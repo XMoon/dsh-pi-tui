@@ -27,8 +27,10 @@ import {
   effortValue,
   focusedAction,
   highlightedModel,
+  catalogueRowIds,
   modelChoices,
   modelRowId,
+  nearestWindowStart,
   seedDrafts,
   selectionOf,
   stepActionFocus,
@@ -104,6 +106,7 @@ export class TspModelPicker {
       actionFocus: undefined,
       previousZone: undefined,
       notice: undefined,
+      windowStart: 0,
       directory: undefined,
       rows: [],
       failures: [],
@@ -202,6 +205,10 @@ export class TspModelPicker {
       if (panel.zone !== 'primary-action') panel.zone = 'models'
       return
     }
+    // The catalogue window follows the selection: a directory change can drop rows, so
+    // the start is re-derived here exactly as it is on a browse.
+    const ids = catalogueRowIds(panel)
+    panel.windowStart = nearestWindowStart(panel.windowStart, ids.indexOf(panel.selected ?? ''), ids.length)
     // The strip exists only while the CATALOGUE really paints it: a page change, a
     // phase that can no longer draft (an admitted write, a running re-read, a failed
     // one), a re-read that dropped the model's effort metadata, or a highlight that
@@ -355,6 +362,8 @@ export class TspModelPicker {
           || (intent.rowId === FAILURE_RETRY_ID && panel.failures.length > 0)
         if (!known) return
         panel.selected = intent.rowId
+        const ids = catalogueRowIds(panel)
+        panel.windowStart = nearestWindowStart(panel.windowStart, ids.indexOf(intent.rowId), ids.length)
         this.change(panel)
         return
       }

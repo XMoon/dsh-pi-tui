@@ -45,6 +45,20 @@ row and the `Esc` that shares its intent return there.
 
 ### The catalogue (one list-first picker at every width)
 
+**The list is WINDOWED, and that is a defect fix, not a density choice.** MEASURED on
+the real client: whenever `selected` changes, the client re-anchors the newly selected
+row to the BOTTOM edge of its own list — it scrolls the list to do it — so a click on a
+row far below the previous one moved the whole viewport (a 4-row jump in the probe,
+more with a longer catalogue). A list that has nothing to scroll cannot move, so the
+catalogue sends a window of at most six model rows (plus the group head that introduces
+them): the rows fill the client's list box, a click lands the highlight exactly where
+the row already is, and the probe shows the frame before and after a real click
+byte-identical. The window follows the app's own cursor with a `nearest` rule, so a
+single-row step slides it by one row and a selection inside it never re-pages it. The
+consequences are deliberate: the catalogue shows six models at a time (the client's own
+wheel has nothing left to scroll, so browsing is the search box plus the arrow keys),
+and the count on the title row still names the whole catalogue.
+
 The catalogue is ONE native picker: `layout: 'rows'`, ALWAYS `size: 'md'`,
 `preview: 'none'` at every width, and NO `scopes` column ever. The sheet is a dialog
 at every pane width — the client shrinks it by itself when the pane is narrower than

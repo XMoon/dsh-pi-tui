@@ -84,6 +84,11 @@ export interface ModelPickerPanel {
   directory: ModelPickerDirectory | undefined
   rows: readonly ModelPickerModelRow[]
   failures: readonly ModelPickerFailureRow[]
+  /** The first ROW of the catalogue window this picker sends ({@link
+   *  nearestWindowStart}): the client re-anchors the selected row on every `selected`
+   *  change, so the window must keep the list short enough that there is nothing to
+   *  scroll — and it must move as little as possible while doing it. */
+  windowStart: number
   /** Per-(provider, model) local effort draft, keyed by {@link modelRowId}. */
   efforts: Map<string, string>
 }
@@ -129,6 +134,49 @@ export function effortItemId(value: string): string {
  *  entry). */
 export function effortValue(item: string): string | undefined {
   return item.startsWith(EFFORT_PREFIX) ? item.slice(EFFORT_PREFIX.length) : undefined
+}
+
+/**
+ * How many model ROWS the catalogue sends at once.
+ *
+ * The client re-anchors the newly SELECTED row on every `selected` change — measured on
+ * the real client, it scrolls its list so that row sits at the bottom edge — and it can
+ * only do that while its list has something to scroll. A window that fits the list box
+ * leaves nothing to scroll, so a click on a visible row cannot move the viewport at all
+ * (the official product keeps its own picker windowed for the same reason). MEASURED:
+ * that box holds ~9 rows at a 560x640 pane and ~14 at 1280x800, and the group heads the
+ * window carries ride inside the same box, so 8 rows keep every pane the plan supports
+ * (bar the 400px-tall ones) free of scroll.
+ */
+export const CATALOGUE_WINDOW_ROWS = 6
+
+/** Every row id the catalogue offers, in display order (the group heads are the view's
+ *  own insertion into this sequence, so the window counts ROWS). */
+export function catalogueRowIds(panel: ModelPickerPanel): readonly string[] {
+  return [
+    ...visibleModels(panel).map(modelRowId),
+    ...(panel.failures.length === 0 ? [] : [FAILURE_RETRY_ID]),
+  ]
+}
+
+/**
+ * The window start for a selection at `at`: move it only as far as the selection needs
+ * (a `nearest` scroll), so a selection that is already inside the window does not move
+ * the list at all. That is what keeps a click on a visible row — and every single-row
+ * step of the keyboard walk — from re-paging the whole window.
+ */
+export function nearestWindowStart(
+  start: number,
+  at: number,
+  length: number,
+  size = CATALOGUE_WINDOW_ROWS,
+): number {
+  if (length <= size) return 0
+  const last = length - size
+  const from = Math.min(Math.max(start, 0), last)
+  if (at < from) return Math.min(Math.max(at, 0), last)
+  if (at >= from + size) return Math.min(at - size + 1, last)
+  return from
 }
 
 /* ---------------------------------------------------------------- selectors */
