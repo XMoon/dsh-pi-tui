@@ -1692,18 +1692,18 @@ test('B2A-21 closing a workspace hands the terminal over without flushing its ow
   vt.sendInput('\r')
   await vt.waitForRender()
   assert.equal(jobScreenOpen(app), true, 'the Job workspace owns the surface')
-  // The marker must be contiguous in the WRITE STREAM (the terminal receives
-  // per-span diffs, so a header split across two chalk spans is not a substring)
-  // and unique to the Job workspace: the status group is ONE span, and no other
-  // surface paints the shared `‣` marker. The bare word `Job` would be vacuous —
-  // the restored Task Browser paints `── Jobs / executions ──`.
+  // The marker must be CONTIGUOUS in the write stream (the terminal receives
+  // per-span diffs, so text split across two chalk spans is not a substring) and
+  // UNIQUE to the departing Job document. The workspace's own action-bar verb
+  // `Esc back` (D13) qualifies on both counts: it is a single span, it is painted
+  // at EVERY width (Esc is never dropped), and no other surface in this
+  // transition paints it — the restored Task Browser paints `Esc close`.
   //
-  // The shared status group `‣ Running` is no longer unique: since B4-A the
-  // RESUMED regular surface paints the passive Task Quick window, whose rows
-  // carry the SAME shared `‣` status group by design (design language D5+D7).
-  // The workspace's own action-bar verb `Esc back` (D13) is a single span, is
-  // painted at EVERY width (Esc is never dropped) and belongs to no other
-  // surface here — the restored Task Browser paints `Esc close`.
+  // It is deliberately NOT the shared status group `‣ Running` any more: since
+  // B4-A the RESUMED regular surface paints the passive Task Quick window, whose
+  // rows carry that same shared `‣` group by design (design language D5+D7), so
+  // its presence could no longer tell "the Job document was flushed" apart from
+  // "the restored surface legitimately painted a task row".
   const jobMark = 'Esc back'
   assert.ok(captured().includes(jobMark), 'control: the live Job document is what writes the mark')
   writes.length = 0
