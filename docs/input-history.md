@@ -93,10 +93,14 @@ second screen.
     hidden — a session tab with no identity would always be empty.
 - **Filtering**: case-insensitive substring over the content; an empty
   query browses the most recent history.
-- **Layout (one vertical presentation at every width)**: `Input History`
-  header with the scope tabs and the `F2` hint, the query row, a
-  `Results · N matches` counter, a single-line results window (at most eight
-  painted rows, following the selection), a divider, then the `Preview`.
+- **Layout (one vertical presentation at every width)**: a top boundary `─`
+  (Owner decision D15), then the `Input History` header with the scope tabs and
+  the `F2` hint, the query row, a `Results · N matches` counter, a single-line
+  results window (at most eight painted rows, following the selection), the
+  Results/Preview divider, then the `Preview`, the action bar and a bottom
+  boundary `─` (below the action bar, against the footer). The two boundary
+  rules are decoration with a fixed degradation order — bottom yields first,
+  then top, before the Preview shrinks — and never take a transcript/footer row.
   `F2` toggles the seat between its normal (≈63% of the terminal) and expanded
   (≈80%) target height; the real grant also reserves the live non-seat chrome
   and one transcript row, so a small terminal drops the Preview before it drops

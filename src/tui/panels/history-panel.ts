@@ -96,14 +96,19 @@ export interface HistorySeatContent {
 export interface HistorySeatLayout {
   /** The width every painted row is clamped to. */
   readonly width: number
-  /** The maximum number of rows the panel may paint (`0` = nothing fits). */
+  /** Whether the maximum number of rows the panel may paint (`0` = nothing fits). */
   readonly grant: number
+  /** Whether the top boundary rule (transcript↔seat) is painted as the FIRST row. */
+  readonly topRule: boolean
   /** Whether the mandatory Header row is painted. */
   readonly header: boolean
   /** Whether the mandatory query row is painted. */
   readonly query: boolean
   /** Whether the footer hint row is painted. */
   readonly footer: boolean
+  /** Whether the bottom boundary rule (seat↔footer chrome) is painted as the
+   *  LAST row, below the action bar (Owner decision D15, 2026-10-14). */
+  readonly bottomRule: boolean
   /** Whether the one-row list/Preview divider is painted. */
   readonly divider: boolean
   /** Whether the one-row Preview heading is painted. */
@@ -124,18 +129,23 @@ export interface HistorySeatLayout {
 
 /**
  * Derive the History seat row plan from the LIVE frame (B3-A plan §2's exact
- * algorithm):
+ * algorithm + the B3-B Owner decision D15 boundary rules):
  *
  * 1. `target = floor(terminalRows × (expanded ? .80 : .63))`;
  * 2. `granted = min(target, max(0, terminalRows - nonHistoryChrome - 1))` — the
  *    `-1` is the B3 explicit policy of keeping at least one visible transcript
- *    row;
- * 3. Header → query → footer have first claim, then the shrinkable
- *    body: one divider, the results window (`min(8, max(1, floor((body-1)×.55)))`)
- *    and the Preview remainder;
- * 4. the trailing metadata row exists only at `previewRegion >= 3`, the Preview
+ *    row. The boundary rules are painted INSIDE `granted`; they never take a
+ *    transcript/footer row;
+ * 3. the boundary rules are DECORATION with the Owner's degradation order:
+ *    the bottom rule yields first, then the top rule, and only then the
+ *    Preview/metadata region starts to shrink; header/query/action bar and at
+ *    least one result/message row are never given up for a rule;
+ * 4. Header → query → footer have first claim on the content budget, then the
+ *    shrinkable body: one divider, the results window
+ *    (`min(8, max(1, floor((body-1)×.55)))`) and the Preview remainder;
+ * 5. the trailing metadata row exists only at `previewRegion >= 3`, the Preview
  *    heading only when it can keep at least one content row;
- * 5. `granted` is never exceeded.
+ * 6. `granted` is never exceeded.
  */
 export function planHistorySeatLayout(
   terminalCols: number,
@@ -150,6 +160,40 @@ export function planHistorySeatLayout(
   const target = Math.floor(rows * (expanded ? HISTORY_SEAT_EXPANDED_RATIO : HISTORY_SEAT_NORMAL_RATIO))
   const grant = Math.min(target, Math.max(0, rows - chrome - 1))
 
+  // One candidate rule count: 2 = both boundaries, 1 = top only (the bottom rule
+  // is the first decoration to yield), 0 = none. A candidate is affordable only
+  // while the content still keeps the mandatory chrome AND a usable body, so a
+  // rule can never push out the header/query/action bar or the Preview the
+  // Owner ordered it to yield before.
+  const affordable = (rules: number): boolean => {
+    const inner = planHistoryContent(width, Math.max(0, grant - rules), content)
+    if (!inner.header || !inner.query || !inner.footer) return false
+    if (content.previewable) return inner.resultsRows > 0 && inner.previewRows > 0
+    return inner.resultsRows > 0
+  }
+  let rules = 0
+  for (const candidate of [2, 1, 0]) {
+    if (affordable(candidate)) {
+      rules = candidate
+      break
+    }
+  }
+  return {
+    width,
+    grant,
+    topRule: rules >= 1,
+    bottomRule: rules >= 2,
+    ...planHistoryContent(width, Math.max(0, grant - rules), content),
+  }
+}
+
+/** The CONTENT plan of one History frame at a given content-row budget (the
+ *  boundary rules are layered on top by {@link planHistorySeatLayout}). */
+function planHistoryContent(
+  width: number,
+  grant: number,
+  content: HistorySeatContent,
+): Omit<HistorySeatLayout, 'width' | 'grant' | 'topRule' | 'bottomRule'> {
   const header = grant >= 1
   const query = grant >= 2
   const footer = grant >= 3
@@ -161,7 +205,7 @@ export function planHistorySeatLayout(
     // no Preview and no acceptance of an unpainted row.
     const messageRows = Math.min(body, 1)
     return {
-      width, grant, header, query, footer,
+      header, query, footer,
       divider: false, previewHeading: false, metadata: false,
       resultsRows: messageRows, resultRows: 0, previewRows: 0, listPage: 1,
       acceptEnabled: false,
@@ -171,7 +215,7 @@ export function planHistorySeatLayout(
   if (body <= 2) {
     // Cramped: the visible selected result row(s) win over any Preview.
     return {
-      width, grant, header, query, footer,
+      header, query, footer,
       divider: false, previewHeading: false, metadata: false,
       resultsRows: body, resultRows: body, previewRows: 0, listPage: Math.max(1, body),
       acceptEnabled: body > 0,
@@ -194,7 +238,7 @@ export function planHistorySeatLayout(
   const previewHeading = previewRegion - (metadata ? 1 : 0) >= 2
   const previewRows = previewRegion - (metadata ? 1 : 0) - (previewHeading ? 1 : 0)
   return {
-    width, grant, header, query, footer,
+    header, query, footer,
     divider: true, previewHeading, metadata,
     resultsRows: listRegion, resultRows, previewRows,
     listPage: Math.max(1, resultRows),
@@ -782,6 +826,11 @@ export class HistoryPanel implements Component, Focusable {
     let previewBottom: number | undefined
     let previewContentTop: number | undefined
 
+    // Owner decision D15 (2026-10-14): the seat declares its own boundary with
+    // the surrounding chrome — ONE `─` (role 15) as the first row and ONE as the
+    // last row, BELOW the action bar. Both are decoration: the plan drops the
+    // bottom rule first, then the top one, before any Preview region shrinks.
+    if (layout.topRule) push(color.border('─'.repeat(layout.width)), { kind: 'inert' })
     if (layout.header) push(this.renderHeader(layout.width), { kind: 'inert' })
     if (layout.query) push(this.renderQueryRow(layout.width), { kind: 'search', xOffset: visibleWidth('Search: ') })
 
@@ -804,6 +853,7 @@ export class HistoryPanel implements Component, Focusable {
       previewBottom = lines.length - 1
     }
     if (layout.footer) push(this.renderFooter(layout.width), { kind: 'inert' })
+    if (layout.bottomRule) push(color.border('─'.repeat(layout.width)), { kind: 'inert' })
 
     // A frame whose width or height moved: the painted rows, the pointer hit map
     // and the Preview drag coordinates all describe the OLD frame, so the

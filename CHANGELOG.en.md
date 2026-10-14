@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `Ctrl+R` history now declares its own boundary: one `─` above the identity row
+  and one below the action bar (against the footer), so the seat is visibly
+  bounded by the transcript and the status/footer. Both are decoration: on a
+  short grant the bottom rule yields first, then the top one, and only then the
+  Preview shrinks; a rule never displaces the header, query, action bar or a
+  result row, and never takes a transcript/footer row. This is an explicit Owner
+  amendment (D15) of the design rule "at most two rules per frame".
 - `Ctrl+R` history finished its visual and lifecycle closure: the title is
   `Input History` (Title Case), the active scope is a bold-`primary` `[Label]`,
   a result row uses a `primary` `> ` cursor with bold selected text (time and

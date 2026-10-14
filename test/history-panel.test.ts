@@ -116,20 +116,29 @@ const settle = (ms = 5): Promise<void> => new Promise(resolve => setTimeout(reso
 /** Strip ANSI so the assertions read the plain text the user sees. */
 const plain = (lines: readonly string[]): string[] => lines.map(line => line.replace(/\x1b\[[0-9;]*m/g, ''))
 
+/** The INTERNAL Results/Preview divider row: skips the two Owner-decision D15
+ *  boundary rules at the first and last seat rows. */
+const internalDividerRow = (lines: readonly string[]): number =>
+  lines.findIndex((line, index) => index > 0 && index < lines.length - 1 && /^─+$/u.test(line.trim()))
+
 // ── the pure seat row allocator ─────────────────────────────────────────────
 
 test('B3-A layout: the responsive sizes allocate header/query/footer, ≤8 result rows and the Preview remainder', () => {
   const cases = [
-    { cols: 200, rows: 60, chrome: 2, expanded: false, target: 37, list: 8, preview: 23 },
-    { cols: 200, rows: 60, chrome: 2, expanded: true, target: 48, list: 8, preview: 34 },
-    { cols: 120, rows: 40, chrome: 2, expanded: false, target: 25, list: 8, preview: 11 },
-    { cols: 120, rows: 40, chrome: 2, expanded: true, target: 32, list: 8, preview: 18 },
-    { cols: 80, rows: 24, chrome: 2, expanded: false, target: 15, list: 6, preview: 3 },
+    // D15: at these comfortable grants BOTH boundary rules are drawn and consume
+    // two content rows (the list region yields first), so each Preview is 2
+    // content rows smaller than the pre-D15 plan at the wide sizes.
+    { cols: 200, rows: 60, chrome: 2, expanded: false, target: 37, list: 8, preview: 21 },
+    { cols: 200, rows: 60, chrome: 2, expanded: true, target: 48, list: 8, preview: 32 },
+    { cols: 120, rows: 40, chrome: 2, expanded: false, target: 25, list: 8, preview: 9 },
+    { cols: 120, rows: 40, chrome: 2, expanded: true, target: 32, list: 8, preview: 16 },
+    { cols: 80, rows: 24, chrome: 2, expanded: false, target: 15, list: 4, preview: 3 },
   ] as const
   for (const item of cases) {
     const layout = planHistorySeatLayout(item.cols, item.rows, item.chrome, item.expanded, { previewable: true })
     const painted = (layout.header ? 1 : 0) + (layout.query ? 1 : 0) + (layout.footer ? 1 : 0)
       + (layout.divider ? 1 : 0) + (layout.previewHeading ? 1 : 0) + (layout.metadata ? 1 : 0)
+      + (layout.topRule ? 1 : 0) + (layout.bottomRule ? 1 : 0)
       + layout.resultsRows + layout.previewRows
     assert.equal(layout.grant, Math.min(item.target, item.rows - item.chrome - 1),
       `${item.cols}x${item.rows} expanded=${item.expanded} grant`)
@@ -138,6 +147,8 @@ test('B3-A layout: the responsive sizes allocate header/query/footer, ≤8 resul
     assert.equal(layout.previewRows, item.preview, `${item.cols}x${item.rows} preview content rows`)
     assert.equal(layout.resultRows + (layout.resultsRows >= 2 ? 1 : 0), layout.resultsRows)
     assert.equal(layout.acceptEnabled, true)
+    assert.equal(layout.topRule, true, `${item.cols}x${item.rows} top boundary rule`)
+    assert.equal(layout.bottomRule, true, `${item.cols}x${item.rows} bottom boundary rule`)
   }
 })
 
@@ -318,7 +329,7 @@ test('panel: the selection viewport FOLLOWS the cursor and PgUp/PgDn page by the
   panel.start()
   await settle()
   const lines = plain(panel.render(100))
-  const dividerRow = lines.findIndex(line => line.includes('─'))
+  const dividerRow = internalDividerRow(lines)
   const selected = lines.findIndex(line => line.startsWith('> '))
   // Only the LIST region rows (above the divider) are results: the Preview
   // paints the selected entry's own text too.
@@ -401,14 +412,18 @@ test('panel: the vertical presentation keeps the header, query, counter, list, d
   await settle()
   const raw = panel.render(120)
   const lines = plain(raw)
-  assert.ok(lines[0]!.includes('Input History'), 'the header is the first row')
-  assert.ok(lines[1]!.includes('Search: '), 'the query row follows')
+  assert.ok(internalDividerRow(lines) > 0, 'the Results/Preview divider is painted')
+  assert.ok(/^─+$/u.test(lines[0]!.trim()), 'the Owner-decision D15 top boundary rule is the first row')
+  assert.ok(/^─+$/u.test(lines.at(-1)!.trim()), 'the D15 bottom boundary rule is the last row')
+  assert.ok(lines[1]!.includes('Input History'), 'the header follows the top boundary rule')
+  assert.ok(lines[2]!.includes('Search: '), 'the query row follows')
   assert.ok(lines.some(line => line.includes('Results · 26 matches')), 'the counter is painted')
   assert.ok(lines.some(line => line.includes('Preview ')), 'the Preview heading is painted')
   assert.ok(lines.some(line => line.includes('Scope: directory')), 'the metadata row is painted')
   assert.ok(lines.some(line => line.includes('Enter use · Tab scope') && line.includes('Esc cancel')),
     'the footer hint is painted')
-  assert.equal(lines.filter(line => /entry \d+/.test(line)).length, 7, 'the list window is the allocated region minus its counter row')
+  assert.equal(lines.filter(line => /entry \d+/.test(line)).length, 6,
+    'the list window (5 result rows) plus the one Preview content row for the selected entry')
   assert.ok(lines.length <= 18, `the render must stay within the grant (got ${lines.length})`)
   for (const line of raw) assert.ok(visibleWidthOf(line) <= 120, `line exceeds the width: ${JSON.stringify(line)}`)
 })
@@ -424,12 +439,12 @@ test('panel: a long Preview is fully readable — no `… more` truncation, inde
   const lines = plain(panel.render(100))
   assert.ok(!lines.some(line => line.includes('… more')), 'the Preview never truncates the source with a marker')
   assert.ok(lines.some(line => line.includes('source line 0')), 'the Preview starts at the source head')
-  assert.ok(lines.some(line => line.includes('rows 1-5/500')), `the heading reports the real position:\n${lines.join('\n')}`)
+  assert.ok(lines.some(line => line.includes('rows 1-4/500')), `the heading reports the real position:\n${lines.join('\n')}`)
   // Alt+End scrolls the Preview to the LAST source row.
   panel.handleInput('\x1b[1;3F')
   const tail = plain(panel.render(100))
   assert.ok(tail.some(line => line.includes('source line 499')), `Alt+End reaches the last source row:\n${tail.join('\n')}`)
-  assert.ok(tail.some(line => line.includes('rows 496-500/500')), tail.join('\n'))
+  assert.ok(tail.some(line => line.includes('rows 497-500/500')), tail.join('\n'))
   // The list selection did NOT move (the Preview scroll is independent).
   assert.equal(panel.selected()?.content, huge)
 })
@@ -446,7 +461,7 @@ test('panel: F2 toggles the 63%/80% presentation and the render grows', async ()
   assert.equal(panel.isExpanded(), true)
   const expanded = panel.render(100)
   assert.ok(expanded.length > normal.length, 'the expanded presentation must grant more rows')
-  assert.ok(plain(expanded)[0]!.includes('F2 collapse'), 'the header advertises the toggle')
+  assert.ok(plain(expanded).find(line => line.includes('Input History'))!.includes('F2 collapse'), 'the header advertises the toggle')
   panel.handleInput('\x1bOQ')
   assert.equal(panel.isExpanded(), false)
 })
@@ -608,7 +623,7 @@ test('H3A-05: a 200-row page scrolls to row 150 with the marker visible and the 
   for (let step = 0; step < 150; step += 1) panel.handleInput('\x1b[B')
   assert.equal(panel.selected()?.id, 'id-150')
   const lines = plain(panel.render(columns))
-  const divider = lines.findIndex(line => line.includes('─'))
+  const divider = internalDividerRow(lines)
   const painted = lines.slice(0, divider).filter(line => /entry \d+/.test(line))
   assert.ok(painted.some(line => line.startsWith('> ') && line.includes('entry 150')),
     `the selected row must stay inside the painted window:\n${lines.join('\n')}`)
@@ -669,7 +684,7 @@ test('H3A-09: a Preview drag that releases outside the painted region cancels (n
   panel.start()
   await settle()
   const painted = plain(panel.render(100))
-  const divider = painted.findIndex(line => line.includes('─'))
+  const divider = internalDividerRow(painted)
   const firstContent = painted.findIndex(line => line.includes('Preview ')) + 1
   const listRow = painted.findIndex(line => /entry|abc/.test(line) && !line.includes('Preview '))
   assert.ok(divider > 0 && firstContent > 0 && listRow >= 0 && listRow < divider,
@@ -1001,12 +1016,15 @@ test('B3-B visual: identity / active scope / selected row / counter / metadata c
   await settle()
   const raw = panel.render(100)
 
-  const header = raw[0]!
+  const borderOpen = color.border('\u0000').split('\u0000')[0]!
+  assert.ok(raw[0]!.startsWith(`${borderOpen}─`), 'the D15 top boundary rule is the first row')
+  assert.ok(raw.at(-1)!.startsWith(`${borderOpen}─`), 'the D15 bottom boundary rule is the last row')
+  const header = raw[1]!
   assert.ok(header.startsWith(color.textStrong(' Input History ')), `identity is bold textStrong:\n${header}`)
   assert.ok(header.includes(color.textStrong('[Current Session]', 'primary')), `the active scope is bold primary:\n${header}`)
   assert.ok(header.includes(color.textDim('Current Directory')), 'the inactive scopes are textDim')
   assert.equal(plain([header])[0]!.split('[').length - 1, 1, 'exactly ONE bracketed active scope per header')
-  assert.ok(raw[1]!.includes(color.textDim('Search: ')), 'the query label is textDim')
+  assert.ok(raw[2]!.includes(color.textDim('Search: ')), 'the query label is textDim')
   assert.ok(raw.some(line => line.includes(color.textDim('Results · ')) && line.includes(color.textMuted('2 matches'))),
     'the counter splits its label and count tokens')
 
@@ -1047,7 +1065,7 @@ test('B3-B narrow: the F2 hint is removed whole and the scope tabs use the short
   const { panel } = makePanel(source, { sessionId: 'ses_a' })
   panel.start()
   await settle()
-  const header = plain(panel.render(44))[0]!
+  const header = plain(panel.render(44)).find(line => line.includes('Input History'))!
   assert.ok(header.includes('Input History'), header)
   assert.ok(header.includes('[Session]'), `the narrow header uses the short scope label:\n${header}`)
   assert.ok(!header.includes('F2'), `the F2 hint is removed whole, never a partial F2 label:\n${header}`)
@@ -1092,10 +1110,16 @@ test('B3-B matrix: the seat never overflows 200x50 / 80x10 / 44x20 and keeps the
     for (const line of raw) {
       assert.ok(visibleWidthOf(line) <= columns, `${columns}x${rows}: a row exceeds the frame: ${JSON.stringify(line)}`)
     }
-    const grant = planHistorySeatLayout(columns, rows, 0, false, { previewable: true }).grant
-    if (grant >= 3) {
-      const last = plain(raw)[raw.length - 1]!
-      assert.ok(last.includes('use') && last.includes('cancel'), `${columns}x${rows}: the action bar is the last seat row:\n${last}`)
+    const layout = planHistorySeatLayout(columns, rows, 0, false, { previewable: true })
+    if (layout.grant >= 3) {
+      const plainLines = plain(raw)
+      const last = plainLines[plainLines.length - 1]!
+      if (layout.bottomRule) {
+        assert.ok(/^─+$/u.test(last.trim()), `${columns}x${rows}: the D15 bottom rule is the last row:\n${last}`)
+      }
+      const actionBar = layout.bottomRule ? plainLines[plainLines.length - 2]! : last
+      assert.ok(actionBar.includes('use') && actionBar.includes('cancel'),
+        `${columns}x${rows}: the action bar is the last CONTENT row:\n${actionBar}`)
     }
   }
 })
@@ -1145,9 +1169,10 @@ test('B3-B theme: dark/light/custom resolve the frozen role tokens live and neve
     for (const themeCase of cases) {
       themeCase.apply()
       const raw = panel.render(100)
-      assert.ok(raw[0]!.startsWith(color.textStrong(' Input History ')),
+      const header = raw.find(line => line.includes('Input History'))!
+      assert.ok(header.startsWith(color.textStrong(' Input History ')),
         `${themeCase.name}: identity is bold textStrong`)
-      assert.ok(raw[0]!.includes(color.textStrong('[Current Session]', 'primary')),
+      assert.ok(header.includes(color.textStrong('[Current Session]', 'primary')),
         `${themeCase.name}: the active scope is bold primary`)
       const selected = raw.find(line => line.startsWith(color.primary('> ')))
       assert.ok(selected !== undefined && selected.includes(color.textStrong('alpha prompt')),

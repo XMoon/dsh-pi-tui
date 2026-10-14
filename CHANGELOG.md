@@ -9,6 +9,11 @@
 
 ### 变更
 
+- `Ctrl+R` 历史席位现在有自己的一条边界：顶部一条 `─`（位于身份行之上）与底部一条
+  `─`（位于操作提示行之下、贴 footer），让席位与上下方 Transcript / 状态栏的边界可见。
+  两条线都是装饰：行数紧张时先让出底部线、再让出顶部线，之后才收缩 Preview；它们绝不
+  挤掉 Header/查询/操作提示/结果行，也不会占用 Transcript 与 footer 的行。这是 Owner
+  对设计规范「每帧至多两条规则」的明确修订（D15）。
 - `Ctrl+R` 历史席位完成视觉与生命周期收口：标题为 `Input History`（Title Case），当前
   scope 用加粗 `primary` 的 `[Label]`，结果行以 `primary` 的 `> ` 游标配加粗的选中文字
   （时间、目录等次要信息保持 `textDim`），Fullscreen 操作为不带方括号的
