@@ -2176,8 +2176,11 @@ the seat shows the History surface.
   itself from that async path, so the fire-and-forget search cannot reject. The
   host's next revalidation entry retires the stale tenant through its ONE close
   path; treating the session-switch publication itself as a revalidation entry is
-  deliberately NOT done here (it would extend the Phase-3A revalidation seam and
-  let UI teardown failure propagate into the session commit).
+  deliberately NOT done in B3-A (it would extend the Phase-3A revalidation seam
+  and let UI teardown failure propagate into the session commit). B3-B later
+  supersedes this with the SEPARATE, non-throwing `retireStaleHistorySeat()`
+  publication port (see its section below), so the seam extension B3-A avoided
+  never happens.
 - **B3-B closes the lifecycle and currentness.** The full Question/Approval
   FIFO PARK/restore, the publication-time retirement, the authoritative Session
   owner generation with ABA protection across async queries/acceptance, and the

@@ -1220,4 +1220,70 @@ test('B3-B composition: bootstrap retires History in the ONE resetForGeneration 
     'a same-owner generation bump must retire the History seat from the ONE reset callback')
   assert.equal(withoutComments.split('surface.retireStaleHistorySeat()').length - 1, 2,
     'the composition root reaches the app retirement exactly twice: the reset callback and the publication port wiring')
+  // The OTHER History composition line: the ONE scope bridge. A mutation to it
+  // (e.g. isCurrent: () => true) would survive the behavioural suite because the
+  // fixture mirrors this exact bridge, so lock its authoritative shape.
+  const bridge = /captureHistoryScope: \(\) => \{([\s\S]*?)\n {6}\}/.exec(withoutComments)?.[1]
+  assert.ok(bridge !== undefined, 'the composition root must inject the ONE History scope bridge')
+  assert.ok(bridge.includes('sessionScope.capture()'), 'the bridge must capture ONE atomic authority scope')
+  assert.ok(bridge.includes('sessionScope.isCurrent(scope)'), 'the bridge must re-read the SAME captured scope')
+  assert.equal(withoutComments.split('captureHistoryScope').length - 1, 1,
+    'exactly ONE History scope bridge exists in the composition root')
+})
+
+
+// ---------------------------------------------------------------------------
+// H3B-05b: a throwing History cleanup AT PUBLICATION (plan §2.4 item 7)
+// ---------------------------------------------------------------------------
+
+test('H3B-05b: a throwing History cleanup at publication keeps the published owner, surfaces the error identity and closes once', async (t) => {
+  const life = testLifecycle(t)
+  const dispose = probeHistoryPanelDispose(life)
+  const ownedFailures: unknown[] = []
+  // The owned-task channel the app uses to report a retirement cleanup failure
+  // (`routeTerminalSettlementFailure`): capture every primary failure identity.
+  const capturingRunner: OwnedRunner = <T,>(
+    _label: string,
+    task: () => T | Promise<T>,
+    options: Omit<OwnedTaskOptions<T>, 'diag' | 'sessionId'>,
+  ): void => {
+    const settle = (handler: ((value: T) => void) | undefined, value: T): void => {
+      try { handler?.(value) } catch (error) { ownedFailures.push(error) }
+    }
+    let result: T | Promise<T>
+    try { result = task() } catch (error) { settle(options.onError as ((value: T) => void) | undefined, error as T); return }
+    Promise.resolve(result).then(
+      value => settle(options.onResult as ((value: T) => void) | undefined, value),
+      error => settle(options.onError as ((value: T) => void) | undefined, error as T),
+    )
+  }
+  const h = buildSessionFixture(life, {
+    source: filterSource([{ content: 'publication cleanup row', ts: 3 }]),
+    runOwned: capturingRunner,
+  })
+  h.publish('session-a')
+  h.app.start()
+  await h.vt.waitForRender()
+  await openHistory(h.vt, h.app)
+  await waitFor(() => strip(h.vt.getViewport()).includes('publication cleanup row'))
+
+  const boom = new Error('history cleanup at publication boom')
+  dispose.armThrow(boom)
+
+  assert.equal(await h.runtime.switchSession('session-b'), undefined,
+    'the throwing History cleanup must NOT roll back or reject the Session commit')
+  assert.equal(h.core.currentSessionId(), 'session-b',
+    'the NEW owner stays published; the OLD owner is never restored')
+  assert.equal(dispose.count(), 1,
+    'the stale seat closed exactly once (the failure did not truncate the cleanup)')
+  assert.equal(ownedFailures.length, 1, 'the cleanup failure reached the owned-failure channel')
+  assert.equal(ownedFailures[0], boom, 'the ORIGINAL error identity is preserved')
+  await h.vt.waitForRender()
+  assert.ok(!panelVisible(h.vt), 'the retired History never stays painted')
+  assert.equal(h.app.focusSeatForTest(), 'editor', 'the seat projects the live editor')
+
+  // Positive control: the NEW owner's History still opens and acts normally.
+  await openHistory(h.vt, h.app)
+  assert.equal(h.captures.at(-1)!.sessionId, 'session-b')
+  assert.equal(h.captures.at(-1)!.isCurrent(), true)
 })

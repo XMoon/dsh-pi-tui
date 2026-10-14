@@ -427,7 +427,7 @@ async function mountRunnerHarness(options: {
   // interaction owner borrows its diagnostics channel), then the ONE input
   // bind, then the interaction attach.
   surface.attachTasks({
-    captureHistoryScope: () => ({ sessionId: SESSION_ID, isCurrent: () => true }),
+    sessionId: () => SESSION_ID,
     captureSubject: () => undefined,
     subjectMatches: () => true,
     enterView: async () => {},
