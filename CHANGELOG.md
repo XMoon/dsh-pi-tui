@@ -177,7 +177,8 @@
 - `/settings` 的 Theme 子菜单与 `/preset` 选择器里的「当前值」标记,由字面 `← current` 改为
   `[current]` 状态 chip:两个 picker 统一到行的 value 槽,ink 固定为最弱色(选中与未选中两态
   都一样);preset 的 `default` 也一并从描述里移出、成为旁边的 `[default]` chip(两个状态
-  就是两个 chip,连接符也自带 ink)。
+  就是两个 chip,中间只隔一个空格)。chip 现在要么完整画出、要么整枚不画:窄终端下让位的
+  是 label(截断成 `…`),不会再被切掉一半,也不会被超长的 preset 名挤出整行。
 
 - `/model` 等选择器(覆盖层)改用与工作区一致的视觉词汇:选择游标从无色粗体的 `→ ` 改为
   `>` 的 `primary`(并且现在真的从 `selectListTheme.selectedPrefix` 取,不再内联硬编码);

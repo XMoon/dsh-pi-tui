@@ -23,8 +23,10 @@ import { registerTuiCommands, type TuiCommandRunner } from '../src/commands.ts'
 import { createDiag } from '../src/runtime/process/diagnostics.ts'
 import { TuiApp } from '../src/tui-app.ts'
 import { KeybindingEditorPanel } from '../src/tui/keybindings/ui/list.ts'
+import { ThemeRegistry } from '../src/extension/internal/theme-registry.ts'
 import { visibleWidth } from '@xmoon76/pi-tui'
 import { currentPalette } from '../src/tui/theme/runtime.ts'
+import { SettingsRegistry } from '../src/extension/internal/settings-registry.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 import { registerTuiCommandsWithDirectSeams } from './support/register-tui-commands.ts'
 import { openLegacySettingsPanel } from './support/open-legacy-settings.ts'
@@ -134,7 +136,7 @@ interface Harness {
  * the existing `/settings` command-entry suites; the pointed-at seams
  * (commands registry, tuiSettings doc, config readiness) are real.
  */
-function setup(options: { columns?: number; rows?: number; tuiSettings?: boolean } = {}): Harness {
+function setup(options: { columns?: number; rows?: number; tuiSettings?: boolean; themes?: ThemeRegistry } = {}): Harness {
   const ctx = new Context()
   const vt = new VirtualTerminal(options.columns ?? 120, options.rows ?? 40)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
@@ -184,7 +186,7 @@ function setup(options: { columns?: number; rows?: number; tuiSettings?: boolean
     tuiSettings: options.tuiSettings === false
       ? undefined
       : { get: () => doc, replace: () => undefined },
-    extensions: undefined,
+    extensions: options.themes === undefined ? undefined : { themes: options.themes, settings: new SettingsRegistry() },
     openPluginManager: () => {},
     createPluginManagerSubmenu: () => ({ render: () => [], invalidate: () => {} }),
     config: {
@@ -456,6 +458,36 @@ test('C-T13: the Theme submenu [current] chip keeps textMuted on BOTH the select
   assert.ok(!isCursorRow(h.vt, unselectedRow), `the second frame must have the cursor OFF the [current] row:\n${viewportText(h.vt)}`)
   assert.equal(h.vt.getCellFgRgb(unselectedRow, cellIndexOf(h.vt, unselectedRow, '[current]')), hexToRgb(currentPalette.textMuted),
     `the [current] chip is textMuted on the UNSELECTED row (not textDim):\n${viewportText(h.vt)}`)
+})
+
+test('C-T14: the Theme submenu chip survives a narrow frame with an over-wide label (X061, real overlay frame)', async () => {
+  // A long plugin theme name pushes the label column to its 36-cell cap, so the
+  // value slot is narrow on EVERY row: the chip is reserved (the label clips
+  // with `…`) instead of being cut or pushed out of the frame.
+  const longName = 'A deliberately very long plugin theme name here'
+  for (const columns of [120, 48, 44]) {
+    const registry = new ThemeRegistry()
+    registry.register({ id: 'long-theme', name: longName, palette: { text: '#123456' } as never }, 'owner-x', 'x')
+    const h = setup({ columns, rows: 20, themes: registry })
+    await openLegacySettingsPanel(h.invoke, h.vt)
+    for (const character of 'theme') {
+      h.vt.sendInput(character)
+      await h.vt.waitForRender()
+    }
+    h.vt.sendInput('\r')
+    await h.vt.waitForRender()
+    const view = viewportText(h.vt)
+    const marked = view.split('\n').filter(line => line.includes('[current]'))
+    assert.equal(marked.length, 1, `at ${columns} columns exactly one row is marked:\n${view}`)
+    assert.ok(!/\[curren(?!t\])/.test(marked[0]!), `the chip must be painted whole at ${columns} columns:\n${view}`)
+    // The over-wide label is clipped INSIDE its column: no row may overflow.
+    for (const line of view.split('\n')) {
+      assert.ok(visibleWidth(line) <= columns, `no painted row may exceed ${columns} columns:\n${line}`)
+    }
+    h.app.stop()
+    // A fresh process slot per width (the fork's keybindings are process-global).
+    h.app.dispose()
+  }
 })
 
 test('C-T11: a question suspends the nested submenu and restores its grant and query', async () => {

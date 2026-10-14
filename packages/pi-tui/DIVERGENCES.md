@@ -87,8 +87,8 @@
 
 ## Summary
 
-- Records: 61
-- Statuses: `ABSORBED_UPSTREAM`: 4, `ACTIVE`: 45, `MOVED_TO_HOST`: 3, `REMOVED_UNUSED`: 6, `SUPERSEDED`: 3
+- Records: 62
+- Statuses: `ABSORBED_UPSTREAM`: 4, `ACTIVE`: 46, `MOVED_TO_HOST`: 3, `REMOVED_UNUSED`: 6, `SUPERSEDED`: 3
 
 | ID | Status | Risk | Categories | Upstream equivalence |
 | --- | --- | --- | --- | --- |
@@ -153,6 +153,7 @@
 | X058 | ACTIVE | MEDIUM | LOCAL_UX | NO |
 | X059 | ACTIVE | MEDIUM | HARD_HOST_API | NO |
 | X060 | ACTIVE | MEDIUM | HARD_HOST_API | NO |
+| X061 | ACTIVE | MEDIUM | PUBLIC_COMPONENT_CONTRACT, BUGFIX_MISSING_UPSTREAM | NO |
 
 ## Divergences
 
@@ -5142,3 +5143,88 @@ The host decides Dark/Light from the terminal's default BACKGROUND only. Upstrea
 
 - Scope: `vendor-internal`, `inheritance-structural`, `host`, `public-extension`, `behavioral`, `tests`
 - Notes: Introduced in PR #272 as the replacement for the retired X008 serialization. Scope checked against both screens and the shared terminal input chain (a reply that outlives its observation must not become user activity on the screen that owns the terminal now, including across a Main/Fullscreen swap in either direction), the host boot/track wiring (Mode 2031 enablement must not bypass the colour opt-out), the shared TUI color consumer parse order, the upstream full-query suite, and the modified-key input path.
+
+### X061 — Structured value parts and a reserved label column for the SettingsList value slot
+
+- Status: `ACTIVE`
+- Category: `PUBLIC_COMPONENT_CONTRACT`, `BUGFIX_MISSING_UPSTREAM`
+- Risk: `MEDIUM`
+- Files: `src/components/settings-list.ts`, `src/index.ts`
+- Last audited: `2026-10-14`
+- Baseline compared: `earendil-works/pi@abe508e1b89912adde45528136c3221eb69acdd7`
+
+#### Why it exists
+
+The host's state chips (`[current]`/`[default]`) live in the vendored value slot, which truncates its text by RAW width after the label column has taken `min(36, longest label)` cells. Three defects follow from the renderer owning that layout: a chip is cut in half (`[defaul`), a separator can survive without the chip it joined, and a label wider than its column overflows the row so the value slot — the only in-row `current` signal — leaves the painted row entirely, at 120 columns as well as at the 44-column floor. The host cannot repair this through the public surface: only `render(width)` knows the final value width, so no call-site string can be shaped correctly, and duplicating the layout math in every caller would drift from the fork. Upstream has neither the structured slot nor the label clamp.
+
+#### Changed surface
+
+- `SettingItem.valueParts?: readonly SettingValuePart[]` (`{ kind: 'chip' | 'text'; text: string }`) — a structured, whole-unit replacement for the value slot; `currentValue`, `values`, `updateValue` and `activateItem` semantics are untouched (the parts are a paint-time display fact)
+- the value slot keeps the longest WHOLE prefix of `valueParts` that fits its budget and never cuts a part; a kept prefix never ENDS on a `text` part, so a dropped chip takes its separator with it (`fitValueParts`)
+- the label column is clamped to `min(36, longest label, width - widest chip - 6)` (the same fixed-cell budget the value slot uses) and the label itself is truncated with `…` to that column (`stateReserveWidth`), so one chip is reserved and no painted row exceeds `render(width)`
+- no `valueParts` => the historical path (`truncateToWidth(currentValue, valueMaxWidth, '')`) is byte-identical
+- `SettingValuePart` is exported from the package entry next to `SettingItem`
+
+#### Dependency map
+
+**Vendor internal**
+- `fitValueParts` and `SettingsList.stateReserveWidth` are private to `settings-list.ts`; no other vendored component reads `valueParts`.
+- `SettingsListTheme.value` still wraps the joined parts, so the existing `selected ? primary : textDim` paint contract is unchanged.
+- Audit note: No vendor-internal consumer changes; the renderer is the single owner of the layout math.
+
+**Inheritance / structural**
+- None found (audited).
+- Audit note: No inheritance edge is introduced or relied on.
+
+**Host**
+- `src/tui/pickers/preset-presentation-pitui.ts` hands the `/preset` rows the `[current]`/`[default]` chips as parts, current before default (drop priority).
+- `src/tui/pickers/theme-menu.ts` hands the Theme submenu row its `[current]` chip as a part.
+- Every other SettingsList caller (`commands/settings.ts` rows, `commands/status.ts`, `commands/skills.ts`, `commands/utility.ts`) declares no parts and keeps the historical value path; the label clamp is the only shared change they see.
+- Audit note: The host is the only consumer of the structured slot today (the two PR5b pickers).
+
+**Public / extension**
+- The additive `SettingValuePart` type and `valueParts` field are structural members of the public component contract; the bundled declaration rolls up through `src/index.ts` and stays inside the allowlisted entry regions.
+- Audit note: Additive only: no existing member is repurposed or removed.
+
+**Behavioral coupling**
+- whole-part keep/drop with trailing-`text` trimming
+- label clamp with `…` (no row overflow)
+- chip reservation down to the 44-column floor; no cached width (per-render, so a resize reflows)
+- the plain-string path is unchanged
+- Audit note: The reservation is a budget, not an exception: the chip outranks the label's tail (spec §6.4/§8, Owner decision 2026-10-14).
+
+#### Guarding tests
+
+- packages/pi-tui/test/settings-list.test.ts: a chip is kept whole and the rest dropped whole (no `[curre`, no dangling separator) at 60/45/15/14 cells; a label wider than its column is clipped with `…` and the chip survives at 40 and 120 cells; a label wider than its column is clamped even without parts; `currentValue`/`values` still cycle while the slot paints the parts; a wide -> narrow -> wide resize reflows both chips back
+- test/preset-command.test.ts: the real `/preset` overlay paints both chips whole and no retired prose marker; the 120/67/66/59/58/57/56/52/48/44-column matrix (one whole chip, no half chip, no separator, no row wider than the terminal); a wide -> narrow -> wide resize restores both chips and a click on the long-name row at the narrow geometry still selects THAT row
+- test/surface-row-grant.test.ts: the Theme submenu chip keeps `textMuted` in both selection states; the chip survives 120/48/44 columns with an over-wide plugin theme name (label clipped, no overflow)
+- test/theme-picker.test.ts: the identity matcher follows the painted prefix of an over-wide label; the `file:`/plugin identity marker is unaffected
+
+#### Upstream comparison
+
+- Baseline: `earendil-works/pi@abe508e1b89912adde45528136c3221eb69acdd7`
+- Semantic equivalence: `NO`
+- Reference snapshot: `earendil-works/pi@abe508e1b89912adde45528136c3221eb69acdd7`
+- Relevant upstream files:
+- packages/tui/src/components/settings-list.ts
+- Relevant issues/PRs:
+- None recorded; issue/PR state was not used as semantic proof.
+- Remaining semantic delta: Upstream's `SettingItem` has no structured value slot: the renderer pads the label to `min(36, longest label)` without clamping it, and truncates the value with a raw `truncateToWidth`. A label wider than its column therefore overflows the row and a chip in the value slot can be sliced (`[defaul`) or pushed out of the paint. The fork adds `valueParts` (whole-unit keep/drop with trailing-separator trimming) and the label clamp/reservation; rows without parts keep upstream's exact rendering path.
+
+#### Retirement conditions
+
+- Upstream gains a structured value slot with whole-unit drops plus a label clamp (or a per-width value provider a call site can shape correctly).
+- Or the host stops placing state chips in a vendored fixed-width value slot.
+
+#### Replacement mapping
+
+- None recorded.
+
+#### Retirement evidence
+
+- None recorded.
+
+#### Audit record
+
+- Scope: `vendor-internal`, `inheritance-structural`, `host`, `public-extension`, `behavioral`, `tests`
+- Notes: Introduced in PR #309 (rollout PR5b) after the external review P2 (a chip cut or pushed out of the row on supported narrow frames). Scope checked against every SettingsList caller, the fork's own value-paint theme, the real-overlay frames at 120/67/66/59/58/57/56/52/48/44 columns, the over-wide-label case at 120 and 44 columns, and the mouse hit map after a resize.
