@@ -173,7 +173,7 @@ can be reviewed against a frame:
 | 6 | Active glyph (navigation cursor) | `primary` | no | `> ` leading a list row |
 | 7 | Active label (focused pane / active tab) | `primary` | yes | `[Rows (2)]`, `[Output]` |
 | 8 | Selected row text | `textStrong` | yes | the selected row's label and value |
-| 9 | Status word (+ the shared marker `‣`) | `success` / `warning` / **`primary`** / `error` / `textDim` | no | `‣ Running` (`primary`), `‣ Failed` (`warning`), `Completed` (`textDim`), `Ready` (`textMuted`), `Stale` (`warning`) |
+| 9 | Status word (+ the shared marker `‣`) | `success` / `warning` / **`primary`** / `error` / `textDim` / **`textMuted`** | no | `‣ Running` (`primary`), `‣ Failed` (`warning`), `Completed` (`textDim`), `Ready` (`textMuted`), `Stale` (`warning`) |
 | 10 | Machine marker | `warning` / `error` / `textMuted` | no | `[GAP]`, `[ERROR]`, `[SETTLED]` |
 | 11 | Diagnostic line | `textMuted` | no | `Scope: … · Refreshed 09:41` |
 | 12 | Count / position | `textMuted` | no | `2 editable rows`, `rows 7-40/40`, `3/8 checks` |
@@ -361,7 +361,7 @@ Measured, still in use and *not* introduced by v1:
 | `─` U+2500 | every rule, the editor's top/bottom border, history's stacked divider |
 | ` · ` U+00B7 | the fact/hint separator across the chrome (D4 makes this the only separator) |
 | `↗` U+2197 | the Job `↗ Command` affordance |
-| `←` U+2190 | the current-value suffix `← current` (D9) and the read-gutter/line-number joins |
+| `←` U+2190 | the question flow's chrome hints (`← back`, `←→ edit`, `← back · → skip`) |
 | `▼` `▶` U+25BC/25B6 | the hardcoded sub-call / workflow disclosure (the registry's `▸`/`▾` are neutral) |
 | `◆` U+25C6 | the footer configurator's move-mode marker |
 | `▏` U+258F | the footer configurator's text-edit cursor |
@@ -380,7 +380,7 @@ new place.** That is why D2 rejects a `│` column rule, and why Pi's `→` curs
 |---|---|---|
 | Navigation cursor | `> ` (2 cells) | one per list; D3 |
 | Active/current label | `[Label]` | focus, active tab, current pane |
-| Current-value marker | `← current` at the row end | row-end suffix in `textDim`; never shares the cursor's meaning; `←` (U+2190) is a **grandfathered** ambiguous glyph (§4.3) — no neutral arrow reads as "current" without colliding with another role |
+| Current-value marker | row-end word `current` | `textDim`, two cells after the value; never shares the cursor's meaning; **no arrow** — the previous `← current` / `[← current]` forms are replaced because `←` is EAW-ambiguous (§4.3) |
 | Status marker | `‣` (U+2023) | the ONE marker for a standalone status group; one cell, EAW neutral; D5+D7 |
 | Disclosure | `▸` / `▾` | collapse state only, never "selected" |
 | Rule | `─` | boundary only |
@@ -396,7 +396,7 @@ One device, three uses:
 selection in a list         > Appearance            cursor glyph in primary
                             (the row's own text is bold textStrong)
 focused pane / active tab   [Rows (2)] / [Output]   brackets + bold primary
-current value (candidates)  label  [← current]      row-end marker, no colour
+current value (candidates)  label  current        row-end word, textDim
 ```
 
 ### 5.1 Rules
@@ -418,13 +418,17 @@ current value (candidates)  label  [← current]      row-end marker, no colour
    `SearchablePicker` still hardcodes a bold `'→ '` (§11.4).
 3. **Selection ≠ current.** The keyboard cursor and the authoritative current
    value are different facts and get different markers. The current value is a
-   **row-end `← current` suffix in `textDim`** (D9) — not a badge word, not a
-   leading gutter, and never `primary` (the cursor already owns primary on that
-   row). The Job workspace has no list selection.
+   **row-end word `current` in `textDim`, two cells after the value** (D9; the
+   form was amended in review — the *device* is what was chosen: row-end,
+   `textDim`, never competing with the cursor — and the arrow is dropped because
+   `←` U+2190 is EAW-ambiguous, so painting it in every overlay would break
+   §4.3). A second
+   suffix on the same row is joined with ` · ` (`current · unavailable`). The
+   Job workspace has no list selection.
 4. **Overlays use the same three devices** (D9): `> ` + bold `textStrong` for
    selection, `[Label]` + bold `primary` for the active tab/mode, and the
-   row-end `← current` suffix. A picker must not invent `→`, a badge word or a
-   leading `✓`.
+   row-end `current` suffix. A picker must not invent `→`, a badge word with a
+   different mark, or a leading `✓`.
 5. **Disabled / read-only / pending / failed** are words, not just inks: the
    detail pane's `Status` field, the read-only note and the `[Retry save]` verb
    already express them; unavailable candidates keep `[unavailable]`.
@@ -737,7 +741,9 @@ is next touched for another reason** (never by a mass search/replace):
 | picker group headers | bold `textMuted` where role 5 is `textDim` for the label and `textMuted` for its count (D9) | next picker change |
 | picker failure placeholder | `Model catalog unavailable: …` is painted `noMatch` (`textMuted`) instead of `error` for the failure word (D11) | next picker change |
 | all overlays | ad-hoc frame sizes (64/72/76/88/100% × 24/26/28) instead of the four-step ladder (D10) | next change to that overlay |
-| `/model` current marker | a trailing badge word `current` instead of the row-end `← current` suffix (§5.1.3) | next model-picker change |
+| `/model` current/default badges | already painted `textDim`, but as trailing badges rather than the row-end `current` suffix with the standard two-cell gap | next model-picker change |
+| theme menu / preset picker | the `currentValue` mark is still the literal `← current` (`pickers/theme-menu.ts:119`, `pickers/preset-presentation-pitui.ts:50`); it becomes the row-end word `current` | next picker change |
+| question flow hints | lowercase keys with `←`/`←→` (`'← back · ↵ submit · esc cancel'`, `'←→ edit'`) instead of §4.1's `Esc`-style casing and the width-safe arrow rule | next question-flow change |
 | task browser hint | `Esc close` sits before `S stop` instead of last (D8) | next task-panel change |
 | approval dialog | bracketed key choices `[y] allow once   [n] reject   [esc/ctrl+c] cancel` (three-space separator, lowercase keys) | next approval change |
 | task browser / history | `│` column split for a master/detail pair (`task-panel.ts:907`, `history-panel.ts:621`) | next change to that panel |
@@ -778,13 +784,13 @@ An overlay is the same vocabulary in a rounded `Frame` instead of a full termina
 | Title | role 1 (bold `textStrong`) as the **first row inside the frame**; a title is never inset into the frame's top rule (`╭─ Title ─╮` is not our device — it would fight the `Frame` geometry contract). A context suffix (`Subagent allowed models`) is role 2. |
 | Count / status | role 12, **right-aligned on the title row** (`Models` … `3/8`), exactly as a workspace header aligns its badge. Not a title suffix. |
 | Selection | `> ` in `primary` + the row's text in bold `textStrong` (§5). |
-| Current value | row-end `← current` in `textDim` (§5.1.3). Remove badge words (`current`, `default`) and leading `✓` gutters. |
+| Current value | the row-end word `current` in `textDim`, **two cells after the value**, joined with ` · ` when another suffix shares the row (`current · unavailable`). No arrow, no brackets, no leading `✓` gutter — the arrow form is width-unsafe (§4.3) |
 | Group header | role 5: the group label in `textDim`, its count in `textMuted`, joined by ` · ` (`Directory · 12`). Never bold. |
 | Second-level text | an indented description line (2 cells after the cursor gutter) in `textDim`, wrapped at the list width; a right-aligned value column is the workspace form of the same roles (D14.4). |
 | Disabled / unavailable row | `textDim` plus a reason word (`unavailable`, `read-only`); never colour-only (§3.3.3), and the cursor still moves onto it (no dead rows). |
 | Placeholder / loading / failure | role 16: `textDim`; a failed one names the failure and paints that word `error` (`Model catalog unavailable: …`); loading is a word (`Loading models…`), never animation. |
 | Bottom row | inside the frame; `Esc` is its **last** segment (D8) and the hint line uses ` · ` (D4). |
-| Sizing ladder | The step is chosen by **content type** and is never stepped UP merely because the terminal is wide: a short menu ≈ `64`; the default interactive list ≈ `72`; a list with long values, badges or a detail column ≈ `88`; a surface that must present a whole document or decision (a long-command approval, a full-screen list) = `100%`. The effective width is the **largest ladder step ≤ min(declared, columns)**; if that is below `24`, the overlay takes exactly `columns` and degrades through the existing `ROW_PRIORITY`/degenerate-grant rules instead of through frame size. Height is `min(rows − 2, cap)` with the cap owned by the step (`24` narrow/standard, `28` wide, the terminal for full). A per-surface exception is allowed only when that surface's own doc names it with its reason — today `/model` is `72×28` — never chosen ad hoc in code. |
+| Sizing ladder | The step is declared by **content type**: short menu `64`; default interactive list `72`; long values, badges or a detail column `88`; **full** for a surface that must present a whole document or decision (a long-command approval, a full-screen list). Resolution, in this order: **(1)** `full` is not a numeric step — `effective = columns` (a surface that needs its own margin, e.g. the full-screen task browser, declares that margin as a per-surface exception); **(2)** otherwise `effective = min(declared, columns)`, then snap **down** to the largest ladder step `≤ effective`; **(3)** if `effective < 64` there is no ladder step to snap to — the overlay takes **exactly `columns`** and degrades through its own row budget / `ROW_PRIORITY` / degenerate-grant rules instead of through frame size (there is no minimum terminal width for an overlay). The step is never raised because the terminal is wide. Height is `min(rows − 2, cap)` with the cap owned by the step (`24` narrow/standard, `28` wide, the terminal for full). A per-surface exception is allowed only when that surface's own doc names it with its reason — today `/model` is `72×28` |
 | Assembly | mandatory chrome (title, search row, hint) is granted first, then the item window, then optional separators/scroll/status — the existing `overlay-focus-contract.md` budget rules stay authoritative. |
 
 ## 13. Reference alignment and deliberate divergences
@@ -801,7 +807,7 @@ line numbers.
 | Rule | Where the references agree | Where this repo already does it |
 |---|---|---|
 | A navigation cursor is a **glyph in a gutter**, not a colour | pi `select-list.ts` `"→ "`; oh-my-pi `select-list.ts:592` `cursor + ' '`; kimi `SELECT_POINTER = '❯'` | `src/tui/panels/settings-workspace-panel.ts:766,774,887` (`'> '`), `settingsListTheme.cursor` |
-| **Selection ≠ current** | pi `model-selector.ts` second `✓ ` gutter; kimi DESIGN §1 "当前项与选中项互相独立" | candidate list `[← current]` (`:888`) |
+| **Selection ≠ current** | pi `model-selector.ts` second `✓ ` gutter; kimi DESIGN §1 "当前项与选中项互相独立" | the candidate list's row-end mark (`:888`); this document keeps the device and replaces the arrow with the width-safe word |
 | ` · ` joins metadata/hint segments | oh-my-pi `theme/symbols.ts:456` `"sep.dot": " · "`; kimi DESIGN §4; pi `settings-list.ts` hint line | both workspace meta/fact rows, `task-panel.ts:1275-1287` |
 | **Key token Capitalized, verb lowercase** | pi `keyDisplayText`; oh-my-pi `key-hint-format.ts`; kimi DESIGN §4 | `Esc back`, `Enter details` (bare letters must change, §4.1) |
 | Hints and keys come from the **keymap**, never a raw literal | pi AGENTS.md; kimi `printable-key-guard.test.ts` (CI-enforced); oh-my-pi `formatKeyHint` | `componentKeymap.keyHint('tasks.stop')` in Job; Settings still compares `'r'`/`'c'` |

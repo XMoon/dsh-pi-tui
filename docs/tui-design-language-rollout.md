@@ -125,6 +125,15 @@ row grant, hit target or write path.
    Do not add new `APP_KEYBINDINGS` actions, and do not switch these hints to
    `componentKeymap` — making them rebindable is a keybinding-contract change,
    not a visual one (spec §7.1).
+10. **The candidate list's current mark loses the arrow and the brackets**: the
+    `'← current'` mark at `settings-workspace-panel.ts:888` becomes the row-end
+    word `current` in `textDim`, two cells after the value, joined with ` · `
+    next to another suffix (`current · unavailable`) — spec §5.1.3/§12.2. `←` is
+    EAW-ambiguous, so it must not spread to the overlays.
+11. **Update the one prose reference in `docs/extension-api.md:301`** from the
+    `← current` marker to the `current` suffix, in this same PR (the owning doc
+    must not go stale). No public type changes: `currentValue` stays an opaque
+    display string.
 
 **Non-goals:** `planSettingsChrome` row grants and the `ruleRows`/`metaRows`
 conditions; `layoutForWidth` breakpoints (`108`/`76`) and the `22/42/2` geometry;
@@ -233,7 +242,7 @@ touched for another reason**, and each must not invent a device:
 
 | Target | What to align (§12.2 applies to all of them) | Do not touch |
 |---|---|---|
-| `SearchablePicker` | cursor `→ ` → `>` in `primary`; hint lines to `Key verb` case with `Esc` last; count moved from the title suffix to the right-aligned role 12; group headers to role 5; failure placeholder word to `error`; the theme's prefix instead of the hardcoded string | the picker's row budget/`ROW_PRIORITY`, the search field, the caps |
+| `SearchablePicker` | cursor `→ ` → `>` in `primary`; hint lines to `Key verb` case with `Esc` last; count moved from the title suffix to the right-aligned role 12; group headers to role 5; failure placeholder word to `error`; the `current`/`default` badges become the row-end `current` suffix with the standard gap; the theme's prefix instead of the hardcoded string | the picker's row budget/`ROW_PRIORITY`, the search field, the caps |
 | history panel | title/cursor/tab/hint ink from the role table (it currently paints no token at all); `│` split decision | its geometry, the inline/split breakpoints, the footer literal semantics |
 | task browser / quick panel | cursor and status inks (one `‣` + word, no per-status glyph set); `Esc` to the tail; hint case | its `│` split, the tree, the marquee, `S stop` semantics |
 | output viewer / approval dialog | title ink, hint grammar and case; keep the approval bracketed-key device (spec §11.4) | the approval decision semantics and the 1-row stop hint |
