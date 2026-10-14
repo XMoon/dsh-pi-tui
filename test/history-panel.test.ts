@@ -30,7 +30,8 @@ import {
 } from '../src/tui/components/source-text-layout.ts'
 import type { HistorySearchResult, HistorySearchSource } from '../src/client/history/search.ts'
 import type { HistoryScope } from '../src/client/history/search.ts'
-import { color } from '../src/tui/theme/runtime.ts'
+import { color, setTheme } from '../src/tui/theme/runtime.ts'
+import { darkColors, type ColorPalette } from '../src/domain/display/theme.ts'
 
 const visibleWidthOf = visibleWidth
 
@@ -1111,5 +1112,59 @@ test('B3-B degenerate width: a frame below the frozen matrix never overflows', a
   const raw = panel.render(12)
   for (const line of raw) {
     assert.ok(visibleWidthOf(line) <= 12, `a degenerate-width row exceeds the frame: ${JSON.stringify(line)}`)
+  }
+})
+
+
+// ---------------------------------------------------------------------------
+// B3-B theme: dark / light / custom (H3B-16)
+// ---------------------------------------------------------------------------
+
+test('B3-B theme: dark/light/custom resolve the frozen role tokens live and never overflow', async () => {
+  const source = new FakeSource()
+  source.rows = [row('alpha prompt', 3, '/work/a', 'a')]
+  const { panel } = makePanel(source, { sessionId: 'ses_a' })
+  panel.start()
+  await settle()
+  const custom: ColorPalette = {
+    ...darkColors,
+    primary: '#123456',
+    textStrong: '#abcdef',
+    textDim: '#111111',
+    textMuted: '#222222',
+    border: '#333333',
+    error: '#ff0000',
+  }
+  const cases: Array<{ name: string; apply: () => void; cursorAnsi?: string }> = [
+    { name: 'dark', apply: () => setTheme('dark') },
+    { name: 'light', apply: () => setTheme('light') },
+    // 0x12,0x34,0x56 → the truecolor SGR the custom primary must really emit.
+    { name: 'custom', apply: () => setTheme('custom', custom), cursorAnsi: '\x1b[38;2;18;52;86m' },
+  ]
+  try {
+    for (const themeCase of cases) {
+      themeCase.apply()
+      const raw = panel.render(100)
+      assert.ok(raw[0]!.startsWith(color.textStrong(' Input History ')),
+        `${themeCase.name}: identity is bold textStrong`)
+      assert.ok(raw[0]!.includes(color.textStrong('[Current Session]', 'primary')),
+        `${themeCase.name}: the active scope is bold primary`)
+      const selected = raw.find(line => line.startsWith(color.primary('> ')))
+      assert.ok(selected !== undefined && selected.includes(color.textStrong('alpha prompt')),
+        `${themeCase.name}: the selected row uses the live primary cursor + bold textStrong label`)
+      assert.ok(raw.some(line => line.includes(color.textMuted('F2 expand'))),
+        `${themeCase.name}: the F2 hint is textMuted`)
+      assert.ok(raw.some(line => line.includes(color.textDim('Results · ')) && line.includes(color.textMuted('1 match'))),
+        `${themeCase.name}: the counter splits its tokens`)
+      if (themeCase.cursorAnsi !== undefined) {
+        assert.ok(selected!.includes(themeCase.cursorAnsi),
+          `${themeCase.name}: the custom palette's primary really reaches the cursor (no cached ink)`)
+      }
+      for (const line of raw) {
+        assert.ok(visibleWidthOf(line) <= 100, `${themeCase.name}: a row exceeds the frame`)
+      }
+    }
+  } finally {
+    setTheme('dark')
   }
 })
