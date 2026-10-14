@@ -1500,6 +1500,41 @@ test('the badge is right-aligned against the row edge', async () => {
   h.app.stop()
 })
 
+test('the picker never paints a row wider than the grant, multi-line effort name included', async () => {
+  // `A\nB\nC\nD` is 4 raw cells but 7 projected; `Medium` is 6 raw. Comparing raw
+  // labels picked `Medium`, so the layout-only badge measured one cell short and
+  // could keep a badge inline that overflows once the multi-line name is painted.
+  const directory = makeDirectory({
+    groups: [{ id: 'p1', name: 'P1', models: [model('sol', { name: 'Sol', efforts: [
+      { id: 'multi', name: 'A\nB\nC\nD' }, { id: 'medium', name: 'Medium' },
+    ], defaultEffort: 'medium' })] }],
+    default: { provider: 'p2', model: 'ghost' },
+  })
+  const h = await openPicker({ directory, current: { provider: 'p2', model: 'ghost' } })
+  // The layout is decided for the WIDEST candidate; the multi-line name only
+  // reaches the row once the effort is cycled onto it, so drive the real overlay
+  // onto that choice and then sweep widths around the wrap threshold.
+  //
+  // HONEST SCOPE: this asserts the INVARIANT (no painted row exceeds the grant).
+  // It is NOT a mutation witness for the projected-width comparison fixed in
+  // `widestBadgeOf` — reverting that comparison to raw labels does NOT fail this
+  // test, so the fix is still only argued from the code, not proven by a probe.
+  h.vt.sendInput('\r') // focus the inline effort
+  await h.vt.waitForRender()
+  h.vt.sendInput('\x1b[C') // cycle Medium -> the multi-line name
+  await h.vt.waitForRender()
+  for (let width = 26; width <= 44; width += 1) {
+    h.vt.resize(width, 24)
+    await h.vt.waitForRender()
+    const rows = h.vt.getViewport()
+    for (const line of rows) {
+      assert.ok(visibleWidth(line) <= width,
+        `width ${width}: a painted row overflowed the grant:\n${rows.join('\n')}`)
+    }
+  }
+  h.app.stop()
+})
+
 test('a narrow wrapped badge drops whole chips instead of slicing one', async () => {
   const h = await openPicker({ directory: LAYOUT_DIRECTORY, current: { provider: 'p1', model: 'sol' }, fullscreen: true })
   // `[current] [default] · effort ‹High›` is 35 cells (two state chips a single
