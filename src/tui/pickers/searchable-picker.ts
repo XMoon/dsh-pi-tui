@@ -601,7 +601,15 @@ export class SearchablePicker implements Component, Focusable {
         hits.push({ kind: 'item', value: item.value, index: i })
         priorities.push(itemPriority)
         const badge = normalizeToSingleLine(item.badge!)
-        lines.push(this.theme.description(this.wrappedBadgeLine(badge, width, item.badgeParts)))
+        // The PARTS are projected through the same one-row helper as the joined
+        // badge: a part is painted as its own unit, so a provider effort name
+        // carrying CR/LF must not smuggle a row break into the returned row
+        // (the joined string alone is not enough once parts exist).
+        const badgeParts = item.badgeParts?.map(part => ({
+          kind: part.kind,
+          text: singlePhysicalLine(part.text),
+        }))
+        lines.push(this.theme.description(this.wrappedBadgeLine(badge, width, badgeParts)))
         hits.push({ kind: 'inert' })
         priorities.push(ROW_PRIORITY.wrappedBadge)
       } else {
