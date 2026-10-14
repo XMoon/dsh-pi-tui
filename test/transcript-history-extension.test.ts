@@ -264,7 +264,7 @@ function mountBoundaryHarness(turns: number, options: {
     imageScope: () => undefined,
     present: { call: () => undefined, result: () => undefined },
     sessionCwd: () => '/tmp',
-    sessionId: () => 'session-boundary-test',
+    captureHistoryScope: () => ({ sessionId: 'session-boundary-test', isCurrent: () => true }),
     onTerminalResize: () => {},
     copySelection: async () => false,
     openExternalUrl: () => {},

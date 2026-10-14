@@ -416,7 +416,7 @@ async function mountRunnerHarness(options: {
     imageScope: () => undefined,
     present: { call: () => undefined, result: () => undefined },
     sessionCwd: () => '/tmp',
-    sessionId: () => currentSessionId,
+    captureHistoryScope: () => ({ sessionId: currentSessionId, isCurrent: () => true }),
     onTerminalResize: () => {},
     copySelection: async () => false,
     openExternalUrl: () => {},
@@ -427,7 +427,7 @@ async function mountRunnerHarness(options: {
   // interaction owner borrows its diagnostics channel), then the ONE input
   // bind, then the interaction attach.
   surface.attachTasks({
-    sessionId: () => SESSION_ID,
+    captureHistoryScope: () => ({ sessionId: SESSION_ID, isCurrent: () => true }),
     captureSubject: () => undefined,
     subjectMatches: () => true,
     enterView: async () => {},

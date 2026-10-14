@@ -242,7 +242,7 @@ function mountSurfaceProbe(
       imageScope: () => undefined,
       present: { call: () => undefined, result: () => undefined },
       sessionCwd: () => '/tmp',
-      sessionId: () => sessionId,
+      captureHistoryScope: () => ({ sessionId: sessionId, isCurrent: () => true }),
       onTerminalResize: () => {},
       copySelection: async () => false,
       openExternalUrl: () => {},

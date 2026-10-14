@@ -854,9 +854,9 @@ becomes a second authority over them or over the editor seat.
 - **By-design boundaries.** An approval alone never fences the physical seat (it
   is a host overlay), so a plugin recompile may still swap the seat beneath it.
   `stop()`/`start()` and the external-editor round-trip are NOT disposal: the
-  logical record survives them. No History or Approval product migration rides
-  this seam — `openHistorySearch()` keeps its own managed overlay and its own
-  PARK semantics, and it is deliberately not an optional tenant.
+  logical record survives them. History IS a real optional tenant (B3-A); its
+  Session currentness and physical retirement are the B3-B contract in §11.1
+  below, which extends — never replaces — this seam.
 
 Evidence: `test/editor-seat-optional-tenant.test.ts` (B-01…B-60: activation and
 real key delivery, the REFUSE gate, PARK/restore across Question, Save Location
@@ -872,7 +872,7 @@ Save presentation that mounts no frame and hides no root, the Approval A→B
 handover refusing a fresh opener, a callback-created root handed back, the
 rollback's independent repaint and seat publish with identity-preserving
 aggregation, Save preemption by a Question and by an Approval, an Approval +
-Question overlap, a capturing-overlay handoff, the untouched History overlay, the
+Question overlap, a capturing-overlay handoff, the PARKED History tenant, the
 `↓ view` affordance withheld while an ACTIVE tenant owns the seat, a broker
 release that must not resurrect a just-retired tenant, a failed presentation that
 advances a QUEUED successor (Question handover and approval `showNext`), a
@@ -900,3 +900,44 @@ interleaved a swap being re-projected in logical order through the one
 registration authority, the newer covering overlay staying VISUALLY on top of the
 late-projected Approval, a newer owner that leaves inside the window still handing
 the keyboard to the live Approval, and input routing).
+
+### 11.1 Session currentness and publication retirement (B3-B)
+
+B3-B closes the optional History tenant's Session identity without adding a
+second authority:
+
+- **One capture, one predicate.** At `Ctrl+R` the application composition calls
+  the runtime's single `SessionScopeAuthority.capture()` ONCE and hands the TUI
+  only `{ sessionId, isCurrent }` (`HistoryOpenScope`). `TuiApp` stores that pair
+  and it is the ONE Session-currentness predicate behind the optional record and
+  the panel's every acting entry (accept, copy, async search commit, pointer).
+  The old History-only `historySearchSessionId` getter and the mixed
+  `TuiApp.generation` check are gone: a same-id reopen, an A→B→A switch, a
+  same-owner generation bump and a sessionless→first-session publication all
+  fail the exact-owner/generation fence. No History epoch, no shadow counter.
+- **Publication retirement.** `SurfaceRuntime.retireStaleHistorySeat()` (a
+  PRIVATE instance port — never part of `SurfaceDisplaySeam` or any TSP/Host
+  API) delegates to `TuiApp.retireStaleHistorySeat()`, which reuses the ONE
+  existing `revalidateOptionalSeat()`. The runner calls it from the three
+  `publishOwner` seams immediately after `beginInputHistoryScope` (ordinary
+  switch, fork adoption, first-session creation), before any post-commit await;
+  the ownership core's single `resetForGeneration` hook calls it too, covering a
+  same-owner generation bump (including one a pre-publication failure already
+  produced). The call is synchronous, state-only and strictly non-throwing: a
+  tenant cleanup failure is routed to the owned-failure reporting channel and can
+  never roll back or mask the already-published Session. The logical fence is the
+  owner commit itself; this port only performs the physical close.
+- **Accept reentrancy.** `openHistorySearch`'s `onAccept` closes its OWN lease,
+  then re-reads the captured scope (not the now-closed panel instance) and the
+  live blocker / newer-optional-tenant / focused-capturing-overlay facts before
+  `setEditorText`; a newer owner that took the seat during the close keeps the
+  keyboard and the current editor.
+
+Evidence: `test/history-seat-b3b-lifecycle.test.ts` (H3B-01…H3B-12: the real
+`SessionScopeAuthority` + ownership core + `bindSessionRuntime` publication over
+a real `TuiApp`/`VirtualTerminal`, Question/Approval FIFO park/restore, A→B→A
+and same-id re-owner refusal, the failed/pre-commit switch, a deferred
+search/copy settling after a switch, and the reentrant accept), plus the
+existing `test/ctrl-r.test.ts`, `test/history-panel.test.ts`,
+`test/history-seat-mouse.test.ts` and `test/editor-seat-optional-tenant.test.ts`
+suites.

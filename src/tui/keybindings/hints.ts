@@ -30,8 +30,30 @@ export const TSP_CONTINUED_INSPECTION_LABEL = 'Alt+Q'
  * only sanctions key labels owned by this tree: a panel or renderer module must
  * not hard-code the chords itself.
  */
-export const HISTORY_PREVIEW_SCROLL_LABEL = 'Alt+↑↓'
+export const HISTORY_PREVIEW_SCROLL_LABEL = 'Alt+↑/↓'
 export const HISTORY_COPY_LABEL = 'Alt+C'
+
+/**
+ * The History editor-seat tenant's ONE fixed-chord table (Phase 3B / B3-B).
+ *
+ * The seat is a per-surface COMPONENT contract, not a Host command: it owns no
+ * keymap action and no remap exists, so both the handler's KeyIds and the
+ * footer / key-badge labels are fixed. Keeping them in ONE table (and in this
+ * key-label authority, which is the sanctioned owner of fixed chords) means a
+ * hint and the handler it names can never drift into two string authorities.
+ */
+export const HISTORY_CHORDS = {
+  accept: { keys: ['enter', 'ctrl+j'], label: 'Enter' },
+  scope: { keys: ['tab'], label: 'Tab' },
+  results: { keys: ['up', 'down', 'pageUp', 'pageDown'], label: '↑/↓' },
+  preview: { keys: ['alt+up', 'alt+down', 'alt+pageUp', 'alt+pageDown', 'alt+home', 'alt+end'], label: HISTORY_PREVIEW_SCROLL_LABEL },
+  copy: { keys: ['alt+c'], label: HISTORY_COPY_LABEL },
+  expand: { keys: ['f2'], label: 'F2' },
+  cancel: { keys: ['escape', 'ctrl+c'], label: 'Esc' },
+} as const satisfies Record<string, { keys: readonly string[]; label: string }>
+
+/** One History chord table key. */
+export type HistoryChordId = keyof typeof HISTORY_CHORDS
 
 /** The display name of a bare (unmodified) key id. */
 const BASE_KEY_LABELS: Record<string, string> = {

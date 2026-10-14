@@ -343,10 +343,11 @@ test('A-03 a fullscreen swap finalizes a non-remountable viewer once and never a
         exhausted: true,
       }),
     },
+    captureHistoryScope: () => ({ sessionId: undefined, isCurrent: () => true }),
   })
   app.openHistorySearch()
   await vt.waitForRender()
-  assert.ok(view(vt).includes('Input history'), `the History tenant must be painted:\n${view(vt)}`)
+  assert.ok(view(vt).includes('Input History'), `the History tenant must be painted:\n${view(vt)}`)
   const lease = app.showExtensionOverlay({ kind: 'text', spans: [{ text: 'lease overlay' }] })
   await vt.waitForRender()
   let closes = 0

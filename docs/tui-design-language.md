@@ -543,10 +543,12 @@ anchor, without inventing a fourth meaning for `primary`.
   must not need a glyph: the pane header is on every multi-column frame, and a
   surface with more than two columns that needs stronger separation must come
   back for an Owner amendment rather than inventing a rule style locally.
-- Two older overlays already draw a `│` split for an independently-scrolled
-  master/detail pair (`task-panel.ts:907` at ≥110 columns, `history-panel.ts:621`
-  at ≥100). v1 does **not** extend that device to the workspaces (D2) and records
-  the two as debt (§11.4): a new surface must not add a third convention.
+- One older overlay still draws a `│` split for an independently-scrolled
+  master/detail pair (`task-panel.ts:907` at ≥110 columns). v1 does **not**
+  extend that device to the workspaces (D2) and records it as debt (§11.4): a
+  new surface must not add a second convention. (The retired History `│`
+  implementation was removed by B3-A; `Ctrl+R` History is an embedded
+  editor-seat tenant, not an overlay — see §12.)
 
 ### 6.4 Insets, alignment and truncation
 
@@ -836,12 +838,11 @@ is next touched for another reason** (never by a mass search/replace):
 | question flow hints | lowercase keys with `←`/`←→` (`'← back · ↵ submit · esc cancel'`, `'←→ edit'`) instead of §4.1's `Esc`-style casing and the width-safe arrow rule | next question-flow change |
 | task browser hint | `Esc close` sits before `S stop` instead of last (D8) | next task-panel change |
 | approval dialog | bracketed key choices `[y] allow once   [n] reject   [esc/ctrl+c] cancel` (three-space separator, lowercase keys) | next approval change |
-| task browser / history | `│` column split for a master/detail pair (`task-panel.ts:907`, `history-panel.ts:621`) | next change to that panel |
+| task browser | `│` column split for a master/detail pair (`task-panel.ts:907`) | next task-panel change |
 | task quick panel, plugin-manager | already follow the ` · ` hint separator, but their hints capitalise bare keys (`S stop`) and the task browser writes `Tab/⇧Tab` with an EAW-ambiguous arrow | next change to that bar |
 | footer configurator help lines | capitalised verbs (`'↑↓ Select · Enter Open · S Save · Esc Close'`) where §4.1/§7.1 want lowercase verbs | next configurator change |
-| picker / overlay titles | the picker header is bold `textMuted` (`groupHeader`) and the history, output-viewer and approval titles carry no ink at all, where role 1 is bold `textStrong` | next change to that overlay |
+| picker / overlay titles | the picker header is bold `textMuted` (`groupHeader`) and the output-viewer and approval titles carry no ink at all, where role 1 is bold `textStrong` | next change to that overlay |
 | keybindings UI | `Saving…` painted `accent` | next keybindings UI change |
-| history panel | paints **no** colour token at all (title, cursor, tabs, hints are plain) | next history-panel change |
 | editor seat borders | `warning` for plan mode, `accent` for a subagent viewer seat (`tui-app.ts:12850`, `:13093`) | next editor-seat change |
 | transcript disclosure | three shapes for one semantic: `🐋/🐳` (Focus), `▸/▾` (Activity/cluster), hardcoded `▼/▶` (sub-call/workflow, `tui-app.ts:16415,16663,16706`) | next disclosure change |
 | transcript `🐋` | the same glyph is the assistant bullet (`icons.ts:80`) and the Focus-collapsed disclosure (`:74`) | next icon-registry change |
@@ -858,12 +859,19 @@ A new surface picks one and must justify any deviation.
 | Archetype | Skeleton | Examples |
 |---|---|---|
 | **Workspace** (fullscreen) | §6.1, own row budget, pinned action bar | Settings, Job |
-| **Overlay** (modal, non-fullscreen) | `Frame` box, single body, bottom hint | pickers, approval dialog, history |
+| **Overlay** (modal, non-fullscreen) | `Frame` box, single body, bottom hint | pickers, approval dialog |
 | **Pane** (embedded in the transcript/log) | header line + folded body, no action bar | tool cards, subagent cards, Thinking |
 | **Status bar** | one row of items + separators, no interaction (a host-instruction line may be reserved above it — `footer/instruction.ts`) | footer |
 
 Shared minimum spec for Workspace and Overlay: identity, one body, one bottom
 bar, `Esc` last, whole-segment hint drops (never mid-word), role table respected.
+
+`Ctrl+R` History is deliberately NOT an Overlay: since B3-A it is a component
+projected into the shared editor seat (an embedded editor-seat tenant), and B3-B
+aligned it to this vocabulary (role table, `> ` + bold `textStrong` selection,
+`[Label]` active scope, ` · ` action-bar segments, whole-segment drops). It
+creates no `Frame`, no new screen and no overlay node, and its pointer support
+exists only inside Transcript Fullscreen.
 
 ### 12.2 Overlay specifics (D9, D10)
 

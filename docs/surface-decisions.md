@@ -2129,10 +2129,10 @@ and nothing else does.
 live Transcript keeps rendering above it and the ordinary footer below it while
 the seat shows the History surface.
 
-- **One vertical presentation at every width.** Header (`Input history` + the
+- **One vertical presentation at every width.** Header (`Input History` + the
   responsive scope tabs + the `F2` hint), query row, a `Results · N matches`
   counter, a single-line results window capped at eight painted rows, a divider,
-  the `Preview x-y/N` heading with the copy actions, the soft-wrapped ORIGINAL
+  the `Preview` + `rows X-Y/N` heading with the copy actions, the soft-wrapped ORIGINAL
   prompt and one trailing metadata row. The retired 100-column split/stacked
   overlay layout, its width cap, its 7-row detail clamp and its `… more` marker
   are gone: the Preview never truncates the source, only its viewport.
@@ -2152,14 +2152,14 @@ the seat shows the History surface.
   the Preview is built from the shared neutral source-text layout
   (`src/tui/components/source-text-layout.ts`, extracted from the Job Command
   document, whose named exports and tests are unchanged), so every painted cell
-  maps back to an exact original UTF-16 range. `Alt+C` / `[Copy all]` copy the
-  stored `content` byte for byte and the Fullscreen Preview drag copies an exact
-  original substring — never a rendered or truncated row.
+  maps back to an exact original UTF-16 range. `Alt+C` / `Copy All [Alt+C]` copy
+  the stored `content` byte for byte and the Fullscreen Preview drag copies an
+  exact original substring — never a rendered or truncated row.
 - **Pointer support is Transcript Fullscreen only.** The alt screen's existing
   component dispatch delivers press/drag/wheel to the panel, which resolves
   against its last painted frame (width/height, painted result identity, search
-  generation). A result click selects; the explicit `[Use selected]` and
-  `[Copy all]` cells act, and each action is bound to the result ID it was
+  generation). A result click selects; the explicit `Use Selected [Enter]` and
+  `Copy All [Alt+C]` cells act, and each action is bound to the result ID it was
   pressed for. Only the LEFT button may start, extend or finish a gesture: a
   right or middle press falls through to the terminal's own handling (e.g. the
   Windows right-click paste path) and can never select, drag or activate a
@@ -2178,10 +2178,11 @@ the seat shows the History surface.
   cursor, input mode and pending paste content exactly as they were; those two
   keys are consumed by History while it is the active seat tenant, so closing it
   can never interrupt the agent or quit the TUI.
-- **Currentness at every ACTING entry.** The host's `isCurrent()` (same panel +
-  same optional-seat record + unchanged surface generation + the live session
-  identity still equal to the one captured at open) is injected into the panel as
-  `tenantIsCurrent` and evaluated at the pointer entry (the fork dispatches mouse
+- **Currentness at every ACTING entry.** The host's `isCurrent()` (B3-B: the
+  captured `SessionScopeAuthority` pair — the exact owner + generation — see the
+  B3-B section below; B3-A used the live session-id string plus the surface
+  generation) is injected into the panel as `tenantIsCurrent` and evaluated at
+  the pointer entry (the fork dispatches mouse
   events outside the Host key ladder, so nothing else would notice a session
   change first), at the acceptance/copy eligibility checks and at the async search
   commit — a page that was in flight for a previous session is never published
@@ -2192,11 +2193,50 @@ the seat shows the History surface.
   path; treating the session-switch publication itself as a revalidation entry is
   deliberately NOT done here (it would extend the Phase-3A revalidation seam and
   let UI teardown failure propagate into the session commit).
-- **Still later.** B3-B owns the full production Question/Approval FIFO
-  PARK/restore, the switch-time retirement/authoritative session generation and
-  ABA protection across async queries and acceptance, and the L6 integration
-  closure. B3-A ships the basic park/restore, the live-subject `isCurrent()` fence
-  at every acting entry and the refusal path; it is not Gate-3B closure.
+- **B3-B closes the lifecycle and currentness.** The full Question/Approval
+  FIFO PARK/restore, the publication-time retirement, the authoritative Session
+  owner generation with ABA protection across async queries/acceptance, and the
+  L6 closure are B3-B (see its section below). B3-A's basic park/restore and
+  refusal path are the foundation; closing B3-B is not Gate-3B closure.
+
+## History Session lifecycle and design-language closure (B3-B)
+
+B3-B closes the two B3-A deferrals without a second authority and restyles the
+seat to the frozen design language.
+
+- **One Session authority, captured once.** At `Ctrl+R` the application
+  composition calls the runtime's single `SessionScopeAuthority.capture()` and
+  injects `{ sessionId, isCurrent }` (`HistoryOpenScope`) into `TuiApp`; the
+  seat's search/accept/copy/async/pointer guards all re-read that ONE capture.
+  The old History-only `historySearchSessionId` getter and the mixed
+  `TuiApp.generation` check are deleted. A session switch, a same-id reopen
+  (A→B→A), a same-owner generation bump and the sessionless→first-session
+  publication all fail the exact-owner/generation fence — no History epoch, no
+  shadow counter, no Session class reaches the TUI.
+- **Publication-time physical retirement.** `SurfaceRuntime` gains a PRIVATE
+  `retireStaleHistorySeat()` instance port (never on `SurfaceDisplaySeam` or any
+  TSP/Host API) that delegates to `TuiApp.retireStaleHistorySeat()`, which
+  reuses the ONE existing `revalidateOptionalSeat()`. The runner calls it from
+  the three `publishOwner` seams immediately after `beginInputHistoryScope`
+  (ordinary switch, fork adoption, first-session), before any post-commit await,
+  and the ownership core's single `resetForGeneration` hook calls it for a
+  same-owner generation bump. The call is synchronous, state-only and strictly
+  non-throwing: a tenant cleanup failure routes to the owned-failure reporting
+  channel and can never roll back or mask the already-published Session. The
+  owner commit is the logical fence; this port performs the physical close.
+- **Accept reentrancy.** `onAccept` closes its OWN lease, then re-reads the
+  captured scope (not the now-closed panel instance) plus the live
+  blocker/newer-tenant/focused-overlay facts before `setEditorText`, so a newer
+  owner that took the seat during the close keeps the keyboard and the current
+  editor.
+- **Design-language alignment (History only).** Identity/Header, active scope
+  `[Label]` (bold `primary`), `> ` + bold `textStrong` selection, per-span
+  secondary facts, `Results`/count tokens, bracket-less
+  `Copy All [Alt+C]` / `Use Selected [Enter]`, labeled metadata facts, and a
+  History-local whole-segment action bar with `Esc` last. Geometry, the
+  0.63/0.80 grant, the eight-row list cap and the Preview's independent source
+  anchoring are unchanged from B3-A; the shared `ACTION_BAR_SEPARATOR` is not
+  touched.
 
 ## Task Browser Host-text terminal-safety boundary
 

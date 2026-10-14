@@ -962,7 +962,7 @@ test('History replaces the EDITOR SEAT: the transcript stays above it and no flo
     search: async () => ({ results: rows, exhausted: true }),
   }
   const vt = new VirtualTerminal(120, 30)
-  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { historySearchSource: source })
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { historySearchSource: source, captureHistoryScope: () => ({ sessionId: undefined, isCurrent: () => true }) })
   app.start()
   startedApps.add(app)
   app.setTranscript([{ kind: 'assistant', turn: 0, text: 'transcript marker above the seat' }])
@@ -973,12 +973,12 @@ test('History replaces the EDITOR SEAT: the transcript stays above it and no flo
   await vt.waitForRender()
   const viewport = vt.getViewport().map(line => stripTerminalSequences(line))
   const transcriptRow = viewport.findIndex(line => line.includes('transcript marker above the seat'))
-  const headerRow = viewport.findIndex(line => line.includes('Input history'))
+  const headerRow = viewport.findIndex(line => line.includes('Input History'))
   assert.ok(transcriptRow >= 0, `the transcript must stay visible:\n${viewport.join('\n')}`)
   assert.ok(headerRow > transcriptRow, `the History seat must sit BELOW the live transcript:\n${viewport.join('\n')}`)
   // A SEAT is full-width and flush: no centered floating frame, no outer border
   // and no horizontal margin.
-  assert.ok(viewport[headerRow]!.startsWith(' Input history'),
+  assert.ok(viewport[headerRow]!.startsWith(' Input History'),
     `the seat header must start at column 0:\n${JSON.stringify(viewport[headerRow])}`)
   assert.ok(viewport.some(line => line.includes('entry alpha')), 'the results are painted')
   assert.ok(viewport.some(line => line.includes('Esc cancel')), 'the seat action bar is painted')
@@ -994,7 +994,7 @@ test('History reflows across a resize without restarting its search state', asyn
     search: async () => ({ results: rows, exhausted: true }),
   }
   const vt = new VirtualTerminal(50, 10)
-  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { historySearchSource: source })
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { historySearchSource: source, captureHistoryScope: () => ({ sessionId: undefined, isCurrent: () => true }) })
   app.start()
   startedApps.add(app)
   app.openHistorySearch()
@@ -1014,15 +1014,15 @@ test('History reflows across a resize without restarting its search state', asyn
   // The seat spans the terminal's CURRENT content width (never the retired
   // 100-column overlay cap) and the header reflows with it.
   const headerRow = vt.getViewport().map(line => stripTerminalSequences(line))
-    .find(line => line.includes('Input history'))
+    .find(line => line.includes('Input History'))
   assert.ok(headerRow !== undefined, `the seat header must survive the resize:\n${view}`)
   assert.ok(visibleWidth(headerRow!.trimEnd()) > 80,
     `the seat must reflow to the grown width:\n${JSON.stringify(headerRow)}`)
-  assert.ok(view.includes('Current directory'), `the scope tabs did not reflow after grow:\n${view}`)
+  assert.ok(view.includes('Current Directory'), `the scope tabs did not reflow after grow:\n${view}`)
   vt.resize(50, 10)
   await vt.waitForRender()
   view = vt.getViewport().join('\n')
-  assert.ok(view.includes('Input history'), `the seat must survive shrink:\n${view}`)
+  assert.ok(view.includes('Input History'), `the seat must survive shrink:\n${view}`)
   assert.ok(view.includes('Esc cancel'), `the seat hint must survive shrink:\n${view}`)
   vt.sendInput('\x1b')
   await vt.waitForRender()
@@ -1037,7 +1037,7 @@ test('History preserves query and selection across fullscreen rebinds', async ()
     search: async () => ({ results: rows, exhausted: true }),
   }
   const vt = new VirtualTerminal(120, 30)
-  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { historySearchSource: source })
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { historySearchSource: source, captureHistoryScope: () => ({ sessionId: undefined, isCurrent: () => true }) })
   app.start()
   startedApps.add(app)
   app.openHistorySearch()
@@ -1050,7 +1050,7 @@ test('History preserves query and selection across fullscreen rebinds', async ()
   const strip = (line: string): string => stripTerminalSequences(line)
   const hasSelectedBeta = (viewport: string[]): boolean => viewport.some(line => {
     const plain = strip(line)
-    return plain.includes('entry beta') && plain.includes('›')
+    return plain.includes('entry beta') && plain.startsWith('> ')
   })
   const before = vt.getViewport().map(strip).join('\n')
   assert.ok(before.includes('Search: > x'), `history query must be visible before fullscreen:\n${before}`)
