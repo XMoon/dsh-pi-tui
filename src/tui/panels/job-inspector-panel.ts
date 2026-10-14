@@ -39,7 +39,7 @@
 
 import { Text, VStack, matchesKey, truncateToWidth, visibleWidth, type Component } from '@xmoon76/pi-tui'
 import { componentKeymap } from '../keybindings/component-keymap.ts'
-import { formatHintKeys, formatKeyId } from '../keybindings/hints.ts'
+import { formatHintKeys } from '../keybindings/hints.ts'
 import { renderActionBarRow, type ActionBarSegment } from '../presentation/action-bar.ts'
 import { sanitizedPhysicalLine } from '../presentation/lines.ts'
 import { color, taskStatusColor } from '../theme/runtime.ts'
@@ -807,12 +807,10 @@ class JobInspectorActionBar implements Component {
     // (plan §1.2 MUST 5 / §2.1 / §4.2).
     const pageHint = facts.bodyVisible && !facts.searchEditing
     const findSegment: ActionBarSegment[] = !facts.searchEditing && facts.canFind
-      // `<key list> <verb>`, like every other segment: `/` is the always-available
-      // Find alias and sits INSIDE the key list, so the verb terminates the hint
-      // and the list can never read as a dangling separator (design language
-      // §4.2). The list itself is the effective keymap hint, never a fabricated
-      // key (`/` alone when the action is unbound).
-      ? [{ text: facts.findHint === '' ? '/ find' : `${facts.findHint} / find`, priority: 1 }]
+      // ONE key per action (design language §7.1): the live keymap's primary
+      // binding, verb last. `/` is the Job-local alias and is advertised only when
+      // the action has no live binding left to name.
+      ? [{ text: facts.findHint === '' ? '/ find' : `${facts.findHint} find`, priority: 1 }]
       : []
     const position: ActionBarSegment[] = facts.bodyVisible && facts.position.total > 0
       ? [{ text: `rows ${facts.position.start}-${facts.position.end}/${facts.position.total}`, priority: 2 }]
@@ -838,12 +836,7 @@ class JobInspectorActionBar implements Component {
     const segments: ActionBarSegment[] = []
     const stopKey = componentKeymap.keyHint('tasks.stop') ?? ''
     if (!facts.searchActive && this.canStop() && stopKey !== '') {
-      // B1-A's own compaction: when both effective Stop keys are advertised and
-      // the row is tight, the primary key alone still names the real action.
-      const stopHint = formatHintKeys(stopKey)
-      const primaryKey = componentKeymap.keysFor('tasks.stop')[0]
-      const short = primaryKey === undefined ? undefined : `${formatHintKeys(formatKeyId(primaryKey))} stop`
-      segments.push({ text: `${stopHint} stop`, ...(short === undefined || short === `${stopHint} stop` ? {} : { short }), priority: 6 })
+      segments.push({ text: `${formatHintKeys(stopKey)} stop`, priority: 6 })
     }
     segments.push(facts.follow
       ? { text: 'Follow on', priority: 5 }
