@@ -281,7 +281,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   not fit); a group header splits into its label and its count in two weaker inks
   instead of one bold span; the `current` / `default` row states are the
   `[current]` / `[default]` state chips whose ink stays the weakest one even on a
-  selected row; and a failed catalog paints its failure word `error` while an
+  selected row; and a failed catalog paints its failure word `error` while an Two states on one row are two chips a single space apart; ` · ` stays the chrome/grouped-badge separator.
   ordinary empty filter stays muted. The selected row's text is bold `textStrong`
   instead of a colourless bold default, and the badge's effort value is painted its own
   secondary ink (`textDim`): a nested span's reset ends the outer colour for everything
