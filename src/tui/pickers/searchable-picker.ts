@@ -28,6 +28,11 @@ const DEFAULT_PRIMARY_COLUMN_WIDTH = 32
 const PRIMARY_COLUMN_GAP = 2
 const MIN_DESCRIPTION_WIDTH = 10
 
+/** One whole SGR sequence or one character, for the escape-aware badge trim:
+ *  the trim may only land BETWEEN tokens, so it can never cut inside an
+ *  `\x1b[38;2;…m` sequence. */
+const SGR_OR_CHAR = /\x1b\[[0-9;]*m|[\s\S]/gu
+
 // Description/badge presentation keeps its historical trim; the CR/LF
 // collapse itself is the shared single-physical-row projection.
 const normalizeToSingleLine = (text: string): string => singlePhysicalLine(text).trim()
@@ -390,14 +395,17 @@ export class SearchablePicker implements Component, Focusable {
       // suffix. The count drops whole when the row cannot hold it beside the
       // title (§8 step 6).
       const titleText = singlePhysicalLine(this.options.header)
+      const titleWidth = visibleWidth(titleText)
       const countText = this.searchEnabled ? `${this.filteredItems.length}/${this.items.length}` : ''
       const countWidth = visibleWidth(countText)
-      if (countWidth === 0 || countWidth + 2 > width) {
+      // §8 step 6: the count yields FIRST and WHOLE when the title and the
+      // count cannot share the row; the title is truncated only when it does
+      // not fit on its own.
+      if (countWidth === 0 || titleWidth + 1 + countWidth > width) {
         push(color.textStrong(truncateToWidth(titleText, width, '')), { kind: 'inert' }, ROW_PRIORITY.header)
       } else {
-        const lead = color.textStrong(truncateToWidth(titleText, width - countWidth - 1, ''))
-        const gap = Math.max(1, width - visibleWidth(lead) - countWidth)
-        push(lead + ' '.repeat(gap) + color.textMuted(countText), { kind: 'inert' }, ROW_PRIORITY.header)
+        const gap = Math.max(1, width - titleWidth - countWidth)
+        push(color.textStrong(titleText) + ' '.repeat(gap) + color.textMuted(countText), { kind: 'inert' }, ROW_PRIORITY.header)
       }
       push('', { kind: 'inert' }, ROW_PRIORITY.spacer)
     }
@@ -544,10 +552,13 @@ export class SearchablePicker implements Component, Focusable {
           const suffix = ` · ${count}`
           const suffixWidth = visibleWidth(suffix)
           const paintLabel = this.theme.groupHeader ?? this.theme.description
-          if (suffixWidth >= width) {
+          // Same budget shape as the header row: the ` · count` suffix yields
+          // WHOLE when the label and the suffix cannot share the row; the label
+          // is truncated only when it alone overflows.
+          if (visibleWidth(label) + suffixWidth > width) {
             lines.push(paintLabel(truncateToWidth(label, width, '')))
           } else {
-            lines.push(paintLabel(truncateToWidth(label, width - suffixWidth, '')) + color.textMuted(suffix))
+            lines.push(paintLabel(label) + color.textMuted(suffix))
           }
           hits.push({ kind: 'inert' })
           priorities.push(ROW_PRIORITY.groupHeader)
@@ -883,23 +894,37 @@ export class SearchablePicker implements Component, Focusable {
   }
 
   /** The wrapped badge line, right-aligned against the row edge. When the
-   *  badge is itself wider than the grant it drops from the LEFT (keeping the
-   *  most specific TAIL, e.g. `/model`'s effort token) rather than truncating
-   *  the tail away, so an ultra-narrow row never loses the value the user is
+   *  badge is itself wider than the grant it drops leading WHOLE ` · `-separated
+   *  parts (keeping the most specific TAIL, e.g. `/model`'s effort token) rather
+   *  than truncating the tail away, so a state chip never survives as a
+   *  `…rent]` fragment and an ultra-narrow row never loses the value the user is
    *  actively editing. */
   private wrappedBadgeLine(badge: string, width: number): string {
     const text = visibleWidth(badge) <= width
       ? badge
-      : `…${this.tailToWidth(badge, Math.max(1, width - 1))}`
+      : `…${this.tailPartsToWidth(badge, Math.max(1, width - 1))}`
     return ' '.repeat(Math.max(0, width - visibleWidth(text))) + text
   }
 
-  /** The longest SUFFIX of `text` whose visible width does not exceed `width`. */
-  private tailToWidth(text: string, width: number): string {
-    const chars = Array.from(text)
+  /** The longest suffix of `badge` within `width`. Whole ` · `-separated parts
+   *  drop from the left while the remainder still overflows; a lone remaining
+   *  part is then trimmed on VISIBLE boundaries — never inside an SGR sequence —
+   *  and re-prefixed with the last SGR sequence the trim dropped, so the
+   *  survivor keeps its own ink (ANSI cannot resume a style after a cut). */
+  private tailPartsToWidth(badge: string, width: number): string {
+    const parts = badge.split(' · ')
+    while (parts.length > 1 && visibleWidth(parts.join(' · ')) > width) parts.shift()
+    const tail = parts.join(' · ')
+    if (visibleWidth(tail) <= width) return tail
+    const tokens = tail.match(SGR_OR_CHAR) ?? []
     let start = 0
-    while (start < chars.length && visibleWidth(chars.slice(start).join('')) > width) start += 1
-    return chars.slice(start).join('')
+    while (start < tokens.length && visibleWidth(tokens.slice(start).join('')) > width) start += 1
+    let ink = ''
+    for (let index = 0; index < start; index += 1) {
+      const token = tokens[index]!
+      if (token.startsWith('\x1b[')) ink = token
+    }
+    return ink + tokens.slice(start).join('')
   }
 
   /** `wrap-when-needed`: move this item's badge to a second physical row when

@@ -408,6 +408,44 @@ test('shows filtered/total counts in the header', () => {
   assert.ok(rendered.some((line) => line.includes('1/3')), `counts missing: ${JSON.stringify(rendered)}`)
 })
 
+test('the header count yields WHOLE before the title is truncated (plan §8 step 6)', () => {
+  const items = Array.from({ length: 3 }, (_, index) => ({ value: `v${index}`, label: `item ${index}` }))
+  const picker = new SearchablePicker(items, 5, testTheme, {}, { enableSearch: true, header: 'Models' })
+  // `Models` (6) + gap (1) + `3/3` (3) = 10. At width 8 the count ALONE would
+  // fit (3 + 2 <= 8), but not BESIDE the title: the title must survive whole
+  // and the count drops whole — never the old `Mode 3/3`.
+  const narrow = picker.render(8).map(plainRow)
+  assert.ok(narrow.some((line) => line.includes('Models')), `the full title must survive:\n${narrow.join('\n')}`)
+  assert.ok(!narrow.some((line) => line.includes('3/3')), `the count must drop whole:\n${narrow.join('\n')}`)
+  // Exactly enough for both: the title stays whole and the count is painted.
+  const fits = picker.render(10).map(plainRow)
+  const titleRow = fits.find((line) => line.includes('Models'))!
+  assert.ok(titleRow.includes('3/3'), `title and count must share width 10:\n${titleRow}`)
+  assert.equal(visibleWidth(titleRow), 10, `the count must be right-aligned to the grant:\n${titleRow}`)
+  for (const width of [8, 10]) {
+    for (const line of picker.render(width)) {
+      assert.ok(visibleWidth(line) <= width, `over-wide row at ${width}: ${JSON.stringify(line)}`)
+    }
+  }
+})
+
+test('the group header keeps its label and drops the ` · count` suffix whole', () => {
+  const items = [
+    { value: 'a', label: 'alpha', group: 'Models' },
+    { value: 'b', label: 'beta', group: 'Models' },
+    { value: 'c', label: 'gamma', group: 'Models' },
+  ]
+  const picker = new SearchablePicker(items, 5, testTheme, {}, {})
+  // `  Models` (8) + ` · 3` (4) = 12. At width 10 the suffix alone would fit,
+  // but not beside the label: the label survives and the suffix drops whole
+  // (it used to truncate the label down to the suffix).
+  const narrow = picker.render(10).map(plainRow)
+  assert.ok(narrow.some((line) => line.includes('Models')), `the label must survive:\n${narrow.join('\n')}`)
+  assert.ok(!narrow.some((line) => line.includes('· 3')), `the suffix must drop whole:\n${narrow.join('\n')}`)
+  const fits = picker.render(12).map(plainRow)
+  assert.ok(fits.some((line) => line.includes('Models · 3')), `both must fit at width 12:\n${fits.join('\n')}`)
+})
+
 test('renders a hint footer when search is enabled', () => {
   const picker = new SearchablePicker([{ value: 'a', label: 'alpha' }], 5, testTheme, {}, { enableSearch: true })
   const rendered = picker.render(80)

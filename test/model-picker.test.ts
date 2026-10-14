@@ -1500,6 +1500,47 @@ test('the badge is right-aligned against the row edge', async () => {
   h.app.stop()
 })
 
+test('a narrow wrapped badge drops whole chips instead of slicing one', async () => {
+  const h = await openPicker({ directory: LAYOUT_DIRECTORY, current: { provider: 'p1', model: 'sol' }, fullscreen: true })
+  // `[current] · [default] · effort ‹High›` is 37 cells: at 34 the pre-painted
+  // `[current]` chip must drop WHOLE — the pre-paint makes a char-wise left trim
+  // produce both a `…rent]` fragment and, potentially, a broken SGR sequence.
+  for (const width of [34, 20]) {
+    const rows = h.picker.render(width)
+    const raw = rows.find(line => line.includes('‹High›') && !line.includes('GPT-5.6 Sol'))
+    assert.ok(raw !== undefined, `width ${width}: the wrapped badge row must render:\n${rows.join('\n')}`)
+    // The escape-aware trim only lands BETWEEN tokens: no broken SGR survives.
+    assert.ok(!raw.replace(/\x1b\[[0-9;]*m/g, '').includes('\x1b'),
+      `width ${width}: a broken escape survived:\n${JSON.stringify(raw)}`)
+    const badge = stripAnsi(raw)
+    assert.ok(!badge.includes('rent]'), `width ${width}: a partial state chip survived:\n${badge}`)
+    // Every `]` closes a WHOLE chip: no `[`-less remnant may survive.
+    const wholeChips = badge.match(/\[[^\]]*\]/g) ?? []
+    assert.equal((badge.match(/\]/g) ?? []).length, wholeChips.length,
+      `width ${width}: a chip survived in fragments:\n${badge}`)
+    // The ellipsis may only prefix a WHOLE surviving unit (`…[default]` /
+    // `…effort ‹High›`), never a chip fragment (`…rent]`).
+    assert.match(badge, /…(?:\[(?:current|default)\]|effort ‹High›)/,
+      `width ${width}: the ellipsis landed inside a chip:\n${badge}`)
+    assert.ok(badge.includes('effort ‹High›'), `width ${width}: the effort token must survive whole:\n${badge}`)
+    for (const line of rows) {
+      assert.ok(visibleWidth(line) <= width, `width ${width}: over-wide row ${JSON.stringify(line)}`)
+    }
+  }
+  // A real narrow frame: the dropped `[current]` leaves a WHOLE `[default]`, and
+  // the surviving chip keeps its own `textMuted` ink.
+  h.vt.resize(40, 24)
+  await h.vt.waitForRender()
+  const chipRow = rowOf(h.vt, '…')
+  const frame = linesOf(h.vt)
+  assert.ok(frame[chipRow]!.includes('[default]'), `the frame must keep the whole [default] chip:\n${viewOf(h.vt)}`)
+  assert.ok(!frame[chipRow]!.includes('rent]'), `the frame must not slice a chip:\n${viewOf(h.vt)}`)
+  assert.equal(h.vt.getCellFgRgb(chipRow, cellIndexOf(h.vt, chipRow, '[default]')),
+    hexToRgb(currentPalette.textMuted),
+    `the surviving chip must keep its textMuted ink:\n${viewOf(h.vt)}`)
+  h.app.stop()
+})
+
 test('a narrow-to-wide unwrap transition fences the stale two-line hit map', async () => {
   const directory = makeDirectory({
     groups: [{ id: 'p1', name: 'P1', models: [
