@@ -17,9 +17,10 @@
   parked Question 的同一个 Task Runtime 投影，不新增第二套目录），每行显示任务身份、真实
   mode 与 `‣ Running` / `‣ Failed` / `‣ Awaiting answer` 状态词，右侧是真实的
   `showing x-y/N`（N 是可以真正滚到的行数）。被动绘制、刷新、滚轮与 resize 都不会改变失败
-  确认（`!N`）或 Question 的回答状态。全屏 Transcript 下滚轮只滚动指针所在的这个窗口，不
-  抢键盘焦点、不动草稿与 Transcript；普通主屏仍是纯键盘界面（终端自身的选择与回滚不变），
-  任务仍按原有方式用 `↓` 或 `/tasks` 打开 Task Center。
+  确认（`!N`）或 Question 的回答状态。全屏 Transcript 下滚轮只滚动指针所在的这个窗口：
+  指针落在窗口上时（含窗口已到第一/最后一行）后面的 Transcript 不会被滚动，也不会抢键盘
+  焦点或改动草稿。普通主屏仍是纯键盘界面（终端自身的选择与回滚不变），任务仍按原有方式用
+  `↓` 或 `/tasks` 打开 Task Center。
 
 - `Ctrl+R` 历史席位现在有自己的一条边界：顶部一条 `─`（位于身份行之上）与底部一条
   `─`（位于操作提示行之下、贴 footer），让席位与上下方 Transcript / 状态栏的边界可见。

@@ -165,7 +165,7 @@ function renderHeaderRow(width: number, start: number, count: number, total: num
 }
 
 /**
- * One task row: `[tree]label[ · mode]` + the status group, and — in the
+ * One task row: `<indent>label[ · mode]` + the status group, and — in the
  * granted-one-row frame — the compact position at the tail.
  *
  * Sacrifice order (plan §5.2): elapsed/description/details are never painted at
@@ -174,25 +174,33 @@ function renderHeaderRow(width: number, start: number, count: number, total: num
  * than cut mid-word when the row cannot hold it beside one identifiable label
  * cell; the status word and the position are only ever cut below the frozen
  * 44-column matrix floor.
+ *
+ * Nesting is painted as INDENTATION derived from the durable depth, never as the
+ * modal panel's `├─ ` connector: U+2500 is East-Asian-Width ambiguous, and the
+ * design language forbids putting an ambiguous glyph in a NEW place
+ * (`docs/tui-design-language.md` §4.3). The status word is projected through the
+ * same single-physical-line sanitizer as the label: a status is an external
+ * (possibly Remote/wire) string, and this row is budgeted as exactly one
+ * terminal row.
  */
 function renderItemRow(item: TaskPanelItem, width: number, position?: string): string {
-  const statusText = `${STATUS_MARKER} ${taskStatusWord(item.status)}`
+  const statusText = `${STATUS_MARKER} ${sanitizedPhysicalLine(taskStatusWord(item.status))}`
   const status = taskStatusColor(item.status)(statusText)
   const tail = position === undefined ? status : `${status}  ${color.textMuted(position)}`
   const tailWidth = visibleWidth(position === undefined ? statusText : `${statusText}  ${position}`)
   if (tailWidth >= width) return fit(tail, width)
   const room = width - tailWidth - 1
-  const tree = item.treePrefix === undefined || item.treePrefix === '' ? '' : item.treePrefix
-  const treeWidth = visibleWidth(tree)
+  const indent = '  '.repeat(Math.max(0, Math.floor(item.depth ?? 0)))
+  const indentWidth = visibleWidth(indent)
   const suffixText = item.suffix === undefined || item.suffix === '' ? '' : ` · ${item.suffix}`
   const suffixWidth = visibleWidth(suffixText)
   // The durable mode rides as a non-truncatable suffix: it is kept only while
   // the label still owns at least one identifiable cell after it.
-  const suffix = suffixWidth > 0 && treeWidth + suffixWidth + 1 <= room ? suffixText : ''
-  const labelBudget = Math.max(0, room - treeWidth - visibleWidth(suffix))
+  const suffix = suffixWidth > 0 && indentWidth + suffixWidth + 1 <= room ? suffixText : ''
+  const labelBudget = Math.max(0, room - indentWidth - visibleWidth(suffix))
   const label = truncateToWidth(sanitizedPhysicalLine(item.label), labelBudget, '…', false)
   const ink = item.ancestorContext === true ? color.textDim : color.text
-  const left = `${color.textDim(tree)}${ink(label)}${color.textDim(suffix)}`
+  const left = `${color.textDim(indent)}${ink(label)}${color.textDim(suffix)}`
   const gap = Math.max(1, width - visibleWidth(left) - tailWidth)
   return `${left}${' '.repeat(gap)}${tail}`
 }
@@ -205,10 +213,15 @@ interface TaskQuickPainted {
   readonly width: number
   /** The physical row count this frame painted (the hit box height). */
   readonly height: number
-  /** The painted identity-row count (0 or 1). */
-  readonly headerRows: number
   /** The painted task-row count — the wheel window. */
   readonly itemRows: number
+  /** The LIVE terminal geometry this frame was painted for. The pi-tui alt
+   *  screen builds a pointer event's own box dimensions from its last painted
+   *  layout, so after a resize the event still carries the OLD dimensions:
+   *  comparing the live geometry at dispatch time is the fence that can
+   *  actually detect "this frame was painted for another terminal". */
+  readonly terminalColumns: number
+  readonly terminalRows: number
 }
 
 /**
@@ -279,24 +292,31 @@ export class TaskQuickAccessory implements Component {
   invalidate(): void {}
 
   /**
-   * Mouse wheel over the painted task-row window: move the window by one row
-   * and repaint. Every other gesture is refused (no press/release/click action
-   * and no focus — the pointer may scroll a viewport, never enter the surface).
+   * Mouse wheel over the painted window: move the row window by one row and
+   * repaint. Every other gesture is refused (no press/release/click action and
+   * no focus — the pointer may scroll a viewport, never enter the surface).
+   *
+   * The whole painted band owns the wheel (identity row included): while the
+   * pointer is over the accessory the transcript underneath never scrolls, and a
+   * wheel at a window boundary is consumed WITHOUT repainting rather than falling
+   * through.
    */
   handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
     if (event.type !== 'wheel' || event.wheelDelta === undefined || event.wheelDelta === 0) return undefined
     const painted = this.painted
     if (painted === undefined) return undefined
-    // Last-painted geometry is authoritative: a resize (or a re-mount) that has
-    // not been repainted yet must never resolve against a stale box.
+    // Last-painted geometry is authoritative: a resize (or a screen swap) that
+    // has not been repainted yet must never resolve against a stale box. The
+    // event's own dimensions come from the SAME stale layout cache the frame was
+    // painted into, so the LIVE terminal geometry recorded at paint time is the
+    // check that can actually fail on a resize.
     if (event.width !== painted.width || event.height !== painted.height) return undefined
+    if (this.geometry.columns() !== painted.terminalColumns || this.geometry.rows() !== painted.terminalRows) return undefined
     const localY = event.y
-    if (localY < painted.headerRows || localY >= painted.headerRows + painted.itemRows) return undefined
+    if (localY < 0 || localY >= painted.height) return undefined
     const step = event.wheelDelta < 0 ? -1 : 1
     const next = Math.min(Math.max(0, this.start + step), Math.max(0, this.items.length - painted.itemRows))
-    // At the window boundary the accessory consumes nothing: the transcript
-    // keeps the wheel (the accessory never swallows a gesture it cannot use).
-    if (next === this.start) return undefined
+    if (next === this.start) return { handled: true }
     this.start = next
     this.firstVisibleId = this.items[next]?.value
     // The painted frame is stale until the repaint this result requests.
@@ -306,9 +326,10 @@ export class TaskQuickAccessory implements Component {
 
   render(width: number): string[] {
     const columns = Math.max(1, Math.floor(width))
+    const terminalRows = this.geometry.rows()
     const layout = planTaskQuickLayout(
       columns,
-      this.geometry.rows(),
+      terminalRows,
       this.geometry.chromeRows(columns),
       this.items.length,
       this.start,
@@ -332,8 +353,9 @@ export class TaskQuickAccessory implements Component {
     this.painted = {
       width: columns,
       height: lines.length,
-      headerRows: layout.header ? 1 : 0,
       itemRows: layout.count,
+      terminalColumns: this.geometry.columns(),
+      terminalRows,
     }
     return lines
   }

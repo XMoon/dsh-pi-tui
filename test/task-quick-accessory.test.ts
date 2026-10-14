@@ -178,7 +178,7 @@ test('a 0-grant frame paints nothing and refuses the wheel', () => {
   assert.equal(accessory.handleMouse(wheel(1, 1)), undefined)
   geometry.rows = 24
   assert.equal(accessory.render(80).length, 4)
-  assert.equal(accessory.handleMouse(wheel(-1, 1)), undefined, 'an upward wheel at the top is not consumed')
+  assert.deepEqual(accessory.handleMouse(wheel(-1, 1)), { handled: true }, 'an upward wheel at the top is consumed without a repaint')
   assert.deepEqual(accessory.handleMouse(wheel(1, 1)), { handled: true, render: true }, 'the down wheel moves the window')
   assert.match(strip(accessory.render(80)[0]!), /showing 2-4\/4$/)
 })
@@ -187,12 +187,11 @@ test('the wheel resolves only against the LAST PAINTED frame', () => {
   const { accessory, geometry } = harness()
   accessory.setItems([item('job:a'), item('job:b'), item('job:c'), item('job:d'), item('job:e')])
   accessory.render(80)
-  // The identity row is not a scroll target.
-  assert.equal(accessory.handleMouse(wheel(1, 0)), undefined)
   // A stale box (a resize that has not been repainted) is refused, both ways.
   assert.equal(accessory.handleMouse(wheel(1, 1, { width: 100 })), undefined)
   assert.equal(accessory.handleMouse(wheel(1, 1, { height: 3 })), undefined)
-  // A y outside the painted band is not ours.
+  // A y outside the painted band is not ours (the alt screen cannot produce one,
+  // but the guard is part of the hit contract).
   assert.equal(accessory.handleMouse(wheel(1, 9)), undefined)
   // Press/release/click never act and never take focus.
   assert.equal(accessory.handleMouse({ ...wheel(1, 1), type: 'press' }), undefined)
@@ -203,19 +202,41 @@ test('the wheel resolves only against the LAST PAINTED frame', () => {
   assert.match(strip(accessory.render(80)[0]!), /showing 2-4\/5$/)
   assert.deepEqual(accessory.handleMouse(wheel(1, 1)), { handled: true, render: true })
   assert.match(strip(accessory.render(80)[0]!), /showing 3-5\/5$/)
-  // At the window boundary the accessory consumes nothing.
-  assert.equal(accessory.handleMouse(wheel(1, 1)), undefined)
+  // At the window boundary the wheel is CONSUMED with no repaint: the
+  // transcript under the pointer never scrolls.
+  assert.deepEqual(accessory.handleMouse(wheel(1, 1)), { handled: true })
+  assert.match(strip(accessory.render(80)[0]!), /showing 3-5\/5$/)
   assert.deepEqual(accessory.handleMouse(wheel(-1, 1)), { handled: true, render: true })
   assert.match(strip(accessory.render(80)[0]!), /showing 2-4\/5$/)
-  // A resize that has not been repainted still resolves against the OLD box.
+  // A resize that has not been repainted is refused against the LIVE geometry —
+  // the event's own dimensions come from the same stale layout cache and cannot
+  // express the resize at all.
   geometry.rows = 6
-  assert.equal(accessory.handleMouse(wheel(-1, 1, { height: 1 })), undefined)
+  assert.equal(accessory.handleMouse(wheel(-1, 1)), undefined, 'a stale frame after a resize is refused')
   const shrunk = accessory.render(80)
   // A one-row grant paints ONE content row (no header) and keeps the position.
   assert.equal(shrunk.length, 1)
   assert.match(strip(shrunk[0]!), /^job:b\s+‣ Running\s+2-2\/5$/)
   assert.deepEqual(accessory.handleMouse(wheel(1, 0, { height: 1 })), { handled: true, render: true })
   assert.match(strip(accessory.render(80)[0]!), /^job:c\s+‣ Running\s+3-3\/5$/)
+  // A width resize is caught the same way.
+  geometry.cols = 100
+  assert.equal(accessory.handleMouse(wheel(-1, 0, { height: 1 })), undefined, 'a stale frame after a width change is refused')
+  accessory.render(100)
+  assert.deepEqual(accessory.handleMouse(wheel(-1, 0, { width: 100, height: 1 })), { handled: true, render: true })
+})
+
+test('the whole painted band owns the wheel, identity row included', () => {
+  const { accessory } = harness()
+  accessory.setItems([item('job:a'), item('job:b'), item('job:c'), item('job:d')])
+  accessory.render(80)
+  // y=0 is the identity row: the accessory still owns it, so the transcript never
+  // scrolls under a pointer that is on the window.
+  assert.deepEqual(accessory.handleMouse(wheel(1, 0)), { handled: true, render: true })
+  assert.match(strip(accessory.render(80)[0]!), /showing 2-4\/4$/)
+  // Nothing to scroll: consumed without a repaint, never bubbled.
+  assert.deepEqual(accessory.handleMouse(wheel(1, 1)), { handled: true })
+  assert.match(strip(accessory.render(80)[0]!), /showing 2-4\/4$/)
 })
 
 test('the window rebases on the first visible row ID, not on an index or a label', () => {
@@ -283,6 +304,44 @@ test('every rendered row is a single safe physical row, measured in terminal cel
   const third = strip(lines[3]!)
   assert.match(third, /‣ Running$/)
   assert.ok(!third.includes('one-shot'), 'an unaffordable mode is dropped whole')
+})
+
+test('nesting is painted as indentation, never with an ambiguous box-drawing connector', () => {
+  const { accessory } = harness()
+  accessory.setItems([
+    item('job:a', { label: 'build' }),
+    item('agent:p', { label: 'subagent · parent', suffix: 'continuable', source: 'subagent', type: 'subagent', depth: 1 }),
+    item('agent:c', {
+      label: 'subagent · child', suffix: 'continuable', source: 'subagent', type: 'subagent',
+      depth: 2, treePrefix: '  ├─ ',
+    }),
+  ])
+  const lines = accessory.render(80).map(strip)
+  assert.ok(lines[1]!.startsWith('build'), `a root row stays flush:\n${lines.join('\n')}`)
+  assert.ok(lines[2]!.startsWith('  subagent · parent'), `a depth-1 row is indented one step: ${JSON.stringify(lines[2])}`)
+  assert.ok(lines[3]!.startsWith('    subagent · child'), `a depth-2 row is indented two steps: ${JSON.stringify(lines[3])}`)
+  // U+2500 is East-Asian-Width ambiguous: the modal panel's connector must not be
+  // carried into this new surface (the plan adds a placement, not a glyph).
+  assert.equal(/[\u2500-\u257f]/.test(lines.join('')), false, 'no box-drawing glyph in the accessory')
+})
+
+test('an unknown or hostile remote status is projected to ONE safe physical row', () => {
+  const { accessory } = harness()
+  accessory.setItems([
+    item('job:a', { status: 'failed\u001b[31m\ninjected\u0007' }),
+    item('job:b', { status: 'weird_status' }),
+  ])
+  const lines = accessory.render(80)
+  for (const line of lines) {
+    assert.equal(visibleWidth(line), 80)
+    assert.ok(!line.includes('\n') && !line.includes('\r') && !line.includes('\t'))
+  }
+  const first = strip(lines[1]!)
+  assert.ok(!first.includes('[31m') && !first.includes('\u001b'), `the raw status escape must not leak: ${JSON.stringify(first)}`)
+  assert.ok(!first.includes('\u0007'), 'the control byte must not leak')
+  assert.match(first, /^job:a\s+‣ Failed injected$/)
+  // An unknown status keeps its REAL word (Title-cased), never a renamed one.
+  assert.match(strip(lines[2]!), /‣ Weird_status$/)
 })
 
 test('the ink follows a live theme switch without a re-construction', () => {

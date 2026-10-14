@@ -28,7 +28,7 @@
 
 import assert from 'node:assert/strict'
 import { afterEach, test } from 'node:test'
-import { stripTerminalSequences } from '@xmoon76/pi-tui'
+import { Text, stripTerminalSequences, visibleWidth } from '@xmoon76/pi-tui'
 import { TuiApp } from '../src/tui-app.ts'
 import { createTaskRuntime, type TaskRuntime, type TaskSurfaceSource } from '../src/app/surface/task-runtime.ts'
 import { TaskBrowserRuntime } from '../src/app/surface/task-browser-runtime.ts'
@@ -37,6 +37,8 @@ import type { SessionSubject } from '../src/app/session/subject.ts'
 import type { JobObservationPort, JobStopOutcome } from '../src/runtime/job-observation-port.ts'
 import type { TaskSubagentEntry } from '../src/runtime/task-read-port.ts'
 import type { TaskBrowserJobInput } from '../src/domain/task/browser.ts'
+import { ExtensionLedger } from '../src/extension/internal/ledger.ts'
+import { SurfaceHost } from '../src/extension/internal/surface-host.ts'
 import { createDiag } from '../src/runtime/process/diagnostics.ts'
 import { currentPalette, setTheme } from '../src/tui/theme/runtime.ts'
 import { lightColors } from '../src/domain/display/theme.ts'
@@ -97,6 +99,8 @@ interface QuickHarness {
   band(): { identity: number; items: string[] }
   /** The editor's top and bottom border rows in the painted frame. */
   editor(): { top: number; bottom: number }
+  /** Settle every catalog read currently held by `holdCatalog`. */
+  releaseCatalog(): void
 }
 
 function startQuick(options: {
@@ -106,17 +110,39 @@ function startQuick(options: {
   supportsTaskCenter?: boolean
   roster: TaskBrowserJobInput[]
   descendants?: TaskSubagentEntry[]
+  /** Hold every semantic catalog (`readTask`) so a test can settle a SUPERSEDED
+   *  session's read after the generation bump. */
+  holdCatalog?: boolean
+  /** A live PUBLIC below widget (`input.widget.below`) registered through a real
+   *  `SurfaceHost`, so the accessory's coexistence with the public slot is
+   *  witnessed on the painted frame. */
+  widgetBelow?: string
 }): QuickHarness {
   const columns = options.cols ?? 120
   const terminalRows = options.rows ?? 40
   const vt = new VirtualTerminal(columns, terminalRows)
-  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {})
+  let app!: TuiApp
+  const ledger = options.widgetBelow === undefined ? undefined : new ExtensionLedger(() => {})
+  const host = ledger === undefined ? undefined : new SurfaceHost(ledger, () => app.requestRender())
+  app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, host === undefined ? {} : { extensionHost: host })
   app.start()
   startedApps.add(app)
+  if (host !== undefined && ledger !== undefined && options.widgetBelow !== undefined) {
+    host.attach({ header: new Text('', 0, 0), dock: new Text('', 0, 0), footer: new Text('', 0, 0) }, {
+      surfaceId: host.surfaceId, generation: 1, width: columns, height: terminalRows,
+      fullscreen: false, focusedSeat: 'editor', themeId: 'dark', themeRevision: 0,
+    })
+    ledger.register('input.widget.below', { id: 'b4a-widget', order: 0 }, {
+      view: { kind: 'text', spans: [{ text: options.widgetBelow }] },
+      importance: 0,
+    }, 'owner-b4a')
+    host.refreshOutlets()
+  }
 
   const roster = { rows: [...options.roster], failure: undefined as Error | undefined }
   const attention: QuestionAttentionRow[] = []
   const descendants = [...(options.descendants ?? [])]
+  const pendingCatalogReads: Array<() => void> = []
   const subject = {} as SessionSubject
   const source: TaskSurfaceSource = {
     sessionId: () => 'sess-main',
@@ -139,12 +165,17 @@ function startQuick(options: {
       taskRead: {
         currentKey: () => 'g1:sess-main',
         currentSessionId: () => 'sess-main',
-        readTask: async () => ({
-          parentSessionId: 'sess-main',
-          parentAvailable: true,
-          descendants: [...descendants],
-          jobs: roster.failure === undefined ? roster.rows : [],
-        }),
+        readTask: async () => {
+          if (options.holdCatalog === true) {
+            await new Promise<void>(resolve => pendingCatalogReads.push(resolve))
+          }
+          return {
+            parentSessionId: 'sess-main',
+            parentAvailable: true,
+            descendants: [...descendants],
+            jobs: roster.failure === undefined ? roster.rows : [],
+          }
+        },
         activityOf: (childId: string) => {
           const entry = descendants.find(candidate => candidate.id === childId)
           return entry !== undefined && entry.kind === 'child' ? entry.activity : 'inactive'
@@ -180,7 +211,10 @@ function startQuick(options: {
     const bottom = prompt < 0 ? -1 : lines.findIndex((line, index) => index > prompt && line.includes(border))
     return { top, bottom }
   }
-  return { vt, app, tasks, roster, attention, descendants, band, editor }
+  const releaseCatalog = (): void => {
+    for (const release of pendingCatalogReads.splice(0)) release()
+  }
+  return { vt, app, tasks, roster, attention, descendants, band, editor, releaseCatalog }
 }
 
 // ── B4A-01: the passive projection reaches the frame with no browser open ──
@@ -261,6 +295,38 @@ test('B4A-01d the coordinator path (semantic Task read) feeds the SAME window', 
   assert.ok(band.identity >= 0, `the coordinator commit must reach the accessory:\n${view(h.vt)}`)
   const painted = band.items.map(line => `${line.trimEnd()}`)
   assert.ok(painted.some(line => /subagent · review/.test(line)), `the descendant row must paint:\n${view(h.vt)}`)
+})
+
+test('B4A-01e a Workflow-scoped Task Browser never narrows the resident window', async () => {
+  const h = startQuick({
+    roster: [job('j1', 'build', 'running')],
+    descendants: [
+      {
+        kind: 'child', id: 'c1', label: 'phase agent', mode: 'continuable',
+        activity: 'running', hasChildren: false, parentId: '', depth: 1,
+      },
+      {
+        kind: 'child', id: 'c2', label: 'unrelated agent', mode: 'continuable',
+        activity: 'running', hasChildren: false, parentId: '', depth: 1,
+      },
+    ] as unknown as TaskSubagentEntry[],
+  })
+  await flush()
+  await h.vt.waitForRender()
+  assert.equal(itemRows(h.vt).length, 3, `the whole session is resident first:\n${view(h.vt)}`)
+  // A Workflow phase viewer opens the modal with a DATASET scope of one child id.
+  h.tasks.handleWorkflowAction({
+    kind: 'open-phase-agents', runId: 'run-1', name: 'wf', phaseLabel: 'Phase 1', childIds: ['c1'],
+  })
+  await h.vt.waitForRender()
+  await flush(2)
+  assert.ok(view(h.vt).includes('Workflow · wf · Phase 1 · 1 agent'), `the modal is scoped:\n${view(h.vt)}`)
+  // The resident window is NOT a dataset view: the Job and the unrelated active
+  // subagent stay visible while the scoped modal is open.
+  const resident = itemRows(h.vt)
+  assert.equal(resident.length, 3, `the resident window keeps the session-wide rows:\n${view(h.vt)}`)
+  assert.ok(resident.some(line => /bash · build/.test(line)), 'the Job stays resident under a subagent scope')
+  assert.ok(resident.some(line => /unrelated agent/.test(line)), 'an unrelated active agent stays resident')
 })
 
 test('B4A-02 the window paints the PROJECTED activity in tree order, never a running lie', async () => {
@@ -350,8 +416,14 @@ test('B4A-05 the 3/1/0 ladder on the frozen matrix, editor/footer/transcript pre
       assert.ok(lines.some(line => line.includes(footerRow)),
         `${label}: a footer row was clipped out of the viewport: ${JSON.stringify(footerRow)}`)
     }
+    // Every painted row is clamped to the terminal width in CELLS (a JS
+    // `.length` would hide a CJK overflow).
+    for (const line of lines) {
+      assert.ok(visibleWidth(line) <= cols, `${label}: a painted row overflowed ${cols} cells: ${JSON.stringify(line)}`)
+    }
     // The position indicator is real and the frozen glyph vocabulary is used.
     assert.equal(/→|●|○|◐|×/.test(items.join('')), false, `${label}: no legacy per-status glyph in the accessory`)
+    assert.equal(/[\u2500-\u257f]/.test(items.join('')), false, `${label}: no box-drawing glyph in the accessory`)
     // The process slot (pi-tui keybindings are process-global) is released only
     // by the FINAL dispose: the next matrix cell needs its own app.
     h.app.dispose()
@@ -360,10 +432,13 @@ test('B4A-05 the 3/1/0 ladder on the frozen matrix, editor/footer/transcript pre
 
 test('B4A-05c the fullscreen root keeps a real transcript viewport beside the window', async () => {
   const cells: ReadonlyArray<readonly [cols: number, rows: number, items: number]> = [
+    [200, 60, 3],
     [120, 40, 3],
     [80, 24, 3],
     [80, 10, 1],
     [80, 8, 1],
+    [72, 24, 3],
+    [44, 20, 3],
   ]
   for (const [cols, rows, expected] of cells) {
     const h = startQuick({ cols, rows, taskRead: false, roster: [
@@ -381,6 +456,9 @@ test('B4A-05c the fullscreen root keeps a real transcript viewport beside the wi
     assert.ok(scroll.viewportHeight >= 1,
       `${label}: the transcript floor survives the accessory (viewport ${scroll.viewportHeight}):\n${view(h.vt)}`)
     assert.ok(rowOf(h.vt, '❯') >= 0, `${label}: the seat is painted`)
+    for (const line of rawView(h.vt)) {
+      assert.ok(visibleWidth(line) <= cols, `${label}: a painted row overflowed ${cols} cells: ${JSON.stringify(line)}`)
+    }
     for (const footerRow of h.app.footerRenderRowsForTest().map(strip).map(line => line.trimEnd())) {
       if (footerRow === '') continue
       assert.ok(rawView(h.vt).some(line => line.includes(footerRow)),
@@ -419,6 +497,30 @@ test('B4A-05b a nonempty multi-line draft never invades the transcript floor', a
   assert.match(items[0]!, /^bash · build\s+‣ Running\s+1-1\/3$/)
   assert.ok(rowOf(h.vt, items[0]!) > editor.bottom, 'the accessory stays BELOW the editor seat')
   assert.ok(editor.top >= 1, `the transcript floor survives a taller draft:\n${view(h.vt)}`)
+})
+
+test('B4A-02c a superseded session late catalog result never paints into the new session', async () => {
+  const h = startQuick({
+    holdCatalog: true,
+    roster: [job('j1', 'build', 'running')],
+    descendants: [{
+      kind: 'child', id: 'c1', label: 'late agent', mode: 'continuable',
+      activity: 'running', hasChildren: false, parentId: '', depth: 1,
+    } as unknown as TaskSubagentEntry],
+  })
+  await flush()
+  await h.vt.waitForRender()
+  // The roster commit alone already paints; the catalog read is still in flight.
+  assert.equal(itemRows(h.vt).length, 1, `the roster row is resident:\n${view(h.vt)}`)
+  // The session switches: the generation bump clears the Task Center state.
+  h.tasks.resetTasks()
+  await h.vt.waitForRender()
+  assert.deepEqual(itemRows(h.vt), [], `the new session starts empty:\n${view(h.vt)}`)
+  // The OLD read now settles with its old-session snapshot: it must not paint.
+  h.releaseCatalog()
+  await flush(4)
+  await h.vt.waitForRender()
+  assert.deepEqual(itemRows(h.vt), [], `a stale catalog result must never reach the new session:\n${view(h.vt)}`)
 })
 
 // ── B4A-03: Question attention ─────────────────────────────────────────────
@@ -480,6 +582,63 @@ test('B4A-06 the alt screen delivers a real SGR wheel to the painted window only
   await h.vt.waitForRender()
   await flush(2)
   assert.equal(strip(rawView(h.vt)[h.band().identity]!), scrolled, 'a transcript wheel must not move the Quick window')
+})
+
+test('B4A-06c a wheel on the window never scrolls the transcript behind it, boundary included', async () => {
+  const h = startQuick({ cols: 120, rows: 40, taskRead: false, roster: [
+    job('j1', 'build', 'running'), job('j2', 'test', 'running'), job('j3', 'lint', 'running'),
+    job('j4', 'deploy', 'running'), job('j5', 'audit', 'running'), job('j6', 'docs', 'running'),
+  ] })
+  await flush()
+  // A scrollable transcript behind the window: an unconsumed wheel WOULD move it.
+  h.app.setTranscript(Array.from({ length: 40 }, (_, index) => ({
+    kind: 'assistant' as const, turn: index, text: `history row ${index}`,
+  })))
+  h.app.setFullscreen(true)
+  await h.vt.waitForRender()
+  const scroll = h.app.fullscreenScrollForTest()
+  assert.ok(scroll, 'the fullscreen transcript pane must exist')
+  assert.ok(scroll.maxScrollTop > 0, 'the transcript must be scrollable for this witness')
+  const band = h.band()
+  assert.match(strip(rawView(h.vt)[band.identity]!), /showing 1-3\/6$/)
+  const before = { scrollTop: scroll.scrollTop, following: scroll.isFollowingEnd }
+  // At the window's TOP boundary an upward wheel must stay with the window.
+  h.vt.sendInput(`\x1b[<64;5;${band.identity + 2}M`)
+  await h.vt.waitForRender()
+  await flush(2)
+  const afterUp = h.app.fullscreenScrollForTest()!
+  assert.equal(afterUp.scrollTop, before.scrollTop, `the transcript must not move under a boundary wheel:\n${view(h.vt)}`)
+  assert.equal(afterUp.isFollowingEnd, before.following, 'the follow state must not flip')
+  assert.match(strip(rawView(h.vt)[h.band().identity]!), /showing 1-3\/6$/, 'the window stays at its top boundary')
+})
+
+test('B4A-06d a resize that has not been repainted refuses the wheel, then resolves against the new frame', async () => {
+  const h = startQuick({ cols: 120, rows: 40, taskRead: false, roster: [
+    job('j1', 'build', 'running'), job('j2', 'test', 'running'), job('j3', 'lint', 'running'),
+    job('j4', 'deploy', 'running'),
+  ] })
+  await flush()
+  h.app.setFullscreen(true)
+  await h.vt.waitForRender()
+  const band = h.band()
+  assert.match(strip(rawView(h.vt)[band.identity]!), /showing 1-3\/4$/)
+  // The screen row of the first painted item in the 120x40 frame.
+  const itemRow = rowOf(h.vt, itemRows(h.vt)[0]!)
+  // The resize lands on the terminal BEFORE the repaint: the pointer event still
+  // carries the stale painted box, so only the LIVE-geometry fence can refuse it.
+  h.vt.resize(120, 8)
+  h.vt.sendInput(`\x1b[<65;5;${itemRow + 1}M`)
+  await h.vt.waitForRender()
+  await flush(2)
+  // The repainted frame proves the refusal: the window is still at its first row
+  // (an accepted stale wheel would have moved it to `2-2/4`).
+  const shrunk = itemRows(h.vt)
+  assert.equal(shrunk.length, 1, `the new frame keeps one task row:\n${view(h.vt)}`)
+  assert.match(shrunk[0]!, /bash · build\s+‣ Running\s+1-1\/4$/, 'a pre-repaint wheel must not move the window')
+  // The SAME gesture now resolves against the current frame.
+  h.vt.sendInput(`\x1b[<65;5;${rowOf(h.vt, shrunk[0]!) + 1}M`)
+  await h.vt.waitForRender()
+  assert.match(itemRows(h.vt)[0]!, /bash · test\s+‣ Running\s+2-2\/4$/, `the new frame owns the wheel:\n${view(h.vt)}`)
 })
 
 test('B4A-06b the ordinary main screen has NO application mouse: the wheel moves nothing', async () => {
@@ -576,9 +735,60 @@ test('B4A-08 the painted window uses the frozen role tokens, live across a theme
   await h.vt.waitForRender()
   assert.equal(ink('Task Quick', 'Task Quick'), hexToRgb(lightColors.textStrong))
   assert.equal(ink('bash · deploy', '‣'), hexToRgb(lightColors.warning))
+  // A CUSTOM palette is read live as well (no token is captured at module scope).
+  setTheme('custom', { ...lightColors, textStrong: '#123456', warning: '#654321' })
+  h.app.requestRender()
+  await h.vt.waitForRender()
+  assert.equal(ink('Task Quick', 'Task Quick'), hexToRgb('#123456'))
+  assert.equal(ink('bash · deploy', '‣'), hexToRgb('#654321'))
+  // Icon density is NOT part of the chrome vocabulary: the accessory paints no
+  // icon, so its rows stay byte-identical when the density changes.
+  const symbolRows = itemRows(h.vt)
+  h.app.setIconStyle('minimal')
+  await h.vt.waitForRender()
+  assert.deepEqual(itemRows(h.vt), symbolRows, 'the accessory is independent of the icon density')
   // Nothing new entered the chrome vocabulary.
   assert.equal(/→|●|○|◐|×|│|╭|─/.test(itemRows(h.vt).join('')), false, `only the frozen vocabulary:\n${view(h.vt)}`)
   setTheme('dark')
+})
+
+test('B4A-05e the resident window coexists with a live PUBLIC below widget', async () => {
+  const h = startQuick({ cols: 120, rows: 40, taskRead: false, widgetBelow: 'BELOW-WIDGET', roster: [
+    job('j1', 'build', 'running'), job('j2', 'test', 'running'),
+  ] })
+  await flush()
+  await h.vt.waitForRender()
+  const lines = rawView(h.vt)
+  const editor = h.editor()
+  const widgetRow = rowOf(h.vt, 'BELOW-WIDGET')
+  const firstItemRow = rowOf(h.vt, itemRows(h.vt)[0]!)
+  assert.ok(widgetRow >= 0, `the public below widget must still paint:\n${view(h.vt)}`)
+  // Editor seat -> first-party accessory -> public below widget -> footer.
+  assert.ok(firstItemRow > editor.bottom, `the accessory sits below the seat:\n${view(h.vt)}`)
+  assert.ok(widgetRow > firstItemRow, `the PUBLIC slot keeps its position under the accessory:\n${view(h.vt)}`)
+  for (const footerRow of h.app.footerRenderRowsForTest().map(strip).map(line => line.trimEnd())) {
+    if (footerRow === '') continue
+    assert.ok(lines.some(line => line.includes(footerRow)), `the footer is not pushed out: ${JSON.stringify(footerRow)}`)
+  }
+})
+
+test('B4A-04b after the modal acknowledges, the window still paints the REAL failed state', async () => {
+  const h = startQuick({ cols: 120, rows: 40, roster: [job('j2', 'deploy', 'failed')] })
+  await flush()
+  await h.vt.waitForRender()
+  assert.ok(view(h.vt).includes('! 1 failed'), `the unacknowledged failure is footer attention:\n${view(h.vt)}`)
+  assert.match(itemRows(h.vt)[0]!, /bash · deploy\s+‣ Failed$/)
+  h.tasks.openTasksBrowser('quick')
+  await h.vt.waitForRender()
+  await flush(2)
+  h.vt.sendInput('\x1b')
+  await h.vt.waitForRender()
+  await flush(2)
+  // The acknowledgement clears the FOOTER attention…
+  assert.ok(!view(h.vt).includes('! 1 failed'), `the acknowledged failure leaves the badge:\n${view(h.vt)}`)
+  // …while the resident window keeps reporting the task's own real state: being
+  // acknowledged is not being unfailed.
+  assert.match(itemRows(h.vt)[0]!, /bash · deploy\s+‣ Failed$/)
 })
 
 // ── B4A-07 / B4A-10 ────────────────────────────────────────────────────────

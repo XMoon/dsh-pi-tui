@@ -78,10 +78,15 @@ export interface TaskBrowserRuntimeHooks {
    * started. `undefined` keeps the entry's own read-time activity. */
   activityOf(childId: string): string | undefined
   /** Commit the merged rows to the OPEN task browser (no-op when closed).
+   * `globalRows` is the SAME commit's GLOBAL projection BEFORE the open
+   * browser's dataset scope filtered it: the surface's resident, always-on
+   * consumers (the below-editor Task Quick accessory) project from it, so an open
+   * Workflow-scoped browser never narrows what the resident window shows — while
+   * the modal keeps the scoped rows it actually displays.
    * `preferredValue` = the first running subagent in tree order, else the
    * first active job — the panel honors it only while the user has not
    * moved the selection (plan §6.6). */
-  commitRows(rows: readonly TaskBrowserRow[], preferredValue?: string): void
+  commitRows(rows: readonly TaskBrowserRow[], preferredValue?: string, globalRows?: readonly TaskBrowserRow[]): void
   /** Commit the dock badge: the RUNNING children only (id + label). */
   commitBadge(running: ReadonlyArray<{ id: string; label: string }>): void
   /** Commit independent job/agent totals and failure attention. */
@@ -315,7 +320,10 @@ export class TaskBrowserRuntime {
     // untouched).
     const preferred = rows.find(row => row.kind === 'subagent' && row.activity === 'running')?.value
       ?? rows.find(row => row.kind === 'job' && isActiveJobStatus(row.status))?.value
-    this.hooks.commitRows(rows, preferred)
+    // The scoped rows go to the OPEN browser; the SAME commit's global projection
+    // goes to the surface's resident consumers (the passive below-editor window),
+    // which are not a dataset view and must never inherit a Workflow scope.
+    this.hooks.commitRows(rows, preferred, rawRows)
     const runningAgents = projected.filter(entry => entry.kind === 'child' && entry.activity === 'running')
     const totalAgents = projected.filter(entry => entry.kind === 'child').length
     const summary: TaskBrowserSummary = {
