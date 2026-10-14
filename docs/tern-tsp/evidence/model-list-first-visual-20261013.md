@@ -1,9 +1,11 @@
 # List-first model catalogue — Gate V1/V2 and the acceptance lane
 
-This is the evidence for the `/model` **list-first** revision: the model catalogue
-became ONE native picker at every pane width (no provider sidebar, no side column),
-the ONE write became an explicit footer action everywhere, and the read-only
-Reader's facts were grouped.
+This is the evidence for the `/model` **list-first** revision and its follow-up: the
+model catalogue is ONE native picker of ONE size at every pane width (no provider
+sidebar, no side column, no preview region, no fact column), it carries the ONE
+Reasoning Effort editor as its own native `strip`, a row activation opens the
+read-only Reader DIRECTLY (there is no intermediate page), and the ONE write is an
+explicit footer action everywhere.
 
 It succeeds the [Model-Responsive / Reader evidence](./model-responsive-reader-20261013.md),
 whose measurements stay valid for what they measured (the client's own
@@ -25,6 +27,7 @@ contract; this one records how it was measured.
 | Fonts | `Noto Sans/Serif CJK` + `Noto Color Emoji` installed and resolved by fontconfig; the client resolves `Geist`/`system-ui` for body text and `Berkeley Mono` for the monospace id/mark cells |
 | Gate harness | `node scripts/tern-pane-drive.mjs <flow> --out <dir>`; each run directory keeps `assertions.json`, `run.log`, the node trees, the PNGs and copies of the flow and subject |
 | Acceptance lane | `node scripts/tern-pane-drive.mjs scripts/tern-pane-model-ux.mjs` (the SHIPPED lane, updated by this revision) |
+| Size probe (untracked spike) | `node scripts/tern-pane-drive.mjs scripts/tern-pane-size-probe.mjs` with `GATE_PICKER_SIZE=md\|lg`, one synthetic twelve-row picker whose only variable is the SDK `size` prop; used to decide the sheet size, kept under `temp/tern-model-size-probe/` |
 
 The two Gates ran BEFORE any production edit, because they decide the page's shape;
 the acceptance lane runs AFTER it and asserts the shipped presenter. Every claim
@@ -68,19 +71,21 @@ the `layer` region, which is what this confirms.
 
 1. The catalogue is ONE picker in the `layer` region, `layout: 'rows'`, no scopes
    column and no side column (the mount and row facts above).
-2. Width decides ONLY informational chrome: the `lg` sheet plus the compact
-   read-only summary from `900px` of reconstructed pane width upwards. That number
-   is inside the region the client was measured to paint (888px paints, 544px is
-   hidden) and it also keeps the ONE measured squeeze case (888px at a 400px-tall
-   window) on the `none` side of the line.
-3. The `Effort` column IS adopted: it makes the model's drafted effort visible at
-   the first level (which is the product concern this revision answers) and its
-   measured cost falls on the row's provider detail, not on the intrinsically
-   sized model name; the client hides the column itself on the narrowest panes.
-   The Overview remains the place where a draft is changed.
+2. ~~Width decides ONLY informational chrome (the `lg` sheet plus the compact
+   read-only summary from `900px` upwards).~~ **SUPERSEDED**: the summary and the
+   fact column were retired (they cost a fixed slice of every row and of the sheet
+   body for one line of information), and the sheet is now the client's `md` dialog
+   at EVERY width — see §4's size measurements and the official product's own
+   precedent recorded in the contract.
+3. ~~The `Effort` column IS adopted.~~ **SUPERSEDED**: the column cost a fixed
+   106px of the row's text area at every width for a value that read as a column
+   detached from its model, and the effort is now edited in the catalogue's own
+   native `strip` instead — a first-class control rather than a fact. The
+   measurements above stay valid for what they measured.
 4. The action bar keeps an app-rendered focus cue: the `focus` prop has no value
-   for it and the client paints no button focus distinction, so the focused action
-   still changes shape while the keyboard is in the bar.
+   for a button and the client paints no button focus distinction, so the focused
+   action still carries a shape of its own while the keyboard is in the bar. It is
+   the design language's `Verb [Enter]` key badge.
 5. The list cursor is the APP's: with the app's own navigation disabled, six real
    `Down` keys moved no cursor and produced no event, so the presenter drives the
    client's highlight through the picker's own `selected` prop. That is also why
@@ -118,75 +123,59 @@ because the visible row cannot be reached from the tail.
 ## 4. The shipped presenter's acceptance lane
 
 `scripts/tern-pane-model-ux.mjs` (flow) + `scripts/tern-pane-model-ux-subject.mts`
-(subject) mount the PRODUCTION `TspModelPicker` over one official SDK inline
-surface in a headless `tern serve` pane and send REAL pointer clicks and REAL keys.
-It asserts the presenter's own claim against the client's own preview classes at
-every supported size, the containment of what the client paints (footer buttons,
-model rows, Overview candidates), the real `select`/`activate` split, the ONE write
-through the subject's writer spy, the Reader's complete values and app-driven
-scroll, and the failed-read phase. The run directories keep the ledger, the node
-trees, the screenshots and `visual-acceptance.md`; the lane is part of the
-repository's repeatable acceptance path (it is not part of `pnpm test`/CI, because
-it needs the external Tern CLI). The final run of this revision is
-`temp/tern-model-ux-lane-v2-a10`, taken after the review round's fixes; it carries
-the per-size matrix over TEN panes, the per-size Overview + Reader pass, the twelve
-§9 captures and `visual-acceptance.md`, and §5 below summarises its visual review.
-Its earlier iterations are kept, and two of them are the reason its assertions read
-the way they do: the short `900x400` pane is asserted through the contract's rule
-(the list region plus its FIRST row/candidate contained, everything else reachable
-by the list's own line keys) with every clipped span and the painted-at-once count
-recorded as MEASUREMENTS, and a candidate count is an assertion on every pane tall
-enough to mount the rows rather than on the one short pane where the client
-virtualises them. Two of them are why the flow reads the way it does: an early
-one measured the short 900x400 pane more strictly than the plan's short-height rule
-requires (full containment of every row and candidate), so the flow now asserts
-containment of the FIRST row and candidate plus the reachability of the rest and
-records every clipped span as a measurement; and the round that fixed the review's
-findings added the assertion that NO pending Overview frame offers a clickable
-`Back`.
+(subject) mount the PRODUCTION `TspModelPicker` over one official SDK inline surface
+in a headless `tern serve` pane and drive it with REAL pointer clicks and REAL keys.
+It asserts the presenter's own claim against the client's own classes at every
+supported pane size, the containment of everything the client paints (the sheet, the
+footer, the rows, the strip's chips), the real `select`/`activate` split, the ONE
+write through the subject's writer spy, the Reader's complete values and its
+app-driven scroll, and the strip's phase gate. The run directories keep the ledger,
+the node trees, the screenshots and `visual-acceptance.md`; the lane is part of the
+repository's repeatable acceptance path (it is not part of `pnpm test`/CI, because it
+needs the external Tern CLI).
+
+The final run of this revision is `temp/tern-model-ux-lane-v2-a22`, taken on the
+frozen tree (the run records the sha256 of the four production modules it rendered
+and they match the tree byte for byte); its `visual-acceptance.md` carries the per-pane table, the
+seven-label review of every capture and that provenance record. Every earlier
+iteration is kept beside its own screenshots, and two of them are why the assertions
+read the way they do: the short `900x400` pane is asserted through the contract's
+rule (the list region plus its FIRST row contained, everything else reachable by the
+list's own line keys) with every clipped span and the painted-at-once count recorded
+as MEASUREMENTS, and a frame that carries an admitted write must offer no clickable
+entry the phase cannot run.
 
 The measurements it established on the shipped presenter:
 
 | Fact | Measured |
 |---|---|
-| The presenter's claim vs the client, per size | the catalogue asks for `lg` + `preview: 'below'` from a RECONSTRUCTED 900px upwards and for `md` + `preview: 'none'` below it, and the client's own classes agree at every tested size (888px → `sz-md pv-none`, 992px → `sz-lg pv-below`) |
-| The effort column | the wire declares it at every catalogue width; `facts` paint only while it is declared; the client paints the `Effort` header on the first group row and auto-hides the column at 400x600; the fact slot measures 96px at every size that paints it, while the model NAME keeps its own intrinsic 76.6px |
-| The `pk-txt` text area | 236px at 400x600 (column hidden), 300 at 560x640, 480 at 900x400, 740 at 1000x640, 920 at 1280x800 |
-| The short 900x400 pane | the list region shows two complete model rows and clips the third at 18 of its 36px; the Overview's first screen shows the effort head plus three of four candidates (the fourth at 10 of 36px). Both remain reachable with the list's own line keys, which is the plan's short-height rule — the clipped spans are recorded as measurements, never as contained nodes |
-| Real row events | one click on a non-highlighted row emits `select` for it (highlight only, still the catalogue, zero writes); one click on the highlighted row emits `activate` and enters that model's Overview |
-| The one write | a real click on the Overview's primary wrote exactly once, with the drafted effort, through the subject's writer spy; the catalogue row then states the new `High` fact |
-| The Reader | the long unbroken id renders as ONE client-wrapped node of 3 lines and the long description as ONE node of 83 lines (against the same font's 16px single line); a `catalog is unreachable` value carrying CRLF, LF and a blank line renders exactly 4.00 lines as the Reader's LEADING line; `Down` and `End` really move the client's viewport through the native `scroll` op addressed to this frame's body id; `Esc` and the visible `Back` row both return to the Overview |
-| The partial failure | the catalogue's order ends with `Unavailable providers` (its inert rows) plus the ONE `Retry failed providers` row, and a real click on it reached the retry spy exactly once while the writer was never called |
-| The admitted write's bar | every frame that carried the pending state paints `Close` + the disabled `Selecting…` and NO clickable `Back`; the settled (refused) page restores its `Back`, which then returns to the catalogue |
+| The sheet, per pane | the catalogue asks for `size: 'md'` at EVERY width and the client's own class agrees (`sz-md`, and `sz-lg` never appears). A separate synthetic probe (one twelve-row picker whose only variable is the `size` prop, kept under `temp/tern-model-size-probe/`) measured what the choice means: `lg` fills 1120x698 of a 1280x800 pane and 940x538 of a 1000x640 one, while `md` is a centred 680x540 / 680x498. At 560x640 and 400x600 both sizes give the same 500px and 340px sheet, because the client shrinks `md` below its own cap |
+| No informational chrome, at any width | `preview: 'none'` with no `pk-pv` node, no fact cell (`pk-fact`/`pk-fh`), no `columns` in the wire and no `pv-below` class at any tested pane |
+| The strip is the ONE effort editor | the wire carries `label: 'Reasoning Effort'` and one item per advertised candidate of the HIGHLIGHTED model, with the local draft marked `on`; a real click on a different chip moves `on` and writes NOTHING; a model that advertises no effort paints no strip, and one forward `Tab` reaches the bar |
+| The strip's phase gate | the strip exists only while the phase is `ready`: an admitted write, a running re-read and a failed read paint NO strip (the client paints no disabled strip item), and a strip click in those phases changes neither the draft nor the writer |
+| The strip's own focus | while the keyboard is on the strip the picker asks for the client's own region focus (`focus: 'strip'`) and the sheet really switches to the measured `pk-sheet f-strip` class; one more `Tab` returns it to `f-list` |
+| The strip's chip labels | the client wraps the chips onto further rows but can neither shrink nor wrap ONE chip: at 400x600 the chip container measures 193.27px while the widest chip measures 308.59px, so the presenter clamps each label to the pane's own capacity with a MIDDLE ellipsis. Two candidates that differ only in their tail stay distinguishable, every clamped chip is contained and each one still delivers its own strip click with zero writes; at 1280x800 the same labels are untouched |
+| The two pages | the client is only ever on `models` or `details`: `Enter`/`activate` on a catalogue row opens the read-only Reader DIRECTLY (no intermediate picker frame at any tested pane), its head is the model's own name, and its visible `Back` row and the `Esc` that shares its intent return to the catalogue |
+| The ONE write | a real click on the footer's primary writes exactly once, with the strip's draft, through the subject's writer spy |
+| The Reader | the long unbroken id renders as ONE client-wrapped node (3 lines) and the long description as ONE node of 83 lines against the same font's 16px single line; a value carrying CRLF, LF and a blank line renders exactly 4.00 lines as the page's LEADING notice (a wire span with the `error` tone in the error phase); `Down`/`End` really move the client's viewport through the native `scroll` op addressed to this frame's body id (one dropped scroll was observed under a stalled frame credit — the documented F3-004 boundary, recorded rather than hidden) |
+| The short 900x400 pane | the list region paints two complete model rows and clips the third at its fold; the third is reached with the list's own line keys. The clipped span is recorded as a measurement, never counted as a contained node |
+| The partial failure | the order ends with `Unavailable providers` (each row stating `<Provider> · unavailable` in words) plus the ONE `Retry failed providers` row, whose real click reaches the retry spy exactly once while the writer is never called |
+| The admitted write's bar | every frame carrying the pending state paints `Close` + the disabled `Selecting…`, offers no strip, and no entry the phase cannot run; the refused page is usable again with the draft the strip chose |
 | The sessionless subject | the title reads `Choose default model`, the primary `Save default`, and no `current` badge is fabricated |
-| The Overview's identity row | the page's FIRST main-list row is the model's own identity (its name, with the complete id as the row's `title`) at EVERY width — the caption alone cannot carry it, because the client ellipsizes a narrow title and paints no subtitle at 400/560px (measured in the captures) |
-| Every size opens BOTH content pages | per size: `Enter` opens the Overview, the `Reasoning effort` head and its FIRST candidate are contained, all four candidates are listed, the LAST one is reachable with real line keys, a REAL pointer click on `View full model details ›` opens the Reader, the Reader really replaces the picker (no picker node, no button), its head is the MODEL NAME, its visible `Back` row and its first group head are contained, and `Esc` walks back to the Overview and then to the catalogue |
-| The Overview's identity row, per size | the identity row is PAINTED and contained at all ten sizes: `400x600` → `40,170,320,36` carrying `Alpha Model` while the caption is elided to `Model over…` and no subtitle is painted; `560x640` → `40,170,480,36`; `1000x640` → `40,126,920,36`; `1280x800` → `90,126,1100,36`. The wire row carries `label` = the model name and `title` = the complete model id |
-| The 400px floor (visual check of the capture) | the client ellipsizes the page title itself (`Switch mo…`) and paints NO subtitle, so the catalogue's one hint and the fact column are both absent there; the rows keep their provider mark and their real badges and the footer's `Cancel` + ONE write are fully visible and contained. It is the client's own floor behaviour, recorded as a limitation rather than as a passing hint |
 
 ## 5. The §9 visual review of the shipped captures
 
-Four acceptance sizes (`1280x800`, `1000x640`, `560x640`, `400x600`) × three pages,
-each captured by the lane and reviewed against the plan's seven labels. Every cell
-below is a PASS; the number behind a non-obvious one is the lane's own measurement
-(`temp/tern-model-ux-lane-v2-a10/visual-acceptance.md` carries the same review for
-all twelve captures of the FINAL run, with the per-capture numbers; the earlier
-runs' reports are kept beside their own screenshots).
+Four acceptance sizes (`1280x800`, `1000x640`, `560x640`, `400x600`) × the TWO pages,
+plus the eight-wide-label strip variants at the widest and the narrowest pane, each
+captured by the lane and reviewed against the plan's seven labels. The per-capture
+numbers live in the run's own `visual-acceptance.md`; the review below is the
+summary, and every cell is a PASS with the exception named underneath.
 
 | page | Hierarchy | Density | Alignment | Contrast | Consistency | Action clarity | Overflow |
 |---|---|---|---|---|---|---|---|
-| Models | PASS — a 32px group-head band against a 36px row pitch, then the rows, then the summary | PASS — 0.79–1.65 rows per 100px from the widest pane down to 400px; one line per model | PASS — the provider mark, the label and the provider detail share the row grid, with the fact column right-aligned | PASS — 10.55:1 text contrast; muted heads and labels against strong names; the primary is the only filled control | PASS — the same sheet, muted-label and footer rules as the other two pages; `Geist 13.5/400` body | PASS — `Cancel` + the ONE write, both contained at every size | PASS — 0 clipped rows at every size except the short 900x400 fold (measured below); the 400px title elision is the client's own floor behaviour |
-| Overview | PASS — the model's own identity row leads the page (its name, painted at every size), with its real state in the subtitle where the pane paints one, then the effort section and the single details entry | PASS — the candidates own the page (1.38–2.65 rows per 100px); no inert fact rows | PASS — the section head, the candidate marks and their labels share one gutter | PASS — 10.55:1; the drafted candidate is the only filled mark | PASS — the same picker family as the catalogue | PASS — `Back` + the ONE write, both contained, and `●` marks the draft | PASS — 0 clipped candidates at every size except the short 900x400 fold (measured below) |
-| Full Details | PASS — the model name is the overlay title, then Identity / Configuration / Description separated by a rule and a `lg` spacer (36px between groups against ≤5px inside one) | PASS — one label+value per fact, no cards and no unlabelled fragments | PASS — every value starts at the same left edge | PASS — muted labels against plain values | PASS — the same fact wording as the catalogue and the same footer rules (`Back` first) | PASS — the visible `Back` row plus the `Esc` that shares its intent | PASS — the long unbroken id and the description wrap fully (3 and 83 client-wrapped lines), with nothing pre-split by the presenter |
-
-The short `900x400` pane is the one measured exception to "0 clipped": there the
-catalogue's list shows two complete rows and clips the third at 18 of its 36px, and
-the Overview's first screen paints three of the four candidates — the fourth
-(`High`) is not even mounted while the scrollport is at the top, and the third
-(`Medium`) is clipped at 10 of its 36px. Every one of them is reachable with the
-list's own line keys, which is the plan's short-height rule, and the ledger records
-each clipped span plus the painted-at-once count (`3/4`) as measurements rather than
-counting them as contained nodes.
+| Models | PASS — the group head band, then one row per model, then the strip, then the bar | PASS — one line per model; the strip costs one 48px row for up to four candidates and wraps for more | PASS — the provider mark, the label and the details share the row grid; the strip's label column is its own gutter | PASS — muted group heads and labels against strong names; the draft chip is the one filled chip; the primary is the only filled control | PASS — the same sheet, hint and footer rules on every pane | PASS — `Cancel` + the ONE write, both contained; the focused entry carries the `[Enter]` badge | PASS — 0 clipped rows at every size except the short 900x400 fold (measured); the 400px title elision is the client's own floor behaviour |
+| Full Details | PASS — the model name is the overlay title, then Identity / Configuration / Description separated by a rule and a `lg` spacer (36px between groups against ≤5px inside one) | PASS — one label+value per fact, no cards and no unlabelled fragments | PASS — every value starts at the same left edge | PASS — muted labels and heads against content values; the notice carries its own role ink | PASS — the same fact wording as the catalogue, and the Reader keeps `Back` first | PASS — the visible `Back` row plus the `Esc` that shares its intent | PASS — the long unbroken id and the description wrap fully (3 and 83 client-wrapped lines), with nothing pre-split by the presenter |
+| The 8-wide-label strip | PASS — the strip is still one labelled region under the list | PASS — the chips wrap onto eight rows at 400x600 (282px) and four at 1280x800 (146px) | PASS — every chip shares the strip's chip gutter | PASS — the draft chip is the only filled one | PASS — the same chip rules as the four-candidate strip | PASS — 8/8 chips answered their own click with zero writes | PASS — every chip is contained after the clamp (`xspan == width`) at BOTH panes; at 400x600 the labels are the clamped `…` form, at 1280x800 they are untouched |
 
 ## 6. What stays NOT_VERIFIED
 
@@ -198,8 +187,10 @@ counting them as contained nodes.
   command accepts `PageDown` and delivers no key for it; the byte-level
   `CSI 5~`/`CSI 6~` mapping is covered by the headless suite, and the pane drives
   the same `scroll` op with `Down`/`Up`/`Home`/`End`.
-- the client's EXACT breakpoint for painting the below-list summary (measured only
-  between 544px hidden and 888px painted);
+- the FORMULA behind the client's `size` caps: `md` measured a 680px-wide sheet at
+  both 1000x640 and 1280x800 and simply followed the pane below that, while `lg`
+  filled 87-94% of it — the numbers are measured, the rule that produces them is not
+  read from the client;
 - `ui.kv` clipping for a pathological long value is a geometry-plus-screenshot
   inference (the gate did not read a DOM `scrollWidth`);
 - **dark theme**: the client's own control channel accepted a `theme dark` request
@@ -212,3 +203,70 @@ counting them as contained nodes.
 - the +25%/+50% enlarged-UI-font matrix at 400px, which remains the pre-existing
   Owner-accepted limitation recorded in
   [the PR4-A evidence](./pr4-a.md) §0.
+
+## 7. The frozen design-language checklist (§11.2)
+
+`docs/tui-design-language.md` requires this checklist in every PR that changes a
+visible surface. Filled for the model picker:
+
+```text
+[x] Which archetype(s) from docs/tui-design-language.md does this surface map to?
+    Overlay: the catalogue is the native modal picker sheet and the Full details page
+    is the native modal Reader. §12 names `/model`'s own sizing exception, and this
+    revision brings the sheet back to that dialog size (always `md`).
+[x] Role → token: does every painted string use its §3.2 token (no borrowed ink)?
+    The native client paints the sheet, so its roles are the client's; OUR spans are
+    the Reader's muted group heads and fact labels (role 2/5), its content values
+    (role 3, painted by the client's own content ink) and its notice, which now
+    carries its own role ink (`error` in the error phase, `muted` otherwise = role 17)
+    instead of borrowing the content's. A failed provider's row states its state in
+    WORDS (`<Provider> · unavailable`) because §3.3.3 forbids colour-only signalling.
+[x] Exactly one active signal per region (one `[Label]`/`> item` in primary)?
+    Yes, and the signals are the client's own devices: the list's cursor row, the
+    strip's `on` chip, the focused region (`pk-sheet f-list` / `f-strip`) and the
+    action bar's ONE `[Enter]` key badge. The presenter adds no second colour cue.
+[x] Can the reviewer distinguish selected / current / focused / disabled / pending /
+    failed from the frame alone?
+    Selected: the client's highlighted row. Current/default: the row's own lowercase
+    state chips. Focused: the region class plus the `[Enter]` badge. Disabled/
+    unavailable: the dim row plus the `· unavailable` word. Pending: the disabled
+    primary reading `Selecting…`. Failed: the client's error state plus our message
+    line. Each is a shape or a word, never colour alone.
+[x] Header = where I am, body = what I see, status line = current facts, action bar =
+    what I can do — no responsibility moved?
+    The picker's title states what committing does, its subtitle is the ONE keyboard
+    hint, the body is the rows plus the strip, and the footer carries the operations.
+    The Reader's title is the model name and its body is the grouped facts.
+[x] Do the advertised keys come from the live effective keymap?
+    The picker's own keys (`Tab`/`Shift+Tab`, `↑↓`, `Enter`, `Esc`) are the surface's
+    LOCAL keys, not rebindable `APP_KEYBINDINGS` actions, and the ONE hint is derived
+    from the same ring (`tabZone`) the handler walks, so the promise and the behaviour
+    cannot drift. No hard-coded letter key is advertised.
+[x] Action bar: whole-segment drops only; no partial word; safety facts kept?
+    The bar is the client's: it lays its two buttons on one line, both are contained
+    at every tested pane, and the presenter never truncates a label itself (the strip
+    chip clamp is content, not a hint).
+[x] New glyphs: ASCII or EAW neutral/narrow/halfwidth (§4.3)?
+    None added. The revision REMOVES glyphs: the `▸` focus prefix is gone (`▸` is the
+    disclosure role) and the `●`/`○` candidate marks are gone with the retired page;
+    `test/design-language.test.ts` passes unchanged.
+[x] Wide / medium / narrow / short / CJK: full interaction still reachable?
+    The lane drives ten panes from 400x600 to 1280x800 (including the short 900x400)
+    plus CJK/emoji and 141-character unbroken fixtures; the sheet is one dialog at all
+    of them, every candidate is reachable, and the short pane's clipped fold is
+    recorded as a measurement with the row reachable by key.
+[x] Dark / light / custom, and icons symbols / minimal checked?
+    LIGHT only: the real client cannot be driven into a dark rendering (its control
+    channel accepts `theme dark` and still lays out light), so dark stays NOT_VERIFIED
+    as an Owner-accepted waiver. Icon variants are the client's own.
+[x] No new shadow authority, focus owner, fork divergence, or duplicate layout
+    framework? No new palette token?
+    None: no fork change, no new token, no new module — the change is the presenter's
+    own node tree plus one text-clamp helper beside its twin in `picker-text.ts`.
+[x] before/after frames from the real VirtualTerminal included, plus a real terminal
+    check per docs/tmux-testing.md. Unrun items are marked NOT_RUN.
+    The frames are REAL-CLIENT captures (headless `tern serve`) because this surface IS
+    the external client, not our VirtualTerminal; the lane's run directory keeps the
+    before/after PNGs and §5 reviews them. The physical GUI / IME / OS-focus checks stay
+    NOT_RUN and are listed in §6.
+```

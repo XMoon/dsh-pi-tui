@@ -8,9 +8,9 @@
  *
  * The two SDK row events are NOT the same intent: `select` is the client telling
  * the panel which row the user moved onto (browse only, zero write), while
- * `activate` is a deliberate activation of that row — it opens the model's
- * Overview. Keeping them apart is what lets ONE click highlight a model and the
- * same click on the already-highlighted row enter it.
+ * `activate` is a deliberate activation of that row — it opens that model's
+ * read-only Full details. Keeping them apart is what lets ONE click highlight a
+ * model and the same click on the already-highlighted row enter it.
  * @module tui/tsp/model-picker-intents
  */
 import type { Key, ScrollTo } from '@stencil-hq/tern'
@@ -118,8 +118,9 @@ function tabZone(panel: ModelPickerPanel, direction: -1 | 1): ModelPickerZone {
   // Tab/Shift+Tab must never move the keyboard there: both stay in the bar,
   // where ←→ switches between Retry and the always-enabled Cancel.
   if (panel.phase === 'error') return 'primary-action'
-  // The catalogue paints its own effort strip between the list and the bar; a model
-  // without effort metadata has no strip to reach.
+  // The catalogue paints its own effort strip between the list and the bar; a phase
+  // that cannot draft and a model without effort metadata both have no strip to
+  // reach.
   const ring: ModelPickerZone[] = ['models']
   if (stripOffered(panel)) ring.push('strip')
   ring.push('primary-action')
@@ -252,8 +253,8 @@ function offeredActionIds(panel: ModelPickerPanel): Set<string> {
 /**
  * Whether one action id this page may receive at all. `close` is the panel's
  * DISMISSAL authority — the same intent `Esc` uses and the one the client's own
- * backdrop gesture sends — so it is admitted on every page even where the frozen
- * footer deliberately renders no `Cancel` (the Overview). Every page OPERATION
+ * backdrop gesture sends — so it is admitted on every page, including the read-only
+ * Reader, where the frozen footer deliberately renders no `Cancel`. Every page OPERATION
  * (`back`, `retry`, `apply`) still has to be really rendered by the current bar,
  * so a stale or forged receiver cannot reach a write, a page change or a re-read
  * from a page that never offered it.
@@ -307,15 +308,16 @@ export function actionIntent(
 }
 
 /**
- * One SDK ROW event (a model row, an Overview row, or the read-only Retry row).
+ * One SDK ROW event (a model row, or the read-only Retry row).
  *
  * The event KIND carries a distinct intent on the catalogue: `select` moves the
  * highlight onto the row the client names — browse only, never a write and never a
- * page change — while `activate` opens THAT row's Overview. The event's `item` is
- * the routing authority in every case, never the previous cursor.
+ * page change — while `activate` (a click on the already-highlighted row, a double
+ * click, or `Enter`) opens that model's read-only Full details DIRECTLY. The event's
+ * `item` is the routing authority in every case, never the previous cursor.
  *
- * The Overview's rows are the REAL rows of the page the user is looking at, so
- * only an id that row set currently carries may act; the read-only Reader has NO
+ * The catalogue's rows are the REAL rows of the page the user is looking at, so
+ * only an id the row set currently carries may act; the read-only Reader has NO
  * selectable row of its own (its one interactive node is the `Back` row, which the
  * SDK dispatches as its own `onClick`), so a row event can never act on that page.
  */

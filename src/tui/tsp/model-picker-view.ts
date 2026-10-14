@@ -43,16 +43,16 @@ import {
   providerMark,
   readerHead,
   stripItems,
+  stripLabelColumns,
   stripOffered,
   visibleModels,
   type ModelPickerPanel,
 } from './model-picker-state.ts'
 
 export interface ModelPickerViewDeps {
-  /** True when the pane paints the catalogue's `lg` SHEET form (the measured
-   *  {@link wideCatalog} rule). Density only: it never decides what can be reached
-   *  or written. */
-  readonly wide: boolean
+  /** The pane width the client's geometry was reconstructed from (`cols *
+   *  cell.w`), which prices the strip's own chip capacity. */
+  readonly paneWidth: number
   /** Bind one intent to THIS frame's revision (admission lives in the presenter). */
   readonly bind: (intent: ModelPickerIntent) => () => void
 }
@@ -60,13 +60,15 @@ export interface ModelPickerViewDeps {
 /**
  * The inert row of a provider whose catalogue read failed. The client shows a
  * disabled row's REASON only as its title (measured: the `detail` of a disabled
- * row is not painted), so the row states the provider and carries the message
- * where the client really can surface it; the group head above it says why.
+ * row is not painted), so the row carries the message where the client really can
+ * surface it AND states its state in WORDS: the design language forbids signalling
+ * a disabled row by colour alone, so the label ends with the `unavailable` word
+ * (`unavailable` is also the state-chip word its bracket classes use).
  */
 function failureItem(failure: ModelPickerFailureRow): PickerItem {
   return {
     id: failureRowId(failure.providerId),
-    label: failure.providerName,
+    label: `${failure.providerName} · unavailable`,
     detail: failure.message,
     title: failure.message,
     disabled: failure.message,
@@ -183,7 +185,11 @@ function renderedActions(panel: ModelPickerPanel): PickerAction[] {
  *  keyboard region. */
 function nativeFocus(panel: ModelPickerPanel): PickerProps['focus'] {
   if (panel.phase === 'error' || panel.zone === 'primary-action') return undefined
-  return 'list'
+  // The client really paints a per-REGION focus class (`pk-sheet f-list` /
+  // `f-strip`, measured), so asking for the region the keyboard is really in is a
+  // fact the client can show. The action bar has no such value (its focused entry is
+  // marked by the `[Enter]` badge).
+  return panel.zone === 'strip' && stripOffered(panel) ? 'strip' : 'list'
 }
 
 /** The state/notice surface: one message, in one place, per size. */
@@ -246,8 +252,12 @@ function detailsReader(panel: ModelPickerPanel, deps: ModelPickerViewDeps): Node
         ? [ui.text(span('No model is selected.', 'muted'))]
         : [
             // The transient read/write notice leads the page: it describes the state
-            // the facts below were read in.
-            ...(panel.notice === '' ? [] : [ui.text({ text: panel.notice, wrap: 'word' })]),
+            // the facts below were read in. The design language gives a notice its own
+            // role (`textMuted` for information, `error` for an error), so it is never
+            // painted in the content's own ink.
+            ...(panel.notice === ''
+              ? []
+              : [ui.text({ wrap: 'word' }, span(panel.notice, panel.phase === 'error' ? 'error' : 'muted'))]),
             ...groups.flatMap((group, index) => [
               ui.col(
                 { key: `reader-group-${group.id}`, gap: 'xs' },
@@ -275,7 +285,12 @@ function modelListPicker(
     key,
     title: pickerTitle(panel),
     layout: 'rows',
-    size: deps.wide ? 'lg' : 'md',
+    // The sheet is ALWAYS `md`, like the official product's own pickers: `lg` grows
+    // to the pane (measured 1120x698 at a 1280x800 pane, 87% of both axes) and a
+    // catalogue has no informational chrome that needs the room, so the sheet is a
+    // dialog on a large screen instead of a fullscreen panel. The client shrinks an
+    // `md` sheet by itself below its own cap, so narrow panes are unchanged.
+    size: 'md',
     // The catalogue asks for NO preview region: the client reserves a fixed ~36%
     // of the sheet body for `preview: 'below'` (measured 214px of 594px at
     // 1280x800) and our read-only summary was one line, so the band read as dead
@@ -294,7 +309,7 @@ function modelListPicker(
     // at all, and no page hides that editor behind a second page.
     ...(stripOffered(panel)
       ? {
-          strip: { label: STRIP_LABEL, items: stripItems(panel) },
+          strip: { label: STRIP_LABEL, items: stripItems(panel, stripLabelColumns(deps.paneWidth)) },
         }
       : {}),
     selected: panel.selected,

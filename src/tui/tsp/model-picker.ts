@@ -34,7 +34,6 @@ import {
   stepActionFocus,
   stripOffered,
   visibleModels,
-  wideCatalog,
   type ModelPickerPanel,
 } from './model-picker-state.ts'
 import { MODEL_DETAILS_BODY_KEY_PREFIX, modelPickerLayer } from './model-picker-view.ts'
@@ -189,23 +188,11 @@ export class TspModelPicker {
   }
 
   /**
-   * Whether this pane paints the `lg` catalogue sheet and its compact read-only
-   * summary ({@link wideCatalog}): the ONE layout threshold of this presenter,
-   * reconstructed from the only geometry the SDK reports (`cols` + the cell
-   * width). It decides informational chrome only — never what can be reached,
-   * drafted or written.
-   */
-  private wide(): boolean {
-    return wideCatalog(this.cols, this.cellWidth)
-  }
-
-  /**
    * Keep the visible page and the keyboard zone in agreement with what the
    * current read really offers.
    *
-   * A model that vanished from the read leaves every content page meaningless
-   * (the Overview and the Full details page both describe ONE model), so the
-   * panel falls back to the catalogue. The action bar is the only other zone and
+   * A model that vanished from the read leaves the Full details page meaningless
+   * (it describes ONE model), so the panel falls back to the catalogue. The action bar is the only other zone and
    * is painted in every phase, so it never has to be left.
    */
   private normalize(panel: ModelPickerPanel): void {
@@ -215,10 +202,11 @@ export class TspModelPicker {
       if (panel.zone !== 'primary-action') panel.zone = 'models'
       return
     }
-    // The strip exists only while the CATALOGUE really paints it for a model that
-    // advertises candidates: a page change, a re-read that dropped the model's
-    // effort metadata, or a highlight that moved to such a model must never leave
-    // the keyboard on a region that is not on screen.
+    // The strip exists only while the CATALOGUE really paints it: a page change, a
+    // phase that can no longer draft (an admitted write, a running re-read, a failed
+    // one), a re-read that dropped the model's effort metadata, or a highlight that
+    // moved to such a model must never leave the keyboard on a region that is not on
+    // screen.
     if (panel.zone === 'strip' && !stripOffered(panel)) panel.zone = 'models'
   }
 
@@ -430,7 +418,7 @@ export class TspModelPicker {
           return
         }
         // A refusal leaves the SAME page usable with its draft intact (the
-        // Overview still shows the model the user was working on) and parks the
+        // catalogue still shows the model the user was working on) and parks the
         // keyboard back on the list, so a second Enter cannot repeat the write.
         panel.phase = 'ready'
         panel.zone = 'models'
@@ -488,7 +476,7 @@ export class TspModelPicker {
     }
     const revision = panel.revision
     const layer = modelPickerLayer(panel, {
-      wide: this.wide(),
+      paneWidth: this.cols * this.cellWidth,
       bind: (intent) => () => this.act(panel, revision, intent),
     })
     // Every node in the model layer belongs to this panel, so an event whose

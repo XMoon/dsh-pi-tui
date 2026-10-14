@@ -19,6 +19,7 @@ import {
   type ModelPickerFailureRow,
   type ModelPickerModelRow,
 } from '../pickers/model-directory.ts'
+import { clampMiddle } from './picker-text.ts'
 
 /** The read/write lifecycle of the panel. `pending` is an ADMITTED write. */
 export type ModelPickerPhase = 'loading' | 'ready' | 'error' | 'pending'
@@ -32,11 +33,11 @@ export type ModelPickerPhase = 'loading' | 'ready' | 'error' | 'pending'
 export type ModelPickerPage = 'models' | 'details'
 
 /**
- * K2: the logical regions Tab moves between. `models` is the CURRENT page's
- * native main list — the catalogue on the `models` page, the model's own rows on
- * the Overview — `strip` is the catalogue's own Reasoning Effort editor (the
+ * K2: the logical regions Tab moves between. `models` is the catalogue's native
+ * main list, `strip` is the catalogue's own Reasoning Effort editor (the
  * native Picker `strip` between the list and the action bar, painted only while the
- * highlighted model advertises efforts), and `primary-action` is the action bar,
+ * phase can really draft AND the highlighted model advertises efforts), and
+ * `primary-action` is the action bar,
  * the ONE region that can commit the write. The read-only Reader is not a picker
  * and has no second region at all.
  */
@@ -99,7 +100,7 @@ export const FAILURE_RETRY_ID = 'retry-failed'
 /* -------------------------------------------------------------- candidates */
 
 /**
- * The wire id of one effort CANDIDATE row (the Overview's candidate rows). The
+ * The wire id of one effort CANDIDATE (the catalogue strip's own items). The
  * namespace keeps a candidate value that happened to look like a model row id
  * distinguishable from it; a candidate is only ever read from this prefix.
  */
@@ -229,16 +230,17 @@ export function actionKeyboardLive(panel: ModelPickerPanel): boolean {
  * all (never an empty or invented one).
  */
 export function stripOffered(panel: ModelPickerPanel): boolean {
-  return panel.page === 'models' && modelChoices(highlightedModel(panel)).length > 0
+  // A draft can only change while the panel is READY: `pending` is an admitted
+  // write, a running re-read is about to replace the whole directory, and a failed
+  // one has no authoritative directory left. The strip is therefore not painted in
+  // those phases at all (the client paints no disabled strip item), and its action
+  // channel is refused at admission instead of by a later guard — display and
+  // admission are the same fact.
+  return panel.page === 'models'
+    && panel.phase === 'ready'
+    && modelChoices(highlightedModel(panel)).length > 0
 }
 
-/**
- * The strip's items: one native button per advertised candidate of the HIGHLIGHTED
- * model, in the directory's own order, with the local DRAFT marked `on`. The item
- * id is the candidate's own wire id ({@link effortItemId}), so a strip click and an
- * Overview candidate click are the same value on the same namespace and both route
- * to the one draft writer.
- */
 /** One button of the catalogue's Reasoning Effort strip. */
 export interface ModelPickerStripItem {
   readonly id: string
@@ -247,12 +249,52 @@ export interface ModelPickerStripItem {
   readonly on?: boolean
 }
 
-export function stripItems(panel: ModelPickerPanel): readonly ModelPickerStripItem[] {
+/**
+ * How many display columns a strip chip's label may use on a pane whose width is
+ * `panePx`.
+ *
+ * The client caps its `md` sheet (measured: every pane from 888px up paints a
+ * `680px`-wide sheet) and spends a fixed part of it on chrome, so the budget must
+ * NOT grow with the pane past that cap — it is the SHEET that a chip competes with,
+ * not the window.
+ *
+ * MEASURED against the real client: the sheet is `pane - 44px` wide below its cap
+ * (a 400px pane paints a 340px sheet, a 560px pane a 500px one) and `680px` at every
+ * wider pane; inside it the `Reasoning Effort` label column, the strip's
+ * insets/gutters and the chip's own padding take `169px` (measured: a 400x600 chip
+ * container of 213px against a 356px sheet, a 400px-pane container of 193px against
+ * the 340px sheet). `12px` per column is the conservative advance for the strip's own
+ * 12.5px `Geist` (its widest Latin glyph measured ~11.5px, a CJK glyph 12.5px), and
+ * the budget is display-width aware, so a CJK glyph is charged two columns. The
+ * ellipsis is the design language's content-truncation device, and the COMPLETE
+ * label stays exactly where it came from — the directory and the Reader's own
+ * configured facts.
+ */
+const SHEET_MAX_PX = 680
+const SHEET_INSET_PX = 44
+const STRIP_CHROME_PX = 169
+const STRIP_GLYPH_PX = 12
+
+export function stripLabelColumns(panePx: number): number {
+  const sheet = Math.min(panePx - SHEET_INSET_PX, SHEET_MAX_PX)
+  return Math.max(4, Math.floor((sheet - STRIP_CHROME_PX) / STRIP_GLYPH_PX))
+}
+
+/**
+ * The strip's items: one native button per advertised candidate of the HIGHLIGHTED
+ * model, in the directory's own order, with the local DRAFT marked `on`. A label is
+ * clamped to the pane's own strip capacity ({@link stripLabelColumns}) because the
+ * client cannot shrink a chip and would cut a too-wide label at the sheet's edge.
+ */
+export function stripItems(
+  panel: ModelPickerPanel,
+  columns: number,
+): readonly ModelPickerStripItem[] {
   const row = highlightedModel(panel)
   const draft = draftedEffort(panel, row)
   return modelChoices(row).map((choice) => ({
     id: effortItemId(choice.value),
-    label: choice.label,
+    label: clampMiddle(choice.label, columns),
     ...(choice.value === draft ? { on: true } : {}),
   }))
 }
@@ -268,8 +310,8 @@ export const STRIP_LABEL = 'Reasoning Effort'
  * The `models` page states what committing there really does (`Switch model` for
  * a live Session, `Choose default model` for a sessionless subject), which is the
  * whole subject of the panel in one short line — there is no separate subject
- * slot to keep in sync with it. The Overview names the model it belongs to, so
- * the page can never describe a different model than the rows below it.
+ * slot to keep in sync with it. The READER names the model it describes, so that
+ * page can never describe a different model than the row it was opened from.
  */
 export function pickerTitle(panel: ModelPickerPanel): string {
   return panel.request.subject.sessionless ? 'Choose default model' : 'Switch model'
@@ -277,14 +319,13 @@ export function pickerTitle(panel: ModelPickerPanel): string {
 
 /**
  * The picker's ONE-line subtitle: the single keyboard hint on the catalogue (the
- * plan allows exactly one such hint and no standing action strip), and the
- * model's own provider + configured state on the Overview.
+ * plan allows exactly one such hint and no standing action strip).
  *
- * The Overview's identity does NOT depend on this line: a narrow pane paints no
- * subtitle at all (measured at 400 and 560px), which is why the model's name is
- * also the page's first ROW.
+ * The hint does NOT carry identity: a narrow pane paints no subtitle at all
+ * (measured at 400 and 560px), which is why a model's name is its own ROW's label
+ * and never a caption.
  *
- * The catalogue's hint is a promise about `Enter`, so it is painted only while
+ * The catalogue's hint is a promise about `Enter`/`Tab`, so it is painted only while
  * the phase really admits Enter: a running (re-)read and an admitted write refuse
  * every key but `Esc`, and a phase that refuses Enter must not promise it.
  */
@@ -346,11 +387,11 @@ function primaryAction(panel: ModelPickerPanel): PickerAction {
  * The ACTION BAR for the CURRENT page and phase: short, fixed, and never wider
  * than the page's own entries.
  *
- * The catalogue is `Cancel` + the ONE write; the Overview is `Back` + the ONE
- * write; a failed read is `Cancel` + the read-only `Retry`, which is the only
- * operation that phase can run. `Cancel` is therefore NOT rendered on the
- * Overview — a user leaves it with `Back` (and `Esc`, which is the same intent)
- * and cancels from the catalogue. The panel's own dismissal authority
+ * The catalogue is `Cancel` + the ONE write; a failed read is `Cancel` + the
+ * read-only `Retry`, which is the only operation that phase can run. The
+ * read-only Reader paints no bar at all: a user leaves it with its own `Back` row
+ * (and `Esc`, which is the same intent), and cancels from the catalogue. The
+ * panel's own dismissal authority
  * (`close`) stays admitted on every page, so the client's backdrop/dismiss
  * gesture still closes the panel there; it is simply not a VISIBLE entry the
  * footer has to carry.
@@ -477,36 +518,6 @@ export function detailReaderGroups(
 }
 
 /* ------------------------------------------------------------ layout budget */
-
-/**
- * The RECONSTRUCTED pane width, in CSS px, at and above which the catalogue asks
- * for its `lg` SHEET (below it the same catalogue uses `md`).
- *
- * MEASURED against the real client (Gate V1 of the Model Visual UX plan): with
- * `preview: 'below'` requested, an `888px` pane (900x400) really paints the
- * summary while a `544px` pane (560x640) is `pv-hide`d — the client's own
- * breakpoint lies between them and is NOT measured exactly. This presenter asks
- * for the summary from `900px` of its own reconstruction upwards, which is inside
- * the region the client was measured to paint, and which also keeps the ONE
- * measured case where the summary squeezed the list (an 888px pane in a 400px-tall
- * window leaves two model rows instead of three) on the `none` side of the line.
- * Panes below the line get `md` + `preview: 'none'`: the same rows and the same
- * ONE write, without any informational chrome.
- *
- * Only `SessionCaps.cols`/`cell` describe geometry (the SDK reports no sheet box
- * and no pane height), so the pane width is RECONSTRUCTED as `cols * cell.w`.
- */
-export const LARGE_SHEET_MIN_PANE_PX = 900
-
-/**
- * Whether the current pane gets the catalogue's `lg` sheet form. This is the ONE
- * layout threshold of the `/model` presenter, and it decides DENSITY only: the
- * same rows, the same strip, the same ONE write and the same pages are offered on
- * both sides of it.
- */
-export function wideCatalog(cols: number, cellWidth: number): boolean {
-  return cols * cellWidth >= LARGE_SHEET_MIN_PANE_PX
-}
 
 /* ------------------------------------------------------------ draft payload */
 

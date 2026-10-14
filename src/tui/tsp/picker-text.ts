@@ -107,6 +107,43 @@ export function clampColumns(text: string, columns: number): string {
 }
 
 /**
+ * Clamp `text` to `columns` display columns with a MIDDLE ellipsis: a head and a
+ * tail both survive.
+ *
+ * {@link clampColumns} keeps the head only, which is enough when the value's tail
+ * carries nothing (`fact` rows). A strip chip is the ONE place an advertised effort
+ * NAME is shown for a candidate that is not the draft, and names are free-form: two
+ * of them can differ only in their tail (`Extended thinking (low)` vs
+ * `Extended thinking (high)`), where a head-only clamp would render one label for
+ * two different candidates. The ellipsis is the design language's content
+ * truncation; the complete text stays with its owner.
+ */
+export function clampMiddle(text: string, columns: number): string {
+  if (displayWidth(text) <= columns) return text
+  const budget = Math.max(2, columns - 1)
+  // The two ends share the budget evenly: a trailing discriminator is as long as a
+  // typical leading word (`(high)`, `(low)`, `(max)`, `2.1`), and a 60/40 split
+  // would clip the opening bracket off exactly the tail this clamp exists to keep.
+  const head = Math.max(1, Math.ceil(budget / 2))
+  const tail = Math.max(1, budget - head)
+  const graphemes = [...graphemeSegmenter.segment(text)].map((entry) => entry.segment)
+  const take = (source: readonly string[], room: number): string[] => {
+    const kept: string[] = []
+    let used = 0
+    for (const grapheme of source) {
+      const cell = columnsOf(grapheme)
+      if (used + cell > room) break
+      kept.push(grapheme)
+      used += cell
+    }
+    return kept
+  }
+  const left = take(graphemes, head).join('')
+  const right = take([...graphemes].reverse(), tail).reverse().join('')
+  return `${left.trimEnd()}…${right.trimStart()}`
+}
+
+/**
  * The ONE-line form of a text: every whitespace run — an explicit LF, CRLF, CR
  * or Unicode line/paragraph separator included — collapses to a single space, so
  * the result is exactly one rendered line. The complete value always stays
