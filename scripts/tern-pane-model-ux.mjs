@@ -412,7 +412,7 @@ export default async function (h) {
     lastFrame(h)?.subtitle === 'Tab list' && actionLabels(lastFrame(h)).includes('Switch [Enter]')
     && barSheet.includes('f-list') && !barSheet.includes('f-strip'),
     `${JSON.stringify(lastFrame(h)?.subtitle)} :: ${actionIds(lastFrame(h))} :: ${actionLabels(lastFrame(h))} :: ${barSheet.join(' ')}`)
-  await h.key('Escape', 700)   // back to the list zone
+  await h.key('Tab', 700)   // the ring wraps the bar back to the list
 
   frame = lastFrame(h)
   const highWire = (frame?.strip?.items ?? []).find((item) => item.label === 'High')
@@ -663,6 +663,67 @@ export default async function (h) {
   h.check('one REAL click on the retry row reaches the retry spy exactly once and never the writer',
     retryClicked && retries(h).length === retriesBefore + 1 && applies(h).length === appliesBeforeRetry,
     `clicked=${retryClicked} retries=${retries(h).length} applies=${applies(h).length}`)
+
+  // A read that fails as a WHOLE leaves ONE Retry, and it is the bar's: the list's partial
+  // row belongs to a catalogue that is really ready, and its failure information stays as
+  // read-only context.
+  await h.key('4', 900)
+  await toCatalogue(h)
+  await h.key('e', 900)   // the next read fails entirely
+  snap = h.snapshot()
+  frame = lastFrame(h)
+  // The error phase is observed through what the CLIENT paints: its error message line.
+  const failedNotice = textStarting(snap, 'catalog is unreachable')
+  h.check('a FULLY failed read keeps ONE Retry (the bar\'s) and no retry row',
+    failedNotice !== undefined && actionLabels(frame).includes('Retry')
+    && (frame?.items ?? []).every((item) => String(item.id) !== 'retry-failed')
+    && rowWithText(h, snap, 'Retry failed providers') === undefined,
+    `notice=${String(failedNotice !== undefined)} actions=${JSON.stringify(actionLabels(frame))} retryRow=${String(rowWithText(h, snap, 'Retry failed providers') !== undefined)}`)
+  h.capture('failed-read-one-retry', 'a full read failure: the bar is the only operable region')
+  await h.key('1', 900)
+
+  // A SEARCH that matches nothing must not read as "no model is advertised": the client paints
+  // our empty-list copy, and that copy is a different sentence per situation. A FRESH panel is
+  // opened first: the failed read above left the keyboard in the action bar, and only the list
+  // zone owns the search box, so typing there would move the bar instead of the query.
+  await h.key('s', 900)
+  await h.key('z', 300)
+  await h.key('z', 700)
+  await h.sleep(400)
+  // MEASURED, not assumed: the wire carries the picker's `empty` prop, but the client paints no
+  // empty copy for a search that matched nothing (the list is simply empty). The check records
+  // that fact so a future client that starts painting one flips it and the copy has to be
+  // distinguished then.
+  const emptyCopy = textStarting(h.snapshot(), 'No model is advertised by the configured providers.')
+  h.check('a SEARCH with no matches leaves the list empty and the client paints no copy',
+    (lastFrame(h)?.items ?? []).length === 0
+    && modelRows(h, h.snapshot()).length === 0
+    && emptyCopy === undefined,
+    `items=${(lastFrame(h)?.items ?? []).length} paintedCopy=${String(emptyCopy !== undefined)}`)
+  h.measure('the empty-list copy the client paints for a no-match search (wire carries `empty`)',
+    JSON.stringify({ wireEmpty: 'No model is advertised by the configured providers.', painted: emptyCopy === undefined ? null : String(emptyCopy.text) }))
+  h.capture('empty-search-copy', 'a search with no matches: an empty list, no empty copy')
+
+  // The Owner's Esc ladder, on the real client: a typed filter is what Esc clears, and the
+  // panel stays open (with the query emptied) until a second Esc has nothing left to clear.
+  await h.key('Escape', 800)   // clears the no-match filter and leaves the panel open
+  h.check('Esc cleared that filter and left the panel open',
+    lastFrame(h)?.query === '' && lastFrame(h)?.page === 'models',
+    `query=${JSON.stringify(lastFrame(h)?.query)} page=${JSON.stringify(lastFrame(h)?.page)}`)
+  await h.key('s', 900)   // a fresh panel again, so the search box is the one the keys reach
+  await h.key('a', 400)
+  await h.key('l', 700)   // a filter that still matches the catalogue
+  frame = lastFrame(h)
+  const filteredQuery = frame?.query
+  await h.key('Escape', 800)
+  h.check('Esc clears a typed filter and leaves the panel open',
+    filteredQuery !== '' && filteredQuery !== undefined && lastFrame(h)?.page === 'models' && lastFrame(h)?.query === '',
+    `before=${JSON.stringify(filteredQuery)} after=${JSON.stringify(lastFrame(h)?.query)} page=${JSON.stringify(lastFrame(h)?.page)}`)
+  await h.key('Escape', 800)
+  await h.sleep(300)
+  h.check('and the next Esc closes it (the client paints no sheet at all)',
+    pickerNode(h.snapshot()) === undefined,
+    `pickerNodes=${h.classNodes(h.snapshot(), 'sf-picker').length}`)
 
   // --------------------------------------------- claim 8: sessionless title/labels
   await h.key('s', 900)

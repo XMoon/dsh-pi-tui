@@ -134,20 +134,27 @@ the node trees, the screenshots and `visual-acceptance.md`; the lane is part of 
 repository's repeatable acceptance path (it is not part of `pnpm test`/CI, because it
 needs the external Tern CLI).
 
-**This section describes the CURRENT source.** The run below is the lane's final run on
-the tree that commit `ea25ffa5` carries, and its record names the sha256 of the four
-production modules it really rendered — the strip's composite item id, the row click's zone
-reclaim and the Reader's per-reading epoch are all rendered BY that run, and the lane asserts
-each of them on the real client:
+**This section describes the CURRENT source.** The run below is the lane's final run on the
+tree it names by hash, and its record carries the sha256 of the four production modules it
+really rendered — every fence below is rendered BY that run, and the lane asserts each of them
+on the real client:
 
 - a chip click hands back its **composite** id verbatim (`effort:["alpha","m-alpha"]\u0000high`
   in the fixture) and drafts only that model's local effort;
 - a MOUSE click on another model while the strip owns the keyboard hands the keys back to the
   list (asserted by the hint and by the next `↓` moving the ROW, not the draft);
 - leaving the Reader and entering it again gives the second reading its OWN scroll-container
-  id, and that reading's own `End` addresses that id.
+  id, and that reading's own `End` addresses that id;
+- a read that fails as a WHOLE leaves ONE `Retry` — the bar's — with no retry ROW beside it and
+  the failed providers still on screen as read-only context;
+- `Esc` with a typed filter CLEARS that filter and leaves the panel open (asserted from the
+  strip and from the list), and a second `Esc` then closes it;
+- a SEARCH with no matches empties the list and the client paints NO empty copy at all (the wire
+  still carries the picker's `empty` prop): the "no model is advertised" sentence is therefore
+  not reachable from a filtered list on this client, and the lane records the measurement so a
+  future client that starts painting one flips it.
 
-The run is `temp/tern-model-ux-lane-v2-a35`; its `visual-acceptance.md` carries the per-pane
+The run is `temp/tern-model-ux-lane-v2-a40`; its `visual-acceptance.md` carries the per-pane
 table, the seven-label review of every capture and the provenance record. Earlier runs are
 kept beside their own screenshots as HISTORY — their hashes describe the source of their own
 moment and are never quoted as evidence for this one. Two of them are why the assertions read

@@ -266,13 +266,16 @@ really paints:
 | `details` (the Reader) | ONE region: `Tab` is a consumed no-op |
 | `pending` (admitted write) | the bar holds the keyboard (`Esc` only) |
 | `loading` (running re-read) | the catalogue keeps its search box (everything else is refused but `Esc`); the Reader keeps its own `Back`/`Esc`/scroll keys |
-| `error` (failed read) | the bar holds the keyboard (`Tab`/`Shift+Tab` both stay there) — except on the Reader, which has no bar and keeps its own `Back`/`Esc`/scroll keys |
+| `error` (failed read) | the bar holds the keyboard (`Tab`/`Shift+Tab` both stay there) — except on the Reader, which has no bar and keeps its own `Back`/`Esc`/scroll keys. The list's partial-failure RETRY ROW is **not part of the page** in this phase (see below): it belongs to a catalogue that is really showing its content |
 
-`Esc` is never swallowed. On a content page it is exactly the visible `Back`
-(`details → the catalogue it was opened from` — the Reader's own visible row and
-`Esc` are the same intent); inside the action bar it returns to the zone the bar
-was entered from; on the catalogue it closes the panel. An admitted write, a
-running (re-)read and a failed read all close.
+`Esc` is never swallowed, and on the catalogue it follows the Owner's ladder: **while
+the search filter is not empty it clears that filter** (in whatever zone the keyboard
+is — the panel stays open and the query empties), and **once there is nothing left to
+clear it closes the panel**. The zone ring — `Tab`/`Shift+Tab` — is what moves the
+keyboard between the list, the strip and the bar, so `Esc` never has to return to a
+zone. On the Reader `Esc` is exactly the visible `Back` (its own row and `Esc` are the
+same intent), and an admitted write — the one state whose only reachable action is its
+dismissal — closes.
 
 **The Reader is the one exception, and it is deliberate.** Its `Back` row is a
 VISIBLE control on a read-only page, so it is never a dead one: `Back` (and the
@@ -288,9 +291,9 @@ every draft and every write.
 | Zone | `↑↓` | `Tab` / `Shift+Tab` | `Enter` | `Esc` |
 |---|---|---|---|---|
 | `models` (catalogue) | move the row cursor over every visible model AND the retry row | → the strip (then the bar) | open the highlighted model's read-only Full details DIRECTLY, or run the retry row's read-only re-read — **never writes** | close |
-| `strip` (catalogue) | `↑↓`/`←→` move the DRAFT over the highlighted model's candidates | → the bar | hand the keyboard to the action bar — **never writes** | back to the list |
+| `strip` (catalogue) | `↑↓`/`←→` move the DRAFT over the highlighted model's candidates | → the bar | hand the keyboard to the action bar — **never writes** | clear the search filter, else close (see above) |
 | `details` (the Reader) | `↑↓`/`PageUp`/`PageDown`/`Home`/`End` scroll the Reader's native body (also while a read runs or has failed) | — (one region) | inert — **never writes** | `Back`/`Esc` to the page it came from |
-| action bar | — | → the other zone | **the only key that writes**, once, when the FOCUSED action is the enabled Primary | return to the zone the bar was entered from (a failed read closes) |
+| action bar | — | → the other zone | **the only key that writes**, once, when the FOCUSED action is the enabled Primary | clear the search filter, else close (see above) |
 
 ### The visible vocabulary (frozen design language)
 
@@ -391,9 +394,20 @@ rendered by the current bar. `Retry` is the stable `retry` action and is the onl
 action a failed read offers; it is read-only and re-reads through the command's
 single read owner, exactly like the list's own retry row.
 
-The action **ids** are the routing authority and stay stable: `close`, `back`,
-`retry`, `apply`. The key map and the row router act on those ids, never on
-display text.
+**The partial-failure retry ROW is offered only while the phase is `ready`** (`retryRowOffered`,
+the ONE predicate the row set, its painted order and the row router all read). A read that
+fails as a whole puts the panel in `error`, where the action bar is the only operable region:
+leaving the row painted — and its event admissible — would offer a SECOND `Retry` beside the
+footer's, reachable with the mouse while the keyboard is refused, and `Esc` would have two
+meanings at once. The failed providers themselves stay on screen as read-only context.
+
+The action **ids** are the routing authority, and they are revision-scoped so a stale frame
+cannot act on a newer one: `close` is the ONE untokened id (the dismissal `Esc` and the
+client's own backdrop both send it from any frame), while `retry`, `apply` — and any future
+`back` — are rebuilt every frame as `<base>#<revision>` and refused at admission unless the
+token names the current revision. The Reader's `Back` is not a bar action at all: it is a
+native Row `onClick` on the read-only page. The key map and the row router act on those ids,
+never on display text.
 
 ### Loading, errors and retry
 
@@ -420,7 +434,7 @@ its `Back`/`Esc` working (see above); `Retry` itself belongs to the pages that
 paint an action bar, so a user returns to the catalogue to run it.
 
 Pending saves disable every mutation entry (including the strip and the Primary
-Action) and keep `Cancel` available; closing does
+Action) and keep `Close` available; closing does
 not cancel an admitted business operation. Rejected, cancelled and unsupported
 outcomes leave the picker usable ON THE PAGE IT WAS ON, with its draft intact, and
 report the outcome through the dock notice; indeterminate outcomes close it with
