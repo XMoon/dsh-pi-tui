@@ -33,30 +33,58 @@ afterEach(() => setTheme('dark'))
 
 /** The frozen B4-A grant ladder at chrome = 4 (a three-row editor seat plus the
  *  one-row footer — the ordinary surface's steady state). */
-test('grant ladder: normal 3 rows, short 1 row, extreme 0 rows', () => {
+test('grant ladder: separator when everything fits, then header, then 1 row, then 0 (B4-B addendum)', () => {
   const at = (rows: number, total = 12): TaskQuickLayout => planTaskQuickLayout(80, rows, 4, total, 0)
-  // 24 rows: the accessory's own ceiling — identity + three task rows.
-  assert.deepEqual(at(24), { width: 80, grant: 4, header: true, itemRows: 3, start: 0, count: 3, total: 12 })
+  // 24 rows: the new ceiling — separator + identity + three task rows.
+  assert.deepEqual(at(24), { width: 80, grant: 5, header: true, separator: true, itemRows: 3, start: 0, count: 3, total: 12 })
   // 20 rows (the 44-column matrix height): still the full window.
-  assert.equal(at(20).grant, 4)
+  assert.equal(at(20).grant, 5)
+  assert.equal(at(20).separator, true)
   assert.equal(at(20).itemRows, 3)
-  // 12 rows: two task rows.
+  // 12 rows: identity + two task rows — the separator yields to task rows.
   assert.equal(at(12).grant, 3)
+  assert.equal(at(12).header, true)
+  assert.equal(at(12).separator, false)
   assert.equal(at(12).itemRows, 2)
   // 10 and 8 rows: the proportional share degrades to identity + ONE task row.
   assert.equal(at(10).grant, 2)
+  assert.equal(at(10).separator, false)
   assert.equal(at(10).itemRows, 1)
   assert.equal(at(8).grant, 2)
   assert.equal(at(8).itemRows, 1)
   // 6 rows: a lone granted row is spent on content, never on a header.
   assert.equal(at(6).grant, 1)
   assert.equal(at(6).header, false)
+  assert.equal(at(6).separator, false)
   assert.equal(at(6).itemRows, 1)
   // 4 rows: the editor seat and the footer alone consume the frame — 0 grant.
   assert.equal(at(4).grant, 0)
   assert.equal(at(4).count, 0)
   // The ceiling is the accessory's own budget, never a terminal-size threshold.
   assert.ok(at(200).grant <= TASK_QUICK_MAX_ROWS)
+})
+
+test('grant ladder: the separator yields to every visible task row (N=1/2/≥3 × grant)', () => {
+  // N=3 with a generous frame: separator + identity + 3 items (grant 5).
+  const three = planTaskQuickLayout(80, 24, 4, 3, 0)
+  assert.equal(three.grant, 5)
+  assert.equal(three.separator, true)
+  assert.equal(three.itemRows, 3)
+  // N=2: the requested budget is desired+2 = 4 → separator + identity + 2.
+  const two = planTaskQuickLayout(80, 24, 4, 2, 0)
+  assert.equal(two.grant, 4)
+  assert.equal(two.separator, true)
+  assert.equal(two.itemRows, 2)
+  // N=1: desired+2 = 3 → separator + identity + 1.
+  const one = planTaskQuickLayout(80, 24, 4, 1, 0)
+  assert.equal(one.grant, 3)
+  assert.equal(one.separator, true)
+  assert.equal(one.itemRows, 1)
+  // When the grant cannot cover desired+2, the separator is the FIRST yield:
+  // N=3 at a 12-row frame (grant 3 = identity + 2 items — one item unseen).
+  const squeezed = planTaskQuickLayout(80, 12, 4, 3, 0)
+  assert.equal(squeezed.separator, false)
+  assert.equal(squeezed.itemRows, 2)
 })
 
 test('grant ladder: an empty projection paints no row at any size', () => {
@@ -71,10 +99,12 @@ test('grant ladder: an empty projection paints no row at any size', () => {
 test('grant ladder: one real item never paints a header-only frame', () => {
   const one = planTaskQuickLayout(80, 24, 4, 1, 0)
   assert.equal(one.header, true)
+  assert.equal(one.separator, true)
   assert.equal(one.itemRows, 1)
   assert.equal(one.count, 1)
   const short = planTaskQuickLayout(80, 6, 4, 1, 0)
   assert.equal(short.header, false)
+  assert.equal(short.separator, false)
   assert.equal(short.count, 1)
 })
 
@@ -136,6 +166,8 @@ function item(value: string, patch: Partial<TaskPanelItem> = {}): TaskPanelItem 
   return { value, label: value, status: 'running', ...patch }
 }
 
+const WHEEL_BOX = { width: 80, height: 5 }
+
 function wheel(delta: number, y: number, overrides: Partial<TuiMouseEvent> = {}): TuiMouseEvent {
   return {
     type: 'wheel',
@@ -144,8 +176,8 @@ function wheel(delta: number, y: number, overrides: Partial<TuiMouseEvent> = {})
     y,
     screenX: 4,
     screenY: y,
-    width: 80,
-    height: 4,
+    width: WHEEL_BOX.width,
+    height: WHEEL_BOX.height,
     shift: false,
     alt: false,
     ctrl: false,
@@ -160,12 +192,15 @@ test('a painted frame is exactly its grant and every row is one physical row', (
   accessory.focused = true
   assert.ok(accessory.activate())
   const lines = accessory.render(80)
-  assert.equal(lines.length, 4)
-  assert.deepEqual(lines.map(line => visibleWidth(line)), [80, 80, 80, 80])
-  assert.match(strip(lines[0]!), /^Task Quick\s+showing 1-3\/4$/)
-  assert.match(strip(lines[1]!), /job:a\s+‣ Running$/)
-  assert.match(strip(lines[2]!), /job:b\s+‣ Running$/)
-  assert.match(strip(lines[3]!), /job:c\s+‣ Running$/)
+  // B4-B addendum: separator + identity + three task rows (grant 5).
+  assert.equal(lines.length, 5)
+  assert.deepEqual(lines.map(line => visibleWidth(line)), [80, 80, 80, 80, 80])
+  assert.match(strip(lines[0]!), /^─+$/, 'the separator is the FIRST painted row')
+  assert.equal(strip(lines[0]!), '─'.repeat(80), 'the rule spans the component width exactly')
+  assert.match(strip(lines[1]!), /^Task Quick\s+showing 1-3\/4$/)
+  assert.match(strip(lines[2]!), /job:a\s+‣ Running$/)
+  assert.match(strip(lines[3]!), /job:b\s+‣ Running$/)
+  assert.match(strip(lines[4]!), /job:c\s+‣ Running$/)
 })
 
 test('a one-row grant spends the row on content and keeps the position at its tail', () => {
@@ -186,9 +221,12 @@ test('the window shows the REAL N: the row total, never a pseudo row', () => {
   accessory.setItems([item('job:a'), item('job:b'), item('job:c'), item('job:d')])
   accessory.focused = true
   assert.ok(accessory.activate())
-  assert.match(strip(accessory.render(80)[0]!), /showing 1-3\/4$/)
+  // Row 0 is the separator, row 1 the identity.
+  assert.match(strip(accessory.render(80)[1]!), /showing 1-3\/4$/)
   geometry.rows = 12
-  assert.match(strip(accessory.render(80)[0]!), /showing 1-2\/4$/)
+  const degraded = accessory.render(80)
+  // grant 3: no separator; the identity row is FIRST.
+  assert.match(strip(degraded[0]!), /showing 1-2\/4$/)
 })
 
 test('an empty projection paints nothing and installs no hit geometry', () => {
@@ -228,10 +266,10 @@ test('a 0-grant frame paints nothing and refuses the wheel', () => {
   assert.deepEqual(accessory.render(80), [])
   assert.equal(accessory.handleMouse(wheel(1, 1)), undefined)
   geometry.rows = 24
-  assert.equal(accessory.render(80).length, 4)
+  assert.equal(accessory.render(80).length, 5)
   assert.deepEqual(accessory.handleMouse(wheel(-1, 1)), { handled: true, render: false }, 'an upward wheel at the top is consumed without a repaint')
   assert.deepEqual(accessory.handleMouse(wheel(1, 1)), { handled: true, render: true }, 'the down wheel moves the window')
-  assert.match(strip(accessory.render(80)[0]!), /showing 2-4\/4$/)
+  assert.match(strip(accessory.render(80)[1]!), /showing 2-4\/4$/)
 })
 
 test('the wheel resolves only against the LAST PAINTED frame', () => {
@@ -250,20 +288,23 @@ test('the wheel resolves only against the LAST PAINTED frame', () => {
   assert.equal(accessory.handleMouse(wheel(1, -1)), undefined)
   // B4-B: a press latches only a REAL row identity and a click without a
   // matching pressed gesture is consumed inertly — no focus is ever taken.
-  assert.deepEqual(accessory.handleMouse({ ...wheel(1, 1), type: 'press', button: 'left' }), { handled: true, capture: true })
-  assert.deepEqual(accessory.handleMouse({ ...wheel(1, 1), type: 'click', button: 'left' }), { handled: true })
+  // (y=1 is the identity row after the separator: inert chrome, consumed
+  // without latching.)
+  assert.deepEqual(accessory.handleMouse({ ...wheel(1, 1), type: 'press', button: 'left' }), { handled: true })
+  assert.deepEqual(accessory.handleMouse({ ...wheel(1, 2), type: 'press', button: 'left' }), { handled: true, capture: true })
+  assert.deepEqual(accessory.handleMouse({ ...wheel(1, 2), type: 'click', button: 'left' }), { handled: true })
   const moved = accessory.handleMouse(wheel(1, 1))
   assert.deepEqual(moved, { handled: true, render: true })
   assert.ok(!('focus' in moved!), 'the wheel never requests focus')
-  assert.match(strip(accessory.render(80)[0]!), /showing 2-4\/5$/)
+  assert.match(strip(accessory.render(80)[1]!), /showing 2-4\/5$/)
   assert.deepEqual(accessory.handleMouse(wheel(1, 1)), { handled: true, render: true })
-  assert.match(strip(accessory.render(80)[0]!), /showing 3-5\/5$/)
+  assert.match(strip(accessory.render(80)[1]!), /showing 3-5\/5$/)
   // At the window boundary the wheel is CONSUMED with no repaint: the
   // transcript under the pointer never scrolls.
   assert.deepEqual(accessory.handleMouse(wheel(1, 1)), { handled: true, render: false })
-  assert.match(strip(accessory.render(80)[0]!), /showing 3-5\/5$/)
+  assert.match(strip(accessory.render(80)[1]!), /showing 3-5\/5$/)
   assert.deepEqual(accessory.handleMouse(wheel(-1, 1)), { handled: true, render: true })
-  assert.match(strip(accessory.render(80)[0]!), /showing 2-4\/5$/)
+  assert.match(strip(accessory.render(80)[1]!), /showing 2-4\/5$/)
   // A resize that has not been repainted is refused against the LIVE geometry —
   // the event's own dimensions come from the same stale layout cache and cannot
   // express the resize at all.
@@ -290,13 +331,13 @@ test('the whole painted band owns the wheel, identity row included', () => {
   accessory.focused = true
   assert.ok(accessory.activate())
   accessory.render(80)
-  // y=0 is the identity row: the accessory still owns it, so the transcript never
-  // scrolls under a pointer that is on the window.
+  // y=0/1 are the separator/identity rows: the accessory still owns the whole
+  // band, so the transcript never scrolls under a pointer that is on it.
   assert.deepEqual(accessory.handleMouse(wheel(1, 0)), { handled: true, render: true })
-  assert.match(strip(accessory.render(80)[0]!), /showing 2-4\/4$/)
+  assert.match(strip(accessory.render(80)[1]!), /showing 2-4\/4$/)
   // Nothing to scroll: consumed without a repaint, never bubbled.
   assert.deepEqual(accessory.handleMouse(wheel(1, 1)), { handled: true, render: false })
-  assert.match(strip(accessory.render(80)[0]!), /showing 2-4\/4$/)
+  assert.match(strip(accessory.render(80)[1]!), /showing 2-4\/4$/)
 })
 
 test('the window rebases on the first visible row ID, not on an index or a label', () => {
@@ -307,8 +348,9 @@ test('the window rebases on the first visible row ID, not on an index or a label
   accessory.render(80)
   accessory.handleMouse(wheel(1, 1))
   accessory.render(80)
-  assert.match(strip(accessory.render(80)[0]!), /showing 2-4\/6$/)
-  assert.match(strip(accessory.render(80)[1]!), /job:b/)
+  // Row 0 = separator, row 1 = identity.
+  assert.match(strip(accessory.render(80)[1]!), /showing 2-4\/6$/)
+  assert.match(strip(accessory.render(80)[2]!), /job:b/)
   // A status update of the anchored row keeps the window exactly where it is.
   accessory.setItems([
     item('job:a'), item('job:b', { status: 'failed' }), item('job:c'),
@@ -317,8 +359,8 @@ test('the window rebases on the first visible row ID, not on an index or a label
   accessory.focused = true
   assert.ok(accessory.activate())
   const updated = accessory.render(80)
-  assert.match(strip(updated[0]!), /showing 2-4\/6$/)
-  assert.match(strip(updated[1]!), /job:b\s+‣ Failed$/)
+  assert.match(strip(updated[1]!), /showing 2-4\/6$/)
+  assert.match(strip(updated[2]!), /job:b\s+‣ Failed$/)
   // An insertion ABOVE the anchor keeps the anchored row first.
   accessory.setItems([
     item('job:x'), item('job:a'), item('job:b'), item('job:c'),
@@ -327,8 +369,8 @@ test('the window rebases on the first visible row ID, not on an index or a label
   accessory.focused = true
   assert.ok(accessory.activate())
   const inserted = accessory.render(80)
-  assert.match(strip(inserted[0]!), /showing 3-5\/7$/)
-  assert.match(strip(inserted[1]!), /job:b/)
+  assert.match(strip(inserted[1]!), /showing 3-5\/7$/)
+  assert.match(strip(inserted[2]!), /job:b/)
   // Removing the anchored row falls back to the BOUNDED previous index.
   accessory.setItems([
     item('job:x'), item('job:a'), item('job:c'), item('job:d'), item('job:e'), item('job:f'),
@@ -336,8 +378,8 @@ test('the window rebases on the first visible row ID, not on an index or a label
   accessory.focused = true
   assert.ok(accessory.activate())
   const removed = accessory.render(80)
-  assert.match(strip(removed[0]!), /showing 3-5\/6$/)
-  assert.match(strip(removed[1]!), /job:c/, 'index 2 of the remaining rows')
+  assert.match(strip(removed[1]!), /showing 3-5\/6$/)
+  assert.match(strip(removed[2]!), /job:c/, 'index 2 of the remaining rows')
   // A shrink keeps the anchored row visible…
   geometry.rows = 8
   const shrunk = accessory.render(80)
@@ -346,7 +388,7 @@ test('the window rebases on the first visible row ID, not on an index or a label
   assert.match(strip(shrunk[0]!), /showing 3-3\/6$/)
   // …and growing back does not jump the window.
   geometry.rows = 24
-  assert.match(strip(accessory.render(80)[0]!), /showing 3-5\/6$/)
+  assert.match(strip(accessory.render(80)[1]!), /showing 3-5\/6$/)
 })
 
 test('every rendered row is a single safe physical row, measured in terminal cells', () => {
@@ -364,15 +406,15 @@ test('every rendered row is a single safe physical row, measured in terminal cel
     assert.equal(visibleWidth(line), 80)
     assert.ok(!line.includes('\n') && !line.includes('\r') && !line.includes('\t'))
   }
-  const first = strip(lines[1]!)
+  const first = strip(lines[2]!)
   assert.ok(!first.includes('[31m') && !first.includes('evil\x1b'), `the raw escape must not leak: ${JSON.stringify(first)}`)
   assert.ok(!first.includes('\u0007'), 'the control byte must not leak')
   assert.match(first, /…/, 'the long label truncates with the content ellipsis')
   assert.ok(first.startsWith('> '), 'the selected row keeps its marker')
   // The durable mode rides whole while an identifiable label cell survives.
-  assert.match(strip(lines[2]!), /短 · continuable\s+‣ Running$/)
+  assert.match(strip(lines[3]!), /短 · continuable\s+‣ Running$/)
   // A mode longer than the row yields whole rather than being cut mid-word.
-  const third = strip(lines[3]!)
+  const third = strip(lines[4]!)
   assert.match(third, /‣ Running$/)
   assert.ok(!third.includes('one-shot'), 'an unaffordable mode is dropped whole')
 })
@@ -390,12 +432,15 @@ test('nesting is painted as indentation, never with an ambiguous box-drawing con
   accessory.focused = true
   assert.ok(accessory.activate())
   const lines = accessory.render(80).map(strip)
-  assert.ok(strip(lines[1]!).startsWith('> build'), `the selected root row carries the marker:\n${lines.join('\n')}`)
-  assert.ok(strip(lines[2]!).startsWith('    subagent · parent'), `a depth-1 row is marker slot + one indent step: ${JSON.stringify(lines[2])}`)
-  assert.ok(strip(lines[3]!).startsWith('      subagent · child'), `a depth-2 row is marker slot + two indent steps: ${JSON.stringify(lines[3])}`)
-  // U+2500 is East-Asian-Width ambiguous: the modal panel's connector must not be
-  // carried into this new surface (the plan adds a placement, not a glyph).
-  assert.equal(/[\u2500-\u257f]/.test(lines.join('')), false, 'no box-drawing glyph in the accessory')
+  assert.ok(lines[0]!.startsWith('─'), 'the separator leads the ACTIVE frame')
+  assert.ok(strip(lines[2]!).startsWith('> build'), `the selected root row carries the marker:\n${lines.join('\n')}`)
+  assert.ok(strip(lines[3]!).startsWith('    subagent · parent'), `a depth-1 row is marker slot + one indent step: ${JSON.stringify(lines[3])}`)
+  assert.ok(strip(lines[4]!).startsWith('      subagent · child'), `a depth-2 row is marker slot + two indent steps: ${JSON.stringify(lines[4])}`)
+  // U+2500 is East-Asian-Width ambiguous: the modal panel's NESTING connector
+  // must not be carried into the task rows (the placement is indentation, not
+  // a glyph). The ONE rule at the top is the Owner-authorized Footer↔Quick
+  // boundary (B4-B addendum) — role 15 `border`, not a nesting connector.
+  assert.equal(/[\u2500-\u257f]/.test(lines.slice(2).join('')), false, 'no box-drawing glyph in the task rows')
 })
 
 test('an unknown or hostile remote status is projected to ONE safe physical row', () => {
@@ -411,12 +456,12 @@ test('an unknown or hostile remote status is projected to ONE safe physical row'
     assert.equal(visibleWidth(line), 80)
     assert.ok(!line.includes('\n') && !line.includes('\r') && !line.includes('\t'))
   }
-  const first = strip(lines[1]!)
+  const first = strip(lines[2]!)
   assert.ok(!first.includes('[31m') && !first.includes('\u001b'), `the raw status escape must not leak: ${JSON.stringify(first)}`)
   assert.ok(!first.includes('\u0007'), 'the control byte must not leak')
   assert.match(first, /^> job:a\s+‣ Failed injected$/)
   // An unknown status keeps its REAL word (Title-cased), never a renamed one.
-  assert.match(strip(lines[2]!), /^  job:b\s+‣ Weird_status$/)
+  assert.match(strip(lines[3]!), /^  job:b\s+‣ Weird_status$/)
 })
 
 test('the ink follows a live theme switch without a re-construction', () => {
@@ -437,7 +482,9 @@ test('a narrow frame degrades the position whole, never mid-word', () => {
     accessory.setItems([item('job:a'), item('job:b')])
     accessory.focused = true
     assert.ok(accessory.activate())
-    return strip(accessory.render(cols)[0]!)
+    const rows = accessory.render(cols)
+    // Row 0 is the separator when the frame grants it; the identity row follows.
+    return strip(rows.find(line => line.includes('Task Quick')) ?? rows[0]!)
   }
   assert.match(render(44), /^Task Quick\s+showing 1-2\/2$/)
   assert.equal(render(24), 'Task Quick showing 1-2/2')

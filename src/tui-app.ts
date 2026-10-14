@@ -4153,10 +4153,10 @@ export class TuiApp {
     // is always the row directly above the editor border (pi's
     // statusContainer). The widget zones sit directly around the editor
     // seat: above between the working row and the seat, below between the
-    // seat and the footer. The first-party Task Quick accessory is the
-    // editor's OWN below-editor band, so it sits between the seat and the
-    // public below widget zone — the public slot keeps its placement and
-    // lifecycle.
+    // seat and the footer. The on-demand Task Quick accessory (B4-B, Owner
+    // revision 2026-10-15) is the band UNDER THE WHOLE FOOTER — the last
+    // visible region of the frame — so it sits after the footer; unfocused
+    // it paints zero rows (no separator, no blank band).
     this.tui.addChild(this.header)
     this.tui.addChild(this.viewerSubjectBar)
     this.tui.addChild(this.messagesView)
@@ -4167,9 +4167,9 @@ export class TuiApp {
     this.tui.addChild(this.working)
     this.tui.addChild(this.widgetsAbove)
     this.tui.addChild(this.editorSeat)
-    this.tui.addChild(this.taskQuick)
     this.tui.addChild(this.widgetsBelow)
     this.tui.addChild(this.footer)
+    this.tui.addChild(this.taskQuick)
     this.tui.setFocus(this.editor)
     // Input routes through routeInput (see its doc): every screen's input
     // funnels through the app's single dispatch path.
@@ -7266,13 +7266,13 @@ export class TuiApp {
         // so a compensated fullscreen simply shows no widget zone.
         { component: this.widgetsAbove, shrink: 0 },
         { component: this.editorSeat, shrink: 0 },
-        // Phase 3B / B4-A: the SAME passive Task Quick accessory rides the
-        // pinned stack in the editor's own below-editor band (between the seat
-        // and the public below widget zone). It renders ZERO rows on a 0 grant
+        // Phase 3B / B4-B (Owner revision 2026-10-15): the on-demand Task
+        // Quick accessory rides the pinned stack as the band UNDER THE WHOLE
+        // FOOTER — the last visible region. It renders ZERO rows on a 0 grant
         // or an empty projection, so it never reserves a blank band.
-        { component: this.taskQuick, shrink: 0 },
         { component: this.widgetsBelow, shrink: 0 },
         { component: this.footer, shrink: 0 },
+        { component: this.taskQuick, shrink: 0 },
       ])
       alt.setLayoutRoot(root)
       // Registration order IS dispatch order (X043): the host router goes
@@ -7606,11 +7606,13 @@ export class TuiApp {
   }
 
   /** The live pinned chrome rows the Task Quick accessory's grant reserves:
-   *  the History set PLUS the editor seat — the accessory ADDS a band below the
-   *  seat, it never replaces it, so the seat is a real reservation here
-   *  (measuring it here is not cyclic: the seat does not measure the
-   *  accessory). Both roots carry exactly this chrome set, so one helper serves
-   *  the regular document and the fullscreen stack. */
+   *  the History set PLUS the editor seat — the accessory is the band UNDER
+   *  THE WHOLE FOOTER (B4-B, Owner revision 2026-10-15), so every chrome row
+   *  above it (widgetsBelow and the footer included) is a real reservation,
+   *  and the seat keeps its own (measuring any of them here is not cyclic:
+   *  none of them measures the accessory). Both roots carry exactly this
+   *  chrome set in this order, so one helper serves the regular document and
+   *  the fullscreen stack. */
   private taskQuickChromeRows(width: number): number {
     const safeWidth = Math.max(1, Math.floor(width))
     return this.historyChromeRows(safeWidth) + this.editorSeat.render(safeWidth).length
@@ -11920,10 +11922,11 @@ export class TuiApp {
    * the shared editor seat, and the below widget zone is a pinned row
    * BETWEEN that seat and the footer — subtracting only the footer would
    * shift every option hit by the widget's height and answer the wrong
-   * option. B4-A: the first-party Task Quick band is pinned between the seat
-   * and the below widget zone, so it is part of the same offset; its height
-   * comes from the alt screen's LAST PAINTED box (never a live re-render), so
-   * the option hits resolve against the geometry actually on screen. */
+   * option. B4-B (Owner revision 2026-10-15): the on-demand Task Quick band
+   * moved UNDER the whole footer — it is the LAST pinned row of the stack, so
+   * the overlay region (the question frame included) still ends above it and
+   * its painted height (divider included, from the alt screen's LAST PAINTED
+   * box — never a live re-render) remains part of the same bottom offset. */
   private questionFrameBounds(question: QuestionState): { top: number; bottom: number } | undefined {
     const frame = question.frame
     if (frame === undefined) return undefined
@@ -12036,14 +12039,15 @@ export class TuiApp {
     },
     y: number,
   ): 'todo:dock' | 'todo:panel' | undefined {
-    // PR-D: the stack order from the screen bottom is footer, below widget
-    // zone, editor seat, above widget zone, working, queue, goal, todo,
-    // dock — so BOTH widget zones are part of the bottom-anchored offset.
-    // B4-A: the first-party Task Quick band is pinned between the seat and the
-    // below widget zone, so it belongs to the SAME bottom-anchored offset.
+    // PR-D: the stack order from the screen bottom is task Quick, footer,
+    // below widget zone, editor seat, above widget zone, working, queue,
+    // goal, todo, dock (B4-B moved the band under the whole footer — it is
+    // the LAST pinned row, so it stays FIRST in this bottom-anchored offset
+    // and its height is the painted band including the separator).
     const todoBottom = Math.max(0, Math.min(snapshot.termRows,
-      snapshot.termRows - snapshot.footerHeight - snapshot.widgetBelowHeight
-      - snapshot.taskQuickHeight - snapshot.editorHeight
+      snapshot.termRows - snapshot.taskQuickHeight - snapshot.footerHeight
+      - snapshot.widgetBelowHeight
+      - snapshot.editorHeight
       - snapshot.widgetAboveHeight - snapshot.workingHeight
       - snapshot.queueHeight - snapshot.goalHeight))
     const todoTop = Math.max(0, todoBottom - snapshot.todoHeight)

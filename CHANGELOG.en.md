@@ -9,12 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- The Task Quick window is now on-demand: even with live tasks, the window
-  below the editor occupies **zero rows** by default. It appears only when the
-  cursor sits on the focused editor's last visual line (the last soft-wrapped
-  segment of a non-empty multi-line draft included) and you press `↓`; `↑` at
-  the first row or `Esc` returns to the editor with the draft and cursor
-  byte-for-byte intact. While open, `↑↓/PgUp/PgDn` move the selection across
+- The Task Quick window is now on-demand and lives UNDER THE WHOLE FOOTER:
+  even with live tasks, the window occupies **zero rows** by default. It
+  appears only when the cursor sits on the focused editor's last visual line
+  (the last soft-wrapped segment of a non-empty multi-line draft included) and
+  you press `↓`; `↑` at the first row or `Esc` returns to the editor with the
+  draft and cursor byte-for-byte intact. When open it is the frame's LAST
+  region, below the footer, with ONE `border`-ink separator rule as the
+  Footer↔Quick boundary (the rule yields first when the task rows cannot all
+  fit), followed by the identity row and at most three task rows. While
+  open, `↑↓/PgUp/PgDn` move the selection across
   the whole task row set (first row selected, tail clamped, paging by the
   painted rows) and `Enter` — or a same-task-row click in fullscreen — opens
   the existing typed detail with the row's REAL identity (Job view, subagent

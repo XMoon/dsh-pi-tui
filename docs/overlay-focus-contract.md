@@ -363,8 +363,11 @@ has exactly ONE per-open finalizer, and every close route funnels through it:
   owns the slot". (B4-B retired the Esc → Quick restore tail; the fence now
   guards a synchronous open during the close.)
 - **The on-demand Task Quick is NOT an overlay** (B4-B): it is the first-party
-  pinned accessory below the editor seat, and `focused` (written by the TUI
-  focus transition) is its one visibility authority. Entering it is a normal
+  pinned accessory as the LAST pinned row of both roots — under the whole
+  footer (Owner revision 2026-10-15) — and `focused` (written by the TUI
+  focus transition) is its one visibility authority. Exiting restores the
+  current seat occupant and the band collapses to zero rows (the separator
+  rule is painted by the band itself and disappears with it). Entering it is a normal
   `setFocus(taskQuick)` from the keymap-admitted `app.tasks.open`; leaving it
   restores the CURRENT seat occupant. Every blocking owner terminates it at
   its own composition commit — before the new owner takes focus — and an
