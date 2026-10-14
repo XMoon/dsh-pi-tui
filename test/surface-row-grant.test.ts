@@ -513,6 +513,9 @@ test('C-T15: two long same-prefix theme names stay distinguishable at 44 columns
   assert.ok(rowA !== undefined && rowB !== undefined,
     `each theme row must keep its own tail:\n${view}`)
   assert.notEqual(rowA, rowB, `the two rows must not paint identically:\n${view}`)
+  // Both ENDS must survive: the head identifies the theme, the tail separates the pair.
+  assert.ok(rowA.includes('A deliberate') && rowB.includes('A deliberate'),
+    `each row must keep the name's head too:\n${view}`)
   // Walk the cursor onto the first long row: its description must carry the
   // COMPLETE display name (the row identity), not only the source class.
   for (let step = 0; step < 6; step += 1) {
