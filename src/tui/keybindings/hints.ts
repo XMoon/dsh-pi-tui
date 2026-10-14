@@ -85,6 +85,22 @@ export function formatKeyList(keys: readonly KeyId[]): string {
   return keys.map(formatKeyId).join(' / ')
 }
 
+/** The Job workspace's FIXED local keys (B1-C/B1-D, the same category as the
+ *  History editor seat's labels below): the workspace owns NO keymap action for
+ *  them — the page toggle and the current page's exact copy are screen-local,
+ *  deliberately non-rebindable semantics — so they cannot come from `keyHint`,
+ *  and they cannot lie either because no remap exists for them. The **key ids**
+ *  live in this authority and the panel imports them for BOTH the handler and
+ *  the hint, so an advertised key can never drift from the key that really acts
+ *  (design language §7.1). */
+export const JOB_LOCAL_KEYS = {
+  /** Switch between the Output and Command pages, in both directions. */
+  switchPage: 'tab',
+  /** Copy the current page's exact original. A MODIFIED chord, so its hint names
+   *  the modifier (`Shift+C`) instead of a bare letter (§4.1). */
+  copy: 'shift+c',
+} as const
+
 /** Format one already-labelled key list for an ACTION-BAR HINT: a BARE
  *  unmodified letter stays lowercase (`s`, never `S`) because `S` reads as ⇧S in
  *  prose — the design language's key rule (§4.1). A modified chord keeps its

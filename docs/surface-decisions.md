@@ -1702,9 +1702,12 @@ retention anchor above are B1-B.
 
 A shell Job (`bash`/`pwsh`) whose OBSERVED `label` is non-empty gains a Command
 page inside the same workspace, the same `TuiAltScreen`, the same Job and the
-same observation: `v` on the Output page, or a click on the visible Command
-summary / its `↗ Command` entry / the `Command` tab, switches to it; `Esc` returns to Output (it never closes the workspace
-and never releases the observer). `Label:` Jobs (`subagent` and every non-shell
+same observation: `Tab` on either page toggles between Output and Command, or a
+click on the visible Command summary / its `↗ Command` entry / the `Command` tab
+switches to it; `Esc` returns to Output (it never closes the workspace
+and never releases the observer). `Tab` replaced the former Job-local `v` open
+verb: one symmetric key now owns the page toggle in both directions, and `v` is
+inert. `Label:` Jobs (`subagent` and every non-shell
 kind) never grow one — the entry is gated on the OBSERVED kind plus a non-empty
 label, so an opening Task row that merely looks like a shell command can show a
 read-only summary but cannot open or copy a Command, and a Job whose eligibility
@@ -1844,7 +1847,7 @@ current hit, the search mode or the search input's focus.
 
 The Action Bar keeps B1-A/B's retention order and simply appends the two
 read-only verbs at the LOWEST priority, so a narrow row drops `C copy output`
-before `V command` and both before any pre-existing truth (`Esc back`, Stop,
+before `Tab switch` and both before any pre-existing truth (`Esc back`, Stop,
 Follow, `[GAP]`, the retained/full disclosure, the position fact and the Find
 hint). At 80 columns that means the verbs are usually not advertised at all while
 their KEYS stay fully functional: no half-painted affordance is ever shown, no

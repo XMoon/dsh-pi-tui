@@ -209,10 +209,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and the Command page no longer repeats `Full command`. The pinned action bar
   joins with ` · `, keeps `Esc` last (with the highest drop priority), spells its
   facts `Follow on` / `Follow paused` and its bare key letters lowercase
-  (`s stop`, `c copy output`, `v command`), and takes the weakest readable ink; a
+  (`s stop`, `c copy output`, `Tab switch`), and takes the weakest readable ink; a
   right-aligned entry such as `↗ Command` or `Copy All [C]` is painted only while
   the whole content fits beside it, so a narrow row keeps the output and leaves no
   dead click region.
+
+- The Job workspace now uses `Tab` to switch between its Output and Command pages
+  in **both** directions (the former `v` open verb is removed and doing nothing);
+  the action bar advertises `Tab switch` on both pages, while the mouse paths (a
+  tab click, the summary row's `↗ Command` entry) and `Esc output` returning to
+  Output are unchanged. While a Find owns the ordinary keys the toggle yields, as
+  it did before.
 
 ### Fixed
 

@@ -190,10 +190,12 @@ observation, admission, follow/find/copy or tab hit-map behaviour.
    drops the duplicated `Full command`).
 7. Action bar: PR1 helper + spec priorities; facts Title Case
    (`Follow on`, `Follow paused`); bare key letters lowercase (`s stop`,
-   `v command`); **`Esc` moves to the last segment** (D8) while keeping the top
+   `Tab switch`); **`Esc` moves to the last segment** (D8) while keeping the top
    drop priority; safety facts (gap/error/retained disclosure) outrank secondary
    verbs and the page hint. The ` · ` separator already landed in PR2 (the
-   constant is shared) — do not touch it here.
+   constant is shared) — do not touch it here. **Owner amendment:** the page
+   toggle is `Tab` (both directions, advertised on both pages) and the former
+   Job-local `v` open verb is removed.
 
 **Non-goals:** `planChrome` grants and their thresholds (`COMPACT_*`,
 `FACTS_MIN_*`, `METADATA_MIN_BODY_ROWS`); the body floor; the tab hit map
@@ -285,7 +287,7 @@ light.
 | A row grant or geometry drifts while restyling | medium | PR2/PR3 list the frozen constants as non-goals; the reviewer diffs the chrome plans; the matrix test pins the dropped/kept set |
 | Existing assertions on `SETTINGS`/`JOB`/`RUNNING`/`[GAP]` break loudly | high (expected) | enumerate the tests in each PR; update assertions only to the new literal, never to a looser matcher |
 | Lowercase bare key letters (`R refresh` → `r refresh`) confuse long-time users | low | it is a wording change; note it in the changelog |
-| Dropping the `↗ Command` affordance at narrow widths removes a mouse-discoverable entry | low | the summary row is itself clickable (D-03) and `v command` stays advertised |
+| Dropping the `↗ Command` affordance at narrow widths removes a mouse-discoverable entry | low | the summary row is itself clickable (D-03) and `Tab switch` stays advertised |
 | Painting detail values with `text` changes how a custom/light palette looks | medium (intended) | check light + one custom palette in the evidence; it is the fix, not a regression |
 | `borderFocus` looks "lost" once ordinary focus stops using it | low | it keeps its approval role; the palette is unchanged |
 | The new glyph gate fails on an existing chrome literal | low | the gate covers only the canonical inventory in the spec §4.4; the grandfathered `─`/` · ` are listed as accepted |

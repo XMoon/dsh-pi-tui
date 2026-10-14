@@ -39,7 +39,7 @@
 
 import { Text, VStack, matchesKey, truncateToWidth, visibleWidth, type Component } from '@xmoon76/pi-tui'
 import { componentKeymap } from '../keybindings/component-keymap.ts'
-import { formatHintKeys, formatKeyId } from '../keybindings/hints.ts'
+import { JOB_LOCAL_KEYS, formatHintKeys, formatKeyId } from '../keybindings/hints.ts'
 import { renderActionBarRow, type ActionBarSegment } from '../presentation/action-bar.ts'
 import { sanitizedPhysicalLine } from '../presentation/lines.ts'
 import { color, taskStatusColor } from '../theme/runtime.ts'
@@ -754,8 +754,9 @@ interface JobOutputStatusFacts {
   /** Whether the frame actually shows a body row: a browsing hint or a
    *  viewport position is never advertised for a body that is not painted. */
   readonly bodyVisible: boolean
-  /** Whether `v` can open the shell Command page this frame. */
-  readonly canViewCommand: boolean
+  /** Whether `Tab` can switch the page away from the current one (on the Output
+   *  page: whether the shell Command page exists at all). */
+  readonly canSwitchPage: boolean
   /** Whether `C` can copy a non-empty retained Output this frame. */
   readonly canCopyOutput: boolean
 }
@@ -817,7 +818,12 @@ class JobInspectorActionBar implements Component {
       : []
     if ('command' in facts) {
       const segments: ActionBarSegment[] = []
-      if (!facts.searchActive) segments.push({ text: 'c copy all', priority: 6 })
+      if (!facts.searchActive) {
+        segments.push({ text: `${formatHintKeys(formatKeyId(JOB_LOCAL_KEYS.copy))} copy all`, priority: 6 })
+        // The page toggle is advertised on BOTH pages: it is one symmetric key,
+        // and switching back is the same action as switching forward.
+        segments.push({ text: `${formatHintKeys(formatKeyId(JOB_LOCAL_KEYS.switchPage))} switch`, priority: 0.6 })
+      }
       if (!facts.readingFacts) {
         segments.push({ text: COMMAND_FULL_NOTE, priority: 5 })
         segments.push(...position)
@@ -855,16 +861,16 @@ class JobInspectorActionBar implements Component {
       segments.push(...position)
     }
     segments.push(...findSegment)
-    // Neither verb is advertised while a Job Find owns the ordinary keys
-    // (`v`/`C` are inert in EDIT and NAVIGATE), nor when the action itself
-    // cannot execute this frame. Both yield BEFORE every pre-existing segment
-    // (B1-B's Follow/GAP/disclosure/position/Find truth is unchanged), and their
-    // two DIFFERENT priorities make the drop order deliberate rather than
-    // array-order-dependent: the Command entry outranks the Output copy verb, so
-    // a row wide enough for one verb advertises the read-only page entry.
+    // Neither the page toggle nor the copy verb is advertised while a Job Find
+    // owns the ordinary keys (both are inert in EDIT and NAVIGATE), nor when the
+    // action itself cannot execute this frame. Both yield BEFORE every
+    // pre-existing segment (B1-B's Follow/GAP/disclosure/position/Find truth is
+    // unchanged), and their two DIFFERENT priorities make the drop order
+    // deliberate rather than array-order-dependent: the page toggle outranks the
+    // Output copy verb, so a row wide enough for one verb advertises the page.
     if (!facts.searchActive) {
-      if (facts.canCopyOutput) segments.push({ text: 'c copy output', priority: 0.5 })
-      if (facts.canViewCommand) segments.push({ text: 'v command', priority: 0.6 })
+      if (facts.canCopyOutput) segments.push({ text: `${formatHintKeys(formatKeyId(JOB_LOCAL_KEYS.copy))} copy output`, priority: 0.5 })
+      if (facts.canSwitchPage) segments.push({ text: `${formatHintKeys(formatKeyId(JOB_LOCAL_KEYS.switchPage))} switch`, priority: 0.6 })
     }
     if (pageHint) segments.push({ text: PAGE_HINT, priority: 0.1 })
     segments.push({ text: 'Esc back', priority: 7 })
@@ -1092,7 +1098,7 @@ export class JobInspectorPanel extends VStack {
         position: positionFacts(search, scrollView, width),
         readingFacts: factsRowShown,
         ...grants,
-        canViewCommand: commandEligible(chrome.view),
+        canSwitchPage: commandEligible(chrome.view),
         canCopyOutput: chrome.view.phase === 'observed' && chrome.view.retainedText !== '',
       }
     })
@@ -1265,7 +1271,7 @@ export class JobInspectorPanel extends VStack {
   /**
    * The Job workspace's ONE input owner. `Esc`/`tasks.stop` are the B1-A
    * intents; Find, the search state machine, the strict-follow viewport keys and
-   * the Job-local `v`/`C` verbs are B1-B/B1-C's. Every other key is inert: the
+   * the Job-local `Tab`/`Shift+C` verbs are B1-B/B1-C's. Every other key is inert: the
    * Job is read-only and never leaks into the background editor or transcript.
    */
   handleInput(data: string): void {
@@ -1365,7 +1371,7 @@ export class JobInspectorPanel extends VStack {
     if (search.mode === 'navigate') {
       // NAVIGATE: only the result navigation keys act; ordinary printing is
       // inert — the Job is read-only and never leaks into the editor, and the
-      // `v`/`C`/Stop verbs are NOT reachable here.
+      // `Tab`/`C`/Stop verbs are NOT reachable here.
       if (matchesKey(data, 'n')) {
         search.step(1)
         this.intents.requestRender()
@@ -1376,9 +1382,13 @@ export class JobInspectorPanel extends VStack {
       return
     }
     if (command) {
-      // Command is a pure reading page: the ONLY ordinary verb is the original
-      // Copy All, and Stop is never reachable from here.
-      if (matchesKey(data, 'shift+c')) this.copyCommandAll()
+      // Command is a pure reading page: the ONLY ordinary verbs are the original
+      // Copy All and the page toggle back to Output.
+      if (matchesKey(data, JOB_LOCAL_KEYS.switchPage)) {
+        this.showOutput()
+        return
+      }
+      if (matchesKey(data, JOB_LOCAL_KEYS.copy)) this.copyCommandAll()
       return
     }
     // Stop keeps its existing precedence on the Output page (the fixed
@@ -1387,11 +1397,16 @@ export class JobInspectorPanel extends VStack {
       this.intents.onStop()
       return
     }
-    if (matchesKey(data, 'v')) {
+    // `Tab` switches the page in BOTH directions: on the Output page it opens the
+    // shell Command page, and the same physical key is what the Command page's own
+    // branch uses to come back. Reachability is exactly the advertisement's gate —
+    // a Find in NAVIGATE returns above and in EDIT owns the keys, so the toggle can
+    // never strand a search.
+    if (matchesKey(data, JOB_LOCAL_KEYS.switchPage)) {
       this.openCommand()
       return
     }
-    if (matchesKey(data, 'shift+c')) this.copyOutput()
+    if (matchesKey(data, JOB_LOCAL_KEYS.copy)) this.copyOutput()
   }
 
   /** The painted header hit region at one screen cell, or undefined. */

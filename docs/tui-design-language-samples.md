@@ -441,7 +441,7 @@ line 038
 line 039
 line 040
 Retained preview · not full history                                                                         rows 7-40/40
-s stop · Follow on · Ctrl+F find · c copy output · v command · PgUp/PgDn · Esc back
+s stop · Follow on · Ctrl+F find · Shift+C copy output · Tab switch · PgUp/PgDn · Esc back
 ```
 The tab strip is deliberately unchanged: `[Output]` in bold `primary` is the device the Settings pane focus now adopts. What changes: the header identity, the status word, the meta labels, and the facts row (whose two flanking rules are removed — the disclosure becomes a dim status line with the position right-aligned).
 
@@ -494,7 +494,7 @@ line 012
 build failed
 ⋮
 Retained preview · not full history                                                                         rows 1-13/13
-Follow on · [GAP] · Ctrl+F find · c copy output · v command · PgUp/PgDn · Esc back
+Follow on · [GAP] · Ctrl+F find · Shift+C copy output · Tab switch · PgUp/PgDn · Esc back
 ```
 `● FAILED [GAP] [SETTLED]` becomes `‣ Failed [GAP] [SETTLED]`: the word is the signal, the colour is secondary, and `●` (U+25CF, East-Asian-Width *ambiguous*) is replaced by the EAW-neutral `‣` (U+2023), which keeps a one-cell glyph anchor without risking a two-cell paint on CJK-width terminals (Owner amendment to D5). The bracketed machine markers stay uppercase — that is the role ALL-CAPS keeps. Note the bar correctly advertises no Stop for a settled job in both frames.
 
@@ -523,7 +523,7 @@ Output  [Command] ────────────────────�
 pnpm build && pnpm test:product
 ⋮
                                                                                                               rows 1-1/1
-c copy all · Ctrl+F find · PgUp/PgDn · Esc output
+Shift+C copy all · Tab switch · Ctrl+F find · PgUp/PgDn · Esc output
 ```
 The page label `Full command` is stated once (summary row) instead of twice (summary row *and* status line); the status line keeps only the real position fact. `Copy All [C]` already follows the target affordance grammar (`Verb [Key]`).
 
@@ -660,7 +660,7 @@ line 039
 line 040
 s stop · Follow on · Esc back
 ```
-At 44 columns the BEFORE frame cuts the command to `pnpm build && pnpm test:…` so that the `↗ Command` affordance can fit. The target drops the affordance instead (the summary row is itself clickable, so the command fits in full; `v command` is NOT advertised at 44 columns because the bar dropped it by priority — the command page stays reachable through the clickable summary row). This is the "an affordance yields to its content" rule.
+At 44 columns the BEFORE frame cuts the command to `pnpm build && pnpm test:…` so that the `↗ Command` affordance can fit. The target drops the affordance instead (the summary row is itself clickable, so the command fits in full; `Tab switch` is NOT advertised at 44 columns because the bar dropped it by priority — the command page stays reachable through the clickable summary row). This is the "an affordance yields to its content" rule.
 
 
 ### 4.6 Job change list
@@ -674,7 +674,7 @@ At 44 columns the BEFORE frame cuts the command to `pnpm build && pnpm test:…`
 | 5 | Affordance always painted on the summary row | affordance yields when content + affordance cannot both fit | never truncate the content to keep a redundant affordance |
 | 6 | `[Output]  Command ────` | unchanged | already the target device |
 | 7 | Facts row flanked by two full-width rules | dim status line, no flanks; note left, position right | a rule marks a boundary; a text line is never flanked (`D6`) |
-| 8 | Bar ` \| `; `Follow ON`; `S stop`; `V command` | ` · `; `Follow on`; `s stop`; `v command` | one separator, Title Case words, no bare uppercase letters |
+| 8 | Bar ` \| `; `Follow ON`; `S stop`; `V command` | ` · `; `Follow on`; `s stop`; `Tab switch` | one separator, Title Case words, no bare uppercase letters; the page toggle is one symmetric `Tab` |
 | 9 | Command page repeats `Full command` in the status line | stated once | a status line states only facts not already stated above it |
 | 10 | Facts drop after every hint | safety facts outrank verbs and browsing hints | a disclosure must survive a tight row |
 | 11 | Bar started with `Esc back` / `Esc output` | both move to the TAIL | D8: the family puts `Esc` last everywhere (all overlays already do) |

@@ -216,10 +216,10 @@ test('C-03 a non-shell kind never grows a Command page or a Command Copy verb', 
   const harness = makePanel(observedState({ kind: 'subagent', label: 'echo one' }))
   const painted = paint(harness, 120).join('\n')
   assert.match(painted, /Label {2}echo one/, 'a non-shell label is shown as a Label')
-  assert.ok(!/v command/.test(painted), 'no Command entry is advertised')
-  harness.panel.handleInput('v')
+  assert.ok(!/Tab switch/.test(painted), 'no page toggle is advertised')
+  harness.panel.handleInput('\t')
   const after = paint(harness, 120).join('\n')
-  assert.ok(!/Copy All \[C\]/.test(after), '`v` cannot open a Command page')
+  assert.ok(!/Copy All \[C\]/.test(after), '`Tab` cannot open a Command page for a non-shell Job')
   // `C` on the Output page is the INDEPENDENT retained-Output copy: a non-shell
   // Job still copies its retained text, never a fabricated command.
   harness.panel.handleInput('C')
@@ -233,8 +233,8 @@ test('C-04 the opening row is never a Command source: only the observed label op
   const opening = makePanel({ opening: { jobId: 'job-a', kind: 'bash', label: 'pnpm build', status: 'running' } })
   const before = paint(opening, 120).join('\n')
   assert.match(before, /Command {2}pnpm build/)
-  assert.ok(!/v command/.test(before), 'the opening row alone does not advertise V')
-  opening.panel.handleInput('v')
+  assert.ok(!/Tab switch/.test(before), 'the opening row alone does not advertise the page toggle')
+  opening.panel.handleInput('\t')
   assert.ok(!/Copy All \[C\]/.test(paint(opening, 120).join('\n')), 'no Command page before the first observation')
   opening.panel.handleInput('C')
   assert.deepEqual(opening.copies, [{ source: 'output', text: '', unavailable: 'output-unavailable' }],
@@ -244,8 +244,8 @@ test('C-04 the opening row is never a Command source: only the observed label op
   // The SAME instance becomes eligible once the observation arrives.
   const live = makePanel({ opening: { jobId: 'job-a', kind: 'bash', label: 'pnpm build', status: 'running' } })
   live.panel.update(observedState({ label: 'pnpm build --watch' }))
-  assert.match(paint(live, 120).join('\n'), /v command/, 'a wide Output bar advertises the Command entry')
-  live.panel.handleInput('v')
+  assert.match(paint(live, 120).join('\n'), /Tab switch/, 'a wide Output bar advertises the page toggle')
+  live.panel.handleInput('\t')
   const command = paint(live, 120).join('\n')
   assert.match(command, /Copy All \[C\]/)
   assert.match(command, /Esc output/)
@@ -258,14 +258,23 @@ test('C-05/C-06 the Command page owns one body and its own viewport at every bud
   for (const budget of [{ width: 120, rows: 40 }, { width: 80, rows: 24 }, { width: 44, rows: 8 }, { width: 44, rows: 4 }]) {
     const harness = makePanel(observedState({ label: `long command ${'x'.repeat(300)}` }))
     harness.rows.value = budget.rows
-    harness.panel.handleInput('v')
+    harness.panel.handleInput('\t')
     const lines = paint(harness, budget.width)
     for (const line of lines) {
       assert.ok(stripTerminalSequences(line).length <= budget.width * 2, `no over-wide row at ${budget.width}x${budget.rows}`)
     }
     const painted = lines.join('\n')
     assert.match(painted, /Esc output/, `the Command bar is pinned at ${budget.width}x${budget.rows}`)
-    assert.ok(!/v command/.test(painted), 'the Output-only verb is absent on the Command page')
+    // The page toggle is SYMMETRIC: the same `Tab` switches back, so it is
+    // advertised on the Command page too. Like every other segment it obeys the
+    // ONE drop order, so a tight row (44 columns) may yield it before the
+    // pre-existing truth. What can NEVER appear here are the OUTPUT-ONLY verbs,
+    // which have no action on this page at any budget.
+    if (budget.width >= 80) {
+      assert.match(painted, /Tab switch/, `the symmetric page toggle is advertised on the Command page at ${budget.width}x${budget.rows}`)
+    }
+    assert.ok(!/Shift\+C copy output/.test(painted), 'the Output-only copy verb is absent on the Command page')
+    assert.ok(!/s stop/.test(painted), 'the Stop segment is absent on the Command page')
     assert.ok(!/Follow on|Follow paused/.test(painted), 'the Command page never claims a Follow state')
     assert.ok(!/Retained preview/.test(painted), 'the Command page never claims a retained preview')
     assert.match(painted, /Full command/)
@@ -291,7 +300,7 @@ test('C-15 the two pages own independent Find state, and `C` in EDIT never copie
   harness.panel.handleInput('\x1b')
   assert.equal(harness.copies.length, 0, 'Esc leaves NAVIGATE only')
   // Switch to Command: its OWN query, never the Output one.
-  harness.panel.handleInput('v')
+  harness.panel.handleInput('\t')
   assert.ok(!/Find Output: beta/.test(paint(harness).join('\n')), 'the Output query is not inherited')
   harness.panel.openFind()
   const commandFind = paint(harness).join('\n')
@@ -346,7 +355,7 @@ test('C-14 an empty / unavailable / ineligible copy source reports its own reaso
   // An empty label is not a Command page at all; the Output path still answers.
   const emptyLabel = makePanel(observedState({ label: '', text: '' }))
   paint(emptyLabel)
-  emptyLabel.panel.handleInput('v')
+  emptyLabel.panel.handleInput('\t')
   assert.ok(!/Copy All \[C\]/.test(paint(emptyLabel).join('\n')), 'an empty label is not a Command')
   emptyLabel.panel.handleInput('C')
   assert.deepEqual(emptyLabel.copies, [{ source: 'output', text: '', unavailable: 'output-empty' }],
@@ -358,7 +367,7 @@ test('C-14 an empty / unavailable / ineligible copy source reports its own reaso
   // never left as a hidden copy owner (plan §1.1 / §3).
   const lost = makePanel(observedState({ label: 'echo one' }))
   paint(lost)
-  lost.panel.handleInput('v')
+  lost.panel.handleInput('\t')
   assert.match(paint(lost).join('\n'), /Copy All \[C\]/)
   lost.panel.update({ opening: { jobId: 'job-a', kind: 'bash', label: 'echo one', status: 'running' } })
   assert.ok(!/Copy All \[C\]/.test(paint(lost).join('\n')), 'a lost Command eligibility returns to Output')
@@ -428,7 +437,7 @@ test('C-18 the header click must re-prove the same painted target; a narrowed bu
   // status + body + Action Bar.
   const narrow = makePanel(observedState({ label: 'echo one' }))
   narrow.rows.value = 4
-  narrow.panel.handleInput('v')
+  narrow.panel.handleInput('\t')
   const narrowLines = paint(narrow, 80).join('\n')
   assert.ok(!/Copy All \[C\]/.test(narrowLines), 'the button is not painted without its row')
   narrow.panel.onHeaderPress(1, 1)
@@ -441,7 +450,7 @@ test('C-18 the header click must re-prove the same painted target; a narrowed bu
   // A granted summary row that is still too narrow for the button paints the
   // title ONLY: the clip leaves no partial/ghost target behind.
   const clipped = makePanel(observedState({ label: 'echo one' }))
-  clipped.panel.handleInput('v')
+  clipped.panel.handleInput('\t')
   const clippedLines = paint(clipped, 12)
   assert.ok(!/Copy All \[C\]/.test(clippedLines.join('\n')), 'the button is not painted at 12 columns')
   const titleRow = clippedLines.findIndex(line => /Full command/.test(line))
@@ -643,9 +652,9 @@ async function openFirstJob(harness: AppHarness): Promise<void> {
   await harness.vt.waitForRender()
 }
 
-/** Enter the Command page through the FIXED `v` key. */
+/** Enter the Command page through the `Tab` page toggle. */
 async function openCommand(harness: AppHarness): Promise<void> {
-  harness.vt.sendInput('v')
+  harness.vt.sendInput('\t')
   await harness.vt.waitForRender()
   await flush(2)
 }
@@ -712,7 +721,7 @@ test('C-01 the official Bash label reaches the Command page and Copy All copies 
   await flush(2)
   assert.equal(harness.tasks.observation.records.length, 1, 'ONE observer for the opened Job')
 
-  // Reachable by the FIXED `v` key.
+  // Reachable by the `Tab` page toggle.
   await openCommand(harness)
   assert.match(view(harness.vt), /Copy All \[C\]/)
 
@@ -1103,7 +1112,7 @@ test('C-09 hardBreakEnd carries the real newline offsets and equals sourceEnd on
 test('C-18 the header hit map covers ONLY painted text: blank padding has no click target', () => {
   // The Command page button region is exactly the painted `Copy All [C]`.
   const harness = makePanel(observedState({ label: 'echo one' }))
-  harness.panel.handleInput('v')
+  harness.panel.handleInput('\t')
   const commandLines = paint(harness, 80)
   const readerRow = commandLines.findIndex(line => line.includes('Copy All [C]'))
   assert.ok(readerRow >= 0)
@@ -1160,8 +1169,8 @@ test('C-05 the two read-only verbs are advertised with a deterministic drop orde
     harness.rows.value = rows
     for (let width = 60; width <= 200; width += 1) {
       const bar = paint(harness, width).at(-1)!
-      const hasCopy = /c copy output/.test(bar)
-      const hasCommand = /v command/.test(bar)
+      const hasCopy = /Shift\+C copy output/.test(bar)
+      const hasCommand = /Tab switch/.test(bar)
       assert.ok(!hasCopy || hasCommand, `the copy verb never survives alone at ${width}x${rows}`)
       if (hasCopy) sawBoth = true
       if (hasCommand && !hasCopy) sawCommandOnly = true
@@ -1169,20 +1178,20 @@ test('C-05 the two read-only verbs are advertised with a deterministic drop orde
   }
   harness.rows.value = 24
   assert.ok(sawBoth, 'there is a row wide enough to advertise BOTH verbs')
-  assert.ok(sawCommandOnly, 'there is a row where only the higher-priority Command verb survives')
+  assert.ok(sawCommandOnly, 'there is a row where only the higher-priority page toggle survives')
   const tight = paint(harness, 80).at(-1)!
-  assert.ok(!/v command/.test(tight), 'a tight row yields the Command verb too')
-  assert.ok(!/c copy output/.test(tight), 'a tight row yields the copy verb')
+  assert.ok(!/Tab switch/.test(tight), 'a tight row yields the page toggle too')
+  assert.ok(!/Shift\+C copy output/.test(tight), 'a tight row yields the copy verb')
   assert.match(tight, /Retained preview · not full history/, 'the pre-existing disclosure is never the price')
   harness.panel.dispose()
 
   // plan §4: an action that cannot execute this frame is never advertised. With
   // nothing retained the copy verb is absent even where the row has all the room
-  // in the world, while the Command entry (which CAN act) stays.
+  // in the world, while the page toggle (which CAN act) stays.
   const emptyOutput = makePanel(observedState({ label: 'echo one', text: '' }))
   const wideBar = paint(emptyOutput, 200).at(-1)!
-  assert.ok(!/c copy output/.test(wideBar), 'an empty Output never advertises the copy verb')
-  assert.match(wideBar, /v command/, 'the Command entry can still act, so it stays advertised')
+  assert.ok(!/Shift\+C copy output/.test(wideBar), 'an empty Output never advertises the copy verb')
+  assert.match(wideBar, /Tab switch/, 'the page toggle can still act, so it stays advertised')
   emptyOutput.panel.dispose()
 })
 
@@ -1271,7 +1280,7 @@ test('C-06 a >10,000-character / 1,200-line Command scrolls locally and keeps ON
   // Round trip to Output and back: the Command viewport survives, one observer.
   harness.vt.sendInput('\x1b')
   await harness.vt.waitForRender()
-  harness.vt.sendInput('v')
+  harness.vt.sendInput('\t')
   await harness.vt.waitForRender()
   await flush(2)
   assert.equal(firstRowMatching(harness.vt, /^line-\d{4}/), scrolledTop,
