@@ -136,10 +136,11 @@ export interface HistorySeatLayout {
  *    `-1` is the B3 explicit policy of keeping at least one visible transcript
  *    row. The boundary rules are painted INSIDE `granted`; they never take a
  *    transcript/footer row;
- * 3. the boundary rules are DECORATION with the Owner's degradation order:
- *    the bottom rule yields first, then the top rule, and only then the
- *    Preview/metadata region starts to shrink; header/query/action bar and at
- *    least one result/message row are never given up for a rule;
+ * 3. the boundary rules are PREFERRED decoration (Owner decision D15): they may
+ *    compress the Results/Preview regions, but a rule is never drawn at the cost
+ *    of the mandatory header/query/action bar, at least one result row or at
+ *    least one Preview content row. When the budget cannot satisfy all of those,
+ *    the bottom rule is removed first, then the top rule;
  * 4. Header → query → footer have first claim on the content budget, then the
  *    shrinkable body: one divider, the results window
  *    (`min(8, max(1, floor((body-1)×.55)))`) and the Preview remainder;
@@ -160,11 +161,13 @@ export function planHistorySeatLayout(
   const target = Math.floor(rows * (expanded ? HISTORY_SEAT_EXPANDED_RATIO : HISTORY_SEAT_NORMAL_RATIO))
   const grant = Math.min(target, Math.max(0, rows - chrome - 1))
 
-  // One candidate rule count: 2 = both boundaries, 1 = top only (the bottom rule
-  // is the first decoration to yield), 0 = none. A candidate is affordable only
-  // while the content still keeps the mandatory chrome AND a usable body, so a
-  // rule can never push out the header/query/action bar or the Preview the
-  // Owner ordered it to yield before.
+  // One candidate rule count: 2 = both boundaries, 1 = top only (the bottom
+  // rule is removed first), 0 = none. A candidate is affordable only while the
+  // content still keeps the mandatory chrome AND a usable body — at least one
+  // result row and (when previewable) at least one Preview content row — so a
+  // rule may compress the Results/Preview regions but can never push the
+  // Preview below one content row; when even the top-only rule cannot afford
+  // that, both rules are dropped.
   const affordable = (rules: number): boolean => {
     const inner = planHistoryContent(width, Math.max(0, grant - rules), content)
     if (!inner.header || !inner.query || !inner.footer) return false
