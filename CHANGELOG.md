@@ -9,6 +9,18 @@
 
 ### 变更
 
+- 编辑器下方新增常驻的 Task Quick 任务窗口：默认最多 3 条任务（一行身份/位置 + 最多 3 行
+  任务），终端变矮时自然收缩到 1 行，极短屏或没有可展示的任务/注意力时一行都不占（不会留下
+  空占位）。它和 Editor、footer、Transcript 共用同一份实时行预算：先满足编辑器席位、状态栏、
+  至少一行 Transcript 与既有插件 widget 位，剩余空间才给这个窗口，因此任务再多也不会把
+  Editor 或 Footer 顶出屏幕。任务数据与 `/tasks` 完全同源（Job roster、Subagent 目录与
+  parked Question 的同一个 Task Runtime 投影，不新增第二套目录），每行显示任务身份、真实
+  mode 与 `‣ Running` / `‣ Failed` / `‣ Awaiting answer` 状态词，右侧是真实的
+  `showing x-y/N`（N 是可以真正滚到的行数）。被动绘制、刷新、滚轮与 resize 都不会改变失败
+  确认（`!N`）或 Question 的回答状态。全屏 Transcript 下滚轮只滚动指针所在的这个窗口，不
+  抢键盘焦点、不动草稿与 Transcript；普通主屏仍是纯键盘界面（终端自身的选择与回滚不变），
+  任务仍按原有方式用 `↓` 或 `/tasks` 打开 Task Center。
+
 - `Ctrl+R` 历史席位现在有自己的一条边界：顶部一条 `─`（位于身份行之上）与底部一条
   `─`（位于操作提示行之下、贴 footer），让席位与上下方 Transcript / 状态栏的边界可见。
   两条线优先保留，可以适度压缩 Results/Preview 区域，但绝不牺牲 Header、查询、操作提示、

@@ -2639,3 +2639,75 @@ Credential operations also re-check the Connection generation before reporting
 their outcome: a `setReference` that completed against a replaced Host is
 reported as unconfirmed (never as a new-Host success), and a superseded
 `describeReference` degrades to "not configured" in the picker.
+
+## The passive Task Quick accessory below the editor (B4-A)
+
+B4-A installs the passive half of the locked Task Quick UX: a bounded,
+non-focusable task window directly below the editor seat. It is a first-party
+PRIVATE sibling on BOTH physical roots (the regular document, between the seat
+and the public `input.widget.below` Text, and the fullscreen pinned stack in the
+same position) — never an overlay, never an editor-seat tenant, never a public
+extension widget, and never a second focus owner. B4-B owns the keyboard
+crossing, the row selection and the typed row clicks; the legacy modal Quick
+(the existing `↓` / `app.tasks.open`) and `/tasks` Full stay the reachable
+entries, and their routing/wordings are unchanged.
+
+- **One data authority.** The rows are the SAME `Task Runtime` projection the
+  Task Center uses. `TaskBrowserRuntime.commitRows` now publishes the passive
+  window on EVERY commit (not only while a modal browser is open),
+  `TaskRuntime.refreshAttentionRows` republishes it from the controller's
+  detached attention model, and the Jobs-only fallback (`source.jobs` without a
+  `taskRead`) keeps `taskBrowserRows` and the window in step with the registry
+  even while no browser is open. The projection helper
+  (`quickTaskProjection`) applies exactly the modal Quick's Active/ancestor/
+  attention policy and drops the modal-only `view-full` promotion row, so the
+  window's `N` is the number of rows that can actually be scrolled to. There is
+  no second catalog, no second summary and no second acknowledgement ledger; a
+  transient roster read failure keeps the retained same-session snapshot rather
+  than publishing an authoritative empty.
+- **Failure attention is never silently acknowledged.** Passive painting,
+  refresh, resize and wheel never call `TaskBrowserRuntime.acknowledge()`: while
+  live work exists the Active scope keeps the failure out of the window (the
+  footer `!N` attention stays pending), and once it surfaces the window only
+  paints the `‣ Failed` word. Opening the modal Task Browser still performs the
+  original "the user actually saw the row" acknowledgement.
+- **Row budget.** The grant is derived from the LIVE frame: the terminal rows,
+  the measured pinned chrome (header, subject bar, dock, todo, goal, queue, busy
+  indicator, BOTH widget zones, the footer AND the editor seat) plus exactly one
+  visible transcript row, further capped by the accessory's own proportional
+  share of the terminal height and by its own four-row ceiling (identity + three
+  task rows). A one-row grant is spent on task content, never on a header, and an
+  empty projection or a frame with no room paints NO row and installs no hit
+  geometry. The public widget zones keep their placement, their own budget and
+  their lifecycle: the accessory never borrows a row from them, from the editor,
+  from the footer or from the transcript floor.
+- **Window anchoring.** The durable anchor is the first visible row's stable
+  `value`; a status update never moves the window, an inserted/removed row
+  rebases onto the surviving anchored row, and a vanished anchor falls back to
+  the bounded previous index — never to a label, a position or a time guess.
+  `showing x-y/N` reports the painted window, the mode suffix is dropped whole
+  when it cannot be painted whole, and the label is the only part that truncates.
+- **Pointer contract (Transcript Fullscreen only).** The regular main screen
+  stays a keyboard-only surface (the accepted H3A-16 contract: no mouse mode is
+  written, no pointer is dispatched, native terminal selection/scrollback is
+  untouched), so the wheel over the window is deliberately NOT reachable there —
+  it is recorded as such rather than emulated. Inside Transcript Fullscreen the
+  alt screen's EXISTING component dispatch delivers the wheel to the accessory,
+  which resolves it only against its LAST PAINTED frame (width, height, the
+  painted task-row band), moves its own window by one row, consumes nothing at a
+  window boundary, requests no focus and acknowledges nothing. Press/release/
+  click are refused: the accessory cannot open, stop or acknowledge anything in
+  B4-A.
+- **Session currentness.** A session-generation reset clears the window together
+  with the badge/summary/roster mirrors, and every publish inherits the
+  coordinator's session key + request-epoch fence: a late catalog commit of a
+  superseded session can never paint into the new session's window.
+
+Evidence: `test/task-quick-b4a-composition.test.ts` (real `TuiApp` +
+`VirtualTerminal` + `createTaskRuntime`: roster → commit → projection → painted
+below-editor rows on both roots, the Jobs-only fallback, a transient read
+failure, the frozen size matrix, the fullscreen transcript floor, the parked vs
+visible Question case, the SGR wheel with its negative controls, the
+acknowledgement negative with a modal positive control, resize anchoring and the
+no-Task-Center-capability skip) and `test/task-quick-accessory.test.ts` (the pure
+grant ladder, the single-physical-row projection and the window anchor).

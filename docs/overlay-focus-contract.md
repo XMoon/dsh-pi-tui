@@ -941,3 +941,39 @@ search/copy settling after a switch, and the reentrant accept), plus the
 existing `test/ctrl-r.test.ts`, `test/history-panel.test.ts`,
 `test/history-seat-mouse.test.ts` and `test/editor-seat-optional-tenant.test.ts`
 suites.
+
+## 12. The passive below-editor accessory (B4-A)
+
+Task Quick (B4-A) is the first first-party PRIVATE pinned decoration that lives
+in the same physical band as the public `input.widget.below` zone. The boundary
+between the two owners:
+
+- **Two owners, one order, no shared focus.** The accessory is a `TuiApp`-owned
+  component mounted on both roots between the editor seat and the public below
+  widget `Text`; the public slot keeps its registration, its ordering, its
+  visible-text contract and its lifecycle untouched. Neither owner can take
+  keyboard focus: the accessory implements no `Focusable` surface and no
+  input handling, and no `FocusManager` or second input router is introduced.
+- **One budget, computed by the accessory's own owner.** The grant comes from
+  the LIVE terminal rows, the measured pinned chrome (header, subject bar, dock,
+  todo, goal, queue, busy indicator, BOTH widget zones at their current grant,
+  the footer and the editor seat) plus one reserved visible transcript row,
+  capped by the accessory's own proportional share and four-row ceiling. The
+  widget zones derive their own grant from the same live chrome, so neither
+  budget can promise the other's rows away: the accessory reserves the widget
+  zones, not the reverse. A zero grant renders `[]` (no blank band, no hit
+  geometry).
+- **Pointer scope.** The accessory's wheel support exists only where the
+  application already has a pointer: the alt screen's existing component
+  dispatch inside Transcript Fullscreen. The regular main screen keeps its
+  accepted keyboard-only contract (no mouse mode, no dispatch — see §11 and the
+  H3A-16 negative). A resolved wheel moves only the accessory's own window and
+  is resolved against the LAST PAINTED frame; it never focuses, never opens and
+  never acknowledges a failure.
+- **Data and currentness.** The rows are published by the surface Task Runtime
+  through a private `TuiApp` sink on every row/attention commit; the accessory
+  keeps no catalog, no timer and no subscription, and a session-generation reset
+  clears it with the other Task Center mirrors.
+
+Evidence: `test/task-quick-b4a-composition.test.ts`,
+`test/task-quick-accessory.test.ts`, `test/fullscreen-widget-parity.test.ts`.
