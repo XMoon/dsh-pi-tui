@@ -976,6 +976,34 @@ test('PR5b/X061: a wide → narrow → wide resize restores both chips and keeps
   t.app.stop()
 })
 
+test('X061: two long same-prefix preset names stay distinguishable at 44 columns (PR #309 review)', async () => {
+  // The label column at 44 columns is 25 cells for a chip-bearing row, so the
+  // shared head…tail abbreviation must keep each name's own tail and the SELECTED
+  // row must paint the complete `name (id)` identity in its description.
+  const prefix = 'x'.repeat(30)
+  const rows = [{ id: `a-${prefix}AA` }, { id: `a-${prefix}BB` }]
+  const t = setup({
+    agent: fakeAgent('s1', []),
+    sessionBlank: true,
+    currentPreset: () => rows[0]!.id,
+    rows,
+    width: 44,
+    height: 20,
+  })
+  const result = await t.run('') as { kind: string }
+  assert.equal(result.kind, 'success')
+  await t.view()
+  const view = plainViewport(t.vt)
+  const firstRow = view.find(line => line.includes('AA'))
+  const secondRow = view.find(line => line.includes('BB'))
+  assert.ok(firstRow !== undefined && secondRow !== undefined,
+    `each preset row must keep its own tail:\n${view.join('\n')}`)
+  assert.notEqual(firstRow, secondRow, `the two rows must not paint identically:\n${view.join('\n')}`)
+  assert.ok(view.join('\n').includes(rows[0]!.id),
+    `the selected row's description must expand the complete name (id):\n${view.join('\n')}`)
+  t.app.stop()
+})
+
 test('/preset <id> with a started session refuses with the locked text', async () => {
   // The Host outcome is scripted explicitly (agent-preset/locked); the double
   // must NOT re-implement the Host blank state machine (§0.11).
