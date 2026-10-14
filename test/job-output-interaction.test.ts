@@ -599,7 +599,15 @@ test('B-05b a Job opened with an ALREADY observed retained snapshot is searchabl
   await vt.waitForRender()
   assert.equal(harness.observation.records.length, 1, 'the sync first snapshot opened exactly ONE observer')
   assert.match(view(vt), /retained job-a/, 'the first snapshot really reached the body')
-  assert.match(view(vt), /rows 1-1\/1/, 'the position fact is live on the FIRST frame, not after a push')
+  // The opener's first frame measures the chrome BEFORE the layout commits the
+  // real viewport (X054); the onFramePainted re-converge repaints the position
+  // fact one throttled frame later. Wait for that committed frame instead of
+  // asserting inside the window a single waitForRender() does not cover.
+  assert.match(
+    await paintedWhen(vt, painted => /rows 1-1\/1/.test(painted)),
+    /rows 1-1\/1/,
+    'the position fact is live from the FIRST frame, not after a push',
+  )
 
   // No further snapshot is emitted: Find must work on the initial state alone.
   vt.sendInput('\x06')
