@@ -55,7 +55,12 @@ const scrolls = (h) => records(h).filter((row) => row.nativeScroll).map((row) =>
 /* ------------------------------------------------------------- the tree */
 
 const box = (node) => (node === undefined ? 'none' : rect(node).map((n) => Math.round(n * 10) / 10).join(','))
-const actionIds = (frame) => (frame?.actions ?? []).map((action) => action.id).join(',')
+/** The bar's action ids, WITH their frame token (`apply#27`): the token is how a stale
+ *  action is refused once the picker's node identity is long-lived, so the flow reads the
+ *  bases when it asserts WHAT the bar offers. */
+const rawActionIds = (frame) => (frame?.actions ?? []).map((action) => action.id)
+const actionIds = (frame) => rawActionIds(frame).map((id) => String(id).split('#')[0]).join(',')
+const actionOf = (frame, base) => (frame?.actions ?? []).find((action) => String(action.id).split('#')[0] === base)
 const actionLabels = (frame) => (frame?.actions ?? []).map((action) => String(action.label ?? '')).join(' | ')
 const itemOf = (frame, id) => (frame?.items ?? []).find((item) => item.id === id)
 const pickerNode = (snap) => snap.nodes.find((node) => (node.class ?? '').split(' ').includes('sf-picker'))
@@ -201,7 +206,7 @@ const matrixCell = async (h, size) => {
 
   const barButtons = buttons(h, snap)
   h.check(`${cellKey}: the footer is exactly Cancel + the one write, both contained`,
-    barButtons.length === 2 && actionIds(frame) === 'close,apply' && (frame?.actions ?? []).filter((action) => action.id === 'apply').length === 1
+    barButtons.length === 2 && actionIds(frame) === 'close,apply' && (frame?.actions ?? []).filter((action) => String(action.id).split('#')[0] === 'apply').length === 1
     && barButtons.every((node) => containedXY(snap.chains, node)),
     `${barButtons.map((node) => `${h.descendantsText(node)}@${box(node)}`).join(' ')} :: ${actionIds(frame)}`)
   const rows = modelRows(h, snap)
@@ -644,6 +649,31 @@ export default async function (h) {
     && actionLabels(frame).includes('Save default') && actionIds(frame) === 'close,apply'
     && !h.classNodes(snap, 'pk-badge').some((node) => String(node.text) === 'current'),
     `${JSON.stringify(frame?.title)} :: ${actionIds(frame)} :: ${actionLabels(frame)}`)
+
+  // ------------------ the node identity a REAL click must not change (in place) ------
+  // The reported defect: a click on a model lower in the list moved the whole viewport,
+  // because the picker's node key carried the frame revision, so the SDK diffed del+add
+  // and the client REMOUNTED the list (a freshly mounted list brings its selected row into
+  // view). A node whose identity is long-lived cannot remount, so the picker's own wire id
+  // survives the click that changes the selection. The forty-row, scrolled-list case lives
+  // in `scripts/tern-pane-scroll-probe.mjs`, whose fixture is long enough to scroll.
+  {
+    const before = h.snapshot()
+    const selBefore = (lastFrame(h)?.selected ?? null)
+    // The REAL wire id the SDK gave the picker's node this frame, recorded by the subject
+    // from its own view tree: the identity the client keys its DOM on.
+    const idBefore = lastFrame(h)?.pickerId
+    const row = modelRows(h, before)
+      .find((node) => !(node.class ?? '').split(' ').includes('sel') && containedXY(before.chains, node))
+    const clicked = row === undefined ? false : await h.click(before.chains, row)
+    await h.sleep(200)
+    const after = h.snapshot()
+    const idAfter = lastFrame(h)?.pickerId
+    h.check('the picker keeps ONE node identity across a real selection click (no remount)',
+      typeof idBefore === 'string' && clicked && idAfter === idBefore,
+      `before=${JSON.stringify(idBefore)} after=${JSON.stringify(idAfter)} clicked=${clicked} selectedBefore=${JSON.stringify(selBefore)} selectedAfter=${JSON.stringify(lastFrame(h)?.selected ?? null)}`)
+    h.measure('the rows the click left on screen', JSON.stringify(modelRows(h, after).map((node) => `${h.descendantsText(node).slice(0, 12)}@${Math.round(rect(node)[1])}${(node.class ?? '').includes('sel') ? '[SEL]' : ''}`)))
+  }
 
   // ------------------------------------- claim 9: measured capability + ledger
   const acceptedWheelShapes = []

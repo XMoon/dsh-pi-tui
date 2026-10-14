@@ -66,12 +66,12 @@ test('production /model: a pane with the picker but without the Reader kinds sti
  *  immediately, but a credit-gated frame may still be in flight and an event read
  *  from the previous frame is (by design) refused as a stale receiver. */
 async function resize(pane: TspPane, cols: number): Promise<void> {
-  // One frame per resize is the evidence: a picker page's node id moves with the
-  // revision, but the read-only Reader's ids are stable, so the frame count is
-  // what proves the resized layout was really committed.
-  const before = pane.frameCount()
+  // A resize is NOT evidence of a wire frame: the sheet is the client's `md` dialog at
+  // every width and the pane width only prices the strip's chip labels, so a resize of a
+  // short catalogue legitimately changes nothing on the wire. The evidence the presenter
+  // really processed it is the input loop's own tick.
   sendResize(pane, cols)
-  await waitUntil('the resized frame is committed', () => pane.frameCount() > before)
+  await settle(20)
 }
 
 // The wire observation helpers: the REAL reconciled node tree of the frames.
@@ -79,7 +79,7 @@ import {
   clickNode as click,
   clickNodeById,
   layerNodes,
-  pickerAction as actionOf,
+  pickerAction as rawActionOf,
   pickerNode as picker,
   pickerProps as props,
   sendAction as action,
@@ -101,8 +101,21 @@ function rowIds(pane: TspPane): string[] {
 }
 
 /** The action-bar ids of the mounted picker, in wire order. */
-function actionIds(pane: TspPane): string[] {
+/** One action entry by the BASE it really does: the bar's ids carry a frame token. */
+function actionOf(pane: TspPane, base: string): Record<string, unknown> | undefined {
+  const entry = rawActionOf(pane, base)
+  if (entry !== undefined) return entry
+  const actions = (props(pane).actions ?? []) as Array<Record<string, unknown>>
+  return actions.find((action) => String(action.id).split('#')[0] === base)
+}
+
+/** The RAW action ids the bar renders: the frame token is part of them on purpose. */
+function rawActionIds(pane: TspPane): string[] {
   return ((props(pane).actions ?? []) as Array<Record<string, unknown>>).map((entry) => String(entry.id))
+}
+/** The action BASES the bar renders, i.e. what each entry really does. */
+function actionIds(pane: TspPane): string[] {
+  return rawActionIds(pane).map((id) => id.split('#')[0]!)
 }
 
 /** The bar's visible labels, in wire order. */
@@ -128,9 +141,9 @@ function candidateMark(pane: TspPane, id: string): string | undefined {
 async function walkList(pane: TspPane, id: string): Promise<void> {
   for (let step = 0; step < 64; step += 1) {
     if (props(pane).selected === id) return
-    const before = picker(pane)?.id
+    const before = pane.frameCount()
     pane.key('\u001b[B')
-    await waitUntil(`the cursor moves toward ${id}`, () => picker(pane)?.id !== before)
+    await waitUntil(`the cursor moves toward ${id}`, () => pane.frameCount() > before)
   }
   assert.equal(props(pane).selected, id, `the cursor reached ${id}`)
 }
@@ -141,8 +154,11 @@ async function walkList(pane: TspPane, id: string): Promise<void> {
  *  as a stale receiver BY DESIGN, so a test that wants to deliver one must first
  *  observe the new frame. */
 async function nextPickerFrame(pane: TspPane): Promise<void> {
-  const before = picker(pane)?.id
-  await waitUntil('the next picker frame is committed', () => picker(pane)?.id !== before)
+  // The picker's node id is deliberately long-lived (a per-frame id made the client
+  // REMOUNT the list, which moved it under a click), so a committed frame is observed
+  // by the frame counter the fixture itself keeps.
+  const before = pane.frameCount()
+  await waitUntil('the next picker frame is committed', () => pane.frameCount() > before)
 }
 
 /** Whether the mounted picker page is the CATALOGUE (its title states what the
@@ -342,9 +358,8 @@ async function mounted(t: { after(fn: () => unknown): void }, subject = { sessio
   // Every case starts on the suite's NARROW pane (100 columns = 800px). The sheet is
   // the same `md` dialog at every width (the retired wide summary had a threshold;
   // nothing has one now), and a case that needs a wider pane resizes up explicitly.
-  const firstFrame = picker(pane)?.id
   sendResize(pane, 100)
-  await waitUntil('the narrow pane is committed', () => picker(pane)?.id !== firstFrame)
+  await settle(20)
   return {
     pane,
     renderer,
@@ -553,17 +568,52 @@ test('native Model: a row select only highlights, and only a real row can act', 
   await settle(30)
   assert.equal(onCatalogue(pane), true)
   assert.equal(m.writes.length, 0)
-  // A RETIRED frame's receiver is absent from the current one, so a row event
-  // addressed to it can neither re-target the highlight nor the page.
-  const staleFrame = picker(pane)!.id
-  browse(pane, SAME_A)
-  await nextPickerFrame(pane)
-  sendActivate(pane, SAME_B, staleFrame)
-  browse(pane, SAME_B, staleFrame)
+  // A row event only acts when the FRAME is one this pane really built AND the payload
+  // names a row the panel offers right now: the picker's node id is deliberately
+  // long-lived (one identity per panel), so a foreign node id is what `targets` refuses
+  // and a foreign ROW id is what the payload check refuses.
+  sendActivate(pane, SAME_B, 'layer.model-999')
+  browse(pane, SAME_B, 'layer.model-999')
   await settle(30)
-  assert.equal(onCatalogue(pane), true, 'a retired receiver cannot navigate')
+  assert.equal(onCatalogue(pane), true, 'a node this pane never built cannot navigate')
   assert.equal(props(pane).selected, SAME_A, 'and it cannot re-target the highlight either')
   assert.equal(m.writes.length, 0)
+  // The frame id is REAL here and the row id is not one this page carries: a candidate
+  // id belongs to the strip's namespace, so an activate carrying it resolves nowhere.
+  sendActivate(pane, effortItemId('low'), picker(pane)!.id)
+  await settle(30)
+  assert.equal(onCatalogue(pane), true, 'a candidate id cannot navigate the catalogue')
+  assert.equal(props(pane).selected, SAME_A, 'and it cannot re-target the highlight')
+  assert.equal(m.writes.length, 0)
+})
+
+test('native Model: an action from an earlier revision is refused by its own token', async (t) => {
+  // One long-lived picker node means the node id can no longer tell a stale event from a
+  // current one, so the BAR carries the revision itself: the actions are rebuilt every
+  // frame with the frame's token, and an `act` naming any other revision is refused at
+  // admission exactly like an id that was never rendered. `close` is deliberately the one
+  // untokened action (Esc and the client's backdrop send it from any frame).
+  const m = await mounted(t)
+  await m.ready()
+  const { pane } = m
+  const ids = rawActionIds(pane)
+  assert.equal(ids.includes('close'), true, 'the dismissal keeps its frame-free id')
+  const apply = ids.find((id) => id.startsWith('apply#'))
+  assert.ok(apply !== undefined, `the write carries a frame token: ${JSON.stringify(ids)}`)
+  assert.match(apply!, /^apply#\d+$/, 'and the token is the frame revision')
+  const token = Number(apply!.split('#')[1])
+  // A token from an earlier frame, and a base that was never rendered, are both refused.
+  action(pane, `apply#${Math.max(token - 1, 0)}`)
+  action(pane, 'apply#999999')
+  action(pane, 'back#0')
+  await settle(30)
+  assert.equal(m.writes.length, 0, 'a stale or never-rendered action cannot write')
+  assert.equal(onCatalogue(pane), true, 'and none of them pages the surface away')
+  assert.equal(m.retries(), 0, 'and none of them starts a read')
+  // The CURRENT frame's own token still works, so the negatives above are not vacuous.
+  action(pane, apply!)
+  await waitUntil('the current token writes', () => m.writes.length === 1)
+  m.handle.close()
 })
 
 test('native Model: the catalogue owns its Reasoning Effort strip and it only drafts', async (t) => {
@@ -609,7 +659,7 @@ test('native Model: the catalogue owns its Reasoning Effort strip and it only dr
   // A model that advertises NO effort paints NO strip row, and the ring skips it.
   browse(pane, SAME_B)
   await waitUntil('the no-effort model is highlighted', () => props(pane).selected === SAME_B)
-  assert.equal(props(pane).strip, undefined, 'a model without efforts has no strip')
+  assert.equal(props(pane).strip ?? undefined, undefined, 'a model without efforts has no strip')
   pane.key('\t')
   await waitUntil('the bar is the next zone', () => String(actionOf(pane, 'apply')?.label).endsWith('[Enter]'))
   assert.equal(m.writes.length, 1, 'reaching the bar wrote nothing')
@@ -619,7 +669,7 @@ test('native Model: the catalogue owns its Reasoning Effort strip and it only dr
   pane.key('\u001b')
   await waitUntil('the bar released the keyboard', () => !String(actionOf(pane, 'apply')?.label).endsWith('[Enter]'))
   await enterDetails(pane)
-  assert.equal(props(pane).strip, undefined, 'the read-only Reader carries no strip of its own')
+  assert.equal(props(pane).strip ?? undefined, undefined, 'the read-only Reader carries no strip of its own')
   assert.equal(m.writes.length, 1)
   m.handle.close()
 })
@@ -672,14 +722,14 @@ test('native Model: the strip is painted only while the phase can really draft',
   m.handle.setLoading()
   await settle(30)
   assert.equal(props(pane).state, 'loading')
-  assert.equal(props(pane).strip, undefined, 'a running re-read paints no strip')
+  assert.equal(props(pane).strip ?? undefined, undefined, 'a running re-read paints no strip')
   action(pane, 'strip', effortItemId('high'))
   await settle(30)
   assert.equal(m.writes.length, 0, 'and a strip click is refused at admission, not by a later guard')
   m.handle.setLoadError('catalog is unreachable')
   await settle(30)
   assert.equal(props(pane).state, 'error')
-  assert.equal(props(pane).strip, undefined, 'a failed read keeps no strip either')
+  assert.equal(props(pane).strip ?? undefined, undefined, 'a failed read keeps no strip either')
   action(pane, 'strip', effortItemId('high'))
   await settle(30)
   assert.equal(m.writes.length, 0, 'and still admits nothing')
@@ -806,7 +856,7 @@ test('native Model: `select` only highlights and `activate` opens the Reader of 
   await waitUntil('one write from the catalogue', () => m.writes.length === 1)
   assert.deepEqual(m.writes, [{ provider: 'b', model: 'same' }], 'the highlighted model, its own draft')
   m.settleWrite('rejected')
-  await waitUntil('the refusal restores the catalogue', () => picker(pane) !== undefined && picker(pane)!.id !== frame)
+  await waitUntil('the refusal restores the catalogue', () => picker(pane) !== undefined && props(pane).state === 'ready' && onCatalogue(pane))
 })
 
 test('native Model: the Reader is entered from the catalogue and Back returns to it', async (t) => {
@@ -898,7 +948,7 @@ test('native Model: proven refusal stays usable, uncertain settlement closes, su
       await settle(30)
       assert.equal(picker(pane)!.id, pendingId)
     } else {
-      await waitUntil('refusal clears pending', () => picker(pane) !== undefined && picker(pane)!.id !== pendingId)
+      await waitUntil('refusal clears pending', () => picker(pane) !== undefined && props(pane).state === 'ready')
       assert.ok(!actionOf(pane, 'apply')?.disabled, 'a refusal restores the primary action')
       assert.deepEqual(props(pane).current, [SAME_A], 'a refusal never paints the requested model as current')
       assert.match(String(props(pane).message), /(Rejected|Cancelled|Unsupported)\./,
@@ -925,7 +975,7 @@ test('native Model: a refusal keeps the catalogue and the draft the strip chose'
   // An admitted write refuses every page operation, so its bar renders the way out
   // and the disabled write — never an entry that nothing could run.
   assert.deepEqual(actionIds(pane), ['close', 'apply'], 'a pending catalogue offers Close + the disabled write')
-  assert.equal(props(pane).strip, undefined, 'and it paints no strip at all while the write is admitted')
+  assert.equal(props(pane).strip ?? undefined, undefined, 'and it paints no strip at all while the write is admitted')
   forge(pane, 'strip', effortItemId('high'))
   await settle(30)
   assert.equal(m.writes.length, 1, 'a forged strip value cannot admit a second write')
@@ -954,13 +1004,15 @@ test('native Model: a failed directory read shows ONE Retry and re-reads from th
   await waitUntil('retry asked the original read owner', () => m.retries() === 1)
   assert.equal(m.writes.length, 0, 'a Retry never writes')
   assert.equal(props(pane).state, 'loading', 'the retry re-enters loading')
-  // The re-read hydrates the SAME panel (no second picker).
-  const staleId = picker(pane)!.id
+  // The re-read hydrates the SAME panel AND the same node: one identity per panel is
+  // what keeps the client from remounting the list (measured: a per-frame id moved the
+  // whole viewport under a click).
+  const nodeId = picker(pane)!.id
   await m.ready()
-  assert.notEqual(picker(pane)!.id, staleId, 'the hydrated frame is a new revision')
-  action(pane, 'apply', undefined, staleId)
+  assert.equal(picker(pane)!.id, nodeId, 'the re-read hydrates the SAME picker node')
+  action(pane, 'apply', undefined, nodeId)
   await settle(20)
-  assert.equal(m.writes.length, 0, 'the loading frame receiver is retired')
+  assert.equal(m.writes.length, 0, 'the re-read phase admits no write')
   assert.equal(m.retries(), 1, 'one Retry is exactly one read')
 })
 
@@ -1061,7 +1113,7 @@ test('native Model: browsing, effort, graphemes, modal and stale receiver fences
   assert.equal(layerNodes(pane).length, 0, 'the modal owns the layer')
   pane.key('\u001b')
   await approval
-  await waitUntil('model resumes', () => picker(pane) !== undefined && picker(pane)!.id !== oldId)
+  await waitUntil('model resumes', () => picker(pane) !== undefined && picker(pane)!.id === oldId && props(pane).title !== undefined)
   action(pane, 'apply', undefined, oldId)
   browse(pane, SAME_A, oldId)
   await settle(30)
@@ -1122,11 +1174,19 @@ test('production /model: sessionless pending save, close/reopen and settled defa
     assert.deepEqual(saved, [{ provider: 'p', model: 'm2' }])
     assert.equal(boot.harness.createdSessions.length, 0, 'default selection must not create a session')
     await waitUntil('pending action', () => actionOf(boot.pane, 'apply')?.label === 'Selecting…')
+    const firstPanel = picker(boot.pane)!.id
     boot.pane.key('\u001b')
     await waitUntil('close picker', () => picker(boot.pane) === undefined)
     boot.pane.key('/model\r')
     await waitUntil('reopened old default', () => props(boot.pane).state === 'ready')
     const id = picker(boot.pane)!.id
+    // One identity per PANEL, never across panels: a node id from the panel that closed
+    // must not be able to act on the one that replaced it (the SDK routes by id, and the
+    // id is the only thing an event carries besides its payload).
+    assert.notEqual(id, firstPanel, 'a reopened panel gets its own node identity')
+    browse(boot.pane, JSON.stringify(['p', 'm2']), firstPanel)
+    await settle(20)
+    assert.equal(picker(boot.pane)!.id, id, "the retired panel's id cannot act on the new one")
     release()
     await settle(60)
     assert.equal(picker(boot.pane)!.id, id)
@@ -1505,20 +1565,22 @@ test('native Model: a failed read keeps the keyboard in the one bar it can opera
   // keyboard into the inert list, where no key acts and the cue disappears. Each
   // step waits for ITS OWN committed frame: a predicate can still read the
   // pre-Tab frame and pass on the wrong state.
+  // A Tab that keeps the SAME bar focus legitimately changes nothing on the wire (one
+  // long-lived node, and the cue is what carries the focus), so each step is asserted on
+  // the state it produced rather than on a frame that need not exist.
   for (const [name, key] of [['Tab', '\t'], ['Shift+Tab', '\u001b[Z']] as const) {
-    const before = picker(pane)?.id
     pane.key(key)
-    await waitUntil(`${name} commits its own frame`, () => picker(pane)?.id !== before)
+    await settle(20)
     assert.ok(focused('retry') || focused('close'),
       `${name} must not drop the cue into the inert list`)
   }
   // ←→ still move across Retry/Cancel in that zone (each step its own frame).
   const barFrame = picker(pane)?.id
   pane.key('\u001b[D')
-  await waitUntil('Cancel focused', () => picker(pane)?.id !== barFrame && focused('close'))
+  await waitUntil('Cancel focused', () => focused('close'))
   const closeFrame = picker(pane)?.id
   pane.key('\u001b[C')
-  await waitUntil('Retry focused again', () => picker(pane)?.id !== closeFrame && focused('retry'))
+  await waitUntil('Retry focused again', () => focused('retry'))
   // Esc is never swallowed: the failed read has no operable zone to return to, so
   // it closes instead of parking the keyboard in the inert list.
   pane.key('\u001b')
@@ -2014,7 +2076,7 @@ test('native Model: a model without efforts paints no strip and invents no candi
   assert.equal(m.writes.length, 0)
   // The absence is stated by the ABSENT strip: no invented `Not available` row and
   // no candidate anywhere, and `Tab` therefore reaches the bar directly.
-  assert.equal(props(pane).strip, undefined, 'a model without efforts paints no strip')
+  assert.equal(props(pane).strip ?? undefined, undefined, 'a model without efforts paints no strip')
   assert.equal(
     layerNodes(pane).some((node) => node.id.includes('effort:')),
     false,
@@ -2190,16 +2252,16 @@ test('native Model: no pane width changes the sheet form any more', async (t) =>
   m.handle.close()
 })
 
-test('native Model: a scroll queued behind a stalled frame credit names a Reader body the client never received', async (t) => {
+test('native Model: a scroll queued behind a stalled frame credit stays a REAL Reader body', async (t) => {
   // The SDK owns the frame/credit queue: `Surface.scroll()` appends to the SDK's own
-  // `#queue` when no frame credit is free, and `#flush()` sends the newest pending
-  // View followed by that queue UNFILTERED (the documented F3-001 boundary, here on
-  // a scroll op — see the runtime-gap record's F3-004). A Reader body id is
-  // frame-scoped, so a scroll queued for one revision and delivered after a LATER
-  // revision replaced the pending View addresses a node the client never saw. This
-  // test drives exactly that sequence and asserts the reproduced opacity so that the
-  // day the SDK filters the queue the assertion fails and the limitation can be
-  // retired.
+  // `#queue` when no frame credit is free, and `#flush()` sends the newest pending View
+  // followed by that queue UNFILTERED (the documented F3-001 boundary — see the
+  // runtime-gap record). That queue used to trip F3-004 here because a Reader body id
+  // was frame-scoped: a scroll queued for one revision and delivered after a LATER
+  // revision replaced the pending View addressed a node the client never saw. The Reader
+  // now keeps ONE identity per panel, so this test drives the same stall and asserts the
+  // opposite, stronger fact: the op the client finally receives names the body the
+  // client already HAS.
   const m = await mounted(t)
   await m.ready()
   const { pane } = m
@@ -2211,8 +2273,11 @@ test('native Model: a scroll queued behind a stalled frame credit names a Reader
   // otherwise leave the fixture stalled.
   t.after(() => pane.releaseAcks())
   pane.holdAcks()
-  for (const cols of [101, 102, 103, 104]) {
-    sendResize(pane, cols)
+  // Force more repaints than the pane has credits (2) through props that really change
+  // the Reader's frame — a resize no longer does (the sheet is width-independent, and one
+  // long-lived node means an unchanged View sends no op at all).
+  for (const notice of ['stall-1', 'stall-2', 'stall-3', 'stall-4']) {
+    m.handle.setLoadError(notice)
     await settle(40)
   }
   const sentWhileStalled = pane.frameCount()
@@ -2221,7 +2286,7 @@ test('native Model: a scroll queued behind a stalled frame credit names a Reader
   pane.key('\u001b[F')
   await settle(30)
   // One more repaint replaces the pending View BEFORE the credit is released.
-  sendResize(pane, 105)
+  m.handle.setLoadError('stall-5')
   await settle(40)
   pane.releaseAcks()
   await settle(80)
@@ -2248,9 +2313,12 @@ test('native Model: a scroll queued behind a stalled frame credit names a Reader
   assert.ok(pane.frameCount() > sentWhileStalled, `releasing the acks really sent the coalesced frame (${sentWhileStalled} -> ${pane.frameCount()})`)
   assert.equal(queued.length, 1, `the Reader key really queued exactly one scroll op: ${JSON.stringify(queued)}`)
   assert.ok(deliveredBodies.length >= 1, `the bodies of the revisions the client really received are on the wire: ${JSON.stringify(deliveredBodies)}`)
-  assert.equal(deliveredBodies.includes(queued[0]!.id), false,
-    `the scrolled body is NOT one the client received: ${queued[0]!.id} vs ${JSON.stringify(deliveredBodies)}`)
-  assert.equal(stale.length, 1, `the delivered scroll op addresses a body the client never received: ${JSON.stringify(queued)} vs ${delivered.size} delivered node id(s)`)
+  // The identity fix, asserted positively: the scrolled body is one the client really
+  // received (its id is long-lived, so a coalesced View cannot retire it), and every
+  // delivered scroll op names such a body.
+  assert.equal(deliveredBodies.includes(queued[0]!.id), true,
+    `the scrolled body IS one the client received: ${queued[0]!.id} vs ${JSON.stringify(deliveredBodies)}`)
+  assert.equal(stale.length, 0, `every scroll op names a body the client received: ${JSON.stringify(queued)} vs ${delivered.size} delivered node id(s)`)
   m.handle.close()
 })
 
@@ -2315,30 +2383,29 @@ test('native Model: the Reader survives a resize and Back returns to its real or
   m.handle.close()
 })
 
-test('native Model: a retired Reader frame can never act on a later one', async (t) => {
+test('native Model: the Reader keeps ONE identity per panel and a foreign frame cannot act', async (t) => {
   const m = await mounted(t)
   await m.ready()
   const { pane } = m
   await openDetails(pane)
-  const staleBack = readerBackNode(pane).id
-  const staleBody = readerBodyNode(pane)?.id
+  const readerBack = readerBackNode(pane).id
+  const readerBody = readerBodyNode(pane)?.id
+  // Coming back to the catalogue and entering the Reader again must reuse the SAME ids:
+  // a per-revision Reader id made the client REMOUNT the container, so the app's own
+  // scroll op could name a body the client never received (the runtime-gap record's
+  // F3-004) and the container's scroll position was lost with it.
   await backToCatalogue(pane)
   await openDetails(pane)
-  const freshBack = readerBackNode(pane).id
-  const freshBody = readerBodyNode(pane)?.id
-  // The layer region's root id is the fixed region name and the root's own key
-  // never reaches its children, so a CONSTANT child key would make the Reader's
-  // ids stable across revisions and panels. They must be frame-scoped instead.
-  assert.notEqual(freshBack, staleBack, "the Reader never reuses a retired frame's Back id")
-  assert.notEqual(freshBody, staleBody, 'and never reuses its scroll container id either')
-  // A retired receiver is refused ON THE WIRE: its id is simply absent from the
-  // current frame, so neither the SDK's own dispatch nor the presenter routes it.
-  clickNodeById(pane, staleBack)
+  assert.equal(readerBackNode(pane).id, readerBack, 'the Reader keeps one Back identity across the round trip')
+  assert.equal(readerBodyNode(pane)?.id, readerBody, 'and one scroll-container identity')
+  // The fence that replaced the per-frame ids, on the page that has no action bar: an
+  // event addressed to a frame this pane never built is simply not in `targets`.
+  sendActivate(pane, 'row-that-does-not-exist', 'layer.model-999')
+  clickNodeById(pane, 'layer.model-999')
   await settle(30)
-  assert.equal(inDetails(pane), true, 'the retired Back click cannot navigate the new Reader')
+  assert.equal(inDetails(pane), true, 'a foreign frame cannot navigate the Reader')
   assert.equal(picker(pane), undefined, 'and it cannot page the surface away either')
-  // The CURRENT frame's Back row still works, so the negative above is not a
-  // vacuous "nothing works".
+  // The CURRENT frame's Back row still works, so the negatives above are not vacuous.
   await backToCatalogue(pane)
   m.handle.close()
 })

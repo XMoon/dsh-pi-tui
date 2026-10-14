@@ -160,7 +160,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   switching the whole model needs no second page; a row click only moves the
   highlight, and clicking the highlighted row (or `Enter`) opens that model's
   read-only **Full details** page directly: there is no intermediate page and no
-  second-level effort menu. The notice at the top of that page is now inked by what it
+  second-level effort menu. The catalogue, its layer and that page now keep ONE node
+  identity for the panel's whole life (a per-frame id made the client remount the list,
+  which moved the whole viewport when a lower model was clicked), so the native scrollbar
+  and wheel stay available and clicking a visible row no longer moves the viewport. The notice at the top of that page is now inked by what it
   reports — an error for a write that was refused, unsupported or threw, information for
   a cancellation — where write-outcome notices used to read as information. The window no longer grows with the terminal either: the
   catalogue always asks for the client's medium dialog (measured, the `lg` sheet

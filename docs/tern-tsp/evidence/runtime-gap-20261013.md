@@ -52,43 +52,30 @@ Baseline R5 real-pane run: **11 assertions / 0 failed / 7 informational**. The f
 
 ### F3-004 — the same credit/queue boundary on a queued `Surface.scroll()` (Reader body)
 
-**Confirmed at the wire level; new operation, same SDK boundary as F3-001.** The
-Reader page is the one place the app drives a native scroll container, and it
-addresses the body node of the frame it built (a frame-scoped id, so a retired
-Reader's id is never reused). Under a blocked frame credit, `Surface.scroll()`
-queues the operation exactly like `focus()` did.
+**The same SDK boundary as F3-001; the app-side consequence retired with the node-identity
+fix.** The Reader page is the one place the app drives a native scroll container, and it
+addresses the body node of the frame it built. While a Reader body id was FRAME-SCOPED, a
+`Surface.scroll()` queued under a blocked frame credit could be delivered after a later
+View replaced the pending one, so it named a body the client had never received (the
+earlier revision of this entry records that sequence id by id). That was a SECOND symptom
+of the per-frame node key: a key that changes every frame also makes the SDK diff
+`del + add`, so the client REMOUNTED the Reader — losing its scroll position — and the
+app's own scroll target was retired by the remount.
 
-The controlled sequence, reproduced by the targeted test
-`test/tern-tsp-model-picker.test.ts` → *"a scroll queued behind a stalled frame
-credit names a Reader body the client never received"* (its own diagnostic prints
-the exact ids):
+The fix is the same one the picker needed: `model-picker-view.ts` now keys the layer, the
+picker and the Reader by the panel SERIAL only (`model-<serial>`, `model-details-reader-<serial>`,
+`model-details-body-<serial>`), so every long-lived node keeps ONE identity for the panel's
+life. The targeted test
+`test/tern-tsp-model-picker.test.ts` → *"a scroll queued behind a stalled frame credit stays
+a REAL Reader body"* still drives the exact stall (held acks, more repaints than the pane's
+two credits, a real `End` while stalled, one more repaint that replaces the pending View,
+then the release) and now asserts the STRONGER fact: the scroll op the client finally
+receives names the body the client already has (measured: every queued scroll id is in the
+delivered set, and the delivered set contains that body).
 
-1. the Reader is open and 12 frames have been acknowledged;
-2. the test holds the pane's frame acks, so the next two Views spend the pane's two
-   credits and every further repaint is coalesced into the single pending View
-   (measured: no frame is sent during the stall and the release sends one frame);
-3. a real `End` asks the Surface to scroll the body of the frame the presenter
-   currently holds — `layer.model-details-reader-1-rev-15.model-details-body-1-rev-15`;
-4. one more repaint replaces the pending View with `rev-16`, so `rev-15` is
-   discarded **without ever being sent**;
-5. releasing the acks flushes the newest View (`rev-16`) followed by the queue
-   (measured: the delivered Reader bodies are `rev-11`, `rev-12`, `rev-13` and
-   `rev-16` — `rev-15` is not among them — while the delivered scroll op still names
-   `rev-15`'s body).
-
-**Impact bound.** The client can only reject that op as an `unknown id` (the same
-rejection class F3-001 observed for the stale focus): the ONE Reader scroll keypress
-that raced the coalescing is dropped. There is no crash, no stale app state, no
-business effect, and the next key after the flush addresses the current body. The
-test observes the WIRE (a scripted pane does not validate ids), so this is a
-protocol-level confirmation, not a reproduced client error.
-
-**Disposition.** Report upstream together with F3-001: it is the same
-`#queue`/`#flush` filter boundary applied to one more operation, and the project does
-NOT add a second scroll queue, a shadow sent View, an ACK watchdog or an automatic
-retry for it. The regression test intentionally asserts the reproduced opacity so
-that the day the SDK filters the queue the assertion fails and this entry can be
-retired. Owner acceptance of the bounded limitation is the open product decision.
+**Status.** The SDK's `#queue`/`#flush` behaviour itself is unmodified and stays upstream
+with F3-001 — the app simply no longer trips it. No second scroll queue, shadow sent View,
+ACK watchdog or automatic retry was added, and none is needed for this symptom.
 
 ## 3. F3-002 — diagnostic gap fixed independently
 
@@ -149,7 +136,7 @@ Historical reproducibility hints (paths are **local historical locators, not rep
 
 ## 7. Maintenance decisions and re-open triggers
 
-1. **Current actions:** F3-001 stays `OPEN / P2 / UPSTREAM_REPORTED` ([SDK #48](https://github.com/stencil-hq/tern-sdk/issues/48)); F3-004 (the queued `Surface.scroll()` on the Reader body, the same boundary on one more operation) stays `OPEN / P2 / UPSTREAM` with F3-001; F3-002 stays `FIXED` ([project #299](https://github.com/XMoon/dsh-pi-tui/pull/299)); F3-003 stays `RISK_UNPROVEN`.
+1. **Current actions:** F3-001 stays `OPEN / P2 / UPSTREAM_REPORTED` ([SDK #48](https://github.com/stencil-hq/tern-sdk/issues/48)); F3-004's SDK boundary (the queued `Surface.scroll()`, the same `#queue`/`#flush` filter as F3-001) stays upstream with F3-001, but its APP-SIDE symptom is RETIRED by the node-identity fix — the Reader keeps one id per panel, so a queued scroll can no longer name a body the client never received; F3-002 stays `FIXED` ([project #299](https://github.com/XMoon/dsh-pi-tui/pull/299)); F3-003 stays `RISK_UNPROVEN`.
 2. **No new local infrastructure:** no second Frame/Focus queue, shadow sent View, ACK watchdog, automatic operation retry, or SDK fork/patch merely to silence this error.
 3. **Revisit F3-001** when upstream SDK changes relevant `Surface` semantics / publishes a candidate fix; when a Tern client changes per-Op rejection to frame-level failure; or when a real input/focus failure is correlated with the protocol diagnostic. Rapid modal/focus transitions becoming a routine feature also warrants requalification.
 4. **Revisit F3-003** if a real broken-tty/retention consequence is observed, or upstream close semantics materially change. Do not equate a source-level divergent default with a confirmed visible residue.

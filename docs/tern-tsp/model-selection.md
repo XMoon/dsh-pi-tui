@@ -45,19 +45,31 @@ row and the `Esc` that shares its intent return there.
 
 ### The catalogue (one list-first picker at every width)
 
-**The list is WINDOWED, and that is a defect fix, not a density choice.** MEASURED on
-the real client: whenever `selected` changes, the client re-anchors the newly selected
-row to the BOTTOM edge of its own list — it scrolls the list to do it — so a click on a
-row far below the previous one moved the whole viewport (a 4-row jump in the probe,
-more with a longer catalogue). A list that has nothing to scroll cannot move, so the
-catalogue sends a window of at most six model rows (plus the group head that introduces
-them): the rows fill the client's list box, a click lands the highlight exactly where
-the row already is, and the probe shows the frame before and after a real click
-byte-identical. The window follows the app's own cursor with a `nearest` rule, so a
-single-row step slides it by one row and a selection inside it never re-pages it. The
-consequences are deliberate: the catalogue shows six models at a time (the client's own
-wheel has nothing left to scroll, so browsing is the search box plus the arrow keys),
-and the count on the title row still names the whole catalogue.
+**One node identity per panel, and that is a defect fix.** The picker, its layer and the
+Reader keep ONE node key for as long as the panel lives (`model-<serial>`); the frame
+revision never reaches a long-lived key. MEASURED on the real client with a 42-model
+catalogue: a key that changes per frame makes the SDK diff `del(oldPicker) + add(newPicker)`,
+so the client REMOUNTS the list — and a freshly mounted list brings its selected row into
+view, which moved the whole viewport under a click (the click on a row four rows above the
+selection shifted the list by exactly four rows). The isolated A/B/C/D probe confirms the
+cause: with one stable key and the same `selected` change, every row keeps its exact
+coordinates and only the highlight moves; with a per-frame key the list shifts. The full
+catalogue is sent again, so the client's own scroller (and its scrollbar and wheel) is
+back.
+
+The fence that the per-frame key used to provide is not weakened, it MOVED:
+- the bar's actions carry the frame revision in their own id (`apply#<rev>`,
+  `retry#<rev>`) and are rebuilt every frame, so an action event from an earlier
+  revision is refused at admission exactly like a node id that was never rendered;
+  `close` is deliberately the ONE untokened action, because `Esc` and the client's own
+  backdrop gesture must dismiss the panel from any frame;
+- a ROW event is validated against what the panel offers right now (a row id the current
+  page does not carry resolves nowhere), and the node id must belong to a frame this pane
+  really built, which is what refuses a foreign panel's id;
+- the cross-PANEL isolation is the `serial`: a reopened panel gets its own node ids, so a
+  previous panel's id can never act on its replacement;
+- the read-only Reader paints no action bar and its only operation is navigation, so it
+  needs no token of its own.
 
 The catalogue is ONE native picker: `layout: 'rows'`, ALWAYS `size: 'md'`,
 `preview: 'none'` at every width, and NO `scopes` column ever. The sheet is a dialog

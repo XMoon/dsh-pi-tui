@@ -18,6 +18,8 @@ import {
   FAILURE_RETRY_ID,
   applyOffered,
   draftedEffort,
+  actionBase,
+  catalogueRowIds,
   effortValue,
   highlightedModel,
   modelChoices,
@@ -81,11 +83,8 @@ function editedQuery(
  * arrow keys move nothing without the app driving `selected`), so this walk is
  * the app's own and it is what makes every visible row keyboard reachable.
  */
-function catalogueCursorIds(panel: ModelPickerPanel): string[] {
-  return [
-    ...visibleModels(panel).map(modelRowId),
-    ...(panel.failures.length === 0 ? [] : [FAILURE_RETRY_ID]),
-  ]
+function catalogueCursorIds(panel: ModelPickerPanel): readonly string[] {
+  return catalogueRowIds(panel)
 }
 
 /** Step the catalogue cursor, wrapping (browse only — never a write). */
@@ -289,7 +288,11 @@ export function actionIntent(
       ? { kind: 'browse-effort', value: candidate }
       : undefined
   }
-  switch (act) {
+  // The bar's own actions carry the frame token of the revision that rendered them, so
+  // an action from an earlier frame is refused here even though its node id is long-lived.
+  const base = actionBase(panel, act)
+  if (base === undefined) return undefined
+  switch (base) {
     case 'close':
       return { kind: 'close' }
     case 'back':
