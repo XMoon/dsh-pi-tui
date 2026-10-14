@@ -807,7 +807,12 @@ class JobInspectorActionBar implements Component {
     // (plan §1.2 MUST 5 / §2.1 / §4.2).
     const pageHint = facts.bodyVisible && !facts.searchEditing
     const findSegment: ActionBarSegment[] = !facts.searchEditing && facts.canFind
-      ? [{ text: facts.findHint === '' ? 'Find /' : `Find ${facts.findHint} /`, priority: 1 }]
+      // `<key list> <verb>`, like every other segment: `/` is the always-available
+      // Find alias and sits INSIDE the key list, so the verb terminates the hint
+      // and the list can never read as a dangling separator (design language
+      // §4.2). The list itself is the effective keymap hint, never a fabricated
+      // key (`/` alone when the action is unbound).
+      ? [{ text: facts.findHint === '' ? '/ find' : `${facts.findHint} / find`, priority: 1 }]
       : []
     const position: ActionBarSegment[] = facts.bodyVisible && facts.position.total > 0
       ? [{ text: `rows ${facts.position.start}-${facts.position.end}/${facts.position.total}`, priority: 2 }]
