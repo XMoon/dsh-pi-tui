@@ -25,6 +25,19 @@ import { clampMiddle } from './picker-text.ts'
 export type ModelPickerPhase = 'loading' | 'ready' | 'error' | 'pending'
 
 /**
+ * One local notice: its text plus the role ink it must be painted in.
+ *
+ * The design language gives a notice its own role — `textMuted` when it reports
+ * information, `error` when it reports a failure — so the tone follows the NOTICE,
+ * never the page's read phase: a refused write leaves the panel `ready` and is still
+ * a failure, while a cancellation is information.
+ */
+export interface ModelPickerNotice {
+  readonly text: string
+  readonly tone: 'muted' | 'error'
+}
+
+/**
  * The visible page: the model catalogue (the working page, with the Reasoning
  * Effort strip and the ONE write) or the model's read-only Full details. There is no
  * intermediate page: a row activation opens the details DIRECTLY, and the effort is
@@ -66,8 +79,9 @@ export interface ModelPickerPanel {
   /** The zone the keyboard came from when it entered the action bar (Esc returns
    *  there instead of guessing). */
   previousZone: ModelPickerZone | undefined
-  /** The single local notice (a read error or the last write outcome). */
-  notice: string
+  /** The single local notice (a read error or the last write outcome), with the
+   *  role ink its OWN semantics demand. */
+  notice: ModelPickerNotice | undefined
   directory: ModelPickerDirectory | undefined
   rows: readonly ModelPickerModelRow[]
   failures: readonly ModelPickerFailureRow[]

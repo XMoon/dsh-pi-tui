@@ -277,8 +277,10 @@ deviation, are recorded here so the contract and the frames cannot drift:
   inside the native pill too, it is a one-line change to the badge texts.
 - **A failed provider states itself in words**: its row reads
   `<Provider> · unavailable` — a disabled row may not be signalled by colour alone.
-- **The Reader's notice has a role ink** (`textMuted` for information, `error` for an
-  error) instead of the content's own ink; its labels/heads are the muted role while
+- **The Reader's notice has a role ink** (`textMuted` for information, `error` for a
+  failure) instead of the content's own ink — and the notice CARRIES that tone itself:
+  a refused write leaves the panel `ready` again, so the read phase cannot tell it from
+  a cancellation, and only the outcome can. Its labels/heads are the muted role while
   values are content.
 - No new glyph role, no new palette token, no fork divergence and no new layout
   framework: the whole change is the presenter's own node tree.

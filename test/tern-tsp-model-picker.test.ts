@@ -163,6 +163,22 @@ function carriesText(pane: TspPane, value: string): boolean {
   return nodes(pane).some((node) => node.k === 'text' && nodeText(node) === value)
 }
 
+/** The role ink of the painted span that carries `value` (`t`/`s` is the SDK's own
+ *  span shape), or undefined when no painted span carries that text. */
+function noticeTone(pane: TspPane, value: string): string | undefined {
+  for (const node of nodes(pane)) {
+    if (node.k !== 'text') continue
+    const spans = node.p.spans
+    if (!Array.isArray(spans)) continue
+    for (const part of spans) {
+      if (typeof part === 'object' && part !== null && String((part as { t?: unknown }).t ?? '') === value) {
+        return String((part as { s?: unknown }).s ?? '')
+      }
+    }
+  }
+  return undefined
+}
+
 function onCatalogue(pane: TspPane): boolean {
   const title = String(props(pane).title ?? '')
   return title === 'Switch model' || title === 'Choose default model'
@@ -1784,6 +1800,21 @@ test('native Model: every Details fact reaches the Reader COMPLETE and wraps by 
   await waitUntil('rejected and ready', () => props(m.pane).state === 'ready' && onCatalogue(m.pane))
   await openDetails(m.pane)
   assert.equal(carriesText(m.pane, 'Rejected.'), true, 'the full write notice is readable')
+  // A refused write is a FAILURE, not information: the tone follows the notice, not
+  // the phase — the panel is `ready` again by the time the Reader paints it.
+  assert.equal(noticeTone(m.pane, 'Rejected.'), 'error',
+    'a refusal is painted with the error role even though the panel is ready again')
+  // A CANCELLATION is information: the same page inks it muted.
+  await backFromDetails(m.pane)
+  await waitUntil('back on the catalogue', () => onCatalogue(m.pane))
+  m.pane.key('\u001b[Z')
+  await waitUntil('primary focused again', () => String(actionOf(m.pane, 'apply')?.label).endsWith('[Enter]'))
+  m.pane.key('\r')
+  await waitUntil('pending again', () => actionOf(m.pane, 'apply')?.label === 'Selecting…')
+  m.settleWrite('cancelled')
+  await waitUntil('cancelled and ready', () => props(m.pane).state === 'ready')
+  await openDetails(m.pane)
+  assert.equal(noticeTone(m.pane, 'Cancelled.'), 'muted', 'a cancelled write is information, never a failure')
   m.handle.close()
 })
 

@@ -103,7 +103,7 @@ export class TspModelPicker {
       selected: undefined,
       actionFocus: undefined,
       previousZone: undefined,
-      notice: '',
+      notice: undefined,
       directory: undefined,
       rows: [],
       failures: [],
@@ -116,7 +116,7 @@ export class TspModelPicker {
       setLoading: () => {
         if (this.current() !== panel) return
         panel.phase = 'loading'
-        panel.notice = ''
+        panel.notice = undefined
         this.change(panel)
       },
       close: () => {
@@ -131,7 +131,7 @@ export class TspModelPicker {
       setLoadError: (message) => {
         if (this.current() !== panel) return
         panel.phase = 'error'
-        panel.notice = message
+        panel.notice = { text: message, tone: 'error' }
         this.change(panel)
       },
       setDirectory: (directory) => {
@@ -161,7 +161,7 @@ export class TspModelPicker {
       panel.selected = configured === undefined ? undefined : modelRowId(configured)
     }
     panel.phase = 'ready'
-    panel.notice = ''
+    panel.notice = undefined
     this.align(panel)
     this.change(panel)
   }
@@ -389,7 +389,7 @@ export class TspModelPicker {
    *  again. The loading frame is committed BEFORE the re-entrant callback. */
   private retry(panel: ModelPickerPanel): void {
     panel.phase = 'loading'
-    panel.notice = ''
+    panel.notice = undefined
     this.change(panel)
     panel.request.retry()
   }
@@ -402,7 +402,7 @@ export class TspModelPicker {
     // A stale/undrafted effort can never be submitted as if it were advertised.
     if (choices.length > 0 && !choices.some((choice) => choice.value === draft)) return
     const selection = selectionOf(row, draft, PROVIDER_DEFAULT)
-    panel.notice = ''
+    panel.notice = undefined
     panel.phase = 'pending'
     // Keep the visible Primary Action highlighted while the write settles.
     panel.previousZone = panel.zone
@@ -422,14 +422,19 @@ export class TspModelPicker {
         // keyboard back on the list, so a second Enter cannot repeat the write.
         panel.phase = 'ready'
         panel.zone = 'models'
-        panel.notice = `${outcome.charAt(0).toUpperCase()}${outcome.slice(1)}.`
+        // A cancellation is information; a refusal (or an unsupported write) is a
+        // failure. The notice says which, so the Reader can ink it correctly.
+        panel.notice = {
+          text: `${outcome.charAt(0).toUpperCase()}${outcome.slice(1)}.`,
+          tone: outcome === 'cancelled' ? 'muted' : 'error',
+        }
         this.change(panel)
       },
       onError: () => {
         if (this.current() !== panel) return
         panel.phase = 'ready'
         panel.zone = 'models'
-        panel.notice = 'Failed.'
+        panel.notice = { text: 'Failed.', tone: 'error' }
         this.change(panel)
       },
     })
