@@ -1541,6 +1541,66 @@ test('a narrow wrapped badge drops whole chips instead of slicing one', async ()
   h.app.stop()
 })
 
+test('a lone state chip is dropped whole, never sliced', async () => {
+  // A current model with NO effort: the whole badge is the single `[current]`
+  // chip (the directory default points elsewhere, so no `[default]` chip).
+  const directory = makeDirectory({
+    groups: [{ id: 'p1', name: 'P1', models: [model('sol', { name: 'Sol' })] }],
+    default: { provider: 'p2', model: 'ghost' },
+  })
+  const h = await openPicker({ directory, current: { provider: 'p1', model: 'sol' } })
+  for (const width of [8, 7]) {
+    const rows = h.picker.render(width)
+    const plain = rows.map(stripAnsi)
+    assert.ok(plain.some(line => line.includes('Sol')), `width ${width}: the label must stay painted:\n${rows.join('\n')}`)
+    // `[current]` (9) cannot fit: the LONE chip must be absent whole — no
+    // `urrent]`/`rrent]` fragment and no `[`-less remnant anywhere.
+    assert.ok(!plain.some(line => line.includes('[') || line.includes(']')),
+      `width ${width}: the lone chip must be absent whole:\n${rows.join('\n')}`)
+    // The wrapped badge slot stays reserved as a blank row padded to the grant
+    // (the whole chip dropped, nothing sliced).
+    const blank = rows.find(line => stripAnsi(line) === '' && visibleWidth(line) === width)
+    assert.ok(blank !== undefined, `width ${width}: the blank wrapped badge row stays reserved:\n${rows.join('\n')}`)
+    for (const line of rows) {
+      assert.ok(visibleWidth(line) <= width, `width ${width}: over-wide row ${JSON.stringify(line)}`)
+    }
+  }
+  h.app.stop()
+})
+
+test('a provider effort name containing ` · ` is never split into badge parts', async () => {
+  const directory = makeDirectory({
+    groups: [{ id: 'p1', name: 'P1', models: [
+      model('sol', { name: 'Sol', efforts: [{ id: 'high', name: 'High · Adaptive' }], defaultEffort: 'high' }),
+    ] }],
+    default: { provider: 'p1', model: 'sol' },
+  })
+  const h = await openPicker({ directory, current: { provider: 'p1', model: 'sol' } })
+  const token = 'effort ‹High · Adaptive›'
+  // Badge parts: `[current]` + `[default]` chips then ONE effort `text` part.
+  // The buggy joined-text ` · `-split tears the name, drops the `effort ‹High`
+  // head and paints `…Adaptive›` at 25 and 24 columns.
+  for (const width of [26, 25, 24]) {
+    const rows = h.picker.render(width)
+    const raw = rows.find(line => line.includes('Adaptive'))
+    assert.ok(raw !== undefined, `width ${width}: the wrapped badge row must render:\n${rows.join('\n')}`)
+    // The trim still only lands BETWEEN whole SGR sequences.
+    assert.ok(!raw.replace(/\x1b\[[0-9;]*m/g, '').includes('\x1b'),
+      `width ${width}: a broken escape survived:\n${JSON.stringify(raw)}`)
+    const badge = stripAnsi(raw)
+    assert.ok(!badge.includes('…Adaptive›'),
+      `width ${width}: the name separator was treated as a part boundary:\n${badge}`)
+    assert.ok(badge.includes('‹High · Adaptive›'), `width ${width}: the effort name head must survive:\n${badge}`)
+    if (width >= 25) {
+      assert.ok(badge.includes(token), `width ${width}: the whole effort token must survive:\n${badge}`)
+    }
+    for (const line of rows) {
+      assert.ok(visibleWidth(line) <= width, `width ${width}: over-wide row ${JSON.stringify(line)}`)
+    }
+  }
+  h.app.stop()
+})
+
 test('a narrow-to-wide unwrap transition fences the stale two-line hit map', async () => {
   const directory = makeDirectory({
     groups: [{ id: 'p1', name: 'P1', models: [
