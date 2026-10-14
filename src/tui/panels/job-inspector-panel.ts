@@ -1325,14 +1325,19 @@ export class JobInspectorPanel extends VStack {
       return
     }
     // `Tab` is a RESERVED Job key too (the workspace's own page toggle, the same
-    // way Home/End are reserved): the owner handles it FIRST so a Find binding
-    // remapped onto `Tab` can never shadow the toggle the bar advertises, and the
-    // Find hint drops such a binding (tui-app's `findHint` filters it). The toggle
-    // stays inactive while a Find owns the ordinary keys — in EDIT the branch above
-    // returned, and NAVIGATE falls through to its own block below.
-    if (matchesKey(data, JOB_LOCAL_KEYS.switchPage) && search.mode === 'inactive') {
-      if (command) this.showOutput()
-      else this.openCommand()
+    // way Home/End are reserved). It is consumed HERE — unconditionally, BEFORE the
+    // Find binding is resolved — so a Find remapped onto `Tab` can never reach
+    // `openFind()` in ANY search state: EDIT returned above, and NAVIGATE would
+    // otherwise re-enter EDIT through the branch below. Only the inactive state
+    // performs the page switch; while a Find owns the ordinary keys `Tab` is a
+    // consumed no-op, exactly like the reserved Home/End, and the Find hint drops
+    // such a binding (tui-app's `findHint` filters it). Every OTHER Find binding
+    // keeps its existing NAVIGATE re-entry.
+    if (matchesKey(data, JOB_LOCAL_KEYS.switchPage)) {
+      if (search.mode === 'inactive') {
+        if (command) this.showOutput()
+        else this.openCommand()
+      }
       return
     }
     // `/` is the Job-local alias and the effective Find binding is scoped to the
