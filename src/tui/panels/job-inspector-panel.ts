@@ -1271,7 +1271,7 @@ export class JobInspectorPanel extends VStack {
   /**
    * The Job workspace's ONE input owner. `Esc`/`tasks.stop` are the B1-A
    * intents; Find, the search state machine, the strict-follow viewport keys and
-   * the Job-local `Tab`/`Shift+C` verbs are B1-B/B1-C's. Every other key is inert: the
+   * the Job-local `Tab`/`c` verbs are B1-B/B1-C's. Every other key is inert: the
    * Job is read-only and never leaks into the background editor or transcript.
    */
   handleInput(data: string): void {

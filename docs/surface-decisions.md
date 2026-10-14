@@ -1744,7 +1744,7 @@ introduced.
   `JobObservedSnapshot.text` captured at the keypress, verbatim: no trim, no ANSI
   strip, no header/marker/decoration, no Command source, and no claim about
   evicted history.
-- **Command Copy All** (`C` on the Command page, or a click on the painted
+- **Command Copy All** (`c` on the Command page, or a click on the painted
   `Copy All [C]` button) sends the ORIGINAL `JobObservedSnapshot.label`: leading and
   trailing whitespace, TABs, CRLF and a trailing newline all survive, and the
   display prefix, ellipsis, escapes and alignment spaces are never part of the

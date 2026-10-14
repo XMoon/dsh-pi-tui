@@ -973,7 +973,7 @@ test('L6 B1-C: the Remote Client roster label reaches the Command page and Copy 
     copied.push(text)
     return true
   }
-  fx.fixture.vt.sendInput('C')
+  fx.fixture.vt.sendInput('c')
   await waitFor('the copy settled with a success notice', () => fx.notices.includes('Copy sent'), 10_000)
   assert.deepEqual(copied, [command],
     'the Remote roster label is the Command source byte for byte (TAB, quotes and trailing spaces kept)')

@@ -179,13 +179,6 @@ export const SCOPED_STRING_ALLOWLIST: ReadonlyArray<{ readonly file: string; rea
   // panel imports them.
   { file: 'src/tui/keybindings/hints.ts', line: "export const HISTORY_PREVIEW_SCROLL_LABEL = 'Alt+↑↓'" },
   { file: 'src/tui/keybindings/hints.ts', line: "export const HISTORY_COPY_LABEL = 'Alt+C'" },
-  // (10) The Job workspace's FIXED local keys (B1-D, same category as (8)/(9)):
-  // the workspace owns no keymap action — the page toggle and the current page's
-  // exact copy are screen-local and deliberately non-rebindable — so they cannot
-  // come from `keyHint`, and no remap exists for them to lie about. The KEY ID
-  // (not a rendered label) lives in the key-label authority and the panel imports
-  // it for BOTH the handler and the hint, so the label is derived and cannot drift.
-  { file: 'src/tui/keybindings/hints.ts', line: "copy: 'shift+c'," },
 ]
 
 /** One detected violation (a host chord or a hard-coded label). */
