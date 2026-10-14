@@ -72,6 +72,16 @@ proof through authoritative production input -> derived decision -> route/policy
 the missing production connection. This checkpoint does not create a runtime
 qualification requirement for documentation-only or unrelated changes.
 
+**If the diff touches a rendering path, walk the visual checklist.** Copy
+`docs/tui-design-language.md` §11.2 into the PR and answer every line — role →
+token per painted string, exactly one active device per region, whole-segment
+action-bar drops, keymap-derived keys, the frozen size matrix, dark/light plus the
+icon densities, before/after frames from the real `VirtualTerminal` **and** a real
+terminal check — then record what was actually run. Visual quality itself is an
+**Owner/Reviewer judgement**: "all tests pass" never closes a visual item, and an
+unrun frame or terminal check is reported `NOT_RUN`, never as PASS. The vocabulary
+lives in that one document; do not restate it here.
+
 ## 3. Qualification and evidence
 
 Use [migration qualification governance](client-server-migration.md#migration-process-and-qualification-governance)

@@ -33,6 +33,13 @@ import { themePickerRows } from '../src/app/surface/theme-selection.ts'
 import type { TuiSettingsDoc } from '../src/runtime/config-port.ts'
 import { registerTuiCommandsWithDirectSeams } from './support/register-tui-commands.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
+import {
+  assertBarIsLastRow,
+  assertBodyFloor,
+  assertNoHalfSegmentInBar,
+  assertOneActiveDevice,
+  type PaintedFrame,
+} from './support/design-language-frames.ts'
 
 const startedApps = new Set<TuiApp>()
 afterEach(() => {
@@ -2736,5 +2743,110 @@ test('B-17 the diagnostic line keeps its field name muted and tones only the sta
     assert.equal(h.vt.getCellFgRgb(row, cellIndexOf(h, row, readiness === 'stale' ? 'Stale' : 'Unavailable')),
       hexToRgb(currentPalette[tone]), `only the status word takes the ${tone} tone`)
     h.dispose()
+  }
+})
+
+// ── A-16: the frozen §11.2 degradation-ladder matrix (rollout PR4) ──────────
+//
+// §11.3.2's "a `Status` value of `Verified` and of `Not saved` do not paint the
+// same token" is ALREADY covered by B-02 (it pins the `Verified` word to the
+// `success` token) and B-03 (it pins `Not saved` to the `error` token) in this
+// file, so it is deliberately NOT duplicated here.
+//
+// A-05/A-05b already pin the short-screen rules/notice boundaries (5/6/8 rows);
+// this case walks the frozen §11.2 matrix instead and asserts, per size, the
+// chrome the §8 ladder keeps.
+
+interface SettingsLadder {
+  readonly layout: 'wide' | 'medium' | 'narrow'
+  readonly metaRows: number
+  readonly ruleRows: number
+  readonly noticeRows: number
+  readonly bodyRows: number
+}
+
+/**
+ * The §8 ladder over the panel's own documented grants
+ * (`settings-workspace-panel.ts:302-345`: the exported `76` medium minimum and
+ * the `108` wide minimum, the notice `base - 1 >= 2` floor, the diagnostic
+ * `base - 1 >= 3` floor, and `bodyWithoutRules >= 5` for the two rules).
+ */
+function settingsLadder(width: number, rows: number, noticeLive: boolean): SettingsLadder {
+  const safeRows = Math.max(1, Math.floor(rows))
+  const headerRows = safeRows >= 2 ? 1 : 0
+  const base = Math.max(0, safeRows - headerRows - 1)
+  const noticeRows = safeRows >= 6 && noticeLive && base - 1 >= 2 ? 1 : 0
+  const metaRows = safeRows >= 8 && base - noticeRows - 1 >= 3 ? 1 : 0
+  const bodyWithoutRules = base - noticeRows - metaRows
+  const ruleRows = bodyWithoutRules >= 5 ? 2 : 0
+  return {
+    layout: width >= 108 ? 'wide' : width >= 76 ? 'medium' : 'narrow',
+    metaRows,
+    ruleRows,
+    noticeRows,
+    bodyRows: bodyWithoutRules - ruleRows,
+  }
+}
+
+/** The frozen §11.2 matrix. */
+const SETTINGS_MATRIX = [[200, 50], [120, 40], [100, 40], [80, 24], [80, 10], [72, 24], [44, 20]] as const
+
+const paintedFrame = (h: Harness): PaintedFrame => ({
+  rows: h.rowsPlain(),
+  readColor: (row, col) => h.vt.getCellFgRgb(row, col),
+  primaryRgb: hexToRgb(currentPalette.primary),
+})
+
+test('A-16 the frozen §11.2 matrix keeps the §8 ladder-derived chrome at every size', async () => {
+  for (const [columns, rows] of SETTINGS_MATRIX) {
+    for (const noticeLive of [false, true]) {
+      const h = setup({ columns, rows, doc: { theme: 'dark' } })
+      await h.open()
+      if (noticeLive) {
+        h.app.notify('governance notice', 'info')
+        await h.vt.waitForRender()
+      }
+      const ladder = settingsLadder(columns, rows, noticeLive)
+      const painted = h.rowsPlain()
+      assert.equal(painted.length, rows, `the frame must paint exactly ${rows} rows at ${columns}x${rows}`)
+      const frame = paintedFrame(h)
+
+      // §8 invariants 1 + 2 (shared helper): the bar is the physical last row and
+      // a real body row is reserved from 3 rows up.
+      assertBarIsLastRow(painted, frame.readColor, '↑↓ select · Enter open · Esc close')
+      const bodyTop = 1 + ladder.metaRows + (ladder.ruleRows >= 1 ? 1 : 0)
+      assertBodyFloor(painted, Array.from({ length: ladder.bodyRows }, (_, index) => bodyTop + index))
+      assertNoHalfSegmentInBar(painted, painted.length - 1, ' · ')
+      assertOneActiveDevice(frame)
+      assertRowWidths(h, columns)
+
+      // §8 step 2: the full-width rules exist exactly while the body keeps >= 5 rows.
+      assert.equal(painted.filter(line => /^─+$/.test(line)).length, ladder.ruleRows,
+        `the decorative rules at ${columns}x${rows}:\n${h.view()}`)
+
+      // §8 step 3: the diagnostic line drops when granting it would leave < 3 body rows.
+      assert.equal(painted.some(line => line.includes('Scope:')), ladder.metaRows === 1,
+        `the diagnostic line at ${columns}x${rows}:\n${h.view()}`)
+
+      // §8 step 4: the notice drops when granting it would leave < 2 body rows.
+      assert.equal(painted.some(line => line.includes('governance notice')), ladder.noticeRows === 1,
+        `the notice row at ${columns}x${rows}:\n${h.view()}`)
+
+      // Pane projection: >= 108 three panes, >= 76 two, below one — and each
+      // projection paints only its OWN panes.
+      const hasCategories = painted.some(line => line.includes('Categories ('))
+      const hasRows = painted.some(line => line.includes('Rows ('))
+      const hasDetails = painted.some(line => line.includes('Details'))
+      if (ladder.layout === 'wide') {
+        assert.ok(hasCategories && hasRows && hasDetails, `wide (>=108) paints three panes:\n${h.view()}`)
+      } else if (ladder.layout === 'medium') {
+        assert.ok(hasCategories && hasRows, `medium (76..107) paints categories + rows:\n${h.view()}`)
+        assert.ok(!hasDetails, `medium L0 does not paint the Detail pane:\n${h.view()}`)
+      } else {
+        assert.ok(!hasCategories && !hasRows && !hasDetails, `narrow (<76) paints no pane header:\n${h.view()}`)
+        assert.ok(painted.some(line => line.startsWith('> Appearance')), `the narrow level's list is painted:\n${h.view()}`)
+      }
+      h.dispose()
+    }
   }
 })
