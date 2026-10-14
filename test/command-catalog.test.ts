@@ -901,6 +901,40 @@ test('the /skill picker keeps two same-prefix long names distinguishable (PR #30
   app.stop()
 })
 
+test('the /skill abbreviation also separates two names that share a SUFFIX (PR #309 review)', async () => {
+  // The symmetric counter-case the earlier tail-only form introduced: different
+  // prefixes, identical 35-cell suffixes. A head+tail abbreviation must differ,
+  // and an astral (emoji) name must not break the width budget.
+  const ctx = new Context()
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  const services = fakeServices()
+  ctx.provide('commands', services.commands as never)
+  const suffix = `${'y'.repeat(33)}ZZ`
+  const front = { name: `frontend-common-workflow-${suffix}`, description: '', invocation: { modelInvocable: false, userInvocable: true }, source: 'bundled', provider: 't' }
+  const back = { name: `backend--common-workflow-${suffix}`, description: '', invocation: { modelInvocable: false, userInvocable: true }, source: 'bundled', provider: 't' }
+  const emoji = { name: `${'e'.repeat(30)}\u{1F680}\u{1F680}\u{1F680}\u{1F680}`, description: '', invocation: { modelInvocable: false, userInvocable: true }, source: 'bundled', provider: 't' }
+  ctx.provide('skills', { list: async () => [front, back, emoji], get: async () => undefined } as never)
+  const { defs } = services
+  registerTuiCommandsWithDirectSeams(stubRunner(ctx, app, { agent: fakeAgent('session-a') }))
+  const skillDef = defs.find(def => def.name === 'skill')
+  assert.ok(skillDef?.handler !== undefined)
+  await (skillDef!.handler as (invocation: { rawInput: string }) => Promise<unknown>)({ rawInput: '' })
+  await vt.waitForRender()
+  const rows = vt.getViewport()
+  const view = rows.join('\n')
+  const frontRow = rows.find(line => line.includes('frontend'))
+  const backRow = rows.find(line => line.includes('backend'))
+  assert.ok(frontRow !== undefined && backRow !== undefined, `both prefixes must stay visible:\n${view}`)
+  assert.notEqual(frontRow, backRow, `two same-suffix names must not paint identically:\n${view}`)
+  const emojiRow = rows.find(line => line.includes('eeee'))
+  assert.ok(emojiRow !== undefined, `an astral-character name must still paint:\n${view}`)
+  assert.ok(visibleWidth(emojiRow) <= 80, 'a label must never exceed its row')
+  app.stop()
+})
+
 test('the /skill tail survives the 44-column floor budget (PR #309 review)', async () => {
   const ctx = new Context()
   const vt = new VirtualTerminal(44, 20)
