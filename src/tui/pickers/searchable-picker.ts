@@ -131,16 +131,15 @@ export interface SearchablePickerItem {
    */
   badge?: string
   /**
-   * The PARTS of `badge` when the caller can supply them (the caller derives
-   * both from ONE array: `badge` is the parts joined by `joinBadgeParts` (two
-   * ADJACENT state chips a single space apart, every other boundary ` · `), and
-   * the opt-in
-   * `wrap-when-needed` left-trim then drops WHOLE parts and never has to
-   * reverse-engineer boundaries from the joined text, so a part whose own
-   * text contains ` · ` (e.g. an effort name) is never torn apart. A `chip`
-   * part is kept whole or dropped whole; a `text` part may be visibly
-   * trimmed when it is the only survivor. Trusted internal contract: the
-   * parts must describe `badge` as given, no validation.
+   * The PARTS of `badge`, when the caller can supply them (the caller derives
+   * both from ONE array: `badge` is `joinBadgeParts(parts)`, where two ADJACENT
+   * state chips sit a single space apart and every other boundary keeps the
+   * chrome ` · `). Supplying the boundaries lets the opt-in `wrap-when-needed`
+   * left-trim drop WHOLE parts instead of reverse-engineering them from the
+   * joined text, so a part whose own text contains ` · ` (e.g. an effort name)
+   * is never torn apart. A `chip` part is kept whole or dropped whole; a `text`
+   * part may be visibly trimmed when it is the only survivor. Trusted internal
+   * contract: the parts must describe `badge` as given, no validation.
    */
   badgeParts?: readonly SearchablePickerBadgePart[]
   /**
