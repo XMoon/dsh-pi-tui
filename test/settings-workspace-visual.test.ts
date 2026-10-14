@@ -2677,3 +2677,64 @@ test('B-35 a handled hand-off leaves no stale re-sample latch for the next one',
     restoreThemeEnv()
   }
 })
+
+// ── B-16 / B-17: the narrow-width colour contracts the review asked for ─────
+
+test('B-16 a status WORD that WRAPS keeps its semantic tone on every character (22 columns)', async () => {
+  // At 22 columns the narrow pane's label column is 8 and the value area 14, so
+  // `Outcome unknown` (15 cells) really wraps. The tone must follow the WORD,
+  // not the first wrapped line.
+  const h = setup({
+    columns: 22,
+    rows: 40,
+    doc: { theme: 'dark' },
+    themes: pluginThemes(),
+    applyReplace: () => {
+      h.doc.theme = 'auto'
+      throw new Error('settings namespace "tui-app" changed since it was read')
+    },
+  })
+  await openDetail(h, 'theme')
+  await key(h, '\r')
+  const candidate = rowOf(h, 'light')
+  press(h, candidate, cellIndexOf(h, candidate, 'light'))
+  release(h, candidate, cellIndexOf(h, candidate, 'light'))
+  await settle(h)
+  const confirm = rowOf(h, 'Confirm')
+  press(h, confirm, cellIndexOf(h, confirm, 'Confirm'))
+  release(h, confirm, cellIndexOf(h, confirm, 'Confirm'))
+  await settle(h)
+
+  const rows = h.rowsPlain()
+  const first = rows.findIndex(line => line.includes('Outcome'))
+  assert.ok(first >= 0, `the wrapped status word must be painted:\n${h.view()}`)
+  const second = rows.findIndex((line, index) => index > first && line.trimStart().startsWith('unknown'))
+  assert.ok(second >= 0, `\`Outcome unknown\` must wrap at 22 columns:\n${h.view()}`)
+  const tone = hexToRgb(currentPalette.warning)
+  const firstCol = visibleWidth(rows[first]!.slice(0, rows[first]!.indexOf('Outcome')))
+  for (const [index, character] of [...'Outcome'].entries()) {
+    assert.equal(h.vt.getCellFgRgb(first, firstCol + index), tone,
+      `the first line's \`${character}\` keeps the warning tone`)
+  }
+  const secondCol = visibleWidth(rows[second]!.slice(0, rows[second]!.indexOf('unknown')))
+  for (const [index, character] of [...'unknown'].entries()) {
+    assert.equal(h.vt.getCellFgRgb(second, secondCol + index), tone,
+      `the CONTINUATION line's \`${character}\` keeps the warning tone`)
+  }
+  assert.equal(h.vt.getCellFgRgb(second, secondCol + 'unknown'.length), hexToRgb(currentPalette.textDim),
+    'the explanation right after the word stays dim')
+  h.dispose()
+})
+
+test('B-17 the diagnostic line keeps its field name muted and tones only the status word', async () => {
+  for (const [readiness, tone] of [['stale', 'warning'], ['unavailable', 'error']] as const) {
+    const h = setup({ columns: 100, rows: 40, readiness })
+    await h.open()
+    const row = rowOf(h, 'Config')
+    assert.equal(h.vt.getCellFgRgb(row, cellIndexOf(h, row, 'Config')), hexToRgb(currentPalette.textMuted),
+      `the field name stays muted on a ${readiness} backend`)
+    assert.equal(h.vt.getCellFgRgb(row, cellIndexOf(h, row, readiness === 'stale' ? 'Stale' : 'Unavailable')),
+      hexToRgb(currentPalette[tone]), `only the status word takes the ${tone} tone`)
+    h.dispose()
+  }
+})

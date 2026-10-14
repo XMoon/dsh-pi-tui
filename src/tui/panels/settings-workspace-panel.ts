@@ -569,9 +569,13 @@ export class SettingsWorkspacePanel implements Component {
       kept.push(fact)
     }
     const separator = color.textMuted(' · ')
-    const painted = kept.map((fact, index) => index === kept.length - 1 && kept.length === facts.length
-      ? paint(fact)
-      : color.textMuted(fact)).join(separator)
+    const painted = kept.map((fact, index) => {
+      if (index !== kept.length - 1 || kept.length !== facts.length) return color.textMuted(fact)
+      // The FIELD NAME stays `textMuted`; only the status word takes the tone,
+      // so a stale or unavailable backend does not paint `Config` in warning red.
+      const name = 'Config '
+      return `${color.textMuted(name)}${paint(fact.slice(name.length))}`
+    }).join(separator)
     return fit(painted, plan.width)
   }
 
@@ -1092,16 +1096,20 @@ export class SettingsWorkspacePanel implements Component {
       for (const extra of parts.slice(1)) lines.push(' '.repeat(labelWidth) + ink(extra))
     }
     /** Role 9: the status WORD carries the semantic token and the explanation
-     *  stays one step weaker. The word is our own vocabulary and never wraps;
-     *  the reason is Host text and does. */
+     *  stays one step weaker. The two are painted as SEPARATE SPANS before
+     *  wrapping — `wrapTextWithAnsi` closes a span at a line end and re-opens it
+     *  on the next line, so a status word that wraps on a very narrow pane keeps
+     *  its tone on EVERY character (painting by `word.length` after wrapping
+     *  would drop the tone from the continuation line). */
     const statusField = (label: string, word: string, reason: string | undefined, paint: (text: string) => string): void => {
       const head = fit(color.textDim(label), labelWidth)
-      const plain = reason === undefined ? word : `${word} · ${escapedPhysicalLine(reason)}`
-      const wrapped = wrapTextWithAnsi(plain, bodyWidth)
-      const first = wrapped[0] ?? ''
-      const painted = `${paint(first.slice(0, word.length))}${first.length <= word.length ? '' : color.textDim(first.slice(word.length))}`
-      lines.push(head + painted)
-      for (const extra of wrapped.slice(1)) lines.push(' '.repeat(labelWidth) + color.textDim(extra))
+      const body = reason === undefined
+        ? paint(word)
+        : `${paint(escapedPhysicalLine(word))}${color.textDim(` · ${escapedPhysicalLine(reason)}`)}`
+      const wrapped = wrapTextWithAnsi(body, bodyWidth)
+      const parts = wrapped.length === 0 ? [''] : wrapped
+      lines.push(head + parts[0]!)
+      for (const extra of parts.slice(1)) lines.push(' '.repeat(labelWidth) + extra)
     }
     field('Value', row.summary, color.text)
     if (row.value !== undefined && row.value !== row.summary) field('Source', row.value)

@@ -739,7 +739,40 @@ badge, then bar segments, then right-side affordances. The action bar is the
 physical last row at every size and the body floor never falls below 1 row from 3
 terminal rows up — both already true today and both must stay true.
 
-## 7. Re-verification recipe
+## 7. Real-terminal verification (Settings PR)
+
+Performed on a real TTY (`tmux`, truecolor, this machine), driving the product
+with `dsh --profile <profile>` and reading the pane back with
+`tmux capture-pane -e`: a BEFORE profile linked to `next` without the Settings
+PR, and an AFTER profile linked to the Settings PR worktree. Window sizes
+`120×40` (wide, L0 + L2), `80×10` (short, L0 + L2) and `44×20` (narrow, L2) were
+each captured, and the AFTER frames were reached through a LIVE RESIZE from
+120 to 44 to 80 columns, so the resize path is covered too.
+
+Per-cell ink of the three decisive cells, decoded from the real pane (the
+same window, the same row, BEFORE → AFTER):
+
+| Cell | BEFORE (real `next`) | AFTER (this PR) |
+|---|---|---|
+| the surface word in row 0 | `primary` (`SETTINGS`) | `textStrong` (`Settings`) |
+| the focused pane label | `warning` — the amber `borderFocus`, i.e. an ordinary focus painted as a warning | `primary` (`[Details]`) |
+| a detail value (`Value`, `Runtime`) | **terminal default — unpainted**, so the palette was bypassed | `text` for the primary value, `textDim` for a secondary fact |
+| the pinned bar | `textDim`, `Esc` first, ` \| ` joins, `R refresh` / `↑↓/Pg keys scroll` | `textMuted`, `Esc` last, ` · ` joins, `r refresh` + a separate `PgUp/PgDn` |
+| detail verbs | `[Change…]  [Copy value]` in `accent` | `Change…  Copy value [C]` in `primary` |
+
+The narrow AFTER frame also demonstrates the degradation rule on a real
+terminal: at `44×20` the diagnostic line keeps only `Scope: TUI settings
+document` (trailing facts dropped whole, no `…`), and the bar reads
+`Enter change · ↑↓ scroll · Esc back` — the lowest-priority segments are gone
+as whole segments instead of the old `Enter change…` half-word.
+
+NOT covered by this real-terminal pass (and not claimed): the mouse path, the
+refused-write path inside a live session (it needs a forced authority conflict;
+the refusal ink is covered by the `VirtualTerminal` cell read-back in
+`test/settings-workspace-visual.test.ts`), CJK/wide-glyph terminals, and any
+terminal other than this one. Those stay `NOT_RUN`, not PASS.
+
+## 8. Re-verification recipe
 
 For V2/V3 (and for any later surface PR), the after-evidence must be produced
 from the implemented panels, not from this document:
