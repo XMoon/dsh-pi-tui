@@ -500,6 +500,25 @@ export class Editor implements Component, Focusable {
 		return currentVisualLine === visualLines.length - 1;
 	}
 
+	/**
+	 * True only when a real Down press may leave THIS editor at the last visual
+	 * line (fork divergence X063). The host cannot derive this from the logical
+	 * cursor position: soft-wrapped lines, history browsing, autocomplete, jump
+	 * mode and bracketed paste all change what Down means, and only the editor's
+	 * own word-wrap layout knows where the cursor visually sits. The method is
+	 * read-only and side-effect free; `expectedLayoutWidth` must be the SAME
+	 * layout width `render()` used for the painted frame, so a stale caller
+	 * width can never classify against a wrap map the user is not looking at.
+	 */
+	protected canYieldDownAtLastVisualLine(expectedLayoutWidth: number): boolean {
+		return this.lastWidth === expectedLayoutWidth
+			&& this.isOnLastVisualLine()
+			&& this.historyIndex === -1
+			&& this.autocompleteState === null
+			&& this.jumpMode === null
+			&& !this.isInPaste;
+	}
+
 	private navigateHistory(direction: 1 | -1): void {
 		this.lastAction = null;
 		if (this.history.length === 0) return;

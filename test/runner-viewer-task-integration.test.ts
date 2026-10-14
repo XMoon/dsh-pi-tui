@@ -1760,21 +1760,22 @@ test('a parked continued Question is reachable and reopenable from the Task Cent
   assert.ok(idle.includes('? 1 awaiting'), `the footer counts it as human attention:\n${idle}`)
   assert.ok(idle.includes('↓ view'), `and advertises the reopen trigger:\n${idle}`)
 
-  // The MANDATORY keyboard path: the literal ↓ opens Quick for a Questions-only
-  // session.
+  // The MANDATORY keyboard path: the literal ↓ enters the on-demand Task
+  // Quick for a Questions-only session (B4-B: the accessory, not a modal).
   vt.sendInput('\x1b[B')
   await settle()
   await vt.waitForRender()
   const quickByKey = vt.getViewport().join('\n')
-  assert.equal(app.overlayGraphState().handles, 1, `↓ opens Quick Tasks:\n${quickByKey}`)
-  assert.equal(app.focusSeatForTest(), 'overlay', 'Quick owns keyboard focus while open')
-  assert.ok(quickByKey.includes('Needs attention'), `with the attention group:\n${quickByKey}`)
+  assert.equal(app.overlayGraphState().handles, 0, `↓ enters the on-demand Quick (no modal):\n${quickByKey}`)
+  assert.ok(quickByKey.includes('Task Quick'), `the accessory band paints:\n${quickByKey}`)
   assert.ok(quickByKey.includes('Use staging or production?'), `and the parked Question row:\n${quickByKey}`)
-  assert.ok(quickByKey.includes('awaiting answer'), `marked as awaiting an answer:\n${quickByKey}`)
+  assert.ok(quickByKey.includes('Awaiting answer'), `marked as awaiting an answer (the accessory's status word):\n${quickByKey}`)
+  // Enter routes the typed selection through the production openQuickTaskItem
+  // → the controller entry reopens.
   input('\r')
   await settle()
   await vt.waitForRender()
-  assert.equal(app.overlayGraphState().handles, 0, 'Enter reopens the Question from Quick')
+  assert.equal(app.overlayGraphState().handles, 0, 'Enter reopens the Question from the on-demand Quick')
   const fromQuick = vt.getViewport().join('\n')
   assert.ok(fromQuick.includes('Type your answer…'), `the QuestionFlow is reopened:\n${fromQuick}`)
   assert.equal(app.focusSeatForTest(), 'overlay', 'the reopened Question owns keyboard focus')
@@ -1812,7 +1813,8 @@ test('a parked continued Question is reachable and reopenable from the Task Cent
   await settle()
   await vt.waitForRender()
   const quickAfterPark = vt.getViewport().join('\n')
-  assert.equal(app.overlayGraphState().handles, 1, `↓ opens Quick after the park:\n${quickAfterPark}`)
+  assert.equal(app.overlayGraphState().handles, 0, `↓ enters the on-demand Quick after the park:\n${quickAfterPark}`)
+  assert.ok(quickAfterPark.includes('Task Quick'), `the accessory band paints:\n${quickAfterPark}`)
   assert.ok(quickAfterPark.includes('Use staging or production?'), `with the Question row:\n${quickAfterPark}`)
   input('\r')
   await settle()

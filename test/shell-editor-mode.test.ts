@@ -778,8 +778,13 @@ test('task-browser routing and the footer hint follow the VISIBLE seat editor, n
   const app = new TuiApp(vt, {
     onSubmit: () => {},
     onExit: () => {},
-    onOpenTasks: () => { opened += 1; app.requestRender() },
   }, { editorRegistry: registry })
+  const realEntry = app.enterTaskQuick.bind(app)
+  app.enterTaskQuick = () => {
+    const entered = realEntry.call(app)
+    if (entered) opened += 1
+    return entered
+  }
   app.setCommandCompletions([], fixtureWorkspace(life), null)
   app.start()
   startedApps.add(app)
@@ -804,17 +809,34 @@ test('task-browser routing and the footer hint follow the VISIBLE seat editor, n
   // The plugin's document is the wire form; the user clears it — the
   // VISIBLE editor is now an empty prompt-mode editor.
   created[0]!.setText('')
+  // B4-B: the ↓ admission is the HOST fork editor's boundary claim (X063) —
+  // a plugin editor on the seat takes NO claim, so the hint is withheld and
+  // the route stays with the plugin's own Down ownership even though the
+  // badge + projection are live. (The stale hidden-host shell mode is
+  // irrelevant either way: the claim follows the CURRENT seat occupant.)
+  app.setQuickTaskItems([{ value: 'job:bash-1', label: 'pnpm build', status: 'running', kind: 'task', source: 'job' }])
   app.setTasks([{ id: 'bash-1', label: 'pnpm build', status: 'running', kind: 'bash' }])
   await vt.waitForRender()
-  // The footer advertises the ↓ trigger (the visible editor is prompt).
   const view = vt.getViewport().join('\n')
-  assert.ok(view.includes('↓ view'), `the footer must advertise ↓ for the visible prompt editor:\n${view}`)
-  // ↓ opens the browser despite the hidden host's stale shell mode.
+  assert.ok(!view.includes('↓ view'), `a plugin editor takes no ↓ claim:\n${view}`)
   vt.sendInput('\x1b[B')
   await vt.waitForRender()
-  assert.equal(opened, 1, 'the visible prompt-mode editor must open the task browser')
+  assert.equal(opened, 0, 'a plugin editor must not open the on-demand Quick')
+  // Handing the seat BACK to the host editor restores the claim — but the
+  // hidden host editor is still in SHELL mode ('!' earlier); exit it first
+  // (Esc with the empty body) so the prompt gate holds again.
   handle.dispose()
   app.reconcileEditorNow()
+  await vt.waitForRender()
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+  app.setStatus({ model: 'probe' })
+  await vt.waitForRender()
+  const restored = vt.getViewport().join('\n')
+  assert.ok(restored.includes('↓ view'), `the host editor's claim returns with the seat:\n${restored}`)
+  vt.sendInput('\x1b[B')
+  await vt.waitForRender()
+  assert.equal(opened, 1, 'the host editor enters the on-demand Quick from its last visual line')
 })
 
 test('the ↓ hint is gated on the ROUTING gate, not host-editor emptiness (the review regression)', async (t) => {
@@ -825,19 +847,25 @@ test('the ↓ hint is gated on the ROUTING gate, not host-editor emptiness (the 
   const app = new TuiApp(vt, {
     onSubmit: () => {},
     onExit: () => {},
-    onOpenTasks: () => { opened += 1; app.requestRender() },
   }, { editorRegistry: registry })
+  const realEntry = app.enterTaskQuick.bind(app)
+  app.enterTaskQuick = () => {
+    const entered = realEntry.call(app)
+    if (entered) opened += 1
+    return entered
+  }
   app.setCommandCompletions([], fixtureWorkspace(life), null)
   app.start()
   startedApps.add(app)
   life.defer(() => app.stop())
   await vt.waitForRender()
+  // B4-B: the ↓ admission needs the Quick projection alongside the badge.
+  app.setQuickTaskItems([{ value: 'job:bash-1', label: 'pnpm build', status: 'running', kind: 'task', source: 'job' }])
   app.setTasks([{ id: 'bash-1', label: 'pnpm build', status: 'running', kind: 'bash' }])
   await vt.waitForRender()
   // Scenario 1 (host shell mode, EMPTY body): `!` composes a command —
-  // the old host-editor-emptiness check advertised ↓, but the routing
-  // gate (prompt mode only) refuses it. The hint must NOT show, and ↓
-  // must NOT open the browser.
+  // the routing gate (prompt mode only) refuses it. The hint must NOT
+  // show, and ↓ must NOT enter Quick.
   vt.sendInput('!')
   await vt.waitForRender()
   let view = vt.getViewport().join('\n')
@@ -865,15 +893,17 @@ test('the ↓ hint is gated on the ROUTING gate, not host-editor emptiness (the 
   vt.sendInput('\x1b[B')
   await vt.waitForRender()
   assert.equal(opened, 0, 'a non-empty visible draft must never open the task browser')
-  // The plugin editor clears its draft: the hint returns (the visible
-  // seat is empty + prompt again). A plugin's own text edits reach the
-  // host chrome through its invalidation seam (refreshChrome — the same
-  // path the host editor's onChange takes).
+  // The plugin editor clears its draft. B4-B: even emptied, a plugin
+  // editor takes NO ↓ claim (the visual boundary is the host fork's X063
+  // seam) — the hint stays withheld and the route stays with the plugin.
   created[0]!.setText('')
   app.refreshChrome()
   await vt.waitForRender()
   view = vt.getViewport().join('\n')
-  assert.ok(view.includes('↓ view'), `an emptied plugin editor must advertise ↓ again:\n${view}`)
+  assert.ok(!view.includes('↓ view'), `an emptied plugin editor still takes no ↓ claim:\n${view}`)
+  vt.sendInput('\x1b[B')
+  await vt.waitForRender()
+  assert.equal(opened, 0, 'an emptied plugin editor must not enter the on-demand Quick')
   handle.dispose()
   app.reconcileEditorNow()
 })

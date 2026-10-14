@@ -9,6 +9,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- The Task Quick window is now on-demand: even with live tasks, the window
+  below the editor occupies **zero rows** by default. It appears only when the
+  cursor sits on the focused editor's last visual line (the last soft-wrapped
+  segment of a non-empty multi-line draft included) and you press `↓`; `↑` at
+  the first row or `Esc` returns to the editor with the draft and cursor
+  byte-for-byte intact. While open, `↑↓/PgUp/PgDn` move the selection across
+  the whole task row set (first row selected, tail clamped, paging by the
+  painted rows) and `Enter` — or a same-task-row click in fullscreen — opens
+  the existing typed detail with the row's REAL identity (Job view, subagent
+  viewer, parked Question reopen), never a Stop. Shell mode, autocomplete,
+  history browsing and blocking modals keep `↓` for its editing meaning. The
+  footer's `↓ view` hint now tracks the real admission (a disabled action or a
+  blocking owner drops only the hint — the task count and `?N`/`!N` stay), and
+  the legacy modal Quick is retired: `↓` opens this on-demand window and
+  `/tasks` remains the Full Task Center. The task panel's action bar also
+  settles to the design language: `Esc close` moves last among the navigation
+  verbs and never truncates on narrow frames, the low-frequency management
+  verbs drop as whole segments, key names are lowercase, and `⇧Tab` is spelled
+  `shift+tab`.
+
 - A resident Task Quick window now sits below the editor: up to three tasks by
   default (one identity/position row plus at most three task rows), shrinking to
   one row on a short terminal and to **no row at all** on an extreme frame or an

@@ -43,9 +43,9 @@ afterEach(() => {
   }
 })
 
-/** A real app on a virtual terminal with the Task Center sink counted (the
- * runner's `onOpenTasks` opens the Quick browser; the test only counts the
- * dispatch and never fakes the predicate). */
+/** A real app on a virtual terminal with the Task Center sink counted (B4-B:
+ * the on-demand Quick's production entry replaces the retired onOpenTasks
+ * event; the test only counts the dispatch and never fakes the predicate). */
 function startApp(options: { width?: number; rows?: number } = {}): {
   vt: VirtualTerminal
   app: TuiApp
@@ -56,8 +56,15 @@ function startApp(options: { width?: number; rows?: number } = {}): {
   const app = new TuiApp(vt, {
     onSubmit: () => {},
     onExit: () => {},
-    onOpenTasks: () => { opened += 1 },
   })
+  const realEntry = app.enterTaskQuick.bind(app)
+  app.enterTaskQuick = () => {
+    if (realEntry.call(app)) {
+      opened += 1
+      return true
+    }
+    return false
+  }
   app.start()
   startedApps.add(app)
   return { vt, app, opened: () => opened }
@@ -69,9 +76,31 @@ async function view(vt: VirtualTerminal): Promise<string> {
   return vt.getViewport().join('\n')
 }
 
-/** The non-rich embedder task setter (one running job). */
-function oneRunningTask(app: TuiApp): void {
+/** The non-rich embedder task setter (one running job): the badge sink AND
+ *  the matching Quick projection (B4-B — the ↓ hint follows the same
+ *  admission facts as the routing, and the projection is half of them). The
+ *  commit waits for the FIRST editor paint: the admission includes the fork's
+ *  width-guarded visual classifier, live only after the editor painted at the
+ *  terminal width (production steady state — the roster commits long after
+ *  the first frame). */
+async function oneRunningTask(app: TuiApp, vt: VirtualTerminal): Promise<void> {
+  await vt.waitForRender()
+  await vt.waitForRender()
+  app.setQuickTaskItems([{ value: 'job:job-1', label: 'pnpm build', status: 'running', kind: 'task', source: 'job' }])
   app.setTasks([{ id: 'job-1', label: 'pnpm build', status: 'running', kind: 'job' }])
+}
+
+/** Two parked Questions as their Quick projection rows (B4-B: the ↓ hint
+ *  follows the same admission facts the routing uses — the projection is one
+ *  of them). The commit waits for the FIRST editor paint (see
+ *  {@link oneRunningTask}). */
+async function twoParkedQuestionRows(app: TuiApp, vt: VirtualTerminal): Promise<void> {
+  await vt.waitForRender()
+  await vt.waitForRender()
+  app.setQuickTaskItems([
+    { value: 'question:s1:c1', label: 'first', status: 'awaiting answer', source: 'question' },
+    { value: 'question:s1:c2', label: 'second', status: 'awaiting answer', source: 'question' },
+  ])
 }
 
 /** A bounded Save Location fixture over one real temp directory. */
@@ -118,7 +147,7 @@ async function answerFirstOption(vt: VirtualTerminal): Promise<void> {
 
 test('an active Question drops the ↓ view hint and never routes ↓ to the task browser', async () => {
   const { vt, app, opened } = startApp()
-  oneRunningTask(app)
+  await oneRunningTask(app, vt)
   let screen = await view(vt)
   assert.ok(screen.includes('[1 task running · ↓ view]'), `the idle footer must advertise ↓:\n${screen}`)
   vt.sendInput('\x1b[B')
@@ -144,6 +173,7 @@ test('an active Question drops the ↓ view hint and never routes ↓ to the tas
 test('parked Question attention keeps ?N and the hint; a presented Question only hides the hint', async () => {
   const { vt, app, opened } = startApp()
   app.setQuestionAttention(2)
+  await twoParkedQuestionRows(app, vt)
   let screen = await view(vt)
   assert.ok(screen.includes('? 2 awaiting'), `parked attention must render:\n${screen}`)
   assert.ok(screen.includes('↓ view'), `attention-only state still allows the browser:\n${screen}`)
@@ -166,7 +196,7 @@ test('parked Question attention keeps ?N and the hint; a presented Question only
 
 test('an active Approval drops the hint in the full and compact footers and keeps its decision keys', async () => {
   const { vt, app, opened } = startApp()
-  oneRunningTask(app)
+  await oneRunningTask(app, vt)
   const decision = app.showApprovalPrompt({ toolName: 'bash', reason: 'run a command' })
   let screen = await view(vt)
   assert.ok(screen.includes('Approve bash?'), `the approval dialog missing:\n${screen}`)
@@ -180,10 +210,16 @@ test('an active Approval drops the hint in the full and compact footers and keep
   vt.sendInput('\x1b[B')
   await vt.waitForRender()
   assert.equal(opened(), 1, 'the restored ↓ must reach the sink')
+  // B4-B: the routing witness ENTERED Quick — leave it (Esc) so the idle
+  // affordance under test is the footer's, not the accessory's.
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
 
   // The responsive compact density (`[1t·↓]`) is the second consumer of the
   // same context flag: a pending Approval must drop and restore it too.
   vt.resize(28, 24)
+  await vt.waitForRender()
+  app.setStatus({ model: 'probe' })
   screen = await view(vt)
   assert.ok(screen.includes('[1t·↓]'), `the compact item must advertise ↓:\n${screen}`)
   const compactDecision = app.showApprovalPrompt({ toolName: 'bash', reason: 'run a command' })
@@ -202,7 +238,7 @@ test('a Save Location prompt drops the hint in the full and compact footers and 
   const life = testLifecycle(t)
   const deps = saveLocationDeps(life.tempDir('dsh-pr-e-save-'))
   const { vt, app, opened } = startApp()
-  oneRunningTask(app)
+  await oneRunningTask(app, vt)
   const promise = app.askSaveLocation(
     { title: 'Save session archive', filename: 'dsh-session-abc.zip', initialDirectory: './' },
     deps,
@@ -221,9 +257,14 @@ test('a Save Location prompt drops the hint in the full and compact footers and 
   vt.sendInput('\x1b[B')
   await vt.waitForRender()
   assert.equal(opened(), 1, 'the restored ↓ must reach the sink')
+  // B4-B: exit the entered Quick before the compact boundary (same reason).
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
 
   // Same boundary at the compact density.
   vt.resize(28, 24)
+  await vt.waitForRender()
+  app.setStatus({ model: 'probe' })
   screen = await view(vt)
   assert.ok(screen.includes('[1t·↓]'), `the compact item must advertise ↓:\n${screen}`)
   const compact = app.askSaveLocation(
@@ -244,7 +285,7 @@ test('a Save Location prompt drops the hint in the full and compact footers and 
 
 test('a queued Question handover never flashes the hint between flows', async () => {
   const { vt, app, opened } = startApp()
-  oneRunningTask(app)
+  await oneRunningTask(app, vt)
   const first = askYes(app, 'q1', 'first?')
   const second = askYes(app, 'q2', 'second?')
   let screen = await view(vt)
@@ -266,7 +307,7 @@ test('a queued Question handover never flashes the hint between flows', async ()
 
 test('a nonCapturing notice keeps the hint while a focused capturing overlay suppresses it', async () => {
   const { vt, app } = startApp()
-  oneRunningTask(app)
+  await oneRunningTask(app, vt)
   const notice = app.showExtensionOverlay(
     { kind: 'text', spans: [{ text: 'notice: build finished' }] },
     { nonCapturing: true },
@@ -297,6 +338,7 @@ test('failure and parked attention badges survive a Question; only the hint is g
     failedTotal: 1,
   })
   app.setQuestionAttention(2)
+  await twoParkedQuestionRows(app, vt)
   let screen = await view(vt)
   assert.ok(screen.includes('! 1 failed'), `the failure attention must render:\n${screen}`)
   assert.ok(screen.includes('? 2 awaiting'), `the parked attention must render:\n${screen}`)
@@ -321,7 +363,7 @@ test('failure and parked attention badges survive a Question; only the hint is g
 
 test('the full, responsive-compact and fullscreen footers hide and restore the hint', async () => {
   const { vt, app } = startApp()
-  oneRunningTask(app)
+  await oneRunningTask(app, vt)
   let screen = await view(vt)
   assert.ok(screen.includes('↓ view'), `the default full footer must advertise ↓:\n${screen}`)
   const wideQuestion = askYes(app, 'q1', 'wide?')
@@ -336,6 +378,8 @@ test('the full, responsive-compact and fullscreen footers hide and restore the h
   // Width pressure re-renders the SAME builtin task item at its compact
   // density (`[1t·↓]`): the second consumer of the one context flag.
   vt.resize(28, 24)
+  await vt.waitForRender()
+  app.setStatus({ model: 'probe' })
   screen = await view(vt)
   assert.ok(screen.includes('[1t·↓]'), `the responsive compact item must advertise ↓:\n${screen}`)
   const narrowQuestion = askYes(app, 'q2', 'narrow?')
@@ -369,7 +413,7 @@ test('an explicitly disabled app.tasks.open drops the ↓ hint on every surface 
   // hint is a claim about that trigger, so it must follow the same fact;
   // otherwise it promises a key the router no longer resolves.
   const { vt, app, opened } = startApp()
-  oneRunningTask(app)
+  await oneRunningTask(app, vt)
   let screen = await view(vt)
   assert.ok(screen.includes('↓ view'), `precondition — the default map advertises ↓:\n${screen}`)
 
@@ -405,12 +449,18 @@ test('an explicitly disabled app.tasks.open drops the ↓ hint on every surface 
   // real ↓ route — again through the keymap rebuild alone, at a width whose
   // compact row must now carry the ↓.
   vt.resize(28, 24)
+  await vt.waitForRender()
+  app.setStatus({ model: 'probe' })
   screen = await view(vt)
   assert.ok(!screen.includes('[1t·↓]'), `precondition — still withheld before the rebuild:\n${screen}`)
   app.applyUserKeybindings({}, () => {})
+  await vt.waitForRender()
+  app.setStatus({ model: 'probe' })
   screen = await view(vt)
   assert.ok(screen.includes('[1t·↓]'), `re-enabling must restore the compact ↓:\n${screen}`)
   vt.resize(100, 25)
+  await vt.waitForRender()
+  app.setStatus({ model: 'probe2' })
   screen = await view(vt)
   assert.ok(screen.includes('↓ view'), `re-enabling must restore the hint:\n${screen}`)
   vt.sendInput('\x1b[B')
@@ -424,7 +474,7 @@ test('a ↓ taken by another action drops the hint even while app.tasks.open kee
   // place (additive contract), so the hint stays honest; a DIFFERENT action
   // bound to ↓ shadows the composition rule, and the hint must go.
   const { vt, app, opened } = startApp()
-  oneRunningTask(app)
+  await oneRunningTask(app, vt)
 
   app.applyUserKeybindings({ 'app.tasks.open': 'ctrl+g' }, () => {})
   let screen = await view(vt)

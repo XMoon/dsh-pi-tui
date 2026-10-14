@@ -75,14 +75,28 @@ binding still works outside it). The config parser warns on such a
 collision (`FIXED_OVERLAY_KEYS`); the overlay never resolves the
 configurable action first (plan §3.3).
 
-### The conditional task affordance vs the actual modal route
+### The conditional task affordance vs the actual route
 
-The empty-editor `↓` task-browser affordance is a composition rule over
-`app.tasks.open` (`manager.ts`), and the footer's `↓ view` / compact `↓`
-hint asks the SAME question. That hint has ONE input —
-`TuiApp.taskBrowserAvailable()` — shared by the builtin task item's full
-and compact densities and by every custom layout that references the
-item; never two per-mode branches.
+The `↓` task admission is a composition rule over `app.tasks.open`
+(`manager.ts`), and the footer's `↓ view` / compact `↓` hint asks the SAME
+question. That hint has ONE input — `TuiApp.taskBrowserAvailable()` —
+shared by the builtin task item's full and compact densities and by every
+custom layout that references the item; never two per-mode branches.
+
+Phase 3B/B4-B changed WHAT the rule admits: the on-demand Task Quick enters
+from the focused HOST editor's last VISUAL line — the context field is
+`quickDownEligible` (a lazy thunk: the fork classifier runs once per
+candidate Down, never per keystroke), and `editorEmpty` no longer gates this
+composition (a NON-EMPTY draft qualifies on its last visual line; the field
+keeps its own meaning for other rules). `quickDownEligible()` is the ONE
+private predicate behind both the routing and the hint: `tasksActive`, a
+real Quick projection (>= 1 row), the host editor as the physically focused
+seat in prompt mode, and no higher-priority owner. A plugin editor takes no
+claim — the visual boundary is the host fork's protected seam (divergence
+X063 in `packages/pi-tui/vendor-divergences.json`), which no public editor
+API exposes. The retired empty-editor route into the modal Quick is gone;
+`app.tasks.open` now opens the on-demand accessory, and `/tasks` remains the
+Full Task Center's own entry, independent of this action.
 
 The gate must test the ACTIVE input OWNERS, not only physical overlay
 focus: a Question / Save Location frame owns the editor SEAT (it is not a

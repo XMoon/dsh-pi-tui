@@ -48,14 +48,13 @@ afterEach(() => {
  *  preference callback, a keyboard-exit counter) — never a later patch. */
 function startApp(
   options: Record<string, unknown> = {},
-  events: Partial<Pick<TuiAppEvents, 'onFullscreenChange' | 'onExit' | 'onOpenTasks' | 'runOwned'>> = {},
+  events: Partial<Pick<TuiAppEvents, 'onFullscreenChange' | 'onExit' | 'runOwned'>> = {},
 ): { vt: VirtualTerminal; app: TuiApp } {
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, {
     onSubmit: () => {},
     onExit: () => events.onExit?.() ?? undefined,
     ...(events.onFullscreenChange === undefined ? {} : { onFullscreenChange: events.onFullscreenChange }),
-    ...(events.onOpenTasks === undefined ? {} : { onOpenTasks: events.onOpenTasks }),
     ...(events.runOwned === undefined ? {} : { runOwned: events.runOwned }),
   }, options)
   app.start()
@@ -1405,7 +1404,7 @@ test('A-09i a workspace leased BY the abandonment callback while a blocking owne
 test('A-09j a leader-bound effective exit still leaves the TUI while every other leader action stays blocked', async () => {
   let exits = 0
   let tasksOpened = 0
-  const { vt, app } = startApp({}, { onExit: () => { exits += 1 }, onOpenTasks: () => { tasksOpened += 1 } })
+  const { vt, app } = startApp({}, { onExit: () => { exits += 1 } })
   app.keybindingsManager().setUserConfiguration(parseUserKeybindings({
     leader: 'ctrl+x',
     bindings: { 'app.exit.request': '<leader>x', 'app.tasks.open': '<leader>t' },

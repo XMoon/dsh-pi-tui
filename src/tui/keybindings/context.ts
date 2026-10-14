@@ -26,6 +26,11 @@ export interface KeybindingContextState {
   readonly editorPromptMode?: boolean | (() => boolean)
   readonly autocompleteActive?: boolean
   readonly tasksActive?: boolean
+  /** A boolean, or a LAZY thunk (same lazy contract as editorEmpty). The
+   * on-demand Task Quick admission — the visual-line classification of the
+   * focused host editor. Defaults to false: a context that cannot vouch
+   * for the editor's visual state never claims the Down key. */
+  readonly quickDownEligible?: boolean | (() => boolean)
   readonly focusedSeat?: 'editor' | 'overlay' | 'editor-panel' | 'none'
 }
 
@@ -36,6 +41,7 @@ export interface KeybindingContextState {
 export function deriveKeybindingContext(state: KeybindingContextState = {}): KeybindingContext {
   const editorEmpty = state.editorEmpty ?? true
   const editorPromptMode = state.editorPromptMode ?? true
+  const quickDownEligible = state.quickDownEligible ?? false
   return {
     focusedSeat: state.focusedSeat ?? 'editor',
     questionActive: state.questionActive ?? false,
@@ -55,5 +61,10 @@ export function deriveKeybindingContext(state: KeybindingContextState = {}): Key
     },
     autocompleteActive: state.autocompleteActive ?? false,
     tasksActive: state.tasksActive ?? false,
+    // LAZY like editorEmpty: the fork visual-line classifier runs once per
+    // CANDIDATE Down resolution, never on every keystroke.
+    get quickDownEligible() {
+      return typeof quickDownEligible === 'function' ? quickDownEligible() : quickDownEligible
+    },
   }
 }

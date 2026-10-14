@@ -173,12 +173,18 @@ function startApp(registry?: EditorRegistry, history?: import('../src/client/his
     onExit: () => { exitCount += 1 },
     onSteer: (text) => { steers.push(text) },
     onTerminalFocus: (focused) => { focusReports.push(focused) },
-    onOpenTasks: () => { openTaskCalls += 1 },
   }, {
     ...(registry === undefined ? {} : { editorRegistry: registry }),
     ...(history === undefined ? {} : { historySearchSource: history }),
     captureHistoryScope: () => ({ sessionId: undefined, isCurrent: () => true }),
   })
+  // B4-B: the retired onOpenTasks sink becomes a spy on the production entry.
+  const realEntry = app.enterTaskQuick.bind(app)
+  app.enterTaskQuick = () => {
+    const entered = realEntry.call(app)
+    if (entered) openTaskCalls += 1
+    return entered
+  }
   app.start()
   harness.app = app
   startedApps.add(app)
@@ -2040,6 +2046,9 @@ test('B-35: the approval rollback still attempts the repaint and re-publishes th
 
 test('B-37: the ↓ view affordance is withheld while an ACTIVE tenant owns the seat', async () => {
   const { vt, app, openTasks } = startApp()
+  // B4-B: the admission needs the Quick projection alongside the badge.
+  await vt.waitForRender()
+  app.setQuickTaskItems([{ value: 'job:job-1', label: 'pnpm build', status: 'running', kind: 'task', source: 'job' }])
   app.setTasks([{ id: 'job-1', label: 'pnpm build', status: 'running', kind: 'job' }])
   await vt.waitForRender()
   assert.ok(viewport(vt).includes('↓ view'), `the idle footer must advertise the affordance:\n${viewport(vt)}`)
@@ -2063,6 +2072,9 @@ test('B-37: the ↓ view affordance is withheld while an ACTIVE tenant owns the 
   lease?.close()
   await vt.waitForRender()
   assert.ok(viewport(vt).includes('↓ view'), 'closing the tenant restores the affordance')
+  // B4-B: the earlier witness ENTERED Quick — leave it before the restore shot.
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
   vt.sendInput('\x1b[B')
   await vt.waitForRender()
   assert.equal(openTasks(), 2, 'the restored ↓ reaches the sink again')
