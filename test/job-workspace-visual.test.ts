@@ -1204,22 +1204,38 @@ test('D-26 the frozen §11.2 matrix keeps the §8 ladder-derived chrome at every
         primaryRgb: hexToRgb(currentPalette.primary),
       }
 
-      // §8 invariants 1 + 2 (shared helper): the bar is last and the body floor holds.
-      assertOneActiveDevice(frame)
+      // §8 invariants 1 + 2 (shared helper): the bar is last and the PREDICTED body
+      // rows (from the ladder, not from the painted text) must carry the Job's OWN
+      // retained text (`line NNN` from the fixture), so a blanked body cannot pass on
+      // plausible indexes alone.
       assertBarIsLastRow(painted, frame.readColor, 'Esc back')
       assertNoHalfSegmentInBar(painted, painted.length - 1, ' · ')
       assertRowWidths(harness.vt, width)
-      const bodyIndexes = painted.flatMap((line, index) => /^line \d{3}/.test(line) ? [index] : [])
-      assertBodyFloor(painted, bodyIndexes)
-      assert.ok(bodyIndexes.length >= 1, `the retained body is painted at ${width}x${height}:\n${view(harness.vt)}`)
+      const tabsRow = 1 + ladder.metadataRows + ladder.summaryRows
+      const bodyTop = tabsRow + ladder.tabRows
+      const bodyIndexes = Array.from({ length: ladder.bodyRows }, (_, index) => bodyTop + index)
+      assertBodyFloor(painted, bodyIndexes, line => /^line \d{3}/.test(line), `Job ${width}x${height}`)
 
-      // §8 step 5: the reading-tab row follows the body floor (and compactness).
-      const tabToken = ladder.compact ? '[Out]' : '[Output]'
-      const otherTabToken = ladder.compact ? '[Output]' : '[Out]'
-      assert.equal(painted.some(line => line.includes(tabToken)), ladder.tabRows === 1,
+      // §11.3.2/§4.5: the tab row owns exactly ONE active device — the focused tab
+      // (`[Output]` wide, `[Out]` compact). A primary badge (`Copy All [C]`) or a
+      // bracket in the Host body is not a chrome device; only the tab row is scanned.
+      const expectedTab = ladder.compact ? '[Out]' : '[Output]'
+      const activeDevice = assertOneActiveDevice(frame, {
+        rows: ladder.tabRows === 1 ? [tabsRow] : [],
+        labelPrefixes: ['[Output]', '[Command]', '[Out]', '[Cmd]'],
+      })
+      assert.deepEqual(activeDevice, ladder.tabRows === 1 ? [expectedTab] : [],
+        `the focused reading tab at ${width}x${height}:\n${view(harness.vt)}`)
+
+      // §8 step 5: the reading-tab row and the Command/Label summary row follow the
+      // body floor (and the tab row follows the compactness).
+      assert.equal(painted.some(line => line.includes(expectedTab)), ladder.tabRows === 1,
         `the tab row at ${width}x${height}:\n${view(harness.vt)}`)
+      const otherTabToken = ladder.compact ? '[Output]' : '[Out]'
       assert.ok(!painted.some(line => line.includes(otherTabToken)),
         `the tab row's compactness at ${width}x${height}:\n${view(harness.vt)}`)
+      assert.equal(painted.some(line => /^(Command|Label) {2}\S/.test(line)), ladder.summaryRows === 1,
+        `the Command/Label summary row at ${width}x${height}:\n${view(harness.vt)}`)
 
       // §8 step 3: the metadata row holds only with its own grant.
       assert.equal(painted.some(line => line.includes('Progress: 3/8 checks')), ladder.metadataRows === 1,

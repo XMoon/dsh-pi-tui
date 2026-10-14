@@ -2812,13 +2812,28 @@ test('A-16 the frozen §11.2 matrix keeps the §8 ladder-derived chrome at every
       const frame = paintedFrame(h)
 
       // §8 invariants 1 + 2 (shared helper): the bar is the physical last row and
-      // a real body row is reserved from 3 rows up.
+      // a real body row is reserved from 3 rows up. The Settings body always paints
+      // its selection cursor `> <item>` (settings-workspace-panel.ts:813-820), so a
+      // regression that blanks the body while leaving the chrome in place fails.
       assertBarIsLastRow(painted, frame.readColor, '↑↓ select · Enter open · Esc close')
       const bodyTop = 1 + ladder.metaRows + (ladder.ruleRows >= 1 ? 1 : 0)
-      assertBodyFloor(painted, Array.from({ length: ladder.bodyRows }, (_, index) => bodyTop + index))
+      const bodyIndexes = Array.from({ length: ladder.bodyRows }, (_, index) => bodyTop + index)
+      assertBodyFloor(painted, bodyIndexes, line => /^> \S/.test(line), `Settings ${columns}x${rows}`)
       assertNoHalfSegmentInBar(painted, painted.length - 1, ' · ')
-      assertOneActiveDevice(frame)
       assertRowWidths(h, columns)
+
+      // §11.3.2/§4.5: exactly ONE chrome active device, and it is the focused pane
+      // label. Wide/medium L0 put the pane header on the body's first row, so the
+      // focused `[Categories (3)]` is the ONE primary label. The narrow projection
+      // paints NO pane header at all (settings-workspace-panel.ts:739-803): the
+      // MEASURED 72x24/44x20 frames put the plain list cursor on that row
+      // (`3|> Appearance`), so the returned device list is EMPTY there.
+      const device = assertOneActiveDevice(frame, {
+        rows: [bodyTop],
+        labelPrefixes: ['[Categories', '[Rows', '[Details'],
+      })
+      assert.deepEqual(device, ladder.layout === 'narrow' ? [] : ['[Categories'],
+        `the focused pane device at ${columns}x${rows} (${ladder.layout}):\n${h.view()}`)
 
       // §8 step 2: the full-width rules exist exactly while the body keeps >= 5 rows.
       assert.equal(painted.filter(line => /^─+$/.test(line)).length, ladder.ruleRows,
