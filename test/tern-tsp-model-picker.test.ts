@@ -339,9 +339,9 @@ async function mounted(t: { after(fn: () => unknown): void }, subject = { sessio
     runOwned: (label, task, options) =>
       runOwned(label, task, { ...options, diag: { debug() {}, warn() {}, error() {} } as never }),
   })
-  // Every case starts on the suite's NARROW pane (100 columns = 800px, below the
-  // measured summary threshold): the interaction contract is the SAME at every
-  // width, and a case that exercises the wide summary resizes up explicitly.
+  // Every case starts on the suite's NARROW pane (100 columns = 800px). The sheet is
+  // the same `md` dialog at every width (the retired wide summary had a threshold;
+  // nothing has one now), and a case that needs a wider pane resizes up explicitly.
   const firstFrame = picker(pane)?.id
   sendResize(pane, 100)
   await waitUntil('the narrow pane is committed', () => picker(pane)?.id !== firstFrame)
