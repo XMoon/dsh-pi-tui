@@ -45,22 +45,22 @@ row and the `Esc` that shares its intent return there.
 
 ### The catalogue (one list-first picker at every width)
 
-The catalogue is ONE native picker: `layout: 'rows'`, `md` on a narrow pane and
-`lg` on a wide one, `preview: 'none'` at every width, and NO `scopes` column ever.
-Width decides only the sheet's DENSITY — never what can be reached, drafted or
-written.
+The catalogue is ONE native picker: `layout: 'rows'`, ALWAYS `size: 'md'`,
+`preview: 'none'` at every width, and NO `scopes` column ever. The sheet is a dialog
+at every pane width — the client shrinks it by itself when the pane is narrower than
+its own cap — so the page's shape never changes with the window.
 
 - **Rows.** ONE row per (provider, model). `label` is the model name (the main
   information), `mark` is a deterministic 1–2 character abbreviation of the
   provider's own advertised name (`{text, seed}`, never a fabricated logo),
   `detail` is the provider name, `title` is the complete model id, and `badges`
-  carry the REAL `current` (a live Session fact) and `Default` (the directory
+  carry the REAL `current` (a live Session fact) and `default` (the directory
   fact) only — the browse highlight is never painted as either. The row id is the
   provider+model JSON pair, so the same model id under two providers is two
   independently addressable rows. A row states NO effort of its own: the effort is
   edited in the page's strip below, where every candidate of the highlighted model
   is visible and actionable at once.
-- **Order.** A pinned `Current / Default` group comes first and each configured
+- **Order.** A pinned `Current · Default` group comes first and each configured
   model appears exactly ONCE (it is not repeated in its provider's group), then
   one group per provider. No `Recent` group, no MRU and no row listed twice.
 - **Partial failure.** Only while the current read reports failed providers, the
@@ -72,7 +72,27 @@ written.
 - **The Reasoning Effort strip (every width).** Below the list the catalogue paints
   the native Picker `strip`: its head reads `Reasoning Effort` and it carries ONE
   button per candidate the HIGHLIGHTED model advertises, in the directory's own
-  order, with the local DRAFT marked as the client's own "on" item. Clicking a
+  order, with the local DRAFT marked as the client's own "on" item. It is painted —
+  and its action channel admitted — ONLY while the phase is `ready`: the client
+  paints no disabled strip item, so a strip left on screen during an admitted write,
+  a running re-read or a failed one would be a promise the panel cannot keep (the
+  same `stripOffered` predicate gates the display and the admission). A chip label is
+  clamped to the pane's own strip capacity with the design language's content
+  ellipsis: the client WRAPS the chips onto further rows but can neither shrink nor
+  wrap ONE chip, so a label wider than the chip container would be cut at the sheet's
+  edge (measured in a 400x600 pane: the container is 193.27px while the widest chip
+  measures 308.59px). The budget is the reconstructed pane width minus the measured
+  strip chrome (`stripLabelColumns`: the sheet is `pane - 44px` wide up to the client's
+  measured `680px` cap — so the budget stops growing with the window at that cap — and
+  the label column, gutters and chip padding take `169px`; one column per 12px of the
+  strip's own 12.5px font, display-width aware), and the clamp keeps BOTH ends
+  (`clampMiddle`): an effort
+  name is free-form, two candidates can differ only in their tail, and a strip item
+  carries no `title`, so a head-only clamp could render one label for two different
+  candidates. The COMPLETE label stays exactly where it came from — the directory and
+  the Reader's configured facts. While the strip owns the
+  keyboard the picker requests the client's OWN region focus (`focus: 'strip'`, the
+  measured `pk-sheet f-strip` class), so the region is not signalled by our ink. Clicking a
   button (or placing the keyboard on the strip with `Tab` and using its arrows)
   changes that model's local draft and NOTHING else — no write, no page change. A
   model that advertises no effort metadata paints NO strip at all, and no page hides
@@ -95,7 +115,8 @@ painting a picker page:
   cannot be a reading surface for a long value. The Reader renders each fact as
   its label plus ONE `ui.text({ text, wrap })` value node the CLIENT wraps at the
   width the layout really has: `char` for machine identifiers (a
-  `provider/model/effort` slug or a model id may carry no break opportunity at
+  configured-selection value (`provider · model · effort`) or a model id may carry
+  no break opportunity at
   all) and `word` for prose (the description and the transient notice). Nothing is
   pre-wrapped, truncated or re-derived: the value is the directory's own string,
   every explicit break it carries (LF, CRLF and a blank line alike) is rendered as
@@ -127,8 +148,8 @@ painting a picker page:
   [the runtime-gap record](./evidence/runtime-gap-20261013.md) §F3-004;
 - its one interactive node is a visible `Back` row bound to the SAME `back`
   intent `Esc` uses, so `Back` and `Esc` can never disagree about where the page
-  returns: the OVERVIEW enters it (through its own details row) and that is
-  therefore where it always returns, across a resize and a re-read alike. It carries no candidate, no
+  returns: the CATALOGUE enters it (a row activation) and that is therefore where it
+  always returns, across a resize and a re-read alike. It carries no candidate, no
   draft and no writer. The row is the FIRST row of the scrollable body, so it is
   visible at the top of the page and travels with the content: **after scrolling
   to a long value's tail the row is outside the viewport (measured), so `Esc` is
@@ -152,9 +173,10 @@ action channel, so the two are told apart by **channel**, not by shape:
 - There is no provider-scope channel at all any more: a forged
   `action { act: 'scope' }` or a scope-shaped row id resolves nowhere, because no
   page paints a scope column.
-- The removed wire shapes are refused, not ignored: `details`, `effort-page`,
-  `strip` (and any `strip-*` value) are not part of any page's action set, and a
-  `more:<action>` row id resolves nowhere.
+- The removed wire shapes are refused, not ignored: `details` and `effort-page`
+  are not part of any page's action set, a `strip` click is admitted ONLY while the
+  catalogue really paints the strip and ONLY for a candidate of the model that strip
+  shows (any `strip-*` value included), and a `more:<action>` row id resolves nowhere.
 
 ### Writing
 
@@ -229,6 +251,38 @@ every draft and every write.
 | `details` (the Reader) | `↑↓`/`PageUp`/`PageDown`/`Home`/`End` scroll the Reader's native body (also while a read runs or has failed) | — (one region) | inert — **never writes** | `Back`/`Esc` to the page it came from |
 | action bar | — | → the other zone | **the only key that writes**, once, when the FOCUSED action is the enabled Primary | return to the zone the bar was entered from (a failed read closes) |
 
+### The visible vocabulary (frozen design language)
+
+This surface follows `docs/tui-design-language.md` as an **Overlay** archetype (that
+document names `/model`'s own sizing exception). The consequences, and the ONE
+deviation, are recorded here so the contract and the frames cannot drift:
+
+- **The focused action carries a key badge, never a glyph.** The focused entry's
+  label is the canonical `Verb [Key]` affordance form (`Switch [Enter]`,
+  `Retry [Enter]`); `▸` is the design language's DISCLOSURE role and is never used
+  for focus or selection, and a verb label never takes brackets.
+- **The ONE hint is `<Key> <object>` and names the next `Tab` zone** (`Tab effort`,
+  `Tab actions`, `Tab list`) — the same ring `tabZone` walks, so the hint and the
+  handler cannot disagree. It replaces the earlier `Enter: effort & details`, whose
+  colon/ampersand form the vocabulary does not allow.
+- **One separator**: the pinned group head is `Current · Default` and the configured
+  selection's values join as `provider · model · effort`; ` / ` never joins fields.
+- **State chips are the client's own pills.** The row badges stay the lowercase
+  `current` / `default` because the native picker paints each badge as its own
+  rounded chip in the muted ink (measured: `span.pk-badge`, 18px tall, its own
+  background, `rgb(101,101,101)`); the design language's bracketed `[current]` form is
+  its chip syntax for a surface with NO box of its own, and §11.4's badge-slot row
+  cites the text-only PiTui badge slot (`src/tui/pickers/model-picker.ts`), which this
+  change does not touch. **Owner decision open**: if the bracketed form is wanted
+  inside the native pill too, it is a one-line change to the badge texts.
+- **A failed provider states itself in words**: its row reads
+  `<Provider> · unavailable` — a disabled row may not be signalled by colour alone.
+- **The Reader's notice has a role ink** (`textMuted` for information, `error` for an
+  error) instead of the content's own ink; its labels/heads are the muted role while
+  values are content.
+- No new glyph role, no new palette token, no fork divergence and no new layout
+  framework: the whole change is the presenter's own node tree.
+
 The strip is the ONE effort editor, and the app never lets a stale or forged
 receiver use it: a strip click is admitted only while the CATALOGUE really paints
 the strip, and only for a value that is a candidate of the model the strip currently
@@ -244,15 +298,21 @@ no focus distinction on its buttons (measured: both button class lists are
 byte-identical under either region focus; the client's own `f-list`/`f-preview`
 region class belongs to the list/preview region, not to the bar), so the FOCUSED
 action carries an app-rendered shape cue
-(`▸ Switch` / `▸ Save default` / `▸ Retry` / `▸ Back` / `▸ Cancel`). A disabled
+(`Switch [Enter]`, `Save default [Enter]`, `Retry [Enter]`, `Cancel [Enter]`). The
+badge is the design language's `Verb [Key]` affordance form, not an invented focus
+glyph: `▸` is that language's DISCLOSURE role and must never mean "focused". A disabled
 action never carries the cue, and neither does an action the current phase cannot
 run from the keyboard at all (`pending`, `loading`), so the cue is always a
 promise about `Enter`.
 
-The catalogue carries exactly ONE short hint, in its `subtitle` slot:
-`Enter: effort & details`. It is painted only while the phase really admits
-`Enter` (a running re-read and an admitted write refuse it), it names no business
-action, and no other page repeats it.
+The catalogue carries exactly ONE short hint, in its `subtitle` slot, in the
+design language's `<Key> <object>` form: it names the zone `Tab` reaches NEXT
+(`Tab effort` while the highlighted model has a strip, `Tab actions` when it does
+not, `Tab actions` from the strip itself, and `Tab list` from the action bar — the
+same ring the key walk uses). It is painted only while the phase really admits keys
+(a running re-read and an admitted write refuse them), it names no business action,
+and no other page repeats it. `▸`/`▾` never appear: that glyph pair is the
+disclosure role, and the focused action is marked by its `[Enter]` key badge.
 
 `Ctrl+C` always remains the original application cancel owner, and a
 Question/Approval modal owns the keyboard before the Model panel.
@@ -261,8 +321,8 @@ Question/Approval modal owns the keyboard before the Model panel.
 
 The native action bar lays its buttons on ONE line and does not wrap them, and the
 bar has no scroll port of its own, so the bar is SHORT AND FIXED and the frozen
-table caps it per page: `Cancel` + the ONE write on the catalogue, `Back` + the
-ONE write on the catalogue, and `Cancel` + the read-only `Retry` on a failed read.
+table caps it per page: `Cancel` + the ONE write on the catalogue, and `Cancel` +
+the read-only `Retry` on a failed read.
 A partial failure does NOT add a third button: its context and its one read-only
 operation row live at the end of the list. The read-only `details` page has NO
 picker and therefore NO action bar at all: its `Back` is the Reader's own visible
@@ -325,26 +385,28 @@ the original reconciliation notice. Hydration and disposal retire the picker
 synchronously, and receivers bound to a previous panel serial and presentation
 revision are never routed again.
 
-## Layout threshold
+## Sheet size (one dialog at every width)
 
-The presenter knows only `SessionCaps.cols`/`cell` (the SDK reports no sheet box
-and no pane height), so the pane width is RECONSTRUCTED as `cols * cell.w` and
-compared against the measured `900px` (`LARGE_SHEET_MIN_PANE_PX`). That threshold
-decides ONE thing: whether the catalogue asks for the `lg` sheet form instead of
-`md`. Everything else — the rows, the order, the strip, the ONE write, the
-the Reader — is identical on both sides of it, which is what makes the
-narrow and the wide pane the same product instead of two layouts.
+The catalogue asks for `size: 'md'` at EVERY pane width, and the choice is MEASURED
+rather than tuned: with a twelve-row fixture in the real client (`tern 0.8.3`), an
+`lg` sheet filled `1120x698` of a `1280x800` pane (87% of BOTH axes) and `940x538` of
+a `1000x640` one, while the same fixture at `md` is a centred `680x540` at 1280 and
+`680x498` at 1000. At a `560x640` pane both sizes give `500px` and at `400x600` both
+give `340px`: the client shrinks an `md` sheet below its own cap, so a narrow pane is
+unchanged by this choice and only a wide one stops being filled.
 
-The number is carried over from the measured client behaviour of the sheet
-(`tern 0.8.3`): an `888px` pane (900x400) and a `544px` pane (560x640) were the
-measured bounds of the client's own `preview: 'below'` painting, and `900px` sits
-just above the lower of them, so the `lg` form is asked for only where the client
-was measured to give the sheet the room for it. The exact client breakpoint between
-544px and 888px stays `NOT_VERIFIED`; a pane the reconstruction classifies narrow
-therefore loses only sheet density, never a candidate, a page or the write.
+Two independent precedents agree. The official product (`oh-my-pi`) uses
+`size: 'md'` for every picker — its own model picker included — and reserves `lg`
+for a separate fullscreen hub; and the frozen design language names `/model` as
+`72x28` (≈576px), i.e. a dialog, not a sheet that grows with the terminal.
+
+Nothing in the presenter reads the pane width to decide the sheet form any more (the
+retired `900px` reconstruction and its `LARGE_SHEET_MIN_PANE_PX` are gone). The pane
+width is still reconstructed for ONE purpose: the strip's own chip-label budget
+({@link stripLabelColumns}).
 
 A SHORT pane is a supported case with a measured shape of its own: at `900x400`
-(888px, i.e. the `md` sheet) the catalogue's list region shows two complete model
+(888px) the catalogue's list region shows two complete model
 rows and clips the third at its own fold; the strip below it wraps instead of
 scrolling, so at that pane (and with 7+ candidates) the client paints EVERY item,
 just in more rows — measured on the real client: a four-item strip occupies 78px in
@@ -469,7 +531,7 @@ node scripts/tern-pane-drive.mjs scripts/tern-pane-model-ux.mjs
 The native Model suite drives the real runner, classifier, command handler and
 SDK over a scripted tty and asserts on the reconciled wire tree: the list-first
 catalogue's rows (one per provider+model, the provider `mark`, the real
-`current`/`Default` badges, the complete id in `title`), its pinned-then-provider
+`current`/`default` badges, the complete id in `title`), its pinned-then-provider
 order with each configured model exactly once, the `select`-highlights /
 `activate`-opens-the-Reader split (including a retired receiver that can never
 re-target a page), the ONE write on the catalogue at every width with the

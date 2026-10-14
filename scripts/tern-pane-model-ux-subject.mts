@@ -37,7 +37,7 @@ const note = (value: unknown): void => {
 /* --------------------------------------------------------------- fixtures */
 
 /** Fixture `1`: the normal catalogue. `current` and `default` are DIFFERENT rows;
- *  `Alpha Model` advertises three efforts (so the Overview carries four
+ *  `Alpha Model` advertises three efforts (so the strip carries four
  *  candidates including the synthetic provider default), `Beta Model` and
  *  `Alpha Second` advertise none. */
 const NORMAL = {
@@ -66,7 +66,10 @@ const NORMAL = {
 }
 
 /** Fixture `2`: eight widest-glyph effort labels on ONE model. */
-const WIDE_EFFORTS = Array.from({ length: 8 }, (_, i) => ({ id: `w${i + 1}`, name: `Effort ${i + 1} ${'W'.repeat(24)}` }))
+/** Fixture `2`: eight widest-glyph effort labels that all share one long prefix
+ *  and differ ONLY in their tail. An end clamp would render all eight identically;
+ *  the middle clamp must keep each tail, so this is the clamp's real witness. */
+const WIDE_EFFORTS = Array.from({ length: 8 }, (_, i) => ({ id: `w${i + 1}`, name: `${'W'.repeat(30)} (${i + 1})` }))
 const WIDE = {
   current: { provider: 'wide', model: 'm-wide', reasoningEffort: 'w1' },
   directory: {
@@ -137,11 +140,50 @@ const describe = (layer: Node) => {
   let pickerNode: Node | undefined
   let overlayNode: Node | undefined
   let kvNode: Node | undefined
+  let notice: Record<string, unknown> | undefined
   const visit = (node: Node | undefined): void => {
     if (node === undefined) return
     if (node.kind === 'picker' && pickerNode === undefined) pickerNode = node
     if (node.kind === 'overlay' && overlayNode === undefined) overlayNode = node
     if (node.kind === 'kv' && kvNode === undefined) kvNode = node
+    // The Reader's notice is a `ui.text` whose value is a TONED span, not a bare
+    // `text` prop. The frame record keeps the span's text + tone and the text
+    // node's own key set, so the role ink is asserted on the WIRE, not inferred.
+    // (Kind-agnostic: the notice node's kind token is not part of the contract.)
+    const ownText = (node.props ?? {})['text']
+    if (typeof ownText === 'string' && ownText.startsWith('catalog is unreachable')) {
+      notice = { text: ownText, tone: undefined, kind: node.kind, textNodeHasTextProp: true, textNodeKeys: Object.keys(node.props ?? {}).sort(), childKeys: [] }
+    }
+    // `ui.text({…}, span(text, tone))` keeps the styled runs in `props.spans`.
+    const spans = (node.props ?? {})['spans']
+    if (Array.isArray(spans)) {
+      for (const run of spans as readonly { t?: unknown; s?: unknown }[]) {
+        if (typeof run?.t === 'string' && run.t.startsWith('catalog is unreachable')) {
+          notice = {
+            text: run.t,
+            tone: run.s,
+            kind: node.kind,
+            textNodeHasTextProp: 'text' in (node.props ?? {}),
+            textNodeKeys: Object.keys(node.props ?? {}).sort(),
+            spanKeys: Object.keys((run as object) ?? {}),
+          }
+        }
+      }
+    }
+    for (const child of node.children) {
+      const spanText = (child as { t?: unknown })?.t ?? (child as { props?: Record<string, unknown> })?.props?.['text']
+      const spanTone = (child as { s?: unknown })?.s ?? (child as { props?: Record<string, unknown> })?.props?.['tone']
+      if (typeof spanText === 'string' && spanText.startsWith('catalog is unreachable')) {
+        notice = {
+          text: spanText,
+          tone: spanTone,
+          kind: node.kind,
+          textNodeHasTextProp: 'text' in (node.props ?? {}),
+          textNodeKeys: Object.keys(node.props ?? {}).sort(),
+          childKeys: Object.keys((child as object) ?? {}),
+        }
+      }
+    }
     for (const child of node.children) visit(child)
   }
   visit(layer)
@@ -181,7 +223,24 @@ const describe = (layer: Node) => {
       }))
       : undefined,
     summary: kvNode === undefined ? undefined : kvNode.props['items'],
+    notice,
   }
+}
+
+/** The wire id of the frame's picker node, so a control can dispatch a FORGED
+ *  action event through the presenter's real admission path. */
+const findPickerId = (layer: Node): string | undefined => {
+  let found: string | undefined
+  const visit = (node: Node | undefined): void => {
+    if (node === undefined || found !== undefined) return
+    if (node.kind === 'picker') {
+      found = node.id
+      return
+    }
+    for (const child of node.children) visit(child)
+  }
+  visit(layer)
+  return found
 }
 
 /* ------------------------------------------------------------- the panel */
@@ -193,10 +252,12 @@ note({ caps: session.caps })
 
 let picker!: TspModelPicker
 let frames = 0
+let pickerId: string | undefined
 const draw = (): void => {
   const layer = picker.renderLayer()
   surface.render({ layer })
   frames += 1
+  pickerId = findPickerId(layer)
   note({ frame: { n: frames, ...describe(layer) } })
 }
 picker = new TspModelPicker({
@@ -249,6 +310,16 @@ try {
         if (key.text === 'e') handle.setLoadError(FAILED)
         else handle.setLoading()
         note({ control: key.text === 'e' ? 'load-error' : 'loading' })
+        continue
+      }
+      // A FORGED strip action, dispatched through the presenter's real admission
+      // path: proves the phase gate refuses the strip channel while it is not
+      // painted (the client cannot click a chip that does not exist).
+      if (key.text === 'f') {
+        if (pickerId !== undefined) {
+          picker.handleEvent({ ev: 'action', id: pickerId, act: 'strip', value: 'effort:high' } as unknown as TspEvent)
+        }
+        note({ control: 'forged-strip', id: pickerId, value: 'effort:high' })
         continue
       }
       // The panel-lifecycle control: a SESSIONLESS subject (never a live one).
