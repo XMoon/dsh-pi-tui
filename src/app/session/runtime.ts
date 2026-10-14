@@ -97,6 +97,15 @@ export interface SessionRuntimeSurface {
    * @param owner - the published Session's id.
    */
   beginInputHistoryScope(owner: string): void
+  /**
+   * Phase 3B / B3-B: physically close a mounted History editor-seat tenant whose
+   * captured Session scope is no longer current. Called at the SAME synchronous
+   * publication commit, right after `beginInputHistoryScope`, and from the
+   * ownership core's generation-reset hook. The implementation is state-only and
+   * non-throwing: it never lets a UI cleanup failure roll back or mask the
+   * already-published Session.
+   */
+  retireStaleHistorySeat(): void
   /** Report a failed switch (the runner owns the logger + diagnostics). */
   reportSwitchFailure(sessionId: string, message: string): void
   // First-session (deferred creation) runner operations.
@@ -372,6 +381,12 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
                 // reseed must survive it (the owner is current here, so the
                 // entry belongs to the new Session). State-only.
                 deps.surface.beginInputHistoryScope(sessionId)
+                // Phase 3B / B3-B: the old Session's History seat is logically
+                // dead the instant the new owner is published; close its physical
+                // tenant in the same synchronous commit, before the post-commit
+                // awaits, so the new owner's first editable frame never paints a
+                // stale History. State-only and non-throwing.
+                deps.surface.retireStaleHistorySeat()
                 // External review P2-B: the new owner IS published here, so the
                 // replaced subject's modal must already be out of the seat before
                 // the post-commit awaits below (retirement, quiesce, hydration).
@@ -824,6 +839,9 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
               // The editor-recall scope follows the same synchronous
               // publication (see the ordinary commit seam).
               deps.surface.beginInputHistoryScope(nextSessionId)
+              // Phase 3B / B3-B: see the ordinary commit seam — retire a stale
+              // History seat inside the same synchronous publication.
+              deps.surface.retireStaleHistorySeat()
               // External review P2-B: same publication commit, same rule.
               if (oldOwner !== undefined && oldOwner !== nextOwner) {
                 deps.surface.withdrawReplacedPresentation()
@@ -1065,6 +1083,12 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
         // entries instead of clearing them, because their row is written under
         // THIS Session and can therefore not be in the snapshot yet.
         deps.surface.beginInputHistoryScope(deps.owners.sessionId(childOwner))
+        // Phase 3B / B3-B: the first published Session kills a sessionless
+        // History seat even though no id string moved (the capture's
+        // subject-undefined branch fails the moment an owner exists). The
+        // generation bump below would also catch it; retiring here keeps the
+        // commit's own first frame clean.
+        deps.surface.retireStaleHistorySeat()
         return deps.owners.completionIdentity(childOwner)
       },
       setCompletionOwner: deps.surface.setCompletionOwner,

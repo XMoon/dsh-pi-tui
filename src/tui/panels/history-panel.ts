@@ -4,7 +4,7 @@
  *
  * Anatomy (ONE vertical presentation at EVERY width — a single `render(width)`
  * decides the layout):
- * - Header row: ` Input history ` plus the responsive scope tabs and the `F2`
+ * - Header row: ` Input History ` plus the responsive scope tabs and the `F2`
  *   expand hint;
  * - Query row: the panel's OWN query `Input` (the query state is never
  *   duplicated);
@@ -29,7 +29,7 @@
  *
  * Pointer contract (Transcript Fullscreen ONLY): the alt screen's single
  * native SGR parser dispatches press/drag/release into this component. A result
- * row click only SELECTS; the explicit `[Use selected]` / `[Copy all]` buttons
+ * row click only SELECTS; the explicit `Use Selected [Enter]` / `Copy All [Alt+C]` items
  * and the Preview drag selection act, always resolved against the LAST PAINTED
  * frame (width/height, result identity, search generation) and the exact
  * original source offsets. In the regular main screen this component installs
@@ -47,7 +47,8 @@ import { truncateToWidth, visibleWidth } from '@xmoon76/pi-tui'
 import type { HistorySearchResult, HistorySearchSource, HistoryScope } from '../../client/history/search.ts'
 import { HISTORY_SEARCH_RESULT_LIMIT } from '../../client/history/search.ts'
 import { HISTORY_SEARCH_DEBOUNCE_MS } from '../../client/history/search.ts'
-import { HISTORY_COPY_LABEL, HISTORY_PREVIEW_SCROLL_LABEL } from '../keybindings/hints.ts'
+import { HISTORY_CHORDS, type HistoryChordId } from '../keybindings/hints.ts'
+import { renderActionBarRow, type ActionBarSegment } from '../presentation/action-bar.ts'
 import { sanitizedPhysicalLine } from '../presentation/lines.ts'
 import { color } from '../theme/runtime.ts'
 import {
@@ -67,13 +68,6 @@ export const HISTORY_SEAT_EXPANDED_RATIO = 0.80
 
 /** The hard cap on painted results-list rows (the counter row included). */
 export const HISTORY_PANEL_MAX_LIST_ROWS = 8
-
-/** The footer hint (Plan §2: `Enter use`, never `Enter select`). The Preview
- *  chord label comes from the key-label authority (`keybindings/hints.ts`),
- *  exactly like the TSP fixed chord: this seat owns no keymap action and no
- *  remap exists for it, so the label must not be hard-coded in a panel. */
-export const HISTORY_PANEL_FOOTER =
-  `Enter use · Esc cancel · Tab scope · ↑↓ results · ${HISTORY_PREVIEW_SCROLL_LABEL} preview`
 
 /** The live geometry seam the host injects: the terminal size and the rows the
  *  non-History chrome currently occupies. `chromeRows` EXCLUDES the editor seat
@@ -506,7 +500,13 @@ export class HistoryPanel implements Component, Focusable {
    * reserved Escape), not to a remappable Host action.
    */
   cancelsOnKey(data: string): boolean {
-    return matchesKey(data, 'escape') || matchesKey(data, 'ctrl+c')
+    return this.matchesChord('cancel', data)
+  }
+
+  /** Whether one raw event matches a History-local chord (one authority for the
+   *  handler and its display label). */
+  private matchesChord(id: HistoryChordId, data: string): boolean {
+    return HISTORY_CHORDS[id].keys.some(key => matchesKey(data, key))
   }
 
   /**
@@ -527,43 +527,40 @@ export class HistoryPanel implements Component, Focusable {
 
   handleInput(data: string): void {
     // Tab: scope toggle — the query SURVIVES.
-    if (matchesKey(data, 'tab')) {
+    if (this.matchesChord('scope', data)) {
       this.toggleScope()
       return
     }
     // F2: the LOCAL normal/expanded presentation preference. Closing History
     // discards it (a fresh open starts normal).
-    if (matchesKey(data, 'f2')) {
+    if (this.matchesChord('expand', data)) {
       this.expanded = !this.expanded
       this.onResultsChanged?.()
       return
     }
     // Preview navigation is Alt-prefixed so the plain keys keep paging the
     // results list.
-    if (matchesKey(data, 'alt+up') || matchesKey(data, 'alt+down')
-      || matchesKey(data, 'alt+pageUp') || matchesKey(data, 'alt+pageDown')
-      || matchesKey(data, 'alt+home') || matchesKey(data, 'alt+end')) {
+    if (this.matchesChord('preview', data)) {
       this.movePreview(data)
       return
     }
     // Copy All (both modes): the EXACT selected content, captured now.
-    if (matchesKey(data, 'alt+c')) {
+    if (this.matchesChord('copy', data)) {
       this.copyAll()
       return
     }
     // Navigation: ↑/↓/PgUp/PgDn select within the results list.
-    if (matchesKey(data, 'up') || matchesKey(data, 'down')
-      || matchesKey(data, 'pageUp') || matchesKey(data, 'pageDown')) {
+    if (this.matchesChord('results', data)) {
       this.moveSelection(data)
       return
     }
     // Enter: accept the selected row into the editor (NO submit).
-    if (matchesKey(data, 'enter') || matchesKey(data, 'ctrl+j')) {
+    if (this.matchesChord('accept', data)) {
       this.acceptSelected()
       return
     }
     // Esc / Ctrl+C: cancel — the editor draft is untouched.
-    if (matchesKey(data, 'escape') || matchesKey(data, 'ctrl+c')) {
+    if (this.matchesChord('cancel', data)) {
       this.onClose()
       return
     }
@@ -597,7 +594,7 @@ export class HistoryPanel implements Component, Focusable {
     // Only the LEFT button may start, extend or finish a History gesture: a
     // right or middle press must fall through to the terminal's own handling
     // (e.g. the Windows right-click paste path) and can never select a result,
-    // start a Preview drag or activate `[Use selected]`. A drag/release that
+    // start a Preview drag or activate `Use Selected [Enter]`. A drag/release that
     // carries no button code is the legacy SGR spelling of a left gesture and
     // stays valid.
     const leftButton = event.button === 'left'
@@ -629,7 +626,7 @@ export class HistoryPanel implements Component, Focusable {
         return result ? { handled: true } : undefined
       }
       if (hit.kind === 'result') {
-        // A result row click only SELECTS; the explicit `[Use selected]` button
+        // A result row click only SELECTS; the explicit `Use Selected [Enter]` item
         // (or Enter) accepts.
         const index = this.state.results.findIndex(candidate => candidate.id === hit.id)
         if (index === -1) return undefined
@@ -857,53 +854,73 @@ export class HistoryPanel implements Component, Focusable {
   // ── rendering ────────────────────────────────────────────────────────────
 
   private renderHeader(width: number): string {
-    const title = ' Input history '
+    // Identity is Title Case, role 1 (`textStrong`); the leading/trailing blank
+    // width of the old ` Input history ` is preserved.
+    const title = ' Input History '
+    const hint = `${HISTORY_CHORDS.expand.label} ${this.expanded ? 'collapse' : 'expand'}`
     const tabs = this.renderTabs(width)
-    const hint = `F2 ${this.expanded ? 'collapse' : 'expand'}`
-    const head = `${title}${tabs}`
-    const gap = width - visibleWidth(head) - visibleWidth(hint)
+    const headPlain = `${title}${tabs.plain}`
+    const gap = width - visibleWidth(headPlain) - visibleWidth(hint)
     if (gap >= 2) {
       // Styles are applied AFTER the widths are resolved, so the line can never
-      // exceed the frame.
-      return `${color.textStrong(title)}${tabs}${' '.repeat(gap)}${color.textDim(hint)}`
+      // exceed the frame. The F2 hint is role 13 (`textMuted`).
+      return `${color.textStrong(title)}${tabs.styled}${' '.repeat(gap)}${color.textMuted(hint)}`
     }
-    // Cramped: the F2 hint yields first, the scope tabs second.
-    return color.textStrong(clampLine(head, width))
+    // Cramped: the F2 hint is removed WHOLE (never a partial `F2 exp…`); the
+    // scope tabs keep their own ink while the head fits, and the head is
+    // clamped plain only below the frozen 44-column matrix minimum.
+    if (visibleWidth(headPlain) <= width) return `${color.textStrong(title)}${tabs.styled}`
+    return color.textStrong(clampLine(headPlain, width))
   }
 
   /**
-   * The scope tabs, responsive: wide terminals get the full labels
-   * (`Current session` / `Current directory` / `All directories`), narrow ones
-   * the short forms (`Session` / `Directory` / `All`). The session tab exists
-   * only when a live session identity was injected.
+   * The scope tabs, responsive: wide terminals get the full Title Case labels
+   * (`Current Session` / `Current Directory` / `All Directories`), narrow ones
+   * the short forms (`Session` / `Directory` / `All`). Each Header paints
+   * exactly ONE active scope as a bold-`primary` `[Label]`; the others are
+   * `textDim`. The session tab exists only when a live session identity was
+   * injected.
    */
-  private renderTabs(width: number): string {
+  private renderTabs(width: number): { plain: string; styled: string } {
     const wide = width >= 85
-    const sessionLabel = this.sessionId !== undefined ? (wide ? 'Current session' : 'Session') : null
-    const currentLabel = wide ? 'Current directory' : 'Directory'
-    const allLabel = wide ? 'All directories' : 'All'
-    const parts: string[] = []
-    if (sessionLabel !== null) {
-      parts.push(this.state.scope === 'session' ? `[${sessionLabel}]` : ` ${sessionLabel} `)
+    const sessionLabel = this.sessionId !== undefined ? (wide ? 'Current Session' : 'Session') : null
+    const currentLabel = wide ? 'Current Directory' : 'Directory'
+    const allLabel = wide ? 'All Directories' : 'All'
+    const parts: Array<{ plain: string; styled: string }> = []
+    const push = (scope: HistoryScope, label: string): void => {
+      const active = this.state.scope === scope
+      parts.push(active
+        ? { plain: `[${label}]`, styled: color.textStrong(`[${label}]`, 'primary') }
+        : { plain: ` ${label} `, styled: ` ${color.textDim(label)} ` })
     }
-    parts.push(this.state.scope === 'current' ? `[${currentLabel}]` : ` ${currentLabel} `)
-    parts.push(this.state.scope === 'all' ? `[${allLabel}]` : ` ${allLabel} `)
-    return `  ${parts.join(' ')}`
+    if (sessionLabel !== null) push('session', sessionLabel)
+    push('current', currentLabel)
+    push('all', allLabel)
+    return {
+      plain: `  ${parts.map(part => part.plain).join(' ')}`,
+      styled: `  ${parts.map(part => part.styled).join(' ')}`,
+    }
   }
 
   private renderQueryRow(width: number): string {
+    // The field label is role 5 (`textDim`); the Input paints its own real text
+    // and cursor, which is never re-rendered or trimmed here.
     const label = 'Search: '
     const labelWidth = visibleWidth(label)
     const inputLines = this.input.render(Math.max(1, width - labelWidth))
     const first = inputLines[0] ?? ''
-    return `${label}${first}${' '.repeat(Math.max(0, width - labelWidth - visibleWidth(first)))}`
+    return `${color.textDim(label)}${first}${' '.repeat(Math.max(0, width - labelWidth - visibleWidth(first)))}`
   }
 
   private renderMessage(width: number): string {
-    const text = this.state.error !== undefined
-      ? this.state.error
+    const failed = this.state.error !== undefined
+    const text = failed
+      ? this.state.error!
       : this.state.loading ? 'Loading history…' : this.state.query === '' ? 'No history yet' : 'No matching history'
-    return color.textMuted(clampLine(`  ${text}`, width))
+    // Role 16: the placeholder is `textDim`; a failed placeholder's word is
+    // `error` (a no-match must never read as a failure).
+    const plain = clampLine(`  ${text}`, width)
+    return failed ? color.error(plain) : color.textDim(plain)
   }
 
   /** The results list: one single-line virtual window that FOLLOWS the
@@ -921,27 +938,45 @@ export class HistoryPanel implements Component, Focusable {
     const visible = Math.max(1, layout.resultsRows - (counter ? 1 : 0))
     if (counter) {
       const matches = `${count} match${count === 1 ? '' : 'es'}`
-      lines.push({ text: color.textMuted(clampLine(`Results · ${matches}`, width)), hit: { kind: 'inert' } })
+      const plain = clampLine(`Results · ${matches}`, width)
+      const cut = Math.min(visibleWidth('Results · '), visibleWidth(plain))
+      lines.push({
+        text: `${color.textDim(plain.slice(0, cut))}${color.textMuted(plain.slice(cut))}`,
+        hit: { kind: 'inert' },
+      })
     }
     // Viewport: center the selection, clamp to the ends — ↓ to row 150 of 200
-    // must scroll the window, never hide the › marker.
+    // must scroll the window, never hide the `> ` marker.
     const start = Math.max(0, Math.min(this.state.selectedIndex - Math.floor(visible / 2), count - visible))
     const end = Math.min(count, start + visible)
     for (let index = start; index < end; index += 1) {
       const result = this.state.results[index]
       if (result === undefined) continue
       const isSelected = index === this.state.selectedIndex
-      const marker = isSelected ? '› ' : '  '
-      const age = result.ts === null ? '   ' : formatRelativeAge(result.ts).padStart(3)
-      const prefix = `${marker}${age} `
-      const prefixWidth = visibleWidth(prefix)
-      let label = resultLabel(result.content)
-      if (this.state.scope === 'all' && result.cwd !== null) {
-        label = `${shortCwd(result.cwd).padEnd(14)} ${label}`
+      // The row is ONE two-cell gutter (`> ` in `primary` when selected, two
+      // blank cells otherwise), the secondary facts (`age`, and the All-dirs
+      // directory) in `textDim`, and the prompt text as its own span — bold
+      // `textStrong` when selected, `text` otherwise. The prefix spans keep the
+      // B3-A geometry: the gutter is exactly two cells.
+      const markerPlain = isSelected ? '> ' : '  '
+      const agePlain = `${result.ts === null ? '   ' : formatRelativeAge(result.ts).padStart(3)} `
+      const cwdPlain = this.state.scope === 'all' && result.cwd !== null
+        ? `${shortCwd(result.cwd).padEnd(14)} `
+        : ''
+      const labelPlain = resultLabel(result.content)
+      let remaining = width
+      const take = (text: string, ellipsis = ''): string => {
+        const clamped = truncateToWidth(text, remaining, ellipsis)
+        remaining -= visibleWidth(clamped)
+        return clamped
       }
-      const plain = clampLine(`${prefix}${label}`, width)
+      const marker = take(markerPlain)
+      const age = take(agePlain)
+      const cwd = take(cwdPlain)
+      const label = take(labelPlain, '…')
       lines.push({
-        text: isSelected ? color.textStrong(plain) : color.text(plain),
+        text: `${isSelected ? color.primary(marker) : marker}${color.textDim(age)}${color.textDim(cwd)}`
+          + (isSelected ? color.textStrong(label) : color.text(label)),
         hit: { kind: 'result', id: result.id },
       })
       paintedIds.push(result.id)
@@ -994,6 +1029,16 @@ export class HistoryPanel implements Component, Focusable {
     return out
   }
 
+  /**
+   * The Preview heading: the fixed `Preview` label (role 2, `textDim`) plus the
+   * `rows X-Y/N` count (role 12, `textMuted`) when available. On the regular
+   * main screen the keyboard hint (`Alt+C copy · Enter use`) replaces the
+   * fullscreen affordances — never a fake mouse target. In Fullscreen the two
+   * verbs are role-14 `primary` affordances, WITHOUT brackets, each carrying its
+   * key badge and painted only while the whole item fits; the count yields
+   * first. Every clickable cell range is resolved from the final painted plain
+   * width (never a pre-clamp string length).
+   */
   private renderPreviewHeading(
     width: number,
     totalRows: number,
@@ -1002,66 +1047,94 @@ export class HistoryPanel implements Component, Focusable {
   ): { kind: 'heading'; text: string; hit: HistoryMouseHit } {
     const first = totalRows === 0 ? 0 : this.previewTop + 1
     const last = Math.min(totalRows, this.previewTop + previewRows)
-    const position = `Preview ${first}-${last}/${totalRows}`
+    const position = totalRows === 0 ? '' : `rows ${first}-${last}/${totalRows}`
+    const label = 'Preview'
+
     if (!this.pointerEnabled() || selected === undefined) {
-      // Regular main screen (or no selection): keyboard hints only — never a
-      // fake mouse target.
-      return {
-        kind: 'heading',
-        text: color.textDim(clampLine(`${position}   ${HISTORY_COPY_LABEL} copy · Enter use`, width)),
-        hit: { kind: 'inert' },
+      const hint = `${HISTORY_CHORDS.copy.label} copy · ${HISTORY_CHORDS.accept.label} use`
+      const build = (withPosition: boolean, withHint: boolean): { plain: string; styled: string } => {
+        const plain: string[] = [label]
+        const styled: string[] = [color.textDim(label)]
+        if (withPosition && position !== '') { plain.push(position); styled.push(color.textMuted(position)) }
+        if (withHint) { plain.push(hint); styled.push(color.textMuted(hint)) }
+        return { plain: plain.join('  '), styled: styled.join('  ') }
       }
+      const chosen = [
+        build(true, true),
+        build(false, true),
+        build(true, false),
+        build(false, false),
+      ].find(candidate => visibleWidth(candidate.plain) <= width) ?? { plain: label, styled: color.textDim(label) }
+      // Only a sub-`Preview`-wide frame reaches this clamp (below the frozen
+      // 44-column matrix minimum); every painted row must stay inside the frame.
+      const plain = visibleWidth(chosen.plain) <= width ? chosen.plain : truncateToWidth(chosen.plain, width, '')
+      return { kind: 'heading', text: plain === chosen.plain ? chosen.styled : color.textDim(plain), hit: { kind: 'inert' } }
     }
-    // Transcript Fullscreen: real clickable actions whose painted CELL RANGES
-    // are the hit targets. A press and its synthesized click must resolve to the
-    // SAME action (and, for Use, the same result identity).
-    const prefix = `${position}   `
-    const copyText = '[Copy all]'
-    const useText = '[Use selected]'
-    const plain = `${prefix}${copyText} ${useText}`
-    const clipped = clampLine(plain, width)
+
+    const copyText = `Copy All [${HISTORY_CHORDS.copy.label}]`
+    const useText = `Use Selected [${HISTORY_CHORDS.accept.label}]`
+    const build = (withPosition: boolean, withCopy: boolean, withUse: boolean): { plain: string; styled: string } => {
+      const plain: string[] = [label]
+      const styled: string[] = [color.textDim(label)]
+      if (withPosition && position !== '') { plain.push(position); styled.push(color.textMuted(position)) }
+      if (withCopy) { plain.push(copyText); styled.push(color.primary(copyText)) }
+      if (withUse) { plain.push(useText); styled.push(color.primary(useText)) }
+      return { plain: plain.join('  '), styled: styled.join('  ') }
+    }
+    // Degradation: the count yields first, then `Use Selected`, then `Copy All`.
+    const chosen = [
+      build(true, true, true),
+      build(false, true, true),
+      build(false, true, false),
+      build(true, false, false),
+      build(false, false, false),
+    ].find(candidate => visibleWidth(candidate.plain) <= width) ?? { plain: label, styled: color.textDim(label) }
+    // Only a sub-`Preview`-wide frame reaches this clamp (below the frozen
+    // 44-column matrix minimum); every painted row must stay inside the frame.
+    const plain = visibleWidth(chosen.plain) <= width ? chosen.plain : truncateToWidth(chosen.plain, width, '')
     const actions: Array<{ from: number; to: number; action: HistoryPointerAction }> = []
-    const copyFrom = visibleWidth(prefix)
-    const useFrom = copyFrom + copyText.length + 1
-    if (copyFrom + copyText.length <= visibleWidth(clipped)) {
-      actions.push({ from: copyFrom, to: copyFrom + copyText.length, action: { kind: 'copyAll', id: selected.id } })
+    const copyFrom = plain.indexOf(copyText)
+    if (copyFrom >= 0) {
+      actions.push({ from: copyFrom, to: copyFrom + visibleWidth(copyText), action: { kind: 'copyAll', id: selected.id } })
     }
-    if (useFrom + useText.length <= visibleWidth(clipped)) {
-      actions.push({ from: useFrom, to: useFrom + useText.length, action: { kind: 'useSelected', id: selected.id } })
+    const useFrom = plain.indexOf(useText)
+    if (useFrom >= 0) {
+      actions.push({ from: useFrom, to: useFrom + visibleWidth(useText), action: { kind: 'useSelected', id: selected.id } })
     }
-    if (actions.length === 0) {
-      return { kind: 'heading', text: color.textDim(clipped), hit: { kind: 'inert' } }
+    return {
+      kind: 'heading',
+      text: plain === chosen.plain ? chosen.styled : color.textDim(plain),
+      hit: actions.length === 0 ? { kind: 'inert' } : { kind: 'actions', actions },
     }
-    // Style the plain (already clamped) string by slicing at the resolved
-    // offsets — a clipped button never becomes clickable because its range is
-    // only recorded when it fully fits.
-    const parts: string[] = []
-    let cursor = 0
-    for (const entry of actions) {
-      if (entry.from > cursor) parts.push(color.textDim(clipped.slice(cursor, entry.from)))
-      parts.push(color.textStrong(clipped.slice(entry.from, entry.to)))
-      cursor = entry.to
-    }
-    parts.push(color.textDim(clipped.slice(cursor)))
-    return { kind: 'heading', text: parts.join(''), hit: { kind: 'actions', actions } }
   }
 
   private renderMetadata(width: number, selected: HistorySearchResult | undefined): string {
-    const scope = this.state.scope === 'session' ? 'session' : this.state.scope === 'current' ? 'current dir' : 'all dirs'
+    const scope = this.state.scope === 'session' ? 'session' : this.state.scope === 'current' ? 'directory' : 'all'
     const parts = [`Scope: ${scope}`]
-    if (selected?.cwd != null) parts.push(sanitizedPhysicalLine(shortCwd(selected.cwd)))
-    if (selected?.ts != null) parts.push(formatHistoryTime(selected.ts))
+    if (selected?.cwd != null) parts.push(`Directory: ${sanitizedPhysicalLine(shortCwd(selected.cwd))}`)
+    if (selected?.ts != null) parts.push(`Time: ${formatHistoryTime(selected.ts)}`)
     else parts.push('Time unknown')
     if (selected?.sessionId !== undefined) parts.push(`Session: ${sanitizedPhysicalLine(selected.sessionId)}`)
-    return color.textDim(clampLine(`  ${parts.join('  ·  ')}`, width))
+    // Role 11 (diagnostic facts): labels and facts are `textDim`; this is an
+    // inline fact line, so it never carries the standalone status marker.
+    return color.textDim(clampLine(`  ${parts.join(' · ')}`, width))
   }
 
   private renderFooter(width: number): string {
-    // The mandatory navigation hints: Enter and Esc stay discoverable even when
-    // the full hint does not fit.
-    const clipped = clampLine(`  ${HISTORY_PANEL_FOOTER}`, width)
-    if (clipped.includes('Enter use') && clipped.includes('Esc cancel')) return color.textDim(clipped)
-    return color.textDim(clampLine('  Enter use · Esc cancel', width))
+    // The History-LOCAL Action Bar: the shared `renderActionBarRow` algorithm
+    // (compact a declared `short` first, then drop whole segments by ascending
+    // priority, `Esc` last and never dropped), driven by the ONE chord table so
+    // every hint names the same key its handler matches.
+    const segments: ActionBarSegment[] = [
+      { text: `${HISTORY_CHORDS.accept.label} use`, priority: 100 },
+      { text: `${HISTORY_CHORDS.scope.label} scope`, priority: 65 },
+      { text: `${HISTORY_CHORDS.results.label} results`, priority: 50, short: HISTORY_CHORDS.results.label },
+      { text: `${HISTORY_CHORDS.preview.label} preview`, priority: 35, short: HISTORY_CHORDS.preview.label },
+      { text: `${HISTORY_CHORDS.copy.label} copy`, priority: 55 },
+      { text: `${HISTORY_CHORDS.expand.label} ${this.expanded ? 'collapse' : 'expand'}`, priority: 30 },
+      { text: `${HISTORY_CHORDS.cancel.label} cancel`, priority: 1000 },
+    ]
+    return color.textMuted(renderActionBarRow(segments, width))
   }
 
   /** One Preview source row, with the drag-selected source CELLS inverted. The

@@ -93,7 +93,7 @@ second screen.
     hidden — a session tab with no identity would always be empty.
 - **Filtering**: case-insensitive substring over the content; an empty
   query browses the most recent history.
-- **Layout (one vertical presentation at every width)**: `Input history`
+- **Layout (one vertical presentation at every width)**: `Input History`
   header with the scope tabs and the `F2` hint, the query row, a
   `Results · N matches` counter, a single-line results window (at most eight
   painted rows, following the selection), a divider, then the `Preview`.
@@ -103,22 +103,37 @@ second screen.
   the visible selected result.
 - **Preview**: the selected row's FULL soft-wrapped multi-line content with its
   OWN scroll position (`Alt+↑`/`Alt+↓` one row, `Alt+PgUp`/`Alt+PgDn` one page,
-  `Alt+Home`/`Alt+End` first/last) and ONE trailing metadata row (scope,
-  directory, time, session — legacy rows honestly show `Time unknown`, never a
-  fabricated time). The Preview never truncates the source with a marker. `↑`/
-  `↓`/`PgUp`/`PgDn` keep selecting in the results list; the list shows the
-  prompt only, with the directory prefix in `All directories` only.
+  `Alt+Home`/`Alt+End` first/last) and ONE trailing metadata row
+  (`Scope: … · Directory: … · Time: … · Session: …`; a legacy row honestly shows
+  `Time unknown`, never a fabricated time). The Preview never truncates the
+  source with a marker. `↑`/`↓`/`PgUp`/`PgDn` keep selecting in the results list;
+  the list shows the prompt only, with the directory prefix in
+  `All directories` only.
 - **Copy**: `Alt+C` copies the EXACT stored prompt (both roots); in Transcript
-  Fullscreen the Preview heading also carries clickable `[Copy all]` and
-  `[Use selected]`.
+  Fullscreen the Preview heading also carries clickable `Copy All [Alt+C]` and
+  `Use Selected [Enter]` (the verb is never bracketed; the whole item is hidden
+  when it cannot fit, while `Alt+C`/Enter stay available).
 - **Enter** puts the selected text back into the CURRENT editor (via
   `setEditorText`) and closes the seat — it never submits and never writes a
   hidden host editor behind a plugin winner. **Esc**/**Ctrl+C** close it with
   the draft, cursor, input mode and pending paste content untouched, and those
   two keys are consumed by the seat while it is active (closing History never
   interrupts the agent or quits the TUI).
+- **Session currentness (B3-B)**: `Ctrl+R` captures the runtime's SINGLE
+  `SessionScopeAuthority` scope once (exact owner + generation) and the seat's
+  search/accept/copy/async guards re-read that same capture. A session switch, a
+  same-id reopen (A→B→A), a same-owner generation bump or the sessionless→first
+  session publication therefore makes the old seat logically dead the instant the
+  new owner is published: the runner physically closes it in the same synchronous
+  commit (before the new Session's first editable frame), a UI cleanup failure can
+  never roll the published Session back, and Enter/Copy/async results from the old
+  scope are refused rather than written into the new Session. A live blocking
+  owner (Question / Approval / Save Location) PARKS the seat instead — the SAME
+  instance with its query/selection/Preview anchor returns after the LAST blocker
+  settles.
 - **Pointer (Transcript Fullscreen only)**: clicking a result row SELECTS it
-  (it does not accept); the explicit `[Use selected]`/`[Copy all]` cells act,
+  (it does not accept); the explicit `Use Selected [Enter]` / `Copy All [Alt+C]`
+  cells act,
   the wheel scrolls the list or the Preview under the pointer only, and a
   Preview drag copies the exact original source substring. The regular main
   screen has NO application mouse: it is fully keyboard-driven and the

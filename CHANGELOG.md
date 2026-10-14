@@ -9,6 +9,16 @@
 
 ### 变更
 
+- `Ctrl+R` 历史席位完成视觉与生命周期收口：标题为 `Input History`（Title Case），当前
+  scope 用加粗 `primary` 的 `[Label]`，结果行以 `primary` 的 `> ` 游标配加粗的选中文字
+  （时间、目录等次要信息保持 `textDim`），Fullscreen 操作为不带方括号的
+  `Copy All [Alt+C]` / `Use Selected [Enter]`，底部提示整段降级、绝不在半个键名处截断且
+  `Esc` 恒定在最后，无匹配/加载与加载失败使用不同的墨色。切换到新会话（包括重新打开
+  同一个 session id、或同一 owner 的 generation 变化）时，旧历史席位随会话发布立即
+  关闭：旧席位上的 Enter、复制与异步搜索结果都不会写入或显示到新会话，且席位清理
+  失败不会回滚已发布的会话；Question / Approval / Save Location 仍会暂停并在最后一个
+  阻塞项结束后恢复同一个历史席位。
+
 - `Ctrl+R` 的历史搜索不再弹出居中浮层，而是接管底部编辑席位：上方 Transcript 与下方
   状态/footer 都保持可见，任何宽度下都是同一套「Header（scope + `F2`）+ 查询 + 结果 +
   分隔 + Preview」的纵向布局。结果列表单行显示并随选中滚动（最多 8 行），下方 Preview

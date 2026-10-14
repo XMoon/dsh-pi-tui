@@ -244,7 +244,7 @@ async function createProbe(adapter: LlmAdapter): Promise<Probe> {
     imageScope: () => undefined,
     present: { call: () => undefined, result: () => undefined },
     sessionCwd: () => '/tmp',
-    sessionId: () => MAIN,
+    captureHistoryScope: () => ({ sessionId: MAIN, isCurrent: () => true }),
     onTerminalResize: () => {},
     copySelection: async () => false,
     openExternalUrl: () => {},

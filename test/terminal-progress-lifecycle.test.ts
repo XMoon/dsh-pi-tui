@@ -575,7 +575,7 @@ function mountSurface(
       imageScope: () => undefined,
       present: { call: () => undefined, result: () => undefined },
       sessionCwd: () => '/tmp',
-      sessionId: () => 'session-terminal-progress-test',
+      captureHistoryScope: () => ({ sessionId: 'session-terminal-progress-test', isCurrent: () => true }),
       onTerminalResize: () => {},
       copySelection: async () => false,
       openExternalUrl: () => {},

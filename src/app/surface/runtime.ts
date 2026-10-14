@@ -100,6 +100,7 @@ import {
   startProcessTui,
   type ComposerSubmitRequest,
   type DisplaySubjectPresentation,
+  type HistoryOpenScope,
   type StatusData,
   type TranscriptSearchCloseReason,
   type TranscriptSearchPresentation,
@@ -282,6 +283,14 @@ export interface SurfaceRendererMount {
    */
   releaseUnmounted(): Promise<void>
 }
+/**
+ * Phase 3B / B3-B: `SurfaceMountDeps.captureHistoryScope` reuses the ONE
+ * `HistoryOpenScope` declaration owned by `src/tui-app.ts` (type-only import in
+ * the same direction as `TuiAppOptions`). Keeping the declaration on the TUI
+ * side is what stops the DOM-less bench program (`scripts/bench.mts` imports
+ * `src/tui-app.ts`) from pulling this whole surface/extension graph in.
+ */
+
 /** The capabilities the mount needs; each is resolved by the runner/bootstrap. */
 export interface SurfaceMountDeps {
   /** The application input contract (session/submission/command owners). */
@@ -321,8 +330,13 @@ export interface SurfaceMountDeps {
   readonly present: OptionCapability<'present'>
   /** The live session cwd the history search's `current` scope resolves against. */
   readonly sessionCwd: () => string
-  /** The live session identity the history panel captures at open time. */
-  readonly sessionId: () => string | undefined
+  /** The ONE atomic History currentness capture (Phase 3B / B3-B): the
+   *  application composition reads the runtime's single `SessionScopeAuthority`
+   *  ONCE per Ctrl+R open and hands the TUI a `{ sessionId, isCurrent }` pair.
+   *  The UI never sees an owner subject or re-derives an identity from separate
+   *  reads; `isCurrent` answers the exact-owner/generation question the whole
+   *  surface already uses. */
+  readonly captureHistoryScope: () => HistoryOpenScope
   /** Material terminal-width change (the command surface coalesces its refresh). */
   readonly onTerminalResize: OptionCapability<'onTerminalResize'>
   /** Fullscreen drag-selection copy (the runner owns the clipboard policy). */
@@ -611,6 +625,18 @@ export interface SurfaceRuntime<Event extends RoutedSessionEvent> {
    * a renderer frame failure routes to that renderer's fatal sink.
    */
   withdrawReplacedPresentation(): void
+  /**
+   * Phase 3B / B3-B: retire a mounted History editor-seat tenant whose captured
+   * Session scope is no longer current. It is the runner's publication-commit
+   * half of the History currentness policy, called from the three `publishOwner`
+   * seams (ordinary transition, fork adoption, first-session creation) right
+   * after the new owner is published, and from the ownership core's single
+   * generation-reset hook (a same-owner generation bump). It is STRICTLY
+   * non-throwing: the commit section must never fail because UI cleanup did. It
+   * performs no Host read and is a no-op when no PiTui app is mounted (TSP
+   * renderer, pre-mount, disposed).
+   */
+  retireStaleHistorySeat(): void
   /**
    * Attach the A4-7 presentation event routing source (plan §16). The surface
    * owns every routing decision and the apply/paint calls; the runner keeps the
@@ -1624,10 +1650,10 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
     // lifecycle (plan §27 — TuiApp never touches the filesystem).
     historySearchSource: deps.historySearchSource,
     historySearchCwd: () => deps.sessionCwd(),
-    // The session scope's identity — a GETTER like the cwd: a session switch
-    // must make the next Ctrl+R search the NEW session (the panel captures it
-    // once at open time).
-    historySearchSessionId: () => deps.sessionId(),
+    // The Session currentness bridge (Phase 3B / B3-B): the application
+    // composition captured ONE scope authority pair for this open; the TUI
+    // stores the pair and never re-derives a session identity.
+    captureHistoryScope: deps.captureHistoryScope,
     // The transcript image surface (plan M8/M9): the durable loader plus the
     // dim fallback coloring.
     imageLoader: new ImageLoader((ref, context) => deps.readImage(ref, context)),
@@ -1819,6 +1845,12 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
     },
     withdrawReplacedPresentation() {
       interaction.withdrawReplacedPresentation()
+    },
+    retireStaleHistorySeat() {
+      // The PiTui-only mounted app owns the optional seat; a TSP renderer mount
+      // (no `app`) and a pre-mount/disposed surface are strict no-ops. The app's
+      // own entry is state-only and non-throwing.
+      if (app !== undefined) app.retireStaleHistorySeat()
     },
     attachEventRouting(source) {
       routingSource = source

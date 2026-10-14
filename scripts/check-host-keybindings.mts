@@ -177,8 +177,16 @@ export const SCOPED_STRING_ALLOWLIST: ReadonlyArray<{ readonly file: string; rea
   // hard-code the chords and they cannot come from `keyHint` — no keymap action
   // and no remap exists. The labels live in the key-label authority and the
   // panel imports them.
-  { file: 'src/tui/keybindings/hints.ts', line: "export const HISTORY_PREVIEW_SCROLL_LABEL = 'Alt+↑↓'" },
+  { file: 'src/tui/keybindings/hints.ts', line: "export const HISTORY_PREVIEW_SCROLL_LABEL = 'Alt+↑/↓'" },
   { file: 'src/tui/keybindings/hints.ts', line: "export const HISTORY_COPY_LABEL = 'Alt+C'" },
+  // (10) The History editor-seat tenant's ONE fixed-chord table (B3-B): the
+  // machine KeyIds `handleInput` dispatches on and the display label painted for
+  // each. The seat owns no Host keymap action (no remap exists), so this table
+  // IS its key authority — the same category as (8)/(9), in the same file.
+  { file: 'src/tui/keybindings/hints.ts', line: "accept: { keys: ['enter', 'ctrl+j'], label: 'Enter' }," },
+  { file: 'src/tui/keybindings/hints.ts', line: "preview: { keys: ['alt+up', 'alt+down', 'alt+pageUp', 'alt+pageDown', 'alt+home', 'alt+end'], label: HISTORY_PREVIEW_SCROLL_LABEL }," },
+  { file: 'src/tui/keybindings/hints.ts', line: "copy: { keys: ['alt+c'], label: HISTORY_COPY_LABEL }," },
+  { file: 'src/tui/keybindings/hints.ts', line: "cancel: { keys: ['escape', 'ctrl+c'], label: 'Esc' }," },
 ]
 
 /** One detected violation (a host chord or a hard-coded label). */

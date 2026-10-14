@@ -364,6 +364,12 @@ export function applyRunnerWithRuntime(
         // from their own authorities, so the old permission preset can
         // never survive an identity change.
         surface.resetSubjectStatus()
+        // Phase 3B / B3-B: a generation bump has ALREADY moved the authoritative
+        // generation here (see `runGenerationBump`), so any History seat captured
+        // against the old generation is stale — a same-owner bump included. This
+        // closes the physical tenant through the app's ONE revalidation path
+        // without changing the owner or fabricating a Session commit.
+        surface.retireStaleHistorySeat()
       },
     })
     // The A3 command/submission scope authority (plan A3 §1.1): ONE synchronous
@@ -706,6 +712,9 @@ export function applyRunnerWithRuntime(
         settlePendingQueueRecalls: (committed) => submissionRuntime.settleQueueRecalls(committed),
         settleLocalSubmitAck: (reason) => submission.settleLocalSubmitAck(reason),
         resetSubmitLatency: () => submission.resetSubmitLatency(),
+        // Phase 3B / B3-B: the publication-commit History retirement (see the
+        // three `publishOwner` seams in app/session/runtime.ts).
+        retireStaleHistorySeat: () => surface.retireStaleHistorySeat(),
         setCompletionOwner: (identity) => surface.setCompletionOwner(identity),
         initLiveSession: (owner) => {
           // PR3-B B3 (findings C/F6): the committed owner takes the
@@ -2569,12 +2578,15 @@ export function applyRunnerWithRuntime(
       },
       present,
       sessionCwd: () => status.sessionCwd(),
-      // The session scope's identity — a GETTER like the cwd: a session switch
-      // must make the next Ctrl+R search the NEW session (the panel captures it
-      // once at open time). PR5 v2 §2.12: the SELECTED OWNERSHIP authority is
-      // the source (transport-neutral — a Remote session has no Direct agent),
-      // never `agentNow()`.
-      sessionId: () => ownership.currentSessionId(),
+      // Phase 3B / B3-B: the ONE atomic History currentness bridge. It captures
+      // the runtime's single `SessionScopeAuthority` scope ONCE per Ctrl+R open
+      // and hands the TUI only `{ sessionId, isCurrent }`; PR5 v2 §2.12: the
+      // SELECTED OWNERSHIP authority is the source (transport-neutral — a Remote
+      // session has no Direct agent), never `agentNow()`.
+      captureHistoryScope: () => {
+        const scope = sessionScope.capture()
+        return { sessionId: scope.sessionId, isCurrent: () => sessionScope.isCurrent(scope) }
+      },
       // M5: a material width change refreshes the command surface (the runner
       // coalesces to its interval).
       onTerminalResize: () => settings.requestFooterCommandRefresh(),

@@ -17,7 +17,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { visibleWidth } from '@xmoon76/pi-tui'
 import {
-  HISTORY_PANEL_FOOTER,
+  formatRelativeAge,
   HistoryPanel,
   planHistorySeatLayout,
   type HistoryPanelOptions,
@@ -30,6 +30,7 @@ import {
 } from '../src/tui/components/source-text-layout.ts'
 import type { HistorySearchResult, HistorySearchSource } from '../src/client/history/search.ts'
 import type { HistoryScope } from '../src/client/history/search.ts'
+import { color } from '../src/tui/theme/runtime.ts'
 
 const visibleWidthOf = visibleWidth
 
@@ -317,7 +318,7 @@ test('panel: the selection viewport FOLLOWS the cursor and PgUp/PgDn page by the
   await settle()
   const lines = plain(panel.render(100))
   const dividerRow = lines.findIndex(line => line.includes('─'))
-  const selected = lines.findIndex(line => line.includes('›'))
+  const selected = lines.findIndex(line => line.startsWith('> '))
   // Only the LIST region rows (above the divider) are results: the Preview
   // paints the selected entry's own text too.
   const visible = lines.slice(0, dividerRow).filter(line => /entry \d+/.test(line)).length
@@ -325,7 +326,7 @@ test('panel: the selection viewport FOLLOWS the cursor and PgUp/PgDn page by the
   panel.handleInput('\x1b[6~') // PageDown
   assert.equal(panel.selected()?.content, `entry ${visible}`)
   const scrolled = plain(panel.render(100))
-  assert.ok(scrolled.some(line => line.includes('›') && line.includes(`entry ${visible}`)),
+  assert.ok(scrolled.some(line => line.startsWith('> ') && line.includes(`entry ${visible}`)),
     'the selected row must stay inside the viewport')
   assert.ok(!scrolled.some(line => line.includes('entry 0')), 'the window scrolled past the head')
   panel.handleInput('\x1b[5~') // PageUp
@@ -382,7 +383,8 @@ test('panel: zero results renders the no-match state and the footer', async () =
   await settle()
   const lines = plain(panel.render(100))
   assert.ok(lines.some(line => line.includes('No history yet')))
-  assert.ok(lines.some(line => line.includes(HISTORY_PANEL_FOOTER)))
+  assert.ok(lines.some(line => line.includes('Enter use · Tab scope') && line.includes('Esc cancel')),
+    'the full action bar is painted at 100 columns')
 })
 
 // ── presentation: list + Preview ────────────────────────────────────────────
@@ -398,12 +400,13 @@ test('panel: the vertical presentation keeps the header, query, counter, list, d
   await settle()
   const raw = panel.render(120)
   const lines = plain(raw)
-  assert.ok(lines[0]!.includes('Input history'), 'the header is the first row')
+  assert.ok(lines[0]!.includes('Input History'), 'the header is the first row')
   assert.ok(lines[1]!.includes('Search: '), 'the query row follows')
   assert.ok(lines.some(line => line.includes('Results · 26 matches')), 'the counter is painted')
   assert.ok(lines.some(line => line.includes('Preview ')), 'the Preview heading is painted')
-  assert.ok(lines.some(line => line.includes('Scope: current dir')), 'the metadata row is painted')
-  assert.ok(lines.some(line => line.includes(HISTORY_PANEL_FOOTER)), 'the footer hint is painted')
+  assert.ok(lines.some(line => line.includes('Scope: directory')), 'the metadata row is painted')
+  assert.ok(lines.some(line => line.includes('Enter use · Tab scope') && line.includes('Esc cancel')),
+    'the footer hint is painted')
   assert.equal(lines.filter(line => /entry \d+/.test(line)).length, 7, 'the list window is the allocated region minus its counter row')
   assert.ok(lines.length <= 18, `the render must stay within the grant (got ${lines.length})`)
   for (const line of raw) assert.ok(visibleWidthOf(line) <= 120, `line exceeds the width: ${JSON.stringify(line)}`)
@@ -420,12 +423,12 @@ test('panel: a long Preview is fully readable — no `… more` truncation, inde
   const lines = plain(panel.render(100))
   assert.ok(!lines.some(line => line.includes('… more')), 'the Preview never truncates the source with a marker')
   assert.ok(lines.some(line => line.includes('source line 0')), 'the Preview starts at the source head')
-  assert.ok(lines.some(line => line.includes('Preview 1-5/500')), `the heading reports the real position:\n${lines.join('\n')}`)
+  assert.ok(lines.some(line => line.includes('rows 1-5/500')), `the heading reports the real position:\n${lines.join('\n')}`)
   // Alt+End scrolls the Preview to the LAST source row.
   panel.handleInput('\x1b[1;3F')
   const tail = plain(panel.render(100))
   assert.ok(tail.some(line => line.includes('source line 499')), `Alt+End reaches the last source row:\n${tail.join('\n')}`)
-  assert.ok(tail.some(line => line.includes('Preview 496-500/500')), tail.join('\n'))
+  assert.ok(tail.some(line => line.includes('rows 496-500/500')), tail.join('\n'))
   // The list selection did NOT move (the Preview scroll is independent).
   assert.equal(panel.selected()?.content, huge)
 })
@@ -485,13 +488,13 @@ test('panel: a NEW selected result resets the Preview to its top, a repaint of t
   panel.render(100)
   const headingOf = (): string => plain(panel.render(100)).find(line => line.includes('Preview ')) ?? ''
   const scrolled = headingOf()
-  assert.ok(scrolled.includes('Preview 2-'), scrolled)
+  assert.ok(scrolled.includes('rows 2-'), scrolled)
   // A repaint of the SAME result keeps the anchor.
   assert.equal(headingOf(), scrolled)
   // A NEW selection resets it.
   panel.handleInput('\x1b[B')
   panel.render(100)
-  assert.ok(headingOf().includes('Preview 1-'), 'a new selected result starts the Preview at the top')
+  assert.ok(headingOf().includes('rows 1-'), 'a new selected result starts the Preview at the top')
 })
 
 // ── Copy All / pointer capability ───────────────────────────────────────────
@@ -505,7 +508,7 @@ test('panel: Alt+C copies the EXACT selected content in both modes; the regular 
   await settle()
   const lines = plain(panel.render(100))
   assert.ok(lines.some(line => line.includes('Alt+C copy')), 'the regular mode advertises the keyboard hint')
-  assert.ok(!lines.some(line => line.includes('[Copy all]')), 'the regular mode never paints a fake mouse target')
+  assert.ok(!lines.some(line => line.includes('Copy All [Alt+C]')), 'the regular mode never paints a fake mouse target')
   panel.handleInput('\x1bc') // Alt+C
   assert.deepEqual(copied, [prompt], 'Alt+C copies the stored source byte for byte')
 })
@@ -535,10 +538,10 @@ test('panel: the fullscreen pointer mode paints the actions and a Preview drag c
   await settle()
   const raw = panel.render(100)
   const lines = plain(raw)
-  assert.ok(lines.some(line => line.includes('[Copy all]') && line.includes('[Use selected]')),
+  assert.ok(lines.some(line => line.includes('Copy All [Alt+C]') && line.includes('Use Selected [Enter]')),
     'the fullscreen Preview heading carries the real clickable actions')
   const height = raw.length
-  const headingRow = lines.findIndex(line => line.includes('[Copy all]'))
+  const headingRow = lines.findIndex(line => line.includes('Copy All [Alt+C]'))
   const firstContentRow = headingRow + 1
   const event = (
     type: 'press' | 'drag' | 'release' | 'click',
@@ -606,14 +609,14 @@ test('H3A-05: a 200-row page scrolls to row 150 with the marker visible and the 
   const lines = plain(panel.render(columns))
   const divider = lines.findIndex(line => line.includes('─'))
   const painted = lines.slice(0, divider).filter(line => /entry \d+/.test(line))
-  assert.ok(painted.some(line => line.includes('›') && line.includes('entry 150')),
+  assert.ok(painted.some(line => line.startsWith('> ') && line.includes('entry 150')),
     `the selected row must stay inside the painted window:\n${lines.join('\n')}`)
   assert.ok(!lines.some(line => line.includes('entry 0')), 'the window scrolled past the head')
   // A resize re-wraps/repaints but keeps the stable selection identity.
   columns = 60
   const resized = plain(panel.render(columns))
   assert.equal(panel.selected()?.id, 'id-150', 'the stable ID survives the resize')
-  assert.ok(resized.some(line => line.includes('›') && line.includes('entry 150')), resized.join('\n'))
+  assert.ok(resized.some(line => line.startsWith('> ') && line.includes('entry 150')), resized.join('\n'))
 })
 
 test('H3A-06: Copy All of a 2000-line prompt is the whole original source, and the Preview reaches its last row', async () => {
@@ -895,7 +898,7 @@ test('pointer: a right or middle button can never start a History gesture', asyn
   const height = painted.length
   const contentRow = painted.findIndex(line => line.includes('Preview ')) + 1
   const secondRow = painted.findIndex(line => line.includes('second entry'))
-  const actionRow = painted.findIndex(line => line.includes('[Use selected]'))
+  const actionRow = painted.findIndex(line => line.includes('Use Selected [Enter]'))
   assert.ok(secondRow >= 0 && actionRow >= 0 && contentRow > 0,
     `the frame must paint rows and actions:\n${painted.join('\n')}`)
   const event = (
@@ -985,4 +988,128 @@ test('H3A-12: a resize keeps the Preview on the same SOURCE text (real re-wrap, 
     `the CJK re-wrap keeps the same source line at the top:\n${JSON.stringify(wrapped)}`)
   assert.ok(!cjk(2).startsWith(wrapped), 'the re-wrap never jumps to another source line')
   assert.ok(wrapped.length < head.length, 'the narrower wrap really shortens the painted row')
+})
+
+// ── B3-B: the frozen design-language roles on the History seat ───────────────
+
+test('B3-B visual: identity / active scope / selected row / counter / metadata carry the frozen role tokens', async () => {
+  const source = new FakeSource()
+  source.rows = [row('alpha prompt', 3, '/work/a', 'a'), row('beta prompt', 2, '/work/b', 'b')]
+  const { panel } = makePanel(source, { sessionId: 'ses_a' })
+  panel.start()
+  await settle()
+  const raw = panel.render(100)
+
+  const header = raw[0]!
+  assert.ok(header.startsWith(color.textStrong(' Input History ')), `identity is bold textStrong:\n${header}`)
+  assert.ok(header.includes(color.textStrong('[Current Session]', 'primary')), `the active scope is bold primary:\n${header}`)
+  assert.ok(header.includes(color.textDim('Current Directory')), 'the inactive scopes are textDim')
+  assert.equal(plain([header])[0]!.split('[').length - 1, 1, 'exactly ONE bracketed active scope per header')
+  assert.ok(raw[1]!.includes(color.textDim('Search: ')), 'the query label is textDim')
+  assert.ok(raw.some(line => line.includes(color.textDim('Results · ')) && line.includes(color.textMuted('2 matches'))),
+    'the counter splits its label and count tokens')
+
+  const selectedRow = raw.find(line => line.startsWith(color.primary('> ')))
+  assert.ok(selectedRow !== undefined, 'the selected row opens with a primary `> ` gutter')
+  assert.ok(selectedRow.includes(color.textStrong('alpha prompt')), 'the selected prompt is bold textStrong')
+  assert.ok(selectedRow.includes(color.textDim(`${formatRelativeAge(3).padStart(3)} `)), 'the age stays textDim, never bolded with the row')
+  const dimOpen = color.textDim('\u0000').split('\u0000')[0]!
+  const metaLine = raw.find(line => plain([line])[0]!.startsWith('  Scope: session'))!
+  assert.ok(metaLine.startsWith(`${dimOpen}  Scope: session`), 'the metadata facts are textDim')
+  assert.ok(raw.some(line => line.includes(color.textMuted('F2 expand'))), 'the F2 hint is textMuted')
+})
+
+test('B3-B action bar: fixed order with Esc last, whole-segment drops, never a partial word', async () => {
+  const source = new FakeSource()
+  source.rows = [row('alpha', 1, '/work/a', 'a')]
+  const { panel } = makePanel(source)
+  panel.start()
+  await settle()
+
+  const wide = plain(panel.render(120)).find(line => line.includes('Esc cancel'))!
+  assert.equal(wide.trimEnd(),
+    'Enter use · Tab scope · ↑/↓ results · Alt+↑/↓ preview · Alt+C copy · F2 expand · Esc cancel')
+
+  const mid = plain(panel.render(80)).find(line => line.includes('Esc cancel'))!
+  assert.ok(mid.includes('↑/↓') && !mid.includes('↑/↓ results'), `the short form is compacted whole:\n${mid}`)
+  assert.ok(mid.trimEnd().endsWith('Esc cancel'), 'Esc stays last')
+
+  const narrow = plain(panel.render(44)).find(line => line.includes('Esc cancel'))!
+  assert.ok(narrow.trimEnd().endsWith('Esc cancel'), `Esc survives and stays last:\n${narrow}`)
+  assert.ok(!narrow.includes('…'), 'a dropped segment is never a partial word')
+  assert.ok(!narrow.includes('· ·') && !narrow.includes('·  ') && !narrow.trimEnd().endsWith('·'), 'no dangling separator')
+})
+
+test('B3-B narrow: the F2 hint is removed whole and the scope tabs use the short forms', async () => {
+  const source = new FakeSource()
+  source.rows = [row('alpha', 1, '/work/a', 'a')]
+  const { panel } = makePanel(source, { sessionId: 'ses_a' })
+  panel.start()
+  await settle()
+  const header = plain(panel.render(44))[0]!
+  assert.ok(header.includes('Input History'), header)
+  assert.ok(header.includes('[Session]'), `the narrow header uses the short scope label:\n${header}`)
+  assert.ok(!header.includes('F2'), `the F2 hint is removed whole, never a partial F2 label:\n${header}`)
+  assert.ok(!header.includes('exp'), header)
+})
+
+test('B3-B placeholders: a no-match is textDim and a failed load paints its word error', async () => {
+  const empty = new FakeSource()
+  empty.rows = []
+  const { panel } = makePanel(empty)
+  panel.start()
+  await settle()
+  panel.handleInput('zzz')
+  await settle()
+  const noMatch = panel.render(100)
+  assert.ok(noMatch.some(line => line.startsWith(color.textDim('  No matching history'))),
+    `a no-match is a textDim placeholder:\n${plain(noMatch).join('\n')}`)
+
+  const failing = new FakeSource()
+  failing.fail = true
+  const { panel: failedPanel } = makePanel(failing)
+  failedPanel.start()
+  await settle()
+  const failed = failedPanel.render(100)
+  assert.ok(failed.some(line => line.startsWith(color.error('  History unavailable'))),
+    `a failed load paints its word error:\n${plain(failed).join('\n')}`)
+  assert.ok(!failed.some(line => line.startsWith(color.textDim('  History unavailable'))),
+    'a failure is never painted as a calm placeholder')
+})
+
+test('B3-B matrix: the seat never overflows 200x50 / 80x10 / 44x20 and keeps the action bar last', async () => {
+  for (const [columns, rows] of [[200, 50], [80, 10], [44, 20]] as const) {
+    const source = new FakeSource()
+    source.rows = [row('alpha prompt with a much longer body than the row', 3, '/work/a', 'a')]
+    const { panel } = makePanel(source, {
+      sessionId: 'ses_a',
+      geometry: { columns: () => columns, rows: () => rows, chromeRows: () => 0 },
+    })
+    panel.start()
+    await settle()
+    const raw = panel.render(columns)
+    for (const line of raw) {
+      assert.ok(visibleWidthOf(line) <= columns, `${columns}x${rows}: a row exceeds the frame: ${JSON.stringify(line)}`)
+    }
+    const grant = planHistorySeatLayout(columns, rows, 0, false, { previewable: true }).grant
+    if (grant >= 3) {
+      const last = plain(raw)[raw.length - 1]!
+      assert.ok(last.includes('use') && last.includes('cancel'), `${columns}x${rows}: the action bar is the last seat row:\n${last}`)
+    }
+  }
+})
+
+test('B3-B degenerate width: a frame below the frozen matrix never overflows', async () => {
+  const source = new FakeSource()
+  source.rows = [row('alpha prompt', 1, '/work/a', 'a')]
+  const { panel } = makePanel(source, {
+    sessionId: 'ses_a',
+    geometry: { columns: () => 12, rows: () => 20, chromeRows: () => 0 },
+  })
+  panel.start()
+  await settle()
+  const raw = panel.render(12)
+  for (const line of raw) {
+    assert.ok(visibleWidthOf(line) <= 12, `a degenerate-width row exceeds the frame: ${JSON.stringify(line)}`)
+  }
 })

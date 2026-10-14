@@ -296,7 +296,7 @@ function mountHarness(): Harness {
         imageScope: () => undefined,
         present: { call: () => undefined, result: () => undefined },
         sessionCwd: () => '/tmp',
-        sessionId: () => SESSION_ID,
+        captureHistoryScope: () => ({ sessionId: SESSION_ID, isCurrent: () => true }),
         onTerminalResize: () => {},
         copySelection: async () => false,
         openExternalUrl: () => {},

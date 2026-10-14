@@ -1653,6 +1653,25 @@ function pendingTailRowKey(item: PendingTailRow): string {
     : `ctx:${item.row.id}`
 }
 
+/**
+ * Phase 3B / B3-B: the narrow History currentness pair the TUI receives. It is
+ * produced by ONE `SessionScopeAuthority.capture()` at Ctrl+R open time; the
+ * `sessionId` names the scope the search filters by and `isCurrent` re-reads the
+ * SAME captured scope (exact owner + generation, sessionless included) on every
+ * acting entry. The pinned scope itself never crosses into the TUI.
+ *
+ * Declared HERE (not in `app/surface/runtime.ts`) because `scripts/bench.mts`
+ * imports `src/tui-app.ts` directly under a DOM-less tsconfig: a type-only
+ * import from the TUI into the surface runtime would pull that whole graph —
+ * extension service included — into the bench program. `app/surface/runtime.ts`
+ * reuses this exact declaration with a type-only import in the opposite
+ * direction (it already imports `TuiAppOptions` from this module).
+ */
+export interface HistoryOpenScope {
+  readonly sessionId: string | undefined
+  readonly isCurrent: () => boolean
+}
+
 /** Injectable TuiApp options; every field is optional. */
 export interface TuiAppOptions {
   /** How long a notify line stays before it auto-clears, in ms. */
@@ -1855,14 +1874,15 @@ export interface TuiAppOptions {
    */
   historySearchCwd?: () => string
   /**
-   * The live session identity the `session` scope filters by (the runner
-   * forwards `liveAgent?.session.id`). A GETTER like `historySearchCwd` —
-   * resolved at panel OPEN time, never a snapshot: a session switch must
-   * make the next Ctrl+R search the NEW session. Absent (or resolving
-   * undefined — no session yet on a deferred start), the panel defaults
-   * to the `current` scope and hides the session tab.
+   * Phase 3B / B3-B: the ONE History currentness bridge. Called exactly once per
+   * Ctrl+R open; the returned pair pins the Session owner + generation captured
+   * at that instant. The panel's search filters by `sessionId` and every acting
+   * entry (accept, copy, async commit, seat revalidation) re-reads `isCurrent`,
+   * so a same-id reopen, an A→B→A switch or a same-owner generation bump all
+   * refuse stale History work. Absent, Ctrl+R never opens the seat (no string-
+   * identity fallback exists).
    */
-  historySearchSessionId?: () => string | undefined
+  captureHistoryScope?: () => HistoryOpenScope
 }
 
 /**
@@ -3011,10 +3031,9 @@ export class TuiApp {
    * the whole surface's cwd with the new session header, so the panel must
    * resolve the cwd at OPEN time, not at construction time. */
   private readonly historySearchCwd: (() => string) | undefined
-  /** The live session identity for the panel's `session` scope — a GETTER
-   * (the runner's `liveAgent?.session.id`), never a snapshot: a session
-   * switch must make the next Ctrl+R search the NEW session. */
-  private readonly historySearchSessionId: (() => string | undefined) | undefined
+  /** Phase 3B / B3-B: the ONE History currentness bridge — the same closure the
+   *  runner injected, invoked once per Ctrl+R open (never a stored scope). */
+  private readonly captureHistoryScope: (() => HistoryOpenScope) | undefined
   /** The open CATEGORIZED picker (e.g. /sessions): Tab cycles its
    * categories while it is open. Cleared when the picker closes. */
   private activeCategorizedPicker: CategorizedPickerState | undefined
@@ -3944,7 +3963,7 @@ export class TuiApp {
     this.historySearchCwd = options.historySearchCwd
     // Same for the session identity: a session switch must make the next
     // history search the NEW session (see the field doc).
-    this.historySearchSessionId = options.historySearchSessionId
+    this.captureHistoryScope = options.captureHistoryScope
     this.editorSeatHolder = new EditorSeatHolder({
       hostAdapter: () => this.hostEditorAdapter(),
       surfaceId: `tui-${Date.now().toString(36)}`,
@@ -7358,26 +7377,28 @@ export class TuiApp {
     if (this.historyPanel !== undefined) return
     if (this.historySearchSource === undefined) return
     if (this.disposed) return
+    const captureHistoryScope = this.captureHistoryScope
+    if (captureHistoryScope === undefined) return
     const source = this.historySearchSource
-    // Scope/session/cwd are captured ONCE at open time (a session switch moves
-    // the live cwd/identity, and the panel's whole lifetime keeps this
-    // snapshot; the next open re-resolves).
+    // ONE atomic Session-scope capture for this open. The cwd is a live getter
+    // like before; the identity and its currentness come from the SAME capture,
+    // so no later read can recombine a different session id with this scope.
+    const captured = captureHistoryScope()
     const cwd = this.historySearchCwd?.() ?? this.status.cwd
-    const sessionId = this.historySearchSessionId?.()
-    const generation = this.generation
+    const sessionId = captured.sessionId
     let panel: HistoryPanel | undefined
     let lease: { close(): void } | undefined
-    // The ONE caller subject predicate: the same panel is still the live tenant,
-    // the surface generation is unchanged and the LIVE session identity still
-    // equals the one captured at open. The seam reads it at every revalidation
-    // entry AND the panel reads it at every ACTING entry of its own (pointer,
-    // acceptance/copy, async commit), because the fork dispatches pointer events
-    // outside the Host key ladder.
+    // The ONE caller subject predicate: the same panel is still the live tenant
+    // AND the captured Session scope (exact owner + generation) is still
+    // current. The seam reads it at every revalidation entry AND the panel reads
+    // it at every ACTING entry of its own (pointer, acceptance/copy, async
+    // commit), because the fork dispatches pointer events outside the Host key
+    // ladder. The panel-instance half answers component lifecycle; the scope
+    // half is the Session owner authority — neither substitutes for the other.
     const isCurrent = (): boolean => panel !== undefined
       && this.historyPanel === panel
       && !this.disposed
-      && this.generation === generation
-      && this.historySearchSessionId?.() === sessionId
+      && captured.isCurrent()
     lease = this.tryOpenOptionalSeatTenant(() => {
       const created = new HistoryPanel({
         source,
@@ -7397,12 +7418,18 @@ export class TuiApp {
         onCopy: (text) => this.copyHistorySelection(created, text),
         onAccept: (selection) => {
           // Retire THIS lease first (the panel is disposed and the seat
-          // re-projects the live editor owner), then re-validate the captured
-          // subject — a session switch that landed during the (potentially
-          // re-entrant) retirement must never receive a prior-session prompt.
+          // re-projects the live editor owner), then re-validate the CAPTURED
+          // Session scope — never the now-closed panel instance. A session
+          // switch, a same-id reopen or a same-owner generation bump that landed
+          // during the (potentially re-entrant) retirement must never receive a
+          // prior-session prompt.
           lease?.close()
-          if (this.disposed) return
-          if (this.historySearchSessionId?.() !== sessionId) return
+          if (!captured.isCurrent()) return
+          // A new optional tenant, a Question/Approval/Save blocker or a focused
+          // capturing overlay that took the seat during the close is the NEWER
+          // fact: the accept must not overwrite the current Editor/owner.
+          if (this.optionalSeatBlocking() || this.optionalSeat !== undefined) return
+          if (this.overlayBroker.hasFocusedOverlay()) return
           // Accept = "bring back and EDIT", never submit: the text replaces the
           // editor draft through the seat setter; the seat projection focuses
           // the CURRENT winner.
@@ -7438,6 +7465,28 @@ export class TuiApp {
     const lease = this.historyLease
     this.historyLease = undefined
     lease?.close()
+  }
+
+  /**
+   * Phase 3B / B3-B: retire a mounted History optional-seat tenant whose
+   * captured Session scope is no longer current. Called by the runner at the
+   * SYNCHRONOUS publication commit (ordinary switch / fork adoption /
+   * first-session) and by the ownership core's generation-reset hook; it adds NO
+   * new close path — it reuses the ONE existing `revalidateOptionalSeat()`,
+   * whose predicate now includes the captured `SessionScopeAuthority` pair, so a
+   * same-id reopen and a same-owner generation bump are caught too. STRICTLY
+   * non-throwing: a cleanup failure is isolated into the owned-failure reporting
+   * channel instead of unwinding into (and masking) the already-published
+   * Session. A no-op without a live record and once disposed.
+   */
+  retireStaleHistorySeat(): void {
+    if (this.disposed) return
+    if (this.historyPanel === undefined && this.optionalSeat === undefined) return
+    try {
+      this.revalidateOptionalSeat()
+    } catch (error) {
+      this.routeTerminalSettlementFailure('history seat publication retirement', error)
+    }
   }
 
   /** The live non-History pinned chrome rows the History grant reserves: the

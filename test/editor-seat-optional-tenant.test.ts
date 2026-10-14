@@ -34,6 +34,7 @@ import { EditorRegistry } from '../src/extension/internal/editor-registry.ts'
 import type { AdvancedInteractiveComponent } from '../src/extension/advanced-types.ts'
 import type { EditorHost, ExtensionEditor, ExtensionView } from '../src/extension/public-types.ts'
 import type { SaveLocationDeps, SaveLocationResult } from '../src/tui/interaction/save-location.ts'
+import { HistoryPanel } from '../src/tui/panels/history-panel.ts'
 import { TuiApp, type ApprovalOutcome } from '../src/tui-app.ts'
 import { releaseProcessTuiSlot } from '../src/tui/process-slot.ts'
 import type { Component, Focusable } from '@xmoon76/pi-tui'
@@ -176,6 +177,7 @@ function startApp(registry?: EditorRegistry, history?: import('../src/client/his
   }, {
     ...(registry === undefined ? {} : { editorRegistry: registry }),
     ...(history === undefined ? {} : { historySearchSource: history }),
+    captureHistoryScope: () => ({ sessionId: undefined, isCurrent: () => true }),
   })
   app.start()
   harness.app = app
@@ -995,6 +997,7 @@ test('B-23: History is the first REAL optional-seat tenant; a Question parks and
         exhausted: true,
       }),
     },
+    captureHistoryScope: () => ({ sessionId: undefined, isCurrent: () => true }),
   })
   app.start()
   startedApps.add(app)
@@ -1002,7 +1005,7 @@ test('B-23: History is the first REAL optional-seat tenant; a Question parks and
   app.openHistorySearch()
   await vt.waitForRender()
   await settle()
-  assert.ok(viewport(vt).includes('Input history'), `the History tenant owns the editor seat:\n${viewport(vt)}`)
+  assert.ok(viewport(vt).includes('Input History'), `the History tenant owns the editor seat:\n${viewport(vt)}`)
   // Phase 3B / B3-A retired the old managed History overlay: no overlay node is
   // created and no responsive frame survives.
   assert.equal(app.overlayGraphState().handles, 0, 'History is a SEAT tenant, never an overlay node')
@@ -1013,16 +1016,16 @@ test('B-23: History is the first REAL optional-seat tenant; a Question parks and
   const question = app.askQuestions([{ id: 'q1', question: 'history under a question?', options: [{ label: 'Yes' }] }])
   await vt.waitForRender()
   assert.ok(viewport(vt).includes('history under a question?'))
-  assert.ok(!viewport(vt).includes('Input history'), 'the parked History tenant is not painted')
+  assert.ok(!viewport(vt).includes('Input History'), 'the parked History tenant is not painted')
   vt.sendInput('\r')
   vt.sendInput('\r')
   assert.deepEqual(await question, [{ id: 'q1', selected: ['Yes'] }])
   await vt.waitForRender()
-  assert.ok(viewport(vt).includes('Input history'), 'the SAME History tenant is restored after the settle')
+  assert.ok(viewport(vt).includes('Input History'), 'the SAME History tenant is restored after the settle')
   assert.ok(viewport(vt).includes('abc'), 'the query survives the park/restore round trip')
   vt.sendInput('\x1b')
   await vt.waitForRender()
-  assert.ok(!viewport(vt).includes('Input history'), 'the panel keeps its own Esc close contract')
+  assert.ok(!viewport(vt).includes('Input History'), 'the panel keeps its own Esc close contract')
 })
 
 test('B-24: the tenant takes ordinary keys; Host-reserved and protocol input keeps its owner', async () => {
@@ -3295,7 +3298,7 @@ test('B-56: History as the seat tenant restores the plugin editor WINNER without
   app.openHistorySearch()
   await vt.waitForRender()
   await settle()
-  assert.ok(viewport(vt).includes('Input history'), `the History tenant owns the seat:\n${viewport(vt)}`)
+  assert.ok(viewport(vt).includes('Input History'), `the History tenant owns the seat:\n${viewport(vt)}`)
   vt.sendInput('\x1b')
   await vt.waitForRender()
   assert.equal(app.seatTextForTest(), 'plugin draft', 'Esc must leave the plugin draft unchanged')
@@ -3315,4 +3318,174 @@ test('B-56: History as the seat tenant restores the plugin editor WINNER without
   // view is re-created per projection, so its identity is not the assertion —
   // the live seat derivation is).
   assert.equal(app.focusSeatForTest(), 'editor', 'focus returns to the editor seat after the restore')
+})
+
+// ---------------------------------------------------------------------------
+// Phase 3B / B3-B: the REAL History tenant under the blocking owners and the
+// plugin-editor winner handoff. B-56 pins the restore; these pin the PARK-time
+// winner change/invalidate and the Question↔Save handoff.
+// ---------------------------------------------------------------------------
+
+test('B-61: the REAL History tenant: a plugin editor winner change + recompile while PARKED never ejects the blocker and Esc keeps the CURRENT winner', async () => {
+  const registry = new EditorRegistry()
+  const history: import('../src/client/history/search.ts').HistorySearchSource = {
+    search: async () => ({
+      results: [{ id: 'h1', content: 'parked prompt', cwd: '/work/a', ts: 1, sourceFile: '/h.jsonl', sourceByteOffset: 1 }],
+      exhausted: true,
+    }),
+  }
+  const { vt, app } = startApp(registry, history)
+  await vt.waitForRender()
+  app.setDraft('host draft')
+  const first = { text: '' }
+  registerLiveView(registry, 'first', first)
+  app.reconcileEditorNow()
+  app.requestRender()
+  await vt.waitForRender()
+  app.setDraft('first plugin')
+  await vt.waitForRender()
+  assert.equal(app.seatEditorForTest().id, 'first', 'the first plugin owns the seat')
+
+  app.openHistorySearch()
+  await vt.waitForRender()
+  await settle()
+  assert.ok(viewport(vt).includes('Input History'), `the History tenant owns the seat:\n${viewport(vt)}`)
+  const panel = app.focusedComponentForTest()
+
+  const question = app.askQuestions([{ id: 'q1', question: 'still holds the seat?', options: [{ label: 'Yes' }] }])
+  await vt.waitForRender()
+  assert.ok(viewport(vt).includes('still holds the seat?'), 'the Question owns the seat')
+  assert.ok(!viewport(vt).includes('Input History'), 'the parked History is hidden')
+
+  // Winner change + live-view recompile while PARKED: a LOWER priority editor
+  // wins; its `setText` recompiles the view through the host invalidate seam.
+  const second = { text: 'second view' }
+  registerLiveView(registry, 'second', second, -1)
+  app.reconcileEditorNow()
+  app.requestRender()
+  app.setDraft('second recompiled')
+  await vt.waitForRender()
+  assert.ok(viewport(vt).includes('still holds the seat?'),
+    'the winner change/recompile must not eject the blocking Question')
+  assert.ok(!viewport(vt).includes('Input History'), 'the parked History stays hidden')
+  assert.equal(app.seatEditorForTest().id, 'second', 'the newer winner is the seat editor while parked')
+
+  vt.sendInput('\r')
+  vt.sendInput('\r')
+  assert.deepEqual(await question, [{ id: 'q1', selected: ['Yes'] }])
+  await vt.waitForRender()
+  assert.equal(app.focusedComponentForTest(), panel, 'the SAME History tenant is restored after the blocker')
+
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+  assert.ok(!viewport(vt).includes('Input History'))
+  assert.equal(app.seatEditorForTest().id, 'second', 'the CURRENT winner — never the hidden host editor — takes the keyboard')
+  assert.equal(app.seatTextForTest(), 'second recompiled', 'the recompiled winner keeps its live document')
+  assert.equal(app.hostEditorTextForTest(), 'host draft', 'the hidden host editor is never written')
+})
+
+test('B-62: the REAL History tenant survives a Question↔Save Location handoff and is restored exactly once at the END', async () => {
+  const history: import('../src/client/history/search.ts').HistorySearchSource = {
+    search: async () => ({
+      results: [{ id: 'h1', content: 'handoff prompt', cwd: '/work/a', ts: 1, sourceFile: '/h.jsonl', sourceByteOffset: 1 }],
+      exhausted: true,
+    }),
+  }
+  const { vt, app } = startApp(undefined, history)
+  await vt.waitForRender()
+  app.setDraft('handoff draft')
+  app.openHistorySearch()
+  await vt.waitForRender()
+  await settle()
+  assert.ok(viewport(vt).includes('Input History'))
+  const panel = app.focusedComponentForTest()
+
+  const save = askSave(app)
+  await vt.waitForRender()
+  assert.ok(viewport(vt).includes('Save session archive'), 'the Save prompt owns the seat first')
+  assert.ok(!viewport(vt).includes('Input History'), 'the parked History is hidden')
+
+  const question = app.askQuestions([{ id: 'q1', question: 'takes over?', options: [{ label: 'Yes' }] }])
+  await vt.waitForRender()
+  assert.ok(viewport(vt).includes('takes over?'), 'the Question supersedes the Save prompt')
+  assert.ok(!viewport(vt).includes('Input History'), 'no History projection mid-handoff')
+  assert.deepEqual(await save, { kind: 'cancelled' }, 'the superseded Save prompt settles cancelled')
+  await vt.waitForRender()
+  assert.ok(!viewport(vt).includes('Input History'), 'the History stays parked while the Question lives')
+
+  vt.sendInput('\r')
+  vt.sendInput('\r')
+  assert.deepEqual(await question, [{ id: 'q1', selected: ['Yes'] }])
+  await vt.waitForRender()
+  assert.equal(app.focusedComponentForTest(), panel, 'the History is restored exactly once, at the very END')
+  assert.equal(app.seatTextForTest(), 'handoff draft', 'the draft survived the whole handoff')
+})
+
+test('B-63: the REAL History tenant: a throwing stale cleanup while parking an Approval surfaces the error identity and rolls the owner back once', async (t) => {
+  const history: import('../src/client/history/search.ts').HistorySearchSource = {
+    search: async () => ({
+      results: [{ id: 'h1', content: 'stale cleanup prompt', cwd: '/work/a', ts: 1, sourceFile: '/h.jsonl', sourceByteOffset: 1 }],
+      exhausted: true,
+    }),
+  }
+  const vt = new VirtualTerminal(100, 30)
+  let tenantCurrent = true
+  const app = new TuiApp(vt, {
+    onSubmit: () => {},
+    onExit: () => {},
+    onSteer: () => {},
+  }, {
+    historySearchSource: history,
+    captureHistoryScope: () => ({ sessionId: undefined, isCurrent: () => tenantCurrent }),
+  })
+  app.start()
+  startedApps.add(app)
+  await vt.waitForRender()
+  app.openHistorySearch()
+  await vt.waitForRender()
+  await settle()
+  assert.ok(viewport(vt).includes('Input History'))
+
+  // The ONE caller cleanup path of the REAL History panel: count its entries and
+  // inject the shape of a throwing caller cleanup (the park's stale-tenant
+  // retirement).
+  const originalDispose = HistoryPanel.prototype.dispose
+  let disposeCalls = 0
+  let pendingThrow: { value: unknown } | undefined
+  HistoryPanel.prototype.dispose = function patchedHistoryDispose(this: HistoryPanel): void {
+    disposeCalls += 1
+    const armed = pendingThrow
+    pendingThrow = undefined
+    originalDispose.call(this)
+    if (armed !== undefined) throw armed.value
+  }
+  t.after(() => { HistoryPanel.prototype.dispose = originalDispose })
+
+  tenantCurrent = false
+  const boom = new Error('history stale cleanup boom')
+  pendingThrow = { value: boom }
+  const controller = new AbortController()
+  const approval = app.showApprovalPrompt(
+    { toolName: 'bash', reason: 'never presented', signal: controller.signal },
+  )
+  let caught: unknown
+  try { await approval } catch (error) { caught = error }
+  assert.equal(caught, boom, 'the ORIGINAL cleanup failure must surface by identity')
+  assert.equal(
+    getEventListeners(controller.signal, 'abort').length,
+    0,
+    'the failed approval must release its abort binding',
+  )
+  await vt.waitForRender()
+  assert.equal(disposeCalls, 1, 'the stale History tenant is closed exactly once (no double close)')
+  assert.ok(!viewport(vt).includes('bash'), 'the failed approval must never be presented')
+  assert.ok(!viewport(vt).includes('Input History'), 'the retired History must not stay painted')
+  assert.equal(app.focusedComponentForTest(), app.seatEditorForTest().component,
+    'the seat projects the live editor again')
+  // No half-committed approval: a fresh one is answerable.
+  const healthy = app.showApprovalPrompt({ toolName: 'fs', reason: 'healthy after rollback' })
+  await vt.waitForRender()
+  assert.ok(viewport(vt).includes('fs'))
+  vt.sendInput('y')
+  assert.equal(await settleOrTimeout(healthy), 'allowed-once')
 })

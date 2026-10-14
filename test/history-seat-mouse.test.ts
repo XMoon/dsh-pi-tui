@@ -101,6 +101,7 @@ function startApp(rows: HistorySearchResult[], columns = 100, terminalRows = 30)
   }, {
     historySearchSource: { search: async () => ({ results: [...page], exhausted: true }) } satisfies HistorySearchSource,
     historySearchCwd: () => '/work/a',
+    captureHistoryScope: () => ({ sessionId: undefined, isCurrent: () => true }),
     copySelection: async (text: string) => {
       copied.push(text)
       return true
@@ -153,7 +154,7 @@ test('A0 fullscreen seat preflight: the alt screen delivers press/click to a His
   await flush(2)
   // ONE click selects and repaints the Preview; it NEVER accepts (no draft
   // write, no close).
-  assert.ok(rawView(h.vt).some(line => line.includes('›') && line.includes('beta prompt')),
+  assert.ok(rawView(h.vt).some(line => line.startsWith('> ') && line.includes('beta prompt')),
     `the clicked row must become the selection:\n${view(h.vt)}`)
   assert.equal(h.app.getDraft(), '', 'a result click must never accept the entry into the editor')
   assert.ok(rowOf(h.vt, 'Preview') >= 0, 'the Preview must be painted')
@@ -178,24 +179,24 @@ test('A0 fullscreen seat preflight: wheel scrolls the region under the pointer o
   // (the selected entry's own first line also appears in the list label, so the
   // row is located from the frame rather than by content).
   const previewRow = rowOf(h.vt, 'Preview ') + 1
-  const listRow = rawView(h.vt).findIndex(line => /entry \d+/.test(line) && !line.includes('›'))
+  const listRow = rawView(h.vt).findIndex(line => /entry \d+/.test(line) && !line.startsWith('> '))
   assert.ok(rowOf(h.vt, 'source line 0') >= 0, `the Preview content must paint:\n${view(h.vt)}`)
   assert.ok(listRow >= 0, `the results list must paint:\n${view(h.vt)}`)
-  const listSelectionBefore = rawView(h.vt).find(line => line.includes('›')) ?? ''
+  const listSelectionBefore = rawView(h.vt).find(line => line.startsWith('> ')) ?? ''
   // Wheel over the PREVIEW scrolls only the Preview…
   wheelDown(h.vt, previewRow, 4)
   await h.vt.waitForRender()
   await flush(2)
   const headingAfter = rawView(h.vt).find(line => line.includes('Preview ') && line.includes('/')) ?? ''
   assert.notEqual(headingAfter, headingBefore, 'the Preview wheel must move the Preview viewport')
-  assert.equal(rawView(h.vt).find(line => line.includes('›')) ?? '', listSelectionBefore,
+  assert.equal(rawView(h.vt).find(line => line.startsWith('> ')) ?? '', listSelectionBefore,
     'the Preview wheel must not move the results selection')
   // …and the wheel over the LIST moves only the selection.
   const previewAfterListWheel = rawView(h.vt).find(line => line.includes('Preview ') && line.includes('/')) ?? ''
   wheelDown(h.vt, listRow, 4)
   await h.vt.waitForRender()
   await flush(2)
-  assert.notEqual(rawView(h.vt).find(line => line.includes('›')) ?? '', listSelectionBefore,
+  assert.notEqual(rawView(h.vt).find(line => line.startsWith('> ')) ?? '', listSelectionBefore,
     'the list wheel must move the results selection')
   assert.notEqual(rawView(h.vt).find(line => line.includes('Preview ') && line.includes('/')) ?? '',
     previewAfterListWheel, 'a NEW selected result resets the Preview to its top')
@@ -241,7 +242,7 @@ test('A0 fullscreen seat preflight: a release after a resize never accepts (last
   await h.vt.waitForRender()
   await flush(2)
   assert.equal(h.app.getDraft(), '', 'a release across a resize must never accept')
-  assert.ok(rowOf(h.vt, 'Input history') >= 0, 'the seat stays open (no action fired)')
+  assert.ok(rowOf(h.vt, 'Input History') >= 0, 'the seat stays open (no action fired)')
 })
 
 test('A0 fullscreen seat preflight: a result press resolves by ID, and a page that moved under it never transfers the selection', async () => {
@@ -254,7 +255,7 @@ test('A0 fullscreen seat preflight: a result press resolves by ID, and a page th
   assert.ok(pressedRow >= 0, `alpha must paint:\n${view(h.vt)}`)
   press(h.vt, pressedRow, 4)
   await h.vt.waitForRender()
-  assert.ok(rawView(h.vt).some(line => line.includes('›') && line.includes('alpha prompt')),
+  assert.ok(rawView(h.vt).some(line => line.startsWith('> ') && line.includes('alpha prompt')),
     'the press selects the pressed result')
   // The page is REPLACED: BETA takes the pressed cells, alpha moves below it.
   h.rows.length = 0
@@ -264,7 +265,7 @@ test('A0 fullscreen seat preflight: a result press resolves by ID, and a page th
   const alphaRow = rowOf(h.vt, 'alpha prompt')
   assert.ok(betaRow >= 0 && alphaRow >= 0 && alphaRow > betaRow,
     `the replacement page must paint BETA above alpha:\n${view(h.vt)}`)
-  const marker = (): string => rawView(h.vt).find(line => line.includes('›')) ?? ''
+  const marker = (): string => rawView(h.vt).find(line => line.startsWith('> ')) ?? ''
   assert.ok(marker().includes('alpha prompt'), 'the stable id keeps the pressed result selected')
   // release + the synthesized click land on the SAME painted cell, now BETA.
   release(h.vt, betaRow, 4)
@@ -293,7 +294,7 @@ test('A0 negative: the regular main screen writes no mouse mode and honors no po
   // The seat is keyboard-only here: no mouse buttons, and the ordinary footer
   // region stays reachable.
   assert.equal(rowOf(h.vt, 'Copy all'), -1, 'the regular root must not paint fullscreen-only mouse buttons')
-  const markerBefore = rawView(h.vt).find(line => line.includes('›')) ?? ''
+  const markerBefore = rawView(h.vt).find(line => line.startsWith('> ')) ?? ''
   assert.ok(markerBefore.includes('alpha prompt'), 'the first result is selected')
   // Send a REAL SGR press/click on the OTHER row: with no application mouse it
   // must change nothing at all.
@@ -301,9 +302,9 @@ test('A0 negative: the regular main screen writes no mouse mode and honors no po
   release(h.vt, betaRow, 4)
   await h.vt.waitForRender()
   await flush(2)
-  assert.equal(rawView(h.vt).find(line => line.includes('›')) ?? '', markerBefore,
+  assert.equal(rawView(h.vt).find(line => line.startsWith('> ')) ?? '', markerBefore,
     'a regular-root SGR click must not move the History selection')
-  assert.ok(rowOf(h.vt, 'Input history') >= 0, 'the click must not close the seat')
+  assert.ok(rowOf(h.vt, 'Input History') >= 0, 'the click must not close the seat')
   assert.equal(h.app.getDraft(), '', 'a regular-root press must never accept')
   // NO application mouse mode was ever enabled (1000/1002/1003/1006), and the
   // regular root never entered the alternate screen: the terminal keeps its own
@@ -320,16 +321,16 @@ test('A0 negative: the regular main screen writes no mouse mode and honors no po
     `the regular-root History stays fully keyboard-driven:\n${view(h.vt)}`)
   h.vt.sendInput('\x1b')
   await h.vt.waitForRender()
-  assert.ok(rowOf(h.vt, 'Input history') < 0, 'Esc must still close the regular-root History')
+  assert.ok(rowOf(h.vt, 'Input History') < 0, 'Esc must still close the regular-root History')
 })
 
-test('A0 fullscreen actions: [Copy all] copies the EXACT entry bytes (newline/CJK/trailing spaces)', async () => {
+test('A0 fullscreen actions: Copy All [Alt+C] copies the EXACT entry bytes (newline/CJK/trailing spaces)', async () => {
   const prompt = '  leading\n中文行 with trailing  \nlast'
   const h = startApp([row(prompt, 1, '/work/a', 'p1')])
   await openFullscreenHistory(h)
-  const headingRow = rowOf(h.vt, '[Copy all]')
+  const headingRow = rowOf(h.vt, 'Copy All [Alt+C]')
   assert.ok(headingRow >= 0, `the action heading must paint:\n${view(h.vt)}`)
-  const col = colOf(h.vt, headingRow, '[Copy all]')
+  const col = colOf(h.vt, headingRow, 'Copy All [Alt+C]')
   press(h.vt, headingRow, col + 1)
   release(h.vt, headingRow, col + 1)
   await h.vt.waitForRender()
@@ -339,11 +340,11 @@ test('A0 fullscreen actions: [Copy all] copies the EXACT entry bytes (newline/CJ
   assert.equal(h.app.getDraft(), '', 'a copy must never accept into the editor')
 })
 
-test('A0 fullscreen actions: [Use selected] accepts the pressed entry; a page that moved under it refuses', async () => {
+test('A0 fullscreen actions: Use Selected [Enter] accepts the pressed entry; a page that moved under it refuses', async () => {
   const h = startApp([row('result A', 1, '/work/a', 'id-a')])
   await openFullscreenHistory(h)
-  const headingRow = rowOf(h.vt, '[Use selected]')
-  const col = colOf(h.vt, headingRow, '[Use selected]')
+  const headingRow = rowOf(h.vt, 'Use Selected [Enter]')
+  const col = colOf(h.vt, headingRow, 'Use Selected [Enter]')
   assert.ok(headingRow >= 0 && col >= 0, `the Use action must paint:\n${view(h.vt)}`)
   press(h.vt, headingRow, col + 1)
   await h.vt.waitForRender()
@@ -358,14 +359,14 @@ test('A0 fullscreen actions: [Use selected] accepts the pressed entry; a page th
   assert.equal(h.app.getDraft(), '', 'a button pressed for A must never accept B')
 
   // Positive control on the SAME panel: the freshly painted button accepts.
-  const freshRow = rowOf(h.vt, '[Use selected]')
-  const freshCol = colOf(h.vt, freshRow, '[Use selected]')
+  const freshRow = rowOf(h.vt, 'Use Selected [Enter]')
+  const freshCol = colOf(h.vt, freshRow, 'Use Selected [Enter]')
   press(h.vt, freshRow, freshCol + 1)
   release(h.vt, freshRow, freshCol + 1)
   await h.vt.waitForRender()
   await flush(2)
   assert.equal(h.app.getDraft(), 'result B', 'the same-action press+click accepts the pressed entry')
-  assert.ok(rowOf(h.vt, '[Copy all]') < 0, 'accepting closes the History seat')
+  assert.ok(rowOf(h.vt, 'Copy All [Alt+C]') < 0, 'accepting closes the History seat')
 })
 
 test('A0 fullscreen cancellation: Esc closes the seat without exiting or interrupting', async () => {
@@ -373,6 +374,7 @@ test('A0 fullscreen cancellation: Esc closes the seat without exiting or interru
   const vt = new VirtualTerminal(100, 30)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => { exits += 1 } }, {
     historySearchSource: { search: async () => ({ results: [row('alpha prompt', 1)], exhausted: true }) },
+    captureHistoryScope: () => ({ sessionId: undefined, isCurrent: () => true }),
   })
   app.start()
   startedApps.add(app)
@@ -387,7 +389,7 @@ test('A0 fullscreen cancellation: Esc closes the seat without exiting or interru
   vt.sendInput('\x1b')
   await vt.waitForRender()
   await flush(2)
-  assert.ok(!rawView(vt).some(line => line.includes('Input history')),
+  assert.ok(!rawView(vt).some(line => line.includes('Input History')),
     `Esc must close the History seat:\n${view(vt)}`)
   assert.equal(exits, 0, 'Esc while History owns the seat must never reach the exit/quit admission')
   assert.equal(app.getDraft(), 'my draft', 'Esc must leave the draft untouched')
@@ -402,13 +404,13 @@ test('A0 fullscreen cancellation: a Question parks the seat and the SAME History
   const question = h.app.askQuestions([{ id: 'q1', question: 'park the history?', options: [{ label: 'Yes' }] }])
   await h.vt.waitForRender()
   assert.ok(view(h.vt).includes('park the history?'), 'the blocking owner takes the seat')
-  assert.ok(!view(h.vt).includes('Input history'), 'the parked History is not painted')
+  assert.ok(!view(h.vt).includes('Input History'), 'the parked History is not painted')
   h.vt.sendInput('\r')
   h.vt.sendInput('\r')
   await question
   await h.vt.waitForRender()
   await flush(2)
-  assert.ok(view(h.vt).includes('Input history'), 'the SAME History tenant is restored')
+  assert.ok(view(h.vt).includes('Input History'), 'the SAME History tenant is restored')
   assert.ok(view(h.vt).includes('Search: > alp'), 'the query survives the park/restore round trip')
 })
 
@@ -426,7 +428,7 @@ test('A0 fullscreen cancellation: a fullscreen swap keeps the SAME panel and dro
   h.app.setFullscreen(true)
   await h.vt.waitForRender()
   await flush(2)
-  assert.ok(view(h.vt).includes('Input history'), 'the SAME panel survives the round trip')
+  assert.ok(view(h.vt).includes('Input History'), 'the SAME panel survives the round trip')
   const restoredRow = rowOf(h.vt, 'beta prompt')
   assert.ok(restoredRow >= 0, `the selected result must still paint:\n${view(h.vt)}`)
   release(h.vt, restoredRow, colOf(h.vt, restoredRow, 'beta') + 1)
@@ -438,8 +440,8 @@ test('A0 fullscreen cancellation: a fullscreen swap keeps the SAME panel and dro
 test('A0 fullscreen actions: an action pressed before a resize never fires at the stale geometry', async () => {
   const h = startApp([row('alpha prompt', 1, '/work/a', 'id-a')], 120, 40)
   await openFullscreenHistory(h)
-  const headingRow = rowOf(h.vt, '[Use selected]')
-  const col = colOf(h.vt, headingRow, '[Use selected]')
+  const headingRow = rowOf(h.vt, 'Use Selected [Enter]')
+  const col = colOf(h.vt, headingRow, 'Use Selected [Enter]')
   assert.ok(headingRow >= 0 && col >= 0, `the Use action must paint:\n${view(h.vt)}`)
   press(h.vt, headingRow, col + 1)
   await h.vt.waitForRender()
@@ -450,33 +452,33 @@ test('A0 fullscreen actions: an action pressed before a resize never fires at th
   await h.vt.waitForRender()
   await flush(4)
   assert.equal(h.app.getDraft(), '', 'an action taken against a stale frame must never accept')
-  assert.ok(rowOf(h.vt, 'Input history') >= 0, 'the seat stays open')
+  assert.ok(rowOf(h.vt, 'Input History') >= 0, 'the seat stays open')
 })
 
 test('A0 cancellation: a pointer press does not survive a Question park/restore round trip', async () => {
   const h = startApp([row('alpha prompt', 1, '/work/a', 'id-a')])
   await openFullscreenHistory(h)
-  const headingRow = rowOf(h.vt, '[Use selected]')
-  const col = colOf(h.vt, headingRow, '[Use selected]')
+  const headingRow = rowOf(h.vt, 'Use Selected [Enter]')
+  const col = colOf(h.vt, headingRow, 'Use Selected [Enter]')
   assert.ok(headingRow >= 0 && col >= 0, `the Use action must paint:\n${view(h.vt)}`)
   press(h.vt, headingRow, col + 1)
   await h.vt.waitForRender()
   const question = h.app.askQuestions([{ id: 'q1', question: 'park the pointer gesture?', options: [{ label: 'Yes' }] }])
   await h.vt.waitForRender()
-  assert.ok(!view(h.vt).includes('Input history'), 'the Question parks the History seat')
+  assert.ok(!view(h.vt).includes('Input History'), 'the Question parks the History seat')
   h.vt.sendInput('\r')
   h.vt.sendInput('\r')
   await question
   await h.vt.waitForRender()
   await flush(2)
-  assert.ok(view(h.vt).includes('Input history'), 'the SAME History seat returns after the settle')
+  assert.ok(view(h.vt).includes('Input History'), 'the SAME History seat returns after the settle')
   // The press belonged to a frame the parked seat never kept: its release/click
   // must not act.
   release(h.vt, headingRow, col + 1)
   await h.vt.waitForRender()
   await flush(4)
   assert.equal(h.app.getDraft(), '', 'a gesture taken before the park must never accept after it')
-  assert.ok(rowOf(h.vt, 'Input history') >= 0, 'the restored seat stays open')
+  assert.ok(rowOf(h.vt, 'Input History') >= 0, 'the restored seat stays open')
 })
 
 test('A0 fullscreen mouse: a right or middle SGR button can never select, drag or activate', async () => {
@@ -487,10 +489,10 @@ test('A0 fullscreen mouse: a right or middle SGR button can never select, drag o
   await openFullscreenHistory(h)
   const alphaRow = rowOf(h.vt, 'alpha prompt')
   const betaRow = rowOf(h.vt, 'beta prompt')
-  const actionRow = rowOf(h.vt, '[Use selected]')
+  const actionRow = rowOf(h.vt, 'Use Selected [Enter]')
   assert.ok(alphaRow >= 0 && betaRow >= 0 && actionRow >= 0,
     `the frame must paint results and actions:\n${view(h.vt)}`)
-  const marker = (): string => rawView(h.vt).find(line => line.includes('›')) ?? ''
+  const marker = (): string => rawView(h.vt).find(line => line.startsWith('> ')) ?? ''
   const markerBefore = marker()
   assert.ok(markerBefore.includes('alpha prompt'), 'the first result is selected')
   // SGR button codes: 1 = middle, 2 = right (lowercase `m` = release).
@@ -503,7 +505,7 @@ test('A0 fullscreen mouse: a right or middle SGR button can never select, drag o
     await flush(2)
     assert.equal(marker(), markerBefore, `button ${button} must not move the result selection`)
     assert.equal(h.app.getDraft(), '', `button ${button} must never accept`)
-    assert.ok(rowOf(h.vt, 'Input history') >= 0, `button ${button} must not close the seat`)
+    assert.ok(rowOf(h.vt, 'Input History') >= 0, `button ${button} must not close the seat`)
   }
   // The LEFT button is unaffected in the same frame.
   const betaCol = colOf(h.vt, betaRow, 'beta')
@@ -528,4 +530,28 @@ test('A0 fullscreen mouse: the drag copies through the RELEASE cell, not the las
   await flush(4)
   assert.deepEqual(h.copied, ['abc\ndefg'],
     'the release position finalizes the copied range (through the released cell)')
+})
+
+test('A0 fullscreen actions: the LAST painted cell of each item is inside its hit range (no bracket device)', async () => {
+  const h = startApp([row('alpha prompt', 3, '/work/a', 'id-a')])
+  await openFullscreenHistory(h)
+  const copyRow = rowOf(h.vt, 'Copy All [Alt+C]')
+  assert.ok(copyRow >= 0, `the bracket-less Copy All item must be painted:\n${view(h.vt)}`)
+  const copyStart = rawView(h.vt)[copyRow]!.indexOf('Copy All [Alt+C]')
+  const copyLast = copyStart + 'Copy All [Alt+C]'.length - 1
+  press(h.vt, copyRow, copyLast)
+  release(h.vt, copyRow, copyLast)
+  await h.vt.waitForRender()
+  await flush(2)
+  assert.deepEqual(h.copied, ['alpha prompt'], 'the last painted cell of Copy All is inside its hit range')
+
+  const useRow = rowOf(h.vt, 'Use Selected [Enter]')
+  const useStart = rawView(h.vt)[useRow]!.indexOf('Use Selected [Enter]')
+  const useLast = useStart + 'Use Selected [Enter]'.length - 1
+  press(h.vt, useRow, useLast)
+  release(h.vt, useRow, useLast)
+  await h.vt.waitForRender()
+  await flush(2)
+  assert.equal(h.app.getDraft(), 'alpha prompt', 'the last painted cell of Use Selected accepts the entry')
+  assert.ok(rowOf(h.vt, 'Input History') < 0, 'accepting closes the History seat')
 })

@@ -13,6 +13,7 @@ import { afterEach, test } from 'node:test'
 import { testLifecycle, type TestLifecycle } from './support/temp-lifecycle.ts'
 import { mkdirSync, writeFileSync } from 'node:fs'
 import { FileHistorySearchSource } from '../src/client/history/search.ts'
+import type { SaveLocationDeps, SaveLocationResult } from '../src/tui/interaction/save-location.ts'
 import { historyFilePath } from '../src/client/history/store.ts'
 
 
@@ -74,6 +75,10 @@ async function makeApp(
   }, {
     historySearchSource: sourceImpl ?? new FileHistorySearchSource({ dshHome: home }),
     historySearchCwd: () => cwd,
+    // No Session bound in this harness: the captured scope is sessionless and
+    // stays current (a controllable pair; the currentness tests below inject
+    // their own).
+    captureHistoryScope: () => ({ sessionId: undefined, isCurrent: () => true }),
     copySelection,
   })
   app.start()
@@ -84,9 +89,9 @@ async function makeApp(
 }
 
 /** Whether the History seat frame is currently painted. The header is the
- * seat's stable identity (`Input history`). */
+ * seat's stable identity (`Input History`). */
 function panelVisible(viewport: string[]): boolean {
-  return viewport.some(line => line.includes('Input history'))
+  return viewport.some(line => line.includes('Input History'))
 }
 
 const strip = (lines: string[]): string => lines.map(line => line.replace(/\x1b\[[0-9;]*m/g, '')).join('\n')
@@ -172,6 +177,7 @@ test('an active transcript-search overlay keeps its keys (Ctrl+R never opens a s
   }, {
     historySearchSource: new FileHistorySearchSource({ dshHome: home }),
     historySearchCwd: () => '/work/a',
+    captureHistoryScope: () => ({ sessionId: undefined, isCurrent: () => true }),
   })
   app.start()
   startedApps.add(app)
@@ -204,7 +210,7 @@ test('a live blocking Question REFUSES Ctrl+R (silent no-op, question untouched)
   assert.ok(!panelVisible(vt.getViewport()), 'the refused History never appears after the settle')
 })
 
-test('Ctrl+R resolves the Current directory at OPEN time (a session switch moves the scope)', async (t) => {
+test('Ctrl+R resolves the Current Directory at OPEN time (a session switch moves the scope)', async (t) => {
   const life = testLifecycle(t)
   const home = tempHome(life)
   const { VirtualTerminal } = await import('./virtual-terminal.ts')
@@ -221,6 +227,7 @@ test('Ctrl+R resolves the Current directory at OPEN time (a session switch moves
     // The runner wires the LIVE session cwd getter — it must be read at
     // open time, not captured at construction.
     historySearchCwd: () => liveCwd,
+    captureHistoryScope: () => ({ sessionId: undefined, isCurrent: () => true }),
   })
   app.start()
   startedApps.add(app)
@@ -255,7 +262,10 @@ test('UI4: Ctrl+R captures the session identity at OPEN time (a session switch m
     historySearchSource: new FileHistorySearchSource({ dshHome: home }),
     historySearchCwd: () => '/work/a',
     // The runner wires the LIVE session identity getter.
-    historySearchSessionId: () => liveSessionId,
+    captureHistoryScope: () => {
+      const capturedId = liveSessionId
+      return { sessionId: capturedId, isCurrent: () => liveSessionId === capturedId }
+    },
   })
   app.start()
   startedApps.add(app)
@@ -289,7 +299,7 @@ test('H3A-14: a Question PARKS the History seat and the SAME tenant (query + sel
   vt.sendInput('\x1b[B') // select the second (older) row
   await vt.waitForRender()
   const before = strip(vt.getViewport())
-  assert.ok(before.includes('›'), 'a row is selected before the park')
+  assert.ok(before.split('\n').some(line => line.startsWith('> ')), 'a row is selected before the park')
 
   const question = app.askQuestions([{ id: 'q1', question: 'park history?', options: [{ label: 'Yes' }] }])
   await vt.waitForRender()
@@ -323,7 +333,10 @@ test('a session switch WHILE History is open retires the seat (no prior-session 
   }, {
     historySearchSource: new FileHistorySearchSource({ dshHome: home }),
     historySearchCwd: () => '/work/a',
-    historySearchSessionId: () => liveSessionId,
+    captureHistoryScope: () => {
+      const capturedId = liveSessionId
+      return { sessionId: capturedId, isCurrent: () => liveSessionId === capturedId }
+    },
   })
   app.start()
   startedApps.add(app)
@@ -353,6 +366,7 @@ test('Ctrl+R on a TINY terminal (8 rows) keeps the header and the Esc hint, neve
   }, {
     historySearchSource: new FileHistorySearchSource({ dshHome: home }),
     historySearchCwd: () => '/work/a',
+    captureHistoryScope: () => ({ sessionId: undefined, isCurrent: () => true }),
   })
   app.start()
   startedApps.add(app)
@@ -361,7 +375,7 @@ test('Ctrl+R on a TINY terminal (8 rows) keeps the header and the Esc hint, neve
   vt.sendInput('\x12') // Ctrl+R
   await vt.waitForRender()
   const viewport = vt.getViewport()
-  assert.ok(viewport.some(line => line.includes('Input history')), 'the seat header must open')
+  assert.ok(viewport.some(line => line.includes('Input History')), 'the seat header must open')
   assert.ok(viewport.some(line => line.includes('Esc cancel')), 'the Esc hint must stay visible')
   // The seat must not paint past the terminal: the last painted row is the
   // footer/hint region and the physical frame never exceeds the rows.
@@ -426,7 +440,7 @@ test('H3A-01: a second Ctrl+R while the seat is open is a no-op (ONE History ins
   vt.sendInput('\x12') // a second Ctrl+R
   await vt.waitForRender()
   const viewport = strip(vt.getViewport()).split('\n')
-  assert.equal(viewport.filter(line => line.includes('Input history')).length, 1,
+  assert.equal(viewport.filter(line => line.includes('Input History')).length, 1,
     'a second Ctrl+R must never open a second History surface')
   assert.ok(strip(vt.getViewport()).includes('Search: > nginx'), 'the SAME seat keeps its query')
 })
@@ -567,7 +581,10 @@ test('currentness: a session switch while a search is in flight never publishes 
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
     historySearchSource: source,
     historySearchCwd: () => '/work/a',
-    historySearchSessionId: () => liveSessionId,
+    captureHistoryScope: () => {
+      const capturedId = liveSessionId
+      return { sessionId: capturedId, isCurrent: () => liveSessionId === capturedId }
+    },
   })
   app.start()
   startedApps.add(app)
@@ -625,7 +642,10 @@ test('currentness: a copy settling after a SESSION SWITCH notifies nothing', asy
   }, {
     historySearchSource: new FileHistorySearchSource({ dshHome: home }),
     historySearchCwd: () => '/work/a',
-    historySearchSessionId: () => liveSessionId,
+    captureHistoryScope: () => {
+      const capturedId = liveSessionId
+      return { sessionId: capturedId, isCurrent: () => liveSessionId === capturedId }
+    },
     copySelection: () => deferred,
   })
   app.start()
@@ -649,4 +669,147 @@ test('currentness: a copy settling after a SESSION SWITCH notifies nothing', asy
   await new Promise(resolve => setTimeout(resolve, 10))
   assert.deepEqual(notices, [],
     'a copy started for the previous session must not report its outcome over the new session')
+})
+
+// ---------------------------------------------------------------------------
+// Phase 3B / B3-B: the REAL History tenant under the blocking owners. These
+// reuse the file-backed harness above (the real `HistoryPanel` seat tenant and
+// the real Question / Approval / Save Location owners); there is no shadow
+// simulator.
+// ---------------------------------------------------------------------------
+
+/** A Client-local save-location deps set with no real filesystem. */
+function b3bSaveDeps(): SaveLocationDeps {
+  return {
+    resolveDirectory: (input) => input === './' ? '/tmp/dsh-ctrl-r-out' : input,
+    isDirectory: () => true,
+    targetExists: () => false,
+    complete: async () => null,
+  }
+}
+
+function b3bAskSave(app: import('../src/tui-app.ts').TuiApp): Promise<SaveLocationResult> {
+  return app.askSaveLocation(
+    { title: 'Save session archive', filename: 'dsh-session-abc.zip', initialDirectory: './' },
+    b3bSaveDeps(),
+  )
+}
+
+test('H3B-01 (ctrl-r harness): a Question FIFO Q1→Q2 keeps the file-backed History seat parked and restores its query', async (t) => {
+  const life = testLifecycle(t)
+  const home = tempHome(life)
+  const { vt, app } = await makeApp(life, home)
+  vt.sendInput('\x12') // Ctrl+R
+  await vt.waitForRender()
+  vt.sendInput('nginx')
+  await waitFor(() => vt.getViewport().some(line => line.includes('fix nginx reload'))
+    && !vt.getViewport().some(line => line.includes('old prompt from yesterday')))
+  const panel = app.focusedComponentForTest()
+  assert.ok(panel !== null, 'the History tenant owns the seat')
+
+  const first = app.askQuestions([{ id: 'q1', question: 'first park?', options: [{ label: 'Yes' }] }])
+  const second = app.askQuestions([{ id: 'q2', question: 'second park?', options: [{ label: 'Yes' }] }])
+  await vt.waitForRender()
+  assert.ok(strip(vt.getViewport()).includes('first park?'), 'Q1 owns the seat')
+  assert.ok(!panelVisible(vt.getViewport()), 'the parked History is not painted')
+  assert.notEqual(app.focusSeatForTest(), 'editor-panel')
+
+  vt.sendInput('\r')
+  vt.sendInput('\r')
+  assert.deepEqual(await first, [{ id: 'q1', selected: ['Yes'] }])
+  await vt.waitForRender()
+  assert.ok(strip(vt.getViewport()).includes('second park?'), 'Q2 takes the seat directly')
+  assert.ok(!panelVisible(vt.getViewport()), 'no History projection between the two flows')
+  assert.notEqual(app.focusSeatForTest(), 'editor-panel')
+
+  vt.sendInput('\r')
+  vt.sendInput('\r')
+  assert.deepEqual(await second, [{ id: 'q2', selected: ['Yes'] }])
+  await vt.waitForRender()
+  assert.equal(app.focusedComponentForTest(), panel, 'the LAST settle restores the SAME tenant')
+  assert.ok(strip(vt.getViewport()).includes('Search: > nginx'), 'the query survives the FIFO round trip')
+  assert.equal(app.focusSeatForTest(), 'editor-panel')
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+  assert.ok(!panelVisible(vt.getViewport()))
+})
+
+test('H3B-02 (ctrl-r harness): an Approval A→B FIFO keeps the file-backed History seat parked through the handover', async (t) => {
+  const life = testLifecycle(t)
+  const home = tempHome(life)
+  const { vt, app } = await makeApp(life, home)
+  vt.sendInput('\x12')
+  await vt.waitForRender()
+  await waitFor(() => vt.getViewport().some(line => line.includes('fix nginx reload')))
+  const panel = app.focusedComponentForTest()
+  assert.ok(panel !== null)
+
+  // The `hasPending()` handover gap: `ApprovalRuntime.settle(A)` clears the
+  // ACTIVE slot and only then presents B. `projectActivity()` runs inside that
+  // window — the parked History must not be restored there.
+  const proto = Object.getPrototypeOf(app) as { projectActivity(): void }
+  const originalProject = proto.projectActivity
+  const gaps: Array<{ seat: string; panelFocused: boolean }> = []
+  let armed = false
+  proto.projectActivity = function patchedProjectActivity(this: typeof app): void {
+    originalProject.call(this)
+    if (armed) gaps.push({ seat: this.focusSeatForTest(), panelFocused: this.focusedComponentForTest() === panel })
+  }
+  life.defer(() => { proto.projectActivity = originalProject })
+
+  const first = app.showApprovalPrompt({ toolName: 'bash', reason: 'park first' })
+  const second = app.showApprovalPrompt({ toolName: 'fs', reason: 'park second' })
+  await vt.waitForRender()
+  assert.ok(strip(vt.getViewport()).includes('bash'), 'A owns the seat')
+  assert.ok(!panelVisible(vt.getViewport()))
+
+  armed = true
+  vt.sendInput('y')
+  assert.equal(await first, 'allowed-once')
+  await vt.waitForRender()
+  assert.ok(strip(vt.getViewport()).includes('fs'), 'B took the seat after A settled')
+  assert.ok(!panelVisible(vt.getViewport()), 'no History projection between the two approvals')
+  assert.notEqual(app.focusSeatForTest(), 'editor-panel')
+  assert.ok(gaps.length >= 1, 'the settle tail ran inside the active→next handover window')
+  assert.ok(gaps.every(gap => gap.seat !== 'editor-panel' && !gap.panelFocused),
+    `the parked History must never regain the seat in the handover gap: ${JSON.stringify(gaps)}`)
+
+  vt.sendInput('n')
+  assert.equal(await second, 'rejected')
+  await vt.waitForRender()
+  assert.equal(app.focusedComponentForTest(), panel, 'the drained queue releases the SAME tenant')
+  assert.equal(app.focusSeatForTest(), 'editor-panel')
+})
+
+test('H3B-03 (ctrl-r harness): Save Location cancel and confirm each restore the SAME file-backed History seat', async (t) => {
+  const life = testLifecycle(t)
+  const home = tempHome(life)
+  const { vt, app } = await makeApp(life, home)
+  app.setDraft('untouched draft')
+  await vt.waitForRender()
+  vt.sendInput('\x12')
+  await vt.waitForRender()
+  await waitFor(() => vt.getViewport().some(line => line.includes('fix nginx reload')))
+  const panel = app.focusedComponentForTest()
+  assert.ok(panel !== null)
+
+  const cancelled = b3bAskSave(app)
+  await vt.waitForRender()
+  assert.ok(strip(vt.getViewport()).includes('Save session archive'), 'the Save prompt owns the seat')
+  assert.ok(!panelVisible(vt.getViewport()))
+  vt.sendInput('\x1b')
+  assert.deepEqual(await cancelled, { kind: 'cancelled' })
+  await vt.waitForRender()
+  assert.equal(app.focusedComponentForTest(), panel, 'cancel restores the SAME History tenant')
+  assert.equal(app.getDraft(), 'untouched draft', 'cancel leaves the draft untouched')
+
+  const confirmed = b3bAskSave(app)
+  await vt.waitForRender()
+  assert.ok(strip(vt.getViewport()).includes('Save session archive'))
+  vt.sendInput('\r')
+  assert.deepEqual(await confirmed, { kind: 'selected', directory: '/tmp/dsh-ctrl-r-out', overwrite: false })
+  await vt.waitForRender()
+  assert.equal(app.focusedComponentForTest(), panel, 'confirm restores the SAME History tenant')
+  assert.equal(app.getDraft(), 'untouched draft', 'confirm leaves the draft untouched')
+  assert.ok(strip(vt.getViewport()).includes('Search: > '), 'the query row is back')
 })

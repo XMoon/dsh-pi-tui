@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `Ctrl+R` history finished its visual and lifecycle closure: the title is
+  `Input History` (Title Case), the active scope is a bold-`primary` `[Label]`,
+  a result row uses a `primary` `> ` cursor with bold selected text (time and
+  directory stay `textDim`), the Fullscreen actions are the bracket-less
+  `Copy All [Alt+C]` / `Use Selected [Enter]`, the hint row degrades by whole
+  segments (never mid-key, `Esc` always last), and no-match/loading and a failed
+  load use different inks. When a new session is published — including reopening
+  the same session id or a same-owner generation change — the old history seat
+  closes immediately: Enter, copy and async search results from it are neither
+  written nor shown in the new session, a seat cleanup failure cannot roll back
+  the published session, and a Question / Approval / Save Location still parks
+  and restores the SAME history seat once the last blocker settles.
+
 - `Ctrl+R` history search no longer opens a centered floating overlay: it takes
   over the bottom editor seat, so the live Transcript and the status/footer stay
   visible and every width gets the same vertical layout (header with the scope and

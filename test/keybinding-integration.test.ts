@@ -625,6 +625,7 @@ test('app.input.submit remap does NOT leak into the history search Input (X037)'
         exhausted: true,
       }),
     },
+    captureHistoryScope: () => ({ sessionId: undefined, isCurrent: () => true }),
   })
   app.start()
   startedApps.add(app)
