@@ -28,9 +28,11 @@ import type { PickerAction, PickerGroup, PickerItem, PickerProps } from '@stenci
 import type { ModelPickerFailureRow } from '../pickers/model-directory.ts'
 import type { ModelPickerIntent } from './model-picker-intents.ts'
 import {
+  CATALOGUE_WINDOW_ROWS,
   FAILURE_RETRY_ID,
   STRIP_LABEL,
   actionKeyboardLive,
+  catalogueRowIds,
   detailReaderGroups,
   draftedEffort,
   effortItemId,
@@ -119,7 +121,26 @@ function modelOrder(panel: ModelPickerPanel): (string | PickerGroup)[] {
     for (const failure of panel.failures) order.push(failureRowId(failure.providerId))
     order.push(FAILURE_RETRY_ID)
   }
-  return order
+  const window = windowIds(panel)
+  if (window === undefined) return order
+  // Keep the window's rows AND the group head that introduces the first of them, so a
+  // windowed slice still shows which provider its rows belong to. A head is only kept
+  // when a row of its own group follows it inside the window.
+  const sliced: (string | PickerGroup)[] = []
+  let pending: PickerGroup | undefined
+  for (const entry of order) {
+    if (typeof entry !== 'string') {
+      pending = entry
+      continue
+    }
+    if (!window.has(entry)) continue
+    if (pending !== undefined) {
+      sliced.push(pending)
+      pending = undefined
+    }
+    sliced.push(entry)
+  }
+  return sliced
 }
 
 /**
@@ -133,6 +154,23 @@ function modelOrder(panel: ModelPickerPanel): (string | PickerGroup)[] {
  * An exhausted or partially failed catalogue appends the inert failure rows and
  * the one read-only Retry row.
  */
+/**
+ * The row ids the catalogue really sends: the window `panel.windowStart` covers, or
+ * `undefined` when the whole catalogue already fits. A short list is sent whole, so a
+ * small fixture behaves exactly as it always did.
+ *
+ * The window exists because the client re-anchors the selected row on every `selected`
+ * change while its list can scroll (see {@link CATALOGUE_WINDOW_ROWS}): a window that
+ * fits the list box leaves it nothing to scroll, so a click cannot move the viewport.
+ */
+function windowIds(panel: ModelPickerPanel): ReadonlySet<string> | undefined {
+  const ids = catalogueRowIds(panel)
+  if (ids.length <= CATALOGUE_WINDOW_ROWS) return undefined
+  const last = Math.max(ids.length - CATALOGUE_WINDOW_ROWS, 0)
+  const start = Math.min(Math.max(panel.windowStart, 0), last)
+  return new Set(ids.slice(start, start + CATALOGUE_WINDOW_ROWS))
+}
+
 function modelItems(panel: ModelPickerPanel): PickerItem[] {
   const items: PickerItem[] = visibleModels(panel).map((row) => ({
     id: modelRowId(row),
@@ -147,7 +185,8 @@ function modelItems(panel: ModelPickerPanel): PickerItem[] {
   }))
   items.push(...panel.failures.map(failureItem))
   if (panel.failures.length > 0) items.push({ id: FAILURE_RETRY_ID, label: 'Retry failed providers' })
-  return items
+  const window = windowIds(panel)
+  return window === undefined ? items : items.filter((item) => window.has(item.id))
 }
 
 /** How many rows the catalogue really lists (it appends the failure rows and the
