@@ -425,21 +425,21 @@ never as a caption: a row is painted at every width, a caption is not. That is t
 behaviour, measured in the acceptance lane's 400x600 capture: the catalogue still
 shows every row with its provider mark and its real badges, and the footer's
 `Cancel` + the ONE write are fully visible and clickable, so the model is chosen
-and committed at that width — the effort is reached by entering the model's
-(`Enter` or a click on the highlighted row), which is the same path every
-narrow pane uses.
+and committed at that width; the effort is reached with the SAME strip every width
+paints (one `Tab`, then its chips — they simply wrap onto more rows there).
 
 The catalogue's rows are ONE line each: the SDK ellipsizes what does not fit and
 never breaks an unbroken fragment, so the model's complete id is carried in the
 row's `title` and the complete values are read in the Reader. The row identity
-(`mark`, `badges`, `title`, `facts` with `columns`) is a MEASURED client
+(`mark`, `badges`, `title`, and `facts`/`columns` in general) is a MEASURED client
 capability, measured on the synthetic list-first picker before this revision
-shipped. The ONE fact column carries the drafted effort: the client gives it a
-FIXED 106px of the row's text area at every width (measured: `pk-txt` 1026px →
-920px at 1280x800) and hides it by itself at 400x600, while the model NAME keeps
-its intrinsic width — the row's provider DETAIL is what yields — which is why the
-column is used here and the plan's "only while it does not cost the model name its
-width" rule holds.
+shipped — and it is also what retired the fact column here: the client gives a
+declared column a FIXED 106px of the row's text area at every width (measured:
+`pk-txt` 1026px → 920px at 1280x800) and hides it by itself at 400x600, while the
+model NAME keeps its intrinsic width and the row's provider DETAIL is what yields.
+That fixed cost bought one value that read as a column detached from its model, so
+the effort is now edited in the page's own `strip` instead, which costs the LIST's
+viewport rather than every row's text area.
 
 ### What these numbers do and do not guarantee
 
@@ -552,15 +552,16 @@ none away from the Reader — and its origin-preserving return), the K2 two-zone
 walk with the strip between the list and the bar and Enter refused outside the
 Primary Action, the page-by-page action bar
 (including the failed read's `Cancel` + `Retry`), `Esc` returning to the zone/page
-it came from, a resize that keeps the panel, the page and every draft at both sides
-of the threshold, a loading panel
+it came from, a resize that keeps the panel, the page and every draft at every width
+(and the sheet form unchanged by it), a loading panel
 that keeps the search editable and closes
 on `Esc`, the pending/refusal/indeterminate settlements (a refusal keeps the page
 it happened on), the read-error Retry through the original read owner, the
 Current/Default facts of a live versus sessionless subject, long unbroken/CJK/
 emoji descriptions as ONE complete Reader value, effort candidate sets of 0, 1
-and 7+ (with no phantom candidate), the measured sheet threshold and its
-cell-width dependence, the Reader's queued-scroll credit-stall lock (F3-004),
+and 7+ (with no phantom candidate), the strip's phase gate and its chip-label
+budget, the client's measured `md` sheet cap as the SAME dialog at every pane width,
+the Reader's queued-scroll credit-stall lock (F3-004),
 grapheme search, modal precedence, stale
 receivers, legacy-pane
 refusal, a pane with `picker` but without `row`/`overlay`, a same-name Host command,

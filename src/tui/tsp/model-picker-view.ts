@@ -93,7 +93,7 @@ const PINNED_GROUP_LABEL = 'Current · Default'
 const UNAVAILABLE_GROUP_LABEL = 'Unavailable providers'
 
 /**
- * The catalogue's order: the REAL configured rows first (`Current / Default`,
+ * The catalogue's order: the REAL configured rows first (`Current · Default`,
  * each model appearing exactly ONCE), then one group per provider for everything
  * else, then — only while part of the directory failed — the `Unavailable
  * providers` group with the inert failed rows and the ONE read-only
