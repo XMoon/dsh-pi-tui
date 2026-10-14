@@ -39,7 +39,7 @@
 
 import { Text, VStack, matchesKey, truncateToWidth, visibleWidth, type Component } from '@xmoon76/pi-tui'
 import { componentKeymap } from '../keybindings/component-keymap.ts'
-import { formatHintKeys } from '../keybindings/hints.ts'
+import { formatHintKeys, formatKeyId } from '../keybindings/hints.ts'
 import { renderActionBarRow, type ActionBarSegment } from '../presentation/action-bar.ts'
 import { sanitizedPhysicalLine } from '../presentation/lines.ts'
 import { color, taskStatusColor } from '../theme/runtime.ts'
@@ -834,9 +834,13 @@ class JobInspectorActionBar implements Component {
     // segments a tight row may drop before the pre-existing truth). `Esc` carries
     // the highest priority and is painted LAST.
     const segments: ActionBarSegment[] = []
-    const stopKey = componentKeymap.keyHint('tasks.stop') ?? ''
-    if (!facts.searchActive && this.canStop() && stopKey !== '') {
-      segments.push({ text: `${formatHintKeys(stopKey)} stop`, priority: 6 })
+    // ONE key per action (§7.1): the keymap's PRIMARY default. `componentKeymap
+    // .keyHint` lists every default because the transcript search overlay's compact
+    // hint must name each physical key (`esc/ctrl+c` close), so the BAR takes the
+    // primary itself.
+    const stopKey = componentKeymap.keysFor('tasks.stop')[0]
+    if (!facts.searchActive && this.canStop() && stopKey !== undefined) {
+      segments.push({ text: `${formatHintKeys(formatKeyId(stopKey))} stop`, priority: 6 })
     }
     segments.push(facts.follow
       ? { text: 'Follow on', priority: 5 }

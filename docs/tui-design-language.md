@@ -569,16 +569,25 @@ anchor, without inventing a fourth meaning for `primary`.
   a bare unmodified letter is lowercase (§4.1).
 - **One action advertises ONE key: the PRIMARY binding from the live effective
   keymap** (`keysFor(action)[0]`, or the action's leader sequence when it is bound
-  only to one). A bar never enumerates an action's alternative bindings — they
-  stay live and are listed in the keybinding UI, so a row never spends its cells
-  repeating the same action three ways. `PgUp/PgDn` (one action, two symmetric
-  page keys) is the only sanctioned two-key token in a hint.
+  only to one). An **action-bar segment** never enumerates an action's alternative
+  bindings — they stay live and are listed in the keybinding UI, so a row never
+  spends its cells repeating the same action three ways. `PgUp/PgDn` (one action,
+  two symmetric page keys) is the only sanctioned two-key token in a bar hint.
+  - **A modal's cancel/close device names both real keys.** The approval dialog
+    already paints `[esc/ctrl+c] cancel` and the transcript search overlay paints
+    `esc/ctrl+c` close — the latter because its shared Input swallows `Ctrl+C`, so
+    that key has to stay discoverable where the user is typing. Naming the two keys
+    that leave a modal is NOT a bar enumerating an action's alternatives (which the
+    rule above forbids): a modal hint's whole job is telling the user what leaves
+    it. `componentKeymap.keyHint` keeps the list form for these; a bar takes
+    `keysFor(action)[0]` itself.
 - **State fact** = `<Noun> <state>`: `Follow on`, `Follow paused`,
   `rows 7-40/40`, `Retained preview · not full history`. A fact never begins
   with a key name, so the two segment kinds stay distinguishable on one row.
 - Keys come from the **live effective keymap** for every action that is a
-  rebindable app action (`componentKeymap.keyHint('tasks.stop')` is the existing
-  correct pattern). This is the one governance rule all three reference TUIs
+  rebindable app action (a bar takes `componentKeymap.keysFor(action)[0]`, the
+  primary binding; the Job Stop segment is the existing correct pattern). This is
+  the one governance rule all three reference TUIs
   state in their own words — each of them guards it (or its equivalent) in CI
   (§13).
 - **A surface-local key that is deliberately NOT rebindable derives both its
