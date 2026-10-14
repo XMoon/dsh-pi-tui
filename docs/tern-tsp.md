@@ -38,11 +38,12 @@ The dated audit and Tern 0.8.3 evidence are in
   B4 item the owner explicitly deferred to PR4 — the masked Question's physical
   qualification — is recorded as deferred below and must not be read as done.
 - **PR4-A Model — CURRENT:** the original `/model` handler has PiTui and TSP
-  presentation adapters. The TSP surface now uses **two pages** (one list-first
+  presentation adapters. The TSP surface now uses **two pages**: one list-first
   native Picker with one Reasoning Effort strip and an explicit `Switch` /
-  `Save default` footer; a read-only native Full details Reader), and the
-  client's `size:'md'` dialog at every supported pane width. The sole
-  business read/write owner and modal seat are unchanged. The required native
+  `Save default` footer, painted as the client's `size:'md'` dialog at every
+  supported pane width; a read-only native Full details Reader, painted as the
+  client's `size:'lg'` overlay. The sole business read/write owner and modal
+  seat are unchanged. The required native
   kinds are `picker`, `row` and `overlay`; `strip` is a **Picker prop/region**,
   not a separate required kind. **Historical evolution (superseded, below):**
   The Owner's earlier follow-up revisions added the scope-column click protocol
@@ -389,7 +390,7 @@ The dated Foundation audit was followed by a bounded **F1/F2/F3 runtime-gap audi
 
 **Engineering decision:** issue/report upstream, wait for an SDK fix and separately qualify any consumable SDK update. Isolated A1/A1′ experiments are **PoC only**; the E7/E8 addendum currently has an Agent-reported summary without the raw addendum files attached to the committed evidence. The team is **not** implementing a second Frame/Focus queue, ACK watchdog, local SDK fork, or four-language upstream patch. This remains experimental TSP functionality and does not alter the PiTui default.
 
-### Model UX supersession record (PR #301, 2026-10-14)
+## Model UX supersession record (PR #301, 2026-10-14)
 
 The Owner-retired arrangements — wide Provider/Model/Preview Explorer, adaptive Overview page, `More actions`, second-level Effort and the six-row window — are **historical evidence**, not current feature requirements. They were superseded after real-client tests found the effort path unreachable in normal splits, `lg` sheet occupying most of a wide pane, fragmented long detail values and a per-frame Picker key causing remount/scroll movement. The currently authoritative contract is [`model-selection.md`](./tern-tsp/model-selection.md): two pages, one native catalogue strip, direct read-only Reader and explicit footer commit. Retain the historical evidence files as dated records; do not restore their old Must/keyboard/layout assertions without a new Owner decision. This change **does not supersede** Preset's independent UX, the Host/Client writer, TSP renderer opt-in, SDK Focus/Credit issue #48, or physical-GUI qualification gaps.
 
