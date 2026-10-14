@@ -2660,7 +2660,8 @@ reported as unconfirmed (never as a new-Host success), and a superseded
 ## The passive Task Quick accessory below the editor (B4-A)
 
 B4-A installs the passive half of the locked Task Quick UX: a bounded,
-non-focusable task window directly below the editor seat. It is a first-party
+non-focusable task window directly below the editor seat (B4-B moved the band
+under the whole footer — see the on-demand section below). It is a first-party
 PRIVATE sibling on BOTH physical roots (the regular document, between the seat
 and the public `input.widget.below` Text, and the fullscreen pinned stack in the
 same position) — never an overlay, never an editor-seat tenant, never a public
@@ -2815,3 +2816,18 @@ the session-reset exit, `/tasks` Full filtering with Quick hidden),
 same production composition) and `packages/pi-tui/test/editor-task-quick-boundary.test.ts`
 (the X063 classifier: wrap segments, transient modes, the width guard, and the
 non-consuming negative).
+
+**Owner revision 2026-10-15 (footer-below layout addendum):** the accessory
+band moved UNDER THE WHOLE FOOTER — the LAST visible region of both roots
+(editor seat → public below widgets → footer → separator → accessory). The
+band owns exactly ONE top separator rule (role 15 `border`, the
+Owner-authorized Footer↔Quick boundary — never `primary`/`borderFocus`, no
+bottom rule, no frame); it paints only when every projected task row already
+fits (`grant ≥ desired + 2`) and yields to task rows on a low budget. The
+active ceiling is 5 rows: 1 separator + 1 identity + 3 task rows. The Footer's
+own budget is untouched (the chrome measurement includes the footer; the band
+takes the remainder), the painted hit geometry includes the separator row as
+inert chrome, and the mouse/wheel contract is unchanged. The owner-revision
+authority is the addendum document (`temp/panel/…footer-below-quick-layout
+-addendum-v1-20261015.md`); the default-hidden and ↓-admission decisions of
+2026-10-14 are unchanged.

@@ -549,12 +549,18 @@ anchor, without inventing a fourth meaning for `primary`.
 ### 6.2 Rules budget
 
 - A rule marks a **boundary between chrome and content**. At most one rule per
-  boundary, at most two per frame — with the ONE Owner-confirmed exception of
-  the nested editor-seat tenant (D15, `Ctrl+R` History), which paints a top and
+  boundary, at most two per frame — with TWO Owner-confirmed exceptions: the
+  nested editor-seat tenant (D15, `Ctrl+R` History), which paints a top and
   a bottom boundary rule of its own plus its Results/Preview divider (three
-  rules, each on a distinct boundary). The rules may compress the Results and
-  Preview regions, but they are removed — bottom first, then top — before the
-  Preview is squeezed below one content row.
+  rules, each on a distinct boundary); and the on-demand Task Quick accessory
+  (B4-B, Owner revision 2026-10-15), which paints exactly ONE top boundary
+  rule (role 15 `border`) as the Footer↔Quick boundary of its combined Root
+  position (editor seat → widgets → footer → Quick). That rule belongs to the
+  accessory, never applies the D15 History rules, opens no generic third-rule
+  allowance for Workspace/Overlay surfaces, and is the FIRST thing dropped
+  when the row budget cannot cover every projected task row. The rules may
+  compress the Results and Preview regions, but they are removed — bottom
+  first, then top — before the Preview is squeezed below one content row.
 - **A line whose own text is the content is never flanked by rules.** The Job
   reading-facts row's two flanking rules (`job-inspector-panel.ts:681`) are
   therefore removed (D6); the disclosure becomes a dim status line, and the
@@ -920,9 +926,12 @@ A new surface picks one and must justify any deviation.
 | **Overlay** (modal, non-fullscreen) | `Frame` box, single body, bottom hint | pickers, approval dialog |
 | **Pane** (embedded in the transcript/log) | header line + folded body, no action bar | tool cards, subagent cards, Thinking |
 | **Status bar** | one row of items + separators, no interaction (a host-instruction line may be reserved above it — `footer/instruction.ts`) | footer |
+| **Accessory band** (pinned, on-demand) | zero rows hidden; when active: ONE top separator rule (the §6.2 exception) + identity row + ≤3 single-line rows, painted UNDER the whole footer as the frame's last region | Task Quick |
 
 Shared minimum spec for **PiTui-painted** Workspace and Overlay: identity, one body, one bottom
-bar, `Esc` last, whole-segment hint drops (never mid-word), role table respected.
+bar, `Esc` last, whole-segment hint drops (never mid-word), role table respected. The
+accessory band is its own archetype (not a Workspace/Overlay): it owns no hint bar, no
+frame, and its separator is the §6.2 exception above.
 A **TSP-native** read-only Reader may legitimately have its own visible Back row and no
 action bar; its UI still needs a reachable, truthful navigation gesture (§12.3).
 

@@ -265,8 +265,14 @@ test('B4A-01 the Job roster paints below the editor with NO Task Browser open', 
   assert.ok(band.identity >= 0, `the accessory must paint:\n${view(h.vt)}`)
   assert.equal(band.items.length, 3, `three task rows at 120x40:\n${view(h.vt)}`)
   // Exactly below the editor seat, and above the footer.
-  assert.equal(band.identity, editor.bottom + 1, 'the identity row sits directly below the editor')
-  assert.ok(band.identity + band.items.length < lines.length, 'the footer stays below the accessory')
+  // B4-B addendum: the band lives UNDER the whole footer — the painted
+  // order is editor < widgetsBelow < footer < separator < identity row. The
+  // separator rule is the FIRST row after the footer's stats line.
+  const separatorRow = lines.findIndex((line, index) =>
+    index > editor.bottom && /^─+$/.test(line.trim()))
+  assert.ok(separatorRow > editor.bottom, `the separator sits below the editor:\n${view(h.vt)}`)
+  assert.equal(band.identity, separatorRow + 1, 'the identity row sits directly below the separator')
+  assert.ok(band.identity + band.items.length < lines.length, 'the accessory is the LAST visible band')
   // The real roster, projected by the ONE authority — never a second catalog.
   // N is the scrollable projection: the failed job is footer attention while
   // live work keeps the Active scope, exactly as the modal Quick projects it.
@@ -1063,9 +1069,12 @@ test('B4A-05e the resident window coexists with a live PUBLIC below widget', asy
   const widgetRow = rowOf(h.vt, 'BELOW-WIDGET')
   const firstItemRow = rowOf(h.vt, itemRows(h.vt)[0]!)
   assert.ok(widgetRow >= 0, `the public below widget must still paint:\n${view(h.vt)}`)
-  // Editor seat -> first-party accessory -> public below widget -> footer.
-  assert.ok(firstItemRow > editor.bottom, `the accessory sits below the seat:\n${view(h.vt)}`)
-  assert.ok(widgetRow > firstItemRow, `the PUBLIC slot keeps its position under the accessory:\n${view(h.vt)}`)
+  // B4-B addendum: editor seat -> public below widget -> footer -> separator
+  // -> accessory band (the accessory is the LAST visible region). The
+  // separator rule is the FIRST frame row below the footer's stats line.
+  const separatorRow = lines.findLastIndex(line => /^\s*─+$/.test(line))
+  assert.ok(separatorRow > widgetRow, `the separator sits below the public widget:\n${view(h.vt)}`)
+  assert.ok(firstItemRow > separatorRow, `the accessory is the LAST band, under the footer:\n${view(h.vt)}`)
   for (const footerRow of h.app.footerRenderRowsForTest().map(strip).map(line => line.trimEnd())) {
     if (footerRow === '') continue
     assert.ok(lines.some(line => line.includes(footerRow)), `the footer is not pushed out: ${JSON.stringify(footerRow)}`)
@@ -1089,8 +1098,11 @@ test('B4A-05f the FULLSCREEN root paints the public below widget beside the wind
   assert.ok(scroll, 'the fullscreen transcript pane must exist')
   assert.ok(firstItemRow >= 0, `the window paints in fullscreen:\n${view(h.vt)}`)
   assert.ok(widgetRow >= 0, `the public below widget still paints in fullscreen:\n${view(h.vt)}`)
-  // editor seat -> first-party accessory -> public below widget -> footer.
-  assert.ok(widgetRow > firstItemRow, `the PUBLIC slot keeps its position under the accessory:\n${view(h.vt)}`)
+  // B4-B addendum: editor seat -> public below widget -> footer -> separator
+  // -> accessory band (the accessory is the LAST visible region).
+  const separatorRow = lines.findLastIndex(line => /^─+$/.test(line.trim()))
+  assert.ok(separatorRow > widgetRow, `the separator sits below the public widget:\n${view(h.vt)}`)
+  assert.ok(firstItemRow > separatorRow, `the accessory is the LAST band, under the footer:\n${view(h.vt)}`)
   // Neither band starves the pinned transcript: both reservations hold at once.
   assert.ok(scroll.viewportHeight >= 1, `the transcript floor survives both bands:\n${view(h.vt)}`)
   for (const footerRow of h.app.footerRenderRowsForTest().map(strip).map(line => line.trimEnd())) {

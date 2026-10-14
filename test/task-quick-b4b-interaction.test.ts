@@ -210,6 +210,14 @@ test('B4B-02/03 a non-last visual line keeps ↓ in the editor; the LAST visual 
   assert.ok(band.items.length >= 1, `the task rows paint:\n${view(h.vt)}`)
   // The selection marker sits on the FIRST row (D6's one active device).
   assert.match(strip(band.items[0]!), /^> /, `the first row is selected:\n${band.items[0]}`)
+  // B4-B addendum (painted order): editor < widgetsBelow < footer < separator
+  // < identity < task rows. The separator rule is the FIRST row of the band,
+  // the identity row the second, and the whole band is the LAST region.
+  const lines = rawView(h.vt)
+  const separatorRow = lines.findLastIndex(line => /^─+$/.test(line))
+  assert.ok(separatorRow >= 0, `the separator rule paints above the band:\n${view(h.vt)}`)
+  assert.equal(band.identity, separatorRow + 1, 'the identity row follows the separator')
+  assert.ok(separatorRow > 2, 'the separator is BELOW the editor and the footer')
 
   // S5: Esc exits with the exact original draft.
   h.vt.sendInput('\x1b')

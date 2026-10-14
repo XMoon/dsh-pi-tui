@@ -52,7 +52,7 @@ import type { TaskPanelItem } from '../../app/surface/task-presentation.ts'
 
 /** The accessory's own row ceiling: identity row + three task rows. This is
  *  the accessory's budget, never a terminal-size threshold. */
-export const TASK_QUICK_MAX_ROWS = 4
+export const TASK_QUICK_MAX_ROWS = 5
 /** The item-row ceiling: at most three single-line task rows at any size. */
 export const TASK_QUICK_MAX_ITEM_ROWS = 3
 /** The shared status marker (design language §4.4, D5+D7) — one `‣` and a word. */
@@ -82,6 +82,11 @@ export interface TaskQuickLayout {
   readonly grant: number
   /** Whether the identity/position row is painted. */
   readonly header: boolean
+  /** Whether the Quick-owned top separator rule is painted. It is the ONLY
+   *  rule on this surface (the Owner-authorized Footer↔Quick boundary,
+   *  design language §6.2 exception) and it yields to task rows: painted
+   *  only when every projected task row already fits. */
+  readonly separator: boolean
   /** The capacity of the task-row window (the paging/anchor step). */
   readonly itemRows: number
   /** The first visible item index. */
@@ -94,21 +99,24 @@ export interface TaskQuickLayout {
 
 /** A frame with nothing to paint (0 grant or 0 items). */
 function emptyLayout(width: number, total: number): TaskQuickLayout {
-  return { width, grant: 0, header: false, itemRows: 0, start: 0, count: 0, total }
+  return { width, grant: 0, header: false, separator: false, itemRows: 0, start: 0, count: 0, total }
 }
 
 /**
- * Derive the accessory's row plan from the LIVE frame:
+ * Derive the accessory's row plan from the LIVE frame (B4-B addendum
+ * 2026-10-15: the band is under the whole footer and owns ONE top separator):
  *
  * 1. `desired = min(3, N)` — the real projected row count, never a fabricated
  *    one; an empty projection paints nothing at all;
  * 2. `share = floor(terminalRows / 4)` — the accessory's proportional share of
  *    the terminal height, the same shape as the public below-widget zone's cap;
- * 3. `room = terminalRows - chromeRows - 1` — every other owner first, plus one
- *    visible transcript row;
- * 4. `grant = min(4, share, room, desired + 1)` — the identity row is granted
- *    only while a task row still fits under it (a one-row grant is spent on
- *    content), and a row the accessory may not paint is never left blank.
+ * 3. `room = terminalRows - chromeRows - 1` — every other owner first (the
+ *    footer included — the band sits UNDER it), plus one visible transcript row;
+ * 4. `grant = min(5, share, room, desired + 2)` — at least one TASK row is the
+ *    first guarantee; the identity row follows the B4-A rule (a ≥2 grant with
+ *    task rows to spare); the separator is DECORATIVE and painted only when
+ *    every projected task row already fits (`grant >= desired + 2`) — a rule
+ *    line never displaces a visible task row.
  */
 export function planTaskQuickLayout(
   terminalCols: number,
@@ -125,9 +133,12 @@ export function planTaskQuickLayout(
   if (desired === 0) return emptyLayout(width, 0)
   const share = Math.floor(rows / 4)
   const room = rows - chrome - 1
-  const grant = Math.max(0, Math.min(TASK_QUICK_MAX_ROWS, share, room, desired + 1))
+  const grant = Math.max(0, Math.min(TASK_QUICK_MAX_ROWS, share, room, desired + 2))
   if (grant === 0) return emptyLayout(width, items)
   const header = grant >= 2
+  // The decorative separator yields to task rows: only when the grant covers
+  // the identity row AND every projected task row with one row to spare.
+  const separator = header && grant >= desired + 2
   const capacity = Math.min(desired, header ? grant - 1 : grant)
   const requested = Math.floor(Number.isFinite(startIndex) ? startIndex : 0)
   const start = Math.min(Math.max(0, requested), Math.max(0, items - capacity))
@@ -135,6 +146,7 @@ export function planTaskQuickLayout(
     width,
     grant,
     header,
+    separator,
     itemRows: capacity,
     start,
     count: Math.min(capacity, items - start),
@@ -653,6 +665,15 @@ export class TaskQuickAccessory implements Component, Focusable {
     }
     const lines: string[] = []
     const hits: TaskQuickHit[] = []
+    // Paint order is strictly separator → identity → task rows. The rule is
+    // the Quick-owned top boundary (role 15 `border`, the Owner-authorized
+    // Footer↔Quick exception — never `primary`/`borderFocus`), it spans the
+    // component width exactly, and it is INERT: a pointer event on it is
+    // consumed without acting (the hit map records it as identity chrome).
+    if (layout.separator) {
+      lines.push(color.border('─'.repeat(columns)))
+      hits.push({ kind: 'identity' })
+    }
     if (layout.header) {
       lines.push(renderHeaderRow(columns, layout.start, layout.count, layout.total))
       hits.push({ kind: 'identity' })
