@@ -1,44 +1,51 @@
 /**
- * Task Quick — the passive, non-focusable task accessory below the editor
- * (Phase 3B / B4-A).
+ * Task Quick — the on-demand task accessory below the editor (Phase 3B /
+ * B4-A passive projection + B4-B interaction).
  *
- * Anatomy (ONE vertical presentation at every width — a single `render(width)`
- * decides the layout):
+ * Anatomy while ACTIVE (ONE vertical presentation at every width — a single
+ * `render(width)` decides the layout):
  * - Identity row: `Task Quick` (role 1, bold `textStrong`) with the right-aligned
  *   position `showing x-y/N` (role 12, `textMuted`);
- * - Up to three single-line task rows: the projected row label (role 3
- *   `text`, ancestor-context rows role 4 `textDim`), the durable mode suffix
- *   (role 4) and the status group `‣ Running` (role 9, `taskStatusColor` ink +
- *   `taskStatusWord` word);
+ * - Up to three single-line task rows: the selection marker `> ` (`primary`,
+ *   D6's ONE active device) for the selected row, the projected row label
+ *   (role 3 `text`, ancestor-context rows role 4 `textDim`), the durable mode
+ *   suffix (role 4) and the status group `‣ Running` (role 9, `taskStatusColor`
+ *   ink + `taskStatusWord` word);
  * - A granted-one-row frame spends its ONLY row on task content and moves the
  *   compact `x-y/N` to that row's tail — a header never displaces a task row.
  *
- * This component is a display-only projection: it owns the row window (the
- * first visible row ID plus a bounded index fallback), the last PAINTED frame
- * geometry and the wheel hit test. It never reads a Job/Question/Host source,
- * never opens a surface, never acknowledges a failure and never takes keyboard
- * focus — the pointer path below resolves exclusively against the last painted
- * frame and mutates nothing but its own window.
+ * HIDDEN (unfocused) paints ZERO rows (B4-B, Owner revision 2026-10-14): no
+ * body, no header, no blank band — even with live tasks. `focused` is the
+ * ONLY visibility authority; the host's keymap-admitted `↓` (and a
+ * Fullscreen same-row click) are the only paths in, and Esc / Up-at-first /
+ * commit / owner displacement are the paths out.
  *
- * Row budget: the accessory is the lowest-priority first-party pinned
- * decoration. Its grant is derived from the LIVE frame — the terminal rows, the
- * pinned chrome the host measures for it, and exactly one visible transcript
- * row — and is additionally capped by its own proportional share of the
- * terminal height and by `TASK_QUICK_MAX_ROWS`. It is never a fixed
- * terminal-size threshold, and it never borrows a row from the editor seat, the
- * footer, the public widget zones or the transcript floor.
+ * The component is a projection surface: it owns the row window, the
+ * ephemeral selection, the keyboard surface and the Fullscreen pointer
+ * surface while ACTIVE. It never reads a Job/Question/Host source, never
+ * opens a surface itself (the host's typed callback does), never
+ * acknowledges a failure and never paints without real focus.
+ *
+ * Row budget while ACTIVE: the accessory is the lowest-priority first-party
+ * pinned decoration. Its grant is derived from the LIVE frame — the terminal
+ * rows, the pinned chrome the host measures for it, and exactly one visible
+ * transcript row — and is additionally capped by its own proportional share
+ * of the terminal height and by `TASK_QUICK_MAX_ROWS`. It is never a fixed
+ * terminal-size threshold, and it never borrows a row from the editor seat,
+ * the footer, the public widget zones or the transcript floor. A 0-grant
+ * frame cannot be entered (the host declines).
  *
  * Visual vocabulary is frozen by `docs/tui-design-language.md` (§3.2 role
- * table, §4.3/§4.4 glyph inventory, §5.2 of the B4-A plan): one `‣` marker and a
- * Title Case status word, no cursor glyph, no brackets, no rules, no second
- * palette token. The legacy modal `TaskBrowserPanel` keeps its own registered
- * per-status glyph debt (§11.4) — this accessory does not copy it.
+ * table, §4.3/§4.4 glyph inventory): one `‣` marker and a Title Case status
+ * word, `> ` as the only active marker, no cursor glyph, no brackets, no
+ * rules, no second palette token, no frame/border.
  *
  * @module @xmoon76/dsh-pi-tui/tui/panels/task-quick-accessory
  */
 
 import { truncateToWidth, visibleWidth } from '@xmoon76/pi-tui'
-import type { Component, TuiMouseEvent, TuiMouseEventResult } from '@xmoon76/pi-tui'
+import type { Component, Focusable, TuiMouseEvent, TuiMouseEventResult } from '@xmoon76/pi-tui'
+import { componentKeymap } from '../keybindings/component-keymap.ts'
 import { sanitizedPhysicalLine } from '../presentation/lines.ts'
 import { color, taskStatusColor, taskStatusWord } from '../theme/runtime.ts'
 import type { TaskPanelItem } from '../../app/surface/task-presentation.ts'
@@ -165,8 +172,13 @@ function renderHeaderRow(width: number, start: number, count: number, total: num
 }
 
 /**
- * One task row: `<indent>label[ · mode]` + the status group, and — in the
- * granted-one-row frame — the compact position at the tail.
+ * One task row: `[selection marker]label[ · mode]` + the status group, and —
+ * in the granted-one-row frame — the compact position at the tail.
+ *
+ * The selection marker (B4-B) is the ONLY active device (design language
+ * D6): `> ` in the `primary` ink, painted only for the row whose stable
+ * `value` is the current selection. It never introduces a second marker
+ * glyph set and never re-inks the status word.
  *
  * Sacrifice order (plan §5.2): elapsed/description/details are never painted at
  * all, then the LABEL truncates with `…`, while the durable mode suffix, the
@@ -183,13 +195,14 @@ function renderHeaderRow(width: number, start: number, count: number, total: num
  * (possibly Remote/wire) string, and this row is budgeted as exactly one
  * terminal row.
  */
-function renderItemRow(item: TaskPanelItem, width: number, position?: string): string {
+function renderItemRow(item: TaskPanelItem, width: number, position?: string, selected = false): string {
   const statusText = `${STATUS_MARKER} ${sanitizedPhysicalLine(taskStatusWord(item.status))}`
   const status = taskStatusColor(item.status)(statusText)
+  const marker = selected ? color.primary('> ') : '  '
   const tail = position === undefined ? status : `${status}  ${color.textMuted(position)}`
   const tailWidth = visibleWidth(position === undefined ? statusText : `${statusText}  ${position}`)
-  if (tailWidth >= width) return fit(tail, width)
-  const room = width - tailWidth - 1
+  if (tailWidth >= width) return fit(`${marker}${tail}`, width)
+  const room = width - tailWidth - visibleWidth(marker) - 1
   const indent = '  '.repeat(Math.max(0, Math.floor(item.depth ?? 0)))
   const indentWidth = visibleWidth(indent)
   const suffixText = item.suffix === undefined || item.suffix === '' ? '' : ` · ${item.suffix}`
@@ -200,9 +213,21 @@ function renderItemRow(item: TaskPanelItem, width: number, position?: string): s
   const labelBudget = Math.max(0, room - indentWidth - visibleWidth(suffix))
   const label = truncateToWidth(sanitizedPhysicalLine(item.label), labelBudget, '…', false)
   const ink = item.ancestorContext === true ? color.textDim : color.text
-  const left = `${color.textDim(indent)}${ink(label)}${color.textDim(suffix)}`
+  const left = `${marker}${color.textDim(indent)}${ink(label)}${color.textDim(suffix)}`
   const gap = Math.max(1, width - visibleWidth(left) - tailWidth)
   return `${left}${' '.repeat(gap)}${tail}`
+}
+
+/**
+ * One painted task row of the last painted ACTIVE frame (mouse hit-testing).
+ * The map is built from the EXACT final rows render() returns, so a click
+ * can only act on last-painted geometry. The identity is the row's stable
+ * `value` — never the physical index (an async reorder between press and
+ * release must not activate whatever moved into the row).
+ */
+interface TaskQuickHit {
+  readonly kind: 'item' | 'identity' | 'inert'
+  readonly value?: string
 }
 
 /**
@@ -215,6 +240,8 @@ interface TaskQuickPainted {
   readonly height: number
   /** The painted task-row count — the wheel window. */
   readonly itemRows: number
+  /** The per-row hit identities of THIS frame (length === height). */
+  readonly hits: readonly TaskQuickHit[]
   /** The LIVE terminal geometry this frame was painted for. The pi-tui alt
    *  screen builds a pointer event's own box dimensions from its last painted
    *  layout, so after a resize the event still carries the OLD dimensions:
@@ -225,15 +252,30 @@ interface TaskQuickPainted {
 }
 
 /**
- * The passive Task Quick accessory.
+ * The Task Quick accessory (Phase 3B / B4-A passive projection + B4-B
+ * on-demand interaction).
  *
- * The host owns mounting, the live geometry and the render request; the
- * surface Task Runtime owns the projected rows. The component owns the window
- * anchor (`firstVisibleId` + a bounded index fallback) and the wheel hit test.
- * It holds no timer, no subscription and no catalog: a data commit only
- * re-anchors the window and asks for one repaint.
+ * `focused` is the ONLY visibility authority (B4-A kept the band always
+ * painted; B4-B retires that default per the Owner's 2026-10-14 revision):
+ * an unfocused accessory paints ZERO rows — no header, no blank band — and
+ * cuts its stale painted hit geometry at the same moment. The host owns the
+ * whole admission/exit lifecycle (`enterTaskQuick` / `leaveTaskQuick`); the
+ * component never claims focus itself and never fabricates an `open` flag.
+ *
+ * While ACTIVE the component owns: the row window (anchor + bounded
+ * fallback), the selected row (an ephemeral stable `value` — never a label
+ * or an index), the keyboard surface (`tasks.cursorUp/Down/pageUp/pageDown/
+ * open/search.exit` through the shared component keymap), and the Fullscreen
+ * pointer surface (the B4-A wheel window plus the B4-B same-row
+ * press/release click). It holds no timer, no subscription and no catalog:
+ * a data commit only re-anchors the window, reconciles the selection, and
+ * asks for one repaint.
+ *
+ * Every unlisted key is consumed as a no-op while focused: nothing leaks to
+ * the background editor, nothing submits, and no retired modal action is
+ * dispatched.
  */
-export class TaskQuickAccessory implements Component {
+export class TaskQuickAccessory implements Component, Focusable {
   private items: TaskPanelItem[] = []
   /** The durable window anchor: the first visible row's stable value. */
   private firstVisibleId: string | undefined
@@ -242,10 +284,76 @@ export class TaskQuickAccessory implements Component {
   private painted: TaskQuickPainted | undefined
   private readonly geometry: TaskQuickGeometry
   private readonly requestRender: () => void
+  /** The host-owned lifecycle callbacks (B4-B). `onExit` leaves Quick
+   *  (Up at the global first row / Esc); `onActivate` commits the typed
+   *  selection (Enter / same-row click) AFTER the host has already left
+   *  Quick; `onEmpty` lets the host exit when the ACTIVE projection empties
+   *  (fired only while this component really holds focus). */
+  private readonly onExit: () => void
+  private readonly onActivate: (value: string) => void
+  private readonly onEmpty: () => void
+  /** Invoked ONCE on the first render pass (render runs every frame even
+   *  while HIDDEN — it returns [] — so the first call is the first frame).
+   *  The host recomposes its footer hint then: the Down admission's
+   *  painted-frame guard (X063) is live only from the first paint on, and a
+   *  projection committed before that frame would otherwise leave the hint
+   *  stale until unrelated churn. */
+  private readonly onFirstPaint: () => void
+  private firstPaintNotified = false
+  /** The selected row's stable value while ACTIVE (ephemeral: never
+   *  restored across open/close — a fresh entry always selects the first
+   *  row). The selected INDEX is derived on demand from this value. */
+  private selectedValue: string | undefined
+  /** The pressed row identity of an in-flight Fullscreen press→release
+   *  gesture. Component-local, short-lived, cleared on every release and
+   *  by `deactivate()`. */
+  private pressedValue: string | undefined
 
-  constructor(options: { readonly geometry: TaskQuickGeometry; readonly onRequestRender: () => void }) {
+  focused = false
+
+  constructor(options: {
+    readonly geometry: TaskQuickGeometry
+    readonly onRequestRender: () => void
+    readonly onExit: () => void
+    readonly onActivate: (value: string) => void
+    readonly onEmpty: () => void
+    readonly onFirstPaint: () => void
+  }) {
     this.geometry = options.geometry
     this.requestRender = options.onRequestRender
+    this.onExit = options.onExit
+    this.onActivate = options.onActivate
+    this.onEmpty = options.onEmpty
+    this.onFirstPaint = options.onFirstPaint
+  }
+
+  /** The live projected rows (host diagnostics + the grant probe). */
+  getItems(): readonly TaskPanelItem[] {
+    return this.items
+  }
+
+  /**
+   * Enter ACTIVE selection: select the GLOBAL first row and report whether a
+   * real row was selectable. NEVER writes `focused` — the host's
+   * `setFocus(taskQuick)` is the only focus writer (plan §5). Returning
+   * `false` means no row was selectable (0 items), so the host must DECLINE
+   * the entry and leave the editor's own Down in place.
+   */
+  activate(): boolean {
+    const first = this.items[0]
+    if (first === undefined) return false
+    this.selectedValue = first.value
+    return true
+  }
+
+  /**
+   * Leave ACTIVE: release the transient pointer/selection intent. Task
+   * facts (the projected rows) are NOT cleared — an unfocused accessory
+   * keeps its data and paints nothing.
+   */
+  deactivate(): void {
+    this.selectedValue = undefined
+    this.pressedValue = undefined
   }
 
   /**
@@ -255,6 +363,14 @@ export class TaskQuickAccessory implements Component {
    * falls back to the bounded previous index — never to a label or a position
    * guess.
    *
+   * While ACTIVE the selected identity is reconciled against the new rows:
+   * a surviving selection keeps its row (the window follows it), a deleted
+   * selection falls back bounded to the successor of its pre-delete global
+   * index (predecessor at the tail), and an emptied projection notifies the
+   * host — ONLY while this component really holds the active focus (a
+   * HIDDEN accessory's empty commit is a data-only update and must never
+   * re-enter the host's focus lifecycle).
+   *
    * An empty projection keeps the LAST PAINTED hit geometry until `render()`
    * actually paints the blank frame: the rows are still on screen, so a wheel
    * dispatched to that band before the deferred repaint must be consumed by the
@@ -263,29 +379,145 @@ export class TaskQuickAccessory implements Component {
    */
   setItems(next: readonly TaskPanelItem[]): void {
     const items = [...next]
-    const previous = this.firstVisibleId
-    const found = previous === undefined ? -1 : items.findIndex(item => item.value === previous)
     if (items.length === 0) {
+      const wasActive = this.focused
       this.items = []
       this.firstVisibleId = undefined
       this.start = 0
+      this.selectedValue = undefined
       this.requestRender()
+      // The host notification is deliberate LAST: the component state is
+      // already consistent if the host re-enters synchronously.
+      if (wasActive) this.onEmpty()
       return
     }
+    const previousAnchor = this.firstVisibleId
+    const previousSelection = this.selectedValue
     this.items = items
+    // Selection reconciliation (stable ID first, bounded index fallback).
+    if (previousSelection !== undefined) {
+      const selectedIndex = items.findIndex(item => item.value === previousSelection)
+      if (selectedIndex >= 0) {
+        this.selectedValue = previousSelection
+      } else {
+        // Deleted: bounded fallback to the successor of the pre-delete
+        // global index; the predecessor when the tail was deleted.
+        const oldIndex = this.indexOfValue(previousSelection)
+        const fallback = oldIndex === undefined ? 0 : Math.min(oldIndex, items.length - 1)
+        this.selectedValue = items[Math.max(0, fallback)]?.value
+      }
+    }
+    // Window anchor rebases onto the surviving first visible value.
+    const found = previousAnchor === undefined ? -1 : items.findIndex(item => item.value === previousAnchor)
     if (found >= 0) {
       this.start = found
     } else {
-      const window = this.painted === undefined || this.painted.itemRows <= 0 ? 1 : this.painted.itemRows
+      const window = this.currentWindow(items.length)
       this.start = Math.min(Math.max(0, this.start), Math.max(0, items.length - window))
     }
     this.firstVisibleId = items[this.start]?.value
+    if (this.selectedValue === undefined) this.selectedValue = items[0]?.value
     this.requestRender()
   }
 
   /** The value of the first visible row of the last committed window. */
   get anchoredValue(): string | undefined {
     return this.firstVisibleId
+  }
+
+  /** The currently selected row's stable value (ephemeral ACTIVE state). */
+  get selected(): string | undefined {
+    return this.selectedValue
+  }
+
+  /** The visible window size from the last painted frame (1 before the
+   *  first paint) — the paging/wheel step and the selection clamp. */
+  private currentWindow(itemCount: number): number {
+    const painted = this.painted
+    const paintedWindow = painted === undefined || painted.itemRows <= 0 ? 1 : painted.itemRows
+    return Math.max(1, Math.min(paintedWindow, itemCount))
+  }
+
+  /** The index of a stable value in the CURRENT rows (the reconcile path). */
+  private indexOfValue(value: string): number | undefined {
+    const index = this.items.findIndex(item => item.value === value)
+    return index === -1 ? undefined : index
+  }
+
+  /** Move the selection by a bounded delta (keyboard Up/Down, wheel). */
+  private move(delta: number): void {
+    const index = this.selectedValue === undefined ? undefined : this.indexOfValue(this.selectedValue)
+    const current = index ?? 0
+    const next = Math.min(Math.max(0, current + delta), Math.max(0, this.items.length - 1))
+    if (next === current && this.selectedValue !== undefined) {
+      // No movement happened; still consume the key.
+      this.requestRender()
+      return
+    }
+    this.selectedValue = this.items[next]?.value
+    this.ensureVisible()
+    this.requestRender()
+  }
+
+  /** Page by the ACTUAL visible task-row count (painted window). */
+  private page(delta: number): void {
+    this.move(delta * this.currentWindow(this.items.length))
+  }
+
+  /** Keep the selected row inside the painted window. */
+  private ensureVisible(): void {
+    const index = this.selectedValue === undefined ? undefined : this.indexOfValue(this.selectedValue)
+    if (index === undefined) return
+    const windowSize = this.currentWindow(this.items.length)
+    if (index < this.start) this.start = index
+    else if (index >= this.start + windowSize) this.start = index - windowSize + 1
+    this.start = Math.max(0, Math.min(this.start, Math.max(0, this.items.length - windowSize)))
+    this.firstVisibleId = this.items[this.start]?.value
+  }
+
+  /**
+   * The ACTIVE keyboard surface. Only the component keymap's task actions
+   * are recognized; every other input is CONSUMED as a no-op — it never
+   * reaches the background editor and never dispatches a retired modal
+   * action. Up at the GLOBAL first row and Esc exit through the host; Down
+   * clamps at the tail; Enter commits through the host AFTER the host has
+   * left Quick.
+   */
+  handleInput(data: string): void {
+    if (!this.focused) return
+    if (componentKeymap.matches(data, 'tasks.cursorUp')) {
+      const index = this.selectedValue === undefined ? undefined : this.indexOfValue(this.selectedValue)
+      // Up at the GLOBAL first row EXITS (plan §1.3) — never wrap.
+      if (index === 0) {
+        this.onExit()
+        return
+      }
+      this.move(-1)
+      return
+    }
+    if (componentKeymap.matches(data, 'tasks.cursorDown')) {
+      const index = this.selectedValue === undefined ? undefined : this.indexOfValue(this.selectedValue)
+      // Down at the tail clamps (never wraps, never exits).
+      if (index !== undefined && index >= this.items.length - 1) return
+      this.move(1)
+      return
+    }
+    if (componentKeymap.matches(data, 'tasks.pageUp')) { this.page(-1); return }
+    if (componentKeymap.matches(data, 'tasks.pageDown')) { this.page(1); return }
+    if (componentKeymap.matches(data, 'tasks.open')) {
+      const value = this.selectedValue
+      if (value === undefined) return
+      // The host's onActivate implementation leaves Quick FIRST, then
+      // routes the typed selection to the current Task Runtime authority.
+      this.onActivate(value)
+      return
+    }
+    if (componentKeymap.matches(data, 'tasks.search.exit')) {
+      this.onExit()
+      return
+    }
+    // Every unlisted key is a consumed no-op (plan §1.3): the background
+    // editor must never receive it.
   }
 
   /**
@@ -297,49 +529,115 @@ export class TaskQuickAccessory implements Component {
   invalidate(): void {}
 
   /**
-   * Mouse wheel over the painted window: move the row window by one row and
-   * repaint. Every other gesture is refused (no press/release/click action and
-   * no focus — the pointer may scroll a viewport, never enter the surface).
+   * Fullscreen pointer surface (B4-A wheel + B4-B same-row press/release).
    *
-   * The whole painted band owns the wheel (identity row included): while the
-   * pointer is over the accessory the transcript underneath never scrolls, and a
-   * wheel at a window boundary — or one dispatched against a frame that is stale
-   * because a resize has not been repainted yet — is consumed WITHOUT repainting
-   * (`render: false`) rather than falling through.
+   * The wheel keeps its B4-A contract: the whole painted band owns the
+   * wheel (identity row included) and moves the ROW WINDOW without ever
+   * taking focus — focus-adjacent semantics never change here.
+   *
+   * A left press on a painted task row records that row's stable VALUE; the
+   * synthesized click activates only when the same VALUE still resolves to
+   * the same physical row's identity at click time (press A → release B
+   * never fires; a row deleted/reordered between press and release never
+   * fires on the new occupant). The header/identity row and every blank row
+   * are inert. A click activates the typed open directly WITHOUT a focus
+   * detour (plan §5: the pointer never enters a hidden intermediate state).
+   * A stale frame (a resize that has not been repainted) or a geometry that
+   * no longer matches the live terminal is consumed inertly.
    */
   handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
-    if (event.type !== 'wheel' || event.wheelDelta === undefined || event.wheelDelta === 0) return undefined
     const painted = this.painted
     if (painted === undefined) return undefined
-    // Outside the painted band the transcript legitimately owns the wheel.
+    // Outside the painted band the transcript legitimately owns the gesture.
     if (event.y < 0 || event.y >= painted.height) return undefined
-    // IN the band the accessory owns the gesture, even when the frame it was
-    // dispatched against is stale: the alt screen routes an UNHANDLED wheel to the
-    // primary viewport, so merely refusing would scroll the transcript under a
-    // pointer that is still on the window. Nothing visible changes, so no repaint
-    // is requested. Last-painted geometry stays authoritative: the event's own box
-    // comes from the SAME stale layout cache the frame was painted into, which is
-    // why the LIVE terminal geometry recorded at paint time is the check that can
-    // actually fail on a resize.
+    // Stale-frame fences (the B4-A wheel contract, now covering the whole
+    // pointer surface): consume without acting when the frame was painted
+    // for another geometry.
     if (event.width !== painted.width || event.height !== painted.height) return { handled: true, render: false }
     if (this.geometry.columns() !== painted.terminalColumns || this.geometry.rows() !== painted.terminalRows) {
       return { handled: true, render: false }
     }
-    // A projection that emptied (or that had nothing to show) before the repaint
-    // still owns its band: consume without acting, never touch the anchor.
-    if (this.items.length === 0) return { handled: true, render: false }
-    const step = event.wheelDelta < 0 ? -1 : 1
-    const next = Math.min(Math.max(0, this.start + step), Math.max(0, this.items.length - painted.itemRows))
-    if (next === this.start) return { handled: true, render: false }
-    this.start = next
-    this.firstVisibleId = this.items[next]?.value
-    // The painted CONTENT is stale until the repaint this result requests, but the
-    // painted GEOMETRY stays the frame the pointer is on: a further wheel arriving
-    // before that repaint is still in-band and must not fall through.
-    return { handled: true, render: true }
+
+    if (event.type === 'wheel') {
+      if (event.wheelDelta === undefined || event.wheelDelta === 0) return { handled: true, render: false }
+      // A projection that emptied (or that had nothing to show) before the repaint
+      // still owns its band: consume without acting, never touch the anchor.
+      if (this.items.length === 0) return { handled: true, render: false }
+      const step = event.wheelDelta < 0 ? -1 : 1
+      const next = Math.min(Math.max(0, this.start + step), Math.max(0, this.items.length - painted.itemRows))
+      if (next === this.start) return { handled: true, render: false }
+      this.start = next
+      this.firstVisibleId = this.items[next]?.value
+      // The painted CONTENT is stale until the repaint this result requests, but the
+      // painted GEOMETRY stays the frame the pointer is on: a further wheel arriving
+      // before that repaint is still in-band and must not fall through.
+      return { handled: true, render: true }
+    }
+
+    const hit = painted.hits[event.y]
+    if (hit === undefined || hit.kind !== 'item' || hit.value === undefined) {
+      // The identity/blank rows are inert chrome — but they still belong to
+      // the accessory's band while ACTIVE: consume without acting.
+      if (this.focused && (event.type === 'press' || event.type === 'release' || event.type === 'click')) {
+        return { handled: true }
+      }
+      return undefined
+    }
+    if (event.button !== 'left' || (event.type !== 'press' && event.type !== 'click' && event.type !== 'release')) {
+      return undefined
+    }
+
+    if (event.type === 'press') {
+      // The hit map is last-painted geometry: the pressed row must still
+      // exist in the CURRENT rows by VALUE (a setItems() between paint and
+      // press may have removed it without a repaint — no match => reject).
+      const exists = this.items.some(candidate => candidate.value === hit.value)
+      if (!exists) {
+        this.pressedValue = undefined
+        return { handled: true }
+      }
+      this.pressedValue = hit.value
+      return { handled: true, capture: true }
+    }
+
+    if (event.type === 'release') {
+      const pressed = this.pressedValue
+      this.pressedValue = undefined
+      // A release is only meaningful for a gesture this component owns.
+      if (pressed === undefined) return { handled: true }
+      return { handled: true }
+    }
+
+    // click: the pressed identity must match THIS row's identity — press A
+    // with a release/click resolving to B never activates (async reorder
+    // safety). Then resolve the CURRENT row by the stable value: the value
+    // is the identity, the stale frame's index never is.
+    if (this.pressedValue !== hit.value) return { handled: true }
+    this.pressedValue = undefined
+    const item = this.items.find(candidate => candidate.value === hit.value)
+    if (item === undefined) return { handled: true }
+    // Same-row click opens the typed detail directly (no focus detour).
+    this.onActivate(item.value)
+    return { handled: true }
   }
 
   render(width: number): string[] {
+    // The ONLY visibility gate (B4-B): an unfocused accessory paints zero
+    // rows and cuts its stale painted geometry — a stale hit band must not
+    // survive a blur.
+    if (!this.focused) {
+      this.painted = undefined
+      if (!this.firstPaintNotified) {
+        this.firstPaintNotified = true
+        // DEFERRED: render() runs inside the screen's paint pass — a
+        // synchronous footer recompose here would mutate components
+        // mid-frame. A macrotask lands after this frame AND after the
+        // startup commit chain, which is the compose the painted frame
+        // should reflect.
+        setTimeout(() => this.onFirstPaint(), 0)
+      }
+      return []
+    }
     const columns = Math.max(1, Math.floor(width))
     const terminalRows = this.geometry.rows()
     const layout = planTaskQuickLayout(
@@ -354,13 +652,20 @@ export class TaskQuickAccessory implements Component {
       return []
     }
     const lines: string[] = []
-    if (layout.header) lines.push(renderHeaderRow(columns, layout.start, layout.count, layout.total))
+    const hits: TaskQuickHit[] = []
+    if (layout.header) {
+      lines.push(renderHeaderRow(columns, layout.start, layout.count, layout.total))
+      hits.push({ kind: 'identity' })
+    }
     const position = layout.header ? undefined : `${layout.start + 1}-${layout.start + layout.count}/${layout.total}`
     for (let index = 0; index < layout.count; index += 1) {
       const item = this.items[layout.start + index]
       if (item === undefined) break
-      lines.push(renderItemRow(item, columns, position))
+      const selected = item.value === this.selectedValue
+      lines.push(renderItemRow(item, columns, position, selected))
+      hits.push({ kind: 'item', value: item.value })
     }
+    while (hits.length < lines.length) hits.push({ kind: 'inert' })
     // The window the frame actually painted is the durable anchor: the next
     // commit rebases onto the row the user really sees.
     this.start = layout.start
@@ -369,6 +674,7 @@ export class TaskQuickAccessory implements Component {
       width: columns,
       height: lines.length,
       itemRows: layout.count,
+      hits,
       terminalColumns: this.geometry.columns(),
       terminalRows,
     }

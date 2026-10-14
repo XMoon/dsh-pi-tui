@@ -597,9 +597,11 @@ export interface SurfaceRuntime<Event extends RoutedSessionEvent> {
   hasTask(childId: string): boolean
   /** Reset the whole Task Center on a session-generation bump. */
   resetTasks(): void
-  /** Open the Task Browser (`quick` = the ↓ trigger, `full` = `/tasks`). */
+  /** Open the Full Task Browser (`/tasks` and the scoped views). The
+   *  `quick` modal is retired (Phase 3B/B4-B): the on-demand Task Quick
+   *  accessory replaced it and `openQuickTaskItem` routes its selections. */
   openTasksBrowser(
-    viewMode: 'quick' | 'full',
+    viewMode: 'full',
     restoreState?: TaskBrowserViewState,
     scope?: TaskBrowserDatasetScope,
     header?: string,
@@ -1707,6 +1709,11 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
     // browse). A4-6 moved the handler into the surface owner (it reads the
     // browser's row-identity source); the closure only runs on a user click.
     onWorkflowAction: action => task.handleWorkflowAction(action),
+    // B4-B: the on-demand Task Quick's typed selection route. The app calls
+    // this AFTER the accessory has left Quick; the SAME TaskRuntime owner
+    // resolves the row against its CURRENT global authority (the ONE open/
+    // reopen path the Full browser uses — never a second registry).
+    onQuickTaskSelect: value => task.openQuickTaskItem(value),
   })
 
   return {
@@ -1972,6 +1979,13 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
       // `withdrawPending`, whose PiTui owner stays the app's own disposal.
       composerPort = app
       interactionPresenter = pituiSurfaceInteractionPresenter(app)
+      // B4-B: any Task Center commit that ran BEFORE this mount (a cold
+      // parked-Question discovery can publish before the terminal exists)
+      // hit an unmounted display seam and skipped the below-editor Quick
+      // projection. The mount is the ONE point where the seam becomes live:
+      // republish the presentation-only projections so a quiet session (no
+      // later churn) still paints its badge + Quick window.
+      task.refreshAttentionRows()
     },
     bindRendererInput() {
       const target = inputBindTarget

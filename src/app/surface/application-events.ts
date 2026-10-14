@@ -622,10 +622,9 @@ export function createApplicationEvents(deps: ApplicationEventsDeps): Applicatio
     // editor draft. The gesture is disabled in every viewer so it cannot mutate
     // a hidden main or child queue.
     onDequeue: () => deps.submission.dequeue(),
-    // ↓ with an empty editor: the Quick Tasks browser. Task Center merges the
-    // JobRegistry roster with the subagent descendant catalog; the SAME browser
-    // is the `/tasks` surface.
-    onOpenTasks: () => deps.surface.openTasksBrowser('quick'),
+    // B4-B retired the old modal-Quick event route: the on-demand Task Quick
+    // opens through the app's own `enterTaskQuick()` (the keymap's
+    // `app.tasks.open` action), NOT through this event surface.
     // A submit gesture in an INTERACTIVE (continuable) subagent viewer: resolve
     // queue/steer delivery, then deliver the human prompt through the OFFICIAL
     // `subagents.prompt` control API — the child inbox (a distinct FIFO turn:

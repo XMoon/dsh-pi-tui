@@ -96,12 +96,18 @@ test('grant ladder: the transcript floor, the chrome and the accessory ceiling a
 interface Harness {
   readonly accessory: TaskQuickAccessory
   readonly geometry: { cols: number; rows: number; chrome: number }
+  /** The host-side exits the accessory requested (Up-at-first / Esc / empty). */
+  exits(): number
+  /** The typed selections the accessory committed (Enter / same-row click). */
+  activations(): string[]
   renders(): number
 }
 
 function harness(initial: { cols?: number; rows?: number; chrome?: number } = {}): Harness {
   const geometry = { cols: initial.cols ?? 80, rows: initial.rows ?? 24, chrome: initial.chrome ?? 4 }
   let renders = 0
+  let exitCount = 0
+  const activated: string[] = []
   const accessory = new TaskQuickAccessory({
     geometry: {
       columns: () => geometry.cols,
@@ -109,8 +115,21 @@ function harness(initial: { cols?: number; rows?: number; chrome?: number } = {}
       chromeRows: () => geometry.chrome,
     },
     onRequestRender: () => { renders += 1 },
+    onExit: () => { exitCount += 1 },
+    onActivate: (value) => { activated.push(value) },
+    onEmpty: () => { exitCount += 1 },
+    onFirstPaint: () => {},
   })
-  return { accessory, geometry, renders: () => renders }
+  return { accessory, geometry, exits: () => exitCount, activations: () => [...activated], renders: () => renders }
+}
+
+/** B4-B: the accessory paints only while focused — focus it like the host
+ *  does (activate selects the first row, the TUI writes `focused`), the
+ *  test-level equivalent of `enterTaskQuick`. */
+function focus(h: ReturnType<typeof harness>, initial: readonly TaskPanelItem[]): void {
+  h.accessory.setItems([...initial])
+  assert.ok(h.accessory.activate(), 'the harness entry must find a row')
+  h.accessory.focused = true
 }
 
 function item(value: string, patch: Partial<TaskPanelItem> = {}): TaskPanelItem {
@@ -138,6 +157,8 @@ function wheel(delta: number, y: number, overrides: Partial<TuiMouseEvent> = {})
 test('a painted frame is exactly its grant and every row is one physical row', () => {
   const { accessory } = harness()
   accessory.setItems([item('job:a'), item('job:b'), item('job:c'), item('job:d')])
+  accessory.focused = true
+  assert.ok(accessory.activate())
   const lines = accessory.render(80)
   assert.equal(lines.length, 4)
   assert.deepEqual(lines.map(line => visibleWidth(line)), [80, 80, 80, 80])
@@ -150,15 +171,21 @@ test('a painted frame is exactly its grant and every row is one physical row', (
 test('a one-row grant spends the row on content and keeps the position at its tail', () => {
   const { accessory } = harness({ rows: 6 })
   accessory.setItems([item('job:a'), item('job:b'), item('job:c')])
+  accessory.focused = true
+  assert.ok(accessory.activate())
   const lines = accessory.render(80)
   assert.equal(lines.length, 1)
   assert.equal(visibleWidth(lines[0]!), 80)
-  assert.match(strip(lines[0]!), /^job:a\s+‣ Running\s+1-1\/3$/)
+  // B4-B: the ACTIVE one-row frame paints the selection marker on the only
+  // (selected) row and keeps the compact position at the tail.
+  assert.match(strip(lines[0]!), /^> job:a\s+‣ Running\s+1-1\/3$/)
 })
 
 test('the window shows the REAL N: the row total, never a pseudo row', () => {
   const { accessory, geometry } = harness()
   accessory.setItems([item('job:a'), item('job:b'), item('job:c'), item('job:d')])
+  accessory.focused = true
+  assert.ok(accessory.activate())
   assert.match(strip(accessory.render(80)[0]!), /showing 1-3\/4$/)
   geometry.rows = 12
   assert.match(strip(accessory.render(80)[0]!), /showing 1-2\/4$/)
@@ -174,6 +201,8 @@ test('an empty projection paints nothing and installs no hit geometry', () => {
 test('an emptied projection keeps its LAST PAINTED band until the blank frame is painted', () => {
   const { accessory } = harness()
   accessory.setItems([item('job:a'), item('job:b'), item('job:c'), item('job:d')])
+  accessory.focused = true
+  assert.ok(accessory.activate())
   accessory.render(80)
   // The rows are still on screen: an in-band wheel must be consumed, not bubbled.
   accessory.setItems([])
@@ -185,6 +214,8 @@ test('an emptied projection keeps its LAST PAINTED band until the blank frame is
   assert.equal(accessory.handleMouse(wheel(1, 1)), undefined, 'after the blank frame nothing is owed the wheel')
   // …and re-populating paints a fresh frame the wheel resolves against again.
   accessory.setItems([item('job:a'), item('job:b'), item('job:c'), item('job:d')])
+  accessory.focused = true
+  assert.ok(accessory.activate())
   accessory.render(80)
   assert.deepEqual(accessory.handleMouse(wheel(1, 1)), { handled: true, render: true })
 })
@@ -192,6 +223,8 @@ test('an emptied projection keeps its LAST PAINTED band until the blank frame is
 test('a 0-grant frame paints nothing and refuses the wheel', () => {
   const { accessory, geometry } = harness({ rows: 4 })
   accessory.setItems([item('job:a'), item('job:b'), item('job:c'), item('job:d')])
+  accessory.focused = true
+  assert.ok(accessory.activate())
   assert.deepEqual(accessory.render(80), [])
   assert.equal(accessory.handleMouse(wheel(1, 1)), undefined)
   geometry.rows = 24
@@ -204,6 +237,8 @@ test('a 0-grant frame paints nothing and refuses the wheel', () => {
 test('the wheel resolves only against the LAST PAINTED frame', () => {
   const { accessory, geometry } = harness()
   accessory.setItems([item('job:a'), item('job:b'), item('job:c'), item('job:d'), item('job:e')])
+  accessory.focused = true
+  assert.ok(accessory.activate())
   accessory.render(80)
   // A stale box (a resize that has not been repainted) is CONSUMED in-band without
   // acting — refusing would fall through to the transcript behind the window.
@@ -213,9 +248,10 @@ test('the wheel resolves only against the LAST PAINTED frame', () => {
   // but the guard is part of the hit contract): the transcript keeps that wheel.
   assert.equal(accessory.handleMouse(wheel(1, 9)), undefined)
   assert.equal(accessory.handleMouse(wheel(1, -1)), undefined)
-  // Press/release/click never act and never take focus.
-  assert.equal(accessory.handleMouse({ ...wheel(1, 1), type: 'press' }), undefined)
-  assert.equal(accessory.handleMouse({ ...wheel(1, 1), type: 'click' }), undefined)
+  // B4-B: a press latches only a REAL row identity and a click without a
+  // matching pressed gesture is consumed inertly — no focus is ever taken.
+  assert.deepEqual(accessory.handleMouse({ ...wheel(1, 1), type: 'press', button: 'left' }), { handled: true, capture: true })
+  assert.deepEqual(accessory.handleMouse({ ...wheel(1, 1), type: 'click', button: 'left' }), { handled: true })
   const moved = accessory.handleMouse(wheel(1, 1))
   assert.deepEqual(moved, { handled: true, render: true })
   assert.ok(!('focus' in moved!), 'the wheel never requests focus')
@@ -237,9 +273,9 @@ test('the wheel resolves only against the LAST PAINTED frame', () => {
   const shrunk = accessory.render(80)
   // A one-row grant paints ONE content row (no header) and keeps the position.
   assert.equal(shrunk.length, 1)
-  assert.match(strip(shrunk[0]!), /^job:b\s+‣ Running\s+2-2\/5$/)
+  assert.match(strip(shrunk[0]!), /^  job:b\s+‣ Running\s+2-2\/5$/, 'the wheel moved the window, never the selection — no marker')
   assert.deepEqual(accessory.handleMouse(wheel(1, 0, { height: 1 })), { handled: true, render: true })
-  assert.match(strip(accessory.render(80)[0]!), /^job:c\s+‣ Running\s+3-3\/5$/)
+  assert.match(strip(accessory.render(80)[0]!), /^  job:c\s+‣ Running\s+3-3\/5$/)
   // A width resize is caught the same way.
   geometry.cols = 100
   assert.deepEqual(accessory.handleMouse(wheel(-1, 0, { height: 1 })), { handled: true, render: false },
@@ -251,6 +287,8 @@ test('the wheel resolves only against the LAST PAINTED frame', () => {
 test('the whole painted band owns the wheel, identity row included', () => {
   const { accessory } = harness()
   accessory.setItems([item('job:a'), item('job:b'), item('job:c'), item('job:d')])
+  accessory.focused = true
+  assert.ok(accessory.activate())
   accessory.render(80)
   // y=0 is the identity row: the accessory still owns it, so the transcript never
   // scrolls under a pointer that is on the window.
@@ -264,6 +302,8 @@ test('the whole painted band owns the wheel, identity row included', () => {
 test('the window rebases on the first visible row ID, not on an index or a label', () => {
   const { accessory, geometry } = harness()
   accessory.setItems([item('job:a'), item('job:b'), item('job:c'), item('job:d'), item('job:e'), item('job:f')])
+  accessory.focused = true
+  assert.ok(accessory.activate())
   accessory.render(80)
   accessory.handleMouse(wheel(1, 1))
   accessory.render(80)
@@ -274,6 +314,8 @@ test('the window rebases on the first visible row ID, not on an index or a label
     item('job:a'), item('job:b', { status: 'failed' }), item('job:c'),
     item('job:d'), item('job:e'), item('job:f'),
   ])
+  accessory.focused = true
+  assert.ok(accessory.activate())
   const updated = accessory.render(80)
   assert.match(strip(updated[0]!), /showing 2-4\/6$/)
   assert.match(strip(updated[1]!), /job:b\s+‣ Failed$/)
@@ -282,6 +324,8 @@ test('the window rebases on the first visible row ID, not on an index or a label
     item('job:x'), item('job:a'), item('job:b'), item('job:c'),
     item('job:d'), item('job:e'), item('job:f'),
   ])
+  accessory.focused = true
+  assert.ok(accessory.activate())
   const inserted = accessory.render(80)
   assert.match(strip(inserted[0]!), /showing 3-5\/7$/)
   assert.match(strip(inserted[1]!), /job:b/)
@@ -289,6 +333,8 @@ test('the window rebases on the first visible row ID, not on an index or a label
   accessory.setItems([
     item('job:x'), item('job:a'), item('job:c'), item('job:d'), item('job:e'), item('job:f'),
   ])
+  accessory.focused = true
+  assert.ok(accessory.activate())
   const removed = accessory.render(80)
   assert.match(strip(removed[0]!), /showing 3-5\/6$/)
   assert.match(strip(removed[1]!), /job:c/, 'index 2 of the remaining rows')
@@ -296,7 +342,7 @@ test('the window rebases on the first visible row ID, not on an index or a label
   geometry.rows = 8
   const shrunk = accessory.render(80)
   assert.equal(shrunk.length, 2)
-  assert.match(strip(shrunk[1]!), /^job:c\s+‣ Running$/)
+  assert.match(strip(shrunk[1]!), /^  job:c\s+‣ Running$/)
   assert.match(strip(shrunk[0]!), /showing 3-3\/6$/)
   // …and growing back does not jump the window.
   geometry.rows = 24
@@ -311,6 +357,8 @@ test('every rendered row is a single safe physical row, measured in terminal cel
     item('job:b', { label: '短', suffix: 'continuable' }),
     item('job:c', { label: 'c', suffix: 'one-shot' + 'x'.repeat(200) }),
   ])
+  accessory.focused = true
+  assert.ok(accessory.activate())
   const lines = accessory.render(80)
   for (const line of lines) {
     assert.equal(visibleWidth(line), 80)
@@ -320,6 +368,7 @@ test('every rendered row is a single safe physical row, measured in terminal cel
   assert.ok(!first.includes('[31m') && !first.includes('evil\x1b'), `the raw escape must not leak: ${JSON.stringify(first)}`)
   assert.ok(!first.includes('\u0007'), 'the control byte must not leak')
   assert.match(first, /…/, 'the long label truncates with the content ellipsis')
+  assert.ok(first.startsWith('> '), 'the selected row keeps its marker')
   // The durable mode rides whole while an identifiable label cell survives.
   assert.match(strip(lines[2]!), /短 · continuable\s+‣ Running$/)
   // A mode longer than the row yields whole rather than being cut mid-word.
@@ -338,10 +387,12 @@ test('nesting is painted as indentation, never with an ambiguous box-drawing con
       depth: 2, treePrefix: '  ├─ ',
     }),
   ])
+  accessory.focused = true
+  assert.ok(accessory.activate())
   const lines = accessory.render(80).map(strip)
-  assert.ok(lines[1]!.startsWith('build'), `a root row stays flush:\n${lines.join('\n')}`)
-  assert.ok(lines[2]!.startsWith('  subagent · parent'), `a depth-1 row is indented one step: ${JSON.stringify(lines[2])}`)
-  assert.ok(lines[3]!.startsWith('    subagent · child'), `a depth-2 row is indented two steps: ${JSON.stringify(lines[3])}`)
+  assert.ok(strip(lines[1]!).startsWith('> build'), `the selected root row carries the marker:\n${lines.join('\n')}`)
+  assert.ok(strip(lines[2]!).startsWith('    subagent · parent'), `a depth-1 row is marker slot + one indent step: ${JSON.stringify(lines[2])}`)
+  assert.ok(strip(lines[3]!).startsWith('      subagent · child'), `a depth-2 row is marker slot + two indent steps: ${JSON.stringify(lines[3])}`)
   // U+2500 is East-Asian-Width ambiguous: the modal panel's connector must not be
   // carried into this new surface (the plan adds a placement, not a glyph).
   assert.equal(/[\u2500-\u257f]/.test(lines.join('')), false, 'no box-drawing glyph in the accessory')
@@ -353,6 +404,8 @@ test('an unknown or hostile remote status is projected to ONE safe physical row'
     item('job:a', { status: 'failed\u001b[31m\ninjected\u0007' }),
     item('job:b', { status: 'weird_status' }),
   ])
+  accessory.focused = true
+  assert.ok(accessory.activate())
   const lines = accessory.render(80)
   for (const line of lines) {
     assert.equal(visibleWidth(line), 80)
@@ -361,14 +414,16 @@ test('an unknown or hostile remote status is projected to ONE safe physical row'
   const first = strip(lines[1]!)
   assert.ok(!first.includes('[31m') && !first.includes('\u001b'), `the raw status escape must not leak: ${JSON.stringify(first)}`)
   assert.ok(!first.includes('\u0007'), 'the control byte must not leak')
-  assert.match(first, /^job:a\s+‣ Failed injected$/)
+  assert.match(first, /^> job:a\s+‣ Failed injected$/)
   // An unknown status keeps its REAL word (Title-cased), never a renamed one.
-  assert.match(strip(lines[2]!), /‣ Weird_status$/)
+  assert.match(strip(lines[2]!), /^  job:b\s+‣ Weird_status$/)
 })
 
 test('the ink follows a live theme switch without a re-construction', () => {
   const { accessory } = harness()
   accessory.setItems([item('job:a')])
+  accessory.focused = true
+  assert.ok(accessory.activate())
   const dark = accessory.render(80).join('\n')
   setTheme('light')
   const light = accessory.render(80).join('\n')
@@ -380,6 +435,8 @@ test('a narrow frame degrades the position whole, never mid-word', () => {
   const render = (cols: number): string => {
     const { accessory } = harness({ cols })
     accessory.setItems([item('job:a'), item('job:b')])
+    accessory.focused = true
+    assert.ok(accessory.activate())
     return strip(accessory.render(cols)[0]!)
   }
   assert.match(render(44), /^Task Quick\s+showing 1-2\/2$/)

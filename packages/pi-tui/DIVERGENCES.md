@@ -87,8 +87,8 @@
 
 ## Summary
 
-- Records: 63
-- Statuses: `ABSORBED_UPSTREAM`: 4, `ACTIVE`: 47, `MOVED_TO_HOST`: 3, `REMOVED_UNUSED`: 6, `SUPERSEDED`: 3
+- Records: 64
+- Statuses: `ABSORBED_UPSTREAM`: 4, `ACTIVE`: 48, `MOVED_TO_HOST`: 3, `REMOVED_UNUSED`: 6, `SUPERSEDED`: 3
 
 | ID | Status | Risk | Categories | Upstream equivalence |
 | --- | --- | --- | --- | --- |
@@ -155,6 +155,7 @@
 | X060 | ACTIVE | MEDIUM | HARD_HOST_API | NO |
 | X061 | ACTIVE | MEDIUM | PUBLIC_COMPONENT_CONTRACT, BUGFIX_MISSING_UPSTREAM | NO |
 | X062 | ACTIVE | MEDIUM | PUBLIC_COMPONENT_CONTRACT, BUGFIX_MISSING_UPSTREAM | NO |
+| X063 | ACTIVE | MEDIUM | HARD_HOST_API | NO |
 
 ## Divergences
 
@@ -5311,3 +5312,86 @@ The host abbreviates a long row NAME (head…tail around one `…`) so the label
 
 - Scope: `vendor-internal`, `inheritance-structural`, `host`, `public-extension`, `behavioral`, `tests`
 - Notes: Introduced in PR #309 (rollout PR5b) after the external review found the pre-abbreviated label had broken the search contract on the Theme submenu, /preset and /skill. Scope checked against every SettingsList caller (the three abbreviated-name rows declare `searchText`; every other caller declares none and inherits the label basis), the fork's own render path (the field is filter-only), and the real pickers' search inputs.
+
+### X063 — A read-only Down-boundary seam on the Editor's own visual-line classifier
+
+- Status: `ACTIVE`
+- Category: `HARD_HOST_API`
+- Risk: `MEDIUM`
+- Files: `src/components/editor.ts`
+- Last audited: `2026-10-14`
+- Baseline compared: `earendil-works/pi@abe508e1b89912adde45528136c3221eb69acdd7`
+
+#### Why it exists
+
+The host's Task Quick on-demand entry (Phase 3B/B4-B) must fire on a Down press at the editor's last VISUAL line only. The visual boundary lives entirely inside the fork editor: soft word-wrap, CJK/astral width, empty lines, history browsing, autocomplete, jump mode and bracketed paste all change what Down means, and the private word-wrap map (`buildVisualLineMap` + `findCurrentVisualLine`) plus the private mode flags are the only authoritative classifier. The host cannot re-derive it from the public surface — a `cursor.line === lastLine` or character-count guess answers the LOGICAL line, not the wrapped one, and re-implementing the wrap would drift from the exact layout the user sees. Upstream has no such seam.
+
+#### Changed surface
+
+- `protected canYieldDownAtLastVisualLine(expectedLayoutWidth: number): boolean` — one synchronous, read-only, side-effect-free method on the fork `Editor`.
+- True only when `lastWidth === expectedLayoutWidth`, the cursor is on the last VISUAL line of the editor's own wrap map, and NO transient mode owns Down: `historyIndex === -1`, `autocompleteState === null`, `jumpMode === null`, `isInPaste === false`.
+- `expectedLayoutWidth` must be the SAME layout width `render()` derived for the painted frame, so a stale caller width can never classify against a wrap map the user is not looking at.
+- No private field becomes public, no wrap logic is duplicated, no input is intercepted, and the method never mutates editor state.
+- The host `TuiEditor` subclass exposes `canEnterTaskQuickFromDown(physicalWidth)` on top of it (host-side code, not this ledger) — the seam stays the ONLY fork delta.
+
+#### Dependency map
+
+**Vendor internal**
+- The seam reads only existing private state (`lastWidth`, `buildVisualLineMap`, `findCurrentVisualLine`, `historyIndex`, `autocompleteState`, `jumpMode`, `isInPaste`) through the existing private methods `isOnLastVisualLine` uses — no vendored caller behavior changes and no vendored component consumes the method.
+- The lazy one-shot call shape (one wrap-map computation per CANDIDATE Down, per the host predicate's guard chain) keeps printable-key input paths free of any new editor content scan.
+- Audit note: No vendor-internal consumer exists; the fork method is consumed exclusively through the host subclass.
+
+**Inheritance / structural**
+- Exactly one inheritance edge relies on the seam: `TuiEditor extends Editor` (`src/tui/interaction/tui-editor.ts`) calls the protected method from `canEnterTaskQuickFromDown`. No other subclass exists in the bundle, and the method is `protected`, so it is invisible to every non-subclass consumer including the public Extension API.
+- Audit note: The structural edge is the intended contract: a read-only capability granted to the first-party subclass only.
+
+**Host**
+- `src/tui/interaction/tui-editor.ts` — `canEnterTaskQuickFromDown(physicalWidth)` derives the layout width with the SAME rule `render()` uses (`max(1, physicalWidth - 2 * getPaddingX())`), requires prompt input mode, and delegates the rest to the seam.
+- `src/tui-app.ts` — the single private `quickDownEligible()` predicate calls it ONLY when the host editor is the real focused component with no higher-priority owner; the local bool alone never routes input.
+- Audit note: The host consumes the seam through one guarded predicate; the seam never decides routing by itself.
+
+**Public / extension**
+- The method is `protected` on the vendored `Editor` class and is NOT re-exported, declared, or reachable through the package entry (`src/index.ts`) or any public structural type — the public Extension Editor API is unchanged.
+- Audit note: No public surface change: a plugin editor sees the same class shape as before.
+
+**Behavioral coupling**
+- an empty editor and a cursor at the end of the last line yield true on a live painted frame
+- a hard-multiline draft answers false above the last visual line and true only after Down reaches it
+- a soft-wrapped single logical line answers false on middle segments and true only on the last segment (the boundary a logical-line classifier gets wrong)
+- history browsing, an open autocomplete dropdown, armed jump mode and an in-flight bracketed paste each force false, and return to true only when the editor itself leaves the mode
+- a caller width that does not match the painted frame's layout width forces false until the frame is repainted at that width
+- the seam consumes nothing: a real Down after a false answer still moves the cursor natively
+- Audit note: The seam answers one question — may a real Down leave this editor at its last visual line — and owns no state.
+
+#### Guarding tests
+
+- packages/pi-tui/test/editor-task-quick-boundary.test.ts: live-frame true on the empty editor and on the last line of a multiline draft; false above the last visual line; soft-wrap middle vs last segment; history browse, autocomplete, jump mode and bracketed paste each force false and restore; a stale caller width forces false until repaint; a false answer leaves a real Down moving the cursor natively (the mutation witness — without the seam's mode guards the browse/autocomplete/paste cases answer true)
+
+#### Upstream comparison
+
+- Baseline: `earendil-works/pi@abe508e1b89912adde45528136c3221eb69acdd7`
+- Semantic equivalence: `NO`
+- Reference snapshot: `earendil-works/pi@abe508e1b89912adde45528136c3221eb69acdd7`
+- Relevant upstream files:
+- packages/tui/src/components/editor.ts
+- Relevant issues/PRs:
+- None recorded; issue/PR state was not used as semantic proof.
+- Remaining semantic delta: Upstream's `Editor` keeps `isOnLastVisualLine` and the mode flags fully private with no protected read-only accessor, so a host subclass cannot ask the editor whether a real Down would leave it at the last visual line. The fork adds exactly that protected seam; the wrapping, history, autocomplete, jump and paste behavior are upstream's own, unchanged.
+
+#### Retirement conditions
+
+- Upstream gains an equivalent safe read-only seam (a protected/public classifier for the Down-at-last-visual-line state the host can consume instead).
+- Or the host no longer needs the editor's visual Down boundary (the Task Quick on-demand entry is retired or re-owned).
+
+#### Replacement mapping
+
+- None recorded.
+
+#### Retirement evidence
+
+- None recorded.
+
+#### Audit record
+
+- Scope: `vendor-internal`, `inheritance-structural`, `host`, `public-extension`, `behavioral`, `tests`
+- Notes: Introduced for Phase 3B/B4-B (the implementation plan's X061 slot; renumbered X063 because rollout PR5b claimed X061/X062 — Owner-approved 2026-10-14). Scope checked against the fork's own input path (the seam adds no vendored caller), the single host subclass consumer, the public entry (nothing re-exported), and the real editor states the boundary classifier must distinguish.

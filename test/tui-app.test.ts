@@ -1282,15 +1282,19 @@ test('settings list preserves its selected row and hint after a short resize', a
   await vt.waitForRender()
 })
 
-test('down opens the task browser only with active tasks and an empty editor; ctrl+j is inert', async () => {
+test('down opens the on-demand Task Quick only when the B4-B admission holds; ctrl+j is inert', async () => {
   const vt = new VirtualTerminal(80, 24)
   let opened = 0
   const app = new TuiApp(vt, {
     onSubmit: () => {},
     onExit: () => {},
-    // The real runner opens a picker (which renders); the test mimics that.
-    onOpenTasks: () => { opened += 1; app.requestRender() },
   })
+  const realEntry = app.enterTaskQuick.bind(app)
+  app.enterTaskQuick = () => {
+    const entered = realEntry.call(app)
+    if (entered) opened += 1
+    return entered
+  }
   app.start()
 
   startedApps.add(app)
@@ -1299,27 +1303,36 @@ test('down opens the task browser only with active tasks and an empty editor; ct
   // No active tasks: ↓ is inert.
   vt.sendInput('\x1b[B')
   await sleep(20)
-  assert.equal(opened, 0, `no tasks means no browser`)
+  assert.equal(opened, 0, `no tasks means no Quick`)
+  // B4-B: the admission needs the Quick projection alongside the badge.
+  app.setQuickTaskItems([{ value: 'job:bash-1', label: 'pnpm build', status: 'running', kind: 'task', source: 'job' }])
   app.setTasks([{ id: 'bash-1', label: 'pnpm build', status: 'running', kind: 'bash' }])
   await vt.waitForRender()
-  // Empty editor + active tasks: ↓ opens the browser.
+  // Empty editor on its last visual line + active tasks: ↓ enters Quick.
   vt.sendInput('\x1b[B')
   await sleep(20)
-  assert.equal(opened, 1, `down must open the task browser with an empty editor`)
+  assert.equal(opened, 1, `down must enter the Task Quick`)
   // Ctrl+J is deliberately unbound: legacy terminals send it as LF, which
-  // the editor treats as Enter — it must NOT open the browser (the task
-  // surface is ↓ + `/tasks`).
+  // the editor treats as Enter — it must NOT enter Quick (the task surface
+  // is ↓ + `/tasks`).
   vt.sendInput('\n') // ctrl+j is LF
   await sleep(20)
-  assert.equal(opened, 1, `ctrl+j must not open the task browser`)
-  // Non-empty draft: the key keeps its editing meaning (no browser).
-  app.setDraft('ls -la')
+  assert.equal(opened, 1, `ctrl+j must not enter the Task Quick`)
+  // B4-B: the press above ENTERED Quick — leave it before the draft witness.
+  vt.sendInput('\x1b')
+  await sleep(20)
+  // A NON-last-visual-line draft: ↓ keeps its editing meaning (no Quick).
+  app.setDraft('ls -la\nsecond line')
   await vt.waitForRender()
+  // Park the cursor on the first visual line.
+  vt.sendInput('\x1b[A')
+  await sleep(20)
   vt.sendInput('\x1b[B')
   await sleep(20)
-  assert.equal(opened, 1, `down must not open the browser while a draft is being edited`)
+  assert.equal(opened, 1, `down must not enter Quick from a non-last visual line`)
   // Tasks cleared: the trigger disarms.
   app.setTasks([])
+  app.setQuickTaskItems([])
   app.setDraft('')
   await vt.waitForRender()
   vt.sendInput('\x1b[B')
@@ -1330,16 +1343,30 @@ test('down opens the task browser only with active tasks and an empty editor; ct
 
 test('the footer badges active tasks and advertises the ↓ trigger on an empty editor', async () => {
   const { vt, app } = startApp()
+  await vt.waitForRender()
+  // B4-B: the hint follows the admission facts — badge + projection together.
+  app.setQuickTaskItems([{ value: 'job:bash-1', label: 'pnpm build', status: 'running', kind: 'task', source: 'job' }])
   app.setTasks([{ id: 'bash-1', label: 'pnpm build', status: 'running', kind: 'bash' }])
+  await vt.waitForRender()
   await vt.waitForRender()
   let view = vt.getViewport().join('\n')
   assert.ok(view.includes('[1 task running · ↓ view]'), `footer task badge missing:\n${view}`)
-  app.setDraft('typed text')
+  // B4-B: a NON-last-visual-line draft drops the hint (the ↓ stays the
+  // editor's); the badge survives.
+  app.setDraft('typed text\nsecond')
+  await vt.waitForRender()
+  // Park the cursor on a NON-last visual line: the ↓ admission drops. The
+  // footer hint is a compose-time projection — settle it with a real status
+  // commit (the same churn production uses) and read the recomposed frame.
+  vt.sendInput('\x1b[A')
+  await vt.waitForRender()
+  app.setStatus({ model: 'probe' })
   await vt.waitForRender()
   view = vt.getViewport().join('\n')
   assert.ok(view.includes('[1 task running]'), `badge must stay with a draft:\n${view}`)
-  assert.ok(!view.includes('↓ view'), `the ↓ hint must not show while a draft is being edited:\n${view}`)
+  assert.ok(!view.includes('↓ view'), `the ↓ hint must not show while the ↓ is the editor's:\n${view}`)
   app.setTasks([])
+  app.setQuickTaskItems([])
   await vt.waitForRender()
   assert.ok(!vt.getViewport().join('\n').includes('task running'), `badge survived clearing:\n${view}`)
 })
@@ -1350,8 +1377,13 @@ test('live continuable subagents arm the task browser trigger through setAgents'
   const app = new TuiApp(vt, {
     onSubmit: () => {},
     onExit: () => {},
-    onOpenTasks: () => { opened += 1; app.requestRender() },
   })
+  const realEntry = app.enterTaskQuick.bind(app)
+  app.enterTaskQuick = () => {
+    const entered = realEntry.call(app)
+    if (entered) opened += 1
+    return entered
+  }
   app.start()
 
   startedApps.add(app)
@@ -1362,6 +1394,8 @@ test('live continuable subagents arm the task browser trigger through setAgents'
   await sleep(20)
   assert.equal(opened, 0, `no agents means no browser`)
   // A live continuable child arms the trigger even with zero jobs.
+  // B4-B: the admission needs the Quick projection too.
+  app.setQuickTaskItems([{ value: 'agent:child-abc', label: 'research', status: 'running', kind: 'task', source: 'subagent' }])
   app.setAgents([{ id: 'child-abc', label: 'research', activity: 'running' }])
   await vt.waitForRender()
   vt.sendInput('\x1b[B')
@@ -1371,17 +1405,23 @@ test('live continuable subagents arm the task browser trigger through setAgents'
   vt.sendInput('\n') // ctrl+j is LF
   await sleep(20)
   assert.equal(opened, 1, `ctrl+j must not open the task browser with a live subagent`)
+  // B4-B: the press above ENTERED Quick — leave it before the disarm witness.
+  vt.sendInput('\x1b')
+  await sleep(20)
   // Clearing agents disarms; clearing jobs while agents live must not.
   app.setAgents([])
+  app.setQuickTaskItems([])
   app.setTasks([])
   await vt.waitForRender()
   vt.sendInput('\x1b[B')
   await sleep(20)
   assert.equal(opened, 1, `the trigger must disarm when no agents are active`)
   app.setTasks([{ id: 'bash-1', label: 'pnpm build', status: 'running', kind: 'bash' }])
+  app.setQuickTaskItems([{ value: 'job:bash-1', label: 'pnpm build', status: 'running', kind: 'task', source: 'job' }])
   app.setAgents([])
   await vt.waitForRender()
   app.setTasks([])
+  app.setQuickTaskItems([{ value: 'agent:child-abc', label: 'research', status: 'running', kind: 'task', source: 'subagent' }])
   app.setAgents([{ id: 'child-abc', label: 'research', activity: 'running' }])
   await vt.waitForRender()
   vt.sendInput('\x1b[B')
@@ -1955,19 +1995,34 @@ test('fullscreen transcript click: a question-frame press clears the stale backg
 
 test('the footer badge combines tasks and live agents, hint only on an empty editor', async () => {
   const { vt, app } = startApp()
+  await vt.waitForRender()
+  // B4-B: the hint follows the admission facts — badge + projection together.
+  app.setQuickTaskItems([{ value: 'agent:child-abc', label: 'research', status: 'running', kind: 'task', source: 'subagent' }])
   app.setAgents([{ id: 'child-abc', label: 'research', activity: 'running' }])
+  await vt.waitForRender()
   await vt.waitForRender()
   let view = vt.getViewport().join('\n')
   assert.ok(view.includes('[1 agent · ↓ view]'), `agent-only badge missing:\n${view}`)
+  app.setQuickTaskItems([
+    { value: 'agent:child-abc', label: 'research', status: 'running', kind: 'task', source: 'subagent' },
+    { value: 'job:bash-1', label: 'pnpm build', status: 'running', kind: 'task', source: 'job' },
+  ])
   app.setTasks([{ id: 'bash-1', label: 'pnpm build', status: 'running', kind: 'bash' }])
+  await vt.waitForRender()
   await vt.waitForRender()
   view = vt.getViewport().join('\n')
   assert.ok(view.includes('[1 task running · 1 agent · ↓ view]'), `combined badge missing:\n${view}`)
-  app.setDraft('typed text')
+  app.setDraft('typed text\nsecond')
+  await vt.waitForRender()
+  // Park the cursor on a NON-last visual line: the ↓ admission drops (the
+  // footer hint is a compose-time projection — settle with a real commit).
+  vt.sendInput('\x1b[A')
+  await vt.waitForRender()
+  app.setStatus({ model: 'probe' })
   await vt.waitForRender()
   view = vt.getViewport().join('\n')
   assert.ok(view.includes('[1 task running · 1 agent]'), `badge must stay with a draft:\n${view}`)
-  assert.ok(!view.includes('↓ view'), `the ↓ hint must not show while a draft is being edited:\n${view}`)
+  assert.ok(!view.includes('↓ view'), `the ↓ hint must not show while the ↓ is the editor's:\n${view}`)
   app.setTasks([])
   app.setAgents([])
   await vt.waitForRender()
@@ -2398,7 +2453,7 @@ test('a Job View opened from Quick returns to the exact parent browser state on 
       return 'keep-open'
     },
     () => {},
-    { mode: 'quick', header: 'Tasks', enableSearch: true, maxVisible: 8 },
+    { mode: 'full', header: 'Tasks', enableSearch: true, maxVisible: 8 },
   )
   await vt.waitForRender()
   vt.sendInput('\x1b[B') // move to the second row
@@ -2428,17 +2483,17 @@ test('a Job View opened from Quick returns to the exact parent browser state on 
   vt.sendInput('\x1b') // close only the Job View
   await vt.waitForRender()
   assert.ok(!view().includes('job detail'), `Esc must close the Job View:\n${view()}`)
-  assert.ok(view().includes('Open Task Center'), `Quick must be restored:\n${view()}`)
+  assert.ok(view().includes('Tasks [TRACKED]'), `the parent browser must be restored:\n${view()}`)
   assert.ok(view().includes('bash · lint (updated)'), `the hidden parent must have absorbed the live refresh:\n${view()}`)
-  assert.equal(app.overlayGraphState().handles, 1, 'only Quick remains tracked')
+  assert.equal(app.overlayGraphState().handles, 1, 'only the browser remains tracked')
   assert.equal(handle.getViewState!().selectedId, 'job:2', 'the parent selection must be preserved')
   assert.equal(app.focusSeatForTest(), 'overlay')
   assert.notEqual(app.focusedComponentForTest(), app.seatEditorForTest().component,
-    'the restored Quick holds physical focus')
+    'the restored browser holds physical focus')
 
   vt.sendInput('\x1b')
   await vt.waitForRender()
-  assert.ok(!view().includes('Open Task Center'), `the second Esc must close Quick:\n${view()}`)
+  assert.ok(!view().includes('Tasks [TRACKED]'), `the second Esc must close the browser:\n${view()}`)
   assert.equal(app.focusSeatForTest(), 'editor')
   assert.equal(app.focusedComponentForTest(), app.seatEditorForTest().component)
   vt.sendInput('Z')
@@ -3077,7 +3132,7 @@ test('fixed-width overlays fill the declared width: no border-external mask regi
       [{ value: 'job:1', label: 'bash · build', status: 'running', startedAt: Date.now(), group: 'jobs' }],
       () => 'close',
       () => {},
-      { mode: 'quick', header: 'tasks' },
+      { mode: 'full', header: 'tasks', width: 72, maxHeight: 16 },
     )
     await vt.waitForRender()
     const strip = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, '').replace(/\s+$/, '')
@@ -3095,7 +3150,9 @@ test('fixed-width overlays fill the declared width: no border-external mask regi
     // overlay still occupied the declared 72 — the compositor padded the
     // gap, and the border's right edge sat far short of the overlay edge
     // (the black mask). The right-border position is the detector.
-    const declared = Math.min(72, columns)
+    // B4-B: full mode keeps the 1-cell margin each side, so the resolved
+    // width is min(declared, columns - 2).
+    const declared = Math.min(72, columns - 2)
     const left = box[0]!.indexOf('╭')
     assert.ok(left >= 0, `top border missing:\n${box.join('\n')}`)
     for (const line of box) {
@@ -3119,7 +3176,7 @@ test('a fixed-width overlay keeps its frame geometry across fullscreen, resize a
       [{ value: 'job:1', label: 'bash · build', status: 'running', startedAt: Date.now(), group: 'jobs' }],
       () => 'close',
       () => {},
-      { mode: 'quick', header: 'tasks' },
+      { mode: 'full', header: 'tasks', width: 72, maxHeight: 16 },
     )
   }
   const assertRightEdge = (label: string): void => {
@@ -4080,22 +4137,28 @@ test('Quick Tasks overlay consumes non-whitelisted printable input (no editor le
     ],
     () => 'close',
     () => {},
-    { mode: 'quick', header: 'Tasks', enableSearch: true, maxVisible: 8 },
+    { mode: 'full', header: 'Tasks', enableSearch: true, maxVisible: 8 },
   )
   await vt.waitForRender()
   const strip = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, '').replace(/\s+$/, '')
-  for (const key of ['s', '/', 't', 'a', 'r', 'n', 'x', 'S', 'N', 'T']) vt.sendInput(key)
+  vt.sendInput('s')
+  await vt.waitForRender()
+  // Full's stop chord: s arms, a navigation key cancels (the same contract
+  // the Quick whitelist used to prove by ignoring the key entirely).
+  vt.sendInput('\x1b[B')
+  await vt.waitForRender()
+  for (const key of ['t', 'x', 'N', 'T']) vt.sendInput(key)
   await vt.waitForRender()
   let view = vt.getViewport().map(strip).join('\n')
-  assert.ok(view.includes('Open Task Center'), `Quick must stay open:\n${view}`)
+  assert.ok(view.includes('Tasks [TRACKED]'), `the browser must stay open:\n${view}`)
   assert.ok(!view.includes('confirm stop'), `no hidden stop confirmation:\n${view}`)
   assert.ok(!view.includes('type to filter'), `no hidden search mode:\n${view}`)
   assert.equal(app.seatTextForTest(), 'keep-this-draft', 'printables must not reach the editor')
-  // A single Esc closes Quick; the editor regains input ownership.
+  // A single Esc closes the browser; the editor regains input ownership.
   vt.sendInput('\x1b')
   await vt.waitForRender()
   view = vt.getViewport().map(strip).join('\n')
-  assert.ok(!view.includes('Open Task Center'), `one Esc must close Quick:\n${view}`)
+  assert.ok(!view.includes('Tasks [TRACKED]'), `one Esc must close the browser:\n${view}`)
   vt.sendInput('Z')
   await vt.waitForRender()
   assert.equal(app.seatTextForTest(), 'keep-this-draftZ', 'the editor owns input again after the single Esc')
@@ -4110,45 +4173,50 @@ test('Quick Tasks: S then a single Esc returns to the editor (original regressio
     [{ value: 'job:1', label: 'bash · build', status: 'running', active: true, source: 'job', type: 'bash', canStop: true, startedAt: Date.now(), group: 'jobs' }],
     () => 'close',
     () => {},
-    { mode: 'quick', header: 'Tasks', enableSearch: true, maxVisible: 8 },
+    { mode: 'full', header: 'Tasks', enableSearch: true, maxVisible: 8 },
   )
   await vt.waitForRender()
   const strip = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, '').replace(/\s+$/, '')
+  // B4-B: this surface is the FULL browser now — S arms the destructive
+  // chord (the Full contract; the retired Quick ignored it), Esc cancels the
+  // chord, and the SECOND Esc closes the browser back to the editor.
   vt.sendInput('S')
   await vt.waitForRender()
-  assert.ok(!vt.getViewport().map(strip).join('\n').includes('confirm stop'),
-    'S must not arm a stop confirmation in Quick')
+  assert.ok(vt.getViewport().map(strip).join('\n').includes('confirm stop'),
+    'S arms the stop chord (never confirms without Y)')
   vt.sendInput('\x1b')
   await vt.waitForRender()
-  assert.ok(!vt.getViewport().map(strip).join('\n').includes('Open Task Center'),
-    'one Esc must close Quick')
+  assert.ok(!vt.getViewport().map(strip).join('\n').includes('confirm stop'),
+    'Esc cancels the armed chord')
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+  assert.ok(!vt.getViewport().map(strip).join('\n').includes('Tasks [TRACKED]'),
+    'the second Esc closes the browser')
   vt.sendInput('Z')
   await vt.waitForRender()
   assert.equal(app.seatTextForTest(), 'draftZ', 'the editor owns input again after Esc')
   app.stop()
 })
 
-test('Quick Tasks overlay drops a query restored from the full Task Center (Full→Quick regression)', async () => {
-  // index.ts reopens Quick with the full view's current state after
-  // Full → Esc → Esc, which can carry the query typed in Full. Quick owns
-  // no search, so the overlay must drop it instead of stranding the user in
-  // a filtered view with no pseudo-row (and therefore no way back to Full).
+test('a restored query stays the Full browser\'s own search state (B4-B: no modal Quick to drop into)', async () => {
+  // B4-B retired the modal Quick, so the Full→Quick query-drop regression is
+  // gone with it: the Full browser OWNS its query — a restored one filters
+  // its rows and stays visible in the search input.
   const { vt, app } = startApp()
   const strip = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, '').replace(/\s+$/, '')
   app.openTaskBrowser(
     [{ value: 'job:1', label: 'bash · build', status: 'running', active: true, source: 'job', type: 'bash', startedAt: Date.now(), group: 'jobs' }],
     () => 'close',
     () => {},
-    { mode: 'quick', header: 'Tasks', enableSearch: true, maxVisible: 8, initialQuery: 'no-match', initialSearchMode: false },
+    { mode: 'full', header: 'Tasks', enableSearch: true, maxVisible: 8, initialQuery: 'no-match', initialSearchMode: false },
   )
   await vt.waitForRender()
   const view = vt.getViewport().map(strip).join('\n')
-  assert.ok(view.includes('Open Task Center'), `the pseudo-row must survive a restored query:\n${view}`)
-  assert.ok(!view.includes('no-match'), `the restored query must be dropped in Quick:\n${view}`)
+  assert.ok(view.includes('Tasks [TRACKED]'), `the browser must open:\n${view}`)
   vt.sendInput('\x1b')
   await vt.waitForRender()
-  assert.ok(!vt.getViewport().map(strip).join('\n').includes('Open Task Center'),
-    'one Esc must still close Quick')
+  assert.ok(!vt.getViewport().map(strip).join('\n').includes('Tasks [TRACKED]'),
+    'one Esc must still close the browser')
   app.stop()
 })
 
@@ -5169,26 +5237,37 @@ test('question: Esc between press and release cannot re-enter the free-text edit
   app.stop()
 })
 
-test('a nonCapturing overlay does not suppress the Host shortcut ladder (↓ Quick Tasks)', async () => {
+test('a nonCapturing overlay does not suppress the Host shortcut ladder (↓ Task Quick)', async () => {
   const vt = new VirtualTerminal(80, 24)
   let opened = 0
   const app = new TuiApp(vt, {
     onSubmit: () => {},
     onExit: () => {},
-    onOpenTasks: () => { opened += 1 },
   })
+  const realEntry = app.enterTaskQuick.bind(app)
+  app.enterTaskQuick = () => {
+    const entered = realEntry.call(app)
+    if (entered) opened += 1
+    return entered
+  }
   app.start()
   startedApps.add(app)
   await vt.waitForRender()
+  // B4-B: the admission needs the Quick projection alongside the badge.
+  app.setQuickTaskItems([{ value: 'job:job-1', label: 'build', status: 'running', kind: 'task', source: 'job' }])
   app.setTasks([{ id: 'job:1', label: 'build', status: 'running' }])
   await vt.waitForRender()
-  // A nonCapturing notice owns no keyboard: the empty-editor ↓ affordance
-  // (focusedSeat 'editor' + tasksActive) must still reach the resolver.
+  // A nonCapturing notice owns no keyboard: the ↓ admission (focusedSeat
+  // 'editor' + tasksActive + the Quick projection) must still reach the
+  // resolver.
   app.showExtensionOverlay({ kind: 'text', spans: [{ text: 'HUD notice' }] }, { nonCapturing: true })
   await vt.waitForRender()
   vt.sendInput('\x1b[B') // down
   await vt.waitForRender()
-  assert.equal(opened, 1, '↓ must open Quick Tasks under a nonCapturing overlay')
+  assert.equal(opened, 1, '↓ must enter Task Quick under a nonCapturing overlay')
+  // B4-B: leave Quick before the capturing witness.
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
   // A capturing overlay HOLDS the keyboard: the same ↓ belongs to it, so the
   // conditional affordance must be refused while it is focused.
   const capturing = app.showExtensionOverlay({ kind: 'text', spans: [{ text: 'modal notice' }] })

@@ -254,6 +254,10 @@ test('B4A-01 the Job roster paints below the editor with NO Task Browser open', 
   })
   await flush()
   await h.vt.waitForRender()
+  await h.vt.waitForRender()
+  // B4-B: hidden by default; the production entry opens the ACTIVE frame.
+  assert.equal(h.app.enterTaskQuick(), true, 'the production entry must admit a real projection')
+  await h.vt.waitForRender()
 
   const lines = rawView(h.vt)
   const band = h.band()
@@ -271,8 +275,9 @@ test('B4A-01 the Job roster paints below the editor with NO Task Browser open', 
   assert.match(painted[0]!, /bash · build\s+‣ Running$/)
   assert.match(painted[1]!, /pwsh · test\s+‣ Running$/)
   assert.match(painted[2]!, /subagent job · review · one-shot\s+‣ Running$/)
-  // No modal chrome, no keyboard hint, no focus device: the window is passive.
-  assert.equal(band.items.some(line => line.includes('> ') || line.includes('Select')), false)
+  // B4-B: the ACTIVE frame's selection marker is the ONE focus device (D6);
+  // the modal Task Browser chrome stays retired.
+  assert.equal(band.items.some(line => line.includes('Select')), false)
   assert.ok(!view(h.vt).includes('↑↓ select'), 'the modal Task Browser chrome must not be painted')
   // Footer attention for the failed job is untouched by the passive paint.
   h.app.stop()
@@ -285,11 +290,15 @@ test('B4A-01b the Jobs-only fallback (no subagent catalog) also paints below the
   })
   await flush()
   await h.vt.waitForRender()
+  await h.vt.waitForRender()
+  // B4-B: hidden by default; the production entry opens the ACTIVE frame.
+  assert.equal(h.app.enterTaskQuick(), true, 'the production entry must admit a real projection')
+  await h.vt.waitForRender()
   const band = h.band()
   assert.ok(band.identity >= 0, `the Jobs-only feed must paint:\n${view(h.vt)}`)
   // Live work keeps the Active scope: the terminal failure is footer attention,
   // exactly as the modal Quick projects it.
-  assert.deepEqual(band.items.map(line => line.trimEnd().split(/\s+‣\s+/)[0]), ['bash · build'])
+  assert.deepEqual(band.items.map(line => line.trimEnd().replace(/^>\s*/, '').split(/\s+‣\s+/)[0]), ['bash · build'])
   assert.match(strip(rawView(h.vt)[band.identity]!), /showing 1-1\/1$/)
 })
 
@@ -297,9 +306,14 @@ test('B4A-01c a transient roster read failure keeps the RETAINED rows', async ()
   const h = startQuick({ taskRead: false, roster: [job('j1', 'build', 'running')] })
   await flush()
   await h.vt.waitForRender()
+  await h.vt.waitForRender()
+  // B4-B: hidden by default; the production entry opens the ACTIVE frame.
+  assert.equal(h.app.enterTaskQuick(), true, 'the production entry must admit a real projection')
+  await h.vt.waitForRender()
   assert.equal(h.band().items.length, 1)
   h.roster.failure = new Error('registry read failed')
   h.tasks.refreshTasks()
+  await h.vt.waitForRender()
   await h.vt.waitForRender()
   assert.equal(h.band().items.length, 1, `a failed read is not an authoritative empty:\n${view(h.vt)}`)
   assert.match(strip(h.band().items[0]!), /bash · build\s+‣ Running$/)
@@ -314,6 +328,10 @@ test('B4A-01d the coordinator path (semantic Task read) feeds the SAME window', 
     } as unknown as TaskSubagentEntry],
   })
   await flush()
+  await h.vt.waitForRender()
+  await h.vt.waitForRender()
+  // B4-B: hidden by default; the production entry opens the ACTIVE frame.
+  assert.equal(h.app.enterTaskQuick(), true, 'the production entry must admit a real projection')
   await h.vt.waitForRender()
   const band = h.band()
   assert.ok(band.identity >= 0, `the coordinator commit must reach the accessory:\n${view(h.vt)}`)
@@ -337,6 +355,10 @@ test('B4A-01e a Workflow-scoped Task Browser never narrows the resident window',
   })
   await flush()
   await h.vt.waitForRender()
+  await h.vt.waitForRender()
+  // B4-B: hidden by default; the production entry opens the ACTIVE frame.
+  assert.equal(h.app.enterTaskQuick(), true, 'the production entry must admit a real projection')
+  await h.vt.waitForRender()
   assert.equal(itemRows(h.vt).length, 3, `the whole session is resident first:\n${view(h.vt)}`)
   // A Workflow phase viewer opens the modal with a DATASET scope of one child id.
   h.tasks.handleWorkflowAction({
@@ -344,9 +366,17 @@ test('B4A-01e a Workflow-scoped Task Browser never narrows the resident window',
   })
   await h.vt.waitForRender()
   await flush(2)
+  await h.vt.waitForRender()
   assert.ok(view(h.vt).includes('Workflow · wf · Phase 1 · 1 agent'), `the modal is scoped:\n${view(h.vt)}`)
-  // The resident window is NOT a dataset view: the Job and the unrelated active
-  // subagent stay visible while the scoped modal is open.
+  // B4-B: the modal open displaced the ACTIVE accessory (owner displacement,
+  // plan §5). The resident-window contract is the RUNTIME's projection: close
+  // the modal and re-enter — the window must still show the whole session
+  // (never the Workflow dataset scope).
+  h.vt.sendInput('\x1b')
+  await h.vt.waitForRender()
+  await flush(2)
+  assert.equal(h.app.enterTaskQuick(), true, 'the entry must admit the resident projection')
+  await h.vt.waitForRender()
   const resident = itemRows(h.vt)
   assert.equal(resident.length, 3, `the resident window keeps the session-wide rows:\n${view(h.vt)}`)
   assert.ok(resident.some(line => /bash · build/.test(line)), 'the Job stays resident under a subagent scope')
@@ -369,6 +399,10 @@ test('B4A-02 the window paints the PROJECTED activity in tree order, never a run
   })
   await flush()
   await h.vt.waitForRender()
+  await h.vt.waitForRender()
+  // B4-B: hidden by default; the production entry opens the ACTIVE frame.
+  assert.equal(h.app.enterTaskQuick(), true, 'the production entry must admit a real projection')
+  await h.vt.waitForRender()
   const items = itemRows(h.vt)
   assert.equal(items.length, 2, `the running child and its context ancestor paint in that order:\n${view(h.vt)}`)
   // The inactive ancestor keeps its OWN real activity word — the tree context
@@ -381,8 +415,13 @@ test('B4A-02b a session reset clears the window with the rest of the Task Center
   const h = startQuick({ taskRead: false, roster: [job('j1', 'build', 'running')] })
   await flush()
   await h.vt.waitForRender()
+  await h.vt.waitForRender()
+  // B4-B: hidden by default; the production entry opens the ACTIVE frame.
+  assert.equal(h.app.enterTaskQuick(), true, 'the production entry must admit a real projection')
+  await h.vt.waitForRender()
   assert.equal(itemRows(h.vt).length, 1)
   h.tasks.resetTasks()
+  await h.vt.waitForRender()
   await h.vt.waitForRender()
   assert.deepEqual(itemRows(h.vt), [], `the new session must not inherit the old rows:\n${view(h.vt)}`)
   assert.equal(rowOf(h.vt, 'Task Quick'), -1, 'no orphan identity row after the reset')
@@ -418,7 +457,11 @@ test('B4A-05 the 3/1/0 ladder on the frozen matrix, editor/footer/transcript pre
     })
     await flush()
     await h.vt.waitForRender()
-    const label = `${cols}x${rows}`
+      await h.vt.waitForRender()
+    // B4-B: hidden by default; the production entry opens the ACTIVE frame.
+    assert.equal(h.app.enterTaskQuick(), true, 'the production entry must admit a real projection')
+    await h.vt.waitForRender()
+      const label = `${cols}x${rows}`
     const lines = rawView(h.vt)
     const items = itemRows(h.vt)
     const identity = rowOf(h.vt, 'Task Quick')
@@ -472,9 +515,12 @@ test('B4A-05c the fullscreen root keeps a real transcript viewport beside the wi
       job('j4', 'deploy', 'running'),
     ] })
     await flush()
-    h.app.setFullscreen(true)
+      h.app.setFullscreen(true)
     await h.vt.waitForRender()
-    const label = `${cols}x${rows}`
+    // B4-B: hidden by default; the production entry opens the ACTIVE frame.
+    assert.equal(h.app.enterTaskQuick(), true, 'the production entry must admit a real projection')
+    await h.vt.waitForRender()
+      const label = `${cols}x${rows}`
     const items = itemRows(h.vt)
     const scroll = h.app.fullscreenScrollForTest()
     assert.ok(scroll, `${label}: the fullscreen transcript pane must exist`)
@@ -500,6 +546,11 @@ test('B4A-05d an extreme frame degrades to ZERO rows instead of eating the trans
   ] })
   await flush()
   await h.vt.waitForRender()
+  await h.vt.waitForRender()
+  // B4-B: the frame has no room for a task row, so the production entry
+  // DECLINES (the zero-row contract) and the accessory never paints.
+  assert.equal(h.app.enterTaskQuick(), false, 'a 0-grant frame must decline the entry')
+  await h.vt.waitForRender()
   assert.deepEqual(itemRows(h.vt), [], `a frame with no room paints nothing:\n${view(h.vt)}`)
   assert.equal(rowOf(h.vt, 'Task Quick'), -1, 'no orphan identity row without a task row')
   assert.ok(rowOf(h.vt, '❯') >= 0, 'the editor seat still owns its rows')
@@ -513,6 +564,11 @@ test('B4A-05b a nonempty multi-line draft never invades the transcript floor', a
   await flush()
   h.app.setEditorText('first\nsecond\nthird')
   await h.vt.waitForRender()
+  await h.vt.waitForRender()
+  // B4-B: the ACTIVE frame under test — the taller seat has already settled,
+  // so the entry admits against the REAL grant.
+  assert.equal(h.app.enterTaskQuick(), true, 'the production entry must admit a real projection')
+  await h.vt.waitForRender()
   const items = itemRows(h.vt)
   const editor = h.editor()
   assert.ok(editor.bottom - editor.top >= 2, `the multi-line editor owns its rows:\n${view(h.vt)}`)
@@ -520,7 +576,7 @@ test('B4A-05b a nonempty multi-line draft never invades the transcript floor', a
   // transcript floor can only afford ONE content row — spent on the task, never
   // on the identity row: the compact position rides its tail.
   assert.equal(items.length, 1, `exactly one task row survives:\n${view(h.vt)}`)
-  assert.match(items[0]!, /^bash · build\s+‣ Running\s+1-1\/3$/)
+  assert.match(items[0]!, /^> bash · build\s+‣ Running\s+1-1\/3$/)
   assert.ok(rowOf(h.vt, items[0]!) > editor.bottom, 'the accessory stays BELOW the editor seat')
   assert.ok(editor.top >= 1, `the transcript floor survives a taller draft:\n${view(h.vt)}`)
 })
@@ -536,15 +592,21 @@ test('B4A-02c a superseded session late catalog result never paints into the new
   })
   await flush()
   await h.vt.waitForRender()
+  await h.vt.waitForRender()
+  // B4-B: hidden by default; the production entry opens the ACTIVE frame.
+  assert.equal(h.app.enterTaskQuick(), true, 'the production entry must admit a real projection')
+  await h.vt.waitForRender()
   // The roster commit alone already paints; the catalog read is still in flight.
   assert.equal(itemRows(h.vt).length, 1, `the roster row is resident:\n${view(h.vt)}`)
   // The session switches: the generation bump clears the Task Center state.
   h.tasks.resetTasks()
   await h.vt.waitForRender()
+  await h.vt.waitForRender()
   assert.deepEqual(itemRows(h.vt), [], `the new session starts empty:\n${view(h.vt)}`)
   // The OLD read now settles with its old-session snapshot: it must not paint.
   h.releaseCatalog()
   await flush(4)
+  await h.vt.waitForRender()
   await h.vt.waitForRender()
   assert.deepEqual(itemRows(h.vt), [], `a stale catalog result must never reach the new session:\n${view(h.vt)}`)
 })
@@ -633,6 +695,9 @@ test('B4A-03b the production Question controller subscription reaches the painte
   controller.reconcile()
   await flush()
   await vt.waitForRender()
+  // B4-B: the ACTIVE frame under test — the parked row paints on entry.
+  assert.equal(app.enterTaskQuick(), true, 'the production entry must admit a real projection')
+  await vt.waitForRender()
   assert.match(itemRows(vt)[0] ?? '', /Use staging or production\?\s+‣ Awaiting answer$/,
     `the controller's parked row must paint:\n${view(vt)}`)
   assert.ok(view(vt).includes('? 1 awaiting'), `the footer count comes from the same authority:\n${view(vt)}`)
@@ -659,6 +724,9 @@ test('B4A-03 a PARKED Question is its own typed row and a VISIBLE one never dupl
   h.tasks.refreshAttentionRows()
   h.app.setQuestionAttention(1)
   await h.vt.waitForRender()
+  // B4-B: hidden by default; the production entry opens the ACTIVE frame.
+  assert.equal(h.app.enterTaskQuick(), true, 'the production entry must admit a real projection')
+  await h.vt.waitForRender()
   const parked = h.band()
   assert.ok(parked.identity >= 0, `parked attention must paint:\n${view(h.vt)}`)
   assert.equal(parked.items.length, 1)
@@ -670,6 +738,7 @@ test('B4A-03 a PARKED Question is its own typed row and a VISIBLE one never dupl
   h.attention[0] = { ...h.attention[0]!, presentation: 'visible' }
   h.tasks.refreshAttentionRows()
   h.app.setQuestionAttention(0)
+  await h.vt.waitForRender()
   await h.vt.waitForRender()
   assert.equal(h.band().identity, -1, `a visible Question never duplicates into Quick:\n${view(h.vt)}`)
 })
@@ -686,27 +755,37 @@ test('B4A-06 the alt screen delivers a real SGR wheel to the painted window only
   h.app.setEditorText('a draft line')
   h.app.setFullscreen(true)
   await h.vt.waitForRender()
+  // B4-B: hidden by default; the production entry opens the ACTIVE frame.
+  assert.equal(h.app.enterTaskQuick(), true, 'the production entry must admit a real projection')
+  await h.vt.waitForRender()
   const before = h.band()
   assert.match(strip(rawView(h.vt)[before.identity]!), /showing 1-3\/5$/)
   const firstItemRow = before.identity + 1
   // ONE native SGR wheel notch DOWN over the first painted task row.
   h.vt.sendInput(`\x1b[<65;5;${firstItemRow + 1}M`)
   await h.vt.waitForRender()
+  await h.vt.waitForRender()
   await flush(2)
+  await h.vt.waitForRender()
   const after = h.band()
   assert.match(strip(rawView(h.vt)[after.identity]!), /showing 2-4\/5$/, `the wheel must move the window:\n${view(h.vt)}`)
   assert.match(strip(after.items[0]!), /bash · test\s+‣ Running$/)
-  // The editor draft, its focus and the transcript viewport are untouched.
+  // The editor draft and the transcript viewport are untouched by the wheel.
   assert.equal(h.app.getDraft(), 'a draft line', 'the wheel must never touch the draft')
+  // B4-B: the accessory is ACTIVE, so a printable key is a consumed no-op IN
+  // Quick — the background editor never receives it (plan §1.3).
   h.vt.sendInput('x')
   await h.vt.waitForRender()
-  assert.equal(h.app.getDraft(), 'a draft linex', 'the editor still owns the keyboard after the wheel')
-  // A wheel ABOVE the accessory belongs to the transcript, never to Quick.
-  const scrolled = strip(rawView(h.vt)[before.identity]!)
-  h.vt.sendInput(`\x1b[<65;5;2M`)
+  assert.equal(h.app.getDraft(), 'a draft line', 'a printable key while ACTIVE never reaches the editor')
+  // Exit (Esc) and the editor owns the keyboard again.
+  h.vt.sendInput('\x1b')
   await h.vt.waitForRender()
-  await flush(2)
-  assert.equal(strip(rawView(h.vt)[h.band().identity]!), scrolled, 'a transcript wheel must not move the Quick window')
+  h.vt.sendInput('x')
+  await h.vt.waitForRender()
+  assert.equal(h.app.getDraft(), 'a draft linex', 'the editor still owns the keyboard after Quick leaves')
+  // B4-B: the accessory left (Esc), so nothing owns a band any more — the
+  // final wheel lands on the transcript with no Quick window to move.
+  assert.equal(h.band().identity, -1, 'the accessory is hidden after its Esc')
 })
 
 test('B4A-06c a wheel on the window never scrolls the transcript behind it, boundary included', async () => {
@@ -721,6 +800,9 @@ test('B4A-06c a wheel on the window never scrolls the transcript behind it, boun
   })))
   h.app.setFullscreen(true)
   await h.vt.waitForRender()
+  // B4-B: hidden by default; the production entry opens the ACTIVE frame.
+  assert.equal(h.app.enterTaskQuick(), true, 'the production entry must admit a real projection')
+  await h.vt.waitForRender()
   const scroll = h.app.fullscreenScrollForTest()
   assert.ok(scroll, 'the fullscreen transcript pane must exist')
   assert.ok(scroll.maxScrollTop > 0, 'the transcript must be scrollable for this witness')
@@ -731,6 +813,7 @@ test('B4A-06c a wheel on the window never scrolls the transcript behind it, boun
   h.vt.sendInput(`\x1b[<64;5;${band.identity + 2}M`)
   await h.vt.waitForRender()
   await flush(2)
+  await h.vt.waitForRender()
   const afterUp = h.app.fullscreenScrollForTest()!
   assert.equal(afterUp.scrollTop, before.scrollTop, `the transcript must not move under a boundary wheel:\n${view(h.vt)}`)
   assert.equal(afterUp.isFollowingEnd, before.following, 'the follow state must not flip')
@@ -743,7 +826,11 @@ test('B4A-06d a resize that has not been repainted refuses the wheel, then resol
     job('j4', 'deploy', 'running'),
   ] })
   await flush()
+  // B4-B: hidden by default; the production entry opens the ACTIVE frame.
+  assert.equal(h.app.enterTaskQuick(), true, 'the production entry must admit a real projection')
+  await h.vt.waitForRender()
   h.app.setFullscreen(true)
+  await h.vt.waitForRender()
   await h.vt.waitForRender()
   const band = h.band()
   assert.match(strip(rawView(h.vt)[band.identity]!), /showing 1-3\/4$/)
@@ -755,6 +842,7 @@ test('B4A-06d a resize that has not been repainted refuses the wheel, then resol
   h.vt.sendInput(`\x1b[<65;5;${itemRow + 1}M`)
   await h.vt.waitForRender()
   await flush(2)
+  await h.vt.waitForRender()
   // The repainted frame proves the refusal: the window is still at its first row
   // (an accepted stale wheel would have moved it to `2-2/4`).
   const shrunk = itemRows(h.vt)
@@ -777,6 +865,9 @@ test('B4A-06e a stale width resize still owns the in-band wheel: the transcript 
     kind: 'assistant' as const, turn: index, text: `history row ${index}`,
   })))
   h.app.setFullscreen(true)
+  await h.vt.waitForRender()
+  // B4-B: the ACTIVE frame under test — open through the production entry.
+  assert.equal(h.app.enterTaskQuick(), true, 'the production entry must admit a real projection')
   await h.vt.waitForRender()
   const before = h.app.fullscreenScrollForTest()
   assert.ok(before && before.maxScrollTop > 0, 'the transcript must be scrollable for this witness')
@@ -811,6 +902,9 @@ test('B4A-06f an emptied roster owns its band until the blank frame is painted',
   })))
   h.app.setFullscreen(true)
   await h.vt.waitForRender()
+  // B4-B: the ACTIVE frame under test — open through the production entry.
+  assert.equal(h.app.enterTaskQuick(), true, 'the production entry must admit a real projection')
+  await h.vt.waitForRender()
   const before = h.app.fullscreenScrollForTest()
   assert.ok(before && before.maxScrollTop > 0, 'the transcript must be scrollable for this witness')
   assert.equal(before.isFollowingEnd, true)
@@ -844,6 +938,9 @@ test('B4A-06b the ordinary main screen has NO application mouse: the wheel moves
   ] })
   await flush()
   await h.vt.waitForRender()
+  // B4-B: the ACTIVE frame under test — open through the production entry.
+  assert.equal(h.app.enterTaskQuick(), true, 'the production entry must admit a real projection')
+  await h.vt.waitForRender()
   const before = h.band()
   assert.ok(before.identity >= 0)
   assert.match(strip(rawView(h.vt)[before.identity]!), /showing 1-3\/4$/)
@@ -873,8 +970,11 @@ test('B4A-04 painting, resizing and wheeling the passive window acknowledge NOTH
     ] })
     await flush()
     await h.vt.waitForRender()
+    // B4-B: the ACTIVE frame under test — open through the production entry.
+    assert.equal(h.app.enterTaskQuick(), true, 'the production entry must admit a real projection')
+    await h.vt.waitForRender()
     // Live work keeps the failure OUT of the Active scope: footer attention only.
-    assert.deepEqual(itemRows(h.vt).map(line => line.split(/\s+‣\s+/)[0]), ['bash · build'])
+    assert.deepEqual(itemRows(h.vt).map(line => line.replace(/^>\s*/, '').split(/\s+‣\s+/)[0]), ['bash · build'])
     // Settle the work: the unacknowledged failure surfaces in the window…
     h.roster.rows = [job('j2', 'deploy', 'failed')]
     h.tasks.refreshAgentRuntimeOnly()
@@ -895,7 +995,7 @@ test('B4A-04 painting, resizing and wheeling the passive window acknowledge NOTH
     // failure row — so the probe is not vacuous.
     h.app.setFullscreen(false)
     await h.vt.waitForRender()
-    h.tasks.openTasksBrowser('quick')
+    h.tasks.openTasksBrowser('full')
     await h.vt.waitForRender()
     await flush(2)
     assert.ok(calls >= 1, `opening the modal browser on the failure row must acknowledge:\n${view(h.vt)}`)
@@ -909,6 +1009,9 @@ test('B4A-08 the painted window uses the frozen role tokens, live across a theme
     job('j1', 'build', 'running'), job('j2', 'deploy', 'failed'),
   ] })
   await flush()
+  await h.vt.waitForRender()
+  // B4-B: the ACTIVE frame under test — open through the production entry.
+  assert.equal(h.app.enterTaskQuick(), true, 'the production entry must admit a real projection')
   await h.vt.waitForRender()
   const ink = (needle: string, glyph: string): number | undefined => {
     const row = rowOf(h.vt, needle)
@@ -952,6 +1055,9 @@ test('B4A-05e the resident window coexists with a live PUBLIC below widget', asy
   ] })
   await flush()
   await h.vt.waitForRender()
+  // B4-B: the ACTIVE frame under test — open through the production entry.
+  assert.equal(h.app.enterTaskQuick(), true, 'the production entry must admit a real projection')
+  await h.vt.waitForRender()
   const lines = rawView(h.vt)
   const editor = h.editor()
   const widgetRow = rowOf(h.vt, 'BELOW-WIDGET')
@@ -971,6 +1077,9 @@ test('B4A-05f the FULLSCREEN root paints the public below widget beside the wind
     job('j1', 'build', 'running'), job('j2', 'test', 'running'), job('j3', 'lint', 'running'),
   ] })
   await flush()
+  // B4-B: the ACTIVE frame under test — open through the production entry.
+  assert.equal(h.app.enterTaskQuick(), true, 'the production entry must admit a real projection')
+  await h.vt.waitForRender()
   h.app.setFullscreen(true)
   await h.vt.waitForRender()
   const lines = rawView(h.vt)
@@ -994,9 +1103,12 @@ test('B4A-04b after the modal acknowledges, the window still paints the REAL fai
   const h = startQuick({ cols: 120, rows: 40, roster: [job('j2', 'deploy', 'failed')] })
   await flush()
   await h.vt.waitForRender()
+  // B4-B: the ACTIVE frame under test — open through the production entry.
+  assert.equal(h.app.enterTaskQuick(), true, 'the production entry must admit a real projection')
+  await h.vt.waitForRender()
   assert.ok(view(h.vt).includes('! 1 failed'), `the unacknowledged failure is footer attention:\n${view(h.vt)}`)
   assert.match(itemRows(h.vt)[0]!, /bash · deploy\s+‣ Failed$/)
-  h.tasks.openTasksBrowser('quick')
+  h.tasks.openTasksBrowser('full')
   await h.vt.waitForRender()
   await flush(2)
   h.vt.sendInput('\x1b')
@@ -1004,9 +1116,12 @@ test('B4A-04b after the modal acknowledges, the window still paints the REAL fai
   await flush(2)
   // The acknowledgement clears the FOOTER attention…
   assert.ok(!view(h.vt).includes('! 1 failed'), `the acknowledged failure leaves the badge:\n${view(h.vt)}`)
-  // …while the resident window keeps reporting the task's own real state: being
-  // acknowledged is not being unfailed.
-  assert.match(itemRows(h.vt)[0]!, /bash · deploy\s+‣ Failed$/)
+  // B4-B: with the failure acknowledged and NO live work left, `tasksActive`
+  // (the plan's admission authority) drops — a session with nothing active
+  // has no Quick to enter. The acknowledged row is NOT unfailed; it stays
+  // reachable in the Full Task Center (the modal above already showed it).
+  assert.equal(h.app.enterTaskQuick(), false, 'an inactive session has no Quick (tasksActive dropped)')
+  await h.vt.waitForRender()
 })
 
 // ── The band is a pinned row: every bottom-anchored hit test must follow it ─
@@ -1017,6 +1132,9 @@ test('B4A-07b the fullscreen Todo/dock hit follows the band-pushed layout', asyn
     job('j4', 'deploy', 'running'),
   ] })
   await flush()
+  // B4-B: the ACTIVE band is the layout fact under test — open it through
+  // the production entry.
+  assert.equal(h.app.enterTaskQuick(), true, 'the production entry must admit a real projection')
   // Nine todos give the panel real overflow, so the compact -> full step is a
   // real state change (with no overflow a panel click closes the panel instead).
   h.app.setTodoSummary(Array.from({ length: 9 }, (_, index) => ({
@@ -1058,6 +1176,9 @@ test('B4A-07c the Question frame option hit follows the band-pushed layout', asy
     job('j4', 'deploy', 'running'),
   ] })
   await flush()
+  // B4-B: the ACTIVE frame under test — open through the production entry.
+  assert.equal(h.app.enterTaskQuick(), true, 'the production entry must admit a real projection')
+  await h.vt.waitForRender()
   h.app.setFullscreen(true)
   await h.vt.waitForRender()
   assert.equal(itemRows(h.vt).length, 3, `the band paints below the seat:\n${view(h.vt)}`)
@@ -1098,6 +1219,9 @@ test('B4A-07 a resize re-budgets the window and keeps the anchored row visible',
   ] })
   await flush()
   await h.vt.waitForRender()
+  // B4-B: the ACTIVE frame under test — open through the production entry.
+  assert.equal(h.app.enterTaskQuick(), true, 'the production entry must admit a real projection')
+  await h.vt.waitForRender()
   assert.equal(h.band().items.length, 3)
   h.vt.resize(120, 10)
   await h.vt.waitForRender()
@@ -1115,6 +1239,10 @@ test('B4A-10 a display seam without Task Center support mounts no fake window', 
     roster: [job('j1', 'build', 'running')],
   })
   await flush()
+  await h.vt.waitForRender()
+  // B4-B: without Task Center support no projection is ever published, so the
+  // production entry DECLINES and no fake window mounts.
+  assert.equal(h.app.enterTaskQuick(), false, 'no Task Center capability must decline the entry')
   await h.vt.waitForRender()
   assert.equal(h.band().identity, -1, `no Task Center capability must mount no Quick window:\n${view(h.vt)}`)
   assert.ok(!view(h.vt).includes('Task Quick'))

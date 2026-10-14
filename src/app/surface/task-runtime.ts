@@ -210,13 +210,27 @@ export interface TaskRuntime {
   hasTask(childId: string): boolean
   /** Reset the whole Task Center on a session-generation bump. */
   resetTasks(): void
-  /** Open the Task Browser (`quick` = the ↓ trigger, `full` = `/tasks`). */
+  /** Open the Task Browser (`full` = `/tasks` and the Workflow-scoped
+   *  views). The `quick` modal is retired (Phase 3B/B4-B): the on-demand
+   *  Task Quick accessory replaced it, and no production caller opens the
+   *  quick mode any more. */
   openTasksBrowser(
-    viewMode: 'quick' | 'full',
+    viewMode: 'full',
     restoreState?: TaskBrowserViewState,
     scope?: TaskBrowserDatasetScope,
     header?: string,
   ): void
+  /**
+   * The on-demand Task Quick's typed selection route (Phase 3B/B4-B). The
+   * value is a CURRENT `TaskPanelItem.value` of the Quick projection
+   * (`quickTaskProjection` over the runtime's GLOBAL rows + the detached
+   * attention rows). Resolves the ONE existing open/reopen path — Question
+   * `attention.reopen`, subagent `enterView`, Job view — exactly as the
+   * Full browser's selection does; never a Stop; never a second authority.
+   * Returns `false` (no surface opened) when the row is unreachable in the
+   * current projection, the session fence fails, or cleanup has started.
+   */
+  openQuickTaskItem(value: string): boolean
   /** Open one Job from the Task Browser (a subagent job may replace it). */
   openJobView(jobId: string): 'close' | 'keep-open'
   /** The Workflow card action sink (PR2 plan §9/§10/§14.5). */
@@ -410,7 +424,6 @@ export function createTaskRuntime(options: TaskRuntimeOptions): TaskRuntime {
   let taskBrowserGlobalRows: TaskBrowserRow[] = []
   let taskRuntime: TaskBrowserRuntime | undefined
   let taskBrowserScope: TaskBrowserDatasetScope = { kind: 'all' }
-  let quickTaskState: TaskBrowserViewState | undefined
   let activeTaskBrowser: TaskBrowserHandle | undefined
   let activeTaskBrowserToken: object | undefined
   /** The open browser's mode: Question attention rows are mode-dependent
@@ -830,11 +843,99 @@ export function createTaskRuntime(options: TaskRuntimeOptions): TaskRuntime {
   }
 
   /**
-   * Open the Task Browser. `quick` is the ↓ trigger, `full` is the `/tasks`
-   * surface; the SAME browser serves both.
+   * The ONE typed selection router (Phase 3B/B4-B): resolve a stable row
+   * value against an explicit authority row list and run the existing
+   * open/reopen path. Full browser and on-demand Quick share this — never a
+   * second open path, never a Stop, never a registry re-read. The inputs
+   * are exactly the plan's: the CURRENT authority rows, the selected value,
+   * and the captured session/subject implicitly bound by the existing
+   * openers (their own fences decide currentness at dispatch).
+   */
+  const resolveTaskSelection = (
+    value: string,
+    authorityRows: readonly TaskBrowserRow[],
+  ): 'close' | 'keep-open' => {
+    if (options.isCleanedUp()) return 'close'
+    const source = taskCenter()
+    // A Question attention row is NOT a Job: it never enters the Job
+    // stop/detail paths. Enter reopens the SAME controller entry, and a row
+    // that went stale between rendering and selection (another client
+    // queued/settled the call) fails closed and keeps the caller usable.
+    const questionIdentity = questionIdentityOf(value)
+    if (questionIdentity !== undefined) {
+      const reopened = options.attention.reopen(questionIdentity.sessionId, questionIdentity.callId)
+      return reopened ? 'close' : 'keep-open'
+    }
+    const row = authorityRows.find(candidate => candidate.value === value)
+    if (row === undefined) return source.rowSelectionDisposition(undefined, 'keep-open')
+    if (row.kind === 'subagent') {
+      // The viewer target carries the row's OWN parent (plan §6.10:
+      // childId + parentId + depth + mode + activity — never just
+      // childId + mode). A nested row's durable parent is the exact
+      // direct parent recorded by DSH; only a direct child falls back
+      // to the browser root (the live main session).
+      const parentSessionId = row.parentId !== '' ? row.parentId : source.sessionId()
+      if (parentSessionId === undefined) return 'close'
+      // The row carries the catalog MODE + projected activity + DEPTH:
+      // the viewer target is pinned to them (continuable → interactive
+      // editor only at depth 1, one-shot → read-only, depth > 1 →
+      // nested read-only), and the follow-up write path to the exact
+      // parent.
+      runOwned('subagent view from tasks', () => source.enterView(
+        row.childId, row.label, row.mode, parentSessionId, row.activity, row.depth,
+      ), {
+        diag: taskDiag(),
+        sessionId: () => source.sessionId(),
+        onError: (error) => {
+          if (options.isCleanedUp()) return
+          options.mounted().notify(`could not open the subagent view: ${safeErrorMessage(error)}`, 'error')
+        },
+      })
+      // The subagent transcript is a session/viewer surface, not a
+      // child overlay of the browser: it REPLACES the Task Center and
+      // keeps its own Esc semantics.
+      return source.rowSelectionDisposition(row, 'keep-open')
+    }
+    // A Job View is the selected row's DETAIL: it opens as a child
+    // overlay (hiding this browser, not destroying it) and returns to
+    // the exact browser state on Esc. A job that has already vanished
+    // simply opens nothing — the parent stays usable either way.
+    return source.rowSelectionDisposition(row, openJobView(row.jobId))
+  }
+
+  /**
+   * The on-demand Task Quick's typed selection route (B4-B). The value is a
+   * `TaskPanelItem.value` the accessory showed; it is verified against the
+   * CURRENT Quick projection (`quickTaskProjection` over the runtime's
+   * GLOBAL authority rows + the detached attention rows) before any open —
+   * never the modal-scoped rows, a label, or the footer badge. The open
+   * itself runs the ONE `resolveTaskSelection` router. `false` = no surface
+   * opened (stale/unreachable row, fence, cleanup); the app never re-opens
+   * the hidden Quick on a refusal.
+   */
+  const openQuickTaskItem = (value: string): boolean => {
+    if (options.isCleanedUp()) return false
+    const source = taskCenter()
+    const sessionId = source.sessionId()
+    if (sessionId === undefined) return false
+    // The CURRENT Quick projection is the only admission list.
+    const projection = quickTaskProjection(taskBrowserGlobalRows, options.attention.rows())
+    if (!projection.some(item => item.value === value)) return false
+    // The captured subject fence: a selection dispatched after the session
+    // switched must not open the OLD session's detail.
+    const subject = source.captureSubject()
+    if (!source.subjectMatches(subject)) return false
+    resolveTaskSelection(value, taskBrowserGlobalRows)
+    return true
+  }
+
+  /**
+   * Open the Task Browser. `full` is the `/tasks` surface and every scoped
+   * view; the `quick` modal is retired (B4-B — the on-demand Task Quick
+   * accessory replaced it).
    */
   const openTasksBrowser = (
-    viewMode: 'quick' | 'full',
+    viewMode: 'full',
     restoreState?: TaskBrowserViewState,
     scope?: TaskBrowserDatasetScope,
     header?: string,
@@ -895,50 +996,9 @@ export function createTaskRuntime(options: TaskRuntimeOptions): TaskRuntime {
     }
     const selectRow = (value: string): 'close' | 'keep-open' => {
       if (options.isCleanedUp()) return 'close'
-      // A Question attention row is NOT a Job: it never enters the Job
-      // stop/detail paths. Enter reopens the SAME controller entry, and a row
-      // that went stale between rendering and selection (another client
-      // queued/settled the call) fails closed and keeps the browser usable.
-      const questionIdentity = questionIdentityOf(value)
-      if (questionIdentity !== undefined) {
-        const reopened = options.attention.reopen(questionIdentity.sessionId, questionIdentity.callId)
-        return reopened ? 'close' : 'keep-open'
-      }
-      const row = taskBrowserRows.find(candidate => candidate.value === value)
-      if (row === undefined) return source.rowSelectionDisposition(undefined, 'keep-open')
-      if (row.kind === 'subagent') {
-        // The viewer target carries the row's OWN parent (plan §6.10:
-        // childId + parentId + depth + mode + activity — never just
-        // childId + mode). A nested row's durable parent is the exact
-        // direct parent recorded by DSH; only a direct child falls back
-        // to the browser root (the live main session).
-        const parentSessionId = row.parentId !== '' ? row.parentId : source.sessionId()
-        if (parentSessionId === undefined) return 'close'
-        // The row carries the catalog MODE + projected activity + DEPTH:
-        // the viewer target is pinned to them (continuable → interactive
-        // editor only at depth 1, one-shot → read-only, depth > 1 →
-        // nested read-only), and the follow-up write path to the exact
-        // parent.
-        runOwned('subagent view from tasks', () => source.enterView(
-          row.childId, row.label, row.mode, parentSessionId, row.activity, row.depth,
-        ), {
-          diag: taskDiag(),
-          sessionId: () => source.sessionId(),
-          onError: (error) => {
-            if (options.isCleanedUp()) return
-            options.mounted().notify(`could not open the subagent view: ${safeErrorMessage(error)}`, 'error')
-          },
-        })
-        // The subagent transcript is a session/viewer surface, not a
-        // child overlay of the browser: it REPLACES the Task Center and
-        // keeps its own Esc semantics.
-        return source.rowSelectionDisposition(row, 'keep-open')
-      }
-      // A Job View is the selected row's DETAIL: it opens as a child
-      // overlay (hiding this browser, not destroying it) and returns to
-      // the exact browser state on Esc. A job that has already vanished
-      // simply opens nothing — the parent stays usable either way.
-      return source.rowSelectionDisposition(row, openJobView(row.jobId))
+      // The ONE typed selection router (B4-B): the same resolver the
+      // on-demand Quick uses, over the CURRENT browser rows.
+      return resolveTaskSelection(value, taskBrowserRows)
     }
     const stopRow = (value: string): void => {
       if (options.isCleanedUp()) return
@@ -1024,7 +1084,7 @@ export function createTaskRuntime(options: TaskRuntimeOptions): TaskRuntime {
     // Re-publish the parked count with the same fresh authority: the footer
     // affordance must never lag a Question that is already known to be pending.
     options.attention.publish()
-    const initialScope = restoreState?.scope ?? (viewMode === 'quick' ? 'active' : 'all')
+    const initialScope = restoreState?.scope ?? 'all'
     const initialQuery = restoreState?.searchQuery ?? ''
     const initialSelected = restoreState?.selectedId === 'task:view-all' ? undefined : restoreState?.selectedId ?? undefined
     const initialPreferred = initialSelected
@@ -1060,7 +1120,7 @@ export function createTaskRuntime(options: TaskRuntimeOptions): TaskRuntime {
         // The restore tail belongs to the browser GENERATION that opened it:
         // a browser a synchronous callback opened while this one was closing
         // (the physical hide restores plugin focus) already owns the slot and
-        // must not be overwritten by a stale Quick. The retired browser's own
+        // must not be overwritten by a stale browser. The retired browser's own
         // token cannot express this — `onRetired` just cleared it.
         if (taskBrowserEpoch !== browserEpoch) return
         if (activeTaskBrowserToken === browserToken) {
@@ -1069,19 +1129,19 @@ export function createTaskRuntime(options: TaskRuntimeOptions): TaskRuntime {
           activeTaskBrowserMode = undefined
           resetTaskBrowserScope()
         }
-        if (viewMode === 'full' && restoreState !== undefined) {
-          // Esc from a promoted full view returns to Quick with the state
-          // captured BEFORE the frame was disposed (TuiApp's onCancel seam),
-          // not the state from the promotion moment.
-          const state = viewState ?? quickTaskState ?? restoreState
-          openTasksBrowser('quick', state)
+        // B4-B: the Quick→Full promotion restore tail is retired with the
+        // modal Quick — a Full browser closes to the editor (the on-demand
+        // Quick no longer exists as a modal to return into).
+        if (viewState !== undefined && viewState.mode !== undefined) {
+          // Keep the view state type honest: nothing to restore into.
+          return
         }
       },
       {
         header: header ?? 'Tasks',
         enableSearch: true,
         mode: viewMode,
-        openedFrom: viewMode === 'full' && restoreState !== undefined ? 'quick' : 'command',
+        openedFrom: 'command',
         scope: initialScope,
         typeFilter: restoreState?.typeFilter,
         initialQuery,
@@ -1090,7 +1150,7 @@ export function createTaskRuntime(options: TaskRuntimeOptions): TaskRuntime {
         collapsedIds: [...(restoreState?.collapsedIds ?? [])],
         selectedId: initialSelected,
         preferredValue: initialPreferred,
-        maxVisible: viewMode === 'quick' ? 8 : 18,
+        maxVisible: 18,
         loading: runtime !== undefined && taskBrowserRows.length === 0,
         groupLabels: true,
         onRefresh: () => {
@@ -1111,19 +1171,18 @@ export function createTaskRuntime(options: TaskRuntimeOptions): TaskRuntime {
           // rejects (PR review P1).
           refreshAgents()
         },
-        onViewFull: state => {
+        onViewFull: () => {
+          // B4-B: the promotion is retired with the modal Quick — the Full
+          // browser IS the Task Center, and the on-demand accessory is not
+          // a modal to promote from. The panel never invokes this any more;
+          // the retirement closes the slot like any terminal navigation.
           if (options.isCleanedUp()) return
-          // Same generation fence as the Esc restore: the promotion tail must
-          // not overwrite a browser a callback opened while THIS one was being
-          // retired by `requestClose('promote')`.
           if (taskBrowserEpoch !== browserEpoch) return
           if (activeTaskBrowserToken === browserToken) {
             activeTaskBrowser = undefined
             activeTaskBrowserToken = undefined
             activeTaskBrowserMode = undefined
           }
-          quickTaskState = state
-          openTasksBrowser('full', state)
         },
         onStop: stopRow,
         onViewportExpose: ids => { if (!options.isCleanedUp()) runtime?.acknowledge(ids) },
@@ -1462,6 +1521,9 @@ export function createTaskRuntime(options: TaskRuntimeOptions): TaskRuntime {
     },
     openTasksBrowser(viewMode, restoreState, scope, header) {
       openTasksBrowser(viewMode, restoreState, scope, header)
+    },
+    openQuickTaskItem(value) {
+      return openQuickTaskItem(value)
     },
     openJobView(jobId) {
       return openJobView(jobId)

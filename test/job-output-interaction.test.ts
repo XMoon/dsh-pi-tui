@@ -41,7 +41,7 @@ afterEach(() => {
 
 function startApp(
   options: Record<string, unknown> = {},
-  events: Partial<Pick<TuiAppEvents, 'onFullscreenChange' | 'onExit' | 'onOpenTasks' | 'runOwned'>> = {},
+  events: Partial<Pick<TuiAppEvents, 'onFullscreenChange' | 'onExit' | 'runOwned'>> = {},
   columns = 80,
   rows = 24,
 ): { vt: VirtualTerminal; app: TuiApp } {
@@ -50,7 +50,6 @@ function startApp(
     onSubmit: () => {},
     onExit: () => events.onExit?.() ?? undefined,
     ...(events.onFullscreenChange === undefined ? {} : { onFullscreenChange: events.onFullscreenChange }),
-    ...(events.onOpenTasks === undefined ? {} : { onOpenTasks: events.onOpenTasks }),
     ...(events.runOwned === undefined ? {} : { runOwned: events.runOwned }),
   }, options)
   app.start()

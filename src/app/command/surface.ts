@@ -214,7 +214,8 @@ export interface CommandSurfaceDeps<Selection extends ModelSelectionValue, Exact
     setNotificationMethod(method: string): void
     setTerminalProgressMode(mode: string): void
     openJobView(jobId: string): void
-    openTasksBrowser(viewMode: 'quick' | 'full'): void
+    /** B4-B: the Full Task Center only — the quick modal is retired. */
+    openTasksBrowser(viewMode: 'full'): void
   }
   /** The semantic backend port slices the runner exposes unchanged. */
   readonly backend: {

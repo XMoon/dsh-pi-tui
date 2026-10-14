@@ -175,29 +175,6 @@ test('A toggles the scope chip while getViewState().scope stays the internal act
   assert.equal(panel.getViewState().scope, 'all')
 })
 
-test('Quick keeps the ACTIVE chip and consumes A as a no-op', () => {
-  const panel = new TaskBrowserPanel(
-    [runningJob()],
-    8,
-    { mode: 'quick', header: 'Quick Tasks', noMatchText: 'no active tasks' },
-    () => {},
-    () => {},
-    () => {},
-  )
-  const rendered = (): string[] => panel.render(100).map(strip)
-  const first = rendered().join('\n')
-  assert.ok(first.includes('[ACTIVE]'), `Quick shows the active scope chip:\n${first}`)
-  assert.ok(!first.includes('[TRACKED]'), `Quick never claims the tracked scope:\n${first}`)
-  assert.equal(panel.getViewState().scope, 'active')
-  // Quick is navigation-only: A is consumed as a no-op and cannot flip
-  // the scope (the Quick/Full input-ownership whitelist).
-  panel.handleInput('a')
-  const after = rendered().join('\n')
-  assert.ok(after.includes('[ACTIVE]'), `a must stay a no-op in Quick:\n${after}`)
-  assert.equal(panel.getViewState().scope, 'active')
-  panel.dispose()
-})
-
 test('selected row shows the pointer and bold label', () => {
   const { panel, rendered } = makePanel([runningJob(), doneJob()])
   const first = rendered().map(strip).join('\n')
@@ -410,10 +387,10 @@ test('rows without a type never match a type filter (they only appear under All)
 
 test('the Full hint always advertises the Tab type cycle', () => {
   const single = makePanel([typed(runningJob(), 'bash')], { enableSearch: true })
-  assert.ok(single.rendered().map(strip).join('\n').includes('Tab type'),
+  assert.ok(single.rendered().map(strip).join('\n').includes('shift+tab type'),
     `a single-kind list still toggles All↔type:\n${single.rendered().map(strip).join('\n')}`)
   const multi = makePanel([typed(runningJob(), 'bash'), typed(subagent(), 'subagent')], { enableSearch: true })
-  assert.ok(multi.rendered().map(strip).join('\n').includes('Tab type'),
+  assert.ok(multi.rendered().map(strip).join('\n').includes('shift+tab type'),
     `mixed list advertises the Tab cycle:\n${multi.rendered().map(strip).join('\n')}`)
 })
 
@@ -1066,7 +1043,7 @@ test('Quick Tasks: a multiline job label stays ONE physical row and the raw item
   const panel = new TaskBrowserPanel(
     [item],
     10,
-    { mode: 'quick' },
+    { mode: 'full' },
     () => {},
     () => {},
     () => {},
@@ -1234,7 +1211,7 @@ test('Quick shows a parked Question in Needs attention ABOVE active work', () =>
   const panel = new TaskBrowserPanel(
     [questionRow(), runningJob(), subagent()],
     10,
-    { mode: 'quick', header: 'tasks' },
+    { mode: 'full', header: 'tasks' },
     () => {},
     () => {},
     () => {},
@@ -1255,7 +1232,7 @@ test('a pending Question stays visible in Quick even with running work', () => {
   const panel = new TaskBrowserPanel(
     [questionRow(), runningJob()],
     10,
-    { mode: 'quick', header: 'tasks' },
+    { mode: 'full', header: 'tasks' },
     () => {},
     () => {},
     () => {},

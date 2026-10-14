@@ -490,110 +490,69 @@ test('A-05 a display-mode switch is refused while the Job screen owns the surfac
   app.stop()
 })
 
-test('A-06 Quick → Full preserves the dataset scope; Esc restores Quick with the captured NON-DEFAULT state', async () => {
+test('A-06 the Workflow-scoped Full browser preserves the dataset scope across a close/reopen cycle', async () => {
   const { vt, app } = startApp()
   const harness = attachTasks(app, { jobIds: ['job-a'], childIds: ['child-1', 'child-2'] })
   await flush()
-  // A Workflow-scoped Quick browser over TWO child ids: exactly the scope, no
+  // A Workflow-scoped browser over TWO child ids: exactly the scope, no
   // Job rows.
-  harness.tasks.openTasksBrowser('quick', undefined, { kind: 'subagents', childIds: ['child-1', 'child-2'] })
+  harness.tasks.openTasksBrowser('full', undefined, { kind: 'subagents', childIds: ['child-1', 'child-2'] })
   await vt.waitForRender()
-  const quick = harness.lastBrowser()!
+  const scoped = harness.lastBrowser()!
   const actorRows = (handle: TaskBrowserHandle): string[] =>
     handle.visibleItems!().map(item => item.value).filter(value => value.startsWith('agent:'))
-  assert.deepEqual(actorRows(quick), ['agent:child-1', 'agent:child-2'],
-    `the scoped Quick must show exactly the scope child ids:\n${JSON.stringify(quick.visibleItems!().map(i => i.value))}`)
-  assert.ok(!quick.visibleItems!().some(item => item.value.startsWith('job:')), 'jobs must never leak into a subagents scope')
+  assert.deepEqual(actorRows(scoped), ['agent:child-1', 'agent:child-2'],
+    `the scoped browser must show exactly the scope child ids:
+${JSON.stringify(scoped.visibleItems!().map(i => i.value))}`)
+  assert.ok(!scoped.visibleItems!().some(item => item.value.startsWith('job:')), 'jobs must never leak into a subagents scope')
 
-  // Promote through the REAL panel: Down onto the "Open Task Center" pseudo
-  // row, then Enter (the production Quick → Full trigger).
-  vt.sendInput('\x1b[B')
-  vt.sendInput('\x1b[B')
-  vt.sendInput('\r')
-  await vt.waitForRender()
-  const full = harness.lastBrowser()
-  assert.notEqual(full, quick, 'the promotion must open a NEW Full browser')
-  const fullRows = full!.visibleItems!().map(item => item.value)
-  assert.deepEqual(fullRows.filter(value => value.startsWith('agent:')), ['agent:child-1', 'agent:child-2'],
-    `the promoted Full must KEEP the dataset scope:\n${JSON.stringify(fullRows)}`)
-  assert.ok(!fullRows.some(value => value.startsWith('job:')), 'a promote must never reset the scope to the global dataset')
-  assert.deepEqual(harness.retires, ['promote'], 'the promotion must retire the Quick browser with the promote reason')
-  // The state captured from the Quick panel reached the Full: a FRESH Full
-  // would default to the `all` presentation scope, the promoted one inherits
-  // Quick's `active` scope.
-  assert.equal(full!.getViewState!().scope, quick.getViewState!().scope,
-    'the promotion must carry the captured Quick state, not a fresh default')
-
-  // Establish a NON-DEFAULT selection inside the Full (child-2).
+  // Establish a NON-DEFAULT selection inside the scoped browser (child-2):
+  // the selection STARTS on the first running row (child-1, the preferred),
+  // so one Down reaches child-2.
   vt.sendInput('\x1b[B')
   await vt.waitForRender()
-  assert.equal(full!.getViewState!().selectedId, 'agent:child-2', 'the Full selection must have moved')
-
-  // Esc from the promoted Full returns to Quick with the state captured
-  // BEFORE the frame was disposed (the plan's onCancel(state) seam). The
-  // restore is created synchronously inside the Esc dispatch, so the seeded
-  // cursor is read before any async catalog commit can re-target it to the
-  // preferred (first running) row — the pre-existing preferred-row behavior.
-  vt.sendInput('\x1b')
-  const restored = harness.lastBrowser()
-  assert.notEqual(restored, full, 'Esc must open Quick again')
-  assert.equal(restored!.getViewState!().mode, 'quick', 'the restore must land in Quick mode')
-  assert.equal(restored!.getViewState!().selectedId, 'agent:child-2',
-    'the restore must seed the cursor from the state captured before the dispose')
+  vt.sendInput('\x1b[B')
   await vt.waitForRender()
-  assert.deepEqual(harness.retires, ['promote', 'cancel'], 'the promoted Full must retire with the cancel reason')
-  assert.deepEqual(
-    restored!.visibleItems!().map(item => item.value)
-      .filter(value => value.startsWith('agent:') || value.startsWith('job:')),
-    ['agent:child-1', 'agent:child-2', 'job:job-a'],
-    'the Esc restore must reset the dataset scope to the global dataset',
-  )
+  assert.equal(scoped.getViewState!().selectedId, 'agent:child-2', 'the selection must have moved')
 
-  // Negative control: a 'select'-disposition row (a subagent row REPLACES the
-  // Task Center) must close the browser without re-opening a Quick. The
-  // restored Quick's selection is already on the child-2 subagent row.
-  const opensBefore = harness.browsers().length
-  vt.sendInput('\r')
+  // Close and reopen the SAME scope: the dataset scope resets through the
+  // close paths (PR2 plan §10.8) — a fresh ordinary open starts from all.
+  scoped.close()
   await vt.waitForRender()
-  assert.equal(harness.browsers().length, opensBefore, 'a select close must NOT restore Quick')
-  assert.deepEqual(harness.retires, ['promote', 'cancel', 'select'], 'the select close must be the only new retire')
-  assert.equal(app.overlayGraphState().handles, 0, 'the select close must remove the browser')
+  harness.tasks.openTasksBrowser('full')
+  await vt.waitForRender()
+  const fresh = harness.lastBrowser()!
+  assert.notEqual(fresh, scoped, 'the reopen must be a NEW browser instance')
+  const freshRows = fresh.visibleItems!().map(item => item.value)
+  assert.ok(freshRows.some(value => value.startsWith('job:')), 'a fresh open must see the global dataset')
+  assert.equal(fresh.getViewState!().scope, 'all', 'the fresh open resets the presentation scope')
   app.stop()
 })
 
-test('A-06b Esc from a promoted Full carries the Full presentation state (type filter) into the restored Quick', async () => {
+test('A-06b the Full browser carries its presentation state across an overlay round-trip', async () => {
+  // B4-B: the Quick→Full promotion is retired with the modal Quick. The
+  // surviving contract: the Full browser keeps its OWN presentation state
+  // (type filter, selection) across a Job-detail overlay round-trip.
   const { vt, app } = startApp()
   const harness = attachTasks(app, { jobIds: ['job-a'], childIds: ['child-1', 'child-2'] })
   await flush()
-  harness.tasks.openTasksBrowser('quick')
+  harness.tasks.openTasksBrowser('full', undefined, { kind: 'subagents', childIds: ['child-1', 'child-2'] })
   await vt.waitForRender()
-  // Promote through the real panel (two child rows + the pseudo row).
-  vt.sendInput('\x1b[B')
-  vt.sendInput('\x1b[B')
-  vt.sendInput('\x1b[B')
-  vt.sendInput('\r')
-  await vt.waitForRender()
-  const full = harness.lastBrowser()!
-  assert.equal(full.getViewState!().mode, 'full', 'the promotion must open the Full')
-
-  // Establish a NON-DEFAULT presentation state in the Full.
+  const first = harness.lastBrowser()!
+  // A type filter in the Full (Tab cycles: subagents → ... ).
   vt.sendInput('\t')
   await vt.waitForRender()
-  const filter = full.getViewState!().typeFilter
-  assert.notEqual(filter, null, 'Tab must set a type filter in the Full')
+  assert.notEqual(first.getViewState!().typeFilter, null, 'Tab must set a type filter in the Full')
+  const filtered = first.getViewState!().typeFilter
 
-  // Esc → the restored Quick must carry that captured filter (a fresh Quick
-  // would start with no type filter).
+  // Open + close a Job-detail overlay (the same round-trip shape): the
+  // browser beneath keeps its state.
+  vt.sendInput('\r')
+  await vt.waitForRender()
   vt.sendInput('\x1b')
   await vt.waitForRender()
-  const restored = harness.lastBrowser()!
-  assert.notEqual(restored, full, 'Esc must open Quick again')
-  assert.equal(restored.getViewState!().mode, 'quick')
-  assert.equal(restored.getViewState!().typeFilter, filter,
-    'the restored Quick must carry the Full presentation state captured before the dispose')
-  restored.close()
-  await vt.waitForRender()
-  assert.equal(app.overlayGraphState().handles, 0)
+  const same = harness.lastBrowser()!
+  assert.equal(same.getViewState!().typeFilter, filtered, 'the type filter survives the overlay round-trip')
   app.stop()
 })
 
@@ -760,7 +719,7 @@ test('A-08b TaskRuntime: a browser opened by a plugin focus callback during the 
     await vt.waitForRender()
 
     const restoreState: TaskBrowserViewState = {
-      mode: 'quick',
+      mode: 'full',
       openedFrom: 'command',
       scope: 'active',
       typeFilter: null,
@@ -822,7 +781,7 @@ test('A-08b TaskRuntime: a browser opened by a plugin focus callback during the 
     }
     const lease = app.showAdvancedInteractiveOverlay(component)
     await vt.waitForRender()
-    harness.tasks.openTasksBrowser('quick', undefined, { kind: 'subagents', childIds: ['child-1'] })
+    harness.tasks.openTasksBrowser('full', undefined, { kind: 'subagents', childIds: ['child-1'] })
     await vt.waitForRender()
     assert.equal(harness.browsers().length, 1)
     armed = true
@@ -843,13 +802,15 @@ test('A-08b TaskRuntime: a browser opened by a plugin focus callback during the 
 })
 
 test('A-08c TaskRuntime: a synchronous session reset during the close retires the pending navigation tail', async () => {
+  // B4-B: the Quick → Full promotion is retired, so the probed "pending
+  // Esc restore into Quick" no longer exists. The surviving contract: a
+  // synchronous resetTasks() fired from an overlay focus hook (the physical
+  // hide of the browser restoring plugin focus) retires the whole browser
+  // generation — the close tails (scope reset, mirrors) run exactly once and
+  // no stale browser survives.
   const { vt, app } = startApp()
   const harness = attachTasks(app, { jobIds: [], childIds: ['child-1'] })
   await flush()
-  // The REAL route the reviewer probed: a Quick → Full promotion, then Esc on
-  // the Full whose physical hide restores plugin focus, and the plugin's
-  // onFocus synchronously retires the whole browser generation with a real
-  // `tasks.resetTasks()`.
   let armed = false
   const component: AdvancedInteractiveComponent = {
     render: () => ({ kind: 'text', spans: [{ text: 'intro overlay' }] }),
@@ -861,16 +822,9 @@ test('A-08c TaskRuntime: a synchronous session reset during the close retires th
   }
   const lease = app.showAdvancedInteractiveOverlay(component)
   await vt.waitForRender()
-  harness.tasks.openTasksBrowser('quick', undefined, { kind: 'subagents', childIds: ['child-1'] })
+  harness.tasks.openTasksBrowser('full', undefined, { kind: 'subagents', childIds: ['child-1'] })
   await vt.waitForRender()
   assert.equal(harness.browsers().length, 1)
-  // Promote with the hook still disarmed, so the intro's focus during the
-  // promote-retire is a no-op and the Full opens normally.
-  vt.sendInput('\x1b[B')
-  vt.sendInput('\r')
-  await vt.waitForRender()
-  assert.equal(harness.browsers().length, 2, 'the promotion must open the Full')
-  assert.equal(harness.lastBrowser()!.getViewState!().mode, 'full')
 
   const mirrorsBefore = { ...harness.mirrors }
   armed = true
@@ -881,9 +835,8 @@ test('A-08c TaskRuntime: a synchronous session reset during the close retires th
   assert.equal(harness.mirrors.resetSummary, mirrorsBefore.resetSummary + 1, 'the reset must really run inside the hook')
   assert.equal(harness.mirrors.resetTasks, mirrorsBefore.resetTasks + 1, 'the reset must really run inside the hook')
   assert.equal(harness.mirrors.resetAgents, mirrorsBefore.resetAgents + 1, 'the reset must really run inside the hook')
-  // …and the retired generation's pending Esc restore is dead.
-  assert.equal(harness.browsers().length, 2, 'the reset must invalidate the pending Esc restore (no stale Quick)')
-  assert.deepEqual(harness.retires, ['promote', 'cancel'], 'only the two real retires may be delivered')
+  // …and no stale browser survives the retired generation.
+  assert.deepEqual(harness.retires, ['cancel'], 'only the real retire may be delivered')
   assert.equal(app.overlayGraphState().handles, 1, 'only the plugin overlay may remain')
   lease.close()
   await vt.waitForRender()

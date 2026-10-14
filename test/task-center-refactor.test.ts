@@ -51,34 +51,6 @@ test('Task Center stop is capability-gated and confirmed', () => {
   panel.dispose()
 })
 
-test('Quick Tasks retains active ancestor closure and exposes shared transition state', () => {
-  const parent: TaskPanelItem = {
-    value: 'agent:parent', label: 'parent', status: 'inactive', active: false,
-    source: 'subagent', type: 'subagent', depth: 1, hasChildren: true, group: 'subagents',
-  }
-  const child: TaskPanelItem = {
-    value: 'agent:child', label: 'child', status: 'running', active: true,
-    source: 'subagent', type: 'subagent', depth: 2, parentId: 'agent:parent', group: 'subagents',
-  }
-  let state: ReturnType<TaskBrowserPanel['getViewState']> | undefined
-  const panel = new TaskBrowserPanel([parent, child], 10, {
-    mode: 'quick', enableSearch: true, header: 'Tasks', initialExpandedIds: ['agent:parent'],
-    onViewFull: next => { state = next },
-  }, () => {}, () => {}, () => {})
-  assert.deepEqual(panel.visibleItems().map(item => item.value), ['agent:parent', 'agent:child', 'task:view-all'])
-  assert.equal(panel.visibleItems()[0]!.ancestorContext, true)
-  // The ONLY keyboard way into Full is the pseudo-row + Enter: no `T`.
-  panel.handleInput('\x1b[B')
-  panel.handleInput('\x1b[B')
-  assert.equal(panel.getViewState().selectedId, 'task:view-all')
-  panel.handleInput('\r')
-  assert.equal(state?.scope, 'active')
-  assert.equal(state?.selectedId, 'task:view-all')
-  assert.deepEqual([...(state?.expandedIds ?? [])], ['agent:parent'])
-  assert.deepEqual([...(state?.collapsedIds ?? [])], [])
-  panel.dispose()
-})
-
 test('explicit search mode: Esc exits search first, a second Esc closes the panel', () => {
   let cancelled = 0
   const panel = new TaskBrowserPanel([job('running')], 10, {
@@ -124,18 +96,6 @@ test('responsive widths: list-only, inline detail, and two-column detail pane', 
   }
 })
 
-test('Quick view-all pseudo-row carries no status tail (review round: cosmetic)', () => {
-  const panel = new TaskBrowserPanel([job('running')], 10, {
-    mode: 'quick', enableSearch: true, header: 'Tasks',
-  }, () => {}, () => {}, () => {})
-  const plain = panel.render(80).join('\n').replace(/\x1b\[[0-9;]*m/g, '')
-  const row = plain.split('\n').find(line => line.includes('Open Task Center'))!
-  assert.ok(row.includes('Open Task Center · 0 agents · 1 job…'),
-    `pseudo-row present with separate agent/job counts:\n${plain}`)
-  assert.ok(!/Open Task Center[^\n]*completed/.test(row), `no completed tail:\n${row}`)
-  panel.dispose()
-})
-
 test('a stale restored type filter snaps to All instead of a dead view', () => {
   const panel = new TaskBrowserPanel([job('running')], 10, {
     mode: 'full', enableSearch: true, header: 'Tasks', initialTypeFilter: 'pwsh',
@@ -155,7 +115,7 @@ test('acknowledge scope is the VIEWPORT, not the whole projection (PR review M1)
     source: 'job', type: 'bash', startedAt: Date.now(), group: 'jobs',
   }))
   const panel = new TaskBrowserPanel(failures, 8, {
-    mode: 'quick', enableSearch: true, header: 'Tasks',
+    mode: 'full', enableSearch: true, header: 'Tasks',
   }, () => {}, () => {}, () => {})
   assert.equal(panel.visibleItems().filter(item => item.kind !== 'view-full').length, 20,
     'the projection holds every failure (plus the quick view-all pseudo-row)')
@@ -240,7 +200,7 @@ test('search mode renders its own hint — query actions, never the task actions
   const view = panel.render(100).join('\n')
   // esc back leads the verb list: a 1-line hint on an 80-column terminal
   // truncates its tail, so the escape verb must never be the clipped part.
-  const searchHint = 'type to filter · Esc back · ←→ edit · ↑↓ select · Tab/⇧Tab type · Enter open'
+  const searchHint = 'type to filter · Esc back · ←→ edit · ↑↓ select · shift+tab type · Enter open'
   assert.ok(view.includes(searchHint), `search-mode hint must advertise the query actions:\n${view}`)
   for (const stale of ['A scope', 'N next running', 'S stop', 'R refresh', '←→ tree']) {
     assert.ok(!view.includes(stale), `search-mode hint must not advertise '${stale}':\n${view}`)
@@ -257,8 +217,9 @@ test('search-mode hint keeps Esc back visible at 80 columns', () => {
   const hintRow = view.split('\n').find(line => line.includes('type to filter'))
   assert.ok(hintRow !== undefined, `search hint missing at 80 cols:\n${view}`)
   assert.ok(hintRow.includes('Esc back'), `Esc back must survive the 80-column hint:\n${view}`)
-  // Shift+Tab reverse type cycling must be discoverable in search mode too.
-  assert.ok(hintRow.includes('⇧Tab'), `reverse type cycling must be discoverable:\n${view}`)
+  // Shift+Tab reverse type cycling must be discoverable in search mode too
+  // (B4-B: spelled `shift+tab` — the EAW-ambiguous `⇧` glyph is retired).
+  assert.ok(hintRow.includes('shift+tab'), `reverse type cycling must be discoverable:\n${view}`)
   // The ordinary task actions stay out of search mode here too.
   assert.ok(!view.includes('A scope') && !view.includes('S stop'), `no task actions in search mode:\n${view}`)
   panel.dispose()
@@ -287,7 +248,7 @@ test('search mode: A/S/R/N are query text, ←→ edit the query (never tree act
   panel.handleInput('\x1b')
   const afterEsc = panel.render(100).join('\n')
   assert.ok(!afterEsc.includes('type to filter · Esc back'), `first Esc must leave search mode:\n${afterEsc}`)
-  assert.ok(afterEsc.includes('A scope'), `normal task actions return after Esc:\n${afterEsc}`)
+  assert.ok(afterEsc.includes('a scope'), `normal task actions return after Esc:\n${afterEsc}`)
   panel.dispose()
 })
 
@@ -298,70 +259,11 @@ const agentRow = (value: string): TaskPanelItem => ({
   source: 'subagent', type: 'subagent', group: 'subagents',
 })
 
-test('Quick Tasks ignores every non-whitelisted keyboard action', () => {
-  const calls = { stop: [] as string[], refresh: 0, viewFull: 0, cancel: 0 }
-  const panel = new TaskBrowserPanel(
-    [job('job:a'), job('job:b')], 10,
-    {
-      mode: 'quick', enableSearch: true, header: 'Tasks',
-      onStop: value => calls.stop.push(value),
-      onRefresh: () => { calls.refresh += 1 },
-      onViewFull: () => { calls.viewFull += 1 },
-    },
-    () => {}, () => { calls.cancel += 1 }, () => {})
-  const before = panel.getViewState()
-  assert.equal(before.selectedId, 'job:a')
-  for (const key of ['/', 'a', 'A', 'n', 'N', 's', 'S', 'r', 'R', 't', 'T', 'x', '\x1b[5~', '\x1b[6~', '\x1b[Z']) {
-    panel.handleInput(key)
-  }
-  const after = panel.getViewState()
-  assert.equal(after.scope, before.scope, 'scope must not change')
-  assert.equal(after.searchMode, false, 'Quick never enters search')
-  assert.equal(after.searchQuery, '')
-  assert.equal(after.typeFilter, before.typeFilter, 'non-whitelisted input must not change the type filter')
-  assert.equal(after.selectedId, before.selectedId, 'non-whitelisted input must not move the selection')
-  assert.equal(panel.getFilter(), '')
-  assert.deepEqual(calls.stop, [], 'no stop action')
-  assert.equal(calls.refresh, 0, 'no refresh action')
-  assert.equal(calls.viewFull, 0, 'no Quick → Full transition')
-  assert.equal(calls.cancel, 0, 'nothing but Esc closes Quick')
-  assert.ok(!panel.render(100).join('\n').includes('confirm stop'), 'no hidden stop confirmation')
-  panel.handleInput('\x1b')
-  assert.equal(calls.cancel, 1, 'a single Esc closes Quick')
-  panel.dispose()
-})
-
-test('Quick Tasks: the original S → Esc regression closes exactly once', () => {
-  let cancelled = 0
-  const panel = new TaskBrowserPanel([job('job:a')], 10, {
-    mode: 'quick', enableSearch: true, header: 'Tasks', onStop: () => {},
-  }, () => {}, () => { cancelled += 1 }, () => {})
-  panel.handleInput('S')
-  assert.ok(!panel.render(100).join('\n').includes('confirm stop'),
-    'S must not arm a stop confirmation in Quick')
-  panel.handleInput('\x1b')
-  assert.equal(cancelled, 1, 'one Esc closes Quick instead of cancelling hidden state')
-  panel.dispose()
-})
-
-test('Quick Tasks: / and T followed by a single Esc each close Quick', () => {
-  for (const key of ['/', 'T']) {
-    let cancelled = 0
-    const panel = new TaskBrowserPanel([job('job:a')], 10, {
-      mode: 'quick', enableSearch: true, header: 'Tasks',
-    }, () => {}, () => { cancelled += 1 }, () => {})
-    panel.handleInput(key)
-    panel.handleInput('\x1b')
-    assert.equal(cancelled, 1, `${key} must be a no-op followed by a single-Esc close`)
-    panel.dispose()
-  }
-})
-
 test('Quick Tasks whitelist still navigates, filters types and opens rows', () => {
   let cancelled = 0
   const panel = new TaskBrowserPanel(
     [job('job:a'), job('job:b'), agentRow('agent:c')], 10,
-    { mode: 'quick', enableSearch: true, header: 'Tasks' },
+    { mode: 'full', enableSearch: true, header: 'Tasks' },
     () => {}, () => { cancelled += 1 }, () => {})
   panel.handleInput('\x1b[B')
   assert.equal(panel.getViewState().selectedId, 'job:b', '↓ moves the selection')
@@ -379,35 +281,11 @@ test('Quick Tasks whitelist still navigates, filters types and opens rows', () =
 
   let opened: string | undefined
   const panel2 = new TaskBrowserPanel([job('job:a')], 10,
-    { mode: 'quick', enableSearch: true, header: 'Tasks' },
+    { mode: 'full', enableSearch: true, header: 'Tasks' },
     value => { opened = value }, () => {}, () => {})
   panel2.handleInput('\r')
   assert.equal(opened, 'job:a', 'Enter opens the selected row')
   panel2.dispose()
-})
-
-test('Quick Tasks ←→ still expand and collapse the tree', () => {
-  const parent: TaskPanelItem = {
-    value: 'agent:parent', label: 'parent', status: 'inactive', active: false,
-    source: 'subagent', type: 'subagent', hasChildren: true, group: 'subagents',
-  }
-  const child: TaskPanelItem = {
-    value: 'agent:child', label: 'child', status: 'completed', active: false,
-    source: 'subagent', type: 'subagent', parentId: 'agent:parent', group: 'subagents',
-  }
-  const panel = new TaskBrowserPanel([parent, child], 10,
-    { mode: 'quick', header: 'Tasks', initialScope: 'all' },
-    () => {}, () => {}, () => {})
-  assert.deepEqual(panel.visibleItems().map(item => item.value), ['agent:parent', 'task:view-all'],
-    'a settled branch starts collapsed')
-  panel.handleInput('\x1b[C')
-  assert.deepEqual(panel.visibleItems().map(item => item.value), ['agent:parent', 'agent:child', 'task:view-all'],
-    '→ expands the branch')
-  assert.equal(panel.getViewState().expandedIds.has('agent:parent'), true)
-  panel.handleInput('\x1b[D')
-  assert.deepEqual(panel.visibleItems().map(item => item.value), ['agent:parent', 'task:view-all'],
-    '← collapses the branch')
-  panel.dispose()
 })
 
 test('Full Task Center: N / Shift+N / T have no effect (removed actions)', () => {
@@ -462,75 +340,17 @@ test('Full search mode: Shift+Tab cycles the type filter backward without becomi
   panel.dispose()
 })
 
-test('Quick Tasks hint advertises only the navigation whitelist', () => {
-  const panel = new TaskBrowserPanel([job('job:a')], 10,
-    { mode: 'quick', enableSearch: true, header: 'Tasks' }, () => {}, () => {}, () => {})
-  const view = panel.render(100).join('\n')
-  assert.ok(view.includes('↑↓ select · ←→ tree · Tab type · Enter open · Esc close'),
-    `Quick hint must advertise the whitelist:\n${view}`)
-  for (const stale of ['/ search', 'A scope', 'A active/all', 'N next running', 'S stop', 'R refresh', 'T Task Center', 'pgup/pgdn']) {
-    assert.ok(!view.includes(stale), `Quick hint must not advertise '${stale}':\n${view}`)
-  }
-  panel.dispose()
-})
-
 test('Full Task Center hint advertises the management verbs without N/T/R', () => {
   const panel = new TaskBrowserPanel([job('job:a')], 10,
     { mode: 'full', enableSearch: true, header: 'Tasks' }, () => {}, () => {}, () => {})
   const view = panel.render(100).join('\n')
-  for (const verb of ['/ search', 'A scope', 'Tab type', 'S stop', 'Esc close']) {
+  for (const verb of ['/ search', 'a scope', 'shift+tab type', 's stop', 'Esc close']) {
     assert.ok(view.includes(verb), `Full hint must advertise '${verb}':\n${view}`)
   }
   for (const stale of ['N next running', 'T Task Center', 'R refresh']) {
     assert.ok(!view.includes(stale), `Full hint must not advertise '${stale}':\n${view}`)
   }
   panel.dispose()
-})
-
-test('Quick Tasks ignores a search query restored from the full view (no hidden-query dead end)', () => {
-  // index.ts reopens Quick with the full view's CURRENT state after
-  // Full → Esc → Esc; that state may carry the search query typed in Full
-  // (searchMode already false after the first Esc). Quick owns no search,
-  // so the query must be dropped — otherwise the projection filters every
-  // row and the pseudo-row (appended only for an empty query) disappears,
-  // removing the only keyboard path back to Full.
-  let state: ReturnType<TaskBrowserPanel['getViewState']> | undefined
-  const panel = new TaskBrowserPanel([job('job:a'), job('job:b')], 10, {
-    mode: 'quick', enableSearch: true, header: 'Tasks',
-    initialQuery: 'no-match', initialSearchMode: false,
-    onViewFull: next => { state = next },
-  }, () => {}, () => {}, () => {})
-  assert.equal(panel.getFilter(), '', 'Quick must not retain a restored query')
-  assert.equal(panel.getViewState().searchMode, false)
-  assert.deepEqual(panel.visibleItems().map(item => item.value), ['job:a', 'job:b', 'task:view-all'],
-    'every row and the pseudo-row must stay visible')
-  const view = panel.render(80).join('\n').replace(/\x1b\[[0-9;]*m/g, '')
-  assert.ok(view.includes('Open Task Center'), `the pseudo-row must render:\n${view}`)
-  assert.ok(!view.includes('no-match'), `the stale query must not filter the view:\n${view}`)
-  // The pseudo-row + Enter path back to Full still works.
-  panel.handleInput('\x1b[B')
-  panel.handleInput('\x1b[B')
-  panel.handleInput('\r')
-  assert.equal(state?.selectedId, 'task:view-all')
-  panel.dispose()
-})
-
-test('Quick Tasks stale banner does not advertise the Full-only R retry', () => {
-  const items = [job('job:a')]
-  const quick = new TaskBrowserPanel(items, 10, {
-    mode: 'quick', enableSearch: true, header: 'Tasks', refreshError: 'catalog failed',
-  }, () => {}, () => {}, () => {})
-  const quickView = quick.render(80).join('\n')
-  assert.ok(quickView.includes('catalog failed'), `Quick must still show the error:\n${quickView}`)
-  assert.ok(!quickView.includes('R retry'), `Quick R is a no-op; the banner must not advertise it:\n${quickView}`)
-  quick.dispose()
-
-  const full = new TaskBrowserPanel(items, 10, {
-    mode: 'full', enableSearch: true, header: 'Tasks', refreshError: 'catalog failed',
-  }, () => {}, () => {}, () => {})
-  const fullView = full.render(80).join('\n')
-  assert.ok(fullView.includes('catalog failed · R retry'), `Full must keep the retry verb:\n${fullView}`)
-  full.dispose()
 })
 
 // ── Host-text terminal display safety (independent fix PR) ─────────────────

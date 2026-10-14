@@ -143,7 +143,7 @@ import { isDiffResult, summarizeDiffs } from './tui/transcript/diff-projection.t
 import { renderDiffLines, renderDiffView } from './tui/components/transcript/diff.ts'
 import { ENABLE_FOCUS_REPORTING, isFocusReport } from './tui/notification/terminal-focus.ts'
 import { TaskBrowserPanel } from './tui/panels/task-panel.ts'
-import { TaskQuickAccessory } from './tui/panels/task-quick-accessory.ts'
+import { planTaskQuickLayout, TaskQuickAccessory } from './tui/panels/task-quick-accessory.ts'
 import { JobInspectorPanel, type JobCopyUnavailable } from './tui/panels/job-inspector-panel.ts'
 import {
   SettingsWorkspacePanel,
@@ -1072,12 +1072,6 @@ export interface TuiAppEventsBase {
    */
   onCyclePermission?: () => void
   /**
-   * The empty-editor ↓ affordance (the app.tasks.open action) with active
-   * jobs/subagents: open the task browser. The
-   * host lists the tasks and mounts the picker/viewer. Optional.
-   */
-  onOpenTasks?: () => void
-  /**
    * The TUI-only recall-all action (default: Alt+↑): remove every queued
    * message occurrence and pull its content into the editor draft. The host
    * clears the inbox and the draft lands via {@link TuiApp.setDraft}. This is
@@ -1412,8 +1406,9 @@ export interface TaskBrowserOptions {
   /** Rows visible before the list scrolls (default 10). */
   maxVisible?: number
   /** Quick (navigation-only) or full (management) presentation mode. */
-  mode: 'quick' | 'full'
-  /** Whether Esc from full should return to a Quick Tasks parent. */
+  mode: 'full'
+  /** Retired with the modal Quick (B4-B); kept optional for handle-shape
+   *  compatibility until the runtime handle stops declaring it. */
   openedFrom?: 'quick' | 'command'
   scope?: 'active' | 'all'
   typeFilter?: string | null
@@ -1429,8 +1424,10 @@ export interface TaskBrowserOptions {
   groupLabels?: boolean
   /** Re-list task data. */
   onRefresh?: () => void
-  /** Quick Tasks → full Task Center transition. */
-  onViewFull?: (state: TaskBrowserViewState) => void
+  /** Retired with the modal Quick (B4-B): no production caller passes it;
+   * the shape keeps an optional no-op callback until the runtime handle
+   * stops declaring it. */
+  onViewFull?: () => void
   /** Confirmed Stop: emitted only after the S → Y confirmation chord. */
   onStop?: (value: string) => void
   /** First-time viewport exposure of attention rows (the ack signal). */
@@ -1766,6 +1763,17 @@ export interface TuiAppOptions {
    * Workflow card display-only.
    */
   onWorkflowAction?: (action: WorkflowAction) => void
+  /**
+   * Phase 3B/B4-B: the typed Task Quick selection route. The app calls it
+   * AFTER the accessory has left Quick, with the CURRENT projected row's
+   * stable `TaskPanelItem.value`; the surface Task Runtime resolves the
+   * existing typed detail (Job view / subagent enterView / Question
+   * reopen). Returning `false` means the route refused (stale row, session
+   * fence, cleanup) — the app reports nothing further and the editor stays
+   * where it is. A first-party internal option, NOT a Stable Extension API
+   * member: a renderer without a Task Center never triggers it.
+   */
+  onQuickTaskSelect?: (value: string) => boolean
   /**
    * M6: the plugin keybinding resolver (wired by the runner from the M5
    * KeybindingRegistry). Maps a NORMALIZED key (the InputRouter has
@@ -2570,12 +2578,21 @@ export class TuiApp {
   private readonly widgetsAbove: Text
   private readonly widgetsBelow: Text
   /**
-   * Phase 3B / B4-A: the first-party PASSIVE Task Quick accessory — one
-   * bounded, non-focusable task window directly below the editor seat and
-   * ABOVE the public widget zone. It owns no data: the surface Task Runtime
-   * publishes its projected rows through {@link TuiApp.setQuickTaskItems}.
+   * Phase 3B / B4-A: the first-party Task Quick accessory below the editor
+   * seat and ABOVE the public widget zone (B4-B: focusable on demand —
+   * `focused` is the only visibility authority). It owns no task data: the
+   * surface Task Runtime publishes its projected rows through
+   * {@link TuiApp.setQuickTaskItems}.
    */
   private readonly taskQuick: TaskQuickAccessory
+  /**
+   * B4-B: the typed selection callback the surface composition injects
+   * (`onQuickTaskSelect` — a first-party internal option, never a Stable
+   * Extension API member). Invoked AFTER the accessory has already left
+   * Quick; it routes the stable row value to the current Task Runtime
+   * authority (`openQuickTaskItem`).
+   */
+  private readonly quickTaskSelect: ((value: string) => boolean) | undefined
   /** PR-D: the measured protected pinned chrome height the CURRENT fullscreen
    * widget grant was derived from (undefined on the regular surface, whose
    * grants are fixed). A change means the grant is stale — the widget rows
@@ -3664,6 +3681,8 @@ export class TuiApp {
     this.extensionHost = options.extensionHost
     this.onTerminalResize = options.onTerminalResize
     this.onWorkflowAction = options.onWorkflowAction
+    // B4-B: the typed Quick selection route (see the field doc).
+    this.quickTaskSelect = options.onQuickTaskSelect
     // M0: the unified status projection store. The runner passes its own
     // store; without one the app keeps an internal projection so the
     // footer always composes from a snapshot (headless tests drive it
@@ -4098,6 +4117,29 @@ export class TuiApp {
         chromeRows: (width) => this.taskQuickChromeRows(width),
       },
       onRequestRender: () => this.requestRender(),
+      // B4-B host callbacks: Up-at-first/Esc leave (the host restores the
+      // seat owner's focus), Enter/click commit AFTER leaving, an ACTIVE
+      // empty projection exits.
+      onExit: () => this.leaveTaskQuick(),
+      onActivate: (value) => {
+        this.leaveTaskQuick()
+        this.quickTaskSelect?.(value)
+      },
+      onEmpty: () => {
+        // Fired only while the accessory really holds focus (the component
+        // guards it) — a HIDDEN empty commit never re-enters this path.
+        this.leaveTaskQuick()
+      },
+      // B4-B: the first frame is the earliest point where the ↓ classifier's
+      // painted-frame guard is live. Recompose the footer hint ONLY when a
+      // Quick projection was committed before that frame (a cold publish —
+      // setQuickTaskItems before start — composed against the default layout
+      // width and its hint is stale). An idle no-task session must compose
+      // nothing here: the painted frame stays exactly as the pre-B4-B
+      // composition painted it.
+      onFirstPaint: () => {
+        if (this.taskQuick.getItems().length > 0) this.renderFooter()
+      },
     })
     this.editorSeat = new EditorSeatMount()
     this.editorSeat.replace(this.editor)
@@ -5912,6 +5954,15 @@ export class TuiApp {
     // Escape is a separate lifecycle action; it can never complete a
     // keyboard exit confirmation.
     this.clearExitConfirmation()
+    // Phase 3B/B4-B: the on-demand Task Quick owns Esc while it is ACTIVE —
+    // leave immediately (restore the editor seat), never arm the double-Esc
+    // cancel and never deliver the key to the background editor (plan §1.3:
+    // "不进入双 Esc cancel"). Busy-cancel keeps its Host-owned priority above
+    // this seam exactly as it does over every other physical-Escape seam.
+    if (this.taskQuick.focused) {
+      this.leaveTaskQuick()
+      return { consume: true }
+    }
     // While Escape is the effective interrupt trigger, BUSY cancel keeps its
     // Host-owned priority over EVERY physical Escape seam (shell-mode exit,
     // replacement-editor Esc). A remapped interrupt intentionally bypasses
@@ -6196,7 +6247,14 @@ export class TuiApp {
         return true
       },
       openTasks: () => {
-        this.events.onOpenTasks?.()
+        // B4-B: the on-demand Task Quick. The keymap composition's
+        // `quickDownEligible` predicate gated the RESOLUTION; this re-checks
+        // the live facts and a DECLINE consumes the key without replaying
+        // it (no double processing — the editor's own Down for this press
+        // is forfeited only when Quick actually entered... a declined
+        // entry consumed the key as the resolution's winner; the editor
+        // keeps every later Down).
+        this.enterTaskQuick()
         return true
       },
       openHistorySearch: () => {
@@ -6248,6 +6306,9 @@ export class TuiApp {
       editorPromptMode: () => this.seatInputMode() === 'prompt',
       autocompleteActive: (this.seatEditor() as { isShowingAutocomplete?: () => boolean }).isShowingAutocomplete?.() === true,
       tasksActive: this.tasksActive,
+      // LAZY like editorEmpty: the fork visual-line classifier runs once per
+      // candidate Down resolution, never on every keystroke (Step 2, B4-B).
+      quickDownEligible: () => this.quickDownEligible(),
     })
   }
 
@@ -15054,11 +15115,14 @@ export class TuiApp {
    * the question the ↓ route already answers through the input ladder (the
    * `TASKS_OPEN_AFFORDANCE` composition rule, plus the modal owners that
    * consume keys BEFORE keybinding resolution): active jobs/subagents or
-   * failure attention, NO input-capturing owner, and an EMPTY VISIBLE seat
-   * editor in PROMPT mode. The visible seat decides (a shell-mode empty
-   * body is composing a command; a plugin replacement editor contributes
-   * its own text/mode) — the hidden host editor's draft is never the gate
-   * (a P2 regression once used it and advertised a ↓ the gate refused).
+   * failure attention, NO input-capturing owner, and the on-demand Task
+   * Quick admission (`quickDownEligible()` — Phase 3B/B4-B replaced the
+   * empty-draft gate: a NON-EMPTY draft qualifies once its visible host
+   * editor sits on the last VISUAL line). The visible seat decides (a
+   * shell-mode body is composing a command; a plugin replacement editor
+   * contributes its own text/mode and takes no boundary claim) — the hidden
+   * host editor's draft is never the gate (a P2 regression once used it and
+   * advertised a ↓ the gate refused).
    *
    * The capture facts are the ACTIVE OWNERS, not the physical focus: a
    * Question / Save Location frame owns the editor SEAT (it is not a
@@ -15089,16 +15153,152 @@ export class TuiApp {
   private taskBrowserAvailable(): boolean {
     return this.keybindings.keysFor('app.tasks.open').includes('down')
       && this.tasksActive
-      && this.activeQuestions === undefined
-      && !this.approvals.hasPending()
-      && this.activeSaveLocation === undefined
-      // Phase 3A / PR-B integration: an ACTIVE optional tenant owns the seat and
-      // consumes the ↓ route, so the affordance must not advertise it either
-      // (the same "no input-capturing owner" rule as the modals above).
-      && !this.optionalTenantOwnsSeat()
-      && !this.overlayBroker.hasFocusedOverlay()
-      && this.seatEditor().getText().trim() === ''
-      && this.seatInputMode() === 'prompt'
+      && this.quickDownEligible()
+  }
+
+  /**
+   * B4-B: enter the on-demand Task Quick (the ONLY caller is the keymap's
+   * `app.tasks.open` action). Re-verifies the admission facts at dispatch
+   * time (the context predicate already gated the RESOLUTION, but the
+   * frame grant is checked here against the LIVE geometry), selects the
+   * global first row, moves the physical focus to the accessory, and asks
+   * for one render. Any failure is a DECLINE: the editor keeps the key and
+   * the raw Down is NOT replayed (no double processing).
+   */
+  /** The on-demand Quick's focus probe (the interaction suites read the
+   *  focus authority, never a private field). Test-only. */
+  taskQuickFocusedForTest(): boolean {
+    return this.taskQuick.focused
+  }
+
+  /**
+   * The on-demand Task Quick's production entry (B4-B): the ONLY caller in
+   * production is the keymap's `app.tasks.open` action; the L6 suites drive
+   * THIS method (never component internals) so the painted frame is always
+   * the production composition's. Public on the first-party TuiApp — not a
+   * Stable Extension API member.
+   */
+  enterTaskQuick(): boolean {
+    if (!this.quickDownEligible()) return false
+    if (!this.taskQuick.activate()) return false
+    // The frame grant: an ACTIVE Quick needs at least one task row in the
+    // current frame. planTaskQuickLayout's grant test runs inside render —
+    // probe it here with the same inputs to DECLINE before taking focus.
+    const width = Math.max(1, this.terminal.columns)
+    const layout = planTaskQuickLayout(
+      width,
+      this.terminal.rows,
+      this.taskQuickChromeRows(width),
+      this.taskQuick.getItems().length,
+      0,
+    )
+    if (layout.itemRows < 1) {
+      this.taskQuick.deactivate()
+      return false
+    }
+    this.activeScreen.setFocus(this.taskQuick)
+    this.requestRender()
+    return true
+  }
+
+  /**
+   * B4-B: leave the on-demand Task Quick — the ONLY exit path (Esc, Up at
+   * the global first row, commit, owner displacement, empty projection).
+   * Order matters (plan §5): the accessory's transient intent is committed
+   * HIDDEN first (blur → render cut), then the CURRENT seat owner's focus
+   * is restored — never a hard-coded editor, so a blocking owner that
+   * displaced the seat regains its own focus. Every synchronous callback
+   * (`deactivate` → focus restore) completes before any reentrant owner
+   * code runs, so a newer owner always wins.
+   */
+  private leaveTaskQuick(): void {
+    if (!this.taskQuick.focused) return
+    // Transient intent goes first: after the blur below the accessory must
+    // hold no selection and no pressed gesture (the render cut is driven by
+    // the focus flag itself).
+    this.taskQuick.deactivate()
+    // The focus transition blurs the accessory (TUI writes focused=false)
+    // and focuses the CURRENT seat owner — never a hard-coded editor, so a
+    // blocking owner that displaced the seat regains its own focus. The
+    // order is the plan's commit discipline: identity/focus committed
+    // before any callback returns.
+    this.restoreSeatFocusAfterQuick()
+    this.requestRender()
+  }
+
+  /**
+   * Restore the focus owner after Quick leaves: the live editor seat
+   * holder's CURRENT occupant (host editor or plugin winner), or the seat
+   * fallback component when the seat itself cannot take focus. Never the
+   * retired modal Quick.
+   */
+  private restoreSeatFocusAfterQuick(): void {
+    const seat = this.seatEditor()
+    this.activeScreen.setFocus(seat.component !== undefined ? seat.component : (this.seatFallbackComponent() ?? this.editor))
+  }
+
+  /**
+   * The on-demand Quick's task grant: whether the accessory currently holds
+   * >=1 projected row AND the ACTIVE frame can paint at least one task row
+   * (the same live plan `enterTaskQuick` admits with). The footer hint and
+   * the focus guards read this — never the accessory's `focused` flag.
+   */
+  private taskQuickGrantAvailable(): boolean {
+    if (this.taskQuick.getItems().length < 1) return false
+    const width = Math.max(1, this.terminal.columns)
+    const layout = planTaskQuickLayout(
+      width,
+      this.terminal.rows,
+      this.taskQuickChromeRows(width),
+      this.taskQuick.getItems().length,
+      0,
+    )
+    return layout.itemRows >= 1
+  }
+
+  /**
+   * The ONE admission predicate for the on-demand Task Quick (Phase 3B/B4-B):
+   * may the effective `app.tasks.open` Down composition take this key from
+   * the editor? Every fact is read-only; the predicate renders nothing, sets
+   * no focus and touches no Host/TaskRegistry source. The list:
+   *
+   * - live surface (`!disposed`) with Task Center support (`tasksActive` —
+   *   the footer badge's own authority) and a real Quick projection
+   *   (>=1 item); the composition additionally requires the ACTIVE root to
+   *   grant >=1 task row at frame time — enforced by `enterTaskQuick()`
+   *   returning false (a DECLINE lets the editor's own Down proceed);
+   * - the REAL focused component is the seat editor's component AND the seat
+   *   is the host editor (`seatEditor().id === 'host'`) — a plugin editor
+   *   gets no visual-boundary claim (X063 is the host fork's capability);
+   * - prompt input mode, autocomplete closed, and the fork's own
+   *   visual-line classifier admitting the Down boundary
+   *   (`canEnterTaskQuickFromDown`) — the ONLY visual-line authority;
+   * - no higher-priority input owner: Question/Approval/Save flows, an
+   *   ACTIVE optional History tenant, a focused managed overlay, the Job
+   *   Workspace, the Settings Workspace, a plugin editor seat winner, or a
+   *   pending leader sequence.
+   *
+   * The keymap resolution itself stays the single router: this predicate
+   * only feeds `keybindingContext()` and the footer hint.
+   */
+  private quickDownEligible(): boolean {
+    if (this.disposed) return false
+    if (!this.tasksActive) return false
+    if (this.taskQuick.getItems().length < 1) return false
+    if (this.activeQuestions !== undefined) return false
+    if (this.approvals.hasPending()) return false
+    if (this.activeSaveLocation !== undefined) return false
+    if (this.optionalTenantOwnsSeat()) return false
+    if (this.overlayBroker.hasFocusedOverlay()) return false
+    if (this.jobWorkspace !== undefined) return false
+    if (this.settingsWorkspace !== undefined) return false
+    if (this.keybindings.leaderMachine()?.pending === true) return false
+    const seat = this.seatEditor()
+    if (seat.id !== 'host') return false
+    if (this.activeScreen.getFocusedComponent() !== this.editor) return false
+    if (this.seatInputMode() !== 'prompt') return false
+    if (this.editor.isShowingAutocomplete()) return false
+    return this.editor.canEnterTaskQuickFromDown(this.terminal.columns)
   }
 
   /**
@@ -18474,6 +18674,12 @@ export class TuiApp {
    */
   setQuickTaskItems(items: readonly TaskPanelItem[]): void {
     this.taskQuick.setItems(items)
+    // B4-B: the projection count is half of the ↓ admission facts — the
+    // footer composes its hint from `taskBrowserAvailable()` at compose time,
+    // so ANY projection commit must recompose it (a badge-only commit never
+    // sees the accessory's rows change; the composer's own no-churn
+    // discipline keeps a same-value recompose free).
+    this.renderFooter()
   }
 
   /**
@@ -20034,7 +20240,7 @@ export class TuiApp {
       return { close: () => {}, setItems: () => {}, setRefreshState: () => {}, getViewState: () => ({
         mode: options.mode,
         openedFrom: options.openedFrom ?? 'command',
-        scope: options.scope ?? (options.mode === 'quick' ? 'active' : 'all'),
+        scope: options.scope ?? 'all',
         typeFilter: options.typeFilter ?? null,
         searchMode: options.initialSearchMode ?? false,
         searchQuery: options.initialQuery ?? '',
@@ -20067,9 +20273,12 @@ export class TuiApp {
         onStop: options.onStop,
         onViewportExpose: options.onViewportExpose,
         onRefresh: options.onRefresh,
-        onViewFull: state => {
+        // B4-B: the Quick→Full promotion is retired with the modal Quick —
+        // the Full Task Center is the only browser surface; the on-demand
+        // accessory below the editor is not a modal and is never promoted.
+        onViewFull: () => {
           requestClose('promote')
-          options.onViewFull?.(state)
+          options.onViewFull?.()
         },
         mode: options.mode,
         openedFrom: options.openedFrom,

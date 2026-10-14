@@ -448,6 +448,14 @@ export function createInteractionRuntime(options: InteractionRuntimeOptions): In
         options.onAttentionChanged()
       })
       publishAttention()
+      // B4-B: a cold discovery that parked a Question BEFORE this subscription
+      // registered fired no listener — publishAttention recomputes the parked
+      // COUNT, but the Task Quick projection (the attention ROWS composed by
+      // the surface Task Runtime) is refreshed only through
+      // `onAttentionChanged`. Fire it once for the already-discovered state so
+      // a quiet Questions-only session paints its Quick window without
+      // waiting for later churn.
+      options.onAttentionChanged()
     },
     controller: () => questionController,
     attentionRows: () => questionController?.attentionRows() ?? [],

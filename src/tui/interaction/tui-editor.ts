@@ -204,6 +204,29 @@ export class TuiEditor extends Editor {
     return this.inputMode
   }
 
+  /**
+   * Whether a real Down press at the CURRENT state would leave this editor at
+   * its last VISUAL line (the Task Quick on-demand entry seam, Phase 3B/B4-B).
+   *
+   * The classification is the fork editor's own (divergence X063): soft wrap,
+   * CJK width, empty lines, history browsing, autocomplete, jump mode and
+   * bracketed paste are all editor-internal state the host cannot re-derive.
+   * `physicalWidth` is the live terminal column count; the layout width is
+   * derived here with the SAME rule `render()` uses, so a mid-resize caller
+   * can never classify against the wrap map of a frame that is no longer
+   * painted. Read-only: this predicate never mutates editor state and never
+   * processes the key itself.
+   *
+   * This local bool alone never routes input — the host additionally requires
+   * the real focused seat, prompt mode, a valid `app.tasks.open` resolution
+   * and no higher-priority owner before Down enters Task Quick.
+   */
+  canEnterTaskQuickFromDown(physicalWidth: number): boolean {
+    const layoutWidth = Math.max(1, physicalWidth - 2 * this.getPaddingX())
+    return this.getInputMode() === 'prompt'
+      && this.canYieldDownAtLastVisualLine(layoutWidth)
+  }
+
   /** Dispose resources owned by the permanent host editor at final surface
    * teardown. EditorSeatHolder is deliberately non-owning: plugin editor
    * handoffs must never dispose this host editor. */

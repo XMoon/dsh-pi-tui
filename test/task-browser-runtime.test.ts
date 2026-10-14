@@ -613,21 +613,13 @@ test('Task Center dispatch re-validates session, driver and job state at confirm
     'a subagent stop must not call ctx.subagents directly')
 })
 
-test('Esc from a promoted full view returns to Quick ONLY for the quick-opener stack (review round)', () => {
+test('the modal Quick promotion/restore tail is retired (Phase 3B/B4-B)', () => {
   const marker = 'const openTasksBrowser = ('
   const open = taskSource.slice(taskSource.indexOf(marker), taskSource.indexOf('const handleWorkflowAction'))
-  // The cancel callback now takes the view state TuiApp captured BEFORE the
-  // browser frame was disposed (the panel is gone by the time it runs).
-  const cancelMarker = '(viewState) => {'
-  const cancelBlock = open.slice(open.indexOf(cancelMarker), open.indexOf('},', open.indexOf(cancelMarker)) + 3)
-  assert.ok(cancelBlock.includes('viewState'),
-    'the Esc path must use the state captured before the frame is disposed')
-  assert.ok(cancelBlock.includes("viewMode === 'full' && restoreState !== undefined"),
-    'Esc must reopen Quick only when the full view was promoted from Quick')
-  assert.ok(cancelBlock.includes("openTasksBrowser('quick', state)"),
-    'the Esc path must restore the shared context into Quick')
-  assert.ok(cancelBlock.includes('quickTaskState'),
-    'Quick state must be carried across the promote/demote round-trip')
+  assert.ok(!open.includes("openTasksBrowser('quick'"),
+    'no production path may reopen the retired quick modal')
+  assert.ok(!open.includes('quickTaskState'),
+    'the Quick→Full→Quick state carrier is retired with the modal')
 })
 
 test('the Task Center surface never calls the consuming jobs read API (review round)', () => {

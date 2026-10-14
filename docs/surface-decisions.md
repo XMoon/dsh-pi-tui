@@ -2745,3 +2745,73 @@ visible Question case, the SGR wheel with its negative controls, the
 acknowledgement negative with a modal positive control, resize anchoring and the
 no-Task-Center-capability skip) and `test/task-quick-accessory.test.ts` (the pure
 grant ladder, the single-physical-row projection and the window anchor).
+
+## The on-demand Task Quick: hidden by default, keyboard-focusable (B4-B)
+
+Owner product revision (2026-10-14): even with live tasks the accessory paints
+ZERO rows by default; the ONLY automatic crossing is an effective
+`app.tasks.open` Down from the focused HOST editor whose cursor sits on its
+last VISUAL line. `focused` is the one visibility authority — the component
+keeps no second `open` flag, and losing focus hides it again.
+
+- **The visual boundary is the fork editor's own (divergence X063).**
+  `TuiEditor.canEnterTaskQuickFromDown` delegates to the new protected
+  read-only seam `canYieldDownAtLastVisualLine(expectedLayoutWidth)` — the
+  editor's private word-wrap map plus its transient-mode flags
+  (history/autocomplete/jump/paste) are the only authority for "a real Down
+  would leave this editor at the last visual line". The host predicate
+  (`quickDownEligible`) adds the ownership facts: live surface, `tasksActive`,
+  a real projection (>=1 row), the host editor as the PHYSICALLY focused seat
+  in prompt mode, and no Question/Approval/Save/tenant/overlay/workspace/
+  leader owner. A plugin editor takes no claim. Any miss is a DECLINE: the key
+  is consumed without a replay.
+- **Admission and hint share ONE predicate.** `taskBrowserAvailable()` feeds
+  the footer `↓ view` / compact `↓` from the SAME `quickDownEligible()` the
+  routing resolves — the hint may never advertise a route the ladder refuses,
+  and `editorEmpty` no longer gates this composition (a non-empty draft
+  qualifies on its last visual line). The footer hint is a compose-time
+  projection: after a resize the classifier's painted-frame guard settles on
+  the next footer commit.
+- **Keyboard surface.** The component keymap's task actions drive it:
+  ↑↓ move the selection over the WHOLE row set (window follows, no wrap;
+  Down at the tail clamps), PgUp/PgDn page by the PAINTED row count, Up at the
+  global first row exits, `Esc` exits (Host physical-Escape seam: never arms
+  the double-Esc cancel, never reaches the background editor), Enter commits,
+  every other key is a consumed no-op. The selection is an EPHEMERAL stable
+  `value` — never restored across open/close, reconciled by stable ID on
+  commits with a bounded successor/predecessor fallback.
+- **Typed commit.** Enter (and a Fullscreen same-row press→release click —
+  the value-identity latch forbids press A → release B) first leave Quick,
+  then route the CURRENT projected row through `openQuickTaskItem`: the value
+  is verified against the CURRENT Quick projection and the session subject,
+  then resolved by the ONE `resolveTaskSelection` router the Full browser uses
+  (Question `attention.reopen`, subagent `enterView`, Job view). A stale value,
+  a switched session or cleanup refuse with `false` — the hidden Quick never
+  re-opens and nothing reports "opened".
+- **Owner displacement.** Every blocking owner (Question/Approval/Save,
+  optional tenant, managed capturing overlay, Job Workspace, Settings, plugin
+  editor winner, session reset, screen swap) terminates Quick at its own
+  composition commit; a commit that empties the ACTIVE projection exits
+  through `onEmpty` (guarded to the real focused component). The exit restores
+  the CURRENT seat occupant, never a hard-coded editor.
+- **The modal Quick is retired.** `openTasksBrowser` narrows to `'full'`
+  (`/tasks` and the Workflow-scoped views); the Quick→Full promotion pseudo-row,
+  the Esc restore-into-Quick tail, the modal-only state carrier and the panel's
+  `quick` mode are removed with their consumers — no shim, no dead branch. The
+  Full browser's Scope/Search/Type/Stop/Job-child semantics are untouched.
+- **Row budget while ACTIVE.** The grant ladder is B4-A's (live frame, one
+  transcript row, proportional share, four-row ceiling); a frame with no room
+  for a task row DECLINES the entry. The selected row paints `> ` in
+  `primary` — D6's one active device; the status group stays `‣ Word`.
+
+Evidence: `test/task-quick-b4b-interaction.test.ts` (S1–S14 minus the pointer
+matrix: hidden-by-default both with and without tasks, the boundary drives the
+entry with the draft preserved, navigation with the global-first Up exit, the
+typed route's refusal + open sides, the parked-Question reopen through the
+production sink, shell-mode/non-last-line fail-closed, the disabled action's
+hint + route drop, the 44-column CJK wrapped entry and the 0-grant decline,
+the session-reset exit, `/tasks` Full filtering with Quick hidden),
+`test/task-quick-b4a-composition.test.ts` (the ACTIVE-frame witnesses of the
+same production composition) and `packages/pi-tui/test/editor-task-quick-boundary.test.ts`
+(the X063 classifier: wrap segments, transient modes, the width guard, and the
+non-consuming negative).

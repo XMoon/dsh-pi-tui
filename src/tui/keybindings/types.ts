@@ -208,6 +208,16 @@ export interface KeybindingContext {
   readonly autocompleteActive: boolean
   /** Jobs/subagents are active (the ↓ browser affordance). */
   readonly tasksActive: boolean
+  /**
+   * The on-demand Task Quick admission (Phase 3B/B4-B): the focused HOST
+   * editor sits at its last VISUAL line in prompt mode with no transient
+   * editor mode (history/autocomplete/jump/paste) owning Down, so the
+   * effective `app.tasks.open` Down composition may take the key. A
+   * boolean, or a LAZY thunk (the same lazy contract as `editorEmpty` —
+   * the visual-line classification runs only when a candidate Down
+   * resolves, never on every keystroke). Defaults to `false`.
+   */
+  readonly quickDownEligible: boolean
 }
 
 /** Where an effective rule came from (plan §7). */

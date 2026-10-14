@@ -375,7 +375,6 @@ Measured, still in use and *not* introduced by v1:
 | `▼` `▶` U+25BC/25B6 | the hardcoded sub-call / workflow disclosure (the registry's `▸`/`▾` are neutral) |
 | `◆` U+25C6 | the footer configurator's move-mode marker |
 | `▏` U+258F | the footer configurator's text-edit cursor |
-| `⇧` U+21E7 | the task browser's `Tab/⇧Tab` hint |
 | `●` `○` `◐` `×` | per-status glyphs (§11.4) — `● RUNNING` is the one D5 removes |
 
 The forward-looking rule is narrower and checkable:
@@ -896,10 +895,9 @@ is next touched for another reason** (never by a mass search/replace):
 | all overlays | ad-hoc frame sizes (64/72/76/88/100% × 24/26/28) instead of the four-step ladder (D10) | next change to that overlay |
 | keybindings UI list / action editor | its own list hardcodes the cursor `›` in `primary` with a ONE-cell gutter (`keybindings/ui/list.ts:101,115`, `ui/action-editor.ts:61`) where §4.3/D3 want `>` (U+203A is EAW-ambiguous) and the family gutter is two cells; its footer hints read `<Key>: <verb>` (`Enter: details · type: search · ←→: edit · ↑↓: move · Esc: back`) instead of §7.1's `<Key> <verb>` | next keybindings-UI change |
 | question flow hints | lowercase keys with `←`/`←→` (`'← back · ↵ submit · esc cancel'`, `'←→ edit'`) instead of §4.1's `Esc`-style casing and the width-safe arrow rule | next question-flow change |
-| task browser hint | `Esc close` sits before `S stop` instead of last (D8) | next task-panel change |
 | approval dialog | bracketed key choices `[y] allow once   [n] reject   [esc/ctrl+c] cancel` (three-space separator, lowercase keys) | next approval change |
 | task browser | `│` column split for a master/detail pair (`task-panel.ts:907`) | next task-panel change |
-| task quick panel, plugin-manager | already follow the ` · ` hint separator, but their hints capitalise bare keys (`S stop`) and the task browser writes `Tab/⇧Tab` with an EAW-ambiguous arrow | next change to that bar |
+| plugin-manager | its hint capitalises bare keys (`S stop`) instead of §4.1's lowercase | next change to that bar |
 | footer configurator help lines | capitalised verbs (`'↑↓ Select · Enter Open · S Save · Esc Close'`) where §4.1/§7.1 want lowercase verbs | next configurator change |
 | picker / overlay titles | the picker header is bold `textMuted` (`groupHeader`) and the output-viewer and approval titles carry no ink at all, where role 1 is bold `textStrong` | next change to that overlay |
 | keybindings UI | `Saving…` painted `accent` | next keybindings UI change |
@@ -907,7 +905,7 @@ is next touched for another reason** (never by a mass search/replace):
 | transcript disclosure | three shapes for one semantic: `🐋/🐳` (Focus), `▸/▾` (Activity/cluster), hardcoded `▼/▶` (sub-call/workflow, `tui-app.ts:16415,16663,16706`) | next disclosure change |
 | transcript `🐋` | the same glyph is the assistant bullet (`icons.ts:80`) and the Focus-collapsed disclosure (`:74`) | next icon-registry change |
 | workflow member rows | colour-only status glyphs `!`/`•`/`●` with no word (`tui-app.ts:470-478`); must become word + the shared `‣` | next workflow-rendering change |
-| task browser / task quick panel | per-status glyph set `?`/`◐`/`×`/`○`/`●` (`task-panel.ts:110-118`) where D5+D7 allow only the shared `‣` + a word; `○` (U+25CB) and `●` are also EAW-ambiguous | next change to that panel |
+| task browser panel | per-status glyph set `?`/`◐`/`×`/`○`/`●` (`task-panel.ts:110-118`) where D5+D7 allow only the shared `‣` + a word; `○` (U+25CB) and `●` are also EAW-ambiguous (the on-demand task quick accessory is D5+D7-clean — its status group is `‣ Word`, its selection marker `> `) | next change to that panel (Phase 3C records the full-panel disposition) |
 | viewer subject bar | `● running` / `○ inactive` (`viewer-subject-bar.ts:88-90`) — same per-status glyph debt, and both glyphs are EAW-ambiguous | next subject-bar change |
 | failed generic tool | the result text stays unpainted/`textDim`; only the `[error]` pill carries the colour | next tool-card change |
 | chrome-wide ambiguous glyphs | ` · `, `─`, `↗`, `▼`/`▶`, `◆`, `▏`, `⇧`, `×`, `○`, `◐`, `●`; measured list in §4.3 | only if CJK-width terminals become a supported target (D5 already removed the Job status `●`) |

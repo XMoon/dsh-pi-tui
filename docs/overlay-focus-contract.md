@@ -348,18 +348,29 @@ has exactly ONE per-open finalizer, and every close route funnels through it:
   workspace does not even suppress its Task Browser as an overlay: it PAUSES the
   whole physical screen the browser lives on (§10.1).
 - **The Task Browser owner gets a reason exactly once per open** (`cancel` /
-  `select` / `promote` / `external`). `promote` (Quick → Full) is the ONE reason
-  that preserves the dataset scope; every terminal reason resets it. The retired
-  browser identity is cleared BEFORE the Job workspace is closed, so a callback
-  that synchronously opens a newer browser wins; a late callback from a retired
-  browser is a strict no-op.
-- **A retired browser's navigation tails are generation-fenced.** The Esc → Quick
-  restore and the Quick → Full promotion close over the monotonic epoch of the
-  browser that opened them, so a browser a synchronous callback opened while the
-  old one was closing (for example a plugin `onFocus` fired by the restore of
-  physical focus) keeps the slot. The retired browser's OWN token cannot express
-  this: its `onRetired` legitimately clears it, so "the token is clear" cannot be
-  told apart from "someone newer owns the slot".
+  `select` / `external`; B4-B retired the `promote` reason with the modal
+  Quick — the Full Task Center IS the browser and the on-demand accessory is
+  not a modal to promote from). Every terminal reason resets the dataset
+  scope. The retired browser identity is cleared BEFORE the Job workspace is
+  closed, so a callback that synchronously opens a newer browser wins; a late
+  callback from a retired browser is a strict no-op.
+- **A retired browser's navigation tails are generation-fenced.** The tails
+  close over the monotonic epoch of the browser that opened them, so a browser
+  a synchronous callback opened while the old one was closing (for example a
+  plugin `onFocus` fired by the restore of physical focus) keeps the slot. The
+  retired browser's OWN token cannot express this: its `onRetired` legitimately
+  clears it, so "the token is clear" cannot be told apart from "someone newer
+  owns the slot". (B4-B retired the Esc → Quick restore tail; the fence now
+  guards a synchronous open during the close.)
+- **The on-demand Task Quick is NOT an overlay** (B4-B): it is the first-party
+  pinned accessory below the editor seat, and `focused` (written by the TUI
+  focus transition) is its one visibility authority. Entering it is a normal
+  `setFocus(taskQuick)` from the keymap-admitted `app.tasks.open`; leaving it
+  restores the CURRENT seat occupant. Every blocking owner terminates it at
+  its own composition commit — before the new owner takes focus — and an
+  ACTIVE projection that empties exits through the component's `onEmpty`
+  (guarded to the real focused component, so a hidden empty commit never
+  re-enters the host lifecycle).
 - **The Job workspace closes before its parent browser's physical hide** on an
   explicit close; on a physical disposal the workspace's own finalizer releases
   it. Either way the observer is released exactly once (per-open `releaseOnce`),
