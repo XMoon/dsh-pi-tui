@@ -143,6 +143,7 @@ import { isDiffResult, summarizeDiffs } from './tui/transcript/diff-projection.t
 import { renderDiffLines, renderDiffView } from './tui/components/transcript/diff.ts'
 import { ENABLE_FOCUS_REPORTING, isFocusReport } from './tui/notification/terminal-focus.ts'
 import { TaskBrowserPanel } from './tui/panels/task-panel.ts'
+import { TaskQuickAccessory } from './tui/panels/task-quick-accessory.ts'
 import { JobInspectorPanel, type JobCopyUnavailable } from './tui/panels/job-inspector-panel.ts'
 import {
   SettingsWorkspacePanel,
@@ -2568,6 +2569,13 @@ export class TuiApp {
   /** The M4 widget zones (extension widgets around the editor seat). */
   private readonly widgetsAbove: Text
   private readonly widgetsBelow: Text
+  /**
+   * Phase 3B / B4-A: the first-party PASSIVE Task Quick accessory — one
+   * bounded, non-focusable task window directly below the editor seat and
+   * ABOVE the public widget zone. It owns no data: the surface Task Runtime
+   * publishes its projected rows through {@link TuiApp.setQuickTaskItems}.
+   */
+  private readonly taskQuick: TaskQuickAccessory
   /** PR-D: the measured protected pinned chrome height the CURRENT fullscreen
    * widget grant was derived from (undefined on the regular surface, whose
    * grants are fixed). A change means the grant is stale — the widget rows
@@ -4072,6 +4080,19 @@ export class TuiApp {
     // plugin can never touch the editor seat or the root layout.
     this.widgetsAbove = new Text('', 0, 0)
     this.widgetsBelow = new Text('', 0, 0)
+    // The passive Task Quick accessory: a first-party, non-focusable pinned
+    // row band between the editor seat and the public below widget zone. Its
+    // grant is derived from the LIVE frame (terminal rows, the measured pinned
+    // chrome and one visible transcript row) and never borrows a row from the
+    // editor, the footer, the public widget zones or the transcript floor.
+    this.taskQuick = new TaskQuickAccessory({
+      geometry: {
+        columns: () => this.terminal.columns,
+        rows: () => this.terminal.rows,
+        chromeRows: (width) => this.taskQuickChromeRows(width),
+      },
+      onRequestRender: () => this.requestRender(),
+    })
     this.editorSeat = new EditorSeatMount()
     this.editorSeat.replace(this.editor)
     // If a plugin editor already won the registry (registration before
@@ -4084,7 +4105,10 @@ export class TuiApp {
     // is always the row directly above the editor border (pi's
     // statusContainer). The widget zones sit directly around the editor
     // seat: above between the working row and the seat, below between the
-    // seat and the footer.
+    // seat and the footer. The first-party Task Quick accessory is the
+    // editor's OWN below-editor band, so it sits between the seat and the
+    // public below widget zone — the public slot keeps its placement and
+    // lifecycle.
     this.tui.addChild(this.header)
     this.tui.addChild(this.viewerSubjectBar)
     this.tui.addChild(this.messagesView)
@@ -4095,6 +4119,7 @@ export class TuiApp {
     this.tui.addChild(this.working)
     this.tui.addChild(this.widgetsAbove)
     this.tui.addChild(this.editorSeat)
+    this.tui.addChild(this.taskQuick)
     this.tui.addChild(this.widgetsBelow)
     this.tui.addChild(this.footer)
     this.tui.setFocus(this.editor)
@@ -7174,6 +7199,11 @@ export class TuiApp {
         // so a compensated fullscreen simply shows no widget zone.
         { component: this.widgetsAbove, shrink: 0 },
         { component: this.editorSeat, shrink: 0 },
+        // Phase 3B / B4-A: the SAME passive Task Quick accessory rides the
+        // pinned stack in the editor's own below-editor band (between the seat
+        // and the public below widget zone). It renders ZERO rows on a 0 grant
+        // or an empty projection, so it never reserves a blank band.
+        { component: this.taskQuick, shrink: 0 },
         { component: this.widgetsBelow, shrink: 0 },
         { component: this.footer, shrink: 0 },
       ])
@@ -7506,6 +7536,17 @@ export class TuiApp {
       used += chrome.render(safeWidth).length
     }
     return used
+  }
+
+  /** The live pinned chrome rows the Task Quick accessory's grant reserves:
+   *  the History set PLUS the editor seat — the accessory ADDS a band below the
+   *  seat, it never replaces it, so the seat is a real reservation here
+   *  (measuring it here is not cyclic: the seat does not measure the
+   *  accessory). Both roots carry exactly this chrome set, so one helper serves
+   *  the regular document and the fullscreen stack. */
+  private taskQuickChromeRows(width: number): number {
+    const safeWidth = Math.max(1, Math.floor(width))
+    return this.historyChromeRows(safeWidth) + this.editorSeat.render(safeWidth).length
   }
 
   /**
@@ -18407,6 +18448,17 @@ export class TuiApp {
     this.projectActivity()
     this.syncExtensionState()
     this.renderFooter()
+  }
+
+  /**
+   * Phase 3B / B4-A: publish the passive Task Quick window. This is the
+   * surface Task Runtime's PRIVATE first-party sink (never a public extension
+   * API and never a focusable widget slot): the rows are the runtime's already
+   * projected `TaskPanelItem`s, and this method only forwards them to the
+   * accessory — it derives no task fact of its own and acknowledges nothing.
+   */
+  setQuickTaskItems(items: readonly TaskPanelItem[]): void {
+    this.taskQuick.setItems(items)
   }
 
   /**

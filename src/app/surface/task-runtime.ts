@@ -25,7 +25,7 @@
 
 import { buildTaskRows, isActiveJobStatus, isSubagentRowInterruptible, subagentInterruptParent, viewerAccessOf, workflowMemberViewerTarget, type TaskBrowserJobInput, type TaskBrowserRow } from '../../domain/task/browser.ts'
 import { TaskBrowserRuntime, type TaskBrowserDatasetScope, type TaskBrowserRuntimeHooks, type TaskBrowserSummary } from './task-browser-runtime.ts'
-import { rowGroup, taskRowLabel, taskTreePrefix, viewerAccessHint, type TaskPanelItem, type TaskScope } from './task-presentation.ts'
+import { isTaskItemActive, projectTaskItems, rowGroup, taskRowLabel, taskTreePrefix, viewerAccessHint, type TaskPanelItem, type TaskScope } from './task-presentation.ts'
 import { fullQuestionRows, questionIdentityOf, quickQuestionRows } from './task-attention.ts'
 import type { QuestionAttentionRow } from './question-controller.ts'
 import type { JobInspectorHandle, TaskBrowserHandle, TuiApp, WorkflowAction } from '../../tui-app.ts'
@@ -314,6 +314,33 @@ function taskPanelItems(target: readonly TaskBrowserRow[]): TaskPanelItem[] {
 }
 
 /**
+ * The ONE passive Quick projection (Phase 3B / B4-A): the SAME Quick
+ * active/ancestor/attention policy the modal Task Browser applies when it opens
+ * in Quick mode, over the SAME composed rows (parked Question attention above
+ * the work rows), with the modal-only `view-full` promotion row removed — that
+ * row is a keyboard promotion action inside the modal, not a task.
+ *
+ * It is a pure read over the runtime's already-committed row facts plus the
+ * Question controller's detached attention model: it never lists a source,
+ * never reads the footer badge back and never keeps a second registry. `N` (the
+ * row total the accessory's window shows) is therefore exactly the number of
+ * rows the accessory can scroll to.
+ */
+export function quickTaskProjection(
+  rows: readonly TaskBrowserRow[],
+  attention: readonly QuestionAttentionRow[],
+): TaskPanelItem[] {
+  const items = [...quickQuestionRows(attention), ...taskPanelItems(rows)]
+  return projectTaskItems(items, {
+    scope: 'active',
+    autoExpandRunning: true,
+    // Quick surfaces attention rows only while no live work is present — the
+    // same condition the modal Quick evaluates at open.
+    includeAttentionInActive: !items.some(isTaskItemActive),
+  }).rows.filter(item => item.kind !== 'view-full')
+}
+
+/**
  * The opening Task-Browser row projection of ONE Job workspace (Phase 3B /
  * B1-A). It is the FIRST-FRAME identity fallback of the selected-Job view — the
  * observer's snapshots are the authority from the first one on — and it is
@@ -524,9 +551,27 @@ export function createTaskRuntime(options: TaskRuntimeOptions): TaskRuntime {
     return [...questionItems, ...taskPanelItems(rows)]
   }
 
+  /**
+   * Publish the passive Quick accessory window (B4-A). The accessory is
+   * PiTui-only chrome exactly like the roster badge and the summary: a renderer
+   * without a Task Center (read-only TSP) skips the commit instead of mounting a
+   * fake projection. The rows are re-projected from the runtime's committed row
+   * facts + the controller's detached attention model on every call — this sink
+   * is NEVER a second catalog, and it never acknowledges a failure.
+   */
+  const publishQuickProjection = (): void => {
+    if (options.isCleanedUp()) return
+    if (!options.display().supportsTaskCenter) return
+    options.mounted().setQuickTaskItems(quickTaskProjection(taskBrowserRows, options.attention.rows()))
+  }
+
   const commitRows = (rows: readonly TaskBrowserRow[], preferred?: string): void => {
     if (options.isCleanedUp()) return
     taskBrowserRows = [...rows]
+    // The passive below-editor accessory projects from THIS commit whether or
+    // not a modal browser is open (B4-A): an unopened browser is not a reason
+    // to leave the live task window stale.
+    publishQuickProjection()
     if (activeTaskBrowserMode === undefined) {
       // No browser open: only the select-path identity source is updated.
       return
@@ -1219,12 +1264,17 @@ export function createTaskRuntime(options: TaskRuntimeOptions): TaskRuntime {
           }))
           if (options.display().supportsTaskCenter) options.mounted().setTasks(tasks)
           // A jobs-only session has no catalog coordinator, so this is the
-          // ONLY refresh channel for an OPEN browser. Keep it in step with
-          // the registry, or a Job detail's hidden parent returns with stale
-          // status (the subagents path commits through TaskBrowserRuntime).
-          if (taskRuntime === undefined && activeTaskBrowser !== undefined && activeTaskBrowserMode !== undefined) {
+          // ONLY refresh channel for the OPEN browser AND for the passive
+          // accessory. The rows are kept in step with the registry even while
+          // no browser is open — otherwise a Job detail's hidden parent returns
+          // with a stale status (the subagents path commits through
+          // TaskBrowserRuntime) and the below-editor window goes stale.
+          if (taskRuntime === undefined) {
             taskBrowserRows = buildTaskRows(snapshots, [])
-            activeTaskBrowser.setItems(taskPanelItemsWithAttention(taskBrowserRows, activeTaskBrowserMode))
+            publishQuickProjection()
+            if (activeTaskBrowser !== undefined && activeTaskBrowserMode !== undefined) {
+              activeTaskBrowser.setItems(taskPanelItemsWithAttention(taskBrowserRows, activeTaskBrowserMode))
+            }
           }
         }
         // Events route by SEMANTICS, mirroring the TaskBrowserRuntime's own
@@ -1388,6 +1438,10 @@ export function createTaskRuntime(options: TaskRuntimeOptions): TaskRuntime {
         () => { if (options.display().supportsTaskCenter) options.mounted().setTasks([]) },
         () => { if (options.display().supportsTaskCenter) options.mounted().setAgents([]) },
         () => { taskBrowserRows = [] },
+        // The passive below-editor window is session-scoped state like the
+        // badge/summary mirrors: the new session must never paint the old
+        // session's tasks. No acknowledgement is ever issued here.
+        () => { if (options.display().supportsTaskCenter) options.mounted().setQuickTaskItems([]) },
       ])
     },
     openTasksBrowser(viewMode, restoreState, scope, header) {
@@ -1402,7 +1456,13 @@ export function createTaskRuntime(options: TaskRuntimeOptions): TaskRuntime {
     refreshAttentionRows() {
       // The Question-attention subscription is a PRESENTATION-only refresh: it
       // never re-lists the Subagent catalog or touches the Job registry.
-      if (options.isCleanedUp() || activeTaskBrowserMode === undefined) return
+      if (options.isCleanedUp()) return
+      // The passive accessory reads the SAME detached attention authority as
+      // the modal rows, so a parked Question appears in (and leaves) the
+      // below-editor window with the modal projection — an unopened browser is
+      // not a reason to miss human attention.
+      publishQuickProjection()
+      if (activeTaskBrowserMode === undefined) return
       activeTaskBrowser?.setItems(taskPanelItemsWithAttention(taskBrowserRows, activeTaskBrowserMode))
     },
     disposeJobEvents() {
