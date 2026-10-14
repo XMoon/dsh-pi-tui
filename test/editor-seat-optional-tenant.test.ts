@@ -155,7 +155,7 @@ interface AppHarness {
   openTasks(): number
 }
 
-function startApp(registry?: EditorRegistry): AppHarness {
+function startApp(registry?: EditorRegistry, history?: import('../src/client/history/search.ts').HistorySearchSource): AppHarness {
   const vt = new VirtualTerminal(100, 30)
   const submissions: string[] = []
   const steers: string[] = []
@@ -173,7 +173,10 @@ function startApp(registry?: EditorRegistry): AppHarness {
     onSteer: (text) => { steers.push(text) },
     onTerminalFocus: (focused) => { focusReports.push(focused) },
     onOpenTasks: () => { openTaskCalls += 1 },
-  }, registry === undefined ? {} : { editorRegistry: registry })
+  }, {
+    ...(registry === undefined ? {} : { editorRegistry: registry }),
+    ...(history === undefined ? {} : { historySearchSource: history }),
+  })
   app.start()
   harness.app = app
   startedApps.add(app)
@@ -983,34 +986,43 @@ test('B-22: a capturing overlay keeps the keyboard; the tenant regains it only w
   lease?.close()
 })
 
-test('B-23: the existing History overlay is suspended/restored by a Question and stays outside the tenant seam', async () => {
+test('B-23: History is the first REAL optional-seat tenant; a Question parks and restores the SAME seat', async () => {
   const vt = new VirtualTerminal(100, 30)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
-    historySearchSource: { search: async () => ({ results: [], exhausted: true }) },
+    historySearchSource: {
+      search: async () => ({
+        results: [{ id: 'h1', content: 'history entry', cwd: '/work/a', ts: 1, sourceFile: '/h.jsonl', sourceByteOffset: 1 }],
+        exhausted: true,
+      }),
+    },
   })
   app.start()
   startedApps.add(app)
   await vt.waitForRender()
   app.openHistorySearch()
   await vt.waitForRender()
-  assert.ok(viewport(vt).includes('History Search'), `the history overlay must be up:\n${viewport(vt)}`)
+  await settle()
+  assert.ok(viewport(vt).includes('Input history'), `the History tenant owns the editor seat:\n${viewport(vt)}`)
+  // Phase 3B / B3-A retired the old managed History overlay: no overlay node is
+  // created and no responsive frame survives.
+  assert.equal(app.overlayGraphState().handles, 0, 'History is a SEAT tenant, never an overlay node')
   vt.sendInput('abc')
   await vt.waitForRender()
-  assert.ok(viewport(vt).includes('abc'), 'the query is typed into the history panel')
+  assert.ok(viewport(vt).includes('abc'), 'the query is typed into the History panel')
 
   const question = app.askQuestions([{ id: 'q1', question: 'history under a question?', options: [{ label: 'Yes' }] }])
   await vt.waitForRender()
   assert.ok(viewport(vt).includes('history under a question?'))
-  assert.ok(!viewport(vt).includes('History Search'), 'the history overlay is suspended, not migrated')
+  assert.ok(!viewport(vt).includes('Input history'), 'the parked History tenant is not painted')
   vt.sendInput('\r')
   vt.sendInput('\r')
   assert.deepEqual(await question, [{ id: 'q1', selected: ['Yes'] }])
   await vt.waitForRender()
-  assert.ok(viewport(vt).includes('History Search'), 'the history overlay is restored by its own suspension')
-  assert.ok(viewport(vt).includes('abc'), 'the query survives the suspension')
+  assert.ok(viewport(vt).includes('Input history'), 'the SAME History tenant is restored after the settle')
+  assert.ok(viewport(vt).includes('abc'), 'the query survives the park/restore round trip')
   vt.sendInput('\x1b')
   await vt.waitForRender()
-  assert.ok(!viewport(vt).includes('History Search'), 'the history panel keeps its own Esc close contract')
+  assert.ok(!viewport(vt).includes('Input history'), 'the panel keeps its own Esc close contract')
 })
 
 test('B-24: the tenant takes ordinary keys; Host-reserved and protocol input keeps its owner', async () => {
@@ -3256,4 +3268,51 @@ test('B-60: a NEWER owner that leaves inside the swap window still hands the key
   assert.equal(app.ownedApprovalFramesForTest(), 0)
   assert.equal(app.assertOverlayForestForTest(), undefined)
   void rootLease
+})
+
+test('B-56: History as the seat tenant restores the plugin editor WINNER without writing the hidden host editor', async () => {
+  const registry = new EditorRegistry()
+  const history: import('../src/client/history/search.ts').HistorySearchSource = {
+    search: async () => ({
+      results: [{ id: 'h1', content: 'restored prompt', cwd: '/work/a', ts: 1, sourceFile: '/h.jsonl', sourceByteOffset: 1 }],
+      exhausted: true,
+    }),
+  }
+  const { vt, app } = startApp(registry, history)
+  await vt.waitForRender()
+  app.setDraft('host draft')
+  await vt.waitForRender()
+  const plugin = { text: '' }
+  registerLiveView(registry, 'live', plugin)
+  app.reconcileEditorNow()
+  app.requestRender()
+  await vt.waitForRender()
+  app.setDraft('plugin draft')
+  await vt.waitForRender()
+  assert.equal(app.seatTextForTest(), 'plugin draft', 'the plugin editor owns the seat document')
+
+  // Esc: the plugin draft is untouched and the hidden host editor never moves.
+  app.openHistorySearch()
+  await vt.waitForRender()
+  await settle()
+  assert.ok(viewport(vt).includes('Input history'), `the History tenant owns the seat:\n${viewport(vt)}`)
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+  assert.equal(app.seatTextForTest(), 'plugin draft', 'Esc must leave the plugin draft unchanged')
+  assert.equal(app.hostEditorTextForTest(), 'host draft', 'Esc must never write the hidden host editor')
+
+  // Enter: the CURRENT winner receives the accepted content.
+  app.openHistorySearch()
+  await vt.waitForRender()
+  await settle()
+  vt.sendInput('\r')
+  await vt.waitForRender()
+  await settle()
+  assert.equal(app.seatTextForTest(), 'restored prompt', 'Enter populates the CURRENT seat winner')
+  assert.equal(plugin.text, 'restored prompt', 'the plugin editor received the accepted content')
+  assert.equal(app.hostEditorTextForTest(), 'host draft', 'the hidden host editor is never written')
+  // The derived focus seat is the EDITOR again (the plugin winner's compiled
+  // view is re-created per projection, so its identity is not the assertion —
+  // the live seat derivation is).
+  assert.equal(app.focusSeatForTest(), 'editor', 'focus returns to the editor seat after the restore')
 })

@@ -215,7 +215,7 @@ import {
 import { TranscriptSearchComponent } from './tui/interaction/transcript-search.ts'
 import { CompactTextPreview } from './tui/components/transcript/compact-text-preview.ts'
 import { longMessageDisclosureWindow } from './tui/transcript/long-message-disclosure.ts'
-import { HistoryPanel, historyOverlayGeometry } from './tui/panels/history-panel.ts'
+import { HistoryPanel } from './tui/panels/history-panel.ts'
 import type { HistorySearchSource } from './client/history/search.ts'
 import { QuestionFlow, QuestionFrame, type QuestionFlowDraft } from './tui/interaction/question.ts'
 import { ApprovalRuntime } from './tui/interaction/approval-runtime.ts'
@@ -2986,12 +2986,12 @@ export class TuiApp {
   /** The pre-wrap `terminal.write` (diagnostic builds only): restored in
    * dispose() so the opt-in instrumentation never outlives the app. */
   private scrollProfileOriginalWrite: ((data: string) => void) | undefined
-  /** The Ctrl+R input-history panel, while one is open. */
+  /** The Ctrl+R input-history panel, while one is open. Phase 3B / B3-A: it is
+   * the ONE optional editor-seat tenant (no overlay, no second screen). */
   private historyPanel: HistoryPanel | undefined
-  /** The overlay handle of the history panel (hide() closes it). */
-  private historyOverlay: OverlayHandle | undefined
-  /** The responsive shell survives a resize and a fullscreen screen swap. */
-  private historyResponsiveFrame: ResponsiveOverlayFrame | undefined
+  /** The ONE lease `tryOpenOptionalSeatTenant` returned for the open History
+   * panel (the only close path; it owns the panel disposal). */
+  private historyLease: { close(): void } | undefined
   /** The `/model` picker component while one is open: retained across a
    *  fullscreen screen swap (the remountable overlay opts out of
    *  disposeOnHide, so the SAME component keeps its query/view/selection). */
@@ -4779,9 +4779,10 @@ export class TuiApp {
     const unstableLeases = [...this.unstableMountLeases]
     const brokerSettles = [...this.pendingBrokerSettles]
     const footerClosers = [...this.footerConfiguratorClosers]
-    const historyPanel = this.historyPanel
-    this.historyPanel = undefined
-    this.historyOverlay = undefined
+    // Phase 3B / B3-A: the History panel is the optional seat tenant, so its
+    // teardown below (`optionalSeat.close()`) is the ONE release path; the seat
+    // identity is dropped with it.
+    this.historyLease = undefined
     const modelPickerComponent = this.modelPickerComponent
     this.modelPickerComponent = undefined
     this.modelPickerOverlay = undefined
@@ -4903,9 +4904,6 @@ export class TuiApp {
       // must never focus() or repaint a dead component.
       () => { this.searchOverlay = undefined },
       () => { this.searchComponent = undefined },
-      // The history-search panel dies with the surface: its in-flight search
-      // is aborted (a late result must never touch a dead component).
-      () => historyPanel?.dispose(),
       // The /model picker component dies with the surface too: a remountable
       // overlay opts out of disposeOnHide, so final teardown owns it explicitly.
       () => modelPickerComponent?.dispose?.(),
@@ -5238,6 +5236,22 @@ export class TuiApp {
     if (this.approvals.isActive()) {
       this.clearExitConfirmation()
       return this.approvals.handleKey(data)
+    }
+    // Phase 3B / B3-A: while the History optional tenant owns the seat, physical
+    // Escape and Ctrl+C are its OWN cancel — the plan's single narrow exception,
+    // consumed BEFORE the Host physical-Escape/interrupt seam and the global
+    // exit admission, so closing History never interrupts the agent or quits the
+    // TUI. Every other Host-reserved input keeps its owner: the blocking owners
+    // above already had their chance, a REMAPPED exit key still runs the Host
+    // admission, and terminal protocol chunks are stopped later by the protocol
+    // sink fence.
+    const historySeat = this.historyPanel
+    if (historySeat !== undefined && historySeat.cancelsOnKey(data)
+      && this.revalidateOptionalSeat() && this.optionalSeatOwnsKeyboard()) {
+      this.clearExitConfirmation()
+      historySeat.handleInput(data)
+      this.requestRender()
+      return { consume: true }
     }
     // Phase 3B / B1-A: a leased Job workspace screen owns ordinary input. The
     // workspace is READ-ONLY — the key goes to its presenter (Esc closes it,
@@ -7272,6 +7286,11 @@ export class TuiApp {
     // re-projected), so a throwing caller cleanup cannot leave the swap
     // half-done.
     this.revalidateOptionalSeat()
+    // Phase 3B / B3-A: the SAME History panel survives the swap (the seat mount
+    // is shared), but the pointer frame it was pressed against does not — drop
+    // the in-flight gesture/highlight so a release can never resolve against a
+    // frame the other root painted.
+    this.historyPanel?.resetPointerGesture()
     // The screen swap re-established focus (or re-mounted the approval
     // dialog): re-derive the seat from the live state (follow-up P1).
     this.setFocusSeat('editor')
@@ -7324,95 +7343,171 @@ export class TuiApp {
   }
 
   /**
-   * Ctrl+R input-history search: open the modal panel (plan §18/§27). The
-   * host owns the lifecycle; the panel owns the query/scope/list/detail
-   * state; the injected search source owns the filesystem. A second
-   * Ctrl+R while the panel is up is a no-op (the panel already owns the
-   * keys through the overlay guard).
+   * Ctrl+R input-history search (Phase 3B / B3-A): replace the EDITOR SEAT with
+   * the History tenant. The Transcript keeps rendering above it, the ordinary
+   * footer keeps rendering below it and no overlay/screen is created. The host
+   * owns only the tenant lease; the panel owns the query/scope/results/Preview
+   * state and the injected search source owns the filesystem.
+   *
+   * A second Ctrl+R while the panel is up is a no-op, and a live blocking owner
+   * (Question / Approval / Save Location) makes the request a SILENT REFUSE —
+   * the seam evaluates its gate before the factory runs, so no panel, timer or
+   * clipboard action exists for a refused request.
    */
   openHistorySearch(): void {
     if (this.historyPanel !== undefined) return
     if (this.historySearchSource === undefined) return
     if (this.disposed) return
-    const geometry = historyOverlayGeometry(this.terminal.columns, this.terminal.rows)
-    const panel = new HistoryPanel({
-      source: this.historySearchSource,
-      // Resolve the cwd at OPEN time (session switches move it): the
-      // injected getter reflects the LIVE session, the status cwd is the
-      // fallback when no getter is wired.
-      cwd: this.historySearchCwd?.() ?? this.status.cwd,
-      // The session identity is captured ONCE at open time, like the cwd:
-      // the panel's default scope and every request use this snapshot for
-      // the panel's whole lifetime (a switch while the panel is up keeps
-      // the search stable; the next open re-resolves).
-      sessionId: this.historySearchSessionId?.(),
-      maxRows: geometry.panelRows,
-      onResultsChanged: () => this.requestRender(),
-      onAccept: (content) => {
-        this.closeHistorySearch()
-        // Accept = "bring back and EDIT", never submit (plan §33): the
-        // text replaces the editor draft through the seat setter; the
-        // fork's overlay hide() restores editor focus automatically.
-        this.setEditorText(content)
-      },
-      onClose: () => this.closeHistorySearch(),
-    })
-    panel.start()
-    this.historyPanel = panel
-    this.mountHistoryOverlay(panel)
-  }
-
-  /** Mount an existing history panel on the current physical screen (first
-   * mount) and register its fullscreen rebind. */
-  private mountHistoryOverlay(panel: HistoryPanel): void {
-    const frame = this.createHistoryFrame(panel)
-    this.historyResponsiveFrame = frame
-    const handle = this.showOverlayOnHost(
-      frame,
-      { width: 100, maxHeight: '100%', margin: { left: 3, right: 3 } },
-      {
-        remountable: true,
-        remount: (logical) => {
-          if (this.historyPanel !== panel) return
-          const next = this.createHistoryFrame(panel)
-          this.historyResponsiveFrame = next
-          this.rebindOverlayRaw(logical, next, { width: 100, maxHeight: '100%', margin: { left: 3, right: 3 } })
+    const source = this.historySearchSource
+    // Scope/session/cwd are captured ONCE at open time (a session switch moves
+    // the live cwd/identity, and the panel's whole lifetime keeps this
+    // snapshot; the next open re-resolves).
+    const cwd = this.historySearchCwd?.() ?? this.status.cwd
+    const sessionId = this.historySearchSessionId?.()
+    const generation = this.generation
+    let panel: HistoryPanel | undefined
+    let lease: { close(): void } | undefined
+    // The ONE caller subject predicate: the same panel is still the live tenant,
+    // the surface generation is unchanged and the LIVE session identity still
+    // equals the one captured at open. The seam reads it at every revalidation
+    // entry AND the panel reads it at every ACTING entry of its own (pointer,
+    // acceptance/copy, async commit), because the fork dispatches pointer events
+    // outside the Host key ladder.
+    const isCurrent = (): boolean => panel !== undefined
+      && this.historyPanel === panel
+      && !this.disposed
+      && this.generation === generation
+      && this.historySearchSessionId?.() === sessionId
+    lease = this.tryOpenOptionalSeatTenant(() => {
+      const created = new HistoryPanel({
+        source,
+        cwd,
+        sessionId,
+        geometry: {
+          columns: () => this.terminal.columns,
+          rows: () => this.terminal.rows,
+          chromeRows: (width) => this.historyChromeRows(width),
         },
-      },
-    )
-    this.historyOverlay = handle
+        // The pointer capability is Transcript Fullscreen's alone: the regular
+        // main screen has no application mouse, so the panel refuses every
+        // pointer event there.
+        pointerEnabled: () => this.fullscreen !== undefined,
+        tenantIsCurrent: isCurrent,
+        onResultsChanged: () => this.requestRender(),
+        onCopy: (text) => this.copyHistorySelection(created, text),
+        onAccept: (selection) => {
+          // Retire THIS lease first (the panel is disposed and the seat
+          // re-projects the live editor owner), then re-validate the captured
+          // subject — a session switch that landed during the (potentially
+          // re-entrant) retirement must never receive a prior-session prompt.
+          lease?.close()
+          if (this.disposed) return
+          if (this.historySearchSessionId?.() !== sessionId) return
+          // Accept = "bring back and EDIT", never submit: the text replaces the
+          // editor draft through the seat setter; the seat projection focuses
+          // the CURRENT winner.
+          this.setEditorText(selection.content)
+        },
+        onClose: () => lease?.close(),
+      })
+      // The panel pointer is committed BEFORE the seam installs/validates the
+      // record, so `isCurrent()` and the lease's own cleanup already see the
+      // instance they belong to.
+      this.historyPanel = created
+      panel = created
+      return {
+        component: created,
+        isCurrent,
+        close: () => {
+          if (this.historyPanel === created) {
+            this.historyPanel = undefined
+            this.historyLease = undefined
+          }
+          created.dispose()
+        },
+      }
+    })
+    if (lease === undefined || panel === undefined) return
+    this.historyLease = lease
+    panel.start()
   }
 
-  private createHistoryFrame(panel: HistoryPanel): ResponsiveOverlayFrame {
-    const geometryOf = (): ResponsiveOverlayGeometry => {
-      const geometry = historyOverlayGeometry(this.terminal.columns, this.terminal.rows)
-      return {
-        width: geometry.width,
-        maxHeight: geometry.maxHeight,
-        // The raw terminal dims are part of the identity: once the history
-        // geometry caps are reached a pure resize would otherwise leave the
-        // key unchanged and defeat the last-painted-geometry mouse fence.
-        key: `${this.terminal.columns}:${this.terminal.rows}:${geometry.width}:${geometry.maxHeight}:${geometry.panelRows}`,
-      }
+  /** Close the history panel (Esc/Ctrl+C, accept, surface dispose). The ONE
+   *  optional-seat lease owns the panel disposal. */
+  closeHistorySearch(): void {
+    const lease = this.historyLease
+    this.historyLease = undefined
+    lease?.close()
+  }
+
+  /** The live non-History pinned chrome rows the History grant reserves: the
+   *  header, subject bar, dock, todo, goal, queue, busy indicator, BOTH widget
+   *  zones and the footer — the editor seat is deliberately EXCLUDED (measuring
+   *  the seat from inside its own render would be cyclic; the widget zones
+   *  re-budget themselves from the live chrome, so they are counted at their
+   *  CURRENT grant). */
+  private historyChromeRows(width: number): number {
+    const safeWidth = Math.max(1, Math.floor(width))
+    let used = 0
+    for (const chrome of [
+      this.header, this.viewerSubjectBar, this.dock, this.todoPanel,
+      this.goalLine, this.queuePane, this.working, this.widgetsAbove,
+      this.widgetsBelow, this.footer,
+    ]) {
+      used += chrome.render(safeWidth).length
     }
-    return new ResponsiveOverlayFrame(panel, geometryOf, geometry => {
-      panel.setMaxRows(Math.max(1, geometry.maxHeight - 2))
+    return used
+  }
+
+  /**
+   * Phase 3B / B3-A: the History Copy intent. The panel captured the payload
+   * SYNCHRONOUSLY (the whole entry for Copy All, the exact original substring
+   * for a Preview drag); this app owns only the delivery through the EXISTING
+   * Client-local clipboard capability and the owned-task runner. A settlement
+   * may only notify while the SAME panel still owns the seat — a copy that lands
+   * after the user left History can neither repaint nor address a replacement.
+   */
+  private copyHistorySelection(panel: HistoryPanel, text: string): void {
+    const copy = this.copySelection
+    const runner = this.events.runOwned
+    if (copy === undefined || runner === undefined) {
+      if (this.historyTokenIsLive(panel)) this.notify('Copy failed', 'error')
+      return
+    }
+    runner('history copy', () => copy(text), {
+      onResult: (ok) => {
+        if (!this.historyTokenIsLive(panel)) return
+        // `true` only proves the strategy EMITTED the bytes (OSC52 has no
+        // clipboard ACK), so the wording never claims the system clipboard
+        // received them.
+        this.notify(ok ? 'Copy sent' : 'Copy failed', ok ? 'info' : 'error')
+      },
+      onError: () => {
+        if (!this.historyTokenIsLive(panel)) return
+        this.notify('Copy failed', 'error')
+      },
     })
   }
 
-  /** Close the history panel (Esc/Ctrl+C, accept, surface dispose). */
-  closeHistorySearch(): void {
-    const overlay = this.historyOverlay
-    const panel = this.historyPanel
-    this.historyOverlay = undefined
-    this.historyResponsiveFrame = undefined
-    this.historyPanel = undefined
-    if (overlay !== undefined) this.overlayRemounts.delete(overlay)
-    overlay?.hide()
-    // Remountable history overlays intentionally opt out of disposeOnHide so
-    // fullscreen migration can retain query/results/selection. The final
-    // close owns the panel lifecycle explicitly.
-    panel?.dispose()
+  /**
+   * Whether one History panel is still the LIVE, ACTIVE, VISIBLE seat tenant —
+   * the token a copy settlement must re-prove before it may notify. Two facts are
+   * required, and neither replaces the other: the LIFECYCLE state (unlike the
+   * Job/Settings workspaces, whose lease is CLOSED when a blocking owner preempts
+   * them, the Phase-3A optional tenant is deliberately PARKED, so the same panel
+   * keeps existing while it is not painted — `phase` is that authority, and
+   * physical focus is not consulted because a capturing overlay may hold the
+   * keyboard while the tenant stays the active projected seat) AND the caller
+   * SUBJECT (`record.isCurrent()`: the captured session identity is still the
+   * live one — a copy started before a session switch must not report its
+   * outcome over the new session).
+   */
+  private historyTokenIsLive(panel: HistoryPanel): boolean {
+    if (this.disposed || this.historyPanel !== panel) return false
+    const record = this.optionalSeat
+    if (record === undefined || record.component !== panel
+      || record.phase !== 'active' || record.finalized) return false
+    return record.isCurrent()
   }
 
   /** Publish the current match position for the overlay header (1-based, total). */
@@ -17415,7 +17510,11 @@ export class TuiApp {
         this.recompileAdvancedOverlays()
       }
       if (widthChanged || heightChanged) {
-        this.historyResponsiveFrame?.syncGeometry()
+        // Phase 3B / B3-A: the History seat reads the LIVE terminal geometry and
+        // chrome height on every render, so a resize only has to repaint it (the
+        // ordinary render funnel below does that) and drop the pointer state
+        // that described the old frame.
+        this.historyPanel?.resetPointerGesture()
         this.approvals.syncGeometry()
       }
       // PR #57 review (P1): the footer's physical-line budget derives from

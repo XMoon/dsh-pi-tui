@@ -20,6 +20,10 @@ applicable requirements/contracts to the reviewer. It supplements the generic
 review loop; subsystem contracts remain authoritative. PR acceptance is not
 stage closure or permission to merge.
 
+Before adding a surface or restyling one, read `docs/tui-design-language.md`
+(the canonical TUI visual vocabulary, role→token table and governance) and walk
+its §11.2 checklist for any change that alters what a surface paints.
+
 ## Naming and writing
 
 - Repository/profile/package names are `dsh-pi-tui`, `pi-tui`, `@xmoon76/pi-tui`

@@ -2104,8 +2104,84 @@ and nothing else does.
   replacement workspace.
 - **Still read-only / still later.** `Icon style` and `Thinking detail` remain
   readable rows in this slice (their full editors stay behind `Other settings`);
-  the remaining Settings migration, B3 History and B4 Task Quick are later
-  slices, and closing B2-B on these two rows is not Gate-3B closure.
+  the remaining Settings migration and B4 Task Quick are later slices, and
+  closing B2-B on these two rows is not Gate-3B closure.
+
+## History is an Editor-seat tenant with an independent Preview (B3-A)
+
+`Ctrl+R` no longer opens a managed overlay. Phase 3B / B3-A projects the
+`HistoryPanel` into the editor seat through the Phase-3A optional tenant, so the
+live Transcript keeps rendering above it and the ordinary footer below it while
+the seat shows the History surface.
+
+- **One vertical presentation at every width.** Header (`Input history` + the
+  responsive scope tabs + the `F2` hint), query row, a `Results · N matches`
+  counter, a single-line results window capped at eight painted rows, a divider,
+  the `Preview x-y/N` heading with the copy actions, the soft-wrapped ORIGINAL
+  prompt and one trailing metadata row. The retired 100-column split/stacked
+  overlay layout, its width cap, its 7-row detail clamp and its `… more` marker
+  are gone: the Preview never truncates the source, only its viewport.
+- **The grant is live.** `planHistorySeatLayout()` derives the row budget from
+  the real terminal rows (63% normal / 80% expanded by `F2`) and the measured
+  non-History pinned chrome minus one reserved transcript row; the header, query
+  and footer hint have first claim, and the shrinkable body splits between the
+  results window and the Preview. A small grant drops the Preview (and then the
+  footer with the hint folded into the header) LONG before it drops the visible
+  selected result; a grant too small for any body row disables acceptance of an
+  unpainted row.
+- **The Preview keeps its place across a re-wrap.** The scroll anchor is the
+  SOURCE UTF-16 offset of the first painted source row (`previewAnchorOffset`),
+  and the visual row is derived from it at every width, so narrowing or widening
+  the terminal keeps the reader on the same TEXT instead of the same row number.
+- **The Preview is the copy authority.** List labels are single sanitized lines;
+  the Preview is built from the shared neutral source-text layout
+  (`src/tui/components/source-text-layout.ts`, extracted from the Job Command
+  document, whose named exports and tests are unchanged), so every painted cell
+  maps back to an exact original UTF-16 range. `Alt+C` / `[Copy all]` copy the
+  stored `content` byte for byte and the Fullscreen Preview drag copies an exact
+  original substring — never a rendered or truncated row.
+- **Pointer support is Transcript Fullscreen only.** The alt screen's existing
+  component dispatch delivers press/drag/wheel to the panel, which resolves
+  against its last painted frame (width/height, painted result identity, search
+  generation). A result click selects; the explicit `[Use selected]` and
+  `[Copy all]` cells act, and each action is bound to the result ID it was
+  pressed for. Only the LEFT button may start, extend or finish a gesture: a
+  right or middle press falls through to the terminal's own handling (e.g. the
+  Windows right-click paste path) and can never select, drag or activate a
+  button. A Preview drag copies only when its RELEASE lands inside the painted
+  Preview of the same last-painted frame, and the release position IS the final
+  endpoint (a terminal may fold the last motion into the release event) — a
+  release outside it, on another painted region, or after a width/height change
+  safely cancels (no copy, no surviving selection), and an ended gesture can
+  never be extended or resurrected by a later motion event. The regular main screen writes no mouse mode and installs no
+  bridge: the panel refuses every pointer event there, and the terminal's native
+  selection/scrollback is untouched.
+- **Draft and cancellation.** Accept writes the accepted `content` into the
+  CURRENT editor winner through `setEditorText` (never a submit, never the hidden
+  host editor), after the tenant lease is retired and the captured session
+  identity re-validated. `Esc` / `Ctrl+C` close the seat and leave the draft,
+  cursor, input mode and pending paste content exactly as they were; those two
+  keys are consumed by History while it is the active seat tenant, so closing it
+  can never interrupt the agent or quit the TUI.
+- **Currentness at every ACTING entry.** The host's `isCurrent()` (same panel +
+  same optional-seat record + unchanged surface generation + the live session
+  identity still equal to the one captured at open) is injected into the panel as
+  `tenantIsCurrent` and evaluated at the pointer entry (the fork dispatches mouse
+  events outside the Host key ladder, so nothing else would notice a session
+  change first), at the acceptance/copy eligibility checks and at the async search
+  commit — a page that was in flight for a previous session is never published
+  (the seat keeps its current rows and stays inert: no acceptance, no copy, no
+  pointer action) and the CALLER keeps the lifecycle: the panel never retires
+  itself from that async path, so the fire-and-forget search cannot reject. The
+  host's next revalidation entry retires the stale tenant through its ONE close
+  path; treating the session-switch publication itself as a revalidation entry is
+  deliberately NOT done here (it would extend the Phase-3A revalidation seam and
+  let UI teardown failure propagate into the session commit).
+- **Still later.** B3-B owns the full production Question/Approval FIFO
+  PARK/restore, the switch-time retirement/authoritative session generation and
+  ABA protection across async queries and acceptance, and the L6 integration
+  closure. B3-A ships the basic park/restore, the live-subject `isCurrent()` fence
+  at every acting entry and the refusal path; it is not Gate-3B closure.
 
 ## Task Browser Host-text terminal-safety boundary
 

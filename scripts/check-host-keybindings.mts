@@ -172,6 +172,13 @@ export const SCOPED_STRING_ALLOWLIST: ReadonlyArray<{ readonly file: string; rea
   // label lives in the key-label authority and the renderer imports it, which
   // is why this row is owned by the keybindings tree.
   { file: 'src/tui/keybindings/hints.ts', line: "export const TSP_CONTINUED_INSPECTION_LABEL = 'Alt+Q'" },
+  // (9) The History editor-seat tenant's FIXED labels (B3-A, same category as
+  // (8)): the seat is a per-surface component contract, so its panel may not
+  // hard-code the chords and they cannot come from `keyHint` — no keymap action
+  // and no remap exists. The labels live in the key-label authority and the
+  // panel imports them.
+  { file: 'src/tui/keybindings/hints.ts', line: "export const HISTORY_PREVIEW_SCROLL_LABEL = 'Alt+↑↓'" },
+  { file: 'src/tui/keybindings/hints.ts', line: "export const HISTORY_COPY_LABEL = 'Alt+C'" },
 ]
 
 /** One detected violation (a host chord or a hard-coded label). */

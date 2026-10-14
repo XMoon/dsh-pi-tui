@@ -9,6 +9,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `Ctrl+R` history search no longer opens a centered floating overlay: it takes
+  over the bottom editor seat, so the live Transcript and the status/footer stay
+  visible and every width gets the same vertical layout (header with the scope and
+  the `F2` hint, query, results, divider, Preview). The single-line results list
+  follows the selection (at most 8 rows) and the Preview below it soft-wraps the
+  FULL selected prompt with its own scroll position (`Alt+↑`/`Alt+↓` one row,
+  `Alt+PgUp`/`Alt+PgDn` one page, `Alt+Home`/`Alt+End` first/last) — the `… more`
+  truncation is gone. `F2` switches between the roughly 63% and 80% seat heights,
+  and a short terminal yields the Preview and its hints before it hides the query
+  or the selected row. `Enter` (or clicking `[Use selected]`) writes the entry back
+  into the CURRENT editor and never submits; `Alt+C` (or `[Copy all]`) copies the
+  entry's original text; `Esc`/`Ctrl+C` cancels and leaves the draft, cursor, input
+  mode and any unexpanded paste content exactly as they were. The session identity
+  is captured when the seat opens; after a session switch it neither accepts nor
+  copies the previous session's content, and a search that resolves for that
+  previous session is not shown as a current result. A window resize keeps the Preview on
+  the same passage of the original text. The mouse is Fullscreen-only and left-button only:
+  clicking a result only selects it, the wheel scrolls only the region under the pointer,
+  and a Preview drag copies an exact fragment of the original text, ending at the released
+  cell (a drag that leaves the preview, or a window-width change mid-drag, cancels instead
+  of copying); the regular main screen
+  stays keyboard-only and the terminal's own selection and scrollback are untouched.
 - `/settings` now opens a dedicated full-screen settings workspace in which two
   rows — `Configured theme` and `Transcript display` — can really be changed. Wide
   terminals show three columns (categories / settings rows / details), medium ones

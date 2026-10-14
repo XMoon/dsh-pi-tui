@@ -40,6 +40,7 @@
 import { Text, VStack, matchesKey, truncateToWidth, visibleWidth, type Component } from '@xmoon76/pi-tui'
 import { componentKeymap } from '../keybindings/component-keymap.ts'
 import { formatKeyId } from '../keybindings/hints.ts'
+import { renderActionBarRow, type ActionBarSegment } from '../presentation/action-bar.ts'
 import { sanitizedPhysicalLine } from '../presentation/lines.ts'
 import { color, taskStatusColor } from '../theme/runtime.ts'
 import { JobCommandReader, type CommandPaintedBox } from './job-command-reader.ts'
@@ -686,34 +687,6 @@ class JobWorkspaceReadingFactsRow implements Component {
   }
 }
 
-/** One Action Bar segment: `short` is the compaction this segment accepts when
- *  the row is tight, `priority` the order it is DROPPED in (lower goes first). */
-interface JobActionBarSegment {
-  text: string
-  priority: number
-  short?: string
-}
-/** Lay out one Action Bar row: compact shortenable segments first, then drop
- *  the lowest-priority segment until the row fits (never the last one). */
-function renderActionBarRow(segments: JobActionBarSegment[], width: number): string {
-  for (;;) {
-    const line = segments.map(segment => segment.text).join(' | ')
-    if (visibleWidth(line) <= width || segments.length <= 1) {
-      return truncateToWidth(line, width, '…', true)
-    }
-    const shortenable = segments.find(segment => segment.short !== undefined && segment.text !== segment.short)
-    if (shortenable !== undefined) {
-      shortenable.text = shortenable.short!
-      continue
-    }
-    let lowest = 0
-    for (let index = 1; index < segments.length; index += 1) {
-      if (segments[index]!.priority < segments[lowest]!.priority) lowest = index
-    }
-    segments.splice(lowest, 1)
-  }
-}
-
 /** The visible position/follow/find facts of the Action Bar. */
 interface JobOutputStatusFacts {
   readonly follow: boolean
@@ -787,14 +760,14 @@ class JobInspectorActionBar implements Component {
     // that is not painted (or belongs to the query input), stays unadvertised
     // (plan §1.2 MUST 5 / §2.1 / §4.2).
     const pageHint = facts.bodyVisible && !facts.searchEditing
-    const findSegment: JobActionBarSegment[] = !facts.searchEditing && facts.canFind
+    const findSegment: ActionBarSegment[] = !facts.searchEditing && facts.canFind
       ? [{ text: facts.findHint === '' ? 'Find /' : `Find ${facts.findHint} /`, priority: 1 }]
       : []
-    const position: JobActionBarSegment[] = facts.bodyVisible && facts.position.total > 0
+    const position: ActionBarSegment[] = facts.bodyVisible && facts.position.total > 0
       ? [{ text: `rows ${facts.position.start}-${facts.position.end}/${facts.position.total}`, priority: 2 }]
       : []
     if ('command' in facts) {
-      const segments: JobActionBarSegment[] = []
+      const segments: ActionBarSegment[] = []
       segments.push({ text: 'Esc output', priority: 7 })
       if (!facts.searchActive) segments.push({ text: 'C copy all', priority: 6 })
       if (!facts.readingFacts) {
@@ -808,7 +781,7 @@ class JobInspectorActionBar implements Component {
     // Retention priority: Esc, Stop, Follow, GAP, disclosure, position, Find,
     // then the two B1-C verbs and finally the pure browsing hint (they are the
     // ONLY segments a tight row may drop before the pre-existing truth).
-    const segments: JobActionBarSegment[] = []
+    const segments: ActionBarSegment[] = []
     segments.push({ text: 'Esc back', priority: 7 })
     const stopKey = componentKeymap.keyHint('tasks.stop')
     if (!facts.searchActive && this.canStop() && stopKey !== '') {
