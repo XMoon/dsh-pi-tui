@@ -27,6 +27,7 @@ import { DirectCatalogPort } from '../src/runtime/direct/catalog-direct.ts'
 import { DirectConfigPort } from '../src/runtime/direct/config-direct.ts'
 import { DirectHostFilePort } from '../src/runtime/direct/host-file-direct.ts'
 import { registerTuiCommandsWithDirectSeams } from './support/register-tui-commands.ts'
+import { visibleWidth, type SettingItem } from '@xmoon76/pi-tui'
 
 
 /** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file
@@ -847,6 +848,56 @@ test('the /skill picker offers only human-invocable skills', async () => {
   const view = vt.getViewport().join('\n')
   assert.ok(view.includes('human-skill'), `the human skill must be offered:\n${view}`)
   assert.ok(!view.includes('model-only'), `a model-only skill must not be offered:\n${view}`)
+  app.stop()
+})
+
+test('the /skill picker keeps two same-prefix long names distinguishable (PR #309 review)', async () => {
+  const ctx = new Context()
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  const services = fakeServices()
+  ctx.provide('commands', services.commands as never)
+  const agent = fakeAgent('session-a')
+  // Two names wider than the 36-cell label column, sharing their first 35
+  // characters, with NO description: the vendored list's head-keeping clip
+  // would paint both as the same prefix + `\u2026` while Enter still runs
+  // different ids. The rows keep the name's TAIL and expand the full name of
+  // the SELECTED row in its description; neither changes the row's identity.
+  const prefix = 'x'.repeat(35)
+  const first = { name: `${prefix}AA`, description: '', invocation: { modelInvocable: false, userInvocable: true }, source: 'bundled', provider: 't' }
+  const second = { name: `${prefix}BB`, description: '', invocation: { modelInvocable: false, userInvocable: true }, source: 'bundled', provider: 't' }
+  ctx.provide('skills', { list: async () => [first, second], get: async () => undefined } as never)
+  const { defs } = services
+  registerTuiCommandsWithDirectSeams(stubRunner(ctx, app, { agent }))
+  // Capture the REAL rows the command hands to the overlay (the wrapper still
+  // opens the real overlay, so the painted frame below stays production output).
+  const originalOpenSettings = app.openSettings.bind(app)
+  let captured: { items: readonly SettingItem[] } | undefined
+  app.openSettings = ((items, onChange, onCancel, onHidden) => {
+    captured = { items }
+    return originalOpenSettings(items, onChange, onCancel, onHidden)
+  }) as typeof app.openSettings
+  const skillDef = defs.find(def => def.name === 'skill')
+  assert.ok(skillDef?.handler !== undefined)
+  await (skillDef!.handler as (invocation: { rawInput: string }) => Promise<unknown>)({ rawInput: '' })
+  await vt.waitForRender()
+  const rows = vt.getViewport()
+  const view = rows.join('\n')
+  const firstRow = rows.find(line => line.includes('AA'))
+  const secondRow = rows.find(line => line.includes('BB'))
+  assert.ok(firstRow !== undefined && secondRow !== undefined, `both names must keep their distinguishing tail:\n${view}`)
+  assert.notEqual(firstRow, secondRow, `the two rows must not paint identically:\n${view}`)
+  assert.ok(view.includes(first.name), `the selected row's description must expand the FULL name:\n${view}`)
+  // Identity untouched: the delivered id is still the FULL name, and it is the
+  // row the user saw (its label carries this name's tail). The submit path
+  // itself is pinned by the /skill delivery tests above.
+  const items = captured?.items ?? []
+  assert.deepEqual(items.map(item => item.id), [first.name, second.name])
+  assert.ok(items[0]!.label.endsWith('AA') && items[1]!.label.endsWith('BB'),
+    `the labels must keep each name's tail: ${JSON.stringify(items.map(item => item.label))}`)
+  assert.ok(items.every(item => visibleWidth(item.label) <= 36), 'a label must fit the 36-cell column')
   app.stop()
 })
 

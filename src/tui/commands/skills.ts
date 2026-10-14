@@ -7,7 +7,7 @@
  * @module @xmoon76/dsh-pi-tui/tui/commands/skills
  */
 
-import { SettingsList } from '@xmoon76/pi-tui'
+import { SettingsList, visibleWidth } from '@xmoon76/pi-tui'
 import type { ComposerSubmitGesture, TuiApp } from '../../tui-app.ts'
 import { safeErrorMessage } from '../../runtime/process/errors.ts'
 import { SupersededReadError } from '../../runtime/read-error.ts'
@@ -22,6 +22,27 @@ import type {
   SubmitDelivery,
   TuiCommandRunner,
 } from '../../commands.ts'
+
+/** The label column's budget for one skill row (`SettingsList` caps it at 36
+ *  cells). The vendored renderer clips a label keeping the HEAD, so two long
+ *  skill names sharing a prefix would paint identically while Enter still runs
+ *  different ids: keep the name's TAIL here instead, and let the SELECTED row
+ *  carry the full name in its description. Display only — the row `id` and its
+ *  `values` (the write path) are untouched. */
+function skillLabel(name: string): string {
+  const limit = 36
+  if (visibleWidth(name) <= limit) return name
+  let tail = ''
+  let used = 1 // the ellipsis cell
+  for (let index = name.length - 1; index >= 0; index -= 1) {
+    const char = name[index]!
+    const width = visibleWidth(char)
+    if (used + width > limit) break
+    tail = char + tail
+    used += width
+  }
+  return `…${tail}`
+}
 
 /** The runner operations the static skill commands consume. */
 type SkillsCommandRunner = Pick<
@@ -99,8 +120,14 @@ export function registerSkillCommand(deps: SkillsCommandDeps): void {
         app.openSettings(
           catalog.skills.map(skill => ({
             id: skill.name,
-            label: skill.name,
-            description: skill.description,
+            // The vendored list clips a label to its column keeping the HEAD
+            // (`…` at the end), so two long skill names that share a prefix
+            // would paint identically while Enter still runs different ids.
+            // Keep the TAIL inside the column instead, and let the SELECTED
+            // row carry the full name in its description (below) — the row's
+            // identity (id/values) is untouched by either.
+            label: skillLabel(skill.name),
+            description: skill.description === '' ? skill.name : `${skill.name} — ${skill.description}`,
             currentValue: '',
             values: ['✓'],
           })),
