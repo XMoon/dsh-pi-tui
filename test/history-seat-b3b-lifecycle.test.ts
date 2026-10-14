@@ -26,6 +26,7 @@
  */
 
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 import { afterEach, test } from 'node:test'
 import { EditorRegistry } from '../src/extension/internal/editor-registry.ts'
 import type { ExtensionEditor } from '../src/extension/public-types.ts'
@@ -1199,4 +1200,24 @@ test('H3B-12: a plugin editor winner change during a PARK never ejects the block
   assert.deepEqual(second.received, ['x'], 'the current winner receives the keys')
   assert.deepEqual(first.received, [], 'the replaced winner receives nothing')
   assert.equal(h.app.hostEditorTextForTest(), 'host draft', 'the hidden host editor is never written by the plugin winner')
+})
+
+
+// ---------------------------------------------------------------------------
+// B3-B composition lock: the bootstrap reset-callback wiring.
+// ---------------------------------------------------------------------------
+
+test('B3-B composition: bootstrap retires History in the ONE resetForGeneration callback', () => {
+  // Why a source lock: the L6 harness above mirrors bootstrap's reset wiring, so
+  // removing THIS production line is otherwise invisible (the publishOwner seam
+  // still retires after the ordinary switch's bump). A pure generation bump has
+  // no publishOwner, so this is the only entry that closes History then.
+  const source = readFileSync(new URL('../src/app/bootstrap.ts', import.meta.url), 'utf8')
+  const withoutComments = source.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/[^\n]*/g, '')
+  const coreCall = /createSessionOwnershipCore\(\{([\s\S]*?)\n {4}\}\)/.exec(withoutComments)?.[1]
+  assert.ok(coreCall !== undefined, 'the composition root must construct the ownership core')
+  assert.ok(coreCall.includes('surface.retireStaleHistorySeat()'),
+    'a same-owner generation bump must retire the History seat from the ONE reset callback')
+  assert.equal(withoutComments.split('surface.retireStaleHistorySeat()').length - 1, 2,
+    'the composition root reaches the app retirement exactly twice: the reset callback and the publication port wiring')
 })
