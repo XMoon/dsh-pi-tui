@@ -1471,17 +1471,29 @@ async function openTaskRow(
 ): Promise<void> {
   submit(app, '/tasks')
   await waitFor(`the Task Center rendered ${rowLabel}`, () => viewport().includes(rowLabel), 20_000)
-  const selected = (): boolean => viewport().split('\n')
-    .some(line => line.includes('→') && line.includes(rowLabel))
-  for (let step = 0; step <= 8; step += 1) {
-    if (selected()) {
+  // The dock strip on the MAIN surface also carries running-subagent labels
+  // (the passive quick-task projection commits with no browser open), so the
+  // label alone does not prove the Task Center painted. Wait for the browser's
+  // own chrome (its hint line) before reading the selection, or the first
+  // Down below races the browser's first frame and pushes the selection —
+  // which STARTS on the panel's running-subagent preference — off the row.
+  await waitFor('the Task Center browser frame painted', () => viewport().includes('↑↓ select · ←→ tree'), 20_000)
+  const lines = (): string[] => viewport().split('\n')
+  const selectedLine = (): number =>
+    lines().findIndex(line => line.includes('→') && line.includes(rowLabel))
+  for (let step = 0; step < 12; step += 1) {
+    if (selectedLine() >= 0) {
       fixture.vt.sendInput('\r')
       return
     }
-    fixture.vt.sendInput('\x1b[B')
+    // Walk TOWARD the target row: the initial selection is the panel's own
+    // preference (the first running subagent), which may sit above or below.
+    const target = lines().findIndex(line => line.includes(rowLabel))
+    const pointer = lines().findIndex(line => line.includes('→'))
+    fixture.vt.sendInput(target >= 0 && pointer > target ? '\x1b[A' : '\x1b[B')
     await new Promise(resolve => setTimeout(resolve, 80))
   }
-  throw new Error(`the Task Center never selected ${rowLabel}`)
+  throw new Error(`the Task Center never selected ${rowLabel}:\n${viewport()}`)
 }
 
 test('L6 §14 step 14: a main-Session switch fences the in-flight child open — no stale child operation reaches the replacement surface', async (t) => {
