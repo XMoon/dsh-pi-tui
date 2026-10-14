@@ -1079,7 +1079,7 @@ test('search matches a provider display name and a provider id independently', a
   h.app.stop()
 })
 
-test('a current model that is also the default composes [current] · [default] · effort', async () => {
+test('a current model that is also the default composes [current] [default] · effort', async () => {
   const directory = makeDirectory({
     groups: [{ id: 'p1', name: 'P1', models: [model('sol', { name: 'Sol', efforts: [
       { id: 'low', name: 'Low' }, { id: 'medium', name: 'Medium' }, { id: 'high', name: 'High' },
@@ -1087,7 +1087,7 @@ test('a current model that is also the default composes [current] · [default] �
     default: { provider: 'p1', model: 'sol' },
   })
   const h = await openPicker({ directory, current: { provider: 'p1', model: 'sol', reasoningEffort: 'medium' } })
-  assert.ok(rowLine(h.vt, 'Sol')?.includes('[current] · [default] · effort ‹Medium›'),
+  assert.ok(rowLine(h.vt, 'Sol')?.includes('[current] [default] · effort ‹Medium›'),
     `the state chips and the inline effort must compose:\n${viewOf(h.vt)}`)
   h.app.stop()
 })
@@ -1252,7 +1252,7 @@ test('the /model selected row is role 8 textStrong and the effort token keeps it
   const unselectedOther = rowOf(h.vt, 'Other')
   assert.equal(h.vt.getCellFgRgb(unselectedOther, cellIndexOf(h.vt, unselectedOther, 'effort ‹')), hexToRgb(currentPalette.textDim),
     `the effort token keeps its own textDim ink on the UNSELECTED row:\n${viewOf(h.vt)}`)
-  assert.ok(rowLine(h.vt, 'Sol')?.includes('[current] · [default] · effort ‹High›'),
+  assert.ok(rowLine(h.vt, 'Sol')?.includes('[current] [default] · effort ‹High›'),
     `the chips come first and the effort token last:\n${viewOf(h.vt)}`)
   h.app.stop()
 })
@@ -1260,17 +1260,17 @@ test('the /model selected row is role 8 textStrong and the effort token keeps it
 test('a normal-width badge row stays on one line', async () => {
   const h = await openPicker({ directory: LAYOUT_DIRECTORY, current: { provider: 'p1', model: 'sol' } })
   const lines = renderAt(h, 72)
-  assert.ok(lines.some(line => line.includes('GPT-5.6 Sol') && line.includes('[current] · [default] · effort ‹High›')),
+  assert.ok(lines.some(line => line.includes('GPT-5.6 Sol') && line.includes('[current] [default] · effort ‹High›')),
     `must stay single-line at 72:\n${lines.join('\n')}`)
   h.app.stop()
 })
 
 test('the badge wraps exactly when label + badge no longer fit (no width threshold)', async () => {
   const h = await openPicker({ directory: LAYOUT_DIRECTORY, current: { provider: 'p1', model: 'sol' } })
-  const badge = '[current] · [default] · effort ‹High›'
+  const badge = '[current] [default] · effort ‹High›'
   // The wrap is measured from the WIDEST form (the active `[ High ]`), so the
   // single/two-line boundary is that width, not the inactive rendering.
-  const measure = '[current] · [default] · effort [ High ]'
+  const measure = '[current] [default] · effort [ High ]'
   const exact = 2 + visibleWidth('GPT-5.6 Sol') + 2 + visibleWidth(measure)
   const fits = renderAt(h, exact)
   assert.ok(fits.some(line => line.includes('GPT-5.6 Sol') && line.includes(badge)),
@@ -1315,7 +1315,7 @@ test('effort cycling never toggles a row between one and two lines', async () =>
   const h = await openPicker({ directory, current: { provider: 'p1', model: 'sol', reasoningEffort: 'a' } })
   // The SHORT badge would fit here, but the LONGEST candidate does not, so the
   // stable measurement must wrap from the start.
-  const short = '[current] · [default] · effort ‹A›'
+  const short = '[current] [default] · effort ‹A›'
   const width = 2 + visibleWidth('Sol') + 2 + visibleWidth(short)
   const before = renderAt(h, width)
   assert.ok(!before.some(line => line.includes('Sol') && line.includes('effort ‹A›')),
@@ -1502,9 +1502,10 @@ test('the badge is right-aligned against the row edge', async () => {
 
 test('a narrow wrapped badge drops whole chips instead of slicing one', async () => {
   const h = await openPicker({ directory: LAYOUT_DIRECTORY, current: { provider: 'p1', model: 'sol' }, fullscreen: true })
-  // `[current] · [default] · effort ‹High›` is 37 cells: at 34 the pre-painted
-  // `[current]` chip must drop WHOLE — the pre-paint makes a char-wise left trim
-  // produce both a `…rent]` fragment and, potentially, a broken SGR sequence.
+  // `[current] [default] · effort ‹High›` is 35 cells (two state chips a single
+  // space apart): at 34 the pre-painted `[current]` chip must drop WHOLE — the
+  // pre-paint makes a char-wise left trim produce both a `…rent]` fragment and,
+  // potentially, a broken SGR sequence.
   for (const width of [34, 20]) {
     const rows = h.picker.render(width)
     const raw = rows.find(line => line.includes('‹High›') && !line.includes('GPT-5.6 Sol'))
@@ -1528,8 +1529,10 @@ test('a narrow wrapped badge drops whole chips instead of slicing one', async ()
     }
   }
   // A real narrow frame: the dropped `[current]` leaves a WHOLE `[default]`, and
-  // the surviving chip keeps its own `textMuted` ink.
-  h.vt.resize(40, 24)
+  // the surviving chip keeps its own `textMuted` ink. The width is 38, not 40:
+  // the badge lost the two cells the ` · ` join used to spend, so it first
+  // overflows (and wraps) two columns earlier.
+  h.vt.resize(38, 24)
   await h.vt.waitForRender()
   const chipRow = rowOf(h.vt, '…')
   const frame = linesOf(h.vt)
