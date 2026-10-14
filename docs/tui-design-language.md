@@ -415,9 +415,17 @@ Rules:
   badge) or `Verb…` (§7.1). `[Change…]`, `[Retry save]`, `[Confirm]` and
   `[Cancel]` are retired by the Settings PR.
 - The **active device** is the only bold-`primary` bracket on a frame; a chip is
-  never bold *of its own account* and a neutral chip is never `primary`. A chip
-  inherits the emphasis of the line that carries it, so on a selected row it is
-  bold like the rest of that row (role 8), exactly as every other field does.
+  never bold and a neutral chip is never `primary`.
+- **A state chip is always `textMuted` (`warning` for a problem state) and is
+  never recoloured by the row's selection.** A surface whose row model paints the
+  whole row as ONE string must therefore compose the chip as its own span — the
+  selected row's emphasis applies to the label/value, not to the state chip. On a
+  vendored list that offers only a single `value` slot painted `selected ?
+  primary : textDim` (`SettingsListTheme.value`), pre-paint the chip at the call
+  site with `color.textMuted(...)` — the nested style wins and the outer slot
+  paint is restored afterwards. That is the existing pattern in
+  `src/tui/commands/status.ts:110`, and **the vendored fork is never modified for
+  it**.
 - `[current]` is a neutral state chip (`textMuted`); `[unavailable]` is a problem
   state (`warning`). A state chip is not the only signal on the row — the row's
   own value or label is.
@@ -452,8 +460,9 @@ current value (candidates)  Solarized  [current]    state chip, textMuted
    `SearchablePicker` still hardcodes a bold `'→ '` (§11.4).
 3. **Selection ≠ current.** The keyboard cursor and the authoritative current
    value are different facts and get different markers. The current value is the
-   **state chip `[current]`** (§4.5) in `textMuted` (D9; the form was settled in
-   review — the arrow and the `[← current]` shape are retired because `←`
+   **state chip `[current]`** (§4.5) in `textMuted` — always that ink, never
+   recoloured by the row's selection (D9; the form was settled in review — the
+   arrow and the `[← current]` shape are retired because `←`
    U+2190 is EAW-ambiguous and because a chip is what separates a state from the
    row's own label/value).
    **Position follows the row's layout**: a row that already has a right-aligned
@@ -778,7 +787,7 @@ is next touched for another reason** (never by a mass search/replace):
 | picker failure placeholder | `Model catalog unavailable: …` is painted `noMatch` (`textMuted`) instead of `error` for the failure word (D11) | next picker change |
 | all overlays | ad-hoc frame sizes (64/72/76/88/100% × 24/26/28) instead of the four-step ladder (D10) | next change to that overlay |
 | `/model` current/default badges | the badge slot is right, but its `current` / `default` are bare words (`model-picker.ts:335-343`) where every row state is a chip (§4.5) — they become `[current] [default]` inside the same slot | next model-picker change |
-| theme menu / preset picker | the mark is still the literal `← current` (`pickers/theme-menu.ts:119`, `pickers/preset-presentation-pitui.ts:50`) and, in the preset picker, a word inside the description rather than a chip | next picker change |
+| theme menu / preset picker | the mark is still the literal `← current` (`pickers/theme-menu.ts:119`, `pickers/preset-presentation-pitui.ts:50`) and, in the preset picker, a word inside the description rather than a chip. Both route through the vendored `SettingsListTheme.value` slot, which paints `selected ? primary : textDim` — so the chip must be pre-painted `color.textMuted(...)` at the call site (`status.ts:110` precedent) and the slot's own paint must NOT be changed, and the fork must NOT be touched | next picker change |
 | question flow hints | lowercase keys with `←`/`←→` (`'← back · ↵ submit · esc cancel'`, `'←→ edit'`) instead of §4.1's `Esc`-style casing and the width-safe arrow rule | next question-flow change |
 | task browser hint | `Esc close` sits before `S stop` instead of last (D8) | next task-panel change |
 | approval dialog | bracketed key choices `[y] allow once   [n] reject   [esc/ctrl+c] cancel` (three-space separator, lowercase keys) | next approval change |
@@ -820,7 +829,7 @@ An overlay is the same vocabulary in a rounded `Frame` instead of a full termina
 | Title | role 1 (bold `textStrong`) as the **first row inside the frame**; a title is never inset into the frame's top rule (`╭─ Title ─╮` is not our device — it would fight the `Frame` geometry contract). A context suffix (`Subagent allowed models`) is role 2. |
 | Count / status | role 12, **right-aligned on the title row** (`Models` … `3/8`), exactly as a workspace header aligns its badge. Not a title suffix. |
 | Selection | `> ` in `primary` + the row's text in bold `textStrong` (§5). |
-| Current value | the state chip `[current]` in `textMuted` (§4.5), placed at the end of the row's content — or inside the row's right-aligned fact slot when it has one (`/model`'s badge group). No arrow, no bare word, no leading `✓` gutter. Two states are two chips (`[current] [unavailable]`), not one joined pair. |
+| Current value | the state chip `[current]` in `textMuted` (§4.5), placed at the end of the row's content — or inside the row's right-aligned fact slot when it has one (`/model`'s badge group, the vendored `SettingsList` value slot). **Never recoloured by selection** — pre-paint it at the call site when the row paints itself as one string. No arrow, no bare word, no leading `✓` gutter. Two states are two chips (`[current] [unavailable]`), not one joined pair. |
 | Group header | role 5: the group label in `textDim`, its count in `textMuted`, joined by ` · ` (`Directory · 12`). Never bold. |
 | Second-level text | an indented description line (2 cells after the cursor gutter) in `textDim`, wrapped at the list width; a right-aligned value column is the workspace form of the same roles (D14.4). |
 | Disabled / unavailable row | `textDim` plus a reason word (`unavailable`, `read-only`); never colour-only (§3.3.3), and the cursor still moves onto it (no dead rows). |
