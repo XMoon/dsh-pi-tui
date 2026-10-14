@@ -1601,6 +1601,44 @@ test('a provider effort name containing ` · ` is never split into badge parts',
   h.app.stop()
 })
 
+test('a provider effort name carrying CR/LF never breaks the single-row contract', async () => {
+  // Two break forms in one frame: the current+default row (`[current]` +
+  // `[default]`, so the badge is long enough to trim) carries `\n`; the second
+  // row carries `\r\n`. Both names come verbatim from the model directory.
+  const directory = makeDirectory({
+    groups: [{ id: 'p1', name: 'P1', models: [
+      model('sol', { name: 'Sol', efforts: [{ id: 'high', name: 'High\nAdaptive' }], defaultEffort: 'high' }),
+      model('luna', { name: 'Luna', efforts: [{ id: 'low', name: 'Low\r\nAdaptive' }], defaultEffort: 'low' }),
+    ] }],
+    default: { provider: 'p1', model: 'sol' },
+  })
+  const h = await openPicker({ directory, current: { provider: 'p1', model: 'sol' } })
+  const cases = [
+    { rowNeedle: 'High', name: 'High Adaptive', whole: 'effort ‹High Adaptive›' },
+    { rowNeedle: 'Low', name: 'Low Adaptive', whole: 'effort ‹Low Adaptive›' },
+  ]
+  // Every width here takes the wrapped-badge path (the widest-form measurement
+  // is longer than the grant) and trims the effort PART.
+  for (const width of [26, 23, 20]) {
+    const rows = h.picker.render(width)
+    for (const row of rows) {
+      assert.equal(/[\r\n]/.test(row), false, `width ${width}: a row break leaked: ${JSON.stringify(row)}`)
+      assert.ok(visibleWidth(row) <= width, `width ${width}: over-wide row ${JSON.stringify(row)}`)
+    }
+    for (const { rowNeedle, name, whole } of cases) {
+      const raw = rows.find(line => line.includes(rowNeedle) && line.includes('‹'))
+      assert.ok(raw !== undefined, `width ${width}: ${rowNeedle}'s effort token must survive:\n${rows.join('\n')}`)
+      const badge = stripAnsi(raw)
+      assert.ok(badge.includes(`‹${name}›`),
+        `width ${width}: ${rowNeedle}'s name head must survive with the break projected to a space:\n${badge}`)
+      if (width >= 23) {
+        assert.ok(badge.includes(whole), `width ${width}: the whole effort token must survive:\n${badge}`)
+      }
+    }
+  }
+  h.app.stop()
+})
+
 test('a narrow-to-wide unwrap transition fences the stale two-line hit map', async () => {
   const directory = makeDirectory({
     groups: [{ id: 'p1', name: 'P1', models: [
