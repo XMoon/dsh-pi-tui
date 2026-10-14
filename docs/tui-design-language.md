@@ -39,7 +39,9 @@ This is a presentation contract. It must never silently change:
   without a test update in the same PR.
 - The live theme owner (`src/tui/theme/runtime.ts`) and the palette vocabulary
   (`src/domain/display/theme.ts`). v1 adds **no** colour token.
-- The vendored fork (`packages/pi-tui/**`). Nothing here justifies a divergence.
+- The vendored fork (`packages/pi-tui/**`). Nothing here justifies a divergence
+  on its own; the only authorized exception is an Owner amendment recorded in
+  §1.3 (today: `D16`, rollout PR5b's X061/X062).
 - The transcript's right-gutter contract (`docs/transcript-gutter.md`).
 
 If a requested visual change needs a new layout/focus authority, a second theme
