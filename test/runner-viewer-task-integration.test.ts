@@ -1289,6 +1289,7 @@ test('switching sessions tears down the Job status viewer with its Task Browser'
   await settle()
   await vt.waitForRender()
   assert.ok(view().includes('build'), `the browser must show the job:\n${view()}`)
+  assert.ok(view().includes('↑↓ select'), `the open Task Browser owns the task chrome:\n${view()}`)
 
   input('\r') // open the Job status detail (a child overlay of the browser)
   await settle()
@@ -1302,7 +1303,11 @@ test('switching sessions tears down the Job status viewer with its Task Browser'
   await vt.waitForRender()
   assert.equal(app.overlayGraphState().handles, 0, 'the whole Task Center stack is torn down')
   assert.ok(!view().includes('Esc back'), `the old Job View must not survive the switch:\n${view()}`)
-  assert.ok(!view().includes('build'), `the old browser must not survive the switch:\n${view()}`)
+  // The BROWSER's own chrome is the discriminator: the new session's
+  // first-party Task Quick accessory may legitimately paint the same fixture
+  // roster label below the editor, so a bare label search can no longer tell
+  // "browser gone" from "passive window repainted".
+  assert.ok(!view().includes('↑↓ select'), `the old browser must not survive the switch:\n${view()}`)
   assert.equal(app.focusSeatForTest(), 'editor', 'the new-session editor owns the keyboard')
 })
 
