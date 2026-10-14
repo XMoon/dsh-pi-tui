@@ -290,7 +290,7 @@ every draft and every write.
 
 | Zone | `↑↓` | `Tab` / `Shift+Tab` | `Enter` | `Esc` |
 |---|---|---|---|---|
-| `models` (catalogue) | move the row cursor over every visible model AND the retry row | → the strip (then the bar) | open the highlighted model's read-only Full details DIRECTLY, or run the retry row's read-only re-read — **never writes** | close |
+| `models` (catalogue) | move the row cursor over every visible model AND the retry row | → the strip (then the bar) | open the highlighted model's read-only Full details DIRECTLY, or run the retry row's read-only re-read — **never writes** | clear the search filter, else close (see above) |
 | `strip` (catalogue) | `↑↓`/`←→` move the DRAFT over the highlighted model's candidates | → the bar | hand the keyboard to the action bar — **never writes** | clear the search filter, else close (see above) |
 | `details` (the Reader) | `↑↓`/`PageUp`/`PageDown`/`Home`/`End` scroll the Reader's native body (also while a read runs or has failed) | — (one region) | inert — **never writes** | `Back`/`Esc` to the page it came from |
 | action bar | — | → the other zone | **the only key that writes**, once, when the FOCUSED action is the enabled Primary | clear the search filter, else close (see above) |
@@ -390,9 +390,10 @@ not offer. The catalogue is the only page with an action bar, so its two-entry c
 stays admitted on every page, because it is the panel's own DISMISSAL authority —
 the same intent `Esc` and the client's backdrop gesture use — and dismissing can
 never write; only the page OPERATIONS (`back`, `retry`, `apply`) have to be really
-rendered by the current bar. `Retry` is the stable `retry` action and is the only
-action a failed read offers; it is read-only and re-reads through the command's
-single read owner, exactly like the list's own retry row.
+rendered by the current bar. `Retry` is the `retry` action — rendered as `retry#<revision>`
+like every other page operation, so an earlier frame's entry cannot run it — and it is the only
+action a failed read offers; it is read-only and re-reads through the command's single read
+owner, exactly like the list's own retry row (which exists only while the phase is `ready`).
 
 **The partial-failure retry ROW is offered only while the phase is `ready`** (`retryRowOffered`,
 the ONE predicate the row set, its painted order and the row router all read). A read that
@@ -603,8 +604,8 @@ and the two-page set is asserted), the read-only Reader (its grouped
 Identity/Configuration/Description structure, its complete values and `wrap`
 kinds, its PER-READING Back/body ids, the SDK `scroll` ops its own keys emit for
 the body node it really built — with the negative control that the same keys emit
-none away from the Reader — and its origin-preserving return), the K2 two-zone
-walk with the strip between the list and the bar and Enter refused outside the
+none away from the Reader — and its origin-preserving return), the K2 THREE-zone
+walk (the list, the effort strip and the bar) with Enter refused outside the
 Primary Action, the page-by-page action bar
 (including the failed read's `Cancel` + `Retry`, and the fact that the failed providers stay
 as read-only context while the list's retry ROW is gone), `Esc`'s ladder (a typed filter is
