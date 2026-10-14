@@ -137,8 +137,13 @@
   阅读事实行去掉左右两条装饰线,改为「左侧披露 + 右侧位置」的暗色状态行,Command 页不再
   重复 `Full command`;底部动作栏统一 ` · ` 分隔、`Esc` 放到最后(仍保留最高丢弃优先级)、
   事实改为 `Follow on` / `Follow paused`、裸字母键小写(`s stop`、`c copy output`、
-  `v command`),并整体降到最弱可读 ink;`↗ Command` / `Copy All [C]` 这类右侧入口只在
+  `Tab switch`),并整体降到最弱可读 ink;`↗ Command` / `Copy All [C]` 这类右侧入口只在
   整段正文放得下时才画,窄屏优先保留正文,并且不再留下失效的点击区域。
+
+- Job 工作区改用 `Tab` 在 Output / Command 两页之间**来回切换**(原来的 `v` 打开命令页
+  已移除、按 `v` 不再有任何作用);动作栏在两页都广告 `Tab switch`,鼠标点页签、点摘要行的
+  `↗ Command` 入口、以及 `Esc output` 返回 Output 都保持不变;正在 Find 时该切换与提示
+  一并让位(原有行为)。
 
 ### 修复
 

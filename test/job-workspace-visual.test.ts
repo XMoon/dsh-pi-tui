@@ -431,10 +431,15 @@ test('D-05 a non-shell Job paints Label only: no Command tab, no ↗ entry and n
   const summary = bodyRow(harness.vt, 'Label  review the diff')
   await click(harness.vt, summary, 6)
   assert.ok(!/Copy All \[C\]/.test(view(harness.vt)), 'the Label summary has no click target')
-  // `v` is equally inert.
+  // The retired `v` verb is inert here…
   harness.vt.sendInput('v')
   await settle(harness.vt)
-  assert.ok(!/Copy All \[C\]/.test(view(harness.vt)), 'the fixed Command verb is inert without eligibility')
+  assert.ok(!/Copy All \[C\]/.test(view(harness.vt)), 'the retired `v` verb never opens a Command page')
+  // …and the eligibility-gated `Tab` toggle is inert too: a non-shell Job grows no
+  // Command page at all, so neither key may switch to one.
+  harness.vt.sendInput('\t')
+  await settle(harness.vt)
+  assert.ok(!/Copy All \[C\]/.test(view(harness.vt)), '`Tab` cannot open a Command page without eligibility')
 })
 
 // ── D-06: the independent facts coexist ───────────────────────────────────
@@ -1037,4 +1042,49 @@ test('D-23 a hostile label is sanitized on the NEW header rows and never reaches
   harness.vt.sendInput('C')
   await flush(6)
   assert.deepEqual(harness.copied, [hostile], 'the copy payload stays the official original')
+})
+
+// ── C-19: the `Tab` page toggle is symmetric and `v` is inert ──────────────
+
+test('C-19 Tab switches Output <-> Command in BOTH directions and v is inert', async () => {
+  const harness = startApp(120, 40)
+  await openFirstJob(harness)
+  harness.observation.latest()!.emit({ label: 'pnpm build --watch', text: numberedLines(0, 39) })
+  await settle(harness.vt)
+
+  // (1) The Output bar advertises the symmetric page toggle, and the retired
+  // `v command` hint does not exist anywhere on the frame any more.
+  assert.match(plainRows(harness.vt).at(-1)!, /Tab switch/, 'the Output bar advertises the page toggle')
+  assert.ok(!/v command/.test(view(harness.vt)), 'the retired `v command` hint is never painted')
+  // The Output page's OWN body rows, remembered before the round trip.
+  const tabsBefore = bodyRow(harness.vt, '[Output]  Command')
+  const factsBefore = bodyRow(harness.vt, 'Retained preview · not full history')
+  const outputBody = plainRows(harness.vt).slice(tabsBefore + 1, factsBefore)
+  assert.ok(outputBody.length > 0 && /^line \d{3}/.test(outputBody[0]!), 'the Output body is really painted')
+
+  // (2) `Tab` opens the Command page: Command-page-only chrome is painted.
+  harness.vt.sendInput('\t')
+  await settle(harness.vt)
+  assert.match(view(harness.vt), /^Output {2}\[Command\] ─+$/m, 'the Command tab is the focused one')
+  assert.match(plainRows(harness.vt).at(-1)!, /Esc output/, 'the Command bar advertises `Esc output`')
+  assert.match(view(harness.vt), /Full command/, 'the Full command summary row is painted')
+  assert.ok(!/line \d{3}/.test(view(harness.vt)), 'the Output body is not painted on the Command page')
+
+  // (3) `Tab` again returns to Output: the Output-only chrome and exactly the
+  // SAME body rows that were painted before the round trip come back.
+  harness.vt.sendInput('\t')
+  await settle(harness.vt)
+  assert.match(view(harness.vt), /^\[Output\] {2}Command ─+$/m, 'the Output tab is focused again')
+  assert.match(plainRows(harness.vt).at(-1)!, /Esc back/, 'the Output bar advertises `Esc back`')
+  const tabsAfter = bodyRow(harness.vt, '[Output]  Command')
+  const factsAfter = bodyRow(harness.vt, 'Retained preview · not full history')
+  assert.deepEqual(plainRows(harness.vt).slice(tabsAfter + 1, factsAfter), outputBody,
+    'the Output body rows are exactly the ones painted before the round trip')
+
+  // (4) `v` is now completely inert: the page stays on Output with its own body.
+  harness.vt.sendInput('v')
+  await settle(harness.vt)
+  assert.match(view(harness.vt), /^\[Output\] {2}Command ─+$/m, '`v` did not leave the Output page')
+  assert.match(plainRows(harness.vt).at(-1)!, /Esc back/, 'the Output bar is still the painted one')
+  assert.ok(!/Esc output/.test(view(harness.vt)), 'the Command page was never entered by `v`')
 })

@@ -960,8 +960,8 @@ test('L6 B1-C: the Remote Client roster label reaches the Command page and Copy 
   const readsBefore = fx.hostReadCalls()
   const observesBefore = fx.observeAcquires()
 
-  // `v` opens the Command page of the SAME observation instance.
-  fx.fixture.vt.sendInput('v')
+  // `Tab` opens the Command page of the SAME observation instance.
+  fx.fixture.vt.sendInput('\t')
   await waitFor('the Command reader painted', () => view().includes('Copy All [C]'), 10_000)
   assert.match(view(), /Full command/u, 'the Command page discloses that it shows the full command')
   assert.match(view(), /Esc output/u, 'Esc on the Command page returns to Output, never out of the workspace')
