@@ -2529,17 +2529,38 @@ test('native Model: a scroll queued by a CLOSED Reader cannot address the next r
   // A held gate must always carry a fallback release.
   t.after(() => pane.releaseAcks())
   pane.holdAcks()
-  // `End` on the first reading while the credit is blocked: the op is queued.
+  // Holding the acks does NOT by itself spend the pane's credits: drive more repaints than
+  // the pane has credits (2) through props that really change the Reader's frame, so the
+  // first two are SENT and everything after them is coalesced into the pending View. Without
+  // this the Scroll below would simply go out and the test would prove nothing about the
+  // queue.
+  const sentBefore = pane.frameCount()
+  // Two catalogues alternate, so every step really changes the Reader's frame and the phase
+  // stays `ready` (a failed read would make the catalogue refuse the Enter below for reasons
+  // that have nothing to do with the queue).
+  for (const next of [twinEffortDirectory, directory, twinEffortDirectory]) {
+    m.handle.setDirectory(next)
+    await settle(40)
+  }
+  const sentWhileStalled = pane.frameCount()
+  assert.equal(sentWhileStalled, sentBefore + 2,
+    `exactly the pane's two credits were spent before the stall (${sentBefore} -> ${sentWhileStalled})`)
+  // The stall is REAL now: `End` on the first reading can only be queued, and nothing more is
+  // sent until the acks are released.
   pane.key('\u001b[F')
   await settle(30)
+  assert.equal(pane.frameCount(), sentWhileStalled,
+    `the Reader key cannot be sent while the credit is blocked (${sentWhileStalled} -> ${pane.frameCount()})`)
   // Leave the Reader and open a NEW one while the acks are still held, so the queued op can
   // only flush together with the next reading's first View.
   pane.key('\u001b')
   await settle(30)
   pane.key('\r')
   await settle(30)
+  assert.equal(pane.frameCount(), sentWhileStalled, 'and the Reader switch is coalesced too')
   pane.releaseAcks()
   await settle(80)
+  assert.ok(pane.frameCount() > sentWhileStalled, 'releasing the acks really sent the pending View')
   assert.equal(inDetails(pane), true, 'the next reading is the page after the flush')
   const secondBody = readerBodyNode(pane)?.id
   assert.equal(typeof secondBody, 'string', 'and it has a scroll container of its own')

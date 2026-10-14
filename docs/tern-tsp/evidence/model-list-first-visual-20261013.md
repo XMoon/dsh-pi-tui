@@ -134,20 +134,25 @@ the node trees, the screenshots and `visual-acceptance.md`; the lane is part of 
 repository's repeatable acceptance path (it is not part of `pnpm test`/CI, because it
 needs the external Tern CLI).
 
-The final run of this revision is `temp/tern-model-ux-lane-v2-a29`, taken on the
-frozen tree; the run records the sha256 of the four production modules it rendered
-(`model-picker-view.ts f8e640c326bf`, `model-picker-state.ts fea2feabc809`,
-`model-picker-intents.ts a9d009a8e5f3`, `model-picker.ts cd2ab573e365`). Every edit that
-landed after it leaves the lane's INPUTS alone: `src/tui/tsp/**`'s PRODUCTION behaviour
-is unchanged (later commits only add comments there), and the rest is test coverage
-(a rejected or throwing write's notice tone), contract, milestone, evidence and
-changelog wording. The run's visual evidence is therefore INHERITED under the
-repository's rule that a comment-only delta does not invalidate a green lane — its
-recorded hashes are NOT the current source's hashes; its `visual-acceptance.md` carries
-the per-pane table, the
-seven-label review of every capture and that provenance record. Every earlier
-iteration is kept beside its own screenshots, and two of them are why the assertions
-read the way they do: the short `900x400` pane is asserted through the contract's
+**This section describes the CURRENT source.** The run below is the lane's final run on
+the tree that commit `ea25ffa5` carries, and its record names the sha256 of the four
+production modules it really rendered — the strip's composite item id, the row click's zone
+reclaim and the Reader's per-reading epoch are all rendered BY that run, and the lane asserts
+each of them on the real client:
+
+- a chip click hands back its **composite** id verbatim (`effort:["alpha","m-alpha"]\u0000high`
+  in the fixture) and drafts only that model's local effort;
+- a MOUSE click on another model while the strip owns the keyboard hands the keys back to the
+  list (asserted by the hint and by the next `↓` moving the ROW, not the draft);
+- leaving the Reader and entering it again gives the second reading its OWN scroll-container
+  id, and that reading's own `End` addresses that id.
+
+The run is `temp/tern-model-ux-lane-v2-a35`; its `visual-acceptance.md` carries the per-pane
+table, the seven-label review of every capture and the provenance record. Earlier runs are
+kept beside their own screenshots as HISTORY — their hashes describe the source of their own
+moment and are never quoted as evidence for this one. Two of them are why the assertions read
+the way they do: Every earlier
+the short `900x400` pane is asserted through the contract's
 rule (the list region plus its FIRST row contained, everything else reachable by the
 list's own line keys) with every clipped span and the painted-at-once count recorded
 as MEASUREMENTS, and a frame that carries an admitted write must offer no clickable
