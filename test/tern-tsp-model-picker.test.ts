@@ -1019,7 +1019,7 @@ test('native Model: resize keeps the panel and every page stays reachable', asyn
     'the provider-default draft submits WITHOUT a reasoningEffort literal',
   )
   // A refusal re-enables the panel with the chosen draft intact, and the draft
-  // survives the flip to the wide layout (where it is readable in the summary).
+  // survives the flip to a wider pane (where the strip still shows it).
   m.settleWrite('rejected')
   await waitUntil('refusal restores the panel', () => props(pane).state === 'ready')
   await resize(pane, WIDE_COLS)
