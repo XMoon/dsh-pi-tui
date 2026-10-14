@@ -1357,7 +1357,7 @@ test('/settings theme pick persists the BUILTIN choice too (review P1: the trans
   vt.sendInput('\r') // reopen the submenu
   await vt.waitForRender()
   const view = vt.getViewport().join('\n')
-  const lightMarked = view.split('\n').filter(line => line.includes('light') && line.includes('← current'))
+  const lightMarked = view.split('\n').filter(line => line.includes('light') && line.includes('[current]'))
   assert.equal(lightMarked.length, 1, `the light row carries the marker after the pick:\n${view}`)
   app.stop()
 })
@@ -1558,11 +1558,11 @@ test('/settings theme STALE pick through the REAL handler rolls the row and the 
   const rollbackRow = vt.getViewport().find(line => line.includes('Theme'))
   assert.ok(rollbackRow !== undefined && rollbackRow.includes('auto'),
     `the theme row rolled back to the previous choice's label: ${rollbackRow ?? ''}`)
-  // The committed choice is UNCHANGED: a re-open marks `auto` `← current`.
+  // The committed choice is UNCHANGED: a re-open marks `auto` `[current]`.
   vt.sendInput('\r') // reopen the submenu
   await vt.waitForRender()
   const reopened = vt.getViewport().join('\n')
-  const autoMarked = reopened.split('\n').filter(line => line.includes('auto') && line.includes('← current'))
+  const autoMarked = reopened.split('\n').filter(line => line.includes('auto') && line.includes('[current]'))
   assert.equal(autoMarked.length, 1, `the auto row carries the marker after the rollback:\n${reopened}`)
   app.stop()
 })

@@ -24,6 +24,7 @@ import { createDiag } from '../src/runtime/process/diagnostics.ts'
 import { TuiApp } from '../src/tui-app.ts'
 import { KeybindingEditorPanel } from '../src/tui/keybindings/ui/list.ts'
 import { visibleWidth } from '@xmoon76/pi-tui'
+import { currentPalette } from '../src/tui/theme/runtime.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 import { registerTuiCommandsWithDirectSeams } from './support/register-tui-commands.ts'
 import { openLegacySettingsPanel } from './support/open-legacy-settings.ts'
@@ -81,6 +82,30 @@ function selectedRowText(vt: VirtualTerminal): string {
   const line = vt.getViewport().map(stripAnsi).find(row => row.includes('│') && content(row).startsWith('›'))
   assert.ok(line !== undefined, `no selected row painted:\n${viewportText(vt)}`)
   return content(line)
+}
+
+const hexToRgb = (hex: string): number =>
+  (parseInt(hex.slice(1, 3), 16) << 16) | (parseInt(hex.slice(3, 5), 16) << 8) | parseInt(hex.slice(5, 7), 16)
+
+/** The viewport row of the first painted occurrence of `needle`. */
+function rowOf(vt: VirtualTerminal, needle: string): number {
+  const row = vt.getViewport().map(stripAnsi).findIndex(line => line.includes(needle))
+  assert.ok(row >= 0, `the painted frame must contain ${JSON.stringify(needle)}:\n${viewportText(vt)}`)
+  return row
+}
+
+/** The terminal-CELL column of the first painted occurrence of `needle`. */
+function cellIndexOf(vt: VirtualTerminal, row: number, needle: string): number {
+  const plain = vt.getViewport().map(stripAnsi)[row] ?? ''
+  const index = plain.indexOf(needle)
+  assert.ok(index >= 0, `row ${row} must contain ${JSON.stringify(needle)}:\n${plain}`)
+  return visibleWidth(plain.slice(0, index))
+}
+
+/** Whether the row carries the SettingsList cursor marker inside the frame. */
+function isCursorRow(vt: VirtualTerminal, row: number): boolean {
+  const line = vt.getViewport().map(stripAnsi)[row] ?? ''
+  return line.includes('│') && rowContent(line).startsWith('>')
 }
 
 interface StandaloneState {
@@ -394,14 +419,43 @@ test('C-T09: the Theme submenu keeps the same live grant chain (positive control
   h.vt.sendInput('\r')
   await h.vt.waitForRender()
   let view = viewportText(h.vt)
-  assert.match(view, /← current/, 'the theme submenu must keep its source-qualified current marker')
+  assert.match(view, /\[current\]/, 'the theme submenu must keep its source-qualified current chip')
   assert.match(view, /Enter\/Space to change · Esc to cancel/, 'the theme submenu hint must be painted')
   h.vt.resize(120, 10) // shrink: the outer grant must reach the inner SettingsList
   await h.vt.waitForRender()
   view = viewportText(h.vt)
-  assert.match(view, /← current/, 'the current marker must survive the shrink')
+  assert.match(view, /\[current\]/, 'the current chip must survive the shrink')
   assert.match(view, /Enter\/Space to change · Esc to cancel/, 'the hint must survive the shrink')
-  assert.ok(paintedFrame(h.vt, '← current').bottomBorder, `the theme frame bottom border must survive the shrink:\n${view}`)
+  assert.ok(paintedFrame(h.vt, '[current]').bottomBorder, `the theme frame bottom border must survive the shrink:\n${view}`)
+})
+
+test('C-T13: the Theme submenu [current] chip keeps textMuted on BOTH the selected and the unselected row (real overlay frame)', async () => {
+  // §4.5/§12.2 + rollout PR5b requirement 4: the vendored
+  // `settingsListTheme.value` paints `selected ? primary : textDim`, so the
+  // cell colour is asserted in the REAL painted frame in both states — a
+  // string-level assertion cannot see the re-colour.
+  const h = setup({ columns: 120, rows: 40 })
+  await openLegacySettingsPanel(h.invoke, h.vt)
+  for (const character of 'theme') {
+    h.vt.sendInput(character)
+    await h.vt.waitForRender()
+  }
+  h.vt.sendInput('\r')
+  await h.vt.waitForRender()
+  // The current row is the doc's `auto` and the submenu opens on it: the
+  // SELECTED state is the first frame.
+  const selectedRow = rowOf(h.vt, '[current]')
+  assert.ok(isCursorRow(h.vt, selectedRow), `the first frame must have the cursor ON the [current] row:\n${viewportText(h.vt)}`)
+  assert.equal(h.vt.getCellFgRgb(selectedRow, cellIndexOf(h.vt, selectedRow, '[current]')), hexToRgb(currentPalette.textMuted),
+    `the [current] chip is textMuted on the SELECTED row (not primary):\n${viewportText(h.vt)}`)
+  // Move the cursor off the current row: the UNSELECTED state must keep the
+  // SAME ink (not textDim).
+  h.vt.sendInput('\x1b[B')
+  await h.vt.waitForRender()
+  const unselectedRow = rowOf(h.vt, '[current]')
+  assert.ok(!isCursorRow(h.vt, unselectedRow), `the second frame must have the cursor OFF the [current] row:\n${viewportText(h.vt)}`)
+  assert.equal(h.vt.getCellFgRgb(unselectedRow, cellIndexOf(h.vt, unselectedRow, '[current]')), hexToRgb(currentPalette.textMuted),
+    `the [current] chip is textMuted on the UNSELECTED row (not textDim):\n${viewportText(h.vt)}`)
 })
 
 test('C-T11: a question suspends the nested submenu and restores its grant and query', async () => {

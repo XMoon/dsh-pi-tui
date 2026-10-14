@@ -136,7 +136,7 @@ test('ThemeSubmenu row ids ARE the source-qualified values and labels are unique
   assert.equal(doneValue, 'unset', 'construction must not settle anything')
 })
 
-test('the submenu marks "← current" by the SELECTION IDENTITY, never a display label (the review\'s P3: a re-open after a pick follows the new selection)', () => {
+test('the submenu marks "[current]" by the SELECTION IDENTITY, never a display label (the review\'s P3: a re-open after a pick follows the new selection)', () => {
   const registry = new ThemeRegistry()
   const rows = themePickerRows(registry)
   // The /settings handler passes its synchronous `lastThemeChoice`
@@ -145,7 +145,7 @@ test('the submenu marks "← current" by the SELECTION IDENTITY, never a display
   const rendered = (currentSelection: string): string =>
     new ThemeSubmenu(currentSelection, registry, () => {}).render(80).join('\n')
   const openAtAuto = rendered('auto')
-  assert.ok(openAtAuto.includes('auto') && openAtAuto.includes('← current'),
+  assert.ok(openAtAuto.includes('auto') && openAtAuto.includes('[current]'),
     'opening with the auto identity marks the auto row')
   // After picking `file:…` the committed identity is the source-qualified
   // value — reopening with it marks THAT row (not the stale panel-open
@@ -157,7 +157,7 @@ test('the submenu marks "← current" by the SELECTION IDENTITY, never a display
   try {
     const openAtFile = rendered(`file:${name}`)
     // Exactly ONE row carries the marker, and it is the file row.
-    const marked = themePickerRows(registry).filter(row => openAtFile.includes(`${row.displayName}  ← current`) || openAtFile.split('\n').some(line => line.includes('← current') && line.includes(row.displayName)))
+    const marked = themePickerRows(registry).filter(row => openAtFile.includes(`${row.displayName}  [current]`) || openAtFile.split('\n').some(line => line.includes('[current]') && line.includes(row.displayName)))
     assert.equal(marked.length, 1, `exactly one row must be marked: ${JSON.stringify(themePickerRows(registry))}`)
     assert.ok(marked[0]?.value === `file:${name}`, `the marked row is the picked file: ${marked[0]?.value}`)
   } finally {
@@ -165,7 +165,7 @@ test('the submenu marks "← current" by the SELECTION IDENTITY, never a display
   }
 })
 
-test('a same-labeled file created AFTER a plugin selection can never steal the ← current marker (the review\'s P3 identity repro)', () => {
+test('a same-labeled file created AFTER a plugin selection can never steal the [current] marker (the review\'s P3 identity repro)', () => {
   // The current selection is plugin:foo/solarized (display `Solarized`).
   // While the settings panel is open, `Solarized.json` is created: the
   // next picker run gives the FILE the bare `Solarized` label (files
@@ -180,13 +180,13 @@ test('a same-labeled file created AFTER a plugin selection can never steal the �
   writeFileSync(filePath, JSON.stringify({ name: 'Solarized', colors: { primary: '#010203' } }))
   try {
     const rendered = new ThemeSubmenu(current, registry, () => {}).render(80).join('\n')
-    const markedLines = rendered.split('\n').filter(line => line.includes('← current'))
+    const markedLines = rendered.split('\n').filter(line => line.includes('[current]'))
     assert.equal(markedLines.length, 1, `exactly one row must be marked:\n${rendered}`)
     // The marked line is the PLUGIN row's tagged label (`Solarized
     // (plugin)`), never the bare-label FILE row.
     assert.ok(markedLines[0]?.includes('Solarized (plugin)'), `the PLUGIN row carries the marker (identity, not label):\n${rendered}`)
-    const fileLine = rendered.split('\n').find(line => line.includes('Solarized') && !line.includes('← current') && !line.includes('(plugin)'))
-    assert.ok(fileLine !== undefined && !fileLine.includes('← current'),
+    const fileLine = rendered.split('\n').find(line => line.includes('Solarized') && !line.includes('[current]') && !line.includes('(plugin)'))
+    assert.ok(fileLine !== undefined && !fileLine.includes('[current]'),
       `the same-labeled file row is NOT marked:\n${fileLine ?? ''}`)
     // The file row exists with the stolen bare label — and is NOT marked.
     const fileRow = themePickerRows(registry).find(row => row.value === 'file:Solarized')
@@ -250,7 +250,7 @@ test('INTEGRATION: the vendored SettingsList submenu chain keeps the outer row F
   //    revert(friendlyLabel) — the openSettings updateValue seam — so the
   //    outer row displays the friendly name, never `plugin:acme/solarized`.
   // 3. reopening the submenu passes the handler's COMMITTED identity →
-  //    the correct row carries `← current`.
+  //    the correct row carries `[current]`.
   const registry = new ThemeRegistry()
   pluginTheme(registry, 'solarized', 'Solarized')
   pluginTheme(registry, 'nord', 'Nord')
@@ -324,14 +324,14 @@ test('INTEGRATION: the vendored SettingsList submenu chain keeps the outer row F
 
   // Reopen the submenu: the fork passes the LIVE outer currentValue (the
   // friendly label after the rewrite); the Solarized row carries
-  // `← current` (not the panel-open 'auto').
+  // `[current]` (not the panel-open 'auto').
   list!.handleInput('\r') // reopen
   rendered = list!.render(80).join('\n')
-  assert.ok(rendered.includes('← current'), `the reopen marks a current row:\n${rendered}`)
+  assert.ok(rendered.includes('[current]'), `the reopen marks a current row:\n${rendered}`)
   // Exactly the Solarized label row is marked.
   const markedLines = rendered.split('\n').filter(line => line.includes('Solarized'))
-  assert.ok(markedLines.some(line => line.includes('← current')), `Solarized row is the current one:\n${rendered}`)
-  const nordMarked = rendered.split('\n').filter(line => line.includes('Nord') && line.includes('← current'))
+  assert.ok(markedLines.some(line => line.includes('[current]')), `Solarized row is the current one:\n${rendered}`)
+  const nordMarked = rendered.split('\n').filter(line => line.includes('Nord') && line.includes('[current]'))
   assert.equal(nordMarked.length, 0, `Nord must not be marked:\n${rendered}`)
 })
 
@@ -518,12 +518,12 @@ test('INTEGRATION: a STALE pick (the contribution unloads between open and confi
   const afterRollback = outer()
   assert.ok(afterRollback.includes('auto'), `the row shows the previous choice's label:\n${afterRollback}`)
   assert.ok(!afterRollback.includes('plugin:owner-a/solarized'), `the row must not show the stale identity:\n${afterRollback}`)
-  // The committed choice is UNCHANGED: a re-open marks `auto` `← current`
+  // The committed choice is UNCHANGED: a re-open marks `auto` `[current]`
   // (and the in-flight auto detection's guard still reads `auto`).
   assert.equal(lastThemeChoice, 'auto', 'a failed pick must not move the choice')
   list!.handleInput('\r') // reopen the submenu
   const reopened = list!.render(80).join('\n')
-  const autoMarked = reopened.split('\n').filter(line => line.includes('auto') && line.includes('← current'))
+  const autoMarked = reopened.split('\n').filter(line => line.includes('auto') && line.includes('[current]'))
   assert.equal(autoMarked.length, 1, `the auto row carries the marker after the rollback:\n${reopened}`)
 })
 

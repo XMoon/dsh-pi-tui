@@ -870,6 +870,219 @@ device keeps its row:
 ⋮
 ```
 
+### 5.1 The `[current]` chip in a vendored value slot (PR5)
+
+Two pickers route a row STATE through the vendored `SettingsList` value slot, whose
+own paint is `selected ? primary : textDim`. Both now pre-paint the chip at the call
+site, so the chip keeps `textMuted` in BOTH selection states, and the preset picker
+moved its mark out of the `description` (which is painted only while the row is
+selected) into the same slot the theme picker uses:
+
+**BEFORE — real output**
+
+```text
+# current-before-theme-120x40.txt
+# theme submenu, cursor ON the current row, 120x40
+ 0| 🐋  dsh-pi-tui
+ 1| ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ 2| ❯
+ 3| ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ 4|                                                                                                                     full
+ 5| ↑0 ↓0  t0/s0
+ 6|
+ 7|
+ 8|
+ 9|
+10|
+11|
+12|
+13|
+14|                         ╭──────────────────────────────────────────────────────────────────────╮
+15|                         │ >                                                                    │
+16|                         │                                                                      │
+17|                         │ > auto   ← current                                                   │
+18|                         │   dark                                                               │
+19|                         │   light                                                              │
+20|                         │                                                                      │
+21|                         │   Built-in palette                                                   │
+22|                         │                                                                      │
+23|                         │   Type to search · Enter/Space to change · Esc to cancel             │
+24|                         ╰──────────────────────────────────────────────────────────────────────╯
+25|
+26|
+27|
+28|
+29|
+30|
+31|
+32|
+33|
+34|
+35|
+36|
+37|
+38|
+39|
+
+# SELECTED (cursor on the current row): "│ > auto   ← current                                                   │"
+# chip cell (row 17, col 36) fg = 5220607
+```
+**AFTER — real output at this HEAD**
+
+```text
+# current-after-theme-120x40.txt
+# theme submenu, cursor ON the current row, 120x40
+ 0| 🐋  dsh-pi-tui
+ 1| ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ 2| ❯
+ 3| ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ 4|                                                                                                                     full
+ 5| ↑0 ↓0  t0/s0
+ 6|
+ 7|
+ 8|
+ 9|
+10|
+11|
+12|
+13|
+14|                         ╭──────────────────────────────────────────────────────────────────────╮
+15|                         │ >                                                                    │
+16|                         │                                                                      │
+17|                         │ > auto   [current]                                                   │
+18|                         │   dark                                                               │
+19|                         │   light                                                              │
+20|                         │                                                                      │
+21|                         │   Built-in palette                                                   │
+22|                         │                                                                      │
+23|                         │   Type to search · Enter/Space to change · Esc to cancel             │
+24|                         ╰──────────────────────────────────────────────────────────────────────╯
+25|
+26|
+27|
+28|
+29|
+30|
+31|
+32|
+33|
+34|
+35|
+36|
+37|
+38|
+39|
+
+# SELECTED (cursor on the current row): "│ > auto   [current]                                                   │"
+# chip cell (row 17, col 35) fg = 7039851
+```
+
+**BEFORE — real output**
+
+```text
+# current-before-preset-120x40.txt
+# preset picker, cursor ON the current row, 120x40
+ 0| 🐋  dsh-pi-tui
+ 1| ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ 2| ❯
+ 3| ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ 4|                                                                                                                     full
+ 5| ↑0 ↓0  t0/s0
+ 6|
+ 7|
+ 8|
+ 9|
+10|
+11|
+12|
+13|                         ╭──────────────────────────────────────────────────────────────────────╮
+14|                         │ >                                                                    │
+15|                         │                                                                      │
+16|                         │ > Standard mode (standard)                                           │
+17|                         │   PTC mode (ptc)                                                     │
+18|                         │   Minimal mode (minimal)                                             │
+19|                         │                                                                      │
+20|                         │   Full coding agent with file editing, shell, file and web search,   │
+21|                         │   skills, planning, goals, subagents, and workflows. · system ·      │
+22|                         │   default · ← current                                                │
+23|                         │                                                                      │
+24|                         │   Type to search · Enter/Space to change · Esc to cancel             │
+25|                         ╰──────────────────────────────────────────────────────────────────────╯
+26|
+27|
+28|
+29|
+30|
+31|
+32|
+33|
+34|
+35|
+36|
+37|
+38|
+39|
+
+# SELECTED LABEL ROW (16): "│ > Standard mode (standard)                                           │"
+# marker row (22): "│   default · ← current                                                │"
+# marker cell (row 22, col 39) fg = 8947848
+```
+**AFTER — real output at this HEAD**
+
+```text
+# current-after-preset-120x40.txt
+# preset picker, cursor ON the current row, 120x40
+ 0| 🐋  dsh-pi-tui
+ 1| ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ 2| ❯
+ 3| ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ 4|                                                                                                                     full
+ 5| ↑0 ↓0  t0/s0
+ 6|
+ 7|
+ 8|
+ 9|
+10|
+11|
+12|
+13|                         ╭──────────────────────────────────────────────────────────────────────╮
+14|                         │ >                                                                    │
+15|                         │                                                                      │
+16|                         │ > Standard mode (standard)  [current]                                │
+17|                         │   PTC mode (ptc)                                                     │
+18|                         │   Minimal mode (minimal)                                             │
+19|                         │                                                                      │
+20|                         │   Full coding agent with file editing, shell, file and web search,   │
+21|                         │   skills, planning, goals, subagents, and workflows. · system ·      │
+22|                         │   default                                                            │
+23|                         │                                                                      │
+24|                         │   Type to search · Enter/Space to change · Esc to cancel             │
+25|                         ╰──────────────────────────────────────────────────────────────────────╯
+26|
+27|
+28|
+29|
+30|
+31|
+32|
+33|
+34|
+35|
+36|
+37|
+38|
+39|
+
+# SELECTED LABEL ROW (16): "│ > Standard mode (standard)  [current]                                │"
+# marker row (16): "│ > Standard mode (standard)  [current]                                │"
+# marker cell (row 16, col 54) fg = 7039851
+```
+
+The measured ink in those frames: `← current` was `primary` (#4FA8FF) on the cursor
+row and `textDim` (#888888) elsewhere; the `[current]` chip is `textMuted` (#6B6B6B)
+in both states. Two states are two chips (`[current] [default]`), and the ` · `
+joiner is pre-painted too — a nested span's reset ends the outer ink after it.
+
 ## 6. Measured ink inventory (BEFORE) → target role
 
 Measured from the cell read-back at `120×40`; token names confirmed against the
