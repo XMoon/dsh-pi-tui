@@ -129,13 +129,16 @@ row grant, hit target or write path.
     `'← current'` mark at `settings-workspace-panel.ts:888` loses the arrow and
     the outer bracket pair, and a row with two states paints two chips
     (`[current] [unavailable]`) instead of `[← current · unavailable]` — spec
-    §4.5/§5.1.3. Also retire the bracketed verb labels in the same PR
+    §4.5/§5.1.3. The chip is **always `textMuted` and is never recoloured by the
+    row's selection**, so the candidate row can no longer be painted as ONE
+    coloured string: the chip is composed as its own span while the label/value
+    take the row emphasis. Also retire the bracketed verb labels in the same PR
     (`[Change…]` → `Change…`, `[Retry save]` → `Retry save`, `[Confirm]` →
     `Confirm`, `[Cancel]` → `Cancel`, `[Copy value]` → `Copy value [C]`).
 11. **Update the one prose reference in `docs/extension-api.md:301`** from the
-    `← current` marker to the `current` suffix, in this same PR (the owning doc
-    must not go stale). No public type changes: `currentValue` stays an opaque
-    display string.
+    `← current` marker to the `[current]` state chip, in this same PR (the owning
+    doc must not go stale). No public type changes: `currentValue` stays an
+    opaque display string.
 
 **Non-goals:** `planSettingsChrome` row grants and the `ruleRows`/`metaRows`
 conditions; `layoutForWidth` breakpoints (`108`/`76`) and the `22/42/2` geometry;
@@ -250,6 +253,24 @@ touched for another reason**, and each must not invent a device:
 | output viewer / approval dialog | title ink, hint grammar and case; keep the approval bracketed-key device (spec §11.4) | the approval decision semantics and the 1-row stop hint |
 | footer configurator / keybindings UI | `accent` → the role table for interactive inks; help-line verb case | the user-selectable tone vocabulary (`accent` stays available there) |
 | all overlays | the four-step sizing ladder once that overlay is touched for another reason (D10) | each surface's existing height cap until then |
+
+**SettingsList-family requirement (the `[current]` chip's ink).** Three sites
+route a row state through the vendored `SettingsList`: `pickers/theme-menu.ts:119`
+(its `currentValue` slot), `pickers/preset-presentation-pitui.ts:50` (today a word
+inside the `description`) and the `/settings` submenu. The vendored list paints
+`SettingsListTheme.value` as `selected ? primary : textDim`, so **swapping the
+string alone yields the wrong ink in both states**. Requirements:
+
+1. pre-paint the chip with `color.textMuted(...)` at the call site — the
+   `src/tui/commands/status.ts:110` precedent, where the nested style wins and the
+   slot's outer paint resumes after it;
+2. **do not** change `settingsListTheme().value` and **do not** touch
+   `packages/pi-tui/**`: no fork divergence and no new theme abstraction;
+3. move the preset picker's chip out of the `description` into its `currentValue`
+   slot, so both pickers use one position;
+4. assert the painted cell colour in the real overlay frame: the chip's foreground
+   is `textMuted` on BOTH the selected and the unselected row — not `primary`,
+   not `textDim`.
 
 **Gate for the whole rollout (V4 done):** all fourteen decisions frozen; PR1–PR4
 merged; the visual checklist in `docs/code-review.md`; the matrix test and glyph

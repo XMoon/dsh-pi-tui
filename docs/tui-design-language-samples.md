@@ -306,7 +306,7 @@ This pair exists because it is the strongest single argument for the target ink 
 
 ### 3.6 The `[current]` state chip (candidate list)
 
-A focused excerpt of the candidate rows (the choice page is otherwise unchanged apart from the retired verb brackets and the bar). The chip is one lowercase state chip per predicate: it is `textMuted` on its own account, and bold only because the whole selected row is bold (role 8).
+A focused excerpt of the candidate rows (the choice page is otherwise unchanged apart from the retired verb brackets and the bar). The chip is one lowercase state chip per predicate: always `textMuted`, never recoloured by the row's selection — a surface that paints its row as one string must therefore keep the chip as its own span (a vendored `SettingsListTheme.value` slot paints `selected ? primary : textDim`, so the chip is pre-painted at the call site; the fork is never touched).
 
 **BEFORE — real output (candidate rows, real colours)**
 
@@ -695,7 +695,7 @@ painting source line.
 | Settings detail labels | `textDim` | role 5 `textDim` |
 | Settings detail values | **terminal default (unpainted)** — derived presentation text with no ink at all | role 3 `text` / role 4 `textDim` (the palette-invisible defect of §3.2) |
 | Settings detail buttons | `accent` | role 14 `primary` |
-| Settings candidate state chip | `[← current]` in the row ink (selected → `textStrong`) | row-state chip `[current]` in `textMuted`; two states = two chips |
+| Settings candidate state chip | `[← current]` in the row ink (selected → `textStrong`) | row-state chip `[current]` in `textMuted`, never recoloured by selection; two states = two chips |
 | Settings action bar | `textDim` | role 13 `textMuted` |
 | Settings rules | `border` | role 15 `border` |
 | Job `JOB` | `textStrong` | role 1 `textStrong` bold |
