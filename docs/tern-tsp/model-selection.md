@@ -19,6 +19,10 @@ write is an explicit footer action. There is **no global action menu, no global
 operation block and no second-level effort menu**: the ONE Reasoning Effort editor
 is the catalogue's strip.
 
+### Superseded layouts: history is not this surface's contract
+
+Earlier Model plans proposed a wide Explorer, provider sidebar, a three-page `Models → Overview → Full details` path and a second-level Effort editor. The PR #301 Owner revision **retired** those shapes: one working list with the **only** Effort editor as a native `strip`, direct read-only Reader and the explicit footer write are now authoritative. Historical plans and their measurements remain valid **as dated evidence only**, not as Must/acceptance requirements. This exact composition is `/model`-specific, not a global requirement for every TSP picker. Real-client evidence is Tern `0.8.3 (e2b8656)` headless; dark theme, physical wheel/trackpad, IME/OS focus and enlarged-font matrix are not silently promoted to PASS.
+
 ## Availability and behavior
 
 The mounted terminal must advertise `picker`, `row` and `overlay` before the
@@ -297,9 +301,11 @@ every draft and every write.
 
 ### The visible vocabulary (frozen design language)
 
-This surface follows `docs/tui-design-language.md` as an **Overlay** archetype (that
-document names `/model`'s own sizing exception). The consequences, and the ONE
-deviation, are recorded here so the contract and the frames cannot drift:
+This surface follows the **semantic** Overlay archetype of `docs/tui-design-language.md`,
+with its renderer-specific **Native TSP adapter** (§12.3). The historical
+character-cell `/model` sizing exception is not the Tern sheet's size policy: this
+page uses the client's measured `size:'md'`. The concrete native adaptations
+are recorded here so the product contract and actual painted frames cannot drift:
 
 - **The focused action carries a key badge, never a glyph.** The focused entry's
   label is the canonical `Verb [Key]` affordance form (`Switch [Enter]`,
@@ -315,10 +321,12 @@ deviation, are recorded here so the contract and the frames cannot drift:
   `current` / `default` because the native picker paints each badge as its own
   rounded chip in the muted ink (measured: `span.pk-badge`, 18px tall, its own
   background, `rgb(101,101,101)`); the design language's bracketed `[current]` form is
-  its chip syntax for a surface with NO box of its own, and §11.4's badge-slot row
-  cites the text-only PiTui badge slot (`src/tui/pickers/model-picker.ts`), which this
-  change does not touch. **Owner decision open**: if the bracketed form is wanted
-  inside the native pill too, it is a one-line change to the badge texts.
+  its chip syntax for a surface with NO box of its own. The current native
+  rounded Pill already communicates the state without redundant bracket characters;
+  this is a **renderer adaptation**, not a change to the PiTui bracketed-chip
+  vocabulary or an instruction to synthesize an extra selection glyph. The
+  separately painted PiTui badge slot (`src/tui/pickers/model-picker.ts`) is out
+  of scope. A future literal-bracket preference would be a new Owner UX amendment.
 - **A failed provider states itself in words**: its row reads
   `<Provider> · unavailable` — a disabled row may not be signalled by colour alone.
 - **The Reader's notice has a role ink** (`textMuted` for information, `error` for a
