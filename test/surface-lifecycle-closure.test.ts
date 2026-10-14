@@ -1697,7 +1697,14 @@ test('B2A-21 closing a workspace hands the terminal over without flushing its ow
   // and unique to the Job workspace: the status group is ONE span, and no other
   // surface paints the shared `‣` marker. The bare word `Job` would be vacuous —
   // the restored Task Browser paints `── Jobs / executions ──`.
-  const jobMark = '‣ Running'
+  //
+  // The shared status group `‣ Running` is no longer unique: since B4-A the
+  // RESUMED regular surface paints the passive Task Quick window, whose rows
+  // carry the SAME shared `‣` status group by design (design language D5+D7).
+  // The workspace's own action-bar verb `Esc back` (D13) is a single span, is
+  // painted at EVERY width (Esc is never dropped) and belongs to no other
+  // surface here — the restored Task Browser paints `Esc close`.
+  const jobMark = 'Esc back'
   assert.ok(captured().includes(jobMark), 'control: the live Job document is what writes the mark')
   writes.length = 0
   vt.sendInput('\x1b')
