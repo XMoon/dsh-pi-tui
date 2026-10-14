@@ -30,7 +30,12 @@ import type {
  *  carry the full name in its description. Display only — the row `id` and its
  *  `values` (the write path) are untouched. */
 function skillLabel(name: string): string {
-  const limit = 36
+  // 34 = the effective label column at the 44-column floor the design language
+  // supports (`SettingsList` child width 40 minus its fixed `6` cells; the
+  // `min(36, longest label)` cap does not bind there). A wider budget would let
+  // the renderer clip the tail a SECOND time at that size and the rows would
+  // collide again.
+  const limit = 34
   if (visibleWidth(name) <= limit) return name
   let tail = ''
   let used = 1 // the ellipsis cell
