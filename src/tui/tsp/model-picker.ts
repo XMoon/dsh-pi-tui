@@ -485,7 +485,7 @@ export class TspModelPicker {
       bind: (intent) => () => this.act(panel, revision, intent),
     })
     // Every node in the model layer belongs to this panel, so an event whose
-    // `id` is ANY node of the frame (the picker, its summary, a row) is routed
+    // `id` is ANY node of the frame (the picker, a row, an action) is routed
     // here; a node from an earlier frame is absent and never routed.
     // The SAME walk records the Reader body's real wire id — the id the SDK
     // assigned this frame — so the native scroll op can only ever address a node

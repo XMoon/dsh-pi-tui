@@ -184,8 +184,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   read-only **Full details** page directly: there is no intermediate page and no
   second-level effort menu. The notice at the top of that page is now inked by what it
   reports — an error for a write that was refused, unsupported or threw, information for
-  a cancellation (a transition fence refuses before dispatch) — where write-outcome
-  notices used to read as information. The window no longer grows with the terminal either: the
+  a cancellation — where write-outcome notices used to read as information. The window no longer grows with the terminal either: the
   catalogue always asks for the client's medium dialog (measured, the `lg` sheet
   filled 1120x698 of a 1280x800 pane — 87% of both axes — where the medium one is
   680x540, the same choice the official product's own pickers make), and the client

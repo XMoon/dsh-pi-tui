@@ -180,10 +180,10 @@ function renderedActions(panel: ModelPickerPanel): PickerAction[] {
   )
 }
 
-/** Which picker region the SDK should show as focused. The primary action has no
- *  native region (the action bar shape change carries it), so the list owns the
- *  focus everywhere else — including the read-only summary, which is never a
- *  keyboard region. */
+/** Which picker region the SDK should show as focused. The action bar has no native
+ *  region (its focused entry carries the `[Enter]` badge instead), so everywhere else
+ *  the focus follows the keyboard's own zone: the strip while it owns the keyboard,
+ *  the list otherwise. */
 function nativeFocus(panel: ModelPickerPanel): PickerProps['focus'] {
   if (panel.phase === 'error' || panel.zone === 'primary-action') return undefined
   // The client really paints a per-REGION focus class (`pk-sheet f-list` /
@@ -294,9 +294,9 @@ function modelListPicker(
     size: 'md',
     // The catalogue asks for NO preview region: the client reserves a fixed ~36%
     // of the sheet body for `preview: 'below'` (measured 214px of 594px at
-    // 1280x800) and our read-only summary was one line, so the band read as dead
-    // space above the footer. Everything the page offers is in its own main list
-    // and its own strip instead.
+    // 1280x800), and the read-only summary this page once painted there was a
+    // single line, so the band read as dead space above the footer. Everything the
+    // page offers lives in its own main list and its own strip instead.
     preview: 'none',
     query: panel.query,
     cursor: panel.cursor,

@@ -1,10 +1,9 @@
 /** Panel state and pure selectors for the native TSP `/model` presentation.
  *
  * This module answers only "what is the panel currently browsing / offering":
- * its state, the pure selectors over it, the action bar's contents and the ONE
- * measured layout threshold. It renders nothing, mutates nothing and writes
- * nothing, so the view builder and the key map stay pure functions over one
- * explicit state object.
+ * its state, the pure selectors over it, the strip's items and the action bar's
+ * contents. It renders nothing, mutates nothing and writes nothing, so the view
+ * builder and the key map stay pure functions over one explicit state object.
  * @module tui/tsp/model-picker-state
  */
 import type { PickerAction, PickerItem } from '@stencil-hq/tern'
