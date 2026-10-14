@@ -414,8 +414,8 @@ Rules:
 - A **verb label never wears brackets**: an affordance is `Verb [Key]` (key
   badge) or `Verb…` (§7.1). `[Change…]`, `[Retry save]`, `[Confirm]` and
   `[Cancel]` are retired by the Settings PR.
-- The **active device** is the only bold-`primary` bracket on a frame; a chip is
-  never bold and a neutral chip is never `primary`.
+- The **active device** is the only bold-`primary` bracket on a frame. A chip
+  never introduces bold on its own, and a neutral chip is never `primary`.
 - **A state chip is always `textMuted` (`warning` for a problem state) and is
   never recoloured by the row's selection.** A surface whose row model paints the
   whole row as ONE string must therefore compose the chip as its own span — the
@@ -426,11 +426,13 @@ Rules:
   paint is restored afterwards. That is the existing pattern in
   `src/tui/commands/status.ts:110`, and **the vendored fork is never modified for
   it**.
-- **Ink is never inherited; weight may be.** A terminal cannot unbold a nested
-  span, so where a row is painted as ONE emphasised run (the Settings candidate
-  row composes `cursor + label + chips` and wraps that), the chip is `textMuted`
-  *and* bold on the selected row. That is accepted — what must never happen is
-  the chip taking the row's selection COLOUR (`primary` / `textDim`).
+- **A chip never introduces bold on its own; it may inherit the carrying row's
+  weight.** Ink and weight are separate contracts: the INK is never inherited (a
+  chip must not take the row's selection colour, `primary` / `textDim`), while
+  the WEIGHT may be, because a terminal cannot unbold a nested span — where a row
+  is painted as ONE emphasised run (the Settings candidate row composes
+  `cursor + label + chips` and wraps that), the chip is `textMuted` *and* bold on
+  the selected row, and that is accepted.
 - `[current]` is a neutral state chip (`textMuted`); `[unavailable]` is a problem
   state (`warning`). A state chip is not the only signal on the row — the row's
   own value or label is.
