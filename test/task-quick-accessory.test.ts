@@ -171,6 +171,24 @@ test('an empty projection paints nothing and installs no hit geometry', () => {
   assert.equal(accessory.handleMouse(wheel(-1, 1)), undefined)
 })
 
+test('an emptied projection keeps its LAST PAINTED band until the blank frame is painted', () => {
+  const { accessory } = harness()
+  accessory.setItems([item('job:a'), item('job:b'), item('job:c'), item('job:d')])
+  accessory.render(80)
+  // The rows are still on screen: an in-band wheel must be consumed, not bubbled.
+  accessory.setItems([])
+  assert.deepEqual(accessory.handleMouse(wheel(1, 1)), { handled: true, render: false })
+  assert.deepEqual(accessory.handleMouse(wheel(-1, 1)), { handled: true, render: false })
+  assert.equal(accessory.anchoredValue, undefined, 'the anchor is dropped with the rows')
+  // The blank paint is what retires the geometry…
+  assert.deepEqual(accessory.render(80), [])
+  assert.equal(accessory.handleMouse(wheel(1, 1)), undefined, 'after the blank frame nothing is owed the wheel')
+  // …and re-populating paints a fresh frame the wheel resolves against again.
+  accessory.setItems([item('job:a'), item('job:b'), item('job:c'), item('job:d')])
+  accessory.render(80)
+  assert.deepEqual(accessory.handleMouse(wheel(1, 1)), { handled: true, render: true })
+})
+
 test('a 0-grant frame paints nothing and refuses the wheel', () => {
   const { accessory, geometry } = harness({ rows: 4 })
   accessory.setItems([item('job:a'), item('job:b'), item('job:c'), item('job:d')])

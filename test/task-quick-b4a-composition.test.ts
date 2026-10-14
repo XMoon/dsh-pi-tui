@@ -779,6 +779,44 @@ test('B4A-06e a stale width resize still owns the in-band wheel: the transcript 
   assert.equal(h.app.fullscreenScrollForTest()!.scrollTop, before.scrollTop, 'the transcript is still untouched')
 })
 
+test('B4A-06f an emptied roster owns its band until the blank frame is painted', async () => {
+  const h = startQuick({ cols: 120, rows: 40, taskRead: false, roster: [
+    job('j1', 'build', 'running'), job('j2', 'test', 'running'), job('j3', 'lint', 'running'),
+    job('j4', 'deploy', 'running'),
+  ] })
+  await flush()
+  // A scrollable transcript behind the window: an unconsumed wheel WOULD move it.
+  h.app.setTranscript(Array.from({ length: 40 }, (_, index) => ({
+    kind: 'assistant' as const, turn: index, text: `history row ${index}`,
+  })))
+  h.app.setFullscreen(true)
+  await h.vt.waitForRender()
+  const before = h.app.fullscreenScrollForTest()
+  assert.ok(before && before.maxScrollTop > 0, 'the transcript must be scrollable for this witness')
+  assert.equal(before.isFollowingEnd, true)
+  const itemRow = rowOf(h.vt, itemRows(h.vt)[0]!)
+  // The roster empties and the projection is published SYNCHRONOUSLY, before the
+  // deferred repaint: the old band is still on screen.
+  h.roster.rows = []
+  h.tasks.refreshTasks()
+  h.vt.sendInput(`\x1b[<64;5;${itemRow + 1}M`)
+  await flush(1)
+  const mid = h.app.fullscreenScrollForTest()!
+  assert.equal(mid.scrollTop, before.scrollTop,
+    'an in-band wheel during the emptied-but-unpainted window must not scroll the transcript')
+  assert.equal(mid.isFollowingEnd, before.isFollowingEnd, 'the follow state must not flip')
+  // The repaint paints the blank band and retires the hit geometry.
+  await h.vt.waitForRender()
+  await flush(2)
+  assert.deepEqual(itemRows(h.vt), [], `the emptied window paints nothing:\n${view(h.vt)}`)
+  // The band's rows return to the transcript pane, which stays FOLLOWING the end:
+  // its scrollTop settles on the new (larger-viewport) maximum — a layout
+  // consequence, never the wheel.
+  const after = h.app.fullscreenScrollForTest()!
+  assert.equal(after.isFollowingEnd, true, 'the pane still follows the end')
+  assert.equal(after.scrollTop, after.maxScrollTop, 'the pane sits at the end of the grown viewport')
+})
+
 test('B4A-06b the ordinary main screen has NO application mouse: the wheel moves nothing', async () => {
   const h = startQuick({ cols: 120, rows: 40, taskRead: false, roster: [
     job('j1', 'build', 'running'), job('j2', 'test', 'running'), job('j3', 'lint', 'running'),
