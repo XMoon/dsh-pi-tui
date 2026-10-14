@@ -110,6 +110,33 @@ export const selectListTheme: SearchablePickerTheme = {
 }
 
 /**
+ * The readable half of a task/job state: the Title Case status WORD that
+ * carries the shared `‣` marker (design language `docs/tui-design-language.md`
+ * §3.2 role 9 — colour is never the only signal, §3.3.3). The word is paired
+ * with {@link taskStatusColor}'s token; the two must stay one vocabulary, so
+ * this map lives beside the colour map (`docs/tui-design-language.md` §10) and
+ * is never forked.
+ *
+ * A status the map does not name is Title-cased verbatim: the surface may not
+ * rename a real state it does not know, and a future wire status must still
+ * paint a readable word.
+ */
+export function taskStatusWord(status: string): string {
+  switch (status) {
+    case 'running': return 'Running'
+    case 'stopping': return 'Stopping'
+    case 'completed': return 'Completed'
+    case 'failed': return 'Failed'
+    case 'killed': return 'Killed'
+    case 'timed_out': return 'Timed out'
+    case 'lost': return 'Lost'
+    case 'inactive': return 'Inactive'
+    case 'awaiting answer': return 'Awaiting answer'
+    default: return status.charAt(0).toUpperCase() + status.slice(1)
+  }
+}
+
+/**
  * Status-dot colour for a job status (dsh-web StateDot parity:
  * running = ongoing/primary, stopping/killed = warning, completed = done/dim,
  * failed/timed-out/lost = error). Unknown statuses fall back to the
