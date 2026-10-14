@@ -6211,7 +6211,7 @@
     "`SettingItem.valueParts?: readonly SettingValuePart[]` (`{ kind: 'chip' | 'text'; text: string }`) — a structured, whole-unit replacement for the value slot; `currentValue`, `values`, `updateValue` and `activateItem` semantics are untouched (the parts are a paint-time display fact)",
     "the value slot keeps the longest WHOLE prefix of `valueParts` that fits its budget and never cuts a part; a kept prefix never ENDS on a `text` part, so a dropped chip takes its separator with it (`fitValueParts`)",
     "the label column is clamped to `min(36, longest label, width - widest chip - 6)` (the same fixed-cell budget the value slot uses) and the label itself is truncated with `…` to that column (`stateReserveWidth`), so one chip is reserved and no painted row exceeds `render(width)`",
-    "no `valueParts` => the historical path (`truncateToWidth(currentValue, valueMaxWidth, '')`) is byte-identical",
+    "no `valueParts` => the VALUE field keeps its historical expression (`truncateToWidth(currentValue, valueMaxWidth, '')`) byte-for-byte; the LABEL-column clamp is GLOBAL, so every row whose label exceeds its column (a user `/skills` name, a dynamic command/keybinding label) now clips with `…` instead of painting past its column",
     "`SettingValuePart` is exported from the package entry next to `SettingItem`"
    ],
    "dependencies": {
@@ -6250,7 +6250,7 @@
       "whole-part keep/drop with trailing-`text` trimming",
       "label clamp with `…` (no row overflow)",
       "chip reservation down to the 44-column floor; no cached width (per-render, so a resize reflows)",
-      "the plain-string path is unchanged"
+      "the value field's plain-string path is unchanged; the label-column clamp applies to every row"
      ],
      "notes": "The reservation is a budget, not an exception: the chip outranks the label's tail (spec §6.4/§8, Owner decision 2026-10-14)."
     }
@@ -6272,7 +6272,7 @@
      "packages/tui/src/components/settings-list.ts"
     ],
     "relevantIssues": [],
-    "semanticDelta": "Upstream's `SettingItem` has no structured value slot: the renderer pads the label to `min(36, longest label)` without clamping it, and truncates the value with a raw `truncateToWidth`. A label wider than its column therefore overflows the row and a chip in the value slot can be sliced (`[defaul`) or pushed out of the paint. The fork adds `valueParts` (whole-unit keep/drop with trailing-separator trimming) and the label clamp/reservation; rows without parts keep upstream's exact rendering path."
+    "semanticDelta": "Upstream's `SettingItem` has no structured value slot: the renderer pads the label to `min(36, longest label)` but never CLAMPS it, and truncates the value with a raw `truncateToWidth`. A label wider than its column therefore overflows the row, and a chip in the value slot can be sliced (`[defaul`) or pushed out of the paint. The fork adds `valueParts` (longest whole prefix, trailing-separator trimming) and closes the label column to the width it allocates (the clamp is global; the value field's plain-string path is unchanged)."
    },
    "retirement": {
     "conditions": [

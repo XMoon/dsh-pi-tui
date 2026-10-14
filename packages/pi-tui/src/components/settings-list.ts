@@ -371,7 +371,9 @@ export class SettingsList implements Component, Focusable {
 	 * column yields these cells, so the chip a row leads with is painted WHOLE
 	 * at any width that fits it — the same reservation is a budget, not an
 	 * exception, and the row's own label is what truncates instead. 0 when no
-	 * row declares a chip, which leaves the historical layout untouched. */
+	 * row declares a chip: the label column is then capped by `width - 6`
+	 * alone (the clamp below is global — every row obeys its column), while the
+	 * value slot keeps its historical plain-string path. */
 	private stateReserveWidth(): number {
 		let widest = 0;
 		for (const item of this.items) {

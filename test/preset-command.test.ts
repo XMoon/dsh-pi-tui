@@ -2062,4 +2062,3 @@ test('a sessionless /preset stages the next preset without reading a policy rost
   assert.equal(rosterReads, 0, 'the sessionless selection must not read a chooser-policy roster')
   t.app.stop()
 })
-

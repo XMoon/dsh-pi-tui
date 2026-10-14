@@ -37,10 +37,11 @@ const SAFE_EAW: ReadonlySet<string> = new Set(['neutral', 'narrow', 'halfwidth']
 
 /** The chrome glyph inventory of `docs/tui-design-language.md` §4.4 that MUST be
  *  width-safe. The current-value arrow `←` is deliberately NOT here: it is
- *  ambiguous and grandfathered (§4.3). What keeps it in the inventory is now
- *  only the question flow's chrome hints — the three `← current` marks were
- *  retired by the Settings and picker PRs, and for those hints every neutral
- *  substitute either collides with another role or reads as something else. */
+ *  ambiguous and grandfathered (§4.3). The three `← current` marks were retired
+ *  by the Settings and picker PRs, but the glyph is still painted in TWO places
+ *  — the question flow's chrome hints and the keybindings UI's `←→: edit` hint
+ *  (§11.4) — and for those hints every neutral substitute either collides with
+ *  another role or reads as something else. */
 const CANONICAL_CHROME_GLYPHS: ReadonlyArray<readonly [role: string, glyph: string]> = [
   ['navigation cursor', '>'],
   ['active/current label brackets', '['],
@@ -63,7 +64,7 @@ const GRANDFATHERED_AMBIGUOUS: ReadonlyArray<readonly [glyph: string, where: str
   ['─', 'every rule and the editor border'],
   ['·', 'the fact/hint separator'],
   ['↗', 'the Job command affordance'],
-  ['←', 'the question flow chrome hints (the `← current` marks were retired by PR5)'],
+  ['←', 'the question flow chrome hints and the keybindings UI `←→: edit` hint (the `← current` marks were retired by PR5)'],
   ['▼', 'the hardcoded sub-call/workflow disclosure'],
   ['▶', 'the hardcoded sub-call/workflow disclosure'],
   ['◆', 'the footer configurator move-mode marker'],
