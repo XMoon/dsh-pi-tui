@@ -25,8 +25,10 @@ export interface ActionBarSegment {
 }
 
 /** The separator between surviving segments. The design language freezes ` · `
- *  (v1 §4.2, decision D4); this constant stays ` | ` until every surface that
- *  paints a bar is on this helper, and then flips in ONE place. */
+ *  (v1 §4.2, decision D4). It is still ` | ` because this module was extracted
+ *  verbatim; the Settings PR flips this ONE constant and re-runs the Job visual
+ *  suites in the same change, since both surfaces share it. No per-caller
+ *  separator option: one family, one separator. */
 export const ACTION_BAR_SEPARATOR = ' | '
 
 /**

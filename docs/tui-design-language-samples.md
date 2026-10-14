@@ -283,7 +283,7 @@ Esc back | ↑↓/Pg keys scroll | Enter change | R refresh | C copy value
 Settings · Appearance · Configured theme                                                             2 editable rows
 Scope: TUI settings document · Refreshed 09:41 · Config ready
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-[Categories (3)]        Rows (2)                                    Details
+Categories (3)          Rows (2)                                    [Details]
 > Appearance            > Configured theme                    dark  Configured theme
   Display                 Icon style                       symbols  Value       dark
   Other settings                                                    Runtime     light
@@ -299,7 +299,7 @@ Scope: TUI settings document · Refreshed 09:41 · Config ready
 ⋮
                                                                     Change…  Retry save  Copy value [C]
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-Esc back · Enter change · ↑↓ scroll · r refresh · c copy value
+Enter change · ↑↓ scroll · r refresh · c copy value · Esc back
 ```
 
 This pair exists because it is the strongest single argument for the target ink table: in the BEFORE frame `Status  Not saved · settings namespace …` is painted in exactly the same terminal-default ink as `Value` and `Runtime` above it, so the one row that says the write was refused looks like every other fact. The target paints only the status **word** (`Not saved` in `error`, `Verified` in `success`, `Outcome unknown` in `warning`, `Saving…` in `textDim`) and leaves the reason `textDim`. Nothing else on this frame changes except the vocabulary the earlier pairs already listed.
@@ -377,6 +377,9 @@ Job · job-a · bash                                                            
 Progress: 3/8 checks · Detail: Building components
 Command  pnpm build && pnpm test:product                                                                       ↗ Command
 [Output]  Command ──────────────────────────────────────────────────────────────────────────────────────────────────────
+line 007
+line 008
+line 009
 line 010
 line 011
 line 012
@@ -408,9 +411,6 @@ line 037
 line 038
 line 039
 line 040
-line 041
-line 042
-line 043
 Retained preview · not full history                                                                         rows 7-40/40
 s stop · Follow on · Find Ctrl+F · c copy output · v command · PgUp/PgDn · Esc back
 ```
@@ -524,11 +524,11 @@ Job · job-a · bash                                                     ‣ Run
 Progress: 3/8 checks · Detail: Building components
 Command  pnpm build && pnpm test:product                               ↗ Command
 [Output]  Command ──────────────────────────────────────────────────────────────
-line 010
-line 011
-line 012
-line 013
-line 014
+line 036
+line 037
+line 038
+line 039
+line 040
 s stop · Follow on · Retained preview · not full history · Esc back
 ```
 This frame proves why the proposal's "keep facts out of the action bar" rule cannot be adopted literally: at `80×10` the reading-facts row is not granted (`FACTS_MIN_ROWS = 12`), so the retained-output disclosure has nowhere else to live. The target keeps it on the bar, distinguishable from the hints because a fact reads `<Noun> <state>` and never starts with a key name.
@@ -564,24 +564,24 @@ Esc back | S stop | Follow ON
 
 ```text
 Job · job-a · bash                                 ‣ Running
-Progress: 3/8 checks · Detail: Building components
-Command  pnpm build && pnpm test:product
+Command  pnpm build && pnpm test:product           ↗ Command
 [Out]  Cmd ─────────────────────────────────────────────────
-line 010
-line 011
-line 012
-line 013
-line 014
-line 015
-line 016
-line 017
-line 018
-line 019
-line 020
-line 021
-line 022
-line 023
-line 024
+line 025
+line 026
+line 027
+line 028
+line 029
+line 030
+line 031
+line 032
+line 033
+line 034
+line 035
+line 036
+line 037
+line 038
+line 039
+line 040
 s stop · Follow on · Esc back
 ```
 
@@ -613,24 +613,24 @@ Esc back | S stop | Follow ON
 
 ```text
 Job · job-a · bash                 ‣ Running
-Progress: 3/8 checks
 Command  pnpm build && pnpm test:product
 [Out]  Cmd ─────────────────────────────────
-line 010
-line 011
-line 012
-line 013
-line 014
-line 015
-line 016
-line 017
-line 018
-line 019
-line 020
-line 021
-line 022
-line 023
-line 024
+line 025
+line 026
+line 027
+line 028
+line 029
+line 030
+line 031
+line 032
+line 033
+line 034
+line 035
+line 036
+line 037
+line 038
+line 039
+line 040
 s stop · Follow on · Esc back
 ```
 At 44 columns the BEFORE frame cuts the command to `pnpm build && pnpm test:…` so that the `↗ Command` affordance can fit. The target drops the affordance instead (the summary row is itself clickable, and `v command` stays advertised), so the command fits in full. This is the "an affordance yields to its content" rule.
