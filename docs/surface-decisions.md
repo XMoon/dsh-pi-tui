@@ -2709,8 +2709,10 @@ entries, and their routing/wordings are unchanged.
   acknowledges nothing. The whole painted band owns the wheel: while the pointer
   is on the window the transcript underneath never scrolls, and a wheel at a
   window boundary — or one dispatched against a frame that is stale because a
-  resize has not been repainted — is consumed with `render: false` instead of
-  falling through.
+  resize has not been repainted, or because the projection just emptied and the
+  blank frame is not painted yet — is consumed with `render: false` instead of
+  falling through. The last painted hit geometry therefore lives until
+  `render()` really paints zero rows, which is when the band leaves the screen.
   Press/release/click are refused: the accessory cannot open, stop or acknowledge
   anything in B4-A.
 - **Session currentness.** A session-generation reset clears the window together

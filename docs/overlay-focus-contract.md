@@ -977,9 +977,12 @@ between the two owners:
   dimensions from the same last painted layout and a resize therefore cannot be
   detected from the event alone. The accessory's whole painted band owns the
   wheel: a boundary wheel — and one dispatched against a frame that is stale
-  because a resize has not been repainted yet — is consumed with
-  `render: false` instead of falling through to the transcript, and the wheel
-  never focuses, opens or acknowledges anything.
+  because a resize has not been repainted yet, or because the projection emptied
+  before its deferred repaint — is consumed with `render: false` instead of
+  falling through to the transcript. Ownership is decided from the painted band
+  FIRST and only then from currentness, and the band's hit geometry lives until
+  `render()` paints zero rows. The wheel never focuses, opens or acknowledges
+  anything.
 - **Data and currentness.** The rows are published by the surface Task Runtime
   through a private `TuiApp` sink on every row/attention commit; the accessory
   keeps no catalog, no timer and no subscription, and a session-generation reset

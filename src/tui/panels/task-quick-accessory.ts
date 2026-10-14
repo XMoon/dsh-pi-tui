@@ -253,7 +253,13 @@ export class TaskQuickAccessory implements Component {
    * showed before: a status update never resets the window, an inserted/removed
    * row rebases onto the surviving first visible value, and a vanished anchor
    * falls back to the bounded previous index — never to a label or a position
-   * guess. An empty projection drops the frame and its hit geometry.
+   * guess.
+   *
+   * An empty projection keeps the LAST PAINTED hit geometry until `render()`
+   * actually paints the blank frame: the rows are still on screen, so a wheel
+   * dispatched to that band before the deferred repaint must be consumed by the
+   * accessory (not fall through to the transcript). `render()` clears the
+   * geometry on the zero-row path.
    */
   setItems(next: readonly TaskPanelItem[]): void {
     const items = [...next]
@@ -263,7 +269,6 @@ export class TaskQuickAccessory implements Component {
       this.items = []
       this.firstVisibleId = undefined
       this.start = 0
-      this.painted = undefined
       this.requestRender()
       return
     }
@@ -320,6 +325,9 @@ export class TaskQuickAccessory implements Component {
     if (this.geometry.columns() !== painted.terminalColumns || this.geometry.rows() !== painted.terminalRows) {
       return { handled: true, render: false }
     }
+    // A projection that emptied (or that had nothing to show) before the repaint
+    // still owns its band: consume without acting, never touch the anchor.
+    if (this.items.length === 0) return { handled: true, render: false }
     const step = event.wheelDelta < 0 ? -1 : 1
     const next = Math.min(Math.max(0, this.start + step), Math.max(0, this.items.length - painted.itemRows))
     if (next === this.start) return { handled: true, render: false }
