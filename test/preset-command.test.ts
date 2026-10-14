@@ -999,6 +999,9 @@ test('X061: two long same-prefix preset names stay distinguishable at 44 columns
   assert.ok(firstRow !== undefined && secondRow !== undefined,
     `each preset row must keep its own tail:\n${view.join('\n')}`)
   assert.notEqual(firstRow, secondRow, `the two rows must not paint identically:\n${view.join('\n')}`)
+  // Both ENDS must survive: the head identifies the id, the tail separates the pair.
+  assert.ok(firstRow.includes('a-xxx') && secondRow.includes('a-xxx'),
+    `each row must keep the name's head too:\n${view.join('\n')}`)
   assert.ok(view.join('\n').includes(rows[0]!.id),
     `the selected row's description must expand the complete name (id):\n${view.join('\n')}`)
   t.app.stop()
