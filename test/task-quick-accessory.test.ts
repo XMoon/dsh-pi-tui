@@ -178,7 +178,7 @@ test('a 0-grant frame paints nothing and refuses the wheel', () => {
   assert.equal(accessory.handleMouse(wheel(1, 1)), undefined)
   geometry.rows = 24
   assert.equal(accessory.render(80).length, 4)
-  assert.deepEqual(accessory.handleMouse(wheel(-1, 1)), { handled: true }, 'an upward wheel at the top is consumed without a repaint')
+  assert.deepEqual(accessory.handleMouse(wheel(-1, 1)), { handled: true, render: false }, 'an upward wheel at the top is consumed without a repaint')
   assert.deepEqual(accessory.handleMouse(wheel(1, 1)), { handled: true, render: true }, 'the down wheel moves the window')
   assert.match(strip(accessory.render(80)[0]!), /showing 2-4\/4$/)
 })
@@ -187,12 +187,14 @@ test('the wheel resolves only against the LAST PAINTED frame', () => {
   const { accessory, geometry } = harness()
   accessory.setItems([item('job:a'), item('job:b'), item('job:c'), item('job:d'), item('job:e')])
   accessory.render(80)
-  // A stale box (a resize that has not been repainted) is refused, both ways.
-  assert.equal(accessory.handleMouse(wheel(1, 1, { width: 100 })), undefined)
-  assert.equal(accessory.handleMouse(wheel(1, 1, { height: 3 })), undefined)
+  // A stale box (a resize that has not been repainted) is CONSUMED in-band without
+  // acting — refusing would fall through to the transcript behind the window.
+  assert.deepEqual(accessory.handleMouse(wheel(1, 1, { width: 100 })), { handled: true, render: false })
+  assert.deepEqual(accessory.handleMouse(wheel(1, 1, { height: 3 })), { handled: true, render: false })
   // A y outside the painted band is not ours (the alt screen cannot produce one,
-  // but the guard is part of the hit contract).
+  // but the guard is part of the hit contract): the transcript keeps that wheel.
   assert.equal(accessory.handleMouse(wheel(1, 9)), undefined)
+  assert.equal(accessory.handleMouse(wheel(1, -1)), undefined)
   // Press/release/click never act and never take focus.
   assert.equal(accessory.handleMouse({ ...wheel(1, 1), type: 'press' }), undefined)
   assert.equal(accessory.handleMouse({ ...wheel(1, 1), type: 'click' }), undefined)
@@ -204,7 +206,7 @@ test('the wheel resolves only against the LAST PAINTED frame', () => {
   assert.match(strip(accessory.render(80)[0]!), /showing 3-5\/5$/)
   // At the window boundary the wheel is CONSUMED with no repaint: the
   // transcript under the pointer never scrolls.
-  assert.deepEqual(accessory.handleMouse(wheel(1, 1)), { handled: true })
+  assert.deepEqual(accessory.handleMouse(wheel(1, 1)), { handled: true, render: false })
   assert.match(strip(accessory.render(80)[0]!), /showing 3-5\/5$/)
   assert.deepEqual(accessory.handleMouse(wheel(-1, 1)), { handled: true, render: true })
   assert.match(strip(accessory.render(80)[0]!), /showing 2-4\/5$/)
@@ -212,7 +214,8 @@ test('the wheel resolves only against the LAST PAINTED frame', () => {
   // the event's own dimensions come from the same stale layout cache and cannot
   // express the resize at all.
   geometry.rows = 6
-  assert.equal(accessory.handleMouse(wheel(-1, 1)), undefined, 'a stale frame after a resize is refused')
+  assert.deepEqual(accessory.handleMouse(wheel(-1, 1)), { handled: true, render: false },
+    'a stale frame after a resize is consumed without acting')
   const shrunk = accessory.render(80)
   // A one-row grant paints ONE content row (no header) and keeps the position.
   assert.equal(shrunk.length, 1)
@@ -221,7 +224,8 @@ test('the wheel resolves only against the LAST PAINTED frame', () => {
   assert.match(strip(accessory.render(80)[0]!), /^job:c\s+‣ Running\s+3-3\/5$/)
   // A width resize is caught the same way.
   geometry.cols = 100
-  assert.equal(accessory.handleMouse(wheel(-1, 0, { height: 1 })), undefined, 'a stale frame after a width change is refused')
+  assert.deepEqual(accessory.handleMouse(wheel(-1, 0, { height: 1 })), { handled: true, render: false },
+    'a stale frame after a width change is consumed without acting')
   accessory.render(100)
   assert.deepEqual(accessory.handleMouse(wheel(-1, 0, { width: 100, height: 1 })), { handled: true, render: true })
 })
@@ -235,7 +239,7 @@ test('the whole painted band owns the wheel, identity row included', () => {
   assert.deepEqual(accessory.handleMouse(wheel(1, 0)), { handled: true, render: true })
   assert.match(strip(accessory.render(80)[0]!), /showing 2-4\/4$/)
   // Nothing to scroll: consumed without a repaint, never bubbled.
-  assert.deepEqual(accessory.handleMouse(wheel(1, 1)), { handled: true })
+  assert.deepEqual(accessory.handleMouse(wheel(1, 1)), { handled: true, render: false })
   assert.match(strip(accessory.render(80)[0]!), /showing 2-4\/4$/)
 })
 

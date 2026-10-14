@@ -31,6 +31,10 @@ import { afterEach, test } from 'node:test'
 import { Text, stripTerminalSequences, visibleWidth } from '@xmoon76/pi-tui'
 import { TuiApp } from '../src/tui-app.ts'
 import { createTaskRuntime, type TaskRuntime, type TaskSurfaceSource } from '../src/app/surface/task-runtime.ts'
+import { QuestionSurfaceController } from '../src/app/surface/question-controller.ts'
+import type { QuestionInteractionPort, QuestionSurfaceSnapshot, QuestionWaitClaim } from '../src/runtime/interaction-port.ts'
+import type { AskUserQuestionItem } from '@deepseek-ai/dsh-user-questions/types'
+import type { TuiQuestionAnswer } from '../src/tui-app.ts'
 import { TaskBrowserRuntime } from '../src/app/surface/task-browser-runtime.ts'
 import type { QuestionAttentionRow } from '../src/app/surface/question-controller.ts'
 import type { SessionSubject } from '../src/app/session/subject.ts'
@@ -383,11 +387,13 @@ test('B4A-05 the 3/1/0 ladder on the frozen matrix, editor/footer/transcript pre
       rows,
       taskRead: false,
       roster: [
+        // The long CJK label is FIRST so the painted window really carries it at
+        // every size (a 44x20 frame shows only its first row).
+        job('j5', '中文任务标签非常长需要被正确截断', 'running'),
         job('j1', 'build the whole thing with a very long label', 'running'),
         job('j2', 'test', 'running'),
         job('j3', 'deploy', 'running'),
         job('j4', 'lint', 'running'),
-        job('j5', '中文任务标签非常长需要被正确截断', 'running'),
       ],
     })
     await flush()
@@ -523,6 +529,105 @@ test('B4A-02c a superseded session late catalog result never paints into the new
   assert.deepEqual(itemRows(h.vt), [], `a stale catalog result must never reach the new session:\n${view(h.vt)}`)
 })
 
+// ── B4A-03: Question attention, driven through the REAL controller ─────────
+
+test('B4A-03b the production Question controller subscription reaches the painted window', async () => {
+  const QUESTIONS: readonly AskUserQuestionItem[] = [{ id: 'q1', question: 'Use staging or production?' }]
+  const SESSION = 'sess-main'
+  const CALL = 'call-continued'
+  let snapshot: QuestionSurfaceSnapshot | undefined
+  let subscribers: Array<() => void> = []
+
+  // The same minimal Question port the controller suites use (`question-park-reopen`).
+  const port: QuestionInteractionPort = {
+    onRequest: () => true,
+    subscribe: (_sessionId, listener) => {
+      subscribers.push(listener)
+      return () => { subscribers = subscribers.filter(entry => entry !== listener) }
+    },
+    snapshot: () => snapshot,
+    claimTimedWait: async (): Promise<QuestionWaitClaim | undefined> => undefined,
+    answerContinued: async () => 'queued',
+  }
+
+  // A real TuiApp + the ONE Task Runtime, wired the way the production
+  // composition wires them: the controller is the attention authority,
+  // `publishAttention` is the app's own parked count, and the controller's
+  // subscription repaints the Task Center rows.
+  const vt = new VirtualTerminal(120, 40)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {})
+  app.start()
+  startedApps.add(app)
+  const controller = new QuestionSurfaceController({
+    port,
+    ask: () => new Promise<TuiQuestionAnswer[]>(() => {}),
+    notify: () => {},
+    repaint: () => app.requestRender(),
+    currentSessionId: () => SESSION,
+    isAdmissibleSession: sessionId => sessionId === SESSION,
+    diag: createDiag({ filePath: undefined, stderrLevel: 'off' }),
+  })
+  const publishAttention = (): void => {
+    app.setQuestionAttention(controller.attentionRows().filter(row => row.presentation === 'parked').length)
+  }
+  const tasks = createTaskRuntime({
+    mounted: () => app,
+    display: () => displaySeamStub(),
+    isCleanedUp: () => false,
+    attention: {
+      rows: () => controller.attentionRows(),
+      reconcile: () => controller.reconcile(),
+      publish: publishAttention,
+      reopen: (sessionId, callId) => controller.reopen(sessionId, callId),
+    },
+  })
+  tasks.attachTasks({
+    sessionId: () => SESSION,
+    captureSubject: () => ({}) as never,
+    subjectMatches: () => true,
+    enterView: async () => {},
+    interruptSubagent: async () => ({ kind: 'committed' }) as never,
+    rowSelectionDisposition: (row, detail) => row === undefined || row.kind === 'job' ? detail : 'close',
+    subagentJobTranscriptId: () => undefined,
+    subagentJobViewHint: status => status,
+    jobObservation: new JobObservationDouble(),
+    jobs: { list: () => [], subscribe: () => () => {} },
+  }, { diag: createDiag({ filePath: undefined, stderrLevel: 'off' }), isCleanedUp: () => false })
+  const subscription = controller.subscribeAttention(() => {
+    publishAttention()
+    tasks.refreshAttentionRows()
+  })
+  controller.attach()
+  await flush()
+  await vt.waitForRender()
+
+  // Cold discovery with authority exposing a CONTINUED call: the controller
+  // parks it (no form mounted) and its OWN subscription drives the window.
+  snapshot = {
+    sessionId: SESSION,
+    active: [{ callId: CALL, sessionId: SESSION, questions: QUESTIONS, state: 'continued' }],
+    settled: [],
+    queuedReplyCallIds: new Set<string>(),
+  }
+  for (const listener of [...subscribers]) listener()
+  controller.reconcile()
+  await flush()
+  await vt.waitForRender()
+  assert.match(itemRows(vt)[0] ?? '', /Use staging or production\?\s+‣ Awaiting answer$/,
+    `the controller's parked row must paint:\n${view(vt)}`)
+  assert.ok(view(vt).includes('? 1 awaiting'), `the footer count comes from the same authority:\n${view(vt)}`)
+
+  // The user reopens it: the controller's own subscription moves it to `visible`
+  // (the flow owns the editor seat) and the resident window must drop it.
+  assert.equal(controller.reopen(SESSION, CALL), true)
+  await flush()
+  await vt.waitForRender()
+  await flush(2)
+  assert.deepEqual(itemRows(vt), [], `a visible Question never duplicates into the window:\n${view(vt)}`)
+  assert.ok(!view(vt).includes('? 1 awaiting'), 'the parked count returns to zero')
+  subscription()
+})
+
 // ── B4A-03: Question attention ─────────────────────────────────────────────
 
 test('B4A-03 a PARKED Question is its own typed row and a VISIBLE one never duplicates', async () => {
@@ -639,6 +744,39 @@ test('B4A-06d a resize that has not been repainted refuses the wheel, then resol
   h.vt.sendInput(`\x1b[<65;5;${rowOf(h.vt, shrunk[0]!) + 1}M`)
   await h.vt.waitForRender()
   assert.match(itemRows(h.vt)[0]!, /bash · test\s+‣ Running\s+2-2\/4$/, `the new frame owns the wheel:\n${view(h.vt)}`)
+})
+
+test('B4A-06e a stale width resize still owns the in-band wheel: the transcript never scrolls', async () => {
+  const h = startQuick({ cols: 120, rows: 40, taskRead: false, roster: [
+    job('j1', 'build', 'running'), job('j2', 'test', 'running'), job('j3', 'lint', 'running'),
+    job('j4', 'deploy', 'running'), job('j5', 'audit', 'running'),
+  ] })
+  await flush()
+  // A scrollable transcript behind the window: an unconsumed wheel WOULD move it.
+  h.app.setTranscript(Array.from({ length: 40 }, (_, index) => ({
+    kind: 'assistant' as const, turn: index, text: `history row ${index}`,
+  })))
+  h.app.setFullscreen(true)
+  await h.vt.waitForRender()
+  const before = h.app.fullscreenScrollForTest()
+  assert.ok(before && before.maxScrollTop > 0, 'the transcript must be scrollable for this witness')
+  assert.equal(before.isFollowingEnd, true)
+  const itemRow = rowOf(h.vt, itemRows(h.vt)[0]!)
+  const windowBefore = itemRows(h.vt)
+  // A WIDTH resize lands on the terminal before the repaint: the pointer is still
+  // over the painted band of the old frame.
+  h.vt.resize(100, 40)
+  h.vt.sendInput(`\x1b[<64;5;${itemRow + 1}M`)
+  await flush(1)
+  const mid = h.app.fullscreenScrollForTest()!
+  assert.equal(mid.scrollTop, before.scrollTop,
+    'a stale in-band wheel must not fall through and scroll the transcript')
+  assert.equal(mid.isFollowingEnd, before.isFollowingEnd, 'the follow state must not flip')
+  // After the repaint the window's own anchor is unchanged as well.
+  await h.vt.waitForRender()
+  await flush(2)
+  assert.deepEqual(itemRows(h.vt).map(line => line.split(/\s+‣\s+/)[0]), windowBefore.map(line => line.split(/\s+‣\s+/)[0]))
+  assert.equal(h.app.fullscreenScrollForTest()!.scrollTop, before.scrollTop, 'the transcript is still untouched')
 })
 
 test('B4A-06b the ordinary main screen has NO application mouse: the wheel moves nothing', async () => {
@@ -769,6 +907,30 @@ test('B4A-05e the resident window coexists with a live PUBLIC below widget', asy
   for (const footerRow of h.app.footerRenderRowsForTest().map(strip).map(line => line.trimEnd())) {
     if (footerRow === '') continue
     assert.ok(lines.some(line => line.includes(footerRow)), `the footer is not pushed out: ${JSON.stringify(footerRow)}`)
+  }
+})
+
+test('B4A-05f the FULLSCREEN root paints the public below widget beside the window', async () => {
+  const h = startQuick({ cols: 120, rows: 40, taskRead: false, widgetBelow: 'BELOW-WIDGET', roster: [
+    job('j1', 'build', 'running'), job('j2', 'test', 'running'), job('j3', 'lint', 'running'),
+  ] })
+  await flush()
+  h.app.setFullscreen(true)
+  await h.vt.waitForRender()
+  const lines = rawView(h.vt)
+  const firstItemRow = rowOf(h.vt, itemRows(h.vt)[0]!)
+  const widgetRow = rowOf(h.vt, 'BELOW-WIDGET')
+  const scroll = h.app.fullscreenScrollForTest()
+  assert.ok(scroll, 'the fullscreen transcript pane must exist')
+  assert.ok(firstItemRow >= 0, `the window paints in fullscreen:\n${view(h.vt)}`)
+  assert.ok(widgetRow >= 0, `the public below widget still paints in fullscreen:\n${view(h.vt)}`)
+  // editor seat -> first-party accessory -> public below widget -> footer.
+  assert.ok(widgetRow > firstItemRow, `the PUBLIC slot keeps its position under the accessory:\n${view(h.vt)}`)
+  // Neither band starves the pinned transcript: both reservations hold at once.
+  assert.ok(scroll.viewportHeight >= 1, `the transcript floor survives both bands:\n${view(h.vt)}`)
+  for (const footerRow of h.app.footerRenderRowsForTest().map(strip).map(line => line.trimEnd())) {
+    if (footerRow === '') continue
+    assert.ok(lines.some(line => line.includes(footerRow)), `the footer stays painted: ${JSON.stringify(footerRow)}`)
   }
 })
 

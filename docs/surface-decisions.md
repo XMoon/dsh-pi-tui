@@ -2708,7 +2708,9 @@ entries, and their routing/wordings are unchanged.
   layout's box dimensions — moves its own window by one row, requests no focus and
   acknowledges nothing. The whole painted band owns the wheel: while the pointer
   is on the window the transcript underneath never scrolls, and a wheel at a
-  window boundary is consumed without repainting instead of falling through.
+  window boundary — or one dispatched against a frame that is stale because a
+  resize has not been repainted — is consumed with `render: false` instead of
+  falling through.
   Press/release/click are refused: the accessory cannot open, stop or acknowledge
   anything in B4-A.
 - **Session currentness.** A session-generation reset clears the window together

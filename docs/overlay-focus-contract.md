@@ -953,7 +953,11 @@ between the two owners:
   widget `Text`; the public slot keeps its registration, its ordering, its
   visible-text contract and its lifecycle untouched. Neither owner can take
   keyboard focus: the accessory implements no `Focusable` surface and no
-  input handling, and no `FocusManager` or second input router is introduced.
+  keyboard input at all, and no `FocusManager` or second input router is
+  introduced. Its ONE input handler is a wheel handler reached exclusively
+  through the alt screen's existing component dispatch (Transcript Fullscreen);
+  it never requests focus and returns `{handled:true, render:false}` for every
+  gesture it consumes without acting on.
 - **One budget, computed by the accessory's own owner.** The grant comes from
   the LIVE terminal rows, the measured pinned chrome (header, subject bar, dock,
   todo, goal, queue, busy indicator, BOTH widget zones at their current grant,
@@ -972,9 +976,10 @@ between the two owners:
   geometry recorded at paint time, because the fork builds an event's box
   dimensions from the same last painted layout and a resize therefore cannot be
   detected from the event alone. The accessory's whole painted band owns the
-  wheel: a boundary wheel is consumed without repainting instead of falling
-  through to the transcript, and the wheel never focuses, opens or acknowledges
-  anything.
+  wheel: a boundary wheel — and one dispatched against a frame that is stale
+  because a resize has not been repainted yet — is consumed with
+  `render: false` instead of falling through to the transcript, and the wheel
+  never focuses, opens or acknowledges anything.
 - **Data and currentness.** The rows are published by the surface Task Runtime
   through a private `TuiApp` sink on every row/attention commit; the accessory
   keeps no catalog, no timer and no subscription, and a session-generation reset
