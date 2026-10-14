@@ -23,7 +23,7 @@ and gutters, the header/body/status/action-bar responsibilities, and the order
 in which chrome degrades on small terminals.
 
 Applies to: the transcript, editor, footer, pickers, overlays, Settings, the Job
-workspace, and every new surface.
+workspace, and every new surface. **Product meaning, visual hierarchy and accessibility remain common across renderers; the painting mechanism does not.** The existing cell/glyph/Frame rules are authoritative for PiTui-painted chrome. TSP-native components adapt those rules through §12.3; do not impose PiTui glyphs or a character-cell Frame on a client-owned widget.
 
 ### 1.2 What this never changes (STOP conditions)
 
@@ -78,7 +78,7 @@ the sizing ladder) — so these are Owner decisions, not implementer inferences.
 | D10 | Overlay sizing ladder | four steps — narrow `64`, standard `72`, wide `88`, full `100%` — each with its height rule; per-surface exceptions listed explicitly (§12.2) | today's 64/72/76/88/100% × 24/28/26 is a per-surface accident |
 | D11 | Placeholder / loading / failure ink | new **role 16** `placeholder` = `textDim`; a *failed* placeholder's word uses `error`; loading is text, never animation; an unselectable row is `textDim` plus a reason word | today a failed catalog load and an empty list paint the same `textMuted` |
 | D12 | Case | labels, verbs and segments = Title Case; explanations and sentences = sentence case (§4.1) | the earlier "Title Case or sentence case" was undecidable |
-| D13 | `Esc` verb | names the real effect of the key on that surface (`back`, `close`, `cancel`, `output`) and stays constant within one surface | a single fixed word would make the hint lie about where the user lands |
+| D13 | `Esc` verb | names the real effect of the key (`back`, `close`, `cancel`, `output`) where the hint is shown. A **state-dependent ladder**, explicitly frozen in a product contract (e.g. native TSP `/model`: clear query, else close), is an allowed scoped amendment; its displayed cue must never promise the wrong branch | a single fixed word would make the hint lie about where the user lands; a dynamic Esc effect cannot be described truthfully by an invariant single-verb hint |
 | D14 | Six additive rules | see below | each removes a place where two surfaces could legitimately disagree |
 
 D14 in full:
@@ -483,10 +483,13 @@ current value (candidates)  Solarized  [current]    state chip, textMuted
    without one puts them at the end of its content. Several states are several
    chips (`[current] [unavailable]`), never one bracket pair with a join. The
    Job workspace has no list selection.
-4. **Overlays use the same three devices** (D9): `> ` + bold `textStrong` for
-   selection, `[Label]` + bold `primary` for the active tab/mode, and the
-   `[current]` state chip. A picker must not invent `→`, an arrowed or bare-word
-   current mark, or a leading `✓`.
+4. **PiTui-painted overlays** use the same three devices (D9): `> ` + bold
+   `textStrong` for selection, `[Label]` + bold `primary` for the active tab/mode,
+   and the `[current]` state chip. A PiTui picker must not invent `→`, an arrowed
+   or bare-word current mark, or a leading `✓`. **TSP-native overlays** must
+   preserve those *meanings*, but may use the native Picker cursor/focus and
+   client-rendered rounded `current` / `default` badges without redundant literal
+   brackets: see §12.3.
 5. **Disabled / read-only / pending / failed** are words, not just inks: the
    detail pane's `Status` field, the read-only note and the `[Retry save]` verb
    already express them; unavailable candidates keep `[unavailable]`.
@@ -633,8 +636,11 @@ second order.
 The `Esc` verb **names the real effect of the key on that surface** (D13):
 `Esc back` returns to the parent page, `Esc close` leaves the surface, `Esc
 cancel` abandons an in-progress action, `Esc output` returns from the Command
-page to Output. One surface keeps one verb; the verb must never be chosen for
+page to Output. A surface ordinarily keeps one verb; the verb must never be chosen for
 cosmetic uniformity, because a hint that names the wrong destination is a lie.
+An explicitly frozen state-dependent Esc ladder is the narrowly scoped exception described below.
+
+**Scoped native exception to D13:** the Owner-frozen TSP `/model` Esc ladder first clears a non-empty search and otherwise closes; its single catalogue hint does not claim a fixed Esc destination. Where a surface does advertise Esc, its wording must describe the *current* outcome. This changes no other overlay's key contract.
 
 The bar acts in this order: **compact a segment that declares a `short` form
 first, then drop whole segments by ascending priority**, and only truncate as the
@@ -789,6 +795,8 @@ Copy into every PR that changes a visible surface:
 Visual beauty is an Owner/Reviewer judgement. "All tests pass" never closes a
 visual item, and an unrun screenshot must never be reported as PASS.
 
+**Renderer-qualified evidence:** the VirtualTerminal / tmux path above applies to PiTui-painted ANSI surfaces. When a PR instead changes a **TSP-native** surface, use the pinned SDK's scripted wire/production-path tests **and** an actual versioned Tern headless pane for the client's painted node/ancestor-clipping/PNG/action behavior. Declare `NOT_APPLICABLE` rather than `PASS` for PiTui-specific frame assertions; record physical GUI/IME/wheel/dark/custom fonts as `NOT_VERIFIED` unless actually exercised. Follow [`tern-tsp/foundation.md`](./tern-tsp/foundation.md) §6, [`tern-pane-harness.md`](./tern-pane-harness.md) and the owning TSP product contract. Owner visual acceptance is independent of CI and headless measurements.
+
 ### 11.3 Machine checks
 
 Enforce only what is cheap and low-false-positive; the rest is review.
@@ -870,8 +878,10 @@ A new surface picks one and must justify any deviation.
 | **Pane** (embedded in the transcript/log) | header line + folded body, no action bar | tool cards, subagent cards, Thinking |
 | **Status bar** | one row of items + separators, no interaction (a host-instruction line may be reserved above it — `footer/instruction.ts`) | footer |
 
-Shared minimum spec for Workspace and Overlay: identity, one body, one bottom
+Shared minimum spec for **PiTui-painted** Workspace and Overlay: identity, one body, one bottom
 bar, `Esc` last, whole-segment hint drops (never mid-word), role table respected.
+A **TSP-native** read-only Reader may legitimately have its own visible Back row and no
+action bar; its UI still needs a reachable, truthful navigation gesture (§12.3).
 
 `Ctrl+R` History is deliberately NOT an Overlay: since B3-A it is a component
 projected into the shared editor seat (an embedded editor-seat tenant), and B3-B
@@ -884,7 +894,7 @@ exists only inside Transcript Fullscreen.
 
 ### 12.2 Overlay specifics (D9, D10)
 
-An overlay is the same vocabulary in a rounded `Frame` instead of a full terminal:
+A **PiTui-painted** overlay is the same vocabulary in a rounded `Frame` instead of a full terminal. **TSP-native overlay/picker sheets are client-rendered and do not require our `Frame`**; translate semantic roles via §12.3:
 
 | Item | Rule |
 |---|---|
@@ -897,8 +907,25 @@ An overlay is the same vocabulary in a rounded `Frame` instead of a full termina
 | Disabled / unavailable row | `textDim` plus a reason word (`unavailable`, `read-only`); never colour-only (§3.3.3), and the cursor still moves onto it (no dead rows). |
 | Placeholder / loading / failure | role 16: `textDim`; a failed one names the failure and paints that word `error` (`Model catalog unavailable: …`); loading is a word (`Loading models…`), never animation. |
 | Bottom row | inside the frame; `Esc` is its **last** segment (D8) and the hint line uses ` · ` (D4). |
-| Sizing ladder | The step is declared by **content type**: short menu `64`; default interactive list `72`; long values, badges or a detail column `88`; **full** for a surface that must present a whole document or decision (a long-command approval, a full-screen list). Resolution, in this order: **(1)** `full` is not a numeric step — `effective = columns` (a surface that needs its own margin, e.g. the full-screen task browser, declares that margin as a per-surface exception); **(2)** otherwise `effective = min(declared, columns)`, then snap **down** to the largest ladder step `≤ effective`; **(3)** if `effective < 64` there is no ladder step to snap to — the overlay takes **exactly `columns`** and degrades through its own row budget / `ROW_PRIORITY` / degenerate-grant rules instead of through frame size (there is no minimum terminal width for an overlay). The step is never raised because the terminal is wide. Height is `min(rows − 2, cap)` with the cap owned by the step (`24` narrow/standard, `28` wide, the terminal for full). A per-surface exception is allowed only when that surface's own doc names it with its reason — today `/model` is `72×28` |
+| Sizing ladder | The step is declared by **content type**: short menu `64`; default interactive list `72`; long values, badges or a detail column `88`; **full** for a surface that must present a whole document or decision (a long-command approval, a full-screen list). Resolution, in this order: **(1)** `full` is not a numeric step — `effective = columns` (a surface that needs its own margin, e.g. the full-screen task browser, declares that margin as a per-surface exception); **(2)** otherwise `effective = min(declared, columns)`, then snap **down** to the largest ladder step `≤ effective`; **(3)** if `effective < 64` there is no ladder step to snap to — the overlay takes **exactly `columns`** and degrades through its own row budget / `ROW_PRIORITY` / degenerate-grant rules instead of through frame size (there is no minimum terminal width for an overlay). The step is never raised because the terminal is wide. Height is `min(rows − 2, cap)` with the cap owned by the step (`24` narrow/standard, `28` wide, the terminal for full). A per-surface exception is allowed only when that surface's own doc names it with its reason — the historical PiTui `/model` sizing exception is `72×28`; the TSP-native `/model` instead requests client `size:'md'` based on its own measured pane geometry (see §12.3) |
 | Assembly | mandatory chrome (title, search row, hint) is granted first, then the item window, then optional separators/scroll/status — the existing `overlay-focus-contract.md` budget rules stay authoritative. |
+
+### 12.3 Native TSP surface adapter (product semantics, not PiTui geometry)
+
+This is a **renderer-specific application of** D1–D14, not a new layout framework or an independent palette/theme authority. The final painter is Tern, not `Frame`, `VirtualTerminal`, `visibleWidth()` or our terminal-cell row budget. **Do not** wrap a native Picker in a lookalike PiTui Frame or add a duplicate status/preview strip to satisfy a character UI convention.
+
+| Common semantic obligation | Native TSP expression / qualification |
+|---|---|
+| One selected / current / focused signal per region | Let the native Picker render its highlighted row, region `focus`, chip `on` and the client's pill badges. Selection, current configuration, local draft and keyboard ownership are separate facts. Do not add a second `>` glyph, a literal `[current]` inside an already self-contained native pill, or a misleading action focus arrow. |
+| Identity and action affordances | Use a concise title; make the actual write verb explicit (`Switch`/`Save default`). Where a native action bar has no visible focused-button state, an app-provided `Verb [Enter]` cue is permitted **only when Enter really invokes it**. A Reader with its own Back row need not paint a redundant action bar. |
+| Status / unavailable / disabled | Preserve text-visible reasons and semantic notice tones, not colour-only flags. Map semantic roles to the client's supported native badges/tones; do not invent ANSI palette assignments inside a native sheet. |
+| Responsive hierarchy | Decide the high-frequency task path before assigning `size`, `preview`, `strip` and secondary pages. `preview: 'side'` or `'below'` is a hint and may disappear on normal split panes. Do not make essential controls visible only in Preview. Use the client-rendered sheet's actual geometry; the PiTui 64/72/88/full cell ladder does **not** prescribe TSP `size`. |
+| One source of truth | Component-level draft/page/zone is presentation state, not a business writer. A real write goes through the existing command/Host owner. Native `select` (browse), `activate` (inspect) and `action` (explicit operation) must be individually mapped and tested rather than assumed equivalent. |
+| Node continuity and stale events | Stable client IDs preserve viewport/scroll state **when measured**, but stale admission remains mandatory. Frame revision belongs on operations that must be refused from old frames; a Reader's scroll body should have a reading-lifetime identity. This is **not** an instruction to stabilize all IDs globally. |
+| Keyboard and pointer agreement | App-side key router and native event router must converge on the same intent and admission. A pointer row click must reclaim the appropriate logical keyboard zone; disabled/read-only rows cannot accidentally write. `Esc` may have a documented product-specific search-clear/close ladder. |
+| Accessibility and evidence | Review the real client tree, ancestor clipping and screenshots at the supported pane widths; use one real click/key path for material behaviors. Keep version/build, font and observation tier. A headless screenshot is **not** proof of physical window focus, IME, wheel, dark theme or enlarged-font behavior. |
+
+**Current model example, not a universal template.** PR #301's `/model` uses a single `ui.picker` with `size:'md'`, `preview:'none'`, one Reasoning Effort `strip` and an explicit write footer; row activation opens a read-only native Reader. This shape was chosen from Tern 0.8.3 headless measurements. Another TSP surface may justify a different native composition, sheet size or number of pages through its own Owner-frozen product contract and evidence. For dated proof, see [`tern-tsp/model-selection.md`](./tern-tsp/model-selection.md) and [`tern-tsp/evidence/model-list-first-visual-20261013.md`](./tern-tsp/evidence/model-list-first-visual-20261013.md).
 
 ## 13. Reference alignment and deliberate divergences
 
