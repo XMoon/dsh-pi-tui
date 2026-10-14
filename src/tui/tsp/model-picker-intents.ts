@@ -20,7 +20,7 @@ import {
   draftedEffort,
   actionBase,
   catalogueRowIds,
-  effortValue,
+  stripItemParts,
   highlightedModel,
   modelChoices,
   modelRowId,
@@ -279,13 +279,18 @@ export function actionIntent(
 ): ModelPickerIntent | undefined {
   if (!admissibleAction(panel, act)) return undefined
   if (act === 'strip') {
-    // STRICT: the clicked value must be a candidate of the model the strip is
-    // currently showing, or it is a stale/forged receiver and changes nothing.
+    // STRICT, in BOTH halves: the click must name the model the strip CURRENTLY shows
+    // AND a candidate that model advertises. A strip event is delivered asynchronously, so
+    // the user can click another model in between; a value-only check would then let the
+    // PREVIOUS model's candidate draft into the newly highlighted model whenever both
+    // happen to advertise the same value.
     if (value === undefined) return undefined
-    const candidate = effortValue(value)
-    if (candidate === undefined) return undefined
-    return modelChoices(highlightedModel(panel)).some((choice) => choice.value === candidate)
-      ? { kind: 'browse-effort', value: candidate }
+    const parts = stripItemParts(value)
+    const row = highlightedModel(panel)
+    if (parts === undefined || row === undefined) return undefined
+    if (parts.rowId !== modelRowId(row)) return undefined
+    return modelChoices(row).some((choice) => choice.value === parts.value)
+      ? { kind: 'browse-effort', value: parts.value }
       : undefined
   }
   // The bar's own actions carry the frame token of the revision that rendered them, so

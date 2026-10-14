@@ -34,7 +34,6 @@ import {
   actionKeyboardLive,
   detailReaderGroups,
   draftedEffort,
-  effortItemId,
   failureRowId,
   focusedAction,
   highlightedModel,
@@ -207,12 +206,13 @@ function pickerState(panel: ModelPickerPanel): Pick<PickerProps, 'state' | 'mess
 /**
  * The key PREFIX of the Reader's scrollable content column.
  *
- * The key carries the panel SERIAL and never the frame revision: MEASURED on the real
- * client, a key that changes per frame makes the SDK diff `del + add` and REMOUNT the
- * node — for the Reader that also means its scroll container is recreated, so the app's
- * own `scroll` op can name a body the client never received. One identity per panel
- * keeps the id (and the scroll target) the same for as long as the Reader is the page;
- * a later PANEL still gets its own serial, so a retired panel's ids are never reused.
+ * The key carries the panel SERIAL and the READING's epoch, never the frame revision:
+ * MEASURED on the real client, a key that changes per frame makes the SDK diff `del + add`
+ * and REMOUNT the node — for the Reader that also means its scroll container is recreated,
+ * so the app's own `scroll` op could name a body the client never received. One identity per
+ * reading keeps the id (and the scroll target) the same while the page is open, and a NEW
+ * reading takes a new epoch, so an op queued by the previous one cannot address it. A later
+ * PANEL still gets its own serial, so a retired panel's ids are never reused either.
  */
 export const MODEL_DETAILS_BODY_KEY_PREFIX = 'model-details-body-'
 const MODEL_DETAILS_READER_KEY = 'model-details-reader'
@@ -239,8 +239,10 @@ const MODEL_DETAILS_BACK_KEY = 'model-details-back'
 function detailsReader(panel: ModelPickerPanel, deps: ModelPickerViewDeps): Node {
   const row = highlightedModel(panel)
   const groups = row === undefined ? [] : detailReaderGroups(panel, row)
-  // One identity per PANEL: the revision never reaches a long-lived node key.
-  const scope = `${panel.serial}`
+  // One identity per READING: the frame revision never reaches a node key (a per-frame key
+  // made the client remount the container), but a NEW reading gets its own, so a `scroll` op
+  // queued while an earlier Reader was open can never address this one's body.
+  const scope = `${panel.serial}-${panel.readerEpoch}`
   return ui.overlay(
     { key: `${MODEL_DETAILS_READER_KEY}-${scope}`, head: readerHead(panel), size: 'lg', modal: true },
     ui.row(
