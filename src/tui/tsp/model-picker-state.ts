@@ -78,6 +78,11 @@ export interface ModelPickerPanel {
   /** The zone the keyboard came from when it entered the action bar (Esc returns
    *  there instead of guessing). */
   previousZone: ModelPickerZone | undefined
+  /** How many times the read-only Reader has been OPENED on this panel. One identity per
+   *  READING: a re-render must not move the Reader's node ids (a per-frame key made the
+   *  client remount its scroll container), but a NEW reading gets fresh ones, so a `scroll`
+   *  op queued while an earlier Reader was open can never address the next one's body. */
+  readerEpoch: number
   /** The single local notice (a read error or the last write outcome), with the
    *  role ink its OWN semantics demand. */
   notice: ModelPickerNotice | undefined
@@ -119,16 +124,34 @@ export const FAILURE_RETRY_ID = 'retry-failed'
  */
 const EFFORT_PREFIX = 'effort:'
 
-/** The wire id of one effort candidate row (see {@link EFFORT_PREFIX}). */
-export function effortItemId(value: string): string {
-  return EFFORT_PREFIX + value
+/**
+ * The wire id of one strip item: the MODEL it was built for, then the candidate value.
+ *
+ * The model half is what keeps a strip click honest. A click is delivered
+ * asynchronously: the user can click another model, the highlight moves, and only then
+ * does the strip event of the frame that showed the PREVIOUS model's candidates arrive.
+ * With a value-only id that event would pass a membership check whenever the newly
+ * highlighted model happens to advertise the same value, and the draft of a model the
+ * user never touched would move. Both halves are therefore validated on arrival.
+ */
+export function stripItemId(rowId: string, value: string): string {
+  return `${EFFORT_PREFIX}${rowId}\u0000${value}`
 }
 
-/** The candidate value of an effort row, or `undefined` when the id is not a
- *  candidate row at all (a model row, the effort section head, the details
- *  entry). */
-export function effortValue(item: string): string | undefined {
-  return item.startsWith(EFFORT_PREFIX) ? item.slice(EFFORT_PREFIX.length) : undefined
+/**
+ * The model and value one strip item id names, or `undefined` when the id is not one this
+ * code built.
+ *
+ * `modelRowId` is a JSON string, so a RAW NUL can never occur inside the model half: the
+ * FIRST NUL separates it from the value exactly. An effort VALUE may itself contain a NUL
+ * (the synthetic provider default does), which is why the split cannot be done the other
+ * way round.
+ */
+export function stripItemParts(id: string): { readonly rowId: string; readonly value: string } | undefined {
+  if (!id.startsWith(EFFORT_PREFIX)) return undefined
+  const rest = id.slice(EFFORT_PREFIX.length)
+  const at = rest.indexOf('\u0000')
+  return at <= 0 ? undefined : { rowId: rest.slice(0, at), value: rest.slice(at + 1) }
 }
 
 /** Every row id the catalogue offers, in display order (the group heads are the view's
@@ -314,8 +337,9 @@ export function stripItems(
 ): readonly ModelPickerStripItem[] {
   const row = highlightedModel(panel)
   const draft = draftedEffort(panel, row)
+  const rowId = row === undefined ? '' : modelRowId(row)
   return modelChoices(row).map((choice) => ({
-    id: effortItemId(choice.value),
+    id: stripItemId(rowId, choice.value),
     label: clampMiddle(choice.label, columns),
     ...(choice.value === draft ? { on: true } : {}),
   }))

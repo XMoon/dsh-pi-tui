@@ -24,7 +24,6 @@ import {
   FAILURE_RETRY_ID,
   applyOffered,
   draftedEffort,
-  effortValue,
   focusedAction,
   highlightedModel,
   modelChoices,
@@ -104,6 +103,7 @@ export class TspModelPicker {
       actionFocus: undefined,
       previousZone: undefined,
       notice: undefined,
+      readerEpoch: 0,
       directory: undefined,
       rows: [],
       failures: [],
@@ -315,6 +315,7 @@ export class TspModelPicker {
     }
     switch (intent.kind) {
       case 'open-details': {
+        panel.readerEpoch += 1
         // A catalogue row activation (`activate`, a double click, or `Enter`) opens
         // that model's read-only Full details DIRECTLY: there is no intermediate
         // page. The row it names must be a REAL visible one — the selection is
@@ -355,6 +356,11 @@ export class TspModelPicker {
           || (intent.rowId === FAILURE_RETRY_ID && panel.failures.length > 0)
         if (!known) return
         panel.selected = intent.rowId
+        // Selecting a row is a LIST interaction, so the keyboard follows it: otherwise the
+        // zone that was live before the click keeps owning the keys — the user highlights a
+        // model with the mouse while their next ↑/↓ edits the PREVIOUS model's effort draft
+        // (or walks the action bar) without ever seeing the highlight move.
+        panel.zone = 'models'
         this.change(panel)
         return
       }

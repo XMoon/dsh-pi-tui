@@ -68,8 +68,23 @@ The fence that the per-frame key used to provide is not weakened, it MOVED:
   really built, which is what refuses a foreign panel's id;
 - the cross-PANEL isolation is the `serial`: a reopened panel gets its own node ids, so a
   previous panel's id can never act on its replacement;
-- the read-only Reader paints no action bar and its only operation is navigation, so it
-  needs no token of its own.
+- a STRIP item id names the MODEL it was built for as well as the candidate value
+  (`effort:<row id>\u0000<value>`), and a strip click must match BOTH the model the strip
+  currently shows and a candidate that model advertises. A click is delivered asynchronously,
+  so the user can select another model in between; a value-only check would then let the
+  previous model's candidate draft into the newly highlighted one whenever both happen to
+  advertise the same value. (`modelRowId` is a JSON string, so a raw NUL cannot occur inside
+  the model half — the first NUL separates the two exactly, and an effort VALUE may itself
+  contain a NUL, as the synthetic provider default does);
+- a ROW click also reclaims the keyboard: selecting a row is a list interaction, so the focus
+  returns to `models`. Otherwise the zone that was live before the click keeps owning the keys
+  — the user highlights a model with the mouse while their next `↑`/`↓` drafts the PREVIOUS
+  model's effort (or walks the action bar) without ever seeing the highlight move;
+- the read-only Reader paints no action bar and its only operation is navigation, so it needs
+  no action token of its own; its node ids carry the panel SERIAL and the READING's epoch —
+  one identity for as long as one reading is open (a per-frame key remounted the container and
+  retired the app's own scroll target), and a NEW reading takes a new one, so a `scroll` op
+  queued by a closed Reader can never address the next reading's body.
 
 The catalogue is ONE native picker: `layout: 'rows'`, ALWAYS `size: 'md'`,
 `preview: 'none'` at every width, and NO `scopes` column ever. The sheet is a dialog

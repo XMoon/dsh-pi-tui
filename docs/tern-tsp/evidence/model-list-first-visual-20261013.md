@@ -134,7 +134,7 @@ the node trees, the screenshots and `visual-acceptance.md`; the lane is part of 
 repository's repeatable acceptance path (it is not part of `pnpm test`/CI, because it
 needs the external Tern CLI).
 
-The final run of this revision is `temp/tern-model-ux-lane-v2-a28`, taken on the
+The final run of this revision is `temp/tern-model-ux-lane-v2-a29`, taken on the
 frozen tree; the run records the sha256 of the four production modules it rendered
 (`model-picker-view.ts f8e640c326bf`, `model-picker-state.ts fea2feabc809`,
 `model-picker-intents.ts a9d009a8e5f3`, `model-picker.ts cd2ab573e365`). Every edit that

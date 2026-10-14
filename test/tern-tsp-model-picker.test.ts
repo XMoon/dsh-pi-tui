@@ -16,7 +16,8 @@ import { connect } from '@stencil-hq/tern'
 import { mountTspRenderer } from '../src/tui/tsp/session.ts'
 import {
   FAILURE_RETRY_ID,
-  effortItemId,
+  stripItemId,
+  stripItemParts,
   stripLabelColumns,
 } from '../src/tui/tsp/model-picker-state.ts'
 import { displayWidth } from '../src/tui/tsp/picker-text.ts'
@@ -107,6 +108,29 @@ function actionOf(pane: TspPane, base: string): Record<string, unknown> | undefi
   if (entry !== undefined) return entry
   const actions = (props(pane).actions ?? []) as Array<Record<string, unknown>>
   return actions.find((action) => String(action.id).split('#')[0] === base)
+}
+
+/** The model and value one strip id names, or `undefined` for a foreign id. */
+function stripValueOf(id: string): string | undefined {
+  return stripItemParts(id)?.value
+}
+/** The candidate VALUES the wire's strip currently offers (its ids name the model too). */
+function stripValues(pane: TspPane): Array<string | undefined> {
+  return stripItemIds(pane).map(stripValueOf)
+}
+/** The strip ids the wire really carries, in order. */
+function stripItemIds(pane: TspPane): string[] {
+  return ((props(pane).strip as { items?: Array<Record<string, unknown>> } | undefined)?.items ?? [])
+    .map((item) => String(item.id))
+}
+/** The id the wire carries for one candidate value of the highlighted model. */
+function stripId(pane: TspPane, value: string): string {
+  return stripItemIds(pane).find((id) => stripValueOf(id) === value) ?? ''
+}
+/** The VALUE of the strip item the client paints as `on` (the local draft). */
+function stripOn(pane: TspPane): string | undefined {
+  return stripValueOf(String(((props(pane).strip as { items?: Array<Record<string, unknown>> } | undefined)
+    ?.items ?? []).find((item) => item.on === true)?.id ?? ''))
 }
 
 /** The RAW action ids the bar renders: the frame token is part of them on purpose. */
@@ -315,6 +339,38 @@ const directory: ModelPickerDirectory = {
 const SAME_A = JSON.stringify(['a', 'same'])
 const SAME_B = JSON.stringify(['b', 'same'])
 
+/** TWO models that advertise the SAME candidate value: the reviewer's fixtures for a
+ *  delayed strip click crossing a selection change, and for the keyboard zone a row click
+ *  has to reclaim. */
+const twinEffortDirectory: ModelPickerDirectory = {
+  current: { provider: 'a', model: 'same', reasoningEffort: 'high' },
+  directory: {
+    default: { provider: 'a', model: 'same', reasoningEffort: 'high' },
+    routableProviders: ['a', 'b'],
+    groups: [
+      {
+        id: 'a',
+        name: 'A',
+        models: [{
+          id: 'same',
+          name: 'Twin A',
+          reasoning: { efforts: [{ id: 'low', name: 'Low' }, { id: 'high', name: 'High' }] },
+        }],
+      },
+      {
+        id: 'b',
+        name: 'B',
+        models: [{
+          id: 'same',
+          name: 'Twin B',
+          reasoning: { efforts: [{ id: 'low', name: 'Low' }, { id: 'high', name: 'High' }] },
+        }],
+      },
+    ],
+    failures: [],
+  },
+}
+
 /** One mounted renderer over the scripted pane, with a write/retry spy. */
 async function mounted(t: { after(fn: () => unknown): void }, subject = { sessionless: true }) {
   const pane = installTspPane({ modelPicker: true })
@@ -485,10 +541,10 @@ test('native Model: the catalogue browses, drafts in its own strip and writes on
   await waitUntil('back on the catalogue', () => onCatalogue(pane))
   // The catalogue's OWN strip is the ONE effort editor: a strip click changes the
   // local draft and nothing else.
-  action(pane, 'strip', effortItemId('low'))
+  action(pane, 'strip', stripId(pane, 'low'))
   await waitUntil('the strip drafted Low', () => {
     const items = (props(pane).strip as { items?: Array<Record<string, unknown>> } | undefined)?.items ?? []
-    return items.find((item) => item.on === true)?.id === effortItemId('low')
+    return items.find((item) => item.on === true)?.id === stripId(pane, 'low')
   })
   assert.equal(m.writes.length, 0, 'a strip click never writes')
   // The strip click made the strip the keyboard zone, so one forward Tab reaches
@@ -564,7 +620,7 @@ test('native Model: a row select only highlights, and only a real row can act', 
   await m.ready()
   // A candidate id belongs to the strip's own namespace: a catalogue select
   // carrying it resolves nowhere.
-  browse(pane, effortItemId('low'))
+  browse(pane, stripId(pane, 'low'))
   await settle(30)
   assert.equal(onCatalogue(pane), true)
   assert.equal(m.writes.length, 0)
@@ -580,7 +636,7 @@ test('native Model: a row select only highlights, and only a real row can act', 
   assert.equal(m.writes.length, 0)
   // The frame id is REAL here and the row id is not one this page carries: a candidate
   // id belongs to the strip's namespace, so an activate carrying it resolves nowhere.
-  sendActivate(pane, effortItemId('low'), picker(pane)!.id)
+  sendActivate(pane, stripId(pane, 'low'), picker(pane)!.id)
   await settle(30)
   assert.equal(onCatalogue(pane), true, 'a candidate id cannot navigate the catalogue')
   assert.equal(props(pane).selected, SAME_A, 'and it cannot re-target the highlight')
@@ -627,24 +683,21 @@ test('native Model: the catalogue owns its Reasoning Effort strip and it only dr
   // The strip edits the HIGHLIGHTED model's candidates at the first level: the
   // native Picker `strip` between the list and the action bar.
   assert.equal(strip()?.label, 'Reasoning Effort')
-  assert.deepEqual(
-    (strip()?.items ?? []).map((item) => String(item.id)),
-    [effortItemId('\u0000provider-default'), effortItemId('low'), effortItemId('high')],
-  )
-  assert.equal(onId(), effortItemId('high'), 'the seeded draft is marked `on`')
+  assert.deepEqual(stripValues(pane), ['\u0000provider-default', 'low', 'high'])
+  assert.equal(onId(), stripId(pane, 'high'), 'the seeded draft is marked `on`')
   // A REAL strip click (the client's own `act:"strip"` channel) changes the local
   // draft only.
-  action(pane, 'strip', effortItemId('low'))
-  await waitUntil('the strip click drafted Low', () => onId() === effortItemId('low'))
+  action(pane, 'strip', stripId(pane, 'low'))
+  await waitUntil('the strip click drafted Low', () => onId() === stripId(pane, 'low'))
   assert.equal(m.writes.length, 0, 'a strip click never writes')
   // A STALE or FORGED strip value is refused: a candidate this model does not
   // advertise, a candidate value on another namespace, and a missing value.
   const frame = picker(pane)!.id
-  for (const value of [effortItemId('nope'), 'effort:nope', 'not-an-effort', undefined]) {
+  for (const value of [stripItemId(SAME_A, 'nope'), 'effort:nope', 'not-an-effort', undefined]) {
     action(pane, 'strip', value)
   }
   await settle(30)
-  assert.equal(onId(), effortItemId('low'), 'no forged strip value moves the draft')
+  assert.equal(onId(), stripId(pane, 'low'), 'no forged strip value moves the draft')
   assert.equal(m.writes.length, 0)
   assert.equal(picker(pane)!.id, frame, 'and none of them re-renders the page')
   // The draft the strip chose is what the ONE write commits. The click made the
@@ -709,6 +762,52 @@ test('native Model: a strip chip label is clamped to the pane\'s own strip capac
   m.handle.close()
 })
 
+test('native Model: a row click hands the keyboard back to the list', async (t) => {
+  const m = await mounted(t)
+  await m.ready(twinEffortDirectory)
+  const { pane } = m
+  // Enter the strip the way a user does — a real click on a candidate — and then select the
+  // OTHER model with the mouse. The keys must follow the last interaction: leaving the zone
+  // in the strip would make the next ↑/↓ draft the PREVIOUS model's effort while the
+  // highlight silently sits on the clicked one.
+  action(pane, 'strip', stripId(pane, 'low'))
+  await waitUntil('the strip owns the keyboard', () => props(pane).focus === 'strip')
+  const onBefore = stripOn(pane)
+  browse(pane, SAME_B)
+  await waitUntil('the click highlighted B', () => props(pane).selected === SAME_B)
+  assert.equal(props(pane).focus, 'list', 'the keyboard follows the click back to the list')
+  pane.key('\u001b[B')
+  await waitUntil('the cursor moved on the LIST', () => props(pane).selected !== SAME_B)
+  assert.equal(stripOn(pane), onBefore, 'and the arrows never draft a model in the background')
+  assert.equal(m.writes.length, 0)
+  m.handle.close()
+})
+
+test('native Model: a delayed strip click from another model cannot draft into the new one', async (t) => {
+  const m = await mounted(t)
+  await m.ready(twinEffortDirectory)
+  const { pane } = m
+  // The id A's strip built while A was the highlighted model.
+  const staleItem = stripId(pane, 'low')
+  assert.notEqual(staleItem, '', 'A advertises `low`')
+  // The user clicks model B — which advertises the SAME `low`, so a value-only membership
+  // check would pass — and only then does the previous frame's strip event arrive.
+  browse(pane, SAME_B)
+  await waitUntil('the click highlighted B', () => props(pane).selected === SAME_B)
+  const freshItem = stripId(pane, 'low')
+  assert.notEqual(freshItem, staleItem, 'the new strip builds its ids for ITS model')
+  const onBefore = stripOn(pane)
+  action(pane, 'strip', staleItem)
+  await settle(30)
+  assert.equal(props(pane).selected, SAME_B, 'B is still the highlighted model')
+  assert.equal(stripOn(pane), onBefore, "and A's click never drafts into B")
+  assert.equal(m.writes.length, 0)
+  // The CURRENT model's own item still drafts, so the refusal above is not vacuous.
+  action(pane, 'strip', freshItem)
+  await waitUntil('the current model drafts', () => stripOn(pane) === 'low')
+  m.handle.close()
+})
+
 test('native Model: the strip is painted only while the phase can really draft', async (t) => {
   // The client paints no DISABLED strip item, so a strip that stayed on screen during
   // a phase that refuses every draft change would be a promise the panel cannot keep
@@ -723,14 +822,14 @@ test('native Model: the strip is painted only while the phase can really draft',
   await settle(30)
   assert.equal(props(pane).state, 'loading')
   assert.equal(props(pane).strip ?? undefined, undefined, 'a running re-read paints no strip')
-  action(pane, 'strip', effortItemId('high'))
+  action(pane, 'strip', stripId(pane, 'high'))
   await settle(30)
   assert.equal(m.writes.length, 0, 'and a strip click is refused at admission, not by a later guard')
   m.handle.setLoadError('catalog is unreachable')
   await settle(30)
   assert.equal(props(pane).state, 'error')
   assert.equal(props(pane).strip ?? undefined, undefined, 'a failed read keeps no strip either')
-  action(pane, 'strip', effortItemId('high'))
+  action(pane, 'strip', stripId(pane, 'high'))
   await settle(30)
   assert.equal(m.writes.length, 0, 'and still admits nothing')
   m.handle.close()
@@ -755,9 +854,9 @@ test('native Model K2: Enter never writes from the list; the write is the focuse
   // nothing — that is how the zone is observed on the wire.
   const onId = (): string | undefined => (((props(pane).strip as { items?: Array<Record<string, unknown>> } | undefined)?.items ?? [])
     .find((item) => item.on === true)?.id as string | undefined)
-  assert.equal(onId(), effortItemId('high'), 'the seeded draft is the strip-on item')
+  assert.equal(onId(), stripId(pane, 'high'), 'the seeded draft is the strip-on item')
   pane.key('\u001b[D')
-  await waitUntil('the strip arrow moved the draft', () => onId() === effortItemId('low'))
+  await waitUntil('the strip arrow moved the draft', () => onId() === stripId(pane, 'low'))
   assert.equal(m.writes.length, 0, 'a strip arrow never writes')
   pane.key('\t')
   await waitUntil('primary focused', () => String(actionOf(pane, 'apply')?.label).endsWith('[Enter]'))
@@ -966,8 +1065,8 @@ test('native Model: a refusal keeps the catalogue and the draft the strip chose'
   const { pane } = m
   const onId = (): string | undefined => ((props(pane).strip as { items?: Array<Record<string, unknown>> } | undefined)?.items ?? [])
     .find((item) => item.on === true)?.id as string | undefined
-  action(pane, 'strip', effortItemId('low'))
-  await waitUntil('the strip drafted Low', () => onId() === effortItemId('low'))
+  action(pane, 'strip', stripId(pane, 'low'))
+  await waitUntil('the strip drafted Low', () => onId() === stripId(pane, 'low'))
   pane.key('\t')
   await waitUntil('the catalogue primary is focused', () => actionOf(pane, 'apply')?.label === 'Switch [Enter]')
   pane.key('\r')
@@ -976,7 +1075,7 @@ test('native Model: a refusal keeps the catalogue and the draft the strip chose'
   // and the disabled write — never an entry that nothing could run.
   assert.deepEqual(actionIds(pane), ['close', 'apply'], 'a pending catalogue offers Close + the disabled write')
   assert.equal(props(pane).strip ?? undefined, undefined, 'and it paints no strip at all while the write is admitted')
-  forge(pane, 'strip', effortItemId('high'))
+  forge(pane, 'strip', stripId(pane, 'high'))
   await settle(30)
   assert.equal(m.writes.length, 1, 'a forged strip value cannot admit a second write')
   assert.equal(actionOf(pane, 'apply')?.label, 'Selecting…', 'and nothing can cancel the admitted write')
@@ -984,7 +1083,7 @@ test('native Model: a refusal keeps the catalogue and the draft the strip chose'
   await waitUntil('the refusal clears pending', () => props(pane).focus === 'list')
   // The catalogue is still the page, with the draft the strip chose.
   assert.equal(onCatalogue(pane), true, 'the refusal keeps the page the user was on')
-  assert.equal(onId(), effortItemId('low'), 'and the draft they chose')
+  assert.equal(onId(), stripId(pane, 'low'), 'and the draft they chose')
   assert.ok(actionOf(pane, 'apply'), 'the write is offered again after a refusal')
 })
 
@@ -1058,8 +1157,8 @@ test('native Model: resize keeps the panel and every page stays reachable', asyn
   await waitUntil('back on the catalogue', () => onCatalogue(pane))
   const onId = (): string | undefined => ((props(pane).strip as { items?: Array<Record<string, unknown>> } | undefined)?.items ?? [])
     .find((item) => item.on === true)?.id as string | undefined
-  action(pane, 'strip', effortItemId('\u0000provider-default'))
-  await waitUntil('the candidate took the draft', () => onId() === effortItemId('\u0000provider-default'))
+  action(pane, 'strip', stripId(pane, '\u0000provider-default'))
+  await waitUntil('the candidate took the draft', () => onId() === stripId(pane, '\u0000provider-default'))
   assert.equal(m.writes.length, 0, 'a strip click never writes')
   pane.key('\t')
   await waitUntil('the catalogue primary is focused', () => String(actionOf(pane, 'apply')?.label).endsWith('[Enter]'))
@@ -1083,7 +1182,7 @@ test('native Model: resize keeps the panel and every page stays reachable', asyn
   assert.deepEqual(props(pane).preview, 'none', 'and it paints no preview region either')
   const stripOn = ((props(pane).strip as { items?: Array<Record<string, unknown>> } | undefined)?.items ?? [])
     .find((item) => item.on === true)?.id
-  assert.equal(stripOn, effortItemId('\u0000provider-default'),
+  assert.equal(stripOn, stripId(pane, '\u0000provider-default'),
     'the draft chosen on the narrow pane is the wide catalogue strip draft')
 })
 
@@ -1656,9 +1755,14 @@ test('native Model: the title states the ONE intent and carries no other global 
   const strip = props(pane).strip as { label?: string; items?: Array<Record<string, unknown>> } | undefined
   assert.equal(strip?.label, 'Reasoning Effort', 'the strip names the effort it edits')
   assert.deepEqual(
-    (strip?.items ?? []).map((item) => String(item.id)),
-    [effortItemId('\u0000provider-default'), effortItemId('low'), effortItemId('high')],
-    'and every one of its items is a candidate of the highlighted model',
+    (strip?.items ?? []).map((item) => stripValueOf(String(item.id))),
+    ['\u0000provider-default', 'low', 'high'],
+    'and every one of its items is a candidate of the MODEL the strip currently shows',
+  )
+  assert.equal(
+    (strip?.items ?? []).every((item) => stripItemParts(String(item.id))?.rowId === SAME_A),
+    true,
+    'each item id also names that model, so a delayed click cannot draft into another one',
   )
   assert.equal((strip?.items ?? []).some((item) => item.disabled !== undefined), false, 'and none of them is an action')
   const live = await mounted(t, { sessionless: false })
@@ -1748,10 +1852,10 @@ test('native Model: every advertised effort is reachable in the catalogue strip 
       await waitUntil(`${where}: back on the catalogue`, () => onCatalogue(m.pane))
       const last = reasoning?.efforts.at(-1)?.id
       assert.ok(last, `${where}: the fixture advertises at least one concrete effort`)
-      action(m.pane, 'strip', effortItemId(last))
+      action(m.pane, 'strip', stripId(m.pane, last))
       await waitUntil(`${where}: the last candidate drafted`, () => {
         const items = (props(m.pane).strip as { items?: Array<Record<string, unknown>> } | undefined)?.items ?? []
-        return items.find((item) => item.on === true)?.id === effortItemId(last)
+        return items.find((item) => item.on === true)?.id === stripId(m.pane, last)
       })
       m.pane.key('\t')
       await waitUntil(`${where}: the Primary Action`, () => String(actionOf(m.pane, 'apply')?.label).endsWith('[Enter]'))
@@ -2168,8 +2272,8 @@ test('native Model: a provider called `all` and a scope-shaped effort id stay un
   const onId = (): string | undefined => ((props(pane).strip as { items?: Array<Record<string, unknown>> } | undefined)?.items ?? [])
     .find((item) => item.on === true)?.id as string | undefined
   for (const value of ['scope-all', 'scope:other', 'scope:复杂🚀']) {
-    action(pane, 'strip', effortItemId(value))
-    await waitUntil(`the candidate ${value} takes the draft`, () => onId() === effortItemId(value))
+    action(pane, 'strip', stripId(pane, value))
+    await waitUntil(`the candidate ${value} takes the draft`, () => onId() === stripId(pane, value))
   }
   assert.equal(m.writes.length, 0, 'a strip click is never a write')
   // A scope-shaped value that is NOT one of the highlighted model's candidates
@@ -2180,7 +2284,7 @@ test('native Model: a provider called `all` and a scope-shaped effort id stay un
   action(pane, 'strip', 'not-an-effort')
   await settle(30)
   assert.equal(picker(pane)!.id, stripFrame, 'a foreign strip value never acts')
-  assert.equal(onId(), effortItemId('scope:复杂🚀'), 'and never moves the draft')
+  assert.equal(onId(), stripId(pane, 'scope:复杂🚀'), 'and never moves the draft')
   assert.equal(m.writes.length, 0)
   // ...and the ONE write carries the non-ASCII effort id VERBATIM.
   pane.key('\t')
@@ -2383,21 +2487,20 @@ test('native Model: the Reader survives a resize and Back returns to its real or
   m.handle.close()
 })
 
-test('native Model: the Reader keeps ONE identity per panel and a foreign frame cannot act', async (t) => {
+test('native Model: one reading keeps its Reader identity, and a foreign frame cannot act', async (t) => {
   const m = await mounted(t)
   await m.ready()
   const { pane } = m
   await openDetails(pane)
   const readerBack = readerBackNode(pane).id
   const readerBody = readerBodyNode(pane)?.id
-  // Coming back to the catalogue and entering the Reader again must reuse the SAME ids:
-  // a per-revision Reader id made the client REMOUNT the container, so the app's own
-  // scroll op could name a body the client never received (the runtime-gap record's
-  // F3-004) and the container's scroll position was lost with it.
-  await backToCatalogue(pane)
-  await openDetails(pane)
-  assert.equal(readerBackNode(pane).id, readerBack, 'the Reader keeps one Back identity across the round trip')
-  assert.equal(readerBodyNode(pane)?.id, readerBody, 'and one scroll-container identity')
+  // A re-render WITHIN one reading must not move the Reader's ids: a per-frame key made the
+  // client remount the container, which lost its scroll position and retired the app's own
+  // scroll target (the runtime-gap record's F3-004).
+  m.handle.setLoadError('a repaint inside the same reading')
+  await settle(30)
+  assert.equal(readerBackNode(pane).id, readerBack, 'a re-render keeps the reading identity')
+  assert.equal(readerBodyNode(pane)?.id, readerBody, 'and its scroll-container identity')
   // The fence that replaced the per-frame ids, on the page that has no action bar: an
   // event addressed to a frame this pane never built is simply not in `targets`.
   sendActivate(pane, 'row-that-does-not-exist', 'layer.model-999')
@@ -2407,6 +2510,48 @@ test('native Model: the Reader keeps ONE identity per panel and a foreign frame 
   assert.equal(picker(pane), undefined, 'and it cannot page the surface away either')
   // The CURRENT frame's Back row still works, so the negatives above are not vacuous.
   await backToCatalogue(pane)
+  m.handle.close()
+})
+
+test('native Model: a scroll queued by a CLOSED Reader cannot address the next reading', async (t) => {
+  // The reviewer's cross-reading boundary: the SDK queues a `Surface.scroll()` op while the
+  // frame credit is blocked, so an op queued by one Reader can be delivered after the app has
+  // left it and opened the NEXT one. Both readings are the same page of the same panel, so
+  // nothing about the page tells them apart — the IDENTITY has to, which is what the Reader's
+  // own epoch is for. (The scripted pane cannot show the client rejecting an unknown id; this
+  // asserts the wire fact that makes the rejection possible.)
+  const m = await mounted(t)
+  await m.ready()
+  const { pane } = m
+  await openDetails(pane)
+  const firstBody = readerBodyNode(pane)?.id
+  assert.equal(typeof firstBody, 'string', 'the first reading has a scroll container')
+  // A held gate must always carry a fallback release.
+  t.after(() => pane.releaseAcks())
+  pane.holdAcks()
+  // `End` on the first reading while the credit is blocked: the op is queued.
+  pane.key('\u001b[F')
+  await settle(30)
+  // Leave the Reader and open a NEW one while the acks are still held, so the queued op can
+  // only flush together with the next reading's first View.
+  pane.key('\u001b')
+  await settle(30)
+  pane.key('\r')
+  await settle(30)
+  pane.releaseAcks()
+  await settle(80)
+  assert.equal(inDetails(pane), true, 'the next reading is the page after the flush')
+  const secondBody = readerBodyNode(pane)?.id
+  assert.equal(typeof secondBody, 'string', 'and it has a scroll container of its own')
+  assert.notEqual(secondBody, firstBody, 'a NEW reading takes a NEW identity')
+  const queued = scrollOps(pane)
+  assert.equal(queued.some((entry) => entry.id === secondBody), false,
+    `no op queued by the closed reading addresses this one: ${JSON.stringify(queued)} vs ${JSON.stringify(secondBody)}`)
+  // Positive control: this reading's own keys still scroll its own body.
+  const before = scrollOps(pane).length
+  pane.key('\u001b[F')
+  await waitUntil('the current reading scrolls', () => scrollOps(pane).length > before)
+  assert.equal(scrollOps(pane).at(-1)?.id, secondBody, 'and they address THIS reading')
   m.handle.close()
 })
 

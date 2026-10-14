@@ -261,12 +261,15 @@ note({ caps: session.caps })
 let picker!: TspModelPicker
 let frames = 0
 let pickerId: string | undefined
+let pickerSelected: string | undefined
 const draw = (): void => {
   const layer = picker.renderLayer()
   surface.render({ layer })
   frames += 1
   pickerId = findPickerId(layer)
-  note({ frame: { n: frames, ...describe(layer), pickerId } })
+  const described = describe(layer)
+  pickerSelected = described.selected
+  note({ frame: { n: frames, ...described, pickerId } })
 }
 picker = new TspModelPicker({
   render: draw,
@@ -324,10 +327,14 @@ try {
       // path: proves the phase gate refuses the strip channel while it is not
       // painted (the client cannot click a chip that does not exist).
       if (key.text === 'f') {
+        // A WELL-FORMED id for the panel's HIGHLIGHTED model and a value it does NOT
+        // advertise: a strip id names the model it was built for, so a control that dropped
+        // the model half would only prove that a MALFORMED id is refused.
+        const forged = `effort:${String(pickerSelected ?? '')}\u0000not-a-candidate`
         if (pickerId !== undefined) {
-          picker.handleEvent({ ev: 'action', id: pickerId, act: 'strip', value: 'effort:high' } as unknown as TspEvent)
+          picker.handleEvent({ ev: 'action', id: pickerId, act: 'strip', value: forged } as unknown as TspEvent)
         }
-        note({ control: 'forged-strip', id: pickerId, value: 'effort:high' })
+        note({ control: 'forged-strip', id: pickerId, value: forged })
         continue
       }
       // The panel-lifecycle control: a SESSIONLESS subject (never a live one).
