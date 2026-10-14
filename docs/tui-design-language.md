@@ -799,6 +799,14 @@ Enforce only what is cheap and low-false-positive; the rest is review.
 3. **Degradation-ladder test**: for each size in the frozen matrix, assert the
    dropped/kept set matches §8 (this is the test that catches "someone made the
    header taller").
+
+Items 1–3 are enforced by `test/design-language.test.ts` (item 1), the four frame
+invariants in `test/support/design-language-frames.ts` — called from BOTH visual
+suites — and the per-surface ladder matrix each of those suites walks over the
+frozen sizes above (items 2–3). The `Verified`/`Not saved` ink check lives in the
+Settings suite's `B-02`/`B-03`. This list is the contract; that helper is only
+where it happens to be enforced.
+
 4. **Snapshot policy**: snapshot only stable, spec-level frames; normalize
    timestamps, job ids and durations. Do not add a whole-frame ASCII snapshot
    that fails on every cosmetic change.

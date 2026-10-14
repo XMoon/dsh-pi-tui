@@ -32,6 +32,13 @@ import type { JobObservedSnapshot, JobObservationPort, JobStopOutcome } from '..
 import { createDiag } from '../src/runtime/process/diagnostics.ts'
 import { displaySeamStub } from './support/display-seam-stub.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
+import {
+  assertBarIsLastRow,
+  assertBodyFloor,
+  assertNoHalfSegmentInBar,
+  assertOneActiveDevice,
+  type PaintedFrame,
+} from './support/design-language-frames.ts'
 
 const startedApps = new Set<TuiApp>()
 afterEach(() => {
@@ -1119,4 +1126,131 @@ test('B-18 the metadata row drops a long Detail whole and truncates only a lone 
   await harness.vt.waitForRender()
   assert.ok(!/Progress:/.test(view(harness.vt)), 'the progress fact is gone with the newer snapshot')
   assert.match(view(harness.vt), /^Detail: .*…$/m, 'a lone Detail truncates with the ellipsis')
+})
+
+// ── D-26: the frozen §11.2 degradation-ladder matrix (rollout PR4) ──────────
+//
+// D-08/D-11/D-12 pin the compact/floor frames and D-25 pins the single
+// disclosure at 120x40/80x24; this walks the frozen §11.2 matrix and asserts the
+// §8 ladder-derived chrome at every size. The metadata snapshot is emitted so
+// the metadata grant is really exercised; a live notice is added in a second
+// pass to exercise the notice row's own grant.
+
+interface JobLadder {
+  readonly compact: boolean
+  readonly metadataRows: number
+  readonly summaryRows: number
+  readonly tabRows: number
+  readonly noticeRows: number
+  readonly readingFactsRows: number
+  readonly bodyRows: number
+}
+
+/**
+ * The §8 ladder over the Job panel's own documented grants
+ * (`job-inspector-panel.ts:104-116,181-230`: `COMPACT_WIDTH/ROWS = 80/10`,
+ * `METADATA_MIN_BODY_ROWS = 4` requiring a standard `rows >= 10` frame,
+ * `FACTS_MIN_WIDTH/ROWS/BODY_ROWS = 100/12/6`, and the `rows >= 5` tab/summary
+ * grant that keeps the reserved body row).
+ */
+function jobLadder(
+  width: number,
+  rows: number,
+  options: { readonly noticeLive: boolean; readonly metadataAvailable: boolean },
+): JobLadder {
+  const safeRows = Math.max(1, Math.floor(rows))
+  const compact = width < 80 || safeRows < 10
+  let remaining = safeRows - 1 // the pinned Action Bar
+  const minBodyRows = safeRows >= 3 ? 1 : 0
+  if (safeRows >= 2) remaining -= 1 // the status title
+  const grant = (minRows: number, condition: boolean, minBody = minBodyRows): number => {
+    if (!condition || safeRows < minRows || remaining - 1 < minBody) return 0
+    remaining -= 1
+    return 1
+  }
+  const summaryRows = grant(5, true)
+  const tabRows = grant(5, true)
+  const noticeRows = grant(6, options.noticeLive)
+  const metadataRows = grant(10, !compact && options.metadataAvailable, Math.max(minBodyRows, 4))
+  const readingFactsRows = grant(12, width >= 100, Math.max(minBodyRows, 6))
+  return { compact, metadataRows, summaryRows, tabRows, noticeRows, readingFactsRows, bodyRows: remaining }
+}
+
+/** The frozen §11.2 matrix. */
+const JOB_MATRIX = [[200, 50], [120, 40], [100, 40], [80, 24], [80, 10], [72, 24], [44, 20]] as const
+
+test('D-26 the frozen §11.2 matrix keeps the §8 ladder-derived chrome at every size', async () => {
+  for (const [width, height] of JOB_MATRIX) {
+    for (const noticeLive of [false, true]) {
+      const harness = startApp(width, height)
+      await openFirstJob(harness)
+      harness.observation.latest()!.emit({
+        progress: '3/8 checks',
+        detail: 'Building components',
+        text: numberedLines(0, 39),
+      })
+      await settle(harness.vt)
+      await harness.vt.waitForRender()
+      if (noticeLive) {
+        harness.app.notify('governance notice', 'info')
+        await settle(harness.vt)
+      }
+      const ladder = jobLadder(width, height, { noticeLive, metadataAvailable: true })
+      const painted = plainRows(harness.vt)
+      assert.equal(painted.length, height, `the frame must paint exactly ${height} rows at ${width}x${height}`)
+      const frame: PaintedFrame = {
+        rows: painted,
+        readColor: (row, col) => harness.vt.getCellFgRgb(row, col),
+        primaryRgb: hexToRgb(currentPalette.primary),
+      }
+
+      // §8 invariants 1 + 2 (shared helper): the bar is last and the body floor holds.
+      assertOneActiveDevice(frame)
+      assertBarIsLastRow(painted, frame.readColor, 'Esc back')
+      assertNoHalfSegmentInBar(painted, painted.length - 1, ' · ')
+      assertRowWidths(harness.vt, width)
+      const bodyIndexes = painted.flatMap((line, index) => /^line \d{3}/.test(line) ? [index] : [])
+      assertBodyFloor(painted, bodyIndexes)
+      assert.ok(bodyIndexes.length >= 1, `the retained body is painted at ${width}x${height}:\n${view(harness.vt)}`)
+
+      // §8 step 5: the reading-tab row follows the body floor (and compactness).
+      const tabToken = ladder.compact ? '[Out]' : '[Output]'
+      const otherTabToken = ladder.compact ? '[Output]' : '[Out]'
+      assert.equal(painted.some(line => line.includes(tabToken)), ladder.tabRows === 1,
+        `the tab row at ${width}x${height}:\n${view(harness.vt)}`)
+      assert.ok(!painted.some(line => line.includes(otherTabToken)),
+        `the tab row's compactness at ${width}x${height}:\n${view(harness.vt)}`)
+
+      // §8 step 3: the metadata row holds only with its own grant.
+      assert.equal(painted.some(line => line.includes('Progress: 3/8 checks')), ladder.metadataRows === 1,
+        `the metadata row at ${width}x${height}:\n${view(harness.vt)}`)
+
+      // §8 step 6/§7.3: the reading-facts row only at its width/height/body grant,
+      // and then the bar must NOT repeat the disclosure — one fact is never
+      // advertised twice. The dedicated row is the one ABOVE the pinned bar.
+      const dedicatedFacts = painted.slice(0, -1).some(line => line.includes('Retained preview · not full history'))
+      const totalDisclosure = painted.filter(line => line.includes('Retained preview · not full history')).length
+      assert.equal(dedicatedFacts, ladder.readingFactsRows === 1,
+        `the reading-facts row at ${width}x${height}:\n${view(harness.vt)}`)
+      assert.ok(totalDisclosure <= 1, `the disclosure is advertised at most once at ${width}x${height}:\n${view(harness.vt)}`)
+      if (ladder.readingFactsRows === 1) {
+        assert.ok(!painted.at(-1)!.includes('Retained preview'),
+          `the bar never repeats the granted facts row at ${width}x${height}`)
+      }
+
+      // §8 step 4: the notice row has its own grant.
+      assert.equal(painted.some(line => line.includes('governance notice')), ladder.noticeRows === 1,
+        `the notice row at ${width}x${height}:\n${view(harness.vt)}`)
+
+      // §11.3.2/§4.1 (D5+D7): a status group paints the shared `‣` and no other
+      // per-status glyph.
+      const statusRow = painted.find(line => line.includes('‣'))
+      assert.notEqual(statusRow, undefined, `the status group must be painted at ${width}x${height}`)
+      for (const glyph of ['●', '○', '◐', '×', '✓', '✕', '⊘']) {
+        assert.ok(!statusRow!.includes(glyph),
+          `the status row must not paint the per-status glyph ${glyph} at ${width}x${height}: ${JSON.stringify(statusRow)}`)
+      }
+      disposeHarness(harness)
+    }
+  }
 })
