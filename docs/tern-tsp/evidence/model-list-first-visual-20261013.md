@@ -134,7 +134,7 @@ the node trees, the screenshots and `visual-acceptance.md`; the lane is part of 
 repository's repeatable acceptance path (it is not part of `pnpm test`/CI, because it
 needs the external Tern CLI).
 
-The final run of this revision is `temp/tern-model-ux-lane-v2-a22`, taken on the
+The final run of this revision is `temp/tern-model-ux-lane-v2-a23`, taken on the
 frozen tree (the run records the sha256 of the four production modules it rendered
 and they match the tree byte for byte); its `visual-acceptance.md` carries the per-pane table, the
 seven-label review of every capture and that provenance record. Every earlier
@@ -218,8 +218,9 @@ visible surface. Filled for the model picker:
     The native client paints the sheet, so its roles are the client's; OUR spans are
     the Reader's muted group heads and fact labels (role 2/5), its content values
     (role 3, painted by the client's own content ink) and its notice, which now
-    carries its own role ink (`error` in the error phase, `muted` otherwise = role 17)
-    instead of borrowing the content's. A failed provider's row states its state in
+    carries its own role ink (role 17: `error` for a refused or failed write, `muted`
+    for a cancellation) instead of borrowing the content's or guessing from the page's
+    phase. A failed provider's row states its state in
     WORDS (`<Provider> · unavailable`) because §3.3.3 forbids colour-only signalling.
 [x] Exactly one active signal per region (one `[Label]`/`> item` in primary)?
     Yes, and the signals are the client's own devices: the list's cursor row, the

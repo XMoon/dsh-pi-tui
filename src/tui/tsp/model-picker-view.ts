@@ -4,22 +4,23 @@
  * through `deps.bind`, so a click lands on the same admission point as a key —
  * this module never mutates state, never writes and never reads the SDK.
  *
- * Layout contract (Owner-frozen, list-first):
- *  - the catalogue (`models`) is ONE native picker at every pane width: a single
- *    column of model rows carrying the model name, a deterministic provider mark,
- *    its real `current`/`Default` badges, grouped as `Current / Default` first and
- *    then by provider. There is no provider sidebar and no side column; a model is
- *    entered with `activate`/`Enter` and the ONE write is an explicit footer
- *    action at every width. A wide pane adds only a compact READ-ONLY summary
- *    under the list — never a required operation;
- *  - the model's OVERVIEW is the same picker, showing the model's every advertised
- *    effort candidate first (or the explicit `Not available`) and the read-only
- *    Full details entry;
- *  - the read-only Full details page is a native `overlay` Reader (`ui.text` with
- *    the client's own wrapping and a native scroll container) grouped into
- *    Identity / Configuration / Description: a picker row is ONE ellipsized line
- *    and cannot carry a long value. No overlay ON TOP of a picker, no `ui.el`, no
- *    self-drawn button, no global action menu.
+ * Layout contract (Owner-frozen, TWO pages):
+ *  - the catalogue (`models`) is ONE native picker, the client's `md` dialog at
+ *    EVERY pane width: a single column of model rows carrying the model name, a
+ *    deterministic provider mark and its real lowercase `current` / `default` state
+ *    chips, grouped as `Current · Default` first and then by provider. There is no
+ *    provider sidebar, no side column, no preview region and no fact column; the
+ *    Reasoning Effort is edited in the catalogue's own native `strip` (one chip per
+ *    candidate of the highlighted model, the local draft marked `on`) and the ONE
+ *    write is an explicit footer action at every width;
+ *  - a row activation (`activate` — the client's own click on the already-highlighted
+ *    row — or `Enter`) opens the read-only Full details page DIRECTLY: there is no
+ *    intermediate page and no second-level effort menu;
+ *  - that read-only page is a native `overlay` Reader (`ui.text` with the client's
+ *    own wrapping and a native scroll container) grouped into Identity /
+ *    Configuration / Description: a picker row is ONE ellipsized line and cannot
+ *    carry a long value. No overlay ON TOP of a picker, no `ui.el`, no self-drawn
+ *    button, no global action menu.
  * @module tui/tsp/model-picker-view
  */
 import { ui, span, type Node } from '@stencil-hq/tern'
@@ -196,7 +197,7 @@ function nativeFocus(panel: ModelPickerPanel): PickerProps['focus'] {
 function pickerState(panel: ModelPickerPanel): Pick<PickerProps, 'state' | 'message' | 'empty'> {
   return {
     state: panel.phase === 'loading' ? 'loading' : panel.phase === 'error' ? 'error' : 'ready',
-    ...(panel.notice === '' ? {} : { message: panel.notice }),
+    ...(panel.notice === undefined ? {} : { message: panel.notice.text }),
     empty: 'No model is advertised by the configured providers.',
   }
 }
@@ -252,12 +253,12 @@ function detailsReader(panel: ModelPickerPanel, deps: ModelPickerViewDeps): Node
         ? [ui.text(span('No model is selected.', 'muted'))]
         : [
             // The transient read/write notice leads the page: it describes the state
-            // the facts below were read in. The design language gives a notice its own
-            // role (`textMuted` for information, `error` for an error), so it is never
-            // painted in the content's own ink.
-            ...(panel.notice === ''
+            // the facts below were read in. It carries its OWN role ink (information
+            // is `textMuted`, a failure is `error`) — the page's phase cannot tell a
+            // refused write, which leaves the panel `ready`, from a cancellation.
+            ...(panel.notice === undefined
               ? []
-              : [ui.text({ wrap: 'word' }, span(panel.notice, panel.phase === 'error' ? 'error' : 'muted'))]),
+              : [ui.text({ wrap: 'word' }, span(panel.notice.text, panel.notice.tone))]),
             ...groups.flatMap((group, index) => [
               ui.col(
                 { key: `reader-group-${group.id}`, gap: 'xs' },
