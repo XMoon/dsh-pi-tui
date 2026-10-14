@@ -1224,3 +1224,31 @@ test('D15 boundary rules: the bottom rule yields first, leaving a witnessed TOP-
   assert.equal(message.bottomRule, true)
   assert.ok(message.resultsRows >= 1, 'the message row stays painted')
 })
+
+
+test('D15 boundary rules: they may compress Results/Preview but never to zero rows', () => {
+  // The rules really take rows from the body (the allocation matrix above pins
+  // the pre-D15 vs D15 numbers, e.g. 200x60 preview 23 -> 21), yet a real result
+  // row and a real Preview content row always survive them.
+  for (const [rows, chrome] of [[24, 2], [30, 0], [40, 2], [50, 0], [60, 2]] as const) {
+    const layout = planHistorySeatLayout(100, rows, chrome, false, { previewable: true })
+    if (layout.topRule || layout.bottomRule) {
+      assert.ok(layout.resultRows >= 1, `${rows}x${chrome}: a result row survives the rules`)
+      assert.ok(layout.previewRows >= 1, `${rows}x${chrome}: a Preview content row survives the rules`)
+    }
+  }
+  // At the exact boundary the budget removes a rule rather than zeroing the
+  // Preview: 80x12 -> grant 7 -> top only (the bottom rule is removed first)
+  // while >=1 result row and >=1 Preview row stay painted.
+  const topOnly = planHistorySeatLayout(80, 12, 0, false, { previewable: true })
+  assert.equal(topOnly.topRule, true)
+  assert.equal(topOnly.bottomRule, false)
+  assert.ok(topOnly.resultRows >= 1 && topOnly.previewRows >= 1,
+    'removing the bottom rule is what protects the one-row Preview floor')
+  // A non-previewable state has no Preview to protect: it keeps both rules and
+  // its one status/message row.
+  const message = planHistorySeatLayout(80, 12, 0, false, { previewable: false })
+  assert.equal(message.topRule, true)
+  assert.equal(message.bottomRule, true)
+  assert.ok(message.resultsRows >= 1)
+})

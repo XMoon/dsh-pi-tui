@@ -99,8 +99,12 @@ second screen.
   results window (at most eight painted rows, following the selection), the
   Results/Preview divider, then the `Preview`, the action bar and a bottom
   boundary `─` (below the action bar, against the footer). The two boundary
-  rules are decoration with a fixed degradation order — bottom yields first,
-  then top, before the Preview shrinks — and never take a transcript/footer row.
+  rules are preferred and may compress the Results/Preview regions, but they
+  never cost the mandatory Header/Query/Action Bar, at least one result row or at
+  least one Preview content row: when the budget cannot satisfy all of those the
+  bottom rule is removed first, then the top one; a loading/empty/failed state
+  keeps at least its one status/message row. A rule never takes a
+  transcript/footer row.
   `F2` toggles the seat between its normal (≈63% of the terminal) and expanded
   (≈80%) target height; the real grant also reserves the live non-seat chrome
   and one transcript row, so a small terminal drops the Preview before it drops
