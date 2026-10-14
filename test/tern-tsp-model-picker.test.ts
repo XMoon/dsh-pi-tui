@@ -322,6 +322,7 @@ async function mounted(t: { after(fn: () => unknown): void }, subject = { sessio
   assert.ok(renderer.modelPresentation)
   const writes: unknown[] = []
   let resolve!: (outcome: ModelApplyOutcome) => void
+  let reject!: (reason: unknown) => void
   let retries = 0
   const handle = renderer.modelPresentation.open({
     subject,
@@ -330,9 +331,10 @@ async function mounted(t: { after(fn: () => unknown): void }, subject = { sessio
       retries += 1
     },
     apply: (selection: unknown) =>
-      new Promise<ModelApplyOutcome>((r) => {
+      new Promise<ModelApplyOutcome>((r, j) => {
         writes.push(selection)
         resolve = r
+        reject = j
       }),
     runOwned: (label, task, options) =>
       runOwned(label, task, { ...options, diag: { debug() {}, warn() {}, error() {} } as never }),
@@ -350,6 +352,7 @@ async function mounted(t: { after(fn: () => unknown): void }, subject = { sessio
     writes,
     retries: () => retries,
     settleWrite: (outcome: ModelApplyOutcome) => resolve(outcome),
+    failWrite: () => reject(new Error('the model writer threw')),
     ready: async (d: ModelPickerDirectory = directory) => {
       handle.setLoading()
       handle.setDirectory(d)
@@ -1815,6 +1818,25 @@ test('native Model: every Details fact reaches the Reader COMPLETE and wraps by 
   await waitUntil('cancelled and ready', () => props(m.pane).state === 'ready')
   await openDetails(m.pane)
   assert.equal(noticeTone(m.pane, 'Cancelled.'), 'muted', 'a cancelled write is information, never a failure')
+  m.handle.close()
+})
+
+test('native Model: a write that THROWS reaches the Reader as a failure too', async (t) => {
+  // The third way a write can fail: the writer itself throws. It shares the refusal's
+  // role ink (`error`) and must never be mistaken for the informational cancellation.
+  const m = await mounted(t)
+  await m.ready()
+  const { pane } = m
+  pane.key('\u001b[Z')
+  await waitUntil('primary focused', () => String(actionOf(pane, 'apply')?.label).endsWith('[Enter]'))
+  pane.key('\r')
+  await waitUntil('pending', () => actionOf(pane, 'apply')?.label === 'Selecting…')
+  m.failWrite()
+  await waitUntil('the failure restores the catalogue', () => onCatalogue(pane) && props(pane).state === 'ready')
+  assert.equal(props(pane).message, 'Failed.', 'the catalogue offers the failure in its message slot')
+  await openDetails(pane)
+  assert.equal(carriesText(pane, 'Failed.'), true, 'the Reader states the failure')
+  assert.equal(noticeTone(pane, 'Failed.'), 'error', 'and inks it as a failure')
   m.handle.close()
 })
 
