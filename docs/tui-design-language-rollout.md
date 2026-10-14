@@ -16,7 +16,9 @@
    `PaneBox`/`VisiblePaneLayout` geometry. If a change seems to need one, stop
    and ask.
 2. **No fork change.** `packages/pi-tui/**` stays untouched; nothing in this
-   rollout justifies a divergence.
+   rollout justifies a divergence — the only exception is `D16` in
+   `docs/tui-design-language.md` §1.3 (X061/X062, Owner amendment 2026-10-14),
+   and it authorizes nothing else.
 3. **No new theme owner or token.** Ink comes from `color.*` /
    `taskStatusColor()` / the existing theme factories, read at render time.
 4. **Targeted evidence first.** `pnpm build` (the fork `dist` is a test input),
@@ -267,7 +269,11 @@ string alone yields the wrong ink in both states**. Requirements:
    `src/tui/commands/status.ts:110` precedent, where the nested style wins and the
    slot's outer paint resumes after it;
 2. **do not** change `settingsListTheme().value` and **do not** touch
-   `packages/pi-tui/**`: no fork divergence and no new theme abstraction;
+   `packages/pi-tui/**`: no fork divergence and no new theme abstraction — the
+   two divergences this PR needs, X061 (the whole-unit state slot and label
+   column) and X062 (the `searchText ?? label` predicate), are the `D16` Owner
+   amendment in `docs/tui-design-language.md` §1.3, and nothing else in the fork
+   may change;
 3. move the preset picker's chip out of the `description` into its `currentValue`
    slot, so both pickers use one position;
 4. assert the painted cell colour in the real overlay frame: the chip's foreground

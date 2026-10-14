@@ -1,9 +1,11 @@
 # TUI design language (v1)
 
 > **Status: FROZEN v1 (Owner-confirmed 2026-10-14).** §1.3 records the six
-> decisions and the two Owner amendments (`D5`: the status keeps a glyph marker;
-> `D7`: that marker is `‣`, not `∙`). Any later change to the vocabulary follows
-> §11.1 and lands in this file first.
+> decisions, the two Owner amendments (`D5`: the status keeps a glyph marker;
+> `D7`: that marker is `‣`, not `∙`) and the one fork-exception amendment
+> (`D16`, Owner amendment 2026-10-14: X061/X062 are the only authorized
+> `packages/pi-tui/**` divergences of rollout PR5b). Any later change to the
+> vocabulary follows §11.1 and lands in this file first.
 >
 > Baseline: branch `next`, commit `7ccaa20a`. This document was derived from the
 > real `VirtualTerminal` frames of the running product (`docs/tui-design-language-samples.md`
@@ -58,6 +60,7 @@ alternative; this is the frozen outcome, and the rollout plan may start.
 | D5 | Status presentation | **a Title Case word plus ONE shared status marker** (glyph settled by D7 below) | **Owner amendment**: the word is the signal, but the glyph anchor is kept; `●` (U+25CF, EAW-ambiguous) must go, and the marker is **not** specialised per status (`✓` for done, `✕` for failed, `⊘` for cancelled …) — state is carried by the word and its token, never by a second glyph set (§4.1) |
 | D6 | Job reading-facts row | **remove the two flanking rules** | accepted: a rule marks a boundary and a text line is never flanked (§6.2) |
 | D15 | Editor-seat tenant boundary | **the nested History editor-seat tenant (`Ctrl+R`) draws ONE `─` (role 15) as its FIRST row and ONE as its LAST row, below the action bar**, so the seat is visibly bounded by the transcript above and the footer chrome below. This is a deliberate, Owner-confirmed exception to §6.2's "at most two rules per frame" (that surface may paint three: top boundary, Results/Preview divider, bottom boundary). **History prefers to keep both boundary rules and lets them compress the Results/Preview regions, but a rule must never cost the mandatory Header, Query or Action Bar, at least one result row and at least one Preview content row.** When the row budget cannot satisfy all of those, the **bottom rule is removed first, then the top rule**; with no previewable content, at least one status/message row survives. A rule never takes a transcript/footer row. On this surface the action bar is the last CONTENT row, not the last physical row | Owner decision 2026-10-14: the History seat previously floated against the transcript and the footer with no boundary of its own; the seat declares its own boundary inside its grant rather than altering shared chrome |
+| D16 | Fork exception for the settings row state (rollout PR5b) | **X061** (`SettingItem.valueParts` plus the label-column clamp) and **X062** (`SettingItem.searchText` plus the `searchText ?? label` predicate) are the **only** `packages/pi-tui/**` divergences rollout PR5b authorizes, each with its ledger record and guarding test; every other §1.2 item and rollout ground rule 2 stay in force | **Owner amendment 2026-10-14**: the P2 that a state chip could be sliced (`[defaul`) or pushed out of the row (X061) and the P2 that the label-only search lost a keyword from the middle of an abbreviated name (X062) cannot be repaired through the public surface — only `render(width)` knows the value budget, and one string is both painted and searched — so the Owner kept the atomic chip and the display/search split instead of reverting them |
 
 Re-opening any of these is a spec change (§11.1): edit this table in the same PR,
 and note a user-visible consequence in the changelog.
@@ -431,7 +434,10 @@ Rules:
   pre-painted too** (measured in the real `/model` frame: the selected row's badge
   kept ` · effort ‹high›` in the default colour until that token was painted its own
   role-4 ink). That is the pattern in `src/tui/commands/status.ts:110`, and **the
-  vendored fork is never modified for it**.
+  vendored fork is never modified for the chip's ink**. The two contracts the slot
+  itself cannot express — the whole-unit state layout (fork divergence X061) and
+  the row's search basis (fork divergence X062) — are the sole exception, recorded
+  as the Owner amendment `D16` in §1.3; nothing else here changes the fork.
 - **A chip never introduces bold on its own; it may inherit the carrying row's
   weight.** Ink and weight are separate contracts: the INK is never inherited (a
   chip must not take the row's selection colour, `primary` / `textDim`), while
