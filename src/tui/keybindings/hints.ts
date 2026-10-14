@@ -84,3 +84,18 @@ export function formatLeaderSequence(completingKey: KeyId): string {
 export function formatKeyList(keys: readonly KeyId[]): string {
   return keys.map(formatKeyId).join(' / ')
 }
+
+/** Format one already-labelled key list for an ACTION-BAR HINT: a BARE
+ *  unmodified letter stays lowercase (`s`, never `S`) because `S` reads as ⇧S in
+ *  prose — the design language's key rule (§4.1). A modified chord keeps its
+ *  formatted form (`Shift+S`), and a list keeps its OWN separator spacing
+ *  (`s / Shift+S`, the same shape {@link formatKeyList} paints). */
+export function formatHintKeys(keys: string): string {
+  return keys.split('/').map(part => {
+    const core = part.trim()
+    const lowered = /^[A-Za-z]$/u.test(core) ? core.toLowerCase() : core
+    // Preserve the separator's own spacing instead of imposing one: the list
+    // formatter's ` / ` must survive, and a compact `S/Shift+S` stays compact.
+    return part.replace(core, lowered)
+  }).join('/')
+}

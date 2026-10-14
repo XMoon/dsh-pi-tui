@@ -216,7 +216,7 @@ test('C-03 a non-shell kind never grows a Command page or a Command Copy verb', 
   const harness = makePanel(observedState({ kind: 'subagent', label: 'echo one' }))
   const painted = paint(harness, 120).join('\n')
   assert.match(painted, /Label {2}echo one/, 'a non-shell label is shown as a Label')
-  assert.ok(!/V command/.test(painted), 'no Command entry is advertised')
+  assert.ok(!/v command/.test(painted), 'no Command entry is advertised')
   harness.panel.handleInput('v')
   const after = paint(harness, 120).join('\n')
   assert.ok(!/Copy All \[C\]/.test(after), '`v` cannot open a Command page')
@@ -233,7 +233,7 @@ test('C-04 the opening row is never a Command source: only the observed label op
   const opening = makePanel({ opening: { jobId: 'job-a', kind: 'bash', label: 'pnpm build', status: 'running' } })
   const before = paint(opening, 120).join('\n')
   assert.match(before, /Command {2}pnpm build/)
-  assert.ok(!/V command/.test(before), 'the opening row alone does not advertise V')
+  assert.ok(!/v command/.test(before), 'the opening row alone does not advertise V')
   opening.panel.handleInput('v')
   assert.ok(!/Copy All \[C\]/.test(paint(opening, 120).join('\n')), 'no Command page before the first observation')
   opening.panel.handleInput('C')
@@ -244,7 +244,7 @@ test('C-04 the opening row is never a Command source: only the observed label op
   // The SAME instance becomes eligible once the observation arrives.
   const live = makePanel({ opening: { jobId: 'job-a', kind: 'bash', label: 'pnpm build', status: 'running' } })
   live.panel.update(observedState({ label: 'pnpm build --watch' }))
-  assert.match(paint(live, 120).join('\n'), /V command/, 'a wide Output bar advertises the Command entry')
+  assert.match(paint(live, 120).join('\n'), /v command/, 'a wide Output bar advertises the Command entry')
   live.panel.handleInput('v')
   const command = paint(live, 120).join('\n')
   assert.match(command, /Copy All \[C\]/)
@@ -265,8 +265,8 @@ test('C-05/C-06 the Command page owns one body and its own viewport at every bud
     }
     const painted = lines.join('\n')
     assert.match(painted, /Esc output/, `the Command bar is pinned at ${budget.width}x${budget.rows}`)
-    assert.ok(!/V command/.test(painted), 'the Output-only verb is absent on the Command page')
-    assert.ok(!/Follow ON|Follow PAUSED/.test(painted), 'the Command page never claims a Follow state')
+    assert.ok(!/v command/.test(painted), 'the Output-only verb is absent on the Command page')
+    assert.ok(!/Follow on|Follow paused/.test(painted), 'the Command page never claims a Follow state')
     assert.ok(!/Retained preview/.test(painted), 'the Command page never claims a retained preview')
     assert.match(painted, /Full command/)
     assert.match(lines.at(-1)!, /Esc output/, 'the Action Bar is the last row')
@@ -375,14 +375,14 @@ test('C-16/C-06 an Output Follow/PAUSED position survives a round trip through t
   harness.tasks.observation.latest()!.emit({ label: 'echo hello', text })
   await harness.vt.waitForRender()
   await flush(2)
-  // Follow ON: the newest retained row is visible.
-  assert.match(view(harness.vt), /Follow ON/)
+  // Follow on: the newest retained row is visible.
+  assert.match(view(harness.vt), /Follow on/)
   assert.ok(bodyRow(harness.vt, 'line 079') >= 0)
   // Pause with PageUp and remember the topmost visible retained row.
   harness.vt.sendInput('\x1b[5~')
   await harness.vt.waitForRender()
   await flush(2)
-  assert.match(view(harness.vt), /Follow PAUSED/)
+  assert.match(view(harness.vt), /Follow paused/)
   const pausedTop = firstBodyLine(harness.vt)
   assert.notEqual(pausedTop, '', `the paused body must still paint retained rows:\n${view(harness.vt)}`)
   // Round trip through the Command page: scrolling THERE must not touch Output.
@@ -393,13 +393,13 @@ test('C-16/C-06 an Output Follow/PAUSED position survives a round trip through t
   harness.vt.sendInput('\x1b')
   await harness.vt.waitForRender()
   await flush(2)
-  assert.match(view(harness.vt), /Follow PAUSED/, 'the Output page never re-arms Follow')
+  assert.match(view(harness.vt), /Follow paused/, 'the Output page never re-arms Follow')
   assert.equal(firstBodyLine(harness.vt), pausedTop, 'the Output viewport is exactly where the user left it')
   // Physical End on the Output page is still the ONLY Follow re-arm.
   harness.vt.sendInput('\x1b[F')
   await harness.vt.waitForRender()
   await flush(2)
-  assert.match(view(harness.vt), /Follow ON/)
+  assert.match(view(harness.vt), /Follow on/)
   assert.ok(bodyRow(harness.vt, 'line 079') >= 0, 'the newest retained row is followed again')
 })
 
@@ -945,7 +945,7 @@ test('C-11 edge auto-scroll follows the fork gesture: drag to the visible edge r
   harness.vt.sendInput('\x1b')
   await harness.vt.waitForRender()
   await flush(2)
-  assert.match(view(harness.vt), /Follow ON/, 'the Output follow state is untouched')
+  assert.match(view(harness.vt), /Follow on/, 'the Output follow state is untouched')
 })
 
 test('C-13 the Output page copies the trigger-moment retained text, never the Command source', async () => {
@@ -1039,7 +1039,7 @@ test('C-16 an Output Follow (tail) survives a round trip through the Command pag
   harness.tasks.observation.latest()!.emit({ text: `${text}\nline 080` })
   await harness.vt.waitForRender()
   await flush(2)
-  assert.ok(bodyRow(harness.vt, 'line 080') >= 0, 'Follow ON still tracks the newest retained rows')
+  assert.ok(bodyRow(harness.vt, 'line 080') >= 0, 'Follow on still tracks the newest retained rows')
 })
 
 test('C-08 zero-width graphemes belong to their base cell and never break the painted row', () => {
@@ -1160,8 +1160,8 @@ test('C-05 the two read-only verbs are advertised with a deterministic drop orde
     harness.rows.value = rows
     for (let width = 60; width <= 200; width += 1) {
       const bar = paint(harness, width).at(-1)!
-      const hasCopy = /C copy output/.test(bar)
-      const hasCommand = /V command/.test(bar)
+      const hasCopy = /c copy output/.test(bar)
+      const hasCommand = /v command/.test(bar)
       assert.ok(!hasCopy || hasCommand, `the copy verb never survives alone at ${width}x${rows}`)
       if (hasCopy) sawBoth = true
       if (hasCommand && !hasCopy) sawCommandOnly = true
@@ -1171,8 +1171,8 @@ test('C-05 the two read-only verbs are advertised with a deterministic drop orde
   assert.ok(sawBoth, 'there is a row wide enough to advertise BOTH verbs')
   assert.ok(sawCommandOnly, 'there is a row where only the higher-priority Command verb survives')
   const tight = paint(harness, 80).at(-1)!
-  assert.ok(!/V command/.test(tight), 'a tight row yields the Command verb too')
-  assert.ok(!/C copy output/.test(tight), 'a tight row yields the copy verb')
+  assert.ok(!/v command/.test(tight), 'a tight row yields the Command verb too')
+  assert.ok(!/c copy output/.test(tight), 'a tight row yields the copy verb')
   assert.match(tight, /Retained preview · not full history/, 'the pre-existing disclosure is never the price')
   harness.panel.dispose()
 
@@ -1181,8 +1181,8 @@ test('C-05 the two read-only verbs are advertised with a deterministic drop orde
   // in the world, while the Command entry (which CAN act) stays.
   const emptyOutput = makePanel(observedState({ label: 'echo one', text: '' }))
   const wideBar = paint(emptyOutput, 200).at(-1)!
-  assert.ok(!/C copy output/.test(wideBar), 'an empty Output never advertises the copy verb')
-  assert.match(wideBar, /V command/, 'the Command entry can still act, so it stays advertised')
+  assert.ok(!/c copy output/.test(wideBar), 'an empty Output never advertises the copy verb')
+  assert.match(wideBar, /v command/, 'the Command entry can still act, so it stays advertised')
   emptyOutput.panel.dispose()
 })
 

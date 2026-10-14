@@ -263,12 +263,12 @@ test('D-01 120x40 paints status → metadata → summary → tabs → body → f
   // one more throttled frame to converge the reading-facts position.
   await harness.vt.waitForRender()
 
-  const status = bodyRow(harness.vt, 'JOB  job-a · bash')
-  const metadata = bodyRow(harness.vt, 'progress: 3/8 checks')
+  const status = bodyRow(harness.vt, 'Job · job-a · bash')
+  const metadata = bodyRow(harness.vt, 'Progress: 3/8 checks')
   const summary = bodyRow(harness.vt, 'Command  pnpm build && pnpm test:product')
   const tabs = bodyRow(harness.vt, '[Output]  Command')
   const firstBody = tabs + 1
-  const facts = bodyRow(harness.vt, 'Retained preview · not full history · rows')
+  const facts = bodyRow(harness.vt, 'Retained preview · not full history')
   const bar = bodyRow(harness.vt, 'Esc back')
 
   assert.equal(status, 0, 'the status title owns the FIRST physical row')
@@ -282,8 +282,8 @@ test('D-01 120x40 paints status → metadata → summary → tabs → body → f
   assert.equal(bodyRow(harness.vt, 'line 039'), facts - 1, 'the followed tail is the LAST body row')
   assert.ok(tabs < firstBody && firstBody < facts && facts < bar, 'the visual order is fixed')
 
-  // Status: identity + the themed dot + the UPPERCASE real status, all on the row.
-  assert.match(plainRows(harness.vt)[status]!, /● RUNNING/)
+  // Status: identity + the ONE shared marker + the Title Case real status, all on the row.
+  assert.match(plainRows(harness.vt)[status]!, /‣ Running/)
   // Summary: the read-only command AND its clickable entry.
   assert.match(plainRows(harness.vt)[summary]!, /↗ Command/)
   // Tabs: the CURRENT page is the only bracketed one.
@@ -293,7 +293,7 @@ test('D-01 120x40 paints status → metadata → summary → tabs → body → f
   // Action Bar: Esc + Follow + the browsing hint, and it never repeats the disclosure.
   const barText = plainRows(harness.vt)[bar]!
   assert.match(barText, /Esc back/)
-  assert.match(barText, /Follow ON/)
+  assert.match(barText, /Follow on/)
   assert.match(barText, /PgUp\/PgDn/)
   assert.ok(!/Retained preview/.test(barText), 'the Action Bar never repeats the dedicated facts row')
 
@@ -380,7 +380,8 @@ test('D-04 a 1,500-character command summary stays ONE truncated row that still 
   const tabs = bodyRow(harness.vt, '[Output]  Command')
   assert.equal(tabs, summary + 1, 'the summary stays ONE row above the tabs')
   assert.match(plainRows(harness.vt)[summary]!, /…/, 'the long identity is elided, never wrapped')
-  assert.match(plainRows(harness.vt)[summary]!, /↗ Command/, 'the entry survives the elision')
+  assert.ok(!/↗ Command/.test(plainRows(harness.vt)[summary]!),
+    'the affordance yields to the elided lead — it is painted only while the WHOLE lead fits')
 
   // The synthetic ellipsis is the truncation marker, NOT a summary cell: it must
   // stay inert (the same contract the reading tabs follow).
@@ -394,7 +395,7 @@ test('D-04 a 1,500-character command summary stays ONE truncated row that still 
   assert.ok(!/Copy All \[C\]/.test(view(harness.vt)), 'the summary ellipsis opens nothing')
   assert.deepEqual(harness.copied, [], 'and it never copies')
 
-  // The painted summary text and the painted entry both still enter the page.
+  // The painted summary text still enters the page even without the affordance.
   await click(harness.vt, summary, 4)
   assert.match(view(harness.vt), /Copy All \[C\]/, 'the elided summary still opens the page')
   const button = bodyRow(harness.vt, 'Copy All [C]')
@@ -403,12 +404,13 @@ test('D-04 a 1,500-character command summary stays ONE truncated row that still 
   assert.deepEqual(harness.copied, [label], 'Copy All still delivers the WHOLE original document')
   assert.equal(harness.observation.records.length, 1, 'and never opens a second observer')
 
-  // The painted `↗ Command` entry is the other positive control on this row.
+  // No `↗ Command` entry is advertised on an elided row, and no phantom click
+  // region is published in its place: the dropped affordance owns no span.
   harness.vt.sendInput('\x1b')
   await settle(harness.vt)
   const entrySummary = bodyRow(harness.vt, 'pnpm build --flag=value')
-  await click(harness.vt, entrySummary, cellIndexOf(harness.vt, entrySummary, '↗ Command') + 1)
-  assert.match(view(harness.vt), /Copy All \[C\]/, 'the painted entry still opens the page')
+  assert.ok(!/↗ Command/.test(plainRows(harness.vt)[entrySummary]!),
+    'the entry stays absent on the elided summary row')
 })
 
 // ── D-05: no faked Command affordance ─────────────────────────────────────
@@ -453,12 +455,12 @@ test('D-06 GAP + ERROR + SETTLED stay independently visible without squeezing th
   })
   await settle(harness.vt)
 
-  const status = bodyRow(harness.vt, '● FAILED')
+  const status = bodyRow(harness.vt, '‣ Failed')
   assert.match(plainRows(harness.vt)[status]!, /\[GAP\]/, 'the gap fact is visible on the status row')
   assert.match(plainRows(harness.vt)[status]!, /\[ERROR\]/, 'the error fact is visible on the status row')
   assert.match(plainRows(harness.vt)[status]!, /\[SETTLED\]/, 'the settled fact is visible on the status row')
   assert.match(view(harness.vt), /Earlier output evicted/, 'the descriptive gap fact is readable')
-  assert.match(view(harness.vt), /error: stream reset/, 'the follow-stream reason is readable')
+  assert.match(view(harness.vt), /Error: stream reset/, 'the follow-stream reason is readable')
   // The facts never displace the body or the pinned bar.
   assert.ok(bodyRow(harness.vt, 'line 039') > status, 'the body survives below the chrome')
   assert.match(plainRows(harness.vt).at(-1)!, /Esc back/, 'the Action Bar stays last')
@@ -473,7 +475,7 @@ test('D-07 connecting / empty / unavailable paint three DIFFERENT bodies, never 
   connecting.observation.syncEmit = false
   await openFirstJob(connecting)
   assert.match(view(connecting.vt), /Waiting for retained output…/)
-  assert.match(view(connecting.vt), /JOB\s+job-a · bash/)
+  assert.match(view(connecting.vt), /Job · job-a · bash/)
   assert.ok(!/Copy All \[C\]/.test(view(connecting.vt)), 'no Command page before the first observation')
   disposeHarness(connecting)
 
@@ -493,7 +495,7 @@ test('D-07 connecting / empty / unavailable paint three DIFFERENT bodies, never 
   await flush(6)
   assert.match(view(unavailable.vt), /Retained output unavailable/)
   assert.match(view(unavailable.vt), /\[ERROR\]/)
-  assert.match(view(unavailable.vt), /error: no job controller/)
+  assert.match(view(unavailable.vt), /Error: no job controller/)
   assert.equal(unavailable.observation.records.length, 0, 'a refused open never acquired an observer')
 })
 
@@ -513,7 +515,8 @@ test('D-08 80x24 with no real metadata grows no blank row and keeps the bounded 
   assert.match(bar, /Retained preview · not full history/, 'the compact-width bar keeps the bounded disclosure')
   assert.ok(!/rows \d+-\d+\/40/.test(bar),
     'the bar may drop the position when the row is tight — the disclosure never is')
-  assert.ok(!/─ Retained preview/.test(view(harness.vt)), 'no dedicated facts row at this size')
+  assert.equal(plainRows(harness.vt).filter(row => /Retained preview/.test(row)).length, 1,
+    'no dedicated facts row at this size — the pinned Action Bar is the only disclosure row')
   assertRowWidths(harness.vt, 80)
 })
 
@@ -547,7 +550,7 @@ test('D-10 44x5 with a live Find keeps the SearchRow and one body row, and the t
   await settle(harness.vt)
   const rows = plainRows(harness.vt)
   assert.equal(rows.length, 5)
-  assert.match(rows[0]!, /JOB\s+job-a · bash/, 'the status title survives')
+  assert.match(rows[0]!, /Job · job-a · bash/, 'the status title survives')
   assert.match(rows[1]!, /Command {2}echo one/, 'the summary keeps its row')
   assert.match(rows[2]!, /Find Output:/, 'the SearchRow is physically visible, directly under the summary')
   assert.ok(/needle alpha|other/.test(rows[3]!), 'the body keeps at least one readable row')
@@ -569,7 +572,7 @@ test('D-11 44x4 keeps status + SearchRow + body + Action Bar, and a live notice 
 
   let rows = plainRows(harness.vt)
   assert.equal(rows.length, 4, 'exactly four physical rows')
-  assert.match(rows[0]!, /JOB\s+job-a · bash/)
+  assert.match(rows[0]!, /Job · job-a · bash/)
   assert.match(rows[1]!, /Find Output:/)
   assert.ok(/needle alpha|other/.test(rows[2]!), 'the body keeps its one row')
   assert.match(rows[3]!, /Esc back/)
@@ -593,7 +596,7 @@ test('D-12 80x2 keeps the status + Action Bar, 80x1 keeps the Action Bar alone, 
   await settle(harness.vt)
   let rows = plainRows(harness.vt)
   assert.equal(rows.length, 2, 'two physical rows')
-  assert.match(rows[0]!, /JOB\s+job-a · bash/)
+  assert.match(rows[0]!, /Job · job-a · bash/)
   assert.match(rows[1]!, /Esc back/)
 
   harness.vt.resize(80, 1)
@@ -606,7 +609,7 @@ test('D-12 80x2 keeps the status + Action Bar, 80x1 keeps the Action Bar alone, 
   // observation is released exactly once.
   harness.vt.sendInput('\x1b')
   await settle(harness.vt)
-  assert.ok(!/JOB\s+job-a/.test(view(harness.vt)), 'Esc leaves the workspace')
+  assert.ok(!/Job · job-a/.test(view(harness.vt)), 'Esc leaves the workspace')
   assert.deepEqual(harness.observation.records.map(record => record.closes), [1],
     'leaving releases the ONE observer exactly once')
   assertRowWidths(harness.vt, 80)
@@ -738,7 +741,7 @@ test('D-17 a press whose painted frame changed before the release never fires', 
   await settle(jobSwap.vt)
   release(jobSwap.vt, tabs, commandCol)
   await flush(6)
-  assert.match(view(jobSwap.vt), /JOB\s+job-b · bash/, 'the NEW Job owns the screen')
+  assert.match(view(jobSwap.vt), /Job · job-b · bash/, 'the NEW Job owns the screen')
   assert.ok(!/Copy All \[C\]/.test(view(jobSwap.vt)), 'the stale press never opens the replaced Job page')
   assert.deepEqual(jobSwap.copied, [], 'and it never copies')
 })
@@ -851,8 +854,8 @@ test('D-16/D-19 the status follows the LIVE theme and every real status keeps it
   await settle(harness.vt)
 
   // running maps to the palette's primary token, in the CURRENT palette.
-  const statusRow = bodyRow(harness.vt, '● RUNNING')
-  const darkDot = harness.vt.getCellFgRgb(statusRow, cellIndexOf(harness.vt, statusRow, '●'))
+  const statusRow = bodyRow(harness.vt, '‣ Running')
+  const darkDot = harness.vt.getCellFgRgb(statusRow, cellIndexOf(harness.vt, statusRow, '‣'))
   assert.equal(darkDot, hexToRgb(currentPalette.primary), 'the running dot uses the live primary token')
 
   // The WHOLE chrome follows the token, not just the dot: the selected tab, the
@@ -879,25 +882,25 @@ test('D-16/D-19 the status follows the LIVE theme and every real status keeps it
   assert.equal(darkChrome.selected, hexToRgb(currentPalette.primary), 'the current tab uses the primary token')
   assert.equal(darkChrome.plain, hexToRgb(currentPalette.textDim), 'the other tab uses the dim token')
   assert.equal(darkChrome.rule, hexToRgb(currentPalette.border), 'the rule uses the border token')
-  assert.equal(darkChrome.bar, hexToRgb(currentPalette.textDim), 'the Action Bar uses the dim token (plan §2.3)')
+  assert.equal(darkChrome.bar, hexToRgb(currentPalette.textMuted), 'the Action Bar uses the muted token (role 13)')
 
   harness.app.applyTheme('light')
   await settle(harness.vt)
-  const lightStatusRow = bodyRow(harness.vt, '● RUNNING')
-  assert.match(plainRows(harness.vt)[lightStatusRow]!, /● RUNNING/, 'the status TEXT survives the switch')
-  assert.equal(harness.vt.getCellFgRgb(lightStatusRow, cellIndexOf(harness.vt, lightStatusRow, '●')),
+  const lightStatusRow = bodyRow(harness.vt, '‣ Running')
+  assert.match(plainRows(harness.vt)[lightStatusRow]!, /‣ Running/, 'the status TEXT survives the switch')
+  assert.equal(harness.vt.getCellFgRgb(lightStatusRow, cellIndexOf(harness.vt, lightStatusRow, '‣')),
     hexToRgb(currentPalette.primary), 'the dot follows the LIGHT palette after the live switch')
   assert.notEqual(hexToRgb(currentPalette.primary), darkDot, 'the two palettes really differ')
   const lightChrome = chromeColors()
   assert.equal(lightChrome.selected, hexToRgb(currentPalette.primary), 'the current tab follows the light palette')
   assert.equal(lightChrome.plain, hexToRgb(currentPalette.textDim), 'the plain tab follows the light palette')
   assert.equal(lightChrome.rule, hexToRgb(currentPalette.border), 'the rule follows the light palette')
-  assert.equal(lightChrome.bar, hexToRgb(currentPalette.textDim), 'the Action Bar follows the light palette')
+  assert.equal(lightChrome.bar, hexToRgb(currentPalette.textMuted), 'the Action Bar follows the light palette')
   assert.notEqual(lightChrome.bar, darkChrome.bar, 'the Action Bar is really repainted, never cached')
 
   // A CUSTOM palette is just as live: every chrome cell takes the custom tokens
   // (the resolved palette is what the renderers read per frame).
-  const custom = { ...darkColors, primary: '#FF2FD0', textDim: '#123456', border: '#00FF66' }
+  const custom = { ...darkColors, primary: '#FF2FD0', textDim: '#123456', textMuted: '#654321', border: '#00FF66' }
   harness.app.applyPalette(custom)
   await settle(harness.vt)
   assert.equal(currentPalette.primary, '#FF2FD0', 'the custom palette really is active')
@@ -905,7 +908,7 @@ test('D-16/D-19 the status follows the LIVE theme and every real status keeps it
   assert.equal(customChrome.selected, hexToRgb('#FF2FD0'), 'the tab follows the CUSTOM primary')
   assert.equal(customChrome.plain, hexToRgb('#123456'), 'the plain tab follows the CUSTOM dim')
   assert.equal(customChrome.rule, hexToRgb('#00FF66'), 'the rule follows the CUSTOM border')
-  assert.equal(customChrome.bar, hexToRgb('#123456'), 'the Action Bar follows the CUSTOM dim')
+  assert.equal(customChrome.bar, hexToRgb('#654321'), 'the Action Bar follows the CUSTOM muted token')
   assert.notEqual(customChrome.selected, lightChrome.selected, 'and it is not a cached light render')
 
   // A failed Job uses the warning token (never a hard-coded red) and an unknown
@@ -913,20 +916,21 @@ test('D-16/D-19 the status follows the LIVE theme and every real status keeps it
   harness.app.applyTheme('dark')
   harness.observation.latest()!.emit({ status: 'failed', text: 'out' })
   await settle(harness.vt)
-  const failedRow = bodyRow(harness.vt, '● FAILED')
-  assert.equal(harness.vt.getCellFgRgb(failedRow, cellIndexOf(harness.vt, failedRow, '●')),
+  const failedRow = bodyRow(harness.vt, '‣ Failed')
+  assert.equal(harness.vt.getCellFgRgb(failedRow, cellIndexOf(harness.vt, failedRow, '‣')),
     hexToRgb(currentPalette.warning), 'taskStatusColor(failed) is the warning token, not a hard-coded red')
   // Every real terminal status keeps its OWN token (completed = dim, killed =
-  // warning) and its own word; an unknown wire status never crashes.
+  // warning) and its own Title Case word; an unknown wire status renders as
+  // itself and never crashes.
   for (const [status, token, word] of [
-    ['completed', currentPalette.textDim, 'COMPLETED'],
-    ['killed', currentPalette.warning, 'KILLED'],
-    ['future-status', currentPalette.textMuted, 'FUTURE-STATUS'],
+    ['completed', currentPalette.textDim, 'Completed'],
+    ['killed', currentPalette.warning, 'Killed'],
+    ['future-status', currentPalette.textMuted, 'future-status'],
   ] as const) {
     harness.observation.latest()!.emit({ status, text: 'out' })
     await settle(harness.vt)
-    const row = bodyRow(harness.vt, `● ${word}`)
-    assert.equal(harness.vt.getCellFgRgb(row, cellIndexOf(harness.vt, row, '●')), hexToRgb(token),
+    const row = bodyRow(harness.vt, `‣ ${word}`)
+    assert.equal(harness.vt.getCellFgRgb(row, cellIndexOf(harness.vt, row, '‣')), hexToRgb(token),
       `taskStatusColor(${status}) must be the ${word} token`)
   }
 })
@@ -947,7 +951,7 @@ test('D-20 CJK/wide identity and label stay terminal-cell exact at 120x40, 200x6
     assertRowWidths(harness.vt, width)
     const tabs = bodyRow(harness.vt, '[Output]  Command')
     assert.match(plainRows(harness.vt)[tabs]!, /^\[Output\] {2}Command ─+$/, 'the rule fills the row exactly')
-    assert.match(view(harness.vt), /● RUNNING/)
+    assert.match(view(harness.vt), /‣ Running/)
     harness.app.dispose()
     startedApps.delete(harness.app)
   }
@@ -1024,8 +1028,8 @@ test('D-23 a hostile label is sanitized on the NEW header rows and never reaches
   assert.ok(!stream.includes('UFdORUQ='), 'no Host clipboard payload reaches the terminal stream')
   assert.ok(!stream.includes('\u009b'), 'no raw C1 control byte reaches the terminal stream')
   assert.match(view(harness.vt), /Command {2}echo ok/, 'the summary shows the sanitized label')
-  assert.match(view(harness.vt), /progress: echo ok/, 'the metadata row shows the sanitized progress')
-  assert.match(view(harness.vt), /detail: echo ok/, 'the metadata row shows the sanitized detail')
+  assert.match(view(harness.vt), /Progress: echo ok/, 'the metadata row shows the sanitized progress')
+  assert.match(view(harness.vt), /Detail: echo ok/, 'the metadata row shows the sanitized detail')
   assert.ok(!/\]52;c;|\[2J/.test(view(harness.vt)), 'no escape payload text leaks into the painted chrome')
 
   // The official bytes still reach the Command copy verb untouched.

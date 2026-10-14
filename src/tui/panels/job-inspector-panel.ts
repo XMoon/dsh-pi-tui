@@ -39,7 +39,7 @@
 
 import { Text, VStack, matchesKey, truncateToWidth, visibleWidth, type Component } from '@xmoon76/pi-tui'
 import { componentKeymap } from '../keybindings/component-keymap.ts'
-import { formatKeyId } from '../keybindings/hints.ts'
+import { formatHintKeys, formatKeyId } from '../keybindings/hints.ts'
 import { renderActionBarRow, type ActionBarSegment } from '../presentation/action-bar.ts'
 import { sanitizedPhysicalLine } from '../presentation/lines.ts'
 import { color, taskStatusColor } from '../theme/runtime.ts'
@@ -365,7 +365,7 @@ const markerTokens = (view: JobInspectorView): string[] => [
 const paintMarker = (marker: string): string =>
   marker === '[GAP]' ? color.warning(marker)
     : marker === '[ERROR]' ? color.error(marker)
-      : color.textDim(marker)
+      : color.textMuted(marker)
 
 /** Whether the view carries real metadata worth the ONE metadata row (plan §3.2
  *  step 8): a progress, a detail, a follow-stream error or the retained-window
@@ -374,35 +374,61 @@ const paintMarker = (marker: string): string =>
 const metadataAvailable = (view: JobInspectorView): boolean =>
   view.progress !== undefined || view.detail !== undefined || view.observationError !== undefined || view.gapBefore
 
-/** The reading-facts text of the CURRENT page: the page's own disclosure plus
- *  the real viewport position (the note alone while the body has no position). */
-const readingFactsText = (
+/** The display word of one wire status (design language §4.1): Title Case, with
+ *  the raw wire value as the fallback, so a future status renders as itself
+ *  instead of a blank or a throw. */
+const STATUS_WORDS: Record<string, string> = {
+  running: 'Running',
+  stopping: 'Stopping',
+  completed: 'Completed',
+  failed: 'Failed',
+  killed: 'Killed',
+  timed_out: 'Timed out',
+  lost: 'Lost',
+}
+
+/** The ONE status marker of the family (design language §4.1, D5+D7): `‣` is
+ *  EAW neutral and one cell wide, and the same marker is used for EVERY status —
+ *  no per-status glyph set. The WORD carries the state; the marker anchors it. */
+const STATUS_MARKER = '‣'
+
+/** The reading-facts text of the CURRENT page, split so the row can place the
+ *  disclosure on the left and the real viewport position on the right. */
+const readingFactsParts = (
   note: string,
   position: { readonly start: number; readonly end: number; readonly total: number },
-): string => position.total > 0 ? `${note} · rows ${position.start}-${position.end}/${position.total}` : note
+): { readonly note: string; readonly position?: string } =>
+  position.total > 0 ? { note, position: `rows ${position.start}-${position.end}/${position.total}` } : { note }
 
 /** `${lead}${gap}${affordance}` with the affordance right-aligned on the row.
  *  Returns the painted line, the cell where the lead's own painted text ends and
  *  the affordance's exact cell span. `leadEnd` is a HIT range, so when the row had
  *  to truncate the lead the synthetic trailing `…` is excluded: it is the
- *  truncation marker, never a label cell (the same rule as the reading tabs). */
+ *  truncation marker, never a label cell (the same rule as the reading tabs).
+ *
+ *  The affordance YIELDS to its content (design language §8, last step): it is
+ *  painted only while the WHOLE lead fits beside it, because a truncated
+ *  affordance would cost the reader the very content it points at. When it
+ *  yields, NO span is published — a dropped affordance must not leave a dead
+ *  click region behind. */
 const withTrailingAffordance = (
   lead: string,
   affordance: string,
   width: number,
 ): { readonly line: string; readonly leadEnd: number; readonly span?: { readonly start: number; readonly end: number } } => {
   const affordanceWidth = visibleWidth(affordance)
-  if (affordanceWidth >= width) {
-    const truncated = visibleWidth(lead) > width
+  const leadWidth = visibleWidth(lead)
+  if (affordanceWidth >= width || leadWidth + 1 + affordanceWidth > width) {
+    const truncated = leadWidth > width
     return {
       line: truncateToWidth(lead, width, '…', false),
-      leadEnd: truncated ? Math.max(0, width - 1) : visibleWidth(lead),
+      leadEnd: truncated ? Math.max(0, width - 1) : leadWidth,
     }
   }
   const room = width - affordanceWidth - 1
   const paintedLead = truncateToWidth(lead, room, '…', false)
   const paintedLeadWidth = visibleWidth(paintedLead)
-  const leadEnd = visibleWidth(lead) > room ? Math.max(0, paintedLeadWidth - 1) : paintedLeadWidth
+  const leadEnd = leadWidth > room ? Math.max(0, paintedLeadWidth - 1) : paintedLeadWidth
   const gap = width - paintedLeadWidth - affordanceWidth
   const start = paintedLeadWidth + gap
   return {
@@ -559,18 +585,19 @@ class JobInspectorHeader implements Component {
     return painted
   }
 
-  /** The ONE status title row: the fixed `JOB` identity, then the status dot and
-   *  the UPPERCASE status with the independent fact markers. The status and its
+  /** The ONE status title row: the `Job` identity, then the status word with the
+   *  ONE shared marker and the independent fact markers. The status group and its
    *  markers are laid out FIRST, so a long Job identity can only ever truncate
    *  itself (plan §2.1 / §3.1). */
   private statusLine(width: number): string {
     const view = this.view
     const paintStatus = taskStatusColor(view.status)
-    let right = paintStatus(`● ${chromeText(view.status).toUpperCase()}`)
+    let right = paintStatus(`${STATUS_MARKER} ${STATUS_WORDS[view.status] ?? chromeText(view.status)}`)
     for (const marker of markerTokens(view)) {
       if (visibleWidth(right) + visibleWidth(marker) + 1 <= width) right += ` ${paintMarker(marker)}`
     }
-    const identity = `${color.textStrong('JOB')}  ${color.textMuted(chromeText(view.jobId))} ${color.textDim(`· ${chromeText(view.kind)}`)}`
+    // Identity (role 1) + trail (role 2): `Job · job-a · bash`.
+    const identity = `${color.textStrong('Job')}${color.textDim(` · ${chromeText(view.jobId)} · ${chromeText(view.kind)}`)}`
     const room = width - visibleWidth(right) - 1
     if (room < 1) return truncateToWidth(right, width, '…', false)
     const lead = truncateToWidth(identity, room, '…', false)
@@ -587,17 +614,25 @@ class JobInspectorHeader implements Component {
   private metadataLine(width: number): string {
     const view = this.view
     const meta: string[] = []
-    if (view.progress !== undefined) meta.push(color.textDim(`progress: ${chromeText(view.progress)}`))
-    if (view.detail !== undefined) meta.push(color.textDim(`detail: ${chromeText(view.detail)}`))
+    if (view.progress !== undefined) meta.push(color.textDim(`Progress: ${chromeText(view.progress)}`))
+    if (view.detail !== undefined) meta.push(color.textDim(`Detail: ${chromeText(view.detail)}`))
     const facts: string[] = []
     if (view.gapBefore) facts.push(color.textDim('Earlier output evicted'))
-    if (view.observationError !== undefined) facts.push(color.error(`error: ${chromeText(view.observationError)}`))
+    if (view.observationError !== undefined) facts.push(color.error(`Error: ${chromeText(view.observationError)}`))
     const separator = color.textDim(' · ')
-    const factText = facts.join(color.textDim('   '))
-    if (meta.length === 0) return truncateToWidth(factText, width, '…', false)
-    const factRows = facts.length === 0
-      ? 0
-      : Math.min(visibleWidth(factText), Math.max(0, Math.floor(width / 2)))
+    // The fact group keeps its reserved HALF (plan §2.1: an unbounded progress can
+    // never make an independent marker fact unreachable), but a fact that does not
+    // fit that HALF is dropped WHOLE instead of being cut mid-word (design
+    // language §4.2/§8); only a lone remaining fact truncates.
+    const budget = Math.max(0, Math.floor(width / 2))
+    const fitting: string[] = []
+    for (const fact of facts) {
+      if (fitting.length > 0 && visibleWidth([...fitting, fact].join(color.textDim('   '))) > budget) break
+      fitting.push(fact)
+    }
+    const factText = fitting.join(color.textDim('   '))
+    if (meta.length === 0) return fitting.length === 0 ? '' : truncateToWidth(factText, width, '…', false)
+    const factRows = fitting.length === 0 ? 0 : Math.min(visibleWidth(factText), budget)
     const metaRoom = factRows === 0 ? width : Math.max(0, width - factRows - 3)
     const metaText = truncateToWidth(meta.join(separator), metaRoom, '…', false)
     if (factRows === 0) return metaText
@@ -656,30 +691,41 @@ class JobOutputBody implements Component {
 }
 
 /** The ONE reading-facts row of a standard frame: the current page's own
- *  disclosure plus the real measured viewport position, framed by the themed
- *  rule. It renders ZERO rows whenever the frame grant is zero, so compact
- *  terminals keep the bounded disclosure on the Action Bar instead — the same
- *  fact is never advertised twice (plan §3.3), and it is never advertised as a
- *  complete history. */
+ *  disclosure on the LEFT and the real measured viewport position on the RIGHT.
+ *  It renders ZERO rows whenever the frame grant is zero, so compact terminals
+ *  keep the bounded disclosure on the Action Bar instead — the same fact is never
+ *  advertised twice (plan §3.3), and it is never advertised as a complete
+ *  history. A status line is never flanked by rules (design language §6.2, D6). */
 class JobWorkspaceReadingFactsRow implements Component {
-  private readonly text: (width: number) => string | undefined
+  private readonly parts: (width: number) => { readonly note: string; readonly position?: string } | undefined
   private readonly plan: (width: number) => JobInspectorChromePlan
 
-  constructor(text: (width: number) => string | undefined, plan: (width: number) => JobInspectorChromePlan) {
-    this.text = text
+  constructor(parts: (width: number) => { readonly note: string; readonly position?: string } | undefined, plan: (width: number) => JobInspectorChromePlan) {
+    this.parts = parts
     this.plan = plan
   }
 
   render(width: number): string[] {
     if (this.plan(width).readingFactsRows === 0) return []
-    const text = this.text(width)
-    if (text === undefined || text === '') return []
-    const painted = color.textDim(text)
-    const room = width - visibleWidth(text) - 2
-    if (room < 0) return [truncateToWidth(painted, width, '…', true)]
-    const lead = Math.floor(room / 2)
-    const tail = room - lead
-    return [`${color.border('─'.repeat(lead))} ${painted} ${color.border('─'.repeat(tail))}`]
+    const parts = this.parts(width)
+    if (parts === undefined) return []
+    const positionText = parts.position
+    const note = parts.note === '' ? undefined : color.textDim(parts.note)
+    const position = positionText === undefined ? undefined : color.textMuted(positionText)
+    // A GRANTED row is never left empty (the frame reserved it): a lone position
+    // is right-aligned, a lone note is left-aligned and truncatable.
+    if (note === undefined && position === undefined) return []
+    if (note === undefined) {
+      return [`${' '.repeat(Math.max(0, width - visibleWidth(positionText!)))}${position}`]
+    }
+    if (positionText === undefined) return [truncateToWidth(note, width, '…', true)]
+    // The right-aligned position yields to the disclosure when both cannot fit,
+    // and never cuts a word: the pair degrades to one joined, truncatable line.
+    if (visibleWidth(parts.note) + 1 + visibleWidth(positionText) > width) {
+      return [truncateToWidth(color.textDim(`${parts.note} · ${positionText}`), width, '…', true)]
+    }
+    const gap = width - visibleWidth(parts.note) - visibleWidth(positionText)
+    return [`${note}${' '.repeat(gap)}${position}`]
   }
 
   invalidate(): void {
@@ -768,34 +814,37 @@ class JobInspectorActionBar implements Component {
       : []
     if ('command' in facts) {
       const segments: ActionBarSegment[] = []
-      segments.push({ text: 'Esc output', priority: 7 })
-      if (!facts.searchActive) segments.push({ text: 'C copy all', priority: 6 })
+      if (!facts.searchActive) segments.push({ text: 'c copy all', priority: 6 })
       if (!facts.readingFacts) {
         segments.push({ text: COMMAND_FULL_NOTE, priority: 5 })
         segments.push(...position)
       }
       segments.push(...findSegment)
       if (pageHint) segments.push({ text: PAGE_HINT, priority: 0.1 })
-      return [color.textDim(renderActionBarRow(segments, width))]
+      // `Esc` is the LAST segment (design language §7.2, D8) while keeping the
+      // highest drop priority, so it is never the thing a tight row loses.
+      segments.push({ text: 'Esc output', priority: 7 })
+      return [color.textMuted(renderActionBarRow(segments, width))]
     }
-    // Retention priority: Esc, Stop, Follow, GAP, disclosure, position, Find,
-    // then the two B1-C verbs and finally the pure browsing hint (they are the
-    // ONLY segments a tight row may drop before the pre-existing truth).
+    // Drop order: Stop, Follow, GAP, the disclosure and position, Find, then the
+    // two B1-C verbs and finally the pure browsing hint (they are the ONLY
+    // segments a tight row may drop before the pre-existing truth). `Esc` carries
+    // the highest priority and is painted LAST.
     const segments: ActionBarSegment[] = []
-    segments.push({ text: 'Esc back', priority: 7 })
-    const stopKey = componentKeymap.keyHint('tasks.stop')
+    const stopKey = componentKeymap.keyHint('tasks.stop') ?? ''
     if (!facts.searchActive && this.canStop() && stopKey !== '') {
       // B1-A's own compaction: when both effective Stop keys are advertised and
       // the row is tight, the primary key alone still names the real action.
+      const stopHint = formatHintKeys(stopKey)
       const primaryKey = componentKeymap.keysFor('tasks.stop')[0]
-      const short = primaryKey === undefined ? undefined : `${formatKeyId(primaryKey)} stop`
-      segments.push({ text: `${stopKey} stop`, ...(short === undefined || short === `${stopKey} stop` ? {} : { short }), priority: 6 })
+      const short = primaryKey === undefined ? undefined : `${formatHintKeys(formatKeyId(primaryKey))} stop`
+      segments.push({ text: `${stopHint} stop`, ...(short === undefined || short === `${stopHint} stop` ? {} : { short }), priority: 6 })
     }
     segments.push(facts.follow
-      ? { text: 'Follow ON', priority: 5 }
+      ? { text: 'Follow on', priority: 5 }
       : facts.searchEditing
-        ? { text: 'Follow PAUSED', priority: 5 }
-        : { text: 'Follow PAUSED · End resume', short: 'Follow PAUSED', priority: 5 })
+        ? { text: 'Follow paused', priority: 5 }
+        : { text: 'Follow paused · End resume', short: 'Follow paused', priority: 5 })
     if (facts.gap) segments.push({ text: '[GAP]', priority: 4 })
     // The dedicated facts row already discloses the bounded preview and the real
     // viewport position: the bar must never advertise them twice (plan §3.3).
@@ -812,11 +861,14 @@ class JobInspectorActionBar implements Component {
     // array-order-dependent: the Command entry outranks the Output copy verb, so
     // a row wide enough for one verb advertises the read-only page entry.
     if (!facts.searchActive) {
-      if (facts.canCopyOutput) segments.push({ text: 'C copy output', priority: 0.5 })
-      if (facts.canViewCommand) segments.push({ text: 'V command', priority: 0.6 })
+      if (facts.canCopyOutput) segments.push({ text: 'c copy output', priority: 0.5 })
+      if (facts.canViewCommand) segments.push({ text: 'v command', priority: 0.6 })
     }
     if (pageHint) segments.push({ text: PAGE_HINT, priority: 0.1 })
-    return [color.textDim(renderActionBarRow(segments, width))]
+    segments.push({ text: 'Esc back', priority: 7 })
+    // Role 13: hints are the WEAKEST readable ink so the bar never competes with
+    // the output it describes.
+    return [color.textMuted(renderActionBarRow(segments, width))]
   }
 
   invalidate(): void {
@@ -847,7 +899,10 @@ class JobInspectorNoticeRow implements Component {
     // so it crosses the SAME display boundary as the header BEFORE the theme's
     // own styling is applied.
     const text = chromeText(live.text)
-    const line = live.kind === 'info' ? color.textDim(`ℹ ${text}`) : color.error(`✗ ${text}`)
+    // Role 17: an info notice is the weakest readable ink (`textMuted`), an error
+    // notice is `error`; the `ℹ`/`✗` prefixes are the glyph inventory's notice
+    // prefixes (design language §4.4/§4.5).
+    const line = live.kind === 'info' ? color.textMuted(`ℹ ${text}`) : color.error(`✗ ${text}`)
     return [truncateToWidth(line, width, '…', true)]
   }
 
@@ -996,13 +1051,18 @@ export class JobInspectorPanel extends VStack {
       searchRowVisible: (width) => readState.view === 'command' && plan(width).searchRows === 1,
     })
     holders.commandReader = commandReader
-    /** The reading-facts text of the CURRENT page: the page's disclosure plus the
-     *  real measured viewport position, or undefined when the page shows none. */
-    const readingFacts = (width: number): string | undefined => {
+    /** The reading facts of the CURRENT page: the page's disclosure plus the real
+     *  measured viewport position, or undefined when the page shows none. */
+    const readingFacts = (width: number): { readonly note: string; readonly position?: string } | undefined => {
       if (readState.view === 'command') {
-        return readingFactsText(COMMAND_FULL_NOTE, positionFacts(commandReader.search, commandReader.scroll, width))
+        const position = positionFacts(commandReader.search, commandReader.scroll, width)
+        // The Command page's summary row already states `Full command`, so the
+        // status line does not state it a second time (design language §7.3) — it
+        // carries only the real position, and falls back to the note when there
+        // is no position so the granted row is never empty.
+        return readingFactsParts(position.total > 0 ? '' : COMMAND_FULL_NOTE, position)
       }
-      return readingFactsText(RETAINED_NOTE, positionFacts(search, scrollView, width))
+      return readingFactsParts(RETAINED_NOTE, positionFacts(search, scrollView, width))
     }
     const bar = new JobInspectorActionBar(intents.canStop, (width) => {
       const frame = plan(width)

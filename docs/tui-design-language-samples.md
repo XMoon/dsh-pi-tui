@@ -11,11 +11,11 @@
 > `TuiApp` + `VirtualTerminal` composition at commit `7ccaa20a` and read back
 > from the terminal cells (§1).
 >
-> **The Settings AFTER frames are REAL product output at the Settings PR**
-> (`feat/tui-settings-visual-language`), captured the same way as the BEFORE
-> frames. **The Job AFTER frames are still design targets**, hand-laid against
-> the frozen spec and painted with the real theme tokens: the Job panel lands in
-> its own PR, and its after-frames must be regenerated the same way then.
+> **An AFTER frame is real product output at the PR that landed its panel**,
+> captured exactly like the BEFORE side. A surface whose PR has not landed yet
+> still shows a hand-laid design target painted with the real theme tokens; each
+> frame block says which it is, and the label is derived from whether the capture
+> really exists.
 >
 > A real-terminal review of the implemented Settings frames is still an Owner
 > acceptance item (`NOT_RUN` here): this document is the VirtualTerminal
@@ -399,7 +399,7 @@ line 040
 ────────────────────────────────── Retained preview · not full history · rows 7-40/40 ──────────────────────────────────
 Esc back | S / Shift+S stop | Follow ON | Find Ctrl+F / Ctrl+Shift+F / | C copy output | V command | PgUp/PgDn
 ```
-**AFTER — target (real tokens)**
+**AFTER — real output at this HEAD**
 
 ```text
 Job · job-a · bash                                                                                             ‣ Running
@@ -441,7 +441,7 @@ line 038
 line 039
 line 040
 Retained preview · not full history                                                                         rows 7-40/40
-s stop · Follow on · Find Ctrl+F · c copy output · v command · PgUp/PgDn · Esc back
+s / Shift+S stop · Follow on · Find Ctrl+F / Ctrl+Shift+F / · c copy output · v command · PgUp/PgDn · Esc back
 ```
 The tab strip is deliberately unchanged: `[Output]` in bold `primary` is the device the Settings pane focus now adopts. What changes: the header identity, the status word, the meta labels, and the facts row (whose two flanking rules are removed — the disclosure becomes a dim status line with the position right-aligned).
 
@@ -472,11 +472,11 @@ build failed
 ────────────────────────────────── Retained preview · not full history · rows 1-13/13 ──────────────────────────────────
 Esc back | Follow ON | [GAP] | Find Ctrl+F / Ctrl+Shift+F / | C copy output | V command | PgUp/PgDn
 ```
-**AFTER — target (real tokens)**
+**AFTER — real output at this HEAD**
 
 ```text
 Job · job-a · bash                                                                              ‣ Failed [GAP] [SETTLED]
-Progress: 3/8 checks · Detail: Building components · Earlier output evicted
+Earlier output evicted
 Command  pnpm build && pnpm test:product                                                                       ↗ Command
 [Output]  Command ──────────────────────────────────────────────────────────────────────────────────────────────────────
 line 001
@@ -494,7 +494,7 @@ line 012
 build failed
 ⋮
 Retained preview · not full history                                                                         rows 1-13/13
-Follow on · [GAP] · Find Ctrl+F · c copy output · v command · PgUp/PgDn · Esc back
+Follow on · [GAP] · Find Ctrl+F / Ctrl+Shift+F / · c copy output · v command · PgUp/PgDn · Esc back
 ```
 `● FAILED [GAP] [SETTLED]` becomes `‣ Failed [GAP] [SETTLED]`: the word is the signal, the colour is secondary, and `●` (U+25CF, East-Asian-Width *ambiguous*) is replaced by the EAW-neutral `‣` (U+2023), which keeps a one-cell glyph anchor without risking a two-cell paint on CJK-width terminals (Owner amendment to D5). The bracketed machine markers stay uppercase — that is the role ALL-CAPS keeps. Note the bar correctly advertises no Stop for a settled job in both frames.
 
@@ -513,7 +513,7 @@ pnpm build && pnpm test:product
 ────────────────────────────────────────────── Full command · rows 1-1/1 ───────────────────────────────────────────────
 Esc output | C copy all | Find Ctrl+F / Ctrl+Shift+F / | PgUp/PgDn
 ```
-**AFTER — target (real tokens)**
+**AFTER — real output at this HEAD**
 
 ```text
 Job · job-a · bash                                                                                             ‣ Running
@@ -521,11 +521,9 @@ Progress: 3/8 checks · Detail: Building components
 Full command                                                                                                Copy All [C]
 Output  [Command] ──────────────────────────────────────────────────────────────────────────────────────────────────────
 pnpm build && pnpm test:product
-
-  --watch would go here, wrapped by the reader
 ⋮
-rows 1-1/1
-c copy all · Find Ctrl+F · PgUp/PgDn · Esc output
+                                                                                                              rows 1-1/1
+c copy all · Find Ctrl+F / Ctrl+Shift+F / · PgUp/PgDn · Esc output
 ```
 The page label `Full command` is stated once (summary row) instead of twice (summary row *and* status line); the status line keeps only the real position fact. `Copy All [C]` already follows the target affordance grammar (`Verb [Key]`).
 
@@ -546,7 +544,7 @@ line 039
 line 040
 Esc back | S stop | Follow ON | Retained preview · not full history
 ```
-**AFTER — target (real tokens)**
+**AFTER — real output at this HEAD**
 
 ```text
 Job · job-a · bash                                                     ‣ Running
@@ -589,7 +587,7 @@ line 039
 line 040
 Esc back | S stop | Follow ON
 ```
-**AFTER — 60×20 target (real tokens)**
+**AFTER — real output at this HEAD**
 
 ```text
 Job · job-a · bash                                 ‣ Running
@@ -638,7 +636,7 @@ line 039
 line 040
 Esc back | S stop | Follow ON
 ```
-**AFTER — 44×20 target (real tokens)**
+**AFTER — real output at this HEAD**
 
 ```text
 Job · job-a · bash                 ‣ Running
@@ -771,6 +769,22 @@ refused-write path inside a live session (it needs a forced authority conflict;
 the refusal ink is covered by the `VirtualTerminal` cell read-back in
 `test/settings-workspace-visual.test.ts`), CJK/wide-glyph terminals, and any
 terminal other than this one. Those stay `NOT_RUN`, not PASS.
+
+### 7.1 The Job workspace side is NOT_RUN for this revision
+
+Opening the Job workspace needs a LIVE Host job: it is reached from the Task
+Browser, and a sessionless TUI has no jobs. The agent turn started for this
+check produced no job inside the observation window, and the Client-local `!`
+shell does not register one. Recipe for the Owner, on a profile with a real
+session that ran a `bash` tool call: open `/tasks`, press Enter on the job row,
+then check `Job · <id> · <kind>`, the `‣ Running` / `‣ Failed` status, the
+UNFLANKED reading-facts row (disclosure left, `rows a-b/N` right), the bar
+(`s / Shift+S stop … Esc back`) and the affordance yield at 44 columns.
+
+What that leaves covered: the Job frames' text and per-cell ink in this
+document come from the `VirtualTerminal` cell read-back, and the SHARED chrome
+the Job bar reuses (rules budget, glyph widths, ` · ` joins, `Esc` last, a
+`textMuted` bar) was verified on a real terminal in the Settings PR.
 
 ## 8. Re-verification recipe
 
