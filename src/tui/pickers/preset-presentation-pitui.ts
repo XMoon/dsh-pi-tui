@@ -11,12 +11,29 @@
  * @module tui/pickers/preset-presentation-pitui
  */
 import type { PresetPresentation, PresetPickerRoster } from '../../app/command/preset-presentation.ts'
-import type { SettingValuePart } from '@xmoon76/pi-tui'
+import { visibleWidth, type SettingValuePart } from '@xmoon76/pi-tui'
 import { abbreviateName } from './name-label.ts'
 import { safeErrorMessage } from '../../runtime/process/errors.ts'
 import type { TuiApp } from '../../tui-app.ts'
 import { color } from '../theme/runtime.ts'
 import { isBuiltInPresetRow, presetDisplayText } from './preset-display.ts'
+
+/**
+ * The row LABEL for one preset: the ID is what a user types (`/preset <id>`), so it
+ * stays WHOLE whenever the 25-cell label column at the 44-column floor can hold it —
+ * only the friendly name is abbreviated into what is left. When even the ` (id)`
+ * suffix cannot fit, the ID alone is abbreviated head…tail, so the row still ends on
+ * the part that tells two ids apart. The complete `name (id)` always leads the
+ * SELECTED row's description.
+ */
+function presetLabelOf(name: string, id: string): string {
+  const limit = 25
+  const suffix = ` (${id})`
+  if (visibleWidth(suffix) <= limit) {
+    return `${abbreviateName(name, Math.max(4, limit - visibleWidth(suffix)))}${suffix}`
+  }
+  return abbreviateName(id, limit)
+}
 
 export function pituiPresetPresentation(app: TuiApp): PresetPresentation {
   return {
@@ -74,7 +91,10 @@ export function pituiPresetPresentation(app: TuiApp): PresetPresentation {
                 // reserves one 9-cell state chip (40 - 9 - 6). The selected row's
                 // description leads with the COMPLETE `name (id)` identity, so a
                 // pair of long same-prefix names can never be indistinguishable.
-                label: abbreviateName(`${display.name} (${preset.id})`, 25),
+                // The preset ID is what the user types (`/preset <id>`), so it must
+                // stay WHOLE in the label: only the friendly name is abbreviated,
+                // into whatever the 25-cell column leaves after the ` (id)` suffix.
+                label: presetLabelOf(display.name, preset.id),
                 description: [
                   `${display.name} (${preset.id})`,
                   display.description,
