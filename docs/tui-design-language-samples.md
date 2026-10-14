@@ -633,7 +633,7 @@ line 039
 line 040
 s stop · Follow on · Esc back
 ```
-At 44 columns the BEFORE frame cuts the command to `pnpm build && pnpm test:…` so that the `↗ Command` affordance can fit. The target drops the affordance instead (the summary row is itself clickable, and `v command` stays advertised), so the command fits in full. This is the "an affordance yields to its content" rule.
+At 44 columns the BEFORE frame cuts the command to `pnpm build && pnpm test:…` so that the `↗ Command` affordance can fit. The target drops the affordance instead (the summary row is itself clickable, so the command fits in full; `v command` is NOT advertised at 44 columns because the bar dropped it by priority — the command page stays reachable through the clickable summary row). This is the "an affordance yields to its content" rule.
 
 
 ### 4.6 Job change list
