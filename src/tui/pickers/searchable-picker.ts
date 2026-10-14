@@ -132,7 +132,9 @@ export interface SearchablePickerItem {
   badge?: string
   /**
    * The PARTS of `badge` when the caller can supply them (the caller derives
-   * both from ONE array: `badge` is the parts joined with ` · `). The
+   * both from ONE array: `badge` is the parts joined by `joinBadgeParts` (two
+   * ADJACENT state chips a single space apart, every other boundary ` · `), and
+   * the opt-in
    * `wrap-when-needed` left-trim then drops WHOLE parts and never has to
    * reverse-engineer boundaries from the joined text, so a part whose own
    * text contains ` · ` (e.g. an effort name) is never torn apart. A `chip`
