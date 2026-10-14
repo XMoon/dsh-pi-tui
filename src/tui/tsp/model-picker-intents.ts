@@ -16,6 +16,7 @@
 import type { Key, ScrollTo } from '@stencil-hq/tern'
 import {
   FAILURE_RETRY_ID,
+  retryRowOffered,
   applyOffered,
   draftedEffort,
   actionBase,
@@ -176,18 +177,15 @@ export function keyIntent(panel: ModelPickerPanel, key: Key): ModelPickerIntent 
     // it (and closing the whole panel there would drop the page context the
     // origin can restore).
     if (panel.page === 'details' && panel.phase !== 'pending') return { kind: 'back' }
-    // Esc is NEVER swallowed. An admitted write, a running (re-)read and a failed
-    // read all leave the close action as the only reachable one, and in the failed
-    // read the zone/page Esc would return to is inert (`tabZone` keeps the keyboard
-    // in the bar for exactly that reason), so all three close instead of parking
-    // the keyboard where no key acts.
-    if (panel.phase === 'pending' || panel.phase === 'loading' || panel.phase === 'error') {
-      return { kind: 'close' }
-    }
-    // The action bar returns to the region it was entered FROM, and everywhere else
-    // on the catalogue Esc closes the panel. (The read-only Reader's own Esc was
-    // handled above, where its visible `Back` row shares the intent.)
-    if (panel.zone === 'primary-action') return { kind: 'zone', zone: panel.previousZone ?? 'models' }
+    // An admitted write owns the panel: it is the one state whose only reachable
+    // action is its dismissal, so Esc closes rather than editing anything.
+    if (panel.phase === 'pending') return { kind: 'close' }
+    // The Owner's ladder for the catalogue: `Esc` clears the SEARCH FILTER first and
+    // closes the panel only once there is nothing left to clear. It is never swallowed
+    // and needs no zone bookkeeping — the zone ring is how the keyboard moves between
+    // the list, the strip and the bar, and it stays reachable while a read runs or has
+    // failed for exactly that reason.
+    if (panel.query !== '') return { kind: 'query', query: '', cursor: 0 }
     return { kind: 'close' }
   }
   // While the read runs the query stays editable (frozen §4.5) and every other
@@ -338,7 +336,7 @@ export function rowIntent(
   // The partial-failure row is the ONE read-only operation row of the catalogue:
   // it routes to the command's existing read owner, never to the writer. It exists
   // only while the current read really reports failures.
-  if (item === FAILURE_RETRY_ID) return panel.failures.length === 0 ? undefined : { kind: 'retry' }
+  if (item === FAILURE_RETRY_ID) return retryRowOffered(panel) ? { kind: 'retry' } : undefined
   // A model row is validated against the VISIBLE rows, so a failure-shaped id can
   // never be read as a model (or the reverse).
   if (!visibleModels(panel).some((row) => modelRowId(row) === item)) return undefined

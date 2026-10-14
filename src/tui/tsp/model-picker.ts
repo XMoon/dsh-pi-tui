@@ -22,6 +22,7 @@ import { PROVIDER_DEFAULT, projectModelDirectory } from '../pickers/model-direct
 import { actionIntent, keyIntent, rowIntent, type ModelPickerIntent } from './model-picker-intents.ts'
 import {
   FAILURE_RETRY_ID,
+  retryRowOffered,
   applyOffered,
   draftedEffort,
   focusedAction,
@@ -101,7 +102,6 @@ export class TspModelPicker {
       cursor: 0,
       selected: undefined,
       actionFocus: undefined,
-      previousZone: undefined,
       notice: undefined,
       readerEpoch: 0,
       directory: undefined,
@@ -336,13 +336,8 @@ export class TspModelPicker {
         this.retry(panel)
         return
       case 'zone': {
-        // Remember where the action bar was entered FROM: Esc must return there
-        // rather than re-deriving a region.
-        if (intent.zone === 'primary-action') {
-          panel.previousZone = panel.zone
-          // The frozen third zone always starts on the Primary Action.
-          panel.actionFocus = 'apply'
-        }
+        // The frozen third zone always starts on the Primary Action.
+        if (intent.zone === 'primary-action') panel.actionFocus = 'apply'
         panel.zone = intent.zone
         this.change(panel)
         return
@@ -353,7 +348,7 @@ export class TspModelPicker {
         // client keeps a disabled row selectable, so the app is what refuses every
         // other shape here.
         const known = visibleModels(panel).some((row) => modelRowId(row) === intent.rowId)
-          || (intent.rowId === FAILURE_RETRY_ID && panel.failures.length > 0)
+          || (intent.rowId === FAILURE_RETRY_ID && retryRowOffered(panel))
         if (!known) return
         panel.selected = intent.rowId
         // Selecting a row is a LIST interaction, so the keyboard follows it: otherwise the
@@ -411,7 +406,6 @@ export class TspModelPicker {
     panel.notice = undefined
     panel.phase = 'pending'
     // Keep the visible Primary Action highlighted while the write settles.
-    panel.previousZone = panel.zone
     panel.zone = 'primary-action'
     panel.actionFocus = 'apply'
     this.change(panel)

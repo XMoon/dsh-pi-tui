@@ -29,6 +29,7 @@ import type { ModelPickerFailureRow } from '../pickers/model-directory.ts'
 import type { ModelPickerIntent } from './model-picker-intents.ts'
 import {
   FAILURE_RETRY_ID,
+  retryRowOffered,
   STRIP_LABEL,
   actionBase,
   actionKeyboardLive,
@@ -117,7 +118,7 @@ function modelOrder(panel: ModelPickerPanel): (string | PickerGroup)[] {
   if (panel.failures.length > 0) {
     order.push({ group: UNAVAILABLE_GROUP_ID, label: UNAVAILABLE_GROUP_LABEL, count: panel.failures.length + 1 })
     for (const failure of panel.failures) order.push(failureRowId(failure.providerId))
-    order.push(FAILURE_RETRY_ID)
+    if (retryRowOffered(panel)) order.push(FAILURE_RETRY_ID)
   }
   return order
 }
@@ -146,7 +147,7 @@ function modelItems(panel: ModelPickerPanel): PickerItem[] {
     ],
   }))
   items.push(...panel.failures.map(failureItem))
-  if (panel.failures.length > 0) items.push({ id: FAILURE_RETRY_ID, label: 'Retry failed providers' })
+  if (retryRowOffered(panel)) items.push({ id: FAILURE_RETRY_ID, label: 'Retry failed providers' })
   return items
 }
 
@@ -199,6 +200,9 @@ function pickerState(panel: ModelPickerPanel): Pick<PickerProps, 'state' | 'mess
   return {
     state: panel.phase === 'loading' ? 'loading' : panel.phase === 'error' ? 'error' : 'ready',
     ...(panel.notice === undefined ? {} : { message: panel.notice.text }),
+    // The client is what paints this (if it paints it at all): MEASURED on the real client, a
+    // search that matches nothing empties the list and draws NO copy, so one honest sentence
+    // covers the state the string can describe.
     empty: 'No model is advertised by the configured providers.',
   }
 }

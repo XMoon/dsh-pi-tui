@@ -160,7 +160,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   switching the whole model needs no second page; a row click only moves the
   highlight, and clicking the highlighted row (or `Enter`) opens that model's
   read-only **Full details** page directly: there is no intermediate page and no
-  second-level effort menu. The catalogue, its layer and that page now keep ONE node
+  second-level effort menu. `Esc` follows one ladder on the catalogue: it clears a typed
+  SEARCH first (the panel stays open with the query emptied, and the keyboard stays in the
+  zone it was in) and closes only once there is nothing left to clear — in the list, the
+  effort strip and the action bar alike, with `Tab`/`Shift+Tab` moving between the zones.
+  A read that fails as a whole leaves exactly ONE Retry (the bar's): the list's partial-failure
+  row exists only while the catalogue is really ready, and its failure information stays as
+  read-only context. The catalogue, its layer and that page now keep ONE node
   identity for the panel's whole life (a per-frame id made the client remount the list,
   which moved the whole viewport when a lower model was clicked), so the native scrollbar
   and wheel stay available and clicking a visible row no longer moves the viewport. The notice at the top of that page is now inked by what it

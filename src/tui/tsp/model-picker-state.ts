@@ -75,9 +75,6 @@ export interface ModelPickerPanel {
    * last enabled action, so entering the zone always lands on a live entry.
    */
   actionFocus: string | undefined
-  /** The zone the keyboard came from when it entered the action bar (Esc returns
-   *  there instead of guessing). */
-  previousZone: ModelPickerZone | undefined
   /** How many times the read-only Reader has been OPENED on this panel. One identity per
    *  READING: a re-render must not move the Reader's node ids (a per-frame key made the
    *  client remount its scroll container), but a NEW reading gets fresh ones, so a `scroll`
@@ -154,12 +151,26 @@ export function stripItemParts(id: string): { readonly rowId: string; readonly v
   return at <= 0 ? undefined : { rowId: rest.slice(0, at), value: rest.slice(at + 1) }
 }
 
+/**
+ * Whether the catalogue's READ-ONLY retry ROW is part of the list right now.
+ *
+ * A partial read leaves failed providers behind, and that row is how the user asks for them
+ * again. It belongs to a catalogue that is really showing its content (`ready`): when a read
+ * fails as a WHOLE the panel is in `error`, where the action bar is the only operable region —
+ * leaving the row painted, and its event admissible, would offer a SECOND Retry beside the
+ * footer's, reachable with the mouse while the keyboard is refused. The failed providers
+ * themselves stay on screen as read-only context.
+ */
+export function retryRowOffered(panel: ModelPickerPanel): boolean {
+  return panel.phase === 'ready' && panel.failures.length > 0
+}
+
 /** Every row id the catalogue offers, in display order (the group heads are the view's
  *  own insertion into this sequence, so the window counts ROWS). */
 export function catalogueRowIds(panel: ModelPickerPanel): readonly string[] {
   return [
     ...visibleModels(panel).map(modelRowId),
-    ...(panel.failures.length === 0 ? [] : [FAILURE_RETRY_ID]),
+    ...(retryRowOffered(panel) ? [FAILURE_RETRY_ID] : []),
   ]
 }
 

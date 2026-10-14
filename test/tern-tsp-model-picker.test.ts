@@ -717,10 +717,11 @@ test('native Model: the catalogue owns its Reasoning Effort strip and it only dr
   await waitUntil('the bar is the next zone', () => String(actionOf(pane, 'apply')?.label).endsWith('[Enter]'))
   assert.equal(m.writes.length, 1, 'reaching the bar wrote nothing')
   // The read-only Reader paints no picker at all, therefore no strip either.
-  // (Esc and the next key are separated by a real observation: two raw keys in the
-  // same flush would decode as one sequence.)
-  pane.key('\u001b')
-  await waitUntil('the bar released the keyboard', () => !String(actionOf(pane, 'apply')?.label).endsWith('[Enter]'))
+  // (The ring key and the next key are separated by a real observation: two raw keys
+  // in the same flush would decode as one sequence.) `Esc` no longer returns anywhere —
+  // it clears a filter or closes — so the bar is left with the ring itself.
+  pane.key('\t')
+  await waitUntil('the ring released the bar', () => !String(actionOf(pane, 'apply')?.label).endsWith('[Enter]'))
   await enterDetails(pane)
   assert.equal(props(pane).strip ?? undefined, undefined, 'the read-only Reader carries no strip of its own')
   assert.equal(m.writes.length, 1)
@@ -1448,23 +1449,70 @@ test('official Direct Agent: native /model makes exactly one durable Session sel
 
 /* ---------------------------------------------------------------- K2/zone map */
 
-test('native Model: Esc returns to the zone and page it came from', async (t) => {
+test('native Model: Esc clears the search filter first, then closes', async (t) => {
+  // The Owner's ladder, and it holds in EVERY catalogue zone: a typed filter is what `Esc`
+  // clears, and only a second `Esc` (with nothing left to clear) dismisses the panel. The zone
+  // ring — `Tab`/`Shift+Tab` — is how the keyboard moves between the list, the strip and the
+  // bar, so `Esc` never has to return anywhere. This is the reviewer's directed case for the
+  // frozen K2 table: from the STRIP, `Esc` with a filter clears it and leaves the panel open.
   const m = await mounted(t)
   await m.ready()
   const { pane } = m
-  // models -> Primary (Shift+Tab) -> Esc must not invent the effort zone.
-  pane.key('\u001b[Z')
-  await waitUntil('primary from the model list', () => String(actionOf(pane, 'apply')?.label).endsWith('[Enter]'))
+  // A filter that still matches: with an EMPTY list there is no highlighted model, so the
+  // strip would not be offered and the keyboard could not reach it.
+  pane.key('win')
+  await waitUntil('the filter is typed', () => props(pane).query === 'win')
+  pane.key('\t')
+  await waitUntil('the strip owns the keyboard', () => props(pane).focus === 'strip')
   pane.key('\u001b')
-  await waitUntil('back in the list zone', () => props(pane).focus === 'list')
-  assert.equal(props(pane).focus, 'list')
-  assert.equal(m.writes.length, 0)
-  // The read-only Reader returns to the catalogue it was entered from, and its
-  // `Esc` is the same intent as its visible `Back` row.
-  await enterDetails(pane)
+  await waitUntil('Esc cleared the filter from the strip', () => props(pane).query === '')
+  assert.equal(picker(pane) !== undefined, true, 'the panel is still open')
+  assert.equal(props(pane).focus, 'strip', 'with the keyboard where it was')
+  // Nothing left to clear: the next Esc closes, from whatever zone it is pressed in.
   pane.key('\u001b')
-  await waitUntil('Esc returns to the catalogue', () => onCatalogue(pane))
+  await waitUntil('the second Esc closes the panel', () => picker(pane) === undefined)
   assert.equal(m.writes.length, 0, 'and no key on that path ever wrote')
+  // (The Reader's own `Esc` = its visible `Back` row is unchanged and covered by its own
+  // tests: it has no filter to clear, and closing the panel there would drop the page
+  // context its origin can restore.)
+})
+
+test('native Model: a fully failed read leaves ONE Retry, and it is the bar’s', async (t) => {
+  const m = await mounted(t)
+  await m.ready()
+  const { pane } = m
+  // The PARTIAL read paints its one read-only retry row, and the keyboard can run it while the
+  // catalogue is really showing its content.
+  assert.equal(rowIds(pane).includes(FAILURE_RETRY_ID), true,
+    `the partial read offers its retry row: ${JSON.stringify(rowIds(pane))}`)
+  for (let step = 0; step < 8 && props(pane).selected !== FAILURE_RETRY_ID; step += 1) {
+    pane.key('\u001b[B')
+    await settle(10)
+  }
+  assert.equal(props(pane).selected, FAILURE_RETRY_ID, 'the cursor really reaches it')
+  pane.key('\r')
+  await waitUntil('the row ran the read owner', () => m.retries() === 1)
+  await m.ready()
+  // Now the read fails as a WHOLE. The action bar is the only operable region, so the row must
+  // be gone: leaving it painted, and its event admissible, would offer a SECOND Retry beside
+  // the footer's — reachable with the mouse while the keyboard is refused.
+  m.handle.setLoadError('catalog is unreachable')
+  await waitUntil('the whole read failed', () => props(pane).state === 'error')
+  assert.equal(rowIds(pane).includes(FAILURE_RETRY_ID), false,
+    `no retry row in a failed read: ${JSON.stringify(rowIds(pane))}`)
+  assert.equal(actionIds(pane).includes('retry'), true, 'the bar keeps the ONE Retry')
+  // A stale row event (the id the ready frame used to carry) is inert: it is not part of this
+  // frame, and the panel no longer offers that row.
+  const before = m.retries()
+  sendActivate(pane, FAILURE_RETRY_ID, picker(pane)!.id)
+  browse(pane, FAILURE_RETRY_ID, picker(pane)!.id)
+  await settle(30)
+  assert.equal(m.retries(), before, 'the retired row id cannot start a read')
+  assert.equal(m.writes.length, 0)
+  // The bar's own Retry still works, so the negation above is not vacuous.
+  action(pane, String(actionOf(pane, 'retry')?.id))
+  await waitUntil('the bar ran the read owner', () => m.retries() === before + 1)
+  m.handle.close()
 })
 
 test('native Model: every visible action is keyboard reachable and never a no-op', async (t) => {
@@ -1567,8 +1615,8 @@ test('native Model: the catalogue carries ONE short hint and the other pages car
   await waitUntil('bar focused on the primary', () => focusCue(pane, 'apply'))
   assert.equal(props(pane).subtitle, 'Tab list',
     'from the bar the ONE hint names the list it wraps to, and the badge names the focused action')
-  pane.key('\u001b')
-  await waitUntil('back in the list zone', () => props(pane).focus === 'list')
+  pane.key('\t')
+  await waitUntil('the ring wraps back to the list zone', () => props(pane).focus === 'list')
   // The Reader paints ONE region, so `Tab` is consumed as a no-op instead of
   // promising a second zone; the visible `Back` row is the page's own way out.
   const detailsPane = await mounted(t)
@@ -1725,7 +1773,7 @@ test('native Model: a failed read keeps the keyboard in the one bar it can opera
   details.handle.close()
 })
 
-test('native Model: Loading keeps the search editable, closes on Esc and looks disabled', async (t) => {
+test('native Model: Loading keeps the search editable, and Esc clears that filter first', async (t) => {
   const m = await mounted(t)
   const { pane } = m
   await m.ready()
@@ -1737,7 +1785,10 @@ test('native Model: Loading keeps the search editable, closes on Esc and looks d
   pane.key('b')
   await waitUntil('the query stays editable while loading', () => props(pane).query === 'ab')
   pane.key('\u001b')
-  await waitUntil('Esc always closes a loading panel', () => picker(pane) === undefined)
+  await waitUntil('Esc clears the filter while the read runs',
+    () => props(pane).query === '' && picker(pane) !== undefined)
+  pane.key('\u001b')
+  await waitUntil('and the next Esc closes the loading panel', () => picker(pane) === undefined)
 })
 
 test('native Model: the title states the ONE intent and carries no other global surface', async (t) => {
@@ -2188,8 +2239,8 @@ test('native Model: a model without efforts paints no strip and invents no candi
   )
   pane.key('\t')
   await waitUntil('the bar is the next zone', () => String(actionOf(pane, 'apply')?.label).endsWith('[Enter]'))
-  pane.key('\u001b')
-  await waitUntil('the bar released the keyboard', () => !String(actionOf(pane, 'apply')?.label).endsWith('[Enter]'))
+  pane.key('\t')
+  await waitUntil('the ring released the bar', () => !String(actionOf(pane, 'apply')?.label).endsWith('[Enter]'))
   await enterDetails(pane)
   assert.equal(readerValue(pane, 'reader-model'), 'Twin', 'the Reader still describes that model')
   assert.equal(m.writes.length, 0, 'and nothing wrote')
