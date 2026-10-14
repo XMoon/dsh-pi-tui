@@ -219,7 +219,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the action bar advertises `Tab switch` on both pages, while the mouse paths (a
   tab click, the summary row's `↗ Command` entry) and `Esc output` returning to
   Output are unchanged. While a Find owns the ordinary keys the toggle yields, as
-  it did before.
+  it did before. Copying the current page's exact original moved to a bare `c`
+  (the key that really acted was `Shift+C` while the bar wrote `C`), matching the
+  Settings workspace and the `Copy All [C]` / `Copy value [C]` badges exactly.
 
 ### Fixed
 

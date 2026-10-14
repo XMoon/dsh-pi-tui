@@ -222,7 +222,7 @@ test('C-03 a non-shell kind never grows a Command page or a Command Copy verb', 
   assert.ok(!/Copy All \[C\]/.test(after), '`Tab` cannot open a Command page for a non-shell Job')
   // `C` on the Output page is the INDEPENDENT retained-Output copy: a non-shell
   // Job still copies its retained text, never a fabricated command.
-  harness.panel.handleInput('C')
+  harness.panel.handleInput('c')
   assert.deepEqual(harness.copies, [{ source: 'output', text: 'retained tail' }])
   harness.panel.dispose()
 })
@@ -236,7 +236,7 @@ test('C-04 the opening row is never a Command source: only the observed label op
   assert.ok(!/Tab switch/.test(before), 'the opening row alone does not advertise the page toggle')
   opening.panel.handleInput('\t')
   assert.ok(!/Copy All \[C\]/.test(paint(opening, 120).join('\n')), 'no Command page before the first observation')
-  opening.panel.handleInput('C')
+  opening.panel.handleInput('c')
   assert.deepEqual(opening.copies, [{ source: 'output', text: '', unavailable: 'output-unavailable' }],
     'no Output copy without an observation: the UNAVAILABLE reason is reported so the app can say so')
   opening.panel.dispose()
@@ -249,7 +249,7 @@ test('C-04 the opening row is never a Command source: only the observed label op
   const command = paint(live, 120).join('\n')
   assert.match(command, /Copy All \[C\]/)
   assert.match(command, /Esc output/)
-  live.panel.handleInput('C')
+  live.panel.handleInput('c')
   assert.deepEqual(live.copies, [{ source: 'command-all', text: 'pnpm build --watch' }])
   live.panel.dispose()
 })
@@ -273,7 +273,7 @@ test('C-05/C-06 the Command page owns one body and its own viewport at every bud
     if (budget.width >= 80) {
       assert.match(painted, /Tab switch/, `the symmetric page toggle is advertised on the Command page at ${budget.width}x${budget.rows}`)
     }
-    assert.ok(!/Shift\+C copy output/.test(painted), 'the Output-only copy verb is absent on the Command page')
+    assert.ok(!/c copy output/.test(painted), 'the Output-only copy verb is absent on the Command page')
     assert.ok(!/s stop/.test(painted), 'the Stop segment is absent on the Command page')
     assert.ok(!/Follow on|Follow paused/.test(painted), 'the Command page never claims a Follow state')
     assert.ok(!/Retained preview/.test(painted), 'the Command page never claims a retained preview')
@@ -295,7 +295,7 @@ test('C-15 the two pages own independent Find state, and `C` in EDIT never copie
   assert.match(outputSearch, /Find Output:/)
   assert.equal(harness.copies.length, 0, 'Enter only navigates')
   // `C` while a Find owns the ordinary keys is inert.
-  harness.panel.handleInput('C')
+  harness.panel.handleInput('c')
   assert.equal(harness.copies.length, 0, '`C` in NAVIGATE must not copy')
   harness.panel.handleInput('\x1b')
   assert.equal(harness.copies.length, 0, 'Esc leaves NAVIGATE only')
@@ -307,10 +307,10 @@ test('C-15 the two pages own independent Find state, and `C` in EDIT never copie
   assert.match(commandFind, /Find Command:/)
   assert.ok(!/beta/.test(commandFind.split('\n').find(line => line.includes('Find Command:')) ?? ''), 'a fresh Command query')
   harness.panel.handleInput('alpha')
-  harness.panel.handleInput('C')
+  harness.panel.handleInput('c')
   assert.equal(harness.copies.length, 0, '`C` in Command EDIT goes to the query, never the clipboard')
   harness.panel.handleInput('\x1b')
-  harness.panel.handleInput('C')
+  harness.panel.handleInput('c')
   assert.deepEqual(harness.copies, [{ source: 'command-all', text: 'alpha beta gamma' }])
   // Back to Output: its query survived, the Command query did not transfer.
   harness.panel.handleInput('\x1b')
@@ -328,7 +328,7 @@ test('C-14 an empty / unavailable / ineligible copy source reports its own reaso
   // Observed, but nothing retained: the empty body has its own reason.
   const empty = makePanel(observedState({ text: '' }))
   paint(empty)
-  empty.panel.handleInput('C')
+  empty.panel.handleInput('c')
   assert.deepEqual(empty.copies, [{ source: 'output', text: '', unavailable: 'output-empty' }],
     'an empty retained Output names the EMPTY reason')
   empty.panel.dispose()
@@ -337,7 +337,7 @@ test('C-14 an empty / unavailable / ineligible copy source reports its own reaso
   // they are looking at (plan §3).
   const connecting = makePanel({ opening: { jobId: 'job-a', kind: 'bash', label: 'pnpm build', status: 'running' } })
   paint(connecting)
-  connecting.panel.handleInput('C')
+  connecting.panel.handleInput('c')
   assert.deepEqual(connecting.copies, [{ source: 'output', text: '', unavailable: 'output-unavailable' }],
     'a not-yet-observed Output names the UNAVAILABLE reason')
   connecting.panel.dispose()
@@ -347,7 +347,7 @@ test('C-14 an empty / unavailable / ineligible copy source reports its own reaso
     observationError: 'no job controller',
   })
   paint(failed)
-  failed.panel.handleInput('C')
+  failed.panel.handleInput('c')
   assert.deepEqual(failed.copies, [{ source: 'output', text: '', unavailable: 'output-unavailable' }],
     'a refused observation names the UNAVAILABLE reason')
   failed.panel.dispose()
@@ -357,7 +357,7 @@ test('C-14 an empty / unavailable / ineligible copy source reports its own reaso
   paint(emptyLabel)
   emptyLabel.panel.handleInput('\t')
   assert.ok(!/Copy All \[C\]/.test(paint(emptyLabel).join('\n')), 'an empty label is not a Command')
-  emptyLabel.panel.handleInput('C')
+  emptyLabel.panel.handleInput('c')
   assert.deepEqual(emptyLabel.copies, [{ source: 'output', text: '', unavailable: 'output-empty' }],
     'nothing is copyable, and the reason is the empty body')
   emptyLabel.panel.dispose()
@@ -371,7 +371,7 @@ test('C-14 an empty / unavailable / ineligible copy source reports its own reaso
   assert.match(paint(lost).join('\n'), /Copy All \[C\]/)
   lost.panel.update({ opening: { jobId: 'job-a', kind: 'bash', label: 'echo one', status: 'running' } })
   assert.ok(!/Copy All \[C\]/.test(paint(lost).join('\n')), 'a lost Command eligibility returns to Output')
-  lost.panel.handleInput('C')
+  lost.panel.handleInput('c')
   assert.deepEqual(lost.copies, [{ source: 'output', text: '', unavailable: 'output-unavailable' }],
     'the copy intent now belongs to the Output page, with its own reason')
   lost.panel.dispose()
@@ -443,7 +443,7 @@ test('C-18 the header click must re-prove the same painted target; a narrowed bu
   narrow.panel.onHeaderPress(1, 1)
   narrow.panel.onHeaderClick(1, 1)
   assert.equal(narrow.copies.length, 0, 'an unpainted button has no click target')
-  narrow.panel.handleInput('C')
+  narrow.panel.handleInput('c')
   assert.deepEqual(narrow.copies, [{ source: 'command-all', text: 'echo one' }], '`C` remains the reachable path')
   narrow.panel.dispose()
 
@@ -458,7 +458,7 @@ test('C-18 the header click must re-prove the same painted target; a narrowed bu
   clipped.panel.onHeaderPress(5, titleRow)
   clipped.panel.onHeaderClick(5, titleRow)
   assert.deepEqual(clipped.copies, [], 'the clipped affordance leaves no click target')
-  clipped.panel.handleInput('C')
+  clipped.panel.handleInput('c')
   assert.deepEqual(clipped.copies, [{ source: 'command-all', text: 'echo one' }], '`C` stays reachable')
   clipped.panel.dispose()
 })
@@ -725,7 +725,7 @@ test('C-01 the official Bash label reaches the Command page and Copy All copies 
   await openCommand(harness)
   assert.match(view(harness.vt), /Copy All \[C\]/)
 
-  harness.vt.sendInput('C')
+  harness.vt.sendInput('c')
   await flush(4)
   assert.deepEqual(harness.copied, [label], 'Copy All sends the ORIGINAL label, whitespace and trailing LF included')
   assert.equal(harness.notices.at(-1), 'Copy sent')
@@ -963,7 +963,7 @@ test('C-13 the Output page copies the trigger-moment retained text, never the Co
   harness.tasks.observation.latest()!.emit({ label: 'echo hello', text: 'retained\n tail  ' })
   await harness.vt.waitForRender()
   await flush(2)
-  harness.vt.sendInput('C')
+  harness.vt.sendInput('c')
   await flush(4)
   assert.deepEqual(harness.copied, ['retained\n tail  '], 'the Output copy keeps the retained bytes verbatim')
   assert.equal(harness.notices.at(-1), 'Copy sent')
@@ -979,18 +979,18 @@ test('C-14 the clipboard settlement is honest: false/rejection report failure, a
   let result = false
   ;(harness.app as unknown as { copySelection?: (text: string) => Promise<boolean> }).copySelection =
     async () => result
-  harness.vt.sendInput('C')
+  harness.vt.sendInput('c')
   await flush(4)
   assert.equal(harness.notices.at(-1), 'Copy failed', 'a false result is reported as a failure')
   result = true
   harness.copied.length = 0
-  harness.vt.sendInput('C')
+  harness.vt.sendInput('c')
   await flush(4)
   assert.equal(harness.notices.at(-1), 'Copy sent')
   // A rejection is a failure, not a silent success.
   ;(harness.app as unknown as { copySelection?: (text: string) => Promise<boolean> }).copySelection =
     async () => { throw new Error('no clipboard backend') }
-  harness.vt.sendInput('C')
+  harness.vt.sendInput('c')
   await flush(4)
   assert.equal(harness.notices.at(-1), 'Copy failed')
   // A copy that settles AFTER the workspace closed must be silent.
@@ -998,7 +998,7 @@ test('C-14 the clipboard settlement is honest: false/rejection report failure, a
   let settle: ((value: boolean) => void) | undefined
   ;(harness.app as unknown as { copySelection?: (text: string) => Promise<boolean> }).copySelection =
     () => new Promise<boolean>(resolve => { settle = resolve })
-  harness.vt.sendInput('C')
+  harness.vt.sendInput('c')
   harness.vt.sendInput('\x1b')
   await harness.vt.waitForRender()
   settle?.(true)
@@ -1169,7 +1169,7 @@ test('C-05 the two read-only verbs are advertised with a deterministic drop orde
     harness.rows.value = rows
     for (let width = 60; width <= 200; width += 1) {
       const bar = paint(harness, width).at(-1)!
-      const hasCopy = /Shift\+C copy output/.test(bar)
+      const hasCopy = /c copy output/.test(bar)
       const hasCommand = /Tab switch/.test(bar)
       assert.ok(!hasCopy || hasCommand, `the copy verb never survives alone at ${width}x${rows}`)
       if (hasCopy) sawBoth = true
@@ -1181,7 +1181,7 @@ test('C-05 the two read-only verbs are advertised with a deterministic drop orde
   assert.ok(sawCommandOnly, 'there is a row where only the higher-priority page toggle survives')
   const tight = paint(harness, 80).at(-1)!
   assert.ok(!/Tab switch/.test(tight), 'a tight row yields the page toggle too')
-  assert.ok(!/Shift\+C copy output/.test(tight), 'a tight row yields the copy verb')
+  assert.ok(!/c copy output/.test(tight), 'a tight row yields the copy verb')
   assert.match(tight, /Retained preview · not full history/, 'the pre-existing disclosure is never the price')
   harness.panel.dispose()
 
@@ -1190,7 +1190,7 @@ test('C-05 the two read-only verbs are advertised with a deterministic drop orde
   // in the world, while the page toggle (which CAN act) stays.
   const emptyOutput = makePanel(observedState({ label: 'echo one', text: '' }))
   const wideBar = paint(emptyOutput, 200).at(-1)!
-  assert.ok(!/Shift\+C copy output/.test(wideBar), 'an empty Output never advertises the copy verb')
+  assert.ok(!/c copy output/.test(wideBar), 'an empty Output never advertises the copy verb')
   assert.match(wideBar, /Tab switch/, 'the page toggle can still act, so it stays advertised')
   emptyOutput.panel.dispose()
 })
@@ -1201,7 +1201,7 @@ test('C-14 an empty retained Output is refused with honest feedback, never a fal
   harness.tasks.observation.latest()!.emit({ label: 'echo hello', text: '' })
   await harness.vt.waitForRender()
   await flush(2)
-  harness.vt.sendInput('C')
+  harness.vt.sendInput('c')
   await flush(4)
   assert.deepEqual(harness.copied, [], 'nothing is written for an empty retained Output')
   assert.equal(harness.notices.at(-1), 'Nothing to copy', 'the user learns why C did nothing')
@@ -1215,7 +1215,7 @@ test('C-14 a refused observation reports Output unavailable, never a copy', asyn
   await openFirstJob(harness)
   await flush(6)
   assert.match(view(harness.vt), /Retained output unavailable/, 'the unavailable phase is visible')
-  harness.vt.sendInput('C')
+  harness.vt.sendInput('c')
   await flush(4)
   assert.deepEqual(harness.copied, [], 'an unavailable Output is never written to the clipboard')
   assert.equal(harness.notices.at(-1), 'Output unavailable', 'and it names its OWN reason')
@@ -1248,7 +1248,7 @@ test('C-01 Direct L6: the official bash args.command label crosses the PRODUCTIO
   assert.match(painted, /Command {4}pnpm build/, 'the observed label IS the official args.command')
   assert.match(painted, /direct retained/, 'the retained output came through the same adapter')
   await openCommand(harness)
-  harness.vt.sendInput('C')
+  harness.vt.sendInput('c')
   await flush(6)
   assert.deepEqual(harness.copied, [command], 'the Direct path delivers the ORIGINAL command byte for byte')
   assert.equal(harness.notices.at(-1), 'Copy sent')
@@ -1274,7 +1274,7 @@ test('C-06 a >10,000-character / 1,200-line Command scrolls locally and keeps ON
   assert.equal(rawView(harness.vt)[0], headerBefore, 'the header never scrolls with the body')
   const scrolledTop = firstRowMatching(harness.vt, /^line-\d{4}/)
   assert.notEqual(scrolledTop, commandTop, 'PageDown really moved the Command viewport')
-  harness.vt.sendInput('C')
+  harness.vt.sendInput('c')
   await flush(6)
   assert.deepEqual(harness.copied, [big], 'Copy All still delivers the WHOLE original document')
   // Round trip to Output and back: the Command viewport survives, one observer.
@@ -1315,7 +1315,7 @@ test('C-10 a hostile OSC/CSI label is sanitized at the Header boundary and never
   // The display boundary never touches the official bytes: the Command page
   // still copies the ORIGINAL label verbatim.
   await openCommand(harness)
-  harness.vt.sendInput('C')
+  harness.vt.sendInput('c')
   await flush(4)
   assert.deepEqual(harness.copied, [hostile], 'the copy payload stays the official original')
 })

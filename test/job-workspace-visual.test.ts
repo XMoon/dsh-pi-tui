@@ -707,7 +707,7 @@ test('D-13b an 8-column tab row keeps its truncation ellipsis inert (real press/
   await flush(6)
   assert.ok(!/Full co/.test(view(harness.vt)), 'the ellipsis never opens the Command page')
   assert.deepEqual(harness.copied, [], 'a click alone never copies')
-  harness.vt.sendInput('C')
+  harness.vt.sendInput('c')
   await flush(6)
   assert.deepEqual(harness.copied, ['retained body'],
     'the still-current Output page owns the copy verb (never the command)')
@@ -1039,7 +1039,7 @@ test('D-23 a hostile label is sanitized on the NEW header rows and never reaches
 
   // The official bytes still reach the Command copy verb untouched.
   await click(harness.vt, bodyRow(harness.vt, 'Command  echo ok'), 4)
-  harness.vt.sendInput('C')
+  harness.vt.sendInput('c')
   await flush(6)
   assert.deepEqual(harness.copied, [hostile], 'the copy payload stays the official original')
 })

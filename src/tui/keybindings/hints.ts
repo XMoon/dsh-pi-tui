@@ -96,9 +96,10 @@ export function formatKeyList(keys: readonly KeyId[]): string {
 export const JOB_LOCAL_KEYS = {
   /** Switch between the Output and Command pages, in both directions. */
   switchPage: 'tab',
-  /** Copy the current page's exact original. A MODIFIED chord, so its hint names
-   *  the modifier (`Shift+C`) instead of a bare letter (§4.1). */
-  copy: 'shift+c',
+  /** Copy the current page's exact original. A BARE letter — the same key the
+   *  Settings workspace's copy uses and the one the `[C]` affordance badges name —
+   *  so the bar hint reads `c copy …` and badge and key agree (§4.1, §7.1). */
+  copy: 'c',
 } as const
 
 /** Format one already-labelled key list for an ACTION-BAR HINT: a BARE
