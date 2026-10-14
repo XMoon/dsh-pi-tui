@@ -118,6 +118,18 @@
   表现(沿用既有 Owner 接受限制),以及滚轮/IME/主题/Remote 路径;细节见
   `docs/tern-tsp/model-selection.md` 的真机验证与未验证清单。
 
+- 全屏 Settings 工作区改用与家族统一的视觉语言:标题变成 `Settings · <层级路径>`
+  (身份词用粗体、路径用弱色,不再把 `SETTINGS` 画成蓝色品牌词),诊断行的状态词改为
+  首字母大写并带语义色(`Ready`/`Stale`/`Unavailable`),窗格焦点改为与 Job 页签同一套
+  「方括号 + 蓝色粗体」装置,分栏标题改为 `Categories (3)` / `Rows (2)` / `Details`。
+  详情区的字段值不再退化成终端默认前景色:主值用一种、次级事实用弱一档,提交结果的
+  状态词(`Verified`/`Not saved`/`Outcome unknown`/`Saving…`)各自带语义色——被拒绝的
+  写入不再看起来像成功;候选值的「当前」标记从小写状态 chip 之外的形式统一为
+  `[current]`,同一行有两个状态时是两个独立 chip。详情操作由 `[Change…]`/`[Copy value]`
+  这类方括号词改为 `Change…`、`Retry save`、`Copy value [C]`、`Confirm`、`Cancel`;
+  底部动作栏统一用 ` · ` 分隔、`Esc` 放到最后,并按优先级整段让位,不再把提示截成
+  `Enter change…` 这样的半截词。
+
 ### 修复
 
 - TSP 实验渲染器的 `/model`：点击左列 `All models` 或某个 Provider 现在真的会

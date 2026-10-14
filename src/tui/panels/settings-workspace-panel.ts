@@ -30,6 +30,7 @@ import {
   type TuiMouseEvent,
   type TuiMouseEventResult,
 } from '@xmoon76/pi-tui'
+import { renderActionBarRow, type ActionBarSegment } from '../presentation/action-bar.ts'
 import { sanitizedPhysicalLine } from '../presentation/lines.ts'
 import { color } from '../theme/runtime.ts'
 
@@ -135,6 +136,15 @@ export interface SettingsWorkspaceCommitRequest {
 export interface SettingsWorkspaceCommitOutcome {
   readonly outcome: 'verified' | 'not-saved' | 'unverified' | 'indeterminate'
   readonly reason?: string
+}
+
+/** The row's commit status as the Detail pane paints it: the status WORD, its
+ *  semantic tone and the explanation kept separate, so only the word takes the
+ *  token (design language §3.2 / role 9). */
+interface SettingsCommitStatus {
+  readonly word: string
+  readonly reason: string
+  readonly tone: 'success' | 'error' | 'warning' | 'muted'
 }
 
 /** The snapshot one open/refresh reads from the live authorities. */
@@ -279,6 +289,15 @@ const MEDIUM_CATEGORY_WIDTH = 22
 /** The medium projection's leading rows column (L1/L2). */
 const MEDIUM_ROWS_WIDTH = 40
 const COLUMN_GAP = 2
+
+/**
+ * The Settings workspace's own FIXED keys. They are surface-local, own no
+ * keymap action and are therefore NOT rebindable (design language §7.1): the
+ * handler and the Action Bar hint read the SAME constant, so the advertised key
+ * can never drift from the accepted one. Making them rebindable would land with
+ * the keybinding contract, and the hint would then switch to `componentKeymap`.
+ */
+const SETTINGS_LOCAL_KEYS = { refresh: 'r', copy: 'c' } as const
 
 /** The minimum column count of the two-column (medium) projection. */
 export const SETTINGS_WORKSPACE_MEDIUM_MIN_COLUMNS = 76
@@ -501,17 +520,21 @@ export class SettingsWorkspacePanel implements Component {
   invalidate(): void {}
 
   /** The ONE level breadcrumb, identical in every layout: `Categories` →
-   *  `<Category> · Rows` → `<Category> / <Row label>`. It paints no hit target:
-   *  the header is no longer a category focus owner or switch. */
+   *  `<Category> · Rows` → `<Category> · <Row label>` (one ` · ` join for every
+   *  trail segment, design language §4.2). It paints no hit target: the header is
+   *  no longer a category focus owner or switch. */
   private renderHeader(plan: SettingsChromePlan): string[] {
     const row = this.selectedRow()
     const breadcrumb = this.focus === 'categories'
       ? 'Categories'
       : this.focus === 'rows'
         ? `${CATEGORY_LABELS[this.categoryId]} · Rows`
-        : `${CATEGORY_LABELS[this.categoryId]} / ${row?.label ?? '—'}`
-    const title = `SETTINGS · ${breadcrumb}`
-    const lead = `${color.primary('SETTINGS')}${color.textMuted(title.slice('SETTINGS'.length))}`
+        : `${CATEGORY_LABELS[this.categoryId]} · ${row?.label ?? '—'}`
+    // Identity is BOLD textStrong and the trail is textDim (roles 1 + 2): the
+    // brand word is not `primary`, because primary means active/actionable and
+    // already paints the cursor, the focused label and every affordance.
+    const title = `Settings · ${breadcrumb}`
+    const lead = `${color.textStrong('Settings')}${color.textDim(title.slice('Settings'.length))}`
     // The header states which rows the workspace can really change. The narrow
     // projection is width-starved: the breadcrumb keeps the whole line there
     // instead of ceding cells to a badge it can still show at 76+ columns.
@@ -522,14 +545,34 @@ export class SettingsWorkspacePanel implements Component {
     return [composeEdge(lead, right === '' ? '' : color.textMuted(right), plan.width)]
   }
 
+  /** The diagnostic line (roles 11 + 12). Trailing facts drop WHOLE before any
+   *  truncation (a half fact is a lie), and the readiness word carries its own
+   *  ink: the calm default is `textMuted`, a stale document is `warning` and an
+   *  unavailable one is `error` (design language §3.2 corrections). */
   private renderMetadata(plan: SettingsChromePlan): string {
     const row = this.selectedRow()
     const scope = row?.scope ?? 'TUI preferences'
     const captured = new Date(this.snapshot.capturedAt)
     const hh = String(captured.getHours()).padStart(2, '0')
     const mm = String(captured.getMinutes()).padStart(2, '0')
-    const text = `Scope: ${scope}  ·  Refreshed ${hh}:${mm} / Config ${this.snapshot.configReadiness.toUpperCase()}`
-    return fit(color.textMuted(sanitizedPhysicalLine(text)), plan.width)
+    const readiness = this.snapshot.configReadiness
+    const word = readiness === 'ready' ? 'Ready' : readiness === 'stale' ? 'Stale' : 'Unavailable'
+    const paint = readiness === 'ready' ? color.textMuted : readiness === 'stale' ? color.warning : color.error
+    const facts = [
+      `Scope: ${sanitizedPhysicalLine(scope)}`,
+      `Refreshed ${hh}:${mm}`,
+      `Config ${word}`,
+    ]
+    const kept: string[] = []
+    for (const fact of facts) {
+      if (kept.length > 0 && visibleWidth([...kept, fact].join(' · ')) > plan.width) break
+      kept.push(fact)
+    }
+    const separator = color.textMuted(' · ')
+    const painted = kept.map((fact, index) => index === kept.length - 1 && kept.length === facts.length
+      ? paint(fact)
+      : color.textMuted(fact)).join(separator)
+    return fit(painted, plan.width)
   }
 
   private renderNotice(plan: SettingsChromePlan): string {
@@ -675,10 +718,10 @@ export class SettingsWorkspacePanel implements Component {
     if (showPaneHeader) {
       const head = layout.map((pane) => {
         const title = pane.page === 'categories'
-          ? `CATEGORIES (${CATEGORY_ORDER.length})`
+          ? `Categories (${CATEGORY_ORDER.length})`
           : pane.page === 'rows'
-            ? `SETTINGS (${this.currentRows().length})`
-            : 'DETAILS'
+            ? `Rows (${this.currentRows().length})`
+            : 'Details'
         return fit(this.paneHeader(title, this.focus === pane.page), pane.width)
       })
       out.push(head.join(' '.repeat(COLUMN_GAP)))
@@ -755,36 +798,49 @@ export class SettingsWorkspacePanel implements Component {
     return out
   }
 
+  /** The active device (role 7): the focused pane's label is bracketed and bold
+   *  `primary` — the SAME device the Job workspace's active tab paints. An
+   *  unfocused pane label is plain `textDim` (role 5). `borderFocus` is NOT an
+   *  ordinary-focus colour; it belongs to approvals. */
   private paneHeader(text: string, focused: boolean): string {
-    const marked = focused ? `[${text}]` : text
-    return focused ? color.borderFocus(marked) : color.textMuted(marked)
+    return focused ? color.textStrong(`[${text}]`, 'primary') : color.textDim(text)
   }
 
   private categoryLine(id: SettingsWorkspaceCategoryId | undefined): string {
     if (id === undefined) return ''
     const selected = id === this.categoryId
-    const marker = selected ? '> ' : '  '
-    const text = `${marker}${CATEGORY_LABELS[id]}`
-    return selected ? color.textStrong(text) : color.text(text)
+    const marker = selected ? color.primary('> ') : '  '
+    const label = CATEGORY_LABELS[id]
+    // Cursor glyph = role 6 (`primary`), the selected row's own text = role 8
+    // (bold textStrong): two anchors, one meaning each.
+    return `${marker}${selected ? color.textStrong(label) : color.text(label)}`
   }
 
   private rowLine(row: SettingsWorkspaceRow | undefined, width: number): string {
     if (row === undefined) return ''
     const selected = row.id === this.rowId
-    const marker = selected ? '> ' : '  '
+    const cursor = selected ? '> ' : '  '
     // The configured NAME is measured UNPADDED and owns its cells first (the
     // frozen hierarchy: the name stays identifiable, the list SUMMARY is what
     // truncates). Only a name that alone fills the pane drops the summary; the
     // remainder is then handed to the (truncatable) value, right-aligned.
-    const lead = truncateToWidth(`${marker}${sanitizedPhysicalLine(row.label)}`, width, '…', false)
+    const lead = truncateToWidth(`${cursor}${sanitizedPhysicalLine(row.label)}`, width, '…', false)
     const leadCells = visibleWidth(lead)
     const summaryCellRoom = Math.max(0, width - leadCells - 1)
     const value = summaryCellRoom >= 1
       ? truncateToWidth(sanitizedPhysicalLine(row.summary), summaryCellRoom, '…', false)
       : ''
     const gap = Math.max(1, width - leadCells - visibleWidth(value))
-    const painted = lead + ' '.repeat(gap) + value
-    return selected ? color.textStrong(painted) : color.text(painted)
+    const pad = ' '.repeat(gap)
+    // The cursor is the row's FIRST two cells whenever they survive truncation.
+    const cursorText = leadCells >= 2 ? lead.slice(0, 2) : ''
+    const rest = lead.slice(cursorText.length)
+    if (selected) {
+      // Role 8: the selected row is ONE emphasised run (label + value).
+      return `${color.primary(cursorText)}${color.textStrong(`${rest}${pad}${value}`)}`
+    }
+    // Role 3/4: content in `text`, the secondary summary column in `textDim`.
+    return `${cursorText}${color.text(`${rest}${pad}`)}${color.textDim(value)}`
   }
 
   /**
@@ -884,14 +940,19 @@ export class SettingsWorkspacePanel implements Component {
     }
     return options.map((option, index) => {
       const selected = phase.kind === 'choosing' && index === phase.index
-      const marker = selected ? '> ' : '  '
-      const marks = [option.current ? '← current' : '', option.available ? '' : 'unavailable'].filter(Boolean).join(' · ')
-      const body = `${sanitizedPhysicalLine(option.label)}${marks === '' ? '' : `  [${marks}]`}`
+      // State chips (design language §4.5): ONE lowercase chip per boolean
+      // state — `[current]` is the neutral `textMuted` chip, `[unavailable]` is
+      // a problem state and takes `warning`. The chips keep their OWN ink, which
+      // is why the row is composed as spans instead of one painted string.
+      const chips: string[] = []
+      if (option.current) chips.push(color.textMuted('[current]'))
+      if (!option.available) chips.push(color.warning('[unavailable]'))
+      const body = `${sanitizedPhysicalLine(option.label)}${chips.length === 0 ? '' : `  ${chips.join(' ')}`}`
       const chunks = wrapTextWithAnsi(body, Math.max(1, width - 2))
       const rows = chunks.length === 0 ? [''] : chunks
       return rows.map((chunk, line) => {
-        const text = `${line === 0 ? marker : '  '}${chunk}`
-        return selected ? color.textStrong(text) : color.text(text)
+        const cursor = line === 0 && selected ? color.primary('> ') : '  '
+        return `${cursor}${selected ? color.textStrong(chunk) : color.text(chunk)}`
       })
     })
   }
@@ -943,25 +1004,29 @@ export class SettingsWorkspacePanel implements Component {
 
   /** The actions the pinned row may paint for this row in the CURRENT phase.
    *  A pending commit disables the edit verbs (ONE commit at a time) and a
-   *  non-writable row only ever offers copy/legacy. */
+   *  non-writable row only ever offers copy/legacy.
+   *
+   *  A verb label never wears brackets (design language §4.5): `Verb [Key]` when
+   *  the affordance has a key, `Verb` for a click-only action, `Verb…` when it
+   *  opens a further step. */
   private detailButtons(row: SettingsWorkspaceRow): readonly DetailButton[] {
     const phase = this.editPhase
     if (phase.kind === 'choosing') {
       return [
-        { verb: 'confirm', text: '[Confirm]', value: phase.candidate },
-        { verb: 'cancel', text: '[Cancel]' },
+        { verb: 'confirm', text: 'Confirm', value: phase.candidate },
+        { verb: 'cancel', text: 'Cancel' },
       ]
     }
     const buttons: DetailButton[] = []
     const edit = row.edit
     if (edit !== undefined && phase.kind !== 'pending') {
-      buttons.push({ verb: 'change', text: '[Change…]' })
+      buttons.push({ verb: 'change', text: 'Change…' })
       if (phase.kind === 'settled' && phase.field === edit.field && phase.outcome !== 'verified') {
-        buttons.push({ verb: 'retry', text: '[Retry save]', value: phase.attempted })
+        buttons.push({ verb: 'retry', text: 'Retry save', value: phase.attempted })
       }
     }
-    if (row.value !== undefined) buttons.push({ verb: 'copy', text: '[Copy value]' })
-    else if (row.action === 'open-legacy') buttons.push({ verb: 'legacy', text: '[Open existing settings…]' })
+    if (row.value !== undefined) buttons.push({ verb: 'copy', text: `Copy value [${SETTINGS_LOCAL_KEYS.copy.toUpperCase()}]` })
+    else if (row.action === 'open-legacy') buttons.push({ verb: 'legacy', text: 'Open existing settings…' })
     return buttons
   }
 
@@ -980,7 +1045,7 @@ export class SettingsWorkspacePanel implements Component {
       const gap = paint === '' ? 0 : 2
       const buttonCells = visibleWidth(button.text)
       if (cells + gap + buttonCells > width) break
-      paint += ' '.repeat(gap) + color.accent(button.text)
+      paint += ' '.repeat(gap) + color.primary(button.text)
       painted.push({ button, startCol: cells + gap })
       cells += gap + buttonCells
     }
@@ -988,15 +1053,26 @@ export class SettingsWorkspacePanel implements Component {
   }
 
   /** The commit status of the row's own field, as the last settlement reported
-   *  it. Only the row that owns the phase shows it — never a global banner. */
-  private editStatus(field: SettingsWorkspaceWritableField): string | undefined {
+   *  it. Only the row that owns the phase shows it — never a global banner.
+   *  The WORD and its tone are separate from the explanation so the pane can
+   *  paint only the word with the semantic token (design language §3.2): a
+   *  refused write must not look like a verified one. */
+  private editStatus(field: SettingsWorkspaceWritableField): SettingsCommitStatus | undefined {
     const phase = this.editPhase
-    if (phase.kind === 'pending' && phase.field === field) return 'Saving… · the Host has not confirmed yet'
+    if (phase.kind === 'pending' && phase.field === field) {
+      return { word: 'Saving…', reason: 'the Host has not confirmed yet', tone: 'muted' }
+    }
     if (phase.kind !== 'settled' || phase.field !== field) return undefined
-    if (phase.outcome === 'verified') return 'Verified · the authoritative read agrees'
-    if (phase.outcome === 'not-saved') return `Not saved · ${phase.reason ?? 'the write was refused'}`
-    if (phase.outcome === 'indeterminate') return `Outcome unknown · ${phase.reason ?? 'the write could not be attributed'}`
-    return `Commit accepted · verification unavailable${phase.reason === undefined ? '' : ` · ${phase.reason}`}`
+    if (phase.outcome === 'verified') return { word: 'Verified', reason: 'the authoritative read agrees', tone: 'success' }
+    if (phase.outcome === 'not-saved') return { word: 'Not saved', reason: phase.reason ?? 'the write was refused', tone: 'error' }
+    if (phase.outcome === 'indeterminate') {
+      return { word: 'Outcome unknown', reason: phase.reason ?? 'the write could not be attributed', tone: 'warning' }
+    }
+    return {
+      word: 'Commit accepted',
+      reason: `verification unavailable${phase.reason === undefined ? '' : ` · ${phase.reason}`}`,
+      tone: 'warning',
+    }
   }
 
   private detailContent(row: SettingsWorkspaceRow, width: number, includeTitle: boolean): string[] {
@@ -1004,14 +1080,30 @@ export class SettingsWorkspacePanel implements Component {
     const bodyWidth = Math.max(1, width - labelWidth)
     const lines: string[] = []
     if (includeTitle) lines.push(color.textStrong(sanitizedPhysicalLine(row.label)))
-    const field = (label: string, value: string): void => {
+    // Roles 3/4/5: labels are textDim, the PRIMARY field's value is `text` and
+    // every secondary fact's value is one step weaker (`textDim`) — the old code
+    // left every value UNPAINTED, which silently ignored the palette (design
+    // language §3.2 corrections).
+    const field = (label: string, value: string, ink: (text: string) => string = color.textDim): void => {
       const head = fit(color.textDim(label), labelWidth)
       const wrapped = wrapTextWithAnsi(escapedPhysicalLine(value), bodyWidth)
       const parts = wrapped.length === 0 ? [''] : wrapped
-      lines.push(head + parts[0]!)
-      for (const extra of parts.slice(1)) lines.push(' '.repeat(labelWidth) + extra)
+      lines.push(head + ink(parts[0]!))
+      for (const extra of parts.slice(1)) lines.push(' '.repeat(labelWidth) + ink(extra))
     }
-    field('Value', row.summary)
+    /** Role 9: the status WORD carries the semantic token and the explanation
+     *  stays one step weaker. The word is our own vocabulary and never wraps;
+     *  the reason is Host text and does. */
+    const statusField = (label: string, word: string, reason: string | undefined, paint: (text: string) => string): void => {
+      const head = fit(color.textDim(label), labelWidth)
+      const plain = reason === undefined ? word : `${word} · ${escapedPhysicalLine(reason)}`
+      const wrapped = wrapTextWithAnsi(plain, bodyWidth)
+      const first = wrapped[0] ?? ''
+      const painted = `${paint(first.slice(0, word.length))}${first.length <= word.length ? '' : color.textDim(first.slice(word.length))}`
+      lines.push(head + painted)
+      for (const extra of wrapped.slice(1)) lines.push(' '.repeat(labelWidth) + color.textDim(extra))
+    }
+    field('Value', row.summary, color.text)
     if (row.value !== undefined && row.value !== row.summary) field('Source', row.value)
     const edit = row.edit
     if (edit !== undefined) {
@@ -1020,7 +1112,13 @@ export class SettingsWorkspacePanel implements Component {
       if (edit.primary === 'persisted') field('Runtime', edit.runtime)
       else field('Persisted', edit.persisted)
       const status = this.editStatus(edit.field)
-      if (status !== undefined) field('Status', status)
+      if (status !== undefined) {
+        const paint = status.tone === 'success' ? color.success
+          : status.tone === 'error' ? color.error
+            : status.tone === 'warning' ? color.warning
+              : color.textDim
+        statusField('Status', status.word, status.reason, paint)
+      }
     }
     field('Scope', row.scope)
     field('Freshness', freshnessText(row, this.snapshot.configReadiness))
@@ -1029,6 +1127,10 @@ export class SettingsWorkspacePanel implements Component {
     return lines
   }
 
+  /** The pinned Action Bar (design language §7): the surface's own actions
+   *  first and `Esc` LAST, while `Esc` keeps the highest drop priority. Whole
+   *  segments are dropped by priority through the shared row layout, so a hint
+   *  is never cut mid-word (the old bar truncated its single string). */
   private renderActionBar(plan: SettingsChromePlan): string {
     const row = this.selectedRow()
     const copyable = row?.value !== undefined
@@ -1037,29 +1139,47 @@ export class SettingsWorkspacePanel implements Component {
     // every navigation/clipboard action is refused, so only this Esc/back hint is
     // still honest.
     const back = this.focus === 'categories' ? 'Esc close' : 'Esc back'
-    if (this.bodyFloor() < 1) return fit(color.textDim(back), plan.width)
+    if (this.bodyFloor() < 1) return fit(color.textMuted(back), plan.width)
+    let segments: ActionBarSegment[]
     if (this.choiceField() !== undefined) {
-      return fit(color.textDim('Esc cancel | ↑↓ select | Enter confirm'), plan.width)
-    }
-    if (this.editPhase.kind === 'pending') {
-      return fit(color.textDim(`${back} | Saving… · one write at a time`), plan.width)
-    }
-    let hints: string
-    if (this.focus === 'categories') {
-      hints = `${back} | ↑↓ select | Enter open`
+      segments = [
+        { text: '↑↓ select', priority: 5 },
+        { text: 'Enter confirm', priority: 6 },
+        { text: 'Esc cancel', priority: 7 },
+      ]
+    } else if (this.editPhase.kind === 'pending') {
+      segments = [
+        { text: 'Saving… · one write at a time', priority: 5 },
+        { text: back, priority: 7 },
+      ]
+    } else if (this.focus === 'categories') {
+      segments = [
+        { text: '↑↓ select', priority: 5 },
+        { text: 'Enter open', priority: 6 },
+        { text: back, priority: 7 },
+      ]
     } else if (this.focus === 'rows') {
-      hints = `${back} | ↑↓ select | Enter details | R refresh`
+      segments = [
+        { text: '↑↓ select', priority: 5 },
+        { text: 'Enter details', priority: 6 },
+        { text: `${SETTINGS_LOCAL_KEYS.refresh} refresh`, priority: 4 },
+        { text: back, priority: 7 },
+      ]
     } else {
       const editable = row?.edit !== undefined
-      hints = [
-        back,
-        '↑↓/Pg keys scroll',
-        editable ? 'Enter change' : '',
-        'R refresh',
-        copyable ? 'C copy value' : '',
-      ].filter(Boolean).join(' | ')
+      segments = [
+        ...editable ? [{ text: 'Enter change', priority: 6 }] : [],
+        { text: '↑↓ scroll', priority: 5 },
+        { text: `${SETTINGS_LOCAL_KEYS.refresh} refresh`, priority: 4 },
+        ...copyable ? [{ text: `${SETTINGS_LOCAL_KEYS.copy} copy value`, priority: 3 }] : [],
+        { text: 'PgUp/PgDn', priority: 0.1 },
+        { text: back, priority: 7 },
+      ]
     }
-    return fit(color.textDim(hints), plan.width)
+    // Role 13: hints are the WEAKEST readable ink (`textMuted`), one step below
+    // the diagnostic line, so the bar never competes with content. The shared
+    // row layout already padded/truncated to the pane width.
+    return color.textMuted(renderActionBarRow(segments, plan.width))
   }
 
   // ── state helpers ────────────────────────────────────────────────────────
@@ -1182,8 +1302,8 @@ export class SettingsWorkspacePanel implements Component {
     if (matchesKey(data, 'home')) return this.jump(-1)
     if (matchesKey(data, 'end')) return this.jump(1)
     if (matchesKey(data, 'enter')) return this.confirm()
-    if (data === 'r' || data === 'R') return this.refresh()
-    if (data === 'c' || data === 'C') return this.copy()
+    if (data === SETTINGS_LOCAL_KEYS.refresh || data === SETTINGS_LOCAL_KEYS.refresh.toUpperCase()) return this.refresh()
+    if (data === SETTINGS_LOCAL_KEYS.copy || data === SETTINGS_LOCAL_KEYS.copy.toUpperCase()) return this.copy()
     // Everything else is inert inside the workspace: no key ever leaks to the
     // hidden editor, transcript or a host composer action.
   }

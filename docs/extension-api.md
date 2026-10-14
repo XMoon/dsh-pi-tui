@@ -298,7 +298,7 @@ id IS the source-qualified value (display labels are unique per row —
 builtin/file/plugin collisions are source-tagged — but are presentational
 only and never round-tripped back to an identity at confirm time, so an
 HMR unload between open and confirm can never redirect a selection to a
-same-named new contribution). The `← current` marker compares the
+same-named new contribution). The `[current]` state chip compares the
 selection's source-qualified IDENTITY against the live row values — a
 same-labeled row from another source (a file created while a plugin theme
 is selected) can never steal the marker. The choice commit is

@@ -90,7 +90,7 @@ D14 in full:
 2. **Notice row = role 17** (new): info `textMuted`, error `error`, with the
    `ℹ` / `✗` prefixes added to the glyph inventory.
 3. **The status marker appears only on a standalone status group.** An inline
-   fact (`Config ready`, `Loading models…`, `rows 7-40/40`) never carries it.
+   fact (`Config Ready`, `Loading models…`, `rows 7-40/40`) never carries it.
 4. **A list's second-level text has two allowed layouts** — a right-aligned value
    column (workspace lists) or an indented description line (overlay lists) —
    chosen by width; they are the same roles, not two role sets.
@@ -426,6 +426,11 @@ Rules:
   paint is restored afterwards. That is the existing pattern in
   `src/tui/commands/status.ts:110`, and **the vendored fork is never modified for
   it**.
+- **Ink is never inherited; weight may be.** A terminal cannot unbold a nested
+  span, so where a row is painted as ONE emphasised run (the Settings candidate
+  row composes `cursor + label + chips` and wraps that), the chip is `textMuted`
+  *and* bold on the selected row. That is accepted — what must never happen is
+  the chip taking the row's selection COLOUR (`primary` / `textDim`).
 - `[current]` is a neutral state chip (`textMuted`); `[unavailable]` is a problem
   state (`warning`). A state chip is not the only signal on the row — the row's
   own value or label is.
@@ -580,6 +585,11 @@ anchor, without inventing a fourth meaning for `primary`.
   affordance that opens a further step renders `Verb…` (`Change…`). The current
   whole-word brackets (`[Change…]`) are replaced by this rule, so Settings and
   Job affordances look the same.
+- **A key badge spells a bare letter UPPERCASE, while the Action Bar hint keeps
+  it lowercase.** `Copy All [C]` / `Copy value [C]` name the *key*; the bar says
+  `c copy value` because `C` would read as ⇧C in prose (§4.1). The brackets are
+  the discriminator, so the two forms are not a contradiction: one is a key
+  badge, the other is a hint.
 - Affordances are `primary` (role 14).
 
 ### 7.2 Ordering and degradation

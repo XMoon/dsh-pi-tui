@@ -11,11 +11,15 @@
 > `TuiApp` + `VirtualTerminal` composition at commit `7ccaa20a` and read back
 > from the terminal cells (§1).
 >
-> **The AFTER frames are design targets, not product output.** They were laid
-> out by hand against the target spec and painted with the *real* theme tokens,
-> so their colour is truthful while their geometry is a design statement. The
-> real after-frames must be regenerated from the implemented panels in V2/V3
-> and reviewed in a real terminal before this visual item can be called done.
+> **The Settings AFTER frames are REAL product output at the Settings PR**
+> (`feat/tui-settings-visual-language`), captured the same way as the BEFORE
+> frames. **The Job AFTER frames are still design targets**, hand-laid against
+> the frozen spec and painted with the real theme tokens: the Job panel lands in
+> its own PR, and its after-frames must be regenerated the same way then.
+>
+> A real-terminal review of the implemented Settings frames is still an Owner
+> acceptance item (`NOT_RUN` here): this document is the VirtualTerminal
+> evidence, not the human one.
 
 ## 1. Method (how the BEFORE frames were produced)
 
@@ -92,11 +96,11 @@ Scope: TUI settings document  ·  Refreshed 23:57 / Config READY
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 Esc close | ↑↓ select | Enter open
 ```
-**AFTER — target (real tokens)**
+**AFTER — real output at this HEAD**
 
 ```text
 Settings · Categories                                                                                    2 editable rows
-Scope: TUI settings document · Refreshed 09:41 · Config ready
+Scope: TUI settings document · Refreshed 09:35 · Config Ready
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 [Categories (3)]        Rows (2)                                    Details
 > Appearance            > Configured theme               Solarized  Configured theme
@@ -110,8 +114,8 @@ Scope: TUI settings document · Refreshed 09:41 · Config ready
                                                                                 is the source-qualified configured
                                                                                 identity; the summary is its display
                                                                                 name.
-                                                                    Change…  Copy value [C]
 ⋮
+                                                                    Change…  Copy value [C]
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 ↑↓ select · Enter open · Esc close
 ```
@@ -143,11 +147,11 @@ CATEGORIES (3)          SETTINGS (2)                                [DETAILS]
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 Esc back | ↑↓/Pg keys scroll | Enter change | R refresh | C copy value
 ```
-**AFTER — target (real tokens)**
+**AFTER — real output at this HEAD**
 
 ```text
 Settings · Appearance · Configured theme                                                                 2 editable rows
-Scope: TUI settings document · Refreshed 09:41 · Config ready
+Scope: TUI settings document · Refreshed 09:35 · Config Ready
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 Categories (3)          Rows (2)                                    [Details]
 > Appearance            > Configured theme               Solarized  Configured theme
@@ -161,10 +165,10 @@ Categories (3)          Rows (2)                                    [Details]
                                                                                 is the source-qualified configured
                                                                                 identity; the summary is its display
                                                                                 name.
-                                                                    Change…  Copy value [C]
 ⋮
+                                                                    Change…  Copy value [C]
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-Enter change · ↑↓ scroll · r refresh · c copy value · Esc back
+Enter change · ↑↓ scroll · r refresh · c copy value · PgUp/PgDn · Esc back
 ```
 The commit `Status` row is the important one: today `Verified · …` and `Not saved · …` paint the same terminal-default ink, so a successful write and a refused write look identical. The target keeps the sentences and gives the status word its semantic token (`success` / `error` / `warning`), with the explanation left `textDim`.
 
@@ -185,11 +189,11 @@ Scope: TUI settings document  ·  Refreshed 23:57 / Config READY
 ────────────────────────────────────────────────────────────────────────────────
 Esc close | ↑↓ select | Enter open
 ```
-**AFTER — target (real tokens)**
+**AFTER — real output at this HEAD**
 
 ```text
 Settings · Categories                                            2 editable rows
-Scope: TUI settings document · Refreshed 09:41 · Config ready
+Scope: TUI settings document · Refreshed 09:35 · Config Ready
 ────────────────────────────────────────────────────────────────────────────────
 [Categories (3)]        Rows (2)
 > Appearance            > Configured theme                             Solarized
@@ -226,7 +230,7 @@ Description The palette family used by the
 ────────────────────────────────────────────
 Esc back | ↑↓/Pg keys scroll | Enter change…
 ```
-**AFTER — target (real tokens)**
+**AFTER — real output at this HEAD**
 
 ```text
 Settings · Appearance · Configured theme
@@ -244,6 +248,7 @@ Description The palette family used by the
             identity; the summary is its
             display name.
 ⋮
+Change…  Copy value [C]
 ────────────────────────────────────────────
 Enter change · ↑↓ scroll · Esc back
 ```
@@ -277,11 +282,11 @@ CATEGORIES (3)          SETTINGS (2)                                [DETAILS]
 Esc back | ↑↓/Pg keys scroll | Enter change | R refresh | C copy value
 ```
 
-**AFTER — target (real tokens)**
+**AFTER — real output at this HEAD**
 
 ```text
-Settings · Appearance · Configured theme                                                             2 editable rows
-Scope: TUI settings document · Refreshed 09:41 · Config ready
+Settings · Appearance · Configured theme                                                                 2 editable rows
+Scope: TUI settings document · Refreshed 09:35 · Config Ready
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 Categories (3)          Rows (2)                                    [Details]
 > Appearance            > Configured theme                    dark  Configured theme
@@ -299,7 +304,7 @@ Categories (3)          Rows (2)                                    [Details]
 ⋮
                                                                     Change…  Retry save  Copy value [C]
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-Enter change · ↑↓ scroll · r refresh · c copy value · Esc back
+Enter change · ↑↓ scroll · r refresh · c copy value · PgUp/PgDn · Esc back
 ```
 
 This pair exists because it is the strongest single argument for the target ink table: in the BEFORE frame `Status  Not saved · settings namespace …` is painted in exactly the same terminal-default ink as `Value` and `Runtime` above it, so the one row that says the write was refused looks like every other fact. The target paints only the status **word** (`Not saved` in `error`, `Verified` in `success`, `Outcome unknown` in `warning`, `Saving…` in `textDim`) and leaves the reason `textDim`. Nothing else on this frame changes except the vocabulary the earlier pairs already listed.
@@ -333,7 +338,7 @@ The arrow is gone because `←` (U+2190) is EAW-ambiguous (§4.3), and the chip 
 | # | Before | After | Why |
 |---|---|---|---|
 | 1 | `SETTINGS` in `primary` | `Settings` in bold `textStrong` | `primary` must mean exactly one thing: active/actionable. It already paints links, inline code and picker cursors |
-| 2 | Trails joined with ` · ` and `/`; `Refreshed 09:41 / Config READY` | one ` · ` join; `Config ready` | one separator per job; no ALL-CAPS words |
+| 2 | Trails joined with ` · ` and `/`; `Refreshed 09:41 / Config READY` | one ` · ` join; `Config Ready` | one separator per job; no ALL-CAPS words |
 | 3 | Pane titles `CATEGORIES (3)` / `SETTINGS (2)` / `DETAILS` | `Categories (3)` / `Rows (2)` / `Details` | the rows pane must not reuse the surface word; Title Case |
 | 4 | Focus = `[Label]` in `borderFocus` (= `warning` amber) | Focus = `[Label]` in bold `primary` | ordinary focus must not read as a warning; the Job tab already uses this device |
 | 5 | Cursor and row both `textStrong` | cursor `primary`, row bold `textStrong` | the cursor must be findable. The theme objects already split colour-on-glyph from bold-on-text (`settingsListTheme.cursor`, `selectListTheme.selectedText`); `SearchablePicker` still hardcodes a bold `→ ` |

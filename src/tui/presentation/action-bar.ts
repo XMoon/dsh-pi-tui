@@ -25,11 +25,10 @@ export interface ActionBarSegment {
 }
 
 /** The separator between surviving segments. The design language freezes ` · `
- *  (v1 §4.2, decision D4). It is still ` | ` because this module was extracted
- *  verbatim; the Settings PR flips this ONE constant and re-runs the Job visual
- *  suites in the same change, since both surfaces share it. No per-caller
- *  separator option: one family, one separator. */
-export const ACTION_BAR_SEPARATOR = ' | '
+ *  (v1 §4.2, decision D4) and this constant is the ONE place it lives: the
+ *  Settings PR flipped it for both surfaces at once, because they share the row.
+ *  There is no per-caller separator option — one family, one separator. */
+export const ACTION_BAR_SEPARATOR = ' · '
 
 /**
  * Lay out one Action Bar row: compact shortenable segments first, then drop the
