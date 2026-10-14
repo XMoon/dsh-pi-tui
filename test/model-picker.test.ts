@@ -21,6 +21,7 @@ import {
   type ModelPickerCurrent,
 } from '../src/tui/pickers/model-picker.ts'
 import type { ModelDirectoryDto, ModelDirectoryModelDto, ModelSelectionDto } from '../src/runtime/catalog-port.ts'
+import { currentPalette } from '../src/tui/theme/runtime.ts'
 import { runOwned, type OwnedTaskOptions } from '../src/runtime/process/tasks.ts'
 import { createDiag } from '../src/runtime/process/diagnostics.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
@@ -40,13 +41,32 @@ const stripAnsi = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, '').
 const viewOf = (vt: VirtualTerminal): string => vt.getViewport().map(stripAnsi).join('\n')
 const linesOf = (vt: VirtualTerminal): string[] => vt.getViewport().map(stripAnsi)
 /** Viewport lines with the overlay frame's left border stripped, so a row's
- *  own prefix (`→ `) is observable. */
+ *  own prefix (`> `) is observable. */
 const contentLinesOf = (vt: VirtualTerminal): string[] => linesOf(vt).map((line) => {
   const index = line.indexOf('│ ')
   return index === -1 ? line : line.slice(index + 2)
 })
-const selectedRow = (vt: VirtualTerminal): string | undefined =>
-  contentLinesOf(vt).find(line => line.startsWith('→ '))
+const selectedRow = (vt: VirtualTerminal): string | undefined => {
+  // The search Input's own prompt is also `> `, and it is painted FIRST; the
+  // LIST cursor is the next `> ` row after it.
+  const rows = contentLinesOf(vt).filter(line => line.startsWith('> '))
+  return rows[1] ?? rows[0]
+}
+const hexToRgb = (hex: string): number =>
+  (parseInt(hex.slice(1, 3), 16) << 16) | (parseInt(hex.slice(3, 5), 16) << 8) | parseInt(hex.slice(5, 7), 16)
+/** The terminal row of the first painted occurrence of `needle`. */
+const rowOf = (vt: VirtualTerminal, needle: string): number => {
+  const row = linesOf(vt).findIndex(line => line.includes(needle))
+  assert.ok(row >= 0, `the frame must contain ${JSON.stringify(needle)}:\n${viewOf(vt)}`)
+  return row
+}
+/** The terminal-CELL column of the first painted occurrence of `needle`. */
+const cellIndexOf = (vt: VirtualTerminal, row: number, needle: string): number => {
+  const plain = linesOf(vt)[row] ?? ''
+  const index = plain.indexOf(needle)
+  assert.ok(index >= 0, `row ${row} must contain ${JSON.stringify(needle)}:\n${plain}`)
+  return visibleWidth(plain.slice(0, index))
+}
 const rowLine = (vt: VirtualTerminal, label: string): string | undefined =>
   contentLinesOf(vt).find(line => line.includes(label))
 
@@ -297,6 +317,13 @@ test('a failed directory read becomes an in-panel error state, not a second over
   const view = viewOf(h.vt)
   assert.ok(view.includes('Model catalog unavailable'), `the error state must render in the same panel:\n${view}`)
   assert.ok(view.includes('connection refused'), `the failure detail must render:\n${view}`)
+  // §12.2 role 16: only the failure WORD is `error`; the placeholder wrapper
+  // (and the transport detail) keep the ordinary `textMuted` ink.
+  const failureRow = rowOf(h.vt, 'Model catalog unavailable')
+  assert.equal(h.vt.getCellFgRgb(failureRow, cellIndexOf(h.vt, failureRow, 'Model catalog unavailable')), hexToRgb(currentPalette.error),
+    `the failure word is painted error:\n${viewOf(h.vt)}`)
+  assert.equal(h.vt.getCellFgRgb(failureRow, cellIndexOf(h.vt, failureRow, 'connection refused')), hexToRgb(currentPalette.textMuted),
+    `the failure detail keeps the placeholder ink:\n${viewOf(h.vt)}`)
   h.vt.sendInput(ENTER)
   await settle()
   assert.deepEqual(h.applied, [], 'Enter on the error state must be inert')
@@ -311,6 +338,9 @@ test('a settled empty catalog says No models available', async () => {
   h.hydrate(makeDirectory({ groups: [], failures: [], default: { provider: 'p', model: 'm' } }))
   await h.vt.waitForRender()
   assert.ok(viewOf(h.vt).includes('No models available'), `empty catalog message:\n${viewOf(h.vt)}`)
+  const emptyRow = rowOf(h.vt, 'No models available')
+  assert.equal(h.vt.getCellFgRgb(emptyRow, cellIndexOf(h.vt, emptyRow, 'No models available')), hexToRgb(currentPalette.textMuted),
+    `an ordinary empty message keeps the placeholder ink:\n${viewOf(h.vt)}`)
   h.app.stop()
 })
 
@@ -333,9 +363,37 @@ test('the initial selection is the full current identity, not a same-id other pr
 
 test('current and default badges are independent, using the full identity', async () => {
   const h = await openPicker({ directory: TWO_PROVIDERS, current: { provider: 'openai', model: 'shared-id' } })
-  assert.ok(rowLine(h.vt, 'Sol')?.includes('current'), viewOf(h.vt))
-  assert.ok(rowLine(h.vt, 'Pro')?.includes('default'), viewOf(h.vt))
-  assert.ok(!rowLine(h.vt, 'Opus')?.includes('current'), 'the duplicate-id row must not be current')
+  assert.ok(rowLine(h.vt, 'Sol')?.includes('[current]'), viewOf(h.vt))
+  assert.ok(rowLine(h.vt, 'Pro')?.includes('[default]'), viewOf(h.vt))
+  assert.ok(!rowLine(h.vt, 'Opus')?.includes('[current]'), 'the duplicate-id row must not be current')
+  h.app.stop()
+})
+
+test('the real /model frame paints the §12.2 overlay roles (cursor, title, count, group, chips)', async () => {
+  const h = await openPicker({ directory: TWO_PROVIDERS, current: { provider: 'openai', model: 'shared-id' } })
+  // Role 1 title (bold `textStrong`) and role 12 count (`textMuted`), right
+  // aligned on the SAME row — not a title suffix.
+  const titleRow = rowOf(h.vt, 'Models')
+  assert.equal(h.vt.getCellFgRgb(titleRow, cellIndexOf(h.vt, titleRow, 'Models')), hexToRgb(currentPalette.textStrong),
+    `the title is role 1 bold textStrong:\n${viewOf(h.vt)}`)
+  assert.equal(h.vt.getCellFgRgb(titleRow, cellIndexOf(h.vt, titleRow, '3/3')), hexToRgb(currentPalette.textMuted),
+    `the right-aligned count is role 12 textMuted:\n${viewOf(h.vt)}`)
+  // Role 5 group header: label `textDim`, count `textMuted`.
+  const groupRow = rowOf(h.vt, 'OpenAI')
+  assert.equal(h.vt.getCellFgRgb(groupRow, cellIndexOf(h.vt, groupRow, 'OpenAI')), hexToRgb(currentPalette.textDim),
+    `the group label is role 5 textDim:\n${viewOf(h.vt)}`)
+  assert.equal(h.vt.getCellFgRgb(groupRow, cellIndexOf(h.vt, groupRow, '·')), hexToRgb(currentPalette.textMuted),
+    `the group count is textMuted:\n${viewOf(h.vt)}`)
+  // Role 6 cursor glyph `primary` on the selected row.
+  const selectedSol = rowOf(h.vt, 'Sol')
+  assert.equal(h.vt.getCellFgRgb(selectedSol, cellIndexOf(h.vt, selectedSol, '>')), hexToRgb(currentPalette.primary),
+    `the selection cursor glyph is role 6 primary:\n${viewOf(h.vt)}`)
+  // The state chip keeps `textMuted` in BOTH selection states.
+  assert.equal(h.vt.getCellFgRgb(selectedSol, cellIndexOf(h.vt, selectedSol, '[current]')), hexToRgb(currentPalette.textMuted),
+    `the [current] chip stays textMuted on the SELECTED row:\n${viewOf(h.vt)}`)
+  const unselectedPro = rowOf(h.vt, 'Pro')
+  assert.equal(h.vt.getCellFgRgb(unselectedPro, cellIndexOf(h.vt, unselectedPro, '[default]')), hexToRgb(currentPalette.textMuted),
+    `the [default] chip stays textMuted on the unselected row:\n${viewOf(h.vt)}`)
   h.app.stop()
 })
 
@@ -454,7 +512,7 @@ test('a sessionless inline effort seeds from the global default, with no current
     sessionless: true,
   })
   const sol = rowLine(h.vt, 'Sol')!
-  assert.ok(!sol.includes('current'), `sessionless must not show a current badge: ${sol}`)
+  assert.ok(!sol.includes('[current]'), `sessionless must not show a current chip: ${sol}`)
   assert.ok(sol.includes('effort ‹High›'), `the global default effort must seed the inline value: ${sol}`)
   h.app.stop()
 })
@@ -466,7 +524,7 @@ test('a non-current model seeds its own default effort, never the Session effort
   })
   const sol = rowLine(h.vt, 'Sol')!
   assert.ok(sol.includes('effort ‹Medium›'), `Sol must use its own default (medium): ${sol}`)
-  assert.ok(!sol.includes('current'), `a non-current model must not be current: ${sol}`)
+  assert.ok(!sol.includes('[current]'), `a non-current model must not be current: ${sol}`)
   const plain = rowLine(h.vt, 'Plain')!
   assert.ok(!plain.includes('effort ‹'), `a no-effort model must not show an effort token: ${plain}`)
   h.app.stop()
@@ -931,7 +989,7 @@ test('an 80x6 terminal still shows the selected model primary row and its arrow'
   await settle()
   await h.vt.waitForRender()
   assert.ok(linesOf(h.vt).length <= 6, `frame must fit the terminal:\n${viewOf(h.vt)}`)
-  assert.ok(contentLinesOf(h.vt).some(line => line.startsWith('→ ') && line.includes('Model 0')),
+  assert.ok(contentLinesOf(h.vt).some(line => line.startsWith('> ') && line.includes('Model 0')),
     `the selected primary row/arrow must survive the tiny grant:\n${viewOf(h.vt)}`)
   h.app.stop()
 })
@@ -987,7 +1045,7 @@ test('an unlisted current model selects nothing wrongly and never fakes a catalo
   assert.ok(!viewOf(h.vt).includes('ghost'), `no fabricated current row:\n${viewOf(h.vt)}`)
   const selected = selectedRow(h.vt)
   assert.ok(selected?.includes('Sol'), `the first catalog row wins: ${selected}`)
-  assert.ok(!selected!.includes('current'), 'an unmatched current must not badge a catalog row as current')
+  assert.ok(!selected!.includes('[current]'), 'an unmatched current must not chip a catalog row as current')
   h.app.stop()
 })
 
@@ -1021,7 +1079,7 @@ test('search matches a provider display name and a provider id independently', a
   h.app.stop()
 })
 
-test('a current model that is also the default composes current · default · effort', async () => {
+test('a current model that is also the default composes [current] · [default] · effort', async () => {
   const directory = makeDirectory({
     groups: [{ id: 'p1', name: 'P1', models: [model('sol', { name: 'Sol', efforts: [
       { id: 'low', name: 'Low' }, { id: 'medium', name: 'Medium' }, { id: 'high', name: 'High' },
@@ -1029,8 +1087,8 @@ test('a current model that is also the default composes current · default · ef
     default: { provider: 'p1', model: 'sol' },
   })
   const h = await openPicker({ directory, current: { provider: 'p1', model: 'sol', reasoningEffort: 'medium' } })
-  assert.ok(rowLine(h.vt, 'Sol')?.includes('current · default · effort ‹Medium›'),
-    `the factual badges and the inline effort must compose:\n${viewOf(h.vt)}`)
+  assert.ok(rowLine(h.vt, 'Sol')?.includes('[current] · [default] · effort ‹Medium›'),
+    `the state chips and the inline effort must compose:\n${viewOf(h.vt)}`)
   h.app.stop()
 })
 
@@ -1171,20 +1229,48 @@ const LAYOUT_DIRECTORY = makeDirectory({
 
 const renderAt = (h: Harness, width: number): string[] => h.picker.render(width).map(stripAnsi)
 
+test('the /model selected row is role 8 textStrong and the effort token keeps its own role-4 textDim ink', async () => {
+  // Two effort models: Sol is the selected current+default row, Other is an
+  // UNSELECTED row that also carries an effort token.
+  const directory = makeDirectory({
+    groups: [{ id: 'p1', name: 'P1', models: [
+      model('sol', { name: 'Sol', efforts: [{ id: 'high', name: 'High' }], defaultEffort: 'high' }),
+      model('other', { name: 'Other', efforts: [{ id: 'low', name: 'Low' }], defaultEffort: 'low' }),
+    ] }],
+    default: { provider: 'p1', model: 'sol' },
+  })
+  const h = await openPicker({ directory, current: { provider: 'p1', model: 'sol' } })
+  const selectedSol = rowOf(h.vt, 'Sol')
+  // Role 8: the selected row's LABEL is bold `textStrong` (only the cursor
+  // glyph is `primary`). It used to be the terminal default (chalk.bold only).
+  assert.equal(h.vt.getCellFgRgb(selectedSol, cellIndexOf(h.vt, selectedSol, 'Sol')), hexToRgb(currentPalette.textStrong),
+    `the selected row label is role 8 textStrong:\n${viewOf(h.vt)}`)
+  // Role 4: the effort token carries its OWN `textDim` span, so a nested chip's
+  // reset can never drop it to the terminal default — on either selection state.
+  assert.equal(h.vt.getCellFgRgb(selectedSol, cellIndexOf(h.vt, selectedSol, 'effort ‹')), hexToRgb(currentPalette.textDim),
+    `the effort token keeps its own textDim ink on the SELECTED row:\n${viewOf(h.vt)}`)
+  const unselectedOther = rowOf(h.vt, 'Other')
+  assert.equal(h.vt.getCellFgRgb(unselectedOther, cellIndexOf(h.vt, unselectedOther, 'effort ‹')), hexToRgb(currentPalette.textDim),
+    `the effort token keeps its own textDim ink on the UNSELECTED row:\n${viewOf(h.vt)}`)
+  assert.ok(rowLine(h.vt, 'Sol')?.includes('[current] · [default] · effort ‹High›'),
+    `the chips come first and the effort token last:\n${viewOf(h.vt)}`)
+  h.app.stop()
+})
+
 test('a normal-width badge row stays on one line', async () => {
   const h = await openPicker({ directory: LAYOUT_DIRECTORY, current: { provider: 'p1', model: 'sol' } })
   const lines = renderAt(h, 72)
-  assert.ok(lines.some(line => line.includes('GPT-5.6 Sol') && line.includes('current · default · effort ‹High›')),
+  assert.ok(lines.some(line => line.includes('GPT-5.6 Sol') && line.includes('[current] · [default] · effort ‹High›')),
     `must stay single-line at 72:\n${lines.join('\n')}`)
   h.app.stop()
 })
 
 test('the badge wraps exactly when label + badge no longer fit (no width threshold)', async () => {
   const h = await openPicker({ directory: LAYOUT_DIRECTORY, current: { provider: 'p1', model: 'sol' } })
-  const badge = 'current · default · effort ‹High›'
+  const badge = '[current] · [default] · effort ‹High›'
   // The wrap is measured from the WIDEST form (the active `[ High ]`), so the
   // single/two-line boundary is that width, not the inactive rendering.
-  const measure = 'current · default · effort [ High ]'
+  const measure = '[current] · [default] · effort [ High ]'
   const exact = 2 + visibleWidth('GPT-5.6 Sol') + 2 + visibleWidth(measure)
   const fits = renderAt(h, exact)
   assert.ok(fits.some(line => line.includes('GPT-5.6 Sol') && line.includes(badge)),
@@ -1229,7 +1315,7 @@ test('effort cycling never toggles a row between one and two lines', async () =>
   const h = await openPicker({ directory, current: { provider: 'p1', model: 'sol', reasoningEffort: 'a' } })
   // The SHORT badge would fit here, but the LONGEST candidate does not, so the
   // stable measurement must wrap from the start.
-  const short = 'current · default · effort ‹A›'
+  const short = '[current] · [default] · effort ‹A›'
   const width = 2 + visibleWidth('Sol') + 2 + visibleWidth(short)
   const before = renderAt(h, width)
   assert.ok(!before.some(line => line.includes('Sol') && line.includes('effort ‹A›')),
@@ -1409,7 +1495,7 @@ test('the badge is right-aligned against the row edge', async () => {
   assert.equal(visibleWidth(wide), 72, `a single-line badge row must sit flush right:\n${wide}`)
   assert.ok(wide.trimEnd().endsWith('›'), `the badge must be the last thing on the row:\n${wide}`)
   const narrow = renderAt(h, 34)
-    .find(line => line.includes('current'))!
+    .find(line => line.includes('‹High›'))!
   assert.equal(visibleWidth(narrow), 34, `the wrapped badge line must sit flush right:\n${narrow}`)
   h.app.stop()
 })
@@ -1476,7 +1562,7 @@ test('mixed wrapped/unwrapped rows keep a stable height as the cursor moves', as
   await h.vt.waitForRender()
   const after = renderAt(h, width)
   assert.equal(after.length, heightBefore, `selection move must not change the height:\n${after.join('\n')}`)
-  assert.ok(after.some(line => line.startsWith('→ ') && line.includes('Another Long')),
+  assert.ok(after.some(line => line.startsWith('> ') && line.includes('Another Long')),
     `the selected identity must stay visible:\n${after.join('\n')}`)
   h.app.stop()
 })
@@ -1495,9 +1581,9 @@ test('a wrapped badge under a tight row grant stays in budget and keeps the sele
   h.picker.setMaxRows(grant)
   const lines = renderAt(h, width)
   assert.ok(lines.length <= grant, `render must respect the grant ${grant}:\n${lines.join('\n')}`)
-  assert.ok(lines.some(line => line.startsWith('→ ') && line.includes('A Long')),
+  assert.ok(lines.some(line => line.startsWith('> ') && line.includes('A Long')),
     `the selected primary identity must survive:\n${lines.join('\n')}`)
-  const badgeRow = lines.findIndex(line => line.includes('effort') && !line.startsWith('→ '))
+  const badgeRow = lines.findIndex(line => line.includes('effort') && !line.startsWith('> '))
   if (badgeRow >= 0) {
     assert.equal(h.picker.handleMouse(mouse('press', 3, badgeRow, width, 24)), undefined,
       'a wrapped badge row must stay inert under the tight grant')
@@ -1519,7 +1605,7 @@ test('effort edit mode consumes ↑/↓ and printable keys (no model move, no qu
   await h.vt.waitForRender()
   const view = viewOf(h.vt)
   assert.ok(rowLine(h.vt, 'Sol')?.includes('effort [ Medium ]'), `the effort must not change:\n${view}`)
-  assert.ok(!contentLinesOf(h.vt).some(line => line.startsWith('→ ') && line.includes('Plain')),
+  assert.ok(!contentLinesOf(h.vt).some(line => line.startsWith('> ') && line.includes('Plain')),
     `↑/↓ must not move the selected model:\n${view}`)
   const searchAfter = contentLinesOf(h.vt).find(line => line.trimStart().startsWith('>'))!
   assert.equal(searchAfter, searchBefore, `printable keys must not edit the query:\n${view}`)
@@ -1540,7 +1626,7 @@ test('entering and leaving effort edit preserves the query and the selected mode
   await h.vt.waitForRender()
   const view = viewOf(h.vt)
   assert.ok(rowLine(h.vt, 'Sol')?.includes('effort ‹High›'), `the effort must persist:\n${view}`)
-  assert.ok(contentLinesOf(h.vt).some(line => line.startsWith('→ ') && line.includes('Sol')),
+  assert.ok(contentLinesOf(h.vt).some(line => line.startsWith('> ') && line.includes('Sol')),
     `the selected model must persist:\n${view}`)
   const searchAfter = contentLinesOf(h.vt).find(line => line.trimStart().startsWith('>'))!
   assert.equal(searchAfter, searchBefore, `the query (and cursor) must survive the round trip:\n${view}`)
@@ -1759,8 +1845,8 @@ test('a refresh that drops the reasoning metadata exits Effort mode to the no-ef
   await h.vt.waitForRender()
   const view = viewOf(h.vt)
   assert.ok(!view.includes('[ '), `the focus must be released:\n${view}`)
-  assert.ok(!view.includes('esc back'), `the effort-mode hint must be dropped:\n${view}`)
-  assert.ok(view.includes('enter effort/select'), `the model-mode hint must return:\n${view}`)
+  assert.ok(!view.includes('Esc back'), `the effort-mode hint must be dropped:\n${view}`)
+  assert.ok(view.includes('Enter effort/select'), `the model-mode hint must return:\n${view}`)
   h.vt.sendInput(ENTER) // the no-effort fast path commits directly
   await settle()
   assert.deepEqual(h.applied, [{ provider: 'p1', model: 'sol' }])
@@ -1820,7 +1906,7 @@ test('a refresh that moves the configured selection keeps the Effort-bound row s
   h.hydrate(two, { provider: 'p1', model: 'other' }) // the configured selection moves
   await h.vt.waitForRender()
   const view = viewOf(h.vt)
-  assert.ok(contentLinesOf(h.vt).some(line => line.startsWith('→ ') && line.includes('Sol')),
+  assert.ok(contentLinesOf(h.vt).some(line => line.startsWith('> ') && line.includes('Sol')),
     `the effort-bound row must stay selected:\n${view}`)
   assert.ok(rowLine(h.vt, 'Sol')?.includes('effort [ High ]'), `the active token must sit on the selected row:\n${view}`)
   h.vt.sendInput(LEFT) // still acts on Sol

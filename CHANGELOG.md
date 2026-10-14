@@ -162,6 +162,17 @@
   一并让位(原有行为)。复制当前页原文的键改为裸 `c`(原先实际生效的是 `Shift+C`,而动作栏
   写的是 `C`),与设置工作区、以及 `Copy All [C]` / `Copy value [C]` 两个 badge 完全一致。
 
+- `/model` 等选择器(覆盖层)改用与工作区一致的视觉词汇:选择游标从无色粗体的 `→ ` 改为
+  `>` 的 `primary`(并且现在真的从 `selectListTheme.selectedPrefix` 取,不再内联硬编码);
+  底部提示行改为键名大写、动词小写、`Esc` 置尾(`↑↓ model · Enter effort/select · Esc close`);
+  标题行只承载标题(粗体),计数改为同行的右对齐弱色(不再当下标拼接,放不下时整段丢弃);
+  分组标题的标签与计数分成两级弱色(不再整体加粗);当前值/默认值的裸词 `current`/`default`
+  改为 `[current]`/`[default]` 状态 chip(位置不变、ink 固定为最弱色,不会被选中态重新着色);
+  目录加载失败时失败词用 `error`,而普通的空结果仍为弱色。选中行的文字由「只加粗、无颜色」的
+  终端默认色改为粗体 `textStrong`;徽标里的 effort 值也改为它该有的次级 ink(`textDim`),
+  因为嵌套样式的 reset 会终止其后的外层颜色(实测),自己上色的 span 才不会再掉成终端默认色。
+  settings-list 家族的游标 `›` 也一并改为 `>`。
+
 ### 修复
 
 - TSP 实验渲染器的 `/model`：点击左列 `All models` 或某个 Provider 现在真的会

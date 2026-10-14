@@ -24,6 +24,10 @@ const testTheme: SearchablePickerTheme = {
   noMatch: (text: string) => text,
 }
 
+/** Plain text of one row: the ` · count` group suffix is a separate styled
+ *  span, so the label/count boundary carries ANSI even under a plain theme. */
+const plainRow = (line: string): string => line.replace(/\x1b\[[0-9;]*m/gu, '')
+
 test('search filters labels by case-insensitive substring', () => {
   const items = [
     { value: 'session-a', label: 'alpha', description: 'first' },
@@ -356,6 +360,22 @@ test('uses the groupHeader theme when provided', () => {
   assert.ok(styled[0]!.includes('g'))
 })
 
+test('the selected row cursor comes from the theme selectedPrefix slot (D3: `> `, not `→ `)', () => {
+  // The picker owns the GLYPH (`> `); the theme slot owns the INK. This test
+  // flips the previous hardcoded `'→ '` device — the theme slot was unused
+  // before and the glyph was EAW-ambiguous.
+  const prefixes: string[] = []
+  const theme: SearchablePickerTheme = {
+    ...testTheme,
+    selectedPrefix: (text: string) => { prefixes.push(text); return `{${text}}` },
+  }
+  const picker = new SearchablePicker([{ value: 'a', label: 'alpha' }], 5, theme, {}, {})
+  const rendered = picker.render(40)
+  assert.deepEqual(prefixes, ['> '], 'the picker must ask the theme slot for the `> ` cursor')
+  assert.ok(rendered.some(line => line.includes('{> }alpha')),
+    `the themed prefix must lead the selected row:\n${rendered.join('\n')}`)
+})
+
 test('mixed grouped/ungrouped rows never inherit a stale group header', () => {
   const items = [
     { value: 'a', label: 'alpha', group: 'g1' },
@@ -391,7 +411,7 @@ test('shows filtered/total counts in the header', () => {
 test('renders a hint footer when search is enabled', () => {
   const picker = new SearchablePicker([{ value: 'a', label: 'alpha' }], 5, testTheme, {}, { enableSearch: true })
   const rendered = picker.render(80)
-  assert.ok(rendered.some((line) => line.includes('type to filter')), 'hint missing')
+  assert.ok(rendered.some((line) => line.includes('Type to filter')), 'hint missing')
 })
 
 test('keeps the compact height without hints for inline usage', () => {
@@ -412,7 +432,7 @@ test('reflows to a live row budget without losing selection or hint', () => {
   picker.setMaxRows(8)
   const rendered = picker.render(80)
   assert.ok(rendered.some((line) => line.includes('item 8')), 'selected item must remain visible')
-  assert.ok(rendered.some((line) => line.includes('esc close')), 'hint must remain visible')
+  assert.ok(rendered.some((line) => line.includes('Esc close')), 'hint must remain visible')
   assert.ok(rendered.length <= 8, 'list must fit the live row budget')
 })
 
@@ -430,7 +450,7 @@ test('keeps the hint when a grouped window exceeds a small row budget', () => {
   picker.handleInput('\x1b[B') // select item 1 (still alpha)
   const rendered = picker.render(80)
   assert.ok(rendered.length <= 6, `grouped list must fit the grant (${rendered.length})`)
-  assert.ok(rendered.some((line) => line.includes('esc close')), 'hint must remain visible')
+  assert.ok(rendered.some((line) => line.includes('Esc close')), 'hint must remain visible')
   assert.ok(rendered.some((line) => line.includes('item 1')), 'selected item must remain visible')
 })
 
@@ -465,7 +485,7 @@ test('fits the no-match state to the row grant, keeping the message and hint', (
   const rendered = picker.render(80)
   assert.ok(rendered.length <= 6, `no-match must fit the grant (${rendered.length})`)
   assert.ok(rendered.some((line) => line.includes('No matching')), 'message must survive')
-  assert.ok(rendered.some((line) => line.includes('esc close')), 'hint must survive')
+  assert.ok(rendered.some((line) => line.includes('Esc close')), 'hint must survive')
 })
 
 test('keeps the message over the header on an extreme no-match grant', () => {
@@ -766,7 +786,7 @@ test('selected-below detail stays inside the row budget and keeps the hint', () 
   picker.setMaxRows(8)
   const rendered = picker.render(80)
   assert.ok(rendered.length <= 8, `render must respect the grant, got ${rendered.length}`)
-  assert.ok(rendered.some(line => line.includes('esc close')), 'the hint must survive')
+  assert.ok(rendered.some(line => line.includes('Esc close')), 'the hint must survive')
 })
 
 test('a badge renders right-aligned and yields the label width to it', () => {
@@ -821,7 +841,7 @@ test('an explicit hint overrides the default footer wording', () => {
   })
   const rendered = picker.render(80)
   assert.ok(rendered.some(line => line.includes('custom hint text')), 'custom hint missing')
-  assert.ok(!rendered.some(line => line.includes('type to filter')), 'default hint must be replaced')
+  assert.ok(!rendered.some(line => line.includes('Type to filter')), 'default hint must be replaced')
 })
 
 test('a cursor-only key does not reset the selection to the top', () => {
@@ -856,8 +876,8 @@ test('a tiny grant keeps the search row and the selected primary row (plan §17)
     picker.setMaxRows(grant)
     const rendered = picker.render(60)
     assert.ok(rendered.length <= grant, `grant ${grant} must cap rows, got ${rendered.length}`)
-    assert.ok(rendered.some(line => line.includes('→ Alpha')), `grant ${grant} must keep the selected primary row:\n${rendered.join('\n')}`)
-    assert.ok(rendered.some(line => line.includes('type to filter')), `grant ${grant} keeps the search row:\n${rendered.join('\n')}`)
+    assert.ok(rendered.some(line => line.includes('> Alpha')), `grant ${grant} must keep the selected primary row:\n${rendered.join('\n')}`)
+    assert.ok(rendered.some(line => line.includes('Type to filter')), `grant ${grant} keeps the search row:\n${rendered.join('\n')}`)
   }
 })
 
@@ -877,7 +897,7 @@ test('groupKey separates sections that share a display label', () => {
     { value: 'b', label: 'B', group: 'Same', groupKey: 'g2' },
   ]
   const picker = new SearchablePicker(items, 5, testTheme, {}, {})
-  const rendered = picker.render(40)
+  const rendered = picker.render(40).map(plainRow)
   assert.equal(rendered.filter(line => line.includes('Same · 1')).length, 2,
     `expected two separate "Same" sections:\n${rendered.join('\n')}`)
 })
@@ -888,7 +908,7 @@ test('groupKey falls back to group so existing consumers keep identical grouping
     { value: 'b', label: 'B', group: 'G' },
   ]
   const picker = new SearchablePicker(items, 5, testTheme, {}, {})
-  const rendered = picker.render(40)
+  const rendered = picker.render(40).map(plainRow)
   assert.equal(rendered.filter(line => line.includes('G · 2')).length, 1, rendered.join('\n'))
 })
 
@@ -970,7 +990,7 @@ test('caller-provided chrome (header/noMatch/group) projects to ONE physical row
     assert.ok(visibleWidth(row) <= 80, `a chrome row exceeds the grant: ${JSON.stringify(row)}`)
   }
   assert.ok(rows.some(row => row.includes('head line')), `the collapsed header must render:\n${rows.join('\n')}`)
-  assert.ok(rows.some(row => row.includes('group second · 2')), `the collapsed group header must render:\n${rows.join('\n')}`)
+  assert.ok(rows.map(plainRow).some(row => row.includes('group second · 2')), `the collapsed group header must render:\n${rows.join('\n')}`)
   // The raw group identity/search corpus is untouched (the raw group text
   // still matches a filter).
   picker.setFilter('second')

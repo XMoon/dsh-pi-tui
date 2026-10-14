@@ -245,6 +245,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (the key that really acted was `Shift+C` while the bar wrote `C`), matching the
   Settings workspace and the `Copy All [C]` / `Copy value [C]` badges exactly.
 
+- The pickers (the `/model` overlay and its family) now speak the same visual
+  language as the workspaces: the selection cursor is `>` in `primary` — asked from
+  `selectListTheme.selectedPrefix` instead of being inlined, and no longer the
+  colourless bold EAW-ambiguous `→ `; the hint line capitalizes its key tokens,
+  lowercases its verbs and keeps `Esc` last (`↑↓ model · Enter effort/select · Esc
+  close`); the title row carries only the title (bold) with the count right-aligned
+  in the weaker ink on the same row instead of a suffix (dropped whole when it does
+  not fit); a group header splits into its label and its count in two weaker inks
+  instead of one bold span; the `current` / `default` row states are the
+  `[current]` / `[default]` state chips whose ink stays the weakest one even on a
+  selected row; and a failed catalog paints its failure word `error` while an
+  ordinary empty filter stays muted. The selected row's text is bold `textStrong`
+  instead of a colourless bold default, and the badge's effort value is painted its own
+  secondary ink (`textDim`): a nested span's reset ends the outer colour for everything
+  after it, so a pre-painted state chip used to leave that value in the terminal's
+  default colour. The
+  settings-list family's cursor glyph follows (`›` → `>`).
+
 ### Fixed
 
 - The experimental TSP renderer's `/model`: clicking `All models` or a Provider

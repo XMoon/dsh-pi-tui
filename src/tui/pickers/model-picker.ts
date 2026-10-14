@@ -41,7 +41,7 @@ import {
 import type { OwnedTaskOptions } from '../../runtime/process/tasks.ts'
 import type { ModelSelectionDto } from '../../runtime/catalog-port.ts'
 import { SearchablePicker, type SearchablePickerItem } from './searchable-picker.ts'
-import { selectListTheme } from '../theme/runtime.ts'
+import { color, selectListTheme } from '../theme/runtime.ts'
 
 import type {
   ModelApplyOutcome,
@@ -99,10 +99,11 @@ const FAILURE_PREFIX = `${IDENTITY_SEP}failure${IDENTITY_SEP}`
  *  `groupKey` is its id and can never collide with this NUL-prefixed key). */
 const FAILURE_GROUP_KEY = `${IDENTITY_SEP}unavailable`
 /** Model-mode footer hint: Enter either focuses the inline effort (reasoning
- *  model) or commits directly (no-effort model). */
-const MODEL_MODE_HINT = '↑↓ model · enter effort/select · esc close'
+ *  model) or commits directly (no-effort model). §4.1/§7.1 key tokens are
+ *  Capitalized, verbs lowercase, and `Esc` is last (§7.2/D8). */
+const MODEL_MODE_HINT = '↑↓ model · Enter effort/select · Esc close'
 /** Effort-mode footer hint: the same row, now editing its effort. */
-const EFFORT_MODE_HINT = '←→ effort · enter select · esc back'
+const EFFORT_MODE_HINT = '←→ effort · Enter select · Esc back'
 
 /** The human-facing label for one effort value within a row's candidates. */
 function effortLabelOf(choices: readonly InlineEffortChoice[], value: string): string | undefined {
@@ -283,9 +284,12 @@ export class ModelPicker implements Component, RowBudgetAware, Focusable {
     this.modelsList.setHint(MODEL_MODE_HINT)
     this.failures = []
     this.modelsList.setItems([])
-    this.modelsList.setNoMatchText(message === ''
-      ? '  Model catalog unavailable'
-      : `  Model catalog unavailable: ${message}`)
+    // §12.2/role 16: only a REAL failure names a failure, and that word is
+    // painted `error`. Pre-paint it here so the picker's `noMatch` (`textMuted`)
+    // wrapper does not recolour it (the nested span wins, the outer paint
+    // resumes); an ordinary empty-filter message keeps the placeholder ink.
+    const failure = color.error('Model catalog unavailable')
+    this.modelsList.setNoMatchText(message === '' ? `  ${failure}` : `  ${failure}: ${message}`)
     this.deps.requestRender()
   }
 
@@ -332,13 +336,21 @@ export class ModelPicker implements Component, RowBudgetAware, Focusable {
    *  legible without relying on color. */
   private modelBadgeOf(row: ModelPickerModelRow): string | undefined {
     const parts: string[] = []
-    if (row.isCurrent) parts.push('current')
-    if (row.isDefault) parts.push('default')
     const identity = modelIdentity(row.providerId, row.modelId)
     const choice = this.effortChoices.get(identity)
+    // §4.5/§12.2: a row state is a `[current]` / `[default]` state chip in
+    // `textMuted`, pre-painted so the badge slot's selected-dependent paint
+    // (`primary` on the cursor row, `textDim` otherwise) never recolours it.
+    if (row.isCurrent) parts.push(color.textMuted('[current]'))
+    if (row.isDefault) parts.push(color.textMuted('[default]'))
+    // The effort token keeps the LAST position — the wrapped badge drops from the LEFT,
+    // so the tail is the fact the user is acting on — and it is painted its OWN role-4
+    // ink: a nested span's reset ends the outer ink for everything after it (ANSI cannot
+    // resume a style), so an unstyled tail would fall back to the terminal's default
+    // colour on the selected row (measured in the real `/model` frame).
     if (choice !== undefined) {
       const label = effortLabelOf(this.choicesByModel.get(identity) ?? [], choice)
-      if (label !== undefined) parts.push(effortTokenOf(label, this.isEffortFocused(identity)))
+      if (label !== undefined) parts.push(color.textDim(effortTokenOf(label, this.isEffortFocused(identity))))
     }
     return parts.length === 0 ? undefined : parts.join(' · ')
   }
@@ -349,8 +361,10 @@ export class ModelPicker implements Component, RowBudgetAware, Focusable {
    *  change the physical row count. */
   private widestBadgeOf(row: ModelPickerModelRow): string | undefined {
     const parts: string[] = []
-    if (row.isCurrent) parts.push('current')
-    if (row.isDefault) parts.push('default')
+    // Measurement uses the CHIP text (wider than the bare word), so the
+    // one/two-line wrap decision stays honest.
+    if (row.isCurrent) parts.push('[current]')
+    if (row.isDefault) parts.push('[default]')
     const choices = this.choicesByModel.get(modelIdentity(row.providerId, row.modelId)) ?? []
     if (choices.length > 0) {
       let widest = choices[0]!

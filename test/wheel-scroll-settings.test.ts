@@ -236,7 +236,11 @@ test('/settings lists the Mouse wheel lines row; missing and invalid persisted v
   t.vt.sendInput('Mouse wheel lines')
   const view = await t.view()
   assert.ok(view.includes('Mouse wheel lines'), `row missing:\n${view}`)
-  const row = stripTerminalSequences(view).split('\n').find(line => line.includes('›Mouse wheel lines'))
+  // The detail's TITLE row paints the same `> Mouse wheel lines` shape earlier in the
+  // frame; the list row is the one carrying its value column.
+  const content = (line: string): string => line.slice(line.indexOf('│') + 1, line.lastIndexOf('│')).trim()
+  const row = stripTerminalSequences(view).split('\n')
+    .find(line => line.includes('│') && /^> Mouse wheel lines {2,}\S/.test(content(line)))
   assert.ok(row !== undefined && row.includes('1'),
     `missing persisted value must fall back to 1 (row: ${row}):\n${view}`)
   t.app.dispose()

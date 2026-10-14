@@ -19,7 +19,7 @@
 >
 > This document is VirtualTerminal evidence, not the human one: the real-
 > terminal passes, and what each of them did and did not cover, are recorded in
-> §7.
+> §8.
 
 ## 1. Method (how the BEFORE frames were produced)
 
@@ -48,7 +48,7 @@ Two traps this recorded, both relevant to any future visual evidence:
   the source line that paints it. The `warning`/`borderFocus` collision is the
   substantive one: it is why an ordinary pane focus currently reads as amber.
 
-The temporary dump files are not part of this PR; §7 records the recipe so the
+The temporary dump files are not part of this PR; §9 records the recipe so the
 after-frames can be regenerated the same way.
 
 ## 2. Sample matrix
@@ -65,6 +65,9 @@ after-frames can be regenerated the same way.
 | Job | `80×10` | short screen: facts row gone, facts in the bar |
 | Job | `60×20` | narrow: compact tabs, metadata gone |
 | Job | `44×20` | narrow: affordance yields to the command text |
+| Picker overlay (`/model`) | `120×40` | opened: title + right-aligned count, group header, `[current]` chip, hint line |
+| Picker overlay (`/model`) | `120×40` | a failed catalog: the failure word in `error`, its detail muted |
+| Picker overlay (`/model`) | `80×24` | short overlay: the count still fits right-aligned, chip and hint intact |
 
 `⋮` marks a run of elided blank rows. Frame widths are exact terminal cells;
 the target frames are shown without trailing padding noise.
@@ -680,7 +683,194 @@ At 44 columns the BEFORE frame cuts the command to `pnpm build && pnpm test:…`
 | 11 | Bar started with `Esc back` / `Esc output` | both move to the TAIL | D8: the family puts `Esc` last everywhere (all overlays already do) |
 | — | Follow/End, Find, search layering, copy sinks, Stop admission, body floor, tab hit map, observer lease | unchanged | vocabulary only |
 
-## 5. Measured ink inventory (BEFORE) → target role
+## 5. Picker overlay — the `/model` picker (PR5)
+
+The **Overlay** archetype (§12.2) is the same vocabulary inside a rounded
+`Frame` instead of a full terminal. The `/model` picker is its reference
+surface: a `SearchablePicker` carrying a title row, group headers, a hint line
+and the `/model` badge slot. The overlay is composited over the live editor, so
+the screen around the box is the ordinary one.
+
+**BEFORE — real output**
+
+```text
+🐋  dsh-pi-tui
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+                                                                                                                    full
+↑0 ↓0  t0/s0
+⋮
+                        ╭──────────────────────────────────────────────────────────────────────╮
+                        │ Models  5/5                                                          │
+                        │                                                                      │
+                        │ >                                                                    │
+                        │                                                                      │
+                        │   OpenAI · 3                                                         │
+                        │ → Sol                                                        current │
+                        │   Pro                                                        default │
+                        │   Lite                                                               │
+                        │   Anthropic · 2                                                      │
+                        │   Opus                                                               │
+                        │   Sonnet                                                             │
+                        │                                                                      │
+                        │   ↑↓ model · enter effort/select · esc close                         │
+                        ╰──────────────────────────────────────────────────────────────────────╯
+⋮
+```
+**AFTER — real output at this HEAD**
+
+```text
+🐋  dsh-pi-tui
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+                                                                                                                    full
+↑0 ↓0  t0/s0
+⋮
+                        ╭──────────────────────────────────────────────────────────────────────╮
+                        │ Models                                                           3/3 │
+                        │                                                                      │
+                        │ >                                                                    │
+                        │                                                                      │
+                        │   OpenAI · 2                                                         │
+                        │ > Sol                          [current] · [default] · effort ‹High› │
+                        │   Pro                                                                │
+                        │   Anthropic · 1                                                      │
+                        │   Opus                                                  effort ‹Low› │
+                        │                                                                      │
+                        │   ↑↓ model · Enter effort/select · Esc close                         │
+                        ╰──────────────────────────────────────────────────────────────────────╯
+⋮
+```
+
+The devices it aligns, all of them §12.2 role assignments:
+
+- **cursor** — `→ ` wrapped in `selectedText`, i.e. bold with no colour of its
+  own, and an EAW-ambiguous glyph, becomes `> ` in `primary`; the picker now asks
+  the theme for it (`selectListTheme.selectedPrefix`, a slot that existed and was
+  unused). The search field above the list already painted its own `> ` prompt, so
+  the two now agree instead of disagreeing.
+- **title row** — `Models  5/5` (the count as a title suffix, the title carrying
+  `groupHeader`'s bold `textMuted`) becomes role 1 (bold `textStrong`) with the
+  count right-aligned in role 12 (`textMuted`) on the same row, dropped whole
+  when it cannot fit (§8 step 6).
+- **group header** — the whole `  OpenAI · 3` in bold `textMuted` becomes role 5:
+  the label in `textDim`, the ` · 3` count in `textMuted`, never bold.
+- **hint line** — `↑↓ model · enter effort/select · esc close` becomes
+  `↑↓ model · Enter effort/select · Esc close`: key tokens capitalized, verbs
+  lowercase, `Esc` last (§4.1, §7.1, D8). The picker's own default hints follow
+  the same rule, as does the subagent model menu's.
+- **the row state** — the bare words `current` / `default` become the
+  `[current]` / `[default]` state chips in `textMuted` (§4.5), inside the SAME
+  badge slot, pre-painted at the call site so the slot's selected-dependent
+  paint can never recolour them — and the effort token that shares the badge is
+  painted its own role-4 ink for the same reason: a nested span
+  reset ends the outer ink for everything after it, so the unstyled tail used to
+  fall back to the terminal default colour (measured). The token also keeps the
+  LAST position, because the wrapped badge drops from the LEFT and the tail must be
+  the fact the user is acting on. The wrap measurement uses the
+  chip text, so the layout stays honest.
+- **a failed catalog** — names the failure and paints that word `error` (D11)
+  while its detail resumes the muted ink, because the chip-like pre-paint wins
+  over the picker's own `noMatch` wrapper (the `status.ts:110` precedent). An
+  ordinary empty filter stays muted: only a real failure is painted as one.
+
+**BEFORE — real output**
+
+```text
+🐋  dsh-pi-tui
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+                                                                                                                    full
+↑0 ↓0  t0/s0
+⋮
+                        ╭──────────────────────────────────────────────────────────────────────╮
+                        │ Models  0/0                                                          │
+                        │                                                                      │
+                        │ > zzzznomatch                                                        │
+                        │                                                                      │
+                        │   Model catalog unavailable: connection refused                      │
+                        │                                                                      │
+                        │   ↑↓ model · enter effort/select · esc close                         │
+                        ╰──────────────────────────────────────────────────────────────────────╯
+⋮
+```
+**AFTER — real output at this HEAD**
+
+```text
+🐋  dsh-pi-tui
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+                                                                                                                    full
+↑0 ↓0  t0/s0
+⋮
+                        ╭──────────────────────────────────────────────────────────────────────╮
+                        │ Models                                                           0/0 │
+                        │                                                                      │
+                        │ > zzzznomatch                                                        │
+                        │                                                                      │
+                        │   Model catalog unavailable: connection refused                      │
+                        │                                                                      │
+                        │   ↑↓ model · Enter effort/select · Esc close                         │
+                        ╰──────────────────────────────────────────────────────────────────────╯
+⋮
+```
+
+The same overlay at `80×24` — the count still fits right-aligned, and every
+device keeps its row:
+
+**BEFORE — real output**
+
+```text
+🐋  dsh-pi-tui
+────────────────────────────────────────────────────────────────────────────────
+❯
+────────────────────────────────────────────────────────────────────────────────
+    ╭──────────────────────────────────────────────────────────────────────╮full
+↑0 ↓│ Models  5/5                                                          │
+    │                                                                      │
+    │ >                                                                    │
+    │                                                                      │
+    │   OpenAI · 3                                                         │
+    │ → Sol                                                        current │
+    │   Pro                                                        default │
+    │   Lite                                                               │
+    │   Anthropic · 2                                                      │
+    │   Opus                                                               │
+    │   Sonnet                                                             │
+    │                                                                      │
+    │   ↑↓ model · enter effort/select · esc close                         │
+    ╰──────────────────────────────────────────────────────────────────────╯
+⋮
+```
+**AFTER — real output at this HEAD**
+
+```text
+🐋  dsh-pi-tui
+────────────────────────────────────────────────────────────────────────────────
+❯
+────────────────────────────────────────────────────────────────────────────────
+                                                                            full
+↑0 ↓╭──────────────────────────────────────────────────────────────────────╮
+    │ Models                                                           3/3 │
+    │                                                                      │
+    │ >                                                                    │
+    │                                                                      │
+    │   OpenAI · 2                                                         │
+    │ > Sol                          [current] · [default] · effort ‹High› │
+    │   Pro                                                                │
+    │   Anthropic · 1                                                      │
+    │   Opus                                                  effort ‹Low› │
+    │                                                                      │
+    │   ↑↓ model · Enter effort/select · Esc close                         │
+    ╰──────────────────────────────────────────────────────────────────────╯
+⋮
+```
+
+## 6. Measured ink inventory (BEFORE) → target role
 
 Measured from the cell read-back at `120×40`; token names confirmed against the
 painting source line.
@@ -718,7 +908,7 @@ The two rows in **bold** above are the substantive defects, not taste: an
 unpainted value silently ignores the active palette, and a `borderFocus` equal
 to `warning` makes ordinary focus read as a warning.
 
-## 6. Responsive behaviour: before → after
+## 7. Responsive behaviour: before → after
 
 | Size | BEFORE keeps | AFTER keeps |
 |---|---|---|
@@ -737,7 +927,7 @@ badge, then bar segments, then right-side affordances. The action bar is the
 physical last row at every size and the body floor never falls below 1 row from 3
 terminal rows up — both already true today and both must stay true.
 
-## 7. Real-terminal verification (Settings PR)
+## 8. Real-terminal verification (Settings PR)
 
 Performed on a real TTY (`tmux`, truecolor, this machine), driving the product
 with `dsh --profile <profile>` and reading the pane back with
@@ -770,7 +960,7 @@ the refusal ink is covered by the `VirtualTerminal` cell read-back in
 `test/settings-workspace-visual.test.ts`), CJK/wide-glyph terminals, and any
 terminal other than this one. Those stay `NOT_RUN`, not PASS.
 
-### 7.1 The Job workspace side was accepted on a real terminal by the Owner
+### 8.1 The Job workspace side was accepted on a real terminal by the Owner
 
 The Job workspace is only reachable from the Task Browser, which lists Host
 jobs, so a sessionless TUI cannot show it. The Owner ran the recipe below on a
@@ -790,7 +980,7 @@ document come from the `VirtualTerminal` cell read-back, and the SHARED chrome
 the Job bar reuses (rules budget, glyph widths, ` · ` joins, `Esc` last, a
 `textMuted` bar) was verified on a real terminal in the Settings pass.
 
-## 8. Re-verification recipe
+## 9. Re-verification recipe
 
 For V2/V3 (and for any later surface PR), the after-evidence must be produced
 from the implemented panels, not from this document:

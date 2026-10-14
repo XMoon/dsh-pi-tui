@@ -1251,7 +1251,7 @@ test('generic picker preserves its selected row and hint after a short resize', 
   await vt.waitForRender()
   const view = vt.getViewport().join('\n')
   assert.ok(view.includes('choice 17'), `selected picker row must remain visible:\n${view}`)
-  assert.ok(view.includes('esc close'), `picker hint must remain visible:\n${view}`)
+  assert.ok(view.includes('Esc close'), `picker hint must remain visible:\n${view}`)
   vt.sendInput('\x1b')
   await vt.waitForRender()
 })
