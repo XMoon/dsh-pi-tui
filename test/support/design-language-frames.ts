@@ -123,30 +123,48 @@ export interface ActiveDeviceSite {
 /**
  * §11.3.2/§4.5: "at most one bracketed active label per painted frame". Scans
  * only the caller's CHROME rows for the caller's CHROME label prefixes, reads
- * each one's first cell, and asserts at most one wears `primary`.
+ * every one's first cell, and asserts at most ONE PAINTED OCCURRENCE wears
+ * `primary` — the same label painted twice is two active devices, so the count is
+ * over occurrences, never over distinct names.
  *
- * Returns the prefixes really found primary, so a caller can also assert WHICH
- * device is active this frame (and that the check was not vacuous).
+ * Returns the distinct prefixes really found primary, so a caller can also assert
+ * WHICH device is active this frame (and that the check was not vacuous).
  */
 export function assertOneActiveDevice(frame: PaintedFrame, site: ActiveDeviceSite): string[] {
   const primaries: string[] = []
+  const occurrences: string[] = []
   const found: string[] = []
   for (const rowIndex of site.rows) {
     const row = frame.rows[rowIndex]
     if (row === undefined) continue
+    // Every occurrence of every prefix, not just the first.
+    const matches: { readonly prefix: string; readonly col: number; readonly width: number }[] = []
     for (const prefix of site.labelPrefixes) {
-      const at = row.indexOf(prefix)
-      if (at < 0) continue
-      const col = visibleWidth(row.slice(0, at))
+      let at = row.indexOf(prefix)
+      while (at >= 0) {
+        matches.push({ prefix, col: visibleWidth(row.slice(0, at)), width: visibleWidth(prefix) })
+        at = row.indexOf(prefix, at + 1)
+      }
+    }
+    // A shorter prefix can match INSIDE a longer one (`[Out` in `[Output]`): keep
+    // only the longest match covering each position, so one painted device is one
+    // occurrence instead of two.
+    const kept = matches
+      .sort((left, right) => left.col - right.col || right.width - left.width)
+      .filter((match, index, all) => !all.slice(0, index).some(prior =>
+        prior.col <= match.col && match.col + match.width <= prior.col + prior.width))
+    for (const match of kept) {
       // The prefix starts at the label's opening bracket; a counted label paints
       // the whole `[Label (n)]` device in one ink, so its first cell is the signal.
-      const ink = frame.readColor(rowIndex, col)
+      const ink = frame.readColor(rowIndex, match.col)
       if (ink === undefined) continue
-      found.push(`${prefix}@${rowIndex}:${col}`)
-      if (ink === frame.primaryRgb && !primaries.includes(prefix)) primaries.push(prefix)
+      found.push(`${match.prefix}@${rowIndex}:${match.col}`)
+      if (ink !== frame.primaryRgb) continue
+      occurrences.push(`${match.prefix}@${rowIndex}:${match.col}`)
+      if (!primaries.includes(match.prefix)) primaries.push(match.prefix)
     }
   }
-  assert.ok(primaries.length <= 1,
-    `at most ONE chrome active device may be painted primary, found ${primaries.length} (${primaries.join(', ')}); chrome labels seen: ${found.length === 0 ? 'none' : found.join(', ')}\n${frameText(frame.rows)}`)
+  assert.ok(occurrences.length <= 1,
+    `at most ONE chrome active device may be painted primary, found ${occurrences.length} (${occurrences.join(', ')}); chrome labels seen: ${found.length === 0 ? 'none' : found.join(', ')}\n${frameText(frame.rows)}`)
   return primaries
 }

@@ -209,6 +209,33 @@ test('assertOneActiveDevice rejects a second DECLARED chrome device painted prim
   )
 })
 
+test('assertOneActiveDevice counts PAINTED devices: the same label painted twice is two', () => {
+  // A layout regression that paints the active label twice — `[Output]  [Output]` —
+  // breaks §11.3.2 exactly like two different labels do. Counting distinct NAMES, or
+  // reading only the first occurrence, silently accepts it.
+  const rows = ['[Output]  [Output] ─────', '↑↓ select · Esc close']
+  const secondAt = rows[0]!.indexOf('[Output]', 1)
+  assert.ok(secondAt > 0, 'the fixture really paints the label twice')
+  const colors = new Map<string, number>([['0:0', PRIMARY], [`0:${secondAt}`, PRIMARY]])
+  assert.throws(
+    () => assertOneActiveDevice(syntheticFrame(rows, colors), { rows: [0], labelPrefixes: ['[Output]', '[Command]'] }),
+    /at most ONE chrome active device/,
+    'the same active label painted twice is two active devices',
+  )
+})
+
+test('assertOneActiveDevice counts a label nested in a longer prefix ONCE', () => {
+  // The compact and non-compact label prefixes overlap by construction
+  // (`[Out` ⊂ `[Output]`): one painted device must be one occurrence, not two.
+  const rows = ['[Output]  Command ─────', '↑↓ select · Esc close']
+  const colors = new Map<string, number>([['0:0', PRIMARY]])
+  const device = assertOneActiveDevice(syntheticFrame(rows, colors), {
+    rows: [0],
+    labelPrefixes: ['[Output]', '[Out', '[Command]', '[Cmd'],
+  })
+  assert.deepEqual(device, ['[Output]'], 'a nested prefix must not double-count one device')
+})
+
 test('assertBodyFloor requires real body content, not just in-range indexes', () => {
   const isSettingsBody = (line: string): boolean => /^> \S/.test(line)
   const blank = ['Settings · Categories', '', '↑↓ select · Enter open · Esc close']
