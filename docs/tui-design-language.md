@@ -584,9 +584,13 @@ anchor, without inventing a fourth meaning for `primary`.
   X061) — and is itself clipped to its column with `…` — so a long label is
   never allowed to cut a chip or push it out of the row. **The label clamp is
   every row's, not only a chip row's**: the column is `min(36, longest label,
-  width − chip − 6)` in the `SettingsList`, and a wider label is truncated with
-  `…` there instead of painting past its column (identity beyond the column
-  belongs to the row's description/value, not to the label).
+  width − chip − 6)` in the `SettingsList`, and a wider label is truncated there
+  with a visible `…` instead of painting past its column. The renderer
+  guarantees the COLUMN, never a caller's disambiguation: a surface whose
+  identity does not fit 36 cells must make the visible part distinguishing
+  itself (the `/skill` rows keep the name's tail and put the FULL name in the
+  selected row's description) — a caller that can neither fit the tail nor
+  guarantee a differing description is not covered by this contract.
 - Truncation of content uses `…`. **Action hints never truncate mid-word**: a
   segment is dropped whole (§7.2).
 

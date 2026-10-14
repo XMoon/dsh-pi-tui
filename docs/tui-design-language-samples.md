@@ -1218,8 +1218,12 @@ terminal other than this one. Those stay `NOT_RUN`, not PASS.
 "link:<worktree>"`, `dsh --profile wt`; the bundle list must include
 `@deepseek-ai/dsh-base`, otherwise the TUI never mounts), captured at `44×20`
 and then after a live `tmux resize-window` to `120×40`. At both sizes the row
-paints ONE WHOLE state chip inside the frame — `│ > Standard mode (standard)
- [default]    │` at 44 columns, no `[defaul` fragment, no dangling separator,
+paints ONE WHOLE state chip inside the frame, no `[defaul` fragment, no
+dangling separator, nothing overflowing. The real row, unbroken (two cells
+between the label and the chip, four after it):
+
+    │ > Standard mode (standard)  [default]    │
+
 nothing overflowing — and the ANSI read-back (`tmux capture-pane -e`) gives the
 chip `38;2;107;107;107` (`textMuted`) in both, with the cursor row's label
 `1m` + `245;245;245` (bold `textStrong`). A blank session has no CURRENT preset,
