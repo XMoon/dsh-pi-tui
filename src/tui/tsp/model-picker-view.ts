@@ -23,35 +23,35 @@
  * @module tui/tsp/model-picker-view
  */
 import { ui, span, type Node } from '@stencil-hq/tern'
-import type { PickerAction, PickerColumn, PickerGroup, PickerItem, PickerProps } from '@stencil-hq/tern'
-import type { ModelPickerFailureRow, ModelPickerModelRow } from '../pickers/model-directory.ts'
+import type { PickerAction, PickerGroup, PickerItem, PickerProps } from '@stencil-hq/tern'
+import type { ModelPickerFailureRow } from '../pickers/model-directory.ts'
 import type { ModelPickerIntent } from './model-picker-intents.ts'
 import {
   FAILURE_RETRY_ID,
+  STRIP_LABEL,
   actionKeyboardLive,
   detailReaderGroups,
   draftedEffort,
+  effortItemId,
   failureRowId,
   focusedAction,
   highlightedModel,
-  modelChoices,
   modelRowId,
-  overviewItems,
-  overviewSelected,
   pickerActions,
   pickerSubtitle,
   pickerTitle,
   providerMark,
   readerHead,
-  summaryFacts,
+  stripItems,
+  stripOffered,
   visibleModels,
   type ModelPickerPanel,
 } from './model-picker-state.ts'
 
 export interface ModelPickerViewDeps {
-  /** True when the pane paints the `lg` catalogue sheet and its compact
-   *  selected-model summary (the MEASURED {@link wideCatalog} rule). Informational
-   *  chrome only: it never decides what can be reached or written. */
+  /** True when the pane paints the catalogue's `lg` SHEET form (the measured
+   *  {@link wideCatalog} rule). Density only: it never decides what can be reached
+   *  or written. */
   readonly wide: boolean
   /** Bind one intent to THIS frame's revision (admission lives in the presenter). */
   readonly bind: (intent: ModelPickerIntent) => () => void
@@ -82,8 +82,9 @@ function failureItem(failure: ModelPickerFailureRow): PickerItem {
 const PINNED_GROUP_ID = '\u0000current-default'
 const UNAVAILABLE_GROUP_ID = '\u0000unavailable'
 
-/** The pinned group head: the rows that are really the configured selection. */
-const PINNED_GROUP_LABEL = 'Current / Default'
+/** The pinned group head: the rows that are really the configured selection. The
+ *  design language allows exactly ONE separator (` · `) for joined facts. */
+const PINNED_GROUP_LABEL = 'Current · Default'
 /** The partial-failure group head: the providers whose read failed, plus the one
  *  read-only operation row that re-reads them. */
 const UNAVAILABLE_GROUP_LABEL = 'Unavailable providers'
@@ -119,39 +120,28 @@ function modelOrder(panel: ModelPickerPanel): (string | PickerGroup)[] {
 }
 
 /**
- * The catalogue's ONE optional fact column. The client gives it a FIXED 106px of
- * the row's text area (measured), and it hides it by itself on the narrowest
- * panes, so it buys the drafted effort at the first level without taking anything
- * from the model NAME — the label keeps its intrinsic width and the row's provider
- * detail is what yields. The Overview remains the place where a draft is CHANGED.
- */
-const EFFORT_COLUMN: PickerColumn = { id: 'effort', head: 'Effort', format: 'text', priority: 1, min: 6 }
-
-/**
  * The catalogue's rows: ONE row per model — the model name as the main
  * information, the provider as a deterministic MARK, its real `current`/`Default`
- * badges (never the browse highlight), its drafted effort in the ONE fact column
- * and its complete id available to the client as the row's `title`. An exhausted
- * or partially failed catalogue appends the inert failure rows and the one
- * read-only Retry row.
+ * badges (never the browse highlight) and its complete id available to the client
+ * as the row's `title`. The row deliberately carries NO per-row effort fact: the
+ * effort is edited in the page's own `strip` below the list, where every candidate
+ * of the HIGHLIGHTED model is visible at once (the previous right-hand fact column
+ * cost 106px of the row's text area and read as a column detached from its model).
+ * An exhausted or partially failed catalogue appends the inert failure rows and
+ * the one read-only Retry row.
  */
 function modelItems(panel: ModelPickerPanel): PickerItem[] {
-  const items: PickerItem[] = visibleModels(panel).map((row) => {
-    const draft = draftedEffort(panel, row)
-    const effort = modelChoices(row).find((choice) => choice.value === draft)?.label
-    return {
-      id: modelRowId(row),
-      label: row.modelName,
-      mark: providerMark(row),
-      detail: row.providerName,
-      title: row.modelId,
-      ...(effort === undefined ? {} : { facts: { effort } }),
-      badges: [
-        ...(row.isCurrent ? [{ text: 'current' }] : []),
-        ...(row.isDefault ? [{ text: 'Default' }] : []),
-      ],
-    }
-  })
+  const items: PickerItem[] = visibleModels(panel).map((row) => ({
+    id: modelRowId(row),
+    label: row.modelName,
+    mark: providerMark(row),
+    detail: row.providerName,
+    title: row.modelId,
+    badges: [
+      ...(row.isCurrent ? [{ text: 'current' }] : []),
+      ...(row.isDefault ? [{ text: 'default' }] : []),
+    ],
+  }))
   items.push(...panel.failures.map(failureItem))
   if (panel.failures.length > 0) items.push({ id: FAILURE_RETRY_ID, label: 'Retry failed providers' })
   return items
@@ -167,17 +157,22 @@ function catalogueTotal(panel: ModelPickerPanel): number {
  * The rendered action bar: the state module owns WHICH actions exist (and which
  * the current phase admits), and the focused one — only while the action zone
  * owns the keyboard — carries the app-rendered shape cue, because the SDK has
- * no focus affordance for a button. A phase whose bar no key can run (an
- * admitted write, a running re-read) marks nothing: the cue promises Enter.
+ * no focus affordance for a button. The cue is the `Verb [Enter]` key badge, which
+ * states which key the focused action really owns. A phase whose bar no key can run
+ * (an admitted write, a running re-read) marks nothing: the badge promises Enter.
  */
 function renderedActions(panel: ModelPickerPanel): PickerAction[] {
   const focused = panel.zone === 'primary-action' && actionKeyboardLive(panel)
     ? focusedAction(panel).id
     : undefined
   return pickerActions(panel).map((action) =>
-    // A DISABLED action owns no Enter, so it must not carry the focus cue.
+    // A DISABLED action owns no Enter, so it must not carry the key badge.
+    // The badge is the design language's `Verb [Key]` affordance form: `Enter` is a
+    // real key of the focused action, so the badge states a fact instead of
+    // inventing a focus glyph (`▸` is the DISCLOSURE glyph and never means
+    // "selected"; `[Switch]` would give a verb label brackets).
     action.id === focused && action.label !== undefined && action.disabled !== true
-      ? { ...action, label: `▸ ${action.label}` }
+      ? { ...action, label: `${action.label} [Enter]` }
       : action,
   )
 }
@@ -198,23 +193,6 @@ function pickerState(panel: ModelPickerPanel): Pick<PickerProps, 'state' | 'mess
     ...(panel.notice === '' ? {} : { message: panel.notice }),
     empty: 'No model is advertised by the configured providers.',
   }
-}
-
-/**
- * The catalogue's compact selected-model summary: the HIGHLIGHTED model's
- * read-only facts, in the picker's own below-list preview region. It carries no
- * handler, no candidate and no write, so hiding it (narrow pane) can never remove
- * a required operation.
- */
-function summaryNode(panel: ModelPickerPanel, row: ModelPickerModelRow): Node {
-  return ui.col(
-    { key: 'model-summary' },
-    ui.kv({
-      key: 'model-summary-facts',
-      layout: 'inline',
-      items: summaryFacts(panel, row).map((fact) => ({ k: fact.label, v: fact.value })),
-    }),
-  )
 }
 
 /**
@@ -293,31 +271,39 @@ function modelListPicker(
   key: string,
 ): Node {
   const row = highlightedModel(panel)
-  const page = panel.page
-  const items = page === 'models' ? modelItems(panel) : overviewItems(panel)
   const props: PickerProps & { readonly key: string } = {
     key,
     title: pickerTitle(panel),
     layout: 'rows',
     size: deps.wide ? 'lg' : 'md',
-    // The ONLY preview region the catalogue has is its compact READ-ONLY summary;
-    // every page's real operations live in its own main list at every width.
-    preview: page === 'models' && deps.wide && row !== undefined ? 'below' : 'none',
-    query: page === 'models' ? panel.query : '',
-    cursor: page === 'models' ? panel.cursor : 0,
-    ...(page === 'models' ? { placeholder: 'Search models…' } : {}),
-    items,
-    order: page === 'models' ? modelOrder(panel) : items.map((item) => item.id),
-    total: page === 'models' ? catalogueTotal(panel) : items.length,
-    ...(page === 'models' ? { columns: [EFFORT_COLUMN] } : {}),
-    selected: page === 'models' ? panel.selected : overviewSelected(panel),
-    current: page === 'models' ? panel.rows.filter((item) => item.isCurrent).map(modelRowId) : [],
+    // The catalogue asks for NO preview region: the client reserves a fixed ~36%
+    // of the sheet body for `preview: 'below'` (measured 214px of 594px at
+    // 1280x800) and our read-only summary was one line, so the band read as dead
+    // space above the footer. Everything the page offers is in its own main list
+    // and its own strip instead.
+    preview: 'none',
+    query: panel.query,
+    cursor: panel.cursor,
+    placeholder: 'Search models…',
+    items: modelItems(panel),
+    order: modelOrder(panel),
+    total: catalogueTotal(panel),
+    // The catalogue's OWN Reasoning Effort editor: the native strip between the list
+    // and the action bar, painting one button per candidate of the HIGHLIGHTED model
+    // (the drafted one marked `on`). A model without effort metadata paints no strip
+    // at all, and no page hides that editor behind a second page.
+    ...(stripOffered(panel)
+      ? {
+          strip: { label: STRIP_LABEL, items: stripItems(panel) },
+        }
+      : {}),
+    selected: panel.selected,
+    current: panel.rows.filter((item) => item.isCurrent).map(modelRowId),
     subtitle: pickerSubtitle(panel),
     focus: nativeFocus(panel),
     ...pickerState(panel),
     actions: renderedActions(panel),
   }
-  if (page === 'models' && deps.wide && row !== undefined) return ui.picker(props, summaryNode(panel, row))
   return ui.picker(props)
 }
 

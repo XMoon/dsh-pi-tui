@@ -44,11 +44,14 @@ test('official profile: native /model persists through ConfigEditor and survives
     fixture.pane.key('/model\r')
     await waitForPicker('model directory', fixture.pane)
     assert.equal(records.length, 0)
-    // K2: Enter on the model list only focuses the wide details card; the
-    // Primary Action is the next stop, and only Enter from there commits. The
-    // model advertises no effort metadata, so no effort zone is in between.
+    // K2: Enter on the catalogue opens the read-only Reader (never a write), and
+    // the footer owns the ONE write. This model advertises no effort metadata, so
+    // its catalogue has no strip and one Tab reaches the Primary Action.
     fixture.pane.key('\r')
+    await waitFor('the read-only Reader', () => fixture.pane.output.text().includes('Identity'))
     assert.equal(records.length, 0, 'Enter on the model list is never a write')
+    fixture.pane.key('\u001b')
+    await waitForPicker('back on the catalogue', fixture.pane)
     fixture.pane.key('\t')
     fixture.pane.key('\r')
     await waitFor('official default save settles', () => records.length === 1)
