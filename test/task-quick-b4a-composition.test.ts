@@ -79,6 +79,26 @@ function job(id: string, label: string, status: string, kind = 'bash'): TaskBrow
   return { id, kind, label, status, startedAt: 1_000 }
 }
 
+/** A `#rrggbb` literal as the truecolor value the VirtualTerminal reads back. */
+const hexToRgb = (hex: string): number =>
+  (parseInt(hex.slice(1, 3), 16) << 16) | (parseInt(hex.slice(3, 5), 16) << 8) | parseInt(hex.slice(5, 7), 16)
+
+/** One native SGR left-button press + release at 1-based terminal cells. */
+function click(vt: VirtualTerminal, x: number, y: number): void {
+  vt.sendInput(`\x1b[<0;${x};${y}M`)
+  vt.sendInput(`\x1b[<0;${x};${y}m`)
+}
+
+/** One native SGR left-button press (no release). */
+function press(vt: VirtualTerminal, x: number, y: number): void {
+  vt.sendInput(`\x1b[<0;${x};${y}M`)
+}
+
+/** One native SGR left-button release at 1-based terminal cells. */
+function release(vt: VirtualTerminal, x: number, y: number): void {
+  vt.sendInput(`\x1b[<0;${x};${y}m`)
+}
+
 class JobObservationDouble implements JobObservationPort {
   open(): () => void {
     return () => {}
@@ -885,8 +905,6 @@ test('B4A-04 painting, resizing and wheeling the passive window acknowledge NOTH
 })
 
 test('B4A-08 the painted window uses the frozen role tokens, live across a theme switch', async () => {
-  const hexToRgb = (hex: string): number =>
-    (parseInt(hex.slice(1, 3), 16) << 16) | (parseInt(hex.slice(3, 5), 16) << 8) | parseInt(hex.slice(5, 7), 16)
   const h = startQuick({ cols: 120, rows: 40, taskRead: false, roster: [
     job('j1', 'build', 'running'), job('j2', 'deploy', 'failed'),
   ] })
@@ -989,6 +1007,86 @@ test('B4A-04b after the modal acknowledges, the window still paints the REAL fai
   // …while the resident window keeps reporting the task's own real state: being
   // acknowledged is not being unfailed.
   assert.match(itemRows(h.vt)[0]!, /bash · deploy\s+‣ Failed$/)
+})
+
+// ── The band is a pinned row: every bottom-anchored hit test must follow it ─
+
+test('B4A-07b the fullscreen Todo/dock hit follows the band-pushed layout', async () => {
+  const h = startQuick({ cols: 80, rows: 24, taskRead: false, roster: [
+    job('j1', 'build', 'running'), job('j2', 'test', 'running'), job('j3', 'lint', 'running'),
+    job('j4', 'deploy', 'running'),
+  ] })
+  await flush()
+  // Nine todos give the panel real overflow, so the compact -> full step is a
+  // real state change (with no overflow a panel click closes the panel instead).
+  h.app.setTodoSummary(Array.from({ length: 9 }, (_, index) => ({
+    id: `t-${index}`,
+    content: index === 0 ? 'first todo' : `todo item ${index}`,
+    status: index === 0 ? 'in_progress' as const : 'pending' as const,
+  })))
+  h.app.setFullscreen(true)
+  await h.vt.waitForRender()
+  assert.equal(itemRows(h.vt).length, 3, `the band paints three task rows at 80x24:\n${view(h.vt)}`)
+  const editor = h.editor()
+  const dockRow = rowOf(h.vt, '☑')
+  assert.ok(dockRow >= 0, `the todo dock summary must paint:\n${view(h.vt)}`)
+  // The dock sits directly above the seat, which the band has pushed UP: the
+  // painted geometry is the only authority for the hit.
+  assert.equal(dockRow + 1, editor.top, `the dock is the row above the seat:\n${view(h.vt)}`)
+  assert.ok(!h.app.isTodoPanelVisible(), 'the panel starts closed')
+  // ONE click on the painted dock row opens the panel. With the band missing
+  // from the bottom-anchored computation this row resolves to nothing.
+  click(h.vt, 20, dockRow + 1)
+  await h.vt.waitForRender()
+  assert.ok(h.app.isTodoPanelVisible(), `clicking the painted dock row must open the panel:\n${view(h.vt)}`)
+  assert.ok(!h.app.isTodoPanelExpanded(), 'it opens compact')
+  // The compact panel's own region uses the same offset: a fresh click on a
+  // PANEL row runs the compact -> full step.
+  // Beyond the Todo click-coalescing window (500ms), so this is a DELIBERATE
+  // second gesture rather than a rapid double-click of the same family.
+  await new Promise<void>(resolve => setTimeout(resolve, 600))
+  const panelRow = rowOf(h.vt, 'first todo')
+  assert.ok(panelRow >= 0, `the compact panel must paint its rows:\n${view(h.vt)}`)
+  click(h.vt, 20, panelRow + 1)
+  await h.vt.waitForRender()
+  assert.ok(h.app.isTodoPanelExpanded(), `a panel-row click must expand the panel:\n${view(h.vt)}`)
+})
+
+test('B4A-07c the Question frame option hit follows the band-pushed layout', async () => {
+  const h = startQuick({ cols: 80, rows: 24, taskRead: false, roster: [
+    job('j1', 'build', 'running'), job('j2', 'test', 'running'), job('j3', 'lint', 'running'),
+    job('j4', 'deploy', 'running'),
+  ] })
+  await flush()
+  h.app.setFullscreen(true)
+  await h.vt.waitForRender()
+  assert.equal(itemRows(h.vt).length, 3, `the band paints below the seat:\n${view(h.vt)}`)
+  const question = h.app.askQuestions([{
+    id: 'q', question: 'PICK-ONE-B4A?', options: [{ label: 'OPTION-A' }, { label: 'OPTION-B' }],
+  }])
+  await flush(2)
+  await h.vt.waitForRender()
+  const optionRow = rowOf(h.vt, 'OPTION-B')
+  assert.ok(optionRow >= 0, `the second option must paint in the seat frame:\n${view(h.vt)}`)
+  // The band is still painted under the seat while the frame owns it.
+  assert.ok(itemRows(h.vt).length > 0, `the band remains below the Question seat:\n${view(h.vt)}`)
+  click(h.vt, 10, optionRow + 1)
+  await flush(2)
+  await h.vt.waitForRender()
+  // A single-select option click CHOOSES the row and advances to the review
+  // step, which paints the chosen answer. Asserting THAT (before submitting)
+  // keeps a wrong hit a fast, bounded failure instead of a test that hangs
+  // waiting for a submit the flow is not ready for.
+  const reviewed = rawView(h.vt)
+  assert.ok(reviewed.some(line => line.includes('Submit')),
+    `the click must advance to the review step:\n${view(h.vt)}`)
+  assert.ok(reviewed.some(line => line.includes('OPTION-B')),
+    `the review step must carry the chosen answer:\n${view(h.vt)}`)
+  assert.ok(!reviewed.some(line => /\[1\] OPTION-A/.test(line)),
+    `the option list must be behind the review step:\n${view(h.vt)}`)
+  h.vt.sendInput('\r')
+  const answers = await question
+  assert.equal(answers[0]?.selected[0], 'OPTION-B', 'the click selects the option the user pointed at')
 })
 
 // ── B4A-07 / B4A-10 ────────────────────────────────────────────────────────

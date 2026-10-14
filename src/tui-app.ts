@@ -3521,6 +3521,12 @@ export class TuiApp {
          * (the seat frame and the Todo/dock block) must subtract them. */
         widgetAboveHeight: number
         widgetBelowHeight: number
+        /** B4-A: the painted footprint of the first-party Task Quick band. It
+         * is pinned BETWEEN the editor seat and the below widget zone, so every
+         * bottom-anchored hit test must subtract it exactly like the widget
+         * zones — otherwise the Todo/dock block and the Question frame bounds
+         * shift by its height whenever the band is non-empty. */
+        taskQuickHeight: number
         scrollTop: number
         viewportHeight: number
         /** The painted transcript projection: per-block semantic identity
@@ -11565,6 +11571,7 @@ export class TuiApp {
       dockHeight: paintedHeight(this.dock),
       widgetAboveHeight: paintedHeight(this.widgetsAbove),
       widgetBelowHeight: paintedHeight(this.widgetsBelow),
+      taskQuickHeight: paintedHeight(this.taskQuick),
       scrollTop: scroll?.scrollTop ?? 0,
       viewportHeight: scroll?.viewportHeight ?? 0,
       rows,
@@ -11852,14 +11859,18 @@ export class TuiApp {
    * the shared editor seat, and the below widget zone is a pinned row
    * BETWEEN that seat and the footer — subtracting only the footer would
    * shift every option hit by the widget's height and answer the wrong
-   * option. */
+   * option. B4-A: the first-party Task Quick band is pinned between the seat
+   * and the below widget zone, so it is part of the same offset; its height
+   * comes from the alt screen's LAST PAINTED box (never a live re-render), so
+   * the option hits resolve against the geometry actually on screen. */
   private questionFrameBounds(question: QuestionState): { top: number; bottom: number } | undefined {
     const frame = question.frame
     if (frame === undefined) return undefined
     const width = Math.max(1, this.terminal.columns)
     const footerHeight = this.footer.render(width).length
     const belowWidgetHeight = this.widgetsBelow.render(width).length
-    const bottom = this.terminal.rows - footerHeight - belowWidgetHeight
+    const taskQuickHeight = this.fullscreen?.getPaintedBox(this.taskQuick)?.height ?? 0
+    const bottom = this.terminal.rows - footerHeight - belowWidgetHeight - taskQuickHeight
     return { top: bottom - frame.rows, bottom }
   }
 
@@ -11960,14 +11971,18 @@ export class TuiApp {
       dockHeight: number
       widgetAboveHeight: number
       widgetBelowHeight: number
+      taskQuickHeight: number
     },
     y: number,
   ): 'todo:dock' | 'todo:panel' | undefined {
     // PR-D: the stack order from the screen bottom is footer, below widget
     // zone, editor seat, above widget zone, working, queue, goal, todo,
     // dock — so BOTH widget zones are part of the bottom-anchored offset.
+    // B4-A: the first-party Task Quick band is pinned between the seat and the
+    // below widget zone, so it belongs to the SAME bottom-anchored offset.
     const todoBottom = Math.max(0, Math.min(snapshot.termRows,
-      snapshot.termRows - snapshot.footerHeight - snapshot.widgetBelowHeight - snapshot.editorHeight
+      snapshot.termRows - snapshot.footerHeight - snapshot.widgetBelowHeight
+      - snapshot.taskQuickHeight - snapshot.editorHeight
       - snapshot.widgetAboveHeight - snapshot.workingHeight
       - snapshot.queueHeight - snapshot.goalHeight))
     const todoTop = Math.max(0, todoBottom - snapshot.todoHeight)
