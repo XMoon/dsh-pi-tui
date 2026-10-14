@@ -340,7 +340,7 @@ export class ModelPicker implements Component, RowBudgetAware, Focusable {
    *  wrap-trim never has to reverse-engineer boundaries from the joined text.
    *  The token is `[ Name ]` while THIS model owns the inline effort focus and
    *  `‹Name›` otherwise, so the active state is legible without relying on
-   *  color. The caller joins the parts with ` · ` for the `badge` string. */
+   *  color. The caller joins the parts with `joinBadgeParts` — two adjacent state chips a single space apart, ` · ` otherwise — for the `badge` string. */
   private modelBadgePartsOf(row: ModelPickerModelRow): SearchablePickerBadgePart[] | undefined {
     const parts: SearchablePickerBadgePart[] = []
     const identity = modelIdentity(row.providerId, row.modelId)
