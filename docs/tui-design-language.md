@@ -322,6 +322,10 @@ chrome rules budget of §6.2.
     `Progress: 3/8 checks`.
   - ` / ` joins alternatives *inside one key token*: `PgUp/PgDn`, `Ctrl+F`.
     It never joins fields.
+  - **A key list may contain `/` as one of its own members** (the Job's Find
+    hint: `Ctrl+F / Ctrl+Shift+F / find`). The VERB after the list terminates a
+    hint, so a `/` member is never mistaken for a dangling separator; the older
+    `Find <list> /` shape — verb first, with the list ending in `/` — is retired.
   - Two spaces separate a fixed column label from its value within one row
     (`Command  pnpm build`; `Value       Solarized` uses the padded label column
     of the detail pane).
@@ -806,7 +810,6 @@ is next touched for another reason** (never by a mass search/replace):
 | picker failure placeholder | `Model catalog unavailable: …` is painted `noMatch` (`textMuted`) instead of `error` for the failure word (D11) | next picker change |
 | all overlays | ad-hoc frame sizes (64/72/76/88/100% × 24/26/28) instead of the four-step ladder (D10) | next change to that overlay |
 | `/model` current/default badges | the badge slot is right, but its `current` / `default` are bare words (`model-picker.ts:335-343`) where every row state is a chip (§4.5) — they become `[current] [default]` inside the same slot | next model-picker change |
-| Job Find hint | the Action Bar paints `Find Ctrl+F / Ctrl+Shift+F /` — verb first, with the prefix key trailing — where §7.1's hint grammar is `<Key> <verb>` (the short form `Find /` already matches) | next change to that bar |
 | theme menu / preset picker | the mark is still the literal `← current` (`pickers/theme-menu.ts:119`, `pickers/preset-presentation-pitui.ts:50`) and, in the preset picker, a word inside the description rather than a chip. Both route through the vendored `SettingsListTheme.value` slot, which paints `selected ? primary : textDim` — so the chip must be pre-painted `color.textMuted(...)` at the call site (`status.ts:110` precedent) and the slot's own paint must NOT be changed, and the fork must NOT be touched | next picker change |
 | question flow hints | lowercase keys with `←`/`←→` (`'← back · ↵ submit · esc cancel'`, `'←→ edit'`) instead of §4.1's `Esc`-style casing and the width-safe arrow rule | next question-flow change |
 | task browser hint | `Esc close` sits before `S stop` instead of last (D8) | next task-panel change |

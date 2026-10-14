@@ -441,7 +441,7 @@ line 038
 line 039
 line 040
 Retained preview · not full history                                                                         rows 7-40/40
-s / Shift+S stop · Follow on · Find Ctrl+F / Ctrl+Shift+F / · c copy output · v command · PgUp/PgDn · Esc back
+s / Shift+S stop · Follow on · Ctrl+F / Ctrl+Shift+F / find · c copy output · v command · PgUp/PgDn · Esc back
 ```
 The tab strip is deliberately unchanged: `[Output]` in bold `primary` is the device the Settings pane focus now adopts. What changes: the header identity, the status word, the meta labels, and the facts row (whose two flanking rules are removed — the disclosure becomes a dim status line with the position right-aligned).
 
@@ -494,7 +494,7 @@ line 012
 build failed
 ⋮
 Retained preview · not full history                                                                         rows 1-13/13
-Follow on · [GAP] · Find Ctrl+F / Ctrl+Shift+F / · c copy output · v command · PgUp/PgDn · Esc back
+Follow on · [GAP] · Ctrl+F / Ctrl+Shift+F / find · c copy output · v command · PgUp/PgDn · Esc back
 ```
 `● FAILED [GAP] [SETTLED]` becomes `‣ Failed [GAP] [SETTLED]`: the word is the signal, the colour is secondary, and `●` (U+25CF, East-Asian-Width *ambiguous*) is replaced by the EAW-neutral `‣` (U+2023), which keeps a one-cell glyph anchor without risking a two-cell paint on CJK-width terminals (Owner amendment to D5). The bracketed machine markers stay uppercase — that is the role ALL-CAPS keeps. Note the bar correctly advertises no Stop for a settled job in both frames.
 
@@ -523,7 +523,7 @@ Output  [Command] ────────────────────�
 pnpm build && pnpm test:product
 ⋮
                                                                                                               rows 1-1/1
-c copy all · Find Ctrl+F / Ctrl+Shift+F / · PgUp/PgDn · Esc output
+c copy all · Ctrl+F / Ctrl+Shift+F / find · PgUp/PgDn · Esc output
 ```
 The page label `Full command` is stated once (summary row) instead of twice (summary row *and* status line); the status line keeps only the real position fact. `Copy All [C]` already follows the target affordance grammar (`Verb [Key]`).
 
