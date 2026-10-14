@@ -867,6 +867,114 @@ test('PR5b: the preset picker [current] chip keeps textMuted on BOTH the selecte
   t.app.stop()
 })
 
+test('PR5b: the preset picker paints BOTH state chips whole and no retired prose marker (real overlay frame)', async () => {
+  // §4.5/§12.2 + rollout PR5b requirement 4: the `default` fact left the
+  // description and became a second chip beside `[current]`; the retired
+  // `default · ← current` prose must not come back in any ink. This is the
+  // frame the committed AFTER sample is generated from, so a stale sample
+  // (the pre-migration description) fails here instead of shipping in docs/.
+  const t = setup({ agent: fakeAgent('s1', []), sessionBlank: true, currentPreset: () => 'standard' })
+  const result = await t.run('') as { kind: string }
+  assert.equal(result.kind, 'success')
+  await t.view()
+  const view = plainViewport(t.vt)
+  const currentRow = rowOfText(t.vt, '[current]')
+  assert.ok(view[currentRow]!.includes('[current] [default]'),
+    `the current row must paint BOTH chips whole in its value slot:\n${view.join('\n')}`)
+  const description = view.slice(currentRow + 1).join('\n')
+  assert.ok(!/ default\b/.test(description),
+    `the description must not carry the retired bare \`default\` prose:\n${view.join('\n')}`)
+  assert.ok(!view.some(line => line.includes('← current')),
+    `the retired \`← current\` prose must not be painted anywhere:\n${view.join('\n')}`)
+  t.app.stop()
+})
+
+test('PR5b/X061: the preset state chips stay WHOLE at every supported frame width (real overlay frames)', async () => {
+  // The PR #309 review P2 acceptance matrix. The vendored value slot truncates
+  // by raw width, so the chip is handed to it as a WHOLE part (X061) and the
+  // label column yields: the state is never cut (`[defaul`), never left with a
+  // dangling separator, and never pushed out of the row.
+  const longId = 'a-very-long-custom-preset-name-here'
+  // The custom row publishes no `name`, so its label is `<id> (<id>)` — 73
+  // cells, wider than the 36-cell label column, exactly the review's case.
+  const rows = [{ id: 'standard' }, { id: longId }]
+  for (const width of [120, 67, 66, 59, 58, 57, 56, 52, 48, 44]) {
+    const t = setup({
+      agent: fakeAgent('s1', []),
+      sessionBlank: true,
+      currentPreset: () => 'standard',
+      rows,
+      width,
+      height: 20,
+    })
+    const result = await t.run('') as { kind: string }
+    assert.equal(result.kind, 'success')
+    await t.view()
+    const view = plainViewport(t.vt)
+    const chipRows = view.filter(line => line.includes('[current]'))
+    assert.equal(chipRows.length, 1, `at ${width} columns exactly the current row is marked:\n${view.join('\n')}`)
+    const marked = chipRows[0]!
+    assert.ok(!/\[default(?!\])/.test(marked), `no half chip at ${width} columns:\n${view.join('\n')}`)
+    // §4.5: the pair is two chips — a dropped chip takes its separator with it.
+    assert.ok(!marked.includes('·'), `no dangling separator at ${width} columns:\n${marked}`)
+    // The long label is clipped INSIDE its column: nothing may overflow.
+    for (const line of view) {
+      assert.ok(visibleWidth(line) <= width, `no painted row may exceed ${width} columns:\n${line}`)
+    }
+    t.app.stop()
+    // The process slot is released only by the final dispose (the keybindings
+    // are process-global), so the next width needs its own fresh slot.
+    t.app.dispose()
+  }
+})
+
+test('PR5b/X061: a wide → narrow → wide resize restores both chips and keeps the row clickable', async () => {
+  const longId = 'a-very-long-custom-preset-name-here'
+  const t = setup({
+    agent: fakeAgent('s1', []),
+    sessionBlank: true,
+    currentPreset: () => 'standard',
+    rows: [{ id: 'standard' }, { id: longId }],
+    width: 120,
+    height: 20,
+  })
+  // Overlay mouse integration is a fullscreen-screen behavior (the main-screen
+  // terminal never enables SGR reporting) — the same frame the mouse parity
+  // suites drive.
+  t.app.setFullscreen(true)
+  const result = await t.run('') as { kind: string }
+  assert.equal(result.kind, 'success')
+  await t.view()
+  assert.ok(plainViewport(t.vt).some(line => line.includes('[current] [default]')),
+    `the wide frame paints both chips:\n${plainViewport(t.vt).join('\n')}`)
+  // Shrink: the second chip yields WHOLE, the current chip survives (the label
+  // yields its cells — X061's reservation).
+  t.vt.resize(48, 20)
+  await t.view()
+  let view = plainViewport(t.vt)
+  assert.ok(view.some(line => line.includes('[current]')), `the current chip survives the shrink:\n${view.join('\n')}`)
+  assert.ok(!view.some(line => line.includes('[default')), `the second chip yields whole:\n${view.join('\n')}`)
+  // Widen back: both chips return (no cached width state in the slot).
+  t.vt.resize(120, 20)
+  await t.view()
+  assert.ok(plainViewport(t.vt).some(line => line.includes('[current] [default]')),
+    `both chips must come back after widening:\n${plainViewport(t.vt).join('\n')}`)
+  // Shrink again and click: the hit map is rebuilt for the NARROW geometry, so
+  // a click on the long-name row still selects THAT row (not the chip row).
+  t.vt.resize(48, 20)
+  await t.view()
+  view = plainViewport(t.vt)
+  const targetRow = view.findIndex(line => line.includes('a-very-long-custom'))
+  assert.ok(targetRow >= 0, `the long-name row must be painted:\n${view.join('\n')}`)
+  const leftBorder = view[targetRow]!.indexOf('│')
+  assert.ok(leftBorder >= 0, `frame left border missing:\n${view.join('\n')}`)
+  t.vt.sendInput(`\x1b[<0;${leftBorder + 3};${targetRow + 1}M`)
+  t.vt.sendInput(`\x1b[<0;${leftBorder + 3};${targetRow + 1}m`)
+  await t.view()
+  assert.deepEqual(t.presets.selected, [longId], `the click must select the clicked row:\n${plainViewport(t.vt).join('\n')}`)
+  t.app.stop()
+})
+
 test('/preset <id> with a started session refuses with the locked text', async () => {
   // The Host outcome is scripted explicitly (agent-preset/locked); the double
   // must NOT re-implement the Host blank state machine (§0.11).
@@ -1954,3 +2062,4 @@ test('a sessionless /preset stages the next preset without reading a policy rost
   assert.equal(rosterReads, 0, 'the sessionless selection must not read a chooser-policy roster')
   t.app.stop()
 })
+

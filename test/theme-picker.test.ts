@@ -156,10 +156,16 @@ test('the submenu marks "[current]" by the SELECTION IDENTITY, never a display l
   writeFileSync(filePath, JSON.stringify({ name, colors: { primary: '#aabbcc' } }))
   try {
     const openAtFile = rendered(`file:${name}`)
-    // Exactly ONE row carries the marker, and it is the file row.
-    const marked = themePickerRows(registry).filter(row => openAtFile.includes(`${row.displayName}  [current]`) || openAtFile.split('\n').some(line => line.includes('[current]') && line.includes(row.displayName)))
-    assert.equal(marked.length, 1, `exactly one row must be marked: ${JSON.stringify(themePickerRows(registry))}`)
-    assert.ok(marked[0]?.value === `file:${name}`, `the marked row is the picked file: ${marked[0]?.value}`)
+    // Exactly ONE row carries the marker, and its label is the FILE row's
+    // display name. The generated name is wider than the label column, so the
+    // row is matched on the painted PREFIX: X061 clips an over-wide label with
+    // `…` (and keeps the state chip) instead of overflowing the row.
+    const fileRow = themePickerRows(registry).find(row => row.value === `file:${name}`)
+    assert.ok(fileRow !== undefined, 'the picked file is a row')
+    const markedLines = openAtFile.split('\n').filter(line => line.includes('[current]'))
+    assert.equal(markedLines.length, 1, `exactly one row must be marked:\n${openAtFile}`)
+    assert.ok(markedLines[0]?.includes(fileRow.displayName.slice(0, 20)),
+      `the marked row is the picked file:\n${markedLines[0] as string}`)
   } finally {
     rmSync(filePath, { force: true })
   }

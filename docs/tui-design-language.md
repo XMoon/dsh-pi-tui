@@ -366,7 +366,7 @@ Measured, still in use and *not* introduced by v1:
 | `─` U+2500 | every rule, the editor's top/bottom border, history's stacked divider |
 | ` · ` U+00B7 | the fact/hint separator across the chrome (D4 makes this the only separator) |
 | `↗` U+2197 | the Job `↗ Command` affordance |
-| `←` U+2190 | the three `← current` marks being retired by the Settings and picker PRs (§11.4), and the question flow's chrome hints |
+| `←` U+2190 | the question flow's chrome hints — the three `← current` marks this inventory used to list were retired by the Settings and picker PRs (§11.4) |
 | `▼` `▶` U+25BC/25B6 | the hardcoded sub-call / workflow disclosure (the registry's `▸`/`▾` are neutral) |
 | `◆` U+25C6 | the footer configurator's move-mode marker |
 | `▏` U+258F | the footer configurator's text-edit cursor |
@@ -439,6 +439,17 @@ Rules:
   is painted as ONE emphasised run (the Settings candidate row composes
   `cursor + label + chips` and wraps that), the chip is `textMuted` *and* bold on
   the selected row, and that is accepted.
+- **A state chip is atomic: it is painted WHOLE or not at all.** It is never cut
+  (`[defaul`), and a chip that yields takes its separator with it — a dangling
+  ` · ` is the same defect as a half chip. Where the state sits in a fixed-width
+  fact slot whose width only the RENDERER knows (the vendored `SettingsList`
+  value slot), the row hands the renderer whole parts
+  (`SettingItem.valueParts`, fork divergence X061) instead of a pre-joined
+  string; the renderer keeps the longest whole prefix that fits, highest
+  priority first (`[current]` before `[default]`), and never slices a part. The
+  slot also **reserves the widest chip**: the label column yields those cells
+  and truncates with `…`, so a long label can never push the state out of the
+  row, and no painted row exceeds the width it was given.
 - `[current]` is a neutral state chip (`textMuted`); `[unavailable]` is a problem
   state (`warning`). A state chip is not the only signal on the row — the row's
   own value or label is.
@@ -570,6 +581,11 @@ anchor, without inventing a fourth meaning for `primary`.
   that column.
 - A list row is `cursor(2) + label + gap + value`; the **value truncates first,
   the label owns its cells first** (existing `rowLine`).
+- **A state chip outranks the label's tail.** The value slot's *content* still
+  truncates first (above), but a state chip is chrome, not content: the label
+  column yields the cells for at least one whole chip (§4.5, fork divergence
+  X061) — and is itself clipped to its column with `…` — so a long label is
+  never allowed to cut a chip or push it out of the row.
 - Truncation of content uses `…`. **Action hints never truncate mid-word**: a
   segment is dropped whole (§7.2).
 
@@ -704,6 +720,13 @@ Invariants that hold at every size:
 - A body row is reserved from 3 terminal rows up.
 - The breadcrumb (identity + trail) survives; only the right-hand badge yields.
 - No "minimum terminal size" gate; a 44-column frame stays fully reachable.
+  - **The state guarantee at the floor** (Owner decision 2026-10-14, the PR #309
+    review): at 44 columns a row that carries state still paints **one WHOLE
+    state chip** beside an identifiable label — the label yields its cells and
+    truncates with `…` (§4.5's atomic-chip rule, fork X061). §8's "fully
+    reachable" sentence alone never promised this; it is stated here so a
+    surface cannot trade the chip away for label cells. At wider sizes the pair
+    is complete, and the lower-priority chip yields whole rather than being cut.
 - Layout math uses terminal cells (`visibleWidth`), never string length, and
   never requires East-Asian ambiguous width to be 1 (§4.3).
 
@@ -821,6 +844,11 @@ Enforce only what is cheap and low-false-positive; the rest is review.
 3. **Degradation-ladder test**: for each size in the frozen matrix, assert the
    dropped/kept set matches §8 (this is the test that catches "someone made the
    header taller").
+4. **Atomic state chip** (`packages/pi-tui/test/settings-list.test.ts` for the
+   renderer contract, `test/preset-command.test.ts` + `test/surface-row-grant.test.ts`
+   for the real frames): a chip is never painted partially (`[defaul`), a dropped
+   chip never leaves its separator, an over-wide label is clipped with `…` instead
+   of overflowing, and the chip survives every width from the 44-column floor up.
 
 Items 1–3 are enforced by `test/design-language.test.ts` (item 1), the four frame
 invariants in `test/support/design-language-frames.ts` — called from BOTH visual
@@ -848,6 +876,7 @@ is next touched for another reason** (never by a mass search/replace):
 | footer configurator | cursor `›` in `primary` (`footer/configurator.ts:940`) | next configurator change |
 | all overlays | ad-hoc frame sizes (64/72/76/88/100% × 24/26/28) instead of the four-step ladder (D10) | next change to that overlay |
 | model-picker badge measurement | `widestBadgeOf` measures the RAW effort name while the painted row projects CR/LF to a space, and `visibleWidth('\n')` is 0: a provider name with three or more breaks can make `shouldWrapBadge` decline to wrap while the inline painted row is 1–2 cells too wide (the two non-selected inline returns have no final truncate). Pre-dates the structured parts | next model-picker change |
+| model-picker state chips | two STATE chips are joined with ` · ` (`[current] · [default] · effort ‹High›`) where §4.5/§12.2 write two states as `[current] [unavailable]` — a plain space; ` · ` between bracket groups is the grouped badge's shape. The `SettingsList` value slot (PR5b) uses the space form, so the family is split until the picker is touched | next model-picker change (an Owner call, not an implementation detail) |
 | keybindings UI list / action editor | its own list hardcodes the cursor `›` in `primary` with a ONE-cell gutter (`keybindings/ui/list.ts:101,115`, `ui/action-editor.ts:61`) where §4.3/D3 want `>` (U+203A is EAW-ambiguous) and the family gutter is two cells; its footer hints read `<Key>: <verb>` (`Enter: details · type: search · ←→: edit · ↑↓: move · Esc: back`) instead of §7.1's `<Key> <verb>` | next keybindings-UI change |
 | question flow hints | lowercase keys with `←`/`←→` (`'← back · ↵ submit · esc cancel'`, `'←→ edit'`) instead of §4.1's `Esc`-style casing and the width-safe arrow rule | next question-flow change |
 | task browser hint | `Esc close` sits before `S stop` instead of last (D8) | next task-panel change |
@@ -900,7 +929,7 @@ A **PiTui-painted** overlay is the same vocabulary in a rounded `Frame` instead 
 | Title | role 1 (bold `textStrong`) as the **first row inside the frame**; a title is never inset into the frame's top rule (`╭─ Title ─╮` is not our device — it would fight the `Frame` geometry contract). A context suffix (`Subagent allowed models`) is role 2. |
 | Count / status | role 12, **right-aligned on the title row** (`Models` … `3/8`), exactly as a workspace header aligns its badge. Not a title suffix. |
 | Selection | `> ` in `primary` + the row's text in bold `textStrong` (§5). |
-| Current value | the state chip `[current]` in `textMuted` (§4.5), placed at the end of the row's content — or inside the row's right-aligned fact slot when it has one (`/model`'s badge group, the vendored `SettingsList` value slot). **Never recoloured by selection** — pre-paint it at the call site when the row paints itself as one string. No arrow, no bare word, no leading `✓` gutter. Two states are two chips (`[current] [unavailable]`), not one joined pair. |
+| Current value | the state chip `[current]` in `textMuted` (§4.5), placed at the end of the row's content — or inside the row's right-aligned fact slot when it has one (`/model`'s badge group, the vendored `SettingsList` value slot). **Never recoloured by selection** — pre-paint it at the call site when the row paints itself as one string. No arrow, no bare word, no leading `✓` gutter. Two states are two chips (`[current] [unavailable]`), not one joined pair. **Painted whole or not at all**: in a slot whose width only the renderer knows, hand it whole parts (`valueParts`, X061) — it reserves one chip and drops the rest whole, and the label is what truncates. |
 | Group header | role 5: the group label in `textDim`, its count in `textMuted`, joined by ` · ` (`Directory · 12`). Never bold. |
 | Second-level text | an indented description line (2 cells after the cursor gutter) in `textDim`, wrapped at the list width; a right-aligned value column is the workspace form of the same roles (D14.4). |
 | Disabled / unavailable row | `textDim` plus a reason word (`unavailable`, `read-only`); never colour-only (§3.3.3), and the cursor still moves onto it (no dead rows). |

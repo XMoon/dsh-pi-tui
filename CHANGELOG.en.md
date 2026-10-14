@@ -287,8 +287,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is the `[current]` state chip instead of the literal `← current`: both pickers use
   ONE position (the row's value slot), and its ink is pinned to the weakest token in
   BOTH selection states. The preset's `default` state moved out of the description too
-  and sits beside it as a `[default]` chip — two states are two chips, with the joiner
-  carrying its own ink as well.
+  and sits beside it as a `[default]` chip — two states are two chips, a plain space
+  apart. A chip is now painted whole or not at all: on a narrow terminal the LABEL
+  yields and is clipped with `…`, instead of the chip being cut in half or pushed out
+  of the row by a long preset name.
 
 - The pickers (the `/model` overlay and its family) now speak the same visual
   language as the workspaces: the selection cursor is `>` in `primary` — asked from

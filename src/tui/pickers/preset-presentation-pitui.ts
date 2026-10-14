@@ -11,6 +11,7 @@
  * @module tui/pickers/preset-presentation-pitui
  */
 import type { PresetPresentation, PresetPickerRoster } from '../../app/command/preset-presentation.ts'
+import type { SettingValuePart } from '@xmoon76/pi-tui'
 import { safeErrorMessage } from '../../runtime/process/errors.ts'
 import type { TuiApp } from '../../tui-app.ts'
 import { color } from '../theme/runtime.ts'
@@ -43,6 +44,29 @@ export function pituiPresetPresentation(app: TuiApp): PresetPresentation {
           closer = app.openSettings(
             input.roster.presets.map(preset => {
               const display = presetDisplayText(preset)
+              // §4.5/§12.2: the row state is a WHOLE state chip in the row's
+              // value slot — the SAME position the /settings theme picker uses
+              // — never a word inside the description (which is also painted
+              // only while the row is selected). The chip is PRE-PAINTED
+              // `textMuted` (the `status.ts:110` precedent) because
+              // `settingsListTheme().value` paints `selected ? primary :
+              // textDim`; each part is its own span, so nothing after a nested
+              // reset can lose its ink.
+              // TWO states are TWO chips joined by a plain space (§4.5's
+              // `[current] [unavailable]` shape; the ` · ` join is the grouped
+              // badge's shape), never one joined pair, and neither stays in the
+              // description. The joiner is a `text` part of the slot itself, so
+              // a chip that yields takes its separator with it.
+              // X061: the slot is handed WHOLE parts in priority order — the
+              // renderer drops the lower-priority chip instead of cutting it
+              // (`[default`) and reserves the first chip's cells, clipping the
+              // label instead.
+              const stateParts: SettingValuePart[] = []
+              if (preset.id === input.currentId) stateParts.push({ kind: 'chip', text: color.textMuted('[current]') })
+              if (preset.id === input.defaultId) {
+                if (stateParts.length > 0) stateParts.push({ kind: 'text', text: ' ' })
+                stateParts.push({ kind: 'chip', text: color.textMuted('[default]') })
+              }
               return {
                 id: preset.id,
                 label: `${display.name} (${preset.id})`,
@@ -51,24 +75,11 @@ export function pituiPresetPresentation(app: TuiApp): PresetPresentation {
                   isBuiltInPresetRow(preset) ? 'system' : 'user',
                   preset.broken,
                 ].filter(Boolean).join(' · '),
-                // §4.5/§12.2: the row state is the `[current]` state chip in
-                // the row's value slot — the SAME position the /settings theme
-                // picker uses — never a word inside the description (which is
-                // also painted only while the row is selected). The chip is
-                // PRE-PAINTED `textMuted` (the `status.ts:110` precedent)
-                // because `settingsListTheme().value` paints `selected ?
-                // primary : textDim`; it is the slot's only span, so nothing
-                // after a nested reset can lose its ink.
-                // §4.5/§12.2: TWO states are TWO chips (`[current] [default]`), never
-                // one joined pair — both are state, not prose, so both leave the
-                // description. Each span is pre-painted (the `status.ts:110` precedent),
-                // the ` · ` joiner included: a nested span's reset ends the outer ink for
-                // everything after it, so an unpainted joiner would fall back to the
-                // terminal's default colour between the two chips.
-                currentValue: [
-                  preset.id === input.currentId ? color.textMuted('[current]') : '',
-                  preset.id === input.defaultId ? color.textMuted('[default]') : '',
-                ].filter(chip => chip !== '').join(color.textDim(' · ')),
+                // A display fact only: the slot paints `valueParts`, so the
+                // fork's own `currentValue` (values cycling, updateValue) keeps
+                // its exact semantics and is simply unused for these rows.
+                currentValue: '',
+                valueParts: stateParts,
                 // The values entry makes SettingsList.activateItem fire
                 // onChange on Enter/Space (rows without values or a submenu
                 // are inert) — one key confirms the switch while the selected

@@ -1048,13 +1048,13 @@ selected) into the same slot the theme picker uses:
 13|                         ╭──────────────────────────────────────────────────────────────────────╮
 14|                         │ >                                                                    │
 15|                         │                                                                      │
-16|                         │ > Standard mode (standard)  [current]                                │
+16|                         │ > Standard mode (standard)  [current] [default]                      │
 17|                         │   PTC mode (ptc)                                                     │
 18|                         │   Minimal mode (minimal)                                             │
-19|                         │                                                                      │
-20|                         │   Full coding agent with file editing, shell, file and web search,   │
-21|                         │   skills, planning, goals, subagents, and workflows. · system ·      │
-22|                         │   default                                                            │
+19|                         │   Creator mode (cordis)                                              │
+20|                         │                                                                      │
+21|                         │   Full coding agent with file editing, shell, file and web search,   │
+22|                         │   skills, planning, goals, subagents, and workflows. · system        │
 23|                         │                                                                      │
 24|                         │   Type to search · Enter/Space to change · Esc to cancel             │
 25|                         ╰──────────────────────────────────────────────────────────────────────╯
@@ -1073,15 +1073,53 @@ selected) into the same slot the theme picker uses:
 38|
 39|
 
-# SELECTED LABEL ROW (16): "│ > Standard mode (standard)  [current]                                │"
-# marker row (16): "│ > Standard mode (standard)  [current]                                │"
-# marker cell (row 16, col 54) fg = 7039851
+# SELECTED LABEL ROW (16): "                        │ > Standard mode (standard)  [current] [default]                      │                        "
+# marker row (16): "                        │ > Standard mode (standard)  [current] [default]                      │                        "
+# marker cell (row 16, col 55) fg = 7039851
 ```
 
 The measured ink in those frames: `← current` was `primary` (#4FA8FF) on the cursor
 row and `textDim` (#888888) elsewhere; the `[current]` chip is `textMuted` (#6B6B6B)
-in both states. Two states are two chips (`[current] [default]`), and the ` · `
-joiner is pre-painted too — a nested span's reset ends the outer ink after it.
+in both states. Two states are two chips (`[current] [default]`), a plain space
+apart, and the pair is handed to the slot as WHOLE parts: the renderer reserves one
+chip and drops the rest whole (fork divergence X061), so a narrow frame shows
+`[current]` — never `[defaul`, never a dangling separator — while the LABEL is what
+truncates with `…` instead of pushing the state out of the row.
+
+At `44×20` — the narrowest frame the ladder supports — the chip is still painted
+whole and the lower-priority state yields entirely:
+
+**AFTER — real output at this HEAD (44×20)**
+
+```text
+# current-after-preset-44x20.txt
+# preset picker, cursor ON the current row, 44x20
+ 0| 🐋  dsh-pi-tui
+ 1| ────────────────────────────────────────────
+ 2| ╭──────────────────────────────────────────╮
+ 3| │ >                                        │
+ 4| │                                          │
+ 5| │ > Standard mode (standard)  [current]    │
+ 6| │   PTC mode (ptc)                         │
+ 7| │   Minimal mode (minimal)                 │
+ 8| │   Creator mode (cordis)                  │
+ 9| │                                          │
+10| │   Full coding agent with file editing,   │
+11| │   shell, file and web search, skills,    │
+12| │   planning, goals, subagents, and        │
+13| │   workflows. · system                    │
+14| │                                          │
+15| │   Type to search · Enter/Space to cha... │
+16| ╰──────────────────────────────────────────╯
+17|
+18|
+19|
+
+# SELECTED LABEL ROW (5): "│ > Standard mode (standard)  [current]    │"
+# marker row (5): "│ > Standard mode (standard)  [current]    │"
+# marker cell (row 5, col 31) fg = 7039851
+```
+
 
 ## 6. Measured ink inventory (BEFORE) → target role
 
@@ -1172,6 +1210,26 @@ refused-write path inside a live session (it needs a forced authority conflict;
 the refusal ink is covered by the `VirtualTerminal` cell read-back in
 `test/settings-workspace-visual.test.ts`), CJK/wide-glyph terminals, and any
 terminal other than this one. Those stay `NOT_RUN`, not PASS.
+
+### 8.2 `NOT_RUN` — the state-chip value slot (`[current] [default]`)
+
+The state chips that sit in the vendored `SettingsList` value slot (the
+`/settings` Theme submenu and the `/preset` picker) have **no real-terminal pass
+of their own** — the real pane was not re-driven for them after the structured
+slot landed. What backs them is the `VirtualTerminal` side of §5.1 and the
+behavioral matrix in `test/preset-command.test.ts` / `test/surface-row-grant.test.ts`
+(120/67/66/59/58/57/56/52/48/44 columns, an over-wide label, both selection
+states, and a wide → narrow → wide resize). A real pass needs a profile that
+resolves THIS worktree's build: the development profile on this machine still
+points at the main checkout, so a run against it paints the pre-PR5b product and
+proves nothing about this change. That is a `NOT_RUN`, not a PASS.
+
+| Claim | Evidence today |
+|---|---|
+| the pair is `[current] [default]`, both `textMuted` | `VirtualTerminal` cell read-back (§5.1, `test/preset-command.test.ts`) |
+| a chip is never cut, and a dropped chip takes its separator | fork suite `packages/pi-tui/test/settings-list.test.ts` + the 120/67/66/…/44-column frames |
+| the label yields (clipped with `…`) so the chip survives at 44 columns | `VirtualTerminal` frames at 44×20 (§5.1) and the mouse hit map after a resize |
+| the same in a real TTY | `NOT_RUN` |
 
 ### 8.1 The Job workspace side was accepted on a real terminal by the Owner
 

@@ -119,9 +119,14 @@ export class ThemeSubmenu implements RowBudgetAware, Focusable {
         // is `textMuted` and is NEVER recoloured by the row's selection,
         // while `settingsListTheme().value` paints `selected ? primary :
         // textDim` — so the chip is PRE-PAINTED here (the `status.ts:110`
-        // precedent): the nested span wins for its own cells, and the chip
-        // is the slot's only span, so nothing after a reset can lose ink.
-        currentValue: row.value === current ? color.textMuted('[current]') : '',
+        // precedent) and handed to the renderer as a WHOLE part (X061): the
+        // slot drops it entirely rather than ever painting `[curre`, and the
+        // row's own `currentValue` keeps the fork's values/update semantics
+        // untouched (it is unused for these rows).
+        currentValue: '',
+        valueParts: row.value === current
+          ? [{ kind: 'chip' as const, text: color.textMuted('[current]') }]
+          : undefined,
         values: ['✓'],
       })),
       Math.min(8, Math.max(3, rows.length)),
