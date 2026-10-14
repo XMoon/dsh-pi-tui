@@ -304,7 +304,31 @@ Enter change · ↑↓ scroll · r refresh · c copy value · Esc back
 
 This pair exists because it is the strongest single argument for the target ink table: in the BEFORE frame `Status  Not saved · settings namespace …` is painted in exactly the same terminal-default ink as `Value` and `Runtime` above it, so the one row that says the write was refused looks like every other fact. The target paints only the status **word** (`Not saved` in `error`, `Verified` in `success`, `Outcome unknown` in `warning`, `Saving…` in `textDim`) and leaves the reason `textDim`. Nothing else on this frame changes except the vocabulary the earlier pairs already listed.
 
-### 3.6 Settings change list
+### 3.6 The `[current]` state chip (candidate list)
+
+A focused excerpt of the candidate rows (the choice page is otherwise unchanged apart from the retired verb brackets and the bar). The chip is one lowercase state chip per predicate: it is `textMuted` on its own account, and bold only because the whole selected row is bold (role 8).
+
+**BEFORE — real output (candidate rows, real colours)**
+
+```text
+  auto
+  dark
+  light
+> Solarized  [← current]
+```
+
+**AFTER — target**
+
+```text
+  auto
+  dark
+  light
+> Solarized  [current]
+```
+
+The arrow is gone because `←` (U+2190) is EAW-ambiguous (§4.3), and the chip stays because it is what separates a *state* from the row's own label/value (a candidate value can itself be a word, so `Solarized  current` would read as part of the value). Two states on one row are two chips (`[current] [unavailable]`), never one joined bracket pair — that shape belongs to the grouped badge class (§4.5).
+
+### 3.7 Settings change list
 
 | # | Before | After | Why |
 |---|---|---|---|
@@ -671,6 +695,7 @@ painting source line.
 | Settings detail labels | `textDim` | role 5 `textDim` |
 | Settings detail values | **terminal default (unpainted)** — derived presentation text with no ink at all | role 3 `text` / role 4 `textDim` (the palette-invisible defect of §3.2) |
 | Settings detail buttons | `accent` | role 14 `primary` |
+| Settings candidate state chip | `[← current]` in the row ink (selected → `textStrong`) | row-state chip `[current]` in `textMuted`; two states = two chips |
 | Settings action bar | `textDim` | role 13 `textMuted` |
 | Settings rules | `border` | role 15 `border` |
 | Job `JOB` | `textStrong` | role 1 `textStrong` bold |

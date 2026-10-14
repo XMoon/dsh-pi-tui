@@ -82,9 +82,11 @@ the sizing ladder) — so these are Owner decisions, not implementer inferences.
 
 D14 in full:
 
-1. **Machine chip vs active device.** A bracketed ALL-CAPS chip (`[ACTIVE]`,
-   `[TRACKED]`, `[GAP]`) is a machine label; the active device is Title Case and
-   bold `primary` (`[Output]`, `[Rows (2)]`). They must not be swapped.
+1. **Bracket classes.** Brackets carry exactly six classes — machine marker,
+   machine chip, state chip, key badge, grouped badge and the active device —
+   told apart by case + ink + uniqueness of the bold `primary` bracket, never by
+   position (§4.5). A surface must not invent a seventh, a state chip never
+   joins two states, and a verb label never wears brackets.
 2. **Notice row = role 17** (new): info `textMuted`, error `error`, with the
    `ℹ` / `✗` prefixes added to the glyph inventory.
 3. **The status marker appears only on a standalone status group.** An inline
@@ -361,7 +363,7 @@ Measured, still in use and *not* introduced by v1:
 | `─` U+2500 | every rule, the editor's top/bottom border, history's stacked divider |
 | ` · ` U+00B7 | the fact/hint separator across the chrome (D4 makes this the only separator) |
 | `↗` U+2197 | the Job `↗ Command` affordance |
-| `←` U+2190 | the question flow's chrome hints (`← back`, `←→ edit`, `← back · → skip`) |
+| `←` U+2190 | the three `← current` marks being retired by the Settings and picker PRs (§11.4), and the question flow's chrome hints |
 | `▼` `▶` U+25BC/25B6 | the hardcoded sub-call / workflow disclosure (the registry's `▸`/`▾` are neutral) |
 | `◆` U+25C6 | the footer configurator's move-mode marker |
 | `▏` U+258F | the footer configurator's text-edit cursor |
@@ -380,13 +382,45 @@ new place.** That is why D2 rejects a `│` column rule, and why Pi's `→` curs
 |---|---|---|
 | Navigation cursor | `> ` (2 cells) | one per list; D3 |
 | Active/current label | `[Label]` | focus, active tab, current pane |
-| Current-value marker | row-end word `current` | `textDim`, two cells after the value; never shares the cursor's meaning; **no arrow** — the previous `← current` / `[← current]` forms are replaced because `←` is EAW-ambiguous (§4.3) |
+| Current-value marker | state chip `[current]` | lowercase chip at the end of the row's content, or inside the row's right-aligned fact slot when it has one (§4.5, §5.1.3); **no arrow** — `←` is EAW-ambiguous and the previous `← current` / `[← current]` forms are retired |
 | Status marker | `‣` (U+2023) | the ONE marker for a standalone status group; one cell, EAW neutral; D5+D7 |
 | Disclosure | `▸` / `▾` | collapse state only, never "selected" |
 | Rule | `─` | boundary only |
 | Fact + action-bar separator | ` · ` | D4; the single separator for segments and facts |
 | Notice prefix | `ℹ` / `✗` | info / error notice rows; both EAW neutral; D14 |
 | Ellipsis | `…` | truncation of *content* only, never inside an action hint |
+
+### 4.5 Bracket classes
+
+Brackets are this family's chip syntax and they already carry six distinct
+classes. **A surface must not invent a seventh**, and the classes are told apart
+by **case + ink + whether the bracket is the only bold-`primary` one on the
+frame** — never by position alone.
+
+| Class | Shape | Case | Ink | Examples |
+|---|---|---|---|---|
+| Machine marker | `[WORD]` | ALL-CAPS | semantic (`warning` / `error` / `textMuted`) | `[GAP]`, `[ERROR]`, `[SETTLED]` |
+| Machine chip | `[WORD]` | ALL-CAPS | the carrying line's ink | `[ACTIVE]`, `[TRACKED]` |
+| State chip | `[word]` | lowercase | `textMuted` for a neutral state, the semantic token for a problem state | `[current]`, `[default]`, `[unavailable]` (`warning`), `[read-only]`, `[yolo]`, `[plan]` |
+| Key badge | `[K]` | as the key is spelled | the affordance's ink (`primary`) | `Copy All [C]` |
+| Grouped badge | `[a · b · c]` | lowercase / sentence | the group's ink | footer `[● 1/3 agents · 2/5 tracked jobs · ↓ view]`, context `[████░░░░░░░░] 16%` |
+| Active device | `[Label]` | Title Case | bold `primary` | `[Output]`, `[Rows (2)]`, `[Details]` |
+
+Rules:
+
+- A **state chip** carries exactly ONE boolean state. Several states on one row
+  are several chips — `[current] [unavailable]` — never one bracket pair with a
+  ` · ` join, because that shape belongs to the grouped badge.
+- A **verb label never wears brackets**: an affordance is `Verb [Key]` (key
+  badge) or `Verb…` (§7.1). `[Change…]`, `[Retry save]`, `[Confirm]` and
+  `[Cancel]` are retired by the Settings PR.
+- The **active device** is the only bold-`primary` bracket on a frame; a chip is
+  never bold *of its own account* and a neutral chip is never `primary`. A chip
+  inherits the emphasis of the line that carries it, so on a selected row it is
+  bold like the rest of that row (role 8), exactly as every other field does.
+- `[current]` is a neutral state chip (`textMuted`); `[unavailable]` is a problem
+  state (`warning`). A state chip is not the only signal on the row — the row's
+  own value or label is.
 
 ## 5. The active device
 
@@ -396,7 +430,7 @@ One device, three uses:
 selection in a list         > Appearance            cursor glyph in primary
                             (the row's own text is bold textStrong)
 focused pane / active tab   [Rows (2)] / [Output]   brackets + bold primary
-current value (candidates)  label  current        row-end word, textDim
+current value (candidates)  Solarized  [current]    state chip, textMuted
 ```
 
 ### 5.1 Rules
@@ -417,18 +451,20 @@ current value (candidates)  label  current        row-end word, textDim
    the existing theme device instead of keeping their own. The Host
    `SearchablePicker` still hardcodes a bold `'→ '` (§11.4).
 3. **Selection ≠ current.** The keyboard cursor and the authoritative current
-   value are different facts and get different markers. The current value is a
-   **row-end word `current` in `textDim`, two cells after the value** (D9; the
-   form was amended in review — the *device* is what was chosen: row-end,
-   `textDim`, never competing with the cursor — and the arrow is dropped because
-   `←` U+2190 is EAW-ambiguous, so painting it in every overlay would break
-   §4.3). A second
-   suffix on the same row is joined with ` · ` (`current · unavailable`). The
+   value are different facts and get different markers. The current value is the
+   **state chip `[current]`** (§4.5) in `textMuted` (D9; the form was settled in
+   review — the arrow and the `[← current]` shape are retired because `←`
+   U+2190 is EAW-ambiguous and because a chip is what separates a state from the
+   row's own label/value).
+   **Position follows the row's layout**: a row that already has a right-aligned
+   fact slot puts its state chips in that slot (the `/model` badge group), a row
+   without one puts them at the end of its content. Several states are several
+   chips (`[current] [unavailable]`), never one bracket pair with a join. The
    Job workspace has no list selection.
 4. **Overlays use the same three devices** (D9): `> ` + bold `textStrong` for
    selection, `[Label]` + bold `primary` for the active tab/mode, and the
-   row-end `current` suffix. A picker must not invent `→`, a badge word with a
-   different mark, or a leading `✓`.
+   `[current]` state chip. A picker must not invent `→`, an arrowed or bare-word
+   current mark, or a leading `✓`.
 5. **Disabled / read-only / pending / failed** are words, not just inks: the
    detail pane's `Status` field, the read-only note and the `[Retry save]` verb
    already express them; unavailable candidates keep `[unavailable]`.
@@ -741,8 +777,8 @@ is next touched for another reason** (never by a mass search/replace):
 | picker group headers | bold `textMuted` where role 5 is `textDim` for the label and `textMuted` for its count (D9) | next picker change |
 | picker failure placeholder | `Model catalog unavailable: …` is painted `noMatch` (`textMuted`) instead of `error` for the failure word (D11) | next picker change |
 | all overlays | ad-hoc frame sizes (64/72/76/88/100% × 24/26/28) instead of the four-step ladder (D10) | next change to that overlay |
-| `/model` current/default badges | already painted `textDim`, but as trailing badges rather than the row-end `current` suffix with the standard two-cell gap | next model-picker change |
-| theme menu / preset picker | the `currentValue` mark is still the literal `← current` (`pickers/theme-menu.ts:119`, `pickers/preset-presentation-pitui.ts:50`); it becomes the row-end word `current` | next picker change |
+| `/model` current/default badges | the badge slot is right, but its `current` / `default` are bare words (`model-picker.ts:335-343`) where every row state is a chip (§4.5) — they become `[current] [default]` inside the same slot | next model-picker change |
+| theme menu / preset picker | the mark is still the literal `← current` (`pickers/theme-menu.ts:119`, `pickers/preset-presentation-pitui.ts:50`) and, in the preset picker, a word inside the description rather than a chip | next picker change |
 | question flow hints | lowercase keys with `←`/`←→` (`'← back · ↵ submit · esc cancel'`, `'←→ edit'`) instead of §4.1's `Esc`-style casing and the width-safe arrow rule | next question-flow change |
 | task browser hint | `Esc close` sits before `S stop` instead of last (D8) | next task-panel change |
 | approval dialog | bracketed key choices `[y] allow once   [n] reject   [esc/ctrl+c] cancel` (three-space separator, lowercase keys) | next approval change |
@@ -784,7 +820,7 @@ An overlay is the same vocabulary in a rounded `Frame` instead of a full termina
 | Title | role 1 (bold `textStrong`) as the **first row inside the frame**; a title is never inset into the frame's top rule (`╭─ Title ─╮` is not our device — it would fight the `Frame` geometry contract). A context suffix (`Subagent allowed models`) is role 2. |
 | Count / status | role 12, **right-aligned on the title row** (`Models` … `3/8`), exactly as a workspace header aligns its badge. Not a title suffix. |
 | Selection | `> ` in `primary` + the row's text in bold `textStrong` (§5). |
-| Current value | the row-end word `current` in `textDim`, **two cells after the value**, joined with ` · ` when another suffix shares the row (`current · unavailable`). No arrow, no brackets, no leading `✓` gutter — the arrow form is width-unsafe (§4.3) |
+| Current value | the state chip `[current]` in `textMuted` (§4.5), placed at the end of the row's content — or inside the row's right-aligned fact slot when it has one (`/model`'s badge group). No arrow, no bare word, no leading `✓` gutter. Two states are two chips (`[current] [unavailable]`), not one joined pair. |
 | Group header | role 5: the group label in `textDim`, its count in `textMuted`, joined by ` · ` (`Directory · 12`). Never bold. |
 | Second-level text | an indented description line (2 cells after the cursor gutter) in `textDim`, wrapped at the list width; a right-aligned value column is the workspace form of the same roles (D14.4). |
 | Disabled / unavailable row | `textDim` plus a reason word (`unavailable`, `read-only`); never colour-only (§3.3.3), and the cursor still moves onto it (no dead rows). |
