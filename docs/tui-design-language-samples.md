@@ -1220,7 +1220,7 @@ between the label and the chip, four after it):
 
     │ > Standard mode (standard)  [default]    │
 
-nothing overflowing — and the ANSI read-back (`tmux capture-pane -e`) gives the
+The ANSI read-back (`tmux capture-pane -e`) gives the
 chip `38;2;107;107;107` (`textMuted`) in both, with the cursor row's label
 `1m` + `245;245;245` (bold `textStrong`). A blank session has no CURRENT preset,
 so the state a real `/preset` run shows is `[default]`; the `[current]` chip

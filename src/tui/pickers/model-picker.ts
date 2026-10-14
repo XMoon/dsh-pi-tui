@@ -48,6 +48,7 @@ import type {
   ModelPickerDirectory,
   ModelPickerSubject,
 } from '../../app/command/model-presentation.ts'
+import { singlePhysicalLine } from '../presentation/lines.ts'
 import {
   modelIdentity,
   projectModelDirectory,
@@ -380,7 +381,12 @@ export class ModelPicker implements Component, RowBudgetAware, Focusable {
       for (const choice of choices) {
         if (visibleWidth(choice.label) > visibleWidth(widest.label)) widest = choice
       }
-      parts.push({ kind: 'text', text: effortTokenOf(widest.label, true) })
+      // The painted row projects the label onto ONE physical line, so the
+      // measurement must measure that same text: `visibleWidth('\n')` is 0, which
+      // made the widest badge under-count by a cell or two for an effort name with
+      // three or more breaks and let `shouldWrapBadge` decline to wrap a row that
+      // overflows.
+      parts.push({ kind: 'text', text: effortTokenOf(singlePhysicalLine(widest.label), true) })
     }
     return parts.length === 0 ? undefined : joinBadgeParts(parts)
   }
