@@ -40,7 +40,7 @@ import {
 } from '@xmoon76/pi-tui'
 import type { OwnedTaskOptions } from '../../runtime/process/tasks.ts'
 import type { ModelSelectionDto } from '../../runtime/catalog-port.ts'
-import { SearchablePicker, type SearchablePickerBadgePart, type SearchablePickerItem } from './searchable-picker.ts'
+import { SearchablePicker, joinBadgeParts, type SearchablePickerBadgePart, type SearchablePickerItem } from './searchable-picker.ts'
 import { color, selectListTheme } from '../theme/runtime.ts'
 
 import type {
@@ -300,7 +300,7 @@ export class ModelPicker implements Component, RowBudgetAware, Focusable {
       // ONE parts array per row: the picker's wrap-trim drops WHOLE parts, so
       // an effort NAME containing ` · ` must never be mistaken for a boundary.
       const badgeParts = this.modelBadgePartsOf(row)
-      const badge = badgeParts === undefined ? undefined : badgeParts.map(part => part.text).join(' · ')
+      const badge = badgeParts === undefined ? undefined : joinBadgeParts(badgeParts)
       // Layout measurement uses the WIDEST badge any effort value of this
       // model could render, so cycling the effort never toggles one/two lines.
       const badgeLayoutText = this.widestBadgeOf(row)
@@ -369,20 +369,20 @@ export class ModelPicker implements Component, RowBudgetAware, Focusable {
    *  measurement so neither cycling nor entering/leaving effort focus can
    *  change the physical row count. */
   private widestBadgeOf(row: ModelPickerModelRow): string | undefined {
-    const parts: string[] = []
-    // Measurement uses the CHIP text (wider than the bare word), so the
-    // one/two-line wrap decision stays honest.
-    if (row.isCurrent) parts.push('[current]')
-    if (row.isDefault) parts.push('[default]')
+    const parts: SearchablePickerBadgePart[] = []
+    // Measurement uses the CHIP text (wider than the bare word) and the SAME
+    // joiner as the painted badge, so the one/two-line wrap decision stays honest.
+    if (row.isCurrent) parts.push({ kind: 'chip', text: '[current]' })
+    if (row.isDefault) parts.push({ kind: 'chip', text: '[default]' })
     const choices = this.choicesByModel.get(modelIdentity(row.providerId, row.modelId)) ?? []
     if (choices.length > 0) {
       let widest = choices[0]!
       for (const choice of choices) {
         if (visibleWidth(choice.label) > visibleWidth(widest.label)) widest = choice
       }
-      parts.push(effortTokenOf(widest.label, true))
+      parts.push({ kind: 'text', text: effortTokenOf(widest.label, true) })
     }
-    return parts.length === 0 ? undefined : parts.join(' · ')
+    return parts.length === 0 ? undefined : joinBadgeParts(parts)
   }
 
   /** Whether `identity` is the model currently owning the inline effort focus. */

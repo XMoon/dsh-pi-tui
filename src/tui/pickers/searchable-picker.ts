@@ -85,6 +85,25 @@ function pickKeptRowIndexes(priorities: readonly number[], limit: number): numbe
 
 /** One structured part of a row's `badge`: a state `chip` (whole or absent) or
  * generic pre-painted `text` (whose own content may itself contain ` · `). */
+/** Join one row's badge parts (dsh-pi-tui, PR #309): two ADJACENT state chips sit
+ *  a single space apart — §4.5/§12.2 write two states as `[current] [unavailable]`,
+ *  and ` · ` between bracket groups is the GROUPED badge's shape — while every other
+ *  boundary keeps the chrome separator. The badge string, the wrap MEASUREMENT and
+ *  the tail trim all use this one function, so a layout decision can never disagree
+ *  with what is painted. */
+export function joinBadgeParts(parts: readonly SearchablePickerBadgePart[]): string {
+	let out = ''
+	for (let index = 0; index < parts.length; index += 1) {
+		const part = parts[index]!
+		if (index > 0) {
+			const previous = parts[index - 1]!
+			out += previous.kind === 'chip' && part.kind === 'chip' ? ' ' : ' · '
+		}
+		out += part.text
+	}
+	return out
+}
+
 export interface SearchablePickerBadgePart {
   readonly text: string
   readonly kind: 'chip' | 'text'
@@ -957,8 +976,8 @@ export class SearchablePicker implements Component, Focusable {
     const kept: SearchablePickerBadgePart[] = parts === undefined
       ? badge.split(' · ').map(text => ({ kind: 'text', text }))
       : [...parts]
-    while (kept.length > 1 && visibleWidth(kept.map(part => part.text).join(' · ')) > width) kept.shift()
-    const tail = kept.map(part => part.text).join(' · ')
+    while (kept.length > 1 && visibleWidth(joinBadgeParts(kept)) > width) kept.shift()
+    const tail = joinBadgeParts(kept)
     if (visibleWidth(tail) <= width) return tail
     return kept[0]!.kind === 'chip' ? '' : this.trimTextToWidth(kept[0]!.text, width)
   }
