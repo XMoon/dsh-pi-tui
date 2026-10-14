@@ -57,6 +57,7 @@ alternative; this is the frozen outcome, and the rollout plan may start.
 | D4 | Action-bar separator | **` · `** (U+00B7) | accepted: all three reference TUIs join hint segments with it, and it is already this repo's dominant idiom; the `─` rule grandfathers the same EAW class (§4.2) |
 | D5 | Status presentation | **a Title Case word plus ONE shared status marker** (glyph settled by D7 below) | **Owner amendment**: the word is the signal, but the glyph anchor is kept; `●` (U+25CF, EAW-ambiguous) must go, and the marker is **not** specialised per status (`✓` for done, `✕` for failed, `⊘` for cancelled …) — state is carried by the word and its token, never by a second glyph set (§4.1) |
 | D6 | Job reading-facts row | **remove the two flanking rules** | accepted: a rule marks a boundary and a text line is never flanked (§6.2) |
+| D15 | Editor-seat tenant boundary | **the nested History editor-seat tenant (`Ctrl+R`) draws ONE `─` (role 15) as its FIRST row and ONE as its LAST row, below the action bar**, so the seat is visibly bounded by the transcript above and the footer chrome below. This is a deliberate, Owner-confirmed exception to §6.2's "at most two rules per frame" (that surface may paint three: top boundary, Results/Preview divider, bottom boundary). Degradation is fixed: the **bottom rule yields first, then the top rule**, and only then the Preview/metadata region shrinks; a rule never displaces the header, the query, the action bar or a result/message row, and never takes a transcript/footer row. On this surface the action bar is the last CONTENT row, not the last physical row | Owner decision 2026-10-14: the History seat previously floated against the transcript and the footer with no boundary of its own; the seat declares its own boundary inside its grant rather than altering shared chrome |
 
 Re-opening any of these is a spec change (§11.1): edit this table in the same PR,
 and note a user-visible consequence in the changelog.
@@ -524,7 +525,10 @@ anchor, without inventing a fourth meaning for `primary`.
 ### 6.2 Rules budget
 
 - A rule marks a **boundary between chrome and content**. At most one rule per
-  boundary, at most two per frame.
+  boundary, at most two per frame — with the ONE Owner-confirmed exception of
+  the nested editor-seat tenant (D15, `Ctrl+R` History), which paints a top and
+  a bottom boundary rule of its own plus its Results/Preview divider (three
+  rules, each on a distinct boundary), the bottom rule yielding first.
 - **A line whose own text is the content is never flanked by rules.** The Job
   reading-facts row's two flanking rules (`job-inspector-panel.ts:681`) are
   therefore removed (D6); the disclosure becomes a dim status line, and the
@@ -682,7 +686,10 @@ this is the wording a new surface must match):
 
 Invariants that hold at every size:
 
-- The action bar is the physical last row and is never budgeted away.
+- The action bar is the physical last row and is never budgeted away. (On the
+  nested History editor-seat tenant the D15 bottom boundary rule is the last
+  physical row and the action bar is the last CONTENT row, immediately above
+  it.)
 - A body row is reserved from 3 terminal rows up.
 - The breadcrumb (identity + trail) survives; only the right-hand badge yields.
 - No "minimum terminal size" gate; a 44-column frame stays fully reachable.
@@ -869,7 +876,9 @@ bar, `Esc` last, whole-segment hint drops (never mid-word), role table respected
 `Ctrl+R` History is deliberately NOT an Overlay: since B3-A it is a component
 projected into the shared editor seat (an embedded editor-seat tenant), and B3-B
 aligned it to this vocabulary (role table, `> ` + bold `textStrong` selection,
-`[Label]` active scope, ` · ` action-bar segments, whole-segment drops). It
+`[Label]` active scope, ` · ` action-bar segments, whole-segment drops). Under
+Owner decision D15 it also declares its own boundary with the surrounding chrome:
+one `─` as its first row and one as its last row (below the action bar). It
 creates no `Frame`, no new screen and no overlay node, and its pointer support
 exists only inside Transcript Fullscreen.
 
