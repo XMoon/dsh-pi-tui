@@ -901,6 +901,37 @@ test('the /skill picker keeps two same-prefix long names distinguishable (PR #30
   app.stop()
 })
 
+test('the /skill tail survives the 44-column floor budget (PR #309 review)', async () => {
+  const ctx = new Context()
+  const vt = new VirtualTerminal(44, 20)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  const services = fakeServices()
+  ctx.provide('commands', services.commands as never)
+  ctx.provide('skills', {
+    list: async () => [
+      { name: `${'x'.repeat(35)}AA`, description: '', invocation: { modelInvocable: false, userInvocable: true }, source: 'bundled', provider: 't' },
+      { name: `${'x'.repeat(35)}BB`, description: '', invocation: { modelInvocable: false, userInvocable: true }, source: 'bundled', provider: 't' },
+    ],
+    get: async () => undefined,
+  } as never)
+  const { defs } = services
+  registerTuiCommandsWithDirectSeams(stubRunner(ctx, app, { agent: fakeAgent('session-a') }))
+  const skillDef = defs.find(def => def.name === 'skill')
+  assert.ok(skillDef?.handler !== undefined)
+  await (skillDef!.handler as (invocation: { rawInput: string }) => Promise<unknown>)({ rawInput: '' })
+  await vt.waitForRender()
+  const rows = vt.getViewport()
+  const view = rows.join('\n')
+  const firstRow = rows.find(line => line.includes('AA'))
+  const secondRow = rows.find(line => line.includes('BB'))
+  assert.ok(firstRow !== undefined && secondRow !== undefined,
+    `at 44 columns each row must still keep its own tail:\n${view}`)
+  assert.notEqual(firstRow, secondRow, `the two rows must not paint identically at 44 columns:\n${view}`)
+  app.stop()
+})
+
 test('a direct skill wrapper re-checks the policy on the CURRENT agent at execution time', async () => {
   const ctx = new Context()
   const vt = new VirtualTerminal(80, 24)
