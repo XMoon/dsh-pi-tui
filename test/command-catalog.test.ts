@@ -915,9 +915,20 @@ test('the /skill abbreviation also separates two names that share a SUFFIX (PR #
   const suffix = `${'y'.repeat(33)}ZZ`
   const front = { name: `frontend-common-workflow-${suffix}`, description: '', invocation: { modelInvocable: false, userInvocable: true }, source: 'bundled', provider: 't' }
   const back = { name: `backend--common-workflow-${suffix}`, description: '', invocation: { modelInvocable: false, userInvocable: true }, source: 'bundled', provider: 't' }
-  const emoji = { name: `${'e'.repeat(30)}\u{1F680}\u{1F680}\u{1F680}\u{1F680}`, description: '', invocation: { modelInvocable: false, userInvocable: true }, source: 'bundled', provider: 't' }
+  // Six astral characters at the END: the 34-cell budget (33 + the ellipsis) must
+  // keep them all WHOLE in the label. A loop that walked UTF-16 CODE UNITS would
+  // spend a unit per surrogate half and stop short of (or inside) the sixth
+  // rocket, so the count and the lone-surrogate check below are the witness.
+  const rockets = '\u{1F680}'.repeat(6)
+  const emoji = { name: `${'e'.repeat(30)}${rockets}`, description: '', invocation: { modelInvocable: false, userInvocable: true }, source: 'bundled', provider: 't' }
   ctx.provide('skills', { list: async () => [front, back, emoji], get: async () => undefined } as never)
   const { defs } = services
+  const originalOpenSettings = app.openSettings.bind(app)
+  let captured: { items: readonly SettingItem[] } | undefined
+  app.openSettings = ((items, onChange, onCancel, onHidden) => {
+    captured = { items }
+    return originalOpenSettings(items, onChange, onCancel, onHidden)
+  }) as typeof app.openSettings
   registerTuiCommandsWithDirectSeams(stubRunner(ctx, app, { agent: fakeAgent('session-a') }))
   const skillDef = defs.find(def => def.name === 'skill')
   assert.ok(skillDef?.handler !== undefined)
@@ -931,7 +942,16 @@ test('the /skill abbreviation also separates two names that share a SUFFIX (PR #
   assert.notEqual(frontRow, backRow, `two same-suffix names must not paint identically:\n${view}`)
   const emojiRow = rows.find(line => line.includes('eeee'))
   assert.ok(emojiRow !== undefined, `an astral-character name must still paint:\n${view}`)
-  assert.ok(visibleWidth(emojiRow) <= 80, 'a label must never exceed its row')
+  // Assert on the REAL row label, not on the terminal-bounded viewport line: the
+  // label must spend its 34 cells on whole code points.
+  const emojiItem = captured!.items.find(item => item.id === emoji.name)
+  assert.ok(emojiItem !== undefined, `the astral-name row must be handed to the overlay:\n${view}`)
+  const emojiLabel = emojiItem.label
+  assert.equal([...emojiLabel].filter(char => char === '\u{1F680}').length, 6,
+    `every astral character must survive whole: ${JSON.stringify(emojiLabel)}`)
+  assert.equal(visibleWidth(emojiLabel), 34, `the label must fill its budget: ${JSON.stringify(emojiLabel)}`)
+  assert.ok(!/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/u.test(emojiLabel),
+    `no lone surrogate may reach the label: ${JSON.stringify(emojiLabel)}`)
   app.stop()
 })
 
