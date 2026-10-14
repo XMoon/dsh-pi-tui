@@ -64,8 +64,10 @@ and note a user-visible consequence in the changelog.
 ### 1.4 Family-consistency decisions (same review)
 
 Checking the frozen target against the rest of the family showed places where
-the *target itself* would still leave two conventions standing. They were
-decided in the same review; these are rules, not open questions.
+the *target itself* would still leave two conventions standing. Each was chosen
+by the Owner from an explicit option list during the same review — including the
+two that widen the scope beyond Settings/Job (`D9` overlay adoption and `D10`
+the sizing ladder) — so these are Owner decisions, not implementer inferences.
 
 | # | Decision | Rule | Why |
 |---|---|---|---|
@@ -171,7 +173,7 @@ can be reviewed against a frame:
 | 6 | Active glyph (navigation cursor) | `primary` | no | `> ` leading a list row |
 | 7 | Active label (focused pane / active tab) | `primary` | yes | `[Rows (2)]`, `[Output]` |
 | 8 | Selected row text | `textStrong` | yes | the selected row's label and value |
-| 9 | Status word (+ the shared marker `‣`) | `success` / `warning` / `error` / `textDim` | no | `‣ Running`, `‣ Failed`, `Completed`, `Ready`, `Stale` |
+| 9 | Status word (+ the shared marker `‣`) | `success` / `warning` / **`primary`** / `error` / `textDim` | no | `‣ Running` (`primary`), `‣ Failed` (`warning`), `Completed` (`textDim`), `Ready` (`textMuted`), `Stale` (`warning`) |
 | 10 | Machine marker | `warning` / `error` / `textMuted` | no | `[GAP]`, `[ERROR]`, `[SETTLED]` |
 | 11 | Diagnostic line | `textMuted` | no | `Scope: … · Refreshed 09:41` |
 | 12 | Count / position | `textMuted` | no | `2 editable rows`, `rows 7-40/40`, `3/8 checks` |
@@ -510,12 +512,20 @@ anchor, without inventing a fourth meaning for `primary`.
 - **State fact** = `<Noun> <state>`: `Follow on`, `Follow paused`,
   `rows 7-40/40`, `Retained preview · not full history`. A fact never begins
   with a key name, so the two segment kinds stay distinguishable on one row.
-- Keys come from the **live effective keymap**, never from a hardcoded literal
-  for a rebindable action (`componentKeymap.keyHint('tasks.stop')` is the
-  existing correct pattern; `settings-workspace-panel.ts:1185-1186` compares raw
-  characters and must move to the keymap in the V2 PR). This is the one
-  governance rule all three reference TUIs state in their own words — each of
-  them guards it (or its equivalent) in CI (§13).
+- Keys come from the **live effective keymap** for every action that is a
+  rebindable app action (`componentKeymap.keyHint('tasks.stop')` is the existing
+  correct pattern). This is the one governance rule all three reference TUIs
+  state in their own words — each of them guards it (or its equivalent) in CI
+  (§13).
+- **A surface-local key that is deliberately NOT rebindable derives both its
+  handler and its hint from one local constant.** The Settings workspace's
+  `r refresh` and `c copy value` are such keys: they are read by raw character
+  comparison today (`settings-workspace-panel.ts:1185-1186`) and there is no
+  corresponding `APP_KEYBINDINGS` action. The V2 PR must introduce ONE local
+  table used by both the handler and the hint — not a new rebindable action
+  (that is a keybinding-contract change, not a visual one) and not two copies of
+  the letter. If these keys are ever made rebindable, that lands with the
+  keybinding contract and the hint then switches to `componentKeymap`.
 - An affordance with a key renders `Verb [Key]` (`Copy All [C]`); a
   **direct action with no key renders `Verb`** (`Retry save` — click-only); an
   affordance that opens a further step renders `Verb…` (`Change…`). The current
@@ -537,10 +547,11 @@ cancel` abandons an in-progress action, `Esc output` returns from the Command
 page to Output. One surface keeps one verb; the verb must never be chosen for
 cosmetic uniformity, because a hint that names the wrong destination is a lie.
 
-The bar **drops whole segments by ascending priority**, then compacts a
-segment that declares a `short` form, and only truncates as the last resort with
-one segment left. `job-inspector-panel.ts:698-715` is the reference
-implementation; the Settings bar (which today truncates mid-hint —
+The bar acts in this order: **compact a segment that declares a `short` form
+first, then drop whole segments by ascending priority**, and only truncate as the
+last resort with one segment left. `renderActionBarRow`
+(`src/tui/presentation/action-bar.ts`, moved verbatim out of the Job panel) is the
+reference implementation; the Settings bar (which today truncates mid-hint —
 `Esc back | ↑↓/Pg keys scroll | Enter change…` at 44 columns) adopts it. `Esc`
 carries the highest priority in every surface, so moving it to the tail does not
 make it droppable.
@@ -575,8 +586,12 @@ this is the wording a new surface must match):
 6. Count/status in the header — dropped whole, never truncated
    (`composeEdge` already drops the right region before the left).
 7. Individual action-bar segments — dropped whole, lowest priority first.
-8. Right-side affordances — yield to their content: at narrow widths the
-   `↗ Command` affordance is dropped before the command text is cut to nothing.
+8. Right-side affordances — a right-aligned affordance is painted only while the
+   **whole** left-hand content still fits beside it; otherwise the affordance is
+   dropped so the content keeps its cells (a truncated keyed affordance is worse
+   than none, and the summary row is itself clickable). This is a fit test, not a
+   width-class test: at 60 columns the command and `↗ Command` coexist, at 44 the
+   affordance yields.
 
 Invariants that hold at every size:
 
@@ -678,10 +693,13 @@ visual item, and an unrun screenshot must never be reported as PASS.
 
 Enforce only what is cheap and low-false-positive; the rest is review.
 
-1. **Chrome glyph width gate** (new, small): extend the existing width-gate
-   pattern of `test/icons.test.ts` with the canonical chrome glyph inventory
-   (§4.4) — each entry must be 1 cell under `visibleWidth()` *and* EAW
-   neutral/narrow/halfwidth. This makes §4.3 regression-proof.
+1. **Chrome glyph width gate** (`test/design-language.test.ts`): the canonical
+   chrome glyph inventory (§4.4) must be 1 cell under `visibleWidth()` *and* EAW
+   neutral/narrow/halfwidth, one glyph must not carry two meanings, and the
+   rejected per-status glyphs are pinned as data. This makes §4.3
+   regression-proof. It is a **static inventory check**: it never substitutes for
+   the real-frame evidence §11.2 asks for, and it says nothing about a painted
+   surface.
 2. **Frame invariants in the two existing visual suites** (add, don't duplicate):
    - at most one bracketed active label per painted frame;
    - the action bar is the last physical row at every size in the matrix;
@@ -766,7 +784,7 @@ An overlay is the same vocabulary in a rounded `Frame` instead of a full termina
 | Disabled / unavailable row | `textDim` plus a reason word (`unavailable`, `read-only`); never colour-only (§3.3.3), and the cursor still moves onto it (no dead rows). |
 | Placeholder / loading / failure | role 16: `textDim`; a failed one names the failure and paints that word `error` (`Model catalog unavailable: …`); loading is a word (`Loading models…`), never animation. |
 | Bottom row | inside the frame; `Esc` is its **last** segment (D8) and the hint line uses ` · ` (D4). |
-| Sizing ladder | **narrow `64` · standard `72` · wide `88` · full `100%`** columns, choosing the first step that fits the terminal; height is `min(rows − 2, cap)` with the cap owned by the step (`24` for narrow/standard, `28` for wide, the terminal for full). Per-surface exceptions are allowed but must be listed in the surface's own doc, not chosen ad hoc. |
+| Sizing ladder | The step is chosen by **content type** and is never stepped UP merely because the terminal is wide: a short menu ≈ `64`; the default interactive list ≈ `72`; a list with long values, badges or a detail column ≈ `88`; a surface that must present a whole document or decision (a long-command approval, a full-screen list) = `100%`. The effective width is the **largest ladder step ≤ min(declared, columns)**; if that is below `24`, the overlay takes exactly `columns` and degrades through the existing `ROW_PRIORITY`/degenerate-grant rules instead of through frame size. Height is `min(rows − 2, cap)` with the cap owned by the step (`24` narrow/standard, `28` wide, the terminal for full). A per-surface exception is allowed only when that surface's own doc names it with its reason — today `/model` is `72×28` — never chosen ad hoc in code. |
 | Assembly | mandatory chrome (title, search row, hint) is granted first, then the item window, then optional separators/scroll/status — the existing `overlay-focus-contract.md` budget rules stay authoritative. |
 
 ## 13. Reference alignment and deliberate divergences

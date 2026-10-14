@@ -112,11 +112,19 @@ row grant, hit target or write path.
 7. Action bar: route through the PR1 helper with the spec §7.2 order — the
    surface's own actions first and **`Esc` as the last segment** (D8), while
    `Esc` keeps the highest drop priority (7), then the primary action 6,
-   navigation 5, secondary verbs 4…; separator ` · `; bare key letters
-   lowercase; **hints generated from the live keymap** instead of the raw
-   `data === 'r'` comparisons (`settings-workspace-panel.ts:1185-1186`) — this is
-   the one functional-adjacent change in the PR, and it must not alter which keys
-   are accepted.
+   navigation 5, secondary verbs 4…; bare key letters lowercase.
+8. **Flip the shared separator to ` · `** in
+   `src/tui/presentation/action-bar.ts` (`ACTION_BAR_SEPARATOR`). The helper is
+   shared, so this PR also changes the Job bars — that is intended and is part
+   of this PR's acceptance (run the Job visual suites). Do **not** add a
+   per-caller separator option.
+9. **The two Settings-local keys stay non-rebindable, with one source of truth.**
+   Introduce a single local table used by BOTH the handler and the hint for
+   `r refresh` / `c copy value` (today `data === 'r'` is compared at
+   `settings-workspace-panel.ts:1185-1186` and the hint repeats the letters).
+   Do not add new `APP_KEYBINDINGS` actions, and do not switch these hints to
+   `componentKeymap` — making them rebindable is a keybinding-contract change,
+   not a visual one (spec §7.1).
 
 **Non-goals:** `planSettingsChrome` row grants and the `ruleRows`/`metaRows`
 conditions; `layoutForWidth` breakpoints (`108`/`76`) and the `22/42/2` geometry;
@@ -125,9 +133,10 @@ semantics; the legacy `open-legacy` entry.
 
 **Tests:** `test/settings-workspace-visual.test.ts` (the main blast radius — 52
 assertions mention `SETTINGS`), `test/legacy-settings-migration.test.ts`,
-`test/surface-lifecycle-closure.test.ts`, plus the PR1 glyph gate. If the keymap
-switch lands: `test/host-keybindings-gate` / the keybinding convergence suite.
-Then `pnpm typecheck`.
+`test/surface-lifecycle-closure.test.ts`, plus the PR1 glyph gate. **The Job
+visual suites also run in this PR** (`job-workspace-visual`,
+`job-inspector-workspace`, `job-output-interaction`) because the separator
+constant is shared with the Job bar. Then `pnpm typecheck`.
 
 **Evidence:** before/after frames at `120×40` (L0 + L2), `80×10`, `44×20`, dark +
 light, `symbols` + `minimal`; one real-terminal check.
@@ -148,10 +157,13 @@ observation, admission, follow/find/copy or tab hit-map behaviour.
 
 1. Header (role 1/2): `JOB  job-a · bash` → `Job · job-a · bash` (identity
    `textStrong`, trail `textDim`).
-2. Status (role 9, decision `D5`): Title Case word from a display map
+2. Status (role 9, decisions `D5` + `D7`): Title Case word from a display map
    (`running`→`Running` … `timed_out`→`Timed out`, raw status as fallback),
-   painted by `taskStatusColor`, **without** the `●` glyph. Bracketed machine
-   markers `[GAP]`/`[ERROR]`/`[SETTLED]` keep their case and priority order.
+   painted by `taskStatusColor`, with the `●` glyph **replaced by the one shared
+   `‣` marker** — `● RUNNING` becomes `‣ Running`, `● FAILED` becomes `‣ Failed`.
+   Do not simply delete the marker, and do not map a different glyph per status.
+   Bracketed machine markers `[GAP]`/`[ERROR]`/`[SETTLED]` keep their case and
+   priority order.
 3. Metadata (role 11): `Progress: … · Detail: …`, `Error: …`; whole trailing
    facts drop before truncation.
 4. Summary row: keep `Command  <label>` / `Full command`; make the right-side
@@ -162,11 +174,12 @@ observation, admission, follow/find/copy or tab hit-map behaviour.
    becomes a dim status line — note left (`textDim`), position right
    (`textMuted`). Do not repeat a fact already stated above it (the Command page
    drops the duplicated `Full command`).
-7. Action bar: PR1 helper + spec priorities; ` · ` separator; facts Title Case
+7. Action bar: PR1 helper + spec priorities; facts Title Case
    (`Follow on`, `Follow paused`); bare key letters lowercase (`s stop`,
    `v command`); **`Esc` moves to the last segment** (D8) while keeping the top
    drop priority; safety facts (gap/error/retained disclosure) outrank secondary
-   verbs and the page hint.
+   verbs and the page hint. The ` · ` separator already landed in PR2 (the
+   constant is shared) — do not touch it here.
 
 **Non-goals:** `planChrome` grants and their thresholds (`COMPACT_*`,
 `FACTS_MIN_*`, `METADATA_MIN_BODY_ROWS`); the body floor; the tab hit map
