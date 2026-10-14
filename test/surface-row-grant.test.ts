@@ -490,6 +490,43 @@ test('C-T14: the Theme submenu chip survives a narrow frame with an over-wide la
   }
 })
 
+test('C-T15: two long same-prefix theme names stay distinguishable at 44 columns (PR #309 review)', async () => {
+  const prefix = 'A deliberately very long theme name '
+  const suffixA = `${prefix}alpha`
+  const suffixB = `${prefix}bravo`
+  const h = setup({ columns: 44, rows: 20, themes: (() => {
+    const registry = new ThemeRegistry()
+    registry.register({ id: 'long-a', name: suffixA, palette: { text: '#123456' } as never }, 'owner-x', 'x')
+    registry.register({ id: 'long-b', name: suffixB, palette: { text: '#654321' } as never }, 'owner-x', 'x')
+    return registry
+  })() })
+  await openLegacySettingsPanel(h.invoke, h.vt)
+  for (const character of 'theme') {
+    h.vt.sendInput(character)
+    await h.vt.waitForRender()
+  }
+  h.vt.sendInput('\r')
+  await h.vt.waitForRender()
+  const view = viewportText(h.vt)
+  const rowA = view.split('\n').find(line => line.includes('alpha'))
+  const rowB = view.split('\n').find(line => line.includes('bravo'))
+  assert.ok(rowA !== undefined && rowB !== undefined,
+    `each theme row must keep its own tail:\n${view}`)
+  assert.notEqual(rowA, rowB, `the two rows must not paint identically:\n${view}`)
+  // Walk the cursor onto the first long row: its description must carry the
+  // COMPLETE display name (the row identity), not only the source class.
+  for (let step = 0; step < 6; step += 1) {
+    if (viewportText(h.vt).split('\n').some(line => line.includes('alpha') && line.includes('> '))) break
+    h.vt.sendInput('\x1b[B')
+    await h.vt.waitForRender()
+  }
+  // The description WRAPS, so the complete name spans two painted lines.
+  const flat = viewportText(h.vt).replace(/\u2502/g, ' ').replace(/\s*\n\s*/g, ' ').replace(/\s+/g, ' ')
+  assert.ok(flat.includes(suffixA),
+    `the selected row's description must expand the complete name:\n${viewportText(h.vt)}`)
+  h.app.stop()
+})
+
 test('C-T11: a question suspends the nested submenu and restores its grant and query', async () => {
   const h = setup({ columns: 120, rows: 40 })
   await openKeyboardShortcuts(h)
