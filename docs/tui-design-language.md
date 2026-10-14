@@ -266,7 +266,7 @@ chrome rules budget of §6.2.
   `Retained preview · not full history` are sentences. There is no ALL-CAPS role
   for words: `SETTINGS` → `Settings`, `JOB` → `Job`, `CATEGORIES (3)` →
   `Categories (3)`, `DETAILS` → `Details`, `RUNNING` → `Running`,
-  `Config READY` → `Config ready`.
+  `Config READY` → `Config Ready`.
 - ALL-CAPS is reserved for two non-prose roles: **bracketed machine markers**
   (`[GAP]`, `[SETTLED]`, `[ERROR]`) and **acronyms / unit abbreviations**
   (`TTFB`, `CH91.9%`, `R5 116 tok/s` in the footer stats, `PS>` as a shell
@@ -320,12 +320,10 @@ chrome rules budget of §6.2.
     ` · ` for exactly this, and it is already the dominant idiom in this repo.)
   - `: ` introduces one labelled fact in a prose line: `Scope: …`,
     `Progress: 3/8 checks`.
-  - ` / ` joins alternatives *inside one key token*: `PgUp/PgDn`, `Ctrl+F`.
-    It never joins fields.
-  - **A key list may contain `/` as one of its own members** (the Job's Find
-    hint: `Ctrl+F / Ctrl+Shift+F / find`). The VERB after the list terminates a
-    hint, so a `/` member is never mistaken for a dangling separator; the older
-    `Find <list> /` shape — verb first, with the list ending in `/` — is retired.
+  - ` / ` joins alternatives *inside one key token*: a primary key plus its
+    leader sequence (`Ctrl+F / Leader S`), or the sanctioned `PgUp/PgDn` pair.
+    It never joins fields, and a hint never lists an action's second direct
+    binding (§7.1).
   - Two spaces separate a fixed column label from its value within one row
     (`Command  pnpm build`; `Value       Solarized` uses the padded label column
     of the detail pane).
@@ -569,6 +567,12 @@ anchor, without inventing a fourth meaning for `primary`.
 - **Hint segment** = `<Key> <verb>`: `Esc back`, `Enter details`, `r refresh`,
   `c copy value`, `s stop`, `PgUp/PgDn`. Capitalized key token, lowercase verb;
   a bare unmodified letter is lowercase (§4.1).
+- **One action advertises ONE key: the PRIMARY binding from the live effective
+  keymap** (`keysFor(action)[0]`, or the action's leader sequence when it is bound
+  only to one). A bar never enumerates an action's alternative bindings — they
+  stay live and are listed in the keybinding UI, so a row never spends its cells
+  repeating the same action three ways. `PgUp/PgDn` (one action, two symmetric
+  page keys) is the only sanctioned two-key token in a hint.
 - **State fact** = `<Noun> <state>`: `Follow on`, `Follow paused`,
   `rows 7-40/40`, `Retained preview · not full history`. A fact never begins
   with a key name, so the two segment kinds stay distinguishable on one row.
@@ -746,7 +750,8 @@ Copy into every PR that changes a visible surface:
     pending / failed from the frame alone?
 [ ] Header = where I am, body = what I see, status line = current facts,
     action bar = what I can do — no responsibility moved?
-[ ] Do the advertised keys come from the live effective keymap?
+[ ] Do the advertised keys come from the live effective keymap, ONE per
+    action (the primary binding)?
 [ ] Action bar: whole-segment drops only; no partial word; safety facts kept?
 [ ] New glyphs: ASCII or EAW neutral/narrow/halfwidth (§4.3)?
 [ ] Wide / medium / narrow / short / CJK: full interaction still reachable

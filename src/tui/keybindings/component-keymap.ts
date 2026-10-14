@@ -30,10 +30,13 @@ export class ComponentKeymap {
     return [...(APP_KEYBINDINGS[action]?.defaultKeys ?? [])]
   }
 
-  /** The human hint for one component action. */
+  /** The human hint for one component action: its PRIMARY default key. One
+   *  action advertises ONE key (design language §7.1) — the remaining defaults
+   *  stay live and are listed in the keybinding UI, so a bar never spends its
+   *  cells enumerating every alternative. */
   keyHint(action: AppKeybindingId): string {
     const keys = this.keysFor(action)
-    return keys.length === 0 ? '' : keys.map(formatKeyId).join(' / ')
+    return keys.length === 0 ? '' : formatKeyId(keys[0]!)
   }
 }
 

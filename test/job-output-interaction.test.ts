@@ -647,7 +647,7 @@ test('B-05e the Action Bar drops the inert End/Find hints while the query is bei
   await vt.waitForRender()
   const bar = (): string => rawView(vt).at(-1) ?? ''
   assert.match(bar(), /Follow paused · End resume/)
-  assert.match(bar(), /Ctrl\+F \/ Ctrl\+Shift\+F \/ find/)
+  assert.match(bar(), /Ctrl\+F find/)
 
   vt.sendInput('\x06')
   await vt.waitForRender()
@@ -655,14 +655,14 @@ test('B-05e the Action Bar drops the inert End/Find hints while the query is bei
   assert.match(bar(), /Follow paused/)
   assert.ok(!bar().includes('End resume'),
     `End belongs to the query Input while editing, so the bar must not promise it:\n${bar()}`)
-  assert.ok(!bar().includes('Ctrl+F / Ctrl+Shift+F / find'),
+  assert.ok(!bar().includes('Ctrl+F find'),
     `the Find entry cannot re-enter while already editing:\n${bar()}`)
   assert.ok(!bar().includes('stop'))
 
   vt.sendInput('\r') // NAVIGATE: End really resumes, Find really re-enters
   await vt.waitForRender()
   assert.match(bar(), /Follow paused · End resume/)
-  assert.match(bar(), /Ctrl\+F \/ Ctrl\+Shift\+F \/ find/)
+  assert.match(bar(), /Ctrl\+F find/)
   assert.ok(!bar().includes('stop'), 'NAVIGATE keeps the read-only result keys')
   vt.sendInput('\x1b')
   await vt.waitForRender()
@@ -842,7 +842,7 @@ test('B-08 the Job Find follows the EFFECTIVE Find binding: a remap, a disable a
   await openFirstJob(vt, harness)
   harness.observation.latest()!.emit({ text: 'needle' })
   await vt.waitForRender()
-  assert.match(view(vt), /Ctrl\+F \/ Ctrl\+Shift\+F \/ find/, 'the default direct binding is advertised')
+  assert.match(view(vt), /Ctrl\+F find/, 'the default direct binding is advertised')
 
   // A disabled Find advertises nothing and Ctrl+F is inert.
   app.keybindingsManager().setUserConfiguration(parseUserKeybindings({
@@ -866,7 +866,7 @@ test('B-08 the Job Find follows the EFFECTIVE Find binding: a remap, a disable a
     bindings: { 'app.transcript.search': 'ctrl+y' },
   }))
   await vt.waitForRender()
-  assert.match(view(vt), /Ctrl\+Y \/ find/, 'the hint follows the effective remap')
+  assert.match(view(vt), /Ctrl\+Y find/, 'the hint follows the effective remap')
   vt.sendInput('\x06')
   await vt.waitForRender()
   assert.ok(!/Find Output:/.test(view(vt)), 'the old key is really inert')
@@ -903,7 +903,7 @@ test('B-08 the Job Find follows the EFFECTIVE Find binding: a remap, a disable a
 test('B-08b a Find binding remapped onto the reserved physical End cannot shadow the only follow re-arm or be advertised', async () => {
   // A wide frame so the LOWEST-priority Find hint really fits: with the reserved
   // key filtered out the segment is the bare `/ find`, and without the filter it
-  // would advertise the inert `End` as `End / find`.
+  // would advertise the inert `End` as `End find`.
   const { vt, app } = startApp({}, {}, 200, 40)
   const harness = attachTasks(app, { jobIds: ['job-a'] })
   await flush()
@@ -914,7 +914,7 @@ test('B-08b a Find binding remapped onto the reserved physical End cannot shadow
   await vt.waitForRender()
   assert.match(view(vt), /Follow paused/)
   const bar = (): string => rawView(vt).at(-1) ?? ''
-  assert.match(bar(), /Ctrl\+F \/ Ctrl\+Shift\+F \/ find/)
+  assert.match(bar(), /Ctrl\+F find/)
 
   app.keybindingsManager().setUserConfiguration(parseUserKeybindings({
     bindings: { 'app.transcript.search': 'end' },
@@ -922,7 +922,7 @@ test('B-08b a Find binding remapped onto the reserved physical End cannot shadow
   await vt.waitForRender()
   assert.match(bar(), /Follow paused · End resume/, 'End still really resumes follow')
   assert.match(bar(), /\/ find/, 'the Job-local `/` alias is the only live Find entry')
-  assert.ok(!/End \/ find/.test(bar()),
+  assert.ok(!/End find/.test(bar()),
     `a Find binding the Job reserves must never be advertised as usable:\n${bar()}`)
 
   // Physical End keeps its reserved meaning: resume follow and show the tail.
