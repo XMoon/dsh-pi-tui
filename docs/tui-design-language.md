@@ -642,6 +642,13 @@ this is the wording a new surface must match):
 2. Full-width rules — dropped below the body floor (`bodyWithoutRules < 5`).
 3. Diagnostic line (`Scope:`/`Refreshed`, `Progress:`/`Detail:`) — dropped when
    it would leave fewer than 3 body rows.
+   - **A surface's approved row policy may reserve part of ONE chrome row**, and
+     facts still drop whole inside that reservation. The Job workspace's metadata
+     row keeps its plan guarantee (§2.1): the gap/error facts hold at most HALF the
+     row so an unbounded `progress:` can never make an `[ERROR]` unreachable — and
+     within that half, whole facts are dropped rather than cut mid-word, with only
+     a lone remaining fact truncatable. A reservation is a budget, not an exception
+     to the no-half-word rule.
 4. Notice row — dropped when it would leave fewer than 2 body rows.
 5. Pane/tab header row — dropped with the body floor.
 6. Count/status in the header — dropped whole, never truncated
@@ -799,6 +806,7 @@ is next touched for another reason** (never by a mass search/replace):
 | picker failure placeholder | `Model catalog unavailable: …` is painted `noMatch` (`textMuted`) instead of `error` for the failure word (D11) | next picker change |
 | all overlays | ad-hoc frame sizes (64/72/76/88/100% × 24/26/28) instead of the four-step ladder (D10) | next change to that overlay |
 | `/model` current/default badges | the badge slot is right, but its `current` / `default` are bare words (`model-picker.ts:335-343`) where every row state is a chip (§4.5) — they become `[current] [default]` inside the same slot | next model-picker change |
+| Job Find hint | the Action Bar paints `Find Ctrl+F / Ctrl+Shift+F /` — verb first, with the prefix key trailing — where §7.1's hint grammar is `<Key> <verb>` (the short form `Find /` already matches) | next change to that bar |
 | theme menu / preset picker | the mark is still the literal `← current` (`pickers/theme-menu.ts:119`, `pickers/preset-presentation-pitui.ts:50`) and, in the preset picker, a word inside the description rather than a chip. Both route through the vendored `SettingsListTheme.value` slot, which paints `selected ? primary : textDim` — so the chip must be pre-painted `color.textMuted(...)` at the call site (`status.ts:110` precedent) and the slot's own paint must NOT be changed, and the fork must NOT be touched | next picker change |
 | question flow hints | lowercase keys with `←`/`←→` (`'← back · ↵ submit · esc cancel'`, `'←→ edit'`) instead of §4.1's `Esc`-style casing and the width-safe arrow rule | next question-flow change |
 | task browser hint | `Esc close` sits before `S stop` instead of last (D8) | next task-panel change |

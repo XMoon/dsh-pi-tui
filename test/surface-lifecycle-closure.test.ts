@@ -1691,12 +1691,18 @@ test('B2A-21 closing a workspace hands the terminal over without flushing its ow
   vt.sendInput('\r')
   await vt.waitForRender()
   assert.equal(jobScreenOpen(app), true, 'the Job workspace owns the surface')
-  assert.ok(captured().includes('JOB'), 'control: the live Job document is what writes the mark')
+  // The marker must be contiguous in the WRITE STREAM (the terminal receives
+  // per-span diffs, so a header split across two chalk spans is not a substring)
+  // and unique to the Job workspace: the status group is ONE span, and no other
+  // surface paints the shared `‣` marker. The bare word `Job` would be vacuous —
+  // the restored Task Browser paints `── Jobs / executions ──`.
+  const jobMark = '‣ Running'
+  assert.ok(captured().includes(jobMark), 'control: the live Job document is what writes the mark')
   writes.length = 0
   vt.sendInput('\x1b')
   await vt.waitForRender()
   assert.equal(jobScreenOpen(app), false)
-  assert.ok(!captured().includes('JOB'), `the departing Job document must not be flushed:\n${captured()}`)
+  assert.ok(!captured().includes(jobMark), `the departing Job document must not be flushed:\n${captured()}`)
   capturing = false
   app.stop()
 })

@@ -825,8 +825,21 @@ test('5.11 a reserved key ALIAS (esc/return) is rejected at registration', async
   ), /reserved by the host/, 'return is the reserved enter and must be rejected')
 })
 
-test('5.12 canonical named keys still display as PageUp/PageDown', async () => {
-  const { formatKeyId, formatKeyList } = await import('../src/tui/keybindings/hints.ts')
+test('5.12b an Action Bar hint lowercases a bare letter and keeps the list spacing', async () => {
+  const { formatHintKeys, formatKeyList } = await import('../src/tui/keybindings/hints.ts')
+  // The Stop hint is a key LIST: a bare letter is lowercase in prose (design
+  // language §4.1), a modified chord keeps its capital, and the list keeps its
+  // OWN ` / ` separator spacing. A formatter that re-joined the parts painted
+  // `s/Shift+S`, which no longer matches the list formatter's shape (and the
+  // same bar paints `Ctrl+F / Ctrl+Shift+F` with spaces).
+  assert.equal(formatKeyList(['s', 'shift+s'] as never), 'S / Shift+S')
+  assert.equal(formatHintKeys(formatKeyList(['s', 'shift+s'] as never)), 's / Shift+S')
+  assert.equal(formatHintKeys('s'), 's')
+  assert.equal(formatHintKeys('Shift+Tab'), 'Shift+Tab')
+  assert.equal(formatHintKeys('Ctrl+F / Ctrl+Shift+F'), 'Ctrl+F / Ctrl+Shift+F')
+})
+
+test('5.12 canonical named keys still display as PageUp/PageDown', async () => {  const { formatKeyId, formatKeyList } = await import('../src/tui/keybindings/hints.ts')
   const { canonicalizeKeyId } = await import('../src/tui/keybindings/key-identity.ts')
   assert.equal(canonicalizeKeyId('pageUp' as never), 'pageup')
   assert.equal(canonicalizeKeyId('pageDown' as never), 'pagedown')

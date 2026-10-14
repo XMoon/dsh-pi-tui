@@ -198,6 +198,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   pinned action bar joins hints with ` · `, keeps `Esc` last and drops whole
   segments by priority instead of cutting a hint mid-word.
 
+- The fullscreen Job workspace now speaks the same visual language as the rest of
+  the TUI: the header reads `Job · <id> · <kind>` (a bold identity word and a dim
+  trail); the status reads `‣ Running` / `‣ Failed` — ONE East-Asian-width-neutral
+  marker plus a Title Case status word, instead of `●` with ALL CAPS and instead
+  of a glyph per status — and the metadata line reads
+  `Progress: … · Detail: … · Error: …`, dropping a fact whole inside its reserved
+  half row instead of cutting it mid-word. The reading-facts row loses its two
+  flanking rules and becomes a dim status line (disclosure left, position right),
+  and the Command page no longer repeats `Full command`. The pinned action bar
+  joins with ` · `, keeps `Esc` last (with the highest drop priority), spells its
+  facts `Follow on` / `Follow paused` and its bare key letters lowercase
+  (`s stop`, `c copy output`, `v command`), and takes the weakest readable ink; a
+  right-aligned entry such as `↗ Command` or `Copy All [C]` is painted only while
+  the whole content fits beside it, so a narrow row keeps the output and leaves no
+  dead click region.
+
 ### Fixed
 
 - The experimental TSP renderer's `/model`: clicking `All models` or a Provider
