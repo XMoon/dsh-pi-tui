@@ -83,6 +83,13 @@ function pickKeptRowIndexes(priorities: readonly number[], limit: number): numbe
   return kept
 }
 
+/** One structured part of a row's `badge`: a state `chip` (whole or absent) or
+ * generic pre-painted `text` (whose own content may itself contain ` · `). */
+export interface SearchablePickerBadgePart {
+  readonly text: string
+  readonly kind: 'chip' | 'text'
+}
+
 /** One picker row; `group` renders a workspace-style header before the group. */
 export interface SearchablePickerItem {
   value: string
@@ -104,6 +111,17 @@ export interface SearchablePickerItem {
    * without a badge renders exactly as before.
    */
   badge?: string
+  /**
+   * The PARTS of `badge` when the caller can supply them (the caller derives
+   * both from ONE array: `badge` is the parts joined with ` · `). The
+   * `wrap-when-needed` left-trim then drops WHOLE parts and never has to
+   * reverse-engineer boundaries from the joined text, so a part whose own
+   * text contains ` · ` (e.g. an effort name) is never torn apart. A `chip`
+   * part is kept whole or dropped whole; a `text` part may be visibly
+   * trimmed when it is the only survivor. Trusted internal contract: the
+   * parts must describe `badge` as given, no validation.
+   */
+  badgeParts?: readonly SearchablePickerBadgePart[]
   /**
    * LAYOUT-ONLY measurement for `badge` (defaults to `badge` when absent). A
    * caller that can change the rendered badge text while the row stays put
@@ -583,7 +601,7 @@ export class SearchablePicker implements Component, Focusable {
         hits.push({ kind: 'item', value: item.value, index: i })
         priorities.push(itemPriority)
         const badge = normalizeToSingleLine(item.badge!)
-        lines.push(this.theme.description(this.wrappedBadgeLine(badge, width)))
+        lines.push(this.theme.description(this.wrappedBadgeLine(badge, width, item.badgeParts)))
         hits.push({ kind: 'inert' })
         priorities.push(ROW_PRIORITY.wrappedBadge)
       } else {
@@ -894,29 +912,54 @@ export class SearchablePicker implements Component, Focusable {
   }
 
   /** The wrapped badge line, right-aligned against the row edge. When the
-   *  badge is itself wider than the grant it drops leading WHOLE ` · `-separated
-   *  parts (keeping the most specific TAIL, e.g. `/model`'s effort token) rather
-   *  than truncating the tail away, so a state chip never survives as a
-   *  `…rent]` fragment and an ultra-narrow row never loses the value the user is
-   *  actively editing. */
-  private wrappedBadgeLine(badge: string, width: number): string {
-    const text = visibleWidth(badge) <= width
-      ? badge
-      : `…${this.tailPartsToWidth(badge, Math.max(1, width - 1))}`
+   *  badge is itself wider than the grant it drops leading WHOLE parts (keeping
+   *  the most specific TAIL, e.g. `/model`'s effort token) rather than
+   *  truncating the tail away, so a state chip is always whole or absent and an
+   *  ultra-narrow row never loses the value the user is actively editing. A
+   *  badge whose last surviving part is itself a chip renders as the padded
+   *  blank row (a chip is never sliced); the `…` marks every non-empty
+   *  survivor. */
+  private wrappedBadgeLine(
+    badge: string,
+    width: number,
+    parts?: readonly SearchablePickerBadgePart[],
+  ): string {
+    let text = badge
+    if (visibleWidth(badge) > width) {
+      const tail = this.tailPartsToWidth(badge, Math.max(1, width - 1), parts)
+      text = tail === '' ? '' : `…${tail}`
+    }
     return ' '.repeat(Math.max(0, width - visibleWidth(text))) + text
   }
 
-  /** The longest suffix of `badge` within `width`. Whole ` · `-separated parts
-   *  drop from the left while the remainder still overflows; a lone remaining
-   *  part is then trimmed on VISIBLE boundaries — never inside an SGR sequence —
-   *  and re-prefixed with the last SGR sequence the trim dropped, so the
-   *  survivor keeps its own ink (ANSI cannot resume a style after a cut). */
-  private tailPartsToWidth(badge: string, width: number): string {
-    const parts = badge.split(' · ')
-    while (parts.length > 1 && visibleWidth(parts.join(' · ')) > width) parts.shift()
-    const tail = parts.join(' · ')
+  /** The longest suffix of the badge within `width`. Whole parts drop from the
+   *  left while the remainder still overflows; a lone `chip` survivor that still
+   *  overflows is dropped TOO (whole or absent), while a lone `text` survivor is
+   *  trimmed on VISIBLE boundaries — never inside an SGR sequence — and
+   *  re-prefixed with the last SGR sequence the trim dropped, so the survivor
+   *  keeps its own ink (ANSI cannot resume a style after a cut). Without
+   *  `parts` the joined badge is split on ` · ` as a best-effort fallback for
+   *  callers that cannot supply the real boundaries (every part is then
+   *  `text`). */
+  private tailPartsToWidth(
+    badge: string,
+    width: number,
+    parts?: readonly SearchablePickerBadgePart[],
+  ): string {
+    const kept: SearchablePickerBadgePart[] = parts === undefined
+      ? badge.split(' · ').map(text => ({ kind: 'text', text }))
+      : [...parts]
+    while (kept.length > 1 && visibleWidth(kept.map(part => part.text).join(' · ')) > width) kept.shift()
+    const tail = kept.map(part => part.text).join(' · ')
     if (visibleWidth(tail) <= width) return tail
-    const tokens = tail.match(SGR_OR_CHAR) ?? []
+    return kept[0]!.kind === 'chip' ? '' : this.trimTextToWidth(kept[0]!.text, width)
+  }
+
+  /** The longest suffix of one pre-painted `text` part within `width`, trimmed
+   *  only BETWEEN whole SGR sequences and re-prefixed with the last SGR
+   *  sequence the trim dropped, so the survivor keeps its ink. */
+  private trimTextToWidth(text: string, width: number): string {
+    const tokens = text.match(SGR_OR_CHAR) ?? []
     let start = 0
     while (start < tokens.length && visibleWidth(tokens.slice(start).join('')) > width) start += 1
     let ink = ''

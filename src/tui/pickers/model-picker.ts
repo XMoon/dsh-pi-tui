@@ -40,7 +40,7 @@ import {
 } from '@xmoon76/pi-tui'
 import type { OwnedTaskOptions } from '../../runtime/process/tasks.ts'
 import type { ModelSelectionDto } from '../../runtime/catalog-port.ts'
-import { SearchablePicker, type SearchablePickerItem } from './searchable-picker.ts'
+import { SearchablePicker, type SearchablePickerBadgePart, type SearchablePickerItem } from './searchable-picker.ts'
 import { color, selectListTheme } from '../theme/runtime.ts'
 
 import type {
@@ -297,7 +297,10 @@ export class ModelPicker implements Component, RowBudgetAware, Focusable {
     const items: SearchablePickerItem[] = []
     for (const row of this.modelRows.values()) {
       const identity = modelIdentity(row.providerId, row.modelId)
-      const badge = this.modelBadgeOf(row)
+      // ONE parts array per row: the picker's wrap-trim drops WHOLE parts, so
+      // an effort NAME containing ` · ` must never be mistaken for a boundary.
+      const badgeParts = this.modelBadgePartsOf(row)
+      const badge = badgeParts === undefined ? undefined : badgeParts.map(part => part.text).join(' · ')
       // Layout measurement uses the WIDEST badge any effort value of this
       // model could render, so cycling the effort never toggles one/two lines.
       const badgeLayoutText = this.widestBadgeOf(row)
@@ -310,6 +313,7 @@ export class ModelPicker implements Component, RowBudgetAware, Focusable {
         group: row.providerName,
         groupKey: row.providerId,
         ...(badge === undefined ? {} : { badge }),
+        ...(badgeParts === undefined ? {} : { badgeParts }),
         ...(badgeLayoutText === undefined ? {} : { badgeLayoutText }),
         // Search covers provider/model NAME + ID only: the (hidden) model
         // description and effort descriptions are deliberately NOT searchable.
@@ -330,19 +334,22 @@ export class ModelPicker implements Component, RowBudgetAware, Focusable {
     return items
   }
 
-  /** The right-aligned badge: factual state (`current`/`default`) plus the
-   *  picker-local effort token. The token is `[ Name ]` while THIS model owns
-   *  the inline effort focus and `‹Name›` otherwise, so the active state is
-   *  legible without relying on color. */
-  private modelBadgeOf(row: ModelPickerModelRow): string | undefined {
-    const parts: string[] = []
+  /** The right-aligned badge PARTS: factual state (`current`/`default`) as
+   *  `chip` parts plus the picker-local effort token — its provider-supplied
+   *  NAME verbatim, ` · ` or not, as ONE `text` part — so the picker's
+   *  wrap-trim never has to reverse-engineer boundaries from the joined text.
+   *  The token is `[ Name ]` while THIS model owns the inline effort focus and
+   *  `‹Name›` otherwise, so the active state is legible without relying on
+   *  color. The caller joins the parts with ` · ` for the `badge` string. */
+  private modelBadgePartsOf(row: ModelPickerModelRow): SearchablePickerBadgePart[] | undefined {
+    const parts: SearchablePickerBadgePart[] = []
     const identity = modelIdentity(row.providerId, row.modelId)
     const choice = this.effortChoices.get(identity)
     // §4.5/§12.2: a row state is a `[current]` / `[default]` state chip in
     // `textMuted`, pre-painted so the badge slot's selected-dependent paint
     // (`primary` on the cursor row, `textDim` otherwise) never recolours it.
-    if (row.isCurrent) parts.push(color.textMuted('[current]'))
-    if (row.isDefault) parts.push(color.textMuted('[default]'))
+    if (row.isCurrent) parts.push({ kind: 'chip', text: color.textMuted('[current]') })
+    if (row.isDefault) parts.push({ kind: 'chip', text: color.textMuted('[default]') })
     // The effort token keeps the LAST position — the wrapped badge drops from the LEFT,
     // so the tail is the fact the user is acting on — and it is painted its OWN role-4
     // ink: a nested span's reset ends the outer ink for everything after it (ANSI cannot
@@ -350,9 +357,11 @@ export class ModelPicker implements Component, RowBudgetAware, Focusable {
     // colour on the selected row (measured in the real `/model` frame).
     if (choice !== undefined) {
       const label = effortLabelOf(this.choicesByModel.get(identity) ?? [], choice)
-      if (label !== undefined) parts.push(color.textDim(effortTokenOf(label, this.isEffortFocused(identity))))
+      if (label !== undefined) {
+        parts.push({ kind: 'text', text: color.textDim(effortTokenOf(label, this.isEffortFocused(identity))) })
+      }
     }
-    return parts.length === 0 ? undefined : parts.join(' · ')
+    return parts.length === 0 ? undefined : parts
   }
 
   /** The widest badge this row could ever render (the facts plus the longest
