@@ -26,7 +26,7 @@
  * @module scripts/tern-pane-model-ux-subject
  */
 import { appendFileSync } from 'node:fs'
-import { connect, type Key, type Node, type TspEvent } from '@stencil-hq/tern'
+import { View, connect, type Key, type Node, type TspEvent } from '@stencil-hq/tern'
 import { TspModelPicker } from '../src/tui/tsp/model-picker.ts'
 
 const dir = process.env.TERN_PANE_DIR ?? '.'
@@ -227,19 +227,27 @@ const describe = (layer: Node) => {
   }
 }
 
-/** The wire id of the frame's picker node, so a control can dispatch a FORGED
- *  action event through the presenter's real admission path. */
+/**
+ * The wire id of the frame's picker node.
+ *
+ * The SDK assigns ids when a view is built, so the raw `Node` a presenter hands back has
+ * none: the id must be read from the SDK's own tree (`View.from`), exactly like the
+ * presenter resolves the ids it routes on. A control needs a REAL id to dispatch a forged
+ * event through that same admission path, and the flow needs it to assert the node's
+ * identity across a click (the identity that must not change, or the client remounts the
+ * list and moves the viewport).
+ */
 const findPickerId = (layer: Node): string | undefined => {
   let found: string | undefined
-  const visit = (node: Node | undefined): void => {
+  const visit = (node: { readonly id?: string; readonly kind?: string; readonly children?: readonly unknown[] }): void => {
     if (node === undefined || found !== undefined) return
     if (node.kind === 'picker') {
       found = node.id
       return
     }
-    for (const child of node.children) visit(child)
+    for (const child of node.children ?? []) visit(child as { readonly id?: string; readonly kind?: string; readonly children?: readonly unknown[] })
   }
-  visit(layer)
+  for (const root of View.from({ layer }).regions) visit(root as { readonly id?: string; readonly kind?: string; readonly children?: readonly unknown[] })
   return found
 }
 
@@ -258,7 +266,7 @@ const draw = (): void => {
   surface.render({ layer })
   frames += 1
   pickerId = findPickerId(layer)
-  note({ frame: { n: frames, ...describe(layer) } })
+  note({ frame: { n: frames, ...describe(layer), pickerId } })
 }
 picker = new TspModelPicker({
   render: draw,

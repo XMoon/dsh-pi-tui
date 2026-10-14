@@ -28,11 +28,10 @@ import type { PickerAction, PickerGroup, PickerItem, PickerProps } from '@stenci
 import type { ModelPickerFailureRow } from '../pickers/model-directory.ts'
 import type { ModelPickerIntent } from './model-picker-intents.ts'
 import {
-  CATALOGUE_WINDOW_ROWS,
   FAILURE_RETRY_ID,
   STRIP_LABEL,
+  actionBase,
   actionKeyboardLive,
-  catalogueRowIds,
   detailReaderGroups,
   draftedEffort,
   effortItemId,
@@ -121,26 +120,7 @@ function modelOrder(panel: ModelPickerPanel): (string | PickerGroup)[] {
     for (const failure of panel.failures) order.push(failureRowId(failure.providerId))
     order.push(FAILURE_RETRY_ID)
   }
-  const window = windowIds(panel)
-  if (window === undefined) return order
-  // Keep the window's rows AND the group head that introduces the first of them, so a
-  // windowed slice still shows which provider its rows belong to. A head is only kept
-  // when a row of its own group follows it inside the window.
-  const sliced: (string | PickerGroup)[] = []
-  let pending: PickerGroup | undefined
-  for (const entry of order) {
-    if (typeof entry !== 'string') {
-      pending = entry
-      continue
-    }
-    if (!window.has(entry)) continue
-    if (pending !== undefined) {
-      sliced.push(pending)
-      pending = undefined
-    }
-    sliced.push(entry)
-  }
-  return sliced
+  return order
 }
 
 /**
@@ -154,23 +134,6 @@ function modelOrder(panel: ModelPickerPanel): (string | PickerGroup)[] {
  * An exhausted or partially failed catalogue appends the inert failure rows and
  * the one read-only Retry row.
  */
-/**
- * The row ids the catalogue really sends: the window `panel.windowStart` covers, or
- * `undefined` when the whole catalogue already fits. A short list is sent whole, so a
- * small fixture behaves exactly as it always did.
- *
- * The window exists because the client re-anchors the selected row on every `selected`
- * change while its list can scroll (see {@link CATALOGUE_WINDOW_ROWS}): a window that
- * fits the list box leaves it nothing to scroll, so a click cannot move the viewport.
- */
-function windowIds(panel: ModelPickerPanel): ReadonlySet<string> | undefined {
-  const ids = catalogueRowIds(panel)
-  if (ids.length <= CATALOGUE_WINDOW_ROWS) return undefined
-  const last = Math.max(ids.length - CATALOGUE_WINDOW_ROWS, 0)
-  const start = Math.min(Math.max(panel.windowStart, 0), last)
-  return new Set(ids.slice(start, start + CATALOGUE_WINDOW_ROWS))
-}
-
 function modelItems(panel: ModelPickerPanel): PickerItem[] {
   const items: PickerItem[] = visibleModels(panel).map((row) => ({
     id: modelRowId(row),
@@ -185,8 +148,7 @@ function modelItems(panel: ModelPickerPanel): PickerItem[] {
   }))
   items.push(...panel.failures.map(failureItem))
   if (panel.failures.length > 0) items.push({ id: FAILURE_RETRY_ID, label: 'Retry failed providers' })
-  const window = windowIds(panel)
-  return window === undefined ? items : items.filter((item) => window.has(item.id))
+  return items
 }
 
 /** How many rows the catalogue really lists (it appends the failure rows and the
@@ -204,8 +166,9 @@ function catalogueTotal(panel: ModelPickerPanel): number {
  * (an admitted write, a running re-read) marks nothing: the badge promises Enter.
  */
 function renderedActions(panel: ModelPickerPanel): PickerAction[] {
+  // The focus state is a BASE id; the actions carry the frame token.
   const focused = panel.zone === 'primary-action' && actionKeyboardLive(panel)
-    ? focusedAction(panel).id
+    ? actionBase(panel, focusedAction(panel).id)
     : undefined
   return pickerActions(panel).map((action) =>
     // A DISABLED action owns no Enter, so it must not carry the key badge.
@@ -213,7 +176,7 @@ function renderedActions(panel: ModelPickerPanel): PickerAction[] {
     // real key of the focused action, so the badge states a fact instead of
     // inventing a focus glyph (`▸` is the DISCLOSURE glyph and never means
     // "selected"; `[Switch]` would give a verb label brackets).
-    action.id === focused && action.label !== undefined && action.disabled !== true
+    actionBase(panel, action.id) === focused && action.label !== undefined && action.disabled !== true
       ? { ...action, label: `${action.label} [Enter]` }
       : action,
   )
@@ -244,14 +207,12 @@ function pickerState(panel: ModelPickerPanel): Pick<PickerProps, 'state' | 'mess
 /**
  * The key PREFIX of the Reader's scrollable content column.
  *
- * The FULL key carries the panel serial and the frame revision (exactly like the
- * picker's own key), so a node id of a RETIRED frame is never reused by a later
- * Reader: the layer region's root id is the fixed region name and the root's own
- * key never reaches its children, so a constant child key would make the Reader's
- * ids stable across revisions and panels. The presenter resolves the column by
- * this prefix from the very frame it built and hands its real wire id to the one
- * Surface owner, so the native scroll op addresses a node this frame really built
- * instead of a guessed id.
+ * The key carries the panel SERIAL and never the frame revision: MEASURED on the real
+ * client, a key that changes per frame makes the SDK diff `del + add` and REMOUNT the
+ * node — for the Reader that also means its scroll container is recreated, so the app's
+ * own `scroll` op can name a body the client never received. One identity per panel
+ * keeps the id (and the scroll target) the same for as long as the Reader is the page;
+ * a later PANEL still gets its own serial, so a retired panel's ids are never reused.
  */
 export const MODEL_DETAILS_BODY_KEY_PREFIX = 'model-details-body-'
 const MODEL_DETAILS_READER_KEY = 'model-details-reader'
@@ -278,8 +239,8 @@ const MODEL_DETAILS_BACK_KEY = 'model-details-back'
 function detailsReader(panel: ModelPickerPanel, deps: ModelPickerViewDeps): Node {
   const row = highlightedModel(panel)
   const groups = row === undefined ? [] : detailReaderGroups(panel, row)
-  // The frame-scoped suffix is what keeps a retired Reader's node ids retired.
-  const scope = `${panel.serial}-rev-${panel.revision}`
+  // One identity per PANEL: the revision never reaches a long-lived node key.
+  const scope = `${panel.serial}`
   return ui.overlay(
     { key: `${MODEL_DETAILS_READER_KEY}-${scope}`, head: readerHead(panel), size: 'lg', modal: true },
     ui.row(
@@ -363,9 +324,13 @@ function modelListPicker(
 }
 
 /**
- * The whole layer for one frame. The node id carries the panel serial AND the
- * revision, so an event or `onClick` from an earlier frame can only ever be
- * refused by `targets`/admission — never silently applied to the new one.
+ * The whole layer for one PANEL. The node id carries the panel serial and NOT the frame
+ * revision: MEASURED on the real client, a key that changes per frame makes the SDK diff
+ * `del + add`, and a remounted picker re-anchors its selected row — a click then moves
+ * the whole list. Stale events are fenced by what the current frame really offers: an
+ * action event carries the revision token of the bar that rendered it (see
+ * {@link actionId}), and a row event is validated against the rows the panel currently
+ * paints.
  *
  * The read-only `details` page REPLACES the picker with the native Reader (the
  * page is the SAME logical page and the same layer; it is not a second
@@ -373,9 +338,9 @@ function modelListPicker(
  * whose rows could be operated behind the reader.
  */
 export function modelPickerLayer(panel: ModelPickerPanel, deps: ModelPickerViewDeps): Node {
-  const key = `model-${panel.serial}-rev-${panel.revision}`
+  const key = `model-${panel.serial}`
   return ui.col(
-    { key: `model-layer-${panel.serial}-rev-${panel.revision}` },
+    { key: `model-layer-${panel.serial}` },
     panel.page === 'details' ? detailsReader(panel, deps) : modelListPicker(panel, deps, key),
   )
 }

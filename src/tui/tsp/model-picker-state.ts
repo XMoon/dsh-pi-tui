@@ -84,11 +84,6 @@ export interface ModelPickerPanel {
   directory: ModelPickerDirectory | undefined
   rows: readonly ModelPickerModelRow[]
   failures: readonly ModelPickerFailureRow[]
-  /** The first ROW of the catalogue window this picker sends ({@link
-   *  nearestWindowStart}): the client re-anchors the selected row on every `selected`
-   *  change, so the window must keep the list short enough that there is nothing to
-   *  scroll — and it must move as little as possible while doing it. */
-  windowStart: number
   /** Per-(provider, model) local effort draft, keyed by {@link modelRowId}. */
   efforts: Map<string, string>
 }
@@ -136,20 +131,6 @@ export function effortValue(item: string): string | undefined {
   return item.startsWith(EFFORT_PREFIX) ? item.slice(EFFORT_PREFIX.length) : undefined
 }
 
-/**
- * How many model ROWS the catalogue sends at once.
- *
- * The client re-anchors the newly SELECTED row on every `selected` change — measured on
- * the real client, it scrolls its list so that row sits at the bottom edge — and it can
- * only do that while its list has something to scroll. A window that fits the list box
- * leaves nothing to scroll, so a click on a visible row cannot move the viewport at all
- * (the official product keeps its own picker windowed for the same reason). MEASURED:
- * that box holds ~9 rows at a 560x640 pane and ~14 at 1280x800, and the group heads the
- * window carries ride inside the same box, so 8 rows keep every pane the plan supports
- * (bar the 400px-tall ones) free of scroll.
- */
-export const CATALOGUE_WINDOW_ROWS = 6
-
 /** Every row id the catalogue offers, in display order (the group heads are the view's
  *  own insertion into this sequence, so the window counts ROWS). */
 export function catalogueRowIds(panel: ModelPickerPanel): readonly string[] {
@@ -157,26 +138,6 @@ export function catalogueRowIds(panel: ModelPickerPanel): readonly string[] {
     ...visibleModels(panel).map(modelRowId),
     ...(panel.failures.length === 0 ? [] : [FAILURE_RETRY_ID]),
   ]
-}
-
-/**
- * The window start for a selection at `at`: move it only as far as the selection needs
- * (a `nearest` scroll), so a selection that is already inside the window does not move
- * the list at all. That is what keeps a click on a visible row — and every single-row
- * step of the keyboard walk — from re-paging the whole window.
- */
-export function nearestWindowStart(
-  start: number,
-  at: number,
-  length: number,
-  size = CATALOGUE_WINDOW_ROWS,
-): number {
-  if (length <= size) return 0
-  const last = length - size
-  const from = Math.min(Math.max(start, 0), last)
-  if (at < from) return Math.min(Math.max(at, 0), last)
-  if (at >= from + size) return Math.min(at - size + 1, last)
-  return from
 }
 
 /* ---------------------------------------------------------------- selectors */
@@ -414,6 +375,42 @@ export function readerHead(panel: ModelPickerPanel): string {
 /* --------------------------------------------------------------- action bar */
 
 /**
+ * The frame token an ACTION id carries.
+ *
+ * The picker, its layer and the Reader keep ONE node identity for as long as the panel
+ * lives (their keys carry the panel SERIAL, never the frame revision — MEASURED on the
+ * real client: a key that changes per frame makes the SDK diff `del + add`, and a
+ * remounted list re-anchors its selected row, which moves the whole viewport under a
+ * click). With a long-lived id, `targets` can no longer tell an event from an earlier
+ * frame by the id it addresses, so the ACTIONS carry the revision themselves: the bar is
+ * rebuilt every frame, and an event whose `act` names any other revision is refused at
+ * admission exactly like an id that was never rendered.
+ *
+ * The panel's dismissal is the ONE untokened action: `close` is the same intent `Esc`
+ * and the client's own backdrop gesture send, so it must keep working from any frame.
+ */
+export const ACTION_TOKEN = '#'
+/** The one action that is deliberately frame-independent. */
+export const FRAME_FREE_ACTION = 'close'
+
+/** The revision-scoped id the CURRENT frame renders for one action base. */
+export function actionId(panel: ModelPickerPanel, base: string): string {
+  return base === FRAME_FREE_ACTION ? base : `${base}${ACTION_TOKEN}${panel.revision}`
+}
+
+/**
+ * The action base an id names, or `undefined` when the id is not one THIS frame renders:
+ * an unknown shape, a missing token, or a token from a revision that is no longer the
+ * panel's. That is what keeps a stale action from acting on a later frame.
+ */
+export function actionBase(panel: ModelPickerPanel, id: string): string | undefined {
+  if (id === FRAME_FREE_ACTION) return id
+  const at = id.lastIndexOf(ACTION_TOKEN)
+  if (at <= 0) return undefined
+  return id.slice(at + 1) === String(panel.revision) ? id.slice(0, at) : undefined
+}
+
+/**
  * Whether the CURRENT page carries the explicit write action. The catalogue and
  * the catalogue offers it on the model the user highlighted, with its
  * already-seeded (or strip-drafted) effort — so the ONE write is an explicitly
@@ -432,7 +429,7 @@ function primaryLabel(panel: ModelPickerPanel): string {
 /** The single visible Primary Action of the current page and phase. */
 function primaryAction(panel: ModelPickerPanel): PickerAction {
   return {
-    id: 'apply',
+    id: actionId(panel, 'apply'),
     label: panel.phase === 'pending' ? 'Selecting…' : primaryLabel(panel),
     primary: true,
     // A phase that admits no write (a running read, an admitted write) and a
@@ -468,12 +465,12 @@ export function pickerActions(panel: ModelPickerPanel): PickerAction[] {
   // with the Host, so that phase keeps the honest `Close` instead of the `Cancel`
   // a user would read as "undo the write".
   if (panel.page === 'models' || panel.phase !== 'ready') {
-    actions.push({ id: 'close', label: panel.phase === 'pending' ? 'Close' : 'Cancel', end: true })
+    actions.push({ id: actionId(panel, FRAME_FREE_ACTION), label: panel.phase === 'pending' ? 'Close' : 'Cancel', end: true })
   }
   // A failed read admits exactly one operation — the read-only Retry — so the
   // bar never offers a browse or a write the phase would refuse.
   if (panel.phase === 'error') {
-    actions.push({ id: 'retry', label: 'Retry', primary: true })
+    actions.push({ id: actionId(panel, 'retry'), label: 'Retry', primary: true })
     return actions
   }
   // Every page operation below belongs to the catalogue: a running (re-)read and an
@@ -493,16 +490,19 @@ export function pickerActions(panel: ModelPickerPanel): PickerAction[] {
 export function focusedAction(panel: ModelPickerPanel): PickerAction {
   const actions = pickerActions(panel)
   const enabled = (action: PickerAction): boolean => action.disabled !== true
-  const explicit = actions.find((action) => action.id === panel.actionFocus && enabled(action))
+  const explicit = actions.find((action) => actionBase(panel, action.id) === panel.actionFocus && enabled(action))
   return explicit ?? actions.filter(enabled).at(-1) ?? actions[actions.length - 1]!
 }
 
 /** The next ENABLED action in the bar, wrapping in `delta`'s direction. */
 export function stepActionFocus(panel: ModelPickerPanel, delta: -1 | 1): string {
   const offered = pickerActions(panel).filter((action) => action.disabled !== true)
-  const at = offered.findIndex((action) => action.id === focusedAction(panel).id)
-  const next = offered[(Math.max(at, 0) + delta + offered.length) % offered.length]
-  return next?.id ?? focusedAction(panel).id
+  const current = focusedAction(panel)
+  const at = offered.findIndex((action) => actionBase(panel, action.id) === actionBase(panel, current.id))
+  const next = offered[(Math.max(at, 0) + delta + offered.length) % offered.length] ?? current
+  // The focus state is stored as a BASE id: the rendered actions carry the frame token,
+  // and a token kept in the panel's own state would stop matching on the very next frame.
+  return actionBase(panel, next.id) ?? next.id
 }
 
 /* ------------------------------------------------------------- details page */
