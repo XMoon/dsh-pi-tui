@@ -1,0 +1,336 @@
+/**
+ * Phase 3B / B4-A — the passive Task Quick accessory and its ONE projection.
+ *
+ * L1 coverage of the two pure owners the passive below-editor window is built
+ * from:
+ * - `planTaskQuickLayout` + `TaskQuickAccessory`: the grant ladder, the
+ *   single-physical-row projection, the row-identity window anchor and the
+ *   LAST-PAINTED wheel geometry;
+ * - `quickTaskProjection`: the Quick active/ancestor/attention policy over the
+ *   runtime's committed rows, with the modal-only promotion row removed.
+ *
+ * The real painted frame (mount, budget, editor/footer/transcript survival, an
+ * SGR wheel over the live box) is the L6 suite's job — a component test never
+ * substitutes for it.
+ * @module @xmoon76/dsh-pi-tui/task-quick-accessory.test
+ */
+
+import assert from 'node:assert/strict'
+import { afterEach, test } from 'node:test'
+import { visibleWidth } from '@xmoon76/pi-tui'
+import type { TuiMouseEvent } from '@xmoon76/pi-tui'
+import { TaskQuickAccessory, TASK_QUICK_MAX_ROWS, planTaskQuickLayout, type TaskQuickLayout } from '../src/tui/panels/task-quick-accessory.ts'
+import { quickTaskProjection } from '../src/app/surface/task-runtime.ts'
+import { buildTaskRows } from '../src/domain/task/browser.ts'
+import { setTheme } from '../src/tui/theme/runtime.ts'
+import type { TaskPanelItem } from '../src/app/surface/task-presentation.ts'
+import type { QuestionAttentionRow } from '../src/app/surface/question-controller.ts'
+
+const SGR = /\x1b\[[0-9;]*m/g
+const strip = (text: string): string => text.replace(SGR, '')
+
+afterEach(() => setTheme('dark'))
+
+/** The frozen B4-A grant ladder at chrome = 4 (a three-row editor seat plus the
+ *  one-row footer — the ordinary surface's steady state). */
+test('grant ladder: normal 3 rows, short 1 row, extreme 0 rows', () => {
+  const at = (rows: number, total = 12): TaskQuickLayout => planTaskQuickLayout(80, rows, 4, total, 0)
+  // 24 rows: the accessory's own ceiling — identity + three task rows.
+  assert.deepEqual(at(24), { width: 80, grant: 4, header: true, itemRows: 3, start: 0, count: 3, total: 12 })
+  // 20 rows (the 44-column matrix height): still the full window.
+  assert.equal(at(20).grant, 4)
+  assert.equal(at(20).itemRows, 3)
+  // 12 rows: two task rows.
+  assert.equal(at(12).grant, 3)
+  assert.equal(at(12).itemRows, 2)
+  // 10 and 8 rows: the proportional share degrades to identity + ONE task row.
+  assert.equal(at(10).grant, 2)
+  assert.equal(at(10).itemRows, 1)
+  assert.equal(at(8).grant, 2)
+  assert.equal(at(8).itemRows, 1)
+  // 6 rows: a lone granted row is spent on content, never on a header.
+  assert.equal(at(6).grant, 1)
+  assert.equal(at(6).header, false)
+  assert.equal(at(6).itemRows, 1)
+  // 4 rows: the editor seat and the footer alone consume the frame — 0 grant.
+  assert.equal(at(4).grant, 0)
+  assert.equal(at(4).count, 0)
+  // The ceiling is the accessory's own budget, never a terminal-size threshold.
+  assert.ok(at(200).grant <= TASK_QUICK_MAX_ROWS)
+})
+
+test('grant ladder: an empty projection paints no row at any size', () => {
+  for (const rows of [200, 24, 10, 6]) {
+    const layout = planTaskQuickLayout(80, rows, 4, 0, 0)
+    assert.equal(layout.grant, 0)
+    assert.equal(layout.count, 0)
+    assert.equal(layout.total, 0)
+  }
+})
+
+test('grant ladder: one real item never paints a header-only frame', () => {
+  const one = planTaskQuickLayout(80, 24, 4, 1, 0)
+  assert.equal(one.header, true)
+  assert.equal(one.itemRows, 1)
+  assert.equal(one.count, 1)
+  const short = planTaskQuickLayout(80, 6, 4, 1, 0)
+  assert.equal(short.header, false)
+  assert.equal(short.count, 1)
+})
+
+test('grant ladder: the transcript floor, the chrome and the accessory ceiling are all kept', () => {
+  for (const rows of [200, 60, 40, 24, 20, 12, 10, 8, 6, 5, 4, 3]) {
+    for (const chrome of [0, 1, 4, 8]) {
+      const layout = planTaskQuickLayout(120, rows, chrome, 12, 5)
+      assert.ok(layout.grant <= TASK_QUICK_MAX_ROWS, `ceiling: ${rows}/${chrome}`)
+      assert.ok(layout.start >= 0 && layout.start + layout.count <= layout.total, `window: ${rows}/${chrome}`)
+      if (layout.grant === 0) continue
+      assert.ok(layout.count <= layout.itemRows, `capacity: ${rows}/${chrome}`)
+      assert.ok(layout.count <= layout.grant, `grant: ${rows}/${chrome}`)
+      assert.ok(layout.grant <= 12 + 1, `demand: ${rows}/${chrome}`)
+      assert.ok(rows - chrome - layout.grant >= 1, `transcript floor: ${rows}/${chrome}`)
+    }
+  }
+})
+
+interface Harness {
+  readonly accessory: TaskQuickAccessory
+  readonly geometry: { cols: number; rows: number; chrome: number }
+  renders(): number
+}
+
+function harness(initial: { cols?: number; rows?: number; chrome?: number } = {}): Harness {
+  const geometry = { cols: initial.cols ?? 80, rows: initial.rows ?? 24, chrome: initial.chrome ?? 4 }
+  let renders = 0
+  const accessory = new TaskQuickAccessory({
+    geometry: {
+      columns: () => geometry.cols,
+      rows: () => geometry.rows,
+      chromeRows: () => geometry.chrome,
+    },
+    onRequestRender: () => { renders += 1 },
+  })
+  return { accessory, geometry, renders: () => renders }
+}
+
+function item(value: string, patch: Partial<TaskPanelItem> = {}): TaskPanelItem {
+  return { value, label: value, status: 'running', ...patch }
+}
+
+function wheel(delta: number, y: number, overrides: Partial<TuiMouseEvent> = {}): TuiMouseEvent {
+  return {
+    type: 'wheel',
+    button: 'none',
+    x: 4,
+    y,
+    screenX: 4,
+    screenY: y,
+    width: 80,
+    height: 4,
+    shift: false,
+    alt: false,
+    ctrl: false,
+    wheelDelta: delta,
+    ...overrides,
+  }
+}
+
+test('a painted frame is exactly its grant and every row is one physical row', () => {
+  const { accessory } = harness()
+  accessory.setItems([item('job:a'), item('job:b'), item('job:c'), item('job:d')])
+  const lines = accessory.render(80)
+  assert.equal(lines.length, 4)
+  assert.deepEqual(lines.map(line => visibleWidth(line)), [80, 80, 80, 80])
+  assert.match(strip(lines[0]!), /^Task Quick\s+showing 1-3\/4$/)
+  assert.match(strip(lines[1]!), /job:a\s+‣ Running$/)
+  assert.match(strip(lines[2]!), /job:b\s+‣ Running$/)
+  assert.match(strip(lines[3]!), /job:c\s+‣ Running$/)
+})
+
+test('a one-row grant spends the row on content and keeps the position at its tail', () => {
+  const { accessory } = harness({ rows: 6 })
+  accessory.setItems([item('job:a'), item('job:b'), item('job:c')])
+  const lines = accessory.render(80)
+  assert.equal(lines.length, 1)
+  assert.equal(visibleWidth(lines[0]!), 80)
+  assert.match(strip(lines[0]!), /^job:a\s+‣ Running\s+1-1\/3$/)
+})
+
+test('the window shows the REAL N: the row total, never a pseudo row', () => {
+  const { accessory, geometry } = harness()
+  accessory.setItems([item('job:a'), item('job:b'), item('job:c'), item('job:d')])
+  assert.match(strip(accessory.render(80)[0]!), /showing 1-3\/4$/)
+  geometry.rows = 12
+  assert.match(strip(accessory.render(80)[0]!), /showing 1-2\/4$/)
+})
+
+test('an empty projection paints nothing and installs no hit geometry', () => {
+  const { accessory } = harness()
+  accessory.setItems([])
+  assert.deepEqual(accessory.render(80), [])
+  assert.equal(accessory.handleMouse(wheel(-1, 1)), undefined)
+})
+
+test('a 0-grant frame paints nothing and refuses the wheel', () => {
+  const { accessory, geometry } = harness({ rows: 4 })
+  accessory.setItems([item('job:a'), item('job:b'), item('job:c'), item('job:d')])
+  assert.deepEqual(accessory.render(80), [])
+  assert.equal(accessory.handleMouse(wheel(1, 1)), undefined)
+  geometry.rows = 24
+  assert.equal(accessory.render(80).length, 4)
+  assert.equal(accessory.handleMouse(wheel(-1, 1)), undefined, 'an upward wheel at the top is not consumed')
+  assert.deepEqual(accessory.handleMouse(wheel(1, 1)), { handled: true, render: true }, 'the down wheel moves the window')
+  assert.match(strip(accessory.render(80)[0]!), /showing 2-4\/4$/)
+})
+
+test('the wheel resolves only against the LAST PAINTED frame', () => {
+  const { accessory, geometry } = harness()
+  accessory.setItems([item('job:a'), item('job:b'), item('job:c'), item('job:d'), item('job:e')])
+  accessory.render(80)
+  // The identity row is not a scroll target.
+  assert.equal(accessory.handleMouse(wheel(1, 0)), undefined)
+  // A stale box (a resize that has not been repainted) is refused, both ways.
+  assert.equal(accessory.handleMouse(wheel(1, 1, { width: 100 })), undefined)
+  assert.equal(accessory.handleMouse(wheel(1, 1, { height: 3 })), undefined)
+  // A y outside the painted band is not ours.
+  assert.equal(accessory.handleMouse(wheel(1, 9)), undefined)
+  // Press/release/click never act and never take focus.
+  assert.equal(accessory.handleMouse({ ...wheel(1, 1), type: 'press' }), undefined)
+  assert.equal(accessory.handleMouse({ ...wheel(1, 1), type: 'click' }), undefined)
+  const moved = accessory.handleMouse(wheel(1, 1))
+  assert.deepEqual(moved, { handled: true, render: true })
+  assert.ok(!('focus' in moved!), 'the wheel never requests focus')
+  assert.match(strip(accessory.render(80)[0]!), /showing 2-4\/5$/)
+  assert.deepEqual(accessory.handleMouse(wheel(1, 1)), { handled: true, render: true })
+  assert.match(strip(accessory.render(80)[0]!), /showing 3-5\/5$/)
+  // At the window boundary the accessory consumes nothing.
+  assert.equal(accessory.handleMouse(wheel(1, 1)), undefined)
+  assert.deepEqual(accessory.handleMouse(wheel(-1, 1)), { handled: true, render: true })
+  assert.match(strip(accessory.render(80)[0]!), /showing 2-4\/5$/)
+  // A resize that has not been repainted still resolves against the OLD box.
+  geometry.rows = 6
+  assert.equal(accessory.handleMouse(wheel(-1, 1, { height: 1 })), undefined)
+  const shrunk = accessory.render(80)
+  // A one-row grant paints ONE content row (no header) and keeps the position.
+  assert.equal(shrunk.length, 1)
+  assert.match(strip(shrunk[0]!), /^job:b\s+‣ Running\s+2-2\/5$/)
+  assert.deepEqual(accessory.handleMouse(wheel(1, 0, { height: 1 })), { handled: true, render: true })
+  assert.match(strip(accessory.render(80)[0]!), /^job:c\s+‣ Running\s+3-3\/5$/)
+})
+
+test('the window rebases on the first visible row ID, not on an index or a label', () => {
+  const { accessory, geometry } = harness()
+  accessory.setItems([item('job:a'), item('job:b'), item('job:c'), item('job:d'), item('job:e'), item('job:f')])
+  accessory.render(80)
+  accessory.handleMouse(wheel(1, 1))
+  accessory.render(80)
+  assert.match(strip(accessory.render(80)[0]!), /showing 2-4\/6$/)
+  assert.match(strip(accessory.render(80)[1]!), /job:b/)
+  // A status update of the anchored row keeps the window exactly where it is.
+  accessory.setItems([
+    item('job:a'), item('job:b', { status: 'failed' }), item('job:c'),
+    item('job:d'), item('job:e'), item('job:f'),
+  ])
+  const updated = accessory.render(80)
+  assert.match(strip(updated[0]!), /showing 2-4\/6$/)
+  assert.match(strip(updated[1]!), /job:b\s+‣ Failed$/)
+  // An insertion ABOVE the anchor keeps the anchored row first.
+  accessory.setItems([
+    item('job:x'), item('job:a'), item('job:b'), item('job:c'),
+    item('job:d'), item('job:e'), item('job:f'),
+  ])
+  const inserted = accessory.render(80)
+  assert.match(strip(inserted[0]!), /showing 3-5\/7$/)
+  assert.match(strip(inserted[1]!), /job:b/)
+  // Removing the anchored row falls back to the BOUNDED previous index.
+  accessory.setItems([
+    item('job:x'), item('job:a'), item('job:c'), item('job:d'), item('job:e'), item('job:f'),
+  ])
+  const removed = accessory.render(80)
+  assert.match(strip(removed[0]!), /showing 3-5\/6$/)
+  assert.match(strip(removed[1]!), /job:c/, 'index 2 of the remaining rows')
+  // A shrink keeps the anchored row visible…
+  geometry.rows = 8
+  const shrunk = accessory.render(80)
+  assert.equal(shrunk.length, 2)
+  assert.match(strip(shrunk[1]!), /^job:c\s+‣ Running$/)
+  assert.match(strip(shrunk[0]!), /showing 3-3\/6$/)
+  // …and growing back does not jump the window.
+  geometry.rows = 24
+  assert.match(strip(accessory.render(80)[0]!), /showing 3-5\/6$/)
+})
+
+test('every rendered row is a single safe physical row, measured in terminal cells', () => {
+  const { accessory } = harness()
+  const hostile = '\x1b[31mevil\x1b[0m\nsecond\ttab\u0007' + '任务标签'.repeat(30)
+  accessory.setItems([
+    item('job:a', { label: hostile }),
+    item('job:b', { label: '短', suffix: 'continuable' }),
+    item('job:c', { label: 'c', suffix: 'one-shot' + 'x'.repeat(200) }),
+  ])
+  const lines = accessory.render(80)
+  for (const line of lines) {
+    assert.equal(visibleWidth(line), 80)
+    assert.ok(!line.includes('\n') && !line.includes('\r') && !line.includes('\t'))
+  }
+  const first = strip(lines[1]!)
+  assert.ok(!first.includes('[31m') && !first.includes('evil\x1b'), `the raw escape must not leak: ${JSON.stringify(first)}`)
+  assert.ok(!first.includes('\u0007'), 'the control byte must not leak')
+  assert.match(first, /…/, 'the long label truncates with the content ellipsis')
+  // The durable mode rides whole while an identifiable label cell survives.
+  assert.match(strip(lines[2]!), /短 · continuable\s+‣ Running$/)
+  // A mode longer than the row yields whole rather than being cut mid-word.
+  const third = strip(lines[3]!)
+  assert.match(third, /‣ Running$/)
+  assert.ok(!third.includes('one-shot'), 'an unaffordable mode is dropped whole')
+})
+
+test('the ink follows a live theme switch without a re-construction', () => {
+  const { accessory } = harness()
+  accessory.setItems([item('job:a')])
+  const dark = accessory.render(80).join('\n')
+  setTheme('light')
+  const light = accessory.render(80).join('\n')
+  assert.notEqual(dark, light, 'the same frame must repaint with the live palette')
+  assert.equal(strip(dark), strip(light), 'only the ink changes, never the text')
+})
+
+test('a narrow frame degrades the position whole, never mid-word', () => {
+  const render = (cols: number): string => {
+    const { accessory } = harness({ cols })
+    accessory.setItems([item('job:a'), item('job:b')])
+    return strip(accessory.render(cols)[0]!)
+  }
+  assert.match(render(44), /^Task Quick\s+showing 1-2\/2$/)
+  assert.equal(render(24), 'Task Quick showing 1-2/2')
+  // The compact position replaces the verbose one before it is dropped whole.
+  assert.equal(render(16), 'Task Quick 1-2/2')
+  assert.equal(render(14), 'Task Quick    ')
+})
+
+test('the projection keeps the Quick policy and drops the modal-only promotion row', () => {
+  const rows = buildTaskRows([
+    { id: 'j1', label: 'build', status: 'running', kind: 'bash', startedAt: 0 },
+    { id: 'j2', label: 'deploy', status: 'failed', kind: 'bash', startedAt: 0 },
+  ], [])
+  // Live work: the Active scope keeps the running job and leaves the terminal
+  // failure as footer attention (not a Quick row).
+  assert.deepEqual(quickTaskProjection(rows, []).map(row => row.value), ['job:j1'])
+  // No live work: the unacknowledged failure surfaces, as the modal Quick does.
+  const settled = buildTaskRows([
+    { id: 'j2', label: 'deploy', status: 'failed', kind: 'bash', startedAt: 0 },
+  ], [])
+  assert.deepEqual(quickTaskProjection(settled, []).map(row => row.value), ['job:j2'])
+  // Parked Question attention leads the rows and is never a Job.
+  const attention: QuestionAttentionRow[] = [
+    { sessionId: 's', callId: 'c', questions: [{ id: 'q1', question: 'Continue?' }], presentation: 'parked' },
+    // A VISIBLE Question owns the editor seat: it never duplicates into Quick.
+    { sessionId: 's', callId: 'v', questions: [{ id: 'q2', question: 'Answer me' }], presentation: 'visible' },
+  ]
+  const projected = quickTaskProjection(settled, attention)
+  assert.equal(projected.length, 2)
+  assert.match(projected[0]!.value, /^question:/)
+  assert.equal(projected[0]!.source, 'question')
+  assert.equal(projected[0]!.status, 'awaiting answer')
+  assert.ok(projected.every(row => row.kind !== 'view-full'))
+})
