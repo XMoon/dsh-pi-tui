@@ -851,141 +851,6 @@ test('the /skill picker offers only human-invocable skills', async () => {
   app.stop()
 })
 
-test('the /skill picker keeps two same-prefix long names distinguishable (PR #309 review)', async () => {
-  const ctx = new Context()
-  const vt = new VirtualTerminal(80, 24)
-  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
-  app.start()
-  startedApps.add(app)
-  const services = fakeServices()
-  ctx.provide('commands', services.commands as never)
-  const agent = fakeAgent('session-a')
-  // Two names wider than the 36-cell label column, sharing their first 35
-  // characters, with NO description: the vendored list's head-keeping clip
-  // would paint both as the same prefix + `\u2026` while Enter still runs
-  // different ids. The rows keep the name's TAIL and expand the full name of
-  // the SELECTED row in its description; neither changes the row's identity.
-  const prefix = 'x'.repeat(35)
-  const first = { name: `${prefix}AA`, description: '', invocation: { modelInvocable: false, userInvocable: true }, source: 'bundled', provider: 't' }
-  const second = { name: `${prefix}BB`, description: '', invocation: { modelInvocable: false, userInvocable: true }, source: 'bundled', provider: 't' }
-  ctx.provide('skills', { list: async () => [first, second], get: async () => undefined } as never)
-  const { defs } = services
-  registerTuiCommandsWithDirectSeams(stubRunner(ctx, app, { agent }))
-  // Capture the REAL rows the command hands to the overlay (the wrapper still
-  // opens the real overlay, so the painted frame below stays production output).
-  const originalOpenSettings = app.openSettings.bind(app)
-  let captured: { items: readonly SettingItem[] } | undefined
-  app.openSettings = ((items, onChange, onCancel, onHidden) => {
-    captured = { items }
-    return originalOpenSettings(items, onChange, onCancel, onHidden)
-  }) as typeof app.openSettings
-  const skillDef = defs.find(def => def.name === 'skill')
-  assert.ok(skillDef?.handler !== undefined)
-  await (skillDef!.handler as (invocation: { rawInput: string }) => Promise<unknown>)({ rawInput: '' })
-  await vt.waitForRender()
-  const rows = vt.getViewport()
-  const view = rows.join('\n')
-  const firstRow = rows.find(line => line.includes('AA'))
-  const secondRow = rows.find(line => line.includes('BB'))
-  assert.ok(firstRow !== undefined && secondRow !== undefined, `both names must keep their distinguishing tail:\n${view}`)
-  assert.notEqual(firstRow, secondRow, `the two rows must not paint identically:\n${view}`)
-  assert.ok(view.includes(first.name), `the selected row's description must expand the FULL name:\n${view}`)
-  // Identity untouched: the delivered id is still the FULL name, and it is the
-  // row the user saw (its label carries this name's tail). The submit path
-  // itself is pinned by the /skill delivery tests above.
-  const items = captured?.items ?? []
-  assert.deepEqual(items.map(item => item.id), [first.name, second.name])
-  assert.ok(items[0]!.label.endsWith('AA') && items[1]!.label.endsWith('BB'),
-    `the labels must keep each name's tail: ${JSON.stringify(items.map(item => item.label))}`)
-  assert.ok(items.every(item => visibleWidth(item.label) <= 36), 'a label must fit the 36-cell column')
-  app.stop()
-})
-
-test('the /skill abbreviation also separates two names that share a SUFFIX (PR #309 review)', async () => {
-  // The symmetric counter-case the earlier tail-only form introduced: different
-  // prefixes, identical 35-cell suffixes. A head+tail abbreviation must differ,
-  // and an astral (emoji) name must not break the width budget.
-  const ctx = new Context()
-  const vt = new VirtualTerminal(80, 24)
-  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
-  app.start()
-  startedApps.add(app)
-  const services = fakeServices()
-  ctx.provide('commands', services.commands as never)
-  const suffix = `${'y'.repeat(33)}ZZ`
-  const front = { name: `frontend-common-workflow-${suffix}`, description: '', invocation: { modelInvocable: false, userInvocable: true }, source: 'bundled', provider: 't' }
-  const back = { name: `backend--common-workflow-${suffix}`, description: '', invocation: { modelInvocable: false, userInvocable: true }, source: 'bundled', provider: 't' }
-  // Six astral characters at the END: the 34-cell budget (33 + the ellipsis) must
-  // keep them all WHOLE in the label. A loop that walked UTF-16 CODE UNITS would
-  // spend a unit per surrogate half and stop short of (or inside) the sixth
-  // rocket, so the count and the lone-surrogate check below are the witness.
-  const rockets = '\u{1F680}'.repeat(6)
-  const emoji = { name: `${'e'.repeat(30)}${rockets}`, description: '', invocation: { modelInvocable: false, userInvocable: true }, source: 'bundled', provider: 't' }
-  ctx.provide('skills', { list: async () => [front, back, emoji], get: async () => undefined } as never)
-  const { defs } = services
-  const originalOpenSettings = app.openSettings.bind(app)
-  let captured: { items: readonly SettingItem[] } | undefined
-  app.openSettings = ((items, onChange, onCancel, onHidden) => {
-    captured = { items }
-    return originalOpenSettings(items, onChange, onCancel, onHidden)
-  }) as typeof app.openSettings
-  registerTuiCommandsWithDirectSeams(stubRunner(ctx, app, { agent: fakeAgent('session-a') }))
-  const skillDef = defs.find(def => def.name === 'skill')
-  assert.ok(skillDef?.handler !== undefined)
-  await (skillDef!.handler as (invocation: { rawInput: string }) => Promise<unknown>)({ rawInput: '' })
-  await vt.waitForRender()
-  const rows = vt.getViewport()
-  const view = rows.join('\n')
-  const frontRow = rows.find(line => line.includes('frontend'))
-  const backRow = rows.find(line => line.includes('backend'))
-  assert.ok(frontRow !== undefined && backRow !== undefined, `both prefixes must stay visible:\n${view}`)
-  assert.notEqual(frontRow, backRow, `two same-suffix names must not paint identically:\n${view}`)
-  const emojiRow = rows.find(line => line.includes('eeee'))
-  assert.ok(emojiRow !== undefined, `an astral-character name must still paint:\n${view}`)
-  // Assert on the REAL row label, not on the terminal-bounded viewport line: the
-  // label must spend its 34 cells on whole code points.
-  const emojiItem = captured!.items.find(item => item.id === emoji.name)
-  assert.ok(emojiItem !== undefined, `the astral-name row must be handed to the overlay:\n${view}`)
-  const emojiLabel = emojiItem.label
-  assert.equal([...emojiLabel].filter(char => char === '\u{1F680}').length, 6,
-    `every astral character must survive whole: ${JSON.stringify(emojiLabel)}`)
-  assert.equal(visibleWidth(emojiLabel), 34, `the label must fill its budget: ${JSON.stringify(emojiLabel)}`)
-  assert.ok(!/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/u.test(emojiLabel),
-    `no lone surrogate may reach the label: ${JSON.stringify(emojiLabel)}`)
-  app.stop()
-})
-
-test('the /skill tail survives the 44-column floor budget (PR #309 review)', async () => {
-  const ctx = new Context()
-  const vt = new VirtualTerminal(44, 20)
-  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
-  app.start()
-  startedApps.add(app)
-  const services = fakeServices()
-  ctx.provide('commands', services.commands as never)
-  ctx.provide('skills', {
-    list: async () => [
-      { name: `${'x'.repeat(35)}AA`, description: '', invocation: { modelInvocable: false, userInvocable: true }, source: 'bundled', provider: 't' },
-      { name: `${'x'.repeat(35)}BB`, description: '', invocation: { modelInvocable: false, userInvocable: true }, source: 'bundled', provider: 't' },
-    ],
-    get: async () => undefined,
-  } as never)
-  const { defs } = services
-  registerTuiCommandsWithDirectSeams(stubRunner(ctx, app, { agent: fakeAgent('session-a') }))
-  const skillDef = defs.find(def => def.name === 'skill')
-  assert.ok(skillDef?.handler !== undefined)
-  await (skillDef!.handler as (invocation: { rawInput: string }) => Promise<unknown>)({ rawInput: '' })
-  await vt.waitForRender()
-  const rows = vt.getViewport()
-  const view = rows.join('\n')
-  const firstRow = rows.find(line => line.includes('AA'))
-  const secondRow = rows.find(line => line.includes('BB'))
-  assert.ok(firstRow !== undefined && secondRow !== undefined,
-    `at 44 columns each row must still keep its own tail:\n${view}`)
-  assert.notEqual(firstRow, secondRow, `the two rows must not paint identically at 44 columns:\n${view}`)
-  app.stop()
-})
-
 test('a direct skill wrapper re-checks the policy on the CURRENT agent at execution time', async () => {
   const ctx = new Context()
   const vt = new VirtualTerminal(80, 24)
@@ -1750,5 +1615,67 @@ test('the built-in command decomposition preserves the exact primary set and reg
     'help',
     'keybindings',
   ])
+  app.stop()
+})
+
+test('/skill search finds a keyword from the middle of a long skill name (PR #309 review)', async () => {
+  // `SettingsList.applyFilter()` filters on `item.label` ONLY: a label abbreviation
+  // would make the middle of a long name unfindable, so the label must stay the
+  // complete name and the column clip is what handles display.
+  const ctx = new Context()
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  const services = fakeServices()
+  ctx.provide('commands', services.commands as never)
+  const long = { name: 'zzz-quasar-unique-marker-zzz', description: '', invocation: { modelInvocable: false, userInvocable: true }, source: 'bundled', provider: 't' }
+  ctx.provide('skills', { list: async () => [long], get: async () => undefined } as never)
+  const { defs } = services
+  registerTuiCommandsWithDirectSeams(stubRunner(ctx, app, { agent: fakeAgent('session-a') }))
+  const skillDef = defs.find(def => def.name === 'skill')
+  assert.ok(skillDef?.handler !== undefined)
+  await (skillDef!.handler as (invocation: { rawInput: string }) => Promise<unknown>)({ rawInput: '' })
+  await vt.waitForRender()
+  vt.sendInput('quasar')
+  await vt.waitForRender()
+  assert.ok(vt.getViewport().join('\n').includes('quasar-unique-marker'),
+    `a middle keyword must still find the skill:\n${vt.getViewport().join('\n')}`)
+  app.stop()
+})
+
+test('/skill rows keep the complete name as the search basis (PR #309 review)', async () => {
+  // The list's search filters on `item.label` only, so the label must stay the
+  // COMPLETE name however wide it is and the column clip is what handles display;
+  // the selected row's description expands the complete name.
+  const ctx = new Context()
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  const services = fakeServices()
+  ctx.provide('commands', services.commands as never)
+  const prefix = 'x'.repeat(35)
+  const first = { name: `${prefix}AA`, description: '', invocation: { modelInvocable: false, userInvocable: true }, source: 'bundled', provider: 't' }
+  const second = { name: `${prefix}BB`, description: '', invocation: { modelInvocable: false, userInvocable: true }, source: 'bundled', provider: 't' }
+  ctx.provide('skills', { list: async () => [first, second], get: async () => undefined } as never)
+  const { defs } = services
+  const originalOpenSettings = app.openSettings.bind(app)
+  let captured: { items: readonly SettingItem[] } | undefined
+  app.openSettings = ((items, onChange, onCancel, onHidden) => {
+    captured = { items }
+    return originalOpenSettings(items, onChange, onCancel, onHidden)
+  }) as typeof app.openSettings
+  registerTuiCommandsWithDirectSeams(stubRunner(ctx, app, { agent: fakeAgent('session-a') }))
+  const skillDef = defs.find(def => def.name === 'skill')
+  assert.ok(skillDef?.handler !== undefined)
+  await (skillDef!.handler as (invocation: { rawInput: string }) => Promise<unknown>)({ rawInput: '' })
+  await vt.waitForRender()
+  const items = captured?.items ?? []
+  assert.deepEqual(items.map(item => item.id), [first.name, second.name])
+  assert.deepEqual(items.map(item => item.label), [first.name, second.name],
+    'the LABEL must stay the COMPLETE name: the list searches item.label only')
+  assert.ok(items.every(item => (item.description ?? '').startsWith(item.id)),
+    `the SELECTED row's description must expand the complete name:\n${JSON.stringify(items.map(item => item.description))}`)
   app.stop()
 })
