@@ -1501,15 +1501,16 @@ test('the badge is right-aligned against the row edge', async () => {
 })
 
 test('a multi-line effort choice never truncates the model label', async () => {
-  // HONEST SCOPE, verified by a width probe: this test does NOT discriminate the
-  // projected-width comparison. Rendering the same fixture with the comparison
-  // reverted to raw labels (and with the projection) produced byte-identical rows at
-  // every width from 36 to 44, so no threshold exists on this path to assert against;
-  // the projected comparison therefore remains a consistency fix argued from the code
-  // (both candidates' labels are projected somewhere before the decision, or the wrap
-  // threshold is insensitive to the one-cell difference here). What this test does
-  // pin is the user-visible outcome: with the effort focus on a multi-line choice the
-  // model label is still painted in full.
+  // WITNESS for the projected-width comparison in `widestBadgeOf` (mutation-proven:
+  // reverting it to raw labels fails this test). The widest CANDIDATE badge is 30
+  // cells once projected — `[current] · effort [ A B C D ]` — but 29 measured on the
+  // RAW label, because `A\nB\nC\nD` is 4 cells raw and 7 projected. The wrap
+  // threshold is therefore exactly `2 + 20 + 2 + 29 = 53` cells, and this test
+  // renders AT it: the projected comparison sees 54 > 53 and WRAPS, painting the
+  // 20-cell model label in full, while the raw comparison sees 53 > 53 false and
+  // keeps the 32-cell badge inline — leaving the label `53 - 2 - 32 = 19` cells and
+  // cutting its last character. (Widths below 53 wrap either way, which is why the
+  // earlier 36..44 sweep could not discriminate.)
   const label = 'Model name 123456789' // exactly 20 cells
   const directory = makeDirectory({
     groups: [{ id: 'p1', name: 'P1', models: [model('sol', { name: label, efforts: [
@@ -1522,7 +1523,7 @@ test('a multi-line effort choice never truncates the model label', async () => {
   await h.vt.waitForRender()
   h.vt.sendInput('\x1b[C') // cycle Medium -> the multi-line choice
   await h.vt.waitForRender()
-  const rows = h.picker.render(41).map(line => line.replace(/\x1b\[[0-9;]*m/g, ''))
+  const rows = h.picker.render(53).map(line => line.replace(/\x1b\[[0-9;]*m/g, ''))
   assert.ok(rows.some(line => line.includes('[ A B C D ]')),
     `the effort must really be on the multi-line choice:\n${rows.join('\n')}`)
   assert.ok(rows.some(line => line.includes(label)),

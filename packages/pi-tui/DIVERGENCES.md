@@ -87,8 +87,8 @@
 
 ## Summary
 
-- Records: 62
-- Statuses: `ABSORBED_UPSTREAM`: 4, `ACTIVE`: 46, `MOVED_TO_HOST`: 3, `REMOVED_UNUSED`: 6, `SUPERSEDED`: 3
+- Records: 63
+- Statuses: `ABSORBED_UPSTREAM`: 4, `ACTIVE`: 47, `MOVED_TO_HOST`: 3, `REMOVED_UNUSED`: 6, `SUPERSEDED`: 3
 
 | ID | Status | Risk | Categories | Upstream equivalence |
 | --- | --- | --- | --- | --- |
@@ -154,6 +154,7 @@
 | X059 | ACTIVE | MEDIUM | HARD_HOST_API | NO |
 | X060 | ACTIVE | MEDIUM | HARD_HOST_API | NO |
 | X061 | ACTIVE | MEDIUM | PUBLIC_COMPONENT_CONTRACT, BUGFIX_MISSING_UPSTREAM | NO |
+| X062 | ACTIVE | MEDIUM | PUBLIC_COMPONENT_CONTRACT, BUGFIX_MISSING_UPSTREAM | NO |
 
 ## Divergences
 
@@ -5228,3 +5229,85 @@ The host's state chips (`[current]`/`[default]`) live in the vendored value slot
 
 - Scope: `vendor-internal`, `inheritance-structural`, `host`, `public-extension`, `behavioral`, `tests`
 - Notes: Introduced in PR #309 (rollout PR5b) after the external review P2 (a chip cut or pushed out of the row on supported narrow frames). Scope checked against every SettingsList caller, the fork's own value-paint theme, the real-overlay frames at 120/67/66/59/58/57/56/52/48/44 columns, the over-wide-label case at 120 and 44 columns, and the mouse hit map after a resize.
+
+### X062 — A row's search basis kept separate from its painted label
+
+- Status: `ACTIVE`
+- Category: `PUBLIC_COMPONENT_CONTRACT`, `BUGFIX_MISSING_UPSTREAM`
+- Risk: `MEDIUM`
+- Files: `src/components/settings-list.ts`
+- Last audited: `2026-10-14`
+- Baseline compared: `earendil-works/pi@abe508e1b89912adde45528136c3221eb69acdd7`
+
+#### Why it exists
+
+The host abbreviates a long row NAME (head…tail around one `…`) so the label column can hold a name that would otherwise be clipped to its head — two same-prefix names would otherwise paint identically while Enter still runs different ids. The list's own search, however, filters on `item.label` ONLY, so the abbreviation made a keyword from the MIDDLE of the name unfindable: the Theme submenu runs with `enableSearch: true` and /preset and /skill use the same list, and the description never participates in search. The host cannot repair this through the public surface: one string is both painted and searched, and no call-site shaping can be the abbreviation for the column and the complete name for the filter. Upstream has neither the abbreviation need nor the split.
+
+#### Changed surface
+
+- `SettingItem.searchText?: string` — an optional search basis for a row whose painted `label` is not what the user should be able to type.
+- `SettingsList.applyFilter()` filters on `item.searchText ?? item.label`; absent `searchText` the label is the search basis byte-for-byte as before.
+
+#### Dependency map
+
+**Vendor internal**
+- `applyFilter` is the only search entry in the fork; no other vendored component reads `searchText` or filters on a label.
+- The rendered label is untouched: `renderItemWindow` still truncates `item.label` to the label column with `…` (X061), so `searchText` is a filter-only field and changes no paint.
+- Audit note: No vendor-internal consumer changes; the search predicate is the single owner of the field.
+
+**Inheritance / structural**
+- None found (audited).
+- Audit note: No inheritance edge is introduced or relied on.
+
+**Host**
+- `src/tui/pickers/theme-menu.ts` (Theme submenu, `enableSearch: true`) declares the complete display name as `searchText` while the label is the 25-cell abbreviation.
+- `src/tui/pickers/preset-presentation-pitui.ts` declares the complete `name (id)` as `searchText` while the label is the 25-cell abbreviation.
+- `src/tui/commands/skills.ts` declares the complete skill name as `searchText` while the label is the 34-cell abbreviation (the 44-column floor budget).
+- Every other SettingsList caller declares no `searchText` and keeps the historical label-as-search-basis behavior.
+- Audit note: The field is additive and optional, so no non-declaring caller changes behavior.
+
+**Public / extension**
+- `searchText` is an optional structural member of the public `SettingItem`; it rolls up through the existing `SettingItem` export in `src/index.ts` inside the allowlisted entry regions — no new export and no entry-graph change.
+- Audit note: Additive only: no existing member is repurposed or removed.
+
+**Behavioral coupling**
+- a row that declares `searchText` is found by a keyword from the middle of its complete text while painting the abbreviation
+- a row that declares none is found exactly as before (label-only), so the change is inert for every existing caller
+- the filter result set, the selected index reset and `recomputeVisibleBudget()` are unchanged
+- Audit note: The split answers one question — what text may the user type to find this row — and never touches identity, ordering or the write path.
+
+#### Guarding tests
+
+- packages/pi-tui/test/settings-list.test.ts: a row painting an abbreviation (`Classic Dark…l Edition v9`) is still found by a middle keyword (`quasar`) declared in `searchText`; a row with no `searchText` keeps the historical label-only basis (the same query answers `No matching settings`), which is also the mutation witness for the split
+- test/command-catalog.test.ts: the real `/skill` picker answers a middle keyword of a long skill name through the real search input, and a row hands the COMPLETE name as `searchText` while its label stays the 34-cell abbreviation
+- test/preset-command.test.ts: the real `/preset` overlay answers a middle keyword of a long preset name; the 44-column regressions keep the abbreviation and the whole-ID labeling intact
+- test/surface-row-grant.test.ts: the real Theme submenu (the case the external review reported) answers `quasar` for `Classic Dark quasar Special Edition v9`, and the two long same-prefix theme names still paint apart at 44 columns
+
+#### Upstream comparison
+
+- Baseline: `earendil-works/pi@abe508e1b89912adde45528136c3221eb69acdd7`
+- Semantic equivalence: `NO`
+- Reference snapshot: `earendil-works/pi@abe508e1b89912adde45528136c3221eb69acdd7`
+- Relevant upstream files:
+- packages/tui/src/components/settings-list.ts
+- Relevant issues/PRs:
+- None recorded; issue/PR state was not used as semantic proof.
+- Remaining semantic delta: Upstream's `SettingsList` filters its items on `item.label` too, but upstream has no row that abbreviates its label for the column, so the two never diverge there. The fork adds the optional `searchText` split so a caller can abbreviate for the column without hiding the name from the search.
+
+#### Retirement conditions
+
+- Upstream gains a per-row search basis distinct from the painted label (or a structured row model where the search text is a separate field).
+- Or the host stops abbreviating a row label, so the painted label is again the complete name.
+
+#### Replacement mapping
+
+- None recorded.
+
+#### Retirement evidence
+
+- None recorded.
+
+#### Audit record
+
+- Scope: `vendor-internal`, `inheritance-structural`, `host`, `public-extension`, `behavioral`, `tests`
+- Notes: Introduced in PR #309 (rollout PR5b) after the external review found the pre-abbreviated label had broken the search contract on the Theme submenu, /preset and /skill. Scope checked against every SettingsList caller (the three abbreviated-name rows declare `searchText`; every other caller declares none and inherits the label basis), the fork's own render path (the field is filter-only), and the real pickers' search inputs.

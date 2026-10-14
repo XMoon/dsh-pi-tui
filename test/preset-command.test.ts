@@ -976,8 +976,72 @@ test('PR5b/X061: a wide → narrow → wide resize restores both chips and keeps
   t.app.stop()
 })
 
-test('/preset search finds a keyword from the middle of a long preset id (PR #309 review)', async () => {
-  const id = 'my-long-quasar-preset-id'
+test('X061: two long same-prefix preset names stay distinguishable at 44 columns (PR #309 review)', async () => {
+  // The label column at 44 columns is 25 cells for a chip-bearing row, so the
+  // shared head…tail abbreviation must keep each name's own tail and the SELECTED
+  // row must paint the complete `name (id)` identity in its description.
+  const prefix = 'x'.repeat(30)
+  const rows = [{ id: `a-${prefix}AA` }, { id: `a-${prefix}BB` }]
+  const t = setup({
+    agent: fakeAgent('s1', []),
+    sessionBlank: true,
+    currentPreset: () => rows[0]!.id,
+    rows,
+    width: 44,
+    height: 20,
+  })
+  const result = await t.run('') as { kind: string }
+  assert.equal(result.kind, 'success')
+  await t.view()
+  const view = plainViewport(t.vt)
+  const firstRow = view.find(line => line.includes('AA'))
+  const secondRow = view.find(line => line.includes('BB'))
+  assert.ok(firstRow !== undefined && secondRow !== undefined,
+    `each preset row must keep its own tail:\n${view.join('\n')}`)
+  assert.notEqual(firstRow, secondRow, `the two rows must not paint identically:\n${view.join('\n')}`)
+  // Both ENDS must survive: the head identifies the id, the tail separates the pair.
+  assert.ok(firstRow.includes('a-xxx') && secondRow.includes('a-xxx'),
+    `each row must keep the name's head too:\n${view.join('\n')}`)
+  assert.ok(view.join('\n').includes(rows[0]!.id),
+    `the selected row's description must expand the complete name (id):\n${view.join('\n')}`)
+  t.app.stop()
+})
+
+test('PR5b: a 19-22 character preset id stays whole in the 44-column label (PR #309 review)', async () => {
+  // The ` (id)` suffix must never be traded away while it fits: with only 0-3
+  // cells left for the friendly name a 4-cell floor made the composed label exceed
+  // the 25-cell column and the renderer clipped the ID's own tail. Each of these
+  // ids is the row's own name too, so the label must still end on the whole id.
+  for (const length of [19, 20, 22]) {
+    const id = 'x'.repeat(length)
+    const t = setup({
+      agent: fakeAgent('s1', []),
+      sessionBlank: true,
+      currentPreset: () => id,
+      rows: [{ id }],
+      width: 44,
+      height: 20,
+    })
+    const result = await t.run('') as { kind: string }
+    assert.equal(result.kind, 'success')
+    await t.view()
+    const rows = plainViewport(t.vt)
+    // The LABEL row itself must carry the whole id: the description also holds it,
+    // so a view-wide search would pass even when the label clipped it.
+    const labelRow = rows.find(line => line.includes('[current]'))
+    assert.ok(labelRow !== undefined && labelRow.includes(id),
+      `a ${length}-character id must stay whole in the LABEL:\n${rows.join('\n')}`)
+    t.app.stop()
+    t.app.dispose()
+  }
+})
+
+test('/preset search still finds a keyword the label abbreviation cut away (PR #309 review)', async () => {
+  // The 25-cell label abbreviates an over-wide row, so the list's search must read
+  // the COMPLETE `name (id)` (fork X062) — otherwise a keyword from the middle of
+  // the name answers an empty list. The 30-cell id abbreviates to the head's 12 +
+  // `…` + the tail's 12, so `quasar` (cells 11-16) is cut AND leaves no `u` behind.
+  const id = `${'k'.repeat(11)}quasar${'z'.repeat(13)}`
   const t = setup({
     agent: fakeAgent('s1', []),
     sessionBlank: true,
@@ -989,10 +1053,15 @@ test('/preset search finds a keyword from the middle of a long preset id (PR #30
   const result = await t.run('') as { kind: string }
   assert.equal(result.kind, 'success')
   await t.view()
+  const labelRow = plainViewport(t.vt).find(line => line.includes('[current]'))
+  assert.ok(labelRow !== undefined && labelRow.includes('\u2026') && !labelRow.includes('quasar'),
+    `the label is the abbreviation that cut the keyword:\n${plainViewport(t.vt).join('\n')}`)
+  // The search goes through the REAL overlay input, not the row object.
   t.vt.sendInput('quasar')
   await t.view()
-  assert.ok(plainViewport(t.vt).join('\n').includes(id),
-    `a middle keyword must still find the preset row:\n${plainViewport(t.vt).join('\n')}`)
+  const view = plainViewport(t.vt).join('\n')
+  assert.ok(!view.includes('No matching settings'), `a middle keyword must still find the preset row:\n${view}`)
+  assert.ok(view.includes(id), `the found row must carry the complete identity:\n${view}`)
   t.app.stop()
 })
 

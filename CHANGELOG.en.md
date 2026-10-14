@@ -290,7 +290,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and sits beside it as a `[default]` chip — two states are two chips, a plain space
   apart. A chip is now painted whole or not at all: on a narrow terminal the LABEL
   yields and is clipped with `…`, instead of the chip being cut in half or pushed out
-  of the row by a long preset name.
+  of the row by a long preset name. An over-wide name keeps BOTH ends on its label
+  (head…tail around one `…`) instead of only its head, and that abbreviation is a
+  drawing fact: the row's COMPLETE name stays its search basis, so a keyword from the
+  middle of a long name still finds it.
 
 - The pickers (the `/model` overlay and its family) now speak the same visual
   language as the workspaces: the selection cursor is `>` in `primary` — asked from
