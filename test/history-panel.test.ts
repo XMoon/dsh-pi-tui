@@ -1193,3 +1193,34 @@ test('B3-B theme: dark/light/custom resolve the frozen role tokens live and neve
     setTheme('dark')
   }
 })
+
+
+test('D15 boundary rules: the bottom rule yields first, leaving a witnessed TOP-only state', () => {
+  // 80x12, no chrome: grant = floor(12×.63) = 7. Two rules need an 8-row grant,
+  // so the bottom rule has yielded while the top rule and the full mandatory
+  // chrome plus a result row stay painted.
+  const topOnly = planHistorySeatLayout(80, 12, 0, false, { previewable: true })
+  assert.equal(topOnly.grant, 7)
+  assert.equal(topOnly.topRule, true, 'the top boundary rule survives')
+  assert.equal(topOnly.bottomRule, false, 'the bottom boundary rule yielded first')
+  assert.deepEqual([topOnly.header, topOnly.query, topOnly.footer], [true, true, true],
+    'the mandatory chrome is untouched by the rule budget')
+  assert.ok(topOnly.resultRows >= 1, 'a real result row stays painted')
+  assert.ok(topOnly.previewRows >= 1, 'the Preview is not what yielded for the rule')
+
+  // One row narrower: both rules have yielded, still with the mandatory chrome.
+  const none = planHistorySeatLayout(80, 11, 0, false, { previewable: true })
+  assert.equal(none.grant, 6)
+  assert.equal(none.topRule, false)
+  assert.equal(none.bottomRule, false)
+  assert.deepEqual([none.header, none.query, none.footer], [true, true, true])
+
+  // Non-previewable content keeps BOTH rules at the same small grant: loading /
+  // empty / failed needs only its one message row, so the rules are not
+  // competing with a Preview region (this is why 80x10 paints rules for
+  // error/loading/no-match but not for a ready Preview — documented in the PR).
+  const message = planHistorySeatLayout(80, 12, 0, false, { previewable: false })
+  assert.equal(message.topRule, true)
+  assert.equal(message.bottomRule, true)
+  assert.ok(message.resultsRows >= 1, 'the message row stays painted')
+})

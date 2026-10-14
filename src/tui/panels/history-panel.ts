@@ -96,7 +96,7 @@ export interface HistorySeatContent {
 export interface HistorySeatLayout {
   /** The width every painted row is clamped to. */
   readonly width: number
-  /** Whether the maximum number of rows the panel may paint (`0` = nothing fits). */
+  /** The maximum number of rows the panel may paint (`0` = nothing fits). */
   readonly grant: number
   /** Whether the top boundary rule (transcript↔seat) is painted as the FIRST row. */
   readonly topRule: boolean
