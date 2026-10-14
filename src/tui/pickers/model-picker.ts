@@ -377,9 +377,13 @@ export class ModelPicker implements Component, RowBudgetAware, Focusable {
     if (row.isDefault) parts.push({ kind: 'chip', text: '[default]' })
     const choices = this.choicesByModel.get(modelIdentity(row.providerId, row.modelId)) ?? []
     if (choices.length > 0) {
+      // Compare the PROJECTED width, the same text the inline row paints: an
+      // effort name with line breaks measures 0 for its `\n` but paints a space, so
+      // comparing raw labels could pick a candidate that is not the widest once
+      // painted and leave the layout-only badge one cell short of a wrap.
       let widest = choices[0]!
       for (const choice of choices) {
-        if (visibleWidth(choice.label) > visibleWidth(widest.label)) widest = choice
+        if (visibleWidth(singlePhysicalLine(choice.label)) > visibleWidth(singlePhysicalLine(widest.label))) widest = choice
       }
       // The painted row projects the label onto ONE physical line, so the
       // measurement must measure that same text: `visibleWidth('\n')` is 0, which
