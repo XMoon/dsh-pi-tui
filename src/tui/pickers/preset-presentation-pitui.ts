@@ -11,11 +11,35 @@
  * @module tui/pickers/preset-presentation-pitui
  */
 import type { PresetPresentation, PresetPickerRoster } from '../../app/command/preset-presentation.ts'
-import type { SettingValuePart } from '@xmoon76/pi-tui'
+import { visibleWidth, type SettingValuePart } from '@xmoon76/pi-tui'
+import { abbreviateName } from './name-label.ts'
 import { safeErrorMessage } from '../../runtime/process/errors.ts'
 import type { TuiApp } from '../../tui-app.ts'
 import { color } from '../theme/runtime.ts'
 import { isBuiltInPresetRow, presetDisplayText } from './preset-display.ts'
+
+/**
+ * The row LABEL for one preset: the ID is what a user types (`/preset <id>`), so it
+ * stays WHOLE whenever the 25-cell label column at the 44-column floor can hold it —
+ * only the friendly name is abbreviated into what is left. When even the ` (id)`
+ * suffix cannot fit, the ID alone is abbreviated head…tail, so the row still ends on
+ * the part that tells two ids apart. The complete `name (id)` always leads the
+ * SELECTED row's description.
+ */
+function presetLabelOf(name: string, id: string): string {
+  const limit = 25
+  const suffix = ` (${id})`
+  const suffixWidth = visibleWidth(suffix)
+  // The ID is what the user types, so the suffix is never traded away while it
+  // fits — and the name budget is the TRUE remainder: a floor of its own (the
+  // 4-cell minimum this used to clamp to) made the composed label exceed the
+  // column whenever 0-3 cells were left, and the renderer then clipped the ID's
+  // own tail. With no cells left the suffix IS the label.
+  if (suffixWidth > limit) return abbreviateName(id, limit)
+  const remaining = limit - suffixWidth
+  if (remaining === 0) return suffix
+  return `${abbreviateName(name, remaining)}${suffix}`
+}
 
 export function pituiPresetPresentation(app: TuiApp): PresetPresentation {
   return {
@@ -76,7 +100,12 @@ export function pituiPresetPresentation(app: TuiApp): PresetPresentation {
                 // The preset ID is what the user types (`/preset <id>`), so it must
                 // stay WHOLE in the label: only the friendly name is abbreviated,
                 // into whatever the 25-cell column leaves after the ` (id)` suffix.
-                label: `${display.name} (${preset.id})`,
+                label: presetLabelOf(display.name, preset.id),
+                // The abbreviation above is a DRAWING fact: the list's search
+                // filters on this row's complete `name (id)` (fork X062), so a
+                // keyword from the middle of a long friendly name still finds the
+                // row. The same complete identity leads the description below.
+                searchText: `${display.name} (${preset.id})`,
                 description: [
                   `${display.name} (${preset.id})`,
                   display.description,

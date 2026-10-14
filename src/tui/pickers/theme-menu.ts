@@ -30,6 +30,7 @@
 
 import { SettingsList, type Focusable, type RowBudgetAware, type TuiMouseEvent, type TuiMouseEventResult } from '@xmoon76/pi-tui'
 import { color, settingsListTheme } from '../theme/runtime.ts'
+import { abbreviateName } from './name-label.ts'
 import type { ThemeRegistry } from '../../extension/internal/theme-registry.ts'
 import { themePickerRows } from '../../app/surface/theme-selection.ts'
 import { normalizePersistedTheme } from '../../domain/display/theme-selection.ts'
@@ -107,11 +108,16 @@ export class ThemeSubmenu implements RowBudgetAware, Focusable {
       rows.map(row => ({
         // The row id IS the identity — no display round-trip anywhere.
         id: row.value,
-        // The LABEL stays the complete display name: this list's search filters on
-        // `item.label` only, so abbreviating it would make a keyword from the middle
-        // of a long theme name unfindable; the list's own column clip handles display
-        // and the SELECTED row's description leads with the same complete name.
-        label: row.displayName,
+        // 25 = the label column at the 44-column floor (40 child width minus the
+        // one 9-cell state chip this list reserves minus the 6 fixed cells). The
+        // label keeps BOTH ends of a long name (head…tail around one `…`); that
+        // abbreviation is a DRAWING fact, so the COMPLETE display name is declared
+        // as the search basis (fork X062) — this list runs with `enableSearch:
+        // true` and filters on `searchText ?? label`. The SELECTED row's
+        // description leads with the same complete name, so two long same-prefix
+        // theme names cannot paint one indistinguishable pair.
+        label: abbreviateName(row.displayName, 25),
+        searchText: row.displayName,
         description: `${row.displayName} · ${row.value.startsWith('plugin:')
           ? 'Extension-registered theme'
           : row.value.startsWith('file:')

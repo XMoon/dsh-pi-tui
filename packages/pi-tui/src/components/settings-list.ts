@@ -26,6 +26,13 @@ export interface SettingItem {
 	id: string;
 	/** Display label (left side) */
 	label: string;
+	/** Search basis for this row when it differs from the painted `label`
+	 *  (dsh-pi-tui divergence X062). A caller that abbreviates a long name to
+	 *  fit the label column would otherwise hide the middle of that name from
+	 *  the list's own search; declaring the complete text here keeps the label
+	 *  a DRAWING fact and the search a separate one. Absent => the label is the
+	 *  search basis, byte-for-byte the historical behavior. */
+	searchText?: string;
 	/** Optional description shown when selected */
 	description?: string;
 	/** Current value to display (right side) */
@@ -675,7 +682,9 @@ export class SettingsList implements Component, Focusable {
 	}
 
 	private applyFilter(query: string): void {
-		this.filteredItems = fuzzyFilter(this.items, query, (item) => item.label);
+		// X062: the row may separate its search basis from the painted label, so
+		// an abbreviated label cannot hide the name it was abbreviated from.
+		this.filteredItems = fuzzyFilter(this.items, query, (item) => item.searchText ?? item.label);
 		this.selectedIndex = 0;
 		this.recomputeVisibleBudget();
 	}

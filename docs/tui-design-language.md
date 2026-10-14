@@ -587,9 +587,12 @@ anchor, without inventing a fourth meaning for `primary`.
   width − chip − 6)` in the `SettingsList`, and a wider label is truncated there
   with a visible `…` instead of painting past its column. The renderer
   guarantees the COLUMN, never a caller's disambiguation: a surface whose
-  identity does not fit 36 cells must make the visible part distinguishing
-  itself (the `/skill` rows keep the name's tail and put the FULL name in the
-  selected row's description) — a caller that can neither fit the tail nor
+  identity does not fit its column must make the visible part distinguishing
+  itself — the name-bearing picker rows keep BOTH ends of an over-wide name
+  (`abbreviateName`: head…tail around one `…`), declare the COMPLETE name as the
+  row's search basis so the abbreviation can never hide it from the list's own
+  search (fork divergence X062), and put the FULL name in the selected row's
+  description — a caller that can neither fit a distinguishing part nor
   guarantee a differing description is not covered by this contract.
 - Truncation of content uses `…`. **Action hints never truncate mid-word**: a
   segment is dropped whole (§7.2).

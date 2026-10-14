@@ -605,3 +605,31 @@ describe("SettingsList structured value parts (dsh-pi-tui extension X061)", () =
 		assert.match(list.render(60)[0] ?? "", /\[current\] · \[default\]$/);
 	});
 });
+
+describe("SettingsList search text (dsh-pi-tui extension X062)", () => {
+	const renderAfterSearch = (rows: Array<Record<string, unknown>>, query: string): string => {
+		const list = new SettingsList(rows as never, 10, testTheme, () => {}, () => {}, { enableSearch: true });
+		for (const character of query) list.handleInput(character);
+		return list.render(80).join("\n");
+	};
+
+	it("filters on searchText when the painted label is an abbreviation", () => {
+		// The label is what the column paints; the search must still see the name
+		// the abbreviation was cut from, or a keyword from its middle is lost.
+		const rendered = renderAfterSearch([
+			{ id: "a", label: "Classic Dark…l Edition v9", searchText: "Classic Dark quasar Special Edition v9", currentValue: "" },
+			{ id: "b", label: "Solarized", currentValue: "" },
+		], "quasar");
+		assert.match(rendered, /Classic Dark…l Edition v9/, `the abbreviated row must survive the filter:\n${rendered}`);
+		assert.doesNotMatch(rendered, /No matching settings/, `the filter must not answer empty:\n${rendered}`);
+	});
+
+	it("keeps the label as the search basis when no searchText is declared", () => {
+		// The historical contract, unchanged: absent searchText the label IS the
+		// search basis — so an abbreviation declared without one really is lost.
+		const rendered = renderAfterSearch([
+			{ id: "a", label: "Classic Dark…l Edition v9", currentValue: "" },
+		], "quasar");
+		assert.match(rendered, /No matching settings/, `the label-only fallback must be preserved:\n${rendered}`);
+	});
+});

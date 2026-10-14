@@ -490,11 +490,57 @@ test('C-T14: the Theme submenu chip survives a narrow frame with an over-wide la
   }
 })
 
-test('C-T15: the Theme submenu finds a keyword from the middle of a long theme name (PR #309 review)', async () => {
-  // The exact regression the external review reported: the list filters on
-  // `item.label`, so abbreviating the display name made `quasar` unfindable.
+test('C-T15: two long same-prefix theme names stay distinguishable at 44 columns (PR #309 review)', async () => {
+  const prefix = 'A deliberately very long theme name '
+  const suffixA = `${prefix}alpha`
+  const suffixB = `${prefix}bravo`
+  const h = setup({ columns: 44, rows: 20, themes: (() => {
+    const registry = new ThemeRegistry()
+    registry.register({ id: 'long-a', name: suffixA, palette: { text: '#123456' } as never }, 'owner-x', 'x')
+    registry.register({ id: 'long-b', name: suffixB, palette: { text: '#654321' } as never }, 'owner-x', 'x')
+    return registry
+  })() })
+  await openLegacySettingsPanel(h.invoke, h.vt)
+  for (const character of 'theme') {
+    h.vt.sendInput(character)
+    await h.vt.waitForRender()
+  }
+  h.vt.sendInput('\r')
+  await h.vt.waitForRender()
+  const view = viewportText(h.vt)
+  const rowA = view.split('\n').find(line => line.includes('alpha'))
+  const rowB = view.split('\n').find(line => line.includes('bravo'))
+  assert.ok(rowA !== undefined && rowB !== undefined,
+    `each theme row must keep its own tail:\n${view}`)
+  assert.notEqual(rowA, rowB, `the two rows must not paint identically:\n${view}`)
+  // Both ENDS must survive: the head identifies the theme, the tail separates the pair.
+  assert.ok(rowA.includes('A deliberate') && rowB.includes('A deliberate'),
+    `each row must keep the name's head too:\n${view}`)
+  // Walk the cursor onto the first long row: its description must carry the
+  // COMPLETE display name (the row identity), not only the source class.
+  for (let step = 0; step < 6; step += 1) {
+    if (viewportText(h.vt).split('\n').some(line => line.includes('alpha') && line.includes('> '))) break
+    h.vt.sendInput('\x1b[B')
+    await h.vt.waitForRender()
+  }
+  // The description WRAPS, so the complete name spans two painted lines.
+  const flat = viewportText(h.vt).replace(/\u2502/g, ' ').replace(/\s*\n\s*/g, ' ').replace(/\s+/g, ' ')
+  assert.ok(flat.includes(suffixA),
+    `the selected row's description must expand the complete name:\n${viewportText(h.vt)}`)
+  h.app.stop()
+})
+
+test('C-T16: the Theme submenu searches the complete name, not the abbreviated label (PR #309 review)', async () => {
+  // The external review's exact case: the label is abbreviated for its column
+  // (`Classic Dark…l Edition v9`), so the list — which runs `enableSearch: true` —
+  // must read the row's COMPLETE display name (fork X062), or `quasar` answers an
+  // empty list even though the theme exists.
   const registry = new ThemeRegistry()
-  registry.register({ id: 'classic', name: 'Classic Dark quasar Special Edition v9', palette: { text: '#123456' } as never }, 'owner-x', 'x')
+  registry.register(
+    { id: 'classic', name: 'Classic Dark quasar Special Edition v9', palette: { text: '#123456' } as never },
+    'owner-x',
+    'x',
+  )
   const h = setup({ columns: 120, rows: 24, themes: registry })
   await openLegacySettingsPanel(h.invoke, h.vt)
   for (const character of 'theme') {
@@ -503,10 +549,17 @@ test('C-T15: the Theme submenu finds a keyword from the middle of a long theme n
   }
   h.vt.sendInput('\r')
   await h.vt.waitForRender()
+  const labelRow = viewportText(h.vt).split('\n').find(line => line.includes('Classic Dark'))
+  assert.ok(labelRow !== undefined, `the theme row must paint:\n${viewportText(h.vt)}`)
+  assert.ok(labelRow.includes('\u2026') && !labelRow.includes('quasar'),
+    `the label must be the abbreviation that cut the keyword: ${JSON.stringify(labelRow)}`)
+  // The search goes through the REAL submenu input, not the row object.
   h.vt.sendInput('quasar')
   await h.vt.waitForRender()
-  assert.ok(viewportText(h.vt).includes('quasar'),
-    `a middle keyword must still find the theme row:\n${viewportText(h.vt)}`)
+  const view = viewportText(h.vt)
+  assert.ok(!view.includes('No matching settings'), `a middle keyword must still find the theme row:\n${view}`)
+  assert.ok(view.includes('Classic Dark quasar Special Edition v9'),
+    `the found row must carry the complete name:\n${view}`)
   h.app.stop()
 })
 
