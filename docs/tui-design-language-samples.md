@@ -1211,25 +1211,35 @@ the refusal ink is covered by the `VirtualTerminal` cell read-back in
 `test/settings-workspace-visual.test.ts`), CJK/wide-glyph terminals, and any
 terminal other than this one. Those stay `NOT_RUN`, not PASS.
 
-### 8.2 `NOT_RUN` — the state-chip value slot (`[current] [default]`)
+### 8.2 The state-chip value slot (`[current] [default]`)
 
-The state chips that sit in the vendored `SettingsList` value slot (the
-`/settings` Theme submenu and the `/preset` picker) have **no real-terminal pass
-of their own** — the real pane was not re-driven for them after the structured
-slot landed. What backs them is the `VirtualTerminal` side of §5.1 and the
-behavioral matrix in `test/preset-command.test.ts` / `test/surface-row-grant.test.ts`
-(120/67/66/59/58/57/56/52/48/44 columns, an over-wide label, both selection
-states, and a wide → narrow → wide resize). A real pass needs a profile that
-resolves THIS worktree's build: the development profile on this machine still
-points at the main checkout, so a run against it paints the pre-PR5b product and
-proves nothing about this change. That is a `NOT_RUN`, not a PASS.
+**The `/preset` picker has a real-TTY pass.** It was driven with a throwaway
+`DSH_HOME` whose profile LINKS this worktree (`"@xmoon76/dsh-pi-tui":
+"link:<worktree>"`, `dsh --profile wt`; the bundle list must include
+`@deepseek-ai/dsh-base`, otherwise the TUI never mounts), captured at `44×20`
+and then after a live `tmux resize-window` to `120×40`. At both sizes the row
+paints ONE WHOLE state chip inside the frame — `│ > Standard mode (standard)
+ [default]    │` at 44 columns, no `[defaul` fragment, no dangling separator,
+nothing overflowing — and the ANSI read-back (`tmux capture-pane -e`) gives the
+chip `38;2;107;107;107` (`textMuted`) in both, with the cursor row's label
+`1m` + `245;245;245` (bold `textStrong`). A blank session has no CURRENT preset,
+so the state a real `/preset` run shows is `[default]`; the `[current]` chip
+itself needs a session whose current preset is already committed and is covered
+on the `VirtualTerminal` side instead.
+
+**The `/settings` Theme submenu is `NOT_RUN` on a real terminal.** Its rows use
+the same `SettingsList` slot and the same chip, and the `VirtualTerminal`
+read-back in §5.1 plus `test/surface-row-grant.test.ts` (`C-T13` ink, `C-T14`
+narrow frame with an over-wide plugin theme name) cover it, but the nested
+legacy list was not re-driven through the workspace bridge in a real pane, so
+no real-TTY claim is made for it. That is a `NOT_RUN`, not a PASS.
 
 | Claim | Evidence today |
 |---|---|
 | the pair is `[current] [default]`, both `textMuted` | `VirtualTerminal` cell read-back (§5.1, `test/preset-command.test.ts`) |
 | a chip is never cut, and a dropped chip takes its separator | fork suite `packages/pi-tui/test/settings-list.test.ts` + the 120/67/66/…/44-column frames |
 | the label yields (clipped with `…`) so the chip survives at 44 columns | `VirtualTerminal` frames at 44×20 (§5.1) and the mouse hit map after a resize |
-| the same in a real TTY | `NOT_RUN` |
+| the same in a real TTY | `/preset` `44×20` + live resize `120×40` (whole chip, `textMuted`, cursor label `textStrong`); `/settings` Theme submenu `NOT_RUN` |
 
 ### 8.1 The Job workspace side was accepted on a real terminal by the Owner
 

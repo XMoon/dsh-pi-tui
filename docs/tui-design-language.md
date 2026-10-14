@@ -366,7 +366,7 @@ Measured, still in use and *not* introduced by v1:
 | `─` U+2500 | every rule, the editor's top/bottom border, history's stacked divider |
 | ` · ` U+00B7 | the fact/hint separator across the chrome (D4 makes this the only separator) |
 | `↗` U+2197 | the Job `↗ Command` affordance |
-| `←` U+2190 | the question flow's chrome hints — the three `← current` marks this inventory used to list were retired by the Settings and picker PRs (§11.4) |
+| `←` U+2190 | the question flow's chrome hints, and the keybindings UI hint `←→: edit` (`keybindings/ui/list.ts:231`, registered in §11.4) — the three `← current` marks this inventory used to list were retired by the Settings and picker PRs |
 | `▼` `▶` U+25BC/25B6 | the hardcoded sub-call / workflow disclosure (the registry's `▸`/`▾` are neutral) |
 | `◆` U+25C6 | the footer configurator's move-mode marker |
 | `▏` U+258F | the footer configurator's text-edit cursor |
@@ -585,7 +585,11 @@ anchor, without inventing a fourth meaning for `primary`.
   truncates first (above), but a state chip is chrome, not content: the label
   column yields the cells for at least one whole chip (§4.5, fork divergence
   X061) — and is itself clipped to its column with `…` — so a long label is
-  never allowed to cut a chip or push it out of the row.
+  never allowed to cut a chip or push it out of the row. **The label clamp is
+  every row's, not only a chip row's**: the column is `min(36, longest label,
+  width − chip − 6)` in the `SettingsList`, and a wider label is truncated with
+  `…` there instead of painting past its column (identity beyond the column
+  belongs to the row's description/value, not to the label).
 - Truncation of content uses `…`. **Action hints never truncate mid-word**: a
   segment is dropped whole (§7.2).
 
