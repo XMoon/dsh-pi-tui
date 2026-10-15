@@ -413,7 +413,7 @@ test('A-03b the wide inline choice keeps the focused pane title as its phase cha
   h.dispose()
 })
 
-test('A-03c the wide pane title yields only when it would consume the sole body row', async () => {
+test('A-03c a short inline choice exposes only Esc when the pane title consumes the body budget', async () => {
   for (const rows of [3, 4] as const) {
     const h = setup({ columns: 200, rows, doc: { theme: 'dark' } })
     await h.open()
@@ -424,8 +424,55 @@ test('A-03c the wide pane title yields only when it would consume the sole body 
       `the pane title requires a remaining candidate row at 200x${rows}:\n${h.view()}`)
     assert.ok(h.view().includes('> dark'), `the selected candidate remains painted at 200x${rows}:\n${h.view()}`)
     assert.ok(!h.view().includes('Enter confirm'), `confirmation is withheld without enough body rows at 200x${rows}:\n${h.view()}`)
+    const actionBar = h.rowsPlain().at(-1) ?? ''
+    assert.match(actionBar, /^Esc back/, `only the safe back action is advertised at 200x${rows}`)
+    for (const hiddenHint of ['Up/Down', 'PgUp/PgDn', 'Enter confirm', 'c copy']) {
+      assert.ok(!actionBar.includes(hiddenHint), `${hiddenHint} is not advertised at 200x${rows}: ${actionBar}`)
+    }
+
+    const beforeHiddenActions = h.view()
+    for (const [name, data] of [
+      ['Up', '\x1b[A'],
+      ['Down', '\x1b[B'],
+      ['PageUp', '\x1b[5~'],
+      ['PageDown', '\x1b[6~'],
+      ['Home', '\x1b[H'],
+      ['End', '\x1b[F'],
+    ] as const) {
+      await key(h, data)
+      assert.equal(h.view(), beforeHiddenActions, `${name} is inert when only Esc is advertised at 200x${rows}`)
+      assert.equal(h.replacements(), 0, `${name} never writes at 200x${rows}`)
+    }
+
+    await key(h, rows === 3 ? '\x1b' : '\x1b[D') // Esc / Left still cancels the choice.
+    h.vt.resize(200, 24)
+    await h.vt.waitForRender()
+    assert.match(h.rowsPlain()[0]!, /· Rows/, `the safe back action remains live at 200x${rows}`)
+    assert.equal(h.replacements(), 0, `cancelling at 200x${rows} never writes`)
+    assert.equal(h.doc.theme, 'dark')
     h.dispose()
   }
+})
+
+test('A-03d a resize before repaint revokes the previous choice-navigation grant', async () => {
+  const h = setup({ columns: 200, rows: 24, doc: { theme: 'dark' } })
+  await h.open()
+  await key(h, '\r') // Categories -> Rows
+  await key(h, '\x1b[C') // Rows -> inline choice
+  assert.ok(h.rowsPlain().at(-1)?.includes('Up/Down choose'), `the tall frame advertises navigation:\n${h.view()}`)
+
+  // The terminal geometry changes immediately; deliver input before waiting for
+  // the resize repaint so a grant from the previous frame cannot leak through.
+  h.vt.resize(200, 3)
+  h.vt.sendInput('\x1b[B') // Down is no longer advertised at the live height.
+  await h.vt.waitForRender()
+  assert.match(h.rowsPlain().at(-1) ?? '', /^Esc back/)
+  h.vt.resize(200, 24)
+  await h.vt.waitForRender()
+  assert.ok(h.view().includes('> dark'), `the stale Down did not change the candidate:\n${h.view()}`)
+  assert.equal(h.replacements(), 0)
+  assert.equal(h.doc.theme, 'dark')
+  h.dispose()
 })
 
 // ── A-04: the narrow drill-down ───────────────────────────────────────────
@@ -732,7 +779,19 @@ test('B-15e mouse Confirm requires the painted Enter hint at the minimum Action 
     const h = setup({ columns, rows: 24, doc: { theme: 'dark' }, themes: pluginThemes() })
     await openSelectedRow(h, 'theme')
     await key(h, '\r') // Detail -> choosing
-    await key(h, '\x1b[B') // dark -> light, a real value change
+    const actionBar = h.rowsPlain().at(-1) ?? ''
+    if (!actionBar.includes('Up/Down')) {
+      const beforeHiddenDown = h.view()
+      await key(h, '\x1b[B')
+      assert.equal(h.view(), beforeHiddenDown, `Down is inert without a painted navigation hint at ${columns} columns`)
+    }
+    const lightRow = rowOf(h, 'light')
+    const lightColumn = cellIndexOf(h, lightRow, 'light')
+    press(h, lightRow, lightColumn)
+    release(h, lightRow, lightColumn)
+    await settle(h)
+    assert.ok(h.view().includes('> light'), `the visible candidate click selects Light at ${columns} columns:\n${h.view()}`)
+    assert.equal(h.replacements(), 0, 'clicking the candidate remains a preview')
     assert.equal(h.view().includes('Enter confirm'), canConfirm, `Enter hint follows the whole-segment width at ${columns} columns:\n${h.view()}`)
     assert.equal(h.view().includes('Confirm'), canConfirm, `Confirm is painted only while its required hint fits at ${columns} columns:\n${h.view()}`)
     const buttonRow = rowOf(h, 'Cancel')
