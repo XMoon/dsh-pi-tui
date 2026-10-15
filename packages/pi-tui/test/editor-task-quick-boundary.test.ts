@@ -186,65 +186,93 @@ describe("canYieldDownAtLastVisualLine (X063)", () => {
 		assert.notDeepStrictEqual(editor.getCursor(), cursorBefore);
 	});
 
-	it("notifies with the boundary state on visual-cursor transitions (Up/Down always; Left/Right when they cross)", () => {
+	it("notifies 'navigation' on visual-cursor transitions (Up/Down/Page always; the host reads the state itself)", () => {
 		const editor = new Editor(createTestTUI(), defaultEditorTheme);
 		editor.setTextAndCursor("line1\nline2", { line: 0, col: 0 });
 		paint(editor, 80);
-		const states: boolean[] = [];
-		editor.onVisualLineBoundaryChanged = (onLast: boolean) => {
-			states.push(onLast);
+		const events: string[] = [];
+		editor.onVisualLineBoundaryChanged = (reason) => {
+			events.push(reason);
 		};
-		// Down crosses ONTO the last visual line: notify with true.
+		const probe = editor as unknown as { isOnLastVisualLine(): boolean };
+		// Down crosses ONTO the last visual line: notify 'navigation'.
 		editor.handleInput(DOWN);
-		assert.deepStrictEqual(states, [true], "the crossing Down notifies with the new state");
-		// A no-op Down at the bottom still dispatches (the cursor runs to the
-		// line end; the state is unchanged) — the HOST compares and skips its
-		// recompose; the editor cannot know the host's painted fact.
+		assert.deepStrictEqual(events, ["navigation"], "the crossing Down notifies navigation");
+		assert.strictEqual(probe.isOnLastVisualLine(), true, "the state after the move is the last line");
+		// A no-op Down at the bottom STILL dispatches: the admission fact may
+		// not have moved but the move ran — the host re-reads the live facts.
 		editor.handleInput(DOWN);
-		assert.deepStrictEqual(states, [true, true], "the bottom Down dispatches with the unchanged state");
-		// A Left INSIDE the last visual line (line-end → mid-line) does not
-		// cross the boundary: no dispatch.
+		assert.deepStrictEqual(events, ["navigation", "navigation"], "the bottom Down still dispatches");
+		// An intra-line Left (line-end → mid-line) dispatches too (the event
+		// is cheap for the host to drop; no wrap-map budget is spent twice).
 		editor.handleInput("\x1b[D");
-		assert.deepStrictEqual(states, [true, true], "an intra-line Left does not dispatch");
+		assert.deepStrictEqual(events, ["navigation", "navigation", "navigation"], "an intra-line Left dispatches navigation");
 		assert.deepStrictEqual(editor.getCursor(), { line: 1, col: 4 });
-		// PageDown ALWAYS dispatches (a viewport-page move; the editor does
-		// not pre-filter it) with the live state — here still the last line.
+		// PageDown dispatches (a viewport-page move).
 		editor.handleInput("\x1b[6~");
-		assert.strictEqual(states.length, 3, "PageDown dispatches");
-		assert.strictEqual(states[2], editor.isOnLastVisualLine());
+		assert.deepStrictEqual(events, ["navigation", "navigation", "navigation", "navigation"], "PageDown dispatches");
+		assert.strictEqual(probe.isOnLastVisualLine(), true, "still on the last line after the page move");
+		// Printable input never dispatches.
+		editor.handleInput("x");
+		assert.deepStrictEqual(events, ["navigation", "navigation", "navigation", "navigation"], "printable input does not dispatch");
 	});
 
-	it("Left/Right across a visual-line boundary notify with the crossed state", () => {
+	it("Left/Right across a visual-line boundary notify 'navigation' (the host re-reads the state)", () => {
 		const editor = new Editor(createTestTUI(), defaultEditorTheme);
 		editor.setTextAndCursor("line1\nline2", { line: 1, col: 0 });
 		paint(editor, 80);
-		const states: boolean[] = [];
-		editor.onVisualLineBoundaryChanged = (onLast: boolean) => {
-			states.push(onLast);
+		const events: string[] = [];
+		editor.onVisualLineBoundaryChanged = (reason) => {
+			events.push(reason);
 		};
-		assert.strictEqual((editor as unknown as { isOnLastVisualLine(): boolean }).isOnLastVisualLine(), true);
+		const probe = editor as unknown as { isOnLastVisualLine(): boolean };
+		assert.strictEqual(probe.isOnLastVisualLine(), true);
 		// Left from the second line's start wraps back to the first line's
 		// end: OFF the last visual line.
 		editor.handleInput("\x1b[D");
-		assert.deepStrictEqual(states, [false], "the wrapping Left notifies with false");
+		assert.deepStrictEqual(events, ["navigation"], "the wrapping Left notifies navigation");
+		assert.strictEqual(probe.isOnLastVisualLine(), false, "OFF the last line after the wrap");
 		assert.deepStrictEqual(editor.getCursor(), { line: 0, col: 5 });
 		// Right from the first line's end wraps forward: ONTO the last
 		// visual line again.
 		editor.handleInput("\x1b[C");
-		assert.deepStrictEqual(states, [false, true], "the wrapping Right notifies with true");
+		assert.deepStrictEqual(events, ["navigation", "navigation"], "the wrapping Right notifies navigation");
+		assert.strictEqual(probe.isOnLastVisualLine(), true, "ON the last line after the wrap");
 		assert.deepStrictEqual(editor.getCursor(), { line: 1, col: 0 });
-		// The intra-line walk (col0 → col1 → col0 on the LAST line) never
-		// crosses the boundary: no dispatch.
+		// The intra-line walk (col0 → col1 → col0 on the LAST line) stays ON
+		// the last line: the events still fire (cheap drop), the boundary
+		// fact the host reads is unchanged.
 		editor.handleInput("\x1b[C");
 		assert.deepStrictEqual(editor.getCursor(), { line: 1, col: 1 });
 		editor.handleInput("\x1b[D");
 		assert.deepStrictEqual(editor.getCursor(), { line: 1, col: 0 });
-		assert.strictEqual(states.length, 2, "intra-line moves never dispatch");
+		assert.strictEqual(probe.isOnLastVisualLine(), true, "the intra-line walk never leaves the last line");
 		// The wrap-point Left (from the line START the walk landed on) wraps
-		// back again — a fresh crossing that MUST notify.
+		// back again — the boundary fact flips.
 		editor.handleInput("\x1b[D");
-		assert.deepStrictEqual(states, [false, true, false], "the wrap-point Left crosses again");
+		assert.deepStrictEqual(events, ["navigation", "navigation", "navigation", "navigation", "navigation"], "the wrap-point Left dispatches again");
 		assert.deepStrictEqual(editor.getCursor(), { line: 0, col: 5 });
+		assert.strictEqual(probe.isOnLastVisualLine(), false);
 	});
 
+
+	it("dispatches 'autocomplete' on the open flip and 'programmatic' on cursor/text replacement", () => {
+		const editor = new Editor(createTestTUI(), defaultEditorTheme);
+		editor.setTextAndCursor("line1\nline2", { line: 1, col: 0 });
+		paint(editor, 80);
+		const events: string[] = [];
+		editor.onVisualLineBoundaryChanged = (reason) => {
+			events.push(reason);
+		};
+		// setCursor (programmatic): the boundary fact may move with no
+		// keyboard event.
+		editor.setCursor({ line: 0, col: 0 });
+		assert.deepStrictEqual(events, ["programmatic"], "setCursor dispatches programmatic");
+		// setTextAndCursor (programmatic replacement).
+		editor.setTextAndCursor("a\nb", { line: 1, col: 0 });
+		assert.deepStrictEqual(events, ["programmatic", "programmatic"], "setTextAndCursor dispatches programmatic");
+		// The document/cursor are exactly what the host asked for.
+		assert.deepStrictEqual(editor.getCursor(), { line: 1, col: 0 });
+		assert.strictEqual(editor.getText(), "a\nb");
+	});
 });
