@@ -416,16 +416,25 @@ export class Editor implements Component, Focusable {
 
 	public onSubmit?: (text: string) => void;
 	public onChange?: (text: string) => void;
-	/** The cursor may have crossed the editor's last-VISUAL-line boundary
-	 * (dsh-pi-tui divergence X063 — the host's Task Quick admission is a
-	 * visual-line fact the base editor exposes no onChange for). Fired on
-	 * the navigation presses that move the visual cursor (Up/Down/PageUp/
-	 * PageDown always; Left/Right only when they crossed ONTO or OFF the
-	 * last visual line) with the boundary state AFTER the move. The host
-	 * compares the state against its own last-painted fact and does
-	 * nothing when it did not change — a no-op press costs one dispatch
-	 * and one compare, never a chrome re-measure. */
-	public onVisualLineBoundaryChanged?: (onLastVisualLine: boolean) => void;
+	/** The Down-admission's editor-owned facts MAY have changed (dsh-pi-tui
+	 * divergence X063 — the admission is a visual-line + transient-mode
+	 * fact the base editor exposes no onChange for). The reason names the
+	 * transition class so the host can invalidate its painted-hint state
+	 * WITHOUT content-equality gating: two consecutive events may carry
+	 * the same visual-line truth and still flip the admission (an
+	 * autocomplete open/close at an unchanged cursor). Fired after:
+	 * - "navigation": any cursor move (Up/Down/PageUp/PageDown always;
+	 *   Left/Right word/line jumps only the host cares about anyway — the
+	 *   event is cheap for the host to drop);
+	 * - "autocomplete": the dropdown opened or closed (a mode flip with
+	 *   no cursor move);
+	 * - "history": history browsing entered or left;
+	 * - "paste": a bracketed paste completed (isInPaste flips);
+	 * - "programmatic": setText/setTextAndCursor/clear replaced the
+	 *   document or cursor directly.
+	 * The host recomposes its hint per event and re-reads the live facts
+	 * through the read-only seam; the editor does no content comparison. */
+	public onVisualLineBoundaryChanged?: (reason: "navigation" | "autocomplete" | "history" | "paste" | "programmatic") => void;
 	public disableSubmit: boolean = false;
 
 	constructor(tui: TUI, theme: EditorTheme, options: EditorOptions = {}) {
@@ -511,29 +520,31 @@ export class Editor implements Component, Focusable {
 	}
 
 	// X063 publish state: the LAST navigation move's wrap-map facts. A move
-	// that built its own map (pageScroll) publishes the post-move cursor
-	// visual line; the shared notify reuses it instead of rebuilding. A move
-	// with O(1) cursor bookkeeping (setCursorCol paths) leaves it unset and
-	// the notify does the single authoritative rebuild.
+	// that built its own map (pageScroll, the Up/Down cursor move) publishes
+	// the post-move cursor visual line; the shared notify reuses it instead
+	// of rebuilding. A move with O(1) cursor bookkeeping (setCursorCol
+	// paths) leaves it unset and the notify does the single authoritative
+	// rebuild.
 	private lastVisualLineCount: number | null = null;
 	private lastCursorVisualLine: number | null = null;
 
 	/** The X063 shared notify (dsh-pi-tui divergence X063): fire the host's
-	 * observation callback with the CURRENT last-visual-line state — reusing
-	 * the move's own published map facts when present, else one authoritative
-	 * rebuild. Also fires when a transient mode flip (autocomplete open/
-	 * close, history enter/leave) changed the admission WITHOUT a cursor
-	 * move, so the host hint can never strand behind a mode-only transition. */
-	private notifyVisualLineBoundary(): void {
-		let onLast: boolean;
-		if (this.lastVisualLineCount !== null && this.lastCursorVisualLine !== null) {
-			onLast = this.lastCursorVisualLine === this.lastVisualLineCount - 1;
-		} else {
-			onLast = this.isOnLastVisualLine();
+	 * observation callback for `reason`, consuming the move's own published
+	 * wrap-map facts when present (else one authoritative rebuild). The
+	 * callback ALWAYS fires — the payload's truth value is the host's
+	 * concern; the editor cannot know whether the host's painted hint still
+	 * matches. */
+	private notifyVisualLineBoundary(reason: "navigation" | "autocomplete" | "history" | "paste" | "programmatic"): void {
+		if (this.lastVisualLineCount === null || this.lastCursorVisualLine === null) {
+			// No published facts: one authoritative rebuild.
+			this.lastCursorVisualLine = this.findCurrentVisualLine(this.buildVisualLineMap(this.lastWidth));
+			this.lastVisualLineCount = this.buildVisualLineMap(this.lastWidth).length;
 		}
+		const onLast = this.lastCursorVisualLine === this.lastVisualLineCount - 1;
 		this.lastVisualLineCount = null;
 		this.lastCursorVisualLine = null;
-		this.onVisualLineBoundaryChanged?.(onLast);
+		this.onVisualLineBoundaryChanged?.(reason);
+		void onLast;
 	}
 
 	/**
@@ -586,9 +597,9 @@ export class Editor implements Component, Focusable {
 		}
 
 		this.historyIndex = newIndex;
-		this.lastVisualLineCount = null;
-		this.lastCursorVisualLine = null;
-		this.onVisualLineBoundaryChanged?.(this.isOnLastVisualLine());
+		// X063 (review R7-F2): the caller (cursorUp/Down, the dedicated
+		// history actions) notifies once after the move — firing here too
+		// would double-notify on every recall.
 
 		if (this.historyIndex === -1) {
 			const draft = this.historyDraft;
@@ -645,6 +656,10 @@ export class Editor implements Component, Focusable {
 		if (this.onChange) {
 			this.onChange(this.getText());
 		}
+		// X063: a document/cursor replacement moves the visual boundary with
+		// no navigation event — the host hint follows (the recall path fires
+		// its own "history" event too; the host deduplicates per event).
+		this.notifyVisualLineBoundary("programmatic");
 	}
 
 	invalidate(): void {
@@ -885,6 +900,9 @@ export class Editor implements Component, Focusable {
 		this.lastAction = null;
 		this.exitHistoryBrowsing();
 		if (this.autocompleteState) this.updateAutocomplete();
+		// X063: a click repositions the cursor (and can leave history
+		// browsing) with no keyboard event — the host hint follows.
+		this.notifyVisualLineBoundary("navigation");
 		return { handled: true, focus: true };
 	}
 
@@ -911,7 +929,7 @@ export class Editor implements Component, Focusable {
 				const direction = this.jumpMode;
 				this.jumpMode = null;
 				this.jumpToChar(printable, direction);
-				this.notifyVisualLineBoundary();
+				this.notifyVisualLineBoundary("navigation");
 				return;
 			}
 
@@ -937,8 +955,13 @@ export class Editor implements Component, Focusable {
 				this.isInPaste = false;
 				const remaining = this.pasteBuffer.substring(endIndex + 6);
 				this.pasteBuffer = "";
+				// X063: isInPaste flipping to false re-admits Down with no
+				// cursor move — the host hint must hear the paste completion.
 				if (remaining.length > 0) {
 					this.handleInput(remaining);
+					this.notifyVisualLineBoundary("paste");
+				} else {
+					this.notifyVisualLineBoundary("paste");
 				}
 				return;
 			}
@@ -1063,13 +1086,13 @@ export class Editor implements Component, Focusable {
 		if (kb.matches(data, "tui.editor.historyPrevious")) {
 			this.cancelAutocomplete();
 			this.navigateHistory(-1);
-			this.notifyVisualLineBoundary();
+			this.notifyVisualLineBoundary("navigation");
 			return;
 		}
 		if (kb.matches(data, "tui.editor.historyNext")) {
 			this.cancelAutocomplete();
 			this.navigateHistory(1);
-			this.notifyVisualLineBoundary();
+			this.notifyVisualLineBoundary("navigation");
 			return;
 		}
 
@@ -1078,22 +1101,22 @@ export class Editor implements Component, Focusable {
 		// soft-wrapped bodies — same notify contract as the arrow keys).
 		if (kb.matches(data, "tui.editor.cursorLineStart")) {
 			this.moveToLineStart();
-			this.notifyVisualLineBoundary();
+			this.notifyVisualLineBoundary("navigation");
 			return;
 		}
 		if (kb.matches(data, "tui.editor.cursorLineEnd")) {
 			this.moveToLineEnd();
-			this.notifyVisualLineBoundary();
+			this.notifyVisualLineBoundary("navigation");
 			return;
 		}
 		if (kb.matches(data, "tui.editor.cursorWordLeft")) {
 			this.moveWordBackwards();
-			this.notifyVisualLineBoundary();
+			this.notifyVisualLineBoundary("navigation");
 			return;
 		}
 		if (kb.matches(data, "tui.editor.cursorWordRight")) {
 			this.moveWordForwards();
-			this.notifyVisualLineBoundary();
+			this.notifyVisualLineBoundary("navigation");
 			return;
 		}
 
@@ -1157,7 +1180,7 @@ export class Editor implements Component, Focusable {
 			} else {
 				this.moveCursor(-1, 0);
 			}
-			this.notifyVisualLineBoundary();
+			this.notifyVisualLineBoundary("navigation");
 			return;
 		}
 		if (kb.matches(data, "tui.editor.cursorDown")) {
@@ -1169,19 +1192,17 @@ export class Editor implements Component, Focusable {
 			} else {
 				this.moveCursor(1, 0);
 			}
-			this.notifyVisualLineBoundary();
+			this.notifyVisualLineBoundary("navigation");
 			return;
 		}
 		if (kb.matches(data, "tui.editor.cursorRight")) {
-			const onLastBeforeRight = this.isOnLastVisualLine();
 			this.moveCursor(0, 1);
-			if (!onLastBeforeRight && this.isOnLastVisualLine()) this.onVisualLineBoundaryChanged?.(true);
+			this.notifyVisualLineBoundary("navigation");
 			return;
 		}
 		if (kb.matches(data, "tui.editor.cursorLeft")) {
-			const onLastBeforeLeft = this.isOnLastVisualLine();
 			this.moveCursor(0, -1);
-			if (onLastBeforeLeft && !this.isOnLastVisualLine()) this.onVisualLineBoundaryChanged?.(false);
+			this.notifyVisualLineBoundary("navigation");
 			return;
 		}
 
@@ -1189,12 +1210,12 @@ export class Editor implements Component, Focusable {
 		// its own wrap-map facts; the notify reuses them).
 		if (kb.matches(data, "tui.editor.pageUp")) {
 			this.pageScroll(-1);
-			this.notifyVisualLineBoundary();
+			this.notifyVisualLineBoundary("navigation");
 			return;
 		}
 		if (kb.matches(data, "tui.editor.pageDown")) {
 			this.pageScroll(1);
-			this.notifyVisualLineBoundary();
+			this.notifyVisualLineBoundary("navigation");
 			return;
 		}
 
@@ -1443,6 +1464,7 @@ export class Editor implements Component, Focusable {
 		this.state.cursorLine = line;
 		this.setCursorCol(col);
 		this.scrollOffset = 0;
+		this.notifyVisualLineBoundary("programmatic");
 		this.tui.requestRender();
 	}
 
@@ -1473,6 +1495,7 @@ export class Editor implements Component, Focusable {
 		this.state.cursorLine = line;
 		this.setCursorCol(col);
 		this.scrollOffset = 0;
+		this.notifyVisualLineBoundary("programmatic");
 		// The whole document is replaced: PRUNE the paste registry to the
 		// markers that actually survive in the new text. Staged replacement
 		// text (a plugin editor's document) otherwise leaves orphaned
@@ -2314,6 +2337,10 @@ export class Editor implements Component, Focusable {
 			}
 		}
 
+		// X063: publish this move's own wrap-map facts for the host notify —
+		// the shared notify consumes them instead of a second build (§9.3).
+		this.lastCursorVisualLine = this.findVisualLineAt(visualLines, this.state.cursorLine, this.state.cursorCol);
+		this.lastVisualLineCount = visualLines.length;
 		// Keep an open autocomplete picker in sync with the new cursor
 		// position: cursor movement changes the text before the cursor, so a
 		// picker computed for the old position is stale. Re-query so it
@@ -2878,12 +2905,17 @@ export class Editor implements Component, Focusable {
 			this.autocompleteList.setSelectedIndex(bestMatchIndex);
 		}
 
-		this.autocompleteState = state;
-		// X063: the dropdown flip refuses Down with no cursor move — same
-		// notify contract as the close path.
-		this.lastVisualLineCount = null;
-		this.lastCursorVisualLine = null;
-		this.onVisualLineBoundaryChanged?.(this.isOnLastVisualLine());
+		// X063 (review R7-F2): the admission-relevant fact is the OPEN flip
+		// (null → state refuses Down with no cursor move). A refresh while
+		// the picker is already open changes NO admission fact — notifying
+		// here would cost a wrap-map scan per keystroke for an event the
+		// host would drop. Notify ONLY on the open transition.
+		if (this.autocompleteState === null) {
+			this.autocompleteState = state;
+			this.notifyVisualLineBoundary("autocomplete");
+		} else {
+			this.autocompleteState = state;
+		}
 	}
 
 	private cancelAutocompleteRequest(): void {
@@ -2918,7 +2950,7 @@ export class Editor implements Component, Focusable {
 		// X063: closing the dropdown flips the Down admission from refused to
 		// admissible with NO cursor move and NO onChange — the host hint must
 		// hear about it or it stays dark while Down works again.
-		if (hadDropdown) this.notifyVisualLineBoundary();
+		if (hadDropdown) this.notifyVisualLineBoundary("autocomplete");
 	}
 
 	public isShowingAutocomplete(): boolean {

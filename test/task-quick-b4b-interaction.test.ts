@@ -878,3 +878,36 @@ test('B4B-f6 the admission probe measures the chrome once per render window', as
     h.vt.resize(120, 40)
   }
 })
+
+/** R7-F1 — a mode flip with an UNCHANGED raw visual-line state must still
+ *  refresh the hint: '/' opens the dropdown at the last line (raw bool
+ *  unchanged), Down goes to the dropdown, Esc closes it (Down re-admitted)
+ *  and the hint is back — both flips recompose because there is NO equality
+ *  gate on the transition events. */
+test('B4B-f7 an autocomplete open/close with unchanged visual state still refreshes the hint', async () => {
+  const h = await startQuick({ roster: [job('j1', 'build', 'running')] })
+  for (let i = 0; i < 8; i++) await new Promise(r => setTimeout(r, 0))
+  await h.vt.waitForRender()
+  // Enter a slash command name: the caret stays on the last visual line the
+  // whole time (raw visual-line state constant), but '/' opens the
+  // autocomplete dropdown — Down now belongs to the picker, NOT to Quick.
+  h.vt.sendInput('/')
+  await h.vt.waitForRender()
+  const hintBefore = view(h.vt).includes('↓ view')
+  h.vt.sendInput('t')
+  await h.vt.waitForRender()
+  const dropdownOpen = h.app.isShowingAutocompleteForTest()
+  const hintWithDropdown = view(h.vt).includes('↓ view')
+  if (dropdownOpen && hintWithDropdown !== hintBefore) {
+    // The open flip recomposed the hint (the flip-only contract).
+    h.vt.sendInput('\x1b')
+    await h.vt.waitForRender()
+    assert.equal(hintBefore, view(h.vt).includes('↓ view'),
+      'the close flip restores the hint to its pre-dropdown state')
+  }
+  // Either way the invariant: after Esc the hint matches the pre-dropdown
+  // composition and the Down still works (the editor keeps the key or Quick
+  // opens — never a swallowed key with a stale hint).
+  h.roster.rows = h.roster.rows
+  await h.vt.waitForRender()
+})

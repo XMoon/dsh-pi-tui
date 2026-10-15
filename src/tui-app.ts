@@ -3890,20 +3890,17 @@ export class TuiApp {
     // from the state the painted hint was composed from, so a no-op Up at
     // the top line pays one dispatch + one compare, never a chrome
     // re-measure (plan §9.3).
-    this.editor.onVisualLineBoundaryChanged = (onLastVisualLine: boolean) => {
-      // The hook reports the RAW visual-line state. The DOWN admission adds
-      // mode gates (prompt mode, autocomplete, history browsing) on top of
-      // it — and the fork notifies on THOSE flips too (autocomplete open/
-      // close, history enter/leave), so a raw-state flip or a mode flip
-      // both arrive here. The baseline is refreshed by every renderFooter
-      // (the painted hint IS the compose), so a flip-compare can never
-      // strand behind an unrelated compose.
-      if (!this.tasksActive || !this.taskQuickAdvertised) {
-        this.taskQuickHintBoundary = onLastVisualLine
-        return
-      }
-      if (onLastVisualLine === this.taskQuickHintBoundary) return
-      this.taskQuickHintBoundary = onLastVisualLine
+    this.editor.onVisualLineBoundaryChanged = (reason) => {
+      // The hook reports a TRANSITION CLASS (navigation / autocomplete /
+      // history / paste / programmatic), not a content value: two events may
+      // carry the same visual-line truth and still flip the admission (an
+      // autocomplete open/close at an unchanged cursor), so there is NO
+      // equality gate — every event recomposes the hint and the composer's
+      // no-churn discipline keeps a stable hint free. A Quick-focused or
+      // dark-hint window only records; the enter/leave recompose paints the
+      // fresh state.
+      if (!this.tasksActive || !this.taskQuickAdvertised) return
+      void reason
       this.renderFooter()
     }
     this.editorBorder = this.editor.borderColor
@@ -15219,6 +15216,12 @@ export class TuiApp {
     return this.taskQuick.getItems().length
   }
 
+  /** Whether the HOST editor currently shows the autocomplete dropdown (the
+   *  Down-admission's mode gate, for the same-bool flip witnesses). Test-only. */
+  isShowingAutocompleteForTest(): boolean {
+    return this.editor.isShowingAutocomplete()
+  }
+
   /**
    * The on-demand Task Quick's production entry (B4-B): the ONLY caller in
    * production is the keymap's `app.tasks.open` action; the L6 suites drive
@@ -15239,7 +15242,6 @@ export class TuiApp {
     // action. The boundary baseline is taken at the DARK composition, so
     // the leave recompose compares against fresh fact, not a stale one.
     this.taskQuickAdvertised = false
-    this.taskQuickHintBoundary = this.editor.canEnterTaskQuickFromDown(this.terminal.columns)
     this.renderFooter()
     this.requestRender()
     return true
@@ -15273,7 +15275,6 @@ export class TuiApp {
     // boundary baseline is re-read so the next navigation hook compares
     // against the state the freshly painted hint was composed from.
     this.taskQuickAdvertised = true
-    this.taskQuickHintBoundary = this.editor.canEnterTaskQuickFromDown(this.terminal.columns)
     this.renderFooter()
     this.requestRender()
   }
@@ -15331,10 +15332,6 @@ export class TuiApp {
    *  hint must track the boundary without waiting for an unrelated footer
    *  churn. Entries/exits set it directly (enterTaskQuick/leaveTaskQuick). */
   private taskQuickAdvertised = false
-  /** The last-visual-line state the PAINTED hint was composed from: the
-   *  X063 boundary hook recomposes only when the editor's live state
-   *  differs from this, so no-op navigation never re-measures (R5-F1). */
-  private taskQuickHintBoundary: boolean | undefined
 
   private taskQuickGrantCached(): boolean {
     if (this.renderTick !== this.taskQuickGrantCacheTick) {
@@ -19463,6 +19460,14 @@ export class TuiApp {
           }))
           newFooterRows = this.footer.render(width).length
         }
+        // R7-F3 product policy for a NO-FIXED-POINT oscillation (a self-
+        // referential layout where the hint's presence changes the height
+        // that decides the hint — e.g. a compact one-row footer whose ↓
+        // hint wraps it to two rows, flipping the grant back): the LAST
+        // painted state is authoritative. Sync the latch to the REAL final
+        // height so the next compose re-measures the grant against the
+        // rows actually painted — never against a stale latch value.
+        this.lastFooterRows = newFooterRows
       } finally {
         this.convergingFooter = false
       }
