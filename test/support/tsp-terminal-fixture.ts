@@ -136,6 +136,7 @@ export function installTspPane(options: {
   readonly modelPicker?: boolean
   readonly presetPicker?: boolean
   readonly kinds?: readonly string[]
+  readonly features?: readonly string[]
 } = {}): TspPane {
   const input = new FakeInput()
   const output = new FakeOutput()
@@ -151,20 +152,33 @@ export function installTspPane(options: {
   const unacked: TspWireFrame[] = []
   let acksHeld = false
   let frames = 0
-  // The native-kind sets are the pane's own advertised set, exactly like the
+  // The native-kind/feature sets are the pane's own advertised set, exactly like the
   // real client: the Model layer needs its picker, the Reader's Back row and the
-  // Reader overlay, the Preset layer needs the picker alone. A case can override
-  // the advertised set verbatim (fail-closed).
-  const native = [
+  // Reader overlay; the Preset layer needs its picker, the native `ui.row({onClick})`
+  // Back row of the Details overlay (plus `text` facts and the inline `md` guide),
+  // and the body's own keyboard scrolling. A case can override the advertised sets
+  // verbatim (fail-closed).
+  const native = Array.from(new Set([
     ...(options.modelPicker === true ? ['picker', 'row', 'overlay'] : []),
-    ...(options.presetPicker === true ? ['picker'] : []),
+    ...(options.presetPicker === true ? ['picker', 'row', 'overlay', 'md'] : []),
     ...(options.modelPicker === true || options.presetPicker === true ? ['text'] : []),
-  ]
-  const hello = options.kinds !== undefined
-    ? { ...HELLO, ver: '0.7.2', kinds: options.kinds }
+  ]))
+  const nativeFeatures = options.presetPicker === true ? ['scroll'] : []
+  const hello = options.kinds !== undefined || options.features !== undefined
+    ? {
+        ...HELLO,
+        ver: '0.7.2',
+        kinds: options.kinds ?? HELLO.kinds,
+        features: options.features ?? HELLO.features,
+      }
     : native.length === 0
       ? HELLO
-      : { ...HELLO, ver: '0.7.2', kinds: [...HELLO.kinds, ...native] }
+      : {
+          ...HELLO,
+          ver: '0.7.2',
+          kinds: [...HELLO.kinds, ...native],
+          features: [...HELLO.features, ...nativeFeatures],
+        }
 
   const reply = (): void => {
     const pending = queued

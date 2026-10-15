@@ -30,6 +30,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   terminal selection and scrollback are untouched), and tasks remain reachable
   through the existing `↓` / `/tasks` Task Center.
 
+
+- The experimental TSP renderer's `/preset` now uses the v4 two-page native flow: the
+  catalogue is ONE native `cards` picker grouped `Built-in` / `Custom` with their counts,
+  and every card carries the preset's name, its kind, a one-line summary and its real state
+  badges (`Current`, `Next session`, `Default`, `Draft`); a broken declaration states its
+  reason on its own card and stays readable but can never be written. The catalogue footer
+  carries the THREE native buttons — `Close` on the left, `Set default` beside `Use next` /
+  `Use session` on the right (the primary highlight) — as the panel's ONLY writer; a
+  disabled button greys out and carries its reason as its tooltip. `Enter` (or a click on
+  the selected card) opens the preset's single read-only Details page: the complete name /
+  ID / type and scope sentence, its relation to the current session, the next session and
+  the new-session default, the full description and failure reason, and — for a shipped
+  preset — the official English "Mode details" and "How to use" sections INLINE as one
+  continuous Markdown scroll (no third layer). The page opens with the native navigation row
+  `← Back to presets · Esc`; the click, Enter and Esc all return to the catalogue keeping
+  the search and the selection. Browsing, searching, reading and going back never write; while a write is in
+  flight only `Close` remains, a refused write returns to the catalogue and states why, and
+  long names, IDs and descriptions wrap completely and scroll to the end on the Details
+  page.
 - `Ctrl+R` history now declares its own boundary: one `─` above the identity row
   and one below the action bar (against the footer), so the seat is visibly
   bounded by the transcript and the status/footer. Both are preferred and may

@@ -47,7 +47,7 @@ export type PresetApplyOutcome =
   | { readonly kind: 'indeterminate'; readonly message: string }
 
 /**
- * The `Set new-session default` settlement. `unconfirmed` is deliberate: the
+ * The `Set as default for new sessions` settlement. `unconfirmed` is deliberate: the
  * Config owner's write is an awaited settings mutation that raises on failure,
  * so a throw proves NEITHER commit nor rollback — the presenter must not claim
  * a failed save left the previous default in place, and must not retry it.
@@ -61,7 +61,10 @@ export interface PresetPickerRequest {
   readonly subject: PresetPickerSubject
   /** One explicit `Use` / row-key activation, through the ORIGINAL apply owner. */
   apply(id: string): Promise<PresetApplyOutcome>
-  /** One explicit `Set new-session default`, through the ORIGINAL default writer. */
+  /**
+   * One explicit `Set as default for new sessions` (the TSP Overview's own row),
+   * through the ORIGINAL default writer.
+   */
   setDefault(id: string): Promise<PresetDefaultOutcome>
   /**
    * Re-read the SAME roster authority after a failed read. The command's single

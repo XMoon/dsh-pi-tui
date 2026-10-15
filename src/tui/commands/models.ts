@@ -459,7 +459,7 @@ export function createModelCommands(deps: ModelCommandDeps): ModelCommandRegistr
         const presetErrorText = (error: unknown): string => safeErrorMessage(error)
         /**
          * The ONE new-session-default writer: the typed `/preset default <id>`
-         * verb and the picker's `Set new-session default` action call THIS
+         * verb and the picker's `Set as default for new sessions` row call THIS
          * function, so the validate/config-write/standing-refresh contract is
          * never duplicated. It persists the default for FUTURE sessions only;
          * the current Session, the run-local pending preset and the live catalog
@@ -727,7 +727,7 @@ export function createModelCommands(deps: ModelCommandDeps): ModelCommandRegistr
         })
         const closer = () => { if (surfaceToken === presetSurfaceToken) picker.close() }
         /**
-         * The picker's explicit `Set new-session default`: the SAME writer the
+         * The picker's explicit `Set as default for new sessions` row: the SAME writer the
          * typed `/preset default <id>` verb calls. The settings write raises
          * instead of returning a `WriteOutcome`, so a failure is reported as
          * `unconfirmed` — never as a proven rollback, and never retried.

@@ -20,22 +20,46 @@ import { testLifecycle } from './support/temp-lifecycle.ts'
 import { DirectPresetCatalog } from '../src/runtime/direct/catalog-direct.ts'
 import {
   PRESET_LAYER_PREFIX as P,
-  pickerAction,
+  clickLayerNode,
+  layerNodes,
+  pickerActionByBase,
   pickerNode,
   pickerProps,
-  sendAction,
+  sendActivate,
+  sendPickerAction,
+  sheetText,
   wireNodes,
+  type WireNode,
 } from './support/tsp-picker-wire.ts'
 
 const props = (pane: { readonly output: unknown } | never): Record<string, unknown> => pickerProps(pane as never, P)
 const node = (pane: unknown): unknown => pickerNode(pane as never, P)
-const action = (pane: unknown, id: string): Record<string, unknown> | undefined =>
-  pickerAction(pane as never, id, P)
+/** One footer entry by the BASE id it does: a rendered id carries the frame token. */
+const action = (pane: unknown, base: string): Record<string, unknown> | undefined =>
+  pickerActionByBase(pane as never, base, P)
 
-/** One visible preset-panel status fact (the presenter's own line). */
+/** The `/preset` Overview overlay, or `undefined` while the catalogue shows. */
+const details = (pane: unknown): WireNode | undefined =>
+  layerNodes(pane as never, P).find((node) => node.k === 'overlay' && node.id.includes('preset-details-'))
+
+/** The reading page's scrolling body: ONE identity per reading. */
+const readingBody = (pane: unknown): WireNode | undefined =>
+  layerNodes(pane as never, P).find((node) => node.k === 'col' && node.id.includes('preset-reading-body-'))
+
+/** Every visible string of the preset layer (the Details page's own text). */
+const layerText = (pane: unknown): string => sheetText(pane as never, P)
+
+/** The mounted catalogue's card records (the roster's own projected badges). */
+const items = (pane: { readonly output: unknown } | never): Array<Record<string, unknown>> =>
+  (props(pane).items ?? []) as Array<Record<string, unknown>>
+
+/** One `<Label>: <value>` fact of the preset catalogue's ONE native subtitle line. */
 function statusOf(pane: { readonly output: { text(): string } }, label: string): string | undefined {
-  const match = new RegExp(`"t":"(${label}: [^"]*)"`, 'u').exec(dockText(pane))
-  return match?.[1]
+  const at = dockText(pane).indexOf(`${label}: `)
+  if (at < 0) return undefined
+  const rest = dockText(pane).slice(at)
+  const end = rest.search(/ · |"/u)
+  return end < 0 ? rest : rest.slice(0, end)
 }
 
 /** The pane's own dock/notice text (the display seam's visible facts). */
@@ -88,27 +112,35 @@ test('PR4-A: the real /preset handler opens the native picker over the REAL rost
     await waitFor('renderer ready', () => dockText(fixture.pane).includes('dock.composer'))
     fixture.pane.key('/preset\r')
     await waitFor('native preset picker', () => props(fixture.pane).state === 'ready')
-    const items = (props(fixture.pane).items ?? []) as Array<Record<string, unknown>>
-    assert.deepEqual(items.map((entry) => entry.id), ['preset:b2-direct-preset', 'preset:minimal-preset'])
-    assert.equal(items[0]?.label, 'B2 direct preset')
-    assert.deepEqual(items[0]?.badges, [{ text: 'Default' }])
-    assert.match(String(items[1]?.detail), /^Custom · A second real target\.$/)
-    // The two session facts are independent display facts of this subject.
-    assert.match(dockText(fixture.pane), /Next session: none/)
-    assert.match(dockText(fixture.pane), /New-session default: b2-direct-preset/)
+    assert.deepEqual(items(fixture.pane).map((entry) => entry.id), ['preset:b2-direct-preset', 'preset:minimal-preset'])
+    const cards = items(fixture.pane)
+    assert.equal(cards[0]?.label, 'B2 direct preset')
+    assert.deepEqual(cards[0]?.badges, [{ text: 'Default' }])
+    assert.match(String(cards[1]?.detail), /^Custom · A second real target\.$/)
+    // The two session facts are independent display facts of this subject (Owner
+    // ruling "a": the ready picker paints no status text — the committed facts are
+    // the cards' own badges and the native `current` slot).
+    assert.equal(items(fixture.pane).some((entry) => (entry.badges as Array<{ text: string }>)?.some((badge) => badge.text === 'Next session')), false,
+      'a sessionless subject states no Next session before a choice exists')
     // A sessionless subject can never present a Current row.
     assert.deepEqual(props(fixture.pane).current, [])
     // Browsing and Enter on the list are read-only: the Host writer is untouched.
-    sendAction(fixture.pane, 'details', undefined, pickerNode(fixture.pane, P)!.id)
-    await waitFor('details page', () => props(fixture.pane).title === 'Preset details')
+    // The card's own activation opens the read-only Overview: no write, and the
+    // picker is gone while it reads (ONE page at a time).
+    sendActivate(fixture.pane, 'preset:b2-direct-preset', pickerNode(fixture.pane, P)!.id)
+    await waitFor('the Details page replaced the picker', () => details(fixture.pane) !== undefined)
+    assert.equal(pickerNode(fixture.pane, P), undefined, 'a reading page carries no picker')
     assert.equal(switches.length, 0)
-    sendAction(fixture.pane, 'back', undefined, pickerNode(fixture.pane, P)!.id)
-    await waitFor('back on the list', () => props(fixture.pane).title === 'Agent presets')
+    clickLayerNode(fixture.pane, 'preset-details-back-', P)
+    await waitFor('back on the catalogue', () => pickerNode(fixture.pane, P) !== undefined)
     fixture.pane.key('\u001b[B')
     await waitFor('second preset browsed', () => props(fixture.pane).selected === 'preset:minimal-preset')
     assert.equal(switches.length, 0, 'browsing never writes')
     fixture.pane.key('\r')
-    await waitFor('list Enter is browse-only', () => switches.length === 0 && node(fixture.pane) !== undefined)
+    await waitFor('the catalogue Enter opens Details only', () =>
+      switches.length === 0 && details(fixture.pane) !== undefined)
+    fixture.pane.key('\u001b')
+    await waitFor('Details Esc returns to the catalogue', () => pickerNode(fixture.pane, P) !== undefined)
     // Esc closes; the picker is a pure view so far.
     fixture.pane.key('\u001b')
     await waitFor('closed', () => node(fixture.pane) === undefined)
@@ -132,7 +164,7 @@ test('PR4-A: sessionless Use stages the run-local pending preset without a Sessi
     await waitFor('second preset browsed', () => props(fixture.pane).selected === 'preset:minimal-preset')
     // Tab then Enter: the focused `Use for next session` is the ONE write.
     fixture.pane.key('\t')
-    await waitFor('use focused', () => String(action(fixture.pane, 'use')?.label).startsWith('▸'))
+    await waitFor('use focused', () => String(action(fixture.pane, 'use')?.label).includes('[Enter]'))
     fixture.pane.key('\r')
     await waitFor('staged notice', () => dockText(fixture.pane).includes('new sessions will start on preset minimal-preset'))
     await waitFor('picker dismissed', () => node(fixture.pane) === undefined)
@@ -140,7 +172,9 @@ test('PR4-A: sessionless Use stages the run-local pending preset without a Sessi
     // Reopening the SAME authority shows the staged choice as the Next session.
     fixture.pane.key('/preset\r')
     await waitFor('reopened', () => props(fixture.pane).state === 'ready')
-    assert.match(dockText(fixture.pane), /Next session: minimal-preset/)
+    const badges = (items(fixture.pane).find((entry) => entry.id === 'preset:minimal-preset')?.badges ?? []) as Array<{ text: string }>
+    assert.deepEqual(badges, [{ text: 'Next session' }],
+      'the staged choice is that card\'s own native badge (Owner ruling "a")')
     assert.equal(props(fixture.pane).selected, 'preset:minimal-preset')
     assert.deepEqual(props(fixture.pane).current, [], 'the next-session choice is not a current badge')
     fixture.pane.key('\u001b')
@@ -239,16 +273,16 @@ test('PR4-A: a REAL blank live Session switches preset through the Host and rere
     // The Host turn-boundary authority says the resumed Session is still BLANK:
     // no started-Session refusal, a `Current session` fact, and the in-session
     // write offered by its own wording.
-    assert.match(dockText(fixture.pane), /Current session: b2-direct-preset/)
+    assert.deepEqual(props(fixture.pane).current, ['preset:b2-direct-preset'])
     assert.equal(dockText(fixture.pane).includes('preset switching is only available in a new session'), false)
-    assert.equal(String(action(fixture.pane, 'use')?.label), 'Use in this session')
+    assert.equal(String(action(fixture.pane, 'use')?.label), 'Use session')
     assert.equal(action(fixture.pane, 'use')?.disabled, undefined)
     assert.deepEqual(props(fixture.pane).current, ['preset:b2-direct-preset'])
     // Browse the second real preset and commit through the focused action.
     fixture.pane.key('\u001b[B')
     await waitFor('second preset browsed', () => props(fixture.pane).selected === 'preset:minimal-preset')
     fixture.pane.key('\t')
-    await waitFor('use focused', () => String(action(fixture.pane, 'use')?.label).startsWith('▸'))
+    await waitFor('use focused', () => String(action(fixture.pane, 'use')?.label).includes('[Enter]'))
     fixture.pane.key('\r')
     // The DURABLE Host commit: the live Session's own log holds exactly one
     // selection, and the Session was NEVER re-created or replaced.
@@ -265,9 +299,11 @@ test('PR4-A: a REAL blank live Session switches preset through the Host and rere
     assert.equal(observed.projections.values.agentPreset, 'minimal-preset')
     fixture.pane.key('/preset\r')
     await waitFor('reopened', () => props(fixture.pane).state === 'ready')
-    assert.match(dockText(fixture.pane), /Current session: minimal-preset/)
     assert.deepEqual(props(fixture.pane).current, ['preset:minimal-preset'])
-    assert.equal(statusOf(fixture.pane, 'New-session default'), 'New-session default: b2-direct-preset',
+    // The new-session default is a CARD BADGE (on `b2-direct-preset`), never a
+    // Current badge (Owner ruling "a").
+    const b2Badges = (items(fixture.pane).find((entry) => entry.id === 'preset:b2-direct-preset')?.badges ?? []) as Array<{ text: string }>
+    assert.deepEqual(b2Badges, [{ text: 'Default' }],
       'a Session switch never rewrites the new-session default')
     // A Session that has STARTED is refused by the Host (the locked negative).
     fixture.pane.key('\u001b')
@@ -313,7 +349,7 @@ test('PR4-A: a Host write that settles after its panel was replaced notifies nob
     fixture.pane.key('\u001b[B')
     await waitFor('second preset browsed', () => props(fixture.pane).selected === 'preset:minimal-preset')
     fixture.pane.key('\t')
-    await waitFor('use focused', () => String(action(fixture.pane, 'use')?.label).startsWith('▸'))
+    await waitFor('use focused', () => String(action(fixture.pane, 'use')?.label).includes('[Enter]'))
     fixture.pane.key('\r')
     await waitFor('the write reached the Host writer', () => calls === 1)
     // Esc closes the panel; the admitted Host write keeps running (closing a
@@ -337,7 +373,7 @@ test('PR4-A: a Host write that settles after its panel was replaced notifies nob
     // POSITIVE CONTROL on the same seam: while the panel still owns the surface,
     // the very same outcome IS announced (the fence is not a blanket silence).
     fixture.pane.key('\t')
-    await waitFor('use focused again', () => String(action(fixture.pane, 'use')?.label).startsWith('▸'))
+    await waitFor('use focused again', () => String(action(fixture.pane, 'use')?.label).includes('[Enter]'))
     fixture.pane.key('\r')
     await waitFor('the control switch is announced', () =>
       dockText(fixture.pane).includes('session preset switched to b2-direct-preset'))
@@ -450,15 +486,18 @@ test('PR4-A: the picker default write persists through the official profile plan
     assert.equal((fixture.ctx.get('agentPresets') as { defaultId: string }).defaultId, 'fixture-a')
     fixture.pane.key('/preset\r')
     await waitFor('picker ready', () => props(fixture.pane).state === 'ready')
-    assert.match(dockText(fixture.pane), /New-session default: fixture-a/)
+    const fixtureABadges = (items(fixture.pane).find((entry) => entry.id === 'preset:fixture-a')?.badges ?? []) as Array<{ text: string }>
+    assert.deepEqual(fixtureABadges, [{ text: 'Default' }], 'the recorded default is that card\'s own badge (Owner ruling "a")')
     // The registry IS a configurable plugin entry here, so the write is offered.
     fixture.pane.key('\u001b[B')
     await waitFor('second preset browsed', () => props(fixture.pane).selected === 'preset:fixture-b')
-    assert.notEqual(action(fixture.pane, 'set-default')?.disabled, true)
+    // The default write is the FOOTER's `Set default` button (the ONE writer, the
+    // v4 two-page contract): Tab moves into the footer, one ArrowLeft walks the ring
+    // onto `Set default`, Enter commits.
     fixture.pane.key('\t')
-    await waitFor('use focused', () => String(action(fixture.pane, 'use')?.label).startsWith('▸'))
-    fixture.pane.key('\u001b[C')
-    await waitFor('default focused', () => String(action(fixture.pane, 'set-default')?.label).startsWith('▸'))
+    await waitFor('footer focused', () => String(action(fixture.pane, 'use')?.label).includes('[Enter]'))
+    fixture.pane.key('\u001b[D')
+    await waitFor('default focused', () => String(action(fixture.pane, 'set-default')?.label).includes('[Enter]'))
     fixture.pane.key('\r')
     // The REAL ConfigEditor/Loader writes the selected default into the profile
     // document, and the registry's effective default follows it.
@@ -473,7 +512,8 @@ test('PR4-A: the picker default write persists through the official profile plan
     // A reopened panel reads the new default from the authority.
     fixture.pane.key('/preset\r')
     await waitFor('reopened', () => props(fixture.pane).state === 'ready')
-    assert.match(dockText(fixture.pane), /New-session default: fixture-a/)
+    const reopenedBadges = (items(fixture.pane).find((entry) => entry.id === 'preset:fixture-a')?.badges ?? []) as Array<{ text: string }>
+    assert.deepEqual(reopenedBadges, [{ text: 'Default' }], 'the reopened panel reads the default from the authority')
     fixture.pane.key('\u001b')
     await waitFor('closed', () => pickerNode(fixture.pane, P) === undefined)
   } finally {
@@ -506,17 +546,19 @@ test('PR4-A: without a Config owner the default write is honestly disabled', asy
     await waitFor('picker ready', () => props(fixture.pane).state === 'ready')
     fixture.pane.key('\u001b[B')
     await waitFor('second preset browsed', () => props(fixture.pane).selected === 'preset:minimal-preset')
-    assert.equal(action(fixture.pane, 'set-default')?.disabled, true)
-    // Dispatching the DISABLED action at the presenter is refused at admission:
-    // the panel keeps the same frame and no settings write happens at all.
-    const before = pickerNode(fixture.pane, P)!.id
-    sendAction(fixture.pane, 'set-default', undefined, before)
+    // The footer's `Set default` states the real reason (its `disabled` string —
+    // Owner ruling "a") and the SAME availability predicate refuses the program's
+    // own action channel, so no forged receiver can write either.
+    assert.equal(action(fixture.pane, 'set-default')?.disabled, 'Settings unavailable')
+    const frames = fixture.pane.frameCount()
+    sendPickerAction(fixture.pane, 'set-default', P)
     await settle(600)
-    assert.equal(pickerNode(fixture.pane, P)?.id, before, 'a disabled action never repaints or dismisses')
-    assert.equal(props(fixture.pane).state, 'ready')
+    assert.equal(fixture.pane.frameCount(), frames, 'a disabled entry never repaints or dismisses')
     assert.equal(dockText(fixture.pane).includes('new-session default set:'), false)
     assert.equal(dockText(fixture.pane).includes('settings service unavailable'), false)
     // The panel owns the keyboard, so the typed verb runs after it closes.
+    fixture.pane.key('\u001b')
+    await waitFor('back on the catalogue', () => pickerNode(fixture.pane, P) !== undefined)
     fixture.pane.key('\u001b')
     await waitFor('closed', () => pickerNode(fixture.pane, P) === undefined)
     await clearComposer(fixture.pane)

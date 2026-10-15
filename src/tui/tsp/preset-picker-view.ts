@@ -1,93 +1,149 @@
 /** Node construction for the native TSP `/preset` presentation.
  *
- * Pure: state in, node tree out. Every interaction goes through the native
- * picker's own row/action channels, which the presenter's ONE admission point
- * routes — this module never mutates state, never writes and never reads the
- * SDK.
+ * Pure: state in, node tree out. Every interactive node binds a panel INTENT
+ * through `deps.bind`, so a click lands on the same admission point as a key —
+ * this module never mutates state, never writes and never reads the SDK.
  *
- * Layout contract (Owner-frozen): ONE native `ui.picker` at the fixed `md` size
- * with no preview, drilled into a read-only `Preset details` page. The
- * next/current, default and draft facts sit above it as their own complete
- * lines, and the keyboard hint below it; no overlay, no `ui.el`, no CSS, no
- * second geometry.
+ * Layout contract (Owner-frozen v4, TWO pages in ONE layer):
+ *  - the CATALOGUE is ONE native `ui.picker` at the client's `md` dialog size with
+ *    `layout:'cards'`, `preview:'none'` and no scopes: one column of preset cards
+ *    grouped `Built-in` then `Custom`, each card carrying the preset's name, its
+ *    real classification, a ONE-line summary and its real state badges. The
+ *    footer is the client's own action bar with the THREE native entries —
+ *    `Use next`/`Use session`, `Set default`, `Close` — the only writer on the
+ *    panel. There is no provider sidebar, no second fact-row picker, no grid and
+ *    no status row: the committed facts are the cards' own badges (MEASURED:
+ *    `lead`/`message` stay unpainted in the ready phase and a sibling line is
+ *    clipped behind the modal sheet);
+ *  - a card ACTIVATION (`activate` — the client's own click on the already-selected
+ *    card — or `Enter`) REPLACES the picker with the selected preset's DETAILS: a
+ *    native `overlay` at `lg` whose body is ONE continuous read — identity,
+ *    relationship facts, the complete description, the failure reason and, for a
+ *    SHIPPED preset, the official Mode guide inline (`ui.md`). Strictly read-only:
+ *    no write row, no footer, no second page. The way back is the #301-proven
+ *    native navigation row (`ui.row({onClick})`, `← Back to presets · Esc`) at the
+ *    TOP of the reading body — Owner A4 amendment, 2026-10-14, final form: the
+ *    measured client scrolls every overlay child in the ONE body scroller (no
+ *    app-controllable pinned slot exists and an `el` button paints no stylesheet
+ *    border/background), so the ROW is the pointer path at the page top and the
+ *    ALWAYS-available fixed path is the keyboard twin `Esc`, admitted at any
+ *    scroll position through the same ONE intent. No overlay ON TOP of a picker.
+ *
+ * The picker and the layer keep ONE identity for a PANEL's life (their keys carry
+ * the panel serial, never the frame revision: a key that changes per frame makes
+ * the client remount its scroll container); the Details page takes ONE identity
+ * per READING, so a `scroll` op queued by a previous reading cannot address the
+ * next one's body. The layer root is ALWAYS a `ui.col`: MEASURED (Gate A round
+ * 0), a bare page node as the region root is ACKed but paints NOTHING.
  * @module tui/tsp/preset-picker-view
  */
 import { span, ui, type Node } from '@stencil-hq/tern'
 import type { PickerAction, PickerItem, PickerProps } from '@stencil-hq/tern'
+import type { PresetPickerIntent } from './preset-picker-intents.ts'
 import {
+  FRAME_FREE_ACTION,
+  actionBase,
   actionKeyboardLive,
+  catalogueActions,
   currentId,
-  detailCursor,
-  detailFactItems,
+  detailsHead,
   focusedAction,
+  guideMarkdown,
   highlightedRow,
-  pickerActions,
+  pendingId,
+  pickerSubtitle,
   presetItemId,
   presetItems,
-  statusLines,
+  presetOrder,
+  statusMessage,
+  statusRelations,
   zoneHintText,
   type PresetPickerPanel,
 } from './preset-picker-state.ts'
 
+export interface PresetPickerViewDeps {
+  /** Bind one intent to THIS frame's revision (admission lives in the presenter). */
+  readonly bind: (intent: PresetPickerIntent) => () => void
+}
+
 /**
- * The rendered action bar: the state module owns WHICH actions exist (and which
- * the current phase admits), and the focused one — only while the action zone
- * owns the keyboard — carries the app-rendered shape cue, because the SDK has
- * no focus affordance for a button. A phase whose bar no key can run (an
- * admitted write, a running re-read) marks nothing: the cue promises Enter.
+ * The key PREFIX of the Details page's scrollable content column.
+ *
+ * The presenter resolves a frame's body id by THIS prefix from the tree the SDK
+ * really built (never a guessed path), so a `scroll` op can only ever address a body
+ * that frame contains.
+ */
+export const PRESET_READING_BODY_KEY_PREFIX = 'preset-reading-body-'
+
+/** The panel-lifetime identity of the picker and of the layer itself. */
+const pickerKey = (panel: PresetPickerPanel): string => `preset-${panel.serial}`
+const layerKey = (panel: PresetPickerPanel): string => `preset-layer-${panel.serial}`
+
+/** The ONE identity of the reading currently open: the panel serial plus the
+ *  reading's epoch. It never carries the frame revision. */
+const readingScope = (panel: PresetPickerPanel): string => `${panel.serial}-${panel.readerEpoch}`
+const bodyKey = (panel: PresetPickerPanel): string => `${PRESET_READING_BODY_KEY_PREFIX}${readingScope(panel)}`
+
+/** The state/notice surface: one message, in one place. An admitted write states
+ *  itself here, because that phase's bar carries no entry able to say it. */
+function pickerState(panel: PresetPickerPanel): Pick<PickerProps, 'state' | 'message' | 'empty'> {
+  const message = statusMessage(panel)
+  return {
+    state: panel.phase === 'loading' ? 'loading' : panel.phase === 'error' ? 'error' : 'ready',
+    ...(message === '' ? {} : { message }),
+    // The empty roster is a real, readable state and never a silent fallback to
+    // "take the first card".
+    empty: 'No agent presets configured.',
+  }
+}
+
+/**
+ * The rendered footer: the state module owns WHICH operations exist (and which the
+ * current phase admits) and which one the keyboard has focused; the focused entry
+ * carries the app-rendered `Verb [Enter]` badge, because the SDK paints no focused
+ * button state. A DISABLED entry owns no Enter and therefore never carries the
+ * badge, and neither does a phase whose bar no key can run.
  */
 function renderedActions(panel: PresetPickerPanel): PickerAction[] {
   const focused = panel.zone === 'actions' && actionKeyboardLive(panel)
     ? focusedAction(panel).id
     : undefined
-  return pickerActions(panel).map((action) =>
-    // A DISABLED action owns no Enter, so it must not carry the focus cue.
-    action.id === focused && action.label !== undefined && action.disabled !== true
-      ? { ...action, label: `▸ ${action.label}` }
+  return catalogueActions(panel).map((action) =>
+    actionBase(panel, action.id) === focused && action.disabled !== true
+      ? { ...action, label: `${action.label} [Enter]` }
       : action,
   )
 }
 
-/** The state/notice surface: one message, in one place. */
-function pickerState(panel: PresetPickerPanel): Pick<PickerProps, 'state' | 'message' | 'empty'> {
-  return {
-    state: panel.phase === 'loading' ? 'loading' : panel.phase === 'error' ? 'error' : 'ready',
-    ...(panel.notice === '' ? {} : { message: panel.notice }),
-    // The Owner-frozen empty copy: an empty roster is a real, readable state and
-    // never a silent fallback to "pick the first row".
-    empty: 'No agent presets configured.',
-  }
-}
-
-/** The ONE picker of both pages: the same list and action bar; only its
- *  items/selected/query change. */
-function presetListPicker(panel: PresetPickerPanel, key: string): Node {
-  const details = panel.page === 'details'
+/** The ONE native picker of the catalogue page. */
+function cataloguePicker(panel: PresetPickerPanel): Node {
   const row = highlightedRow(panel)
-  const items: PickerItem[] = details
-    ? (row === undefined ? [] : detailFactItems(panel, row))
-    : presetItems(panel)
-  const current = details ? undefined : currentId(panel)
+  const current = currentId(panel)
+  const items: PickerItem[] = presetItems(panel)
   const props: PickerProps & { readonly key: string } = {
-    key,
-    title: details ? 'Preset details' : 'Agent presets',
+    key: pickerKey(panel),
+    title: 'Agent presets',
     noun: 'preset',
-    layout: 'rows',
-    // The frozen size: ONE compact native picker, no preview column, no tabs.
+    // The client's own card layout: ONE column at EVERY pane width, each card's
+    // detail on its own line. It is never a two-column grid, so no breakpoint, no
+    // stylesheet and no second keyboard contract exist.
+    layout: 'cards',
     size: 'md',
     preview: 'none',
-    query: details ? '' : panel.query,
-    cursor: details ? 0 : panel.cursor,
+    query: panel.query,
+    cursor: panel.cursor,
+    placeholder: 'Search presets…',
     items,
-    order: items.map((item) => item.id),
+    order: presetOrder(panel),
     total: items.length,
-    selected: details
-      // The Details page selects its presentation cursor, so the native list
-      // scrolls to the fact row being read.
-      ? (row === undefined ? undefined : items[detailCursor(panel, row)]?.id)
-      : (row === undefined ? undefined : presetItemId(row.id)),
+    // MEASURED: the subtitle is the header's title TOOLTIP, and the ready-phase
+    // `message`/`lead` slots paint nothing — so this line is a discoverable
+    // extra; the load-bearing statements are the cards' badges and the Details
+    // page's relationship facts.
+    subtitle: pickerSubtitle(panel),
+    selected: row === undefined ? undefined : presetItemId(row.id),
     // The live Session's own marker, native where the SDK offers one; the
-    // Default/Draft/Failed-to-load facts ride the rows' badges.
+    // Default/Next-session/Draft facts ride the cards' own badges.
     current: current === undefined ? [] : [presetItemId(current)],
     focus: 'list',
     ...pickerState(panel),
@@ -97,32 +153,123 @@ function presetListPicker(panel: PresetPickerPanel, key: string): Node {
 }
 
 /**
- * The whole layer for one frame: the session/default/draft facts, the ONE picker
- * and the keyboard hint. The node id carries the panel serial AND the revision,
- * so an event from an earlier frame can only ever be refused by
- * `targets`/admission — never silently applied to the new one.
+ * The Details page's way back (Owner A4 amendment, final form): the native
+ * NAVIGATION row `ui.row({onClick})` at the TOP of the reading body — `← Back to
+ * presets · Esc`. MEASURED: the client puts every overlay child into the ONE
+ * `sf-ov-body` scroller, so the row scrolls with the content; the ALWAYS-available
+ * fixed path is the keyboard twin (`Esc`, admitted at any scroll position), and
+ * the row is the pointer path at the page top where every reading starts. It must
+ * read as NAVIGATION, never as a business write (the page is read-only), and
+ * pointer and keyboard converge: the `onClick` closure and the key map both send
+ * the SAME `back` intent through the ONE admission.
  */
-export function presetPickerLayer(panel: PresetPickerPanel): Node {
-  const live = panel.zone === 'actions' && actionKeyboardLive(panel)
-  // Every node's id carries the panel serial AND the revision, so an event
-  // addressed at a node of an EARLIER frame can never resolve to the current
-  // revision through the presenter's target map.
-  const frame = `${panel.serial}-rev-${panel.revision}`
-  return ui.col(
-    { key: `preset-layer-${frame}`, gap: 'xs' },
-    // The session/default/draft facts: independent COMPLETE lines. Each is asked
-    // for exactly one rendered line (`truncate`/`lines`), so a very long id can
-    // never turn the header into a variable-height block that pushes the action
-    // bar out of a short pane — the id's complete value is the Details page's
-    // own fact row, and the row identity itself is never replaced by a chip.
-    ...statusLines(panel).map((line, index) => headerLine(line, 'muted', `preset-fact-${index}-${frame}`)),
-    presetListPicker(panel, `preset-${frame}`),
-    headerLine(zoneHintText(panel), live ? 'accent' : 'muted', `preset-hint-${frame}`),
+function detailsBackRow(panel: PresetPickerPanel, deps: PresetPickerViewDeps): Node {
+  return ui.row(
+    {
+      key: `preset-details-back-${readingScope(panel)}`,
+      onClick: deps.bind({ kind: 'back' }),
+    },
+    ui.text({
+      key: `preset-details-back-label-${readingScope(panel)}`,
+      spans: [span('← Back to presets', 'accent'), span(' · Esc', 'muted')],
+    }),
   )
 }
 
-/** One bounded header/hint line: exactly one rendered row, ellipsized by the
- *  pane when the value does not fit (never a wrapped block). */
-function headerLine(text: string, tone: 'muted' | 'accent', key: string): Node {
-  return ui.text({ key, spans: [span(text, tone)], truncate: 'end', lines: 1 })
+/** The Details page's identity block: the complete values, wrapped by the client
+ *  at the layout's real width — never pre-split. */
+function detailsIdentity(panel: PresetPickerPanel, row: NonNullable<ReturnType<typeof highlightedRow>>): Node[] {
+  const relations = statusRelations(panel, row)
+  return [
+    ui.col(
+      { key: `preset-details-identity-${readingScope(panel)}`, gap: 'xs' },
+      ui.text(span('Name', 'muted')),
+      ui.text({ key: 'details-name', text: row.name, wrap: 'char' }),
+      ui.text(span('ID', 'muted')),
+      ui.text({ key: 'details-id', text: row.id, wrap: 'char' }),
+      ui.text(span('Type', 'muted')),
+      ui.text({ key: 'details-type', text: row.builtIn ? 'Built-in' : 'Custom' }),
+      ui.text(span('Scope', 'muted')),
+      ui.text({
+        key: 'details-scope',
+        spans: [
+          span('Use: ', 'muted'),
+          span(panel.request.subject.sessionless ? 'next session only' : 'current blank session'),
+          span(' · Default: ', 'muted'),
+          span('future new sessions'),
+        ],
+      }),
+      ...relations.flatMap((relation) => [
+        ui.text({ key: relation.id, spans: [span(`${relation.label}: `, 'muted'), span(relation.value)] }),
+      ]),
+      ...(row.broken === undefined
+        ? []
+        : [
+            ui.text(span('Failed to load', 'muted')),
+            ui.text({ key: 'details-broken', text: row.broken, wrap: 'word' }),
+          ]),
+    ),
+  ]
+}
+
+/**
+ * The DETAILS page: the selected preset's complete, inert identity and status,
+ * the full description / failure reason and — for a SHIPPED preset — the official
+ * Mode guide inline, all in ONE continuous scrolling body (the client scrolls
+ * every overlay child, the Back row included). NOTHING on the page writes, and
+ * `Esc` is the way back from ANY scroll position.
+ */
+function detailsOverlay(panel: PresetPickerPanel, deps: PresetPickerViewDeps): Node {
+  const row = highlightedRow(panel)
+  const notice = statusMessage(panel)
+  const markdown = guideMarkdown(panel)
+  return ui.overlay(
+    {
+      key: `preset-details-${readingScope(panel)}`,
+      head: detailsHead(panel),
+      size: 'lg',
+      modal: true,
+    },
+    detailsBackRow(panel, deps),
+    ui.col(
+      { key: bodyKey(panel), gap: 'xs' },
+      // The transient read/write notice leads the page: it describes the state the facts
+      // below were read in.
+      ...(notice === '' ? [] : [ui.text({ key: 'details-notice', wrap: 'word' }, span(notice, 'muted'))]),
+      ...(row === undefined
+        ? [ui.text(span('No preset is selected.', 'muted'))]
+        : [
+            ...detailsIdentity(panel, row),
+            // ONE rule + spacer at the boundary between the INERT facts and the
+            // long reading content: the design language's counted separation device
+            // (one rule per boundary, never flanking a text line).
+            ui.rule(),
+            ui.spacer({ size: 'sm' }),
+            ...(row.description === undefined || row.description.trim() === ''
+              ? [ui.text(span('No description provided.', 'muted'))]
+              : [
+                  ui.text(span('Description', 'muted')),
+                  ui.text({ key: 'details-description', text: row.description, wrap: 'word' }),
+                ]),
+            // A SHIPPED preset's official guide follows INLINE — one scroll, no
+            // `Read mode guide` jump, no third page. A Custom declaration stops
+            // here: it must not borrow an official guide.
+            ...(markdown === undefined ? [] : [ui.md({ key: `preset-details-guide-${readingScope(panel)}`, text: markdown })]),
+          ]),
+    ),
+  )
+}
+
+/**
+ * The whole layer for one frame: exactly ONE page. The catalogue is the native
+ * picker; Details REPLACES it with a native overlay, so the layer can never
+ * carry a picker whose cards could be operated behind a reading page. The root
+ * is always a `ui.col` (MEASURED: a bare page node as the region root paints
+ * nothing).
+ */
+export function presetPickerLayer(panel: PresetPickerPanel, deps: PresetPickerViewDeps): Node {
+  return ui.col(
+    { key: layerKey(panel) },
+    panel.page === 'details' ? detailsOverlay(panel, deps) : cataloguePicker(panel),
+  )
 }

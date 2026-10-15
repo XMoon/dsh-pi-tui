@@ -118,6 +118,33 @@ export function pickerAction(pane: TspPane, id: string, prefix = MODEL_LAYER_PRE
     .find((entry) => entry.id === id)
 }
 
+/** One action entry by the BASE id it really does: a footer's ids carry the frame token
+ *  of the revision that rendered them, so an exact-id lookup cannot find them. */
+export function pickerActionByBase(
+  pane: TspPane,
+  base: string,
+  prefix = MODEL_LAYER_PREFIX,
+): Record<string, unknown> | undefined {
+  return ((pickerProps(pane, prefix).actions ?? []) as Array<Record<string, unknown>>)
+    .find((entry) => String(entry.id) === base || String(entry.id).startsWith(`${base}#`))
+}
+
+/** Send one footer action by its BASE id, addressing the id the picker REALLY rendered
+ *  (a test that invented the token would prove nothing about the wire). */
+export function sendPickerAction(pane: TspPane, base: string, prefix = MODEL_LAYER_PREFIX): void {
+  const entry = pickerActionByBase(pane, base, prefix)
+  assert.ok(entry, `no ${base} action in ${JSON.stringify(pickerProps(pane, prefix).actions)}`)
+  sendAction(pane, String(entry.id), undefined, pickerNode(pane, prefix)!.id)
+}
+
+/** Click one layer node by a fragment of its key: the SDK dispatches the node's own
+ *  `onClick` for it, exactly as the pane does for a real pointer click. */
+export function clickLayerNode(pane: TspPane, fragment: string, prefix = MODEL_LAYER_PREFIX): void {
+  const node = layerNodes(pane, prefix).find((entry) => entry.id.includes(fragment))
+  assert.ok(node, `no node matching ${fragment} in ${layerNodes(pane, prefix).map((n) => n.id).join(', ')}`)
+  clickNodeById(pane, node.id)
+}
+
 /** A Row the SDK dispatches `onClick` on (an effort radio row). */
 export function rowNode(pane: TspPane, fragment: string, prefix = MODEL_LAYER_PREFIX): WireNode {
   const node = layerNodes(pane, prefix).find((entry) => entry.k === 'row' && entry.id.includes(fragment))
