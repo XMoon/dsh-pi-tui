@@ -323,9 +323,20 @@ export class TaskQuickAccessory implements Component, Focusable {
    *  row). The selected INDEX is derived on demand from this value. */
   private selectedValue: string | undefined
   /** The pressed row identity of an in-flight Fullscreen press→release
-   *  gesture. Component-local, short-lived, cleared on every release and
-   *  by `deactivate()`. */
+   *  gesture, bound to the painted frame the press happened on. Component-
+   *  local, short-lived, cleared on every release and by `deactivate()`. */
   private pressedValue: string | undefined
+  /** The painted frame the press happened on: a repaint (any reflow, a
+   *  resize, a row insertion/removal) invalidates the in-flight gesture —
+   *  the user pressed a row they SAW, and the row the frame now shows at
+   *  that cell is not the row they pressed (addendum §2.4 stale-intent
+   *  negative control). The click branch requires the latch AND its frame
+   *  to be the CURRENT painted frame. */
+  private pressedFrame: {
+    readonly width: number
+    readonly height: number
+    readonly first: string | undefined
+  } | undefined
 
   focused = false
 
@@ -372,6 +383,7 @@ export class TaskQuickAccessory implements Component, Focusable {
   deactivate(): void {
     this.selectedValue = undefined
     this.pressedValue = undefined
+    this.pressedFrame = undefined
   }
 
   /**
@@ -616,9 +628,18 @@ export class TaskQuickAccessory implements Component, Focusable {
       const exists = this.items.some(candidate => candidate.value === hit.value)
       if (!exists) {
         this.pressedValue = undefined
+        this.pressedFrame = undefined
         return { handled: true }
       }
       this.pressedValue = hit.value
+      // The gesture is bound to the frame the user actually SAW: a repaint
+      // that changes the frame (a reflow, a resize, a row swap) invalidates
+      // the in-flight press even when the stable ID would still match.
+      this.pressedFrame = {
+        width: painted.width,
+        height: painted.height,
+        first: this.items[0]?.value,
+      }
       return { handled: true, capture: true }
     }
 
@@ -628,21 +649,46 @@ export class TaskQuickAccessory implements Component, Focusable {
       // that follows needs it for the same-row match. The latch is cleared
       // by the click branch (or by deactivate/row-removal paths below).
       if (this.pressedValue === undefined) return { handled: true }
+      // A repaint between press and release invalidates the gesture: the
+      // click this release may synthesize must not act on the new frame.
+      if (this.pressedFrameInvalid()) {
+        this.pressedValue = undefined
+        this.pressedFrame = undefined
+      }
       return { handled: true }
     }
 
     // click: the pressed identity must match THIS row's identity — press A
     // with a release/click resolving to B never activates (async reorder
-    // safety). Then resolve the CURRENT row by the stable value: the value
-    // is the identity, the stale frame's index never is.
+    // safety) — AND the gesture must still belong to the CURRENT painted
+    // frame (a resize/repaint between press and release kills the stale
+    // intent even when origin and row ID survived). Then resolve the
+    // CURRENT row by the stable value: the value is the identity, the
+    // stale frame's index never is.
     const pressed = this.pressedValue
+    const frame = this.pressedFrame
     this.pressedValue = undefined
+    this.pressedFrame = undefined
+    if (frame === undefined || this.pressedFrameInvalid(frame)) return { handled: true }
     if (pressed !== hit.value) return { handled: true }
     const item = this.items.find(candidate => candidate.value === hit.value)
     if (item === undefined) return { handled: true }
     // Same-row click opens the typed detail directly (no focus detour).
     this.onActivate(item.value)
     return { handled: true }
+  }
+
+  /** Whether the pressed frame no longer matches the CURRENT painted frame
+   *  (a repaint happened since the press). Called with no argument against
+   *  the live latch; with an argument, against a frame snapshot taken at
+   *  the click. */
+  private pressedFrameInvalid(observed?: { readonly width: number; readonly height: number; readonly first: string | undefined }): boolean {
+    const frame = observed ?? this.pressedFrame
+    const painted = this.painted
+    if (frame === undefined || painted === undefined) return true
+    return frame.width !== painted.width
+      || frame.height !== painted.height
+      || frame.first !== this.items[0]?.value
   }
 
   render(width: number): string[] {
