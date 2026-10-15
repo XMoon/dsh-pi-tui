@@ -3696,13 +3696,12 @@ export class TuiApp {
     // externally supplied store must not retain the dead surface).
     this.statusStoreUnsubscribe = this.statusStore.subscribe(() => {
       this.renderViewerSubjectBar()
-      // B4-B (review R4-F2): a status commit can change the footer's own
-      // wrapped height, which is part of the ↓ admission's chrome measure —
-      // the grant must be queried against the frame the NEW text paints,
-      // not the cache of the previous one. The render funnel right after
-      // recomposes again if the tick moved, so the second compose reads
-      // fresh geometry for free.
-      this.renderTick += 1
+      // B4-B (review R4-F2/R5-F2): a status commit can change the footer's
+      // own wrapped height — part of the ↓ admission's chrome measure.
+      // renderFooter itself now converges: when the NEW text changed the
+      // footer's painted height it re-queries the grant against the fresh
+      // geometry (see the lastFooterRows latch in renderFooter), so no
+      // speculative tick bump is needed here.
       this.renderFooter()
     })
     this.footerItemRegistry = createBuiltinFooterRegistry()
@@ -3879,14 +3878,18 @@ export class TuiApp {
     this.editor = new TuiEditor(this.tui, editorTheme, {
       requestRender: (force) => this.requestRender(force),
     })
-    // B4-B (review R4-F2): the ↓ admission's visual-line fact moves with an
-    // Up/Down press, and the fork fires no caret callback for it — the
-    // X063 observation hook is the ONLY transition signal. Recompose the
-    // footer on it while the hint is live (the composer's no-churn
-    // discipline keeps a same-value recompose free; the admission cache is
-    // tick-scoped so the recompose measures at most once per window).
-    this.editor.onVisualLineBoundaryChanged = () => {
-      if (this.tasksActive && this.taskQuickAdvertised) this.renderFooter()
+    // B4-B (review R4-F2/R5-F1): the ↓ admission's visual-line fact moves
+    // with navigation, and the fork fires no caret callback for it — the
+    // X063 observation hook is the ONLY transition signal. The hook carries
+    // the boundary state AFTER the move: recompose ONLY when it differs
+    // from the state the painted hint was composed from, so a no-op Up at
+    // the top line pays one dispatch + one compare, never a chrome
+    // re-measure (plan §9.3).
+    this.editor.onVisualLineBoundaryChanged = (onLastVisualLine: boolean) => {
+      if (!this.tasksActive || !this.taskQuickAdvertised) return
+      if (onLastVisualLine === this.taskQuickHintBoundary) return
+      this.taskQuickHintBoundary = onLastVisualLine
+      this.renderFooter()
     }
     this.editorBorder = this.editor.borderColor
     this.editor.onSubmit = (text) => {
@@ -14542,6 +14545,14 @@ export class TuiApp {
   private lastFooterGeometry: { surface: 'main' | 'alt'; width: number; height: number; total: number } = {
     surface: 'main', width: -1, height: -1, total: -1,
   }
+  /** The painted row count of the LAST footer composition (B4-B review
+   *  R5-F2): the ↓ admission's chrome measure includes this footer's
+   *  height, so a composition that CHANGED it re-queries the grant once
+   *  against the fresh geometry instead of leaving the hint computed from
+   *  the previous frame's height. */
+  private lastFooterRows = -1
+  /** Re-entrancy latch for the footer height convergence pass (R5-F2). */
+  private convergingFooter = false
   /** The last terminal width the transcript components were built at (the
    * right-gutter resize latch): a width change rebuilds the width-baked
    * folds, so a stale truncation never wraps at the new paint width. */
@@ -15209,8 +15220,10 @@ export class TuiApp {
     // B4-B (review R3-F2): while the accessory is ACTIVE the ↓ hint must
     // not advertise the entry, and the editor's own Down no longer reaches
     // the keymap — recompose the footer so the painted hint matches the
-    // action.
+    // action. The boundary baseline is taken at the DARK composition, so
+    // the leave recompose compares against fresh fact, not a stale one.
     this.taskQuickAdvertised = false
+    this.taskQuickHintBoundary = this.editor.canEnterTaskQuickFromDown(this.terminal.columns)
     this.renderFooter()
     this.requestRender()
     return true
@@ -15240,8 +15253,11 @@ export class TuiApp {
     this.restoreSeatFocusAfterQuick()
     // B4-B (review R3-F2): leaving restores the editor seat, so the ↓ hint
     // becomes live again (the D8-settled classifier paints it on the next
-    // compose) — recompose NOW, not on some later footer churn.
+    // compose) — recompose NOW, not on some later footer churn. The
+    // boundary baseline is re-read so the next navigation hook compares
+    // against the state the freshly painted hint was composed from.
     this.taskQuickAdvertised = true
+    this.taskQuickHintBoundary = this.editor.canEnterTaskQuickFromDown(this.terminal.columns)
     this.renderFooter()
     this.requestRender()
   }
@@ -15294,11 +15310,15 @@ export class TuiApp {
   private taskQuickGrantCacheValue = false
   /** Whether the CURRENT admission facts can flip on an editor caret move
    *  alone (the visual-line classifier's painted-frame guard is live). The
-   *  fork editor fires NO caret callback, so while this is true the editor's
-   *  `onChange` recomposes the footer (B4-B review R3-F2): the ↓ hint must
-   *  track the boundary without waiting for an unrelated footer churn.
-   *  Entries/exits set it directly (enterTaskQuick/leaveTaskQuick). */
+   *  fork editor fires NO caret callback, so while this is true the X063
+   *  boundary hook drives the footer recompose (B4-B review R3-F2): the ↓
+   *  hint must track the boundary without waiting for an unrelated footer
+   *  churn. Entries/exits set it directly (enterTaskQuick/leaveTaskQuick). */
   private taskQuickAdvertised = false
+  /** The last-visual-line state the PAINTED hint was composed from: the
+   *  X063 boundary hook recomposes only when the editor's live state
+   *  differs from this, so no-op navigation never re-measures (R5-F1). */
+  private taskQuickHintBoundary: boolean | undefined
 
   private taskQuickGrantCached(): boolean {
     if (this.renderTick !== this.taskQuickGrantCacheTick) {
@@ -19391,6 +19411,29 @@ export class TuiApp {
       })
     }
     this.footer.setText(text)
+    // B4-B (review R5-F2): the admission's chrome measure includes THIS
+    // footer's painted height. If the NEW text changed it, the grant the
+    // composer just queried was measured against the PREVIOUS frame's
+    // height — converge with ONE more compose against the fresh geometry
+    // (the composer's no-churn discipline makes it a byte-identical no-op
+    // whenever the hint's value is stable; the tick bump invalidates the
+    // frame-scoped grant cache so the recompose truly re-measures). The
+    // latch keeps the convergence to a single pass — a footer is bounded
+    // by its hard line capacity, and a second height change is absorbed by
+    // the NEXT compose (each compose paints the truth of its own text).
+    const newFooterRows = this.footer.render(width).length
+    if (newFooterRows !== this.lastFooterRows) {
+      this.lastFooterRows = newFooterRows
+      this.renderTick += 1
+      if (!this.convergingFooter) {
+        this.convergingFooter = true
+        try {
+          this.renderFooter()
+        } finally {
+          this.convergingFooter = false
+        }
+      }
+    }
     this.requestRender()
   }
 
