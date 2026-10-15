@@ -4,8 +4,9 @@ import test from 'node:test'
 import { connect } from '@stencil-hq/tern'
 import { mountTspRenderer } from '../src/tui/tsp/session.ts'
 import { createSessionBrowserReadOwner } from '../src/app/command/session-browser-read.ts'
-import type { SessionProjectionSummary, SessionReader, SessionSummary } from '../src/runtime/session-reader-port.ts'
+import type { SessionContentSearchPage, SessionProjectionSummary, SessionReader, SessionSummary } from '../src/runtime/session-reader-port.ts'
 import { createDiag } from '../src/runtime/process/diagnostics.ts'
+import { formatSessionAge } from '../src/tui/pickers/sessions.ts'
 import { installTspPane, type TspPane } from './support/tsp-terminal-fixture.ts'
 import { waitUntil } from './support/tsp-runner-harness.ts'
 import {
@@ -178,6 +179,18 @@ test('native Browser is one workspace tree, then a global cards union with Host-
   assert.equal(m.fatals.length, 0)
 })
 
+test('browse row activity age uses updatedAt rather than createdAt', async (t) => {
+  const createdAt = Date.now() - 40 * 24 * 60 * 60 * 1000
+  const updatedAt = Date.now() - 60 * 1000
+  assert.notEqual(formatSessionAge(createdAt), formatSessionAge(updatedAt), 'the fixture separates creation and activity ages')
+  const m = await mounted(t, reader({
+    list: async () => [row('session-recent', { createdAt, updatedAt })],
+    projectionBatch: async () => new Map(),
+  }), false)
+  const detail = String(items(m.pane)[0]?.detail)
+  assert.ok(detail.includes(`Updated ${formatSessionAge(updatedAt)}`), detail)
+})
+
 test('55-row projection batches keep the native Picker identity and selected row', async (t) => {
   const rows = Array.from({ length: 55 }, (_, index) => {
     const id = `session-row-${String(index).padStart(2, '0')}`
@@ -235,6 +248,72 @@ test('unavailable Host search with no metadata match is not presented as an ordi
   assert.match(String(props(pane).message), /content search is unavailable/iu)
 })
 
+test('projection failure does not mask unavailable Host search status', async (t) => {
+  const m = await mounted(t, reader({
+    list: async () => [row('needle-session')],
+    projectionBatch: async () => { throw new Error('Projection unavailable') },
+    search: async () => undefined,
+  }), false)
+  const { pane } = m
+  await waitUntil('projection failure is visible before search', () =>
+    String(props(pane).message).includes('Some session details are unavailable'))
+  pane.key('needle')
+  await waitUntil('metadata match and both partial-state messages are visible', () => {
+    const message = String(props(pane).message)
+    return props(pane).state === 'error'
+      && message.includes('Content search is unavailable')
+      && message.includes('Some session details are unavailable')
+  })
+  assert.deepEqual(items(pane).map((item) => item.id), ['session:needle-session'])
+})
+
+test('projection failure does not mask thrown Host search status', async (t) => {
+  const m = await mounted(t, reader({
+    list: async () => [row('needle-session')],
+    projectionBatch: async () => { throw new Error('Projection unavailable') },
+    search: async () => { throw new Error('Host index failed') },
+  }), false)
+  const { pane } = m
+  await waitUntil('projection failure is visible before search', () =>
+    String(props(pane).message).includes('Some session details are unavailable'))
+  pane.key('needle')
+  await waitUntil('metadata match and both failure messages are visible', () => {
+    const message = String(props(pane).message)
+    return props(pane).state === 'error'
+      && message.includes('Content search failed: Host index failed')
+      && message.includes('Some session details are unavailable')
+  })
+  assert.deepEqual(items(pane).map((item) => item.id), ['session:needle-session'])
+})
+
+test('projection failure remains secondary to loading and hasMore search status', async (t) => {
+  const page = deferred<SessionContentSearchPage | undefined>()
+  let searchCalls = 0
+  const m = await mounted(t, reader({
+    list: async () => [row('needle-session')],
+    projectionBatch: async () => { throw new Error('Projection unavailable') },
+    search: async () => { searchCalls += 1; return page.promise },
+  }), false)
+  const { pane } = m
+  await waitUntil('projection failure is visible before search', () =>
+    String(props(pane).message).includes('Some session details are unavailable'))
+  pane.key('needle')
+  await waitUntil('loading remains visible while Host search is pending', () => {
+    const message = String(props(pane).message)
+    return searchCalls === 1 && props(pane).state === 'loading'
+      && message.includes('Searching session content…')
+      && message.includes('Some session details are unavailable')
+  })
+  page.resolve({ items: [], hasMore: true })
+  await waitUntil('hasMore remains explicit after Host search completes', () => {
+    const message = String(props(pane).message)
+    return props(pane).state === 'ready'
+      && message.includes('More matches are available; refine the query.')
+      && message.includes('Some session details are unavailable')
+  })
+  assert.deepEqual(items(pane).map((item) => item.id), ['session:needle-session'])
+})
+
 test('All workspaces retains cross-workspace lineage, orphans, and cycle members', async (t) => {
   const m = await mounted(t)
   const { pane } = m
@@ -266,10 +345,13 @@ test('Details preserves search state, scrolls its own body, and emits read-only 
   assert.equal(picker(pane), undefined)
   assert.equal(layerNodes(pane, BROWSER).filter((node) => node.k === 'overlay').length, 1)
   assert.ok(detailBody(pane))
-  assert.match(sheetText(pane, BROWSER), /session-content/u)
-  assert.match(sheetText(pane, BROWSER), /Unrelated title/u)
-  assert.match(sheetText(pane, BROWSER), /Host content excerpt/u)
-  assert.doesNotMatch(sheetText(pane, BROWSER), /\u001b/u)
+  const firstDetails = sheetText(pane, BROWSER)
+  assert.match(firstDetails, /session-content/u)
+  assert.match(firstDetails, /Unrelated title/u)
+  assert.match(firstDetails, /Host content excerpt/u)
+  assert.ok(firstDetails.includes(`Created | ${new Date(10).toISOString()}`), firstDetails)
+  assert.ok(firstDetails.includes(`Updated | ${new Date(100).toISOString()}`), firstDetails)
+  assert.doesNotMatch(firstDetails, /\u001b/u)
   const firstBackId = layerNodes(pane, BROWSER).find((node) => node.k === 'row' && node.id.includes('session-browser-back-'))!.id
   const bodyId = detailBody(pane)!.id
   const before = scrollOps(pane).length
@@ -324,6 +406,20 @@ test('Details preserves search state, scrolls its own body, and emits read-only 
     source: 'enter',
   })
   assert.equal(m.fatals.length, 0)
+})
+
+test('Details reports Unknown rather than inferring an absent createdAt', async (t) => {
+  const m = await mounted(t, reader({
+    list: async () => [row('session-current', { createdAt: undefined, updatedAt: 3_000, live: true })],
+    projectionBatch: async () => new Map(),
+  }), false)
+  const { pane } = m
+  await waitUntil('current row without createdAt is listed', () => items(pane).some((item) => item.id === 'session:session-current'))
+  sendPickerAction(pane, 'details', BROWSER)
+  await waitUntil('Details opens for row without createdAt', () => details(pane) !== undefined)
+  const text = sheetText(pane, BROWSER)
+  assert.ok(text.includes('Created | Unknown'), text)
+  assert.ok(text.includes(`Updated | ${new Date(3_000).toISOString()}`), text)
 })
 
 test('modal seat suspends Browser events and restores the same query/selection afterward', async (t) => {

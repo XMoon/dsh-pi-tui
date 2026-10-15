@@ -51,6 +51,11 @@ query, workspace, and lineage helpers are in
   empty Host page. Metadata matches remain available; with no metadata match,
   the Presenter states that content search is unavailable. Thrown list,
   projection, and search errors remain distinct from empty/unavailable states.
+  Search loading/unavailable/error/`hasMore` status remains visible when
+  projection enrichment also fails; the projection warning stays secondary.
+- Browse rows show compact recent activity from `updatedAt`; Details shows full
+  ISO Created/Updated timestamps. An absent `createdAt` is `Unknown` and is
+  never inferred from `updatedAt`.
 - Details is one read-only native Overlay Reader. Back or Esc returns to the
   same Picker and retains query/scope/selection. Each reading owns a distinct
   Reader/body/scroll identity; no Resume action is offered from Details.
@@ -77,8 +82,8 @@ can publish.
   does not claim one.
 - The existing modal seat has priority. Browser, Preset, and Model share one
   layer and retire one another; a modal suspends Browser input and restores the
-  same read-only state when it closes. Hydration and renderer disposal retire
-  the Browser.
+  same read-only state when it closes. Hydration retires the Browser; shared
+  renderer disposal clears the exposed Model, Preset, and Browser presenters.
 - Pointer selection changes only the selected row. In B1-A, Enter/activate may
   produce a test-observable Resume intent, but the footer Resume is disabled
   and no production writer, `switchSession`, transition gate, or session

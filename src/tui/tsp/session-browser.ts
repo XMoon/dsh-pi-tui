@@ -10,7 +10,7 @@ import type {
   SessionBrowserSearchResult,
 } from '../../app/command/session-browser-presentation.ts'
 import { buildSessionTree, sameWorkspace, sanitizeSessionSearchInput } from '../../domain/session/browser.ts'
-import { sanitizeTerminalText, shortSessionId, workspaceKey } from '../pickers/sessions.ts'
+import { formatSessionAge, sanitizeTerminalText, shortSessionId, workspaceKey } from '../pickers/sessions.ts'
 
 const DETAILS_BODY_KEY_PREFIX = 'session-browser-details-body-'
 const BROWSE_ACTIONS = ['close', 'details', 'resume'] as const
@@ -184,6 +184,7 @@ function rowItem(
   const title = row.title === undefined || row.title.trim() === '' ? shortSessionId(row.id) : row.title
   const detail = [
     workspaceKey(row.cwd),
+    `Updated ${formatSessionAge(row.updatedAt)}`,
     row.preset === undefined ? undefined : `Preset ${row.preset}`,
     row.live ? 'Live' : 'Persisted',
     shortSessionId(row.id),
@@ -199,7 +200,7 @@ function rowItem(
     label: sanitizeTerminalText(title),
     detail: result?.snippet === undefined
       ? detail
-      : `${workspaceKey(row.cwd)} · ${sanitizeTerminalText(result.snippet)}`,
+      : `${workspaceKey(row.cwd)} · Updated ${formatSessionAge(row.updatedAt)} · ${sanitizeTerminalText(result.snippet)}`,
     title: sanitizeTerminalText(row.id),
     ...(depth === undefined ? {} : { depth }),
     ...(badges.length === 0 ? {} : { badges }),
@@ -211,13 +212,17 @@ function statusText(panel: SessionBrowserPanel): string | undefined {
   if (snapshot.listState === 'loading') return 'Loading persisted sessions…'
   if (snapshot.listState === 'unavailable') return 'Session listing is unavailable.'
   if (snapshot.listState === 'error') return `Session listing failed: ${sanitizeTerminalText(snapshot.listError ?? 'unknown error')}`
-  if (snapshot.projectionError !== undefined) return `Some session details are unavailable: ${sanitizeTerminalText(snapshot.projectionError)}`
-  if (!queryMode(panel)) return undefined
-  if (snapshot.searchState === 'loading') return 'Searching session content…'
-  if (snapshot.searchState === 'unavailable') return 'Content search is unavailable; metadata matches remain visible.'
-  if (snapshot.searchState === 'error') return `Content search failed: ${sanitizeTerminalText(snapshot.searchError ?? 'unknown error')}; metadata matches remain visible.`
-  if (snapshot.hasMore) return 'More matches are available; refine the query.'
-  return undefined
+  const projectionMessage = snapshot.projectionError === undefined
+    ? undefined
+    : `Some session details are unavailable: ${sanitizeTerminalText(snapshot.projectionError)}`
+  if (!queryMode(panel)) return projectionMessage
+  const searchMessage = snapshot.searchState === 'loading' ? 'Searching session content…'
+    : snapshot.searchState === 'unavailable' ? 'Content search is unavailable; metadata matches remain visible.'
+      : snapshot.searchState === 'error'
+        ? `Content search failed: ${sanitizeTerminalText(snapshot.searchError ?? 'unknown error')}; metadata matches remain visible.`
+        : snapshot.hasMore ? 'More matches are available; refine the query.' : undefined
+  if (searchMessage === undefined) return projectionMessage
+  return projectionMessage === undefined ? searchMessage : `${searchMessage} ${projectionMessage}`
 }
 
 function emptyText(panel: SessionBrowserPanel): string {
@@ -308,6 +313,14 @@ function detailReader(panel: SessionBrowserPanel, bind: (intent: BrowserIntent) 
         ['Title', title],
         ['State', row.id === panel.request.subject.currentSessionId ? 'Current session' : row.live ? 'Live session' : 'Persisted session'],
         ['Workspace', row.cwd === undefined ? 'Unknown workspace' : row.cwd],
+      ],
+    },
+    {
+      id: 'activity',
+      head: 'Activity',
+      facts: [
+        ['Created', row.createdAt === undefined ? 'Unknown' : new Date(row.createdAt).toISOString()],
+        ['Updated', new Date(row.updatedAt).toISOString()],
       ],
     },
     {

@@ -118,11 +118,11 @@ class ScriptedTern {
   readonly frames: WireFrame[] = []
   readonly closeBodies: unknown[] = []
 
-  constructor() {
+  constructor(hello: typeof HELLO = HELLO) {
     this.output.onWrite = bytes => {
       const text = DECODER.decode(bytes)
       if (text.includes('\u001b[c')) {
-        setTimeout(() => this.input.type(`\u001b_tsp;r;${JSON.stringify(HELLO)}\u001b\\\u001b[?62;52;c`), 1)
+        setTimeout(() => this.input.type(`\u001b_tsp;r;${JSON.stringify(hello)}\u001b\\\u001b[?62;52;c`), 1)
         return
       }
       for (const match of text.matchAll(/\u001b_tsp;x;([\s\S]*?)\u001b\\/g)) {
@@ -226,8 +226,19 @@ interface Harness {
   dispose(): Promise<void>
 }
 
-async function mountTspHarness(options: { requestExit?: () => void; onFatal?: (error: unknown) => void } = {}): Promise<Harness & { session: Session }> {
-  const tern = new ScriptedTern()
+async function mountTspHarness(options: {
+  requestExit?: () => void
+  onFatal?: (error: unknown) => void
+  sessionBrowserCapabilities?: boolean
+} = {}): Promise<Harness & { session: Session }> {
+  const hello = options.sessionBrowserCapabilities
+    ? {
+      ...HELLO,
+      kinds: [...HELLO.kinds, 'picker', 'row', 'overlay', 'text', 'md'],
+      features: [...HELLO.features, 'scroll'],
+    }
+    : HELLO
+  const tern = new ScriptedTern(hello)
   const session = await openSession(tern)
   let folder = new TranscriptFolder()
   const controller = new TranscriptWindowController({ windowTurns: 20, stepTurns: 10 })
@@ -513,6 +524,25 @@ test('A-07: dispose closes the SDK surface (x keep:false) and the session exactl
     harness.surface.paintNow()
     await settle()
     assert.equal(harness.tern.frames.length, framesBefore, 'a late projection never frames a closed surface')
+  } finally {
+    await harness.dispose().catch(() => {})
+    await session.close().catch(() => {})
+  }
+})
+
+test('A-07b: SurfaceRuntime retires all native presenter getters on dispose', async () => {
+  const harness = await mountTspHarness({ sessionBrowserCapabilities: true })
+  const session = harness.session
+  try {
+    assert.ok(harness.surface.modelPresentation, 'the TSP renderer exposes its Model presenter')
+    assert.ok(harness.surface.presetPresentation, 'the TSP renderer exposes its Preset presenter')
+    assert.ok(harness.surface.sessionBrowserPresentation, 'the TSP renderer exposes its Session Browser presenter')
+
+    await harness.dispose()
+
+    assert.equal(harness.surface.modelPresentation, undefined)
+    assert.equal(harness.surface.presetPresentation, undefined)
+    assert.equal(harness.surface.sessionBrowserPresentation, undefined)
   } finally {
     await harness.dispose().catch(() => {})
     await session.close().catch(() => {})
