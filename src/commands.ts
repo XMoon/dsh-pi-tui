@@ -647,15 +647,15 @@ export interface TuiCommandRunner {
   updateWelcomeCard(): void
   /**
    * Open one job's detail from a task list: bash jobs show the status
-   * viewer, subagent jobs the child transcript. Shared by the footer ↓
-   * Quick Tasks browser and `/tasks`.
+   * viewer, subagent jobs the child transcript. Shared by the on-demand
+   * Task Quick and `/tasks`.
    */
   openJobView(jobId: string): void
   /**
    * Open the full Task Center (jobs + subagents, searchable, with
    * confirmed row-level Stop on capable rows). This is the command-side
    * entry behind `/tasks` (and its `subagents` alias); the footer ↓ opens
-   * the compact Quick Tasks view.
+   * the on-demand Task Quick.
    */
   openTasksBrowser(): void
   /**

@@ -20211,7 +20211,7 @@ export class TuiApp {
   }
 
   /**
-   * Open the task browser overlay (the footer ↓ Quick Tasks trigger or
+   * Open the task browser overlay (the `/tasks` entry or
    * `/tasks` Full Task Center). Unlike the generic {@link openPicker}, rows carry a
    * status word + start timestamp so the panel can render status dots,
    * right-aligned status/elapsed columns, live counts, and a 1s elapsed
