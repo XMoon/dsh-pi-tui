@@ -3696,6 +3696,13 @@ export class TuiApp {
     // externally supplied store must not retain the dead surface).
     this.statusStoreUnsubscribe = this.statusStore.subscribe(() => {
       this.renderViewerSubjectBar()
+      // B4-B (review R4-F2): a status commit can change the footer's own
+      // wrapped height, which is part of the ↓ admission's chrome measure —
+      // the grant must be queried against the frame the NEW text paints,
+      // not the cache of the previous one. The render funnel right after
+      // recomposes again if the tick moved, so the second compose reads
+      // fresh geometry for free.
+      this.renderTick += 1
       this.renderFooter()
     })
     this.footerItemRegistry = createBuiltinFooterRegistry()
@@ -3872,6 +3879,15 @@ export class TuiApp {
     this.editor = new TuiEditor(this.tui, editorTheme, {
       requestRender: (force) => this.requestRender(force),
     })
+    // B4-B (review R4-F2): the ↓ admission's visual-line fact moves with an
+    // Up/Down press, and the fork fires no caret callback for it — the
+    // X063 observation hook is the ONLY transition signal. Recompose the
+    // footer on it while the hint is live (the composer's no-churn
+    // discipline keeps a same-value recompose free; the admission cache is
+    // tick-scoped so the recompose measures at most once per window).
+    this.editor.onVisualLineBoundaryChanged = () => {
+      if (this.tasksActive && this.taskQuickAdvertised) this.renderFooter()
+    }
     this.editorBorder = this.editor.borderColor
     this.editor.onSubmit = (text) => {
       const gesture: ComposerSubmitGesture = 'enter'
@@ -3946,12 +3962,6 @@ export class TuiApp {
       // editor is empty; the editor mutates without going through
       // setStatus, so keep the badge truthful while tasks are active.
       if (this.tasksActive) this.renderFooter()
-      // B4-B (review R3-F2): the ↓ admission is a VISUAL-LINE fact — the
-      // caret crossing the last-visual-line boundary flips it without any
-      // document change, and the fork fires no caret callback. Recompose
-      // on every editor change (the composer's own no-churn discipline
-      // keeps a same-value recompose free).
-      if (this.tasksActive && this.taskQuickAdvertised) this.renderFooter()
       // PR-D (review F1): a live draft height change (the editor grows or
       // shrinks with its content) never reaches TuiApp.requestRender — the
       // fork repaints the screen itself — so the fullscreen widget grant is

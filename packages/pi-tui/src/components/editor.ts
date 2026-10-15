@@ -416,6 +416,12 @@ export class Editor implements Component, Focusable {
 
 	public onSubmit?: (text: string) => void;
 	public onChange?: (text: string) => void;
+	/** The cursor crossed the editor's last-VISUAL-line boundary with an
+	 * Up/Down press (dsh-pi-tui divergence X063 — the host's Task Quick
+	 * admission is a visual-line fact the base editor exposes no onChange
+	 * for). Observation only; fires on the keypress that may have moved
+	 * the boundary, including when it did not. */
+	public onVisualLineBoundaryChanged?: () => void;
 	public disableSubmit: boolean = false;
 
 	constructor(tui: TUI, theme: EditorTheme, options: EditorOptions = {}) {
@@ -1099,6 +1105,9 @@ export class Editor implements Component, Focusable {
 			} else {
 				this.moveCursor(-1, 0);
 			}
+			// (dsh-pi-tui divergence X063): see the cursorDown branch — the
+			// visual boundary may have moved; the host owns the painted hint.
+			this.onVisualLineBoundaryChanged?.();
 			return;
 		}
 		if (kb.matches(data, "tui.editor.cursorDown")) {
@@ -1110,6 +1119,13 @@ export class Editor implements Component, Focusable {
 			} else {
 				this.moveCursor(1, 0);
 			}
+			// (dsh-pi-tui divergence X063): the VISUAL-LINE boundary moved —
+			// the host's on-demand Task Quick admission reads it through the
+			// read-only seam, and its painted ↓ hint must track the boundary
+			// without waiting for an unrelated document change (the base
+			// editor fires no caret callback). Observation only: the host
+			// notification composes chrome, it never routes this key.
+			this.onVisualLineBoundaryChanged?.();
 			return;
 		}
 		if (kb.matches(data, "tui.editor.cursorRight")) {

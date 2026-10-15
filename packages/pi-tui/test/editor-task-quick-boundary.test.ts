@@ -185,4 +185,22 @@ describe("canYieldDownAtLastVisualLine (X063)", () => {
 		assert.strictEqual(editor.getText(), textBefore);
 		assert.notDeepStrictEqual(editor.getCursor(), cursorBefore);
 	});
+
+	it("fires onVisualLineBoundaryChanged on Up/Down presses (the host's painted-hint hook)", () => {
+		const editor = new Editor(createTestTUI(), defaultEditorTheme);
+		editor.setTextAndCursor("line1\nline2", { line: 0, col: 0 });
+		paint(editor, 80);
+		let fired = 0;
+		editor.onVisualLineBoundaryChanged = () => {
+			fired += 1;
+		};
+		editor.handleInput(DOWN);
+		assert.strictEqual(fired, 1, "the crossing Down notifies once");
+		// A navigation key never notifies when it is NOT an Up/Down press:
+		// use Left (cursorCol moves, the boundary does not fire).
+		editor.handleInput("\x1b[D");
+		assert.strictEqual(fired, 1, "a non-Up/Down navigation key does not notify");
+		editor.handleInput(UP);
+		assert.strictEqual(fired, 2, "the crossing Up notifies once");
+	});
 });
