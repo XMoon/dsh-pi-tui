@@ -2296,11 +2296,23 @@ test('B-15c identity-aware 44x8 allocation shows a full long raw identity with c
   await key(h, '\x1b[B') // dark -> light
   await key(h, '\x1b[B') // light -> the long source-qualified identity
   const shortText = h.rowsPlain().map(line => line.trim()).join('')
-  assert.ok(shortText.includes(value), `the complete raw identity fits at 44x8:\n${h.view()}`)
-  assert.ok(h.view().includes('Value'), `the persisted old value remains visible:\n${h.view()}`)
-  assert.match(h.view(), /Enter confirm/, 'the complete identity and keyboard confirm hint coexist')
-  assert.match(h.view(), /Confirm\s+Cancel/, 'the explicit Detail confirm action is painted')
+  const initialView = h.view()
+  assert.ok(shortText.includes(value), `the complete raw identity fits at 44x8:\n${initialView}`)
+  assert.ok(initialView.includes('Value'), `the persisted old value remains visible:\n${initialView}`)
+  assert.match(initialView, /Enter confirm/, 'the complete identity and keyboard confirm hint coexist')
+  assert.match(initialView, /Confirm\s+Cancel/, 'the explicit Detail confirm action is painted')
+  assert.ok(!(h.rowsPlain().at(-1) ?? '').includes('PgUp/PgDn'),
+    'the width-constrained Action Bar omits the facts-page hint at 44x8')
   assert.equal(h.replacements(), 0, 'reading the long candidate does not write before confirmation')
+  await key(h, '\x1b[6~') // PageDown is a facts-region capability even when its hint is elided.
+  const afterPageDown = h.view()
+  assert.notEqual(afterPageDown, initialView, `PageDown scrolls hidden facts at 44x8:\n${afterPageDown}`)
+  assert.ok(afterPageDown.includes('Scope'), `PageDown reveals the next fact row at 44x8:\n${afterPageDown}`)
+  assert.ok(afterPageDown.replace(/\s+/g, '').includes(value),
+    'facts paging leaves the complete selected identity visible')
+  assert.equal(h.replacements(), 0, 'reading facts never confirms the candidate')
+  await key(h, '\x1b[5~') // PageUp returns to the original facts without changing the candidate.
+  assert.equal(h.view(), initialView, 'PageUp restores the first facts page while the hint remains omitted')
   await key(h, '\r')
   await settle(h)
   assert.equal(h.replacements(), 1, 'one explicit Enter dispatches exactly one write')
