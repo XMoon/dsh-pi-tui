@@ -275,4 +275,47 @@ describe("canYieldDownAtLastVisualLine (X063)", () => {
 		assert.deepStrictEqual(editor.getCursor(), { line: 1, col: 0 });
 		assert.strictEqual(editor.getText(), "a\nb");
 	});
+
+	it("dispatches 'autocomplete' on the dropdown open AND close with an unchanged visual state", async () => {
+		const editor = new Editor(createTestTUI(), defaultEditorTheme);
+		const provider = {
+			getSuggestions: async () => ({
+				prefix: "/",
+				items: [{ id: "t1", label: "tasks", description: "", prefix: "/", insertText: "tasks", value: "/tasks" } as never],
+			}),
+			applyCompletion: (lines: string[]) => ({ lines, cursorLine: lines.length - 1, cursorCol: 0 }),
+		};
+		editor.setAutocompleteProvider(provider as never);
+		editor.setTextAndCursor("line1\n/", { line: 1, col: 1 });
+		paint(editor, 80);
+		const events: Array<{ reason: string; onLast: boolean }> = [];
+		editor.onVisualLineBoundaryChanged = (reason, onLast) => {
+			events.push({ reason, onLast });
+		};
+		const probe = editor as unknown as { isOnLastVisualLine(): boolean };
+		assert.strictEqual(probe.isOnLastVisualLine(), true, "the cursor sits on the last visual line");
+		editor.handleInput("a"); // refresh while closed: no open flip, no event
+		assert.deepStrictEqual(events, [], "typing with no dropdown dispatches nothing");
+		// Trigger the dropdown: the slash menu opens only on LINE 0 — use a
+		// SINGLE-line document whose only line is both the first and the
+		// LAST visual line: the visual state is trivially unchanged by the
+		// open (the same-bool property the host's equality gate would have
+		// collapsed).
+		editor.setTextAndCursor("", { line: 0, col: 0 });
+		events.length = 0;
+		paint(editor, 80);
+		editor.handleInput("/");
+		await new Promise((resolve) => setTimeout(resolve, 120));
+		assert.strictEqual(editor.isShowingAutocomplete(), true, "the '/' must open the dropdown");
+		const openEvent = events.filter((e) => e.reason === "autocomplete").at(-1);
+		assert.ok(openEvent, "the open flip dispatches 'autocomplete'");
+		assert.strictEqual(openEvent.onLast, true, "the visual state is UNCHANGED (still the last line)");
+		// Esc closes: the close flip dispatches 'autocomplete' again — same
+		// visual truth, a DISTINCT event the host must not drop.
+		events.length = 0;
+		editor.handleInput("\x1b");
+		assert.strictEqual(editor.isShowingAutocomplete(), false, "Esc closes the dropdown");
+		const closeEvents = events.filter((e) => e.reason === "autocomplete");
+		assert.ok(closeEvents.length >= 1, "the close dispatches 'autocomplete' (the TuiEditor head-cancel + the base branch may each fire; the host coalesces)");
+	});
 });

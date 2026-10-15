@@ -3883,25 +3883,45 @@ export class TuiApp {
     this.editor = new TuiEditor(this.tui, editorTheme, {
       requestRender: (force) => this.requestRender(force),
     })
-    // B4-B (review R4-F2/R5-F1): the ↓ admission's visual-line fact moves
-    // with navigation, and the fork fires no caret callback for it — the
-    // X063 observation hook is the ONLY transition signal. The hook carries
-    // the boundary state AFTER the move: recompose ONLY when it differs
-    // from the state the painted hint was composed from, so a no-op Up at
-    // the top line pays one dispatch + one compare, never a chrome
-    // re-measure (plan §9.3).
-    this.editor.onVisualLineBoundaryChanged = (reason) => {
-      // The hook reports a TRANSITION CLASS (navigation / autocomplete /
-      // history / paste / programmatic), not a content value: two events may
-      // carry the same visual-line truth and still flip the admission (an
-      // autocomplete open/close at an unchanged cursor), so there is NO
-      // equality gate — every event recomposes the hint and the composer's
-      // no-churn discipline keeps a stable hint free. A Quick-focused or
-      // dark-hint window only records; the enter/leave recompose paints the
-      // fresh state.
-      if (!this.tasksActive || !this.taskQuickAdvertised) return
-      void reason
-      this.renderFooter()
+    // B4-B (reviews R4-F2…R8-F1): the ↓ hint must equal the LIVE admission
+    // (`taskBrowserAvailable` — the same predicate the Down route reads).
+    // The X063 hook is the transition signal for every editor-owned fact
+    // (visual line, autocomplete, history, paste, programmatic
+    // replacement): each event recomposes the footer UNCONDITIONALLY — no
+    // advertised-flag guard (the initial hint is painted before any Quick
+    // entry and must track its events too), no equality gate (an
+    // open/close pair can flip the admission with an unchanged visual
+    // line). Cost: a compose whose admission output didn't change is a
+    // same-text compose the composer no-churns, and its grant query reads
+    // the frame-scoped cache (the compose itself does not bump the tick —
+    // only real chrome re-bakes do), so ordinary navigation costs one
+    // cheap compose + one cached compare, never a chrome re-measure.
+    let hookComposeScheduled = false
+    this.editor.onVisualLineBoundaryChanged = (reason, onLastVisualLine) => {
+      // The payload: the transition CLASS plus the post-transition raw
+      // boundary state (computed from the move's own wrap-map facts — no
+      // extra build). Mode flips (autocomplete/history/paste/programmatic)
+      // always recompose — any of them can flip the admission with an
+      // unchanged cursor. A navigation event recomposes ONLY when the raw
+      // boundary differs from the boundary the painted hint was composed
+      // from: a pure cursor move cannot change the other admission facts,
+      // so an unchanged boundary is a genuine no-op and the compose (plus
+      // its grant query) is skipped — the §9.3 ordinary-navigation budget.
+      if (reason === 'navigation' && onLastVisualLine === this.taskQuickPaintedBoundary) return
+      this.taskQuickPaintedBoundary = onLastVisualLine
+      // R8-F3: one editor action can fire MULTIPLE events (setTextInternal's
+      // programmatic + a recall's navigation; a paste's trailing-chunk
+      // navigation + its own paste) — coalesce the composes to one per host
+      // turn: the LAST event's facts win, the coalesced compose reads them
+      // all fresh. Mode flips always schedule; navigation flips schedule
+      // through the same coalescer.
+      if (hookComposeScheduled) return
+      hookComposeScheduled = true
+      queueMicrotask(() => {
+        hookComposeScheduled = false
+        if (this.disposed) return
+        this.renderFooter()
+      })
     }
     this.editorBorder = this.editor.borderColor
     this.editor.onSubmit = (text) => {
@@ -14562,6 +14582,10 @@ export class TuiApp {
    *  height, so a composition that CHANGED it converges to the fixed
    *  point (bounded by FOOTER_CONVERGE_LIMIT) before painting. */
   private lastFooterRows = -1
+  /** The last-visual-line state the PAINTED ↓ hint was composed from:
+   *  navigation events compare against it (mode-flip events recompose
+   *  unconditionally). Refreshed on every footer compose. */
+  private taskQuickPaintedBoundary: boolean | undefined
   /** Re-entrancy latch for the footer height convergence loop (R5-F2):
    *  a compose triggered INSIDE the convergence (an extension item calling
    *  back) must not nest another loop. */
@@ -15241,7 +15265,6 @@ export class TuiApp {
     // the keymap — recompose the footer so the painted hint matches the
     // action. The boundary baseline is taken at the DARK composition, so
     // the leave recompose compares against fresh fact, not a stale one.
-    this.taskQuickAdvertised = false
     this.renderFooter()
     this.requestRender()
     return true
@@ -15274,7 +15297,6 @@ export class TuiApp {
     // compose) — recompose NOW, not on some later footer churn. The
     // boundary baseline is re-read so the next navigation hook compares
     // against the state the freshly painted hint was composed from.
-    this.taskQuickAdvertised = true
     this.renderFooter()
     this.requestRender()
   }
@@ -15325,13 +15347,6 @@ export class TuiApp {
   private renderTick = 0
   private taskQuickGrantCacheTick = -1
   private taskQuickGrantCacheValue = false
-  /** Whether the CURRENT admission facts can flip on an editor caret move
-   *  alone (the visual-line classifier's painted-frame guard is live). The
-   *  fork editor fires NO caret callback, so while this is true the X063
-   *  boundary hook drives the footer recompose (B4-B review R3-F2): the ↓
-   *  hint must track the boundary without waiting for an unrelated footer
-   *  churn. Entries/exits set it directly (enterTaskQuick/leaveTaskQuick). */
-  private taskQuickAdvertised = false
 
   private taskQuickGrantCached(): boolean {
     if (this.renderTick !== this.taskQuickGrantCacheTick) {
@@ -17802,11 +17817,14 @@ export class TuiApp {
    * benign no-op (M0 stale-generation contract). */
   requestRender(force = false): void {
     if (this.disposed) return
-    // One monotonic per-request tick for the frame-scoped caches (the Task
-    // Quick admission geometry): every app-driven chrome render ends in a
-    // render request, so a tick bump is the single invalidation signal that
-    // chrome a cache was measured against may have been re-baked.
-    this.renderTick += 1
+    // One monotonic tick for the frame-scoped caches (the Task Quick
+    // admission geometry): the tick means "a compose happened", so a
+    // compose that only READS the cached grant does not invalidate it for
+    // the next compose within the same window. Real chrome re-bakes land
+    // here through requestRender and bump it; the frame-paint boundary
+    // (onFramePainted) bumps it too, so a painted frame always starts a
+    // fresh measurement window (review R8-F2: a request-only bump made
+    // every compose pay a fresh chrome measurement).
     // M9: a cheap editor-winner reconciliation on every render request —
     // the registry's invalidation (register/unload) funnels here through
     // the service batcher → SurfaceHost sink. The compare is O(1) when
@@ -19424,11 +19442,6 @@ export class TuiApp {
       })
     }
     this.footer.setText(text)
-    // B4-B (R6-F1): the boundary baseline is owned by the X063 hook alone —
-    // every cursor transition AND every admission-mode flip (autocomplete
-    // open/close, history enter/leave) notifies, so the baseline can never
-    // strand behind a fact change. A compose from a path that notifies
-    // neither (pure chrome/status churn) does not move the fact either.
     // B4-B (review R5-F2/R6-F3): the admission's chrome measure includes
     // THIS footer's painted height. A compose whose text CHANGED that
     // height measured the grant against the PREVIOUS frame — converge to
@@ -19460,14 +19473,34 @@ export class TuiApp {
           }))
           newFooterRows = this.footer.render(width).length
         }
-        // R7-F3 product policy for a NO-FIXED-POINT oscillation (a self-
-        // referential layout where the hint's presence changes the height
-        // that decides the hint — e.g. a compact one-row footer whose ↓
-        // hint wraps it to two rows, flipping the grant back): the LAST
-        // painted state is authoritative. Sync the latch to the REAL final
-        // height so the next compose re-measures the grant against the
-        // rows actually painted — never against a stale latch value.
+        // R7-F3/R8-F4 product policy for a NO-FIXED-POINT oscillation (a
+        // self-referential layout where the hint's presence changes the
+        // height that decides the hint — e.g. a compact one-row footer
+        // whose ↓ hint wraps it to two rows, flipping the grant back):
+        // the hint/route consistency is enforced by construction — the
+        // FINAL compose re-queries the admission against the CURRENT
+        // painted height and its text is accepted unconditionally. The
+        // hint on screen is then exactly what the live route grants at
+        // that height: Down and the painted ↓ can never disagree, even
+        // though the height itself keeps oscillating. The latch is synced
+        // to the real final height so the next compose re-measures from
+        // the truth.
         this.lastFooterRows = newFooterRows
+        this.renderTick += 1
+        if (this.commandRows === undefined) {
+          this.footer.setText(this.footerComposer.render({
+            snapshot: this.statusStore.snapshot(),
+            layout: this.currentFooterLayout(),
+            width,
+            context: {
+              taskBrowserAvailable: this.taskBrowserAvailable(),
+              extensionFooterText: this.extensionHost?.footerText() ?? '',
+            },
+            instruction,
+            physicalLineBudget: this.footerPhysicalLineBudget(),
+          }))
+          this.lastFooterRows = this.footer.render(width).length
+        }
       } finally {
         this.convergingFooter = false
       }
