@@ -122,8 +122,6 @@ export interface TaskPanelItem {
   readonly expanded?: boolean
   readonly ancestorContext?: boolean
   readonly treePrefix?: string
-  /** Quick Tasks' discoverable transition row. */
-  readonly kind?: 'task' | 'view-full'
 }
 
 /** Inputs controlling one projection. */
@@ -177,7 +175,7 @@ export function projectTaskItems(
   input: readonly TaskPanelItem[],
   options: TaskPresentationProjectionOptions,
 ): TaskPresentationProjection {
-  const all = input.filter(item => item.kind !== 'view-full')
+  const all = [...input]
   const byId = new Map(all.map(item => [item.value, item]))
   const byChildId = new Map<string, string>()
   for (const item of all) {
@@ -362,7 +360,6 @@ export function projectTaskItems(
       && ((options.scope === 'active') || !matchedIds.has(item.value))
     visible.push({
       ...item,
-      kind: item.kind ?? 'task',
       parentId: parentById.get(item.value),
       expanded: isExpanded(item),
       ancestorContext: context,

@@ -1031,6 +1031,13 @@ test('B4A-08 the painted window uses the frozen role tokens, live across a theme
   // Role 1 identity, role 9 status word, both from the LIVE palette.
   assert.equal(ink('Task Quick', 'Task Quick'), hexToRgb(currentPalette.textStrong))
   assert.equal(ink('bash · build', '‣'), hexToRgb(currentPalette.primary))
+  // The top boundary rule is role 15 `border` (addendum §3.1 — never
+  // `primary`/`borderFocus`): the FIRST band row is the separator, and its
+  // cell ink must be the live border token.
+  const bandRow = rowOf(h.vt, 'Task Quick') - 1
+  assert.ok(bandRow >= 0, 'the separator row precedes the identity row')
+  assert.equal(h.vt.getCellFgRgb(bandRow, 0), hexToRgb(currentPalette.border),
+    'the divider paints the border role')
   // No live work: the unacknowledged failure paints its own semantic token.
   h.roster.rows = [job('j2', 'deploy', 'failed')]
   h.tasks.refreshTasks()

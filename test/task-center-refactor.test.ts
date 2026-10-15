@@ -117,12 +117,12 @@ test('acknowledge scope is the VIEWPORT, not the whole projection (PR review M1)
   const panel = new TaskBrowserPanel(failures, 8, {
     mode: 'full', enableSearch: true, header: 'Tasks',
   }, () => {}, () => {}, () => {})
-  assert.equal(panel.visibleItems().filter(item => item.kind !== 'view-full').length, 20,
-    'the projection holds every failure (plus the quick view-all pseudo-row)')
+  assert.equal(panel.visibleItems().length, 20,
+    'the projection holds every failure')
   assert.equal(panel.viewportItems().length, 8, 'the viewport renders only maxVisible rows')
   assert.deepEqual(panel.viewportItems().map(item => item.value),
     Array.from({ length: 8 }, (_, i) => `job:f${i}`),
-    'the viewport is the scroll window from the top (the pseudo-row is beyond the fold)')
+    'the viewport is the scroll window from the top')
   assert.ok(panel.viewportItems().every(item => item.attention === true), 'every visible row is an attention row')
   panel.dispose()
 })

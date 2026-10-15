@@ -2048,7 +2048,7 @@ test('B-37: the ↓ view affordance is withheld while an ACTIVE tenant owns the 
   const { vt, app, openTasks } = startApp()
   // B4-B: the admission needs the Quick projection alongside the badge.
   await vt.waitForRender()
-  app.setQuickTaskItems([{ value: 'job:job-1', label: 'pnpm build', status: 'running', kind: 'task', source: 'job' }])
+  app.setQuickTaskItems([{ value: 'job:job-1', label: 'pnpm build', status: 'running', source: 'job' }])
   app.setTasks([{ id: 'job-1', label: 'pnpm build', status: 'running', kind: 'job' }])
   await vt.waitForRender()
   assert.ok(viewport(vt).includes('↓ view'), `the idle footer must advertise the affordance:\n${viewport(vt)}`)

@@ -317,7 +317,7 @@ test('4.7 leader completion obeys the action context predicate', async () => {
   }))
   await vt.waitForRender()
   // B4-B: the admission needs the Quick projection alongside the badge.
-  app.setQuickTaskItems([{ value: 'job:job-1', label: 'bash', status: 'running', kind: 'task', source: 'job' }])
+  app.setQuickTaskItems([{ value: 'job:job-1', label: 'bash', status: 'running', source: 'job' }])
   app.setTasks([{ id: 'job-1', label: 'bash', status: 'running', kind: 'job' }])
   await vt.waitForRender()
   // Editor has text → the tasks predicate is false (the cursor is on the

@@ -1135,8 +1135,10 @@ test('Task Center full mode keeps search input and the selected task at 10 rows'
     })),
     () => 'close',
     () => {},
-    { mode: 'full', header: 'Tasks', maxVisible: 10, initialSearchMode: true },
+    { mode: 'full', header: 'Tasks', maxVisible: 10, enableSearch: true },
   )
+  await vt.waitForRender()
+  vt.sendInput('/')
   await vt.waitForRender()
   for (let index = 0; index < 2; index += 1) vt.sendInput('\x1b[B') // select task 2
   await vt.waitForRender()
@@ -1305,7 +1307,7 @@ test('down opens the on-demand Task Quick only when the B4-B admission holds; ct
   await sleep(20)
   assert.equal(opened, 0, `no tasks means no Quick`)
   // B4-B: the admission needs the Quick projection alongside the badge.
-  app.setQuickTaskItems([{ value: 'job:bash-1', label: 'pnpm build', status: 'running', kind: 'task', source: 'job' }])
+  app.setQuickTaskItems([{ value: 'job:bash-1', label: 'pnpm build', status: 'running', source: 'job' }])
   app.setTasks([{ id: 'bash-1', label: 'pnpm build', status: 'running', kind: 'bash' }])
   await vt.waitForRender()
   // Empty editor on its last visual line + active tasks: ↓ enters Quick.
@@ -1345,7 +1347,7 @@ test('the footer badges active tasks and advertises the ↓ trigger on an empty 
   const { vt, app } = startApp()
   await vt.waitForRender()
   // B4-B: the hint follows the admission facts — badge + projection together.
-  app.setQuickTaskItems([{ value: 'job:bash-1', label: 'pnpm build', status: 'running', kind: 'task', source: 'job' }])
+  app.setQuickTaskItems([{ value: 'job:bash-1', label: 'pnpm build', status: 'running', source: 'job' }])
   app.setTasks([{ id: 'bash-1', label: 'pnpm build', status: 'running', kind: 'bash' }])
   await vt.waitForRender()
   await vt.waitForRender()
@@ -1395,7 +1397,7 @@ test('live continuable subagents arm the task browser trigger through setAgents'
   assert.equal(opened, 0, `no agents means no browser`)
   // A live continuable child arms the trigger even with zero jobs.
   // B4-B: the admission needs the Quick projection too.
-  app.setQuickTaskItems([{ value: 'agent:child-abc', label: 'research', status: 'running', kind: 'task', source: 'subagent' }])
+  app.setQuickTaskItems([{ value: 'agent:child-abc', label: 'research', status: 'running', source: 'subagent' }])
   app.setAgents([{ id: 'child-abc', label: 'research', activity: 'running' }])
   await vt.waitForRender()
   vt.sendInput('\x1b[B')
@@ -1417,11 +1419,11 @@ test('live continuable subagents arm the task browser trigger through setAgents'
   await sleep(20)
   assert.equal(opened, 1, `the trigger must disarm when no agents are active`)
   app.setTasks([{ id: 'bash-1', label: 'pnpm build', status: 'running', kind: 'bash' }])
-  app.setQuickTaskItems([{ value: 'job:bash-1', label: 'pnpm build', status: 'running', kind: 'task', source: 'job' }])
+  app.setQuickTaskItems([{ value: 'job:bash-1', label: 'pnpm build', status: 'running', source: 'job' }])
   app.setAgents([])
   await vt.waitForRender()
   app.setTasks([])
-  app.setQuickTaskItems([{ value: 'agent:child-abc', label: 'research', status: 'running', kind: 'task', source: 'subagent' }])
+  app.setQuickTaskItems([{ value: 'agent:child-abc', label: 'research', status: 'running', source: 'subagent' }])
   app.setAgents([{ id: 'child-abc', label: 'research', activity: 'running' }])
   await vt.waitForRender()
   vt.sendInput('\x1b[B')
@@ -1997,15 +1999,15 @@ test('the footer badge combines tasks and live agents, hint only on an empty edi
   const { vt, app } = startApp()
   await vt.waitForRender()
   // B4-B: the hint follows the admission facts — badge + projection together.
-  app.setQuickTaskItems([{ value: 'agent:child-abc', label: 'research', status: 'running', kind: 'task', source: 'subagent' }])
+  app.setQuickTaskItems([{ value: 'agent:child-abc', label: 'research', status: 'running', source: 'subagent' }])
   app.setAgents([{ id: 'child-abc', label: 'research', activity: 'running' }])
   await vt.waitForRender()
   await vt.waitForRender()
   let view = vt.getViewport().join('\n')
   assert.ok(view.includes('[1 agent · ↓ view]'), `agent-only badge missing:\n${view}`)
   app.setQuickTaskItems([
-    { value: 'agent:child-abc', label: 'research', status: 'running', kind: 'task', source: 'subagent' },
-    { value: 'job:bash-1', label: 'pnpm build', status: 'running', kind: 'task', source: 'job' },
+    { value: 'agent:child-abc', label: 'research', status: 'running', source: 'subagent' },
+    { value: 'job:bash-1', label: 'pnpm build', status: 'running', source: 'job' },
   ])
   app.setTasks([{ id: 'bash-1', label: 'pnpm build', status: 'running', kind: 'bash' }])
   await vt.waitForRender()
@@ -4198,25 +4200,35 @@ test('Quick Tasks: S then a single Esc returns to the editor (original regressio
   app.stop()
 })
 
-test('a restored query stays the Full browser\'s own search state (B4-B: no modal Quick to drop into)', async () => {
-  // B4-B retired the modal Quick, so the Full→Quick query-drop regression is
-  // gone with it: the Full browser OWNS its query — a restored one filters
-  // its rows and stays visible in the search input.
+test('the Full browser owns its own search state (B4-B: no modal Quick to drop into)', async () => {
+  // B4-B retired the modal Quick together with its restore input: the Full
+  // browser OWNS its query — typing one filters its rows and stays visible
+  // in the search input; one Esc still closes the browser.
   const { vt, app } = startApp()
   const strip = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, '').replace(/\s+$/, '')
   app.openTaskBrowser(
     [{ value: 'job:1', label: 'bash · build', status: 'running', active: true, source: 'job', type: 'bash', startedAt: Date.now(), group: 'jobs' }],
     () => 'close',
     () => {},
-    { mode: 'full', header: 'Tasks', enableSearch: true, maxVisible: 8, initialQuery: 'no-match', initialSearchMode: false },
+    { mode: 'full', header: 'Tasks', enableSearch: true, maxVisible: 8 },
   )
   await vt.waitForRender()
   const view = vt.getViewport().map(strip).join('\n')
   assert.ok(view.includes('Tasks [TRACKED]'), `the browser must open:\n${view}`)
+  vt.sendInput('/')
+  vt.sendInput('no-match')
+  await vt.waitForRender()
+  const filtered = vt.getViewport().map(strip).join('\n')
+  assert.ok(!filtered.includes('bash · build'), 'the query must filter the rows')
+  // One Esc leaves search mode, the second closes the browser.
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+  assert.ok(vt.getViewport().map(strip).join('\n').includes('Tasks [TRACKED]'),
+    'the first Esc only leaves search mode')
   vt.sendInput('\x1b')
   await vt.waitForRender()
   assert.ok(!vt.getViewport().map(strip).join('\n').includes('Tasks [TRACKED]'),
-    'one Esc must still close the browser')
+    'the second Esc closes the browser')
   app.stop()
 })
 
@@ -5254,7 +5266,7 @@ test('a nonCapturing overlay does not suppress the Host shortcut ladder (↓ Tas
   startedApps.add(app)
   await vt.waitForRender()
   // B4-B: the admission needs the Quick projection alongside the badge.
-  app.setQuickTaskItems([{ value: 'job:job-1', label: 'build', status: 'running', kind: 'task', source: 'job' }])
+  app.setQuickTaskItems([{ value: 'job:job-1', label: 'build', status: 'running', source: 'job' }])
   app.setTasks([{ id: 'job:1', label: 'build', status: 'running' }])
   await vt.waitForRender()
   // A nonCapturing notice owns no keyboard: the ↓ admission (focusedSeat

@@ -86,7 +86,7 @@ async function view(vt: VirtualTerminal): Promise<string> {
 async function oneRunningTask(app: TuiApp, vt: VirtualTerminal): Promise<void> {
   await vt.waitForRender()
   await vt.waitForRender()
-  app.setQuickTaskItems([{ value: 'job:job-1', label: 'pnpm build', status: 'running', kind: 'task', source: 'job' }])
+  app.setQuickTaskItems([{ value: 'job:job-1', label: 'pnpm build', status: 'running', source: 'job' }])
   app.setTasks([{ id: 'job-1', label: 'pnpm build', status: 'running', kind: 'job' }])
 }
 

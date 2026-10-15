@@ -814,7 +814,7 @@ test('task-browser routing and the footer hint follow the VISIBLE seat editor, n
   // the route stays with the plugin's own Down ownership even though the
   // badge + projection are live. (The stale hidden-host shell mode is
   // irrelevant either way: the claim follows the CURRENT seat occupant.)
-  app.setQuickTaskItems([{ value: 'job:bash-1', label: 'pnpm build', status: 'running', kind: 'task', source: 'job' }])
+  app.setQuickTaskItems([{ value: 'job:bash-1', label: 'pnpm build', status: 'running', source: 'job' }])
   app.setTasks([{ id: 'bash-1', label: 'pnpm build', status: 'running', kind: 'bash' }])
   await vt.waitForRender()
   const view = vt.getViewport().join('\n')
@@ -860,7 +860,7 @@ test('the ↓ hint is gated on the ROUTING gate, not host-editor emptiness (the 
   life.defer(() => app.stop())
   await vt.waitForRender()
   // B4-B: the ↓ admission needs the Quick projection alongside the badge.
-  app.setQuickTaskItems([{ value: 'job:bash-1', label: 'pnpm build', status: 'running', kind: 'task', source: 'job' }])
+  app.setQuickTaskItems([{ value: 'job:bash-1', label: 'pnpm build', status: 'running', source: 'job' }])
   app.setTasks([{ id: 'bash-1', label: 'pnpm build', status: 'running', kind: 'bash' }])
   await vt.waitForRender()
   // Scenario 1 (host shell mode, EMPTY body): `!` composes a command —

@@ -349,7 +349,7 @@ async function appWithTasksTrigger() {
   app.start()
   startedApps.add(app)
   await vt.waitForRender()
-  app.setQuickTaskItems([{ value: 'job:job-1', label: 'build', status: 'running', kind: 'task', source: 'job' }])
+  app.setQuickTaskItems([{ value: 'job:job-1', label: 'build', status: 'running', source: 'job' }])
   app.setTasks([{ id: 'job:1', label: 'build', status: 'running' }])
   await vt.waitForRender()
   await vt.waitForRender()

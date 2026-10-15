@@ -1380,10 +1380,8 @@ export interface PickerOptions {
 
 /**
  * Why an open Task Browser was retired. (B4-B retired `'promote'` with the
- * modal Quick; the remaining reasons cover every live close path.)
- * transition (the ONE reason that must preserve the dataset scope); the other
- * three are the terminal closures. This is the owner-notification signal, not
- * a product action.
+ * modal Quick; the remaining reasons cover every live close path — this is
+ * the owner-notification signal, not a product action.)
  */
 type TaskBrowserCloseReason = 'cancel' | 'select' | 'external'
 
@@ -1395,18 +1393,13 @@ export interface TaskBrowserOptions {
   header?: string
   /** Text shown when no row matches the filter. */
   noMatchText?: string
-  /** Pre-fill the search input. Ignored in Quick mode, which owns no search state. */
-  initialQuery?: string
-  /** Preserve explicit search-mode state during Quick/Full transitions.
-   * Ignored (forced off) in Quick mode, which owns no search state. */
-  initialSearchMode?: boolean
   /** Overlay width in cells, or a terminal-width percentage. */
   width?: number | `${number}%`
   /** Overlay max height in rows, or a terminal-height percentage. */
   maxHeight?: number | `${number}%`
   /** Rows visible before the list scrolls (default 10). */
   maxVisible?: number
-  /** Quick (navigation-only) or full (management) presentation mode. */
+  /** Full (management) presentation — the modal Quick mode is retired (B4-B). */
   mode: 'full'
   openedFrom?: 'command'
   scope?: 'active' | 'all'
@@ -1423,10 +1416,6 @@ export interface TaskBrowserOptions {
   groupLabels?: boolean
   /** Re-list task data. */
   onRefresh?: () => void
-  /** Retired with the modal Quick (B4-B): no production caller passes it;
-   * the shape keeps an optional no-op callback until the runtime handle
-   * stops declaring it. */
-  onViewFull?: () => void
   /** Confirmed Stop: emitted only after the S → Y confirmation chord. */
   onStop?: (value: string) => void
   /** First-time viewport exposure of attention rows (the ack signal). */
@@ -1592,7 +1581,9 @@ export interface TaskBrowserHandle {
   setItems(items: readonly TaskPanelItem[], preferredValue?: string): void
   /** Update loading/ready/stale state without replacing cached rows. */
   setRefreshState?(state: 'loading' | 'ready' | 'stale', error?: string): void
-  /** Read the presentation state for a Quick → Full transition. */
+  /** Read the presentation state for tests/embedders (the full projection
+   *  snapshot; the Quick→Full restore consumer retired with the modal
+   *  Quick, B4-B). */
   getViewState?(): TaskBrowserViewState
   /** Read projected rows for tests/embedders (the full projection). */
   visibleItems?(): readonly TaskPanelItem[]
@@ -15188,22 +15179,10 @@ export class TuiApp {
    */
   enterTaskQuick(): boolean {
     if (!this.quickDownEligible()) return false
+    // The predicate already admitted the CURRENT frame's grant (the same
+    // measured geometry, frame-cached) — the keymap resolution and this
+    // dispatch share it, so no second chrome/seat render happens here.
     if (!this.taskQuick.activate()) return false
-    // The frame grant: an ACTIVE Quick needs at least one task row in the
-    // current frame. planTaskQuickLayout's grant test runs inside render —
-    // probe it here with the same inputs to DECLINE before taking focus.
-    const width = Math.max(1, this.terminal.columns)
-    const layout = planTaskQuickLayout(
-      width,
-      this.terminal.rows,
-      this.taskQuickChromeRows(width),
-      this.taskQuick.getItems().length,
-      0,
-    )
-    if (layout.itemRows < 1) {
-      this.taskQuick.deactivate()
-      return false
-    }
     this.activeScreen.setFocus(this.taskQuick)
     this.requestRender()
     return true
@@ -15265,16 +15244,44 @@ export class TuiApp {
   }
 
   /**
+   * Frame-scoped cache for the admission geometry (plan §9/§9.3 fast-path
+   * budget): one Down press resolves the keymap TWICE and the footer hint
+   * composes from the same predicate — each uncached probe renders the whole
+   * pinned chrome set (header, dock, todo, widgets, the FOOTER, the editor
+   * seat). Within one between-requests window the measurement is identical,
+   * because the only writers that re-bake chrome end in `requestRender`,
+   * which bumps `renderTick`; the internal resize lane (which skips the
+   * funnel) is covered by the host-side geometry sync that re-renders the
+   * footer on any width/height change. The tick therefore identifies
+   * exactly the interval in which one chrome/seat measurement is
+   * authoritative; a frame that did not repaint measures nothing at all.
+   */
+  private renderTick = 0
+  private taskQuickGrantCacheTick = -1
+  private taskQuickGrantCacheValue = false
+
+  private taskQuickGrantCached(): boolean {
+    if (this.renderTick !== this.taskQuickGrantCacheTick) {
+      this.taskQuickGrantCacheTick = this.renderTick
+      this.taskQuickGrantCacheValue = this.taskQuickGrantAvailable()
+    }
+    return this.taskQuickGrantCacheValue
+  }
+
+  /**
    * The ONE admission predicate for the on-demand Task Quick (Phase 3B/B4-B):
    * may the effective `app.tasks.open` Down composition take this key from
-   * the editor? Every fact is read-only; the predicate renders nothing, sets
-   * no focus and touches no Host/TaskRegistry source. The list:
+   * the editor? Every fact is read-only; the predicate sets no focus and
+   * touches no Host/TaskRegistry source. Its one MEASURED fact — the frame
+   * grant — renders the pinned chrome set ONCE per physical frame
+   * (`taskQuickGrantCached`); all other facts are O(1) field/gate reads.
+   * The list:
    *
    * - live surface (`!disposed`) with Task Center support (`tasksActive` —
    *   the footer badge's own authority) and a real Quick projection
    *   (>=1 item); the composition additionally requires the ACTIVE root to
-   *   grant >=1 task row at frame time — enforced by `enterTaskQuick()`
-   *   returning false (a DECLINE lets the editor's own Down proceed);
+   *   grant >=1 task row at frame time — the LAST fact here, paid only
+   *   after every O(1) rejection has fired.
    * - the REAL focused component is the seat editor's component AND the seat
    *   is the host editor (`seatEditor().id === 'host'`) — a plugin editor
    *   gets no visual-boundary claim (X063 is the host fork's capability);
@@ -15293,11 +15300,14 @@ export class TuiApp {
     if (this.disposed) return false
     if (!this.tasksActive) return false
     if (this.taskQuick.getItems().length < 1) return false
-    // The ACTIVE frame must be able to paint >= 1 task row: a 0-grant frame
-    // (extreme short screen) can never show the band, so the admission — and
-    // with it the footer hint — must fail closed here rather than consuming a
-    // Down the editor should keep.
-    if (!this.taskQuickGrantAvailable()) return false
+    // A plugin seat loser is rejected BEFORE any measured probe: measuring
+    // the chrome/seat grant for a seat this predicate then rejects would
+    // pay the geometry cost for a guaranteed decline (plan §9.3).
+    const seat = this.seatEditor()
+    if (seat.id !== 'host') return false
+    if (this.activeScreen.getFocusedComponent() !== this.editor) return false
+    if (this.seatInputMode() !== 'prompt') return false
+    if (this.editor.isShowingAutocomplete()) return false
     if (this.activeQuestions !== undefined) return false
     if (this.approvals.hasPending()) return false
     if (this.activeSaveLocation !== undefined) return false
@@ -15306,11 +15316,12 @@ export class TuiApp {
     if (this.jobWorkspace !== undefined) return false
     if (this.settingsWorkspace !== undefined) return false
     if (this.keybindings.leaderMachine()?.pending === true) return false
-    const seat = this.seatEditor()
-    if (seat.id !== 'host') return false
-    if (this.activeScreen.getFocusedComponent() !== this.editor) return false
-    if (this.seatInputMode() !== 'prompt') return false
-    if (this.editor.isShowingAutocomplete()) return false
+    // The ACTIVE frame must be able to paint >= 1 task row: a 0-grant frame
+    // (extreme short screen) can never show the band, so the admission — and
+    // with it the footer hint — must fail closed here rather than consuming a
+    // Down the editor should keep. Frame-cached: the repeated resolutions
+    // within one physical frame share ONE chrome/seat measurement.
+    if (!this.taskQuickGrantCached()) return false
     return this.editor.canEnterTaskQuickFromDown(this.terminal.columns)
   }
 
@@ -17718,6 +17729,11 @@ export class TuiApp {
    * benign no-op (M0 stale-generation contract). */
   requestRender(force = false): void {
     if (this.disposed) return
+    // One monotonic per-request tick for the frame-scoped caches (the Task
+    // Quick admission geometry): every app-driven chrome render ends in a
+    // render request, so a tick bump is the single invalidation signal that
+    // chrome a cache was measured against may have been re-baked.
+    this.renderTick += 1
     // M9: a cheap editor-winner reconciliation on every render request —
     // the registry's invalidation (register/unload) funnels here through
     // the service batcher → SurfaceHost sink. The compare is O(1) when
@@ -20234,8 +20250,9 @@ export class TuiApp {
    *   browser through the overlay stack; `'keep-open'` preserves the exact
    *   browser instance/state for the detail's Esc.
    * @param onCancel - dismissed without a choice; receives the view state
-   *   captured BEFORE the browser frame is disposed (a Full promoted from
-   *   Quick restores its search/selection from it).
+   *   captured BEFORE the browser frame is disposed (embedder/test
+   *   information — the Quick→Full restore consumer retired with the modal
+   *   Quick, B4-B).
    * @param options - header/search/sizing configuration.
    * @returns a handle to close the browser or replace its rows (e.g. when
    * jobs change while it is open).
@@ -20255,8 +20272,8 @@ export class TuiApp {
         openedFrom: options.openedFrom ?? 'command',
         scope: options.scope ?? 'all',
         typeFilter: options.typeFilter ?? null,
-        searchMode: options.initialSearchMode ?? false,
-        searchQuery: options.initialQuery ?? '',
+        searchMode: false,
+        searchQuery: '',
         selectedId: options.selectedId ?? options.preferredValue ?? null,
         expandedIds: new Set(options.expandedIds ?? []),
         collapsedIds: new Set(options.collapsedIds ?? []),
@@ -20281,8 +20298,6 @@ export class TuiApp {
         header: options.header,
         noMatchText: options.noMatchText,
         enableSearch: options.enableSearch,
-        initialQuery: options.initialQuery,
-        initialSearchMode: options.initialSearchMode,
         onStop: options.onStop,
         onViewportExpose: options.onViewportExpose,
         onRefresh: options.onRefresh,
@@ -20309,9 +20324,9 @@ export class TuiApp {
         if (disposition === 'close') requestClose('select')
       },
       () => {
-        // Capture the view state BEFORE the frame is disposed: `onCancel` is
-        // the Quick-restore seam (a Full promoted from Quick restores its
-        // search/selection), and the panel is gone by the time it runs.
+        // Capture the view state BEFORE the frame is disposed: the panel is
+        // gone by the time `onCancel` runs (embedder/test snapshot — the
+        // Quick→Full restore consumer retired with the modal Quick, B4-B).
         const state = panel.getViewState()
         requestClose('cancel')
         onCancel(state)
@@ -21670,13 +21685,16 @@ export class TuiApp {
     // owner's own stage fence, not by this line.
     //
     // An ALREADY-ABORTED request is never a blocking owner: the approvals owner
-    // settles it `cancelled` synchronously without mounting a prompt, so
-    // preempting the workspace for it would kick the user out of a Job view for
-    // an interaction that can never appear.
-    if (request.signal?.aborted !== true) this.abandonWorkspaceForBlockingOwner()
-    // B4-B: a blocking owner retires the on-demand Task Quick at its
-    // composition commit (main-plan §5).
-    this.leaveTaskQuick()
+    // settles it `cancelled` synchronously without mounting a prompt (the
+    // runtime settles before queueing), so neither the Job workspace nor the
+    // on-demand Task Quick is preempted for an interaction that can never
+    // appear on the screen.
+    if (request.signal?.aborted !== true) {
+      this.abandonWorkspaceForBlockingOwner()
+      // B4-B: a blocking owner retires the on-demand Task Quick at its
+      // composition commit (main-plan §5).
+      this.leaveTaskQuick()
+    }
     return this.approvals.showPrompt(request, agentInputWait)
   }
 
