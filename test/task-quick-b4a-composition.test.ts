@@ -837,6 +837,10 @@ test('B4A-06d a resize that has not been repainted refuses the wheel, then resol
   await h.vt.waitForRender()
   h.app.setFullscreen(true)
   await h.vt.waitForRender()
+  // B4-B: the swap retired the ACTIVE band (main §5) — re-enter on the alt
+  // root so the stale-geometry wheel legs have a live band to resolve.
+  assert.equal(h.app.enterTaskQuick(), true, 'the re-entry must admit on the alt root')
+  await h.vt.waitForRender()
   await h.vt.waitForRender()
   const band = h.band()
   assert.match(strip(rawView(h.vt)[band.identity]!), /showing 1-3\/4$/)
@@ -1086,10 +1090,12 @@ test('B4A-05f the FULLSCREEN root paints the public below widget beside the wind
     job('j1', 'build', 'running'), job('j2', 'test', 'running'), job('j3', 'lint', 'running'),
   ] })
   await flush()
+  // Swap FIRST: a Quick opened on the regular root must be retired by the
+  // screen hand-off (main-plan §5), then re-entered on the alt root.
+  h.app.setFullscreen(true)
+  await h.vt.waitForRender()
   // B4-B: the ACTIVE frame under test — open through the production entry.
   assert.equal(h.app.enterTaskQuick(), true, 'the production entry must admit a real projection')
-  await h.vt.waitForRender()
-  h.app.setFullscreen(true)
   await h.vt.waitForRender()
   const lines = rawView(h.vt)
   const firstItemRow = rowOf(h.vt, itemRows(h.vt)[0]!)
@@ -1144,9 +1150,6 @@ test('B4A-07b the fullscreen Todo/dock hit follows the band-pushed layout', asyn
     job('j4', 'deploy', 'running'),
   ] })
   await flush()
-  // B4-B: the ACTIVE band is the layout fact under test — open it through
-  // the production entry.
-  assert.equal(h.app.enterTaskQuick(), true, 'the production entry must admit a real projection')
   // Nine todos give the panel real overflow, so the compact -> full step is a
   // real state change (with no overflow a panel click closes the panel instead).
   h.app.setTodoSummary(Array.from({ length: 9 }, (_, index) => ({
@@ -1155,6 +1158,11 @@ test('B4A-07b the fullscreen Todo/dock hit follows the band-pushed layout', asyn
     status: index === 0 ? 'in_progress' as const : 'pending' as const,
   })))
   h.app.setFullscreen(true)
+  await h.vt.waitForRender()
+  // B4-B: the ACTIVE band is the layout fact under test — the swap retired
+  // nothing here (Quick was never open on the regular root); enter it on the
+  // alt root through the production entry.
+  assert.equal(h.app.enterTaskQuick(), true, 'the production entry must admit a real projection')
   await h.vt.waitForRender()
   assert.equal(itemRows(h.vt).length, 3, `the band paints three task rows at 80x24:\n${view(h.vt)}`)
   const editor = h.editor()
@@ -1188,12 +1196,13 @@ test('B4A-07c the Question frame option hit follows the band-pushed layout', asy
     job('j4', 'deploy', 'running'),
   ] })
   await flush()
-  // B4-B: the ACTIVE frame under test — open through the production entry.
-  assert.equal(h.app.enterTaskQuick(), true, 'the production entry must admit a real projection')
-  await h.vt.waitForRender()
   h.app.setFullscreen(true)
   await h.vt.waitForRender()
-  assert.equal(itemRows(h.vt).length, 3, `the band paints below the seat:\n${view(h.vt)}`)
+  // B4-B: the ACTIVE frame under test — enter on the alt root after the swap
+  // (a regular-root band would have been retired by the hand-off).
+  assert.equal(h.app.enterTaskQuick(), true, 'the production entry must admit a real projection')
+  await h.vt.waitForRender()
+  assert.equal(itemRows(h.vt).length, 3, `the band paints under the footer:\n${view(h.vt)}`)
   const question = h.app.askQuestions([{
     id: 'q', question: 'PICK-ONE-B4A?', options: [{ label: 'OPTION-A' }, { label: 'OPTION-B' }],
   }])
@@ -1201,8 +1210,9 @@ test('B4A-07c the Question frame option hit follows the band-pushed layout', asy
   await h.vt.waitForRender()
   const optionRow = rowOf(h.vt, 'OPTION-B')
   assert.ok(optionRow >= 0, `the second option must paint in the seat frame:\n${view(h.vt)}`)
-  // The band is still painted under the seat while the frame owns it.
-  assert.ok(itemRows(h.vt).length > 0, `the band remains below the Question seat:\n${view(h.vt)}`)
+  // B4-B (main §5): a blocking owner retires the on-demand band at its
+  // composition commit — the Question seat paints alone.
+  assert.ok(itemRows(h.vt).length === 0, `the Question retires the band:\n${view(h.vt)}`)
   click(h.vt, 10, optionRow + 1)
   await flush(2)
   await h.vt.waitForRender()

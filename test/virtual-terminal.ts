@@ -191,6 +191,17 @@ export class VirtualTerminal implements Terminal {
 	}
 
 	/**
+	 * Whether one viewport cell carries the BOLD attribute — the Task Quick
+	 * selected row's `textStrong` label ink (B4-B addendum).
+	 */
+	getCellBold(row: number, col: number): boolean {
+		const buffer = this.xterm.buffer.active;
+		const line = buffer.getLine(buffer.viewportY + row);
+		const cell = line?.getCell(col);
+		return (cell?.isBold() ?? 0) !== 0;
+	}
+
+	/**
 	 * Whether one viewport cell carries the UNDERLINE attribute — the WEAK
 	 * transcript-search occurrence highlight (the fork's `ESC[4m` style).
 	 */

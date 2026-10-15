@@ -63,10 +63,7 @@ export interface TaskPanelOptions {
   onViewportExpose?: (ids: readonly string[]) => void
   /** Re-list the runtime catalog. */
   onRefresh?: () => void
-  /** Retired with the modal Quick (B4-B): kept as an optional no-op in the
-   * options shape until the runtime handle stops passing it. */
-  onViewFull?: (state: TaskBrowserViewState) => void
-  openedFrom?: 'quick' | 'command'
+  openedFrom?: 'command'
   initialScope?: TaskScope
   initialTypeFilter?: string | null
   initialExpandedIds?: readonly string[]
@@ -130,8 +127,8 @@ export class TaskBrowserPanel implements Component, Focusable {
   private activeType: string | null
   private typeOrder: string[] = []
   private scope: TaskScope
-  private readonly mode: 'quick' | 'full'
-  private readonly openedFrom: 'quick' | 'command'
+  private readonly mode: 'full'
+  private readonly openedFrom: 'command'
   private searchMode: boolean
   private selectionTouched = false
   private readonly expandedIds: Set<string>
@@ -169,7 +166,6 @@ export class TaskBrowserPanel implements Component, Focusable {
   private readonly onViewportExpose: ((ids: readonly string[]) => void) | undefined
   private readonly exposedAttention = new Set<string>()
   private readonly onRefresh: (() => void) | undefined
-  private readonly onViewFull: ((state: TaskBrowserViewState) => void) | undefined
   private now = Date.now()
   private tickTimer: NodeJS.Timeout | undefined
   private disposed = false
@@ -203,7 +199,6 @@ export class TaskBrowserPanel implements Component, Focusable {
     this.onStop = options.onStop
     this.onViewportExpose = options.onViewportExpose
     this.onRefresh = options.onRefresh
-    this.onViewFull = options.onViewFull
     this.requestRender = requestRender
     this.mode = options.mode
     this.openedFrom = options.openedFrom ?? 'command'
@@ -1226,11 +1221,6 @@ export class TaskBrowserPanel implements Component, Focusable {
    */
   private hintFor(width: number): string {
     if (this.pendingStopValue !== undefined) return 'Y confirm stop · Esc cancel'
-    if (this.mode === 'quick') {
-      // Navigation-only: advertise EXACTLY the whitelist. Every other key
-      // is a consumed no-op, so the hint must not promise one.
-      return '↑↓ select · ←→ tree · Tab type · Enter open · Esc close'
-    }
     if (this.searchMode) {
       // Search mode owns every printable key as query text — A/S/N/R and
       // the tree arrows are QUERY characters now, never the ordinary task

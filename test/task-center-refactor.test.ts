@@ -292,7 +292,7 @@ test('Full Task Center: N / Shift+N / T have no effect (removed actions)', () =>
   let viewFull = 0
   const panel = new TaskBrowserPanel(
     [{ ...job('job:done', 'completed') }, job('job:r1'), job('job:r2')], 10,
-    { mode: 'full', enableSearch: true, header: 'Tasks', onViewFull: () => { viewFull += 1 } },
+    { mode: 'full', enableSearch: true, header: 'Tasks' },
     () => {}, () => {}, () => {})
   assert.equal(panel.getViewState().selectedId, 'job:done')
   panel.handleInput('n')
