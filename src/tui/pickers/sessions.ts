@@ -13,8 +13,20 @@
  * @module @xmoon76/dsh-pi-tui/tui/pickers/sessions
  */
 
-import { normalize } from 'node:path'
 import { stripTerminalSequences } from '@xmoon76/pi-tui'
+import {
+  buildSessionTree,
+  sameWorkspace,
+  sanitizeSessionSearchInput,
+  sessionRowMatchesQuery,
+} from '../../domain/session/browser.ts'
+export {
+  buildSessionTree,
+  sameWorkspace,
+  sanitizeSessionSearchInput,
+  SESSION_SEARCH_QUERY_MAX_CHARS,
+  sessionRowMatchesQuery,
+} from '../../domain/session/browser.ts'
 
 /** First-batch size for the progressive projection loader: the visible
  * picker window fills immediately, then the remaining rows load behind it. */
@@ -31,31 +43,6 @@ export function shortSessionId(id: string): string {
   return id.replace(/^session[-_]/i, '').slice(0, 8)
 }
 
-/** The official search-query cap in JavaScript UTF-16 code units (master
- * `ApiSessionList.search()` parity). */
-export const SESSION_SEARCH_QUERY_MAX_CHARS = 500
-
-/**
- * The ONE canonical Client-side search query (review): remove NUL
- * (officially illegal) → trim → cap at 500 UTF-16 code units without
- * splitting a surrogate pair. This exact value drives BOTH the local
- * metadata projection and the Host search — the Direct adapter's
- * authoritative validation (trim → non-empty → ≤500 → no NUL) is then a
- * no-op, so the local and Host queries can never drift (e.g. NUL adjacent
- * to padding whitespace must not leave a padded canonical behind).
- */
-export function sanitizeSessionSearchInput(value: string): string {
-  const trimmed = value.replace(/\0/g, '').trim()
-  if (trimmed.length <= SESSION_SEARCH_QUERY_MAX_CHARS) return trimmed
-  const truncated = trimmed.slice(0, SESSION_SEARCH_QUERY_MAX_CHARS)
-  const last = truncated.charCodeAt(SESSION_SEARCH_QUERY_MAX_CHARS - 1)
-  // A lone high surrogate at the cut is the first half of a pair — drop it
-  // so the remaining text is well-formed.
-  return last >= 0xD800 && last <= 0xDBFF
-    ? truncated.slice(0, SESSION_SEARCH_QUERY_MAX_CHARS - 1)
-    : truncated
-}
-
 /** kimicode-style workspace key: the last two path segments, or a placeholder.
  * The cwd is a Host/persistence boundary value — the group header is
  * rendered straight to the terminal, so the output is sanitized here (the
@@ -63,22 +50,6 @@ export function sanitizeSessionSearchInput(value: string): string {
 export function workspaceKey(cwd: string | undefined): string {
   if (cwd === undefined || cwd === '') return '(no workspace)'
   return sanitizeTerminalText(cwd.split('/').slice(-2).join('/'))
-}
-
-/** Whether two cwd values denote the same workspace: lexical path
- * normalization (`/a/b/` ≡ `/a/b` — node's normalize KEEPS one trailing
- * separator, so it is stripped first — and `.`/`..` segments collapse);
- * never a symlink/realpath resolution. An absent/empty cwd matches
- * NOTHING (an unrooted session never scopes into the Current directory
- * category). */
-export function sameWorkspace(a: string | undefined, b: string | undefined): boolean {
-  if (a === undefined || b === undefined || a === '' || b === '') return false
-  const strip = (path: string): string => {
-    let end = path.length
-    while (end > 1 && (path[end - 1] === '/' || path[end - 1] === '\\')) end -= 1
-    return path.slice(0, end)
-  }
-  return normalize(strip(a)) === normalize(strip(b))
 }
 
 /** Compact relative age of a session ("now", "2m", "3h", "5d", "3mo", "1y"). */
@@ -96,19 +67,6 @@ export function formatSessionAge(createdAt: number, now: number = Date.now()): s
   const months = Math.floor(days / 30)
   if (months < 12) return `${months}mo`
   return `${Math.floor(months / 12)}y`
-}
-
-/** Whether a session row's METADATA matches a search query (id, title,
- * cwd, preset — case-insensitive substring). This is the local half of the
- * search projection's explicit membership: `localMatches ∪ hostContentHits`.
- * It deliberately does NOT look at the content snippet — content membership
- * comes from the Host page, never from re-scanning text here. */
-export function sessionRowMatchesQuery(row: SessionPickerRow, query: string): boolean {
-  const needle = query.toLowerCase()
-  return row.id.toLowerCase().includes(needle)
-    || (row.title ?? '').toLowerCase().includes(needle)
-    || (row.cwd ?? '').toLowerCase().includes(needle)
-    || (row.preset ?? '').toLowerCase().includes(needle)
 }
 
 /** One session as the picker renders it. */
@@ -224,51 +182,6 @@ export function sessionLabelParts(label: string): { prefix: string; title: strin
   const rest = label.slice(tree.length)
   const marker = rest.startsWith('● ') ? '● ' : ''
   return { prefix: tree + marker, title: rest.slice(marker.length) }
-}
-
-/**
- * Build the session tree for the picker's "All" category: rows WITHOUT a
- * parentSession are roots (depth 0), and every row WITH a parentSession —
- * fork children, rewind branches AND subagents alike (plan §20: `origin`
- * only decides the badge, `parentSession` decides the hierarchy) — hangs
- * under its parent chain (depth = distance to the nearest root). Orphans —
- * a parent outside the shown window, or a missing parent id — degrade to root
- * depth 0. The input order (newest first) is preserved per level; a `placed`
- * set guards against parent cycles in corrupt data, which are emitted from
- * root depth when no ordinary root reaches them.
- * @param rows - the picker rows, newest first.
- * @returns rows in display order with their tree depth.
- */
-export function buildSessionTree(rows: readonly SessionPickerRow[]): { row: SessionPickerRow; depth: number }[] {
-  const known = new Set(rows.map(row => row.id))
-  const children = new Map<string, SessionPickerRow[]>()
-  const roots: SessionPickerRow[] = []
-  for (const row of rows) {
-    if (row.parentSession !== undefined && known.has(row.parentSession)) {
-      const list = children.get(row.parentSession)
-      if (list === undefined) children.set(row.parentSession, [row])
-      else list.push(row)
-    } else {
-      // Match the official Client flattenLineage projection: an absent parent
-      // is an orphaned root, never an indented pseudo-child.
-      roots.push(row)
-    }
-  }
-  const result: { row: SessionPickerRow; depth: number }[] = []
-  const placed = new Set<string>()
-  const place = (row: SessionPickerRow, depth: number): void => {
-    if (placed.has(row.id)) return
-    placed.add(row.id)
-    result.push({ row, depth })
-    for (const child of children.get(row.id) ?? []) place(child, depth + 1)
-  }
-  for (const root of roots) place(root, 0)
-  // A cycle has no root. Emit its first member as a root and let the placed
-  // guard terminate the back-edge without dropping any session.
-  for (const row of rows) {
-    if (!placed.has(row.id)) place(row, 0)
-  }
-  return result
 }
 
 /**

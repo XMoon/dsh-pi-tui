@@ -313,4 +313,5 @@ test('sanitizeSessionSearchInput canonicalizes remove-NUL → trim → cap-500',
   assert.equal(sanitizeSessionSearchInput(' ' + 'x'.repeat(500)).length, 500)
   assert.equal(sanitizeSessionSearchInput('x'.repeat(500) + '\u{1F600}').length, 500)
   assert.equal(sanitizeSessionSearchInput('x'.repeat(500) + '\u{1F600}').endsWith('x'), true)
+  assert.equal(sanitizeSessionSearchInput('x'.repeat(499) + '\u{1F600}'), 'x'.repeat(499))
 })

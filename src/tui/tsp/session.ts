@@ -55,8 +55,10 @@ import { createTspComposer, type TspComposer, type TspComposerEdit } from './edi
 import { createTspInteractionSeat, type TspContinuedRow, type TspInteractionSeat } from './interaction.ts'
 import { TspModelPicker } from './model-picker.ts'
 import { TspPresetPicker } from './preset-picker.ts'
+import { TspSessionBrowser } from './session-browser.ts'
 import type { ModelPresentation } from '../../app/command/model-presentation.ts'
 import type { PresetPresentation } from '../../app/command/preset-presentation.ts'
+import type { SessionBrowserPresentation } from '../../app/command/session-browser-presentation.ts'
 import type { PendingInputPresentation, PendingTailRow, QueueItem } from '../../app/surface/pending-presentation.ts'
 import { projectTranscriptStructure } from '../transcript/structure.ts'
 import type { TranscriptMessage, TurnActivity } from '../../domain/transcript/types.ts'
@@ -179,6 +181,8 @@ export interface TspRenderer extends TspInputBinding {
    * advertise the official kinds it renders.
    */
   readonly presetPresentation: PresetPresentation | undefined
+  /** Internal read-only Session Browser seam; absent unless all required kinds are negotiated. */
+  readonly sessionBrowserPresentation: SessionBrowserPresentation | undefined
   /**
    * PR3-B B1: the composer projection backed by the renderer's ONE
    * program-owned composer (`getDraft()` reads the VISIBLE editor, never a
@@ -311,6 +315,7 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
   let lastMain: Node | undefined
   let modelPicker: TspModelPicker | undefined
   let presetPicker: TspPresetPicker | undefined
+  let sessionBrowser: TspSessionBrowser | undefined
   const dock: DockState = { statusLine: DOCK_BANNER, notices: [], welcome: [] }
   const pending: { queued: readonly QueueItem[]; tail: readonly PendingTailRow[]; running: boolean } = { queued: [], tail: [], running: false }
   /** The application's pending-submit fact, surfaced as a dock line. */
@@ -367,15 +372,22 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     // reading keys ask for. The presenter names a wire id of the frame IT built.
     nativeScroll: (id, to) => { surface.scroll(id, to) },
   })
+  sessionBrowser = new TspSessionBrowser({
+    surfaceId: surface.id,
+    render: () => render(),
+    canInteract: () => !disposed && !hydrating && inputBound && !seat.hasModalSeat(),
+    notify: (text, kind) => display.notify(text, kind),
+    nativeScroll: (id, to) => { surface.scroll(id, to) },
+    scrollSupported: session.caps.features.includes('scroll'),
+  })
   modelPicker.resize(session.caps.cols, session.caps.cell.w)
   /**
-   * The ONE layer, and the two presenters that may claim it. Opening either
-   * one retires the other FIRST, so the renderer's `layer` region can never
-   * carry two panels and a stale panel's wire ids can never stay reachable
-   * (the retirement commits the next frame through its `render` callback).
+   * The ONE layer and its mutually-exclusive presenters. Opening one retires
+   * the other two before the next committed frame.
    */
   const modelPresentation: ModelPresentation = {
     open: (request) => {
+      sessionBrowser?.retire()
       presetPicker?.retire()
       return modelPicker!.presentation.open(request)
     },
@@ -383,10 +395,19 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
   }
   const presetPresentation: PresetPresentation = {
     open: (request) => {
+      sessionBrowser?.retire()
       modelPicker?.retire()
       return presetPicker!.presentation.open(request)
     },
     notify: (message, kind) => presetPicker!.presentation.notify(message, kind),
+  }
+  const sessionBrowserPresentation: SessionBrowserPresentation = {
+    open: (request) => {
+      presetPicker?.retire()
+      modelPicker?.retire()
+      return sessionBrowser!.presentation.open(request)
+    },
+    notify: (message, kind) => sessionBrowser!.presentation.notify(message, kind),
   }
   /**
    * PR3-A supports NO viewer, so this read is the explicit UNSUPPORTED capability
@@ -417,11 +438,13 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     if (disposed) return
     const desired = seat.hasModalSeat()
       ? seat.desiredFocusId()
-      : presetPicker?.isOpen() === true
-        ? presetPicker.desiredFocusId() ?? null
-        : modelPicker?.isOpen() === true
-          ? modelPicker.desiredFocusId() ?? null
-          : 'dock.composer'
+      : sessionBrowser?.isOpen() === true
+        ? sessionBrowser.desiredFocusId() ?? null
+        : presetPicker?.isOpen() === true
+          ? presetPicker.desiredFocusId() ?? null
+          : modelPicker?.isOpen() === true
+            ? modelPicker.desiredFocusId() ?? null
+            : 'dock.composer'
     if (!force && desired === lastAppliedFocusId) return
     lastAppliedFocusId = desired
     composer.setFocused(desired === 'dock.composer')
@@ -434,6 +457,7 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
   function render(): void {
     if (disposed) return
     if (seat.hasModalSeat()) {
+      sessionBrowser?.suspend()
       modelPicker?.suspend()
       presetPicker?.suspend()
     }
@@ -444,7 +468,7 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       ...(dockNode === undefined ? {} : { dock: dockNode }),
       layer: seat.hasModalSeat()
         ? seat.renderLayer()
-        : presetPicker?.renderLayer() ?? modelPicker?.renderLayer() ?? seat.renderLayer(),
+        : sessionBrowser?.renderLayer() ?? presetPicker?.renderLayer() ?? modelPicker?.renderLayer() ?? seat.renderLayer(),
     })
     // The focus op is meaningful only for a node of a COMMITTED frame (the
     // SDK never validates it), so it always follows the render above.
@@ -587,6 +611,7 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     },
     beginSessionHydration() {
       if (disposed) return
+      sessionBrowser?.retire()
       modelPicker?.retire()
       presetPicker?.retire()
       // P3: the transient Alt+Q list belongs to the subject that opened it — a
@@ -736,6 +761,7 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       handlers.cancel()
       return false
     }
+    if (sessionBrowser?.handleKey(key)) return false
     if (presetPicker?.handleKey(key)) return false
     if (modelPicker?.handleKey(key)) return false
     if (key.name === 'escape') {
@@ -818,9 +844,10 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       }
       if (seat.hasModalSeat()) { if (seat.handleEvent(input.event)) applyFocus(true); return false }
       if (!hydrating && inputBound && 'sf' in input.event && input.event.sf === surface.id) {
+        if (sessionBrowser?.handleEvent(input.event)) return false
         if (presetPicker?.handleEvent(input.event)) return false
         if (modelPicker?.handleEvent(input.event)) return false
-        if ((presetPicker?.isOpen() === true || modelPicker?.isOpen() === true)
+        if ((sessionBrowser?.isOpen() === true || presetPicker?.isOpen() === true || modelPicker?.isOpen() === true)
           && input.event.ev === 'focus') applyFocus(true)
       }
       return false
@@ -915,6 +942,13 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
         ? presetPresentation
         : undefined
     },
+    get sessionBrowserPresentation() {
+      const kinds = ['picker', 'row', 'overlay', 'text']
+      return kinds.every(kind => session.caps.kinds.includes(kind))
+        && session.caps.features.includes('scroll')
+        ? sessionBrowserPresentation
+        : undefined
+    },
     composer: composerPort,
     // PR3-B B3 (§3.5.1): the REAL interaction presenter (the seat) replaces
     // the B0 inert one. It is installed with the mount, but the surface only
@@ -946,6 +980,7 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       // cancellation error) before the surface/session close below, and the
       // call is idempotent with the interaction owner's own `withdrawPending`.
       seat.dispose()
+      sessionBrowser?.retire()
       modelPicker?.retire()
       presetPicker?.retire()
       // Both steps are ALWAYS attempted — the tty restore (and the SDK's own

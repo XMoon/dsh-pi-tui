@@ -135,6 +135,7 @@ export interface TspPane {
 export function installTspPane(options: {
   readonly modelPicker?: boolean
   readonly presetPicker?: boolean
+  readonly sessionBrowser?: boolean
   readonly kinds?: readonly string[]
   readonly features?: readonly string[]
 } = {}): TspPane {
@@ -153,17 +154,15 @@ export function installTspPane(options: {
   let acksHeld = false
   let frames = 0
   // The native-kind/feature sets are the pane's own advertised set, exactly like the
-  // real client: the Model layer needs its picker, the Reader's Back row and the
-  // Reader overlay; the Preset layer needs its picker, the native `ui.row({onClick})`
-  // Back row of the Details overlay (plus `text` facts and the inline `md` guide),
-  // and the body's own keyboard scrolling. A case can override the advertised sets
-  // verbatim (fail-closed).
+  // real client. Model, Preset and Session Browser opt-ins each add only their native
+  // picker/Reader kinds; Preset adds `md` for its guide. Reader pages negotiate scroll.
+  // A case can override the advertised sets verbatim (fail-closed).
   const native = Array.from(new Set([
-    ...(options.modelPicker === true ? ['picker', 'row', 'overlay'] : []),
-    ...(options.presetPicker === true ? ['picker', 'row', 'overlay', 'md'] : []),
-    ...(options.modelPicker === true || options.presetPicker === true ? ['text'] : []),
+    ...(options.modelPicker === true ? ['picker', 'row', 'overlay', 'text'] : []),
+    ...(options.presetPicker === true ? ['picker', 'row', 'overlay', 'text', 'md'] : []),
+    ...(options.sessionBrowser === true ? ['picker', 'row', 'overlay', 'text'] : []),
   ]))
-  const nativeFeatures = options.presetPicker === true ? ['scroll'] : []
+  const nativeFeatures = options.presetPicker === true || options.sessionBrowser === true ? ['scroll'] : []
   const hello = options.kinds !== undefined || options.features !== undefined
     ? {
         ...HELLO,
