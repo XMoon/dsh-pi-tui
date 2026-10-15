@@ -689,6 +689,63 @@ test('A-10d the narrow inline choice advertises and runs exact keyboard Copy', a
   }
 })
 
+test('A-10e inline Copy accepts Kitty and modifyOtherKeys printable events', async () => {
+  const encodedCopyKeys = ['\x1b[99u', '\x1b[99:67:99;2u', '\x1b[27;2;67~'] as const
+  for (const encodedKey of encodedCopyKeys) {
+    const h = setup({ columns: 72, rows: 24, doc: { theme: 'dark' } })
+    await h.open()
+    await key(h, '\x1b[C') // Categories -> Rows
+    await key(h, '\x1b[C') // Rows -> inline choice
+    assert.ok(h.view().includes('Choose value'), `the inline choice is open:\n${h.view()}`)
+    assert.ok(h.view().includes('c copy'), `inline Copy remains advertised:\n${h.view()}`)
+    await key(h, encodedKey)
+    await settle(h)
+    assert.deepEqual(h.copied, ['dark'], 'inline semantic Copy copies the original configured identity')
+    assert.match(h.view(), /dark\s+\[current\]/, 'inline Copy leaves the candidate selection open')
+    assert.equal(h.replacements(), 0, 'inline Copy never commits a candidate')
+    h.dispose()
+  }
+})
+
+test('A-10f settled Detail Copy accepts Kitty and modifyOtherKeys printable events', async () => {
+  const encodedCopyKeys = ['\x1b[99u', '\x1b[99:67:99;2u', '\x1b[27;2;67~'] as const
+  for (const encodedKey of encodedCopyKeys) {
+    const h = setup({ columns: 72, rows: 24, doc: { theme: 'dark' } })
+    await openSelectedRow(h, 'theme')
+    await key(h, '\r') // Rows -> inline choice
+    await key(h, '\x1b[B') // dark -> light
+    await key(h, '\r') // Confirm into settled Detail
+    await settle(h)
+    assert.equal(h.replacements(), 1, 'the source fixture reaches settled Detail')
+    assert.equal(h.doc.theme, 'light')
+    assert.ok(h.view().includes('c copy value'), `ordinary Detail Copy remains advertised:\n${h.view()}`)
+    await key(h, encodedKey)
+    await settle(h)
+    assert.deepEqual(h.copied, ['light'], 'semantic Detail Copy copies the raw configured identity')
+    assert.equal(h.replacements(), 1, 'Detail Copy never adds a settings write')
+    h.dispose()
+  }
+})
+
+test('B-15e mouse Confirm requires the painted Enter hint at the minimum Action Bar width', async () => {
+  for (const [columns, canConfirm] of [[18, false], [19, true], [23, true]] as const) {
+    const h = setup({ columns, rows: 24, doc: { theme: 'dark' }, themes: pluginThemes() })
+    await openSelectedRow(h, 'theme')
+    await key(h, '\r') // Detail -> choosing
+    await key(h, '\x1b[B') // dark -> light, a real value change
+    assert.equal(h.view().includes('Enter confirm'), canConfirm, `Enter hint follows the whole-segment width at ${columns} columns:\n${h.view()}`)
+    assert.equal(h.view().includes('Confirm'), canConfirm, `Confirm is painted only while its required hint fits at ${columns} columns:\n${h.view()}`)
+    const buttonRow = rowOf(h, 'Cancel')
+    const buttonColumn = canConfirm ? cellIndexOf(h, buttonRow, 'Confirm') : 0
+    press(h, buttonRow, buttonColumn)
+    release(h, buttonRow, buttonColumn)
+    await settle(h)
+    assert.equal(h.replacements(), canConfirm ? 1 : 0, `mouse confirmation obeys the painted Enter hint at ${columns} columns`)
+    assert.equal(h.doc.theme, canConfirm ? 'light' : 'dark', `the setting commits only when the Enter hint is painted at ${columns} columns`)
+    h.dispose()
+  }
+})
+
 test('A-10b a copy settled after the workspace closed never notifies the restored surface', async () => {
   let settleCopy: ((ok: boolean) => void) | undefined
   const h = setup({
