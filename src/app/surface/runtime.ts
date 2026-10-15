@@ -2004,6 +2004,7 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
       rendererDispose = undefined
       modelPresentation = undefined
       presetPresentation = undefined
+      sessionBrowserPresentation = undefined
       // A disposed surface never binds its renderer input afterwards.
       pendingInputBinding = undefined
       inputBindTarget = undefined
