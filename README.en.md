@@ -347,26 +347,33 @@ show only the current level. At every width ASCII `Right` advances exactly one
 level and `Left` returns one level (inert at L0); `Enter` follows the same
 transitions, and `Esc`/`Backspace` step back, closing at the outermost level.
 `Tab`/`Shift+Tab` remain inert. The Action Bar stays pinned to the last physical
-row. It presents the real Appearance / Display facts: the theme's
-source-qualified raw value plus its friendly name, Icon style, the live
-Transcript display preset alongside the persisted preference, the live Thinking
-detail state, and each row's configuration Scope and backend readiness. `R`
-re-reads, `C` copies the selected row's exact source value, and browsing or
-picking writes no configuration.
+row. Multi-column choosing retains the active `[Details]` marker unless that
+heading would consume the only content row. It presents the real Appearance /
+Display facts: the theme's source-qualified raw value plus its friendly name,
+Icon style, the live Transcript display preset alongside the persisted preference,
+the live Thinking detail state, and each row's configuration Scope and backend
+readiness. `R`
+re-reads and `C` copies the selected row's exact source value. Browsing, choosing
+and copying alone never write configuration.
 
 The **`Configured theme` and `Transcript display` rows are directly editable**:
 from L1, `Right` or `Enter`, the painted `[Change…]` button, or ordinary visible
 Detail content opens the candidate choice in the SAME L2 pane. Current-value and
-Runtime/Persisted facts remain above the candidates. `Up`/`Down`/`Home`/`End`
-move the candidate; `PgUp`/`PgDn` and the wheel over facts scroll only the fact
-region, while the candidate wheel scrolls independently. `Enter` or `[Confirm]`
-confirms explicitly, and `Left`/`Esc`/`Backspace` or `[Cancel]` cancels directly
-to L1 without writing anything. If the selected candidate identity has scrolled
-out of view, the first Enter only reveals it; confirmation requires a later
-Enter. From L2 browse or a settled outcome, Enter reopens choice for a writable
-non-pending row. Even at 44×8 the current value, candidate identity and explicit
-`Enter confirm` hint remain visible. Only buttons and candidates that are really
-painted can be clicked. A confirmed change is stored through the existing
+Runtime/Persisted facts stay in the same pane above the candidate region and scroll
+independently. `Up`/`Down`/`Home`/`End` move the candidate; `PgUp`/`PgDn` and the
+wheel over facts scroll only the fact region, while the candidate wheel scrolls
+independently. During choice, `C` copies the original row value only while the
+Action Bar paints `c copy`; it never copies or commits the draft candidate. `Enter`
+or `[Confirm]` confirms explicitly, and `Left`/`Esc`/`Backspace` or `[Cancel]`
+cancels directly to L1 without writing anything. If the selected candidate identity
+has scrolled out of view, the first Enter only reveals it; confirmation requires a
+later Enter. From L2 browse or a settled outcome, Enter reopens choice for a
+writable non-pending row. At 44×8, a long identity may first reclaim the optional
+`Choose value` heading; if still needed, the fact area shrinks only to one original
+`Value` row. The complete identity, `Confirm` and `Enter confirm` must be visible
+before a write.
+An identity beyond the remaining candidate capacity stays unconfirmable. Only
+buttons and candidates that are really painted can be clicked. A confirmed change is stored through the existing
 serialized whole-document write path and then re-read from the authority: the
 detail names the live runtime fact (`Runtime`, e.g. the current palette) and the
 stored preference (`Persisted`) separately and states `Saving…`, `Verified`,

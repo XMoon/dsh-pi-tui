@@ -390,10 +390,41 @@ test('A-03 100x40 and 76x24 project the medium composition per level and switch 
   // Right enters L2's inline choice directly from L1 on the same projection.
   await key(h, '\x1b[C')
   assert.match(h.view(), /Choose value/, 'the one-step detail entry opens the inline choice')
+  const detailHeader = h.rowsPlain()[rowOf(h, 'Details')]!
+  assert.match(detailHeader, /\[Details\]/, 'the focused Detail title remains visible while choosing')
   const choiceHeading = rowOf(h, 'Choose value')
   assert.ok(h.rowsPlain().slice(choiceHeading + 1).some(line => />\s+\S+/.test(line)), 'the selected candidate identity remains visible')
   assert.match(h.view(), /Enter confirm/, 'confirmation is explicit and advertised')
   h.dispose()
+  }
+})
+
+test('A-03b the wide inline choice keeps the focused pane title as its phase changes', async () => {
+  const h = setup({ columns: 200, rows: 50, doc: { theme: 'dark' } })
+  await h.open()
+  await key(h, '\r') // Categories -> Rows
+  const before = h.rowsPlain()[rowOf(h, 'Rows (2)')]!
+  assert.match(before, /\[Rows \(2\)\]/, 'the Rows pane owns focus before editing')
+  await key(h, '\x1b[C') // Rows -> inline choice
+  const after = h.rowsPlain()[rowOf(h, 'Details')]!
+  assert.match(after, /\[Details\]/, 'the Detail pane remains visibly focused while choosing')
+  assert.ok(h.view().includes('Choose value'), `the choice remains visible:\n${h.view()}`)
+  assert.ok(h.view().includes('> dark'), `the current candidate remains visible:\n${h.view()}`)
+  h.dispose()
+})
+
+test('A-03c the wide pane title yields only when it would consume the sole body row', async () => {
+  for (const rows of [3, 4] as const) {
+    const h = setup({ columns: 200, rows, doc: { theme: 'dark' } })
+    await h.open()
+    await key(h, '\r') // Categories -> Rows
+    await key(h, '\x1b[C') // Rows -> inline choice
+    const hasFocusedDetails = h.rowsPlain().some(line => line.includes('[Details]'))
+    assert.equal(hasFocusedDetails, rows === 4,
+      `the pane title requires a remaining candidate row at 200x${rows}:\n${h.view()}`)
+    assert.ok(h.view().includes('> dark'), `the selected candidate remains painted at 200x${rows}:\n${h.view()}`)
+    assert.ok(!h.view().includes('Enter confirm'), `confirmation is withheld without enough body rows at 200x${rows}:\n${h.view()}`)
+    h.dispose()
   }
 })
 
@@ -638,6 +669,24 @@ test('A-10 Copy sends the exact source value and its settlement is visible insid
   assert.deepEqual(h.copied, ['plugin:acme/solarized'], 'the copy payload is the raw identity, never the friendly label')
   assert.ok(h.rowsPlain().some(line => line.includes('Copy sent')), `the notice is painted inside the workspace:\n${h.view()}`)
   h.dispose()
+})
+
+test('A-10d the narrow inline choice advertises and runs exact keyboard Copy', async () => {
+  for (const [columns, rows, copyKey, copyVisible] of [[72, 24, 'c', true], [44, 20, 'C', true], [30, 24, 'c', false]] as const) {
+    const h = setup({ columns, rows, doc: { theme: 'plugin:acme/solarized' }, themes: pluginThemes() })
+    await h.open()
+    await key(h, '\x1b[C') // Categories -> Rows
+    await key(h, '\x1b[C') // Rows -> inline choice
+    assert.ok(h.view().includes('Choose value'), `the keyboard path reaches choosing at ${columns}x${rows}:\n${h.view()}`)
+    const copyHintVisible = h.rowsPlain().at(-1)!.includes('c copy')
+    assert.equal(copyHintVisible, copyVisible, `Copy hint visibility follows Action Bar width at ${columns}x${rows}:\n${h.view()}`)
+    await key(h, copyKey)
+    await settle(h)
+    assert.deepEqual(h.copied, copyVisible ? ['plugin:acme/solarized'] : [], `Copy follows the visible hint at ${columns}x${rows}`)
+    if (copyVisible) assert.ok(h.view().includes('Choose value'), `Copy leaves the candidate choice open at ${columns}x${rows}`)
+    assert.equal(h.replacements(), 0, 'Copy never commits a candidate')
+    h.dispose()
+  }
 })
 
 test('A-10b a copy settled after the workspace closed never notifies the restored surface', async () => {
@@ -2119,7 +2168,7 @@ test('B-15b the source-qualified candidate identity stays visible before 44x8 ke
   h.dispose()
 })
 
-test('B-15c keyboard confirm waits until every wrapped raw identity row is visible', async () => {
+test('B-15c identity-aware 44x8 allocation shows a full long raw identity with confirm', async () => {
   const id = 'x'.repeat(80)
   const themes = new ThemeRegistry()
   themes.register({ id, name: 'Long custom theme', palette: darkColors }, 'acme-owner', 'acme')
@@ -2131,22 +2180,37 @@ test('B-15c keyboard confirm waits until every wrapped raw identity row is visib
   await key(h, '\x1b[B') // dark -> light
   await key(h, '\x1b[B') // light -> the long source-qualified identity
   const shortText = h.rowsPlain().map(line => line.trim()).join('')
-  assert.ok(!shortText.includes(value), `the full raw identity does not fit at 44x8:\n${h.view()}`)
-  assert.ok(!h.view().includes('Enter confirm'), `Confirm is withheld while the raw identity tail is hidden:\n${h.view()}`)
+  assert.ok(shortText.includes(value), `the complete raw identity fits at 44x8:\n${h.view()}`)
+  assert.ok(h.view().includes('Value'), `the persisted old value remains visible:\n${h.view()}`)
+  assert.match(h.view(), /Enter confirm/, 'the complete identity and keyboard confirm hint coexist')
+  assert.match(h.view(), /Confirm\s+Cancel/, 'the explicit Detail confirm action is painted')
+  assert.equal(h.replacements(), 0, 'reading the long candidate does not write before confirmation')
   await key(h, '\r')
   await settle(h)
-  assert.equal(h.replacements(), 0, 'a hidden identity cannot be committed by Enter')
-  assert.equal(h.doc.theme, 'dark')
+  assert.equal(h.replacements(), 1, 'one explicit Enter dispatches exactly one write')
+  assert.equal(h.doc.theme, value, 'the confirmed source-qualified identity is exact')
+  h.dispose()
+})
 
-  h.vt.resize(44, 10)
-  await settle(h)
-  const tallText = h.rowsPlain().map(line => line.trim()).join('')
-  assert.ok(tallText.includes(value), `the complete source-qualified identity fits after resize:\n${h.view()}`)
-  assert.match(h.view(), /Enter confirm/, 'the confirm hint returns only when the full identity is visible')
+test('B-15d identity beyond the adaptive 44x8 budget remains non-confirmable', async () => {
+  const id = 'x'.repeat(200)
+  const themes = new ThemeRegistry()
+  themes.register({ id, name: 'Oversized custom theme', palette: darkColors }, 'acme-owner', 'acme')
+  const value = themePickerRows(themes).find(row => row.displayName === 'Oversized custom theme')?.value
+  assert.ok(value !== undefined, 'the oversized plugin theme is selectable')
+  const h = setup({ columns: 44, rows: 8, doc: { theme: 'dark' }, themes })
+  await openSelectedRow(h, 'theme')
+  await key(h, '\r')
+  await key(h, '\x1b[B') // dark -> light
+  await key(h, '\x1b[B') // light -> the oversized source-qualified identity
+  const shortText = h.rowsPlain().map(line => line.trim()).join('')
+  assert.ok(!shortText.includes(value), `the identity exceeds the bounded 44x8 candidate area:\n${h.view()}`)
+  assert.ok(!h.view().includes('Enter confirm'), `confirmation stays hidden while identity rows are missing:\n${h.view()}`)
+  assert.ok(!h.view().includes('Confirm'), `no painted Confirm button is granted for a partial identity:\n${h.view()}`)
   await key(h, '\r')
   await settle(h)
-  assert.equal(h.replacements(), 1, 'the now-visible candidate confirms once')
-  assert.equal(h.doc.theme, value)
+  assert.equal(h.replacements(), 0, 'an identity beyond the short-screen capacity cannot be committed')
+  assert.equal(h.doc.theme, 'dark')
   h.dispose()
 })
 

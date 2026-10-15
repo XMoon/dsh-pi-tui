@@ -2007,32 +2007,41 @@ and nothing else does.
   display name — the raw identity is what `C` copies. The header is a pure level
   breadcrumb (`Categories` / `<Category> · Rows` / `<Category> · <Row>`) plus an
   `N editable rows` badge at 76+ columns; it paints no interactive cell.
-- **Browse never writes.** Navigation, `R` (re-read the same authorities, no
-  subscription and no shadow store) and the `C` copy verb never touch the
-  configuration document. A row without a write channel says so
-  (`read-only here · Other settings edits this row`) and paints no edit verb.
+- **Browse and copy never write.** Navigation and `R` (re-read the same
+  authorities, no subscription and no shadow store) never touch the configuration
+  document. `C` copies the captured row's exact `value`; during L2 choosing it is
+  active only while the painted Action Bar advertises `c copy`, using the existing
+  `copySelected()` path and never the draft candidate. A row without a write
+  channel says so (`read-only here · Other settings edits this row`) and paints no
+  edit verb.
 - **The L2 edit phase is transient, not a fourth level.** On the two writable
   rows, `Right`/`Enter` (or the painted `[Change…]`) opens an in-pane choice
-  directly from L1; the same Detail pane keeps compact Runtime/Persisted facts
-  above the candidates. `Up`/`Down`/`Home`/`End` move candidates without writing,
-  `PgUp`/`PgDn` and the wheel over facts scroll only the fact region, and the
-  candidate list scrolls independently under its own wheel region. `Enter` or
-  `[Confirm]` is the only commit; `Left`/`Esc`/`Backspace` or `[Cancel]` cancels
-  directly to L1 with ZERO writes. Only an explicit confirm dispatches, and a
-  candidate whose source is gone (an unloaded `plugin:` theme) is listed as
+  directly from L1; the same Detail pane keeps current-value and Runtime/Persisted
+  facts above the candidates. `Up`/`Down`/`Home`/`End` move candidates without
+  writing, `PgUp`/`PgDn` and the wheel over facts scroll only the fact region, and
+  the candidate list scrolls independently under its own wheel region. The active
+  multi-column pane title (for example `[Details]`) remains while one content row
+  remains; it yields only when it would replace the sole content/candidate row.
+  `Enter` or `[Confirm]` is the only commit; `Left`/`Esc`/`Backspace` or `[Cancel]`
+  cancels directly to L1 with ZERO writes. Only an explicit confirm dispatches,
+  and a candidate whose source is gone (an unloaded `plugin:` theme) is listed as
   `unavailable` and refused at confirm and at retry. The heading `Choose value`
   names the shared in-pane selector; a long or CJK candidate WRAPS rather than
   being truncated, every painted candidate row is a real hit target, and the
   exact candidate value (source-qualified for themes, never its label) must be
-  visible before keyboard confirmation. If it has scrolled out of view, the first Enter reveals
-  it and the next Enter confirms. On a 44×8 terminal the current value, selected
-  candidate identity and explicit `Enter confirm` hint remain visible. A layout
-  WIDTH change re-flows wrapped candidates and participates in the reveal rebase
-  exactly like a candidate or viewport change (while a plain repaint never fights
-  the user's own scrolling), and a source that unloads under an open choice
-  re-anchors it on the candidate VALUE. One commit at a time: while a write is
-  pending the edit verbs are not painted, and the panel holds exactly one request
-  identity, so a superseded or post-close settlement can never repaint.
+  visible before keyboard confirmation. If it has scrolled out of view, the first
+  Enter reveals it and the next Enter confirms. The frozen 44×8 allocation remains
+  the default; under the owner-approved bounded exception, an identity that needs
+  more candidate rows first reclaims the optional `Choose value` heading and, only
+  if still needed, reduces facts to one original `Value` row. Confirm and `Enter confirm` are
+  painted only when the complete identity fits; identities beyond that capacity
+  remain unconfirmable at 44×8 and require more height. A layout WIDTH change
+  re-flows wrapped candidates and participates in the reveal rebase exactly like a
+  candidate or viewport change (while a plain repaint never fights the user's own
+  scrolling), and a source that unloads under an open choice re-anchors it on the
+  candidate VALUE. One commit at a time: while a write is pending the edit verbs
+  are not painted, and the panel holds exactly one request identity, so a
+  superseded or post-close settlement can never repaint.
 - **Runtime and persisted are two facts, always drawn apart.** A writable row's
   Detail names the live runtime fact (`Runtime` for the theme palette —
   `app.currentTheme()`/`app.activePluginTheme()`, never the configured value) and
