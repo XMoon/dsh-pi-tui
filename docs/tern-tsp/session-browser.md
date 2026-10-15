@@ -38,6 +38,11 @@ query, workspace, and lineage helpers are in
   All-workspaces mode keeps the listed main-session lineage, including
   cross-workspace parent/child edges. Orphans become roots and cycles are
   emitted without unbounded traversal.
+- Browse Tree groups only adjacent rows whose workspaces match; repeated
+  workspace headings are intentional. Grouping never reorders the
+  `buildSessionTree()` parent-first sequence or resets row depth, and every
+  contiguous run has its own PickerGroup ID. Search remains global Cards without
+  workspace groups.
 - A non-empty query is canonicalized once for metadata matching and Host
   search: remove NUL, trim, cap at 500 UTF-16 code units, and avoid a dangling
   high surrogate. Metadata matches only listed-row `id`, `title`, `cwd`, and

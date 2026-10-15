@@ -1,6 +1,6 @@
 /** The internal native TSP Session Browser: read-only panel state and admission. */
 import { View, span, ui, type Key, type Node, type ScrollTo, type TspEvent } from '@stencil-hq/tern'
-import type { PickerAction, PickerItem, PickerProps } from '@stencil-hq/tern'
+import type { PickerAction, PickerGroup, PickerItem, PickerProps } from '@stencil-hq/tern'
 import type {
   SessionBrowserPanelHandle,
   SessionBrowserPanelRequest,
@@ -260,6 +260,28 @@ function pickerLayer(panel: SessionBrowserPanel): Node {
     { id: 'workspace', label: 'This workspace', count: workspaceRows.length },
     { id: 'all', label: 'All workspaces', count: panel.snapshot.rows.length },
   ] satisfies NonNullable<PickerProps['scopes']>
+  const order: Array<string | PickerGroup> = []
+  if (searching) {
+    order.push(...rows.map((item) => item.id))
+  } else {
+    let start = 0
+    let run = 0
+    while (start < tree.length) {
+      const first = tree[start]!
+      let end = start + 1
+      while (end < tree.length && sameWorkspace(first.row.cwd, tree[end]!.row.cwd)) end += 1
+      order.push({
+        group: `workspace-run:${run}`,
+        label: workspaceKey(first.row.cwd),
+        count: end - start,
+      })
+      for (let index = start; index < end; index += 1) {
+        order.push(`session:${tree[index]!.row.id}`)
+      }
+      start = end
+      run += 1
+    }
+  }
   const pickerKey = `session-browser-picker-${panel.serial}`
   const actions = actionList(panel)
   const props: PickerProps & { readonly key: string } = {
@@ -284,7 +306,7 @@ function pickerLayer(panel: SessionBrowserPanel): Node {
     empty: emptyText(panel),
     total: rows.length,
     items: rows,
-    order: rows.map((item) => item.id),
+    order,
     ...(selected === undefined || !rows.some((item) => item.id === selected) ? {} : { selected }),
     current,
     scopes,
