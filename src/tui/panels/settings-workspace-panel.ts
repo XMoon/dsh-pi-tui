@@ -483,9 +483,10 @@ export class SettingsWorkspacePanel implements Component {
    *  unchanged (the plan's "sizes changed ⇒ reject"). */
   private lastRenderWidth = -1
   private lastRenderRows = -1
-  /** Facts from the actual Detail projection just rendered, used to grant Enter. */
+  /** Facts from the current painted projection, used to grant choice actions. */
   private paintedChoiceCandidateVisible = false
   private paintedEnterConfirm = false
+  private paintedChoiceCopy = false
   private paintedRevision = -1
   private chrome: SettingsChromePlan | undefined
   private disposed = false
@@ -528,6 +529,7 @@ export class SettingsWorkspacePanel implements Component {
     this.chrome = plan
     this.paintedChoiceCandidateVisible = false
     this.paintedEnterConfirm = false
+    this.paintedChoiceCopy = false
     const lines: string[] = []
     const targets: HitTarget[] = []
     const panes: PaneBoxes = {}
@@ -658,10 +660,10 @@ export class SettingsWorkspacePanel implements Component {
     targets: HitTarget[],
     panes: PaneBoxes,
   ): string[] {
-    // The shared pane-header line is a grant of its own: below two body rows it
-    // would consume the ONLY body row, so the real content wins and the header
-    // is dropped (the Action Bar still names the current pane).
-    const showPaneHeader = plan.bodyRows >= 2 && this.choiceField() === undefined
+    // The shared pane-header line is a grant of its own: keep it whenever one
+    // real content row remains, including during choice editing. With only one
+    // body row it would replace the candidate/content line, so the header yields.
+    const showPaneHeader = plan.bodyRows >= 2
     const contentTop = bodyTop + (showPaneHeader ? 1 : 0)
     const contentRows = Math.max(0, plan.bodyRows - (showPaneHeader ? 1 : 0))
     this.paintedViewport = Math.max(1, contentRows)
@@ -955,39 +957,53 @@ export class SettingsWorkspacePanel implements Component {
     return { lines, content, viewport: scrollViewport, buttons: painted.painted, optionRows: [], confirmCandidateVisible: false }
   }
 
-  /** Compose a fixed fact viewport, optional heading, candidate viewport and
-   *  pinned buttons. Facts and candidates retain their own existing offsets. */
+  /** Compose facts, optional heading, candidate viewport and pinned buttons.
+   *  Long identities may reclaim only the approved optional rows. */
   private choiceLines(row: SettingsWorkspaceRow, width: number, viewport: number): DetailProjection {
     const actionRows = viewport >= 2 ? 1 : 0
     const scrollableRows = Math.max(0, viewport - actionRows)
-    const factRows = scrollableRows >= 6 ? 3 : scrollableRows >= 4 ? 2 : scrollableRows >= 2 ? 1 : 0
-    const headingRows = scrollableRows - factRows >= 2 ? 1 : 0
-    const optionViewport = Math.max(0, scrollableRows - factRows - headingRows)
+    const options = row.edit?.options ?? []
+    const blocks = this.choiceBlocks(row, width)
+    const flattened = blocks.flat()
+    const phase = this.editPhase
+    const selectedOption = phase.kind === 'choosing' ? options[phase.index] : undefined
+    const identityRows = selectedOption === undefined
+      ? 0
+      : wrapTextWithAnsi(escapedPhysicalLine(selectedOption.value), Math.max(1, width - 2)).length
+    let factRows = scrollableRows >= 6 ? 3 : scrollableRows >= 4 ? 2 : scrollableRows >= 2 ? 1 : 0
+    let headingRows = scrollableRows - factRows >= 2 ? 1 : 0
+    let optionViewport = Math.max(0, scrollableRows - factRows - headingRows)
+    if (identityRows > optionViewport) {
+      // Keep the original split by default. A long selected identity first
+      // reclaims the optional heading, then facts only down to the old Value row;
+      // confirmation still requires the entire raw identity to fit in the result.
+      const previousFactRows = this.paintedPanes.detail?.factRegion?.rows ?? 0
+      const previousOptionRows = this.paintedPanes.detail?.optionRegion?.rows ?? 0
+      headingRows = 0
+      optionViewport = Math.max(0, scrollableRows - factRows)
+      if (identityRows > optionViewport && factRows > 1) {
+        factRows = Math.max(1, scrollableRows - identityRows)
+        optionViewport = Math.max(0, scrollableRows - factRows)
+      }
+      if (previousFactRows !== factRows || previousOptionRows !== optionViewport) this.detailOffset = 0
+    }
     const factContent = this.detailContent(row, width, false, true)
     const factMaxOffset = Math.max(0, factContent.length - factRows)
     this.detailOffset = Math.min(Math.max(0, this.detailOffset), factMaxOffset)
     const visibleFacts: string[] = []
     for (let i = 0; i < factRows; i += 1) visibleFacts.push(factContent[this.detailOffset + i] ?? '')
 
-    const options = row.edit?.options ?? []
-    const blocks = this.choiceBlocks(row, width)
-    const flattened = blocks.flat()
     const optionOffset = this.rebaseChoice(blocks, optionViewport, width)
     const lines = [...visibleFacts]
     if (headingRows === 1) lines.push(color.textStrong('Choose value'))
     for (let i = 0; i < optionViewport; i += 1) lines.push(flattened[optionOffset + i] ?? '')
 
-    const phase = this.editPhase
     let selectedStart = -1
     let cursor = 0
     for (const [index, block] of blocks.entries()) {
       if (phase.kind === 'choosing' && index === phase.index) selectedStart = cursor
       cursor += block.length
     }
-    const selectedOption = phase.kind === 'choosing' ? options[phase.index] : undefined
-    const identityRows = selectedOption === undefined
-      ? 0
-      : wrapTextWithAnsi(escapedPhysicalLine(selectedOption.value), Math.max(1, width - 2)).length
     const confirmCandidateVisible = optionViewport > 0
       && selectedStart >= optionOffset
       && selectedStart + identityRows <= optionOffset + optionViewport
@@ -1281,11 +1297,16 @@ export class SettingsWorkspacePanel implements Component {
       const canNavigate = (detail?.optionRegion?.rows ?? 0) > 0 && this.paintedViewport >= 3
       const canReadFacts = (detail?.factRegion?.maxOffset ?? 0) > 0 && this.paintedViewport >= 3
       segments = [
-        ...canNavigate ? [{ text: 'Up/Down choose', priority: 5 }] : [],
+        ...canNavigate ? [{ text: 'Up/Down choose', short: 'Up/Down', priority: 5 }] : [],
         ...canReadFacts ? [{ text: 'PgUp/PgDn details', priority: 4 }] : [],
         ...this.paintedChoiceCandidateVisible && this.paintedViewport >= 3
           ? [{ text: 'Enter confirm', priority: 7 }]
           : [],
+        ...copyable && this.paintedViewport >= 3 ? [{
+          text: `${SETTINGS_LOCAL_KEYS.copy} copy value`,
+          short: `${SETTINGS_LOCAL_KEYS.copy} copy`,
+          priority: 6,
+        }] : [],
         { text: 'Esc back', priority: 8 },
       ]
     } else if (this.editPhase.kind === 'pending') {
@@ -1345,6 +1366,8 @@ export class SettingsWorkspacePanel implements Component {
     // row layout already padded/truncated to the pane width.
     const rendered = renderActionBarRow(segments, plan.width)
     this.paintedEnterConfirm = this.choiceField() !== undefined && rendered.includes('Enter confirm')
+    this.paintedChoiceCopy = this.choiceField() !== undefined
+      && rendered.includes(`${SETTINGS_LOCAL_KEYS.copy} copy`)
     return color.textMuted(rendered)
   }
 
@@ -1455,8 +1478,8 @@ export class SettingsWorkspacePanel implements Component {
       if (this.choiceField() === undefined && this.focus !== 'detail') this.confirm()
       return
     }
-    // Choosing remains a transient phase of L2 and consumes every other key.
-    // Page keys scroll its real facts; only arrows/Home/End change the candidate.
+    // Choosing remains a transient phase of L2: only its navigation, confirmation
+    // and visibly painted Copy verb are active. Page keys scroll the real facts.
     if (this.choiceField() !== undefined) {
       if (matchesKey(data, 'up')) return this.moveChoice(-1)
       if (matchesKey(data, 'down')) return this.moveChoice(1)
@@ -1465,6 +1488,10 @@ export class SettingsWorkspacePanel implements Component {
       if (matchesKey(data, 'home')) return this.setChoice(0)
       if (matchesKey(data, 'end')) return this.setChoice(this.choiceCount() - 1)
       if (matchesKey(data, 'enter')) return this.confirmChoice('keyboard')
+      if ((data === SETTINGS_LOCAL_KEYS.copy || data === SETTINGS_LOCAL_KEYS.copy.toUpperCase())
+        && this.paintedChoiceCopy
+        && this.lastRenderWidth === this.intents.columns()
+        && this.lastRenderRows === this.intents.rows()) return this.copy()
       return
     }
     if (matchesKey(data, 'up')) return this.move(-1)
@@ -1771,8 +1798,8 @@ export class SettingsWorkspacePanel implements Component {
     this.refresh()
   }
 
-  /** The keyboard Copy verb: only the Detail view may copy (a hidden action is
-   *  never executed), and the exact source value is the payload. */
+  /** The keyboard Copy verb is Detail-local and carries the exact source value.
+   *  While choosing, the caller additionally requires the painted Copy hint. */
   private copy(): void {
     if (this.focus !== 'detail') return
     this.copySelected()

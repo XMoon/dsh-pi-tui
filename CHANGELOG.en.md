@@ -283,7 +283,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   states paints two chips. Detail actions read `Change…`, `Retry save`,
   `Copy value [C]`, `Confirm` and `Cancel` instead of bracketed verbs, and the
   pinned action bar joins hints with ` · `, keeps `Esc` last and drops whole
-  segments by priority instead of cutting a hint mid-word.
+  segments by priority instead of cutting a hint mid-word. L2 choosing keeps the
+  focused multi-column title unless it would replace the only content row; its
+  keyboard Copy is available only while `c copy` is painted. At 44×8, a long
+  identity may reclaim the optional chooser heading and excess facts (never the
+  original `Value` row), but cannot be confirmed until the full identity and
+  `Enter confirm` are visible together.
 
 - The fullscreen Job workspace now speaks the same visual language as the rest of
   the TUI: the header reads `Job · <id> · <kind>` (a bold identity word and a dim
