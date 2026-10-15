@@ -3,11 +3,12 @@ import assert from 'node:assert/strict'
 import { mkdirSync } from 'node:fs'
 import test from 'node:test'
 import { SESSION_FORMAT_VERSION } from '@deepseek-ai/dsh-session'
-import { connect } from '@stencil-hq/tern'
+import { connect, type PickerGroup } from '@stencil-hq/tern'
 import { join } from 'node:path'
 import { mountTspRenderer } from '../src/tui/tsp/session.ts'
 import { createSessionBrowserReadOwner } from '../src/app/command/session-browser-read.ts'
 import { DirectSessionReader } from '../src/runtime/direct/session-direct.ts'
+import { workspaceKey } from '../src/tui/pickers/sessions.ts'
 import type { DurableModelSelectionReader } from '../src/runtime/direct/model-selection-direct.ts'
 import { createDiag } from '../src/runtime/process/diagnostics.ts'
 import { installTspPane, type TspPane } from './support/tsp-terminal-fixture.ts'
@@ -197,7 +198,15 @@ test('REAL_DIRECT_HEADLESS: cross-workspace persisted Fork lineage reaches the p
     const positions = lineageIds.map((id) => ids.indexOf(id))
     assert.ok(positions[0]! < positions[1]! && positions[1]! < positions[2]!, 'the production Picker preserves parent-before-child order')
     assert.deepEqual(positions.map((index) => items[index]?.depth), [0, 1, 2])
-    assert.deepEqual(props(browserPane).order, ids, 'the current production order does not regroup workspace rows')
+    const order = props(browserPane).order as Array<string | PickerGroup>
+    const groups = order.filter((entry): entry is PickerGroup => typeof entry !== 'string')
+    assert.deepEqual(order.filter((entry): entry is string => typeof entry === 'string'), ids)
+    assert.deepEqual(groups.map((group) => [group.label, group.count]), [
+      [workspaceKey(fixture.workRoot), 1],
+      [workspaceKey(otherWorkspace), 1],
+      [workspaceKey(fixture.workRoot), 1],
+    ])
+    assert.equal(new Set(groups.map((group) => group.group)).size, groups.length, 'each A→B→A run has a distinct PickerGroup identity')
   } finally {
     owner?.dispose()
     diag.dispose()

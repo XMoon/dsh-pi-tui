@@ -1,7 +1,7 @@
 /** Production TSP Session Browser, observed through the SDK's reconciled pane wire. */
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { connect } from '@stencil-hq/tern'
+import { connect, type PickerGroup } from '@stencil-hq/tern'
 import { mountTspRenderer } from '../src/tui/tsp/session.ts'
 import { createSessionBrowserReadOwner } from '../src/app/command/session-browser-read.ts'
 import type { SessionContentSearchPage, SessionProjectionSummary, SessionReader, SessionSummary } from '../src/runtime/session-reader-port.ts'
@@ -27,6 +27,7 @@ const BROWSER = 'session-browser-'
 const props = (pane: TspPane): Record<string, unknown> => pickerProps(pane, BROWSER)
 const picker = (pane: TspPane): WireNode | undefined => pickerNode(pane, BROWSER)
 const items = (pane: TspPane): Array<Record<string, unknown>> => (props(pane).items ?? []) as Array<Record<string, unknown>>
+const order = (pane: TspPane): Array<string | PickerGroup> => props(pane).order as Array<string | PickerGroup>
 const details = (pane: TspPane): WireNode | undefined => layerNodes(pane, BROWSER).find((node) => node.k === 'overlay')
 const detailBody = (pane: TspPane): WireNode | undefined => layerNodes(pane, BROWSER)
   .find((node) => node.k === 'col' && node.id.includes('session-browser-details-body-'))
@@ -152,6 +153,12 @@ test('native Browser is one workspace tree, then a global cards union with Host-
     'session:session-current', 'session:session-other', 'session:session-cross-child',
   ])
   assert.deepEqual(items(pane).map((entry) => entry.depth), [0, 1, 0])
+  assert.deepEqual(order(pane), [
+    { group: 'workspace-run:0', label: 'workspace/project', count: 3 },
+    'session:session-current',
+    'session:session-other',
+    'session:session-cross-child',
+  ])
   assert.equal(items(pane)[0]?.label, 'Needle current title', 'terminal sequences are removed from projected titles')
   assert.ok(pickerActionByBase(pane, 'resume', BROWSER)?.disabled, 'Resume is always disabled in B1-A')
 
@@ -168,6 +175,7 @@ test('native Browser is one workspace tree, then a global cards union with Host-
   await waitUntil('global cards search is ready', () => props(pane).layout === 'cards' && props(pane).state === 'ready')
   assert.equal(props(pane).query, 'needle')
   assert.deepEqual(items(pane).map((entry) => entry.id), ['session:session-current', 'session:session-content'])
+  assert.deepEqual(order(pane), items(pane).map((entry) => entry.id), 'global search Cards do not carry workspace groups')
   const currentCard = items(pane)[0]!
   const contentCard = items(pane)[1]!
   assert.equal((currentCard.badges as Array<Record<string, unknown>>)[0]?.text, 'Both')
@@ -314,7 +322,7 @@ test('projection failure remains secondary to loading and hasMore search status'
   assert.deepEqual(items(pane).map((item) => item.id), ['session:needle-session'])
 })
 
-test('All workspaces retains cross-workspace lineage, orphans, and cycle members', async (t) => {
+test('All workspaces groups contiguous workspace runs without changing lineage, orphans, and cycle members', async (t) => {
   const m = await mounted(t)
   const { pane } = m
   sendAction(pane, 'scope', 'all', picker(pane)!.id)
@@ -329,6 +337,23 @@ test('All workspaces retains cross-workspace lineage, orphans, and cycle members
     'session:session-cycle-b',
   ])
   assert.deepEqual(items(pane).map((entry) => entry.depth), [0, 1, 2, 3, 0, 0, 1])
+  const allOrder = order(pane)
+  const groups = allOrder.filter((entry): entry is PickerGroup => typeof entry !== 'string')
+  assert.deepEqual(allOrder, [
+    { group: 'workspace-run:0', label: 'workspace/project', count: 2 },
+    'session:session-current',
+    'session:session-other',
+    { group: 'workspace-run:1', label: 'workspace/other', count: 1 },
+    'session:session-content',
+    { group: 'workspace-run:2', label: 'workspace/project', count: 1 },
+    'session:session-cross-child',
+    { group: 'workspace-run:3', label: 'workspace/other', count: 3 },
+    'session:session-orphan',
+    'session:session-cycle-a',
+    'session:session-cycle-b',
+  ])
+  assert.equal(new Set(groups.map((group) => group.group)).size, groups.length, 'repeated workspace labels still have unique run identities')
+  assert.deepEqual(groups.map((group) => group.count), [2, 1, 1, 3], 'every listed row belongs to exactly one contiguous workspace run')
 })
 
 test('Details preserves search state, scrolls its own body, and emits read-only Resume intents', async (t) => {

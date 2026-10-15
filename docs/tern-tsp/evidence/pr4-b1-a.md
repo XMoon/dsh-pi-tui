@@ -29,7 +29,7 @@ the stable coverage and evidence tier, not a GUI or merge approval.
 |---|---|---|
 | R01 — list, main rows, Current vs selection, unavailable/empty/error | PASS | `tern-tsp-session-browser-read.test.ts`: `listing unavailable, empty, and list failure remain distinct`; `tern-tsp-session-browser.test.ts`: native tree and Current/selected assertions. Subagents and unlisted rows do not become rows. |
 | R02 — projection enrichment, stable Picker, stale batch | PASS | Read-owner projection tests; `55-row projection batches keep the native Picker identity and selected row` exercises the initial and subsequent batches and late enrichment; close/retire rejects late projection. |
-| R03 — workspace scope and lineage | STOP_GROUP_LINEAGE_UX — Owner decision pending | `tern-tsp-session-browser-direct.test.ts` persists an isolated cross-workspace parentSession/isSeeded chain through official Direct persistence, then exercises the real Direct Reader, read owner, and production Picker order/depth. A real Tern 0.8.3 Picker study over those DirectReader rows shows one group per workspace reorders A→B→A (the grandchild precedes its parent); contiguous workspace runs preserve parent-first order but repeat the A header. The study's child rows are persisted fork-lineage headers, not a cross-cwd `SessionStore.fork()` execution: the current `SessionStore.fork()` inherits its source cwd. Screenshots are retained under ignored `temp/tern-pane-*`; no grouping redesign is chosen here. |
+| R03 — workspace scope and lineage | PASS — Owner accepted contiguous workspace-run groups | `tern-tsp-session-browser.test.ts` verifies same-workspace parent grouping, A→B→A repeated groups, unique run IDs, original depth, and orphan/cycle membership without duplication; the Direct integration test verifies the persisted A→B→A chain through DirectSessionReader → read owner → production Picker order. A real Tern 0.8.3 screenshot drives the production Presenter with those DirectReader-output rows and shows the repeated A headings in parent-first order. The isolated child rows are official persisted parentSession/isSeeded headers, not a cross-CWD `SessionStore.fork()` execution; current `SessionStore.fork()` inherits its source cwd. The Owner explicitly accepted contiguous grouping and repeated headings; global workspace reordering remains forbidden. |
 | R04 — canonical query, debounce, global Cards, content-only hit | PASS | Controlled timer test pins the 250 ms boundary; integrated read + Presenter test keeps a Host content-only hit whose metadata does not match; real Tern headless flow paints the Host result and excerpt. |
 | R05 — metadata/Host union order and snippets | PASS | Read-owner test checks metadata list order, Host-only page order, deduplication, `Metadata`/`Content`/`Both`, and Host-owned snippets; existing PiTui session-search regression remains in scope. |
 | R06 — unavailable/error content search with local metadata retained | PASS | Read-owner unavailable/error tests and native empty-metadata/unavailable state test distinguish ordinary no-match from unavailable content search; combined projection-failure tests keep Host loading, unavailable, error, and `hasMore` status visible. |
@@ -40,7 +40,7 @@ the stable coverage and evidence tier, not a GUI or merge approval.
 | R11 — capability and Reader scroll | PASS | Capability negatives refuse missing kinds/`scroll` and produce no scroll op; native tests target the current Reader body; Tern 0.8.3 headless flow checks the 400×440 Reader tail. |
 | R12 — modal priority/exclusivity and retired input | PASS | Renderer integration suspends/restores Browser state around the modal seat, verifies Model/Browser/Preset exclusivity, rejects a retired Browser panel event, and checks that disposal clears all three exposed presenter getters. |
 | R13 — no command admission or PiTui behavior change | PASS (scope) | No command/route registration or existing session command implementation changed. Existing command-admission and PiTui session-picker behavior are unchanged; their validation is recorded with the final PR gates. |
-| R14 — visual qualification | PARTIAL; full production-Presenter matrix must be rerun on the final delta | The current delta has a real Tern 0.8.3 headless Picker grouping comparison at 1000×560, driven by isolated DirectReader persisted rows; it is F1 layout evidence, not a production-Presenter viewport matrix. The earlier multi-size production screenshots predate this review delta and do not qualify it. `REAL_TERN_GUI`, physical GUI/IME/wheel/theme, and Owner visual sign-off remain **NOT_VERIFIED**. |
+| R14 — visual qualification | PARTIAL; full production-Presenter matrix must be rerun on the final delta | The current delta has a real Tern 0.8.3 production-Presenter A→B→A screenshot at 1280×800 using DirectReader-output persisted rows. This is F1 layout evidence at one viewport, not the full production-Presenter viewport matrix; earlier multi-size screenshots predate this delta and do not qualify it. `REAL_TERN_GUI`, physical GUI/IME/wheel/theme, and Owner physical-GUI sign-off remain **NOT_VERIFIED**. |
 | R15 — Direct persisted main Session → same Presenter | PASS | `tern-tsp-session-browser-direct.test.ts` exercises a cold persisted main Session through the real Direct `SessionReader`, read owner, and native TSP Presenter rather than a precomputed capability flag. |
 | R16 — Remote read-only semantics | UNKNOWN | No runnable Remote TSP fixture was available for this slice. No Remote Session switch or new Remote wire is claimed. |
 
@@ -54,9 +54,10 @@ by the available `tern ctl key` path; physical/client PageUp/PageDown remains
 
 The old 400×600 capture showed the disabled Resume label, but that observation
 is historical and is neither current-tree evidence nor an Owner waiver. The new
-F1 study qualifies only the native Picker grouping/layout tradeoff described in
-R03; it does not certify the production Presenter viewport matrix or settle any
-B1-B write-enabled UX decision.
+F1 study drives the production Presenter with DirectReader-output A→B→A rows and
+qualifies the Owner-selected grouping at one viewport; it does not certify the
+full production Presenter viewport matrix or settle any B1-B write-enabled UX
+decision.
 
 ## Validation record
 
