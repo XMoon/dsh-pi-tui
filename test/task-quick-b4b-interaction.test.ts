@@ -879,35 +879,31 @@ test('B4B-f6 the admission probe measures the chrome once per render window', as
   }
 })
 
-/** R7-F1 — a mode flip with an UNCHANGED raw visual-line state must still
- *  refresh the hint: '/' opens the dropdown at the last line (raw bool
- *  unchanged), Down goes to the dropdown, Esc closes it (Down re-admitted)
- *  and the hint is back — both flips recompose because there is NO equality
- *  gate on the transition events. */
-test('B4B-f7 an autocomplete open/close with unchanged visual state still refreshes the hint', async () => {
+/** R7-F1/R8-F5 — a mode flip with an UNCHANGED raw visual-line state must
+ *  still refresh the hint: '/' opens the dropdown at the last line (the raw
+ *  visual-line truth is unchanged), the open event recomposes, Down routes
+ *  to the picker; Esc closes it, the close event recomposes, and the hint
+ *  returns to its pre-dropdown value. Both directions are HARD assertions —
+ *  a defect that skips either recompose fails here. */
+test('B4B-f7 an autocomplete open/close with unchanged visual state recomposes both ways', async () => {
   const h = await startQuick({ roster: [job('j1', 'build', 'running')] })
   for (let i = 0; i < 8; i++) await new Promise(r => setTimeout(r, 0))
   await h.vt.waitForRender()
-  // Enter a slash command name: the caret stays on the last visual line the
-  // whole time (raw visual-line state constant), but '/' opens the
-  // autocomplete dropdown — Down now belongs to the picker, NOT to Quick.
+  // The dropdown needs a provider — the production MentionProvider is
+  // installed via setCommandCompletions (the same path /tasks tests use).
+  h.app.setCommandCompletions([{ name: 'tasks', description: 'Task Center' }], '/tmp')
+  // Type a slash command prefix: the caret stays on the last visual line
+  // (raw visual-line truth unchanged); '/' opens the autocomplete dropdown.
   h.vt.sendInput('/')
   await h.vt.waitForRender()
-  const hintBefore = view(h.vt).includes('↓ view')
-  h.vt.sendInput('t')
+  assert.equal(h.app.isShowingAutocompleteForTest(), true, 'the dropdown must be open after /')
+  const hintOpen = view(h.vt).includes('↓ view')
+  // While the dropdown owns Down, the hint must NOT advertise the Quick
+  // entry (the admission gate refuses Down).
+  assert.equal(hintOpen, false, `the open dropdown must hide the ↓ hint:\n${view(h.vt)}`)
+  // Esc closes the dropdown: Down is re-admitted and the hint returns.
+  h.vt.sendInput('\x1b')
   await h.vt.waitForRender()
-  const dropdownOpen = h.app.isShowingAutocompleteForTest()
-  const hintWithDropdown = view(h.vt).includes('↓ view')
-  if (dropdownOpen && hintWithDropdown !== hintBefore) {
-    // The open flip recomposed the hint (the flip-only contract).
-    h.vt.sendInput('\x1b')
-    await h.vt.waitForRender()
-    assert.equal(hintBefore, view(h.vt).includes('↓ view'),
-      'the close flip restores the hint to its pre-dropdown state')
-  }
-  // Either way the invariant: after Esc the hint matches the pre-dropdown
-  // composition and the Down still works (the editor keeps the key or Quick
-  // opens — never a swallowed key with a stale hint).
-  h.roster.rows = h.roster.rows
-  await h.vt.waitForRender()
+  assert.equal(h.app.isShowingAutocompleteForTest(), false, 'Esc closes the dropdown')
+  assert.equal(view(h.vt).includes('↓ view'), true, `the closed dropdown restores the ↓ hint:\n${view(h.vt)}`)
 })

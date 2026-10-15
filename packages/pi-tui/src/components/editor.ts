@@ -434,7 +434,7 @@ export class Editor implements Component, Focusable {
 	 *   document or cursor directly.
 	 * The host recomposes its hint per event and re-reads the live facts
 	 * through the read-only seam; the editor does no content comparison. */
-	public onVisualLineBoundaryChanged?: (reason: "navigation" | "autocomplete" | "history" | "paste" | "programmatic") => void;
+	public onVisualLineBoundaryChanged?: (reason: "navigation" | "autocomplete" | "history" | "paste" | "programmatic", onLastVisualLine: boolean) => void;
 	public disableSubmit: boolean = false;
 
 	constructor(tui: TUI, theme: EditorTheme, options: EditorOptions = {}) {
@@ -536,15 +536,19 @@ export class Editor implements Component, Focusable {
 	 * matches. */
 	private notifyVisualLineBoundary(reason: "navigation" | "autocomplete" | "history" | "paste" | "programmatic"): void {
 		if (this.lastVisualLineCount === null || this.lastCursorVisualLine === null) {
-			// No published facts: one authoritative rebuild.
-			this.lastCursorVisualLine = this.findCurrentVisualLine(this.buildVisualLineMap(this.lastWidth));
-			this.lastVisualLineCount = this.buildVisualLineMap(this.lastWidth).length;
+			// No published facts: ONE authoritative rebuild (single map, both
+			// facts read from it — review R8-F3).
+			const visualLines = this.buildVisualLineMap(this.lastWidth);
+			this.lastCursorVisualLine = this.findCurrentVisualLine(visualLines);
+			this.lastVisualLineCount = visualLines.length;
 		}
 		const onLast = this.lastCursorVisualLine === this.lastVisualLineCount - 1;
 		this.lastVisualLineCount = null;
 		this.lastCursorVisualLine = null;
-		this.onVisualLineBoundaryChanged?.(reason);
-		void onLast;
+		// The payload: the transition class PLUS the post-transition raw
+		// boundary state (computed from the move's own map facts — review
+		// R8-F3: never computed-and-discarded).
+		this.onVisualLineBoundaryChanged?.(reason, onLast);
 	}
 
 	/**
@@ -917,9 +921,11 @@ export class Editor implements Component, Focusable {
 
 		// Handle character jump mode (awaiting next character to jump to)
 		if (this.jumpMode !== null) {
-			// Cancel if the hotkey is pressed again
+			// Cancel if the hotkey is pressed again (X063: the admission
+			// flips back to admissible — notify).
 			if (kb.matches(data, "tui.editor.jumpForward") || kb.matches(data, "tui.editor.jumpBackward")) {
 				this.jumpMode = null;
+				this.notifyVisualLineBoundary("autocomplete");
 				return;
 			}
 
@@ -1219,13 +1225,17 @@ export class Editor implements Component, Focusable {
 			return;
 		}
 
-		// Character jump mode triggers
+		// Character jump mode triggers (X063: an armed jump REFUSES Down —
+		// the admission flips with no cursor move; the same-hotkey cancel
+		// flips it back. Both notify.)
 		if (kb.matches(data, "tui.editor.jumpForward")) {
-			this.jumpMode = "forward";
+			this.jumpMode = this.jumpMode === "forward" ? null : "forward";
+			this.notifyVisualLineBoundary("autocomplete");
 			return;
 		}
 		if (kb.matches(data, "tui.editor.jumpBackward")) {
-			this.jumpMode = "backward";
+			this.jumpMode = this.jumpMode === "backward" ? null : "backward";
+			this.notifyVisualLineBoundary("autocomplete");
 			return;
 		}
 
