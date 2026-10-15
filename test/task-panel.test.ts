@@ -87,13 +87,13 @@ test('a 1-row search-mode grant paints only the search input and acks nothing', 
       mode: 'full',
       header: 'tasks · subagents',
       enableSearch: true,
-      initialSearchMode: true,
       onViewportExpose: (ids) => { exposed.push(...ids) },
     },
     () => {},
     () => {},
     () => {},
   )
+  panel.handleInput('/') // explicit search mode
   panel.setMaxRows(1)
   panel.render(100)
   // The degraded layout drops the selected main row (only the search

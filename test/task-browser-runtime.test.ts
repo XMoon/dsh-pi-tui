@@ -819,7 +819,7 @@ test('PR2 review: the surface wires onWorkflowAction through the single authorit
     'the member open path must use the single authority resolver')
   assert.ok(!handler.replace(/\/\/.*$/gm, '').includes("row.depth !== 1"),
     'the surface must not re-implement the authority conditions')
-  assert.ok(handler.includes("openTasksBrowser('full', undefined, { kind: 'subagents', childIds: action.childIds }"),
+  assert.ok(handler.includes("openTasksBrowser('full', { kind: 'subagents', childIds: action.childIds }"),
     'the scoped-agent actions must open the existing Task Browser with the exact child-id scope')
 })
 
@@ -833,16 +833,18 @@ test('PR2 review: every task-browser close path resets the dataset scope', () =>
     'the selection close path must reset the dataset scope')
   assert.ok(selectBlock.includes('activeTaskBrowserToken = undefined'),
     'the selection close path must invalidate delayed actions')
-  const cancelMarker = '(viewState) => {'
+  const cancelMarker = '() => {'
   const cancelBlock = open.slice(open.indexOf(cancelMarker), open.indexOf('},', open.indexOf(cancelMarker)) + 3)
   assert.ok(cancelBlock.includes('resetTaskBrowserScope()'),
     'the Esc close path must reset the dataset scope')
   assert.ok(cancelBlock.includes('activeTaskBrowserToken = undefined'),
     'the Esc close path must invalidate delayed actions')
-  // The Quick→Full transition must NOT reset the scope (it preserves it).
-  const viewFullBlock = open.slice(open.indexOf('onViewFull:'), open.indexOf('onStop:'))
-  assert.ok(!viewFullBlock.includes('resetTaskBrowserScope'),
-    'the Quick→Full promotion must preserve the dataset scope')
+  // B4-B: the modal Quick and its Quick→Full promotion are retired — no
+  // promotion callback/option survives in the production source.
+  assert.ok(!open.includes('onViewFull'),
+    'the retired promotion callback must not reappear in the open path')
+  assert.ok(!open.includes('restoreState'),
+    'the retired Quick→Full restore input must not reappear in the open path')
 })
 
 test('PR2 review: a scoped viewer never re-arms acknowledged global failures (review P2)', async () => {

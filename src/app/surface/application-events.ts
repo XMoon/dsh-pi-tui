@@ -108,7 +108,9 @@ export interface ApplicationEventsSurface {
   readonly composer: SubmissionComposerPort
   handleTerminalFocus(focused: boolean): void
   noteUserInput(): void
-  openTasksBrowser(viewMode: 'quick' | 'full'): void
+  /** Open the Full Task Center. The `quick` modal is retired (B4-B): the
+   *  on-demand Task Quick accessory replaced it. */
+  openTasksBrowser(viewMode: 'full'): void
 }
 
 /**

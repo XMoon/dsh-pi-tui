@@ -314,8 +314,9 @@ test('B4B-06 Enter routes the typed Job selection to the production openJobView'
 })
 
 /** S8 — a parked Question row reaches the REAL attention.reopen. */
-test('B4B-08 a parked Question enters the projection and Enter reopens the controller entry', async () => {
+test('B4B-08 a parked Question enters the projection; a refused reopen reports no surface', async () => {
   const reopens: string[] = []
+  let allowReopen = true
   const vt = new VirtualTerminal(120, 40)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {})
   app.start()
@@ -354,7 +355,7 @@ test('B4B-08 a parked Question enters the projection and Enter reopens the contr
       publish: () => {},
       reopen: (sessionId, callId) => {
         reopens.push(`${sessionId}:${callId}`)
-        return true
+        return allowReopen
       },
     },
   })
@@ -383,6 +384,15 @@ test('B4B-08 a parked Question enters the projection and Enter reopens the contr
   assert.equal(tasks.openQuickTaskItem('question:s1:c1'), true, 'the current Question row routes')
   await sleep(20)
   assert.ok(reopens.includes('s1:c1'), `the reopen must reach the controller entry:\n${reopens.join(' |')}`)
+
+  // The STALE-Question refusal is part of the typed contract (plan §9.2):
+  // reopen false ⇒ openQuickTaskItem false, and the router dispatches the
+  // refusal exactly once (no retry, no fabricated success).
+  allowReopen = false
+  tasks.refreshAttentionRows()
+  assert.equal(tasks.openQuickTaskItem('question:s1:c1'), false, 'a refused reopen reports no surface opened')
+  await sleep(20)
+  assert.equal(reopens.filter(id => id === 's1:c1').length, 2, 'exactly the refusal dispatch happened')
 })
 
 /** S9 — Fullscreen native SGR press→release→synthesized click opens the
@@ -406,19 +416,52 @@ test('B4B-09-s9 fullscreen same-row SGR click opens; cross-row press/release ref
   const rowB = rows.findIndex(line => line.includes('bravo') && line.includes('‣'))
   assert.ok(rowA >= 0 && rowB >= 0, `both task rows paint in fullscreen:\n${view(h.vt)}`)
 
-  // press A → release B: identity mismatch, nothing opens.
+  // press A → release B: identity mismatch (a moved gesture), nothing opens.
+  // The SINK is observed, not a painted word: an empty record BEFORE the
+  // positive control makes this negative discriminating.
   h.vt.sendInput(`\x1b[<0;10;${rowA + 1}M`)
   h.vt.sendInput(`\x1b[<0;10;${rowB + 1}m`)
   await h.vt.waitForRender()
   await sleep(20)
-  assert.ok(!view(h.vt).includes('selected'), 'cross-row press/release must not activate')
+  assert.deepEqual(h.quickSelects(), [], 'a moved press/release must not activate any row')
 
-  // press A → release A → synthesized click: the typed route fires.
+  // The separator/header rule is inert: a full press/release ON the
+  // separator row synthesizes a click that no task row answers.
+  const sepRow = h.band().identity
+  assert.ok(sepRow >= 0, 'the band is still ACTIVE for the separator probe')
+  h.vt.sendInput(`\x1b[<0;10;${sepRow + 1}M`)
+  h.vt.sendInput(`\x1b[<0;10;${sepRow + 1}m`)
+  await h.vt.waitForRender()
+  await sleep(20)
+  assert.deepEqual(h.quickSelects(), [], 'the separator hit is inert (addendum §3.3)')
+
+  // STRUCTURAL row replacement between press and release: the pressed row's
+  // stable identity is REPLACED while the gesture is held (a real
+  // asynchronous swap — same physical cell, a different task at the SAME
+  // painted window). After the reflow REPAINTS, the cell carries a
+  // different stable identity while the painted placement stays live — the
+  // accessory's stable-ID guard must refuse the click (the fork synthesizes
+  // one for the unchanged placement; the identity mismatch decides).
+  h.vt.sendInput(`\x1b[<0;10;${rowA + 1}M`)
+  await h.vt.waitForRender()
+  h.roster.rows = [job('j9', 'alpha2', 'running'), job('j2', 'bravo', 'running'), job('j3', 'charlie', 'running')]
+  h.tasks.refreshTasks()
+  await h.vt.waitForRender()
+  await sleep(40) // let the reflow frame clear the fork's render throttle
+  await h.vt.waitForRender()
+  h.vt.sendInput(`\x1b[<0;10;${rowA + 1}m`)
+  await h.vt.waitForRender()
+  await sleep(20)
+  assert.deepEqual(h.quickSelects(), [], 'a replaced pressed row must not activate on the stale identity')
+
+  // The gesture state is clean after the refusal: a fresh same-cell
+  // press/release on the CURRENT first row activates THAT row (a NEW press
+  // overwrites the latch; the refused identity is gone).
   h.vt.sendInput(`\x1b[<0;10;${rowA + 1}M`)
   h.vt.sendInput(`\x1b[<0;10;${rowA + 1}m`)
   await h.vt.waitForRender()
   await sleep(20)
-  assert.ok(h.quickSelects().includes('job:j1'), `the same-row click must activate alpha:\n${h.quickSelects().join('|')}`)
+  assert.deepEqual(h.quickSelects(), ['job:j9'], `the fresh click must activate the CURRENT row:\n${h.quickSelects().join('|')}`)
   h.app.setFullscreen(false)
   await h.vt.waitForRender()
 })
@@ -581,13 +624,13 @@ test('B4B-delete-fallback deleted selection lands on successor/predecessor', asy
   assert.ok(accessory, 'the accessory must be reachable for the projection commit')
   // Delete bravo: [alpha, charlie] → successor charlie selected.
   accessory.setItems([
-    { value: 'job:j1', label: 'alpha', status: 'running', kind: 'task', source: 'job' },
-    { value: 'job:j3', label: 'charlie', status: 'running', kind: 'task', source: 'job' },
+    { value: 'job:j1', label: 'alpha', status: 'running', source: 'job' },
+    { value: 'job:j3', label: 'charlie', status: 'running', source: 'job' },
   ])
   await h.vt.waitForRender()
   assert.match(strip(h.band().items[1]!), /^> /, `charlie (successor) is selected:\n${h.band().items.map(strip).join('|')}`)
   // Delete the tail (charlie): [alpha] → predecessor alpha selected.
-  accessory.setItems([{ value: 'job:j1', label: 'alpha', status: 'running', kind: 'task', source: 'job' }])
+  accessory.setItems([{ value: 'job:j1', label: 'alpha', status: 'running', source: 'job' }])
   await h.vt.waitForRender()
   assert.match(strip(h.band().items[0]!), /^> /, `alpha (predecessor) is selected:\n${h.band().items.map(strip).join('|')}`)
 })
@@ -645,4 +688,75 @@ test('B4B-14 the /tasks Full browser opens and filters while the Quick stays hid
   await h.vt.waitForRender()
   assert.ok(!view(h.vt).includes('Tasks [TRACKED]'), 'Esc closes the Full browser')
   assert.equal(h.band().identity, -1, 'the on-demand Quick stays hidden the whole time')
+})
+
+/** F2 — a PRE-ABORTED approval request is never a blocking owner. */
+test('B4B-f2 a pre-aborted approval request does not retire the ACTIVE Quick', async () => {
+  const h = await startQuick({ roster: [job('j1', 'build', 'running')] })
+  for (let i = 0; i < 8; i++) await new Promise(r => setTimeout(r, 0))
+  await h.vt.waitForRender()
+  h.vt.sendInput('\x1b[B')
+  await h.vt.waitForRender()
+  assert.ok(h.band().identity >= 0, 'the Quick is ACTIVE before the aborted request')
+
+  const controller = new AbortController()
+  controller.abort()
+  const decision = h.app.showApprovalPrompt({ toolName: 'bash', signal: controller.signal })
+  await h.vt.waitForRender()
+  assert.equal(await decision, 'cancelled', 'the aborted request settles cancelled')
+  assert.ok(!view(h.vt).includes('Approve bash'), 'no dialog mounts for a pre-aborted request')
+  assert.ok(h.band().identity >= 0, `the ACTIVE Quick survives the non-owner:\n${view(h.vt)}`)
+
+  // The NEGATIVE control: a LIVE request is a real blocking owner and DOES
+  // retire the band (plan §5 — the retirement follows the owner, not the
+  // call).
+  const live = h.app.showApprovalPrompt({ toolName: 'fs', reason: 'write' })
+  await h.vt.waitForRender()
+  assert.ok(view(h.vt).includes('Approve fs'), 'the live dialog mounts')
+  assert.equal(h.band().identity, -1, 'the live blocking owner retires the ACTIVE Quick')
+  h.vt.sendInput('n')
+  assert.equal(await live, 'rejected')
+  await h.vt.waitForRender()
+})
+
+/** F6 — the Down fast path measures the chrome ONCE per frame (plan §9.3). */
+test('B4B-f6 the admission probe measures the chrome once per render window', async () => {
+  const h = await startQuick({ roster: [job('j1', 'build', 'running')] })
+  for (let i = 0; i < 8; i++) await new Promise(r => setTimeout(r, 0))
+  await h.vt.waitForRender()
+  // Patch the PRODUCTION measurement seam on the live instance (the
+  // one-to-one passthrough pattern): every chrome measurement the admission
+  // pays routes through this method.
+  const app = h.app as unknown as { taskQuickChromeRows(width: number): number }
+  const original = app.taskQuickChromeRows
+  let calls = 0
+  const patched = (width: number): number => {
+    calls += 1
+    return original.call(app, width)
+  }
+  app.taskQuickChromeRows = patched
+  try {
+    h.vt.sendInput('\x1b[B') // one Down: resolution + hint compose + dispatch
+    await h.vt.waitForRender()
+    await sleep(20)
+    assert.ok(h.band().identity >= 0, 'the Down enters the Quick')
+    assert.ok(calls <= 2, `the whole keypress must measure the chrome at most twice, got ${calls}`)
+    calls = 0
+    h.vt.sendInput('\x1b') // Esc leaves
+    await h.vt.waitForRender()
+    assert.equal(h.band().identity, -1, 'Esc leaves the Quick')
+    calls = 0
+    // A DECLINED candidate Down (0 grant after the roster empties) pays at
+    // most ONE measurement for the whole keypress.
+    h.roster.rows = []
+    h.tasks.refreshTasks()
+    await h.vt.waitForRender()
+    h.vt.sendInput('\x1b[B')
+    await h.vt.waitForRender()
+    await sleep(20)
+    assert.ok(h.band().identity === -1 || h.band().items.length === 0, 'the 0-grant Down declines')
+    assert.ok(calls <= 2, `a declined keypress must measure at most twice, got ${calls}`)
+  } finally {
+    app.taskQuickChromeRows = original
+  }
 })

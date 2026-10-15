@@ -520,5 +520,5 @@ test('the projection keeps the Quick policy and drops the modal-only promotion r
   assert.match(projected[0]!.value, /^question:/)
   assert.equal(projected[0]!.source, 'question')
   assert.equal(projected[0]!.status, 'awaiting answer')
-  assert.ok(projected.every(row => row.kind !== 'view-full'))
+  assert.ok(projected.every(row => row.source !== undefined || row.value.startsWith('question:')))
 })

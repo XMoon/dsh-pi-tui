@@ -147,14 +147,15 @@ export interface TaskQuestionAttention {
 }
 
 /**
- * The presentation state carried from Quick Tasks into the full Task Center
- * (and back out through `getViewState()`).
+ * The Full Task Browser's presentation snapshot (the panel's current scope,
+ * search state and selection — what the Handle exposes for embedders/tests;
+ * the Quick→Full restore round trip retired with the modal Quick, B4-B).
  *
- * The lifecycle owner is this runtime — it stores `quickTaskState` and
- * `restoreState` — so the type lives here and the TUI panel consumes it as a
- * TYPE only (TS4 plan §13/§14). The row model (`TaskPanelItem`, `TaskScope`)
- * stays presentation-owned in `task-presentation.ts`, and the concrete
- * `TaskBrowserPanel` stays TUI-owned.
+ * The lifecycle owner is this runtime, so the type lives here and the TUI
+ * panel consumes it as a TYPE only (TS4 plan §13/§14). The row model
+ * (`TaskPanelItem`, `TaskScope`) stays presentation-owned in
+ * `task-presentation.ts`, and the concrete `TaskBrowserPanel` stays
+ * TUI-owned.
  */
 export interface TaskBrowserViewState {
   readonly mode: 'full'
@@ -210,13 +211,12 @@ export interface TaskRuntime {
   hasTask(childId: string): boolean
   /** Reset the whole Task Center on a session-generation bump. */
   resetTasks(): void
-  /** Open the Task Browser (`full` = `/tasks` and the Workflow-scoped
-   *  views). The `quick` modal is retired (Phase 3B/B4-B): the on-demand
-   *  Task Quick accessory replaced it, and no production caller opens the
-   *  quick mode any more. */
+  /** Open the Task Browser (the `/tasks` Full Task Center and the
+   *  Workflow-scoped views). The `quick` modal and its Quick→Full restore
+   *  round trip are retired (Phase 3B/B4-B): the on-demand Task Quick
+   *  accessory replaced the modal, and every close lands on the editor. */
   openTasksBrowser(
     viewMode: 'full',
-    restoreState?: TaskBrowserViewState,
     scope?: TaskBrowserDatasetScope,
     header?: string,
   ): void
@@ -228,7 +228,9 @@ export interface TaskRuntime {
    * `attention.reopen`, subagent `enterView`, Job view — exactly as the
    * Full browser's selection does; never a Stop; never a second authority.
    * Returns `false` (no surface opened) when the row is unreachable in the
-   * current projection, the session fence fails, or cleanup has started.
+   * current projection, the session fence fails, cleanup has started, or
+   * the Question row went stale (`attention.reopen` refuses); a Job /
+   * subagent row that survives the fences always opens its routed surface.
    */
   openQuickTaskItem(value: string): boolean
   /** Open one Job from the Task Browser (a subagent job may replace it). */
@@ -328,11 +330,10 @@ function taskPanelItems(target: readonly TaskBrowserRow[]): TaskPanelItem[] {
 }
 
 /**
- * The ONE passive Quick projection (Phase 3B / B4-A): the SAME Quick
- * active/ancestor/attention policy the modal Task Browser applies when it opens
- * in Quick mode, over the SAME composed rows (parked Question attention above
- * the work rows), with the modal-only `view-full` promotion row removed — that
- * row is a keyboard promotion action inside the modal, not a task.
+ * The ONE passive Quick projection (Phase 3B / B4-A): the active/ancestor/
+ * attention policy over the composed rows (parked Question attention above
+ * the work rows). The modal-only `view-full` promotion row is retired with
+ * the modal Quick (B4-B) — a keyboard promotion action is not a task.
  *
  * It is a pure read over the runtime's already-committed row facts plus the
  * Question controller's detached attention model: it never lists a source,
@@ -348,10 +349,10 @@ export function quickTaskProjection(
   return projectTaskItems(items, {
     scope: 'active',
     autoExpandRunning: true,
-    // Quick surfaces attention rows only while no live work is present — the
-    // same condition the modal Quick evaluates at open.
+    // Quick surfaces attention rows only while no live work is present —
+    // the same condition the retired modal Quick evaluated at open.
     includeAttentionInActive: !items.some(isTaskItemActive),
-  }).rows.filter(item => item.kind !== 'view-full')
+  }).rows
 }
 
 /**
@@ -426,16 +427,17 @@ export function createTaskRuntime(options: TaskRuntimeOptions): TaskRuntime {
   let taskBrowserScope: TaskBrowserDatasetScope = { kind: 'all' }
   let activeTaskBrowser: TaskBrowserHandle | undefined
   let activeTaskBrowserToken: object | undefined
-  /** The open browser's mode: Question attention rows are mode-dependent
-   *  (Quick lists parked ones only, Full lists every actionable one). */
+  /** The open browser's mode (always `'full'` when a browser is open — the
+   *  Quick modal is retired; Full lists every actionable attention row).
+   *  `undefined` = no browser open. */
   let activeTaskBrowserMode: 'full' | undefined
   /**
-   * Monotonic identity of the LAST opened Task Browser. The navigation tails
-   * (Esc → Quick restore, Quick → Full promotion) close over the epoch of the
-   * browser that opened them, so a browser a synchronous callback opened while
-   * the old one was closing can never be overwritten. A retired browser's own
-   * token is NOT such a fence: its own `onRetired` legitimately clears it, so
-   * "token is clear" cannot be told apart from "someone newer owns the slot".
+   * Monotonic identity of the LAST opened Task Browser. The close tails
+   * close over the epoch of the browser that opened them, so a browser a
+   * synchronous callback opened while the old one was closing can never be
+   * overwritten. A retired browser's own token is NOT such a fence: its own
+   * `onRetired` legitimately clears it, so "token is clear" cannot be told
+   * apart from "someone newer owns the slot".
    */
   let taskBrowserEpoch = 0
   let activeJobViewerClose: (() => void) | undefined
@@ -564,11 +566,9 @@ export function createTaskRuntime(options: TaskRuntimeOptions): TaskRuntime {
    */
   const taskPanelItemsWithAttention = (
     rows: readonly TaskBrowserRow[],
-    mode: 'quick' | 'full',
   ): TaskPanelItem[] => {
     const attention = options.attention.rows()
-    const questionItems = mode === 'quick' ? quickQuestionRows(attention) : fullQuestionRows(attention)
-    return [...questionItems, ...taskPanelItems(rows)]
+    return [...fullQuestionRows(attention), ...taskPanelItems(rows)]
   }
 
   /**
@@ -601,7 +601,7 @@ export function createTaskRuntime(options: TaskRuntimeOptions): TaskRuntime {
       // No browser open: only the select-path identity source is updated.
       return
     }
-    activeTaskBrowser?.setItems(taskPanelItemsWithAttention(rows, activeTaskBrowserMode), preferred)
+    activeTaskBrowser?.setItems(taskPanelItemsWithAttention(rows), preferred)
   }
   const commitBadge = (running: ReadonlyArray<{ id: string; label: string }>): void => {
     if (options.isCleanedUp()) return
@@ -911,7 +911,8 @@ export function createTaskRuntime(options: TaskRuntimeOptions): TaskRuntime {
    * never the modal-scoped rows, a label, or the footer badge. The open
    * itself runs the ONE `resolveTaskSelection` router. `false` = no surface
    * opened (stale/unreachable row, fence, cleanup); the app never re-opens
-   * the hidden Quick on a refusal.
+   * the hidden Quick on a refusal; `true` = the routed surface opened
+   * (the only refusal is a stale Question row).
    */
   const openQuickTaskItem = (value: string): boolean => {
     if (options.isCleanedUp()) return false
@@ -925,6 +926,17 @@ export function createTaskRuntime(options: TaskRuntimeOptions): TaskRuntime {
     // switched must not open the OLD session's detail.
     const subject = source.captureSubject()
     if (!source.subjectMatches(subject)) return false
+    // The only REFUSAL the router can produce is a stale Question row
+    // (`attention.reopen` false — plan §9.2: false, nothing opens, the
+    // caller stays usable). A Job / subagent row that survives the
+    // projection and the subject fence always opens its routed surface
+    // (the Job detail overlay or the subagent transcript), even though its
+    // browser disposition is `'keep-open'` — that disposition describes the
+    // CALLER's survival, not whether a surface opened.
+    const questionIdentity = questionIdentityOf(value)
+    if (questionIdentity !== undefined) {
+      return options.attention.reopen(questionIdentity.sessionId, questionIdentity.callId)
+    }
     resolveTaskSelection(value, taskBrowserGlobalRows)
     return true
   }
@@ -932,11 +944,10 @@ export function createTaskRuntime(options: TaskRuntimeOptions): TaskRuntime {
   /**
    * Open the Task Browser. `full` is the `/tasks` surface and every scoped
    * view; the `quick` modal is retired (B4-B — the on-demand Task Quick
-   * accessory replaced it).
+   * accessory replaced it) and with it the Quick→Full restore input.
    */
   const openTasksBrowser = (
     viewMode: 'full',
-    restoreState?: TaskBrowserViewState,
     scope?: TaskBrowserDatasetScope,
     header?: string,
   ): void => {
@@ -944,10 +955,9 @@ export function createTaskRuntime(options: TaskRuntimeOptions): TaskRuntime {
     const browserSessionId = source.sessionId()
     if (options.isCleanedUp() || browserSessionId === undefined) return
     // PR2 plan §10.5/§10.8: an EXPLICIT scope (a Workflow phase/run
-    // dataset) becomes the browser's dataset scope; a transition
-    // (Quick→Full / Full→Quick) without one keeps the current scope; a
-    // fresh ordinary open after a close always starts from `all` (the
-    // close paths reset it). The scope applies at EVERY runtime commit.
+    // dataset) becomes the browser's dataset scope; a fresh ordinary open
+    // after a close always starts from `all` (the close paths reset it).
+    // The scope applies at EVERY runtime commit.
     if (scope !== undefined) taskBrowserScope = scope
     taskRuntime?.setScope(taskBrowserScope)
     // The destructive-intent fence is captured at OPEN time: a Stop
@@ -1084,14 +1094,10 @@ export function createTaskRuntime(options: TaskRuntimeOptions): TaskRuntime {
     // Re-publish the parked count with the same fresh authority: the footer
     // affordance must never lag a Question that is already known to be pending.
     options.attention.publish()
-    const initialScope = restoreState?.scope ?? 'all'
-    const initialQuery = restoreState?.searchQuery ?? ''
-    const initialSelected = restoreState?.selectedId === 'task:view-all' ? undefined : restoreState?.selectedId ?? undefined
-    const initialPreferred = initialSelected
-      ?? taskBrowserRows.find(row => row.kind === 'subagent' && row.activity === 'running')?.value
+    const initialPreferred = taskBrowserRows.find(row => row.kind === 'subagent' && row.activity === 'running')?.value
       ?? taskBrowserRows.find(row => row.kind === 'job' && isActiveJobStatus(row.status))?.value
     const handle = options.mounted().openTaskBrowser(
-      taskPanelItemsWithAttention(taskBrowserRows, viewMode),
+      taskPanelItemsWithAttention(taskBrowserRows),
       // Selection disposition decides whether the browser survives: a Job
       // detail keeps it MOUNTED underneath (the overlay stack hides and
       // restores the exact instance/state on Esc); a terminal navigation
@@ -1115,9 +1121,9 @@ export function createTaskRuntime(options: TaskRuntimeOptions): TaskRuntime {
         }
         return 'close'
       },
-      (viewState) => {
+      () => {
         if (options.isCleanedUp()) return
-        // The restore tail belongs to the browser GENERATION that opened it:
+        // The close tail belongs to the browser GENERATION that opened it:
         // a browser a synchronous callback opened while this one was closing
         // (the physical hide restores plugin focus) already owns the slot and
         // must not be overwritten by a stale browser. The retired browser's own
@@ -1132,23 +1138,15 @@ export function createTaskRuntime(options: TaskRuntimeOptions): TaskRuntime {
         // B4-B: the Quick→Full promotion restore tail is retired with the
         // modal Quick — a Full browser closes to the editor (the on-demand
         // Quick no longer exists as a modal to return into).
-        if (viewState !== undefined && viewState.mode !== undefined) {
-          // Keep the view state type honest: nothing to restore into.
-          return
-        }
       },
       {
         header: header ?? 'Tasks',
         enableSearch: true,
         mode: viewMode,
         openedFrom: 'command',
-        scope: initialScope,
-        typeFilter: restoreState?.typeFilter,
-        initialQuery,
-        initialSearchMode: restoreState?.searchMode,
-        expandedIds: [...(restoreState?.expandedIds ?? [])],
-        collapsedIds: [...(restoreState?.collapsedIds ?? [])],
-        selectedId: initialSelected,
+        scope: 'all',
+        expandedIds: [],
+        collapsedIds: [],
         preferredValue: initialPreferred,
         maxVisible: 18,
         loading: runtime !== undefined && taskBrowserRows.length === 0,
@@ -1277,7 +1275,7 @@ export function createTaskRuntime(options: TaskRuntimeOptions): TaskRuntime {
         const header = action.kind === 'open-phase-agents'
           ? `Workflow · ${action.name} · ${action.phaseLabel} · ${count} agent${count === 1 ? '' : 's'}`
           : `Workflow · ${action.name} · ${count} agent${count === 1 ? '' : 's'}`
-        openTasksBrowser('full', undefined, { kind: 'subagents', childIds: action.childIds }, header)
+        openTasksBrowser('full', { kind: 'subagents', childIds: action.childIds }, header)
         return
       }
     }
@@ -1334,7 +1332,7 @@ export function createTaskRuntime(options: TaskRuntimeOptions): TaskRuntime {
             taskBrowserGlobalRows = taskBrowserRows
             publishQuickProjection()
             if (activeTaskBrowser !== undefined && activeTaskBrowserMode !== undefined) {
-              activeTaskBrowser.setItems(taskPanelItemsWithAttention(taskBrowserRows, activeTaskBrowserMode))
+              activeTaskBrowser.setItems(taskPanelItemsWithAttention(taskBrowserRows))
             }
           }
         }
@@ -1506,8 +1504,8 @@ export function createTaskRuntime(options: TaskRuntimeOptions): TaskRuntime {
         () => { if (options.display().supportsTaskCenter) options.mounted().setQuickTaskItems([]) },
       ])
     },
-    openTasksBrowser(viewMode, restoreState, scope, header) {
-      openTasksBrowser(viewMode, restoreState, scope, header)
+    openTasksBrowser(viewMode, scope, header) {
+      openTasksBrowser(viewMode, scope, header)
     },
     openQuickTaskItem(value) {
       return openQuickTaskItem(value)
@@ -1528,7 +1526,7 @@ export function createTaskRuntime(options: TaskRuntimeOptions): TaskRuntime {
       // not a reason to miss human attention.
       publishQuickProjection()
       if (activeTaskBrowserMode === undefined) return
-      activeTaskBrowser?.setItems(taskPanelItemsWithAttention(taskBrowserRows, activeTaskBrowserMode))
+      activeTaskBrowser?.setItems(taskPanelItemsWithAttention(taskBrowserRows))
     },
     disposeJobEvents() {
       jobsEventsDispose?.()

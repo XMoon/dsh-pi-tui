@@ -46,12 +46,6 @@ export interface TaskPanelOptions {
   noMatchText?: string
   /** Whether the `/` search action is available (Full mode). */
   enableSearch?: boolean
-  /** Pre-fill the search input. A non-empty value enters search mode.
-   * Ignored in Quick mode, which owns no search state. */
-  initialQuery?: string
-  /** Preserve whether the search editor was active across Quick/Full.
-   * Ignored (forced off) in Quick mode, which owns no search state. */
-  initialSearchMode?: boolean
   /** Confirmed Stop: emitted only after the S → Y confirmation chord. */
   onStop?: (value: string) => void
   /**
@@ -210,9 +204,7 @@ export class TaskBrowserPanel implements Component, Focusable {
     this.loading = options.loading ?? false
     this.refreshError = options.refreshError
     this.preferredValue = options.initialPreferredValue ?? options.initialSelectedId
-    // Full keeps the shared search state (the retired Quick forced its own
-    // query/search mode off; the mode no longer exists).
-    this.searchMode = options.initialSearchMode ?? (options.initialQuery ?? '') !== ''
+    this.searchMode = false
     this.marquee = new SelectedMarquee({
       requestRender: () => this.requestRender(),
       now: options.marqueeNow,
@@ -225,8 +217,6 @@ export class TaskBrowserPanel implements Component, Focusable {
       }
     }
     this.searchInput.onSubmit = () => this.openSelected()
-    const initial = options.initialQuery ?? ''
-    if (initial !== '') this.searchInput.setValue(initial)
     this.rebuildTypeCycle()
     // A restored type filter that no row satisfies produces a dead view;
     // validate it against the initial row set exactly like setItems does.
@@ -340,7 +330,8 @@ export class TaskBrowserPanel implements Component, Focusable {
     if (fresh.length > 0) this.onViewportExpose(fresh)
   }
 
-  /** Current view state used by Quick → Full. */
+  /** The presentation snapshot for tests/embedders (the Quick→Full
+  * restore consumer retired with the modal Quick, B4-B). */
   getViewState(): TaskBrowserViewState {
     return {
       mode: this.mode,
@@ -366,7 +357,6 @@ export class TaskBrowserPanel implements Component, Focusable {
   private rebuildTypeCycle(): void {
     const seen: string[] = []
     for (const item of this.items) {
-      if (item.kind === 'view-full') continue
       if (item.type !== undefined && !seen.includes(item.type)) seen.push(item.type)
     }
     this.typeOrder = seen
@@ -473,16 +463,13 @@ export class TaskBrowserPanel implements Component, Focusable {
   }
 
   private canStop(item: TaskPanelItem | undefined): boolean {
-    if (item === undefined || item.kind === 'view-full') return false
+    if (item === undefined) return false
     return item.canStop ?? false
   }
 
   private openSelected(): void {
     const item = this.selectedItem()
     if (item === undefined) return
-    // B4-B: the `view-full` promotion row is retired with the modal Quick —
-    // the Full panel never receives one (the runtime filters it out of the
-    // Quick projection; the business projection never produces it).
     this.onSelect(item.value)
   }
 
@@ -504,7 +491,7 @@ export class TaskBrowserPanel implements Component, Focusable {
 
   private treeExpand(): void {
     const item = this.selectedItem()
-    if (item === undefined || item.kind === 'view-full' || !item.hasChildren) return
+    if (item === undefined || !item.hasChildren) return
     if (!item.expanded) {
       this.collapsedIds.delete(item.value)
       this.expandedIds.add(item.value)
@@ -521,7 +508,7 @@ export class TaskBrowserPanel implements Component, Focusable {
 
   private treeCollapse(): void {
     const item = this.selectedItem()
-    if (item === undefined || item.kind === 'view-full') return
+    if (item === undefined) return
     if (item.expanded) {
       this.expandedIds.delete(item.value)
       this.collapsedIds.add(item.value)
@@ -712,7 +699,6 @@ export class TaskBrowserPanel implements Component, Focusable {
       // must not bypass it (keyboard Enter is ignored there).
       if (this.pendingStopValue !== undefined) return { handled: true }
       const item = this.filtered.find(candidate => candidate.value === hit.value)
-      // B4-B: the `view-full` promotion row is retired with the modal Quick.
       if (item !== undefined) {
         this.onSelect(item.value)
       }
@@ -868,7 +854,7 @@ export class TaskBrowserPanel implements Component, Focusable {
         const selected = from + i === this.selected
         listLines.push(...this.renderRow(item, selected, listWidth))
         listHits.push({ kind: 'item', value: item.value, index: from + i })
-        if (safeWidth >= 70 && safeWidth < 110 && selected && item.kind !== 'view-full') {
+        if (safeWidth >= 70 && safeWidth < 110 && selected) {
           const detailLines = this.renderInlineDetail(item, safeWidth)
           listLines.push(...detailLines)
           listHits.push(...detailLines.map((): TaskMouseHit => ({ kind: 'inert' })))
@@ -1081,7 +1067,7 @@ export class TaskBrowserPanel implements Component, Focusable {
       const item = this.filtered[index]
       if (item === undefined) continue
       const main = this.renderRow(item, index === this.selected, width)[0]!
-      const details = index === this.selected && item.kind !== 'view-full'
+      const details = index === this.selected
         ? this.renderInlineDetail(item, width)
         : []
       entries.push({ group: item.group, main, details, selected: index === this.selected })
@@ -1122,8 +1108,8 @@ export class TaskBrowserPanel implements Component, Focusable {
 
 
   private headerText(): string {
-    const real = this.items.filter(item => item.kind !== 'view-full')
-    const visible = this.filtered.filter(item => item.kind !== 'view-full').length
+    const real = this.items
+    const visible = this.filtered.length
     const active = real.filter(isTaskItemActive).length
     const done = real.filter(item => item.status === 'completed').length
     const failed = real.filter(item => isTaskItemFailure(item.status)).length
@@ -1149,9 +1135,9 @@ export class TaskBrowserPanel implements Component, Focusable {
     const leftPrefix = `${pointer} ${attention}${dot} `
     const tree = item.treePrefix ?? ''
     const treeWidth = visibleWidth(tree)
-    const statusText = item.kind === 'view-full' ? '' : taskStatusColor(item.status)(item.status)
+    const statusText = taskStatusColor(item.status)(item.status)
     const elapsedSeconds = item.startedAt === undefined ? undefined : Math.max(0, Math.floor(((item.finishedAt ?? this.now) - item.startedAt) / 1000))
-    const elapsedText = item.kind === 'view-full' || elapsedSeconds === undefined ? '' : color.textMuted(formatElapsed(elapsedSeconds))
+    const elapsedText = elapsedSeconds === undefined ? '' : color.textMuted(formatElapsed(elapsedSeconds))
     const tail = [statusText, elapsedText].filter(part => part !== '').join(' ')
     const tailWidth = visibleWidth(tail)
     const suffix = item.suffix === undefined || item.suffix === '' ? '' : ` · ${item.suffix}`
@@ -1174,7 +1160,7 @@ export class TaskBrowserPanel implements Component, Focusable {
   }
 
   private detailLines(item: TaskPanelItem | undefined): string[] {
-    if (item === undefined || item.kind === 'view-full') return ['Selected', 'No task selected']
+    if (item === undefined) return ['Selected', 'No task selected']
     const elapsed = item.startedAt === undefined ? undefined : Math.max(0, Math.floor(((item.finishedAt ?? this.now) - item.startedAt) / 1000))
     const lines = ['Selected', item.label]
     if (item.source === 'subagent' || item.mode !== undefined) {

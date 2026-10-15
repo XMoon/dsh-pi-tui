@@ -28,7 +28,7 @@ import { JobInspectorPanel } from '../src/tui/panels/job-inspector-panel.ts'
 import { SettingsWorkspacePanel, type SettingsWorkspaceSource } from '../src/tui/panels/settings-workspace-panel.ts'
 import { pituiDisplaySeam } from '../src/app/surface/display-seam-pitui.ts'
 import { TaskBrowserPanel } from '../src/tui/panels/task-panel.ts'
-import { createTaskRuntime, type TaskBrowserViewState, type TaskRuntime, type TaskSurfaceSource } from '../src/app/surface/task-runtime.ts'
+import { createTaskRuntime, type TaskRuntime, type TaskSurfaceSource } from '../src/app/surface/task-runtime.ts'
 import type { AdvancedInteractiveComponent } from '../src/extension/advanced-types.ts'
 import type { TaskBrowserJobInput } from '../src/domain/task/browser.ts'
 import type { SessionSubject } from '../src/app/session/subject.ts'
@@ -496,7 +496,7 @@ test('A-06 the Workflow-scoped Full browser preserves the dataset scope across a
   await flush()
   // A Workflow-scoped browser over TWO child ids: exactly the scope, no
   // Job rows.
-  harness.tasks.openTasksBrowser('full', undefined, { kind: 'subagents', childIds: ['child-1', 'child-2'] })
+  harness.tasks.openTasksBrowser('full', { kind: 'subagents', childIds: ['child-1', 'child-2'] })
   await vt.waitForRender()
   const scoped = harness.lastBrowser()!
   const actorRows = (handle: TaskBrowserHandle): string[] =>
@@ -536,7 +536,7 @@ test('A-06b the Full browser carries its presentation state across an overlay ro
   const { vt, app } = startApp()
   const harness = attachTasks(app, { jobIds: ['job-a'], childIds: ['child-1', 'child-2'] })
   await flush()
-  harness.tasks.openTasksBrowser('full', undefined, { kind: 'subagents', childIds: ['child-1', 'child-2'] })
+  harness.tasks.openTasksBrowser('full', { kind: 'subagents', childIds: ['child-1', 'child-2'] })
   await vt.waitForRender()
   const first = harness.lastBrowser()!
   // A type filter in the Full (Tab cycles: subagents → ... ).
@@ -718,19 +718,8 @@ test('A-08b TaskRuntime: a browser opened by a plugin focus callback during the 
     const lease = app.showAdvancedInteractiveOverlay(component)
     await vt.waitForRender()
 
-    const restoreState: TaskBrowserViewState = {
-      mode: 'full',
-      openedFrom: 'command',
-      scope: 'active',
-      typeFilter: null,
-      searchMode: false,
-      searchQuery: '',
-      selectedId: null,
-      expandedIds: new Set(),
-      collapsedIds: new Set(),
-    }
     armed = true
-    harness.tasks.openTasksBrowser('full', restoreState)
+    harness.tasks.openTasksBrowser('full')
     await vt.waitForRender()
     assert.equal(harness.browsers().length, 1)
 
@@ -781,15 +770,16 @@ test('A-08b TaskRuntime: a browser opened by a plugin focus callback during the 
     }
     const lease = app.showAdvancedInteractiveOverlay(component)
     await vt.waitForRender()
-    harness.tasks.openTasksBrowser('full', undefined, { kind: 'subagents', childIds: ['child-1'] })
+    harness.tasks.openTasksBrowser('full', { kind: 'subagents', childIds: ['child-1'] })
     await vt.waitForRender()
     assert.equal(harness.browsers().length, 1)
     armed = true
-    // Promote through the real panel (one scoped child row + the pseudo row).
+    // Enter through the real panel (one scoped child row; the modal-only
+    // pseudo row retired with the modal Quick).
     vt.sendInput('\x1b[B')
     vt.sendInput('\r')
     await vt.waitForRender()
-    assert.equal(harness.browsers().length, 2, 'the promotion tail must not open a second browser')
+    assert.equal(harness.browsers().length, 2, 'the Enter tail must not open a second browser')
     assert.equal(harness.lastBrowser()!.getViewState!().mode, 'full')
     assert.equal(app.overlayGraphState().handles, 2, 'the intro overlay plus the newer browser')
     harness.lastBrowser()!.close()
@@ -822,7 +812,7 @@ test('A-08c TaskRuntime: a synchronous session reset during the close retires th
   }
   const lease = app.showAdvancedInteractiveOverlay(component)
   await vt.waitForRender()
-  harness.tasks.openTasksBrowser('full', undefined, { kind: 'subagents', childIds: ['child-1'] })
+  harness.tasks.openTasksBrowser('full', { kind: 'subagents', childIds: ['child-1'] })
   await vt.waitForRender()
   assert.equal(harness.browsers().length, 1)
 
@@ -849,12 +839,12 @@ test('A-08d TaskRuntime: a stale browser\'s late close cannot clear the replacem
   const harness = attachTasks(app, { jobIds: ['job-a'], childIds: ['child-1', 'child-2'] })
   await flush()
   // A = a Workflow-scoped browser that is still mounted but NOT retired.
-  harness.tasks.openTasksBrowser('full', undefined, { kind: 'subagents', childIds: ['child-1'] })
+  harness.tasks.openTasksBrowser('full', { kind: 'subagents', childIds: ['child-1'] })
   await vt.waitForRender()
   const stale = harness.lastBrowser()!
   // B = a replacement browser with a LIVE Job child (it needs the global
   // dataset, so it carries an explicit `all` scope).
-  harness.tasks.openTasksBrowser('full', undefined, { kind: 'all' })
+  harness.tasks.openTasksBrowser('full', { kind: 'all' })
   await vt.waitForRender()
   const replacement = harness.lastBrowser()!
   assert.notEqual(replacement, stale)
@@ -959,7 +949,7 @@ test('A-09c a throwing browser hide cannot strand the reset mirrors or the datas
   const harness = attachTasks(app, { jobIds: ['job-a'], childIds: ['child-1', 'child-2'] })
   await flush()
   // A Workflow-scoped browser: the scope reset is observable on the next open.
-  harness.tasks.openTasksBrowser('full', undefined, { kind: 'subagents', childIds: ['child-1'] })
+  harness.tasks.openTasksBrowser('full', { kind: 'subagents', childIds: ['child-1'] })
   await vt.waitForRender()
   assert.deepEqual(
     harness.lastBrowser()!.visibleItems!().map(item => item.value).filter(value => value.startsWith('agent:')),

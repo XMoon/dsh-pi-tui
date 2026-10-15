@@ -60,7 +60,7 @@ function startApp(
 /** B4-B: the entry admission needs the Quick projection alongside the badge
  *  sink (the ↓ hint and the route share the same facts). */
 function oneRunningTask(app: TuiApp): void {
-  app.setQuickTaskItems([{ value: 'job:job-1', label: 'bash', status: 'running', kind: 'task', source: 'job' }])
+  app.setQuickTaskItems([{ value: 'job:job-1', label: 'bash', status: 'running', source: 'job' }])
   app.setTasks([{ id: 'job-1', label: 'bash', status: 'running', kind: 'job' }])
 }
 

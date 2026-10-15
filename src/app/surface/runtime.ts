@@ -116,7 +116,6 @@ import type { PresetPresentation } from '../command/preset-presentation.ts'
 import type { SessionBrowserPresentation } from '../command/session-browser-presentation.ts'
 import { pituiSurfaceInteractionPresenter, type SurfaceInteractionPresenter } from './interaction-presenter.ts'
 import type { TaskBrowserDatasetScope } from './task-browser-runtime.ts'
-import type { TaskBrowserViewState } from './task-runtime.ts'
 import type { QuestionAttentionRow } from './question-controller.ts'
 import type { InteractionPort } from '../../runtime/interaction-port.ts'
 import type { AssistantLiveInput } from '../../runtime/assistant-stream-port.ts'
@@ -602,7 +601,6 @@ export interface SurfaceRuntime<Event extends RoutedSessionEvent> {
    *  accessory replaced it and `openQuickTaskItem` routes its selections. */
   openTasksBrowser(
     viewMode: 'full',
-    restoreState?: TaskBrowserViewState,
     scope?: TaskBrowserDatasetScope,
     header?: string,
   ): void
@@ -1845,8 +1843,8 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
     resetTasks() {
       task.resetTasks()
     },
-    openTasksBrowser(viewMode, restoreState, scope, header) {
-      task.openTasksBrowser(viewMode, restoreState, scope, header)
+    openTasksBrowser(viewMode, scope, header) {
+      task.openTasksBrowser(viewMode, scope, header)
     },
     openJobView(jobId) {
       return task.openJobView(jobId)
