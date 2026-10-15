@@ -160,17 +160,22 @@ test('native Browser is one workspace tree, then a global cards union with Host-
     'session:session-cross-child',
   ])
   assert.equal(items(pane)[0]?.label, 'Needle current title', 'terminal sequences are removed from projected titles')
-  const resumeAction = pickerActionByBase(pane, 'resume', BROWSER)
-  assert.equal(resumeAction?.disabled, 'Session switching is deferred to B1-B.')
-  assert.equal(resumeAction?.primary, true, 'Owner-requested primary styling does not enable Resume')
 
   const pickerId = picker(pane)!.id
   const surfaceId = pane.frames().at(-1)!.sf
-  sendPickerAction(pane, 'resume', BROWSER)
+  sendSelect(pane, 'session:session-other', pickerId)
+  await waitUntil('a non-current row is selected', () => props(pane).selected === 'session:session-other')
+  assert.deepEqual(props(pane).current, ['session:session-current'])
+  const resumeAction = pickerActionByBase(pane, 'resume', BROWSER)
+  assert.ok(resumeAction)
+  assert.equal(resumeAction.disabled, 'Session switching is deferred to B1-B.')
+  assert.equal(resumeAction.primary, true, 'Owner-requested primary styling does not enable Resume')
+
+  sendAction(pane, String(resumeAction.id), undefined, pickerId)
   pane.event({ ev: 'action', sf: surfaceId, id: pickerId, act: 'details#999999' })
   pane.event({ ev: 'select', sf: surfaceId, id: pickerId, item: 'session:not-listed' })
-  sendSelect(pane, 'session:session-other', pickerId)
-  await waitUntil('later valid selection is processed', () => props(pane).selected === 'session:session-other')
+  sendSelect(pane, 'session:session-cross-child', pickerId)
+  await waitUntil('later valid selection is processed', () => props(pane).selected === 'session:session-cross-child')
   assert.equal(m.resumeIntents.length, 0, 'the processed disabled primary Resume action never dispatches')
   assert.equal(details(pane), undefined, 'stale action tokens and unlisted row ids cannot enter Details')
   assert.deepEqual(props(pane).current, ['session:session-current'])
