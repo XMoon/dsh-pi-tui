@@ -484,14 +484,16 @@ projection; B2-B gave exactly two of its rows (`Configured theme`,
   that opened the workspace is stopped with `preserveScreen: true`, its object
   tree, overlay graph, focus, draft and scroll state survive, and closing restarts
   the SAME instance.
-- **The workspace has three levels at every width; `Esc` is the ONE lifecycle
-  key.** L0 `categories` → L1 `rows` → L2 `detail` is the panel's only navigation
-  state (the former wide/medium "focus owner" split is retired). `Enter` advances
-  one level, `Esc`/`Backspace` steps one level back, and only L0's `Esc` closes
-  the workspace — wide, medium and narrow behave identically, and a new open
-  always starts on L0. `Tab`/`Shift+Tab` and `←`/`→` are not navigation keys.
-  Leaving the workspace is therefore always one reachable key (the Action Bar is
-  pinned to the physical last row at every height, down to a one-row terminal).
+- **The workspace has three levels at every width; one focus state owns them.**
+  L0 `categories` → L1 `rows` → L2 `detail` is the panel's only navigation state
+  (the former wide/medium "focus owner" split is retired). ASCII `Right` advances
+  exactly one level; `Left` returns one level and is inert at L0. `Enter` follows
+  the same transitions, except that a writable L1 row enters its inline choice in
+  the same L2 transition. `Esc`/`Backspace` step back (and close at L0) — wide,
+  medium and narrow behave identically, and a new open always starts on L0.
+  `Tab`/`Shift+Tab` remain inert. Leaving the workspace is therefore always one
+  reachable key (the Action Bar is pinned to the physical last row at every
+  height, down to a one-row terminal).
 - **Width only projects panes.** Wide paints all three columns; medium derives its
   two columns purely from the current level (`categories + rows` at L0,
   `rows + details` otherwise); narrow paints the current level alone. No second
@@ -504,30 +506,37 @@ projection; B2-B gave exactly two of its rows (`Configured theme`,
   Settings the key before any Host action, mirroring the Job branch. A key that
   arrives before the first paint resolves against the LIVE level, never a guessed
   layout.
-- **Mouse follows the last painted frame.** The row cells and the Detail's
-  `Copy value` button are plain painted cells reached through the alt screen's
-  existing `onCellPress`/`onCellClick`: a real item click takes ITS level's
-  keyboard focus (a category click never advances into the rows, a row click never
-  advances into the detail — only `Enter` does), and a click acts only when the
-  release re-proves the press-time kind, id, painted row, cell range, state
-  version, level AND category. Refresh, selection, level, category AND terminal
-  geometry all bump that version — a resize refuses a straddling gesture even when
-  the target's own cells did not move. Wheel events are the panel's own
-  `handleMouse` and scroll only the pane under the pointer (a hidden pane owns no
-  wheel); a wheel-scrolled list keeps its viewport (only a selection or viewport
-  change rebases it, so a shrink still reveals the selection). The workspace
-  screen suspends the fork's native copy-on-select: B2-A has no drag-copy
-  contract, and the panel's own `Copy value`/`C` verb is the only copy source (a
-  plain click can never put a character on the clipboard). The Action Bar
-  advertises only the keys the current level and row grant actually honour: below
-  the body floor it shows the Esc/back semantics alone.
+- **Mouse follows the last painted frame.** The row cells and Detail actions are
+  plain painted cells reached through the alt screen's existing
+  `onCellPress`/`onCellClick`: a category/row click selects and focuses its level
+  without advancing; ordinary visible Detail content clicked from L1 enters L2
+  (the same one-step choice for a writable row, browse for a read-only row). Any
+  click leaving L2 cancels an uncommitted choice atomically, including a click on
+  the same row/category. A click acts only when release re-proves the press-time
+  kind, id, painted row, cell range, state version, level AND category. Refresh,
+  selection, level, category AND terminal geometry all bump that version — a
+  resize refuses a straddling gesture even when the target's own cells did not
+  move. Wheel events are the panel's own `handleMouse` and scroll only the painted
+  region under the pointer (facts and candidates have independent wheel regions;
+  a hidden pane owns no wheel). A wheel-scrolled list keeps its viewport (only a
+  selection or viewport change rebases it, so a shrink still reveals the
+  selection). The workspace screen suspends the fork's native copy-on-select:
+  B2-A has no drag-copy contract, and the panel's own `Copy value`/`C` verb is
+  the only copy source (a plain click can never put a character on the clipboard).
+  The Action Bar advertises only the keys the current level and row grant actually
+  honour: below the body floor it shows the Esc/back semantics alone.
 - **The L2 edit phase is a transient phase of the SAME lease (B2-B).** On the two
-  writable rows, `Enter`/`[Change…]` opens an in-pane candidate choice and
-  `Esc`/`[Cancel]` cancels it with zero writes; the choice is presentation state
-  inside the panel, never a fourth navigation level, a second screen or a second
-  focus owner. The choice heading is pinned and only the candidates scroll, the
-  candidate identity is the source-qualified value, and one candidate whose source
-  is gone is listed as unavailable and refused. At most ONE commit is in flight
+  writable rows, `Right`/`Enter`/`[Change…]` opens an in-pane candidate choice
+  directly from L1; `Left`/`Esc`/`Backspace`/`[Cancel]` cancels to L1 with zero
+  writes. The choice is presentation state inside the panel, never a fourth
+  navigation level, a second screen or a second focus owner. The shared Detail
+  pane keeps the current Runtime/Persisted facts above the candidates; `PgUp`/
+  `PgDn` scroll only those facts and the candidate wheel scrolls its own region.
+  Candidate identity is the exact underlying value (source-qualified for themes)
+  and must be visible before
+  keyboard confirmation; if it is offscreen, the first Enter only reveals it.
+  A candidate whose source is gone is listed as unavailable and refused. At most
+  ONE commit is in flight
   per open: while a write is pending the edit/retry verbs are not painted and no
   second confirm can be started (no unbounded queue, no background watcher), and
   `Esc` still steps back or closes. A settlement is fenced twice — the app's

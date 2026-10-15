@@ -52,28 +52,7 @@
   所在区域，Preview 拖选复制的是原文的精确片段并以松开位置为终点（拖选越出预览区、
   或拖选期间窗口宽度变化时取消，不会复制）；普通主屏仍是纯键盘操作，终端自身的
   选择与回滚不受影响。
-- `/settings` 改为打开独立的全屏设置工作区，其中「Configured theme」与
-  「Transcript display」两行现在可以真正修改。宽屏三栏（分类 / 设置行 / 详情）、中屏按
-  当前层显示两栏、窄屏单栏，只是同一套 `分类 → 设置行 → 详情` 三层的投影；所有宽度上
-  `Enter` 进入下一级、`Esc`（`Backspace` 同义）逐级返回，只有最外层 `Esc` 才关闭，`Tab`
-  与 `←`/`→` 不承担导航。工作区展示 Appearance / Display 的真实读值，并标明配置来源
-  Scope 与 backend 就绪状态（`Ready` / `Last-known` / `Unavailable` / `Read error`）；
-  `R` 重新读取，`C` 只复制所选行的原始值，浏览与选择本身不写入任何配置。这两行的详情里
-  `Enter`（或点击 `[Change…]`）进入候选选择：`↑↓`/`Pg`/`Home`/`End` 移动候选，`Enter`
-  或 `[Confirm]` 明确确认，`Esc`/`[Cancel]` 取消且零写入；只有真正绘制出来的按钮与候选
-  行可点，窄屏与短屏仍可滚动、选中并确认。确认后用既有的串行整文档写入路径落盘，并在
-  成功后从权威来源重读目标字段：详情分别显示运行态（`Runtime`）与持久偏好
-  （`Persisted`），提交状态明确显示 `Saving…` / `Verified` / `Not saved · 原因` /
-  `Commit accepted · verification unavailable` / `Outcome unknown · 原因`，只有写入完成、
-  后端 `ready` 且权威回读一致才显示 Verified；被拒绝的写入会先重新读取权威：若权威仍
-  是旧值则明确显示 Not saved，若权威已是目标值（可能由别处先写入）或无法读取，则如实
-  显示 Outcome unknown，不冒认成功也不误报拒绝。后端不 ready 时主题不会被应用或写入；显示预设可能已在本机生效，
-  此时会明确说明只是本机生效、未能保存，绝不假报保存成功。插件主题在确认时再次按
-  source-qualified 身份校验，已卸载的插件主题标为 unavailable 并拒绝确认，不会被重定向
-  到同名的自定义文件。Icon style 与 Thinking detail 仍是只读行（底部按钮行说明需到
-  `Other settings` 编辑），旧的完整设置编辑器仍完整可用：`Other settings` →
-  `Open existing settings…` 先关闭工作区并恢复原界面，再打开原有编辑器，Theme、Plugin
-  Manager、键位、权限与扩展设置的写入路径不变。
+- `/settings` 的全屏工作区统一了三层键盘导航与同屏编辑：`Right` 只前进一层、`Left` 返回一层（L0 无效），`Enter` 遵循相同层级；`Esc`/`Backspace` 逐级返回，最外层关闭，`Tab`/`Shift+Tab` 不承担导航。宽屏三栏（分类 / 设置行 / 详情）、中屏按当前层显示两栏、窄屏单栏，仍是同一套 `分类 → 设置行 → 详情` 的投影。对可编辑的 `Configured theme` 与 `Transcript display`，L1 的 `Right`/`Enter`、可见的 `[Change…]` 或普通 Detail 内容都能一步进入同一 L2 候选选择；旧值及 Runtime / Persisted 事实留在候选上方。`Up`/`Down`/`Home`/`End` 移动候选，`PgUp`/`PgDn` 和事实区滚轮只滚动详情事实，候选区滚轮独立滚动候选；`Enter` 或 `[Confirm]` 明确确认，`Left`/`Esc`/`Backspace` 或 `[Cancel]` 直接取消回 L1 且零写入。滚出屏幕的候选身份必须先由一次 Enter 重新显示，之后才能确认；44×8 仍能看到旧值、当前候选身份和 `Enter confirm`。工作区展示 Appearance / Display 的真实读值，并标明配置来源 Scope 与 backend 就绪状态（`Ready` / `Last-known` / `Unavailable` / `Read error`）；`R` 重新读取，`C` 只复制所选行的原始值，浏览与选择本身不写入任何配置。只有真正绘制出来的按钮与候选行可点，短屏仍可滚动、选中并确认。确认后用既有的串行整文档写入路径落盘，并在成功后从权威来源重读目标字段：详情分别显示运行态（`Runtime`）与持久偏好（`Persisted`），提交状态明确显示 `Saving…` / `Verified` / `Not saved · 原因` / `Commit accepted · verification unavailable` / `Outcome unknown · 原因`，只有写入完成、后端 `ready` 且权威回读一致才显示 Verified；被拒绝的写入会先重新读取权威：若权威仍是旧值则明确显示 Not saved，若权威已是目标值（可能由别处先写入）或无法读取，则如实显示 Outcome unknown，不冒认成功也不误报拒绝。后端不 ready 时主题不会被应用或写入；显示预设可能已在本机生效，此时会明确说明只是本机生效、未能保存，绝不假报保存成功。插件主题在确认时再次按 source-qualified 身份校验，已卸载的插件主题标为 unavailable 并拒绝确认，不会被重定向到同名的自定义文件。Icon style 与 Thinking detail 仍是只读行（底部按钮行说明需到 `Other settings` 编辑），旧的完整设置编辑器仍完整可用：`Other settings` → `Open existing settings…` 先关闭工作区并恢复原界面，再打开原有编辑器，Theme、Plugin Manager、键位、权限与扩展设置的写入路径不变。
 - 任务中心里的 Job 详情改为独立的全屏工作区：Job 状态、进度、输出缺口、观察错误
   与终态、以及保留输出分区呈现，不再拼成一块文本；底部固定显示 `Esc back` 与
   （仅在有意义时）Stop，并标注保留输出只是预览、不是完整历史。`Esc` 回到原任务

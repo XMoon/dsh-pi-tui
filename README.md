@@ -301,29 +301,32 @@ TUI 使用 DSH 提供的模型和设置服务。
 
 `/settings` 打开一个真正的全屏工作区，三栏 / 两栏 / 单栏只是同一套
 `分类 → 设置行 → 详情` 三层的投影：宽屏同时显示三栏，中屏按当前层显示
-`分类 + 设置行` 或 `设置行 + 详情`，窄屏只显示当前层。所有宽度上 `Enter` 进入下一级、
-`Esc`（`Backspace` 同义）逐级返回，只有最外层 `Esc` 才关闭工作区；`Tab` 与 `←`/`→`
-不承担导航，底部操作栏始终固定在最后一行。
+`分类 + 设置行` 或 `设置行 + 详情`，窄屏只显示当前层。所有宽度上 `Right` 只前进一层，
+`Left` 返回一层（在最外层无效）；`Enter` 遵循相同层级，`Esc`/`Backspace` 逐级返回，
+最外层关闭工作区。`Tab`/`Shift+Tab` 不承担导航，底部操作栏始终固定在最后一行。
 它展示 Appearance / Display 的真实事实：主题的 source-qualified 原始值与友好名称、
 Icon style、Transcript display 的运行时当前值与持久偏好、Thinking detail 的当前运行
 态，以及每个条目的配置来源 Scope 与 backend 就绪状态；`R` 重新读取、`C` 复制所选行的
 原始值，浏览与选择本身不写入配置。
 
-其中**「Configured theme」和「Transcript display」两行可以直接修改**：在 L2 详情按
-`Enter`（或点击 `[Change…]`）进入候选列表，`↑↓`/`Pg`/`Home`/`End` 移动候选，`Enter`
-或点击 `[Confirm]` 明确确认，`Esc`/`[Cancel]` 取消且不写任何配置；只有实际绘制出来的
-按钮与候选行可以点击，窄屏与短屏仍可滚动、选中并确认。确认后走既有的串行整文档写入
-路径落盘，再从权威来源重读目标字段核对：详情里分别显示运行态（`Runtime`，如当前
-palette）与持久偏好（`Persisted`），并显示 `Saving…` / `Verified` / `Not saved · 原因`
-/ `Commit accepted · verification unavailable` / `Outcome unknown · 原因`，只有写入完成、
-backend `ready` 且权威回读一致才显示 Verified；被拒绝的写入会先重读权威：仍停留在请求起点值才报 Not saved，
-出现第三个值、已是目标值或无法读取则如实报 Outcome unknown；写返回成功但权威可读地不一致
-同样按失败显示，而不是"verification unavailable"。backend 不 ready 时主题不会被应用或写入；显示预设可以先在本
-机生效，此时会明确说明未能保存，而不是假装保存成功。插件主题在确认时再次按
-source-qualified 身份解析，已卸载的插件主题标记为 unavailable 并拒绝确认，不会退化成
-同名文件主题。Icon style 与 Thinking detail 仍是只读行。旧的完整设置编辑器仍然可用：
-`Other settings` → `Open existing settings…` 会先关闭工作区并恢复原界面，再打开原有编
-辑器，Theme、Plugin Manager、键位、权限与扩展设置的写入路径全部不变。
+其中**「Configured theme」和「Transcript display」两行可以直接修改**：在 L1 设置行按
+`Right` 或 `Enter`，或点击 `[Change…]` / 可见的 Detail 内容，即可在同一 L2 详情中打开
+候选选择；当前值与 Runtime / Persisted 事实保留在候选列表上方。`Up`/`Down`/`Home`/`End`
+移动候选，`PgUp`/`PgDn` 和事实区上的滚轮只滚动详情事实，候选区滚轮独立滚动候选；
+`Enter` 或点击 `[Confirm]` 明确确认，`Left`/`Esc`/`Backspace` 或 `[Cancel]` 取消并直接回到
+L1，零写入。L2 浏览/已结算时，`Enter` 可重新打开可写行的选择；pending 写入时不触发新选择。若当前候选身份已滚出可见区域，第一次 `Enter` 只将其重新显示，之后才能确认；
+44×8 短屏仍显示旧值、当前候选身份与明确的 `Enter confirm` 提示。只有实际绘制出来的
+按钮与候选行可以点击。确认后走既有的串行整文档写入路径落盘，再从权威来源重读目标字段核对：
+详情里分别显示运行态（`Runtime`，如当前 palette）与持久偏好（`Persisted`），并显示
+`Saving…` / `Verified` / `Not saved · 原因` / `Commit accepted · verification unavailable` /
+`Outcome unknown · 原因`，只有写入完成、backend `ready` 且权威回读一致才显示 Verified；
+被拒绝的写入会先重读权威：仍停留在请求起点值才报 Not saved，出现第三个值、已是目标值或无法读取
+则如实报 Outcome unknown；写返回成功但权威可读地不一致同样按失败显示，而不是
+"verification unavailable"。backend 不 ready 时主题不会被应用或写入；显示预设可以先在本机生效，
+此时会明确说明未能保存，而不是假装保存成功。插件主题在确认时再次按 source-qualified 身份解析，
+已卸载的插件主题标记为 unavailable 并拒绝确认，不会退化成同名文件主题。Icon style 与
+Thinking detail 仍是只读行。旧的完整设置编辑器仍然可用：`Other settings` → `Open existing settings…`
+会先关闭工作区并恢复原界面，再打开原有编辑器，Theme、Plugin Manager、键位、权限与扩展设置的写入路径全部不变。
 
 `/settings` 中的 `Icon style` 可切换 TUI 结构图标的风格:`Emoji`(默认,
 彩色)、`Symbols`(紧凑的单格终端符号)、`Minimal`(隐藏装饰性图标,只

@@ -347,7 +347,7 @@ test('A-01 /settings enters a dedicated fullscreen workspace: Settings chrome ow
   assert.ok(rows[0]?.startsWith('Settings'), `the Settings header owns row 0:\n${h.view()}`)
   assert.match(rows[0]!, /Settings · Categories/, 'every width opens on the L0 categories level')
   assert.ok(!h.view().includes('❯'), `no editor/transcript row may render behind the workspace:\n${h.view()}`)
-  assert.match(rows.at(-1) ?? '', /↑↓ select · Enter open · Esc close/, 'the Settings Action Bar is pinned to the physical last row')
+  assert.match(rows.at(-1) ?? '', /Right open · Enter open · Esc close/, 'the Settings Action Bar is pinned to the physical last row')
   assert.match(h.view(), /Rows \(2\)/, 'the row list column is part of the workspace body')
   h.dispose()
 })
@@ -387,10 +387,12 @@ test('A-03 100x40 and 76x24 project the medium composition per level and switch 
   await key(h, '\r')
   assert.match(h.rowsPlain()[rowOf(h, 'Details')]!, /Details/, 'L1 paints the Detail column')
   assert.ok(!h.view().includes('Categories (3)'), 'L1 hides the categories column')
-  // Enter again reaches L2 on the same rows+detail composition.
-  await key(h, '\r')
-  assert.match(h.rowsPlain()[rowOf(h, 'Details')]!, /\[Details\]/, 'L2 owns the detail level')
-  assert.match(h.view(), /Solarized/, 'the detail shows the selected row value')
+  // Right enters L2's inline choice directly from L1 on the same projection.
+  await key(h, '\x1b[C')
+  assert.match(h.view(), /Choose value/, 'the one-step detail entry opens the inline choice')
+  const choiceHeading = rowOf(h, 'Choose value')
+  assert.ok(h.rowsPlain().slice(choiceHeading + 1).some(line => />\s+\S+/.test(line)), 'the selected candidate identity remains visible')
+  assert.match(h.view(), /Enter confirm/, 'confirmation is explicit and advertised')
   h.dispose()
   }
 })
@@ -415,18 +417,23 @@ test('A-04 72x24 drills categories → rows → detail with one Esc per level an
   h.dispose()
 })
 
-test('A-04b 44x8 still reaches the Detail, keeps the Action Bar last and copies a long value', async () => {
+test('A-04b 44x8 shows the old value, current candidate identity and explicit confirm', async () => {
   const longTheme = 'file:a-very-long-custom-theme-name-that-must-wrap-across-cells'
   const h = setup({ columns: 44, rows: 8, doc: { theme: longTheme } })
   await h.open()
-  assert.match(h.rowsPlain().at(-1) ?? '', /↑↓ select · Enter open · Esc close/, 'the Action Bar is the physical last row')
+  assert.match(h.rowsPlain().at(-1) ?? '', /Enter open · Esc close/, 'the Action Bar is the physical last row')
   await key(h, '\r') // categories -> rows (Appearance)
-  await key(h, '\r') // rows -> detail (Configured theme)
+  await key(h, '\r') // L1 -> inline choice
   assert.match(h.rowsPlain()[0]!, /Appearance · Configure/)
-  assert.match(h.view(), /Value/, 'the Detail keeps its value field reachable at 44x8')
-  await key(h, 'c')
-  await settle(h)
-  assert.deepEqual(h.copied, [longTheme], 'the copied payload is the exact raw value, never the wrapped display')
+  assert.ok(h.view().includes('Value'), `the persisted old value remains in the granted facts region:\n${h.view()}`)
+  const visibleIdentity = h.rowsPlain().map(line => line.trim()).join('')
+  assert.ok(visibleIdentity.includes(longTheme), `the complete selected source-qualified identity is painted:\n${h.view()}`)
+  assert.match(h.view(), /^.*> \S+/mu, 'the candidate head is visible before confirmation')
+  assert.match(h.rowsPlain().at(-1) ?? '', /Enter confirm/, 'Enter is explicitly advertised for the visible candidate')
+  assertRowWidths(h, 44)
+  assert.equal(h.replacements(), 0, 'opening a candidate never commits')
+  await key(h, '\x1b')
+  assert.equal(h.replacements(), 0, 'Esc cancels the short-screen choice')
   h.dispose()
 })
 
@@ -477,16 +484,13 @@ test('A-06 200 → 72 → 44 → 200 preserves the category, the row, the level 
 
 test('A-07 hostile OSC/CSI/CJK theme text is sanitized before paint, wrapped to the pane, and copied verbatim', async () => {
   const hostile = `evil\x1b[31mred\x07payload-${'汉'.repeat(60)}`
-  const h = setup({ columns: 72, rows: 24, doc: { theme: hostile } })
+  const h = setup({ columns: 100, rows: 24, doc: { theme: hostile } })
   await h.open()
-  await key(h, '\r') // categories -> rows
-  await key(h, '\r') // rows -> detail
+  await key(h, '\r') // L0 -> L1 exposes the real Details pane
   const plain = h.view()
   assert.ok(!plain.includes('\x1b'), 'no raw escape sequence may reach the terminal text')
   assert.ok(!plain.includes('[31m'), 'the CSI sequence must be stripped whole, never left as visible payload')
-  for (const [index, line] of h.vt.getViewport().entries()) {
-    assert.ok(visibleWidth(line) <= 80, `row ${index} must stay inside the pane width`)
-  }
+  assertRowWidths(h, 100)
   // RAW terminal-write safety: the terminal's own write sink is the witness (a
   // parsed viewport would already have interpreted the sequences). The whole
   // hostile value must never be emitted, nor its raw CSI/BEL/C1 bytes.
@@ -495,7 +499,10 @@ test('A-07 hostile OSC/CSI/CJK theme text is sanitized before paint, wrapped to 
   assert.ok(!emitted.includes('\x1b[31m'), 'the injected CSI must never reach the terminal')
   assert.ok(!emitted.includes('\x07payload'), 'the injected BEL must never reach the terminal')
   assert.ok(!emitted.includes('\u009b'), 'the injected C1 byte must never reach the terminal')
-  await key(h, 'c')
+  const copyRow = rowOf(h, 'Copy value [C]')
+  const copyCol = cellIndexOf(h, copyRow, 'Copy value [C]')
+  press(h, copyRow, copyCol)
+  release(h, copyRow, copyCol)
   await settle(h)
   assert.deepEqual(h.copied, [`file:${hostile}`], 'the copy payload is the EXACT normalized source value, byte for byte')
   h.dispose()
@@ -521,9 +528,9 @@ test('A-08 the ready snapshot distinguishes the raw theme identity, the runtime 
   // every level, but the walk still goes through the same Enter ladder.
   await key(h, '\x1b[B') // Appearance -> Display (its first row is Transcript display)
   await key(h, '\r') // L0 -> L1
-  await key(h, '\r') // L1 -> L2
-  assert.match(h.view(), /Client runtime · optional TUI preference persistence/)
-  assert.match(h.view(), /Persisted preference: compact \(last read/, 'the persisted fact is named as last-read')
+  await key(h, '\r') // L1 -> inline choice
+  assert.match(h.view(), /Persisted\s+compact/, 'the persisted fact is separately named')
+  assert.match(h.view(), /Client runtime · optional TUI preference persistence/, 'the scope fact remains distinct from the runtime value')
   h.dispose()
 })
 
@@ -566,8 +573,8 @@ test('A-09 SGR press/release hits the same painted row; a repaint between press 
   press(h, iconRow, col)
   release(h, iconRow, col)
   await h.vt.waitForRender()
-  // The click selects the clicked item and takes the rows LEVEL; it never
-  // advances into the Detail (only Enter does).
+  // The click selects the clicked item and takes the rows level; only a
+  // keyboard advance (Right/Enter) or Detail-pane action enters L2.
   assert.ok(h.rowsPlain()[iconRow]!.startsWith('> Icon style'), 'the same-cell click selects the painted row')
   assert.match(h.view(), /minimal/, 'the detail follows the newly selected row')
   assert.ok(!h.view().includes('Settings · Appearance · Icon style'), 'the click did not enter the Detail level')
@@ -620,11 +627,13 @@ test('A-09b the wheel scrolls only the visible pane under the pointer, and blank
 // ── A-10: exact copy and scoped feedback ──────────────────────────────────
 
 test('A-10 Copy sends the exact source value and its settlement is visible inside the workspace', async () => {
-  const h = setup({ columns: 72, rows: 24, doc: { theme: 'plugin:acme/solarized' }, themes: pluginThemes() })
+  const h = setup({ columns: 100, rows: 24, doc: { theme: 'plugin:acme/solarized' }, themes: pluginThemes() })
   await h.open()
-  await key(h, '\r')
-  await key(h, '\r')
-  await key(h, 'c')
+  await key(h, '\r') // L0 -> L1; the Details copy button is visible in medium
+  const row = rowOf(h, 'Copy value [C]')
+  const col = cellIndexOf(h, row, 'Copy value [C]')
+  press(h, row, col)
+  release(h, row, col)
   await settle(h)
   assert.deepEqual(h.copied, ['plugin:acme/solarized'], 'the copy payload is the raw identity, never the friendly label')
   assert.ok(h.rowsPlain().some(line => line.includes('Copy sent')), `the notice is painted inside the workspace:\n${h.view()}`)
@@ -634,7 +643,7 @@ test('A-10 Copy sends the exact source value and its settlement is visible insid
 test('A-10b a copy settled after the workspace closed never notifies the restored surface', async () => {
   let settleCopy: ((ok: boolean) => void) | undefined
   const h = setup({
-    columns: 72,
+    columns: 100,
     rows: 24,
     doc: { theme: 'dark' },
     copySelection: async (text: string) => {
@@ -643,10 +652,13 @@ test('A-10b a copy settled after the workspace closed never notifies the restore
     },
   })
   await h.open()
-  await key(h, '\r')
-  await key(h, '\r')
-  await key(h, 'c')
-  await key(h, '\x1b') // detail -> rows
+  await key(h, '\r') // L0 -> L1
+  const copyRow = rowOf(h, 'Copy value [C]')
+  const copyCol = cellIndexOf(h, copyRow, 'Copy value [C]')
+  press(h, copyRow, copyCol)
+  release(h, copyRow, copyCol)
+  await settle(h)
+  await key(h, '\x1b') // Detail -> rows after the painted copy takes column focus
   await key(h, '\x1b') // rows -> categories
   await key(h, '\x1b') // close the workspace before the clipboard settles
   assert.ok(h.view().includes('❯'), 'the editor is restored')
@@ -745,7 +757,7 @@ test('F1-01 narrow item clicks select and focus, never drill past the level', as
   assert.match(h.rowsPlain()[0]!, /Settings · Categories/, 'a category click stays on the categories level')
   assert.ok(h.rowsPlain().some(line => line.startsWith('> Display')), 'the clicked category is selected')
   assert.ok(!h.view().includes('· Rows'), 'the click never drilled into the rows level')
-  // Enter is the ONLY level advance.
+  // Enter/Right is the only keyboard level advance; a row click stays at L1.
   await key(h, '\r')
   assert.match(h.rowsPlain()[0]!, /Settings · Display · Rows/)
   assert.ok(h.rowsPlain().some(line => line.startsWith('> Transcript display')))
@@ -823,46 +835,45 @@ test('F2-02 below the body floor Enter/Tab/arrows/C/R are inert; only Esc escape
   h.dispose()
 })
 
-test('F2-03 72x3 paints no Copy button and publishes no Copy hit', async () => {
+test('F2-03 72x3 paints no hidden Copy or Confirm action', async () => {
   const h = setup({ columns: 72, rows: 3, doc: { theme: 'dark' } })
   await h.open()
   await key(h, '\r') // categories -> rows
-  await key(h, '\r') // rows -> detail
-  assert.ok(!h.view().includes('Copy value [C]'), `the button is not painted at 72x3:\n${h.view()}`)
-  const valueRow = rowOf(h, 'Value')
-  press(h, valueRow, 0)
-  release(h, valueRow, 0)
-  await settle(h)
-  assert.deepEqual(h.copied, [], 'a click on an unpainted button cell copies nothing')
+  await key(h, '\r') // L1 -> inline choice
+  assert.ok(!h.view().includes('Copy value [C]'), `the hidden Copy action is not painted at 72x3:\n${h.view()}`)
+  assert.ok(!h.view().includes('Confirm'), `the Confirm button is not granted below a two-row detail body:\n${h.view()}`)
+  await key(h, 'c')
+  assert.deepEqual(h.copied, [], 'a hidden copy action cannot execute')
+  await key(h, '\r')
+  assert.equal(h.replacements(), 0, 'a one-row choice has no hidden commit affordance')
   h.dispose()
 })
 
 // ── F3: a gesture spanning a data change is refused ───────────────────────
 
 test('F3 a release after Refresh is refused instead of copying the newer value', async () => {
-  const h = setup({ columns: 72, rows: 24, doc: { theme: 'dark' } })
+  const h = setup({ columns: 72, rows: 24, doc: { iconStyle: 'minimal' } })
   await h.open()
-  await key(h, '\r')
-  await key(h, '\r') // detail
+  await key(h, '\r') // L0 -> L1
+  await key(h, '\x1b[B') // Configured theme -> read-only Icon style
+  await key(h, '\r') // read-only detail
   const buttonRow = rowOf(h, 'Copy value [C]')
   const buttonCol = cellIndexOf(h, buttonRow, 'Copy value [C]')
   press(h, buttonRow, buttonCol)
-  h.doc.theme = 'light'
+  h.doc.iconStyle = 'symbols'
   await key(h, 'r') // refresh: the row value changes and the state version bumps
-  assert.match(h.view(), /light/, 'R really re-read the new value')
+  assert.match(h.view(), /symbols/, 'R really re-read the new value')
   release(h, buttonRow, buttonCol)
   await settle(h)
   assert.deepEqual(h.copied, [], 'the stale press must not copy the refreshed value')
   // Positive control: the same gesture without an intervening change copies.
-  // A DIFFERENT cell inside the same painted button keeps it a single click
-  // (the fork's 500 ms double-click window would otherwise turn the second
-  // click at the same cell into a word selection).
+  // A DIFFERENT cell inside the same painted button keeps it a single click.
   const settledRow = rowOf(h, 'Copy value [C]')
   const settledCol = cellIndexOf(h, settledRow, 'Copy value [C]') + 5
   press(h, settledRow, settledCol)
   release(h, settledRow, settledCol)
   await settle(h)
-  assert.deepEqual(h.copied, ['light'], 'an unchanged gesture still copies')
+  assert.deepEqual(h.copied, ['symbols'], 'an unchanged gesture still copies')
   h.dispose()
 })
 
@@ -892,7 +903,7 @@ test('F5 an unreadable document never fabricates a "not set" persisted preferenc
   await key(missing, '\r') // L0 -> L1
   await key(missing, '\r') // L1 -> L2 (the Transcript display row's detail)
   const missingView = missing.view().replace(/\s+/g, ' ')
-  assert.match(missingView, /Persisted preference unknown/, 'absence is an unknown persistence state')
+  assert.match(missingView, /Persisted\s+unknown/, 'absence is an unknown persistence state')
   assert.ok(!missingView.includes('Persisted preference: not set'), 'absence is never "read and not configured"')
   missing.dispose()
 
@@ -902,8 +913,9 @@ test('F5 an unreadable document never fabricates a "not set" persisted preferenc
   await key(throwing, '\r')
   await key(throwing, '\r')
   const throwingView = throwing.view().replace(/\s+/g, ' ')
-  assert.match(throwingView, /Persisted preference unknown — the TUI settings document could not be read/)
-  assert.match(throwingView, /settings read exploded/, 'the real read error is reachable')
+  assert.match(throwingView, /Persisted\s+unknown/, 'a failed read remains explicitly unknown')
+  for (let page = 0; page < 3; page += 1) await key(throwing, '\x1b[6~')
+  assert.match(throwing.view().replace(/\s+/g, ' '), /settings read exploded/, 'PgDn reaches the complete read error fact')
   throwing.dispose()
 })
 
@@ -932,22 +944,24 @@ test('A-02b the wide geometry is exact and a 300-char value never squeezes the A
   for (const [index, line] of h.vt.getViewport().entries()) {
     assert.ok(visibleWidth(line) <= 200, `row ${index} must fit the terminal`)
   }
-  assert.match(h.rowsPlain().at(-1) ?? '', /↑↓ select · Enter open · Esc close/, 'the Action Bar stays the last physical row')
+  assert.match(h.rowsPlain().at(-1) ?? '', /Right open · Enter open · Esc close/, 'the Action Bar stays the last physical row')
   await key(h, '\r') // L0 -> L1 (the row list owns the keyboard)
-  await key(h, '\r') // L1 -> L2 (the Detail owns the keyboard)
-  await key(h, '\x1b[B')
-  await key(h, '\x1b[B')
-  assert.match(h.view().replace(/\s+/g, ''), /x{100}/, 'the long value is wrapped and readable in the Detail')
+  await key(h, '\r') // L1 -> inline choice
+  assert.ok(h.view().includes('Full value'), 'the complete long value starts in the facts region')
+  await key(h, '\x1b[6~') // PageDown scrolls the facts, not the candidate
+  assert.match(h.view().replace(/\s+/g, ''), /x{100}/, 'the long value remains readable while the facts scroll')
   h.dispose()
 })
 
 test('A-10c the copy failure paths report inside the workspace instead of a false success', async () => {
   for (const failing of [async () => false, async () => { throw new Error('clipboard refused') }]) {
-    const h = setup({ columns: 72, rows: 24, doc: { theme: 'dark' }, copySelection: failing })
+    const h = setup({ columns: 140, rows: 24, doc: { theme: 'dark' }, copySelection: failing })
     await h.open()
-    await key(h, '\r')
-    await key(h, '\r')
-    await key(h, 'c')
+    await key(h, '\r') // L0 -> L1 exposes the Details copy action
+    const row = rowOf(h, 'Copy value [C]')
+    const col = cellIndexOf(h, row, 'Copy value [C]')
+    press(h, row, col)
+    release(h, row, col)
     await settle(h)
     assert.ok(h.rowsPlain().some(line => line.includes('Copy failed')), `the failure notice is visible:\n${h.view()}`)
     assert.ok(!h.view().includes('Copy sent'), 'a failure is never reported as success')
@@ -1033,7 +1047,7 @@ test('F2-04 below the body floor the Action Bar advertises only the Esc semantic
     await h.open()
     const bar = h.rowsPlain().at(-1)!
     assert.match(bar, /^Esc /, `the bar keeps its Esc semantics at ${columns}x${rows}`)
-    for (const forbidden of ['↑↓', '←→', 'Enter', 'Tab', 'r refresh', 'c copy', 'PgDn', 'PgUp']) {
+    for (const forbidden of ['Up/Down', 'Left', 'Right', 'Enter', 'Tab', 'r refresh', 'c copy', 'PgDn', 'PgUp']) {
       assert.ok(!bar.includes(forbidden), `${columns}x${rows} must not advertise the inert ${forbidden}: ${bar}`)
     }
     h.dispose()
@@ -1079,7 +1093,9 @@ test('F6b a real newline and a literal backslash-n render differently', async ()
   // The SAME app re-reads a literal backslash-n: the projection must keep the
   // two raw identities distinguishable.
   h.doc.theme = 'file:a\\nb'
+  await key(h, '\x1b') // cancel the open choice back to L1
   await key(h, 'r')
+  await key(h, '\r') // re-read and re-enter the inline choice
   const literalValue = valueLine(h)
   assert.ok(literalValue.includes('file:a\\\\nb'), `a literal backslash renders doubled: ${JSON.stringify(literalValue)}`)
   assert.notEqual(literalValue, realValue, 'the two raw identities render differently')
@@ -1111,37 +1127,48 @@ test('F10 a viewport shrink reveals the selected row instead of hiding it', asyn
 
 // ── F1 sibling: the retired Tab cycle and header arrows ───────────────────
 
-test('F1-05 Tab/Shift+Tab and Left/Right are inert on every level: no focus cycle, no category switch', async () => {
-  const h = setup({ columns: 100, rows: 24, doc: { theme: 'dark' } })
-  await h.open()
-  assert.match(h.rowsPlain()[rowOf(h, 'Categories (3)')]!, /\[Categories \(3\)\]/, 'the categories level owns focus at open')
-  assert.ok(!h.view().includes('←'), 'the header paints no category arrows')
-  const l0 = h.view()
-  for (const data of ['\t', '\x1b[Z', '\x1b[C', '\x1b[D']) await key(h, data)
-  assert.equal(h.view(), l0, 'Tab/Shift+Tab/Left/Right are inert on the medium categories level')
-  await key(h, '\r') // L0 -> L1
-  const l1 = h.view()
-  for (const data of ['\t', '\x1b[Z', '\x1b[C', '\x1b[D']) await key(h, data)
-  assert.equal(h.view(), l1, 'and inert on the medium rows level')
-  await key(h, '\r') // L1 -> L2
-  const l2 = h.view()
-  for (const data of ['\t', '\x1b[Z', '\x1b[C', '\x1b[D']) await key(h, data)
-  assert.equal(h.view(), l2, 'and inert on the medium detail level')
-  h.dispose()
+test('F1-05 Left/Right navigate the single focus hierarchy; Tab remains inert at every projection', async () => {
+  for (const columns of [200, 100, 72] as const) {
+    const h = setup({ columns, rows: 24, doc: { theme: 'dark' } })
+    await h.open()
+    assert.match(h.rowsPlain()[0]!, /Settings · Categories/, `the category level opens at ${columns}`)
+    assert.ok(!h.view().includes('←'), 'the header paints no category arrows')
+    const l0 = h.view()
+    for (const data of ['\t', '\x1b[Z']) await key(h, data)
+    assert.equal(h.view(), l0, 'Tab/Shift+Tab remain inert on L0')
 
-  const wide = setup({ columns: 200, rows: 24, doc: { theme: 'dark' } })
-  await wide.open()
-  const wideL0 = wide.view()
-  for (const data of ['\t', '\x1b[C', '\x1b[D']) await key(wide, data)
-  assert.equal(wide.view(), wideL0, 'the wide projection has no Tab cycle and no arrow category switch')
-  wide.dispose()
+    await key(h, '\x1b[C') // Right: L0 -> L1
+    assert.match(h.rowsPlain()[0]!, /· Rows/, `Right enters the row level at ${columns}`)
+    const l1 = h.view()
+    for (const data of ['\t', '\x1b[Z']) await key(h, data)
+    assert.equal(h.view(), l1, 'Tab/Shift+Tab remain inert on L1')
 
-  const narrow = setup({ columns: 72, rows: 24, doc: { theme: 'dark' } })
-  await narrow.open()
-  const narrowL0 = narrow.view()
-  for (const data of ['\t', '\x1b[Z', '\x1b[C', '\x1b[D']) await key(narrow, data)
-  assert.equal(narrow.view(), narrowL0, 'the narrow projection is inert to Tab and Left/Right')
-  narrow.dispose()
+    await key(h, '\x1b[C') // Right: L1 -> inline L2 choice
+    assert.match(h.view(), /Choose value/, `Right enters the one-step inline choice at ${columns}`)
+    assert.ok(h.view().includes('> dark'), 'the selected option is visibly identified')
+    await key(h, '\x1b[F') // End -> last candidate
+    assert.ok(h.view().includes('> light'), 'End selects the last candidate without writing')
+    await key(h, '\x1b[H') // Home -> first candidate
+    assert.ok(h.view().includes('> auto'), 'Home selects the first candidate without writing')
+    await key(h, '\x1b[B') // Down -> dark
+    assert.ok(h.view().includes('> dark'))
+    await key(h, '\x1b[D') // Left cancels L2 -> L1
+    assert.ok(!h.view().includes('Choose value'), 'Left cancels rather than leaving a hidden chooser')
+    assert.match(h.rowsPlain()[0]!, /· Rows/)
+    for (const cancel of ['\x7f', '\x1b'] as const) {
+      await key(h, '\x1b[C')
+      assert.ok(h.view().includes('Choose value'))
+      await key(h, cancel)
+      assert.ok(!h.view().includes('Choose value'), 'Backspace/Esc cancel straight to L1')
+      assert.match(h.rowsPlain()[0]!, /· Rows/)
+    }
+    await key(h, '\x1b[D') // Left: L1 -> L0
+    assert.match(h.rowsPlain()[0]!, /Settings · Categories/)
+    await key(h, '\x1b[D') // Left at L0 is inert
+    assert.match(h.rowsPlain()[0]!, /Settings · Categories/)
+    assert.equal(h.replacements(), 0, 'navigation never commits the selected value')
+    h.dispose()
+  }
 })
 
 // ── External UI review (PR #295) P2s ───────────────────────────────────────
@@ -1185,7 +1212,7 @@ test('A-05b the decorative rules yield before readable content on short screens'
   await short.open()
   const painted = short.rowsPlain()
   assert.equal(painted.length, 5)
-  assert.match(painted.at(-1)!, /↑↓ select · Enter open · Esc close/)
+  assert.match(painted.at(-1)!, /Right open · Enter open · Esc close/)
   assert.equal(painted.filter(line => /^─+$/.test(line)).length, 0, 'the decorative rules yield at 5 rows')
   for (const label of ['Appearance', 'Display', 'Other settings']) {
     assert.ok(painted.some(line => line.includes(label)), `the body keeps the real ${label} row:\n${short.view()}`)
@@ -1193,26 +1220,30 @@ test('A-05b the decorative rules yield before readable content on short screens'
   short.dispose()
 
   // 6 and 8 rows with a LIVE notice: the notice's body floor is honoured first.
-  const live = setup({ columns: 72, rows: 24, doc: { theme: 'dark' } })
+  const live = setup({ columns: 100, rows: 24, doc: { theme: 'dark' } })
   await live.open()
-  await key(live, '\r')
-  await key(live, '\r')
-  await key(live, 'c')
+  await key(live, '\r') // L0 -> L1 exposes the real Detail button in medium
+  const copyRow = rowOf(live, 'Copy value [C]')
+  const copyCol = cellIndexOf(live, copyRow, 'Copy value [C]')
+  press(live, copyRow, copyCol)
+  release(live, copyRow, copyCol)
   await settle(live)
   assert.ok(live.rowsPlain().some(line => line.includes('Copy sent')), 'the notice is live before the shrink')
   for (const rows of [6, 8]) {
-    live.vt.resize(72, rows)
+    live.vt.resize(100, rows)
     await live.vt.waitForRender()
     const frame = live.rowsPlain()
     assert.equal(frame.length, rows)
-    assert.match(frame.at(-1)!, /Enter change · ↑↓ scroll · r refresh · c copy value · Esc back/)
+    assert.match(frame.at(-1)!, /Left back/)
     assert.ok(frame.some(line => line.includes('Copy sent')), `the notice is still granted and painted at ${rows} rows:\n${live.view()}`)
     assert.equal(frame.filter(line => /^─+$/.test(line)).length, 0, `the decorative rules yield at ${rows} rows:\n${live.view()}`)
     if (rows === 8) {
       assert.ok(frame.some(line => line.includes('Config Ready')), 'the freshness/scope metadata is granted at 8 rows')
     }
     if (rows === 6) {
-      assert.ok(frame.some(line => line.includes('Value')), 'the body keeps real detail rows under the notice')
+      const detailHeader = frame.findIndex(line => line.includes('[Details]'))
+      assert.ok(detailHeader >= 0, 'the multi-column pane identity survives the live notice')
+      assert.ok(frame[detailHeader + 1]?.includes('Configured theme'), `the selected Detail row remains in the body:\n${live.view()}`)
     }
   }
   live.dispose()
@@ -1220,30 +1251,27 @@ test('A-05b the decorative rules yield before readable content on short screens'
 
 // ── External UI review round 2 (PR #295): the narrow drill-down contract ───
 
-test('F11 narrow Tab/Shift+Tab never bypass the drill-down and Left/Right never switch category', async () => {
+test('F11 narrow Left/Right enter exactly one level and never skip directly from Categories to detail', async () => {
   const h = setup({ columns: 72, rows: 24, doc: { theme: 'dark' } })
   await h.open()
   assert.match(h.rowsPlain()[0]!, /Settings · Categories/)
   const before = h.view()
-  for (const data of ['\t', '\x1b[Z', '\t']) await key(h, data)
+  for (const data of ['\t', '\x1b[Z']) await key(h, data)
   assert.equal(h.view(), before, 'Tab/Shift+Tab are inert on the narrow categories page')
   assert.ok(!h.view().includes('Value'), 'the Detail is never reached directly from Categories')
-  await key(h, '\x1b[C')
-  assert.equal(h.view(), before, 'Right never switches category on the narrow categories page')
-  await key(h, '\x1b[D')
-  assert.equal(h.view(), before, 'Left neither')
-  // Positive control: the unified per-level Enter/Esc walk still works.
-  await key(h, '\r')
+  await key(h, '\x1b[C') // Right: Categories -> Rows only
   assert.match(h.rowsPlain()[0]!, /Settings · Appearance · Rows/)
-  await key(h, '\r')
+  assert.ok(!h.view().includes('Choose value'), 'Right never skips directly from L0 to the choice')
+  await key(h, '\x1b[C') // Right: Rows -> inline choice
   assert.match(h.rowsPlain()[0]!, /Settings · Appearance · Configured theme/)
-  await key(h, '\x1b')
-  assert.match(h.rowsPlain()[0]!, /· Rows/, 'Esc returns one level')
-  await key(h, '\x1b')
+  assert.match(h.view(), /Choose value/)
+  await key(h, '\x1b[D') // Left: choice -> Rows
+  assert.ok(!h.view().includes('Choose value'))
+  assert.match(h.rowsPlain()[0]!, /· Rows/, 'Left cancels to the row level')
+  await key(h, '\x1b[D') // Left: Rows -> Categories
   assert.match(h.rowsPlain()[0]!, /Categories/)
   h.dispose()
 
-  // Medium has no Tab focus cycle and no header arrows any more either.
   const medium = setup({ columns: 100, rows: 24, doc: { theme: 'dark' } })
   await medium.open()
   const mediumBefore = medium.view()
@@ -1251,7 +1279,7 @@ test('F11 narrow Tab/Shift+Tab never bypass the drill-down and Left/Right never 
   assert.equal(medium.view(), mediumBefore, 'Tab/Shift+Tab do not cycle a focus owner in medium')
   assert.ok(!medium.view().includes('←'), 'the medium header paints no category arrows')
   await key(medium, '\x1b[C')
-  assert.equal(medium.view(), mediumBefore, 'Right does not switch category in medium')
+  assert.match(medium.rowsPlain()[0]!, /· Rows/, 'Right enters L1 without changing the category')
   medium.dispose()
 })
 
@@ -1261,8 +1289,8 @@ test('F12 / UX-10 pre-paint keys resolve the level, never the projection: the sa
     // Deliberately do NOT await a paint: the first keys arrive before the initial
     // frame, exactly when the level — not the layout — must be the state.
     h.invoke('settings')
-    h.vt.sendInput('\r') // L0 -> L1
-    h.vt.sendInput('\x1b') // L1 -> L0, NEVER a full close
+    h.vt.sendInput('\x1b[C') // Right: L0 -> L1 before paint
+    h.vt.sendInput('\x1b[D') // Left: L1 -> L0, NEVER a full close
     await h.vt.waitForRender()
     assert.ok(h.view().includes('Settings'), `the pre-paint Esc must not close the workspace at ${columns}:\n${h.view()}`)
     assert.match(h.rowsPlain()[0]!, /Settings · Categories/, 'the pre-paint Esc returns to the categories level')
@@ -1274,14 +1302,14 @@ test('F12 / UX-10 pre-paint keys resolve the level, never the projection: the sa
     h.dispose()
   }
 
-  // Three keys BEFORE the first paint: Enter -> Enter -> Esc must land on L1
+  // Three keys BEFORE the first paint: Right -> Right -> Left must land on L1
   // (neither close nor skip a level), exactly like the painted walk.
   for (const [columns, rows] of [[72, 24], [100, 40], [160, 40]] as const) {
     const h = setup({ columns, rows, doc: { theme: 'dark' } })
     h.invoke('settings')
-    h.vt.sendInput('\r') // L0 -> L1
-    h.vt.sendInput('\r') // L1 -> L2
-    h.vt.sendInput('\x1b') // L2 -> L1, NEVER a full close
+    h.vt.sendInput('\x1b[C') // Right: L0 -> L1
+    h.vt.sendInput('\x1b[C') // Right: L1 -> L2 choice
+    h.vt.sendInput('\x1b[D') // Left: L2 -> L1, NEVER a full close
     await h.vt.waitForRender()
     assert.ok(h.view().includes('Settings'), `the pre-paint deep walk never closes at ${columns}:\n${h.view()}`)
     assert.match(h.rowsPlain()[0]!, /Settings · Appearance · Rows/, `the pre-paint deep walk lands on L1 at ${columns}`)
@@ -1336,7 +1364,7 @@ test('UX-02 Esc walks one level back at every width; only L0 closes', async () =
   }
 })
 
-test('UX-03 the medium projection is a pure function of the level: L0 categories+rows, L1/L2 rows+detail', async () => {
+test('UX-03 the medium projection is a pure function of focus: L0 categories+rows, L1/L2 rows+detail', async () => {
   for (const columns of [76, 107]) {
     const h = setup({ columns, rows: 40, doc: { theme: 'plugin:acme/solarized' }, themes: pluginThemes() })
     await h.open()
@@ -1347,10 +1375,11 @@ test('UX-03 the medium projection is a pure function of the level: L0 categories
     assert.ok(h.rowsPlain().some(line => line.includes('Details')), 'L1 paints rows+detail')
     assert.ok(!h.view().includes('Categories (3)'), 'L1 drops the categories column')
     await key(h, '\r')
-    assert.match(h.rowsPlain()[rowOf(h, 'Details')]!, /\[Details\]/, 'L2 focuses the detail on the same composition')
+    assert.ok(h.view().includes('Choose value'), 'L2 enters an inline choice without a second browse Enter')
+    assert.ok(h.view().includes('Solarized'), 'the selected source identity remains visible')
     assert.ok(!h.view().includes('Categories (3)'), 'L2 keeps the rows+detail projection')
     await key(h, '\x1b')
-    assert.match(h.rowsPlain()[0]!, /· Rows/, 'Esc from L2 returns to L1 on the same rows+detail projection')
+    assert.match(h.rowsPlain()[0]!, /· Rows/, 'Esc cancels L2 directly back to L1')
     await key(h, '\x1b')
     assert.ok(h.rowsPlain().some(line => line.includes('Categories (3)')), 'Esc from L1 returns to categories+rows')
     assert.ok(!h.view().includes('Details'), 'and hides the detail again')
@@ -1358,7 +1387,7 @@ test('UX-03 the medium projection is a pure function of the level: L0 categories
   }
 })
 
-test('UX-04 the narrow projection paints only the current level and a resize never resets the level', async () => {
+test('UX-04 the narrow projection keeps the inline choice across resize and preserves Detail copy', async () => {
   const h = setup({ columns: 72, rows: 24, doc: { theme: 'dark' } })
   await h.open()
   assert.match(h.rowsPlain()[0]!, /Settings · Categories/)
@@ -1369,53 +1398,143 @@ test('UX-04 the narrow projection paints only the current level and a resize nev
   assert.ok(!h.view().includes('Display'), 'L1 shows only the current category rows')
   await key(h, '\r')
   assert.match(h.rowsPlain()[0]!, /Configured theme/)
+  assert.ok(h.view().includes('Choose value'), 'a writable L1 row enters the inline choice')
   h.vt.resize(100, 24)
   await h.vt.waitForRender()
-  assert.match(h.rowsPlain()[0]!, /Configured theme/, 'the medium resize keeps the detail level')
+  assert.match(h.rowsPlain()[0]!, /Configured theme/, 'the medium resize keeps the choice level')
+  assert.ok(h.view().includes('Choose value'))
   h.vt.resize(44, 8)
   await h.vt.waitForRender()
-  assert.match(h.rowsPlain()[0]!, /Appearance · Conf/, 'the 44-column projection keeps the detail level')
-  assert.ok(h.view().includes('Value'), 'the real value stays reachable')
-  await key(h, 'c')
+  assert.match(h.rowsPlain()[0]!, /Appearance · Conf/, 'the 44-column projection keeps the choice level')
+  assert.ok(h.view().includes('Value'), 'the persisted old value stays reachable')
+
+  // Cancel back to L1; medium exposes the same Details copy action without a
+  // hidden focus cycle or an extra confirmation step.
+  await key(h, '\x1b')
+  h.vt.resize(100, 24)
+  await h.vt.waitForRender()
+  const copyRow = rowOf(h, 'Copy value [C]')
+  const copyCol = cellIndexOf(h, copyRow, 'Copy value [C]')
+  press(h, copyRow, copyCol)
+  release(h, copyRow, copyCol)
   await settle(h)
   assert.deepEqual(h.copied, ['dark'], 'the copy still sends the exact source value')
   h.dispose()
 })
 
-test('UX-05 a resize keeps focus/category/row and invalidates the previous painted hit map', async () => {
+test('UX-05 a resize keeps focus/category/row and invalidates the previous painted Confirm hit map', async () => {
   const h = setup({ columns: 200, rows: 40, doc: { theme: 'dark' } })
   await h.open()
   await key(h, '\x1b[B') // Display
   await key(h, '\r') // L1
-  await key(h, '\r') // L2
-  const buttonRow = rowOf(h, 'Copy value [C]')
-  const buttonCol = cellIndexOf(h, buttonRow, 'Copy value [C]')
+  await key(h, '\r') // L2 choice
+  const buttonRow = rowOf(h, 'Confirm')
+  const buttonCol = cellIndexOf(h, buttonRow, 'Confirm')
   press(h, buttonRow, buttonCol)
   h.vt.resize(100, 40)
   await h.vt.waitForRender()
   release(h, buttonRow, buttonCol)
   await settle(h)
-  assert.deepEqual(h.copied, [], 'a press recorded against the wide geometry is refused after the resize')
+  assert.equal(h.replacements(), 0, 'a press recorded against the wide geometry is refused after resize')
+  assert.equal(h.doc.theme, 'dark', 'the stale Confirm did not write any preference')
   assert.match(h.rowsPlain()[0]!, /Settings · Display/, 'the category and level survive the resize')
   h.dispose()
 })
 
-test('UX-05b a resize that has NOT repainted yet still refuses the straddling press', async () => {
+test('UX-05b a resize that has NOT repainted yet still refuses the straddling Confirm press', async () => {
   const h = setup({ columns: 72, rows: 24, doc: { theme: 'dark' } })
   await h.open()
   await key(h, '\r') // L0 -> L1 (narrow)
-  await key(h, '\r') // L1 -> L2: the narrow Detail paints the Copy button at x=0
-  const buttonRow = rowOf(h, 'Copy value [C]')
-  const buttonCol = cellIndexOf(h, buttonRow, 'Copy value [C]')
+  await key(h, '\r') // L1 -> inline choice
+  const buttonRow = rowOf(h, 'Confirm')
+  const buttonCol = cellIndexOf(h, buttonRow, 'Confirm')
   press(h, buttonRow, buttonCol)
   // The LIVE terminal is already 96 columns (medium, two panes) but NO repaint
-  // has run yet: the resize is a gesture boundary by itself, so the press-time
-  // cell must not activate even though the painted hit map is still the old one.
+  // has run yet: the resize is a gesture boundary by itself.
   h.vt.resize(96, 24)
   release(h, buttonRow, buttonCol)
   await settle(h)
-  assert.deepEqual(h.copied, [], 'a release after a resize without a repaint must be refused')
-  assert.match(h.rowsPlain()[0]!, /Settings · Appearance · Configured theme/, 'the level survives the resize')
+  assert.equal(h.replacements(), 0, 'a release after a resize without a repaint must be refused')
+  assert.match(h.rowsPlain()[0]!, /Settings · Appearance · Configured theme/, 'the choice level survives the resize')
+  h.dispose()
+})
+
+test('UX-05c a one-row choice cannot confirm invisibly and the first Enter only reveals its identity', async () => {
+  const h = setup({ columns: 100, rows: 24, doc: { theme: 'dark' } })
+  await h.open()
+  await key(h, '\r') // L0 -> L1
+  await key(h, '\x1b[C') // Right -> inline choice
+
+  h.vt.resize(100, 3)
+  await h.vt.waitForRender()
+  assert.match(h.rowsPlain().at(-1) ?? '', /^Esc back/, 'one granted choice row advertises only its safe back action')
+  assert.ok(!h.rowsPlain().at(-1)!.includes('Enter confirm'))
+  assert.ok(h.view().includes('> dark'), 'the one candidate row is still identity-bearing')
+  await key(h, '\r')
+  assert.equal(h.replacements(), 0, 'Enter without a painted confirm hint never writes')
+  assert.equal(h.doc.theme, 'dark')
+
+  h.vt.resize(100, 2)
+  await h.vt.waitForRender()
+  assert.match(h.rowsPlain().at(-1) ?? '', /^Esc back/, 'with zero body rows only Esc remains')
+  await key(h, '\r')
+  assert.equal(h.replacements(), 0, 'the below-floor Enter stays inert')
+  h.dispose()
+})
+
+test('UX-05d clicking another category or row cancels an inline choice atomically', async () => {
+  const h = setup({ columns: 200, rows: 24, doc: { theme: 'dark' } })
+  await h.open()
+  await key(h, '\r') // L0 -> L1
+  await key(h, '\r') // L1 -> inline choice
+  assert.ok(h.view().includes('Choose value'))
+
+  const displayRow = rowOf(h, 'Display')
+  const displayCol = cellIndexOf(h, displayRow, 'Display')
+  press(h, displayRow, displayCol)
+  release(h, displayRow, displayCol)
+  await settle(h)
+  assert.ok(!h.view().includes('Choose value'), 'a category click retires the old chooser')
+  assert.ok(!h.view().includes('Confirm'), 'the old candidate confirm is no longer painted')
+  assert.ok(h.rowsPlain().some(line => line.startsWith('> Display')), 'the clicked category is selected')
+  assert.equal(h.replacements(), 0)
+
+  await key(h, '\x1b[C') // L0 -> L1
+  await key(h, '\x1b[C') // L1 -> Display preset choice
+  assert.ok(h.view().includes('Choose value'))
+  const thinkingRow = rowOf(h, 'Thinking detail')
+  const thinkingCol = cellIndexOf(h, thinkingRow, 'Thinking detail')
+  press(h, thinkingRow, thinkingCol)
+  release(h, thinkingRow, thinkingCol)
+  await settle(h)
+  assert.ok(!h.view().includes('Choose value'), 'a row click cancels the chooser before changing selection')
+  assert.ok(!h.view().includes('Confirm'))
+  assert.match(h.rowsPlain()[0]!, /Settings · Display · Rows/)
+  assert.ok(h.view().includes('> Thinking detail'), 'the clicked row is selected at L1')
+  assert.equal(h.replacements(), 0, 'neither navigation click commits a candidate')
+  h.dispose()
+})
+
+test('UX-05e a Detail-pane or Change click enters the same one-step inline choice', async () => {
+  const h = setup({ columns: 100, rows: 40, doc: { theme: 'dark' } })
+  await h.open()
+  await key(h, '\r') // L0 -> L1; the medium Details pane is visible
+  const valueRow = rowOf(h, 'Value')
+  const valueCol = cellIndexOf(h, valueRow, 'Value')
+  press(h, valueRow, valueCol)
+  release(h, valueRow, valueCol)
+  await settle(h)
+  assert.ok(h.view().includes('Choose value'), 'ordinary Detail content enters L2 choosing in one click')
+  assert.equal(h.replacements(), 0)
+
+  await key(h, '\x1b') // back to L1
+  const changeRow = rowOf(h, 'Change…')
+  const changeCol = cellIndexOf(h, changeRow, 'Change…')
+  press(h, changeRow, changeCol)
+  release(h, changeRow, changeCol)
+  await settle(h)
+  assert.ok(h.view().includes('Choose value'), 'the painted Change button follows the same transition')
+  assert.equal(h.replacements(), 0, 'neither entry path writes before explicit confirmation')
   h.dispose()
 })
 
@@ -1437,15 +1556,19 @@ test('UX-06 changing category refreshes the row selection and the detail; browsi
   h.dispose()
 })
 
-test('UX-07 Tab/arrows never change the level and never leak into the hidden editor', async () => {
+test('UX-07 the arrow hierarchy never leaks keys into the hidden editor', async () => {
   const h = setup({ columns: 100, rows: 40, doc: { theme: 'dark' } })
   await h.vt.waitForRender()
   for (const ch of 'draft') await key(h, ch)
   await h.open()
   const before = h.view()
-  for (const data of ['\t', '\x1b[Z', '\x1b[C', '\x1b[D']) await key(h, data)
-  assert.equal(h.view(), before, 'Tab/Shift+Tab/Left/Right change nothing in the workspace')
-  assert.ok(!h.view().includes('draft'), 'no key leaks into the hidden editor')
+  for (const data of ['\t', '\x1b[Z']) await key(h, data)
+  assert.equal(h.view(), before, 'Tab/Shift+Tab remain inert inside the workspace')
+  await key(h, '\x1b[C') // Right: L0 -> L1
+  assert.match(h.rowsPlain()[0]!, /· Rows/)
+  await key(h, '\x1b[D') // Left: L1 -> L0
+  assert.match(h.rowsPlain()[0]!, /Settings · Categories/)
+  assert.ok(!h.view().includes('draft'), 'no navigation key leaks into the hidden editor')
   assert.deepEqual(h.copied, [], 'no key leaks into a clipboard action')
   await key(h, '\x1b')
   assert.ok(h.view().includes('draft'), 'the editor draft is untouched after the round trip')
@@ -1465,8 +1588,8 @@ test('UX-08 only visible panes publish hits: the hidden Detail band neither copi
   h.dispose()
 })
 
-test('UX-09 C copies only in the Detail level; R refreshes in place; browsing never writes', async () => {
-  const h = setup({ columns: 100, rows: 40, doc: { theme: 'plugin:acme/solarized' }, themes: pluginThemes() })
+test('UX-09 C copies only in a read-only Detail; R refreshes in place; browsing never writes', async () => {
+  const h = setup({ columns: 100, rows: 40, doc: { theme: 'plugin:acme/solarized', iconStyle: 'symbols' }, themes: pluginThemes() })
   await h.open()
   await key(h, 'c')
   await settle(h)
@@ -1479,20 +1602,22 @@ test('UX-09 C copies only in the Detail level; R refreshes in place; browsing ne
   await key(h, 'r')
   assert.ok(h.reads() > readsBefore, 'R re-reads the same authority')
   assert.match(h.rowsPlain()[0]!, /· Rows/, 'R keeps the current level')
-  await key(h, '\r') // L2
+  await key(h, '\x1b[B') // Configured theme -> read-only Icon style
+  await key(h, '\r') // L2 read-only Detail
   await key(h, 'c')
   await settle(h)
-  assert.deepEqual(h.copied, ['plugin:acme/solarized'], 'C in the Detail copies the exact source value')
+  assert.deepEqual(h.copied, ['symbols'], 'C in the read-only Detail copies the exact source value')
   assert.equal(h.replacements(), 0, 'no navigation or refresh ever writes the config document')
   h.dispose()
 })
 
-test('UX-11 a long CJK value wraps inside the narrow Detail and copies byte-exact', async () => {
+test('UX-11 a long CJK value wraps inside the narrow read-only Detail and copies byte-exact', async () => {
   const value = `file:${'汉'.repeat(40)}`
-  const h = setup({ columns: 44, rows: 8, doc: { theme: value } })
+  const h = setup({ columns: 44, rows: 8, doc: { iconStyle: value } })
   await h.open()
-  await key(h, '\r')
-  await key(h, '\r')
+  await key(h, '\r') // L0 -> L1
+  await key(h, '\x1b[B') // Configured theme -> Icon style
+  await key(h, '\r') // read-only L2 Detail
   for (const [index, line] of h.vt.getViewport().entries()) {
     assert.ok(visibleWidth(line) <= 44, `row ${index} must stay inside the pane width`)
   }
@@ -1527,18 +1652,18 @@ test('UX-12 the projection table is frozen: below 76 columns one pane, 76..107 t
 // registry are the external seams; the write really travels the command's
 // serialized whole-document path and its authoritative re-read.
 
-/** Enter the L2 detail of one row: `/settings` always opens on L0. */
-async function openDetail(h: Harness, row: 'theme' | 'display-preset'): Promise<void> {
+/** Select one row at L1; writable rows enter the inline choice with one Enter or Right. */
+async function openSelectedRow(h: Harness, row: 'theme' | 'display-preset'): Promise<void> {
   await h.open()
   if (row === 'display-preset') await key(h, '\x1b[B') // Appearance -> Display
   await key(h, '\r') // L0 -> L1
-  await key(h, '\r') // L1 -> L2
 }
 
 test('B-01 the Theme Detail separates the runtime palette from the persisted preference and starts read-only', async () => {
   const h = setup({ columns: 140, rows: 40, doc: { theme: 'plugin:acme/solarized' }, themes: pluginThemes() })
-  await openDetail(h, 'theme')
-  assert.match(h.view(), /Settings · Appearance · Configured theme/)
+  await openSelectedRow(h, 'theme')
+  assert.match(h.rowsPlain()[0]!, /Settings · Appearance · Rows/)
+  assert.match(h.view(), /Configured theme/, 'the Detail pane keeps the selected row identity visible')
   assert.match(h.view(), /plugin:acme\/solarized/, 'the persisted source-qualified identity is stated')
   assert.match(h.view(), /Runtime\s+\S/, 'the live runtime palette has its own named fact')
   assert.match(h.view(), /Solarized/)
@@ -1549,9 +1674,9 @@ test('B-01 the Theme Detail separates the runtime palette from the persisted pre
 
 test('B-02 Enter opens the L2 choice; moving the candidate writes nothing; only the explicit Confirm commits and verifies', async () => {
   const h = setup({ columns: 140, rows: 40, doc: { theme: 'dark' }, themes: pluginThemes() })
-  await openDetail(h, 'theme')
-  await key(h, '\r') // L2 browse -> choice
-  assert.match(h.view(), /Choose Configured theme/)
+  await openSelectedRow(h, 'theme')
+  await key(h, '\r') // L1 -> inline choice
+  assert.match(h.view(), /Choose value/)
   const current = h.view().split('\n').find(line => line.includes('[current]')) ?? h.view()
   assert.match(current, /> dark\s+\[current\]/, 'the candidate list marks the persisted value, never a display label')
   // The chip keeps its OWN ink even on the selected candidate row (it must not
@@ -1575,8 +1700,8 @@ test('B-02 Enter opens the L2 choice; moving the candidate writes nothing; only 
 
   // Esc cancels with zero writes (W-08).
   await key(h, '\x1b')
-  assert.match(h.view(), /Settings · Appearance · Configured theme/, 'Esc returns to the L2 browse detail')
-  assert.ok(!h.view().includes('Choose Configured theme'))
+  assert.match(h.rowsPlain()[0]!, /Settings · Appearance · Rows/, 'Esc cancels to L1 while retaining the visible Detail facts')
+  assert.ok(!h.view().includes('Choose value'))
   assert.equal(h.replacements(), 0, 'a cancelled choice writes nothing')
   // Detail values are DERIVED presentation text and must be painted (the old
   // pane left every value in the terminal's default foreground, silently
@@ -1618,7 +1743,7 @@ test('B-03 a confirmed Theme commit whose write is refused reports the real fail
     themes: pluginThemes(),
     applyReplace: () => { throw new Error('settings namespace "tui-app" changed since it was read') },
   })
-  await openDetail(h, 'theme')
+  await openSelectedRow(h, 'theme')
   await key(h, '\r')
   const row = rowOf(h, 'light')
   const col = cellIndexOf(h, row, 'light')
@@ -1660,7 +1785,7 @@ test('B-04 Retry save re-dispatches the failed value once the write can succeed'
       Object.assign(h.doc, next)
     },
   })
-  await openDetail(h, 'theme')
+  await openSelectedRow(h, 'theme')
   await key(h, '\r')
   const row = rowOf(h, 'light')
   const col = cellIndexOf(h, row, 'light')
@@ -1686,11 +1811,11 @@ test('B-04 Retry save re-dispatches the failed value once the write can succeed'
 
 test('B-05 the Display preset applies through the shared runtime owner, persists exactly once and verifies', async () => {
   const h = setup({ columns: 140, rows: 40, doc: { displayPreset: 'compact', theme: 'dark' }, displayPreset: 'full' })
-  await openDetail(h, 'display-preset')
+  await openSelectedRow(h, 'display-preset')
   assert.match(h.view(), /Value\s+full/, 'the row value IS the live runtime preset')
   assert.match(h.view(), /Persisted\s+compact/, 'and the stored preference is named separately')
   await key(h, '\r')
-  assert.match(h.view(), /Choose Transcript display/)
+  assert.match(h.view(), /Choose value/)
   const row = rowOf(h, 'focus')
   const col = cellIndexOf(h, row, 'focus')
   press(h, row, col)
@@ -1713,7 +1838,7 @@ test('B-05 the Display preset applies through the shared runtime owner, persists
 
 test('B-06 a stale backend never writes and says why; the Display runtime fact still applies locally', async () => {
   const theme = setup({ columns: 200, rows: 40, doc: { theme: 'dark' }, readiness: 'stale', themes: pluginThemes() })
-  await openDetail(theme, 'theme')
+  await openSelectedRow(theme, 'theme')
   await key(theme, '\r')
   const themeRow = rowOf(theme, 'light')
   press(theme, themeRow, cellIndexOf(theme, themeRow, 'light'))
@@ -1729,7 +1854,7 @@ test('B-06 a stale backend never writes and says why; the Display runtime fact s
   theme.dispose()
 
   const display = setup({ columns: 200, rows: 40, doc: { displayPreset: 'compact' }, displayPreset: 'full', readiness: 'stale' })
-  await openDetail(display, 'display-preset')
+  await openSelectedRow(display, 'display-preset')
   await key(display, '\r')
   const displayRow = rowOf(display, 'focus')
   press(display, displayRow, cellIndexOf(display, displayRow, 'focus'))
@@ -1747,7 +1872,7 @@ test('B-06 a stale backend never writes and says why; the Display runtime fact s
 
 test('B-07 a stored theme whose source is gone is listed as unavailable and can never be confirmed', async () => {
   const h = setup({ columns: 140, rows: 40, doc: { theme: 'plugin:gone/removed' } })
-  await openDetail(h, 'theme')
+  await openSelectedRow(h, 'theme')
   assert.match(h.view(), /plugin:gone\/removed/, 'the broken persisted identity is still readable')
   await key(h, '\r')
   assert.match(h.view(), /unavailable/, 'the gone source is marked unavailable')
@@ -1762,10 +1887,9 @@ test('B-07 a stored theme whose source is gone is listed as unavailable and can 
 
 test('B-08 the read-only rows keep their copy verb and gain no edit channel', async () => {
   const h = setup({ columns: 200, rows: 40, doc: { theme: 'dark', iconStyle: 'minimal' } })
-  await openDetail(h, 'theme')
-  await key(h, '\x1b') // back to L1
+  await openSelectedRow(h, 'theme')
   await key(h, '\x1b[B') // Configured theme -> Icon style
-  await key(h, '\r')
+  await key(h, '\r') // read-only Detail
   assert.match(h.view(), /Icon style/)
   assert.match(h.view(), /Copy value \[C\]/)
   assert.ok(!h.view().includes('Change…'), 'a read-only row paints no edit verb')
@@ -1783,7 +1907,7 @@ test('B-08 the read-only rows keep their copy verb and gain no edit channel', as
 
 test('B-09 a settlement held across the teardown never reaches a closed or replacement workspace', async () => {
   const h = setup({ columns: 200, rows: 40, doc: { theme: 'dark' }, themes: pluginThemes(), holdOwned: true })
-  await openDetail(h, 'theme')
+  await openSelectedRow(h, 'theme')
   await key(h, '\r')
   const row = rowOf(h, 'light')
   press(h, row, cellIndexOf(h, row, 'light'))
@@ -1823,8 +1947,7 @@ test('B-10 the 44x8 choice stays reachable, identity-fenced across a resize, and
   for (const [index, line] of h.vt.getViewport().entries()) {
     assert.ok(visibleWidth(line) <= 44, `row ${index} must stay inside the pane width`)
   }
-  await key(h, '\r') // into the choice on the narrowest projection
-  assert.match(h.view(), /Choose Configured theme/)
+  assert.match(h.view(), /Choose value/, 'the second Enter opens the choice directly on the narrowest projection')
   assert.match(h.view(), /Confirm/)
   // A press against the 44-column geometry, a resize before the release: the
   // gesture is refused (the resize is a boundary of its own).
@@ -1836,7 +1959,7 @@ test('B-10 the 44x8 choice stays reachable, identity-fenced across a resize, and
   release(h, confirmRow, confirmCol)
   await settle(h)
   assert.equal(h.replacements(), 0, 'a straddling press never confirms')
-  assert.match(h.view(), /Choose Configured theme/, 'the choice survives the resize with its candidate')
+  assert.match(h.view(), /Choose value/, 'the choice survives the resize with its candidate')
   h.dispose()
 })
 
@@ -1851,7 +1974,7 @@ test('B-11 a write the authority readably disagrees with is Not saved, never Ver
     themes: pluginThemes(),
     applyReplace: () => {},
   })
-  await openDetail(h, 'theme')
+  await openSelectedRow(h, 'theme')
   await key(h, '\r')
   const row = rowOf(h, 'light')
   press(h, row, cellIndexOf(h, row, 'light'))
@@ -1876,10 +1999,10 @@ test('B-11 a write the authority readably disagrees with is Not saved, never Ver
 test('B-12 the writable rows reach the choice and confirm at every responsive breakpoint', async () => {
   for (const [columns, rows] of [[200, 40], [120, 40], [109, 40], [108, 40], [107, 40], [76, 40], [75, 24], [60, 24]] as const) {
     const h = setup({ columns, rows, doc: { theme: 'dark' } })
-    await openDetail(h, 'theme')
-    assert.match(h.view(), /Change…/, `the writable row offers Change at ${columns}x${rows}:\n${h.view()}`)
+    await openSelectedRow(h, 'theme')
+    assert.match(h.view(), /Change…|Right choose|Enter choose/, `the writable row offers a visible edit entry at ${columns}x${rows}:\n${h.view()}`)
     await key(h, '\r')
-    assert.match(h.view(), /Choose Configured theme/, `the choice names its field at ${columns}x${rows}:\n${h.view()}`)
+    assert.match(h.view(), /Choose value/, `the choice names its field at ${columns}x${rows}:\n${h.view()}`)
     assert.match(h.view(), /Confirm/, `the explicit confirm is painted at ${columns}x${rows}:\n${h.view()}`)
     assertRowWidths(h, columns)
     // The keyboard path confirms the same way the painted button does.
@@ -1899,7 +2022,7 @@ test('B-12 the writable rows reach the choice and confirm at every responsive br
 test('B-13 the REAL Direct adapter drives the workspace write end to end (UI → path ops → authoritative re-read → Verified)', async () => {
   const fixture = createDirectSettingsFixture({ theme: 'dark', iconStyle: 'symbols' })
   const h = setup({ columns: 140, rows: 40, tuiSettings: fixture.settings })
-  await openDetail(h, 'theme')
+  await openSelectedRow(h, 'theme')
   await key(h, '\r')
   const row = rowOf(h, 'light')
   press(h, row, cellIndexOf(h, row, 'light'))
@@ -1927,18 +2050,18 @@ test('B-13 the REAL Direct adapter drives the workspace write end to end (UI →
 test('B-14 the Persisted fact distinguishes a readable document without a value from an unreadable one', async () => {
   // A readable document with no stored preset: `not set`, never "unreadable".
   const readable = setup({ columns: 200, rows: 40, doc: { theme: 'dark' }, displayPreset: 'full' })
-  await openDetail(readable, 'display-preset')
+  await openSelectedRow(readable, 'display-preset')
   assert.match(readable.view(), /Persisted\s+not set/, `the readable document states the absence: ${readable.view()}`)
   readable.dispose()
 
   // No document at all: an explicit unknown, and no write verb is offered as a save.
   const missing = setup({ columns: 200, rows: 40, settingsService: false })
-  await openDetail(missing, 'display-preset')
+  await openSelectedRow(missing, 'display-preset')
   assert.match(missing.view(), /Persisted\s+unknown — the TUI settings document could not be read/)
   missing.dispose()
 })
 
-test('B-15 a long CJK candidate wraps in the choice list instead of losing its identity', async () => {
+test('B-15 a long CJK candidate wraps while retaining its source-qualified raw identity', async () => {
   const label = `汉${'字'.repeat(30)}`
   const themes = new ThemeRegistry()
   themes.register({ id: 'long-cjk', name: label, palette: darkColors }, 'acme-owner', 'acme')
@@ -1947,9 +2070,9 @@ test('B-15 a long CJK candidate wraps in the choice list instead of losing its i
   // 24 rows so the settled Status line stays inside the granted viewport after the
   // wrapped Value/Source block; the width is what this case is about.
   const h = setup({ columns: 44, rows: 24, doc: { theme: 'dark' }, themes })
-  await openDetail(h, 'theme')
+  await openSelectedRow(h, 'theme')
   await key(h, '\r')
-  assert.match(h.view(), /Choose Configured theme/)
+  assert.match(h.view(), /Choose value/)
   for (const [index, line] of h.vt.getViewport().entries()) {
     assert.ok(visibleWidth(line) <= 44, `row ${index} must stay inside the pane width`)
   }
@@ -1966,6 +2089,7 @@ test('B-15 a long CJK candidate wraps in the choice list instead of losing its i
   press(h, start + 1, 4)
   release(h, start + 1, 4)
   await settle(h)
+  assert.ok(h.view().includes(value), 'the source-qualified raw identity is visible before the explicit confirm')
   assert.equal(h.replacements(), 0, 'selecting a candidate through its wrapped tail writes nothing')
   const confirm = rowOf(h, 'Confirm')
   press(h, confirm, cellIndexOf(h, confirm, 'Confirm'))
@@ -1976,19 +2100,98 @@ test('B-15 a long CJK candidate wraps in the choice list instead of losing its i
   h.dispose()
 })
 
-test('B-16 the wheel really scrolls the candidate list', async () => {
-  const h = setup({ columns: 44, rows: 8, doc: { theme: 'dark' } })
-  await openDetail(h, 'theme')
+test('B-15b the source-qualified candidate identity stays visible before 44x8 keyboard confirm', async () => {
+  const themes = new ThemeRegistry()
+  themes.register({ id: 'solarized', name: 'Solarized', palette: darkColors }, 'acme-owner', 'acme')
+  const value = 'plugin:acme/solarized'
+  const h = setup({ columns: 44, rows: 8, doc: { theme: 'dark' }, themes })
+  await openSelectedRow(h, 'theme')
+  await key(h, '\r')
+  await key(h, '\x1b[B') // dark -> light
+  await key(h, '\x1b[B') // light -> the source-qualified plugin theme
+  assert.ok(h.view().includes(value), `the exact candidate identity is painted before confirm:\n${h.view()}`)
+  assert.match(h.view(), /Enter confirm/, 'the visible identity and keyboard confirm hint coexist')
+  assert.match(h.view(), /Confirm\s+Cancel/, 'the explicit Detail confirm action is painted')
+  await key(h, '\r')
+  await settle(h)
+  assert.equal(h.replacements(), 1, 'one explicit Enter dispatches exactly one write')
+  assert.equal(h.doc.theme, value, 'the exact source-qualified identity is committed')
+  h.dispose()
+})
+
+test('B-15c keyboard confirm waits until every wrapped raw identity row is visible', async () => {
+  const id = 'x'.repeat(80)
+  const themes = new ThemeRegistry()
+  themes.register({ id, name: 'Long custom theme', palette: darkColors }, 'acme-owner', 'acme')
+  const value = themePickerRows(themes).find(row => row.displayName === 'Long custom theme')?.value
+  assert.ok(value !== undefined, 'the long plugin theme is selectable')
+  const h = setup({ columns: 44, rows: 8, doc: { theme: 'dark' }, themes })
+  await openSelectedRow(h, 'theme')
+  await key(h, '\r')
+  await key(h, '\x1b[B') // dark -> light
+  await key(h, '\x1b[B') // light -> the long source-qualified identity
+  const shortText = h.rowsPlain().map(line => line.trim()).join('')
+  assert.ok(!shortText.includes(value), `the full raw identity does not fit at 44x8:\n${h.view()}`)
+  assert.ok(!h.view().includes('Enter confirm'), `Confirm is withheld while the raw identity tail is hidden:\n${h.view()}`)
+  await key(h, '\r')
+  await settle(h)
+  assert.equal(h.replacements(), 0, 'a hidden identity cannot be committed by Enter')
+  assert.equal(h.doc.theme, 'dark')
+
+  h.vt.resize(44, 10)
+  await settle(h)
+  const tallText = h.rowsPlain().map(line => line.trim()).join('')
+  assert.ok(tallText.includes(value), `the complete source-qualified identity fits after resize:\n${h.view()}`)
+  assert.match(h.view(), /Enter confirm/, 'the confirm hint returns only when the full identity is visible')
+  await key(h, '\r')
+  await settle(h)
+  assert.equal(h.replacements(), 1, 'the now-visible candidate confirms once')
+  assert.equal(h.doc.theme, value)
+  h.dispose()
+})
+
+test('B-16 the wheel really scrolls the candidate list independently of its selection', async () => {
+  const themes = longNamedThemes(5)
+  const h = setup({ columns: 44, rows: 8, doc: { theme: 'dark' }, themes })
+  await openSelectedRow(h, 'theme')
   await key(h, '\r')
   assert.match(h.view(), /> dark/, 'the current candidate is revealed first')
-  // One candidate row is granted at 44x8: the wheel must reach the rest of the list.
+  // Two candidate rows are granted at 44x8: the longer list lets the wheel move
+  // the unchanged selection's identity out of view without touching the facts.
+  wheel(h, 4, 10, true)
+  await h.vt.waitForRender()
   wheel(h, 4, 10, true)
   await h.vt.waitForRender()
   assert.ok(!h.view().includes('> dark'), `the wheel scrolled the highlighted candidate out of the viewport: ${h.view()}`)
-  assert.match(h.view(), /light/, 'and the next candidate is visible')
-  // The candidate navigation still works and reveals the highlight again.
+  assert.match(h.view(), /light/, 'and another candidate is visible')
+  // Candidate navigation still changes identity and reveals the selected head.
   await key(h, '\x1b[B')
   assert.match(h.view(), /> light/)
+  h.dispose()
+})
+
+test('B-16b wheel scrolling the facts leaves candidate identity and offset alone', async () => {
+  const themes = longNamedThemes(10)
+  const value = `file:${'x'.repeat(120)}`
+  const h = setup({ columns: 108, rows: 24, doc: { theme: value }, themes })
+  await openSelectedRow(h, 'theme')
+  await key(h, '\x1b[C') // Right -> inline choice
+  await key(h, '\x1b[H') // Home -> first candidate, visible
+  assert.ok(h.view().includes('> auto'))
+
+  const valueRow = rowOf(h, 'Value')
+  wheel(h, valueRow, cellIndexOf(h, valueRow, 'Value'), true)
+  await h.vt.waitForRender()
+  assert.ok(h.view().includes('> auto'), 'a fact-region wheel never changes the candidate selection')
+  const runtimeLine = h.rowsPlain().find(line => line.includes('Runtime'))
+  assert.ok(runtimeLine, `the scrolled facts include Runtime:\n${h.view()}`)
+
+  const autoRow = rowOf(h, '> auto')
+  wheel(h, autoRow, cellIndexOf(h, autoRow, '> auto'), true)
+  await h.vt.waitForRender()
+  assert.ok(!h.view().includes('> auto'), 'an option-region wheel moves only the candidate viewport')
+  assert.equal(h.rowsPlain().find(line => line.includes('Runtime')), runtimeLine,
+    'scrolling the candidates leaves the fact viewport exactly where it was')
   h.dispose()
 })
 
@@ -1998,7 +2201,7 @@ test('B-17 choosing auto drops the plugin-theme record, so a later HMR unload ca
   // The plugin palette is the LIVE one when the user opens the workspace.
   h.app.applyPluginPalette('plugin:acme/solarized', darkColors)
   assert.equal(h.app.activePluginTheme(), 'plugin:acme/solarized', 'the plugin theme is recorded as applied')
-  await openDetail(h, 'theme')
+  await openSelectedRow(h, 'theme')
   await key(h, '\r')
   const autoRow = rowOf(h, 'auto')
   press(h, autoRow, cellIndexOf(h, autoRow, 'auto'))
@@ -2038,7 +2241,7 @@ test('B-18 a late OSC answer never overrides a newer choice, while it still appl
   try {
     // POSITIVE CONTROL: an unchallenged `auto` accepts the terminal's answer.
     const auto = setup({ columns: 140, rows: 40, doc: { theme: 'dark' } })
-    await openDetail(auto, 'theme')
+    await openSelectedRow(auto, 'theme')
     await key(auto, '\r')
     await key(auto, '\x1b[A') // dark -> auto
     await confirmChoice(auto)
@@ -2072,7 +2275,7 @@ test('B-18 a late OSC answer never overrides a newer choice, while it still appl
         })
       },
     })
-    await openDetail(raced, 'theme')
+    await openSelectedRow(raced, 'theme')
     await key(raced, '\r')
     await key(raced, '\x1b[A') // dark -> auto
     await confirmChoice(raced)
@@ -2107,7 +2310,7 @@ test('B-19 a dispatched write that fails after the workspace closed still leaves
     holdOwned: true,
     applyReplace: () => { throw new Error('settings namespace "tui-app" changed since it was read') },
   })
-  await openDetail(h, 'theme')
+  await openSelectedRow(h, 'theme')
   await key(h, '\r')
   const row = rowOf(h, 'light')
   press(h, row, cellIndexOf(h, row, 'light'))
@@ -2158,7 +2361,7 @@ test('B-20 a FAILED candidate never steals the intent of a pending auto query', 
     const brokenValue = themePickerRows(themes).find(row => row.displayName === 'Broken')?.value
     assert.ok(brokenValue !== undefined)
     const h = setup({ columns: 140, rows: 40, doc: { theme: 'dark' }, themes })
-    await openDetail(h, 'theme')
+    await openSelectedRow(h, 'theme')
     // Choose `auto` first: its query is now pending and owns the guard.
     await key(h, '\r')
     await key(h, '\x1b[A') // dark -> auto
@@ -2206,14 +2409,14 @@ test('B-21 a candidate taller than the list viewport reveals its HEAD, never a m
   themes.register({ id: 'tall-cjk', name: label, palette: darkColors }, 'acme-owner', 'acme')
   const value = themePickerRows(themes).find(row => row.displayName === label)?.value
   assert.ok(value !== undefined)
-  // 44x8 grants ONE candidate row: the wrapped label is taller than the viewport.
+  // 44x8 grants ONE candidate row: the friendly label is taller than the viewport.
   const h = setup({ columns: 44, rows: 8, doc: { theme: 'dark' }, themes })
-  await openDetail(h, 'theme')
+  await openSelectedRow(h, 'theme')
   await key(h, '\r')
   await key(h, '\x1b[B') // dark -> light
   await key(h, '\x1b[B') // light -> the tall candidate
   const frame = h.rowsPlain().join('\n')
-  assert.match(frame, /> 汉/, `the highlighted tall candidate must show its head (marker + label prefix):\n${frame}`)
+  assert.match(frame, /> plugin:acme\/tall-cjk/, `the highlighted candidate must show its source-qualified identity before the friendly label tail:\n${frame}`)
   for (const [index, line] of h.vt.getViewport().entries()) {
     assert.ok(visibleWidth(line) <= 44, `row ${index} must stay inside the pane width`)
   }
@@ -2243,7 +2446,7 @@ test('B-22 a PENDING theme commit already shows the runtime fact it applied', as
       setTimeout(() => { Object.assign(h.doc, next); resolve() }, 250)
     }),
   })
-  await openDetail(h, 'theme')
+  await openSelectedRow(h, 'theme')
   await key(h, '\r')
   const row = rowOf(h, 'FullPalette')
   press(h, row, cellIndexOf(h, row, 'FullPalette'))
@@ -2282,7 +2485,7 @@ test('B-23 a PENDING display commit already shows the runtime preset', async () 
       setTimeout(() => { Object.assign(h.doc, next); resolve() }, 250)
     }),
   })
-  await openDetail(h, 'display-preset')
+  await openSelectedRow(h, 'display-preset')
   await key(h, '\r')
   const row = rowOf(h, 'compact')
   press(h, row, cellIndexOf(h, row, 'compact'))
@@ -2319,7 +2522,7 @@ test('B-24 a refused write whose value an external writer already set is neither
       throw new Error('settings namespace "tui-app" changed since it was read')
     },
   })
-  await openDetail(h, 'theme')
+  await openSelectedRow(h, 'theme')
   await key(h, '\r')
   const row = rowOf(h, 'light')
   press(h, row, cellIndexOf(h, row, 'light'))
@@ -2345,13 +2548,13 @@ test('B-25 a contribution unloading under an open choice re-anchors the highligh
   themes.register({ id: 'aaa', name: 'Alpha', palette: darkColors }, 'acme-owner', 'acme')
   themes.register({ id: 'zzz', name: 'Zeta', palette: darkColors }, 'acme-owner', 'acme')
   const h = setup({ columns: 140, rows: 40, doc: { theme: 'dark' }, themes })
-  await openDetail(h, 'theme')
+  await openSelectedRow(h, 'theme')
   await key(h, '\r')
   const zetaRow = rowOf(h, 'Zeta')
   press(h, zetaRow, cellIndexOf(h, zetaRow, 'Zeta'))
   release(h, zetaRow, cellIndexOf(h, zetaRow, 'Zeta'))
   await settle(h)
-  assert.ok(h.view().includes('> Zeta'), 'Zeta is highlighted')
+  assert.ok(h.view().includes('> plugin:acme/zzz (Zeta)'), 'the source-qualified Zeta identity is highlighted')
 
   // Alpha (which precedes Zeta in the list) unloads: every later candidate re-numbers,
   // and the runtime owner refreshes the open workspace's facts.
@@ -2360,7 +2563,7 @@ test('B-25 a contribution unloading under an open choice re-anchors the highligh
   await settle(h)
 
   const frame = h.view()
-  assert.ok(frame.includes('> Zeta'), `the highlight still names the chosen candidate:\n${frame}`)
+  assert.ok(frame.includes('> plugin:acme/zzz (Zeta)'), `the highlight still names the chosen source-qualified candidate:\n${frame}`)
   assert.ok(!frame.includes('Alpha'), 'and the unloaded candidate is gone from the list')
   const confirm = rowOf(h, 'Confirm')
   press(h, confirm, cellIndexOf(h, confirm, 'Confirm'))
@@ -2377,13 +2580,13 @@ test('B-26 a choice whose candidate source vanished is dropped instead of offeri
   const handle = themes.register({ id: 'gone', name: 'Gone', palette: darkColors }, 'acme-owner', 'acme')
   themes.register({ id: 'stay', name: 'Stay', palette: darkColors }, 'acme-owner', 'acme')
   const h = setup({ columns: 140, rows: 40, doc: { theme: 'dark' }, themes })
-  await openDetail(h, 'theme')
+  await openSelectedRow(h, 'theme')
   await key(h, '\r')
   const goneRow = rowOf(h, 'Gone')
   press(h, goneRow, cellIndexOf(h, goneRow, 'Gone'))
   release(h, goneRow, cellIndexOf(h, goneRow, 'Gone'))
   await settle(h)
-  assert.ok(h.view().includes('> Gone'))
+  assert.ok(h.view().includes('> plugin:acme/gone (Gone)'))
 
   handle.dispose()
   h.app.clearActivePluginTheme()
@@ -2411,7 +2614,7 @@ test('B-27 a rejected write whose field an external writer moved to a THIRD valu
       throw new Error('settings namespace "tui-app" changed since it was read')
     },
   })
-  await openDetail(h, 'theme')
+  await openSelectedRow(h, 'theme')
   await key(h, '\r')
   const row = rowOf(h, 'light')
   press(h, row, cellIndexOf(h, row, 'light'))
@@ -2434,7 +2637,7 @@ test('B-27 a rejected write whose field an external writer moved to a THIRD valu
 
 test('B-28 the leased Settings screen joins the terminal scheme-notification sync in both directions', async () => {
   const h = setup({ columns: 140, rows: 40, doc: { theme: 'dark' } })
-  await openDetail(h, 'theme')
+  await openSelectedRow(h, 'theme')
   await key(h, '\r')
   const autoRow = rowOf(h, 'auto')
   press(h, autoRow, cellIndexOf(h, autoRow, 'auto'))
@@ -2455,7 +2658,9 @@ test('B-28 the leased Settings screen joins the terminal scheme-notification syn
   // The symmetric direction: a manual theme chosen inside the workspace must release
   // the subscription on the screen that owns the terminal.
   await key(h, '\r')
-  const darkRow = rowOf(h, 'dark')
+  const choiceHeading = rowOf(h, 'Choose value')
+  const darkRow = h.rowsPlain().findIndex((line, index) => index > choiceHeading && line.includes('dark'))
+  assert.ok(darkRow >= 0, `the dark candidate is painted below the chooser heading:\n${h.view()}`)
   press(h, darkRow, cellIndexOf(h, darkRow, 'dark'))
   release(h, darkRow, cellIndexOf(h, darkRow, 'dark'))
   await settle(h)
@@ -2484,7 +2689,7 @@ test('B-29 leaving the workspace right after choosing auto re-samples on the res
   delete process.env.COLORFGBG
   try {
     const h = setup({ columns: 140, rows: 40, doc: { theme: 'dark' } })
-    await openDetail(h, 'theme')
+    await openSelectedRow(h, 'theme')
     await key(h, '\r')
     await key(h, '\x1b[A') // dark -> auto
     const confirm = rowOf(h, 'Confirm')
@@ -2535,17 +2740,17 @@ test('B-30 a narrower pane that re-flows the wrapped candidates keeps the confir
   const themes = longNamedThemes(10)
   const h = setup({ columns: 200, rows: 14, doc: { theme: 'dark' }, themes })
   themes.dispose('long0') // the builtin rows still precede the plugins; keep the walk short
-  await openDetail(h, 'theme')
+  await openSelectedRow(h, 'theme')
   await key(h, '\r')
   for (let index = 0; index < 10; index += 1) await key(h, '\x1b[B')
   await settle(h)
-  assert.ok(h.view().includes('> L9-'), `the last candidate is highlighted at 200 columns:\n${h.view()}`)
+  assert.ok(h.view().includes('> plugin:acme/long9'), `the last candidate is highlighted at 200 columns:\n${h.view()}`)
 
   // The SAME three-pane layout with a much narrower Detail pane: the candidates wrap
   // into more lines, so the highlight's start row moves even though its INDEX does not.
   h.vt.resize(108, 14)
   await settle(h)
-  assert.ok(h.view().includes('> L9-'), `the highlight survives the re-flow:\n${h.view()}`)
+  assert.ok(h.view().includes('> plugin:acme/long9'), `the highlight survives the re-flow:\n${h.view()}`)
   h.dispose()
 })
 
@@ -2553,15 +2758,15 @@ test('B-31 the same re-flow inside the two-pane layout keeps the confirmed candi
   const themes = longNamedThemes(10)
   const h = setup({ columns: 107, rows: 14, doc: { theme: 'dark' }, themes })
   themes.dispose('long0')
-  await openDetail(h, 'theme')
+  await openSelectedRow(h, 'theme')
   await key(h, '\r')
   for (let index = 0; index < 10; index += 1) await key(h, '\x1b[B')
   await settle(h)
-  assert.ok(h.view().includes('> L9-'), `the last candidate is highlighted at 107 columns:\n${h.view()}`)
+  assert.ok(h.view().includes('> plugin:acme/long9'), `the last candidate is highlighted at 107 columns:\n${h.view()}`)
 
   h.vt.resize(76, 14)
   await settle(h)
-  assert.ok(h.view().includes('> L9-'), `the highlight survives the two-pane re-flow:\n${h.view()}`)
+  assert.ok(h.view().includes('> plugin:acme/long9'), `the highlight survives the two-pane re-flow:\n${h.view()}`)
   h.dispose()
 })
 
@@ -2569,7 +2774,7 @@ test('B-32 re-entering the choice reveals the highlighted candidate again', asyn
   const themes = longNamedThemes(10)
   const h = setup({ columns: 108, rows: 14, doc: { theme: 'dark' }, themes })
   themes.dispose('long0')
-  await openDetail(h, 'theme')
+  await openSelectedRow(h, 'theme')
   await key(h, '\r')
   for (let index = 0; index < 10; index += 1) await key(h, '\x1b[B')
   const confirm = rowOf(h, 'Confirm')
@@ -2583,7 +2788,33 @@ test('B-32 re-entering the choice reveals the highlighted candidate again', asyn
   await key(h, '\r')
   await settle(h)
   assert.ok(h.view().includes('> '), `the choice paints its highlight:\n${h.view()}`)
-  assert.ok(h.view().includes('> L9-'), `and it is the visible highlighted candidate:\n${h.view()}`)
+  assert.ok(h.view().includes('> plugin:acme/long9'), `and it is the visible highlighted candidate:\n${h.view()}`)
+  h.dispose()
+})
+
+test('B-32b Enter first reveals an offscreen selected identity and only a later Enter confirms', async () => {
+  const themes = longNamedThemes(10)
+  const h = setup({ columns: 108, rows: 14, doc: { theme: 'dark' }, themes })
+  await openSelectedRow(h, 'theme')
+  await key(h, '\x1b[C') // Right opens the choice
+  await key(h, '\x1b[B') // dark -> light
+  const lightRow = rowOf(h, '> light')
+  const lightCol = cellIndexOf(h, lightRow, '> light')
+  for (let index = 0; index < 3; index += 1) {
+    wheel(h, lightRow, lightCol, true)
+    await settle(h)
+  }
+  assert.ok(!h.view().includes('> light'), `the selected candidate head has scrolled out of view:\n${h.view()}`)
+  assert.ok(!h.rowsPlain().at(-1)!.includes('Enter confirm'), 'the invisible identity cannot advertise keyboard confirmation')
+
+  await key(h, '\r')
+  assert.equal(h.replacements(), 0, 'the first Enter is reveal-only')
+  assert.ok(h.view().includes('> light'), 'the selected identity is revealed on the new painted frame')
+  assert.ok(h.rowsPlain().at(-1)!.includes('Enter confirm'), 'the current frame now advertises the explicit action')
+  await key(h, '\r')
+  await settle(h)
+  assert.equal(h.doc.theme, 'light', 'the next Enter confirms the visible candidate')
+  assert.equal(h.replacements(), 1, 'only the second Enter dispatches one write')
   h.dispose()
 })
 
@@ -2701,7 +2932,7 @@ test('B-16 a status WORD that WRAPS keeps its semantic tone on every character (
       throw new Error('settings namespace "tui-app" changed since it was read')
     },
   })
-  await openDetail(h, 'theme')
+  await openSelectedRow(h, 'theme')
   await key(h, '\r')
   const candidate = rowOf(h, 'light')
   press(h, candidate, cellIndexOf(h, candidate, 'light'))
@@ -2815,7 +3046,10 @@ test('A-16 the frozen §11.2 matrix keeps the §8 ladder-derived chrome at every
       // a real body row is reserved from 3 rows up. The Settings body always paints
       // its selection cursor `> <item>` (settings-workspace-panel.ts:813-820), so a
       // regression that blanks the body while leaving the chrome in place fails.
-      assertBarIsLastRow(painted, frame.readColor, '↑↓ select · Enter open · Esc close')
+      const categoryBar = columns < 60
+        ? 'Right open · Enter open · Esc close'
+        : 'Up/Down select · Right open · Enter open · Esc close'
+      assertBarIsLastRow(painted, frame.readColor, categoryBar)
       const bodyTop = 1 + ladder.metaRows + (ladder.ruleRows >= 1 ? 1 : 0)
       const bodyIndexes = Array.from({ length: ladder.bodyRows }, (_, index) => bodyTop + index)
       assertBodyFloor(painted, bodyIndexes, line => /^> \S/.test(line), `Settings ${columns}x${rows}`)
