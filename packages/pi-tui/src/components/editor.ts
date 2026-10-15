@@ -510,6 +510,32 @@ export class Editor implements Component, Focusable {
 		return currentVisualLine === visualLines.length - 1;
 	}
 
+	// X063 publish state: the LAST navigation move's wrap-map facts. A move
+	// that built its own map (pageScroll) publishes the post-move cursor
+	// visual line; the shared notify reuses it instead of rebuilding. A move
+	// with O(1) cursor bookkeeping (setCursorCol paths) leaves it unset and
+	// the notify does the single authoritative rebuild.
+	private lastVisualLineCount: number | null = null;
+	private lastCursorVisualLine: number | null = null;
+
+	/** The X063 shared notify (dsh-pi-tui divergence X063): fire the host's
+	 * observation callback with the CURRENT last-visual-line state — reusing
+	 * the move's own published map facts when present, else one authoritative
+	 * rebuild. Also fires when a transient mode flip (autocomplete open/
+	 * close, history enter/leave) changed the admission WITHOUT a cursor
+	 * move, so the host hint can never strand behind a mode-only transition. */
+	private notifyVisualLineBoundary(): void {
+		let onLast: boolean;
+		if (this.lastVisualLineCount !== null && this.lastCursorVisualLine !== null) {
+			onLast = this.lastCursorVisualLine === this.lastVisualLineCount - 1;
+		} else {
+			onLast = this.isOnLastVisualLine();
+		}
+		this.lastVisualLineCount = null;
+		this.lastCursorVisualLine = null;
+		this.onVisualLineBoundaryChanged?.(onLast);
+	}
+
 	/**
 	 * True only when a real Down press may leave THIS editor at the last visual
 	 * line (fork divergence X063). The host cannot derive this from the logical
@@ -560,6 +586,9 @@ export class Editor implements Component, Focusable {
 		}
 
 		this.historyIndex = newIndex;
+		this.lastVisualLineCount = null;
+		this.lastCursorVisualLine = null;
+		this.onVisualLineBoundaryChanged?.(this.isOnLastVisualLine());
 
 		if (this.historyIndex === -1) {
 			const draft = this.historyDraft;
@@ -882,6 +911,7 @@ export class Editor implements Component, Focusable {
 				const direction = this.jumpMode;
 				this.jumpMode = null;
 				this.jumpToChar(printable, direction);
+				this.notifyVisualLineBoundary();
 				return;
 			}
 
@@ -1033,29 +1063,37 @@ export class Editor implements Component, Focusable {
 		if (kb.matches(data, "tui.editor.historyPrevious")) {
 			this.cancelAutocomplete();
 			this.navigateHistory(-1);
+			this.notifyVisualLineBoundary();
 			return;
 		}
 		if (kb.matches(data, "tui.editor.historyNext")) {
 			this.cancelAutocomplete();
 			this.navigateHistory(1);
+			this.notifyVisualLineBoundary();
 			return;
 		}
 
-		// Cursor movement actions
+		// Cursor movement actions (X063: LineStart/End and word jumps can
+		// cross the last-visual-line boundary on hard-multiline or
+		// soft-wrapped bodies — same notify contract as the arrow keys).
 		if (kb.matches(data, "tui.editor.cursorLineStart")) {
 			this.moveToLineStart();
+			this.notifyVisualLineBoundary();
 			return;
 		}
 		if (kb.matches(data, "tui.editor.cursorLineEnd")) {
 			this.moveToLineEnd();
+			this.notifyVisualLineBoundary();
 			return;
 		}
 		if (kb.matches(data, "tui.editor.cursorWordLeft")) {
 			this.moveWordBackwards();
+			this.notifyVisualLineBoundary();
 			return;
 		}
 		if (kb.matches(data, "tui.editor.cursorWordRight")) {
 			this.moveWordForwards();
+			this.notifyVisualLineBoundary();
 			return;
 		}
 
@@ -1100,10 +1138,13 @@ export class Editor implements Component, Focusable {
 		// move the cursor across a VISUAL line notifies the host afterwards
 		// (dsh-pi-tui divergence X063): the host's on-demand Task Quick
 		// admission is a visual-line fact, and its painted ↓ hint must track
-		// the boundary without waiting for an unrelated document change. The
-		// notification carries the boundary STATE after the move; the host
-		// decides whether anything changed, so a no-op press costs the
-		// callback dispatch and one boolean compare, never a re-measure.
+		// the boundary. The notification carries the boundary STATE after
+		// the move; the host decides whether anything changed, so a no-op
+		// press costs the callback dispatch and one boolean compare, never a
+		// re-measure. The shared notify reads the cursor's CURRENT visual
+		// line index OFF THE MOVE'S OWN wrap map where the move built one
+		// (pageScroll publishes it via lastPageVisualIndex) — the extra cost
+		// over the move itself is O(1).
 		if (kb.matches(data, "tui.editor.cursorUp")) {
 			if (
 				this.isOnFirstVisualLine() &&
@@ -1116,7 +1157,7 @@ export class Editor implements Component, Focusable {
 			} else {
 				this.moveCursor(-1, 0);
 			}
-			this.onVisualLineBoundaryChanged?.(this.isOnLastVisualLine());
+			this.notifyVisualLineBoundary();
 			return;
 		}
 		if (kb.matches(data, "tui.editor.cursorDown")) {
@@ -1128,43 +1169,32 @@ export class Editor implements Component, Focusable {
 			} else {
 				this.moveCursor(1, 0);
 			}
-			this.onVisualLineBoundaryChanged?.(this.isOnLastVisualLine());
+			this.notifyVisualLineBoundary();
 			return;
 		}
 		if (kb.matches(data, "tui.editor.cursorRight")) {
-			if (this.isOnLastVisualLine()) {
-				this.moveCursor(0, 1);
-			} else {
-				// A Right at a visual-line wrap or logical-line end crosses
-				// ONTO the last visual line; an intra-line Right does not
-				// cross (the re-read decides).
-				this.moveCursor(0, 1);
-				if (this.isOnLastVisualLine()) this.onVisualLineBoundaryChanged?.(true);
-			}
+			const onLastBeforeRight = this.isOnLastVisualLine();
+			this.moveCursor(0, 1);
+			if (!onLastBeforeRight && this.isOnLastVisualLine()) this.onVisualLineBoundaryChanged?.(true);
 			return;
 		}
 		if (kb.matches(data, "tui.editor.cursorLeft")) {
-			if (!this.isOnLastVisualLine()) {
-				this.moveCursor(0, -1);
-			} else {
-				// A Left at a visual-line wrap or logical-line start crosses
-				// back OFF the last visual line; an intra-line Left does not
-				// cross (the re-read decides).
-				this.moveCursor(0, -1);
-				if (!this.isOnLastVisualLine()) this.onVisualLineBoundaryChanged?.(false);
-			}
+			const onLastBeforeLeft = this.isOnLastVisualLine();
+			this.moveCursor(0, -1);
+			if (onLastBeforeLeft && !this.isOnLastVisualLine()) this.onVisualLineBoundaryChanged?.(false);
 			return;
 		}
 
-		// Page up/down - scroll by page and move cursor
+		// Page up/down - scroll by page and move cursor (the move publishes
+		// its own wrap-map facts; the notify reuses them).
 		if (kb.matches(data, "tui.editor.pageUp")) {
 			this.pageScroll(-1);
-			this.onVisualLineBoundaryChanged?.(this.isOnLastVisualLine());
+			this.notifyVisualLineBoundary();
 			return;
 		}
 		if (kb.matches(data, "tui.editor.pageDown")) {
 			this.pageScroll(1);
-			this.onVisualLineBoundaryChanged?.(this.isOnLastVisualLine());
+			this.notifyVisualLineBoundary();
 			return;
 		}
 
@@ -2311,6 +2341,10 @@ export class Editor implements Component, Focusable {
 		const targetVisualLine = Math.max(0, Math.min(visualLines.length - 1, currentVisualLine + direction * pageSize));
 
 		this.moveToVisualLine(visualLines, currentVisualLine, targetVisualLine);
+		// X063: publish the post-move boundary fact from THIS map — the
+		// notify reads the published value instead of rebuilding (§9.3).
+		this.lastVisualLineCount = visualLines.length;
+		this.lastCursorVisualLine = this.findVisualLineAt(visualLines, this.state.cursorLine, this.state.cursorCol);
 	}
 
 	private moveWordBackwards(): void {
@@ -2845,6 +2879,11 @@ export class Editor implements Component, Focusable {
 		}
 
 		this.autocompleteState = state;
+		// X063: the dropdown flip refuses Down with no cursor move — same
+		// notify contract as the close path.
+		this.lastVisualLineCount = null;
+		this.lastCursorVisualLine = null;
+		this.onVisualLineBoundaryChanged?.(this.isOnLastVisualLine());
 	}
 
 	private cancelAutocompleteRequest(): void {
@@ -2874,7 +2913,12 @@ export class Editor implements Component, Focusable {
 	 */
 	protected cancelAutocomplete(): void {
 		this.cancelAutocompleteRequest();
+		const hadDropdown = this.autocompleteState !== null;
 		this.clearAutocompleteUi();
+		// X063: closing the dropdown flips the Down admission from refused to
+		// admissible with NO cursor move and NO onChange — the host hint must
+		// hear about it or it stays dark while Down works again.
+		if (hadDropdown) this.notifyVisualLineBoundary();
 	}
 
 	public isShowingAutocomplete(): boolean {
