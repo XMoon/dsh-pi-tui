@@ -14,9 +14,9 @@
  *
  * The panel owns NO configuration authority: its rows are a detached read
  * projection assembled by the `/settings` command from the existing ConfigPort /
- * DisplayState / presentation-preference readers, and the only verbs it exposes
- * are navigate, refresh (re-read the same authority), copy the exact source
- * value and hand off to the existing legacy settings editor. B2-A never writes.
+ * DisplayState / presentation-preference readers. Theme and Display commits are
+ * requests through the existing `onCommit` intent; all other settings retain
+ * their existing read, copy and legacy-editor handoff behavior.
  * @module @xmoon76/dsh-pi-tui/tui/panels/settings-workspace-panel
  */
 
@@ -219,6 +219,13 @@ interface SettingsChromePlan {
   readonly bodyRows: number
 }
 
+interface PaintedRegion {
+  /** Absolute panel row of the region's first painted line. */
+  readonly top: number
+  readonly rows: number
+  readonly maxOffset: number
+}
+
 interface PaneBox {
   /** Absolute panel column of the pane. */
   readonly x: number
@@ -228,6 +235,9 @@ interface PaneBox {
   readonly contentRows: number
   /** The scrollable extent measured at paint. */
   readonly maxOffset: number
+  /** The two independent scroll regions of an inline choice, when present. */
+  readonly factRegion?: PaintedRegion
+  readonly optionRegion?: PaintedRegion
 }
 
 interface PaneBoxes {
@@ -264,6 +274,12 @@ interface DetailButton {
   readonly value?: string
 }
 
+interface DetailRegionProjection {
+  readonly lineStart: number
+  readonly rows: number
+  readonly maxOffset: number
+}
+
 interface DetailProjection {
   readonly lines: readonly string[]
   readonly content: readonly string[]
@@ -272,6 +288,10 @@ interface DetailProjection {
   /** The candidate rows the choice projection really painted, as offsets inside
    *  the granted viewport: only these may publish an `option` hit target. */
   readonly optionRows: readonly { readonly value: string; readonly line: number; readonly endCol: number }[]
+  readonly factRegion?: DetailRegionProjection
+  readonly optionRegion?: DetailRegionProjection
+  /** Whether this frame paints the selected candidate's identity-bearing head. */
+  readonly confirmCandidateVisible: boolean
 }
 
 const CATEGORY_ORDER: readonly SettingsWorkspaceCategoryId[] = ['appearance', 'display', 'other']
@@ -319,7 +339,7 @@ function layoutForWidth(width: number): SettingsLayout {
  * The decorative rules are LAST: they are granted only when the body would still
  * keep three real rows, so decoration never crowds out readable content.
  */
-function planSettingsChrome(width: number, rows: number, noticeLive: boolean): SettingsChromePlan {
+function planSettingsChrome(width: number, rows: number, noticeLive: boolean, choosing = false): SettingsChromePlan {
   const safeRows = Math.max(1, Math.floor(rows))
   const headerRows = safeRows >= 2 ? 1 : 0
   const actionRows = 1
@@ -327,9 +347,9 @@ function planSettingsChrome(width: number, rows: number, noticeLive: boolean): S
   const base = Math.max(0, safeRows - headerRows - actionRows)
   // §4.4: the notice keeps the body at two rows; the metadata keeps it at three.
   const noticeRows = safeRows >= 6 && noticeLive && base - 1 >= 2 ? 1 : 0
-  const metaRows = safeRows >= 8 && base - noticeRows - 1 >= 3 ? 1 : 0
+  const metaRows = !choosing && safeRows >= 8 && base - noticeRows - 1 >= 3 ? 1 : 0
   const bodyWithoutRules = base - noticeRows - metaRows
-  const ruleRows = bodyWithoutRules >= 5 ? 2 : 0
+  const ruleRows = !choosing && bodyWithoutRules >= 5 ? 2 : 0
   const bodyRows = Math.max(0, bodyWithoutRules - ruleRows)
   return {
     width,
@@ -463,6 +483,10 @@ export class SettingsWorkspacePanel implements Component {
    *  unchanged (the plan's "sizes changed ⇒ reject"). */
   private lastRenderWidth = -1
   private lastRenderRows = -1
+  /** Facts from the actual Detail projection just rendered, used to grant Enter. */
+  private paintedChoiceCandidateVisible = false
+  private paintedEnterConfirm = false
+  private paintedRevision = -1
   private chrome: SettingsChromePlan | undefined
   private disposed = false
   /** The ONE transient editing phase of THIS open workspace (presentation
@@ -499,8 +523,11 @@ export class SettingsWorkspacePanel implements Component {
     }
     this.lastRenderWidth = width
     this.lastRenderRows = liveRows
-    const plan = planSettingsChrome(width, liveRows, this.intents.notice() !== undefined)
+    const choosing = this.choiceField() !== undefined
+    const plan = planSettingsChrome(width, liveRows, this.intents.notice() !== undefined, choosing)
     this.chrome = plan
+    this.paintedChoiceCandidateVisible = false
+    this.paintedEnterConfirm = false
     const lines: string[] = []
     const targets: HitTarget[] = []
     const panes: PaneBoxes = {}
@@ -509,11 +536,13 @@ export class SettingsWorkspacePanel implements Component {
     if (plan.ruleRows >= 1) lines.push(color.border('─'.repeat(Math.max(1, plan.width))))
     const bodyTop = plan.headerRows + plan.metaRows + (plan.ruleRows >= 1 ? 1 : 0)
     if (plan.bodyRows > 0) lines.push(...this.renderBody(plan, bodyTop, targets, panes))
+    this.paintedPanes = panes
     if (plan.ruleRows >= 2) lines.push(color.border('─'.repeat(Math.max(1, plan.width))))
     if (plan.noticeRows === 1) lines.push(this.renderNotice(plan))
     if (plan.actionRows === 1) lines.push(this.renderActionBar(plan))
     this.paintedTargets = targets
     this.paintedPanes = panes
+    this.paintedRevision = this.revision
     return lines.slice(0, plan.rows)
   }
 
@@ -632,7 +661,7 @@ export class SettingsWorkspacePanel implements Component {
     // The shared pane-header line is a grant of its own: below two body rows it
     // would consume the ONLY body row, so the real content wins and the header
     // is dropped (the Action Bar still names the current pane).
-    const showPaneHeader = plan.bodyRows >= 2
+    const showPaneHeader = plan.bodyRows >= 2 && this.choiceField() === undefined
     const contentTop = bodyTop + (showPaneHeader ? 1 : 0)
     const contentRows = Math.max(0, plan.bodyRows - (showPaneHeader ? 1 : 0))
     this.paintedViewport = Math.max(1, contentRows)
@@ -682,6 +711,7 @@ export class SettingsWorkspacePanel implements Component {
       }
       const detail = this.detailLines(pane.width, contentRows)
       detailProjection = detail
+      this.paintedChoiceCandidateVisible = detail.confirmCandidateVisible
       const buttonRow = contentTop + Math.max(0, contentRows - 1)
       for (const painted of detail.buttons) {
         itemHits.push({
@@ -706,7 +736,28 @@ export class SettingsWorkspacePanel implements Component {
       else if (pane.page === 'detail') {
         maxOffset = detailProjection === undefined ? 0 : Math.max(0, detailProjection.content.length - detailProjection.viewport)
       }
-      panes[pane.page] = { x: pane.x, width: pane.width, contentTop, contentRows, maxOffset }
+      const projection = pane.page === 'detail' ? detailProjection : undefined
+      panes[pane.page] = {
+        x: pane.x,
+        width: pane.width,
+        contentTop,
+        contentRows,
+        maxOffset,
+        ...(projection?.factRegion === undefined ? {} : {
+          factRegion: {
+            top: contentTop + projection.factRegion.lineStart,
+            rows: projection.factRegion.rows,
+            maxOffset: projection.factRegion.maxOffset,
+          },
+        }),
+        ...(projection?.optionRegion === undefined ? {} : {
+          optionRegion: {
+            top: contentTop + projection.optionRegion.lineStart,
+            rows: projection.optionRegion.rows,
+            maxOffset: projection.optionRegion.maxOffset,
+          },
+        }),
+      }
     }
     // Real item targets precede the pane fallback so a click resolves to the row.
     targets.push(...itemHits)
@@ -784,7 +835,28 @@ export class SettingsWorkspacePanel implements Component {
       return padBody(out, viewport, width)
     }
     const detail = this.detailLines(width, viewport)
-    panes.detail = { x: 0, width, contentTop: bodyTop, contentRows: viewport, maxOffset: Math.max(0, detail.content.length - detail.viewport) }
+    this.paintedChoiceCandidateVisible = detail.confirmCandidateVisible
+    panes.detail = {
+      x: 0,
+      width,
+      contentTop: bodyTop,
+      contentRows: viewport,
+      maxOffset: Math.max(0, detail.content.length - detail.viewport),
+      ...(detail.factRegion === undefined ? {} : {
+        factRegion: {
+          top: bodyTop + detail.factRegion.lineStart,
+          rows: detail.factRegion.rows,
+          maxOffset: detail.factRegion.maxOffset,
+        },
+      }),
+      ...(detail.optionRegion === undefined ? {} : {
+        optionRegion: {
+          top: bodyTop + detail.optionRegion.lineStart,
+          rows: detail.optionRegion.rows,
+          maxOffset: detail.optionRegion.maxOffset,
+        },
+      }),
+    }
     const buttonRow = bodyTop + Math.max(0, viewport - 1)
     for (const painted of detail.buttons) {
       targets.push({
@@ -848,21 +920,19 @@ export class SettingsWorkspacePanel implements Component {
   }
 
   /**
-   * The detail pane projection: the scrollable content plus the pinned action
-   * row. The pinned row costs one viewport row when both exist; a viewport too
-   * short for it paints NO button, so no button is addressable either. Every
-   * button that does not fit inside the pane width WHOLE is dropped with its
-   * hit target — a half-painted action is never clickable.
+   * The Detail projection: browse keeps its original single scroll region; an
+   * open choice composes the same facts above the candidate list with independent
+   * scroll extents for each region.
    */
   private detailLines(width: number, viewport: number): DetailProjection {
     const row = this.selectedRow()
+    if (this.choiceField() !== undefined && row?.edit !== undefined) {
+      return this.choiceLines(row, width, viewport)
+    }
     const includeTitle = this.currentLayout() !== 'narrow'
     const buttons = row === undefined ? [] : this.detailButtons(row)
     const pinned = buttons.length > 0 && viewport >= 2 ? 1 : 0
     const scrollViewport = Math.max(0, viewport - pinned)
-    if (this.choiceField() !== undefined && row?.edit !== undefined) {
-      return this.choiceLines(row, width, scrollViewport, pinned, buttons)
-    }
     const content = row === undefined ? [] : this.detailContent(row, width, includeTitle)
     const offset = Math.min(Math.max(0, this.detailOffset), Math.max(0, content.length - scrollViewport))
     this.detailOffset = offset
@@ -882,53 +952,81 @@ export class SettingsWorkspacePanel implements Component {
       const decorated = note === '' || painted.text === '' ? painted.text : `${painted.text}  ${color.textMuted(note)}`
       lines.push(fit(visibleWidth(decorated) <= width ? decorated : painted.text, width))
     }
-    return { lines, content, viewport: scrollViewport, buttons: painted.painted, optionRows: [] }
+    return { lines, content, viewport: scrollViewport, buttons: painted.painted, optionRows: [], confirmCandidateVisible: false }
   }
 
-  /**
-   * The L2 choice projection. The HEADING is pinned whenever at least one
-   * candidate fits beside it (a candidate list whose subject scrolled away could
-   * not be confirmed knowingly); only the candidates scroll, and a long or CJK
-   * candidate label WRAPS instead of being truncated — while choosing, the list
-   * is the only place the candidate identity is visible. On a one-row body the
-   * heading is dropped rather than hiding the candidates.
-   */
-  private choiceLines(
-    row: SettingsWorkspaceRow,
-    width: number,
-    scrollViewport: number,
-    pinned: number,
-    buttons: readonly DetailButton[],
-  ): DetailProjection {
+  /** Compose a fixed fact viewport, optional heading, candidate viewport and
+   *  pinned buttons. Facts and candidates retain their own existing offsets. */
+  private choiceLines(row: SettingsWorkspaceRow, width: number, viewport: number): DetailProjection {
+    const actionRows = viewport >= 2 ? 1 : 0
+    const scrollableRows = Math.max(0, viewport - actionRows)
+    const factRows = scrollableRows >= 6 ? 3 : scrollableRows >= 4 ? 2 : scrollableRows >= 2 ? 1 : 0
+    const headingRows = scrollableRows - factRows >= 2 ? 1 : 0
+    const optionViewport = Math.max(0, scrollableRows - factRows - headingRows)
+    const factContent = this.detailContent(row, width, false, true)
+    const factMaxOffset = Math.max(0, factContent.length - factRows)
+    this.detailOffset = Math.min(Math.max(0, this.detailOffset), factMaxOffset)
+    const visibleFacts: string[] = []
+    for (let i = 0; i < factRows; i += 1) visibleFacts.push(factContent[this.detailOffset + i] ?? '')
+
     const options = row.edit?.options ?? []
-    const headingRows = scrollViewport >= 2 ? 1 : 0
-    const listViewport = Math.max(0, scrollViewport - headingRows)
     const blocks = this.choiceBlocks(row, width)
     const flattened = blocks.flat()
-    const offset = this.rebaseChoice(blocks, listViewport, width)
-    // Every content line is composed UNPADDED (the frame's own composition pass
-    // is the only fit), exactly like the category/row lines.
-    const content: string[] = []
-    if (headingRows === 1) content.push(color.textStrong(`Choose ${row.label}`))
-    for (let i = 0; i < listViewport; i += 1) content.push(flattened[offset + i] ?? '')
-    const lines = [...content]
-    const painted = pinned === 1 ? this.layoutButtons(width, buttons) : { text: '', painted: [] }
-    if (pinned === 1) lines.push(painted.text)
-    const optionRows: { value: string; line: number; endCol: number }[] = []
+    const optionOffset = this.rebaseChoice(blocks, optionViewport, width)
+    const lines = [...visibleFacts]
+    if (headingRows === 1) lines.push(color.textStrong('Choose value'))
+    for (let i = 0; i < optionViewport; i += 1) lines.push(flattened[optionOffset + i] ?? '')
+
+    const phase = this.editPhase
+    let selectedStart = -1
     let cursor = 0
     for (const [index, block] of blocks.entries()) {
-      const start = cursor
+      if (phase.kind === 'choosing' && index === phase.index) selectedStart = cursor
       cursor += block.length
-      const option = options[index]
-      if (option === undefined) continue
-      for (let line = Math.max(start, offset); line < Math.min(cursor, offset + listViewport); line += 1) {
-        optionRows.push({ value: option.value, line: headingRows + line - offset, endCol: width })
-      }
     }
-    // `content` is the CANDIDATE list the wheel and the rebase both scroll (the
-    // pinned heading is not scrollable content and the action row is not content
-    // at all), so `maxOffset` is the real candidate extent.
-    return { lines, content: flattened, viewport: listViewport, buttons: painted.painted, optionRows }
+    const selectedOption = phase.kind === 'choosing' ? options[phase.index] : undefined
+    const identityRows = selectedOption === undefined
+      ? 0
+      : wrapTextWithAnsi(escapedPhysicalLine(selectedOption.value), Math.max(1, width - 2)).length
+    const confirmCandidateVisible = optionViewport > 0
+      && selectedStart >= optionOffset
+      && selectedStart + identityRows <= optionOffset + optionViewport
+    const actionButtons = actionRows === 1 && factRows > 0 && optionViewport > 0
+      ? this.detailButtons(row).filter(button => button.verb !== 'confirm' || confirmCandidateVisible)
+      : []
+    const painted = actionRows === 1 ? this.layoutButtons(width, actionButtons) : { text: '', painted: [] }
+    if (actionRows === 1) lines.push(painted.text)
+
+    const optionRows: { value: string; line: number; endCol: number }[] = []
+    let start = 0
+    for (const [index, block] of blocks.entries()) {
+      const end = start + block.length
+      const option = options[index]
+      if (option !== undefined) {
+        for (let line = Math.max(start, optionOffset); line < Math.min(end, optionOffset + optionViewport); line += 1) {
+          optionRows.push({ value: option.value, line: factRows + headingRows + line - optionOffset, endCol: width })
+        }
+      }
+      start = end
+    }
+    return {
+      lines,
+      content: factContent,
+      viewport: factRows,
+      buttons: painted.painted,
+      optionRows,
+      ...(factRows === 0 ? {} : {
+        factRegion: { lineStart: 0, rows: factRows, maxOffset: factMaxOffset },
+      }),
+      ...(optionViewport === 0 ? {} : {
+        optionRegion: {
+          lineStart: factRows + headingRows,
+          rows: optionViewport,
+          maxOffset: Math.max(0, flattened.length - optionViewport),
+        },
+      }),
+      confirmCandidateVisible,
+    }
   }
 
   /** One painted candidate, wrapped to the pane width: the first line carries the
@@ -951,7 +1049,9 @@ export class SettingsWorkspacePanel implements Component {
       const chips: string[] = []
       if (option.current) chips.push(color.textMuted('[current]'))
       if (!option.available) chips.push(color.warning('[unavailable]'))
-      const body = `${sanitizedPhysicalLine(option.label)}${chips.length === 0 ? '' : `  ${chips.join(' ')}`}`
+      const identity = escapedPhysicalLine(option.value)
+      const label = sanitizedPhysicalLine(option.label)
+      const body = `${identity}${label === identity ? '' : ` (${label})`}${chips.length === 0 ? '' : `  ${chips.join(' ')}`}`
       const chunks = wrapTextWithAnsi(body, Math.max(1, width - 2))
       const rows = chunks.length === 0 ? [''] : chunks
       return rows.map((chunk, line) => {
@@ -962,8 +1062,8 @@ export class SettingsWorkspacePanel implements Component {
   }
 
   /** The writable field the panel is CHOOSING for, or undefined in every other
-   *  phase. The choice projection replaces the browse detail only for the row
-   *  that owns the phase; any row change cancels it (see {@link resetChoice}). */
+   *  phase. While choosing, facts and candidates share the selected row's Detail
+   *  pane; leaving that level cancels the transient choice. */
   private choiceField(): SettingsWorkspaceWritableField | undefined {
     return this.editPhase.kind === 'choosing' ? this.editPhase.field : undefined
   }
@@ -973,7 +1073,8 @@ export class SettingsWorkspacePanel implements Component {
    *  viewport — a plain repaint must never fight that, while a real shrink or a narrower
    *  pane that re-flows the wrapped candidates must reveal the highlight again). A multi-line candidate reveals as a whole when it
    *  fits; when it is TALLER than the viewport its HEAD is revealed, never a
-   *  marker-less continuation tail — the identity must be visible before a confirm. */
+   *  marker-less continuation tail. Confirm stays unavailable until every wrapped
+   *  line of the raw value identity is inside the painted option viewport. */
   private rebaseChoice(blocks: readonly (readonly string[])[], viewport: number, width: number): number {
     const phase = this.editPhase
     if (phase.kind !== 'choosing') return 0
@@ -1023,7 +1124,7 @@ export class SettingsWorkspacePanel implements Component {
     }
     const buttons: DetailButton[] = []
     const edit = row.edit
-    if (edit !== undefined && phase.kind !== 'pending') {
+    if (edit !== undefined && edit.options.length > 0 && phase.kind !== 'pending') {
       buttons.push({ verb: 'change', text: 'Change…' })
       if (phase.kind === 'settled' && phase.field === edit.field && phase.outcome !== 'verified') {
         buttons.push({ verb: 'retry', text: 'Retry save', value: phase.attempted })
@@ -1079,18 +1180,36 @@ export class SettingsWorkspacePanel implements Component {
     }
   }
 
-  private detailContent(row: SettingsWorkspaceRow, width: number, includeTitle: boolean): string[] {
+  private detailContent(row: SettingsWorkspaceRow, width: number, includeTitle: boolean, inlineChoice = false): string[] {
     const labelWidth = width >= 26 ? 12 : 8
     const bodyWidth = Math.max(1, width - labelWidth)
     const lines: string[] = []
+    const fullFacts: string[] = []
     if (includeTitle) lines.push(color.textStrong(sanitizedPhysicalLine(row.label)))
     // Roles 3/4/5: labels are textDim, the PRIMARY field's value is `text` and
-    // every secondary fact's value is one step weaker (`textDim`) — the old code
-    // left every value UNPAINTED, which silently ignored the palette (design
-    // language §3.2 corrections).
-    const field = (label: string, value: string, ink: (text: string) => string = color.textDim): void => {
+    // every secondary fact's value is one step weaker (`textDim`).
+    const field = (
+      label: string,
+      value: string,
+      ink: (text: string) => string = color.textDim,
+      compact = false,
+    ): void => {
       const head = fit(color.textDim(label), labelWidth)
-      const wrapped = wrapTextWithAnsi(escapedPhysicalLine(value), bodyWidth)
+      const escaped = escapedPhysicalLine(value)
+      if (compact) {
+        const clipped = truncateToWidth(escaped, bodyWidth, '…', false)
+        lines.push(head + ink(clipped))
+        if (visibleWidth(escaped) > bodyWidth) {
+          const fullLabel = `Full ${label.toLowerCase()}`
+          const fullHead = fit(color.textDim(fullLabel), labelWidth)
+          const wrapped = wrapTextWithAnsi(escaped, bodyWidth)
+          const parts = wrapped.length === 0 ? [''] : wrapped
+          fullFacts.push(fullHead + ink(parts[0]!))
+          for (const extra of parts.slice(1)) fullFacts.push(' '.repeat(labelWidth) + ink(extra))
+        }
+        return
+      }
+      const wrapped = wrapTextWithAnsi(escaped, bodyWidth)
       const parts = wrapped.length === 0 ? [''] : wrapped
       lines.push(head + ink(parts[0]!))
       for (const extra of parts.slice(1)) lines.push(' '.repeat(labelWidth) + ink(extra))
@@ -1099,8 +1218,7 @@ export class SettingsWorkspacePanel implements Component {
      *  stays one step weaker. The two are painted as SEPARATE SPANS before
      *  wrapping — `wrapTextWithAnsi` closes a span at a line end and re-opens it
      *  on the next line, so a status word that wraps on a very narrow pane keeps
-     *  its tone on EVERY character (painting by `word.length` after wrapping
-     *  would drop the tone from the continuation line). */
+     *  its tone on EVERY character. */
     const statusField = (label: string, word: string, reason: string | undefined, paint: (text: string) => string): void => {
       const head = fit(color.textDim(label), labelWidth)
       const body = reason === undefined
@@ -1111,14 +1229,26 @@ export class SettingsWorkspacePanel implements Component {
       lines.push(head + parts[0]!)
       for (const extra of parts.slice(1)) lines.push(' '.repeat(labelWidth) + extra)
     }
-    field('Value', row.summary, color.text)
-    if (row.value !== undefined && row.value !== row.summary) field('Source', row.value)
     const edit = row.edit
+    if (inlineChoice) {
+      // Keep the first two authoritative facts in the initial viewport; full
+      // source text is appended to this same scrollable projection only when the
+      // compact line actually had to truncate it.
+      field('Value', row.summary, color.text, true)
+      if (edit !== undefined) {
+        if (edit.primary === 'persisted') field('Runtime', edit.runtime, color.textDim, true)
+        else field('Persisted', edit.persisted, color.textDim, true)
+      }
+      lines.push(...fullFacts)
+    } else {
+      field('Value', row.summary, color.text)
+    }
+    if (row.value !== undefined && row.value !== row.summary) field('Source', row.value)
     if (edit !== undefined) {
-      // The two facts are NEVER conflated: which one `Value` expresses is stated
-      // by the reader (`primary`), and the OTHER one is named explicitly.
-      if (edit.primary === 'persisted') field('Runtime', edit.runtime)
-      else field('Persisted', edit.persisted)
+      if (!inlineChoice) {
+        if (edit.primary === 'persisted') field('Runtime', edit.runtime)
+        else field('Persisted', edit.persisted)
+      }
       const status = this.editStatus(edit.field)
       if (status !== undefined) {
         const paint = status.tone === 'success' ? color.success
@@ -1127,6 +1257,7 @@ export class SettingsWorkspacePanel implements Component {
               : color.textDim
         statusField('Status', status.word, status.reason, paint)
       }
+      if (edit.options.length === 0) field('Choice', 'No candidate is available for this setting right now.')
     }
     field('Scope', row.scope)
     field('Freshness', freshnessText(row, this.snapshot.configReadiness))
@@ -1138,56 +1269,83 @@ export class SettingsWorkspacePanel implements Component {
   /** The pinned Action Bar (design language §7): the surface's own actions
    *  first and `Esc` LAST, while `Esc` keeps the highest drop priority. Whole
    *  segments are dropped by priority through the shared row layout, so a hint
-   *  is never cut mid-word (the old bar truncated its single string). */
+   *  is never cut mid-word. */
   private renderActionBar(plan: SettingsChromePlan): string {
     const row = this.selectedRow()
     const copyable = row?.value !== undefined
-    // The ONE Esc semantics of the unified hierarchy: L0 closes, every inner
-    // level steps back, and an open L2 choice cancels first. Below the body floor
-    // every navigation/clipboard action is refused, so only this Esc/back hint is
-    // still honest.
     const back = this.focus === 'categories' ? 'Esc close' : 'Esc back'
     if (this.bodyFloor() < 1) return fit(color.textMuted(back), plan.width)
     let segments: ActionBarSegment[]
     if (this.choiceField() !== undefined) {
+      const detail = this.paintedPanes.detail
+      const canNavigate = (detail?.optionRegion?.rows ?? 0) > 0 && this.paintedViewport >= 3
+      const canReadFacts = (detail?.factRegion?.maxOffset ?? 0) > 0 && this.paintedViewport >= 3
       segments = [
-        { text: '↑↓ select', priority: 5 },
-        { text: 'Enter confirm', priority: 6 },
-        { text: 'Esc cancel', priority: 7 },
+        ...canNavigate ? [{ text: 'Up/Down choose', priority: 5 }] : [],
+        ...canReadFacts ? [{ text: 'PgUp/PgDn details', priority: 4 }] : [],
+        ...this.paintedChoiceCandidateVisible && this.paintedViewport >= 3
+          ? [{ text: 'Enter confirm', priority: 7 }]
+          : [],
+        { text: 'Esc back', priority: 8 },
       ]
     } else if (this.editPhase.kind === 'pending') {
+      const detailScroll = (this.paintedPanes.detail?.maxOffset ?? 0) > 0
       segments = [
-        { text: 'Saving… · one write at a time', priority: 5 },
-        { text: back, priority: 7 },
+        { text: 'Saving… · one write at a time', priority: 3 },
+        ...(this.focus === 'categories' ? [
+          { text: 'Up/Down select', priority: 4 },
+          { text: 'Right open', priority: 6 },
+          { text: 'Enter open', priority: 5 },
+        ] : []),
+        ...(this.focus === 'rows' ? [
+          { text: 'Up/Down select', priority: 4 },
+          { text: 'Left back', priority: 7 },
+          { text: 'Right details', priority: 6 },
+          { text: 'Enter details', priority: 5 },
+        ] : []),
+        ...(this.focus === 'detail' && detailScroll ? [
+          { text: 'Up/Down scroll', priority: 4 },
+          { text: 'PgUp/PgDn details', priority: 3 },
+          { text: 'Left back', priority: 7 },
+        ] : this.focus === 'detail' ? [{ text: 'Left back', priority: 7 }] : []),
+        { text: back, priority: 8 },
       ]
     } else if (this.focus === 'categories') {
       segments = [
-        { text: '↑↓ select', priority: 5 },
-        { text: 'Enter open', priority: 6 },
-        { text: back, priority: 7 },
+        { text: 'Up/Down select', priority: 4 },
+        { text: 'Right open', priority: 6 },
+        { text: 'Enter open', priority: 5 },
+        { text: back, priority: 8 },
       ]
     } else if (this.focus === 'rows') {
+      const rowAction = row?.action === 'open-legacy' ? 'open' : row?.edit === undefined || row.edit.options.length === 0 ? 'details' : 'choose'
       segments = [
-        { text: '↑↓ select', priority: 5 },
-        { text: 'Enter details', priority: 6 },
-        { text: `${SETTINGS_LOCAL_KEYS.refresh} refresh`, priority: 4 },
-        { text: back, priority: 7 },
+        { text: 'Up/Down select', priority: 4 },
+        { text: 'Left back', priority: 7 },
+        { text: `Right ${rowAction}`, priority: 6 },
+        { text: `Enter ${rowAction}`, priority: 5 },
+        { text: `${SETTINGS_LOCAL_KEYS.refresh} refresh`, priority: 2 },
+        { text: back, priority: 8 },
       ]
     } else {
-      const editable = row?.edit !== undefined
+      const editable = row?.edit !== undefined && row.edit.options.length > 0
+      const detailScroll = (this.paintedPanes.detail?.maxOffset ?? 0) > 0
       segments = [
-        ...editable ? [{ text: 'Enter change', priority: 6 }] : [],
-        { text: '↑↓ scroll', priority: 5 },
-        { text: `${SETTINGS_LOCAL_KEYS.refresh} refresh`, priority: 4 },
-        ...copyable ? [{ text: `${SETTINGS_LOCAL_KEYS.copy} copy value`, priority: 3 }] : [],
-        { text: 'PgUp/PgDn', priority: 0.1 },
-        { text: back, priority: 7 },
+        ...(editable ? [{ text: 'Enter choose', priority: 6 }] : []),
+        ...(detailScroll ? [{ text: 'Up/Down scroll', priority: 4 }] : []),
+        ...(detailScroll ? [{ text: 'PgUp/PgDn details', priority: 3 }] : []),
+        { text: `${SETTINGS_LOCAL_KEYS.refresh} refresh`, priority: 2 },
+        ...(copyable ? [{ text: `${SETTINGS_LOCAL_KEYS.copy} copy value`, priority: 1 }] : []),
+        { text: 'Left back', priority: 7 },
+        { text: back, priority: 8 },
       ]
     }
     // Role 13: hints are the WEAKEST readable ink (`textMuted`), one step below
     // the diagnostic line, so the bar never competes with content. The shared
     // row layout already padded/truncated to the pane width.
-    return color.textMuted(renderActionBarRow(segments, plan.width))
+    const rendered = renderActionBarRow(segments, plan.width)
+    this.paintedEnterConfirm = this.choiceField() !== undefined && rendered.includes('Enter confirm')
+    return color.textMuted(rendered)
   }
 
   // ── state helpers ────────────────────────────────────────────────────────
@@ -1240,13 +1398,13 @@ export class SettingsWorkspacePanel implements Component {
   }
 
   /** Re-read the same authorities; keep the stable selection when it survives. */
-  private refresh(): void {
+  private refresh(requestRender = true): void {
     const next = this.source.readSnapshot()
     this.snapshot = next
     if (next.rows.every(row => row.id !== this.rowId)) this.rowId = this.firstRowOf(this.categoryId)
     this.detailOffset = 0
     this.bumpRevision()
-    this.intents.requestRender()
+    if (requestRender) this.intents.requestRender()
   }
 
   /** Every navigation/focus/refresh change bumps the state version a pending
@@ -1260,7 +1418,12 @@ export class SettingsWorkspacePanel implements Component {
    *  allocation matters here, and that is a pure function of the height (the
    *  width only chooses the projection). */
   private bodyFloor(): number {
-    return planSettingsChrome(this.projectionWidth(), this.intents.rows(), this.intents.notice() !== undefined).bodyRows
+    return planSettingsChrome(
+      this.projectionWidth(),
+      this.intents.rows(),
+      this.intents.notice() !== undefined,
+      this.choiceField() !== undefined,
+    ).bodyRows
   }
 
   /** The projection width: the last painted frame's, else the LIVE terminal
@@ -1280,29 +1443,30 @@ export class SettingsWorkspacePanel implements Component {
   handleInput(data: string): void {
     if (this.disposed) return
     if (matchesKey(data, 'escape') || matchesKey(data, 'backspace')) return this.goBack()
-    // Below the body floor the frame grants no body row: every navigation and
-    // clipboard action is invisible, so only the Esc/back semantics survive
-    // (never a hidden action the user cannot see). The floor is computed from
-    // the LIVE height — a key may arrive BEFORE the first paint, and reading the
-    // last render's plan would then swallow it.
+    // Below the body floor every navigation/action target is invisible; only the
+    // lifecycle/back key remains available. Read the live geometry because input
+    // may arrive before a resize-triggered frame has painted.
     if (this.bodyFloor() < 1) return
-    // The L2 choice is a transient phase of the SAME detail level: while it is
-    // live only candidate navigation and the explicit confirm act, so no key can
-    // reach a hidden editor action or a second commit.
+    if (matchesKey(data, 'left')) {
+      if (this.focus !== 'categories') this.goBack()
+      return
+    }
+    if (matchesKey(data, 'right')) {
+      if (this.choiceField() === undefined && this.focus !== 'detail') this.confirm()
+      return
+    }
+    // Choosing remains a transient phase of L2 and consumes every other key.
+    // Page keys scroll its real facts; only arrows/Home/End change the candidate.
     if (this.choiceField() !== undefined) {
       if (matchesKey(data, 'up')) return this.moveChoice(-1)
       if (matchesKey(data, 'down')) return this.moveChoice(1)
-      if (matchesKey(data, 'pageUp')) return this.moveChoice(-Math.max(1, this.paintedViewport))
-      if (matchesKey(data, 'pageDown')) return this.moveChoice(Math.max(1, this.paintedViewport))
+      if (matchesKey(data, 'pageUp')) return this.page(-1)
+      if (matchesKey(data, 'pageDown')) return this.page(1)
       if (matchesKey(data, 'home')) return this.setChoice(0)
       if (matchesKey(data, 'end')) return this.setChoice(this.choiceCount() - 1)
-      if (matchesKey(data, 'enter')) return this.confirmChoice()
+      if (matchesKey(data, 'enter')) return this.confirmChoice('keyboard')
       return
     }
-    // The level is the ONLY navigation state: `↑↓` act on the current level and
-    // `Enter` advances one level. `Tab`/`Shift+Tab` and `←`/`→` are deliberately
-    // ignored — no focus cycle and no category switch — so they can neither
-    // change the level nor reach the hidden editor.
     if (matchesKey(data, 'up')) return this.move(-1)
     if (matchesKey(data, 'down')) return this.move(1)
     if (matchesKey(data, 'pageUp')) return this.page(-1)
@@ -1312,30 +1476,19 @@ export class SettingsWorkspacePanel implements Component {
     if (matchesKey(data, 'enter')) return this.confirm()
     if (data === SETTINGS_LOCAL_KEYS.refresh || data === SETTINGS_LOCAL_KEYS.refresh.toUpperCase()) return this.refresh()
     if (data === SETTINGS_LOCAL_KEYS.copy || data === SETTINGS_LOCAL_KEYS.copy.toUpperCase()) return this.copy()
-    // Everything else is inert inside the workspace: no key ever leaks to the
-    // hidden editor, transcript or a host composer action.
+    // Everything else is inert inside the workspace: no key leaks to the hidden
+    // editor, transcript or a host composer action.
   }
 
-  /** Esc/Backspace: step one level back in EVERY layout; only L0 closes. The
-   *  frame before the first paint resolves the same way, because the level (not
-   *  the projection) is the state. An open L2 choice cancels FIRST — Esc in an
-   *  edit never leaves the workspace and never writes. */
+  /** Esc/Backspace: choosing cancels straight back to L1; otherwise step one
+   *  level back in every layout. Only L0 Esc/Backspace closes the workspace. */
   private goBack(): void {
-    if (this.choiceField() !== undefined) {
-      this.resetChoice()
-      this.intents.requestRender()
-      return
-    }
     if (this.focus === 'detail') {
-      this.focus = 'rows'
-      this.bumpRevision()
-      this.intents.requestRender()
+      this.leaveDetailTo('rows')
       return
     }
     if (this.focus === 'rows') {
-      this.focus = 'categories'
-      this.bumpRevision()
-      this.intents.requestRender()
+      this.leaveDetailTo('categories')
       return
     }
     this.intents.onClose()
@@ -1348,7 +1501,10 @@ export class SettingsWorkspacePanel implements Component {
   }
 
   private page(delta: number): void {
-    const step = this.paintedViewport
+    const factRows = this.paintedPanes.detail?.factRegion?.rows
+    const step = this.focus === 'detail' && this.choiceField() !== undefined
+      ? Math.max(1, factRows ?? 1)
+      : this.paintedViewport
     if (this.focus === 'detail') return this.scroll(delta * step)
     if (this.focus === 'categories') return this.moveCategory(delta * step)
     this.moveRow(delta * step)
@@ -1357,6 +1513,7 @@ export class SettingsWorkspacePanel implements Component {
   private jump(direction: 1 | -1): void {
     if (this.focus === 'detail') {
       this.detailOffset = direction < 0 ? 0 : Number.MAX_SAFE_INTEGER
+      this.bumpRevision()
       this.intents.requestRender()
       return
     }
@@ -1375,14 +1532,18 @@ export class SettingsWorkspacePanel implements Component {
     this.selectCategory(CATEGORY_ORDER[next]!)
   }
 
-  private selectCategory(category: SettingsWorkspaceCategoryId): void {
-    if (category !== this.categoryId) {
-      this.resetChoice()
-      this.categoryId = category
-      this.rowId = this.firstRowOf(category)
-      this.rowOffset = 0
-      this.detailOffset = 0
-      this.bumpRevision()
+  private selectCategory(category: SettingsWorkspaceCategoryId, focus?: SettingsWorkspacePage): void {
+    const changedCategory = category !== this.categoryId
+    const targetFocus = focus ?? (this.choiceField() === undefined ? this.focus : 'categories')
+    if (changedCategory || targetFocus !== this.focus || (this.choiceField() !== undefined && targetFocus !== 'detail')) {
+      this.leaveDetailTo(targetFocus, () => {
+        if (!changedCategory) return
+        this.categoryId = category
+        this.rowId = this.firstRowOf(category)
+        this.rowOffset = 0
+        this.detailOffset = 0
+      })
+      return
     }
     this.intents.requestRender()
   }
@@ -1395,42 +1556,57 @@ export class SettingsWorkspacePanel implements Component {
     this.selectRow(rows[next]!.id)
   }
 
-  private selectRow(id: SettingsWorkspaceRowId): void {
-    if (id !== this.rowId) {
-      this.resetChoice()
-      this.rowId = id
-      this.detailOffset = 0
-      this.bumpRevision()
+  private selectRow(id: SettingsWorkspaceRowId, focus?: SettingsWorkspacePage): void {
+    const changedRow = id !== this.rowId
+    const targetFocus = focus ?? (this.choiceField() === undefined ? this.focus : 'rows')
+    if (changedRow || targetFocus !== this.focus || (this.choiceField() !== undefined && targetFocus !== 'detail')) {
+      this.leaveDetailTo(targetFocus, () => {
+        if (!changedRow) return
+        this.rowId = id
+        this.detailOffset = 0
+      })
+      return
     }
     this.intents.requestRender()
   }
 
   private scroll(delta: number): void {
     const max = this.paintedPanes.detail?.maxOffset ?? 0
-    this.detailOffset = Math.min(Math.max(0, this.detailOffset + delta), max)
+    const next = Math.min(Math.max(0, this.detailOffset + delta), max)
+    if (next !== this.detailOffset) {
+      this.detailOffset = next
+      this.bumpRevision()
+    }
     this.intents.requestRender()
   }
 
   private confirm(): void {
     if (this.focus === 'detail') {
-      // Enter in the L2 browse detail is the ONE way into the edit phase, and
-      // only a row that really carries a write channel can open one. Everywhere
-      // else it stays navigation.
+      if (this.choiceField() !== undefined) return this.confirmChoice('keyboard')
       return this.beginChoice()
     }
     if (this.focus === 'categories') {
-      this.focus = 'rows'
-      this.bumpRevision()
-      this.intents.requestRender()
+      this.leaveDetailTo('rows')
       return
     }
+    this.enterDetail()
+  }
+
+  /** Enter the one Detail level. Writable rows start choosing in the same
+   *  transition; focus is committed before the candidate source is re-read. */
+  private enterDetail(): void {
     const row = this.selectedRow()
     if (row?.action === 'open-legacy') {
       this.intents.onOpenLegacy()
       return
     }
+    if (this.focus === 'detail') return
     this.focus = 'detail'
     this.bumpRevision()
+    if (row?.edit !== undefined && this.editPhase.kind !== 'pending') {
+      this.beginChoice()
+      return
+    }
     this.intents.requestRender()
   }
 
@@ -1444,7 +1620,6 @@ export class SettingsWorkspacePanel implements Component {
     if (this.editPhase.kind !== 'choosing') return
     this.editPhase = { kind: 'browsing' }
     this.choiceOffset = 0
-    this.bumpRevision()
   }
 
   private choiceCount(): number {
@@ -1473,30 +1648,26 @@ export class SettingsWorkspacePanel implements Component {
     this.intents.requestRender()
   }
 
-  /** Enter / a click on a painted `[Change…]`: enter the choice phase, after
-   *  re-reading the candidate source so a contribution that unloaded since the
-   *  open is no longer offered. */
+  /** Enter the choice phase after re-reading the source so a contribution that
+   *  unloaded since the last frame is no longer offered. */
   private beginChoice(): void {
     const row = this.selectedRow()
-    const edit = row?.edit
-    if (row === undefined || edit === undefined) return
-    // ONE commit at a time: a pending write owns the row, so a second confirm can
-    // never be started (and the frame paints no Change/Confirm target either).
-    if (this.editPhase.kind === 'pending') return
-    this.refresh()
+    if (row?.edit === undefined || this.editPhase.kind === 'pending') return
+    if (this.focus !== 'detail') return
+    this.refresh(false)
     const fresh = this.selectedRow()
-    if (fresh?.id !== row.id) return
-    const options = fresh.edit?.options ?? []
-    if (options.length === 0) return
+    const options = fresh?.id === row.id ? fresh.edit?.options ?? [] : []
+    if (fresh?.id !== row.id || fresh.edit === undefined || options.length === 0) {
+      this.intents.requestRender()
+      return
+    }
     const current = options.findIndex(option => option.current)
     const index = current >= 0 ? current : 0
     this.resetChoice()
-    this.editPhase = { kind: 'choosing', field: fresh.edit!.field, candidate: options[index]!.value, index }
+    this.editPhase = { kind: 'choosing', field: fresh.edit.field, candidate: options[index]!.value, index }
     this.choiceOffset = 0
-    // The rebase sentinels are the LAST computed layout, not a fact about this choice:
-    // leaving them set would make the first paint of a new choice take the no-rebase
-    // branch, so re-entering the choice for a candidate below the fold would highlight it
-    // out of view (and a confirm would commit an identity the user cannot see).
+    // These are layout sentinels, not authority: a new choice must reveal its
+    // selected candidate on the first painted option frame.
     this.lastChoiceIndex = -1
     this.lastChoiceViewport = -1
     this.lastChoiceWidth = -1
@@ -1504,13 +1675,27 @@ export class SettingsWorkspacePanel implements Component {
     this.intents.requestRender()
   }
 
-  /** Enter / a click on `[Confirm]`: dispatch the highlighted candidate through
-   *  the app-owned write channel. An unavailable source is refused here — a
-   *  candidate whose plugin/file is gone is never written. */
-  private confirmChoice(): void {
+  /** Enter / a click on `[Confirm]`: dispatch only a candidate identity that
+   *  appeared in the current painted frame. Keyboard Enter additionally requires
+   *  its action-bar hint; a scrolled-away identity is revealed on the first press. */
+  private confirmChoice(source: 'keyboard' | 'button'): void {
     const phase = this.editPhase
     const edit = this.selectedRow()?.edit
     if (phase.kind !== 'choosing' || edit === undefined || edit.field !== phase.field) return
+    if (
+      this.paintedRevision !== this.revision ||
+      this.lastRenderWidth !== this.intents.columns() ||
+      this.lastRenderRows !== this.intents.rows()
+    ) return
+    if (!this.paintedChoiceCandidateVisible) {
+      if (source === 'keyboard') {
+        this.lastChoiceIndex = -1
+        this.bumpRevision()
+        this.intents.requestRender()
+      }
+      return
+    }
+    if (source === 'keyboard' && !this.paintedEnterConfirm) return
     const option = edit.options.find(candidate => candidate.value === phase.candidate)
     if (option === undefined) {
       // The source vanished between the paint and the confirm: report it instead of
@@ -1614,7 +1799,11 @@ export class SettingsWorkspacePanel implements Component {
     if (pane === undefined) return undefined
     if (pane === 'detail') {
       if (this.choiceField() === undefined) this.scroll(delta)
-      else this.scrollChoice(delta)
+      else {
+        const region = this.detailRegionAt(event.x, event.y)
+        if (region === 'facts') this.scroll(delta)
+        else if (region === 'options') this.scrollChoice(delta)
+      }
     }
     else if (pane === 'rows') this.scrollRows(delta)
     else this.scrollCategories(delta)
@@ -1667,21 +1856,13 @@ export class SettingsWorkspacePanel implements Component {
   private activate(target: HitTarget): void {
     switch (target.kind) {
       case 'category':
-        // A real item click takes ITS column's keyboard focus (the §5
-        // "click the corresponding column" contract) and selects the item; only
-        // Enter advances the level, so a single click never opens the detail.
-        this.selectCategory(target.id as SettingsWorkspaceCategoryId)
-        this.takeColumnFocus('categories')
+        this.selectCategory(target.id as SettingsWorkspaceCategoryId, 'categories')
         return
       case 'row': {
-        this.selectRow(target.id as SettingsWorkspaceRowId)
+        this.selectRow(target.id as SettingsWorkspaceRowId, 'rows')
         // The row's `open-legacy` action is the ONE navigation verb (never an
         // edit) and the painted row IS its target, exactly like Enter.
-        if (this.selectedRow()?.action === 'open-legacy') {
-          this.intents.onOpenLegacy()
-          return
-        }
-        this.takeColumnFocus('rows')
+        if (this.selectedRow()?.action === 'open-legacy') this.intents.onOpenLegacy()
         return
       }
       case 'copy':
@@ -1693,8 +1874,8 @@ export class SettingsWorkspacePanel implements Component {
         this.intents.onOpenLegacy()
         return
       case 'change':
-        this.takeColumnFocus('detail')
-        this.beginChoice()
+        if (this.focus === 'detail') this.beginChoice()
+        else this.enterDetail()
         return
       case 'retry':
         this.takeColumnFocus('detail')
@@ -1713,26 +1894,35 @@ export class SettingsWorkspacePanel implements Component {
         // candidate has already bumped the revision and refused this click, and
         // the id check is the second, independent proof.
         if (this.editPhase.kind === 'choosing' && this.editPhase.candidate !== target.id) return
-        this.takeColumnFocus('detail')
-        this.confirmChoice()
+        this.confirmChoice('button')
         return
       case 'cancel':
-        this.takeColumnFocus('detail')
-        this.resetChoice()
-        this.intents.requestRender()
+        this.leaveDetailTo('rows')
         return
-      case 'pane':
-        this.takeColumnFocus(target.id as SettingsWorkspacePage)
+      case 'pane': {
+        const page = target.id as SettingsWorkspacePage
+        if (page === 'detail' && this.focus !== 'detail') this.enterDetail()
+        else this.takeColumnFocus(page)
         return
+      }
     }
+  }
+
+  /** Commit a leave-L2 transition, its atomic selection change, and choice
+   *  cancellation at one revision boundary. */
+  private leaveDetailTo(page: SettingsWorkspacePage, update?: () => void): void {
+    const cancelChoice = this.choiceField() !== undefined && page !== 'detail'
+    if (this.focus === page && !cancelChoice && update === undefined) return
+    if (cancelChoice) this.resetChoice()
+    update?.()
+    this.focus = page
+    this.bumpRevision()
+    this.intents.requestRender()
   }
 
   /** Make one column the keyboard owner (no-op when it already is). */
   private takeColumnFocus(page: SettingsWorkspacePage): void {
-    if (this.focus === page) return
-    this.focus = page
-    this.bumpRevision()
-    this.intents.requestRender()
+    this.leaveDetailTo(page)
   }
 
   private scrollRows(delta: number): void {
@@ -1742,12 +1932,15 @@ export class SettingsWorkspacePanel implements Component {
     this.intents.requestRender()
   }
 
-  /** The wheel in the choice phase scrolls the CANDIDATE list (the browse detail
-   *  scroll is not the live projection there). */
+  /** The wheel over the candidate region scrolls only its painted extent. */
   private scrollChoice(delta: number): void {
-    const pane = this.paintedPanes.detail
-    if (pane === undefined) return
-    this.choiceOffset = Math.min(Math.max(0, this.choiceOffset + delta), pane.maxOffset)
+    const region = this.paintedPanes.detail?.optionRegion
+    if (region === undefined) return
+    const next = Math.min(Math.max(0, this.choiceOffset + delta), region.maxOffset)
+    if (next !== this.choiceOffset) {
+      this.choiceOffset = next
+      this.bumpRevision()
+    }
     this.intents.requestRender()
   }
 
@@ -1765,6 +1958,16 @@ export class SettingsWorkspacePanel implements Component {
     if (hit(panes.detail)) return 'detail'
     if (hit(panes.rows)) return 'rows'
     if (hit(panes.categories)) return 'categories'
+    return undefined
+  }
+
+  private detailRegionAt(x: number, y: number): 'facts' | 'options' | undefined {
+    const pane = this.paintedPanes.detail
+    if (pane === undefined || x < pane.x || x >= pane.x + pane.width) return undefined
+    const inRegion = (region: PaintedRegion | undefined): boolean =>
+      region !== undefined && y >= region.top && y < region.top + region.rows
+    if (inRegion(pane.factRegion)) return 'facts'
+    if (inRegion(pane.optionRegion)) return 'options'
     return undefined
   }
 

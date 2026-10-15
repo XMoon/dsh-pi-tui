@@ -93,40 +93,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   cell (a drag that leaves the preview, or a window-width change mid-drag, cancels instead
   of copying); the regular main screen
   stays keyboard-only and the terminal's own selection and scrollback are untouched.
-- `/settings` now opens a dedicated full-screen settings workspace in which two
-  rows — `Configured theme` and `Transcript display` — can really be changed. Wide
+- `/settings` now has consistent three-level keyboard navigation and same-pane
+  editing. ASCII `Right` advances exactly one level, `Left` returns one level
+  (inert at L0), `Enter` follows the same hierarchy, and `Esc`/`Backspace` step
+  back and close at the outermost level; `Tab`/`Shift+Tab` remain inert. Wide
   terminals show three columns (categories / settings rows / details), medium ones
-  the current level's two columns, and narrow ones a single column: all three are
-  projections of the SAME `categories → rows → detail` levels. At every width
-  `Enter` descends and `Esc` (`Backspace` too) steps back one level; only `Esc` at
-  the outermost level closes the workspace, and `Tab` and `←`/`→` are not navigation
-  keys. The workspace shows the real Appearance / Display facts and each row's
-  configuration Scope and backend readiness (`Ready` / `Last-known` / `Unavailable`
-  / `Read error`); `R` re-reads, `C` copies only the selected row's exact source
-  value, and browsing or picking writes no configuration. On those two rows, `Enter`
-  (or `[Change…]`) opens an in-pane candidate choice: `↑`/`↓`/`Pg`/`Home`/`End` move
-  the candidate, `Enter` or `[Confirm]` confirms it explicitly, and `Esc`/`[Cancel]`
-  cancels with zero writes. Only buttons and candidates that are really painted can
-  be clicked, and narrow or short terminals can still scroll, select and confirm.
-  A confirmed change is stored through the existing serialized whole-document write
-  path and then re-read from the authority: the Detail names the live runtime fact
-  (`Runtime`) and the stored preference (`Persisted`) separately and states the
-  commit as `Saving…`, `Verified`, `Not saved · <reason>`, `Commit accepted ·
-  verification unavailable` or `Outcome unknown · <reason>` — only a completed write
-  whose authoritative re-read agrees is called Verified. A REJECTED write re-reads the
-  authority first: a value that is still the previous one is reported as Not saved,
-  while a value already in place (another writer may have set it first) or an
-  authority that cannot be read is reported as Outcome unknown — never a claimed
-  success, and never a refusal the authority contradicts. On a non-ready backend the theme is neither applied nor
-  written; a display preset may already be live locally and then says so instead of
-  claiming a save. A plugin theme is resolved again by its source-qualified identity
-  at confirm time, so an unloaded plugin theme is listed as unavailable and refused
-  rather than redirected to a same-named custom file. Icon style and Thinking detail
-  stay read-only rows (their button row points at `Other settings`), and the existing
-  complete settings editor remains fully available: `Other settings` → `Open existing
-  settings…` retires the workspace and restores the surface it paused before opening
-  the original editor, so Theme, the Plugin Manager, keybindings, permissions and
-  extension settings keep every existing write path.
+  the current level's two columns, and narrow ones a single column: all remain
+  projections of the SAME `categories → rows → detail` levels. For the editable
+  `Configured theme` and `Transcript display`, L1 `Right`/`Enter`, the painted
+  `[Change…]` button, or ordinary visible Detail content opens the choice in the
+  SAME L2 pane, with the current value and Runtime/Persisted facts above the
+  candidates. `Up`/`Down`/`Home`/`End` move the candidate; `PgUp`/`PgDn` and the
+  wheel over facts scroll only the fact region, while the candidate wheel scrolls
+  independently. `Enter` or `[Confirm]` confirms explicitly; `Left`/`Esc`/
+  `Backspace` or `[Cancel]` cancels directly to L1 without writing. If the selected
+  candidate identity has scrolled out of view, the first Enter only reveals it;
+  confirmation requires a later Enter. Even at 44×8 the old value, current
+  candidate identity and explicit `Enter confirm` hint remain visible. Only
+  buttons and candidates that are really painted can be clicked. The workspace
+  shows the real Appearance / Display facts and each row's configuration Scope and
+  backend readiness (`Ready` / `Last-known` / `Unavailable` / `Read error`); `R`
+  re-reads, `C` copies only the selected row's exact source value, and browsing or
+  picking writes no configuration. A confirmed change is stored through the
+  existing serialized whole-document write path and then re-read from the
+  authority: the Detail names the live runtime fact (`Runtime`) and the stored
+  preference (`Persisted`) separately and states the commit as `Saving…`,
+  `Verified`, `Not saved · <reason>`, `Commit accepted · verification unavailable`
+  or `Outcome unknown · <reason>` — only a completed write whose authoritative
+  re-read agrees is called Verified. A REJECTED write re-reads the authority first:
+  a value that is still the previous one is reported as Not saved, while a value
+  already in place (another writer may have set it first) or an authority that
+  cannot be read is reported as Outcome unknown — never a claimed success, and
+  never a refusal the authority contradicts. On a non-ready backend the theme is
+  neither applied nor written; a display preset may already be live locally and
+  then says so instead of claiming a save. A plugin theme is resolved again by its
+  source-qualified identity at confirm time, so an unloaded plugin theme is listed
+  as unavailable and refused rather than redirected to a same-named custom file.
+  Icon style and Thinking detail stay read-only rows (their button row points at
+  `Other settings`), and the existing complete settings editor remains fully
+  available: `Other settings` → `Open existing settings…` retires the workspace
+  and restores the surface it paused before opening the original editor, so Theme,
+  the Plugin Manager, keybindings, permissions and extension settings keep every
+  existing write path.
 - A Job opened from the Task Center now renders in its own fullscreen workspace:
   the Job status, progress, output gaps, observation errors, terminal state and
   the retained output are presented as separate regions instead of one joined

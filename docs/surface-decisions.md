@@ -1978,13 +1978,14 @@ and nothing else does.
 
 - **Post-B2-A navigation decision: three levels, not focus owners.** The
   workspace always has exactly three levels — L0 `categories`, L1 `rows`, L2
-  `detail` — and the panel's `focus` is the only navigation state. `Enter`
-  advances one level, `Esc`/`Backspace` steps one level back, and only L0's
-  `Esc` closes the workspace, at EVERY width. `↑`/`↓` act on the current level.
-  `Tab`/`Shift+Tab` and `←`/`→` are not navigation keys: the earlier
-  medium-only Tab focus cycle and header `← category →` switch were retired, so
-  a single key scheme holds on wide, medium and narrow terminals. A new open
-  always starts on L0.
+  `detail` — and the panel's `focus` is the only navigation state. `Right`
+  advances exactly one level; `Left` returns one level and is inert at L0.
+  `Enter` follows the same level transition, while `Esc`/`Backspace` step back
+  (and close at L0), at EVERY width. `Up`/`Down` act on the current level.
+  `Tab`/`Shift+Tab` remain inert; the retired medium-only Tab focus cycle and
+  header category switch are not restored. A writable row enters L2 choosing
+  in one step from L1; a read-only row enters L2 browse. A new open always
+  starts on L0.
 - **Responsive three / two / one projection.** Width only decides how many panes
   of the current level are painted: `>=108` columns render the three-column
   `Categories | Settings | Details` layout; `76..107` derive their two columns
@@ -2004,30 +2005,34 @@ and nothing else does.
   a fabricated default. The theme row's `value` is the source-qualified
   configured identity (`plugin:…`/`file:…`) and its summary is the friendly
   display name — the raw identity is what `C` copies. The header is a pure level
-  breadcrumb (`Categories` / `<Category> · Rows` / `<Category> / <Row>`) plus an
+  breadcrumb (`Categories` / `<Category> · Rows` / `<Category> · <Row>`) plus an
   `N editable rows` badge at 76+ columns; it paints no interactive cell.
 - **Browse never writes.** Navigation, `R` (re-read the same authorities, no
   subscription and no shadow store) and the `C` copy verb never touch the
   configuration document. A row without a write channel says so
   (`read-only here · Other settings edits this row`) and paints no edit verb.
 - **The L2 edit phase is transient, not a fourth level.** On the two writable
-  rows, `Enter` (or the painted `[Change…]`) opens an in-pane choice: `↑`/`↓`/
-  `Pg`/`Home`/`End` move a candidate, `Enter`/`[Confirm]` confirms it, `Esc`/
-  `[Cancel]` cancels with ZERO writes. Only an explicit confirm dispatches, and a
+  rows, `Right`/`Enter` (or the painted `[Change…]`) opens an in-pane choice
+  directly from L1; the same Detail pane keeps compact Runtime/Persisted facts
+  above the candidates. `Up`/`Down`/`Home`/`End` move candidates without writing,
+  `PgUp`/`PgDn` and the wheel over facts scroll only the fact region, and the
+  candidate list scrolls independently under its own wheel region. `Enter` or
+  `[Confirm]` is the only commit; `Left`/`Esc`/`Backspace` or `[Cancel]` cancels
+  directly to L1 with ZERO writes. Only an explicit confirm dispatches, and a
   candidate whose source is gone (an unloaded `plugin:` theme) is listed as
-  `unavailable` and refused at confirm and at retry. The choice heading is pinned
-  so the field being changed stays named and the candidates alone scroll; a long or
-  CJK candidate WRAPS rather than being truncated (while choosing, the list is the
-  only place the candidate identity is visible) and every one of its painted rows is
-  a real hit target, while the wheel and the rebase both scroll the candidate list
-  itself. A layout WIDTH change re-flows the wrapped candidates, so it takes part in the
-  reveal rebase exactly like a candidate or viewport change (while a plain repaint never
-  fights the user's own scrolling), and a source that unloads under an open choice
-  re-anchors it on the candidate VALUE. The candidate IDENTITY is the source-qualified
-  value, never the label. One commit at
-  a time: while a write is pending the edit verbs are not painted, and the panel
-  holds exactly one request identity, so a superseded or post-close settlement can
-  never repaint.
+  `unavailable` and refused at confirm and at retry. The heading `Choose value`
+  names the shared in-pane selector; a long or CJK candidate WRAPS rather than
+  being truncated, every painted candidate row is a real hit target, and the
+  exact candidate value (source-qualified for themes, never its label) must be
+  visible before keyboard confirmation. If it has scrolled out of view, the first Enter reveals
+  it and the next Enter confirms. On a 44×8 terminal the current value, selected
+  candidate identity and explicit `Enter confirm` hint remain visible. A layout
+  WIDTH change re-flows wrapped candidates and participates in the reveal rebase
+  exactly like a candidate or viewport change (while a plain repaint never fights
+  the user's own scrolling), and a source that unloads under an open choice
+  re-anchors it on the candidate VALUE. One commit at a time: while a write is
+  pending the edit verbs are not painted, and the panel holds exactly one request
+  identity, so a superseded or post-close settlement can never repaint.
 - **Runtime and persisted are two facts, always drawn apart.** A writable row's
   Detail names the live runtime fact (`Runtime` for the theme palette —
   `app.currentTheme()`/`app.activePluginTheme()`, never the configured value) and
@@ -2095,15 +2100,18 @@ and nothing else does.
   row survive a resize in both directions, and the list rebases to keep the
   selected row (or the highlighted candidate) visible instead of scrolling the
   whole screen.
-- **Mouse follows the last painted frame.** A click selects the clicked item and
-  takes ITS level's focus (a category click never advances into the rows, and a
-  row click never advances into the detail — only `Enter` does); the painted
-  `Copy value`/`[Change…]`/`[Retry save]`/`[Confirm]`/candidate/legacy cell acts
-  on the item it is painted for regardless of the keyboard level, and a click is
-  refused unless the release re-proves the press-time kind, id, painted row, cell
-  range, state version, level and category. A button that does not fit the pane
-  WHOLE is not painted and publishes no hit target, and wheel events scroll only
-  the pane under the pointer (the candidate list while choosing).
+- **Mouse follows the last painted frame.** A category/row click selects the
+  clicked item and takes its level's focus without advancing; clicking ordinary
+  visible Detail content from L1 enters L2 (the same one-step choice for a
+  writable row, browse for a read-only row). Any click that leaves L2 cancels an
+  uncommitted choice atomically, including a click on the same row/category.
+  Painted `Copy value`/`[Change…]`/`[Retry save]`/`[Confirm]`/candidate/legacy
+  cells act on the item they are painted for regardless of the keyboard level,
+  and a click is refused unless release re-proves the press-time kind, id, painted
+  row, cell range, state version, level and category. A button that does not fit
+  the pane WHOLE is not painted and publishes no hit target; wheel events scroll
+  only the painted region under the pointer (facts and candidates are independent
+  while choosing).
 - **The legacy complete editor stays reachable.** The permanently visible
   `Other settings` category holds one row, `Open existing settings…`. Activating
   it retires the workspace (restoring the surface it paused) and only then opens

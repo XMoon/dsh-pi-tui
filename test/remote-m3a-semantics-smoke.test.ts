@@ -987,13 +987,21 @@ test('P16: the REAL /settings workspace commits through the Remote adapter over 
     await fixture.open()
     await fixture.key('\x1b[B') // Appearance -> Display
     await fixture.key('\r') // L0 -> L1
-    await fixture.key('\r') // L1 -> L2
-    assert.match(fixture.view(), /Transcript display/)
-    assert.match(fixture.view(), /Client runtime · optional TUI preference persistence/)
-    await fixture.key('\r') // L2 browse -> choice
-    assert.match(fixture.view(), /Choose Transcript display/)
-    await fixture.key('\x1b[B') // full -> compact
-    await fixture.key('\r') // confirm
+    await fixture.key('\r') // writable L1 -> L2 inline choice
+    const initialChoice = fixture.view().replace(/\s+/gu, ' ')
+    assert.match(initialChoice, /Transcript display/)
+    assert.match(initialChoice, /Choose value/)
+    assert.match(initialChoice, /Value full/)
+    assert.match(initialChoice, /Persisted full/)
+    assert.match(initialChoice, /Client runtime · optional TUI preference/)
+    assert.match(initialChoice, /> full/)
+    await fixture.key('\x1b[6~') // PgDn scrolls facts only
+    const scrolledChoice = fixture.view().replace(/\s+/gu, ' ')
+    assert.match(scrolledChoice, /persistence/, 'the wrapped Scope continuation is readable')
+    assert.match(scrolledChoice, /> full/, 'scrolling facts leaves the candidate unchanged')
+    await fixture.key('\x1b[B') // full -> compact, still only a preview
+    assert.match(fixture.view(), /> compact/)
+    await fixture.key('\r') // explicit confirm
     await fixture.settle()
 
     assert.match(fixture.view(), /Status\s+Verified/, `the UI verified the commit:\n${fixture.view()}`)
@@ -1057,7 +1065,7 @@ test('P16: the REAL /settings workspace commits through the Remote adapter over 
      *  one), then confirm. */
     const chooseNextPreset = async (): Promise<void> => {
       await fixture.key('\r')
-      assert.match(fixture.view().replace(/\s+/gu, ' '), /Choose Transcript display/)
+      assert.match(fixture.view().replace(/\s+/gu, ' '), /Choose value/)
       await fixture.key('\x1b[B')
       assert.match(fixture.view(), /> focus/, `the highlighted candidate is the next preset:\n${fixture.view()}`)
       await fixture.key('\r')
@@ -1138,10 +1146,12 @@ test('P17: the REAL Host-owned Direct settings authority drives the /settings wo
 
     await fixture.open()
     await fixture.key('\r') // L0 -> L1
-    await fixture.key('\r') // L1 -> L2
+    await fixture.key('\r') // writable L1 -> L2 inline choice
     assert.match(fixture.view(), /Configured theme/)
-    await fixture.key('\r') // L2 browse -> choice
-    assert.match(fixture.view().replace(/\s+/gu, ' '), /Choose Configured theme/)
+    const choiceFrame = fixture.view().replace(/\s+/gu, ' ')
+    assert.match(choiceFrame, /Choose value/)
+    assert.match(choiceFrame, /> auto/)
+    assert.equal(settings.get().theme, 'auto', 'entering the choice is preview-only')
     // Pick a value that really CHANGES the runtime: the fresh TuiApp is painted dark,
     // so `light` proves the apply reached the live surface (and `auto` would leave the
     // terminal detection to decide).
