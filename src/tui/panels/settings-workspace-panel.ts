@@ -1305,10 +1305,12 @@ export class SettingsWorkspacePanel implements Component {
     const back = this.focus === 'categories' ? 'Esc close' : 'Esc back'
     if (this.bodyFloor() < 1) return fit(color.textMuted(back), plan.width)
     let segments: ActionBarSegment[]
+    let choiceFactScrollAvailable = false
     if (this.choiceField() !== undefined) {
       const detail = this.paintedPanes.detail
       const canNavigate = (detail?.optionRegion?.rows ?? 0) > 0 && this.paintedViewport >= 3
       const canReadFacts = (detail?.factRegion?.maxOffset ?? 0) > 0 && this.paintedViewport >= 3
+      choiceFactScrollAvailable = canReadFacts
       segments = [
         ...canNavigate ? [{ text: 'Up/Down choose', short: 'Up/Down', priority: 5 }] : [],
         ...canReadFacts ? [{ text: 'PgUp/PgDn details', priority: 4 }] : [],
@@ -1380,7 +1382,7 @@ export class SettingsWorkspacePanel implements Component {
     const rendered = renderActionBarRow(segments, plan.width)
     const choosing = this.choiceField() !== undefined
     this.paintedChoiceNavigation = choosing && rendered.includes('Up/Down')
-    this.paintedChoiceFactScroll = choosing && rendered.includes('PgUp/PgDn details')
+    this.paintedChoiceFactScroll = choosing && choiceFactScrollAvailable
     this.paintedEnterConfirm = choosing && rendered.includes(CHOICE_CONFIRM_HINT.text)
     this.paintedChoiceCopy = choosing && rendered.includes(`${SETTINGS_LOCAL_KEYS.copy} copy`)
     return color.textMuted(rendered)
@@ -1495,8 +1497,9 @@ export class SettingsWorkspacePanel implements Component {
       if (this.choiceField() === undefined && this.focus !== 'detail') this.confirm()
       return
     }
-    // Choosing remains a transient phase of L2: candidate navigation and fact
-    // scrolling require their complete Action Bar hint in the current geometry.
+    // Choosing remains a transient phase of L2: candidate navigation requires
+    // its complete Action Bar hint. Fact paging follows the painted fact region's
+    // scroll extent, even when its optional hint is dropped for width.
     if (this.choiceField() !== undefined) {
       const paintedGeometryIsCurrent = this.lastRenderWidth === this.intents.columns()
         && this.lastRenderRows === this.intents.rows()
