@@ -5329,11 +5329,11 @@ The host's Task Quick on-demand entry (Phase 3B/B4-B) must fire on a Down press 
 #### Changed surface
 
 - `protected canYieldDownAtLastVisualLine(expectedLayoutWidth: number): boolean` — one synchronous, read-only, side-effect-free method on the fork `Editor`.
-- `public onVisualLineBoundaryChanged?: () => void` - an observation-only callback fired on the Up/Down presses that may move the cursor across the last-VISUAL-line boundary; the host recomposes its painted hint from it (the base editor exposes no caret-change callback for a boundary that is a wrap-map fact, not a document fact).
+- `public onVisualLineBoundaryChanged?(onLastVisualLine: boolean): void` - an observation-only callback fired after every editor transition that can change the last-VISUAL-line admission fact: Up/Down/PageUp/PageDown always (with the post-move state read off the move's own wrap map), Left/Right only when they cross the boundary, character jump, dedicated history recall, and the autocomplete open/close flips (a dropdown refuses Down with no cursor move). The host compares the state against its painted hint's baseline and recomposes only on a flip (the base editor exposes no caret-change callback for a boundary that is a wrap-map fact, not a document fact).
 - True only when `lastWidth === expectedLayoutWidth`, the cursor is on the last VISUAL line of the editor's own wrap map, and NO transient mode owns Down: `historyIndex === -1`, `autocompleteState === null`, `jumpMode === null`, `isInPaste === false`.
 - `expectedLayoutWidth` must be the SAME layout width `render()` derived for the painted frame, so a stale caller width can never classify against a wrap map the user is not looking at.
-- No private field becomes public, no wrap logic is duplicated, no input is intercepted, and the method never mutates editor state.
-- The host `TuiEditor` subclass exposes `canEnterTaskQuickFromDown(physicalWidth)` on top of it (host-side code, not this ledger) — the seam stays the ONLY fork delta.
+- No private field becomes public, no wrap logic is duplicated, and the editor's own key routing, cursor and document are untouched: the callback is an observation whose payload is computed from the moving code's OWN wrap-map facts (page moves publish theirs; Left/Right reuse the pre-move read plus one post-move comparison), so the notify adds no second wrap-map build on any navigation path.
+- The host `TuiEditor` subclass exposes `canEnterTaskQuickFromDown(physicalWidth)` on top of the seam (host-side code, not this ledger). Both fork deltas serve the same host consumer — the read-only classifier and the state-carrying observation callback; no other fork surface changed.
 
 #### Dependency map
 
@@ -5362,7 +5362,7 @@ The host's Task Quick on-demand entry (Phase 3B/B4-B) must fire on a Down press 
 - history browsing, an open autocomplete dropdown, armed jump mode and an in-flight bracketed paste each force false, and return to true only when the editor itself leaves the mode
 - a caller width that does not match the painted frame's layout width forces false until the frame is repainted at that width
 - the seam consumes nothing: a real Down after a false answer still moves the cursor natively
-- the boundary-notification callback fires on Up/Down presses with the post-move boundary state (and never on printable input — the document, the cursor and the key routing are untouched), on Left/Right only when they cross the boundary (the corrected negative: an intra-line Left/Right does NOT dispatch, a wrap-point move does), and on PageUp/PageDown always
+- the boundary-notification callback fires on Up/Down presses with the post-move boundary state (and never on printable input — the document, the cursor and the key routing are untouched), on Left/Right only when they cross the boundary at a HARD logical-line end (the corrected negative: an intra-line Left/Right does NOT dispatch, a wrap-point move does; a soft-wrap segment boundary behaves identically through the same visual map), and on PageUp/PageDown always — the page move publishes its own map facts and the notify reuses them instead of a second wrap-map build
 - Audit note: The seam answers one question — may a real Down leave this editor at its last visual line — and owns no state.
 
 #### Guarding tests
@@ -5378,7 +5378,7 @@ The host's Task Quick on-demand entry (Phase 3B/B4-B) must fire on a Down press 
 - packages/tui/src/components/editor.ts
 - Relevant issues/PRs:
 - None recorded; issue/PR state was not used as semantic proof.
-- Remaining semantic delta: Upstream's `Editor` keeps `isOnLastVisualLine` and the mode flags fully private with no protected read-only accessor, so a host subclass cannot ask the editor whether a real Down would leave it at the last visual line. The fork adds exactly that protected seam PLUS the observation-only `onVisualLineBoundaryChanged` callback that reports the last-visual-line state after visual-cursor navigation (Up/Down always; Left/Right and PageUp/PageDown when they cross), so the host can keep its painted hint fresh; the wrapping, history, autocomplete, jump and paste behavior are upstream's own, unchanged.
+- Remaining semantic delta: Upstream's `Editor` keeps `isOnLastVisualLine` and the mode flags fully private with no protected read-only accessor, so a host subclass cannot ask the editor whether a real Down would leave it at the last visual line. The fork adds exactly that protected seam PLUS the observation-only `onVisualLineBoundaryChanged` callback that reports the last-visual-line state after visual-cursor navigation (Up/Down/PageUp/PageDown always (page moves publish their own wrap-map facts), Left/Right only when they cross), so the host can keep its painted hint fresh; the wrapping, history, autocomplete, jump and paste behavior are upstream's own, unchanged.
 
 #### Retirement conditions
 

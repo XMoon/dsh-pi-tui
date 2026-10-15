@@ -174,6 +174,11 @@ import { FooterCustomItemCatalog } from './tui/footer/custom-item-catalog.ts'
 import type { FooterItemRegistry } from './tui/footer/item-registry.ts'
 import { createFooterRuntime, type FooterRuntime } from './tui/footer/runtime.ts'
 import { FOOTER_MAX_PHYSICAL_LINES, FOOTER_MAX_PHYSICAL_LINES_PER_ROW, type FooterLayoutV1, type FooterPhysicalLineBudget } from './tui/footer/presentation-types.ts'
+/** The hard pass bound of the footer height convergence (B4-B review R6-F3):
+ *  a footer's line budget is 4, so the height settles in 1-2 passes; 4 is
+ *  the fail-safe bound against a pathological oscillator (each compose
+ *  paints the truth of its own text; the loop stops on the bound). */
+const FOOTER_CONVERGE_LIMIT = FOOTER_MAX_PHYSICAL_LINES
 import type { FooterCommandConfig } from './domain/footer/command-config.ts'
 import type { FooterCustomCommandItemSettings } from './domain/footer/custom-items.ts'
 import { isViewerAccessInteractive, resolveViewerAccess, type ViewerAccess } from './domain/task/browser.ts'
@@ -3886,7 +3891,17 @@ export class TuiApp {
     // the top line pays one dispatch + one compare, never a chrome
     // re-measure (plan §9.3).
     this.editor.onVisualLineBoundaryChanged = (onLastVisualLine: boolean) => {
-      if (!this.tasksActive || !this.taskQuickAdvertised) return
+      // The hook reports the RAW visual-line state. The DOWN admission adds
+      // mode gates (prompt mode, autocomplete, history browsing) on top of
+      // it — and the fork notifies on THOSE flips too (autocomplete open/
+      // close, history enter/leave), so a raw-state flip or a mode flip
+      // both arrive here. The baseline is refreshed by every renderFooter
+      // (the painted hint IS the compose), so a flip-compare can never
+      // strand behind an unrelated compose.
+      if (!this.tasksActive || !this.taskQuickAdvertised) {
+        this.taskQuickHintBoundary = onLastVisualLine
+        return
+      }
       if (onLastVisualLine === this.taskQuickHintBoundary) return
       this.taskQuickHintBoundary = onLastVisualLine
       this.renderFooter()
@@ -14547,11 +14562,12 @@ export class TuiApp {
   }
   /** The painted row count of the LAST footer composition (B4-B review
    *  R5-F2): the ↓ admission's chrome measure includes this footer's
-   *  height, so a composition that CHANGED it re-queries the grant once
-   *  against the fresh geometry instead of leaving the hint computed from
-   *  the previous frame's height. */
+   *  height, so a composition that CHANGED it converges to the fixed
+   *  point (bounded by FOOTER_CONVERGE_LIMIT) before painting. */
   private lastFooterRows = -1
-  /** Re-entrancy latch for the footer height convergence pass (R5-F2). */
+  /** Re-entrancy latch for the footer height convergence loop (R5-F2):
+   *  a compose triggered INSIDE the convergence (an extension item calling
+   *  back) must not nest another loop. */
   private convergingFooter = false
   /** The last terminal width the transcript components were built at (the
    * right-gutter resize latch): a width change rebuilds the width-baked
@@ -19411,27 +19427,44 @@ export class TuiApp {
       })
     }
     this.footer.setText(text)
-    // B4-B (review R5-F2): the admission's chrome measure includes THIS
-    // footer's painted height. If the NEW text changed it, the grant the
-    // composer just queried was measured against the PREVIOUS frame's
-    // height — converge with ONE more compose against the fresh geometry
-    // (the composer's no-churn discipline makes it a byte-identical no-op
-    // whenever the hint's value is stable; the tick bump invalidates the
-    // frame-scoped grant cache so the recompose truly re-measures). The
-    // latch keeps the convergence to a single pass — a footer is bounded
-    // by its hard line capacity, and a second height change is absorbed by
-    // the NEXT compose (each compose paints the truth of its own text).
-    const newFooterRows = this.footer.render(width).length
-    if (newFooterRows !== this.lastFooterRows) {
-      this.lastFooterRows = newFooterRows
-      this.renderTick += 1
-      if (!this.convergingFooter) {
-        this.convergingFooter = true
-        try {
-          this.renderFooter()
-        } finally {
-          this.convergingFooter = false
+    // B4-B (R6-F1): the boundary baseline is owned by the X063 hook alone —
+    // every cursor transition AND every admission-mode flip (autocomplete
+    // open/close, history enter/leave) notifies, so the baseline can never
+    // strand behind a fact change. A compose from a path that notifies
+    // neither (pure chrome/status churn) does not move the fact either.
+    // B4-B (review R5-F2/R6-F3): the admission's chrome measure includes
+    // THIS footer's painted height. A compose whose text CHANGED that
+    // height measured the grant against the PREVIOUS frame — converge to
+    // the FIXED POINT: recompose until the painted height is stable (the
+    // composer's no-churn discipline makes a settled pass a byte-identical
+    // no-op; each pass bumps the tick so the grant truly re-measures). The
+    // FOOTER_CONVERGE_LIMIT is a hard safety bound — a footer is a bounded
+    // line budget, so the fixed point is reached in 1-2 passes in practice;
+    // a pathological oscillator stops at the bound with the LAST painted
+    // state (each compose paints the truth of its own text).
+    let newFooterRows = this.footer.render(width).length
+    if (newFooterRows !== this.lastFooterRows && !this.convergingFooter) {
+      this.convergingFooter = true
+      try {
+        for (let pass = 0; pass < FOOTER_CONVERGE_LIMIT && newFooterRows !== this.lastFooterRows; pass += 1) {
+          this.lastFooterRows = newFooterRows
+          this.renderTick += 1
+          if (this.commandRows !== undefined) break
+          this.footer.setText(this.footerComposer.render({
+            snapshot: this.statusStore.snapshot(),
+            layout: this.currentFooterLayout(),
+            width,
+            context: {
+              taskBrowserAvailable: this.taskBrowserAvailable(),
+              extensionFooterText: this.extensionHost?.footerText() ?? '',
+            },
+            instruction,
+            physicalLineBudget: this.footerPhysicalLineBudget(),
+          }))
+          newFooterRows = this.footer.render(width).length
         }
+      } finally {
+        this.convergingFooter = false
       }
     }
     this.requestRender()
