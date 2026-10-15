@@ -5329,6 +5329,7 @@ The host's Task Quick on-demand entry (Phase 3B/B4-B) must fire on a Down press 
 #### Changed surface
 
 - `protected canYieldDownAtLastVisualLine(expectedLayoutWidth: number): boolean` — one synchronous, read-only, side-effect-free method on the fork `Editor`.
+- `public onVisualLineBoundaryChanged?: () => void` - an observation-only callback fired on the Up/Down presses that may move the cursor across the last-VISUAL-line boundary; the host recomposes its painted hint from it (the base editor exposes no caret-change callback for a boundary that is a wrap-map fact, not a document fact).
 - True only when `lastWidth === expectedLayoutWidth`, the cursor is on the last VISUAL line of the editor's own wrap map, and NO transient mode owns Down: `historyIndex === -1`, `autocompleteState === null`, `jumpMode === null`, `isInPaste === false`.
 - `expectedLayoutWidth` must be the SAME layout width `render()` derived for the painted frame, so a stale caller width can never classify against a wrap map the user is not looking at.
 - No private field becomes public, no wrap logic is duplicated, no input is intercepted, and the method never mutates editor state.
@@ -5361,6 +5362,7 @@ The host's Task Quick on-demand entry (Phase 3B/B4-B) must fire on a Down press 
 - history browsing, an open autocomplete dropdown, armed jump mode and an in-flight bracketed paste each force false, and return to true only when the editor itself leaves the mode
 - a caller width that does not match the painted frame's layout width forces false until the frame is repainted at that width
 - the seam consumes nothing: a real Down after a false answer still moves the cursor natively
+- the boundary-notification callback fires on Up/Down presses (observation only — the document, the cursor and the key routing are untouched), never on printable input
 - Audit note: The seam answers one question — may a real Down leave this editor at its last visual line — and owns no state.
 
 #### Guarding tests

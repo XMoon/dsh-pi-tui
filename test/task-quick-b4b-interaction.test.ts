@@ -302,13 +302,18 @@ test('B4B-06 Enter opens the real Job workspace; a refused value never disturbs 
 
   // The LITERAL keyboard path: enter Quick, select alpha, Enter. The sink is
   // the REAL Job workspace (keyboard + screen), not a recorded array: with a
-  // runtime that never opens anything this test could not pass.
+  // runtime that never opens anything this test could not pass. The typed
+  // IDENTITY is asserted too: the callback input is exactly the selected
+  // stable value, and the opened workspace is THAT Job's — a mis-route to
+  // job:j2 would fail both witnesses.
   h.vt.sendInput('\x1b[B')
   await h.vt.waitForRender()
   h.vt.sendInput('\r')
   await h.vt.waitForRender()
   await sleep(20)
+  assert.deepEqual(h.quickSelects(), ['job:j1'], `the Enter must route the EXACT selected value:\n${h.quickSelects().join('|')}`)
   assert.ok(screenOpen(), `the Enter must open the REAL Job workspace:\n${view(h.vt)}`)
+  assert.ok(view(h.vt).includes('j1'), `the opened workspace is job:j1's:\n${view(h.vt)}`)
   assert.equal(h.band().identity, -1, 'the commit leaves Quick (the workspace owns the surface)')
 
   // The workspace HOLDS the keyboard: typing grows nothing in the editor
@@ -341,9 +346,16 @@ test('B4B-08 a parked Question enters the projection; a refused reopen reports n
   // The PRODUCTION commit route, wired exactly like the surface composition:
   // Enter → accessory onActivate → the app's onQuickTaskSelect → the
   // runtime's openQuickTaskItem. Without this option the Enter would fall
-  // through to the editor submit and prove nothing.
+  // through to the editor submit and prove nothing. The callback's RETURN
+  // value is observed (the typed outcome the accessory contract carries).
+  const callbackResults: boolean[] = []
+  const observedCallbackResults = (): readonly boolean[] => [...callbackResults]
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
-    onQuickTaskSelect: (value: string): boolean => runtimeRef?.openQuickTaskItem(value) ?? false,
+    onQuickTaskSelect: (value: string): boolean => {
+      const result = runtimeRef?.openQuickTaskItem(value) ?? false
+      callbackResults.push(result)
+      return result
+    },
   })
   app.start()
   startedApps.add(app)
@@ -412,10 +424,13 @@ test('B4B-08 a parked Question enters the projection; a refused reopen reports n
   await vt.waitForRender()
   await sleep(20)
   assert.ok(reopens.includes('s1:c1'), `the Enter must reopen through the controller entry:\n${reopens.join(' |')}`)
+  assert.deepEqual(observedCallbackResults(), [true], 'the successful reopen reports the TRUE outcome')
   assert.equal(rawView(vt).findIndex(line => line.startsWith('Task Quick')), -1, 'the commit leaves Quick after the Question route')
 
   // The STALE-Question refusal is part of the typed contract (plan §9.2):
-  // reopen false ⇒ openQuickTaskItem false, dispatched exactly once.
+  // reopen false ⇒ openQuickTaskItem false, dispatched exactly once. The
+  // callback outcome is observed at the SAME production seam, so a runtime
+  // that promoted the refusal to a fabricated success would fail here.
   vt.sendInput('\x1b[B')
   await vt.waitForRender()
   allowReopen = false
@@ -425,6 +440,7 @@ test('B4B-08 a parked Question enters the projection; a refused reopen reports n
   await vt.waitForRender()
   await sleep(20)
   assert.equal(reopens.filter(id => id === 's1:c1').length, 2, 'exactly the refusal dispatch happened')
+  assert.deepEqual(observedCallbackResults(), [true, false], 'the refused reopen reports the FALSE outcome through the same callback')
   assert.equal(rawView(vt).findIndex(line => line.startsWith('Task Quick')), -1, 'a refused reopen keeps Quick closed (no fabricated reopen surface)')
 })
 
@@ -623,6 +639,58 @@ test('B4B-13 a session reset with Quick ACTIVE exits and clears the projection',
   assert.ok(!view(h.vt).includes('build'), `no stale row content:\n${view(h.vt)}`)
 })
 
+/** F4/R4-F1: a held pointer gesture does NOT survive a repaint. A real SGR
+ *  press, a WIDTH-ONLY resize (the band keeps its grant, its rows and the
+ *  pressed cell's physical y), a repaint, THEN the release on the same
+ *  cell: the frame-fence clears the intent — nothing activates. A fresh
+ *  same-cell gesture after the resize clicks the CURRENT row normally. */
+test('B4B-07-resize a held press across a width-only resize never activates; a fresh gesture does', async () => {
+  const h = await startQuick({
+    roster: [job('j1', 'alpha', 'running'), job('j2', 'bravo', 'running'), job('j3', 'charlie', 'running')],
+  })
+  for (let i = 0; i < 8; i++) await new Promise(r => setTimeout(r, 0))
+  await h.vt.waitForRender()
+  // Swap first (a regular-root band would be retired by the hand-off), then
+  // enter Quick on the alt root.
+  h.app.setFullscreen(true)
+  await h.vt.waitForRender()
+  h.vt.sendInput('\x1b[B')
+  await h.vt.waitForRender()
+  const rows = rawView(h.vt)
+  const bandStart = rows.findIndex(line => line.startsWith('Task Quick'))
+  const rowA = rows.findIndex(line => line.includes('alpha') && line.includes('‣'))
+  assert.ok(bandStart >= 0 && rowA >= 0, `the band and the target row paint:\n${view(h.vt)}`)
+
+  // Press alpha, THEN resize the width (rows stay 40): the band keeps its
+  // grant, the same task rows, and the pressed cell's physical y.
+  h.vt.sendInput(`\x1b[<0;10;${rowA + 1}M`)
+  await h.vt.waitForRender()
+  h.vt.resize(100, 40)
+  await h.vt.waitForRender()
+  await sleep(40) // the resize frame clears the fork's render throttle
+  await h.vt.waitForRender()
+  const rowsAfter = rawView(h.vt)
+  const rowAAfter = rowsAfter.findIndex(line => line.includes('alpha') && line.includes('‣'))
+  assert.equal(rowAAfter, rowA, 'the pressed cell keeps its physical row across the width-only resize')
+  assert.ok(rowsAfter.findIndex(line => line.startsWith('Task Quick')) >= 0, 'the band survives the resize with its grant')
+
+  // Release on the SAME cell: the frame fence kills the stale intent —
+  // observed at the SINK, not a painted word.
+  h.vt.sendInput(`\x1b[<0;10;${rowA + 1}m`)
+  await h.vt.waitForRender()
+  await sleep(20)
+  assert.deepEqual(h.quickSelects(), [], 'a held press across a repaint must not activate')
+
+  // The positive control: a FRESH same-cell gesture clicks the CURRENT row.
+  h.vt.sendInput(`\x1b[<0;10;${rowAAfter + 1}M`)
+  h.vt.sendInput(`\x1b[<0;10;${rowAAfter + 1}m`)
+  await h.vt.waitForRender()
+  await sleep(20)
+  assert.deepEqual(h.quickSelects(), ['job:j1'], `a fresh post-resize click activates normally:\n${h.quickSelects().join('|')}`)
+  h.app.setFullscreen(false)
+  await h.vt.waitForRender()
+})
+
 /** F4: an ACTIVE Quick resized below its grant retires — the editor gets
  *  the keyboard back instead of an invisible band consuming input. */
 test('B4B-resize-zero an ACTIVE Quick resized to 0 grant exits and returns the editor', async () => {
@@ -788,8 +856,9 @@ test('B4B-f6 the admission probe measures the chrome once per render window', as
     // A DECLINED candidate Down with a NON-EMPTY projection: the frame is
     // too short to paint one task row, so the projection survives (the
     // predicate's items gate passes) and the MEASURED grant probe is the
-    // fact that declines. Shrink the viewport (rows 40 → 8) with the roster
-    // intact — the projection stays non-empty, the grant goes to zero.
+    // fact that declines. Shrink the viewport (rows 40 → 6; rows 8 still
+    // grants one row — probed) with the roster intact — the projection
+    // stays non-empty, the grant goes to zero.
     const measuredBefore = calls
     h.vt.resize(120, 6)
     await h.vt.waitForRender()
