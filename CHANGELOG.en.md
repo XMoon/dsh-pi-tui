@@ -33,26 +33,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   verbs drop as whole segments, key names are lowercase, and `⇧Tab` is spelled
   `shift+tab`.
 
-- A resident Task Quick window now sits below the editor: up to three tasks by
-  default (one identity/position row plus at most three task rows), shrinking to
-  one row on a short terminal and to **no row at all** on an extreme frame or an
-  empty projection (no blank placeholder). It shares ONE live row budget with the
-  Editor, the footer and the transcript: the editor seat, the status/footer, at
-  least one transcript row and the existing plugin widget zones come first, and
-  only the remainder goes to the window — so a long task list can never push the
-  Editor or the Footer off screen. Its rows are the SAME Task Runtime projection
-  `/tasks` shows (Job roster, Subagent catalog and parked Question attention —
-  never a second registry); each row carries the task identity, its real mode and
-  a `‣ Running` / `‣ Failed` / `‣ Awaiting answer` status word, with the true
-  `showing x-y/N` (N is the number of rows that can actually be scrolled to).
-  Passive painting, refresh, wheel and resize never change failure
-  acknowledgement (`!N`) or a Question's answer state. Inside Transcript
-  Fullscreen the wheel scrolls only the window under the pointer: while the
-  pointer is on the window (including at its first/last row) the transcript
-  behind it never scrolls, and the wheel takes no keyboard focus and leaves the
-  draft alone; the ordinary main screen stays a keyboard-only surface (native
-  terminal selection and scrollback are untouched), and tasks remain reachable
-  through the existing `↓` / `/tasks` Task Center.
+- A Task Quick window now sits below the editor (sharing ONE live row budget
+  with the Editor, the footer and the transcript: the editor seat, the
+  status/footer, at least one transcript row and the existing plugin widget
+  zones come first, and only the remainder goes to the window — so a long task
+  list can never push the Editor or the Footer off screen; an extreme frame or
+  an empty projection paints no row at all). Its rows are the SAME Task Runtime
+  projection `/tasks` shows (Job roster, Subagent catalog and parked Question
+  attention — never a second catalog), each row showing the task identity, its
+  real mode and the `‣ Running` / `‣ Failed` / `‣ Awaiting answer` status
+  words with the true `showing x-y/N` position. Passive painting, refresh,
+  wheel and resize never change failure acknowledgement (`!N`) or a Question's
+  answer state. In fullscreen the wheel scrolls only the window under the
+  pointer; the regular screen stays keyboard-only. The delivered shape is the
+  NEXT bullet (on-demand, under the footer).
+
 
 
 - The experimental TSP renderer's `/preset` now uses the v4 two-page native flow: the

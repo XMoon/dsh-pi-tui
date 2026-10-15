@@ -38,7 +38,9 @@
  * Visual vocabulary is frozen by `docs/tui-design-language.md` (§3.2 role
  * table, §4.3/§4.4 glyph inventory): one `‣` marker and a Title Case status
  * word, `> ` as the only active marker, no cursor glyph, no brackets, no
- * rules, no second palette token, no frame/border.
+ * second palette token, no frame/border — plus the ONE Owner-authorized top
+ * separator rule (role 15 `border`) that marks the Footer↔Quick boundary
+ * (§6.2 exception) and yields to task rows on a low budget.
  *
  * @module @xmoon76/dsh-pi-tui/tui/panels/task-quick-accessory
  */
@@ -224,7 +226,11 @@ function renderItemRow(item: TaskPanelItem, width: number, position?: string, se
   const suffix = suffixWidth > 0 && indentWidth + suffixWidth + 1 <= room ? suffixText : ''
   const labelBudget = Math.max(0, room - indentWidth - visibleWidth(suffix))
   const label = truncateToWidth(sanitizedPhysicalLine(item.label), labelBudget, '…', false)
-  const ink = item.ancestorContext === true ? color.textDim : color.text
+  // B4-B addendum §1: the selected row's label paints `textStrong` (bold
+  // role 1); unselected rows keep `text`/`textDim` by context.
+  const ink = selected
+    ? color.textStrong
+    : item.ancestorContext === true ? color.textDim : color.text
   const left = `${marker}${color.textDim(indent)}${ink(label)}${color.textDim(suffix)}`
   const gap = Math.max(1, width - visibleWidth(left) - tailWidth)
   return `${left}${' '.repeat(gap)}${tail}`
@@ -405,6 +411,7 @@ export class TaskQuickAccessory implements Component, Focusable {
     }
     const previousAnchor = this.firstVisibleId
     const previousSelection = this.selectedValue
+    const previousSelectionIndex = previousSelection === undefined ? undefined : this.indexOfValue(previousSelection)
     this.items = items
     // Selection reconciliation (stable ID first, bounded index fallback).
     if (previousSelection !== undefined) {
@@ -412,9 +419,11 @@ export class TaskQuickAccessory implements Component, Focusable {
       if (selectedIndex >= 0) {
         this.selectedValue = previousSelection
       } else {
-        // Deleted: bounded fallback to the successor of the pre-delete
-        // global index; the predecessor when the tail was deleted.
-        const oldIndex = this.indexOfValue(previousSelection)
+        // Deleted: bounded fallback to the SUCCESSOR of the pre-delete
+        // global index; the predecessor when the tail was deleted. The
+        // pre-delete index must come from the PREVIOUS rows — the new array
+        // no longer contains the value.
+        const oldIndex = previousSelectionIndex
         const fallback = oldIndex === undefined ? 0 : Math.min(oldIndex, items.length - 1)
         this.selectedValue = items[Math.max(0, fallback)]?.value
       }
@@ -455,6 +464,7 @@ export class TaskQuickAccessory implements Component, Focusable {
     const index = this.items.findIndex(item => item.value === value)
     return index === -1 ? undefined : index
   }
+
 
   /** Move the selection by a bounded delta (keyboard Up/Down, wheel). */
   private move(delta: number): void {
@@ -613,10 +623,11 @@ export class TaskQuickAccessory implements Component, Focusable {
     }
 
     if (event.type === 'release') {
-      const pressed = this.pressedValue
-      this.pressedValue = undefined
-      // A release is only meaningful for a gesture this component owns.
-      if (pressed === undefined) return { handled: true }
+      // The fork dispatcher's SGR sequence is press → release → SYNTHESIZED
+      // click, so the release must NOT clear the pressed identity: the click
+      // that follows needs it for the same-row match. The latch is cleared
+      // by the click branch (or by deactivate/row-removal paths below).
+      if (this.pressedValue === undefined) return { handled: true }
       return { handled: true }
     }
 
@@ -624,8 +635,9 @@ export class TaskQuickAccessory implements Component, Focusable {
     // with a release/click resolving to B never activates (async reorder
     // safety). Then resolve the CURRENT row by the stable value: the value
     // is the identity, the stale frame's index never is.
-    if (this.pressedValue !== hit.value) return { handled: true }
+    const pressed = this.pressedValue
     this.pressedValue = undefined
+    if (pressed !== hit.value) return { handled: true }
     const item = this.items.find(candidate => candidate.value === hit.value)
     if (item === undefined) return { handled: true }
     // Same-row click opens the typed detail directly (no focus detour).
@@ -661,6 +673,11 @@ export class TaskQuickAccessory implements Component, Focusable {
     )
     if (layout.grant === 0 || layout.count === 0) {
       this.painted = undefined
+      // B4-B (review F4): an ACTIVE band that lost its grant (a resize to an
+      // extreme frame) retires through the host — the editor regains the
+      // keyboard instead of an invisible surface consuming input. A HIDDEN
+      // frame was never consuming input, so it stays a data-only update.
+      if (this.focused) this.onEmpty()
       return []
     }
     const lines: string[] = []

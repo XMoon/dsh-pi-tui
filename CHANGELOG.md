@@ -24,18 +24,15 @@
   操作提示按设计规范收口：`Esc close` 移到导航动词末位且在窄屏下永不截断，低频管理
   动词整段降级，键名统一小写、`⇧Tab` 改写为 `shift+tab`。
 
-- 编辑器下方新增常驻的 Task Quick 任务窗口：默认最多 3 条任务（一行身份/位置 + 最多 3 行
-  任务），终端变矮时自然收缩到 1 行，极短屏或没有可展示的任务/注意力时一行都不占（不会留下
-  空占位）。它和 Editor、footer、Transcript 共用同一份实时行预算：先满足编辑器席位、状态栏、
-  至少一行 Transcript 与既有插件 widget 位，剩余空间才给这个窗口，因此任务再多也不会把
-  Editor 或 Footer 顶出屏幕。任务数据与 `/tasks` 完全同源（Job roster、Subagent 目录与
-  parked Question 的同一个 Task Runtime 投影，不新增第二套目录），每行显示任务身份、真实
-  mode 与 `‣ Running` / `‣ Failed` / `‣ Awaiting answer` 状态词，右侧是真实的
-  `showing x-y/N`（N 是可以真正滚到的行数）。被动绘制、刷新、滚轮与 resize 都不会改变失败
-  确认（`!N`）或 Question 的回答状态。全屏 Transcript 下滚轮只滚动指针所在的这个窗口：
-  指针落在窗口上时（含窗口已到第一/最后一行）后面的 Transcript 不会被滚动，也不会抢键盘
-  焦点或改动草稿。普通主屏仍是纯键盘界面（终端自身的选择与回滚不变），任务仍按原有方式用
-  `↓` 或 `/tasks` 打开 Task Center。
+- 编辑器下方新增 Task Quick 任务窗口（与 Editor、footer、Transcript 共用同一份实时行
+  预算：先满足编辑器席位、状态栏、至少一行 Transcript 与既有插件 widget 位，剩余空间才
+  给这个窗口，因此任务再多也不会把 Editor 或 Footer 顶出屏幕；极短屏或没有可展示的
+  任务/注意力时一行都不占）。任务数据与 `/tasks` 完全同源（Job roster、Subagent 目录
+  与 parked Question 的同一个 Task Runtime 投影，不新增第二套目录），每行显示任务身份、
+  真实 mode 与 `‣ Running` / `‣ Failed` / `‣ Awaiting answer` 状态词，右侧是真实的
+  `showing x-y/N`。被动绘制、刷新、滚轮与 resize 都不会改变失败确认（`!N`）或 Question
+  的回答状态。全屏 Transcript 下滚轮只滚动指针所在的这个窗口，不会抢键盘焦点或改动
+  草稿；普通主屏仍是纯键盘界面。最终交付形态见下一条（按需展开、位于 Footer 下方）。
 
 - TSP 实验渲染器的 `/preset` 改为 v4 两页式原生交互：目录是一次原生 `cards` 选择器，按「内置 / 自定义」
   分组并显示每组数量，每张卡带预设名、类型、一行摘要与真实状态徽标（Current / Next session /

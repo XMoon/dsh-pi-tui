@@ -286,12 +286,15 @@ test('the wheel resolves only against the LAST PAINTED frame', () => {
   // but the guard is part of the hit contract): the transcript keeps that wheel.
   assert.equal(accessory.handleMouse(wheel(1, 9)), undefined)
   assert.equal(accessory.handleMouse(wheel(1, -1)), undefined)
-  // B4-B: a press latches only a REAL row identity and a click without a
+  // B4-B: a press latches only a REAL row identity; a click without a
   // matching pressed gesture is consumed inertly — no focus is ever taken.
   // (y=1 is the identity row after the separator: inert chrome, consumed
   // without latching.)
   assert.deepEqual(accessory.handleMouse({ ...wheel(1, 1), type: 'press', button: 'left' }), { handled: true })
   assert.deepEqual(accessory.handleMouse({ ...wheel(1, 2), type: 'press', button: 'left' }), { handled: true, capture: true })
+  // The REAL dispatcher sequence is press → release → synthesized click; the
+  // release must keep the latch so the click can match it.
+  assert.deepEqual(accessory.handleMouse({ ...wheel(1, 2), type: 'release', button: 'left' }), { handled: true })
   assert.deepEqual(accessory.handleMouse({ ...wheel(1, 2), type: 'click', button: 'left' }), { handled: true })
   const moved = accessory.handleMouse(wheel(1, 1))
   assert.deepEqual(moved, { handled: true, render: true })

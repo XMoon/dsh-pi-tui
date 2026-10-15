@@ -1379,12 +1379,13 @@ export interface PickerOptions {
 }
 
 /**
- * Why an open Task Browser was retired. `'promote'` is the Quick → Full
+ * Why an open Task Browser was retired. (B4-B retired `'promote'` with the
+ * modal Quick; the remaining reasons cover every live close path.)
  * transition (the ONE reason that must preserve the dataset scope); the other
  * three are the terminal closures. This is the owner-notification signal, not
  * a product action.
  */
-type TaskBrowserCloseReason = 'cancel' | 'select' | 'promote' | 'external'
+type TaskBrowserCloseReason = 'cancel' | 'select' | 'external'
 
 /** Options for {@link TuiApp.openTaskBrowser}. */
 export interface TaskBrowserOptions {
@@ -1407,9 +1408,7 @@ export interface TaskBrowserOptions {
   maxVisible?: number
   /** Quick (navigation-only) or full (management) presentation mode. */
   mode: 'full'
-  /** Retired with the modal Quick (B4-B); kept optional for handle-shape
-   *  compatibility until the runtime handle stops declaring it. */
-  openedFrom?: 'quick' | 'command'
+  openedFrom?: 'command'
   scope?: 'active' | 'all'
   typeFilter?: string | null
   expandedIds?: readonly string[]
@@ -4106,9 +4105,10 @@ export class TuiApp {
     this.widgetsAbove = new Text('', 0, 0)
     this.widgetsBelow = new Text('', 0, 0)
     // The passive Task Quick accessory: a first-party, non-focusable pinned
-    // row band between the editor seat and the public below widget zone. Its
-    // grant is derived from the LIVE frame (terminal rows, the measured pinned
-    // chrome and one visible transcript row) and never borrows a row from the
+    // row band UNDER THE WHOLE FOOTER (B4-B, Owner revision 2026-10-15) —
+    // the frame's last visible region. Its grant is derived from the LIVE
+    // frame (terminal rows, the measured pinned chrome including the footer
+    // and one visible transcript row) and never borrows a row from the
     // editor, the footer, the public widget zones or the transcript floor.
     this.taskQuick = new TaskQuickAccessory({
       geometry: {
@@ -6249,13 +6249,11 @@ export class TuiApp {
       openTasks: () => {
         // B4-B: the on-demand Task Quick. The keymap composition's
         // `quickDownEligible` predicate gated the RESOLUTION; this re-checks
-        // the live facts and a DECLINE consumes the key without replaying
-        // it (no double processing — the editor's own Down for this press
-        // is forfeited only when Quick actually entered... a declined
-        // entry consumed the key as the resolution's winner; the editor
-        // keeps every later Down).
-        this.enterTaskQuick()
-        return true
+        // the live facts at dispatch. A DECLINE returns false so the input
+        // continues through the remaining stages (the accessory never
+        // opened); an ENTRY consumes the key (no replay — no double
+        // processing).
+        return this.enterTaskQuick()
       },
       openHistorySearch: () => {
         // Input-history search: unbound (no historySearchSource) is a
@@ -7073,6 +7071,12 @@ export class TuiApp {
     this.keybindings.cancelLeader()
     const active = this.fullscreen !== undefined
     if (enabled === active) return
+    // B4-B: the on-demand Task Quick is retired on ANY screen hand-off — the
+    // accessory instance is shared by both roots and its `focused` flag would
+    // otherwise survive the swap while the new screen focuses the editor,
+    // painting a band that owns no keyboard. (Main-plan §5: "Main ↔
+    // fullscreen swap → HIDDEN".)
+    this.leaveTaskQuick()
     this.clearFullscreenPointerGestures()
     this.fullscreenPaintSnapshot = undefined
     // Entering fullscreen from a regular surface with NO effective expand key:
@@ -15289,6 +15293,11 @@ export class TuiApp {
     if (this.disposed) return false
     if (!this.tasksActive) return false
     if (this.taskQuick.getItems().length < 1) return false
+    // The ACTIVE frame must be able to paint >= 1 task row: a 0-grant frame
+    // (extreme short screen) can never show the band, so the admission — and
+    // with it the footer hint — must fail closed here rather than consuming a
+    // Down the editor should keep.
+    if (!this.taskQuickGrantAvailable()) return false
     if (this.activeQuestions !== undefined) return false
     if (this.approvals.hasPending()) return false
     if (this.activeSaveLocation !== undefined) return false
@@ -20277,13 +20286,7 @@ export class TuiApp {
         onStop: options.onStop,
         onViewportExpose: options.onViewportExpose,
         onRefresh: options.onRefresh,
-        // B4-B: the Quick→Full promotion is retired with the modal Quick —
-        // the Full Task Center is the only browser surface; the on-demand
-        // accessory below the editor is not a modal and is never promoted.
-        onViewFull: () => {
-          requestClose('promote')
-          options.onViewFull?.()
-        },
+
         mode: options.mode,
         openedFrom: options.openedFrom,
         initialScope: options.scope,
@@ -21671,6 +21674,9 @@ export class TuiApp {
     // preempting the workspace for it would kick the user out of a Job view for
     // an interaction that can never appear.
     if (request.signal?.aborted !== true) this.abandonWorkspaceForBlockingOwner()
+    // B4-B: a blocking owner retires the on-demand Task Quick at its
+    // composition commit (main-plan §5).
+    this.leaveTaskQuick()
     return this.approvals.showPrompt(request, agentInputWait)
   }
 
@@ -21874,6 +21880,10 @@ export class TuiApp {
     // M6: a question owns the seat now — any pending leader sequence is
     // cancelled (focus-transition cancellation).
     this.keybindings.cancelLeader()
+    // B4-B: a blocking owner retires the on-demand Task Quick at its
+    // composition commit (main-plan §5), BEFORE the question claims the seat
+    // — the band must not outlive its keyboard ownership.
+    this.leaveTaskQuick()
     this.clearFullscreenPointerGestures()
     // Set the active flow BEFORE touching overlays: showOverlayOnHost and
     // the suspension bookkeeping branch on it — and the optional seat tenant
@@ -22294,6 +22304,9 @@ export class TuiApp {
     // A prompt owns the seat now: any pending leader sequence is cancelled
     // (focus-transition cancellation).
     this.keybindings.cancelLeader()
+    // B4-B: a blocking owner retires the on-demand Task Quick at its
+    // composition commit (main-plan §5).
+    this.leaveTaskQuick()
     this.activeSaveLocation = state
     // Phase 3A / PR-B: the logical blocking intent is already committed above,
     // so PARK the optional tenant BEFORE the prompt mounts/focuses — the tenant

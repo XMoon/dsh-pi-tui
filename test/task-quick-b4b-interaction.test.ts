@@ -79,7 +79,21 @@ async function startQuick(options: {
   const columns = options.cols ?? 120
   const terminalRows = options.rows ?? 40
   const vt = new VirtualTerminal(columns, terminalRows)
-  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {})
+  // The typed selection route is wired EXACTLY like the production surface
+  // composition (onQuickTaskSelect → task.openQuickTaskItem) through a
+  // late-bound ref, so an Enter/click in this suite proves the real
+  // app → callback → runtime-authority sink.
+  let runtimeRef: TaskRuntime | undefined
+  const quickSelects: string[] = []
+  const app = new TuiApp(vt, {
+    onSubmit: () => {},
+    onExit: () => {},
+  }, {
+    onQuickTaskSelect: (value: string): boolean => {
+      quickSelects.push(value)
+      return runtimeRef?.openQuickTaskItem(value) ?? false
+    },
+  })
   app.start()
   startedApps.add(app)
   // The FIRST paint settles the editor's layout width — the ↓ classifier's
@@ -89,7 +103,6 @@ async function startQuick(options: {
 
   const roster = { rows: [...(options.roster ?? [])] }
   const attention: Array<{ sessionId: string; callId: string }> = []
-  const quickSelects: string[] = []
   const reopens: string[] = []
   const subject = {} as SessionSubject
   const reopenResult = options.reopenResult ?? true
@@ -131,6 +144,7 @@ async function startQuick(options: {
     },
   })
   tasks.attachTasks(source, { diag: createDiag({ filePath: undefined, stderrLevel: 'off' }), isCleanedUp: () => false })
+  runtimeRef = tasks
   // The jobs-only feed publishes the badge AND the Quick projection.
   tasks.refreshTasks()
 
@@ -146,10 +160,9 @@ async function startQuick(options: {
     }
     return { identity, items }
   }
-  void quickSelects
   return {
     vt, app, tasks, roster, attention: { reopen: () => false }, reopens: () => [...reopens],
-    quickSelects: () => [], band,
+    quickSelects: () => [...quickSelects], band,
   }
 }
 
@@ -213,6 +226,17 @@ test('B4B-02/03 a non-last visual line keeps ↓ in the editor; the LAST visual 
   // B4-B addendum (painted order): editor < widgetsBelow < footer < separator
   // < identity < task rows. The separator rule is the FIRST row of the band,
   // the identity row the second, and the whole band is the LAST region.
+  // F6: the SELECTED label paints textStrong (bold); the unselected does not.
+  // Bold is a CELL attribute — read through the terminal buffer, not the
+  // stripped text.
+  const allRows = rawView(h.vt)
+  const selectedRowNo = allRows.findIndex(line => line.includes('build') && line.includes('‣'))
+  const unselectedRowNo = allRows.findIndex(line => line.includes('test') && line.includes('‣'))
+  assert.ok(selectedRowNo >= 0 && unselectedRowNo >= 0, `both rows paint:\n${allRows.join('\n')}`)
+  const labelCol = allRows[selectedRowNo]!.indexOf('bash')
+  assert.ok(h.vt.getCellBold(selectedRowNo, labelCol + 1), `the selected label is bold (textStrong):\n${allRows[selectedRowNo]}`)
+  assert.equal(h.vt.getCellBold(unselectedRowNo, allRows[unselectedRowNo]!.indexOf('test') + 1), false,
+    `the unselected label is not bold:\n${allRows[unselectedRowNo]}`)
   const lines = rawView(h.vt)
   const separatorRow = lines.findLastIndex(line => /^─+$/.test(line))
   assert.ok(separatorRow >= 0, `the separator rule paints above the band:\n${view(h.vt)}`)
@@ -272,10 +296,19 @@ test('B4B-06 Enter routes the typed Job selection to the production openJobView'
   for (let i = 0; i < 8; i++) await new Promise(r => setTimeout(r, 0))
   await h.vt.waitForRender()
 
-  // Route a Job detail through the runtime's OWN public openJobView: the
-  // same authority openQuickTaskItem resolves (source → decision → sink).
-  // The on-demand Quick itself is exercised by the surrounding witnesses;
-  // this one pins the typed route's REFUSAL side for a stale value.
+  // The LITERAL keyboard path: enter Quick, select alpha, Enter — the app's
+  // onQuickTaskSelect (wired exactly like the surface composition) routes to
+  // the runtime authority and reports the typed selection.
+  h.vt.sendInput('\x1b[B')
+  await h.vt.waitForRender()
+  h.vt.sendInput('\r')
+  await h.vt.waitForRender()
+  await sleep(20)
+  assert.deepEqual(h.quickSelects(), ['job:j1'], `the Enter route reaches the sink:\n${h.quickSelects().join('|')}`)
+  assert.equal(h.band().identity, -1, 'the commit leaves Quick (the editor seat returns)')
+
+  // The REFUSAL side through the SAME authority: a stale value is refused
+  // (no surface opens), a current one routes.
   assert.equal(h.tasks.openQuickTaskItem('job:missing'), false, 'a stale value is refused, no surface opens')
   assert.equal(h.tasks.openQuickTaskItem('job:j1'), true, 'a current value routes to the Job open')
 })
@@ -350,6 +383,44 @@ test('B4B-08 a parked Question enters the projection and Enter reopens the contr
   assert.equal(tasks.openQuickTaskItem('question:s1:c1'), true, 'the current Question row routes')
   await sleep(20)
   assert.ok(reopens.includes('s1:c1'), `the reopen must reach the controller entry:\n${reopens.join(' |')}`)
+})
+
+/** S9 — Fullscreen native SGR press→release→synthesized click opens the
+ *  typed detail for the SAME row; press A → release B never activates. */
+test('B4B-09-s9 fullscreen same-row SGR click opens; cross-row press/release refuses', async () => {
+  const h = await startQuick({
+    roster: [job('j1', 'alpha', 'running'), job('j2', 'bravo', 'running'), job('j3', 'charlie', 'running')],
+  })
+  for (let i = 0; i < 8; i++) await new Promise(r => setTimeout(r, 0))
+  await h.vt.waitForRender()
+  // Swap first (a regular-root band would be retired by the hand-off), then
+  // enter Quick on the alt root.
+  h.app.setFullscreen(true)
+  await h.vt.waitForRender()
+  h.vt.sendInput('\x1b[B')
+  await h.vt.waitForRender()
+  assert.ok(h.band().identity >= 0, 'the Quick is ACTIVE on the alt root')
+
+  const rows = rawView(h.vt)
+  const rowA = rows.findIndex(line => line.includes('alpha') && line.includes('‣'))
+  const rowB = rows.findIndex(line => line.includes('bravo') && line.includes('‣'))
+  assert.ok(rowA >= 0 && rowB >= 0, `both task rows paint in fullscreen:\n${view(h.vt)}`)
+
+  // press A → release B: identity mismatch, nothing opens.
+  h.vt.sendInput(`\x1b[<0;10;${rowA + 1}M`)
+  h.vt.sendInput(`\x1b[<0;10;${rowB + 1}m`)
+  await h.vt.waitForRender()
+  await sleep(20)
+  assert.ok(!view(h.vt).includes('selected'), 'cross-row press/release must not activate')
+
+  // press A → release A → synthesized click: the typed route fires.
+  h.vt.sendInput(`\x1b[<0;10;${rowA + 1}M`)
+  h.vt.sendInput(`\x1b[<0;10;${rowA + 1}m`)
+  await h.vt.waitForRender()
+  await sleep(20)
+  assert.ok(h.quickSelects().includes('job:j1'), `the same-row click must activate alpha:\n${h.quickSelects().join('|')}`)
+  h.app.setFullscreen(false)
+  await h.vt.waitForRender()
 })
 
 /** S10 — shell mode / autocomplete / a non-last line never enter Quick. */
@@ -439,13 +510,22 @@ test('B4B-12 the 44-col CJK wrapped draft enters; an extreme frame declines the 
   // The process slot is single-owner: dispose this app before the next one.
   h.app.dispose()
 
-  // An extreme short frame: the entry DECLINES (0 grant → no band).
+  // An extreme short frame: the entry DECLINES (0 grant → no band), the ↓
+  // hint is NOT painted, and the Down reaches the EDITOR (native behavior —
+  // here: it jumps the single-line draft to the line end, visible via the
+  // next printable landing after the cursor; simpler witness: a printable
+  // still edits the draft, proving the editor owns the keyboard).
   const small = await startQuick({ cols: 80, rows: 6, roster: [job('j1', 'build', 'running')] })
   for (let i = 0; i < 8; i++) await new Promise(r => setTimeout(r, 0))
   await small.vt.waitForRender()
+  const smallScreen = view(small.vt)
+  assert.ok(!smallScreen.includes('↓ view'), `a 0-grant frame must not advertise ↓:\n${smallScreen}`)
   small.vt.sendInput('\x1b[B')
   await small.vt.waitForRender()
-  assert.equal(small.band().identity, -1, `a 0-grant frame must decline the entry:\n${view(small.vt)}`)
+  assert.equal(small.band().identity, -1, `a 0-grant frame must decline the entry:\n${smallScreen}`)
+  small.vt.sendInput('x')
+  await small.vt.waitForRender()
+  assert.ok(view(small.vt).includes('❯ x'), `the editor must own the keyboard after the declined Down:\n${view(small.vt)}`)
 })
 
 /** S13 — a session reset with Quick ACTIVE exits and leaves no stale rows. */
@@ -465,6 +545,80 @@ test('B4B-13 a session reset with Quick ACTIVE exits and clears the projection',
   await sleep(20)
   assert.equal(h.band().identity, -1, `the reset must exit the ACTIVE Quick:\n${view(h.vt)}`)
   assert.ok(!view(h.vt).includes('build'), `no stale row content:\n${view(h.vt)}`)
+})
+
+/** F4: an ACTIVE Quick resized below its grant retires — the editor gets
+ *  the keyboard back instead of an invisible band consuming input. */
+test('B4B-resize-zero an ACTIVE Quick resized to 0 grant exits and returns the editor', async () => {
+  const h = await startQuick({ cols: 120, rows: 40, roster: [job('j1', 'build', 'running')] })
+  for (let i = 0; i < 8; i++) await new Promise(r => setTimeout(r, 0))
+  await h.vt.waitForRender()
+  h.vt.sendInput('\x1b[B')
+  await h.vt.waitForRender()
+  assert.ok(h.band().identity >= 0, 'the Quick is ACTIVE before the resize')
+  h.vt.resize(120, 4)
+  await h.vt.waitForRender()
+  await sleep(30)
+  assert.equal(h.band().identity, -1, `the lost grant must retire the band:\n${view(h.vt)}`)
+  // The editor owns the keyboard again (the accessory consumes nothing).
+  h.vt.sendInput('x')
+  await h.vt.waitForRender()
+  assert.equal(h.app.getDraft(), 'x', `the editor must own the keyboard after the resize:\n${view(h.vt)}`)
+})
+
+/** Selection-currentness (B4B-08): deleting the SELECTED row falls back to
+ *  its successor (predecessor at the tail) — never to the head. */
+test('B4B-delete-fallback deleted selection lands on successor/predecessor', async () => {
+  const h = await startQuick({ roster: [job('j1', 'alpha', 'running'), job('j2', 'bravo', 'running'), job('j3', 'charlie', 'running')] })
+  for (let i = 0; i < 8; i++) await new Promise(r => setTimeout(r, 0))
+  await h.vt.waitForRender()
+  h.vt.sendInput('\x1b[B') // enter; alpha selected
+  await h.vt.waitForRender()
+  h.vt.sendInput('\x1b[B') // select bravo
+  await h.vt.waitForRender()
+  assert.match(strip(h.band().items[1]!), /^> /, 'bravo is selected')
+  const accessory = (h.app as unknown as { taskQuick?: { setItems(items: readonly unknown[]): void } }).taskQuick
+  assert.ok(accessory, 'the accessory must be reachable for the projection commit')
+  // Delete bravo: [alpha, charlie] → successor charlie selected.
+  accessory.setItems([
+    { value: 'job:j1', label: 'alpha', status: 'running', kind: 'task', source: 'job' },
+    { value: 'job:j3', label: 'charlie', status: 'running', kind: 'task', source: 'job' },
+  ])
+  await h.vt.waitForRender()
+  assert.match(strip(h.band().items[1]!), /^> /, `charlie (successor) is selected:\n${h.band().items.map(strip).join('|')}`)
+  // Delete the tail (charlie): [alpha] → predecessor alpha selected.
+  accessory.setItems([{ value: 'job:j1', label: 'alpha', status: 'running', kind: 'task', source: 'job' }])
+  await h.vt.waitForRender()
+  assert.match(strip(h.band().items[0]!), /^> /, `alpha (predecessor) is selected:\n${h.band().items.map(strip).join('|')}`)
+})
+
+/** Screen-swap retirement (main §5): entering fullscreen while Quick is
+ *  ACTIVE must hide the band and return the keyboard to the editor. */
+test('B4B-swap a fullscreen hand-off retires the ACTIVE Quick', async () => {
+  const h = await startQuick({ roster: [job('j1', 'build', 'running')] })
+  for (let i = 0; i < 8; i++) await new Promise(r => setTimeout(r, 0))
+  await h.vt.waitForRender()
+  h.vt.sendInput('\x1b[B')
+  await h.vt.waitForRender()
+  assert.ok(h.band().identity >= 0, 'the Quick is ACTIVE before the swap')
+  const draftBefore = h.app.getDraft()
+
+  h.app.setFullscreen(true)
+  await h.vt.waitForRender()
+  await sleep(20)
+  assert.equal(h.band().identity, -1, `the swap must retire the ACTIVE band:\n${view(h.vt)}`)
+  // The editor owns the keyboard on the new root: typing edits the draft.
+  h.vt.sendInput('x')
+  await h.vt.waitForRender()
+  assert.equal(h.app.getDraft(), `${draftBefore}x`, `the editor owns the keyboard after the swap:\n${view(h.vt)}`)
+
+  // Re-entry works on the alt root.
+  h.vt.sendInput('\x1b[B')
+  await h.vt.waitForRender()
+  assert.ok(h.band().identity >= 0, 'the Quick can be re-entered on the alt root')
+  h.app.setFullscreen(false)
+  await h.vt.waitForRender()
+  assert.equal(h.band().identity, -1, 'the reverse swap retires it again')
 })
 
 /** S14 — /tasks Full works while the Quick stays hidden. */

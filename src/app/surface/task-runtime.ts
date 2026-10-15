@@ -157,8 +157,8 @@ export interface TaskQuestionAttention {
  * `TaskBrowserPanel` stays TUI-owned.
  */
 export interface TaskBrowserViewState {
-  readonly mode: 'quick' | 'full'
-  readonly openedFrom: 'quick' | 'command'
+  readonly mode: 'full'
+  readonly openedFrom: 'command'
   readonly scope: TaskScope
   readonly typeFilter: string | null
   readonly searchMode: boolean
@@ -428,7 +428,7 @@ export function createTaskRuntime(options: TaskRuntimeOptions): TaskRuntime {
   let activeTaskBrowserToken: object | undefined
   /** The open browser's mode: Question attention rows are mode-dependent
    *  (Quick lists parked ones only, Full lists every actionable one). */
-  let activeTaskBrowserMode: 'quick' | 'full' | undefined
+  let activeTaskBrowserMode: 'full' | undefined
   /**
    * Monotonic identity of the LAST opened Task Browser. The navigation tails
    * (Esc → Quick restore, Quick → Full promotion) close over the epoch of the
@@ -1171,19 +1171,6 @@ export function createTaskRuntime(options: TaskRuntimeOptions): TaskRuntime {
           // rejects (PR review P1).
           refreshAgents()
         },
-        onViewFull: () => {
-          // B4-B: the promotion is retired with the modal Quick — the Full
-          // browser IS the Task Center, and the on-demand accessory is not
-          // a modal to promote from. The panel never invokes this any more;
-          // the retirement closes the slot like any terminal navigation.
-          if (options.isCleanedUp()) return
-          if (taskBrowserEpoch !== browserEpoch) return
-          if (activeTaskBrowserToken === browserToken) {
-            activeTaskBrowser = undefined
-            activeTaskBrowserToken = undefined
-            activeTaskBrowserMode = undefined
-          }
-        },
         onStop: stopRow,
         onViewportExpose: ids => { if (!options.isCleanedUp()) runtime?.acknowledge(ids) },
         onRetired: reason => {
@@ -1198,11 +1185,11 @@ export function createTaskRuntime(options: TaskRuntimeOptions): TaskRuntime {
           activeTaskBrowserToken = undefined
           activeTaskBrowserMode = undefined
           // The child's OWN finalizer clears its token/closer; this browser
-          // only asks it to close. `promote` preserves the dataset scope so a
-          // Workflow-scoped Quick → Full does not fall back to `all`.
+          // only asks it to close. (B4-B removed the `promote` scope-
+          // preservation branch with the modal Quick.)
           const childCloser = activeJobViewerClose
           runSyncDisposalSteps('task browser retire', [
-            () => { if (reason !== 'promote') resetTaskBrowserScope() },
+            () => resetTaskBrowserScope(),
             () => childCloser?.(),
           ])
         },
