@@ -490,6 +490,8 @@ export class SettingsWorkspacePanel implements Component {
   private paintedChoiceCandidateVisible = false
   private paintedEnterConfirm = false
   private paintedChoiceCopy = false
+  private paintedChoiceNavigation = false
+  private paintedChoiceFactScroll = false
   private paintedRevision = -1
   private chrome: SettingsChromePlan | undefined
   private disposed = false
@@ -533,6 +535,8 @@ export class SettingsWorkspacePanel implements Component {
     this.paintedChoiceCandidateVisible = false
     this.paintedEnterConfirm = false
     this.paintedChoiceCopy = false
+    this.paintedChoiceNavigation = false
+    this.paintedChoiceFactScroll = false
     const lines: string[] = []
     const targets: HitTarget[] = []
     const panes: PaneBoxes = {}
@@ -1374,9 +1378,11 @@ export class SettingsWorkspacePanel implements Component {
     // the diagnostic line, so the bar never competes with content. The shared
     // row layout already padded/truncated to the pane width.
     const rendered = renderActionBarRow(segments, plan.width)
-    this.paintedEnterConfirm = this.choiceField() !== undefined && rendered.includes(CHOICE_CONFIRM_HINT.text)
-    this.paintedChoiceCopy = this.choiceField() !== undefined
-      && rendered.includes(`${SETTINGS_LOCAL_KEYS.copy} copy`)
+    const choosing = this.choiceField() !== undefined
+    this.paintedChoiceNavigation = choosing && rendered.includes('Up/Down')
+    this.paintedChoiceFactScroll = choosing && rendered.includes('PgUp/PgDn details')
+    this.paintedEnterConfirm = choosing && rendered.includes(CHOICE_CONFIRM_HINT.text)
+    this.paintedChoiceCopy = choosing && rendered.includes(`${SETTINGS_LOCAL_KEYS.copy} copy`)
     return color.textMuted(rendered)
   }
 
@@ -1489,15 +1495,35 @@ export class SettingsWorkspacePanel implements Component {
       if (this.choiceField() === undefined && this.focus !== 'detail') this.confirm()
       return
     }
-    // Choosing remains a transient phase of L2: only its navigation, confirmation
-    // and visibly painted Copy verb are active. Page keys scroll the real facts.
+    // Choosing remains a transient phase of L2: candidate navigation and fact
+    // scrolling require their complete Action Bar hint in the current geometry.
     if (this.choiceField() !== undefined) {
-      if (matchesKey(data, 'up')) return this.moveChoice(-1)
-      if (matchesKey(data, 'down')) return this.moveChoice(1)
-      if (matchesKey(data, 'pageUp')) return this.page(-1)
-      if (matchesKey(data, 'pageDown')) return this.page(1)
-      if (matchesKey(data, 'home')) return this.setChoice(0)
-      if (matchesKey(data, 'end')) return this.setChoice(this.choiceCount() - 1)
+      const paintedGeometryIsCurrent = this.lastRenderWidth === this.intents.columns()
+        && this.lastRenderRows === this.intents.rows()
+      if (matchesKey(data, 'up')) {
+        if (paintedGeometryIsCurrent && this.paintedChoiceNavigation) this.moveChoice(-1)
+        return
+      }
+      if (matchesKey(data, 'down')) {
+        if (paintedGeometryIsCurrent && this.paintedChoiceNavigation) this.moveChoice(1)
+        return
+      }
+      if (matchesKey(data, 'pageUp')) {
+        if (paintedGeometryIsCurrent && this.paintedChoiceFactScroll) this.page(-1)
+        return
+      }
+      if (matchesKey(data, 'pageDown')) {
+        if (paintedGeometryIsCurrent && this.paintedChoiceFactScroll) this.page(1)
+        return
+      }
+      if (matchesKey(data, 'home')) {
+        if (paintedGeometryIsCurrent && this.paintedChoiceNavigation) this.setChoice(0)
+        return
+      }
+      if (matchesKey(data, 'end')) {
+        if (paintedGeometryIsCurrent && this.paintedChoiceNavigation) this.setChoice(this.choiceCount() - 1)
+        return
+      }
       if (matchesKey(data, 'enter')) return this.confirmChoice('keyboard')
       if (copyKeyPressed
         && this.paintedChoiceCopy
