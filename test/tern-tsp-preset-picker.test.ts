@@ -392,6 +392,40 @@ test('native Preset: select only browses, activate opens the EVENT row, Enter op
   assert.equal(m.applies.length, 0, 'Enter on the catalogue never writes')
 })
 
+test('native Preset: a mouse select after footer focus moves the keyboard back to the list (P2 review round 7)', async (t) => {
+  // THE REVIEW FINDING: with the footer focused, a pointer `select` on another card
+  // moved only `selected` and left `zone: actions` live — Enter then ran the STALE
+  // footer focus (`Use`/`Set default`) instead of opening the highlighted card's
+  // Details. Regression: after ANY mouse select, Enter may only open Details, for
+  // BOTH stale foci.
+  for (const staleFocus of ['use', 'set-default'] as const) {
+    const m = await mounted(t)
+    await m.ready()
+    const { pane } = m
+    // Arm the stale focus on a row where BOTH writes are ENABLED: the boot browse
+    // target is the recorded default (`standard`, so its `Set default` is
+    // disabled and the ring cannot reach it); browsing to `reviewer` first makes
+    // the whole ring walkable.
+    browse(pane, 'reviewer')
+    await waitUntil('browse to the enabled row', () => props(pane).selected === 'preset:reviewer')
+    await tabToCatalogueAction(pane, staleFocus)
+    assert.equal(catalogueFocus(pane), staleFocus, 'the stale footer focus is armed')
+    const appliesBefore = m.applies.length
+    const defaultsBefore = m.defaults.length
+    browse(pane, 'standard')
+    await waitUntil('the pointer select moved the highlight', () => props(pane).selected === 'preset:standard')
+    // The keyboard followed the mouse onto the list: Enter OPENS, never writes.
+    pane.key('\r')
+    await waitUntil('Enter after mouse select opens Details', () => inDetails(pane))
+    assert.equal(detailsNode(pane)?.p.head, 'Standard mode', 'Enter opened the card the mouse selected')
+    assert.equal(m.applies.length, appliesBefore, `stale ${staleFocus} focus wrote no session preset`)
+    assert.equal(m.defaults.length, defaultsBefore, `stale ${staleFocus} focus wrote no default`)
+    // And the pointer path stayed a pointer path: no synthetic click needed.
+    pane.key('\u001b')
+    await waitUntil('back on the catalogue', () => picker(pane) !== undefined)
+  }
+})
+
 /* ------------------------------------------------------ the catalogue write */
 
 test('native Preset: the footer writes once, and an admitted write offers only Close', async (t) => {

@@ -334,6 +334,13 @@ export class TspPresetPicker {
       case 'browse-row': {
         if (!visibleRows(panel).some((row) => row.id === intent.rowId)) return
         panel.selected = intent.rowId
+        // Selecting a card is a LIST interaction, so the keyboard follows it
+        // (sibling fix from the Model picker): otherwise the footer entry that was
+        // focused before the click keeps owning Enter — the user highlights a card
+        // with the mouse, presses Enter to open its Details, and the PREVIOUS
+        // focus (`Use`/`Set default`) writes instead. Browse can never stay in the
+        // `actions` zone.
+        panel.zone = 'list'
         this.change(panel)
         return
       }
