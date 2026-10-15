@@ -21,6 +21,7 @@
  */
 
 import {
+  Key,
   matchesKey,
   stripTerminalSequences,
   truncateToWidth,
@@ -318,6 +319,8 @@ const COLUMN_GAP = 2
  * the keybinding contract, and the hint would then switch to `componentKeymap`.
  */
 const SETTINGS_LOCAL_KEYS = { refresh: 'r', copy: 'c' } as const
+const CHOICE_CONFIRM_HINT: ActionBarSegment = { text: 'Enter confirm', priority: 7 }
+const CHOICE_BACK_HINT: ActionBarSegment = { text: 'Esc back', short: 'Esc', priority: 8 }
 
 /** The minimum column count of the two-column (medium) projection. */
 export const SETTINGS_WORKSPACE_MEDIUM_MIN_COLUMNS = 76
@@ -1007,8 +1010,14 @@ export class SettingsWorkspacePanel implements Component {
     const confirmCandidateVisible = optionViewport > 0
       && selectedStart >= optionOffset
       && selectedStart + identityRows <= optionOffset + optionViewport
+    const confirmActionVisible = confirmCandidateVisible
+      && this.paintedViewport >= 3
+      && renderActionBarRow(
+        [CHOICE_CONFIRM_HINT, CHOICE_BACK_HINT],
+        this.chrome?.width ?? width,
+      ).includes(CHOICE_CONFIRM_HINT.text)
     const actionButtons = actionRows === 1 && factRows > 0 && optionViewport > 0
-      ? this.detailButtons(row).filter(button => button.verb !== 'confirm' || confirmCandidateVisible)
+      ? this.detailButtons(row).filter(button => button.verb !== 'confirm' || confirmActionVisible)
       : []
     const painted = actionRows === 1 ? this.layoutButtons(width, actionButtons) : { text: '', painted: [] }
     if (actionRows === 1) lines.push(painted.text)
@@ -1300,14 +1309,14 @@ export class SettingsWorkspacePanel implements Component {
         ...canNavigate ? [{ text: 'Up/Down choose', short: 'Up/Down', priority: 5 }] : [],
         ...canReadFacts ? [{ text: 'PgUp/PgDn details', priority: 4 }] : [],
         ...this.paintedChoiceCandidateVisible && this.paintedViewport >= 3
-          ? [{ text: 'Enter confirm', priority: 7 }]
+          ? [CHOICE_CONFIRM_HINT]
           : [],
         ...copyable && this.paintedViewport >= 3 ? [{
           text: `${SETTINGS_LOCAL_KEYS.copy} copy value`,
           short: `${SETTINGS_LOCAL_KEYS.copy} copy`,
-          priority: 6,
+          priority: 4,
         }] : [],
-        { text: 'Esc back', priority: 8 },
+        CHOICE_BACK_HINT,
       ]
     } else if (this.editPhase.kind === 'pending') {
       const detailScroll = (this.paintedPanes.detail?.maxOffset ?? 0) > 0
@@ -1365,7 +1374,7 @@ export class SettingsWorkspacePanel implements Component {
     // the diagnostic line, so the bar never competes with content. The shared
     // row layout already padded/truncated to the pane width.
     const rendered = renderActionBarRow(segments, plan.width)
-    this.paintedEnterConfirm = this.choiceField() !== undefined && rendered.includes('Enter confirm')
+    this.paintedEnterConfirm = this.choiceField() !== undefined && rendered.includes(CHOICE_CONFIRM_HINT.text)
     this.paintedChoiceCopy = this.choiceField() !== undefined
       && rendered.includes(`${SETTINGS_LOCAL_KEYS.copy} copy`)
     return color.textMuted(rendered)
@@ -1470,6 +1479,8 @@ export class SettingsWorkspacePanel implements Component {
     // lifecycle/back key remains available. Read the live geometry because input
     // may arrive before a resize-triggered frame has painted.
     if (this.bodyFloor() < 1) return
+    const copyKeyPressed = matchesKey(data, SETTINGS_LOCAL_KEYS.copy)
+      || matchesKey(data, Key.shift(SETTINGS_LOCAL_KEYS.copy))
     if (matchesKey(data, 'left')) {
       if (this.focus !== 'categories') this.goBack()
       return
@@ -1488,7 +1499,7 @@ export class SettingsWorkspacePanel implements Component {
       if (matchesKey(data, 'home')) return this.setChoice(0)
       if (matchesKey(data, 'end')) return this.setChoice(this.choiceCount() - 1)
       if (matchesKey(data, 'enter')) return this.confirmChoice('keyboard')
-      if ((data === SETTINGS_LOCAL_KEYS.copy || data === SETTINGS_LOCAL_KEYS.copy.toUpperCase())
+      if (copyKeyPressed
         && this.paintedChoiceCopy
         && this.lastRenderWidth === this.intents.columns()
         && this.lastRenderRows === this.intents.rows()) return this.copy()
@@ -1502,7 +1513,7 @@ export class SettingsWorkspacePanel implements Component {
     if (matchesKey(data, 'end')) return this.jump(1)
     if (matchesKey(data, 'enter')) return this.confirm()
     if (data === SETTINGS_LOCAL_KEYS.refresh || data === SETTINGS_LOCAL_KEYS.refresh.toUpperCase()) return this.refresh()
-    if (data === SETTINGS_LOCAL_KEYS.copy || data === SETTINGS_LOCAL_KEYS.copy.toUpperCase()) return this.copy()
+    if (copyKeyPressed) return this.copy()
     // Everything else is inert inside the workspace: no key leaks to the hidden
     // editor, transcript or a host composer action.
   }
@@ -1702,9 +1713,9 @@ export class SettingsWorkspacePanel implements Component {
     this.intents.requestRender()
   }
 
-  /** Enter / a click on `[Confirm]`: dispatch only a candidate identity that
-   *  appeared in the current painted frame. Keyboard Enter additionally requires
-   *  its action-bar hint; a scrolled-away identity is revealed on the first press. */
+  /** Enter / a click on `[Confirm]`: dispatch only when the complete candidate
+   *  and both painted confirmation affordances are present in the current frame.
+   *  A scrolled-away identity is revealed on the first keyboard press. */
   private confirmChoice(source: 'keyboard' | 'button'): void {
     const phase = this.editPhase
     const edit = this.selectedRow()?.edit
@@ -1722,7 +1733,7 @@ export class SettingsWorkspacePanel implements Component {
       }
       return
     }
-    if (source === 'keyboard' && !this.paintedEnterConfirm) return
+    if (!this.paintedEnterConfirm) return
     const option = edit.options.find(candidate => candidate.value === phase.candidate)
     if (option === undefined) {
       // The source vanished between the paint and the confirm: report it instead of
