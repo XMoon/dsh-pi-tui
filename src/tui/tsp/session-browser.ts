@@ -171,6 +171,7 @@ function actionList(panel: SessionBrowserPanel): PickerAction[] {
     return {
       id: base === 'close' ? base : actionId(panel, base),
       label: `${actionLabel(base)}${focused ? ' [Enter]' : ''}`,
+      ...(base === 'resume' ? { primary: true } : {}),
       ...(disabled === undefined ? {} : { disabled }),
     }
   })

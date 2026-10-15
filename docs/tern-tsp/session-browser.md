@@ -90,9 +90,12 @@ can publish.
   same read-only state when it closes. Hydration retires the Browser; shared
   renderer disposal clears the exposed Model, Preset, and Browser presenters.
 - Pointer selection changes only the selected row. In B1-A, Enter/activate may
-  produce a test-observable Resume intent, but the footer Resume is disabled
-  and no production writer, `switchSession`, transition gate, or session
-  operation is connected. With no test callback, the intent is reported as
+  produce a test-observable Resume intent, but the footer Resume stays disabled
+  while carrying the Owner-requested Tern `primary` visual marker. This is a
+  scoped exception to the general `primary` = active/actionable semantic in
+  `docs/tui-design-language.md` §3.3; the marker does not enable or dispatch the
+  action. No production writer, `switchSession`, transition gate, or session
+  operation is connected. With no test callback, row activation is reported as
   deferred to B1-B.
 
 Physical GUI, IME, wheel, theme, and Remote-TSP behavior are not certified by a
