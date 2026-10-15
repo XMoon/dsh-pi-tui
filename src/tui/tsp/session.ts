@@ -363,6 +363,9 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     render: () => render(),
     canInteract: () => !disposed && !hydrating && inputBound && !seat.hasModalSeat(),
     notify: (text, kind) => display.notify(text, kind),
+    // The SAME ONE Surface owner performs the native scroll the Overview/Guide
+    // reading keys ask for. The presenter names a wire id of the frame IT built.
+    nativeScroll: (id, to) => { surface.scroll(id, to) },
   })
   modelPicker.resize(session.caps.cols, session.caps.cell.w)
   /**
@@ -895,10 +898,22 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
         : undefined
     },
     get presetPresentation() {
-      // The PR4-A Preset layer renders ONE `ui.picker` (list + action bar) with
-      // text lines around it and no preview column, so it needs only the picker
-      // kind. A pane that cannot present it is refused BEFORE the handler.
-      return session.caps.kinds.includes('picker') ? presetPresentation : undefined
+      // The Preset layer renders ONE native `ui.picker` with `layout:'cards'` and
+      // `preview:'none'` and the THREE-entry native footer, ONE native `ui.overlay`
+      // Details page whose `Back` control is the #301-proven native `ui.row({onClick})`
+      // navigation row over `text` identity facts, and a SHIPPED preset's inline guide
+      // body (`md`), and it drives the reading body with the SDK's `scroll` op
+      // (Owner A4 amendment, 2026-10-14: the measured client paints no stylesheet
+      // border/background on an `el` button, so the Details way back is native
+      // navigation, not an `html.button`; no stylesheet is used anywhere on this
+      // layer). A pane that does not advertise every one of those kinds AND the
+      // `scroll` feature is refused BEFORE the handler (fail closed) instead of
+      // being handed a page it cannot present.
+      const kinds = ['picker', 'row', 'overlay', 'text', 'md']
+      return kinds.every(kind => session.caps.kinds.includes(kind))
+        && session.caps.features.includes('scroll')
+        ? presetPresentation
+        : undefined
     },
     composer: composerPort,
     // PR3-B B3 (§3.5.1): the REAL interaction presenter (the seat) replaces

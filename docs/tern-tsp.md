@@ -82,19 +82,24 @@ The dated audit and Tern 0.8.3 evidence are in
   [PR4-A evidence](./tern-tsp/evidence/pr4-a.md) for the durable summary of what is
   certified at which tier and which pitfalls became rules.
 - **PR4-A Preset:** the original `/preset` command family now has PiTui and
-  native TSP presentation adapters implementing the Owner-frozen Preset UX (one
-  compact native picker, Built-in/Custom rows, a read-only Details page,
-  independent Current/Next-session/default/Draft facts, two-zone K2,
-  explicit-action-only writes). The whole command family rides ONE capability
-  behind the same native kinds; every read, write and Config owner stays in the
-  original command. See [Preset selection](./tern-tsp/preset-selection.md) and
+  native TSP presentation adapters implementing the Owner-frozen v4 Preset UX
+  (the TWO-page shape: ONE native cards catalogue whose footer carries the
+  THREE native business buttons — the panel's only writer — and ONE read-only
+  Details page with the complete identity, the inline official Mode guide and
+  the native Back navigation row; independent Current/Next-session/default/
+  Draft facts; two-zone K2 with the footer's own arrow ring). The whole command
+  family rides ONE capability behind the same native kinds; every read, write
+  and Config owner stays in the original command. See
+  [Preset selection](./tern-tsp/preset-selection.md),
+  [Preset v4 evidence](./tern-tsp/evidence/preset-v4-two-page-20261014.md) and
   [PR4-A Preset evidence](./tern-tsp/evidence/pr4-a-preset.md).
 - **As tested, not a compatibility promise:** `@stencil-hq/tern@0.1.0` (npm, a
   runtime `dependencies` entry) against real Tern `0.6.2` (PR1), `0.7.0` (PR3-B
-  real-pane runs), `0.7.2` (PR4-A real-pane Model runs) and `0.8.0` (the PR4-A
-  real-pane Preset runs). A future SDK or pane version may change any field below.
-- **Last verified:** 2026-10-12 (UTC+8) for the PR4-A Preset surface (real-pane
-  Preset runs on Tern `0.8.0`) and the PR4-A Model surface (real-pane Model runs
+  real-pane runs), `0.7.2` (PR4-A real-pane Model runs), `0.8.0` (the earlier
+  PR4-A Preset runs) and `0.8.3` (the v4 Preset real-pane runs). A future SDK or
+  pane version may change any field below.
+- **Last verified:** 2026-10-14 (UTC+8) for the v4 Preset surface (real-pane
+  Preset runs on Tern `0.8.3`) and the PR4-A Model surface (real-pane Model runs
   on Tern `0.7.2`); 2026-10-10 for the interactive (PR3-B) surface; 2026-10-08
   for the read-only PR3-A surface.
 
@@ -242,7 +247,7 @@ island (the SDK import stays lazy).
 | Display seam, shared composer, submission/command admission | `src/app/surface/**`, `src/app/submission/**` | DONE (PR3-A, PR3-B B0–B2) |
 | Official Question/Approval modal seat and its lifecycle | reused as-is inside TSP | DONE (PR3-B B3); B4 is the owner-QA-confirmed physical qualification record |
 | Native Model B2 (`/model`): model + Reasoning Effort selection over the original handler | `src/app/command/model-presentation.ts`, `src/tui/commands/models.ts`, `src/tui/tsp/model-picker*.ts`, `src/tui/pickers/model-directory.ts` | IMPLEMENTED under owner-frozen UX, qualification partial — see [model-selection.md](./tern-tsp/model-selection.md) and [evidence/pr4-a.md](./tern-tsp/evidence/pr4-a.md) |
-| Native Preset (`/preset` + its typed verbs): the original handler behind one compact picker with a read-only Details page | `src/app/command/preset-presentation.ts`, `src/tui/commands/models.ts`, `src/tui/tsp/preset-picker*.ts`, `src/tui/pickers/preset-presentation-pitui.ts`, `src/tui/pickers/preset-display.ts` | IMPLEMENTED under owner-frozen UX, qualification partial — see [preset-selection.md](./tern-tsp/preset-selection.md) and [evidence/pr4-a-preset.md](./tern-tsp/evidence/pr4-a-preset.md) |
+| Native Preset (`/preset` + its typed verbs): the original handler behind the v4 TWO-page shape — a native CARDS catalogue whose footer carries the THREE native business buttons, and a read-only Details page (identity, inline official Mode guide, the native Back navigation row) | `src/app/command/preset-presentation.ts`, `src/tui/commands/models.ts`, `src/tui/tsp/preset-picker*.ts`, `src/tui/tsp/preset-guide-content.ts`, `src/tui/pickers/preset-presentation-pitui.ts`, `src/tui/pickers/preset-display.ts` | IMPLEMENTED under owner-frozen UX, qualification partial — see [preset-selection.md](./tern-tsp/preset-selection.md) and [evidence/preset-v4-two-page-20261014.md](./tern-tsp/evidence/preset-v4-two-page-20261014.md) |
 | Editor/input inside TSP (a Client-controlled `ui.editor`) | the TSP composer | IMPLEMENTED (PR3-B B1/B2); real-GUI IME, physical paste and physical control keys stay B4 items |
 
 TSP is still opt-in (`DSH_PI_TUI_RENDERER=tsp`) and experimental; Direct and PiTui remain
@@ -306,7 +311,7 @@ composition root (table above); the caution is kept here because it is why no se
 | Live application projection → real Tern pane (product) | PR3-A manual smoke (see evidence); still experimental |
 | Editor/submit input inside TSP | IMPLEMENTED (B1/B2); real-GUI IME / physical paste / physical control keys are B4 qualification items |
 | Question/Approval modals inside TSP | IMPLEMENTED (B3): one official FIFO seat over the real lifecycle (timed → continued → `Alt+Q` → late answer); fail-closed in PR3-A only |
-| Preset inspection and selection inside TSP | PR4-A implementation: Owner-frozen native UI over the original command family (Built-in/Custom rows, Current/Next-session/default/Draft facts, read-only Details page, two-zone K2, explicit-action-only `Use`/`Set new-session default`); `picker` required. Automated coverage includes the real Direct registry roster, the started-Session refusal, the typed verbs and the new-session-default write through the real ConfigEditor/Loader profile document plus a fresh-Context reload, and the blank-live-Session switch over a REAL persisted Session resumed through the official persistence seam (durable `agent-preset/selected`, authority reread, locked negative, clean teardown); Remote TSP, the shipped full profile/HMR and physical input remain open. [Preset selection](./tern-tsp/preset-selection.md) · [PR4-A Preset evidence](./tern-tsp/evidence/pr4-a-preset.md) |
+| Preset inspection and selection inside TSP | v4 TWO-PAGE revision over the PR4-A implementation: Owner-frozen native UI over the original command family — ONE `ui.picker` with `layout:'cards'` (ONE column at every pane width, `Built-in`/`Custom` groups with their counts, real state badges) whose native footer carries the THREE business buttons in the Owner shape (`Close` plain left; `Set default` + `Use next`/`Use session` both `primary`, packed right; disabled entries grey with the reason as tooltip — Owner ruling "a"), and ONE read-only `lg` Details page (complete identity incl. the `Use:/Default:` scope sentence, relationship facts, the full description/failure reason, and a SHIPPED preset's pinned official English Mode guide INLINE as native Markdown; its ONE interactive node is the native `ui.row({onClick})` Back NAVIGATION row — Owner A4 amendment: the measured client paints no stylesheet border/background on an `el` button, so the styled button was retired with the sheet; the keyboard Back/Esc is application-owned). The layer carries exactly ONE page node inside the app's `ui.col` wrapper (a bare page node paints nothing — measured). `picker`/`row`/`overlay`/`text`/`md` and the `scroll` feature are required (no stylesheet exists on this layer). Automated coverage includes the real Direct registry roster, the started-Session refusal, the typed verbs and the new-session-default write through the real ConfigEditor/Loader profile document plus a fresh-Context reload, and the blank-live-Session switch over a REAL persisted Session resumed through the official persistence seam (durable `agent-preset/selected`, authority reread, locked negative, clean teardown); real-Tern headless runs (Tern `0.8.3`) cover 1280x800, 900x640, 560x640 and the 400x600 minimum, the PAINTED footer order and Owner shape, the `off` greying + tooltip reason, real `select`/`activate`, the Back navigation row's real click path, the inline guide's real client scroll to the tail, and the long-value wrapping. Remote TSP, the shipped full profile/HMR and physical input remain open. [Preset selection](./tern-tsp/preset-selection.md) · [Preset v4 evidence](./tern-tsp/evidence/preset-v4-two-page-20261014.md) · [PR4-A Preset evidence](./tern-tsp/evidence/pr4-a-preset.md) |
 | Model/effort selection inside TSP | PR4-A implementation + Model-UX restructuring + Model-Responsive/Reader revision + the **list-first** revision and its strip/Reader follow-up: Owner-frozen native **Models → Full details** flow (TWO pages) over the original handler (ONE native catalogue picker of the client's `md` dialog size at every pane width, with provider marks, real lowercase `current` / `default` state chips and a `Current · Default` group first; the catalogue's own native Reasoning Effort `strip` as the ONE effort editor, painting the local draft as the client's `on` chip; the ONE explicit `Switch` / `Save default` write in the footer everywhere; `select` highlights while `activate`/`Enter` opens that model's read-only Full details DIRECTLY — there is no intermediate Overview page; K2 keyboard; one read owner with Retry); `picker`/`row`/`overlay` required (`strip` is a Picker prop/region), and the read-only details page is a native `overlay` Reader instead of a picker. The catalogue Picker and its layer keep one identity for a panel's life; the Reader body/Back have **one identity per reading** (fresh epoch on re-entry). A per-frame Picker key remounted the list and moved its viewport in the tested 42-row client probe. The bar's `retry`/`apply` IDs are revision-scoped; `close` is intentionally untokened, while Row/Strip events receive current-page/current-model validation. This is a Model-specific admission and lifecycle design, not a universal stable-key rule. Automated coverage includes live Agent selection, isolated profile persistence/restart and the full K2/wire matrix; the surface was additionally driven in a real Tern pane (the presenter's own `size`/`preview` claim against the client's own sheet classes at every supported size, the strip's own phase gate and chip clamp, real `select`/`activate`, sheet/footer containment, the one write, and the Reader's complete values with its app-driven native scroll and `Back`) by the repository's real-pane harness (`scripts/tern-pane-model-ux.mjs`, reproducible), with the enlarged-font matrix and physical wheel/trackpad recorded as NOT_VERIFIED. [Model selection](./tern-tsp/model-selection.md) · [List-first visual evidence](./tern-tsp/evidence/model-list-first-visual-20261013.md) |
 
 | Search/Reveal/Focus parity inside TSP | PLANNED (PR4–PR5) |
@@ -365,7 +370,9 @@ and key input, the real node tree, PNG captures and the clipping/click oracle �
 is `scripts/tern-pane-drive.mjs` with the pure `scripts/tern-pane-geometry.mjs`
 oracle; a flow module mounts the surface under test, and
 `scripts/tern-pane-smoke.mjs` is the committed end-to-end smoke of the instrument
-itself. See [`tern-pane-harness.md`](./tern-pane-harness.md). It is operator-run
+itself. The committed surface lanes are `scripts/tern-pane-model-ux.mjs`
+(`/model`) and `scripts/tern-pane-preset-native-ux.mjs` (`/preset` with its
+`-subject.mts` mount). See [`tern-pane-harness.md`](./tern-pane-harness.md). It is operator-run
 (it needs the external Tern CLI) and is deliberately not part of `pnpm test`.
 
 Evidence levels — do not merge these into a stronger claim:
@@ -394,6 +401,32 @@ The dated Foundation audit was followed by a bounded **F1/F2/F3 runtime-gap audi
 
 The Owner-retired arrangements — wide Provider/Model/Preview Explorer, adaptive Overview page, `More actions`, second-level Effort and the six-row window — are **historical evidence**, not current feature requirements. They were superseded after real-client tests found the effort path unreachable in normal splits, `lg` sheet occupying most of a wide pane, fragmented long detail values and a per-frame Picker key causing remount/scroll movement. The currently authoritative contract is [`model-selection.md`](./tern-tsp/model-selection.md): two pages, one native catalogue strip, direct read-only Reader and explicit footer commit. Retain the historical evidence files as dated records; do not restore their old Must/keyboard/layout assertions without a new Owner decision. This change **does not supersede** Preset's independent UX, the Host/Client writer, TSP renderer opt-in, SDK Focus/Credit issue #48, or physical-GUI qualification gaps.
 
+## Preset UX supersession record (native cards, 2026-10-14)
+
+The Owner-retired arrangements — the `rows` catalogue whose long description was pre-split
+into measured one-line `fact` rows on a second `Preset details` picker page, and the
+2026-10-12 plan's HTML-like two-column card grid with a surface scoped stylesheet and a wide
+`Set default` footer — are **historical evidence, not current feature requirements**. They
+were superseded after the real Tern client showed that a native `md` picker is a MODAL sheet:
+a sibling status line collapses the layer column and is painted behind the sheet's dim, while
+`layout:'cards'` already gives EVERY card its own detail line in ONE column at every pane
+width, and a native `lg` overlay is the reading surface that really wraps and scrolls long
+values. The v3 THREE-page shape (`Catalog → Overview → Guide`, business actions as accent
+`ui.row` operation rows) is retired in turn by the v4 Owner decision: the catalogue's footer
+carries the THREE native business buttons (the panel's only writer) and reading is ONE page
+with the guide inline. The currently authoritative contract is
+[`preset-selection.md`](./tern-tsp/preset-selection.md) (TWO pages: cards catalogue +
+Details reader; the Owner-shaped footer; per-panel/per-reading identity); the measured facts
+and the G8 record are in
+[`preset-v4-two-page-20261014.md`](./tern-tsp/evidence/preset-v4-two-page-20261014.md), with
+the earlier revision's record kept as a dated snapshot in
+[`preset-native-cards-reader-20261014.md`](./tern-tsp/evidence/preset-native-cards-reader-20261014.md).
+Retain the historical evidence files as dated records; do not restore their old Must/keyboard/
+layout assertions, and do NOT describe the native `cards` layout as a CSS two-column grid or
+the `lg` reading pages as a second picker page. This change **does not supersede** the Model
+UX, the Host/Client writer, TSP renderer opt-in, SDK Focus/Credit issue #48, or physical-GUI
+qualification gaps.
+
 ## Milestones and evidence ledger
 
 | PR | State | Proved | Not proved | Evidence |
@@ -405,7 +438,7 @@ The Owner-retired arrangements — wide Provider/Model/Preview Explorer, adaptiv
 | PR3-B B4 | Qualification COMPLETE (owner QA-confirmed) | The §6.4 mandatory cases and the B-01..B-09 gates with evidence tiers (real pane / real SDK+scripted tty / production harness), the fixture manifest, the per-case record digests, the owner's QA confirmation and the independent review record; the automated lanes are green on the frozen artifact | The explicit merge approval (and the reviewer's re-check of this revision). The masked Question's **physical** qualification was deferred by the owner to PR4 and is NOT part of this closure | [./tern-tsp/evidence/pr3-b.md](./tern-tsp/evidence/pr3-b.md) |
 | PR4-0 capability audit | DONE (`AUDIT_DONE / SPLIT_PROPOSED_NOT_FROZEN`) | The actual reachability ledger: every registered command with its origin/refusal/handler, the panel/keybinding/session/task/viewer/media/extension consumers, the pinned SDK 0.1.0 vs real Tern 0.7.0 event proof, and a proposed (unfrozen) PR4A/B/C split with the owner decision sheet | The PR4A/B/C split and the first command batch are **owner decisions**, not accepted here; the physical/GUI tier is `GUI_BLOCKED`; the early-catalog `/settings` cause is `UNKNOWN` | [./tern-tsp/evidence/pr4-0.md](./tern-tsp/evidence/pr4-0.md) |
 | PR4-A Model | IMPLEMENTED (owner-frozen UX); qualification partial | Original handler + native presenter implementing UX-D01/D02/D08/D09(K2)/D10/D12/D15 and Retry; regression tests cover the list-first catalogue, the explicit writes, the K2 write admission, read-error Retry, isolated profile persistence/restart and stale input; real-Tern headless runs cover the `md` dialog at ten pane widths, the catalogue's own Reasoning Effort strip, the direct row-to-Reader path, the eight-candidate wrap and the chip clamp | Physical GUI/IME/focus, full-profile/HMR, clean live-Agent teardown, Remote TSP Model success and catalogues beyond the scripted sizes are NOT certified (`GUI_BLOCKED` / `NOT_VERIFIED`) | [Model selection](./tern-tsp/model-selection.md) · [List-first visual evidence](./tern-tsp/evidence/model-list-first-visual-20261013.md) |
-| PR4-A Preset | IMPLEMENTED (owner-frozen UX); qualification partial | Original `/preset` handler plus one native presenter: Built-in/Custom rows, the independent Current/Next-session/default/Draft facts, a read-only Details page, two-zone K2 with explicit-action-only writes, and the same settings writer behind the picker action and the typed verb; regression tests cover the K2 admission, the settlement matrix, the capability/admission negatives and the real Direct registry/handler path; the default write persists through the real ConfigEditor/Loader document and survives a fresh-Context reload; real-Tern headless runs cover 1280x800, 900x640, 560x640 and the 400x600 minimum | Remote TSP preset success, the shipped full profile/HMR and physical GUI/IME/focus are NOT certified (`GUI_BLOCKED` / `NOT_VERIFIED`) | [Preset selection](./tern-tsp/preset-selection.md) · [PR4-A Preset evidence](./tern-tsp/evidence/pr4-a-preset.md) |
+| PR4-A Preset | IMPLEMENTED (owner-frozen v4 UX); qualification partial | Original `/preset` handler plus one native presenter implementing the TWO-page shape: a `layout:'cards'` catalogue with `Built-in`/`Custom` groups, counts and real state badges whose native footer carries the THREE business buttons (`Close`; `Set default` + `Use next`/`Use session` as `primary` — the Owner shape; disabled entries grey with the reason as tooltip, per Owner ruling "a"), and a read-only `lg` Details page carrying the complete identity/scope facts, the full description/failure reason and a shipped preset's pinned official English Mode guide INLINE, with the native `ui.row({onClick})` Back NAVIGATION row (Owner A4 amendment: the measured client drops stylesheet border/background on `el` buttons, so the styled button and its sheet were retired); per-panel picker identity and per-reading overlay/body identity with a real `scroll` target; the same settings writer behind the footer button and the typed verb; regression tests cover the two-page keyboard contract (the footer's arrow ring, the error-phase Esc ladder), the settlement matrix, the stale/forged receivers, the per-kind capability negatives and the real Direct registry/handler path; the default write persists through the real ConfigEditor/Loader document and survives a fresh-Context reload; real-Tern headless runs (Tern `0.8.3`) cover 1280x800, 900x640, 560x640 and the 400x600 minimum — the ONE-column 54px cards, the PAINTED Owner footer shape, real `select`/`activate`, the Back navigation row's real click path, the inline guide's official copy and its real client scroll to the tail, and the long-value wrapping | Remote TSP preset success, the shipped full profile/HMR and physical GUI/IME/focus are NOT certified (`GUI_BLOCKED` / `NOT_VERIFIED`) | [Preset selection](./tern-tsp/preset-selection.md) · [Preset v4 evidence](./tern-tsp/evidence/preset-v4-two-page-20261014.md) · [PR4-A Preset evidence](./tern-tsp/evidence/pr4-a-preset.md) |
 | PR4+ (feature work) | PLANNED | UI/panel/clipboard parity, exit-confirmation window, native editor chords — scoped by the PR4-0 proposal once the owner freezes the split | — | [./tern-tsp/evidence/pr4-0.md](./tern-tsp/evidence/pr4-0.md) |
 
 ## Next decisions

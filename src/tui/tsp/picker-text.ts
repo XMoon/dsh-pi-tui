@@ -3,13 +3,24 @@
  * It answers only "how many display columns does this text occupy" and "which
  * rows does one labelled fact become on the picker's measured one-line slot".
  * It renders nothing, reads no SDK state (only the picker item TYPE) and holds
- * no panel state, so the `/model` and `/preset` presenters share ONE geometry
- * instead of growing a second, silently different one. It lives inside the TSP
- * renderer module because the SDK specifier is forbidden everywhere else.
+ * no panel state, so the TSP presenters share ONE geometry instead of growing a
+ * second, silently different one. It lives inside the TSP renderer module because
+ * the SDK specifier is forbidden everywhere else.
  *
- * The measured slot constants below belong to the `sz-md` picker surface with
- * no preview (`/preset`) and to the same `md` picker in its compact drill-down
- * shape (`/model`): the Owner-frozen environment numbers, not SDK guarantees.
+ * LIVE consumers today are {@link displayWidth} (the `/model` strip's own label
+ * budget and its regression), {@link clampMiddle} (a strip chip that must keep its
+ * distinguishing tail) and {@link oneLine} (a `/preset` card's ONE-line summary).
+ * The fact-row group below — {@link factRowItems}, {@link factLineColumns},
+ * {@link wrapColumns} and `PICKER_GLYPH_PX` — lost its only consumer when the
+ * `/preset` details page was replaced by the Overview (a native `lg` overlay wraps
+ * its values itself, so no measured one-line slot exists to pre-split into). It is
+ * RETAINED deliberately: this module is the TSP pickers' shared measured-text
+ * toolbox, its removal belongs with a decision about that toolbox as a whole, and
+ * pruning it is not part of the native-preset revision.
+ *
+ * The measured slot constants below belong to the `sz-md` picker surface in its
+ * compact drill-down shape (`/model`): the Owner-frozen environment numbers, not
+ * SDK guarantees.
  * @module tui/tsp/picker-text
  */
 import type { PickerItem } from '@stencil-hq/tern'
@@ -215,6 +226,9 @@ export function factLineColumns(wide: boolean, label: string): number {
  * shares its line with it, so its fragment fits the room the label leaves, and
  * the remainder continues on label-less rows at the full row bound. Every
  * fragment therefore fits its own row's measured ONE-line slot.
+ *
+ * Currently WITHOUT a production consumer: see this module's header for why it is
+ * retained rather than pruned with the `/preset` details page it was built for.
  */
 export function factRowItems(id: string, label: string, text: string, wide: boolean): PickerItem[] {
   const lines = wrapColumns(text, factLineColumns(wide, ''))
