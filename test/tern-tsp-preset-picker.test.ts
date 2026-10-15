@@ -403,9 +403,9 @@ test('native Preset: a mouse select after footer focus moves the keyboard back t
     await m.ready()
     const { pane } = m
     // Arm the stale focus on a row where BOTH writes are ENABLED: the boot browse
-    // target is the recorded default (`standard`, so its `Set default` is
-    // disabled and the ring cannot reach it); browsing to `reviewer` first makes
-    // the whole ring walkable.
+    // target is the recorded default (`ptc`, so its `Set default` is disabled and
+    // the ring cannot reach it); browsing to `reviewer` first makes the whole ring
+    // walkable.
     browse(pane, 'reviewer')
     await waitUntil('browse to the enabled row', () => props(pane).selected === 'preset:reviewer')
     await tabToCatalogueAction(pane, staleFocus)
