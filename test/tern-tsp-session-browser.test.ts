@@ -160,7 +160,11 @@ test('native Browser is one workspace tree, then a global cards union with Host-
     'session:session-cross-child',
   ])
   assert.equal(items(pane)[0]?.label, 'Needle current title', 'terminal sequences are removed from projected titles')
-  assert.ok(pickerActionByBase(pane, 'resume', BROWSER)?.disabled, 'Resume is always disabled in B1-A')
+  const resumeAction = pickerActionByBase(pane, 'resume', BROWSER)
+  assert.ok(resumeAction?.disabled, 'Resume is always disabled in B1-A')
+  assert.equal(resumeAction?.primary, true, 'Owner-requested primary styling does not enable Resume')
+  sendPickerAction(pane, 'resume', BROWSER)
+  assert.equal(m.resumeIntents.length, 0, 'the disabled primary Resume action never dispatches')
 
   const pickerId = picker(pane)!.id
   const surfaceId = pane.frames().at(-1)!.sf
