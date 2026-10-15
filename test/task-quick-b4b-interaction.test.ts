@@ -38,6 +38,7 @@ import type { TaskBrowserJobInput } from '../src/domain/task/browser.ts'
 import type { SessionSubject } from '../src/app/session/subject.ts'
 import type { JobObservationPort, JobStopOutcome } from '../src/runtime/job-observation-port.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
+import { JobInspectorPanel } from '../src/tui/panels/job-inspector-panel.ts'
 
 const startedApps = new Set<TuiApp>()
 afterEach(() => {
@@ -288,24 +289,42 @@ test('B4B-04/05 Up/Down move the selection; Up at the global first row exits', a
   assert.equal(h.band().identity, -1, 'Up at the first row exits the Quick')
 })
 
-/** S6 — Enter routes the typed selection through the production openJobView. */
-test('B4B-06 Enter routes the typed Job selection to the production openJobView', async () => {
+/** S6 — Enter routes the typed selection into a REAL Job workspace (the
+ *  literal Enter → accessory → app callback → runtime → Job Inspector sink). */
+test('B4B-06 Enter opens the real Job workspace; a refused value never disturbs it', async () => {
   const h = await startQuick({
     roster: [job('j1', 'build', 'running'), job('j2', 'test', 'running')],
   })
   for (let i = 0; i < 8; i++) await new Promise(r => setTimeout(r, 0))
   await h.vt.waitForRender()
+  const draftBefore = h.app.getDraft()
+  const screenOpen = (): boolean => h.app.focusedComponentForTest() instanceof JobInspectorPanel
 
-  // The LITERAL keyboard path: enter Quick, select alpha, Enter — the app's
-  // onQuickTaskSelect (wired exactly like the surface composition) routes to
-  // the runtime authority and reports the typed selection.
+  // The LITERAL keyboard path: enter Quick, select alpha, Enter. The sink is
+  // the REAL Job workspace (keyboard + screen), not a recorded array: with a
+  // runtime that never opens anything this test could not pass.
   h.vt.sendInput('\x1b[B')
   await h.vt.waitForRender()
   h.vt.sendInput('\r')
   await h.vt.waitForRender()
   await sleep(20)
-  assert.deepEqual(h.quickSelects(), ['job:j1'], `the Enter route reaches the sink:\n${h.quickSelects().join('|')}`)
-  assert.equal(h.band().identity, -1, 'the commit leaves Quick (the editor seat returns)')
+  assert.ok(screenOpen(), `the Enter must open the REAL Job workspace:\n${view(h.vt)}`)
+  assert.equal(h.band().identity, -1, 'the commit leaves Quick (the workspace owns the surface)')
+
+  // The workspace HOLDS the keyboard: typing grows nothing in the editor
+  // draft while it is up.
+  h.vt.sendInput('q')
+  await h.vt.waitForRender()
+  assert.equal(h.app.getDraft(), draftBefore, 'the Job workspace owns the keys, the editor gets nothing')
+
+  // The workspace's Esc returns the KEYBOARD to the editor with the draft
+  // intact (plan §9.2 — Job detail Esc lands on the editor; no modal Quick).
+  h.vt.sendInput('\x1b')
+  await h.vt.waitForRender()
+  assert.ok(!screenOpen(), 'the workspace Esc closes it')
+  h.vt.sendInput('z')
+  await h.vt.waitForRender()
+  assert.equal(h.app.getDraft(), `${draftBefore}z`, 'the editor owns the keys again, draft intact')
 
   // The REFUSAL side through the SAME authority: a stale value is refused
   // (no surface opens), a current one routes.
@@ -318,7 +337,14 @@ test('B4B-08 a parked Question enters the projection; a refused reopen reports n
   const reopens: string[] = []
   let allowReopen = true
   const vt = new VirtualTerminal(120, 40)
-  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {})
+  let runtimeRef: TaskRuntime | undefined
+  // The PRODUCTION commit route, wired exactly like the surface composition:
+  // Enter → accessory onActivate → the app's onQuickTaskSelect → the
+  // runtime's openQuickTaskItem. Without this option the Enter would fall
+  // through to the editor submit and prove nothing.
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
+    onQuickTaskSelect: (value: string): boolean => runtimeRef?.openQuickTaskItem(value) ?? false,
+  })
   app.start()
   startedApps.add(app)
   // The FIRST paint settles the layout width (the ↓ classifier's guard).
@@ -360,6 +386,7 @@ test('B4B-08 a parked Question enters the projection; a refused reopen reports n
     },
   })
   tasks.attachTasks(source, { diag: createDiag({ filePath: undefined, stderrLevel: 'off' }), isCleanedUp: () => false })
+  runtimeRef = tasks
   for (let i = 0; i < 8; i++) await new Promise(r => setTimeout(r, 0))
 
   attentionRows.push({ sessionId: 's1', callId: 'c1' })
@@ -376,23 +403,29 @@ test('B4B-08 a parked Question enters the projection; a refused reopen reports n
   const bandStart = lines.findIndex(line => line.startsWith('Task Quick'))
   assert.ok(bandStart >= 0, `the parked row must paint in the ACTIVE Quick:\n${view(vt)}`)
   assert.ok(view(vt).includes('Question c1?'), `the Question row paints its question text:\n${view(vt)}`)
-  // The accessory selected the CURRENT Question row (the source). Its commit
-  // route is the app's onQuickTaskSelect → the runtime's openQuickTaskItem;
-  // this inline harness constructs the app without the surface composition,
-  // so the SINK is driven through the SAME production function with the
-  // CURRENT projected value (never a fabricated one).
-  assert.equal(tasks.openQuickTaskItem('question:s1:c1'), true, 'the current Question row routes')
+  // The LITERAL Enter path — accessory → app onQuickTaskSelect → runtime
+  // openQuickTaskItem → the controller's reopen. The parked Question's
+  // reopen is the PRODUCTION reopen (the reopens array is wired as the
+  // attention authority), so this proves the source→sink chain, not a
+  // helper called in isolation.
+  vt.sendInput('\r')
+  await vt.waitForRender()
   await sleep(20)
-  assert.ok(reopens.includes('s1:c1'), `the reopen must reach the controller entry:\n${reopens.join(' |')}`)
+  assert.ok(reopens.includes('s1:c1'), `the Enter must reopen through the controller entry:\n${reopens.join(' |')}`)
+  assert.equal(rawView(vt).findIndex(line => line.startsWith('Task Quick')), -1, 'the commit leaves Quick after the Question route')
 
   // The STALE-Question refusal is part of the typed contract (plan §9.2):
-  // reopen false ⇒ openQuickTaskItem false, and the router dispatches the
-  // refusal exactly once (no retry, no fabricated success).
+  // reopen false ⇒ openQuickTaskItem false, dispatched exactly once.
+  vt.sendInput('\x1b[B')
+  await vt.waitForRender()
   allowReopen = false
   tasks.refreshAttentionRows()
-  assert.equal(tasks.openQuickTaskItem('question:s1:c1'), false, 'a refused reopen reports no surface opened')
+  await vt.waitForRender()
+  vt.sendInput('\r')
+  await vt.waitForRender()
   await sleep(20)
   assert.equal(reopens.filter(id => id === 's1:c1').length, 2, 'exactly the refusal dispatch happened')
+  assert.equal(rawView(vt).findIndex(line => line.startsWith('Task Quick')), -1, 'a refused reopen keeps Quick closed (no fabricated reopen surface)')
 })
 
 /** S9 — Fullscreen native SGR press→release→synthesized click opens the
@@ -661,7 +694,13 @@ test('B4B-swap a fullscreen hand-off retires the ACTIVE Quick', async () => {
   assert.ok(h.band().identity >= 0, 'the Quick can be re-entered on the alt root')
   h.app.setFullscreen(false)
   await h.vt.waitForRender()
+  await sleep(20)
   assert.equal(h.band().identity, -1, 'the reverse swap retires it again')
+  // The reverse swap restores the EDITOR's keyboard on the main root: the
+  // same input-owner proof as the forward direction (B4B-11/S13).
+  h.vt.sendInput('y')
+  await h.vt.waitForRender()
+  assert.equal(h.app.getDraft(), `${draftBefore}xy`, 'the editor owns the keyboard after the reverse swap')
 })
 
 /** S14 — /tasks Full works while the Quick stays hidden. */
@@ -746,17 +785,27 @@ test('B4B-f6 the admission probe measures the chrome once per render window', as
     await h.vt.waitForRender()
     assert.equal(h.band().identity, -1, 'Esc leaves the Quick')
     calls = 0
-    // A DECLINED candidate Down (0 grant after the roster empties) pays at
-    // most ONE measurement for the whole keypress.
-    h.roster.rows = []
-    h.tasks.refreshTasks()
+    // A DECLINED candidate Down with a NON-EMPTY projection: the frame is
+    // too short to paint one task row, so the projection survives (the
+    // predicate's items gate passes) and the MEASURED grant probe is the
+    // fact that declines. Shrink the viewport (rows 40 → 8) with the roster
+    // intact — the projection stays non-empty, the grant goes to zero.
+    const measuredBefore = calls
+    h.vt.resize(120, 6)
     await h.vt.waitForRender()
+    await sleep(20)
+    await h.vt.waitForRender()
+    assert.ok(h.app.taskQuickItemCountForTest() >= 1, 'the projection must be NON-empty for this negative')
+    assert.equal(h.app.enterTaskQuick(), false, 'the 0-grant entry declines through the measured probe')
+    assert.ok(calls >= measuredBefore, 'the decline must have gone through the measured grant path')
+    calls = 0
     h.vt.sendInput('\x1b[B')
     await h.vt.waitForRender()
     await sleep(20)
-    assert.ok(h.band().identity === -1 || h.band().items.length === 0, 'the 0-grant Down declines')
+    assert.equal(h.band().identity, -1, 'the 0-grant Down declines')
     assert.ok(calls <= 2, `a declined keypress must measure at most twice, got ${calls}`)
   } finally {
     app.taskQuickChromeRows = original
+    h.vt.resize(120, 40)
   }
 })

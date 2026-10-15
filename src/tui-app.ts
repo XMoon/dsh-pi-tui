@@ -3946,6 +3946,12 @@ export class TuiApp {
       // editor is empty; the editor mutates without going through
       // setStatus, so keep the badge truthful while tasks are active.
       if (this.tasksActive) this.renderFooter()
+      // B4-B (review R3-F2): the ↓ admission is a VISUAL-LINE fact — the
+      // caret crossing the last-visual-line boundary flips it without any
+      // document change, and the fork fires no caret callback. Recompose
+      // on every editor change (the composer's own no-churn discipline
+      // keeps a same-value recompose free).
+      if (this.tasksActive && this.taskQuickAdvertised) this.renderFooter()
       // PR-D (review F1): a live draft height change (the editor grows or
       // shrinks with its content) never reaches TuiApp.requestRender — the
       // fork repaints the screen itself — so the fullscreen widget grant is
@@ -15170,6 +15176,12 @@ export class TuiApp {
     return this.taskQuick.focused
   }
 
+  /** The on-demand Quick's projected row count (the admission's projection
+   *  fact, for the 0-grant negative witnesses). Test-only. */
+  taskQuickItemCountForTest(): number {
+    return this.taskQuick.getItems().length
+  }
+
   /**
    * The on-demand Task Quick's production entry (B4-B): the ONLY caller in
    * production is the keymap's `app.tasks.open` action; the L6 suites drive
@@ -15184,6 +15196,12 @@ export class TuiApp {
     // dispatch share it, so no second chrome/seat render happens here.
     if (!this.taskQuick.activate()) return false
     this.activeScreen.setFocus(this.taskQuick)
+    // B4-B (review R3-F2): while the accessory is ACTIVE the ↓ hint must
+    // not advertise the entry, and the editor's own Down no longer reaches
+    // the keymap — recompose the footer so the painted hint matches the
+    // action.
+    this.taskQuickAdvertised = false
+    this.renderFooter()
     this.requestRender()
     return true
   }
@@ -15210,6 +15228,11 @@ export class TuiApp {
     // order is the plan's commit discipline: identity/focus committed
     // before any callback returns.
     this.restoreSeatFocusAfterQuick()
+    // B4-B (review R3-F2): leaving restores the editor seat, so the ↓ hint
+    // becomes live again (the D8-settled classifier paints it on the next
+    // compose) — recompose NOW, not on some later footer churn.
+    this.taskQuickAdvertised = true
+    this.renderFooter()
     this.requestRender()
   }
 
@@ -15259,6 +15282,13 @@ export class TuiApp {
   private renderTick = 0
   private taskQuickGrantCacheTick = -1
   private taskQuickGrantCacheValue = false
+  /** Whether the CURRENT admission facts can flip on an editor caret move
+   *  alone (the visual-line classifier's painted-frame guard is live). The
+   *  fork editor fires NO caret callback, so while this is true the editor's
+   *  `onChange` recomposes the footer (B4-B review R3-F2): the ↓ hint must
+   *  track the boundary without waiting for an unrelated footer churn.
+   *  Entries/exits set it directly (enterTaskQuick/leaveTaskQuick). */
+  private taskQuickAdvertised = false
 
   private taskQuickGrantCached(): boolean {
     if (this.renderTick !== this.taskQuickGrantCacheTick) {
@@ -17902,7 +17932,12 @@ export class TuiApp {
       // The footer recompose runs LAST: the budget is keyed on the
       // MEASURED effective total (surface + geometry + actual chrome
       // heights), so a widget-zone bake, a resize or a mode switch all
-      // land here before the frame paints.
+      // land here before the frame paints. The Task Quick admission
+      // cache is invalidated FIRST: this lane is the one resize path that
+      // reaches renderFooter WITHOUT a renderTick bump, so the composed
+      // hint must read the grant of the NEW geometry, never the cached
+      // one (B4-B review R3-F2).
+      this.renderTick += 1
       const surface: 'main' | 'alt' = this.fullscreen !== undefined ? 'alt' : 'main'
       const available = this.footerPhysicalLineBudget().total
       if (surface !== this.lastFooterGeometry.surface
