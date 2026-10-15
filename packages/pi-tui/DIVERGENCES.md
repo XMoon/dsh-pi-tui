@@ -5362,7 +5362,7 @@ The host's Task Quick on-demand entry (Phase 3B/B4-B) must fire on a Down press 
 - history browsing, an open autocomplete dropdown, armed jump mode and an in-flight bracketed paste each force false, and return to true only when the editor itself leaves the mode
 - a caller width that does not match the painted frame's layout width forces false until the frame is repainted at that width
 - the seam consumes nothing: a real Down after a false answer still moves the cursor natively
-- the boundary-notification callback fires on Up/Down presses (observation only — the document, the cursor and the key routing are untouched), never on printable input
+- the boundary-notification callback fires on Up/Down presses with the post-move boundary state (and never on printable input — the document, the cursor and the key routing are untouched), on Left/Right only when they cross the boundary (the corrected negative: an intra-line Left/Right does NOT dispatch, a wrap-point move does), and on PageUp/PageDown always
 - Audit note: The seam answers one question — may a real Down leave this editor at its last visual line — and owns no state.
 
 #### Guarding tests
@@ -5378,7 +5378,7 @@ The host's Task Quick on-demand entry (Phase 3B/B4-B) must fire on a Down press 
 - packages/tui/src/components/editor.ts
 - Relevant issues/PRs:
 - None recorded; issue/PR state was not used as semantic proof.
-- Remaining semantic delta: Upstream's `Editor` keeps `isOnLastVisualLine` and the mode flags fully private with no protected read-only accessor, so a host subclass cannot ask the editor whether a real Down would leave it at the last visual line. The fork adds exactly that protected seam; the wrapping, history, autocomplete, jump and paste behavior are upstream's own, unchanged.
+- Remaining semantic delta: Upstream's `Editor` keeps `isOnLastVisualLine` and the mode flags fully private with no protected read-only accessor, so a host subclass cannot ask the editor whether a real Down would leave it at the last visual line. The fork adds exactly that protected seam PLUS the observation-only `onVisualLineBoundaryChanged` callback that reports the last-visual-line state after visual-cursor navigation (Up/Down always; Left/Right and PageUp/PageDown when they cross), so the host can keep its painted hint fresh; the wrapping, history, autocomplete, jump and paste behavior are upstream's own, unchanged.
 
 #### Retirement conditions
 

@@ -416,12 +416,16 @@ export class Editor implements Component, Focusable {
 
 	public onSubmit?: (text: string) => void;
 	public onChange?: (text: string) => void;
-	/** The cursor crossed the editor's last-VISUAL-line boundary with an
-	 * Up/Down press (dsh-pi-tui divergence X063 — the host's Task Quick
-	 * admission is a visual-line fact the base editor exposes no onChange
-	 * for). Observation only; fires on the keypress that may have moved
-	 * the boundary, including when it did not. */
-	public onVisualLineBoundaryChanged?: () => void;
+	/** The cursor may have crossed the editor's last-VISUAL-line boundary
+	 * (dsh-pi-tui divergence X063 — the host's Task Quick admission is a
+	 * visual-line fact the base editor exposes no onChange for). Fired on
+	 * the navigation presses that move the visual cursor (Up/Down/PageUp/
+	 * PageDown always; Left/Right only when they crossed ONTO or OFF the
+	 * last visual line) with the boundary state AFTER the move. The host
+	 * compares the state against its own last-painted fact and does
+	 * nothing when it did not change — a no-op press costs one dispatch
+	 * and one compare, never a chrome re-measure. */
+	public onVisualLineBoundaryChanged?: (onLastVisualLine: boolean) => void;
 	public disableSubmit: boolean = false;
 
 	constructor(tui: TUI, theme: EditorTheme, options: EditorOptions = {}) {
@@ -1092,7 +1096,14 @@ export class Editor implements Component, Focusable {
 			return;
 		}
 
-		// Arrow key navigation (with history support)
+		// Arrow key navigation (with history support). Every branch that can
+		// move the cursor across a VISUAL line notifies the host afterwards
+		// (dsh-pi-tui divergence X063): the host's on-demand Task Quick
+		// admission is a visual-line fact, and its painted ↓ hint must track
+		// the boundary without waiting for an unrelated document change. The
+		// notification carries the boundary STATE after the move; the host
+		// decides whether anything changed, so a no-op press costs the
+		// callback dispatch and one boolean compare, never a re-measure.
 		if (kb.matches(data, "tui.editor.cursorUp")) {
 			if (
 				this.isOnFirstVisualLine() &&
@@ -1105,9 +1116,7 @@ export class Editor implements Component, Focusable {
 			} else {
 				this.moveCursor(-1, 0);
 			}
-			// (dsh-pi-tui divergence X063): see the cursorDown branch — the
-			// visual boundary may have moved; the host owns the painted hint.
-			this.onVisualLineBoundaryChanged?.();
+			this.onVisualLineBoundaryChanged?.(this.isOnLastVisualLine());
 			return;
 		}
 		if (kb.matches(data, "tui.editor.cursorDown")) {
@@ -1119,31 +1128,43 @@ export class Editor implements Component, Focusable {
 			} else {
 				this.moveCursor(1, 0);
 			}
-			// (dsh-pi-tui divergence X063): the VISUAL-LINE boundary moved —
-			// the host's on-demand Task Quick admission reads it through the
-			// read-only seam, and its painted ↓ hint must track the boundary
-			// without waiting for an unrelated document change (the base
-			// editor fires no caret callback). Observation only: the host
-			// notification composes chrome, it never routes this key.
-			this.onVisualLineBoundaryChanged?.();
+			this.onVisualLineBoundaryChanged?.(this.isOnLastVisualLine());
 			return;
 		}
 		if (kb.matches(data, "tui.editor.cursorRight")) {
-			this.moveCursor(0, 1);
+			if (this.isOnLastVisualLine()) {
+				this.moveCursor(0, 1);
+			} else {
+				// A Right at a visual-line wrap or logical-line end crosses
+				// ONTO the last visual line; an intra-line Right does not
+				// cross (the re-read decides).
+				this.moveCursor(0, 1);
+				if (this.isOnLastVisualLine()) this.onVisualLineBoundaryChanged?.(true);
+			}
 			return;
 		}
 		if (kb.matches(data, "tui.editor.cursorLeft")) {
-			this.moveCursor(0, -1);
+			if (!this.isOnLastVisualLine()) {
+				this.moveCursor(0, -1);
+			} else {
+				// A Left at a visual-line wrap or logical-line start crosses
+				// back OFF the last visual line; an intra-line Left does not
+				// cross (the re-read decides).
+				this.moveCursor(0, -1);
+				if (!this.isOnLastVisualLine()) this.onVisualLineBoundaryChanged?.(false);
+			}
 			return;
 		}
 
 		// Page up/down - scroll by page and move cursor
 		if (kb.matches(data, "tui.editor.pageUp")) {
 			this.pageScroll(-1);
+			this.onVisualLineBoundaryChanged?.(this.isOnLastVisualLine());
 			return;
 		}
 		if (kb.matches(data, "tui.editor.pageDown")) {
 			this.pageScroll(1);
+			this.onVisualLineBoundaryChanged?.(this.isOnLastVisualLine());
 			return;
 		}
 

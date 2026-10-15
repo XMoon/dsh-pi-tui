@@ -186,21 +186,65 @@ describe("canYieldDownAtLastVisualLine (X063)", () => {
 		assert.notDeepStrictEqual(editor.getCursor(), cursorBefore);
 	});
 
-	it("fires onVisualLineBoundaryChanged on Up/Down presses (the host's painted-hint hook)", () => {
+	it("notifies with the boundary state on visual-cursor transitions (Up/Down always; Left/Right when they cross)", () => {
 		const editor = new Editor(createTestTUI(), defaultEditorTheme);
 		editor.setTextAndCursor("line1\nline2", { line: 0, col: 0 });
 		paint(editor, 80);
-		let fired = 0;
-		editor.onVisualLineBoundaryChanged = () => {
-			fired += 1;
+		const states: boolean[] = [];
+		editor.onVisualLineBoundaryChanged = (onLast: boolean) => {
+			states.push(onLast);
 		};
+		// Down crosses ONTO the last visual line: notify with true.
 		editor.handleInput(DOWN);
-		assert.strictEqual(fired, 1, "the crossing Down notifies once");
-		// A navigation key never notifies when it is NOT an Up/Down press:
-		// use Left (cursorCol moves, the boundary does not fire).
+		assert.deepStrictEqual(states, [true], "the crossing Down notifies with the new state");
+		// A no-op Down at the bottom still dispatches (the cursor runs to the
+		// line end; the state is unchanged) — the HOST compares and skips its
+		// recompose; the editor cannot know the host's painted fact.
+		editor.handleInput(DOWN);
+		assert.deepStrictEqual(states, [true, true], "the bottom Down dispatches with the unchanged state");
+		// A Left INSIDE the last visual line (line-end → mid-line) does not
+		// cross the boundary: no dispatch.
 		editor.handleInput("\x1b[D");
-		assert.strictEqual(fired, 1, "a non-Up/Down navigation key does not notify");
-		editor.handleInput(UP);
-		assert.strictEqual(fired, 2, "the crossing Up notifies once");
+		assert.deepStrictEqual(states, [true, true], "an intra-line Left does not dispatch");
+		assert.deepStrictEqual(editor.getCursor(), { line: 1, col: 4 });
+		// PageDown ALWAYS dispatches (a viewport-page move; the editor does
+		// not pre-filter it) with the live state — here still the last line.
+		editor.handleInput("\x1b[6~");
+		assert.strictEqual(states.length, 3, "PageDown dispatches");
+		assert.strictEqual(states[2], editor.isOnLastVisualLine());
 	});
+
+	it("Left/Right across a visual-line boundary notify with the crossed state", () => {
+		const editor = new Editor(createTestTUI(), defaultEditorTheme);
+		editor.setTextAndCursor("line1\nline2", { line: 1, col: 0 });
+		paint(editor, 80);
+		const states: boolean[] = [];
+		editor.onVisualLineBoundaryChanged = (onLast: boolean) => {
+			states.push(onLast);
+		};
+		assert.strictEqual((editor as unknown as { isOnLastVisualLine(): boolean }).isOnLastVisualLine(), true);
+		// Left from the second line's start wraps back to the first line's
+		// end: OFF the last visual line.
+		editor.handleInput("\x1b[D");
+		assert.deepStrictEqual(states, [false], "the wrapping Left notifies with false");
+		assert.deepStrictEqual(editor.getCursor(), { line: 0, col: 5 });
+		// Right from the first line's end wraps forward: ONTO the last
+		// visual line again.
+		editor.handleInput("\x1b[C");
+		assert.deepStrictEqual(states, [false, true], "the wrapping Right notifies with true");
+		assert.deepStrictEqual(editor.getCursor(), { line: 1, col: 0 });
+		// The intra-line walk (col0 → col1 → col0 on the LAST line) never
+		// crosses the boundary: no dispatch.
+		editor.handleInput("\x1b[C");
+		assert.deepStrictEqual(editor.getCursor(), { line: 1, col: 1 });
+		editor.handleInput("\x1b[D");
+		assert.deepStrictEqual(editor.getCursor(), { line: 1, col: 0 });
+		assert.strictEqual(states.length, 2, "intra-line moves never dispatch");
+		// The wrap-point Left (from the line START the walk landed on) wraps
+		// back again — a fresh crossing that MUST notify.
+		editor.handleInput("\x1b[D");
+		assert.deepStrictEqual(states, [false, true, false], "the wrap-point Left crosses again");
+		assert.deepStrictEqual(editor.getCursor(), { line: 0, col: 5 });
+	});
+
 });
