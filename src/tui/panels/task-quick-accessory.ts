@@ -543,8 +543,12 @@ export class TaskQuickAccessory implements Component, Focusable {
     }
     if (componentKeymap.matches(data, 'tasks.cursorDown')) {
       const index = this.selectedValue === undefined ? undefined : this.indexOfValue(this.selectedValue)
-      // Down at the tail clamps (never wraps, never exits).
-      if (index !== undefined && index >= this.items.length - 1) return
+      // Down at the tail clamps (never wraps, never exits), but it still
+      // supersedes a wheel target whose repaint has not happened yet.
+      if (index !== undefined && index >= this.items.length - 1) {
+        this.wheelSelectionPending = false
+        return
+      }
       this.move(1)
       return
     }

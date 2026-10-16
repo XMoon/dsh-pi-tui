@@ -198,9 +198,9 @@ test('search mode renders its own hint — query actions, never the task actions
   }, () => {}, () => {}, () => {})
   panel.handleInput('/')
   const view = panel.render(100).join('\n')
-  // esc back leads the verb list: a 1-line hint on an 80-column terminal
-  // truncates its tail, so the escape verb must never be the clipped part.
-  const searchHint = 'type to filter · Esc back · ←→ edit · ↑↓ select · Shift+Tab type · Enter open'
+  // D8 keeps the real Escape outcome last and highest-priority; low-priority
+  // query help drops before it when the one-line hint is constrained.
+  const searchHint = 'Enter open · ↑↓ select · ←→ edit · Shift+Tab type · type to filter · Esc back'
   assert.ok(view.includes(searchHint), `search-mode hint must advertise the query actions:\n${view}`)
   for (const stale of ['A scope', 'N next running', 'S stop', 'R refresh', '←→ tree']) {
     assert.ok(!view.includes(stale), `search-mode hint must not advertise '${stale}':\n${view}`)

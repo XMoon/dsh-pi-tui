@@ -415,6 +415,26 @@ test('keyboard navigation supersedes a pending wheel window before repaint', () 
   assert.match(strip(after[2]!), /^> job:b/, 'the keyboard-selected identity paints')
 })
 
+test('tail Down cancels a pending wheel window before repaint', () => {
+  const h = harness()
+  h.accessory.setItems([item('job:a'), item('job:b'), item('job:c'), item('job:d'), item('job:e'), item('job:f')])
+  h.accessory.focused = true
+  assert.ok(h.accessory.activate())
+  for (let i = 0; i < 5; i += 1) h.accessory.handleInput('\x1b[B')
+  const before = h.accessory.render(80)
+  assert.match(strip(before[1]!), /showing 4-6\/6$/)
+  assert.match(strip(before[4]!), /^> job:f/, 'the last global row is selected in the painted frame')
+
+  assert.deepEqual(h.accessory.handleMouse(wheel(-1, 1)), { handled: true, render: true })
+  assert.deepEqual(h.accessory.handleMouse(wheel(-1, 1)), { handled: true, render: true })
+  h.accessory.handleInput('\x1b[B')
+
+  const after = h.accessory.render(80)
+  assert.equal(h.accessory.selected, 'job:f', 'Down at the global tail remains a selection no-op')
+  assert.match(strip(after[1]!), /showing 4-6\/6$/, 'tail Down supersedes the queued upward wheel window')
+  assert.match(strip(after[4]!), /^> job:f/, 'the visible tail selection remains marked')
+})
+
 test('a height-only repaint invalidates the pressed frame when component geometry is unchanged', () => {
   const h = harness({ rows: 24, chrome: 4 })
   focus(h, [item('job:a'), item('job:b'), item('job:c'), item('job:d')])
