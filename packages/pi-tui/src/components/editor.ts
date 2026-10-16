@@ -419,22 +419,19 @@ export class Editor implements Component, Focusable {
 	/** The Down-admission's editor-owned facts MAY have changed (dsh-pi-tui
 	 * divergence X063 — the admission is a visual-line + transient-mode
 	 * fact the base editor exposes no onChange for). The reason names the
-	 * transition class so the host can invalidate its painted-hint state
-	 * WITHOUT content-equality gating: two consecutive events may carry
-	 * the same visual-line truth and still flip the admission (an
-	 * autocomplete open/close at an unchanged cursor). Fired after:
-	 * - "navigation": any cursor move (Up/Down/PageUp/PageDown always;
-	 *   Left/Right word/line jumps only the host cares about anyway — the
-	 *   event is cheap for the host to drop);
-	 * - "autocomplete": the dropdown opened or closed (a mode flip with
-	 *   no cursor move);
-	 * - "history": history browsing entered or left;
-	 * - "paste": a bracketed paste completed (isInPaste flips);
-	 * - "programmatic": setText/setTextAndCursor/clear replaced the
-	 *   document or cursor directly.
-	 * The host recomposes its hint per event and re-reads the live facts
-	 * through the read-only seam; the editor does no content comparison. */
-	public onVisualLineBoundaryChanged?: (reason: "navigation" | "autocomplete" | "history" | "paste" | "programmatic", onLastVisualLine: boolean) => void;
+	 * transition class: consecutive events may carry the same visual-line
+	 * truth and still flip admission (for example autocomplete open/close at
+	 * an unchanged cursor). Fired after:
+	 * - "navigation": cursor movement (Up/Down/PageUp/PageDown, Left/Right,
+	 *   word/line jumps and mouse repositioning);
+	 * - "autocomplete": the dropdown opened or closed;
+	 * - "history": history browsing changed;
+	 * - "paste": a bracketed paste completed;
+	 * - "programmatic": setText/setTextAndCursor/clear changed document or cursor;
+	 * - "jump": jump mode armed, cancelled, completed or aborted.
+	 * The payload is the post-transition raw boundary; the host may consume it
+	 * in the same turn while the classifier still checks live mode gates. */
+	public onVisualLineBoundaryChanged?: (reason: "navigation" | "autocomplete" | "history" | "paste" | "programmatic" | "jump", onLastVisualLine: boolean) => void;
 	public disableSubmit: boolean = false;
 
 	constructor(tui: TUI, theme: EditorTheme, options: EditorOptions = {}) {
@@ -527,14 +524,22 @@ export class Editor implements Component, Focusable {
 	// rebuild.
 	private lastVisualLineCount: number | null = null;
 	private lastCursorVisualLine: number | null = null;
+	/** The last render's exact visual layout facts. Unlike the navigation
+	 *  payload above, this survives until a newer frame is rendered so the
+	 *  host can read the painted boundary without rebuilding the wrap map. */
+	private lastRenderedVisualLineLayout: {
+		layoutWidth: number;
+		cursorVisualLine: number;
+		visualLineCount: number;
+	} | null = null;
 
 	/** The X063 shared notify (dsh-pi-tui divergence X063): fire the host's
 	 * observation callback for `reason`, consuming the move's own published
 	 * wrap-map facts when present (else one authoritative rebuild). The
-	 * callback ALWAYS fires — the payload's truth value is the host's
-	 * concern; the editor cannot know whether the host's painted hint still
-	 * matches. */
-	private notifyVisualLineBoundary(reason: "navigation" | "autocomplete" | "history" | "paste" | "programmatic"): void {
+	 * callback ALWAYS fires — its post-transition boundary can be reused by
+	 * the host in the same turn; the editor cannot know whether the host's
+	 * painted hint still matches. */
+	private notifyVisualLineBoundary(reason: "navigation" | "autocomplete" | "history" | "paste" | "programmatic" | "jump"): void {
 		if (this.lastVisualLineCount === null || this.lastCursorVisualLine === null) {
 			// No published facts: ONE authoritative rebuild (single map, both
 			// facts read from it — review R8-F3).
@@ -560,14 +565,30 @@ export class Editor implements Component, Focusable {
 	 * read-only and side-effect free; `expectedLayoutWidth` must be the SAME
 	 * layout width `render()` used for the painted frame, so a stale caller
 	 * width can never classify against a wrap map the user is not looking at.
+	 * A current `onVisualLineBoundaryChanged` payload may supply the raw boundary
+	 * so a same-turn host compose reuses the move's map facts. The private mode
+	 * gates below are always checked against live editor state.
 	 */
-	protected canYieldDownAtLastVisualLine(expectedLayoutWidth: number): boolean {
+	protected canYieldDownAtLastVisualLine(expectedLayoutWidth: number, knownOnLastVisualLine?: boolean): boolean {
 		return this.lastWidth === expectedLayoutWidth
-			&& this.isOnLastVisualLine()
+			&& (knownOnLastVisualLine ?? this.isOnLastVisualLine())
 			&& this.historyIndex === -1
 			&& this.autocompleteState === null
 			&& this.jumpMode === null
 			&& !this.isInPaste;
+	}
+
+	/** The RAW last-visual-line state of the latest rendered layout (no mode
+	 * gates; X063). `render()` already computed the exact cursor/line facts,
+	 * so this baseline is O(1) and never rebuilds the visual map. A width that
+	 * does not match the latest frame fails closed until that width is rendered.
+	 * Read-only, side-effect free. */
+	protected isOnLastVisualLineRaw(expectedLayoutWidth: number): boolean {
+		const layout = this.lastRenderedVisualLineLayout;
+		return this.lastWidth === expectedLayoutWidth
+			&& layout !== null
+			&& layout.layoutWidth === expectedLayoutWidth
+			&& layout.cursorVisualLine === layout.visualLineCount - 1;
 	}
 
 	private navigateHistory(direction: 1 | -1): void {
@@ -702,6 +723,13 @@ export class Editor implements Component, Focusable {
 		// Find the cursor line index in layoutLines
 		let cursorLineIndex = layoutLines.findIndex((line) => line.hasCursor);
 		if (cursorLineIndex === -1) cursorLineIndex = 0;
+		// X063: publish the exact painted boundary from the layout this render
+		// already built; Footer refreshes must not rebuild a second wrap map.
+		this.lastRenderedVisualLineLayout = {
+			layoutWidth,
+			cursorVisualLine: cursorLineIndex,
+			visualLineCount: layoutLines.length,
+		};
 
 		// Adjust scroll offset to keep cursor visible
 		if (cursorLineIndex < this.scrollOffset) {
@@ -925,7 +953,7 @@ export class Editor implements Component, Focusable {
 			// flips back to admissible — notify).
 			if (kb.matches(data, "tui.editor.jumpForward") || kb.matches(data, "tui.editor.jumpBackward")) {
 				this.jumpMode = null;
-				this.notifyVisualLineBoundary("autocomplete");
+				this.notifyVisualLineBoundary("jump");
 				return;
 			}
 
@@ -935,12 +963,17 @@ export class Editor implements Component, Focusable {
 				const direction = this.jumpMode;
 				this.jumpMode = null;
 				this.jumpToChar(printable, direction);
-				this.notifyVisualLineBoundary("navigation");
+				// X063: completing a jump ends the armed-jump refusal even
+				// when no matching character exists or the cursor stays on
+				// the same visual line.
+				this.notifyVisualLineBoundary("jump");
 				return;
 			}
 
-			// Control character - cancel and fall through to normal handling
+			// Control character cancels the armed-jump refusal and then
+			// falls through to normal handling.
 			this.jumpMode = null;
+			this.notifyVisualLineBoundary("jump");
 		}
 
 		// Handle bracketed paste mode
@@ -1230,12 +1263,12 @@ export class Editor implements Component, Focusable {
 		// flips it back. Both notify.)
 		if (kb.matches(data, "tui.editor.jumpForward")) {
 			this.jumpMode = this.jumpMode === "forward" ? null : "forward";
-			this.notifyVisualLineBoundary("autocomplete");
+			this.notifyVisualLineBoundary("jump");
 			return;
 		}
 		if (kb.matches(data, "tui.editor.jumpBackward")) {
 			this.jumpMode = this.jumpMode === "backward" ? null : "backward";
-			this.notifyVisualLineBoundary("autocomplete");
+			this.notifyVisualLineBoundary("jump");
 			return;
 		}
 
