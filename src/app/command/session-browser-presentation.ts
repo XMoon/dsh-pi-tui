@@ -42,6 +42,7 @@ export interface SessionBrowserSubject {
 
 export interface SessionBrowserPanelRequest {
   readonly subject: SessionBrowserSubject
+  /** Called only when raw editor text changes; cursor movement stays in the Presenter. */
   readonly onQueryChange: (query: string) => void
   readonly onResumeIntent: (intent: SessionBrowserResumeIntent) => void
   readonly onClose: () => void
@@ -49,7 +50,8 @@ export interface SessionBrowserPanelRequest {
 
 export interface SessionBrowserPanelHandle {
   isDisposed(): boolean
-  setSnapshot(snapshot: SessionBrowserReadSnapshot): void
+  /** Ordinary snapshots update results; only this one-shot option may seed editor text. */
+  setSnapshot(snapshot: SessionBrowserReadSnapshot, options?: { readonly initialQuery?: string }): void
   close(): void
 }
 

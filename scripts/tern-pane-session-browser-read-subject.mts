@@ -205,9 +205,9 @@ const observedPresentation: SessionBrowserPresentation = {
     const handle = browser.presentation.open(request)
     return {
       isDisposed: () => handle.isDisposed(),
-      setSnapshot: (snapshot: SessionBrowserReadSnapshot) => {
+      setSnapshot: (snapshot: SessionBrowserReadSnapshot, options) => {
         latestSnapshot = snapshot
-        handle.setSnapshot(snapshot)
+        handle.setSnapshot(snapshot, options)
       },
       close: () => handle.close(),
     }

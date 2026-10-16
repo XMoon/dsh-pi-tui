@@ -41,6 +41,7 @@ function reader(overrides: Partial<SessionReader> = {}): SessionReader {
 class PresentationProbe implements SessionBrowserPresentation {
   readonly requests: SessionBrowserPanelRequest[] = []
   readonly snapshots: SessionBrowserReadSnapshot[][] = []
+  readonly initialQueries: Array<string | undefined> = []
   readonly closed: boolean[] = []
   readonly notifications: string[] = []
 
@@ -53,7 +54,11 @@ class PresentationProbe implements SessionBrowserPresentation {
     let disposed = false
     return {
       isDisposed: () => disposed,
-      setSnapshot: (snapshot) => { if (!disposed) snapshots.push(snapshot) },
+      setSnapshot: (snapshot, options) => {
+        if (disposed) return
+        snapshots.push(snapshot)
+        this.initialQueries.push(options?.initialQuery)
+      },
       close: () => { disposed = true; this.closed[index] = true },
     }
   }
@@ -378,6 +383,21 @@ test('a no-match direct query opens the filtered Browser without overriding live
   assert.deepEqual(await handle.settlement, { kind: 'ready' })
   assert.equal(presentation.latest()?.query, 'manual query', 'a user edit during listing wins over the typed fallback')
   assert.equal(presentation.latest()?.rows[0]?.id, 'session-main-row')
+  assert.deepEqual(presentation.initialQueries.filter((query) => query !== undefined), [],
+    'a manually edited query never receives a programmatic initial-query seed')
+})
+
+test('a no-match typed Resume supplies a one-time initial-query seed', async (t) => {
+  const presentation = new PresentationProbe()
+  const listed = deferred<SessionSummary[] | undefined>()
+  const { owner, diag } = ownerFor(presentation, reader({ list: async () => listed.promise }))
+  t.after(() => { owner.dispose(); diag.dispose() })
+  const handle = owner.open({ directMatch: { query: 'not-found', find: findSessionMatch } })
+  listed.resolve([row('session-main-row')])
+
+  assert.deepEqual(await handle.settlement, { kind: 'ready' })
+  assert.equal(presentation.latest()?.query, 'not-found')
+  assert.deepEqual(presentation.initialQueries.filter((query) => query !== undefined), ['not-found'])
 })
 
 test('metadata search re-evaluates when projection titles arrive after the Host page', async (t) => {
