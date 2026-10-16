@@ -219,6 +219,9 @@ importers:
       '@deepseek-ai/dsh-shell':
         specifier: 0.2.0-rc.2
         version: 0.2.0-rc.2(@deepseek-ai/cordis@4.0.4)(@deepseek-ai/dsh-sandbox@0.2.0-rc.2(@deepseek-ai/cordis@4.0.4)(@deepseek-ai/dsh-llm@0.2.0-rc.2(@deepseek-ai/cordis@4.0.4))(@deepseek-ai/dsh-session@0.2.0-rc.2(@deepseek-ai/cordis@4.0.4)(@deepseek-ai/dsh-scope@0.2.0-rc.2(@deepseek-ai/cordis@4.0.4)(@deepseek-ai/dsh-invariants@0.2.0-rc.2(@deepseek-ai/cordis@4.0.4)))))(@deepseek-ai/dsh-subprocess@0.2.0-rc.2(@deepseek-ai/cordis@4.0.4)(@deepseek-ai/dsh-http-proxy@0.2.0-rc.2(@deepseek-ai/cordis@4.0.4)))
+      '@deepseek-ai/dsh-shell-env':
+        specifier: 0.2.0-rc.2
+        version: 0.2.0-rc.2(dfdc01057fc4889f0af011941735be67)
       '@deepseek-ai/dsh-skill':
         specifier: 0.2.0-rc.2
         version: 0.2.0-rc.2(@deepseek-ai/cordis@4.0.4)(@deepseek-ai/dsh-llm@0.2.0-rc.2(@deepseek-ai/cordis@4.0.4))(@deepseek-ai/dsh-scope@0.2.0-rc.2(@deepseek-ai/cordis@4.0.4)(@deepseek-ai/dsh-invariants@0.2.0-rc.2(@deepseek-ai/cordis@4.0.4)))
@@ -255,6 +258,9 @@ importers:
       '@deepseek-ai/dsh-tool-ask-user':
         specifier: 0.2.0-rc.2
         version: 0.2.0-rc.2(16d4e17cbc6c9ea80d47d8f776e8cc2a)
+      '@deepseek-ai/dsh-tool-bash':
+        specifier: 0.2.0-rc.2
+        version: 0.2.0-rc.2(4e336b02698517060b11d46fb1f15a3d)
       '@deepseek-ai/dsh-tool-cordis':
         specifier: 0.2.0-rc.2
         version: 0.2.0-rc.2(60cb3cee8ebdb68cfa7f842401600862)
@@ -270,6 +276,9 @@ importers:
       '@deepseek-ai/dsh-tool-jobs':
         specifier: 0.2.0-rc.2
         version: 0.2.0-rc.2(f3945ee8fcbc3a4f4103e8ae4bee1d5e)
+      '@deepseek-ai/dsh-tool-pwsh':
+        specifier: 0.2.0-rc.2
+        version: 0.2.0-rc.2(4e336b02698517060b11d46fb1f15a3d)
       '@deepseek-ai/dsh-tool-ralph':
         specifier: 0.2.0-rc.2
         version: 0.2.0-rc.2(38c245cd511a09302036720e57e72b0a)
