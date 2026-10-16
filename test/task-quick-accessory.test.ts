@@ -179,7 +179,7 @@ test('the typed Full action follows all real tasks and never enters task selecti
 
   const rows = h.accessory.render(80).map(strip)
   const actionRow = rows.find(row => row.includes('Open Task Center…'))
-  assert.ok(actionRow?.startsWith('>   ➜ Open Task Center…'), `the last navigation target is selected:
+  assert.ok(actionRow?.startsWith('> ➜ Open Task Center…'), `the last navigation target is selected:
 ${rows.join('\n')}`)
   assert.equal(h.accessory.selected, undefined, 'the Full action is not exposed as a TaskPanelItem value')
   assert.deepEqual(h.activations(), [], 'navigating to the action cannot produce a fake task selection')
@@ -202,7 +202,7 @@ test('PageDown uses the painted navigation window, including the action target',
   h.accessory.handleInput('\x1b[6~')
   assert.equal(h.accessory.selected, undefined, 'the next page clamps to the appended Full action')
   const actionRow = h.accessory.render(80).map(strip).find(row => row.includes('Open Task Center…'))
-  assert.ok(actionRow?.startsWith('>   ➜ Open Task Center…'))
+  assert.ok(actionRow?.startsWith('> ➜ Open Task Center…'))
 })
 
 test('the action remains the final navigation target after 100 real task values', () => {
@@ -213,7 +213,7 @@ test('the action remains the final navigation target after 100 real task values'
 
   const rows = h.accessory.render(80).map(strip)
   const actionRow = rows.find(row => row.includes('Open Task Center…'))
-  assert.ok(actionRow?.startsWith('>   ➜ Open Task Center…'))
+  assert.ok(actionRow?.startsWith('> ➜ Open Task Center…'))
   assert.equal(h.accessory.selected, undefined)
   assert.equal(h.accessory.getItems().length, 100)
   assert.equal(planTaskQuickLayout(80, 40, 4, 100, 100, true).total, 100)
@@ -232,7 +232,7 @@ test('open-full selection survives task insertion, reorder and status refresh', 
   assert.equal(h.accessory.selected, undefined, 'a surviving typed action remains selected after N changes')
   const rows = h.accessory.render(80).map(strip)
   const actionRow = rows.find(row => row.includes('Open Task Center…'))
-  assert.ok(actionRow?.startsWith('>   ➜ Open Task Center…'))
+  assert.ok(actionRow?.startsWith('> ➜ Open Task Center…'))
   assert.equal(h.accessory.getItems().length, 4)
   assert.match(rows[1]!, /showing 3-4\/4$/, 'the header still counts visible real task rows only')
 
@@ -257,7 +257,7 @@ test('wheel reaches the action window without changing Enter before repaint', ()
   h.accessory.handleInput('\x1b[B')
   h.accessory.handleInput('\x1b[B')
   const selectedAction = h.accessory.render(80).map(strip).find(row => row.includes('Open Task Center…'))
-  assert.ok(selectedAction?.startsWith('>   ➜ Open Task Center…'))
+  assert.ok(selectedAction?.startsWith('> ➜ Open Task Center…'))
 
   const pending = harness({ openFull: true })
   focus(pending, [item('job:a'), item('job:b'), item('job:c'), item('job:d'), item('job:e')])
@@ -276,7 +276,7 @@ test('the Full action keeps the real-task range and renders one clipped physical
     const plainBefore = before.map(strip)
     assert.match(plainBefore[1]!, /^Task Quick\s+showing 1-1\/1$/, 'the action is excluded from N')
     const unselected = before.find(row => strip(row).includes('Open Task Center…'))!
-    assert.ok(strip(unselected).startsWith('    ➜ Open Task Center…'))
+    assert.ok(strip(unselected).startsWith('  ➜ Open Task Center…'))
     assert.ok(unselected.includes(color.textMuted('➜ ')), 'the arrow remains textMuted')
     assert.ok(unselected.includes(color.textMuted('Open Task Center…')), 'the unselected label is textMuted')
     assert.equal(visibleWidth(unselected), cols)
@@ -285,7 +285,7 @@ test('the Full action keeps the real-task range and renders one clipped physical
 
     h.accessory.handleInput('\x1b[B')
     const selected = h.accessory.render(cols).find(row => strip(row).includes('Open Task Center…'))!
-    assert.ok(strip(selected).startsWith('>   ➜ Open Task Center…'))
+    assert.ok(strip(selected).startsWith('> ➜ Open Task Center…'))
     assert.ok(selected.includes(color.textMuted('➜ ')), 'selection does not recolor the arrow')
     assert.ok(selected.includes(color.textStrong('Open Task Center…')), 'the selected label is textStrong')
     assert.equal(visibleWidth(selected), cols)
@@ -302,7 +302,7 @@ test('an action-only visible window has no fabricated task position', () => {
   assert.equal(rows.length, 2)
   assert.equal(rows[0]!.trimEnd(), 'Task Quick')
   assert.ok(!rows[0]!.includes('showing') && !rows[0]!.includes('/1'))
-  assert.ok(rows[1]!.startsWith('>   ➜ Open Task Center…'))
+  assert.ok(rows[1]!.startsWith('> ➜ Open Task Center…'))
   assert.equal(h.accessory.anchoredValue, undefined, 'an action anchor is not a task value')
 })
 

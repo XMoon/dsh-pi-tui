@@ -936,7 +936,7 @@ frame, and its separator is the §6.2 exception above.
 Task Quick's optional Full navigation target follows all real task rows in the same
 three-row window and exists only when its first-party Full callback is injected. It is
 not a `TaskPanelItem`, task count, status or Footer fact. Paint `➜ Open Task Center…`
-with a two-cell blank gutter after the existing `> ` selection marker; keep `➜` muted,
+with `➜` immediately after the existing `> ` selection marker; keep `➜` muted,
 the unselected label muted and the selected label `textStrong`. The arrow is the action
 kind only; `>` remains the sole focus/selection signal. Use terminal-cell truncation and
 keep the navigation target as one physical row.
