@@ -47,6 +47,13 @@ query, workspace, and lineage helpers are in
   search: remove NUL, trim, cap at 500 UTF-16 code units, and avoid a dangling
   high surrogate. Metadata matches only listed-row `id`, `title`, `cwd`, and
   `preset` fields. It does not locally search content or Host snippets.
+- The native input keeps raw editor text and cursor separate from the canonical
+  query. Ordinary Reader snapshots update results/status without rewriting the
+  editor; `/sessions` and `/search` initial queries and a no-match typed
+  `/resume` query are explicitly seeded once. Text edits made while the list
+  loads, including whitespace-only changes that canonicalize to the existing
+  query, take precedence over pending initial/direct-match intent. Such
+  canonical no-op edits do not restart Host Search.
 - Query mode uses the same native Picker identity in global Cards layout and
   does not inherit browse-scope membership. Metadata matches retain the
   official list order; Host-only results follow Host page order; overlap is

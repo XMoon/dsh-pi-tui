@@ -345,9 +345,9 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
       ? undefined
       : {
           query: options.directMatchQuery,
-          // Owner ruling: the existing typed `/resume` path matches the full
-          // official Reader listing, including subagents. The Browser itself
-          // continues to expose main rows only.
+          // Owner ruling: Native TSP typed `/resume` matches the Browser's
+          // listed main-session rows only. The PiTui fallback retains its
+          // existing matcher behavior.
           find: (rows: readonly SessionPickerRow[], query: string) => findSessionMatch(rows, query),
         }
     const handle = nativeReadOwnerFor(presentation).open({

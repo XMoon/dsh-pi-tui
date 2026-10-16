@@ -118,9 +118,10 @@ export function createSessionBrowserReadOwner(options: SessionBrowserReadOwnerOp
     return true
   }
 
-  const publish = (panel: ActiveRead): void => {
+  const publish = (panel: ActiveRead, initialQuery?: string): void => {
     if (!isActive(panel)) return
-    panel.handle?.setSnapshot(snapshotOf(panel))
+    const options = initialQuery === undefined ? undefined : { initialQuery }
+    panel.handle?.setSnapshot(snapshotOf(panel), options)
   }
 
   const retire = (panel: ActiveRead, closePresenter: boolean): void => {
@@ -270,9 +271,9 @@ export function createSessionBrowserReadOwner(options: SessionBrowserReadOwnerOp
 
   const changeQuery = (panel: ActiveRead, rawQuery: string, userInitiated = true): void => {
     if (!isActive(panel)) return
+    if (userInitiated) panel.userQueryChanged = true
     const query = sanitizeSessionSearchInput(rawQuery)
     if (query === panel.query) return
-    if (userInitiated) panel.userQueryChanged = true
     if (panel.queryTimer !== undefined) clearTimeout(panel.queryTimer)
     panel.queryTimer = undefined
     panel.queryController?.abort()
@@ -286,7 +287,7 @@ export function createSessionBrowserReadOwner(options: SessionBrowserReadOwnerOp
     panel.searchPage = undefined
     panel.hasMore = false
     panel.searchError = undefined
-    publish(panel)
+    publish(panel, userInitiated ? undefined : query)
     if (!isActive(panel) || query === '') return
     scheduleSearch(panel)
   }
@@ -374,7 +375,9 @@ export function createSessionBrowserReadOwner(options: SessionBrowserReadOwnerOp
         if (fallbackQuery !== undefined && !panel.userQueryChanged) {
           const previousQuery = panel.query
           changeQuery(panel, fallbackQuery, false)
-          if (panel.query === previousQuery) publish(panel)
+          if (panel.query === previousQuery) {
+            publish(panel, sanitizeSessionSearchInput(fallbackQuery))
+          }
         } else {
           publish(panel)
           if (panel.query !== '') scheduleSearch(panel)

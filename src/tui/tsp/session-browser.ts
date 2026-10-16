@@ -44,6 +44,8 @@ interface SessionBrowserPanel {
   actionFocus: BrowseAction
   query: string
   cursor: number
+  queryEdited: boolean
+  initialQueryApplied: boolean
   readerEpoch: number
   snapshot: SessionBrowserReadSnapshot
   previousBrowse: { readonly scope: BrowseScope; readonly selected: string | undefined } | undefined
@@ -472,6 +474,8 @@ export class TspSessionBrowser {
       actionFocus: 'details',
       query: '',
       cursor: 0,
+      queryEdited: false,
+      initialQueryApplied: false,
       readerEpoch: 0,
       snapshot: EMPTY_SNAPSHOT,
       previousBrowse: undefined,
@@ -480,11 +484,14 @@ export class TspSessionBrowser {
     this.change(panel)
     return {
       isDisposed: () => panel.disposed,
-      setSnapshot: (snapshot) => {
+      setSnapshot: (snapshot, options) => {
         if (this.current() !== panel) return
-        if (panel.query !== snapshot.query) {
-          panel.query = snapshot.query
-          panel.cursor = snapshot.query.length
+        if (options?.initialQuery !== undefined && !panel.initialQueryApplied) {
+          panel.initialQueryApplied = true
+          if (!panel.queryEdited) {
+            panel.query = options.initialQuery
+            panel.cursor = options.initialQuery.length
+          }
         }
         panel.snapshot = snapshot
         normalize(panel)
@@ -543,6 +550,7 @@ export class TspSessionBrowser {
   }
 
   private updateQuery(panel: SessionBrowserPanel, query: string, cursor: number): void {
+    const textChanged = query !== panel.query
     const wasSearching = queryMode(panel)
     const willSearch = sanitizeSessionSearchInput(query) !== ''
     if (!wasSearching && willSearch) {
@@ -558,7 +566,10 @@ export class TspSessionBrowser {
     panel.cursor = cursor
     panel.zone = 'list'
     const revision = panel.revision
-    panel.request.onQueryChange(query)
+    if (textChanged) {
+      panel.queryEdited = true
+      panel.request.onQueryChange(query)
+    }
     if (this.panel !== panel || panel.disposed) return
     if (panel.revision === revision) this.change(panel)
   }

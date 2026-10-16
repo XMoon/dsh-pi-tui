@@ -4,9 +4,10 @@ import test from 'node:test'
 import { connect, type PickerGroup } from '@stencil-hq/tern'
 import { mountTspRenderer } from '../src/tui/tsp/session.ts'
 import { createSessionBrowserReadOwner } from '../src/app/command/session-browser-read.ts'
+import type { SessionBrowserOpenOptions } from '../src/app/command/session-browser-read.ts'
 import type { SessionContentSearchPage, SessionProjectionSummary, SessionReader, SessionSummary } from '../src/runtime/session-reader-port.ts'
 import { createDiag } from '../src/runtime/process/diagnostics.ts'
-import { formatSessionAge } from '../src/tui/pickers/sessions.ts'
+import { findSessionMatch, formatSessionAge } from '../src/tui/pickers/sessions.ts'
 import { installTspPane, type TspPane } from './support/tsp-terminal-fixture.ts'
 import { waitUntil } from './support/tsp-runner-harness.ts'
 import type { SessionScope } from '../src/app/session/scope.ts'
@@ -85,7 +86,7 @@ async function mounted(t: { after(fn: () => unknown): void }, read: SessionReade
     ],
     hasMore: true,
   }),
-}), waitForProjection = true, expectedState: 'ready' | 'loading' | 'error' = 'ready') {
+}), waitForProjection = true, expectedState: 'ready' | 'loading' | 'error' = 'ready', openOptions: SessionBrowserOpenOptions = {}) {
   const pane = installTspPane({ sessionBrowser: true })
   t.after(() => pane.restore())
   const session = await connect({ timeout: 500, exitHooks: false })
@@ -128,7 +129,7 @@ async function mounted(t: { after(fn: () => unknown): void }, read: SessionReade
     onResumeIntent: (intent, _scope, settle) => { resumeIntents.push(intent); resumeSettlements.push(settle) },
   })
   t.after(() => owner.dispose())
-  const readHandle = owner.open()
+  const readHandle = owner.open(openOptions)
   await waitUntil(`the Session Browser picker is ${expectedState}`, () => props(pane).state === expectedState)
   if (waitForProjection) {
     await waitUntil('the first projection batch is visible', () => items(pane).some((entry) => entry.label === 'Needle current title'))
@@ -144,6 +145,74 @@ async function mounted(t: { after(fn: () => unknown): void }, read: SessionReade
     moveSubject: () => { current = false },
   }
 }
+
+test('raw query text and cursor survive a late projection while input continues', async (t) => {
+  const projection = deferred<Map<string, SessionProjectionSummary>>()
+  const searches: string[] = []
+  let projectionStarted = false
+  const m = await mounted(t, reader({
+    list: async () => [row('session-current', { live: true }), row('session-query-result')],
+    projectionBatch: async () => {
+      projectionStarted = true
+      return projection.promise
+    },
+    search: async (query) => {
+      searches.push(query)
+      return { items: [], hasMore: false }
+    },
+  }), false, 'ready', { initialQuery: 'hello' })
+  const { pane } = m
+
+  assert.equal(props(pane).query, 'hello', 'the explicit initial query seeds the native input once')
+  assert.equal(props(pane).cursor, 5)
+  assert.deepEqual(searches, ['hello'])
+  await waitUntil('the first projection batch is held', () => projectionStarted)
+  pane.key(' ')
+  await waitUntil('the trailing space reaches the native input', () => props(pane).query === 'hello ')
+  assert.equal(props(pane).cursor, 6)
+
+  projection.resolve(new Map([['session-query-result', { title: 'hello projected result' }]]))
+  await waitUntil('the late projection contributes a metadata result', () =>
+    items(pane).some((item) => item.id === 'session:session-query-result'))
+  assert.equal(props(pane).query, 'hello ')
+  assert.equal(props(pane).cursor, 6)
+  assert.deepEqual(searches, ['hello'], 'the same canonical query does not restart Host Search')
+
+  pane.key('world')
+  await waitUntil('typing continues after the retained separator', () => props(pane).query === 'hello world')
+  assert.equal(props(pane).cursor, 11)
+  assert.equal(m.fatals.length, 0)
+})
+
+test('whitespace-only input while typed Resume loads suppresses the native direct switch', async (t) => {
+  const listed = deferred<SessionSummary[] | undefined>()
+  const searches: string[] = []
+  t.after(() => listed.resolve([row('session-target')]))
+  const m = await mounted(t, reader({
+    list: async () => listed.promise,
+    search: async (query) => {
+      searches.push(query)
+      return undefined
+    },
+  }), false, 'loading', {
+    directMatch: { query: 'session-target', find: findSessionMatch },
+  })
+  const { pane } = m
+
+  pane.key(' ')
+  await waitUntil('the whitespace-only edit reaches the native input', () => props(pane).query === ' ')
+  assert.equal(props(pane).cursor, 1)
+  listed.resolve([row('session-current', { live: true }), row('session-target')])
+
+  assert.deepEqual(await m.readHandle.settlement, { kind: 'ready' })
+  await waitUntil('the Browser remains open with the listed target', () =>
+    picker(pane) !== undefined && items(pane).some((item) => item.id === 'session:session-target'))
+  assert.deepEqual(m.resumeIntents, [], 'whitespace-only user editing supersedes typed /resume')
+  assert.deepEqual(searches, [], 'an unchanged canonical query does not start Host Search')
+  assert.equal(props(pane).query, ' ')
+  assert.equal(props(pane).cursor, 1)
+  assert.equal(m.fatals.length, 0)
+})
 
 test('native Browser is one workspace tree, then a global cards union with Host-owned excerpts', async (t) => {
   const m = await mounted(t)
