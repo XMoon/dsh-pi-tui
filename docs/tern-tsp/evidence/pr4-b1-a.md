@@ -1,10 +1,10 @@
 # PR4-B1-A Session Browser read-path evidence
 
 This record covers the internal, read-only Session Browser Presenter and its
-`SessionReader` owner. The frozen plan is
+`SessionReader` owner. The frozen plan is the local ignored file
 `temp/tern_ux/dsh-pi-tui-tsp-pr4-b1-a-session-browser-read-path-implementation-plan-v1-20261015.md`
-(worktree-local). The user-visible command/admission and real Session transition
-remain B1-B work.
+(not included in the PR). The user-visible command/admission and real Session
+transition remain B1-B work.
 
 Evidence files and screenshots are generated per run under the ignored
 `temp/tern-pane-*` worktree paths; they are not committed. This document records
