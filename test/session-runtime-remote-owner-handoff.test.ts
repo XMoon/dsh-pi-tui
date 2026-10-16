@@ -14,6 +14,12 @@ import { createRemoteSessionOwnerServices } from '../src/app/remote/session-owne
 import { createSessionOwnershipCore } from '../src/app/session/ownership-core.ts'
 import { bindSessionRuntime, type SessionRuntimeSurface } from '../src/app/session/runtime.ts'
 import type { SessionOwnerRef } from '../src/app/session/subject.ts'
+import {
+  createSessionScopeAuthority,
+  type SessionScope,
+  type SessionScopeAuthority,
+  type SessionScopeLive,
+} from '../src/app/session/scope.ts'
 import type {
   CreateResult,
   ForkResult,
@@ -69,6 +75,11 @@ interface OpenArm {
 
 function harness() {
   const events: string[] = []
+  const diagnostics: Array<{ readonly message: string; readonly fields?: Record<string, unknown> }> = []
+  const diag: Diag = {
+    ...fakeDiag,
+    error: (message, fields) => { diagnostics.push({ message, fields }) },
+  }
   const calls = { forks: 0, opens: [] as string[], creates: 0, fromHandle: 0 }
   const live = new Map<string, { binding: FakeBinding; refs: number }>()
   const arms = new Map<string, OpenArm>()
@@ -109,6 +120,8 @@ function harness() {
     binding: (id: string) => live.get(id)?.binding,
   })
   let failCompletionIdentity = false
+  let currentScope = true
+  let scopeAuthority: SessionScopeAuthority | undefined
   let failNextSessionId = false
   let sessionIdCalls = 0
   let throwOnSessionIdCall = 0
@@ -179,6 +192,7 @@ function harness() {
   }
 
   let disposed = false
+  let failNextCatalog = false
   const surface: SessionRuntimeSurface = {
     warnRetirement: () => {},
     warnRetirementSkipped: () => {},
@@ -190,7 +204,14 @@ function harness() {
     resetSubmitLatency: () => {},
     setCompletionOwner: (identity) => { events.push(`completion:${String(identity)}`) },
     initLiveSession: async (owner) => { events.push(`init:${services.owners.sessionId(owner)}`) },
-    refreshLiveCatalog: async (owner) => { events.push(`catalog:${services.owners.sessionId(owner)}`) },
+    refreshLiveCatalog: async (owner) => {
+      const sessionId = services.owners.sessionId(owner)
+      events.push(`catalog:${sessionId}`)
+      if (failNextCatalog) {
+        failNextCatalog = false
+        throw new Error('controlled catalog refresh failure')
+      }
+    },
     reportSwitch: (from, to) => { events.push(`switch:${from ?? '(none)'}->${services.owners.sessionId(to)}`) },
     clearUnpinnedDrafts: () => {},
     dropOutgoingActiveDraft: () => { events.push('dropDraft') },
@@ -226,8 +247,8 @@ function harness() {
     lifecycle,
     lifecycleSignal: controller.signal,
     surface,
-    isScopeCurrent: () => true,
-    diag: fakeDiag,
+    isScopeCurrent: (scope) => scopeAuthority?.isCurrent(scope) ?? currentScope,
+    diag,
   })
 
   /** Publish one retained session as the current owner (the startup-resume shape). */
@@ -300,6 +321,10 @@ function harness() {
     failNextDropWithSideEffect,
     failNextCompletionIdentity: (): void => { failCompletionIdentity = true },
     failNextSessionId: (): void => { failNextSessionId = true },
+    setScopeCurrent: (current: boolean): void => { currentScope = current },
+    setScopeAuthority: (authority: SessionScopeAuthority): void => { scopeAuthority = authority },
+    failNextCatalogRefresh: (): void => { failNextCatalog = true },
+    diagnostics,
     sessionIdCallCount: (): number => sessionIdCalls,
     throwOnSessionIdCall: (call: number): void => { throwOnSessionIdCall = call },
   }
@@ -326,6 +351,25 @@ test('H1: ordinary switch = retain NEW → commit NEW → release OLD → post-h
   assert.equal(h.countRefs('session-a'), 0, 'the OLD generation is fully released')
   assert.equal(h.core.currentSessionId(), 'session-b')
   assert.ok(h.isLive('session-b'), 'the NEW generation stays retained')
+})
+
+test('B1-B: a committed switch survives a post-commit catalog failure and reports it', async () => {
+  const h = harness()
+  h.publishRetained('session-a')
+  h.failNextCatalogRefresh()
+
+  assert.equal(await h.runtime.switchSession('session-b'), undefined,
+    'the post-commit catalog failure does not turn a committed switch into a refusal')
+  assert.equal(h.core.currentSessionId(), 'session-b', 'the published child remains current')
+  assert.equal(h.countRefs('session-a'), 0, 'the old owner is still retired')
+  assert.deepEqual(h.calls.opens, ['session-b'])
+  const catalogIndex = h.events.indexOf('catalog:session-b')
+  const reportIndex = h.events.indexOf('switch:session-a->session-b')
+  assert.ok(catalogIndex >= 0 && reportIndex > catalogIndex,
+    'switch reporting follows the attempted catalog refresh')
+  const failure = h.diagnostics.find((entry) => entry.message === 'transition retire failed (child committed)')
+  assert.deepEqual(failure?.fields?.['failures'], ['catalog refresh: controlled catalog refresh failure'],
+    'the post-commit failure is recorded with its truthful catalog phase')
 })
 
 test('PR3-B §7.3 (F1 timing): the drop rides the publication commit — BEFORE the new session\'s init/catalog', async () => {
@@ -432,6 +476,97 @@ test('H2: a NEW superseded before commit is released; OLD stays current; no init
   assert.equal(h.core.currentSessionId(), 'session-a', 'OLD remains current')
   assert.ok(!h.events.some(entry => entry.startsWith('init:')), 'no surface init may run for a superseded NEW')
   assert.ok(!h.events.some(entry => entry.startsWith('switch:')), 'no switch may be reported')
+})
+
+test('B1-B: a guarded switch rechecks scope inside the gate before navigation side effects', async () => {
+  const h = harness()
+  h.publishRetained('session-a')
+  const expectedScope = { sessionId: 'session-a' } as SessionScope
+  let releaseOpen!: () => void
+  const heldOpen = new Promise<void>((resolve) => { releaseOpen = resolve })
+  h.arms.set('session-c', { duringOpen: () => heldOpen })
+  let switchC: Promise<string | undefined> | undefined
+  let switchB: Promise<string | undefined> | undefined
+  try {
+    switchC = h.runtime.switchSession('session-c')
+    await new Promise<void>((resolve) => setImmediate(resolve))
+    assert.deepEqual(h.calls.opens, ['session-c'], 'C holds the transition gate during open')
+
+    const epochBeforeB = h.core.navigationEpoch()
+    switchB = h.runtime.switchSession('session-b', expectedScope)
+    assert.equal(h.core.navigationEpoch(), epochBeforeB, 'the captured UI intent does not bump navigation before gate admission')
+    assert.deepEqual(h.calls.opens, ['session-c'], 'B remains queued behind C')
+
+    h.setScopeCurrent(false)
+    releaseOpen()
+    assert.equal(await switchC, undefined)
+    const epochAfterC = h.core.navigationEpoch()
+    assert.equal(await switchB, undefined, 'the stale queued intent is silently refused')
+    assert.equal(h.core.currentSessionId(), 'session-c')
+    assert.deepEqual(h.calls.opens, ['session-c'], 'stale B never reaches SessionLifecycle.open')
+    assert.equal(h.core.navigationEpoch(), epochAfterC, 'stale B has no post-gate navigation side effect')
+  } finally {
+    releaseOpen()
+    if (switchC !== undefined) await switchC
+    if (switchB !== undefined) await switchB
+  }
+})
+
+test('B1-B: a queued captured scope stays stale through A→C→A even when the Session ID returns', async () => {
+  const h = harness()
+  h.publishRetained('session-a')
+  const scopeAuthority = createSessionScopeAuthority({
+    current: (): SessionScopeLive => {
+      const sessionId = h.core.currentSessionId()
+      const subject = h.core.captureSubject()
+      if (sessionId === undefined || subject === undefined) {
+        assert.equal(sessionId, undefined)
+        assert.equal(subject, undefined)
+        return { subject: undefined, sessionId: undefined, generation: h.core.generation() }
+      }
+      return { subject, sessionId, generation: h.core.generation() }
+    },
+    isSubjectCurrent: (subject) => h.core.isSubjectCurrent(subject),
+  })
+  h.setScopeAuthority(scopeAuthority)
+  const capturedA = scopeAuthority.captureLive()
+  assert.ok(capturedA)
+
+  let releaseC!: () => void
+  const heldC = new Promise<void>((resolve) => { releaseC = resolve })
+  h.arms.set('session-c', { duringOpen: () => heldC })
+  let switchC: Promise<string | undefined> | undefined
+  let reopenA: Promise<string | undefined> | undefined
+  let staleB: Promise<string | undefined> | undefined
+  try {
+    switchC = h.runtime.switchSession('session-c')
+    await new Promise<void>((resolve) => setImmediate(resolve))
+    assert.deepEqual(h.calls.opens, ['session-c'], 'C holds the transition gate during open')
+
+    reopenA = h.runtime.switchSession('session-a')
+    const epochBeforeStaleB = h.core.navigationEpoch()
+    staleB = h.runtime.switchSession('session-b', capturedA)
+    assert.equal(h.core.navigationEpoch(), epochBeforeStaleB,
+      'the captured UI intent does not bump navigation while queued')
+    assert.deepEqual(h.calls.opens, ['session-c'], 'A and B remain queued behind C')
+
+    releaseC()
+    assert.equal(await switchC, undefined)
+    assert.equal(await reopenA, undefined)
+    assert.equal(h.core.currentSessionId(), 'session-a', 'the same Session ID has returned under a new generation')
+    assert.equal(scopeAuthority.isCurrent(capturedA), false, 'the original captured owner remains stale')
+    const epochAfterReopen = h.core.navigationEpoch()
+
+    assert.equal(await staleB, undefined, 'the old UI intent is silently refused inside the gate')
+    assert.equal(h.core.currentSessionId(), 'session-a')
+    assert.deepEqual(h.calls.opens, ['session-c', 'session-a'], 'stale B never reaches SessionLifecycle.open')
+    assert.equal(h.core.navigationEpoch(), epochAfterReopen, 'stale B has no post-gate navigation side effect')
+  } finally {
+    releaseC()
+    if (switchC !== undefined) await switchC
+    if (reopenA !== undefined) await reopenA
+    if (staleB !== undefined) await staleB
+  }
 })
 
 test('H3: a same-id reopen is a NEW owner generation; the stale owner never becomes current', async () => {

@@ -236,6 +236,8 @@ export interface SubmissionControllerDeps<ExactAgent extends SubmissionAgentLike
   readonly supportsModelPickerUi?: () => boolean
   /** The installed native Preset presenter, including its terminal capability. */
   readonly supportsPresetPickerUi?: () => boolean
+  /** The installed native Session Browser presenter, including its capabilities. */
+  readonly supportsSessionBrowserUi?: () => boolean
   /**
    * PR3-B §7.3 (F2): whether this renderer RETAINS a stale submission's
    * draft restore across a session switch. PiTui = true (steer.test.ts's
@@ -1697,6 +1699,7 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
       const availability = tspBuiltinAvailability(classification, parsed.name, {
         modelPicker: deps.supportsModelPickerUi?.() === true,
         presetPicker: deps.supportsPresetPickerUi?.() === true,
+        sessionBrowser: deps.supportsSessionBrowserUi?.() === true,
       })
       // ONLY the TUI-owned builtin family is this gate's business. A Host
       // command, an extension contribution, a skill invocation or an ordinary

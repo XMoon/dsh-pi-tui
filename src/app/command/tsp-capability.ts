@@ -18,9 +18,9 @@
  *   spelling is never captured here);
  * - it holds no state and performs no IO.
  *
- * The unconditional set is the two exit builtins. PR4 additionally admits the
- * TUI builtins whose native presenter the mounted renderer really installed
- * (`/model`, `/preset`); every other TUI builtin is refused.
+ * The unconditional set is the two exit builtins. Native Model, Preset and
+ * Session Browser commands are admitted only when their mounted presenters
+ * are available; every other TUI builtin is refused.
  * @module @xmoon76/dsh-pi-tui/app/command/tsp-capability
  */
 
@@ -47,6 +47,7 @@ export const TSP_SUPPORTED_TUI_BUILTINS: ReadonlySet<string> = new Set(['exit', 
 export interface TspBuiltinPickers {
   readonly modelPicker?: boolean
   readonly presetPicker?: boolean
+  readonly sessionBrowser?: boolean
 }
 
 /**
@@ -91,6 +92,7 @@ export function tspBuiltinAvailability(
   return TSP_SUPPORTED_TUI_BUILTINS.has(name)
     || (name === 'model' && pickers.modelPicker === true)
     || (name === 'preset' && pickers.presetPicker === true)
+    || ((name === 'sessions' || name === 'resume' || name === 'search') && pickers.sessionBrowser === true)
     ? { kind: 'available' }
     : { kind: 'unsupported' }
 }

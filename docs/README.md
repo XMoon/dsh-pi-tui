@@ -43,8 +43,9 @@ knows where the rest lives.
 | `keybinding-architecture.md` | contributors | The user-orchestrable keybinding design: the semantic action inventory (`app.*`), the context-aware effective keymap, the input ladder, the leader (M6) machinery, user configuration, and the static gate |
 | `extension-tiers.md` | plugin authors | The three-tier contract table and the current tier status (`ADVANCED_API_LEVEL` / `UNSTABLE_API_LEVEL`) |
 | `tern-tsp.md` | contributors | The Tern Surface Protocol (TSP) integration entry point: the protocol/SDK boundary, implementation status and limits, capability matrix, and per-PR evidence ledger |
-| `tern-tsp/session-browser.md` | TSP contributors | Internal read-only Session Browser authority, workspace/search/Reader semantics, lifecycle and B1-B handoff |
-| `tern-tsp/evidence/pr4-b1-a.md` | TSP contributors | PR4-B1-A frozen-plan coverage, real Tern headless observations, evidence tiers and explicit unverified limits |
+| `tern-tsp/session-browser.md` | TSP contributors | Complete Session Browser authority, workspace/search/Reader semantics, command admission, guarded Resume lifecycle and qualification limits |
+| `tern-tsp/evidence/pr4-b1-a.md` | TSP contributors | PR4-B1-A historical read-path coverage, real Tern headless observations, evidence tiers and explicit unverified limits |
+| `tern-tsp/evidence/pr4-b1-b.md` | TSP contributors | PR4-B1-B command/Resume coverage, Direct source-to-sink evidence, real Tern headless qualification and unverified limits |
 | `tern-tsp/foundation.md` | TSP contributors | Verified runtime/Surface owners, lifecycle, node/event identity, modal/focus, capability and evidence boundaries; source-qualified, not a universal protocol specification |
 | `tern-tsp/upstream-reference.md` | TSP contributors | Version-pinned official SDK / oh-my-pi / protocol reference, semantic differences and reusable patterns without copying another runtime |
 | `tern-tsp/evidence/foundation-20261013.md` | TSP contributors | Dated audit (A1–A7), the observed Tern 0.8.3 headless evidence tiers, exact provenance, and remaining unknowns |

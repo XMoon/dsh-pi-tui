@@ -50,6 +50,7 @@ import type { CommandRuntime } from './runtime.ts'
 import type { ModelSelectionOwner, SelectionRef } from './model-selection.ts'
 import type { ModelPresentation } from './model-presentation.ts'
 import type { PresetPresentation } from './preset-presentation.ts'
+import type { SessionBrowserPresentation } from './session-browser-presentation.ts'
 
 /** The catalog capability slice the command surface subscribes to. */
 export interface CommandCatalogCapability {
@@ -129,6 +130,8 @@ export interface CommandSurfaceDeps<Selection extends ModelSelectionValue, Exact
   readonly modelPresentation?: () => ModelPresentation | undefined
   /** Only the Preset presenter; never an alternate command executor. */
   readonly presetPresentation?: () => PresetPresentation | undefined
+  /** Native Session Browser presenter, read live; absent on unsupported renderers. */
+  readonly sessionBrowserPresentation?: () => SessionBrowserPresentation | undefined
   /** PR3-A: the renderer-neutral notice sink (registration/refresh failures
    *  are background-reachable under a read-only TSP renderer). */
   readonly notify: (text: string, kind?: 'error' | 'info') => void
@@ -240,7 +243,7 @@ export interface CommandSurfaceDeps<Selection extends ModelSelectionValue, Exact
   readonly session: {
     ensureSession(): Promise<void>
     withWriter: CommandSessionRuntime['withWriter']
-    switchSession(sessionId: string): Promise<string | undefined>
+    switchSession(sessionId: string, expectedScope?: SessionScope): Promise<string | undefined>
     forkSession: NonNullable<TuiCommandRunner['forkSession']>
     transitionTo: TuiCommandRunner['transitionTo']
   }
@@ -897,6 +900,7 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
     const facade: RunnerFacade<Selection, Id> = {
       ctx: deps.ctx,
       app: deps.app(),
+      get sessionBrowserPresentation() { return deps.sessionBrowserPresentation?.() },
       diag: deps.diag,
       get currentSessionId() { return deps.ownership.currentSessionId() },
       // The A3-5 semantic command runtime (scope/currentness, scoped catalog,
@@ -1043,7 +1047,7 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
         deps.backend.interaction.setApprovalPolicy(scope.sessionId, value)
         return 'applied' as const
       },
-      switchSession: (sessionId) => deps.session.switchSession(sessionId),
+      switchSession: (sessionId, expectedScope) => deps.session.switchSession(sessionId, expectedScope),
       forkSession: (sourceSessionId) => deps.session.forkSession(sourceSessionId),
       transitionTo: (steps) => deps.session.transitionTo(steps),
       currentPreset: deps.presets.current,

@@ -12,8 +12,10 @@
 import { scheduler } from 'node:timers/promises'
 import type { CommandInvocation, CommandResult } from '@deepseek-ai/dsh-commands'
 import type { PickerCategory, TuiApp } from '../../tui-app.ts'
+import { createSessionBrowserReadOwner, type SessionBrowserReadOwner, type SessionBrowserReadSettlement } from '../../app/command/session-browser-read.ts'
+import type { SessionBrowserPresentation } from '../../app/command/session-browser-presentation.ts'
 import { TransitionInProgressError } from '../../app/session/operation-barrier.ts'
-import { SessionScopeSupersededError } from '../../app/session/scope.ts'
+import { SessionScopeSupersededError, type SessionScope } from '../../app/session/scope.ts'
 import { cancellationError, isCancellation, runOwned } from '../../runtime/process/tasks.ts'
 import { safeErrorMessage } from '../../runtime/process/errors.ts'
 import { LifecycleError } from '../../runtime/session-lifecycle-port.ts'
@@ -62,6 +64,7 @@ type SessionCommandRunner = Pick<
   | 'requireLiveSessionScope'
   | 'sessionCwd'
   | 'sessionReader'
+  | 'sessionBrowserPresentation'
   | 'sessionWriter'
   | 'signal'
   | 'switchSession'
@@ -258,13 +261,71 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
    * in-flight content search exactly like its scan. */
   let activeContentSearchTimer: ReturnType<typeof setTimeout> | undefined
   let activeContentSearch: AbortController | undefined
+  let nativeReadOwner: SessionBrowserReadOwner | undefined
+  let nativePresentation: SessionBrowserPresentation | undefined
+
+  const nativeReadOwnerFor = (presentation: SessionBrowserPresentation): SessionBrowserReadOwner => {
+    if (nativeReadOwner !== undefined && nativePresentation === presentation) return nativeReadOwner
+    nativeReadOwner?.dispose()
+    nativePresentation = presentation
+    nativeReadOwner = createSessionBrowserReadOwner({
+      reader: runner.sessionReader,
+      presentation,
+      captureSubject: () => {
+        const scope = runner.captureSessionScope()
+        return {
+          scope,
+          subject: {
+            currentSessionId: scope.sessionId,
+            currentCwd: runner.sessionCwd(),
+            isCurrent: () => runner.isSessionScopeCurrent(scope),
+          },
+        }
+      },
+      diag: runner.diag,
+      sessionId: () => runner.currentSessionId,
+      onResumeIntent: (intent, scope, settle) => {
+        if (!runner.isSessionScopeCurrent(scope)
+          || intent.currentSessionId !== scope.sessionId
+          || intent.sessionId === scope.sessionId) {
+          settle()
+          return
+        }
+        runOwned('session browser resume', () => runner.switchSession(intent.sessionId, scope), {
+          diag: runner.diag,
+          sessionId: () => intent.sessionId,
+          isCancellation: () => runner.signal.aborted,
+          onResult: (error) => {
+            try {
+              if (error !== undefined && runner.isSessionScopeCurrent(scope)) {
+                presentation.notify(sanitizeTerminalText(error), 'error')
+              }
+            } finally {
+              settle()
+            }
+          },
+          onCancel: settle,
+          onError: (error) => {
+            try {
+              if (runner.isSessionScopeCurrent(scope)) {
+                presentation.notify(`session switch failed: ${sanitizeTerminalText(safeErrorMessage(error))}`, 'error')
+              }
+            } finally {
+              settle()
+            }
+          },
+        })
+      },
+    })
+    return nativeReadOwner
+  }
 
   /** The narrow open options the three Session Browser entries really need
    * (plan §8.2) — not a controller/framework abstraction. */
   interface SessionPickerOpenOptions {
     readonly header: 'sessions' | 'resume' | 'search'
     /** `/resume <arg>`: after the ONE shared listing lands, resolve the
-     * argument as a direct id/prefix match — a unique match closes the
+     * argument as a direct id/prefix match — the first listed match closes the
      * picker and switches; no match falls through to the filtered picker
      * (the argument stays as the live search query). */
     readonly directMatchQuery?: string
@@ -272,6 +333,35 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
      * rejected BEFORE the overlay opens. */
     readonly requireQuery?: boolean
   }
+  const openNativeSessionBrowser = (
+    invocation: { rawInput: string },
+    options: SessionPickerOpenOptions,
+    presentation: SessionBrowserPresentation,
+  ): Promise<{ kind: 'success' } | { kind: 'error'; text: string }> => {
+    const initialQuery = options.header === 'sessions' || options.header === 'search'
+      ? invocation.rawInput.trim()
+      : undefined
+    const directMatch = options.directMatchQuery === undefined
+      ? undefined
+      : {
+          query: options.directMatchQuery,
+          // Owner ruling: the existing typed `/resume` path matches the full
+          // official Reader listing, including subagents. The Browser itself
+          // continues to expose main rows only.
+          find: (rows: readonly SessionPickerRow[], query: string) => findSessionMatch(rows, query),
+        }
+    const handle = nativeReadOwnerFor(presentation).open({
+      ...(initialQuery === undefined ? {} : { initialQuery }),
+      ...(directMatch === undefined ? {} : { directMatch }),
+    })
+    if (directMatch === undefined) return Promise.resolve({ kind: 'success' })
+    return handle.settlement.then((result: SessionBrowserReadSettlement) => {
+      if (result.kind === 'matched' || result.kind === 'ready') return { kind: 'success' }
+      if (result.kind === 'refused') return { kind: 'error', text: result.text }
+      return { kind: 'error', text: 'resume cancelled' }
+    })
+  }
+
   const openSessionPicker = async (
     invocation: { rawInput: string },
     options: SessionPickerOpenOptions,
@@ -279,6 +369,8 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
     if (options.requireQuery === true && invocation.rawInput.trim() === '') {
       return { kind: 'error', text: 'search needs a query' }
     }
+    const presentation = runner.sessionBrowserPresentation
+    if (presentation !== undefined) return openNativeSessionBrowser(invocation, options, presentation)
     // The current marker is the live session's id; before the first session
     // (deferred start) no row is marked current, and the picker can still
     // browse and switch to a persisted session without creating one.

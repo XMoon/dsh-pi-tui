@@ -3,9 +3,8 @@
  *
  * The predicate is the module under test here; its PRODUCTION consumer (the
  * `SubmissionController` admission) is exercised end-to-end on the real runner
- * in `tern-tsp-runner-interactive.test.ts` with an UNKNOWN-slash-line negative
- * control (the Host-same-name winner case needs the official Host catalog
- * fixture and is tracked with the B2 qualification work, not claimed here). This file deliberately does NOT re-implement the
+ * in `tern-tsp-runner-interactive.test.ts` and `tern-tsp-direct-admission.test.ts`
+ * with Unknown-slash and Host-same-name controls. This file deliberately does NOT re-implement the
  * consumer's family guard: a helper that supplies the guard production lacks
  * would be green while production misroutes (the B2 review's F1).
  *
@@ -36,9 +35,9 @@ function classify(facts: {
   })
 }
 
-// ── The predicate: exactly the exit pair is available for the TUI family ────
+// ── Only the exit pair is unconditional; native presenters are capability-gated ─
 
-test('B2: the TSP builtin capability admits exactly /exit and /quit', () => {
+test('the TSP builtin capability unconditionally admits /exit and /quit', () => {
   assert.deepEqual([...TSP_SUPPORTED_TUI_BUILTINS].sort(), ['exit', 'quit'])
   for (const name of ['exit', 'quit']) {
     assert.deepEqual(tspBuiltinAvailability(classify({ tuiCommand: true }), name), { kind: 'available' },
@@ -47,6 +46,33 @@ test('B2: the TSP builtin capability admits exactly /exit and /quit', () => {
   for (const name of ['settings', 'help', 'status', 'tasks', 'model', 'preset', 'title', 'footer', 'focus', 'display']) {
     assert.deepEqual(tspBuiltinAvailability(classify({ tuiCommand: true }), name), { kind: 'unsupported' },
       `/${name} needs PiTui UI and is refused on the TSP renderer`)
+  }
+})
+
+// ── The FAMILY is part of the result (the F1 fix) ───────────────────────────
+
+test('B1-B: native Session Browser commands require the mounted capability', () => {
+  const tui = classify({ tuiCommand: true })
+  for (const name of ['sessions', 'resume', 'search']) {
+    assert.deepEqual(tspBuiltinAvailability(tui, name), { kind: 'unsupported' }, `/${name} is refused without the Browser`)
+    assert.deepEqual(tspBuiltinAvailability(tui, name, { sessionBrowser: true }), { kind: 'available' },
+      `/${name} is admitted only when the Browser presenter is installed`)
+  }
+})
+
+test('B1-B: the Session Browser capability never captures a non-TUI family', () => {
+  const browser = { sessionBrowser: true }
+  const hostClaimed = classify({ hostClaim: { claimed: true, attachments: false }, tuiCommand: true })
+  assert.deepEqual(tspBuiltinAvailability(hostClaimed, 'sessions', browser), { kind: 'not-a-tui-builtin' })
+  for (const facts of [
+    { extensionCommand: true },
+    { skillInvocation: true },
+    {},
+  ]) {
+    const classification = classify(facts)
+    for (const name of ['sessions', 'resume', 'search']) {
+      assert.deepEqual(tspBuiltinAvailability(classification, name, browser), { kind: 'not-a-tui-builtin' })
+    }
   }
 })
 

@@ -7,11 +7,17 @@ import { connect, type PickerGroup } from '@stencil-hq/tern'
 import { join } from 'node:path'
 import { mountTspRenderer } from '../src/tui/tsp/session.ts'
 import { createSessionBrowserReadOwner } from '../src/app/command/session-browser-read.ts'
+import type {
+  SessionBrowserPresentation,
+  SessionBrowserReadSnapshot,
+  SessionBrowserResumeIntent,
+} from '../src/app/command/session-browser-presentation.ts'
 import { DirectSessionReader } from '../src/runtime/direct/session-direct.ts'
-import { workspaceKey } from '../src/tui/pickers/sessions.ts'
+import { findSessionMatch, workspaceKey } from '../src/tui/pickers/sessions.ts'
 import type { DurableModelSelectionReader } from '../src/runtime/direct/model-selection-direct.ts'
 import { createDiag } from '../src/runtime/process/diagnostics.ts'
 import { installTspPane, type TspPane } from './support/tsp-terminal-fixture.ts'
+import type { SessionScope } from '../src/app/session/scope.ts'
 import { createDirectTspFixture, waitFor } from './support/direct-tsp-fixture.ts'
 import { pickerNode, pickerProps, sendAction } from './support/tsp-picker-wire.ts'
 
@@ -66,9 +72,12 @@ test('REAL_DIRECT_HEADLESS: persisted main Session → DirectSessionReader → p
       reader: directReader,
       presentation: browserPresentation,
       captureSubject: () => ({
-        currentSessionId: undefined,
-        currentCwd: fixture.workRoot,
-        isCurrent: () => true,
+        subject: {
+          currentSessionId: undefined,
+          currentCwd: fixture.workRoot,
+          isCurrent: () => true,
+        },
+        scope: { sessionId: undefined } as SessionScope,
       }),
       diag,
       sessionId: () => 'blank-live-1',
@@ -175,9 +184,12 @@ test('REAL_DIRECT_HEADLESS: cross-workspace persisted Fork lineage reaches the p
       reader: directReader,
       presentation: browserPresentation,
       captureSubject: () => ({
-        currentSessionId: 'blank-live-1',
-        currentCwd: fixture.workRoot,
-        isCurrent: () => true,
+        subject: {
+          currentSessionId: 'blank-live-1',
+          currentCwd: fixture.workRoot,
+          isCurrent: () => true,
+        },
+        scope: { sessionId: 'blank-live-1' } as SessionScope,
       }),
       diag,
       sessionId: () => 'blank-live-1',
@@ -212,6 +224,82 @@ test('REAL_DIRECT_HEADLESS: cross-workspace persisted Fork lineage reaches the p
     diag.dispose()
     await renderer?.dispose()
     pane?.restore()
+    await fixture.settle()
+  }
+})
+
+test('DirectSessionReader: persisted subagent is excluded from native typed-match targets', async (t) => {
+  const { testLifecycle } = await import('./support/temp-lifecycle.ts')
+  const life = testLifecycle(t)
+  const parentId = 'persisted-parent'
+  const childId = 'persisted-child'
+  const fixture = await createDirectTspFixture(life, {
+    persistedBlankSession: { id: parentId },
+    persistedBlankSessions: [{
+      id: childId,
+      parentSession: parentId,
+      origin: 'subagent',
+      delegationDepth: 1,
+    }],
+  })
+  const diag = createDiag({ stderrLevel: 'off' })
+  let owner: ReturnType<typeof createSessionBrowserReadOwner> | undefined
+  try {
+    const directReader = new DirectSessionReader(fixture.ctx, undefined, {
+      durableProjectionForSession: (): ReturnType<DurableModelSelectionReader['durableProjectionForSession']> => ({
+        lastUsed: null,
+        next: null,
+      }),
+    })
+    const directRows = await directReader.list(undefined)
+    assert.ok(directRows)
+    const child = directRows.find((entry) => entry.id === childId)
+    assert.equal(child?.origin, 'subagent')
+    assert.equal(child?.parentSession, parentId)
+    assert.equal(findSessionMatch(directRows, childId)?.id, childId,
+      'the unfiltered official corpus contains a match, but Native TSP admission is main-row-only')
+
+    const snapshots: SessionBrowserReadSnapshot[][] = []
+    const closed: boolean[] = []
+    const presentation: SessionBrowserPresentation = {
+      open: () => {
+        const index = snapshots.length
+        snapshots.push([])
+        closed.push(false)
+        return {
+          isDisposed: () => closed[index]!,
+          setSnapshot: (snapshot) => { if (!closed[index]) snapshots[index]!.push(snapshot) },
+          close: () => { closed[index] = true },
+        }
+      },
+      notify() {},
+    }
+    const intents: SessionBrowserResumeIntent[] = []
+    owner = createSessionBrowserReadOwner({
+      reader: directReader,
+      presentation,
+      captureSubject: () => ({
+        subject: { currentSessionId: undefined, currentCwd: fixture.workRoot, isCurrent: () => true },
+        scope: { sessionId: undefined } as SessionScope,
+      }),
+      diag,
+      sessionId: () => parentId,
+      onResumeIntent: (intent, _scope, settle) => { intents.push(intent); settle() },
+    })
+    const browse = owner.open()
+    assert.deepEqual(await browse.settlement, { kind: 'ready' })
+    assert.deepEqual(snapshots[0]?.at(-1)?.rows.map((entry) => entry.id), [parentId],
+      'the same real Direct list hides the persisted subagent from visible Browser rows')
+    browse.close()
+
+    const direct = owner.open({ directMatch: { query: childId, find: findSessionMatch } })
+    assert.deepEqual(await direct.settlement, { kind: 'ready' })
+    assert.deepEqual(intents, [], 'the hidden persisted child cannot emit a Native TSP Resume intent')
+    assert.equal(snapshots[1]?.at(-1)?.query, childId, 'a hidden child ID falls back to the main-only Browser query')
+    assert.deepEqual(snapshots[1]?.at(-1)?.rows.map((entry) => entry.id), [parentId])
+  } finally {
+    owner?.dispose()
+    diag.dispose()
     await fixture.settle()
   }
 })

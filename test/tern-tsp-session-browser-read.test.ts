@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { createDiag } from '../src/runtime/process/diagnostics.ts'
 import { createSessionBrowserReadOwner } from '../src/app/command/session-browser-read.ts'
+import { findSessionMatch } from '../src/tui/pickers/sessions.ts'
 import type {
   SessionBrowserPanelHandle,
   SessionBrowserPanelRequest,
@@ -12,6 +13,7 @@ import type {
 } from '../src/app/command/session-browser-presentation.ts'
 import type { SessionProjectionSummary, SessionReader, SessionSummary } from '../src/runtime/session-reader-port.ts'
 import { waitUntil } from './support/tsp-runner-harness.ts'
+import type { SessionScope } from '../src/app/session/scope.ts'
 
 const DIAG = () => createDiag({ stderrLevel: 'off' })
 const row = (id: string, overrides: Partial<SessionSummary> = {}): SessionSummary => ({
@@ -70,6 +72,10 @@ const subject = (isCurrent: () => boolean = () => true) => ({
   currentCwd: '/workspace/project',
   isCurrent,
 })
+const captured = (isCurrent?: () => boolean) => ({
+  subject: subject(isCurrent),
+  scope: { sessionId: 'session-current' } as SessionScope,
+})
 
 function ownerFor(
   presentation: PresentationProbe,
@@ -80,7 +86,7 @@ function ownerFor(
   const owner = createSessionBrowserReadOwner({
     reader: value,
     presentation,
-    captureSubject: () => subject(options.isCurrent),
+    captureSubject: () => captured(options.isCurrent),
     diag,
     sessionId: () => 'session-current',
     ...(options.onResumeIntent === undefined ? {} : { onResumeIntent: options.onResumeIntent }),
@@ -112,7 +118,7 @@ test('synchronous presentation retirement closes the returned handle before any 
       },
       notify() {},
     },
-    captureSubject: () => subject(),
+    captureSubject: () => captured(),
     diag,
   })
   t.after(() => { owner.dispose(); diag.dispose() })
@@ -268,6 +274,110 @@ test('Resume intent stays scoped to a listed non-current row and captured subjec
   request.onResumeIntent({ sessionId: 'session-unlisted', currentSessionId: 'session-current', source: 'activate' })
   request.onResumeIntent({ sessionId: 'session-other', currentSessionId: 'session-current', source: 'activate' })
   assert.deepEqual(intents, [{ sessionId: 'session-other', currentSessionId: 'session-current', source: 'activate' }])
+})
+
+test('typed direct resume matches main-session rows in Reader order only', async (t) => {
+  const presentation = new PresentationProbe()
+  const intents: SessionBrowserResumeIntent[] = []
+  const { owner, diag } = ownerFor(presentation, reader({
+    list: async () => [
+      row('session-subagent-first', { origin: 'subagent' }),
+      row('session-main-second'),
+    ],
+  }), { onResumeIntent: (intent) => intents.push(intent) })
+  t.after(() => { owner.dispose(); diag.dispose() })
+  const handle = owner.open({ directMatch: { query: 'session-', find: findSessionMatch } })
+
+  assert.deepEqual(await handle.settlement, { kind: 'matched', sessionId: 'session-main-second' })
+  assert.deepEqual(intents, [{
+    sessionId: 'session-main-second',
+    currentSessionId: 'session-current',
+    source: 'direct',
+  }], 'after excluding subagents, the first main-session match retains official Reader order')
+  assert.deepEqual(presentation.latest()?.rows.map((entry) => entry.id), ['session-main-second'],
+    'the Browser presentation still excludes every subagent row')
+  assert.equal(presentation.closed[0], true, 'a direct match closes after the existing switch handoff starts')
+})
+
+test('typed direct resume preserves Reader order across ambiguous main prefix and exact candidates', async (t) => {
+  const presentation = new PresentationProbe()
+  const intents: SessionBrowserResumeIntent[] = []
+  const { owner, diag } = ownerFor(presentation, reader({
+    list: async () => [
+      row('session-alpha-subagent', { origin: 'subagent' }),
+      row('session-alpha-first-main'),
+      row('session-alpha'),
+      row('session-alpha-second-main'),
+    ],
+  }), { onResumeIntent: (intent) => intents.push(intent) })
+  t.after(() => { owner.dispose(); diag.dispose() })
+  const handle = owner.open({ directMatch: { query: 'session-alpha', find: findSessionMatch } })
+
+  assert.deepEqual(await handle.settlement, { kind: 'matched', sessionId: 'session-alpha-first-main' })
+  assert.deepEqual(intents, [{
+    sessionId: 'session-alpha-first-main',
+    currentSessionId: 'session-current',
+    source: 'direct',
+  }], 'the first listed main prefix candidate wins ahead of a later exact-id candidate')
+  assert.deepEqual(presentation.latest()?.rows.map((entry) => entry.id), [
+    'session-alpha-first-main',
+    'session-alpha',
+    'session-alpha-second-main',
+  ], 'the excluded subagent does not disturb the ordered main candidate corpus')
+  assert.equal(presentation.closed[0], true)
+})
+
+test('closing a pending direct-match read settles its request and ignores a late matching list', async (t) => {
+  const presentation = new PresentationProbe()
+  const listed = deferred<SessionSummary[] | undefined>()
+  const intents: SessionBrowserResumeIntent[] = []
+  const { owner, diag } = ownerFor(presentation, reader({ list: async () => listed.promise }), {
+    onResumeIntent: (intent) => intents.push(intent),
+  })
+  t.after(() => { owner.dispose(); diag.dispose() })
+  const handle = owner.open({ directMatch: { query: 'session-direct-target', find: findSessionMatch } })
+  const beforeClose = presentation.latest()
+
+  presentation.closed[0] = true
+  presentation.requests[0]!.onClose()
+  assert.deepEqual(await handle.settlement, { kind: 'cancelled' })
+  assert.equal(presentation.closed[0], true)
+  listed.resolve([row('session-direct-target')])
+  await new Promise<void>((resolve) => setImmediate(resolve))
+  assert.deepEqual(intents, [], 'a late matching list cannot dispatch Resume after close')
+  assert.equal(presentation.latest(), beforeClose, 'a closed direct-match panel cannot publish a late list')
+})
+
+test('a manual query entered during a matching direct read suppresses typed Resume', async (t) => {
+  const presentation = new PresentationProbe()
+  const listed = deferred<SessionSummary[] | undefined>()
+  const intents: SessionBrowserResumeIntent[] = []
+  const { owner, diag } = ownerFor(presentation, reader({ list: async () => listed.promise }), {
+    onResumeIntent: (intent) => intents.push(intent),
+  })
+  t.after(() => { owner.dispose(); diag.dispose() })
+  const handle = owner.open({ directMatch: { query: 'session-target', find: findSessionMatch } })
+  presentation.requests[0]!.onQueryChange('manual query')
+  listed.resolve([row('session-target'), row('session-manual-query')])
+
+  assert.deepEqual(await handle.settlement, { kind: 'ready' })
+  assert.deepEqual(intents, [], 'a matching typed argument does not override a newer query edit')
+  assert.equal(presentation.latest()?.query, 'manual query')
+  assert.deepEqual(presentation.latest()?.rows.map((entry) => entry.id), ['session-target', 'session-manual-query'])
+})
+
+test('a no-match direct query opens the filtered Browser without overriding live user input', async (t) => {
+  const presentation = new PresentationProbe()
+  const listed = deferred<SessionSummary[] | undefined>()
+  const { owner, diag } = ownerFor(presentation, reader({ list: async () => listed.promise }))
+  t.after(() => { owner.dispose(); diag.dispose() })
+  const handle = owner.open({ directMatch: { query: 'not-found', find: findSessionMatch } })
+  presentation.requests[0]!.onQueryChange('manual query')
+  listed.resolve([row('session-main-row')])
+
+  assert.deepEqual(await handle.settlement, { kind: 'ready' })
+  assert.equal(presentation.latest()?.query, 'manual query', 'a user edit during listing wins over the typed fallback')
+  assert.equal(presentation.latest()?.rows[0]?.id, 'session-main-row')
 })
 
 test('metadata search re-evaluates when projection titles arrive after the Host page', async (t) => {
