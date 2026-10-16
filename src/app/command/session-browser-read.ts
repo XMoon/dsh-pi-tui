@@ -249,7 +249,9 @@ export function createSessionBrowserReadOwner(options: SessionBrowserReadOwnerOp
     panel.queryGeneration++
     panel.queryController = query === '' ? undefined : new AbortController()
     panel.query = query
-    panel.searchState = query === '' ? 'idle' : 'loading'
+    panel.searchState = query === '' || panel.listState === 'unavailable' || panel.listState === 'error'
+      ? 'idle'
+      : 'loading'
     panel.searchResults = query === '' ? [] : localResults(panel)
     panel.searchPage = undefined
     panel.hasMore = false

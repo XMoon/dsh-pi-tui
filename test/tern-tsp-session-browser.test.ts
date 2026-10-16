@@ -84,7 +84,7 @@ async function mounted(t: { after(fn: () => unknown): void }, read: SessionReade
     ],
     hasMore: true,
   }),
-}), waitForProjection = true) {
+}), waitForProjection = true, expectedState: 'ready' | 'error' = 'ready') {
   const pane = installTspPane({ sessionBrowser: true })
   t.after(() => pane.restore())
   const session = await connect({ timeout: 500, exitHooks: false })
@@ -124,7 +124,7 @@ async function mounted(t: { after(fn: () => unknown): void }, read: SessionReade
   })
   t.after(() => owner.dispose())
   const readHandle = owner.open()
-  await waitUntil('the Session Browser picker is ready', () => props(pane).state === 'ready')
+  await waitUntil(`the Session Browser picker is ${expectedState}`, () => props(pane).state === expectedState)
   if (waitForProjection) {
     await waitUntil('the first projection batch is visible', () => items(pane).some((entry) => entry.label === 'Needle current title'))
   }
@@ -194,6 +194,65 @@ test('native Browser is one workspace tree, then a global cards union with Host-
   assert.equal(props(pane).total, 2)
   assert.match(String(props(pane).message), /refine the query/u, 'hasMore is a refine hint, never a page request')
   assert.equal(m.fatals.length, 0)
+})
+
+test('footer keyboard focus visits only enabled actions', async (t) => {
+  const m = await mounted(t)
+  const { pane } = m
+  const actionLabels = (): string[] => (props(pane).actions as Array<Record<string, unknown>>)
+    .map((action) => String(action.label))
+
+  pane.key('\t')
+  await waitUntil('the first Tab enters workspace scopes', () => props(pane).focus === 'scopes')
+  pane.key('\t')
+  await waitUntil('Details receives the initial enabled footer focus', () => actionLabels().includes('Details [Enter]'))
+  assert.deepEqual(actionLabels().filter((label) => label.endsWith('[Enter]')), ['Details [Enter]'])
+  assert.equal(pickerActionByBase(pane, 'resume', BROWSER)?.disabled, 'Session switching is deferred to B1-B.')
+
+  pane.key('\u001b[C')
+  await waitUntil('ArrowRight skips disabled Resume and wraps to Close', () => actionLabels().includes('Close [Enter]'))
+  assert.deepEqual(actionLabels().filter((label) => label.endsWith('[Enter]')), ['Close [Enter]'])
+  pane.key('\u001b[C')
+  await waitUntil('the enabled footer ring returns to Details', () => actionLabels().includes('Details [Enter]'))
+  assert.deepEqual(actionLabels().filter((label) => label.endsWith('[Enter]')), ['Details [Enter]'])
+})
+
+test('empty Browser footer focus falls back to enabled Close', async (t) => {
+  const m = await mounted(t, reader({ list: async () => [] }), false)
+  const { pane } = m
+  const actionLabels = (): string[] => (props(pane).actions as Array<Record<string, unknown>>)
+    .map((action) => String(action.label))
+
+  pane.key('\t')
+  await waitUntil('the first Tab enters workspace scopes', () => props(pane).focus === 'scopes')
+  pane.key('\t')
+  await waitUntil('empty footer focuses enabled Close, not disabled Details', () => actionLabels().includes('Close [Enter]'))
+  assert.deepEqual(actionLabels().filter((label) => label.endsWith('[Enter]')), ['Close [Enter]'])
+  assert.equal(pickerActionByBase(pane, 'details', BROWSER)?.disabled, 'Select a session to read its details.')
+  assert.equal(pickerActionByBase(pane, 'resume', BROWSER)?.disabled, 'Session switching is deferred to B1-B.')
+
+  const previousFrames = pane.frameCount()
+  pane.key('\u001b[C')
+  await waitUntil('the single enabled action retains focus', () => pane.frameCount() > previousFrames
+    && actionLabels().includes('Close [Enter]'))
+  assert.deepEqual(actionLabels().filter((label) => label.endsWith('[Enter]')), ['Close [Enter]'])
+})
+
+test('query over failed listing remains an error instead of content-search loading', async (t) => {
+  let searchCalls = 0
+  const m = await mounted(t, reader({
+    list: async () => { throw new Error('list failed') },
+    search: async () => { searchCalls++; return undefined },
+  }), false, 'error')
+  const { pane } = m
+
+  pane.key('needle')
+  await waitUntil('failed-list query is captured', () => props(pane).query === 'needle')
+  assert.equal(props(pane).state, 'error')
+  assert.match(String(props(pane).message), /Session listing failed: list failed/u)
+  assert.doesNotMatch(String(props(pane).message), /Searching session content/u)
+  assert.equal(props(pane).empty, 'The session list could not be loaded.')
+  assert.equal(searchCalls, 0)
 })
 
 test('browse row activity age uses updatedAt rather than createdAt', async (t) => {

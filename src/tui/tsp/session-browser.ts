@@ -131,6 +131,27 @@ function firstBrowseId(panel: SessionBrowserPanel): string | undefined {
   return rows.some((row) => row.id === current) ? current : rows[0]?.id
 }
 
+function actionDisabledReason(panel: SessionBrowserPanel, base: BrowseAction): string | undefined {
+  if (base === 'details' && rowFor(panel, panel.selected) === undefined) return 'Select a session to read its details.'
+  if (base === 'resume') return 'Session switching is deferred to B1-B.'
+  return undefined
+}
+
+function enabledActions(panel: SessionBrowserPanel): BrowseAction[] {
+  return BROWSE_ACTIONS.filter((base) => actionDisabledReason(panel, base) === undefined)
+}
+
+function focusedAction(panel: SessionBrowserPanel): BrowseAction {
+  const enabled = enabledActions(panel)
+  return enabled.includes(panel.actionFocus) ? panel.actionFocus : enabled[0]!
+}
+
+function stepActionFocus(panel: SessionBrowserPanel, delta: -1 | 1): BrowseAction {
+  const enabled = enabledActions(panel)
+  const at = enabled.indexOf(focusedAction(panel))
+  return enabled[(at + delta + enabled.length) % enabled.length]!
+}
+
 function normalize(panel: SessionBrowserPanel): void {
   if (queryMode(panel)) panel.scope = 'all'
   if (panel.zone === 'scopes' && queryMode(panel)) panel.zone = 'list'
@@ -140,16 +161,14 @@ function normalize(panel: SessionBrowserPanel): void {
       panel.readerEpoch++
       panel.zone = 'list'
       panel.selected = firstBrowseId(panel)
+    } else {
+      return
     }
-    return
   }
   if (panel.selected === undefined || rowFor(panel, panel.selected) === undefined) {
     panel.selected = firstBrowseId(panel)
   }
-}
-
-function selectedAction(panel: SessionBrowserPanel): BrowseAction {
-  return panel.actionFocus
+  if (panel.zone === 'actions') panel.actionFocus = focusedAction(panel)
 }
 
 function actionId(panel: SessionBrowserPanel, action: BrowseAction): string {
@@ -161,13 +180,10 @@ function actionLabel(action: BrowseAction): string {
 }
 
 function actionList(panel: SessionBrowserPanel): PickerAction[] {
+  const focus = panel.zone === 'actions' ? focusedAction(panel) : undefined
   return BROWSE_ACTIONS.map((base) => {
-    const disabled = base === 'details' && rowFor(panel, panel.selected) === undefined
-      ? 'Select a session to read its details.'
-      : base === 'resume'
-        ? 'Session switching is deferred to B1-B.'
-        : undefined
-    const focused = panel.zone === 'actions' && base === selectedAction(panel) && disabled === undefined
+    const disabled = actionDisabledReason(panel, base)
+    const focused = base === focus
     return {
       id: base === 'close' ? base : actionId(panel, base),
       label: `${actionLabel(base)}${focused ? ' [Enter]' : ''}`,
@@ -297,10 +313,11 @@ function pickerLayer(panel: SessionBrowserPanel): Node {
     placeholder: 'Search sessions and messages…',
     noun: 'sessions',
     focus: panel.zone === 'scopes' ? 'scopes' : panel.zone === 'list' ? 'list' : undefined,
-    state: panel.snapshot.listState === 'loading' || (searching && panel.snapshot.searchState === 'loading')
-      ? 'loading'
-      : panel.snapshot.listState === 'error' || panel.snapshot.listState === 'unavailable'
-        || (searching && (panel.snapshot.searchState === 'error' || panel.snapshot.searchState === 'unavailable'))
+    state: panel.snapshot.listState === 'error' || panel.snapshot.listState === 'unavailable'
+      ? 'error'
+      : panel.snapshot.listState === 'loading' || (searching && panel.snapshot.searchState === 'loading')
+        ? 'loading'
+        : searching && (panel.snapshot.searchState === 'error' || panel.snapshot.searchState === 'unavailable')
           ? 'error'
           : 'ready',
     ...(statusText(panel) === undefined ? {} : { message: statusText(panel) }),
@@ -608,7 +625,7 @@ export class TspSessionBrowser {
         this.change(panel)
         return
       case 'action-focus':
-        panel.actionFocus = BROWSE_ACTIONS[(BROWSE_ACTIONS.indexOf(panel.actionFocus) + intent.delta + BROWSE_ACTIONS.length) % BROWSE_ACTIONS.length]!
+        panel.actionFocus = stepActionFocus(panel, intent.delta)
         this.change(panel)
         return
       case 'activate-action': {

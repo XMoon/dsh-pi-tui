@@ -133,6 +133,7 @@ test('listing unavailable, empty, and list failure remain distinct', async (t) =
   await waitUntil('unavailable listing state', () => unavailable.latest()?.listState === 'unavailable')
   assert.equal(unavailable.latest()?.rows.length, 0)
   unavailable.requests[0]!.onQueryChange('content')
+  assert.equal(unavailable.latest()?.searchState, 'idle', 'a query cannot leave content search loading without a list')
   assert.equal(unavailableSearches, 0, 'the unavailable listing has no authorized row corpus to search')
 
   const empty = new PresentationProbe()
@@ -149,11 +150,18 @@ test('listing unavailable, empty, and list failure remain distinct', async (t) =
   assert.deepEqual(empty.latest()?.searchResults, [])
 
   const failed = new PresentationProbe()
-  const failedOwner = ownerFor(failed, reader({ list: async () => { throw new Error('list failed') } }))
+  let failedSearches = 0
+  const failedOwner = ownerFor(failed, reader({
+    list: async () => { throw new Error('list failed') },
+    search: async () => { failedSearches++; return undefined },
+  }))
   t.after(() => { failedOwner.owner.dispose(); failedOwner.diag.dispose() })
   failedOwner.owner.open()
   await waitUntil('failed listing state', () => failed.latest()?.listState === 'error')
   assert.match(failed.latest()?.listError ?? '', /list failed/u)
+  failed.requests[0]!.onQueryChange('content')
+  assert.equal(failed.latest()?.searchState, 'idle', 'a failed list cannot leave content search loading')
+  assert.equal(failedSearches, 0, 'content search is not attempted without an authoritative row corpus')
 })
 
 test('projection enriches listed main rows and Host search merges in authoritative order', async (t) => {
