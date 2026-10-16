@@ -13,10 +13,9 @@ import { VirtualTerminal } from "./virtual-terminal.ts";
  * The seam must classify EXACTLY the editor states a real Down press would
  * resolve through the editor's own visual-line logic, and refuse every state
  * where Down belongs to history browsing, autocomplete, jump mode or an
- * active bracketed paste. Every witness drives a REAL editor into the state
- * through its public input path and reads only the protected predicate — the
- * guard proves the host's Task Quick admission can never fire on a visual
- * boundary the fork itself would not yield.
+ * active bracketed paste. Witnesses drive a REAL editor through its public
+ * input path; the protected classifier may reuse the callback's current
+ * boundary fact without a second map build.
  */
 
 function createTestTUI(cols = 80, rows = 24): TUI {
@@ -33,11 +32,11 @@ function layoutWidthFor(editor: Editor, physicalWidth: number): number {
 }
 
 /** A probe exposing the protected seam for one editor state. */
-function canYield(editor: Editor, physicalWidth: number): boolean {
+function canYield(editor: Editor, physicalWidth: number, knownOnLastVisualLine?: boolean): boolean {
 	const probe = editor as unknown as {
-		canYieldDownAtLastVisualLine(expectedLayoutWidth: number): boolean;
+		canYieldDownAtLastVisualLine(expectedLayoutWidth: number, knownOnLastVisualLine?: boolean): boolean;
 	};
-	return probe.canYieldDownAtLastVisualLine(layoutWidthFor(editor, physicalWidth));
+	return probe.canYieldDownAtLastVisualLine(layoutWidthFor(editor, physicalWidth), knownOnLastVisualLine);
 }
 
 /** Paint the frame so `lastWidth` matches the width the host classifies
@@ -151,6 +150,106 @@ describe("canYieldDownAtLastVisualLine (X063)", () => {
 		assert.strictEqual(canYield(editor, 80), false);
 		editor.handleInput("\x1d"); // Ctrl+] cancels jump mode
 		assert.strictEqual(canYield(editor, 80), true);
+	});
+
+	it("publishes jump arm, unchanged-boundary completion and control abort as jump transitions", () => {
+		const editor = new Editor(createTestTUI(), defaultEditorTheme);
+		editor.setText("hello world");
+		paint(editor, 80);
+		const events: Array<{ reason: string; onLast: boolean }> = [];
+		editor.onVisualLineBoundaryChanged = (reason, onLast) => events.push({ reason, onLast });
+
+		editor.handleInput("\x1d"); // arm
+		assert.strictEqual(canYield(editor, 80), false);
+		editor.handleInput("z"); // no match: completes without moving or changing the boundary
+		assert.strictEqual(canYield(editor, 80), true);
+		editor.handleInput("\x1d"); // arm again
+		editor.handleInput("\x03"); // control input aborts jump mode
+		assert.strictEqual(canYield(editor, 80), true);
+
+		assert.deepStrictEqual(events, [
+			{ reason: "jump", onLast: true },
+			{ reason: "jump", onLast: true },
+			{ reason: "jump", onLast: true },
+			{ reason: "jump", onLast: true },
+		]);
+	});
+
+	it("uses a published boundary fact without rebuilding the wrap map", () => {
+		const editor = new Editor(createTestTUI(), defaultEditorTheme);
+		paint(editor, 80);
+		const probe = editor as unknown as {
+			buildVisualLineMap(width: number): unknown[];
+		};
+		const original = probe.buildVisualLineMap;
+		let builds = 0;
+		probe.buildVisualLineMap = function (width: number): unknown[] {
+			builds += 1;
+			return original.call(editor, width);
+		};
+		try {
+			assert.strictEqual(canYield(editor, 80, true), true);
+			assert.strictEqual(canYield(editor, 80, false), false);
+			assert.strictEqual(builds, 0, "the current X063 fact is consumed directly");
+			assert.strictEqual(canYield(editor, 80), true);
+			assert.strictEqual(builds, 1, "without a fact the editor classifies from one live map");
+		} finally {
+			probe.buildVisualLineMap = original;
+		}
+	});
+
+	it("reads the last rendered raw boundary without rebuilding the visual map", () => {
+		const editor = new Editor(createTestTUI(40), defaultEditorTheme);
+		editor.setTextAndCursor("x".repeat(60), { line: 0, col: 10 });
+		paint(editor, 40);
+		const probe = editor as unknown as {
+			buildVisualLineMap(width: number): unknown[];
+			isOnLastVisualLineRaw(expectedLayoutWidth: number): boolean;
+		};
+		const original = probe.buildVisualLineMap;
+		let builds = 0;
+		probe.buildVisualLineMap = function (width: number): unknown[] {
+			builds += 1;
+			return original.call(editor, width);
+		};
+		try {
+			assert.strictEqual(probe.isOnLastVisualLineRaw(layoutWidthFor(editor, 40)), false);
+			assert.strictEqual(builds, 0, "the rendered cursor-line fact is read directly");
+			assert.strictEqual(probe.isOnLastVisualLineRaw(layoutWidthFor(editor, 80)), false, "a stale width fails closed");
+			paint(editor, 80);
+			assert.strictEqual(probe.isOnLastVisualLineRaw(layoutWidthFor(editor, 80)), true);
+			assert.strictEqual(builds, 0, "render supplied the fact without a second map build");
+		} finally {
+			probe.buildVisualLineMap = original;
+		}
+	});
+
+	it("matches the authoritative map at wrap, whitespace and trailing-line edges", () => {
+		const editor = new Editor(createTestTUI(40), defaultEditorTheme);
+		const probe = editor as unknown as {
+			isOnLastVisualLine(): boolean;
+			isOnLastVisualLineRaw(expectedLayoutWidth: number): boolean;
+		};
+		const cases = [
+			{ label: "empty", text: "", cursor: { line: 0, col: 0 } },
+			{ label: "exact-width end", text: "x".repeat(39), cursor: { line: 0, col: 39 } },
+			{ label: "wrap boundary", text: "x".repeat(40), cursor: { line: 0, col: 39 } },
+			{ label: "cursor before trailing space", text: `${"x".repeat(38)} `, cursor: { line: 0, col: 38 } },
+			{ label: "cursor after trailing space", text: `${"x".repeat(38)} `, cursor: { line: 0, col: 39 } },
+			{ label: "wide glyph at wrap", text: `${"a".repeat(38)}漢`, cursor: { line: 0, col: 39 } },
+			{ label: "astral glyph at wrap", text: `${"a".repeat(38)}😀`, cursor: { line: 0, col: 40 } },
+			{ label: "trailing hard line", text: "line1\n", cursor: { line: 1, col: 0 } },
+			{ label: "hard-line top", text: "line1\nline2", cursor: { line: 0, col: 5 } },
+		];
+		for (const { label, text, cursor } of cases) {
+			editor.setTextAndCursor(text, cursor);
+			paint(editor, 40);
+			assert.strictEqual(
+				probe.isOnLastVisualLineRaw(layoutWidthFor(editor, 40)),
+				probe.isOnLastVisualLine(),
+				label,
+			);
+		}
 	});
 
 	it("is false while a bracketed paste is being captured, and true after it completes", () => {

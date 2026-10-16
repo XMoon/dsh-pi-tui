@@ -6305,43 +6305,43 @@
    "files": [
     "src/components/editor.ts"
    ],
-   "why": "The host's Task Quick on-demand entry (Phase 3B/B4-B) must fire on a Down press at the editor's last VISUAL line only. The visual boundary lives entirely inside the fork editor: soft word-wrap, CJK/astral width, empty lines, history browsing, autocomplete, jump mode and bracketed paste all change what Down means, and the private word-wrap map (`buildVisualLineMap` + `findCurrentVisualLine`) plus the private mode flags are the only authoritative classifier. The host cannot re-derive it from the public surface — a `cursor.line === lastLine` or character-count guess answers the LOGICAL line, not the wrapped one, and re-implementing the wrap would drift from the exact layout the user sees. Upstream has no such seam.",
+   "why": "The host's Task Quick on-demand entry (Phase 3B/B4-B) must fire on a Down press at the editor's last VISUAL line only. The visual boundary lives entirely inside the fork editor: soft word-wrap, CJK/astral width, empty lines, history browsing, autocomplete, jump mode and bracketed paste all change what Down means, and the Editor's own render layout plus its private wrap-map classifier and transient mode flags are the only sources that can prove the painted boundary and live Down behavior. The host cannot re-derive it from the public surface — a `cursor.line === lastLine` or character-count guess answers the LOGICAL line, not the wrapped one, and re-implementing the wrap would drift from the exact layout the user sees. Upstream has no such seam.",
    "changedSurface": [
-    "`protected canYieldDownAtLastVisualLine(expectedLayoutWidth: number): boolean` — one synchronous, read-only, side-effect-free method on the fork `Editor`.",
-    "`public onVisualLineBoundaryChanged?(reason: 'navigation' | 'autocomplete' | 'history' | 'paste' | 'programmatic', onLastVisualLine: boolean): void` - an observation-only callback fired after every editor transition that can change the Down-admission fact; the payload is the transition CLASS plus the post-transition raw boundary state: navigation moves (Up/Down/PageUp/PageDown with the post-move state read off the move's own wrap map; Left/Right, word/line jumps, character jump and mouse repositioning), the AUTOCOMPLETE open/close flips (a dropdown refuses Down with no cursor move — both directions notify, including an open/close pair whose visual-line truth is unchanged), dedicated history recall, bracketed-paste completion, and programmatic setText/setTextAndCursor/setCursor. The payload is the TRANSITION CLASS (navigation/autocomplete/history/paste/programmatic), never a content value: two events may carry the same visual-line truth and still flip the admission, so the host recomposes per event without equality gating (the base editor exposes no caret-change callback for a boundary that is a wrap-map fact, not a document fact).",
+    "`protected canYieldDownAtLastVisualLine(expectedLayoutWidth: number, knownOnLastVisualLine?: boolean): boolean` — the live Down admission classifier; plus `protected isOnLastVisualLineRaw(expectedLayoutWidth: number): boolean` — an O(1), width-guarded read of the last rendered visual boundary. Both methods are synchronous, read-only and side-effect free.",
+    "`public onVisualLineBoundaryChanged?(reason: 'navigation' | 'autocomplete' | 'history' | 'paste' | 'programmatic' | 'jump', onLastVisualLine: boolean): void` — an observation-only callback fired after every editor transition that can change the Down-admission fact; the payload carries the transition CLASS plus the post-transition raw boundary state. It includes navigation moves, autocomplete open/close, history recall, paste completion, programmatic changes, and jump arm/cancel/completion/abort. The host may consume the boundary in the same editor turn without rebuilding the wrap map; an onChange invalidates the host's rendered-layout snapshot until the next Editor render republishes it.",
     "True only when `lastWidth === expectedLayoutWidth`, the cursor is on the last VISUAL line of the editor's own wrap map, and NO transient mode owns Down: `historyIndex === -1`, `autocompleteState === null`, `jumpMode === null`, `isInPaste === false`.",
     "`expectedLayoutWidth` must be the SAME layout width `render()` derived for the painted frame, so a stale caller width can never classify against a wrap map the user is not looking at.",
-    "No private field becomes public, no wrap logic is duplicated, and the editor's own key routing, cursor and document are untouched: the callback is an observation whose payload is computed from the moving code's OWN wrap-map facts (page moves publish theirs; Left/Right reuse the pre-move read plus one post-move comparison), so the notify adds no second wrap-map build on any navigation path.",
-    "The host `TuiEditor` subclass exposes `canEnterTaskQuickFromDown(physicalWidth)` on top of the seam (host-side code, not this ledger). Both fork deltas serve the same host consumer — the read-only classifier and the state-carrying observation callback; no other fork surface changed."
+    "No private field becomes public, no wrap logic is duplicated, and the editor's own key routing, cursor and document are untouched: the callback payload is computed from the moving code's own wrap-map facts, and the host can pass that current fact back through the protected classifier without another boundary-map build.",
+    "The host `TuiEditor` subclass exposes `canEnterTaskQuickFromDown(physicalWidth, knownOnLastVisualLine?)` and `isOnLastVisualLineRawForHost(physicalWidth)` over the protected fork methods (host-side code, not this ledger). Both fork deltas serve the same host consumer; no public package surface changes."
    ],
    "dependencies": {
     "vendorInternal": {
      "audited": true,
      "items": [
-      "The seam reads only existing private state (`lastWidth`, `buildVisualLineMap`, `findCurrentVisualLine`, `historyIndex`, `autocompleteState`, `jumpMode`, `isInPaste`) through the existing private methods `isOnLastVisualLine` uses — no vendored caller behavior changes and no vendored component consumes the method.",
-      "The lazy one-shot call shape (one wrap-map computation per CANDIDATE Down, per the host predicate's guard chain) keeps ordinary printable-key input paths free of any new editor content scan. The notification adds NO second wrap-map build on any navigation path (page moves and cursor moves publish their own map facts; the shared notify consumes them), and the autocomplete event fires only on the OPEN flip — a suggestion refresh while the picker is already open costs no scan. A mode flip or programmatic replacement pays ONE authoritative rebuild for its notify; that is the event's own cost, not a per-keystroke scan."
+      "The live classifier reads the existing private state (`lastWidth`, `buildVisualLineMap`, `findCurrentVisualLine`, `historyIndex`, `autocompleteState`, `jumpMode`, `isInPaste`) through `isOnLastVisualLine`. The raw accessor copies the current cursor/line facts from `render()`'s already-computed `layoutLines`; no vendored caller behavior changes and no vendored component consumes either method.",
+      "The live classifier keeps ordinary printable-key input paths free of a new editor content scan. Navigation publishes its own map facts; mode/programmatic notifications build one authoritative map only when no facts exist. The raw accessor reuses the render's layout facts in O(1), so an onChange-only edit adds neither a second map build nor a Footer compose when boundary, row count and hint ownership are unchanged."
      ],
      "notes": "No vendor-internal consumer exists; the fork method is consumed exclusively through the host subclass."
     },
     "inheritanceStructural": {
      "audited": true,
      "items": [
-      "Exactly one inheritance edge relies on the seam: `TuiEditor extends Editor` (`src/tui/interaction/tui-editor.ts`) calls the protected method from `canEnterTaskQuickFromDown`. No other subclass exists in the bundle, and the method is `protected`, so it is invisible to every non-subclass consumer including the public Extension API."
+      "Exactly one inheritance edge relies on X063: `TuiEditor extends Editor` (`src/tui/interaction/tui-editor.ts`) calls both protected methods through its admission and raw-boundary host wrappers. No other subclass exists in the bundle, and both fork methods remain `protected`, invisible to non-subclass consumers including the public Extension API."
      ],
      "notes": "The structural edge is the intended contract: a read-only capability granted to the first-party subclass only."
     },
     "host": {
      "audited": true,
      "items": [
-      "`src/tui/interaction/tui-editor.ts` — `canEnterTaskQuickFromDown(physicalWidth)` derives the layout width with the SAME rule `render()` uses (`max(1, physicalWidth - 2 * getPaddingX())`), requires prompt input mode, and delegates the rest to the seam.",
-      "`src/tui-app.ts` — the single private `quickDownEligible()` predicate calls it ONLY when the host editor is the real focused component with no higher-priority owner; the local bool alone never routes input."
+      "`src/tui/interaction/tui-editor.ts` — `canEnterTaskQuickFromDown(physicalWidth, knownOnLastVisualLine?)` derives layout width with the same clamped-padding rule as `render()` (including physical width 4), requires prompt input mode, and delegates transient-mode gates to the seam. Its render observer publishes physical/layout widths, the raw boundary and Editor row count from the just-rendered component.",
+      "`src/tui-app.ts` — `quickDownEligible()` remains the single route/hint admission. Footer composition consumes a current X063 fact or the latest matching-width Editor render snapshot; ordinary onChange invalidates the host snapshot and waits for the next rendered layout, while live key routing without an event still uses the classifier. The render observer coalesces boundary-eligibility and Editor geometry changes, and corrects a fail-closed resize compose. The predicate still requires the real focused host editor and no higher-priority owner; the local bool alone never routes input."
      ],
      "notes": "The host consumes the seam through one guarded predicate; the seam never decides routing by itself."
     },
     "publicExtension": {
      "audited": true,
      "items": [
-      "The method is `protected` on the vendored `Editor` class and is NOT re-exported, declared, or reachable through the package entry (`src/index.ts`) or any public structural type — the public Extension Editor API is unchanged."
+      "Both fork methods are `protected` on the vendored `Editor` class and are NOT re-exported, declared, or reachable through the package entry (`src/index.ts`) or any public structural type — the public Extension Editor API is unchanged."
      ],
      "notes": "No public surface change: a plugin editor sees the same class shape as before."
     },
@@ -6352,15 +6352,15 @@
       "a hard-multiline draft answers false above the last visual line and true only after Down reaches it",
       "a soft-wrapped single logical line answers false on middle segments and true only on the last segment (the boundary a logical-line classifier gets wrong)",
       "history browsing, an open autocomplete dropdown, armed jump mode and an in-flight bracketed paste each force false, and return to true only when the editor itself leaves the mode",
-      "a caller width that does not match the painted frame's layout width forces false until the frame is repainted at that width",
+      "a caller width that does not match the latest Editor-rendered layout forces false until Editor renders at that width; the raw-boundary accessor shares this width guard",
       "the seam consumes nothing: a real Down after a false answer still moves the cursor natively",
-      "the boundary-notification callback fires with the TRANSITION CLASS on every admission-affecting transition — navigation moves (Up/Down/Page always; Left/Right including the hard logical-line-end wrap, with the intra-line walk dispatching as a cheap drop the host re-reads), the programmatic setCursor/setTextAndCursor replacements — while printable input never dispatches and the document, cursor and key routing stay untouched; the autocomplete open flip and close flip notify distinctly from navigation; and the notify consumes the moving code's own published wrap-map facts instead of a second build"
+      "the boundary-notification callback fires with the transition class and post-transition raw boundary on admission-affecting transitions, including navigation, autocomplete open/close, history, paste, programmatic edits and jump arm/cancel/completion/abort; host same-turn admission consumes the published fact without a second map build, while onChange-only text rewrap uses the next render's layout snapshot without another map build, with raw-snapshot equivalence verified at exact-fit, wrap, trailing-space, wide/astral and trailing-blank-line edges"
      ],
      "notes": "The seam answers one question — may a real Down leave this editor at its last visual line — and owns no state."
     }
    },
    "tests": [
-    "packages/pi-tui/test/editor-task-quick-boundary.test.ts: live-frame true on the empty editor and on the last line of a multiline draft; false above the last visual line; soft-wrap middle vs last segment; history browse, autocomplete, jump mode and bracketed paste each force false and restore; a stale caller width forces false until repaint; a false answer leaves a real Down moving the cursor natively (the mutation witness — without the seam's mode guards the browse/autocomplete/paste cases answer true)"
+    "packages/pi-tui/test/editor-task-quick-boundary.test.ts: live-frame and hard/soft-wrap boundary witnesses; transient history/autocomplete/jump/paste gates; stale-width guard; native Down preservation; jump arm/no-match completion/control abort reason; and known-fact consumption and raw snapshot/map edge equivalence without a second map build; test/task-quick-b4b-interaction.test.ts: zero same-layout input composes/map builds, rewrap and resize correction, width-4 clamp, and coalesced same-turn payloads"
    ],
    "upstream": {
     "equivalence": "NO",
@@ -6373,11 +6373,11 @@
      "packages/tui/src/components/editor.ts"
     ],
     "relevantIssues": [],
-    "semanticDelta": "Upstream's `Editor` keeps `isOnLastVisualLine` and the mode flags fully private with no protected read-only accessor, so a host subclass cannot ask the editor whether a real Down would leave it at the last visual line. The fork adds exactly that protected seam PLUS the observation-only `onVisualLineBoundaryChanged` callback that fires with the transition class and the post-move boundary state after EVERY navigation move (each move publishes its own wrap-map facts; a no-flip move's event is a cheap drop) and after every admission mode flip (autocomplete open/close, jump arm/cancel, history recall, paste completion), so the host can keep its painted hint fresh; the wrapping, history, autocomplete, jump and paste behavior are upstream's own, unchanged."
+    "semanticDelta": "Upstream's `Editor` keeps `isOnLastVisualLine` and mode flags private with no protected classifier, raw-boundary accessor or transition callback. The fork adds those two protected read-only seams and observation-only `onVisualLineBoundaryChanged` facts; the host may consume a current event fact during the same compose, while onChange-only rewrap consumes Editor.render's already-computed layout facts and composes Footer only when hint-relevant layout/owner facts change. The fork does not alter native wrapping, history, autocomplete, jump or paste behavior."
    },
    "retirement": {
     "conditions": [
-     "Upstream gains an equivalent safe read-only seam (a protected/public classifier for the Down-at-last-visual-line state the host can consume instead).",
+     "Upstream gains equivalent safe read-only classifier/raw-boundary seams plus transition facts (or one callback that also covers text-only rewrap) the host can consume instead.",
      "Or the host no longer needs the editor's visual Down boundary (the Task Quick on-demand entry is retired or re-owned)."
     ],
     "replacementMapping": [],
@@ -6393,7 +6393,7 @@
      "behavioral",
      "tests"
     ],
-    "notes": "Introduced for Phase 3B/B4-B (the implementation plan's X061 slot; renumbered X063 because rollout PR5b claimed X061/X062 — Owner-approved 2026-10-14). Scope checked against the fork's own input path (the seam adds no vendored caller), the single host subclass consumer, the public entry (nothing re-exported), and the real editor states the boundary classifier must distinguish."
+    "notes": "Introduced for Phase 3B/B4-B (the implementation plan's X061 slot; renumbered X063 because rollout PR5b claimed X061/X062 — Owner-approved 2026-10-14). The 2026-10-15 delta rechecks the fork input path, single host subclass, package entry and callback facts, including same-turn boundary consumption and jump completion/abort."
    }
   },
   "X062": {
