@@ -13,6 +13,22 @@
 
 import assert from 'node:assert/strict'
 import { afterEach, test } from 'node:test'
+import { Context } from '@deepseek-ai/cordis'
+import AgentRegistry, { type Agent } from '@deepseek-ai/dsh-agent'
+import { unsupportedInbox } from '@deepseek-ai/dsh-agent-loop-testkit'
+import JobController from '@deepseek-ai/dsh-api-job-controller'
+import LocalJobRegistry from '@deepseek-ai/dsh-jobs-local'
+import { ToolCallId } from '@deepseek-ai/dsh-llm'
+import { Session, SessionId } from '@deepseek-ai/dsh-session'
+import { ShellExecutor } from '@deepseek-ai/dsh-shell'
+import type { ShellExecRequest, ShellExecSpec, ShellExecution, ShellProcess, ShellRunResult } from '@deepseek-ai/dsh-shell'
+import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
+import ToolRuntime from '@deepseek-ai/dsh-tools'
+import * as BashEnvPlugin from '@deepseek-ai/dsh-shell-env'
+import * as ToolBash from '@deepseek-ai/dsh-tool-bash'
+import * as ToolTasks from '@deepseek-ai/dsh-tool-jobs'
+import * as ToolPwsh from '@deepseek-ai/dsh-tool-pwsh'
+import TypertRegistry from '@deepseek-ai/dsh-typert-registry'
 import { stripTerminalSequences, visibleWidth } from '@xmoon76/pi-tui'
 import type { OwnedRunner } from '../src/tui-app.ts'
 import { TuiApp } from '../src/tui-app.ts'
@@ -31,6 +47,68 @@ import type { JobObservedSnapshot, JobObservationPort, JobStopOutcome } from '..
 import { createDiag } from '../src/runtime/process/diagnostics.ts'
 import { displaySeamStub } from './support/display-seam-stub.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
+
+/** Real DSH producer/registry path with process execution controlled, not bypassed. */
+class ControlledShellExecutor extends ShellExecutor {
+  private finishCurrent: (() => void) | undefined
+
+  finish(): void {
+    this.finishCurrent?.()
+    this.finishCurrent = undefined
+  }
+
+  override resolve(request: ShellExecRequest): ShellExecSpec {
+    return {
+      command: request.command,
+      workdir: request.workdir ?? process.cwd(),
+      timeoutMs: request.timeoutMs ?? 60_000,
+      onExpiry: request.onExpiry ?? 'kill',
+      stdoutMaxBytes: request.stdoutMaxBytes ?? 64_000,
+      ...request.signal !== undefined ? { signal: request.signal } : {},
+      ...request.dshEnv !== undefined ? { dshEnv: request.dshEnv } : {},
+      sandboxPolicy: request.sandboxPolicy,
+    }
+  }
+
+  override async execute(spec: ShellExecSpec): Promise<ShellExecution> {
+    let resolveDone!: () => void
+    const done = new Promise<void>(resolve => { resolveDone = resolve })
+    const emptyReader = {
+      readFrom: (fromByte: number) => ({ text: '', nextOffset: fromByte, lossy: false }),
+    }
+    let process!: ShellProcess
+    process = {
+      status: 'running',
+      exitCode: null,
+      signal: null,
+      done,
+      readOutput: () => ({ delta: '', lossy: false }),
+      kill: () => {
+        if (process.status !== 'running') return false
+        process.status = 'killed'
+        resolveDone()
+        return true
+      },
+      observed: { stdout: emptyReader, stderr: emptyReader },
+    }
+    this.finishCurrent = () => {
+      if (process.status !== 'running') return
+      process.status = 'completed'
+      process.exitCode = 0
+      resolveDone()
+    }
+    const result = (): Promise<ShellRunResult> => done.then(() => ({
+      exitCode: process.exitCode,
+      signal: process.signal,
+      timedOut: false,
+      aborted: false,
+      timeoutMs: spec.timeoutMs,
+      stdout: { text: '', truncated: false },
+      stderr: { text: '', truncated: false },
+    }))
+    return Object.assign(process, { result })
+  }
+}
 
 const startedApps = new Set<TuiApp>()
 afterEach(() => {
@@ -567,14 +645,15 @@ function attachTasks(
   jobIds: readonly string[],
   port?: JobObservationPort,
   rosterLabel?: string,
+  liveJobRows?: () => TaskBrowserJobInput[],
 ): TaskHarness {
-  const jobSnapshots = (): TaskBrowserJobInput[] => jobIds.map((id, index) => ({
+  const jobSnapshots = liveJobRows ?? (() => jobIds.map((id, index) => ({
     id,
     kind: 'bash',
     label: rosterLabel ?? `job ${id}`,
     status: 'running',
     startedAt: 1_000 + index,
-  }))
+  })))
   const observation = new JobObservationDouble()
   const subject = {} as SessionSubject
   const source: TaskSurfaceSource = {
@@ -626,6 +705,7 @@ function startApp(
   jobIds: readonly string[] = ['job-a'],
   port?: JobObservationPort,
   rosterLabel?: string,
+  liveJobRows?: () => TaskBrowserJobInput[],
 ): AppHarness {
   const vt = new VirtualTerminal(columns, rows)
   const copied: string[] = []
@@ -650,7 +730,7 @@ function startApp(
   })
   app.start()
   startedApps.add(app)
-  const tasks = attachTasks(app, jobIds, port, rosterLabel)
+  const tasks = attachTasks(app, jobIds, port, rosterLabel, liveJobRows)
   // The notice text is the app's ONE transient notice authority.
   const originalNotify = app.notify.bind(app)
   app.notify = (text: string, kind?: 'info' | 'error'): void => {
@@ -797,6 +877,93 @@ test('C-01 the header Command summary click opens the Command page, and Copy All
   assert.match(view(harness.vt), /Find Command: hello!/, 'the click never stole the search input focus')
   assert.deepEqual(harness.copied, [label], 'no duplicate copy from the extra typing')
 })
+
+for (const producer of [
+  { kind: 'bash', toolName: 'bash' },
+  { kind: 'pwsh', toolName: 'pwsh' },
+] as const) {
+  test(`J-02 ${producer.kind}: the official producer label reaches Direct Command Copy All unchanged`, async () => {
+    const ctx = new Context()
+    let shell: ControlledShellExecutor | undefined
+    let harness: AppHarness | undefined
+    try {
+      await ctx.plugin(SystemPrompt)
+      await ctx.plugin(ToolRuntime)
+      await ctx.plugin(AgentRegistry)
+      await ctx.plugin(LocalJobRegistry, { pumpPollMs: 5 })
+      await ctx.plugin(TypertRegistry)
+      await ctx.plugin(JobController, {})
+      await ctx.plugin(ToolTasks)
+      await ctx.plugin(BashEnvPlugin)
+      await ctx.plugin(ControlledShellExecutor)
+      shell = ctx.shell as ControlledShellExecutor
+      if (producer.kind === 'bash') await ctx.plugin(ToolBash)
+      else await ctx.plugin(ToolPwsh)
+
+      const ownerId = SessionId('sess-main')
+      const scopeFiber = ctx.plugin(() => {})
+      const owner: Agent = {
+        id: ownerId,
+        options: {},
+        session: Session.create(ownerId),
+        inbox: unsupportedInbox(),
+        status: 'idle',
+        ctx: scopeFiber.ctx,
+        send: () => {},
+        followup: () => {},
+        steer: () => {},
+        inject: () => {},
+        cancel: () => {},
+        runMaintenance: (task: (signal: AbortSignal) => unknown) => task(new AbortController().signal),
+        whenIdle: () => Promise.resolve(),
+      } as unknown as Agent
+      await ctx.agents.register(owner)
+
+      const command = '  echo "Gate3B 雪"  \t\n'
+      await ctx.tools.execute({
+        signal: new AbortController().signal,
+        callId: ToolCallId(`gate3b-producer-${producer.kind}`),
+        name: producer.toolName,
+        arguments: { command, description: 'Gate3B synthetic producer witness', run_in_background: true },
+        agent: owner,
+      })
+      const job = ctx.jobs.list(owner.id).find(row => row.kind === producer.kind)
+      assert.ok(job, 'the official producer registered its Job through the real LocalJobRegistry')
+      assert.equal(job.label, command, 'args.command becomes the exact Registry label')
+      const jobId = String(job.id)
+      const liveJobRows = (): TaskBrowserJobInput[] => ctx.jobs.list(owner.id).map(row => ({
+        id: String(row.id),
+        kind: row.kind,
+        label: row.label,
+        status: row.status,
+        startedAt: row.startedAt,
+      }))
+      assert.equal(liveJobRows()[0]?.label, command, 'the task roster reads the official Registry row')
+
+      const port = new DirectJobObservationPort(ctx as never, createDiag({ filePath: undefined, stderrLevel: 'off' }))
+      harness = startApp(120, 40, [jobId], port, undefined, liveJobRows)
+      await openFirstJob(harness)
+      await paintedWhen(harness.vt, frame => frame.includes('Tab switch'))
+      const commandRow = bodyRow(harness.vt, 'Command')
+      press(harness.vt, commandRow, 4)
+      release(harness.vt, commandRow, 4)
+      await paintedWhen(harness.vt, frame => frame.includes('Copy All [C]'))
+      assert.ok(view(harness.vt).includes('Gate3B 雪'), 'the observed Command document is painted')
+
+      const buttonRow = bodyRow(harness.vt, 'Copy All [C]')
+      const buttonCol = rawView(harness.vt)[buttonRow]!.indexOf('Copy All [C]')
+      press(harness.vt, buttonRow, buttonCol + 2)
+      release(harness.vt, buttonRow, buttonCol + 2)
+      await flush(4)
+      assert.deepEqual(harness.copied, [command], 'Direct observation and the real Command Copy All sink preserve every source byte')
+      assert.equal(harness.notices.at(-1), 'Copy sent')
+    } finally {
+      if (harness !== undefined && !harness.app.isDisposed()) harness.app.dispose()
+      shell?.finish()
+      await ctx.fiber.dispose()
+    }
+  })
+}
 
 test('C-11 a real SGR press→drag→release copies the exact original half-open range, forwards and backwards', async () => {
   const harness = startApp()
@@ -1020,6 +1187,77 @@ test('C-14 the clipboard settlement is honest: false/rejection report failure, a
   settle?.(true)
   await flush(6)
   assert.equal(harness.notices.length, before, 'a stale settlement never notifies a newer viewer')
+})
+
+test('C-01 Command Copy All keeps the trigger label when the observation changes before clipboard settlement', async () => {
+  const harness = startApp()
+  await openFirstJob(harness)
+  const triggerLabel = '  printf  "known bytes"  \n'
+  const replacementLabel = 'printf different command'
+  harness.tasks.observation.latest()!.emit({ label: triggerLabel, text: 'retained output' })
+  await harness.vt.waitForRender()
+  await flush(2)
+  await openCommand(harness)
+
+  let settle: ((value: boolean) => void) | undefined
+  let delivered: string | undefined
+  const pendingDelivery = new Promise<boolean>(resolve => { settle = resolve })
+  ;(harness.app as unknown as { copySelection?: (text: string) => Promise<boolean> }).copySelection = (text) => {
+    delivered = text
+    return pendingDelivery
+  }
+  try {
+    harness.vt.sendInput('c')
+    await flush(4)
+    assert.equal(delivered, triggerLabel, 'Copy All receives the original command bytes before delivery awaits')
+
+    harness.tasks.observation.latest()!.emit({ label: replacementLabel })
+    await harness.vt.waitForRender()
+    await flush(2)
+    assert.ok(view(harness.vt).includes(replacementLabel), 'the newer source reaches the live Command document')
+    assert.equal(delivered, triggerLabel, 'the held clipboard request stays bound to its trigger-moment source')
+
+    settle?.(true)
+    await flush(6)
+    assert.equal(harness.notices.at(-1), 'Copy sent')
+  } finally {
+    settle?.(false)
+  }
+})
+
+test('C-13 Output Copy keeps the trigger snapshot while clipboard delivery is pending', async () => {
+  const harness = startApp()
+  await openFirstJob(harness)
+  const triggerText = 'retained bytes  \n'
+  const replacementText = 'new retained snapshot\n'
+  harness.tasks.observation.latest()!.emit({ label: 'echo hello', text: triggerText })
+  await harness.vt.waitForRender()
+  await flush(2)
+
+  let settle: ((value: boolean) => void) | undefined
+  let delivered: string | undefined
+  const pendingDelivery = new Promise<boolean>(resolve => { settle = resolve })
+  ;(harness.app as unknown as { copySelection?: (text: string) => Promise<boolean> }).copySelection = (text) => {
+    delivered = text
+    return pendingDelivery
+  }
+  try {
+    harness.vt.sendInput('c')
+    await flush(4)
+    assert.equal(delivered, triggerText, 'Output Copy receives the exact retained bytes at trigger time')
+
+    harness.tasks.observation.latest()!.emit({ text: replacementText })
+    await harness.vt.waitForRender()
+    await flush(2)
+    assert.ok(view(harness.vt).includes('new retained snapshot'), 'the newer retained snapshot reaches the live Output view')
+    assert.equal(delivered, triggerText, 'the held clipboard request does not reread the newer snapshot')
+
+    settle?.(true)
+    await flush(6)
+    assert.equal(harness.notices.at(-1), 'Copy sent')
+  } finally {
+    settle?.(false)
+  }
 })
 
 test('C-17 leaving the workspace releases the observer exactly once and leaves no gesture behind', async () => {

@@ -65,6 +65,7 @@ import { loadExperimentalRemoteRuntime } from '../src/runtime/backend-loader.ts'
 import type { ExperimentalRemoteRuntime } from '../src/app/remote/runtime.ts'
 import { createRemoteM3ASemantics, type RemoteM3ASemantics } from '../src/app/remote/m3a-semantics.ts'
 import { createRemoteBackendRuntime } from '../src/app/remote/runtime.ts'
+import { RemoteConfigPort } from '../src/runtime/remote/config-remote.ts'
 import { acquireMainSurfaceReference, type MainSurfaceReference } from '../src/runtime/remote/session-reference.ts'
 import { contextPressureOccupancy } from '../src/runtime/session-reader-port.ts'
 import { DirectConfigPort } from '../src/runtime/direct/config-direct.ts'
@@ -967,7 +968,7 @@ test('P16: the REAL /settings workspace commits through the Remote adapter over 
   // authoritative sink is the real Host settings plane. Nothing here is a
   // hand-rolled settings object.
   const life = testLifecycle(t)
-  const host = await createHostFixture(life, { configPlane: true })
+  const host = await createHostFixture(life, { configPlane: true, captureTuiRowConfig: true })
   await host.harness.create(SessionId(MAIN), undefined, { cwd: host.anchorDir })
   const runtime = await composeRuntime(host)
   const assembled = await createRemoteBackendRuntime({
@@ -1113,6 +1114,28 @@ test('P16: the REAL /settings workspace commits through the Remote adapter over 
       forms.describe = originalDescribe
       forms.mutate = originalMutate
     }
+
+    // L4 parity witness: use the SAME real Host, namespace and field in both
+    // directions. The production Direct adapter observes the Remote UI commit,
+    // writes that field back through SettingsForms, and the production Remote
+    // adapter refreshes the authoritative result over the generated Client.
+    const rowConfig = (globalThis as { __m3aTuiRowConfig?: unknown }).__m3aTuiRowConfig
+    assert.ok(rowConfig !== undefined, 'the mounted tui-app row exposed its resolved Config references')
+    const directForms = host.ctx.get('settings') as SettingsFormsLike | undefined
+    assert.ok(directForms !== undefined, 'the official Host settings service is mounted')
+    const directSettings = new DirectTuiSettings(rowConfig as TuiConfigRefs, directForms)
+    assert.ok(config instanceof RemoteConfigPort, 'the assembled Remote backend uses the production config adapter')
+    assert.equal(directSettings.get().displayPreset, 'focus', 'Direct observes the Remote-committed value from the same Host')
+    await directSettings.replace({ ...directSettings.get(), displayPreset: 'full' })
+    const pairedDescriptor = hostDescriptor()
+    assert.equal(pairedDescriptor?.value?.displayPreset, 'full', 'Direct writes the same Host field')
+    const pairedUser = pairedDescriptor?.user as Record<string, unknown> | undefined
+    assert.equal(pairedUser?.displayPreset, 'full', 'the same USER-owned field is updated')
+    assert.equal(pairedUser?.theme, undefined, 'the Direct write does not pin an unrelated field')
+    assert.equal(directSettings.get().displayPreset, 'full', 'the Direct volatile reference follows its commit')
+    await config.describe()
+    assert.equal(tuiSettings.get().displayPreset, 'full', 'Remote refresh reads the Direct-committed value from the same Host')
+    assert.equal(config.configReadiness(), 'ready', 'both adapters remain current after the paired writes')
   } finally {
     fixture.dispose()
     assembled.dispose()
