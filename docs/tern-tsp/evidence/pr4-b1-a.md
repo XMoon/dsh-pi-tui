@@ -40,24 +40,24 @@ the stable coverage and evidence tier, not a GUI or merge approval.
 | R11 — capability and Reader scroll | PASS | Capability negatives refuse missing kinds/`scroll` and produce no scroll op; native tests target the current Reader body; Tern 0.8.3 headless flow checks the 400×440 Reader tail. |
 | R12 — modal priority/exclusivity and retired input | PASS | Renderer integration suspends/restores Browser state around the modal seat, verifies Model/Browser/Preset exclusivity, rejects a retired Browser panel event, and checks that disposal clears all three exposed presenter getters. |
 | R13 — no command admission or PiTui behavior change | PASS (scope) | No command/route registration or existing session command implementation changed. Existing command-admission and PiTui session-picker behavior are unchanged; their validation is recorded with the final PR gates. |
-| R14 — visual qualification | PARTIAL; rerun production-Presenter matrix for Owner-requested primary Resume styling | A real Tern 0.8.3 production-Presenter multi-viewport Headless matrix passed before the Owner requested primary styling for disabled Resume. That matrix does not qualify this final footer styling, so it must be rerun. `REAL_TERN_GUI`, physical GUI/IME/wheel/theme, and Owner final screenshot sign-off remain **NOT_VERIFIED**. |
+| R14 — visual qualification | PASS — production-Presenter REAL_TERN_HEADLESS matrix; Owner accepted screenshots for Headless visual review | The current primary-styled, disabled Resume was painted by the production Presenter in the real Tern 0.8.3 client across wide, medium, narrow, and short Reader viewports; the focused-footer observation retains the disabled reason and renders `primary off`. `REAL_TERN_GUI`, physical GUI/IME/wheel/theme, and physical/client PageUp/PageDown remain **NOT_VERIFIED**. |
 | R15 — Direct persisted main Session → same Presenter | PASS | `tern-tsp-session-browser-direct.test.ts` exercises a cold persisted main Session through the real Direct `SessionReader`, read owner, and native TSP Presenter rather than a precomputed capability flag. |
 | R16 — Remote read-only semantics | UNKNOWN | No runnable Remote TSP fixture was available for this slice. No Remote Session switch or new Remote wire is claimed. |
 
-The full production-Presenter matrix on the preceding snapshot was
+The production-Presenter matrix on the Owner-approved primary Resume style was
 **REAL_TERN_HEADLESS**, not `REAL_TERN_GUI`, and not a real Session switch. It
 verified pointer selection-only behavior, Home/End selection with an independent
 Current marker, native Tree/Card painting, the Host content-only result/snippet,
-and the Reader scroll body/tail across multiple viewports. The Owner-requested
-primary styling for disabled Resume arrived after that run, so its screenshots
-do not qualify the current delta. PageUp/PageDown could not be delivered by the
-available `tern ctl key` path; physical/client PageUp/PageDown remains
-**NOT_VERIFIED**.
+the focused-footer disabled-primary appearance, and the Reader scroll body/tail
+across multiple viewports. The Owner accepted the screenshots for Headless visual
+review. This does not certify `REAL_TERN_GUI` or physical GUI/IME/wheel/theme.
+PageUp/PageDown could not be delivered by the available `tern ctl key` path;
+physical/client PageUp/PageDown remains **NOT_VERIFIED**.
 
 The F1 study drives the production Presenter with DirectReader-output A→B→A rows
-and qualifies the Owner-selected grouping at one viewport; it does not certify
-the current multi-viewport presentation or settle any B1-B write-enabled UX
-decision.
+and qualifies the Owner-selected grouping at one viewport; the R14 matrix does
+not repeat that exact lineage fixture at every viewport or settle any B1-B
+write-enabled UX decision.
 
 ## Validation record
 
