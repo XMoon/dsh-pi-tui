@@ -435,6 +435,43 @@ test('tail Down cancels a pending wheel window before repaint', () => {
   assert.match(strip(after[4]!), /^> job:f/, 'the visible tail selection remains marked')
 })
 
+test('a deleted selection fallback cannot open until it is painted', () => {
+  const h = harness()
+  h.accessory.setItems([item('job:a'), item('job:b'), item('job:c'), item('job:d')])
+  h.accessory.focused = true
+  assert.ok(h.accessory.activate())
+  h.accessory.render(80)
+  h.accessory.handleInput('\x1b[B')
+  h.accessory.render(80)
+  assert.equal(h.accessory.selected, 'job:b')
+
+  h.accessory.setItems([item('job:a'), item('job:c'), item('job:d')])
+  assert.equal(h.accessory.selected, 'job:c', 'the existing successor fallback is retained')
+  h.accessory.handleInput('\r')
+  assert.deepEqual(h.activations(), [], 'Enter cannot open the unpainted deletion fallback')
+
+  const after = h.accessory.render(80)
+  assert.match(strip(after[3]!), /^> job:c/, 'the successor receives the painted selection marker')
+  h.accessory.handleInput('\r')
+  assert.deepEqual(h.activations(), ['job:c'], 'Enter opens the fallback after it is painted')
+})
+
+test('keyboard movement after a deleted fallback keeps immediate Enter semantics', () => {
+  const h = harness()
+  h.accessory.setItems([item('job:a'), item('job:b'), item('job:c'), item('job:d')])
+  h.accessory.focused = true
+  assert.ok(h.accessory.activate())
+  h.accessory.render(80)
+  h.accessory.handleInput('\x1b[B')
+  h.accessory.render(80)
+
+  h.accessory.setItems([item('job:a'), item('job:c'), item('job:d')])
+  h.accessory.handleInput('\x1b[B')
+  assert.equal(h.accessory.selected, 'job:d')
+  h.accessory.handleInput('\r')
+  assert.deepEqual(h.activations(), ['job:d'], 'an explicit keyboard move still commits immediately')
+})
+
 test('a height-only repaint invalidates the pressed frame when component geometry is unchanged', () => {
   const h = harness({ rows: 24, chrome: 4 })
   focus(h, [item('job:a'), item('job:b'), item('job:c'), item('job:d')])

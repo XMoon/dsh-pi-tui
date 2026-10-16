@@ -325,6 +325,8 @@ export class TaskQuickAccessory implements Component, Focusable {
   /** A wheel target is pending paint. Enter keeps the last-painted selection
    *  until render() commits its matching row. */
   private wheelSelectionPending = false
+  /** A deleted row's fallback cannot be opened until a frame paints it. */
+  private deletedSelectionPendingPaint = false
   /** The pressed row identity of an in-flight Fullscreen press→release
    *  gesture, bound to the painted frame the press happened on. Component-
    *  local, short-lived, cleared on every release and by `deactivate()`. */
@@ -377,6 +379,7 @@ export class TaskQuickAccessory implements Component, Focusable {
     const first = this.items[0]
     if (first === undefined) return false
     this.wheelSelectionPending = false
+    this.deletedSelectionPendingPaint = false
     this.selectedValue = first.value
     return true
   }
@@ -389,6 +392,7 @@ export class TaskQuickAccessory implements Component, Focusable {
   deactivate(): void {
     this.selectedValue = undefined
     this.wheelSelectionPending = false
+    this.deletedSelectionPendingPaint = false
     this.pressedValue = undefined
     this.pressedFrame = undefined
   }
@@ -402,12 +406,12 @@ export class TaskQuickAccessory implements Component, Focusable {
    * anchor falls back to the bounded previous index, never to a label guess.
    *
    * While ACTIVE the selected identity is reconciled against the new rows:
-   * a surviving selection keeps its stable value; a deleted
-   * selection falls back bounded to the successor of its pre-delete global
-   * index (predecessor at the tail), and an emptied projection notifies the
-   * host — ONLY while this component really holds the active focus (a
-   * HIDDEN accessory's empty commit is a data-only update and must never
-   * re-enter the host's focus lifecycle).
+   * a surviving selection keeps its stable value; a deleted selection falls back
+   * bounded to the successor of its pre-delete global index (predecessor at
+   * the tail); Enter waits until that fallback is
+   * painted. An emptied projection notifies the host ONLY while this component
+   * really holds active focus (a hidden accessory's empty commit is data-only
+   * and never re-enters the host's focus lifecycle).
    *
    * An empty projection keeps the LAST PAINTED hit geometry until `render()`
    * actually paints the blank frame: the rows are still on screen, so a wheel
@@ -424,6 +428,7 @@ export class TaskQuickAccessory implements Component, Focusable {
       this.start = 0
       this.selectedValue = undefined
       this.wheelSelectionPending = false
+      this.deletedSelectionPendingPaint = false
       this.requestRender()
       // The host notification is deliberate LAST: the component state is
       // already consistent if the host re-enters synchronously.
@@ -447,6 +452,7 @@ export class TaskQuickAccessory implements Component, Focusable {
         const oldIndex = previousSelectionIndex
         const fallback = oldIndex === undefined ? 0 : Math.min(oldIndex, items.length - 1)
         this.selectedValue = items[Math.max(0, fallback)]?.value
+        this.deletedSelectionPendingPaint = true
       }
     }
     // Window anchor rebases onto the surviving first visible value.
@@ -499,6 +505,7 @@ export class TaskQuickAccessory implements Component, Focusable {
       this.requestRender()
       return
     }
+    this.deletedSelectionPendingPaint = false
     this.selectedValue = this.items[next]?.value
     this.ensureVisible()
     this.requestRender()
@@ -535,6 +542,7 @@ export class TaskQuickAccessory implements Component, Focusable {
       // Up at the GLOBAL first row EXITS (plan §1.3) — never wrap.
       if (index === 0) {
         this.wheelSelectionPending = false
+        this.deletedSelectionPendingPaint = false
         this.onExit()
         return
       }
@@ -555,6 +563,8 @@ export class TaskQuickAccessory implements Component, Focusable {
     if (componentKeymap.matches(data, 'tasks.pageUp')) { this.page(-1); return }
     if (componentKeymap.matches(data, 'tasks.pageDown')) { this.page(1); return }
     if (componentKeymap.matches(data, 'tasks.open')) {
+      // A deleted-row fallback is not an openable selection until it is painted.
+      if (this.deletedSelectionPendingPaint) return
       const value = this.selectedValue
       if (value === undefined) return
       // The host's onActivate implementation leaves Quick FIRST, then
@@ -564,6 +574,7 @@ export class TaskQuickAccessory implements Component, Focusable {
     }
     if (componentKeymap.matches(data, 'tasks.search.exit')) {
       this.wheelSelectionPending = false
+      this.deletedSelectionPendingPaint = false
       this.onExit()
       return
     }
@@ -751,6 +762,7 @@ export class TaskQuickAccessory implements Component, Focusable {
     if (layout.grant === 0 || layout.count === 0) {
       this.painted = undefined
       this.wheelSelectionPending = false
+      this.deletedSelectionPendingPaint = false
       // B4-B (review F4): an ACTIVE band that lost its grant (a resize to an
       // extreme frame) retires through the host — the editor regains the
       // keyboard instead of an invisible surface consuming input. A HIDDEN
@@ -808,6 +820,7 @@ export class TaskQuickAccessory implements Component, Focusable {
       terminalColumns: this.geometry.columns(),
       terminalRows,
     }
+    this.deletedSelectionPendingPaint = false
     return lines
   }
 }
