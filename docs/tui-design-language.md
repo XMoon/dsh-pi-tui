@@ -354,7 +354,7 @@ neutral/narrow/halfwidth. Measured classes (`get-east-asian-width`
 | Glyph | Class | Verdict |
 |---|---|---|
 | `>` `\|` `/` `:` `(` `)` `[` `]` | ASCII/narrow | safe |
-| `›` U+203A, `❯` U+276F, `»` U+00BB | neutral | safe |
+| `›` U+203A, `❯` U+276F, `»` U+00BB, `➜` U+279C | neutral | safe; `➜` is reserved to Task Quick's Full navigation action |
 | `∙` U+2219, `◦` U+25E6, `▸` U+25B8, `▾` U+25BE | neutral | safe |
 | `●` U+25CF, `·` U+00B7, `•` U+2022, `←` U+2190, `↗` U+2197 | **ambiguous** | CJK hazard |
 | `─` U+2500, `│` U+2502 | **ambiguous** | CJK hazard |
@@ -388,6 +388,7 @@ new place.** That is why D2 rejects a `│` column rule, and why Pi's `→` curs
 | Role | Glyph | Notes |
 |---|---|---|
 | Navigation cursor | `> ` (2 cells) | one per list; D3 |
+| Task Quick Full action | `➜` (U+279C, 1 cell) | muted action-type marker only; not a status or focus marker |
 | Active/current label | `[Label]` | focus, active tab, current pane |
 | Current-value marker | state chip `[current]` | lowercase chip at the end of the row's content, or inside the row's right-aligned fact slot when it has one (§4.5, §5.1.3); **no arrow** — `←` is EAW-ambiguous and the previous `← current` / `[← current]` forms are retired |
 | Status marker | `‣` (U+2023) | the ONE marker for a standalone status group; one cell, EAW neutral; D5+D7 |
@@ -925,12 +926,21 @@ A new surface picks one and must justify any deviation.
 | **Overlay** (modal, non-fullscreen) | `Frame` box, single body, bottom hint | pickers, approval dialog |
 | **Pane** (embedded in the transcript/log) | header line + folded body, no action bar | tool cards, subagent cards, Thinking |
 | **Status bar** | one row of items + separators, no interaction (a host-instruction line may be reserved above it — `footer/instruction.ts`) | footer |
-| **Accessory band** (pinned, on-demand) | zero rows hidden; when active: ONE top separator rule (the §6.2 exception) + identity row + ≤3 single-line rows, painted UNDER the whole footer as the frame's last region | Task Quick |
+| **Accessory band** (pinned, on-demand) | zero rows hidden; when active: ONE top separator rule (the §6.2 exception) + identity row + ≤3 single-line navigation rows (tasks, then the optional Full action), painted UNDER the whole footer as the frame's last region | Task Quick |
 
 Shared minimum spec for **PiTui-painted** Workspace and Overlay: identity, one body, one bottom
 bar, `Esc` last, whole-segment hint drops (never mid-word), role table respected. The
 accessory band is its own archetype (not a Workspace/Overlay): it owns no hint bar, no
 frame, and its separator is the §6.2 exception above.
+
+Task Quick's optional Full navigation target follows all real task rows in the same
+three-row window and exists only when its first-party Full callback is injected. It is
+not a `TaskPanelItem`, task count, status or Footer fact. Paint `➜ Open Task Center…`
+with a two-cell blank gutter after the existing `> ` selection marker; keep `➜` muted,
+the unselected label muted and the selected label `textStrong`. The arrow is the action
+kind only; `>` remains the sole focus/selection signal. Use terminal-cell truncation and
+keep the navigation target as one physical row.
+
 A **TSP-native** read-only Reader may legitimately have its own visible Back row and no
 action bar; its UI still needs a reachable, truthful navigation gesture (§12.3).
 

@@ -19,10 +19,11 @@ import assert from 'node:assert/strict'
 import { afterEach, test } from 'node:test'
 import { visibleWidth } from '@xmoon76/pi-tui'
 import type { TuiMouseEvent } from '@xmoon76/pi-tui'
+import { eastAsianWidthType } from 'get-east-asian-width'
 import { TaskQuickAccessory, TASK_QUICK_MAX_ROWS, planTaskQuickLayout, type TaskQuickLayout } from '../src/tui/panels/task-quick-accessory.ts'
 import { quickTaskProjection } from '../src/app/surface/task-runtime.ts'
 import { buildTaskRows } from '../src/domain/task/browser.ts'
-import { setTheme } from '../src/tui/theme/runtime.ts'
+import { color, setTheme } from '../src/tui/theme/runtime.ts'
 import type { TaskPanelItem } from '../src/app/surface/task-presentation.ts'
 import type { QuestionAttentionRow } from '../src/app/surface/question-controller.ts'
 
@@ -133,6 +134,178 @@ test('grant ladder: one real item never paints a header-only frame', () => {
   assert.equal(short.count, 1)
 })
 
+test('the optional Full action joins navigation but never task totals or empty projections', () => {
+  const withAction = planTaskQuickLayout(80, 40, 4, 1, 0, true)
+  assert.deepEqual(withAction, {
+    width: 80,
+    grant: 4,
+    header: true,
+    separator: true,
+    itemRows: 2,
+    start: 0,
+    count: 2,
+    total: 1,
+  })
+  const withoutAction = planTaskQuickLayout(80, 40, 4, 1, 0)
+  assert.equal(withoutAction.count, 1, 'absence of the callback preserves task-only navigation')
+  const empty = planTaskQuickLayout(80, 40, 4, 0, 0, true)
+  assert.equal(empty.grant, 0)
+  assert.equal(empty.count, 0, 'the action never appears without a real task')
+  assert.equal(empty.total, 0)
+  const emptyProjection = harness({ openFull: true })
+  emptyProjection.accessory.setItems([])
+  assert.equal(emptyProjection.accessory.activate(), false, 'the action cannot focus an empty Quick')
+  assert.deepEqual(emptyProjection.accessory.render(80), [])
+})
+
+test('the Full action is omitted without its callback', () => {
+  const h = harness()
+  focus(h, [item('job:a'), item('job:b')])
+  const rows = h.accessory.render(80).map(strip)
+  assert.ok(!rows.some(row => row.includes('Open Task Center…')))
+  h.accessory.handleInput('\x1b[B')
+  h.accessory.handleInput('\x1b[B')
+  h.accessory.handleInput('\x1b[B')
+  assert.equal(h.accessory.selected, 'job:b', 'task-only navigation clamps at the last real task')
+  assert.equal(h.fullOpens(), 0)
+})
+
+test('the typed Full action follows all real tasks and never enters task selection routing', () => {
+  const h = harness({ openFull: true })
+  const tasks = [item('job:a'), item('job:b'), item('job:c'), item('job:d')]
+  focus(h, tasks)
+  assert.equal(h.accessory.getItems().length, 4)
+  for (let index = 0; index < tasks.length; index += 1) h.accessory.handleInput('\x1b[B')
+
+  const rows = h.accessory.render(80).map(strip)
+  const actionRow = rows.find(row => row.includes('Open Task Center…'))
+  assert.ok(actionRow?.startsWith('>   ➜ Open Task Center…'), `the last navigation target is selected:
+${rows.join('\n')}`)
+  assert.equal(h.accessory.selected, undefined, 'the Full action is not exposed as a TaskPanelItem value')
+  assert.deepEqual(h.activations(), [], 'navigating to the action cannot produce a fake task selection')
+  h.accessory.handleInput('\x1b[B')
+  h.accessory.handleInput('\r')
+  assert.equal(h.fullOpens(), 1, 'Enter on the typed action invokes the Full callback')
+  assert.deepEqual(h.activations(), [], 'the action never calls onActivate')
+  h.accessory.handleInput('\x1b[A')
+  assert.equal(h.accessory.selected, 'job:d', 'Up returns from open-full to the last real task')
+})
+
+test('PageDown uses the painted navigation window, including the action target', () => {
+  const h = harness({ openFull: true })
+  focus(h, [item('job:a'), item('job:b'), item('job:c'), item('job:d')])
+  const initial = h.accessory.render(80)
+  assert.equal(initial.length, 5, 'the painted window is divider + identity + three navigation rows')
+
+  h.accessory.handleInput('\x1b[6~')
+  assert.equal(h.accessory.selected, 'job:d', 'the first page advances by three painted navigation rows')
+  h.accessory.handleInput('\x1b[6~')
+  assert.equal(h.accessory.selected, undefined, 'the next page clamps to the appended Full action')
+  const actionRow = h.accessory.render(80).map(strip).find(row => row.includes('Open Task Center…'))
+  assert.ok(actionRow?.startsWith('>   ➜ Open Task Center…'))
+})
+
+test('the action remains the final navigation target after 100 real task values', () => {
+  const tasks = Array.from({ length: 100 }, (_, index) => item(`job:${index + 1}`))
+  const h = harness({ openFull: true })
+  focus(h, tasks)
+  for (let index = 0; index < tasks.length; index += 1) h.accessory.handleInput('\x1b[B')
+
+  const rows = h.accessory.render(80).map(strip)
+  const actionRow = rows.find(row => row.includes('Open Task Center…'))
+  assert.ok(actionRow?.startsWith('>   ➜ Open Task Center…'))
+  assert.equal(h.accessory.selected, undefined)
+  assert.equal(h.accessory.getItems().length, 100)
+  assert.equal(planTaskQuickLayout(80, 40, 4, 100, 100, true).total, 100)
+})
+
+test('open-full selection survives task insertion, reorder and status refresh', () => {
+  const h = harness({ openFull: true })
+  focus(h, [item('job:a'), item('job:b'), item('job:c')])
+  h.accessory.render(80)
+  for (let index = 0; index < 3; index += 1) h.accessory.handleInput('\x1b[B')
+  assert.equal(h.accessory.selected, undefined)
+
+  h.accessory.setItems([
+    item('job:x'), item('job:c'), item('job:a', { status: 'failed' }), item('job:b'),
+  ])
+  assert.equal(h.accessory.selected, undefined, 'a surviving typed action remains selected after N changes')
+  const rows = h.accessory.render(80).map(strip)
+  const actionRow = rows.find(row => row.includes('Open Task Center…'))
+  assert.ok(actionRow?.startsWith('>   ➜ Open Task Center…'))
+  assert.equal(h.accessory.getItems().length, 4)
+  assert.match(rows[1]!, /showing 3-4\/4$/, 'the header still counts visible real task rows only')
+
+  h.accessory.setItems([])
+  assert.equal(h.exits(), 1, 'emptying real tasks still notifies the ACTIVE host')
+  assert.equal(h.fullOpens(), 0, 'an action cannot keep an empty Quick active')
+  h.accessory.deactivate()
+  h.accessory.focused = false
+  assert.deepEqual(h.accessory.render(80), [])
+})
+
+test('wheel reaches the action window without changing Enter before repaint', () => {
+  const h = harness({ openFull: true })
+  focus(h, [item('job:a'), item('job:b'), item('job:c'), item('job:d'), item('job:e')])
+  h.accessory.render(80)
+  for (let index = 0; index < 3; index += 1) h.accessory.handleMouse(wheel(1, 1))
+
+  const scrolled = h.accessory.render(80).map(strip)
+  assert.match(scrolled[1]!, /showing 4-5\/5$/, 'the task range ignores the visible action tail')
+  assert.ok(scrolled.some(row => row.includes('➜ Open Task Center…')), 'wheel scrolling reaches the action row')
+  assert.equal(h.accessory.selected, 'job:d', 'wheel paint clamps selection to the new visible task edge')
+  h.accessory.handleInput('\x1b[B')
+  h.accessory.handleInput('\x1b[B')
+  const selectedAction = h.accessory.render(80).map(strip).find(row => row.includes('Open Task Center…'))
+  assert.ok(selectedAction?.startsWith('>   ➜ Open Task Center…'))
+
+  const pending = harness({ openFull: true })
+  focus(pending, [item('job:a'), item('job:b'), item('job:c'), item('job:d'), item('job:e')])
+  pending.accessory.render(80)
+  for (let index = 0; index < 3; index += 1) pending.accessory.handleMouse(wheel(1, 1))
+  pending.accessory.handleInput('\r')
+  assert.deepEqual(pending.activations(), ['job:a'], 'Enter before repaint keeps the last painted real task')
+  assert.equal(pending.fullOpens(), 0, 'wheel-pending action visibility cannot synthesize an action selection')
+})
+
+test('the Full action keeps the real-task range and renders one clipped physical row', () => {
+  for (const cols of [44, 80, 120]) {
+    const h = harness({ cols, rows: 40, chrome: 4, openFull: true })
+    focus(h, [item('job:a')])
+    const before = h.accessory.render(cols)
+    const plainBefore = before.map(strip)
+    assert.match(plainBefore[1]!, /^Task Quick\s+showing 1-1\/1$/, 'the action is excluded from N')
+    const unselected = before.find(row => strip(row).includes('Open Task Center…'))!
+    assert.ok(strip(unselected).startsWith('    ➜ Open Task Center…'))
+    assert.ok(unselected.includes(color.textMuted('➜ ')), 'the arrow remains textMuted')
+    assert.ok(unselected.includes(color.textMuted('Open Task Center…')), 'the unselected label is textMuted')
+    assert.equal(visibleWidth(unselected), cols)
+    assert.equal(visibleWidth('➜'), 1)
+    assert.equal(eastAsianWidthType('➜'.codePointAt(0)!), 'neutral')
+
+    h.accessory.handleInput('\x1b[B')
+    const selected = h.accessory.render(cols).find(row => strip(row).includes('Open Task Center…'))!
+    assert.ok(strip(selected).startsWith('>   ➜ Open Task Center…'))
+    assert.ok(selected.includes(color.textMuted('➜ ')), 'selection does not recolor the arrow')
+    assert.ok(selected.includes(color.textStrong('Open Task Center…')), 'the selected label is textStrong')
+    assert.equal(visibleWidth(selected), cols)
+  }
+})
+
+test('an action-only visible window has no fabricated task position', () => {
+  const h = harness({ rows: 12, chrome: 9, openFull: true })
+  focus(h, [item('job:a')])
+  h.accessory.render(80)
+  h.accessory.handleInput('\x1b[B')
+
+  const rows = h.accessory.render(80).map(strip)
+  assert.equal(rows.length, 2)
+  assert.equal(rows[0]!.trimEnd(), 'Task Quick')
+  assert.ok(!rows[0]!.includes('showing') && !rows[0]!.includes('/1'))
+  assert.ok(rows[1]!.startsWith('>   ➜ Open Task Center…'))
+  assert.equal(h.accessory.anchoredValue, undefined, 'an action anchor is not a task value')
+})
+
 test('grant ladder: the transcript floor, the chrome and the accessory ceiling are all kept', () => {
   for (const rows of [200, 60, 40, 24, 20, 12, 10, 8, 6, 5, 4, 3]) {
     for (const chrome of [0, 1, 4, 8]) {
@@ -155,13 +328,16 @@ interface Harness {
   exits(): number
   /** The typed selections the accessory committed (Enter / same-row click). */
   activations(): string[]
+  /** Full Center callbacks, kept separate from real task selections. */
+  fullOpens(): number
   renders(): number
 }
 
-function harness(initial: { cols?: number; rows?: number; chrome?: number } = {}): Harness {
+function harness(initial: { cols?: number; rows?: number; chrome?: number; openFull?: boolean } = {}): Harness {
   const geometry = { cols: initial.cols ?? 80, rows: initial.rows ?? 24, chrome: initial.chrome ?? 4 }
   let renders = 0
   let exitCount = 0
+  let fullOpenCount = 0
   const activated: string[] = []
   const accessory = new TaskQuickAccessory({
     geometry: {
@@ -172,10 +348,18 @@ function harness(initial: { cols?: number; rows?: number; chrome?: number } = {}
     onRequestRender: () => { renders += 1 },
     onExit: () => { exitCount += 1 },
     onActivate: (value) => { activated.push(value) },
+    onOpenFull: initial.openFull === true ? () => { fullOpenCount += 1 } : undefined,
     onEmpty: () => { exitCount += 1 },
     onFirstPaint: () => {},
   })
-  return { accessory, geometry, exits: () => exitCount, activations: () => [...activated], renders: () => renders }
+  return {
+    accessory,
+    geometry,
+    exits: () => exitCount,
+    activations: () => [...activated],
+    fullOpens: () => fullOpenCount,
+    renders: () => renders,
+  }
 }
 
 /** B4-B: the accessory paints only while focused — focus it like the host
@@ -499,6 +683,68 @@ test('a height-only repaint invalidates the pressed frame when component geometr
   assert.deepEqual(h.accessory.handleMouse({ ...wheel(0, row), type: 'release', button: 'left' }), { handled: true })
   assert.deepEqual(h.accessory.handleMouse({ ...wheel(0, row), type: 'click', button: 'left' }), { handled: true })
   assert.deepEqual(h.activations(), ['job:a'], 'a fresh same-frame gesture remains valid')
+})
+
+test('Fullscreen Full-action clicks require a live matching target and painted frame', () => {
+  const pointer = (height: number, type: 'press' | 'release' | 'click', y: number): TuiMouseEvent => ({
+    ...wheel(0, y, { height }),
+    type,
+    button: 'left',
+  })
+
+  const positive = harness({ openFull: true })
+  focus(positive, [item('job:a')])
+  const painted = positive.accessory.render(80)
+  const actionRow = painted.findIndex(line => strip(line).includes('Open Task Center…'))
+  assert.ok(actionRow >= 0)
+  assert.deepEqual(positive.accessory.handleMouse(pointer(painted.length, 'press', actionRow)),
+    { handled: true, capture: true })
+  assert.deepEqual(positive.accessory.handleMouse(pointer(painted.length, 'release', actionRow)), { handled: true })
+  assert.deepEqual(positive.accessory.handleMouse(pointer(painted.length, 'click', actionRow)), { handled: true })
+  assert.equal(positive.fullOpens(), 1)
+  assert.deepEqual(positive.activations(), [], 'the action click never routes a TaskPanelItem')
+
+  const moved = harness({ openFull: true })
+  focus(moved, [item('job:a')])
+  const movedRows = moved.accessory.render(80)
+  const movedAction = movedRows.findIndex(line => strip(line).includes('Open Task Center…'))
+  const taskRow = movedRows.findIndex(line => strip(line).includes('job:a'))
+  moved.accessory.handleMouse(pointer(movedRows.length, 'press', movedAction))
+  moved.accessory.handleMouse(pointer(movedRows.length, 'release', taskRow))
+  moved.accessory.handleMouse(pointer(movedRows.length, 'click', taskRow))
+  assert.equal(moved.fullOpens(), 0, 'pressing the action and releasing on a task cannot open Full')
+  assert.deepEqual(moved.activations(), [])
+
+  const repainted = harness({ openFull: true })
+  focus(repainted, [item('job:a')])
+  const oldRows = repainted.accessory.render(80)
+  const oldAction = oldRows.findIndex(line => strip(line).includes('Open Task Center…'))
+  repainted.accessory.handleMouse(pointer(oldRows.length, 'press', oldAction))
+  repainted.accessory.render(80)
+  repainted.accessory.handleMouse(pointer(oldRows.length, 'release', oldAction))
+  repainted.accessory.handleMouse(pointer(oldRows.length, 'click', oldAction))
+  assert.equal(repainted.fullOpens(), 0, 'any intervening paint retires the old action gesture')
+
+  const emptied = harness({ openFull: true })
+  focus(emptied, [item('job:a')])
+  const emptyRows = emptied.accessory.render(80)
+  const emptyAction = emptyRows.findIndex(line => strip(line).includes('Open Task Center…'))
+  emptied.accessory.handleMouse(pointer(emptyRows.length, 'press', emptyAction))
+  emptied.accessory.setItems([])
+  emptied.accessory.handleMouse(pointer(emptyRows.length, 'release', emptyAction))
+  emptied.accessory.handleMouse(pointer(emptyRows.length, 'click', emptyAction))
+  assert.equal(emptied.fullOpens(), 0, 'an empty live projection cannot commit the old action')
+
+  const blurred = harness({ openFull: true })
+  focus(blurred, [item('job:a')])
+  const blurRows = blurred.accessory.render(80)
+  const blurAction = blurRows.findIndex(line => strip(line).includes('Open Task Center…'))
+  blurred.accessory.handleMouse(pointer(blurRows.length, 'press', blurAction))
+  blurred.accessory.deactivate()
+  blurred.accessory.focused = false
+  blurred.accessory.handleMouse(pointer(blurRows.length, 'release', blurAction))
+  blurred.accessory.handleMouse(pointer(blurRows.length, 'click', blurAction))
+  assert.equal(blurred.fullOpens(), 0, 'blurred Quick cannot execute a stale action hit')
 })
 
 test('the whole painted band owns the wheel, identity row included', () => {

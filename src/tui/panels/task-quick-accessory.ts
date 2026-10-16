@@ -6,13 +6,12 @@
  * `render(width)` decides the layout):
  * - Identity row: `Task Quick` (role 1, bold `textStrong`) with the right-aligned
  *   position `showing x-y/N` (role 12, `textMuted`);
- * - Up to three single-line task rows: the selection marker `> ` (`primary`,
- *   D6's ONE active device) for the selected row, the projected row label
- *   (role 3 `text`, ancestor-context rows role 4 `textDim`), the durable mode
- *   suffix (role 4) and the status group `‣ Running` (role 9, `taskStatusColor`
- *   ink + `taskStatusWord` word);
- * - A granted-one-row frame spends its ONLY row on task content and moves the
- *   compact `x-y/N` to that row's tail — a header never displaces a task row.
+ * - Up to three single-line navigation rows: real task rows retain their
+ *   projected label, mode suffix and status group; when the Full Task Center
+ *   route is available, one typed `➜ Open Task Center…` action follows all
+ *   real tasks and shares the same selection marker/window;
+ * - A granted-one-row frame spends its ONLY row on the selected navigation
+ *   target and adds task position only when a real task row is visible.
  *
  * HIDDEN (unfocused) paints ZERO rows (B4-B, Owner revision 2026-10-14): no
  * body, no header, no blank band — even with live tasks. `focused` is the
@@ -40,7 +39,7 @@
  * word, `> ` as the only active marker, no cursor glyph, no brackets, no
  * second palette token, no frame/border — plus the ONE Owner-authorized top
  * separator rule (role 15 `border`) that marks the Footer↔Quick boundary
- * (§6.2 exception) and yields to task rows on a low budget.
+ * (§6.2 exception) and yields to task/action navigation rows on a low budget.
  *
  * @module @xmoon76/dsh-pi-tui/tui/panels/task-quick-accessory
  */
@@ -52,10 +51,10 @@ import { sanitizedPhysicalLine } from '../presentation/lines.ts'
 import { color, taskStatusColor, taskStatusWord } from '../theme/runtime.ts'
 import type { TaskPanelItem } from '../../app/surface/task-presentation.ts'
 
-/** The accessory's own row ceiling: identity row + three task rows. This is
- *  the accessory's budget, never a terminal-size threshold. */
+/** The accessory's own row ceiling: separator + identity + three navigation rows.
+ *  This is the accessory's budget, never a terminal-size threshold. */
 export const TASK_QUICK_MAX_ROWS = 5
-/** The item-row ceiling: at most three single-line task rows at any size. */
+/** The navigation-row ceiling: at most three tasks/actions at any size. */
 export const TASK_QUICK_MAX_ITEM_ROWS = 3
 /** The shared status marker (design language §4.4, D5+D7) — one `‣` and a word. */
 const STATUS_MARKER = '‣'
@@ -86,20 +85,20 @@ export interface TaskQuickLayout {
   readonly header: boolean
   /** Whether the Quick-owned top separator rule is painted. It is the ONLY
    *  rule on this surface (the Owner-authorized Footer↔Quick boundary,
-   *  design language §6.2 exception) and it yields to task rows: painted
-   *  only when every projected task row already fits. */
+   *  design language §6.2 exception) and it yields to navigation rows: painted
+   *  only when every desired task/action row already fits. */
   readonly separator: boolean
-  /** The capacity of the task-row window (the paging/anchor step). */
+  /** The capacity of the task/action navigation window (the paging/anchor step). */
   readonly itemRows: number
-  /** The first visible item index. */
+  /** The first visible task/action navigation index. */
   readonly start: number
-  /** The number of task rows actually painted from `start`. */
+  /** The number of task/action navigation rows actually painted from `start`. */
   readonly count: number
-  /** The total number of projected items (`N`). */
+  /** The total number of real projected tasks (`N`); the action is excluded. */
   readonly total: number
 }
 
-/** A frame with nothing to paint (0 grant or 0 items). */
+/** A frame with nothing to paint (0 grant or 0 tasks). */
 function emptyLayout(width: number, total: number): TaskQuickLayout {
   return { width, grant: 0, header: false, separator: false, itemRows: 0, start: 0, count: 0, total }
 }
@@ -108,17 +107,17 @@ function emptyLayout(width: number, total: number): TaskQuickLayout {
  * Derive the accessory's row plan from the LIVE frame (B4-B addendum
  * 2026-10-15: the band is under the whole footer and owns ONE top separator):
  *
- * 1. `desired = min(3, N)` — the real projected row count, never a fabricated
- *    one; an empty projection paints nothing at all;
+ * 1. The desired count is `min(3, tasks + open-full action)`. The action only
+ *    exists when at least one real task and its typed Full callback exist;
+ *    an empty projection still paints nothing;
  * 2. `share = floor(terminalRows / 4)` — the accessory's proportional share of
  *    the terminal height, the same shape as the public below-widget zone's cap;
  * 3. `room = terminalRows - chromeRows - 1` — every other owner first (the
  *    footer included — the band sits UNDER it), plus one visible transcript row;
- * 4. `grant = min(5, share, room, desired + 2)` — at least one TASK row is the
- *    first guarantee; the identity row follows the B4-A rule (a ≥2 grant with
- *    task rows to spare); the separator is DECORATIVE and painted only when
- *    every projected task row already fits (`grant >= desired + 2`) — a rule
- *    line never displaces a visible task row.
+ * 4. `grant = min(5, share, room, desired + 2)` — one navigation row is the
+ *    first guarantee; the identity row follows the B4-A rule (a ≥2 grant);
+ *    the separator is DECORATIVE and painted only when every desired task/action
+ *    row already fits (`grant >= desired + 2`) — it never displaces a row.
  */
 export function planTaskQuickLayout(
   terminalCols: number,
@@ -126,24 +125,26 @@ export function planTaskQuickLayout(
   chromeRows: number,
   total: number,
   startIndex: number,
+  includeOpenFullAction = false,
 ): TaskQuickLayout {
   const width = Math.max(1, Math.floor(Number.isFinite(terminalCols) ? terminalCols : 1))
   const rows = Math.max(1, Math.floor(Number.isFinite(terminalRows) ? terminalRows : 1))
   const chrome = Math.max(0, Math.floor(Number.isFinite(chromeRows) ? chromeRows : 0))
-  const items = Math.max(0, Math.floor(Number.isFinite(total) ? total : 0))
-  const desired = Math.min(TASK_QUICK_MAX_ITEM_ROWS, items)
+  const tasks = Math.max(0, Math.floor(Number.isFinite(total) ? total : 0))
+  const navigationCount = tasks + (tasks > 0 && includeOpenFullAction ? 1 : 0)
+  const desired = Math.min(TASK_QUICK_MAX_ITEM_ROWS, navigationCount)
   if (desired === 0) return emptyLayout(width, 0)
   const share = Math.floor(rows / 4)
   const room = rows - chrome - 1
   const grant = Math.max(0, Math.min(TASK_QUICK_MAX_ROWS, share, room, desired + 2))
-  if (grant === 0) return emptyLayout(width, items)
+  if (grant === 0) return emptyLayout(width, tasks)
   const header = grant >= 2
-  // The decorative separator yields to task rows: only when the grant covers
-  // the identity row AND every projected task row with one row to spare.
+  // The decorative separator yields to navigation rows: only when the grant
+  // covers the identity row AND every desired task/action row with one spare.
   const separator = header && grant >= desired + 2
   const capacity = Math.min(desired, header ? grant - 1 : grant)
   const requested = Math.floor(Number.isFinite(startIndex) ? startIndex : 0)
-  const start = Math.min(Math.max(0, requested), Math.max(0, items - capacity))
+  const start = Math.min(Math.max(0, requested), Math.max(0, navigationCount - capacity))
   return {
     width,
     grant,
@@ -151,8 +152,8 @@ export function planTaskQuickLayout(
     separator,
     itemRows: capacity,
     start,
-    count: Math.min(capacity, items - start),
-    total: items,
+    count: Math.min(capacity, navigationCount - start),
+    total: tasks,
   }
 }
 
@@ -175,6 +176,7 @@ function fits(left: string, right: string, width: number): boolean {
  *  degrades from `showing x-y/N` to the compact `x-y/N` before it is dropped. */
 function renderHeaderRow(width: number, start: number, count: number, total: number): string {
   const identity = color.textStrong(TASK_QUICK_IDENTITY)
+  if (count === 0) return fit(identity, width)
   const range = `${start + 1}-${start + count}/${total}`
   for (const position of [`showing ${range}`, range]) {
     const right = color.textMuted(position)
@@ -236,17 +238,32 @@ function renderItemRow(item: TaskPanelItem, width: number, position?: string, se
   return `${left}${' '.repeat(gap)}${tail}`
 }
 
-/**
- * One painted task row of the last painted ACTIVE frame (mouse hit-testing).
- * The map is built from the EXACT final rows render() returns, so a click
- * can only act on last-painted geometry. The identity is the row's stable
- * `value` — never the physical index (an async reorder between press and
- * release must not activate whatever moved into the row).
- */
-interface TaskQuickHit {
-  readonly kind: 'item' | 'identity' | 'inert'
-  readonly value?: string
+/** The typed navigation target; the Full action never masquerades as a task value. */
+type TaskQuickTarget =
+  | { readonly kind: 'task'; readonly value: string }
+  | { readonly kind: 'open-full' }
+
+/** The appended navigation affordance is not a task/status row. */
+const OPEN_FULL_LABEL = 'Open Task Center…'
+
+function renderOpenFullRow(width: number, selected: boolean): string {
+  const marker = selected ? color.primary('> ') : '  '
+  const arrow = color.textMuted('➜ ')
+  const labelWidth = Math.max(0, width - visibleWidth(marker) - 2 - visibleWidth(arrow))
+  const label = truncateToWidth(OPEN_FULL_LABEL, labelWidth, '…', false)
+  const ink = selected ? color.textStrong : color.textMuted
+  return fit(`${marker}  ${arrow}${ink(label)}`, width)
 }
+
+/**
+ * One painted navigation row of the last painted ACTIVE frame (mouse hit-testing).
+ * Task identities are stable values; the action has its own discriminant and
+ * can never route through a fabricated TaskPanelItem.
+ */
+type TaskQuickHit =
+  | { readonly kind: 'item'; readonly value: string }
+  | { readonly kind: 'open-full' }
+  | { readonly kind: 'identity' | 'inert' }
 
 /**
  * The last painted frame — the ONLY geometry a pointer event may resolve
@@ -256,7 +273,7 @@ interface TaskQuickPainted {
   readonly width: number
   /** The physical row count this frame painted (the hit box height). */
   readonly height: number
-  /** The painted task-row count — the wheel window. */
+  /** The painted task/action navigation-row count — the wheel window. */
   readonly itemRows: number
   /** The per-row hit identities of THIS frame (length === height). */
   readonly hits: readonly TaskQuickHit[]
@@ -280,12 +297,12 @@ interface TaskQuickPainted {
  * whole admission/exit lifecycle (`enterTaskQuick` / `leaveTaskQuick`); the
  * component never claims focus itself and never fabricates an `open` flag.
  *
- * While ACTIVE the component owns: the row window (anchor + bounded
- * fallback), the selected row (an ephemeral stable `value` — never a label
- * or an index), the keyboard surface (`tasks.cursorUp/Down/pageUp/pageDown/
- * open/search.exit` through the shared component keymap), and the Fullscreen
- * pointer surface (the B4-A wheel window plus the B4-B same-row
- * press/release click). It holds no timer, no subscription and no catalog:
+ * While ACTIVE the component owns: the task/action row window (typed anchor
+ * + bounded fallback), the selected task or `open-full` target, the keyboard
+ * surface (`tasks.cursorUp/Down/pageUp/pageDown/open/search.exit` through the
+ * shared component keymap), and the Fullscreen pointer surface (the B4-A wheel
+ * window plus the B4-B same-row press/release click). It holds no timer, no
+ * subscription and no catalog:
  * a data commit only re-anchors the window, reconciles the selection, and
  * asks for one repaint.
  *
@@ -295,8 +312,8 @@ interface TaskQuickPainted {
  */
 export class TaskQuickAccessory implements Component, Focusable {
   private items: TaskPanelItem[] = []
-  /** The durable window anchor: the first visible row's stable value. */
-  private firstVisibleId: string | undefined
+  /** The durable window anchor: a task value or the stable open-full target. */
+  private firstVisibleTarget: TaskQuickTarget | undefined
   /** The bounded index fallback used when the anchor row disappeared. */
   private start = 0
   private painted: TaskQuickPainted | undefined
@@ -304,11 +321,13 @@ export class TaskQuickAccessory implements Component, Focusable {
   private readonly requestRender: () => void
   /** The host-owned lifecycle callbacks (B4-B). `onExit` leaves Quick
    *  (Up at the global first row / Esc); `onActivate` commits the typed
-   *  selection (Enter / same-row click) AFTER the host has already left
-   *  Quick; `onEmpty` lets the host exit when the ACTIVE projection empties
+   *  task selection (Enter / same-row click) AFTER the host has left Quick;
+   *  `onOpenFull` routes the separate Full action after that same exit;
+   *  `onEmpty` lets the host exit when the ACTIVE projection empties
    *  (fired only while this component really holds focus). */
   private readonly onExit: () => void
   private readonly onActivate: (value: string) => void
+  private readonly onOpenFull: (() => void) | undefined
   private readonly onEmpty: () => void
   /** Invoked ONCE on the first render pass (render runs every frame even
    *  while HIDDEN — it returns [] — so the first call is the first frame).
@@ -318,32 +337,21 @@ export class TaskQuickAccessory implements Component, Focusable {
    *  stale until unrelated churn. */
   private readonly onFirstPaint: () => void
   private firstPaintNotified = false
-  /** The selected row's stable value while ACTIVE (ephemeral: never
-   *  restored across open/close — a fresh entry always selects the first
-   *  row). The selected INDEX is derived on demand from this value. */
-  private selectedValue: string | undefined
+  /** The selected typed target while ACTIVE (ephemeral: never restored across
+   *  open/close — a fresh entry always selects the first real task). */
+  private selectedTarget: TaskQuickTarget | undefined
   /** A wheel target is pending paint. Enter keeps the last-painted selection
    *  until render() commits its matching row. */
   private wheelSelectionPending = false
   /** A deleted row's fallback cannot be opened until a frame paints it. */
   private deletedSelectionPendingPaint = false
-  /** The pressed row identity of an in-flight Fullscreen press→release
-   *  gesture, bound to the painted frame the press happened on. Component-
-   *  local, short-lived, cleared on every release and by `deactivate()`. */
-  private pressedValue: string | undefined
-  /** The painted frame the press happened on: a repaint (any reflow, a
-   *  resize, a row insertion/removal) invalidates the in-flight gesture —
-   *  the user pressed a row they SAW, and the row the frame now shows at
-   *  that cell is not the row they pressed (addendum §2.4 stale-intent
-   *  negative control). The click branch requires the latch AND its frame
-   *  to be the CURRENT painted frame. */
-  private pressedFrame: {
-    readonly width: number
-    readonly height: number
-    readonly terminalColumns: number
-    readonly terminalRows: number
-    readonly first: string | undefined
-  } | undefined
+  /** The typed task/action target of an in-flight Fullscreen press→release
+   *  gesture; component-local and cleared by a mismatched click or blur. */
+  private pressedTarget: TaskQuickTarget | undefined
+  /** Object identity of the exact painted frame the press happened on. Any
+   *  intervening render invalidates the gesture, even when its dimensions and
+   *  first task happen to remain unchanged. */
+  private pressedFrame: TaskQuickPainted | undefined
 
   focused = false
 
@@ -352,6 +360,7 @@ export class TaskQuickAccessory implements Component, Focusable {
     readonly onRequestRender: () => void
     readonly onExit: () => void
     readonly onActivate: (value: string) => void
+    readonly onOpenFull?: () => void
     readonly onEmpty: () => void
     readonly onFirstPaint: () => void
   }) {
@@ -359,6 +368,7 @@ export class TaskQuickAccessory implements Component, Focusable {
     this.requestRender = options.onRequestRender
     this.onExit = options.onExit
     this.onActivate = options.onActivate
+    this.onOpenFull = options.onOpenFull
     this.onEmpty = options.onEmpty
     this.onFirstPaint = options.onFirstPaint
   }
@@ -380,7 +390,7 @@ export class TaskQuickAccessory implements Component, Focusable {
     if (first === undefined) return false
     this.wheelSelectionPending = false
     this.deletedSelectionPendingPaint = false
-    this.selectedValue = first.value
+    this.selectedTarget = { kind: 'task', value: first.value }
     return true
   }
 
@@ -390,10 +400,10 @@ export class TaskQuickAccessory implements Component, Focusable {
    * keeps its data and paints nothing.
    */
   deactivate(): void {
-    this.selectedValue = undefined
+    this.selectedTarget = undefined
     this.wheelSelectionPending = false
     this.deletedSelectionPendingPaint = false
-    this.pressedValue = undefined
+    this.pressedTarget = undefined
     this.pressedFrame = undefined
   }
 
@@ -424,107 +434,138 @@ export class TaskQuickAccessory implements Component, Focusable {
     if (items.length === 0) {
       const wasActive = this.focused
       this.items = []
-      this.firstVisibleId = undefined
+      this.firstVisibleTarget = undefined
       this.start = 0
-      this.selectedValue = undefined
+      this.selectedTarget = undefined
       this.wheelSelectionPending = false
       this.deletedSelectionPendingPaint = false
+      this.pressedTarget = undefined
+      this.pressedFrame = undefined
       this.requestRender()
       // The host notification is deliberate LAST: the component state is
       // already consistent if the host re-enters synchronously.
       if (wasActive) this.onEmpty()
       return
     }
-    const previousAnchor = this.firstVisibleId
-    const previousSelection = this.selectedValue
-    const previousSelectionIndex = previousSelection === undefined ? undefined : this.indexOfValue(previousSelection)
+    const previousAnchor = this.firstVisibleTarget
+    const previousSelection = this.selectedTarget
+    const previousSelectionIndex = previousSelection === undefined ? undefined : this.indexOfTarget(previousSelection)
     this.items = items
-    // Selection reconciliation (stable ID first, bounded index fallback).
+    // Task identity is reconciled against the current projection. The
+    // open-full target is stable independently of the last task's value/index.
     if (previousSelection !== undefined) {
-      const selectedIndex = items.findIndex(item => item.value === previousSelection)
-      if (selectedIndex >= 0) {
-        this.selectedValue = previousSelection
-      } else {
+      const selectedIndex = this.indexOfTarget(previousSelection)
+      if (selectedIndex !== undefined) {
+        this.selectedTarget = previousSelection
+      } else if (previousSelection.kind === 'task') {
         // Deleted: bounded fallback to the SUCCESSOR of the pre-delete
-        // global index; the predecessor when the tail was deleted. The
-        // pre-delete index must come from the PREVIOUS rows — the new array
-        // no longer contains the value.
+        // global task index; the predecessor when the tail was deleted.
         const oldIndex = previousSelectionIndex
         const fallback = oldIndex === undefined ? 0 : Math.min(oldIndex, items.length - 1)
-        this.selectedValue = items[Math.max(0, fallback)]?.value
+        this.selectedTarget = { kind: 'task', value: items[Math.max(0, fallback)]!.value }
         this.deletedSelectionPendingPaint = true
       }
     }
-    // Window anchor rebases onto the surviving first visible value.
-    const found = previousAnchor === undefined ? -1 : items.findIndex(item => item.value === previousAnchor)
-    if (found >= 0) {
+    // Window anchor rebases onto the surviving task/action target.
+    const found = previousAnchor === undefined ? undefined : this.indexOfTarget(previousAnchor)
+    if (found !== undefined) {
       this.start = found
     } else {
-      const window = this.currentWindow(items.length)
-      this.start = Math.min(Math.max(0, this.start), Math.max(0, items.length - window))
+      const navigationCount = this.navigationCount()
+      const window = this.currentWindow(navigationCount)
+      this.start = Math.min(Math.max(0, this.start), Math.max(0, navigationCount - window))
     }
-    this.firstVisibleId = items[this.start]?.value
-    if (this.selectedValue === undefined) this.selectedValue = items[0]?.value
+    this.firstVisibleTarget = this.targetAt(this.start)
+    if (this.selectedTarget === undefined) this.selectedTarget = this.targetAt(0)
     if (this.focused && !this.wheelSelectionPending) this.ensureVisible()
     this.requestRender()
   }
 
-  /** The value of the first visible row of the last committed window. */
+  /** The task value at the first visible row, or undefined when it is the action. */
   get anchoredValue(): string | undefined {
-    return this.firstVisibleId
+    return this.firstVisibleTarget?.kind === 'task' ? this.firstVisibleTarget.value : undefined
   }
 
-  /** The currently selected row's stable value (ephemeral ACTIVE state). */
+  /** The selected task value; the typed Full action is intentionally not a task value. */
   get selected(): string | undefined {
-    return this.selectedValue
+    return this.selectedTarget?.kind === 'task' ? this.selectedTarget.value : undefined
   }
 
-  /** The visible window size from the last painted frame (1 before the
-   *  first paint) — the paging/wheel step and the selection clamp. */
-  private currentWindow(itemCount: number): number {
-    const painted = this.painted
-    const paintedWindow = painted === undefined || painted.itemRows <= 0 ? 1 : painted.itemRows
-    return Math.max(1, Math.min(paintedWindow, itemCount))
+  /** The list tail exists only when real tasks and the Full callback both exist. */
+  private hasOpenFullAction(): boolean {
+    return this.items.length > 0 && this.onOpenFull !== undefined
   }
 
-  /** The index of a stable value in the CURRENT rows (the reconcile path). */
-  private indexOfValue(value: string): number | undefined {
-    const index = this.items.findIndex(item => item.value === value)
+  /** Number of keyboard/pointer navigation targets, excluding task accounting. */
+  private navigationCount(): number {
+    return this.items.length + (this.hasOpenFullAction() ? 1 : 0)
+  }
+
+  private targetAt(index: number): TaskQuickTarget | undefined {
+    if (index < 0) return undefined
+    const item = this.items[index]
+    if (item !== undefined) return { kind: 'task', value: item.value }
+    if (index === this.items.length && this.hasOpenFullAction()) return { kind: 'open-full' }
+    return undefined
+  }
+
+  private indexOfTarget(target: TaskQuickTarget): number | undefined {
+    if (target.kind === 'open-full') return this.hasOpenFullAction() ? this.items.length : undefined
+    const index = this.items.findIndex(item => item.value === target.value)
     return index === -1 ? undefined : index
   }
 
+  private sameTarget(left: TaskQuickTarget | undefined, right: TaskQuickTarget | undefined): boolean {
+    if (left === undefined || right === undefined || left.kind !== right.kind) return false
+    return left.kind === 'open-full' || (right.kind === 'task' && left.value === right.value)
+  }
+
+  private targetForHit(hit: TaskQuickHit): TaskQuickTarget | undefined {
+    if (hit.kind === 'item') return { kind: 'task', value: hit.value }
+    if (hit.kind === 'open-full') return { kind: 'open-full' }
+    return undefined
+  }
+
+  /** The visible navigation window from the last painted frame (1 before the
+   *  first paint) — the paging/wheel step and the selection clamp. */
+  private currentWindow(targetCount: number): number {
+    const painted = this.painted
+    const paintedWindow = painted === undefined || painted.itemRows <= 0 ? 1 : painted.itemRows
+    return Math.max(1, Math.min(paintedWindow, targetCount))
+  }
 
   /** Move the selection by a bounded delta (keyboard Up/Down, wheel). */
   private move(delta: number): void {
     this.wheelSelectionPending = false
-    const index = this.selectedValue === undefined ? undefined : this.indexOfValue(this.selectedValue)
+    const targetCount = this.navigationCount()
+    const index = this.selectedTarget === undefined ? undefined : this.indexOfTarget(this.selectedTarget)
     const current = index ?? 0
-    const next = Math.min(Math.max(0, current + delta), Math.max(0, this.items.length - 1))
-    if (next === current && this.selectedValue !== undefined) {
+    const next = Math.min(Math.max(0, current + delta), Math.max(0, targetCount - 1))
+    if (next === current && this.selectedTarget !== undefined) {
       // No movement happened; still consume the key.
       this.requestRender()
       return
     }
     this.deletedSelectionPendingPaint = false
-    this.selectedValue = this.items[next]?.value
+    this.selectedTarget = this.targetAt(next)
     this.ensureVisible()
     this.requestRender()
   }
 
-  /** Page by the ACTUAL visible task-row count (painted window). */
+  /** Page by the ACTUAL visible task/action row count (painted window). */
   private page(delta: number): void {
-    this.move(delta * this.currentWindow(this.items.length))
+    this.move(delta * this.currentWindow(this.navigationCount()))
   }
 
-  /** Keep the selected row inside the painted window. `windowSize` lets a
+  /** Keep the selected target inside the painted window. `windowSize` lets a
    *  freshly recomputed layout apply the same invariant before it is painted. */
-  private ensureVisible(windowSize = this.currentWindow(this.items.length)): void {
-    const index = this.selectedValue === undefined ? undefined : this.indexOfValue(this.selectedValue)
+  private ensureVisible(windowSize = this.currentWindow(this.navigationCount())): void {
+    const index = this.selectedTarget === undefined ? undefined : this.indexOfTarget(this.selectedTarget)
     if (index === undefined) return
     if (index < this.start) this.start = index
     else if (index >= this.start + windowSize) this.start = index - windowSize + 1
-    this.start = Math.max(0, Math.min(this.start, Math.max(0, this.items.length - windowSize)))
-    this.firstVisibleId = this.items[this.start]?.value
+    this.start = Math.max(0, Math.min(this.start, Math.max(0, this.navigationCount() - windowSize)))
+    this.firstVisibleTarget = this.targetAt(this.start)
   }
 
   /**
@@ -538,7 +579,7 @@ export class TaskQuickAccessory implements Component, Focusable {
   handleInput(data: string): void {
     if (!this.focused) return
     if (componentKeymap.matches(data, 'tasks.cursorUp')) {
-      const index = this.selectedValue === undefined ? undefined : this.indexOfValue(this.selectedValue)
+      const index = this.selectedTarget === undefined ? undefined : this.indexOfTarget(this.selectedTarget)
       // Up at the GLOBAL first row EXITS (plan §1.3) — never wrap.
       if (index === 0) {
         this.wheelSelectionPending = false
@@ -550,10 +591,10 @@ export class TaskQuickAccessory implements Component, Focusable {
       return
     }
     if (componentKeymap.matches(data, 'tasks.cursorDown')) {
-      const index = this.selectedValue === undefined ? undefined : this.indexOfValue(this.selectedValue)
+      const index = this.selectedTarget === undefined ? undefined : this.indexOfTarget(this.selectedTarget)
       // Down at the tail clamps (never wraps, never exits), but it still
       // supersedes a wheel target whose repaint has not happened yet.
-      if (index !== undefined && index >= this.items.length - 1) {
+      if (index !== undefined && index >= this.navigationCount() - 1) {
         this.wheelSelectionPending = false
         return
       }
@@ -563,13 +604,17 @@ export class TaskQuickAccessory implements Component, Focusable {
     if (componentKeymap.matches(data, 'tasks.pageUp')) { this.page(-1); return }
     if (componentKeymap.matches(data, 'tasks.pageDown')) { this.page(1); return }
     if (componentKeymap.matches(data, 'tasks.open')) {
-      // A deleted-row fallback is not an openable selection until it is painted.
+      // A deleted-task fallback is not an openable selection until painted.
       if (this.deletedSelectionPendingPaint) return
-      const value = this.selectedValue
-      if (value === undefined) return
+      const target = this.selectedTarget
+      if (target === undefined || this.indexOfTarget(target) === undefined) return
+      if (target.kind === 'open-full') {
+        this.onOpenFull?.()
+        return
+      }
       // The host's onActivate implementation leaves Quick FIRST, then
-      // routes the typed selection to the current Task Runtime authority.
-      this.onActivate(value)
+      // routes the real task value to the current Task Runtime authority.
+      this.onActivate(target.value)
       return
     }
     if (componentKeymap.matches(data, 'tasks.search.exit')) {
@@ -598,13 +643,10 @@ export class TaskQuickAccessory implements Component, Focusable {
    * focus. A pending scroll keeps Enter on the last-painted selection until
    * render() paints its matching selection for the new window.
    *
-   * A left press on a painted task row records that row's stable VALUE; the
-   * synthesized click activates only when the same VALUE still resolves to
-   * the same physical row's identity at click time (press A → release B
-   * never fires; a row deleted/reordered between press and release never
-   * fires on the new occupant). The header/identity row and every blank row
-   * are inert. A click activates the typed open directly WITHOUT a focus
-   * detour (plan §5: the pointer never enters a hidden intermediate state).
+   * A left press records the painted row's typed target; the
+   * synthesized click must match that target on the exact painted frame and resolve against
+   * the live projection/capability (press A → release B never fires). The header/identity row and every blank row
+   * are inert. Task clicks retain their direct typed route; the Full action leaves Quick before its host callback.
    * A stale frame (a resize that has not been repainted) or a geometry that
    * no longer matches the live terminal is consumed inertly.
    */
@@ -620,6 +662,13 @@ export class TaskQuickAccessory implements Component, Focusable {
     if (this.geometry.columns() !== painted.terminalColumns || this.geometry.rows() !== painted.terminalRows) {
       return { handled: true, render: false }
     }
+    if (!this.focused) {
+      this.pressedTarget = undefined
+      this.pressedFrame = undefined
+      return event.type === 'wheel' || event.type === 'press' || event.type === 'release' || event.type === 'click'
+        ? { handled: true, render: false }
+        : undefined
+    }
 
     if (event.type === 'wheel') {
       if (event.wheelDelta === undefined || event.wheelDelta === 0) return { handled: true, render: false }
@@ -627,11 +676,12 @@ export class TaskQuickAccessory implements Component, Focusable {
       // still owns its band: consume without acting, never touch the anchor.
       if (this.items.length === 0) return { handled: true, render: false }
       const step = event.wheelDelta < 0 ? -1 : 1
-      const next = Math.min(Math.max(0, this.start + step), Math.max(0, this.items.length - painted.itemRows))
+      const targetCount = this.navigationCount()
+      const next = Math.min(Math.max(0, this.start + step), Math.max(0, targetCount - painted.itemRows))
       if (next === this.start) return { handled: true, render: false }
       this.start = next
-      this.firstVisibleId = this.items[next]?.value
-      if (this.focused) this.wheelSelectionPending = true
+      this.firstVisibleTarget = this.targetAt(next)
+      this.wheelSelectionPending = true
       // The painted CONTENT is stale until the repaint this result requests, but the
       // painted GEOMETRY stays the frame the pointer is on: a further wheel arriving
       // before that repaint is still in-band and must not fall through.
@@ -639,10 +689,15 @@ export class TaskQuickAccessory implements Component, Focusable {
     }
 
     const hit = painted.hits[event.y]
-    if (hit === undefined || hit.kind !== 'item' || hit.value === undefined) {
-      // The identity/blank rows are inert chrome — but they still belong to
-      // the accessory's band while ACTIVE: consume without acting.
-      if (this.focused && (event.type === 'press' || event.type === 'release' || event.type === 'click')) {
+    const target = hit === undefined ? undefined : this.targetForHit(hit)
+    if (target === undefined) {
+      // The divider/header/blank rows are inert chrome. They still own events
+      // inside the focused band and cancel any gesture released onto them.
+      if (event.type === 'press' || event.type === 'release' || event.type === 'click') {
+        if (event.type !== 'release' || !this.sameTarget(this.pressedTarget, target)) {
+          this.pressedTarget = undefined
+          this.pressedFrame = undefined
+        }
         return { handled: true }
       }
       return undefined
@@ -652,84 +707,56 @@ export class TaskQuickAccessory implements Component, Focusable {
     }
 
     if (event.type === 'press') {
-      // The hit map is last-painted geometry: the pressed row must still
-      // exist in the CURRENT rows by VALUE (a setItems() between paint and
-      // press may have removed it without a repaint — no match => reject).
-      const exists = this.items.some(candidate => candidate.value === hit.value)
-      if (!exists) {
-        this.pressedValue = undefined
-        this.pressedFrame = undefined
+      this.pressedTarget = undefined
+      this.pressedFrame = undefined
+      // The hit map is last-painted geometry: the pressed task/action must
+      // still exist in the CURRENT projection and capability set.
+      if (target.kind === 'task' && !this.items.some(candidate => candidate.value === target.value)) {
         return { handled: true }
       }
-      this.pressedValue = hit.value
-      // The gesture is bound to the frame the user actually SAW: a repaint
-      // that changes the frame (a reflow, a resize, a row swap) invalidates
-      // the in-flight press even when the stable ID would still match.
-      this.pressedFrame = {
-        width: painted.width,
-        height: painted.height,
-        terminalColumns: painted.terminalColumns,
-        terminalRows: painted.terminalRows,
-        first: this.items[0]?.value,
-      }
+      if (target.kind === 'open-full' && !this.hasOpenFullAction()) return { handled: true }
+      this.pressedTarget = target
+      this.pressedFrame = painted
       return { handled: true, capture: true }
     }
 
     if (event.type === 'release') {
       // The fork dispatcher's SGR sequence is press → release → SYNTHESIZED
-      // click, so the release must NOT clear the pressed identity: the click
-      // that follows needs it for the same-row match. The latch is cleared
-      // by the click branch (or by deactivate/row-removal paths below).
-      if (this.pressedValue === undefined) return { handled: true }
-      // A repaint between press and release invalidates the gesture: the
-      // click this release may synthesize must not act on the new frame.
-      if (this.pressedFrameInvalid()) {
-        this.pressedValue = undefined
+      // click, so retain a matching target until that click arrives.
+      if (this.pressedTarget === undefined) return { handled: true }
+      if (!this.sameTarget(this.pressedTarget, target) || this.pressedFrameInvalid()) {
+        this.pressedTarget = undefined
         this.pressedFrame = undefined
       }
       return { handled: true }
     }
 
-    // click: the pressed identity must match THIS row's identity — press A
-    // with a release/click resolving to B never activates (async reorder
-    // safety) — AND the gesture must still belong to the CURRENT painted
-    // frame (a resize/repaint between press and release kills the stale
-    // intent even when origin and row ID survived). Then resolve the
-    // CURRENT row by the stable value: the value is the identity, the
-    // stale frame's index never is.
-    const pressed = this.pressedValue
+    // The click must match both the typed target and the exact painted frame
+    // the user pressed. Resolve a task by its current stable value; the action
+    // remains a separate route and is available only while real tasks remain.
+    const pressed = this.pressedTarget
     const frame = this.pressedFrame
-    this.pressedValue = undefined
+    this.pressedTarget = undefined
     this.pressedFrame = undefined
-    if (frame === undefined || this.pressedFrameInvalid(frame)) return { handled: true }
-    if (pressed !== hit.value) return { handled: true }
-    const item = this.items.find(candidate => candidate.value === hit.value)
+    if (pressed === undefined || frame === undefined || !this.sameTarget(pressed, target)
+      || this.pressedFrameInvalid(frame)) return { handled: true }
+    if (target.kind === 'open-full') {
+      if (!this.hasOpenFullAction()) return { handled: true }
+      this.wheelSelectionPending = false
+      this.onOpenFull?.()
+      return { handled: true }
+    }
+    const item = this.items.find(candidate => candidate.value === target.value)
     if (item === undefined) return { handled: true }
-    // Same-row click opens the typed detail directly (no focus detour).
     this.wheelSelectionPending = false
     this.onActivate(item.value)
     return { handled: true }
   }
 
-  /** Whether the pressed frame no longer matches the CURRENT painted frame
-   *  (a repaint happened since the press). Called with no argument against
-   *  the live latch; with an argument, against a frame snapshot taken at
-   *  the click. */
-  private pressedFrameInvalid(observed?: {
-    readonly width: number
-    readonly height: number
-    readonly terminalColumns: number
-    readonly terminalRows: number
-    readonly first: string | undefined
-  }): boolean {
+  /** Whether the pressed frame is no longer the CURRENT painted frame. */
+  private pressedFrameInvalid(observed?: TaskQuickPainted): boolean {
     const frame = observed ?? this.pressedFrame
-    const painted = this.painted
-    if (frame === undefined || painted === undefined) return true
-    return frame.width !== painted.width
-      || frame.height !== painted.height
-      || frame.terminalColumns !== painted.terminalColumns
-      || frame.terminalRows !== painted.terminalRows
-      || frame.first !== this.items[0]?.value
+    return frame === undefined || this.painted === undefined || frame !== this.painted
   }
 
   render(width: number): string[] {
@@ -752,12 +779,14 @@ export class TaskQuickAccessory implements Component, Focusable {
     const columns = Math.max(1, Math.floor(width))
     const terminalRows = this.geometry.rows()
     const chromeRows = this.geometry.chromeRows(columns)
+    const includeOpenFullAction = this.hasOpenFullAction()
     let layout = planTaskQuickLayout(
       columns,
       terminalRows,
       chromeRows,
       this.items.length,
       this.start,
+      includeOpenFullAction,
     )
     if (layout.grant === 0 || layout.count === 0) {
       this.painted = undefined
@@ -773,45 +802,65 @@ export class TaskQuickAccessory implements Component, Focusable {
     if (this.focused) {
       this.start = layout.start
       if (this.wheelSelectionPending) {
-        const selectedIndex = this.selectedValue === undefined ? undefined : this.indexOfValue(this.selectedValue)
+        const selectedIndex = this.selectedTarget === undefined ? undefined : this.indexOfTarget(this.selectedTarget)
         const lastVisibleIndex = layout.start + layout.count - 1
-        if (selectedIndex === undefined || selectedIndex < layout.start) this.selectedValue = this.items[layout.start]!.value
-        else if (selectedIndex > lastVisibleIndex) this.selectedValue = this.items[lastVisibleIndex]!.value
+        if (selectedIndex === undefined || selectedIndex < layout.start) this.selectedTarget = this.targetAt(layout.start)!
+        else if (selectedIndex > lastVisibleIndex) this.selectedTarget = this.targetAt(lastVisibleIndex)!
         this.wheelSelectionPending = false
       }
       this.ensureVisible(layout.count)
       if (this.start !== layout.start) {
-        layout = planTaskQuickLayout(columns, terminalRows, chromeRows, this.items.length, this.start)
+        layout = planTaskQuickLayout(
+          columns,
+          terminalRows,
+          chromeRows,
+          this.items.length,
+          this.start,
+          includeOpenFullAction,
+        )
       }
     }
     const lines: string[] = []
     const hits: TaskQuickHit[] = []
-    // Paint order is strictly separator → identity → task rows. The rule is
-    // the Quick-owned top boundary (role 15 `border`, the Owner-authorized
-    // Footer↔Quick exception — never `primary`/`borderFocus`), it spans the
-    // component width exactly, and it is INERT: a pointer event on it is
-    // consumed without acting (the hit map records it as identity chrome).
+    const visibleTaskStart = Math.min(layout.start, layout.total)
+    const visibleTaskEnd = Math.min(layout.start + layout.count, layout.total)
+    const visibleTaskCount = Math.max(0, visibleTaskEnd - visibleTaskStart)
+    // Paint order is strictly separator → identity → task/action rows. The
+    // rule is the Quick-owned top boundary (role 15 `border`, the Owner-
+    // authorized Footer↔Quick exception — never `primary`/`borderFocus`),
+    // and is inert in the same painted hit map as the identity row.
     if (layout.separator) {
       lines.push(color.border('─'.repeat(columns)))
       hits.push({ kind: 'identity' })
     }
     if (layout.header) {
-      lines.push(renderHeaderRow(columns, layout.start, layout.count, layout.total))
+      lines.push(renderHeaderRow(columns, visibleTaskStart, visibleTaskCount, layout.total))
       hits.push({ kind: 'identity' })
     }
-    const position = layout.header ? undefined : `${layout.start + 1}-${layout.start + layout.count}/${layout.total}`
-    for (let index = 0; index < layout.count; index += 1) {
-      const item = this.items[layout.start + index]
-      if (item === undefined) break
-      const selected = item.value === this.selectedValue
-      lines.push(renderItemRow(item, columns, position, selected))
-      hits.push({ kind: 'item', value: item.value })
+    const position = layout.header || visibleTaskCount === 0
+      ? undefined
+      : `${visibleTaskStart + 1}-${visibleTaskEnd}/${layout.total}`
+    for (let offset = 0; offset < layout.count; offset += 1) {
+      const index = layout.start + offset
+      const target = this.targetAt(index)
+      if (target === undefined) break
+      if (target.kind === 'task') {
+        const item = this.items[index]
+        if (item === undefined) break
+        const selected = this.sameTarget(target, this.selectedTarget)
+        lines.push(renderItemRow(item, columns, position, selected))
+        hits.push({ kind: 'item', value: item.value })
+      } else {
+        const selected = this.sameTarget(target, this.selectedTarget)
+        lines.push(renderOpenFullRow(columns, selected))
+        hits.push({ kind: 'open-full' })
+      }
     }
     while (hits.length < lines.length) hits.push({ kind: 'inert' })
-    // The window the frame actually painted is the durable anchor: the next
-    // commit rebases onto the row the user really sees.
+    // The window the frame actually painted is the durable typed anchor: the
+    // next commit rebases onto the target the user really sees.
     this.start = layout.start
-    this.firstVisibleId = this.items[layout.start]?.value
+    this.firstVisibleTarget = this.targetAt(layout.start)
     this.painted = {
       width: columns,
       height: lines.length,

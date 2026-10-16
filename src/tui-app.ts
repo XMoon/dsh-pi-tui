@@ -1764,6 +1764,10 @@ export interface TuiAppOptions {
    * member: a renderer without a Task Center never triggers it.
    */
   onQuickTaskSelect?: (value: string) => boolean
+  /** Post-B4-B: opens the existing Full Task Center from Quick's separate
+   *  navigation action. Optional; absence omits that action entirely. This is
+   *  first-party internal wiring, not an extension API. */
+  onQuickTaskOpenFull?: () => void
   /**
    * M6: the plugin keybinding resolver (wired by the runner from the M5
    * KeybindingRegistry). Maps a NORMALIZED key (the InputRouter has
@@ -2583,6 +2587,8 @@ export class TuiApp {
    * authority (`openQuickTaskItem`).
    */
   private readonly quickTaskSelect: ((value: string) => boolean) | undefined
+  /** The Full Task Center route for Quick's typed open-full navigation target. */
+  private readonly quickTaskOpenFull: (() => void) | undefined
   /** PR-D: the measured protected pinned chrome height the CURRENT fullscreen
    * widget grant was derived from (undefined on the regular surface, whose
    * grants are fixed). A change means the grant is stale — the widget rows
@@ -3671,8 +3677,9 @@ export class TuiApp {
     this.extensionHost = options.extensionHost
     this.onTerminalResize = options.onTerminalResize
     this.onWorkflowAction = options.onWorkflowAction
-    // B4-B: the typed Quick selection route (see the field doc).
+    // B4-B: the typed Quick task and Full Center routes (see field docs).
     this.quickTaskSelect = options.onQuickTaskSelect
+    this.quickTaskOpenFull = options.onQuickTaskOpenFull
     // M0: the unified status projection store. The runner passes its own
     // store; without one the app keeps an internal projection so the
     // footer always composes from a snapshot (headless tests drive it
@@ -4144,8 +4151,9 @@ export class TuiApp {
     // plugin can never touch the editor seat or the root layout.
     this.widgetsAbove = new Text('', 0, 0)
     this.widgetsBelow = new Text('', 0, 0)
-    // The passive Task Quick accessory: a first-party, non-focusable pinned
-    // row band UNDER THE WHOLE FOOTER (B4-B, Owner revision 2026-10-15) —
+    const quickTaskOpenFull = this.quickTaskOpenFull
+    // The Task Quick accessory: a first-party, non-focusable pinned row band
+    // UNDER THE WHOLE FOOTER (B4-B, Owner revision 2026-10-15) —
     // the frame's last visible region. Its grant is derived from the LIVE
     // frame (terminal rows, the measured pinned chrome including the footer
     // and one visible transcript row) and never borrows a row from the
@@ -4164,6 +4172,12 @@ export class TuiApp {
       onActivate: (value) => {
         this.leaveTaskQuick()
         this.quickTaskSelect?.(value)
+      },
+      onOpenFull: quickTaskOpenFull === undefined ? undefined : () => {
+        // Commit HIDDEN and restore the live editor seat before the Full
+        // browser can synchronously install its overlay/focus owner.
+        this.leaveTaskQuick()
+        quickTaskOpenFull()
       },
       onEmpty: () => {
         // Fired only while the accessory really holds focus (the component
@@ -15339,6 +15353,7 @@ export class TuiApp {
       this.taskQuickChromeRows(width, footerRows),
       itemCount,
       0,
+      this.quickTaskOpenFull !== undefined,
     )
     return layout.itemRows >= 1
   }

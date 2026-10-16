@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Task Quick now appends a distinct `➜ Open Task Center…` navigation row after
+  real tasks when the Full Task Center is available. It shares selection and
+  paging without becoming a task or affecting `showing x-y/N`, status counts or
+  Footer badges. Enter or a same-row Fullscreen click first exits Quick and
+  restores the Editor, then opens the same Full Task Center as `/tasks`. The
+  regular main screen remains keyboard-only.
+
 - The Task Quick window is now on-demand and lives UNDER THE WHOLE FOOTER:
   even with live tasks, the window occupies **zero rows** by default. It
   appears only when the cursor sits on the focused editor's last visual line

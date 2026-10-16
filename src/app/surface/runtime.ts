@@ -1712,6 +1712,9 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
     // resolves the row against its CURRENT global authority (the ONE open/
     // reopen path the Full browser uses — never a second registry).
     onQuickTaskSelect: value => task.openQuickTaskItem(value),
+    // Post-B4-B: Quick's distinct navigation action opens the same Full Task
+    // Center owner as `/tasks`, without manufacturing a TaskPanelItem value.
+    onQuickTaskOpenFull: () => task.openTasksBrowser('full'),
   })
 
   return {
