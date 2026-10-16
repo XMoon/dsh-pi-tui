@@ -1,9 +1,9 @@
-# TSP Session Browser (PR4-B1-A)
+# TSP Session Browser (PR4-B1)
 
-This contract covers the internal, read-only Session Browser read path for the
-experimental TSP renderer. B1-A implements the Presenter and its real
-`SessionReader` owner; it does not admit a production command or perform a
-Session transition. The production default remains PiTui.
+This contract covers the complete experimental TSP Session Browser. B1-A added
+the `SessionReader`-backed Browse/Search/Details Presenter; B1-B connects the
+registered TUI commands and Resume actions to that Presenter and the existing
+Session switch. PiTui remains the production default.
 
 ## Scope and authority
 
@@ -89,41 +89,103 @@ can publish.
   layer and retire one another; a modal suspends Browser input and restores the
   same read-only state when it closes. Hydration retires the Browser; shared
   renderer disposal clears the exposed Model, Preset, and Browser presenters.
-- Pointer selection changes only the selected row. In B1-A, Enter/activate may
-  produce a test-observable Resume intent, but the footer Resume stays disabled
-  while carrying the Owner-requested Tern `primary` visual marker. This is a
-  scoped exception to the general `primary` = active/actionable semantic in
-  `docs/tui-design-language.md` §3.3; the marker does not enable or dispatch the
-  action. No production writer, `switchSession`, transition gate, or session
-  operation is connected. With no test callback, row activation is reported as
-  deferred to B1-B.
+- Pointer selection changes only the selected row. B1-A's historical read-only
+  state is documented in its evidence: row activation emitted only an internal
+  test intent and Footer Resume was disabled despite its `primary` marker. B1-B
+  supersedes that interaction: a valid non-current row enables the primary Resume
+  action, and row Enter/activate uses the same guarded switch as the Footer.
 
-Physical GUI, IME, wheel, theme, and Remote-TSP behavior are not certified by a
-scripted TSP session or a real-client headless run. Real Tern headless evidence
-is recorded in [PR4-B1-A evidence](./evidence/pr4-b1-a.md).
+## Commands and Resume (B1-B)
 
-## B1-B handoff
+- The TSP capability gate runs only after the authoritative command classifier
+  selects a registered TUI command. Native availability additionally requires
+  the live Session Browser Presenter. A Host-origin same-name command, extension
+  command, skill wrapper, or ordinary unknown slash line remains governed by its
+  existing classifier/owner; no second command registry is introduced.
+- `/sessions [query]` and bare `/resume` open the same Browser. `/search <query>`
+  opens its global Cards view with the initial query; empty `/search` is rejected
+  before listing and none of these commands creates a Session.
+- `/resume <id-or-prefix>` uses the single official `SessionReader.list()` read
+  for that open and the existing `findSessionMatch()` order over `panel.rows`
+  (listed main-session rows only). The first listed main-session match starts
+  the switch without a second list; a miss, including a subagent-only target,
+  becomes the initial global query. A manual Browser query entered while the
+  list loads takes precedence and suppresses a matching typed `/resume` switch.
+  This is the Owner-directed Native TSP rule resolving the frozen plan's
+  `STOP_MATCH_CORPUS` choice as main-only without rewriting that plan; the PiTui
+  fallback direct matcher remains unchanged. `/sessions [query]` and
+  `/search <query>` retain the same loading-time user-query priority. See the
+  [B1-B evidence](./evidence/pr4-b1-b.md) for candidate-order, matching-hit,
+  and persisted-child controls.
+- Footer order is Close, Details, Resume. Resume retains the `primary` action
+  designation in every state; it is enabled only for a listed, non-current
+  selection while no switch is pending. Loading, empty, unavailable, error, no
+  selection, current-row, and pending states keep it disabled with an explicit
+  action reason. The current Tern client represents disabled Resume as
+  `primary off`, retaining the Owner-accepted B1-A style (see [B1-A evidence](./evidence/pr4-b1-a.md));
+  a Tern 0.8.4 headless capture shows the label unreadable while the pointer
+  hovers the disabled primary. The Owner accepts this as an external client
+  limitation: no styling change is authorized, G8 visual acceptance remains
+  PARTIAL, and reason-tooltip paint is unverified (see [B1-B evidence](./evidence/pr4-b1-b.md)).
+  Selecting a row only changes selection; row Enter, row activate, and Footer
+  Resume produce the same single operation intent. Details remains read-only.
+- The Reader owner validates the active panel, captured subject, listed target,
+  and pending latch. Browser events and Native TSP typed direct matches are
+  admitted only for this read's listed main rows; typed direct matching is
+  suppressed when the user changed the query during listing. Both routes carry
+  the captured `SessionScope`; `SessionRuntime.switchSession(target,
+  expectedScope)` checks that exact owner/generation again inside the existing
+  transition gate before navigation side effects. It never opens a nested gate
+  or trusts a Session ID, `Picker.current`, `selected`, or `live` badge as
+  currentness authority.
+- Flush, lifecycle open, publication, old-owner retirement, hydration, catalog
+  refresh, and reporting remain owned by the existing Session runtime. An
+  open/refusal failure leaves the old owner current, keeps the Browser retryable,
+  displays the failure, and releases pending. Pre-publication failures preserve
+  the outgoing draft; post-publication catalog/retirement failures are reported
+  without rolling back the committed owner. Success is checked with the new
+  owner's authoritative reread, not an optimistic notice or Picker snapshot.
+- `test/tern-tsp-session-browser-commands.test.ts` proves the Direct L6 switch
+  through the production command registration, Direct `SessionReader`, lifecycle,
+  and runtime using the scripted TSP event fixture. The separate S4 flow
+  `scripts/tern-pane-session-browser-direct.mjs` is the real-Tern, production-
+  composition qualification; its run result and artifacts are recorded in the
+  [B1-B evidence](./evidence/pr4-b1-b.md). Neither Direct path establishes
+  Remote TSP Resume support.
 
-B1-B owns command admission and the real Resume transition. It may consume the
-internal `SessionBrowserResumeIntent` (`sessionId`, captured
-`currentSessionId`, and source) only after rechecking the authoritative current
-Session and listed target at the existing transition boundary. It must route a
-successful transition through the existing `switchSession`/Session lifecycle
-owner and preserve its cancellation, hydration, writer, and failure semantics.
-It must not treat a disabled footer, selection state, `live` badge, or B1-A
-intent as proof that a transition occurred. B1-A adds neither a public API nor a
-new `SessionReader` method.
+## Qualification limits
+
+The B1-A/B1-B real-client run is `REAL_TERN_HEADLESS`, not `REAL_TERN_GUI` and
+not a physical G8 acceptance. The unreadable disabled-Resume hover paint is an
+Owner-accepted external Tern 0.8.4 limitation; no styling change was made, and
+G8 visual acceptance remains `PARTIAL`. Physical GUI, IME, wheel, theme, and
+physical PageUp/PageDown remain `NOT_VERIFIED`. Remote TSP Resume remains
+`UNKNOWN/NOT_VERIFIED`; no Remote L5/L6 success is claimed. See [PR4-B1-A evidence](./evidence/pr4-b1-a.md)
+for the historical read-only qualification and [PR4-B1-B evidence](./evidence/pr4-b1-b.md)
+for command/Resume coverage and current limits.
 
 ## Regression lanes
 
 ```sh
-node --test --import tsx/esm test/tern-tsp-session-browser-read.test.ts
-node --test --import tsx/esm test/tern-tsp-session-browser.test.ts
-node --test --import tsx/esm test/tern-tsp-session-browser-direct.test.ts
-node --test --import tsx/esm test/sessions.test.ts
+node --import tsx/esm --test --test-concurrency=1 \
+  test/tern-tsp-command-admission.test.ts \
+  test/tern-tsp-direct-admission.test.ts \
+  test/tern-tsp-session-browser-commands.test.ts \
+  test/tern-tsp-session-browser-read.test.ts \
+  test/tern-tsp-session-browser.test.ts \
+  test/tern-tsp-session-browser-direct.test.ts \
+  test/session-runtime-remote-owner-handoff.test.ts \
+  test/runner-remote-command-plane.test.ts \
+  test/session-picker-content-search.test.ts \
+  test/tern-tsp-runner-interactive.test.ts \
+  test/sessions.test.ts
+node --import tsx/esm --test --test-name-pattern='^A-07' test/tern-tsp-live-mount.test.ts
 node scripts/tern-pane-drive.mjs scripts/tern-pane-session-browser-read.mjs
+node scripts/tern-pane-drive.mjs scripts/tern-pane-session-browser-direct.mjs
 ```
 
-The first three lanes cover the read owner, native TSP wire/presentation, and
-Direct `SessionReader` integration respectively. The real-client flow is
-`REAL_TERN_HEADLESS`, not `REAL_TERN_GUI` and not a real Session switch.
+The unit/integration lanes cover command admission, the read owner, native wire,
+Direct lifecycle, and command-owner controls. The `read` flow qualifies painted
+presentation with a controlled Reader; the `direct` flow uses the real Tern
+client and production Direct composition to exercise the business switch and
+authoritative reread. Both are headless, not physical GUI acceptance.

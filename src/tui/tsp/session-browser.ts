@@ -23,7 +23,7 @@ type BrowserIntent =
   | { readonly kind: 'close' }
   | { readonly kind: 'scope'; readonly scope: BrowseScope }
   | { readonly kind: 'browse-row'; readonly sessionId: string }
-  | { readonly kind: 'resume'; readonly sessionId: string; readonly source: 'enter' | 'activate' }
+  | { readonly kind: 'resume'; readonly sessionId: string; readonly source: 'enter' | 'activate' | 'footer' }
   | { readonly kind: 'details' }
   | { readonly kind: 'back' }
   | { readonly kind: 'reader-scroll'; readonly step: ScrollTo }
@@ -62,6 +62,7 @@ const EMPTY_SNAPSHOT: SessionBrowserReadSnapshot = {
   listState: 'loading',
   rows: [],
   query: '',
+  resumePending: false,
   searchState: 'idle',
   searchResults: [],
   hasMore: false,
@@ -133,7 +134,12 @@ function firstBrowseId(panel: SessionBrowserPanel): string | undefined {
 
 function actionDisabledReason(panel: SessionBrowserPanel, base: BrowseAction): string | undefined {
   if (base === 'details' && rowFor(panel, panel.selected) === undefined) return 'Select a session to read its details.'
-  if (base === 'resume') return 'Session switching is deferred to B1-B.'
+  if (base === 'resume') {
+    if (panel.snapshot.resumePending) return 'Switching sessions…'
+    const row = rowFor(panel, panel.selected)
+    if (row === undefined) return panel.snapshot.listState === 'loading' ? 'Sessions are still loading.' : 'Select a session to resume.'
+    if (row.id === panel.request.subject.currentSessionId) return 'The current session is already active.'
+  }
   return undefined
 }
 
@@ -476,6 +482,10 @@ export class TspSessionBrowser {
       isDisposed: () => panel.disposed,
       setSnapshot: (snapshot) => {
         if (this.current() !== panel) return
+        if (panel.query !== snapshot.query) {
+          panel.query = snapshot.query
+          panel.cursor = snapshot.query.length
+        }
         panel.snapshot = snapshot
         normalize(panel)
         this.change(panel)
@@ -565,6 +575,9 @@ export class TspSessionBrowser {
     if (panel.page !== 'browse') return undefined
     if (base === 'close') return { kind: 'close' }
     if (base === 'details' && rowFor(panel, panel.selected) !== undefined) return { kind: 'details' }
+    if (base === 'resume' && actionDisabledReason(panel, 'resume') === undefined && panel.selected !== undefined) {
+      return { kind: 'resume', sessionId: panel.selected, source: 'footer' }
+    }
     return undefined
   }
 
@@ -594,22 +607,23 @@ export class TspSessionBrowser {
         panel.zone = 'list'
         this.change(panel)
         return
-      case 'resume':
-        if (!visibleRows(panel).some((row) => row.id === intent.sessionId)) return
+      case 'resume': {
+        if (panel.snapshot.resumePending || !visibleRows(panel).some((row) => row.id === intent.sessionId)) return
         if (intent.sessionId === panel.request.subject.currentSessionId) {
           this.notify('The current session is already active.', 'info')
           return
         }
         panel.selected = intent.sessionId
         panel.zone = 'list'
-        this.change(panel)
-        if (this.current() !== panel) return
+        const revisionBeforeIntent = panel.revision
         panel.request.onResumeIntent({
           sessionId: intent.sessionId,
           currentSessionId: panel.request.subject.currentSessionId,
           source: intent.source,
         })
+        if (this.current() === panel && panel.revision === revisionBeforeIntent) this.change(panel)
         return
+      }
       case 'details':
         if (rowFor(panel, panel.selected) === undefined) return
         panel.page = 'details'

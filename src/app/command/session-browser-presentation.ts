@@ -17,6 +17,7 @@ export interface SessionBrowserReadSnapshot {
   readonly listState: SessionBrowserListState
   readonly rows: readonly SessionBrowserRow[]
   readonly query: string
+  readonly resumePending: boolean
   readonly searchState: SessionBrowserSearchState
   readonly searchResults: readonly SessionBrowserSearchResult[]
   readonly hasMore: boolean
@@ -29,7 +30,7 @@ export interface SessionBrowserReadSnapshot {
 export interface SessionBrowserResumeIntent {
   readonly sessionId: string
   readonly currentSessionId: string | undefined
-  readonly source: 'enter' | 'activate'
+  readonly source: 'enter' | 'activate' | 'footer' | 'direct'
 }
 
 /** One atomically captured subject for one panel lifetime. */
@@ -57,6 +58,3 @@ export interface SessionBrowserPresentation {
   open(request: SessionBrowserPanelRequest): SessionBrowserPanelHandle
   notify(message: string, kind?: 'info' | 'error'): void
 }
-
-/** Input facts captured from the current Session authority at open time. */
-export type CaptureSessionBrowserSubject = () => SessionBrowserSubject

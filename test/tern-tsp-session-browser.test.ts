@@ -9,6 +9,7 @@ import { createDiag } from '../src/runtime/process/diagnostics.ts'
 import { formatSessionAge } from '../src/tui/pickers/sessions.ts'
 import { installTspPane, type TspPane } from './support/tsp-terminal-fixture.ts'
 import { waitUntil } from './support/tsp-runner-harness.ts'
+import type { SessionScope } from '../src/app/session/scope.ts'
 import {
   layerNodes,
   pickerActionByBase,
@@ -84,7 +85,7 @@ async function mounted(t: { after(fn: () => unknown): void }, read: SessionReade
     ],
     hasMore: true,
   }),
-}), waitForProjection = true, expectedState: 'ready' | 'error' = 'ready') {
+}), waitForProjection = true, expectedState: 'ready' | 'loading' | 'error' = 'ready') {
   const pane = installTspPane({ sessionBrowser: true })
   t.after(() => pane.restore())
   const session = await connect({ timeout: 500, exitHooks: false })
@@ -109,18 +110,22 @@ async function mounted(t: { after(fn: () => unknown): void }, read: SessionReade
   const diag = createDiag({ stderrLevel: 'off' })
   t.after(() => diag.dispose())
   const resumeIntents: Array<{ sessionId: string; currentSessionId: string | undefined; source: string }> = []
+  const resumeSettlements: Array<() => void> = []
   let current = true
   const owner = createSessionBrowserReadOwner({
     reader: read,
     presentation: browserPresentation,
     captureSubject: () => ({
-      currentSessionId: 'session-current',
-      currentCwd: '/workspace/project',
-      isCurrent: () => current,
+      subject: {
+        currentSessionId: 'session-current',
+        currentCwd: '/workspace/project',
+        isCurrent: () => current,
+      },
+      scope: { sessionId: 'session-current' } as SessionScope,
     }),
     diag,
     sessionId: () => 'session-current',
-    onResumeIntent: (intent) => { resumeIntents.push(intent) },
+    onResumeIntent: (intent, _scope, settle) => { resumeIntents.push(intent); resumeSettlements.push(settle) },
   })
   t.after(() => owner.dispose())
   const readHandle = owner.open()
@@ -134,6 +139,7 @@ async function mounted(t: { after(fn: () => unknown): void }, read: SessionReade
     owner,
     readHandle,
     resumeIntents,
+    resumeSettlements,
     fatals,
     moveSubject: () => { current = false },
   }
@@ -163,20 +169,47 @@ test('native Browser is one workspace tree, then a global cards union with Host-
 
   const pickerId = picker(pane)!.id
   const surfaceId = pane.frames().at(-1)!.sf
+  const currentResume = pickerActionByBase(pane, 'resume', BROWSER)
+  assert.equal(currentResume?.disabled, 'The current session is already active.')
+  sendPickerAction(pane, 'resume', BROWSER)
+  sendActivate(pane, 'session:session-current', pickerId)
+  assert.equal(m.resumeIntents.length, 0, 'Current cannot emit a Footer or row-activation Resume intent')
   sendSelect(pane, 'session:session-other', pickerId)
   await waitUntil('a non-current row is selected', () => props(pane).selected === 'session:session-other')
   assert.deepEqual(props(pane).current, ['session:session-current'])
   const resumeAction = pickerActionByBase(pane, 'resume', BROWSER)
   assert.ok(resumeAction)
-  assert.equal(resumeAction.disabled, 'Session switching is deferred to B1-B.')
-  assert.equal(resumeAction.primary, true, 'Owner-requested primary styling does not enable Resume')
+  assert.equal(resumeAction.disabled, undefined, 'a listed non-current row enables Resume')
+  assert.equal(resumeAction.primary, true, 'Resume is the enabled primary footer action')
+  const oldResumeActionId = String(resumeAction.id)
+  assert.match(oldResumeActionId, /^resume#/u, 'the rendered Resume action carries its frame revision')
 
-  sendAction(pane, String(resumeAction.id), undefined, pickerId)
-  pane.event({ ev: 'action', sf: surfaceId, id: pickerId, act: 'details#999999' })
+  sendAction(pane, oldResumeActionId, undefined, pickerId)
+  await waitUntil('footer activation dispatches one resume intent', () => m.resumeIntents.length === 1)
+  assert.deepEqual(m.resumeIntents[0], {
+    sessionId: 'session-other', currentSessionId: 'session-current', source: 'footer',
+  })
+  await waitUntil('the pending switch disables another Resume', () =>
+    pickerActionByBase(pane, 'resume', BROWSER)?.disabled === 'Switching sessions…')
+  sendPickerAction(pane, 'resume', BROWSER)
+  sendActivate(pane, 'session:session-other', pickerId)
+  await new Promise<void>((resolve) => setImmediate(resolve))
+  assert.equal(m.resumeIntents.length, 1, 'Footer and row repeats during pending cannot dispatch twice')
+  m.resumeSettlements[0]!()
+  await waitUntil('settling the operation re-enables Resume', () =>
+    pickerActionByBase(pane, 'resume', BROWSER)?.disabled === undefined)
+
+  const settledResumeAction = pickerActionByBase(pane, 'resume', BROWSER)
+  assert.ok(settledResumeAction)
+  assert.notEqual(String(settledResumeAction.id), oldResumeActionId,
+    'the settled Footer action belongs to a newer frame revision')
+  pane.event({ ev: 'action', sf: surfaceId, id: pickerId, act: oldResumeActionId })
+  pane.event({ ev: 'action', sf: `${surfaceId}-foreign`, id: pickerId, act: String(settledResumeAction.id) })
   pane.event({ ev: 'select', sf: surfaceId, id: pickerId, item: 'session:not-listed' })
   sendSelect(pane, 'session:session-cross-child', pickerId)
   await waitUntil('later valid selection is processed', () => props(pane).selected === 'session:session-cross-child')
-  assert.equal(m.resumeIntents.length, 0, 'the processed disabled primary Resume action never dispatches')
+  assert.equal(m.resumeIntents.length, 1,
+    'an old resume#revision, foreign surface, or unlisted row dispatches no extra Resume')
   assert.equal(details(pane), undefined, 'stale action tokens and unlisted row ids cannot enter Details')
   assert.deepEqual(props(pane).current, ['session:session-current'])
 
@@ -207,7 +240,7 @@ test('footer keyboard focus visits only enabled actions', async (t) => {
   pane.key('\t')
   await waitUntil('Details receives the initial enabled footer focus', () => actionLabels().includes('Details [Enter]'))
   assert.deepEqual(actionLabels().filter((label) => label.endsWith('[Enter]')), ['Details [Enter]'])
-  assert.equal(pickerActionByBase(pane, 'resume', BROWSER)?.disabled, 'Session switching is deferred to B1-B.')
+  assert.equal(pickerActionByBase(pane, 'resume', BROWSER)?.disabled, 'The current session is already active.')
 
   pane.key('\u001b[C')
   await waitUntil('ArrowRight skips disabled Resume and wraps to Close', () => actionLabels().includes('Close [Enter]'))
@@ -229,7 +262,7 @@ test('empty Browser footer focus falls back to enabled Close', async (t) => {
   await waitUntil('empty footer focuses enabled Close, not disabled Details', () => actionLabels().includes('Close [Enter]'))
   assert.deepEqual(actionLabels().filter((label) => label.endsWith('[Enter]')), ['Close [Enter]'])
   assert.equal(pickerActionByBase(pane, 'details', BROWSER)?.disabled, 'Select a session to read its details.')
-  assert.equal(pickerActionByBase(pane, 'resume', BROWSER)?.disabled, 'Session switching is deferred to B1-B.')
+  assert.equal(pickerActionByBase(pane, 'resume', BROWSER)?.disabled, 'Select a session to resume.')
 
   const previousFrames = pane.frameCount()
   pane.key('\u001b[C')
@@ -237,6 +270,43 @@ test('empty Browser footer focus falls back to enabled Close', async (t) => {
     && actionLabels().includes('Close [Enter]'))
   assert.deepEqual(actionLabels().filter((label) => label.endsWith('[Enter]')), ['Close [Enter]'])
 })
+
+for (const listState of ['empty', 'loading', 'unavailable', 'error'] as const) {
+  test(`Resume is disabled and inert while the persisted list is ${listState}`, async (t) => {
+    let resolveList!: (rows: SessionSummary[] | undefined) => void
+    const loadingList = new Promise<SessionSummary[] | undefined>((resolve) => { resolveList = resolve })
+    const m = await mounted(t, reader({
+      list: async () => {
+        if (listState === 'loading') return loadingList
+        if (listState === 'unavailable') return undefined
+        if (listState === 'error') throw new Error('controlled listing failure')
+        return []
+      },
+    }), false, listState === 'loading' ? 'loading' : listState === 'empty' ? 'ready' : 'error')
+    try {
+      const expectedEmpty = {
+        empty: 'No persisted sessions are available.',
+        loading: 'Loading persisted sessions…',
+        unavailable: 'No session listing capability is available.',
+        error: 'The session list could not be loaded.',
+      } as const
+      assert.equal(props(m.pane).empty, expectedEmpty[listState])
+      const resume = pickerActionByBase(m.pane, 'resume', BROWSER)
+      assert.ok(resume)
+      assert.notEqual(resume.disabled, undefined, 'no list result offers an enabled Resume')
+      if (listState === 'loading') {
+        assert.equal(resume.disabled, 'Sessions are still loading.')
+      } else {
+        assert.equal(resume.disabled, 'Select a session to resume.')
+      }
+      sendPickerAction(m.pane, 'resume', BROWSER)
+      assert.equal(m.resumeIntents.length, 0, 'a disabled Footer event is inert')
+      assert.equal(m.fatals.length, 0)
+    } finally {
+      if (listState === 'loading') resolveList([])
+    }
+  })
+}
 
 test('query over failed listing remains an error instead of content-search loading', async (t) => {
   let searchCalls = 0
@@ -491,6 +561,9 @@ test('Details preserves search state, scrolls its own body, and emits read-only 
     currentSessionId: 'session-current',
     source: 'activate',
   })
+  m.resumeSettlements[0]!()
+  await waitUntil('activation settlement clears the pending state', () =>
+    pickerActionByBase(pane, 'resume', BROWSER)?.disabled === undefined)
   pane.key('\r')
   await waitUntil('Enter emits only a Resume intent', () => m.resumeIntents.length === 2)
   assert.deepEqual(m.resumeIntents[1], {

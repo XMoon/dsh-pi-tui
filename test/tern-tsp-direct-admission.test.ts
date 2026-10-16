@@ -16,6 +16,7 @@ import { existsSync, readdirSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import test from 'node:test'
 import { createDirectTspFixture, directSettle, waitFor } from './support/direct-tsp-fixture.ts'
+import { pickerNode } from './support/tsp-picker-wire.ts'
 
 /** Every history file written under the fixture's isolated DSH home. */
 function historyFiles(workRoot: string): string[] {
@@ -70,6 +71,66 @@ test('B2/Direct: a GENUINE Host command with a TUI builtin name keeps its Host s
     assert.equal(calls.length, 1, 'the genuine Host command handler ran exactly once')
     assert.ok(!fixture.pane.output.text().includes('not available in TSP'),
       'a Host-owned /settings is NOT refused by the TSP builtin gate')
+  } finally {
+    await fixture.settle()
+  }
+})
+
+test('B1-B/Direct: installed Session Browser capability never captures Host-owned command names', async (t) => {
+  const { testLifecycle } = await import('./support/temp-lifecycle.ts')
+  const life = testLifecycle(t)
+  const names = ['sessions', 'resume', 'search']
+  const calls: string[] = []
+  const fixture = await createDirectTspFixture(life, {
+    sessionBrowser: true,
+    hostCommands: names.map((name) => ({
+      name,
+      description: `Host-owned ${name}`,
+      definitionId: `host-${name}-def`,
+      handler: () => { calls.push(name); return { kind: 'success', text: `Host ${name} ran` } },
+    })),
+  })
+  try {
+    await directSettle(4_000)
+    for (const name of names) {
+      fixture.pane.input.type(`/${name}`)
+      await directSettle()
+      fixture.pane.input.type('\r')
+      await waitFor(`the genuine Host /${name} sink`, () => calls.length === names.indexOf(name) + 1, 25_000)
+    }
+    assert.deepEqual(calls, names, 'all same-name Host handlers retain authoritative precedence')
+    assert.equal(pickerNode(fixture.pane, 'session-browser-'), undefined,
+      'Host-origin commands never open or capture a native Session Browser')
+    assert.ok(!fixture.pane.output.text().includes('not available in TSP'),
+      'the native capability gate does not refuse Host-origin winners')
+  } finally {
+    await fixture.settle()
+  }
+})
+
+test('B1-B/Direct: /sessions without a negotiated Browser is refused and restores the draft', async (t) => {
+  const { testLifecycle } = await import('./support/temp-lifecycle.ts')
+  const life = testLifecycle(t)
+  const fixture = await createDirectTspFixture(life, { sessionBrowser: false })
+  const sessions = fixture.ctx.get('sessions') as unknown as { list(): unknown[] }
+  const sessionsBefore = sessions.list().length
+  try {
+    await directSettle(4_000)
+    fixture.pane.input.type('/sessions')
+    await directSettle()
+    assert.equal(latestComposerText(fixture.pane.output.text()), '/sessions',
+      'the command draft is present before submission')
+    fixture.pane.input.type('\r')
+    await waitFor('the unsupported Session Browser refusal', () =>
+      fixture.pane.output.text().includes('not available in TSP'), 25_000)
+    const wire = fixture.pane.output.text()
+    assert.equal(latestComposerText(wire), '/sessions',
+      'the unsupported native command restores its original draft')
+    assert.equal(pickerNode(fixture.pane, 'session-browser-'), undefined,
+      'missing Browser capability never opens a native picker')
+    assert.equal(sessions.list().length, sessionsBefore,
+      'the refused command creates no Session')
+    assert.equal(fixture.modelCalls(), 0, 'the refused command never reaches the model')
   } finally {
     await fixture.settle()
   }
@@ -332,6 +393,7 @@ test('B2/Direct: a registered extension contribution runs (never refused by the 
   const life = testLifecycle(t)
   const calls: string[] = []
   const fixture = await createDirectTspFixture(life, {
+    sessionBrowser: true,
     extensionCommands: [{
       id: 'ext-probe',
       name: 'extprobe',
@@ -349,6 +411,8 @@ test('B2/Direct: a registered extension contribution runs (never refused by the 
     assert.deepEqual(calls, ['extprobe'], 'the registered extension contribution ran exactly once')
     assert.ok(!fixture.pane.output.text().includes('not available in TSP'),
       'a client-extension command is NOT refused by the TSP TUI-builtin gate')
+    assert.equal(pickerNode(fixture.pane, 'session-browser-'), undefined,
+      'the mounted Session Browser capability does not capture the extension route')
   } finally {
     await fixture.settle()
   }
@@ -390,13 +454,13 @@ test('B2/Direct: an advertised Skill that is gone at execution is consumed with 
   }
 })
 
-test('B2/Direct: a Skill the created session resolves is never consumed as an advertised miss', async (t) => {
+test('B1-B/Direct: a resolvable Skill invocation keeps its agent-facing route while Browser capability is mounted', async (t) => {
   const { testLifecycle } = await import('./support/temp-lifecycle.ts')
   const life = testLifecycle(t)
-  // The SAME advertised name from a provider that CAN resolve it for the created
-  // session: the wrapper survives, the line is an ordinary skill invocation and
-  // the model turn proves it — the advertised-miss consumption must never own it.
+  // A real non-colliding Skill invocation exercises the production classifier
+  // and command plane with the native Browser capability live.
   const fixture = await createDirectTspFixture(life, {
+    sessionBrowser: true,
     deltas: ['skill turn ran'],
     skills: [{ name: 'fixture-skill', description: 'A fixture skill', body: 'Do the fixture thing.' }],
   })
@@ -410,7 +474,10 @@ test('B2/Direct: a Skill the created session resolves is never consumed as an ad
     const wire = fixture.pane.output.text()
     assert.ok(!wire.includes('unknown skill'), 'the resolvable Skill must not fail')
     assert.ok(!wire.includes('is not available in the created session'),
-      'a Skill the created session executes is never consumed as an advertised miss')
+      'the Skill wrapper stays on its real agent-facing route')
+    assert.ok(!wire.includes('not available in TSP'), 'the Browser builtin gate does not refuse a Skill wrapper')
+    assert.equal(pickerNode(fixture.pane, 'session-browser-'), undefined,
+      'the Skill invocation does not open the Session Browser')
   } finally {
     await fixture.settle()
   }

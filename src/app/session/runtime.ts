@@ -215,8 +215,10 @@ export interface SessionRuntime {
   withWriter<T>(scope: LiveSessionScope, task: () => Promise<T> | T): Promise<T>
   /** Run one ordinary session transition/switch (plan §4A). */
   transitionTo<T>(steps: TransitionSteps<T>): Promise<TransitionOutcome<T>>
-  /** Hand the TUI over to another persisted session (never throws). */
-  switchSession(sessionId: string): Promise<string | undefined>
+  /** Hand the TUI over to another persisted session (never throws). A scoped
+   *  UI intent can supply its captured scope so a queued stale request is
+   *  refused inside the transition gate before navigation side effects. */
+  switchSession(sessionId: string, expectedScope?: SessionScope): Promise<string | undefined>
   /** Adopt one forked child inside the gate (plan §4B). Resolves to the
    * navigation identity captured INSIDE the publication commit (PR5 v2
    * §3C — the caller's final settlement consumes exactly this saved
@@ -526,9 +528,8 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
    * (open → commit) runs inside the session-transition gate, so it can never
    * interleave with another ordinary transition.
    */
-  const switchSession = (sessionId: string): Promise<string | undefined> => {
-    core.bumpNavigationEpoch()
-    return core.gate.run(() => core.barrier.runTransition(async () => {
+  const switchSession = (sessionId: string, expectedScope?: SessionScope): Promise<string | undefined> => {
+    const runLocked = (): Promise<string | undefined> => core.barrier.runTransition(async () => {
       try {
         return await switchSessionLocked(sessionId)
       } finally {
@@ -536,7 +537,19 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
         // recall that was waiting on this transition in that case.
         deps.surface.settlePendingQueueRecalls(false)
       }
-    }))
+    })
+    if (expectedScope === undefined) {
+      core.bumpNavigationEpoch()
+      return core.gate.run(runLocked)
+    }
+    if (!deps.isScopeCurrent(expectedScope)) return Promise.resolve(undefined)
+    return core.gate.run(() => {
+      // A previous queued transition may have published a new owner while this
+      // intent waited. Recheck before this request bumps navigation or opens B.
+      if (!deps.isScopeCurrent(expectedScope)) return undefined
+      core.bumpNavigationEpoch()
+      return runLocked()
+    })
   }
 
   const switchSessionLocked = async (sessionId: string): Promise<string | undefined> => {

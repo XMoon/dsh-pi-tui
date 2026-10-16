@@ -10,7 +10,6 @@ import type {
 } from '../../runtime/session-reader-port.ts'
 import { sanitizeSessionSearchInput, sessionRowMatchesQuery } from '../../domain/session/browser.ts'
 import type {
-  CaptureSessionBrowserSubject,
   SessionBrowserListState,
   SessionBrowserPanelHandle,
   SessionBrowserReadSnapshot,
@@ -19,15 +18,40 @@ import type {
   SessionBrowserSearchResult,
   SessionBrowserSearchState,
   SessionBrowserPresentation,
+  SessionBrowserSubject,
 } from './session-browser-presentation.ts'
+import type { SessionScope } from '../session/scope.ts'
 
 const FIRST_PROJECTION_BATCH = 20
 const PROJECTION_BATCH_SIZE = 50
 const CONTENT_SEARCH_DEBOUNCE_MS = 250
 
+interface CapturedSessionBrowserSubject {
+  readonly subject: SessionBrowserSubject
+  readonly scope: SessionScope
+}
+
+export type SessionBrowserReadSettlement =
+  | { readonly kind: 'ready' }
+  | { readonly kind: 'matched'; readonly sessionId: string }
+  | { readonly kind: 'refused'; readonly text: string }
+  | { readonly kind: 'cancelled' }
+
+export interface SessionBrowserOpenOptions {
+  readonly initialQuery?: string
+  readonly directMatch?: {
+    readonly query: string
+    readonly find: (rows: readonly SessionBrowserRow[], query: string) => Pick<SessionBrowserRow, 'id'> | undefined
+  }
+}
+
 interface ActiveRead {
-  readonly subject: ReturnType<CaptureSessionBrowserSubject>
+  readonly subject: SessionBrowserSubject
+  readonly scope: SessionScope
   readonly controller: AbortController
+  readonly openOptions: SessionBrowserOpenOptions
+  readonly settlement: Promise<SessionBrowserReadSettlement>
+  readonly settle: (result: SessionBrowserReadSettlement) => void
   handle: SessionBrowserPanelHandle | undefined
   disposed: boolean
   rows: SessionBrowserRow[]
@@ -35,6 +59,7 @@ interface ActiveRead {
   listError: string | undefined
   projectionError: string | undefined
   query: string
+  userQueryChanged: boolean
   queryGeneration: number
   queryController: AbortController | undefined
   queryTimer: ReturnType<typeof setTimeout> | undefined
@@ -43,25 +68,27 @@ interface ActiveRead {
   searchPage: SessionContentSearchPage | undefined
   searchError: string | undefined
   hasMore: boolean
+  resumePending: boolean
 }
 
 export interface SessionBrowserReadHandle {
+  readonly settlement: Promise<SessionBrowserReadSettlement>
   close(): void
 }
 
 export interface SessionBrowserReadOwner {
-  open(): SessionBrowserReadHandle
+  open(options?: SessionBrowserOpenOptions): SessionBrowserReadHandle
   dispose(): void
 }
 
 export interface SessionBrowserReadOwnerOptions {
   readonly reader: SessionReader
   readonly presentation: SessionBrowserPresentation
-  readonly captureSubject: CaptureSessionBrowserSubject
+  readonly captureSubject: () => CapturedSessionBrowserSubject
   readonly diag: Diag
   readonly sessionId?: () => string | undefined
-  /** Test-only B1-A observation / B1-B handoff; never a writer in this owner. */
-  readonly onResumeIntent?: (intent: SessionBrowserResumeIntent) => void
+  /** App-owned handoff to the one existing SessionRuntime switch entry. */
+  readonly onResumeIntent?: (intent: SessionBrowserResumeIntent, scope: SessionScope, settle: () => void) => void
 }
 
 /** Build one read owner. It owns every list, projection and search generation for its panel. */
@@ -73,6 +100,7 @@ export function createSessionBrowserReadOwner(options: SessionBrowserReadOwnerOp
     listState: panel.listState,
     rows: panel.rows,
     query: panel.query,
+    resumePending: panel.resumePending,
     searchState: panel.searchState,
     searchResults: panel.searchResults,
     hasMore: panel.hasMore,
@@ -98,6 +126,7 @@ export function createSessionBrowserReadOwner(options: SessionBrowserReadOwnerOp
   const retire = (panel: ActiveRead, closePresenter: boolean): void => {
     if (panel.disposed) return
     panel.disposed = true
+    panel.settle({ kind: 'cancelled' })
     if (panel.queryTimer !== undefined) clearTimeout(panel.queryTimer)
     panel.queryTimer = undefined
     panel.queryController?.abort()
@@ -239,10 +268,11 @@ export function createSessionBrowserReadOwner(options: SessionBrowserReadOwnerOp
     panel.queryTimer = setTimeout(() => startSearch(panel, expectedGeneration), CONTENT_SEARCH_DEBOUNCE_MS)
   }
 
-  const changeQuery = (panel: ActiveRead, rawQuery: string): void => {
+  const changeQuery = (panel: ActiveRead, rawQuery: string, userInitiated = true): void => {
     if (!isActive(panel)) return
     const query = sanitizeSessionSearchInput(rawQuery)
     if (query === panel.query) return
+    if (userInitiated) panel.userQueryChanged = true
     if (panel.queryTimer !== undefined) clearTimeout(panel.queryTimer)
     panel.queryTimer = undefined
     panel.queryController?.abort()
@@ -261,6 +291,32 @@ export function createSessionBrowserReadOwner(options: SessionBrowserReadOwnerOp
     scheduleSearch(panel)
   }
 
+  const requestResume = (
+    panel: ActiveRead,
+    intent: SessionBrowserResumeIntent,
+    permittedRows: readonly SessionBrowserRow[],
+  ): boolean => {
+    if (!isActive(panel)
+      || intent.currentSessionId !== panel.subject.currentSessionId
+      || intent.sessionId === panel.subject.currentSessionId
+      || !permittedRows.some((row) => row.id === intent.sessionId)
+      || panel.resumePending) return false
+    if (options.onResumeIntent === undefined) {
+      options.presentation.notify('Session switching is deferred to B1-B.', 'info')
+      return false
+    }
+    panel.resumePending = true
+    publish(panel)
+    if (!isActive(panel)) return false
+    const settle = (): void => {
+      if (panel.disposed || !panel.resumePending) return
+      panel.resumePending = false
+      publish(panel)
+    }
+    options.onResumeIntent(intent, panel.scope, settle)
+    return true
+  }
+
   const startList = (panel: ActiveRead): void => {
     if (!isActive(panel)) return
     runOwned('session browser list', () => options.reader.list(panel.subject.currentSessionId, panel.controller.signal), {
@@ -277,38 +333,90 @@ export function createSessionBrowserReadOwner(options: SessionBrowserReadOwnerOp
           panel.searchPage = undefined
           panel.searchError = undefined
           publish(panel)
+          panel.settle({ kind: 'refused', text: 'session persistence unavailable' })
           return
         }
-        panel.rows = listed
-          .filter((row) => row.origin !== 'subagent')
-          .map((row): SessionBrowserRow => ({ ...row }))
+        const listedRows = listed.map((row): SessionBrowserRow => ({ ...row }))
+        panel.rows = listedRows.filter((row) => row.origin !== 'subagent')
         panel.listState = panel.rows.length === 0 ? 'empty' : 'ready'
         panel.listError = undefined
-        publish(panel)
+        const directMatch = panel.openOptions.directMatch
+        if (directMatch !== undefined && listedRows.length === 0) {
+          publish(panel)
+          panel.settle({ kind: 'refused', text: 'no persisted sessions' })
+          return
+        }
+        // Native TSP direct matching is limited to visible main-session rows,
+        // and an explicit Browser query edit supersedes the typed argument.
+        const match = directMatch === undefined || panel.userQueryChanged
+          ? undefined
+          : directMatch.find(panel.rows, directMatch.query)
+        if (match !== undefined) {
+          if (match.id === panel.subject.currentSessionId) {
+            panel.settle({ kind: 'refused', text: 'already on this session' })
+            retire(panel, true)
+            return
+          }
+          const accepted = requestResume(panel, {
+            sessionId: match.id,
+            currentSessionId: panel.subject.currentSessionId,
+            source: 'direct',
+          }, panel.rows)
+          if (accepted) {
+            panel.settle({ kind: 'matched', sessionId: match.id })
+            retire(panel, true)
+          } else {
+            panel.settle({ kind: 'cancelled' })
+          }
+          return
+        }
+        const fallbackQuery = directMatch?.query ?? panel.openOptions.initialQuery
+        if (fallbackQuery !== undefined && !panel.userQueryChanged) {
+          const previousQuery = panel.query
+          changeQuery(panel, fallbackQuery, false)
+          if (panel.query === previousQuery) publish(panel)
+        } else {
+          publish(panel)
+          if (panel.query !== '') scheduleSearch(panel)
+        }
+        panel.settle({ kind: 'ready' })
         if (!isActive(panel)) return
         startProjectionBatch(panel, 0, FIRST_PROJECTION_BATCH)
-        if (panel.query !== '') scheduleSearch(panel)
       },
       onError: (error) => {
         if (!isActive(panel)) return
+        const message = safeErrorMessage(error)
         panel.listState = 'error'
-        panel.listError = safeErrorMessage(error)
+        panel.listError = message
         panel.rows = []
         panel.searchState = 'idle'
         panel.searchResults = []
         publish(panel)
+        panel.settle({ kind: 'refused', text: message })
       },
     })
   }
 
   return {
-    open() {
+    open(openOptions = {}) {
       if (disposed) throw new Error('the Session Browser read owner is disposed')
       if (active !== undefined) retire(active, true)
-      const subject = options.captureSubject()
+      const captured = options.captureSubject()
+      let resolveSettlement!: (result: SessionBrowserReadSettlement) => void
+      let settlementResolved = false
+      const settlement = new Promise<SessionBrowserReadSettlement>((resolve) => { resolveSettlement = resolve })
+      const settle = (result: SessionBrowserReadSettlement): void => {
+        if (settlementResolved) return
+        settlementResolved = true
+        resolveSettlement(result)
+      }
       const panel: ActiveRead = {
-        subject,
+        subject: captured.subject,
+        scope: captured.scope,
         controller: new AbortController(),
+        openOptions,
+        settlement,
+        settle,
         handle: undefined,
         disposed: false,
         rows: [],
@@ -316,6 +424,7 @@ export function createSessionBrowserReadOwner(options: SessionBrowserReadOwnerOp
         listError: undefined,
         projectionError: undefined,
         query: '',
+        userQueryChanged: false,
         queryGeneration: 0,
         queryController: undefined,
         queryTimer: undefined,
@@ -324,26 +433,20 @@ export function createSessionBrowserReadOwner(options: SessionBrowserReadOwnerOp
         searchPage: undefined,
         searchError: undefined,
         hasMore: false,
+        resumePending: false,
       }
       active = panel
       const presentationHandle = options.presentation.open({
-        subject,
+        subject: panel.subject,
         onQueryChange: (query) => changeQuery(panel, query),
         onResumeIntent: (intent) => {
-          if (!isActive(panel)
-            || intent.currentSessionId !== panel.subject.currentSessionId
-            || intent.sessionId === panel.subject.currentSessionId
-            || !panel.rows.some((row) => row.id === intent.sessionId)) return
-          if (options.onResumeIntent === undefined) {
-            options.presentation.notify('Session switching is deferred to B1-B.', 'info')
-            return
-          }
-          options.onResumeIntent(intent)
+          if (intent.source === 'direct') return
+          requestResume(panel, intent, panel.rows)
         },
         onClose: () => retire(panel, false),
       })
       panel.handle = presentationHandle
-      const handle = { close: () => retire(panel, true) }
+      const handle: SessionBrowserReadHandle = { settlement, close: () => retire(panel, true) }
       if (!isActive(panel)) {
         if (!presentationHandle.isDisposed()) presentationHandle.close()
         return handle

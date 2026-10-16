@@ -416,6 +416,34 @@ test('L6 §7.4-3 Host command: executes EXACTLY ONCE through HostCommandPort', a
     'exactly ONE command/run row — the Host command is never auto-retried or double-dispatched')
 })
 
+test('B1-B/Remote: the Remote command catalogue routes Host /sessions to its real Host sink', async (t) => {
+  const life = testLifecycle(t)
+  const mainId = 'b1-b-remote-sessions-command'
+  let calls = 0
+  const fixture = await mountRunner(life, {
+    resumeSessionId: mainId,
+    hostCommands: [{
+      name: 'sessions',
+      handler: () => { calls += 1; return { kind: 'success', text: 'Remote Host /sessions ran' } },
+    }],
+  })
+  await settle(120)
+  const catalog = await fixture.aggregate.presentation.commandSource.readCommands(mainId)
+  assert.ok(catalog?.some(command => command.name === 'sessions'),
+    'the genuine Remote Host /sessions descriptor is in the authoritative command catalogue')
+  const runsBefore = fixture.hostCommandRuns(mainId)
+  submit(fixture, '/sessions')
+  await waitFor('the genuine Remote Host /sessions handler', () => calls === 1, 15_000)
+  await waitFor('the official Remote /sessions lifecycle rows', () => {
+    const kinds = fixture.events(mainId).map(event => event.type)
+    return kinds.includes('command/run') && kinds.includes('command/done')
+  }, 15_000)
+  await settle()
+  assert.equal(calls, 1, 'the Remote Host command handler ran exactly once')
+  assert.equal(fixture.hostCommandRuns(mainId) - runsBefore, 1,
+    'the Remote Host winner produced exactly one official command/run row')
+})
+
 test('L6 §7.4-4 collision (M3-6 PR1): the Host claim wins and the same-named CLIENT-CONTEXT extension callback is never invoked', async (t) => {
   const life = testLifecycle(t)
   const mainId = 'm3-4-pr4-cmd-collision'

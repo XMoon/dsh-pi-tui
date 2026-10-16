@@ -1476,6 +1476,7 @@ export function applyRunnerWithRuntime(
       signal: lifecycleController.signal,
       app: () => app,
       modelPresentation: () => surface.modelPresentation,
+              sessionBrowserPresentation: () => surface.sessionBrowserPresentation,
       presetPresentation: () => surface.presetPresentation,
       // PR3-A: registration/refresh failures are background-reachable under a
       // read-only TSP renderer; the notice goes through the display seam.
@@ -1559,7 +1560,7 @@ export function applyRunnerWithRuntime(
       session: {
         ensureSession: () => sessionRuntime.ensureSession(),
         withWriter: (scope, task) => sessionRuntime.withWriter(scope, task),
-        switchSession: (sessionId) => sessionRuntime.switchSession(sessionId),
+        switchSession: (sessionId, expectedScope) => sessionRuntime.switchSession(sessionId, expectedScope),
         forkSession: (sourceSessionId) => sessionRuntime.forkSession(sourceSessionId),
         transitionTo: (steps) => sessionRuntime.transitionTo(steps),
       },
@@ -2205,6 +2206,7 @@ export function applyRunnerWithRuntime(
       get supportsTuiBuiltinUi() { return !tspRendererActive },
       supportsModelPickerUi: () => surface.modelPresentation !== undefined,
       supportsPresetPickerUi: () => surface.presetPresentation !== undefined,
+       supportsSessionBrowserUi: () => surface.sessionBrowserPresentation !== undefined,
       // PR3-B §7.3 (F2): PiTui retains a stale submission's draft restore
       // across a switch (its contract); the TSP renderer's committed switch
       // DROPPED the outgoing draft, so the stale restore is suppressed.

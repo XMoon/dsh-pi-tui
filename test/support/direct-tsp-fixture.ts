@@ -3,8 +3,9 @@
  *
  * This is the Direct counterpart of `remote-application-fixture.ts`: the rc.2
  * Host services are mounted for real (`mountAgentLoopTestDependencies` +
- * `mountAgentLoopTestHarness` compose REAL live Agents), the TUI runner boots
- * against them in the Direct branch, and the TSP pane owns the tty. Only the
+ * `mountAgentLoopTestHarness` compose REAL live Agents), and the TUI runner boots
+ * against them in the Direct branch. By default a scripted TSP pane owns the
+ * tty; the `externalTern` mode leaves stdio with a real Tern client. Only the
  * MODEL is synthetic (a scripted streaming `LlmAdapter` registered on the Host
  * `llm` service). The default configuration boundary is described below;
  * `profileDefault` opts into the official isolated profile composition.
@@ -25,7 +26,7 @@
  *   `profileDefault`, this substitution is removed: the real default service,
  *   Loader profile row, ConfigEditor and SettingsForms are mounted instead
  * - the empty `fileReferences` stand-in (the workspace index)
- * - the scripted tty (the pane)
+ * - the scripted tty in the default mode; `externalTern` uses Tern-owned stdio
  *
  * DELIBERATELY ABSENT
  * - a user's profile and full shipped profile composition. The ordinary mode
@@ -188,84 +189,116 @@ export async function waitFor(label: string, predicate: () => boolean, timeoutMs
 }
 
 /**
- * Mount the official Direct Host composition, boot the TUI runner against it
- * with the TSP renderer, and hand back the pane.
+ * Mount the official Direct Host composition and TUI runner. The default uses
+ * a scripted TSP pane; `externalTern: true` keeps the real Tern-owned stdio.
  */
+export interface DirectTspFixtureOptions {
+  /** The assistant deltas the scripted model streams (default: one line). */
+  readonly deltas?: readonly string[]
+  /** Keep the model stream OPEN until this resolves (a running turn). */
+  readonly streamHold?: () => Promise<void>
+  /** Extra TUI plugin config (e.g. `{ busyEnter: 'steer' }`) — the SAME
+   *  volatile authority `applyRunner` reads, so the busy preference under
+   *  test is the real configured one. */
+  readonly tuiConfig?: Record<string, unknown>
+  /** SKILLS served by a fixture provider on the REAL `dsh-skill` registry
+   *  (the `skill-invocation` family — agent-facing input). `unresolved` models
+   *  the genuine advertised-miss shape: the provider still ADVERTISES the Skill
+   *  to the composer (`list()`) while it can no longer RESOLVE it once the
+   *  Session is created (`get()`), exactly as a provider that lost its
+   *  availability between the submit-time claim and the execution. */
+  readonly skills?: ReadonlyArray<{
+    readonly name: string
+    readonly description: string
+    readonly body: string
+    readonly unresolved?: boolean
+  }>
+  /** CLIENT-EXTENSION command contributions registered through the REAL
+   *  extension service (the `client-command`/`extension` family). */
+  readonly extensionCommands?: ReadonlyArray<{
+    readonly id: string
+    readonly name: string
+    readonly description: string
+    readonly sessionless?: boolean
+    readonly handler: () => unknown
+  }>
+  readonly startup?: { readonly sessionId?: string; readonly presetId?: string }
+  readonly modelPicker?: boolean
+  readonly presetPicker?: boolean
+  readonly sessionBrowser?: boolean
+  /** Reuse isolated persisted session files across a clean runner remount. */
+  readonly workRoot?: string
+  /** Replace the historical default stand-in with the official isolated
+   * profile/configuration plane for Model persistence qualification. */
+  readonly profileDefault?: { readonly provider: string; readonly model: string; readonly reasoningEffort?: string }
+  /** Extra agent presets registered into the REAL registry beside the
+   *  fixture's own (a second real switch target). */
+  readonly presets?: ReadonlyArray<{ readonly id: string; readonly name?: string; readonly description?: string }>
+  /** Materialize a REAL persisted, released, turn-boundary-BLANK Session
+   *  through the official persistence seam before the runner boots, then let
+   *  the runner's ordinary startup resume it. */
+  readonly persistedBlankSession?: {
+    readonly id: string
+    readonly parentSession?: string
+    readonly origin?: 'subagent'
+    readonly delegationDepth?: number
+  }
+  /** Materialize additional blank Sessions, including child metadata, in the same official pre-boot list. */
+  readonly persistedBlankSessions?: ReadonlyArray<{
+    readonly id: string
+    readonly parentSession?: string
+    readonly origin?: 'subagent'
+    readonly delegationDepth?: number
+  }>
+  /** Mount the official preset-declaring profile plane: the listed presets are
+   *  declared by REAL bundle rows (healthy, with a resolution base) and the
+   *  default write goes through the real ConfigEditor/Loader. */
+  readonly presetProfile?: { readonly presets?: readonly { readonly id: string; readonly name?: string }[] }
+  readonly appExit?: () => void
+  /**
+   * GENUINE Host commands registered into the REAL command catalog before the
+   * runner boots (the Host-same-name winner and command-failure cases). Each
+   * handler records its invocation so a test can observe the Host SINK.
+   */
+  readonly hostCommands?: ReadonlyArray<{
+    readonly name: string
+    readonly description: string
+    readonly definitionId?: string
+    readonly handler: (invocation: { readonly rawInput: string }) => unknown
+  }>
+}
+
+export interface DirectTspExternalFixture extends Omit<DirectTspFixture, 'pane'> {}
+
+type DirectTspExternalOptions = DirectTspFixtureOptions & { readonly externalTern: true }
+type DirectTspScriptedOptions = DirectTspFixtureOptions & { readonly externalTern?: false }
+
+export function createDirectTspFixture(
+  life: import('./temp-lifecycle.ts').TestLifecycle,
+  options: DirectTspExternalOptions,
+): Promise<DirectTspExternalFixture>
+export function createDirectTspFixture(
+  life: import('./temp-lifecycle.ts').TestLifecycle,
+  options?: DirectTspScriptedOptions,
+): Promise<DirectTspFixture>
 export async function createDirectTspFixture(
   life: import('./temp-lifecycle.ts').TestLifecycle,
-  options: {
-    /** The assistant deltas the scripted model streams (default: one line). */
-    readonly deltas?: readonly string[]
-    /** Keep the model stream OPEN until this resolves (a running turn). */
-    readonly streamHold?: () => Promise<void>
-    /** Extra TUI plugin config (e.g. `{ busyEnter: 'steer' }`) — the SAME
-     *  volatile authority `applyRunner` reads, so the busy preference under
-     *  test is the real configured one. */
-    readonly tuiConfig?: Record<string, unknown>
-    /** SKILLS served by a fixture provider on the REAL `dsh-skill` registry
-     *  (the `skill-invocation` family — agent-facing input). `unresolved` models
-     *  the genuine advertised-miss shape: the provider still ADVERTISES the Skill
-     *  to the composer (`list()`) while it can no longer RESOLVE it once the
-     *  Session is created (`get()`), exactly as a provider that lost its
-     *  availability between the submit-time claim and the execution. */
-    readonly skills?: ReadonlyArray<{
-      readonly name: string
-      readonly description: string
-      readonly body: string
-      readonly unresolved?: boolean
-    }>
-    /** CLIENT-EXTENSION command contributions registered through the REAL
-     *  extension service (the `client-command`/`extension` family). */
-    readonly extensionCommands?: ReadonlyArray<{
-      readonly id: string
-      readonly name: string
-      readonly description: string
-      readonly sessionless?: boolean
-      readonly handler: () => unknown
-    }>
-    readonly startup?: { readonly sessionId?: string; readonly presetId?: string }
-    readonly modelPicker?: boolean
-    readonly presetPicker?: boolean
-    /** Replace the historical default stand-in with the official isolated
-     * profile/configuration plane for Model persistence qualification. */
-    readonly profileDefault?: { readonly provider: string; readonly model: string; readonly reasoningEffort?: string }
-    /** Extra agent presets registered into the REAL registry beside the
-     *  fixture's own (a second real switch target). */
-    readonly presets?: ReadonlyArray<{ readonly id: string; readonly name?: string; readonly description?: string }>
-    /** Materialize a REAL persisted, released, turn-boundary-BLANK Session
-     *  through the official persistence seam before the runner boots, then let
-     *  the runner's ordinary startup resume it. */
-    readonly persistedBlankSession?: { readonly id: string }
-    /** Mount the official preset-declaring profile plane: the listed presets are
-     *  declared by REAL bundle rows (healthy, with a resolution base) and the
-     *  default write goes through the real ConfigEditor/Loader. */
-    readonly presetProfile?: { readonly presets?: readonly { readonly id: string; readonly name?: string }[] }
-    readonly appExit?: () => void
-    /**
-     * GENUINE Host commands registered into the REAL command catalog before the
-     * runner boots (the Host-same-name winner and command-failure cases). Each
-     * handler records its invocation so a test can observe the Host SINK.
-     */
-    readonly hostCommands?: ReadonlyArray<{
-      readonly name: string
-      readonly description: string
-      readonly definitionId?: string
-      readonly handler: (invocation: { readonly rawInput: string }) => unknown
-    }>
-  } = {},
-): Promise<DirectTspFixture> {
-  const workRoot = life.tempDir('dsh-b2-direct-')
+  options: (DirectTspFixtureOptions & { readonly externalTern?: boolean }) = {},
+): Promise<DirectTspFixture | DirectTspExternalFixture> {
+  const workRoot = options.workRoot ?? life.tempDir('dsh-b2-direct-')
   const anchorDir = join(workRoot, 'anchor')
   mkdirSync(anchorDir, { recursive: true })
-  const pane = installTspPane({ modelPicker: options.modelPicker, presetPicker: options.presetPicker })
-  // OWNERSHIP, not success-contingency: the pane replaced the PROCESS tty and
-  // cleared five env vars the instant it was installed. From this point on,
-  // ANY setup failure below must still restore them — the caller's `finally`
-  // only runs `settle()` when the factory itself SUCCEEDS, so the fixture
-  // registers its own idempotent cleanup at each ownership acquisition and
-  // drops the registration only into the ONE settlement below (the review's
-  // setup-ownership finding: a rejecting `ctx.plugin` used to leak the new
-  // stdin/stdout getters into every later test in the process).
+  const pane = options.externalTern === true
+    ? undefined
+    : installTspPane({
+        modelPicker: options.modelPicker,
+        presetPicker: options.presetPicker,
+        sessionBrowser: options.sessionBrowser,
+      })
+  // OWNERSHIP, not success-contingency: scripted mode replaces the PROCESS tty
+  // and clears five env vars; external-Tern mode must leave the Tern-owned tty
+  // and its injected environment untouched. In either mode, setup failures must
+  // restore the resources this fixture itself acquired.
   const cleanup: Array<() => Promise<void> | void> = []
   /** Ownership cleanups run LAST, LIFO, EXACTLY ONCE (success or reject). */
   const runSetupCleanup = async (): Promise<void> => {
@@ -273,7 +306,15 @@ export async function createDirectTspFixture(
     cleanup.length = 0
   }
   const ownCleanup = (step: () => Promise<void> | void): void => { cleanup.push(step) }
-  ownCleanup(() => pane.restore())
+  if (pane !== undefined) ownCleanup(() => pane.restore())
+  const previousTspRenderer = process.env.DSH_PI_TUI_RENDERER
+  const previousTspLog = process.env.DSH_PI_TUI_LOG
+  ownCleanup(() => {
+    if (previousTspRenderer === undefined) delete process.env.DSH_PI_TUI_RENDERER
+    else process.env.DSH_PI_TUI_RENDERER = previousTspRenderer
+    if (previousTspLog === undefined) delete process.env.DSH_PI_TUI_LOG
+    else process.env.DSH_PI_TUI_LOG = previousTspLog
+  })
   let previousDshHome: string | undefined
   // Declared OUTSIDE the try so the success return below (and the recorder
   // closures) can read the mounted Context even on the last-statement path.
@@ -284,7 +325,7 @@ export async function createDirectTspFixture(
   let settlement: Promise<void> | undefined
   const settle = (): Promise<void> => {
     settlement ??= (async () => {
-      pane.releaseHandshake()
+      pane?.releaseHandshake()
       try {
         for (const fiber of fibers.reverse()) await Promise.resolve(fiber.dispose())
         await persistenceFiber?.dispose()
@@ -436,26 +477,35 @@ export async function createDirectTspFixture(
       } as never)
     }
   }) as never, {} as never)
-  if (options.persistedBlankSession !== undefined) {
+  const persistedBlankSessions = [
+    ...(options.persistedBlankSession === undefined ? [] : [options.persistedBlankSession]),
+    ...(options.persistedBlankSessions ?? []),
+  ]
+  if (persistedBlankSessions.length > 0) {
     // The OFFICIAL persistence seam: `create` takes write ownership, `flush`
-    // materializes the artifact, and `close` releases the handle WITHOUT
-    // deleting the stored log — so the runner's `agents.resume` finds a real
-    // persisted Session that holds no user turn.
+    // materializes each artifact, and `close` releases each handle WITHOUT
+    // deleting the stored log — so the runner's ordinary startup/list paths
+    // see real persisted Sessions that hold no user turn.
     const persistence = ctx.get('sessionPersistence') as unknown as {
       create(header: unknown, options?: unknown): Promise<{
         flush(options?: unknown): Promise<void>
         close(): Promise<void>
       }>
     }
-    const handle = await persistence.create({
-      id: options.persistedBlankSession.id,
-      cwd: workRoot,
-      createdAt: Date.now(),
-      version: SESSION_FORMAT_VERSION,
-      isSeeded: false,
-    })
-    await handle.flush()
-    await handle.close()
+    for (const session of persistedBlankSessions) {
+      const handle = await persistence.create({
+        id: session.id,
+        cwd: workRoot,
+        createdAt: Date.now(),
+        version: SESSION_FORMAT_VERSION,
+        isSeeded: false,
+        ...(session.parentSession === undefined ? {} : { parentSession: session.parentSession }),
+        ...(session.origin === undefined ? {} : { origin: session.origin }),
+        ...(session.delegationDepth === undefined ? {} : { delegationDepth: session.delegationDepth }),
+      })
+      await handle.flush()
+      await handle.close()
+    }
   }
   const runnerFiber = await ctx.plugin(pluginCtx => applyRunner(
     pluginCtx,
@@ -525,8 +575,7 @@ export async function createDirectTspFixture(
     return { detach: () => { prototype.cancel = originalCancel } }
   }
 
-  return {
-    pane,
+  const fixture = {
     ctx,
     workRoot,
     cancellations: () => llmAdapter.aborts.length,
@@ -535,4 +584,5 @@ export async function createDirectTspFixture(
     recordCancels,
     settle,
   }
+  return pane === undefined ? fixture : { ...fixture, pane }
 }

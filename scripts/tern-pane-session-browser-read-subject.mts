@@ -2,6 +2,7 @@
 import { appendFileSync } from 'node:fs'
 import { connect, type Key, type Node, type ScrollTo, type TspEvent } from '@stencil-hq/tern'
 import { createSessionBrowserReadOwner } from '../src/app/command/session-browser-read.ts'
+import type { SessionScope } from '../src/app/session/scope.ts'
 import { createDiag } from '../src/runtime/process/diagnostics.ts'
 import type {
   SessionBrowserPanelHandle,
@@ -215,13 +216,19 @@ const observedPresentation: SessionBrowserPresentation = {
 }
 
 const diag = createDiag({ stderrLevel: 'off' })
+// This controlled read fixture never switches sessions; Direct L6 is covered by
+// test/tern-tsp-session-browser-commands.test.ts with the real runtime scope.
+const readOnlyScope = { sessionId: currentId } as unknown as SessionScope
 const owner = createSessionBrowserReadOwner({
   reader: read,
   presentation: observedPresentation,
   captureSubject: () => ({
-    currentSessionId: currentId,
-    currentCwd: '/workspace/project',
-    isCurrent: () => true,
+    scope: readOnlyScope,
+    subject: {
+      currentSessionId: currentId,
+      currentCwd: '/workspace/project',
+      isCurrent: () => true,
+    },
   }),
   diag,
   sessionId: () => currentId,

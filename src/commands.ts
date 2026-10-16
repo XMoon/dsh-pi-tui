@@ -74,6 +74,7 @@ import { registerPluginsCommand, registerTasksCommand } from './tui/commands/tas
 import { createModelCommands } from './tui/commands/models.ts'
 import type { ModelPresentation } from './app/command/model-presentation.ts'
 import type { PresetPresentation } from './app/command/preset-presentation.ts'
+import type { SessionBrowserPresentation } from './app/command/session-browser-presentation.ts'
 import { registerReloadCommand, registerSkillCommand, type SkillsCommandDeps } from './tui/commands/skills.ts'
 import { createArtifactsCommands } from './tui/commands/artifacts.ts'
 import { createAuthCommands } from './tui/commands/auth.ts'
@@ -275,6 +276,8 @@ export interface TuiCommandRunner {
   /** PR3-A: undefined while a non-PiTui renderer owns the terminal; the
    * boot-mandatory completions install skips, executions are input-gated. */
   app: TuiApp | undefined
+  /** The native Session Browser presenter, when the mounted renderer supports it. */
+  readonly sessionBrowserPresentation?: SessionBrowserPresentation
   /** The runner's diagnostics channel (stderr + $DSH_HOME/logs). */
   diag: Diag
   /** The current session id. SYNC display/diagnostics ONLY — never an operation
@@ -495,7 +498,7 @@ export interface TuiCommandRunner {
   captureExtensionHealthRef?: (slot: string, id: string) => { slot: string; id: string; owner: string } | undefined
   recordExtensionError?: (ref: { slot: string; id: string; owner: string }, error: unknown) => void
   clearExtensionError?: (ref: { slot: string; id: string; owner: string }) => void
-  switchSession(sessionId: string): Promise<string | undefined>
+  switchSession(sessionId: string, expectedScope?: SessionScope): Promise<string | undefined>
   /** Host-owned /fork navigation. The runner dispatches the semantic fork
    * outside the destructive transition FIFO and only commits the visible child
    * while the captured navigation intent is still current. Optional keeps

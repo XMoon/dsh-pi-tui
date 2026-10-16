@@ -1,4 +1,4 @@
-/** Real Tern 0.8.3 headless qualification for the production Session Browser Presenter. */
+/** Real Tern headless qualification for the production Session Browser Presenter and Resume affordance. */
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { containedXY, rect } from './tern-pane-geometry.mjs'
@@ -129,16 +129,60 @@ export default async function (h) {
   await h.key('Tab', 400)
   await h.key('Tab', 400)
   frame = lastFrame(h)
-  const resumeAction = frame?.actions?.find((action) => String(action.label).startsWith('Resume'))
-  const resumeButton = nodesWith(h.snapshot(), 'pk-btn').find((node) => h.descendantsText(node).replace(' [Enter]', '') === 'Resume')
-  h.measure('Owner-limited V13: disabled Resume footer wording in the 400x600 focused-footer frame', JSON.stringify({
-    wireDisabled: resumeAction?.disabled,
-    painted: resumeButton !== undefined,
-    buttonClass: resumeButton?.class,
-    buttonBox: resumeButton === undefined ? 'none' : rect(resumeButton),
+  const currentResumeAction = frame?.actions?.find((action) => String(action.label).startsWith('Resume'))
+  const currentResumeButton = nodesWith(h.snapshot(), 'pk-btn').find((node) => h.descendantsText(node).replace(' [Enter]', '') === 'Resume')
+  h.check('Current keeps primary Resume disabled; expected reason is in action metadata',
+    frame?.selected === 'session:session-current'
+    && currentResumeAction?.primary === true
+    && currentResumeAction?.disabled === 'The current session is already active.'
+    && currentResumeButton !== undefined,
+    JSON.stringify({ selected: frame?.selected, action: currentResumeAction, buttonClass: currentResumeButton?.class }))
+  h.measure('Current Resume footer geometry in the real 400x600 client', JSON.stringify({
+    disabled: currentResumeAction?.disabled,
+    painted: currentResumeButton !== undefined,
+    buttonClass: currentResumeButton?.class,
+    buttonBox: currentResumeButton === undefined ? 'none' : rect(currentResumeButton),
   }))
-  h.capture('session-browser-footer-focused-400x600', 'Owner-limited disabled Resume footer observation; not a GUI acceptance claim')
+  h.capture('session-browser-footer-current-disabled-400x600', 'Current Resume is disabled; reason is action metadata, not visible in capture')
+
+  const resumeRow = cardRows(h.snapshot()).find((node) => h.descendantsText(node).startsWith('Needle long session title'))
+  const resumeRowClicked = resumeRow !== undefined && await h.click(h.snapshot().chains, resumeRow)
+  const resumeRowSelected = await waitFrame(h, (value) => value?.selected === 'session:session-long', 'select non-current Resume target')
+  h.check('pointer selection of a listed non-current row does not dispatch Resume',
+    resumeRowClicked && resumeRowSelected && lastFrame(h)?.current?.[0] === 'session:session-current'
+    && !records(h).some((entry) => entry.resumeIntent),
+    JSON.stringify({ selected: lastFrame(h)?.selected, current: lastFrame(h)?.current, resumeRowClicked, resumeRowSelected }))
   await h.key('Tab', 400)
+  await h.key('Tab', 400)
+  frame = lastFrame(h)
+  const enabledResumeAction = frame?.actions?.find((action) => String(action.label).startsWith('Resume'))
+  const enabledResumeButton = nodesWith(h.snapshot(), 'pk-btn').find((node) => h.descendantsText(node).replace(' [Enter]', '') === 'Resume')
+  const resumeButtonContained = enabledResumeButton !== undefined && containedXY(h.snapshot().chains, enabledResumeButton)
+  h.check('a listed non-current row enables the primary Resume footer inside the Picker',
+    frame?.selected === 'session:session-long'
+    && enabledResumeAction?.disabled === undefined
+    && enabledResumeAction?.primary === true
+    && resumeButtonContained,
+    JSON.stringify({ selected: frame?.selected, action: enabledResumeAction, button: enabledResumeButton === undefined ? undefined : rect(enabledResumeButton), contained: resumeButtonContained }))
+  h.measure('enabled primary Resume footer geometry in the real 400x600 client', JSON.stringify({
+    action: enabledResumeAction,
+    buttonClass: enabledResumeButton?.class,
+    buttonBox: enabledResumeButton === undefined ? 'none' : rect(enabledResumeButton),
+  }))
+  h.capture('session-browser-footer-resume-enabled-400x600', 'non-current Resume is enabled and primary')
+  const footerResumeClicked = enabledResumeButton !== undefined
+    && await h.click(h.snapshot().chains, enabledResumeButton)
+  const footerIntentSeen = await waitFrame(h, () => records(h).some((entry) => entry.resumeIntent?.source === 'footer'), 'real footer Resume click')
+  const footerPending = await waitFrame(h, (value) => value?.actions?.some((action) =>
+    String(action.label).startsWith('Resume') && action.disabled === 'Switching sessions…') === true, 'Resume pending state')
+  h.check('real-client footer click emits one intent and does not fake a Session switch',
+    footerResumeClicked && footerIntentSeen && footerPending
+    && records(h).filter((entry) => entry.resumeIntent).length === 1
+    && lastFrame(h)?.current?.[0] === 'session:session-current'
+    && !records(h).some((entry) => entry.switchSession || entry.apply),
+    JSON.stringify({ footerResumeClicked, footerIntentSeen, footerPending, current: lastFrame(h)?.current,
+      intents: records(h).filter((entry) => entry.resumeIntent) }))
+  h.capture('session-browser-footer-resume-pending-400x600', 'Resume intent is pending; this read harness does not perform business switching')
 
   await keyText(h, 'needle')
   const searched = await waitFrame(h, (value) => value?.layout === 'cards' && value?.query === 'needle'
@@ -211,9 +255,14 @@ export default async function (h) {
   h.check('Esc at the Reader tail returns to the same global Cards, query and selected session',
     back && frame?.query === 'needle' && frame?.selected === 'session:session-long' && frame?.pickerKey === browserKey,
     JSON.stringify({ page: frame?.page, query: frame?.query, selected: frame?.selected, pickerKey: frame?.pickerKey }))
-  h.check('headless read-only flow recorded no Resume intent or business write',
-    !records(h).some((entry) => entry.resumeIntent || entry.apply || entry.switchSession),
-    JSON.stringify(records(h).filter((entry) => entry.resumeIntent || entry.apply || entry.switchSession)))
+  const footerResumeIntents = records(h).filter((entry) => entry.resumeIntent)
+  h.check('the real client emitted one eligible Footer Resume intent without claiming a business switch',
+    footerResumeIntents.length === 1
+    && footerResumeIntents[0]?.resumeIntent?.sessionId === 'session-long'
+    && footerResumeIntents[0]?.resumeIntent?.currentSessionId === 'session-current'
+    && footerResumeIntents[0]?.resumeIntent?.source === 'footer'
+    && !records(h).some((entry) => entry.apply || entry.switchSession),
+    JSON.stringify({ footerResumeIntents, businessSwitches: records(h).filter((entry) => entry.apply || entry.switchSession) }))
   h.capture('session-browser-cards-after-reader-400x440', 'Browse state after returning from the Reader tail')
 
   h.measure('run totals', JSON.stringify({
