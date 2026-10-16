@@ -1995,7 +1995,7 @@ test('fullscreen transcript click: a question-frame press clears the stale backg
   app.stop()
 })
 
-test('the footer badge combines tasks and live agents, hint only on an empty editor', async () => {
+test('the footer badge combines tasks and live agents, hint only at the eligible Editor visual boundary', async () => {
   const { vt, app } = startApp()
   await vt.waitForRender()
   // B4-B: the hint follows the admission facts — badge + projection together.
@@ -4046,7 +4046,7 @@ test('ctrl+o still folds the viewed transcript while the viewer is up', async ()
   app.stop()
 })
 
-test('openTaskBrowser renders status dots and live counts in the overlay', async () => {
+test('openTaskBrowser renders semantic statuses and live counts in the overlay', async () => {
   const { vt, app } = startApp()
   app.openTaskBrowser(
     [
@@ -4062,8 +4062,9 @@ test('openTaskBrowser renders status dots and live counts in the overlay', async
   const strip = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, '').replace(/\s+$/, '')
   const view = vt.getViewport().map(strip).join('\n')
   assert.ok(view.includes('tasks · subagents'), `header missing:\n${view}`)
-  assert.ok(view.includes('●'), `status dots missing:\n${view}`)
-  assert.ok(view.includes('running'), `running status missing:\n${view}`)
+  assert.ok(view.includes('‣ Running'), `running status marker and word missing:\n${view}`)
+  assert.ok(view.includes('‣ Completed'), `completed status marker and word missing:\n${view}`)
+  assert.ok(view.includes('running'), `running detail status missing:\n${view}`)
   assert.ok(view.includes('3s'), `elapsed missing:\n${view}`)
   assert.ok(view.includes('1m'), `completed elapsed missing:\n${view}`)
   assert.ok(view.includes('── jobs ──') && view.includes('── subagents ──'), `group headers missing:\n${view}`)
@@ -4237,7 +4238,7 @@ test('openTaskBrowser repaints a subagent row in place on runtime re-projection 
   // the CACHED catalog from the Agent registry and commits through
   // handle.setItems — the open browser must flip the SAME row's status
   // word to inactive WITHOUT closing (plan §6.2 Case A), repainting the
-  // state glyph with it.
+  // shared marker and semantic word together.
   const { vt, app } = startApp()
   const handle = app.openTaskBrowser(
     [{
@@ -4258,7 +4259,7 @@ test('openTaskBrowser repaints a subagent row in place on runtime re-projection 
   const strip = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, '').replace(/\s+$/, '')
   let view = vt.getViewport().map(strip).join('\n')
   assert.ok(view.includes('running'), `running row missing:\n${view}`)
-  assert.ok(view.includes('●'), `a running row must paint the active glyph:\n${view}`)
+  assert.ok(view.includes('‣ Running'), `a running row must paint the shared marker and word:\n${view}`)
   // The child's driver goes idle: the runtime-only commit re-projects
   // the row (SAME value, new status) — this is exactly what the runner's
   // commitRows hook does on agent/status.
@@ -4276,7 +4277,8 @@ test('openTaskBrowser repaints a subagent row in place on runtime re-projection 
   view = vt.getViewport().map(strip).join('\n')
   assert.ok(view.includes('inactive'), `the row must repaint to inactive in place:\n${view}`)
   assert.ok(!view.includes('running'), `the old status word must be gone:\n${view}`)
-  assert.ok(view.includes('○'), `an idle row must paint the settled glyph:\n${view}`)
+  assert.ok(view.includes('‣ Inactive'), `an idle row must paint the shared marker and word:\n${view}`)
+  assert.ok(!view.includes('‣ Running'), `the old status marker/word must be gone:\n${view}`)
   assert.ok(view.includes('tasks · subagents'), `the browser must stay open:\n${view}`)
   app.stop()
 })

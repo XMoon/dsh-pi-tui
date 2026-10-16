@@ -98,6 +98,15 @@ API exposes. The retired empty-editor route into the modal Quick is gone;
 `app.tasks.open` now opens the on-demand accessory, and `/tasks` remains the
 Full Task Center's own entry, independent of this action.
 
+Owner-approved Footer admission geometry (2026-10-15): before a hidden Quick
+can be admitted, the host composes a read-only candidate of the complete Footer
+with the hint enabled and measures its physical height for the existing Quick
+row grant. This candidate is not committed or iterated to a fixed point. If it
+leaves no Quick row, the hint and Down route both fail closed even when the
+hint-free painted Footer would fit. Once Quick is active, its layout uses the
+actual painted Footer; hiding the hint does not re-run hidden-entry admission
+or close Quick.
+
 The gate must test the ACTIVE input OWNERS, not only physical overlay
 focus: a Question / Save Location frame owns the editor SEAT (it is not a
 managed broker overlay, so `OverlayBroker.hasFocusedOverlay()` stays false

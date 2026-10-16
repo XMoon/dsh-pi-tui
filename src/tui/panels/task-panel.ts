@@ -13,7 +13,7 @@ import { Input, matchesKey, truncateToWidth, visibleWidth } from '@xmoon76/pi-tu
 import { dispatchMouseEvent } from '@xmoon76/pi-tui'
 import type { Component, Focusable, TuiMouseEvent, TuiMouseEventResult } from '@xmoon76/pi-tui'
 import { componentKeymap } from '../keybindings/component-keymap.ts'
-import { color, taskStatusColor } from '../theme/runtime.ts'
+import { color, taskStatusColor, taskStatusWord } from '../theme/runtime.ts'
 import { SelectedMarquee } from '../components/marquee.ts'
 import { sanitizedPhysicalLine } from '../presentation/lines.ts'
 import {
@@ -88,22 +88,12 @@ export function formatElapsed(elapsed: number | undefined): string {
 }
 
 const POINTER = '→'
-const DOT = '●'
+const STATUS_MARKER = '‣'
 function displayGroup(group: string | undefined, longLabels: boolean): string | undefined {
   if (!longLabels || group === undefined) return group
   if (group === 'subagents') return 'Subagents / transcripts'
   if (group === 'jobs') return 'Jobs / executions'
   return group
-}
-
-function stateGlyph(item: TaskPanelItem): string {
-  // Human-required Question attention has its own glyph: it is not work, so
-  // neither the active dot nor the completed marker applies.
-  if (item.source === 'question') return '?'
-  if (item.status === 'stopping') return '◐'
-  if (isTaskItemFailure(item.status)) return '×'
-  if (item.status === 'completed') return '○'
-  return isTaskItemActive(item) ? DOT : '○'
 }
 
 /**
@@ -1129,13 +1119,12 @@ export class TaskBrowserPanel implements Component, Focusable {
   }
 
   private renderRow(item: TaskPanelItem, selected: boolean, width: number): string[] {
-    const dot = taskStatusColor(item.status)(stateGlyph(item))
     const attention = item.attention === true ? color.error('!') : ''
     const pointer = selected ? color.primary(POINTER) : ' '
-    const leftPrefix = `${pointer} ${attention}${dot} `
+    const leftPrefix = `${pointer} ${attention}${attention === '' ? '' : ' '}`
     const tree = item.treePrefix ?? ''
     const treeWidth = visibleWidth(tree)
-    const statusText = taskStatusColor(item.status)(item.status)
+    const statusText = taskStatusColor(item.status)(`${STATUS_MARKER} ${sanitizedPhysicalLine(taskStatusWord(item.status))}`)
     const elapsedSeconds = item.startedAt === undefined ? undefined : Math.max(0, Math.floor(((item.finishedAt ?? this.now) - item.startedAt) / 1000))
     const elapsedText = elapsedSeconds === undefined ? '' : color.textMuted(formatElapsed(elapsedSeconds))
     const tail = [statusText, elapsedText].filter(part => part !== '').join(' ')
@@ -1202,7 +1191,7 @@ export class TaskBrowserPanel implements Component, Focusable {
   /**
    * D8 settled (B4-B): `Esc close` is the LAST verb of the primary bar and
    * is always painted — the low-frequency management verbs (`/ search`,
-   * `a scope`, `shift+tab type`) form a TAIL that is dropped WHOLE when the
+   * `a scope`, reverse type cycling) form a TAIL that is dropped WHOLE when the
    * frame cannot hold it (§8.6 whole-segment drops; Esc never truncates).
    */
   private hintFor(width: number): string {
@@ -1215,13 +1204,13 @@ export class TaskBrowserPanel implements Component, Focusable {
       // terminal truncates the tail — esc back is the most important
       // verb, so it must never be the piece that gets cut off. Shift+Tab
       // is advertised because it now cycles types in reverse here too.
-      return 'type to filter · Esc back · ←→ edit · ↑↓ select · shift+tab type · Enter open'
+      return `type to filter · Esc back · ←→ edit · ↑↓ select · ${componentKeymap.keyHint('tasks.type.previous')} type · Enter open`
     }
     // D8: `Esc` is the LAST verb on the bar; `s` (§4.1 lowercase) stops.
     const primary = ['↑↓ select', '←→ tree', 's stop', 'Enter open', 'Esc close']
     const management: string[] = []
     if (this.searchEnabled) management.push('/ search')
-    management.push('a scope', 'shift+tab type')
+    management.push('a scope', `${componentKeymap.keyHint('tasks.type.previous')} type`)
     const primaryBar = primary.join(' · ')
     const tail = management.join(' · ')
     if (tail === '' || width === 0 || visibleWidth(primaryBar) + 3 + visibleWidth(tail) <= width) {

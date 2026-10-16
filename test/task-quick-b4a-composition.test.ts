@@ -264,7 +264,6 @@ test('B4A-01 the Job roster paints below the editor with NO Task Browser open', 
   const editor = h.editor()
   assert.ok(band.identity >= 0, `the accessory must paint:\n${view(h.vt)}`)
   assert.equal(band.items.length, 3, `three task rows at 120x40:\n${view(h.vt)}`)
-  // Exactly below the editor seat, and above the footer.
   // B4-B addendum: the band lives UNDER the whole footer — the painted
   // order is editor < widgetsBelow < footer < separator < identity row. The
   // separator rule is the FIRST row after the footer's stats line.
@@ -478,8 +477,8 @@ test('B4A-05 the 3/1/0 ladder on the frozen matrix, editor/footer/transcript pre
     // otherwise as the compact tail of the single content row.
     const positionRow = identity >= 0 ? lines[identity]! : items[0]!
     assert.match(positionRow, /\d+-\d+\/5$/, `${label}: a real position indicator:\n${view(h.vt)}`)
-    // The band is BELOW the seat and above the footer: nothing pinned is
-    // orphaned, and the whole accessory fits the visible viewport.
+    // The band sits below the seat, public below widgets and complete Footer;
+    // its optional divider/header precede the task rows within the Quick band.
     const firstItemRow = rowOf(h.vt, items[0]!)
     assert.ok(firstItemRow > editor.bottom, `${label}: the band sits below the seat:\n${view(h.vt)}`)
     assert.ok(firstItemRow + items.length - 1 < h.vt.rows, `${label}: the band stays inside the viewport`)
@@ -1080,15 +1079,19 @@ test('B4A-05e the resident window coexists with a live PUBLIC below widget', asy
   const widgetRow = rowOf(h.vt, 'BELOW-WIDGET')
   const firstItemRow = rowOf(h.vt, itemRows(h.vt)[0]!)
   assert.ok(widgetRow >= 0, `the public below widget must still paint:\n${view(h.vt)}`)
-  // B4-B addendum: editor seat -> public below widget -> footer -> separator
-  // -> accessory band (the accessory is the LAST visible region). The
-  // separator rule is the FIRST frame row below the footer's stats line.
-  const separatorRow = lines.findLastIndex(line => /^\s*─+$/.test(line))
+  assert.ok(editor.bottom < widgetRow, `the Editor seat precedes the public below widget:\n${view(h.vt)}`)
+  // B4-B addendum: assert the actual physical rows, not only the component
+  // registration order: Editor < public widget < every Footer row < divider
+  // < Quick identity/items.
+  const separatorRow = h.band().identity - 1
   assert.ok(separatorRow > widgetRow, `the separator sits below the public widget:\n${view(h.vt)}`)
+  assert.match(lines[separatorRow]!, /^─+$/, 'the separator is the physical row immediately above Quick identity')
   assert.ok(firstItemRow > separatorRow, `the accessory is the LAST band, under the footer:\n${view(h.vt)}`)
-  for (const footerRow of h.app.footerRenderRowsForTest().map(strip).map(line => line.trimEnd())) {
-    if (footerRow === '') continue
-    assert.ok(lines.some(line => line.includes(footerRow)), `the footer is not pushed out: ${JSON.stringify(footerRow)}`)
+  const footerRows = h.app.footerRenderRowsForTest().map(strip).map(line => line.trimEnd()).filter(Boolean)
+  assert.ok(footerRows.length > 0, 'the live Footer has painted rows')
+  for (const footerRow of footerRows) {
+    const paintedRow = lines.findIndex((line, index) => index > widgetRow && index < separatorRow && line.includes(footerRow))
+    assert.ok(paintedRow >= 0, `Footer row must be below the widget and above the Quick divider: ${JSON.stringify(footerRow)}\n${view(h.vt)}`)
   }
 })
 
@@ -1105,22 +1108,28 @@ test('B4A-05f the FULLSCREEN root paints the public below widget beside the wind
   assert.equal(h.app.enterTaskQuick(), true, 'the production entry must admit a real projection')
   await h.vt.waitForRender()
   const lines = rawView(h.vt)
+  const editor = h.editor()
   const firstItemRow = rowOf(h.vt, itemRows(h.vt)[0]!)
   const widgetRow = rowOf(h.vt, 'BELOW-WIDGET')
   const scroll = h.app.fullscreenScrollForTest()
   assert.ok(scroll, 'the fullscreen transcript pane must exist')
   assert.ok(firstItemRow >= 0, `the window paints in fullscreen:\n${view(h.vt)}`)
   assert.ok(widgetRow >= 0, `the public below widget still paints in fullscreen:\n${view(h.vt)}`)
-  // B4-B addendum: editor seat -> public below widget -> footer -> separator
-  // -> accessory band (the accessory is the LAST visible region).
-  const separatorRow = lines.findLastIndex(line => /^─+$/.test(line.trim()))
+  assert.ok(editor.bottom < widgetRow, `the Editor seat precedes the public below widget:\n${view(h.vt)}`)
+  // B4-B addendum: assert the actual physical rows, not only the component
+  // registration order: Editor < public widget < every Footer row < divider
+  // < Quick identity/items.
+  const separatorRow = h.band().identity - 1
   assert.ok(separatorRow > widgetRow, `the separator sits below the public widget:\n${view(h.vt)}`)
+  assert.match(lines[separatorRow]!, /^─+$/, 'the separator is the physical row immediately above Quick identity')
   assert.ok(firstItemRow > separatorRow, `the accessory is the LAST band, under the footer:\n${view(h.vt)}`)
   // Neither band starves the pinned transcript: both reservations hold at once.
   assert.ok(scroll.viewportHeight >= 1, `the transcript floor survives both bands:\n${view(h.vt)}`)
-  for (const footerRow of h.app.footerRenderRowsForTest().map(strip).map(line => line.trimEnd())) {
-    if (footerRow === '') continue
-    assert.ok(lines.some(line => line.includes(footerRow)), `the footer stays painted: ${JSON.stringify(footerRow)}`)
+  const footerRows = h.app.footerRenderRowsForTest().map(strip).map(line => line.trimEnd()).filter(Boolean)
+  assert.ok(footerRows.length > 0, 'the live Footer has painted rows')
+  for (const footerRow of footerRows) {
+    const paintedRow = lines.findIndex((line, index) => index > widgetRow && index < separatorRow && line.includes(footerRow))
+    assert.ok(paintedRow >= 0, `Footer row must be below the widget and above the Quick divider: ${JSON.stringify(footerRow)}\n${view(h.vt)}`)
   }
 })
 
@@ -1197,7 +1206,60 @@ test('B4A-07b the fullscreen Todo/dock hit follows the band-pushed layout', asyn
   assert.ok(h.app.isTodoPanelExpanded(), `a panel-row click must expand the panel:\n${view(h.vt)}`)
 })
 
-test('B4A-07c the Question frame option hit follows the band-pushed layout', async () => {
+test('B4B Todo/Dock hit follows the actual Quick heights 0, 1 and 5', async () => {
+  const cases = [
+    { name: 'hidden', rows: 24, enterQuick: false, expectedHeight: 0 },
+    { name: 'one-row grant', rows: 9, enterQuick: true, expectedHeight: 1 },
+    { name: 'full grant', rows: 24, enterQuick: true, expectedHeight: 5 },
+  ] as const
+
+  for (const scenario of cases) {
+    const h = startQuick({ cols: 80, rows: scenario.rows, taskRead: false, roster: [
+      job('j1', 'build', 'running'), job('j2', 'test', 'running'),
+      job('j3', 'lint', 'running'), job('j4', 'deploy', 'running'),
+    ] })
+    try {
+      await flush()
+      h.app.setTodoSummary(Array.from({ length: 9 }, (_, index) => ({
+        id: `todo-${scenario.name}-${index}`,
+        content: index === 0 ? 'first todo' : `todo item ${index}`,
+        status: index === 0 ? 'in_progress' as const : 'pending' as const,
+      })))
+      h.app.setFullscreen(true)
+      await h.vt.waitForRender()
+      if (scenario.enterQuick) {
+        assert.equal(h.app.enterTaskQuick(), true, `${scenario.name} Quick entry is admitted`)
+        await h.vt.waitForRender()
+      }
+
+      const lines = rawView(h.vt)
+      const identity = lines.findIndex(line => line.startsWith('Task Quick'))
+      const taskRows = itemRows(h.vt)
+      const dividerRows = identity > 0 && /^─+$/.test(lines[identity - 1]!.trim()) ? 1 : 0
+      const paintedHeight = taskRows.length + (identity >= 0 ? 1 : 0) + dividerRows
+      assert.equal(paintedHeight, scenario.expectedHeight,
+        `${scenario.name} must have this ACTUAL painted Quick height:\n${view(h.vt)}`)
+      assert.equal(h.app.taskQuickFocusedForTest(), scenario.expectedHeight > 0,
+        `${scenario.name} focus agrees with the painted band`)
+
+      const dockRow = rowOf(h.vt, '☑')
+      assert.ok(dockRow >= 0, `the Todo/Dock summary remains visible at ${scenario.name}:\n${view(h.vt)}`)
+      const editor = h.editor()
+      assert.equal(dockRow + 1, editor.top, `the painted Dock remains adjacent to the editor seat at ${scenario.name}`)
+      assert.ok(dockRow > 0, `a neighboring row exists for the negative control at ${scenario.name}`)
+      click(h.vt, 20, dockRow)
+      await h.vt.waitForRender()
+      assert.ok(!h.app.isTodoPanelVisible(), `the adjacent non-Dock row is inert at ${scenario.name}`)
+      click(h.vt, 20, dockRow + 1)
+      await h.vt.waitForRender()
+      assert.ok(h.app.isTodoPanelVisible(), `the actual Dock row opens Todo at ${scenario.name}:\n${view(h.vt)}`)
+    } finally {
+      h.app.dispose()
+    }
+  }
+})
+
+test('B4B the Question option hit uses geometry after the blocking owner retires Quick', async () => {
   const h = startQuick({ cols: 80, rows: 24, taskRead: false, roster: [
     job('j1', 'build', 'running'), job('j2', 'test', 'running'), job('j3', 'lint', 'running'),
     job('j4', 'deploy', 'running'),
@@ -1237,6 +1299,80 @@ test('B4A-07c the Question frame option hit follows the band-pushed layout', asy
   h.vt.sendInput('\r')
   const answers = await question
   assert.equal(answers[0]?.selected[0], 'OPTION-B', 'the click selects the option the user pointed at')
+})
+
+test('B4B Question option hits rebase after real Quick heights 0, 1 and 5 retire', async () => {
+  const cases = [
+    { name: 'zero-to-zero', rows: 24, enterQuick: false, expectedHeight: 0 },
+    { name: 'one-to-zero', rows: 8, enterQuick: true, expectedHeight: 1 },
+    { name: 'five-to-zero', rows: 24, enterQuick: true, expectedHeight: 5 },
+  ] as const
+
+  for (const scenario of cases) {
+    const h = startQuick({ cols: 80, rows: scenario.rows, taskRead: false, roster: [
+      job('j1', 'build', 'running'), job('j2', 'test', 'running'),
+      job('j3', 'lint', 'running'), job('j4', 'deploy', 'running'),
+    ] })
+    let question: Promise<readonly { selected: readonly string[] }[]> | undefined
+    try {
+      await flush()
+      h.app.setFullscreen(true)
+      await h.vt.waitForRender()
+      if (scenario.enterQuick) {
+        assert.equal(h.app.enterTaskQuick(), true, `${scenario.name} admits Quick`)
+        await h.vt.waitForRender()
+      }
+
+      const quickLines = rawView(h.vt)
+      const quickIdentity = quickLines.findIndex(line => line.startsWith('Task Quick'))
+      const quickTasks = itemRows(h.vt)
+      const quickDivider = quickIdentity > 0 && /^─+$/.test(quickLines[quickIdentity - 1]!.trim()) ? 1 : 0
+      const actualQuickHeight = quickTasks.length + (quickIdentity >= 0 ? 1 : 0) + quickDivider
+      assert.equal(actualQuickHeight, scenario.expectedHeight,
+        `${scenario.name} must start from the stated physical Quick height:\n${view(h.vt)}`)
+
+      question = h.app.askQuestions([{
+        id: `q-${scenario.name}`,
+        question: `PICK-ONE-${scenario.name}?`,
+        options: [{ label: 'OPTION-A' }, { label: 'OPTION-B' }],
+      }])
+      question.catch(() => {})
+      await flush(2)
+      await h.vt.waitForRender()
+      assert.equal(h.app.taskQuickFocusedForTest(), false, 'the blocking Question owner retires Quick before painting')
+      assert.equal(itemRows(h.vt).length, 0, `the new Question frame paints with zero Quick task rows:\n${view(h.vt)}`)
+      if (scenario.expectedHeight === 1) {
+        // The 8-row transition frame is intentionally short; once the new
+        // Question owner has retired Quick, grow the real terminal so its
+        // complete frame and an outside-frame hit target are painted.
+        h.vt.resize(80, 24)
+        await h.vt.waitForRender()
+      }
+
+      const lines = rawView(h.vt)
+      const optionRow = rowOf(h.vt, 'OPTION-B')
+      const questionBottom = lines.findLastIndex(line => line.includes('╰') && line.includes('╯'))
+      const questionTop = lines.slice(0, questionBottom).findLastIndex(line => line.includes('╭') && line.includes('╮'))
+      assert.ok(optionRow > questionTop && questionBottom > optionRow,
+        `Question option and frame bounds must paint after the transition:\n${view(h.vt)}`)
+      assert.ok(questionTop > 0, `there must be a real row outside the new Question frame:\n${view(h.vt)}`)
+
+      click(h.vt, 1, questionTop)
+      await h.vt.waitForRender()
+      assert.ok(view(h.vt).includes('OPTION-B'), `outside-frame click must not choose/advance the Question:\n${view(h.vt)}`)
+      click(h.vt, 10, optionRow + 1)
+      await flush(2)
+      await h.vt.waitForRender()
+      const reviewed = rawView(h.vt)
+      assert.ok(reviewed.some(line => line.includes('Submit')) && reviewed.some(line => line.includes('OPTION-B')),
+        `the painted option hit must advance to the review step after Quick reflow:\n${view(h.vt)}`)
+      h.vt.sendInput('\r')
+      const answers = await question
+      assert.equal(answers[0]?.selected[0], 'OPTION-B', `${scenario.name} selects the pointed-to option`)
+    } finally {
+      h.app.dispose()
+    }
+  }
 })
 
 // ── B4A-07 / B4A-10 ────────────────────────────────────────────────────────

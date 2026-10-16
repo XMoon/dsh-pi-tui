@@ -174,11 +174,6 @@ import { FooterCustomItemCatalog } from './tui/footer/custom-item-catalog.ts'
 import type { FooterItemRegistry } from './tui/footer/item-registry.ts'
 import { createFooterRuntime, type FooterRuntime } from './tui/footer/runtime.ts'
 import { FOOTER_MAX_PHYSICAL_LINES, FOOTER_MAX_PHYSICAL_LINES_PER_ROW, type FooterLayoutV1, type FooterPhysicalLineBudget } from './tui/footer/presentation-types.ts'
-/** The hard pass bound of the footer height convergence (B4-B review R6-F3):
- *  a footer's line budget is 4, so the height settles in 1-2 passes; 4 is
- *  the fail-safe bound against a pathological oscillator (each compose
- *  paints the truth of its own text; the loop stops on the bound). */
-const FOOTER_CONVERGE_LIMIT = FOOTER_MAX_PHYSICAL_LINES
 import type { FooterCommandConfig } from './domain/footer/command-config.ts'
 import type { FooterCustomCommandItemSettings } from './domain/footer/custom-items.ts'
 import { isViewerAccessInteractive, resolveViewerAccess, type ViewerAccess } from './domain/task/browser.ts'
@@ -315,7 +310,7 @@ import type { RendererRegistry } from './extension/internal/renderer-registry.ts
 import { OverlayBroker } from './tui/interaction/overlay-broker.ts'
 import { EditorSeatMount } from './tui/interaction/editor-seat.ts'
 import { EditorSeatHolder } from './tui/interaction/editor-seat-holder.ts'
-import { TuiEditor } from './tui/interaction/tui-editor.ts'
+import { TuiEditor, type TuiEditorRenderLayout } from './tui/interaction/tui-editor.ts'
 import { serializeEditorInput, serializedDraftHasPayload, shellPrefixForMode, type EditorInputMode } from './tui/interaction/editor-input-mode.ts'
 import type { EditorRegistry } from './extension/internal/editor-registry.ts'
 import { compileView } from './extension/internal/component-compiler.ts'
@@ -3701,12 +3696,9 @@ export class TuiApp {
     // externally supplied store must not retain the dead surface).
     this.statusStoreUnsubscribe = this.statusStore.subscribe(() => {
       this.renderViewerSubjectBar()
-      // B4-B (review R4-F2/R5-F2): a status commit can change the footer's
-      // own wrapped height — part of the ↓ admission's chrome measure.
-      // renderFooter itself now converges: when the NEW text changed the
-      // footer's painted height it re-queries the grant against the fresh
-      // geometry (see the lastFooterRows latch in renderFooter), so no
-      // speculative tick bump is needed here.
+      // B4-B: the hidden-entry grant preflights the complete Footer with
+      // `↓ view` enabled, so the grant does not depend on the Footer's
+      // currently committed height. No post-compose convergence is needed.
       this.renderFooter()
     })
     this.footerItemRegistry = createBuiltinFooterRegistry()
@@ -3883,44 +3875,49 @@ export class TuiApp {
     this.editor = new TuiEditor(this.tui, editorTheme, {
       requestRender: (force) => this.requestRender(force),
     })
-    // B4-B (reviews R4-F2…R8-F1): the ↓ hint must equal the LIVE admission
-    // (`taskBrowserAvailable` — the same predicate the Down route reads).
-    // The X063 hook is the transition signal for every editor-owned fact
-    // (visual line, autocomplete, history, paste, programmatic
-    // replacement): each event recomposes the footer UNCONDITIONALLY — no
-    // advertised-flag guard (the initial hint is painted before any Quick
-    // entry and must track its events too), no equality gate (an
-    // open/close pair can flip the admission with an unchanged visual
-    // line). Cost: a compose whose admission output didn't change is a
-    // same-text compose the composer no-churns, and its grant query reads
-    // the frame-scoped cache (the compose itself does not bump the tick —
-    // only real chrome re-bakes do), so ordinary navigation costs one
-    // cheap compose + one cached compare, never a chrome re-measure.
-    let hookComposeScheduled = false
+    this.editor.onVisualLayoutRendered = (layout) => {
+      const previous = this.quickHintLastEditorLayout
+      const downHintOwnerEligible = this.keybindings.keysFor('app.tasks.open').includes('down')
+        && this.quickDownOwnerEligible()
+      const previousCandidateEligible = previous?.downHintOwnerEligible === true
+        && previous.onLastVisualLine
+      const candidateEligible = downHintOwnerEligible && layout.onLastVisualLine
+      const candidateChanged = previousCandidateEligible !== candidateEligible
+      const renderedGeometryChanged = previous !== undefined
+        && (previous.physicalWidth !== layout.physicalWidth
+          || previous.layoutWidth !== layout.layoutWidth
+          || previous.editorRows !== layout.editorRows)
+      const boundaryMismatch = downHintOwnerEligible
+        && this.taskQuickPaintedBoundary !== layout.onLastVisualLine
+      this.quickHintCurrentEditorLayout = layout
+      this.quickHintLastEditorLayout = { ...layout, downHintOwnerEligible }
+      this.taskQuickPaintedBoundary = layout.onLastVisualLine
+      if (this.footerCompositionInProgress) return
+      if (candidateChanged || renderedGeometryChanged || boundaryMismatch) {
+        this.scheduleQuickHintCompose({
+          physicalWidth: layout.physicalWidth,
+          onLastVisualLine: layout.onLastVisualLine,
+        })
+      }
+    }
+    // X063 events publish post-transition boundary facts. A navigation event
+    // only needs a Footer compose when the raw boundary flips; transient mode
+    // reasons always compose because they can change Down ownership without
+    // moving the cursor. Text edits invalidate the rendered snapshot; the next
+    // Editor render republishes the exact layout boundary.
     this.editor.onVisualLineBoundaryChanged = (reason, onLastVisualLine) => {
-      // The payload: the transition CLASS plus the post-transition raw
-      // boundary state (computed from the move's own wrap-map facts — no
-      // extra build). Mode flips (autocomplete/history/paste/programmatic)
-      // always recompose — any of them can flip the admission with an
-      // unchanged cursor. A navigation event recomposes ONLY when the raw
-      // boundary differs from the boundary the painted hint was composed
-      // from: a pure cursor move cannot change the other admission facts,
-      // so an unchanged boundary is a genuine no-op and the compose (plus
-      // its grant query) is skipped — the §9.3 ordinary-navigation budget.
       if (reason === 'navigation' && onLastVisualLine === this.taskQuickPaintedBoundary) return
       this.taskQuickPaintedBoundary = onLastVisualLine
-      // R8-F3: one editor action can fire MULTIPLE events (setTextInternal's
-      // programmatic + a recall's navigation; a paste's trailing-chunk
-      // navigation + its own paste) — coalesce the composes to one per host
-      // turn: the LAST event's facts win, the coalesced compose reads them
-      // all fresh. Mode flips always schedule; navigation flips schedule
-      // through the same coalescer.
-      if (hookComposeScheduled) return
-      hookComposeScheduled = true
-      queueMicrotask(() => {
-        hookComposeScheduled = false
-        if (this.disposed) return
-        this.renderFooter()
+      this.quickHintCurrentEditorLayout = undefined
+      if (this.quickHintLastEditorLayout !== undefined) {
+        this.quickHintLastEditorLayout = {
+          ...this.quickHintLastEditorLayout,
+          onLastVisualLine,
+        }
+      }
+      this.scheduleQuickHintCompose({
+        physicalWidth: this.terminal.columns,
+        onLastVisualLine,
       })
     }
     this.editorBorder = this.editor.borderColor
@@ -3993,10 +3990,11 @@ export class TuiApp {
       // pending exit confirmation. Ctrl+C clear-draft arms again after its
       // own setText mutation completes.
       this.clearExitConfirmation()
-      // The footer's task badge advertises the ↓ browser ONLY while the
-      // editor is empty; the editor mutates without going through
-      // setStatus, so keep the badge truthful while tasks are active.
-      if (this.tasksActive) this.renderFooter()
+      // A text edit invalidates the prior rendered-layout snapshot and any
+      // pending X063 fact. The Editor's next render publishes its already
+      // computed boundary; only a hint-relevant layout change composes Footer.
+      this.quickHintCurrentEditorLayout = undefined
+      this.quickHintComposeBoundary = undefined
       // PR-D (review F1): a live draft height change (the editor grows or
       // shrinks with its content) never reaches TuiApp.requestRender — the
       // fork repaints the screen itself — so the fullscreen widget grant is
@@ -5646,6 +5644,18 @@ export class TuiApp {
       this.editorSeatHolder.handleHostFallbackInput(data)
       return { consume: true }
     }
+    // Phase 3B/B4-B: the focused Quick component is the input owner. The
+    // app-level listener runs before it, so ordinary keys must pass through
+    // without resolving Host actions (submit/steer/exit) or plugin bindings
+    // against the hidden Editor draft. Quick consumes its own actions and
+    // treats every unlisted key as a no-op.
+    if (this.taskQuick.focused) {
+      if (physicalEscape) {
+        return this.handleEscapeKey(data, this.keybindings.physicalEscapeEnabled())
+      }
+      this.clearExitConfirmation()
+      return undefined
+    }
     // M6: the leader sequence machine (armed only when a leader key is
     // configured). Fed AFTER the capturing flows and overlays, BEFORE the
     // host action ladder — a completing key is consumed by the sequence,
@@ -6476,6 +6486,9 @@ export class TuiApp {
     if (this.disposed) {
       return { hide: () => {}, setHidden: () => {}, isHidden: () => true, focus: () => {}, unfocus: () => {}, isFocused: () => false, getBounds: () => undefined }
     }
+    // A capturing overlay is a new keyboard owner; retire Quick before its
+    // focus transition. NonCapturing notices do not displace the active seat.
+    if (options.nonCapturing !== true) this.leaveTaskQuick()
     // Mounting an overlay is a focus transition; an armed keyboard exit
     // confirmation must not survive while the overlay is active.
     this.clearExitConfirmation()
@@ -7638,7 +7651,7 @@ export class TuiApp {
    *  the seat from inside its own render would be cyclic; the widget zones
    *  re-budget themselves from the live chrome, so they are counted at their
    *  CURRENT grant). */
-  private historyChromeRows(width: number): number {
+  private historyChromeRows(width: number, footerRows?: number): number {
     const safeWidth = Math.max(1, Math.floor(width))
     let used = 0
     for (const chrome of [
@@ -7646,22 +7659,21 @@ export class TuiApp {
       this.goalLine, this.queuePane, this.working, this.widgetsAbove,
       this.widgetsBelow, this.footer,
     ]) {
-      used += chrome.render(safeWidth).length
+      used += chrome === this.footer && footerRows !== undefined
+        ? footerRows
+        : chrome.render(safeWidth).length
     }
     return used
   }
 
-  /** The live pinned chrome rows the Task Quick accessory's grant reserves:
-   *  the History set PLUS the editor seat — the accessory is the band UNDER
-   *  THE WHOLE FOOTER (B4-B, Owner revision 2026-10-15), so every chrome row
-   *  above it (widgetsBelow and the footer included) is a real reservation,
-   *  and the seat keeps its own (measuring any of them here is not cyclic:
-   *  none of them measures the accessory). Both roots carry exactly this
-   *  chrome set in this order, so one helper serves the regular document and
-   *  the fullscreen stack. */
-  private taskQuickChromeRows(width: number): number {
+  /** The pinned chrome rows the Task Quick accessory's grant reserves:
+   *  the History set PLUS the editor seat. The accessory is below the whole
+   *  Footer, so its painted layout uses the actual Footer height; the hidden
+   *  entry preflight supplies the height of the Footer candidate containing
+   *  `↓ view`, keeping admission independent of the committed Footer state. */
+  private taskQuickChromeRows(width: number, footerRows?: number): number {
     const safeWidth = Math.max(1, Math.floor(width))
-    return this.historyChromeRows(safeWidth) + this.editorSeat.render(safeWidth).length
+    return this.historyChromeRows(safeWidth, footerRows) + this.editorSeat.render(safeWidth).length
   }
 
   /**
@@ -14577,19 +14589,10 @@ export class TuiApp {
   private lastFooterGeometry: { surface: 'main' | 'alt'; width: number; height: number; total: number } = {
     surface: 'main', width: -1, height: -1, total: -1,
   }
-  /** The painted row count of the LAST footer composition (B4-B review
-   *  R5-F2): the ↓ admission's chrome measure includes this footer's
-   *  height, so a composition that CHANGED it converges to the fixed
-   *  point (bounded by FOOTER_CONVERGE_LIMIT) before painting. */
-  private lastFooterRows = -1
-  /** The last-visual-line state the PAINTED ↓ hint was composed from:
-   *  navigation events compare against it (mode-flip events recompose
-   *  unconditionally). Refreshed on every footer compose. */
+  /** Latest raw visual-line fact observed or composed for the ↓ hint.
+   *  Navigation notifications compare against this baseline; each committed
+   *  Footer compose refreshes it, including onChange-only text rewraps. */
   private taskQuickPaintedBoundary: boolean | undefined
-  /** Re-entrancy latch for the footer height convergence loop (R5-F2):
-   *  a compose triggered INSIDE the convergence (an extension item calling
-   *  back) must not nest another loop. */
-  private convergingFooter = false
   /** The last terminal width the transcript components were built at (the
    * right-gutter resize latch): a width change rebuilds the width-baked
    * folds, so a stale truncation never wraps at the new paint width. */
@@ -14691,6 +14694,9 @@ export class TuiApp {
     const current = this.editorSeatHolder.currentEditor()
     const targetId = winner?.id
     if (current.id === (targetId ?? 'host')) return
+    // A replacement Editor seat is a new keyboard owner. Retire Quick before
+    // the atomic handoff so focus restoration never targets the old seat.
+    this.leaveTaskQuick()
     // Perform the atomic handoff (create → transfer → mount → dispose).
     // The registry revision rides along so a failed target's guard clears
     // on a same-id re-registration (round-1 finding 4).
@@ -15045,6 +15051,10 @@ export class TuiApp {
       phase: 'active',
       finalized: false,
     }
+    // History is an editor-seat tenant, not a Task Quick child. Retire Quick
+    // only after the candidate has passed its currentness gate, and before the
+    // tenant becomes the live seat occupant.
+    this.leaveTaskQuick()
     this.optionalSeat = record
     this.mountSeatChild()
     this.publishFocusSeat()
@@ -15179,9 +15189,10 @@ export class TuiApp {
    * `TASKS_OPEN_AFFORDANCE` composition rule, plus the modal owners that
    * consume keys BEFORE keybinding resolution): active jobs/subagents or
    * failure attention, NO input-capturing owner, and the on-demand Task
-   * Quick admission (`quickDownEligible()` — Phase 3B/B4-B replaced the
-   * empty-draft gate: a NON-EMPTY draft qualifies once its visible host
-   * editor sits on the last VISUAL line). The visible seat decides (a
+   * Quick admission (`quickDownEligible()` — hidden-to-active entry uses
+   * the visual-line classifier plus a Footer candidate rendered with `↓ view`
+   * enabled, before measuring Quick space; the committed Footer height is
+   * never an input to that admission). The visible seat decides (a
    * shell-mode body is composing a command; a plugin replacement editor
    * contributes its own text/mode and takes no boundary claim) — the hidden
    * host editor's draft is never the gate (a P2 regression once used it and
@@ -15213,17 +15224,17 @@ export class TuiApp {
    * canonical KeyId the composition rule declares. A keymap rebuild
    * recomposes the footer (`onInvalidate`), so this fact is never stale.
    */
-  private taskBrowserAvailable(): boolean {
+  private taskBrowserAvailable(knownOnLastVisualLine?: boolean): boolean {
     return this.keybindings.keysFor('app.tasks.open').includes('down')
       && this.tasksActive
-      && this.quickDownEligible()
+      && this.quickDownEligible(knownOnLastVisualLine)
   }
 
   /**
    * B4-B: enter the on-demand Task Quick (the ONLY caller is the keymap's
    * `app.tasks.open` action). Re-verifies the admission facts at dispatch
    * time (the context predicate already gated the RESOLUTION, but the
-   * frame grant is checked here against the LIVE geometry), selects the
+   * hint-enabled candidate geometry is checked here too), selects the
    * global first row, moves the physical focus to the accessory, and asks
    * for one render. Any failure is a DECLINE: the editor keeps the key and
    * the raw Down is NOT replayed (no double processing).
@@ -15255,9 +15266,8 @@ export class TuiApp {
    */
   enterTaskQuick(): boolean {
     if (!this.quickDownEligible()) return false
-    // The predicate already admitted the CURRENT frame's grant (the same
-    // measured geometry, frame-cached) — the keymap resolution and this
-    // dispatch share it, so no second chrome/seat render happens here.
+    // The predicate already admitted the hint-enabled Footer candidate's
+    // geometry, frame-cached across keymap resolution and dispatch.
     if (!this.taskQuick.activate()) return false
     this.activeScreen.setFocus(this.taskQuick)
     // B4-B (review R3-F2): while the accessory is ACTIVE the ↓ hint must
@@ -15312,37 +15322,34 @@ export class TuiApp {
     this.activeScreen.setFocus(seat.component !== undefined ? seat.component : (this.seatFallbackComponent() ?? this.editor))
   }
 
-  /**
-   * The on-demand Quick's task grant: whether the accessory currently holds
-   * >=1 projected row AND the ACTIVE frame can paint at least one task row
-   * (the same live plan `enterTaskQuick` admits with). The footer hint and
-   * the focus guards read this — never the accessory's `focused` flag.
-   */
+  /** The hidden-to-active entry grant. Preflight the complete Footer candidate
+   *  with `↓ view` enabled, measure its physical rows without mutating the
+   *  painted Footer, then apply the real Quick row planner. This deliberately
+   *  rejects an entry when only the hint-free Footer would leave room. ACTIVE
+   *  visibility is separate: TaskQuickAccessory.render uses actual chrome. */
   private taskQuickGrantAvailable(): boolean {
-    if (this.taskQuick.getItems().length < 1) return false
+    const itemCount = this.taskQuick.getItems().length
+    if (itemCount < 1) return false
     const width = Math.max(1, this.terminal.columns)
+    const candidateFooter = this.composeFooterText(width, true)
+    const footerRows = new Text(candidateFooter, 0, 0).render(width).length
     const layout = planTaskQuickLayout(
       width,
       this.terminal.rows,
-      this.taskQuickChromeRows(width),
-      this.taskQuick.getItems().length,
+      this.taskQuickChromeRows(width, footerRows),
+      itemCount,
       0,
     )
     return layout.itemRows >= 1
   }
 
   /**
-   * Frame-scoped cache for the admission geometry (plan §9/§9.3 fast-path
-   * budget): one Down press resolves the keymap TWICE and the footer hint
-   * composes from the same predicate — each uncached probe renders the whole
-   * pinned chrome set (header, dock, todo, widgets, the FOOTER, the editor
-   * seat). Within one between-requests window the measurement is identical,
-   * because the only writers that re-bake chrome end in `requestRender`,
-   * which bumps `renderTick`; the internal resize lane (which skips the
-   * funnel) is covered by the host-side geometry sync that re-renders the
-   * footer on any width/height change. The tick therefore identifies
-   * exactly the interval in which one chrome/seat measurement is
-   * authoritative; a frame that did not repaint measures nothing at all.
+   * Frame-scoped cache for the hidden-entry grant. Each uncached probe
+   * composes a read-only Footer candidate with `↓ view` enabled, counts its
+   * physical rows, then measures the remaining pinned chrome. The committed
+   * Footer's current height is never an input. Footer recomposition explicitly
+   * invalidates this cache; request/geometry changes advance `renderTick` so
+   * repeated keymap resolution in one stable frame shares the same result.
    */
   private renderTick = 0
   private taskQuickGrantCacheTick = -1
@@ -15354,6 +15361,33 @@ export class TuiApp {
       this.taskQuickGrantCacheValue = this.taskQuickGrantAvailable()
     }
     return this.taskQuickGrantCacheValue
+  }
+
+  /** Coalesce X063 and render-layout changes into one hint refresh per host
+   *  turn. Ordinary onChange only invalidates the rendered-layout snapshot;
+   *  it does not compose Footer or rebuild a visual map per key. Direct
+   *  renderFooter() callers (Quick enter/leave) stay synchronous. */
+  private quickHintComposeScheduled = false
+  private quickHintComposeBoundary: { physicalWidth: number; onLastVisualLine: boolean } | undefined
+  private quickHintCurrentEditorLayout: TuiEditorRenderLayout | undefined
+  private quickHintLastEditorLayout: (TuiEditorRenderLayout & { downHintOwnerEligible: boolean }) | undefined
+  private footerCompositionInProgress = false
+
+  private scheduleQuickHintCompose(boundary?: { physicalWidth: number; onLastVisualLine: boolean }): void {
+    if (this.disposed) return
+    // Keep the latest event facts only while the task surface is active;
+    // onChange or an editor event while inactive still invalidates an older
+    // pending boundary if one was queued earlier in this host turn.
+    this.quickHintComposeBoundary = this.tasksActive ? boundary : undefined
+    if (!this.tasksActive || this.quickHintComposeScheduled) return
+    this.quickHintComposeScheduled = true
+    queueMicrotask(() => {
+      this.quickHintComposeScheduled = false
+      const latestBoundary = this.quickHintComposeBoundary
+      this.quickHintComposeBoundary = undefined
+      if (this.disposed || !this.tasksActive || latestBoundary === undefined) return
+      this.renderFooter(latestBoundary)
+    })
   }
 
   /**
@@ -15384,13 +15418,13 @@ export class TuiApp {
    * The keymap resolution itself stays the single router: this predicate
    * only feeds `keybindingContext()` and the footer hint.
    */
-  private quickDownEligible(): boolean {
+  /** Live non-geometric owners and Task Quick state shared by footer hint
+   *  preflight and the visual-boundary admission. */
+  private quickDownOwnerEligible(): boolean {
     if (this.disposed) return false
     if (!this.tasksActive) return false
     if (this.taskQuick.getItems().length < 1) return false
-    // A plugin seat loser is rejected BEFORE any measured probe: measuring
-    // the chrome/seat grant for a seat this predicate then rejects would
-    // pay the geometry cost for a guaranteed decline (plan §9.3).
+    // A plugin seat loser is rejected before the visual-map or geometry probe.
     const seat = this.seatEditor()
     if (seat.id !== 'host') return false
     if (this.activeScreen.getFocusedComponent() !== this.editor) return false
@@ -15404,13 +15438,23 @@ export class TuiApp {
     if (this.jobWorkspace !== undefined) return false
     if (this.settingsWorkspace !== undefined) return false
     if (this.keybindings.leaderMachine()?.pending === true) return false
-    // The ACTIVE frame must be able to paint >= 1 task row: a 0-grant frame
-    // (extreme short screen) can never show the band, so the admission — and
-    // with it the footer hint — must fail closed here rather than consuming a
-    // Down the editor should keep. Frame-cached: the repeated resolutions
-    // within one physical frame share ONE chrome/seat measurement.
-    if (!this.taskQuickGrantCached()) return false
-    return this.editor.canEnterTaskQuickFromDown(this.terminal.columns)
+    return true
+  }
+
+  /** Admission facts that do not depend on Footer/Quick geometry. Kept
+   *  separate so the geometry probe can render the Footer candidate with its
+   *  hint enabled without calling back into this predicate. */
+  private quickDownBaseEligible(knownOnLastVisualLine?: boolean): boolean {
+    return this.quickDownOwnerEligible()
+      && this.editor.canEnterTaskQuickFromDown(this.terminal.columns, knownOnLastVisualLine)
+  }
+
+  /** Hidden-to-active admission: first check all live non-geometric facts,
+   *  then the cached grant measured against the Footer-with-hint candidate.
+   *  A current X063 payload can supply the boundary without rebuilding its
+   *  map; all other callers let the editor classify the live state. */
+  private quickDownEligible(knownOnLastVisualLine?: boolean): boolean {
+    return this.quickDownBaseEligible(knownOnLastVisualLine) && this.taskQuickGrantCached()
   }
 
   /**
@@ -19390,120 +19434,83 @@ export class TuiApp {
     return layoutForPreset(this.footerPreset, viewing)
   }
 
-  /** Rebuild the footer from the unified status snapshot (M1): the
-   * composer renders the active layout (default/compact) against the
-   * snapshot, and the Host instruction surface owns the keyboard exit hint.
-   * The TuiApp no longer derives permission/plan/viewer/usage — the items
-   * do, from the snapshot. An empty surface (every item unavailable, e.g.
-   * an unloaded extension item) renders zero rows: the fork's Text emits
-   * nothing and the layout reflows, overpainting the freed rows with the
-   * transcript — no stale footer content survives (guarded by the
-   * emptied-footer layout test). */
-  private renderFooter(): void {
-    const width = Math.max(1, this.terminal.columns)
-    // M6 keybindings: a pending leader sequence shows the which-key hint as
-    // a Host-owned instruction beside the keyboard exit hint (exit outranks
-    // the leader; resolveFooterInstruction picks ONE). The instruction is
-    // an INDEPENDENT surface (plan 2026-08-31 §7): it appends its own
-    // reserved physical line after the layout rows — never a "line-2 slot"
-    // replacement of the stats row.
+  /** Render the complete Footer surface for one task-browser context. Used
+   *  both for the committed paint and the read-only `↓ view` candidate-height
+   *  preflight; the latter never mutates `this.footer`. */
+  private composeFooterText(width: number, taskBrowserAvailable: boolean): string {
+    // A pending leader sequence is an independent Host instruction, appended
+    // after the layout rows; it never replaces a Footer row.
     const leader = this.keybindings.leaderMachine()
     const instruction = resolveFooterInstruction({
       exitConfirmKeyLabel: this.exitConfirmTrigger?.label,
       viewing: this.viewerMode !== undefined,
       leaderHint: leader !== undefined && leader.pending ? this.leaderHint(leader) : undefined,
     })
-    let text: string
     if (this.commandRows !== undefined) {
       // M5: the command surface owns the Status Surface; the Host
-      // instruction still merges on top (never user-hideable). The
-      // SURFACE budget applies here too (PR #57 review): the instruction
-      // reserves its line first, so a chrome-heavy short viewport can
-      // never clip the hint behind command rows.
-      text = mergeCommandSurface(this.commandRows, instruction, width, this.footerPhysicalLineBudget())
-    } else {
-      const snapshot = this.statusStore.snapshot()
-      // The SURFACE decides how many of the composer's hard-capacity
-      // lines the current screen can actually give the footer (plan
-      // 2026-08-31 §6.1 / PR #57 review): without this, chrome-heavy
-      // short viewports (e.g. 20x10 with a wrapped todo panel) clipped
-      // the footer's own bottom rows — the appended Host instruction
-      // FIRST — violating "the instruction always survives".
-      text = this.footerComposer.render({
-        snapshot,
-        layout: this.currentFooterLayout(),
-        width,
-        context: {
-          taskBrowserAvailable: this.taskBrowserAvailable(),
-          extensionFooterText: this.extensionHost?.footerText() ?? '',
-        },
-        instruction,
-        physicalLineBudget: this.footerPhysicalLineBudget(),
-      })
+      // instruction still merges on top and reserves its own budget.
+      return mergeCommandSurface(this.commandRows, instruction, width, this.footerPhysicalLineBudget())
+    }
+    return this.footerComposer.render({
+      snapshot: this.statusStore.snapshot(),
+      layout: this.currentFooterLayout(),
+      width,
+      context: {
+        taskBrowserAvailable,
+        extensionFooterText: this.extensionHost?.footerText() ?? '',
+      },
+      instruction,
+      physicalLineBudget: this.footerPhysicalLineBudget(),
+    })
+  }
+
+  /** Commit the current Footer composition and refresh the painted editor
+   *  boundary baseline used to avoid unrelated navigation recomposes. */
+  private renderFooter(boundary?: { physicalWidth: number; onLastVisualLine: boolean }): void {
+    // A synchronous geometry recompose can beat the queued X063/layout turn.
+    // Consume its latest fact here so that compose also satisfies that refresh
+    // instead of immediately paying a second Footer composition.
+    if (this.quickHintComposeScheduled) {
+      boundary = this.quickHintComposeBoundary ?? boundary
+      this.quickHintComposeBoundary = undefined
+    }
+    const width = Math.max(1, this.terminal.columns)
+    // Any Footer recompose may reflect a new layout, snapshot or extension
+    // segment; the candidate grant must be measured from these live inputs.
+    this.taskQuickGrantCacheTick = -1
+    const canAdmitDownHint = this.keybindings.keysFor('app.tasks.open').includes('down')
+      && this.quickDownOwnerEligible()
+    const renderedLayout = this.quickHintCurrentEditorLayout
+    // X063 event facts and the Editor's last rendered layout are both O(1).
+    // A width mismatch stays fail-closed until Editor.render publishes that
+    // width; it must never trigger a raw wrap-map rebuild in ordinary input.
+    const onLastVisualLine = boundary?.physicalWidth === width
+      ? boundary.onLastVisualLine
+      : canAdmitDownHint
+        ? renderedLayout?.physicalWidth === width ? renderedLayout.onLastVisualLine : false
+        : undefined
+    this.footerCompositionInProgress = true
+    let text: string
+    try {
+      text = this.composeFooterText(width, this.taskBrowserAvailable(onLastVisualLine))
+    } finally {
+      this.footerCompositionInProgress = false
     }
     this.footer.setText(text)
-    // B4-B (review R5-F2/R6-F3): the admission's chrome measure includes
-    // THIS footer's painted height. A compose whose text CHANGED that
-    // height measured the grant against the PREVIOUS frame — converge to
-    // the FIXED POINT: recompose until the painted height is stable (the
-    // composer's no-churn discipline makes a settled pass a byte-identical
-    // no-op; each pass bumps the tick so the grant truly re-measures). The
-    // FOOTER_CONVERGE_LIMIT is a hard safety bound — a footer is a bounded
-    // line budget, so the fixed point is reached in 1-2 passes in practice;
-    // a pathological oscillator stops at the bound with the LAST painted
-    // state (each compose paints the truth of its own text).
-    let newFooterRows = this.footer.render(width).length
-    if (newFooterRows !== this.lastFooterRows && !this.convergingFooter) {
-      this.convergingFooter = true
-      try {
-        for (let pass = 0; pass < FOOTER_CONVERGE_LIMIT && newFooterRows !== this.lastFooterRows; pass += 1) {
-          this.lastFooterRows = newFooterRows
-          this.renderTick += 1
-          if (this.commandRows !== undefined) break
-          this.footer.setText(this.footerComposer.render({
-            snapshot: this.statusStore.snapshot(),
-            layout: this.currentFooterLayout(),
-            width,
-            context: {
-              taskBrowserAvailable: this.taskBrowserAvailable(),
-              extensionFooterText: this.extensionHost?.footerText() ?? '',
-            },
-            instruction,
-            physicalLineBudget: this.footerPhysicalLineBudget(),
-          }))
-          newFooterRows = this.footer.render(width).length
-        }
-        // R7-F3/R8-F4 product policy for a NO-FIXED-POINT oscillation (a
-        // self-referential layout where the hint's presence changes the
-        // height that decides the hint — e.g. a compact one-row footer
-        // whose ↓ hint wraps it to two rows, flipping the grant back):
-        // the hint/route consistency is enforced by construction — the
-        // FINAL compose re-queries the admission against the CURRENT
-        // painted height and its text is accepted unconditionally. The
-        // hint on screen is then exactly what the live route grants at
-        // that height: Down and the painted ↓ can never disagree, even
-        // though the height itself keeps oscillating. The latch is synced
-        // to the real final height so the next compose re-measures from
-        // the truth.
-        this.lastFooterRows = newFooterRows
-        this.renderTick += 1
-        if (this.commandRows === undefined) {
-          this.footer.setText(this.footerComposer.render({
-            snapshot: this.statusStore.snapshot(),
-            layout: this.currentFooterLayout(),
-            width,
-            context: {
-              taskBrowserAvailable: this.taskBrowserAvailable(),
-              extensionFooterText: this.extensionHost?.footerText() ?? '',
-            },
-            instruction,
-            physicalLineBudget: this.footerPhysicalLineBudget(),
-          }))
-          this.lastFooterRows = this.footer.render(width).length
-        }
-      } finally {
-        this.convergingFooter = false
-      }
+    this.taskQuickPaintedBoundary = onLastVisualLine
+    const latestLayout = this.quickHintCurrentEditorLayout
+    const latestOwnerEligible = this.keybindings.keysFor('app.tasks.open').includes('down')
+      && this.quickDownOwnerEligible()
+    if (latestLayout?.physicalWidth === width) {
+      this.quickHintLastEditorLayout = { ...latestLayout, downHintOwnerEligible: latestOwnerEligible }
+    }
+    if (latestLayout?.physicalWidth === width
+      && ((latestOwnerEligible !== canAdmitDownHint)
+        || (latestOwnerEligible && latestLayout.onLastVisualLine !== onLastVisualLine))) {
+      this.scheduleQuickHintCompose({
+        physicalWidth: latestLayout.physicalWidth,
+        onLastVisualLine: latestLayout.onLastVisualLine,
+      })
     }
     this.requestRender()
   }
@@ -20892,6 +20899,21 @@ export class TuiApp {
     if (this.activeQuestions !== undefined || this.approvals.isActive() || this.activeSaveLocation !== undefined) {
       throw new Error('a blocking modal owns the surface')
     }
+    if (this.taskQuick.focused) {
+      // A workspace lease retires the transient Quick owner instead of restoring
+      // it after close. Focus changes are synchronous callback boundaries, so
+      // re-prove that no newer owner took the surface before capturing return focus.
+      this.leaveTaskQuick()
+      if (this.disposed) throw new Error('cannot lease a Job workspace screen on a disposed surface')
+      if (this.workspaceLeaseFreezeDepth > 0) {
+        throw new Error('cannot lease a Job workspace screen while the surface is completing a transition')
+      }
+      if (this.jobWorkspace !== undefined) throw new Error('a Job workspace screen is already leased')
+      if (this.settingsWorkspace !== undefined) throw new Error('a Settings workspace screen is already leased')
+      if (this.activeQuestions !== undefined || this.approvals.isActive() || this.activeSaveLocation !== undefined) {
+        throw new Error('a blocking modal owns the surface')
+      }
+    }
     const returnScreen: TuiMainScreen | TuiAltScreen = this.fullscreen ?? this.tui
     const returnFocus = returnScreen.getFocusedComponent()
     const token: object = {}
@@ -21132,6 +21154,22 @@ export class TuiApp {
     // leave the current keyboard owner untouched.
     if (this.activeQuestions !== undefined || this.approvals.isActive() || this.activeSaveLocation !== undefined) {
       throw new Error('a blocking modal owns the surface')
+    }
+    if (this.taskQuick.focused) {
+      // A workspace lease retires the transient Quick owner instead of restoring
+      // it after close. Focus changes are synchronous callback boundaries, so
+      // re-prove that no newer owner took the surface before capturing return focus.
+      this.leaveTaskQuick()
+      if (this.disposed) throw new Error('cannot lease a Settings workspace screen on a disposed surface')
+      if (this.workspaceLeaseFreezeDepth > 0) {
+        throw new Error('cannot lease a Settings workspace screen while the surface is completing a transition')
+      }
+      if (this.jobWorkspace !== undefined || this.settingsWorkspace !== undefined) {
+        throw new Error('a workspace screen is already leased')
+      }
+      if (this.activeQuestions !== undefined || this.approvals.isActive() || this.activeSaveLocation !== undefined) {
+        throw new Error('a blocking modal owns the surface')
+      }
     }
     const returnScreen: TuiMainScreen | TuiAltScreen = this.fullscreen ?? this.tui
     const returnFocus = returnScreen.getFocusedComponent()

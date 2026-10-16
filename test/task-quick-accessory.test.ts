@@ -64,27 +64,52 @@ test('grant ladder: separator when everything fits, then header, then 1 row, the
   assert.ok(at(200).grant <= TASK_QUICK_MAX_ROWS)
 })
 
-test('grant ladder: the separator yields to every visible task row (N=1/2/≥3 × grant)', () => {
-  // N=3 with a generous frame: separator + identity + 3 items (grant 5).
-  const three = planTaskQuickLayout(80, 24, 4, 3, 0)
-  assert.equal(three.grant, 5)
-  assert.equal(three.separator, true)
-  assert.equal(three.itemRows, 3)
-  // N=2: the requested budget is desired+2 = 4 → separator + identity + 2.
-  const two = planTaskQuickLayout(80, 24, 4, 2, 0)
-  assert.equal(two.grant, 4)
-  assert.equal(two.separator, true)
-  assert.equal(two.itemRows, 2)
-  // N=1: desired+2 = 3 → separator + identity + 1.
-  const one = planTaskQuickLayout(80, 24, 4, 1, 0)
-  assert.equal(one.grant, 3)
-  assert.equal(one.separator, true)
-  assert.equal(one.itemRows, 1)
-  // When the grant cannot cover desired+2, the separator is the FIRST yield:
-  // N=3 at a 12-row frame (grant 3 = identity + 2 items — one item unseen).
-  const squeezed = planTaskQuickLayout(80, 12, 4, 3, 0)
-  assert.equal(squeezed.separator, false)
-  assert.equal(squeezed.itemRows, 2)
+test('grant 0..5 × N=1/2/≥3 paints the exact addendum divider/header/task matrix', () => {
+  const matrix = [
+    { total: 1, actualGrants: [0, 1, 2, 3, 3, 3], separators: [false, false, false, true, true, true], taskRows: [0, 1, 1, 1, 1, 1] },
+    { total: 2, actualGrants: [0, 1, 2, 3, 4, 4], separators: [false, false, false, false, true, true], taskRows: [0, 1, 1, 2, 2, 2] },
+    { total: 4, actualGrants: [0, 1, 2, 3, 4, 5], separators: [false, false, false, false, false, true], taskRows: [0, 1, 1, 2, 3, 3] },
+  ] as const
+
+  for (const scenario of matrix) {
+    for (let requestedGrant = 0; requestedGrant <= 5; requestedGrant += 1) {
+      const terminalRows = 40
+      const chromeRows = terminalRows - requestedGrant - 1
+      const h = harness({ cols: 80, rows: terminalRows, chrome: chromeRows })
+      const items = Array.from({ length: scenario.total }, (_, index) => item(`task-${scenario.total}-${index + 1}`))
+      h.accessory.setItems(items)
+      h.accessory.focused = true
+      assert.ok(h.accessory.activate(), `N=${scenario.total}, requested grant=${requestedGrant}`)
+
+      const layout = planTaskQuickLayout(80, terminalRows, chromeRows, scenario.total, 0)
+      const expectedGrant = scenario.actualGrants[requestedGrant]!
+      const expectedTaskRows = scenario.taskRows[requestedGrant]!
+      const expectedSeparator = scenario.separators[requestedGrant]!
+      assert.equal(layout.grant, expectedGrant, `N=${scenario.total}, room grant=${requestedGrant}`)
+      assert.equal(layout.separator, expectedSeparator, `N=${scenario.total}, grant=${expectedGrant}`)
+      assert.equal(layout.header, expectedGrant >= 2, `N=${scenario.total}, grant=${expectedGrant}`)
+      assert.equal(layout.count, expectedTaskRows, `N=${scenario.total}, grant=${expectedGrant}`)
+
+      const lines = h.accessory.render(80)
+      assert.equal(lines.length, expectedGrant, `painted rows never exceed the grant; N=${scenario.total}, grant=${expectedGrant}`)
+      let row = 0
+      if (expectedSeparator) {
+        assert.match(strip(lines[row]!), /^─+$/, 'the optional divider is the first painted row')
+        row += 1
+      }
+      if (layout.header) {
+        assert.match(strip(lines[row]!), /^Task Quick\s+showing 1-\d+\//, 'identity follows the optional divider')
+        row += 1
+      }
+      const paintedTasks = lines.slice(row).map(strip)
+      assert.equal(paintedTasks.length, expectedTaskRows)
+      for (let index = 0; index < paintedTasks.length; index += 1) {
+        assert.ok(paintedTasks[index]!.includes(`task-${scenario.total}-${index + 1}`),
+          `task rows retain their order after divider/header: ${paintedTasks.join(' | ')}`)
+      }
+      if (paintedTasks.length > 0) assert.match(paintedTasks[0]!, /^> /, 'the active marker belongs to the first task row')
+    }
+  }
 })
 
 test('grant ladder: an empty projection paints no row at any size', () => {
@@ -326,6 +351,35 @@ test('the wheel resolves only against the LAST PAINTED frame', () => {
     'a stale frame after a width change is consumed without acting')
   accessory.render(100)
   assert.deepEqual(accessory.handleMouse(wheel(-1, 0, { width: 100, height: 1 })), { handled: true, render: true })
+})
+
+test('a height-only repaint invalidates the pressed frame when component geometry is unchanged', () => {
+  const h = harness({ rows: 24, chrome: 4 })
+  focus(h, [item('job:a'), item('job:b'), item('job:c'), item('job:d')])
+  const before = h.accessory.render(80)
+  assert.equal(before.length, 5)
+  assert.match(strip(before[2]!), /job:a/, 'the target row is inside the painted band')
+
+  const row = 2
+  assert.deepEqual(h.accessory.handleMouse({ ...wheel(0, row), type: 'press', button: 'left' }),
+    { handled: true, capture: true })
+  h.geometry.rows = 25
+  const after = h.accessory.render(80)
+  assert.equal(after.length, before.length, 'the Quick band keeps the same component height')
+  assert.equal(strip(after[row]!), strip(before[row]!), 'the same task remains at the same local cell')
+
+  // Direct component events isolate the terminal-row stamp from the fork
+  // dispatcher's independent moved-pointer guard: all component geometry and
+  // local coordinates are unchanged; only terminalRows differs.
+  assert.deepEqual(h.accessory.handleMouse({ ...wheel(0, row), type: 'release', button: 'left' }), { handled: true })
+  assert.deepEqual(h.accessory.handleMouse({ ...wheel(0, row), type: 'click', button: 'left' }), { handled: true })
+  assert.deepEqual(h.activations(), [], 'a gesture from the old terminal-height frame is inert')
+
+  assert.deepEqual(h.accessory.handleMouse({ ...wheel(0, row), type: 'press', button: 'left' }),
+    { handled: true, capture: true })
+  assert.deepEqual(h.accessory.handleMouse({ ...wheel(0, row), type: 'release', button: 'left' }), { handled: true })
+  assert.deepEqual(h.accessory.handleMouse({ ...wheel(0, row), type: 'click', button: 'left' }), { handled: true })
+  assert.deepEqual(h.activations(), ['job:a'], 'a fresh same-frame gesture remains valid')
 })
 
 test('the whole painted band owns the wheel, identity row included', () => {

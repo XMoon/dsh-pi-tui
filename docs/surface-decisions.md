@@ -2771,8 +2771,18 @@ keeps no second `open` flag, and losing focus hides it again.
   routing resolves — the hint may never advertise a route the ladder refuses,
   and `editorEmpty` no longer gates this composition (a non-empty draft
   qualifies on its last visual line). The footer hint is a compose-time
-  projection: after a resize the classifier's painted-frame guard settles on
-  the next footer commit.
+  projection of the latest Editor-rendered layout. A stale width fails closed; the next Editor render
+   at the new width
+   republishes the boundary and coalesces the Footer correction.
+- **Owner-approved hidden-entry geometry (2026-10-15).** HIDDEN→ACTIVE admission
+  is measured against a read-only candidate of the complete Footer composed
+  with `taskBrowserAvailable=true`, including the `↓ view` hint. The candidate's
+  actual physical height feeds the existing Quick row planner; it is never
+  committed, mutated or iterated to a fixed point. If that candidate leaves no
+  Quick row, both the hint and Down route fail closed—even if the hint-free
+  painted Footer would leave room. Once Quick is ACTIVE, its geometry uses the
+  actual painted Footer; a disappearing hint may free rows but does not revoke
+  focus by re-running hidden-entry eligibility.
 - **Keyboard surface.** The component keymap's task actions drive it:
   ↑↓ move the selection over the WHOLE row set (window follows, no wrap;
   Down at the tail clamps), PgUp/PgDn page by the PAINTED row count, Up at the
@@ -2811,11 +2821,15 @@ entry with the draft preserved, navigation with the global-first Up exit, the
 typed route's refusal + open sides, the parked-Question reopen through the
 production sink, shell-mode/non-last-line fail-closed, the disabled action's
 hint + route drop, the 44-column CJK wrapped entry and the 0-grant decline,
-the session-reset exit, `/tasks` Full filtering with Quick hidden),
-`test/task-quick-b4a-composition.test.ts` (the ACTIVE-frame witnesses of the
-same production composition) and `packages/pi-tui/test/editor-task-quick-boundary.test.ts`
-(the X063 classifier: wrap segments, transient modes, the width guard, and the
-non-consuming negative).
+the session-reset exit, `/tasks` Full filtering with Quick hidden; X063
+same-turn facts, zero normal-input map scans/composes, stale-width resize hint
+restoration and width-4 clamp; focused Quick blocks Host submit/steer actions;
+jump transitions; hint-enabled Footer candidate denial/positive admission and
+ACTIVE geometry independence), `test/task-quick-b4a-composition.test.ts` (the
+ACTIVE-frame witnesses of the same production composition) and
+`packages/pi-tui/test/editor-task-quick-boundary.test.ts` (wrap segments,
+transient modes, stale-width rejection, rendered-snapshot/map edge equivalence,
+and non-consuming negative).
 
 **Owner revision 2026-10-15 (footer-below layout addendum):** the accessory
 band moved UNDER THE WHOLE FOOTER — the LAST visible region of both roots
@@ -2829,5 +2843,20 @@ own budget is untouched (the chrome measurement includes the footer; the band
 takes the remainder), the painted hit geometry includes the separator row as
 inert chrome, and the mouse/wheel contract is unchanged. The owner-revision
 authority is the addendum document (`temp/panel/…footer-below-quick-layout
--addendum-v1-20261015.md`); the default-hidden and ↓-admission decisions of
-2026-10-14 are unchanged.
+-addendum-v1-20261015.md`) except for Footer admission geometry: the Owner-approved
+2026-10-15 hint-present candidate preflight above supersedes conflicting B4-B
+main-plan Step 2 and addendum §2.3 wording. Default-hidden behavior and the
+`app.tasks.open`/Editor-boundary authorities remain unchanged.
+
+**Owner clarification — Main Root Transcript Floor Exception:** Fullscreen is a
+fixed-height root and continues to reserve at least one visible Transcript row;
+its widgets/Quick yield when the budget is short. The ordinary Main Root remains
+a flowing document with its historical public-widget grants. At extreme heights
+such as 80×8, existing chrome may move Transcript above the current viewport
+while preserving it in terminal scrollback. B4-B must not worsen Main visibility
+relative to the Quick-hidden frame: Quick remains zero-row while hidden, and
+entry admission still uses the measured Footer candidate, Editor, below-widget
+rows and a one-row Transcript reserve; if no Quick task row fits, entry is
+refused. This exception does not authorize changing Main widget grants, Footer
+capacity or root layout, and it does not apply to Fullscreen or to clipping
+introduced by an ACTIVE Quick.

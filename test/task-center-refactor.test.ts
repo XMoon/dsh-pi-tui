@@ -200,7 +200,7 @@ test('search mode renders its own hint — query actions, never the task actions
   const view = panel.render(100).join('\n')
   // esc back leads the verb list: a 1-line hint on an 80-column terminal
   // truncates its tail, so the escape verb must never be the clipped part.
-  const searchHint = 'type to filter · Esc back · ←→ edit · ↑↓ select · shift+tab type · Enter open'
+  const searchHint = 'type to filter · Esc back · ←→ edit · ↑↓ select · Shift+Tab type · Enter open'
   assert.ok(view.includes(searchHint), `search-mode hint must advertise the query actions:\n${view}`)
   for (const stale of ['A scope', 'N next running', 'S stop', 'R refresh', '←→ tree']) {
     assert.ok(!view.includes(stale), `search-mode hint must not advertise '${stale}':\n${view}`)
@@ -217,9 +217,8 @@ test('search-mode hint keeps Esc back visible at 80 columns', () => {
   const hintRow = view.split('\n').find(line => line.includes('type to filter'))
   assert.ok(hintRow !== undefined, `search hint missing at 80 cols:\n${view}`)
   assert.ok(hintRow.includes('Esc back'), `Esc back must survive the 80-column hint:\n${view}`)
-  // Shift+Tab reverse type cycling must be discoverable in search mode too
-  // (B4-B: spelled `shift+tab` — the EAW-ambiguous `⇧` glyph is retired).
-  assert.ok(hintRow.includes('shift+tab'), `reverse type cycling must be discoverable:\n${view}`)
+  // Reverse type cycling uses the component keymap's canonical label.
+  assert.ok(hintRow.includes('Shift+Tab'), `reverse type cycling must be discoverable:\n${view}`)
   // The ordinary task actions stay out of search mode here too.
   assert.ok(!view.includes('A scope') && !view.includes('S stop'), `no task actions in search mode:\n${view}`)
   panel.dispose()
@@ -344,7 +343,7 @@ test('Full Task Center hint advertises the management verbs without N/T/R', () =
   const panel = new TaskBrowserPanel([job('job:a')], 10,
     { mode: 'full', enableSearch: true, header: 'Tasks' }, () => {}, () => {}, () => {})
   const view = panel.render(100).join('\n')
-  for (const verb of ['/ search', 'a scope', 'shift+tab type', 's stop', 'Esc close']) {
+  for (const verb of ['/ search', 'a scope', 'Shift+Tab type', 's stop', 'Esc close']) {
     assert.ok(view.includes(verb), `Full hint must advertise '${verb}':\n${view}`)
   }
   for (const stale of ['N next running', 'T Task Center', 'R refresh']) {

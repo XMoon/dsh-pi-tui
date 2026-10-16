@@ -335,6 +335,8 @@ export class TaskQuickAccessory implements Component, Focusable {
   private pressedFrame: {
     readonly width: number
     readonly height: number
+    readonly terminalColumns: number
+    readonly terminalRows: number
     readonly first: string | undefined
   } | undefined
 
@@ -638,6 +640,8 @@ export class TaskQuickAccessory implements Component, Focusable {
       this.pressedFrame = {
         width: painted.width,
         height: painted.height,
+        terminalColumns: painted.terminalColumns,
+        terminalRows: painted.terminalRows,
         first: this.items[0]?.value,
       }
       return { handled: true, capture: true }
@@ -682,12 +686,20 @@ export class TaskQuickAccessory implements Component, Focusable {
    *  (a repaint happened since the press). Called with no argument against
    *  the live latch; with an argument, against a frame snapshot taken at
    *  the click. */
-  private pressedFrameInvalid(observed?: { readonly width: number; readonly height: number; readonly first: string | undefined }): boolean {
+  private pressedFrameInvalid(observed?: {
+    readonly width: number
+    readonly height: number
+    readonly terminalColumns: number
+    readonly terminalRows: number
+    readonly first: string | undefined
+  }): boolean {
     const frame = observed ?? this.pressedFrame
     const painted = this.painted
     if (frame === undefined || painted === undefined) return true
     return frame.width !== painted.width
       || frame.height !== painted.height
+      || frame.terminalColumns !== painted.terminalColumns
+      || frame.terminalRows !== painted.terminalRows
       || frame.first !== this.items[0]?.value
   }
 
