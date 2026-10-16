@@ -1528,16 +1528,17 @@ they carry no `startedAt`, never join the active-work count, never inherit stop
 semantics, and the panel includes them by an explicit rule so a running Job can
 never hide a pending Question. `Enter` on such a row reopens the controller
 entry (closing the browser and returning the seat); a row that went stale
-between rendering and selection fails closed and keeps the browser usable. Scope, type, search, selection, and disclosure are
-presentation state, so promoting Quick to Full never reorders or deduplicates
-rows and Esc can restore the prior context. Their keyboard ownership is
-deliberately asymmetric: Quick is navigation-only (arrows, `←`/`→` tree,
-`Tab` type, `Enter` open, `Esc` close) and consumes every other key as a no-op,
-so no printable can arm a hidden search/stop/action state and `Esc` is always
-exactly one layer; the full Task Center owns search, scope, stop, refresh,
-paging and reverse (`Shift+Tab`) type cycling. The only keyboard path from
-Quick to Full is the `Open Task Center` pseudo-row plus `Enter`. Active scope
-retains every ancestor
+between rendering and selection fails closed and keeps the browser usable.
+
+**Retired pre-B4-B Quick/Full interaction contract.** The former modal promotion
+and Esc-restore flow, Quick `←`/`→`/`Tab` controls, and promotion pseudo-row
+route are superseded; do not use them as current behavior. Current on-demand
+Quick navigation and its optional Full action are specified in [The on-demand
+Task Quick](#the-on-demand-task-quick-hidden-by-default-keyboard-focusable-b4-b).
+The Full Task Center continues to own search, scope, stop, refresh, paging and
+reverse (`Shift+Tab`) type cycling.
+
+Active scope retains every ancestor
 needed to explain an active descendant but does not promote that descendant to a
 root. Terminal job failures are acknowledged only when a visible Task Center
 row is opened; until then the footer keeps a failure marker and the ↓ affordance.
@@ -1564,7 +1565,8 @@ execution-history list. Invariants (DSH `0.1.7` JobRegistry contract):
    the TUI never guesses provenance from kind, tool args, Transcript cards,
    or timing.
 6. **Transitions** — Quick defaults to Active; direct `/tasks` defaults to
-   Tracked; Quick→Full preserves Active; `A` toggles Active ↔ Tracked
+   Tracked. Quick's Full action calls the same `openTasksBrowser('full')` route
+   as `/tasks` and does not inherit Quick's Active scope. `A` toggles the Full browser between Active and Tracked
    (presentation only).
 7. **Footer denominator** — the job denominator is the current tracked
    roster (preferred density says `tracked jobs`), not a session lifetime
@@ -2783,14 +2785,17 @@ keeps no second `open` flag, and losing focus hides it again.
   painted Footer would leave room. Once Quick is ACTIVE, its geometry uses the
   actual painted Footer; a disappearing hint may free rows but does not revoke
   focus by re-running hidden-entry eligibility.
-- **Keyboard surface.** The component keymap's task actions drive it:
-  ↑↓ move the selection over the WHOLE row set (window follows, no wrap;
-  Down at the tail clamps), PgUp/PgDn page by the PAINTED row count, Up at the
-  global first row exits, `Esc` exits (Host physical-Escape seam: never arms
-  the double-Esc cancel, never reaches the background editor), Enter commits,
-  every other key is a consumed no-op. The selection is an EPHEMERAL stable
-  `value` — never restored across open/close, reconciled by stable ID on
-  commits with a bounded successor/predecessor fallback.
+- **Keyboard surface.** The component keymap's task actions drive it. With `N`
+  real tasks and the Full callback, navigation is exactly
+  `task[0] … task[N-1], open-full`; without that callback it remains task-only.
+  Every entry selects `task[0]`, never the action. ↑↓ move through that one
+  windowed sequence without wrapping; Down on the final target clamps, PgUp/PgDn
+  page by the PAINTED navigation-row count, and Up on `task[0]` exits. `Esc`
+  exits (Host physical-Escape seam: never arms the double-Esc cancel, never
+  reaches the background editor), Enter dispatches the selected typed target,
+  every other key is a consumed no-op. Real-task selection remains an ephemeral
+  stable `value`, reconciled by stable ID with a bounded successor/predecessor
+  fallback; `open-full` is a distinct target and is never encoded as a value.
 - **Typed commit.** Enter (and a Fullscreen same-row press→release click —
   the value-identity latch forbids press A → release B) first leave Quick,
   then route the CURRENT projected row through `openQuickTaskItem`: the value
@@ -2799,6 +2804,14 @@ keeps no second `open` flag, and losing focus hides it again.
   (Question `attention.reopen`, subagent `enterView`, Job view). A stale value,
   a switched session or cleanup refuse with `false` — the hidden Quick never
   re-opens and nothing reports "opened".
+- **Open Full action.** When real tasks exist and the first-party callback is
+  available, `➜ Open Task Center…` is one appended navigation target in the same
+  bounded window, with no task status or fabricated `TaskPanelItem.value`. Enter
+  and the Fullscreen same-row press→release click first commit Quick HIDDEN and
+  restore the current Editor seat, then call `TaskRuntime.openTasksBrowser('full')`
+  — the existing `/tasks` owner. A focus loss, changed painted frame, empty
+  projection, stale geometry or mismatched press/release is inert. `/tasks`
+  remains available when Quick is hidden or has no tasks.
 - **Owner displacement.** Every blocking owner (Question/Approval/Save,
   optional tenant, managed capturing overlay, Job Workspace, Settings, plugin
   editor winner, session reset, screen swap) terminates Quick at its own
@@ -2810,10 +2823,16 @@ keeps no second `open` flag, and losing focus hides it again.
   the Esc restore-into-Quick tail, the modal-only state carrier and the panel's
   `quick` mode are removed with their consumers — no shim, no dead branch. The
   Full browser's Scope/Search/Type/Stop/Job-child semantics are untouched.
-- **Row budget while ACTIVE.** The grant ladder is B4-A's (live frame, one
-  transcript row, proportional share, four-row ceiling); a frame with no room
-  for a task row DECLINES the entry. The selected row paints `> ` in
-  `primary` — D6's one active device; the status group stays `‣ Word`.
+- **Row budget while ACTIVE.** The B4-B addendum's live-frame grant keeps one
+  transcript row, the proportional share and the five-row ceiling (at most one
+  divider + identity + three task/action navigation rows). Hidden-to-ACTIVE
+  admission guarantees an initial real task row; identity and decorative
+  divider yield as needed. After entry, a one-row grant may scroll to show only
+  the selected Full action, which uses one of the same three navigation slots.
+  Footer badges and `showing x-y/N` count real tasks only. A frame with no room
+  for an initial task row DECLINES entry. `>` in `primary` remains D6's sole
+  active device; the action's `➜` is muted type information, not another
+  selection/focus marker.
 
 Evidence: `test/task-quick-b4b-interaction.test.ts` (S1–S14 minus the pointer
 matrix: hidden-by-default both with and without tasks, the boundary drives the
@@ -2829,16 +2848,21 @@ ACTIVE geometry independence), `test/task-quick-b4a-composition.test.ts` (the
 ACTIVE-frame witnesses of the same production composition) and
 `packages/pi-tui/test/editor-task-quick-boundary.test.ts` (wrap segments,
 transient modes, stale-width rejection, rendered-snapshot/map edge equivalence,
-and non-consuming negative).
+and non-consuming negative). Post-B4-B action coverage lives in
+`test/task-quick-accessory.test.ts` (typed target, task-only counts, glyph/ink,
+keyboard and stale/cross-row mouse fences) and
+`test/task-quick-b4b-interaction.test.ts` (real TaskRuntime Full route, Quick
+hidden/Editor restored first, `/tasks` dataset parity and Fullscreen SGR click).
 
 **Owner revision 2026-10-15 (footer-below layout addendum):** the accessory
 band moved UNDER THE WHOLE FOOTER — the LAST visible region of both roots
 (editor seat → public below widgets → footer → separator → accessory). The
 band owns exactly ONE top separator rule (role 15 `border`, the
 Owner-authorized Footer↔Quick boundary — never `primary`/`borderFocus`, no
-bottom rule, no frame); it paints only when every projected task row already
-fits (`grant ≥ desired + 2`) and yields to task rows on a low budget. The
-active ceiling is 5 rows: 1 separator + 1 identity + 3 task rows. The Footer's
+bottom rule, no frame); it paints only when every desired task/action navigation
+row already fits (`grant ≥ desired + 2`) and yields to navigation rows on a low
+budget. The active ceiling is 5 rows: 1 separator + 1 identity + 3 task/action
+rows. The Footer's
 own budget is untouched (the chrome measurement includes the footer; the band
 takes the remainder), the painted hit geometry includes the separator row as
 inert chrome, and the mouse/wheel contract is unchanged. The owner-revision

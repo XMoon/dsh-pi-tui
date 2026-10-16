@@ -93,6 +93,10 @@ interface Harness {
   readonly roster: { rows: TaskBrowserJobInput[] }
   /** The typed selection routes the production enterTaskQuick observed. */
   readonly quickSelects: () => readonly string[]
+  /** Full Task Center callback count and focus ownership at dispatch. */
+  readonly fullOpenCalls: () => number
+  readonly quickFocusedAtFullOpen: () => readonly boolean[]
+  readonly editorFocusedAtFullOpen: () => readonly boolean[]
   /** Host submits observed by the real input/action dispatcher. */
   readonly submitted: () => readonly string[]
   /** The Question reopens the attention authority observed. */
@@ -112,8 +116,10 @@ async function startQuick(options: {
   descendants?: TaskSubagentEntry[]
   /** A controller-side reopen spy for the Question witnesses (S8). */
   reopenResult?: boolean
+  /** Include the production Full navigation action (the TuiApp callback uses TaskRuntime). */
+  withFullAction?: boolean
   /** Optional production host seams needed by owner-displacement witnesses. */
-  appOptions?: Omit<TuiAppOptions, 'onQuickTaskSelect'>
+  appOptions?: Omit<TuiAppOptions, 'onQuickTaskSelect' | 'onQuickTaskOpenFull'>
 } = {}): Promise<Harness> {
   const columns = options.cols ?? 120
   const terminalRows = options.rows ?? 40
@@ -125,6 +131,10 @@ async function startQuick(options: {
   // app → callback → runtime-authority sink.
   let runtimeRef: TaskRuntime | undefined
   const quickSelects: string[] = []
+  const quickFocusedAtFullOpen: boolean[] = []
+  const editorFocusedAtFullOpen: boolean[] = []
+  let fullOpenCount = 0
+  let appRef: TuiApp | undefined
   const app = new TuiApp(vt, {
     onSubmit: text => { submitted.push(text) },
     onExit: () => {},
@@ -134,7 +144,20 @@ async function startQuick(options: {
       quickSelects.push(value)
       return runtimeRef?.openQuickTaskItem(value) ?? false
     },
+    ...(options.withFullAction === true ? {
+      onQuickTaskOpenFull: () => {
+        fullOpenCount += 1
+        const currentApp = appRef
+        assert.ok(currentApp, 'the Full callback runs only after TuiApp construction')
+        quickFocusedAtFullOpen.push(currentApp.taskQuickFocusedForTest())
+        editorFocusedAtFullOpen.push(
+          currentApp.focusedComponentForTest() === currentApp.seatEditorForTest().component,
+        )
+        runtimeRef?.openTasksBrowser('full')
+      },
+    } : {}),
   })
+  appRef = app
   app.start()
   startedApps.add(app)
   // The FIRST paint settles the editor's layout width — the ↓ classifier's
@@ -225,7 +248,12 @@ async function startQuick(options: {
   return {
     vt, app, tasks, roster, attention: { reopen: () => false }, reopens: () => [...reopens],
     enteredViews: () => [...enteredViews], quickFocusedAtEnterView: () => [...quickFocusedAtEnterView],
-    quickSelects: () => [...quickSelects], submitted: () => [...submitted], band,
+    quickSelects: () => [...quickSelects],
+    fullOpenCalls: () => fullOpenCount,
+    quickFocusedAtFullOpen: () => [...quickFocusedAtFullOpen],
+    editorFocusedAtFullOpen: () => [...editorFocusedAtFullOpen],
+    submitted: () => [...submitted],
+    band,
   }
 }
 
@@ -484,6 +512,95 @@ test('B4B-06 Enter opens the real Job workspace; a refused value never disturbs 
   // (no surface opens), a current one routes.
   assert.equal(h.tasks.openQuickTaskItem('job:missing'), false, 'a stale value is refused, no surface opens')
   assert.equal(h.tasks.openQuickTaskItem('job:j1'), true, 'a current value routes to the Job open')
+})
+
+test('Post-B4-B Full action exits Quick before opening the same TaskRuntime Task Center as /tasks', async () => {
+  const h = await startQuick({
+    withFullAction: true,
+    roster: [job('j1', 'build', 'running'), job('j2', 'test', 'running')],
+  })
+  for (let i = 0; i < 8; i++) await new Promise(r => setTimeout(r, 0))
+  await h.vt.waitForRender()
+  const draftBefore = h.app.getDraft()
+  const fullTaskLabels = (): string[] => rawView(h.vt)
+    .map(line => line.match(/bash · (build|test)\b/)?.[0])
+    .filter((label): label is string => label !== undefined)
+  assert.equal(h.band().identity, -1, 'the action is hidden together with the inactive accessory')
+  assert.ok(!view(h.vt).includes('Open Task Center…'))
+
+  h.vt.sendInput('\x1b[B') // enter Quick; first real task stays selected
+  await h.vt.waitForRender()
+  h.vt.sendInput('\x1b[B') // second real task
+  await h.vt.waitForRender()
+  h.vt.sendInput('\x1b[B') // typed Full navigation target
+  await h.vt.waitForRender()
+  const action = rawView(h.vt).find(line => line.includes('Open Task Center…'))
+  assert.ok(action?.startsWith('>   ➜ Open Task Center…'), `the action follows both real tasks:
+${view(h.vt)}`)
+  assert.deepEqual(h.quickSelects(), [], 'navigation has not routed any TaskPanelItem')
+
+  h.vt.sendInput('\r')
+  await h.vt.waitForRender()
+  await sleep(20)
+  assert.equal(h.fullOpenCalls(), 1, 'Enter invokes the injected Full Task Center callback once')
+  assert.deepEqual(h.quickFocusedAtFullOpen(), [false], 'Quick commits HIDDEN before the runtime opens Full')
+  assert.deepEqual(h.editorFocusedAtFullOpen(), [true], 'the live Editor seat receives focus before the runtime opens Full')
+  assert.equal(h.app.taskQuickFocusedForTest(), false)
+  const fromQuick = fullTaskLabels()
+  assert.deepEqual(fromQuick, ['bash · build', 'bash · test'], `Full shows the global task rows:
+${view(h.vt)}`)
+  assert.ok(view(h.vt).includes('Tasks'), `the existing Full Task Center is open:
+${view(h.vt)}`)
+  assert.equal(h.band().identity, -1, 'Full owns the surface while Quick remains hidden')
+
+  h.vt.sendInput('\x1b')
+  await h.vt.waitForRender()
+  h.vt.sendInput('x')
+  await h.vt.waitForRender()
+  assert.equal(h.app.getDraft(), `${draftBefore}x`, 'closing Full returns keyboard focus to the current Editor')
+  assert.equal(h.band().identity, -1, 'closing Full does not restore the old Quick action selection')
+
+  // The same runtime entry is what the existing `/tasks` command calls.
+  h.tasks.openTasksBrowser('full')
+  await h.vt.waitForRender()
+  assert.deepEqual(fullTaskLabels(), fromQuick, 'the Full action and `/tasks` share the same global dataset')
+  h.vt.sendInput('\x1b')
+  await h.vt.waitForRender()
+})
+
+test('Post-B4-B Full action accepts only a same-row Fullscreen SGR click', async () => {
+  const h = await startQuick({ withFullAction: true, roster: [job('j1', 'build', 'running')] })
+  for (let i = 0; i < 8; i++) await new Promise(r => setTimeout(r, 0))
+  await h.vt.waitForRender()
+  h.app.setFullscreen(true)
+  await h.vt.waitForRender()
+  h.vt.sendInput('\x1b[B')
+  await h.vt.waitForRender()
+  h.vt.sendInput('\x1b[B')
+  await h.vt.waitForRender()
+
+  const rows = rawView(h.vt)
+  const actionRow = rows.findIndex(line => line.includes('Open Task Center…'))
+  const taskRow = rows.findIndex(line => line.includes('bash · build') && line.includes('‣'))
+  assert.ok(actionRow >= 0 && taskRow >= 0, `both painted targets are visible:
+${view(h.vt)}`)
+
+  h.vt.sendInput(`\x1b[<0;10;${actionRow + 1}M`)
+  h.vt.sendInput(`\x1b[<0;10;${taskRow + 1}m`)
+  await h.vt.waitForRender()
+  assert.equal(h.fullOpenCalls(), 0, 'pressing the action and releasing on a task row is inert')
+  assert.deepEqual(h.quickSelects(), [])
+
+  h.vt.sendInput(`\x1b[<0;10;${actionRow + 1}M`)
+  h.vt.sendInput(`\x1b[<0;10;${actionRow + 1}m`)
+  await h.vt.waitForRender()
+  await sleep(20)
+  assert.equal(h.fullOpenCalls(), 1, 'the matching painted action row opens Full exactly once')
+  assert.deepEqual(h.quickFocusedAtFullOpen(), [false])
+  assert.deepEqual(h.editorFocusedAtFullOpen(), [true], 'Fullscreen click restores Editor before opening Full')
+  assert.equal(h.band().identity, -1, 'the mouse route also leaves Quick first')
+  assert.ok(view(h.vt).includes('Tasks'), `the Full Task Center is visible after the click:
+${view(h.vt)}`)
 })
 
 test('B4B-06c a live SGR wheel keeps Enter on the selected painted Quick row', async () => {
