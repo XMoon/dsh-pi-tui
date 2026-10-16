@@ -535,7 +535,7 @@ test('Post-B4-B Full action exits Quick before opening the same TaskRuntime Task
   h.vt.sendInput('\x1b[B') // typed Full navigation target
   await h.vt.waitForRender()
   const action = rawView(h.vt).find(line => line.includes('Open Task Center…'))
-  assert.ok(action?.startsWith('>   ➜ Open Task Center…'), `the action follows both real tasks:
+  assert.ok(action?.startsWith('> ➜ Open Task Center…'), `the action follows both real tasks:
 ${view(h.vt)}`)
   assert.deepEqual(h.quickSelects(), [], 'navigation has not routed any TaskPanelItem')
 

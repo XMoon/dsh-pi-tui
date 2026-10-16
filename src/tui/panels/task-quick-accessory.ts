@@ -249,10 +249,10 @@ const OPEN_FULL_LABEL = 'Open Task Center…'
 function renderOpenFullRow(width: number, selected: boolean): string {
   const marker = selected ? color.primary('> ') : '  '
   const arrow = color.textMuted('➜ ')
-  const labelWidth = Math.max(0, width - visibleWidth(marker) - 2 - visibleWidth(arrow))
+  const labelWidth = Math.max(0, width - visibleWidth(marker) - visibleWidth(arrow))
   const label = truncateToWidth(OPEN_FULL_LABEL, labelWidth, '…', false)
   const ink = selected ? color.textStrong : color.textMuted
-  return fit(`${marker}  ${arrow}${ink(label)}`, width)
+  return fit(`${marker}${arrow}${ink(label)}`, width)
 }
 
 /**
