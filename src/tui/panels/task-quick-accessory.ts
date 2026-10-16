@@ -322,6 +322,9 @@ export class TaskQuickAccessory implements Component, Focusable {
    *  restored across open/close — a fresh entry always selects the first
    *  row). The selected INDEX is derived on demand from this value. */
   private selectedValue: string | undefined
+  /** A wheel target is pending paint. Enter keeps the last-painted selection
+   *  until render() commits its matching row. */
+  private wheelSelectionPending = false
   /** The pressed row identity of an in-flight Fullscreen press→release
    *  gesture, bound to the painted frame the press happened on. Component-
    *  local, short-lived, cleared on every release and by `deactivate()`. */
@@ -373,6 +376,7 @@ export class TaskQuickAccessory implements Component, Focusable {
   activate(): boolean {
     const first = this.items[0]
     if (first === undefined) return false
+    this.wheelSelectionPending = false
     this.selectedValue = first.value
     return true
   }
@@ -384,19 +388,21 @@ export class TaskQuickAccessory implements Component, Focusable {
    */
   deactivate(): void {
     this.selectedValue = undefined
+    this.wheelSelectionPending = false
     this.pressedValue = undefined
     this.pressedFrame = undefined
   }
 
   /**
-   * Replace the projected rows. The window follows the SAME row identity it
-   * showed before: a status update never resets the window, an inserted/removed
-   * row rebases onto the surviving first visible value, and a vanished anchor
-   * falls back to the bounded previous index — never to a label or a position
-   * guess.
+   * Replace the projected rows. The window first rebases onto the SAME row
+   * identity it showed before: status updates do not reset it, and insertion
+   * or removal keeps a surviving first-visible row. While ACTIVE, a
+   * surviving selection normally remains visible; a pending wheel target takes
+   * precedence until render() clamps selection into that window. A vanished
+   * anchor falls back to the bounded previous index, never to a label guess.
    *
    * While ACTIVE the selected identity is reconciled against the new rows:
-   * a surviving selection keeps its row (the window follows it), a deleted
+   * a surviving selection keeps its stable value; a deleted
    * selection falls back bounded to the successor of its pre-delete global
    * index (predecessor at the tail), and an emptied projection notifies the
    * host — ONLY while this component really holds the active focus (a
@@ -417,6 +423,7 @@ export class TaskQuickAccessory implements Component, Focusable {
       this.firstVisibleId = undefined
       this.start = 0
       this.selectedValue = undefined
+      this.wheelSelectionPending = false
       this.requestRender()
       // The host notification is deliberate LAST: the component state is
       // already consistent if the host re-enters synchronously.
@@ -452,6 +459,7 @@ export class TaskQuickAccessory implements Component, Focusable {
     }
     this.firstVisibleId = items[this.start]?.value
     if (this.selectedValue === undefined) this.selectedValue = items[0]?.value
+    if (this.focused && !this.wheelSelectionPending) this.ensureVisible()
     this.requestRender()
   }
 
@@ -482,6 +490,7 @@ export class TaskQuickAccessory implements Component, Focusable {
 
   /** Move the selection by a bounded delta (keyboard Up/Down, wheel). */
   private move(delta: number): void {
+    this.wheelSelectionPending = false
     const index = this.selectedValue === undefined ? undefined : this.indexOfValue(this.selectedValue)
     const current = index ?? 0
     const next = Math.min(Math.max(0, current + delta), Math.max(0, this.items.length - 1))
@@ -500,11 +509,11 @@ export class TaskQuickAccessory implements Component, Focusable {
     this.move(delta * this.currentWindow(this.items.length))
   }
 
-  /** Keep the selected row inside the painted window. */
-  private ensureVisible(): void {
+  /** Keep the selected row inside the painted window. `windowSize` lets a
+   *  freshly recomputed layout apply the same invariant before it is painted. */
+  private ensureVisible(windowSize = this.currentWindow(this.items.length)): void {
     const index = this.selectedValue === undefined ? undefined : this.indexOfValue(this.selectedValue)
     if (index === undefined) return
-    const windowSize = this.currentWindow(this.items.length)
     if (index < this.start) this.start = index
     else if (index >= this.start + windowSize) this.start = index - windowSize + 1
     this.start = Math.max(0, Math.min(this.start, Math.max(0, this.items.length - windowSize)))
@@ -525,6 +534,7 @@ export class TaskQuickAccessory implements Component, Focusable {
       const index = this.selectedValue === undefined ? undefined : this.indexOfValue(this.selectedValue)
       // Up at the GLOBAL first row EXITS (plan §1.3) — never wrap.
       if (index === 0) {
+        this.wheelSelectionPending = false
         this.onExit()
         return
       }
@@ -549,6 +559,7 @@ export class TaskQuickAccessory implements Component, Focusable {
       return
     }
     if (componentKeymap.matches(data, 'tasks.search.exit')) {
+      this.wheelSelectionPending = false
       this.onExit()
       return
     }
@@ -568,8 +579,9 @@ export class TaskQuickAccessory implements Component, Focusable {
    * Fullscreen pointer surface (B4-A wheel + B4-B same-row press/release).
    *
    * The wheel keeps its B4-A contract: the whole painted band owns the
-   * wheel (identity row included) and moves the ROW WINDOW without ever
-   * taking focus — focus-adjacent semantics never change here.
+   * wheel (identity row included), moves the row window without taking
+   * focus. A pending scroll keeps Enter on the last-painted selection until
+   * render() paints its matching selection for the new window.
    *
    * A left press on a painted task row records that row's stable VALUE; the
    * synthesized click activates only when the same VALUE still resolves to
@@ -604,6 +616,7 @@ export class TaskQuickAccessory implements Component, Focusable {
       if (next === this.start) return { handled: true, render: false }
       this.start = next
       this.firstVisibleId = this.items[next]?.value
+      if (this.focused) this.wheelSelectionPending = true
       // The painted CONTENT is stale until the repaint this result requests, but the
       // painted GEOMETRY stays the frame the pointer is on: a further wheel arriving
       // before that repaint is still in-band and must not fall through.
@@ -678,6 +691,7 @@ export class TaskQuickAccessory implements Component, Focusable {
     const item = this.items.find(candidate => candidate.value === hit.value)
     if (item === undefined) return { handled: true }
     // Same-row click opens the typed detail directly (no focus detour).
+    this.wheelSelectionPending = false
     this.onActivate(item.value)
     return { handled: true }
   }
@@ -722,21 +736,37 @@ export class TaskQuickAccessory implements Component, Focusable {
     }
     const columns = Math.max(1, Math.floor(width))
     const terminalRows = this.geometry.rows()
-    const layout = planTaskQuickLayout(
+    const chromeRows = this.geometry.chromeRows(columns)
+    let layout = planTaskQuickLayout(
       columns,
       terminalRows,
-      this.geometry.chromeRows(columns),
+      chromeRows,
       this.items.length,
       this.start,
     )
     if (layout.grant === 0 || layout.count === 0) {
       this.painted = undefined
+      this.wheelSelectionPending = false
       // B4-B (review F4): an ACTIVE band that lost its grant (a resize to an
       // extreme frame) retires through the host — the editor regains the
       // keyboard instead of an invisible surface consuming input. A HIDDEN
       // frame was never consuming input, so it stays a data-only update.
       if (this.focused) this.onEmpty()
       return []
+    }
+    if (this.focused) {
+      this.start = layout.start
+      if (this.wheelSelectionPending) {
+        const selectedIndex = this.selectedValue === undefined ? undefined : this.indexOfValue(this.selectedValue)
+        const lastVisibleIndex = layout.start + layout.count - 1
+        if (selectedIndex === undefined || selectedIndex < layout.start) this.selectedValue = this.items[layout.start]!.value
+        else if (selectedIndex > lastVisibleIndex) this.selectedValue = this.items[lastVisibleIndex]!.value
+        this.wheelSelectionPending = false
+      }
+      this.ensureVisible(layout.count)
+      if (this.start !== layout.start) {
+        layout = planTaskQuickLayout(columns, terminalRows, chromeRows, this.items.length, this.start)
+      }
     }
     const lines: string[] = []
     const hits: TaskQuickHit[] = []

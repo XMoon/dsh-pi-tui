@@ -340,17 +340,79 @@ test('the wheel resolves only against the LAST PAINTED frame', () => {
   assert.deepEqual(accessory.handleMouse(wheel(-1, 1)), { handled: true, render: false },
     'a stale frame after a resize is consumed without acting')
   const shrunk = accessory.render(80)
-  // A one-row grant paints ONE content row (no header) and keeps the position.
+  // A one-row grant paints ONE content row (no header) and keeps the selection visible.
   assert.equal(shrunk.length, 1)
-  assert.match(strip(shrunk[0]!), /^  job:b\s+‣ Running\s+2-2\/5$/, 'the wheel moved the window, never the selection — no marker')
+  assert.match(strip(shrunk[0]!), /^> job:c\s+‣ Running\s+3-3\/5$/)
   assert.deepEqual(accessory.handleMouse(wheel(1, 0, { height: 1 })), { handled: true, render: true })
-  assert.match(strip(accessory.render(80)[0]!), /^  job:c\s+‣ Running\s+3-3\/5$/)
+  assert.match(strip(accessory.render(80)[0]!), /^> job:d\s+‣ Running\s+4-4\/5$/)
   // A width resize is caught the same way.
   geometry.cols = 100
   assert.deepEqual(accessory.handleMouse(wheel(-1, 0, { height: 1 })), { handled: true, render: false },
     'a stale frame after a width change is consumed without acting')
   accessory.render(100)
   assert.deepEqual(accessory.handleMouse(wheel(-1, 0, { width: 100, height: 1 })), { handled: true, render: true })
+})
+
+test('wheel bursts keep Enter on the last-painted selection until the burst paints', () => {
+  const rows = [item('job:a'), item('job:b'), item('job:c'), item('job:d'), item('job:e'), item('job:f')]
+  const queued = harness()
+  queued.accessory.setItems(rows)
+  queued.accessory.focused = true
+  assert.ok(queued.accessory.activate())
+  assert.match(strip(queued.accessory.render(80)[2]!), /^> job:a/, 'A is selected in the current frame')
+
+  for (let i = 0; i < 3; i += 1) {
+    assert.deepEqual(queued.accessory.handleMouse(wheel(1, 1)), { handled: true, render: true })
+  }
+  assert.equal(queued.accessory.selected, 'job:a', 'wheel scroll intent does not change the selection before repaint')
+  queued.accessory.handleInput('\r')
+  assert.deepEqual(queued.activations(), ['job:a'], 'Enter still opens the item marked in the last-painted frame')
+
+  const painted = harness()
+  painted.accessory.setItems(rows)
+  painted.accessory.focused = true
+  assert.ok(painted.accessory.activate())
+  painted.accessory.render(80)
+  for (let i = 0; i < 3; i += 1) {
+    assert.deepEqual(painted.accessory.handleMouse(wheel(1, 1)), { handled: true, render: true })
+  }
+  const after = painted.accessory.render(80)
+  assert.match(strip(after[1]!), /showing 4-6\/6$/, 'all queued wheel movement reaches the painted window')
+  assert.match(strip(after[2]!), /^> job:d/, 'the new painted window selects its visible leading row')
+  painted.accessory.handleInput('\r')
+  assert.deepEqual(painted.activations(), ['job:d'], 'Enter after paint opens the new visible selection')
+})
+
+test('a projection commit preserves a pending wheel window until paint', () => {
+  const h = harness()
+  h.accessory.setItems([item('job:a'), item('job:b'), item('job:c'), item('job:d'), item('job:e'), item('job:f')])
+  h.accessory.focused = true
+  assert.ok(h.accessory.activate())
+  h.accessory.render(80)
+  for (let i = 0; i < 3; i += 1) h.accessory.handleMouse(wheel(1, 1))
+
+  h.accessory.setItems([
+    item('job:a'), item('job:b'), item('job:c'), item('job:x'), item('job:y'),
+    item('job:d'), item('job:e'), item('job:f'),
+  ])
+  assert.equal(h.accessory.selected, 'job:a', 'the stable old-frame selection remains until the update paints')
+  const after = h.accessory.render(80)
+  assert.match(strip(after[1]!), /showing 6-8\/8$/, 'the rebased wheel anchor remains the target window')
+  assert.match(strip(after[2]!), /^> job:d/, 'paint commits the leading row of the actual new window')
+})
+
+test('keyboard navigation supersedes a pending wheel window before repaint', () => {
+  const h = harness()
+  h.accessory.setItems([item('job:a'), item('job:b'), item('job:c'), item('job:d'), item('job:e'), item('job:f')])
+  h.accessory.focused = true
+  assert.ok(h.accessory.activate())
+  h.accessory.render(80)
+  for (let i = 0; i < 3; i += 1) h.accessory.handleMouse(wheel(1, 1))
+
+  h.accessory.handleInput('\x1b[B')
+  const after = h.accessory.render(80)
+  assert.match(strip(after[1]!), /showing 2-4\/6$/, 'keyboard selection takes precedence over the pending wheel target')
+  assert.match(strip(after[2]!), /^> job:b/, 'the keyboard-selected identity paints')
 })
 
 test('a height-only repaint invalidates the pressed frame when component geometry is unchanged', () => {
@@ -413,8 +475,6 @@ test('the window rebases on the first visible row ID, not on an index or a label
     item('job:a'), item('job:b', { status: 'failed' }), item('job:c'),
     item('job:d'), item('job:e'), item('job:f'),
   ])
-  accessory.focused = true
-  assert.ok(accessory.activate())
   const updated = accessory.render(80)
   assert.match(strip(updated[1]!), /showing 2-4\/6$/)
   assert.match(strip(updated[2]!), /job:b\s+‣ Failed$/)
@@ -423,8 +483,6 @@ test('the window rebases on the first visible row ID, not on an index or a label
     item('job:x'), item('job:a'), item('job:b'), item('job:c'),
     item('job:d'), item('job:e'), item('job:f'),
   ])
-  accessory.focused = true
-  assert.ok(accessory.activate())
   const inserted = accessory.render(80)
   assert.match(strip(inserted[1]!), /showing 3-5\/7$/)
   assert.match(strip(inserted[2]!), /job:b/)
@@ -432,8 +490,6 @@ test('the window rebases on the first visible row ID, not on an index or a label
   accessory.setItems([
     item('job:x'), item('job:a'), item('job:c'), item('job:d'), item('job:e'), item('job:f'),
   ])
-  accessory.focused = true
-  assert.ok(accessory.activate())
   const removed = accessory.render(80)
   assert.match(strip(removed[1]!), /showing 3-5\/6$/)
   assert.match(strip(removed[2]!), /job:c/, 'index 2 of the remaining rows')
@@ -441,7 +497,7 @@ test('the window rebases on the first visible row ID, not on an index or a label
   geometry.rows = 8
   const shrunk = accessory.render(80)
   assert.equal(shrunk.length, 2)
-  assert.match(strip(shrunk[1]!), /^  job:c\s+‣ Running$/)
+  assert.match(strip(shrunk[1]!), /^> job:c\s+‣ Running$/)
   assert.match(strip(shrunk[0]!), /showing 3-3\/6$/)
   // …and growing back does not jump the window.
   geometry.rows = 24

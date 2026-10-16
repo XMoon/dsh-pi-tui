@@ -422,6 +422,47 @@ test('the Full hint always advertises the Tab type cycle', () => {
     `mixed list advertises the Tab cycle:\n${multi.rendered().map(strip).join('\n')}`)
 })
 
+test('the Full action bar keeps the real Esc outcome last and visible at 44/80/120 columns', () => {
+  const panel = new TaskBrowserPanel(
+    [runningJob(), doneJob(), subagent()],
+    10,
+    { mode: 'full', header: 'tasks · subagents', enableSearch: true },
+    () => {},
+    () => {},
+    () => {},
+  )
+  const assertEscLast = (width: number, outcome: 'close' | 'back'): void => {
+    const rows = panel.render(width).map(strip)
+    assertPhysicalRows(rows, width)
+    const hint = rows.at(-1)!
+    assert.equal(visibleWidth(hint) <= width, true,
+      `width ${width}: the painted hint fits (${visibleWidth(hint)} > ${width}): ${JSON.stringify(hint)}`)
+    const segments = hint.trim().split(' · ')
+    const allowed = outcome === 'close'
+      ? new Set(['Enter open', '↑↓ select', '←→ tree', 's stop', '/ search', 'a scope', 'Shift+Tab type', 'Esc close'])
+      : new Set(['Enter open', '↑↓ select', '←→ edit', 'Shift+Tab type', 'type to filter', 'Esc back'])
+    assert.ok(segments.every(segment => allowed.has(segment)),
+      `width ${width}: only complete advertised segments remain: ${JSON.stringify(segments)}`)
+    assert.equal(segments.at(-1), `Esc ${outcome}`,
+      `width ${width}: the real Esc outcome is the final painted segment:\n${rows.join('\n')}`)
+    if (width === 44) {
+      assert.deepEqual(segments, ['Enter open', '↑↓ select', `Esc ${outcome}`],
+        `width ${width}: lower-priority actions drop whole before Esc`)
+    }
+  }
+
+  for (const width of [44, 80, 120]) {
+    assertEscLast(width, 'close')
+    panel.handleInput('/') // enter the real search mode
+    assertEscLast(width, 'back')
+    panel.handleInput('\x1b') // Esc backs out of search; it does not close Full
+    assertEscLast(width, 'close')
+    assert.ok(panel.render(width).map(strip).some(line => line.includes('bash · pnpm build')),
+      `width ${width}: Esc back leaves the Full Task Center open`)
+  }
+  panel.dispose()
+})
+
 test('a vanished active type snaps the filter back to All on setItems', () => {
   const { panel, rendered } = makePanel(
     [typed(subagent(), 'subagent'), typed(runningJob(), 'bash')],
@@ -1172,9 +1213,8 @@ test('caller-provided header and no-match text project to ONE physical row', () 
   assertPhysicalRows(noMatch, 100)
   assert.ok(noMatch.some(line => line.includes('nothing here')), `the collapsed no-match text must render:\n${noMatch.join('\n')}`)
   // Narrow grants: a LONG no-match message is also width-truncated (the
-  // same one-row contract as the refresh-error banner). Only the
-  // no-match rows are asserted — the static hint text's pre-existing
-  // overflow is separate behavior, unchanged by this containment.
+  // same one-row contract as the refresh-error banner). The Task Center hint
+  // has separate rendered-row width and Esc-order coverage above.
   const longPanel = new TaskBrowserPanel(
     [],
     10,
@@ -1211,9 +1251,8 @@ test('a multiline refresh error stays ONE physical row', () => {
   assert.ok(lines.join('\n').includes('fetch failed retry later EOF'), 'the collapsed error must stay visible')
   assert.ok(lines.length <= 12, 'the banner must stay a single row')
   // Narrow grant: the banner is also WIDTH-truncated — a long dynamic
-  // error must not wrap into extra terminal rows in a direct embedding
-  // (only the banner rows are asserted; the static hint text is a
-  // separate pre-existing behavior, unchanged by this containment).
+  // error must not wrap into extra terminal rows in a direct embedding.
+  // The Task Center hint has separate rendered-row width and Esc-order coverage.
   const narrow = panel.render(20).map(strip)
   const banner = narrow.filter(line => line.includes('fetch failed'))
   assert.ok(banner.length >= 1, `the truncated banner must stay visible:\n${narrow.join('\n')}`)
