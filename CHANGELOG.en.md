@@ -30,10 +30,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   hint and `↓` entry are withheld without shrinking the Footer. The legacy modal
   Quick is retired: `↓` opens this on-demand window and
   `/tasks` remains the Full Task Center. The task panel's action bar also
-  settles to the design language: `Esc close` moves last among the navigation
-  verbs and never truncates on narrow frames, the low-frequency management
-  verbs drop as whole segments, and advertised bindings use their canonical
-  keymap labels. Full Task Center rows now share one `‣` marker and semantic
+  settles to the design language: `Enter open` leads, navigation and low-frequency
+  management verbs drop as whole segments by priority, the real `Esc close` or
+  `Esc back` remains last, and wheel scrolling/live task refreshes keep Enter
+  within the painted task window. Advertised bindings use canonical keymap labels.
+  Full Task Center rows now share one `‣` marker and semantic
   Title Case status word instead of a per-status glyph set.
 
 - A Task Quick window now sits below the editor (sharing ONE live row budget

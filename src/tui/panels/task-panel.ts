@@ -15,6 +15,7 @@ import type { Component, Focusable, TuiMouseEvent, TuiMouseEventResult } from '@
 import { componentKeymap } from '../keybindings/component-keymap.ts'
 import { color, taskStatusColor, taskStatusWord } from '../theme/runtime.ts'
 import { SelectedMarquee } from '../components/marquee.ts'
+import { renderActionBarRow, type ActionBarSegment } from '../presentation/action-bar.ts'
 import { sanitizedPhysicalLine } from '../presentation/lines.ts'
 import {
   isTaskItemActive,
@@ -1188,34 +1189,40 @@ export class TaskBrowserPanel implements Component, Focusable {
     return this.hintFor(this.lastRenderWidth)
   }
 
-  /**
-   * D8 settled (B4-B): `Esc close` is the LAST verb of the primary bar and
-   * is always painted — the low-frequency management verbs (`/ search`,
-   * `a scope`, reverse type cycling) form a TAIL that is dropped WHOLE when the
-   * frame cannot hold it (§8.6 whole-segment drops; Esc never truncates).
-   */
+  /** D8: preserve action order and drop lower-priority whole segments before
+   *  the final Esc segment. The caller reserves the two-cell row indent. */
   private hintFor(width: number): string {
-    if (this.pendingStopValue !== undefined) return 'Y confirm stop · Esc cancel'
+    const actionWidth = Math.max(0, width - 2)
+    if (this.pendingStopValue !== undefined) {
+      return renderActionBarRow([
+        { text: 'Y confirm stop', priority: 90 },
+        { text: 'Esc cancel', priority: 1000 },
+      ], actionWidth)
+    }
     if (this.searchMode) {
-      // Search mode owns every printable key as query text — A/S/N/R and
-      // the tree arrows are QUERY characters now, never the ordinary task
-      // actions. Advertise only what search mode actually does, with the
-      // ESCAPE verb FIRST: the hint is one line and a default 80-column
-      // terminal truncates the tail — esc back is the most important
-      // verb, so it must never be the piece that gets cut off. Shift+Tab
-      // is advertised because it now cycles types in reverse here too.
-      return `type to filter · Esc back · ←→ edit · ↑↓ select · ${componentKeymap.keyHint('tasks.type.previous')} type · Enter open`
+      // Printable keys and the arrows are query/edit input in search mode;
+      // only the actions handled by this state are advertised. Esc backs out
+      // of search without closing the Full Task Center.
+      const segments: ActionBarSegment[] = [
+        { text: 'Enter open', priority: 90 },
+        { text: '↑↓ select', priority: 80 },
+        { text: '←→ edit', priority: 70 },
+        { text: `${componentKeymap.keyHint('tasks.type.previous')} type`, priority: 60 },
+        { text: 'type to filter', priority: 10 },
+        { text: 'Esc back', priority: 1000 },
+      ]
+      return renderActionBarRow(segments, actionWidth)
     }
-    // D8: `Esc` is the LAST verb on the bar; `s` (§4.1 lowercase) stops.
-    const primary = ['↑↓ select', '←→ tree', 's stop', 'Enter open', 'Esc close']
-    const management: string[] = []
-    if (this.searchEnabled) management.push('/ search')
-    management.push('a scope', `${componentKeymap.keyHint('tasks.type.previous')} type`)
-    const primaryBar = primary.join(' · ')
-    const tail = management.join(' · ')
-    if (tail === '' || width === 0 || visibleWidth(primaryBar) + 3 + visibleWidth(tail) <= width) {
-      return management.length === 0 ? primaryBar : `${primaryBar} · ${tail}`
-    }
-    return primaryBar
+    const segments: ActionBarSegment[] = [
+      { text: 'Enter open', priority: 90 },
+      { text: '↑↓ select', priority: 80 },
+      { text: '←→ tree', priority: 70 },
+      { text: 's stop', priority: 60 },
+      ...(this.searchEnabled ? [{ text: '/ search', priority: 30 }] : []),
+      { text: 'a scope', priority: 20 },
+      { text: `${componentKeymap.keyHint('tasks.type.previous')} type`, priority: 10 },
+      { text: 'Esc close', priority: 1000 },
+    ]
+    return renderActionBarRow(segments, actionWidth)
   }
 }

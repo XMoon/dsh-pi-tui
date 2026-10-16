@@ -31,6 +31,7 @@
 
 import assert from 'node:assert/strict'
 import { afterEach, test } from 'node:test'
+import { visibleWidth } from '@xmoon76/pi-tui'
 import { TuiApp, type TuiAppOptions } from '../src/tui-app.ts'
 import { EditorRegistry } from '../src/extension/internal/editor-registry.ts'
 import { HistoryPanel } from '../src/tui/panels/history-panel.ts'
@@ -483,6 +484,83 @@ test('B4B-06 Enter opens the real Job workspace; a refused value never disturbs 
   // (no surface opens), a current one routes.
   assert.equal(h.tasks.openQuickTaskItem('job:missing'), false, 'a stale value is refused, no surface opens')
   assert.equal(h.tasks.openQuickTaskItem('job:j1'), true, 'a current value routes to the Job open')
+})
+
+test('B4B-06c a live SGR wheel keeps Enter on the selected painted Quick row', async () => {
+  const h = await startQuick({
+    roster: [
+      job('j1', 'build', 'running'), job('j2', 'test', 'running'), job('j3', 'lint', 'running'),
+      job('j4', 'deploy', 'running'), job('j5', 'audit', 'running'),
+    ],
+  })
+  for (let i = 0; i < 8; i++) await new Promise(r => setTimeout(r, 0))
+  await h.vt.waitForRender()
+  h.app.setFullscreen(true)
+  await h.vt.waitForRender()
+
+  h.vt.sendInput('\x1b[B') // enter Quick through the effective editor binding
+  await h.vt.waitForRender()
+  const before = h.band()
+  assert.equal(before.items.length, 3, `the first three task rows paint:\n${view(h.vt)}`)
+  assert.match(strip(before.items[0]!), /^> .*bash · build/, 'the first painted task starts selected')
+
+  // The real alt-screen router sends this native SGR wheel to Task Quick.
+  const firstItemRow = before.identity + 1
+  h.vt.sendInput(`\x1b[<65;5;${firstItemRow + 1}M`)
+  await h.vt.waitForRender()
+  await h.vt.waitForRender()
+  const after = h.band()
+  assert.match(strip(rawView(h.vt)[after.identity]!), /showing 2-4\/5$/, `the wheel advances the painted window:\n${view(h.vt)}`)
+  assert.match(strip(after.items[0]!), /^> .*bash · test/, `selection moves to the visible edge row:\n${view(h.vt)}`)
+
+  h.vt.sendInput('\r')
+  await h.vt.waitForRender()
+  await sleep(20)
+  assert.deepEqual(h.quickSelects(), ['job:j2'], 'Enter opens the selected value from the painted window')
+  assert.ok(h.app.focusedComponentForTest() instanceof JobInspectorPanel, `the real Job workspace opens:\n${view(h.vt)}`)
+  assert.ok(view(h.vt).includes('j2'), `the opened workspace is the selected job:\n${view(h.vt)}`)
+})
+
+test('B4B-06d an async projection insertion keeps the surviving Enter selection painted', async () => {
+  const h = await startQuick({
+    roster: [
+      job('j1', 'build', 'running'), job('j2', 'test', 'running'), job('j3', 'lint', 'running'),
+      job('j4', 'deploy', 'running'), job('j5', 'audit', 'running'),
+    ],
+  })
+  for (let i = 0; i < 8; i++) await new Promise(r => setTimeout(r, 0))
+  await h.vt.waitForRender()
+  h.app.setFullscreen(true)
+  await h.vt.waitForRender()
+
+  h.vt.sendInput('\x1b[B') // enter Quick
+  await h.vt.waitForRender()
+  h.vt.sendInput('\x1b[B') // select the stable job:j2 identity
+  await h.vt.waitForRender()
+  assert.match(strip(h.band().items[1]!), /^> .*bash · test/, 'job:j2 is selected before the async refresh')
+
+  // A later roster publication inserts two rows ahead of the selected identity
+  // while leaving the first-visible anchor intact.
+  await sleep(0)
+  h.roster.rows = [
+    job('j1', 'build', 'running'), job('j6', 'setup', 'running'), job('j7', 'compile', 'running'),
+    job('j2', 'test', 'running'), job('j3', 'lint', 'running'), job('j4', 'deploy', 'running'),
+    job('j5', 'audit', 'running'),
+  ]
+  h.tasks.refreshTasks()
+  await h.vt.waitForRender()
+  const refreshed = h.band()
+  assert.match(strip(rawView(h.vt)[refreshed.identity]!), /showing 2-4\/7$/, `the stable selection rebases the painted window:\n${view(h.vt)}`)
+  const selected = refreshed.items.filter(line => strip(line).startsWith('> '))
+  assert.equal(selected.length, 1, `exactly one task row remains selected:\n${view(h.vt)}`)
+  assert.match(strip(selected[0]!), /bash · test/, `job:j2 remains the visible selection:\n${view(h.vt)}`)
+
+  h.vt.sendInput('\r')
+  await h.vt.waitForRender()
+  await sleep(20)
+  assert.deepEqual(h.quickSelects(), ['job:j2'], 'Enter routes the reconciled stable identity')
+  assert.ok(h.app.focusedComponentForTest() instanceof JobInspectorPanel, `the real Job workspace opens:\n${view(h.vt)}`)
+  assert.ok(view(h.vt).includes('j2'), `the opened workspace is the selected job:\n${view(h.vt)}`)
 })
 
 test('B4B-06b Enter routes a Quick Subagent through the real typed enterView authority', async () => {
@@ -1165,6 +1243,27 @@ test('B4B-14 the /tasks Full browser opens and filters while the Quick stays hid
   h.tasks.openTasksBrowser('full')
   await h.vt.waitForRender()
   assert.ok(view(h.vt).includes('Tasks [TRACKED]'), `the Full browser opens:\n${view(h.vt)}`)
+  for (const width of [44, 80, 120]) {
+    h.vt.resize(width, 40)
+    await h.vt.waitForRender()
+    const ordinaryHint = rawView(h.vt).find(line => line.includes('Esc close'))
+    assert.ok(ordinaryHint, `width ${width}: the Full action hint paints:\n${view(h.vt)}`)
+    const ordinaryEsc = ordinaryHint.slice(ordinaryHint.indexOf('Esc close') + 'Esc close'.length)
+    assert.ok(!ordinaryEsc.includes(' · '), `width ${width}: Esc close is the final painted action:\n${ordinaryHint}`)
+    assert.ok(visibleWidth(ordinaryHint) <= width, `width ${width}: the Full action row fits (${visibleWidth(ordinaryHint)} > ${width})`)
+
+    h.vt.sendInput('/')
+    await h.vt.waitForRender()
+    const searchHint = rawView(h.vt).find(line => line.includes('Esc back'))
+    assert.ok(searchHint, `width ${width}: search advertises its real Esc back action:\n${view(h.vt)}`)
+    const searchEsc = searchHint.slice(searchHint.indexOf('Esc back') + 'Esc back'.length)
+    assert.ok(!searchEsc.includes(' · '), `width ${width}: Esc back is the final painted action:\n${searchHint}`)
+    assert.ok(visibleWidth(searchHint) <= width, `width ${width}: the search action row fits (${visibleWidth(searchHint)} > ${width})`)
+    h.vt.sendInput('\x1b')
+    await h.vt.waitForRender()
+  }
+  h.vt.resize(120, 40)
+  await h.vt.waitForRender()
   // Search: / types a query and filters the rows.
   h.vt.sendInput('/')
   await h.vt.waitForRender()
