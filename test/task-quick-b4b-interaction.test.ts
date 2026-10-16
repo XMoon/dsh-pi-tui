@@ -563,6 +563,42 @@ test('B4B-06d an async projection insertion keeps the surviving Enter selection 
   assert.ok(view(h.vt).includes('j2'), `the opened workspace is the selected job:\n${view(h.vt)}`)
 })
 
+test('B4B-06e a deleted Quick selection cannot open its fallback before paint', async () => {
+  const h = await startQuick({
+    roster: [job('j1', 'build', 'running'), job('j2', 'test', 'running'), job('j3', 'lint', 'running')],
+  })
+  for (let i = 0; i < 8; i += 1) await new Promise(r => setTimeout(r, 0))
+  await h.vt.waitForRender()
+  h.app.setFullscreen(true)
+  await h.vt.waitForRender()
+
+  h.vt.sendInput('\x1b[B') // enter Quick
+  await h.vt.waitForRender()
+  h.vt.sendInput('\x1b[B') // select job:j2
+  await h.vt.waitForRender()
+  assert.match(strip(h.band().items[1]!), /^> .*bash · test/, 'job:j2 is selected in the painted frame')
+
+  h.roster.rows = [job('j1', 'build', 'running'), job('j3', 'lint', 'running')]
+  h.tasks.refreshTasks()
+  h.vt.sendInput('\r') // The roster commit queued a paint; this input runs before it.
+  assert.deepEqual(h.quickSelects(), [], 'Enter cannot open the unpainted successor fallback')
+  assert.equal(h.app.taskQuickFocusedForTest(), true, 'the refused Enter leaves Quick active')
+  assert.match(strip(h.band().items[1]!), /^> .*bash · test/, 'the last painted selection remains on screen')
+
+  await h.vt.waitForRender()
+  const refreshed = h.band()
+  const selected = refreshed.items.filter(line => strip(line).startsWith('> '))
+  assert.equal(selected.length, 1, `the new frame has exactly one selected task:\n${view(h.vt)}`)
+  assert.match(strip(selected[0]!), /bash · lint/, 'the successor becomes visibly selected after paint')
+
+  h.vt.sendInput('\r')
+  await h.vt.waitForRender()
+  await sleep(20)
+  assert.deepEqual(h.quickSelects(), ['job:j3'], 'Enter routes the painted successor through Task Runtime')
+  assert.ok(h.app.focusedComponentForTest() instanceof JobInspectorPanel, `the real Job workspace opens:\n${view(h.vt)}`)
+  assert.ok(view(h.vt).includes('j3'), `the opened workspace is the painted successor:\n${view(h.vt)}`)
+})
+
 test('B4B-06b Enter routes a Quick Subagent through the real typed enterView authority', async () => {
   const h = await startQuick({
     roster: [],
