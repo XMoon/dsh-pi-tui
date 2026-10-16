@@ -25,13 +25,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   viewer, parked Question reopen), never a Stop. Shell mode, autocomplete,
   history browsing and blocking modals keep `↓` for its editing meaning. The
   footer's `↓ view` hint now tracks the real admission (a disabled action or a
-  blocking owner drops only the hint — the task count and `?N`/`!N` stay), and
-  the legacy modal Quick is retired: `↓` opens this on-demand window and
+  blocking owner drops only the hint — the task count and `?N`/`!N` stay). On an
+  extreme frame where the hint-enabled Footer candidate leaves no task row, both
+  hint and `↓` entry are withheld without shrinking the Footer. The legacy modal
+  Quick is retired: `↓` opens this on-demand window and
   `/tasks` remains the Full Task Center. The task panel's action bar also
   settles to the design language: `Esc close` moves last among the navigation
   verbs and never truncates on narrow frames, the low-frequency management
-  verbs drop as whole segments, key names are lowercase, and `⇧Tab` is spelled
-  `shift+tab`.
+  verbs drop as whole segments, and advertised bindings use their canonical
+  keymap labels. Full Task Center rows now share one `‣` marker and semantic
+  Title Case status word instead of a per-status glyph set.
 
 - A Task Quick window now sits below the editor (sharing ONE live row budget
   with the Editor, the footer and the transcript: the editor seat, the
@@ -45,8 +48,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   words with the true `showing x-y/N` position. Passive painting, refresh,
   wheel and resize never change failure acknowledgement (`!N`) or a Question's
   answer state. In fullscreen the wheel scrolls only the window under the
-  pointer; the regular screen stays keyboard-only. The delivered shape is the
-  NEXT bullet (on-demand, under the footer).
+  pointer; the regular screen stays keyboard-only.
 
 
 - `Ctrl+R` history now declares its own boundary: one `─` above the identity row

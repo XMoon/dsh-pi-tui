@@ -50,7 +50,8 @@ export interface PluginKeybindingRule {
 }
 
 /** The conditional affordance rules synthesized by the host (plan §5):
- * `↓` + empty editor + active tasks → app.tasks.open. */
+ * an effective `↓` from the focused host Editor's last visual line, with the
+ * Task Quick projection and row grant admitted → app.tasks.open. */
 export interface CompositionRule {
   readonly action: AppKeybindingId
   readonly key: KeyId
@@ -129,8 +130,8 @@ export class EffectiveKeymap {
       rules.some(rule => rule.action === action && rule.key === key)
     // The conditional predicate of one action (the composition rules):
     // a USER override of a conditional action must keep the SAME
-    // predicate — e.g. a remap of app.tasks.open must not open the task
-    // browser with a non-empty editor or no active tasks (plan §5).
+    // predicate — e.g. remapping app.tasks.open preserves the focused-host,
+    // last-visual-line Task Quick admission and its live-row/geometry gates.
     const predicateByAction = new Map<string, (context: KeybindingContext) => boolean>()
     for (const composition of this.compositionRules) {
       predicateByAction.set(composition.action, composition.predicate)
@@ -519,7 +520,7 @@ export class EffectiveKeymap {
    * predicate passes. Used by the leader machine before dispatching a
    * completion — a leader sequence is another TRIGGER of the same
    * semantic action and must obey the action's context predicate (e.g.
-   * the empty-editor ↓ tasks affordance), never a predicate bypass.
+   * the focused host Editor's last-visual-line Task Quick affordance), never a predicate bypass.
    * Actions with no effective rules cannot activate. */
   canActivate(action: string, context: KeybindingContext): boolean {
     // ACTION AVAILABILITY (convergence §4.7 finding): whether the
@@ -530,7 +531,7 @@ export class EffectiveKeymap {
     // the action unavailable to its OTHER triggers (leader sequences).
     //
     // The availability is the action's context PREDICATE set (the
-    // composition affordances like the empty-editor ↓ tasks rule):
+    // composition affordances like effective ↓ entry to Task Quick from the focused host Editor's last visual line):
     // every applicable predicate must be satisfiable. An action with NO
     // predicates is always available (the caller already checked
     // disabled/reserved).

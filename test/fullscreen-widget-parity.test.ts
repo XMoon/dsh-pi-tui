@@ -23,6 +23,8 @@ import { PI_TUI_EXTENSIONS_SERVICE, apply as applyExtensionHost } from '../src/e
 import { TUI_STARTUP_SERVICE } from '../src/startup.ts'
 import { setTheme } from '../src/tui/theme/runtime.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
+import type { FooterLayoutV1 } from '../src/tui/footer/presentation-types.ts'
+import type { TaskPanelItem } from '../src/app/surface/task-presentation.ts'
 
 /** The process slot (vendored fork keybindings) is released only by the FINAL
  * dispose, never by stop(): every TuiApp started here is disposed after each
@@ -274,6 +276,183 @@ function countWidgetRefresh(host: SurfaceHost): () => number {
   }
   return () => calls
 }
+
+test('B4B addendum physical matrix preserves below widgets, two-row Footer, multiline Editor and transcript on both roots', async () => {
+  const taskItems: TaskPanelItem[] = [
+    { value: 'job:matrix-a', label: 'Q-MATRIX-A', status: 'running', active: true, source: 'job', type: 'bash', canStop: true },
+    { value: 'job:matrix-b', label: 'Q-MATRIX-B', status: 'running', active: true, source: 'job', type: 'bash', canStop: true },
+    { value: 'job:matrix-c', label: 'Q-MATRIX-C', status: 'running', active: true, source: 'job', type: 'bash', canStop: true },
+  ]
+  const customFooter: FooterLayoutV1 = {
+    schemaVersion: 1,
+    rows: [
+      { left: [{ id: 'tasks' }], right: [] },
+      { left: [{ id: 'model' }], right: [] },
+    ],
+  }
+  const cases = [
+    { name: '80x24-full-below-1', cols: 80, rows: 24, footer: 'full', below: ['BELOW-24-FULL'], instruction: false, draft: 'EDITOR FIRST LINE\nEDITOR LAST LINE' },
+    { name: '80x24-compact-below-2', cols: 80, rows: 24, footer: 'compact', below: ['BELOW-24-COMPACT-A', 'BELOW-24-COMPACT-B'], draft: 'EDITOR FIRST LINE\nEDITOR LAST LINE' },
+    { name: '80x24-custom-below-3', cols: 80, rows: 24, footer: 'custom', below: ['BELOW-24-CUSTOM-A', 'BELOW-24-CUSTOM-B', 'BELOW-24-CUSTOM-C'], expectTwoFooterRows: true, draft: 'EDITOR FIRST LINE\nEDITOR LAST LINE' },
+    { name: '44x20-custom-cjk-below-3', cols: 44, rows: 20, footer: 'custom', below: ['下方组件甲', '下方组件乙', '下方组件丙'], expectTwoFooterRows: true, draft: '编辑器第一行\n编辑器末行' },
+    { name: '80x10-compact-below-1', cols: 80, rows: 10, footer: 'compact', below: ['BELOW-10-COMPACT'], draft: 'EDITOR FIRST LINE\nEDITOR LAST LINE' },
+    { name: '80x8-full-below-3', cols: 80, rows: 8, footer: 'full', below: ['BELOW-8-FULL-A', 'BELOW-8-FULL-B', 'BELOW-8-FULL-C'], draft: 'EDITOR FIRST LINE\nEDITOR LAST LINE' },
+  ] as const
+
+  for (const scenario of cases) {
+    for (const fullscreen of [false, true]) {
+      const h = makeHarness(scenario.cols, scenario.rows)
+      try {
+        await h.vt.waitForRender()
+        registerRows(h.ledger, 'input.widget.below', `matrix-${scenario.name}`, scenario.below)
+        h.app.setTaskSummary({ runningAgents: 0, totalAgents: 0, runningJobs: 3, totalJobs: 3, failedAttention: 0, failedTotal: 0 })
+        h.app.setQuickTaskItems(taskItems)
+        h.app.setStatus({ model: 'matrix-model' })
+        if (scenario.footer === 'compact') h.app.setFooterPreset('compact')
+        else h.app.setFooterPreset('full')
+        if (scenario.footer === 'custom') h.app.setFooterLayout(customFooter)
+        h.app.setTranscript([{ kind: 'assistant', turn: 0, text: 'MATRIX-TRANSCRIPT' }])
+        h.app.setDraft(scenario.draft)
+        await settle()
+        await h.vt.waitForRender()
+        // The Host instruction is independently verified by the real narrow
+        // exit-confirmation VT test; a non-empty draft intentionally preserves
+        // Ctrl+D's forward-delete behavior, so this matrix does not synthesize
+        // an impossible instruction+draft state.
+        if (fullscreen) h.app.setFullscreen(true)
+        await h.vt.waitForRender()
+        await settle()
+
+        const hidden = painted(h.vt)
+        assert.ok(!hidden.some(line => line.includes('Task Quick') || taskItems.some(item => line.includes(item.label))),
+          `${scenario.name}/${fullscreen ? 'fullscreen' : 'main'}: Quick is hidden before entry:\n${hidden.join('\n')}`)
+        const mainShortException = scenario.rows === 8 && !fullscreen
+        if (mainShortException) {
+          assert.ok(!hidden.some(line => line.includes('MATRIX-TRANSCRIPT')),
+            `${scenario.name}: the existing flowing Main Root may place Transcript above the short viewport`)
+        } else {
+          assert.ok(hidden.some(line => line.includes('MATRIX-TRANSCRIPT')),
+            `${scenario.name}/${fullscreen ? 'fullscreen' : 'main'}: the Transcript keeps a visible row:\n${hidden.join('\n')}`)
+        }
+        const initialFooter = h.app.footerRenderRowsForTest().map(strip).map(row => row.trimEnd()).filter(Boolean)
+        assert.ok(initialFooter.length > 0, `${scenario.name}: the Footer keeps real content`)
+        for (const footerRow of initialFooter) {
+          assert.ok(hidden.some(line => line.includes(footerRow)),
+            `${scenario.name}: the hidden frame keeps every Footer row visible: ${JSON.stringify(footerRow)}\n${hidden.join('\n')}`)
+        }
+        if ('expectTwoFooterRows' in scenario && scenario.expectTwoFooterRows) {
+          assert.equal(initialFooter.length, 2, `${scenario.name}: custom Footer really occupies two physical rows`)
+        }
+        const hiddenEditor = editorBounds(hidden)
+        const hiddenWidgetRows = outlet(h.host, 'below').split('\n').filter(Boolean)
+        if (mainShortException) {
+          assert.equal(hiddenWidgetRows.length, 2, `${scenario.name}: preserve the historical Main grant of floor(8/4) below-widget rows`)
+          assert.ok(initialFooter.some(row => row.includes('3/3 tracked jobs')), `${scenario.name}: the Task Badge remains intact`)
+          assert.ok(!initialFooter.some(row => row.includes('↓ view')), `${scenario.name}: the no-room admission hint is absent`)
+        }
+        const hiddenWidgetIndices = scenario.below
+          .map(marker => hidden.findIndex(line => line.includes(marker)))
+          .filter(index => index >= 0)
+        assert.equal(hiddenWidgetIndices.length, hiddenWidgetRows.length,
+          `${scenario.name}: the hidden frame paints only the public widget's actual grant`)
+        assert.ok(hiddenWidgetIndices.every(index => index > hiddenEditor.bottom),
+          `${scenario.name}: every granted below-widget row follows the Editor`)
+        const hiddenFooterIndices = initialFooter.map(row => hidden.findIndex(line => line.includes(row)))
+        assert.ok(hiddenFooterIndices.every(index => index >= 0), `${scenario.name}: each hidden Footer row is physically visible`)
+        if (hiddenWidgetIndices.length > 0) {
+          assert.ok(Math.max(...hiddenWidgetIndices) < Math.min(...hiddenFooterIndices),
+            `${scenario.name}: the complete public below grant precedes the Footer:\n${hidden.join('\n')}`)
+        }
+        if (fullscreen) {
+          const scroll = h.app.fullscreenScrollForTest()
+          assert.ok(scroll !== undefined && scroll.viewportHeight >= 1,
+            `${scenario.name}: fullscreen preserves at least one Transcript row`)
+        }
+
+        const entered = h.app.enterTaskQuick()
+        await h.vt.waitForRender()
+        const active = painted(h.vt)
+        if (scenario.rows >= 20) assert.equal(entered, true, `${scenario.name}: ordinary and narrow frames admit at least one task row`)
+        if (scenario.rows === 10) assert.equal(entered, true, `${scenario.name}: the one-row below widget and compact Footer still leave one task row`)
+        if (scenario.rows === 8) assert.equal(entered, false, `${scenario.name}: the full Footer, multiline Editor and below widget take priority over Quick`)
+        assert.equal(h.app.taskQuickFocusedForTest(), entered, `${scenario.name}: entry result and physical focus agree`)
+        if (!mainShortException) {
+          assert.ok(active.some(line => line.includes('MATRIX-TRANSCRIPT')),
+            `${scenario.name}: the active frame retains the Transcript row:\n${active.join('\n')}`)
+        }
+        const footerRows = h.app.footerRenderRowsForTest().map(strip).map(row => row.trimEnd()).filter(Boolean)
+        for (const footerRow of footerRows) {
+          assert.ok(active.some(line => line.includes(footerRow)),
+            `${scenario.name}: Quick may not clip or borrow a Footer row: ${JSON.stringify(footerRow)}\n${active.join('\n')}`)
+        }
+
+        if (entered) {
+          const editor = editorBounds(active)
+          const widgetRows = outlet(h.host, 'below').split('\n').filter(Boolean)
+          const widgetIndices = scenario.below
+            .map(marker => active.findIndex(line => line.includes(marker)))
+            .filter(index => index >= 0)
+          assert.equal(widgetIndices.length, widgetRows.length,
+            `${scenario.name}: only the public widget's actual grant is painted`)
+          assert.deepEqual(widgetIndices, [...widgetIndices].sort((left, right) => left - right),
+            `${scenario.name}: below-widget rows retain their order`)
+          for (const index of widgetIndices) {
+            assert.ok(index > editor.bottom, `${scenario.name}: the below widget remains after the Editor seat`)
+          }
+          const footerIndices = footerRows.map(row => active.findIndex(line => line.includes(row)))
+          assert.ok(footerIndices.every(index => index >= 0), `${scenario.name}: every Footer row has a physical cell`)
+          const footerFirst = Math.min(...footerIndices)
+          const footerLast = Math.max(...footerIndices)
+          if (widgetIndices.length > 0) {
+            assert.ok(Math.max(...widgetIndices) < footerFirst,
+              `${scenario.name}: every granted below-widget row precedes the Footer:\n${active.join('\n')}`)
+          }
+          const itemIndices = taskItems.map(item => active.findIndex(line => line.includes(item.label))).filter(index => index >= 0)
+          assert.ok(itemIndices.length >= 1, `${scenario.name}: a granted Quick paints a real task row:\n${active.join('\n')}`)
+          const identity = active.findIndex(line => line.startsWith('Task Quick'))
+          let quickTop = identity >= 0 ? identity : Math.min(...itemIndices)
+          if (identity > 0 && /^─+$/.test(active[identity - 1]!.trim())) quickTop = identity - 1
+          assert.ok(quickTop > footerLast,
+            `${scenario.name}: Footer rows precede the actual Quick band:\n${active.join('\n')}`)
+          assert.ok(itemIndices.every(index => index > footerLast),
+            `${scenario.name}: task rows are physically below the complete Footer`)
+          assert.ok(itemIndices.every(index => index >= quickTop), `${scenario.name}: task rows follow the optional divider/header`)
+
+          h.vt.sendInput('\x1b')
+          await h.vt.waitForRender()
+          const closed = painted(h.vt)
+          assert.ok(!closed.some(line => line.includes('Task Quick') || taskItems.some(item => line.includes(item.label))),
+            `${scenario.name}: exit leaves no Quick paint:\n${closed.join('\n')}`)
+          const closedFooter = h.app.footerRenderRowsForTest().map(strip).map(row => row.trimEnd()).filter(Boolean)
+          const closedFooterLast = Math.max(...closedFooter.map(row => closed.findIndex(line => line.includes(row))))
+          assert.ok(!/^─+$/.test(closed[closedFooterLast + 1]?.trim() ?? ''),
+            `${scenario.name}: exit leaves no Quick-owned divider below Footer:\n${closed.join('\n')}`)
+        } else {
+          assert.ok(!active.some(line => line.includes('Task Quick') || taskItems.some(item => line.includes(item.label))),
+            `${scenario.name}: a refused entry leaves no Quick identity, item or divider:\n${active.join('\n')}`)
+          if (mainShortException) {
+            assert.equal(outlet(h.host, 'below').split('\n').filter(Boolean).length, 2,
+              `${scenario.name}: a refused Quick entry does not reduce the Main widget grant`)
+            const draft = h.app.getDraft()
+            h.vt.sendInput('\x1b[B')
+            await h.vt.waitForRender()
+            assert.equal(h.app.getDraft(), draft, `${scenario.name}: Down remains an Editor no-op when Quick has no grant`)
+            assert.equal(h.app.focusSeatForTest(), 'editor', `${scenario.name}: the refused trigger never transfers focus`)
+            h.vt.resize(80, 24)
+            await h.vt.waitForRender()
+            const restored = painted(h.vt)
+            assert.ok(restored.some(line => line.includes('MATRIX-TRANSCRIPT')),
+              `${scenario.name}: Transcript content returns to the viewport when the flowing document fits`)
+            assert.ok(!restored.some(line => line.includes('Task Quick') || taskItems.some(item => line.includes(item.label))),
+              `${scenario.name}: increasing the Main viewport does not auto-open Quick`)
+          }
+        }
+      } finally {
+        if (!h.app.isDisposed()) h.app.dispose()
+      }
+    }
+  }
+})
 
 // ── D-T01: the same contribution paints on both roots ────────────────────
 

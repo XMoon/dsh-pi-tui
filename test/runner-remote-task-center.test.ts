@@ -473,8 +473,8 @@ test('L6 §14.9: the RENDERED /tasks row and badge follow the official Client Se
   await waitFor('the rendered child A row shows running', () =>
     /child A m3-5-pr2-child-a · mode\s+continuable · activity\s+running/u.test(viewport()), 20_000)
   const runningView = viewport()
-  assert.match(runningView, /subagent · child A m3-5-pr2-child-a · continuable\s+running/u,
-    `the row's own status tail must read running:\n${runningView}`)
+  assert.match(runningView, /subagent · child A m3-5-pr2-child-a · continuable\s+‣ Running/u,
+    `the row's own status tail must show the shared marker and Running word:\n${runningView}`)
   // The dock/agents badge (the StatusStore activity projection) arms from the
   // same projected activity.
   assert.equal(app.statusStore.snapshot().activity?.childAgentCount, 1,
@@ -495,6 +495,9 @@ test('L6 §14.9: the RENDERED /tasks row and badge follow the official Client Se
     sessions.list.getSnapshot().byId[CHILD_A_ID]?.running === false, 15_000)
   await waitFor('the rendered child A row converges to inactive', () =>
     /child A m3-5-pr2-child-a · mode\s+continuable · activity\s+inactive/u.test(viewport()), 20_000)
+  const inactiveView = viewport()
+  assert.match(inactiveView, /subagent · child A m3-5-pr2-child-a · continuable\s+‣ Inactive/u,
+    `the row's own status tail must converge to the shared marker and Inactive word:\n${inactiveView}`)
   assert.equal(app.statusStore.snapshot().activity?.childAgentCount, 0,
     'the agents badge must converge back to zero')
   const idle = await fixture.aggregate.presentation.task.readDescendants(PARENT_ID)

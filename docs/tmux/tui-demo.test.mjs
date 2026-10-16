@@ -1,7 +1,7 @@
 /**
  * Structural safety gates for the interactive tmux demo. The demo itself is
- * intentionally manual, but these invariants prevent concurrent runs from
- * sharing/deleting one another's backups or racing on the real settings file.
+ * intentionally manual, but every run owns a unique output directory and
+ * isolated DSH_HOME so concurrent runs cannot share runtime state.
  * @module docs/tmux/tui-demo.test
  */
 
@@ -11,18 +11,23 @@ import test from 'node:test'
 
 const script = await readFile(new URL('./tui-demo.sh', import.meta.url), 'utf8')
 
-test('each tmux demo owns a private output and backup directory', () => {
+test('each tmux demo owns a private output directory and DSH_HOME', () => {
   assert.match(script, /OUT=\$\(mktemp -d \/tmp\/tui-demo\.XXXXXX\)/)
-  assert.match(script, /BACKUP="\$OUT\/settings\.yaml\.bak"/)
+  assert.match(script, /DSH_HOME="\$OUT\/dsh-home"/)
+  assert.match(script, /mkdir -p "\$DSH_HOME"/)
+  assert.match(script, /tmux capture-pane -t "\$S" -p > "\$OUT\/\$1\.txt"/)
+  assert.match(script, /tmux capture-pane -t "\$S" -e -p > "\$OUT\/\$1\.ansi"/)
+  assert.match(script, /node "\$\(dirname "\$0"\)\/ansi2html\.mjs" "\$ansi" "\$OUT\/\$base\.html"/)
   assert.doesNotMatch(script, /^OUT=\/tmp\/tui-demo$/m, 'fixed output directory would be shared')
   assert.doesNotMatch(script, /rm -f "\$OUT"\/\*/, 'one run must never clear another run\'s captures')
 })
 
-test('the settings backup and temporary writes are serialized across runs', () => {
-  const lockIndex = script.indexOf('flock -n 9')
-  const backupIndex = script.indexOf('cp -p "$SETTINGS" "$BACKUP"')
-  const firstWriteIndex = script.indexOf('settheme auto')
-  assert.ok(lockIndex >= 0, 'settings lock missing')
-  assert.ok(backupIndex > lockIndex, 'lock must be acquired before backing up settings')
-  assert.ok(firstWriteIndex > backupIndex, 'settings may only change after the private backup exists')
+test('the linked worktree profile and every tmux launch use isolated DSH_HOME', () => {
+  assert.match(script, /env DSH_HOME="\$DSH_HOME" "\$DSH" plugin --profile "\$PROFILE" -- add 'link:\.'/)
+  assert.match(script, /DSH_HOME=%q COLORFGBG=%q %q --profile %q/)
+  assert.match(script, /printf 'env -u NO_COLOR DSH_HOME=%q COLORFGBG=%q %q --profile %q' \\\s*"\$DSH_HOME" "\$1" "\$DSH" "\$PROFILE"/)
+  const sessionStarts = script.match(/tmux new-session -d -s "\$S"/g) ?? []
+  const isolatedLaunches = script.match(/send "\$\(dsh_command '[^']+'\)" 0\.3/g) ?? []
+  assert.ok(sessionStarts.length > 0, 'the demo must contain a tmux session start')
+  assert.equal(isolatedLaunches.length, sessionStarts.length, 'each tmux session must launch through dsh_command')
 })

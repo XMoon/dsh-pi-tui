@@ -23,22 +23,30 @@
  * - S11 keybinding `false` drops the hint and the route; numbers survive;
  * - S12 a 44-col CJK soft-wrapped draft; short frames decline the entry;
  * - S13 a session reset with Quick ACTIVE exits and leaves no stale content;
- * - S14 `/tasks` Full works with Quick hidden (search filter applied).
+ * - S14 `/tasks` Full works with Quick hidden (search filter applied);
+ * - F11 focused Quick consumes Host submit/steer actions without touching the hidden draft.
  *
  * @module @xmoon76/dsh-pi-tui/task-quick-b4b-interaction.test
  */
 
 import assert from 'node:assert/strict'
 import { afterEach, test } from 'node:test'
-import { TuiApp } from '../src/tui-app.ts'
+import { TuiApp, type TuiAppOptions } from '../src/tui-app.ts'
+import { EditorRegistry } from '../src/extension/internal/editor-registry.ts'
+import { HistoryPanel } from '../src/tui/panels/history-panel.ts'
+import { planTaskQuickLayout } from '../src/tui/panels/task-quick-accessory.ts'
 import { createTaskRuntime, type TaskRuntime, type TaskSurfaceSource } from '../src/app/surface/task-runtime.ts'
 import { displaySeamStub } from './support/display-seam-stub.ts'
 import { createDiag } from '../src/runtime/process/diagnostics.ts'
 import type { TaskBrowserJobInput } from '../src/domain/task/browser.ts'
+import type { TaskSubagentEntry } from '../src/runtime/task-read-port.ts'
 import type { SessionSubject } from '../src/app/session/subject.ts'
 import type { JobObservationPort, JobStopOutcome } from '../src/runtime/job-observation-port.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 import { JobInspectorPanel } from '../src/tui/panels/job-inspector-panel.ts'
+import { SettingsWorkspacePanel, type SettingsWorkspaceSource } from '../src/tui/panels/settings-workspace-panel.ts'
+import { ExtensionLedger } from '../src/extension/internal/ledger.ts'
+import { SurfaceHost } from '../src/extension/internal/surface-host.ts'
 
 const startedApps = new Set<TuiApp>()
 afterEach(() => {
@@ -52,9 +60,29 @@ afterEach(() => {
 const strip = (text: string): string => text.replace(/\x1b\[[0-9;]*m/g, '')
 const rawView = (vt: VirtualTerminal): string[] => vt.getViewport().map(strip)
 const view = (vt: VirtualTerminal): string => rawView(vt).join('\n')
+const editorFrame = (vt: VirtualTerminal): string[] => {
+  const lines = rawView(vt)
+  const top = lines.findIndex(line => line.includes('↑') && line.includes('more'))
+  if (top < 0) return []
+  const bottom = lines.findIndex((line, index) => index > top && /^─+$/.test(line.trim()))
+  if (bottom < 0) return []
+  return lines.slice(top, bottom + 1)
+}
 
 function job(id: string, label: string, status: string, kind = 'bash'): TaskBrowserJobInput {
   return { id, kind, label, status, startedAt: 1_000 }
+}
+
+function settingsWorkspaceSource(): SettingsWorkspaceSource {
+  return {
+    readSnapshot: () => ({
+      configReadiness: 'ready',
+      capturedAt: Date.now(),
+      rows: [
+        { id: 'theme', category: 'appearance', label: 'Configured theme', summary: 'auto', value: 'auto', scope: 'TUI settings document', freshness: 'ready', description: 'palette', action: 'inspect' },
+      ],
+    }),
+  }
 }
 
 interface Harness {
@@ -64,8 +92,14 @@ interface Harness {
   readonly roster: { rows: TaskBrowserJobInput[] }
   /** The typed selection routes the production enterTaskQuick observed. */
   readonly quickSelects: () => readonly string[]
+  /** Host submits observed by the real input/action dispatcher. */
+  readonly submitted: () => readonly string[]
   /** The Question reopens the attention authority observed. */
   readonly reopens: () => readonly string[]
+  /** The production typed route's Subagent-view port calls. */
+  readonly enteredViews: () => readonly Parameters<TaskSurfaceSource['enterView']>[]
+  /** Whether Quick was still focused when the view port was entered. */
+  readonly quickFocusedAtEnterView: () => readonly boolean[]
   readonly attention: { readonly reopen: (sessionId: string, callId: string) => boolean }
   readonly band: () => { identity: number; items: string[] }
 }
@@ -74,12 +108,16 @@ async function startQuick(options: {
   cols?: number
   rows?: number
   roster?: TaskBrowserJobInput[]
+  descendants?: TaskSubagentEntry[]
   /** A controller-side reopen spy for the Question witnesses (S8). */
   reopenResult?: boolean
+  /** Optional production host seams needed by owner-displacement witnesses. */
+  appOptions?: Omit<TuiAppOptions, 'onQuickTaskSelect'>
 } = {}): Promise<Harness> {
   const columns = options.cols ?? 120
   const terminalRows = options.rows ?? 40
   const vt = new VirtualTerminal(columns, terminalRows)
+  const submitted: string[] = []
   // The typed selection route is wired EXACTLY like the production surface
   // composition (onQuickTaskSelect → task.openQuickTaskItem) through a
   // late-bound ref, so an Enter/click in this suite proves the real
@@ -87,9 +125,10 @@ async function startQuick(options: {
   let runtimeRef: TaskRuntime | undefined
   const quickSelects: string[] = []
   const app = new TuiApp(vt, {
-    onSubmit: () => {},
+    onSubmit: text => { submitted.push(text) },
     onExit: () => {},
   }, {
+    ...options.appOptions,
     onQuickTaskSelect: (value: string): boolean => {
       quickSelects.push(value)
       return runtimeRef?.openQuickTaskItem(value) ?? false
@@ -105,13 +144,19 @@ async function startQuick(options: {
   const roster = { rows: [...(options.roster ?? [])] }
   const attention: Array<{ sessionId: string; callId: string }> = []
   const reopens: string[] = []
+  const enteredViews: Parameters<TaskSurfaceSource['enterView']>[] = []
+  const quickFocusedAtEnterView: boolean[] = []
+  const descendants = [...(options.descendants ?? [])]
   const subject = {} as SessionSubject
   const reopenResult = options.reopenResult ?? true
   const source: TaskSurfaceSource = {
     sessionId: () => 'sess-main',
     captureSubject: () => subject,
     subjectMatches: candidate => candidate === subject,
-    enterView: async () => {},
+    enterView: async (...args) => {
+      enteredViews.push(args)
+      quickFocusedAtEnterView.push(app.taskQuickFocusedForTest())
+    },
     interruptSubagent: async () => ({ kind: 'committed' } as never),
     rowSelectionDisposition: (row, jobDetail) => row === undefined || row.kind === 'job' ? jobDetail : 'close',
     subagentJobTranscriptId: () => undefined,
@@ -124,6 +169,21 @@ async function startQuick(options: {
       list: () => roster.rows,
       subscribe: () => () => {},
     },
+    ...(options.descendants === undefined ? {} : {
+      taskRead: {
+        currentKey: () => 'g1:sess-main',
+        currentSessionId: () => 'sess-main',
+        readTask: async () => ({
+          parentSessionId: 'sess-main',
+          parentAvailable: true,
+          descendants,
+          jobs: roster.rows,
+        }),
+        activityOf: (childId: string) => descendants
+          .find((entry): entry is Extract<TaskSubagentEntry, { kind: 'child' }> => entry.kind === 'child' && entry.id === childId)
+          ?.activity,
+      },
+    }),
   }
   const tasks = createTaskRuntime({
     mounted: () => app,
@@ -163,7 +223,8 @@ async function startQuick(options: {
   }
   return {
     vt, app, tasks, roster, attention: { reopen: () => false }, reopens: () => [...reopens],
-    quickSelects: () => [...quickSelects], band,
+    enteredViews: () => [...enteredViews], quickFocusedAtEnterView: () => [...quickFocusedAtEnterView],
+    quickSelects: () => [...quickSelects], submitted: () => [...submitted], band,
   }
 }
 
@@ -194,33 +255,58 @@ test('B4B-01b no tasks: the accessory paints nothing (0 rows, 0 header)', async 
 })
 
 /** S2/S3 — the editor boundary drives the entry; the draft survives. */
-test('B4B-02/03 a non-last visual line keeps ↓ in the editor; the LAST visual line enters Quick with the draft intact', async () => {
+test('B4B-02/03 effective ↓ enters from the middle of the last visual line and preserves the draft', async () => {
   const h = await startQuick({
     roster: [job('j1', 'build', 'running'), job('j2', 'test', 'running')],
   })
   for (let i = 0; i < 8; i++) await new Promise(r => setTimeout(r, 0))
   await h.vt.waitForRender()
 
-  // A non-empty TWO-line draft; the cursor sits at the END of the LAST line.
-  h.app.setDraft('first line of the draft\nsecond line')
+  // Both lines fit the terminal width. Move the real caret left from the end
+  // into the middle of the final visual line before exercising the Down route.
+  const firstLine = 'first line of the draft is long enough to retain the caret column'
+  const lastLine = 'second visual line keeps its cursor near the middle, not the end'
+  const originalDraft = `${firstLine}\n${lastLine}`
+  h.app.setDraft(originalDraft)
   await h.vt.waitForRender()
-  // Park the cursor on the FIRST visual line (a real Up press).
+  for (let i = 0; i < 30; i++) {
+    h.vt.sendInput('\x1b[D')
+    await h.vt.waitForRender()
+  }
+  const cursorAtMiddle = h.app.seatEditorForTest().getCursor()
+  const lastLineStart = firstLine.length + 1
+  assert.ok(cursorAtMiddle > lastLineStart && cursorAtMiddle < originalDraft.length,
+    `real Left input must park the caret inside the final visual line:\n${view(h.vt)}`)
+  assert.ok(view(h.vt).includes('↓ view'), `the effective keymap advertises Down from the middle of the final visual line:\n${view(h.vt)}`)
+
+  // Park the cursor on the FIRST visual line (a real Up press). This position
+  // is still on the same logical draft, but it must not admit the Quick.
   h.vt.sendInput('\x1b[A')
   await h.vt.waitForRender()
   const draftBefore = h.app.getDraft()
   const screen1 = view(h.vt)
-  assert.ok(screen1.includes('first line of the draft'), `the draft is visible:\n${screen1}`)
-  assert.equal(h.band().identity, -1, '↓ on a non-last visual line must not paint Quick')
+  assert.ok(screen1.includes(firstLine), `the draft is visible:\n${screen1}`)
+  assert.equal(h.band().identity, -1, 'Down on a non-last visual line must not paint Quick')
+  assert.ok(!screen1.includes('↓ view'), `a non-last visual line cannot advertise entry:\n${screen1}`)
 
-  // Back to the last visual line (a real Down press), then the entry Down.
+  // Back to the final visual line (real Down), then the entry Down from its
+  // middle. The first Down only navigates the editor; the second is routed by
+  // the effective keymap and must preserve the non-end caret position.
   h.vt.sendInput('\x1b[B')
   await h.vt.waitForRender()
+  const cursorBeforeEntry = h.app.seatEditorForTest().getCursor()
+  assert.ok(cursorBeforeEntry > lastLineStart && cursorBeforeEntry < originalDraft.length,
+    `vertical navigation returns to a middle position in the last visual line:\n${view(h.vt)}`)
+  assert.ok(view(h.vt).includes('↓ view'), 'the effective keymap hint is available at the middle cursor')
   h.vt.sendInput('\x1b[B')
   await h.vt.waitForRender()
   await sleep(20)
   const band = h.band()
-  assert.ok(band.identity >= 0, `the entry Down must paint the Quick band:\n${view(h.vt)}`)
+  assert.ok(band.identity >= 0, `the entry Down from the middle must paint Quick:\n${view(h.vt)}`)
+  assert.equal(h.app.taskQuickFocusedForTest(), true, 'Quick owns focus after entry')
+  assert.ok(!view(h.vt).includes('↓ view'), 'the entry hint disappears while Quick is ACTIVE')
   assert.equal(h.app.getDraft(), draftBefore, 'the draft is byte-for-byte unchanged')
+  assert.equal(h.app.seatEditorForTest().getCursor(), cursorBeforeEntry, 'the middle caret offset is preserved')
   assert.ok(band.items.length >= 1, `the task rows paint:\n${view(h.vt)}`)
   // The selection marker sits on the FIRST row (D6's one active device).
   assert.match(strip(band.items[0]!), /^> /, `the first row is selected:\n${band.items[0]}`)
@@ -239,21 +325,59 @@ test('B4B-02/03 a non-last visual line keeps ↓ in the editor; the LAST visual 
   assert.equal(h.vt.getCellBold(unselectedRowNo, allRows[unselectedRowNo]!.indexOf('test') + 1), false,
     `the unselected label is not bold:\n${allRows[unselectedRowNo]}`)
   const lines = rawView(h.vt)
-  const separatorRow = lines.findLastIndex(line => /^─+$/.test(line))
-  assert.ok(separatorRow >= 0, `the separator rule paints above the band:\n${view(h.vt)}`)
+  const separatorRow = band.identity - 1
+  assert.ok(separatorRow >= 0, `the separator rule paints immediately above the identity row:\n${view(h.vt)}`)
+  assert.match(lines[separatorRow]!, /^─+$/, 'the actual first band row is the divider')
   assert.equal(band.identity, separatorRow + 1, 'the identity row follows the separator')
-  assert.ok(separatorRow > 2, 'the separator is BELOW the editor and the footer')
+  const footerRows = h.app.footerRenderRowsForTest().map(strip).map(line => line.trimEnd()).filter(Boolean)
+  assert.ok(footerRows.length > 0, 'the live footer has painted rows')
+  for (const footerRow of footerRows) {
+    const paintedRow = lines.findIndex((line, index) => index < separatorRow && line.includes(footerRow))
+    assert.ok(paintedRow >= 0, `Footer row must remain painted above the Quick divider: ${JSON.stringify(footerRow)}\n${view(h.vt)}`)
+  }
 
   // S5: Esc exits with the exact original draft.
   h.vt.sendInput('\x1b')
   await h.vt.waitForRender()
   assert.equal(h.band().identity, -1, 'Esc must hide the Quick band')
+  assert.ok(view(h.vt).includes('↓ view'), 'the hint returns after focus is restored to the eligible editor')
   assert.equal(h.app.getDraft(), draftBefore, 'Esc preserves the draft')
   assert.ok(view(h.vt).includes('first line of the draft'), 'the editor is visible again')
 })
 
+test('B4B-05 Quick returns the scrolled editor viewport, cursor and mode unchanged', async () => {
+  const h = await startQuick({ roster: [job('j1', 'build', 'running')] })
+  for (let i = 0; i < 8; i++) await new Promise(r => setTimeout(r, 0))
+  await h.vt.waitForRender()
+  const draft = Array.from({ length: 24 }, (_, index) => `draft line ${index + 1} with enough text`).join('\n')
+  h.app.setDraft(draft)
+  await h.vt.waitForRender()
+
+  const editorBefore = editorFrame(h.vt)
+  assert.ok(editorBefore.length > 0, `the scrolled editor frame is visible:\n${view(h.vt)}`)
+  assert.ok(editorBefore.some(line => line.includes('↑')), `the test draft exercises the scrolled viewport:\n${editorBefore.join('\n')}`)
+  const cursorBefore = h.app.seatEditorForTest().getCursor()
+  const modeBefore = h.app.inputModeForTest()
+  const terminalCursorBefore = h.vt.getCursorPosition()
+
+  // The non-empty draft ends on the last visual line, so the actual Down route
+  // transfers focus without changing any Editor-owned state.
+  h.vt.sendInput('\x1b[B')
+  await h.vt.waitForRender()
+  assert.equal(h.app.taskQuickFocusedForTest(), true, 'the last-visual-line Down enters Quick')
+  assert.equal(h.app.getDraft(), draft)
+  h.vt.sendInput('\x1b')
+  await h.vt.waitForRender()
+
+  assert.equal(h.app.getDraft(), draft)
+  assert.equal(h.app.seatEditorForTest().getCursor(), cursorBefore, 'the logical cursor offset returns exactly')
+  assert.equal(h.app.inputModeForTest(), modeBefore, 'the Editor input mode returns unchanged')
+  assert.deepEqual(h.vt.getCursorPosition(), terminalCursorBefore, 'the painted cursor position returns exactly')
+  assert.deepEqual(editorFrame(h.vt), editorBefore, 'the scrolled visible editor viewport returns exactly')
+})
+
 /** S4 — ↑↓/Pg navigation; Up at the global first row exits. */
-test('B4B-04/05 Up/Down move the selection; Up at the global first row exits', async () => {
+test('B4B-04/05 Up/Down and PgUp/PgDn move by painted task rows; Up at the global first row exits', async () => {
   const h = await startQuick({
     roster: [
       job('j1', 'alpha', 'running'), job('j2', 'bravo', 'running'), job('j3', 'charlie', 'running'),
@@ -268,6 +392,30 @@ test('B4B-04/05 Up/Down move the selection; Up at the global first row exits', a
   await h.vt.waitForRender()
   assert.ok(h.band().identity >= 0, 'the entry Down opens the ACTIVE band')
   assert.match(strip(h.band().items[0]!), /^> /, 'the first row starts selected')
+
+  // PgDn/PgUp move by the actual three painted task rows, not the divider or
+  // identity row. The 4-item catalog exposes the shifted window and selection.
+  h.vt.sendInput('\x1b[6~')
+  await h.vt.waitForRender()
+  assert.match(view(h.vt), /showing 2-4\/4/, `PgDn advances by three visible task rows:\n${view(h.vt)}`)
+  assert.match(strip(h.band().items[2]!), /^> .*delta/, 'PgDn selects the fourth global task row')
+  h.vt.sendInput('\x1b[5~')
+  await h.vt.waitForRender()
+  assert.match(view(h.vt), /showing 1-3\/4/, `PgUp returns to the first painted window:\n${view(h.vt)}`)
+  assert.match(strip(h.band().items[0]!), /^> .*alpha/, 'PgUp selects the first global task row')
+  h.vt.sendInput('\x1b[5~')
+  await h.vt.waitForRender()
+  assert.match(view(h.vt), /showing 1-3\/4/, `PgUp clamps at the first window instead of wrapping:\n${view(h.vt)}`)
+  assert.match(strip(h.band().items[0]!), /^> .*alpha/, 'clamped PgUp keeps the first global row selected')
+  h.vt.sendInput('\x1b[6~')
+  await h.vt.waitForRender()
+  h.vt.sendInput('\x1b[6~')
+  await h.vt.waitForRender()
+  assert.match(view(h.vt), /showing 2-4\/4/, `repeated PgDn clamps at the last window instead of wrapping:\n${view(h.vt)}`)
+  assert.match(strip(h.band().items[2]!), /^> .*delta/, 'clamped PgDn keeps the last global row selected')
+  h.vt.sendInput('\x1b[5~')
+  await h.vt.waitForRender()
+  assert.match(view(h.vt), /showing 1-3\/4/, 'the next PgUp can move away from the clamped last window')
 
   // Down ×2: the marker moves to the third row.
   h.vt.sendInput('\x1b[B')
@@ -335,6 +483,33 @@ test('B4B-06 Enter opens the real Job workspace; a refused value never disturbs 
   // (no surface opens), a current one routes.
   assert.equal(h.tasks.openQuickTaskItem('job:missing'), false, 'a stale value is refused, no surface opens')
   assert.equal(h.tasks.openQuickTaskItem('job:j1'), true, 'a current value routes to the Job open')
+})
+
+test('B4B-06b Enter routes a Quick Subagent through the real typed enterView authority', async () => {
+  const h = await startQuick({
+    roster: [],
+    descendants: [{
+      kind: 'child', id: 'child-1', label: 'review', mode: 'continuable',
+      activity: 'running', hasChildren: false, parentId: '', depth: 1,
+    }],
+  })
+  for (let i = 0; i < 8; i++) await new Promise(r => setTimeout(r, 0))
+  await h.vt.waitForRender()
+  assert.ok(h.app.taskQuickItemCountForTest() >= 1, 'the semantic Task read publishes the child to the hidden projection')
+
+  h.vt.sendInput('\x1b[B')
+  await h.vt.waitForRender()
+  assert.equal(h.app.taskQuickFocusedForTest(), true, 'Down transfers focus to Quick')
+  assert.ok(view(h.vt).includes('subagent · review'), `the real Task projection paints the child row after entry:\n${view(h.vt)}`)
+  h.vt.sendInput('\r')
+  await h.vt.waitForRender()
+  await sleep(20)
+
+  assert.deepEqual(h.quickSelects(), ['agent:child-1'], 'Enter carries the selected stable child identity through the host callback')
+  assert.deepEqual(h.enteredViews(), [['child-1', 'review', 'continuable', 'sess-main', 'running', 1]],
+    'the typed router sends the current child, mode, parent, activity and depth to enterView')
+  assert.deepEqual(h.quickFocusedAtEnterView(), [false], 'Quick retires before the blocking Subagent view takes ownership')
+  assert.equal(h.app.taskQuickFocusedForTest(), false, 'the Subagent route leaves Quick')
 })
 
 /** S8 — a parked Question row reaches the REAL attention.reopen. */
@@ -474,15 +649,30 @@ test('B4B-09-s9 fullscreen same-row SGR click opens; cross-row press/release ref
   await sleep(20)
   assert.deepEqual(h.quickSelects(), [], 'a moved press/release must not activate any row')
 
-  // The separator/header rule is inert: a full press/release ON the
-  // separator row synthesizes a click that no task row answers.
-  const sepRow = h.band().identity
-  assert.ok(sepRow >= 0, 'the band is still ACTIVE for the separator probe')
-  h.vt.sendInput(`\x1b[<0;10;${sepRow + 1}M`)
-  h.vt.sendInput(`\x1b[<0;10;${sepRow + 1}m`)
-  await h.vt.waitForRender()
-  await sleep(20)
-  assert.deepEqual(h.quickSelects(), [], 'the separator hit is inert (addendum §3.3)')
+  // The separator is the row BEFORE the identity header (band().identity is
+  // the header's screen row). Verify the physical rule, then send distinct
+  // press/release gestures to divider, header and Footer badge; all are inert.
+  const headerRow = h.band().identity
+  const sepRow = headerRow - 1
+  assert.ok(headerRow > 0, 'the band is still ACTIVE for the chrome probes')
+  assert.match(rows[sepRow]!, /^\s*─+\s*$/, `the probed row is the actual divider:\n${view(h.vt)}`)
+  for (const y of [sepRow, headerRow]) {
+    h.vt.sendInput(`\x1b[<0;10;${y + 1}M`)
+    h.vt.sendInput(`\x1b[<0;10;${y + 1}m`)
+    await h.vt.waitForRender()
+    assert.deepEqual(h.quickSelects(), [], `divider/header row ${y} is inert (addendum §3.3)`)
+  }
+  const footerRows = h.app.footerRenderRowsForTest().map(strip).map(line => line.trimEnd()).filter(Boolean)
+  const footerScreenRows = footerRows
+    .map(row => rows.findIndex((line, index) => index < sepRow && line.includes(row)))
+    .filter(index => index >= 0)
+  assert.ok(footerScreenRows.length > 0, `the Footer is visible above the divider:\n${view(h.vt)}`)
+  for (const y of footerScreenRows) {
+    h.vt.sendInput(`\x1b[<0;10;${y + 1}M`)
+    h.vt.sendInput(`\x1b[<0;10;${y + 1}m`)
+    await h.vt.waitForRender()
+    assert.deepEqual(h.quickSelects(), [], `Footer row ${y} is not a Task Quick item`)
+  }
 
   // STRUCTURAL row replacement between press and release: the pressed row's
   // stable identity is REPLACED while the gesture is held (a real
@@ -543,8 +733,152 @@ test('B4B-10 shell mode and a non-last visual line fail the admission closed', a
   assert.equal(h.band().identity, -1, 'a non-last visual line never enters Quick')
 })
 
+test('B4B-10 owner displacement retires Quick before History, Settings, managed overlays and plugin editors', async () => {
+  const editorRegistry = new EditorRegistry()
+  const h = await startQuick({
+    roster: [job('j1', 'build', 'running')],
+    appOptions: {
+      editorRegistry,
+      historySearchSource: { search: async () => ({ results: [], exhausted: true }) },
+      historySearchCwd: () => '/workspace',
+      captureHistoryScope: () => ({ sessionId: 'sess-main', isCurrent: () => true }),
+    },
+  })
+  for (let i = 0; i < 8; i++) await new Promise(r => setTimeout(r, 0))
+  await h.vt.waitForRender()
+
+  assert.equal(h.app.enterTaskQuick(), true, 'the production Quick entry must be active before History takes the seat')
+  await h.vt.waitForRender()
+  h.app.openHistorySearch()
+  await h.vt.waitForRender()
+  assert.ok(h.app.focusedComponentForTest() instanceof HistoryPanel, 'History becomes the actual focused seat owner')
+  assert.equal(h.app.taskQuickFocusedForTest(), false, 'History displaces Quick focus')
+  assert.equal(h.band().identity, -1, 'Quick paints no rows under the History tenant')
+  h.app.closeHistorySearch()
+  await h.vt.waitForRender()
+
+  assert.equal(h.app.enterTaskQuick(), true, 'Quick can be entered again after History closes')
+  await h.vt.waitForRender()
+  const closeSettings = h.app.openSettings(
+    [{ id: 'setting', label: 'Plugin setting', currentValue: 'on', values: ['on', 'off'] }],
+    () => {},
+    () => {},
+  )
+  await h.vt.waitForRender()
+  assert.ok(view(h.vt).includes('Plugin setting'), `Settings owns the visible overlay:\n${view(h.vt)}`)
+  assert.equal(h.app.taskQuickFocusedForTest(), false, 'Settings displaces Quick focus')
+  assert.equal(h.band().identity, -1, 'Quick paints no rows under Settings')
+  closeSettings()
+  await h.vt.waitForRender()
+
+  assert.equal(h.app.enterTaskQuick(), true, 'Quick can be entered again after Settings closes')
+  await h.vt.waitForRender()
+  const managed = h.app.showAdvancedInteractiveOverlay({
+    render: () => ({ kind: 'text', spans: [{ text: 'managed overlay' }] }),
+  })
+  await h.vt.waitForRender()
+  assert.ok(managed.focused, 'the managed overlay owns physical focus')
+  assert.ok(view(h.vt).includes('managed overlay'), `the managed overlay is painted:\n${view(h.vt)}`)
+  assert.equal(h.app.taskQuickFocusedForTest(), false, 'the managed overlay displaces Quick focus')
+  assert.equal(h.band().identity, -1, 'Quick paints no rows under the managed overlay')
+  managed.close()
+  await h.vt.waitForRender()
+
+  assert.equal(h.app.enterTaskQuick(), true, 'Quick can be entered again before a plugin editor handoff')
+  await h.vt.waitForRender()
+  editorRegistry.register({
+    id: 'plugin-editor',
+    priority: 1,
+    create: () => ({
+      component: { kind: 'text', spans: [{ text: 'plugin editor' }] },
+      getText: () => 'draft',
+      setText: () => {},
+      getCursor: () => 0,
+      setCursor: () => {},
+      dispose: () => {},
+    }),
+  }, 'plugin')
+  h.app.reconcileEditorNow()
+  h.app.requestRender()
+  await h.vt.waitForRender()
+  assert.equal(h.app.seatEditorForTest().id, 'plugin-editor', 'the plugin editor becomes the current seat occupant')
+  assert.equal(h.app.focusedComponentForTest(), h.app.seatEditorForTest().component, 'the plugin editor receives physical focus')
+  assert.equal(h.app.taskQuickFocusedForTest(), false, 'the plugin editor handoff displaces Quick focus')
+  assert.equal(h.band().identity, -1, 'Quick paints no rows after the plugin editor takes the seat')
+})
+
+test('B4B-10b Job and Settings workspace leases retire active Quick and never restore it', async () => {
+  const h = await startQuick({ roster: [job('j1', 'build', 'running')] })
+  for (let i = 0; i < 8; i++) await new Promise(r => setTimeout(r, 0))
+  await h.vt.waitForRender()
+
+  assert.equal(h.app.enterTaskQuick(), true)
+  const jobHandle = h.app.openJobInspector({
+    initial: { opening: { jobId: 'j1', kind: 'bash', label: 'build', status: 'running' } },
+    canStop: () => false,
+    onStop: () => {},
+    onClose: () => {},
+  })
+  await h.vt.waitForRender()
+  assert.ok(h.app.focusedComponentForTest() instanceof JobInspectorPanel, 'the Job workspace takes ownership')
+  assert.equal(h.app.taskQuickFocusedForTest(), false, 'the Job lease retires Quick')
+  jobHandle.close()
+  await h.vt.waitForRender()
+  assert.equal(h.app.taskQuickFocusedForTest(), false, 'closing Job returns to the editor, not Quick')
+  assert.ok(!view(h.vt).includes('Task Quick'), 'the closed workspace leaves no Quick identity row')
+
+  assert.equal(h.app.enterTaskQuick(), true, 'Quick may be explicitly reopened after returning')
+  const settingsHandle = h.app.openSettingsWorkspace(settingsWorkspaceSource(), { onOpenLegacy: () => {} })
+  await h.vt.waitForRender()
+  assert.ok(h.app.focusedComponentForTest() instanceof SettingsWorkspacePanel, 'Settings takes ownership')
+  assert.equal(h.app.taskQuickFocusedForTest(), false, 'the Settings lease retires Quick')
+  settingsHandle.close()
+  await h.vt.waitForRender()
+  assert.equal(h.app.taskQuickFocusedForTest(), false, 'closing Settings returns to the editor, not Quick')
+  assert.ok(!view(h.vt).includes('Task Quick'), 'the closed workspace leaves no Quick identity row')
+})
+
+test('B4B-10c a synchronous Footer callback workspace wins over an older Quick opener', async () => {
+  let app: TuiApp | undefined
+  let reenter = false
+  let nestedSettings: { close: () => void } | undefined
+  const host = new SurfaceHost(new ExtensionLedger(() => {}), () => app?.requestRender())
+  const originalFooterText = host.footerText
+  host.footerText = () => {
+    if (reenter) {
+      reenter = false
+      if (app === undefined) throw new Error('the TUI must be mounted before the reentrant witness')
+      nestedSettings = app.openSettingsWorkspace(settingsWorkspaceSource(), { onOpenLegacy: () => {} })
+    }
+    return originalFooterText.call(host)
+  }
+  const h = await startQuick({
+    roster: [job('j1', 'build', 'running')],
+    appOptions: { extensionHost: host },
+  })
+  app = h.app
+  for (let i = 0; i < 8; i++) await new Promise(r => setTimeout(r, 0))
+  await h.vt.waitForRender()
+  assert.equal(h.app.enterTaskQuick(), true)
+
+  reenter = true
+  assert.throws(() => h.app.openJobInspector({
+    initial: { opening: { jobId: 'j1', kind: 'bash', label: 'build', status: 'running' } },
+    canStop: () => false,
+    onStop: () => {},
+    onClose: () => {},
+  }), /a Settings workspace screen is already leased/)
+  assert.ok(nestedSettings, 'the synchronous Footer callback committed the newer Settings lease')
+  assert.ok(h.app.focusedComponentForTest() instanceof SettingsWorkspacePanel, 'the newer workspace remains the owner')
+  assert.equal(h.app.taskQuickFocusedForTest(), false, 'Quick was retired before the callback opened Settings')
+
+  nestedSettings.close()
+  await h.vt.waitForRender()
+  assert.equal(h.app.taskQuickFocusedForTest(), false, 'closing the newer workspace does not restore Quick')
+})
+
 /** S11 — `app.tasks.open: false` drops the hint and the route; numbers stay. */
-test('B4B-11 a disabled action drops the ↓ hint and the route; the badge numbers survive', async () => {
+test('B4B-11 a disabled action drops the hint and the route; the badge numbers survive', async () => {
   const h = await startQuick({ roster: [job('j1', 'build', 'running')] })
   for (let i = 0; i < 8; i++) await new Promise(r => setTimeout(r, 0))
   await h.vt.waitForRender()
@@ -687,6 +1021,57 @@ test('B4B-07-resize a held press across a width-only resize never activates; a f
   await h.vt.waitForRender()
   await sleep(20)
   assert.deepEqual(h.quickSelects(), ['job:j1'], `a fresh post-resize click activates normally:\n${h.quickSelects().join('|')}`)
+  h.app.setFullscreen(false)
+  await h.vt.waitForRender()
+})
+
+test('B4B-07-height a height-only terminal resize invalidates the held SGR row intent', async () => {
+  const h = await startQuick({
+    roster: [job('j1', 'alpha', 'running'), job('j2', 'bravo', 'running'), job('j3', 'charlie', 'running')],
+  })
+  for (let i = 0; i < 8; i++) await new Promise(r => setTimeout(r, 0))
+  await h.vt.waitForRender()
+  h.app.setFullscreen(true)
+  await h.vt.waitForRender()
+  h.vt.sendInput('\x1b[B')
+  await h.vt.waitForRender()
+
+  const before = rawView(h.vt)
+  const rowA = before.findIndex(line => line.includes('alpha') && line.includes('‣'))
+  const quickIdentity = before.findIndex(line => line.startsWith('Task Quick'))
+  const taskRows = before.filter(line => line.includes('‣ ')).length
+  const dividerRows = quickIdentity > 0 && /^─+$/.test(before[quickIdentity - 1]!.trim()) ? 1 : 0
+  const initialQuickHeight = taskRows + (quickIdentity >= 0 ? 1 : 0) + dividerRows
+  assert.ok(rowA >= 0, `the target item paints before the resize:\n${view(h.vt)}`)
+  assert.equal(initialQuickHeight, 5, 'the band paints divider, identity and three task rows')
+
+  h.vt.sendInput(`\x1b[<0;10;${rowA + 1}M`)
+  await h.vt.waitForRender()
+  h.vt.resize(120, 41)
+  await h.vt.waitForRender()
+  await sleep(40)
+  await h.vt.waitForRender()
+  const after = rawView(h.vt)
+  const rowAAfter = after.findIndex(line => line.includes('alpha') && line.includes('‣'))
+  assert.equal(rowAAfter, rowA + 1, 'the bottom-anchored band shifts one physical row on a height-only resize')
+  const identityAfter = after.findIndex(line => line.startsWith('Task Quick'))
+  const dividerAfter = identityAfter > 0 && /^─+$/.test(after[identityAfter - 1]!.trim()) ? 1 : 0
+  const actualHeightAfter = after.filter(line => line.includes('‣ ')).length + (identityAfter >= 0 ? 1 : 0) + dividerAfter
+  assert.equal(actualHeightAfter, initialQuickHeight,
+    'the Quick band itself keeps its painted dimensions, reproducing the stale-intent edge')
+
+  // Move with the same visible item: the row/value and Quick dimensions are
+  // unchanged, but the terminal-height component of the painted frame differs.
+  h.vt.sendInput(`\x1b[<0;10;${rowAAfter + 1}m`)
+  await h.vt.waitForRender()
+  await sleep(20)
+  assert.deepEqual(h.quickSelects(), [], 'the held press must not activate across a height-only repaint')
+
+  h.vt.sendInput(`\x1b[<0;10;${rowAAfter + 1}M`)
+  h.vt.sendInput(`\x1b[<0;10;${rowAAfter + 1}m`)
+  await h.vt.waitForRender()
+  await sleep(20)
+  assert.deepEqual(h.quickSelects(), ['job:j1'], 'a fresh post-resize same-row gesture remains valid')
   h.app.setFullscreen(false)
   await h.vt.waitForRender()
 })
@@ -834,12 +1219,12 @@ test('B4B-f6 the admission probe measures the chrome once per render window', as
   // Patch the PRODUCTION measurement seam on the live instance (the
   // one-to-one passthrough pattern): every chrome measurement the admission
   // pays routes through this method.
-  const app = h.app as unknown as { taskQuickChromeRows(width: number): number }
+  const app = h.app as unknown as { taskQuickChromeRows(width: number, footerRows?: number): number }
   const original = app.taskQuickChromeRows
   let calls = 0
-  const patched = (width: number): number => {
+  const patched = (width: number, footerRows?: number): number => {
     calls += 1
-    return original.call(app, width)
+    return original.call(app, width, footerRows)
   }
   app.taskQuickChromeRows = patched
   try {
@@ -906,4 +1291,279 @@ test('B4B-f7 an autocomplete open/close with unchanged visual state recomposes b
   await h.vt.waitForRender()
   assert.equal(h.app.isShowingAutocompleteForTest(), false, 'Esc closes the dropdown')
   assert.equal(view(h.vt).includes('↓ view'), true, `the closed dropdown restores the ↓ hint:\n${view(h.vt)}`)
+})
+
+/** R9-F1/F4/F5 — ordinary same-layout edits neither compose Footer nor
+ *  rebuild the wrap map; a rewrap refreshes the boundary, while X063 events
+ *  share one compose and navigation reuses the event fact. */
+test('B4B-f8 onChange-only rewrap refreshes and coalesces the visual boundary', async () => {
+  const h = await startQuick({ cols: 40, rows: 24, roster: [job('j1', 'build', 'running')] })
+  for (let i = 0; i < 8; i++) await new Promise(r => setTimeout(r, 0))
+  await h.vt.waitForRender()
+  const app = h.app as unknown as {
+    renderFooter(boundary?: { physicalWidth: number; onLastVisualLine: boolean }): void
+    editor: {
+      getPaddingX(): number
+      isOnLastVisualLineRawForHost(width: number): boolean
+      buildVisualLineMap(width: number): unknown[]
+      setTextAndCursor(text: string, cursor: { line: number; col: number }): void
+      setCursor(cursor: { line: number; col: number }): void
+      onVisualLineBoundaryChanged?: (reason: string, onLast: boolean) => void
+    }
+  }
+  const originalRenderFooter = app.renderFooter
+  const originalMapBuilder = app.editor.buildVisualLineMap
+  let composes = 0
+  let mapBuilds = 0
+  app.renderFooter = function (boundary): void {
+    composes += 1
+    originalRenderFooter.call(app, boundary)
+  }
+  app.editor.buildVisualLineMap = function (width: number): unknown[] {
+    mapBuilds += 1
+    return originalMapBuilder.call(app.editor, width)
+  }
+  const originalBoundary = app.editor.onVisualLineBoundaryChanged
+  let boundaryEvents = 0
+  app.editor.onVisualLineBoundaryChanged = (reason, onLast) => {
+    boundaryEvents += 1
+    originalBoundary?.(reason, onLast)
+  }
+  try {
+    const width = h.vt.columns
+    const padding = app.editor.getPaddingX()
+    const clampedPadding = Math.min(padding, Math.max(0, Math.floor((width - 1) / 2)))
+    const contentWidth = Math.max(1, width - clampedPadding * 2)
+    const visualWidth = Math.max(1, contentWidth - (clampedPadding ? 0 : 1))
+    h.app.setDraft('short')
+    await h.vt.waitForRender()
+    composes = 0
+    mapBuilds = 0
+    boundaryEvents = 0
+    for (const key of ['a', 'b', 'c']) {
+      h.vt.sendInput(key)
+      await h.vt.waitForRender()
+    }
+    assert.equal(composes, 0, 'ordinary same-layout printable input does not recompose Footer')
+    assert.equal(mapBuilds, 0, 'ordinary printable input does not rebuild the Editor visual map')
+
+    composes = 0
+    mapBuilds = 0
+    h.app.setDraft('x'.repeat(visualWidth))
+    await h.vt.waitForRender()
+    assert.equal(app.editor.isOnLastVisualLineRawForHost(width), true, 'the full-width draft cursor is on its last visual line')
+
+    // Two X063 changes in one host turn must consume the LAST fact, not the
+    // first: the cursor moves from a non-last line to the end of the last.
+    composes = 0
+    boundaryEvents = 0
+    app.editor.setTextAndCursor('line1\nline2', { line: 0, col: 0 })
+    app.editor.setCursor({ line: 1, col: 5 })
+    await h.vt.waitForRender()
+    assert.equal(boundaryEvents, 2, 'both programmatic boundary facts publish')
+    assert.equal(composes, 1, 'the shared scheduler composes once for both X063 events')
+    assert.ok(view(h.vt).includes('↓ view'), 'the final true fact admits the hint')
+
+    // A current true X063 fact is immediately invalidated by an onChange-only
+    // edit that wraps the trailing text onto another visual line.
+    composes = 0
+    boundaryEvents = 0
+    app.editor.setTextAndCursor('x'.repeat(visualWidth), { line: 0, col: visualWidth })
+    app.editor.setCursor({ line: 0, col: Math.floor(visualWidth / 2) })
+    mapBuilds = 0
+    h.vt.sendInput('X')
+    await h.vt.waitForRender()
+    assert.equal(boundaryEvents, 2, 'the two current true facts preceded the plain insertion')
+    assert.equal(composes, 1, 'the onChange-only rewrap recomposes from the new rendered layout')
+    assert.equal(mapBuilds, 0, 'the rewrap does not rebuild the visual map outside Editor.render')
+    assert.equal(app.editor.isOnLastVisualLineRawForHost(width), false, 'the insertion moves the caret off the last visual line')
+    assert.equal(view(h.vt).includes('↓ view'), false, 'the stale true payload is not painted as an affordance')
+
+    composes = 0
+    boundaryEvents = 0
+    h.vt.sendInput('\x1b[D')
+    await h.vt.waitForRender()
+    assert.equal(boundaryEvents, 1, 'the follow-up cursor move publishes its raw boundary')
+    assert.equal(composes, 0, 'an unchanged false boundary does not recompose from a stale true baseline')
+  } finally {
+    app.renderFooter = originalRenderFooter
+    app.editor.buildVisualLineMap = originalMapBuilder
+    app.editor.onVisualLineBoundaryChanged = originalBoundary
+  }
+})
+
+test('B4B-width4 TuiEditor admission uses the fork-clamped width at four columns', async () => {
+  const h = await startQuick({ cols: 4, rows: 24, roster: [job('j1', 'build', 'running')] })
+  h.app.setDraft('x')
+  await h.vt.waitForRender()
+  const app = h.app as unknown as {
+    editor: {
+      canEnterTaskQuickFromDown(physicalWidth: number): boolean
+      isOnLastVisualLineRawForHost(physicalWidth: number): boolean
+    }
+  }
+  assert.equal(app.editor.isOnLastVisualLineRawForHost(4), true, 'the raw frame fact uses the render padding clamp')
+  assert.equal(app.editor.canEnterTaskQuickFromDown(4), true, 'Down admission uses the same physical-width formula')
+})
+
+/** X063 jump transitions can change Down ownership while the raw visual-line
+ *  truth is unchanged, so the production Footer must recompose in both ways. */
+test('B4B-f9 jump arm and no-match completion refresh an unchanged-boundary hint', async () => {
+  const h = await startQuick({ roster: [job('j1', 'build', 'running')] })
+  for (let i = 0; i < 8; i++) await new Promise(r => setTimeout(r, 0))
+  await h.vt.waitForRender()
+  assert.ok(view(h.vt).includes('↓ view'), 'the initial editor state advertises entry')
+  h.vt.sendInput('\x1d')
+  await h.vt.waitForRender()
+  assert.equal(view(h.vt).includes('↓ view'), false, 'arming jump mode hides the hint despite unchanged raw boundary')
+  h.vt.sendInput('z') // No match: completes without moving the cursor.
+  await h.vt.waitForRender()
+  assert.equal(view(h.vt).includes('↓ view'), true, 'jump completion restores the hint at the same visual boundary')
+})
+
+/** R9-F3 / Owner revision: hidden entry is measured against a complete Footer
+ *  candidate with the hint enabled, never the currently painted hint-free
+ *  Footer. The one-row actual/two-row candidate case must fail closed without
+ *  oscillation; added height admits the same route; ACTIVE focus is governed by
+ *  the actual painted geometry and survives Footer hint/preset changes. */
+test('B4B-f10 preflights the hint-enabled Footer and keeps ACTIVE Quick independent', async () => {
+  const h = await startQuick({ cols: 30, rows: 7, roster: [job('j1', 'build', 'running')] })
+  for (let i = 0; i < 8; i++) await new Promise(r => setTimeout(r, 0))
+  await h.vt.waitForRender()
+
+  const app = h.app as unknown as { taskQuickChromeRows(width: number, footerRows?: number): number }
+  const original = app.taskQuickChromeRows
+  const candidateFooterRows: number[] = []
+  app.taskQuickChromeRows = (width: number, footerRows?: number): number => {
+    if (footerRows !== undefined) candidateFooterRows.push(footerRows)
+    return original.call(app, width, footerRows)
+  }
+  const customLayout = {
+    schemaVersion: 1 as const,
+    rows: [{ left: [{ id: 'tasks', suffix: ' abcde' }], right: [] }],
+  }
+  try {
+    h.app.setFooterPreset('compact')
+    candidateFooterRows.length = 0
+    h.app.setFooterLayout(customLayout)
+    await h.vt.waitForRender()
+    await h.vt.waitForRender()
+
+    const shortScreen = view(h.vt)
+    assert.ok(shortScreen.includes('[1 task running]'), `the task badge and live count survive:\n${shortScreen}`)
+    assert.equal(shortScreen.includes('↓ view'), false, `candidate overflow hides only the entry hint:\n${shortScreen}`)
+    assert.ok(candidateFooterRows.includes(2), `preflight measures the complete hint-enabled Footer as two rows: ${candidateFooterRows}`)
+    const hintFreeChrome = original.call(app, 30, 1)
+    const candidateChrome = original.call(app, 30, 2)
+    assert.ok(planTaskQuickLayout(30, 7, hintFreeChrome, 1, 0).itemRows >= 1,
+      'the hint-free Footer would fit one task row')
+    assert.equal(planTaskQuickLayout(30, 7, candidateChrome, 1, 0).itemRows, 0,
+      'the two-row hint-enabled candidate correctly removes that grant')
+    const footer = (h.app as unknown as { footer: { render(width: number): string[] } }).footer
+    assert.equal(footer.render(30).length, 1, 'the committed hint-free Footer remains one physical row')
+    assert.equal(h.app.enterTaskQuick(), false, 'the conservative candidate grant declines entry')
+    h.vt.sendInput('\x1b[B')
+    await h.vt.waitForRender()
+    assert.equal(h.app.taskQuickFocusedForTest(), false, 'Down remains with the editor')
+    assert.equal(h.band().identity, -1, 'repeated frames do not oscillate into Quick')
+    assert.equal(view(h.vt).includes('↓ view'), false, 'repeated frames preserve the stable hidden state')
+
+    // More rows make room for one task below the same two-row candidate.
+    h.vt.resize(30, 20)
+    await h.vt.waitForRender()
+    await h.vt.waitForRender()
+    assert.ok(view(h.vt).includes('↓ view'), `the larger frame admits the candidate:\n${view(h.vt)}`)
+    h.vt.sendInput('\x1b[B')
+    await h.vt.waitForRender()
+    assert.equal(h.app.taskQuickFocusedForTest(), true, 'the effective Down enters Quick')
+    assert.ok(h.band().items.length >= 1, `the active task row paints:\n${view(h.vt)}`)
+    assert.equal(view(h.vt).includes('↓ view'), false, 'the hint disappears while Quick owns focus')
+
+    // Changing Footer layout while ACTIVE must not re-run hidden-entry
+    // admission or drop Quick merely because the editor no longer owns focus.
+    h.app.setFooterPreset('full')
+    await h.vt.waitForRender()
+    assert.equal(h.app.taskQuickFocusedForTest(), true, 'a Footer preset change does not retire ACTIVE Quick')
+    assert.ok(h.band().identity >= 0, `Quick remains visible after the Footer change:\n${view(h.vt)}`)
+
+    // A real task-source transition still owns ACTIVE lifetime: empty roster
+    // closes Quick; a later row restores the hidden entry hint.
+    h.roster.rows = []
+    h.tasks.refreshTasks()
+    for (let i = 0; i < 8; i++) await new Promise(r => setTimeout(r, 0))
+    await h.vt.waitForRender()
+    assert.equal(h.app.taskQuickFocusedForTest(), false, 'an empty task projection exits ACTIVE Quick')
+    assert.equal(view(h.vt).includes('↓ view'), false, 'no entry hint remains without tasks')
+    h.roster.rows = [job('j2', 'test', 'running')]
+    h.tasks.refreshTasks()
+    for (let i = 0; i < 8; i++) await new Promise(r => setTimeout(r, 0))
+    await h.vt.waitForRender()
+    assert.ok(view(h.vt).includes('↓ view'), `a refreshed task restores the valid entry hint:\n${view(h.vt)}`)
+  } finally {
+    app.taskQuickChromeRows = original
+  }
+})
+
+test('B4B-f11 focused Quick consumes host submit and steer bindings', async () => {
+  const h = await startQuick({ roster: [job('j1', 'build', 'running')] })
+  const draft = 'hidden draft must not submit'
+  h.app.setDraft(draft)
+  await h.vt.waitForRender()
+
+  h.vt.sendInput('\x1b[B')
+  await h.vt.waitForRender()
+  assert.equal(h.app.taskQuickFocusedForTest(), true, 'Down transfers focus to Quick')
+
+  h.vt.sendInput('\x1b[13;5u') // kitty Ctrl+Enter: host accelerated submit
+  await h.vt.waitForRender()
+  assert.deepEqual(h.submitted(), [], 'a Host submit action must not reach the hidden draft')
+  assert.equal(h.app.getDraft(), draft, 'the hidden draft remains byte-for-byte intact')
+  assert.equal(h.app.taskQuickFocusedForTest(), true, 'unlisted Host actions do not leave Quick')
+
+  h.app.setBusy(true)
+  await h.vt.waitForRender()
+  h.vt.sendInput('\x13') // Ctrl+S: host steer while busy
+  await h.vt.waitForRender()
+  assert.deepEqual(h.submitted(), [], 'the busy Host steer action must not send the hidden draft')
+  assert.equal(h.app.getDraft(), draft, 'steer leaves the hidden draft intact')
+  assert.equal(h.app.taskQuickFocusedForTest(), true, 'Quick remains the focused input owner')
+})
+
+test('B4B-f13 a resize before queued Footer compose refreshes from the new Editor layout', async () => {
+  const h = await startQuick({ cols: 40, rows: 24, roster: [job('j1', 'build', 'running')] })
+  const app = h.app as unknown as {
+    editor: {
+      setTextAndCursor(text: string, cursor: { line: number; col: number }): void
+      setCursor(cursor: { line: number; col: number }): void
+      isOnLastVisualLineRawForHost(width: number): boolean
+      onVisualLineBoundaryChanged?: (reason: string, onLast: boolean) => void
+    }
+  }
+  app.editor.setTextAndCursor('x'.repeat(60), { line: 0, col: 30 })
+  await h.vt.waitForRender()
+  assert.equal(app.editor.isOnLastVisualLineRawForHost(40), false)
+  assert.equal(view(h.vt).includes('↓ view'), false, 'the narrow frame does not advertise a false boundary')
+
+  const originalBoundary = app.editor.onVisualLineBoundaryChanged
+  let eventWidth: number | undefined
+  let eventBoundary: boolean | undefined
+  app.editor.onVisualLineBoundaryChanged = (reason, onLast) => {
+    if (reason === 'programmatic') {
+      eventWidth = h.vt.columns
+      eventBoundary = onLast
+    }
+    originalBoundary?.(reason, onLast)
+  }
+  try {
+    app.editor.setCursor({ line: 0, col: 31 })
+    h.vt.resize(80, 24)
+    await h.vt.waitForRender()
+    await h.vt.waitForRender()
+    assert.equal(eventWidth, 40, 'the queued transition fact belongs to the old frame width')
+    assert.equal(eventBoundary, false, 'the old-width fact is non-last')
+    assert.equal(app.editor.isOnLastVisualLineRawForHost(80), true, 'the new rendered frame places the cursor on its last visual line')
+    assert.ok(view(h.vt).includes('↓ view'), 'the post-resize Editor render restores the Footer hint')
+  } finally {
+    app.editor.onVisualLineBoundaryChanged = originalBoundary
+  }
 })
