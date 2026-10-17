@@ -11,6 +11,10 @@
  *   - CHANGELOG.md must contain a `## [<version>]` section,
  *   - CHANGELOG.en.md must contain the same section,
  *   - the current section is dated and immediately follows an empty Unreleased,
+ *   - the `[Unreleased]` link names the tag being created,
+ *   - the version link's compare base is a release tag (`v…` or `next-v…`);
+ *     either prefix is accepted because the publication channel does not
+ *     decide which tag came before this release,
  *   - both reference links and the bilingual section headings are present.
  *
  * The notes file is written as `## 中文` / `## English` sections so the
@@ -95,14 +99,21 @@ function extractSection(file) {
   if (!/^### /mu.test(content)) {
     throw new Error(`Version ${version} in ${file} must contain changelog categories`)
   }
+  // The `[Unreleased]` link names the tag being created, so it carries this
+  // release's own prefix. The version link's compare base is the previous
+  // release tag on the real timeline, which may carry EITHER prefix: the npm
+  // dist-tag decides where a release is published, never which tag came before
+  // it (a `next-v…` release is routinely cut after a `v…` one).
   const comparePrefix = channel === 'next' ? 'next-v' : 'v'
-  const tagPattern = `${comparePrefix}\\d+\\.\\d+\\.\\d+(?:-[0-9A-Za-z.-]+)?`
+  const releaseTag = `${comparePrefix}${version}`
+  const releaseTagPattern = `${comparePrefix}${escapedVersion}`
+  const previousTagPattern = '(?:next-)?v\\d+\\.\\d+\\.\\d+(?:-[0-9A-Za-z.-]+)?'
   const compareBase = 'https://github.com/XMoon/dsh-pi-tui/compare/'
   const escapedCompareBase = compareBase.replaceAll('.', '\\.')
-  const unreleasedReference = new RegExp(`^\\[Unreleased\\]:\\s+${escapedCompareBase}${comparePrefix}${escapedVersion}\\.\\.\\.HEAD$`, 'mu')
-  const releaseReference = new RegExp(`^\\[${escapedVersion}\\]:\\s+${escapedCompareBase}${tagPattern}\\.\\.\\.${comparePrefix}${escapedVersion}$`, 'mu')
+  const unreleasedReference = new RegExp(`^\\[Unreleased\\]:\\s+${escapedCompareBase}${releaseTagPattern}\\.\\.\\.HEAD$`, 'mu')
+  const releaseReference = new RegExp(`^\\[${escapedVersion}\\]:\\s+${escapedCompareBase}${previousTagPattern}\\.\\.\\.${releaseTagPattern}$`, 'mu')
   if (!unreleasedReference.test(text) || !releaseReference.test(text)) {
-    throw new Error(`${file} must contain matching ${channel} release reference links for ${version}`)
+    throw new Error(`${file} must contain matching release reference links for ${version} (${releaseTag})`)
   }
 
   return {
