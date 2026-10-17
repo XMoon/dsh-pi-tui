@@ -104,12 +104,19 @@ function childSessions(childId: string, binding: RemoteChildBinding): ChildSessi
   }
 }
 
-function childBinding(running: boolean): RemoteChildBinding {
+function childBinding(
+  running: boolean,
+  revision = 2,
+): RemoteChildBinding & { setRevision(next: number): void } {
+  let current = revision
   return {
     session: {
       getSnapshot: () => ({ running }),
       readAttachment: async () => ({ ok: true, value: { attachment: {}, data: new Uint8Array() } }),
     },
+    // S3-R0: the child re-fold fence reads this official window revision.
+    eventSource: { getSnapshot: () => ({ revision: current }) },
+    setRevision: next => { current = next },
   }
 }
 
@@ -118,6 +125,8 @@ interface IngressCapture {
   readonly sinks: RemoteLiveIngressSinks
   readonly hydrateRevision: number | undefined
   disposeCount: number
+  /** The proofs this handle was acknowledged with (S3-R0). */
+  readonly acknowledged: Array<{ generation: unknown; binding: unknown; revision: number }>
 }
 
 function fakeIngress(): { readonly ingress: RemoteLiveIngress; readonly captures: IngressCapture[] } {
@@ -126,9 +135,12 @@ function fakeIngress(): { readonly ingress: RemoteLiveIngress; readonly captures
     captures,
     ingress: {
       subscribe(sessionId, sinks, hydrateRevision) {
-        const capture: IngressCapture = { sessionId, sinks, hydrateRevision, disposeCount: 0 }
+        const capture: IngressCapture = { sessionId, sinks, hydrateRevision, disposeCount: 0, acknowledged: [] }
         captures.push(capture)
-        return { dispose: () => { capture.disposeCount += 1 } }
+        return {
+          dispose: () => { capture.disposeCount += 1 },
+          acknowledgeWindowRefold: proof => { capture.acknowledged.push(proof); return true },
+        }
       },
     },
   }
@@ -170,6 +182,7 @@ function buildSource(options: {
   read?: (sessionId: string, signal?: AbortSignal) => Promise<PresentationReadSnapshot | undefined>
   loadOlder?: (sessionId: string, signal?: AbortSignal) => Promise<PresentationReadSnapshot | undefined>
   childCwd?: (childSessionId: string) => string
+  generation?: { getSnapshot(): { id: number } | undefined; subscribe(listener: () => void): () => void }
 }) {
   return createRemoteChildViewSource<WireEvent>({
     sessions: options.sessions,
@@ -178,6 +191,12 @@ function buildSource(options: {
       loadOlder: options.loadOlder ?? (async () => undefined),
     },
     liveIngress: options.ingress,
+    // The official generation source answers a STABLE snapshot object (the
+    // S3-R0 fence compares identity, never a freshly-built value).
+    generation: options.generation ?? (() => {
+      const stable = { id: 1 }
+      return { getSnapshot: () => stable, subscribe: () => () => {} }
+    })(),
     childCwd: options.childCwd ?? (() => ''),
     asEvent,
   })
@@ -287,6 +306,7 @@ test('F6 regression: an errored window is never re-folded by rehydrate', async (
       }),
       readAttachment: async () => ({ ok: true, value: { attachment: {}, data: new Uint8Array() } }),
     },
+    eventSource: { getSnapshot: () => ({ revision: 1 }) },
   }
   const fixture = childSessions('child-1', mutable)
   const { ingress } = fakeIngress()
@@ -361,8 +381,7 @@ test('subscribe forwards every ingress sink and passes the hydrated revision as 
   const sinks: ViewerChildLiveSinks<WireEvent> = {
     onDurableEvent: event => { durable.push(event) },
     onLiveInput: input => { live.push(input) },
-    onWindowReplaced: () => { calls.push('replaced') },
-    onWindowPrepended: () => { calls.push('prepended') },
+    onWindowRefoldRequired: () => { calls.push('refold') },
     onSessionSnapshotChanged: () => { calls.push('snapshot') },
     onProjectionsChanged: () => { calls.push('projections') },
   }
@@ -382,11 +401,10 @@ test('subscribe forwards every ingress sink and passes the hydrated revision as 
   assert.equal(live.length, 1)
   assert.equal(live[0], input, 'the live input is forwarded by identity')
 
-  capture.sinks.onWindowReplaced('child-1')
-  capture.sinks.onWindowPrepended('child-1')
+  capture.sinks.onWindowRefoldRequired('child-1')
   capture.sinks.onSessionSnapshotChanged('child-1')
   capture.sinks.onProjectionsChanged('child-1')
-  assert.deepEqual(calls, ['replaced', 'prepended', 'snapshot', 'projections'])
+  assert.deepEqual(calls, ['refold', 'snapshot', 'projections'])
   view.release()
 })
 
@@ -399,8 +417,7 @@ test('release is idempotent, disposes the live subscription and releases the ref
   const handle = view.subscribe({
     onDurableEvent: () => {},
     onLiveInput: () => {},
-    onWindowReplaced: () => {},
-    onWindowPrepended: () => {},
+    onWindowRefoldRequired: () => {},
     onSessionSnapshotChanged: () => {},
     onProjectionsChanged: () => {},
   })
@@ -413,8 +430,7 @@ test('release is idempotent, disposes the live subscription and releases the ref
   assert.equal(view.subscribe({
     onDurableEvent: () => {},
     onLiveInput: () => {},
-    onWindowReplaced: () => {},
-    onWindowPrepended: () => {},
+    onWindowRefoldRequired: () => {},
     onSessionSnapshotChanged: () => {},
     onProjectionsChanged: () => {},
   }), undefined, 'a released view never installs a new subscription')

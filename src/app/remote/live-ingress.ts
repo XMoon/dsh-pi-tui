@@ -14,17 +14,27 @@
  * a replaced same-id BINDING retires the handle: a stale publication from it
  *   never repaints the new owner's Session;
  * a Connection GENERATION rollover does NOT retire the handle — the retained
- *   binding is unchanged, so the handle ADOPTS the new generation, forgets the
- *   dead generation's revision fence, and lets the next authoritative
- *   publication continue (a `replace` rehydrates the new window, an `append`
- *   routes the new entries). Detaching here would leave the surface dead;
- * no second assistant-stream tracker exists beside this ingress.
+ *   binding is unchanged, so the handle ADOPTS the new generation;
+ * delivery is a SEQUENCE contract, not a latest-change contract: the official
+ *   window is the current complete contiguous window and `change` is only the
+ *   LAST synchronous delta, so any generation rollover, revision
+ *   discontinuity, `replace`, `prepend`, missing change or hydrate gap makes
+ *   the incremental sequence untrustworthy. The handle then enters RECOVERING:
+ *   it stops delivering partial increments (they would fold an incomplete
+ *   transcript while the footer advanced) and asks the fold OWNER — main
+ *   `session-presentation`, child `viewer-runtime` — to re-fold the current
+ *   official window; the owner acknowledges the committed revision and only
+ *   then does incremental delivery resume. Detaching on a rollover instead
+ *   would leave the surface dead.
  * ```
  *
- * The ingress owns NO presentation state: every accepted input is handed to
- * the injected sinks (the bootstrap maps them onto the existing surface
- * routing + presentation owner), so the canonical pipeline stays the ONE
- * join.
+ * The ingress owns NO presentation state and never folds a transcript itself:
+ * every accepted input is handed to the injected sinks (the bootstrap maps
+ * them onto the existing surface routing + presentation owner), so the
+ * canonical pipeline stays the ONE join. The recovery cursor
+ * (`incremental|recovering` + last delivered revision + the exact
+ * generation/binding evidence) is delivery bookkeeping, never a second
+ * transcript or durable-event log authority.
  *
  * @module @xmoon76/dsh-pi-tui/app/remote/live-ingress
  */
@@ -32,6 +42,7 @@
 import type { AssistantLiveChunk, AssistantLiveInput } from '../../runtime/assistant-stream-port.ts'
 import type {
   PresentationDurableEvent,
+  PresentationWindowRefoldProof,
 } from '../../runtime/presentation-read-port.ts'
 import type {
   RemoteConnectionGeneration,
@@ -72,17 +83,16 @@ export interface RemoteLiveIngressSinks {
   /** Apply one transient assistant input (start/chunk synthesized per
    *  attempt tuple, exactly the read-side partition semantics). */
   readonly onLiveInput: (input: AssistantLiveInput) => void
-  /** The window was REPLACED (reconnect/gap repair): re-hydrate the whole
-   *  presentation from the authoritative new window. */
-  readonly onWindowReplaced: (sessionId: string) => void
-  /** Older history PREPENDED to the window front (an official `loadOlder`
-   *  by ANY consumer — the keyboard history extension, the /status facts
-   *  composition, copy paging): the append-only folds cannot take the
-   *  front-joined page incrementally, so the transcript/stats presentation
-   *  (and the footer's derived figures) must re-fold from the widened
-   *  window. F10 (round 4): without this the footer keeps rendering the
-   *  stale pre-page fold — often the all-zero "no samples" view. */
-  readonly onWindowPrepended: (sessionId: string) => void
+  /** The incremental sequence is no longer trustworthy (generation rollover,
+   *  revision discontinuity, window replace/prepend, missing change, hydrate
+   *  gap): the fold OWNER must re-fold the CURRENT official window and then
+   *  acknowledge the committed revision through
+   *  {@link RemoteLiveIngressHandle.acknowledgeWindowRefold}. This sink carries
+   *  INTENT only — it must not synchronously start the async re-fold, because
+   *  it can fire while the caller's `handle = subscribe(...)` assignment is
+   *  still completing. Every later revision, and the Session's loading→open
+   *  transition, re-fires it until the recovery is acknowledged. */
+  readonly onWindowRefoldRequired: (sessionId: string) => void
   /** The Session snapshot changed (pendingSubmissions/running/etc. — the
    *  uSES channel): the pending-input presentation re-joins from the
    *  official sources. */
@@ -99,6 +109,18 @@ export interface RemoteLiveIngressSinks {
 export interface RemoteLiveIngressHandle {
   /** Detach the subscription (idempotent). */
   dispose(): void
+  /**
+   * Acknowledge one COMMITTED window re-fold. Returns `true` — and only then
+   * resumes incremental delivery — when this handle is still alive, still
+   * bound to the EXACT binding object, the official Connection generation is
+   * the same object the fold was fenced under, the official current window
+   * revision still equals the committed revision, and the Session is open.
+   * Session-id equality, a `revision >=` comparison, a surviving footer value
+   * or the latest `change.kind` are NOT substitutes. A `false` return leaves
+   * the handle recovering; the next official revision / open transition wakes
+   * the owner again (never a busy loop).
+   */
+  acknowledgeWindowRefold(proof: PresentationWindowRefoldProof): boolean
 }
 
 /** The lazily-created ingress subscription factory the bootstrap consumes. */
@@ -114,7 +136,7 @@ export interface RemoteLiveIngress {
    * hydration committed. Events published between that snapshot and this
    * subscription are NOT observable as incremental changes; when the
    * subscription-time revision is higher, the gap is surfaced through
-   * `onWindowReplaced` (the authoritative re-hydrate) instead of being
+   * `onWindowRefoldRequired` (the authoritative window re-fold) instead of being
    * silently skipped — no lost-event window exists by construction.
    */
   subscribe(
@@ -167,13 +189,24 @@ export function createRemoteLiveIngress(
        *  the SAME sinks. */
       let disposed = false
       let unsubscribe: (() => void) | undefined
+      let unsubscribeGeneration: (() => void) | undefined
       const subscriptionRevision = binding.eventSource.getSnapshot().revision
-      let lastRevision = subscriptionRevision
+      /** The revision of the last increment DELIVERED to the fold — or the
+       *  revision one acknowledged recovery committed. Delivery bookkeeping
+       *  only: never a business state or a second durable log. */
+      let lastDeliveredRevision = subscriptionRevision
+      /** `recovering` = the incremental sequence is untrustworthy; the owner
+       *  must re-fold the official window and acknowledge the revision. */
+      let mode: 'incremental' | 'recovering' = 'incremental'
+      /** The (revision, open) pair the last wakeup was issued for: a later
+       *  revision, or the Session's loading→open transition, re-arms it. */
+      let notified: { readonly revision: number; readonly open: boolean } | undefined
+      let notifyQueued = false
       // The hydrate→subscribe gap: events that landed after the caller's cold
       // snapshot but before this subscription will never arrive as changes.
-      // The honest recovery is the authoritative window re-hydrate (the same
-      // path a reconnect takes), delivered AFTER the subscription is armed so
-      // no subsequent event can be lost either.
+      // The honest recovery is the authoritative window re-fold (the same path
+      // a reconnect takes), delivered AFTER the subscription is armed so no
+      // subsequent event can be lost either.
       const missedHydrationEvents = hydrateRevision !== undefined && subscriptionRevision > hydrateRevision
 
       /** The exact retained binding is the ONLY retirement condition: a
@@ -182,18 +215,69 @@ export function createRemoteLiveIngress(
       const isBindingReplaced = (): boolean =>
         disposed || sessions.binding(sessionId) !== binding
 
-      /** Adopt the current Connection generation. A generation ROLLOVER
-       *  (reconnect, network loss) does NOT retire the retained binding — it
-       *  invalidates the OLD generation's async results and must drive the
-       *  authoritative re-hydrate. Detaching here instead would leave the
-       *  Remote surface permanently dead after any reconnect, because nothing
-       *  re-establishes this subscription for an unchanged subject. */
+      /** The current Connection generation evidence this handle delivers
+       *  under. A generation ROLLOVER (reconnect, network loss) does NOT
+       *  retire the retained binding — it invalidates the OLD generation's
+       *  window proof, so the handle enters recovery instead of trusting the
+       *  new generation's first change (its numbering starts over and its
+       *  window may be a whole replacement delivered as an `append` delta). */
       let fencedGeneration: RemoteConnectionGeneration | undefined = capturedGeneration
-      const adoptGeneration = (): 'same' | 'replaced' => {
-        const current = generation.getSnapshot()
-        if (Object.is(fencedGeneration, current)) return 'same'
-        fencedGeneration = current
-        return 'replaced'
+
+      /** Ask the fold OWNER to reconcile the CURRENT official window. Intent
+       *  only, coalesced, and deferred by exactly one microtask so the
+       *  caller's `handle = subscribe(...)` assignment always completes before
+       *  the owner can start an async re-fold (reentrancy); a later revision or
+       *  the loading→open transition re-arms the wakeup until the recovery is
+       *  acknowledged. This is not a retry loop: every wakeup is driven by a
+       *  real official change. */
+      const requireRefold = (): void => {
+        if (disposed) return
+        if (isBindingReplaced()) { dispose(); return }
+        mode = 'recovering'
+        const window = binding.eventSource.getSnapshot()
+        const open = binding.session.getSnapshot().openState === 'open'
+        if (notified !== undefined && notified.revision === window.revision && notified.open === open) return
+        notified = { revision: window.revision, open }
+        if (notifyQueued) return
+        notifyQueued = true
+        queueMicrotask(() => {
+          notifyQueued = false
+          if (disposed || mode !== 'recovering') return
+          if (isBindingReplaced()) { dispose(); return }
+          sinks.onWindowRefoldRequired(sessionId)
+        })
+      }
+
+      /** Observe the official Connection generation. A rollover always enters
+       *  recovery: the delivered sequence belongs to the dead generation. */
+      const observeGeneration = (): void => {
+        if (disposed) return
+        const next = generation.getSnapshot()
+        if (Object.is(fencedGeneration, next)) return
+        fencedGeneration = next
+        requireRefold()
+      }
+
+      /** Acknowledge one committed re-fold (see the interface contract). The
+       *  proof is re-validated against the LIVE official state here. */
+      const acknowledgeWindowRefold = (proof: PresentationWindowRefoldProof): boolean => {
+        if (disposed) return false
+        if (!Object.is(proof.binding, binding)) return false
+        if (!Object.is(proof.generation, generation.getSnapshot())) return false
+        const window = binding.eventSource.getSnapshot()
+        if (window.revision !== proof.revision) return false
+        if (binding.session.getSnapshot().openState !== 'open') return false
+        // The committed fold IS the official window as of `proof.revision`:
+        // resume from there, re-seeding the transient tuple memory from the
+        // window the owner just folded, so an already-started attempt never
+        // re-synthesizes a start (and every attempt of the old generation is
+        // gone with the old tuple memory).
+        startedTuples.clear()
+        seedTuplesFromWindow(window.entries)
+        lastDeliveredRevision = proof.revision
+        mode = 'incremental'
+        notified = undefined
+        return true
       }
 
       /** Partition the CHANGE entries into durable events + live inputs
@@ -230,32 +314,37 @@ export function createRemoteLiveIngress(
       const publish = (): void => {
         if (isBindingReplaced()) {
           // A same-id binding rollover no longer owns this subscription:
-          // detach silently (the new owner's own subscription or re-hydrate
-          // owns the surface from here).
+          // detach silently (the new owner's own subscription or re-fold owns
+          // the surface from here).
           dispose()
           return
         }
-        if (adoptGeneration() === 'replaced') {
-          // The Connection generation changed under this exact binding: the
-          // old generation's window proof is VOID. The new generation re-opens
-          // the session and republishes its AUTHORITATIVE baseline, so forget
-          // the old revision (its numbers belong to the dead generation) and
-          // process the very next publication: a `replace` drives the
-          // authoritative re-hydrate through the normal path, an `append`
-          // routes the new durable entries — never swallowed as a duplicate
-          // revision, and never a premature re-hydrate of the dead window.
-          lastRevision = -1
+        // A generation rollover is a recovery trigger even when it arrives
+        // without an eventSource publication (the generation channel notifies
+        // synchronously).
+        observeGeneration()
+        if (mode === 'recovering') {
+          // Nothing incremental may reach the fold while recovering; a newer
+          // official revision (or the loading→open transition) re-arms the
+          // owner's wakeup.
+          requireRefold()
+          return
         }
         const window = binding.eventSource.getSnapshot()
-        if (window.revision === lastRevision) return
-        lastRevision = window.revision
-        // The eventSource exposes the WHOLE window + its latest `change`.
-        // Re-derive from the change when present (the normal live path);
-        // a revision jump without a usable change falls back to a full
-        // re-hydrate through the reader (the honest recovery).
+        if (window.revision === lastDeliveredRevision) return
+        // The eventSource exposes the WHOLE current window + its latest
+        // `change`; the change is the LAST synchronous delta only. It is a
+        // valid increment ONLY when it is contiguous with what the fold
+        // already holds.
         const change = (window as { readonly change?: RemoteWindowChange }).change
-        if (change === undefined) {
-          sinks.onWindowReplaced(sessionId)
+        if (change === undefined || change.kind === 'replace' || change.kind === 'prepend') {
+          requireRefold()
+          return
+        }
+        if (window.revision !== lastDeliveredRevision + 1) {
+          // A skipped revision: the intervening deltas are unobservable, so
+          // the latest change cannot rebuild the fold.
+          requireRefold()
           return
         }
         switch (change.kind) {
@@ -263,25 +352,7 @@ export function createRemoteLiveIngress(
             const { durable, live } = partitionChange(change.entries)
             for (const input of live) sinks.onLiveInput(input)
             for (const event of durable) sinks.onDurableEvent(sessionId, event)
-            return
-          }
-          case 'prepend': {
-            // Older history joined the window front (loadOlder/jump): the
-            // append-only fold cannot take it incrementally. F10 (round 4):
-            // route the re-hydrate through the dedicated sink — the page may
-            // have been requested by ANY official reader consumer (the
-            // keyboard extension, the /status composition, copy paging), so
-            // the surface cannot rely on the paging caller to re-hydrate.
-            sinks.onWindowPrepended(sessionId)
-            return
-          }
-          case 'replace': {
-            // Reconnect / gap repair: the new window is authoritative. The
-            // tuple memory re-seeds from the NEW baseline (the re-hydrate
-            // synthesizes those starts again).
-            startedTuples.clear()
-            seedTuplesFromWindow(binding.eventSource.getSnapshot().entries)
-            sinks.onWindowReplaced(sessionId)
+            lastDeliveredRevision = window.revision
             return
           }
           case 'settle-assistant': {
@@ -298,6 +369,7 @@ export function createRemoteLiveIngress(
             for (const key of startedTuples) {
               if (key.startsWith(`${change.attemptId}:`)) startedTuples.delete(key)
             }
+            lastDeliveredRevision = window.revision
             return
           }
         }
@@ -308,6 +380,8 @@ export function createRemoteLiveIngress(
         disposed = true
         unsubscribe?.()
         unsubscribe = undefined
+        unsubscribeGeneration?.()
+        unsubscribeGeneration = undefined
         unsubscribeSnapshot()
         unsubscribeProjections()
       }
@@ -322,6 +396,10 @@ export function createRemoteLiveIngress(
         }
         lastSnapshotChange += 1
         sinks.onSessionSnapshotChanged(sessionId)
+        // The official Session snapshot also carries the open state: a
+        // loading→open transition is a REAL wakeup for an unsettled recovery
+        // (the window may only become foldable now) — never a timer.
+        if (mode === 'recovering') requireRefold()
       }
       const unsubscribeSnapshot = binding.session.subscribe(onSnapshot)
 
@@ -350,14 +428,21 @@ export function createRemoteLiveIngress(
       })()
 
       unsubscribe = binding.eventSource.subscribe(publish)
+      // The official generation channel: a rollover must enter recovery even
+      // when it arrives without an eventSource publication.
+      unsubscribeGeneration = generation.subscribe(observeGeneration)
       // Lost-wakeup fence: publication may have happened between the
       // subscription and this return; run one synchronous pass.
       publish()
       void lastSnapshotChange
-      if (!disposed && missedHydrationEvents && lastRevision === subscriptionRevision) {
-        sinks.onWindowReplaced(sessionId)
+      if (!disposed && missedHydrationEvents) {
+        // Events landed between the caller's cold snapshot and this
+        // subscription; they are unobservable as changes, so the window is the
+        // only honest source. (Also covers a rollover observed before this
+        // point: the recovery is already armed and simply coalesces.)
+        requireRefold()
       }
-      return { dispose }
+      return { dispose, acknowledgeWindowRefold }
     },
   }
 }

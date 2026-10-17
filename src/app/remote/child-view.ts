@@ -28,7 +28,8 @@ import type {
   ViewerChildSource,
   ViewerChildView,
 } from '../surface/viewer-runtime.ts'
-import type { RemoteLiveIngress } from './live-ingress.ts'
+import type { RemoteConnectionGenerationSource } from '../../runtime/remote/session-reader-remote.ts'
+import type { RemoteLiveIngress, RemoteLiveIngressHandle } from './live-ingress.ts'
 
 /** The official attachment read result (structural `RemoteResult`). */
 export type RemoteAttachmentReadResult =
@@ -52,6 +53,11 @@ export interface RemoteChildBinding {
     }
     readAttachment(attachmentId: string): Promise<RemoteAttachmentReadResult>
   }
+  /** The official event window source (S3-R0: the child re-fold fence must
+   *  prove its read is still the CURRENT revision before it commits). */
+  readonly eventSource?: {
+    getSnapshot(): { readonly revision: number }
+  }
 }
 
 /** Structural subset of official `ClientSessions` (retain + borrow). */
@@ -69,6 +75,8 @@ export interface RemoteChildViewSourceOptions<Event> {
   }
   /** The ONE shared live-ingress factory. */
   readonly liveIngress: RemoteLiveIngress
+  /** The official Connection generation source (S3-R0 child re-fold fence). */
+  readonly generation: RemoteConnectionGenerationSource
   /** The official child Session's own workspace, or '' when unavailable. */
   readonly childCwd: (childSessionId: string) => string
   /** The cast at the composition seam: the wire event satisfies the TUI's
@@ -178,7 +186,7 @@ export function createRemoteChildViewSource<Event>(
       })
       const snapshot = hydrated(read, binding)
       let released = false
-      let live: { dispose(): void } | undefined
+      let live: RemoteLiveIngressHandle | undefined
       return {
         childSessionId: childId,
         parentSessionId: target.parentSessionId,
@@ -190,10 +198,30 @@ export function createRemoteChildViewSource<Event>(
           // as a legitimate (empty) window.
           const before = ownedBinding()
           if (before === undefined || !isOpen(before)) return undefined
+          const fenceGeneration = options.generation.getSnapshot()
           const next = await reader.read(childId)
           const current = ownedBinding()
           if (next === undefined || current === undefined || !isOpen(current)) return undefined
-          return hydrated(next, current)
+          // S3-R0 read→commit fence: the async read may have been overtaken by a
+          // Connection rollover or a newer official revision. Committing it
+          // would both lose the newer events and acknowledge a superseded
+          // recovery, so the fold is valid only while the official window still
+          // IS the revision that was read.
+          if (!Object.is(fenceGeneration, options.generation.getSnapshot())) return undefined
+          if (current.eventSource?.getSnapshot().revision !== next.revision) return undefined
+          const snapshot = hydrated(next, current)
+          return {
+            ...snapshot,
+            // The viewer calls this AFTER it commits the fold: the ingress
+            // resumes incremental delivery only for the exact identity and
+            // revision the committed fold holds. A `false` answer means the
+            // window moved again and the ingress has already re-armed.
+            acknowledge: () => live?.acknowledgeWindowRefold({
+              generation: fenceGeneration,
+              binding: current,
+              revision: next.revision,
+            }) ?? false,
+          }
         },
         async loadOlder(): Promise<void> {
           if (released) return
@@ -205,8 +233,7 @@ export function createRemoteChildViewSource<Event>(
           const handle = liveIngress.subscribe(childId, {
             onDurableEvent: (_id, event) => sinks.onDurableEvent(options.asEvent(event)),
             onLiveInput: (input: AssistantLiveInput) => sinks.onLiveInput(input),
-            onWindowReplaced: () => sinks.onWindowReplaced(),
-            onWindowPrepended: () => sinks.onWindowPrepended(),
+            onWindowRefoldRequired: () => sinks.onWindowRefoldRequired(),
             onSessionSnapshotChanged: () => sinks.onSessionSnapshotChanged(),
             onProjectionsChanged: () => sinks.onProjectionsChanged(),
           }, snapshot.revision)

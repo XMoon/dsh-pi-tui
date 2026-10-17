@@ -1725,8 +1725,11 @@ test('L6 P2 sink: the MOUNTED Remote child viewer converges its committed subjec
   // They are suppressed and counted too: if they ever fired inside the measured
   // window the causality claim below would be false, so a non-zero count fails
   // loudly instead of silently weakening the proof.
-  let suppressedWindowReplaced = 0
-  let suppressedWindowPrepended = 0
+  // S3-R0: the window channels are unified into ONE recovery requirement. It is
+  // FORWARDED (the engine must stay correct if it fires) and COUNTED: a non-zero
+  // count inside the measured window would mean the convergence could have come
+  // from a window reconcile instead of the snapshot channel.
+  let windowRefoldRequirements = 0
   const ingress = fixture.aggregate.presentation.liveIngress as unknown as {
     subscribe(
       sessionId: string,
@@ -1745,8 +1748,10 @@ test('L6 P2 sink: the MOUNTED Remote child viewer converges its committed subjec
       },
       onDurableEvent: () => { suppressedDurableEvents += 1 },
       onProjectionsChanged: () => { suppressedProjectionEvents += 1 },
-      onWindowReplaced: () => { suppressedWindowReplaced += 1 },
-      onWindowPrepended: () => { suppressedWindowPrepended += 1 },
+      onWindowRefoldRequired: (id: string) => {
+        windowRefoldRequirements += 1
+        ;(sinks.onWindowRefoldRequired as (id: string) => void)(id)
+      },
     }, hydrateRevision)
   }
   life.defer(() => { ingress.subscribe = realSubscribe })
@@ -1803,10 +1808,8 @@ test('L6 P2 sink: the MOUNTED Remote child viewer converges its committed subjec
     'the official Session-snapshot sink must be the channel that delivered the flip')
   assert.ok(suppressedProjectionEvents > 0,
     'the projection witness must have suppressed real projection events for the child')
-  assert.equal(suppressedWindowReplaced, 0,
-    'a window replacement would independently re-derive the subject status in this window')
-  assert.equal(suppressedWindowPrepended, 0,
-    'a window prepend would independently re-derive the subject status in this window')
+  assert.equal(windowRefoldRequirements, 0,
+    'a window reconcile would independently re-derive the subject status in this window')
   assert.equal(subjectActivity(), 'inactive',
     'the committed display subject must follow the official running flip')
   await waitFor('the subject bar converges to the inactive activity', () =>
@@ -1845,8 +1848,7 @@ test('L6 P2 sink: the MOUNTED Remote child viewer converges its committed subjec
     'the reverse flip must also be observed with the durable sink suppressed')
   assert.ok(snapshotNotifications > snapshotBefore,
     'the reverse flip must also arrive through the official Session-snapshot sink')
-  assert.equal(suppressedWindowReplaced, 0, 'no window replacement may fire on the reverse flip either')
-  assert.equal(suppressedWindowPrepended, 0, 'no window prepend may fire on the reverse flip either')
+  assert.equal(windowRefoldRequirements, 0, 'no window reconcile may fire on the reverse flip either')
   assert.equal(subjectActivity(), 'running', 'the reverse flip must converge as well')
   assert.equal(subjectLine().includes('● running'), true,
     `the rendered subject bar must show running again:\n${subjectLine()}`)
