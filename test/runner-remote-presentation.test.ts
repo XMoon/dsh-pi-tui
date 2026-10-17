@@ -1031,6 +1031,60 @@ function seedTurns(
   }
 }
 
+test('L6/S3-R0: an unavailable startup hydrate is recovered with exactly ONE ingress (behavioral retry witness)', async (t) => {
+  // RFL-002 behavioral seam: the FIRST cold hydrate fails as the unavailable
+  // transport makes it (the reader answers undefined -> `initLiveRemoteSession`
+  // returns undefined -> the composition root's retry path runs). The retry must
+  // install exactly ONE ingress (the failed attempt installed none) and the
+  // authoritative transcript must appear through the real runner path.
+  const life = testLifecycle(t)
+  const presetId = 'm3-4-pr2-preset'
+  const sessionId = 'm3-4-pr2-s3r0-retry'
+  const host = await mountRemotePresentationHost(life, presetId)
+  await host.harness.create(SessionId(sessionId), undefined, { cwd: host.anchorDir })
+  const append = host.ctx.sessions.get(SessionId(sessionId)) as unknown as {
+    append(type: string, data: unknown, options?: { surfaceOp?: 'append' }): void
+  }
+  seedTurns(append, 1, 1, 'retry')
+  let failFirstRead = true
+  let liveSubscriptions = 0
+  const fixture = await mountRemoteRunner(life, {
+    presetId,
+    resumeSessionId: sessionId,
+    host,
+    beforeRunnerMount: (presentation) => {
+      // Count the LIVE ingress subscriptions this composition installs.
+      const ingress = presentation.liveIngress as unknown as {
+        subscribe: (...args: never[]) => unknown
+      }
+      const realSubscribe = ingress.subscribe
+      ingress.subscribe = function countedSubscribe(this: unknown, ...args: never[]) {
+        liveSubscriptions += 1
+        return (realSubscribe as (...a: never[]) => unknown).apply(this, args)
+      }
+      life.defer(() => { ingress.subscribe = realSubscribe })
+      // The first cold hydrate cannot read (the unavailable-transport shape).
+      const reader = presentation.presentationReader as unknown as {
+        read: (id: string, signal?: AbortSignal) => Promise<unknown>
+      }
+      const realRead = reader.read
+      reader.read = function failingOnce(this: unknown, id: string, signal?: AbortSignal) {
+        if (failFirstRead) {
+          failFirstRead = false
+          return Promise.resolve(undefined)
+        }
+        return realRead.call(this, id, signal)
+      }
+      life.defer(() => { reader.read = realRead })
+    },
+  })
+  await waitFor('the recovered transcript is painted', () => fixture.vt.getViewport().join('').includes('retry answer 1'), 20_000)
+  assert.equal(failFirstRead, false, 'the first hydrate really failed (the retry path ran)')
+  assert.equal(liveSubscriptions, 1,
+    'exactly ONE ingress subscription exists after the recovery (the failed attempt installed none)')
+  fixture.dispose()
+})
+
 test('L6 navigation: switch, same-id rollover and reconnect re-init the presentation without leaking the old subject', async (t) => {
   const life = testLifecycle(t)
   const sessionA = 'm3-4-pr2-nav-a'
