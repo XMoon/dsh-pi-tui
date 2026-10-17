@@ -2,7 +2,7 @@
 
 ## Availability and result
 
-**Current result: `M-01..M-07 NOT_RUN (ENV_UNAVAILABLE)`.** This execution environment exposes no interactive operator terminal, system clipboard/OSC52, tmux/SSH session, IME composition, or physical CJK-font configuration to the agent. No real-terminal artifacts were captured. `VirtualTerminal`, CI, test callbacks and generated screenshots are not substitutes. No Owner waiver exists.
+**Current result:** `M-05 PARTIAL`; `M-01..M-04` and `M-06..M-07 NOT_RUN (ENV_UNAVAILABLE)`. A limited isolated tmux witness is recorded in the [qualification log](qualification-log.md); it does not satisfy the full M-05 matrix. System clipboard/OSC52, IME composition, a trusted widgetsBelow provider and physical CJK-font configuration remain unavailable or unverified. `VirtualTerminal`, CI and test callbacks do not substitute for those checks. No Owner waiver exists.
 
 For every run, record the operator, date, terminal/version, OS, SSH/tmux versions where relevant, columns×rows, font/CJK width configuration, locale, display mode, DSH mode/version, exact test steps, expected/actual, evidence link, and cleanup/restoration. Use synthetic nonsecret content only; redact prompts, command histories, credentials and clipboard data.
 
@@ -50,8 +50,8 @@ Expected: draft/cursor/IME state is preserved; no accidental Quick entry/submit;
 
 ## M-05 — Task Quick and widgetsBelow
 
-**Status:** `NOT_RUN (ENV_UNAVAILABLE)`<br>
-**Next operator:** operator with a trusted local `input.widget.below` provider and at least one real synthetic Job.
+**Status:** `PARTIAL (ISOLATED TMUX, MAIN 80×24; FULL CHECKLIST INCOMPLETE)`<br>
+**Next operator:** operator with a trusted local `input.widget.below` provider and time to complete the Fullscreen/size/click matrix.
 
 1. In separate runs, expose one, two and three below-widget rows. At 80×24, 80×10, 80×8 and 44×24 (CJK), exercise Main and Fullscreen where supported.
 2. Confirm Footer badge, hidden Quick zero-row state, last-visual-line `↓`, scrolling/wheel, typed Job/Question entry, Esc/first Up, resize, and `➜ Open Task Center…` via Enter and Fullscreen click.

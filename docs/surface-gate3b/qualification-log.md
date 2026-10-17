@@ -49,4 +49,4 @@ Mode-gated source checks remain `NOT_RUN (mode=npm; CI step skipped)`, not PASS.
 
 ## Manual qualification
 
-`M-01..M-07`: `NOT_RUN (ENV_UNAVAILABLE)`; no operator artifacts and no Owner waiver. See [manual-terminal-checklist.md](manual-terminal-checklist.md). This leaves the closure `PENDING_MANUAL` even if every automated gate is green.
+`M-01..M-04` and `M-06..M-07`: `NOT_RUN (ENV_UNAVAILABLE)`. `M-05`: `PARTIAL` — an isolated npm-mode tmux 3.5a run on Linux/WSL2 at Main 80×24 used a real model-backed Bash Job and a synthetic two-line CJK draft. Captures show the unselected and selected Full-action row spacing at `temp/gate3b-tmux-manual.SfRsEf/artifacts/quick-active-live.txt` and `quick-open-full-selected.txt`. Full Task Center activation was inconclusive; Fullscreen, widgetsBelow variants, other sizes, clicks, wheel and resize remain unrun. The disposable DSH_HOME and copied credentials were removed after the run; original profile files were untouched. See [manual-terminal-checklist.md](manual-terminal-checklist.md). No Owner waiver exists; closure remains `PENDING_MANUAL`.

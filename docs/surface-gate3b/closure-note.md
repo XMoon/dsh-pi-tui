@@ -25,10 +25,10 @@ Automated details and source/test traces are in the [evidence matrix](evidence-m
 | H-01 | PASS_AUTOMATED | M-04/M-06 `NOT_RUN` | Search, preview and exact-source copy are automated; IME/system clipboard remain open. |
 | H-02 | PASS_AUTOMATED | M-04 `NOT_RUN` | Enter-without-submit and Esc draft/cursor restoration are automated; native IME remains open. |
 | H-03 | PASS_AUTOMATED | M-04 `NOT_RUN` | Question/Approval PARK/REFUSE/FIFO and stale-callback behavior are automated; native focus/IME evidence remains open. |
-| Q-01 | PASS_AUTOMATED | M-05/M-07 `NOT_RUN` | Hidden-zero-row/active typed task navigation is automated; trusted real widget/terminal layouts remain open. |
-| Q-02 | PASS_AUTOMATED | M-04/M-05 `NOT_RUN` | X063 visual-boundary and host key routing are automated; real IME/widget environment remains open. |
-| Q-03 | PASS_AUTOMATED | M-05/M-07 `NOT_RUN` | Footer-with-hint preflight, typed Full action and Main 80×8 exception are automated; physical widget/CJK frames remain open. |
-| X-01 | PASS_AUTOMATED | M-02..M-07 `NOT_RUN` | Cross-surface lifecycle/currentness is automated; native terminal, clipboard, IME and widget evidence remains open. |
+| Q-01 | PASS_AUTOMATED | M-05 `PARTIAL`; M-07 `NOT_RUN` | One Main 80×24 tmux frame is captured; trusted widget and full terminal layouts remain open. |
+| Q-02 | PASS_AUTOMATED | M-04 `NOT_RUN`; M-05 `PARTIAL` | X063 visual-boundary and host key routing are automated; real IME/widget environment and full M-05 matrix remain open. |
+| Q-03 | PASS_AUTOMATED | M-05 `PARTIAL`; M-07 `NOT_RUN` | Footer preflight and typed Full action are automated; the limited tmux capture did not verify activation; physical widget/CJK frames remain open. |
+| X-01 | PASS_AUTOMATED | M-02..M-04/M-06..M-07 `NOT_RUN`; M-05 `PARTIAL` | Cross-surface lifecycle/currentness is automated; native clipboard, IME, widget and remaining terminal evidence is open. |
 
 ## Owner, focus, currentness and compatibility invariants
 
@@ -41,7 +41,7 @@ Automated details and source/test traces are in the [evidence matrix](evidence-m
 ## Frozen-tree verification and review
 
 - Environment, targeted results, the initial `verify:prepush` failure and its corrected sublane results, plus the required local gate ledger: [qualification log](qualification-log.md). The full PR CI run remains pending.
-- Native manual checks: `M-01..M-07 NOT_RUN (ENV_UNAVAILABLE)`; no Owner waiver. See [manual checklist](manual-terminal-checklist.md).
+- Native manual checks: `M-01..M-04` and `M-06..M-07 NOT_RUN`; `M-05 PARTIAL` with a limited tmux witness; no Owner waiver. See [manual checklist](manual-terminal-checklist.md) and [qualification log](qualification-log.md).
 - Independent reviewer: `ACCEPTED` for this PR/evidence artifact only; see [review findings](review-findings.md). This does not grant Gate Owner acceptance or waive manual qualification.
 
 ## Closure axes and Owner decision
