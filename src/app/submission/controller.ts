@@ -1173,10 +1173,16 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
                 // may have changed mid-flight). Scope: the B2-A notice set, so
                 // sibling TUI commands keep their own refusal notices.
                 return deps.command.clientCommands.execute({ line: commandLine, signal: commandSignal }).then((execution) => {
+                  // F5: the Client execution can outlive the Session it was
+                  // admitted against (an async /resume can publish the
+                  // replacement while the handler is still running), so the
+                  // notice is fenced by the SAME captured scope the settlement
+                  // uses — a replaced owner must not receive the old result.
                   if (execution !== undefined
                     && execution.result.kind === 'error'
                     && execution.result.text !== ''
                     && !deps.isCleanedUp()
+                    && deps.scope.isCurrent(scope)
                     && parsedAtSubmit !== undefined
                     && TSP_B2A_RESULT_NOTICE_COMMANDS.has(parsedAtSubmit.name)) {
                     deps.app().notify(execution.result.text, 'error')

@@ -277,3 +277,163 @@ test('round11 F1: an ENDED lifetime (abort + cleanup) writes and announces NOTHI
       `${rejection}: a cancelled gesture announces nothing: ${JSON.stringify(recorded.notices)}`)
   }
 })
+
+/**
+ * F5 (PR4-B2-A review): the card-less Client-command ERROR notice is emitted
+ * inside the Client registry branch, but the Client execution can outlive the
+ * Session it was admitted against (an async `/resume` publishes the replacement
+ * while the handler still runs). The notice is fenced by the SAME captured
+ * scope the settlement uses: a replaced owner never receives the old result.
+ */
+async function runClientCommandErrorAcrossOwnerChange(options: {
+  readonly staleAtSettlement: boolean
+}): Promise<{ readonly notices: readonly string[] }> {
+  const { createSubmissionController } = await import('../src/app/submission/controller.ts')
+  const { createSessionOwnershipCore } = await import('../src/app/session/ownership-core.ts')
+  const { DraftImageStore } = await import('../src/client/media/image/draft-store.ts')
+  const { DraftFileStore } = await import('../src/client/media/attachment/file-draft.ts')
+  const core = createSessionOwnershipCore({ isSurfaceDisposed: () => false, resetForGeneration: () => {} })
+  core.setCurrentOwner({} as never, 'session-a')
+  const notices: string[] = []
+  let editorText = ''
+  const composer = {
+    getDraft: () => editorText,
+    setDraft: (text: string): void => { editorText = text },
+    setEditorText: (text: string): void => { editorText = text },
+    insertIntoEditor: (text: string): void => { editorText += text },
+    notify: (message: string): void => { notices.push(message) },
+    setSubmitPending: (): void => {},
+    clearSettledLocalMessages: (): void => {},
+  }
+  // The transport-neutral Remote projection: NO `inbox`, so the controller's
+  // Direct-Agent discriminator selects the Client command registry route.
+  const agentA = { session: { id: 'session-a' }, status: 'idle' } as never
+  let scopeCurrent = true
+  let releaseExecute!: () => void
+  const executeGate = new Promise<void>(resolve => { releaseExecute = resolve })
+  let enteredExecute!: () => void
+  const entered = new Promise<void>(resolve => { enteredExecute = resolve })
+  const diag = { debug: () => {}, info: () => {}, warn: () => {}, error: () => {}, dispose: () => {} }
+  const deepInert: unknown = new Proxy(function inert(): void {}, {
+    get: (_target, key) => (key === 'then' ? undefined : deepInert),
+    apply: () => undefined,
+  })
+  const deps: Record<string, unknown> = {
+    app: () => composer,
+    diag,
+    signal: new AbortController().signal,
+    isCleanedUp: () => false,
+    logError: () => {},
+    liveAgent: () => agentA,
+    ownership: {
+      generation: () => core.generation(),
+      captureSubject: () => core.subject(),
+      transitionPending: () => false,
+    },
+    scope: {
+      captureLive: () => ({ sessionId: 'session-a', subject: {}, generation: core.generation() }),
+      isCurrent: () => scopeCurrent,
+      requireLive: () => ({ sessionId: 'session-a', subject: {}, generation: core.generation() }),
+    },
+    session: {
+      ensureSession: async () => {},
+      beginCommandSettlement: () => {},
+      abortCommandSettlement: () => {},
+      settleCommandSettlement: () => {},
+      trackSettlementWork: () => {},
+    },
+    submissionRuntime: {
+      withWriter: async (_scope: unknown, task: () => Promise<unknown>) => task(),
+      submitPrompt: async () => {},
+      deferQueueRecall: () => {},
+    },
+    command: {
+      wasAdvertisedClaim: () => false,
+      hostClaimOf: () => undefined,
+      hostOriginClaimOf: () => undefined,
+      hostCatalogResolves: () => false,
+      clientClaimsLine: () => true,
+      isSkillWrapperName: () => false,
+      isSkillInvocation: () => false,
+      withCommandDelivery: <T>(_delivery: unknown, run: () => T): T => run(),
+      takeCommandDraftDisposition: () => undefined,
+      clientCommands: {
+        get: () => undefined,
+        execute: async () => {
+          enteredExecute()
+          await executeGate
+          return { commandId: 'cmd-client-f5', result: { kind: 'error', text: 'stale copy failure' } }
+        },
+      },
+    },
+    commandPlane: { available: () => false, execute: async () => undefined },
+    backendKind: 'remote',
+    history: {
+      persist: () => {},
+      persistAfterSession: async (
+        resolveSession: () => Promise<string | undefined>,
+        persist: (sessionId: string | undefined) => void,
+      ) => {
+        const sessionId = await resolveSession()
+        persist(sessionId)
+      },
+    },
+    drafts: { images: new DraftImageStore(), files: new DraftFileStore() },
+    direct: { withPromptAdmission: async (_agent: unknown, _hasImages: boolean, task: () => Promise<unknown>) => task() },
+    requestExit: () => {},
+    viewer: { isViewing: () => false },
+    artifacts: { start: () => {} },
+    extensions: {
+      findContribution: () => undefined,
+      handlerFor: () => undefined,
+      commandIdFor: () => undefined,
+      recordHealthRef: () => ({}),
+      recordError: () => {},
+      clearError: () => {},
+    },
+    status: { sessionCwd: () => '/tmp' },
+    surface: { refreshPendingInput: () => {} },
+    backend: {
+      hostFile: deepInert,
+      pendingInputReader: { snapshot: () => undefined },
+      sessionWriter: { prompt: async () => ({ kind: 'committed', value: undefined }) },
+      hostCommand: deepInert,
+    },
+    supportsLocalShellCards: false,
+    supportsTuiBuiltinUi: false,
+    retainsStaleDraftRestore: false,
+    ownerWasReplaced: (subject: unknown) => core.subjectAuthority.ownerReplaced(subject as never),
+    captureMatches: (subject: unknown) => core.isSubjectCurrent(subject as never),
+    model: { selected: { get current() { return undefined } } },
+    image: { attachments: () => undefined, llm: () => undefined },
+    tuiSettings: undefined,
+    isPlanActive: () => false,
+  }
+  const controllerDeps = new Proxy(deps, {
+    get: (target, key) => (key in target ? target[key as string] : deepInert),
+  })
+  const controller = createSubmissionController(controllerDeps as never)
+  controller.submit('/copy', 'enter')
+  await entered
+  // The owner is replaced while the Client command is still executing.
+  if (options.staleAtSettlement) {
+    core.bumpGeneration()
+    core.setCurrentOwner({} as never, 'session-b')
+    scopeCurrent = false
+  }
+  releaseExecute()
+  await new Promise(resolve => setTimeout(resolve, 120))
+  return { notices }
+}
+
+test('F5: a stale Client-command error is NOT announced on the replacement owner', async () => {
+  const result = await runClientCommandErrorAcrossOwnerChange({ staleAtSettlement: true })
+  assert.deepEqual(result.notices, [],
+    'the captured scope was replaced, so the old failure must not reach the new surface')
+})
+
+test('F5: the SAME-session Client-command error is announced exactly once', async () => {
+  const result = await runClientCommandErrorAcrossOwnerChange({ staleAtSettlement: false })
+  assert.deepEqual(result.notices, ['stale copy failure'],
+    'a current owner receives the card-less failure exactly once')
+})

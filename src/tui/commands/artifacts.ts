@@ -199,7 +199,12 @@ export function createArtifactsCommands(deps: ArtifactsCommandDeps): ArtifactsCo
         // established (accepted/emitted), never that the OS clipboard was
         // verified; the failure branches keep their existing owner (the Direct
         // command card) and add no second Dock line.
-        notifyOutcome('copied last assistant message')
+        // F5: the clipboard policy can outlive the Session it was pinned to (a
+        // native helper awaits across a /resume commit), so a late success is
+        // never announced on the replacement owner's surface.
+        if (runner.isSessionScopeCurrent(scope) && !runner.signal.aborted) {
+          notifyOutcome('copied last assistant message')
+        }
         return { kind: 'success', text: 'copied last assistant message' }
       },
     })

@@ -726,6 +726,86 @@ test('A16: a no-panel TUI builtin executes locally while the turn runs (busyEnte
   }
 })
 
+// ── F5: a late command outcome never lands on the replacement owner ────────
+
+test('F5: a /copy success that outlives its Session is not announced on the replacement', async (t) => {
+  // POSIX only: the deterministic interleave needs a controllable native
+  // clipboard helper (macOS/Windows attempt theirs unconditionally).
+  if (process.platform === 'darwin' || process.platform === 'win32') {
+    t.skip('the native clipboard helper is attempted unconditionally on this platform')
+    return
+  }
+  const { writeFileSync } = await import('node:fs')
+  const { join } = await import('node:path')
+  const life = (await import('./support/temp-lifecycle.ts')).testLifecycle(t)
+  const marker = join(life.tempDir('b2a-f5-clip-'), 'release')
+  const binDir = life.tempDir('b2a-f5-bin-')
+  // A helper that consumes its stdin, then BLOCKS until the marker exists —
+  // the deterministic window in which the session switch publishes.
+  writeFileSync(join(binDir, 'xclip'), `#!/bin/sh\ncat > /dev/null\nwhile [ ! -f "${marker}" ]; do sleep 0.02; done\nexit 0\n`, { mode: 0o755 })
+  const savedPath = process.env.PATH
+  const savedDisplay = process.env.DISPLAY
+  const savedWayland = process.env.WAYLAND_DISPLAY
+  const savedTmux = process.env.TMUX
+  process.env.PATH = `${binDir}:${savedPath ?? ''}`
+  process.env.DISPLAY = ':0'
+  delete process.env.TMUX
+  delete process.env.WAYLAND_DISPLAY
+  life.defer(() => {
+    if (savedPath === undefined) delete process.env.PATH
+    else process.env.PATH = savedPath
+    if (savedDisplay === undefined) delete process.env.DISPLAY
+    else process.env.DISPLAY = savedDisplay
+    if (savedWayland === undefined) delete process.env.WAYLAND_DISPLAY
+    else process.env.WAYLAND_DISPLAY = savedWayland
+    if (savedTmux === undefined) delete process.env.TMUX
+    else process.env.TMUX = savedTmux
+  })
+  const fixture = await createDirectTspFixture(life, {
+    deltas: ['F5-COPY-TEXT'],
+    sessionBrowser: true,
+    persistedBlankSession: { id: 'f5-target-b' },
+  })
+  try {
+    await directSettle(4_000)
+    const source = await seedTurn(fixture, 'seed the F5 copy source')
+    assert.ok(welcomeSessionIds(fixture).includes(source))
+    // Hold the switch INSIDE the official resume so it publishes later.
+    const agents = fixture.ctx.get('agents') as unknown as {
+      resume(options: unknown): Promise<unknown>
+    }
+    const originalResume = agents.resume
+    let resumeEntered = false
+    let releaseResume!: () => void
+    const resumeGate = new Promise<void>(resolve => { releaseResume = resolve })
+    agents.resume = async function (this: unknown, options: unknown): Promise<unknown> {
+      resumeEntered = true
+      await resumeGate
+      return originalResume.call(this, options)
+    }
+    life.defer(() => { agents.resume = originalResume })
+    // The Browser settles its handler without waiting for the switch, so the
+    // FIFO is free while the transition is still in flight.
+    await submitInput(fixture, '/resume f5-target-b')
+    await waitFor('the resume to be entered', () => resumeEntered, 25_000)
+    // A's /copy starts while A is still Current; its native clipboard leg
+    // blocks on the marker, so the switch can publish underneath it.
+    await submitInput(fixture, '/copy')
+    releaseResume()
+    await waitFor('the replacement Session to become current', () =>
+      welcomeSessionIds(fixture).includes('f5-target-b'), 30_000)
+    writeFileSync(marker, '')
+    await directSettle(2_000)
+    assert.ok(!dockNotices(fixture).some(text => text.includes('copied last assistant message')),
+      'the late success is not announced on the replacement owner')
+    assert.ok(welcomeSessionIds(fixture).includes('f5-target-b'),
+      'the switch really completed (the stale-copy outcome was fenced, not the switch)')
+  } finally {
+    writeFileSync(marker, '')
+    await fixture.settle()
+  }
+})
+
 // ── F4: the result's visible owner is frozen at dispatch ───────────────────
 
 test('F4: a Host-route result keeps its own card when the Host claim is revoked mid-flight', async (t) => {
