@@ -309,6 +309,13 @@ test('A05: bare /title and bare /rename report the blank-Session refusal on the 
 // ── A06: /copy ──────────────────────────────────────────────────────────────
 
 test('A06: /copy emits the OSC 52 sequence for the authoritative last assistant text', async (t) => {
+  // On macOS/Windows the shared policy attempts the native helper
+  // UNCONDITIONALLY, so driving the real copy here would write the synthetic
+  // text into the developer's clipboard: the case is skipped there instead.
+  if (process.platform === 'darwin' || process.platform === 'win32') {
+    t.skip('the native clipboard helper is attempted unconditionally on this platform')
+    return
+  }
   const life = (await import('./support/temp-lifecycle.ts')).testLifecycle(t)
   const assistantText = 'COPY-ME-B2A-42'
   const fixture = await createDirectTspFixture(life, { deltas: [assistantText] })
@@ -321,9 +328,23 @@ test('A06: /copy emits the OSC 52 sequence for the authoritative last assistant 
     // in a DCS passthrough, so the payload and the `]52;c;` marker identify the
     // emission either way (the suite must also pass when run inside tmux).
     const payload = Buffer.from(assistantText, 'utf8').toString('base64')
-    await submitInput(fixture, '/copy')
-    await waitFor('the copy success notice', () =>
-      dockNotices(fixture).some(text => text.includes('copied last assistant message')), 25_000)
+    // The positive case exercises the terminal-client (OSC 52) leg ONLY: the
+    // POSIX/macOS/Windows platform-helper gates are cleared for this gesture
+    // (restored below) so the suite never writes its synthetic text into a
+    // developer's real clipboard.
+    const helperEnvKeys = ['TMUX', 'DISPLAY', 'WAYLAND_DISPLAY'] as const
+    const savedHelperEnv = helperEnvKeys.map(key => [key, process.env[key]] as const)
+    for (const key of helperEnvKeys) delete process.env[key]
+    try {
+      await submitInput(fixture, '/copy')
+      await waitFor('the copy success notice', () =>
+        dockNotices(fixture).some(text => text.includes('copied last assistant message')), 25_000)
+    } finally {
+      for (const [key, value] of savedHelperEnv) {
+        if (value === undefined) delete process.env[key]
+        else process.env[key] = value
+      }
+    }
     // POSITIVE CONTROL: the assistant text the OSC 52 payload encodes is the
     // text the transcript actually shows, so the copy source is the real
     // session content and not an empty/foreign string.
