@@ -94,24 +94,15 @@ export function renderTranscriptMarkdown(session: {
       : [`- agent preset: ${session.header.agentPreset}`],
     '',
   ]
-  // Workflow runs: the SHARED semantic projection (the same owner-tracking
-  // engine as the visual Transcript fold) folds the durable lifecycle events
-  // into one readable block per run, flushed at run-end (or at export end
-  // for a run without one — plan §7.4: no rich format, the new semantic
+  // Workflow runs: the SHARED semantic projection (the same terminal-event
+  // state machine as the visual Transcript fold) folds the durable lifecycle
+  // events into one readable block per run, flushed at run-end (or at export
+  // end for a run without one — plan §7.4: no rich format, the new semantic
   // kind must not regress the export). Reusing the projection means the
-  // export can never drift from the UI on run/member statuses — an
-  // owner-closed run without a terminal fact exports as `interrupted`, not
-  // `running`.
+  // export can never drift from the UI on run/member statuses — a run with
+  // no terminal event exports as `running` (an open record), never as a
+  // synthesized `interrupted`.
   const workflow = new WorkflowProjection()
-  // The visual fold's replay fences: a step/start or step/end for a turn
-  // whose turn/end already passed is a replay artifact and must not reopen
-  // the owner lifecycle (the export applies the same fence so a replayed
-  // fragment can never diverge from the visual projection).
-  const completedTurns = new Set<number>()
-  // The visual fold's current-turn rule: only the turn/start of the NEWEST
-  // turn opens the workflow turn (a late turn/start for an older turn — or
-  // for a closed turn — is a no-op).
-  let currentTurn = -1
   // Unresolved assistant tool-request names by call id (TOOL_NOT_STARTED
   // compat): the export walks the same durable evidence as the visual fold
   // — a `tool-call` block requests a tool, `tool/call` starts it, and a
@@ -134,34 +125,6 @@ export function renderTranscriptMarkdown(session: {
     // position. Unmarked legacy events keep their current behavior.
     if (isReplacementSurfaceEvent(event)) continue
     switch (event.type) {
-      // Owner lifecycle: the shared projection tracks the open step/turn so
-      // run-start captures the same owner the visual fold would. The
-      // completed-turn fence mirrors the visual fold's activity.completed
-      // gate (a late step/start or step/end after turn/end is a no-op).
-      case 'step/start': {
-        if (!completedTurns.has(event.data.turn)) workflow.onStepStart(event.data.turn, event.data.step)
-        break
-      }
-      case 'step/end': {
-        if (!completedTurns.has(event.data.turn)) workflow.onStepEnd(event.data.turn, event.data.step)
-        break
-      }
-      case 'turn/start': {
-        // The visual fold's exact gate: the turn is opened only for the
-        // NEWEST turn's first turn/start, and never for a closed turn (the
-        // projection's monotonic open-turn rule covers a mid-turn replay of
-        // the open turn itself).
-        if (event.data.turn > currentTurn) currentTurn = event.data.turn
-        if (!completedTurns.has(event.data.turn) && event.data.turn === currentTurn) {
-          workflow.onTurnStart(event.data.turn)
-        }
-        break
-      }
-      case 'turn/end': {
-        completedTurns.add(event.data.turn)
-        workflow.onTurnEnd(event.data.turn)
-        break
-      }
       case 'user/message': {
         const text = markdownContent(event.data.content)
         if (text !== '') lines.push(`## User\n\n${text}\n`)
@@ -248,8 +211,8 @@ export function renderTranscriptMarkdown(session: {
         break
     }
   }
-  // A run without a terminal event still exports its current state (the
-  // export is a full-log fold — never drop the record).
+  // An open run (no terminal event observed) still exports its current
+  // state (the export is a full-log fold — never drop the record).
   for (const message of workflow.activeRuns()) {
     lines.push(workflowMarkdownBlock(message))
   }
@@ -259,8 +222,8 @@ export function renderTranscriptMarkdown(session: {
 /** One readable Workflow export block (plan §7.4): the run line with its
  * projected status, then the member rows in arrival order. The statuses
  * come from the shared {@link WorkflowProjection} — the same vocabulary as
- * the visual Transcript (`error` renders as `failed`; an owner-closed run
- * without a terminal fact renders `interrupted`). */
+ * the visual Transcript (`error` renders as `failed`; a run without a
+ * terminal fact is an open record and renders `running`). */
 function workflowMarkdownBlock(message: TranscriptWorkflowMessage): string {
   const memberLines = message.members.map(member => {
     const identity = member.phase === null || member.phase === ''

@@ -84,7 +84,6 @@ import {
   type TranscriptWorkflowMessage,
   type WorkflowChildSessionId,
   type WorkflowMemberView,
-  type WorkflowOwner,
   type WorkflowRunId,
   type WorkflowRunStatus,
 } from './workflow-projection.ts'
@@ -4874,10 +4873,6 @@ export class TranscriptFolder {
           }
         }
         this.usage.onStepStart(event.data.turn, event.data.step)
-        // Owner lifecycle: the step is now open (plan §5.1). Guarded by the
-        // same replay fence as the usage accounting — a late step/start
-        // after turn/end must not reopen the step for owner capture.
-        this.workflow.onStepStart(event.data.turn, event.data.step)
         const candidate = activity.messageCandidate
         if (candidate !== undefined && candidate.step < event.data.step) {
           this.confirmMessageCandidate(activity)
@@ -4904,10 +4899,6 @@ export class TranscriptFolder {
         this.clearPreparingStartsForStep(event.data.turn, event.data.step)
         this.usage.onStepEnd(event.data.turn, event.data.step)
         this.syncUsage(activity)
-        // Owner lifecycle: the step closed — clear the matching open step
-        // and project interrupted for step-owned Workflow runs without a
-        // terminal fact (plan §5.1/§5.3).
-        this.workflow.onStepEnd(event.data.turn, event.data.step)
         break
       }
       case 'turn/start': {
@@ -4935,7 +4926,6 @@ export class TranscriptFolder {
         activity.reason = undefined
         if (event.data.turn === this.currentTurn) {
           this.openTurn = event.data.turn
-          this.workflow.onTurnStart(event.data.turn)
         }
         activity.revision += 1
         break
@@ -5557,15 +5547,6 @@ export class TranscriptFolder {
         // synthetic cards or re-settle the activity (review finding).
         const endTurn = event.data.turn
         if (this.openTurn === endTurn) this.openTurn = undefined
-        // Owner lifecycle: the turn closed — a still-open step of this turn
-        // must not leak into the next turn-less/session-level segment (plan
-        // §5.1/§14.2). The shared projection clears its open step/turn and
-        // projects interrupted on every turn-owned AND step-owned Workflow
-        // run of this turn without a terminal fact (plan §5.3 — upstream
-        // `locationClosed(step)` is `step closed OR owning turn closed`).
-        // Called BEFORE the replay fence: a replayed turn/end must still not
-        // leave a stale open step behind (re-projection is idempotent).
-        this.workflow.onTurnEnd(endTurn)
         const endActivity = this.activityFor(endTurn)
         endActivity.pendingPreSteerAnswerStep = undefined
         if (endActivity.completed) break
@@ -5636,9 +5617,9 @@ export class TranscriptFolder {
         break
       }
       case 'tool-workflow/run-start': {
-        // The shared projection captures the authoritative owner (the open
-        // step wins, then the open turn, else the session — plan §5.2) and
-        // creates the durable message.
+        // The shared projection creates the open durable record. A run
+        // without a terminal `run-end` remains an open `running` record
+        // regardless of which Step/Turn owns its position in the transcript.
         const message = this.workflow.onRunStart(event.data.runId, event.data.name, this.currentTurn)
         const index = this.appendItem(message)
         this.workflowIndexes.set(event.data.runId, index)
@@ -5654,9 +5635,9 @@ export class TranscriptFolder {
         const { runId, seq, label, phase, childId } = event.data
         // The member folds INTO the run card (Web WorkflowRunPanel parity):
         // phase grouping happens at render time over the arrival-ordered
-        // rows. A member starting after its owner closed is interrupted
-        // from birth (plan §6.2 — the projection comes from the current
-        // fold facts, no invented recovery flow).
+        // rows. Members are `running` from birth — a late member after
+        // step/end or turn/end is an ordinary live append, never
+        // "interrupted from birth".
         this.workflow.onAgentStart(runId, seq, label, phase === undefined ? null : phase, childId)
         break
       }

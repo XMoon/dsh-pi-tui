@@ -2884,3 +2884,50 @@ rows and a one-row Transcript reserve; if no Quick task row fits, entry is
 refused. This exception does not authorize changing Main widget grants, Footer
 capacity or root layout, and it does not apply to Fullscreen or to clipping
 introduced by an ACTIVE Quick.
+
+## Workflow settlement authority is the Workflow terminal event (2026-10-17)
+
+The Workflow card's run/member status is derived ONLY from the Workflow
+lifecycle events that carry a terminal fact. This decision fixes the
+background-run misprojection reported from a real session archive (a
+`run_in_background` Workflow whose owning Step and Turn had already closed was
+shown as `[interrupted]` / `N interrupted` while its Job was still running).
+
+- **Old assumption (replaced).** The previous projection reused the upstream
+  Web `locationClosed(step/turn)` rule: a run with no terminal fact whose
+  owning Step or Turn had closed was synthesized as `interrupted`, and members
+  registering after that close were "interrupted from birth". That rule is
+  valid only for a front-only run whose disposal is tied to the tool-step; it
+  contradicts the DSH `dsh-v0.2.0-rc.2` / `dsh-v0.2.1-rc.1`
+  `@deepseek-ai/dsh-tool-workflow` contract, where `run-start` carries no
+  foreground/background mode, `run_in_background` is an independent Job, and
+  the run may outlive both `step/end` and `turn/end`. Only `agent-end`
+  (`runId` + `seq`) and `run-end` (`runId` + `stopReason`) settle Workflow
+  state; `tool/call` parameters, `tool/result` prose, names, labels and
+  adjacent events are not evidence.
+- **New contract.** `run-start` creates an OPEN record whose status is
+  `running`; only the matching `run-end` changes it to `completed` /
+  `cancelled` / `failed` (`error` maps to `failed`). `agent-start` creates a
+  `running` member; only the matching `agent-end` changes it to `completed` /
+  `failed` / `cancelled`. Step, Turn, an aborted main Turn and the next
+  `turn/start` have NO Workflow authority and are never routed into Workflow
+  state transitions.
+- **What `running` means here.** On the Workflow card, `running` means "the
+  durable record is open / no terminal event has been observed". It is NOT
+  proof that a runtime driver is alive and does not authorize killing a Job or
+  counting live work. Live Job/driver state remains owned by the existing Task
+  Center / Job Observation authority; direct member navigation still requires
+  the current live one-shot catalog row and driver, so an open record never
+  grants a Viewer by itself.
+- **Known limitation.** Historical, crash-truncated or append-failed logs may
+  be missing a terminal event; with no `runId -> mode` / `runId -> jobId`
+  durable link, such a record must stay `running` rather than invent a death
+  fact. Users should read current Job state from the Task Center.
+- **Unchanged semantics.** Run/Phase disclosure state, abnormal-first display
+  (`failed` > `interrupted` > `cancelled` > `running` > `completed`), real
+  `cancelled` / `failed` terminal presentation, the `interrupted` presentation
+  vocabulary (now never produced by the shared Workflow projection), the live
+  catalog gate for the Viewer, and the independent main-Turn
+  `Interrupted [error] — cancelled by user` Attention card are untouched.
+  The `/transcript` export and search still consume the same shared
+  `WorkflowProjection`, so they cannot diverge from the card.
