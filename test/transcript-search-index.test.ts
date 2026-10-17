@@ -733,12 +733,14 @@ test('workflow search indexes phase labels and member labels/statuses (PR2 plan 
     rawEvent('tool-workflow/run-start', { runId: 'run1', name: 'audit' }, 1),
     rawEvent('tool-workflow/agent-start', { runId: 'run1', seq: 1, label: 'dependency-scan', phase: 'Research', childId: 'session-x' }, 2),
     rawEvent('tool-workflow/agent-start', { runId: 'run1', seq: 2, label: 'schema-check', phase: '', childId: 'session-y' }, 3),
-    rawEvent('tool-workflow/agent-start', { runId: 'run1', seq: 3, label: 'orphan', phase: null, childId: 'session-z' }, 4),
+    // The official event omits `phase` for the absent case (the event type
+    // only permits a present string); the folder projects that to null.
+    rawEvent('tool-workflow/agent-start', { runId: 'run1', seq: 3, label: 'orphan', childId: 'session-z' }, 4),
   ])
   assertCorpusParity(folder, ['audit', 'Research', 'dependency-scan', 'running'])
-  // The readable phase labels are indexed: Unassigned (null) and Empty ('')
+  // The readable phase labels are indexed: Unassigned (absent) and Empty ('')
   // are distinct searchable words.
-  assert.equal(folder.search('unassigned').length, 1, 'the null phase readable label must be searchable')
+  assert.equal(folder.search('unassigned').length, 1, 'the absent phase readable label must be searchable')
   assert.equal(folder.search('empty').length, 1, 'the empty phase readable label must be searchable')
   assert.equal(folder.search('schema-check').length, 1, 'a member label must be searchable')
   // Machine identities are never indexed.
