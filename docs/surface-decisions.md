@@ -2885,7 +2885,7 @@ refused. This exception does not authorize changing Main widget grants, Footer
 capacity or root layout, and it does not apply to Fullscreen or to clipping
 introduced by an ACTIVE Quick.
 
-## Workflow settlement authority is the Workflow terminal event (2026-10-17)
+## Workflow settlement authority is the Workflow terminal event (2026-10-17, PR #324)
 
 The Workflow card's run/member status is derived ONLY from the Workflow
 lifecycle events that carry a terminal fact. This decision fixes the
