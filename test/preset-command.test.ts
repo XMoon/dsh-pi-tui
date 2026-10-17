@@ -1749,6 +1749,9 @@ async function settlePresetThroughOuterOwner(
     lateAttachmentRefusal: () => undefined,
     commandSubmitAttachments: () => [],
     isTuiOwnedCommand: () => false,
+    // F1: this hand-built harness is not the card-less B2-A route, so the
+    // settlement never publishes an extra error notice here.
+    commandResultHasVisibleOwner: () => true,
     commandPlaneOwnsLine: () => false,
     submittedHostClaim: () => undefined,
     commandSignal: () => new AbortController().signal,
