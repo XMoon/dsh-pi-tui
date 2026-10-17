@@ -6388,3 +6388,40 @@ application-level (L3/L4) only.
 
 This does not qualify the existing Remote reader's own fences; see
 [`PR2 evidence`](./tern-tsp/evidence/pr2.md) for what PR2 did and did not prove.
+
+## Open evidence gap — Remote same-run Job Command producer attribution (Gate-3B `J-02`)
+
+The selected-Job Command page copies the official producer's original
+`args.command` text. On the Direct branch that chain is proven end to end by the
+`J-02` witnesses in `test/job-command-reader.test.ts`: the real `bash`/`pwsh`
+tool plugins execute against the real `LocalJobRegistry`, the registered row's
+`label` is asserted to be the exact command string (leading/trailing spaces, a
+TAB, CJK, a trailing newline), and the painted Command page → header click →
+`Copy All` sink preserves every source byte. Process execution there is
+controlled rather than bypassed — a `ShellExecutor` subclass replaces the OS
+shell — so the witness proves producer → Registry → observation snapshot →
+Command → clipboard, not a real OS shell invocation.
+
+The Remote branch has no equivalent same-run witness. Its consumer coverage
+(`test/job-observation-parity.test.ts`, `test/remote-job-observation.test.ts`)
+drives the Remote observation adapter with a seeded Host Job label, so the
+producer → Registry → wire → snapshot ordering and identity are not established
+in one run on Remote. The Remote claim for this surface therefore rests on the
+wire carrying the Registry label faithfully: consistent with the Direct row, but
+not demonstrated as a chain.
+
+- **Owner:** this Remote qualification contract — an existing `smoke:remote-*`
+  lane or the runner Remote L6 suites with their real Host/Client/Gateway
+  in-process carrier. Do not grow a second Remote harness for it.
+- **Trigger:** before any change to the Job Command source, the Job label
+  mapping, the Jobs `IJobs` adapter, or before Remote stops being experimental.
+- **Closure condition:** one Remote run in which the real Bash/Pwsh producer
+  tool registers the Job, the label crosses the wire, and the Remote-backed
+  Command page copies bytes identical to the produced command — or an explicit
+  Owner scope revision authorizing a test-only attribution seam.
+
+**Disposition (2026-10-17).** Recorded limitation, not a defect: no behavioral
+mismatch was observed, Direct remains the production backend and its row is
+authoritative. Remote stays experimental and this surface is not claimed as
+qualified on Remote; no Host wire, adapter or production seam was added to
+manufacture a same-run witness.
