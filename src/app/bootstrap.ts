@@ -1290,6 +1290,9 @@ export function applyRunnerWithRuntime(
       remoteProgressHandle?.dispose()
       remoteProgressHandle = undefined
     }
+    /** The generation an IMMEDIATE init retry already ran under: a second
+     *  failure under the same generation falls back to the official channel. */
+    let lastInitRetryGeneration: unknown
     /** Arm the official-signal retry for one session whose surface init could
      *  not hydrate (the owner is still current; only the transport is gone). */
     const armRemoteInitRetry = (sessionId: string): void => {
@@ -1382,7 +1385,22 @@ export function applyRunnerWithRuntime(
       // retry instead (plan §2.2/§2.5: an explicit not-ready state completed by
       // a real signal, never a poll).
       if (hydrate === undefined) {
-        if (remoteSources.commandSource.connectionGeneration() === undefined) {
+        const liveGeneration = remoteSources.commandSource.connectionGeneration()
+        if (liveGeneration === undefined) {
+          // The transport is absent right now: wait for the OFFICIAL generation.
+          armRemoteInitRetry(sessionId)
+        } else if (!Object.is(lastInitRetryGeneration, liveGeneration)) {
+          // The generation is already live: the hydrate was dropped by a
+          // transport IDENTITY change between its read and its commit (the owner
+          // fences above passed). Re-run the init ONCE under the current
+          // generation — never a loop: a second failure under the same
+          // generation arms the official-channel retry instead.
+          lastInitRetryGeneration = liveGeneration
+          runDetached('remote live surface retry', () => initRemoteLiveSurface(sessionId), {
+            diag,
+            sessionId: () => sessionId,
+          })
+        } else {
           armRemoteInitRetry(sessionId)
         }
         return

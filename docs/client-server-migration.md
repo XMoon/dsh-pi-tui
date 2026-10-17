@@ -6322,10 +6322,12 @@ LAST synchronous delta, so a latest-change delivery is not a fold.
   acknowledge identity/revision/open validation, disposed handle is inert).
 - L5/L6 over the real wire: `test/runner-remote-presentation.test.ts` keeps its
   original strong assertions (new generation, the authoritative offline turn in
-  the real viewport, retired-subject absence) and is green under the concurrent
-  condition that reproduced the defect — see the PR description for the exact
-  lane/round evidence; the child viewer's reconnect case (§14.5) and the
-  single-publisher/release probes stay green.
+  the real viewport, retired-subject absence). The concurrent reproduction
+  condition (repeated rounds of parallel copies) and the full stage matrix are
+  re-run on the frozen S3-R0 snapshot whose results are recorded in the PR
+  description — this document does not claim them ahead of that run; the child
+  viewer's reconnect case (§14.5) and the single-publisher/release probes are
+  covered by the same snapshot's lane results.
 - S1 full requalification is still required: S1 + S3-R0 are qualified on
   `integration/dsh-0.2.1-rc.2`, and the promotion PR to `next` must run the
   complete product gate on the integration HEAD. `M3 = DONE` remains the

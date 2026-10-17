@@ -224,11 +224,15 @@ test('P1: the image scope identity is the presentation LIFETIME, and the rendere
  * ingress attempt must precede it, and the collected failure must surface
  * after both attempts — a second dispose is inert (the plan's D2 form).
  */
-test('S3-R0: child re-folds are serialized, and a refused commit never overwrites the newer fold', async () => {
-  // C4/§2.5: the child owner must not let an older read's fold land after a
-  // newer one, and a commit the ingress refuses must write NOTHING.
+test('S3-R0: child re-folds are serialized, and a refused commit never overwrites the newer fold', async (t) => {
+  // C4/§2.5 owner-level barrier: read A is already in flight when a second
+  // requirement is coalesced; the FIFO serializes them, A is refused as
+  // superseded (writes NOTHING), and only the newer fold commits. Deterministic
+  // gates, no sleeps; the held read is released in `t.after` even on failure.
   const writes: Array<{ revision: number; accepted: boolean }> = []
-  let pending: (() => void) | undefined
+  let releaseA: (() => void) | undefined
+  let aStarted: (() => void) | undefined
+  const aStartedPromise = new Promise<void>(resolve => { aStarted = resolve })
   let reads = 0
   let capturedSinks: ViewerChildLiveSinks<SessionPresentationEvent> | undefined
   const view: ViewerChildView<SessionPresentationEvent> = {
@@ -238,9 +242,11 @@ test('S3-R0: child re-folds are serialized, and a refused commit never overwrite
     rehydrate: async () => {
       reads += 1
       const revision = reads
-      // The first re-fold is HELD so a second requirement can be enqueued while
-      // it is still in flight.
-      if (revision === 1) await new Promise<void>(resolve => { pending = resolve })
+      if (revision === 1) {
+        // Read A starts and is HELD until the test releases it.
+        aStarted?.()
+        await new Promise<void>(resolve => { releaseA = resolve })
+      }
       return {
         durableEvents: [],
         liveInputs: [],
@@ -248,7 +254,6 @@ test('S3-R0: child re-folds are serialized, and a refused commit never overwrite
         cwd: '',
         revision,
         commit: (write: () => void): boolean => {
-          // The FIRST (older) read is refused as superseded; the newer one commits.
           if (revision === 1) { writes.push({ revision, accepted: false }); return false }
           write()
           writes.push({ revision, accepted: true })
@@ -264,6 +269,7 @@ test('S3-R0: child re-folds are serialized, and a refused commit never overwrite
     },
     release: () => {},
   }
+  t.after(() => { releaseA?.() })
   const childView: ViewerChildSource<SessionPresentationEvent> = {
     open: async () => view,
     childWriterSubject: () => undefined,
@@ -278,6 +284,7 @@ test('S3-R0: child re-folds are serialized, and a refused commit never overwrite
       setViewerMode: () => {},
     },
   } as unknown as SurfaceRuntime<SessionPresentationEvent>
+  let pumpSettled: Promise<void> = Promise.resolve()
   const viewer = createViewerRuntime<SessionPresentationEvent>({
     surface,
     isCleanedUp: () => false,
@@ -287,22 +294,20 @@ test('S3-R0: child re-folds are serialized, and a refused commit never overwrite
     childView,
     refreshStatus: () => {},
     restoreMainTranscriptAnchor: () => {},
-    runDetached: (_name, run) => { void run() },
+    runDetached: (_name, run) => { pumpSettled = run() },
   } satisfies ViewerRuntimeDeps<SessionPresentationEvent>)
 
   await viewer.enterView('child-1', 'child', 'one-shot', 'parent-1', 'inactive')
   assert.equal(reads, 0, 'the open folds the snapshot it already holds (no extra read)')
-  // Two requirements while the first re-fold is held: the pump coalesces them and
-  // the FIFO serializes the reads (the newer read only starts after the older
-  // one settles).
   assert.ok(capturedSinks !== undefined, 'the child live sinks are captured')
+  // Two requirements while read A is held: the pump coalesces them and the FIFO
+  // starts no second read before A settles.
   capturedSinks!.onWindowRefoldRequired()
   capturedSinks!.onWindowRefoldRequired()
-  // Let the detached pump + FIFO start the first read.
-  await new Promise(resolve => setTimeout(resolve, 10))
-  assert.equal(reads, 1, 'the first re-fold read is in flight; no second read starts')
-  pending?.()
-  await new Promise(resolve => setTimeout(resolve, 10))
+  await aStartedPromise
+  assert.equal(reads, 1, 'read A is in flight; no second read starts')
+  releaseA?.()
+  await pumpSettled
   assert.deepEqual(writes.map(write => write.accepted), [false, true],
     'the refused older fold wrote nothing; the newer fold committed')
   assert.equal(reads, 2, 'exactly one follow-up read ran (the coalesced requirement)')
