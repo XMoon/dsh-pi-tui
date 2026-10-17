@@ -811,17 +811,29 @@ export type HostCommandClaim =
  *   on the Remote branch, whose `commandRegistry` is undefined.
  * @param modelPresentation - the mounted native Model presenter, if any.
  * @param presetPresentation - the mounted native Preset presenter, if any.
- * @param notice - the renderer-neutral notice sink (`CommandSurfaceDeps.notify`).
- *   PR4-B2-A: the TSP renderer presents no PiTui command card, so the B2-A
- *   handlers surface a confirmed SUCCESS through the CURRENT surface's own
- *   notice sink. The sink is passed ONLY to the B2-A registrars; no public
- *   `TuiCommandRunner` member and no second notice owner is introduced. Absent
- *   (tests/legacy calls) it degrades to the PiTui `app.notify` route.
+ * @param presentation - PR4-B2-A: the internal presentation seams for the B2-A
+ *   registrars — the renderer-neutral notice sink (`CommandSurfaceDeps.notify`;
+ *   the PiTui route and the TSP Dock are the same seam) plus the one narrow
+ *   suppression fact the title handler needs (whether the official Direct
+ *   command-result card already carries a title result's text on this mount).
+ *   No public `TuiCommandRunner` member and no second notice owner is
+ *   introduced. Absent (tests/legacy calls) the sink degrades to the PiTui
+ *   `app.notify` route and nothing is suppressed.
  */
 export interface CommandCatalogSeams {
   /** The Direct Host global-layer command summaries (already detached). Absent
    *  on Remote. */
   readonly listGlobalCommands?: () => readonly SurfaceCommandSummary[]
+}
+
+/** PR4-B2-A: the internal presentation seams `registerTuiCommands` consumes. */
+export interface TuiCommandPresentation {
+  /** The renderer-neutral notice sink (see the parameter documentation). */
+  readonly notify: (text: string, kind?: 'info' | 'error') => void
+  /** Whether the official Direct command-result card already carries a
+   *  `/title`/`/rename` result's text on this mount, so the handler's own
+   *  additional notice must be suppressed (see `titleResultNoticeSuppressed`). */
+  readonly suppressTitleResultNotice: boolean
 }
 
 export function registerTuiCommands(
@@ -830,7 +842,7 @@ export function registerTuiCommands(
   catalogSeams: CommandCatalogSeams = {},
   modelPresentation?: ModelPresentation,
   presetPresentation?: PresetPresentation,
-  notice?: (text: string, kind?: 'info' | 'error') => void,
+  presentation?: TuiCommandPresentation,
 ): {
   /** Per-name registration failures (a Host-claimed name degraded loudly;
    *  later registrations still installed). */
@@ -1530,23 +1542,42 @@ export function registerTuiCommands(
    * REPLACES those handlers' direct `app.notify` calls, which would dereference
    * a `TuiApp` that does not exist on a non-PiTui renderer.
    *
-   * `notifyOutcome` adds the ONE missing feedback: a TSP renderer presents no
-   * PiTui command card, and the Remote Client-command registry appends no
-   * `command/run` row either, so a CONFIRMED SUCCESS would otherwise leave no
-   * visible line. Refusal/cancellation/indeterminate outcomes are deliberately
-   * NOT re-notified — they already have an owner (the Direct command card, the
-   * controller's local-command error notice, or the handler's own inline
-   * `notify`), and a second line would duplicate it. `runner.app === undefined`
-   * is the mounted-fact discriminator ("no PiTui presentation is installed") —
-   * never a Host/Remote backend decision. Where a PiTui app exists the command
-   * card (and the handler's own notice) already owns the feedback, so nothing
-   * is repeated.
+   * `notifyOutcome` adds the ONE missing feedback for the other B2-A commands:
+   * a TSP renderer presents no PiTui command card, and the Remote Client-command
+   * registry appends no `command/run` row either, so a CONFIRMED SUCCESS would
+   * otherwise leave no visible line. Refusal/cancellation/indeterminate outcomes
+   * are deliberately NOT re-notified for those commands — they already have an
+   * owner (the Direct command card, the controller's local-command error notice,
+   * or the handler's own inline `notify`). `runner.app === undefined` is the
+   * mounted-fact discriminator ("no PiTui presentation is installed") — never a
+   * Host/Remote backend decision.
+   *
+   * The `/title`/`/rename` entries are split by the outcome they carry, because
+   * their base behavior differs:
+   *
+   * - `notifyTitleRefusal` replaces the pre-existing inline refusal notice. The
+   *   official Direct command-result card carries the same `CommandResult.text`
+   *   on this mount, so it is suppressed exactly there; the PiTui surface keeps
+   *   its long-standing notice beside the card, and the Client-registry path (no
+   *   card) keeps the only feedback.
+   * - `notifyTitleSuccess` is a NEW line (the base handler reported a successful
+   *   title write only through the card). It publishes on the TSP renderer where
+   *   no card exists, and is silent on PiTui (unchanged behavior) and on the TSP
+   *   Direct mount where the card already carries `title set: …`.
    */
   const notify: (text: string, kind?: 'info' | 'error') => void =
-    notice ?? ((text, kind) => { app?.notify(text, kind) })
+    presentation?.notify ?? ((text, kind) => { app?.notify(text, kind) })
   const notifyOutcome = (text: string, kind: 'info' | 'error' = 'info'): void => {
     if (app !== undefined) return
     notify(text, kind)
+  }
+  const notifyTitleRefusal = (text: string): void => {
+    if (presentation?.suppressTitleResultNotice === true) return
+    notify(text, 'error')
+  }
+  const notifyTitleSuccess = (text: string): void => {
+    if (presentation?.suppressTitleResultNotice === true) return
+    notifyOutcome(text)
   }
   registerExitCommand({ runner, registerTuiCommand })
 
@@ -1574,7 +1605,8 @@ export function registerTuiCommands(
     recordCommandDraftDisposition,
     newSessionId,
     notify,
-    notifyOutcome,
+    notifyTitleRefusal,
+    notifyTitleSuccess,
   })
   sessionCommands.registerSessions()
 

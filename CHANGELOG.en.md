@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- The experimental TSP renderer can now run the "no new UI" basic commands:
+  `/new`, `/fork`, `/title` (with its `/rename` alias), `/copy`, `/yolo` and
+  `/logout <target>` with an explicit target. They keep the existing command
+  classification, capability admission, handler and real business owner
+  (session runtime, title write, permission-preset write, credential port,
+  clipboard policy) and add no panel or picker. Bare `/logout` (including a
+  whitespace-only form) and the commands that still need PiTui chrome
+  (`/settings`, `/help`, `/login`, `/attach`, `/export`, …) stay explicitly
+  refused with the draft restored. A confirmed write also reports its outcome on
+  the TSP Dock; refused, cancelled and indeterminate outcomes keep their
+  existing single owner (the Direct result card or the local-command notice), so
+  the same text is never shown twice on one screen.
+
 - Task Quick now appends a distinct `➜ Open Task Center…` navigation row after
   real tasks when the Full Task Center is available. It shares selection and
   paging without becoming a task or affecting `showing x-y/N`, status counts or

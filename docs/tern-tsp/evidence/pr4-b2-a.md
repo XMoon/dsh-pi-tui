@@ -28,20 +28,36 @@ description (this file records the durable version pins and the result tiers).
   existing authority, admitted (or refused) by the same
   `tspBuiltinAvailability` gate at the same post-classification site, and then
   executed by the unchanged business handler.
-- Notification is a SUCCESS supplement only: a confirmed success of the B2-A
-  commands is also written through the existing renderer-neutral notice sink
-  (which the TSP Dock renders). Refusal/cancellation/indeterminate outcomes keep
-  their existing owner — the Direct command card, the controller's own
-  local-command error notice, or the handler's existing inline `notify` — so no
-  outcome produces two lines. On a `TuiApp`-backed renderer the supplement is a
-  no-op and PiTui behavior is byte-for-byte the previous behavior.
+- Notification follows ONE rule per command family, and never repeats an
+  outcome the official Direct command-result card already carries:
+  - `/title` / `/rename`: the card carries the handler's `CommandResult.text`
+    (success text and error text alike) whenever the invocation executes on the
+    Direct command plane, so the handler's own notice is suppressed exactly
+    there — `titleResultNoticeSuppressed({ pituiPresentation, backendKind })`,
+    computed by the composition root in `registerCommands()` after the mount.
+    The PiTui surface keeps its long-standing notice beside the card, and the
+    Client-registry path (no card) keeps the only feedback. The two results
+    WITHOUT their own text (`no conversation yet — title left as-is`, `title
+    regenerated: …`) always notify, because the card has no body to carry them.
+    Other title outcomes (stale/transitioned/unsupported/thrown) keep their
+    existing single owner: the Direct card.
+  - the other B2-A commands (`/yolo`, `/logout <target>`, `/copy`): a CONFIRMED
+    success is additionally written through the existing renderer-neutral notice
+    sink on a non-PiTui mount (the frozen plan's §S2 supplement, keyed on
+    `runner.app === undefined`). Refusal/cancellation/indeterminate keep their
+    existing owner (the Direct card, or the controller's own local-command
+    notice for the sessionless path). This is the plan's frozen behavior; the
+    title rule above is narrower because the Owner ruled (relayed in the B2-A
+    session) that a `/title` success must show the card plus the authoritative
+    title and no duplicate Dock line.
 - Direct business-path evidence is the real Host composition
   (`test/support/direct-tsp-fixture.ts`: real rc.2 services, real live Agents,
   the real runner/SubmissionController, the real TSP renderer over the shipped
   SDK `connect`). Only the model endpoint is scripted; the B2-A cases that need
   an authority the base fixture does not compose mount the SHIPPED plugin for it
   (`dsh-session-title`, `dsh-permission-presets` + approval/turn-outline,
-  `dsh-authorization`).
+  `dsh-authorization`), and the credential-port negative uses the explicit
+  no-credentials composition (`withoutCredentials`).
 - Tern Headless is **not** a physical GUI/OS-clipboard proof.
 
 ## Supported / unsupported matrix (this PR)
@@ -63,26 +79,26 @@ description (this file records the durable version pins and the result tiers).
 
 | ID | Status | Evidence |
 |---|---|---|
-| A01 — `/new` creates and publishes a real new Session | PASS | `tern-tsp-headless-commands.test.ts` (A01): one persisted Session after the first `/new`, a different live owner after the second, zero model turns |
-| A02 — `/fork` from the current Session; sessionless refuses | PASS | Same file (A02 ×2): the child is persisted with `parentSession === source`; the sessionless case publishes no owner and persists nothing |
-| A03 — `/title <text>` writes and rereads the authoritative title | PASS | Same file (A03/A04): the folded title read back from the live Session equals the new value |
-| A04 — `/rename` is the same sink; Host `/rename` is not captured | PASS | Same file (A03/A04 for the alias; A14 for the genuine Host winner) |
-| A05 — bare `/title` regenerates when supported | PASS | Same file (A05): the deterministic fallback replaces the pinned title |
-| A06 — `/copy` uses the scope-pinned last assistant text | PASS (Direct) | Same file (A06 ×2): the emitted OSC 52 payload is the authoritative text; the no-message case fails visibly and emits nothing |
-| A07 — `/yolo` goes through the official permission writer | PASS | Same file (A07 ×2): with `dsh-permission-presets` mounted the live Session's approval policy reads `never`; without it the original `unavailable` text is shown, never success |
-| A08 — `/logout <reference>` clears through the credential port | PASS | Same file (A08): `resolve()` is defined before and `undefined` after; no message carries the secret value |
+| A01 — `/new` creates and publishes a real new Session | PARTIAL | `tern-tsp-headless-commands.test.ts` (A01): one persisted Session after the first `/new`, a different live owner after the second, zero model turns. The create/preflight-failure and abort branches are NOT exercised end to end here — they live in the unchanged session-runtime/lifecycle tests |
+| A02 — `/fork` from the current Session; sessionless refuses | PARTIAL | Same file (A02 ×2): the sessionless refusal publishes no owner and persists nothing; the fork child is persisted with `parentSession === source`. The late-A/A→B→late-A navigation race and the failure-after-published-child path are NOT re-qualified here (they are the unchanged `SessionRuntime`/lifecycle tests' subject) |
+| A03 — `/title <text>` writes and rereads the authoritative title | PARTIAL | Same file (A03/A04): the folded title read back from the live Session equals the new value, and the result is card-owned with no duplicate Dock line. The stale-owner / writer-held / indeterminate title outcomes are NOT witnessed end to end here (unchanged handler/runtime branches; the stale writer-held mapping is asserted in `a3-command-identity.test.ts`) |
+| A04 — `/rename` is the same sink; Host `/rename` is not captured | PASS | Same file: A03/A04 drives the TUI `/rename` alias to the same authoritative title; A14 registers a GENUINE Host `/rename` and asserts its own handler ran once with the exact rawInput while no TUI title/rename write or notice occurred |
+| A05 — bare `/title` (and bare `/rename`) regenerates when supported | PASS | Same file (A05): the deterministic fallback replaces the pinned title, and the bare `/rename` alias reaches the same refresh with fresh feedback |
+| A06 — `/copy` uses the scope-pinned last assistant text | PASS (Direct) | Same file (A06 ×3): the emitted OSC 52 body is the base64 of the authoritative text (TMUX-agnostic assertion); the no-message case fails visibly and emits nothing; a one-to-one fault on the real tty write plus the absent helper makes BOTH legs fail and the failure is reported, never a successful copy |
+| A07 — `/yolo` goes through the official permission writer | PARTIAL | Same file (A07 ×2): with `dsh-permission-presets` mounted the live Session's approval policy reads `never`; without it the original `unavailable` text is shown, never success. `refused`/`superseded`/`indeterminate` have only the unchanged handler's source-shape/port guards (`a3-command-identity.test.ts:303,325`) — no behavioral Direct witness. No synthetic writer was injected (`permission-cycle.test.ts` covers the Shift+Tab cycle, NOT `/yolo`) |
+| A08 — `/logout <reference>` clears through the credential port | PASS | Same file (A08 ×2): `resolve()` is defined before and `undefined` after with no message carrying the secret value; the `withoutCredentials` composition makes the real port report unavailable and the handler refuses truthfully without reporting a cleared credential. The throwing-port variant shares the generic command-error path and is not separately witnessed |
 | A09 — `/logout <keyless-flow-route>` reaches `deleteRecord` | **NOT_VERIFIED** | No authorization-flow provider is installed in this environment; the real seam is mounted, `list()` is empty, and the case is exercised as a truthful refusal (`unknown credential target`, no record mutation). No flow is simulated. `/logout` support is therefore limited to the **reference case**; the flow-route gap is reported to the Owner |
-| A10 — bare `/logout` is refused by the gate | PASS | Same file (A10): draft restored, no picker, the stored credential survives |
+| A10 — bare `/logout` (and its whitespace-only form) is refused by the gate | PASS | Same file (A10): both the bare and the `/logout   ` gesture restore the exact draft, open no picker, and leave the stored credential intact; the refusal is reported exactly once |
 | A11 — an unresolvable target returns the real error | PASS | Same file (A11): a hyphenated route reaches the handler's `flowForRoute` branch and reports `unknown credential target` (never the bare UI). Note: an env-var-shaped token such as `nonsense` is the pre-existing literal-reference path (`unsetReference('NONSENSE')`), which the same test's route case deliberately bypasses |
 | A12 — `/model`, `/preset`, `/sessions`, `/resume`, `/search` keep working | PASS (inherited) | Unchanged by this PR; covered by the B1 suites and rerun as regression |
-| A13 — every remaining PiTui-only builtin stays refused | PASS | Same file (A13): sixteen commands in one session, each restoring its draft with a fresh notice; no Session, no model turn |
-| A14 — genuine Host same-name winners keep their sink | PASS | Same file (A14): four genuine Host `/new`, `/copy`, `/logout`, `/title` handlers each ran once; no extra Session, no OSC 52, no credential mutation, no refusal |
+| A13 — every remaining PiTui-only builtin stays refused | PASS | Same file (A13): nineteen registered names in one session (`/settings`, `/help`, `/status`, `/rewind`, `/tasks`, `/subagents`, `/plugins`, `/reload`, `/export`, `/transcript`, `/attach`, `/image`, `/login`, `/skill`, `/display`, `/focus`, `/footer`, `/statusline`, `/keybindings`), each restoring its draft with a fresh notice; no Session, no model turn. The capability-gated siblings stay covered by their own suites (`/sessions`/`/resume`/`/search` refusal in `tern-tsp-direct-admission.test.ts`; `/model`/`/preset` presenter gating in the PR4-A suites), and `!`/`!!` by `tern-tsp-runner-interactive.test.ts` |
+| A14 — genuine Host same-name winners keep their sink; an unclaimed argued line is not re-owned | PASS | Same file (A14 ×2): five genuine Host handlers (`/new`, `/copy`, `/logout`, `/title`, `/rename`) each ran once with the exact rawInput while no TUI write/notice/clipboard/credential effect occurred; an argued `/new argued-line` on an execute-kind Host descriptor is classified ordinary-submission — it reaches the MODEL, the Host handler never runs, no extra Session is created, and it is not refused as a TSP builtin |
 | A15 — extension / skill / ordinary lines are never captured | PASS (inherited) | `tern-tsp-direct-admission.test.ts` (unchanged) |
 | A16 — a no-panel builtin is never steered while running | PASS | Same file (A16, `busyEnter: 'steer'`): `/title` wrote while the turn ran with zero prompt writes; the following plain prompt steered |
-| A17 — confirmed title/permission/logout/copy outcomes are visible | PASS | Success is supplemented as a real `dock.notice-n*` line (A03/A04/A05/A07/A08 and the A06 real-client run); refusals stay with their existing owner (the Direct command card, or the controller's local-command notice) and A02/A10 assert the line appears EXACTLY ONCE, so no outcome is reported twice |
+| A17 — confirmed title/permission/logout/copy outcomes are visible | PASS | `/title` on TSP+Direct is card-owned with no duplicate Dock line: the RFL-001 witness counts the refusal across the WHOLE folded pane (exactly ONE visible sink, zero notice lines), A03/A04/A16 assert the card carries the success text while the Dock does not, and A05 keeps the two no-text notices. The plan-mandated success supplement is visible for `/yolo`/`/logout`/`/copy` (A07/A08 and the A06 real-client run); the gate/local refusals appear exactly once (A02/A10) |
 | A18 — SDK decline falls back to PiTui unchanged | PASS (inherited) | `tern-tsp-renderer-selection.test.ts` (unchanged by this PR) |
 | A19 — `/copy` after the emission keeps the Tern channel healthy | PARTIAL | Real Tern flow below: the OSC 52 bytes reached the Tern tty and a later input still reached the clipboard policy, with a clean exit. The OS clipboard itself is **NOT_VERIFIED** — see the qualification gap |
-| A20 — PiTui defaults are unchanged | PASS | `login-credentials`, `session-state`, `command-catalog`, `busy-enter` and the TSP suites rerun on this tree; `notifyOutcome` is a no-op wherever a `TuiApp` is mounted |
+| A20 — PiTui defaults are unchanged | PASS | `login-credentials`, `session-state`, `command-catalog`, `busy-enter` and the TSP suites rerun on this tree; `notifyTitleRefusal` reaches the same PiTui notice the base already emitted, and `notifyTitleSuccess`/`notifyOutcome` are no-ops wherever a `TuiApp` is mounted |
 
 ## `/copy` qualification gap (STOP_COPY_QUALIFICATION)
 
@@ -117,14 +133,43 @@ The plan requires a real-Tern clipboard qualifier as the merge gate for
   implementation stays exactly the unchanged Clipboard Policy; no helper-only
   shortcut, no Tern-specific wire call and no "verified" wording were added.
 
+## Acceptance limits (why some rows are PARTIAL)
+
+This slice admits commands to an existing business closure; it does not
+re-implement their internal state machines. The rows marked PARTIAL above are
+limited to the TSP end-to-end tier, and their remaining branches stay the
+unchanged owner's subject:
+
+- A01/A02/A03 failure, stale and race branches: `SessionRuntime` /
+  `DirectSessionWriter` / lifecycle tests, plus the `a3-command-identity` branch
+  guards. Nothing in this PR changes those branches.
+- A07 `refused`/`superseded`/`indeterminate`: the unchanged handler's branch
+  mapping (source-shape guards) with no behavioural Direct witness; no synthetic
+  permission writer was injected to manufacture one.
+- A08 throwing credential port: the generic command-error path (unchanged).
+- A09 flow-route logout: no flow provider exists in this environment.
+- A19 OS clipboard / physical GUI / Remote TSP: not observable or not
+  qualified here, as recorded above and in the B1 evidence.
+
 ## Qualification tiers used
 
 | Tier | What it is | Used for |
 |---|---|---|
 | Direct L6 | `test/tern-tsp-headless-commands.test.ts` over the real Direct composition + scripted TSP pane | A01–A08, A10, A11, A13, A14, A16, A17 |
-| Pure unit | `test/tern-tsp-command-admission.test.ts` (the predicate and the `/logout` input-shape rule) | the gate itself |
+| Pure unit | `test/tern-tsp-command-admission.test.ts` (the predicate, the `/logout` input-shape rule and the `titleResultNoticeSuppressed` truth table) | the gate and the title notice policy |
 | REAL_TERN_HEADLESS | `scripts/tern-pane-drive.mjs scripts/tern-pane-b2a-copy.mjs` (real Tern 0.9.2, real keys, real tty) | A19 (channel integrity + OSC52 emission) |
 | Inherited | B1-B / PR4-0 suites rerun unchanged | A12, A15, A18 |
+
+## Review closure
+
+The internal review of the first implementation snapshot raised one in-scope
+wiring finding (RFL-001: a rejected/indeterminate `/title` was shown in both the
+Dock and the Direct result card on TSP) plus evidence gaps for A04/A13/A14 and
+the negative subcases above. This record describes the post-fix state:
+`titleResultNoticeSuppressed` is the composition-root policy that closes
+RFL-001, the A14 controls now include a genuine Host `/rename` and the
+unclaimed argued line, A13 covers every registered PiTui-only name, and the
+PARTIAL rows state their tier limits explicitly.
 
 ## Deliberate non-goals
 
@@ -135,3 +180,6 @@ The plan requires a real-Tern clipboard qualifier as the merge gate for
 - No Tern-specific clipboard implementation; no automatic replay of a
   `superseded`/`indeterminate` permission write; no credential value in any
   message.
+- No new public `TuiCommandRunner` member and no per-invocation ambient state:
+  the title suppression fact is computed once by the composition root when the
+  command surface registers.

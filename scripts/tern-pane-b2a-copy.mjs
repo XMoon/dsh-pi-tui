@@ -82,7 +82,6 @@ export default async function (h) {
   }
 
   // 2. `/copy` through the real composer.
-  const copyStart = records(h).length
   await submitCommand(h, '/copy')
   const noticed = await requiredWait(h, 'the /copy business result renders in the real client', () =>
     h.texts(h.snapshot()).some((text) => String(text).includes('copied last assistant message')), { limit: 240 })
