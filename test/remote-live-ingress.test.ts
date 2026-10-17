@@ -744,8 +744,14 @@ test('S3-R0: an unavailable-transport hydrate arms the OFFICIAL-signal re-init (
     'the retry path classifies the transport state at settle time')
   assert.ok(init.includes('if (liveGeneration === undefined) {'),
     'an ABSENT transport waits for the official generation')
-  assert.ok(init.includes('armRemoteInitRetry(sessionId)'),
-    'an unavailable-transport hydrate arms the official-signal re-init')
+  assert.ok(init.includes('armRemoteInitRetry(sessionId, initGeneration)'),
+    'the official-signal re-init is armed for the FAILED attempt (owner generation included)')
+  assert.ok(bootstrap.includes('ownership.generation() === failedAttemptGeneration'),
+    'the retry is fenced by the failed attempt\'s owner generation (a same-id owner commit wins)')
+  assert.ok(bootstrap.includes('if (!stillTheFailedAttempt()) return undefined'),
+    'the detached retry re-checks the attempt fence in the same tick as the init entry')
+  assert.ok(bootstrap.includes('if (attempt !== remoteInitAttempt) return'),
+    'a superseded init attempt cannot install a second ingress')
   assert.ok(init.includes('const attempt = { ownerGeneration: initGeneration, connectionGeneration: liveGeneration }'),
     'the retry budget is keyed by the owner attempt and the Connection generation')
   assert.ok(init.includes('lastInitRetry.ownerGeneration === attempt.ownerGeneration'),
