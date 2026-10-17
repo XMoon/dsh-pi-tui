@@ -68,12 +68,6 @@ import TypertRegistry from '@deepseek-ai/dsh-typert-registry'
 import WorkspaceRegistry from '@deepseek-ai/dsh-workspace'
 import { DirectSessionLifecycle } from '../src/runtime/direct/session-lifecycle-direct.ts'
 
-const PACKAGE_IDS = {
-  connection: '@deepseek-ai/dsh-client-connection',
-  gateway: '@deepseek-ai/dsh-api-gateway',
-  session: '@deepseek-ai/dsh-api-session-controller',
-}
-
 const PROVIDER = 'smoke'
 const MODEL = 'smoke'
 const PRESET = 'parity-preset'

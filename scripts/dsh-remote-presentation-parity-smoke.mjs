@@ -35,12 +35,6 @@ import {
   RemotePresentationReadShadow,
 } from './support/presentation-read-shadow.ts'
 
-const PACKAGE_IDS = {
-  connection: '@deepseek-ai/dsh-client-connection',
-  gateway: '@deepseek-ai/dsh-api-gateway',
-  session: '@deepseek-ai/dsh-api-session-controller',
-}
-
 function installModuleLoader() {
   const nodeRequire = createRequire(import.meta.url)
   const modules = new Map()

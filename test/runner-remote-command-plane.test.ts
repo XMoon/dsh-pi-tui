@@ -48,6 +48,8 @@
  */
 
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import test from 'node:test'
 import type { Fiber } from '@deepseek-ai/cordis'
 import { symbols } from '@deepseek-ai/cordis'
@@ -1156,6 +1158,22 @@ test('L6 §7.4-14 stale catalog (M3-6 PR2): refresh A → Connection replacement
   // discriminator that makes a no-op install of the automatic B refresh
   // fail this whole block instead of passing vacuously).
   const commandRunsBefore = fixture.hostCommandRuns(sessionA)
+  // Readiness is the APPLY, not the read: the automatic refresh's authoritative
+  // read settles a few milliseconds before the coordinator installs it
+  // (measured: read at T, `catalog applied … source=invalidation` at T+3ms), so
+  // submitting on the read alone races the install and lets the Client twin
+  // claim the line. A user submits what the INSTALLED catalog serves, so wait
+  // for the product's own apply report for the reconnect refresh before the
+  // single submit below.
+  await waitFor('the automatic reconnect refresh APPLIED its catalog', () => {
+    try {
+      return readFileSync(join(fixture.host.workRoot, 'logs', `pi-tui-${process.pid}.log`), 'utf8')
+        .split('\n')
+        .some(line => line.includes('catalog applied') && line.includes('source=invalidation'))
+    } catch {
+      return false
+    }
+  }, 15_000)
   submit(fixture, '/b-fresh-cmd')
   await waitFor('the B Host command entered its real handler', () => bHostRuns === 1, 15_000)
   await settle()

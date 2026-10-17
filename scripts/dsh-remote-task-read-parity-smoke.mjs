@@ -34,13 +34,6 @@ import { DirectTaskReader } from '../src/runtime/direct/task-read-direct.ts'
 import { RemoteTaskReader } from '../src/runtime/remote/task-read-remote.ts'
 import { RemoteTaskReadShadow } from '../src/runtime/remote/task-read-shadow.ts'
 
-const PACKAGE_IDS = {
-  connection: '@deepseek-ai/dsh-client-connection',
-  gateway: '@deepseek-ai/dsh-api-gateway',
-  session: '@deepseek-ai/dsh-api-session-controller',
-  jobs: '@deepseek-ai/dsh-api-job-controller',
-}
-
 function installModuleLoader() {
   const nodeRequire = createRequire(import.meta.url)
   const modules = new Map()

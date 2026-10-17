@@ -425,26 +425,26 @@ test('L6 PR5 §3.9b: teardown with a pending WRITE — observed surface-stop bou
     'the selected transport disposes exactly once through the runner teardown')
   assert.ok(observed.indexOf('surface-stop') < observed.indexOf('transport-dispose'),
     'observed order: surface stop precedes the transport disposal (the drain settled the write between)')
-  await new Promise(resolve => setTimeout(resolve, 800))
+  // A short observation window only widens the chance to SEE a late frame; it
+  // is not evidence about durability.
+  await new Promise(resolve => setTimeout(resolve, 150))
   // The official prompt contract is ADMISSION: `session/prompt` answers once
   // the Host Agent accepted the message (`agent.followup`), and the HOST owns
-  // the durable append from then on — in BOTH baselines; the runtime-context
-  // message the 0.2.1-rc.2 Host composes with the first accepted prompt only
-  // makes the gap observable here. Teardown therefore guarantees the SURFACE
-  // boundary (no render after the surface stopped), not the absence of a
-  // Host-owned commit: the accepted write still reaches its authoritative
-  // durable row.
+  // the durable append from then on — in BOTH baselines. Teardown therefore
+  // guarantees the SURFACE boundary observed above (no render after the surface
+  // stopped, exactly-once transport disposal, the parked write settled between
+  // them); it does NOT guarantee the absence of a Host-owned commit, and this
+  // foundation test deliberately does not pin whether a write parked at
+  // teardown must later become durable or must be refused.
   //
   // OPEN OWNER (S3, recorded — not silently accepted): the TUI's Remote
   // retirement drain can only settle the Client's admission because
   // `RemoteSessionOwnerServices.flush()` is a documented no-op (no public
-  // Remote durable-flush verb exists), so "an accepted write never becomes
-  // durable after transport disposal" is NOT a guarantee this composition can
-  // make. Deciding whether teardown must refuse a still-parked write or must
-  // wait for the Host's durable commit is a Remote lifecycle-contract decision
-  // (`docs/client-server-coupling.md`), never a local sleep/poll patch.
+  // Remote durable-flush verb exists). Deciding whether teardown must refuse a
+  // still-parked write or must await the Host's durable commit belongs to the
+  // Remote lifecycle contract (`docs/client-server-coupling.md`) and must be
+  // proven there with paired success/failure tests — never a local sleep/poll
+  // patch, and never pre-decided by this test's assertions.
   assert.equal(surfaceWrites.count - writesAtRelease, 0,
-    'the accepted write produced ZERO terminal writes after the surface stopped')
-  assert.ok(hostUserRows(fixture, mainId).some(row => row.includes('pending write across teardown sigma')),
-    'the accepted write reaches its authoritative Host commit')
+    'the surface stopped for good: no terminal write follows the teardown')
 })

@@ -38,12 +38,6 @@ import { DirectSessionReader } from '../src/runtime/direct/session-direct.ts'
 import { RemoteSessionReader } from '../src/runtime/remote/session-reader-remote.ts'
 import { RemoteSessionReadShadow } from '../src/runtime/remote/session-read-shadow.ts'
 
-const PACKAGE_IDS = {
-  connection: '@deepseek-ai/dsh-client-connection',
-  gateway: '@deepseek-ai/dsh-api-gateway',
-  session: '@deepseek-ai/dsh-api-session-controller',
-}
-
 const IMAGE_LIMITS = Object.freeze({
   maxImageBytes: 5 * 1024 * 1024,
   maxImagesPerMessage: 20,
