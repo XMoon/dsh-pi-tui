@@ -874,9 +874,9 @@ export class TranscriptFolder {
    *  membership must never be inferred from a layout artifact such as an existing
    *  displacement, which differs between the live and cold raw placements. */
   private readonly declaredToolCallsByStep = new Map<string, ReadonlySet<string>>()
-  /** Active Workflow runs: the shared semantic projection (owner tracking,
-   * interruption projection, member/run settlement) plus the raw item index
-   * of each active run's card for search dirty marking. */
+  /** Active Workflow runs: the shared semantic projection (durable open
+   * records, terminal-event settlement) plus the raw item index of each
+   * active run's card for search dirty marking. */
   private readonly workflow = new WorkflowProjection(runId => {
     const index = this.workflowIndexes.get(runId)
     if (index !== undefined) this.markSearchEntryDirty(index)

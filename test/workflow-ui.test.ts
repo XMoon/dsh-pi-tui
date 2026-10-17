@@ -15,6 +15,10 @@ import { stripTerminalSequences } from '@xmoon76/pi-tui'
 import { TuiApp, type WorkflowAction } from '../src/tui-app.ts'
 import { TranscriptFolder, workflowPhaseKey, type TranscriptMessage, type WorkflowMemberView, type WorkflowRunId, type WorkflowRunStatus } from '../src/transcript.ts'
 import { workflowMemberViewerTarget, type TaskBrowserRow } from '../src/domain/task/browser.ts'
+import { createTaskRuntime, type TaskSurfaceSource } from '../src/app/surface/task-runtime.ts'
+import type { TaskSubagentEntry } from '../src/runtime/task-read-port.ts'
+import { createDiag } from '../src/runtime/process/diagnostics.ts'
+import { displaySeamStub } from './support/display-seam-stub.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 
 const startedApps = new Set<TuiApp>()
@@ -41,6 +45,11 @@ function startApp(options: ConstructorParameters<typeof TuiApp>[2] = {}): { vt: 
 async function viewport(vt: VirtualTerminal): Promise<string> {
   await vt.waitForRender()
   return vt.getViewport().join('\n')
+}
+
+/** Let an injected async Task read settle without a timer. */
+async function flushTasks(rounds = 10): Promise<void> {
+  for (let index = 0; index < rounds; index += 1) await new Promise<void>(resolve => setTimeout(resolve, 0))
 }
 
 const member = (seq: number, label: string, phase: string | null, status: WorkflowRunStatus): WorkflowMemberView =>
@@ -463,7 +472,7 @@ test('running member click emits open-member; terminal member rows have no hit',
   assert.deepEqual(actions, [], `terminal member must never emit open-member`)
 })
 
-test('W8: a folded mid-run member opens through the live catalog gate; settlement closes it', async () => {
+test('W8: Fold -> TUI click -> TaskRuntime live driver gate -> enterView (open and reject)', async () => {
   const folder = new TranscriptFolder()
   folder.apply([
     { type: 'turn/start', seq: 0, time: 1_700_000_000_000, data: { turn: 0 } } as SessionEvent,
@@ -472,48 +481,108 @@ test('W8: a folded mid-run member opens through the live catalog gate; settlemen
     { type: 'step/end', seq: 3, time: 1_700_000_000_003, data: { turn: 0, step: 0 } } as SessionEvent,
     { type: 'turn/end', seq: 4, time: 1_700_000_000_004, data: { turn: 0, reason: { kind: 'aborted', reason: { kind: 'user' } } } } as SessionEvent,
     // The members register AFTER the owning step/turn closed (background run).
-    { type: 'tool-workflow/agent-start', seq: 5, time: 1_700_000_000_005, data: { runId: 'run-1', seq: 0, label: 'live', childId: 'child-1' } } as SessionEvent,
-    { type: 'tool-workflow/agent-start', seq: 6, time: 1_700_000_000_006, data: { runId: 'run-1', seq: 1, label: 'other', childId: 'child-2' } } as SessionEvent,
+    ...['live', 'inactive', 'wrong-parent', 'continuable'].map((label, seq) => ({
+      type: 'tool-workflow/agent-start', seq: 5 + seq, time: 1_700_000_000_005 + seq,
+      data: { runId: 'run-1', seq, label, childId: `child-${seq + 1}` },
+    } as SessionEvent)),
   ])
   const run = folder.messages().find(message => message.kind === 'workflow')
   assert.ok(run !== undefined && run.kind === 'workflow')
   assert.equal(run.status, 'running')
-  const memberRow = run.members[0]
-  assert.ok(memberRow !== undefined)
-  assert.equal(memberRow.status, 'running', 'the member comes from the real fold, not an injected status')
-  // The SAME folded member resolves against the live one-shot catalog row.
-  const root = 'session-main'
-  const catalogRow: TaskBrowserRow = {
-    kind: 'subagent', value: 'agent:child-1', childId: 'child-1', label: 'live',
-    mode: 'one-shot', activity: 'running', hasChildren: false, parentId: '', depth: 1,
+  assert.deepEqual(run.members.map(member => member.status), ['running', 'running', 'running', 'running'],
+    'the members come from the real fold, not injected statuses')
+
+  const entered: Array<{
+    childId: string
+    label: string | undefined
+    mode: 'one-shot' | 'continuable'
+    parentSessionId: string
+    activity: 'running' | 'inactive'
+    depth: number | undefined
+  }> = []
+  const descendants: TaskSubagentEntry[] = [
+    { kind: 'child', id: 'child-1', label: 'live', mode: 'one-shot', activity: 'running', hasChildren: false, parentId: 'sess-main', depth: 1 },
+    { kind: 'child', id: 'child-2', label: 'inactive', mode: 'one-shot', activity: 'inactive', hasChildren: false, parentId: 'sess-main', depth: 1 },
+    { kind: 'child', id: 'child-3', label: 'wrong-parent', mode: 'one-shot', activity: 'running', hasChildren: false, parentId: 'sess-other', depth: 1 },
+    { kind: 'child', id: 'child-4', label: 'continuable', mode: 'continuable', activity: 'running', hasChildren: false, parentId: 'sess-main', depth: 1 },
+  ]
+  let app!: TuiApp
+  const tasks = createTaskRuntime({
+    mounted: () => app,
+    display: () => displaySeamStub(),
+    isCleanedUp: () => false,
+    attention: { rows: () => [], reconcile: () => {}, publish: () => {}, reopen: () => false },
+  })
+  const source: TaskSurfaceSource = {
+    sessionId: () => 'sess-main',
+    captureSubject: () => undefined,
+    subjectMatches: () => true,
+    enterView: async (childId, label, mode, parentSessionId, activity, depth) => {
+      entered.push({ childId, label, mode, parentSessionId, activity, depth })
+    },
+    interruptSubagent: async () => ({ kind: 'committed' } as never),
+    rowSelectionDisposition: () => 'close',
+    subagentJobTranscriptId: () => undefined,
+    subagentJobViewHint: status => status,
+    jobObservation: {
+      open: () => () => {},
+      stop: async () => ({ kind: 'requested' }),
+    },
+    taskRead: {
+      currentKey: () => 'g1:sess-main',
+      currentSessionId: () => 'sess-main',
+      readTask: async () => ({
+        parentSessionId: 'sess-main', parentAvailable: true, descendants: [...descendants], jobs: [],
+      }),
+      activityOf: (childId) => {
+        const entry = descendants.find(candidate => candidate.id === childId)
+        return entry !== undefined && entry.kind === 'child' ? entry.activity : undefined
+      },
+    },
   }
-  assert.ok(workflowMemberViewerTarget(memberRow, catalogRow, root) !== undefined,
-    'a running member with a live one-shot driver must resolve')
-  assert.equal(workflowMemberViewerTarget(memberRow, { ...catalogRow, parentId: 'session-other' }, root), undefined,
-    'a wrong parent must be rejected')
-  assert.equal(workflowMemberViewerTarget(memberRow, { ...catalogRow, activity: 'inactive' }, root), undefined,
-    'a stopped driver must be rejected')
-  const actions: WorkflowAction[] = []
-  const { vt, app } = startApp({ onWorkflowAction: action => actions.push(action) })
+  const vt = new VirtualTerminal(100, 24)
+  app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
+    // The SAME production wiring: the app emits the semantic action and the
+    // TaskRuntime owner resolves it against the live catalog/driver.
+    onWorkflowAction: action => tasks.handleWorkflowAction(action),
+  })
+  app.start()
+  startedApps.add(app)
+  tasks.attachTasks(source, {
+    diag: createDiag({ filePath: undefined, stderrLevel: 'off' }),
+    isCleanedUp: () => false,
+  })
+  tasks.refreshAgents()
+  await flushTasks()
+
   app.setFullscreen(true)
   app.setTranscript(folder.messages())
   let view = await viewport(vt)
   await clickCell(vt, 10, rowOf(view, 'live — running'))
-  await vt.waitForRender()
-  assert.deepEqual(actions, [{ kind: 'open-member', runId: 'run-1', seq: 0, childId: 'child-1' }],
-    'the folded running member emits the real open-member action')
+  await flushTasks()
+  assert.deepEqual(entered, [{
+    childId: 'child-1', label: 'live', mode: 'one-shot',
+    parentSessionId: 'sess-main', activity: 'running', depth: 1,
+  }], 'the folded live member must reach the real viewer sink')
+
+  // The runtime gate refuses: inactive driver, wrong parent, continuable row.
+  for (const label of ['inactive — running', 'wrong-parent — running', 'continuable — running']) {
+    view = await viewport(vt)
+    await clickCell(vt, 10, rowOf(view, label))
+    await flushTasks()
+  }
+  assert.equal(entered.length, 1, 'inactive/wrong-parent/continuable rows must be refused by the live gate')
+
   // The real agent-end settles the member: the SAME card no longer opens.
-  // The sibling member is still running, so the phase stays inline and the
-  // now-terminal row is actually clickable.
+  // The sibling members are still running, so the phase stays inline.
   folder.apply([
-    { type: 'tool-workflow/agent-end', seq: 7, time: 1_700_000_000_007, data: { runId: 'run-1', seq: 0, outcome: 'completed' } } as SessionEvent,
+    { type: 'tool-workflow/agent-end', seq: 9, time: 1_700_000_000_009, data: { runId: 'run-1', seq: 0, outcome: 'completed' } } as SessionEvent,
   ])
   app.setTranscript(folder.messages())
-  actions.length = 0
   view = await viewport(vt)
   await clickCell(vt, 10, rowOf(view, 'live — completed'))
-  await vt.waitForRender()
-  assert.deepEqual(actions, [], 'a settled member must not open')
+  await flushTasks()
+  assert.equal(entered.length, 1, 'a settled member must never open the viewer')
 })
 
 test('W9: a folded mid-run workflow renders running counts and keeps the scoped View route', async () => {
