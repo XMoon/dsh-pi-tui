@@ -585,7 +585,7 @@ test('the bootstrap caller-side abort rule is present in source (subscribe never
     bootstrap.indexOf('const initRemoteLiveSurface'),
     bootstrap.indexOf('const initRemoteLiveSurface') + 2600,
   )
-  assert.ok(init.includes('if (hydrate === undefined) return'),
+  assert.ok(init.includes('if (hydrate === undefined) {'),
     'an uncommitted hydrate (undefined outcome) aborts BEFORE subscribing')
   assert.ok(init.includes('ownership.currentSessionId() !== sessionId || ownership.generation() !== initGeneration'),
     'an owner rollover during the hydrate await aborts BEFORE subscribing')
@@ -642,6 +642,27 @@ test('TUPLE SETTLE: settling an attempt retires its tuple, so a later chunk may 
   assert.deepEqual(log.live.map(input => (input as { kind: string }).kind), ['start', 'chunk'],
     'a retired tuple restarts with a synthetic start (retirement is real)')
   handle.dispose()
+})
+
+test('S3-R0: an unavailable-transport hydrate arms the OFFICIAL-signal re-init (source lock)', async () => {
+  // A hydrate dropped while the transport is gone must not complete as a
+  // healthy init: without a transcript and without an ingress only an unrelated
+  // owner commit could recover it. The composition root arms ONE re-init driven
+  // by the official Connection generation channel (no timer, no poll).
+  const { readFileSync } = await import('node:fs')
+  const bootstrap = readFileSync(new URL('../src/app/bootstrap.ts', import.meta.url), 'utf8')
+  const init = bootstrap.slice(
+    bootstrap.indexOf('const initRemoteLiveSurface'),
+    bootstrap.indexOf('const initRemoteLiveSurface') + 6000,
+  )
+  assert.ok(init.includes('if (remoteSources.commandSource.connectionGeneration() === undefined) {'),
+    'the retry is armed only when the transport is actually unavailable')
+  assert.ok(init.includes('armRemoteInitRetry(sessionId)'),
+    'an unavailable-transport hydrate arms the official-signal re-init')
+  assert.ok(bootstrap.includes('remoteSources.commandSource.subscribeConnectionGeneration'),
+    'the re-init is driven by the OFFICIAL generation channel')
+  assert.ok(!init.includes('setInterval') && !init.includes('setTimeout'),
+    'the re-init must not poll')
 })
 
 test('the compaction cache SEED uses the hydrate outcome token, never a fresh capture (source lock)', async () => {

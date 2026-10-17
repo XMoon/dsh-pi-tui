@@ -289,6 +289,10 @@ export interface RemoteLiveIngressFactory {
       readonly binding: unknown
       readonly revision: number
     }): boolean
+    /** Whether a window read at `revision` may REPLACE the fold (the retained
+     *  window of a rolled-over generation may not; checked before the commit,
+     *  not after it). */
+    refoldEligible(revision: number): boolean
   }
 }
 
