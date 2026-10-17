@@ -46,6 +46,7 @@ knows where the rest lives.
 | `tern-tsp/session-browser.md` | TSP contributors | Complete Session Browser authority, workspace/search/Reader semantics, command admission, guarded Resume lifecycle and qualification limits |
 | `tern-tsp/evidence/pr4-b1-a.md` | TSP contributors | PR4-B1-A historical read-path coverage, real Tern headless observations, evidence tiers and explicit unverified limits |
 | `tern-tsp/evidence/pr4-b1-b.md` | TSP contributors | PR4-B1-B command/Resume coverage, Direct source-to-sink evidence, real Tern headless qualification and unverified limits |
+| `tern-tsp/evidence/pr4-b2-a.md` | TSP contributors | PR4-B2-A headless-basic-command coverage (`/new`, `/fork`, `/title`+`/rename`, `/copy`, `/yolo`, `/logout <target>`), Direct source-to-sink evidence, the real-Tern `/copy` channel run and the reported clipboard/logout qualification gaps |
 | `tern-tsp/foundation.md` | TSP contributors | Verified runtime/Surface owners, lifecycle, node/event identity, modal/focus, capability and evidence boundaries; source-qualified, not a universal protocol specification |
 | `tern-tsp/upstream-reference.md` | TSP contributors | Version-pinned official SDK / oh-my-pi / protocol reference, semantic differences and reusable patterns without copying another runtime |
 | `tern-tsp/evidence/foundation-20261013.md` | TSP contributors | Dated audit (A1–A7), the observed Tern 0.8.3 headless evidence tiers, exact provenance, and remaining unknowns |

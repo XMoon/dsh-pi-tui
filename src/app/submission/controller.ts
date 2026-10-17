@@ -1700,7 +1700,7 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
         modelPicker: deps.supportsModelPickerUi?.() === true,
         presetPicker: deps.supportsPresetPickerUi?.() === true,
         sessionBrowser: deps.supportsSessionBrowserUi?.() === true,
-      })
+      }, parsed.rawInput)
       // ONLY the TUI-owned builtin family is this gate's business. A Host
       // command, an extension contribution, a skill invocation or an ordinary
       // submission keeps its OWN routing below — the family decision comes

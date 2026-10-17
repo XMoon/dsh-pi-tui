@@ -67,6 +67,12 @@ export interface ModelCommandDeps {
   presetPresentation?: PresetPresentation
   registerOne: RegisterOne
   recordCommandDraftDisposition: (commandId: string | undefined, disposition: 'restored' | 'suppressed') => void
+  /**
+   * PR4-B2-A: the TSP-only CONFIRMED-SUCCESS notice (a no-op beside a PiTui
+   * command card). Refusal/cancellation/indeterminate outcomes keep their
+   * existing owners, so no outcome is reported twice.
+   */
+  notifyOutcome: (text: string, kind?: 'info' | 'error') => void
 }
 
 export interface ModelCommandRegistrars {
@@ -82,7 +88,7 @@ export interface ModelCommandRegistrars {
  * position.
  */
 export function createModelCommands(deps: ModelCommandDeps): ModelCommandRegistrars {
-  const { runner, app, registerOne, recordCommandDraftDisposition } = deps
+  const { runner, app, registerOne, recordCommandDraftDisposition, notifyOutcome } = deps
   const { signal } = runner
 
   /**
@@ -384,6 +390,12 @@ export function createModelCommands(deps: ModelCommandDeps): ModelCommandRegistr
         // message + the preset log) — the raw commands service never crosses
         // into the command surface.
         const outcome = await runner.applyPermissionPreset(scope, 'danger-full-access', signal)
+        // PR4-B2-A: every terminal branch keeps its ORIGINAL message — a
+        // refused/superseded/unavailable/indeterminate result is never upgraded
+        // to success and never triggers an automatic retry. Only the CONFIRMED
+        // apply is supplemented below through the TSP-only outcome notice; the
+        // error branches keep their existing owner (the Direct command card)
+        // and add no second Dock line.
         if (outcome.ownership === 'refused') {
           return { kind: 'error', text: 'the session changed before the permission preset could be applied — try again' }
         }
@@ -410,6 +422,7 @@ export function createModelCommands(deps: ModelCommandDeps): ModelCommandRegistr
             text: 'the permission switch was dispatched but its result is unknown — check the footer before relying on it; do not retry blindly',
           }
         }
+        notifyOutcome('danger-full-access — approvals off')
         return { kind: 'success', text: 'danger-full-access — approvals off' }
       },
     })

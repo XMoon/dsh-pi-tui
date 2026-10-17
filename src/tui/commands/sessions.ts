@@ -81,6 +81,21 @@ export interface SessionCommandDeps {
   detach: DetachTask
   recordCommandDraftDisposition: (commandId: string | undefined, disposition: 'restored' | 'suppressed') => void
   newSessionId: NewSessionId
+  /**
+   * PR4-B2-A: the renderer-neutral notice entry (see `registerTuiCommands`).
+   * It replaces the direct `app.notify` calls in the title handler, which
+   * would dereference a `TuiApp` that does not exist on the TSP renderer.
+   */
+  notify: (text: string, kind?: 'info' | 'error') => void
+  /**
+   * PR4-B2-A: the TSP-only SUCCESS-outcome notice — a no-op wherever a PiTui
+   * command card already presents the outcome. Only a CONFIRMED success is
+   * supplemented: a refusal/cancellation/indeterminate keeps its existing
+   * owners (the Direct command card, the controller's own local-command error
+   * notice, or the handler's inline `notify`) so no line is duplicated on the
+   * Dock.
+   */
+  notifyOutcome: (text: string, kind?: 'info' | 'error') => void
 }
 
 export interface SessionCommandRegistrars {
@@ -224,6 +239,8 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
     detach,
     recordCommandDraftDisposition,
     newSessionId,
+    notify,
+    notifyOutcome,
   } = deps
   const { cwd, signal } = runner
 
@@ -791,6 +808,10 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
   const titleHandler = async (invocation: CommandInvocation): Promise<CommandResult> => {
     const scope = await runner.requireLiveSessionScope()
     const current = (): boolean => !runner.signal.aborted && runner.isSessionScopeCurrent(scope)
+    // NOTE (PR4-B2-A): these terminal error outcomes deliberately get NO extra
+    // notice. Their existing owners are the Direct command card and — on the
+    // sessionless local-command path — the controller's own error notice; a
+    // third line from here would be a duplicate on the same Dock.
     const stale = (): CommandResult => ({
       kind: 'error',
       text: 'the session changed while updating the title — try again',
@@ -821,8 +842,10 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
             // only outcome — on the Remote Client-owned command path there is
             // no official command card either, so the indeterminate no-retry
             // notice is emitted with the same inline pattern as the rejected
-            // branch below and the `/preset`/`/model` handlers.
-            app.notify(message, 'error')
+            // branch below and the `/preset`/`/model` handlers. PR4-B2-A: the
+            // entry is the renderer-neutral notice, so the TSP Dock receives it
+            // too (exactly once — the outcome is NOT re-notified).
+            notify(message, 'error')
             return { kind: 'error', text: message }
           }
           const message = outcome.kind === 'rejected' ? outcome.error.message : outcome.reason
@@ -833,7 +856,7 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
           // emit. On Direct this is a transient notice beside the command card.
           // The rejected branch is the writer-held (`session/writer-held`)
           // proven pre-commit refusal: its message is the centralized guidance.
-          app.notify(message, 'error')
+          notify(message, 'error')
           return { kind: 'error', text: message }
         }
       } catch (error) {
@@ -842,6 +865,10 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
         if (isCancellation(error)) throw error
         return { kind: 'error', text: safeErrorMessage(error) }
       }
+      // PR4-B2-A: the confirmed authoritative title write. This is a SUCCESS
+      // supplement only — the one outcome whose text the TSP renderer would
+      // otherwise have to read from a PiTui command card it never paints.
+      notifyOutcome(`title set: ${acceptedTitle}`)
       return { kind: 'success', text: `title set: ${acceptedTitle}` }
     }
     try {
@@ -854,10 +881,10 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
         return { kind: 'error', text: outcome.reason }
       }
       if (outcome.title === undefined) {
-        app.notify('no conversation yet — title left as-is', 'info')
+        notify('no conversation yet — title left as-is', 'info')
         return { kind: 'success' }
       }
-      app.notify(`title regenerated: ${outcome.title}`, 'info')
+      notify(`title regenerated: ${outcome.title}`, 'info')
       return { kind: 'success' }
     } catch (error) {
       if (error instanceof TransitionInProgressError) return transitioning()

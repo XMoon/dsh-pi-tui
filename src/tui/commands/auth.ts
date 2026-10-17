@@ -36,6 +36,12 @@ export interface AuthCommandDeps {
   runner: AuthCommandRunner
   app: TuiApp
   registerOne: RegisterOne
+  /**
+   * PR4-B2-A: the TSP-only CONFIRMED-SUCCESS notice (a no-op wherever a PiTui
+   * command card already presents the outcome). Only the explicit-target
+   * `/logout` branch uses it; the bare picker path and `/login` are unchanged.
+   */
+  notifyOutcome: (text: string, kind?: 'info' | 'error') => void
 }
 
 export interface AuthCommandRegistrars {
@@ -432,7 +438,7 @@ async function askAddProvider(
  * the returned registrars is called at its frozen position.
  */
 export function createAuthCommands(deps: AuthCommandDeps): AuthCommandRegistrars {
-  const { runner, app, registerOne } = deps
+  const { runner, app, registerOne, notifyOutcome } = deps
 
   const registerLogin = (): void => {
     registerOne({
@@ -588,6 +594,12 @@ export function createAuthCommands(deps: AuthCommandDeps): AuthCommandRegistrars
       input: { hint: '[<route|env-var>]' },
       handler: async (invocation) => {
         const credentials = runner.config.credentials
+        // PR4-B2-A: the explicit-target form is the ONLY one the TSP Gate
+        // admits. Its CONFIRMED success is supplemented through the
+        // renderer-neutral outcome notice so the TSP Dock reports the real
+        // result; the error branches keep their existing owner (the Direct
+        // command card) and add no second Dock line. A credential VALUE is
+        // never part of any message.
         if (!credentials.available()) return { kind: 'error', text: 'credentials service unavailable' }
         const targets = runner.config.authorization.listTargets()
         const options = runner.config.providers.listCredentialOptions()
@@ -605,15 +617,18 @@ export function createAuthCommands(deps: AuthCommandDeps): AuthCommandRegistrars
               : undefined
             if (flow !== undefined) {
               await credentials.deleteRecord(flow.key)
+              notifyOutcome(`${flow.label} signed out locally — stored credential cleared`)
               return { kind: 'success', text: `${flow.label} signed out locally — stored credential cleared` }
             }
             await credentials.unsetReference(resolved)
+            notifyOutcome(`API key ${resolved} cleared`)
             return { kind: 'success', text: `API key ${resolved} cleared` }
           }
           // A route naming a flow directly (no provider option for it).
           const flow = flowForRoute(targets, arg.toLowerCase())
           if (flow !== undefined) {
             await credentials.deleteRecord(flow.key)
+            notifyOutcome(`${flow.label} signed out locally — stored credential cleared`)
             return { kind: 'success', text: `${flow.label} signed out locally — stored credential cleared` }
           }
           return { kind: 'error', text: `unknown credential target "${arg}" — ${mergedTargetsSummary(mergeLoginTargets(options, targets))}` }
