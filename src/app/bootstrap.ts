@@ -1298,18 +1298,34 @@ export function applyRunnerWithRuntime(
      *  narrower than the Connection generation, so an owner attempt is the
      *  honest budget unit). */
     let lastInitRetry: { readonly ownerGeneration: number; readonly connectionGeneration: unknown } | undefined
-    /** Arm the official-signal retry for one session whose surface init could
-     *  not hydrate (the owner is still current; only the transport is gone). */
-    const armRemoteInitRetry = (sessionId: string): void => {
+    /** Arm the official-signal retry for one FAILED attempt. The retry belongs
+     *  to that attempt: it is fenced by the exact owner generation as well as
+     *  the session id, so a same-id owner commit (which keeps the session id but
+     *  bumps the generation) can never let an old retry run
+     *  `initRemoteLiveSurface` — whose entry disposes the live surface — against
+     *  the NEW owner (plan §2.5 terminal determinism / single publisher). */
+    const armRemoteInitRetry = (sessionId: string, failedAttemptGeneration: number): void => {
       if (remoteSources === undefined || remoteInitRetryHandle !== undefined) return
+      const stillTheFailedAttempt = (): boolean =>
+        !cleanedUp
+        && ownership.currentSessionId() === sessionId
+        && ownership.generation() === failedAttemptGeneration
       remoteInitRetryHandle = {
         dispose: remoteSources.commandSource.subscribeConnectionGeneration(() => {
           if (cleanedUp) { disposeRemoteInitRetry(); return }
           if (remoteSources === undefined) return
           if (remoteSources.commandSource.connectionGeneration() === undefined) return
+          // The owner may have moved on while the transport was gone: the retry
+          // belongs to the failed attempt only.
+          if (!stillTheFailedAttempt()) { disposeRemoteInitRetry(); return }
           disposeRemoteInitRetry()
-          if (ownership.currentSessionId() !== sessionId) return
-          runDetached('remote live surface retry', () => initRemoteLiveSurface(sessionId), {
+          runDetached('remote live surface retry', () => {
+            // Same-tick re-check before the init's entry disposes anything: a
+            // same-id owner commit that landed after the callback consumed this
+            // listener must win.
+            if (!stillTheFailedAttempt()) return undefined
+            return initRemoteLiveSurface(sessionId)
+          }, {
             diag,
             sessionId: () => sessionId,
           })
@@ -1372,8 +1388,12 @@ export function applyRunnerWithRuntime(
      * and transient chunks through the SAME assistant-input entry the
      * Direct branch uses — one canonical pipeline, two ingress owners.
      */
+    /** The newest init attempt: an older in-flight init bails before it installs
+     *  an ingress, so two attempts can never become two publishers. */
+    let remoteInitAttempt = 0
     const initRemoteLiveSurface = async (sessionId: string): Promise<void> => {
       if (remoteSources === undefined || cleanedUp) return
+      const attempt = ++remoteInitAttempt
       disposeRemoteLiveSurface()
       // §6.5 lifecycle fence (subscribe side): the token is captured BEFORE
       // the hydrate await; a superseded owner (switch/new/fork or a same-id
@@ -1382,6 +1402,9 @@ export function applyRunnerWithRuntime(
       const initGeneration = ownership.generation()
       const hydrate = await presentation.initLiveRemoteSession(sessionId)
       if (cleanedUp) return
+      // A newer attempt (a same-id owner commit, another retry) superseded this
+      // one while it hydrated: it must not install anything.
+      if (attempt !== remoteInitAttempt) return
       if (ownership.currentSessionId() !== sessionId || ownership.generation() !== initGeneration) return
       // An uncommitted hydrate means either a superseded owner (fenced above)
       // or an unavailable transport. The latter must NOT complete as a healthy
@@ -1393,7 +1416,7 @@ export function applyRunnerWithRuntime(
         const liveGeneration = remoteSources.commandSource.connectionGeneration()
         if (liveGeneration === undefined) {
           // The transport is absent right now: wait for the OFFICIAL generation.
-          armRemoteInitRetry(sessionId)
+          armRemoteInitRetry(sessionId, initGeneration)
         } else {
           const attempt = { ownerGeneration: initGeneration, connectionGeneration: liveGeneration }
           const alreadyRetried = lastInitRetry !== undefined
@@ -1412,7 +1435,7 @@ export function applyRunnerWithRuntime(
               sessionId: () => sessionId,
             })
           } else {
-            armRemoteInitRetry(sessionId)
+            armRemoteInitRetry(sessionId, initGeneration)
           }
         }
         return
