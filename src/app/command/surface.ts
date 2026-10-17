@@ -39,7 +39,7 @@ import { registerTuiCommands, type CommandRegistryLike, type HostCommandClaim, t
 import type { ClientCommandRegistry } from './client-command-registry.ts'
 import type { RemoteCommandSourceFace } from '../application-runtime.ts'
 import { bindCommandRuntime, type CommandRuntimeSurface, type CommandSessionRuntime } from './runtime.ts'
-import { titleResultNoticeSuppressed } from './tsp-capability.ts'
+import { titleRefusalNoticeOwner, titleSuccessNoticeVisible } from './tsp-capability.ts'
 import { copyToClipboard } from '../../client/clipboard/copy.ts'
 import { isFocusDisplayPreset, type DisplayState } from '../../domain/display/preset.ts'
 import { draftHasImages } from '../../client/media/draft-attachments.ts'
@@ -685,15 +685,19 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
         deps.presetPresentation?.(),
         // PR4-B2-A: the internal presentation seams the B2-A registrars consume.
         // The notice sink is the renderer-neutral one (the PiTui route and the
-        // TSP Dock are the same seam); the suppression fact is read HERE because
-        // the composition root owns both of its inputs — whether a PiTui
+        // TSP Dock are the same seam); the ownership facts are read HERE because
+        // the composition root owns both of their inputs — whether a PiTui
         // presentation is mounted (`deps.app`, the same live read every other
         // seam uses) and which command plane executes the invocation
         // (`deps.backend.kind`). Registration runs after the surface mount, so
         // the app fact is the real mounted state.
         {
           notify: deps.notify,
-          suppressTitleResultNotice: titleResultNoticeSuppressed({
+          titleRefusalNoticeOwner: titleRefusalNoticeOwner({
+            pituiPresentation: deps.app() !== undefined,
+            backendKind: deps.backend.kind,
+          }),
+          titleSuccessNoticeVisible: titleSuccessNoticeVisible({
             pituiPresentation: deps.app() !== undefined,
             backendKind: deps.backend.kind,
           }),

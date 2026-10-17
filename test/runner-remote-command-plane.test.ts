@@ -62,6 +62,7 @@ import { waitFor } from './support/remote-application-fixture.ts'
 import { testLifecycle, type TestLifecycle } from './support/temp-lifecycle.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 import { LlmAdapter } from '@deepseek-ai/dsh-llm'
+import { wireNodes } from './support/tsp-picker-wire.ts'
 
 process.env.NO_COLOR = ''
 process.env.FORCE_COLOR = ''
@@ -349,6 +350,164 @@ test('L6 §7.4-1 TUI built-in: the Client handler runs and the Host executor is 
   await settle()
   assert.equal(fixture.hostCommandRuns(mainId), 0,
     'a TUI built-in must never reach the Host command executor (zero command/run rows)')
+})
+
+/**
+ * F1 (PR4-B2-A review): a TUI-owned command executing through the card-less
+ * Client command registry must still publish its returned error text. The Direct
+ * command plane appends the official `command/run`/`command/done` rows (the
+ * transcript card); the Client registry appends none, so before the fix the user
+ * saw only a restored draft.
+ */
+function recordNotifications(life: TestLifecycle): string[] {
+  const notifications: string[] = []
+  const originalNotify = TuiApp.prototype.notify
+  TuiApp.prototype.notify = function patchedNotify(this: TuiApp, message: string, kind?: 'error' | 'info'): void {
+    notifications.push(message)
+    return originalNotify.call(this, message, kind)
+  }
+  life.defer(() => { TuiApp.prototype.notify = originalNotify })
+  return notifications
+}
+
+  // A REAL conversation subject (one completed user turn, no assistant
+  // answer) — the Remote runner only attaches a hydrated Session.
+  const seedWithoutAnswer = (append: (type: string, data: unknown, options?: { surfaceOp?: 'append' }) => void): void => {
+    append('turn/start', { turn: 1 })
+    append('step/start', { turn: 1, step: 1 })
+    append('user/message', {
+      id: 'u-f1', role: 'user', content: [{ type: 'text', text: 'a conversation without an answer' }], source: { kind: 'user' },
+    }, { surfaceOp: 'append' })
+    append('step/end', { turn: 1, step: 1 })
+    append('turn/end', { turn: 1, reason: { kind: 'completed' } })
+  }
+
+test('F1 Remote: a card-less /copy failure is published once and produces no Host command row', async (t) => {
+  const life = testLifecycle(t)
+  const mainId = 'b2a-f1-copy'
+  const fixture = await mountRunner(life, { resumeSessionId: mainId, seed: seedWithoutAnswer })
+  await waitFor('the remote runner mount', () => fixture.vt.getViewport().join('').length > 0, 20_000)
+  const notifications = recordNotifications(life)
+  submit(fixture, '/copy')
+  await waitFor('the card-less copy refusal is published', () =>
+    notifications.some(message => message.includes('no assistant message yet')), 20_000)
+  await settle(400)
+  assert.equal(
+    notifications.filter(message => message.includes('no assistant message yet')).length, 1,
+    'the card-less refusal is published EXACTLY once')
+  assert.equal(fixture.hostCommandRuns(mainId), 0,
+    'the Client registry route produced no Host command/run row (so no result card exists)')
+})
+
+test('F1 Remote: a card-less /yolo unavailability is published, never reported as applied', async (t) => {
+  const life = testLifecycle(t)
+  const mainId = 'b2a-f1-yolo'
+  const fixture = await mountRunner(life, { resumeSessionId: mainId, seed: seedWithoutAnswer })
+  await waitFor('the remote runner mount', () => fixture.vt.getViewport().join('').length > 0, 20_000)
+  const notifications = recordNotifications(life)
+  submit(fixture, '/yolo')
+  await waitFor('the card-less permission refusal is published', () =>
+    notifications.some(message => /unavailable/.test(message)), 20_000)
+  await settle(400)
+  assert.ok(!notifications.some(message => message.includes('approvals off')),
+    'an unavailable permission writer is never reported as applied')
+  assert.equal(fixture.hostCommandRuns(mainId), 0,
+    'the Client registry route produced no Host command/run row')
+})
+
+test('F1 Remote: a sessionless /logout target error is settled ONCE by the local command path', async (t) => {
+  const life = testLifecycle(t)
+  // No resumed Session: a sessionless command runs through the controller's
+  // local-command path, which already notifies its errors — the new card-less
+  // settlement must not add a second line.
+  const fixture = await mountRunner(life)
+  await waitFor('the remote runner mount', () => fixture.vt.getViewport().join('').length > 0, 20_000)
+  const notifications = recordNotifications(life)
+  submit(fixture, '/logout No-Such-Route')
+  await waitFor('the local-command logout error is published', () =>
+    notifications.some(message => message.includes('unknown credential target')), 20_000)
+  await settle(400)
+  assert.equal(
+    notifications.filter(message => message.includes('unknown credential target')).length, 1,
+    'the sessionless error is reported EXACTLY once (no double notification)')
+})
+
+/**
+ * F1 Remote + TSP: the card-less route's error must reach the TSP Dock (the
+ * same renderer-neutral sink, mounted through the real Remote composition).
+ * Everything here is production except the scripted model and the TSP pane.
+ */
+test('F1 Remote TSP: a card-less command failure reaches the TSP Dock', async (t) => {
+  const life = testLifecycle(t)
+  const mainId = 'b2a-f1-tsp'
+  const { createRemoteApplicationHostFixture } = await import('./support/remote-application-fixture.ts')
+  const host = await createRemoteApplicationHostFixture(life, 'b2a-f1-tsp-preset', {
+    llmAdapter: new StubStreamingLlmAdapter(),
+  })
+  const TokenMeter = (await import('@deepseek-ai/dsh-token-meter')).default
+  const toolTodo = await import('@deepseek-ai/dsh-tool-todo')
+  const title = await import('@deepseek-ai/dsh-session-title')
+  const goalUnit = await import('@deepseek-ai/dsh-goal')
+  const turnOutline = await import('@deepseek-ai/dsh-session-turn-outline')
+  await host.ctx.plugin(TokenMeter)
+  await host.ctx.plugin(toolTodo, { allowParallelInProgress: false })
+  await host.ctx.plugin(title.default as never, { fallbackMaxWords: 5, fallbackMaxBytes: 40, maxTitleBytes: 80 } as never)
+  await host.ctx.plugin(goalUnit.default as never, { defaultMaxGoalRounds: 5 } as never)
+  await host.ctx.plugin(turnOutline)
+  await host.harness.create(SessionId(mainId), { provider: 'smoke', model: 'smoke' }, { cwd: host.anchorDir })
+  const session = host.ctx.sessions.get(SessionId(mainId)) as unknown as {
+    append(type: string, data: unknown, options?: { surfaceOp?: 'append' }): void
+  }
+  seedWithoutAnswer((type, data, appendOptions) => session.append(type, data, appendOptions))
+
+  const runnerCtx = host.ctx
+  const { TUI_STARTUP_SERVICE } = await import('../src/startup.ts')
+  runnerCtx.provide(TUI_STARTUP_SERVICE, { sessionId: mainId, shippedPresetRoot: host.workRoot })
+  const aggregate = await createRemoteApplicationRuntime({
+    hostContext: host.ctx,
+    waitForHostPrerequisites: async () => {},
+    clientUiStartup: { sessionId: mainId },
+  })
+  life.defer(() => aggregate.selected.disposeTransport().catch(() => {}))
+
+  const { installTspPane } = await import('./support/tsp-terminal-fixture.ts')
+  const pane = installTspPane({})
+  life.defer(() => pane.restore())
+  const previousRenderer = process.env.DSH_PI_TUI_RENDERER
+  process.env.DSH_PI_TUI_RENDERER = 'tsp'
+  life.defer(() => {
+    if (previousRenderer === undefined) delete process.env.DSH_PI_TUI_RENDERER
+    else process.env.DSH_PI_TUI_RENDERER = previousRenderer
+  })
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = host.workRoot
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  runnerCtx.provide('appExit', () => {})
+  const override: RemoteApplicationOverride = {
+    selected: aggregate.selected,
+    presentation: aggregate.presentation,
+    extensionService: aggregate.clientUi.extensionService,
+  }
+  const runnerFiber = runnerCtx.plugin(pluginCtx => {
+    applyRunnerWithRuntime(pluginCtx, TuiConfigSchema({ fullscreen: 'off', sessionId: mainId } as never), override)
+  })
+  await runnerFiber
+  life.defer(() => { runnerFiber.dispose() })
+  await waitFor('the TSP surface mounted over the Remote composition', () =>
+    pane.output.text().includes('dock.composer'), 25_000)
+
+  pane.input.type('/copy')
+  await waitFor('the composer holds the command', () => {
+    const composer = wireNodes(pane).find(node => node.id === 'dock.composer')
+    return composer?.p.text === '/copy'
+  }, 20_000)
+  pane.input.type('\r')
+  await waitFor('the card-less copy failure reaches the TSP Dock', () =>
+    wireNodes(pane).some(node => node.id.startsWith('dock.notice-')
+      && typeof node.p.text === 'string' && node.p.text.includes('no assistant message yet')), 25_000)
 })
 
 test('L6 §7.4-2 extension (M3-6 PR1): the CLIENT-CONTEXT callback runs through the selected Client service; the Host-context twin and the Host executor are NEVER entered', async (t) => {

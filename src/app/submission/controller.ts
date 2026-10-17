@@ -35,7 +35,7 @@ import { classifyCommandLine, isBareCommandLine, isLocalCommandLine, isPlainExit
 import { resolveSubmitDelivery } from './command-policy.ts'
 import { isIndeterminateSkillWrite, type HostCommandClaim, type SubmitDelivery } from '../../commands.ts'
 import type { ClientCommandRegistry } from '../command/client-command-registry.ts'
-import { tspBuiltinAvailability } from '../command/tsp-capability.ts'
+import { TSP_B2A_RESULT_NOTICE_COMMANDS, tspBuiltinAvailability } from '../command/tsp-capability.ts'
 import type { TuiLocalCommandHandler } from '../../extension/public-types.ts'
 import { PendingSubmissions, type PendingSubmissionPlacement } from './pending-submission.ts'
 import { queueInboxMessageOf } from './pending-input.ts'
@@ -1048,6 +1048,22 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
           && deps.isPlanActive(agent) === true
           ? '/plan off'
           : text
+        // PR5 v2 §1C-7: the TUI-owned route is the classifier's
+        // client-command (tui) family evaluated against the FINAL catalog — a
+        // genuine Host-origin name (mirrors excluded) disqualifies it first.
+        // (Distinct question from the line classification: a skill invocation
+        // is agent-facing INPUT yet its handler still lives in the TUI's own
+        // registry, so the skill/wrapper terms stay OUT of this predicate.)
+        const isTuiOwnedCommandLine = (): boolean => parsedAtSubmit !== undefined
+          && classifyCommandLine({
+            // §1C-5 (whole-PR F1): the sticky submit-time non-invocation.
+            hostOriginClaim: effectiveOriginClaim(parsedAtSubmit),
+            // §1C-6 (whole-PR F4): the LIVE Client registry claim.
+            tuiCommand: deps.command.clientClaimsLine(parsedAtSubmit)
+              || deps.command.isSkillWrapperName(parsedAtSubmit.name) === true,
+            extensionCommand: false,
+            skillInvocation: false,
+          }).kind === 'client-command'
         // The HostCommandPort submission + the agent-facing fallback live in
         // the submission runtime; the runner supplies the command-plane and
         // TUI hooks.
@@ -1126,23 +1142,17 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
             return attachmentRefusal(parsed, text, finalClassification)
           },
           commandSubmitAttachments: (value) => commandSubmitAttachments(value),
-          isTuiOwnedCommand: () => parsedAtSubmit !== undefined
-            // §1C-7: the TUI-owned route is the classifier's client-command
-            // (tui) family evaluated against the FINAL catalog — a genuine
-            // Host-origin name (mirrors excluded) disqualifies it first.
-            // (Distinct question from the line classification: a skill
-            // invocation is agent-facing INPUT yet its handler still lives in
-            // the TUI's own registry, so the skill/wrapper terms stay OUT of
-            // this predicate.)
-            && classifyCommandLine({
-              // §1C-5 (whole-PR F1): the sticky submit-time non-invocation.
-              hostOriginClaim: effectiveOriginClaim(parsedAtSubmit),
-              // §1C-6 (whole-PR F4): the LIVE Client registry claim.
-              tuiCommand: deps.command.clientClaimsLine(parsedAtSubmit)
-                || deps.command.isSkillWrapperName(parsedAtSubmit.name) === true,
-              extensionCommand: false,
-              skillInvocation: false,
-            }).kind === 'client-command',
+          isTuiOwnedCommand: isTuiOwnedCommandLine,
+          // F1: the ONE visible-owner fact for this invocation's result text.
+          // The Direct command plane paints the card; a Host command carries
+          // its own lifecycle rows; and the commands outside the B2-A notice
+          // scope publish their own refusal notices. Only a B2-A TUI-owned
+          // command executing through the card-less Client registry leaves the
+          // text unowned, and then the settlement must publish it.
+          commandResultHasVisibleOwner: () => directAgent !== undefined
+            || !isTuiOwnedCommandLine()
+            || parsedAtSubmit === undefined
+            || !TSP_B2A_RESULT_NOTICE_COMMANDS.has(parsedAtSubmit.name),
           commandPlaneOwnsLine,
           submittedHostClaim: () => parsedAtSubmit === undefined ? undefined : deps.command.hostOriginClaimOf(parsedAtSubmit),
           commandSignal: () => deps.signal,

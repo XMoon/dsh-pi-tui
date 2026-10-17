@@ -17,13 +17,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   clipboard policy) and add no panel or picker. Bare `/logout` (including a
   whitespace-only form) and the commands that still need PiTui chrome
   (`/settings`, `/help`, `/login`, `/attach`, `/export`, …) stay explicitly
-  refused with the draft restored. Each outcome has exactly ONE visible owner:
-  a `/title` or `/rename` success and refusal are carried by the Direct command
-  result card (the TSP Dock does not repeat them; the card-less Remote path and
-  PiTui keep their existing notices), while a confirmed `/yolo`,
-  `/logout <target>` or `/copy` success is supplemented on the TSP Dock and
-  their refused/cancelled/indeterminate outcomes keep their existing single
-  owner.
+  refused with the draft restored. Outcome presentation is per command: a
+  `/title` or `/rename` success and refusal are carried by the official command
+  result card on the TSP Direct mount (the Dock does not repeat them; PiTui
+  keeps its existing notice and the card-less Remote path is reported once by
+  the submission settlement), while a confirmed `/yolo`, `/logout <target>` or
+  `/copy` success is supplemented on the TSP Dock and a
+  refused/cancelled/indeterminate outcome keeps its existing single owner (the
+  Direct card or the submission settlement).
 
 - Task Quick now appends a distinct `➜ Open Task Center…` navigation row after
   real tasks when the Full Task Center is available. It shares selection and
