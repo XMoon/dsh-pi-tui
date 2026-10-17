@@ -252,12 +252,14 @@ reinterpret:
      `RemoteSessionOwnerServices.flush()` is therefore a documented no-op —
      there is no public Remote durable-flush verb — so an accepted write may
      become durable AFTER the Client transport is disposed. What teardown does
-     guarantee (no render after the surface stopped, exactly one transport
-     disposal, the accepted write still reaching its authoritative row) is
-     pinned in `test/runner-remote-races.test.ts`. S3 must DECIDE whether a
-     still-parked write is refused at teardown or the drain must await the
-     Host's durable commit, and prove it with paired L5/L6 success/failure
-     tests — not a timeout, poll or fabricated flush.
+     guarantee is only the SURFACE boundary, pinned in
+     `test/runner-remote-races.test.ts`: the surface stops, a writer parked at
+     teardown settles between the stop and the disposal, and the selected
+     transport disposes exactly once — with no terminal write after the stop.
+     Whether a write still parked at teardown must be REFUSED or the drain must
+     await the Host's durable commit is deliberately NOT decided and NOT
+     asserted here: S3 owns that ruling and must prove it with paired L5/L6
+     success/failure tests — not a timeout, poll or fabricated flush.
   2. **Reconnect transcript currentness — CONFIRMED production-reachable
      race (BLOCKER, owner: S3 / C11–C12–C18).** After
      `connection.reconnect()`, the new generation's authoritative window can
@@ -303,11 +305,16 @@ reinterpret:
      `catalog applied … source=invalidation` report followed the submit). The
      test now waits for the product's own apply report before submitting, and
      the end-to-end path (generation subscription → refresh → install →
-     classification → real Host handler) is green. Recorded, NOT fixed here:
-     a submission classified inside that read→apply window is routed against
-     the previous claims; whether the command plane must serialize a
-     submission behind an in-flight catalog install is a command-plane
-     (PR4/S4) decision, not S1's.
+     classification → real Host handler) is green.
+     **NEEDS-DECISION (Owner handoff, not a fix):** the read→apply window
+     itself is unchanged PRODUCT BEHAVIOUR — a submission classified inside it
+     is routed against the previous claims (and a same-named Client-context
+     definition can claim the line). Whether the command plane must serialize a
+     submission behind an in-flight catalog install, or whether the last-good
+     claim rule already covers it, belongs to the command-plane stage (PR4/S4);
+     this PR only re-witnesses the test's readiness and records the window. The
+     handoff needs the Owner's explicit acceptance before it counts as
+     dispositioned.
 
 Evidence: the `PEER` block in `test/remote-client-runtime.test.ts` (owner identity
 observed inside the real Gateway on the stream path, the same object on the Fetch
