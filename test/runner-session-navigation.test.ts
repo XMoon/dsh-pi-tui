@@ -25,6 +25,7 @@ import {
 import { installProbe, liveAgentOf, modelEvent } from './support/runner-session-fixtures.ts'
 import { testLifecycle } from './support/temp-lifecycle.ts'
 import type { TspPane, TspWireFrame } from './support/tsp-terminal-fixture.ts'
+import { wireNodes } from './support/tsp-picker-wire.ts'
 import { ownTspBoot, waitUntil, type OwnedTspRunner } from './support/tsp-runner-harness.ts'
 
 process.env.NO_COLOR = ''
@@ -106,6 +107,49 @@ test('/fork inherits the Host-chosen completed prefix including the trailing sou
     'a Direct fork adoption must not open/resume the child a second time')
   assert.deepEqual(harness.resumeSessionIds, [source.id],
     'only the startup resume ran; the fork child was adopted through its owned handle')
+})
+
+test('/fork announces the adopted child once, after the child hydration', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-fork-notice-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const probe = installProbe()
+  life.defer(probe.restore)
+  let context: Context | undefined
+  let fiber: { dispose: () => Promise<unknown> } | undefined
+  life.defer(() => { if (context !== undefined) return disposeContext(context) })
+  life.defer(() => { if (fiber !== undefined) return fiber.dispose() })
+
+  const source = fakeSession({
+    id: 'fork-notice-source',
+    header: { id: 'fork-notice-source', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('source answer'),
+  })
+  const harness = makeHarness(home, source, { provider: 'global', model: 'fallback', reasoningEffort: 'low' })
+  context = new Context()
+  fiber = await mountRunner(context, home, harness, { sessionId: source.id }, { sessionId: source.id })
+  const forkHandler = (harness.commands as { handler(name: string): ((...args: never[]) => unknown) | undefined }).handler('fork')
+  assert.ok(forkHandler, 'the real runner must register /fork')
+  const hydrationsBeforeFork = probe.transcriptHydrateCount
+
+  await forkHandler()
+  await settle()
+
+  assert.equal(harness.createdSessions.length, 1, '/fork creates one child')
+  const noticeIndex = probe.notices.indexOf('info:Forked to a new session')
+  assert.notEqual(noticeIndex, -1, `the adopted child must be announced: ${probe.notices.join(', ')}`)
+  assert.equal(probe.notices.filter(entry => entry === 'info:Forked to a new session').length, 1,
+    `exactly one success notice: ${probe.notices.join(', ')}`)
+  // The child's hydration (whose tail calls `resetSessionFacts()` →
+  // `clearNotify`) must have completed BEFORE the notice was emitted, or the
+  // new session's own repaint would have wiped it.
+  assert.ok(probe.noticeHydrateCounts[noticeIndex]! > hydrationsBeforeFork,
+    `the success notice must follow the child hydration: ${JSON.stringify(probe.noticeHydrateCounts)}`)
 })
 
 test('/fork leaves the source Session attached until the executor appends command/done', async (t) => {
@@ -334,6 +378,8 @@ test('a rewind-picker fork awaits source retirement before its handoff completes
   }
   assert.ok(probe.notices.some(notice => notice.includes('rewound to turn')),
     `the picker fork must still report success: ${probe.notices.join(', ')}`)
+  assert.ok(!probe.notices.some(notice => notice.includes('Forked to a new session')),
+    `the rewind picker fork must not emit the /fork success notice: ${probe.notices.join(', ')}`)
   assert.equal(harness.retirementEvents.filter(entry => entry === `dispose:${source.id}`).length, 1,
     'the source owner must be retired exactly once')
 })
@@ -557,6 +603,12 @@ test('/fork navigation supersession parks a Direct child for later claim', async
   const child = harness.createdSessions[0]
   assert.ok(child, 'the pending fork must still publish its child')
   assert.equal(harness.createdSessions.length, 1)
+  // A superseded/parked child never became the visible navigation: the fork
+  // returned `success` but must NOT announce itself as adopted. The assertion
+  // is cumulative over every notify of this test, so it also proves the two
+  // real `/resume` navigations never emitted the /fork notice.
+  assert.ok(!probe.notices.some(notice => notice.includes('Forked to a new session')),
+    `a superseded fork must not announce itself: ${probe.notices.join(', ')}`)
 
   const resumesBeforeClaim = harness.resumeSignals.length
   await resume({ rawInput: child.id })
@@ -1644,6 +1696,14 @@ function attentionLineLive(frames: readonly TspWireFrame[]): boolean {
   return live
 }
 
+/** The live dock-notice texts of the pane's CURRENT frame (wire-read, not
+ *  renderer state: a notice the next hydrate cleared is gone from the fold). */
+function liveDockNotices(pane: TspPane): string[] {
+  return wireNodes(pane)
+    .filter(node => node.id.startsWith('dock.notice-'))
+    .map(node => String(node.p.text ?? ''))
+}
+
 /** The Session ids whose welcome card the renderer has presented, in order. */
 function presentedSessions(pane: TspPane): string[] {
   const presented: string[] = []
@@ -1729,6 +1789,9 @@ test('B3 finding C (1): the real /new quiesce parks on a LIVE Question — A kee
     await waitUntil('B publication', () => presentedSessions(owned.pane).at(-1) === sessionB, 15_000)
     assert.ok(harness.retirementEvents.includes(`cancel:${sessionA.id}`), 'the committed switch cancels A')
     assert.ok(harness.retirementEvents.includes(`dispose:${sessionA.id}`), 'the committed switch disposes A')
+    // F-UX-06 control: a real /new transition never announces a fork.
+    assert.ok(!liveDockNotices(owned.pane).includes('Forked to a new session'),
+      'a /new transition must not emit the /fork success notice')
   } finally {
     await owned.settle()
   }
@@ -1786,6 +1849,17 @@ test('B3 finding C (2): the real /fork publication withdraws A\'s live modal whi
     // The REAL post-`command/done` source retirement ends the request as the
     // official Host abort — exactly once, never a user cancel.
     await fork
+    // The /fork success notice rides the EXISTING dock notice sink on the SAME
+    // renderer-neutral `notify` call the PiTui branch uses — no new TSP node,
+    // frame owner or timer. It is read from the wire, so a notice the child's
+    // own hydration had cleared could not satisfy this.
+    await waitUntil('the fork success notice on the dock',
+      () => liveDockNotices(owned.pane).includes('Forked to a new session'), 15_000)
+    // …and it is still there once B's own frames settle: the child's hydration
+    // ran BEFORE the notice, so nothing in the adoption repaints it away.
+    await settle()
+    assert.ok(liveDockNotices(owned.pane).includes('Forked to a new session'),
+      'the notice must survive B\'s own frames, not be wiped by a later hydration')
     await waitUntil('A retirement', () => harness.retirementEvents.includes(`dispose:${sessionA.id}`), 15_000)
     assert.equal(cancels, 1, 'the replaced owner is cancelled exactly once by the real retirement')
     assert.equal(requestOutcome, undefined, 'the held cancellation has not completed yet, so the request still stands')

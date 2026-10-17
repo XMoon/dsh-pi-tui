@@ -1562,6 +1562,10 @@ export function applyRunnerWithRuntime(
         withWriter: (scope, task) => sessionRuntime.withWriter(scope, task),
         switchSession: (sessionId, expectedScope) => sessionRuntime.switchSession(sessionId, expectedScope),
         forkSession: (sourceSessionId) => sessionRuntime.forkSession(sourceSessionId),
+        // The `/fork` success notice's currentness fence: the command surface
+        // reads the SAME navigation authority the fork adopted against, never a
+        // second epoch counter.
+        isNavigationCurrent: (expected) => sessionRuntime.isNavigationCurrent(expected),
         transitionTo: (steps) => sessionRuntime.transitionTo(steps),
       },
       status: {

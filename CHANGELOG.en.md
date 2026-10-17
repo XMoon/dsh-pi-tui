@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- A `/fork` that really switches to the new child session now shows one
+  `Forked to a new session` info notice (PiTui reuses its existing notice area,
+  TSP reuses its existing Dock notice), so it is unambiguous that you are now in
+  the new session. The notice appears exactly once, and only while the child was
+  actually adopted and that navigation is still in effect; a failed fork, a
+  merely parked child or a superseded navigation shows nothing, and the existing
+  `/rewind`, `/new` and `/resume` feedback is unchanged.
+
 - The experimental TSP renderer can now run the "no new UI" basic commands:
   `/new`, `/fork`, `/title` (with its `/rename` alias), `/copy`, `/yolo` and
   `/logout <target>` with an explicit target. They keep the existing command
