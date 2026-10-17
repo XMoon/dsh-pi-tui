@@ -146,9 +146,12 @@ unchanged owner's subject:
 - A07 `refused`/`superseded`/`indeterminate`: the unchanged handler's branch
   mapping (source-shape guards) with no behavioural Direct witness; no synthetic
   permission writer was injected to manufacture one.
-- A06 both-legs-fail on macOS/Windows: skipped (the shared policy attempts the
-  native helper unconditionally there, so the case cannot be made deterministic
-  without touching a real clipboard).
+- The A06 cases that drive the REAL copy policy (the OSC 52 emission and the
+  both-legs-fail fault) are skipped on macOS/Windows: the shared policy attempts
+  the native helper unconditionally there, so the e2e cannot keep the gesture
+  off a developer's real clipboard. On POSIX both cases clear
+  `TMUX`/`DISPLAY`/`WAYLAND_DISPLAY` for the gesture (restored after), so only
+  the terminal-client leg is exercised.
 - A09 flow-route logout: no flow provider exists in this environment.
 - A19 OS clipboard / physical GUI / Remote TSP: not observable or not
   qualified here, as recorded above and in the B1 evidence.
