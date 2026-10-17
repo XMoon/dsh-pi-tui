@@ -809,6 +809,14 @@ export type HostCommandClaim =
  * @param catalogSeams - the narrow Direct catalog seams (the composition root
  *   adapts the Direct Host global-layer read into detached summaries); absent
  *   on the Remote branch, whose `commandRegistry` is undefined.
+ * @param modelPresentation - the mounted native Model presenter, if any.
+ * @param presetPresentation - the mounted native Preset presenter, if any.
+ * @param notice - the renderer-neutral notice sink (`CommandSurfaceDeps.notify`).
+ *   PR4-B2-A: the TSP renderer presents no PiTui command card, so the B2-A
+ *   handlers surface a confirmed SUCCESS through the CURRENT surface's own
+ *   notice sink. The sink is passed ONLY to the B2-A registrars; no public
+ *   `TuiCommandRunner` member and no second notice owner is introduced. Absent
+ *   (tests/legacy calls) it degrades to the PiTui `app.notify` route.
  */
 export interface CommandCatalogSeams {
   /** The Direct Host global-layer command summaries (already detached). Absent
@@ -822,6 +830,7 @@ export function registerTuiCommands(
   catalogSeams: CommandCatalogSeams = {},
   modelPresentation?: ModelPresentation,
   presetPresentation?: PresetPresentation,
+  notice?: (text: string, kind?: 'info' | 'error') => void,
 ): {
   /** Per-name registration failures (a Host-claimed name degraded loudly;
    *  later registrations still installed). */
@@ -1511,6 +1520,34 @@ export function registerTuiCommands(
   // exact historical position. Do not reorder by module grouping: the
   // synchronous `commands/change` effects and the Direct compatibility mirror
   // depend on the sequence.
+  /**
+   * PR4-B2-A: the renderer-neutral notice entries the B2-A command handlers
+   * use.
+   *
+   * `notify` IS the existing surface notice sink (`CommandSurfaceDeps.notify`
+   * threaded in by the composition root): on PiTui it is the long-standing
+   * `app.notify` route, on the TSP renderer the current surface's own Dock. It
+   * REPLACES those handlers' direct `app.notify` calls, which would dereference
+   * a `TuiApp` that does not exist on a non-PiTui renderer.
+   *
+   * `notifyOutcome` adds the ONE missing feedback: a TSP renderer presents no
+   * PiTui command card, and the Remote Client-command registry appends no
+   * `command/run` row either, so a CONFIRMED SUCCESS would otherwise leave no
+   * visible line. Refusal/cancellation/indeterminate outcomes are deliberately
+   * NOT re-notified — they already have an owner (the Direct command card, the
+   * controller's local-command error notice, or the handler's own inline
+   * `notify`), and a second line would duplicate it. `runner.app === undefined`
+   * is the mounted-fact discriminator ("no PiTui presentation is installed") —
+   * never a Host/Remote backend decision. Where a PiTui app exists the command
+   * card (and the handler's own notice) already owns the feedback, so nothing
+   * is repeated.
+   */
+  const notify: (text: string, kind?: 'info' | 'error') => void =
+    notice ?? ((text, kind) => { app?.notify(text, kind) })
+  const notifyOutcome = (text: string, kind: 'info' | 'error' = 'info'): void => {
+    if (app !== undefined) return
+    notify(text, kind)
+  }
   registerExitCommand({ runner, registerTuiCommand })
 
   const settingsCommands = createSettingsCommands({
@@ -1536,6 +1573,8 @@ export function registerTuiCommands(
     detach,
     recordCommandDraftDisposition,
     newSessionId,
+    notify,
+    notifyOutcome,
   })
   sessionCommands.registerSessions()
 
@@ -2044,6 +2083,7 @@ export function registerTuiCommands(
   registerReloadCommand(skillsCommandDeps)
   const modelCommands = createModelCommands({
     runner, app: app as TuiApp, registerOne, recordCommandDraftDisposition,
+    notifyOutcome,
     ...(modelPresentation === undefined ? {} : { modelPresentation }),
     ...(presetPresentation === undefined ? {} : { presetPresentation }),
   })
@@ -2073,7 +2113,7 @@ export function registerTuiCommands(
 
   sessionCommands.registerTitle()
 
-  const artifactCommands = createArtifactsCommands({ runner, app: app as TuiApp, registerOne, registerTuiCommand, detach })
+  const artifactCommands = createArtifactsCommands({ runner, app: app as TuiApp, registerOne, registerTuiCommand, detach, notifyOutcome })
   artifactCommands.registerCopy()
 
 
@@ -2089,7 +2129,7 @@ export function registerTuiCommands(
 
   registerStatusCommand({ runner, registerOne })
 
-  const authCommands = createAuthCommands({ runner, app: app as TuiApp, registerOne })
+  const authCommands = createAuthCommands({ runner, app: app as TuiApp, registerOne, notifyOutcome })
   authCommands.registerLogin()
 
   authCommands.registerLogout()

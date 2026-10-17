@@ -682,6 +682,10 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
         { ...(deps.directCatalog === undefined ? {} : { listGlobalCommands: deps.directCatalog.listGlobalCommands }) },
         deps.modelPresentation?.(),
         deps.presetPresentation?.(),
+        // PR4-B2-A: the renderer-neutral notice entry the B2-A handlers surface
+        // a confirmed success through (the PiTui route and the TSP Dock are the
+        // same seam; see registerTuiCommands).
+        deps.notify,
       )
       // Per-name degradation notice (M3-4 PR2): a Host-claimed name (the
       // Remote Host composition mounts `/export` itself) fails only ITS own

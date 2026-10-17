@@ -9,29 +9,46 @@
  *
  * It is deliberately NOT a parser and NOT a routing authority:
  *
- * - it never inspects the raw line, never re-classifies, and never consults
+ * - it never RE-parses the line, never re-classifies, and never consults
  *   `hostClaimOf`/the display-completion union — the caller passes the
  *   AUTHORITATIVE winner (the existing classifier's `client-command` +
- *   `source: 'tui'` result) and the parsed name it selected;
+ *   `source: 'tui'` result), the parsed name it selected and that same parse's
+ *   `rawInput`. The raw input is read for its SHAPE alone (does this exact line
+ *   carry an explicit argument), never to reconstruct a command or a target;
  * - it does not decide whether a line IS a TUI builtin (the existing command
  *   authority owns that, so a genuine Host-origin command with the same
  *   spelling is never captured here);
  * - it holds no state and performs no IO.
  *
- * The unconditional set is the two exit builtins. Native Model, Preset and
- * Session Browser commands are admitted only when their mounted presenters
- * are available; every other TUI builtin is refused.
+ * The unconditional set is the exit pair plus the PR4-B2-A business builtins
+ * whose ENTIRE outcome is carried by the existing business owner (Session
+ * runtime, SessionWriter, permission writer, credential port, clipboard
+ * policy) and needs no PiTui pane. Native Model, Preset and Session Browser
+ * commands are admitted only when their mounted presenters are available;
+ * every other TUI builtin is refused. `/logout` is the ONE input-shaped
+ * member: only its explicit-target form is admitted (see the predicate).
  * @module @xmoon76/dsh-pi-tui/app/command/tsp-capability
  */
 
 import type { CommandLineClassification } from '../../domain/command/policy.ts'
 
 /**
- * The TUI builtins the TSP renderer can execute in PR3-B. `/quit` is
- * `/exit`'s canonical alias (the runner registers both); both route the
- * EXISTING exit orchestration, which needs no PiTui chrome.
+ * The TUI builtins the TSP renderer can execute without any PiTui chrome.
+ * `/quit` is `/exit`'s canonical alias (the runner registers both); both
+ * route the EXISTING exit orchestration.
+ *
+ * PR4-B2-A adds the builtins whose WHOLE closure is the existing business
+ * owner — `/new` and `/fork` (Session runtime), `/title` and `/rename` (the
+ * authoritative SessionWriter title write) and `/copy` (the existing
+ * Client-local Clipboard Policy) and `/yolo` (the official permission-preset
+ * writer). Membership here is NOT a routing authority: the caller has already
+ * established the authoritative TUI winner, and the handler it then reaches
+ * is the unchanged production one.
  */
-export const TSP_SUPPORTED_TUI_BUILTINS: ReadonlySet<string> = new Set(['exit', 'quit'])
+export const TSP_SUPPORTED_TUI_BUILTINS: ReadonlySet<string> = new Set([
+  'exit', 'quit',
+  'new', 'fork', 'title', 'rename', 'copy', 'yolo',
+])
 
 /**
  * Which native TUI builtin presenters the mounted renderer actually installed.
@@ -77,11 +94,20 @@ export type TspBuiltinAvailability =
  *   caller checks the family first — see the production consumer).
  * @param name - the parsed builtin name the classifier selected.
  * @param pickers - which native presenters the mounted renderer installed.
+ * @param rawInput - the SAME parsed line's `rawInput` (the text after the
+ *   command name). It is the INPUT SHAPE of one exact line, never a second
+ *   parse: the predicate only needs "does this line carry an explicit
+ *   argument" for `/logout`, and the target itself stays the handler's own
+ *   `resolveCredentialArg` business check. `/logout` is admitted ONLY in its
+ *   explicit-target form — the bare command opens the credential picker the
+ *   TSP renderer does not have, so it stays `unsupported` (draft restored,
+ *   zero credential mutation).
  */
 export function tspBuiltinAvailability(
   classification: CommandLineClassification,
   name: string,
-  pickers: TspBuiltinPickers = {},
+  pickers: TspBuiltinPickers,
+  rawInput: string,
 ): TspBuiltinAvailability {
   if (classification.kind !== 'client-command' || classification.source !== 'tui') {
     // Not a TUI builtin: a Host command, an extension contribution, a skill
@@ -89,8 +115,14 @@ export function tspBuiltinAvailability(
     // must branch on this kind — it is the family decision, made once here.
     return { kind: 'not-a-tui-builtin' }
   }
-  return TSP_SUPPORTED_TUI_BUILTINS.has(name)
-    || (name === 'model' && pickers.modelPicker === true)
+  if (TSP_SUPPORTED_TUI_BUILTINS.has(name)) return { kind: 'available' }
+  if (name === 'logout') {
+    // The ONE input-shaped member: `/logout <target>` runs the unchanged
+    // handler's own resolver; bare `/logout` (and whitespace-only) needs the
+    // credential picker and is refused BEFORE any credential read or mutation.
+    return rawInput.trim().length > 0 ? { kind: 'available' } : { kind: 'unsupported' }
+  }
+  return (name === 'model' && pickers.modelPicker === true)
     || (name === 'preset' && pickers.presetPicker === true)
     || ((name === 'sessions' || name === 'resume' || name === 'search') && pickers.sessionBrowser === true)
     ? { kind: 'available' }

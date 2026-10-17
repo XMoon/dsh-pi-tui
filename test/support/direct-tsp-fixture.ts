@@ -266,6 +266,20 @@ export interface DirectTspFixtureOptions {
     readonly definitionId?: string
     readonly handler: (invocation: { readonly rawInput: string }) => unknown
   }>
+  /**
+   * PR4-B2-A: mount the OFFICIAL service plugins the B2-A command closure
+   * needs, so `/title`, `/yolo` and `/logout <flow-route>` reach their REAL
+   * authority instead of a stand-in. Each flag mounts the same plugin the
+   * shipped bundle composes; nothing is re-implemented here.
+   */
+  readonly officialServices?: {
+    /** `dsh-session-title` (the authoritative title write + refresh). */
+    readonly sessionTitle?: boolean
+    /** `dsh-permission-presets` + its approval/shell/turn-outline prerequisites. */
+    readonly permissionPresets?: boolean
+    /** `dsh-authorization` (the provider sign-in flow targets). */
+    readonly authorization?: boolean
+  }
 }
 
 export interface DirectTspExternalFixture extends Omit<DirectTspFixture, 'pane'> {}
@@ -506,6 +520,35 @@ export async function createDirectTspFixture(
       await handle.flush()
       await handle.close()
     }
+  }
+  const officialServices = options.officialServices ?? {}
+  if (officialServices.sessionTitle === true) {
+    // The authoritative session-title service the Direct SessionWriter's
+    // rename/refresh paths require (absent = "renaming is unavailable"). The
+    // config is the shipped bundle's own (bundle/base cordis.patch.yml).
+    const { default: SessionTitleService } = await import('@deepseek-ai/dsh-session-title')
+    await ctx.plugin(SessionTitleService as never, {
+      fallbackMaxWords: 5,
+      fallbackMaxBytes: 40,
+      maxTitleBytes: 80,
+    } as never)
+  }
+  if (officialServices.permissionPresets === true) {
+    // The official preset table + the `/permission` command, over the same
+    // approval/shell/turn-outline prerequisites `runner-remote-permission` uses.
+    ctx.provide('shell', { sandboxMode: 'workspace-write' } as never)
+    const approval = await import('@deepseek-ai/dsh-user-approval')
+    await ctx.plugin((approval as unknown as { default: unknown }).default as never, undefined as never)
+    const turnOutline = await import('@deepseek-ai/dsh-session-turn-outline')
+    await ctx.plugin(turnOutline as never, undefined as never)
+    const { PermissionPresetService } = await import('@deepseek-ai/dsh-permission-presets')
+    await ctx.plugin(PermissionPresetService as never, undefined as never)
+  }
+  if (officialServices.authorization === true) {
+    // The provider sign-in flow targets `/logout <flow-route>` resolves
+    // through (`flowForRoute`), and whose keyless login stores a RECORD.
+    const { default: AuthorizationService } = await import('@deepseek-ai/dsh-authorization')
+    await ctx.plugin(AuthorizationService as never, undefined as never)
   }
   const runnerFiber = await ctx.plugin(pluginCtx => applyRunner(
     pluginCtx,

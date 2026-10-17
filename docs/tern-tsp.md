@@ -268,6 +268,46 @@ island (the SDK import stays lazy).
 TSP is still opt-in (`DSH_PI_TUI_RENDERER=tsp`) and experimental; Direct and PiTui remain
 the defaults, and the capability matrix above is the authoritative status table.
 
+### PR4-B2-A — headless basic commands
+
+The PR4-0 audit and B1 left the TUI builtins whose implementation is a PiTui
+panel/picker refused on the TSP renderer. PR4-B2-A admits the subset whose WHOLE
+closure is an already-existing business owner, with **no new UI of any kind**:
+`/new` and `/fork` (the Session runtime), `/title` and its `/rename` alias (the
+authoritative `SessionWriter` title write), `/copy` (the shared Client-local
+Clipboard Policy) and `/yolo` (the official permission-preset writer), plus
+`/logout` in its **explicit-target form only** — the bare command still needs
+the credential picker and stays refused.
+
+Nothing about the routing changed: the same authoritative classifier selects the
+winner, the same post-classification `tspBuiltinAvailability` predicate answers
+"can the mounted renderer run it", and the same registered handler then reaches
+its real authority. The predicate gained ONE input: the parsed line's
+`rawInput`, used solely to distinguish `/logout <target>` from bare `/logout`.
+Every other builtin (`/settings`, `/help`, `/status`, `/login`, `/attach`,
+`/export`, …) is refused exactly as before, with the draft restored and no side
+effect.
+
+Because the TSP renderer paints no PiTui command card (and the Remote
+Client-command registry appends no `command/run` row either), a confirmed
+SUCCESS of those commands would otherwise be invisible. The B2-A handlers
+therefore surface a confirmed success through the EXISTING renderer-neutral
+notice sink (`CommandSurfaceDeps.notify`, threaded into the B2-A registrars
+only). Refusal, cancellation and indeterminate outcomes are deliberately NOT
+re-notified: they already have an owner (the Direct command card, the
+controller's own local-command error notice, or the handler's inline notice),
+and a second line would duplicate it on the same Dock. `TuiApp`-backed
+renderers keep their long-standing command card and notice and receive no
+duplicate line; no public runner member and no second notice owner is
+introduced. `runner.app === undefined` is the "no PiTui presentation is
+mounted" discriminator used for that supplement, never a Host/Remote decision.
+
+`/copy` keeps the unchanged two-leg policy and is qualified only as
+`OSC52_EMITTED`; the OS-clipboard dimension is `NOT_VERIFIED` in this
+environment and the plan's `STOP_COPY_QUALIFICATION` is reported to the Owner.
+See [PR4-B2-A evidence](./tern-tsp/evidence/pr4-b2-a.md) for the per-command
+result tier, the real-Tern channel-integrity run and the exact gaps.
+
 ### Why the renderer used to be undecided
 
 PiTui claims the process TTY at mount, so rendering the same Session through a TSP pane
@@ -331,6 +371,7 @@ composition root (table above); the caution is kept here because it is why no se
 | Model/effort selection inside TSP | PR4-A implementation + Model-UX restructuring + Model-Responsive/Reader revision + the **list-first** revision and its strip/Reader follow-up: Owner-frozen native **Models → Full details** flow (TWO pages) over the original handler (ONE native catalogue picker of the client's `md` dialog size at every pane width, with provider marks, real lowercase `current` / `default` state chips and a `Current · Default` group first; the catalogue's own native Reasoning Effort `strip` as the ONE effort editor, painting the local draft as the client's `on` chip; the ONE explicit `Switch` / `Save default` write in the footer everywhere; `select` highlights while `activate`/`Enter` opens that model's read-only Full details DIRECTLY — there is no intermediate Overview page; K2 keyboard; one read owner with Retry); `picker`/`row`/`overlay` required (`strip` is a Picker prop/region), and the read-only details page is a native `overlay` Reader instead of a picker. The catalogue Picker and its layer keep one identity for a panel's life; the Reader body/Back have **one identity per reading** (fresh epoch on re-entry). A per-frame Picker key remounted the list and moved its viewport in the tested 42-row client probe. The bar's `retry`/`apply` IDs are revision-scoped; `close` is intentionally untokened, while Row/Strip events receive current-page/current-model validation. This is a Model-specific admission and lifecycle design, not a universal stable-key rule. Automated coverage includes live Agent selection, isolated profile persistence/restart and the full K2/wire matrix; the surface was additionally driven in a real Tern pane (the presenter's own `size`/`preview` claim against the client's own sheet classes at every supported size, the strip's own phase gate and chip clamp, real `select`/`activate`, sheet/footer containment, the one write, and the Reader's complete values with its app-driven native scroll and `Back`) by the repository's real-pane harness (`scripts/tern-pane-model-ux.mjs`, reproducible), with the enlarged-font matrix and physical wheel/trackpad recorded as NOT_VERIFIED. [Model selection](./tern-tsp/model-selection.md) · [List-first visual evidence](./tern-tsp/evidence/model-list-first-visual-20261013.md) |
 
 | Search/Reveal/Focus parity inside TSP | PLANNED (PR4–PR5) |
+| Basic headless commands (`/new`, `/fork`, `/title`+`/rename`, `/copy`, `/yolo`, `/logout <target>`) | IMPLEMENTED (PR4-B2-A) over the unchanged handlers and the same capability gate, with confirmed outcomes surfaced through the renderer-neutral notice sink. `/copy` is qualified `OSC52_EMITTED` only; the OS-clipboard qualifier is `NOT_VERIFIED` (`STOP_COPY_QUALIFICATION` reported to the Owner). Everything else stays refused — [evidence](./tern-tsp/evidence/pr4-b2-a.md) |
 | ExtensionView / custom renderers over TSP | PLANNED (policy undefined) |
 | SSH, tmux, screen, zellij, `TERN_TSP=0` | Unsupported by the SDK (`connect()` declines) |
 | Remote generated wire (L5) / full product (L6) over TSP | NOT CLAIMED |
@@ -457,6 +498,7 @@ qualification gaps.
 | PR4-A Preset | IMPLEMENTED (owner-frozen v4 UX); qualification partial | Original `/preset` handler plus one native presenter implementing the TWO-page shape: a `layout:'cards'` catalogue with `Built-in`/`Custom` groups, counts and real state badges whose native footer carries the THREE business buttons (`Close`; `Set default` + `Use next`/`Use session` as `primary` — the Owner shape; disabled entries grey with the reason as tooltip, per Owner ruling "a"), and a read-only `lg` Details page carrying the complete identity/scope facts, the full description/failure reason and a shipped preset's pinned official English Mode guide INLINE, with the native `ui.row({onClick})` Back NAVIGATION row (Owner A4 amendment: the measured client drops stylesheet border/background on `el` buttons, so the styled button and its sheet were retired); per-panel picker identity and per-reading overlay/body identity with a real `scroll` target; the same settings writer behind the footer button and the typed verb; regression tests cover the two-page keyboard contract (the footer's arrow ring, the error-phase Esc ladder), the settlement matrix, the stale/forged receivers, the per-kind capability negatives and the real Direct registry/handler path; the default write persists through the real ConfigEditor/Loader document and survives a fresh-Context reload; real-Tern headless runs (Tern `0.8.3`) cover 1280x800, 900x640, 560x640 and the 400x600 minimum — the ONE-column 54px cards, the PAINTED Owner footer shape, real `select`/`activate`, the Back navigation row's real click path, the inline guide's official copy and its real client scroll to the tail, and the long-value wrapping | Remote TSP preset success, the shipped full profile/HMR and physical GUI/IME/focus are NOT certified (`GUI_BLOCKED` / `NOT_VERIFIED`) | [Preset selection](./tern-tsp/preset-selection.md) · [Preset v4 evidence](./tern-tsp/evidence/preset-v4-two-page-20261014.md) · [PR4-A Preset evidence](./tern-tsp/evidence/pr4-a-preset.md) |
 | PR4-B1-A Session Browser | IMPLEMENTED as an internal read-only path; qualification is `REAL_TERN_HEADLESS` only | `SessionReader` list/projection/search through one native Presenter; workspace Tree/global Cards/Details, lifecycle and Direct persisted-main-Session coverage; Tern 0.8.3 headless at 1280×800, 900×640, 560×640, 400×600 and the 400×440 Reader case | No production command or real Session switch; Owner accepted the current Headless screenshots, including the focused-footer/V13 frame; `REAL_TERN_GUI`, GUI/physical V13 sign-off, physical IME/wheel/theme and physical PageUp/PageDown remain `NOT_VERIFIED`; Remote TSP remains `UNKNOWN`; B1-B owns command admission and Resume | [Session Browser contract](./tern-tsp/session-browser.md) · [PR4-B1-A evidence](./tern-tsp/evidence/pr4-b1-a.md) |
 | PR4-B1-B Session Browser commands and Resume | IMPLEMENTED; qualification partial | Registered command admission, one-list typed matching, Direct Host content search, Footer/Enter/activate and guarded switch; Direct authoritative reread plus real-Tern headless presentation | Physical G8, GUI/IME/wheel/theme and Remote command-catalogue qualification remain unverified; Remote Resume remains UNKNOWN | [Session Browser contract](./tern-tsp/session-browser.md) · [PR4-B1-B evidence](./tern-tsp/evidence/pr4-b1-b.md) |
+| PR4-B2-A headless basic commands | IMPLEMENTED; qualification partial | `/new`, `/fork`, `/title`+`/rename`, `/copy`, `/yolo` and `/logout <target>` admitted through the ONE existing gate/handlers; confirmed outcomes visible on the Tern dock; each command's real authority reread (persisted Session, fork lineage, folded title, approval policy, credential read); genuine Host same-name winners untouched; real-Tern headless run proves the OSC 52 bytes reach the tty without breaking frame/ACK/input/close | A09 (flow-route logout) `NOT_VERIFIED` — no flow provider installed, so `/logout` is qualified for the **reference case** only, reported to the Owner; `/copy` OS-clipboard qualifier `NOT_VERIFIED` (`STOP_COPY_QUALIFICATION`); physical GUI/IME/Remote TSP unchanged | [PR4-B2-A evidence](./tern-tsp/evidence/pr4-b2-a.md) |
 | PR4+ (feature work) | PLANNED | UI/panel/clipboard parity, exit-confirmation window, native editor chords — scoped by the PR4-0 proposal once the owner freezes the split | — | [./tern-tsp/evidence/pr4-0.md](./tern-tsp/evidence/pr4-0.md) |
 
 ## Next decisions
