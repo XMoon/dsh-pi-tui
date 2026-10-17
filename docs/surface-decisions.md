@@ -2896,15 +2896,19 @@ shown as `[interrupted]` / `N interrupted` while its Job was still running).
 - **Old assumption (replaced).** The previous projection reused the upstream
   Web `locationClosed(step/turn)` rule: a run with no terminal fact whose
   owning Step or Turn had closed was synthesized as `interrupted`, and members
-  registering after that close were "interrupted from birth". That rule is
-  valid only for a front-only run whose disposal is tied to the tool-step; it
-  contradicts the DSH `dsh-v0.2.0-rc.2` / `dsh-v0.2.1-rc.1`
-  `@deepseek-ai/dsh-tool-workflow` contract, where `run-start` carries no
-  foreground/background mode, `run_in_background` is an independent Job, and
-  the run may outlive both `step/end` and `turn/end`. Only `agent-end`
-  (`runId` + `seq`) and `run-end` (`runId` + `stopReason`) settle Workflow
-  state; `tool/call` parameters, `tool/result` prose, names, labels and
-  adjacent events are not evidence.
+  registering after that close were "interrupted from birth". That rule is NOT
+  valid for this durable contract, in either execution mode: `run-start`
+  carries no foreground/background mode, `run_in_background` is an independent
+  Job, the run may outlive both `step/end` and `turn/end`, and a legitimate
+  foreground log prefix may also be missing its terminal event when a recorder
+  write fails. A missing terminal fact is therefore never evidence that the run
+  stopped. Only `agent-end` (`runId` + `seq`) and `run-end` (`runId` +
+  `stopReason`) settle Workflow state; `tool/call` parameters, `tool/result`
+  prose, names, labels and adjacent events are not evidence. The contract was
+  checked against `@deepseek-ai/dsh-tool-workflow` in `dsh-v0.2.0-rc.2`
+  (`639ed015397290b3745d163aafe02ffee4aa3f84`) and `dsh-v0.2.1-rc.1`
+  (`1600d8a1e140dcde43a1a0941940a0480712c011`); this change keeps the
+  repository's rc.2 pin.
 - **New contract.** `run-start` creates an OPEN record whose status is
   `running`; only the matching `run-end` changes it to `completed` /
   `cancelled` / `failed` (`error` maps to `failed`). `agent-start` creates a
