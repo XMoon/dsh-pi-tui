@@ -1,6 +1,6 @@
 /**
  * Headless tests for the startup compatibility notice: on a DeepSeek Harness
- * older than the published npm floor (dsh-v0.2.0-rc.2) the TUI prints
+ * older than the published npm floor (dsh-v0.2.1-rc.2) the TUI prints
  * npm-aware upgrade guidance when it can prove the version, but does not make
  * concurrent Loader ordering a hard startup contract. The recommended published
  * upgrade target (and its native install scripts) follows the shared compat
@@ -67,8 +67,13 @@ test('harnessCompatEntryFor selects the range whose inclusive min the version re
   assert.equal(harnessCompatEntryFor('0.1.1-rc.1')?.min, '0.1.1-rc.1')
   assert.equal(harnessCompatEntryFor('0.1.2-alpha.1')?.min, '0.1.2-alpha.1')
   assert.equal(harnessCompatEntryFor('0.1.3-alpha.1')?.min, '0.1.3-alpha.1')
-  assert.equal(harnessCompatEntryFor('0.2.0-rc.2'), undefined, 'the current supported line has no incompatible entry')
-  assert.equal(harnessCompatEntryFor('0.2.0'), undefined)
+  assert.equal(harnessCompatEntryFor('0.2.1-rc.2'), undefined, 'the current supported line has no incompatible entry')
+  assert.equal(harnessCompatEntryFor('0.2.1'), undefined)
+  // 0.2.1-rc.1 is deliberately unsupported (the matrix carries it without a
+  // TUI) and the previous 0.2.0-rc.2 family is below the current floor.
+  assert.equal(harnessCompatEntryFor('0.2.1-rc.1')?.fallbackTui, undefined)
+  assert.equal(harnessCompatEntryFor('0.2.0-rc.2')?.fallbackTui, '0.5.2-rc.1',
+    'the previous family notices its recorded (reserved) TUI pairing')
 })
 
 test('harnessCompatEntryFor compares prerelease identifiers the semver way', () => {
@@ -107,9 +112,9 @@ test('an older harness gets actionable npm upgrade guidance without a hard Loade
   }
 })
 
-test('the published 0.2.0-rc.2 harness version starts normally and provides the service', (t) => {
+test('the published 0.2.1-rc.2 harness version starts normally and provides the service', (t) => {
   const life = testLifecycle(t)
-  const launcher = fakeLauncher(life, '0.2.0-rc.2')
+  const launcher = fakeLauncher(life, '0.2.1-rc.2')
   const stderr = captureStderr()
   try {
     const ctx = mountStartup(['--session', 's1'])
@@ -122,7 +127,49 @@ test('the published 0.2.0-rc.2 harness version starts normally and provides the 
   }
 })
 
-test('an older alpha.1 line is rejected by the 0.2.0-rc.2 npm gate', (t) => {
+test('the previous 0.2.0-rc.2 family is below the floor and gets the fallback notice', (t) => {
+  const life = testLifecycle(t)
+  const launcher = fakeLauncher(life, '0.2.0-rc.2')
+  const stderr = captureStderr()
+  try {
+    const ctx = mountStartup(['--session', 's1'])
+    assert.ok(ctx.get(TUI_STARTUP_SERVICE) !== undefined, 'the advisory notice must not block mounting')
+    const joined = stderr.lines.join('')
+    assert.ok(joined.includes(EXPECTED_REQUIREMENT), `stderr must name the new floor:\n${joined}`)
+    assert.ok(joined.includes(EXPECTED_UPGRADE), `stderr must give the exact npm upgrade:\n${joined}`)
+    assert.ok(joined.includes('@xmoon76/dsh-pi-tui@0.5.2-rc.1'),
+      `stderr must name the recorded pairing for that family:\n${joined}`)
+  } finally {
+    stderr.restore()
+    launcher.restore()
+  }
+})
+
+test('the intermediate 0.2.1-rc.1 release is REFUSED at runtime with no TUI pairing', (t) => {
+  // The runtime gate, not just the peer range / matrix: a real launcher on the
+  // intermediate rc.1 release must be told to upgrade and must NOT be offered a
+  // TUI line (the compatibility matrix records that version without a `tui`).
+  const life = testLifecycle(t)
+  const launcher = fakeLauncher(life, '0.2.1-rc.1')
+  const stderr = captureStderr()
+  try {
+    const ctx = mountStartup(['--session', 's1'])
+    assert.ok(ctx.get(TUI_STARTUP_SERVICE) !== undefined, 'the advisory notice must not block mounting')
+    const joined = stderr.lines.join('')
+    assert.ok(joined.includes('running dsh 0.2.1-rc.1'), `stderr must name the installed version:\n${joined}`)
+    assert.ok(joined.includes(EXPECTED_REQUIREMENT), `stderr must name the 0.2.1-rc.2 floor:\n${joined}`)
+    assert.ok(joined.includes(EXPECTED_UPGRADE), `stderr must give the exact npm upgrade:\n${joined}`)
+    assert.doesNotMatch(joined, /compatible TUI line/u,
+      `0.2.1-rc.1 has no paired TUI: no fallback line may be advertised:\n${joined}`)
+    assert.doesNotMatch(joined, /@xmoon76\/dsh-pi-tui@0\.5\.\d/u,
+      `the unsupported rc.1 release must never be told to install a 0.5.x TUI:\n${joined}`)
+  } finally {
+    stderr.restore()
+    launcher.restore()
+  }
+})
+
+test('an older alpha.1 line is rejected by the 0.2.1-rc.2 npm gate', (t) => {
   const life = testLifecycle(t)
   // The npm minimum is >=0.2.0-rc.2; this older alpha line is below the
   // floor and must be refused with the exact npm upgrade.
@@ -183,7 +230,7 @@ test('the previous alpha.4/alpha.5 line is rejected by the 0.2.0-rc.2 npm gate',
 })
 
 test('the published floor and future stable lines start normally', (t) => {
-  for (const version of ['0.2.0-rc.2', '0.2.0']) {
+  for (const version of ['0.2.1-rc.2', '0.2.1', '0.2.2']) {
     const life = testLifecycle(t)
     const launcher = fakeLauncher(life, version)
     try {
@@ -333,13 +380,11 @@ test('DSH peer ranges keep the lower-bound compatibility contract', () => {
     .find(([name]) => name.startsWith('@deepseek-ai/dsh'))?.[1]
   const expectedNpmTarget = process.env.DSH_NPM_VERIFY_TARGET ?? expectedDevVersion
   assert.ok(dshPeers.length > 0, 'the bundle must declare DSH peers')
-  // The M3-3B closure lifted the whole peer policy onto the rc.2 floor:
-  // the Question lifecycle consumes rc.2-only published contracts
-  // (`userQuestions.attachWait`/`answer` + the `userQuestions` Session
-  // projection), so claiming the rc.1 family would be a false
-  // compatibility statement.
+  // The 0.5.3 candidate lifts the whole peer policy onto the 0.2.1-rc.2
+  // floor (the exact family it targets); the intermediate 0.2.1-rc.1 release
+  // is deliberately not supported.
   for (const [name, range] of dshPeers) {
-    assert.equal(range, '>=0.2.0-rc.2', `${name} must use the published-npm DSH compatibility contract`)
+    assert.equal(range, '>=0.2.1-rc.2', `${name} must use the published-npm DSH compatibility contract`)
     assert.ok(!range.includes('0.1.1'), `${name} must not claim DSH 0.1.1`)
   }
   assert.equal(expectedDevVersion, expectedNpmTarget, 'the package must keep the declared npm target')
@@ -351,7 +396,7 @@ test('DSH peer ranges keep the lower-bound compatibility contract', () => {
   }
 })
 
-test('harnessCompatEntryFor follows the official DSH tag matrix below the published 0.2.0-rc.2 floor', () => {
+test('harnessCompatEntryFor follows the official DSH tag matrix below the published 0.2.1-rc.2 floor', () => {
   // These entries correspond to the published dsh-v* tags, not invented versions.
   const matrix: readonly [string, string | undefined][] = [
     ['0.1.0-rc.7', undefined],
@@ -377,6 +422,11 @@ test('harnessCompatEntryFor follows the official DSH tag matrix below the publis
     ['0.1.6-alpha.2', '0.4.7-alpha.2'],
     ['0.1.7-rc.2', '0.5.0'],
     ['0.2.0-rc.1', '0.5.0'],
+    // Below the 0.2.1-rc.2 candidate floor. The 0.2.0-rc.2 row keeps the
+    // reserved-but-never-published 0.5.2-rc.1 pairing; 0.2.1-rc.1 has no TUI.
+    ['0.2.0-rc.2', '0.5.2-rc.1'],
+    ['0.2.0', '0.5.2-rc.1'],
+    ['0.2.1-rc.1', undefined],
   ]
   for (const [version, fallback] of matrix) {
     const entry = harnessCompatEntryFor(version)
@@ -395,7 +445,7 @@ test('harnessCompatEntryFor follows the official DSH tag matrix below the publis
   const previousRc1 = harnessCompatEntryFor('0.1.7-rc.1')
   assert.equal(previousRc1?.upgradeDsh, FLOOR_ENTRY?.upgradeDsh, 'the previous rc.1 line upgrades to the current target')
   assert.equal(previousRc1?.fallbackTui, '0.4.8', 'rc.1 remains paired with the released 0.4.8 line')
-  assert.equal(harnessCompatEntryFor('0.2.0-rc.2'), undefined, 'the published npm floor is supported')
-  assert.equal(harnessCompatEntryFor('0.2.0'), undefined, 'future stable runtimes are not rejected without evidence')
+  assert.equal(harnessCompatEntryFor('0.2.1-rc.2'), undefined, 'the published npm floor is supported')
+  assert.equal(harnessCompatEntryFor('0.2.1'), undefined, 'the stable line above the floor is supported')
   assert.equal(harnessCompatEntryFor('1.0.0'), undefined)
 })

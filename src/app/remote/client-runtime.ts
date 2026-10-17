@@ -89,6 +89,13 @@ let officialClientModulesPromise: Promise<OfficialClientModules> | undefined
  * Load the six official Client bundles once per process and freeze their
  * captured module exports. Concurrent callers share the same promise.
  *
+ * DSH 0.2.1-rc.1 and later select the `./client` entry by condition: `@deepseek-ai/dsh-typert-registry`,
+ * `@deepseek-ai/dsh-client-connection` and `@deepseek-ai/dsh-api-gateway` publish
+ * a standalone Node ESM variant (which never touches `window.__ModuleLoader__`),
+ * while the remaining three publish the browser loader factory. Both channels
+ * feed one table, so the registration order below still holds for every
+ * `/client` dependency.
+ *
  * Failure semantics: a rejected capture stays cached (fail fast, no silent
  * retry). ESM evaluates each bundle at most once per process, so bundles
  * already imported during a failed capture can never re-register — a retry
@@ -101,20 +108,24 @@ export function loadOfficialClientModulesOnce(): Promise<OfficialClientModules> 
 
 /**
  * Exact scoped loader capture: install a temporary `window.__ModuleLoader__`,
- * dynamic-import the six bundles in dependency order, validate and evaluate
- * every registration, freeze the module-export table, and restore the
- * previous process state in `finally` — before any Client Context exists.
+ * dynamic-import the six bundles in dependency order, admit each bundle from
+ * exactly the channel the published `./client` entry selected (loader
+ * registration or standalone Node module — see {@link captureOfficialClientModules}),
+ * freeze the module-export table, and restore the previous process state in
+ * `finally` — before any Client Context exists.
  */
 /**
  * The exact scoped loader admission rules (module-internal seam, exercised by
  * the L5 loader-exactness test): reject an unknown registration id, a
  * duplicate id, a non-function factory, and a `/client` dependency requested
- * before its dependency-order capture; report missing expected ids.
+ * before its dependency-order capture; admit a directly imported Node bundle
+ * for an id the loader did not register; report missing expected ids.
  */
 export function createScopedClientModuleLoader(expectedIds: readonly string[]): {
   load: ModuleLoader
   requireModule: (specifier: string) => unknown
   registeredIds(): readonly string[]
+  acceptImported(id: string, module: unknown): void
   assertComplete(): void
 } {
   const nodeRequire = createRequire(import.meta.url)
@@ -147,14 +158,37 @@ export function createScopedClientModuleLoader(expectedIds: readonly string[]): 
     captured.set(id, factory(requireModule))
   }
 
+  /**
+   * Admit one directly imported bundle whose `./client` entry did not register
+   * through the loader shim (the standalone Node variant). The module joins the
+   * SAME table {@link requireModule} resolves `/client` dependencies from, so a
+   * registering bundle can still depend on a Node-variant one. A bundle that did
+   * register is left to its own registration: the browser factory result is the
+   * authoritative module for that id.
+   * @param id - the bundle's registration id.
+   * @param module - the imported module namespace.
+   * @throws when the id is unexpected or already admitted by a direct import.
+   */
+  const acceptImported = (id: string, module: unknown): void => {
+    if (!expectedIds.includes(id)) {
+      throw new Error(`official Client bundle import produced an unexpected id: ${String(id)}`)
+    }
+    if (registrations.has(id)) return
+    if (captured.has(id)) {
+      throw new Error(`official Client bundle ${id} was imported as a Node module twice`)
+    }
+    captured.set(id, module)
+  }
+
   return {
     load,
     requireModule,
     registeredIds: () => [...registrations.keys()],
+    acceptImported,
     assertComplete(): void {
       for (const id of expectedIds) {
-        if (!registrations.has(id)) {
-          throw new Error(`official Client bundle ${id} never registered through __ModuleLoader__`)
+        if (!captured.has(id)) {
+          throw new Error(`official Client bundle ${id} was neither registered through __ModuleLoader__ nor imported as a Node module`)
         }
       }
     },
@@ -220,7 +254,11 @@ async function captureOfficialClientModules(): Promise<OfficialClientModules> {
   const restoreShim = installScopedModuleLoaderShim(loader.load)
   try {
     for (const bundle of OFFICIAL_CLIENT_BUNDLES) {
-      await import(bundle.specifier)
+      // Each published `./client` entry selects its own channel: the browser
+      // variant registers through the shim above, the standalone Node variant
+      // is admitted directly. `acceptImported` is a no-op for a bundle that
+      // registered itself.
+      loader.acceptImported(bundle.id, await import(bundle.specifier))
     }
     loader.assertComplete()
   } finally {
@@ -228,7 +266,7 @@ async function captureOfficialClientModules(): Promise<OfficialClientModules> {
   }
 
   const captured = new Map<string, unknown>()
-  for (const id of loader.registeredIds()) {
+  for (const id of EXPECTED_REGISTRATION_IDS) {
     captured.set(id, loader.requireModule(`${id}/client`))
   }
   return freezeOfficialClientModules(captured)
@@ -374,8 +412,14 @@ export async function createRemoteClientRuntime(options: RemoteClientRuntimeOpti
     await typertFiber
     // 2. Connection as a Cordis-owned fiber: explicit composition transport,
     //    never the bundle's page-global default adapter, no location.
+    //    `interactions: 'answer'` is declared explicitly: the official default
+    //    is `answer` only for a page carrier (a location) and `none` for a
+    //    non-browser composition, and this in-process Client is the TUI's ONE
+    //    answering surface — forwarded events and Host waterfalls are refused
+    //    outright under `none`.
     connectionFiber = context.plugin(connectionContext => {
       modules.connection.installConnection(connectionContext, {
+        interactions: 'answer',
         transport: {
           ownsHost: true,
           fetch: carrier.fetch,

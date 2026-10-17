@@ -61,10 +61,12 @@ import { mountAgentLoopTestDependencies, mountAgentLoopTestHarness } from '@deep
 import CommandRuntime from '@deepseek-ai/dsh-commands'
 import AgentPresetRegistry from '@deepseek-ai/dsh-agent-preset-registry'
 import TypertGatewayService from '@deepseek-ai/dsh-api-gateway'
+import { RemoteAccessService } from '@deepseek-ai/dsh-api-remote-access'
 import JobController from '@deepseek-ai/dsh-api-job-controller'
 import LocalCredentials from '@deepseek-ai/dsh-credentials-local'
 import LocalFileSystem from '@deepseek-ai/dsh-fs-local'
-import JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
+import WorkingDirectory from '@deepseek-ai/dsh-working-directory'
+import * as JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
 import { SqliteSessionQueryEngine } from '@deepseek-ai/dsh-session-query-sqlite'
 import Storage from '@deepseek-ai/dsh-storage'
 import * as StorageJson from '@deepseek-ai/dsh-storage-json'
@@ -296,6 +298,10 @@ export async function createRemoteApplicationHostFixture(
       new SqliteSessionQueryEngine(queryCtx, { path: ':memory:', openAt: 'first-search' })
     })
     await ctx.plugin(LocalFileSystem)
+    // 0.2.1-rc.2's SessionController nests the official skill catalog and the real
+    // `@`-file reference provider injects the directory owner: both require
+    // the real `workingDirectory` service (the same row dsh-base mounts once).
+    await ctx.plugin(WorkingDirectory)
     await ctx.plugin(Storage)
     await ctx.plugin(StorageJson, { root: join(workRoot, 'storages') })
     await ctx.plugin(StorageDomain, { backend: 'json' })
@@ -309,6 +315,10 @@ export async function createRemoteApplicationHostFixture(
     await ctx.plugin(LocalJobRegistry, {})
     await ctx.plugin(toolJobs)
     await ctx.plugin(JobController, {})
+    // 0.2.1-rc.2 requires the Gateway's access decider: `TypertGatewayService.inject`
+    // is ['typert', 'remoteAccess'], so the official RemoteAccess owner mounts
+    // first (the base layer's order) — never a fake `remoteAccess` provide.
+    await ctx.plugin(RemoteAccessService)
     await ctx.inject(TypertGatewayService.inject, gatewayCtx => {
       new TypertGatewayService(gatewayCtx, { websocketHeartbeatIntervalMs: 50 })
     })

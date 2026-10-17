@@ -52,21 +52,24 @@ pnpm compat:dsh:npm
 
 | TUI 包版本 | 对应的官方 DSH tags | 说明 |
 |---|---|---|
-| `0.5.1`（stable / `@latest`） | `dsh-v0.2.0-rc.2` | 当前稳定版；最低与精确验证目标均为 0.2.0-rc.2 family |
-| `0.5.2-rc.1`（next 预览 / `@next`） | `dsh-v0.2.0-rc.2` | 当前 next 线预览；DSH 基线与 `0.5.1` 相同，最低与精确验证目标均为 0.2.0-rc.2 family |
+| `0.5.1`（stable / `@latest`） | `dsh-v0.2.0-rc.2` | 当前已发布稳定版；最低与精确验证目标均为 0.2.0-rc.2 family |
+| `0.5.3`（next 候选 / `@next`，尚未发布） | `dsh-v0.2.1-rc.2` | 当前 next 线候选身份：最低与精确验证目标均为 0.2.1-rc.2 family；reserved candidate，尚未打 tag 或发布 |
+| `dsh-v0.2.1-rc.1`（无配对 TUI） | 无 | 该中间版本没有本矩阵宣称兼容的已发布 TUI；不要为它复用 `0.5.3` |
+| `0.5.2-rc.1`（next 预留，从未发布） | `dsh-v0.2.0-rc.2` | 历史兼容记录：该 next 身份曾在仓库中预留但从未发布，配对仍是 0.2.0-rc.2 family |
 | `0.5.0`（stable，历史） | `dsh-v0.1.7-rc.2`、`dsh-v0.2.0-rc.1` | 上一稳定版；最低 0.1.7-rc.2，精确验证目标 0.2.0-rc.1 |
 | `0.4.9`（stable，历史） | `dsh-v0.1.7-rc.2` | 上一稳定版；0.1.7-rc.2 runtime 的兼容 TUI |
 | `0.4.8`（stable，历史） | `dsh-v0.1.7-rc.1` | 上一稳定版；0.1.7-rc.1 runtime 的兼容 TUI |
 | `0.4.6`（stable，历史） | `dsh-v0.1.5-rc.1`、`dsh-v0.1.5-rc.2` | 上一稳定版；0.1.5 runtime 的兼容 TUI |
 | `0.4.7-alpha.2`（next，历史） | `dsh-v0.1.6-alpha.2` | 上一条 next 线；0.1.6-alpha.2 runtime 的兼容 TUI |
 
-不要把稳定线与 `@next` 预发布线混装。当前 `@next` 指向 `0.5.2-rc.1` 预览，
-它的 DSH 基线与 `0.5.1` 完全相同。`0.5.1` 把整个 DSH peer
-floor 提升到 `>=0.2.0-rc.2`：Question 生命周期消费 rc.2 才发布的公开契约
-（`userQuestions.attachWait`/`answer` Remote 与 `userQuestions` Session
-projection），rc.1 family 不提供这些契约，混装属于虚假的兼容声明。上一稳定版
-`0.5.0` 保持 `>=0.1.7-rc.2` floor 不变（精确验证目标 0.2.0-rc.1）；旧
-runtime 会在正常的不兼容边界以非零状态失败，
+不要把稳定线与 `@next` 预发布线混装。`0.5.3` 是当前 next 线候选身份：它的最低
+DSH 版本（peer floor）与精确验证目标都是已发布的 `0.2.1-rc.2` family；在完成资格
+验证并按流程打 tag 之前，它只是 reserved candidate，不代表已发布。中间的
+`dsh-v0.2.1-rc.1` 没有配对 TUI，`0.5.2-rc.1` 是仓库曾预留、从未发布的 next 身份，
+其历史配对（0.2.0-rc.2）保留在上表中。已发布的稳定版 `0.5.1` 继续配对
+0.2.0-rc.2：它把整个 DSH peer floor 提升到 `>=0.2.0-rc.2`（Question 生命周期消费
+rc.2 才发布的公开契约）。上一稳定版 `0.5.0` 保持 `>=0.1.7-rc.2` floor 不变
+（精确验证目标 0.2.0-rc.1）；旧 runtime 会在正常的不兼容边界以非零状态失败，
 请按上表安装配对的 TUI 线。完整的历史兼容矩阵和 fallback 命令见
 [兼容性文档](docs/dsh-compatibility.md)；要查看 `@next` 的最新集成状态，请看
 [next 分支 README](https://github.com/XMoon/dsh-pi-tui/blob/next/README.md)。

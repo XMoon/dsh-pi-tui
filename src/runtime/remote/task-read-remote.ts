@@ -38,7 +38,7 @@ export interface RemoteTaskSessionsSource {
       readonly byId: Readonly<Record<string, { readonly running: boolean } | undefined>>
       readonly projectionsBySession: Readonly<Record<string, {
         readonly values: Readonly<{ readonly subagentCatalog?: readonly RemoteSubagentCatalogEntry[] }>
-        readonly state: 'idle' | 'loading' | 'ready' | 'error'
+        readonly state: 'idle' | 'loading' | 'ready' | 'error' | 'migration-required'
         readonly error: unknown
       } | undefined>>
     }
@@ -61,11 +61,14 @@ export interface RemoteTaskJobsSource {
 }
 
 /** One official client-safe catalog row
- * (`SubagentCatalogEntry`): identity and durable mode, no activity. */
+ * (`SubagentCatalogEntry`): identity and durable mode, no activity.
+ * `external` (0.2.1-rc.1 catalog v2) names an external provider execution with no
+ * local child Session; its catalog cannot be read, so the traversal reports it
+ * as a branch diagnostic instead of a browsable child. */
 export interface RemoteSubagentCatalogEntry {
   readonly id: string
   readonly createdAt: number
-  readonly mode: 'one-shot' | 'continuable' | 'unknown'
+  readonly mode: 'one-shot' | 'continuable' | 'external' | 'unknown'
   readonly label?: string
 }
 
@@ -191,6 +194,11 @@ export class RemoteTaskReader implements TaskReader {
    *   re-enters it ONCE before giving up — otherwise one transient failure would
    *   turn every later read (including the Task Center's own retry) into a
    *   permanent failure;
+   * - `state === 'migration-required'` (0.2.1-rc.1): the Session needs an official
+   *   migration before its projections can be read. Settled and NOT an
+   *   authoritative catalog, so this read fails closed with a named error
+   *   rather than reporting an empty membership (the fuller migration UX
+   *   belongs to the Session-migration stage);
    * - `state === 'ready'` WITHOUT `subagentCatalog`: the official Client clears
    *   the projection store and still settles `ready` when `session.projections`
    *   answers a null/missing Session, so this is a REAL read failure — exactly
@@ -239,6 +247,9 @@ export class RemoteTaskReader implements TaskReader {
           throw error
         }
         continue
+      }
+      if (state === 'migration-required') {
+        throw new Error(`the subagentCatalog projection requires an official migration for Session ${sessionId}`)
       }
       const entries = projection!.values.subagentCatalog
       if (entries === undefined) {

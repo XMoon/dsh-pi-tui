@@ -445,7 +445,7 @@ EOF
 //                       (user/message text containing userNeedle,
 //                       assistant/message text containing assistantNeedle).
 import { Context } from '@deepseek-ai/cordis'
-import JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
+import * as JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
 
 const [mode, root, id] = process.argv.slice(2)
 
@@ -458,52 +458,59 @@ function contentText(content) {
     .join('')
 }
 
-const ctx = new Context()
-const persistence = new JsonlSessionPersistence(ctx, { root })
-
-if (mode === 'list') {
-  const listed = await persistence.list()
-  const found = listed.some((s) => s.header.id === id)
-  console.log(`LIST ${found ? 'FOUND' : 'MISSING'} ${id} (${listed.length} total)`)
-  const stat = await persistence.stat(id)
-  console.log(`STAT ${stat === undefined ? 'MISSING' : `FOUND ${stat.header.id} v${stat.header.version}`}`)
-} else if (mode === 'read') {
-  try {
-    const handle = await persistence.open(id, 'read')
-    const events = await handle.read(0)
-    await handle.close()
-    console.log(`READ-OK ${id}: ${events.length} events`)
-  } catch (error) {
-    console.log(`READ-FAILED ${id}: ${error?.message ?? String(error)}`)
-  }
-} else if (mode === 'scan') {
-  const [userNeedle, assistantNeedle] = process.argv.slice(5)
-  try {
-    const handle = await persistence.open(id, 'read')
-    const events = await handle.read(0)
-    await handle.close()
-    let userHit = 0
-    let assistantHit = 0
-    let assistantMsgs = 0
-    let turnEnds = 0
-    for (const event of events) {
-      const data = event.data ?? event
-      if (event.type === 'user/message') {
-        if (contentText(data.content).includes(userNeedle)) userHit = 1
-      } else if (event.type === 'assistant/message') {
-        assistantMsgs += 1
-        if (contentText(data.message?.content ?? data.content).includes(assistantNeedle)) assistantHit = 1
-      } else if (event.type === 'turn/end') {
-        turnEnds += 1
-      }
-    }
-    console.log(`SCAN events:${events.length} user-hit:${userHit} assistant-hit:${assistantHit} assistant-msgs:${assistantMsgs} turn-ends:${turnEnds}`)
-  } catch (error) {
-    console.log(`SCAN-FAILED ${id}: ${error?.message ?? String(error)}`)
-  }
-} else {
+if (mode !== 'list' && mode !== 'read' && mode !== 'scan') {
   console.error(`unknown mode: ${mode}`)
   process.exit(2)
+}
+// 0.2.1-rc.1 publishes the backend as a plugin module (named `apply` + `Config`),
+// not a default-exported class: mount it and read the service it provides.
+const ctx = new Context()
+const persistenceFiber = await ctx.plugin(JsonlSessionPersistence, { root })
+const persistence = ctx.sessionPersistence
+try {
+  if (mode === 'list') {
+    const listed = await persistence.list()
+    const found = listed.some((s) => s.header.id === id)
+    console.log(`LIST ${found ? 'FOUND' : 'MISSING'} ${id} (${listed.length} total)`)
+    const stat = await persistence.stat(id)
+    console.log(`STAT ${stat === undefined ? 'MISSING' : `FOUND ${stat.header.id} v${stat.header.version}`}`)
+  } else if (mode === 'read') {
+    try {
+      const handle = await persistence.open(id, 'read')
+      const events = await handle.read(0)
+      await handle.close()
+      console.log(`READ-OK ${id}: ${events.length} events`)
+    } catch (error) {
+      console.log(`READ-FAILED ${id}: ${error?.message ?? String(error)}`)
+    }
+  } else {
+    const [userNeedle, assistantNeedle] = process.argv.slice(5)
+    try {
+      const handle = await persistence.open(id, 'read')
+      const events = await handle.read(0)
+      await handle.close()
+      let userHit = 0
+      let assistantHit = 0
+      let assistantMsgs = 0
+      let turnEnds = 0
+      for (const event of events) {
+        const data = event.data ?? event
+        if (event.type === 'user/message') {
+          if (contentText(data.content).includes(userNeedle)) userHit = 1
+        } else if (event.type === 'assistant/message') {
+          assistantMsgs += 1
+          if (contentText(data.message?.content ?? data.content).includes(assistantNeedle)) assistantHit = 1
+        } else if (event.type === 'turn/end') {
+          turnEnds += 1
+        }
+      }
+      console.log(`SCAN events:${events.length} user-hit:${userHit} assistant-hit:${assistantHit} assistant-msgs:${assistantMsgs} turn-ends:${turnEnds}`)
+    } catch (error) {
+      console.log(`SCAN-FAILED ${id}: ${error?.message ?? String(error)}`)
+    }
+  }
+} finally {
+  await persistenceFiber.dispose()
 }
 EOF
 

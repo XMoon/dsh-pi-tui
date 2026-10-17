@@ -62,6 +62,8 @@ test('snapshot maps bundles/plugins/registries/exemptions onto frozen detached f
       {
         name: '@xmoon76/dsh-pi-tui',
         version: '0.4.8',
+        official: false,
+        availability: 'profile',
         meta: { title: { en: 'TUI' }, description: 'the surface' },
         description: 'manifest description',
         enabled: true,

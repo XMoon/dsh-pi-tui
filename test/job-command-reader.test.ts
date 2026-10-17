@@ -22,8 +22,11 @@ import { ToolCallId } from '@deepseek-ai/dsh-llm'
 import { Session, SessionId } from '@deepseek-ai/dsh-session'
 import { ShellExecutor } from '@deepseek-ai/dsh-shell'
 import type { ShellExecRequest, ShellExecSpec, ShellExecution, ShellProcess, ShellRunResult } from '@deepseek-ai/dsh-shell'
+import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
+import LocalFileSystem from '@deepseek-ai/dsh-fs-local'
+import WorkingDirectory from '@deepseek-ai/dsh-working-directory'
 import * as BashEnvPlugin from '@deepseek-ai/dsh-shell-env'
 import * as ToolBash from '@deepseek-ai/dsh-tool-bash'
 import * as ToolTasks from '@deepseek-ai/dsh-tool-jobs'
@@ -888,8 +891,15 @@ for (const producer of [
     let harness: AppHarness | undefined
     try {
       await ctx.plugin(SystemPrompt)
+      await ctx.plugin(SessionProjectionRegistry)
       await ctx.plugin(ToolRuntime)
       await ctx.plugin(AgentRegistry)
+      // 0.2.1-rc.2: every agent tool injects the real `workingDirectory` owner
+      // (its inject also needs `fs`, `sessionProjections` and `systemPrompt`).
+      // Without it the tool plugin never activates and no background Job is
+      // registered — the official base layer mounts this row once.
+      await ctx.plugin(LocalFileSystem)
+      await ctx.plugin(WorkingDirectory)
       await ctx.plugin(LocalJobRegistry, { pumpPollMs: 5 })
       await ctx.plugin(TypertRegistry)
       await ctx.plugin(JobController, {})

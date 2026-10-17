@@ -60,7 +60,7 @@ function detachIncompatible(entry: IncompatiblePlugin): PluginIncompatibleFact {
     name: entry.name,
     version: entry.version,
     runtimeVersion: entry.runtimeVersion,
-    peers: Object.freeze({ ...entry.peers }),
+    requirements: Object.freeze({ ...entry.requirements }),
   })
 }
 

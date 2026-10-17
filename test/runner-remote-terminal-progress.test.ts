@@ -77,6 +77,8 @@ interface RunnerProbe {
   /** The merged 9;4 / 7501 write timeline. */
   readonly timeline: string[]
   readonly aggregate: Awaited<ReturnType<typeof createRemoteApplicationRuntime>>
+  /** The CURRENT mounted app (an owner switch re-mounts it). */
+  app(): { setDraft(text: string): void; submitDraft(): void; getDraft(): string }
   submitDraft(text: string): void
 }
 
@@ -150,16 +152,21 @@ async function mountRemoteRunner(
   await runnerFiber
   life.defer(() => runnerFiber.dispose())
   await waitFor('remote runner mount', () => vt.getViewport().join('').length > 0, 20_000)
+  /** The CURRENT mounted app (an owner switch re-mounts it). */
+  const mountedApp = (): { setDraft(text: string): void; submitDraft(): void; getDraft(): string } => {
+    const app = apps.at(-1) as unknown as { setDraft(text: string): void; submitDraft(): void; getDraft(): string } | undefined
+    assert.ok(app !== undefined, 'the mounted runner app must be captured')
+    return app
+  }
   return {
     vt,
     program,
     timeline,
     aggregate,
+    app: mountedApp,
     submitDraft(text: string): void {
-      const app = apps.at(-1) as unknown as { setDraft(text: string): void; submitDraft(): void } | undefined
-      assert.ok(app !== undefined, 'the mounted runner app must be captured')
-      app.setDraft(text)
-      app.submitDraft()
+      mountedApp().setDraft(text)
+      mountedApp().submitDraft()
     },
   }
 }
@@ -202,9 +209,28 @@ test('L6 production runner: a real Remote turn drives OSC 7501, and a reconnect 
   assert.equal(doneCount(), doneAfterFirst,
     `a new owner never re-asserts the previous owner's done: ${JSON.stringify(runner.program)}`)
 
+  // The runner keeps its writer fence closed until the committed owner's
+  // surface AND live catalog are ready (and only then reports the switch). A
+  // real user hitting Enter inside that window sees the product's "a session
+  // transition is in progress — try again in a moment" notice and retries, so
+  // these post-switch gestures do the same: a fenced attempt is rejected BEFORE
+  // dispatch and restores the draft; an accepted one clears it.
+  const submitAcrossFence = async (text: string, effect: () => boolean, label: string): Promise<void> => {
+    const deadline = Date.now() + 30_000
+    let submitted = false
+    while (!effect() && Date.now() < deadline) {
+      if (!submitted || runner.app().getDraft() !== '') {
+        runner.app().setDraft(text)
+        runner.app().submitDraft()
+        submitted = true
+      }
+      await new Promise(resolve => setTimeout(resolve, 100))
+    }
+    await waitFor(label, effect, 30_000)
+  }
+
   // ... and the new owner drives its own real turn end to end.
-  runner.submitDraft('second session probe')
-  await waitFor('the new session settles done', () => doneCount() === doneAfterFirst + 1, 30_000)
+  await submitAcrossFence('second session probe', () => doneCount() === doneAfterFirst + 1, 'the new session settles done')
 
   // Re-adopting the FIRST session is a NEW TUI owner over the SAME Host Agent
   // instance (its record and epoch survive the switch). Owner review P1: the
@@ -224,6 +250,5 @@ test('L6 production runner: a real Remote turn drives OSC 7501, and a reconnect 
     `re-adopting a session never resurrects its settled done: ${JSON.stringify(runner.program)}`)
 
   // The authority is re-established for the re-adopted owner.
-  runner.submitDraft('re-adopted probe')
-  await waitFor('the re-adopted owner drives its own turn', () => doneCount() === doneAfterSecond + 1, 30_000)
+  await submitAcrossFence('re-adopted probe', () => doneCount() === doneAfterSecond + 1, 'the re-adopted owner drives its own turn')
 })

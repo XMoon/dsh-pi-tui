@@ -20,7 +20,15 @@ export type TaskSubagentEntry =
     readonly kind: 'child'
     readonly id: string
     readonly label?: string
-    readonly mode: 'one-shot' | 'continuable'
+    /**
+     * The official durable catalog classification (`subagentCatalog` v0–v2).
+     * `external` is 0.2.1-rc.1's v2 record of an external provider execution
+     * (Claude Code / Codex): it has NO local child Session, so this surface's
+     * two-class browser model does not classify it as a readable child — the
+     * row is not browsable, and its disposition belongs to the official
+     * Bundle qualification (B13/B14), not to this read port.
+     */
+    readonly mode: 'one-shot' | 'continuable' | 'external'
     readonly activity: 'running' | 'inactive'
     readonly hasChildren: boolean
     readonly parentId: string
