@@ -50,15 +50,19 @@ description (this file records the durable version pins and the result tiers).
     title rule above is narrower because the Owner ruled (relayed in the B2-A
     session) that a `/title` success must show the card plus the authoritative
     title and no duplicate Dock line.
-  - **card-less transport (review F1).** The Direct command plane appends the
+  - **card-less transport (review F1/F4).** The Direct command plane appends the
     official `command/run` + `command/done` rows (the card); the Remote Client
     command registry appends none, so a returned `CommandResult.error` had NO
     visible owner there and the user saw only a restored draft. The submission
-    settlement now publishes that error text exactly once, scoped to the B2-A
-    command set (`TSP_B2A_RESULT_NOTICE_COMMANDS`, derived from the admitted set
-    plus `/logout`) and only when no card exists — Host commands, the
-    sessionless local path (which notifies itself) and sibling TUI commands
-    (`/preset`, `/model`, …) keep their own owners, so nothing is duplicated.
+    controller now publishes that error text exactly once **inside the Client
+    registry branch itself** — the branch that already knows this invocation has
+    no card. The owner is therefore FROZEN at dispatch: the settlement performs
+    no classification and holds no catalog-derived fact, so a Host-origin catalog
+    change mid-flight can neither hide a Client-route error nor duplicate a
+    Host-route one (F4). The scope is the B2-A command set
+    (`TSP_B2A_RESULT_NOTICE_COMMANDS`, derived from the admitted set plus
+    `/logout`); Host commands, the sessionless local path (which notifies itself)
+    and sibling TUI commands (`/preset`, `/model`, …) keep their own owners.
 - Direct business-path evidence is the real Host composition
   (`test/support/direct-tsp-fixture.ts`: real rc.2 services, real live Agents,
   the real runner/SubmissionController, the real TSP renderer over the shipped
@@ -173,7 +177,7 @@ unchanged owner's subject:
 | Tier | What it is | Used for |
 |---|---|---|
 | Direct L6 | `test/tern-tsp-headless-commands.test.ts` over the real Direct composition + scripted TSP pane | A01–A08, A10, A11, A13, A14, A16, A17 |
-| Remote L6 | `test/runner-remote-command-plane.test.ts` (real Remote composition, real Client registry / HostCommandPort; `F1 Remote` ×3 on PiTui + one Remote+TSP mount) | the card-less error owner (F1), the no-double-notification rule |
+| Remote L6 | `test/runner-remote-command-plane.test.ts` (real Remote composition, real Client registry / HostCommandPort; `F1 Remote` ×3 on PiTui + one Remote+TSP mount + the F4 forward race) | the card-less error owner (F1), the mid-flight catalog race (F4), the no-double-notification rule |
 | Pure unit | `test/tern-tsp-command-admission.test.ts` (the predicate, the `/logout` input-shape rule and the `titleResultNoticeSuppressed` truth table) | the gate and the title notice policy |
 | REAL_TERN_HEADLESS | `scripts/tern-pane-drive.mjs scripts/tern-pane-b2a-copy.mjs` (real Tern 0.9.2, real keys, real tty) | A19 (channel integrity + OSC52 emission) |
 | Inherited | B1-B / PR4-0 suites rerun unchanged | A12, A15, A18 |
@@ -202,6 +206,19 @@ reviewed mapping:
 - **RFL-004 (closed) — changelog wording.** Both bilingual entries describe the
   command-specific outcome presentation (title results: Direct card; `/yolo`,
   `/logout`, `/copy`: planned Dock supplement).
+- **F4 (external review, closed) — the card-less owner was re-derived at
+  settlement.** The first F1 fix answered "does this result have a visible
+  owner?" by re-running the line classifier at settlement, which consults the
+  LIVE Host-origin catalog; a catalog change between dispatch and settlement
+  could hide a Client-route error or duplicate a Host-route one. The owner is now
+  fixed where the route is chosen (the Client registry branch), and the
+  settlement-side fact was removed entirely. Witnessed by (a) a Remote `/copy`
+  whose tty write registers a genuine Host `/copy` mid-flight — the route stays
+  Client (no `command/run` row) and the error is published exactly once, and (b)
+  a Direct `/copy` dispatched on a genuine Host claim that is revoked while the
+  handler runs — the Host result card stays the only presentation (no extra Dock
+  line). The second witness proves the freeze; the first covers the reviewer's
+  requested mid-flight-catalog scenario end to end.
 - **F1 (external review, closed) — card-less command errors were invisible.**
   On the Remote Client command registry no result card exists, so a returned
   `CommandResult.error` reached neither the Dock nor a card. The submission

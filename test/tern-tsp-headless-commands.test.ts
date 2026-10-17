@@ -726,6 +726,55 @@ test('A16: a no-panel TUI builtin executes locally while the turn runs (busyEnte
   }
 })
 
+// ── F4: the result's visible owner is frozen at dispatch ───────────────────
+
+test('F4: a Host-route result keeps its own card when the Host claim is revoked mid-flight', async (t) => {
+  const life = (await import('./support/temp-lifecycle.ts')).testLifecycle(t)
+  let releaseHost!: () => void
+  const hostGate = new Promise<void>(resolve => { releaseHost = resolve })
+  // The genuine Host claim must exist BEFORE the runner boots (otherwise the
+  // TUI's own compatibility mirror owns the name). Its handler waits for the
+  // gate so the claim can be revoked mid-flight.
+  const fixture = await createDirectTspFixture(life, {
+    deltas: ['F4-HOST'],
+    hostCommands: [{
+      name: 'copy',
+      description: 'gated genuine Host copy',
+      handler: async () => {
+        await hostGate
+        return { kind: 'error', text: 'host copy failed mid-flight' }
+      },
+    }],
+  })
+  try {
+    await directSettle(4_000)
+    const sessionId = await seedTurn(fixture, 'seed the F4 host route')
+    const sessionEvents = (): Array<{ type: string }> => {
+      const sessions = fixture.ctx.get('sessions') as unknown as {
+        get(id: string): { snapshotEvents(): Array<{ type: string }> }
+      }
+      return sessions.get(sessionId)?.snapshotEvents() ?? []
+    }
+    await submitInput(fixture, '/copy')
+    await waitFor('the Host route to be entered', () => sessionEvents().some(event => event.type === 'command/run'), 25_000)
+    // MID-FLIGHT REVOCATION: the claim disappears while the Host handler runs.
+    // A settlement-time re-classification would now read /copy as Client-owned
+    // and repeat the error beside the Host card.
+    for (const dispose of fixture.hostCommandDisposers) dispose()
+    await directSettle(800)
+    releaseHost()
+    await waitFor('the Host command to settle', () => sessionEvents().some(event => event.type === 'command/done'), 25_000)
+    await directSettle(600)
+    assert.equal(
+      dockNotices(fixture).filter(text => text.includes('host copy failed mid-flight')).length, 0,
+      'the Host result card owns the error; no extra Dock line is published')
+    assert.equal(sessionEvents().filter(event => event.type === 'command/run').length, 1,
+      'exactly one Host command/run row exists (its own card)')
+  } finally {
+    await fixture.settle()
+  }
+})
+
 // ── A14: genuine Host same-name winners ─────────────────────────────────────
 
 test('A14: genuine Host /new, /copy, /logout, /title and /rename keep their Host sink', async (t) => {

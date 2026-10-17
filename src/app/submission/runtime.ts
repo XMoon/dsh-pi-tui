@@ -1069,10 +1069,7 @@ function steerSubmission(deps: SteerSubmissionDeps, input: SteerSubmissionInput)
 /** One committed command execution as the runtime reads it (structural). */
 export interface HostCommandExecutionLike {
   readonly commandId: string
-  /** The command result the executor settled. `text` is the official
-   *  `CommandResult.text` — the same text a Direct command card renders and the
-   *  only user-facing reason available when no card exists (F1). */
-  readonly result: { readonly kind: string; readonly text?: string }
+  readonly result: { readonly kind: string }
 }
 
 /** The runner-supplied operations the HostCommand submission drives. */
@@ -1095,17 +1092,6 @@ export interface HostCommandSubmissionDeps {
   readonly lateAttachmentRefusal: () => string | undefined
   readonly commandSubmitAttachments: (text: string) => readonly unknown[]
   readonly isTuiOwnedCommand: () => boolean
-  /**
-   * F1: whether this invocation's result text already has a VISIBLE owner. The
-   * Direct command plane paints the official command-result card; a Host
-   * command carries its own lifecycle rows; and the commands outside the B2-A
-   * notice scope publish their own refusal notices. When this is false (a B2-A
-   * TUI-owned command executing through the card-less Client registry), the
-   * settlement publishes the returned error text — otherwise the user would see
-   * only a restored draft. It never publishes the success text: successes keep
-   * their per-command supplement rule.
-   */
-  readonly commandResultHasVisibleOwner: () => boolean
   readonly commandPlaneOwnsLine: () => boolean
   readonly submittedHostClaim: () => { readonly claimed: boolean; readonly attachments?: unknown } | undefined
   readonly commandSignal: () => AbortSignal
@@ -1348,15 +1334,6 @@ export function executeHostCommandSubmission(
           deps.restoreSubmissionDraft(text)
         } else if (execution.result.kind !== 'error') {
           deps.consumeDraftAttachments(text)
-        }
-        // F1: a returned ERROR outcome whose text has no visible owner (the
-        // card-less Client command registry route) is published here — the
-        // settlement is its ONE visible owner. This is independent of the
-        // draft/attachment settlement above, which also runs for that outcome.
-        if (execution.result.kind === 'error'
-          && (execution.result.text ?? '') !== ''
-          && !deps.commandResultHasVisibleOwner()) {
-          deps.notify(execution.result.text!, 'error')
         }
         fallbackPin()
         submitTurn.release()

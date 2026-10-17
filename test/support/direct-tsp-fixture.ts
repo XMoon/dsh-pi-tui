@@ -130,6 +130,8 @@ export class ScriptedStreamingAdapter extends LlmAdapter {
 export interface DirectTspFixture {
   readonly pane: TspPane
   readonly ctx: Context
+  /** Disposers of the pre-boot genuine Host commands (revocation witnesses). */
+  readonly hostCommandDisposers: ReadonlyArray<() => void>
   readonly workRoot: string
   /** How many live model requests observed their caller's abort. */
   cancellations(): number
@@ -341,6 +343,8 @@ export async function createDirectTspFixture(
   let ctx!: Context
   let llmAdapter!: ScriptedStreamingAdapter
   const fibers: Fiber[] = []
+  /** Disposers of the pre-boot genuine Host commands (see the interface). */
+  const hostCommandDisposers: Array<() => void> = []
   let persistenceFiber: Fiber | undefined
   let settlement: Promise<void> | undefined
   const settle = (): Promise<void> => {
@@ -371,12 +375,12 @@ export async function createDirectTspFixture(
   ctx.llm.registerAdapter([DIRECT_TSP_PROVIDER], llmAdapter)
   await ctx.plugin(CommandRuntime)
   for (const command of options.hostCommands ?? []) {
-    ctx.commands.register({
+    hostCommandDisposers.push(ctx.commands.register({
       name: command.name,
       description: command.description,
       ...(command.definitionId === undefined ? {} : { definitionId: command.definitionId as never }),
       handler: (invocation) => command.handler({ rawInput: invocation.rawInput }) as never,
-    })
+    }))
   }
   if (options.profileDefault === undefined) {
     ctx.provide('agentDefaultModel', {
@@ -629,6 +633,7 @@ export async function createDirectTspFixture(
   const fixture = {
     ctx,
     workRoot,
+    hostCommandDisposers,
     cancellations: () => llmAdapter.aborts.length,
     modelCalls: () => llmAdapter.calls,
     recordPrompts,

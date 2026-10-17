@@ -1143,16 +1143,6 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
           },
           commandSubmitAttachments: (value) => commandSubmitAttachments(value),
           isTuiOwnedCommand: isTuiOwnedCommandLine,
-          // F1: the ONE visible-owner fact for this invocation's result text.
-          // The Direct command plane paints the card; a Host command carries
-          // its own lifecycle rows; and the commands outside the B2-A notice
-          // scope publish their own refusal notices. Only a B2-A TUI-owned
-          // command executing through the card-less Client registry leaves the
-          // text unowned, and then the settlement must publish it.
-          commandResultHasVisibleOwner: () => directAgent !== undefined
-            || !isTuiOwnedCommandLine()
-            || parsedAtSubmit === undefined
-            || !TSP_B2A_RESULT_NOTICE_COMMANDS.has(parsedAtSubmit.name),
           commandPlaneOwnsLine,
           submittedHostClaim: () => parsedAtSubmit === undefined ? undefined : deps.command.hostOriginClaimOf(parsedAtSubmit),
           commandSignal: () => deps.signal,
@@ -1175,7 +1165,22 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
                       : { kind: 'committed', matched: true, execution } as const
                   })
                 }
+                // F1/F4: THIS branch is the card-less route. The Client command
+                // registry appends no `command/run` row, so nothing renders the
+                // handler's `CommandResult.text` — publish a returned error once,
+                // HERE, where the route is already decided. The owner is never
+                // re-derived at settlement (the Host-origin catalog is live and
+                // may have changed mid-flight). Scope: the B2-A notice set, so
+                // sibling TUI commands keep their own refusal notices.
                 return deps.command.clientCommands.execute({ line: commandLine, signal: commandSignal }).then((execution) => {
+                  if (execution !== undefined
+                    && execution.result.kind === 'error'
+                    && execution.result.text !== ''
+                    && !deps.isCleanedUp()
+                    && parsedAtSubmit !== undefined
+                    && TSP_B2A_RESULT_NOTICE_COMMANDS.has(parsedAtSubmit.name)) {
+                    deps.app().notify(execution.result.text, 'error')
+                  }
                   return execution === undefined
                     ? { kind: 'committed', matched: false } as const
                     : { kind: 'committed', matched: true, execution } as const

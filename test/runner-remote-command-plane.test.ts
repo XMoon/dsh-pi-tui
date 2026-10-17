@@ -437,6 +437,79 @@ test('F1 Remote: a sessionless /logout target error is settled ONCE by the local
  * same renderer-neutral sink, mounted through the real Remote composition).
  * Everything here is production except the scripted model and the TSP pane.
  */
+/**
+ * F4 (PR4-B2-A review): the result-presentation owner is FROZEN at dispatch.
+ * The Host-origin catalog is live; re-deriving the owner at settlement could
+ * hide a Client-route error or duplicate a Host-route one when the catalog
+ * changes mid-flight. Both directions are driven deterministically below.
+ */
+test('F4 Remote: a Client-route error is still published once when the Host catalog claims the name mid-flight', async (t) => {
+  // The POSIX helper gates are cleared (and macOS/Windows skipped) so the copy
+  // policy's failure is deterministic; the OSC 52 write is the mid-flight hook.
+  if (process.platform === 'darwin' || process.platform === 'win32') {
+    t.skip('the native clipboard helper is attempted unconditionally on this platform')
+    return
+  }
+  const life = testLifecycle(t)
+  const mainId = 'b2a-f4-client'
+  const fixture = await mountRunner(life, {
+    resumeSessionId: mainId,
+    seed: (append) => {
+      append('turn/start', { turn: 1 })
+      append('step/start', { turn: 1, step: 1 })
+      append('user/message', {
+        id: 'u-f4', role: 'user', content: [{ type: 'text', text: 'copy source prompt' }], source: { kind: 'user' },
+      }, { surfaceOp: 'append' })
+      append('assistant/message', {
+        turn: 1, step: 1,
+        message: { id: 'a-f4', role: 'assistant', content: [{ type: 'text', text: 'COPY-F4-TEXT' }], source: { kind: 'model', provider: 'smoke', model: 'smoke' } },
+        stream: [], usage: { inputTokens: 1, outputTokens: 1 },
+      }, { surfaceOp: 'append' })
+      append('step/end', { turn: 1, step: 1 })
+      append('turn/end', { turn: 1, reason: { kind: 'completed' } })
+    },
+  })
+  await waitFor('the remote runner mount', () => fixture.vt.getViewport().join('').length > 0, 20_000)
+  const notifications = recordNotifications(life)
+  const clipboardEnvKeys = ['TMUX', 'DISPLAY', 'WAYLAND_DISPLAY'] as const
+  for (const key of clipboardEnvKeys) delete process.env[key]
+  life.defer(() => {
+    for (const key of clipboardEnvKeys) delete process.env[key]
+  })
+  // MID-FLIGHT CATALOG CHANGE: the copy's own tty write registers a genuine
+  // Host `/copy` claim before the handler returns its error. The dispatch route
+  // (Client registry) is already decided, so the error must still be published.
+  let hostClaimRegistered = false
+  const stdout = process.stdout as unknown as { write(data: unknown): boolean }
+  const previousWrite = stdout.write
+  const originalWrite = previousWrite.bind(stdout)
+  stdout.write = ((data: unknown, ...rest: unknown[]): boolean => {
+    if (typeof data === 'string' && data.includes(']52;c;') && !hostClaimRegistered) {
+      hostClaimRegistered = true
+      fixture.host.ctx.commands.register({
+        name: 'copy',
+        description: 'late genuine Host copy claim',
+        handler: () => ({ kind: 'success', text: 'late host copy ran' }),
+      })
+      throw new Error('controlled tty write failure')
+    }
+    return (originalWrite as (...args: unknown[]) => boolean)(data, ...rest)
+  }) as typeof stdout.write
+  life.defer(() => { stdout.write = previousWrite })
+
+  submit(fixture, '/copy')
+  await waitFor('the Client-route copy failure is published', () =>
+    notifications.some(message => message.includes('failed to copy last assistant message')), 20_000)
+  await settle(600) // let the injected claim reach the live catalog too
+  assert.equal(hostClaimRegistered, true,
+    'the mid-flight Host claim really was registered during the command')
+  assert.equal(
+    notifications.filter(message => message.includes('failed to copy last assistant message')).length, 1,
+    'the Client-route error is published EXACTLY once, even though the catalog now claims the name')
+  assert.equal(fixture.hostCommandRuns(mainId), 0,
+    'the invocation stayed on the Client registry route (no Host command/run row)')
+})
+
 test('F1 Remote TSP: a card-less command failure reaches the TSP Dock', async (t) => {
   const life = testLifecycle(t)
   const mainId = 'b2a-f1-tsp'

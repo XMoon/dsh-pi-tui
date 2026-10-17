@@ -647,9 +647,6 @@ test('the HostCommand path maps a frozen transition to the proven-refusal settle
     lateAttachmentRefusal: () => undefined,
     commandSubmitAttachments: () => [],
     isTuiOwnedCommand: () => false,
-    // F1: these hand-built harnesses are not the card-less B2-A route, so the
-    // settlement never publishes an extra error notice here.
-    commandResultHasVisibleOwner: () => true,
     commandPlaneOwnsLine: () => false,
     submittedHostClaim: () => undefined,
     commandSignal: () => new AbortController().signal,
@@ -1027,9 +1024,6 @@ test('PR5: a command settlement whose subject was REPLACED performs cleanup only
     lateAttachmentRefusal: () => undefined,
     commandSubmitAttachments: () => [],
     isTuiOwnedCommand: () => false,
-    // F1: these hand-built harnesses are not the card-less B2-A route, so the
-    // settlement never publishes an extra error notice here.
-    commandResultHasVisibleOwner: () => true,
     commandPlaneOwnsLine: () => false,
     submittedHostClaim: () => undefined,
     commandSignal: () => new AbortController().signal,
@@ -1102,9 +1096,6 @@ test('PR5 positive control: a current-scope settlement performs the normal visib
     lateAttachmentRefusal: () => undefined,
     commandSubmitAttachments: () => [],
     isTuiOwnedCommand: () => false,
-    // F1: these hand-built harnesses are not the card-less B2-A route, so the
-    // settlement never publishes an extra error notice here.
-    commandResultHasVisibleOwner: () => true,
     commandPlaneOwnsLine: () => false,
     submittedHostClaim: () => undefined,
     commandSignal: () => new AbortController().signal,
