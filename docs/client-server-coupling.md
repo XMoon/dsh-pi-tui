@@ -261,12 +261,13 @@ reinterpret:
   2. **Reconnect window/ingress ordering.** After
      `connection.reconnect()` the new generation re-reads the durable window
      while the live ingress may already deliver later events. The observed
-     failure (2 of 6 concurrent copies of
-     `test/runner-remote-presentation.test.ts`, green sequentially) leaves the
-     transcript window on the pre-append baseline while the projection path has
-     already advanced: the Host log holds the new turn, the new generation id is
-     observed, the model projection lands, yet the painted transcript never
-     shows the new assistant row. Deciding whether the window replacement must
+     failure is reproducible only under concurrent/full-suite runs of
+     `test/runner-remote-presentation.test.ts` (that file is green sequentially
+     and under light concurrency): it leaves the transcript window on the
+     pre-append baseline while the projection path has already advanced — the
+     Host log holds the new turn, the new generation id is observed, the model
+     projection lands, yet the painted transcript never shows the new assistant
+     row. Deciding whether the window replacement must
      be applied before live ingress, or whether a late ingress fact re-triggers
      hydration, is Remote currentness work for S3 (C11/C12/C18) with its own
      L5/L6 positive + stale-generation negative tests.
@@ -276,8 +277,8 @@ reinterpret:
      (`connection.reconnect()`) and disposes the old claim, then requires the
      NEW generation to re-read the Host catalog on its own and route a mounted
      command to the real Host handler exactly once. It times out at that step
-     under full-suite concurrency (3 of 4 `pnpm test:product` runs) while the
-     file passes alone; no trace exists yet, so the cause is NOT established.
+     under full-suite concurrency while the file passes alone; no trace exists
+     yet, so the cause is NOT established.
      Production path: `src/app/command/surface.ts` subscribes
      `connectionGeneration` and fires `refreshLiveCatalogById(sessionId,
      'invalidation')`, returning early when the token is already equal (or
