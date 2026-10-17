@@ -175,8 +175,24 @@ function installModuleLoader() {
     },
   }
   globalThis.location = { hostname: 'localhost', origin: 'http://dsh-fixture.local', search: '' }
+  /**
+   * Import one official Client bundle from whichever channel its published
+   * `./client` entry selects. DSH 0.2.1-rc.1+ splits that entry into a
+   * standalone Node ESM half (`node`, which never registers through
+   * `__ModuleLoader__`) and a browser loader factory (`browser`/`default`).
+   * A browser registration always wins; the Node namespace only fills a gap,
+   * into the SAME table the registering factories resolve `/client`
+   * dependencies from.
+   */
+  const importClient = async (specifier) => {
+    const id = specifier.slice(0, -'/client'.length)
+    const imported = await import(specifier)
+    if (!modules.has(id)) modules.set(id, imported)
+    return modules.get(id)
+  }
   return {
     modules,
+    importClient,
     restore() {
       if (previousWindow === undefined) delete globalThis.window
       else globalThis.window = previousWindow
@@ -296,12 +312,9 @@ async function main() {
   globalThis.__DSH_TRANSPORT__ = { rpc: mock.rpc }
   let context
   try {
-    await import('@deepseek-ai/dsh-client-connection/client')
-    await import('@deepseek-ai/dsh-api-gateway/client')
-    await import('@deepseek-ai/dsh-api-session-controller/client')
-    const connectionClient = loader.modules.get(PACKAGE_IDS.connection)
-    const gatewayClient = loader.modules.get(PACKAGE_IDS.gateway)
-    const sessionClient = loader.modules.get(PACKAGE_IDS.session)
+    const connectionClient = await loader.importClient('@deepseek-ai/dsh-client-connection/client')
+    const gatewayClient = await loader.importClient('@deepseek-ai/dsh-api-gateway/client')
+    const sessionClient = await loader.importClient('@deepseek-ai/dsh-api-session-controller/client')
     assert.ok(connectionClient !== undefined, 'official Connection Client did not load')
     assert.ok(gatewayClient !== undefined, 'official API Gateway Client did not load')
     assert.ok(sessionClient !== undefined, 'official Session Controller Client did not load')

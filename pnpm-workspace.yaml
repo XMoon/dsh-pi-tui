@@ -4,6 +4,18 @@ packages:
 allowBuilds:
   esbuild: true
   koffi: false
+  # DSH 0.2.1-rc.2 pulls these native/postinstall scripts into the dev graph.
+  # Every one is refused explicitly (minimal privilege) instead of relying on
+  # pnpm's implicit "ignored" state, which pnpm 12 turns into a hard
+  # ERR_PNPM_IGNORED_BUILDS failure: `dsh-subprocess-local` only chmods an
+  # existing node-pty spawn-helper, `@google/genai` and `protobufjs` run
+  # diagnostics-only postinstalls, and `node-pty` ships prebuilt binaries that
+  # the verified Linux lane uses. Cross-platform PTY startup stays a
+  # qualification item; approve selectively if a platform really needs a build.
+  '@deepseek-ai/dsh-subprocess-local': false
+  '@google/genai': false
+  node-pty: false
+  protobufjs: false
 verifyDepsBeforeRun: warn
 minimumReleaseAgeExclude:
 - '@deepseek-ai/*'
