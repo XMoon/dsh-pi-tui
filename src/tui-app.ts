@@ -3886,9 +3886,14 @@ export class TuiApp {
       const previous = this.quickHintLastEditorLayout
       const downHintOwnerEligible = this.keybindings.keysFor('app.tasks.open').includes('down')
         && this.quickDownOwnerEligible()
+      // The candidate the paint must track is the ROUTE's own admission, not
+      // the raw visual-line boundary: the Editor publishes its classifier
+      // answer with every render (`downEligible`), so an editor-internal flip
+      // that leaves the boundary unchanged (returning from history browse to
+      // the draft) still reads as a candidate change and recomposes the Footer.
       const previousCandidateEligible = previous?.downHintOwnerEligible === true
-        && previous.onLastVisualLine
-      const candidateEligible = downHintOwnerEligible && layout.onLastVisualLine
+        && previous.downEligible === true
+      const candidateEligible = downHintOwnerEligible && layout.downEligible
       const candidateChanged = previousCandidateEligible !== candidateEligible
       const renderedGeometryChanged = previous !== undefined
         && (previous.physicalWidth !== layout.physicalWidth
@@ -3920,6 +3925,12 @@ export class TuiApp {
         this.quickHintLastEditorLayout = {
           ...this.quickHintLastEditorLayout,
           onLastVisualLine,
+          // The event's boundary is a FRESH fact, so re-ask the ONE classifier
+          // (the same call the admission predicate makes, with this boundary
+          // known) and keep the candidate baseline in step with it — otherwise
+          // the next render would report a transition the Footer already
+          // painted and compose a second time for it.
+          downEligible: this.editor.canEnterTaskQuickFromDown(this.terminal.columns, onLastVisualLine),
         }
       }
       this.scheduleQuickHintCompose({
@@ -18195,6 +18206,14 @@ export class TuiApp {
     // The dock summary hides while the panel is expanded (it would sit on
     // top of the full list); restore it on collapse.
     this.renderDock()
+    // The PINNED CHROME HEIGHT is an input of the Quick band's grant (the band
+    // sits below the whole Footer and every pinned row above it). The dock,
+    // queue, goal and busy owners publish a status snapshot and reach the
+    // Footer through the store listener; a visibility toggle changes ONLY the
+    // chrome height, and the surface's geometry lane deliberately does not
+    // re-measure chrome on every frame. Recompose here or the painted `↓ view`
+    // keeps the PRE-toggle grant in both directions.
+    this.renderFooter()
     this.requestRender()
     return this.todoPanelVisible
   }
@@ -18212,6 +18231,10 @@ export class TuiApp {
     }
     this.todoExpanded = !this.todoExpanded
     this.renderTodoPanel()
+    // Same chrome-height invalidation as the visibility toggle above: the
+    // compact ↔ full list changes how many pinned rows the Quick grant must
+    // reserve.
+    this.renderFooter()
     this.requestRender()
     return this.todoExpanded
   }

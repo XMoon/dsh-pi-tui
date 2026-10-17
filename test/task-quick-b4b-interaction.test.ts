@@ -1819,3 +1819,289 @@ test('B4B-f13 a resize before queued Footer compose refreshes from the new Edito
     app.editor.onVisualLineBoundaryChanged = originalBoundary
   }
 })
+/**
+ * B4B-f14. With NO live work and only
+ * an UNACKNOWLEDGED failed job, the Active projection must keep the failure row
+ * (`task-presentation.ts` active include: `includeAttentionInActive === true &&
+ * (item.attention === true || isTaskItemFailure(item.status))`). The Footer
+ * hint, the Quick projection and the REAL Down route must therefore agree.
+ *
+ * A green run means this shape is NOT a defect: the badge keeps its failure
+ * attention AND still promises a trigger the Quick can serve.
+ */
+test('B4B-f14 failure-only roster: the failure row reaches Quick and the footer keeps promising it', async () => {
+  // `descendants: []` installs the production `taskRead` seam, so the runtime's
+  // RICH summary path is live (`refreshRuntime` early-returns without a catalog
+  // key) — the failure count the badge and `tasksActive` are derived from.
+  const h = await startQuick({ roster: [job('j1', 'build', 'failed')], descendants: [] })
+  for (let i = 0; i < 8; i++) await new Promise(r => setTimeout(r, 0))
+  await h.vt.waitForRender()
+  h.tasks.refreshAgentRuntimeOnly()
+  for (let i = 0; i < 8; i++) await new Promise(r => setTimeout(r, 0))
+  await h.vt.waitForRender()
+
+  const footerText = h.app.footerRenderRowsForTest().map(strip).join('\n')
+  assert.match(footerText, /failed|! ?1/, `the badge keeps the failure attention:\n${view(h.vt)}`)
+  assert.ok(footerText.includes('↓ view'),
+    `the hint must be advertised when the Quick can serve the failure row:\n${view(h.vt)}`)
+  assert.equal(h.app.taskQuickItemCountForTest(), 1, 'the unacknowledged failure row is projected with no live work')
+
+  // The route must agree with the paint: a real Down enters Quick and the
+  // painted band carries the failed row.
+  h.vt.sendInput('\x1b[B')
+  await h.vt.waitForRender()
+  await sleep(20)
+  const band = h.band()
+  assert.ok(band.identity >= 0, `Down must enter Quick for the failure-only roster:\n${view(h.vt)}`)
+  assert.equal(h.app.taskQuickFocusedForTest(), true, 'Quick owns focus after the entry')
+  assert.ok(band.items.some(row => row.includes('build')), `the failed row paints in Quick:\n${band.items.join('\n')}`)
+
+  // Esc returns to the editor and re-paints the same hint.
+  h.vt.sendInput('\x1b')
+  await h.vt.waitForRender()
+  assert.equal(h.band().identity, -1, 'Esc hides the band')
+  assert.ok(h.app.footerRenderRowsForTest().map(strip).join('\n').includes('↓ view'), 'the hint returns')
+})
+
+/**
+ * B4B-f15. The failure
+ * window: an ordinary text edit invalidates the published Editor layout
+ * snapshot (`onChange`), and a TASK-RUNTIME commit (never a StatusStore
+ * commit) composes the Footer before the Editor renders again. That compose
+ * must paint the badge WITHOUT the hint (fail-closed), and the EXISTING
+ * convergence must then restore it — no extra status pushes, no polling — with
+ * the real Down route agreeing with the restored paint.
+ *
+ * Intermediate observations are witnesses of the window, never the verdict:
+ * the assertions are the FINAL painted Footer and the real Down route.
+ */
+test('B4B-f15 a compose before the Editor republishes its layout heals through the existing convergence', async () => {
+  const h = await startQuick({ roster: [job('j1', 'build', 'running')] })
+  for (let i = 0; i < 8; i++) await new Promise(r => setTimeout(r, 0))
+  await h.vt.waitForRender()
+  assert.ok(view(h.vt).includes('↓ view'), 'precondition: the eligible state advertises the hint')
+
+  const app = h.app as unknown as {
+    renderFooter(boundary?: { physicalWidth: number; onLastVisualLine: boolean }): void
+    quickHintCurrentEditorLayout?: { physicalWidth: number; onLastVisualLine: boolean }
+  }
+  const originalRenderFooter = app.renderFooter
+  const observed: Array<{ layoutPublished: boolean; badgePainted: boolean; hintPainted: boolean; items: number }> = []
+  app.renderFooter = function (this: unknown, boundary): void {
+    originalRenderFooter.call(app, boundary)
+    const painted = h.app.footerRenderRowsForTest().map(strip).join('\n')
+    observed.push({
+      layoutPublished: app.quickHintCurrentEditorLayout !== undefined,
+      // The exact user-visible shape: a BADGE-bearing Footer with no hint.
+      badgePainted: /failed|!\s?\d|tracked jobs|tasks? running|agents/.test(painted),
+      hintPainted: painted.includes('↓ view'),
+      items: h.app.taskQuickItemCountForTest(),
+    })
+  }
+  try {
+    // 1) A real edit invalidates the layout snapshot (production onChange path)
+    //    but the Editor has NOT rendered again yet.
+    h.vt.sendInput('a')
+    // 2) A task-runtime commit recomposes the Footer inside that window.
+    h.roster.rows.push(job('j2', 'test', 'running'))
+    h.tasks.refreshTasks()
+
+    const unpublished = observed.filter(entry => !entry.layoutPublished)
+    assert.ok(unpublished.length >= 1,
+      `witness: at least one compose must run with the Editor layout unpublished: ${JSON.stringify(observed)}`)
+    assert.ok(unpublished.some(entry => entry.badgePainted === true && entry.hintPainted === false && entry.items >= 1),
+      `witness: a badge-bearing compose painted without the hint: ${JSON.stringify(observed)}`)
+
+    // 3) No further status/task commits: let only the existing microtask and
+    //    render queues settle.
+    observed.length = 0
+    for (let i = 0; i < 8; i++) await new Promise(r => setTimeout(r, 0))
+    await h.vt.waitForRender()
+    await h.vt.waitForRender()
+    await sleep(20)
+
+    const healed = h.app.footerRenderRowsForTest().map(strip).join('\n')
+    assert.ok(healed.includes('↓ view'),
+      `the hint must self-heal without extra commits:\n${view(h.vt)}\nobserved=${JSON.stringify(observed)}`)
+
+    // 4) The route must agree with the healed paint.
+    h.vt.sendInput('\x1b[B')
+    await h.vt.waitForRender()
+    await sleep(20)
+    assert.ok(h.band().identity >= 0, `Down must enter Quick after the self-heal:\n${view(h.vt)}`)
+    assert.equal(h.app.taskQuickFocusedForTest(), true, 'Quick owns focus after the healed entry')
+    h.vt.sendInput('\x1b')
+    await h.vt.waitForRender()
+  } finally {
+    app.renderFooter = originalRenderFooter
+  }
+})
+
+/**
+ * B4B-f16. History-browse restore: while browsing, the classifier
+ * refuses Down (the hint may legitimately drop), but returning to the draft
+ * makes the REAL route eligible again (`historyIndex === -1`, prompt mode, on
+ * the last visual line, grant available). The restore emits exactly one
+ * `navigation` boundary event; when its value equals `taskQuickPaintedBoundary`
+ * the T4 dedupe returns early and none of the T3 conditions is sensitive to
+ * `historyIndex`, so the paint can stay hint-less while Down works.
+ *
+ * Assertion order is deliberate: the intermediate drop is only a witness, the
+ * verdict is the FINAL painted Footer plus the REAL Down route.
+ */
+test('B4B-f16 returning from history browse repaints the ↓ hint the real Down route admits', async () => {
+  const h = await startQuick({ cols: 40, rows: 24, roster: [job('j1', 'build', 'running')] })
+  for (let i = 0; i < 8; i++) await new Promise(r => setTimeout(r, 0))
+  await h.vt.waitForRender()
+
+  // Seed ONE history entry through the REAL submit path.
+  h.app.setDraft('short')
+  await h.vt.waitForRender()
+  h.vt.sendInput('\r')
+  await h.vt.waitForRender()
+  for (let i = 0; i < 8; i++) await new Promise(r => setTimeout(r, 0))
+  await h.vt.waitForRender()
+
+  const paintedHint = (): boolean => h.app.footerRenderRowsForTest().map(strip).join('\n').includes('↓ view')
+  // The empty draft is eligible: same single visual row as the recalled entry.
+  assert.equal(h.app.getDraft(), '', 'the submission cleared the draft')
+  assert.equal(paintedHint(), true, `precondition: the eligible empty draft advertises the hint:\n${view(h.vt)}`)
+
+  // An EMPTY draft enters history on the first Up (editor.ts:1212-1213); the
+  // recalled entry keeps the raw boundary true while the classifier's history
+  // gate refuses Down.
+  h.vt.sendInput('\x1b[A')
+  await h.vt.waitForRender()
+  for (let i = 0; i < 4; i++) await new Promise(r => setTimeout(r, 0))
+  await h.vt.waitForRender()
+  assert.ok(view(h.vt).includes('short'), `witness: the entry is recalled into the editor:\n${view(h.vt)}`)
+  assert.equal(paintedHint(), false, `witness: browsing legitimately drops the hint:\n${view(h.vt)}`)
+
+  // Down leaves the single-row entry and restores the saved draft.
+  h.vt.sendInput('\x1b[B')
+  await h.vt.waitForRender()
+  for (let i = 0; i < 8; i++) await new Promise(r => setTimeout(r, 0))
+  await h.vt.waitForRender()
+  assert.equal(h.app.getDraft(), '', `the browse exited back to the saved draft:\n${view(h.vt)}`)
+
+  // Both facts are gathered before the verdict so ONE failure reports the whole
+  // split: the REAL route probe mutates the state (Down enters Quick), so it
+  // runs first and the paint is read before it.
+  const paintedAfterRestore = paintedHint()
+  h.vt.sendInput('\x1b[B')
+  await h.vt.waitForRender()
+  await sleep(20)
+  const routeEntered = h.band().identity >= 0
+  const routeFocused = h.app.taskQuickFocusedForTest()
+  assert.equal(routeEntered, true, `the real Down route enters Quick:\n${view(h.vt)}`)
+
+  // VERDICT: the route is eligible again, so the paint must say so.
+  assert.equal(paintedAfterRestore, true,
+    `paint must match the route: the restored eligible draft must repaint ↓ view `
+    + `(real Down entered Quick: ${routeEntered}, Quick focused: ${routeFocused})\n${view(h.vt)}`)
+})
+
+/**
+ * B4B-f17. The Quick band GRANT is a MEASURED geometry fact
+ * (`taskQuickGrantAvailable`) and is deliberately NOT part of
+ * `canAdmitDownHint`. When a chrome-height change removes the band's room the
+ * route correctly refuses Down — so the painted hint must stop promising it.
+ * Driven by the REAL Ctrl+T toggle; the grant is only MEASURED, never edited,
+ * and `renderFooter()` is never called to help.
+ */
+test('B4B-f17 opening the Todo panel removes the grant and the ↓ hint stops promising the refused route', async () => {
+  const h = await startQuick({ cols: 60, rows: 12, roster: [job('j1', 'build', 'running')] })
+  for (let i = 0; i < 8; i++) await new Promise(r => setTimeout(r, 0))
+  await h.vt.waitForRender()
+
+  const app = h.app as unknown as { taskQuickGrantAvailable(): boolean }
+  const paintedHint = (): boolean => h.app.footerRenderRowsForTest().map(strip).join('\n').includes('↓ view')
+
+  h.app.setTodoSummary([
+    { content: 'first', status: 'in_progress' },
+    { content: 'second', status: 'pending' },
+    { content: 'third', status: 'pending' },
+    { content: 'fourth', status: 'pending' },
+  ])
+  for (let i = 0; i < 8; i++) await new Promise(r => setTimeout(r, 0))
+  await h.vt.waitForRender()
+  assert.equal(app.taskQuickGrantAvailable(), true, `precondition: the CLOSED panel leaves band room:\n${view(h.vt)}`)
+  assert.equal(paintedHint(), true, `precondition: the eligible state advertises the hint:\n${view(h.vt)}`)
+
+  // Open the panel with the REAL key: the band loses its room.
+  h.vt.sendInput('\x14')
+  await h.vt.waitForRender()
+  for (let i = 0; i < 8; i++) await new Promise(r => setTimeout(r, 0))
+  await h.vt.waitForRender()
+
+  const grantAfterOpen = app.taskQuickGrantAvailable()
+  const paintedAfterOpen = paintedHint()
+  // The REAL route in the same state (it must refuse while the grant is gone).
+  h.vt.sendInput('\x1b[B')
+  await h.vt.waitForRender()
+  await sleep(20)
+  const routeAfterOpen = h.band().identity >= 0
+  if (routeAfterOpen) {
+    h.vt.sendInput('\x1b')
+    await h.vt.waitForRender()
+  }
+
+  assert.equal(grantAfterOpen, false, `the open panel must remove the grant:\n${view(h.vt)}`)
+  assert.equal(routeAfterOpen, false, `the route must refuse while the grant is gone:\n${view(h.vt)}`)
+  assert.equal(paintedAfterOpen, false,
+    `the hint must not promise a refused route (grant ${grantAfterOpen}, real Down entered ${routeAfterOpen})\n${view(h.vt)}`)
+})
+
+/**
+ * B4B-f18. The restore direction: the band has NO room while the
+ * Todo panel is open (the hint is legitimately absent — the same runner-publish
+ * sequence as production: the panel is opened first, then the todos arrive), and
+ * closing the panel returns the grant. The route admits Down again, so the
+ * painted hint must return with it.
+ */
+test('B4B-f18 closing the Todo panel restores the grant and the ↓ hint returns with the route', async () => {
+  const h = await startQuick({ cols: 60, rows: 12, roster: [job('j1', 'build', 'running')] })
+  for (let i = 0; i < 8; i++) await new Promise(r => setTimeout(r, 0))
+  await h.vt.waitForRender()
+
+  const app = h.app as unknown as { taskQuickGrantAvailable(): boolean }
+  const paintedHint = (): boolean => h.app.footerRenderRowsForTest().map(strip).join('\n').includes('↓ view')
+
+  // Open the panel FIRST (empty), then publish the todos: the production
+  // sequence that leaves the Footer composed with the tall chrome.
+  h.vt.sendInput('\x14')
+  await h.vt.waitForRender()
+  h.app.setTodoSummary([
+    { content: 'first', status: 'in_progress' },
+    { content: 'second', status: 'pending' },
+    { content: 'third', status: 'pending' },
+    { content: 'fourth', status: 'pending' },
+  ])
+  // A REAL task-runtime commit while the panel is open is the live sequence
+  // that leaves the Footer painted from the tall chrome. The grant is only
+  // MEASURED here; nothing edits it and renderFooter() is never called.
+  h.roster.rows.push(job('j2', 'test', 'running'))
+  h.tasks.refreshTasks()
+  for (let i = 0; i < 8; i++) await new Promise(r => setTimeout(r, 0))
+  await h.vt.waitForRender()
+  assert.equal(app.taskQuickGrantAvailable(), false, `precondition: the OPEN panel removes the band room:\n${view(h.vt)}`)
+  assert.equal(paintedHint(), false, `precondition: no room means no hint:\n${view(h.vt)}`)
+
+  // Close the panel with the REAL key: the grant returns.
+  h.vt.sendInput('\x14')
+  await h.vt.waitForRender()
+  for (let i = 0; i < 8; i++) await new Promise(r => setTimeout(r, 0))
+  await h.vt.waitForRender()
+
+  const grantAfterClose = app.taskQuickGrantAvailable()
+  const paintedAfterClose = paintedHint()
+  h.vt.sendInput('\x1b[B')
+  await h.vt.waitForRender()
+  await sleep(20)
+  const routeAfterClose = h.band().identity >= 0
+
+  assert.equal(routeAfterClose, true, `the real Down must enter Quick again after the panel closes:\n${view(h.vt)}`)
+  assert.equal(grantAfterClose, true, `the closed panel must return the grant:\n${view(h.vt)}`)
+  assert.equal(paintedAfterClose, true,
+    `the restored grant must repaint the hint (grant ${grantAfterClose}, real Down entered ${routeAfterClose})\n${view(h.vt)}`)
+})
