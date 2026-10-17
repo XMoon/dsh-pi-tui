@@ -271,10 +271,15 @@ export interface RemoteLiveIngressFactory {
        *  projection-owned current values (the Session snapshot never does). */
       onProjectionsChanged: (sessionId: string) => void
     },
-    /** The cold-hydration snapshot revision: a higher subscription-time
-     *  revision means events landed in the hydrate→subscribe gap and the
-     *  ingress recovers through `onWindowRefoldRequired` (never a lost event). */
-    hydrateRevision?: number,
+    /** The caller's hydrate/read baseline: the committed revision plus the
+     *  EXACT transport identity it was fenced under. A rollover/replacement or
+     *  a revision change between the read and this subscription makes the
+     *  baseline unusable, so the ingress recovers through
+     *  `onWindowRefoldRequired` (never a lost event). */
+    hydrate?: {
+      readonly revision: number
+      readonly transportToken?: unknown
+    },
   ): {
     dispose(): void
     /** S3-R0: acknowledge one committed window re-fold (exact generation +
@@ -284,7 +289,7 @@ export interface RemoteLiveIngressFactory {
       readonly binding: unknown
       readonly revision: number
     }): boolean
-  } | undefined
+  }
 }
 
 /** The pre-composed Remote application input for the internal L6

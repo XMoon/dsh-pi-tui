@@ -64,11 +64,14 @@ export interface ViewerChildSnapshot<Event> {
   readonly activity: 'running' | 'inactive'
   readonly cwd: string
   readonly revision: number | undefined
-  /** S3-R0 (Remote only): acknowledge the child ingress that the committed
-   *  fold now holds `revision` for the exact generation/binding the read was
-   *  fenced under. `false` means a newer window is already known and another
-   *  recovery is armed. Absent for Direct/local reads (no ingress). */
-  readonly acknowledge?: () => boolean
+  /**
+   * S3-R0 (Remote only): commit the fold THROUGH this closure so the identity
+   * proof, the write and the ingress acknowledgement are one synchronous step
+   * (plan §2.5: last-moment read→commit). Returns `false` when the transport or
+   * the window moved after the read — nothing was written and nothing was
+   * acknowledged. Absent for Direct/local reads (no ingress).
+   */
+  readonly commit?: (write: () => void) => boolean
 }
 
 /** The live sinks one child view publishes into the mounted viewer. */
@@ -604,12 +607,18 @@ export function createViewerRuntime<Event extends SessionPresentationEvent>(
     ])
   }
 
-  /** S3-R0: the ONE in-flight child re-fold. A recovery requirement only marks
-   *  INTENT; the pump serializes the async re-folds (so two reads can never
-   *  interleave their commits), runs again when the child ingress reported a
-   *  newer revision while folding, and never disposes/re-creates the ingress. */
+  /** S3-R0: the ONE child re-fold serialization. A recovery requirement marks
+   *  INTENT (the pump coalesces it); the history-paging path ENQUEUES its
+   *  re-fold on the same FIFO so two reads can never interleave their commits —
+   *  an older read must never overwrite the fold a newer one already committed. */
   let viewerChildRefoldInFlight = false
   let viewerChildRefoldPending = false
+  let viewerChildRefoldChain: Promise<void> = Promise.resolve()
+  const enqueueViewerChildRefold = (): Promise<void> => {
+    const run = viewerChildRefoldChain.then(() => rehydrateViewedChild())
+    viewerChildRefoldChain = run.catch(() => {})
+    return run
+  }
   const pumpViewerChildRefold = (): void => {
     if (viewerChildRefoldInFlight) return
     viewerChildRefoldInFlight = true
@@ -617,7 +626,7 @@ export function createViewerRuntime<Event extends SessionPresentationEvent>(
       try {
         while (viewerChildRefoldPending) {
           viewerChildRefoldPending = false
-          await rehydrateViewedChild()
+          await enqueueViewerChildRefold()
         }
       } finally {
         viewerChildRefoldInFlight = false
@@ -651,22 +660,27 @@ export function createViewerRuntime<Event extends SessionPresentationEvent>(
     folder.hydrate(own)
     const stats = new StatsFolder()
     stats.hydrate(own)
-    target.folder = folder
-    target.window.setTurns(folder.groupedTurns())
-    target.stats = stats
-    for (const input of snapshot.liveInputs) {
-      applyAssistantLiveInput(target.folder, target.stats, target.previews, input, deps.summaryKeys)
+    const write = (): void => {
+      target.folder = folder
+      target.window.setTurns(folder.groupedTurns())
+      target.stats = stats
+      for (const input of snapshot.liveInputs) {
+        applyAssistantLiveInput(target.folder, target.stats, target.previews, input, deps.summaryKeys)
+      }
+      target.cwd = snapshot.cwd
+      target.activity = snapshot.activity
     }
-    target.cwd = snapshot.cwd
-    target.activity = snapshot.activity
+    // S3-R0: the fold write goes through the child's OWN last-moment fence when
+    // the source supplies one (Remote): identity + window revision are checked
+    // in the SAME synchronous step as the write, and the ingress acknowledgement
+    // happens only after it. `false` = the window moved after the read; the
+    // ingress re-arms, so the pump's next round re-reads (never a busy loop).
+    const committed = snapshot.commit === undefined
+      ? (write(), true)
+      : snapshot.commit(write)
+    if (!committed) return
     deps.refreshStatus()
     deps.surface.repaint()
-    // S3-R0: only NOW may the child ingress resume incremental delivery — the
-    // fold is visible and still fenced by the exact viewer identity above. A
-    // `false` answer means a newer revision is already known; the ingress has
-    // re-armed its recovery requirement, so the pump's next round re-reads it
-    // (never a busy loop: every wakeup is a real official revision).
-    snapshot.acknowledge?.()
   }
 
   /** Page one official older window into the viewed child, then re-fold. */
@@ -676,7 +690,9 @@ export function createViewerRuntime<Event extends SessionPresentationEvent>(
     if (target === undefined || handle === undefined || deps.isCleanedUp()) return
     await handle.loadOlder()
     if (deps.isCleanedUp() || viewing !== target) return
-    await rehydrateViewedChild()
+    // Serialized with every other child re-fold: an older in-flight re-fold must
+    // never commit after this one.
+    await enqueueViewerChildRefold()
   }
 
   /** Leave the subagent viewer (single Esc). Returns whether it exited.

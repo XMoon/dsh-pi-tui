@@ -148,6 +148,12 @@ export function createRemoteChildViewSource<Event>(
         return undefined
       }
       let read: PresentationReadSnapshot | undefined
+      // The cold open is a READ→COMMIT too: capture the official generation
+      // BEFORE the await and prove after it that the generation did not roll
+      // over and the window is still the revision that was read (a same-id
+      // rollover or a reconnect between them would otherwise hydrate a dead
+      // generation's window into the viewer).
+      const openFenceGeneration = options.generation.getSnapshot()
       try {
         read = await reader.read(childId, target.signal)
       } catch (error) {
@@ -176,6 +182,14 @@ export function createRemoteChildViewSource<Event>(
       if (!isOpen(binding)) {
         reference.release()
         throw childOpenFailure(childId, opened.openState as 'cold' | 'loading' | 'error', opened.openError)
+      }
+      if (!Object.is(openFenceGeneration, options.generation.getSnapshot())
+        || binding.eventSource?.getSnapshot().revision !== read.revision) {
+        // The transport rolled over (or the window moved) while the child was
+        // being opened: commit nothing and let the caller's next open observe
+        // the CURRENT official state (no stale child, no retry loop here).
+        reference.release()
+        return undefined
       }
       const hydrated = (snapshot: PresentationReadSnapshot, current: RemoteChildBinding | undefined): ViewerChildSnapshot<Event> => ({
         durableEvents: snapshot.durableEvents as unknown as readonly Event[],
@@ -212,15 +226,25 @@ export function createRemoteChildViewSource<Event>(
           const snapshot = hydrated(next, current)
           return {
             ...snapshot,
-            // The viewer calls this AFTER it commits the fold: the ingress
-            // resumes incremental delivery only for the exact identity and
-            // revision the committed fold holds. A `false` answer means the
-            // window moved again and the ingress has already re-armed.
-            acknowledge: () => live?.acknowledgeWindowRefold({
-              generation: fenceGeneration,
-              binding: current,
-              revision: next.revision,
-            }) ?? false,
+            // The viewer performs the actual fold write through THIS closure so
+            // the identity proof, the write and the acknowledgement are one
+            // synchronous step (plan §2.5: last-moment read→commit). `false`
+            // means the transport/window moved after the read: the write is
+            // refused, nothing is acknowledged, and the child ingress has
+            // already re-armed its recovery requirement.
+            commit: (write: () => void): boolean => {
+              if (released) return false
+              if (!Object.is(fenceGeneration, options.generation.getSnapshot())) return false
+              const bindingNow = ownedBinding()
+              if (bindingNow === undefined || bindingNow !== current || !isOpen(bindingNow)) return false
+              if (bindingNow.eventSource?.getSnapshot().revision !== next.revision) return false
+              write()
+              return live?.acknowledgeWindowRefold({
+                generation: fenceGeneration,
+                binding: current,
+                revision: next.revision,
+              }) ?? false
+            },
           }
         },
         async loadOlder(): Promise<void> {
@@ -236,8 +260,10 @@ export function createRemoteChildViewSource<Event>(
             onWindowRefoldRequired: () => sinks.onWindowRefoldRequired(),
             onSessionSnapshotChanged: () => sinks.onSessionSnapshotChanged(),
             onProjectionsChanged: () => sinks.onProjectionsChanged(),
-          }, snapshot.revision)
-          if (handle === undefined) return undefined
+          }, {
+            revision: read.revision,
+            transportToken: { generation: openFenceGeneration, binding },
+          })
           live = handle
           return {
             dispose: (): void => {
