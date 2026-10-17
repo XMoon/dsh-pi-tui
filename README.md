@@ -53,13 +53,15 @@ pnpm compat:dsh:npm
 | TUI 包版本 | 对应的官方 DSH tags | 说明 |
 |---|---|---|
 | `0.5.1`（stable / `@latest`） | `dsh-v0.2.0-rc.2` | 当前稳定版；最低与精确验证目标均为 0.2.0-rc.2 family |
+| `0.5.2-rc.1`（next 预览 / `@next`） | `dsh-v0.2.0-rc.2` | 当前 next 线预览；DSH 基线与 `0.5.1` 相同，最低与精确验证目标均为 0.2.0-rc.2 family |
 | `0.5.0`（stable，历史） | `dsh-v0.1.7-rc.2`、`dsh-v0.2.0-rc.1` | 上一稳定版；最低 0.1.7-rc.2，精确验证目标 0.2.0-rc.1 |
 | `0.4.9`（stable，历史） | `dsh-v0.1.7-rc.2` | 上一稳定版；0.1.7-rc.2 runtime 的兼容 TUI |
 | `0.4.8`（stable，历史） | `dsh-v0.1.7-rc.1` | 上一稳定版；0.1.7-rc.1 runtime 的兼容 TUI |
 | `0.4.6`（stable，历史） | `dsh-v0.1.5-rc.1`、`dsh-v0.1.5-rc.2` | 上一稳定版；0.1.5 runtime 的兼容 TUI |
 | `0.4.7-alpha.2`（next，历史） | `dsh-v0.1.6-alpha.2` | 上一条 next 线；0.1.6-alpha.2 runtime 的兼容 TUI |
 
-不要把稳定线与 `@next` 预发布线混装。`0.5.1` 把整个 DSH peer
+不要把稳定线与 `@next` 预发布线混装。当前 `@next` 指向 `0.5.2-rc.1` 预览，
+它的 DSH 基线与 `0.5.1` 完全相同。`0.5.1` 把整个 DSH peer
 floor 提升到 `>=0.2.0-rc.2`：Question 生命周期消费 rc.2 才发布的公开契约
 （`userQuestions.attachWait`/`answer` Remote 与 `userQuestions` Session
 projection），rc.1 family 不提供这些契约，混装属于虚假的兼容声明。上一稳定版
@@ -175,7 +177,7 @@ Rewind 会从选中的历史 User Turn 创建新的 Child Session，并把对应
 
 ### Subagent 与 Task Center
 
-`/tasks` 打开完整 Task Center，显示当前 Session 中仍由 Job Registry / Subagent catalog 跟踪的工作；Footer 的 `↓` 打开轻量 Quick Tasks，只看当前活动（active）工作。选中 Job 后进入全屏 Job 工作区：顶部一行显示 Job 身份、主题状态与大写状态及 `[GAP]`/`[ERROR]`/`[SETTLED]` 事实，下面是真实进度/说明、命令摘要与 `Output`/`Command` 阅读标签。Output 是官方非消耗式的实时输出预览（可滚动、可搜索，并明确标注为保留尾部而非完整历史），Command 页可阅读并按原文复制 shell 命令。工作区不会消耗模型的 `job_output` 游标，也不写入会话历史。
+`/tasks` 打开完整 Task Center，显示当前 Session 中仍由 Job Registry / Subagent catalog 跟踪的工作；Footer 的 `↓`（仅在光标位于编辑器最后一个可视行时）打开按需的 Quick 窗口，它默认不占行、出现在整个 Footer 之下。选中 Job 后进入全屏 Job 工作区：顶部一行显示 Job 身份、主题状态与大写状态及 `[GAP]`/`[ERROR]`/`[SETTLED]` 事实，下面是真实进度/说明、命令摘要与 `Output`/`Command` 阅读标签。Output 是官方非消耗式的实时输出预览（可滚动、可搜索，并明确标注为保留尾部而非完整历史），Command 页可阅读并按原文复制 shell 命令。工作区不会消耗模型的 `job_output` 游标，也不写入会话历史。
 
 Task Center 的 `ACTIVE` / `TRACKED` 是展示范围：`ACTIVE` 只显示当前活动项，`TRACKED` 显示当前跟踪源（Job Registry / Subagent catalog）仍列出的全部项；`TRACKED` 不是 Session 执行历史。DSH `0.1.7` 会在普通前台 `bash` / `pwsh` 执行期间临时注册 Job，使其可以在 Task Center 中观察和停止；如果命令在前台等待内完成，DSH 会移除该临时记录，最终结果仍保留在 Transcript 的 tool card 中。显式 `run_in_background: true` 或被提升为后台的 Job 在完成后，只要 Job Registry 继续保留其记录，就仍可在 `TRACKED` 中查看。
 
@@ -198,9 +200,9 @@ main
 * nested descendant
 * Job Registry 跟踪的 Job（含运行中的前台 shell）
 
-Footer `↓` 打开的 Quick Tasks 是轻量浏览视图，只提供方向键导航、左右展开/折叠、`Tab` 类型过滤、`Enter` 打开和 `Esc` 关闭。底部 “Open Task Center” 行可进入完整 Task Center。
+Footer `↓` 打开的 Quick 窗口默认不占行，只在编辑器最后一个可视行按 `↓` 时展开到 Footer 之下：`↑↓` / `PgUp` / `PgDn` 选择，`Enter` 用真实任务身份打开既有详情，`↑`（首行）或 `Esc` 返回编辑器并保留草稿；列表末尾的 “Open Task Center” 行进入完整 Task Center。
 
-完整 Task Center 额外提供 `A` 切换 Active / Tracked、`/` 搜索、`Tab` / `Shift+Tab` 双向切换类型、`S`（确认后）停止所选任务以及 `R` 刷新 / 重试。Quick Tasks 只消费上述白名单按键，其余输入一律 no-op，不会进入搜索、停止确认或任务管理状态，因此 `Esc` 始终一层关闭。
+完整 Task Center 额外提供 `A` 切换 Active / Tracked、`/` 搜索、`Tab` / `Shift+Tab` 双向切换类型、`S`（确认后）停止所选任务以及 `R` 刷新 / 重试。Quick 窗口只消费上述导航键，其余输入一律 no-op，不会进入搜索、停止确认或任务管理状态，因此 `Esc` 始终一层关闭。
 
 已经结束的 one-shot Subagent 仍可以打开并查看持久化 Transcript。
 

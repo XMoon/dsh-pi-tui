@@ -7,429 +7,106 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.2-rc.1] - 2026-10-17
+
+### Install and version pairing
+
+This preview uses the same released DSH baseline as `0.5.1`: the peer floor stays
+`>=0.2.0-rc.2` and the exact validation target stays `0.2.0-rc.2`. Installing DSH
+requires explicitly allowing its native install scripts:
+
+```sh
+npm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty @deepseek-ai/dsh@0.2.0-rc.2
+dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@0.5.2-rc.1
+dsh --profile pi-tui
+```
+
+The older-runtime pairings are unchanged: `@deepseek-ai/dsh@0.2.0-rc.1` (including
+`0.1.7-rc.2`) uses `@xmoon76/dsh-pi-tui@0.5.0`, and `@deepseek-ai/dsh@0.1.7-rc.1`
+uses `@xmoon76/dsh-pi-tui@0.4.8`.
+
+### Added
+
+- **Task Quick is now an on-demand window.** With live tasks it still takes no rows by
+  default: it appears below the whole Footer only when you press `↓` on the editor's
+  last visible line, where `↑↓`/`PgUp`/`PgDn` select, `Enter` opens the existing detail
+  for that real task identity, and `↑` (first row) or `Esc` returns to the editor with
+  the draft preserved. The trailing `➜ Open Task Center…` row opens the full Task Center
+  without counting as a task; the legacy modal Quick is retired.
+
+- **`Ctrl+R` history search takes over the bottom editor seat.** The seat holds the query,
+  the results and a Preview that soft-wraps the full prompt and scrolls on its own;
+  `Enter` writes the entry back to the editor without submitting, and `Alt+C` copies it.
+  Switching sessions closes the old seat immediately, so its actions and async results
+  never land in the new session.
+
+- **`/settings` is now a fullscreen workspace, and `Configured theme` and
+  `Transcript display` write directly.** Three, two and one column are the same
+  `categories → rows → detail` projection (`Right`/`Enter` move one level in, `Left`/
+  `Esc` one level back), `R` re-reads and `C` copies the raw value, and a confirmed
+  change goes through the existing serialized write path and is re-read from the
+  authority — a failure is reported as `Not saved` or `Outcome unknown`, never as
+  success.
+
+- **A Job detail is now its own fullscreen workspace.** It shows the Job identity, its
+  status and the `[GAP]`/`[ERROR]`/`[SETTLED]` facts, and `Tab` switches between the
+  `Output` and `Command` pages. Output scrolls, searches, and follows the newest output
+  by default (a manual browse pauses it until `End`), the Command page shows the
+  unmodified original command and copies it, and the workspace never consumes the
+  `job_output` cursor or writes session history.
+
+- **The Footer's Performance item gains the whole-Session rate**, now sourced from the
+  TUI's own Host projection: identical on Direct and Remote and unaffected by
+  reconnects or paging, with the main session and a viewed child each showing their own
+  Session's figures, and an ineligible scope omitted instead of shown as `0 tok/s`.
+
 ### Changed
 
-- A `/fork` that really switches to the new child session now shows one
-  `Forked to a new session` info notice (PiTui reuses its existing notice area,
-  TSP reuses its existing Dock notice), so it is unambiguous that you are now in
-  the new session. The notice appears exactly once, and only while the child was
-  actually adopted and that navigation is still in effect; a failed fork, a
-  merely parked child or a superseded navigation shows nothing, and the existing
-  `/rewind`, `/new` and `/resume` feedback is unchanged.
+- **A `/fork` that really switches to the new child session now says so.** The
+  `Forked to a new session` notice appears once, and only while the child was actually
+  adopted and that navigation is still in effect; a failed fork, a merely parked child
+  or a superseded navigation stays silent, and the `/rewind`, `/new` and `/resume`
+  feedback is unchanged.
 
-- The experimental TSP renderer can now run the "no new UI" basic commands:
-  `/new`, `/fork`, `/title` (with its `/rename` alias), `/copy`, `/yolo` and
-  `/logout <target>` with an explicit target. They keep the existing command
-  classification, capability admission, handler and real business owner
-  (session runtime, title write, permission-preset write, credential port,
-  clipboard policy) and add no panel or picker. Bare `/logout` (including a
-  whitespace-only form) and the commands that still need PiTui chrome
-  (`/settings`, `/help`, `/login`, `/attach`, `/export`, …) stay explicitly
-  refused with the draft restored. Outcome presentation is per command: a
-  `/title` or `/rename` success and refusal are carried by the official command
-  result card on the TSP Direct mount (the Dock does not repeat them; PiTui
-  keeps its existing notice and the card-less Remote path is reported once by
-  the submission settlement), while a confirmed `/yolo`, `/logout <target>` or
-  `/copy` success is supplemented on the TSP Dock and a
-  refused/cancelled/indeterminate outcome keeps its existing single owner (the
-  Direct card or the submission settlement).
+- **Pickers and state markers share one visual vocabulary**: overlay pickers use a
+  `primary` cursor and an `Esc`-last hint line, and `/settings` and `/preset` show the
+  current value as a `[current]` / `[default]` chip.
 
-- Task Quick now appends a distinct `➜ Open Task Center…` navigation row after
-  real tasks when the Full Task Center is available. It shares selection and
-  paging without becoming a task or affecting `showing x-y/N`, status counts or
-  Footer badges. Enter or a same-row Fullscreen click first exits Quick and
-  restores the Editor, then opens the same Full Task Center as `/tasks`. The
-  regular main screen remains keyboard-only.
+- **The `▴ Collapse` tail row is removed from long user messages**, replaced by a click
+  anywhere in the body.
 
-- The Task Quick window is now on-demand and lives UNDER THE WHOLE FOOTER:
-  even with live tasks, the window occupies **zero rows** by default. It
-  appears only when the cursor sits on the focused editor's last visual line
-  (the last soft-wrapped segment of a non-empty multi-line draft included) and
-  you press `↓`; `↑` at the first row or `Esc` returns to the editor with the
-  draft and cursor byte-for-byte intact. When open it is the frame's LAST
-  region, below the footer, with ONE `border`-ink separator rule as the
-  Footer↔Quick boundary (the rule yields first when the task rows cannot all
-  fit), followed by the identity row and at most three task rows. While
-  open, `↑↓/PgUp/PgDn` move the selection across
-  the whole task row set (first row selected, tail clamped, paging by the
-  painted rows) and `Enter` — or a same-task-row click in fullscreen — opens
-  the existing typed detail with the row's REAL identity (Job view, subagent
-  viewer, parked Question reopen), never a Stop. Shell mode, autocomplete,
-  history browsing and blocking modals keep `↓` for its editing meaning. The
-  footer's `↓ view` hint now tracks the real admission (a disabled action or a
-  blocking owner drops only the hint — the task count and `?N`/`!N` stay). On an
-  extreme frame where the hint-enabled Footer candidate leaves no task row, both
-  hint and `↓` entry are withheld without shrinking the Footer. The legacy modal
-  Quick is retired: `↓` opens this on-demand window and
-  `/tasks` remains the Full Task Center. The task panel's action bar also
-  settles to the design language: `Enter open` leads, navigation and low-frequency
-  management verbs drop as whole segments by priority, the real `Esc close` or
-  `Esc back` remains last, and wheel scrolling/live task refreshes keep Enter
-  within the painted task window. Advertised bindings use canonical keymap labels.
-  Full Task Center rows now share one `‣` marker and semantic
-  Title Case status word instead of a per-status glyph set.
-
-- A Task Quick window now sits below the editor (sharing ONE live row budget
-  with the Editor, the footer and the transcript: the editor seat, the
-  status/footer, at least one transcript row and the existing plugin widget
-  zones come first, and only the remainder goes to the window — so a long task
-  list can never push the Editor or the Footer off screen; an extreme frame or
-  an empty projection paints no row at all). Its rows are the SAME Task Runtime
-  projection `/tasks` shows (Job roster, Subagent catalog and parked Question
-  attention — never a second catalog), each row showing the task identity, its
-  real mode and the `‣ Running` / `‣ Failed` / `‣ Awaiting answer` status
-  words with the true `showing x-y/N` position. Passive painting, refresh,
-  wheel and resize never change failure acknowledgement (`!N`) or a Question's
-  answer state. In fullscreen the wheel scrolls only the window under the
-  pointer; the regular screen stays keyboard-only.
-
-
-
-- The experimental TSP renderer's `/preset` now uses the v4 two-page native flow: the
-  catalogue is ONE native `cards` picker grouped `Built-in` / `Custom` with their counts,
-  and every card carries the preset's name, its kind, a one-line summary and its real state
-  badges (`Current`, `Next session`, `Default`, `Draft`); a broken declaration states its
-  reason on its own card and stays readable but can never be written. The catalogue footer
-  carries the THREE native buttons — `Close` on the left, `Set default` beside `Use next` /
-  `Use session` on the right (the primary highlight) — as the panel's ONLY writer; a
-  disabled button greys out and carries its reason as its tooltip. `Enter` (or a click on
-  the selected card) opens the preset's single read-only Details page: the complete name /
-  ID / type and scope sentence, its relation to the current session, the next session and
-  the new-session default, the full description and failure reason, and — for a shipped
-  preset — the official English "Mode details" and "How to use" sections INLINE as one
-  continuous Markdown scroll (no third layer). The page opens with the native navigation row
-  `← Back to presets · Esc`; the click, Enter and Esc all return to the catalogue keeping
-  the search and the selection. Browsing, searching, reading and going back never write; while a write is in
-  flight only `Close` remains, a refused write returns to the catalogue and states why, and
-  long names, IDs and descriptions wrap completely and scroll to the end on the Details
-  page.
-- `Ctrl+R` history now declares its own boundary: one `─` above the identity row
-  and one below the action bar (against the footer), so the seat is visibly
-  bounded by the transcript and the status/footer. Both are preferred and may
-  compress the Results/Preview regions, but a rule never costs the header, query
-  or action bar, at least one result row or at least one Preview content row:
-  when the budget cannot satisfy all of those the bottom rule is removed first,
-  then the top one, and a loading/empty/failed state keeps its one status row. A
-  rule never takes a transcript/footer row. This is an explicit Owner amendment
-  (D15) of the design rule "at most two rules per frame".
-- `Ctrl+R` history finished its visual and lifecycle closure: the title is
-  `Input History` (Title Case), the active scope is a bold-`primary` `[Label]`,
-  a result row uses a `primary` `> ` cursor with bold selected text (time and
-  directory stay `textDim`), the Fullscreen actions are the bracket-less
-  `Copy All [Alt+C]` / `Use Selected [Enter]`, the hint row degrades by whole
-  segments (never mid-key, `Esc` always last), and no-match/loading and a failed
-  load use different inks. When a new session is published — including reopening
-  the same session id or a same-owner generation change — the old history seat
-  closes immediately: Enter, copy and async search results from it are neither
-  written nor shown in the new session, a seat cleanup failure cannot roll back
-  the published session, and a Question / Approval / Save Location still parks
-  and restores the SAME history seat once the last blocker settles.
-
-- `Ctrl+R` history search no longer opens a centered floating overlay: it takes
-  over the bottom editor seat, so the live Transcript and the status/footer stay
-  visible and every width gets the same vertical layout (header with the scope and
-  the `F2` hint, query, results, divider, Preview). The single-line results list
-  follows the selection (at most 8 rows) and the Preview below it soft-wraps the
-  FULL selected prompt with its own scroll position (`Alt+↑`/`Alt+↓` one row,
-  `Alt+PgUp`/`Alt+PgDn` one page, `Alt+Home`/`Alt+End` first/last) — the `… more`
-  truncation is gone. `F2` switches between the roughly 63% and 80% seat heights,
-  and a short terminal yields the Preview and its hints before it hides the query
-  or the selected row. `Enter` (or clicking `[Use selected]`) writes the entry back
-  into the CURRENT editor and never submits; `Alt+C` (or `[Copy all]`) copies the
-  entry's original text; `Esc`/`Ctrl+C` cancels and leaves the draft, cursor, input
-  mode and any unexpanded paste content exactly as they were. The session identity
-  is captured when the seat opens; after a session switch it neither accepts nor
-  copies the previous session's content, and a search that resolves for that
-  previous session is not shown as a current result. A window resize keeps the Preview on
-  the same passage of the original text. The mouse is Fullscreen-only and left-button only:
-  clicking a result only selects it, the wheel scrolls only the region under the pointer,
-  and a Preview drag copies an exact fragment of the original text, ending at the released
-  cell (a drag that leaves the preview, or a window-width change mid-drag, cancels instead
-  of copying); the regular main screen
-  stays keyboard-only and the terminal's own selection and scrollback are untouched.
-- `/settings` now has consistent three-level keyboard navigation and same-pane
-  editing. ASCII `Right` advances exactly one level, `Left` returns one level
-  (inert at L0), `Enter` follows the same hierarchy, and `Esc`/`Backspace` step
-  back and close at the outermost level; `Tab`/`Shift+Tab` remain inert. Wide
-  terminals show three columns (categories / settings rows / details), medium ones
-  the current level's two columns, and narrow ones a single column: all remain
-  projections of the SAME `categories → rows → detail` levels. For the editable
-  `Configured theme` and `Transcript display`, L1 `Right`/`Enter`, the painted
-  `[Change…]` button, or ordinary visible Detail content opens the choice in the
-  SAME L2 pane, with the current value and Runtime/Persisted facts above the
-  candidates. `Up`/`Down`/`Home`/`End` move the candidate; `PgUp`/`PgDn` and the
-  wheel over facts scroll only the fact region, while the candidate wheel scrolls
-  independently. `Enter` or `[Confirm]` confirms explicitly; `Left`/`Esc`/
-  `Backspace` or `[Cancel]` cancels directly to L1 without writing. If the selected
-  candidate identity has scrolled out of view, the first Enter only reveals it;
-  confirmation requires a later Enter. Even at 44×8 the old value, current
-  candidate identity and explicit `Enter confirm` hint remain visible. Only
-  buttons and candidates that are really painted can be clicked. The workspace
-  shows the real Appearance / Display facts and each row's configuration Scope and
-  backend readiness (`Ready` / `Last-known` / `Unavailable` / `Read error`); `R`
-  re-reads, `C` copies only the selected row's exact source value, and browsing or
-  picking writes no configuration. A confirmed change is stored through the
-  existing serialized whole-document write path and then re-read from the
-  authority: the Detail names the live runtime fact (`Runtime`) and the stored
-  preference (`Persisted`) separately and states the commit as `Saving…`,
-  `Verified`, `Not saved · <reason>`, `Commit accepted · verification unavailable`
-  or `Outcome unknown · <reason>` — only a completed write whose authoritative
-  re-read agrees is called Verified. A REJECTED write re-reads the authority first:
-  a value that is still the previous one is reported as Not saved, while a value
-  already in place (another writer may have set it first) or an authority that
-  cannot be read is reported as Outcome unknown — never a claimed success, and
-  never a refusal the authority contradicts. On a non-ready backend the theme is
-  neither applied nor written; a display preset may already be live locally and
-  then says so instead of claiming a save. A plugin theme is resolved again by its
-  source-qualified identity at confirm time, so an unloaded plugin theme is listed
-  as unavailable and refused rather than redirected to a same-named custom file.
-  Icon style and Thinking detail stay read-only rows (their button row points at
-  `Other settings`), and the existing complete settings editor remains fully
-  available: `Other settings` → `Open existing settings…` retires the workspace
-  and restores the surface it paused before opening the original editor, so Theme,
-  the Plugin Manager, keybindings, permissions and extension settings keep every
-  existing write path.
-- A Job opened from the Task Center now renders in its own fullscreen workspace:
-  the Job status, progress, output gaps, observation errors, terminal state and
-  the retained output are presented as separate regions instead of one joined
-  block, with a pinned bottom row (`Esc back` plus Stop only while it can act)
-  and a disclosure that the retained output is a preview, not the full history.
-  `Esc` returns to the same Task Center with its selected row, draft and scroll
-  state, and the surface that was showing before (regular or fullscreen) is
-  restored unchanged — leaving the workspace never rewrites the user's display
-  preference. A Stop that is refused or cannot be confirmed now reports its
-  result on the workspace's own notice row, instead of only on the surface the
-  user has left (on a very short terminal the status and `Esc back` keep their
-  rows first).
-- The Job workspace Output is now really browsable and searchable:
-  `PgUp`/`PgDn`, `↑`/`↓`, `Home`, the mouse wheel and the scrollbar move only the
-  Job output — never the background transcript, the Task Browser or the editor
-  input. Opening a Job follows the newest output, any manual browse pauses that
-  follow, and only an explicit `End` resumes it; a newer snapshot, a shrinking
-  body or a terminal resize never silently re-arm it, and the bottom row follows
-  the state: `Follow ON`, or `Follow PAUSED` (with the `End` resume hint while
-  `End` can act — while the query is being edited it is omitted, because `End`
-  belongs to the input there). `Ctrl+F` (or whatever the live keymap really
-  binds) and `/` search only the CURRENT retained Job output: every hit is
-  highlighted with the current one emphasised, `i/N` and `0/0 · No matches` are
-  shown, `Enter` switches to result navigation where `n`/`N` cycle the hits, the
-  first `Esc` leaves only the search (the Job stays open and follow stays paused)
-  and the second `Esc` returns to the Task Center; while a search owns the
-  ordinary keys the bottom row no longer advertises Stop, and while the query is
-  being edited it also omits the Find/End hints, because those keys belong to the
-  query input there.
-- The Job workspace gained a Command reading page: a shell (`bash`/`pwsh`) Job
-  opens it with `v` or by clicking the `Command:` summary in the header, showing
-  the ORIGINAL command text unmodified (indentation, tabs, trailing spaces and
-  line breaks included) with its own scrolling and Find, plus mouse drag-selection
-  of any original fragment; `C` or a click on `[Copy All]` copies the whole
-  original command once, and `Esc` returns to the Output page without closing the
-  workspace. Non-shell Jobs still show only `Label:` and never get a fabricated
-  Command page. On the Output page `C` copies the retained output as of that
-  keypress. Both copies go through the existing local clipboard strategy: success
-  reads `Copy sent`, failure reads `Copy failed`, and the message never claims the
-  system clipboard was confirmed (OSC52 has no acknowledgement). An empty
-  retained output answers `Nothing to copy`, and a not-yet-observed or
-  unavailable one answers `Output unavailable`: neither writes the clipboard and
-  neither reports a false success. Terminal control sequences inside the Job
-  metadata (`label`/`detail`/`progress`) are only ever shown as sanitized text in
-  the workspace header and notice row (a Stop settlement embeds the Job label
-  there) and are never passed to the terminal from those rows. The Command page
-  suspends the terminal's native copy-on-select while it is shown, so a rapid
-  double click on `[Copy All]` cannot overwrite the full command with a screen
-  word.
-  When the retained window is truncated, a paused view keeps the same
-  still-present row where it can, the bottom row number is a position inside this
-  retained preview only, and `[GAP]` still comes only from the official fact.
-- The Job workspace now has a clear visual hierarchy: the top row always shows the
-  fixed `JOB` marker, the Job identity, a themed status dot and the UPPERCASE
-  status plus the independent `[GAP]`/`[ERROR]`/`[SETTLED]` markers; real progress
-  and detail get their own row next to the output-gap and observation-error
-  reasons. Under the title, clickable and readable `Output` / `Command` reading
-  tabs (the current one bracketed; `Out`/`Cmd` on narrow terminals) switch pages
-  exactly like `v`/`Esc`; the command entry is the right-aligned `↗ Command`, and
-  the command page is titled `Full command` with `Copy All [C]`. The log body keeps
-  the terminal's own background — no card or second frame — and a wide terminal
-  gets one rule row under the body with "retained preview, not full history" plus
-  the real preview line numbers; where that row does not fit, the bottom bar keeps
-  the same disclosure, never both at once. Very narrow or short terminals drop the
-  optional rows in a fixed order, always keeping at least one body row for the
-  current page and a reachable `Esc`; at `80×1` only the bottom `Esc` remains. A
-  live theme switch applies immediately.
-- The Footer's Performance item gains the whole-Session rate and shows both
-  scopes in the default layout: the speed placement now defaults to
-  `speed-both` (`R5 116 · All 44 tok/s`), with `speed-all` (`All 44 tok/s`)
-  available on its own. Under width pressure it collapses to its leading fact
-  (`R5 116t/s`, or `All 44t/s` when no recent sample exists) and then drops by
-  importance; the legacy `speed` / `full` / `latency` styles in saved layouts
-  keep their meaning, and the `/status` detail line shows TTFB, R5 and All.
-- The performance facts now come from the TUI's own Host `piTuiPerformance`
-  projection: identical on Direct and Remote and unaffected by reconnects or
-  local paging, while the main session and a viewed child each show their own
-  Session's figures. A scope with no eligible sample is omitted — never
-  `0 tok/s`.
-- The experimental TSP renderer's `/model` is now ONE **list-first** catalogue at
-  every window width: the wide provider sidebar, the side details column and the
-  bounded `Open model & effort ›` card are gone. The catalogue is a single native
-  picker whose rows carry the model name, a short Provider mark, the real
-  `current`/`default` badges and the complete model id, grouped as
-  `Current · Default` first and then by Provider. Below the list the catalogue
-  paints its OWN **Reasoning Effort strip**: one button per candidate the
-  highlighted model advertises, with the model's current draft marked — so the
-  frequent task (choose the model, set its effort, confirm) happens on ONE page. A
-  strip click, or putting the keyboard on the strip with `Tab` and using its arrow
-  keys, changes only that model's local draft, and a model that advertises no
-  effort shows no strip at all. The explicitly named `Switch` (live session) or
-  `Save default` (sessionless) commits ONCE from the footer at EVERY width, so
-  switching the whole model needs no second page; a row click only moves the
-  highlight, and clicking the highlighted row (or `Enter`) opens that model's
-  read-only **Full details** page directly: there is no intermediate page and no
-  second-level effort menu. `Esc` follows one ladder on the catalogue: it clears a typed
-  SEARCH first (the panel stays open with the query emptied, and the keyboard stays in the
-  zone it was in) and closes only once there is nothing left to clear — in the list, the
-  effort strip and the action bar alike, with `Tab`/`Shift+Tab` moving between the zones.
-  A read that fails as a whole leaves exactly ONE Retry (the bar's): the list's partial-failure
-  row exists only while the catalogue is really ready, and its failure information stays as
-  read-only context. The catalogue, its layer and that page now keep ONE node
-  identity for the panel's whole life (a per-frame id made the client remount the list,
-  which moved the whole viewport when a lower model was clicked), so the native scrollbar
-  and wheel stay available and clicking a visible row no longer moves the viewport. The notice at the top of that page is now inked by what it
-  reports — an error for a write that was refused, unsupported or threw, information for
-  a cancellation — where write-outcome notices used to read as information. The window no longer grows with the terminal either: the
-  catalogue always asks for the client's medium dialog (measured, the `lg` sheet
-  filled 1120x698 of a 1280x800 pane — 87% of both axes — where the medium one is
-  680x540, the same choice the official product's own pickers make), and the client
-  shrinks it by itself below that cap. The catalogue asks for no preview region any
-  more (the client reserves a fixed share of the sheet for one and the read-only
-  summary that used to live there was a single line). The read-only Full details page is a native Reader
-  whose facts are grouped into Identity / Configuration / Description: each value
-  is ONE complete string wrapped by the client at the real width (an unbroken
-  identifier by character, a description by word with its blank lines preserved),
-  `↑`/`↓`, `PageUp`/`PageDown` and `Home`/`End` drive the native scroll to the very
-  end, and only its visible `Back` row or `Esc` returns to the page it came from
-  (`Esc` is the way back from the tail, where the row has scrolled away). The page
-  has no submit entry at all and a forged submit is refused. A partially failed
-  read lists its providers under `Unavailable providers` with ONE read-only
-  `Retry failed providers` row, so the footer keeps its two buttons. The former
-  `More actions` page, `Action: …` strip, `Operation` block, Provider scope column,
-  the vague `Confirm` verb and the compact-list "no write" rule are all removed;
-  the write is still the same single business operation and the read still has the
-  same single owner. Re-verified in a real Tern pane (0.8.3): the presenter's own
-  layout claim against the client's preview classes at every supported size, both
-  footer buttons fully inside the bar at the 400px floor, exactly one write per
-  click, and the Reader's complete values, keyboard scrolling and return. Still NOT
-  verified: the 400px floor and the wide layout under +25% / +50% enlarged UI fonts
-  (the pre-existing Owner-accepted limitation), wheel/trackpad scrolling, IME,
-  themes and the Remote path — see the real-pane and not-verified sections of
-  `docs/tern-tsp/model-selection.md`.
-
-- The fullscreen Settings workspace now speaks the same visual language as the
-  rest of the TUI: the header reads `Settings · <trail>` (a bold identity word and
-  a dim trail instead of a blue `SETTINGS` brand word), the diagnostic line's
-  status word is Title Case with a semantic colour (`Ready` / `Stale` /
-  `Unavailable`), pane focus uses the same bracketed bold-blue device as the Job
-  tabs, and the column titles read `Categories (3)` / `Rows (2)` / `Details`.
-  Detail values no longer fall back to the terminal's default foreground: the
-  primary value takes one ink and secondary facts a weaker one, while the commit
-  status word (`Verified` / `Not saved` / `Outcome unknown` / `Saving…`) carries
-  its own semantic colour — a refused write no longer looks like a successful one.
-  The current value is marked with a `[current]` state chip, and a row with two
-  states paints two chips. Detail actions read `Change…`, `Retry save`,
-  `Copy value [C]`, `Confirm` and `Cancel` instead of bracketed verbs, and the
-  pinned action bar joins hints with ` · `, keeps `Esc` last and drops whole
-  segments by priority instead of cutting a hint mid-word. L2 choosing keeps the
-  focused multi-column title unless it would replace the only content row; its
-  keyboard Copy is available only while `c copy` is painted. At 44×8, a long
-  identity may reclaim the optional chooser heading and excess facts (never the
-  original `Value` row), but cannot be confirmed until the full identity and
-  `Enter confirm` are visible together.
-
-- The fullscreen Job workspace now speaks the same visual language as the rest of
-  the TUI: the header reads `Job · <id> · <kind>` (a bold identity word and a dim
-  trail); the status reads `‣ Running` / `‣ Failed` — ONE East-Asian-width-neutral
-  marker plus a Title Case status word, instead of `●` with ALL CAPS and instead
-  of a glyph per status — and the metadata line reads
-  `Progress: … · Detail: … · Error: …`, dropping a fact whole inside its reserved
-  half row instead of cutting it mid-word. The reading-facts row loses its two
-  flanking rules and becomes a dim status line (disclosure left, position right),
-  and the Command page no longer repeats `Full command`. The pinned action bar
-  joins with ` · `, keeps `Esc` last (with the highest drop priority), spells its
-  facts `Follow on` / `Follow paused` and its bare key letters lowercase
-  (`s stop`, `c copy output`, `Tab switch`), and takes the weakest readable ink; a
-  right-aligned entry such as `↗ Command` or `Copy All [C]` is painted only while
-  the whole content fits beside it, so a narrow row keeps the output and leaves no
-  dead click region.
-
-- The Job workspace now uses `Tab` to switch between its Output and Command pages
-  in **both** directions (the former `v` open verb is removed and doing nothing);
-  the action bar advertises `Tab switch` on both pages, while the mouse paths (a
-  tab click, the summary row's `↗ Command` entry) and `Esc output` returning to
-  Output are unchanged. While a Find owns the ordinary keys the toggle yields, as
-  it did before. Copying the current page's exact original moved to a bare `c`
-  (the key that really acted was `Shift+C` while the bar wrote `C`), matching the
-  Settings workspace and the `Copy All [C]` / `Copy value [C]` badges exactly.
-
-- The "current value" state in the `/settings` Theme submenu and the `/preset` picker
-  is the `[current]` state chip instead of the literal `← current`: both pickers use
-  ONE position (the row's value slot), and its ink is pinned to the weakest token in
-  BOTH selection states. The preset's `default` state moved out of the description too
-  and sits beside it as a `[default]` chip — two states are two chips, a plain space
-  apart. A chip is now painted whole or not at all: on a narrow terminal the LABEL
-  yields and is clipped with `…`, instead of the chip being cut in half or pushed out
-  of the row by a long preset name. An over-wide name keeps BOTH ends on its label
-  (head…tail around one `…`) instead of only its head, and that abbreviation is a
-  drawing fact: the row's COMPLETE name stays its search basis, so a keyword from the
-  middle of a long name still finds it.
-
-- The pickers (the `/model` overlay and its family) now speak the same visual
-  language as the workspaces: the selection cursor is `>` in `primary` — asked from
-  `selectListTheme.selectedPrefix` instead of being inlined, and no longer the
-  colourless bold EAW-ambiguous `→ `; the hint line capitalizes its key tokens,
-  lowercases its verbs and keeps `Esc` last (`↑↓ model · Enter effort/select · Esc
-  close`); the title row carries only the title (bold) with the count right-aligned
-  in the weaker ink on the same row instead of a suffix (dropped whole when it does
-  not fit); a group header splits into its label and its count in two weaker inks
-  instead of one bold span; the `current` / `default` row states are the
-  `[current]` / `[default]` state chips whose ink stays the weakest one even on a
-  selected row; and a failed catalog paints its failure word `error` while an
-  ordinary empty filter stays muted. Two states on one row are two chips a single space apart;
-  ` · ` stays the chrome / grouped-badge separator. The selected row's text is bold `textStrong`
-  instead of a colourless bold default, and the badge's effort value is painted its own
-  secondary ink (`textDim`): a nested span's reset ends the outer colour for everything
-  after it, so a pre-painted state chip used to leave that value in the terminal's
-  default colour. The
-  settings-list family's cursor glyph follows (`›` → `>`).
+- **In terminals without paste markers, a multi-line paste submits at the first
+  `Enter`**; terminals that support paste markers are unchanged.
 
 ### Fixed
 
-- The `↓ view` hint no longer disagrees with the real key behaviour: returning
-  from history browse (`↑`/`↓`) to the draft brings it back, and folding or
-  expanding the Todo panel (which changes the Task Quick window's room) makes it
-  disappear and return with the route — never "Down opens it while the hint is
-  gone" and never "the hint promises an entry Down refuses".
+- Input is no longer lost after a new or switched Session: same-name Skill commands, an
+  unacknowledged draft and `↑` recall all survive.
 
-- A skill's slash command no longer disappears after a new or switched Session
-  (`/new`, `/resume`, `/fork`): the catalog refresh no longer treats the TUI's
-  own compatibility mirror as a genuine Host command, so the skill stays in the
-  completion list and `/name args` still runs as a skill. A genuine same-name
-  Host command keeps winning the name.
-- A command that was offered by the completion list but the target Session does
-  not actually provide now returns the COMPLETE original input (staged
-  attachments included) to the editor when it is refused — the submitted words
-  are never swallowed, and a draft typed while the refusal settles stays ABOVE
-  the restored text.
-- Input submitted after a Session switch but before its recall history is
-  reloaded no longer vanishes from ↑: the reload merges the inputs the Session
-  already accepted with its disk rows, in order and without duplicates, and the
-  previous Session's entries still never appear in the new Session's history.
-- While a Question / Approval / Save Location captures the input, the Footer no
-  longer advertises the Task Center `↓ view` (the narrow-screen `↓`), which
-  could not act there. The hint returns once the modal settles, the editor is
-  empty and the other conditions still hold; the parked `?N` and failure `!N`
-  figures stay visible throughout. The hint is also withheld while
-  `app.tasks.open` is explicitly disabled or while `↓` has been given to
-  another action (a keymap change applies immediately) — the footer never
-  promises a key the router no longer resolves.
+- The Footer's `↓ view` hint always matches the real admission: it is withheld while a
+  modal owns the input or the action is disabled or rebound, and it returns with history
+  browsing or a Todo fold that changes the Quick window's room.
+
+- Viewing a child session no longer leaks the main session's facts, and the fullscreen
+  `‹ back` is clickable.
+
+- Plugin widgets no longer disappear in fullscreen; a zero-row grant is a legal empty
+  projection.
+
+- The nested `/settings → Keyboard shortcuts` subpage no longer fills the whole screen;
+  standalone `/keybindings` is unchanged.
+
+- Live and cold-start transcript grouping converge, so a restored session matches the
+  live one.
+
+- workflow cards settle only on the official terminal event and are no longer shown as
+  `[interrupted]`.
+
+- Task Browser Host labels are projected at the terminal boundary, so embedded
+  ANSI/OSC/CSI never reaches the terminal.
+
+> **Known limitations:** The OSC 7 pane working directory and the OSC 9;4 "waiting for
+> input" refinement are currently enabled only for terminals identified as Tern.
 
 ## [0.5.1] - 2026-10-08
 
@@ -2126,7 +1803,8 @@ Users who must keep DSH `0.1.1-rc.2` should use `@xmoon76/dsh-pi-tui@0.3`.
 - Fullscreen layout, Ctrl+F transcript search, theme system.
 - Single-package release model.
 
-[Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/v0.5.1...HEAD
+[Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/next-v0.5.2-rc.1...HEAD
+[0.5.2-rc.1]: https://github.com/XMoon/dsh-pi-tui/compare/v0.5.1...next-v0.5.2-rc.1
 [0.5.1]: https://github.com/XMoon/dsh-pi-tui/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/XMoon/dsh-pi-tui/compare/v0.4.9...v0.5.0
 [0.4.9]: https://github.com/XMoon/dsh-pi-tui/compare/v0.4.8...v0.4.9
