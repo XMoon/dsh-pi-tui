@@ -309,13 +309,22 @@ the official Direct command-result card already carries:
   `runner.app === undefined`), while refusal/cancellation/indeterminate keep
   their existing owner (the Direct card, or the controller's own local-command
   notice on the sessionless path).
+- **card-less transport** — the Remote Client command registry appends no
+  `command/run` row, so a returned error would have no visible owner there; the
+  submission settlement publishes that text exactly once, scoped to the B2-A
+  command set and to the no-card case only (Host commands, the sessionless local
+  path and the sibling TUI commands keep their own owners).
 
 `TuiApp`-backed renderers keep their long-standing command card and notice, so
 PiTui behavior is unchanged.
 
-`/copy` keeps the unchanged two-leg policy and is qualified only as
-`OSC52_EMITTED`; the OS-clipboard dimension is `NOT_VERIFIED` in this
-environment and the plan's `STOP_COPY_QUALIFICATION` is reported to the Owner.
+`/copy` keeps the unchanged two-leg policy. The agent verified the OSC 52
+emission and the Tern channel integrity; the Owner ran the copy in a real
+terminal and
+confirmed the text reached the system clipboard, which clears the plan's
+`STOP_COPY_QUALIFICATION` (provenance split: agent = emission/channel, Owner =
+the real clipboard). A fully automated cross-platform clipboard assertion stays
+out of scope for this PR.
 See [PR4-B2-A evidence](./tern-tsp/evidence/pr4-b2-a.md) for the per-command
 result tier, the exact PARTIAL limits, the real-Tern channel-integrity run and
 the reported gaps.

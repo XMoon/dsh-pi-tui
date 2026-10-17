@@ -14,7 +14,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { classifyCommandLine, type CommandLineClassification } from '../src/domain/command/policy.ts'
-import { titleResultNoticeSuppressed, tspBuiltinAvailability, TSP_SUPPORTED_TUI_BUILTINS, type TspBuiltinPickers } from '../src/app/command/tsp-capability.ts'
+import { TSP_B2A_RESULT_NOTICE_COMMANDS, TSP_SUPPORTED_TUI_BUILTINS, titleRefusalNoticeOwner, titleSuccessNoticeVisible, tspBuiltinAvailability, type TspBuiltinPickers } from '../src/app/command/tsp-capability.ts'
 
 /** Classify one line through the REAL classifier with explicit fact wiring. */
 function classify(facts: {
@@ -159,14 +159,32 @@ test('B2-A: the B2-A builtins stay available for the TUI family whatever the arg
 
 // ── RFL-001: the card-ownership policy the refusal sink consults ────────────
 
-test('B2-A: the title result notice is suppressed exactly where the Direct card carries it', () => {
-  // The card exists exactly where the Direct command plane executes the
-  // command; the PiTui term preserves its long-standing notice beside the card.
-  assert.equal(titleResultNoticeSuppressed({ pituiPresentation: false, backendKind: 'direct' }), true,
-    'TSP over the Direct command plane: the transcript card carries the title result text')
-  assert.equal(titleResultNoticeSuppressed({ pituiPresentation: false, backendKind: 'remote' }), false,
-    'the Client registry appends no lifecycle event, so the notice is the only feedback')
-  assert.equal(titleResultNoticeSuppressed({ pituiPresentation: true, backendKind: 'direct' }), false,
-    'PiTui keeps its existing notice beside the card')
-  assert.equal(titleResultNoticeSuppressed({ pituiPresentation: true, backendKind: 'remote' }), false)
+test('B2-A: each mount has exactly ONE visible owner for a /title refusal', () => {
+  // PiTui over Direct keeps its long-standing in-handler notice beside the card.
+  assert.equal(titleRefusalNoticeOwner({ pituiPresentation: true, backendKind: 'direct' }), 'handler')
+  // TSP over Direct: the command-result card carries the same text.
+  assert.equal(titleRefusalNoticeOwner({ pituiPresentation: false, backendKind: 'direct' }), 'result-card')
+  // The card-less Client command registry: the submission settlement publishes it.
+  assert.equal(titleRefusalNoticeOwner({ pituiPresentation: false, backendKind: 'remote' }), 'submission-settlement')
+  assert.equal(titleRefusalNoticeOwner({ pituiPresentation: true, backendKind: 'remote' }), 'submission-settlement')
+})
+
+test('B2-A: a confirmed title write publishes its own notice only on the card-less TSP path', () => {
+  // The base handler never announced success; the only mount that needs the line
+  // is TSP over the Client command registry (no card, no PiTui presentation).
+  assert.equal(titleSuccessNoticeVisible({ pituiPresentation: false, backendKind: 'remote' }), true)
+  assert.equal(titleSuccessNoticeVisible({ pituiPresentation: false, backendKind: 'direct' }), false)
+  assert.equal(titleSuccessNoticeVisible({ pituiPresentation: true, backendKind: 'remote' }), false)
+  assert.equal(titleSuccessNoticeVisible({ pituiPresentation: true, backendKind: 'direct' }), false)
+})
+
+test('B2-A: the card-less result-notice scope is the admitted set plus /logout', () => {
+  // The scope is derived from the ONE admission set (not a second routing list).
+  assert.deepEqual([...TSP_B2A_RESULT_NOTICE_COMMANDS].sort(),
+    [...TSP_SUPPORTED_TUI_BUILTINS, 'logout'].sort())
+  for (const name of ['new', 'fork', 'title', 'rename', 'copy', 'yolo', 'logout']) {
+    assert.ok(TSP_B2A_RESULT_NOTICE_COMMANDS.has(name), `/${name} needs an owner on the card-less route`)
+  }
+  assert.ok(!TSP_B2A_RESULT_NOTICE_COMMANDS.has('preset'), 'sibling commands keep their own refusal notices')
+  assert.ok(!TSP_B2A_RESULT_NOTICE_COMMANDS.has('model'))
 })

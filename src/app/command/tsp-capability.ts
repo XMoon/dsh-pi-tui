@@ -51,6 +51,20 @@ export const TSP_SUPPORTED_TUI_BUILTINS: ReadonlySet<string> = new Set([
 ])
 
 /**
+ * PR4-B2-A: the commands whose RESULT TEXT needs an explicit owner on the
+ * card-less transport. The Direct command plane appends `command/run` +
+ * `command/done` (the transcript card) for a TUI-owned line; the Remote Client
+ * command registry appends nothing, so a returned `CommandResult` would have no
+ * visible owner there. This set is the B2-A notice scope: it is derived from the
+ * admitted set above plus the argument-shaped `/logout`, and it is deliberately
+ * NOT a routing authority — the classifier and the gate above own that.
+ */
+export const TSP_B2A_RESULT_NOTICE_COMMANDS: ReadonlySet<string> = new Set([
+  ...TSP_SUPPORTED_TUI_BUILTINS,
+  'logout',
+])
+
+/**
  * Which native TUI builtin presenters the mounted renderer actually installed.
  * A capability is admitted only when the presenter exists, so a renderer that
  * lacks the node kinds (or never mounted the picker) refuses the command instead
@@ -130,35 +144,45 @@ export function tspBuiltinAvailability(
 }
 
 /**
- * PR4-B2-A: whether the ADDITIONAL inline outcome notice for a `/title` /
- * `/rename` result is suppressed on this mount because the official Direct
- * command-result card already carries the same text.
+ * PR4-B2-A: WHO owns a `/title` or `/rename` REFUSAL's visible text on this
+ * mount. Exactly one owner per mount, so the same text is never shown twice:
  *
- * Both terms are composition facts, not renderer guesses:
+ * - `'handler'` — the PiTui surface over the Direct command plane keeps its
+ *   long-standing in-handler notice beside the command card.
+ * - `'result-card'` — the TSP renderer over the Direct command plane: the
+ *   official `command/run` + `command/done` pair is the card whose body IS the
+ *   handler's `CommandResult.text`, so the handler stays silent.
+ * - `'submission-settlement'` — the card-less Client command registry (the
+ *   Remote branch): the submission runtime publishes the returned error text
+ *   once, because nothing else renders it.
  *
- * - `backendKind === 'direct'`: a TUI-owned `/title` is NOT sessionless, so on
- *   the Direct branch it always executes through `commandPlane.execute` — the
- *   official executor appends the `command/run` + `command/done` pair, and
- *   `src/tui/tsp/transcript-view.ts` paints that pair as the command card whose
- *   body IS the handler's `CommandResult.text` (success text and error text
- *   alike). The Remote branch executes the same command through the Client
- *   registry, which appends no lifecycle event and therefore paints no card —
- *   there the handler's notice is the only feedback.
- * - `!pituiPresentation`: the PiTui surface keeps its long-standing notice
- *   beside that card, unchanged.
+ * This is a presentation fact owned by the composition root, not a routing
+ * authority; it answers the title notice question only.
  *
- * This is deliberately NOT a general "the card owns the outcome" capability:
- * it answers the suppression question for the title handler alone (the
- * `notifyTitleResult` sink), and it must not be inferred for other commands or
- * for sessionless local invocations (those paint no card even on Direct — the
- * controller notifies their errors itself).
- *
- * @param facts - the composition root's declared inputs: whether a PiTui
- *   presentation is mounted and which backend the command plane belongs to.
+ * @param facts - whether a PiTui presentation is mounted and which command
+ *   plane executes the invocation.
  */
-export function titleResultNoticeSuppressed(facts: {
+export function titleRefusalNoticeOwner(facts: {
+  readonly pituiPresentation: boolean
+  readonly backendKind: 'direct' | 'remote'
+}): 'handler' | 'result-card' | 'submission-settlement' {
+  if (facts.backendKind !== 'direct') return 'submission-settlement'
+  return facts.pituiPresentation ? 'handler' : 'result-card'
+}
+
+/**
+ * PR4-B2-A: whether a CONFIRMED `/title`/`/rename` write must publish its own
+ * notice. The base handler never announced success (the Direct card carries it),
+ * so the only place that needs the line is the card-less TSP path: the Remote
+ * Client command registry with no PiTui presentation. PiTui keeps its previous
+ * silence, and the TSP Direct mount lets the card own the text.
+ *
+ * @param facts - whether a PiTui presentation is mounted and which command
+ *   plane executes the invocation.
+ */
+export function titleSuccessNoticeVisible(facts: {
   readonly pituiPresentation: boolean
   readonly backendKind: 'direct' | 'remote'
 }): boolean {
-  return !facts.pituiPresentation && facts.backendKind === 'direct'
+  return !facts.pituiPresentation && facts.backendKind !== 'direct'
 }

@@ -50,6 +50,15 @@ description (this file records the durable version pins and the result tiers).
     title rule above is narrower because the Owner ruled (relayed in the B2-A
     session) that a `/title` success must show the card plus the authoritative
     title and no duplicate Dock line.
+  - **card-less transport (review F1).** The Direct command plane appends the
+    official `command/run` + `command/done` rows (the card); the Remote Client
+    command registry appends none, so a returned `CommandResult.error` had NO
+    visible owner there and the user saw only a restored draft. The submission
+    settlement now publishes that error text exactly once, scoped to the B2-A
+    command set (`TSP_B2A_RESULT_NOTICE_COMMANDS`, derived from the admitted set
+    plus `/logout`) and only when no card exists — Host commands, the
+    sessionless local path (which notifies itself) and sibling TUI commands
+    (`/preset`, `/model`, …) keep their own owners, so nothing is duplicated.
 - Direct business-path evidence is the real Host composition
   (`test/support/direct-tsp-fixture.ts`: real rc.2 services, real live Agents,
   the real runner/SubmissionController, the real TSP renderer over the shipped
@@ -97,7 +106,7 @@ description (this file records the durable version pins and the result tiers).
 | A16 — a no-panel builtin is never steered while running | PASS | Same file (A16, `busyEnter: 'steer'`): `/title` wrote while the turn ran with zero prompt writes; the following plain prompt steered |
 | A17 — confirmed title/permission/logout/copy outcomes are visible | PASS | `/title` on TSP+Direct is card-owned with no duplicate Dock line: the RFL-001 witness counts the refusal across the WHOLE folded pane (exactly ONE visible sink, zero notice lines), A03/A04/A16 assert the card carries the success text while the Dock does not, and A05 keeps the two no-text notices. The plan-mandated success supplement is visible for `/yolo`/`/logout`/`/copy` (A07/A08 and the A06 real-client run); the gate/local refusals appear exactly once (A02/A10) |
 | A18 — SDK decline falls back to PiTui unchanged | PASS (inherited) | `tern-tsp-renderer-selection.test.ts` (unchanged by this PR) |
-| A19 — `/copy` after the emission keeps the Tern channel healthy | PARTIAL | Real Tern flow below: the OSC 52 bytes reached the Tern tty and a later input still reached the clipboard policy, with a clean exit. The OS clipboard itself is **NOT_VERIFIED** — see the qualification gap |
+| A19 — `/copy` after the emission keeps the Tern channel healthy; the OS clipboard receives the text | PASS | Agent-run real-Tern lane: the OSC 52 bytes reached the Tern tty, a later input still reached the clipboard policy, and the close flow settled. Owner-run (supplied evidence, not re-run by the agent): the OSC 52 copy in a real terminal reached the system clipboard. The agent cannot automate an OS-clipboard read in this environment, so that half is Owner-attested — see the qualification section |
 | A20 — PiTui defaults are unchanged | PASS | `login-credentials`, `session-state`, `command-catalog`, `busy-enter` and the TSP suites rerun on this tree; `notifyTitleRefusal` reaches the same PiTui notice the base already emitted, and `notifyTitleSuccess`/`notifyOutcome` are no-ops wherever a `TuiApp` is mounted |
 
 ## `/copy` qualification gap (STOP_COPY_QUALIFICATION)
@@ -125,13 +134,16 @@ The plan requires a real-Tern clipboard qualifier as the merge gate for
 - **OS clipboard: NOT_VERIFIED.** Nothing in this environment can observe the
   target clipboard changing, so the result may not be reported as
   `CLIPBOARD_CHANGED`.
-- **Consequence (Owner decision needed).** Per the frozen plan this is
-  `COPY_PRODUCT_SUCCESS_NOT_VERIFIED` → **STOP_COPY_QUALIFICATION**: `/copy`
-  must not be claimed as fully supported until a run in an environment with an
-  observable clipboard (a display + `wl-copy`/`xclip`, a tmux client, or a
-  physical Tern GUI) produces at least one observable success. The
-  implementation stays exactly the unchanged Clipboard Policy; no helper-only
-  shortcut, no Tern-specific wire call and no "verified" wording were added.
+- **Owner-reported OS clipboard success (supplied evidence).** The Owner ran
+  the OSC 52 copy in a real terminal and confirmed the text reached the system
+  clipboard. Combined with the agent-run channel-integrity lane this clears the
+  plan's `STOP_COPY_QUALIFICATION`; the provenance stays split on purpose
+  (agent: emission + channel; Owner: the real clipboard), because the agent
+  cannot automate an OS-clipboard read here. The implementation is the
+  unchanged Clipboard Policy — no helper-only shortcut and no Tern-specific wire
+  call. `/copy` therefore reads PASS at the `OSC52_EMITTED` + Owner-verified
+  clipboard tier; a fully automated cross-platform clipboard assertion remains
+  out of scope for this PR.
 
 ## Acceptance limits (why some rows are PARTIAL)
 
@@ -161,6 +173,7 @@ unchanged owner's subject:
 | Tier | What it is | Used for |
 |---|---|---|
 | Direct L6 | `test/tern-tsp-headless-commands.test.ts` over the real Direct composition + scripted TSP pane | A01–A08, A10, A11, A13, A14, A16, A17 |
+| Remote L6 | `test/runner-remote-command-plane.test.ts` (real Remote composition, real Client registry / HostCommandPort; `F1 Remote` ×3 on PiTui + one Remote+TSP mount) | the card-less error owner (F1), the no-double-notification rule |
 | Pure unit | `test/tern-tsp-command-admission.test.ts` (the predicate, the `/logout` input-shape rule and the `titleResultNoticeSuppressed` truth table) | the gate and the title notice policy |
 | REAL_TERN_HEADLESS | `scripts/tern-pane-drive.mjs scripts/tern-pane-b2a-copy.mjs` (real Tern 0.9.2, real keys, real tty) | A19 (channel integrity + OSC52 emission) |
 | Inherited | B1-B / PR4-0 suites rerun unchanged | A12, A15, A18 |
@@ -187,8 +200,16 @@ reviewed mapping:
   attempts the native helper unconditionally; the suite therefore cannot write
   its synthetic text into a real clipboard.
 - **RFL-004 (closed) — changelog wording.** Both bilingual entries describe the
-  command-specific single owner (title results: Direct card; `/yolo`,
+  command-specific outcome presentation (title results: Direct card; `/yolo`,
   `/logout`, `/copy`: planned Dock supplement).
+- **F1 (external review, closed) — card-less command errors were invisible.**
+  On the Remote Client command registry no result card exists, so a returned
+  `CommandResult.error` reached neither the Dock nor a card. The submission
+  settlement now publishes it once, scoped to the B2-A commands and only when no
+  card exists; the title refusal ownership moved to a three-state owner so that
+  fix cannot double-report. Witnessed on the real Remote composition
+  (`/copy` no-answer, `/yolo` unavailable, sessionless `/logout` exactly once)
+  and on a Remote+TSP mount (the error reaches the Dock).
 
 The reviewer explicitly accepted the plan-mandated success supplement for
 `/yolo`/`/logout`/`/copy` (Dock + Direct card) as frozen §S2 behavior, and the

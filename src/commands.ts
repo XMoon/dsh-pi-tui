@@ -830,10 +830,14 @@ export interface CommandCatalogSeams {
 export interface TuiCommandPresentation {
   /** The renderer-neutral notice sink (see the parameter documentation). */
   readonly notify: (text: string, kind?: 'info' | 'error') => void
-  /** Whether the official Direct command-result card already carries a
-   *  `/title`/`/rename` result's text on this mount, so the handler's own
-   *  additional notice must be suppressed (see `titleResultNoticeSuppressed`). */
-  readonly suppressTitleResultNotice: boolean
+  /** WHO owns a `/title`/`/rename` refusal's visible text on this mount (see
+   *  `titleRefusalNoticeOwner`): exactly one of the handler, the official
+   *  command-result card, or the submission settlement. */
+  readonly titleRefusalNoticeOwner: 'handler' | 'result-card' | 'submission-settlement'
+  /** Whether a CONFIRMED `/title`/`/rename` write publishes its own notice on
+   *  this mount (only the card-less TSP path — see
+   *  `titleSuccessNoticeVisible`). */
+  readonly titleSuccessNoticeVisible: boolean
 }
 
 export function registerTuiCommands(
@@ -1553,17 +1557,18 @@ export function registerTuiCommands(
    * Host/Remote backend decision.
    *
    * The `/title`/`/rename` entries are split by the outcome they carry, because
-   * their base behavior differs:
+   * their base behavior differs, and each mount has exactly ONE visible owner
+   * (see `titleRefusalNoticeOwner`):
    *
-   * - `notifyTitleRefusal` replaces the pre-existing inline refusal notice. The
-   *   official Direct command-result card carries the same `CommandResult.text`
-   *   on this mount, so it is suppressed exactly there; the PiTui surface keeps
-   *   its long-standing notice beside the card, and the Client-registry path (no
-   *   card) keeps the only feedback.
+   * - `notifyTitleRefusal` publishes only where the HANDLER is the refusal's
+   *   owner — the PiTui surface beside the Direct command-result card. On the
+   *   TSP Direct mount the card carries the text; on the card-less Client route
+   *   the submission settlement publishes the returned error instead.
    * - `notifyTitleSuccess` is a NEW line (the base handler reported a successful
-   *   title write only through the card). It publishes on the TSP renderer where
-   *   no card exists, and is silent on PiTui (unchanged behavior) and on the TSP
-   *   Direct mount where the card already carries `title set: …`.
+   *   title write only through the card). It publishes only where no card exists
+   *   AND no PiTui presentation is mounted (the TSP client-command path), so
+   *   PiTui keeps its previous silence and the TSP Direct mount stays
+   *   card-owned.
    */
   const notify: (text: string, kind?: 'info' | 'error') => void =
     presentation?.notify ?? ((text, kind) => { app?.notify(text, kind) })
@@ -1572,12 +1577,14 @@ export function registerTuiCommands(
     notify(text, kind)
   }
   const notifyTitleRefusal = (text: string): void => {
-    if (presentation?.suppressTitleResultNotice === true) return
+    // Without the internal presentation seam (legacy/test compositions) the
+    // handler keeps its pre-B2-A notice behavior.
+    if ((presentation?.titleRefusalNoticeOwner ?? 'handler') !== 'handler') return
     notify(text, 'error')
   }
   const notifyTitleSuccess = (text: string): void => {
-    if (presentation?.suppressTitleResultNotice === true) return
-    notifyOutcome(text)
+    if (presentation?.titleSuccessNoticeVisible !== true) return
+    notify(text, 'info')
   }
   registerExitCommand({ runner, registerTuiCommand })
 

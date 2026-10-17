@@ -88,16 +88,16 @@ export interface SessionCommandDeps {
    */
   notify: (text: string, kind?: 'info' | 'error') => void
   /**
-   * PR4-B2-A: the `/title`/`/rename` refusal notice. It is suppressed exactly
-   * where the official Direct command-result card already carries the same
-   * text; the PiTui notice and the no-card Client-registry feedback are kept.
+   * PR4-B2-A: the `/title`/`/rename` refusal notice. It publishes only where the
+   * handler is that refusal's visible owner (the PiTui surface beside the Direct
+   * command-result card); the card owns the TSP Direct text, and the submission
+   * settlement owns the card-less Client-command text.
    */
   notifyTitleRefusal: (text: string) => void
   /**
    * PR4-B2-A: the `/title`/`/rename` CONFIRMED-success notice — a new line the
-   * base handler never emitted. It publishes only where the TSP renderer has no
-   * command-result card to show it (non-PiTui + no card), so PiTui behavior is
-   * unchanged and the TSP Direct mount has a single owner.
+   * base handler never emitted. It publishes only on the card-less TSP path, so
+   * PiTui behavior is unchanged and every other mount has a single owner.
    */
   notifyTitleSuccess: (text: string) => void
 }
