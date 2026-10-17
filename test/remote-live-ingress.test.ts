@@ -542,6 +542,63 @@ test('R0: a rollover during an in-flight re-fold re-arms the wakeup (no lost wak
   handle.dispose()
 })
 
+test('R0/RFL-005: a COLD attach after a rollover verifies the first publication', async () => {
+  // Upstream keeps a Session resident and the journal stream retains its
+  // published window across a restart, so an owner/surface rebuild can cold-read
+  // the SAME binding at the OLD revision while the generation is already the new
+  // one. No handle observed the rollover for that binding, so the cold handle
+  // must not trust its attached revision as an incremental baseline: the first
+  // later publication reconciles the window instead.
+  const log: SinkLog = { durable: [], live: [], refolds: [] }
+  const source = sourceWith({ entries: [], revision: 9, hasMore: false })
+  const generation = generationSource()
+  const ingress = createRemoteLiveIngress(source.sessions, generation)
+  // A rollover is observed by the process BEFORE the cold attach.
+  generation.replace(4)
+  const handle = ingress.subscribe('s', sinksOf(log), {
+    revision: 9,
+    transportToken: { generation: generation.getSnapshot(), binding: source.getBinding() },
+  })
+  await flushWakeup()
+  assert.deepEqual(log.refolds, [], 'the hydrated window is not re-folded immediately')
+  source.publish({ entries: [], revision: 10, hasMore: false, change: appendChange([durableEntry('user/message', 10)]) })
+  await flushWakeup()
+  assert.deepEqual(log.durable, [], 'the first publication is not trusted as a continuous delta')
+  assert.deepEqual(log.refolds, ['s'], 'it reconciles the window instead')
+  assert.equal(handle.acknowledgeWindowRefold(proofOf(source, generation, 10)), true,
+    'the acknowledged revision resumes incremental delivery')
+  source.publish({ entries: [], revision: 11, hasMore: false, change: appendChange([durableEntry('user/message', 11)]) })
+  assert.deepEqual(log.durable.map(event => (event as { type: string }).type), ['user/message'],
+    'delivery resumes after the verification')
+  handle.dispose()
+})
+
+test('R0: a COLD attach under a live generation recovers on the opening page replace', async () => {
+  // The retained window can still be the previous generation's when a cold
+  // hydrate runs under the new one (the upstream journal stream keeps it until the
+  // opening page arrives). No prior handle observed the rollover, so no baseline
+  // exists — the recovery therefore rests on the upstream guarantee that the
+  // opening page is published as a `replace`: that replace must reconcile the
+  // window instead of being consumed as an ordinary delta.
+  const log: SinkLog = { durable: [], live: [], refolds: [] }
+  const generation = generationSource()
+  const source = sourceWith({ entries: [], revision: 9, hasMore: false })
+  const ingress = createRemoteLiveIngress(source.sessions, generation)
+  const handle = ingress.subscribe('s', sinksOf(log), {
+    revision: 9,
+    transportToken: { generation: generation.getSnapshot(), binding: source.getBinding() },
+  })
+  await flushWakeup()
+  assert.deepEqual(log.refolds, [], 'the matching cold baseline starts incrementally')
+  // The new generation's opening page: a replace at a new revision.
+  source.publish({ entries: [], revision: 10, hasMore: false, change: { kind: 'replace', entries: [] } as never })
+  await flushWakeup()
+  assert.deepEqual(log.refolds, ['s'],
+    'the opening page replace reconciles the retained window instead of appending')
+  assert.equal(handle.acknowledgeWindowRefold(proofOf(source, generation, 10)), true)
+  handle.dispose()
+})
+
 test('a same-id binding replacement detaches the subscription (exact binding identity)', async () => {
   const log: SinkLog = { durable: [], live: [], refolds: [] }
   const source = sourceWith({ entries: [], revision: 1, hasMore: false })
@@ -655,10 +712,16 @@ test('S3-R0: an unavailable-transport hydrate arms the OFFICIAL-signal re-init (
     bootstrap.indexOf('const initRemoteLiveSurface'),
     bootstrap.indexOf('const initRemoteLiveSurface') + 6000,
   )
-  assert.ok(init.includes('if (remoteSources.commandSource.connectionGeneration() === undefined) {'),
-    'the retry is armed only when the transport is actually unavailable')
+  assert.ok(init.includes('const liveGeneration = remoteSources.commandSource.connectionGeneration()'),
+    'the retry path classifies the transport state at settle time')
+  assert.ok(init.includes('if (liveGeneration === undefined) {'),
+    'an ABSENT transport waits for the official generation')
   assert.ok(init.includes('armRemoteInitRetry(sessionId)'),
     'an unavailable-transport hydrate arms the official-signal re-init')
+  assert.ok(init.includes('!Object.is(lastInitRetryGeneration, liveGeneration)'),
+    'a transport that changed BETWEEN the read and its commit re-runs the init once under the new generation')
+  assert.ok(init.includes("runDetached('remote live surface retry'"),
+    'the identity-change retry runs through the detached ownership wrapper')
   assert.ok(bootstrap.includes('remoteSources.commandSource.subscribeConnectionGeneration'),
     'the re-init is driven by the OFFICIAL generation channel')
   assert.ok(!init.includes('setInterval') && !init.includes('setTimeout'),
