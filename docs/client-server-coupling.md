@@ -260,7 +260,8 @@ reinterpret:
      await the Host's durable commit is deliberately NOT decided and NOT
      asserted here: S3 owns that ruling and must prove it with paired L5/L6
      success/failure tests — not a timeout, poll or fabricated flush.
-  2. **Reconnect transcript currentness — RESOLVED_BY_S3_R0.** The Remote
+  2. **Reconnect transcript currentness — S3-R0 implemented, resolution pending
+     stage qualification.** The Remote
      ingress no longer treats the latest `change` as a fold input: delivery is a
      SEQUENCE contract over the official identity (Connection generation +
      exact retained binding + eventSource revision). Any generation rollover,
