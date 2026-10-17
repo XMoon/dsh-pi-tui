@@ -12,7 +12,9 @@
 ### 安装与版本对应
 
 本候选版把 DSH 基线推进到已发布的 `0.2.1-rc.2` family：peer floor 为 `>=0.2.1-rc.2`，
-精确验证目标为 `0.2.1-rc.2`。安装 DSH 需要显式允许其原生安装脚本：
+精确验证目标为 `0.2.1-rc.2`。`0.5.3` 目前是 next 线候选身份（reserved
+candidate）：尚未打 tag、未发布到 npm，下面的 TUI 安装命令在发布后才生效。安装
+DSH 需要显式允许其原生安装脚本：
 
 ```sh
 npm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty @deepseek-ai/dsh@0.2.1-rc.2
@@ -28,10 +30,8 @@ dsh --profile pi-tui
 
 ### 变更
 
-- **要求 DeepSeek Harness `0.2.1-rc.2`，不再支持中间的 `0.2.1-rc.1`。** 本版据此重建
-  Profile 与四份官方 preset 镜像、把 in-process Remote 载体收敛到官方的 owner Peer 与
-  连接生命周期，并跟随官方把工作目录作为工具与 Session 的通用前置；从更旧 runtime
-  升级时请按上面的配对表选择 TUI 线。
+- **要求 DeepSeek Harness `0.2.1-rc.2`，不再支持中间的 `0.2.1-rc.1`。** 已发布的旧
+  runtime 配对不变（见上表）；从更旧 runtime 升级时请按配对表选择 TUI 线。
 
 ## [0.5.2-rc.1] - 2026-10-17
 

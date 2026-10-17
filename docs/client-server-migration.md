@@ -5606,10 +5606,13 @@ repopulate the same surfaces, and Host write settlements stay real.
   orchestration.
 - **Last-good Host claim rule**: a disconnect or a failed new-generation
   provider read keeps the last-good Host-origin claims reserved
-  (`mergePartial`); a Client same-name contribution cannot take the name
-  while the new-generation Host catalog is unconfirmed; a successful
-  generation-B read replaces the Host command truth (retired commands lose
-  their claims, new ones gain them).
+  (`mergePartial`); a Client same-name contribution cannot take a name those
+  RESERVED claims own while the new-generation Host catalog is unconfirmed. A
+  name that only the new-generation read carries stays claimable by a Client
+  definition until that install lands — the read→apply window recorded in
+  `docs/client-server-coupling.md` (Owner handoff, command-plane stage). A
+  successful generation-B read replaces the Host command truth (retired
+  commands lose their claims, new ones gain them).
 - **Read supersession vs write settlement**: old-generation reads settle as
   superseded/unavailable and never commit (the existing adapter fences,
   requalified); a proven Host write settlement is never reclassified or
