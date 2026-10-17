@@ -17,7 +17,7 @@ import {
   type RemoteChildBinding,
   type RemoteChildViewSessions,
 } from '../src/app/remote/child-view.ts'
-import type { RemoteLiveIngress, RemoteLiveIngressSinks } from '../src/app/remote/live-ingress.ts'
+import type { RemoteLiveIngress, RemoteLiveIngressHydrate, RemoteLiveIngressSinks } from '../src/app/remote/live-ingress.ts'
 import type { ViewerChildLiveSinks, ViewerChildOpenTarget } from '../src/app/surface/viewer-runtime.ts'
 import type { AssistantLiveInput } from '../src/runtime/assistant-stream-port.ts'
 import type { PresentationDurableEvent, PresentationReadSnapshot } from '../src/runtime/presentation-read-port.ts'
@@ -123,7 +123,7 @@ function childBinding(
 interface IngressCapture {
   readonly sessionId: string
   readonly sinks: RemoteLiveIngressSinks
-  readonly hydrateRevision: number | undefined
+  readonly hydrate: RemoteLiveIngressHydrate | undefined
   disposeCount: number
   /** The proofs this handle was acknowledged with (S3-R0). */
   readonly acknowledged: Array<{ generation: unknown; binding: unknown; revision: number }>
@@ -134,8 +134,8 @@ function fakeIngress(): { readonly ingress: RemoteLiveIngress; readonly captures
   return {
     captures,
     ingress: {
-      subscribe(sessionId, sinks, hydrateRevision) {
-        const capture: IngressCapture = { sessionId, sinks, hydrateRevision, disposeCount: 0, acknowledged: [] }
+      subscribe(sessionId, sinks, hydrate) {
+        const capture: IngressCapture = { sessionId, sinks, hydrate, disposeCount: 0, acknowledged: [] }
         captures.push(capture)
         return {
           dispose: () => { capture.disposeCount += 1 },
@@ -184,11 +184,26 @@ function buildSource(options: {
   childCwd?: (childSessionId: string) => string
   generation?: { getSnapshot(): { id: number } | undefined; subscribe(listener: () => void): () => void }
 }) {
+  // The fixture models the PRODUCTION invariant the S3-R0 fence checks: the
+  // official binding's window revision IS the revision the reader returns. A
+  // test that wants a mismatch sets the binding revision explicitly afterwards.
+  const syncBindingRevision = (id: string, revision: number): void => {
+    const binding = options.sessions.binding(id) as unknown as { setRevision?(next: number): void } | undefined
+    binding?.setRevision?.(revision)
+  }
   return createRemoteChildViewSource<WireEvent>({
     sessions: options.sessions,
     reader: {
-      read: options.read ?? (async () => snapshotOf(0)),
-      loadOlder: options.loadOlder ?? (async () => undefined),
+      read: async (id, signal) => {
+        const snapshot = await (options.read ?? (async () => snapshotOf(0)))(id, signal)
+        if (snapshot !== undefined) syncBindingRevision(id, snapshot.revision)
+        return snapshot
+      },
+      loadOlder: async (id, signal) => {
+        const snapshot = await (options.loadOlder ?? (async () => undefined))(id, signal)
+        if (snapshot !== undefined) syncBindingRevision(id, snapshot.revision)
+        return snapshot
+      },
     },
     liveIngress: options.ingress,
     // The official generation source answers a STABLE snapshot object (the
@@ -390,7 +405,7 @@ test('subscribe forwards every ingress sink and passes the hydrated revision as 
   assert.equal(captures.length, 1)
   const capture = captures[0]!
   assert.equal(capture.sessionId, 'child-1')
-  assert.equal(capture.hydrateRevision, 7, 'the hydrated reader revision fences the subscribe gap')
+  assert.equal(capture.hydrate?.revision, 7, 'the hydrated reader revision fences the subscribe gap')
 
   const raw = { type: 'turn/start', seq: 4, time: 40 }
   capture.sinks.onDurableEvent('child-1', raw)
