@@ -311,9 +311,12 @@ the official Direct command-result card already carries:
   notice on the sessionless path).
 - **card-less transport** — the Remote Client command registry appends no
   `command/run` row, so a returned error would have no visible owner there; the
-  submission settlement publishes that text exactly once, scoped to the B2-A
-  command set and to the no-card case only (Host commands, the sessionless local
-  path and the sibling TUI commands keep their own owners).
+  submission controller publishes that text exactly once inside that very branch,
+  scoped to the B2-A command set. The owner is frozen at dispatch (no
+  classification or catalog read at settlement), so a Host-origin catalog change
+  mid-flight can neither hide a Client-route error nor duplicate a Host-route
+  one; Host commands, the sessionless local path and the sibling TUI commands
+  keep their own owners.
 
 `TuiApp`-backed renderers keep their long-standing command card and notice, so
 PiTui behavior is unchanged.
