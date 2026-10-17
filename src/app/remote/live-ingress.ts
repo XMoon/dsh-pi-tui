@@ -184,6 +184,23 @@ export function createRemoteLiveIngress(
    *  feature contract has per-key faces only). */
   projectionKeys: readonly string[] = [],
 ): RemoteLiveIngress {
+  /**
+   * Whether this process observed a Connection rollover. A COLD attach that
+   * happens after one may be hydrating the retained PREVIOUS-generation window
+   * (the upstream journal stream keeps it until the opening page is republished)
+   * and the official faces carry no window-generation marker, so such a handle
+   * starts in verify-first mode: the first publication reconciles the window
+   * instead of being trusted as an incremental delta.
+   */
+  let observedRollover = false
+  let lastSeenGeneration = generation.getSnapshot()
+  const trackRollover = (): void => {
+    const current = generation.getSnapshot()
+    if (current !== undefined && current !== lastSeenGeneration) observedRollover = true
+    lastSeenGeneration = current
+  }
+  const unsubscribeFactoryRollover = generation.subscribe(trackRollover)
+  void unsubscribeFactoryRollover
   return {
     subscribe(sessionId, sinks, hydrate) {
       // The handle EXISTS from the start. A transport that is momentarily
@@ -515,8 +532,25 @@ export function createRemoteLiveIngress(
       const refoldEligible = (revision: number): boolean =>
         !(rolloverBaselineRevision !== undefined && revision === rolloverBaselineRevision)
 
-      const unsubscribeGeneration = generation.subscribe(onGeneration)
+      const unsubscribeGeneration = generation.subscribe(() => {
+        trackRollover()
+        onGeneration()
+      })
+      const verifyFirst = observedRollover
       tryAttach()
+      if (verifyFirst && attached !== undefined) {
+        // Cold attach after a rollover: do not trust the attached revision as an
+        // incremental baseline. Reconcile on the FIRST later publication (no
+        // immediate wakeup: the fold was just hydrated from this same window).
+        mode = 'recovering'
+        const window = attached.binding.eventSource.getSnapshot()
+        notified = {
+          generation: fencedGeneration,
+          binding: attached.binding,
+          revision: window.revision,
+          open: attached.binding.session.getSnapshot().openState === 'open',
+        }
+      }
       return { dispose, acknowledgeWindowRefold, refoldEligible }
     },
   }

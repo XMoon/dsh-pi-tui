@@ -33,9 +33,19 @@ function harness(options: {
     sessionId: string,
     revision: number,
   ) => { readonly generation: unknown; readonly binding: unknown; readonly revision: number } | undefined
+  /** S3-R0: a deterministic read gate (no sleeps). The read captures the
+   *  CURRENT window at start and awaits this before returning it. */
+  readonly readGate?: () => Promise<void> | undefined
+  /** S3-R0: the transport identity seams (a stale token during the read is what
+   *  makes `initLiveRemoteSession` return undefined). */
+  readonly transport?: {
+    readonly capture: (sessionId: string) => unknown
+    readonly current: (sessionId: string, token: unknown) => boolean
+  }
 } = {}): {
   setWindow(events: readonly Record<string, unknown>[], hasMore: boolean, revision?: number): void
-  coldHydrate(): Promise<void>
+  /** The hydrate outcome: undefined means the commit was fenced out. */
+  coldHydrate(): Promise<unknown>
   /** S3-R0: the committed proof (or undefined when the read was superseded). */
   rehydrate(): Promise<unknown>
   resetForGeneration(): void
@@ -84,7 +94,14 @@ function harness(options: {
     submission: { clearPending: () => {} },
     viewer: { resetAutoPop: () => {}, teardownForSessionSwap: () => {} },
     remote: {
-      read: async () => window,
+      read: async () => {
+        // The snapshot is captured at READ START, exactly like the official
+        // reader: a held read answers the revision it started on.
+        const captured = window
+        const gate = options.readGate?.()
+        if (gate !== undefined) await gate
+        return captured
+      },
       running: () => false,
       plan: () => false,
       // The staleness fence is not this test's subject: every read is current.
@@ -92,6 +109,10 @@ function harness(options: {
       captureGeneration: () => generation,
       facts: () => ({}),
       ...(options.refoldProof === undefined ? {} : { windowRefoldProof: options.refoldProof }),
+      ...(options.transport === undefined ? {} : {
+        captureTransportToken: (sessionId: string) => options.transport!.capture(sessionId),
+        isTransportTokenCurrent: (sessionId: string, token: unknown) => options.transport!.current(sessionId, token),
+      }),
     },
   })
   return {
@@ -107,7 +128,7 @@ function harness(options: {
         openState: 'open',
       }
     },
-    coldHydrate: () => presentation.initLiveRemoteSession('s').then(() => undefined),
+    coldHydrate: () => presentation.initLiveRemoteSession('s'),
     rehydrate: () => presentation.rehydrateFromWindow('s'),
     resetForGeneration: () => {
       generation += 1
@@ -141,31 +162,57 @@ test('S3-R0: the read→commit fence refuses a superseded revision (nothing is r
     'the committed read replaced the fold')
 })
 
-test('S3-R0: an owner read that settles after a newer window commits nothing (barrier)', async () => {
-  // RFL-003 owner-level barrier through the PRODUCTION rehydrate path: read A is
-  // held at revision 41, the official window advances to revision 42 (the proof
-  // seam answers only for the CURRENT revision, exactly as the bootstrap wires
-  // it), A settles last, and only then a read at 42 may commit.
+test('S3-R0: a transport rollover during the cold read makes the hydrate uncommitted (undefined)', async () => {
+  // The bootstrap keys its retry on exactly this outcome: `initLiveRemoteSession`
+  // returns undefined when the transport token captured BEFORE the read is no
+  // longer current at commit time (the G1→undefined→G2 shape).
+  let transportCurrent = true
+  const h = harness({
+    transport: {
+      capture: () => ({ generation: 1, binding: {} }),
+      current: () => transportCurrent,
+    },
+  })
+  h.setWindow([], false, 7)
+  transportCurrent = true
+  await h.coldHydrate()
+  transportCurrent = false
+  assert.equal(await h.coldHydrate(), undefined,
+    'the stale transport token makes the hydrate return undefined (what the retry keys on)')
+})
+
+test('S3-R0: read A already in flight → window B commits → A settles last and writes nothing', async () => {
+  // RFL-003 owner-level barrier through the PRODUCTION rehydrate consumer:
+  // A STARTS (captures revision 41), the official window advances to 42 and B
+  // commits while A is still awaiting, then A settles last. A must not write and
+  // B's fold must survive. Deterministic gate, no sleeps.
   let officialRevision = 41
+  let releaseA: (() => void) | undefined
+  let gateA: Promise<void> | undefined
   const h = harness({
     refoldProof: (_sessionId, revision) => (
       revision === officialRevision ? { generation: 1, binding: {}, revision } : undefined
     ),
+    readGate: () => (gateA === undefined ? undefined : gateA),
   })
   h.setWindow([], false, 41)
   await h.coldHydrate()
   const before = h.presentation.mainFolder()
-  // The official window advances while read A is in flight; A still answers the
-  // retired revision 41, so its fence must refuse the commit.
+  // Read A STARTS while the official window is 41; it is held.
+  gateA = new Promise<void>(resolve => { releaseA = resolve })
+  const aInFlight = h.rehydrate()
+  // The official window advances and B commits while A is still in flight.
   officialRevision = 42
-  const proofA = await h.rehydrate()
-  assert.equal(proofA, undefined, 'a read fenced at the OLD revision cannot commit after the window moved')
-  assert.ok(Object.is(h.presentation.mainFolder(), before), 'the stale owner read wrote nothing')
-  // The republished window (revision 42) is the one a re-fold may commit.
+  gateA = undefined
   h.setWindow([], false, 42)
   const proofB = await h.rehydrate()
-  assert.notEqual(proofB, undefined, 'the read at the CURRENT revision commits')
-  assert.ok(!Object.is(h.presentation.mainFolder(), before), 'the newer read replaced the fold once')
+  assert.notEqual(proofB, undefined, 'B (the current revision) commits')
+  const afterB = h.presentation.mainFolder()
+  assert.ok(!Object.is(afterB, before), 'B replaced the fold')
+  // A settles LAST: it answers revision 41, which the window no longer is.
+  releaseA?.()
+  assert.equal(await aInFlight, undefined, 'A cannot commit after B')
+  assert.ok(Object.is(h.presentation.mainFolder(), afterB), 'A wrote nothing; B remains visible')
 })
 
 test('PR3-B §7.3 (F1): the generation reset NEVER drops the active draft (the drop moved to the committed switch)', async () => {
