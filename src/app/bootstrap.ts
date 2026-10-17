@@ -1404,7 +1404,7 @@ export function applyRunnerWithRuntime(
           // dead window). The ingress handle stays the SINGLE publisher.
           requestRemoteWindowRefold(id)
         },
-      }, hydrate.revision)
+      }, { revision: hydrate.revision, transportToken: hydrate.transportToken })
       // S3-R0: the Remote ingress now owns event delivery for this committed
       // owner (it is subscribed and its own hydrate→subscribe gap recovery is
       // armed), so the opening journal's pre-commit buffering window is OVER.
@@ -1412,7 +1412,7 @@ export function applyRunnerWithRuntime(
       // `clearOpening` are recorded and then DISCARDED at clear (the surface is
       // already live, so nothing merges the cut) — a real lost-event window that
       // a reconnect's fresh generation can land in.
-      if (remoteIngressHandle !== undefined) surface.openingJournal.close(sessionId)
+      surface.openingJournal.close(sessionId)
       // R2 §7.1/§7.2/§7.3: the Remote terminal-progress authority. The Host
       // evidence stream is the ONLY writer of the main interval on this branch
       // (the durable ingress above keeps feeding the transcript and is gated

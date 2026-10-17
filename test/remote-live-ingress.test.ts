@@ -332,7 +332,7 @@ test('R0: the loading→open transition re-arms an unsettled recovery at the sam
   const log: SinkLog = { durable: [], live: [], refolds: [] }
   const source = sourceWith({ entries: [], revision: 2, hasMore: false })
   const ingress = createRemoteLiveIngress(source.sessions, generationSource())
-  const handle = ingress.subscribe('s', sinksOf(log), 1)
+  const handle = ingress.subscribe('s', sinksOf(log), { revision: 1 })
   assert.ok(handle !== undefined)
   await flushWakeup()
   assert.deepEqual(log.refolds, ['s'], 'the hydrate gap is the first wakeup')
@@ -352,7 +352,7 @@ test('the hydrate→subscribe GAP is recovered through onWindowRefoldRequired, n
   // as an incremental change.
   const source = sourceWith({ entries: [], revision: 3, hasMore: false, change: { kind: 'append', entries: [] } })
   const ingress = createRemoteLiveIngress(source.sessions, generationSource())
-  const handle = ingress.subscribe('s', sinksOf(log), 1)
+  const handle = ingress.subscribe('s', sinksOf(log), { revision: 1 })
   assert.ok(handle !== undefined)
   // The wakeup is deferred by exactly one microtask: the caller's
   // `handle = subscribe(...)` assignment must complete before the owner may
@@ -364,14 +364,20 @@ test('the hydrate→subscribe GAP is recovered through onWindowRefoldRequired, n
   handle.dispose()
 })
 
-test('no gap: the subscription-time revision equals the hydrate revision (the normal path)', async () => {
+test('no gap: the same transport identity and revision start incrementally (the normal path)', async () => {
   const log: SinkLog = { durable: [], live: [], refolds: [] }
   const source = sourceWith({ entries: [], revision: 5, hasMore: false })
-  const ingress = createRemoteLiveIngress(source.sessions, generationSource())
-  const handle = ingress.subscribe('s', sinksOf(log), 5)
-  assert.ok(handle !== undefined)
+  const generation = generationSource()
+  const ingress = createRemoteLiveIngress(source.sessions, generation)
+  const handle = ingress.subscribe('s', sinksOf(log), {
+    revision: 5,
+    transportToken: { generation: generation.getSnapshot(), binding: source.getBinding() },
+  })
   await flushWakeup()
-  assert.deepEqual(log.refolds, [], 'no gap ⇒ no recovery')
+  assert.deepEqual(log.refolds, [], 'a matching identity + revision ⇒ no recovery')
+  source.publish({ entries: [], revision: 6, hasMore: false, change: appendChange([durableEntry('user/message', 6)]) })
+  assert.deepEqual(log.durable.map(event => (event as { type: string }).type), ['user/message'],
+    'the normal path stays incremental')
   handle.dispose()
 })
 
@@ -440,21 +446,100 @@ test('a replace change requires the window reconcile and re-seeds the tuple memo
   handle.dispose()
 })
 
-test('R0: no live generation or no retained binding means NO subscription (the owner retries on its next commit)', () => {
-  // C7: the ingress never installs a subscription it cannot fence. The caller's
-  // owner commit/acquire path is the only place that re-subscribes, so there is
-  // never a second, unowned publisher.
-  const missingGeneration = generationSource()
-  missingGeneration.drop()
-  const sourceA = sourceWith({ entries: [], revision: 1, hasMore: false })
-  const ingressA = createRemoteLiveIngress(sourceA.sessions, missingGeneration)
-  assert.equal(ingressA.subscribe('s', sinksOf({ durable: [], live: [], refolds: [] })), undefined,
-    'no Connection generation → no subscription')
-  const sourceB = sourceWith({ entries: [], revision: 1, hasMore: false })
-  sourceB.replaceBinding(undefined)
-  const ingressB = createRemoteLiveIngress(sourceB.sessions, generationSource())
-  assert.equal(ingressB.subscribe('s', sinksOf({ durable: [], live: [], refolds: [] })), undefined,
-    'no retained binding → no subscription')
+test('R0/C7: a missing transport yields a PENDING handle that attaches on the official generation', async () => {
+  // A disconnect between the caller's hydrate and its subscription must leave an
+  // explicit pending state that the OFFICIAL generation channel later completes —
+  // never a missing ingress that no reconnect can wake (plan §2.2/§2.5).
+  const log: SinkLog = { durable: [], live: [], refolds: [] }
+  const source = sourceWith({ entries: [], revision: 4, hasMore: false })
+  const generation = generationSource()
+  generation.drop()
+  const ingress = createRemoteLiveIngress(source.sessions, generation)
+  const handle = ingress.subscribe('s', sinksOf(log), { revision: 4 })
+  assert.ok(handle !== undefined, 'the handle exists even while the transport is unavailable')
+  source.publish({ entries: [], revision: 5, hasMore: false, change: appendChange([durableEntry('user/message', 5)]) })
+  await flushWakeup()
+  assert.deepEqual(log.durable, [], 'a pending handle delivers nothing')
+  assert.deepEqual(log.refolds, [], 'a pending handle asks for nothing yet')
+  // The official generation returns (a reconnect): the handle attaches and the
+  // hydrate baseline it was given is NOT this transport identity, so the owner
+  // must reconcile the window before incremental delivery is trusted.
+  generation.replace(7)
+  await flushWakeup()
+  assert.deepEqual(log.refolds, ['s'], 'the late attach reconciles the hydrated window')
+  assert.equal(handle.acknowledgeWindowRefold(proofOf(source, generation, 5)), false,
+    'the RETAINED window of the previous transport cannot be acknowledged (the republish must come first)')
+  // The new generation republishes its opening page: a `replace` at a new revision.
+  source.publish({ entries: [], revision: 6, hasMore: false, change: { kind: 'replace', entries: [] } as never })
+  await flushWakeup()
+  assert.deepEqual(log.refolds, ['s', 's'], 'the republish re-arms the reconcile')
+  assert.equal(handle.acknowledgeWindowRefold(proofOf(source, generation, 6)), true,
+    'the republished window acknowledges and resumes delivery')
+  source.publish({ entries: [], revision: 7, hasMore: false, change: appendChange([durableEntry('user/message', 7)]) })
+  assert.deepEqual(log.durable.map(event => (event as { type: string }).type), ['user/message'],
+    'delivery resumes after the republished baseline')
+  handle.dispose()
+})
+
+test('R0: a hydrate committed under another transport identity cannot start incrementally', async () => {
+  // A rollover between the caller's read and this subscription: the hydrate
+  // window belongs to the dead generation even when the revision is unchanged.
+  const log: SinkLog = { durable: [], live: [], refolds: [] }
+  const source = sourceWith({ entries: [], revision: 4, hasMore: false })
+  const generation = generationSource()
+  const deadGeneration = generation.getSnapshot()
+  const binding = source.getBinding()!
+  generation.replace(9)
+  const ingress = createRemoteLiveIngress(source.sessions, generation)
+  const handle = ingress.subscribe('s', sinksOf(log), {
+    revision: 4,
+    transportToken: { generation: deadGeneration, binding },
+  })
+  await flushWakeup()
+  assert.deepEqual(log.refolds, ['s'],
+    'the same revision under a NEW generation still requires the authoritative reconcile')
+  assert.equal(handle.acknowledgeWindowRefold(proofOf(source, generation, 4)), false,
+    'the dead generation retained window is not the new baseline')
+  source.publish({ entries: [], revision: 5, hasMore: false, change: { kind: 'replace', entries: [] } as never })
+  await flushWakeup()
+  assert.equal(handle.acknowledgeWindowRefold(proofOf(source, generation, 5)), true,
+    'the republished window acknowledges')
+  handle.dispose()
+})
+
+test('R0: a rollover during an in-flight re-fold re-arms the wakeup (no lost wakeup)', async () => {
+  // The first reconcile is requested at revision 5; while the owner is still
+  // awaiting its read the Connection rolls over WITHOUT any revision/open
+  // change. The in-flight read is already doomed by the transport fence, so the
+  // notification watermark MUST include the generation identity — otherwise the
+  // handle stays recovering with no future wakeup.
+  const log: SinkLog = { durable: [], live: [], refolds: [] }
+  const source = sourceWith({ entries: [], revision: 4, hasMore: false })
+  const generation = generationSource()
+  const ingress = createRemoteLiveIngress(source.sessions, generation)
+  const handle = ingress.subscribe('s', sinksOf(log), { revision: 4 })
+  source.publish({ entries: [], revision: 5, hasMore: false, change: appendChange([durableEntry('user/message', 5)]) })
+  await flushWakeup()
+  assert.deepEqual(log.refolds, ['s'], 'the revision jump asks for the first reconcile')
+  // The owner is "inside" its read here: the generation rolls over, revision and
+  // open state stay identical.
+  generation.replace(11)
+  await flushWakeup()
+  assert.deepEqual(log.refolds, ['s', 's'],
+    'the rollover re-arms the wakeup even at the same revision (the old read is superseded)')
+  assert.equal(handle.acknowledgeWindowRefold(proofOf(source, generation, 5)), false,
+    'the retained window still belongs to the DEAD generation: no acknowledge before the republish')
+  // The new generation publishes its opening page (upstream keeps the old
+  // window until then, then replaces it at a NEW revision).
+  source.publish({ entries: [], revision: 6, hasMore: false, change: { kind: 'replace', entries: [] } as never })
+  await flushWakeup()
+  assert.deepEqual(log.refolds, ['s', 's', 's'], 'the republish wakes the owner again')
+  assert.equal(handle.acknowledgeWindowRefold(proofOf(source, generation, 6)), true,
+    'only the republished window acknowledges')
+  source.publish({ entries: [], revision: 7, hasMore: false, change: appendChange([durableEntry('user/message', 7)]) })
+  assert.deepEqual(log.durable.map(event => (event as { type: string }).type), ['user/message'],
+    'delivery resumes on the republished baseline')
+  handle.dispose()
 })
 
 test('a same-id binding replacement detaches the subscription (exact binding identity)', async () => {
@@ -575,7 +660,17 @@ test('the compaction cache SEED uses the hydrate outcome token, never a fresh ca
   assert.ok(seedEnd > seedStart, 'the seed entry literal is closed')
   const seed = bootstrap.slice(seedStart, seedEnd + 2)
   assert.ok(seed.includes('transportToken: hydrate.transportToken'),
-    'the seed must carry the hydrate outcome token, never a fresh capture')
+    'the seed stamps the token the HYDRATE was fenced under')
+  assert.ok(!seed.includes('captureTransportToken'),
+    'the seed must NOT re-capture the transport identity at seed time')
+  assert.ok(seed.includes('generation: initGeneration') && seed.includes('sessionId,'),
+    'the owner fence travels with the seed')
+  // The storage itself must be the ONE helper-owned slot, fed only by that seed.
+  const startup = readFileSync(new URL('../src/app/bootstrap/session-startup.ts', import.meta.url), 'utf8')
+  assert.equal(startup.split('let remoteWorkingFoldFor').length - 1, 1,
+    'the working-fold cache has exactly one owning slot')
+  assert.equal(startup.split('remoteWorkingFoldFor = undefined').length - 1, 1,
+    'the slot is cleared by exactly one invalidator')
 })
 
 test('a projection change reaches the sink through the per-key faces, coalesced, and a stale generation detaches', async () => {
