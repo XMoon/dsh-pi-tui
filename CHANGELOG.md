@@ -11,9 +11,8 @@
 
 ### 安装与版本对应
 
-本候选版（reserved candidate，尚未打 tag 或发布）把 DSH 基线推进到已发布的
-`0.2.1-rc.2` family：peer floor 为 `>=0.2.1-rc.2`，精确验证目标为 `0.2.1-rc.2`。
-安装 DSH 需要显式允许其原生安装脚本：
+本候选版把 DSH 基线推进到已发布的 `0.2.1-rc.2` family：peer floor 为 `>=0.2.1-rc.2`，
+精确验证目标为 `0.2.1-rc.2`。安装 DSH 需要显式允许其原生安装脚本：
 
 ```sh
 npm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty @deepseek-ai/dsh@0.2.1-rc.2
@@ -22,10 +21,32 @@ dsh --profile pi-tui
 ```
 
 中间的 `@deepseek-ai/dsh@0.2.1-rc.1` 没有配对 TUI。旧 runtime 的配对不变：
-`@deepseek-ai/dsh@0.2.0-rc.2` 使用已发布的 `@xmoon76/dsh-pi-tui@0.5.1`
-（`0.5.2-rc.1` 是同一基线上已发布到 npm `next` 通道的上一轮预览，不覆盖
-0.2.1-rc.2）；
-`@deepseek-ai/dsh@0.2.0-rc.1`（含 `0.1.7-rc.2`）使用
+`@deepseek-ai/dsh@0.2.0-rc.2` 使用 `@xmoon76/dsh-pi-tui@0.5.1` 或
+`@xmoon76/dsh-pi-tui@0.5.2-rc.1`；`@deepseek-ai/dsh@0.2.0-rc.1`（含 `0.1.7-rc.2`）使用
+`@xmoon76/dsh-pi-tui@0.5.0`，`@deepseek-ai/dsh@0.1.7-rc.1` 使用
+`@xmoon76/dsh-pi-tui@0.4.8`。
+
+### 变更
+
+- **要求 DeepSeek Harness `0.2.1-rc.2`，不再支持中间的 `0.2.1-rc.1`。** 本版据此重建
+  Profile 与四份官方 preset 镜像、把 in-process Remote 载体收敛到官方的 owner Peer 与
+  连接生命周期，并跟随官方把工作目录作为工具与 Session 的通用前置；从更旧 runtime
+  升级时请按上面的配对表选择 TUI 线。
+
+## [0.5.2-rc.1] - 2026-10-17
+
+### 安装与版本对应
+
+本预览版与 `0.5.1` 使用同一已发布 DSH 基线：peer floor 为 `>=0.2.0-rc.2`，精确验证目标为
+`0.2.0-rc.2`。安装 DSH 需要显式允许其原生安装脚本：
+
+```sh
+npm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty @deepseek-ai/dsh@0.2.0-rc.2
+dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@0.5.2-rc.1
+dsh --profile pi-tui
+```
+
+旧 runtime 的配对不变：`@deepseek-ai/dsh@0.2.0-rc.1`（含 `0.1.7-rc.2`）使用
 `@xmoon76/dsh-pi-tui@0.5.0`，`@deepseek-ai/dsh@0.1.7-rc.1` 使用
 `@xmoon76/dsh-pi-tui@0.4.8`。
 
@@ -1426,7 +1447,8 @@ dsh --profile pi-tui
 - 单包发布模型。
 
 [Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/next-v0.5.3...HEAD
-[0.5.3]: https://github.com/XMoon/dsh-pi-tui/compare/v0.5.1...next-v0.5.3
+[0.5.3]: https://github.com/XMoon/dsh-pi-tui/compare/next-v0.5.2-rc.1...next-v0.5.3
+[0.5.2-rc.1]: https://github.com/XMoon/dsh-pi-tui/compare/v0.5.1...next-v0.5.2-rc.1
 [0.5.1]: https://github.com/XMoon/dsh-pi-tui/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/XMoon/dsh-pi-tui/compare/v0.4.9...v0.5.0
 [0.4.9]: https://github.com/XMoon/dsh-pi-tui/compare/v0.4.8...v0.4.9

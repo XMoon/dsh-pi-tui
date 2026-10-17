@@ -542,6 +542,29 @@ test('A5: the composition surface keeps the startup order', () => {
   }
 })
 
+test('A5/rc.2: the turn flush is initialized before the routing source is attached', () => {
+  // The routing source registered with `attachEventRouting` can run DURING the
+  // startup sequence itself: the Remote event firehose delivers events while
+  // the first hydration is still open, and `turn/end` reaches
+  // `source.flushTurn()`. A `const` arrow declared later in the startup tail
+  // therefore raised a temporal-dead-zone error inside the firehose subscriber
+  // (CI: "[session-controller] event feed subscriber failed: ReferenceError:
+  // Cannot access 'flushTurn' before initialization") instead of the
+  // documented Remote no-op. Declaration order is the invariant, so this lock
+  // pins it: initialized BEFORE the attach, and still bound BY the attach.
+  const source = compositionSource()
+  const declaration = source.indexOf('const flushTurn = (): void => {')
+  const attach = source.indexOf('surface.attachEventRouting({')
+  const binding = source.indexOf('flushTurn: () => flushTurn(),')
+  assert.ok(declaration >= 0, 'the composition must declare the turn flush')
+  assert.ok(attach >= 0, 'the composition must attach the routing source')
+  assert.ok(binding >= 0, 'the routing source must bind the turn flush')
+  assert.ok(declaration < attach,
+    'the turn flush must be initialized before the routing source is attached')
+  assert.ok(attach < binding,
+    'the routing attach must be the place that binds the turn flush')
+})
+
 test('A5/TS2: the Host-subscription phases keep their frozen startup interleaving', () => {
   // §0/§12/§85/§91 Pass 3: the startup wiring order is BEHAVIOR. The baseline
   // interleaved the six application-level subscriptions with the Direct

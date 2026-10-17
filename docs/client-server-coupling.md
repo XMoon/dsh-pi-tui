@@ -258,34 +258,56 @@ reinterpret:
      still-parked write is refused at teardown or the drain must await the
      Host's durable commit, and prove it with paired L5/L6 success/failure
      tests — not a timeout, poll or fabricated flush.
-  2. **Reconnect window/ingress ordering.** After
-     `connection.reconnect()` the new generation re-reads the durable window
-     while the live ingress may already deliver later events. The observed
-     failure is reproducible only under concurrent/full-suite runs of
-     `test/runner-remote-presentation.test.ts` (that file is green sequentially
-     and under light concurrency): it leaves the transcript window on the
-     pre-append baseline while the projection path has already advanced — the
-     Host log holds the new turn, the new generation id is observed, the model
-     projection lands, yet the painted transcript never shows the new assistant
-     row. Deciding whether the window replacement must
-     be applied before live ingress, or whether a late ingress fact re-triggers
-     hydration, is Remote currentness work for S3 (C11/C12/C18) with its own
-     L5/L6 positive + stale-generation negative tests.
-  3. **Post-reconnect catalog re-read (unverified / needs-evidence).**
+  2. **Reconnect transcript currentness — CONFIRMED production-reachable
+     race (BLOCKER, owner: S3 / C11–C12–C18).** After
+     `connection.reconnect()`, the new generation's authoritative window can
+     arrive as `append` changes on the SAME retained binding instead of a
+     window `replace`. Everything up to the transcript fold is then correct —
+     the new generation is established, the official Client window holds the
+     new turn, the Host log holds it, and `live-ingress` processes the new
+     revisions — but only a `replace` drives the authoritative re-fold
+     (`onWindowReplaced` → `initRemoteLiveSurface` → `rehydrateFromWindow`),
+     while routed `append`s update surface facts only. The painted transcript
+     therefore stays on the DEAD generation's window (the footer/projection
+     advance, the assistant row never appears) until
+     `test/runner-remote-presentation.test.ts`'s navigation case times out.
+     Reproduced only under concurrent/full-suite runs; the same case passes
+     when the reconnect publishes a `replace` and the re-hydrate runs.
+     Two repairs were measured and REJECTED, so the ladder is deliberately
+     unchanged here: (a) driving `onWindowReplaced` from the ingress on a
+     generation rollover made every concurrent run fail, because
+     `initRemoteLiveSurface` disposes the live ingress handle BEFORE its
+     ownership-fenced hydrate can abort — a dispose-before-rearm hazard that
+     can leave the surface with no live ingress at all; (b) driving only the
+     light window re-fold on the rollover changed nothing measurable. S3 owns
+     the design — binding lifetime, re-fold authority and the commit order of
+     the async re-init (rearm-then-dispose is a candidate to verify, NOT a
+     pre-decided answer; two ingress authorities must never publish into the
+     same surface) — and the qualification: the navigation positive path plus
+     generation/binding interleavings during reconnect, old-handle release,
+     new-handle establishment failure, and the symmetric child-viewer path
+     (`src/app/remote/child-view.ts` consumes the same primitive). The strong
+     assertions stay (new generation, authoritative baseline, the new row in
+     the viewport); no skipping, sleeping, timeout widening or weakened
+     assertion is acceptable.
+  3. **Post-reconnect catalog re-read — test readiness, not a defect.**
      `test/runner-remote-command-plane.test.ts` "L6 §7.4-14 stale catalog"
      holds a verified stale catalog snapshot, replaces the official Connection
      (`connection.reconnect()`) and disposes the old claim, then requires the
      NEW generation to re-read the Host catalog on its own and route a mounted
-     command to the real Host handler exactly once. It times out at that step
-     under full-suite concurrency while the file passes alone; no trace exists
-     yet, so the cause is NOT established.
-     Production path: `src/app/command/surface.ts` subscribes
-     `connectionGeneration` and fires `refreshLiveCatalogById(sessionId,
-     'invalidation')`, returning early when the token is already equal (or
-     resolved as `undefined`) — the leading hypothesis, not a finding. S3
-     closure must keep the real-handler and stale-claim assertions, capture a
-     trace through the file/suite, and must not widen the 15 s budget or turn
-     the wait into polling/retry.
+     command to the real Host handler exactly once. It used to time out under
+     full-suite concurrency because the test treated the automatic refresh's
+     authoritative READ as readiness, while the coordinator installs it an
+     instant later: the single submit was classified against the previous
+     claims and the same-named Client-context twin claimed the line (the
+     `catalog applied … source=invalidation` report followed the submit). The
+     test now waits for the product's own apply report before submitting, and
+     the end-to-end path (generation subscription → refresh → install →
+     classification → real Host handler) is green. Recorded, NOT fixed here:
+     a submission classified inside that read→apply window is routed against
+     the previous claims; whether the command plane must serialize a
+     submission behind an in-flight catalog install is a command-plane
+     (PR4/S4) decision, not S1's.
 
 Evidence: the `PEER` block in `test/remote-client-runtime.test.ts` (owner identity
 observed inside the real Gateway on the stream path, the same object on the Fetch

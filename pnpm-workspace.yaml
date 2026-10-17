@@ -4,15 +4,19 @@ packages:
 allowBuilds:
   esbuild: true
   koffi: false
-  # DSH 0.2.1-rc.2 pulls these native/postinstall scripts into the dev graph.
-  # Every one is refused explicitly (minimal privilege) instead of relying on
-  # pnpm's implicit "ignored" state, which pnpm 12 turns into a hard
-  # ERR_PNPM_IGNORED_BUILDS failure: `dsh-subprocess-local` only chmods an
-  # existing node-pty spawn-helper, `@google/genai` and `protobufjs` run
-  # diagnostics-only postinstalls, and `node-pty` ships prebuilt binaries that
-  # the verified Linux lane uses. Cross-platform PTY startup stays a
-  # qualification item; approve selectively if a platform really needs a build.
-  '@deepseek-ai/dsh-subprocess-local': false
+  # DSH 0.2.1-rc.2 pulls these install-time scripts into the dev graph. Each is
+  # decided explicitly instead of left to pnpm's implicit "ignored" state,
+  # which pnpm 12 turns into a hard ERR_PNPM_IGNORED_BUILDS failure.
+  # ALLOWED: the pinned dsh-subprocess-local script restores the executable bit
+  # on node-pty's prebuilt spawn-helper, which node-pty's Unix backend hands to
+  # fork; it only chmods an existing file and never compiles anything.
+  '@deepseek-ai/dsh-subprocess-local': true
+  # DENIED: node-pty uses its prebuilt binary where one exists and would
+  # compile otherwise (platforms without a prebuild need an explicit
+  # re-decision plus PTY qualification — no lane claims that today);
+  # @google/genai's registry tarball already ships built `dist`, so its
+  # install-time `prepare` build is unnecessary; protobufjs only checks its
+  # dependency version scheme.
   '@google/genai': false
   node-pty: false
   protobufjs: false

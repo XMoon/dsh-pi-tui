@@ -42,6 +42,7 @@ import { SessionId } from '@deepseek-ai/dsh-session'
 import { Config as TuiConfigSchema } from '../src/index.ts'
 import { TuiApp } from '../src/tui-app.ts'
 import { applyRunnerWithRuntime } from '../src/app/bootstrap.ts'
+import { TRANSITION_FENCE_NOTICE } from '../src/app/submission/steer.ts'
 import type { RemoteApplicationOverride } from '../src/app/application-runtime.ts'
 import { createRemoteApplicationRuntime } from '../src/app/remote/runtime.ts'
 import { waitFor } from './support/remote-application-fixture.ts'
@@ -136,7 +137,11 @@ interface Pr3Fixture {
  */
 async function mountPr3Runner(
   life: TestLifecycle,
-  options: { readonly presetId?: string; readonly resumeSessionId?: string; readonly host?: HostFixture } = {},
+  options: {
+    readonly presetId?: string
+    readonly resumeSessionId?: string
+    readonly host?: HostFixture
+  } = {},
 ): Promise<Pr3Fixture> {
   const presetId = options.presetId ?? 'm3-4-pr3-preset'
   const host = options.host ?? await mountHost(life, presetId)
@@ -203,6 +208,37 @@ function submitDraft(fixture: Pr3Fixture, text: string): void {
   const app = fixture.runnerApp() as unknown as { setDraft(text: string): void; submitDraft(): void }
   app.setDraft(text)
   app.submitDraft()
+}
+
+/** Collect the notices the mounted surface posts (the canonical prototype
+ * recorder: unbound original, same function identity restored on teardown). */
+function recordNotices(life: TestLifecycle, fixture: Pr3Fixture): string[] {
+  void fixture
+  const notices: string[] = []
+  const originalNotify = TuiApp.prototype.notify
+  TuiApp.prototype.notify = function patchedNotify(this: TuiApp, message: string, kind?: 'error' | 'info'): void {
+    notices.push(message)
+    return originalNotify.call(this, message, kind)
+  }
+  life.defer(() => { TuiApp.prototype.notify = originalNotify })
+  return notices
+}
+
+/** The runner's own post-transition report: the production composition writes
+ * `diag.info('switch ok', { from, to })` only after the committed owner's
+ * surface and live catalog are ready, so it is the real completion signal a
+ * user's next submit waits for. The diagnostics file lives under this
+ * fixture's DSH_HOME. */
+function switchReported(host: HostFixture, fromSessionId: string): boolean {
+  let text: string
+  try {
+    text = readFileSync(join(host.workRoot, 'logs', `pi-tui-${process.pid}.log`), 'utf8')
+  } catch {
+    return false
+  }
+  // The Remote composition has no direct agent for the incoming owner, so the
+  // report's `to` is undefined; the transition is identified by its SOURCE.
+  return text.split('\n').some(line => line.includes('switch ok') && line.includes(`from=${fromSessionId}`))
 }
 
 /** Read the durable user rows the Host session log now holds (the payload
@@ -454,6 +490,62 @@ test('L6 §37 queue/steer: a busy queue prompt lands as an official queued occur
   }, 20_000)
 })
 
+test('L6: a submit inside a session transition is refused, keeps the draft and dispatches nothing', async (t) => {
+  const life = testLifecycle(t)
+  const presetId = 'm3-4-pr3-preset'
+  const host = await mountHost(life, presetId)
+  await host.harness.create(SessionId('pr3-transition-a'), { provider: 'smoke', model: 'smoke' }, { cwd: host.anchorDir })
+  await host.harness.create(SessionId('pr3-transition-b'), { provider: 'smoke', model: 'smoke' }, { cwd: host.anchorDir })
+  const fixture = await mountPr3Runner(life, { presetId, resumeSessionId: 'pr3-transition-a', host })
+  await waitFor('mount paint', () => fixture.vt.getViewport().join('').length > 0, 10_000)
+  const notices = recordNotices(life, fixture)
+  // The switch transaction keeps its writer fence closed until the committed
+  // owner's surface and live catalog are ready. Parking the surface hydration
+  // makes that window REAL instead of a timing guess, so this proof covers the
+  // refusal contract without racing the settle: a submit inside the window must
+  // be refused with the product notice, keep the draft, and dispatch nothing.
+  const presentationSource = fixture.aggregate.presentation as unknown as {
+    presentationReader: { read(sessionId: string, signal: AbortSignal): Promise<unknown> }
+  }
+  const originalRead = presentationSource.presentationReader.read
+  let parked = 0
+  let releaseHydration: (() => void) | undefined
+  presentationSource.presentationReader.read = function parkedRead(
+    this: unknown, sessionId: string, signal: AbortSignal,
+  ): Promise<unknown> {
+    parked += 1
+    return new Promise((resolve, reject) => {
+      releaseHydration = () => {
+        presentationSource.presentationReader.read = originalRead
+        originalRead.call(this, sessionId, signal).then(resolve, reject)
+      }
+    })
+  }
+  life.defer(() => {
+    presentationSource.presentationReader.read = originalRead
+    releaseHydration?.()
+  })
+  submitDraft(fixture, '/resume pr3-transition-b')
+  await waitFor('the transition committed and parked its surface hydration', () => parked >= 1, 15_000)
+  const app = fixture.runnerApp() as unknown as { setDraft(text: string): void; submitDraft(): void; getDraft(): string }
+  app.setDraft('fenced transition draft zeta')
+  app.submitDraft()
+  await waitFor('the transition fence notice', () => notices.includes(TRANSITION_FENCE_NOTICE), 10_000)
+  assert.equal(app.getDraft(), 'fenced transition draft zeta',
+    'the refused submit keeps the user draft in the editor')
+  assert.equal(hostUserRows(fixture, 'pr3-transition-a').length, 0,
+    'a fenced submit dispatches nothing into the retired session')
+  assert.equal(hostUserRows(fixture, 'pr3-transition-b').length, 0,
+    'a fenced submit dispatches nothing into the incoming session')
+  releaseHydration?.()
+  await waitFor('the switch transaction reports completion', () => switchReported(host, 'pr3-transition-a'), 20_000)
+  await waitFor('the post-transition paint settled', () => fixture.vt.getViewport().join('').includes('pr3-transition-b'), 20_000)
+  assert.equal(hostUserRows(fixture, 'pr3-transition-b').length, 0,
+    'a fenced submit is never dispatched later, once the transaction settles')
+  assert.equal(hostUserRows(fixture, 'pr3-transition-a').length, 0,
+    'the retired session stays untouched after the settle')
+})
+
 test('L6: a Remote submit after /resume targets the replacement current Session, never the retired Session', async (t) => {
   const life = testLifecycle(t)
   const presetId = 'm3-4-pr3-preset'
@@ -467,44 +559,28 @@ test('L6: a Remote submit after /resume targets the replacement current Session,
   // the TUI built-in; the Host commands service carries no TUI callback on
   // the Remote branch).
   submitDraft(fixture, '/resume pr3-stale-b')
-  await waitFor('switched to B', () => {
-    return fixture.vt.getViewport().join('').includes('pr3-stale-b')
-      || (fixture.aggregate.presentation as unknown as { sessionFacts: { sessionStatus(id: string): unknown } }).sessionFacts.sessionStatus('pr3-stale-b') !== undefined
-  }, 15_000)
-  // The switch transaction keeps its writer fence closed until the committed
-  // owner's surface AND live catalog are ready (and only then reports the
-  // switch). A real user hitting Enter inside that window sees the product's
-  // "a session transition is in progress — try again in a moment" notice and
-  // tries again, so this gesture does the same instead of assuming the fence
-  // is already open: a rejected attempt restores the draft, an accepted one
-  // clears it and its row must then land in B.
-  const interactive = fixture.runnerApp() as unknown as {
-    setDraft(text: string): void
-    submitDraft(): void
-    getDraft(): string
-  }
-  const landedInB = (): boolean =>
-    hostUserRows(fixture, 'pr3-stale-b').some(row => row.includes('switched-session row epsilon'))
-  let attempted = false
-  const submitDeadline = Date.now() + 20_000
-  while (!landedInB() && Date.now() < submitDeadline) {
-    if (!attempted || interactive.getDraft() !== '') {
-      interactive.setDraft('switched-session row epsilon')
-      interactive.submitDraft()
-      attempted = true
-    }
-    await new Promise(resolve => setTimeout(resolve, 100))
-  }
-  // The row lands in the session the gesture TARGETED (B)…
-  await waitFor('row lands in B', () => hostUserRows(fixture, 'pr3-stale-b').some(row => row.includes('switched-session row epsilon')), 20_000)
+  // The runner reports the switch only after the committed owner's surface and
+  // live catalog are ready — the product's own completion signal, i.e. exactly
+  // what a real user waits for before pressing Enter again.
+  await waitFor('the switch transaction reports completion', () => switchReported(host, 'pr3-stale-a'), 20_000)
+  // ONE submit after that signal, without retrying: the post-transition submit
+  // contract is "dispatch exactly once into the new current owner".
+  submitDraft(fixture, 'switched-session row epsilon')
+  const inB = (): number => hostUserRows(fixture, 'pr3-stale-b').filter(row => row.includes('switched-session row epsilon')).length
+  await waitFor('the single post-switch submit lands in B', () => inB() === 1, 20_000)
+  // A duplicate could still land after the first row, so give the settled state
+  // a bounded look before asserting the exact count.
+  await new Promise(resolve => setTimeout(resolve, 250))
+  assert.equal(inB(), 1, 'the post-switch submit dispatches exactly once into B')
   // …and NEVER in the retired session A. Scope note: this proves the
   // post-switch gesture uses the NEW current owner (rebind correctness), not
   // the pre-dispatch stale-capture race — that counterfactual (capture A →
   // switch → parked operation resumes → zero dispatch into EITHER session) is
   // Step 12 qualification.
-  assert.equal(hostUserRows(fixture, 'pr3-stale-a').some(row => row.includes('switched-session row epsilon')), false,
+  assert.equal(hostUserRows(fixture, 'pr3-stale-a').filter(row => row.includes('switched-session row epsilon')).length, 0,
     'the retired session A never receives the row addressed to B')
 })
+
 
 test('L6 §37 busy steer: a steer gesture while running lands as next-step with its own rpcId (never next-turn, never queued)', async (t) => {
   const life = testLifecycle(t)

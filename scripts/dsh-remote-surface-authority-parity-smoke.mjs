@@ -12,7 +12,7 @@
  */
 
 import assert from 'node:assert/strict'
-import { mkdtempSync } from 'node:fs'
+import { mkdtempSync, rmSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -40,12 +40,6 @@ import TypertRegistry from '@deepseek-ai/dsh-typert-registry'
 import { DirectSurfaceAuthorityReader } from '../src/runtime/direct/surface-authority-direct.ts'
 import { RemoteSurfaceAuthorityReader } from '../src/runtime/remote/surface-authority-remote.ts'
 import { RemoteSurfaceAuthorityShadow } from '../src/runtime/remote/surface-authority-shadow.ts'
-
-const PACKAGE_IDS = {
-  connection: '@deepseek-ai/dsh-client-connection',
-  gateway: '@deepseek-ai/dsh-api-gateway',
-  session: '@deepseek-ai/dsh-api-session-controller',
-}
 
 function installModuleLoader() {
   const nodeRequire = createRequire(import.meta.url)
@@ -167,9 +161,10 @@ async function createHost() {
 
   // rc.2's working-directory owner validates a Session's recorded directory, so
   // the fixture must use a real one instead of a literal path that may not exist.
+  authorityCwd = mkdtempSync(join(tmpdir(), 'dsh-d1-2-authority-'))
   const session = ctx.get('sessions').create(SessionId('authority-session'), {
     meta: {
-      cwd: mkdtempSync(join(tmpdir(), 'dsh-d1-2-authority-')),
+      cwd: authorityCwd,
       createdAt: 2_000,
       agentPreset: 'fixture-preset',
     },
@@ -247,6 +242,9 @@ async function waitFor(description, predicate, timeoutMs = 5_000) {
     await new Promise(resolve => setTimeout(resolve, 10))
   }
 }
+
+/** The real Session directory this run created; removed in `main`'s cleanup. */
+let authorityCwd
 
 function hostTransport(host) {
   const connection = host.ctx.get('connection')
@@ -442,6 +440,7 @@ async function main() {
       await host.agentScope.dispose()
       await host.ctx.fiber.dispose()
     }
+    if (authorityCwd !== undefined) rmSync(authorityCwd, { recursive: true, force: true })
     loader.restore()
   }
 }

@@ -1715,6 +1715,11 @@ test('L6 P2 sink: the MOUNTED Remote child viewer converges its committed subjec
   // footer would keep the stale activity.
   let suppressedDurableEvents = 0
   let suppressedProjectionEvents = 0
+  // The channel that MUST carry the activity flip: the official Session
+  // snapshot sink. A `running` flip is a snapshot fact — it does not have to
+  // produce a projection change — so the snapshot counter (not the projection
+  // counter) is the witness that the flip really arrived and was re-derived.
+  let snapshotNotifications = 0
   // The window sinks drive `rehydrateViewedChild`, which ALSO re-derives the
   // subject status (`deps.refreshStatus()` + `target.activity` from the binding).
   // They are suppressed and counted too: if they ever fired inside the measured
@@ -1734,6 +1739,10 @@ test('L6 P2 sink: the MOUNTED Remote child viewer converges its committed subjec
     if (sessionId !== CHILD_A_ID) return realSubscribe.call(ingress, sessionId, sinks, hydrateRevision)
     return realSubscribe.call(ingress, sessionId, {
       ...sinks,
+      onSessionSnapshotChanged: (changedSessionId: string) => {
+        snapshotNotifications += 1
+        ;(sinks.onSessionSnapshotChanged as (id: string) => void)(changedSessionId)
+      },
       onDurableEvent: () => { suppressedDurableEvents += 1 },
       onProjectionsChanged: () => { suppressedProjectionEvents += 1 },
       onWindowReplaced: () => { suppressedWindowReplaced += 1 },
@@ -1790,6 +1799,8 @@ test('L6 P2 sink: the MOUNTED Remote child viewer converges its committed subjec
     subjectActivity() === 'inactive', 15_000)
   assert.ok(suppressedDurableEvents > 0,
     'the isolation witness must have suppressed real durable events, or this proof is vacuous')
+  assert.ok(snapshotNotifications > 0,
+    'the official Session-snapshot sink must be the channel that delivered the flip')
   assert.ok(suppressedProjectionEvents > 0,
     'the projection witness must have suppressed real projection events for the child')
   assert.equal(suppressedWindowReplaced, 0,
@@ -1819,7 +1830,7 @@ test('L6 P2 sink: the MOUNTED Remote child viewer converges its committed subjec
 
   // ── (4) The reverse flip through the same isolated channel.
   const suppressedBefore = suppressedDurableEvents
-  const suppressedProjectionsBefore = suppressedProjectionEvents
+  const snapshotBefore = snapshotNotifications
   const releaseSecond = adapter.hold()
   life.defer(() => releaseSecond())
   childAgent.followup({
@@ -1832,8 +1843,8 @@ test('L6 P2 sink: the MOUNTED Remote child viewer converges its committed subjec
     subjectLine().includes('● running'), 15_000)
   assert.ok(suppressedDurableEvents > suppressedBefore,
     'the reverse flip must also be observed with the durable sink suppressed')
-  assert.ok(suppressedProjectionEvents > suppressedProjectionsBefore,
-    'the reverse flip must also be observed with the projection sink suppressed')
+  assert.ok(snapshotNotifications > snapshotBefore,
+    'the reverse flip must also arrive through the official Session-snapshot sink')
   assert.equal(suppressedWindowReplaced, 0, 'no window replacement may fire on the reverse flip either')
   assert.equal(suppressedWindowPrepended, 0, 'no window prepend may fire on the reverse flip either')
   assert.equal(subjectActivity(), 'running', 'the reverse flip must converge as well')
