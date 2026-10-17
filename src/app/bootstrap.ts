@@ -104,6 +104,7 @@ import { selectApplicationRuntime } from './bootstrap/runtime-selection.ts'
 import { createPresentationBridge } from './bootstrap/presentation-bridge.ts'
 import { createTaskSource } from './bootstrap/task-source.ts'
 import { installRuntimeEventWiring, installSessionEventWiring } from './bootstrap/event-wiring.ts'
+import { armRemoteInitRetry } from './bootstrap/remote-init-retry.ts'
 import { createFatalLifecycle, createSurfaceLifecycle } from './bootstrap/lifecycle.ts'
 import { createSessionStartupHelpers, quiesceResumedOwner } from './bootstrap/session-startup.ts'
 import { createSessionOwnershipCore } from '../app/session/ownership-core.ts'
@@ -1298,39 +1299,21 @@ export function applyRunnerWithRuntime(
      *  narrower than the Connection generation, so an owner attempt is the
      *  honest budget unit). */
     let lastInitRetry: { readonly ownerGeneration: number; readonly connectionGeneration: unknown } | undefined
-    /** Arm the official-signal retry for one FAILED attempt. The retry belongs
-     *  to that attempt: it is fenced by the exact owner generation as well as
-     *  the session id, so a same-id owner commit (which keeps the session id but
-     *  bumps the generation) can never let an old retry run
-     *  `initRemoteLiveSurface` — whose entry disposes the live surface — against
-     *  the NEW owner (plan §2.5 terminal determinism / single publisher). */
-    const armRemoteInitRetry = (sessionId: string, failedAttemptGeneration: number): void => {
+    /** Arm the official-signal retry for one FAILED attempt (the production
+     *  helper owns the attempt fence, the official-channel wakeup and the
+     *  same-tick re-check; see `app/bootstrap/remote-init-retry.ts`). */
+    const armInitRetry = (sessionId: string, failedAttemptGeneration: number): void => {
       if (remoteSources === undefined || remoteInitRetryHandle !== undefined) return
-      const stillTheFailedAttempt = (): boolean =>
-        !cleanedUp
-        && ownership.currentSessionId() === sessionId
-        && ownership.generation() === failedAttemptGeneration
-      remoteInitRetryHandle = {
-        dispose: remoteSources.commandSource.subscribeConnectionGeneration(() => {
-          if (cleanedUp) { disposeRemoteInitRetry(); return }
-          if (remoteSources === undefined) return
-          if (remoteSources.commandSource.connectionGeneration() === undefined) return
-          // The owner may have moved on while the transport was gone: the retry
-          // belongs to the failed attempt only.
-          if (!stillTheFailedAttempt()) { disposeRemoteInitRetry(); return }
-          disposeRemoteInitRetry()
-          runDetached('remote live surface retry', () => {
-            // Same-tick re-check before the init's entry disposes anything: a
-            // same-id owner commit that landed after the callback consumed this
-            // listener must win.
-            if (!stillTheFailedAttempt()) return undefined
-            return initRemoteLiveSurface(sessionId)
-          }, {
-            diag,
-            sessionId: () => sessionId,
-          })
-        }),
-      }
+      const sources = remoteSources
+      remoteInitRetryHandle = armRemoteInitRetry({
+        isCleanedUp: () => cleanedUp,
+        currentSessionId: () => ownership.currentSessionId(),
+        ownerGeneration: () => ownership.generation(),
+        connectionGeneration: () => sources.commandSource.connectionGeneration(),
+        subscribeConnectionGeneration: listener => sources.commandSource.subscribeConnectionGeneration(listener),
+        runInit: () => initRemoteLiveSurface(sessionId),
+        runDetached: (name, run) => runDetached(name, run, { diag, sessionId: () => sessionId }),
+      }, sessionId, failedAttemptGeneration)
     }
     lifecycleController.signal.addEventListener('abort', disposeRemoteLiveSurface, { once: true })
 
@@ -1416,7 +1399,7 @@ export function applyRunnerWithRuntime(
         const liveGeneration = remoteSources.commandSource.connectionGeneration()
         if (liveGeneration === undefined) {
           // The transport is absent right now: wait for the OFFICIAL generation.
-          armRemoteInitRetry(sessionId, initGeneration)
+          armInitRetry(sessionId, initGeneration)
         } else {
           const attempt = { ownerGeneration: initGeneration, connectionGeneration: liveGeneration }
           const alreadyRetried = lastInitRetry !== undefined
@@ -1435,7 +1418,7 @@ export function applyRunnerWithRuntime(
               sessionId: () => sessionId,
             })
           } else {
-            armRemoteInitRetry(sessionId, initGeneration)
+            armInitRetry(sessionId, initGeneration)
           }
         }
         return
