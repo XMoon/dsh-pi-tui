@@ -19,6 +19,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { Context } from '@deepseek-ai/cordis'
+import { bindScopeParent, createScope, scopeOf } from '@deepseek-ai/dsh-scope'
 import { ToolCallId, LlmAdapter, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import type { LlmModelInfo, LlmResolvedModelInfo, GenerateOptions, StreamChunk } from '@deepseek-ai/dsh-llm'
 import { SessionId } from '@deepseek-ai/dsh-session'
@@ -43,46 +44,73 @@ function selectable(ctx: Context, agent: Agent): boolean {
 }
 
 type SubagentModelSelectionFiber = Awaited<ReturnType<Context['plugin']>>
+type PresetScope = ReturnType<typeof createScope>
 
 /** Mount the real Agent, provider, and tool services with the official
- * model-selection service composed at one preference value (0.1.7: the
- * preference lives on the service's own plugin Config — `remount` swaps
- * the value the NEXT session samples, exactly like a settings edit). */
+ * model-selection service composed at one preference value. The preference
+ * lives on the service's own plugin Config: `remount` swaps the service
+ * instance AND the standing preset composition the NEXT session samples,
+ * exactly like a settings edit followed by the next composition.
+ *
+ * 0.2.1-rc.2 shape: `modelSelectionSettings` samples a STANDING, preset-scoped
+ * composition. The tool row is therefore mounted once into a scope every Agent
+ * binds to (`bindScopeParent`), never per Agent — the official shipped preset
+ * declarations compose it that way, and a per-Agent mount registered after the
+ * Agent's own `agent/created` can never sample. */
 type ModelRoute = { provider: string; model: string }
 
-async function boot(enabled = false, allowedModels: readonly ModelRoute[] = []): Promise<{ ctx: Context; remount(next: { enabled: boolean; allowedModels?: readonly ModelRoute[] }): Promise<void> }> {
+let presetCounter = 0
+
+/** Mount the tool row once into one fresh standing preset scope. */
+async function mountPreset(ctx: Context): Promise<PresetScope> {
+  presetCounter += 1
+  const preset = createScope(ctx, { preset: `model-selection-${presetCounter}` })
+  await preset.ctx.plugin(tool, {
+    provider: 'spawn',
+    modelSelectionSettings: true,
+  })
+  return preset
+}
+
+/** Create one Agent joined to the given standing preset scope. */
+async function createAgent(ctx: Context, preset: PresetScope, id: string): Promise<Agent> {
+  const handle = await ctx.agents.create({
+    sessionId: SessionId(id),
+    setup: (agentCtx) => {
+      bindScopeParent(scopeOf(agentCtx)!, scopeOf(preset.ctx)!)
+    },
+  })
+  return handle.agent
+}
+
+async function boot(enabled = false, allowedModels: readonly ModelRoute[] = []): Promise<{ ctx: Context; create(id: string): Promise<Agent>; remount(next: { enabled: boolean; allowedModels?: readonly ModelRoute[] }): Promise<void> }> {
   const ctx = new Context()
   let selectionFiber: SubagentModelSelectionFiber | undefined
   selectionFiber = await ctx.plugin(SubagentModelSelectionConfig, { enabled, allowedModels: [...allowedModels] })
-  await mountAgentLoopTestDependencies(ctx)
+  // 0.2.1-rc.2's SubagentRuntime injects the official `workingDirectory` owner, so the
+  // Agent/subagent fixture mounts it through the testkit's own option (the same
+  // real directory owner the official base layer provides).
+  await mountAgentLoopTestDependencies(ctx, { workingDirectory: true })
   await ctx.plugin(AgentLoop, { agents: [] })
   await ctx.plugin(SubagentRuntime)
   await ctx.plugin(SubagentSpawn, { providerName: 'spawn' })
+  let preset = await mountPreset(ctx)
   return {
     ctx,
+    create: (id) => createAgent(ctx, preset, id),
     remount: async (next) => {
+      // A live settings edit reaches the standing tool through a NEW service
+      // instance, so the standing composition is re-mounted from it. Agents
+      // already composed keep the tool their own scope installed.
+      await preset.dispose()
       await selectionFiber?.dispose()
       selectionFiber = await ctx.plugin(SubagentModelSelectionConfig, {
         enabled: next.enabled,
         allowedModels: [...(next.allowedModels ?? [])],
       })
+      preset = await mountPreset(ctx)
     },
   }
-}
-
-/** Create one Agent whose setup mounts the settings-controlled tool row. */
-async function createAgent(ctx: Context, id: string): Promise<Agent> {
-  const handle = await ctx.agents.create({
-    sessionId: SessionId(id),
-    setup: async (agentCtx) => {
-      await agentCtx.plugin(tool, {
-        provider: 'spawn',
-        modelSelectionSettings: true,
-        backgroundMode: 'continuable',
-      })
-    },
-  })
-  return handle.agent
 }
 
 /** A minimal LLM adapter advertising alpha/fast + alpha/plain. */
@@ -131,18 +159,23 @@ function text(result: { content?: readonly { type?: string; text?: string }[] })
 }
 
 test('the official subagent model-selection closed loop: fresh sessions sample the setting, old sessions keep their policy', async () => {
-  const { ctx, remount } = await boot()
+  const host = await boot()
+  const { ctx, remount } = host
   try {
     // 1. Default-off: a composed Session's subagent tool has NO route
     //    fields and NO list_subagent_models.
-    const disabled = await createAgent(ctx, 'disabled')
+    const disabled = await host.create('disabled')
     assert.equal(selectable(ctx, disabled), false,
       'default-off must not expose provider/model/reasoning_effort or list_subagent_models')
+    // The negative control is only meaningful if the standing composition DID
+    // install the tool: the route fields are absent, not the whole definition.
+    assert.ok(ctx.tools.schemas(disabled).some(candidate => candidate.name === 'subagent'),
+      'the standing preset composition must register the subagent tool when selection is off')
 
     // 2. Enable + allowlist: a NEW Session samples the setting and its
     //    subagent tool gains the route fields + list_subagent_models.
     await remount({ enabled: true, allowedModels: ALLOWED_MODELS })
-    const enabled = await createAgent(ctx, 'enabled')
+    const enabled = await host.create('enabled')
     assert.equal(selectable(ctx, enabled), true,
       'a fresh Session composed after enabling must expose the route fields and list_subagent_models')
     // The already-composed Session is NOT rewritten by the settings change.
@@ -162,7 +195,7 @@ test('the official subagent model-selection closed loop: fresh sessions sample t
     // 4. Disable again: a NEW Session is not selectable, while the
     //    previously-enabled Session KEEPS its durable sampled policy.
     await remount({ enabled: false })
-    const disabledAgain = await createAgent(ctx, 'disabled-again')
+    const disabledAgain = await host.create('disabled-again')
     assert.equal(selectable(ctx, disabledAgain), false,
       'a fresh Session composed after disabling must not expose the route fields')
     assert.equal(selectable(ctx, enabled), true,

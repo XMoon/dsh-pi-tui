@@ -210,6 +210,73 @@ const on = source.remote.$on.bind(source.remote)
 or an equivalent call that preserves the receiver. This applies to any generated
 Client method whose contract is receiver-sensitive, not only `$on`.
 
+### Carrier Peer, `./client` conditions and the working-directory prerequisite (0.2.1-rc.2 baseline)
+
+The 0.2.1-rc.2 re-qualification of the experimental M3 composition keeps the
+frozen ownership rows above and adds four facts the implementation must not
+reinterpret:
+
+- **One owner Peer, two paths.** `createInProcessCarrier()` passes
+  `hostContext.connection.browserPeer` — the Peer the `HostConnectionService`
+  constructor creates with `principal: { kind: 'owner' }` and disposes with the
+  Connection plugin fiber — to BOTH `shared.fetch(request, peer)` and
+  `gateway.wireStream.open(endpoint, payload, uplink, peer, signal)`. The carrier
+  never creates, caches, or disposes a Peer; the peer's lifetime stays the
+  Connection fiber's, so a retired Connection really does refuse later work.
+- **`interactions: 'answer'` is declared, not inherited.** The official
+  Connection default is `answer` only for a page carrier (one with a location)
+  and `none` otherwise, and `none` refuses forwarded events outright. This
+  in-process Client is the TUI's only answering surface, so
+  `installConnection(..., { interactions: 'answer' })` states it explicitly.
+- **`./client` entries are condition-selected.** The official packages publish a
+  standalone Node ESM half (`node`) and a `__ModuleLoader__`-registering browser
+  factory (`browser`/`default`). The in-process Client composes the Node half
+  where the package publishes one and the registering browser factory otherwise,
+  through ONE module table, so a registering factory can still resolve a
+  Node-half dependency (`src/app/remote/client-runtime.ts`).
+- **The real `workingDirectory` owner is a base prerequisite.** 0.2.1-rc.2's
+  `SubagentRuntime`, the SessionController's nested skill catalog and
+  `@deepseek-ai/dsh-file-reference-local` all inject it; without that row the
+  affected Remotes silently never register (which surfaces as a bare 404).
+  Production inherits the `dsh-base` row; the Host runtime asserts it, and every
+  independent Host fixture must mount the official owner rather than fake it.
+
+- **Open Remote lifecycle gaps handed to S3 (recorded, not closed).** Two
+  behaviours are reachable only with the 0.2.1-rc.2 composition and are owned by
+  the M3 Remote parity stage; this foundation PR neither papers over them nor
+  widens its scope to fix them:
+  1. **Admission is not the durable append.** The official `session/prompt`
+     Remote answers when the Host Agent ACCEPTED the message
+     (`agent.followup`/`steer`); the HOST then owns the durable append and the
+     runtime-context message it composes with the first accepted prompt.
+     `RemoteSessionOwnerServices.flush()` is therefore a documented no-op —
+     there is no public Remote durable-flush verb — so an accepted write may
+     become durable AFTER the Client transport is disposed. What teardown does
+     guarantee (no render after the surface stopped, exactly one transport
+     disposal, the accepted write still reaching its authoritative row) is
+     pinned in `test/runner-remote-races.test.ts`. S3 must DECIDE whether a
+     still-parked write is refused at teardown or the drain must await the
+     Host's durable commit, and prove it with paired L5/L6 success/failure
+     tests — not a timeout, poll or fabricated flush.
+  2. **Reconnect window/ingress ordering.** After
+     `connection.reconnect()` the new generation re-reads the durable window
+     while the live ingress may already deliver later events. The observed
+     failure (2 of 6 concurrent copies of
+     `test/runner-remote-presentation.test.ts`, green sequentially) leaves the
+     transcript window on the pre-append baseline while the projection path has
+     already advanced: the Host log holds the new turn, the new generation id is
+     observed, the model projection lands, yet the painted transcript never
+     shows the new assistant row. Deciding whether the window replacement must
+     be applied before live ingress, or whether a late ingress fact re-triggers
+     hydration, is Remote currentness work for S3 (C11/C12/C18) with its own
+     L5/L6 positive + stale-generation negative tests.
+
+Evidence: the `PEER` block in `test/remote-client-runtime.test.ts` (owner identity
+observed inside the real Gateway on the stream path, the same object on the Fetch
+path, a no-policy guest refused with `remote-access/denied`, a disposed Peer
+refused with `gateway/peer-disposed`, and the owner Peer aborted with the
+Connection fiber).
+
 ### L5 fixture topology
 
 Every NEW or materially modified test described as real-wire / real-Host from

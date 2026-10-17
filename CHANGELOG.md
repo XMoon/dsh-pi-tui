@@ -7,20 +7,24 @@
 
 ## [Unreleased]
 
-## [0.5.2-rc.1] - 2026-10-17
+## [0.5.3] - 2026-10-17
 
 ### 安装与版本对应
 
-本预览版与 `0.5.1` 使用同一已发布 DSH 基线：peer floor 为 `>=0.2.0-rc.2`，精确验证目标为
-`0.2.0-rc.2`。安装 DSH 需要显式允许其原生安装脚本：
+本候选版（reserved candidate，尚未打 tag 或发布）把 DSH 基线推进到已发布的
+`0.2.1-rc.2` family：peer floor 为 `>=0.2.1-rc.2`，精确验证目标为 `0.2.1-rc.2`。
+安装 DSH 需要显式允许其原生安装脚本：
 
 ```sh
-npm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty @deepseek-ai/dsh@0.2.0-rc.2
-dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@0.5.2-rc.1
+npm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty @deepseek-ai/dsh@0.2.1-rc.2
+dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@0.5.3
 dsh --profile pi-tui
 ```
 
-旧 runtime 的配对不变：`@deepseek-ai/dsh@0.2.0-rc.1`（含 `0.1.7-rc.2`）使用
+中间的 `@deepseek-ai/dsh@0.2.1-rc.1` 没有配对 TUI。旧 runtime 的配对不变：
+`@deepseek-ai/dsh@0.2.0-rc.2` 使用已发布的 `@xmoon76/dsh-pi-tui@0.5.1`
+（`0.5.2-rc.1` 是同一基线上曾预留、从未发布的 next 身份）；
+`@deepseek-ai/dsh@0.2.0-rc.1`（含 `0.1.7-rc.2`）使用
 `@xmoon76/dsh-pi-tui@0.5.0`，`@deepseek-ai/dsh@0.1.7-rc.1` 使用
 `@xmoon76/dsh-pi-tui@0.4.8`。
 
@@ -1420,8 +1424,8 @@ dsh --profile pi-tui
 - 全屏布局、Ctrl+F 搜索、主题系统。
 - 单包发布模型。
 
-[Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/next-v0.5.2-rc.1...HEAD
-[0.5.2-rc.1]: https://github.com/XMoon/dsh-pi-tui/compare/v0.5.1...next-v0.5.2-rc.1
+[Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/next-v0.5.3...HEAD
+[0.5.3]: https://github.com/XMoon/dsh-pi-tui/compare/v0.5.1...next-v0.5.3
 [0.5.1]: https://github.com/XMoon/dsh-pi-tui/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/XMoon/dsh-pi-tui/compare/v0.4.9...v0.5.0
 [0.4.9]: https://github.com/XMoon/dsh-pi-tui/compare/v0.4.8...v0.4.9

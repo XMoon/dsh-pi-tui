@@ -405,19 +405,46 @@ test('L6 PR5 §3.9b: teardown with a pending WRITE — observed surface-stop bou
     observed.push('transport-dispose')
     await originalDispose()
   }
+  // TERMINAL-WRITE COUNTER (the real render/callback channel): a disposed
+  // surface must never paint again, whatever the Host commits afterwards.
+  const surfaceWrites = { count: 0 }
+  const vtWrite = fixture.vt.write.bind(fixture.vt)
+  fixture.vt.write = (data: string): void => {
+    if (data.length > 0) surfaceWrites.count += 1
+    vtWrite(data)
+  }
   // START the teardown; observe the surface stop BEFORE releasing the write.
   const teardownPromise = fixture.runnerFiberDispose()
   await waitFor('the surface stopped (observed)', () => observed.includes('surface-stop'), 10_000)
   assert.equal(transportDisposals, 0,
     'the transport has NOT disposed while the drain is pending the parked write')
+  const writesAtRelease = surfaceWrites.count
   parked.release()
   await teardownPromise
   assert.equal(transportDisposals, 1,
     'the selected transport disposes exactly once through the runner teardown')
   assert.ok(observed.indexOf('surface-stop') < observed.indexOf('transport-dispose'),
     'observed order: surface stop precedes the transport disposal (the drain settled the write between)')
-  const rowsAtDisposal = hostUserRows(fixture, mainId).length
   await new Promise(resolve => setTimeout(resolve, 800))
-  assert.equal(hostUserRows(fixture, mainId).length, rowsAtDisposal,
-    'no durable row landed after the transport disposal (no post-disposal visible commit)')
+  // The official prompt contract is ADMISSION: `session/prompt` answers once
+  // the Host Agent accepted the message (`agent.followup`), and the HOST owns
+  // the durable append from then on — in BOTH baselines; the runtime-context
+  // message the 0.2.1-rc.2 Host composes with the first accepted prompt only
+  // makes the gap observable here. Teardown therefore guarantees the SURFACE
+  // boundary (no render after the surface stopped), not the absence of a
+  // Host-owned commit: the accepted write still reaches its authoritative
+  // durable row.
+  //
+  // OPEN OWNER (S3, recorded — not silently accepted): the TUI's Remote
+  // retirement drain can only settle the Client's admission because
+  // `RemoteSessionOwnerServices.flush()` is a documented no-op (no public
+  // Remote durable-flush verb exists), so "an accepted write never becomes
+  // durable after transport disposal" is NOT a guarantee this composition can
+  // make. Deciding whether teardown must refuse a still-parked write or must
+  // wait for the Host's durable commit is a Remote lifecycle-contract decision
+  // (`docs/client-server-coupling.md`), never a local sleep/poll patch.
+  assert.equal(surfaceWrites.count - writesAtRelease, 0,
+    'the accepted write produced ZERO terminal writes after the surface stopped')
+  assert.ok(hostUserRows(fixture, mainId).some(row => row.includes('pending write across teardown sigma')),
+    'the accepted write reaches its authoritative Host commit')
 })

@@ -89,7 +89,13 @@ export interface TaskBrowserAgentInput {
   readonly id: string
   /** Absent for a one-shot child; continuable children always carry one. */
   readonly label?: string
-  readonly mode?: 'one-shot' | 'continuable'
+  /**
+   * The official durable classification. `external` (0.2.1-rc.1 catalog v2) records
+   * an external provider execution with no local child Session: it is carried
+   * through the read ports but the classification guard below keeps it out of
+   * the browsable rows, because this surface owns no external-child viewer.
+   */
+  readonly mode?: 'one-shot' | 'continuable' | 'external'
   /** UI-PROJECTED runtime activity of the child's driver
    * (`running` = the selected activity source reports a live driver right
    * now; `inactive` = no live driver — idle, cold, or disposed, never
@@ -174,10 +180,12 @@ export function buildTaskRows(
 ): TaskBrowserRow[] {
   // Child rows: every healthy classified child — continuable AND one-shot,
   // running AND inactive (a settled one-shot's persisted transcript is
-  // still viewable, plan §6.3). The filter is a TYPE GUARD on mode: a
-  // catalog entry whose mode is missing is NOT treated as a healthy
-  // interactive child — it is dropped like a diagnostic (never silently
-  // defaulted to continuable).
+  // still viewable, plan §6.3). The filter is a TYPE GUARD on mode: an
+  // entry whose mode is missing, unclassified (`unknown`) or `external` is
+  // NOT a healthy interactive child — it is dropped like a diagnostic
+  // (never silently defaulted to continuable). An `external` child has no
+  // local Session to open; its Task-Center disposition is owned by the
+  // official Bundle qualification (B13/B14), not by this projection.
   type AgentRow = Extract<TaskBrowserRow, { kind: 'subagent' }>
   const agentRows: AgentRow[] = agents
     .filter((agent): agent is TaskBrowserAgentInput & { mode: 'one-shot' | 'continuable' } =>

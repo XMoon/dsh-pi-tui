@@ -54,20 +54,26 @@ next compatibility range, and fallback paths.
 
 | TUI package line | Official DSH tags for the pairing | Notes |
 |---|---|---|
-| `0.5.1` (stable / `@latest`) | `dsh-v0.2.0-rc.2` | Current stable line; both the minimum and the exact validation target are the 0.2.0-rc.2 family |
-| `0.5.2-rc.1` (next preview / `@next`) | `dsh-v0.2.0-rc.2` | Current next-line preview; the DSH baseline is identical to `0.5.1` (the 0.2.0-rc.2 family is both the minimum and the exact validation target) |
+| `0.5.1` (stable / `@latest`) | `dsh-v0.2.0-rc.2` | Current published stable line; both the minimum and the exact validation target are the 0.2.0-rc.2 family |
+| `0.5.3` (next candidate / `@next`, unpublished) | `dsh-v0.2.1-rc.2` | Current next-line candidate identity: the 0.2.1-rc.2 family is both the minimum and the exact validation target; a reserved candidate, not yet tagged or published |
+| `dsh-v0.2.1-rc.1` (no paired TUI) | none | No released TUI in this matrix claims that intermediate release; never reuse `0.5.3` for it |
+| `0.5.2-rc.1` (next reservation, never published) | `dsh-v0.2.0-rc.2` | Historical record: the next identity was reserved in the repository but never published; its pairing stays the 0.2.0-rc.2 family |
 | `0.5.0` (stable, previous) | `dsh-v0.1.7-rc.2`, `dsh-v0.2.0-rc.1` | Previous stable; 0.1.7-rc.2 minimum, exact validation target 0.2.0-rc.1 |
 | `0.4.9` (stable, previous) | `dsh-v0.1.7-rc.2` | Previous stable; the compatible TUI for a 0.1.7-rc.2 runtime |
 | `0.4.8` (stable, previous) | `dsh-v0.1.7-rc.1` | Previous stable; the compatible TUI for a 0.1.7-rc.1 runtime |
 | `0.4.6` (stable, previous) | `dsh-v0.1.5-rc.1`, `dsh-v0.1.5-rc.2` | Previous stable; the compatible TUI for a 0.1.5 runtime |
 | `0.4.7-alpha.2` (next, previous) | `dsh-v0.1.6-alpha.2` | Previous next line; the compatible TUI for a 0.1.6-alpha.2 runtime |
 
-Do not mix the stable and `@next` prerelease lines. `@next` currently resolves to
-the `0.5.2-rc.1` preview, whose DSH baseline is identical to `0.5.1`. `0.5.1` lifts the whole DSH
-peer floor to `>=0.2.0-rc.2`: the Question lifecycle
-consumes contracts published only in rc.2 (the `userQuestions.attachWait`/
-`answer` Remotes and the `userQuestions` Session projection), so mixing in the
-rc.1 family would be a false compatibility statement. The previous stable `0.5.0`
+Do not mix the stable and `@next` prerelease lines. `0.5.3` is the current
+next-line candidate identity: its minimum DSH version (peer floor) and its exact
+validation target are both the published `0.2.1-rc.2` family; until the
+qualification finishes and the release is tagged, it is a reserved candidate and
+not a published release. The intermediate `dsh-v0.2.1-rc.1` has no paired TUI,
+and `0.5.2-rc.1` is a next identity that was reserved but never published — its
+historical pairing (0.2.0-rc.2) stays in the table above. The published stable
+`0.5.1` keeps pairing with 0.2.0-rc.2: it lifts the whole DSH peer floor to
+`>=0.2.0-rc.2` (the Question lifecycle consumes contracts published only in
+that rc.2 family). The previous stable `0.5.0`
 line keeps its `>=0.1.7-rc.2` floor (exact validation target 0.2.0-rc.1);
 older runtimes fail at the normal
 incompatible-runtime boundary, so install the paired TUI line from the table

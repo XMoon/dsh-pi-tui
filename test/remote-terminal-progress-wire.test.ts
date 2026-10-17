@@ -385,26 +385,39 @@ test('L5: Host fiber disposal withdraws the descriptor and closes live watchers 
       await waitFor('the live watcher opened', () => liveFrames >= 1, 10_000)
 
       await wire.hostRuntime.dispose()
-      // The row closed the live watcher (its subscriber queue ended) and the
-      // iteration completed instead of hanging.
-      await live
-      assert.ok(liveFrames >= 1, 'the watcher received its opening frame')
+      // Disposal ends the live watcher instead of leaving it hanging. 0.2.1-rc.2
+      // ties the owner Peer to the Host Connection fiber, so the iterated
+      // stream now TERMINATES WITH the official cancellation failure rather
+      // than a quiet completion: both are "the watch is over", and the failure
+      // is the truthful taxonomy for a peer that was disposed.
+      let watcherEnd: unknown
+      try {
+        await live
+      } catch (error) {
+        watcherEnd = error
+      }
+      assert.equal((watcherEnd as { code?: unknown } | undefined)?.code, 'gateway/cancelled',
+        'a disposed Peer ends the live watcher with the official cancellation code')
+      assert.ok(liveFrames >= 1, 'the watcher received its opening frame before disposal')
 
-      // A fresh watch now fails on the Host with the real withdrawn descriptor.
-      // The raw typed client watch is used because the retained Binding itself
-      // is released when the Host Connection composition goes away.
+      // A fresh watch cannot complete any more. 0.2.1-rc.2 ties the owner Peer
+      // to the Host Connection fiber (the mandated lifetime), so the official
+      // Gateway refuses the disposed Peer itself — the same `assertPeerLive`
+      // refusal a live caller would see — instead of reaching the withdrawn
+      // strict definition (that refusal is only observable while the peer is
+      // live). What this test still proves is the user-visible guarantee: no
+      // frames, and the real Remote failure code from the official Gateway.
       let withdrawnError: unknown
       try {
         for await (const _frame of wire.client.remote.piTuiTerminalProgress.watch(disposedSession)) {
-          assert.fail('a withdrawn descriptor must not yield frames')
+          assert.fail('a disposed transport must not yield frames')
         }
       } catch (error) {
         withdrawnError = error
       }
-      assert.ok(withdrawnError instanceof Error, `the withdrawn descriptor must fail: ${String(withdrawnError)}`)
-      assert.equal((withdrawnError as Error).message,
-        'typert gateway: piTuiTerminalProgress/watch: its strict definition was withdrawn and SRC fallback is forbidden',
-        'the real withdrawn-descriptor message')
+      assert.ok(withdrawnError instanceof Error, `a disposed transport must fail: ${String(withdrawnError)}`)
+      assert.equal((withdrawnError as { code?: unknown }).code, 'gateway/peer-disposed',
+        'the official Gateway refuses the disposed owner Peer')
 
       // PROOF 5: no physical socket; the private method travelled the in-process carrier.
       assert.equal(wire.hostRuntime.carrier.ownsHost, true, 'the transport is the in-process carrier')

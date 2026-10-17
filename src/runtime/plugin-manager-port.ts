@@ -22,8 +22,10 @@ export interface PluginIncompatibleFact {
   readonly name: string
   readonly version: string
   readonly runtimeVersion: string
-  /** Only the DSH peer ranges the running version does not satisfy. */
-  readonly peers: Readonly<Record<string, string>>
+  /** Only the requirements the running version does not satisfy, keyed
+   * `engines.dsh` or by DSH peer package name (the 0.2.1-rc.1 official
+   * `IncompatiblePlugin.requirements` fact). */
+  readonly requirements: Readonly<Record<string, string>>
 }
 
 /** A Host management failure, actionable rather than a generic "failed". */

@@ -1,22 +1,23 @@
 /**
- * Runtime-hardening profile contract: the shipped `cordis.patch.yml` must
- * mount DSH's official `@deepseek-ai/dsh-invariants` registry (with an exact
- * allowlist) plus the `@deepseek-ai/dsh-agent-preset-registry/invariant`
- * companion, and both module names must resolve where the patch is applied.
+ * Profile-basics contract for the 0.2.1-rc.2 composition.
  *
- * This file pins the repo's dependency rule for a COMPOSITION ROW, which is not
- * the generic "every referenced package is a runtime peer" rule: a package the
- * patch names but `src/` never imports is resolved by the dsh Host from its own
- * installation and stays a devDependency here. `@deepseek-ai/dsh-invariants` is
- * exactly that case (see `@deepseek-ai/dsh-agent-preset` for the precedent), and
- * it is installed wherever its Host-side dependant is: the registry package —
- * itself a runtime peer of this bundle — declares it as its own peer. A peer
- * that `src/` DOES import is the other contract, enforced by
- * `scripts/naming-gate.mjs`.
+ * The retired hardening layer is gone upstream: 0.2.1-rc.2 no longer publishes
+ * `@deepseek-ai/dsh-invariants`, the `@deepseek-ai/dsh-agent-preset-registry/invariant`
+ * companion subpath, or the base `tool-ralph` row. This file therefore pins
+ * what actually owns each seam now, instead of asserting a local substitute:
  *
- * The allowlist assertion is deliberately exact: the bundle introduces ONE
- * production invariant, so a later layer adding another invariant companion
- * must not be enabled implicitly by this profile.
+ * - the OFFICIAL `@deepseek-ai/dsh-base` layer owns `authorization`,
+ *   `remote-access`, `working-directory` and `tool-working-directory`, exactly
+ *   once each, and this bundle's overlay must NOT insert a second one;
+ * - the overlay still owns the preset registry (deployment default `standard`)
+ *   and must not resurrect the retired rows;
+ * - the overlay keeps its explicit `authorization` inject on `tui-app`, so the
+ *   lifecycle dependency survives even though the row itself is inherited.
+ *
+ * Reading the base patch from the installed official package keeps the
+ * "who owns the seam" claim tied to the shipped 0.2.1-rc.2 artifact rather than to a
+ * hand-copied expectation. It does NOT prove a clean-profile boot; that is the
+ * real-profile smoke's job.
  * @module @xmoon76/dsh-pi-tui/runtime-hardening-profile.test
  */
 
@@ -27,80 +28,104 @@ import test from 'node:test'
 import { parse } from 'yaml'
 
 const REPO_ROOT = process.cwd()
+const BASE_PATCH_PATH = new URL(import.meta.resolve('@deepseek-ai/dsh-base/cordis.patch.yml'))
 
-/** The rows the bundle patch inserts, keyed by entry id. */
-function bundleRows() {
-  const document = parse(readFileSync(join(REPO_ROOT, 'cordis.patch.yml'), 'utf8'))
+/** The rows a patch inserts, keyed by entry id (a bundle patch inserts one
+ * flat list; later layers address those ids by id). */
+function insertedRows(pathOrUrl) {
+  const document = parse(readFileSync(pathOrUrl, 'utf8'))
   const inserted = (document ?? []).flatMap(entry => entry?.insert ?? [])
   return new Map(inserted.filter(row => typeof row.id === 'string').map(row => [row.id, row]))
 }
 
+const overlay = insertedRows(join(REPO_ROOT, 'cordis.patch.yml'))
+const base = insertedRows(BASE_PATCH_PATH)
+const overlayText = readFileSync(join(REPO_ROOT, 'cordis.patch.yml'), 'utf8')
 const manifest = JSON.parse(readFileSync(join(REPO_ROOT, 'package.json'), 'utf8'))
 
-test('the profile mounts the invariants registry with the exact preset allowlist', () => {
-  const registry = bundleRows().get('invariants')
-  assert.ok(registry, 'cordis.patch.yml must insert the `invariants` row')
-  assert.equal(registry.name, '@deepseek-ai/dsh-invariants', 'the row must name the official registry package')
-  assert.equal(registry.disabled, undefined, 'the invariants registry must not be disabled')
-  const config = registry.config ?? {}
-  assert.equal(config.enabled, true, 'the invariants registry must be enabled in production')
-  assert.deepEqual(config.package_allowlist, ['^@deepseek-ai/dsh-agent-preset-registry$'],
-    'the allowlist must enable exactly the preset-registry invariant')
+/** The official row one seam must have discovered exactly once in the layer
+ * that owns it. */
+const BASE_OWNED_SEAMS = [
+  ['authorization', '@deepseek-ai/dsh-authorization'],
+  ['remote-access', '@deepseek-ai/dsh-api-remote-access'],
+  ['working-directory', '@deepseek-ai/dsh-working-directory'],
+  ['tool-working-directory', '@deepseek-ai/dsh-tool-working-directory'],
+  // 0.2.1-rc.2's new DeepSeek Search/Fetch API provider: a base row like the others
+  // (NOT a fifteenth optional Bundle), so the overlay must inherit it too.
+  ['web-deepseek-api', '@deepseek-ai/dsh-web-deepseek-api'],
+]
+
+test('the official base owns the authorization / working-directory / remote-access seams exactly once', () => {
+  for (const [id, name] of BASE_OWNED_SEAMS) {
+    const rows = [...base.entries()].filter(([, row]) => row.name === name)
+    assert.deepEqual(rows.map(([rowId]) => rowId), [id],
+      `the 0.2.1-rc.2 base must declare exactly one ${name} row (id ${id})`)
+  }
 })
 
-test('the profile mounts the agent-preset-registry invariant companion', () => {
-  const companion = bundleRows().get('agent-preset-registry-invariant')
-  assert.ok(companion, 'cordis.patch.yml must insert the preset invariant companion row')
-  assert.equal(companion.name, '@deepseek-ai/dsh-agent-preset-registry/invariant',
-    'the companion must name the registry package subpath')
-  assert.equal(companion.disabled, undefined, 'the companion must not be disabled')
-  assert.equal(companion.config, undefined, 'the companion takes no config; its inject declares the dependency')
+test('the TUI overlay inherits those seams instead of inserting a second owner', () => {
+  for (const [id, name] of BASE_OWNED_SEAMS) {
+    assert.equal(overlay.has(id), false,
+      `cordis.patch.yml must not insert a second \`${id}\` row; the 0.2.1-rc.2 base owns ${name}`)
+  }
+})
+
+test('the overlay keeps its explicit authorization dependency on the surface row', () => {
+  const app = overlay.get('tui-app')
+  assert.ok(app, 'the overlay must insert the tui-app row')
+  assert.ok(Array.isArray(app.inject) && app.inject.includes('authorization'),
+    'tui-app must keep injecting `authorization`: the row is inherited, the lifecycle ordering is this bundle\'s')
+})
+
+test('the base keeps the shipped web defaults and the overlay adds no web provider row', () => {
+  const web = base.get('web')
+  assert.ok(web, 'the 0.2.1-rc.2 base must declare the web row')
+  assert.equal(web.name, '@deepseek-ai/dsh-web')
+  assert.deepEqual(web.config, { searchProvider: 'deepseek-official', fetchProvider: 'http' },
+    'the base web row must keep the shipped Messages-search + HTTP-fetch defaults')
+  // Every web provider row belongs to the base; a TUI copy would be a second
+  // provider registry (and `web-deepseek-api` must never be re-mounted here).
+  for (const id of ['web', 'web-search-deepseek', 'web-deepseek-api']) {
+    assert.equal(overlay.has(id), false, `cordis.patch.yml must not insert a \`${id}\` row`)
+  }
 })
 
 test('the preset registry row stays the deployment default on the host plane', () => {
-  const registry = bundleRows().get('agent-preset-registry')
+  const registry = overlay.get('agent-preset-registry')
   assert.ok(registry, 'the composition must keep the agent-preset-registry row')
   assert.equal(registry.name, '@deepseek-ai/dsh-agent-preset-registry')
   assert.equal((registry.config ?? {}).default, 'standard',
     'the deployment default must stay standard unless a deliberate change says otherwise')
 })
 
-test('dsh-invariants stays a composition row: exact dev pin, deliberately no runtime peer', () => {
-  assert.equal(manifest.devDependencies?.['@deepseek-ai/dsh-invariants'], manifest.devDependencies?.['@deepseek-ai/dsh-agent'],
-    'the composition row stays pinned to the exact declared DSH family target for the real-mount tests')
-  // `@deepseek-ai/dsh-invariants` is named only by cordis.patch.yml — a
-  // composition row the dsh Host resolves from its own installation, exactly
-  // like `@deepseek-ai/dsh-agent-preset`. `src/` never imports it, so a peer
-  // entry would be a dead peer (scripts/naming-gate.mjs) and would invite a
-  // duplicate in-box copy in the profile. This assertion pins the repo rule so
-  // a later edit cannot silently "fix" it into a phantom runtime peer.
-  assert.equal(manifest.peerDependencies?.['@deepseek-ai/dsh-invariants'], undefined,
-    'a composition row is not a module-graph peer')
+test('the retired invariant and Ralph rows are absent from the composition and the manifest', () => {
+  // Both the positive (`insert`) and the negative (`disabled`) forms would
+  // address a row the 0.2.1-rc.2 base no longer mounts.
+  for (const retired of ['invariants', 'agent-preset-registry-invariant', 'tool-ralph']) {
+    assert.equal(overlay.has(retired), false, `the overlay must not declare the retired \`${retired}\` row`)
+    assert.doesNotMatch(overlayText, new RegExp(`^- id: ${retired}$`, 'mu'),
+      `the overlay must not carry a \`${retired}\` negative override either`)
+  }
+  for (const section of ['dependencies', 'peerDependencies', 'devDependencies']) {
+    assert.equal('@deepseek-ai/dsh-invariants' in (manifest[section] ?? {}), false, `${section} must not carry dsh-invariants`)
+    assert.equal('@deepseek-ai/dsh-tool-ralph' in (manifest[section] ?? {}), false, `${section} must not carry the retired tool-ralph package`)
+  }
 })
 
-test('the registry still declares the peer that installs dsh-invariants beside it', () => {
-  // What this test DOES prove: the package that is always installed in a
-  // profile (the registry is a runtime peer of this bundle, so npm/pnpm
-  // installs it with the bundle) declares `@deepseek-ai/dsh-invariants` as one
-  // of its OWN peers, and both module subpaths resolve from this checkout.
-  // What it does NOT prove: a clean-profile BOOT with the row activated — that
-  // end-to-end check is the `pnpm pack:release` tarball / pluginization smokes
-  // plus a fresh-profile install, not this structural assertion.
-  const registryManifest = JSON.parse(readFileSync(
-    new URL(import.meta.resolve('@deepseek-ai/dsh-agent-preset-registry/package.json')),
-    'utf8',
-  ))
-  assert.equal(registryManifest.peerDependencies?.['@deepseek-ai/dsh-invariants'], registryManifest.version,
-    'the registry must keep declaring dsh-invariants as its own exact-family peer (the Host install chain)')
-})
-
-test('every package the profile names resolves from this checkout', () => {
-  // A patch row naming an unresolvable module is a boot-time row failure that
-  // only appears once the bundle is actually mounted; resolving here catches a
-  // typo, a missing subpath export, or a package that never made it into the
-  // dependency graph.
-  assert.match(import.meta.resolve('@deepseek-ai/dsh-invariants'), /dsh-invariants/,
-    'the invariants registry package must resolve')
-  assert.match(import.meta.resolve('@deepseek-ai/dsh-agent-preset-registry/invariant'), /invariant\.js$/,
-    'the registry companion subpath export must resolve')
+test('every overlay row this checkout declares locally resolves from it', () => {
+  // Rows the dsh Host resolves from its own installation (the base-owned seams
+  // and `cordis-host-runner`) are deliberately NOT local dependencies, so they
+  // are out of scope here. For every row this checkout DOES declare, the exact
+  // name — including a subpath export — must resolve: a patch row naming an
+  // unresolvable module is a boot-time row failure.
+  const declared = { ...manifest.dependencies, ...manifest.peerDependencies, ...manifest.devDependencies }
+  const checked = []
+  for (const [id, row] of overlay) {
+    if (typeof row.name !== 'string' || !row.name.startsWith('@deepseek-ai/dsh-')) continue
+    const packageName = row.name.split('/').slice(0, 2).join('/')
+    if (!(packageName in declared)) continue
+    assert.doesNotThrow(() => import.meta.resolve(row.name), `the \`${id}\` row must resolve: ${row.name}`)
+    checked.push(row.name)
+  }
+  assert.ok(checked.length > 0, 'the overlay must declare at least one locally installed row')
 })
