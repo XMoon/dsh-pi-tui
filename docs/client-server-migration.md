@@ -626,6 +626,29 @@ Classify each delta as `INHERITED`, `CONTRACT_AMENDMENT`,
 `QUALIFICATION_ONLY`, `DEFERRED_WITH_OWNER` or `N/A`. Do not broadly reopen
 unaffected stages merely because the version changed.
 
+### S1 foundation re-qualification on the `0.2.1-rc.2` baseline
+
+The DSH baseline moved from `0.2.0-rc.2` to the published `0.2.1-rc.2` (TUI
+candidate `0.5.3`, floor `>=0.2.1-rc.2`; the intermediate `0.2.1-rc.1` carries no
+TUI). Per the procedure above, the delta was classified before any code change:
+
+```text
+INHERITED          the frozen M3 ownership rows, the one-runtime-graph rule and
+                   the Direct/Remote semantic ports: unchanged
+CONTRACT_AMENDMENT the official `./client` node/browser condition split, the
+                   Connection `interactions` default for a non-browser carrier,
+                   and the base `workingDirectory` prerequisite of the
+                   Session/subagent/file-reference rows
+QUALIFICATION_ONLY same-Peer Fetch+Stream evidence, guest/disposed negative
+                   controls and the real rosters re-run on the new family
+DEFERRED_WITH_OWNER Session data forward/downgrade, the rc.2 web
+                   search/fetch provider selection and every optional-bundle
+                   capability stay with their S2/S4 owners
+```
+
+M3 stays DONE and M4 stays NOT STARTED: this re-qualification restores the
+existing experimental Remote path on the new family and does not promote it.
+
 ### Original-plan closure review (required gate)
 
 Before setting a stage to DONE:

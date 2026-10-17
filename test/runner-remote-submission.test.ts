@@ -471,7 +471,30 @@ test('L6: a Remote submit after /resume targets the replacement current Session,
     return fixture.vt.getViewport().join('').includes('pr3-stale-b')
       || (fixture.aggregate.presentation as unknown as { sessionFacts: { sessionStatus(id: string): unknown } }).sessionFacts.sessionStatus('pr3-stale-b') !== undefined
   }, 15_000)
-  submitDraft(fixture, 'switched-session row epsilon')
+  // The switch transaction keeps its writer fence closed until the committed
+  // owner's surface AND live catalog are ready (and only then reports the
+  // switch). A real user hitting Enter inside that window sees the product's
+  // "a session transition is in progress — try again in a moment" notice and
+  // tries again, so this gesture does the same instead of assuming the fence
+  // is already open: a rejected attempt restores the draft, an accepted one
+  // clears it and its row must then land in B.
+  const interactive = fixture.runnerApp() as unknown as {
+    setDraft(text: string): void
+    submitDraft(): void
+    getDraft(): string
+  }
+  const landedInB = (): boolean =>
+    hostUserRows(fixture, 'pr3-stale-b').some(row => row.includes('switched-session row epsilon'))
+  let attempted = false
+  const submitDeadline = Date.now() + 20_000
+  while (!landedInB() && Date.now() < submitDeadline) {
+    if (!attempted || interactive.getDraft() !== '') {
+      interactive.setDraft('switched-session row epsilon')
+      interactive.submitDraft()
+      attempted = true
+    }
+    await new Promise(resolve => setTimeout(resolve, 100))
+  }
   // The row lands in the session the gesture TARGETED (B)…
   await waitFor('row lands in B', () => hostUserRows(fixture, 'pr3-stale-b').some(row => row.includes('switched-session row epsilon')), 20_000)
   // …and NEVER in the retired session A. Scope note: this proves the

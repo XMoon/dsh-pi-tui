@@ -192,10 +192,10 @@ export function errorText(error: PluginErrorFact): string {
   return parts.join(' — ')
 }
 
-/** Render one rejected package with its required peer ranges. */
+/** Render one rejected package with the requirements it does not satisfy. */
 export function incompatibleText(entry: PluginIncompatibleFact): string {
-  const peers = Object.entries(entry.peers).map(([name, range]) => `${name} ${range}`).join(', ')
-  return `${entry.name}@${entry.version} rejects DSH ${entry.runtimeVersion}${peers === '' ? '' : ` (needs ${peers})`}`
+  const requirements = Object.entries(entry.requirements).map(([name, range]) => `${name} ${range}`).join(', ')
+  return `${entry.name}@${entry.version} rejects DSH ${entry.runtimeVersion}${requirements === '' ? '' : ` (needs ${requirements})`}`
 }
 
 /** Format the exemption list for the diagnostics section. */

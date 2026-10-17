@@ -219,7 +219,7 @@ async function mountTaskCenterFixture(
   // the official wire (the same row the production base patch mounts).
   const SubagentRuntime = (await import('@deepseek-ai/dsh-subagent')).default
   await host.ctx.plugin(SubagentRuntime as never, { maxDepth: 3 } as never)
-  const { snapshotSubagentDescriptor } = await import('@deepseek-ai/dsh-subagent')
+  const { snapshotSubagentDescriptor, SUBAGENT_DESCRIPTOR_VERSION } = await import('@deepseek-ai/dsh-subagent')
 
   const parentCwd = host.anchorDir
   const childCwd = (dir: string): string => {
@@ -246,7 +246,10 @@ async function mountTaskCenterFixture(
   // The child's durable identity/classification (the official descriptor the
   // establishing provider appends). A child without it cannot be classified.
   aAppend('subagent/descriptor', snapshotSubagentDescriptor({ mode: 'continuable', provider: 'fixture', label: LABEL_A }))
-  appenderOf(host.ctx, CHILD_B_ID)('subagent/descriptor', snapshotSubagentDescriptor({ mode: 'one-shot', provider: 'fixture', label: LABEL_B }))
+  // 0.2.1-rc.1 removed the one-shot overload of the official descriptor builder (only
+  // the continuable composition has one), so the fixture writes the published
+  // versioned one-shot payload shape directly.
+  appenderOf(host.ctx, CHILD_B_ID)('subagent/descriptor', { version: SUBAGENT_DESCRIPTOR_VERSION, mode: 'one-shot', provider: 'fixture', label: LABEL_B })
   appenderOf(host.ctx, CHILD_C_ID)('subagent/descriptor', snapshotSubagentDescriptor({ mode: 'continuable', provider: 'fixture', label: LABEL_C }))
   seedTurns(parentAppend, 1, 2, 'parent')
   // Child A carries enough turns that the official opening window truncates
@@ -664,7 +667,7 @@ test('L6 negative control §14: no Remote Task/child path reads the process-loca
 // §14 step 8 / §5 Must 17: the REAL continuation follow-up.
 //
 // This test deliberately does NOT fabricate the child catalog/descriptor. The
-// child below is established by the REAL `ctx.subagents.startContinuable`
+// child below is established by the REAL `ctx.subagents.startActivation`
 // delegation over the official `spawn` provider (an existing devDependency
 // row — no base-owned Host service is duplicated). That distinction IS the
 // proof: a fabricated child is a plain live Host Agent, so a viewer follow-up
@@ -770,7 +773,7 @@ test('L6 §14 step 8 / §5 Must 17: a REAL delegated continuable child receives 
   const SpawnProvider = await import('@deepseek-ai/dsh-subagent-spawn-in-process')
   await host.ctx.plugin(SpawnProvider as never, { providerName: 'spawn' } as never)
   const subagents = host.ctx.get('subagents') as unknown as {
-    startContinuable(spec: unknown): Promise<{ readonly childId: string; readonly messageId: string }>
+    startActivation(spec: unknown): Promise<{ readonly childId: string; readonly messageId: string }>
   }
   const sessionOf = (id: string): HostSessionFace | undefined =>
     host.ctx.sessions.get(SessionId(id)) as unknown as HostSessionFace | undefined
@@ -786,7 +789,11 @@ test('L6 §14 step 8 / §5 Must 17: a REAL delegated continuable child receives 
   const parentSession = sessionOf(PARENT_ID)
   assert.ok(parentSession !== undefined, 'the live parent Host Session must exist')
   seedTurns(appenderOf(host.ctx, PARENT_ID), 1, 2, 'parent')
-  const started = await subagents.startContinuable({
+  // 0.2.1-rc.2 replaced `startContinuable()` with the managed
+  // `startActivation()` (a reserved `childId` requires a local backend and
+  // guarantees the accepted message id; `delivery: 'parent'` is the same
+  // parent-notifying route the old entry used).
+  const started = await subagents.startActivation({
     provider: 'spawn',
     label: REAL_LABEL,
     childId: SessionId(REAL_CHILD_ID),
@@ -795,6 +802,7 @@ test('L6 §14 step 8 / §5 Must 17: a REAL delegated continuable child receives 
       parent: agents.get(SessionId(PARENT_ID)),
     },
     signal: new AbortController().signal,
+    delivery: 'parent',
   })
   assert.equal(started.childId, REAL_CHILD_ID,
     'the continuation manager must establish the reserved durable child identity')
@@ -1432,7 +1440,7 @@ test('L6 M3-6 PR2 §14.5: the OPEN Task Center + child viewer survive a normal r
 
   // ── Return to the Task Center and prove a B-side Task/descendant change
   // appears WITHOUT restarting the runner: a NEW grandchild under A.
-  const { snapshotSubagentDescriptor } = await import('@deepseek-ai/dsh-subagent')
+  const { SUBAGENT_DESCRIPTOR_VERSION } = await import('@deepseek-ai/dsh-subagent')
   const CHILD_D_ID = 'm3-6-pr2-child-d'
   const childDwd = join(host.anchorDir, 'd-ws')
   mkdirSync(childDwd, { recursive: true })
@@ -1442,7 +1450,7 @@ test('L6 M3-6 PR2 §14.5: the OPEN Task Center + child viewer survive a normal r
     { cwd: childDwd, parentSession: SessionId(CHILD_A_ID), origin: 'subagent' } as never,
   )
   appenderOf(host.ctx, CHILD_D_ID)('subagent/descriptor',
-    snapshotSubagentDescriptor({ mode: 'one-shot', provider: 'fixture', label: `child D ${CHILD_D_ID}` }))
+    { version: SUBAGENT_DESCRIPTOR_VERSION, mode: 'one-shot', provider: 'fixture', label: `child D ${CHILD_D_ID}` })
   aAppend('subagent/catalog', { version: 1, childId: CHILD_D_ID, childCreatedAt: 5_000, mode: 'one-shot', label: `child D ${CHILD_D_ID}` })
   const LABEL_D = `child D ${CHILD_D_ID}`
   submit(app, '/tasks')

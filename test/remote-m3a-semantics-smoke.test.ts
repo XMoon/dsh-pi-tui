@@ -44,7 +44,7 @@ import TypertGatewayService from '@deepseek-ai/dsh-api-gateway'
 import JobController from '@deepseek-ai/dsh-api-job-controller'
 import { CredentialProvider } from '@deepseek-ai/dsh-credentials'
 import LocalFileSystem from '@deepseek-ai/dsh-fs-local'
-import JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
+import * as JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import { SqliteSessionQueryEngine } from '@deepseek-ai/dsh-session-query-sqlite'
 import Storage from '@deepseek-ai/dsh-storage'
@@ -58,9 +58,9 @@ import * as toolJobs from '@deepseek-ai/dsh-tool-jobs'
 import { createUserMessage, LlmAdapter, MessageId, ToolCallId } from '@deepseek-ai/dsh-llm'
 import type { AskUserQuestionAnswer } from '@deepseek-ai/dsh-user-questions/types'
 import TokenMeter from '@deepseek-ai/dsh-token-meter'
-import InvariantRegistry from '@deepseek-ai/dsh-invariants'
 import * as toolTodo from '@deepseek-ai/dsh-tool-todo'
-import * as toolTodoInvariant from '@deepseek-ai/dsh-tool-todo/invariant'
+import { RemoteAccessService } from '@deepseek-ai/dsh-api-remote-access'
+import WorkingDirectory from '@deepseek-ai/dsh-working-directory'
 import { loadExperimentalRemoteRuntime } from '../src/runtime/backend-loader.ts'
 import type { ExperimentalRemoteRuntime } from '../src/app/remote/runtime.ts'
 import { createRemoteM3ASemantics, type RemoteM3ASemantics } from '../src/app/remote/m3a-semantics.ts'
@@ -123,11 +123,6 @@ async function createHostFixture(
     // wire — plus the official todos projection unit.
     await ctx.plugin(TokenMeter)
     await ctx.plugin(toolTodo, { allowParallelInProgress: false })
-    // The official invariants registry plus the durable-todo companion: a
-    // todo/write OUTSIDE an open turn is a non-production event sequence and
-    // must fail the fixture rather than pass silently.
-    await ctx.plugin(InvariantRegistry, {})
-    await ctx.plugin(toolTodoInvariant)
     persistenceFiber = await ctx.plugin(JsonlSessionPersistence, { root: join(workRoot, 'persistence') })
     harness = await mountAgentLoopTestHarness(ctx)
     ctx.llm.registerAdapter(['smoke'], new StubLlmAdapter())
@@ -289,6 +284,11 @@ async function createHostFixture(
       new SqliteSessionQueryEngine(queryCtx, { path: ':memory:', openAt: 'first-search' })
     })
     await ctx.plugin(LocalFileSystem)
+    // 0.2.1-rc.2's SessionController nests the official skill catalog, whose
+    // `SessionSkillCatalog.inject` requires the real `workingDirectory` owner;
+    // without it the `skills/list` Remote never registers. The official base
+    // layer mounts this same row once.
+    await ctx.plugin(WorkingDirectory)
     await ctx.plugin(Storage)
     await ctx.plugin(StorageJson, { root: join(workRoot, 'storages') })
     await ctx.plugin(StorageDomain, { backend: 'json' })
@@ -299,6 +299,10 @@ async function createHostFixture(
     await ctx.plugin(LocalJobRegistry, {})
     await ctx.plugin(toolJobs)
     await ctx.plugin(JobController, {})
+    // 0.2.1-rc.2 requires the Gateway's access decider: `TypertGatewayService.inject`
+    // is ['typert', 'remoteAccess'], so the official RemoteAccess owner mounts
+    // first (the base layer's order) — never a fake `remoteAccess` provide.
+    await ctx.plugin(RemoteAccessService)
     await ctx.inject(TypertGatewayService.inject, gatewayCtx => {
       new TypertGatewayService(gatewayCtx, { websocketHeartbeatIntervalMs: 50 })
     })

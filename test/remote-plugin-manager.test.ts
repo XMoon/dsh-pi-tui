@@ -32,6 +32,8 @@ const entryId = (value: string): PluginEntryId => value as PluginEntryId
 const BUNDLE: BundleInfo = {
   name: 'bundle-a',
   version: '1.2.3',
+  official: false,
+  availability: 'profile',
   meta: { title: { en: 'Bundle A' }, description: 'Local description' },
   enabled: true,
   installed: true,
