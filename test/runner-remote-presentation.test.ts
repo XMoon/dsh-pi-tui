@@ -1031,6 +1031,65 @@ function seedTurns(
   }
 }
 
+test('L6/S3-R0: a failed/fence-dropped hydrate under a LIVE generation retries once (behavioral witness)', async (t) => {
+  // RFL-002 behavioral seam — the IMMEDIATE retry branch, not the
+  // transport-absent listener: the official Connection generation IS live here
+  // (the fixture's wire is mounted), the FIRST cold read answers undefined, so
+  // `initLiveRemoteSession` returns undefined and the composition root's
+  // identity-change retry runs once under that generation. The separate
+  // transport-absent `armRemoteInitRetry` channel listener is covered by its
+  // source lock only, and the same-id owner-commit cancellation of an armed
+  // listener is static fence review — neither is exercised here.
+  const life = testLifecycle(t)
+  const presetId = 'm3-4-pr2-preset'
+  const sessionId = 'm3-4-pr2-s3r0-retry'
+  const host = await mountRemotePresentationHost(life, presetId)
+  await host.harness.create(SessionId(sessionId), undefined, { cwd: host.anchorDir })
+  const append = host.ctx.sessions.get(SessionId(sessionId)) as unknown as {
+    append(type: string, data: unknown, options?: { surfaceOp?: 'append' }): void
+  }
+  seedTurns(append, 1, 1, 'retry')
+  let failFirstRead = true
+  let liveSubscriptions = 0
+  const fixture = await mountRemoteRunner(life, {
+    presetId,
+    resumeSessionId: sessionId,
+    host,
+    beforeRunnerMount: (presentation) => {
+      // Count the LIVE ingress subscriptions this composition installs.
+      const ingress = presentation.liveIngress as unknown as {
+        subscribe: (...args: never[]) => unknown
+      }
+      const realSubscribe = ingress.subscribe
+      ingress.subscribe = function countedSubscribe(this: unknown, ...args: never[]) {
+        liveSubscriptions += 1
+        return (realSubscribe as (...a: never[]) => unknown).apply(this, args)
+      }
+      life.defer(() => { ingress.subscribe = realSubscribe })
+      // The first cold read deliberately returns undefined at the reader
+      // boundary (no real transport fence is triggered here) while the Connection
+      // generation REMAINS live: the identity-change retry branch.
+      const reader = presentation.presentationReader as unknown as {
+        read: (id: string, signal?: AbortSignal) => Promise<unknown>
+      }
+      const realRead = reader.read
+      reader.read = function failingOnce(this: unknown, id: string, signal?: AbortSignal) {
+        if (failFirstRead) {
+          failFirstRead = false
+          return Promise.resolve(undefined)
+        }
+        return realRead.call(this, id, signal)
+      }
+      life.defer(() => { reader.read = realRead })
+    },
+  })
+  await waitFor('the recovered transcript is painted', () => fixture.vt.getViewport().join('').includes('retry answer 1'), 20_000)
+  assert.equal(failFirstRead, false, 'the first hydrate really failed (the identity-change retry ran)')
+  assert.equal(liveSubscriptions, 1,
+    'exactly ONE ingress subscription exists after the retry (the failed attempt installed none)')
+  fixture.dispose()
+})
+
 test('L6 navigation: switch, same-id rollover and reconnect re-init the presentation without leaking the old subject', async (t) => {
   const life = testLifecycle(t)
   const sessionA = 'm3-4-pr2-nav-a'

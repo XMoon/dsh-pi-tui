@@ -28,7 +28,8 @@ import type {
   ViewerChildSource,
   ViewerChildView,
 } from '../surface/viewer-runtime.ts'
-import type { RemoteLiveIngress } from './live-ingress.ts'
+import type { RemoteConnectionGenerationSource } from '../../runtime/remote/session-reader-remote.ts'
+import type { RemoteLiveIngress, RemoteLiveIngressHandle } from './live-ingress.ts'
 
 /** The official attachment read result (structural `RemoteResult`). */
 export type RemoteAttachmentReadResult =
@@ -52,6 +53,11 @@ export interface RemoteChildBinding {
     }
     readAttachment(attachmentId: string): Promise<RemoteAttachmentReadResult>
   }
+  /** The official event window source (S3-R0: the child re-fold fence must
+   *  prove its read is still the CURRENT revision before it commits). */
+  readonly eventSource?: {
+    getSnapshot(): { readonly revision: number }
+  }
 }
 
 /** Structural subset of official `ClientSessions` (retain + borrow). */
@@ -69,6 +75,8 @@ export interface RemoteChildViewSourceOptions<Event> {
   }
   /** The ONE shared live-ingress factory. */
   readonly liveIngress: RemoteLiveIngress
+  /** The official Connection generation source (S3-R0 child re-fold fence). */
+  readonly generation: RemoteConnectionGenerationSource
   /** The official child Session's own workspace, or '' when unavailable. */
   readonly childCwd: (childSessionId: string) => string
   /** The cast at the composition seam: the wire event satisfies the TUI's
@@ -140,6 +148,12 @@ export function createRemoteChildViewSource<Event>(
         return undefined
       }
       let read: PresentationReadSnapshot | undefined
+      // The cold open is a READ→COMMIT too: capture the official generation
+      // BEFORE the await and prove after it that the generation did not roll
+      // over and the window is still the revision that was read (a same-id
+      // rollover or a reconnect between them would otherwise hydrate a dead
+      // generation's window into the viewer).
+      const openFenceGeneration = options.generation.getSnapshot()
       try {
         read = await reader.read(childId, target.signal)
       } catch (error) {
@@ -169,6 +183,14 @@ export function createRemoteChildViewSource<Event>(
         reference.release()
         throw childOpenFailure(childId, opened.openState as 'cold' | 'loading' | 'error', opened.openError)
       }
+      if (!Object.is(openFenceGeneration, options.generation.getSnapshot())
+        || binding.eventSource?.getSnapshot().revision !== read.revision) {
+        // The transport rolled over (or the window moved) while the child was
+        // being opened: commit nothing and let the caller's next open observe
+        // the CURRENT official state (no stale child, no retry loop here).
+        reference.release()
+        return undefined
+      }
       const hydrated = (snapshot: PresentationReadSnapshot, current: RemoteChildBinding | undefined): ViewerChildSnapshot<Event> => ({
         durableEvents: snapshot.durableEvents as unknown as readonly Event[],
         liveInputs: snapshot.liveInputs,
@@ -178,7 +200,7 @@ export function createRemoteChildViewSource<Event>(
       })
       const snapshot = hydrated(read, binding)
       let released = false
-      let live: { dispose(): void } | undefined
+      let live: RemoteLiveIngressHandle | undefined
       return {
         childSessionId: childId,
         parentSessionId: target.parentSessionId,
@@ -190,10 +212,49 @@ export function createRemoteChildViewSource<Event>(
           // as a legitimate (empty) window.
           const before = ownedBinding()
           if (before === undefined || !isOpen(before)) return undefined
+          const fenceGeneration = options.generation.getSnapshot()
           const next = await reader.read(childId)
           const current = ownedBinding()
           if (next === undefined || current === undefined || !isOpen(current)) return undefined
-          return hydrated(next, current)
+          // S3-R0 read→commit fence: the async read may have been overtaken by a
+          // Connection rollover or a newer official revision. Committing it
+          // would both lose the newer events and acknowledge a superseded
+          // recovery, so the fold is valid only while the official window still
+          // IS the revision that was read.
+          if (!Object.is(fenceGeneration, options.generation.getSnapshot())) return undefined
+          if (current.eventSource?.getSnapshot().revision !== next.revision) return undefined
+          const snapshot = hydrated(next, current)
+          return {
+            ...snapshot,
+            // The viewer performs the actual fold write through THIS closure so
+            // the identity proof, the write and the acknowledgement are one
+            // synchronous step (plan §2.5: last-moment read→commit). `false`
+            // means the transport/window moved after the read: the write is
+            // refused, nothing is acknowledged, and the child ingress has
+            // already re-armed its recovery requirement.
+            commit: (write: () => void): boolean => {
+              if (released) return false
+              if (!Object.is(fenceGeneration, options.generation.getSnapshot())) return false
+              const bindingNow = ownedBinding()
+              if (bindingNow === undefined || bindingNow !== current || !isOpen(bindingNow)) return false
+              if (bindingNow.eventSource?.getSnapshot().revision !== next.revision) return false
+              // Provenance BEFORE the write: while the retained window still
+              // belongs to the generation that rolled over, the fold must not be
+              // replaced at all (the ingress's acknowledgement gate alone would
+              // run too late).
+              if (live !== undefined && !live.refoldEligible(next.revision)) return false
+              write()
+              // No live ingress (the viewer has not subscribed yet, e.g. a
+              // re-fold requested before the subscription): the write itself is
+              // the commit and there is nothing to acknowledge.
+              if (live === undefined) return true
+              return live.acknowledgeWindowRefold({
+                generation: fenceGeneration,
+                binding: current,
+                revision: next.revision,
+              })
+            },
+          }
         },
         async loadOlder(): Promise<void> {
           if (released) return
@@ -205,12 +266,13 @@ export function createRemoteChildViewSource<Event>(
           const handle = liveIngress.subscribe(childId, {
             onDurableEvent: (_id, event) => sinks.onDurableEvent(options.asEvent(event)),
             onLiveInput: (input: AssistantLiveInput) => sinks.onLiveInput(input),
-            onWindowReplaced: () => sinks.onWindowReplaced(),
-            onWindowPrepended: () => sinks.onWindowPrepended(),
+            onWindowRefoldRequired: () => sinks.onWindowRefoldRequired(),
             onSessionSnapshotChanged: () => sinks.onSessionSnapshotChanged(),
             onProjectionsChanged: () => sinks.onProjectionsChanged(),
-          }, snapshot.revision)
-          if (handle === undefined) return undefined
+          }, {
+            revision: read.revision,
+            transportToken: { generation: openFenceGeneration, binding },
+          })
           live = handle
           return {
             dispose: (): void => {

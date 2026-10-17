@@ -20,6 +20,7 @@ import test from 'node:test'
 import { readFileSync } from 'node:fs'
 import {
   createViewerRuntime,
+  type ViewerChildLiveSinks,
   type ViewerChildSource,
   type ViewerChildView,
   type ViewerRuntimeDeps,
@@ -223,6 +224,96 @@ test('P1: the image scope identity is the presentation LIFETIME, and the rendere
  * ingress attempt must precede it, and the collected failure must surface
  * after both attempts — a second dispose is inert (the plan's D2 form).
  */
+test('S3-R0: child re-folds are serialized, and a refused commit never overwrites the newer fold', async (t) => {
+  // C4/§2.5 owner-level barrier: read A is already in flight when a second
+  // requirement is coalesced; the FIFO serializes them, A is refused as
+  // superseded (writes NOTHING), and only the newer fold commits. Deterministic
+  // gates, no sleeps; the held read is released in `t.after` even on failure.
+  const writes: Array<{ revision: number; accepted: boolean }> = []
+  let releaseA: (() => void) | undefined
+  let aStarted: (() => void) | undefined
+  const aStartedPromise = new Promise<void>(resolve => { aStarted = resolve })
+  let reads = 0
+  let capturedSinks: ViewerChildLiveSinks<SessionPresentationEvent> | undefined
+  const view: ViewerChildView<SessionPresentationEvent> = {
+    childSessionId: 'child-1',
+    parentSessionId: 'parent-1',
+    snapshot: { durableEvents: [], liveInputs: [], activity: 'inactive', cwd: '', revision: 1 },
+    rehydrate: async () => {
+      reads += 1
+      const revision = reads
+      if (revision === 1) {
+        // Read A starts and is HELD until the test releases it.
+        aStarted?.()
+        await new Promise<void>(resolve => { releaseA = resolve })
+      }
+      return {
+        durableEvents: [],
+        liveInputs: [],
+        activity: 'inactive',
+        cwd: '',
+        revision,
+        commit: (write: () => void): boolean => {
+          if (revision === 1) { writes.push({ revision, accepted: false }); return false }
+          write()
+          writes.push({ revision, accepted: true })
+          return true
+        },
+      }
+    },
+    loadOlder: async () => {},
+    currentActivity: () => 'inactive',
+    subscribe: (sinks) => {
+      capturedSinks = sinks
+      return { dispose() {} }
+    },
+    release: () => {},
+  }
+  t.after(() => { releaseA?.() })
+  const childView: ViewerChildSource<SessionPresentationEvent> = {
+    open: async () => view,
+    childWriterSubject: () => undefined,
+  }
+  const surface = {
+    routeSessionEvent: () => {},
+    repaint: () => {},
+    refreshPendingInput: () => {},
+    display: displaySeamStub(),
+    app: {
+      enterFocusViewerScope: () => {},
+      setViewerMode: () => {},
+    },
+  } as unknown as SurfaceRuntime<SessionPresentationEvent>
+  let pumpSettled: Promise<void> = Promise.resolve()
+  const viewer = createViewerRuntime<SessionPresentationEvent>({
+    surface,
+    isCleanedUp: () => false,
+    summaryKeys: toolSummaryKeys,
+    currentSessionId: () => 'parent-1',
+    liveParentSessionId: () => 'parent-1',
+    childView,
+    refreshStatus: () => {},
+    restoreMainTranscriptAnchor: () => {},
+    runDetached: (_name, run) => { pumpSettled = run() },
+  } satisfies ViewerRuntimeDeps<SessionPresentationEvent>)
+
+  await viewer.enterView('child-1', 'child', 'one-shot', 'parent-1', 'inactive')
+  assert.equal(reads, 0, 'the open folds the snapshot it already holds (no extra read)')
+  assert.ok(capturedSinks !== undefined, 'the child live sinks are captured')
+  // Two requirements while read A is held: the pump coalesces them and the FIFO
+  // starts no second read before A settles.
+  capturedSinks!.onWindowRefoldRequired()
+  capturedSinks!.onWindowRefoldRequired()
+  await aStartedPromise
+  assert.equal(reads, 1, 'read A is in flight; no second read starts')
+  releaseA?.()
+  await pumpSettled
+  assert.deepEqual(writes.map(write => write.accepted), [false, true],
+    'the refused older fold wrote nothing; the newer fold committed')
+  assert.equal(reads, 2, 'exactly one follow-up read ran (the coalesced requirement)')
+  viewer.dispose()
+})
+
 test('M3-6 PR3: a throwing ingress disposer cannot strand the retained child binding', async () => {
   const order: string[] = []
   const ingressError = new Error('ingress dispose failed')

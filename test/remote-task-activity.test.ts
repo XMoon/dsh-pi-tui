@@ -52,7 +52,7 @@ function taskActivityHarness(): TaskActivityHarness {
   const wire = {
     client: {
       sessions,
-      connection: { generation: { getSnapshot: () => ({ id: 'generation-1' }) } },
+      connection: { generation: { getSnapshot: () => ({ id: 'generation-1' }), subscribe: () => () => {} } },
       jobs: {
         state: {
           getSnapshot: () => ({ rows: { parent: [{ id: 'job-1', kind: 'bash', label: 'j', status: 'running', startedAt: 1 }] } }),

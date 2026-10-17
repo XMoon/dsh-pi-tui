@@ -104,6 +104,7 @@ import { selectApplicationRuntime } from './bootstrap/runtime-selection.ts'
 import { createPresentationBridge } from './bootstrap/presentation-bridge.ts'
 import { createTaskSource } from './bootstrap/task-source.ts'
 import { installRuntimeEventWiring, installSessionEventWiring } from './bootstrap/event-wiring.ts'
+import { armRemoteInitRetry } from './bootstrap/remote-init-retry.ts'
 import { createFatalLifecycle, createSurfaceLifecycle } from './bootstrap/lifecycle.ts'
 import { createSessionStartupHelpers, quiesceResumedOwner } from './bootstrap/session-startup.ts'
 import { createSessionOwnershipCore } from '../app/session/ownership-core.ts'
@@ -1224,6 +1225,16 @@ export function applyRunnerWithRuntime(
           captureTransportToken: (sessionId) => remoteSources.sessionFacts.captureTransportToken(sessionId),
           isTransportTokenCurrent: (sessionId, token) =>
             remoteSources.sessionFacts.isTransportTokenCurrent(sessionId, token),
+          // S3-R0: the read→commit revision/identity proof of a window re-fold
+          // (the caller acknowledges the ingress with it).
+          windowRefoldProof: (sessionId, revision) => {
+            // S3-R0 provenance PRE-commit fence: a window read at the revision the
+            // DEAD generation published is not eligible to replace the fold at
+            // all (acknowledging afterwards would already have overwritten it).
+            const handle = remoteIngressHandle
+            if (handle !== undefined && !handle.refoldEligible(revision)) return undefined
+            return remoteSources.sessionFacts.windowRefoldProof(sessionId, revision)
+          },
           // The official CURRENT-VALUE facts a bounded window cannot own. A
           // field is included ONLY when its projection answered: an absent
           // field means "unavailable" (the owner falls back to the window
@@ -1265,13 +1276,92 @@ export function applyRunnerWithRuntime(
     /** R2 §7.1: the ONE Remote Host terminal-progress watch of the CURRENT main
      *  session owner. Its controller is the watch's cancellation lifetime. */
     let remoteProgressHandle: { dispose(): void } | undefined
+    /** S3-R0: the ONE pending re-init of a Remote live surface whose hydrate
+     *  could not commit because the transport was unavailable. Driven by the
+     *  OFFICIAL Connection generation channel — never a timer or a poll. */
+    let remoteInitRetryHandle: { dispose(): void } | undefined
+    const disposeRemoteInitRetry = (): void => {
+      remoteInitRetryHandle?.dispose()
+      remoteInitRetryHandle = undefined
+    }
     const disposeRemoteLiveSurface = (): void => {
+      disposeRemoteInitRetry()
       remoteIngressHandle?.dispose()
       remoteIngressHandle = undefined
       remoteProgressHandle?.dispose()
       remoteProgressHandle = undefined
     }
+    /** The ONE immediate init retry already granted to an attempt: keyed by the
+     *  TUI owner generation AND the Connection generation, so a NEW owner init
+     *  always gets its single retry while a repeat failure inside the same
+     *  attempt falls back to the official channel (no recursion, no stale
+     *  marker blocking a later attempt — the exact-binding transport identity is
+     *  narrower than the Connection generation, so an owner attempt is the
+     *  honest budget unit). */
+    let lastInitRetry: { readonly ownerGeneration: number; readonly connectionGeneration: unknown } | undefined
+    /** Arm the official-signal retry for one FAILED attempt (the production
+     *  helper owns the attempt fence, the official-channel wakeup and the
+     *  same-tick re-check; see `app/bootstrap/remote-init-retry.ts`). */
+    const armInitRetry = (sessionId: string, failedAttemptGeneration: number): void => {
+      if (remoteSources === undefined || remoteInitRetryHandle !== undefined) return
+      const sources = remoteSources
+      remoteInitRetryHandle = armRemoteInitRetry({
+        isCleanedUp: () => cleanedUp,
+        currentSessionId: () => ownership.currentSessionId(),
+        ownerGeneration: () => ownership.generation(),
+        connectionGeneration: () => sources.commandSource.connectionGeneration(),
+        subscribeConnectionGeneration: listener => sources.commandSource.subscribeConnectionGeneration(listener),
+        runInit: () => initRemoteLiveSurface(sessionId),
+        runDetached: (name, run) => runDetached(name, run, { diag, sessionId: () => sessionId }),
+      }, sessionId, failedAttemptGeneration)
+    }
     lifecycleController.signal.addEventListener('abort', disposeRemoteLiveSurface, { once: true })
+
+    /**
+     * S3-R0: the ONE in-flight window re-fold of the current Remote main owner.
+     * A recovery notification only marks INTENT: this pump serializes the async
+     * re-folds, acknowledges the committed revision through the ingress handle,
+     * and runs again when a newer official revision arrived while it folded (the
+     * ingress re-fires on every revision, so this is never a busy loop). It
+     * NEVER disposes or re-creates the ingress: reconciling a window is not an
+     * owner replacement, and a second publisher must never appear.
+     */
+    let remoteRefoldInFlight = false
+    let remoteRefoldPending = false
+    const pumpRemoteWindowRefold = (): void => {
+      if (remoteRefoldInFlight) return
+      remoteRefoldInFlight = true
+      runDetached('remote window refold', async () => {
+        try {
+          while (remoteRefoldPending) {
+            remoteRefoldPending = false
+            const handle = remoteIngressHandle
+            const sessionId = ownership.currentSessionId()
+            if (cleanedUp || handle === undefined || sessionId === undefined) return
+            // The old window's working-fold proof is VOID: rehydrateFromWindow
+            // re-seeds it from the NEW window's fold.
+            invalidateWorkingFold()
+            const proof = await presentation.rehydrateFromWindow(sessionId)
+            if (cleanedUp || remoteIngressHandle !== handle) return
+            // An uncommitted re-fold (fence-dropped read) leaves the handle
+            // recovering: the next official revision / open transition wakes us.
+            if (proof === undefined) continue
+            if (handle.acknowledgeWindowRefold(proof)) return
+          }
+        } finally {
+          remoteRefoldInFlight = false
+          // A wakeup that landed between the last check and this point must not
+          // be lost (the notification is never a timer: the ingress re-fires it
+          // on the next official revision).
+          if (remoteRefoldPending) pumpRemoteWindowRefold()
+        }
+      }, { diag, sessionId: () => ownership.currentSessionId() })
+    }
+    const requestRemoteWindowRefold = (sessionId: string): void => {
+      if (cleanedUp || ownership.currentSessionId() !== sessionId) return
+      remoteRefoldPending = true
+      pumpRemoteWindowRefold()
+    }
 
     /**
      * Initialize the WHOLE Remote live surface for one session: hydrate
@@ -1281,8 +1371,12 @@ export function applyRunnerWithRuntime(
      * and transient chunks through the SAME assistant-input entry the
      * Direct branch uses — one canonical pipeline, two ingress owners.
      */
+    /** The newest init attempt: an older in-flight init bails before it installs
+     *  an ingress, so two attempts can never become two publishers. */
+    let remoteInitAttempt = 0
     const initRemoteLiveSurface = async (sessionId: string): Promise<void> => {
       if (remoteSources === undefined || cleanedUp) return
+      const attempt = ++remoteInitAttempt
       disposeRemoteLiveSurface()
       // §6.5 lifecycle fence (subscribe side): the token is captured BEFORE
       // the hydrate await; a superseded owner (switch/new/fork or a same-id
@@ -1291,11 +1385,46 @@ export function applyRunnerWithRuntime(
       const initGeneration = ownership.generation()
       const hydrate = await presentation.initLiveRemoteSession(sessionId)
       if (cleanedUp) return
+      // A newer attempt (a same-id owner commit, another retry) superseded this
+      // one while it hydrated: it must not install anything.
+      if (attempt !== remoteInitAttempt) return
       if (ownership.currentSessionId() !== sessionId || ownership.generation() !== initGeneration) return
-      // An uncommitted hydrate (fence-dropped inside the presentation owner)
-      // means this init lost the race — its revision is undefined and its
-      // subscription would resurrect the stale window: abort here.
-      if (hydrate === undefined) return
+      // An uncommitted hydrate means either a superseded owner (fenced above)
+      // or an unavailable transport. The latter must NOT complete as a healthy
+      // init: without a transcript and without an ingress, only an unrelated
+      // owner commit could ever recover it. Arm the OFFICIAL generation-driven
+      // retry instead (plan §2.2/§2.5: an explicit not-ready state completed by
+      // a real signal, never a poll).
+      if (hydrate === undefined) {
+        const liveGeneration = remoteSources.commandSource.connectionGeneration()
+        if (liveGeneration === undefined) {
+          // The transport is absent right now: wait for the OFFICIAL generation.
+          armInitRetry(sessionId, initGeneration)
+        } else {
+          const attempt = { ownerGeneration: initGeneration, connectionGeneration: liveGeneration }
+          const alreadyRetried = lastInitRetry !== undefined
+            && lastInitRetry.ownerGeneration === attempt.ownerGeneration
+            && Object.is(lastInitRetry.connectionGeneration, attempt.connectionGeneration)
+          if (!alreadyRetried) {
+            // The generation is already live: the hydrate was dropped by a
+            // transport IDENTITY change between its read and its commit (the
+            // owner fences above passed). Re-run the init ONCE for THIS attempt
+            // — never a loop (a repeat failure inside the attempt falls back to
+            // the official channel) and never a stale marker for a later owner
+            // attempt (a new owner commit grants its own retry).
+            lastInitRetry = attempt
+            runDetached('remote live surface retry', () => initRemoteLiveSurface(sessionId), {
+              diag,
+              sessionId: () => sessionId,
+            })
+          } else {
+            armInitRetry(sessionId, initGeneration)
+          }
+        }
+        return
+      }
+      // A committed init releases the attempt's retry budget.
+      lastInitRetry = undefined
       // Seed the compaction working-fold cache from the PROVEN cold-hydrate
       // fold (no first-use gap: the first settle reads the authoritative
       // complete-window answer, never the bare running bit).
@@ -1344,33 +1473,25 @@ export function applyRunnerWithRuntime(
           status.refresh()
           status.updateWelcomeCard()
         },
-        onWindowReplaced: (id) => {
-          // Reconnect/gap repair: the official new window is authoritative —
-          // re-run the full Remote hydration for the CURRENT session only
-          // (a replaced owner must not repaint through this subscription).
-          // The old window's working-fold proof is VOID: drop the cache now
-          // (initRemoteLiveSurface re-seeds it from the NEW window's fold).
-          if (ownership.currentSessionId() !== id || cleanedUp) return
-          invalidateWorkingFold()
-          runDetached('remote window re-hydration', () => initRemoteLiveSurface(id), {
-            diag,
-            sessionId: () => id,
-          })
+        onWindowRefoldRequired: (id) => {
+          // S3-R0: the incremental sequence is no longer trustworthy (generation
+          // rollover, revision discontinuity, window replace/prepend, missing
+          // change, hydrate gap). The fold OWNER re-folds the CURRENT official
+          // window — never a destructive surface dispose/re-init (that path
+          // releases the ONE live ingress before its ownership-fenced hydrate can
+          // abort, which is how a reconnect used to leave the transcript on the
+          // dead window). The ingress handle stays the SINGLE publisher.
+          requestRemoteWindowRefold(id)
         },
-        onWindowPrepended: (id) => {
-          // F10 (round 4): an official `loadOlder` page joined the window
-          // front — whoever requested it (keyboard extension, /status facts
-          // composition, copy paging). Re-fold the transcript/stats
-          // presentation from the widened window for the CURRENT session
-          // only; `rehydrateFromWindow` owns the generation/transport fences
-          // and re-derives the footer status from the new fold.
-          if (ownership.currentSessionId() !== id || cleanedUp) return
-          runDetached('remote window front re-hydration', () => presentation.rehydrateFromWindow(id), {
-            diag,
-            sessionId: () => id,
-          })
-        },
-      }, hydrate.revision)
+      }, { revision: hydrate.revision, transportToken: hydrate.transportToken })
+      // S3-R0: the Remote ingress now owns event delivery for this committed
+      // owner (it is subscribed and its own hydrate→subscribe gap recovery is
+      // armed), so the opening journal's pre-commit buffering window is OVER.
+      // Without this, events arriving between the hydrate and the transition's
+      // `clearOpening` are recorded and then DISCARDED at clear (the surface is
+      // already live, so nothing merges the cut) — a real lost-event window that
+      // a reconnect's fresh generation can land in.
+      surface.openingJournal.close(sessionId)
       // R2 §7.1/§7.2/§7.3: the Remote terminal-progress authority. The Host
       // evidence stream is the ONLY writer of the main interval on this branch
       // (the durable ingress above keeps feeding the transcript and is gated

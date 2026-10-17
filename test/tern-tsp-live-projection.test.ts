@@ -1016,6 +1016,14 @@ function mountPresentationHarness(options: {
       captureTransportToken: () => liveTransportToken,
       isTransportTokenCurrent: (_sessionId, token) => Object.is(token, liveTransportToken),
       isStillCurrent: () => current,
+      // S3-R0: the widened-window commit is valid only while the official window
+      // still IS the revision the reader returned (this harness models a
+      // current window; the staleness cases are driven by the fences above).
+      windowRefoldProof: (_sessionId: string, revision: number) => ({
+        generation: 1,
+        binding: liveTransportToken,
+        revision,
+      }),
     },
   })
 
