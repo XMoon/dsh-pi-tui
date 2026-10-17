@@ -14,7 +14,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { classifyCommandLine, type CommandLineClassification } from '../src/domain/command/policy.ts'
-import { tspBuiltinAvailability, TSP_SUPPORTED_TUI_BUILTINS, type TspBuiltinPickers } from '../src/app/command/tsp-capability.ts'
+import { titleResultNoticeSuppressed, tspBuiltinAvailability, TSP_SUPPORTED_TUI_BUILTINS, type TspBuiltinPickers } from '../src/app/command/tsp-capability.ts'
 
 /** Classify one line through the REAL classifier with explicit fact wiring. */
 function classify(facts: {
@@ -155,4 +155,18 @@ test('B2-A: the B2-A builtins stay available for the TUI family whatever the arg
     assert.deepEqual(tspBuiltinAvailability(classify({ tuiCommand: true }), name, {}, 'an argument'),
       { kind: 'available' }, `/${name} keeps its unconditional admission with an argument`)
   }
+})
+
+// ── RFL-001: the card-ownership policy the refusal sink consults ────────────
+
+test('B2-A: the title result notice is suppressed exactly where the Direct card carries it', () => {
+  // The card exists exactly where the Direct command plane executes the
+  // command; the PiTui term preserves its long-standing notice beside the card.
+  assert.equal(titleResultNoticeSuppressed({ pituiPresentation: false, backendKind: 'direct' }), true,
+    'TSP over the Direct command plane: the transcript card carries the title result text')
+  assert.equal(titleResultNoticeSuppressed({ pituiPresentation: false, backendKind: 'remote' }), false,
+    'the Client registry appends no lifecycle event, so the notice is the only feedback')
+  assert.equal(titleResultNoticeSuppressed({ pituiPresentation: true, backendKind: 'direct' }), false,
+    'PiTui keeps its existing notice beside the card')
+  assert.equal(titleResultNoticeSuppressed({ pituiPresentation: true, backendKind: 'remote' }), false)
 })

@@ -128,3 +128,37 @@ export function tspBuiltinAvailability(
     ? { kind: 'available' }
     : { kind: 'unsupported' }
 }
+
+/**
+ * PR4-B2-A: whether the ADDITIONAL inline outcome notice for a `/title` /
+ * `/rename` result is suppressed on this mount because the official Direct
+ * command-result card already carries the same text.
+ *
+ * Both terms are composition facts, not renderer guesses:
+ *
+ * - `backendKind === 'direct'`: a TUI-owned `/title` is NOT sessionless, so on
+ *   the Direct branch it always executes through `commandPlane.execute` — the
+ *   official executor appends the `command/run` + `command/done` pair, and
+ *   `src/tui/tsp/transcript-view.ts` paints that pair as the command card whose
+ *   body IS the handler's `CommandResult.text` (success text and error text
+ *   alike). The Remote branch executes the same command through the Client
+ *   registry, which appends no lifecycle event and therefore paints no card —
+ *   there the handler's notice is the only feedback.
+ * - `!pituiPresentation`: the PiTui surface keeps its long-standing notice
+ *   beside that card, unchanged.
+ *
+ * This is deliberately NOT a general "the card owns the outcome" capability:
+ * it answers the suppression question for the title handler alone (the
+ * `notifyTitleResult` sink), and it must not be inferred for other commands or
+ * for sessionless local invocations (those paint no card even on Direct — the
+ * controller notifies their errors itself).
+ *
+ * @param facts - the composition root's declared inputs: whether a PiTui
+ *   presentation is mounted and which backend the command plane belongs to.
+ */
+export function titleResultNoticeSuppressed(facts: {
+  readonly pituiPresentation: boolean
+  readonly backendKind: 'direct' | 'remote'
+}): boolean {
+  return !facts.pituiPresentation && facts.backendKind === 'direct'
+}

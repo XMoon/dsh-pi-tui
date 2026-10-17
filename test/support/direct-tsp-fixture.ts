@@ -280,6 +280,12 @@ export interface DirectTspFixtureOptions {
     /** `dsh-authorization` (the provider sign-in flow targets). */
     readonly authorization?: boolean
   }
+  /**
+   * Negative composition: mount no credentials provider at all, so the
+   * credential port's `available()` is false (the composition that must refuse
+   * `/logout` truthfully instead of reporting success).
+   */
+  readonly withoutCredentials?: boolean
 }
 
 export interface DirectTspExternalFixture extends Omit<DirectTspFixture, 'pane'> {}
@@ -416,7 +422,9 @@ export async function createDirectTspFixture(
   await ctx.plugin(StorageJson, { root: join(workRoot, 'storages') })
   await ctx.plugin(StorageDomain, { backend: 'json' })
   await ctx.plugin(WorkspaceRegistry)
-  await ctx.plugin(LocalCredentials, { path: join(workRoot, '.credentials.yaml'), watch: false })
+  if (options.withoutCredentials !== true) {
+    await ctx.plugin(LocalCredentials, { path: join(workRoot, '.credentials.yaml'), watch: false })
+  }
   await ctx.plugin(LocalJobRegistry, {})
   await ctx.plugin(toolJobs)
   await ctx.plugin(JobController, {})

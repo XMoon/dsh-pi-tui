@@ -15,7 +15,6 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { buildOsc52Sequence } from '../src/client/clipboard/copy.ts'
 import { createDirectTspFixture, directSettle, waitFor, type DirectTspFixture } from './support/direct-tsp-fixture.ts'
 import { wireNodes } from './support/tsp-picker-wire.ts'
 
@@ -38,6 +37,15 @@ function dockNotices(fixture: DirectTspFixture): string[] {
   return wireNodes(fixture.pane)
     .filter(node => node.id.startsWith('dock.notice-'))
     .map(node => (typeof node.p.text === 'string' ? node.p.text : ''))
+}
+
+/**
+ * The FOLDED text of every live node on the wire, i.e. what the client really
+ * presents (the raw byte stream repeats a value across `add`/`set`/`text` ops,
+ * so counting raw occurrences would over-count a single painted line).
+ */
+function liveNodeTexts(fixture: DirectTspFixture): string[] {
+  return wireNodes(fixture.pane).map(node => (typeof node.p.text === 'string' ? node.p.text : ''))
 }
 
 /**
@@ -184,16 +192,47 @@ test('A03/A04: /title and /rename write the authoritative title and notify the d
     await directSettle(4_000)
     const sessionId = await seedTurn(fixture, 'a conversation for the title')
     await submitInput(fixture, '/title My first title')
-    await waitFor('the /title dock notice', () =>
-      dockNotices(fixture).some(text => text.includes('title set: My first title')), 25_000)
+    // The official Direct command-result card owns the text on this mount
+    // (RFL-001): the Dock does NOT repeat it.
+    await waitFor('the /title result card', () =>
+      fixture.pane.output.text().includes('title set: My first title'), 25_000)
     assert.equal(sessionTitle(fixture, sessionId), 'My first title',
       'the authoritative folded Session title is the new value')
+    assert.ok(!dockNotices(fixture).some(text => text.includes('title set: My first title')),
+      'the Dock does not repeat the title result the command card already carries')
     // The /rename alias reaches the SAME authoritative sink.
     await submitInput(fixture, '/rename Renamed by the alias')
-    await waitFor('the /rename dock notice', () =>
-      dockNotices(fixture).some(text => text.includes('title set: Renamed by the alias')), 25_000)
+    await waitFor('the /rename result card', () =>
+      fixture.pane.output.text().includes('title set: Renamed by the alias'), 25_000)
     assert.equal(sessionTitle(fixture, sessionId), 'Renamed by the alias',
       '/rename is the same authoritative title write')
+  } finally {
+    await fixture.settle()
+  }
+})
+
+test('RFL-001: a rejected /title publishes ONE refusal across Dock and transcript', async (t) => {
+  const life = (await import('./support/temp-lifecycle.ts')).testLifecycle(t)
+  // No session-title service is mounted, so the REAL Direct writer rejects the
+  // explicit rename deterministically. On TSP+Direct the official command
+  // result card owns the message; the Dock must not repeat it.
+  const fixture = await createDirectTspFixture(life, { deltas: ['TITLE-REJECT'] })
+  try {
+    await directSettle(4_000)
+    await seedTurn(fixture, 'a conversation whose title cannot be written')
+    await submitInput(fixture, '/title Rejected Title')
+    await waitFor('the refusal to render', () =>
+      fixture.pane.output.text().includes('renaming is unavailable'), 25_000)
+    await directSettle(1_000)
+    // The contract counts BOTH sinks: across every live node on the wire the
+    // message must appear exactly once (the command-result card), and no Dock
+    // notice line may carry it.
+    const sinks = liveNodeTexts(fixture).filter(text => text.includes('renaming is unavailable'))
+    assert.equal(sinks.length, 1, 'the refusal is presented exactly once across the Dock and the transcript')
+    assert.ok(!dockNotices(fixture).some(text => text.includes('renaming is unavailable')),
+      'the Dock does not repeat the text the command-result card already carries')
+    assert.ok(!dockNotices(fixture).some(text => text.includes('title set:')),
+      'the rejected title is never reported as written')
   } finally {
     await fixture.settle()
   }
@@ -209,14 +248,24 @@ test('A05: bare /title regenerates the title from the conversation', async (t) =
     await directSettle(4_000)
     const sessionId = await seedTurn(fixture, 'regenerate from this sentence')
     await submitInput(fixture, '/title pinned by the user')
-    await waitFor('the pinned title', () =>
-      dockNotices(fixture).some(text => text.includes('title set: pinned by the user')), 25_000)
+    await waitFor('the pinned title card', () =>
+      fixture.pane.output.text().includes('title set: pinned by the user'), 25_000)
+    assert.equal(sessionTitle(fixture, sessionId), 'pinned by the user')
     await submitInput(fixture, '/title')
     await waitFor('the regeneration notice', () =>
       dockNotices(fixture).some(text => text.includes('title regenerated:')), 25_000)
     const regenerated = sessionTitle(fixture, sessionId)
     assert.ok(regenerated !== undefined && regenerated !== 'pinned by the user',
       'bare /title overwrites the pinned title with the deterministic fallback')
+    // The /rename ALIAS takes the same no-argument regeneration path (plan A05).
+    const seqBefore = lastNoticeSeq(fixture)
+    await submitInput(fixture, '/rename')
+    await waitFor('the alias regeneration notice', () =>
+      lastNoticeSeq(fixture) > seqBefore
+      && dockNotices(fixture).some(text => text.includes('title regenerated:')), 25_000)
+    const regeneratedByAlias = sessionTitle(fixture, sessionId)
+    assert.ok(regeneratedByAlias !== undefined && regeneratedByAlias !== 'pinned by the user',
+      'bare /rename regenerates through the same authoritative refresh')
   } finally {
     await fixture.settle()
   }
@@ -233,7 +282,10 @@ test('A06: /copy emits the OSC 52 sequence for the authoritative last assistant 
     await seedTurn(fixture, 'produce a copyable answer')
     // The copy target is the AUTHORITATIVE last assistant text, not the
     // rendered window: assert the delivered text is what the policy received.
-    const osc52 = buildOsc52Sequence(assistantText, false)
+    // The assertion is TMUX-agnostic: the tmux form wraps the same OSC 52 body
+    // in a DCS passthrough, so the payload and the `]52;c;` marker identify the
+    // emission either way (the suite must also pass when run inside tmux).
+    const payload = Buffer.from(assistantText, 'utf8').toString('base64')
     await submitInput(fixture, '/copy')
     await waitFor('the copy success notice', () =>
       dockNotices(fixture).some(text => text.includes('copied last assistant message')), 25_000)
@@ -242,7 +294,8 @@ test('A06: /copy emits the OSC 52 sequence for the authoritative last assistant 
     // session content and not an empty/foreign string.
     assert.ok(fixture.pane.output.text().includes(assistantText),
       'the copied assistant text is the session content the client presents')
-    assert.ok(fixture.pane.output.text().includes(osc52),
+    assert.ok(fixture.pane.output.text().includes(']52;c;')
+      && fixture.pane.output.text().includes(payload),
       'the client-local OSC 52 leg emitted the authoritative assistant text')
   } finally {
     await fixture.settle()
@@ -261,10 +314,44 @@ test('A06: /copy without an assistant message fails visibly and copies nothing',
     // paints it), so it must be visible without a supplementary Dock line.
     await waitFor('the copy refusal card', () =>
       fixture.pane.output.text().includes('no assistant message yet'), 25_000)
-    assert.ok(!fixture.pane.output.text().includes('\u001b]52;c;'),
+    assert.ok(!fixture.pane.output.text().includes(']52;c;'),
       'the refused copy emitted no OSC 52 sequence')
     assert.equal(fixture.modelCalls(), 0, 'the refused copy never reached the model')
   } finally {
+    await fixture.settle()
+  }
+})
+
+test('A06: /copy reports the shared policy failure when BOTH legs fail', async (t) => {
+  const life = (await import('./support/temp-lifecycle.ts')).testLifecycle(t)
+  const fixture = await createDirectTspFixture(life, { deltas: ['COPY-BOTH-LEGS-FAIL'] })
+  // The one-to-one tty fault: the terminal-client leg throws on its OWN OSC 52
+  // write (the real `emitTerminalClipboard` path catches it), and no tmux/display
+  // helper exists here, so the shared policy settles `false`. The chunk that
+  // carries the copy sequence is still forwarded for every other write.
+  const stdout = process.stdout as unknown as { write(data: unknown): boolean }
+  const stdoutPrototype = Object.getPrototypeOf(stdout) as Record<string, unknown>
+  const hadOwnWrite = Object.prototype.hasOwnProperty.call(stdoutPrototype, 'write')
+  const originalWrite = stdoutPrototype.write as (this: unknown, data: unknown) => boolean
+  try {
+    await directSettle(4_000)
+    await seedTurn(fixture, 'produce an uncopyable answer')
+    stdoutPrototype.write = function (this: unknown, data: unknown): boolean {
+      if (typeof data === 'string' && data.includes(']52;c;')) {
+        throw new Error('controlled tty write failure')
+      }
+      return originalWrite.call(this, data)
+    }
+    await submitInput(fixture, '/copy')
+    // The failure is the Direct command card's (its existing owner), and it is
+    // never reported as a successful copy.
+    await waitFor('the copy failure card', () =>
+      fixture.pane.output.text().includes('failed to copy last assistant message'), 25_000)
+    assert.ok(!dockNotices(fixture).some(text => text.includes('copied last assistant message')),
+      'a both-legs-failed copy never reports success')
+  } finally {
+    if (hadOwnWrite) stdoutPrototype.write = originalWrite
+    else delete stdoutPrototype.write
     await fixture.settle()
   }
 })
@@ -351,6 +438,27 @@ test('A08: /logout <reference> clears the credential and reports it visibly', as
   }
 })
 
+test('A08: a composition without the credentials service reports the refusal and mutates nothing', async (t) => {
+  const life = (await import('./support/temp-lifecycle.ts')).testLifecycle(t)
+  // The negative composition: the deployment mounts no credentials provider, so
+  // the port's `available()` is false and the handler must refuse truthfully.
+  const fixture = await createDirectTspFixture(life, { deltas: ['A08-PORT'], withoutCredentials: true })
+  try {
+    await directSettle(4_000)
+    await submitInput(fixture, '/new')
+    await waitFor('the session owner', () => welcomeSessionIds(fixture).length === 1, 25_000)
+    await submitInput(fixture, '/logout deepseek')
+    await waitFor('the unavailable-port card', () =>
+      fixture.pane.output.text().includes('credentials service unavailable'), 25_000)
+    assert.equal(fixture.ctx.get('credentials'), undefined,
+      'this composition really mounts no credentials service')
+    assert.ok(!fixture.pane.output.text().includes('cleared'),
+      'the refused logout never reports a credential as cleared')
+  } finally {
+    await fixture.settle()
+  }
+})
+
 test('A10: bare /logout is refused by the gate — no picker, no credential mutation', async (t) => {
   const life = (await import('./support/temp-lifecycle.ts')).testLifecycle(t)
   const fixture = await createDirectTspFixture(life, { deltas: ['A10'] })
@@ -373,6 +481,15 @@ test('A10: bare /logout is refused by the gate — no picker, no credential muta
     assert.notEqual(await credentials.resolve(ref), undefined, 'the refusal mutated no credential')
     assert.ok(!fixture.pane.output.text().includes('logout · credentials'),
       'the bare refusal opened no credential picker')
+    // The WHITESPACE-ONLY form is refused by the same shape rule, end to end.
+    await clearComposer(fixture)
+    const seqBeforeWhitespace = lastNoticeSeq(fixture)
+    await submitInput(fixture, '/logout   ')
+    await waitFor('the whitespace-only refusal', () =>
+      lastNoticeSeq(fixture) > seqBeforeWhitespace
+      && dockNotices(fixture).some(text => text.includes('not available in TSP')), 25_000)
+    assert.equal(composerText(fixture), '/logout   ', 'the whitespace-only line is the live draft again')
+    assert.notEqual(await credentials.resolve(ref), undefined, 'the whitespace-only refusal mutated no credential')
   } finally {
     await fixture.settle()
   }
@@ -402,9 +519,9 @@ test('A13: every remaining PiTui-only builtin stays refused with the draft resto
   const life = (await import('./support/temp-lifecycle.ts')).testLifecycle(t)
   const fixture = await createDirectTspFixture(life, { deltas: ['A13'] })
   const refused = [
-    '/settings', '/help', '/status', '/rewind', '/tasks', '/plugins',
+    '/settings', '/help', '/status', '/rewind', '/tasks', '/subagents', '/plugins', '/reload',
     '/export', '/transcript', '/attach some-file', '/image some-file',
-    '/login', '/skill', '/display', '/focus', '/footer', '/keybindings',
+    '/login', '/skill', '/display', '/focus', '/footer', '/statusline', '/keybindings',
   ]
   try {
     await directSettle(4_000)
@@ -482,7 +599,7 @@ test('A16: a no-panel TUI builtin executes locally while the turn runs (busyEnte
     const writesBefore = writes.calls()
     await submitInput(fixture, '/title While the turn runs')
     await waitFor('the title write while running', () =>
-      dockNotices(fixture).some(text => text.includes('title set: While the turn runs')), 25_000)
+      fixture.pane.output.text().includes('title set: While the turn runs'), 25_000)
     assert.equal(writes.calls(), writesBefore, 'the command produced NO prompt write (it was never steered)')
     assert.equal(sessionTitle(fixture, sessionId), 'While the turn runs',
       'the command ran through its real business owner while the turn was running')
@@ -498,10 +615,10 @@ test('A16: a no-panel TUI builtin executes locally while the turn runs (busyEnte
 
 // ── A14: genuine Host same-name winners ─────────────────────────────────────
 
-test('A14: genuine Host /new, /copy, /logout and /title keep their Host sink', async (t) => {
+test('A14: genuine Host /new, /copy, /logout, /title and /rename keep their Host sink', async (t) => {
   const life = (await import('./support/temp-lifecycle.ts')).testLifecycle(t)
   const calls: string[] = []
-  const names = ['new', 'copy', 'logout', 'title'] as const
+  const names = ['new', 'copy', 'logout', 'title', 'rename'] as const
   const fixture = await createDirectTspFixture(life, {
     deltas: ['A14'],
     hostCommands: names.map(name => ({
@@ -526,19 +643,54 @@ test('A14: genuine Host /new, /copy, /logout and /title keep their Host sink', a
       'every genuine Host handler ran once, and the TUI handler ran for none of them')
     // The Host command path lazily ensures ONE Session for the session-keyed
     // Host surface. A TUI `/new` handler running here would have published a
-    // SECOND Session; a TUI `/title` handler would have surfaced its own
-    // (successful or refused) title notice.
+    // SECOND Session; a TUI `/title` or `/rename` handler would have surfaced
+    // its own (successful or refused) title notice.
     const headers = await sessionHeaders(fixture)
     assert.equal(headers.length, 1, 'the TUI /new handler never created an extra Session')
-    assert.ok(!dockNotices(fixture).some(text => text.includes('title set:') || text.includes('renaming is unavailable')),
-      'the TUI /title handler never ran')
+    assert.ok(!dockNotices(fixture).some(text => text.includes('title set:') || text.includes('title regenerated:') || text.includes('renaming is unavailable')),
+      'the TUI /title and /rename handlers never ran')
     assert.equal(fixture.modelCalls(), 0, 'no Host winner reached the model')
-    assert.ok(!fixture.pane.output.text().includes('\u001b]52;c;'),
+    assert.ok(!fixture.pane.output.text().includes(']52;c;'),
       'the Host /copy winner never ran the TUI clipboard policy')
     assert.ok(!dockNotices(fixture).some(text => text.includes('cleared')),
       'the Host /logout winner never ran the TUI credential path')
     assert.ok(!fixture.pane.output.text().includes('not available in TSP'),
       'the TSP gate never captured a genuine Host winner')
+  } finally {
+    await fixture.settle()
+  }
+})
+
+test('A14: an argued line of a genuine Host execute-kind command stays an ordinary prompt', async (t) => {
+  const life = (await import('./support/temp-lifecycle.ts')).testLifecycle(t)
+  const calls: string[] = []
+  // A genuine Host name that does NOT claim the argued line (an execute-kind
+  // descriptor without `input`): the production classifier must classify the
+  // line as an ordinary submission — never re-own it as the TUI builtin.
+  const fixture = await createDirectTspFixture(life, {
+    deltas: ['ARGUED-ORDINARY'],
+    hostCommands: [{
+      name: 'new',
+      description: 'Host-owned new (execute kind, no input descriptor)',
+      definitionId: 'host-new-definition',
+      handler: (invocation: { readonly rawInput: string }) => {
+        calls.push(invocation.rawInput)
+        return { kind: 'success', text: 'Host new ran' }
+      },
+    }],
+  })
+  try {
+    await directSettle(4_000)
+    await submitInput(fixture, '/new argued-line')
+    // The line reached the MODEL as a prompt (the ordinary-submission route).
+    await waitFor('the ordinary prompt turn', () => fixture.modelCalls() === 1, 25_000)
+    await waitFor('the prompt transcript row', () =>
+      fixture.pane.output.text().includes('ARGUED-ORDINARY'), 25_000)
+    assert.deepEqual(calls, [], 'the unclaimed argued line never reached the Host handler')
+    assert.equal((await sessionHeaders(fixture)).length, 1,
+      'exactly the prompt Session exists; the TUI /new handler created no second one')
+    assert.ok(!fixture.pane.output.text().includes('not available in TSP'),
+      'an ordinary argued line is never refused as a TSP builtin')
   } finally {
     await fixture.settle()
   }

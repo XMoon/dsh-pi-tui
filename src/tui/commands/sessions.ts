@@ -88,14 +88,18 @@ export interface SessionCommandDeps {
    */
   notify: (text: string, kind?: 'info' | 'error') => void
   /**
-   * PR4-B2-A: the TSP-only SUCCESS-outcome notice — a no-op wherever a PiTui
-   * command card already presents the outcome. Only a CONFIRMED success is
-   * supplemented: a refusal/cancellation/indeterminate keeps its existing
-   * owners (the Direct command card, the controller's own local-command error
-   * notice, or the handler's inline `notify`) so no line is duplicated on the
-   * Dock.
+   * PR4-B2-A: the `/title`/`/rename` refusal notice. It is suppressed exactly
+   * where the official Direct command-result card already carries the same
+   * text; the PiTui notice and the no-card Client-registry feedback are kept.
    */
-  notifyOutcome: (text: string, kind?: 'info' | 'error') => void
+  notifyTitleRefusal: (text: string) => void
+  /**
+   * PR4-B2-A: the `/title`/`/rename` CONFIRMED-success notice — a new line the
+   * base handler never emitted. It publishes only where the TSP renderer has no
+   * command-result card to show it (non-PiTui + no card), so PiTui behavior is
+   * unchanged and the TSP Direct mount has a single owner.
+   */
+  notifyTitleSuccess: (text: string) => void
 }
 
 export interface SessionCommandRegistrars {
@@ -240,7 +244,8 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
     recordCommandDraftDisposition,
     newSessionId,
     notify,
-    notifyOutcome,
+    notifyTitleRefusal,
+    notifyTitleSuccess,
   } = deps
   const { cwd, signal } = runner
 
@@ -843,9 +848,10 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
             // no official command card either, so the indeterminate no-retry
             // notice is emitted with the same inline pattern as the rejected
             // branch below and the `/preset`/`/model` handlers. PR4-B2-A: the
-            // entry is the renderer-neutral notice, so the TSP Dock receives it
-            // too (exactly once — the outcome is NOT re-notified).
-            notify(message, 'error')
+            // entry is the title-scoped result sink, so the TSP Dock receives it
+            // ONLY where the command-result card does not already carry the same
+            // text (RFL-001), and the PiTui notice is unchanged.
+            notifyTitleRefusal(message)
             return { kind: 'error', text: message }
           }
           const message = outcome.kind === 'rejected' ? outcome.error.message : outcome.reason
@@ -853,10 +859,12 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
           // official command card (the Host executor's `command/run` row does
           // not exist there), so the handler surfaces its own refusal — the
           // same inline notice the `/preset` and `/model` handlers already
-          // emit. On Direct this is a transient notice beside the command card.
-          // The rejected branch is the writer-held (`session/writer-held`)
-          // proven pre-commit refusal: its message is the centralized guidance.
-          notify(message, 'error')
+          // emit. On Direct this is a transient notice beside the command card
+          // on PiTui, and is suppressed on the TSP renderer where that card is
+          // the single owner of the same text. The rejected branch is the
+          // writer-held (`session/writer-held`) proven pre-commit refusal: its
+          // message is the centralized guidance.
+          notifyTitleRefusal(message)
           return { kind: 'error', text: message }
         }
       } catch (error) {
@@ -865,10 +873,10 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
         if (isCancellation(error)) throw error
         return { kind: 'error', text: safeErrorMessage(error) }
       }
-      // PR4-B2-A: the confirmed authoritative title write. This is a SUCCESS
-      // supplement only — the one outcome whose text the TSP renderer would
-      // otherwise have to read from a PiTui command card it never paints.
-      notifyOutcome(`title set: ${acceptedTitle}`)
+      // PR4-B2-A: the confirmed authoritative title write. The notice is the
+      // text-bearing result's fallback where the official command-result card
+      // does not carry it; on the TSP Direct mount the card IS the single owner.
+      notifyTitleSuccess(`title set: ${acceptedTitle}`)
       return { kind: 'success', text: `title set: ${acceptedTitle}` }
     }
     try {
