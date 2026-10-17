@@ -1066,7 +1066,8 @@ test('L6/S3-R0: a failed/fence-dropped hydrate under a LIVE generation retries o
         return (realSubscribe as (...a: never[]) => unknown).apply(this, args)
       }
       life.defer(() => { ingress.subscribe = realSubscribe })
-      // The first cold hydrate cannot read (the unavailable-transport shape).
+      // The first cold read is deliberately fence-dropped (undefined) while the
+      // Connection generation REMAINS live: the identity-change retry branch.
       const reader = presentation.presentationReader as unknown as {
         read: (id: string, signal?: AbortSignal) => Promise<unknown>
       }
