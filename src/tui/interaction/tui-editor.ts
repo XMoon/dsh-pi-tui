@@ -36,6 +36,17 @@ export interface TuiEditorRenderLayout {
   readonly layoutWidth: number
   readonly onLastVisualLine: boolean
   readonly editorRows: number
+  /**
+   * The Editor's OWN Down admission for this frame: the exact
+   * `canEnterTaskQuickFromDown` answer (prompt mode plus the editor-internal
+   * history-browse / autocomplete / jump / paste gates beyond the raw visual
+   * line). The host's painted `↓` hint must follow the ROUTE, and the raw
+   * boundary alone cannot express every route flip — returning from history
+   * browse to the draft keeps the boundary true while Down is refused.
+   * Computed from the boundary THIS render already produced, so publishing it
+   * never builds a second visual wrap map.
+   */
+  readonly downEligible: boolean
 }
 
 export interface TuiEditorOptions {
@@ -353,11 +364,15 @@ export class TuiEditor extends Editor {
     const rendered = this.inputMode === 'prompt' && this.placeholderText !== '' && this.getText().trim() === ''
       ? injectEditorPlaceholder(lines, this.placeholderText, width)
       : injectEditorPrompt(lines, this.inputMode)
+    const onLastVisualLine = this.isOnLastVisualLineRawForHost(width)
     this.onVisualLayoutRendered?.({
       physicalWidth: width,
       layoutWidth: this.layoutWidthForPhysicalWidth(width),
-      onLastVisualLine: this.isOnLastVisualLineRawForHost(width),
+      onLastVisualLine,
       editorRows: rendered.length,
+      // Reuses the ONE classifier (with this frame's boundary as the known
+      // fact) instead of restating its editor-internal gates here.
+      downEligible: this.canEnterTaskQuickFromDown(width, onLastVisualLine),
     })
     return rendered
   }

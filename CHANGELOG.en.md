@@ -394,6 +394,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The `↓ view` hint no longer disagrees with the real key behaviour: returning
+  from history browse (`↑`/`↓`) to the draft brings it back, and folding or
+  expanding the Todo panel (which changes the Task Quick window's room) makes it
+  disappear and return with the route — never "Down opens it while the hint is
+  gone" and never "the hint promises an entry Down refuses".
+
 - A skill's slash command no longer disappears after a new or switched Session
   (`/new`, `/resume`, `/fork`): the catalog refresh no longer treats the TUI's
   own compatibility mirror as a genuine Host command, so the skill stays in the
