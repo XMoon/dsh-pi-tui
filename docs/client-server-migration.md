@@ -6293,6 +6293,12 @@ LAST synchronous delta, so a latest-change delivery is not a fold.
   until the next REAL official signal (new revision, or the Session's
   loading→open transition) — no timer, no poll, no widened timeout, and no
   swallowed error.
+- Provenance: the subscription carries the caller's hydrate identity, and a
+  rollover that keeps the previous window (the upstream journal stream retains it
+  until the opening page arrives) cannot be acknowledged at that revision; the
+  republish moves the revision and re-arms the reconcile. A temporarily
+  unavailable transport yields a PENDING handle completed by the official
+  generation channel, never a silently absent ingress.
 - Delivery ownership: installing the Remote live ingress for the committed owner
   closes the opening journal for that session (`OpeningJournal.close`). The
   journal buffers pre-commit events for the cold hydrate; keeping it open after
