@@ -735,31 +735,43 @@ test('F5: a /copy success that outlives its Session is not announced on the repl
     t.skip('the native clipboard helper is attempted unconditionally on this platform')
     return
   }
-  const { writeFileSync } = await import('node:fs')
+  const { existsSync, readFileSync, writeFileSync } = await import('node:fs')
   const { join } = await import('node:path')
   const life = (await import('./support/temp-lifecycle.ts')).testLifecycle(t)
-  const marker = join(life.tempDir('b2a-f5-clip-'), 'release')
+  const workDir = life.tempDir('b2a-f5-clip-')
   const binDir = life.tempDir('b2a-f5-bin-')
-  // A helper that consumes its stdin, then BLOCKS until the marker exists —
-  // the deterministic window in which the session switch publishes.
-  writeFileSync(join(binDir, 'xclip'), `#!/bin/sh\ncat > /dev/null\nwhile [ ! -f "${marker}" ]; do sleep 0.02; done\nexit 0\n`, { mode: 0o755 })
-  const savedPath = process.env.PATH
-  const savedDisplay = process.env.DISPLAY
-  const savedWayland = process.env.WAYLAND_DISPLAY
-  const savedTmux = process.env.TMUX
-  process.env.PATH = `${binDir}:${savedPath ?? ''}`
+  const capturePath = join(workDir, 'capture.txt')
+  const enteredPath = join(workDir, 'entered')
+  const releasePath = join(workDir, 'release')
+  const exitedPath = join(workDir, 'exited')
+  // The helper captures its stdin (the copy text), publishes an ENTERED marker,
+  // then blocks until the release marker exists. `entered` is the synchronization
+  // proof that the copy really is inside the clipboard policy on A's text before
+  // the switch is allowed to publish.
+  writeFileSync(join(binDir, 'xclip'), [
+    '#!/bin/sh',
+    `cat > "${capturePath}"`,
+    `: > "${enteredPath}"`,
+    `while [ ! -f "${releasePath}" ]; do sleep 0.02; done`,
+    `: > "${exitedPath}"`,
+    'exit 0',
+    '',
+  ].join('\n'), { mode: 0o755 })
+  const saved = {
+    PATH: process.env.PATH,
+    DISPLAY: process.env.DISPLAY,
+    WAYLAND_DISPLAY: process.env.WAYLAND_DISPLAY,
+    TMUX: process.env.TMUX,
+  }
+  process.env.PATH = `${binDir}:${saved.PATH ?? ''}`
   process.env.DISPLAY = ':0'
   delete process.env.TMUX
   delete process.env.WAYLAND_DISPLAY
   life.defer(() => {
-    if (savedPath === undefined) delete process.env.PATH
-    else process.env.PATH = savedPath
-    if (savedDisplay === undefined) delete process.env.DISPLAY
-    else process.env.DISPLAY = savedDisplay
-    if (savedWayland === undefined) delete process.env.WAYLAND_DISPLAY
-    else process.env.WAYLAND_DISPLAY = savedWayland
-    if (savedTmux === undefined) delete process.env.TMUX
-    else process.env.TMUX = savedTmux
+    for (const [key, value] of Object.entries(saved)) {
+      if (value === undefined) delete process.env[key]
+      else process.env[key] = value
+    }
   })
   const fixture = await createDirectTspFixture(life, {
     deltas: ['F5-COPY-TEXT'],
@@ -769,7 +781,12 @@ test('F5: a /copy success that outlives its Session is not announced on the repl
   try {
     await directSettle(4_000)
     const source = await seedTurn(fixture, 'seed the F5 copy source')
-    assert.ok(welcomeSessionIds(fixture).includes(source))
+    const sessionEvents = (sessionId: string): Array<{ type: string }> => {
+      const sessions = fixture.ctx.get('sessions') as unknown as {
+        get(id: string): { snapshotEvents(): Array<{ type: string }> }
+      }
+      return sessions.get(sessionId)?.snapshotEvents() ?? []
+    }
     // Hold the switch INSIDE the official resume so it publishes later.
     const agents = fixture.ctx.get('agents') as unknown as {
       resume(options: unknown): Promise<unknown>
@@ -788,20 +805,43 @@ test('F5: a /copy success that outlives its Session is not announced on the repl
     // FIFO is free while the transition is still in flight.
     await submitInput(fixture, '/resume f5-target-b')
     await waitFor('the resume to be entered', () => resumeEntered, 25_000)
-    // A's /copy starts while A is still Current; its native clipboard leg
-    // blocks on the marker, so the switch can publish underneath it.
     await submitInput(fixture, '/copy')
+    // SYNCHRONIZATION PROOF: the copy is INSIDE the native clipboard helper and
+    // already carries A's assistant text before the switch may publish. Without
+    // this wait the test could pass without ever creating the race.
+    await waitFor('the copy to reach the blocked clipboard helper', () => existsSync(enteredPath), 25_000)
+    const captured = readFileSync(capturePath, 'utf8')
+    assert.ok(captured.includes('F5-COPY-TEXT'),
+      'the blocked helper really received A\'s assistant text (the copy pinned A)')
     releaseResume()
     await waitFor('the replacement Session to become current', () =>
       welcomeSessionIds(fixture).includes('f5-target-b'), 30_000)
-    writeFileSync(marker, '')
-    await directSettle(2_000)
+    writeFileSync(releasePath, '')
+    // The helper writes `exited` just before it returns 0, so waiting for it
+    // proves the copy policy (and therefore the handler) really completed.
+    await waitFor('the stale copy to complete', () => existsSync(exitedPath), 25_000)
+    await directSettle(600)
     assert.ok(!dockNotices(fixture).some(text => text.includes('copied last assistant message')),
       'the late success is not announced on the replacement owner')
     assert.ok(welcomeSessionIds(fixture).includes('f5-target-b'),
-      'the switch really completed (the stale-copy outcome was fenced, not the switch)')
+      'the switch really completed (the stale outcome was fenced, not the switch)')
+    // POSITIVE CONTROL: on the SAME (now current) Session the success notice
+    // still appears exactly once — the fence is not an unconditional silence.
+    const modelBefore = fixture.modelCalls()
+    await submitInput(fixture, 'a prompt on the replacement session')
+    await waitFor('the replacement session turn', () => fixture.modelCalls() > modelBefore, 25_000)
+    await directSettle(1_200)
+    const noticesBefore = dockNotices(fixture).filter(text => text.includes('copied last assistant message')).length
+    await submitInput(fixture, '/copy')
+    await waitFor('the same-session copy notice', () =>
+      dockNotices(fixture).filter(text => text.includes('copied last assistant message')).length === noticesBefore + 1,
+    25_000)
+    assert.equal(
+      dockNotices(fixture).filter(text => text.includes('copied last assistant message')).length,
+      noticesBefore + 1,
+      'a current owner receives the copy success exactly once')
   } finally {
-    writeFileSync(marker, '')
+    writeFileSync(releasePath, '')
     await fixture.settle()
   }
 })
