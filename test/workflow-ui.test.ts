@@ -817,15 +817,16 @@ test('a phase folds and unfolds across ANY number of running→clean cycles (rev
   ])
   const { vt, app } = startApp()
   app.setTranscript(folder.messages())
-  const cycle = async (seq: number, label: string): Promise<string> => {
+  const cycle = async (memberSeq: number, label: string): Promise<string> => {
+    const sessionSeq = memberSeq * 2
     folder.apply([
-      { type: 'tool-workflow/agent-start', seq, time: 1_700_000_000_000 + seq, data: { runId: 'run-1', seq: seq - 2, label, childId: `session-${label}` } } as SessionEvent,
+      { type: 'tool-workflow/agent-start', seq: sessionSeq, time: 1_700_000_000_000 + sessionSeq, data: { runId: 'run-1', seq: memberSeq, label, childId: `session-${label}` } } as SessionEvent,
     ])
     app.setTranscript(folder.messages())
     let view = await viewport(vt)
     assert.ok(view.includes('▼ Unassigned'), `${label} start must open the phase:\n${view}`)
     folder.apply([
-      { type: 'tool-workflow/agent-end', seq: seq + 1, time: 1_700_000_000_000 + seq + 1, data: { runId: 'run-1', seq: seq - 2, outcome: 'completed' } } as SessionEvent,
+      { type: 'tool-workflow/agent-end', seq: sessionSeq + 1, time: 1_700_000_000_000 + sessionSeq + 1, data: { runId: 'run-1', seq: memberSeq, outcome: 'completed' } } as SessionEvent,
     ])
     app.setTranscript(folder.messages())
     view = await viewport(vt)
@@ -833,13 +834,13 @@ test('a phase folds and unfolds across ANY number of running→clean cycles (rev
     return view
   }
   // A start -> open, A complete -> close.
-  await cycle(2, 'a')
+  await cycle(1, 'a')
   // B start -> open, B complete -> close (the SECOND cycle — the old
   // one-shot completionClosed/reopened flags would leave it stuck open).
-  await cycle(4, 'b')
+  await cycle(2, 'b')
   // C start -> open (a THIRD cycle still works).
   folder.apply([
-    { type: 'tool-workflow/agent-start', seq: 6, time: 1_700_000_000_006, data: { runId: 'run-1', seq: 5, label: 'c', childId: 'session-c' } } as SessionEvent,
+    { type: 'tool-workflow/agent-start', seq: 6, time: 1_700_000_000_006, data: { runId: 'run-1', seq: 3, label: 'c', childId: 'session-c' } } as SessionEvent,
   ])
   app.setTranscript(folder.messages())
   const view = await viewport(vt)
