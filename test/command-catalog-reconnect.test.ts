@@ -357,6 +357,7 @@ function fakeRunnerDeps(options: {
       withWriter: async (_scope, task) => task(),
       switchSession: async () => undefined,
       forkSession: async () => ({ kind: 'committed', value: undefined }) as never,
+      isNavigationCurrent: () => false,
       transitionTo: runner.transitionTo,
     },
     status: {

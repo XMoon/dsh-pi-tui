@@ -382,6 +382,98 @@ function recordNotifications(life: TestLifecycle): string[] {
     append('turn/end', { turn: 1, reason: { kind: 'completed' } })
   }
 
+test('F-UX-02 Remote: a real /fork announces the adopted child exactly once and stays off the Host executor', async (t) => {
+  const life = testLifecycle(t)
+  const mainId = 'm3-4-pr4-cmd-fork'
+  const fixture = await mountRunner(life, {
+    resumeSessionId: mainId,
+    seed: (append) => {
+      // One COMPLETED turn WITH an assistant answer: the legal Host fork
+      // boundary (the fork seed cuts at the latest completed prefix).
+      append('turn/start', { turn: 1 })
+      append('step/start', { turn: 1, step: 1 })
+      append('user/message', {
+        id: 'u-fork-1', role: 'user', content: [{ type: 'text', text: 'fork source prompt' }], source: { kind: 'user' },
+      }, { surfaceOp: 'append' })
+      append('assistant/message', {
+        turn: 1, step: 1,
+        message: {
+          id: 'a-fork-1', role: 'assistant', content: [{ type: 'text', text: 'fork source answer' }],
+          source: { kind: 'model', provider: 'smoke', model: 'smoke' },
+        },
+        stream: [], usage: { inputTokens: 1, outputTokens: 1 },
+      }, { surfaceOp: 'append' })
+      append('step/end', { turn: 1, step: 1 })
+      append('turn/end', { turn: 1, reason: { kind: 'completed' } })
+    },
+  })
+  await waitFor('the remote runner mount', () => fixture.vt.getViewport().join('').length > 0, 20_000)
+  const notifications = recordNotifications(life)
+  const clientSessions = clientSessionsOf(fixture)
+  const sourcesBefore = clientSessionIds(clientSessions)
+  submit(fixture, '/fork')
+  await waitFor('the fork success notice', () => notifications.includes('Forked to a new session'), 20_000)
+  await settle(400)
+
+  const childIds = clientSessionIds(clientSessions).filter(id => !sourcesBefore.includes(id))
+  assert.equal(childIds.length, 1, 'the Host fork created exactly one child Session')
+  const childId = childIds[0]!
+  assert.equal(childParentId(clientSessions, childId), mainId,
+    'the new Session is the fork child of the source (official lineage)')
+  // The adopted navigation: the TUI main view retains the CHILD and no longer
+  // retains the source — the official Client retain bookkeeping, not a guess.
+  assert.deepEqual(retainFacts(clientSessions, childId).retainedBy, { tuiMainView: 1 },
+    'the TUI main view must retain the forked child')
+  assert.deepEqual(retainFacts(clientSessions, mainId).retainedBy, {},
+    'the source must no longer be the presented Session')
+  assert.equal(notifications.filter(message => message === 'Forked to a new session').length, 1,
+    `exactly one /fork success notice: ${JSON.stringify(notifications)}`)
+  assert.equal(fixture.hostCommandRuns(mainId), 0,
+    'the Remote /fork Client route produces no Host command/run row')
+})
+
+test('F-UX-05 Remote: a refused /fork keeps its failure feedback and never the success notice', async (t) => {
+  const life = testLifecycle(t)
+  const mainId = 'm3-4-pr4-cmd-fork-refused'
+  // NO completed turn: the Host has no legal fork boundary.
+  const fixture = await mountRunner(life, { resumeSessionId: mainId, seed: () => {} })
+  await waitFor('the remote runner mount', () => fixture.vt.getViewport().join('').length > 0, 20_000)
+  const notifications = recordNotifications(life)
+  const sessionsBefore = fixture.host.ctx.sessions.list().length
+  submit(fixture, '/fork')
+  await waitFor('the fork refusal', () => notifications.some(message => message.includes('session/fork-unavailable')), 20_000)
+  await settle(400)
+  assert.ok(!notifications.includes('Forked to a new session'),
+    `a refused fork must never announce success: ${JSON.stringify(notifications)}`)
+  assert.equal(fixture.host.ctx.sessions.list().length, sessionsBefore,
+    'a refused fork creates no child Session')
+})
+
+/** The official Client sessions face the retention/lineage reads need. */
+interface ClientSessionsFace {
+  list: { getSnapshot(): { ids: readonly string[]; byId: Record<string, { parentId?: string }> } }
+  retainInfo(id: unknown): { getSnapshot(): { referenceCount: number; retainedBy: Readonly<Record<string, number>> } }
+}
+
+function clientSessionsOf(fixture: Fixture): ClientSessionsFace {
+  return (fixture.aggregate.wire.client as unknown as { sessions: ClientSessionsFace }).sessions
+}
+
+function clientSessionIds(sessions: ClientSessionsFace): string[] {
+  return [...sessions.list.getSnapshot().ids]
+}
+
+function childParentId(sessions: ClientSessionsFace, id: string): string | undefined {
+  return sessions.list.getSnapshot().byId[id]?.parentId
+}
+
+/** The official local retain facts (`retainedBy` is handed out with a NULL
+ *  prototype, so it is copied for `deepEqual`). */
+function retainFacts(sessions: ClientSessionsFace, id: string): { referenceCount: number; retainedBy: Record<string, number> } {
+  const snapshot = sessions.retainInfo(SessionId(id)).getSnapshot()
+  return { referenceCount: snapshot.referenceCount, retainedBy: { ...snapshot.retainedBy } }
+}
+
 test('F1 Remote: a card-less /copy failure is published once and produces no Host command row', async (t) => {
   const life = testLifecycle(t)
   const mainId = 'b2a-f1-copy'

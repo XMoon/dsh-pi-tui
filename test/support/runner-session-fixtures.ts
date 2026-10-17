@@ -119,6 +119,12 @@ export interface RunnerProbe {
   capturedWelcomeModels: string[]
   /** Every `app.notify(message, kind)` this run surfaced. */
   notices: string[]
+  /**
+   * `transcriptHydrateCount` observed at each `notify`, index-aligned with
+   * `notices`: proves whether a notice was emitted AFTER the hydration that
+   * owns the current session (the hydrate tail clears notices).
+   */
+  noticeHydrateCounts: number[]
   apps: TuiApp[]
   restore: () => void
 }
@@ -144,6 +150,7 @@ export function installProbe(): RunnerProbe {
     capturedModels: [],
     capturedWelcomeModels: [],
     notices: [],
+    noticeHydrateCounts: [],
     apps: [],
     restore: () => {},
   }
@@ -231,6 +238,7 @@ export function installProbe(): RunnerProbe {
   }
   TuiApp.prototype.notify = function (...args: Parameters<typeof originalNotify>) {
     probe.notices.push(`${args[1] ?? 'info'}:${String(args[0])}`)
+    probe.noticeHydrateCounts.push(probe.transcriptHydrateCount)
     return originalNotify.apply(this, args)
   }
   probe.displaySubject = () => {

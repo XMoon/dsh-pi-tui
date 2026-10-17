@@ -34,6 +34,7 @@ import { normalizeSkillInvocation } from '../../domain/command/policy.ts'
 import type { SurfaceCatalogSnapshot, SurfaceCommandSummary } from '../../domain/catalog/surface.ts'
 import type { SkillCatalogCapability } from '../../runtime/catalog-port.ts'
 import type { SessionScopeAuthority } from '../session/scope.ts'
+import type { SessionRuntime as ApplicationSessionRuntime } from '../session/runtime.ts'
 import { CatalogRefreshCoordinator, CoalescingRefreshGate, type CatalogRefreshOutcome, type CatalogRefreshRequest, type CatalogRefreshSource } from './catalog-refresh.ts'
 import { registerTuiCommands, type CommandRegistryLike, type HostCommandClaim, type InitialCommandCatalog, type SubmitDelivery, type TuiCommandRunner } from '../../commands.ts'
 import type { ClientCommandRegistry } from './client-command-registry.ts'
@@ -245,7 +246,12 @@ export interface CommandSurfaceDeps<Selection extends ModelSelectionValue, Exact
     ensureSession(): Promise<void>
     withWriter: CommandSessionRuntime['withWriter']
     switchSession(sessionId: string, expectedScope?: SessionScope): Promise<string | undefined>
-    forkSession: NonNullable<TuiCommandRunner['forkSession']>
+    /** The application Session runtime's `/fork` entry. Its `SessionForkOutcome`
+     *  carries the POST-ADOPTION navigation identity, so the facade can tell a
+     *  real adoption from a superseded/parked child that also reports success. */
+    forkSession: ApplicationSessionRuntime['forkSession']
+    /** Whether a captured navigation identity still owns the visible surface. */
+    isNavigationCurrent: ApplicationSessionRuntime['isNavigationCurrent']
     transitionTo: TuiCommandRunner['transitionTo']
   }
   /** The status owner seams the runner delegates to. */
@@ -1068,7 +1074,22 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
         return 'applied' as const
       },
       switchSession: (sessionId, expectedScope) => deps.session.switchSession(sessionId, expectedScope),
-      forkSession: (sourceSessionId) => deps.session.forkSession(sourceSessionId),
+      forkSession: async (sourceSessionId) => {
+        const result = await deps.session.forkSession(sourceSessionId)
+        // The ONE `/fork` success notice. `kind: 'success'` alone also covers a
+        // superseded/parked child, so the adopted navigation identity — and its
+        // currentness — is the only admissible proof that the user is now IN the
+        // forked session. Emitted AFTER the await: the child's hydration (whose
+        // tail clears the notice area) is awaited inside the fork, so this
+        // notice survives on the new session's surface. `/rewind` has its own
+        // adoption path and its own notice.
+        if (result.kind === 'success'
+          && result.adoptedNavigation !== undefined
+          && deps.session.isNavigationCurrent(result.adoptedNavigation)) {
+          deps.notify('Forked to a new session', 'info')
+        }
+        return result
+      },
       transitionTo: (steps) => deps.session.transitionTo(steps),
       currentPreset: deps.presets.current,
       sessionBlank: deps.presets.blank,
