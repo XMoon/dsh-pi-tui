@@ -78,7 +78,7 @@ function attachmentHarness(options: AttachmentHarnessOptions = {}): AttachmentHa
   const wire = {
     client: {
       sessions,
-      connection: { generation: { getSnapshot: () => generation } },
+      connection: { generation: { getSnapshot: () => generation, subscribe: () => () => {} } },
       jobs: { state: { getSnapshot: () => ({ rows: {} }), subscribe: () => () => {} } },
       remote: {
         commands: { list: async () => ({ ok: true, value: [] }) },
