@@ -13,7 +13,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 This candidate moves the DSH baseline onto the released `0.2.1-rc.2` family: the
 peer floor is `>=0.2.1-rc.2` and the exact validation target is `0.2.1-rc.2`.
-Installing DSH requires explicitly allowing its native install scripts:
+`0.5.3` is still a reserved next-line candidate: it carries no tag and is not
+published to npm, so the TUI install command below takes effect only after that
+release. Installing DSH requires explicitly allowing its native install scripts:
 
 ```sh
 npm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty @deepseek-ai/dsh@0.2.1-rc.2
@@ -31,11 +33,8 @@ pairings are unchanged: `@deepseek-ai/dsh@0.2.0-rc.2` uses
 ### Changed
 
 - **Requires DeepSeek Harness `0.2.1-rc.2` and drops the intermediate
-  `0.2.1-rc.1`.** This line rebuilds the profile and the four official preset
-  mirrors from the published family, moves the in-process Remote carrier onto
-  the official owner Peer and its connection lifetime, and follows the official
-  rule that a working directory is a universal prerequisite for tools and
-  Sessions. Upgrading from an older runtime follows the pairing table above.
+  `0.2.1-rc.1`.** The published older-runtime pairings are unchanged (see the
+  table above); upgrading from an older runtime follows that pairing table.
 
 ## [0.5.2-rc.1] - 2026-10-17
 

@@ -12,8 +12,11 @@ allowBuilds:
   # fork; it only chmods an existing file and never compiles anything.
   '@deepseek-ai/dsh-subprocess-local': true
   # DENIED: node-pty uses its prebuilt binary where one exists and would
-  # compile otherwise (platforms without a prebuild need an explicit
-  # re-decision plus PTY qualification — no lane claims that today);
+  # compile otherwise. NOTE the unverified scope: a packaged prebuild is not
+  # evidence of PTY support — for this pinned node-pty the Windows postinstall
+  # copies conpty.dll/OpenConsole.exe, so Windows PTY is NOT established here,
+  # and no lane qualifies PTY on any platform today. Platforms without a usable
+  # prebuild need an explicit re-decision plus a PTY qualification lane.
   # @google/genai's registry tarball already ships built `dist`, so its
   # install-time `prepare` build is unnecessary; protobufjs only checks its
   # dependency version scheme.
