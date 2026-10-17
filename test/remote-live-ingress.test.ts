@@ -744,12 +744,22 @@ test('S3-R0: an unavailable-transport hydrate arms the OFFICIAL-signal re-init (
     'the retry path classifies the transport state at settle time')
   assert.ok(init.includes('if (liveGeneration === undefined) {'),
     'an ABSENT transport waits for the official generation')
-  assert.ok(init.includes('armRemoteInitRetry(sessionId, initGeneration)'),
+  assert.ok(init.includes('armInitRetry(sessionId, initGeneration)'),
     'the official-signal re-init is armed for the FAILED attempt (owner generation included)')
-  assert.ok(bootstrap.includes('ownership.generation() === failedAttemptGeneration'),
+  assert.ok(bootstrap.includes('armRemoteInitRetry({'),
+    'the composition root arms the PRODUCTION retry helper')
+  // The attempt fence, the official-channel wakeup and the same-tick re-check
+  // live in the helper; its BEHAVIOR is covered by test/remote-init-retry.test.ts
+  // (including a same-id owner commit cancelling an armed retry).
+  const retry = readFileSync(new URL('../src/app/bootstrap/remote-init-retry.ts', import.meta.url), 'utf8')
+  assert.ok(retry.includes('deps.ownerGeneration() === failedAttemptGeneration'),
     'the retry is fenced by the failed attempt\'s owner generation (a same-id owner commit wins)')
-  assert.ok(bootstrap.includes('if (!stillTheFailedAttempt()) return undefined'),
+  assert.ok(retry.includes('if (!stillTheFailedAttempt()) return'),
     'the detached retry re-checks the attempt fence in the same tick as the init entry')
+  assert.ok(retry.includes('if (deps.connectionGeneration() === undefined) return'),
+    'the retry waits for the OFFICIAL generation')
+  assert.ok(retry.includes('deps.subscribeConnectionGeneration('),
+    'the retry is driven by the OFFICIAL generation channel')
   assert.ok(bootstrap.includes('if (attempt !== remoteInitAttempt) return'),
     'a superseded init attempt cannot install a second ingress')
   assert.ok(init.includes('const attempt = { ownerGeneration: initGeneration, connectionGeneration: liveGeneration }'),
