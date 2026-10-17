@@ -219,7 +219,9 @@ function renderItemRow(item: TaskPanelItem, width: number, position?: string, se
   const tailWidth = visibleWidth(position === undefined ? statusText : `${statusText}  ${position}`)
   if (tailWidth >= width) return fit(`${marker}${tail}`, width)
   const room = width - tailWidth - visibleWidth(marker) - 1
-  const indent = '  '.repeat(Math.max(0, Math.floor(item.depth ?? 0)))
+  // Root-level subagents (depth 1) align with Jobs;
+  // only nested descendants receive additional indentation.
+  const indent = '  '.repeat(Math.max(0, Math.floor(item.depth ?? 1) - 1))
   const indentWidth = visibleWidth(indent)
   const suffixText = item.suffix === undefined || item.suffix === '' ? '' : ` · ${item.suffix}`
   const suffixWidth = visibleWidth(suffixText)

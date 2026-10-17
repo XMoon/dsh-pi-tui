@@ -850,8 +850,13 @@ test('nesting is painted as indentation, never with an ambiguous box-drawing con
   const lines = accessory.render(80).map(strip)
   assert.ok(lines[0]!.startsWith('─'), 'the separator leads the ACTIVE frame')
   assert.ok(strip(lines[2]!).startsWith('> build'), `the selected root row carries the marker:\n${lines.join('\n')}`)
-  assert.ok(strip(lines[3]!).startsWith('    subagent · parent'), `a depth-1 row is marker slot + one indent step: ${JSON.stringify(lines[3])}`)
-  assert.ok(strip(lines[4]!).startsWith('      subagent · child'), `a depth-2 row is marker slot + two indent steps: ${JSON.stringify(lines[4])}`)
+  assert.ok(strip(lines[3]!).startsWith('  subagent · parent'), `a depth-1 row is marker slot only: ${JSON.stringify(lines[3])}`)
+  assert.ok(strip(lines[4]!).startsWith('    subagent · child'), `a depth-2 row is marker slot + one indent step: ${JSON.stringify(lines[4])}`)
+  assert.equal(
+    strip(lines[2]!).indexOf('build'),
+    strip(lines[3]!).indexOf('subagent · parent'),
+    'root Job and root Subagent labels must align',
+  )
   // U+2500 is East-Asian-Width ambiguous: the modal panel's NESTING connector
   // must not be carried into the task rows (the placement is indentation, not
   // a glyph). The ONE rule at the top is the Owner-authorized Footer↔Quick
