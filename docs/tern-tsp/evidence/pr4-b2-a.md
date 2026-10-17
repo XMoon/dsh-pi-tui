@@ -33,8 +33,9 @@ description (this file records the durable version pins and the result tiers).
   - `/title` / `/rename`: the card carries the handler's `CommandResult.text`
     (success text and error text alike) whenever the invocation executes on the
     Direct command plane, so the handler's own notice is suppressed exactly
-    there — `titleResultNoticeSuppressed({ pituiPresentation, backendKind })`,
-    computed by the composition root in `registerCommands()` after the mount.
+    there — `titleRefusalNoticeOwner` / `titleSuccessNoticeVisible` (each derived
+    from the mounted presentation + the command plane by the composition root in
+    `registerCommands()`, after the mount).
     The PiTui surface keeps its long-standing notice beside the card, and the
     Client-registry path (no card) keeps the only feedback. The two results
     WITHOUT their own text (`no conversation yet — title left as-is`, `title
@@ -178,7 +179,7 @@ unchanged owner's subject:
 |---|---|---|
 | Direct L6 | `test/tern-tsp-headless-commands.test.ts` over the real Direct composition + scripted TSP pane | A01–A08, A10, A11, A13, A14, A16, A17 |
 | Remote L6 | `test/runner-remote-command-plane.test.ts` (real Remote composition, real Client registry / HostCommandPort; `F1 Remote` ×3 on PiTui + one Remote+TSP mount + the F4 forward race) | the card-less error owner (F1), the mid-flight catalog race (F4), the no-double-notification rule |
-| Pure unit | `test/tern-tsp-command-admission.test.ts` (the predicate, the `/logout` input-shape rule and the `titleResultNoticeSuppressed` truth table) | the gate and the title notice policy |
+| Pure unit | `test/tern-tsp-command-admission.test.ts` (the predicate, the `/logout` input-shape rule, the title ownership tables and the notice scope) | the gate and the title notice policy |
 | REAL_TERN_HEADLESS | `scripts/tern-pane-drive.mjs scripts/tern-pane-b2a-copy.mjs` (real Tern 0.9.2, real keys, real tty) | A19 (channel integrity + OSC52 emission) |
 | Inherited | B1-B / PR4-0 suites rerun unchanged | A12, A15, A18 |
 
@@ -191,7 +192,8 @@ reviewed mapping:
 - **RFL-001 (closed) — duplicate title refusal on TSP+Direct.** A rejected or
   indeterminate `/title` appeared in both the Dock notice and the Direct
   command-result card. Closed by the composition-owned, title-only
-  `titleResultNoticeSuppressed` fact (non-PiTui mount + Direct command plane,
+  `titleRefusalNoticeOwner`/`titleSuccessNoticeVisible` facts (mounted
+  presentation + command plane,
   set at registration after the mount) and the per-outcome notice entries. The
   witness counts the message across every live folded node (exactly one visible
   sink) and separately requires zero Dock notices.
@@ -219,6 +221,21 @@ reviewed mapping:
   handler runs — the Host result card stays the only presentation (no extra Dock
   line). The second witness proves the freeze; the first covers the reviewer's
   requested mid-flight-catalog scenario end to end.
+- **F5 (external review, closed) — a late outcome could land on the
+  replacement Session.** A `/resume` starts its transition asynchronously and
+  releases the submission FIFO, so a subsequent command can execute while the
+  OLD Session is still current and settle after the replacement was published.
+  Two supplements could therefore reach the new owner's surface: the card-less
+  Client-route ERROR notice and the `/copy`/`/yolo` confirmed-success lines.
+  Both are now fenced by the SAME captured Session scope the settlement uses
+  (`deps.scope.isCurrent` / `runner.isSessionScopeCurrent`), with no settlement
+  re-classification, no global notice owner and no new barrier. Witnessed by (a)
+  a controller-level scenario where the owner is replaced while a Client command
+  executes — the stale error is silent, while the same-session control receives
+  it exactly once, and (b) a real Direct/TSP interleave: a `/resume` transition
+  held inside the official resume gate plus a `/copy` whose native clipboard
+  helper blocks on a marker, released only after the replacement became current
+  — the late success is not announced on the new owner.
 - **F1 (external review, closed) — card-less command errors were invisible.**
   On the Remote Client command registry no result card exists, so a returned
   `CommandResult.error` reached neither the Dock nor a card. The submission

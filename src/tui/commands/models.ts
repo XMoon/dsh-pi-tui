@@ -422,7 +422,12 @@ export function createModelCommands(deps: ModelCommandDeps): ModelCommandRegistr
             text: 'the permission switch was dispatched but its result is unknown — check the footer before relying on it; do not retry blindly',
           }
         }
-        notifyOutcome('danger-full-access — approvals off')
+        // F5: the official writer settles under the session barrier, but the
+        // Session can still be replaced before this line is published; the
+        // confirmation must not land on the replacement owner's surface.
+        if (runner.isSessionScopeCurrent(scope) && !signal.aborted) {
+          notifyOutcome('danger-full-access — approvals off')
+        }
         return { kind: 'success', text: 'danger-full-access — approvals off' }
       },
     })
