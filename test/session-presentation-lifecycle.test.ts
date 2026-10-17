@@ -34,7 +34,7 @@ function harness(options: {
     revision: number,
   ) => { readonly generation: unknown; readonly binding: unknown; readonly revision: number } | undefined
 } = {}): {
-  setWindow(events: readonly Record<string, unknown>[], hasMore: boolean): void
+  setWindow(events: readonly Record<string, unknown>[], hasMore: boolean, revision?: number): void
   coldHydrate(): Promise<void>
   /** S3-R0: the committed proof (or undefined when the read was superseded). */
   rehydrate(): Promise<unknown>
@@ -95,12 +95,12 @@ function harness(options: {
     },
   })
   return {
-    setWindow: (events, hasMore) => {
+    setWindow: (events, hasMore, revision = 1) => {
       window = {
         sessionId: 's',
         durableEvents: events as never,
         liveInputs: [],
-        revision: 1,
+        revision,
         coverage: hasMore ? 'bounded' : 'full',
         hasMore,
         loadingOlder: false,
@@ -139,6 +139,33 @@ test('S3-R0: the read→commit fence refuses a superseded revision (nothing is r
   assert.notEqual(proof, undefined, 'a still-current read commits and returns its proof')
   assert.ok(!Object.is(h.presentation.mainFolder(), before),
     'the committed read replaced the fold')
+})
+
+test('S3-R0: an owner read that settles after a newer window commits nothing (barrier)', async () => {
+  // RFL-003 owner-level barrier through the PRODUCTION rehydrate path: read A is
+  // held at revision 41, the official window advances to revision 42 (the proof
+  // seam answers only for the CURRENT revision, exactly as the bootstrap wires
+  // it), A settles last, and only then a read at 42 may commit.
+  let officialRevision = 41
+  const h = harness({
+    refoldProof: (_sessionId, revision) => (
+      revision === officialRevision ? { generation: 1, binding: {}, revision } : undefined
+    ),
+  })
+  h.setWindow([], false, 41)
+  await h.coldHydrate()
+  const before = h.presentation.mainFolder()
+  // The official window advances while read A is in flight; A still answers the
+  // retired revision 41, so its fence must refuse the commit.
+  officialRevision = 42
+  const proofA = await h.rehydrate()
+  assert.equal(proofA, undefined, 'a read fenced at the OLD revision cannot commit after the window moved')
+  assert.ok(Object.is(h.presentation.mainFolder(), before), 'the stale owner read wrote nothing')
+  // The republished window (revision 42) is the one a re-fold may commit.
+  h.setWindow([], false, 42)
+  const proofB = await h.rehydrate()
+  assert.notEqual(proofB, undefined, 'the read at the CURRENT revision commits')
+  assert.ok(!Object.is(h.presentation.mainFolder(), before), 'the newer read replaced the fold once')
 })
 
 test('PR3-B §7.3 (F1): the generation reset NEVER drops the active draft (the drop moved to the committed switch)', async () => {
