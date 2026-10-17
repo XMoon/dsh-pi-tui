@@ -1290,9 +1290,14 @@ export function applyRunnerWithRuntime(
       remoteProgressHandle?.dispose()
       remoteProgressHandle = undefined
     }
-    /** The generation an IMMEDIATE init retry already ran under: a second
-     *  failure under the same generation falls back to the official channel. */
-    let lastInitRetryGeneration: unknown
+    /** The ONE immediate init retry already granted to an attempt: keyed by the
+     *  TUI owner generation AND the Connection generation, so a NEW owner init
+     *  always gets its single retry while a repeat failure inside the same
+     *  attempt falls back to the official channel (no recursion, no stale
+     *  marker blocking a later attempt — the exact-binding transport identity is
+     *  narrower than the Connection generation, so an owner attempt is the
+     *  honest budget unit). */
+    let lastInitRetry: { readonly ownerGeneration: number; readonly connectionGeneration: unknown } | undefined
     /** Arm the official-signal retry for one session whose surface init could
      *  not hydrate (the owner is still current; only the transport is gone). */
     const armRemoteInitRetry = (sessionId: string): void => {
@@ -1389,22 +1394,31 @@ export function applyRunnerWithRuntime(
         if (liveGeneration === undefined) {
           // The transport is absent right now: wait for the OFFICIAL generation.
           armRemoteInitRetry(sessionId)
-        } else if (!Object.is(lastInitRetryGeneration, liveGeneration)) {
-          // The generation is already live: the hydrate was dropped by a
-          // transport IDENTITY change between its read and its commit (the owner
-          // fences above passed). Re-run the init ONCE under the current
-          // generation — never a loop: a second failure under the same
-          // generation arms the official-channel retry instead.
-          lastInitRetryGeneration = liveGeneration
-          runDetached('remote live surface retry', () => initRemoteLiveSurface(sessionId), {
-            diag,
-            sessionId: () => sessionId,
-          })
         } else {
-          armRemoteInitRetry(sessionId)
+          const attempt = { ownerGeneration: initGeneration, connectionGeneration: liveGeneration }
+          const alreadyRetried = lastInitRetry !== undefined
+            && lastInitRetry.ownerGeneration === attempt.ownerGeneration
+            && Object.is(lastInitRetry.connectionGeneration, attempt.connectionGeneration)
+          if (!alreadyRetried) {
+            // The generation is already live: the hydrate was dropped by a
+            // transport IDENTITY change between its read and its commit (the
+            // owner fences above passed). Re-run the init ONCE for THIS attempt
+            // — never a loop (a repeat failure inside the attempt falls back to
+            // the official channel) and never a stale marker for a later owner
+            // attempt (a new owner commit grants its own retry).
+            lastInitRetry = attempt
+            runDetached('remote live surface retry', () => initRemoteLiveSurface(sessionId), {
+              diag,
+              sessionId: () => sessionId,
+            })
+          } else {
+            armRemoteInitRetry(sessionId)
+          }
         }
         return
       }
+      // A committed init releases the attempt's retry budget.
+      lastInitRetry = undefined
       // Seed the compaction working-fold cache from the PROVEN cold-hydrate
       // fold (no first-use gap: the first settle reads the authoritative
       // complete-window answer, never the bare running bit).

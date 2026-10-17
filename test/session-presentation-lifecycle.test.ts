@@ -181,11 +181,15 @@ test('S3-R0: a transport rollover during the cold read makes the hydrate uncommi
     'the stale transport token makes the hydrate return undefined (what the retry keys on)')
 })
 
-test('S3-R0: read A already in flight → window B commits → A settles last and writes nothing', async () => {
+test('S3-R0: read A already in flight → window B commits → A settles last and writes nothing', async (t) => {
   // RFL-003 owner-level barrier through the PRODUCTION rehydrate consumer:
   // A STARTS (captures revision 41), the official window advances to 42 and B
   // commits while A is still awaiting, then A settles last. A must not write and
-  // B's fold must survive. Deterministic gate, no sleeps.
+  // B's fold must survive. The PROOF SEAM here is test-provided and
+  // revision-sensitive (the same decision the bootstrap's ingress eligibility
+  // makes); the real source→sink path over the official wire is the L6 lane, so
+  // this witness is the read→commit fence, not the whole L6 chain. Deterministic
+  // gate, no sleeps.
   let officialRevision = 41
   let releaseA: (() => void) | undefined
   let gateA: Promise<void> | undefined
@@ -200,6 +204,9 @@ test('S3-R0: read A already in flight → window B commits → A settles last an
   const before = h.presentation.mainFolder()
   // Read A STARTS while the official window is 41; it is held.
   gateA = new Promise<void>(resolve => { releaseA = resolve })
+  // AGENTS.local: a held gate always has a fallback release, so a failing
+  // assertion in B cannot leave A pending and poison the process.
+  t.after(() => { releaseA?.() })
   const aInFlight = h.rehydrate()
   // The official window advances and B commits while A is still in flight.
   officialRevision = 42

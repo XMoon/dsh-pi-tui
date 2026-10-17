@@ -6301,7 +6301,13 @@ LAST synchronous delta, so a latest-change delivery is not a fold.
   revision and re-arms the reconcile. A temporarily unavailable transport yields
   a PENDING handle completed by the official generation channel, never a
   silently absent ingress; a hydrate dropped while the transport is gone arms
-  ONE official-generation-driven re-init of the whole live surface.
+  ONE official-generation-driven re-init of the whole live surface (one retry per
+  owner/init attempt; a repeat failure inside the same attempt waits for the
+  official signal). A cold attach after a rollover is verify-first because the
+  retained window may still be the previous generation's
+  (`gateway/src/client/journal-stream.ts` keeps it until the opening page); this
+  depends on the pinned upstream contract that the opening page is published as
+  a `replace`, which is the slice's documented STOP boundary if it changes.
 - Delivery ownership: installing the Remote live ingress for the committed owner
   closes the opening journal for that session (`OpeningJournal.close`). The
   journal buffers pre-commit events for the cold hydrate; keeping it open after
@@ -6328,10 +6334,12 @@ LAST synchronous delta, so a latest-change delivery is not a fold.
   description — this document does not claim them ahead of that run; the child
   viewer's reconnect case (§14.5) and the single-publisher/release probes are
   covered by the same snapshot's lane results.
-- S1 full requalification is still required: S1 + S3-R0 are qualified on
-  `integration/dsh-0.2.1-rc.2`, and the promotion PR to `next` must run the
-  complete product gate on the integration HEAD. `M3 = DONE` remains the
-  historical migration state; this slice claims neither `M4` nor a published
+- S1 is qualified on `integration/dsh-0.2.1-rc.2`; S3-R0 is NOT part of that
+  integration HEAD yet — it is qualified on its own frozen snapshot and becomes
+  qualified on integration only after it is merged there and the complete
+  product gate is re-run on the resulting integration HEAD (the promotion PR to
+  `next` then runs the same gate again). `M3 = DONE` remains the historical
+  migration state; this slice claims neither `M4` nor a published
   `0.5.3`.
 
 ### Staging
