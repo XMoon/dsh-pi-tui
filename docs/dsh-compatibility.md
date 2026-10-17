@@ -22,9 +22,9 @@ fallback was checked against the peer manifest at its corresponding TUI tag.
 | `0.4.7-alpha.2` (published) | `dsh-v0.1.6-alpha.2` | Released forward-integration line; first line on the alpha.2 Client Session contract and the fallback TUI for a 0.1.6-alpha.2 runtime |
 | `0.4.8` (published stable, previous) | `dsh-v0.1.7-rc.1` | Previous stable line: the 0.1.7 profile-owned Config, declarative preset registry, SessionId-owned jobs, execute/result shell, and official Client projections/ClientJobs |
 | `0.5.1` (published stable, latest) | `dsh-v0.2.0-rc.2` | Current stable line: requires the published 0.2.0-rc.2 exact family — the Question lifecycle consumes the rc.2-only published contracts (`userQuestions.attachWait`/`answer` Remotes and the `userQuestions` Session projection), so the whole DSH peer floor moves to `>=0.2.0-rc.2` |
-| `0.5.3` (next-channel candidate, unpublished) | `dsh-v0.2.1-rc.2` | Current `@next` candidate identity: the published 0.2.1-rc.2 family is both the exact validation target and the whole peer floor (`>=0.2.1-rc.2`). Reserved candidate only — no tag, no npm publication, `pending qualification` |
+| `0.5.3` (next-line candidate, unpublished and untagged) | `dsh-v0.2.1-rc.2` | Candidate identity for the next line: the published 0.2.1-rc.2 family is both the exact validation target and the whole peer floor (`>=0.2.1-rc.2`). Reserved candidate only — no tag, no npm publication, and it is NOT the current `@next` dist-tag (which still serves `0.5.2-rc.1`); `pending qualification` |
 | — (no TUI) | `dsh-v0.2.1-rc.1` | The intermediate rc.1 release has no released TUI in this matrix; it is deliberately recorded without a `tui` value, and `0.5.3` must never be claimed for it |
-| `0.5.2-rc.1` (next-channel reservation, never published) | `dsh-v0.2.0-rc.2` | Historical record: the identity was reserved in `next` while the 0.5.1 baseline was current, then reclassified before publication; its DSH pairing stays the 0.2.0-rc.2 family |
+| `0.5.2-rc.1` (published next-channel preview) | `dsh-v0.2.0-rc.2` | Previous `@next` preview: reserved in `next` and published to the npm `next` dist-tag on 2026-10-17. Its whole peer floor stays `>=0.2.0-rc.2`, so it does not cover the 0.2.1-rc.2 target — which is why the 0.5.3 candidate moves the floor |
 | `0.5.0` (published stable, previous) | `dsh-v0.2.0-rc.1` | Previous stable line: qualifies the published 0.2.0-rc.1 exact family (Koffi pinned 3.1.1) while keeping the `>=0.1.7-rc.2` runtime floor, converges the install allow list to `@deepseek-ai/dsh-subprocess-local,koffi,node-pty`, retires the `fs-ext` consumer build, and passes Source Mode against the 0.2.0-rc.1 release commit |
 | `0.4.9` (published stable, previous) | `dsh-v0.1.7-rc.2` | Previous stable line: retires the rc.1 preset chooser policy, converges Direct model selection with the rc.2 availability/background-save semantics, and proves rc.2 dynamic tool updates through the existing P1 surfaces |
 | No historical fallback | `dsh-v0.1.0-rc.7`, `dsh-v0.1.2-alpha.1`, `dsh-v0.1.3-alpha.1`, `dsh-v0.1.5-alpha.1`, `dsh-v0.1.5-alpha.2` | Upgrade DSH to a supported release |
@@ -57,12 +57,19 @@ candidate moves the whole runtime peer floor to `>=0.2.1-rc.2`: that release is
 both the minimum supported runtime and the exact npm family this checkout
 targets. The intermediate `0.2.1-rc.1` release is deliberately NOT supported
 (the matrix records it without a TUI), and every older runtime below the floor
-must use its paired TUI line from the table above. The recommended install
-command explicitly allows the DSH native install scripts:
+must use its paired TUI line from the table above.
+
+The candidate TUI itself is NOT installable yet, and there is deliberately no
+`dsh plugin -- add` line here: `@latest` is the `0.5.1` stable line and `@next`
+still serves `0.5.2-rc.1`, both with the `>=0.2.0-rc.2` floor, so neither
+installs a TUI compatible with the `0.2.1-rc.2` target (npm/node-semver excludes
+a different-tuple prerelease). Prepare the target DSH family now and validate
+this checkout's candidate through the isolated npm driver; the candidate's own
+install command is published together with its `next-v0.5.3` release. The
+recommended DSH upgrade explicitly allows the DSH native install scripts:
 
 ```sh
 npm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty @deepseek-ai/dsh@0.2.1-rc.2
-dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@latest
 ```
 
 The checkout is npm Mode and targets the published `0.2.1-rc.2` family through
@@ -88,7 +95,7 @@ npm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty 
 ```
 
 A `0.2.0-rc.2` runtime pairs with the published `0.5.1` stable line (and with the
-unpublished `0.5.2-rc.1` reservation, which shares that baseline). A
+published `0.5.2-rc.1` next-channel preview, which shares that baseline). A
 `dsh-v0.2.1-rc.1` runtime has no paired TUI in this matrix. A
 `dsh-v0.2.0-rc.1` or older-family runtime falls back to the published
 `0.5.0` TUI line, which keeps its own `>=0.1.7-rc.2` floor. If the official
@@ -124,7 +131,8 @@ stays the rc.1 pairing.
 The `0.5.3` candidate raises the floor again to `>=0.2.1-rc.2` (one whole
 published family, never a mixed rc.1/rc.2 install). `0.2.1-rc.1` is recorded
 without a TUI on purpose, and the previous 0.2.0-rc.2 pairing stays with the
-published `0.5.1` line and the unpublished `0.5.2-rc.1` reservation.
+published `0.5.1` line and the published `0.5.2-rc.1` next-channel preview
+(neither covers the new floor).
 
 The root README intentionally uses DSH's moving `latest`/`alpha` channels for
 ordinary stable/preview installs; the exact release pairing and compatibility

@@ -383,8 +383,26 @@ test('L5: Host fiber disposal withdraws the descriptor and closes live watchers 
         for await (const _fact of wire.source.open(disposedSession, new AbortController().signal)) liveFrames += 1
       })()
       await waitFor('the live watcher opened', () => liveFrames >= 1, 10_000)
+      const endpoint = `${PI_TUI_TERMINAL_PROGRESS_WATCH.namespace}/${PI_TUI_TERMINAL_PROGRESS_WATCH.method}`
+      const localRegistry = wire.host.ctx.typert.local
+      // Positive control for the withdrawal witness below: while the additive
+      // Host fiber lives, this composition really serves the strict descriptor.
+      assert.notEqual(localRegistry.get(endpoint), undefined,
+        'the live Host fiber serves its strict terminal-progress descriptor')
 
       await wire.hostRuntime.dispose()
+      // The strict descriptor is really WITHDRAWN, not merely unreachable. The
+      // Host Typert registry belongs to the fixture (the disposed runtime only
+      // owned the contribution), so it still reports the endpoint's history:
+      // `get` is gone because the contribution disposer withdrew it, while
+      // `hasSeen` stays true because it existed. A disposer that never ran
+      // leaves `get` defined; a registration that never happened leaves
+      // `hasSeen` false — either way this pair fails, so the Peer-death refusal
+      // below cannot mask a broken descriptor withdrawal.
+      assert.equal(localRegistry.get(endpoint), undefined,
+        'the disposed Host fiber withdrew its strict terminal-progress descriptor')
+      assert.equal(localRegistry.hasSeen(endpoint), true,
+        'that endpoint really was registered and then withdrawn (not never-registered)')
       // Disposal ends the live watcher instead of leaving it hanging. 0.2.1-rc.2
       // ties the owner Peer to the Host Connection fiber, so the iterated
       // stream now TERMINATES WITH the official cancellation failure rather
@@ -421,8 +439,7 @@ test('L5: Host fiber disposal withdraws the descriptor and closes live watchers 
 
       // PROOF 5: no physical socket; the private method travelled the in-process carrier.
       assert.equal(wire.hostRuntime.carrier.ownsHost, true, 'the transport is the in-process carrier')
-      const transportEndpoint = `${PI_TUI_TERMINAL_PROGRESS_WATCH.namespace}/${PI_TUI_TERMINAL_PROGRESS_WATCH.method}`
-      assert.ok(wire.carrierOpenEndpoints.includes(transportEndpoint),
+      assert.ok(wire.carrierOpenEndpoints.includes(endpoint),
         `the private endpoint travelled through carrier.openStream: ${JSON.stringify(wire.carrierOpenEndpoints)}`)
       assert.equal(webSocketConstructions, 0, 'no physical WebSocket client was constructed')
     } finally {

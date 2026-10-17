@@ -23,7 +23,8 @@ dsh --profile pi-tui
 
 中间的 `@deepseek-ai/dsh@0.2.1-rc.1` 没有配对 TUI。旧 runtime 的配对不变：
 `@deepseek-ai/dsh@0.2.0-rc.2` 使用已发布的 `@xmoon76/dsh-pi-tui@0.5.1`
-（`0.5.2-rc.1` 是同一基线上曾预留、从未发布的 next 身份）；
+（`0.5.2-rc.1` 是同一基线上已发布到 npm `next` 通道的上一轮预览，不覆盖
+0.2.1-rc.2）；
 `@deepseek-ai/dsh@0.2.0-rc.1`（含 `0.1.7-rc.2`）使用
 `@xmoon76/dsh-pi-tui@0.5.0`，`@deepseek-ai/dsh@0.1.7-rc.1` 使用
 `@xmoon76/dsh-pi-tui@0.4.8`。
