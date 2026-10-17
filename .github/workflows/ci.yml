@@ -184,7 +184,7 @@ jobs:
         with:
           persist-credentials: false
 
-      # package.json already pins pnpm@11.7.0.
+      # package.json already pins pnpm@12.11.2.
       # pnpm/setup@v2 reads that packageManager field.
       - name: Setup pnpm and Node.js
         uses: pnpm/setup@v2

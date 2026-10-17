@@ -11,6 +11,15 @@ Each worktree owns its own `node_modules`. The worktrees may share the pnpm
 store and the source-pack cache, but a `node_modules` directory must never be
 copied or symlinked between them.
 
+The root `mise.toml` pins Node 24 (as CI does) and turns on mise's
+`idiomatic_version_file_enable_tools` for pnpm, so the pnpm version comes from
+`package.json`'s `packageManager` field alone; run `mise install` once per
+worktree to materialize both tools. That ambient pin is what the doctor and the
+bootstrap compare, because they read pnpm with pnpm's own version switching
+disabled. When bumping `packageManager`, commit the regenerated `pnpm-lock.yaml`
+too: pnpm 12 records the resolved pnpm under `packageManagerDependencies`, and
+`--frozen-lockfile` fails without it.
+
 ## Daily entry point
 
 Run this before coding in either worktree:
