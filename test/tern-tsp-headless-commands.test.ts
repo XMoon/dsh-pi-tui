@@ -271,6 +271,41 @@ test('A05: bare /title regenerates the title from the conversation', async (t) =
   }
 })
 
+test('A05: bare /title and bare /rename report the blank-Session refusal on the TSP Dock', async (t) => {
+  const life = (await import('./support/temp-lifecycle.ts')).testLifecycle(t)
+  // A REAL persisted, released, turn-boundary-BLANK Session resumed through the
+  // official persistence seam: the mandated "no conversation yet" feedback.
+  const fixture = await createDirectTspFixture(life, {
+    persistedBlankSession: { id: 'b2a-blank-title' },
+    startup: { sessionId: 'b2a-blank-title' },
+    deltas: ['UNUSED'],
+    officialServices: { sessionTitle: true },
+  })
+  try {
+    await directSettle(4_000)
+    assert.deepEqual(welcomeSessionIds(fixture), ['b2a-blank-title'],
+      'the runner resumed the persisted blank Session')
+    await submitInput(fixture, '/title')
+    await waitFor('the no-conversation notice', () =>
+      dockNotices(fixture).some(text => text.includes('no conversation yet — title left as-is')), 25_000)
+    // The /rename alias takes the same path and reports it again.
+    const seqBeforeAlias = lastNoticeSeq(fixture)
+    await submitInput(fixture, '/rename')
+    await waitFor('the alias no-conversation notice', () =>
+      lastNoticeSeq(fixture) > seqBeforeAlias
+      && dockNotices(fixture).some(text => text.includes('no conversation yet — title left as-is')), 25_000)
+    assert.equal(fixture.modelCalls(), 0, 'a blank-Session title refresh starts no model turn')
+    const sessions = fixture.ctx.get('sessions') as unknown as { get(id: string): unknown }
+    const titles = fixture.ctx.get('sessionTitle') as unknown as {
+      get(session: unknown): { title: string } | undefined
+    }
+    assert.equal(titles.get(sessions.get('b2a-blank-title')), undefined,
+      'no title was invented for the blank Session')
+  } finally {
+    await fixture.settle()
+  }
+})
+
 // ── A06: /copy ──────────────────────────────────────────────────────────────
 
 test('A06: /copy emits the OSC 52 sequence for the authoritative last assistant text', async (t) => {
@@ -323,8 +358,22 @@ test('A06: /copy without an assistant message fails visibly and copies nothing',
 })
 
 test('A06: /copy reports the shared policy failure when BOTH legs fail', async (t) => {
+  // The shared policy attempts the native/platform helper on macOS and Windows
+  // UNCONDITIONALLY (pbcopy/clip), so this e2e cannot make that leg fail there
+  // without touching the developer's real clipboard: the case is skipped on
+  // those platforms instead of faking a pass.
+  if (process.platform === 'darwin' || process.platform === 'win32') {
+    t.skip('the native clipboard helper is attempted unconditionally on this platform')
+    return
+  }
   const life = (await import('./support/temp-lifecycle.ts')).testLifecycle(t)
   const fixture = await createDirectTspFixture(life, { deltas: ['COPY-BOTH-LEGS-FAIL'] })
+  // The POSIX helper chain is gated on these exact environment facts, so
+  // clearing them (restored below) makes the native leg deterministically
+  // absent — no display, no tmux — while the OSC 52 leg is failed by the tty
+  // fault below.
+  const clipboardEnvKeys = ['TMUX', 'DISPLAY', 'WAYLAND_DISPLAY'] as const
+  const savedClipboardEnv = clipboardEnvKeys.map(key => [key, process.env[key]] as const)
   // The one-to-one tty fault: the terminal-client leg throws on its OWN OSC 52
   // write (the real `emitTerminalClipboard` path catches it), and no tmux/display
   // helper exists here, so the shared policy settles `false`. The chunk that
@@ -336,6 +385,8 @@ test('A06: /copy reports the shared policy failure when BOTH legs fail', async (
   try {
     await directSettle(4_000)
     await seedTurn(fixture, 'produce an uncopyable answer')
+    // Clear the POSIX helper gates only for THIS gesture (restored below).
+    for (const key of clipboardEnvKeys) delete process.env[key]
     stdoutPrototype.write = function (this: unknown, data: unknown): boolean {
       if (typeof data === 'string' && data.includes(']52;c;')) {
         throw new Error('controlled tty write failure')
@@ -352,6 +403,10 @@ test('A06: /copy reports the shared policy failure when BOTH legs fail', async (
   } finally {
     if (hadOwnWrite) stdoutPrototype.write = originalWrite
     else delete stdoutPrototype.write
+    for (const [key, value] of savedClipboardEnv) {
+      if (value === undefined) delete process.env[key]
+      else process.env[key] = value
+    }
     await fixture.settle()
   }
 })
@@ -455,6 +510,43 @@ test('A08: a composition without the credentials service reports the refusal and
     assert.ok(!fixture.pane.output.text().includes('cleared'),
       'the refused logout never reports a credential as cleared')
   } finally {
+    await fixture.settle()
+  }
+})
+
+test('A08: a THROWING credential port surfaces the failure and never reports a clear', async (t) => {
+  const life = (await import('./support/temp-lifecycle.ts')).testLifecycle(t)
+  const fixture = await createDirectTspFixture(life, { deltas: ['A08-THROW'] })
+  const ref = 'DEEPSEEK_API_KEY'
+  const secret = 'sk-b2a-throw-secret'
+  const { symbols } = await import('@deepseek-ai/cordis')
+  const proxied = fixture.ctx.get('credentials') as unknown as Record<symbol, unknown>
+  const service = (proxied[symbols.original] ?? proxied) as unknown as {
+    set(ref: string, value: string): Promise<void>
+    resolve(ref: string): Promise<unknown>
+  }
+  // One-to-one fault on the PRODUCTION service's `unset`: the port forwards the
+  // throw (it has no catch), so the existing command-error path must report it
+  // and never claim a clear.
+  const prototype = Object.getPrototypeOf(service) as Record<string, unknown>
+  const hadOwnUnset = Object.prototype.hasOwnProperty.call(prototype, 'unset')
+  const originalUnset = prototype.unset
+  try {
+    await directSettle(4_000)
+    await submitInput(fixture, '/new')
+    await waitFor('the session owner', () => welcomeSessionIds(fixture).length === 1, 25_000)
+    await service.set(ref, secret)
+    prototype.unset = () => { throw new Error('controlled credential unset failure') }
+    await submitInput(fixture, '/logout deepseek')
+    await waitFor('the throwing-port error notice', () =>
+      fixture.pane.output.text().includes('controlled credential unset failure'), 25_000)
+    assert.ok(!fixture.pane.output.text().includes('cleared'),
+      'a throwing port is never reported as a cleared credential')
+    assert.notEqual(await service.resolve(ref), undefined,
+      'the stored reference survives the failed logout')
+  } finally {
+    if (hadOwnUnset) prototype.unset = originalUnset
+    else delete prototype.unset
     await fixture.settle()
   }
 })
