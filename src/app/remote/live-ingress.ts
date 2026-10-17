@@ -171,11 +171,21 @@ export interface RemoteLiveIngressHydrate {
 }
 
 /**
- * Create the ingress factory. The factory holds no subscription state until
- * `subscribe` runs; each handle owns exactly one eventSource subscription plus
- * the current-fact projection faces, and detaches on an exact BINDING
- * replacement or an explicit dispose — never on a Connection generation
- * rollover, which it adopts (see the module contract above).
+ * Create the ingress factory.
+ *
+ * LIFETIME CONTRACT: the factory installs exactly ONE process-lifetime watch —
+ * a listener on the official Connection generation source, used to remember that
+ * a rollover happened even while no handle exists (a surface rebuild must then
+ * treat its cold attach as verify-first). That watch is NOT owned by a handle
+ * and is never explicitly released: its lifetime is the owning presentation
+ * bundle / Client runtime — the official generation source belongs to the same
+ * Client context and stops delivering when that context is disposed, and the
+ * presentation source (`src/app/remote/presentation-source.ts`) is created once
+ * per aggregate with no separate disposer. Each `subscribe` handle additionally
+ * owns exactly one eventSource subscription plus the current-fact projection
+ * faces, and detaches on an exact BINDING replacement or an explicit `dispose` —
+ * never on a Connection generation rollover, which it adopts (see the module
+ * contract above).
  */
 export function createRemoteLiveIngress(
   sessions: RemoteLiveIngressSessions,
