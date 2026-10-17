@@ -27,12 +27,21 @@ import type { Diag } from '../src/runtime/process/diagnostics.ts'
  * The REAL Remote-branch presentation owner over a controlled window and
  * generation, recording every active-draft clear the presentation issues.
  */
-function harness(): {
+function harness(options: {
+  /** S3-R0: the controllable read→commit proof (undefined = superseded). */
+  readonly refoldProof?: (
+    sessionId: string,
+    revision: number,
+  ) => { readonly generation: unknown; readonly binding: unknown; readonly revision: number } | undefined
+} = {}): {
   setWindow(events: readonly Record<string, unknown>[], hasMore: boolean): void
   coldHydrate(): Promise<void>
-  rehydrate(): Promise<void>
+  /** S3-R0: the committed proof (or undefined when the read was superseded). */
+  rehydrate(): Promise<unknown>
   resetForGeneration(): void
   draftClears(): number
+  /** The live presentation bridge (fold identity is the commit witness). */
+  presentation: ReturnType<typeof createSessionPresentation<SessionPresentationEvent>>
 } {
   let window: PresentationReadSnapshot | undefined
   let generation = 0
@@ -82,6 +91,7 @@ function harness(): {
       isStillCurrent: () => true,
       captureGeneration: () => generation,
       facts: () => ({}),
+      ...(options.refoldProof === undefined ? {} : { windowRefoldProof: options.refoldProof }),
     },
   })
   return {
@@ -104,8 +114,32 @@ function harness(): {
       presentation.resetForGeneration()
     },
     draftClears: () => draftClears,
+    presentation,
   }
 }
+
+test('S3-R0: the read→commit fence refuses a superseded revision (nothing is replaced)', async () => {
+  // The S3-R0 window re-fold is only valid while the official window STILL is
+  // the revision that was read; an async read overtaken by a newer revision (or
+  // a replaced generation/binding) must commit nothing — otherwise it would
+  // overwrite the newer fold and acknowledge a superseded recovery.
+  let state: 'current' | 'superseded' = 'current'
+  const h = harness({
+    refoldProof: () => (state === 'current' ? { generation: 1, binding: {}, revision: 42 } : undefined),
+  })
+  h.setWindow([], false)
+  await h.coldHydrate()
+  const before = h.presentation.mainFolder()
+  state = 'superseded'
+  assert.equal(await h.rehydrate(), undefined, 'a superseded read returns no committed proof')
+  assert.ok(Object.is(h.presentation.mainFolder(), before),
+    'a superseded read must NOT replace the fold (a newer window owns the transcript)')
+  state = 'current'
+  const proof = await h.rehydrate()
+  assert.notEqual(proof, undefined, 'a still-current read commits and returns its proof')
+  assert.ok(!Object.is(h.presentation.mainFolder(), before),
+    'the committed read replaced the fold')
+})
 
 test('PR3-B §7.3 (F1): the generation reset NEVER drops the active draft (the drop moved to the committed switch)', async () => {
   // The round-6 review's F1 correction witness: the generation reset is an

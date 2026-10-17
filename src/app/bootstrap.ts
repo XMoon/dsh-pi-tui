@@ -1224,6 +1224,10 @@ export function applyRunnerWithRuntime(
           captureTransportToken: (sessionId) => remoteSources.sessionFacts.captureTransportToken(sessionId),
           isTransportTokenCurrent: (sessionId, token) =>
             remoteSources.sessionFacts.isTransportTokenCurrent(sessionId, token),
+          // S3-R0: the read→commit revision/identity proof of a window re-fold
+          // (the caller acknowledges the ingress with it).
+          windowRefoldProof: (sessionId, revision) =>
+            remoteSources.sessionFacts.windowRefoldProof(sessionId, revision),
           // The official CURRENT-VALUE facts a bounded window cannot own. A
           // field is included ONLY when its projection answered: an absent
           // field means "unavailable" (the owner falls back to the window
@@ -1272,6 +1276,52 @@ export function applyRunnerWithRuntime(
       remoteProgressHandle = undefined
     }
     lifecycleController.signal.addEventListener('abort', disposeRemoteLiveSurface, { once: true })
+
+    /**
+     * S3-R0: the ONE in-flight window re-fold of the current Remote main owner.
+     * A recovery notification only marks INTENT: this pump serializes the async
+     * re-folds, acknowledges the committed revision through the ingress handle,
+     * and runs again when a newer official revision arrived while it folded (the
+     * ingress re-fires on every revision, so this is never a busy loop). It
+     * NEVER disposes or re-creates the ingress: reconciling a window is not an
+     * owner replacement, and a second publisher must never appear.
+     */
+    let remoteRefoldInFlight = false
+    let remoteRefoldPending = false
+    const pumpRemoteWindowRefold = (): void => {
+      if (remoteRefoldInFlight) return
+      remoteRefoldInFlight = true
+      runDetached('remote window refold', async () => {
+        try {
+          while (remoteRefoldPending) {
+            remoteRefoldPending = false
+            const handle = remoteIngressHandle
+            const sessionId = ownership.currentSessionId()
+            if (cleanedUp || handle === undefined || sessionId === undefined) return
+            // The old window's working-fold proof is VOID: rehydrateFromWindow
+            // re-seeds it from the NEW window's fold.
+            invalidateWorkingFold()
+            const proof = await presentation.rehydrateFromWindow(sessionId)
+            if (cleanedUp || remoteIngressHandle !== handle) return
+            // An uncommitted re-fold (fence-dropped read) leaves the handle
+            // recovering: the next official revision / open transition wakes us.
+            if (proof === undefined) continue
+            if (handle.acknowledgeWindowRefold(proof)) return
+          }
+        } finally {
+          remoteRefoldInFlight = false
+          // A wakeup that landed between the last check and this point must not
+          // be lost (the notification is never a timer: the ingress re-fires it
+          // on the next official revision).
+          if (remoteRefoldPending) pumpRemoteWindowRefold()
+        }
+      }, { diag, sessionId: () => ownership.currentSessionId() })
+    }
+    const requestRemoteWindowRefold = (sessionId: string): void => {
+      if (cleanedUp || ownership.currentSessionId() !== sessionId) return
+      remoteRefoldPending = true
+      pumpRemoteWindowRefold()
+    }
 
     /**
      * Initialize the WHOLE Remote live surface for one session: hydrate
@@ -1344,33 +1394,25 @@ export function applyRunnerWithRuntime(
           status.refresh()
           status.updateWelcomeCard()
         },
-        onWindowReplaced: (id) => {
-          // Reconnect/gap repair: the official new window is authoritative —
-          // re-run the full Remote hydration for the CURRENT session only
-          // (a replaced owner must not repaint through this subscription).
-          // The old window's working-fold proof is VOID: drop the cache now
-          // (initRemoteLiveSurface re-seeds it from the NEW window's fold).
-          if (ownership.currentSessionId() !== id || cleanedUp) return
-          invalidateWorkingFold()
-          runDetached('remote window re-hydration', () => initRemoteLiveSurface(id), {
-            diag,
-            sessionId: () => id,
-          })
-        },
-        onWindowPrepended: (id) => {
-          // F10 (round 4): an official `loadOlder` page joined the window
-          // front — whoever requested it (keyboard extension, /status facts
-          // composition, copy paging). Re-fold the transcript/stats
-          // presentation from the widened window for the CURRENT session
-          // only; `rehydrateFromWindow` owns the generation/transport fences
-          // and re-derives the footer status from the new fold.
-          if (ownership.currentSessionId() !== id || cleanedUp) return
-          runDetached('remote window front re-hydration', () => presentation.rehydrateFromWindow(id), {
-            diag,
-            sessionId: () => id,
-          })
+        onWindowRefoldRequired: (id) => {
+          // S3-R0: the incremental sequence is no longer trustworthy (generation
+          // rollover, revision discontinuity, window replace/prepend, missing
+          // change, hydrate gap). The fold OWNER re-folds the CURRENT official
+          // window — never a destructive surface dispose/re-init (that path
+          // releases the ONE live ingress before its ownership-fenced hydrate can
+          // abort, which is how a reconnect used to leave the transcript on the
+          // dead window). The ingress handle stays the SINGLE publisher.
+          requestRemoteWindowRefold(id)
         },
       }, hydrate.revision)
+      // S3-R0: the Remote ingress now owns event delivery for this committed
+      // owner (it is subscribed and its own hydrate→subscribe gap recovery is
+      // armed), so the opening journal's pre-commit buffering window is OVER.
+      // Without this, events arriving between the hydrate and the transition's
+      // `clearOpening` are recorded and then DISCARDED at clear (the surface is
+      // already live, so nothing merges the cut) — a real lost-event window that
+      // a reconnect's fresh generation can land in.
+      if (remoteIngressHandle !== undefined) surface.openingJournal.close(sessionId)
       // R2 §7.1/§7.2/§7.3: the Remote terminal-progress authority. The Host
       // evidence stream is the ONLY writer of the main interval on this branch
       // (the durable ingress above keeps feeding the transcript and is gated

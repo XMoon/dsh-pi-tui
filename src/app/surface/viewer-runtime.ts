@@ -64,14 +64,22 @@ export interface ViewerChildSnapshot<Event> {
   readonly activity: 'running' | 'inactive'
   readonly cwd: string
   readonly revision: number | undefined
+  /** S3-R0 (Remote only): acknowledge the child ingress that the committed
+   *  fold now holds `revision` for the exact generation/binding the read was
+   *  fenced under. `false` means a newer window is already known and another
+   *  recovery is armed. Absent for Direct/local reads (no ingress). */
+  readonly acknowledge?: () => boolean
 }
 
 /** The live sinks one child view publishes into the mounted viewer. */
 export interface ViewerChildLiveSinks<Event> {
   onDurableEvent(event: Event): void
   onLiveInput(input: AssistantLiveInput): void
-  onWindowReplaced(): void
-  onWindowPrepended(): void
+  /** S3-R0: the child's incremental sequence is no longer trustworthy
+   *  (generation rollover, revision discontinuity, replace/prepend, missing
+   *  change, hydrate gap). The viewer re-folds the child's CURRENT official
+   *  window and acknowledges the committed revision. */
+  onWindowRefoldRequired(): void
   onSessionSnapshotChanged(): void
   onProjectionsChanged(): void
 }
@@ -527,13 +535,9 @@ export function createViewerRuntime<Event extends SessionPresentationEvent>(
           applyAssistantLiveInput(target.folder, target.stats, target.previews, input, deps.summaryKeys)
           deps.surface.repaint()
         },
-        onWindowReplaced: () => {
+        onWindowRefoldRequired: () => {
           if (viewing === undefined || viewing.id !== childId) return
-          runDetachedViewerRehydrate()
-        },
-        onWindowPrepended: () => {
-          if (viewing === undefined || viewing.id !== childId) return
-          runDetachedViewerRehydrate()
+          requestViewerChildRefold()
         },
         onSessionSnapshotChanged: () => {
           const target = viewing
@@ -600,11 +604,37 @@ export function createViewerRuntime<Event extends SessionPresentationEvent>(
     ])
   }
 
+  /** S3-R0: the ONE in-flight child re-fold. A recovery requirement only marks
+   *  INTENT; the pump serializes the async re-folds (so two reads can never
+   *  interleave their commits), runs again when the child ingress reported a
+   *  newer revision while folding, and never disposes/re-creates the ingress. */
+  let viewerChildRefoldInFlight = false
+  let viewerChildRefoldPending = false
+  const pumpViewerChildRefold = (): void => {
+    if (viewerChildRefoldInFlight) return
+    viewerChildRefoldInFlight = true
+    deps.runDetached('viewer child refold', async () => {
+      try {
+        while (viewerChildRefoldPending) {
+          viewerChildRefoldPending = false
+          await rehydrateViewedChild()
+        }
+      } finally {
+        viewerChildRefoldInFlight = false
+        if (viewerChildRefoldPending) pumpViewerChildRefold()
+      }
+    })
+  }
+  const requestViewerChildRefold = (): void => {
+    viewerChildRefoldPending = true
+    pumpViewerChildRefold()
+  }
+
   /** Re-fold the viewed child from the current authoritative window. The
    * runner's detached ownership wrapper owns failure reporting; every commit
    * re-checks the exact viewer identity. */
   const runDetachedViewerRehydrate = (): void => {
-    deps.runDetached('viewer child re-hydration', () => rehydrateViewedChild())
+    requestViewerChildRefold()
   }
 
   const rehydrateViewedChild = async (): Promise<void> => {
@@ -631,6 +661,12 @@ export function createViewerRuntime<Event extends SessionPresentationEvent>(
     target.activity = snapshot.activity
     deps.refreshStatus()
     deps.surface.repaint()
+    // S3-R0: only NOW may the child ingress resume incremental delivery — the
+    // fold is visible and still fenced by the exact viewer identity above. A
+    // `false` answer means a newer revision is already known; the ingress has
+    // re-armed its recovery requirement, so the pump's next round re-reads it
+    // (never a busy loop: every wakeup is a real official revision).
+    snapshot.acknowledge?.()
   }
 
   /** Page one official older window into the viewed child, then re-fold. */

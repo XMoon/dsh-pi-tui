@@ -39,7 +39,10 @@ import { TranscriptFolder } from '../../domain/transcript/folder.ts'
 import { TranscriptWindowController } from '../../domain/transcript/window.ts'
 import type { Diag } from '../../runtime/process/diagnostics.ts'
 import type { AssistantLiveInput } from '../../runtime/assistant-stream-port.ts'
-import type { PresentationReadSnapshot } from '../../runtime/presentation-read-port.ts'
+import type {
+  PresentationReadSnapshot,
+  PresentationWindowRefoldProof,
+} from '../../runtime/presentation-read-port.ts'
 import type { TodoItem } from '../../tui-app.ts'
 import type { SurfaceDisplaySeam } from './display-seam.ts'
 import type { RoutedSessionEvent, SurfaceMainPresentation, SurfaceRuntime } from './runtime.ts'
@@ -207,6 +210,14 @@ export interface SessionPresentationDeps<Event extends SessionPresentationEvent>
      *  invalidates the pending visible commit — plan §6.5). */
     readonly isTransportTokenCurrent?: (sessionId: string, token: unknown) => boolean
     /**
+     * S3-R0 read→commit fence + acknowledge proof. Answers the official
+     * identity (Connection generation + exact retained binding) plus the given
+     * revision ONLY while that binding's eventSource still reports the SAME
+     * revision; `undefined` means a newer window (or a replaced identity) made
+     * this read superseded, so the fold must NOT be replaced with it.
+     */
+    readonly windowRefoldProof?: (sessionId: string, revision: number) => PresentationWindowRefoldProof | undefined
+    /**
      * The VISIBLE-COMMIT fence token (plan §6.5/§7.5): the caller captures
      * the ownership GENERATION before starting the hydration; after the
      * reader await, the commit may run only while the CURRENT owner reads
@@ -260,7 +271,10 @@ export interface SessionPresentation<Event extends SessionPresentationEvent> {
    * take a front-joined page incrementally, so the bounded window re-folds
    * (the honest model for a bounded window; the fold stays cheap).
    */
-  rehydrateFromWindow(sessionId: string): Promise<void>
+  /** S3-R0: re-fold the transcript/stats from the CURRENT official window and
+   *  return the committed identity/revision proof the caller acknowledges the
+   *  ingress with (undefined = the read was superseded; nothing was committed). */
+  rehydrateFromWindow(sessionId: string): Promise<PresentationWindowRefoldProof | undefined>
   /** The synchronous surface reset that follows a generation bump (A2 seam). */
   resetForGeneration(): void
 }
@@ -671,17 +685,27 @@ export function createSessionPresentation<Event extends SessionPresentationEvent
     applyCurrentFacts(deps.remote.facts(sessionId), deps.status, deps.surface.display)
   }
 
-  const rehydrateFromWindow = async (sessionId: string): Promise<void> => {
-    if (deps.isCleanedUp()) return
-    if (deps.remote === undefined) return
+  const rehydrateFromWindow = async (
+    sessionId: string,
+  ): Promise<PresentationWindowRefoldProof | undefined> => {
+    if (deps.isCleanedUp()) return undefined
+    if (deps.remote === undefined) return undefined
     const fenceGeneration = deps.remote.captureGeneration?.()
     const fenceTransport = deps.remote.captureTransportToken?.(sessionId)
     const snapshot = await deps.remote.read(sessionId)
-    if (deps.isCleanedUp() || snapshot === undefined) return
+    if (deps.isCleanedUp() || snapshot === undefined) return undefined
     // §6.5 visible-commit fence (same double rule as the cold hydrate).
-    if (deps.remote.isStillCurrent?.(sessionId, fenceGeneration ?? 0) === false) return
+    if (deps.remote.isStillCurrent?.(sessionId, fenceGeneration ?? 0) === false) return undefined
     if (fenceTransport !== undefined
-      && deps.remote.isTransportTokenCurrent?.(sessionId, fenceTransport) === false) return
+      && deps.remote.isTransportTokenCurrent?.(sessionId, fenceTransport) === false) return undefined
+    // S3-R0 read→commit fence: the async read above may have been overtaken by
+    // a newer official revision (or a replaced generation/binding). Replacing
+    // the fold with the older window would both lose the newer events and
+    // acknowledge a superseded recovery, so the commit is valid ONLY while the
+    // official window still IS the revision that was read. The same step builds
+    // the identity proof the fold owner returns to the ingress.
+    const proof = deps.remote.windowRefoldProof?.(sessionId, snapshot.revision)
+    if (proof === undefined) return undefined
     const hydrated = hydrateSessionUi(snapshot.durableEvents as readonly Event[])
     folder = hydrated.folder
     windowController.setTurns(folder.groupedTurns())
@@ -697,6 +721,9 @@ export function createSessionPresentation<Event extends SessionPresentationEvent
     // performance values are the Host projection's and are unaffected.)
     deps.refreshStatusCheap()
     deps.surface.repaint()
+    // The committed proof: the caller acknowledges the ingress with it, so
+    // incremental delivery resumes exactly at the revision the fold now holds.
+    return proof
   }
 
   const mainFolder = (): TranscriptFolder => folder

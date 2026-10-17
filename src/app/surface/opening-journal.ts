@@ -25,6 +25,16 @@ export interface OpeningCut<Event> {
 export interface OpeningJournal<Event> {
   /** Begin an opening for `sessionId` and return its opaque identity token. */
   begin(sessionId: string): object
+  /**
+   * Stop RECORDING for `sessionId` once its live surface owns event delivery
+   * (the Remote ingress is installed for the committed owner, so the pre-commit
+   * buffering window is over). The recorded cut stays readable for a hydration
+   * that already took it, and the entry is still cleared by its own token — but
+   * `isOpening` answers false and later events route normally instead of being
+   * buffered and then discarded at `clear`. A journal for another target is
+   * untouched.
+   */
+  close(sessionId: string): void
   /** The opaque identity token of the journal currently being opened, if any. */
   current(): object | undefined
   /** Clear only the EXACT journal identity (a newer transition's journal wins). */
@@ -41,21 +51,24 @@ export interface OpeningJournal<Event> {
 
 /** Create the process-local opening journal. */
 export function createOpeningJournal<Event>(): OpeningJournal<Event> {
-  let journal: { readonly token: object; readonly id: string; events: Event[] } | undefined
+  let journal: { readonly token: object; readonly id: string; events: Event[]; open: boolean } | undefined
   return {
     begin(sessionId) {
       const token: object = {}
-      journal = { token, id: sessionId, events: [] }
+      journal = { token, id: sessionId, events: [], open: true }
       return token
+    },
+    close(sessionId) {
+      if (journal !== undefined && journal.id === sessionId) journal.open = false
     },
     current: () => journal?.token,
     clear(token) {
       if (journal?.token === token) journal = undefined
     },
     reset() { journal = undefined },
-    isOpening: (sessionId) => journal !== undefined && journal.id === sessionId,
+    isOpening: (sessionId) => journal !== undefined && journal.id === sessionId && journal.open,
     record(sessionId, event) {
-      if (journal !== undefined && journal.id === sessionId) journal.events.push(event)
+      if (journal !== undefined && journal.id === sessionId && journal.open) journal.events.push(event)
     },
     cut: (sessionId) => (journal?.id === sessionId ? { id: journal.id, events: journal.events } : undefined),
   }
