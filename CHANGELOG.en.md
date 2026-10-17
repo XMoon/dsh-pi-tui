@@ -24,8 +24,9 @@ dsh --profile pi-tui
 
 The intermediate `@deepseek-ai/dsh@0.2.1-rc.1` has no paired TUI. The older-runtime
 pairings are unchanged: `@deepseek-ai/dsh@0.2.0-rc.2` uses the published
-`@xmoon76/dsh-pi-tui@0.5.1` (`0.5.2-rc.1` was a next identity reserved on that
-same baseline and never published); `@deepseek-ai/dsh@0.2.0-rc.1` (including
+`@xmoon76/dsh-pi-tui@0.5.1` (`0.5.2-rc.1` is the previous preview published to the
+npm `next` channel on that same baseline, and it does not cover 0.2.1-rc.2);
+`@deepseek-ai/dsh@0.2.0-rc.1` (including
 `0.1.7-rc.2`) uses `@xmoon76/dsh-pi-tui@0.5.0`, and `@deepseek-ai/dsh@0.1.7-rc.1`
 uses `@xmoon76/dsh-pi-tui@0.4.8`.
 

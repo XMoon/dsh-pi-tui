@@ -241,10 +241,10 @@ reinterpret:
   Production inherits the `dsh-base` row; the Host runtime asserts it, and every
   independent Host fixture must mount the official owner rather than fake it.
 
-- **Open Remote lifecycle gaps handed to S3 (recorded, not closed).** Two
-  behaviours are reachable only with the 0.2.1-rc.2 composition and are owned by
-  the M3 Remote parity stage; this foundation PR neither papers over them nor
-  widens its scope to fix them:
+- **Open Remote lifecycle gaps handed to S3 (recorded, not closed).** These
+  behaviours are reachable with the 0.2.1-rc.2 composition and are owned by the
+  M3 Remote parity stage; this foundation PR neither papers over them nor widens
+  its scope to fix them:
   1. **Admission is not the durable append.** The official `session/prompt`
      Remote answers when the Host Agent ACCEPTED the message
      (`agent.followup`/`steer`); the HOST then owns the durable append and the
@@ -270,6 +270,21 @@ reinterpret:
      be applied before live ingress, or whether a late ingress fact re-triggers
      hydration, is Remote currentness work for S3 (C11/C12/C18) with its own
      L5/L6 positive + stale-generation negative tests.
+  3. **Post-reconnect catalog re-read (unverified / needs-evidence).**
+     `test/runner-remote-command-plane.test.ts` "L6 §7.4-14 stale catalog"
+     holds a verified stale catalog snapshot, replaces the official Connection
+     (`connection.reconnect()`) and disposes the old claim, then requires the
+     NEW generation to re-read the Host catalog on its own and route a mounted
+     command to the real Host handler exactly once. It times out at that step
+     under full-suite concurrency (3 of 4 `pnpm test:product` runs) while the
+     file passes alone; no trace exists yet, so the cause is NOT established.
+     Production path: `src/app/command/surface.ts` subscribes
+     `connectionGeneration` and fires `refreshLiveCatalogById(sessionId,
+     'invalidation')`, returning early when the token is already equal (or
+     resolved as `undefined`) — the leading hypothesis, not a finding. S3
+     closure must keep the real-handler and stale-claim assertions, capture a
+     trace through the file/suite, and must not widen the 15 s budget or turn
+     the wait into polling/retry.
 
 Evidence: the `PEER` block in `test/remote-client-runtime.test.ts` (owner identity
 observed inside the real Gateway on the stream path, the same object on the Fetch

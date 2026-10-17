@@ -73,7 +73,7 @@ test('harnessCompatEntryFor selects the range whose inclusive min the version re
   // TUI) and the previous 0.2.0-rc.2 family is below the current floor.
   assert.equal(harnessCompatEntryFor('0.2.1-rc.1')?.fallbackTui, undefined)
   assert.equal(harnessCompatEntryFor('0.2.0-rc.2')?.fallbackTui, '0.5.2-rc.1',
-    'the previous family notices its recorded (reserved) TUI pairing')
+    'the previous family notices its published next-channel TUI pairing')
 })
 
 test('harnessCompatEntryFor compares prerelease identifiers the semver way', () => {
@@ -422,8 +422,8 @@ test('harnessCompatEntryFor follows the official DSH tag matrix below the publis
     ['0.1.6-alpha.2', '0.4.7-alpha.2'],
     ['0.1.7-rc.2', '0.5.0'],
     ['0.2.0-rc.1', '0.5.0'],
-    // Below the 0.2.1-rc.2 candidate floor. The 0.2.0-rc.2 row keeps the
-    // reserved-but-never-published 0.5.2-rc.1 pairing; 0.2.1-rc.1 has no TUI.
+    // Below the 0.2.1-rc.2 candidate floor. The 0.2.0-rc.2 row keeps its
+    // published `next`-channel 0.5.2-rc.1 pairing; 0.2.1-rc.1 has no TUI.
     ['0.2.0-rc.2', '0.5.2-rc.1'],
     ['0.2.0', '0.5.2-rc.1'],
     ['0.2.1-rc.1', undefined],
