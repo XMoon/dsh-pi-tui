@@ -93,12 +93,6 @@ import { RemoteSessionWriter } from '../src/runtime/remote/session-writer-remote
 import { RemotePromptSerializerProduction } from '../src/runtime/remote/prompt-serializer-remote.ts'
 import { SESSION_WRITER_HELD_GUIDANCE } from '../src/runtime/remote/write-failure.ts'
 
-const PACKAGE_IDS = {
-  connection: '@deepseek-ai/dsh-client-connection',
-  gateway: '@deepseek-ai/dsh-api-gateway',
-  session: '@deepseek-ai/dsh-api-session-controller',
-}
-
 const PROVIDER = 'smoke'
 const MODEL = 'smoke'
 const ALT_MODEL = 'smoke-alt'

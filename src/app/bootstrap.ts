@@ -2718,6 +2718,32 @@ export function applyRunnerWithRuntime(
     // terminal-local cwd is published alongside it (OSC 7; no-op off Tern).
     status.refreshTerminalTitle()
     status.refreshTerminalCwd()
+    /** Persist one completed turn. Direct keeps its durability hint; the
+     *  Remote branch is a DELIBERATE no-op (plan §7.9: no public Client
+     *  flush verb exists — the Host owns durability; never a hidden Host
+     *  `sessions.flush` fallback).
+     *
+     *  Declared BEFORE `attachEventRouting` because the registered handlers
+     *  can run during the SAME startup: the Remote event firehose delivers
+     *  events while the first hydration is still open, and `turn/end` calls
+     *  this through the routing source. It must therefore already be
+     *  initialized — a `const` arrow here used to raise a temporal-dead-zone
+     *  error inside the firehose subscriber instead of the documented no-op. */
+    const flushTurn = (): void => {
+      if (remoteSources !== undefined) return
+      const agent = agentNow()
+      if (agent === undefined) return
+      const flushed = agent.session
+      runDetached('turn flush', () => sessions.flush(flushed), {
+        diag,
+        sessionId: () => flushed.id,
+        notify: (message) => surface.display.notify(
+          `session persistence failed: ${message} — the session log was removed externally; this session can no longer be persisted (restart to recover)`,
+          'error',
+        ),
+        recoverable: (error) => (error as NodeJS.ErrnoException | undefined)?.code === 'ENOENT',
+      })
+    }
     surface.attachEventRouting({
       isCleanedUp: () => cleanedUp,
       isAttachedSession: (session) => {
@@ -3144,25 +3170,6 @@ export function applyRunnerWithRuntime(
     // attached EARLIER, before `surface.attachTasks` and the startup
     // `surface.refreshPendingInput()` calls, because the A4-4/A4-8 surface
     // methods read the source during startup.
-    /** Persist one completed turn. Direct keeps its durability hint; the
-     *  Remote branch is a DELIBERATE no-op (plan §7.9: no public Client
-     *  flush verb exists — the Host owns durability; never a hidden Host
-     *  `sessions.flush` fallback). */
-    const flushTurn = (): void => {
-      if (remoteSources !== undefined) return
-      const agent = agentNow()
-      if (agent === undefined) return
-      const flushed = agent.session
-      runDetached('turn flush', () => sessions.flush(flushed), {
-        diag,
-        sessionId: () => flushed.id,
-        notify: (message) => surface.display.notify(
-          `session persistence failed: ${message} — the session log was removed externally; this session can no longer be persisted (restart to recover)`,
-          'error',
-        ),
-        recoverable: (error) => (error as NodeJS.ErrnoException | undefined)?.code === 'ENOENT',
-      })
-    }
     // The six application-level Host subscriptions (TS2 §10): installation is
     // owned by `app/bootstrap/event-wiring.ts`; each handler stays a thin
     // delegation into the surface-owned routing methods. The Direct-only

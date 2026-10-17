@@ -1140,6 +1140,10 @@ test('PEER. the carrier speaks for the Host Connection owner Peer on Fetch and S
     restoreFetchObservation()
     wireStream.open = originalOpen
   }
+  // Registered BEFORE the composition: a throwing composition must not leave
+  // the prototype patch behind for the next test in this process (the cleanup
+  // for the composed runtime is registered only once it exists).
+  t.after(() => { restoreObservation() })
 
   const composed = await (await loadRuntimeModule()).createExperimentalRemoteRuntime({
     hostContext: host.ctx,
@@ -1148,7 +1152,6 @@ test('PEER. the carrier speaks for the Host Connection owner Peer on Fetch and S
   const client = composed.client
   const connection = host.ctx.connection
   t.after(async () => {
-    restoreObservation()
     await composed.dispose()
     await host.dispose()
   })

@@ -27,12 +27,6 @@ import subagentsRemote from '@deepseek-ai/dsh-subagent/remote'
 import { RemoteMock, ok, openStream } from '@deepseek-ai/dsh-remote-mock'
 import { RemoteSessionReader } from '../src/runtime/remote/session-reader-remote.ts'
 
-const PACKAGE_IDS = {
-  connection: '@deepseek-ai/dsh-client-connection',
-  gateway: '@deepseek-ai/dsh-api-gateway',
-  session: '@deepseek-ai/dsh-api-session-controller',
-}
-
 const WRITE_ENDPOINTS = new Set([
   'session/create',
   'session/prompt',
