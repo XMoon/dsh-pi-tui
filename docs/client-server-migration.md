@@ -6295,10 +6295,13 @@ LAST synchronous delta, so a latest-change delivery is not a fold.
   swallowed error.
 - Provenance: the subscription carries the caller's hydrate identity, and a
   rollover that keeps the previous window (the upstream journal stream retains it
-  until the opening page arrives) cannot be acknowledged at that revision; the
-  republish moves the revision and re-arms the reconcile. A temporarily
-  unavailable transport yields a PENDING handle completed by the official
-  generation channel, never a silently absent ingress.
+  until the opening page arrives) is refused BEFORE the fold owner writes — the
+  owner consults the ingress eligibility, so a stale window can never replace a
+  fold and the acknowledgement cannot be the first gate. The republish moves the
+  revision and re-arms the reconcile. A temporarily unavailable transport yields
+  a PENDING handle completed by the official generation channel, never a
+  silently absent ingress; a hydrate dropped while the transport is gone arms
+  ONE official-generation-driven re-init of the whole live surface.
 - Delivery ownership: installing the Remote live ingress for the committed owner
   closes the opening journal for that session (`OpeningJournal.close`). The
   journal buffers pre-commit events for the cold hydrate; keeping it open after
