@@ -46,7 +46,6 @@ export type {
   TranscriptWorkflowMessage,
   WorkflowChildSessionId,
   WorkflowMemberView,
-  WorkflowOwner,
   WorkflowRunId,
   WorkflowRunStatus,
 } from './domain/transcript/workflow-projection.ts'

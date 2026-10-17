@@ -463,6 +463,88 @@ test('running member click emits open-member; terminal member rows have no hit',
   assert.deepEqual(actions, [], `terminal member must never emit open-member`)
 })
 
+test('W8: a folded mid-run member opens through the live catalog gate; settlement closes it', async () => {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    { type: 'turn/start', seq: 0, time: 1_700_000_000_000, data: { turn: 0 } } as SessionEvent,
+    { type: 'step/start', seq: 1, time: 1_700_000_000_001, data: { turn: 0, step: 0 } } as SessionEvent,
+    { type: 'tool-workflow/run-start', seq: 2, time: 1_700_000_000_002, data: { runId: 'run-1', name: 'audit' } } as SessionEvent,
+    { type: 'step/end', seq: 3, time: 1_700_000_000_003, data: { turn: 0, step: 0 } } as SessionEvent,
+    { type: 'turn/end', seq: 4, time: 1_700_000_000_004, data: { turn: 0, reason: { kind: 'aborted', reason: { kind: 'user' } } } } as SessionEvent,
+    // The members register AFTER the owning step/turn closed (background run).
+    { type: 'tool-workflow/agent-start', seq: 5, time: 1_700_000_000_005, data: { runId: 'run-1', seq: 0, label: 'live', childId: 'child-1' } } as SessionEvent,
+    { type: 'tool-workflow/agent-start', seq: 6, time: 1_700_000_000_006, data: { runId: 'run-1', seq: 1, label: 'other', childId: 'child-2' } } as SessionEvent,
+  ])
+  const run = folder.messages().find(message => message.kind === 'workflow')
+  assert.ok(run !== undefined && run.kind === 'workflow')
+  assert.equal(run.status, 'running')
+  const memberRow = run.members[0]
+  assert.ok(memberRow !== undefined)
+  assert.equal(memberRow.status, 'running', 'the member comes from the real fold, not an injected status')
+  // The SAME folded member resolves against the live one-shot catalog row.
+  const root = 'session-main'
+  const catalogRow: TaskBrowserRow = {
+    kind: 'subagent', value: 'agent:child-1', childId: 'child-1', label: 'live',
+    mode: 'one-shot', activity: 'running', hasChildren: false, parentId: '', depth: 1,
+  }
+  assert.ok(workflowMemberViewerTarget(memberRow, catalogRow, root) !== undefined,
+    'a running member with a live one-shot driver must resolve')
+  assert.equal(workflowMemberViewerTarget(memberRow, { ...catalogRow, parentId: 'session-other' }, root), undefined,
+    'a wrong parent must be rejected')
+  assert.equal(workflowMemberViewerTarget(memberRow, { ...catalogRow, activity: 'inactive' }, root), undefined,
+    'a stopped driver must be rejected')
+  const actions: WorkflowAction[] = []
+  const { vt, app } = startApp({ onWorkflowAction: action => actions.push(action) })
+  app.setFullscreen(true)
+  app.setTranscript(folder.messages())
+  let view = await viewport(vt)
+  await clickCell(vt, 10, rowOf(view, 'live — running'))
+  await vt.waitForRender()
+  assert.deepEqual(actions, [{ kind: 'open-member', runId: 'run-1', seq: 0, childId: 'child-1' }],
+    'the folded running member emits the real open-member action')
+  // The real agent-end settles the member: the SAME card no longer opens.
+  // The sibling member is still running, so the phase stays inline and the
+  // now-terminal row is actually clickable.
+  folder.apply([
+    { type: 'tool-workflow/agent-end', seq: 7, time: 1_700_000_000_007, data: { runId: 'run-1', seq: 0, outcome: 'completed' } } as SessionEvent,
+  ])
+  app.setTranscript(folder.messages())
+  actions.length = 0
+  view = await viewport(vt)
+  await clickCell(vt, 10, rowOf(view, 'live — completed'))
+  await vt.waitForRender()
+  assert.deepEqual(actions, [], 'a settled member must not open')
+})
+
+test('W9: a folded mid-run workflow renders running counts and keeps the scoped View route', async () => {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    { type: 'turn/start', seq: 0, time: 1_700_000_000_000, data: { turn: 0 } } as SessionEvent,
+    { type: 'step/start', seq: 1, time: 1_700_000_000_001, data: { turn: 0, step: 0 } } as SessionEvent,
+    { type: 'tool-workflow/run-start', seq: 2, time: 1_700_000_000_002, data: { runId: 'run-1', name: 'audit' } } as SessionEvent,
+    ...Array.from({ length: 6 }, (_, seq) => ({
+      type: 'tool-workflow/agent-start', seq: 3 + seq, time: 1_700_000_000_003 + seq,
+      data: { runId: 'run-1', seq, label: `member-${seq}`, childId: `child-${seq}` },
+    } as SessionEvent)),
+    { type: 'step/end', seq: 9, time: 1_700_000_000_009, data: { turn: 0, step: 0 } } as SessionEvent,
+    { type: 'turn/end', seq: 10, time: 1_700_000_000_010, data: { turn: 0, reason: { kind: 'aborted', reason: { kind: 'user' } } } } as SessionEvent,
+  ])
+  const actions: WorkflowAction[] = []
+  const { vt, app } = startApp({ onWorkflowAction: action => actions.push(action) })
+  app.setFullscreen(true)
+  app.setTranscript(folder.messages())
+  const view = await viewport(vt)
+  assert.ok(view.includes('Workflow audit [running]'), `the run pill must be running:\n${view}`)
+  assert.ok(view.includes('6 agents · 6 running'), `the real fold must report six running members:\n${view}`)
+  assert.ok(view.includes('View 6 agents'), `the scoped phase entry must stay reachable:\n${view}`)
+  await clickCell(vt, 10, rowOf(view, 'View 6 agents'))
+  await vt.waitForRender()
+  assert.deepEqual(actions, [{
+    kind: 'open-phase-agents', runId: 'run-1', name: 'audit', phaseLabel: 'Unassigned',
+    childIds: ['child-0', 'child-1', 'child-2', 'child-3', 'child-4', 'child-5'],
+  }], 'the scoped View route must use the folded child identities')
+})
+
 test('View N agents clicks emit the scoped phase/run actions', async () => {
   const actions: WorkflowAction[] = []
   const { vt, app } = startApp({ onWorkflowAction: action => actions.push(action) })
@@ -695,7 +777,7 @@ test('a phase folds and unfolds across ANY number of running→clean cycles (rev
   assert.ok(view.includes('▼ Unassigned'), `the third cycle must open the phase again:\n${view}`)
 })
 
-test('an explicit user open survives the interrupted edge and late terminal facts (review P2)', async () => {
+test('an explicit user open survives an abnormal terminal edge (review P2)', async () => {
   const folder = new TranscriptFolder()
   folder.apply([
     { type: 'turn/start', seq: 0, time: 1_700_000_000_000, data: { turn: 0 } } as SessionEvent,
@@ -720,35 +802,22 @@ test('an explicit user open survives the interrupted edge and late terminal fact
   view = await viewport(vt)
   assert.equal(runChevron(view), '▼', `the run must be explicitly open:\n${view}`)
   assert.ok(view.includes('▼ Unassigned 1 agent'), `the phase must be explicitly open:\n${view}`)
-  // The owner closes without terminal facts: run + member project
-  // interrupted (PR1). The first abnormal edge must NOT clear the user's
-  // explicit opens.
+  // The run settles abnormally through its OWN terminal events (a failed
+  // member + run-end error). The first abnormal edge must NOT clear the
+  // user's explicit opens.
   folder.apply([
-    { type: 'turn/end', seq: 3, time: 1_700_000_000_003, data: { turn: 0, reason: { kind: 'completed' } } } as SessionEvent,
+    { type: 'tool-workflow/agent-end', seq: 3, time: 1_700_000_000_003, data: { runId: 'run-1', seq: 0, outcome: 'failed' } } as SessionEvent,
+    { type: 'tool-workflow/run-end', seq: 4, time: 1_700_000_000_004, data: { runId: 'run-1', stopReason: 'error' } } as SessionEvent,
   ])
   app.setTranscript(folder.messages())
   view = await viewport(vt)
-  assert.equal(runChevron(view), '▼', `the interrupted edge must keep the explicit run open:\n${view}`)
-  assert.ok(view.includes('▼ Unassigned 1 agent'), `the interrupted edge must keep the explicit phase open:\n${view}`)
-  // Late durable terminal facts recover completed (PR1 late-terminal
-  // contract). The final facts are ALL clean, so the completion edge
-  // auto-closes both the run and the phase (Web: new clean facts =>
-  // close) — the explicit opens were consumed by the clean transition.
-  folder.apply([
-    { type: 'tool-workflow/agent-end', seq: 4, time: 1_700_000_000_004, data: { runId: 'run-1', seq: 0, outcome: 'completed' } } as SessionEvent,
-    { type: 'tool-workflow/run-end', seq: 5, time: 1_700_000_000_005, data: { runId: 'run-1', stopReason: 'completed' } } as SessionEvent,
-  ])
-  app.setTranscript(folder.messages())
+  assert.equal(runChevron(view), '▼', `the abnormal edge must keep the explicit run open:\n${view}`)
+  assert.ok(view.includes('▼ Unassigned 1 agent'), `the abnormal edge must keep the explicit phase open:\n${view}`)
+  // A later explicit user close still persists.
+  const failedRunRow = rowOf(view, 'Workflow audit [failed]')
+  await clickCell(vt, 10, failedRunRow)
   view = await viewport(vt)
-  assert.equal(runChevron(view), '▶', `all-clean late completion must auto-close the run:\n${view}`)
-  // Reopen the run: the phase's clean transition already consumed the
-  // explicit open, so the phase is folded too (Web: new clean facts =>
-  // close).
-  const closedRunRow = rowOf(view, 'Workflow audit [completed]')
-  await clickCell(vt, 10, closedRunRow)
-  view = await viewport(vt)
-  assert.equal(runChevron(view), '▼', `the run must reopen on click:\n${view}`)
-  assert.ok(view.includes('▶ Unassigned 1 agent'), `all-clean late completion must auto-close the phase:\n${view}`)
+  assert.equal(runChevron(view), '▶', `the user close after the abnormal edge must persist:\n${view}`)
 })
 
 test('a new running cycle reopens a user-closed run and phase (review P2, plan §7.7)', async () => {

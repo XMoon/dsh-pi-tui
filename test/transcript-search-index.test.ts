@@ -699,6 +699,33 @@ test('workflow search text follows the live run status (plan §8.12)', () => {
   assert.equal(folder.search('running').length, 0, 'the settled run must not keep the start-time status in the corpus')
 })
 
+test('workflow search keeps an open run indexed as running across step/turn close (W6)', () => {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    turnStart(0, 0),
+    rawEvent('step/start', { turn: 0, step: 0 }, 1),
+    rawEvent('tool-workflow/run-start', { runId: 'run1', name: 'audit' }, 2),
+    rawEvent('tool-workflow/agent-start', { runId: 'run1', seq: 0, label: 'checker', childId: 'session-x' }, 3),
+    rawEvent('step/end', { turn: 0, step: 0 }, 4),
+    rawEvent('turn/end', { turn: 0, reason: { kind: 'completed' } }, 5),
+  ])
+  // The open record is indexed under its real status; Step/Turn closure must
+  // never inject a fabricated `interrupted` corpus entry.
+  const running = folder.search('running')
+  assert.ok(running.some(match => transcriptSearchSourceKey(match.source) === 'workflow-run.status'),
+    'the open run status must be indexed')
+  assert.equal(folder.search('interrupted').length, 0, 'no fabricated interrupted status enters the corpus')
+  folder.apply([
+    rawEvent('tool-workflow/agent-end', { runId: 'run1', seq: 0, outcome: 'completed' }, 6),
+    rawEvent('tool-workflow/run-end', { runId: 'run1', stopReason: 'completed' }, 7),
+  ])
+  assert.equal(folder.search('running').length, 0, 'the settled run must drop its old status')
+  const completed = folder.search('completed')
+  const statusHit = completed.find(match => transcriptSearchSourceKey(match.source) === 'workflow-run.status')
+  assert.ok(statusHit !== undefined, 'the settled status must be indexed')
+  assert.equal(folder.resolveSearchMatch(statusHit)?.kind, 'workflow', 'the hit must open the Workflow card')
+})
+
 test('workflow search indexes phase labels and member labels/statuses (PR2 plan §13)', () => {
   const folder = new TranscriptFolder()
   folder.apply([
