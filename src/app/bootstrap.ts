@@ -1226,8 +1226,14 @@ export function applyRunnerWithRuntime(
             remoteSources.sessionFacts.isTransportTokenCurrent(sessionId, token),
           // S3-R0: the read→commit revision/identity proof of a window re-fold
           // (the caller acknowledges the ingress with it).
-          windowRefoldProof: (sessionId, revision) =>
-            remoteSources.sessionFacts.windowRefoldProof(sessionId, revision),
+          windowRefoldProof: (sessionId, revision) => {
+            // S3-R0 provenance PRE-commit fence: a window read at the revision the
+            // DEAD generation published is not eligible to replace the fold at
+            // all (acknowledging afterwards would already have overwritten it).
+            const handle = remoteIngressHandle
+            if (handle !== undefined && !handle.refoldEligible(revision)) return undefined
+            return remoteSources.sessionFacts.windowRefoldProof(sessionId, revision)
+          },
           // The official CURRENT-VALUE facts a bounded window cannot own. A
           // field is included ONLY when its projection answered: an absent
           // field means "unavailable" (the owner falls back to the window
@@ -1269,11 +1275,38 @@ export function applyRunnerWithRuntime(
     /** R2 §7.1: the ONE Remote Host terminal-progress watch of the CURRENT main
      *  session owner. Its controller is the watch's cancellation lifetime. */
     let remoteProgressHandle: { dispose(): void } | undefined
+    /** S3-R0: the ONE pending re-init of a Remote live surface whose hydrate
+     *  could not commit because the transport was unavailable. Driven by the
+     *  OFFICIAL Connection generation channel — never a timer or a poll. */
+    let remoteInitRetryHandle: { dispose(): void } | undefined
+    const disposeRemoteInitRetry = (): void => {
+      remoteInitRetryHandle?.dispose()
+      remoteInitRetryHandle = undefined
+    }
     const disposeRemoteLiveSurface = (): void => {
+      disposeRemoteInitRetry()
       remoteIngressHandle?.dispose()
       remoteIngressHandle = undefined
       remoteProgressHandle?.dispose()
       remoteProgressHandle = undefined
+    }
+    /** Arm the official-signal retry for one session whose surface init could
+     *  not hydrate (the owner is still current; only the transport is gone). */
+    const armRemoteInitRetry = (sessionId: string): void => {
+      if (remoteSources === undefined || remoteInitRetryHandle !== undefined) return
+      remoteInitRetryHandle = {
+        dispose: remoteSources.commandSource.subscribeConnectionGeneration(() => {
+          if (cleanedUp) { disposeRemoteInitRetry(); return }
+          if (remoteSources === undefined) return
+          if (remoteSources.commandSource.connectionGeneration() === undefined) return
+          disposeRemoteInitRetry()
+          if (ownership.currentSessionId() !== sessionId) return
+          runDetached('remote live surface retry', () => initRemoteLiveSurface(sessionId), {
+            diag,
+            sessionId: () => sessionId,
+          })
+        }),
+      }
     }
     lifecycleController.signal.addEventListener('abort', disposeRemoteLiveSurface, { once: true })
 
@@ -1342,10 +1375,18 @@ export function applyRunnerWithRuntime(
       const hydrate = await presentation.initLiveRemoteSession(sessionId)
       if (cleanedUp) return
       if (ownership.currentSessionId() !== sessionId || ownership.generation() !== initGeneration) return
-      // An uncommitted hydrate (fence-dropped inside the presentation owner)
-      // means this init lost the race — its revision is undefined and its
-      // subscription would resurrect the stale window: abort here.
-      if (hydrate === undefined) return
+      // An uncommitted hydrate means either a superseded owner (fenced above)
+      // or an unavailable transport. The latter must NOT complete as a healthy
+      // init: without a transcript and without an ingress, only an unrelated
+      // owner commit could ever recover it. Arm the OFFICIAL generation-driven
+      // retry instead (plan §2.2/§2.5: an explicit not-ready state completed by
+      // a real signal, never a poll).
+      if (hydrate === undefined) {
+        if (remoteSources.commandSource.connectionGeneration() === undefined) {
+          armRemoteInitRetry(sessionId)
+        }
+        return
+      }
       // Seed the compaction working-fold cache from the PROVEN cold-hydrate
       // fold (no first-use gap: the first settle reads the authoritative
       // complete-window answer, never the bare running bit).

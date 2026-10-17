@@ -238,12 +238,21 @@ export function createRemoteChildViewSource<Event>(
               const bindingNow = ownedBinding()
               if (bindingNow === undefined || bindingNow !== current || !isOpen(bindingNow)) return false
               if (bindingNow.eventSource?.getSnapshot().revision !== next.revision) return false
+              // Provenance BEFORE the write: while the retained window still
+              // belongs to the generation that rolled over, the fold must not be
+              // replaced at all (the ingress's acknowledgement gate alone would
+              // run too late).
+              if (live !== undefined && !live.refoldEligible(next.revision)) return false
               write()
-              return live?.acknowledgeWindowRefold({
+              // No live ingress (the viewer has not subscribed yet, e.g. a
+              // re-fold requested before the subscription): the write itself is
+              // the commit and there is nothing to acknowledge.
+              if (live === undefined) return true
+              return live.acknowledgeWindowRefold({
                 generation: fenceGeneration,
                 binding: current,
                 revision: next.revision,
-              }) ?? false
+              })
             },
           }
         },

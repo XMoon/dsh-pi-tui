@@ -121,6 +121,14 @@ export interface RemoteLiveIngressHandle {
    * the owner again (never a busy loop).
    */
   acknowledgeWindowRefold(proof: PresentationWindowRefoldProof): boolean
+  /**
+   * Whether a window read at `revision` may be COMMITTED by the fold owner. It
+   * is `false` while the window still belongs to the generation that rolled
+   * over (the upstream journal stream retains the previous window until the new
+   * generation's opening page arrives), so the owner must check it BEFORE it
+   * replaces its fold — acknowledging afterwards would be too late.
+   */
+  refoldEligible(revision: number): boolean
 }
 
 /** The lazily-created ingress subscription factory the bootstrap consumes. */
@@ -291,7 +299,7 @@ export function createRemoteLiveIngress(
         const window = current.binding.eventSource.getSnapshot()
         if (window.revision !== proof.revision) return false
         if (current.binding.session.getSnapshot().openState !== 'open') return false
-        if (rolloverBaselineRevision !== undefined && proof.revision === rolloverBaselineRevision) {
+        if (!refoldEligible(proof.revision)) {
           // The window is still the one the DEAD generation published: the new
           // generation has not republished yet, so this fold cannot be the
           // authoritative baseline. Stay recovering; the opening page will move
@@ -504,9 +512,12 @@ export function createRemoteLiveIngress(
         requireRefold()
       }
 
+      const refoldEligible = (revision: number): boolean =>
+        !(rolloverBaselineRevision !== undefined && revision === rolloverBaselineRevision)
+
       const unsubscribeGeneration = generation.subscribe(onGeneration)
       tryAttach()
-      return { dispose, acknowledgeWindowRefold }
+      return { dispose, acknowledgeWindowRefold, refoldEligible }
     },
   }
 }
