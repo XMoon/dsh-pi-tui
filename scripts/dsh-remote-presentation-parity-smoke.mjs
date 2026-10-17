@@ -22,6 +22,9 @@ import { createUserMessage, MessageId } from '@deepseek-ai/dsh-llm'
 import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import { agentPresetProjectionDefinition } from '@deepseek-ai/dsh-agent-preset-registry'
 import LocalFileSystem from '@deepseek-ai/dsh-fs-local'
+import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
+import { RemoteAccessService } from '@deepseek-ai/dsh-api-remote-access'
+import WorkingDirectory from '@deepseek-ai/dsh-working-directory'
 import { titleProjectionDefinition } from '@deepseek-ai/dsh-session-title'
 import { SqliteSessionQueryEngine } from '@deepseek-ai/dsh-session-query-sqlite'
 import TypertRegistry from '@deepseek-ai/dsh-typert-registry'
@@ -62,8 +65,24 @@ function installModuleLoader() {
     },
   }
   globalThis.location = { hostname: 'localhost', origin: 'http://dsh-presentation-parity.local', search: '' }
+  /**
+   * Import one official Client bundle from whichever channel its published
+   * `./client` entry selects. DSH 0.2.1-rc.1+ splits that entry into a
+   * standalone Node ESM half (`node`, which never registers through
+   * `__ModuleLoader__`) and a browser loader factory (`browser`/`default`).
+   * A browser registration always wins; the Node namespace only fills a gap,
+   * into the SAME table the registering factories resolve `/client`
+   * dependencies from.
+   */
+  const importClient = async (specifier) => {
+    const id = specifier.slice(0, -'/client'.length)
+    const imported = await import(specifier)
+    if (!modules.has(id)) modules.set(id, imported)
+    return modules.get(id)
+  }
   return {
     modules,
+    importClient,
     restore() {
       if (previousWindow === undefined) delete globalThis.window
       else globalThis.window = previousWindow
@@ -168,6 +187,9 @@ function appendTurn(session, turn, text, context = false) {
 async function createHost() {
   const ctx = new Context()
   await ctx.plugin(TypertRegistry)
+  // rc.2: the Gateway and the SessionController both inject the official
+  // access decider, so the Host mounts it before either is injected.
+  await ctx.plugin(RemoteAccessService)
   await ctx.plugin(SessionStore)
   await ctx.plugin(AgentRegistry)
   await ctx.plugin(SessionProjectionRegistry)
@@ -177,7 +199,9 @@ async function createHost() {
   await ctx.inject(SqliteSessionQueryEngine.inject, queryCtx => {
     new SqliteSessionQueryEngine(queryCtx, { path: ':memory:', openAt: 'first-search' })
   })
+  await ctx.plugin(SystemPrompt)
   await ctx.plugin(LocalFileSystem)
+  await ctx.plugin(WorkingDirectory)
   await ctx.inject(SessionController.inject, controllerCtx => {
     new SessionController(controllerCtx, { nativeOpen: false })
   })
@@ -212,19 +236,23 @@ function hostTransport(host) {
   /** The client stream carrier contract passes an optional uplink; the Host
    * wire face always takes one, so an absent uplink is an empty one. */
   async function* emptyUplink() {}
-  const shared = host.ctx.get('connection').createSharedFetchHandler('/api')
+  const connection = host.ctx.get('connection')
+  const shared = connection.createSharedFetchHandler('/api')
+  // The official Gateway speaks for the Host Connection's own owner Peer on
+  // both carrier paths (DSH 0.2.1-rc.2 requires an explicit Peer).
+  const peer = connection.browserPeer
   return {
     ownsHost: true,
     fetch(input, init) {
       const request = input instanceof Request
         ? new Request(input, init)
         : new Request(new URL(String(input), 'http://dsh-presentation-parity.local'), init)
-      return shared.fetch(request)
+      return shared.fetch(request, peer)
     },
     openStream(endpoint, payload, signal, uplink) {
       return (async function* () {
         // Wire face: (endpoint, payload, uplink, peer, signal).
-        yield* await host.ctx.get('typertGateway').wireStream.open(endpoint, payload, uplink ?? emptyUplink(), undefined, signal)
+        yield* await host.ctx.get('typertGateway').wireStream.open(endpoint, payload, uplink ?? emptyUplink(), peer, signal)
       })()
     },
   }
@@ -244,12 +272,9 @@ async function main() {
   let host
   let shadow
   try {
-    await import('@deepseek-ai/dsh-client-connection/client')
-    await import('@deepseek-ai/dsh-api-gateway/client')
-    await import('@deepseek-ai/dsh-api-session-controller/client')
-    const connectionClient = loader.modules.get(PACKAGE_IDS.connection)
-    const gatewayClient = loader.modules.get(PACKAGE_IDS.gateway)
-    const sessionClient = loader.modules.get(PACKAGE_IDS.session)
+    const connectionClient = await loader.importClient('@deepseek-ai/dsh-client-connection/client')
+    const gatewayClient = await loader.importClient('@deepseek-ai/dsh-api-gateway/client')
+    const sessionClient = await loader.importClient('@deepseek-ai/dsh-api-session-controller/client')
     assert.ok(connectionClient !== undefined, 'official Connection Client did not load')
     assert.ok(gatewayClient !== undefined, 'official API Gateway Client did not load')
     assert.ok(sessionClient !== undefined, 'official Session Controller Client did not load')
