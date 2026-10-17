@@ -28,6 +28,33 @@ test('opening journal: clear is exact-token guarded, so a newer journal survives
   assert.equal(journal.current(), undefined)
 })
 
+test('opening journal: close() stops recording once the live surface owns delivery (S3-R0)', () => {
+  // A session whose live ingress is installed no longer buffers pre-commit
+  // events: they route normally to the committed owner. Recording them and
+  // discarding them at clear was a real lost-event window (a reconnect's fresh
+  // generation could land in it), so `close` is the explicit end of the window.
+  const journal = createOpeningJournal<Event>()
+  const token = journal.begin('s1')
+  journal.record('s1', { kind: 'before' })
+  journal.close('s1')
+  assert.equal(journal.isOpening('s1'), false, 'a closed opening no longer fences delivery')
+  journal.record('s1', { kind: 'after' })
+  // The cut a hydration already took stays readable — only new records stop.
+  assert.deepEqual(journal.cut('s1'), { id: 's1', events: [{ kind: 'before' }] })
+  assert.equal(journal.current(), token, 'the entry is still owned by its exact token')
+  journal.clear(token)
+  assert.equal(journal.current(), undefined)
+})
+
+test('opening journal: close() for another session leaves the current opening intact', () => {
+  const journal = createOpeningJournal<Event>()
+  journal.begin('s1')
+  journal.close('s2')
+  assert.equal(journal.isOpening('s1'), true)
+  journal.record('s1', { kind: 'kept' })
+  assert.deepEqual(journal.cut('s1'), { id: 's1', events: [{ kind: 'kept' }] })
+})
+
 test('opening journal: events for a non-opening session are ignored', () => {
   const journal = createOpeningJournal<Event>()
   journal.begin('s1')

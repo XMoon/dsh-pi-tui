@@ -260,38 +260,34 @@ reinterpret:
      await the Host's durable commit is deliberately NOT decided and NOT
      asserted here: S3 owns that ruling and must prove it with paired L5/L6
      success/failure tests — not a timeout, poll or fabricated flush.
-  2. **Reconnect transcript currentness — CONFIRMED production-reachable
-     race (BLOCKER, owner: S3 / C11–C12–C18).** After
-     `connection.reconnect()`, the new generation's authoritative window can
-     arrive as `append` changes on the SAME retained binding instead of a
-     window `replace`. Everything up to the transcript fold is then correct —
-     the new generation is established, the official Client window holds the
-     new turn, the Host log holds it, and `live-ingress` processes the new
-     revisions — but only a `replace` drives the authoritative re-fold
-     (`onWindowReplaced` → `initRemoteLiveSurface` → `rehydrateFromWindow`),
-     while routed `append`s update surface facts only. The painted transcript
-     therefore stays on the DEAD generation's window (the footer/projection
-     advance, the assistant row never appears) until
-     `test/runner-remote-presentation.test.ts`'s navigation case times out.
-     Reproduced only under concurrent/full-suite runs; the same case passes
-     when the reconnect publishes a `replace` and the re-hydrate runs.
-     Two repairs were measured and REJECTED, so the ladder is deliberately
-     unchanged here: (a) driving `onWindowReplaced` from the ingress on a
-     generation rollover made every concurrent run fail, because
-     `initRemoteLiveSurface` disposes the live ingress handle BEFORE its
-     ownership-fenced hydrate can abort — a dispose-before-rearm hazard that
-     can leave the surface with no live ingress at all; (b) driving only the
-     light window re-fold on the rollover changed nothing measurable. S3 owns
-     the design — binding lifetime, re-fold authority and the commit order of
-     the async re-init (rearm-then-dispose is a candidate to verify, NOT a
-     pre-decided answer; two ingress authorities must never publish into the
-     same surface) — and the qualification: the navigation positive path plus
-     generation/binding interleavings during reconnect, old-handle release,
-     new-handle establishment failure, and the symmetric child-viewer path
-     (`src/app/remote/child-view.ts` consumes the same primitive). The strong
-     assertions stay (new generation, authoritative baseline, the new row in
-     the viewport); no skipping, sleeping, timeout widening or weakened
-     assertion is acceptable.
+  2. **Reconnect transcript currentness — RESOLVED_BY_S3_R0.** The Remote
+     ingress no longer treats the latest `change` as a fold input: delivery is a
+     SEQUENCE contract over the official identity (Connection generation +
+     exact retained binding + eventSource revision). Any generation rollover,
+     same-generation revision discontinuity, window `replace`/`prepend`, missing
+     change or hydrate gap puts the ONE ingress handle into `recovering`, which
+     suppresses partial increments and asks the fold OWNER to reconcile the
+     CURRENT official window; delivery resumes only after the owner acknowledges
+     the exact committed `{generation, binding, revision}` (the window must
+     still BE that revision and the Session must be open). The main fold owner
+     is `src/app/surface/session-presentation.ts` (`rehydrateFromWindow`, now
+     revision-fenced before it replaces the fold), the child owner is
+     `src/app/surface/viewer-runtime.ts` (`rehydrateViewedChild`); the bootstrap
+     runs ONE single-flight re-fold per surface and never disposes or
+     re-creates the ingress for a window reconcile (the previous
+     `onWindowReplaced → initRemoteLiveSurface` path released the only live
+     ingress before its ownership-fenced hydrate could abort — the
+     dispose-before-rearm hazard that left the transcript on the dead window).
+     A same-id BINDING replacement still retires the handle, and the owner's
+     existing commit/acquire path installs the next one. Installing that
+     ingress also CLOSES the opening journal for the session
+     (`OpeningJournal.close`): the journal's pre-commit buffering exists for the
+     hydrate gap, and keeping it open past the live subscription recorded events
+     that `clearOpening` then DISCARDED — a real lost-event window a reconnect's
+     fresh generation could land in. Direct keeps the journal semantics it has;
+     only the Remote live-surface install ends the window early. Direct behaviour, the
+     Remote graph and the durable-flush/teardown contract are unchanged; the M3
+     `session/prompt` admission-vs-durable item below stays open.
   3. **Post-reconnect catalog re-read — test readiness, not a defect.**
      `test/runner-remote-command-plane.test.ts` "L6 §7.4-14 stale catalog"
      holds a verified stale catalog snapshot, replaces the official Connection

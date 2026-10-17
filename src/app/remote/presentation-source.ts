@@ -29,7 +29,10 @@
  * @module @xmoon76/dsh-pi-tui/app/remote/presentation-source
  */
 
-import type { PresentationReader } from '../../runtime/presentation-read-port.ts'
+import type {
+  PresentationReader,
+  PresentationWindowRefoldProof,
+} from '../../runtime/presentation-read-port.ts'
 import type { SessionReader } from '../../runtime/session-reader-port.ts'
 import type { SubmissionPresentationSource } from '../submission/presentation.ts'
 import { RemoteSubmissionPresentation } from './submission-presentation.ts'
@@ -92,6 +95,15 @@ export interface RemoteSessionFacts {
   captureTransportToken(sessionId: string): unknown
   /** Whether the captured transport token still matches the live identity. */
   isTransportTokenCurrent(sessionId: string, token: unknown): boolean
+  /**
+   * S3-R0 read→commit proof for one window re-fold. Returns the official
+   * identity (Connection generation + exact retained binding) together with the
+   * requested revision ONLY while that binding's eventSource STILL reports the
+   * same revision — so the fold owner can neither overwrite a newer window with
+   * an older async read nor acknowledge a superseded recovery. `undefined`
+   * means "not current: re-read and try again".
+   */
+  windowRefoldProof(sessionId: string, revision: number): PresentationWindowRefoldProof | undefined
   /** The official whole-log `sessionStats` projection value (PR4 §3.3). */
   sessionStatsProjection(sessionId: string): unknown
 }
@@ -196,6 +208,15 @@ export function createRemotePresentationSource(
         if (!Object.is(captured.generation, generation.getSnapshot())) return false
         return sessions.binding(sessionId as never) === captured.binding
       },
+      windowRefoldProof(sessionId: string, revision: number): PresentationWindowRefoldProof | undefined {
+        const current = generation.getSnapshot()
+        if (current === undefined) return undefined
+        const binding = sessions.binding(sessionId as never)
+        if (binding === undefined) return undefined
+        const window = (binding as { readonly eventSource?: { getSnapshot(): { readonly revision: number } } }).eventSource
+        if (window?.getSnapshot().revision !== revision) return undefined
+        return { generation: current, binding, revision }
+      },
     },
     // M3-5 PR2 Step 1/2: the ONE semantic Task read (descendant catalog + root
     // Job roster) plus the official Client model's roster/activity reads and
@@ -227,6 +248,10 @@ export function createRemotePresentationSource(
       sessions,
       reader: backendRuntime.semantics.presentationReader,
       liveIngress,
+      // S3-R0: the child re-fold fences its async read against the official
+      // Connection generation (a transport rollover invalidates a pending child
+      // read exactly like it invalidates the main one).
+      generation,
       childCwd: sessionId => {
         const cwd = sessionReader.sessionStatus(sessionId)?.cwd
         return typeof cwd === 'string' ? cwd : ''

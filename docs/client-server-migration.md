@@ -6254,6 +6254,83 @@ proves the real Host → Client → rendered-status chain, including the default
 Direct remains the production default, no Host/Client ownership or wire semantic changed, and
 the Host/Client coupling inventory is unchanged (the boundary baseline stays at its 31 files).
 
+## S3-R0 status (IMPLEMENTED; qualification in progress) — Remote reconnect transcript currentness
+
+Repairs the blocker the S1/PR-A qualification recorded: after
+`connection.reconnect()` the new generation's authoritative window could arrive
+as an `append` change on the SAME retained binding, and the ingress delivered
+only that latest delta — the footer/projections advanced while the transcript
+stayed painted on the dead generation until the navigation L6 timed out. The
+upstream contract (dsh-v0.2.1-rc.2 `api/session-controller/src/client/contract/events.ts`)
+defines the window as the current complete contiguous window and `change` as the
+LAST synchronous delta, so a latest-change delivery is not a fold.
+
+### Contract / invariants
+
+- Delivery is a SEQUENCE contract over the official identity: Connection
+  generation + exact retained binding + `eventSource` revision. Contiguous
+  same-generation appends and `settle-assistant` stay incremental; every
+  generation rollover, revision discontinuity, `replace`, `prepend`, missing
+  change or hydrate gap enters `recovering`.
+- While recovering the ingress delivers NO partial increment (not to the
+  transcript, not to the transient plane) and asks the fold OWNER to reconcile
+  the CURRENT official window. Main owner:
+  `src/app/surface/session-presentation.ts` (`rehydrateFromWindow`, revision
+  fenced before it replaces the fold, returning the committed proof). Child
+  owner: `src/app/surface/viewer-runtime.ts` (`rehydrateViewedChild`, fenced by
+  the exact viewer identity plus the child generation/window revision).
+- Delivery resumes only through `acknowledgeWindowRefold({ generation, binding,
+  revision })`: the handle must still be alive, bound to the EXACT binding, the
+  generation must be the same object, the official revision must still equal the
+  committed revision and the Session must be open. A superseded read commits
+  nothing and cannot acknowledge.
+- ONE ingress publisher per surface and ONE transcript authority per owner: a
+  window reconcile never disposes or re-creates the ingress, never runs the cold
+  `initRemoteLiveSurface`, and never adds a second subscription or a shadow
+  transcript. A same-id BINDING replacement still retires the handle, and the
+  existing owner commit/acquire path installs the next one.
+- Failure/release: a failed or superseded re-fold leaves the handle recovering
+  until the next REAL official signal (new revision, or the Session's
+  loading→open transition) — no timer, no poll, no widened timeout, and no
+  swallowed error.
+- Delivery ownership: installing the Remote live ingress for the committed owner
+  closes the opening journal for that session (`OpeningJournal.close`). The
+  journal buffers pre-commit events for the cold hydrate; keeping it open after
+  the live subscription recorded events that `clearOpening` then discarded —
+  the second half of the reconnect blocker (a fresh generation's durable events
+  vanished between the hydrate and the transition's clear). Direct keeps its
+  journal semantics; only the Remote live-surface install ends the window
+  early, and the ingress's own hydrate→subscribe gap recovery covers what the
+  journal used to.
+
+### Qualification
+
+- Deterministic L3 (`test/remote-live-ingress.test.ts`): the generation-rollover
+  and revision-discontinuity cases were RED before the change (partial increment
+  delivered, no reconcile requested) and are green after it, together with the
+  negative controls (contiguous appends stay incremental, duplicate revisions
+  never replay, tuple baseline/settle behaviour, binding replacement detaches,
+  acknowledge identity/revision/open validation, disposed handle is inert).
+- L5/L6 over the real wire: `test/runner-remote-presentation.test.ts` keeps its
+  original strong assertions (new generation, the authoritative offline turn in
+  the real viewport, retired-subject absence) and is green under the concurrent
+  condition that reproduced the defect — see the PR description for the exact
+  lane/round evidence; the child viewer's reconnect case (§14.5) and the
+  single-publisher/release probes stay green.
+- S1 full requalification is still required: S1 + S3-R0 are qualified on
+  `integration/dsh-0.2.1-rc.2`, and the promotion PR to `next` must run the
+  complete product gate on the integration HEAD. `M3 = DONE` remains the
+  historical migration state; this slice claims neither `M4` nor a published
+  `0.5.3`.
+
+### Staging
+
+The upgrade is staged on `integration/dsh-0.2.1-rc.2`: S1/PR-A merged there
+first, S3-R0 targets that branch as its base, and only a fully green integration
+HEAD is proposed for `next`. The temporary staging branch never replaces
+`next` as the release line: `next` advances by a normal promotion merge after
+the integration qualification.
+
 ## Open gap (NOT CLOSED) — terminal status on the Remote branch
 
 **Facts.** The terminal-status presentation (the OSC 7501 semantic state and the
