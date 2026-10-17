@@ -114,10 +114,12 @@ description (this file records the durable version pins and the result tiers).
 | A19 — `/copy` after the emission keeps the Tern channel healthy; the OS clipboard receives the text | PASS | Agent-run real-Tern lane: the OSC 52 bytes reached the Tern tty, a later input still reached the clipboard policy, and the close flow settled. Owner-run (supplied evidence, not re-run by the agent): the OSC 52 copy in a real terminal reached the system clipboard. The agent cannot automate an OS-clipboard read in this environment, so that half is Owner-attested — see the qualification section |
 | A20 — PiTui defaults are unchanged | PASS | `login-credentials`, `session-state`, `command-catalog`, `busy-enter` and the TSP suites rerun on this tree; `notifyTitleRefusal` reaches the same PiTui notice the base already emitted, and `notifyTitleSuccess`/`notifyOutcome` are no-ops wherever a `TuiApp` is mounted |
 
-## `/copy` qualification gap (STOP_COPY_QUALIFICATION)
+## `/copy` qualification: OSC52 emission + Owner-verified clipboard (STOP cleared)
 
 The plan requires a real-Tern clipboard qualifier as the merge gate for
-`/copy`. What was measured:
+`/copy`. Two observations satisfy it — one automated (the agent), one supplied
+by the Owner — and the only remaining limit is that the AGENT cannot automate
+an OS-clipboard read in this environment. What was measured:
 
 - **OSC52_EMITTED (REAL_TERN_HEADLESS, Tern 0.9.2).** The production Direct/TSP
   subject launched inside a real headless Tern pane has `process.stdout.isTTY
@@ -136,9 +138,10 @@ The plan requires a real-Tern clipboard qualifier as the merge gate for
   clipboard helper on this machine the helper chain cannot accept anything. The
   tmux-buffer readback that the flow performs when `TMUX` is present was
   therefore measured as not reached.
-- **OS clipboard: NOT_VERIFIED.** Nothing in this environment can observe the
-  target clipboard changing, so the result may not be reported as
-  `CLIPBOARD_CHANGED`.
+- **Automated OS clipboard: NOT_VERIFIED (evidence limit, not an open STOP).**
+  Nothing in this environment can observe the target clipboard changing, so the
+  AGENT's lane may not report `CLIPBOARD_CHANGED`; that is why the real-terminal
+  observation below is the qualifier.
 - **Owner-reported OS clipboard success (supplied evidence).** The Owner ran
   the OSC 52 copy in a real terminal and confirmed the text reached the system
   clipboard. Combined with the agent-run channel-integrity lane this clears the
@@ -229,13 +232,24 @@ reviewed mapping:
   Client-route ERROR notice and the `/copy`/`/yolo` confirmed-success lines.
   Both are now fenced by the SAME captured Session scope the settlement uses
   (`deps.scope.isCurrent` / `runner.isSessionScopeCurrent`), with no settlement
-  re-classification, no global notice owner and no new barrier. Witnessed by (a)
-  a controller-level scenario where the owner is replaced while a Client command
-  executes — the stale error is silent, while the same-session control receives
-  it exactly once, and (b) a real Direct/TSP interleave: a `/resume` transition
-  held inside the official resume gate plus a `/copy` whose native clipboard
-  helper blocks on a marker, released only after the replacement became current
-  — the late success is not announced on the new owner.
+  re-classification, no global notice owner and no new barrier. Witnessed by two
+  complementary tests:
+  - **policy level** (`tern-tsp-controller-stale.test.ts`): the REAL
+    `createSubmissionController` over the REAL ownership core, with a
+    Remote-shaped projection agent; the Client command execution is held open
+    while the owner is replaced — the stale error stays silent, and the
+    same-session control receives it exactly once. The `scope.isCurrent` flag is
+    driven by the test, so this is a controller-policy witness, NOT a full Remote
+    scope-authority L6 claim.
+  - **real interleave** (`tern-tsp-headless-commands.test.ts`): a `/resume`
+    transition held inside the official resume gate plus a `/copy` whose native
+    clipboard helper captures A's text, writes an `entered` marker and blocks;
+    the test waits for that marker (so the race really exists), releases the
+    switch, waits for the replacement to become current, then releases the helper
+    and waits for its `exited` marker (the copy really completed). The late
+    success is not announced on the new owner, and a same-session `/copy` on the
+    replacement still announces its success exactly once. A mutation check
+    (guard removed) fails this test on exactly that assertion.
 - **F1 (external review, closed) — card-less command errors were invisible.**
   On the Remote Client command registry no result card exists, so a returned
   `CommandResult.error` reached neither the Dock nor a card. The submission
