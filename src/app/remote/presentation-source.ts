@@ -134,8 +134,12 @@ function detachedPlan(value: unknown): { readonly active: boolean; readonly pend
  * owns: `semantics.presentationReader` by identity, the wire's
  * `sessions`/`connection.generation` for the official projection/echo reads,
  * and the eventSource borrow for the live ingress. Constructing this bundle
- * installs no subscription and owns no disposal — the ingress subscription
- * is created lazily by the bootstrap and disposed through its own handle.
+ * installs exactly ONE watch — the ingress factory's process-lifetime
+ * Connection-generation listener, whose lifetime is this bundle and the Client
+ * context the generation source belongs to (there is no separate disposer for
+ * it; see `live-ingress.ts`) — and no other subscription. The per-session
+ * ingress subscription is created lazily by the bootstrap and disposed through
+ * its own handle.
  */
 export function createRemotePresentationSource(
   wire: ExperimentalRemoteRuntime,
