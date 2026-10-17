@@ -1093,7 +1093,7 @@ test('workflow rows stay out of the collapsed Focus and visible when expanded (p
       source: { kind: 'user' },
     }, 1001, 1),
     eventAt('tool-workflow/run-start', { runId: 'r1', name: 'audit' }, 1002, 2),
-    eventAt('tool-workflow/agent-start', { runId: 'r1', seq: 0, label: 'checker', childId: 'session-x' }, 1003, 3),
+    eventAt('tool-workflow/agent-start', { runId: 'r1', seq: 1, label: 'checker', childId: 'session-x' }, 1003, 3),
   ])
   const collapsed = projectFocusFlat(folder.messages(), folder.turnActivities(), new Set(), true)
   assert.equal(

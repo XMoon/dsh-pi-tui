@@ -346,7 +346,7 @@ test('automatic Workflow completion releases a running Focus presentation floor'
     eventAt('turn/start', { turn: 1 }, 30),
     eventAt('tool-workflow/run-start', { runId: 'run-1', name: 'audit' }, 31),
     eventAt('tool-workflow/agent-start', {
-      runId: 'run-1', seq: 0, label: 'worker', childId: 'child-1',
+      runId: 'run-1', seq: 1, label: 'worker', childId: 'child-1',
     }, 32),
   ])
   try {
@@ -359,7 +359,7 @@ test('automatic Workflow completion releases a running Focus presentation floor'
     const running = height(app)
 
     folder.apply([eventAt('tool-workflow/agent-end', {
-      runId: 'run-1', seq: 0, outcome: 'completed',
+      runId: 'run-1', seq: 1, outcome: 'completed',
     }, 33)])
     show(app, folder)
     await vt.waitForRender()

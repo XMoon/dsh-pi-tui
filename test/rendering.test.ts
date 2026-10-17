@@ -4061,7 +4061,7 @@ test('workflow live member/status updates invalidate the cached card (plan §8.1
   assert.ok(!view.includes('checker'), `no member before agent-start:\n${view}`)
   // agent-start: the members array reference changes → the card rebuilds.
   folder.apply([
-    { type: 'tool-workflow/agent-start', seq: 2, time: 1_700_000_000_002, data: { runId: 'run-1', seq: 0, label: 'checker', childId: 'session-x' } } as SessionEvent,
+    { type: 'tool-workflow/agent-start', seq: 2, time: 1_700_000_000_002, data: { runId: 'run-1', seq: 1, label: 'checker', childId: 'session-x' } } as SessionEvent,
   ])
   app.setTranscript(folder.messages())
   const secondComponent = cache.get(first)?.component
@@ -4071,7 +4071,7 @@ test('workflow live member/status updates invalidate the cached card (plan §8.1
   // agent-end: the member status changes → rebuild. The phase is now fully
   // completed, so the PR2 completion auto-close folds it (plan §7.6).
   folder.apply([
-    { type: 'tool-workflow/agent-end', seq: 3, time: 1_700_000_000_003, data: { runId: 'run-1', seq: 0, outcome: 'completed' } } as SessionEvent,
+    { type: 'tool-workflow/agent-end', seq: 3, time: 1_700_000_000_003, data: { runId: 'run-1', seq: 1, outcome: 'completed' } } as SessionEvent,
   ])
   app.setTranscript(folder.messages())
   const thirdComponent = cache.get(first)?.component

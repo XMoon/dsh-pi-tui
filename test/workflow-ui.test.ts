@@ -259,7 +259,7 @@ test('first abnormal edge auto-opens once; a later user close persists', async (
   folder.apply([
     { type: 'turn/start', seq: 0, time: 1_700_000_000_000, data: { turn: 0 } } as SessionEvent,
     { type: 'tool-workflow/run-start', seq: 1, time: 1_700_000_000_001, data: { runId: 'run-1', name: 'audit' } } as SessionEvent,
-    { type: 'tool-workflow/agent-start', seq: 2, time: 1_700_000_000_002, data: { runId: 'run-1', seq: 0, label: 'a', childId: 'session-x' } } as SessionEvent,
+    { type: 'tool-workflow/agent-start', seq: 2, time: 1_700_000_000_002, data: { runId: 'run-1', seq: 1, label: 'a', childId: 'session-x' } } as SessionEvent,
   ])
   const { vt, app } = startApp()
   app.setFullscreen(true)
@@ -269,7 +269,7 @@ test('first abnormal edge auto-opens once; a later user close persists', async (
   // The first abnormal edge (a member fails) keeps the run open — the
   // exception stays visible.
   folder.apply([
-    { type: 'tool-workflow/agent-end', seq: 3, time: 1_700_000_000_003, data: { runId: 'run-1', seq: 0, outcome: 'failed' } } as SessionEvent,
+    { type: 'tool-workflow/agent-end', seq: 3, time: 1_700_000_000_003, data: { runId: 'run-1', seq: 1, outcome: 'failed' } } as SessionEvent,
   ])
   app.setTranscript(folder.messages())
   view = await viewport(vt)
@@ -280,8 +280,8 @@ test('first abnormal edge auto-opens once; a later user close persists', async (
   view = await viewport(vt)
   assert.equal(runChevron(view), '▶', `user close must fold the run:\n${view}`)
   folder.apply([
-    { type: 'tool-workflow/agent-start', seq: 4, time: 1_700_000_000_004, data: { runId: 'run-1', seq: 1, label: 'b', childId: 'session-y' } } as SessionEvent,
-    { type: 'tool-workflow/agent-end', seq: 5, time: 1_700_000_000_005, data: { runId: 'run-1', seq: 1, outcome: 'cancelled' } } as SessionEvent,
+    { type: 'tool-workflow/agent-start', seq: 4, time: 1_700_000_000_004, data: { runId: 'run-1', seq: 2, label: 'b', childId: 'session-y' } } as SessionEvent,
+    { type: 'tool-workflow/agent-end', seq: 5, time: 1_700_000_000_005, data: { runId: 'run-1', seq: 2, outcome: 'cancelled' } } as SessionEvent,
   ])
   app.setTranscript(folder.messages())
   view = await viewport(vt)
@@ -293,7 +293,7 @@ test('completion auto-closes once; a new running member reopens the phase', asyn
   folder.apply([
     { type: 'turn/start', seq: 0, time: 1_700_000_000_000, data: { turn: 0 } } as SessionEvent,
     { type: 'tool-workflow/run-start', seq: 1, time: 1_700_000_000_001, data: { runId: 'run-1', name: 'audit' } } as SessionEvent,
-    { type: 'tool-workflow/agent-start', seq: 2, time: 1_700_000_000_002, data: { runId: 'run-1', seq: 0, label: 'a', childId: 'session-x' } } as SessionEvent,
+    { type: 'tool-workflow/agent-start', seq: 2, time: 1_700_000_000_002, data: { runId: 'run-1', seq: 1, label: 'a', childId: 'session-x' } } as SessionEvent,
   ])
   const { vt, app } = startApp()
   app.setTranscript(folder.messages())
@@ -301,14 +301,14 @@ test('completion auto-closes once; a new running member reopens the phase', asyn
   assert.ok(view.includes('▼ Unassigned 1 agent'), `active phase must open:\n${view}`)
   // Completion: the phase auto-closes once.
   folder.apply([
-    { type: 'tool-workflow/agent-end', seq: 3, time: 1_700_000_000_003, data: { runId: 'run-1', seq: 0, outcome: 'completed' } } as SessionEvent,
+    { type: 'tool-workflow/agent-end', seq: 3, time: 1_700_000_000_003, data: { runId: 'run-1', seq: 1, outcome: 'completed' } } as SessionEvent,
   ])
   app.setTranscript(folder.messages())
   view = await viewport(vt)
   assert.ok(view.includes('▶ Unassigned 1 agent'), `completed phase must auto-close:\n${view}`)
   // A new running member in the SAME phase reopens it (plan §7.7).
   folder.apply([
-    { type: 'tool-workflow/agent-start', seq: 4, time: 1_700_000_000_004, data: { runId: 'run-1', seq: 1, label: 'b', childId: 'session-y' } } as SessionEvent,
+    { type: 'tool-workflow/agent-start', seq: 4, time: 1_700_000_000_004, data: { runId: 'run-1', seq: 2, label: 'b', childId: 'session-y' } } as SessionEvent,
   ])
   app.setTranscript(folder.messages())
   view = await viewport(vt)
@@ -483,7 +483,7 @@ test('W8: Fold -> TUI click -> TaskRuntime live driver gate -> enterView (open a
     // The members register AFTER the owning step/turn closed (background run).
     ...['live', 'inactive', 'wrong-parent', 'continuable'].map((label, seq) => ({
       type: 'tool-workflow/agent-start', seq: 5 + seq, time: 1_700_000_000_005 + seq,
-      data: { runId: 'run-1', seq, label, childId: `child-${seq + 1}` },
+      data: { runId: 'run-1', seq: seq + 1, label, childId: `child-${seq + 1}` },
     } as SessionEvent)),
   ])
   const run = folder.messages().find(message => message.kind === 'workflow')
@@ -576,7 +576,7 @@ test('W8: Fold -> TUI click -> TaskRuntime live driver gate -> enterView (open a
   // The real agent-end settles the member: the SAME card no longer opens.
   // The sibling members are still running, so the phase stays inline.
   folder.apply([
-    { type: 'tool-workflow/agent-end', seq: 9, time: 1_700_000_000_009, data: { runId: 'run-1', seq: 0, outcome: 'completed' } } as SessionEvent,
+    { type: 'tool-workflow/agent-end', seq: 9, time: 1_700_000_000_009, data: { runId: 'run-1', seq: 1, outcome: 'completed' } } as SessionEvent,
   ])
   app.setTranscript(folder.messages())
   view = await viewport(vt)
@@ -593,7 +593,7 @@ test('W9: a folded mid-run workflow renders running counts and keeps the scoped 
     { type: 'tool-workflow/run-start', seq: 2, time: 1_700_000_000_002, data: { runId: 'run-1', name: 'audit' } } as SessionEvent,
     ...Array.from({ length: 6 }, (_, seq) => ({
       type: 'tool-workflow/agent-start', seq: 3 + seq, time: 1_700_000_000_003 + seq,
-      data: { runId: 'run-1', seq, label: `member-${seq}`, childId: `child-${seq}` },
+      data: { runId: 'run-1', seq: seq + 1, label: `member-${seq}`, childId: `child-${seq}` },
     } as SessionEvent)),
     { type: 'step/end', seq: 9, time: 1_700_000_000_009, data: { turn: 0, step: 0 } } as SessionEvent,
     { type: 'turn/end', seq: 10, time: 1_700_000_000_010, data: { turn: 0, reason: { kind: 'aborted', reason: { kind: 'user' } } } } as SessionEvent,
@@ -652,8 +652,8 @@ test('a run settling abnormal with only completed members reopens once after use
   folder.apply([
     { type: 'turn/start', seq: 0, time: 1_700_000_000_000, data: { turn: 0 } } as SessionEvent,
     { type: 'tool-workflow/run-start', seq: 1, time: 1_700_000_000_001, data: { runId: 'run-1', name: 'audit' } } as SessionEvent,
-    { type: 'tool-workflow/agent-start', seq: 2, time: 1_700_000_000_002, data: { runId: 'run-1', seq: 0, label: 'a', childId: 'session-x' } } as SessionEvent,
-    { type: 'tool-workflow/agent-end', seq: 3, time: 1_700_000_000_003, data: { runId: 'run-1', seq: 0, outcome: 'completed' } } as SessionEvent,
+    { type: 'tool-workflow/agent-start', seq: 2, time: 1_700_000_000_002, data: { runId: 'run-1', seq: 1, label: 'a', childId: 'session-x' } } as SessionEvent,
+    { type: 'tool-workflow/agent-end', seq: 3, time: 1_700_000_000_003, data: { runId: 'run-1', seq: 1, outcome: 'completed' } } as SessionEvent,
   ])
   const { vt, app } = startApp()
   app.setFullscreen(true)
@@ -783,8 +783,8 @@ test('a running run auto-closes once on run-end completed; an explicit user open
   folder.apply([
     { type: 'turn/start', seq: 0, time: 1_700_000_000_000, data: { turn: 0 } } as SessionEvent,
     { type: 'tool-workflow/run-start', seq: 1, time: 1_700_000_000_001, data: { runId: 'run-1', name: 'audit' } } as SessionEvent,
-    { type: 'tool-workflow/agent-start', seq: 2, time: 1_700_000_000_002, data: { runId: 'run-1', seq: 0, label: 'a', childId: 'session-x' } } as SessionEvent,
-    { type: 'tool-workflow/agent-end', seq: 3, time: 1_700_000_000_003, data: { runId: 'run-1', seq: 0, outcome: 'completed' } } as SessionEvent,
+    { type: 'tool-workflow/agent-start', seq: 2, time: 1_700_000_000_002, data: { runId: 'run-1', seq: 1, label: 'a', childId: 'session-x' } } as SessionEvent,
+    { type: 'tool-workflow/agent-end', seq: 3, time: 1_700_000_000_003, data: { runId: 'run-1', seq: 1, outcome: 'completed' } } as SessionEvent,
   ])
   const { vt, app } = startApp()
   app.setFullscreen(true)
@@ -839,7 +839,7 @@ test('a phase folds and unfolds across ANY number of running→clean cycles (rev
   await cycle(4, 'b')
   // C start -> open (a THIRD cycle still works).
   folder.apply([
-    { type: 'tool-workflow/agent-start', seq: 6, time: 1_700_000_000_006, data: { runId: 'run-1', seq: 4, label: 'c', childId: 'session-c' } } as SessionEvent,
+    { type: 'tool-workflow/agent-start', seq: 6, time: 1_700_000_000_006, data: { runId: 'run-1', seq: 5, label: 'c', childId: 'session-c' } } as SessionEvent,
   ])
   app.setTranscript(folder.messages())
   const view = await viewport(vt)
@@ -851,7 +851,7 @@ test('an explicit user open survives an abnormal terminal edge (review P2)', asy
   folder.apply([
     { type: 'turn/start', seq: 0, time: 1_700_000_000_000, data: { turn: 0 } } as SessionEvent,
     { type: 'tool-workflow/run-start', seq: 1, time: 1_700_000_000_001, data: { runId: 'run-1', name: 'audit' } } as SessionEvent,
-    { type: 'tool-workflow/agent-start', seq: 2, time: 1_700_000_000_002, data: { runId: 'run-1', seq: 0, label: 'a', childId: 'session-x' } } as SessionEvent,
+    { type: 'tool-workflow/agent-start', seq: 2, time: 1_700_000_000_002, data: { runId: 'run-1', seq: 1, label: 'a', childId: 'session-x' } } as SessionEvent,
   ])
   const { vt, app } = startApp()
   app.setFullscreen(true)
@@ -875,7 +875,7 @@ test('an explicit user open survives an abnormal terminal edge (review P2)', asy
   // member + run-end error). The first abnormal edge must NOT clear the
   // user's explicit opens.
   folder.apply([
-    { type: 'tool-workflow/agent-end', seq: 3, time: 1_700_000_000_003, data: { runId: 'run-1', seq: 0, outcome: 'failed' } } as SessionEvent,
+    { type: 'tool-workflow/agent-end', seq: 3, time: 1_700_000_000_003, data: { runId: 'run-1', seq: 1, outcome: 'failed' } } as SessionEvent,
     { type: 'tool-workflow/run-end', seq: 4, time: 1_700_000_000_004, data: { runId: 'run-1', stopReason: 'error' } } as SessionEvent,
   ])
   app.setTranscript(folder.messages())
@@ -894,7 +894,7 @@ test('a new running cycle reopens a user-closed run and phase (review P2, plan �
   folder.apply([
     { type: 'turn/start', seq: 0, time: 1_700_000_000_000, data: { turn: 0 } } as SessionEvent,
     { type: 'tool-workflow/run-start', seq: 1, time: 1_700_000_000_001, data: { runId: 'run-1', name: 'audit' } } as SessionEvent,
-    { type: 'tool-workflow/agent-start', seq: 2, time: 1_700_000_000_002, data: { runId: 'run-1', seq: 0, label: 'a', childId: 'session-a' } } as SessionEvent,
+    { type: 'tool-workflow/agent-start', seq: 2, time: 1_700_000_000_002, data: { runId: 'run-1', seq: 1, label: 'a', childId: 'session-a' } } as SessionEvent,
   ])
   const { vt, app } = startApp()
   app.setFullscreen(true)
@@ -910,7 +910,7 @@ test('a new running cycle reopens a user-closed run and phase (review P2, plan �
   assert.equal(runChevron(view), '▶', `the run must be user-closed:\n${view}`)
   // A completes: the phase is clean — the user's close persists.
   folder.apply([
-    { type: 'tool-workflow/agent-end', seq: 3, time: 1_700_000_000_003, data: { runId: 'run-1', seq: 0, outcome: 'completed' } } as SessionEvent,
+    { type: 'tool-workflow/agent-end', seq: 3, time: 1_700_000_000_003, data: { runId: 'run-1', seq: 1, outcome: 'completed' } } as SessionEvent,
   ])
   app.setTranscript(folder.messages())
   view = await viewport(vt)
@@ -918,7 +918,7 @@ test('a new running cycle reopens a user-closed run and phase (review P2, plan �
   // B starts in the SAME phase: a NEW CYCLE — the phase AND the run reopen
   // (plan §7.7), overriding the prior user close.
   folder.apply([
-    { type: 'tool-workflow/agent-start', seq: 4, time: 1_700_000_000_004, data: { runId: 'run-1', seq: 1, label: 'b', childId: 'session-b' } } as SessionEvent,
+    { type: 'tool-workflow/agent-start', seq: 4, time: 1_700_000_000_004, data: { runId: 'run-1', seq: 2, label: 'b', childId: 'session-b' } } as SessionEvent,
   ])
   app.setTranscript(folder.messages())
   view = await viewport(vt)
@@ -931,8 +931,8 @@ test('a new member in a still-running phase is an ordinary update, not a new cyc
   folder.apply([
     { type: 'turn/start', seq: 0, time: 1_700_000_000_000, data: { turn: 0 } } as SessionEvent,
     { type: 'tool-workflow/run-start', seq: 1, time: 1_700_000_000_001, data: { runId: 'run-1', name: 'audit' } } as SessionEvent,
-    { type: 'tool-workflow/agent-start', seq: 2, time: 1_700_000_000_002, data: { runId: 'run-1', seq: 0, label: 'a', childId: 'session-a' } } as SessionEvent,
-    { type: 'tool-workflow/agent-start', seq: 3, time: 1_700_000_000_003, data: { runId: 'run-1', seq: 1, label: 'b', childId: 'session-b' } } as SessionEvent,
+    { type: 'tool-workflow/agent-start', seq: 2, time: 1_700_000_000_002, data: { runId: 'run-1', seq: 1, label: 'a', childId: 'session-a' } } as SessionEvent,
+    { type: 'tool-workflow/agent-start', seq: 3, time: 1_700_000_000_003, data: { runId: 'run-1', seq: 2, label: 'b', childId: 'session-b' } } as SessionEvent,
   ])
   const { vt, app } = startApp()
   app.setFullscreen(true)
@@ -949,7 +949,7 @@ test('a new member in a still-running phase is an ordinary update, not a new cyc
   // C starts while the phase is STILL running: an ordinary update — the
   // user's close persists (plan §7.4).
   folder.apply([
-    { type: 'tool-workflow/agent-start', seq: 4, time: 1_700_000_000_004, data: { runId: 'run-1', seq: 2, label: 'c', childId: 'session-c' } } as SessionEvent,
+    { type: 'tool-workflow/agent-start', seq: 4, time: 1_700_000_000_004, data: { runId: 'run-1', seq: 3, label: 'c', childId: 'session-c' } } as SessionEvent,
   ])
   app.setTranscript(folder.messages())
   view = await viewport(vt)
@@ -976,7 +976,7 @@ test('a run stays abnormal/open after run-end completed when a member failed (re
   folder.apply([
     { type: 'turn/start', seq: 0, time: 1_700_000_000_000, data: { turn: 0 } } as SessionEvent,
     { type: 'tool-workflow/run-start', seq: 1, time: 1_700_000_000_001, data: { runId: 'run-1', name: 'audit' } } as SessionEvent,
-    { type: 'tool-workflow/agent-start', seq: 2, time: 1_700_000_000_002, data: { runId: 'run-1', seq: 0, label: 'a', childId: 'session-a' } } as SessionEvent,
+    { type: 'tool-workflow/agent-start', seq: 2, time: 1_700_000_000_002, data: { runId: 'run-1', seq: 1, label: 'a', childId: 'session-a' } } as SessionEvent,
   ])
   const { vt, app } = startApp()
   app.setTranscript(folder.messages())
@@ -984,7 +984,7 @@ test('a run stays abnormal/open after run-end completed when a member failed (re
   assert.equal(runChevron(view), '▼', `a running run must open:\n${view}`)
   // The member fails: the run becomes abnormal (still open).
   folder.apply([
-    { type: 'tool-workflow/agent-end', seq: 3, time: 1_700_000_000_003, data: { runId: 'run-1', seq: 0, outcome: 'failed' } } as SessionEvent,
+    { type: 'tool-workflow/agent-end', seq: 3, time: 1_700_000_000_003, data: { runId: 'run-1', seq: 1, outcome: 'failed' } } as SessionEvent,
   ])
   app.setTranscript(folder.messages())
   view = await viewport(vt)
@@ -1006,8 +1006,8 @@ test('a clean phase whose member count changed reopens a user-closed run (Web ph
   folder.apply([
     { type: 'turn/start', seq: 0, time: 1_700_000_000_000, data: { turn: 0 } } as SessionEvent,
     { type: 'tool-workflow/run-start', seq: 1, time: 1_700_000_000_001, data: { runId: 'run-1', name: 'audit' } } as SessionEvent,
-    { type: 'tool-workflow/agent-start', seq: 2, time: 1_700_000_000_002, data: { runId: 'run-1', seq: 0, label: 'a', childId: 'session-a' } } as SessionEvent,
-    { type: 'tool-workflow/agent-end', seq: 3, time: 1_700_000_000_003, data: { runId: 'run-1', seq: 0, outcome: 'completed' } } as SessionEvent,
+    { type: 'tool-workflow/agent-start', seq: 2, time: 1_700_000_000_002, data: { runId: 'run-1', seq: 1, label: 'a', childId: 'session-a' } } as SessionEvent,
+    { type: 'tool-workflow/agent-end', seq: 3, time: 1_700_000_000_003, data: { runId: 'run-1', seq: 1, outcome: 'completed' } } as SessionEvent,
   ])
   const { vt, app } = startApp()
   app.setFullscreen(true)
@@ -1022,8 +1022,8 @@ test('a clean phase whose member count changed reopens a user-closed run (Web ph
   // but its member count changed — Web's phaseStartedCycle still fires
   // (facts.activityCount !== previous.activityCount) and reopens the run.
   folder.apply([
-    { type: 'tool-workflow/agent-start', seq: 4, time: 1_700_000_000_004, data: { runId: 'run-1', seq: 1, label: 'b', childId: 'session-b' } } as SessionEvent,
-    { type: 'tool-workflow/agent-end', seq: 5, time: 1_700_000_000_005, data: { runId: 'run-1', seq: 1, outcome: 'completed' } } as SessionEvent,
+    { type: 'tool-workflow/agent-start', seq: 4, time: 1_700_000_000_004, data: { runId: 'run-1', seq: 2, label: 'b', childId: 'session-b' } } as SessionEvent,
+    { type: 'tool-workflow/agent-end', seq: 5, time: 1_700_000_000_005, data: { runId: 'run-1', seq: 2, outcome: 'completed' } } as SessionEvent,
   ])
   app.setTranscript(folder.messages())
   view = await viewport(vt)
@@ -1035,8 +1035,8 @@ test('a clean phase manually opened then batch-grown closes while the run reopen
   folder.apply([
     { type: 'turn/start', seq: 0, time: 1_700_000_000_000, data: { turn: 0 } } as SessionEvent,
     { type: 'tool-workflow/run-start', seq: 1, time: 1_700_000_000_001, data: { runId: 'run-1', name: 'audit' } } as SessionEvent,
-    { type: 'tool-workflow/agent-start', seq: 2, time: 1_700_000_000_002, data: { runId: 'run-1', seq: 0, label: 'a', childId: 'session-a' } } as SessionEvent,
-    { type: 'tool-workflow/agent-end', seq: 3, time: 1_700_000_000_003, data: { runId: 'run-1', seq: 0, outcome: 'completed' } } as SessionEvent,
+    { type: 'tool-workflow/agent-start', seq: 2, time: 1_700_000_000_002, data: { runId: 'run-1', seq: 1, label: 'a', childId: 'session-a' } } as SessionEvent,
+    { type: 'tool-workflow/agent-end', seq: 3, time: 1_700_000_000_003, data: { runId: 'run-1', seq: 1, outcome: 'completed' } } as SessionEvent,
   ])
   const { vt, app } = startApp()
   app.setFullscreen(true)
@@ -1051,8 +1051,8 @@ test('a clean phase manually opened then batch-grown closes while the run reopen
   // but its member count changed. Web: the clean facts consume the user's
   // open (phase folds) while the outer run reopens (new clean cycle).
   folder.apply([
-    { type: 'tool-workflow/agent-start', seq: 4, time: 1_700_000_000_004, data: { runId: 'run-1', seq: 1, label: 'b', childId: 'session-b' } } as SessionEvent,
-    { type: 'tool-workflow/agent-end', seq: 5, time: 1_700_000_000_005, data: { runId: 'run-1', seq: 1, outcome: 'completed' } } as SessionEvent,
+    { type: 'tool-workflow/agent-start', seq: 4, time: 1_700_000_000_004, data: { runId: 'run-1', seq: 2, label: 'b', childId: 'session-b' } } as SessionEvent,
+    { type: 'tool-workflow/agent-end', seq: 5, time: 1_700_000_000_005, data: { runId: 'run-1', seq: 2, outcome: 'completed' } } as SessionEvent,
   ])
   app.setTranscript(folder.messages())
   view = await viewport(vt)
