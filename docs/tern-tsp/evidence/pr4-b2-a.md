@@ -167,14 +167,35 @@ unchanged owner's subject:
 
 ## Review closure
 
-The internal review of the first implementation snapshot raised one in-scope
-wiring finding (RFL-001: a rejected/indeterminate `/title` was shown in both the
-Dock and the Direct result card on TSP) plus evidence gaps for A04/A13/A14 and
-the negative subcases above. This record describes the post-fix state:
-`titleResultNoticeSuppressed` is the composition-root policy that closes
-RFL-001, the A14 controls now include a genuine Host `/rename` and the
-unclaimed argued line, A13 covers every registered PiTui-only name, and the
-PARTIAL rows state their tier limits explicitly.
+The independent review of the first implementation snapshot raised four findings
+and closed all of them on the final tree; the per-command statuses above are the
+reviewed mapping:
+
+- **RFL-001 (closed) — duplicate title refusal on TSP+Direct.** A rejected or
+  indeterminate `/title` appeared in both the Dock notice and the Direct
+  command-result card. Closed by the composition-owned, title-only
+  `titleResultNoticeSuppressed` fact (non-PiTui mount + Direct command plane,
+  set at registration after the mount) and the per-outcome notice entries. The
+  witness counts the message across every live folded node (exactly one visible
+  sink) and separately requires zero Dock notices.
+- **RFL-002 (closed) — Host precedence negatives.** Genuine Host `/rename` and
+  the execute-kind Host `/new argued-line` now have production
+  source → controller → sink witnesses (A14).
+- **RFL-003 (closed) — copy-policy e2e portability.** The A06 cases that drive
+  the real copy policy now clear the POSIX helper gates only for the gesture
+  (restored in `finally`) and skip on macOS/Windows, where the shared policy
+  attempts the native helper unconditionally; the suite therefore cannot write
+  its synthetic text into a real clipboard.
+- **RFL-004 (closed) — changelog wording.** Both bilingual entries describe the
+  command-specific single owner (title results: Direct card; `/yolo`,
+  `/logout`, `/copy`: planned Dock supplement).
+
+The reviewer explicitly accepted the plan-mandated success supplement for
+`/yolo`/`/logout`/`/copy` (Dock + Direct card) as frozen §S2 behavior, and the
+narrow `/title` card-ownership as the Owner-approved adjustment to it. Per
+`docs/code-review.md`, this acceptance is a review verdict on the deliverable —
+it is not stage closure and not permission to merge, and A09 / the OS-clipboard
+qualification / physical GUI / Remote TSP remain outside it.
 
 ## Deliberate non-goals
 
