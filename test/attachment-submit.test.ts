@@ -113,3 +113,31 @@ test('a file draft without attachment storage fails explicitly', async () => {
     (error: unknown) => error instanceof FileInputError && error.message === 'File attachment storage is unavailable.',
   )
 })
+
+test('a file-bearing ordinary prompt shares ONE source carrying the request id and its zone', async () => {
+  const images = new DraftImageStore()
+  const image = images.add({ bytes: new Uint8Array([1]), mediaType: 'image/png', width: 1, height: 1 })
+  const files = new DraftFileStore()
+  const file = files.add({
+    name: 'report.pdf',
+    byteLength: 4,
+    source: { type: 'recalled', ref: { attachmentId: 'sha256:existing', name: 'report.pdf', bytes: 4 } },
+  })
+  const attachments = {
+    imageLimits,
+    async saveImages(inputs: readonly { data: Uint8Array; mediaType: 'image/png' }[]): Promise<readonly ImageAttachmentRefLike[]> {
+      return inputs.map(input => ({ attachmentId: 'sha256:image', mediaType: input.mediaType, bytes: input.data.byteLength, width: 1, height: 1 }))
+    },
+    async saveFileStream() { throw new Error('a recalled file must not be re-saved') },
+  } as unknown as AttachmentsLike
+  const message = await prepareUserMessage(`A ${file.placeholder} B ${image.placeholder}`, images, {
+    ...deps(attachments),
+    fileStore: files,
+  }, { requestId: 'rpc-file', clientTimeZone: 'Europe/Paris' })
+  assert.deepEqual(message.content.map(block => block.type), ['text', 'file', 'text', 'image'])
+  assert.deepEqual(message.source, {
+    kind: 'user',
+    rpcId: 'rpc-file',
+    clientTimeZone: 'Europe/Paris',
+  }, 'the file/image path shares ONE source: the same request identity and zone as the text fast path')
+})

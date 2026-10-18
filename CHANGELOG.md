@@ -7,6 +7,14 @@
 
 ## [Unreleased]
 
+### 修复
+
+- **人类提示现在携带发送端 TUI 进程的时区**，官方 `time-context` 注入不再对普通请求显示
+  `Browser time zone ... unavailable`：Direct 主会话、Direct/Remote continuable 子 Agent
+  续聊都由发送端在提交时采样 `Intl` 时区并写入官方请求元数据；Remote 主会话继续由官方
+  `SessionFace` 采样。该时区是运行 TUI 的进程时区（在 SSH/容器中即该主机进程的 `TZ`），
+  不是观看终端者的真实时区；进程报不出可用时区时，发送在派发前被拒绝并恢复草稿，不会伪造时区。
+
 ## [0.5.3] - 2026-10-17
 
 ### 安装与版本对应

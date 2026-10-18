@@ -38,6 +38,7 @@ import { safeErrorMessage } from '../../runtime/process/errors.ts'
 import type { DraftImageStore } from '../../client/media/image/draft-store.ts'
 import { checkImageLimits } from '../../client/media/image/intake.ts'
 import { draftHasAttachments, draftHasImages, pruneUnreferencedDraftAttachments } from '../../client/media/draft-attachments.ts'
+import { clientTimeZone } from '../../client/time-zone.ts'
 import { resolveComposerDelivery } from '../../commands.ts'
 import { rewindCandidateOfLoadedWindow } from '../../domain/session/rewind.ts'
 import { rewindOutlineRows } from './rewind-presentation.ts'
@@ -737,6 +738,10 @@ export function createApplicationEvents(deps: ApplicationEventsDeps): Applicatio
           viewerCanonicalizeScope(promptViewerCwd, request.parentSessionId),
           text,
         ),
+        // The Client-local request zone of THIS follow-up, sampled by the
+        // adapter once, immediately before its dispatch (never the Host's
+        // zone, never a cached session fact).
+        clientTimeZone: () => clientTimeZone(),
       }), {
         sessionId: () => deps.lifecycle.liveAgent()?.session.id,
         onResult: (outcome) => deps.viewer.settleSubmit(request, submit.text, outcome, viewerGeneration),

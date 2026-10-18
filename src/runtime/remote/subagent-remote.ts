@@ -147,6 +147,7 @@ export class RemoteSubagentPort implements SubagentPort {
     let signal: AbortSignal
     let canonical: SubagentPromptContentPart[]
     let requestId: string
+    let timeZone: string
     try {
       signal = context.makeSignal()
       canonical = []
@@ -158,6 +159,10 @@ export class RemoteSubagentPort implements SubagentPort {
         }
       }
       if (signal.aborted) return { kind: 'rejected', reason: { kind: 'cancelled' } }
+      // The Client-local request zone is sampled ONCE here: after the async
+      // canonicalization and the cancellation check, immediately before the
+      // dispatch. A throw is still a known non-dispatch (never indeterminate).
+      timeZone = context.clientTimeZone()
       // The identity is minted BEFORE the call and persisted on the accepted
       // message; only a NEW human submit mints another.
       requestId = randomUUID()
@@ -175,6 +180,7 @@ export class RemoteSubagentPort implements SubagentPort {
         mode: 'continuable',
         delivery: request.delivery,
         content: canonical,
+        clientTimeZone: timeZone,
       },
       signal,
     )

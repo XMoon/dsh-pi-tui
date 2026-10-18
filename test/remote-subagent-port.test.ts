@@ -67,6 +67,7 @@ function harness(): Harness {
 function context(overrides: Partial<SubagentPromptContext> = {}): SubagentPromptContext {
   return {
     makeSignal: () => new AbortController().signal,
+    clientTimeZone: () => 'Asia/Shanghai',
     ...overrides,
   }
 }
@@ -117,6 +118,49 @@ test('viewer text is canonicalized against the child scope before delivery', asy
     context({ canonicalizeText: text => `/child/root/${text}` }),
   )
   assert.deepEqual(h.promptCalls[0]?.request.content, [{ type: 'text', text: '/child/root/@src/foo.ts' }])
+})
+
+test('carries the Client-local request zone sampled once into the generated request', async () => {
+  const h = harness()
+  let samples = 0
+  const outcome = await h.port.prompt(
+    { parentSessionId: 'p', childSessionId: 'c', delivery: 'queue', content: [{ type: 'text', text: 'x' }] },
+    context({ clientTimeZone: () => { samples += 1; return 'Europe/Paris' } }),
+  )
+  assert.equal(outcome.kind, 'ok')
+  assert.equal(samples, 1, 'the zone is sampled exactly once per delivery')
+  assert.equal(h.promptCalls[0]?.request.clientTimeZone, 'Europe/Paris',
+    'the sampled zone rides the official generated subagents.prompt request')
+})
+
+test('a pre-call cancellation samples no zone and dispatches nothing', async () => {
+  const h = harness()
+  const controller = new AbortController()
+  controller.abort()
+  let samples = 0
+  const outcome = await h.port.prompt(
+    { parentSessionId: 'p', childSessionId: 'c', delivery: 'queue', content: [{ type: 'text', text: 'x' }] },
+    context({
+      makeSignal: () => controller.signal,
+      clientTimeZone: () => { samples += 1; return 'Europe/Paris' },
+    }),
+  )
+  assert.deepEqual(outcome, { kind: 'rejected', reason: { kind: 'cancelled' } })
+  assert.equal(samples, 0, 'a cancelled send never samples the request zone')
+  assert.equal(h.promptCalls.length, 0)
+})
+
+test('an unsamplable zone is a pre-dispatch refusal, never an indeterminate delivery', async () => {
+  const h = harness()
+  const outcome = await h.port.prompt(
+    { parentSessionId: 'p', childSessionId: 'c', delivery: 'queue', content: [{ type: 'text', text: 'x' }] },
+    context({ clientTimeZone: () => { throw new Error('the TUI process reports no time zone') } }),
+  )
+  assert.deepEqual(outcome, {
+    kind: 'rejected',
+    reason: { kind: 'error', message: 'the TUI process reports no time zone' },
+  })
+  assert.equal(h.promptCalls.length, 0, 'the generated Remote was never invoked')
 })
 
 test('an already-aborted pre-call signal is a cancelled rejection without delivery', async () => {

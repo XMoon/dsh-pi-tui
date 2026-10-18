@@ -920,7 +920,7 @@ The `0.4.9` line adapts the already-completed P1 product to published DSH
 | Long tool-output fix | INHERITED | long multibyte tool-result regression over the real fold/search/export path |
 | Long-conversation send fix | INHERITED | long-session fold + next-prompt regression |
 | Schedule | **DEFERRED** (post-0.4.9) | stable rc.2 Host capability, but its optional composition is not a TUI plugin-install target and the TUI must not insert optional Schedule rows into its own protected bundle |
-| Time Context | **DEFERRED** (post-0.4.9) | official Time Context uses browser request-zone facts; the TUI has no equivalent user-timezone authority and must not promote the Host process timezone into one |
+| Time Context | **DEFERRED** (post-0.4.9) | official Time Context uses browser request-zone facts; the TUI has no equivalent user-timezone authority and must not promote the Host process timezone into one. **Split (2026-10-18):** `REQUEST_ZONE_PROPAGATION` landed — see the `Request-zone metadata propagation (COMPLETE, scope-limited)` section below; the plugin's activation/settings/human-zone authority remain deferred |
 | Approval `displayReason` | INHERITED / additive | no rc.2 blocker; the current generic reason presentation stays |
 | Auto Review | DEFERRED / experimental | upstream experimental surface, never a release blocker |
 | Web/Desktop shortcuts manager | WEB-ONLY / N/A | the TUI keeps its own keybinding owner |
@@ -3261,7 +3261,7 @@ still reaches the Remote graph only through the dynamic
 | Session export | same save UX on Remote | `TERMINAL_NATIVE_EQUIVALENT` | `/api/session.export` |
 | Remote Backend existence | no production UI switch yet | `NO_USER_VISIBLE_CHANGE` | architecture stage only |
 | generic Queue per-row actions | not implemented here | `DEFERRED_WITH_OWNER: Post-M3 Q1` | official inbox semantics |
-| clientTimeZone | not corrected here | `DEFERRED_WITH_OWNER: Post-M3 T1` | official Client request metadata |
+| clientTimeZone | request metadata mapped (Direct + child ports); plugin activation/settings still deferred | `REQUEST_ZONE_PROPAGATION: DONE` / `TIME_CONTEXT_PRODUCT_ACTIVATION: DEFERRED` | official Client request metadata |
 
 This matrix predates the reachability classification in §Migration process and
 qualification governance; M3-4 onward matrices carry an explicit `Reachability`
@@ -6910,3 +6910,76 @@ mismatch was observed, Direct remains the production backend and its row is
 authoritative. Remote stays experimental and this surface is not claimed as
 qualified on Remote; no Host wire, adapter or production seam was added to
 manufacture a same-run witness.
+
+## Request-zone metadata propagation (COMPLETE, scope-limited)
+
+**Split decision (2026-10-18).** The former single `Time Context` deferral is
+split, and this slice closes only the first half:
+
+- `REQUEST_ZONE_PROPAGATION` — **landed here**: a TUI human prompt carries the
+  sending Client runtime's IANA zone into the official request metadata, so the
+  official `@deepseek-ai/dsh-time-context` row (already declared by this
+  bundle's `standard` / `ptc` / `cordis` presets) reports a real request zone
+  instead of `Browser time zone for this request: unavailable`.
+- `TIME_CONTEXT_PRODUCT_ACTIVATION / SETTINGS` — **still DEFERRED**: no
+  enable/disable UX, no settings surface, no Schedule rows, no refresh-interval
+  or display-fallback policy, and no TUI-owned timezone state.
+
+### What landed
+
+- **Client-local sampler** (`src/client/time-zone.ts`): one per-submit
+  `Intl.DateTimeFormat().resolvedOptions().timeZone` read — the same fact the
+  official `SessionFace.prompt()` samples — checked against the strict profile
+  the Host's `time-context` request reader enforces (`UTC` or an IANA
+  `Area/Location` name, canonical on an `Intl` round trip). The Direct path has
+  no Host validation between this sample and the durable source, and a Node
+  `TZ` such as `GMT` resolves to the offset-only `+00:00` the reader rejects, so
+  the profile check belongs at this one client boundary.
+- **Direct ordinary prompt**: `app/submission/controller.ts#prepareMessage`
+  samples once at the send point; `app/submission/direct-message-preparation.ts`
+  puts the value on the ONE source shared by the text / image / file branches,
+  beside the existing `rpcId`. An unidentified submission (the Skill/command
+  preparation path) keeps the plain `{ kind: 'user' }` source: no fabricated
+  identity and no zone attached to something that is not a human request.
+- **Remote ordinary prompt**: unchanged by design — `RemoteSessionWriter` still
+  calls the official `binding.session.prompt(content, mode, undefined,
+  requestId)`; the official Client samples the zone inside that call and the
+  Host `SessionController` validates and canonicalizes it onto the durable
+  source. The TUI adds no wire field here.
+- **Continuable child follow-up (Direct + Remote)**: the Viewer composition
+  (`app/surface/application-events.ts`) provides the narrow per-call
+  `clientTimeZone()` capability on `SubagentPromptContext`; both `SubagentPort`
+  adapters sample exactly once per delivery — after canonicalization and the
+  cancellation check, immediately before dispatch — and put it on the official
+  `subagents.prompt({ clientTimeZone })` request. Request identity, parent/child
+  authority, queue/steer delivery, cancellation and indeterminate settlement are
+  unchanged.
+- **Refusal path**: a zone the runtime cannot report (or one the reader would
+  reject) refuses the send BEFORE dispatch — the Direct prepare-failure restore,
+  or the existing `rejected`/`error` child settlement — so nothing durable is
+  written and no model turn runs. The Host process zone is never substituted.
+
+### Product limit (must stay visible)
+
+The zone is the **sending Client runtime's** zone, not the terminal observer's:
+inside SSH or a container it is that host process's `TZ`. Nothing here detects
+the front-end/terminal's own zone, and the TUI must not claim it does; a user who
+needs a specific human zone sets `TZ` on the TUI process. The
+`unavailable` / `mixed` / `resolved` interpretation, the display fallback zone and
+the injection cadence stay Host-owned in the official plugin.
+
+### Evidence
+
+`test/client-time-zone.test.ts` (sampler + strict profile + refusals),
+`test/image-submit.test.ts` / `test/attachment-submit.test.ts` (Direct source
+across text / image / file and the unidentified-submission negative control),
+`test/request-time-zone.test.ts` (real Direct runner submit over a real Host →
+durable `UserMessage.source` + the mounted official plugin's own
+`Browser time zone for this request: <zone>` text, plus the refusal/restore
+path), `test/subagent-port.test.ts` / `test/subagent-viewer-submit.test.ts` /
+`test/remote-subagent-port.test.ts` (child delivery, single sample, pre-dispatch
+refusal), `test/remote-session-writer.test.ts` (the Remote writer adds no zone
+of its own), `test/runner-remote-presentation.test.ts` (real Client → Gateway →
+Host readback of the client zone plus per-submit re-sampling) and
+`test/runner-viewer-task-integration.test.ts` (real viewer follow-up through the
+REAL `DirectSubagentPort` into the official prompt surface).
