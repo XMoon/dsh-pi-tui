@@ -206,7 +206,11 @@ test('M3-5 PR1: an unavailable child SessionStatus leaves the Session-owned fiel
   const snap = h.store.snapshot()
   assert.deepEqual(snap.composition, {}, 'no parent model may fill the child’s composition')
   assert.deepEqual(snap.access, {}, 'no parent permission may fill the child’s access')
-  assert.deepEqual(snap.workspace, { cwd: '' }, 'no parent cwd may fill the child’s workspace')
+  // The child's workspace carries NO parent value; the display-only
+  // `cwdUnavailable` flag states the unknown directory in words (S2/PR-B §B2 UI)
+  // and is not a Session-owned fact.
+  assert.deepEqual(snap.workspace, { cwd: '', cwdUnavailable: true },
+    'no parent cwd may fill the child’s workspace, and the unknown state is stated')
   assert.equal(snap.usage.tokens, undefined, 'no fold total may stand in for the child’s cumulative usage')
   assert.equal(snap.usage.context, undefined)
   assert.equal(commit.legacy?.cwd, '/client', 'the live-session legacy fields still describe the LIVE session')

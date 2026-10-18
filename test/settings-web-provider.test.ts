@@ -520,6 +520,7 @@ test('a workspace opened while the authority is pending paints Loading…, never
   await key(h, ESC)
 
   const release = h.holdRead()
+  t.after(release)
   h.invoke('settings')
   // The held read cannot settle, so every frame painted before it settles is
   // the pending state (without the pre-snapshot pending entry these frames
@@ -552,6 +553,7 @@ test('a new read clears the previous read ERROR: pending, not a stale Unavailabl
 
   h.store.readThrows = false
   const release = h.holdRead()
+  t.after(release)
   h.invoke('settings')
   await h.vt.waitForRender()
   for (const pressed of h.vt.columns >= 96 ? [TAB, TAB, DOWN, DOWN, ENTER] : [DOWN, DOWN, ENTER]) await key(h, pressed)
@@ -574,6 +576,7 @@ test('the workspace `r` refresh re-enters pending instead of repainting the cach
   assert.match(h.view(), /Search: Messages/u, 'the settled summary is visible on the rows level')
 
   const release = h.holdRead()
+  t.after(release)
   await key(h, 'r')
   const pending = h.view()
   assert.match(pending, /Loading…/u, `the refresh enters the pending state:\n${pending}`)
@@ -594,6 +597,7 @@ test('entering the legacy Web section paints Loading…, never the last-known va
 
   // Hold the read the section's own mount will request.
   const release = h.holdRead()
+  t.after(release)
   await key(h, ENTER)
   const pending = h.view()
   assert.match(pending, /\[Loading…\]/u, `the section starts pending:\n${pending}`)
@@ -621,6 +625,7 @@ test('a section reopened after a FAILED read states Loading…, not the stale er
 
   h.store.readThrows = false
   const release = h.holdRead()
+  t.after(release)
   await key(h, ENTER)
   const pending = h.view()
   assert.match(pending, /\[Loading…\]/u, `the reopened section is pending:\n${pending}`)
@@ -642,6 +647,7 @@ test('an OLD read settling after a write never repaints the reopened Workspace (
   // Hold the Workspace's own read (R_ws1): it observes the PRE-write Host state
   // and will settle LAST, after the write and a newer Workspace read.
   const release = h.holdRead()
+  t.after(release)
   await key(h, ESC)
   await key(h, ESC) // leave the Settings surface entirely
   // Re-enter: the workspace open starts a read, which the gate holds.
@@ -674,4 +680,52 @@ test('an OLD read settling after a write never repaints the reopened Workspace (
   const after = h.view()
   assert.match(after, /Search: DeepSeek Search API/u, `the committed facts survive the stale settlement:\n${after}`)
   assert.doesNotMatch(after, /Search: Messages/u, 'the pre-write summary never comes back')
+})
+
+test('a SUPERSEDED write readback never decides the verdict (owner-generation fence)', async t => {
+  const h = setup()
+  t.after(h.dispose)
+  await openWebSection(h)
+  assert.match(h.view(), /Current: Messages/u)
+
+  // The write's readback captures an UNREADABLE Host (the mutation itself still
+  // commits); it is held while a NEWER read observes the post-write facts.
+  h.store.readUndefined = true
+  const release = h.holdRead()
+  t.after(release)
+  await key(h, ENTER)
+  await new Promise(resolve => setTimeout(resolve, 20))
+  await h.vt.waitForRender()
+  assert.deepEqual(h.writes, ['search:deepseek-search-api'], 'the mutation committed')
+
+  // A newer read (Esc → the restored Workspace) observes the post-write Host and
+  // commits those facts.
+  h.store.readUndefined = false
+  await key(h, ESC)
+  await new Promise(resolve => setTimeout(resolve, 20))
+  await h.vt.waitForRender()
+  assert.match(h.view(), /Search: DeepSeek Search API/u, 'the newer read committed the post-write facts')
+
+  // The superseded readback settles now: it must not turn the committed result
+  // into a stale `Outcome unknown`/`Not saved`, and the rows keep the newest
+  // authority facts.
+  release()
+  await new Promise(resolve => setTimeout(resolve, 20))
+  await h.vt.waitForRender()
+  const after = h.view()
+  assert.doesNotMatch(after, /Outcome unknown|Not saved/u,
+    `no stale verdict leaks into the surface:\n${after}`)
+  assert.match(after, /Search: DeepSeek Search API/u, 'the newest facts survive')
+
+  // Re-open the section: the superseded readback must not have left a stale
+  // verdict phase on the row (the reopened row states the verified value).
+  await key(h, ENTER)
+  for (let attempt = 0; attempt < 40 && h.view().includes('Loading…'); attempt += 1) {
+    await new Promise(resolve => setTimeout(resolve, 5))
+    await h.vt.waitForRender()
+  }
+  const reopened = h.view()
+  assert.doesNotMatch(reopened, /\[Outcome unknown\]|\[Not saved\]/u,
+    `the reopened row carries no stale verdict:\n${reopened}`)
+  assert.match(reopened, /\[current\]/u, 'the reopened row states the verified value')
 })

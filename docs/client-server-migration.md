@@ -6558,8 +6558,10 @@ system or fork divergence is introduced.
   write and a Workspace reopen happened) can never leave the surface on a
   pre-write summary (`test/settings-web-provider.test.ts`, mutation-checked).
 - Not run: a physical Tern GUI record (the TSP renderer does not paint these
-  Settings surfaces) and an automated live-palette switch of the legacy chip
-  ink; both are recorded as NOT_VERIFIED/NOT_RUN rather than PASS.
+  Settings surfaces), recorded as NOT_VERIFIED/NOT_RUN rather than PASS. The
+  live-palette switch of the mounted Web rows IS covered in-process (the theme
+  observer rebuilds the cached chips; cell ink asserted after a real
+  `TuiApp.applyPalette()`).
 
 ### Residual risk / deferred
 
@@ -6584,13 +6586,18 @@ system or fork divergence is introduced.
   `test/session-v4-rc2-persistence.test.ts`; a single fixture that runs the real
   agent-loop testkit underneath the real runner (so the refusal travels
   persistence → agent loop → picker) is NOT_VERIFIED and needs that mount.
-- The RFL-008 question (whether an official Workflow member could ever be an
-  rc.2 external catalog entry) is answered from the official contracts rather
-  than from a producer trace: `ToolWorkflowAgentStartData.childId` documents a
-  member as recorded "after its child Session is published", and the subagent
-  manager's `childId` is a "durable direct-child session id", while an external
-  entry has no local Session. The scoped browser keeps a matching external row
-  visible anyway, so the conservative behaviour holds either way.
+- A Workflow member CAN carry an rc.2 external catalog identity, so the scoped
+  Task Browser MUST keep a matching external row visible (it is required
+  semantics, not a defensive filter). The official producer chain: the Workflow
+  runtime passes any resolved `ctx.subagents` provider to
+  `subagents.startActivation` and returns its `run.childId` verbatim
+  (`dsh-workflow-ptc`), the workflow tool persists that same id as the member's
+  `childId` (`dsh-tool-workflow`, `childId: agent.childId`), and the external
+  activation writes `mode: 'external'` into the SAME parent catalog with that
+  same `SessionId` (`dsh-subagent` catalog v2, documented as "a direct child's
+  identity"). No local Session therefore does NOT mean no member identity.
+  Regression: `test/task-browser-runtime.test.ts` (a scope that names the
+  external child keeps its row, while job rows stay excluded).
 - Web provider network success against a billed DeepSeek endpoint is not
   exercised here (the outer HTTP transport is stubbed); a user-provided account
   would be required.

@@ -239,11 +239,13 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
     return { settings: failure === undefined ? settings : undefined, fresh }
   }
 
-  /** A read issued AFTER a write: it starts from the pending state and its
-   *  settlement (the newest serial) owns the committed facts. */
-  const rereadWebSettings = async (): Promise<WebProviderSettings | undefined> => {
+  /** A read issued AFTER a write. It starts from the pending state and reports
+   *  whether its settlement was still the LATEST one: a newer read may have
+   *  observed the Host after this one was issued, and then THIS snapshot must
+   *  not decide a verdict. */
+  const rereadWebSettings = async (): Promise<{ settings: WebProviderSettings | undefined; fresh: boolean }> => {
     beginWebSettingsRead()
-    return (await readWebSettings()).settings
+    return await readWebSettings()
   }
 
   const webSettingsAvailable = (): boolean => runner.config.web.available()
@@ -495,7 +497,18 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
         return
       }
       const verified = await rereadWebSettings()
-      if (verified === undefined) {
+      if (!verified.fresh) {
+        // A NEWER read owns the facts: this snapshot is superseded, so it must
+        // not decide a verdict (no stale `Not saved` / `Outcome unknown` and no
+        // notice). The row reconciles to whatever the newest read committed.
+        const committed = webSettledValue(id)
+        if (committed === undefined) webRowPhases.set(id, { kind: 'outcome-unknown' })
+        else webRowPhases.delete(id)
+        repaintWebItems?.()
+        return
+      }
+      const settings = verified.settings
+      if (settings === undefined) {
         // The mutation may have applied: never report success, and never
         // pretend a rollback either — the next read owns the display.
         webRowPhases.set(id, { kind: 'outcome-unknown' })
@@ -733,15 +746,29 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
                   throw error
                 }
                 const verified = await rereadWebSettings()
-                if (verified === undefined) {
+                if (!verified.fresh) {
+                  // Judged by the NEWEST committed facts, never by this
+                  // superseded snapshot.
+                  const committed = webSettledValue('web-search-endpoint')
+                  if (committed === url) {
+                    webRowPhases.delete('web-search-endpoint')
+                    repaintWebItems?.()
+                    return
+                  }
+                  webRowPhases.set('web-search-endpoint', { kind: 'not-saved' })
+                  repaintWebItems?.()
+                  throw new WebWriteVerdictError('not-saved', `the Host keeps "${committed ?? 'an unreadable value'}" (verified by a newer read)`)
+                }
+                const settings = verified.settings
+                if (settings === undefined) {
                   webRowPhases.set('web-search-endpoint', { kind: 'outcome-unknown' })
                   repaintWebItems?.()
                   throw new WebWriteVerdictError('outcome-unknown', 'the endpoint write could not be verified against the Host — reopen the section to read the current value')
                 }
                 webRowPhases.delete('web-search-endpoint')
                 repaintWebItems?.()
-                if (verified.api.baseURL !== url) {
-                  throw new WebWriteVerdictError('not-saved', `the Host kept "${verified.api.baseURL}" instead of the submitted endpoint`)
+                if (settings.api.baseURL !== url) {
+                  throw new WebWriteVerdictError('not-saved', `the Host kept "${settings.api.baseURL}" instead of the submitted endpoint`)
                 }
               }),
               requestRender: () => app.requestRender(),
