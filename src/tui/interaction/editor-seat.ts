@@ -46,6 +46,14 @@ export class EditorSeatMount extends Container {
     this.children = [component]
   }
 
+  /** The single live occupant this slot forwards `focused`/input to (the
+   *  vendored Container's X051 focus ownership), or undefined when empty. The
+   *  slot never owns input itself: the host's input-owner predicate resolves
+   *  through this accessor instead of reading the mount as the keyboard owner. */
+  get occupant(): Component | undefined {
+    return this.children[0]
+  }
+
   /** Detach the current occupant without disposing it. */
   detach(): void {
     this.children = []

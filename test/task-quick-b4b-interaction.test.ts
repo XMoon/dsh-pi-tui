@@ -2105,3 +2105,44 @@ test('B4B-f18 closing the Todo panel restores the grant and the ↓ hint returns
   assert.equal(paintedAfterClose, true,
     `the restored grant must repaint the hint (grant ${grantAfterClose}, real Down entered ${routeAfterClose})\n${view(h.vt)}`)
 })
+
+/**
+ * B4B-f19 (focus/seat authority). A fullscreen LEFT CLICK inside the editor
+ * makes the editor the input owner. The fork promotes the mouse focus target
+ * to the seat's physical mount container, which forwards `focused` and the
+ * keyboard to its live child (X051) — so the editor still types. Every
+ * consumer that asks "does the editor own the keyboard" must therefore resolve
+ * to the EDITOR after such a click (the raw physical focus legitimately stays
+ * on the forwarding seat mount).
+ */
+test('B4B-f19 a fullscreen editor click leaves the editor as the input owner (hint and Down follow)', async () => {
+  const h = await startQuick({ roster: [job('j1', 'build', 'running')] })
+  for (let i = 0; i < 8; i++) await new Promise(r => setTimeout(r, 0))
+  await h.vt.waitForRender()
+  h.app.setFullscreen(true)
+  await h.vt.waitForRender()
+  assert.ok(view(h.vt).includes('↓ view'), `precondition: the alt frame advertises the hint:\n${view(h.vt)}`)
+
+  // Press + release on ONE cell inside the editor's painted rows: the renderer
+  // synthesizes the click that positions the cursor (1-based SGR rows).
+  const rows = rawView(h.vt)
+  const promptRow = rows.findIndex(line => line.includes('❯'))
+  assert.ok(promptRow >= 0, `the editor paints its prompt row:\n${view(h.vt)}`)
+  h.vt.sendInput(`\x1b[<0;3;${promptRow + 1}M`)
+  h.vt.sendInput(`\x1b[<0;3;${promptRow + 1}m`)
+  await h.vt.waitForRender()
+  for (let i = 0; i < 8; i++) await new Promise(r => setTimeout(r, 0))
+  await h.vt.waitForRender()
+
+  assert.equal(h.app.inputOwnerForTest(), h.app.seatEditorForTest().component,
+    `the editor itself must remain the input owner after a fullscreen editor click:\n${view(h.vt)}`)
+
+  // Both the paint and the real route must survive the click.
+  assert.ok(view(h.vt).includes('↓ view'), `the hint must survive the click:\n${view(h.vt)}`)
+  h.vt.sendInput('\x1b[B')
+  await h.vt.waitForRender()
+  await sleep(20)
+  assert.ok(h.band().identity >= 0, `Down must still enter Quick after the click:\n${view(h.vt)}`)
+  h.app.setFullscreen(false)
+  await h.vt.waitForRender()
+})
