@@ -6586,18 +6586,21 @@ system or fork divergence is introduced.
   `test/session-v4-rc2-persistence.test.ts`; a single fixture that runs the real
   agent-loop testkit underneath the real runner (so the refusal travels
   persistence → agent loop → picker) is NOT_VERIFIED and needs that mount.
-- A Workflow member CAN carry an rc.2 external catalog identity, so the scoped
-  Task Browser MUST keep a matching external row visible (it is required
-  semantics, not a defensive filter). The official producer chain: the Workflow
-  runtime passes any resolved `ctx.subagents` provider to
-  `subagents.startActivation` and returns its `run.childId` verbatim
-  (`dsh-workflow-ptc`), the workflow tool persists that same id as the member's
-  `childId` (`dsh-tool-workflow`, `childId: agent.childId`), and the external
-  activation writes `mode: 'external'` into the SAME parent catalog with that
-  same `SessionId` (`dsh-subagent` catalog v2, documented as "a direct child's
-  identity"). No local Session therefore does NOT mean no member identity.
-  Regression: `test/task-browser-runtime.test.ts` (a scope that names the
-  external child keeps its row, while job rows stay excluded).
+- Can a Workflow member id ALSO be an rc.2 external catalog row? Traced against
+  the installed packages: the Workflow runtime starts its children with
+  `delivery: 'caller'` (`dsh-workflow-ptc`), and the subagent manager only calls
+  `establishExternalCatalogChild` when `spec.delivery === 'parent'`
+  (`@deepseek-ai/dsh-subagent/lib/index.js`, and its type doc: "Parent delivery
+  notifies the model; caller delivery only returns the result. Local children
+  always enter the parent catalog"). `listDescendants()` reads only the parent
+  `subagentCatalog` projection, so a caller-delivered external activation
+  becomes a Workflow member id WITHOUT a Task Browser catalog row. **No official
+  producer path found today makes one id both**, so a scope can currently never
+  name an external catalog row. The scoped filter keeps matching non-job rows
+  visible ANYWAY (identity, not row kind): dropping a matching id silently would
+  be the worse failure if a future producer registers parent-delivered external
+  children. `test/task-browser-runtime.test.ts` covers that as an IDENTITY GUARD
+  (a synthetic collision), explicitly NOT as producer evidence.
 - Web provider network success against a billed DeepSeek endpoint is not
   exercised here (the outer HTTP transport is stubbed); a user-provided account
   would be required.
