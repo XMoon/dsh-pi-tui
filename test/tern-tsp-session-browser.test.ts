@@ -643,6 +643,52 @@ test('Details preserves search state, scrolls its own body, and emits read-only 
   assert.equal(m.fatals.length, 0)
 })
 
+test('host migration-required state is read-only in row detail, content hits, and Details', async (t) => {
+  const m = await mounted(t, reader({
+    list: async () => [
+      row('session-current', { live: true, formatStatus: 'current' }),
+      row('session-other', { formatStatus: 'migration-required' }),
+      row('session-absent', { cwd: '/workspace/other' }),
+    ],
+    projectionBatch: async (rows) => new Map(rows.map((entry) => [entry.id, { title: `${entry.id} title` }])),
+    search: async () => ({
+      items: [{ sessionId: 'session-other', snippet: 'Host content excerpt' }],
+      hasMore: false,
+    }),
+  }), false)
+  const { pane } = m
+  sendAction(pane, 'scope', 'all', picker(pane)!.id)
+  await waitUntil('all-workspaces scope', () => props(pane).scope === 'all')
+  await waitUntil('the three rows are listed', () => items(pane).length === 3)
+  const detailOf = (id: string): string => String(items(pane).find((entry) => entry.id === `session:${id}`)?.detail)
+  const migrating = detailOf('session-other')
+  assert.ok(migrating.includes('Migration required'), migrating)
+  assert.ok(migrating.indexOf('Updated') < migrating.indexOf('Migration required'),
+    `the read-only state item follows Updated: ${migrating}`)
+  assert.doesNotMatch(detailOf('session-current'), /Migration required/u, 'formatStatus=current adds nothing')
+  assert.doesNotMatch(detailOf('session-absent'), /Migration required/u, 'an absent fact is never invented')
+
+  // A Host content hit rebuilds the detail string: the state label must survive.
+  pane.key('session-other')
+  await waitUntil('the content-hit card is ready', () => props(pane).layout === 'cards' && props(pane).state === 'ready')
+  const card = items(pane).find((entry) => entry.id === 'session:session-other')
+  assert.ok(card, 'the migration-required row is a search card')
+  assert.match(String(card?.detail), /Migration required/u)
+  assert.match(String(card?.detail), /Host content excerpt/u)
+
+  const framesBeforeSelect = pane.frameCount()
+  sendSelect(pane, 'session:session-other', picker(pane)!.id)
+  await waitUntil('the migration-required row is selected', () => props(pane).selected === 'session:session-other')
+  // The single card may already be selected, so wait for the frame that carries
+  // the fresh revision-scoped action before sending it.
+  await waitUntil('the selection frame is rendered', () => pane.frameCount() > framesBeforeSelect)
+  sendPickerAction(pane, 'details', BROWSER)
+  await waitUntil('Details opens for the migration-required row', () => details(pane) !== undefined, 3_000)
+  const text = sheetText(pane, BROWSER)
+  assert.ok(text.includes('State | Persisted session · Migration required'), text)
+  assert.equal(m.fatals.length, 0)
+})
+
 test('Details reports Unknown rather than inferring an absent createdAt', async (t) => {
   const m = await mounted(t, reader({
     list: async () => [row('session-current', { createdAt: undefined, updatedAt: 3_000, live: true })],

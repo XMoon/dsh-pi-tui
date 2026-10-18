@@ -47,7 +47,7 @@ export interface SessionReadMismatch {
 
 /** One field deliberately omitted from parity because the official Remote face has no equivalent. */
 export interface SessionReadSkippedField {
-  readonly field: 'createdAt' | 'live' | 'measureContext'
+  readonly field: 'createdAt' | 'live' | 'measureContext' | 'formatStatus'
   readonly reason: string
 }
 
@@ -110,6 +110,9 @@ interface CapturedOperation {
 const SKIPPED_FIELDS: readonly SessionReadSkippedField[] = [
   { field: 'createdAt', reason: 'the official Remote Session list has no creation timestamp' },
   { field: 'live', reason: 'the official running bit is not the Direct attached-session bit' },
+  // The official Client row's on-disk format state has no Direct read
+  // equivalent yet; the Remote passthrough is real but not comparable.
+  { field: 'formatStatus', reason: 'the Direct session list declares no on-disk format state' },
 ]
 const MAX_DIAGNOSTIC_ITEMS = 64
 const MAX_DIAGNOSTIC_TEXT = 512

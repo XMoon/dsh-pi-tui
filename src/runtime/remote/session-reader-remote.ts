@@ -48,6 +48,9 @@ export interface RemoteSessionListRow {
   readonly running: boolean
   readonly updatedAt: number
   readonly projectionValues?: RemoteProjectionValues
+  /** Official Client on-disk format state (rc.2 `SessionListEntry.formatStatus`).
+   * Passed through verbatim; this adapter never infers it. */
+  readonly formatStatus?: 'current' | 'migration-required'
   /** Official Client host-authoritative blank bit (v2 §0.6). */
   readonly blank?: boolean
 }
@@ -213,6 +216,9 @@ export class RemoteSessionReader implements SessionReader {
         cwd: row.cwd,
         ...(row.parentId === undefined ? {} : { parentSession: row.parentId }),
         ...(row.origin === undefined ? {} : { origin: row.origin }),
+        // The official Client row's `formatStatus` is passed through VERBATIM:
+        // no header parsing, no `cwd`-missing inference, no client-side decoder.
+        ...(row.formatStatus === undefined ? {} : { formatStatus: row.formatStatus }),
         // The Client row's `running` bit is not the Direct reader's attached
         // Session-store bit. Keep Remote rows conservatively detached and let
         // shadow parity mark the field non-comparable.

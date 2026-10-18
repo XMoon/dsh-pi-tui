@@ -40,7 +40,11 @@ function header(id: string, createdAt: number, extra: Partial<{
 }
 
 function query(
-  records: Array<{ header: ReturnType<typeof header>; live: boolean }>,
+  records: Array<{
+    header: ReturnType<typeof header>
+    live: boolean
+    formatStatus?: 'current' | 'migration-required'
+  }>,
   searchSessions?: NonNullable<SessionQueryLike['searchSessions']>,
 ): SessionQueryLike {
   return {
@@ -99,6 +103,26 @@ test('list prefers the semantic query engine and sorts newest-first', async () =
   assert.deepEqual(rows.map(r => r.updatedAt), [300, 100])
   assert.deepEqual(rows.map(r => r.createdAt), [300, 100])
   assert.equal(rows[0].live, true)
+})
+
+test('list passes the official session-query formatStatus through and never invents one', async () => {
+  const reader = new DirectSessionReader(host({
+    sessionQuery: query([
+      { header: header('session-current', 300), live: false, formatStatus: 'current' },
+      { header: header('session-migrating', 200), live: false, formatStatus: 'migration-required' },
+      // The official read reported no format state for this row: the adapter
+      // must not guess one from the header version or a missing cwd.
+      { header: header('session-absent', 100), live: false },
+    ]),
+  }), {
+    sessionOf: () => undefined,
+    agentOf: () => undefined,
+  }, NO_DURABLE_MODEL_SELECTION)
+  const rows = await reader.list(undefined)
+  assert.ok(rows !== undefined)
+  assert.deepEqual(rows.map(r => r.formatStatus), ['current', 'migration-required', undefined])
+  assert.equal(Object.hasOwn(rows[2], 'formatStatus'), false,
+    'an absent official fact must not become a client-side value')
 })
 
 test('list matches master visibility: cold cwd-less rows are omitted but live rows remain visible', async () => {

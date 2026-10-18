@@ -207,9 +207,13 @@ function rowItem(
   result?: SessionBrowserSearchResult,
 ): PickerItem {
   const title = row.title === undefined || row.title.trim() === '' ? shortSessionId(row.id) : row.title
+  // Host-authoritative on-disk format state: a read-only label with no new
+  // control. `current` and absent add nothing.
+  const migration = row.formatStatus === 'migration-required' ? 'Migration required' : undefined
   const detail = [
     workspaceKey(row.cwd),
     `Updated ${formatSessionAge(row.updatedAt)}`,
+    migration,
     row.preset === undefined ? undefined : `Preset ${row.preset}`,
     row.live ? 'Live' : 'Persisted',
     shortSessionId(row.id),
@@ -223,9 +227,16 @@ function rowItem(
   return {
     id: `session:${row.id}`,
     label: sanitizeTerminalText(title),
+    // The search-excerpt branch keeps the SAME state label: a Host content
+    // match must never hide that the row needs migration.
     detail: result?.snippet === undefined
       ? detail
-      : `${workspaceKey(row.cwd)} · Updated ${formatSessionAge(row.updatedAt)} · ${sanitizeTerminalText(result.snippet)}`,
+      : [
+          workspaceKey(row.cwd),
+          `Updated ${formatSessionAge(row.updatedAt)}`,
+          migration,
+          sanitizeTerminalText(result.snippet),
+        ].filter((part): part is string => part !== undefined).join(' · '),
     title: sanitizeTerminalText(row.id),
     ...(depth === undefined ? {} : { depth }),
     ...(badges.length === 0 ? {} : { badges }),
@@ -346,6 +357,16 @@ function detailResult(panel: SessionBrowserPanel, row: SessionBrowserRow): Sessi
   return panel.snapshot.searchResults.find((result) => result.row.id === row.id)
 }
 
+/** The existing Identity `State` value, extended with the Host-authoritative
+ * on-disk format state when the Client reported one. `current` and absent add
+ * nothing; no new fact group or control is introduced. */
+function rowStateText(panel: SessionBrowserPanel, row: SessionBrowserRow): string {
+  const base = row.id === panel.request.subject.currentSessionId
+    ? 'Current session'
+    : row.live ? 'Live session' : 'Persisted session'
+  return row.formatStatus === 'migration-required' ? `${base} · Migration required` : base
+}
+
 function detailReader(panel: SessionBrowserPanel, bind: (intent: BrowserIntent) => () => void): Node {
   const row = rowFor(panel, panel.selected)
   const scope = `${panel.serial}-${panel.readerEpoch}`
@@ -359,7 +380,7 @@ function detailReader(panel: SessionBrowserPanel, bind: (intent: BrowserIntent) 
       facts: [
         ['Session ID', row.id],
         ['Title', title],
-        ['State', row.id === panel.request.subject.currentSessionId ? 'Current session' : row.live ? 'Live session' : 'Persisted session'],
+        ['State', rowStateText(panel, row)],
         ['Workspace', row.cwd === undefined ? 'Unknown workspace' : row.cwd],
       ],
     },
