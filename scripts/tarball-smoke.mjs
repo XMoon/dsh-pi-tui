@@ -59,6 +59,7 @@ import {
   restoreDshInstall,
   sourceInstallPackages,
 } from './lib/dsh-distribution.mjs'
+import { COMPAT_MATRIX } from './lib/dsh-compat.mjs'
 import { pnpmExecutable } from './lib/process.mjs'
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url))
@@ -253,6 +254,13 @@ function main() {
     const pkg = JSON.parse(readFileSync(join(extracted, 'package.json'), 'utf8'))
     check('package name', pkg.name === '@xmoon76/dsh-pi-tui', pkg.name)
     check('published package is not private', pkg.private !== true, `private=${String(pkg.private)}`)
+    // The runtime contract must survive packing: DSH reads an own `engines.dsh`
+    // range in preference to the DSH peer ranges, so a manifest that only has
+    // the field in the working tree would ship a different floor than the one
+    // the build and the matrix gate verified.
+    const expectedDshEngine = `>=${COMPAT_MATRIX.matrix.at(-1).dshFrom}`
+    check('published manifest restates the matrix floor as engines.dsh',
+      pkg.engines?.dsh === expectedDshEngine, `engines.dsh=${String(pkg.engines?.dsh)}`)
     const sourceDistribution = cli.dshDistribution === undefined
       ? undefined
       : loadDshDistribution({ mode: 'source', manifest: cli.dshDistribution, packageJson: pkg })

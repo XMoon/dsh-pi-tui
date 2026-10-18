@@ -59,6 +59,17 @@ targets. The intermediate `0.2.1-rc.1` release is deliberately NOT supported
 (the matrix records it without a TUI), and every older runtime below the floor
 must use its paired TUI line from the table above.
 
+The published manifest states that same floor as `engines.dsh`
+(`>=0.2.1-rc.2`) next to `engines.node`, and the packed artifact must carry it
+too. DSH prefers `engines.dsh` over the DSH peer ranges and consults the peers
+only when the field is absent, so `engines.dsh` is the runtime-declared
+contract while the peers keep the npm-level fallback at the identical floor. A
+floor move therefore belongs in the matrix row, the peer ranges and
+`engines.dsh` together, and the compatibility gate fails on a partial move.
+Upstream evaluates `engines.dsh` with prereleases included, which accepts later
+prereleases of a different release tuple that npm's peer rule excludes; range
+equality with the floor does not by itself qualify every such prerelease.
+
 The candidate TUI itself is NOT installable yet, and there is deliberately no
 `dsh plugin -- add` line here: `@latest` is the `0.5.1` stable line and `@next`
 still serves `0.5.2-rc.1`, both with the `>=0.2.0-rc.2` floor, so neither

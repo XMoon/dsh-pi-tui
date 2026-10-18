@@ -18,7 +18,13 @@
     "target and the recovery wording. The floor and the target are distinct values and",
     "must stay independently derived. Consumed by src/startup.ts (inlined by the bundler)",
     "and, through scripts/lib/dsh-compat.mjs, by the release tooling, the",
-    "installation-doc gate and the release-notes tests."
+    "installation-doc gate and the release-notes tests.",
+    "package.json restates the newest row's `dshFrom` as `engines.dsh` `>=<dshFrom>`; DSH",
+    "prefers that field over the DSH peer ranges and only falls back to the peers when it",
+    "is absent, so the peers keep the npm-level fallback in sync with the same floor",
+    "rather than defining a second one. Upstream matches `engines.dsh` with prereleases",
+    "included, which is broader than npm's peer prerelease-tuple rule; an equal range does",
+    "not by itself qualify every such prerelease."
   ],
   "current": {
     "since": "0.5.3",
