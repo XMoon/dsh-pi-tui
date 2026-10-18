@@ -107,6 +107,11 @@ import { createPresentationBridge } from './bootstrap/presentation-bridge.ts'
 import { createTaskSource } from './bootstrap/task-source.ts'
 import { installRuntimeEventWiring, installSessionEventWiring } from './bootstrap/event-wiring.ts'
 import { armRemoteInitRetry } from './bootstrap/remote-init-retry.ts'
+import {
+  IDLE_REMOTE_REFOLD_REQUEST,
+  requestRemoteRefold,
+  type RemoteRefoldRequestState,
+} from './bootstrap/remote-refold-request.ts'
 import { createFatalLifecycle, createSurfaceLifecycle } from './bootstrap/lifecycle.ts'
 import { createSessionStartupHelpers, quiesceResumedOwner } from './bootstrap/session-startup.ts'
 import { createSessionOwnershipCore } from '../app/session/ownership-core.ts'
@@ -1345,11 +1350,9 @@ export function applyRunnerWithRuntime(
      */
     let remoteRefoldInFlight = false
     let remoteRefoldPending = false
-    /** Whether the armed wakeup may re-measure the context: a PAGING wakeup only
-     *  widened the bounded window with older history, so it must not. A recovery
-     *  always measures (and a later recovery is never weakened by an earlier
-     *  paging wakeup). */
-    let remoteRefoldMeasure = true
+    /** The pending reconcile request (queued + whether it may re-measure the
+     *  context); a paging wakeup must not, a recovery always does. */
+    let remoteRefoldRequest: RemoteRefoldRequestState = IDLE_REMOTE_REFOLD_REQUEST
     const pumpRemoteWindowRefold = (): void => {
       if (remoteRefoldInFlight) return
       remoteRefoldInFlight = true
@@ -1363,7 +1366,12 @@ export function applyRunnerWithRuntime(
             // The old window's working-fold proof is VOID: rehydrateFromWindow
             // re-seeds it from the NEW window's fold.
             invalidateWorkingFold()
-            const proof = await presentation.rehydrateFromWindow(sessionId, { measure: remoteRefoldMeasure })
+            // Consume the request BEFORE the read: a wakeup that lands during the
+            // await must fold into a fresh state (a paging wakeup during an
+            // in-flight recovery reconcile still keeps its no-measure decision).
+            const measure = remoteRefoldRequest.measure
+            remoteRefoldRequest = IDLE_REMOTE_REFOLD_REQUEST
+            const proof = await presentation.rehydrateFromWindow(sessionId, { measure })
             if (cleanedUp || remoteIngressHandle !== handle) return
             // An uncommitted re-fold (fence-dropped read) leaves the handle
             // recovering: the next official revision / open transition wakes us.
@@ -1381,6 +1389,7 @@ export function applyRunnerWithRuntime(
     }
     const requestRemoteWindowRefold = (sessionId: string, reason?: RemoteRefoldReason): void => {
       if (cleanedUp || ownership.currentSessionId() !== sessionId) return
+      remoteRefoldRequest = requestRemoteRefold(remoteRefoldRequest, reason)
       remoteRefoldPending = true
       pumpRemoteWindowRefold()
     }
@@ -3025,7 +3034,10 @@ export function applyRunnerWithRuntime(
             const snapshot = await remoteSources.presentationReader.loadOlder(sessionId, lifecycleController.signal)
             if (snapshot === undefined) return
             if (ownership.currentSessionId() !== sessionId || cleanedUp) return
-            await presentation.rehydrateFromWindow(sessionId)
+            // This is HISTORY PAGING (`loadOlder` joined older events at the
+            // front): the newly provable compaction boundary is old history, not
+            // a new model-visible event, so it must not re-measure the context.
+            await presentation.rehydrateFromWindow(sessionId, { measure: false })
           } finally {
             if (remoteHistoryLoadingFor === sessionId) remoteHistoryLoadingFor = undefined
           }
