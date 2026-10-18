@@ -220,7 +220,11 @@ Corrections this table makes to the current code:
   formatted facts and detail values — and that is where "unpainted" is a defect.
   The two must not be confused: the Settings detail pane's `Value`/`Source`/
   `Runtime` are derived and must be painted; the Job log body is raw and must
-  stay unpainted.
+  stay unpainted. **The raw record stays the content authority and the
+  exact-copy source; the terminal-bound presentation is a disposable projection
+  that may remove untrusted controls** (see `terminal-output-safety.md`). A raw
+  job log can therefore render with whitelisted SGR while the copied bytes stay
+  byte-exact.
 - **Secondary facts are one layer below their group's primary content**, not all
   at the same weight: in the Settings detail pane only the primary field's value
   is `text`; `Source`/`Runtime`/`Persisted`/`Scope`/`Freshness`/`Description`/
