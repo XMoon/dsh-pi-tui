@@ -96,12 +96,13 @@ interface Harness {
 
 function setup(options: {
   readonly columns?: number
+  readonly rows?: number
   readonly available?: boolean
   readonly searchProvider?: string
 }
 = {}): Harness {
   const columns = options.columns ?? 140
-  const vt = new VirtualTerminal(columns, 40)
+  const vt = new VirtualTerminal(columns, options.rows ?? 40)
   const writes: string[] = []
   const delegated: string[] = []
   let activeWrites = 0
@@ -814,10 +815,10 @@ test('a superseded readback settling while the newer read is STILL pending never
 function supersededEndpointCase(
   name: string,
   arrangeNewest: (h: Harness) => void,
-  assertVerdict: (frame: string) => void,
+  assertVerdict: (frame: string, columns: number) => void,
 ): void {
-  test(`a superseded endpoint readback is judged by the NEWEST read: ${name}`, async t => {
-    const h = setup()
+  for (const [columns, rows] of SUPERSEDED_SIZES) test(`a superseded endpoint readback is judged by the NEWEST read at ${columns}x${rows}: ${name}`, async t => {
+    const h = setup({ columns, rows })
     t.after(h.dispose)
     await openWebSection(h)
     const readsBefore = h.readCount()
@@ -838,7 +839,9 @@ function supersededEndpointCase(
     const releaseR2 = h.holdRead()
     t.after(releaseR2)
     await key(h, ESC)
-    assert.ok(h.view().includes('Search / Fetch API Endpoint'), 'the first Esc only closed the endpoint submenu')
+    // The endpoint row's LABEL truncates at the 44-column floor, so the needle
+    // is the part every size keeps: the first Esc closed only the submenu.
+    assert.ok(h.view().includes('Search / Fetch'), 'the first Esc only closed the endpoint submenu')
     await key(h, ESC)
     assert.ok(h.view().includes('Settings · Other'), 'the restored Workspace owns the surface')
     assert.match(h.view(), /Loading…/u, 'the newer read R2 is pending')
@@ -865,38 +868,55 @@ function supersededEndpointCase(
     releaseR3()
     await settle(h)
     for (let index = 0; index < 4; index += 1) await key(h, DOWN)
-    assertVerdict(h.view())
+    assertVerdict(h.view(), columns)
   })
 }
+
+/** The frozen sizes for the changed verdict sink. */
+const SUPERSEDED_SIZES = [[120, 40], [80, 10], [44, 20]] as const
 
 supersededEndpointCase(
   'the newest read observed the submitted endpoint',
   () => {},
-  frame => {
+  (frame, columns) => {
     assert.doesNotMatch(frame, /\[Outcome unknown\]|\[Not saved\]/u, `a verified write leaves no verdict:\n${frame}`)
-    assert.ok(frame.includes('Current: https://api.deepseek.com/v1/tools'),
-      `the row states the verified endpoint:\n${frame}`)
+    if (columns >= 120) {
+      assert.ok(frame.includes('Current: https://api.deepseek.com/v1/tools'),
+        `the row states the verified endpoint:\n${frame}`)
+    }
   },
 )
 
 supersededEndpointCase(
   'the Host kept another value',
   h => { h.store.web.api.baseURL = 'https://other.example/v1' },
-  frame => {
+  (frame, columns) => {
     // R1 was UNREADABLE: an `Outcome unknown` here would be the superseded
     // snapshot's answer, so `Not saved` proves the NEWEST facts decided.
     assert.match(frame, /\[Not saved\]/u, `a kept value is reported as Not saved:\n${frame}`)
     assert.doesNotMatch(frame, /Outcome unknown/u, `the superseded snapshot never decides:\n${frame}`)
-    assert.ok(frame.includes('Current: Not saved'), `the row states the verdict:\n${frame}`)
+    // The endpoint panel (whose own message named the Host's value) is already
+    // closed when a superseded verdict lands, so the ROW's Detail has to carry
+    // the newest authority value or the user never sees it.
+    // The 44-column floor drops the Detail description (the frozen drop order),
+    // so the value is asserted on the sizes that paint it; the verdict CHIP is
+    // asserted at every size above.
+    if (columns >= 80) {
+      assert.ok(frame.includes('Current: Not saved'), `the row states the verdict:\n${frame}`)
+      assert.ok(frame.includes('the Host keeps "https://other.example/v1"'),
+        `the row reports the value the Host actually keeps:\n${frame}`)
+    }
   },
 )
 
 supersededEndpointCase(
   'the newest read could not read the Host',
   h => { h.store.readUndefined = true },
-  frame => {
+  (frame, columns) => {
     assert.match(frame, /\[Outcome unknown\]/u, `an unobservable result is Outcome unknown:\n${frame}`)
-    assert.ok(frame.includes('Current: Outcome unknown'), `the row states the same verdict:\n${frame}`)
+    if (columns >= 120) {
+      assert.ok(frame.includes('Current: Outcome unknown'), `the row states the same verdict:\n${frame}`)
+    }
   },
 )
 

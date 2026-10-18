@@ -79,18 +79,21 @@ const DEFAULT_DOC: TuiSettingsDoc = {
 interface Harness {
   readonly vt: VirtualTerminal
   readonly app: TuiApp
-  readonly store: { web: WebProviderSettings; available: boolean; failNext: string | undefined }
+  readonly store: { web: WebProviderSettings; available: boolean; failNext: string | undefined; endpointStoredValue: string | undefined }
   readonly view: () => string
   readonly plain: () => readonly string[]
   readonly invoke: (name?: string) => unknown
   readonly dispose: () => void
 }
 
-function setup(options: { readonly columns: number; readonly rows: number; readonly endpoint?: string }): Harness {
+function setup(options: { readonly columns: number; readonly rows: number; readonly endpoint?: string; readonly iconStyle?: 'emoji' | 'symbols' | 'minimal' }): Harness {
   const vt = new VirtualTerminal(options.columns, options.rows)
   const store = {
     available: true,
     failNext: undefined as string | undefined,
+    /** The value the Host actually KEEPS after a successful endpoint write (a
+     *  canonical form / a winning project layer); undefined = the submitted URL. */
+    endpointStoredValue: undefined as string | undefined,
     web: {
       searchProvider: 'deepseek-official',
       fetchProvider: 'http',
@@ -99,7 +102,8 @@ function setup(options: { readonly columns: number; readonly rows: number; reado
     } as WebProviderSettings,
   }
   const doc: TuiSettingsDoc = { ...DEFAULT_DOC }
-  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} },
+    options.iconStyle === undefined ? undefined : { iconStyle: options.iconStyle })
   app.start()
   startedApps.add(app)
   const defs: { name: string; handler?: unknown }[] = []
@@ -168,7 +172,7 @@ function setup(options: { readonly columns: number; readonly rows: number; reado
         setFetchProvider: async (id: string) => { write(() => { store.web.fetchProvider = id }) },
         setSearchApiCount: async (count: number) => { write(() => { store.web.api.count = count }) },
         setSendOriginalQuestion: async (enabled: boolean) => { write(() => { store.web.api.sendOriginalQuestion = enabled }) },
-        setSearchApiBaseURL: async (url: string) => { write(() => { store.web.api.baseURL = url }) },
+        setSearchApiBaseURL: async (url: string) => { write(() => { store.web.api.baseURL = store.endpointStoredValue ?? url }) },
       },
     },
     catalog: { models: { available: () => false } },
@@ -295,6 +299,96 @@ test('the credential panel keeps its title and both explicit actions at 72×24 a
     } finally {
       h.dispose()
     }
+  }
+})
+
+for (const [columns, rows] of SIZES) test(`a refused endpoint write reports the value the Host keeps at ${columns}x${rows}`, async t => {
+  const h = setup({ columns, rows })
+  t.after(h.dispose)
+  await openWebSection(h)
+  for (let attempt = 0; attempt < 20 && !h.view().includes('Web Search Provider'); attempt += 1) {
+    await new Promise(resolve => setTimeout(resolve, 5))
+    await h.vt.waitForRender()
+  }
+  // The Host KEEPS another value than the submitted endpoint (a canonical form
+  // or a winning project layer). The panel states the verdict and the value;
+  // once the panel is gone (the section reopened from the Workspace) the ROW's
+  // own `Current:` fact still reports the value the Host keeps.
+  h.store.endpointStoredValue = 'https://other.example/v1'
+  for (let index = 0; index < 4; index += 1) await key(h, DOWN)
+  await key(h, ENTER)
+  await key(h, ENTER)
+  await new Promise(resolve => setTimeout(resolve, 20))
+  await h.vt.waitForRender()
+  const panel = h.view()
+  assert.match(panel, /Not saved/u, `the panel states Not saved at ${columns} columns:\n${panel}`)
+  if (columns >= 72) {
+    assert.ok(panel.includes('the Host keeps "https://other.example/v1"'),
+      `the panel names the kept value at ${columns} columns:\n${panel}`)
+  }
+  await key(h, ESC)
+  await key(h, ESC)
+  await key(h, ENTER)
+  for (let attempt = 0; attempt < 20 && !h.view().includes('Web Search Provider'); attempt += 1) {
+    await new Promise(resolve => setTimeout(resolve, 5))
+    await h.vt.waitForRender()
+  }
+  for (let index = 0; index < 4; index += 1) await key(h, DOWN)
+  const reopened = h.view()
+  assert.ok(reopened.includes('Current: https://other.example/v1'),
+    `the reopened row reports the value the Host keeps at ${columns} columns:\n${reopened}`)
+  for (const line of h.plain()) {
+    assert.ok(visibleWidth(line) <= columns, `no refused-endpoint row overflows ${columns} cells: ${JSON.stringify(line)}`)
+  }
+})
+
+test('the refused-endpoint fact survives the light, custom and minimal-icon skins', async t => {
+  // ONE live TuiApp per process: the skins are checked sequentially on their own
+  // open. The changed row text is plain/dim description text, so the requirement
+  // is that the FACT is unchanged and no new glyph appears.
+  const skins = [
+    { label: 'light', iconStyle: 'emoji', theme: (): void => { setTheme('light') } },
+    { label: 'custom symbols', iconStyle: 'symbols', theme: (): void => { setTheme('custom', { ...currentPalette, textMuted: '#123456' }) } },
+    { label: 'dark minimal icons', iconStyle: 'minimal', theme: (): void => { setTheme('dark') } },
+  ] as const
+  try {
+    for (const skin of skins) {
+      skin.theme()
+      const h = setup({ columns: 120, rows: 40, iconStyle: skin.iconStyle })
+      try {
+        await openWebSection(h)
+        for (let attempt = 0; attempt < 20 && !h.view().includes('Web Search Provider'); attempt += 1) {
+          await new Promise(resolve => setTimeout(resolve, 5))
+          await h.vt.waitForRender()
+        }
+        h.store.endpointStoredValue = 'https://other.example/v1'
+        for (let index = 0; index < 4; index += 1) await key(h, DOWN)
+        await key(h, ENTER)
+        await key(h, ENTER)
+        await new Promise(resolve => setTimeout(resolve, 20))
+        await h.vt.waitForRender()
+        assert.match(h.view(), /Not saved/u, `the ${skin.label} skin states the verdict:\n${h.view()}`)
+        assert.ok(h.view().includes('the Host keeps "https://other.example/v1"'),
+          `the ${skin.label} skin names the kept value:\n${h.view()}`)
+        await key(h, ESC)
+        await key(h, ESC)
+        await key(h, ENTER)
+        for (let attempt = 0; attempt < 20 && !h.view().includes('Web Search Provider'); attempt += 1) {
+          await new Promise(resolve => setTimeout(resolve, 5))
+          await h.vt.waitForRender()
+        }
+        for (let index = 0; index < 4; index += 1) await key(h, DOWN)
+        assert.ok(h.view().includes('Current: https://other.example/v1'),
+          `the ${skin.label} skin keeps the row fact:\n${h.view()}`)
+        for (const line of h.plain()) {
+          assert.ok(visibleWidth(line) <= 120, `no ${skin.label} row overflows: ${JSON.stringify(line)}`)
+        }
+      } finally {
+        h.dispose()
+      }
+    }
+  } finally {
+    setTheme('dark')
   }
 })
 

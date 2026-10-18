@@ -62,6 +62,19 @@ function makePanel(
   return { panel, rendered: () => panel.render(100) }
 }
 
+test('the action bar advertises Stop only for a row that can be stopped', () => {
+  const stoppable = makePanel([subagent()])
+  const stoppableFrame = stoppable.rendered().map(strip).join('\n')
+  assert.ok(stoppableFrame.includes('s stop'), `a stoppable row advertises Stop:\n${stoppableFrame}`)
+  // An external catalog leaf (or any other non-stoppable row) has no Stop
+  // action at all — `requestStop()` is a silent no-op there — so the bar must
+  // not advertise a key that does nothing.
+  const external = makePanel([subagent({ value: 'agent:ext', label: 'external · external run', canStop: false })])
+  const externalFrame = external.rendered().map(strip).join('\n')
+  assert.ok(!externalFrame.includes('s stop'), `a non-stoppable row advertises no Stop:\n${externalFrame}`)
+  assert.ok(externalFrame.includes('Enter open'), 'the remaining hints stay listed')
+})
+
 test('the extreme no-match grant keeps the message over the header', () => {
   const { panel, rendered } = makePanel([runningJob()], { enableSearch: true })
   panel.handleInput('/') // explicit search mode

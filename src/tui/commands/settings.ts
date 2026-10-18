@@ -243,10 +243,12 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
    *  verdict is then decided by the newest authority facts, never by a snapshot
    *  a later read superseded. A read STARTED during the wait is the newer
    *  authority and must settle first too, so the loop re-checks the in-flight
-   *  serial after every await (bounded: each iteration awaits a read the Host
-   *  already accepted, and the guard only stops a pathological read storm). */
+   *  serial after every await. Every iteration awaits a read the Host already
+   *  accepted, so the loop can only continue while reads keep being started — it
+   *  never spins without an await, and judging from a still-pending snapshot
+   *  would be exactly the bug this wait exists to prevent. */
   const awaitWebSettled = async (): Promise<void> => {
-    for (let guard = 0; guard < 100; guard += 1) {
+    for (;;) {
       const inFlight = webReadInFlight
       if (inFlight === undefined) return
       try {
@@ -435,8 +437,17 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
         return `Current: ${current} · Results requested per DeepSeek Search API call; the official limit is 1 through 50, and a smaller per-request bound still wins.`
       case 'web-send-original-question':
         return `Current: ${current} · On: each DeepSeek Search API call also sends up to 128 characters of the human question that triggered it (ori_question). Off: it never does. An already running operation is never changed retroactively.`
-      case 'web-search-endpoint':
-        return `Current: ${current} · The API base the DeepSeek Search and Fetch APIs call (/search and /fetch are appended). Changing it sends the credential to that endpoint, so only a trusted https base is accepted.`
+      case 'web-search-endpoint': {
+        // A refused endpoint write must still say what the Host KEEPS: the
+        // panel's own message dies with the panel (a superseded verdict lands
+        // after the panel was cancelled), so the row's Detail carries the newest
+        // authority value whenever the verdict is `Not saved` and that value is
+        // readable. An unreadable authority claims nothing extra here.
+        const kept = webRowPhases.get('web-search-endpoint')?.kind === 'not-saved'
+          ? webSettledValue('web-search-endpoint')
+          : undefined
+        return `Current: ${current}${kept === undefined ? '' : ` · the Host keeps "${kept}"`} · The API base the DeepSeek Search and Fetch APIs call (/search and /fetch are appended). Changing it sends the credential to that endpoint, so only a trusted https base is accepted.`
+      }
     }
   }
 
