@@ -149,6 +149,8 @@ import {
   SettingsWorkspacePanel,
   type SettingsWorkspaceCommitOutcome,
   type SettingsWorkspaceCommitRequest,
+  type SettingsWorkspaceRowFacts,
+  type SettingsWorkspaceRowId,
   type SettingsWorkspaceSource,
 } from './tui/panels/settings-workspace-panel.ts'
 import type { TaskPanelItem } from './app/surface/task-presentation.ts'
@@ -1577,10 +1579,10 @@ export interface SettingsListOpenOptions {
 export interface SettingsWorkspaceHandle {
   /** Leave the Settings workspace and restore the surface that opened it. */
   close(): void
-  /** Re-read the source snapshot and repaint (S2/PR-B §B3.4): the caller's
-   *  asynchronous authority read settles, then THIS workspace generation
-   *  refreshes its own rows. A superseded/closed lease is inert. */
-  refresh(): void
+  /** Repaint ONE row with facts another authority changed, WITHOUT re-reading
+   *  the TUI settings document (S2/PR-B §B3.4 — a workspace surface keeps its
+   *  ONE guarded document read). A superseded/closed lease is inert. */
+  refreshRow(rowId: SettingsWorkspaceRowId, facts: SettingsWorkspaceRowFacts): void
 }
 
 /**
@@ -21494,9 +21496,9 @@ export class TuiApp {
     }
     return {
       close: () => close(),
-      refresh: () => {
+      refreshRow: (rowId, facts) => {
         if (this.disposed || this.settingsWorkspace !== record) return
-        panel.refreshSnapshot()
+        panel.refreshRow(rowId, facts)
         this.requestRender()
       },
     }
@@ -21785,8 +21787,13 @@ export class TuiApp {
     // outlet refresh reads the revision from the store, so the order
     // matters (F-14 — a theme switch must re-bake extension ANSI).
     this.extensionHost?.updateSurface({ themeId: theme, themeRevision: this.themeRevision })
-    this.notifyThemeChanged()
-    this.repaintAllSurfaces()
+    // A throwing observer must not abort the switch: the repaint runs whatever
+    // the observers did, and the first observer failure is reported afterwards.
+    try {
+      this.notifyThemeChanged()
+    } finally {
+      this.repaintAllSurfaces()
+    }
   }
 
   /** The theme identity the surface is currently painted with (`dark`, `light`
@@ -21831,8 +21838,11 @@ export class TuiApp {
     this.themeRevision += 1
     // Same ordering as applyTheme (F-14).
     this.extensionHost?.updateSurface({ themeId: 'custom', themeRevision: this.themeRevision })
-    this.notifyThemeChanged()
-    this.repaintAllSurfaces()
+    try {
+      this.notifyThemeChanged()
+    } finally {
+      this.repaintAllSurfaces()
+    }
   }
 
   /** Apply a PLUGIN theme palette and remember which plugin theme is the

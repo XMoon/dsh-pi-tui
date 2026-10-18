@@ -1551,6 +1551,63 @@ states are pinned in-process instead (`test/settings-web-provider.test.ts`,
 `test/settings-web-visual.test.ts`, and `test/session-picker-loading.test.ts` at
 80×24 AND 44×20).
 
+## 8d. Real-terminal record — S2 review delta 2 (Web endpoint row)
+
+Same isolated development home and rc.2 CLI as §8b/§8c
+(`/home/xmoon/.local/bin/dsh-next` with `DSH_NEXT_ROOT=<the S2 worktree>`,
+`DSH_HOME=~/.dsh-pi-tui-next`), `tmux new-session -d -s <name> -x 120 -y 40`,
+launched with `env -u NO_COLOR`, keys sent one at a time, frames captured with
+`tmux capture-pane -p` (plain, shown verbatim below) and `-e` (ANSI: 157
+`\e[…m` sequences in the endpoint-row frame, truecolor `\e[38;2;…` included).
+The route is the frozen one: `/settings` → `Other settings` → `Web Search /
+Fetch` → the legacy Web section.
+
+The changed fact is the ENDPOINT row's value slot: while the Host returns a
+readable `baseURL` the slot paints that URL (the submenu shows it in full), and
+`[unavailable]` is reserved for an authority that really could not be read — a
+valid endpoint is never claimed unavailable. Four `Down` presses from the
+section top put the cursor on that row:
+
+```text
+ ╭──────────────────────────────────────────────────────────────────────╮
+ │ >                                                                    │
+ │                                                                      │
+ │   Web Fetch Provider           [current] [default]                   │
+ │   Search API Result Count      [current] [default]                   │
+ │   Share Original Question      [current] [default]                   │
+ │ > Search / Fetch API Endpoint  https://api.deepseek.com/v1/tools     │
+ │   DeepSeek API Key             [current]                             │
+ │   Keyboard shortcuts           Defaults                              │
+ │   (28/31)                                                            │
+ │                                                                      │
+ │   Current: https://api.deepseek.com/v1/tools · The API base the      │
+ │   DeepSeek Search and Fetch APIs call (/search and /fetch are        │
+ │   appended). Changing it sends the credential to that endpoint, so   │
+ │   only a trusted https base is accepted.                             │
+ ╰──────────────────────────────────────────────────────────────────────╯
+```
+
+`Enter` on the same row still opens the endpoint editor on the authoritative
+value (unchanged by this delta; the editor owns the write and its verdict):
+
+```text
+ ╭──────────────────────────────────────────────────────────────────────╮
+ │ Search / Fetch API Endpoint                                          │
+ │ > https://api.deepseek.com/v1/tools                                  │
+ │ Confirm only a trusted https URL: the saved endpoint receives the... │
+ │ Changing this sends the DeepSeek API credential to a different en... │
+ │ Official base: https://api.deepseek.com/v1/tools; /search and /fe... │
+ │ Enter confirm · Esc cancel                                           │
+ ╰──────────────────────────────────────────────────────────────────────╯
+```
+
+The write-verdict change of the same delta (a resolved mutation the Host did not
+commit is `Not saved`, with the row back on the value the Host keeps) needs a
+Host that keeps a DIFFERENT value than the one submitted, which this isolated
+home cannot produce: it stays NOT_RUN as a real-terminal frame (the state is
+pinned in-process at the frozen sizes by `test/settings-web-provider.test.ts`
+and `test/settings-web-visual.test.ts`).
+
 ## 9. Re-verification recipe
 
 For V2/V3 (and for any later surface PR), the after-evidence must be produced

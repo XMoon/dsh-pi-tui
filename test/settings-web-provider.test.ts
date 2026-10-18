@@ -80,6 +80,10 @@ interface Harness {
      *  official store's canonical form of the submitted base); undefined = the
      *  submitted URL verbatim. */
     endpointStoredValue: string | undefined
+    /** The provider id the Host actually KEEPS after a successful mutation (a
+     *  competing external writer / the official store's own answer); undefined =
+     *  the submitted id verbatim. */
+    keptProviderValue: string | undefined
   }
   /** How many authority reads were ISSUED (the newest-read witnesses). */
   readonly readCount: () => number
@@ -117,6 +121,7 @@ function setup(options: {
     readUndefined: false,
     writeDelayMs: 0,
     endpointStoredValue: undefined as string | undefined,
+    keptProviderValue: undefined as string | undefined,
     web: {
       searchProvider: options.searchProvider ?? 'deepseek-official',
       fetchProvider: 'http',
@@ -206,7 +211,7 @@ function setup(options: {
           if (unreadable) return undefined
           return captured
         },
-        setSearchProvider: async (id: string) => { await write(`search:${id}`, () => { store.web.searchProvider = id }, store.writeDelayMs) },
+        setSearchProvider: async (id: string) => { await write(`search:${id}`, () => { store.web.searchProvider = store.keptProviderValue ?? id }, store.writeDelayMs) },
         setFetchProvider: async (id: string) => { await write(`fetch:${id}`, () => { store.web.fetchProvider = id }) },
         setSearchApiCount: async (count: number) => { await write(`count:${count}`, () => { store.web.api.count = count }) },
         setSendOriginalQuestion: async (enabled: boolean) => { await write(`ori:${String(enabled)}`, () => { store.web.api.sendOriginalQuestion = enabled }) },
@@ -372,6 +377,70 @@ test('rapid conflicting selections commit in order and the row ends on the verif
   assert.deepEqual(h.writes, ['search:deepseek-official', 'search:deepseek-search-api'])
   assert.equal(h.store.web.searchProvider, 'deepseek-search-api')
   assert.match(h.view(), /DeepSeek Search API/u, 'the row shows the authoritative read-back')
+})
+
+test('a resolved provider mutation the Host does not commit is Not saved, never a save', async t => {
+  const h = setup()
+  t.after(h.dispose)
+  await openWebSection(h)
+  assert.match(h.view(), /Current: Messages/u, 'the section starts from the settled facts')
+
+  // The mutation RESOLVES, but the Host's own answer keeps Messages (a competing
+  // external writer / the official store's canonical answer): only the read-back
+  // decides, so this is never reported as a save.
+  h.store.keptProviderValue = 'deepseek-official'
+  await key(h, ENTER)
+  await settle(h)
+  assert.deepEqual(h.writes, ['search:deepseek-search-api'], 'the mutation really ran')
+  assert.equal(h.store.web.searchProvider, 'deepseek-official', 'the Host kept its own value')
+  const refusedRow = h.view().split('\n').find(line => line.includes('Web Search Provider')) ?? ''
+  assert.match(refusedRow, /\[Not saved\]/u, `the row reports the Host's answer:\n${h.view()}`)
+  assert.doesNotMatch(refusedRow, /\[current\]/u, 'the row never claims a verified value')
+  assert.match(h.view(), /Current: Not saved/u, 'the row Detail states the same verdict')
+
+  // The selector went back to the value the Host HOLDS: the next Enter resumes
+  // the cycle from Messages (-> DeepSeek Search API), never from the rejected
+  // intent — which would have submitted Messages a second time.
+  await key(h, ENTER)
+  await settle(h)
+  assert.deepEqual(h.writes, ['search:deepseek-search-api', 'search:deepseek-search-api'],
+    'the selector sits on the Host value, not on the rejected intent')
+})
+
+test('two selections on the same row end on the Host value when the second is not committed', async t => {
+  const h = setup()
+  t.after(h.dispose)
+  await openWebSection(h)
+
+  // First intent (Messages -> DeepSeek Search API): committed and verified.
+  await key(h, ENTER)
+  await settle(h)
+  assert.deepEqual(h.writes, ['search:deepseek-search-api'])
+  assert.equal(h.store.web.searchProvider, 'deepseek-search-api')
+  const verifiedRow = h.view().split('\n').find(line => line.includes('Web Search Provider')) ?? ''
+  assert.match(verifiedRow, /\[current\]/u, 'the first selection is verified')
+
+  // Second intent on the SAME row (back to Messages) resolves, but the Host
+  // keeps the first selection.
+  h.store.keptProviderValue = 'deepseek-search-api'
+  await key(h, ENTER)
+  await settle(h)
+  assert.deepEqual(h.writes, ['search:deepseek-search-api', 'search:deepseek-official'],
+    'the second intent really ran')
+  assert.equal(h.store.web.searchProvider, 'deepseek-search-api', 'the Host keeps the first selection')
+  const refusedRow = h.view().split('\n').find(line => line.includes('Web Search Provider')) ?? ''
+  assert.match(refusedRow, /\[Not saved\]/u, `the row reports the refused second intent:\n${h.view()}`)
+
+  // The row's cursor is the value the Host kept, so the next cycle submits
+  // Messages again; a transient verdict word in that field (or the rejected
+  // intent left in it) would have resumed the cycle from the wrong position.
+  await key(h, ENTER)
+  await settle(h)
+  assert.deepEqual(
+    h.writes,
+    ['search:deepseek-search-api', 'search:deepseek-official', 'search:deepseek-official'],
+    'the selector sits on the value the Host kept',
+  )
 })
 
 test('the Web section deeplink is reachable from the workspace and Esc cancels without a write', async t => {

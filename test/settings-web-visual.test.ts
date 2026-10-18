@@ -283,6 +283,51 @@ for (const [columns, rows] of SIZES) {
   })
 }
 
+for (const [label, endpoint, wideNeedle] of [
+  ['the packaged default', 'https://api.deepseek.com/v1/tools', 'https://api.deepseek.com/v1/tools'],
+  ['a custom valid base', 'https://gateway.example.test/deepseek/v1', 'https://gateway.example.test'],
+] as const) {
+  for (const [columns, rows] of SIZES) {
+    test(`a readable endpoint row states its URL, never [unavailable] at ${columns}×${rows}: ${label}`, async t => {
+      const h = setup({ columns, rows, endpoint })
+      t.after(h.dispose)
+      await openWebSection(h)
+      for (let attempt = 0; attempt < 40 && !h.view().includes('Web Search Provider'); attempt += 1) {
+        await new Promise(resolve => setTimeout(resolve, 5))
+        await h.vt.waitForRender()
+      }
+      // The endpoint row is the fifth Web setting: select it so its Detail is
+      // the parsed one, then read the ROW's own value slot. Only the LABEL
+      // truncates with `…` at the 44-column floor, so the needle is its stem.
+      for (let index = 0; index < 4; index += 1) await key(h, DOWN)
+      const row = h.plain().find(line => line.includes('Search / Fetch API Endp')) ?? ''
+      assert.ok(row.length > 0, `the endpoint row is painted at ${columns}x${rows}:\n${h.plain().join('\n')}`)
+      assert.ok(!row.includes('[unavailable]'),
+        `a readable endpoint is never claimed unavailable at ${columns}x${rows}:\n${row}`)
+      // The slot paints the authoritative URL (truncated to the cells it has at
+      // the narrow sizes), never a state word.
+      assert.ok(row.includes(columns >= 72 ? wideNeedle : 'https://'),
+        `the row states the URL the Host returned at ${columns}x${rows}:\n${row}`)
+      for (const line of h.plain()) {
+        assert.ok(visibleWidth(line) <= columns, `no frame line exceeds ${columns} cells: ${JSON.stringify(line)}`)
+      }
+    })
+  }
+}
+
+test('an unreadable endpoint authority still paints [unavailable] on the row', async t => {
+  const h = setup({ columns: 120, rows: 40 })
+  t.after(h.dispose)
+  h.store.available = false
+  await openWebSection(h)
+  // The window shows only the first rows of the section: scroll the endpoint row
+  // into view (the fifth Web setting) before reading its value slot.
+  for (let index = 0; index < 4; index += 1) await key(h, DOWN)
+  const row = h.plain().find(line => line.includes('Search / Fetch API Endp')) ?? ''
+  assert.ok(row.includes('[unavailable]'),
+    `an authority that cannot be read is stated as unavailable:\n${h.plain().join('\n')}`)
+})
+
 test('the credential panel keeps its title and both explicit actions at 72×24 and 44×20', async t => {
   for (const [columns, rows] of [[72, 24], [44, 20]] as const) {
     const h = setup({ columns, rows })

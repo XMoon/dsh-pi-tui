@@ -9,8 +9,9 @@ DSH products — never TUI raw-parser output.
 Copied verbatim from the official deepseek-harness repository:
 
 - Source: `packages/session/session-persistence-jsonl/tests/fixtures/released-v0-real-shapes.jsonl`
-- Ref: `deepseek-ai/deepseek-harness` @ `d347e703908d0406b7a7ef80e3a0e594d86b2215`
-  (the master 0.1.3-alpha.1 source pack; see `test/compat/dsh-source.json`)
+- Ref: the `ref` pinned by `test/compat/dsh-source.json` (the official
+  0.2.1-rc.2 source pack); the committed copy is byte-identical to that path at
+  that ref.
 - Shape: one complete released-v0 session (header `version: 0`, id
   `released-v0-real-shapes`, cwd `/work`) covering retry, repeated compaction
   with provenance ranges, a late user message, and a late title request.
@@ -18,10 +19,11 @@ Copied verbatim from the official deepseek-harness repository:
 ## `released-v1-real-shapes.jsonl`
 
 Generated from the v0 fixture through the OFFICIAL v0→v1 migration package
-`@deepseek-ai/dsh-session-format-v0-to-v1` (master 0.1.3-alpha.1), then encoded
-as the released-v1 PHYSICAL artifact (what the official persistence reads from
-disk). Generation command (run with the master environment's node_modules
-resolvable, e.g. from a directory whose `node_modules` links the master env):
+`@deepseek-ai/dsh-session-format-v0-to-v1` (the pinned source's package set),
+then encoded as the released-v1 PHYSICAL artifact (what the official persistence
+reads from disk). Generation command (run with the master environment's
+node_modules resolvable, e.g. from a directory whose `node_modules` links the
+master env):
 
 ```sh
 node gen-v1.mjs \

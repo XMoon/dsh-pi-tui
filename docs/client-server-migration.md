@@ -6448,12 +6448,19 @@ production changes and positive/negative evidence.
 - B1: `test/session-v4-rc2-persistence.test.ts` — the rc.2 vocabulary
   round-trips through the real JSONL backend (jobs, working-directory change,
   catalog v2 external, the log-only DeepSeek Messages `thinking` field), a read
-  open and the cold observation write nothing, the released generation is
-  classified and read without being rewritten, only a write open publishes the
-  successor, a newer format is refused, and the released-v3 reader contract
-  refuses the rc.2-only event types (run through the official released-v3
-  restore — never claimed as an executed old reader). Three REAL user sinks are
-  pinned as L6: `test/task-center-external-leaf.test.ts` (a REAL
+  open and the cold observation write nothing, a RELEASED-v1 PHYSICAL artifact
+  (the official rc.2 suite's packed-chunk sample, copied shape-for-shape from the
+  pinned source `packages/session/session-persistence-jsonl/tests/jsonl.spec.ts`)
+  is classified `migration-required` and POSITIVELY read back as the complete
+  current-vocabulary log — packed stream expanded, user message verbatim — while
+  the source stays byte-identical and no successor is published; the committed
+  released-v0/v1 `real-shapes` product artifacts are instead refused by the
+  official v2→v3 chronology rule (surface before the first step) with the source
+  unchanged and no successor, which is the SAME refusal the official rc.2 suite
+  asserts for that fixture; a newer format is refused, and the released-v3 reader
+  contract refuses the rc.2-only event types (run through the official
+  released-v3 restore — never claimed as an executed old reader). Three REAL
+  user sinks are pinned as L6: `test/task-center-external-leaf.test.ts` (a REAL
   `ctx.subagents.startActivation({ delivery: 'parent' })` against a registered
   fixture external provider makes the OFFICIAL manager append the parent-owned
   `subagent/catalog` fact; the official `listDescendants` reads it back through
@@ -6500,12 +6507,16 @@ production changes and positive/negative evidence.
   path maps its payload), `test/settings-web-provider.test.ts` (the real
   `/settings` journey: launcher → legacy section → selector → read-back →
   reopen, Esc no-write, rapid intents FIFO, a failed write reverts and reports
-  `Not saved`, Esc restores the Workspace row, a custom provider id is visible
+  `Not saved`, a resolved mutation the Host does not commit is `Not saved` with
+  the row back on the value the Host holds — two consecutive selections
+  included — , Esc restores the Workspace row, a custom provider id is visible
   and not selectable; the endpoint verdict waits for the NEWEST authority read
   at the 120×40/80×10/44×20 frozen sizes, so a superseded readback never decides
   and the reopened row reports the value the Host actually keeps) and
   `test/settings-web-visual.test.ts` (the frozen visual matrix incl. cell ink and
-  the refused-endpoint row under dark/light/custom + emoji/symbols/minimal).
+  the refused-endpoint row under dark/light/custom + emoji/symbols/minimal; a
+  READABLE endpoint row states its own URL at every frozen size and only an
+  unreadable authority paints `[unavailable]`).
 - B4: `test/credentials-precedence-local.test.ts` (the official precedence and
   external read), `test/model-selection-direct.test.ts`,
   `test/job-observation-direct.test.ts`, `test/subagent-port.test.ts`,
@@ -6562,7 +6573,10 @@ system or fork divergence is introduced.
   switch re-bakes the mounted rows: the surface registers a narrow
   `TuiApp.onThemeChanged` observer while the legacy section is mounted and
   rebuilds its cached chip ANSI there (asserted by a cell-ink test), so an
-  open Web row always paints the current skin. The surface is icon-style
+  open Web row always paints the current skin. A THROWING observer still
+  COMPLETES the switch: the repaint runs for every surface and the first
+  observer failure is reported afterwards
+  (`test/surface-host-app.test.ts`). The surface is icon-style
   neutral (symbols/minimal frames are identical). A CJK
   custom provider id stays cell-safe at the narrow sizes. The real-terminal
   record (rc.2 CLI over the isolated development home: entry → provider write →
@@ -6585,10 +6599,22 @@ system or fork divergence is introduced.
   that currently owns the surface, so an old read (e.g. one suspended while a
   write and a Workspace reopen happened) can never leave the surface on a
   pre-write summary (`test/settings-web-provider.test.ts`, mutation-checked).
+- A Web write is Verified only when the newest authoritative read-back HOLDS the
+  requested value: a resolved mutation the Host did not commit is `Not saved`
+  with the row returned to the value the Host keeps, and an unreadable authority
+  stays `Outcome unknown` — a successful mutation is never reported as a save.
+  The row's cycle cursor is the settled Host value, never a transient verdict
+  word, so the next selection resumes from what the Host holds.
+- A Web read repaints its OWN Workspace row: the TUI settings document is never
+  read a second time by that cycle, so each settings surface keeps its ONE
+  guarded document read (B2-A; `test/preset-command.test.ts` counts them).
 - Review-delta visible changes (§4A.3): the endpoint row's refused-write state
   now states the value the Host actually keeps (`Current: Not saved · the Host
   keeps "<value>" · …`), because a verdict superseded by a newer read lands
   after the endpoint panel was cancelled — the row is the only surviving sink.
+  A READABLE endpoint row's value slot now carries the URL itself (the state
+  chips take the slot only while the fact is pending, transient or unreadable),
+  so a valid `baseURL` is never claimed `[unavailable]`.
   Measured on the same real `TuiApp` + `VirtualTerminal` path: the v1→v2 frames
   at 120×40/80×10/44×20 in `test/settings-web-provider.test.ts` (the changed
   state; the 44-column floor drops the description by the frozen drop order, so
@@ -6626,12 +6652,14 @@ system or fork divergence is introduced.
 
 ### Residual risk / deferred
 
-- The released-v0/v1 artifacts in `test/fixtures/session-format/` are refused by
-  rc.2's v2→v3 promotion (surface events before the first step): the refusal is
-  diagnostic-preserving and byte-stable, and it is asserted as such. A positive
-  physical READ of that older generation therefore remains unproven in this
-  tree; the old-generation LOGICAL migration is covered by the official
-  v3→v4 chain (`test/session-v4-tool-result.test.ts`).
+- The released-v0/v1 `real-shapes` artifacts in `test/fixtures/session-format/`
+  are refused by rc.2's v2→v3 promotion (surface events before the first step):
+  the refusal is diagnostic-preserving and byte-stable, and it is asserted as
+  such — the official rc.2 suite asserts the same refusal for the v0 fixture. The
+  released-v1 FORMAT is positively read through the official rc.2 suite's own
+  packed-chunk sample (classified `migration-required`, complete restored log,
+  byte-stable), so what remains unproven is only a positive physical READ of
+  THOSE two product artifacts, whose chronology cannot carry a system head.
 - Remote Web configuration stays unavailable by design (S3/S4 own the generated
   Remote settings parity); the Remote backend never names a Host namespace.
 - After a REFUSED session resume the Session Picker shows the official
