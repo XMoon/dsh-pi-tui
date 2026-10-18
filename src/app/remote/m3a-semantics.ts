@@ -33,7 +33,7 @@ import type { RemoteConnectionGenerationSource, RemoteSessionsReadSource } from 
 import type { RemoteLlmRemotes, RemoteModelRemotes, RemoteModelSessionsSource } from '../../runtime/remote/model-remote.ts'
 import type { RemotePendingSessionsSource } from '../../runtime/remote/pending-input-reader-remote.ts'
 import type { RemoteWriteSessionsSource } from '../../runtime/remote/session-writer-remote.ts'
-import type { RemoteLifecycleSessions, RemoteLifecycleSessionRemotes } from '../../runtime/remote/session-lifecycle-remote.ts'
+import type { RemoteLifecycleSessions } from '../../runtime/remote/session-lifecycle-remote.ts'
 import type { RemoteSubagentSource } from '../../runtime/remote/subagent-remote.ts'
 import type { RemotePresetRemotes } from '../../runtime/remote/preset-remote.ts'
 import type { RemoteSkillRemotes } from '../../runtime/remote/skill-remote.ts'
@@ -111,7 +111,7 @@ export interface RemoteM3ARuntimeSource {
   readonly sessions: RemoteM3ASessionsSource
   /** The ONE shared generated Remote namespaces the M3-3A adapters map. */
   readonly remote: {
-    readonly session: RemoteModelRemotes & RemoteLifecycleSessionRemotes
+    readonly session: RemoteModelRemotes
     readonly llm: RemoteLlmRemotes
     readonly agentPresets: RemotePresetRemotes
     readonly skills: RemoteSkillRemotes
@@ -174,7 +174,7 @@ export function createRemoteM3ASemantics(
     sessionReader: new RemoteSessionReader(sessions, generation),
     pendingInputReader: new RemotePendingInputReader(sessions, generation),
     sessionWriter: new RemoteSessionWriter(sessions, generation, options.promptSerializer),
-    sessionLifecycle: new RemoteSessionLifecycle(sessions, remote.session, generation),
+    sessionLifecycle: new RemoteSessionLifecycle(sessions, generation),
     subagent: new RemoteSubagentPort(remote.subagents),
     catalog: {
       models: modelCatalog,

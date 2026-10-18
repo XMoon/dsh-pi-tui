@@ -15,7 +15,7 @@
  *
  * Covered flows (sub-plan §8):
  * - A ordinary create            (ClientSessions.create -> Host Session Controller)
- * - B explicit-preset create     (atomic generated session.create({agentPreset}))
+ * - B explicit-preset create     (the SAME ClientSessions.create({agentPreset}) entry)
  * - C open / retain              (ClientSessions.retain, no invented resume RPC)
  * - D model select               (session.modelCatalog / session.selectModel)
  * - E preset select + locked     (agentPresets.select normal + refusal)
@@ -363,7 +363,7 @@ async function main() {
     ))
 
     const generation = connection.generation
-    const lifecycle = new RemoteSessionLifecycle(sessions, sessionRemoteFace, generation)
+    const lifecycle = new RemoteSessionLifecycle(sessions, generation)
     const models = new RemoteModelCatalog(sessionRemoteFace, sessions, generation)
     const presets = new RemotePresetCatalog(presetRemoteFace, generation)
     const hostSession = id => host.ctx.sessions.get(SessionId(id))
