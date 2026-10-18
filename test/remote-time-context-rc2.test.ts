@@ -88,16 +88,18 @@ class CapturingLlmAdapter extends LlmAdapter {
   }
 }
 
-/** A controllable `Date.now` OFFSET for the official plugin's scheduling
- *  reads: the process keeps its real monotonic-ish progression (so a durable
- *  event's own `time` and the plugin's `now` stay consistently ordered) while
- *  the test can jump past the default refresh window deterministically. */
-function installClock(): { advance(ms: number): void; restore(): void } {
+/** A FULLY controlled `Date.now` for the official plugin's scheduling reads:
+ *  the durable event time and the plugin's `now` are both sampled from this
+ *  clock, so the default refresh window can be bracketed at exact millisecond
+ *  boundaries (599999 vs 600000) instead of "some default in a wide range".
+ *  The host work itself is driven by real timers (libuv), not by this clock. */
+function installClock(): { advanceTo(ms: number): void; restore(): void } {
   const original = Date.now
+  const base = original()
   let offset = 0
-  Date.now = () => original() + offset
+  Date.now = () => base + offset
   return {
-    advance: (ms: number): void => { offset += ms },
+    advanceTo: (ms: number): void => { offset = ms },
     restore: (): void => { Date.now = original },
   }
 }
@@ -187,9 +189,11 @@ async function waitForTurnEnd(host: Awaited<ReturnType<typeof createRemoteApplic
 }
 
 /** The real Host + official Client fixture this suite runs on. `plugin:false`
- *  reproduces the `minimal` composition state (no time-context row); the
- *  default mount deliberately omits `refreshIntervalMs` so the official
- *  plugin's OWN default window is the one under test. */
+ *  mounts no time-context row at all (the composition state the official
+ *  `minimal` preset produces — asserted separately from the generated preset
+ *  mirrors, NOT run through the official preset Loader); the default mount
+ *  deliberately omits `refreshIntervalMs` so the official plugin's OWN default
+ *  window is the one under test. */
 async function prepareTimeContextHost(
   life: TestLifecycle,
   options: { readonly plugin: boolean; readonly config?: { timeZone?: string; refreshIntervalMs?: number } },
@@ -260,36 +264,39 @@ test('L5: the official time-context plugin injects one durable snapshot per elig
   // mere presence of a time-context message in the request.
   const readingsOf = (messages: readonly RequestShape[]): string[] => timeContextMessages(messages).map(requestText)
 
-  // ── Turn 2: inside the default refresh window → NO new reading ────────────
-  clock.advance(1_000)
+  // ── Turn 2: ONE millisecond below the default window → NO new reading ─────
+  clock.advanceTo(REFRESH_MS - 1)
   await promptViaClient(sessions, 'second question beta')
   await waitFor('the second model request', () => llm.requests.length >= 2, 20_000)
   await waitForTurnEnd(host, 2)
   const second = readingsOf(llm.requests[1]!)
   assert.equal(second.length, 1, `turn 2 carries only the earlier durable reading: ${JSON.stringify(second)}`)
   assert.equal(second.some(reading => reading.includes('preparing turn 2')), false,
-    'a step within the default 600000 ms window adds no new time reading')
+    'a step inside the window adds no new time reading (so the default is GREATER than 599999 ms)')
 
-  // ── Turn 3: past the window → a NEW reading with the elapsed gap ──────────
-  clock.advance(REFRESH_MS)
+  // ── Turn 3: exactly AT the window → a NEW reading with the elapsed gap ────
+  clock.advanceTo(REFRESH_MS)
   await promptViaClient(sessions, 'third question gamma')
   await waitFor('the third model request', () => llm.requests.length >= 3, 20_000)
   await waitForTurnEnd(host, 3)
   const third = readingsOf(llm.requests[2]!)
   const turn3 = third.filter(reading => reading.includes('preparing turn 3'))
-  assert.equal(turn3.length, 1, `crossing the refresh window injects exactly one new reading: ${JSON.stringify(third)}`)
+  assert.equal(turn3.length, 1,
+    `a step exactly at the window injects one new reading (so the default is NOT GREATER than 600000 ms): ${JSON.stringify(third)}`)
   assert.equal(third.length, 2, 'the new reading joins the carried earlier one')
   assert.ok(turn3[0]!.includes('Time sampled while preparing turn 3, step 1:'), turn3[0])
-  assert.ok(
-    /Elapsed since the preceding model-visible message: (?:unavailable|(?:\d+d )?(?:\d+h )?(?:\d+m )?\d+s)\./u.test(turn3[0]!),
-    turn3[0],
-  )
+  // The preceding model-visible message is turn 2's own assistant reply, so the
+  // gap is 1 ms here — the exact value is not the point; the interval bracket is.
+  assert.ok(/Elapsed since the preceding model-visible message: (?:\d+d )?(?:\d+h )?(?:\d+m )?\d+s\./u.test(turn3[0]!), turn3[0])
 
   assert.equal(hostEvents(host).filter(event => event.type === 'user/message' && event.data.source?.kind === 'time-context').length, 2,
     'the durable log holds exactly the two injected readings')
 })
 
-test('L5 negative: without the official plugin no time-context reading is ever injected', async (t) => {
+test('L5 negative: with NO time-context plugin mounted, no reading is ever injected', async (t) => {
+  // This is the "no plugin row" control (the state the official `minimal`
+  // composition produces, evidenced separately by the generated-preset
+  // composition assertion below) — NOT a run of the official minimal preset.
   const life = testLifecycle(t)
   const { host, sessions, llm } = await prepareTimeContextHost(life, { plugin: false })
 
@@ -298,7 +305,7 @@ test('L5 negative: without the official plugin no time-context reading is ever i
   await waitForTurnEnd(host, 1)
   assert.equal(timeContextMessages(llm.requests[0]!).length, 0)
   assert.equal(hostEvents(host).some(event => event.type === 'user/message' && event.data.source?.kind === 'time-context'), false,
-    'the minimal composition never produces a time-context reading')
+    'a composition without the plugin never produces a time-context reading')
 })
 
 test('L5 negative: a message with no Client zone reports the browser zone unavailable, never the process zone', async (t) => {
