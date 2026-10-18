@@ -608,6 +608,7 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
                 repaintWebItems?.()
               },
               requestRender: () => app.requestRender(),
+              run: (label, task) => detach(label, task, { notify: false }),
             }),
           },
         ]
@@ -631,6 +632,7 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
               read: () => runner.config.credentials.describeReference(WEB_CREDENTIAL_REF),
               actions: webCredentialActions(),
               requestRender: () => app.requestRender(),
+              run: (label, task) => detach(label, task, { notify: false }),
             }),
           }
         : {},

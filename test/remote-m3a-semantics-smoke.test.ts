@@ -398,6 +398,11 @@ async function mountSettingsWorkspace(
     readonly footerCustomItems: unknown
     readonly permissions: unknown
     readonly subagentModelSelection: unknown
+    /** S2/PR-B: the Web provider sub-domain (the Remote adapter's static
+     *  unavailable/refuse implementation) and the credential surface the Web
+     *  section reads. */
+    readonly web: unknown
+    readonly credentials: unknown
   },
 ): Promise<{
   open(): Promise<void>
@@ -457,6 +462,8 @@ async function mountSettingsWorkspace(
       footerCustomItems: config.footerCustomItems,
       permissions: config.permissions,
       subagentModelSelection: config.subagentModelSelection,
+      web: config.web,
+      credentials: config.credentials,
     },
     extensions: undefined,
     openPluginManager: () => {},

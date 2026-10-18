@@ -40,6 +40,14 @@ function verdictWord(verdict: 'not-saved' | 'outcome-unknown'): string {
   return verdict === 'not-saved' ? color.error('Not saved') : color.warning('Outcome unknown')
 }
 
+/**
+ * The panels never start a promise themselves: every asynchronous operation
+ * goes through the caller's owned task entry (the `/settings` command's
+ * `detach`), so a failure is owned and reported through the repository's task
+ * model instead of a bare fire-and-forget discard.
+ */
+export type WebPanelTaskRunner = (label: string, task: () => Promise<void>) => void
+
 /** One row of a short fixed panel, rendered without wrapping. */
 function row(text: string, width: number): string {
   return truncateToWidth(text, Math.max(1, width))
@@ -58,6 +66,7 @@ export class WebEndpointPanel implements Component {
   private readonly done: (selected?: string) => void
   private readonly save: (url: string) => Promise<void>
   private readonly requestRender: () => void
+  private readonly runTask: WebPanelTaskRunner
   private state:
     | { readonly kind: 'hint' | 'saving' }
     | { readonly kind: 'error'; readonly verdict: 'not-saved' | 'outcome-unknown'; readonly message: string }
@@ -72,14 +81,17 @@ export class WebEndpointPanel implements Component {
       /** Persist + verify the draft; rejects with the exact reason. */
       readonly save: (url: string) => Promise<void>
       readonly requestRender: () => void
+      /** The caller's owned task entry (never a bare promise). */
+      readonly run: WebPanelTaskRunner
     },
   ) {
     this.done = done
     this.save = options.save
     this.requestRender = options.requestRender
+    this.runTask = options.run
     this.input = new Input({ placeholder: 'https://api.deepseek.com/v1/tools' })
     this.input.setValue(options.current)
-    this.input.onSubmit = () => { void this.submit() }
+    this.input.onSubmit = () => { this.runTask('web endpoint save', () => this.submit()) }
   }
 
   /** Close without a write (Esc, or the overlay tearing this panel down). */
@@ -175,6 +187,7 @@ export class WebCredentialPanel implements Component {
   private readonly actions: readonly WebCredentialAction[]
   private readonly read: () => Promise<{ configured: boolean; source?: string }>
   private readonly requestRender: () => void
+  private readonly runTask: WebPanelTaskRunner
   private readonly reference: string
   private state:
     | { readonly kind: 'reading' }
@@ -192,6 +205,8 @@ export class WebCredentialPanel implements Component {
       readonly read: () => Promise<{ configured: boolean; source?: string }>
       readonly actions: readonly WebCredentialAction[]
       readonly requestRender: () => void
+      /** The caller's owned task entry (never a bare promise). */
+      readonly run: WebPanelTaskRunner
     },
   ) {
     this.done = done
@@ -199,7 +214,8 @@ export class WebCredentialPanel implements Component {
     this.read = options.read
     this.actions = options.actions
     this.requestRender = options.requestRender
-    void this.refresh()
+    this.runTask = options.run
+    this.runTask('web credential state read', () => this.refresh())
   }
 
   private async refresh(): Promise<void> {
