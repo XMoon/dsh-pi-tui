@@ -243,26 +243,37 @@ reinterpret:
   Production inherits the `dsh-base` row; the Host runtime asserts it, and every
   independent Host fixture must mount the official owner rather than fake it.
 
-- **Open Remote lifecycle gaps handed to S3 (recorded, not closed).** These
-  behaviours are reachable with the 0.2.1-rc.2 composition and are owned by the
-  M3 Remote parity stage; this foundation PR neither papers over them nor widens
-  its scope to fix them:
-  1. **Admission is not the durable append.** The official `session/prompt`
-     Remote answers when the Host Agent ACCEPTED the message
+- **Remote lifecycle gaps (S3 PR-C status).** These behaviours are reachable
+  with the 0.2.1-rc.2 composition. The M3 Remote parity stage owned them; PR-C
+  resolves the ones below and leaves the rest recorded, never papered over:
+  1. **Admission is not the durable append — RULED_BY_S3.** The official
+     `session/prompt` Remote answers when the Host Agent ACCEPTED the message
      (`agent.followup`/`steer`); the HOST then owns the durable append and the
      runtime-context message it composes with the first accepted prompt.
-     `RemoteSessionOwnerServices.flush()` is therefore a documented no-op —
-     there is no public Remote durable-flush verb — so an accepted write may
-     become durable AFTER the Client transport is disposed. What teardown does
-     guarantee is only the SURFACE boundary, pinned in
-     `test/runner-remote-races.test.ts`: the surface stops, a writer parked at
-     teardown settles between the stop and the disposal, and the selected
-     transport disposes exactly once — with no terminal write after the stop.
-     Whether a write still parked at teardown must be REFUSED or the drain must
-     await the Host's durable commit is deliberately NOT decided and NOT
-     asserted here: S3 owns that ruling and must prove it with paired L5/L6
-     success/failure tests — not a timeout, poll or fabricated flush.
-  2. **Reconnect transcript currentness — RESOLVED_BY_S3_R0.** The Remote
+     `RemoteSessionOwnerServices.flush()` stays a documented no-op — there is no
+     public Remote durable-flush verb — so an accepted write may become durable
+     AFTER the Client transport is disposed. S3's fixed verdict is that this
+     receipt IS the product contract: `WriteOutcome.committed` means Host
+     admission, never fsync/flush, and no client-side sleep/poll/retry may
+     fabricate a durability barrier. Teardown still guarantees only the SURFACE
+     boundary, pinned in `test/runner-remote-races.test.ts` (surface stops, a
+     writer parked at teardown settles between the stop and the disposal, the
+     selected transport disposes exactly once, no terminal write after the
+     stop); that same suite now also witnesses, ONCE and without resend, that the
+     admitted parked write reaches the Host's own durable log.
+  2. **Session creation entry — RESOLVED_BY_S3_PR_C.** `RemoteSessionLifecycle`
+     no longer keeps the raw generated `session.create` + `sessions.refresh()`
+     path and its `RemoteLifecycleSessionRemotes` seam: ordinary and
+     explicit-preset creates share the ONE official
+     `ClientSessions.create({sessionId, cwd, agentPreset})` entry and adopt the
+     returned identity.
+  3. **Fork migration — RESOLVED_BY_S3_PR_C.** `fork()` always passes
+     `allowMigration:false` and classifies the official
+     `session/migration-required` refusal as a proven rejection. The explicit
+     user open/resume still uses the official `retain → Session.open` path where
+     the Host may migrate; the read-only Browser state never acts as a
+     migration veto or authority.
+  4. **Reconnect transcript currentness — RESOLVED_BY_S3_R0.** The Remote
      ingress no longer treats the latest `change` as a fold input: delivery is a
      SEQUENCE contract over the official identity (Connection generation +
      exact retained binding + eventSource revision). Any generation rollover,
@@ -287,10 +298,9 @@ reinterpret:
      hydrate gap, and keeping it open past the live subscription recorded events
      that `clearOpening` then DISCARDED — a real lost-event window a reconnect's
      fresh generation could land in. Direct keeps the journal semantics it has;
-     only the Remote live-surface install ends the window early. Direct behaviour, the
-     Remote graph and the durable-flush/teardown contract are unchanged; the M3
-     `session/prompt` admission-vs-durable item below stays open.
-  3. **Post-reconnect catalog re-read — test readiness, not a defect.**
+     only the Remote live-surface install ends the window early. Direct behaviour
+     still shares no state with this path.
+  5. **Post-reconnect catalog re-read — test readiness, not a defect.**
      `test/runner-remote-command-plane.test.ts` "L6 §7.4-14 stale catalog"
      holds a verified stale catalog snapshot, replaces the official Connection
      (`connection.reconnect()`) and disposes the old claim, then requires the

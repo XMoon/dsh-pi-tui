@@ -333,3 +333,33 @@ removed with the temporary validation workspace and must never be committed to
   0.1.1 and requires a nonzero unsupported-runtime outcome. Friendly startup
   guidance is asserted when emitted, but raw import failure is accepted because
   DSH Loader mounts profile entries concurrently.
+
+### 0.2.1-rc.2 Remote qualification (S3 PR-C, experimental)
+
+The experimental Remote backend was requalified against the exact released
+`dsh-v0.2.1-rc.2` family as part of the S3 Remote parity work. This subsection
+records conclusions and limits only — no version identity, compatibility-matrix
+row, peer range or `engines.dsh` value changes here:
+
+- Session creation uses the ONE official
+  `ClientSessions.create({sessionId, cwd, agentPreset})` entry and adopts the
+  returned identity (`sessionId` is correlation only). Fork always passes
+  `allowMigration:false`, so deriving a child never migrates the source record;
+  an explicit user open/resume keeps the official `retain → Session.open` path,
+  where the Host may migrate.
+- The official `formatStatus` (`current | migration-required`) is surfaced
+  read-only in the Session Browser on both backends. The TUI never parses the
+  on-disk format itself, never derives a second migration fact, and never
+  performs the migration.
+- A resolved `session/prompt` is Host ADMISSION, not durability. The TUI adds no
+  client-side flush/sleep/retry, because rc.2 publishes no durable-flush verb;
+  the Host owns the append from admission onward.
+- Time Context is the official `@deepseek-ai/dsh-time-context` plugin enabled by
+  the official `standard`/`ptc`/`cordis` presets and never by `minimal`. The TUI
+  adds no clock, no timezone-setting surface and no local timer.
+- Remote remains EXPERIMENTAL and is not the production default: there is still
+  no public CLI/env/config selector, and Direct stays the release default.
+- NOT covered by this qualification: a preset-Loader-driven mount of the
+  time-context plugin (`@deepseek-ai/dsh-time-context` is only a transitive dev
+  dependency of `@deepseek-ai/dsh-web-app` here), the "Host accepted but not yet
+  appended" interleaving (`NOT_FORCED`), and any real Tern GUI path.
