@@ -1,6 +1,6 @@
 /**
  * Experimental Remote implementation of the semantic SessionLifecycle port
- * (D2.3–D2.4, aligned to the published DSH 0.1.7-rc.2 Client contract).
+ * (D2.3–D2.4, aligned to the published DSH 0.2.1-rc.2 Client contract).
  *
  * The published Client contract keeps Session lifetime as explicit reference
  * ownership: `retain()` owns one exact generation, `binding()` only borrows, `create()`
@@ -8,28 +8,28 @@
  * and the Client's own current-selection slot is gone (navigation belongs to
  * the view owner). Three consequences shape this adapter:
  *
- * 1. Ordinary create maps to the official `ClientSessions.create()` and then
- *    RETAINS the published id for the TUI's visible main surface. A locally
- *    superseded navigation still reports the real publication but takes no
- *    ownership.
- * 2. A guaranteed-fresh TUI create carrying an explicit preset uses the
- *    generated official `session.create({sessionId, cwd, agentPreset})` — one
- *    Host mutation preserving creation-time atomicity. Because that raw call
- *    bypasses `ClientSessions.create()`'s local mutation recording, the
- *    adapter reconciles through the public `sessions.refresh()` before
- *    retaining. The `create()` + `agentPresets.select()` emulation is
- *    deliberately NOT used.
- * 3. Open is the official Client semantic `select/open this Session`, now
+ * 1. Create maps to ONE official `ClientSessions.create()` for ordinary and
+ *    explicit-preset creates alike: rc.2 takes `{sessionId, cwd, agentPreset}`
+ *    and records the published catalog row itself, so there is no raw
+ *    `session.create` path, no `sessions.refresh()` reconciliation and no
+ *    `create()` + `agentPresets.select()` emulation. The adapter then RETAINS
+ *    the returned id for the TUI's visible main surface. A locally superseded
+ *    navigation still reports the real publication but takes no ownership.
+ * 2. Open is the official Client semantic `select/open this Session`, now
  *    expressed as `sessions.retain(id, { source: 'tuiMainView' })`. `ready` is
  *    never awaited: official Web navigation commits the new owner before the
  *    initial history open settles.
+ * 3. Host-owned fork maps to the official `ClientSessions.fork()` exactly once
+ *    with `allowMigration:false`, so deriving a child never silently migrates
+ *    the source record; the user's explicit open/resume remains the only path
+ *    that may trigger the official migration. No seed payload or child identity
+ *    crosses this adapter.
  *
- * Host-owned fork maps to the official `ClientSessions.fork()` exactly once;
- * no seed payload or child identity crosses this adapter. Fork resolution means
- * only "the child is catalogued" — it is NOT a binding and it does NOT retain:
- * publication is deliberately independent from navigation adoption, so a
- * superseded fork leaves a real child that the TUI must not select. Adoption
- * happens on the caller's navigation path through `open()` above.
+ * Fork resolution means only "the child is catalogued" — it is NOT a binding
+ * and it does NOT retain: publication is deliberately independent from
+ * navigation adoption, so a superseded fork leaves a real child that the TUI
+ * must not select. Adoption happens on the caller's navigation path through
+ * `open()` above.
  *
  * A create error is operation-specific: a post-publication error is never
  * reported as "the Session was never created", its published identity is
@@ -53,7 +53,6 @@ import type {
 import type { OperationOwnership } from '../write-outcome.ts'
 import { GATEWAY_PRE_INVOCATION_CODES } from '../write-outcome.ts'
 import type { RemoteConnectionGenerationSource } from './session-reader-remote.ts'
-import type { RemoteResultLike } from './session-writer-remote.ts'
 import {
   acquireMainSurfaceReference,
   type MainSurfaceReference,
@@ -64,31 +63,30 @@ import {
 import { remoteFailureCode, remoteFailureMessage } from './write-failure.ts'
 
 /** The official `ClientSessions` subset the lifecycle needs. The generated
- * RemoteResult is already unwrapped by ClientSessions.create/fork; only the
- * generated session namespace below exposes RemoteResultLike values. */
+ * RemoteResult is already unwrapped by ClientSessions.create/fork, so only the
+ * returned identity crosses this boundary. */
 export interface RemoteLifecycleSessions {
-  /** The official `create()` argument is OPTIONAL; mirroring that is what keeps
-   * the published `ISessions` structurally assignable (the contract gate). */
-  create(opts?: { workspaceId?: string; cwd?: string; sessionId?: string }): Promise<string>
-  fork(opts: { readonly sessionId: string; readonly atSeq?: number }): Promise<string>
-  /** Public list reconciliation after a raw generated create. */
-  refresh(): Promise<void>
+  /** The official rc.2 `create()`: ordinary and explicit-preset creates are
+   * the SAME call — `agentPreset` is a creation-time input the Host consumes
+   * atomically, and the Client records the published catalog row before
+   * resolving. The optional argument shape mirrors the published `ISessions`. */
+  create(opts?: {
+    workspaceId?: string
+    cwd?: string
+    sessionId?: string
+    agentPreset?: string
+  }): Promise<string>
+  /** The official rc.2 `fork()`. `allowMigration:false` refuses source
+   * migration; omission preserves the Host default (which may migrate). */
+  fork(opts: {
+    readonly sessionId: string
+    readonly atSeq?: number
+    readonly allowMigration?: boolean
+  }): Promise<string>
   retain(
     target: RemoteSessionTarget,
     options: { readonly source: TuiSessionReferenceSource; readonly signal?: AbortSignal },
   ): RemoteSessionReferenceLike
-}
-
-/** The official generated `session` Remote create face. The identity stays
- * OPTIONAL exactly like the published `SessionCreateRequest`, so the official
- * namespace remains structurally assignable (the contract gate); this adapter
- * always supplies the preallocated id. */
-export interface RemoteLifecycleSessionRemotes {
-  create(request: {
-    readonly sessionId?: string
-    readonly cwd?: string
-    readonly agentPreset?: string
-  }): Promise<RemoteResultLike<{ readonly sessionId: string; readonly agentPreset?: string }>>
 }
 
 /** Read the caller's cancellation state. Kept behind a call so a re-read after
@@ -177,6 +175,10 @@ const FORK_REFUSAL_CODES: ReadonlySet<string> = new Set([
   'gateway/bad-request',
   'session/not-found',
   'session/fork-unavailable',
+  // rc.2 refuses `allowMigration:false` for a source that needs migration.
+  // That is a PROVEN business refusal (no child was produced), so it must
+  // never be downgraded to `indeterminate` or retried.
+  'session/migration-required',
 ])
 
 function classifyForkFailure(error: unknown): ForkResult['outcome'] {
@@ -201,16 +203,13 @@ function classifyForkFailure(error: unknown): ForkResult['outcome'] {
 /** The experimental Remote session lifecycle. */
 export class RemoteSessionLifecycle implements SessionLifecycle {
   private readonly sessions: RemoteLifecycleSessions
-  private readonly session: RemoteLifecycleSessionRemotes
   private readonly generation: RemoteConnectionGenerationSource
 
   constructor(
     sessions: RemoteLifecycleSessions,
-    session: RemoteLifecycleSessionRemotes,
     generation: RemoteConnectionGenerationSource,
   ) {
     this.sessions = sessions
-    this.session = session
     this.generation = generation
   }
 
@@ -228,46 +227,22 @@ export class RemoteSessionLifecycle implements SessionLifecycle {
       !Object.is(captured, this.generation.getSnapshot()) || isAborted(request.signal)
         ? 'superseded'
         : 'current'
-    if (request.agentPreset !== undefined) return this.createWithPreset(request, cwd, ownership)
-    let id: string
+    // ONE official Client create for every create: rc.2 `ClientSessions.create`
+    // accepts `agentPreset` as a creation-time input and records the published
+    // catalog row before resolving, so `retain()` below is immediately valid.
+    let id: unknown
     try {
-      id = String(await this.sessions.create({
-        sessionId: request.sessionId,
+      id = await this.sessions.create({
         ...cwd === undefined ? {} : { cwd },
-      }))
+        sessionId: request.sessionId,
+        ...request.agentPreset === undefined ? {} : { agentPreset: request.agentPreset },
+      })
     } catch (error) {
       return { ownership: ownership(), outcome: classifyCreateFailure(error, request.sessionId) }
     }
-    const handle: SessionHandle = { session: { id } }
-    // The Host success is the authoritative publication. A navigation that was
-    // superseded while the create was in flight must NOT take Client ownership:
-    // the child stays real and catalogued for a later explicit open.
-    if (ownership() === 'superseded') return { ownership: 'superseded', outcome: { kind: 'created', handle } }
-    return this.ownPublishedSession(id, ownership, request.signal)
-  }
-
-  /**
-   * Guaranteed-fresh TUI create with an explicit preset: one Host mutation
-   * (`session.create` with the preset) preserves creation-time atomicity. The
-   * official generated Remote THROWS on transport/envelope failure; normalize
-   * it so a post-dispatch failure is `indeterminate` with the requested id as
-   * correlation (v2 §0.7.3), never a rejected Promise.
-   */
-  private async createWithPreset(
-    request: CreateSessionRequest,
-    cwd: string | undefined,
-    ownership: () => OperationOwnership,
-  ): Promise<CreateResult> {
-    const result = await this.session.create({
-      sessionId: request.sessionId,
-      ...cwd === undefined ? {} : { cwd },
-      ...request.agentPreset === undefined ? {} : { agentPreset: request.agentPreset },
-    }).catch((error: unknown) => ({ ok: false as const, error }))
-    if (!result.ok) return { ownership: ownership(), outcome: classifyCreateFailure(result.error, request.sessionId) }
-    const publishedId = result.value.sessionId
-    // The connection envelope parser does not validate the nested payload:
-    // a malformed success must not fake a created Session identity.
-    if (typeof publishedId !== 'string' || publishedId === '') {
+    // The wire envelope parser does not validate the nested payload: a
+    // malformed success must not fake a created Session identity.
+    if (typeof id !== 'string' || id === '') {
       return {
         ownership: ownership(),
         outcome: {
@@ -277,30 +252,12 @@ export class RemoteSessionLifecycle implements SessionLifecycle {
         },
       }
     }
-    const handle: SessionHandle = { session: { id: publishedId } }
-    // Classify FIRST, then ownership: a Host success after a reconnect is
-    // `created + superseded`, never a downgraded indeterminate.
+    const handle: SessionHandle = { session: { id } }
+    // The Host success is the authoritative publication. A navigation that was
+    // superseded while the create was in flight must NOT take Client ownership:
+    // the child stays real and catalogued for a later explicit open.
     if (ownership() === 'superseded') return { ownership: 'superseded', outcome: { kind: 'created', handle } }
-    // The raw generated create bypasses `ClientSessions.create()`'s local
-    // mutation recording, so the published id is not yet addressable. The
-    // published `retain(stringId)` resolves through the resident/list/address tables, and
-    // the `api-session/added` frame is not guaranteed to precede this line:
-    // reconcile deterministically through the public list refresh.
-    try {
-      await this.sessions.refresh()
-    } catch (error) {
-      return {
-        ownership: ownership(),
-        outcome: {
-          kind: 'published-with-error',
-          sessionId: publishedId,
-          error: { code: 'session/reconcile-failed', message: `the created Session could not be reconciled into Client state: ${remoteFailureMessage(error)}` },
-        },
-      }
-    }
-    // The refresh is an await: a superseded navigation must still not retain.
-    if (ownership() === 'superseded') return { ownership: 'superseded', outcome: { kind: 'created', handle } }
-    return this.ownPublishedSession(publishedId, ownership, request.signal)
+    return this.ownPublishedSession(id, ownership, request.signal)
   }
 
   /**
@@ -398,10 +355,13 @@ export class RemoteSessionLifecycle implements SessionLifecycle {
     try {
       // The official ClientSessions fork owns Host dispatch, child identity,
       // cut, lineage, workspace and Client-state reconciliation. This is one
-      // call only; no retry is legal for any failure below.
+      // call only; no retry is legal for any failure below. `allowMigration:
+      // false` is always explicit: deriving a child must never silently migrate
+      // the source record — only the user's explicit open/resume may.
       childId = String(await this.sessions.fork({
         sessionId: request.sourceSessionId,
         ...request.atSeq === undefined ? {} : { atSeq: request.atSeq },
+        allowMigration: false,
       }))
     } catch (error) {
       return { ownership: ownership(), outcome: classifyForkFailure(error) }
