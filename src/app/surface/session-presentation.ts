@@ -559,6 +559,11 @@ export function createSessionPresentation<Event extends SessionPresentationEvent
     // A4-7: the `compactingId` routing state and the phase/busy/working
     // presentation are surface-owned (plan §16).
     deps.surface.applyResumedCompaction(resumedCompaction.id, resumedCompaction.active, resumedCompaction.phase)
+    // The routing's bracket is now this window's: the LIVE tracker must agree,
+    // or a later live `compaction/end` for that restored bracket would be folded
+    // as stale and fail to advance the baseline (making the next reconcile
+    // measure a boundary the live path already measured).
+    liveMeasureBracket.set(input.sessionId, { id: resumedCompaction.id })
     // The hydrate's window IS the baseline for the next reconcile: an outage
     // that swallowed a compaction boundary (its live handler never ran) must be
     // detected against it.
@@ -791,6 +796,10 @@ export function createSessionPresentation<Event extends SessionPresentationEvent
     // outage-spanning compaction/turn end.
     deps.surface.display.commitStatusFacts({ planMode: planActive, working, busy: working })
     deps.surface.applyResumedCompaction(resumedCompaction.id, resumedCompaction.active, resumedCompaction.phase)
+    // Same parity as the cold hydrate: the routing's bracket is this window's
+    // now, so the LIVE tracker must agree — otherwise a later matched live end
+    // would fold as stale and the next reconcile would measure it again.
+    liveMeasureBracket.set(sessionId, { id: resumedCompaction.id })
     // A compaction that ENDED during the outage changed the context occupancy,
     // and its `compaction/end` event (whose live handler marks the context dirty
     // and re-measures) never reached the surface. Re-run the hydrate tail's own
