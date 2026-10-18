@@ -34,6 +34,7 @@ import {
   type Tree,
 } from '@stencil-hq/tern'
 import { MessageId, ToolCallId } from '@deepseek-ai/dsh-llm'
+import { CommandId } from '@deepseek-ai/dsh-commands'
 import { SessionSeq, type SessionEvent } from '@deepseek-ai/dsh-session'
 import { TranscriptFolder } from '../src/domain/transcript/folder.ts'
 import type { TranscriptMessage } from '../src/domain/transcript/types.ts'
@@ -147,6 +148,52 @@ function keyInput(name: string, ctrl = false): SessionInput {
 function structureKinds(blocks: readonly TranscriptStructureBlock[]): string[] {
   return blocks.map(block => block.kind === 'message' ? `message:${block.message.kind}` : block.kind)
 }
+
+// ── untrusted terminal output hardening: native View props stay clean ──────
+
+/** One hostile payload: every control family the projection must drop. */
+const HOSTILE_TSP =
+  'safe-start'
+  + '\u001b]52;c;YXR0YWNr\u0007'
+  + '\u001b]0;hijacked-title\u001b\\'
+  + '\u001b[2J'
+  + '\u001bPbad\u001b\\'
+  + '\u009b2J'
+  + '\u001b[38;2;999;1;1m'
+  + 'needle-text'
+
+test('T-hardening: hostile transcript text never reaches a native View prop', () => {
+  const user: TranscriptMessage = { kind: 'user', turn: 0, text: HOSTILE_TSP }
+  const assistant: TranscriptMessage = { kind: 'assistant', turn: 0, text: HOSTILE_TSP }
+  const thinking: TranscriptMessage = { kind: 'thinking', turn: 0, text: HOSTILE_TSP }
+  const system: Extract<TranscriptMessage, { kind: 'system' }> = {
+    kind: 'system', turn: 0, text: HOSTILE_TSP, label: HOSTILE_TSP, context: true,
+  }
+  const tool: Extract<TranscriptMessage, { kind: 'tool' }> = {
+    kind: 'tool', turn: 0, name: 'bash',
+    // A RAW argument payload (not JSON-escaped): the projection must remove
+    // the control bytes themselves, not merely rely on JSON escaping.
+    args: `{"command":"${HOSTILE_TSP}"}`, result: HOSTILE_TSP, status: 'ok',
+  }
+  const command = {
+    kind: 'command', commandId: CommandId('cmd-hostile'), seq: SessionSeq(1), time: 1,
+    name: HOSTILE_TSP, args: HOSTILE_TSP, outcome: { kind: 'success', text: HOSTILE_TSP },
+  } as unknown as TranscriptMessage
+  const summary: Extract<TranscriptMessage, { kind: 'summary' }> = { kind: 'summary', text: HOSTILE_TSP }
+
+  const messages = [user, assistant, thinking, system, tool, command, summary]
+  const view = View.from({ main: transcriptView(projectTranscriptStructure(messages), new TranscriptNodeKeys()) })
+  const props = JSON.stringify(flatten(view).map(node => node.props))
+  assert.ok(!props.includes('\u001b'), `no raw ESC may reach a node prop:\n${props}`)
+  assert.ok(!props.includes('YXR0YWNr'), 'no OSC 52 clipboard payload passes through')
+  assert.ok(!props.includes('hijacked-title'), 'no OSC 0 title payload passes through')
+  assert.ok(!props.includes('\u009b'), 'no raw C1 byte passes through')
+  assert.ok(props.includes('needle-text'), 'the readable payload text survives for every row')
+  // The source objects stay authoritative and byte-exact.
+  assert.equal(user.text, HOSTILE_TSP)
+  assert.equal(tool.result, HOSTILE_TSP)
+  assert.equal(system.label, HOSTILE_TSP)
+})
 
 // ── T3: real fold -> canonical projection -> native view ───────────────────
 

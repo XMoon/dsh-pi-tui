@@ -1990,16 +1990,19 @@ test('native Model: a description is never spent on a catalogue row, and the Rea
     layerNodes(m.pane).some((node) => JSON.stringify(node.p).includes(blank)),
     false, 'the description never becomes a catalogue row (it is a Reader fact)')
   assert.ok(!/[\n\r\v\f\u2028\u2029]/u.test(sheetText(m.pane)), 'no catalogue row carries a raw line break')
-  // The complete description reaches the Reader RAW: the explicit blank lines are
-  // the client's to render, never a budget of ours to fold.
+  // The complete description reaches the Reader: the explicit blank lines are
+  // the client's to render, never a budget of ours to fold. The untrusted-text
+  // projection normalizes the fixture's CRLF to LF (it removes no content).
   await openDetails(m.pane)
-  assert.equal(readerValue(m.pane, 'reader-description'), blank, 'the breaks reach the Reader untouched')
+  assert.equal(readerValue(m.pane, 'reader-description'), blank.replace(/\r\n/g, '\n'),
+    'the blank lines reach the Reader, with CRLF normalized to LF')
   // A READ ERROR is reported as the Reader's own leading line, COMPLETE: a long
   // message is never clamped into a one-line row.
   const long = `catalog is unreachable ${'x'.repeat(400)}`
   m.handle.setLoadError(long)
   await settle(30)
-  assert.equal(readerValue(m.pane, 'reader-description'), blank, 'the page keeps its content through the failure')
+  assert.equal(readerValue(m.pane, 'reader-description'), blank.replace(/\r\n/g, '\n'),
+    'the page keeps its content through the failure')
   assert.equal(carriesText(m.pane, long), true, 'the reader carries the complete notice as its own value')
   m.handle.close()
 })
@@ -2136,6 +2139,9 @@ test('native Model: a description of explicit blank lines reaches the Reader raw
   // measured in the real pane (LF + CRLF + a blank line = four lines at a 16px
   // line, on the shipped presenter).
   const blank = `x\n${'\n'.repeat(4)}x\r\n${'\r\n'.repeat(4)}y`
+  // The projection normalizes CRLF to LF: the client still renders the same
+  // explicit blank lines, only the raw CR byte is gone.
+  const projected = blank.replace(/\r\n/g, '\n')
   const five = budgetDirectory({
     providerName: 'p',
     modelId: 'm',
@@ -2149,8 +2155,8 @@ test('native Model: a description of explicit blank lines reaches the Reader raw
   await openDetails(m.pane)
   assert.equal(
     readerValue(m.pane, 'reader-description'),
-    blank,
-    'the blank lines and the visible text all reach the Reader untouched',
+    projected,
+    'the blank lines and the visible text all reach the Reader, CRLF normalized',
   )
   m.handle.close()
 })

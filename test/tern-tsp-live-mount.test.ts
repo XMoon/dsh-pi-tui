@@ -579,6 +579,24 @@ test('A-04b: exit routes Ctrl+C and empty-draft Ctrl+D; a typed q is editor text
   }
 })
 
+// ── untrusted terminal output: the TSP dock never forwards raw controls ─────
+
+test('a hostile notice never reaches the TSP wire raw', async () => {
+  const harness = await mountTspHarness()
+  try {
+    const hostile = 'evil\u001b]52;c;YXR0YWNr\u0007\u001b[2J\u009b2Jname'
+    harness.surface.display.notify(hostile, 'error')
+    await settle()
+    const wire = harness.tern.output.text()
+    assert.ok(!wire.includes('YXR0YWNr'), `no OSC 52 payload reaches the TSP wire:\n${wire.slice(0, 400)}`)
+    assert.ok(!wire.includes('\u009b'), 'no raw C1 byte reaches the TSP wire')
+    assert.ok(wire.includes('evil'), 'the readable notice text survives the projection')
+  } finally {
+    await harness.dispose()
+    await harness.session.close()
+  }
+})
+
 // ── A-09 (F4): many notices never collide on an SDK node key ────────────────
 
 test('A-09: repeated notices keep unique dock keys (no SDK duplicate-key ViewError)', async () => {

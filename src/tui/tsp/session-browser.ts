@@ -217,7 +217,7 @@ function rowItem(
   const badges: NonNullable<PickerItem['badges']>[number][] = []
   if (row.parentSession !== undefined) badges.push({ text: 'Fork', tone: 'muted' })
   if (result !== undefined) badges.push({
-    text: result.source,
+    text: sanitizeTerminalText(result.source),
     tone: result.source === 'Content' ? 'info' : 'muted',
   })
   return {
@@ -401,7 +401,7 @@ function detailReader(panel: SessionBrowserPanel, bind: (intent: BrowserIntent) 
           ? [ui.text(span('The selected session is no longer available.', 'muted'))]
           : groups.map((group) => ui.col(
               { key: `session-browser-group-${group.id}`, gap: 'xs' },
-              ui.text(span(group.head, 'muted')),
+              ui.text(span(sanitizeTerminalText(group.head), 'muted')),
               ...group.facts.flatMap(([label, value]) => [
                 ui.text(span(label, 'muted')),
                 ui.text({ wrap: 'word' }, sanitizeTerminalText(value)),

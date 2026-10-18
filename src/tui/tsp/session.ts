@@ -52,6 +52,7 @@ import type { SubmitPendingDetail } from '../../app/submission/ack.ts'
 import type { SettledQuestionAnswersLookup, SurfaceInteractionPresenter } from '../../app/surface/interaction-presenter.ts'
 import { TSP_CONTINUED_INSPECTION_LABEL } from '../keybindings/hints.ts'
 import { createTspComposer, type TspComposer, type TspComposerEdit } from './editor.ts'
+import { sanitizeDisplayText } from '../presentation/terminal-text.ts'
 import { createTspInteractionSeat, type TspContinuedRow, type TspInteractionSeat } from './interaction.ts'
 import { TspModelPicker } from './model-picker.ts'
 import { TspPresetPicker } from './preset-picker.ts'
@@ -490,16 +491,16 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     const lines: ReturnType<typeof ui.text | typeof ui.editor>[] = []
     for (const facts of dock.welcome) {
       const model = facts.model === undefined ? '' : ` · ${facts.model}`
-      lines.push(ui.text({ key: `welcome-${facts.sessionId}`, text: `DSH session ${facts.sessionId}${model}` }))
+      lines.push(ui.text({ key: `welcome-${facts.sessionId}`, text: sanitizeDisplayText(`DSH session ${facts.sessionId}${model}`) }))
     }
     // The pending-input presentation IS visible on this renderer: the queue
     // lane (authoritative queued + local echoes) and the ordered conversation
     // tail, exactly as the ONE join produced them.
     for (const item of pending.queued) {
-      lines.push(ui.text({ key: `queue-${item.id}`, text: `queued (${item.mode}): ${item.text}` }))
+      lines.push(ui.text({ key: `queue-${item.id}`, text: sanitizeDisplayText(`queued (${item.mode}): ${item.text}`) }))
     }
     for (const [index, row] of pending.tail.entries()) {
-      lines.push(ui.text({ key: `tail-${index}`, text: pendingRowText(row, index) }))
+      lines.push(ui.text({ key: `tail-${index}`, text: sanitizeDisplayText(pendingRowText(row, index)) }))
     }
     if (pending.running && pending.queued.length === 0 && pending.tail.length === 0) {
       lines.push(ui.text({ key: 'pending-running', text: 'queued input is running…' }))
@@ -507,7 +508,7 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     if (pendingSubmit !== undefined) {
       lines.push(ui.text({ key: 'pending-submit', text: pendingSubmit === 'submit' ? 'Submitting…' : 'Queued…' }))
     }
-    if (dock.statusLine !== '') lines.push(ui.text({ key: 'status', text: dock.statusLine }))
+    if (dock.statusLine !== '') lines.push(ui.text({ key: 'status', text: sanitizeDisplayText(dock.statusLine) }))
     // PR3-B B3 (§3.8): the parked-Question count is a PRESENTATION of the ONE
     // controller's read (`InteractionRuntime.publishAttention` → presenter);
     // the Alt+Q entry is the inspection route, never an answerability fact.
@@ -515,7 +516,8 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       lines.push(ui.text({ key: 'question-attention', text: `Continued questions: ${seat.attentionCount()} · ${TSP_CONTINUED_INSPECTION_LABEL}` }))
     }
     for (const notice of dock.notices) {
-      lines.push(ui.text({ key: `notice-${notice.id}`, text: notice.kind === 'error' ? `! ${notice.text}` : notice.text }))
+      const noticeText = sanitizeDisplayText(notice.text)
+      lines.push(ui.text({ key: `notice-${notice.id}`, text: notice.kind === 'error' ? `! ${noticeText}` : noticeText }))
     }
     // The controlled composer: SDK `ui.editor` with client-supplied
     // text/cursor (UTF-16). The native edit/undo/send features are NOT
