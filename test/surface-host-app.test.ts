@@ -180,6 +180,37 @@ test('fullscreen refresh keeps extension chrome on the alt screen', async () => 
   app.stop()
 })
 
+test('a throwing theme observer never skips the theme repaint', async () => {
+  // The observer runs AFTER the new palette is installed and BEFORE the
+  // repaint (F-14), so a throwing observer must not leave the surface painted
+  // with the previous palette: the switch completes and only then reports.
+  const ledger = new ExtensionLedger(() => {})
+  const { vt, app, host } = makeApp(ledger)
+  setTheme('dark')
+  await vt.waitForRender()
+  host.attach({ header: new Text('', 0, 0), dock: new Text('', 0, 0), footer: new Text('', 0, 0) }, {
+    surfaceId: 's1', generation: 1, width: 80, height: 24, fullscreen: false,
+    focusedSeat: 'editor', themeId: 'dark', themeRevision: 0,
+  })
+  ledger.register('chrome.header.badge', { id: 'fs' }, { text: 'fsbadge', tone: 'warning' }, 'plugin-a')
+  host.refreshOutlets()
+  app.refreshChrome()
+  await vt.waitForRender()
+  const darkBytes = host.headerBadgeText()
+  const release = app.onThemeChanged(() => { throw new Error('theme observer failed') })
+  try {
+    assert.throws(() => app.applyTheme('light'), /theme observer failed/u,
+      'the first observer failure is still reported')
+  } finally {
+    release()
+  }
+  await vt.waitForRender()
+  const lightBytes = host.headerBadgeText()
+  assert.notEqual(lightBytes, darkBytes,
+    `the palette switch still repainted every surface: ${lightBytes} vs ${darkBytes}`)
+  app.stop()
+})
+
 test('dispose detaches the extension host (stale outlets are inert)', async () => {
   const ledger = new ExtensionLedger(() => {})
   const { vt, app, host } = makeApp(ledger)

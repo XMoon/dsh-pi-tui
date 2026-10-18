@@ -256,6 +256,115 @@ test('a released generation the current migration refuses reports the diagnostic
   assert.deepEqual(generationFiles(sessionDir), [sourceName], 'a refused read publishes no successor')
 })
 
+/**
+ * The OFFICIAL rc.2 released-v1 physical sample: `releasedV1PackedPhysicalLog`
+ * from `packages/session/session-persistence-jsonl/tests/jsonl.spec.ts`
+ * (`deepseek-ai/deepseek-harness` @ `687f282e8625c6b8d11ff58211a90524be2e4317`,
+ * the pinned 0.2.1-rc.2 source). One turn whose FIRST surface sits inside the
+ * step (so the v2->v3 edge can insert the canonical system head) and whose
+ * assistant stream is carried by a packed `text-chunks` row — the sample the
+ * official suite reads as its POSITIVE released-v1 read. Copied shape-for-shape;
+ * it is an official-format sample, not a product-recorded Session.
+ */
+function releasedV1PackedSample(id: string): string {
+  const chunk = (seq: number, time: number, value: unknown): unknown =>
+    ({ type: 'assistant/chunk', seq, time, data: { turn: 1, step: 1, chunk: value } })
+  const rows = [
+    { type: 'turn/start', seq: 0, time: 1, data: { turn: 1 } },
+    { type: 'step/start', seq: 1, time: 2, data: { turn: 1, step: 1 } },
+    {
+      type: 'user/message', seq: 2, time: 3, surfaceOp: 'append',
+      data: { id: 'one-turn-user', role: 'user', content: [{ type: 'text', text: 'hi' }], source: { kind: 'user' } },
+    },
+    chunk(3, 3, { type: 'block-start', index: 0, blockType: 'text' }),
+    { type: 'text-chunks', seq0: 4, time0: 3, data: { turn: 1, step: 1, index: 0, dt: [0, 0], texts: ['hello', '', ''] } },
+    chunk(7, 4, { type: 'block-end', index: 0, block: { type: 'text', text: 'hello' } }),
+    chunk(8, 4, { type: 'finish', reason: { kind: 'stop' } }),
+    {
+      type: 'assistant/message', seq: 9, time: 4, surfaceOp: 'append',
+      sourceEventSeqs: [3, 4, 5, 6, 7, 8],
+      data: {
+        turn: 1,
+        step: 1,
+        message: {
+          id: 'one-turn-assistant',
+          role: 'assistant',
+          content: [{ type: 'text', text: 'hello' }],
+          source: { kind: 'model', provider: 'mock', model: 'mock' },
+        },
+      },
+    },
+    { type: 'step/end', seq: 10, time: 5, data: { turn: 1, step: 1 } },
+    { type: 'turn/end', seq: 11, time: 6, data: { turn: 1, reason: { kind: 'completed' } } },
+  ]
+  const header = { type: 'session', version: 1, id, createdAt: 1, cwd: '/work', delegationDepth: 0 }
+  return [header, ...rows].map(row => JSON.stringify(row)).join('\n') + '\n'
+}
+
+test('the installed rc.2 reader positively reads a released-v1 artifact and returns its complete log', async t => {
+  const life = testLifecycle(t)
+  const root = life.tempDir('dsh-s2b-b1-released-v1-read-')
+  const id = SessionId('session-b1-released-v1-read')
+  const first = await boot(life, root)
+  const seedHandle = await first.persistence.create({
+    id,
+    createdAt: 1,
+    version: SESSION_FORMAT_VERSION,
+    cwd: '/work',
+    isSeeded: false,
+    delegationDepth: 0,
+  })
+  await seedHandle.flush()
+  await seedHandle.close()
+  const sessionDir = sessionDirOf(root)
+  rmSync(join(sessionDir, `session.v${SESSION_FORMAT_VERSION}.jsonl${CURRENT_SUFFIX}`), { force: true })
+  const sourceName = 'session.v1.jsonl.zstd'
+  const sourcePath = join(sessionDir, sourceName)
+  placeArtifact(sourcePath, releasedV1PackedSample(String(id)))
+  const sourceHash = createHash('sha256').update(readFileSync(sourcePath)).digest('hex')
+  await first.ctx.fiber.dispose()
+
+  const second = await boot(life, root)
+  // The historical generation is CLASSIFIED as needing migration: a real
+  // released old format is never invisible and never presented as current.
+  assert.equal((await second.persistence.stat(id))?.formatStatus, 'migration-required')
+  assert.equal(
+    (await second.persistence.list()).find(row => String(row.header.id) === String(id))?.formatStatus,
+    'migration-required',
+  )
+
+  const readHandle = await second.persistence.open(id, 'read')
+  const read = await readHandle.read()
+  assert.equal(readHandle.header.version, SESSION_FORMAT_VERSION, 'the restored artifact is served as the current format')
+  await readHandle.close()
+  // The complete historical log, restored through the official v1->v2->v3 chain:
+  // the packed stream is expanded into the assistant message, the user message
+  // survives verbatim, and the chronology rule inserts the canonical system head.
+  assert.deepEqual(
+    read.events.map(event => event.type),
+    ['turn/start', 'step/start', 'system/message', 'user/message', 'assistant/message', 'step/end', 'turn/end'],
+  )
+  assert.deepEqual(
+    (read.events[3]!.data as { readonly content?: unknown }).content,
+    [{ type: 'text', text: 'hi' }],
+    'the historical user message survives verbatim',
+  )
+  const assistant = read.events[4]!.data as {
+    readonly message?: { readonly content?: unknown }
+    readonly stream?: readonly { readonly type: string; readonly texts?: readonly string[] }[]
+  }
+  assert.deepEqual(assistant.message?.content, [{ type: 'text', text: 'hello' }])
+  assert.deepEqual(
+    assistant.stream?.find(part => part.type === 'text-chunks')?.texts,
+    ['hello', '', ''],
+    'the packed released-v1 chunk row really decoded',
+  )
+  // A read open never rewrites the released artifact and publishes no successor.
+  assert.equal(createHash('sha256').update(readFileSync(sourcePath)).digest('hex'), sourceHash,
+    'the released-v1 artifact is byte-identical after the read')
+  assert.deepEqual(generationFiles(sessionDir), [sourceName], 'a read open publishes no successor')
+})
+
 test('a newer stored format is refused explicitly, never read as an empty Session', async t => {
   const life = testLifecycle(t)
   const root = life.tempDir('dsh-s2b-b1-newer-')

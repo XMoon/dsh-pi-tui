@@ -121,6 +121,14 @@ export interface SettingsWorkspaceRow {
   readonly edit?: SettingsWorkspaceEdit
 }
 
+/** The facts an authority OTHER than the settings document can change for one
+ *  row between two snapshot reads (the Web launcher row's Host facts). */
+export interface SettingsWorkspaceRowFacts {
+  readonly summary: string
+  readonly freshness: SettingsWorkspaceFreshness
+  readonly description: string
+}
+
 /** One commit the user explicitly confirmed in the L2 choice. */
 export interface SettingsWorkspaceCommitRequest {
   readonly field: SettingsWorkspaceWritableField
@@ -540,12 +548,21 @@ export class SettingsWorkspacePanel implements Component {
     }
   }
 
-  /** Re-read the live snapshot and repaint (S2/PR-B §B3.4): the caller's
-   *  asynchronous read settles, then THIS panel generation refreshes the row
-   *  it owns — a stale panel never repaints a newer one. */
-  refreshSnapshot(): void {
+  /** Repaint ONE row with facts an authority changed BETWEEN snapshot reads
+   *  (S2/PR-B §B3.4): the Web read cycle changed only its OWN row, so the TUI
+   *  settings document is NOT read again — a workspace surface keeps its ONE
+   *  guarded document read (B2-A). The CALLER owns the facts; the panel stores
+   *  no authority of its own. */
+  refreshRow(rowId: SettingsWorkspaceRowId, facts: SettingsWorkspaceRowFacts): void {
     if (this.disposed) return
-    this.refresh()
+    const index = this.snapshot.rows.findIndex(row => row.id === rowId)
+    if (index < 0) return
+    this.snapshot = {
+      ...this.snapshot,
+      rows: this.snapshot.rows.map((row, at) => at === index ? { ...row, ...facts } : row),
+    }
+    this.bumpRevision()
+    this.intents.requestRender()
   }
 
   // ── rendering ────────────────────────────────────────────────────────────

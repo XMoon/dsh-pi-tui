@@ -233,7 +233,8 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
       webReadSettled = true
       // The committed facts repaint whichever generation owns the surface: a
       // write's verification read must converge a Workspace reopened mid-write.
-      activeSettingsWorkspace?.refresh()
+      // Only the Web launcher ROW changes here — never a second document read.
+      activeSettingsWorkspace?.refreshWebRow()
     }
     if (webReadInFlight?.serial === serial) webReadInFlight = undefined
     return { settings: failure === undefined ? settings : undefined, fresh }
@@ -374,6 +375,19 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
     return parts
   }
 
+  /** The ENDPOINT row's value slot. Its fact is a long URL, so while the
+   *  authority is readable the PLAIN slot paints the URL itself (truncated to
+   *  the cells it has — the submenu shows it in full) and claims no state chip:
+   *  `[unavailable]` is reserved for a value that really could not be read. A
+   *  pending read or a transient write verdict keeps the chip vocabulary. */
+  const endpointValueParts = (): SettingValuePart[] | undefined => {
+    const phaseParts = webPhaseParts(webRowPhases.get('web-search-endpoint'))
+    if (phaseParts.length > 0) return phaseParts
+    if (webReadPending()) return [{ kind: 'chip', text: color.textMuted('[Loading…]') }]
+    if (webSettings === undefined) return [{ kind: 'chip', text: color.warning('[unavailable]') }]
+    return undefined
+  }
+
   /** The SETTLED Host value only (never a transient word): this is what a
    *  choice row positions itself on and what a failed write reverts to. */
   const webSettledValue = (id: WebSettingRowId): string | undefined => {
@@ -398,7 +412,9 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
     return webSettledValue(id) ?? 'Unavailable'
   }
 
-  const webRowValueParts = (id: WebSettingRowId): SettingValuePart[] => {
+  /** A row's value units: `undefined` means the row keeps its PLAIN slot (the
+   *  endpoint row's URL); every other row states whole chips. */
+  const webRowValueParts = (id: WebSettingRowId): SettingValuePart[] | undefined => {
     switch (id) {
       case 'web-search-provider':
         return providerValueParts(id, WEB_SEARCH_PROVIDER_VALUES)
@@ -415,7 +431,7 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
           isDefault: webSettings !== undefined && webSettings.api.sendOriginalQuestion,
         })
       case 'web-search-endpoint':
-        return plainValueParts(id, webRowValue(id), { current: false, isDefault: false })
+        return endpointValueParts()
     }
   }
 
@@ -498,8 +514,35 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
    *  from the authoritative read-back on settle — never from the request. */
   let webWriteChain: Promise<void> = Promise.resolve()
 
+  /** The verdict of ONE write intent against the NEWEST committed authority.
+   *  Verified means the Host really HOLDS the requested value: a resolved
+   *  mutation is not a save. A readable difference (a competing writer, a
+   *  canonical form, an official bound) is `Not saved` — the row reports it and
+   *  goes back to the value the Host kept — while an unreadable authority stays
+   *  `Outcome unknown`, because the mutation may or may not have applied. */
+  const settleWebWrite = (
+    id: WebSettingRowId,
+    requested: string,
+    revert: (value: string) => void,
+    previous: string,
+  ): void => {
+    if (webSettings === undefined) {
+      webRowPhases.set(id, { kind: 'outcome-unknown' })
+    } else {
+      const committed = webSettledValue(id)
+      if (committed === requested) {
+        webRowPhases.delete(id)
+      } else {
+        webRowPhases.set(id, { kind: 'not-saved' })
+        revert(committed ?? previous)
+      }
+    }
+    repaintWebItems?.()
+  }
+
   const queueWebSettingWrite = (
     id: WebSettingRowId,
+    requested: string,
     write: () => Promise<void>,
     revert: (previousValue: string) => void,
   ): void => {
@@ -532,14 +575,10 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
         // newest settlement (§B3.4 currentness) and judge by what it committed —
         // never a verdict from the superseded snapshot, and never a stale phase.
         await awaitWebSettled()
-        const committed = webSettledValue(id)
-        if (committed === undefined) webRowPhases.set(id, { kind: 'outcome-unknown' })
-        else webRowPhases.delete(id)
-        repaintWebItems?.()
+        settleWebWrite(id, requested, revert, previous)
         return
       }
-      const settings = verified.settings
-      if (settings === undefined) {
+      if (verified.settings === undefined) {
         // The mutation may have applied: never report success, and never
         // pretend a rollback either — the next read owns the display.
         webRowPhases.set(id, { kind: 'outcome-unknown' })
@@ -549,10 +588,7 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
         }
         return
       }
-      webRowPhases.delete(id)
-      const display = webRowValue(id)
-      if (display !== previous) revert(display)
-      repaintWebItems?.()
+      settleWebWrite(id, requested, revert, previous)
     })
   }
 
@@ -626,9 +662,11 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
 
   /** The ONE Settings workspace open path: the lease is taken SYNCHRONOUSLY
    *  (the first frame is immediate), then the Host Web facts are read for THIS
-   *  panel generation and the SAME generation refreshes when the read settles.
-   *  A newer/closed generation never receives the result. */
-  let activeSettingsWorkspace: { readonly token: object; readonly refresh: () => void } | undefined
+   *  panel generation and the SAME generation repaints its OWN row when the read
+   *  settles. A newer/closed generation never receives the result. The repaint is
+   *  ROW-scoped: the Web authority changed, so the TUI settings document is never
+   *  read a second time (one guarded document read per surface). */
+  let activeSettingsWorkspace: { readonly token: object; readonly refreshWebRow: () => void } | undefined
 
   const openSettingsWorkspaceAt = (initialRowId?: SettingsWorkspaceRowId): void => {
     const token = {}
@@ -650,7 +688,7 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
         },
       },
     )
-    activeSettingsWorkspace = { token, refresh: () => handle?.refresh() }
+    activeSettingsWorkspace = { token, refreshWebRow: () => handle?.refreshRow(WEB_LAUNCHER_ROW_ID, webWorkspaceRowFacts()) }
     startWebSettingsRead(token)
   }
 
@@ -664,11 +702,11 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
   }
 
   /** Start ONE authority read for the panel generation `token`: the pending
-   *  state is applied and repainted BEFORE the async read, and the SAME
-   *  generation repaints only if it still owns the surface when it settles. */
+   *  state is applied and the launcher row repainted BEFORE the async read, and
+   *  the SAME generation repaints its own row when the read settles. */
   const startWebSettingsRead = (_token: object): void => {
     beginWebSettingsRead()
-    activeSettingsWorkspace?.refresh()
+    activeSettingsWorkspace?.refreshWebRow()
     detach('web provider settings read', async () => {
       // The read's own commit refreshes the generation that currently owns the
       // surface (never a superseded one).
@@ -755,9 +793,12 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
             id: 'web-search-endpoint',
             label: 'Search / Fetch API Endpoint',
             description: webRowDescription('web-search-endpoint'),
-            // No state chip on this row: the plain value slot truncates the
-            // long URL to the cells it has (the submenu shows it in full).
+            // The URL is this row's fact: the plain slot carries it (truncated to
+            // the cells it has; the submenu shows it in full), and the state
+            // chips take the slot only while the fact is pending, transient or
+            // unreadable (see `endpointValueParts`).
             currentValue: webSettledValue('web-search-endpoint') ?? '',
+            valueParts: webRowValueParts('web-search-endpoint'),
             submenu: (_currentValue: string, done: (selected?: string) => void) => new WebEndpointPanel(done, {
               current: webSettings?.api.baseURL ?? '',
               // The endpoint text write is a Web-section write like any other:
@@ -2223,7 +2264,7 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
                 revert(webRowValue(id as WebSettingRowId))
                 return
               }
-              queueWebSettingWrite(id as WebSettingRowId, write, revert)
+              queueWebSettingWrite(id as WebSettingRowId, value, write, revert)
             } else if (id === 'fullscreen') {
               if (value === 'off' || value === 'on') {
                 app.setFullscreen(value === 'on')
@@ -2309,7 +2350,10 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
             }
             if (item.id === 'web-separator') continue
             const rowId = item.id as WebSettingRowId
-            item.currentValue = webRowValue(rowId)
+            // The row's VISIBLE state comes from `valueParts`; `currentValue`
+            // stays the row's CYCLE cursor — the value the Host holds, never a
+            // transient verdict word (the fork positions a cycle on this field).
+            item.currentValue = webSettledValue(rowId) ?? ''
             item.valueParts = webRowValueParts(rowId)
             item.description = webRowDescription(rowId)
             if (rowId === 'web-search-provider' || rowId === 'web-fetch-provider') {
