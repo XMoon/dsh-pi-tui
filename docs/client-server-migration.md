@@ -6454,11 +6454,15 @@ production changes and positive/negative evidence.
   `test/runner-direct-working-directory.test.ts` (the runner/TUI path: the
   status fact, the physical footer, the OSC 7 write and the roster grouping).
   `test/direct-session-fork.test.ts` pins the fork-cut seed content. The
-  READ-FAILURE fence is explicit: an unavailable `workingDirectory` projection
-  is UNKNOWN — the status/footer/OSC 7 fact is omitted and the command routing
-  uses the documented Direct Client-local execution cwd, never the immutable
-  header project (asserted by the third case of
-  `test/runner-direct-working-directory.test.ts`).
+  READ-FAILURE fence is explicit: a THROWING `workingDirectory` projection read
+  is UNKNOWN (`SessionReader.sessionStatusFailed`) — the status/footer/OSC 7
+  fact is omitted and the command routing uses the documented Direct
+  Client-local execution cwd, never the immutable header project (asserted by
+  the third case of `test/runner-direct-working-directory.test.ts`). The two
+  unavailable cases stay apart: NO RECORDED VALUE (no projection unit, no
+  authority in the composition, a Session not yet retained) keeps the SAME
+  Session's immutable header — the official initial value — while a FAILED read
+  has no fallback at all.
 - B3: `test/web-provider-config-direct.test.ts` (exact namespace/path/revision,
   read-back, refusal paths), `test/web-provider-rc2-integration.test.ts` (the
   real `web` + providers + `tool-web` over the real configuration plane: the

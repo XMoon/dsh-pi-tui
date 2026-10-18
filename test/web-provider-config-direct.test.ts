@@ -123,6 +123,19 @@ test('read() reports UNAVAILABLE for a missing section instead of shipped defaul
   assert.equal(new DirectWebProviderConfig(host({ omitWeb: true }).ctx).available(), false)
   assert.equal(await new DirectWebProviderConfig(host({ omitApi: true }).ctx).read(), undefined,
     'without the API section the API facts are unavailable, never defaulted')
+  // A MALFORMED mounted section is the second unreadable case: the descriptors
+  // exist (available() answers true) while the validated read answers
+  // undefined, which is why the UI gates its WRITE ADMISSION on the readable
+  // facts, not on the descriptor pair alone.
+  const countMalformed = host()
+  countMalformed.settings.descriptors.set('web-deepseek-api', {
+    ns: 'web-deepseek-api',
+    revision: 1,
+    value: { baseURL: 'https://api.deepseek.com/v1/tools', count: 'ten', sendOriginalQuestion: true },
+  })
+  assert.equal(new DirectWebProviderConfig(countMalformed.ctx).available(), true)
+  assert.equal(await new DirectWebProviderConfig(countMalformed.ctx).read(), undefined,
+    'an invalid count makes the whole section unreadable')
   assert.equal(new DirectWebProviderConfig(host({ omitApi: true }).ctx).available(), false,
     'availability is the SAME authority read() needs: a half-mounted configuration is unavailable')
   // A malformed value is unavailable too (never coerced).

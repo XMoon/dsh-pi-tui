@@ -4,8 +4,8 @@
  *
  * SOURCE → DECISION → SINK: the official persistence refuses a stored Session
  * it cannot read (unsupported/newer format) with its own diagnostic; the TUI
- * must SHOW that refusal on the user's surface and keep the current Session —
- * never mount an empty replacement or silently list a fake Session.
+ * must SHOW that refusal on the user's surface and never mount the unreadable
+ * log as if it had opened.
  *
  * FIXTURE (real): the runner + real TuiApp on a virtual terminal, the real
  * `/sessions` command and picker path. STAND-IN: the resume operation itself
@@ -39,7 +39,7 @@ const REFUSED = 'session-format-newer'
 /** The OFFICIAL refusal text the JSONL persistence throws for a newer format. */
 const REFUSAL = 'stored Session uses newer format v5; this build writes v4'
 
-test('the real Session Picker surfaces the official format refusal and keeps the current Session', async t => {
+test('the real Session Picker surfaces the official format refusal for the refused row', async t => {
   const life = testLifecycle(t)
   const home = life.tempDir('dsh-pi-tui-format-refusal-')
   const previousHome = process.env.DSH_HOME
@@ -88,9 +88,16 @@ test('the real Session Picker surfaces the official format refusal and keeps the
   assert.match(view(), /format-n/u)
   assert.match(view(), /format-c/u)
 
+  // The boot resumed the initial Session; record that count so the assertion
+  // below covers only the resume THIS Enter triggered.
+  const resumesBefore = harness.resumeSessionIds.length
   vt.sendInput('\r')
   await settle()
   await vt.waitForRender()
+  // The refusal came from the REFUSED row, not from whichever row happened to
+  // be selected: this Enter's resume attempt names that exact stored Session.
+  assert.deepEqual(harness.resumeSessionIds.slice(resumesBefore), [REFUSED],
+    'the picker resumed the newer-format Session the user selected')
   const after = view()
   assert.ok(after.includes(REFUSAL), `the refusal text reaches the user's surface:\n${after}`)
   // The unreadable Session's own content is never mounted as if it had opened.
