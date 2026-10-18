@@ -6437,7 +6437,15 @@ production changes and positive/negative evidence.
   classified and read without being rewritten, only a write open publishes the
   successor, a newer format is refused, and the released-v3 reader contract
   refuses the rc.2-only event types (run through the official released-v3
-  restore — never claimed as an executed old reader).
+  restore — never claimed as an executed old reader). Two REAL user sinks are
+  pinned as L6: `test/task-center-external-leaf.test.ts` (the production
+  `/tasks` path lists the external leaf as `external · <label>` / `External`,
+  offers no Stop/Continue, and Enter states that no local Session exists
+  without mounting a surface) and `test/session-picker-format-refusal.test.ts`
+  (the production `/sessions` picker surfaces the official refusal text and
+  never mounts the unreadable log; the sessionless aftermath of a refused
+  resume is recorded as NOT_VERIFIED — the harness cannot prove the runner
+  restores a previous owner there).
 - B2: `test/direct-working-directory-rc2.test.ts` (real Agent + real
   `working_directory` tool + real projections: status/`@`/skill scopes follow
   the committed directory, the header keeps the original project, a vanished
@@ -6445,7 +6453,12 @@ production changes and positive/negative evidence.
   project header + the cut directory, two Sessions never share a directory) and
   `test/runner-direct-working-directory.test.ts` (the runner/TUI path: the
   status fact, the physical footer, the OSC 7 write and the roster grouping).
-  `test/direct-session-fork.test.ts` pins the fork-cut seed content.
+  `test/direct-session-fork.test.ts` pins the fork-cut seed content. The
+  READ-FAILURE fence is explicit: an unavailable `workingDirectory` projection
+  is UNKNOWN — the status/footer/OSC 7 fact is omitted and the command routing
+  uses the documented Direct Client-local execution cwd, never the immutable
+  header project (asserted by the third case of
+  `test/runner-direct-working-directory.test.ts`).
 - B3: `test/web-provider-config-direct.test.ts` (exact namespace/path/revision,
   read-back, refusal paths), `test/web-provider-rc2-integration.test.ts` (the
   real `web` + providers + `tool-web` over the real configuration plane: the
@@ -6510,15 +6523,25 @@ system or fork divergence is introduced.
   readable while the legacy list's own hint line truncates — a pre-existing fork
   property, not a new surface). The endpoint editor keeps its title, the
   external-send note and `Enter confirm · Esc cancel` down to 44 columns; the
-  credential panel keeps its title and both actions. Dark and light palettes
-  supply the same chip roles on their own open; a live palette switch while the
-  legacy editor is mounted keeps pre-painted chip ANSI until the next open (the
-  same property as the existing pre-painted theme/preset chips). The surface is
-  icon-style neutral (symbols/minimal frames are identical).
+  credential panel keeps its title and both actions. Dark, light and a CUSTOM
+  palette supply the same chip roles on their own open; a live palette switch
+  while the legacy editor is mounted keeps pre-painted chip ANSI until the next
+  open (the same property as the existing pre-painted theme/preset chips). The
+  surface is icon-style neutral (symbols/minimal frames are identical). A CJK
+  custom provider id stays cell-safe at the narrow sizes. The real-terminal
+  record (rc.2 CLI over the isolated development home: entry → provider write →
+  Esc → restored Workspace → endpoint editor → credential panel → Esc → reset)
+  is in `docs/tui-design-language-samples.md` §8b.
 - Legacy-editor Esc semantics: entering from the Web launcher restores the
-  Workspace on that row; the original `Open existing settings…` entry keeps its
+  Workspace on that row (always restored; a non-ready backend is stated by the
+  workspace rows); the original `Open existing settings…` entry keeps its
   conversation return. The credential row closes the settings surface BEFORE the
   existing `/login` masked question or `/logout` runs (no stacked modals).
+- Authority state vocabulary: `Loading…` only while a read is in flight; a
+  resolved-but-unreadable or thrown read becomes `Unavailable` and DROPS the
+  previous snapshot, so no row can keep a stale `[current]`; the workspace
+  opens immediately and refreshes its own panel generation when the read
+  settles; Esc-return re-reads in that generation.
 - Not run: a physical Tern GUI record (the TSP renderer does not paint these
   Settings surfaces) and an automated live-palette switch of the legacy chip
   ink; both are recorded as NOT_VERIFIED/NOT_RUN rather than PASS.
@@ -6533,6 +6556,11 @@ system or fork divergence is introduced.
   v3→v4 chain (`test/session-v4-tool-result.test.ts`).
 - Remote Web configuration stays unavailable by design (S3/S4 own the generated
   Remote settings parity); the Remote backend never names a Host namespace.
+- After a REFUSED session resume the Session Picker shows the official
+  refusal and mounts nothing, but whether the runner restores the previous
+  Session owner on that failure path is NOT_VERIFIED here (the runner harness
+  rejects the resume directly; a corrupt on-disk artifact would be needed to
+  prove the real restoration).
 - Web provider network success against a billed DeepSeek endpoint is not
   exercised here (the outer HTTP transport is stubbed); a user-provided account
   would be required.

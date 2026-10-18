@@ -873,13 +873,13 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
           // semantic optionality, never an invariant break.
           // `cwd` is the Session's EFFECTIVE directory (the same-session status
           // projection), NOT the immutable header project: a committed
-          // `working-directory/change` moves every following command's directory.
+          // `working-directory/change` moves every following command's directory,
+          // and an UNAVAILABLE read falls back to the documented Direct
+          // Client-local execution cwd — never to the old header project.
           return {
             provider: agent.options.provider,
             model: agent.options.model,
-            cwd: deps.backend.sessionReader.sessionStatus(sessionId)?.cwd
-              ?? agent.session.header.cwd
-              ?? deps.clientCwd,
+            cwd: deps.backend.sessionReader.sessionStatus(sessionId)?.cwd ?? deps.clientCwd,
           }
         },
         approvalOverride: (sessionId) =>

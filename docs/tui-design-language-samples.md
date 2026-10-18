@@ -1356,6 +1356,73 @@ identical. Not run: a physical Tern GUI record (this renderer does not paint
 these Settings surfaces) and a live palette switch inside the pre-painted
 legacy chips.
 
+## 8b. Real-terminal record — S2 Web Search / Fetch (PR-B)
+
+Produced with the rc.2 CLI over an ISOLATED development home
+(`/home/xmoon/.local/bin/dsh-next` with `DSH_NEXT_ROOT=<the S2 worktree>`,
+`DSH_HOME=~/.dsh-pi-tui-next`, profile relinked to the worktree, bundle built
+from the reviewed tree), `tmux new-session -d -s <name> -x 120 -y 40`, keys
+sent one at a time, frames captured with `tmux capture-pane -p` (ANSI stripped
+here) and the SGR presence checked with `-e` (20+ `\e[38;2;…` sequences per
+frame). No network/paid endpoint was contacted.
+
+`/settings` → `Other settings` → row selected (real Host Web settings mounted;
+the launcher is a navigation row, so `2 editable rows` is unchanged):
+
+```text
+Settings · Other settings · Rows                                    2 editable rows
+Scope: Host Web provider settings · Refreshed <time> · Config Ready
+──────────────────────────────────────────────────────────────────────────────
+Categories (3)          [Rows (2)]                                  Details
+  Appearance              Open existing settings… Existing settin…  Web Search / Fetch
+  Display               > Web Search / Fetch Search: Messages · F…  Value       Search: Messages · Fetch: HTTP
+> Other settings                                                    Scope       Host Web provider settings
+                                                                    Freshness   Ready · on-open snapshot
+                                                                    Description Host Web settings. Defaults: Messages
+                                                                                search · HTTP fetch. The DeepSeek Search
+                                                                                / Fetch APIs are billed separately and
+                                                                                send the request to an external
+                                                                                endpoint; Share Original Question sends
+                                                                                up to 128 characters of the human
+                                                                                question. The API key is stored as a
+                                                                                credential reference and never shown.
+                                                                                Enter configure.
+──────────────────────────────────────────────────────────────────────────────
+Up/Down select · Left back · Right open · Enter open · r refresh · Esc back
+```
+
+Enter → the existing editor's Web section; Enter on the first row performed a
+REAL official `web` settings mutation, and the row moved only after the
+authoritative read-back (`[current]` kept, `[default]` gone, value fact
+`DeepSeek Search API`):
+
+```text
+│ > Web Search Provider          [current]                             │
+│   Current: DeepSeek Search API · Messages is the official DeepSeek   │
+│   Messages search; the DeepSeek Search API is a separately billed    │
+│   endpoint. …                                                        │
+```
+
+Esc → the Workspace restored on the `Web Search / Fetch` row with the NEW
+summary; the endpoint editor (four rows down) and the credential panel (one
+more) rendered their full contracts (`Search / Fetch API Endpoint` +
+`Enter confirm · Esc cancel`; `DeepSeek API Key` + `Configured · source: file` +
+`Configure…`/`Clear…`), each cancelled with Esc without a write:
+
+```text
+Settings · Other settings · Rows                                    2 editable rows
+  Display               > Web Search / Fetch Search: DeepSeek Sea…  Value       Search: DeepSeek Search API · Fetch:
+```
+
+Then the provider was reset to the official default through the same UI
+(`[current] [default]`, `Current: Messages`), so the isolated development home
+is left at the shipped selection.
+
+NOT_VERIFIED in this record: a physical Tern GUI frame (this renderer does not
+paint these Settings surfaces) and a live palette switch of the pre-painted
+legacy chip ink (a new open paints the live palette; asserted in
+`test/settings-web-visual.test.ts`).
+
 ## 9. Re-verification recipe
 
 For V2/V3 (and for any later surface PR), the after-evidence must be produced

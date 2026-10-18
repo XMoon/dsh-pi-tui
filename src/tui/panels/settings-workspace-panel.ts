@@ -536,6 +536,14 @@ export class SettingsWorkspacePanel implements Component {
     }
   }
 
+  /** Re-read the live snapshot and repaint (S2/PR-B §B3.4): the caller's
+   *  asynchronous read settles, then THIS panel generation refreshes the row
+   *  it owns — a stale panel never repaints a newer one. */
+  refreshSnapshot(): void {
+    if (this.disposed) return
+    this.refresh()
+  }
+
   // ── rendering ────────────────────────────────────────────────────────────
 
   render(width: number): string[] {

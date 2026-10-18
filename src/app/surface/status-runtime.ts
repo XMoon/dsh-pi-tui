@@ -385,9 +385,11 @@ export function createStatusRuntime(deps: StatusRuntimeDeps): StatusRuntime {
   const sessionCwdFact = (): string | undefined => {
     const agent = deps.liveAgent()
     if (agent !== undefined) {
+      // The session status projection is the ONE effective-directory read: an
+      // UNAVAILABLE read is unknown, so the immutable header project must never
+      // be presented as the current workspace (§B2.2, read-failure fence).
       const sessionId = deps.currentSessionId()
-      const effective = sessionId === undefined ? undefined : deps.sessionStatus(sessionId)?.cwd
-      return effective ?? agent.session.header.cwd
+      return sessionId === undefined ? undefined : deps.sessionStatus(sessionId)?.cwd
     }
     if (deps.remote !== undefined) {
       const sessionId = deps.currentSessionId()
@@ -455,9 +457,10 @@ export function createStatusRuntime(deps: StatusRuntimeDeps): StatusRuntime {
     if (deps.remote !== undefined) return undefined
     const agent = deps.liveAgent()
     if (agent === undefined) return deps.clientCwd
+    // The terminal-local cwd follows the SAME effective-directory authority; an
+    // unavailable read publishes NOTHING rather than the old header project.
     const sessionId = deps.currentSessionId()
-    const effective = sessionId === undefined ? undefined : deps.sessionStatus(sessionId)?.cwd
-    return effective ?? agent.session.header.cwd ?? deps.clientCwd
+    return sessionId === undefined ? undefined : deps.sessionStatus(sessionId)?.cwd
   }
 
   /** Forward the terminal-local cwd to the mounted TUI (it owns the write and

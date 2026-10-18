@@ -286,7 +286,7 @@ export class WebCredentialPanel implements Component {
       row(color.textDim('Set it with the existing masked /login input; the key is never written into a settings file.'), width),
       row('', width),
       ...enabled.map((action, index) => row(
-        `${index === this.focusedAction ? color.accent('› ') : '  '}${index === this.focusedAction ? color.textStrong(action.label) : action.label} — ${color.textDim(action.description)}`,
+        `${index === this.focusedAction ? color.primary('› ') : '  '}${index === this.focusedAction ? color.textStrong(action.label) : action.label} — ${color.textDim(action.description)}`,
         width,
       )),
       row('', width),

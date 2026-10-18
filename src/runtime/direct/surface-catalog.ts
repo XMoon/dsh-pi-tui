@@ -19,7 +19,7 @@
 
 import { safeErrorMessage } from '../process/errors.ts'
 import { readHumanSkillCatalog, resolveLiveSkillTarget, type SkillCatalogContext } from './skill-catalog.ts'
-import { effectiveAgentCwd, type WorkingDirectoryServiceLike } from './working-directory-direct.ts'
+import { effectiveAgentCwd } from './working-directory-direct.ts'
 import type { HumanSkillSummary } from '../../domain/catalog/skill.ts'
 import { commandSummaryOf, type SurfaceCatalogIssue, type SurfaceCatalogSnapshot, type SurfaceCommandDescriptor, type SurfaceCommandSummary } from '../../domain/catalog/surface.ts'
 
@@ -48,7 +48,10 @@ export interface SurfaceCommandsService {
  * composition, where the immutable header cwd remains the read. */
 export interface SurfaceCatalogContext {
   get(name: 'commands'): SurfaceCommandsService | undefined
-  get(name: 'workingDirectory'): WorkingDirectoryServiceLike | undefined
+  /** The official Session directory owner (`workingDirectory.get(session)`),
+   *  declared STRUCTURALLY here so this public interface never pulls a Direct
+   *  adapter module into the shipped declaration graph. */
+  get(name: 'workingDirectory'): { get(session: unknown): string } | undefined
 }
 
 /**

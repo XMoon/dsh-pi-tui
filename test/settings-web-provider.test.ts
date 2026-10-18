@@ -67,7 +67,18 @@ interface Harness {
   /** Every `/login` | `/logout` line the section delegated. */
   readonly delegated: readonly string[]
   /** The live (fake) Host store the read-back answers from. */
-  readonly store: { web: WebProviderSettings; available: boolean; failNext: string | undefined }
+  readonly store: {
+    web: WebProviderSettings
+    available: boolean
+    failNext: string | undefined
+    readThrows: boolean
+    /** Artificial delay for one Host write (the FIFO order proof). */
+    writeDelayMs: number
+  }
+  /** How many Web writes overlapped (must never exceed 1: ONE owner FIFO). */
+  readonly maxConcurrentWrites: () => number
+  /** The write labels in COMMIT order. */
+  readonly log: readonly string[]
   readonly view: () => string
   readonly invoke: (name?: string) => unknown
   readonly dispose: () => void
@@ -83,9 +94,14 @@ function setup(options: {
   const vt = new VirtualTerminal(columns, 40)
   const writes: string[] = []
   const delegated: string[] = []
+  let activeWrites = 0
+  let maxActiveWrites = 0
+  const log: string[] = []
   const store = {
     available: options.available ?? true,
     failNext: undefined as string | undefined,
+    readThrows: false,
+    writeDelayMs: 0,
     web: {
       searchProvider: options.searchProvider ?? 'deepseek-official',
       fetchProvider: 'http',
@@ -112,14 +128,22 @@ function setup(options: {
   }
   const ctx = new Context()
   ctx.provide('commands', commands as never)
-  const write = (label: string, apply: () => void): void => {
-    if (store.failNext !== undefined) {
-      const reason = store.failNext
-      store.failNext = undefined
-      throw new Error(reason)
+  const write = async (label: string, apply: () => void, delayMs = 0): Promise<void> => {
+    activeWrites += 1
+    maxActiveWrites = Math.max(maxActiveWrites, activeWrites)
+    try {
+      if (delayMs > 0) await new Promise(resolve => setTimeout(resolve, delayMs))
+      if (store.failNext !== undefined) {
+        const reason = store.failNext
+        store.failNext = undefined
+        throw new Error(reason)
+      }
+      writes.push(label)
+      log.push(label)
+      apply()
+    } finally {
+      activeWrites -= 1
     }
-    writes.push(label)
-    apply()
   }
   const base: Record<string, unknown> = {
     ctx,
@@ -152,12 +176,15 @@ function setup(options: {
       },
       web: {
         available: () => store.available,
-        read: async () => store.available ? { ...store.web, api: { ...store.web.api } } : undefined,
-        setSearchProvider: async (id: string) => { write(`search:${id}`, () => { store.web.searchProvider = id }) },
-        setFetchProvider: async (id: string) => { write(`fetch:${id}`, () => { store.web.fetchProvider = id }) },
-        setSearchApiCount: async (count: number) => { write(`count:${count}`, () => { store.web.api.count = count }) },
-        setSendOriginalQuestion: async (enabled: boolean) => { write(`ori:${String(enabled)}`, () => { store.web.api.sendOriginalQuestion = enabled }) },
-        setSearchApiBaseURL: async (url: string) => { write(`endpoint:${url}`, () => { store.web.api.baseURL = url }) },
+        read: async () => {
+          if (store.readThrows) throw new Error('settings descriptor unreadable')
+          return store.available ? { ...store.web, api: { ...store.web.api } } : undefined
+        },
+        setSearchProvider: async (id: string) => { await write(`search:${id}`, () => { store.web.searchProvider = id }, store.writeDelayMs) },
+        setFetchProvider: async (id: string) => { await write(`fetch:${id}`, () => { store.web.fetchProvider = id }) },
+        setSearchApiCount: async (count: number) => { await write(`count:${count}`, () => { store.web.api.count = count }) },
+        setSendOriginalQuestion: async (enabled: boolean) => { await write(`ori:${String(enabled)}`, () => { store.web.api.sendOriginalQuestion = enabled }) },
+        setSearchApiBaseURL: async (url: string) => { await write(`endpoint:${url}`, () => { store.web.api.baseURL = url }) },
       },
     },
     catalog: { models: { available: () => false } },
@@ -192,6 +219,8 @@ function setup(options: {
     writes,
     delegated,
     store,
+    maxConcurrentWrites: () => maxActiveWrites,
+    log,
     view,
     invoke,
     dispose: () => {
@@ -208,15 +237,23 @@ async function key(h: Harness, data: string): Promise<void> {
   await h.vt.waitForRender()
 }
 
+/** Open `/settings` and reach the `Other settings` rows level. */
+async function openOtherRows(h: Harness): Promise<void> {
+  h.invoke('settings')
+  for (let attempt = 0; attempt < 20 && !h.view().includes('Settings ·'); attempt += 1) {
+    await new Promise(resolve => setTimeout(resolve, 5))
+    await h.vt.waitForRender()
+  }
+  const keys = h.vt.columns >= 96 ? [TAB, TAB, DOWN, DOWN, ENTER] : [DOWN, DOWN, ENTER]
+  for (const pressed of keys) await key(h, pressed)
+}
+
 /** Drive `/settings` to the Web Search / Fetch row through the real workspace
  *  keys (categories → Other settings → the Web row), then open it. */
 async function openWebSection(h: Harness): Promise<void> {
-  h.invoke('settings')
-  await h.vt.waitForRender()
-  const keys = h.vt.columns >= 96
-    ? [TAB, TAB, DOWN, DOWN, ENTER, DOWN, ENTER]
-    : [DOWN, DOWN, ENTER, DOWN, ENTER]
-  for (const pressed of keys) await key(h, pressed)
+  await openOtherRows(h)
+  await key(h, DOWN)
+  await key(h, ENTER)
 }
 
 test('the workspace row reports the configured providers and opens the Web section focused', async t => {
@@ -368,4 +405,61 @@ test('a configured custom provider id stays visible, marked unavailable and not 
   await new Promise(resolve => setTimeout(resolve, 10))
   await h.vt.waitForRender()
   assert.deepEqual(h.writes, [], 'a custom route is never silently replaced by a cycle')
+})
+
+test('the endpoint editor joins the SAME FIFO: no Web write overlaps another', async t => {
+  const h = setup()
+  t.after(h.dispose)
+  h.store.writeDelayMs = 40
+  await openWebSection(h)
+  // Queue the (slow) provider write, then immediately open the endpoint editor
+  // and confirm it: with ONE owner FIFO the endpoint write starts only after the
+  // provider write settled.
+  await key(h, ENTER)
+  for (let index = 0; index < 4; index += 1) await key(h, DOWN)
+  await key(h, ENTER)
+  await key(h, ENTER)
+  await new Promise(resolve => setTimeout(resolve, 200))
+  await h.vt.waitForRender()
+  assert.deepEqual(h.log, [
+    'search:deepseek-search-api',
+    'endpoint:https://api.deepseek.com/v1/tools',
+  ], 'the two writes commit in input order')
+  assert.equal(h.maxConcurrentWrites(), 1, 'never two Web writes in flight at once')
+  assert.equal(h.store.web.searchProvider, 'deepseek-search-api')
+})
+
+test('an unreadable authority after a successful read drops to Unavailable, never a stale current', async t => {
+  const h = setup()
+  t.after(h.dispose)
+  await openWebSection(h)
+  assert.match(h.view(), /\[current\]/u, 'the first read paints the verified state')
+  // Leave the editor, close the workspace and make the authority fail.
+  await key(h, ESC)
+  await key(h, ESC)
+  await key(h, ESC)
+  h.store.readThrows = true
+  await openOtherRows(h)
+  assert.match(h.view(), /Unavailable/u, 'the launcher states the failure')
+  assert.doesNotMatch(h.view(), /Search: Messages/u, 'the old summary never survives as current')
+  await key(h, DOWN)
+  await key(h, ENTER)
+  await new Promise(resolve => setTimeout(resolve, 10))
+  await h.vt.waitForRender()
+  const providerLine = h.view().split('\n').find(line => line.includes('Web Search Provider')) ?? ''
+  assert.doesNotMatch(providerLine, /\[current\]|\[default\]/u,
+    'no legacy row claims a current/default value it cannot read')
+  assert.match(providerLine, /\[unavailable\]|Unavailable/u)
+  assert.match(h.view(), /Current: Unavailable/u)
+})
+
+test('a half-mounted Web configuration is unavailable and offers no write', async t => {
+  const h = setup({ available: false })
+  t.after(h.dispose)
+  await openWebSection(h)
+  assert.match(h.view(), /\[unavailable\]/u)
+  await key(h, ENTER)
+  await new Promise(resolve => setTimeout(resolve, 10))
+  await h.vt.waitForRender()
+  assert.deepEqual(h.writes, [], 'an unreadable configuration never accepts a write')
 })

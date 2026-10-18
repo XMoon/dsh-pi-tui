@@ -321,8 +321,8 @@ test('the state chips use their frozen ink roles in dark and light', async t => 
     await key(dark, ENTER)
     await new Promise(resolve => setTimeout(resolve, 10))
     await dark.vt.waitForRender()
-    assert.ok(dark.view().includes('[not saved]'), `the failed write states Not saved:\n${dark.view()}`)
-    assert.equal(chipCell(dark, 'Web Search Provider', '[not saved]'), hexToRgb(currentPalette.error), 'Not saved wears the error token')
+    assert.ok(dark.view().includes('[Not saved]'), `the failed write states Not saved:\n${dark.view()}`)
+    assert.equal(chipCell(dark, 'Web Search Provider', '[Not saved]'), hexToRgb(currentPalette.error), 'Not saved wears the error token')
     dark.dispose()
 
     // The LIGHT palette supplies the same roles on its own open. A live switch
@@ -339,6 +339,40 @@ test('the state chips use their frozen ink roles in dark and light', async t => 
       light.dispose()
     }
   } finally {
+    setTheme('dark')
+  }
+})
+
+test('a CJK custom provider id stays cell-safe at the frozen sizes', async t => {
+  for (const [columns, rows] of [[100, 40], [44, 20]] as const) {
+    const h = setup({ columns, rows })
+    try {
+      h.store.web.searchProvider = '搜索-提供方-一号'
+      await openWebSection(h)
+      const frame = h.plain()
+      for (const line of frame) {
+        assert.ok(visibleWidth(line) <= columns, `no CJK row overflows ${columns} cells: ${JSON.stringify(line)}`)
+      }
+      assert.ok(frame.some(line => line.includes('搜索-提供方-一号')), `the custom id is reported as-is at ${columns}x${rows}`)
+      assert.ok(frame.some(line => line.includes('[unavailable]')), 'a custom route stays unavailable for this selector')
+    } finally {
+      h.dispose()
+    }
+  }
+})
+
+test('a CUSTOM palette supplies the chip roles on its own open', async t => {
+  setTheme('custom', { ...currentPalette, textMuted: '#123456' })
+  const h = setup({ columns: 120, rows: 40 })
+  try {
+    await openWebSection(h)
+    const lines = h.plain()
+    const row = lines.findIndex(line => line.includes('Web Search Provider') && line.includes('[current]'))
+    assert.ok(row >= 0, `the frame paints the chips:\n${h.view()}`)
+    assert.equal(h.vt.getCellFgRgb(row, lines[row]!.indexOf('[current]')), hexToRgb('#123456'),
+      'the custom palette supplies the chip ink (no token is hard-coded)')
+  } finally {
+    h.dispose()
     setTheme('dark')
   }
 })

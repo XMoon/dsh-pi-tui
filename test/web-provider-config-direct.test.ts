@@ -123,6 +123,8 @@ test('read() reports UNAVAILABLE for a missing section instead of shipped defaul
   assert.equal(new DirectWebProviderConfig(host({ omitWeb: true }).ctx).available(), false)
   assert.equal(await new DirectWebProviderConfig(host({ omitApi: true }).ctx).read(), undefined,
     'without the API section the API facts are unavailable, never defaulted')
+  assert.equal(new DirectWebProviderConfig(host({ omitApi: true }).ctx).available(), false,
+    'availability is the SAME authority read() needs: a half-mounted configuration is unavailable')
   // A malformed value is unavailable too (never coerced).
   const malformed = host()
   malformed.settings.descriptors.set('web-deepseek-api', {
