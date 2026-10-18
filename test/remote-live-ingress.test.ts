@@ -788,17 +788,33 @@ test('the compaction cache SEED uses the hydrate outcome token, never a fresh ca
   // still the composition root.
   const { readFileSync } = await import('node:fs')
   const bootstrap = readFileSync(new URL('../src/app/bootstrap.ts', import.meta.url), 'utf8')
-  const seedStart = bootstrap.indexOf('seedWorkingFold({')
-  assert.ok(seedStart >= 0, 'the seed site exists')
+  // The COLD-hydrate seed site (the reconcile publishes its own fold through the
+  // presentation's commit seam, covered separately below).
+  const seedStart = bootstrap.indexOf('fold: hydrate.working')
+  assert.ok(seedStart >= 0, 'the cold-hydrate seed site exists')
+  const seedLiteralStart = bootstrap.lastIndexOf('seedWorkingFold({', seedStart)
   const seedEnd = bootstrap.indexOf('})', seedStart)
-  assert.ok(seedEnd > seedStart, 'the seed entry literal is closed')
-  const seed = bootstrap.slice(seedStart, seedEnd + 2)
+  assert.ok(seedLiteralStart >= 0 && seedEnd > seedStart, 'the seed entry literal is closed')
+  const seed = bootstrap.slice(seedLiteralStart, seedEnd + 2)
   assert.ok(seed.includes('transportToken: hydrate.transportToken'),
     'the seed stamps the token the HYDRATE was fenced under')
   assert.ok(!seed.includes('captureTransportToken'),
     'the seed must NOT re-capture the transport identity at seed time')
   assert.ok(seed.includes('generation: initGeneration') && seed.includes('sessionId,'),
     'the owner fence travels with the seed')
+  // The RECONCILE seed: the presentation publishes the fold under the transport
+  // identity the window commit was fenced under (never a fresh capture), and the
+  // composition root supplies the current owner generation.
+  const reconcileSeed = bootstrap.slice(
+    bootstrap.indexOf('seedWindowWorkingFold: input =>'),
+    bootstrap.indexOf('seedWindowWorkingFold: input =>') + 400,
+  )
+  assert.ok(reconcileSeed.includes('transportToken: input.transportToken'),
+    'the reconcile seed stamps the COMMITTED window identity')
+  assert.ok(!reconcileSeed.includes('captureTransportToken'),
+    'the reconcile seed must NOT re-capture the transport identity at seed time')
+  assert.ok(reconcileSeed.includes('generation: ownership.generation()'),
+    'the reconcile seed carries the current owner generation')
   // The storage itself must be the ONE helper-owned slot, fed only by that seed.
   const startup = readFileSync(new URL('../src/app/bootstrap/session-startup.ts', import.meta.url), 'utf8')
   assert.equal(startup.split('let remoteWorkingFoldFor').length - 1, 1,
