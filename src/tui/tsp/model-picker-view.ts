@@ -26,6 +26,7 @@
 import { ui, span, type Node } from '@stencil-hq/tern'
 import type { PickerAction, PickerGroup, PickerItem, PickerProps } from '@stencil-hq/tern'
 import type { ModelPickerFailureRow } from '../pickers/model-directory.ts'
+import { sanitizeDisplayText } from '../presentation/terminal-text.ts'
 import type { ModelPickerIntent } from './model-picker-intents.ts'
 import {
   FAILURE_RETRY_ID,
@@ -70,10 +71,10 @@ export interface ModelPickerViewDeps {
 function failureItem(failure: ModelPickerFailureRow): PickerItem {
   return {
     id: failureRowId(failure.providerId),
-    label: `${failure.providerName} · unavailable`,
-    detail: failure.message,
-    title: failure.message,
-    disabled: failure.message,
+    label: `${sanitizeDisplayText(failure.providerName)} · unavailable`,
+    detail: sanitizeDisplayText(failure.message),
+    title: sanitizeDisplayText(failure.message),
+    disabled: sanitizeDisplayText(failure.message),
     dot: 'error',
   }
 }
@@ -112,7 +113,7 @@ function modelOrder(panel: ModelPickerPanel): (string | PickerGroup)[] {
   for (const group of panel.directory?.directory.groups ?? []) {
     const rows = visible.filter((row) => row.providerId === group.id && !pinned.includes(row))
     if (rows.length === 0) continue
-    order.push({ group: group.id, label: group.name, count: rows.length })
+    order.push({ group: group.id, label: sanitizeDisplayText(group.name), count: rows.length })
     for (const row of rows) order.push(modelRowId(row))
   }
   if (panel.failures.length > 0) {
@@ -139,17 +140,20 @@ function modelOrder(panel: ModelPickerPanel): (string | PickerGroup)[] {
  * the one read-only Retry row.
  */
 function modelItems(panel: ModelPickerPanel): PickerItem[] {
-  const items: PickerItem[] = visibleModels(panel).map((row) => ({
-    id: modelRowId(row),
-    label: row.modelName,
-    mark: providerMark(row),
-    detail: row.providerName,
-    title: row.modelId,
-    badges: [
-      ...(row.isCurrent ? [{ text: 'current' }] : []),
-      ...(row.isDefault ? [{ text: 'default' }] : []),
-    ],
-  }))
+  const items: PickerItem[] = visibleModels(panel).map((row) => {
+    const mark = providerMark(row)
+    return {
+      id: modelRowId(row),
+      label: sanitizeDisplayText(row.modelName),
+      mark: { text: sanitizeDisplayText(mark.text), seed: mark.seed },
+      detail: sanitizeDisplayText(row.providerName),
+      title: sanitizeDisplayText(row.modelId),
+      badges: [
+        ...(row.isCurrent ? [{ text: 'current' }] : []),
+        ...(row.isDefault ? [{ text: 'default' }] : []),
+      ],
+    }
+  })
   items.push(...panel.failures.map(failureItem))
   if (retryRowOffered(panel)) items.push({ id: FAILURE_RETRY_ID, label: 'Retry failed providers' })
   return items
@@ -203,7 +207,7 @@ function nativeFocus(panel: ModelPickerPanel): PickerProps['focus'] {
 function pickerState(panel: ModelPickerPanel): Pick<PickerProps, 'state' | 'message' | 'empty'> {
   return {
     state: panel.phase === 'loading' ? 'loading' : panel.phase === 'error' ? 'error' : 'ready',
-    ...(panel.notice === undefined ? {} : { message: panel.notice.text }),
+    ...(panel.notice === undefined ? {} : { message: sanitizeDisplayText(panel.notice.text) }),
     // The client is what paints this (if it paints it at all): MEASURED on the real client, a
     // search that matches nothing empties the list and draws NO copy, so one honest sentence
     // covers the state the string can describe.
@@ -252,7 +256,7 @@ function detailsReader(panel: ModelPickerPanel, deps: ModelPickerViewDeps): Node
   // queued while an earlier Reader was open can never address this one's body.
   const scope = `${panel.serial}-${panel.readerEpoch}`
   return ui.overlay(
-    { key: `${MODEL_DETAILS_READER_KEY}-${scope}`, head: readerHead(panel), size: 'lg', modal: true },
+    { key: `${MODEL_DETAILS_READER_KEY}-${scope}`, head: sanitizeDisplayText(readerHead(panel)), size: 'lg', modal: true },
     ui.row(
       { key: `${MODEL_DETAILS_BACK_KEY}-${scope}`, onClick: deps.bind({ kind: 'back' }) },
       ui.text(span('Back', 'accent')),
@@ -268,14 +272,14 @@ function detailsReader(panel: ModelPickerPanel, deps: ModelPickerViewDeps): Node
             // refused write, which leaves the panel `ready`, from a cancellation.
             ...(panel.notice === undefined
               ? []
-              : [ui.text({ wrap: 'word' }, span(panel.notice.text, panel.notice.tone))]),
+              : [ui.text({ wrap: 'word' }, span(sanitizeDisplayText(panel.notice.text), panel.notice.tone))]),
             ...groups.flatMap((group, index) => [
               ui.col(
                 { key: `reader-group-${group.id}`, gap: 'xs' },
-                ui.text(span(group.head, 'muted')),
+                ui.text(span(sanitizeDisplayText(group.head), 'muted')),
                 ...group.facts.flatMap((fact) => [
-                  ...(fact.label === undefined ? [] : [ui.text(span(fact.label, 'muted'))]),
-                  ui.text({ key: fact.id, text: fact.value, wrap: fact.wrap }),
+                  ...(fact.label === undefined ? [] : [ui.text(span(sanitizeDisplayText(fact.label), 'muted'))]),
+                  ui.text({ key: fact.id, text: sanitizeDisplayText(fact.value), wrap: fact.wrap }),
                 ]),
               ),
               // The rule closes the group, so it is never painted after the last one.
@@ -320,12 +324,16 @@ function modelListPicker(
     // at all, and no page hides that editor behind a second page.
     ...(stripOffered(panel)
       ? {
-          strip: { label: STRIP_LABEL, items: stripItems(panel, stripLabelColumns(deps.paneWidth)) },
+          strip: {
+            label: STRIP_LABEL,
+            items: stripItems(panel, stripLabelColumns(deps.paneWidth))
+              .map((item) => ({ ...item, label: sanitizeDisplayText(item.label) })),
+          },
         }
       : {}),
     selected: panel.selected,
     current: panel.rows.filter((item) => item.isCurrent).map(modelRowId),
-    subtitle: pickerSubtitle(panel),
+    subtitle: sanitizeDisplayText(pickerSubtitle(panel)),
     focus: nativeFocus(panel),
     ...pickerState(panel),
     actions: renderedActions(panel),

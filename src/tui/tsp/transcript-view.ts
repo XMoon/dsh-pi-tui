@@ -30,6 +30,7 @@ import type { ContextCluster } from '../transcript/context-structure.ts'
 import { contextClusterSummaryParts } from '../transcript/context-summary.ts'
 import type { TranscriptStructureBlock, TranscriptWorkSpan } from '../transcript/structure.ts'
 import { systemContextBody, toolCardHeader } from '../transcript/tool-presentation.ts'
+import { sanitizeDisplayText } from '../presentation/terminal-text.ts'
 
 /**
  * One replay-local allocator of presentation keys, scoped to a single
@@ -95,14 +96,14 @@ function isUnmatchedToolRow(message: Extract<TranscriptMessage, { kind: 'tool' }
 
 function toolBodyNodes(message: Extract<TranscriptMessage, { kind: 'tool' }>, options: TranscriptViewOptions): Node[] {
   const nodes: Node[] = []
-  if (message.args !== '') nodes.push(ui.code({ key: 'args', text: message.args }))
+  if (message.args !== '') nodes.push(ui.code({ key: 'args', text: sanitizeDisplayText(message.args) }))
   // The body is decided by the SHOWN result, never by the recorded payload: a
   // running `ask_user_question` row can carry an empty recorded result while
   // the official projection already settled it, and the settled batch is still
   // the authority. An absent lookup answers `''` and omits the body exactly as
   // before, so an ordinary tool row is unchanged.
   const result = shownToolResult(message, options)
-  if (result !== '') nodes.push(ui.code({ key: 'result', text: result }))
+  if (result !== '') nodes.push(ui.code({ key: 'result', text: sanitizeDisplayText(result) }))
   return nodes
 }
 
@@ -126,7 +127,7 @@ function toolNode(message: Extract<TranscriptMessage, { kind: 'tool' }>, key: st
   if (isUnmatchedToolRow(message)) {
     const provenance = message.origin === 'tool-not-started' ? 'not started' : 'unmatched result'
     return ui.card(
-      { key, head: header.title, tone: 'warning' },
+      { key, head: sanitizeDisplayText(header.title), tone: 'warning' },
       ui.badge({ key: 'provenance', text: provenance }),
       ...body,
     )
@@ -135,9 +136,9 @@ function toolNode(message: Extract<TranscriptMessage, { kind: 'tool' }>, key: st
     {
       key,
       name: message.name,
-      title: header.title,
+      title: sanitizeDisplayText(header.title),
       status: toolStatus(message.status),
-      ...(header.summary === '' ? {} : { target: header.summary, targetKind: 'text' }),
+      ...(header.summary === '' ? {} : { target: sanitizeDisplayText(header.summary), targetKind: 'text' }),
     },
     ...body,
   )
@@ -150,15 +151,15 @@ function toolNode(message: Extract<TranscriptMessage, { kind: 'tool' }>, key: st
  */
 function contextBodyNodes(message: Extract<TranscriptMessage, { kind: 'system' }>): Node[] {
   const body = systemContextBody(message.text)
-  if (body === undefined) return [ui.md({ key: 'body', text: message.text })]
+  if (body === undefined) return [ui.md({ key: 'body', text: sanitizeDisplayText(message.text) })]
   if (body.length === 0) return []
-  return [ui.code({ key: 'body', text: body.join('\n') })]
+  return [ui.code({ key: 'body', text: sanitizeDisplayText(body.join('\n')) })]
 }
 
 function systemNode(message: Extract<TranscriptMessage, { kind: 'system' }>, key: string): Node {
   if (message.context === true) {
     const kind = contextPresentationKind(message)
-    const head = message.label ?? contextFormOf(message) ?? 'Context'
+    const head = sanitizeDisplayText(message.label ?? contextFormOf(message) ?? 'Context')
     return ui.card(
       { key, head },
       ui.badge({ key: 'kind', text: kind ?? 'generic' }),
@@ -167,17 +168,17 @@ function systemNode(message: Extract<TranscriptMessage, { kind: 'system' }>, key
   }
   // Non-context system rows are orchestration evidence (llm-retry /
   // turn-max-tokens); they are never turn-foundation Context.
-  return ui.card({ key, head: message.origin ?? 'System' }, ui.md({ key: 'body', text: message.text }))
+  return ui.card({ key, head: message.origin ?? 'System' }, ui.md({ key: 'body', text: sanitizeDisplayText(message.text) }))
 }
 
 function commandNode(message: Extract<TranscriptMessage, { kind: 'command' }>, key: string): Node {
   const name = message.name ?? 'command'
-  const head = message.args === null || message.args === '' ? `/${name}` : `/${name} ${message.args}`
+  const head = sanitizeDisplayText(message.args === null || message.args === '' ? `/${name}` : `/${name} ${message.args}`)
   const outcome = message.outcome
   // The official `command/done` kind is the only status authority: a run
   // without a done is running, and a fragment-only fallback invents nothing.
   const status: Status = outcome === null ? 'running' : outcome.kind === 'error' ? 'error' : 'done'
-  const body = outcome?.text === undefined || outcome.text === '' ? [] : [ui.md({ key: 'body', text: outcome.text })]
+  const body = outcome?.text === undefined || outcome.text === '' ? [] : [ui.md({ key: 'body', text: sanitizeDisplayText(outcome.text) })]
   return ui.card({ key, head, status }, ...body)
 }
 
@@ -185,7 +186,7 @@ function compactionNode(message: Extract<TranscriptMessage, { kind: 'compaction'
   const status: Status = message.error !== undefined && message.error !== ''
     ? 'error'
     : message.running === true ? 'running' : 'done'
-  const body = message.text === '' ? [] : [ui.md({ key: 'body', text: message.text })]
+  const body = message.text === '' ? [] : [ui.md({ key: 'body', text: sanitizeDisplayText(message.text) })]
   return ui.card(
     { key, head: 'Compaction', status },
     ui.badge({ key: 'counts', text: `${message.items} items · ${message.tokens} tokens` }),
@@ -195,7 +196,7 @@ function compactionNode(message: Extract<TranscriptMessage, { kind: 'compaction'
 
 function workflowNode(message: Extract<TranscriptMessage, { kind: 'workflow' }>, key: string): Node {
   return ui.card(
-    { key, head: message.name },
+    { key, head: sanitizeDisplayText(message.name) },
     ui.badge({ key: 'state', text: message.status }),
     ui.badge({ key: 'members', text: `${message.members.length} members` }),
   )
@@ -205,13 +206,13 @@ function workflowNode(message: Extract<TranscriptMessage, { kind: 'workflow' }>,
 function messageNode(message: TranscriptMessage, key: string, options: TranscriptViewOptions): Node {
   switch (message.kind) {
     case 'user':
-      return ui.card({ key, head: 'You' }, ui.md({ key: 'body', text: message.text }))
+      return ui.card({ key, head: 'You' }, ui.md({ key: 'body', text: sanitizeDisplayText(message.text) }))
     case 'assistant':
-      return ui.card({ key, head: 'Assistant' }, ui.md({ key: 'body', text: message.text }))
+      return ui.card({ key, head: 'Assistant' }, ui.md({ key: 'body', text: sanitizeDisplayText(message.text) }))
     case 'thinking':
       return ui.card(
         { key, head: 'Thinking', ...(message.running === true ? { status: 'running' } : {}) },
-        ui.md({ key: 'body', text: message.text, ...(message.running === true ? { stream: true } : {}) }),
+        ui.md({ key: 'body', text: sanitizeDisplayText(message.text), ...(message.running === true ? { stream: true } : {}) }),
       )
     case 'tool':
       return toolNode(message, key, options)
@@ -224,7 +225,7 @@ function messageNode(message: TranscriptMessage, key: string, options: Transcrip
     case 'workflow':
       return workflowNode(message, key)
     case 'summary':
-      return ui.card({ key, head: 'Earlier turns' }, ui.md({ key: 'body', text: message.text }))
+      return ui.card({ key, head: 'Earlier turns' }, ui.md({ key: 'body', text: sanitizeDisplayText(message.text) }))
   }
 }
 
@@ -241,7 +242,7 @@ function workNode(span: TranscriptWorkSpan, keys: TranscriptNodeKeys, options: T
 function clusterNode(cluster: ContextCluster, keys: TranscriptNodeKeys, options: TranscriptViewOptions, prefix: string): Node {
   const parts = contextClusterSummaryParts(cluster)
   return ui.card(
-    { key: `${prefix}ctx-${keys.keyFor(cluster.owner)}`, head: parts.length === 0 ? 'Context' : parts.join(' · ') },
+    { key: `${prefix}ctx-${keys.keyFor(cluster.owner)}`, head: parts.length === 0 ? 'Context' : sanitizeDisplayText(parts.join(' · ')) },
     ...cluster.members.map(member => messageNode(member, keys.keyFor(member), options)),
   )
 }

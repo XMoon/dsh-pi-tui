@@ -567,7 +567,9 @@ test('native Preset Details: every long value is complete and one native scroll 
   assert.equal(textOf(pane, 'details-name'), name)
   assert.equal(textOf(pane, 'details-id'), id)
   assert.equal(textOf(pane, 'details-type'), 'Custom')
-  assert.equal(textOf(pane, 'details-description'), long)
+  // The untrusted-text projection normalizes the roster string's CRLF to LF;
+  // no content is dropped and the client renders the same lines.
+  assert.equal(textOf(pane, 'details-description'), long.replace(/\r\n/g, '\n'))
   assert.equal(layer(pane).find((entry) => entry.id.endsWith('.details-id'))?.p.wrap, 'char')
   assert.equal(layer(pane).find((entry) => entry.id.endsWith('.details-description'))?.p.wrap, 'word')
   // The full description lives in the page's ONE scrolling body, which is also the node

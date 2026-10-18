@@ -39,6 +39,7 @@
  */
 import { span, ui, type Node } from '@stencil-hq/tern'
 import type { PickerAction, PickerItem, PickerProps } from '@stencil-hq/tern'
+import { sanitizeDisplayText } from '../presentation/terminal-text.ts'
 import type { PresetPickerIntent } from './preset-picker-intents.ts'
 import {
   FRAME_FREE_ACTION,
@@ -90,7 +91,7 @@ function pickerState(panel: PresetPickerPanel): Pick<PickerProps, 'state' | 'mes
   const message = statusMessage(panel)
   return {
     state: panel.phase === 'loading' ? 'loading' : panel.phase === 'error' ? 'error' : 'ready',
-    ...(message === '' ? {} : { message }),
+    ...(message === '' ? {} : { message: sanitizeDisplayText(message) }),
     // The empty roster is a real, readable state and never a silent fallback to
     // "take the first card".
     empty: 'No agent presets configured.',
@@ -119,7 +120,12 @@ function renderedActions(panel: PresetPickerPanel): PickerAction[] {
 function cataloguePicker(panel: PresetPickerPanel): Node {
   const row = highlightedRow(panel)
   const current = currentId(panel)
-  const items: PickerItem[] = presetItems(panel)
+  const items: PickerItem[] = presetItems(panel).map((item) => ({
+    ...item,
+    label: typeof item.label === 'string' ? sanitizeDisplayText(item.label) : item.label,
+    ...(typeof item.detail === 'string' ? { detail: sanitizeDisplayText(item.detail) } : {}),
+    ...(item.title === undefined ? {} : { title: sanitizeDisplayText(item.title) }),
+  }))
   const props: PickerProps & { readonly key: string } = {
     key: pickerKey(panel),
     title: 'Agent presets',
@@ -184,9 +190,9 @@ function detailsIdentity(panel: PresetPickerPanel, row: NonNullable<ReturnType<t
     ui.col(
       { key: `preset-details-identity-${readingScope(panel)}`, gap: 'xs' },
       ui.text(span('Name', 'muted')),
-      ui.text({ key: 'details-name', text: row.name, wrap: 'char' }),
+      ui.text({ key: 'details-name', text: sanitizeDisplayText(row.name), wrap: 'char' }),
       ui.text(span('ID', 'muted')),
-      ui.text({ key: 'details-id', text: row.id, wrap: 'char' }),
+      ui.text({ key: 'details-id', text: sanitizeDisplayText(row.id), wrap: 'char' }),
       ui.text(span('Type', 'muted')),
       ui.text({ key: 'details-type', text: row.builtIn ? 'Built-in' : 'Custom' }),
       ui.text(span('Scope', 'muted')),
@@ -200,13 +206,13 @@ function detailsIdentity(panel: PresetPickerPanel, row: NonNullable<ReturnType<t
         ],
       }),
       ...relations.flatMap((relation) => [
-        ui.text({ key: relation.id, spans: [span(`${relation.label}: `, 'muted'), span(relation.value)] }),
+        ui.text({ key: relation.id, spans: [span(`${relation.label}: `, 'muted'), span(sanitizeDisplayText(relation.value))] }),
       ]),
       ...(row.broken === undefined
         ? []
         : [
             ui.text(span('Failed to load', 'muted')),
-            ui.text({ key: 'details-broken', text: row.broken, wrap: 'word' }),
+            ui.text({ key: 'details-broken', text: sanitizeDisplayText(row.broken), wrap: 'word' }),
           ]),
     ),
   ]
@@ -226,7 +232,7 @@ function detailsOverlay(panel: PresetPickerPanel, deps: PresetPickerViewDeps): N
   return ui.overlay(
     {
       key: `preset-details-${readingScope(panel)}`,
-      head: detailsHead(panel),
+      head: sanitizeDisplayText(detailsHead(panel)),
       size: 'lg',
       modal: true,
     },
@@ -235,7 +241,7 @@ function detailsOverlay(panel: PresetPickerPanel, deps: PresetPickerViewDeps): N
       { key: bodyKey(panel), gap: 'xs' },
       // The transient read/write notice leads the page: it describes the state the facts
       // below were read in.
-      ...(notice === '' ? [] : [ui.text({ key: 'details-notice', wrap: 'word' }, span(notice, 'muted'))]),
+      ...(notice === '' ? [] : [ui.text({ key: 'details-notice', wrap: 'word' }, span(sanitizeDisplayText(notice), 'muted'))]),
       ...(row === undefined
         ? [ui.text(span('No preset is selected.', 'muted'))]
         : [
@@ -249,12 +255,12 @@ function detailsOverlay(panel: PresetPickerPanel, deps: PresetPickerViewDeps): N
               ? [ui.text(span('No description provided.', 'muted'))]
               : [
                   ui.text(span('Description', 'muted')),
-                  ui.text({ key: 'details-description', text: row.description, wrap: 'word' }),
+                  ui.text({ key: 'details-description', text: sanitizeDisplayText(row.description), wrap: 'word' }),
                 ]),
             // A SHIPPED preset's official guide follows INLINE — one scroll, no
             // `Read mode guide` jump, no third page. A Custom declaration stops
             // here: it must not borrow an official guide.
-            ...(markdown === undefined ? [] : [ui.md({ key: `preset-details-guide-${readingScope(panel)}`, text: markdown })]),
+            ...(markdown === undefined ? [] : [ui.md({ key: `preset-details-guide-${readingScope(panel)}`, text: sanitizeDisplayText(markdown) })]),
           ]),
     ),
   )

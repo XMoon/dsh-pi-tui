@@ -24,6 +24,7 @@
  */
 
 import { ui } from '@stencil-hq/tern'
+import { sanitizeDisplayText } from '../presentation/terminal-text.ts'
 import type { Key, Node } from '@stencil-hq/tern'
 import { runSyncDisposalSteps } from '../../runtime/process/disposal.ts'
 import { cancellationError } from '../../runtime/process/tasks.ts'
@@ -1025,12 +1026,12 @@ export function createTspInteractionSeat(options: TspInteractionSeatOptions): Ts
   const overlayKey = (): string => `modal-${modalEpoch}`
 
   const approvalOverlay = (slot: ApprovalSlot): Node => {
-    const body: Node[] = [ui.text({ key: 'tool', text: `tool: ${slot.request.toolName}` })]
+    const body: Node[] = [ui.text({ key: 'tool', text: sanitizeDisplayText(`tool: ${slot.request.toolName}`) })]
     if (slot.request.reason !== undefined && slot.request.reason !== '') {
-      body.push(ui.text({ key: 'reason', text: slot.request.reason }))
+      body.push(ui.text({ key: 'reason', text: sanitizeDisplayText(slot.request.reason) }))
     }
     if (slot.request.arguments !== undefined) {
-      body.push(ui.code({ key: 'args', text: slot.request.arguments }))
+      body.push(ui.code({ key: 'args', text: sanitizeDisplayText(slot.request.arguments) }))
     }
     if (slot.request.danger === true) {
       // The danger decision already happened upstream; the seat only presents it
@@ -1048,7 +1049,7 @@ export function createTspInteractionSeat(options: TspInteractionSeatOptions): Ts
       body.push(ui.text({ key: 'review', text: 'Review your answers' }))
       for (const [index, question] of slot.questions.entries()) {
         const draft = slot.drafts[index] as SlotDraft
-        body.push(ui.text({ key: `answer-${index}`, text: `${index + 1}. ${answerSummary(question, draft)}` }))
+        body.push(ui.text({ key: `answer-${index}`, text: sanitizeDisplayText(`${index + 1}. ${answerSummary(question, draft)}`) }))
       }
       body.push(ui.text({ key: 'hint', text: 'enter submit · left back · esc cancel' }))
       return ui.overlay({ key: overlayKey(), modal: true, head: 'Review', anchor: 'center', size: 'md' }, ...body)
@@ -1057,14 +1058,14 @@ export function createTspInteractionSeat(options: TspInteractionSeatOptions): Ts
     const draft = slot.drafts[slot.tab] as SlotDraft
     body.push(ui.text({ key: 'progress', text: `question ${slot.tab + 1}/${total}` }))
     const statusText = slot.status?.text
-    if (statusText !== undefined && statusText !== '') body.push(ui.text({ key: 'status', text: statusText }))
-    if (question.header !== undefined) body.push(ui.text({ key: 'header', text: question.header }))
-    body.push(ui.text({ key: 'question', text: question.question }))
-    if (question.detail !== undefined) body.push(ui.text({ key: 'detail', text: question.detail }))
+    if (statusText !== undefined && statusText !== '') body.push(ui.text({ key: 'status', text: sanitizeDisplayText(statusText) }))
+    if (question.header !== undefined) body.push(ui.text({ key: 'header', text: sanitizeDisplayText(question.header) }))
+    body.push(ui.text({ key: 'question', text: sanitizeDisplayText(question.question) }))
+    if (question.detail !== undefined) body.push(ui.text({ key: 'detail', text: sanitizeDisplayText(question.detail) }))
     const seat = seatRows(slot)
     if (slot.editing === slot.tab) {
       for (const [index, row] of seat.entries()) {
-        body.push(ui.text({ key: `row-${index}`, text: `${index === slot.highlight ? '❯' : ' '} ${row.label}` }))
+        body.push(ui.text({ key: `row-${index}`, text: sanitizeDisplayText(`${index === slot.highlight ? '❯' : ' '} ${row.label}`) }))
       }
       const masked = question.masked === true
       body.push(ui.input({
@@ -1081,7 +1082,7 @@ export function createTspInteractionSeat(options: TspInteractionSeatOptions): Ts
       // The navigation state of an optionless question (Esc left the edit).
       const masked = question.masked === true
       const shown = masked ? maskedValue(draft.custom) : draft.custom
-      body.push(ui.text({ key: 'free', text: shown === '' ? '(type an answer)' : shown }))
+      body.push(ui.text({ key: 'free', text: sanitizeDisplayText(shown === '' ? '(type an answer)' : shown) }))
       body.push(ui.text({ key: 'hint', text: 'enter edit · left/right page · esc cancel' }))
       return ui.overlay({ key: overlayKey(), modal: true, head: `Question ${slot.tab + 1}/${total}`, anchor: 'center', size: 'md' }, ...body)
     }
@@ -1094,12 +1095,12 @@ export function createTspInteractionSeat(options: TspInteractionSeatOptions): Ts
           : draft.selected.has(row.value ?? '') ? '(•) ' : '( ) '
       const description = row.description === undefined ? '' : ` — ${row.description}`
       const recommended = row.recommended ? ' [recommended]' : ''
-      body.push(ui.text({ key: `row-${index}`, text: `${pointer} ${marker}${row.label}${recommended}${description}` }))
+      body.push(ui.text({ key: `row-${index}`, text: sanitizeDisplayText(`${pointer} ${marker}${row.label}${recommended}${description}`) }))
     }
     const custom = draft.custom
     if (hasCustomAnswer(draft) || draft.skipped) {
       const shown = custom.trim() === '' ? '(skipped)' : question.masked === true ? maskedValue(custom) : custom
-      body.push(ui.text({ key: 'other-value', text: `other: ${shown}` }))
+      body.push(ui.text({ key: 'other-value', text: sanitizeDisplayText(`other: ${shown}`) }))
     }
     body.push(ui.text({
       key: 'hint',
@@ -1111,7 +1112,7 @@ export function createTspInteractionSeat(options: TspInteractionSeatOptions): Ts
   const listOverlay = (callbacks: TspInteractionCallbacks): Node => {
     const { rows, index } = listState(callbacks)
     const body: Node[] = rows.map((row, position) =>
-      ui.text({ key: `continued-${position}`, text: `${position === index ? '❯' : ' '} ${row.sessionId} · ${row.callId}` }))
+      ui.text({ key: `continued-${position}`, text: sanitizeDisplayText(`${position === index ? '❯' : ' '} ${row.sessionId} · ${row.callId}`) }))
     body.push(ui.text({ key: 'hint', text: 'enter open · esc close' }))
     return ui.overlay({ key: overlayKey(), modal: true, head: 'Continued questions', anchor: 'center', size: 'md' }, ...body)
   }

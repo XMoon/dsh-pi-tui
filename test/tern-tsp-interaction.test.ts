@@ -153,6 +153,29 @@ function wireText(pane: TspPane): string {
   return pane.output.text()
 }
 
+test('B-hardening: a hostile approval request never emits its raw control bytes to the wire', async () => {
+  const harness = await mountHarness()
+  try {
+    const hostile = 'tool\u001b]52;c;YXR0YWNr\u0007\u001b[2J\u001b]0;hijacked-title\u001b\\\u009b2J\r[y] allow once'
+    const outcome = harness.renderer.interaction.showApprovalPrompt(
+      { toolName: hostile, reason: hostile, arguments: hostile, danger: true },
+      true,
+    )
+    await waitFor(() => overlayAdds(harness.ops()).length === 1, 'the approval overlay reached the wire')
+    const wire = wireText(harness.pane)
+    assert.ok(!wire.includes('YXR0YWNr'), `no OSC 52 payload reaches the wire:\n${wire.slice(0, 400)}`)
+    assert.ok(!wire.includes('hijacked-title'), 'no OSC 0 title payload reaches the wire')
+    const ops = JSON.stringify(harness.ops())
+    assert.ok(!ops.includes('\\u001b'), 'no raw ESC reaches a node prop')
+    assert.ok(!ops.includes('\u009b'), 'no raw C1 byte reaches a node prop')
+    assert.ok(ops.includes('[y] allow once'), 'the reason text itself still reads inline')
+    harness.pane.key('n')
+    assert.equal(await outcome, 'rejected')
+  } finally {
+    await harness.dispose()
+  }
+})
+
 // ── The single modal layer, focus, and the return to the composer ───────────
 
 test('B3: an approval owns ONE layer overlay, unmounts it on settle, and returns the caret to an untouched composer', async () => {
