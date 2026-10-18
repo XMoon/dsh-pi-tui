@@ -469,6 +469,74 @@ export interface PresetDefaultConfig {
 }
 
 /**
+ * The OFFICIAL web provider selection and DeepSeek Search/Fetch API options
+ * (the DSH `web` / `web-deepseek-api` settings sections, S2/PR-B §3.2).
+ *
+ * The provider ids are the OFFICIAL registered ones: the selection never
+ * accepts an arbitrary provider id, and a custom id already present in the Host
+ * configuration is read and reported as-is rather than silently replaced.
+ * A read is a snapshot of the Host configuration; it does NOT claim to be the
+ * provider the NEXT operation will use — `ctx.web` decides that at call time,
+ * which the qualification proves by executing the real tool.
+ */
+export interface WebProviderSettings {
+  /** `web.searchProvider`: the configured id, or `undefined` when the Host has
+   *  no explicit selection (the official auto-selection then applies). */
+  searchProvider: string | undefined
+  /** `web.fetchProvider`, with the same absent-selection semantics. */
+  fetchProvider: string | undefined
+  /** The `web-deepseek-api` API options (official defaults when unset). */
+  api: {
+    baseURL: string
+    count: number
+    sendOriginalQuestion: boolean
+  }
+  /** Credential-presence facts from the official credential store (never the
+   *  value): `configured` is the store's own answer, `source` its layer when
+   *  it reports one. */
+  credential: {
+    configured: boolean
+    source?: string
+  }
+}
+
+/**
+ * The Web provider configuration sub-domain: the ONLY write path to the
+ * official `web` / `web-deepseek-api` sections. Every write goes through the
+ * official revision-checked settings mutation, and a caller must re-`read()`
+ * after it to establish the committed value (a resolved write is not a
+ * read-back).
+ */
+export interface WebProviderConfig {
+  /** Whether the official Host settings section for the web providers is
+   *  mounted (false = the UI presents the section as unavailable and offers no
+   *  write). */
+  available(): boolean
+  /**
+   * The current Host facts, or `undefined` when the official descriptors cannot
+   * be read. `undefined` is UNAVAILABLE — never the shipped defaults presented
+   * as a successful read (a caller may still show the shipped defaults
+   * separately, as a documented expectation rather than a fact).
+   */
+  read(): Promise<WebProviderSettings | undefined>
+  /** Pin the official search provider (`web.searchProvider`). */
+  setSearchProvider(id: 'deepseek-official' | 'deepseek-search-api'): Promise<void>
+  /** Pin the official fetch provider (`web.fetchProvider`). */
+  setFetchProvider(id: 'http' | 'deepseek-fetch-api'): Promise<void>
+  /** `web-deepseek-api.count`: an integer from 1 through 50 (the official rule). */
+  setSearchApiCount(count: number): Promise<void>
+  /** `web-deepseek-api.sendOriginalQuestion`: whether the next API search may
+   *  send the triggering human question (the provider bounds it to 128
+   *  characters). */
+  setSendOriginalQuestion(enabled: boolean): Promise<void>
+  /** `web-deepseek-api.baseURL`: an absolute `https:` API base WITHOUT
+   *  credentials, query, fragment or a trailing `/search` / `/fetch` action
+   *  name. A custom endpoint receives the credential, so the human must confirm
+   *  it explicitly in the UI. */
+  setSearchApiBaseURL(url: string): Promise<void>
+}
+
+/**
  * How current this backend's config reads are (M3-3B, plan §9.1).
  *
  * `ready` — the values below are authoritative for the live backend;
@@ -511,4 +579,6 @@ export interface ConfigPort {
   readonly presetDefault: PresetDefaultConfig
   /** The official subagent model-selection preference. */
   readonly subagentModelSelection: SubagentModelSelectionConfig
+  /** The official Web provider selection + Search/Fetch API options. */
+  readonly web: WebProviderConfig
 }

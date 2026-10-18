@@ -11,7 +11,7 @@
  * @module @xmoon76/dsh-pi-tui/commands/settings
  */
 
-import type { SettingItem } from '@xmoon76/pi-tui'
+import type { SettingItem, SettingValuePart } from '@xmoon76/pi-tui'
 import { SettingsList } from '@xmoon76/pi-tui'
 import type { CommandResult } from '@deepseek-ai/dsh-commands'
 import type { TuiApp } from '../../tui-app.ts'
@@ -47,7 +47,8 @@ import { ThemeSubmenu, themeDisplayName as themeDisplayNameOf } from '../pickers
 import { SubagentModelAllowlistPicker, allowlistSummary } from '../pickers/subagent-model-menu.ts'
 import { resolveThemeSelection, themePickerRows } from '../../app/surface/theme-selection.ts'
 import { normalizePersistedTheme } from '../../domain/display/theme-selection.ts'
-import { serializeTuiSettingsMutation, type ConfigPort, type TuiSettingsDoc } from '../../runtime/config-port.ts'
+import { serializeTuiSettingsMutation, type ConfigPort, type TuiSettingsDoc, type WebProviderSettings } from '../../runtime/config-port.ts'
+import { WebCredentialPanel, WebEndpointPanel, WebWriteVerdictError, type WebCredentialAction } from '../panels/web-provider-panels.ts'
 import type {
   SettingsWorkspaceCommitOutcome,
   SettingsWorkspaceCommitRequest,
@@ -71,6 +72,7 @@ type SettingsCommandRunner = Pick<
   | 'applyFooterSettings'
   | 'captureLiveSessionScope'
   | 'catalog'
+  | 'clientCommands'
   | 'config'
   | 'createPluginManagerSubmenu'
   | 'currentApprovalOverride'
@@ -130,6 +132,511 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
     clearExtensionError,
     captureExtensionHealthRef,
   } = deps
+
+  // ── S2/PR-B §3.3 / §B3.4: the Web Search / Fetch settings section ──────
+  //
+  // The Host owns the values (the `web` / `web-deepseek-api` settings sections
+  // and the `ctx.web` selection at CALL time); this command owns only the
+  // presentation and the ONE serialized write entry. State vocabulary is the
+  // frozen design language §4A.2: `Loading…` / `Saving…` are textDim words,
+  // `Verified` is success, `Not saved` is error, `Outcome unknown` is warning,
+  // and `Unavailable` states a fact with its reason. `[current]` and
+  // `[default]` are INDEPENDENT state chips (§4.5): `[current]` only moves
+  // after a mutation AND its authoritative read-back agree.
+
+  /** The exact credential reference the official DeepSeek web providers
+   *  resolve (`apiKeyEnv`'s shipped default). The value never reaches the TUI. */
+  const WEB_CREDENTIAL_REF = 'DEEPSEEK_API_KEY'
+  const WEB_CREDENTIAL_ROW_ID = 'web-credential'
+  /** The `Other`-category launcher row id (a NAVIGATION row: it never becomes a
+   *  Workspace editable field, so the `2 editable rows` count is unchanged). */
+  const WEB_LAUNCHER_ROW_ID = 'web-settings'
+  /** The legacy row the launcher focuses AND the identity that makes Esc
+   *  restore the Workspace instead of returning to the conversation. */
+  const WEB_LAUNCHER_TARGET_ROW = 'web-search-provider'
+  const WEB_SEARCH_PROVIDER_VALUES = [
+    { id: 'deepseek-official', label: 'Messages', default: true },
+    { id: 'deepseek-search-api', label: 'DeepSeek Search API', default: false },
+  ] as const
+  const WEB_FETCH_PROVIDER_VALUES = [
+    { id: 'http', label: 'HTTP', default: true },
+    { id: 'deepseek-fetch-api', label: 'DeepSeek Fetch API', default: false },
+  ] as const
+  const WEB_SEARCH_COUNT_VALUES = ['5', '10', '20', '50'] as const
+  const WEB_ORIGINAL_QUESTION_VALUES = ['on', 'off'] as const
+  type WebSettingRowId =
+    | 'web-search-provider'
+    | 'web-fetch-provider'
+    | 'web-search-count'
+    | 'web-send-original-question'
+    | 'web-search-endpoint'
+  const WEB_SETTING_ROW_IDS: ReadonlySet<string> = new Set([
+    'web-search-provider',
+    'web-fetch-provider',
+    'web-search-count',
+    'web-send-original-question',
+    'web-search-endpoint',
+  ])
+  /** One row's transient write state (PRESENTATION only; never a shadow value). */
+  type WebRowPhase = 'saving' | 'not-saved' | 'outcome-unknown'
+  const webRowPhases = new Map<WebSettingRowId, { readonly kind: WebRowPhase; readonly reason?: string }>()
+  /** The mounted legacy editor's lifetime facts: the Web section's asynchronous
+   *  settles must never repaint a closed editor or delegate through it. */
+  let legacyEditorOpen = false
+  let closeLegacyEditor: (() => void) | undefined
+  /** Recompute the mounted Web rows' display units after a settle. */
+  let repaintWebItems: (() => void) | undefined
+
+  /** The last AUTHORITATIVE Web provider read. Never a defaulted value: while
+   *  it is undefined the section shows Loading…/Unavailable, never a shipped
+   *  default presented as the Host's answer. */
+  let webSettings: WebProviderSettings | undefined
+  let webReadFailure: string | undefined
+  let webReadInFlight: Promise<WebProviderSettings | undefined> | undefined
+
+  /** ONE shared Host read: a burst of opens/refreshes never fans out. */
+  const readWebSettings = (): Promise<WebProviderSettings | undefined> => {
+    if (webReadInFlight !== undefined) return webReadInFlight
+    const task = (async (): Promise<WebProviderSettings | undefined> => {
+      try {
+        const settings = await runner.config.web.read()
+        webSettings = settings
+        webReadFailure = undefined
+        return settings
+      } catch (error) {
+        webReadFailure = safeErrorMessage(error)
+        return undefined
+      } finally {
+        webReadInFlight = undefined
+      }
+    })()
+    webReadInFlight = task
+    return task
+  }
+
+  /** A read issued AFTER a write: the in-flight read may predate the mutation,
+   *  so it is awaited first and a fresh one establishes the committed value. */
+  const rereadWebSettings = async (): Promise<WebProviderSettings | undefined> => {
+    const inFlight = webReadInFlight
+    if (inFlight !== undefined) {
+      try {
+        await inFlight
+      } catch {
+        // The recorded failure is surfaced by the fresh read below.
+      }
+    }
+    return readWebSettings()
+  }
+
+  const webSettingsAvailable = (): boolean => runner.config.web.available()
+
+  /** A provider's official display name, or the configured custom id verbatim
+   *  (a custom route is reported as-is and never silently replaced). */
+  const providerLabel = (
+    values: readonly { readonly id: string; readonly label: string }[],
+    id: string | undefined,
+  ): string | undefined => id === undefined ? undefined : (values.find(entry => entry.id === id)?.label ?? id)
+
+  /** Whether the configured id is one of the two official candidates this UI
+   *  may select. A custom id keeps its configured value and is NOT selectable
+   *  here. */
+  const providerSelectable = (
+    values: readonly { readonly id: string }[],
+    id: string | undefined,
+  ): boolean => id === undefined || values.some(entry => entry.id === id)
+
+  const providerDefault = (
+    values: readonly { readonly id: string; readonly default: boolean }[],
+    id: string | undefined,
+  ): boolean => id !== undefined && values.find(entry => entry.id === id)?.default === true
+
+  /** The provider row's WHOLE display units (§4.5 atomic chips): value, then
+   *  `[current]`, then `[default]`, then a problem chip / state word. Ordering
+   *  is the drop priority — the tail yields first. */
+  const providerValueParts = (
+    rowId: 'web-search-provider' | 'web-fetch-provider',
+    values: readonly { readonly id: string; readonly label: string; readonly default: boolean }[],
+  ): SettingValuePart[] => {
+    const phase = webRowPhases.get(rowId)
+    if (phase?.kind === 'saving') return [{ kind: 'text', text: color.textDim('Saving…') }]
+    const id = rowId === 'web-search-provider' ? webSettings?.searchProvider : webSettings?.fetchProvider
+    const label = providerLabel(values, id)
+    if (label === undefined) return [{ kind: 'text', text: color.textDim('Unavailable') }]
+    // X061's slot contract: the renderer keeps the longest WHOLE prefix and
+    // ALWAYS drops a trailing `text` part, so a value slot that must show both
+    // a state chip and a name can never rely on a text tail. The state chips
+    // are therefore the row's value slot (the theme/preset picker precedent),
+    // and the row's description states `Current: <value>` in full.
+    const phaseParts = webPhaseParts(phase)
+    if (phaseParts.length > 0) return phaseParts
+    const parts: SettingValuePart[] = []
+    if (webSettings !== undefined) {
+      parts.push({ kind: 'chip', text: color.textMuted('[current]') })
+      if (providerDefault(values, id)) {
+        parts.push({ kind: 'text', text: ' ' }, { kind: 'chip', text: color.textMuted('[default]') })
+      }
+      if (!providerSelectable(values, id)) {
+        parts.push({ kind: 'text', text: ' ' }, { kind: 'chip', text: color.warning('[unavailable]') })
+      }
+    } else {
+      parts.push({ kind: 'chip', text: color.warning('[unavailable]') })
+    }
+    return parts
+  }
+
+  /** The transient write state as a WHOLE state chip (§4.5's chip vocabulary
+   *  keeps the words; a problem state takes its semantic token). Undefined when
+   *  no write is in flight, so the verified chips render instead. */
+  const webPhaseParts = (
+    phase: { readonly kind: WebRowPhase; readonly reason?: string } | undefined,
+  ): SettingValuePart[] => {
+    if (phase === undefined) return []
+    if (phase.kind === 'saving') return [{ kind: 'chip', text: color.textMuted('[saving…]') }]
+    if (phase.kind === 'not-saved') return [{ kind: 'chip', text: color.error('[not saved]') }]
+    return [{ kind: 'chip', text: color.warning('[outcome unknown]') }]
+  }
+
+  /** A non-provider row's value units: the value plus the same chip/state
+   *  vocabulary (count / question / endpoint). */
+  const plainValueParts = (
+    rowId: WebSettingRowId,
+    value: string,
+    options: { readonly current: boolean; readonly isDefault: boolean },
+  ): SettingValuePart[] => {
+    const phase = webRowPhases.get(rowId)
+    if (phase?.kind === 'saving') return [{ kind: 'text', text: color.textDim('Saving…') }]
+    const phaseParts = webPhaseParts(phase)
+    if (phaseParts.length > 0) return phaseParts
+    if (!options.current) return [{ kind: 'chip', text: color.warning('[unavailable]') }]
+    const parts: SettingValuePart[] = [{ kind: 'chip', text: color.textMuted('[current]') }]
+    if (options.isDefault) parts.push({ kind: 'text', text: ' ' }, { kind: 'chip', text: color.textMuted('[default]') })
+    return parts
+  }
+
+  const webRowValue = (id: WebSettingRowId): string => {
+    if (webSettings === undefined) return 'Unavailable'
+    switch (id) {
+      case 'web-search-provider': return providerLabel(WEB_SEARCH_PROVIDER_VALUES, webSettings.searchProvider) ?? 'Unavailable'
+      case 'web-fetch-provider': return providerLabel(WEB_FETCH_PROVIDER_VALUES, webSettings.fetchProvider) ?? 'Unavailable'
+      case 'web-search-count': return String(webSettings.api.count)
+      case 'web-send-original-question': return webSettings.api.sendOriginalQuestion ? 'on' : 'off'
+      case 'web-search-endpoint': return webSettings.api.baseURL
+    }
+  }
+
+  const webRowValueParts = (id: WebSettingRowId): SettingValuePart[] => {
+    switch (id) {
+      case 'web-search-provider':
+        return providerValueParts(id, WEB_SEARCH_PROVIDER_VALUES)
+      case 'web-fetch-provider':
+        return providerValueParts(id, WEB_FETCH_PROVIDER_VALUES)
+      case 'web-search-count':
+        return plainValueParts(id, webRowValue(id), {
+          current: webSettings !== undefined,
+          isDefault: webSettings !== undefined && String(webSettings.api.count) === '10',
+        })
+      case 'web-send-original-question':
+        return plainValueParts(id, webRowValue(id), {
+          current: webSettings !== undefined,
+          isDefault: webSettings !== undefined && webSettings.api.sendOriginalQuestion,
+        })
+      case 'web-search-endpoint':
+        return plainValueParts(id, webRowValue(id), { current: false, isDefault: false })
+    }
+  }
+
+  /** The full description of one Web state row: the `Current:` fact leads (the
+   *  row's value slot carries only the whole state chips), then the static
+   *  explanation. */
+  const webRowDescription = (id: WebSettingRowId): string => {
+    const current = webRowValue(id)
+    switch (id) {
+      case 'web-search-provider':
+        return providerSelectable(WEB_SEARCH_PROVIDER_VALUES, webSettings?.searchProvider)
+          ? `Current: ${current} · Messages is the official DeepSeek Messages search; the DeepSeek Search API is a separately billed endpoint. [current] follows a verified write; [default] marks the packaged default. The choice applies to the next search, never to one already running.`
+          : `Current: ${current} · The configured search provider is a custom route: it is displayed as-is and is not selectable here. The official candidates are Messages and DeepSeek Search API.`
+      case 'web-fetch-provider':
+        return providerSelectable(WEB_FETCH_PROVIDER_VALUES, webSettings?.fetchProvider)
+          ? `Current: ${current} · HTTP is the official anonymous public-page fetcher; the DeepSeek Fetch API is a separately billed endpoint. The choice applies to the next fetch.`
+          : `Current: ${current} · The configured fetch provider is a custom route: it is displayed as-is and is not selectable here. The official candidates are HTTP and DeepSeek Fetch API.`
+      case 'web-search-count':
+        return `Current: ${current} · Results requested per DeepSeek Search API call; the official limit is 1 through 50, and a smaller per-request bound still wins.`
+      case 'web-send-original-question':
+        return `Current: ${current} · On: each DeepSeek Search API call also sends up to 128 characters of the human question that triggered it (ori_question). Off: it never does. An already running operation is never changed retroactively.`
+      case 'web-search-endpoint':
+        return `Current: ${current} · The API base the DeepSeek Search and Fetch APIs call (/search and /fetch are appended). Changing it sends the credential to that endpoint, so only a trusted https base is accepted.`
+    }
+  }
+
+  /** The credential row's displayed state: the official store's OWN answer
+   *  (presence and source layer), never the value. */
+  const webCredentialValue = (): string => {
+    if (!runner.config.credentials.available()) return 'Unavailable'
+    if (webSettings === undefined) return 'Unavailable'
+    if (!webSettings.credential.configured) return 'Not configured'
+    return webSettings.credential.source === undefined
+      ? 'Configured'
+      : `Configured · source: ${webSettings.credential.source}`
+  }
+
+  const webCredentialParts = (): SettingValuePart[] => {
+    return webSettings?.credential.configured
+      ? [{ kind: 'chip', text: color.textMuted('[current]') }]
+      : [{ kind: 'chip', text: color.warning('[unavailable]') }]
+  }
+
+  /** The launcher row's facts. The Settings workspace snapshot is SYNCHRONOUS
+   *  and the command reads the Host BEFORE the workspace leases the screen, so
+   *  the first frame already carries authoritative values; a missing or failed
+   *  read is stated, never defaulted. */
+  const webWorkspaceRowFacts = (): { summary: string; freshness: SettingsWorkspaceFreshness; description: string } => {
+    const description = 'Host Web settings. Defaults: Messages search · HTTP fetch. The DeepSeek Search / Fetch APIs are billed separately and send the request to an external endpoint; Share Original Question sends up to 128 characters of the human question. The API key is stored as a credential reference and never shown. Enter configure.'
+    if (!webSettingsAvailable()) {
+      return { summary: 'Unavailable', freshness: 'unavailable', description: `${description} Not supported on this backend.` }
+    }
+    if (webReadFailure !== undefined) {
+      return { summary: 'Unavailable', freshness: 'read-error', description: `${description} Read error: ${webReadFailure}` }
+    }
+    if (webSettings === undefined) {
+      return { summary: 'Loading…', freshness: 'runtime', description }
+    }
+    return {
+      summary: `Search: ${providerLabel(WEB_SEARCH_PROVIDER_VALUES, webSettings.searchProvider) ?? 'unavailable'} · Fetch: ${providerLabel(WEB_FETCH_PROVIDER_VALUES, webSettings.fetchProvider) ?? 'unavailable'}`,
+      freshness: 'ready',
+      description,
+    }
+  }
+
+  /** One Web section write, serialized behind every other Web write: a slow
+   *  earlier mutation can never land after a newer one. The row is reconciled
+   *  from the authoritative read-back on settle — never from the request. */
+  let webWriteChain: Promise<void> = Promise.resolve()
+
+  const queueWebSettingWrite = (
+    id: WebSettingRowId,
+    write: () => Promise<void>,
+    revert: (previousValue: string) => void,
+  ): void => {
+    const previous = webRowValue(id)
+    webRowPhases.set(id, { kind: 'saving' })
+    repaintWebItems?.()
+    webWriteChain = webWriteChain.then(async () => {
+      try {
+        await write()
+      } catch (error) {
+        webRowPhases.set(id, { kind: 'not-saved', reason: safeErrorMessage(error) })
+        revert(previous)
+        repaintWebItems?.()
+        if (legacyEditorOpen) {
+          app.notify(`Web settings · Not saved: ${safeErrorMessage(error)}`, 'error')
+        }
+        return
+      }
+      const verified = await rereadWebSettings()
+      if (verified === undefined) {
+        // The mutation may have applied: never report success, and never
+        // pretend a rollback either — the next read owns the display.
+        webRowPhases.set(id, { kind: 'outcome-unknown' })
+        repaintWebItems?.()
+        if (legacyEditorOpen) {
+          app.notify('Web settings · Outcome unknown: the Host write could not be verified', 'info')
+        }
+        return
+      }
+      webRowPhases.delete(id)
+      const display = webRowValue(id)
+      if (display !== previous) revert(display)
+      repaintWebItems?.()
+    })
+  }
+
+  /** The exact ConfigPort operation one choice row means (undefined = the value
+   *  is not one this UI writes, so the row is restored unchanged). */
+  const webWriteFor = (id: WebSettingRowId, value: string): (() => Promise<void>) | undefined => {
+    switch (id) {
+      case 'web-search-provider': {
+        const candidate = WEB_SEARCH_PROVIDER_VALUES.find(entry => entry.label === value)
+        return candidate === undefined ? undefined : () => runner.config.web.setSearchProvider(candidate.id)
+      }
+      case 'web-fetch-provider': {
+        const candidate = WEB_FETCH_PROVIDER_VALUES.find(entry => entry.label === value)
+        return candidate === undefined ? undefined : () => runner.config.web.setFetchProvider(candidate.id)
+      }
+      case 'web-search-count': {
+        const count = Number(value)
+        return Number.isInteger(count) ? () => runner.config.web.setSearchApiCount(count) : undefined
+      }
+      case 'web-send-original-question':
+        return value !== 'on' && value !== 'off'
+          ? undefined
+          : () => runner.config.web.setSendOriginalQuestion(value === 'on')
+      case 'web-search-endpoint':
+        // Owned by the exclusive endpoint submenu (it validates, writes and
+        // verifies before closing), so the row's commit carries no second write.
+        return undefined
+    }
+  }
+
+  /** Close the settings surface FIRST, then delegate to the EXISTING command
+   *  path: one seat owner at a time, never a masked Question stacked under the
+   *  settings overlay. The Esc-return path is deliberately NOT used here: the
+   *  credential command owns the surface next. */
+  const runWebCredentialCommand = (line: string): void => {
+    webReturnToWorkspace = false
+    closeLegacyEditor?.()
+    detach(`web credential ${line}`, () => runner.clientCommands.execute({
+      line,
+      signal: new AbortController().signal,
+    }), { notify: true })
+  }
+
+  const webCredentialActions = (): readonly WebCredentialAction[] => [
+    {
+      label: 'Configure…',
+      description: `run the existing masked /login ${WEB_CREDENTIAL_REF} prompt`,
+      enabled: true,
+      run: () => runWebCredentialCommand(`/login ${WEB_CREDENTIAL_REF}`),
+    },
+    {
+      label: 'Clear…',
+      description: `run the existing /logout ${WEB_CREDENTIAL_REF} path`,
+      enabled: true,
+      run: () => runWebCredentialCommand(`/logout ${WEB_CREDENTIAL_REF}`),
+    },
+  ]
+
+  /** Whether Esc from the legacy editor must RESTORE the Settings workspace on
+   *  the Web launcher row (the Web-entry return path). The original
+   *  `Open existing settings…` entry keeps its conversation return. */
+  let webReturnToWorkspace = false
+
+  /** Restore the Settings workspace on the Web launcher row. A newer owner of
+   *  the surface (a workspace lease, a blocking modal, a dispose) refuses the
+   *  open; the failure is reported, never ignored. */
+  const reopenSettingsWorkspaceAtWebRow = (): void => {
+    if (app.isDisposed()) return
+    if (runner.config.configReadiness() !== 'ready') return
+    try {
+      app.openSettingsWorkspace(
+        { readSnapshot: readSettingsWorkspaceSnapshot },
+        {
+          onOpenLegacy: (nextTarget) => { openLegacySettings(nextTarget) },
+          onCommit: commitSettingsWorkspaceField,
+          initialRowId: WEB_LAUNCHER_ROW_ID,
+        },
+      )
+    } catch (error) {
+      app.notify(`could not restore the settings workspace: ${safeErrorMessage(error)}`, 'error')
+    }
+  }
+
+  /** The Web section rows, in the frozen order. An unavailable section renders
+   *  its state and OFFERS NO WRITE ENTRY at all. */
+  const webSettingItems = (): SettingItem[] => {
+    const available = webSettingsAvailable()
+    const credentialsAvailable = runner.config.credentials.available()
+    const section: SettingItem = {
+      id: 'web-separator',
+      label: color.border('─'.repeat(24)),
+      currentValue: '',
+    }
+    const unavailableRow = (id: WebSettingRowId, label: string): SettingItem => ({
+      id,
+      label,
+      description: 'The Host Web provider settings are not available on this backend; no value can be read or changed here.',
+      currentValue: 'Unavailable',
+      valueParts: [{ kind: 'chip', text: color.warning('[unavailable]') }],
+    })
+    const customSearch = !providerSelectable(WEB_SEARCH_PROVIDER_VALUES, webSettings?.searchProvider)
+    const customFetch = !providerSelectable(WEB_FETCH_PROVIDER_VALUES, webSettings?.fetchProvider)
+    const rows: SettingItem[] = available
+      ? [
+          {
+            id: 'web-search-provider',
+            label: 'Web Search Provider',
+            description: webRowDescription('web-search-provider'),
+            currentValue: webRowValue('web-search-provider'),
+            valueParts: webRowValueParts('web-search-provider'),
+            ...customSearch ? {} : { values: WEB_SEARCH_PROVIDER_VALUES.map(entry => entry.label) },
+          },
+          {
+            id: 'web-fetch-provider',
+            label: 'Web Fetch Provider',
+            description: webRowDescription('web-fetch-provider'),
+            currentValue: webRowValue('web-fetch-provider'),
+            valueParts: webRowValueParts('web-fetch-provider'),
+            ...customFetch ? {} : { values: WEB_FETCH_PROVIDER_VALUES.map(entry => entry.label) },
+          },
+          {
+            id: 'web-search-count',
+            label: 'Search API Result Count',
+            description: webRowDescription('web-search-count'),
+            currentValue: webRowValue('web-search-count'),
+            valueParts: webRowValueParts('web-search-count'),
+            values: [...WEB_SEARCH_COUNT_VALUES],
+          },
+          {
+            id: 'web-send-original-question',
+            label: 'Share Original Question',
+            description: webRowDescription('web-send-original-question'),
+            currentValue: webRowValue('web-send-original-question'),
+            valueParts: webRowValueParts('web-send-original-question'),
+            values: [...WEB_ORIGINAL_QUESTION_VALUES],
+          },
+          {
+            id: 'web-search-endpoint',
+            label: 'Search / Fetch API Endpoint',
+            description: webRowDescription('web-search-endpoint'),
+            // No state chip on this row: the plain value slot truncates the
+            // long URL to the cells it has (the submenu shows it in full).
+            currentValue: webRowValue('web-search-endpoint'),
+            submenu: (_currentValue: string, done: (selected?: string) => void) => new WebEndpointPanel(done, {
+              current: webSettings?.api.baseURL ?? '',
+              save: async (url: string) => {
+                  await runner.config.web.setSearchApiBaseURL(url)
+                const verified = await rereadWebSettings()
+                if (verified === undefined) {
+                  webRowPhases.set('web-search-endpoint', { kind: 'outcome-unknown' })
+                  repaintWebItems?.()
+                  throw new WebWriteVerdictError('outcome-unknown', 'the endpoint write could not be verified against the Host — reopen the section to read the current value')
+                }
+                webRowPhases.delete('web-search-endpoint')
+                if (verified.api.baseURL !== url) {
+                  repaintWebItems?.()
+                  throw new WebWriteVerdictError('not-saved', `the Host kept "${verified.api.baseURL}" instead of the submitted endpoint`)
+                }
+                repaintWebItems?.()
+              },
+              requestRender: () => app.requestRender(),
+            }),
+          },
+        ]
+      : [
+          unavailableRow('web-search-provider', 'Web Search Provider'),
+          unavailableRow('web-fetch-provider', 'Web Fetch Provider'),
+          unavailableRow('web-search-count', 'Search API Result Count'),
+          unavailableRow('web-send-original-question', 'Share Original Question'),
+          unavailableRow('web-search-endpoint', 'Search / Fetch API Endpoint'),
+        ]
+    const credentialRow: SettingItem = {
+      id: WEB_CREDENTIAL_ROW_ID,
+      label: 'DeepSeek API Key',
+      description: `Current: ${webCredentialValue()} · The credential reference the DeepSeek Search / Fetch APIs resolve (${WEB_CREDENTIAL_REF}); the value is never shown and is stored by the official credential store. Configure… runs the existing masked /login ${WEB_CREDENTIAL_REF}; Clear… runs /logout ${WEB_CREDENTIAL_REF}. The editor closes before either command runs.`,
+      currentValue: webCredentialValue(),
+      valueParts: webCredentialParts(),
+      ...credentialsAvailable
+        ? {
+            submenu: (_currentValue: string, done: (selected?: string) => void) => new WebCredentialPanel(done, {
+              reference: WEB_CREDENTIAL_REF,
+              read: () => runner.config.credentials.describeReference(WEB_CREDENTIAL_REF),
+              actions: webCredentialActions(),
+              requestRender: () => app.requestRender(),
+            }),
+          }
+        : {},
+    }
+    return [section, ...rows, credentialRow]
+  }
 
   /** Keep USER-owned Custom Text definitions out of whole-document writes that
    * start from a merged settings document. A project layer may contribute the
@@ -676,6 +1183,19 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
           description: 'Opens the existing complete settings editor; returns to the conversation when closed.',
           action: 'open-legacy',
         },
+        {
+          // S2/PR-B §3.3: the ONE discoverable entry to the Web provider
+          // settings section. The row opens the EXISTING legacy editor focused
+          // on that section's first row (the same editor as the compatibility
+          // row above; no second settings framework).
+          id: WEB_LAUNCHER_ROW_ID,
+          category: 'other',
+          label: 'Web Search / Fetch',
+          ...webWorkspaceRowFacts(),
+          scope: 'Host Web provider settings',
+          action: 'open-legacy',
+          legacyTargetId: 'web-search-provider',
+        },
       ],
     }
   }
@@ -688,7 +1208,7 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
    * entry of the new Settings workspace (and only there), so it re-reads the live
    * session scope and settings document at the moment of the handoff.
    */
-  const openLegacySettings = (): CommandResult => {
+  const openLegacySettings = (targetId?: string): CommandResult => {
         // The session-scoped rows and their writes belong to the exact owner
         // that was live when the panel opened; the captured scope never
         // retargets to a replacement session. Never creates a Session.
@@ -790,6 +1310,12 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
         // row for bookkeeping, but must not schedule a repaint of a surface
         // that no longer exists.
         let settingsOpen = true
+        legacyEditorOpen = true
+        // The return path belongs to THIS open: the Web launcher restores the
+        // Workspace on its own row, while the compatibility entry keeps the
+        // original conversation return.
+        webReturnToWorkspace = targetId === WEB_LAUNCHER_TARGET_ROW
+        const webItems = webSettingItems()
         const closeSettings = app.openSettings(
           [
             // The independent session approval override exists only where the
@@ -1016,7 +1542,7 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
             // ── read-only session facts ─────────────────────────────
             {
               id: 'separator',
-              label: color.border('─'.repeat(34)),
+              label: color.border('─'.repeat(24)),
               currentValue: '',
             },
             ...liveScope === undefined ? [] : (() => {
@@ -1057,6 +1583,8 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
               description: color.textDim('The live session workspace (follows session switches)'),
               currentValue: color.textDim(runner.sessionCwd()),
             },
+            // ── S2/PR-B §3.3: Web Search / Fetch ──────────────────────
+            ...webItems,
             keyboardShortcutsRow,
             // ── M5: plugin-registered settings rows ───────────────────
             ...(runner.extensions?.settings.rows() ?? []).map(row => ({
@@ -1467,6 +1995,19 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
                   () => settings.replace(withUserFooterCustomItems({ ...settings.get(), terminalProgress: mode }, runner.config)),
                 ), { notify: true })
               }
+            } else if (WEB_SETTING_ROW_IDS.has(id)) {
+              // The Web provider rows: ONE serialized write entry per section,
+              // reconciled from the authoritative read-back (see
+              // queueWebSettingWrite). The endpoint row is owned by its
+              // exclusive submenu, which already wrote and verified before it
+              // closed, so its commit carries no second write.
+              const write = webWriteFor(id as WebSettingRowId, value)
+              if (write === undefined) {
+                if (id === 'web-search-endpoint') return
+                revert(webRowValue(id as WebSettingRowId))
+                return
+              }
+              queueWebSettingWrite(id as WebSettingRowId, write, revert)
             } else if (id === 'fullscreen') {
               if (value === 'off' || value === 'on') {
                 app.setFullscreen(value === 'on')
@@ -1497,14 +2038,66 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
             // overlay closes must not repaint or toast after teardown
             // (review round 6). `settingsOpen` gates the summarize repaint.
             settingsOpen = false
+            legacyEditorOpen = false
             allowlistMenu?.dispose()
+            // S2/PR-B §B3.4: leaving the Web section restores the Settings
+            // Workspace on the Web launcher row; the compatibility entry keeps
+            // its original conversation return. Reopening is SYNCHRONOUS — a
+            // late async settle never revives a closed surface.
+            if (webReturnToWorkspace) {
+              webReturnToWorkspace = false
+              reopenSettingsWorkspaceAtWebRow()
+            }
           },
           // Teardown-aware: a fullscreen screen swap (or any other hide path)
           // removes the panel WITHOUT the Esc cancel, so the mounted state must
           // also flip there — otherwise a late allowlist settle would schedule
           // a repaint of a surface that no longer exists.
-          () => { settingsOpen = false },
+          () => {
+            settingsOpen = false
+            legacyEditorOpen = false
+          },
+          {
+            // S2/PR-B §3.3: the Web section deeplink + the authoritative
+            // read-back for rows whose facts settle asynchronously.
+            ...targetId === undefined ? {} : { initialItemId: targetId },
+            onMounted: (rows) => {
+              if (!webSettingsAvailable()) return
+              detach('web provider settings refresh', async () => {
+                const settings = await rereadWebSettings()
+                if (settings === undefined || !legacyEditorOpen) return
+                for (const rowId of WEB_SETTING_ROW_IDS) {
+                  rows.setValue(rowId, webRowValue(rowId as WebSettingRowId))
+                }
+                rows.setValue(WEB_CREDENTIAL_ROW_ID, webCredentialValue())
+                repaintWebItems?.()
+                app.requestRender()
+              }, { notify: false })
+            },
+          },
         )
+        closeLegacyEditor = closeSettings
+        // Every Web row is reconciled from the live authority state on each
+        // settle: the state chips and the `Current:` fact never come from the
+        // request, only from the read-back.
+        repaintWebItems = () => {
+          if (!settingsOpen) return
+          for (const item of webItems) {
+            if (item.id === WEB_CREDENTIAL_ROW_ID) {
+              item.currentValue = webCredentialValue()
+              item.valueParts = webCredentialParts()
+              item.description = `Current: ${webCredentialValue()} · The credential reference the DeepSeek Search / Fetch APIs resolve (${WEB_CREDENTIAL_REF}); the value is never shown and is stored by the official credential store. Configure… runs the existing masked /login ${WEB_CREDENTIAL_REF}; Clear… runs /logout ${WEB_CREDENTIAL_REF}. The editor closes before either command runs.`
+              continue
+            }
+            if (item.id === 'web-separator') continue
+            const rowId = item.id as WebSettingRowId
+            item.currentValue = webRowValue(rowId)
+            item.valueParts = webRowValueParts(rowId)
+            item.description = webRowDescription(rowId)
+          }
+          app.requestRender()
+        }
+        app.requestRender()
         return { kind: 'success' }
   }
 
@@ -1519,11 +2112,16 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
     registerOne({
       name: 'settings',
       description: 'Open the TUI settings workspace',
-      handler: () => {
+      handler: async () => {
+        // The Web section's facts are HOST reads (the credential store is
+        // asynchronous) while the Settings workspace projection is SYNCHRONOUS:
+        // read them BEFORE the workspace opens, so its Web row paints the
+        // configured facts instead of a placeholder that nothing would refresh.
+        if (webSettingsAvailable()) await readWebSettings()
         app.openSettingsWorkspace(
           { readSnapshot: readSettingsWorkspaceSnapshot },
           {
-            onOpenLegacy: () => { openLegacySettings() },
+            onOpenLegacy: (targetId) => { openLegacySettings(targetId) },
             onCommit: commitSettingsWorkspaceField,
           },
         )
