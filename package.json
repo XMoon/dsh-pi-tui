@@ -175,6 +175,7 @@
     "@deepseek-ai/dsh-goal": "0.2.1-rc.2",
     "@deepseek-ai/dsh-jobs": "0.2.1-rc.2",
     "@deepseek-ai/dsh-jobs-local": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-launch-environment": "0.2.1-rc.2",
     "@deepseek-ai/dsh-llm": "0.2.1-rc.2",
     "@deepseek-ai/dsh-llm-retry": "0.2.1-rc.2",
     "@deepseek-ai/dsh-permission-presets": "0.2.1-rc.2",
