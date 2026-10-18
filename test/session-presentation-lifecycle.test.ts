@@ -371,6 +371,37 @@ test('RFL-007: the reconcile publishes the proven working fold, the plan project
   await parity.rehydrate()
   assert.equal(parity.contextDirty(), parityBase + 1,
     'the matched end B2 measures exactly once')
+  // The tracker must follow a bracket the COLD HYDRATE restored: a later live
+  // matched end then advances the baseline, so the next reconcile measures
+  // nothing (no double measurement).
+  const hydrated = harness({ refoldProof: (_sessionId, revision) => ({ generation: 1, binding: {}, revision }) })
+  hydrated.setWindow([{ type: 'compaction/start', data: { compactionId: 'B3' } }], false, 91)
+  await hydrated.coldHydrate()
+  const hydratedBase = hydrated.contextDirty()
+  hydrated.presentation.noteLiveMeasureEvent('s', { type: 'compaction/end', data: { compactionId: 'B3' } })
+  hydrated.setWindow([
+    { type: 'compaction/start', data: { compactionId: 'B3' } },
+    { type: 'compaction/end', data: { compactionId: 'B3' } },
+  ], false, 92)
+  await hydrated.rehydrate()
+  assert.equal(hydrated.contextDirty(), hydratedBase,
+    'a live end for the bracket the COLD HYDRATE restored never measures twice')
+
+  // The same parity for a bracket a RECONCILE committed.
+  const recommitted = harness({ refoldProof: (_sessionId, revision) => ({ generation: 1, binding: {}, revision }) })
+  recommitted.setWindow([{ type: 'compaction/start', data: { compactionId: 'B4' } }], false, 93)
+  await recommitted.coldHydrate()
+  await recommitted.rehydrate()
+  const recommittedBase = recommitted.contextDirty()
+  recommitted.presentation.noteLiveMeasureEvent('s', { type: 'compaction/end', data: { compactionId: 'B4' } })
+  recommitted.setWindow([
+    { type: 'compaction/start', data: { compactionId: 'B4' } },
+    { type: 'compaction/end', data: { compactionId: 'B4' } },
+  ], false, 94)
+  await recommitted.rehydrate()
+  assert.equal(recommitted.contextDirty(), recommittedBase,
+    'a live end for the bracket a RECONCILE committed never measures twice')
+
   // And once the live path HAS handled it, a later page reconcile measures nothing.
   parity.presentation.noteLiveMeasureEvent('s', { type: 'compaction/end', data: { compactionId: 'B2' } })
   await parity.rehydrate()
