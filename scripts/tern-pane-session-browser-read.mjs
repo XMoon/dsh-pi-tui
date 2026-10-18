@@ -75,9 +75,18 @@ export default async function (h) {
   await h.key('Return', 800)
   const allScope = await waitFrame(h, (value) => value?.scope === 'all', 'All workspaces scope')
   frame = lastFrame(h)
-  h.check('All workspaces restores all 55 listed main rows and preserves the Picker key',
-    allScope && frame?.layout === 'tree' && frameItems(frame).length === 55 && frame?.pickerKey === browserKey,
+  h.check('All workspaces restores all 56 listed main rows and preserves the Picker key',
+    allScope && frame?.layout === 'tree' && frameItems(frame).length === 56 && frame?.pickerKey === browserKey,
     JSON.stringify({ scope: frame?.scope, count: frameItems(frame).length, pickerKey: frame?.pickerKey }))
+  // ── S3 PR-C: the Host-authoritative on-disk format state, painted ─────────
+  // A migration-required row is read-only text in the row detail, never a
+  // control and never a page of its own.
+  const migrationTreeDetail = frameItems(frame)
+    .find((item) => item.id === 'session:session-migration')?.detail
+  h.check('the real client paints the read-only migration state in the row detail',
+    String(migrationTreeDetail ?? '').includes('Migration required'),
+    JSON.stringify({ migrationTreeDetail }))
+  h.capture('session-browser-migration-row-1280x800', 'migration-required row detail at 1280x800')
   const lineage = new Map(frameItems(frame).map((item) => [item.id, item.depth]))
   h.check('the real all-workspaces tree keeps the cross-workspace child under its listed parent',
     lineage.get('session:session-long') === 1 && lineage.get('session:session-row-00') === 2
@@ -264,6 +273,36 @@ export default async function (h) {
     && !records(h).some((entry) => entry.apply || entry.switchSession),
     JSON.stringify({ footerResumeIntents, businessSwitches: records(h).filter((entry) => entry.apply || entry.switchSession) }))
   h.capture('session-browser-cards-after-reader-400x440', 'Browse state after returning from the Reader tail')
+
+  // ── S3 PR-C: the migration state through the search card and Details ──────
+  // (the Tree row detail was asserted right after the All-workspaces scope).
+  await h.resize(1280, 800)
+  await h.sleep(250)
+  // The flow's last Escape returned from Details to Cards with `needle`; this
+  // one clears the query so the migration row can be found by its own title.
+  await h.key('Escape', 700)
+  await keyText(h, 'Legacy')
+  await waitFrame(h, (value) => value?.layout === 'cards' && value?.state === 'ready', 'Legacy metadata card')
+  const legacyCard = frameItems(lastFrame(h)).find((item) => item.id === 'session:session-migration')
+  h.check('the metadata card for the migration-required row keeps the read-only state label',
+    legacyCard !== undefined && String(legacyCard.detail).includes('Migration required'),
+    JSON.stringify(legacyCard))
+  await h.key('Tab', 500)
+  await h.key('Return', 900)
+  const migrationDetails = await waitFrame(h, (value) => value?.page === 'details', 'migration row Details')
+  const migrationDetailsText = (lastFrame(h)?.texts ?? []).map((entry) => String(entry.text))
+  h.check('the Details State paints the read-only migration state beside the persisted state',
+    migrationDetails && migrationDetailsText.some((text) => text.includes('Migration required')),
+    JSON.stringify(migrationDetailsText.filter((text) => text.includes('Migration') || text.includes('Persisted'))))
+  h.capture('session-browser-migration-details-1280x800', 'Details of the migration-required Session at 1280x800')
+
+  await h.resize(400, 600)
+  await h.sleep(250)
+  const narrowDetailsText = (lastFrame(h)?.texts ?? []).map((entry) => String(entry.text))
+  h.check('the migration state survives a 400x600 pane without being dropped',
+    narrowDetailsText.some((text) => text.includes('Migration required')),
+    JSON.stringify(narrowDetailsText.filter((text) => text.includes('Migration'))))
+  h.capture('session-browser-migration-details-400x600', 'Details of the migration-required Session at 400x600')
 
   h.measure('run totals', JSON.stringify({
     frames: frames(h).length,

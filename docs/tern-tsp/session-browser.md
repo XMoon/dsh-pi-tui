@@ -200,6 +200,8 @@ node scripts/tern-pane-drive.mjs scripts/tern-pane-session-browser-direct.mjs
 
 The unit/integration lanes cover command admission, the read owner, native wire,
 Direct lifecycle, and command-owner controls. The `read` flow qualifies painted
-presentation with a controlled Reader; the `direct` flow uses the real Tern
-client and production Direct composition to exercise the business switch and
-authoritative reread. Both are headless, not physical GUI acceptance.
+presentation with a controlled Reader — including the S3 PR-C read-only
+`Migration required` row detail, metadata card and Details `State` at 1280×800
+and a 400×600 pane — and the `direct` flow uses the real Tern client and
+production Direct composition to exercise the business switch and authoritative
+reread. Both are headless, not physical GUI acceptance.
