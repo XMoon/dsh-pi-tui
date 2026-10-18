@@ -217,6 +217,15 @@ export interface SessionPresentationDeps<Event extends SessionPresentationEvent>
      * this read superseded, so the fold must NOT be replaced with it.
      */
     readonly windowRefoldProof?: (sessionId: string, revision: number) => PresentationWindowRefoldProof | undefined
+    /** Seed the working-fold cache from the SAME committed window (the cold
+     *  hydrate publishes the identical value; a reconcile must not leave the
+     *  cache invalidated behind an official-`running` fallback). */
+    readonly seedWindowWorkingFold?: (input: {
+      readonly sessionId: string
+      readonly transportToken: { readonly generation: unknown; readonly binding: unknown }
+      readonly fold: boolean
+      readonly proven: boolean
+    }) => void
     /**
      * The VISIBLE-COMMIT fence token (plan §6.5/§7.5): the caller captures
      * the ownership GENERATION before starting the hydration; after the
@@ -672,6 +681,12 @@ export function createSessionPresentation<Event extends SessionPresentationEvent
    *  hydration and commit are honored. */
   const planActiveRemote = (sessionId: string): boolean => deps.remote?.plan?.(sessionId) ?? false
 
+  /** The compaction state the LAST reconcile committed, per session: a
+   *  compaction that ENDED during an outage must re-measure the context
+   *  occupancy (its live `compaction/end` handler never ran), while ordinary
+   *  history paging stays measurement-free. */
+  const lastReconciledCompactionActive = new Map<string, boolean>()
+
   /**
    * Re-hydrate the main transcript from the CURRENT reader window after an
    * older-history extension (Remote `loadOlder`): the append-only fold
@@ -714,6 +729,18 @@ export function createSessionPresentation<Event extends SessionPresentationEvent
     // window's newest bracket IS the live state, and the revision fence above
     // proves nothing newer exists.
     const resumedCompaction = compactingFromLog(snapshot.durableEvents as readonly { type: unknown }[])
+    // The plan projection is a CURRENT-VALUE fact: a `plan/mode` increment the
+    // replace swallowed is invisible in the window, so the reconcile commits the
+    // SAME projection read the cold hydrate used (the projected `plan` authority,
+    // absent reads inactive) — never a fold of the bounded window.
+    const planActive = planActiveRemote(sessionId)
+    // The working/busy fold obeys the SAME rule as the cold hydrate: a COMPLETE
+    // window proves the log fold, a TRUNCATED one defers to the official
+    // `running` bit (an official fact, never a guess).
+    const foldProven = !snapshot.hasMore
+    const working = foldProven
+      ? workingFromLog(snapshot.durableEvents as readonly Event[])
+      : (deps.remote.running(sessionId) ?? false)
     const hydrated = hydrateSessionUi(snapshot.durableEvents as readonly Event[])
     folder = hydrated.folder
     windowController.setTurns(folder.groupedTurns())
@@ -728,6 +755,30 @@ export function createSessionPresentation<Event extends SessionPresentationEvent
     // refresh's own fences own the session/binding rules. (The measured
     // performance values are the Host projection's and are unaffected.)
     deps.surface.applyResumedCompaction(resumedCompaction.id, resumedCompaction.active)
+    // The plan projection is a CURRENT-VALUE fact: a `plan/mode` increment the
+    // replace swallowed is invisible in the window, so the reconcile commits the
+    // SAME projection read the cold hydrate used (the projected `plan`
+    // authority; absent reads inactive) — never a fold of the bounded window.
+    deps.surface.display.commitStatusFacts({ planMode: planActive })
+    // A compaction that ENDED during the outage changed the context occupancy,
+    // and its `compaction/end` event (whose live handler marks the context dirty
+    // and re-measures) never reached the surface. Re-run the hydrate tail's own
+    // deferred measurement for that transition — the reconcile is otherwise
+    // measurement-free by design (history paging must not measure).
+    if (lastReconciledCompactionActive.get(sessionId) === true && !resumedCompaction.active) {
+      deps.status.scheduleInitialMeasurement(sessionId)
+    }
+    lastReconciledCompactionActive.set(sessionId, resumedCompaction.active)
+    // Seed the working-fold cache with THIS window's fold under the SAME
+    // transport identity the commit was fenced under, so the status refresh
+    // below (and every later read) sees the proven fold instead of the
+    // invalidated cache's official-`running` fallback.
+    deps.remote.seedWindowWorkingFold?.({
+      sessionId,
+      transportToken: { generation: proof.generation, binding: proof.binding },
+      fold: working,
+      proven: foldProven,
+    })
     deps.refreshStatusCheap()
     deps.surface.repaint()
     // The committed proof: the caller acknowledges the ingress with it, so
