@@ -1235,6 +1235,19 @@ export function applyRunnerWithRuntime(
             if (handle !== undefined && !handle.refoldEligible(revision)) return undefined
             return remoteSources.sessionFacts.windowRefoldProof(sessionId, revision)
           },
+          // S3-R0: a window reconcile publishes the SAME proven working/busy
+          // fold the cold hydrate does, stamped with the transport identity the
+          // commit was fenced under and the CURRENT owner generation — the cache
+          // is never left invalidated behind the official-`running` fallback.
+          seedWindowWorkingFold: input => {
+            seedWorkingFold({
+              generation: ownership.generation(),
+              sessionId: input.sessionId,
+              transportToken: input.transportToken,
+              fold: input.fold,
+              proven: input.proven,
+            })
+          },
           // The official CURRENT-VALUE facts a bounded window cannot own. A
           // field is included ONLY when its projection answered: an absent
           // field means "unavailable" (the owner falls back to the window

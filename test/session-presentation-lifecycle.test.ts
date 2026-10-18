@@ -36,6 +36,10 @@ function harness(options: {
   /** S3-R0: a deterministic read gate (no sleeps). The read captures the
    *  CURRENT window at start and awaits this before returning it. */
   readonly readGate?: () => Promise<void> | undefined
+  /** RFL-007: the official `running` bit the working fold defers to. */
+  readonly running?: () => boolean
+  /** RFL-007: the projected plan authority. */
+  readonly plan?: () => boolean
   /** S3-R0: the transport identity seams (a stale token during the read is what
    *  makes `initLiveRemoteSession` return undefined). */
   readonly transport?: {
@@ -54,6 +58,12 @@ function harness(options: {
   presentation: ReturnType<typeof createSessionPresentation<SessionPresentationEvent>>
   /** Every `applyResumedCompaction` commit (external review RFL-001 witness). */
   resumedCompactions(): ReadonlyArray<{ id: string | undefined; active: boolean }>
+  /** Every working-fold seed the reconcile published (RFL-007). */
+  workingSeeds(): ReadonlyArray<{ sessionId: string; transportToken: unknown; fold: boolean; proven: boolean }>
+  /** Every deferred context measurement (RFL-007). */
+  initialMeasurements(): readonly string[]
+  /** Every status-fact commit (RFL-007 planMode witness). */
+  statusFacts(): ReadonlyArray<Record<string, unknown>>
 } {
   let window: PresentationReadSnapshot | undefined
   let generation = 0
@@ -68,10 +78,19 @@ function harness(options: {
   let draftClears = 0
   /** RFL-001 (external review): every resumed-compaction commit the surface saw. */
   const resumedCompactions: Array<{ id: string | undefined; active: boolean }> = []
+  /** RFL-007 (internal review): every working-fold seed the commit published. */
+  const workingSeeds: Array<{ sessionId: string; transportToken: unknown; fold: boolean; proven: boolean }> = []
+  /** RFL-007: every deferred context measurement the tail scheduled. */
+  const initialMeasurements: string[] = []
+  /** Every status-fact commit (planMode and friends). */
+  const statusFacts: Array<Record<string, unknown>> = []
   const surface = {
     app,
     openingJournal: journal,
-    display: displaySeamStub({ clearActiveDraft: () => { draftClears += 1 } }),
+    display: displaySeamStub({
+      clearActiveDraft: () => { draftClears += 1 },
+      commitStatusFacts: (facts: Record<string, unknown>) => { statusFacts.push(facts) },
+    }),
     resetSearchPresentation: () => {}, resetTasks: () => {}, resetPendingPresentation: () => {},
     applyResumedCompaction: (id: string | undefined, active: boolean) => { resumedCompactions.push({ id, active }) }, repaint: () => {}, refreshPendingInput: () => {},
     refreshTasks: () => {}, refreshAgents: () => {},
@@ -91,7 +110,7 @@ function harness(options: {
     },
     status: {
       setGoalText: () => {}, refresh: () => {}, refreshTerminalTitle: () => {}, refreshTerminalCwd: () => {},
-      updateWelcomeCard: () => {}, scheduleInitialMeasurement: () => {},
+      updateWelcomeCard: () => {}, scheduleInitialMeasurement: (sessionId: string) => { initialMeasurements.push(sessionId) },
     },
     history: { rememberCwd: () => {}, currentCwd: () => '/c', records: () => [], setLastContent: () => {} },
     commands: { register: () => {} },
@@ -106,8 +125,8 @@ function harness(options: {
         if (gate !== undefined) await gate
         return captured
       },
-      running: () => false,
-      plan: () => false,
+      running: () => options.running?.() ?? false,
+      plan: () => options.plan?.() ?? false,
       // The staleness fence is not this test's subject: every read is current.
       isStillCurrent: () => true,
       captureGeneration: () => generation,
@@ -117,6 +136,7 @@ function harness(options: {
         captureTransportToken: (sessionId: string) => options.transport!.capture(sessionId),
         isTransportTokenCurrent: (sessionId: string, token: unknown) => options.transport!.current(sessionId, token),
       }),
+      seedWindowWorkingFold: input => { workingSeeds.push(input) },
     },
   })
   return {
@@ -140,6 +160,9 @@ function harness(options: {
     },
     draftClears: () => draftClears,
     resumedCompactions: () => resumedCompactions,
+    workingSeeds: () => workingSeeds,
+    initialMeasurements: () => initialMeasurements,
+    statusFacts: () => statusFacts,
     presentation,
   }
 }
@@ -234,6 +257,65 @@ test('S3-R0/RFL-001: a window reconcile re-derives the compaction routing state 
   assert.equal(await refused.rehydrate(), undefined, 'a superseded read commits nothing')
   assert.equal(refused.resumedCompactions().length, before,
     'a refused reconcile never touches the compaction routing state')
+})
+
+test('RFL-007: the reconcile publishes the proven working fold, the plan projection and the compaction-end measurement', async (t) => {
+  // The replace path used to run the full cold hydrate, which published the
+  // working/busy fold, the projected plan mode and (via the event path) the
+  // context measurement after a compaction end. The in-place reconcile must
+  // publish the same side effects from the SAME committed window/facts.
+  let running = false
+  let plan = false
+  const h = harness({
+    refoldProof: (_sessionId, revision) => ({ generation: 1, binding: {}, revision }),
+    running: () => running,
+    plan: () => plan,
+  })
+  // A COMPLETE window with an open turn proves the fold from the log.
+  h.setWindow([{ type: 'turn/start', data: { turn: 1 } }], false, 31)
+  await h.coldHydrate()
+  plan = true
+  assert.notEqual(await h.rehydrate(), undefined)
+  assert.deepEqual(h.workingSeeds().at(-1), {
+    sessionId: 's',
+    transportToken: { generation: 1, binding: {} },
+    fold: true,
+    proven: true,
+  }, 'a complete window publishes the PROVEN log fold under the committed transport identity')
+  assert.ok(h.statusFacts().some(facts => facts.planMode === true),
+    'the projected plan authority is committed, never folded from the window')
+
+  // A TRUNCATED window defers to the official `running` bit (never a guess).
+  running = false
+  h.setWindow([{ type: 'turn/start', data: { turn: 1 } }], true, 32)
+  await h.rehydrate()
+  assert.deepEqual(h.workingSeeds().at(-1), {
+    sessionId: 's',
+    transportToken: { generation: 1, binding: {} },
+    fold: false,
+    proven: false,
+  }, 'a truncated window publishes the official running fallback as UNPROVEN')
+
+  // A compaction that ENDED during the outage re-measures the context once;
+  // a later reconcile without that transition does not measure again.
+  h.setWindow([{ type: 'compaction/start', data: { compactionId: 'c1' } }], false, 33)
+  await h.rehydrate()
+  const measurementsAfterStart = h.initialMeasurements().length
+  h.setWindow([
+    { type: 'compaction/start', data: { compactionId: 'c1' } },
+    { type: 'compaction/end', data: { compactionId: 'c1' } },
+  ], false, 34)
+  await h.rehydrate()
+  assert.equal(h.initialMeasurements().length, measurementsAfterStart + 1,
+    'the outage-spanning compaction end schedules exactly one measurement')
+  h.setWindow([
+    { type: 'compaction/start', data: { compactionId: 'c1' } },
+    { type: 'compaction/end', data: { compactionId: 'c1' } },
+    { type: 'turn/start', data: { turn: 2 } },
+  ], false, 35)
+  await h.rehydrate()
+  assert.equal(h.initialMeasurements().length, measurementsAfterStart + 1,
+    'history/rolling reconciles stay measurement-free')
 })
 
 test('S3-R0: read A already in flight → window B commits → A settles last and writes nothing', async (t) => {

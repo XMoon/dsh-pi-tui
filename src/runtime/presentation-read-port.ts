@@ -27,6 +27,16 @@ export interface PresentationWindowRefoldProof {
   readonly revision: number
 }
 
+/**
+ * The working/busy fold derived from the SAME committed window the proof
+ * describes, plus whether that window PROVES the fold (a complete window does;
+ * a truncated one defers to the official `running` bit).
+ */
+export interface PresentationWindowWorkingFold {
+  readonly fold: boolean
+  readonly proven: boolean
+}
+
 /** A current official Client Session event-window observation. */
 export interface PresentationReadSnapshot {
   readonly sessionId: string
