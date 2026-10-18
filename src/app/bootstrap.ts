@@ -18,6 +18,7 @@
  */
 
 import { randomUUID } from 'node:crypto'
+import type { RemoteRefoldReason } from './remote/live-ingress.ts'
 import type { ContextMeasureReason } from '../domain/status/context-measurement.ts'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent, ModelSelection } from '@deepseek-ai/dsh-agent'
@@ -1344,6 +1345,11 @@ export function applyRunnerWithRuntime(
      */
     let remoteRefoldInFlight = false
     let remoteRefoldPending = false
+    /** Whether the armed wakeup may re-measure the context: a PAGING wakeup only
+     *  widened the bounded window with older history, so it must not. A recovery
+     *  always measures (and a later recovery is never weakened by an earlier
+     *  paging wakeup). */
+    let remoteRefoldMeasure = true
     const pumpRemoteWindowRefold = (): void => {
       if (remoteRefoldInFlight) return
       remoteRefoldInFlight = true
@@ -1357,7 +1363,7 @@ export function applyRunnerWithRuntime(
             // The old window's working-fold proof is VOID: rehydrateFromWindow
             // re-seeds it from the NEW window's fold.
             invalidateWorkingFold()
-            const proof = await presentation.rehydrateFromWindow(sessionId)
+            const proof = await presentation.rehydrateFromWindow(sessionId, { measure: remoteRefoldMeasure })
             if (cleanedUp || remoteIngressHandle !== handle) return
             // An uncommitted re-fold (fence-dropped read) leaves the handle
             // recovering: the next official revision / open transition wakes us.
@@ -1373,7 +1379,7 @@ export function applyRunnerWithRuntime(
         }
       }, { diag, sessionId: () => ownership.currentSessionId() })
     }
-    const requestRemoteWindowRefold = (sessionId: string): void => {
+    const requestRemoteWindowRefold = (sessionId: string, reason?: RemoteRefoldReason): void => {
       if (cleanedUp || ownership.currentSessionId() !== sessionId) return
       remoteRefoldPending = true
       pumpRemoteWindowRefold()
@@ -1493,7 +1499,7 @@ export function applyRunnerWithRuntime(
           status.refresh()
           status.updateWelcomeCard()
         },
-        onWindowRefoldRequired: (id) => {
+        onWindowRefoldRequired: (id, reason) => {
           // S3-R0: the incremental sequence is no longer trustworthy (generation
           // rollover, revision discontinuity, window replace/prepend, missing
           // change, hydrate gap). The fold OWNER re-folds the CURRENT official
@@ -1501,7 +1507,7 @@ export function applyRunnerWithRuntime(
           // releases the ONE live ingress before its ownership-fenced hydrate can
           // abort, which is how a reconnect used to leave the transcript on the
           // dead window). The ingress handle stays the SINGLE publisher.
-          requestRemoteWindowRefold(id)
+          requestRemoteWindowRefold(id, reason)
         },
       }, { revision: hydrate.revision, transportToken: hydrate.transportToken })
       // S3-R0: the Remote ingress now owns event delivery for this committed
