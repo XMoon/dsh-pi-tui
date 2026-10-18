@@ -6427,14 +6427,14 @@ export class TuiApp {
       // (e.g. Ctrl+Alt+X) is NOT editor-owned and may fire a plugin
       // binding.
       editorAccepts: (data) => {
-        const focused = this.activeScreen.getFocusedComponent()
-        if (focused === undefined || focused === null) return false
-        if (focused !== this.seatEditor().component) return false
-        // The seat editor is focused: it owns every key its binding set
-        // defines. (The seat editor's component is either the fork Editor
-        // or a plugin editor's compiled view — a plugin editor that wants
-        // its own keys must provide a handleInput component; until then
-        // the host's keybinding set is the conservative ownership rule.)
+        // The seat editor is the input owner: it owns every key its binding set
+        // defines. (The seat editor's component is either the fork Editor or a
+        // plugin editor's compiled view — a plugin editor that wants its own
+        // keys must provide a handleInput component; until then the host's
+        // keybinding set is the conservative ownership rule.) The RESOLVED
+        // input owner is consulted, never the raw physical focus: a fullscreen
+        // click inside the seat focuses the seat mount, which forwards.
+        if (!this.ownsPhysicalKeyboard(this.seatEditor().component)) return false
         const kb = getKeybindings()
         return [
           'tui.editor.cursorUp', 'tui.editor.cursorDown', 'tui.editor.cursorLeft',
@@ -14828,15 +14828,16 @@ export class TuiApp {
 
   /**
    * Phase 3A / PR-B: whether the optional seat tenant is the LIVE physical
-   * keyboard owner — ACTIVE, not finalized, still current and the focused
-   * component of the active screen. This is the ONLY state in which the tenant
-   * takes ordinary keys and the only state the protocol sink fence guards.
+   * keyboard owner — ACTIVE, not finalized, still current and the RESOLVED
+   * input owner of the active screen (a seat-mount focus resolves to its live
+   * occupant). This is the ONLY state in which the tenant takes ordinary keys
+   * and the only state the protocol sink fence guards.
    */
   private optionalSeatOwnsKeyboard(): boolean {
     const record = this.optionalSeat
     return record !== undefined && record.phase === 'active' && !record.finalized
       && record.isCurrent()
-      && this.activeScreen.getFocusedComponent() === record.component
+      && this.ownsPhysicalKeyboard(record.component)
   }
 
   /**
@@ -14865,15 +14866,16 @@ export class TuiApp {
 
   /**
    * Phase 3A / PR-B: whether an optional record — whatever its caller subject —
-   * is the physically focused component of the active screen. This is exactly
-   * the state in which the fork's fall-through would deliver a raw protocol
-   * chunk to it, so the protocol sink fence uses the PHYSICAL focus fact (the
-   * key ladder keeps using the stricter ACTIVE + current predicate).
+   * is the RESOLVED input owner of the active screen (the physical focus,
+   * unwrapped through the seat mount). This is exactly the state in which the
+   * fork's fall-through would deliver a raw protocol chunk to it, so the
+   * protocol sink fence uses that fact (the key ladder keeps using the stricter
+   * ACTIVE + current predicate).
    */
   private optionalTenantHoldsFocus(): boolean {
     const record = this.optionalSeat
     return record !== undefined && !record.finalized
-      && this.activeScreen.getFocusedComponent() === record.component
+      && this.ownsPhysicalKeyboard(record.component)
   }
 
   /**
@@ -15154,6 +15156,34 @@ export class TuiApp {
    */
   private seatEditor(): import('./tui/interaction/editor-seat-holder.ts').SeatEditor {
     return this.editorSeatHolder.currentEditor()
+  }
+
+  /**
+   * The component that REALLY receives the keyboard right now — the physical
+   * focus resolved through the editor-seat mount.
+   *
+   * Two evidenced cases: the active screen's physical focus IS the input owner,
+   * or the fork installed the editor-seat MOUNT as the focus owner because a
+   * fullscreen mouse press inside the seat requested focus at the container
+   * root (the vendored Container's X051 focus ownership: `dispatchMouseEvent`
+   * re-targets the delegating container, and `Container.focused`/`handleInput`
+   * forward to the pressed child). The mount is a layout slot, never the input
+   * owner, so its single live occupant is the answer.
+   *
+   * Consumers keep their own business admission ON TOP of this predicate; it
+   * answers the focus question only and never substitutes for `seatEditor()`
+   * identity, ACTIVE/current tenant checks or the modal-owner gates.
+   */
+  private physicalInputOwner(): Component | null {
+    const focused = this.activeScreen.getFocusedComponent()
+    if (focused === null) return null
+    if (focused !== this.editorSeat) return focused
+    return this.editorSeat.occupant ?? focused
+  }
+
+  /** Whether `target` is the component that really receives the keyboard. */
+  private ownsPhysicalKeyboard(target: Component): boolean {
+    return this.physicalInputOwner() === target
   }
 
   /**
@@ -15453,7 +15483,7 @@ export class TuiApp {
     // A plugin seat loser is rejected before the visual-map or geometry probe.
     const seat = this.seatEditor()
     if (seat.id !== 'host') return false
-    if (this.activeScreen.getFocusedComponent() !== this.editor) return false
+    if (!this.ownsPhysicalKeyboard(this.editor)) return false
     if (this.seatInputMode() !== 'prompt') return false
     if (this.editor.isShowingAutocomplete()) return false
     if (this.activeQuestions !== undefined) return false
@@ -15532,6 +15562,13 @@ export class TuiApp {
    * seat. Probes the "overlay visible but editor focused" invariant. */
   focusedComponentForTest(): Component | null {
     return this.activeScreen.getFocusedComponent()
+  }
+
+  /** Input test hook: the component that REALLY receives the keyboard — the
+   * physical focus resolved through the editor-seat mount (see
+   * {@link TuiApp.ownsPhysicalKeyboard}). */
+  inputOwnerForTest(): Component | null {
+    return this.physicalInputOwner()
   }
 
   /** Focus test hook: the DERIVED focused seat (the surface projection's
@@ -18118,10 +18155,11 @@ export class TuiApp {
     // Phase 3A / PR-B: an ACTIVE optional tenant that REALLY holds the
     // keyboard is the seat panel. This is an OBSERVATION of the live physical
     // focus (never an owner input): a PARKED, finalized or stale tenant keeps
-    // reporting `editor`, and a shadow `focused` boolean is never consulted.
+    // reporting `editor`, a shadow `focused` boolean is never consulted, and a
+    // seat-mount focus resolves to the mount's live occupant.
     const optional = this.optionalSeat
     if (optional !== undefined && optional.phase === 'active' && !optional.finalized
-      && optional.isCurrent() && this.activeScreen.getFocusedComponent() === optional.component) {
+      && optional.isCurrent() && this.ownsPhysicalKeyboard(optional.component)) {
       this.setFocusSeat('editor-panel')
       return
     }
