@@ -18,6 +18,7 @@
  */
 
 import { randomUUID } from 'node:crypto'
+import type { ContextMeasureReason } from '../domain/status/context-measurement.ts'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent, ModelSelection } from '@deepseek-ai/dsh-agent'
 import { SessionId } from '@deepseek-ai/dsh-session'
@@ -1189,6 +1190,8 @@ export function applyRunnerWithRuntime(
         refreshTerminalCwd: () => status.refreshTerminalCwd(),
         updateWelcomeCard: () => status.updateWelcomeCard(),
         scheduleInitialMeasurement: (sessionId) => status.scheduleInitialMeasurement(sessionId),
+        markContextDirty: () => status.markContextDirty(),
+        refreshContextMeasurement: (reason: ContextMeasureReason) => status.refreshContextMeasurement(reason),
       },
       history: {
         rememberCwd: (cwd) => history.rememberCwd(cwd),
@@ -1455,6 +1458,10 @@ export function applyRunnerWithRuntime(
       remoteIngressHandle = remoteSources.liveIngress.subscribe(sessionId, {
         onDurableEvent: (id, event) => {
           surface.routeSessionEvent({ id }, event as SessionEvent)
+          // The live routing just handled (and measured) this event: record the
+          // measure boundary so a later window reconcile never re-measures one
+          // the live path already did.
+          presentation.noteLiveMeasureEvent(id, event as { readonly type: unknown; readonly data?: unknown })
         },
         onLiveInput: (input) => {
           // Defense in depth: the ingress fences by exact binding + Connection
