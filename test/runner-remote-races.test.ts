@@ -465,3 +465,59 @@ test('L6 PR5 §3.9b: teardown with a pending WRITE — observed surface-stop bou
   // and the notice: there is no live surface to receive them, and the guard must
   // not be weakened to manufacture an observable callback after the stop.
 })
+
+test('L6 PR5 §3.9c: a prompt ACCEPTED before teardown keeps its receipt, becomes durable and is never resent', async (t) => {
+  const life = testLifecycle(t)
+  const presetId = 'm3-4-pr3-race-preset'
+  const host = await mountHost(life, presetId)
+  const mainId = 'race-teardown-accepted'
+  await host.harness.create(SessionId(mainId), { provider: 'smoke', model: 'smoke' }, { cwd: host.anchorDir })
+  const parked = parkedSerializer()
+  parked.park()
+  life.defer(() => parked.release())
+  const fixture = await mountRaceRunner(life, { presetId, resumeSessionId: mainId, host, serializer: parked.serializer })
+  await waitFor('mount paint', () => fixture.vt.getViewport().join('').length > 0, 10_000)
+  submitDraft(fixture, 'accepted before teardown omega')
+  await waitFor('parked inside serialize', () => parked.parked(), 10_000)
+  // Dispatch and let the Host ACCEPT the write BEFORE any teardown begins: the
+  // surface admission is still open, so the write is a real accepted receipt.
+  parked.release()
+  await waitFor('the accepted write becomes durable', () =>
+    hostUserRows(fixture, mainId).some(row => row.includes('accepted before teardown omega')), 20_000)
+
+  const app = fixture.runnerApp() as unknown as { stop(): void }
+  const surfaceWrites = { count: 0 }
+  const vtWrite = fixture.vt.write.bind(fixture.vt)
+  fixture.vt.write = (data: string): void => {
+    if (data.length > 0) surfaceWrites.count += 1
+    vtWrite(data)
+  }
+  const observed: string[] = []
+  const writesAtSurfaceStop = { count: -1 }
+  const originalStop = app.stop.bind(app)
+  app.stop = (): void => {
+    observed.push('surface-stop')
+    originalStop()
+    writesAtSurfaceStop.count = surfaceWrites.count
+  }
+  const selected = fixture.aggregate.selected as { disposeTransport(): Promise<void> }
+  let transportDisposals = 0
+  const originalDispose = selected.disposeTransport.bind(selected)
+  selected.disposeTransport = async (): Promise<void> => {
+    transportDisposals += 1
+    observed.push('transport-dispose')
+    await originalDispose()
+  }
+
+  await fixture.runnerFiberDispose()
+  assert.equal(transportDisposals, 1, 'the selected transport disposes exactly once')
+  assert.ok(observed.indexOf('surface-stop') < observed.indexOf('transport-dispose'),
+    'the observed order stays surface stop -> drain -> transport disposal')
+  await new Promise(resolve => setTimeout(resolve, 200))
+  assert.equal(surfaceWrites.count - writesAtSurfaceStop.count, 0,
+    'no terminal write follows the surface stop')
+  // The closure fence is pre-dispatch ONLY: an accepted receipt is never
+  // reinterpreted as a refusal, and teardown never resends the message.
+  assert.equal(hostUserRows(fixture, mainId).filter(row => row.includes('accepted before teardown omega')).length, 1,
+    'the accepted receipt stands, becomes durable once, and is never resent by teardown')
+})

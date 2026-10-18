@@ -117,22 +117,23 @@ test('L5: a migration-required generation is listed read-only, refuses an explic
 
   // An explicit user open starts the official migration. THIS released artifact
   // is one the official promotion refuses (its surface events precede the first
-  // step), so the open must fail closed: no fabricated Session, no successor and
-  // byte-identical source. The Client catalog keeps reporting the real artifact.
-  const opened = await lifecycle.open({ sessionId: String(id) })
-  if (opened.outcome.kind === 'opened') {
-    const reference = sessions.binding(id) as unknown as { readonly ready?: Promise<unknown> } | undefined
-    if (reference?.ready !== undefined) {
-      const refusal = await reference.ready.then(() => undefined, (error: unknown) => error as Error)
-      assert.ok(refusal !== undefined, 'the official open refusal must surface, never resolve as opened')
-      assert.match(refusal.message, /cannot acquire a system head|surface before first step/u,
-        `the refusal carries the official diagnostic: ${refusal.message}`)
-    }
-  } else {
-    assert.equal(opened.outcome.kind, 'unavailable', 'a refused migration open is unavailable, never created')
-  }
-  await waitFor('the Client list still reports the released artifact', () =>
-    sessions.list.getSnapshot().byId[id]?.formatStatus === 'migration-required')
+  // step), so the open must fail closed. The official Client surfaces that on
+  // the exact retained generation's snapshot (`openState`/`openError`) — the
+  // settled readiness is asserted UNCONDITIONALLY, never behind an optional cast
+  // that could silently skip the central assertion.
+  const reference = sessions.retain(id, { source: 'tuiMainView' })
+  const binding = await reference.ready
+  const snapshot = (binding.session as unknown as {
+    getSnapshot(): { readonly openState: string; readonly openError: { readonly message?: unknown } | null }
+  }).getSnapshot()
+  reference.release()
+  assert.equal(snapshot.openState, 'error', 'the official initial open settles in the error state')
+  assert.ok(snapshot.openError !== null, 'the error state carries the official failure')
+  assert.match(String(snapshot.openError?.message),
+    /cannot acquire a system head|surface before first step/u,
+    `the refusal carries the official diagnostic: ${String(snapshot.openError?.message)}`)
   assert.equal(hashOf(sourcePath), sourceHash, 'the failed open never rewrites the released artifact')
   assert.deepEqual(generationFiles(sessionDir), [sourceName], 'a failed open publishes no successor')
+  await waitFor('the Client list still reports the released artifact', () =>
+    sessions.list.getSnapshot().byId[id]?.formatStatus === 'migration-required')
 })
