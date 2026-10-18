@@ -1530,7 +1530,13 @@ interface JobWorkspaceRecord {
  * surface instead of stacking under a second physical owner.
  */
 export interface SettingsWorkspaceOpenOptions {
-  readonly onOpenLegacy: () => void
+  /**
+   * Invoked with the target row the opened legacy editor must focus (the
+   * Settings workspace row's `legacyTargetId`), or without one when the
+   * compatibility row opens the editor at its top. The target is presentation
+   * only: the editor itself owns every row id.
+   */
+  readonly onOpenLegacy: (targetId?: string) => void
   /**
    * The ONE host-write channel of a writable row (Phase 3B / B2-B). The command
    * owns the Host semantics (apply + persist + authoritative re-read) and
@@ -1541,6 +1547,29 @@ export interface SettingsWorkspaceOpenOptions {
   readonly onCommit?: (request: SettingsWorkspaceCommitRequest) => Promise<SettingsWorkspaceCommitOutcome>
   /** Fired once when the workspace is torn down by ANY path. */
   readonly onClose?: () => void
+  /** The row this open selects first (the Web Settings return path,
+   *  S2/PR-B §B3.4): a re-entry restores the SAME row instead of the default. */
+  readonly initialRowId?: import('./tui/panels/settings-workspace-panel.ts').SettingsWorkspaceRowId
+}
+
+/** The live row handle of an OPEN legacy settings list: a section whose facts
+ *  arrive asynchronously (the Web credential state) updates the already
+ *  mounted rows through these TWO public fork seams, or focuses the row a
+ *  deeplink targets. It holds no write authority and is valid only while the
+ *  overlay is mounted. */
+export interface SettingsListRowHandle {
+  /** Move the list cursor to one row id (a search filter may hide it). */
+  focus(itemId: string): void
+  /** Replace one row's DISPLAYED value with an authoritative read-back. */
+  setValue(itemId: string, value: string): void
+}
+
+/** The presentation options of ONE `openSettings` overlay. */
+export interface SettingsListOpenOptions {
+  /** The row the cursor starts on (a section deeplink). */
+  readonly initialItemId?: string
+  /** Fired once the list is mounted and rendered, with its row handle. */
+  readonly onMounted?: (rows: SettingsListRowHandle) => void
 }
 
 /** The returned control of an open Settings workspace, fenced by THIS instance:
@@ -20751,6 +20780,14 @@ export class TuiApp {
      *  returned closer, a fullscreen screen swap) — the teardown-aware hook
      *  a caller needs to stop touching a surface that no longer exists. */
     onHidden?: () => void,
+    /**
+     * Presentation seams of the opened list (plan S2/PR-B §3.3): the row the
+     * cursor starts on (a section deeplink) and the mounted-list handle a
+     * section whose facts settle ASYNCHRONOUSLY uses to update a row's
+     * displayed value. Both ride the fork's public `selectItem`/`updateValue`
+     * seams; neither carries any write authority.
+     */
+    options?: SettingsListOpenOptions,
   ): () => void {
     // SettingsList fires onCancel on Esc/ctrl+c; the overlay must close too,
     // so the cancel callback closes the handle captured after mounting.
@@ -20785,7 +20822,12 @@ export class TuiApp {
     const frame = new ResponsiveOverlayFrame(settings, geometryOf, geometry => {
       settings.setMaxRows(Math.max(1, geometry.maxHeight - 2))
     }, onHidden)
+    if (options?.initialItemId !== undefined) settings.selectItem(options.initialItemId)
     handle = this.showOverlayOnHost(frame, { width: configuredWidth, maxHeight: configuredMaxHeight })
+    options?.onMounted?.({
+      focus: (itemId: string) => settings.selectItem(itemId),
+      setValue: (itemId: string, value: string) => settings.updateValue(itemId, value),
+    })
     return () => handle?.hide()
   }
 
@@ -21257,7 +21299,7 @@ export class TuiApp {
       requestRender: () => this.requestRender(),
       notice: () => this.currentNotice(),
       onClose: () => record.close(),
-      onOpenLegacy: () => openLegacy(),
+      onOpenLegacy: (targetId?: string) => openLegacy(targetId),
       // The clipboard capability stays the SAME Client-local `copySelection` the
       // rest of the surface already uses; the settlement re-proves THIS workspace
       // record before it may notify, so a stale copy that lands after the user
@@ -21307,6 +21349,11 @@ export class TuiApp {
           },
         })
       },
+    }, {
+      // The Web Settings re-entry restores ITS row (S2/PR-B §B3.4): a return
+      // from the legacy Web section never lands the user on the default theme
+      // row.
+      ...options.initialRowId === undefined ? {} : { initialRowId: options.initialRowId },
     })
     const screen = new TuiAltScreen(this.terminal, undefined, undefined, {
       deferViewportListener: true,
@@ -21365,7 +21412,7 @@ export class TuiApp {
      *  `app.openSettings()` call may synchronously re-enter, so the lease must
      *  already be gone. A failed open restores the main surface with a real error
      *  and never resurrects the closed workspace. */
-    const openLegacy = (): void => {
+    const openLegacy = (targetId?: string): void => {
       if (finalized) return
       close()
       // `close()` runs the owner notification (and any screen-focus callback)
@@ -21386,7 +21433,7 @@ export class TuiApp {
         return
       }
       try {
-        options.onOpenLegacy()
+        options.onOpenLegacy(targetId)
       } catch (error) {
         if (!this.disposed) {
           this.notify(`could not open the settings editor: ${safeErrorMessage(error)}`, 'error')

@@ -1,0 +1,371 @@
+/**
+ * S2/PR-B §3.3/§3.4 — the `/settings` Web Search / Fetch surface (L6).
+ *
+ * The user-visible chain: `/settings` → the `Other` category → `Web Search /
+ * Fetch` → the EXISTING legacy editor focused on the Web section → a selector
+ * commits through the ConfigPort → the row is reconciled from the authoritative
+ * read-back → closing and reopening shows the committed value.
+ *
+ * FIXTURE (real): the production `/settings` command registration, the real
+ * `TuiApp`/Settings workspace/legacy editor, the real key routing and the real
+ * `VirtualTerminal` frames. STAND-IN: the Host config service behind the
+ * ConfigPort sub-domain (records the exact semantic calls and owns the store the
+ * read-back returns) — the real official settings plane is qualified by
+ * `web-provider-rc2-integration.test.ts`. ABSENT: a real Session, a real model,
+ * the network.
+ *
+ * @module @xmoon76/dsh-pi-tui/settings-web-provider.test
+ */
+
+import assert from 'node:assert/strict'
+import test, { afterEach } from 'node:test'
+import { Context } from '@deepseek-ai/cordis'
+import { parseCommand } from '@deepseek-ai/dsh-commands'
+import type { TuiCommandRunner } from '../src/commands.ts'
+import { TuiApp } from '../src/tui-app.ts'
+import { createClientCommandRegistry } from '../src/app/command/client-command-registry.ts'
+import { createDiag } from '../src/runtime/process/diagnostics.ts'
+import type { TuiSettingsDoc, WebProviderSettings } from '../src/runtime/config-port.ts'
+import { registerTuiCommandsWithDirectSeams } from './support/register-tui-commands.ts'
+import { VirtualTerminal } from './virtual-terminal.ts'
+
+process.env.NO_COLOR = ''
+process.env.FORCE_COLOR = ''
+
+const DOWN = '\x1b[B'
+const ENTER = '\r'
+const TAB = '\t'
+const ESC = '\x1b'
+
+const startedApps = new Set<TuiApp>()
+afterEach(() => {
+  for (const app of [...startedApps]) {
+    startedApps.delete(app)
+    if (app.isDisposed()) continue
+    try { app.dispose() } catch {}
+  }
+})
+
+const DEFAULT_DOC: TuiSettingsDoc = {
+  theme: 'dark',
+  iconStyle: 'unicode',
+  footer: 'default',
+  fullscreen: 'off',
+  busyEnter: 'queue',
+  localShellSandbox: 'bypass',
+  homeEndKeys: 'app',
+  notificationMode: 'off',
+  notificationMethod: 'auto',
+  terminalProgress: 'off',
+  wheelScrollLines: '3',
+}
+
+interface Harness {
+  readonly vt: VirtualTerminal
+  /** Every semantic Web write, in order. */
+  readonly writes: readonly string[]
+  /** Every `/login` | `/logout` line the section delegated. */
+  readonly delegated: readonly string[]
+  /** The live (fake) Host store the read-back answers from. */
+  readonly store: { web: WebProviderSettings; available: boolean; failNext: string | undefined }
+  readonly view: () => string
+  readonly invoke: (name?: string) => unknown
+  readonly dispose: () => void
+}
+
+function setup(options: {
+  readonly columns?: number
+  readonly available?: boolean
+  readonly searchProvider?: string
+}
+= {}): Harness {
+  const columns = options.columns ?? 140
+  const vt = new VirtualTerminal(columns, 40)
+  const writes: string[] = []
+  const delegated: string[] = []
+  const store = {
+    available: options.available ?? true,
+    failNext: undefined as string | undefined,
+    web: {
+      searchProvider: options.searchProvider ?? 'deepseek-official',
+      fetchProvider: 'http',
+      api: { baseURL: 'https://api.deepseek.com/v1/tools', count: 10, sendOriginalQuestion: true },
+      credential: { configured: true, source: 'file' },
+    } as WebProviderSettings,
+  }
+  const doc: TuiSettingsDoc = { ...DEFAULT_DOC }
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  const defs: { name: string; handler?: unknown }[] = []
+  const commands = {
+    register: (definition: { name: string; handler?: unknown }) => { defs.push(definition); return () => {} },
+    list: () => [],
+    find: () => undefined,
+    execute: async () => undefined,
+  }
+  const clientCommands = createClientCommandRegistry(parseCommand)
+  const originalExecute = clientCommands.execute.bind(clientCommands)
+  clientCommands.execute = async request => {
+    delegated.push(request.line)
+    return originalExecute(request)
+  }
+  const ctx = new Context()
+  ctx.provide('commands', commands as never)
+  const write = (label: string, apply: () => void): void => {
+    if (store.failNext !== undefined) {
+      const reason = store.failNext
+      store.failNext = undefined
+      throw new Error(reason)
+    }
+    writes.push(label)
+    apply()
+  }
+  const base: Record<string, unknown> = {
+    ctx,
+    app,
+    diag: createDiag({ filePath: undefined, stderrLevel: 'off' }),
+    cwd: '/ws',
+    sessionCwd: () => '/ws',
+    signal: new AbortController().signal,
+    commandRegistry: commands,
+    clientCommands,
+    recordExtensionError: () => {},
+    clearExtensionError: () => {},
+    captureExtensionHealthRef: () => () => {},
+    currentSessionId: undefined,
+    captureLiveSessionScope: () => undefined,
+    listScopedCommands: () => [],
+    displayPreset: () => app.displayPreset(),
+    focusEnabled: () => false,
+    setDisplayPreset: () => ({ kind: 'unchanged' }),
+    refreshStatus: () => {},
+    tuiSettings: { get: () => doc, replace: (next: TuiSettingsDoc) => { Object.assign(doc, next) } },
+    config: {
+      configReadiness: () => 'ready',
+      footerCustomItems: { rawForPersistence: () => ({ kind: 'available', value: undefined }) },
+      permissions: { presetNames: () => [], defaultPreset: () => undefined, approvalOverrideOf: () => undefined, approvalOverrideAvailable: () => false },
+      subagentModelSelection: { available: () => false },
+      credentials: {
+        available: () => true,
+        describeReference: async () => ({ configured: true, source: 'file' }),
+      },
+      web: {
+        available: () => store.available,
+        read: async () => store.available ? { ...store.web, api: { ...store.web.api } } : undefined,
+        setSearchProvider: async (id: string) => { write(`search:${id}`, () => { store.web.searchProvider = id }) },
+        setFetchProvider: async (id: string) => { write(`fetch:${id}`, () => { store.web.fetchProvider = id }) },
+        setSearchApiCount: async (count: number) => { write(`count:${count}`, () => { store.web.api.count = count }) },
+        setSendOriginalQuestion: async (enabled: boolean) => { write(`ori:${String(enabled)}`, () => { store.web.api.sendOriginalQuestion = enabled }) },
+        setSearchApiBaseURL: async (url: string) => { write(`endpoint:${url}`, () => { store.web.api.baseURL = url }) },
+      },
+    },
+    catalog: { models: { available: () => false } },
+    // Explicitly ABSENT: the Proxy fallback would otherwise hand the legacy
+    // editor a truthy function for a missing optional owner.
+    extensions: undefined,
+    openPluginManager: () => {},
+    createPluginManagerSubmenu: () => ({ render: () => [], dispose: () => {} }),
+    progressUpdatesState: { mode: 'milestones' },
+    responseStyleState: { style: 'default' },
+    gitAttributionState: { mode: 'off' },
+    setFocusMode: () => {},
+    setNotificationMethod: () => {},
+    setNotificationMode: () => {},
+    setTerminalProgressMode: () => {},
+    setSessionApprovalPolicy: () => 'applied',
+    currentApprovalOverride: () => undefined,
+    applyFooterSettings: () => {},
+  }
+  const runner = new Proxy(base, {
+    get: (target, property) => property in target ? target[property as string] : () => undefined,
+  }) as unknown as TuiCommandRunner
+  registerTuiCommandsWithDirectSeams(runner)
+  const invoke = (name = 'settings'): unknown => {
+    const definition = defs.find(candidate => candidate.name === name)
+    assert.ok(definition?.handler !== undefined, `/${name} must be registered`)
+    return (definition.handler as (invocation: { rawInput: string }) => unknown)({ rawInput: '' })
+  }
+  const view = (): string => vt.getViewport().map(line => line.replace(/\u001b\[[0-9;]*m/gu, '')).join('\n')
+  return {
+    vt,
+    writes,
+    delegated,
+    store,
+    view,
+    invoke,
+    dispose: () => {
+      startedApps.delete(app)
+      if (!app.isDisposed()) app.dispose()
+    },
+  }
+}
+
+/** One key press, rendered to quiescence (the workspace routes input through
+ *  its own render loop, so a burst without renders races the projection). */
+async function key(h: Harness, data: string): Promise<void> {
+  h.vt.sendInput(data)
+  await h.vt.waitForRender()
+}
+
+/** Drive `/settings` to the Web Search / Fetch row through the real workspace
+ *  keys (categories → Other settings → the Web row), then open it. */
+async function openWebSection(h: Harness): Promise<void> {
+  h.invoke('settings')
+  await h.vt.waitForRender()
+  const keys = h.vt.columns >= 96
+    ? [TAB, TAB, DOWN, DOWN, ENTER, DOWN, ENTER]
+    : [DOWN, DOWN, ENTER, DOWN, ENTER]
+  for (const pressed of keys) await key(h, pressed)
+}
+
+test('the workspace row reports the configured providers and opens the Web section focused', async t => {
+  const h = setup()
+  t.after(h.dispose)
+  h.invoke('settings')
+  await h.vt.waitForRender()
+  // The Other category's Web row carries the live configured summary.
+  for (const pressed of [TAB, TAB, DOWN, DOWN, ENTER]) await key(h, pressed)
+  assert.match(h.view(), /Web Search \/ Fetch/u)
+  // Select the launcher row: its Detail carries the authoritative summary and
+  // the billing/credential/Enter-configure facts (the narrow row column only
+  // shows the summary prefix).
+  await key(h, DOWN)
+  const rowView = h.view()
+  assert.match(rowView, /Search: Messages · Fetch: HTTP/u, 'the launcher shows the authoritative provider summary')
+  assert.match(rowView, /billed separately/u)
+  assert.match(rowView, /credential reference/u)
+  assert.match(rowView, /Enter configure/u)
+
+  // Enter on the launcher row crosses the real Workspace -> Legacy handoff.
+  await key(h, ENTER)
+  assert.match(h.view(), /Web Search Provider/u, 'the legacy editor opened at the Web section')
+  assert.match(h.view(), /Web Search Provider +\[current\] \[default\]/u,
+    'the current value and the packaged default are INDEPENDENT state chips')
+  assert.match(h.view(), /Current: Messages/u, 'the selected row states the current value in full')
+  // The deeplink focused the FIRST Web row: Enter commits the search provider.
+  await key(h, ENTER)
+  await new Promise(resolve => setTimeout(resolve, 10))
+  await h.vt.waitForRender()
+  assert.deepEqual(h.writes, ['search:deepseek-search-api'])
+  assert.equal(h.store.web.searchProvider, 'deepseek-search-api')
+  assert.match(h.view(), /Web Search Provider +\[current\] +│/u,
+    'the verified read-back keeps the current chip on the selected candidate')
+  assert.match(h.view(), /Current: DeepSeek Search API/u, 'the selected row states the new value in full')
+  assert.doesNotMatch(h.view(), /Web Search Provider +\[current\] \[default\]/u,
+    'the non-default candidate never claims the packaged default')
+})
+
+test('a failed write reverts the row and never reports a save', async t => {
+  const h = setup()
+  t.after(h.dispose)
+  await openWebSection(h)
+  h.store.failNext = 'settings mutate rejected'
+  await key(h, ENTER)
+  await new Promise(resolve => setTimeout(resolve, 10))
+  await h.vt.waitForRender()
+  assert.equal(h.store.web.searchProvider, 'deepseek-official', 'the Host store keeps the previous value')
+  assert.match(h.view(), /Web settings · Not saved: settings mutate rejected/u, 'the failure is reported as Not saved')
+})
+
+test('rapid conflicting selections commit in order and the row ends on the verified value', async t => {
+  const h = setup({ searchProvider: 'deepseek-search-api' })
+  t.after(h.dispose)
+  await openWebSection(h)
+  // Two intents in the same burst: never two concurrent writes, last one wins.
+  await key(h, ENTER)
+  await key(h, ENTER)
+  await new Promise(resolve => setTimeout(resolve, 20))
+  await h.vt.waitForRender()
+  assert.deepEqual(h.writes, ['search:deepseek-official', 'search:deepseek-search-api'])
+  assert.equal(h.store.web.searchProvider, 'deepseek-search-api')
+  assert.match(h.view(), /DeepSeek Search API/u, 'the row shows the authoritative read-back')
+})
+
+test('the Web section deeplink is reachable from the workspace and Esc cancels without a write', async t => {
+  const h = setup()
+  t.after(h.dispose)
+  await openWebSection(h)
+  await key(h, DOWN)
+  await key(h, ENTER)
+  await new Promise(resolve => setTimeout(resolve, 10))
+  await h.vt.waitForRender()
+  assert.deepEqual(h.writes, ['fetch:deepseek-fetch-api'], 'the second row is the fetch provider')
+  await key(h, ESC)
+  assert.deepEqual(h.writes, ['fetch:deepseek-fetch-api'], 'Esc after a commit writes nothing else')
+})
+
+test('closing and reopening the section shows the committed values', async t => {
+  const h = setup()
+  t.after(h.dispose)
+  await openWebSection(h)
+  await key(h, ENTER)
+  await new Promise(resolve => setTimeout(resolve, 10))
+  await h.vt.waitForRender()
+  assert.deepEqual(h.writes, ['search:deepseek-search-api'])
+  // Esc from the Web section restores the Workspace (v2 §B3.4); the restored
+  // workspace then needs its own Esc ladder to reach the conversation.
+  await key(h, ESC)
+  assert.match(h.view(), /Settings · Other/u)
+  await key(h, ESC)
+  await key(h, ESC)
+  // Reopen the whole surface: the row summary and the section read the store.
+  await openWebSection(h)
+  assert.match(h.view(), /DeepSeek Search API/u, 'the reopened section shows the committed value')
+})
+
+test('an unavailable section offers no write and no submenu', async t => {
+  const h = setup({ available: false })
+  t.after(h.dispose)
+  await openWebSection(h)
+  assert.match(h.view(), /\[unavailable\]/u, 'every Web row states the unavailable fact')
+  // The rows carry no values to cycle and no submenu: Enter is inert, and the
+  // workspace summary states the backend limitation.
+  await key(h, ENTER)
+  await new Promise(resolve => setTimeout(resolve, 10))
+  await h.vt.waitForRender()
+  assert.deepEqual(h.writes, [])
+})
+
+test('the credential row delegates to the existing /login and /logout command lines', async t => {
+  const h = setup()
+  t.after(h.dispose)
+  await openWebSection(h)
+  // Reach the credential row (the sixth Web row) and open its action panel.
+  for (let index = 0; index < 5; index += 1) await key(h, DOWN)
+  await key(h, ENTER)
+  assert.match(h.view(), /DeepSeek API Key/u)
+  assert.match(h.view(), /Configure/u)
+  assert.match(h.view(), /Configured/u, 'the live presence/source comes from the credential store')
+  await key(h, ENTER)
+  await new Promise(resolve => setTimeout(resolve, 10))
+  await h.vt.waitForRender()
+  assert.deepEqual(h.delegated, ['/login DEEPSEEK_API_KEY'],
+    'the panel closed the editor and delegated to the existing command path')
+})
+
+test('Esc from the Web section restores the Settings workspace on the Web launcher row', async t => {
+  const h = setup()
+  t.after(h.dispose)
+  await openWebSection(h)
+  await key(h, ESC)
+  assert.match(h.view(), /Settings · Other/u, 'the legacy editor closed back into the Settings workspace')
+  assert.match(h.view(), /Web Search \/ Fetch/u)
+  // The restored workspace carries the Web row's OWN detail (the launcher row),
+  // never the default theme row.
+  assert.match(h.view(), /Host Web settings/u)
+  assert.match(h.view(), /Search: Messages · Fetch: HTTP/u)
+})
+
+test('a configured custom provider id stays visible, marked unavailable and not selectable', async t => {
+  const h = setup({ searchProvider: 'acme-search' })
+  t.after(h.dispose)
+  await openWebSection(h)
+  assert.match(h.view(), /acme-search/u, 'the custom route is reported as-is')
+  assert.match(h.view(), /\[unavailable\]/u, 'it is marked unavailable for this selector')
+  assert.match(h.view(), /Current: acme-search/u)
+  await key(h, ENTER)
+  await new Promise(resolve => setTimeout(resolve, 10))
+  await h.vt.waitForRender()
+  assert.deepEqual(h.writes, [], 'a custom route is never silently replaced by a cycle')
+})

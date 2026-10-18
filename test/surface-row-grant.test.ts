@@ -193,6 +193,12 @@ function setup(options: { columns?: number; rows?: number; tuiSettings?: boolean
       configReadiness: () => 'ready' as const,
       permissions: { presetNames: () => [], defaultPreset: () => undefined, approvalOverrideOf: () => undefined },
       subagentModelSelection: { available: () => false },
+      // The Web provider section is Host-only (S2/PR-B): this stub composes no
+      // Host settings plane, so the section reports unavailable and offers no write.
+      web: { available: () => false },
+      // The credential STORE is not mounted either: the Web section's key row
+      // reports unavailable instead of claiming "not configured".
+      credentials: { available: () => false },
     },
     catalog: { models: { available: () => false } },
   }

@@ -65,6 +65,8 @@ import type {
   ProviderProfileConfig,
   SubagentAllowedModelRoute,
   SubagentModelSelectionConfig,
+  WebProviderConfig,
+  WebProviderSettings,
   TuiSettingsConfig,
   TuiSettingsDoc,
   ConfigReadiness,
@@ -1452,6 +1454,7 @@ export class RemoteConfigPort implements ConfigPort {
   readonly permissions: PermissionConfig
   readonly presetDefault: PresetDefaultConfig
   readonly subagentModelSelection: SubagentModelSelectionConfig
+  readonly web: WebProviderConfig
 
   /** `undefined` while the `tui-app` namespace is absent from the mirror
    *  (the port's documented absence contract). */
@@ -1488,6 +1491,11 @@ export class RemoteConfigPort implements ConfigPort {
     this.permissions = new RemotePermissionConfig(this.mirror, source.remote.commands)
     this.presetDefault = new RemotePresetDefaultConfig(this.mirror)
     this.subagentModelSelection = new RemoteSubagentModelSelectionConfig(this.mirror)
+    // S2/PR-B §3.2: the Host web-provider setting stays DIRECT-only. The wire
+    // publishes no provider-selection read or write, so this backend reports a
+    // static unavailable and refuses every write — it never names a Host
+    // settings namespace and never claims a success.
+    this.web = new RemoteUnsupportedWebProviderConfig()
   }
 
   /** Commit one fresh mirror snapshot (or leave the last-known value). A
@@ -1531,5 +1539,48 @@ export class RemoteConfigPort implements ConfigPort {
   dispose(): void {
     this.mirror.dispose()
     this.credentialConfig.dispose()
+  }
+}
+
+/**
+ * The Remote backend's Web provider sub-domain: INTENTIONALLY unsupported in
+ * S2. The wire carries no web-provider selection read (the `settings` mirror
+ * exposes plugin forms for the CLIENT-owned surfaces only) and no write RPC for
+ * a Host namespace, so the section is presented as unsupported on this backend
+ * and every write fails closed instead of naming a Host settings namespace or
+ * reporting a success it cannot observe. Remote web-provider support is owned
+ * by a later stage (S3/S4) together with the Host generated-settings parity.
+ */
+class RemoteUnsupportedWebProviderConfig implements WebProviderConfig {
+  available(): boolean {
+    return false
+  }
+
+  async read(): Promise<WebProviderSettings | undefined> {
+    return undefined
+  }
+
+  private refuse(): never {
+    throw new Error('web provider settings are not supported on this backend')
+  }
+
+  async setSearchProvider(): Promise<void> {
+    this.refuse()
+  }
+
+  async setFetchProvider(): Promise<void> {
+    this.refuse()
+  }
+
+  async setSearchApiCount(): Promise<void> {
+    this.refuse()
+  }
+
+  async setSendOriginalQuestion(): Promise<void> {
+    this.refuse()
+  }
+
+  async setSearchApiBaseURL(): Promise<void> {
+    this.refuse()
   }
 }

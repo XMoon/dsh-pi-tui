@@ -50,6 +50,7 @@ export type SettingsWorkspaceRowId =
   | 'display-preset'
   | 'thinking'
   | 'legacy-settings'
+  | 'web-settings'
 
 /** How current one row's value is, as the reader proved it. */
 export type SettingsWorkspaceFreshness = 'runtime' | 'ready' | 'last-known' | 'unavailable' | 'read-error'
@@ -112,6 +113,9 @@ export interface SettingsWorkspaceRow {
   readonly freshness: SettingsWorkspaceFreshness
   readonly description: string
   readonly action: 'inspect' | 'open-legacy'
+  /** The legacy-editor row an `open-legacy` action must focus (the Settings
+   *  workspace deeplink, S2/PR-B §3.3). Absent = the editor opens at its top. */
+  readonly legacyTargetId?: string
   /** Present ONLY on the writable pilot rows (B2-B). A row without it is never
    *  editable, whatever its action. */
   readonly edit?: SettingsWorkspaceEdit
@@ -173,8 +177,9 @@ export interface SettingsWorkspacePanelIntents {
   /** Esc/Backspace from the outermost level (`categories`); every layout
    *  steps one level back before it can close. */
   readonly onClose: () => void
-  /** The compatibility bridge: open the existing complete settings editor. */
-  readonly onOpenLegacy: () => void
+  /** The compatibility bridge: open the existing complete settings editor,
+   *  focused on the row the destination asked for (absent = its top). */
+  readonly onOpenLegacy: (targetId?: string) => void
   /** Copy the exact captured source value through the app's clipboard owner. */
   readonly onCopy: (text: string) => void
   /**
@@ -510,11 +515,25 @@ export class SettingsWorkspacePanel implements Component {
   private readonly source: SettingsWorkspaceSource
   private readonly intents: SettingsWorkspacePanelIntents
 
-  constructor(source: SettingsWorkspaceSource, intents: SettingsWorkspacePanelIntents) {
+  constructor(
+    source: SettingsWorkspaceSource,
+    intents: SettingsWorkspacePanelIntents,
+    /** The re-entry selection (S2/PR-B §B3.4): the Web Settings launch restores
+     *  this Workspace with its own row focused, never the default category. */
+    options?: { readonly initialRowId?: SettingsWorkspaceRowId },
+  ) {
     this.source = source
     this.intents = intents
     this.snapshot = source.readSnapshot()
     this.rowId = this.firstRowOf(this.categoryId)
+    if (options?.initialRowId !== undefined) {
+      const target = this.snapshot.rows.find(row => row.id === options.initialRowId)
+      if (target !== undefined) {
+        this.categoryId = target.category
+        this.rowId = target.id
+        this.focus = 'rows'
+      }
+    }
   }
 
   // ── rendering ────────────────────────────────────────────────────────────
@@ -1664,7 +1683,7 @@ export class SettingsWorkspacePanel implements Component {
   private enterDetail(): void {
     const row = this.selectedRow()
     if (row?.action === 'open-legacy') {
-      this.intents.onOpenLegacy()
+      this.intents.onOpenLegacy(row.legacyTargetId)
       return
     }
     if (this.focus === 'detail') return
@@ -1929,17 +1948,22 @@ export class SettingsWorkspacePanel implements Component {
         this.selectRow(target.id as SettingsWorkspaceRowId, 'rows')
         // The row's `open-legacy` action is the ONE navigation verb (never an
         // edit) and the painted row IS its target, exactly like Enter.
-        if (this.selectedRow()?.action === 'open-legacy') this.intents.onOpenLegacy()
+        const legacyRow = this.selectedRow()
+        if (legacyRow?.action === 'open-legacy') this.intents.onOpenLegacy(legacyRow.legacyTargetId)
         return
       }
       case 'copy':
         this.takeColumnFocus('detail')
         this.copySelected()
         return
-      case 'legacy':
+      case 'legacy': {
         this.takeColumnFocus('detail')
-        this.intents.onOpenLegacy()
+        // The Detail bar belongs to the SELECTED row: its own deeplink target
+        // travels with the action (absent = the editor's top).
+        const legacyDetailRow = this.selectedRow()
+        this.intents.onOpenLegacy(legacyDetailRow?.action === 'open-legacy' ? legacyDetailRow.legacyTargetId : undefined)
         return
+      }
       case 'change':
         if (this.focus === 'detail') this.beginChoice()
         else this.enterDetail()

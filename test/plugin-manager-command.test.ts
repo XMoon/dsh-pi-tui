@@ -72,6 +72,12 @@ function proxyRunner(ctx: Context, app: TuiApp, commands: Record<string, unknown
         approvalOverrideOf: () => undefined,
       },
       subagentModelSelection: { available: () => false },
+      // The Web provider section is Host-only (S2/PR-B): this stub composes no
+      // Host settings plane, so the section reports unavailable and offers no write.
+      web: { available: () => false },
+      // The credential STORE is not mounted either: the Web section's key row
+      // reports unavailable instead of claiming "not configured".
+      credentials: { available: () => false },
     },
     catalog: { models: { available: () => false } },
   }
@@ -107,9 +113,11 @@ test('/plugins is registered and opens the shared Plugin Manager surface', () =>
   assert.equal(counts.submenu, 0)
 })
 
-test('/settings renders the Plugins row lazily (no submenu build, no inventory read)', () => {
+test('/settings renders the Plugins row lazily (no submenu build, no inventory read)', async () => {
   const { invoke, counts } = setup()
-  const result = invoke('settings') as { kind: string }
+  // `/settings` reads the Host Web provider facts before it leases the
+  // workspace screen (S2/PR-B §B3.4), so its handler is asynchronous.
+  const result = await invoke('settings') as { kind: string }
   assert.equal(result.kind, 'success')
   assert.equal(counts.submenu, 0, 'opening /settings must not build the Plugin Manager submenu')
   assert.equal(counts.opened, 0)

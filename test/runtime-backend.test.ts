@@ -153,6 +153,15 @@ test('the Direct backend is the current production surface and serves EXACTLY th
       get: () => undefined,
       set: async () => {},
     },
+    web: {
+      available: () => false,
+      read: async () => undefined,
+      setSearchProvider: async () => {},
+      setFetchProvider: async () => {},
+      setSearchApiCount: async () => {},
+      setSendOriginalQuestion: async () => {},
+      setSearchApiBaseURL: async () => {},
+    },
   }
   const hostFile = {
     listReferences: async () => ({ kind: 'ok' as const, items: [] }),

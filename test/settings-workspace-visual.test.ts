@@ -229,6 +229,12 @@ function setup(options: HarnessOptions = {}): Harness {
       footerCustomItems: { rawForPersistence: () => ({ kind: 'available', value: undefined }) },
       permissions: { presetNames: () => [], defaultPreset: () => undefined, approvalOverrideOf: () => undefined, approvalOverrideAvailable: () => false },
       subagentModelSelection: { available: () => false },
+      // The Web provider section is Host-only (S2/PR-B): this stub composes no
+      // Host settings plane, so the section reports unavailable and offers no write.
+      web: { available: () => false },
+      // The credential STORE is not mounted either: the Web section's key row
+      // reports unavailable instead of claiming "not configured".
+      credentials: { available: () => false },
     },
     catalog: { models: { available: () => false } },
   }
