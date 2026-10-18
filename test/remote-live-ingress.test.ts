@@ -655,6 +655,15 @@ test('S3-R0: a prepend wakeup is PAGING, a replace/rollover wakeup is recovery',
   await flushWakeup()
   assert.deepEqual(log.refoldReasons, ['paging', 'recovery', 'recovery'],
     'a rollover is a recovery wakeup')
+  const coalesced = log.refolds.length
+  // SAME-microtask coalescing: a prepend followed by a replace before the wakeup
+  // flushes must deliver ONE wakeup, and it must be the double one.
+  source.publish({ entries: [], revision: 8, hasMore: true, change: { kind: 'prepend', entries: [] } })
+  source.publish({ entries: [], revision: 9, hasMore: false, change: { kind: 'replace', entries: [] } as never })
+  await flushWakeup()
+  assert.equal(log.refolds.length, coalesced + 1, 'coalesced into ONE wakeup')
+  assert.equal(log.refoldReasons.at(-1), 'recovery',
+    'a recovery escalates a paging wakeup coalesced in the same microtask')
   handle.dispose()
 })
 

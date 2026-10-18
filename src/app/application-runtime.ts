@@ -22,7 +22,6 @@
  * @module @xmoon76/dsh-pi-tui/app/application-runtime
  */
 
-import type { RemoteRefoldReason } from './remote/live-ingress.ts'
 import type { PresentationReader } from '../runtime/presentation-read-port.ts'
 import type { SessionReader } from '../runtime/session-reader-port.ts'
 import type { TerminalProgressOutcome } from '../domain/terminal-progress/settings.ts'
@@ -266,7 +265,7 @@ export interface RemoteLiveIngressFactory {
        *  change, hydrate gap). Intent only — the fold owner re-folds the
        *  CURRENT official window and then acknowledges the committed revision
        *  through the handle. */
-      onWindowRefoldRequired: (sessionId: string, reason?: RemoteRefoldReason) => void
+      onWindowRefoldRequired: (sessionId: string, reason?: 'paging' | 'recovery') => void
       onSessionSnapshotChanged: (sessionId: string) => void
       /** The official PROJECTION store changed: the only channel carrying
        *  projection-owned current values (the Session snapshot never does). */
