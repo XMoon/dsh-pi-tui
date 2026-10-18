@@ -11,6 +11,7 @@ import { basename, dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import test from 'node:test'
 
+import { COMPAT_MATRIX } from '../scripts/lib/dsh-compat.mjs'
 import { testLifecycle } from './support/temp-lifecycle.ts'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
@@ -114,6 +115,10 @@ function makeFixture(life, { includePresets = true, candidatePeers = { [DSH_CLI]
       './performance-host': './dist/performance-host.mjs',
     },
     peerDependencies: candidatePeers,
+    // The smoke asserts the packed manifest restates the repo matrix floor, so
+    // the synthetic candidate must mirror that REAL field: a fixture without it
+    // would fail a production manifest contract for the wrong reason.
+    engines: { node: '^22.19.0 || >=24', dsh: `>=${COMPAT_MATRIX.matrix.at(-1).dshFrom}` },
   }, candidateFiles())
   return { root, distribution, candidate, registryTarball }
 }
