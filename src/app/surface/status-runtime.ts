@@ -473,10 +473,15 @@ export function createStatusRuntime(deps: StatusRuntimeDeps): StatusRuntime {
     // The terminal-local cwd follows the SAME effective-directory authority; a
     // FAILED read publishes NOTHING rather than a stale project.
     const sessionId = deps.currentSessionId()
-    if (sessionId === undefined) return undefined
-    const status = deps.sessionStatus(sessionId)
-    if (status?.cwd !== undefined) return status.cwd
-    return deps.sessionStatusFailed?.(sessionId) === true ? undefined : agent.session.header.cwd
+    if (sessionId !== undefined) {
+      const status = deps.sessionStatus(sessionId)
+      if (status?.cwd !== undefined) return status.cwd
+      if (deps.sessionStatusFailed?.(sessionId) === true) return undefined
+    }
+    // NO recorded value (or no session id yet): the pane still sits on this
+    // machine, so the launch cwd is the honest terminal-local fact — the same
+    // fallback the Direct branch had before S2, never another Session's project.
+    return agent.session.header.cwd ?? deps.clientCwd
   }
 
   /** Forward the terminal-local cwd to the mounted TUI (it owns the write and
