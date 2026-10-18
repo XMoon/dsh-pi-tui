@@ -301,7 +301,7 @@ test('the credential panel keeps its title and both explicit actions at 72×24 a
 test('the state chips use their frozen ink roles in dark and light', async t => {
   /** The ink of one chip ON the row that owns it (the description text also
    *  mentions the chip words, and it is painted textDim). */
-  const chipCell = (h: Harness, rowNeedle: string, needle: string): number => {
+  const chipCell = (h: Harness, rowNeedle: string, needle: string): number | undefined => {
     const lines = h.plain()
     const row = lines.findIndex(line => line.includes(rowNeedle) && line.includes(needle))
     assert.ok(row >= 0, `the frame paints ${needle} on ${rowNeedle}:\n${h.view()}`)
