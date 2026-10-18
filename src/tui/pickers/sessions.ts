@@ -13,7 +13,7 @@
  * @module @xmoon76/dsh-pi-tui/tui/pickers/sessions
  */
 
-import { stripTerminalSequences } from '@xmoon76/pi-tui'
+import { sanitizedPhysicalLine } from '../presentation/lines.ts'
 import {
   buildSessionTree,
   sameWorkspace,
@@ -109,17 +109,16 @@ export interface SessionContentHit {
 }
 
 /** Strip terminal control characters from untrusted text before it enters
- * the picker presentation. Complete ANSI/OSC/APC sequences are removed
- * first (the fork's parser), then every remaining C0 control (including a
- * lone ESC), DEL, and C1 control (U+0080–U+009F — CSI/OSC/APC in 8-bit
- * form) is dropped: the picker writes descriptions straight to the
- * terminal, and a terminal decoding UTF-8 interprets C1 code points as
- * control sequences, not text. Host snippets may carry persisted control
- * bytes (message/tool output) — a raw ESC/OSC would be interpreted, not
- * displayed. */
+ * the picker presentation. The shared presentation projection removes every
+ * complete ANSI/OSC/APC sequence (including C1 8-bit forms and unterminated
+ * tails), then every remaining C0 control, DEL and C1 control, and folds the
+ * result onto exactly one physical row: the picker writes descriptions
+ * straight to the terminal, and a terminal decoding UTF-8 interprets C1 code
+ * points as control sequences, not text. Host snippets may carry persisted
+ * control bytes (message/tool output) — a raw ESC/OSC would be interpreted,
+ * not displayed. */
 export function sanitizeTerminalText(value: string): string {
-  // eslint-disable-next-line no-control-regex -- the C0/C1 classes are the point
-  return stripTerminalSequences(value).replace(/[\u0000-\u001f\u007f-\u009f]/gu, '')
+  return sanitizedPhysicalLine(value)
 }
 
 /** Assemble one session row for the picker, marking the current session.

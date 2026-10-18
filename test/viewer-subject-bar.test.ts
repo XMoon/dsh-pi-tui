@@ -200,7 +200,7 @@ test('control characters and line breaks in Host strings never break the single-
   }
   const text = plain(renderViewerSubjectBar({ snapshot: childSnapshot({ label }), childTitle: title, width: 100 }))
   assert.ok(text.includes('review er'), `a line break normalizes to a space:\n${text}`)
-  assert.ok(text.includes('a b c'), `a tab/CR normalizes to spaces:\n${text}`)
+  assert.ok(text.includes('a   b c'), `a tab normalizes to three spaces and a CR to one:\n${text}`)
   // A model identity carrying a line break is normalized too.
   const modelLine = plain(renderViewerSubjectBar({
     snapshot: childSnapshot({ model: { provider: 'pro\nvider', id: 'mo\ndel' } }),
