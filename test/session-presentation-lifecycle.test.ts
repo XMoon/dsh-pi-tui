@@ -389,8 +389,11 @@ test('RFL-007: the reconcile publishes the proven working fold, the plan project
 
   // The same parity for a bracket a RECONCILE committed.
   const recommitted = harness({ refoldProof: (_sessionId, revision) => ({ generation: 1, binding: {}, revision }) })
-  recommitted.setWindow([{ type: 'compaction/start', data: { compactionId: 'B4' } }], false, 93)
+  // The cold hydrate must NOT already carry the bracket, or the cold seed alone
+  // would satisfy this witness (it has to die when the RECONCILE seed is gone).
+  recommitted.setWindow([{ type: 'turn/start', data: { turn: 1 } }], false, 93)
   await recommitted.coldHydrate()
+  recommitted.setWindow([{ type: 'compaction/start', data: { compactionId: 'B4' } }], false, 94)
   await recommitted.rehydrate()
   const recommittedBase = recommitted.contextDirty()
   recommitted.presentation.noteLiveMeasureEvent('s', { type: 'compaction/end', data: { compactionId: 'B4' } })
