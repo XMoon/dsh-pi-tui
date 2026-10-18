@@ -342,12 +342,50 @@ test('RFL-007: the reconcile publishes the proven working fold, the plan project
   await h.rehydrate()
   assert.equal(h.contextDirty(), dirtyBeforeStart + 2, 'a turn that ended during the outage measures too')
 
+  // Measure parity with the live fold, on a FRESH owner so the baseline is
+  // unambiguous: a STALE end for an older compaction is not a measure boundary
+  // (the live routing only measures a MATCHED settle), and the matched end then
+  // measures exactly once.
+  const parity = harness({ refoldProof: (_sessionId, revision) => ({ generation: 1, binding: {}, revision }) })
+  parity.setWindow([{ type: 'turn/start', data: { turn: 1 } }], false, 81)
+  await parity.coldHydrate()
+  const parityBase = parity.contextDirty()
+  parity.presentation.noteLiveMeasureEvent('s', { type: 'compaction/start', data: { compactionId: 'A2' } })
+  parity.presentation.noteLiveMeasureEvent('s', { type: 'compaction/start', data: { compactionId: 'B2' } })
+  parity.presentation.noteLiveMeasureEvent('s', { type: 'compaction/end', data: { compactionId: 'A2' } })
+  parity.setWindow([
+    { type: 'compaction/start', data: { compactionId: 'A2' } },
+    { type: 'compaction/start', data: { compactionId: 'B2' } },
+    { type: 'compaction/end', data: { compactionId: 'A2' } },
+  ], false, 82)
+  await parity.rehydrate()
+  assert.equal(parity.contextDirty(), parityBase,
+    'a stale end for A2 does not measure while B2 is in flight')
+  parity.setWindow([
+    { type: 'compaction/start', data: { compactionId: 'A2' } },
+    { type: 'compaction/start', data: { compactionId: 'B2' } },
+    { type: 'compaction/end', data: { compactionId: 'A2' } },
+    { type: 'compaction/end', data: { compactionId: 'B2' } },
+  ], false, 83)
+  // The outage swallowed this matched end (no live note): the reconcile measures it.
+  await parity.rehydrate()
+  assert.equal(parity.contextDirty(), parityBase + 1,
+    'the matched end B2 measures exactly once')
+  // And once the live path HAS handled it, a later page reconcile measures nothing.
+  parity.presentation.noteLiveMeasureEvent('s', { type: 'compaction/end', data: { compactionId: 'B2' } })
+  await parity.rehydrate()
+  assert.equal(parity.contextDirty(), parityBase + 1,
+    'a live-handled matched end never measures a second time')
+
   // A boundary the LIVE routing already measured keeps an ordinary page
   // reconcile measurement-free (no false positive on paging).
   h.setWindow([
     { type: 'compaction/start', data: { compactionId: 'c9' } },
     { type: 'compaction/end', data: { compactionId: 'c9' } },
   ], false, 38)
+  // A real session saw the START live too (the routing's bracket needs it to
+  // recognise the matched end).
+  h.presentation.noteLiveMeasureEvent('s', { type: 'compaction/start', data: { compactionId: 'c9' } })
   h.presentation.noteLiveMeasureEvent('s', { type: 'compaction/end', data: { compactionId: 'c9' } })
   const dirtyBeforePrepend = h.contextDirty()
   h.setWindow([

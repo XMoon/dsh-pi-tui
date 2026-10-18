@@ -174,35 +174,6 @@ export function workingFromLog(events: readonly { readonly type: string }[]): bo
  * surface on resume.
  */
 /**
- * The identity of the NEWEST model-visible MEASURE event the window shows — the
- * same set the live routing re-measures on (`contextRefreshKind === 'measure'`:
- * `step/start`, `turn/end`, `compaction/end`) — qualified by its own turn/step/
- * compaction identity, because a bounded window can show the same event TYPE
- * across an outage while a NEWER boundary arrived.
- *
- * Two committed windows with the same key saw the same measurable lifecycle; a
- * different key means the outage swallowed a boundary whose live handler would
- * have marked the context dirty and re-measured it — including a compaction
- * bracket whose start AND end both landed off-window, and a turn that ended with
- * no compaction at all.
- */
-export function measureEventKey(events: readonly { type: unknown; data?: unknown }[]): string {
-  for (let index = events.length - 1; index >= 0; index -= 1) {
-    const event = events[index]
-    if (event === undefined) break
-    const kind = typeof event.type === 'string' ? event.type : ''
-    if (kind === '') continue
-    if (contextRefreshKind(kind) !== 'measure') continue
-    const data = (event as { data?: { turn?: unknown; step?: unknown; compactionId?: unknown } }).data
-    const turn = typeof data?.turn === 'number' ? String(data.turn) : ''
-    const step = typeof data?.step === 'number' ? String(data.step) : ''
-    const compaction = typeof data?.compactionId === 'string' ? data.compactionId : ''
-    return `${kind}:${turn}:${step}:${compaction}`
-  }
-  return 'none'
-}
-
-/**
  * The compaction bracket a LOG/WINDOW shows, rebuilt with the SAME
  * compactionId-matched fold the live routing uses (`foldCompactionEvent`), so a
  * window reconcile can never disagree with the live state: a STALE
@@ -238,10 +209,66 @@ export function compactionBracketFromLog(
       phase = 'idle'
       continue
     }
-    // A MATCHED summary advances the phase; a stale one changes nothing.
     if (folded.phase !== undefined) phase = folded.phase
   }
   return { active, id: state.id, phase }
+}
+
+/**
+ * The identity of the NEWEST EFFECTIVE model-visible measure boundary the window
+ * shows. `step/start` and `turn/end` always qualify; a `compaction/end` qualifies
+ * ONLY when it actually SETTLES the in-flight compaction — the live routing
+ * measures exactly on that matched settle, so a stale `end A` while B is in
+ * flight must not count as a measure boundary here either.
+ */
+export function measureEventKey(events: readonly { type: unknown; data?: unknown }[]): string {
+  let bracket: { id: string | undefined } = { id: undefined }
+  let key = 'none'
+  for (const event of events) {
+    const kind = typeof event.type === 'string' ? event.type : ''
+    if (kind === 'session/end-seed') { bracket = { id: undefined }; continue }
+    if (kind === 'compaction/start' || kind === 'compaction/summary' || kind === 'compaction/end') {
+      const folded = foldCompactionEvent(bracket, event as { type: string; data: { compactionId?: unknown; error?: unknown } })
+      if (folded.active) { bracket = { id: folded.id }; continue }
+      if (folded.clear) {
+        key = `compaction/end:${bracket.id ?? ''}`
+        bracket = { id: undefined }
+      }
+      continue
+    }
+    if (kind === '' || contextRefreshKind(kind) !== 'measure') continue
+    const data = (event as { data?: { turn?: unknown; step?: unknown } }).data
+    const turn = typeof data?.turn === 'number' ? String(data.turn) : ''
+    const step = typeof data?.step === 'number' ? String(data.step) : ''
+    key = `${kind}:${turn}:${step}`
+  }
+  return key
+}
+
+/**
+ * Fold ONE live event into the session's compaction bracket and return the
+ * measure boundary that fold implies (`none` when the event is not an effective
+ * measure boundary — a stale `compaction/end` included).
+ */
+export function foldLiveMeasureEvent(
+  state: { id: string | undefined },
+  event: { type: unknown; data?: unknown },
+): { state: { id: string | undefined }; key: string } {
+  const kind = typeof event.type === 'string' ? event.type : ''
+  if (kind === 'session/end-seed') return { state: { id: undefined }, key: 'none' }
+  if (kind === 'compaction/start' || kind === 'compaction/summary' || kind === 'compaction/end') {
+    const folded = foldCompactionEvent(state, event as { type: string; data: { compactionId?: unknown; error?: unknown } })
+    if (folded.active) return { state: { id: folded.id }, key: 'none' }
+    if (folded.clear) return { state: { id: undefined }, key: `compaction/end:${state.id ?? ''}` }
+    return { state, key: 'none' }
+  }
+  if (kind !== '' && contextRefreshKind(kind) === 'measure') {
+    const data = (event as { data?: { turn?: unknown; step?: unknown } }).data
+    const turn = typeof data?.turn === 'number' ? String(data.turn) : ''
+    const step = typeof data?.step === 'number' ? String(data.step) : ''
+    return { state, key: `${kind}:${turn}:${step}` }
+  }
+  return { state, key: 'none' }
 }
 
 export function compactingFromLog(

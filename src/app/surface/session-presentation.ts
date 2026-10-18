@@ -29,7 +29,7 @@
  * @module @xmoon76/dsh-pi-tui/app/surface/session-presentation
  */
 
-import { compactionBracketFromLog, measureEventKey, workingFromLog } from './compaction-presentation.ts'
+import { compactionBracketFromLog, foldLiveMeasureEvent, measureEventKey, workingFromLog } from './compaction-presentation.ts'
 import type { ContextMeasureReason } from '../../domain/status/context-measurement.ts'
 import { foldGoal, goalTextOf } from '../../domain/status/derive-goal.ts'
 import { recallHistoryForSession, type ParsedHistoryRecord } from '../../client/history/store.ts'
@@ -396,6 +396,9 @@ export function createSessionPresentation<Event extends SessionPresentationEvent
    *  and the generation reset drops it so a reused owner never compares against
    *  a retired session's state. */
   const lastCommittedMeasureEvent = new Map<string, string>()
+  /** The live compaction bracket each session's routing sink has folded so far
+   *  (the same `foldCompactionEvent`, so a stale end is recognised as stale). */
+  const liveMeasureBracket = new Map<string, { id: string | undefined }>()
 
   /**
    * The synchronous surface reset that follows a generation bump (A2 seam).
@@ -407,13 +410,19 @@ export function createSessionPresentation<Event extends SessionPresentationEvent
   /** Record a measure boundary the LIVE routing handled (so a later window
    *  reconcile never re-measures one the live path already did). */
   const noteLiveMeasureEvent = (sessionId: string, event: { readonly type: unknown; readonly data?: unknown }): void => {
-    const key = measureEventKey([event])
-    if (key !== 'none') lastCommittedMeasureEvent.set(sessionId, key)
+    // The live routing measures on a MATCHED compaction settle (and on
+    // step/start, turn/end); a stale `compaction/end` measures nothing, so it
+    // must not advance the baseline either. The bracket is folded with the SAME
+    // shared fold the routing uses.
+    const folded = foldLiveMeasureEvent(liveMeasureBracket.get(sessionId) ?? { id: undefined }, event)
+    liveMeasureBracket.set(sessionId, folded.state)
+    if (folded.key !== 'none') lastCommittedMeasureEvent.set(sessionId, folded.key)
   }
 
   const resetForGeneration = (): void => {
     callArgs.clear()
     lastCommittedMeasureEvent.clear()
+    liveMeasureBracket.clear()
     mainStreamingToolPreviews.clear()
     // The new session's subagent delegations are a fresh namespace: stale
     // pending calls from the old session would consume viewer match slots,
