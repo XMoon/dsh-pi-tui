@@ -31,6 +31,7 @@ import type { PendingInputSnapshot } from '../../runtime/pending-input-reader-po
 import type { SubmissionPresentationItem } from '../submission/presentation.ts'
 import type { SubmitLatencyPhase } from '../submission/latency.ts'
 import type { ContextMeasureReason } from '../../domain/status/context-measurement.ts'
+import type { CompactionPhase } from './compaction-presentation.ts'
 import {
   busyAfterTurnBoundary,
   contextRefreshKind,
@@ -284,7 +285,7 @@ export interface EventRoutingRuntime<Event extends RoutedSessionEvent> {
   /** The neutral live-input routing (main target vs the mounted viewed child). */
   applyAssistantInput(input: AssistantLiveInput): void
   /** The resumed-compaction routing (a startup/resume fact, not a session event). */
-  applyResumedCompaction(id: string | undefined, active: boolean): void
+  applyResumedCompaction(id: string | undefined, active: boolean, phase?: CompactionPhase): void
 }
 
 /**
@@ -696,9 +697,12 @@ export function createEventRouting<Event extends RoutedSessionEvent>(
     options.schedulePaint()
   }
 
-  const applyResumedCompaction = (id: string | undefined, active: boolean): void => {
+  const applyResumedCompaction = (id: string | undefined, active: boolean, phase?: CompactionPhase): void => {
     compactingId = id
-    options.mounted().commitStatusFacts({ compactionPhase: active ? 'summarizing' : 'idle' })
+    // The caller may rebuild the EXACT phase from the window (a bracket whose
+    // summary already landed resumes as 'applying'); without it an active
+    // bracket defaults to 'summarizing'.
+    options.mounted().commitStatusFacts({ compactionPhase: active ? (phase ?? 'summarizing') : 'idle' })
     if (active) options.mounted().commitStatusFacts({ busy: true, working: true })
   }
 
