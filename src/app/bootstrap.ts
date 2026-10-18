@@ -1919,6 +1919,7 @@ export function applyRunnerWithRuntime(
       // Remote this is the same function the branch facts used to expose).
       // The subject id is ALWAYS explicit: selection belongs to StatusRuntime.
       sessionStatus: (sessionId) => backend.sessionReader.sessionStatus(sessionId),
+      sessionStatusFailed: (sessionId) => backend.sessionReader.sessionStatusFailed?.(sessionId) === true,
       model: {
         selection: () => model.selected.current,
         currentOf: (agent) => model.currentOf(agent),

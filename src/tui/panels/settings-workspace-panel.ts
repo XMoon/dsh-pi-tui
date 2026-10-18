@@ -163,6 +163,10 @@ export interface SettingsWorkspaceSnapshot {
 /** The read-only projection the app supplies (no shadow store, no watch). */
 export interface SettingsWorkspaceSource {
   readSnapshot(): SettingsWorkspaceSnapshot
+  /** Invoked when the user asks for a refresh (`r`): the OWNER starts the
+   *  asynchronous authority read and refreshes this generation when it
+   *  settles (S2/PR-B §B3.4). The panel itself never reads Host facts. */
+  onRefresh?(): void
 }
 
 /** The client-local capabilities the panel consumes. */
@@ -1568,7 +1572,11 @@ export class SettingsWorkspacePanel implements Component {
     if (matchesKey(data, 'home')) return this.jump(-1)
     if (matchesKey(data, 'end')) return this.jump(1)
     if (matchesKey(data, 'enter')) return this.confirm()
-    if (data === SETTINGS_LOCAL_KEYS.refresh || data === SETTINGS_LOCAL_KEYS.refresh.toUpperCase()) return this.refresh()
+    if (data === SETTINGS_LOCAL_KEYS.refresh || data === SETTINGS_LOCAL_KEYS.refresh.toUpperCase()) {
+      this.refresh()
+      this.source.onRefresh?.()
+      return
+    }
     if (copyKeyPressed) return this.copy()
     // Everything else is inert inside the workspace: no key leaks to the hidden
     // editor, transcript or a host composer action.

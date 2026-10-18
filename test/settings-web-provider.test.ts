@@ -72,6 +72,8 @@ interface Harness {
     available: boolean
     failNext: string | undefined
     readThrows: boolean
+    /** A mounted section whose facts do not validate (read() answers undefined). */
+    readUndefined: boolean
     /** Artificial delay for one Host write (the FIFO order proof). */
     writeDelayMs: number
   }
@@ -101,6 +103,7 @@ function setup(options: {
     available: options.available ?? true,
     failNext: undefined as string | undefined,
     readThrows: false,
+    readUndefined: false,
     writeDelayMs: 0,
     web: {
       searchProvider: options.searchProvider ?? 'deepseek-official',
@@ -131,6 +134,7 @@ function setup(options: {
   const write = async (label: string, apply: () => void, delayMs = 0): Promise<void> => {
     activeWrites += 1
     maxActiveWrites = Math.max(maxActiveWrites, activeWrites)
+    log.push(`begin:${label}`)
     try {
       if (delayMs > 0) await new Promise(resolve => setTimeout(resolve, delayMs))
       if (store.failNext !== undefined) {
@@ -178,7 +182,8 @@ function setup(options: {
         available: () => store.available,
         read: async () => {
           if (store.readThrows) throw new Error('settings descriptor unreadable')
-          return store.available ? { ...store.web, api: { ...store.web.api } } : undefined
+          if (!store.available || store.readUndefined) return undefined
+          return { ...store.web, api: { ...store.web.api } }
         },
         setSearchProvider: async (id: string) => { await write(`search:${id}`, () => { store.web.searchProvider = id }, store.writeDelayMs) },
         setFetchProvider: async (id: string) => { await write(`fetch:${id}`, () => { store.web.fetchProvider = id }) },
@@ -410,7 +415,7 @@ test('a configured custom provider id stays visible, marked unavailable and not 
 test('the endpoint editor joins the SAME FIFO: no Web write overlaps another', async t => {
   const h = setup()
   t.after(h.dispose)
-  h.store.writeDelayMs = 40
+  h.store.writeDelayMs = 150
   await openWebSection(h)
   // Queue the (slow) provider write, then immediately open the endpoint editor
   // and confirm it: with ONE owner FIFO the endpoint write starts only after the
@@ -422,9 +427,11 @@ test('the endpoint editor joins the SAME FIFO: no Web write overlaps another', a
   await new Promise(resolve => setTimeout(resolve, 200))
   await h.vt.waitForRender()
   assert.deepEqual(h.log, [
+    'begin:search:deepseek-search-api',
     'search:deepseek-search-api',
+    'begin:endpoint:https://api.deepseek.com/v1/tools',
     'endpoint:https://api.deepseek.com/v1/tools',
-  ], 'the two writes commit in input order')
+  ], 'the endpoint write does not even START until the pending selection settled')
   assert.equal(h.maxConcurrentWrites(), 1, 'never two Web writes in flight at once')
   assert.equal(h.store.web.searchProvider, 'deepseek-search-api')
 })
@@ -462,4 +469,18 @@ test('a half-mounted Web configuration is unavailable and offers no write', asyn
   await new Promise(resolve => setTimeout(resolve, 10))
   await h.vt.waitForRender()
   assert.deepEqual(h.writes, [], 'an unreadable configuration never accepts a write')
+})
+
+test('a mounted but MALFORMED Web section reads as unavailable and accepts no write', async t => {
+  const h = setup()
+  t.after(h.dispose)
+  h.store.readUndefined = true
+  await openWebSection(h)
+  assert.match(h.view(), /Unavailable/u, 'an unreadable section is stated, never shown as current')
+  await key(h, ENTER)
+  await new Promise(resolve => setTimeout(resolve, 10))
+  await h.vt.waitForRender()
+  assert.deepEqual(h.writes, [], 'a malformed section never accepts a write')
+  const providerLine = h.view().split('\n').find(line => line.includes('Web Search Provider')) ?? ''
+  assert.doesNotMatch(providerLine, /\[current\]/u)
 })

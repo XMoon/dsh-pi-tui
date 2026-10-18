@@ -129,6 +129,11 @@ export interface StatusRuntimeDeps {
    * never "infer the subject from global state".
    */
   readonly sessionStatus: (sessionId: string) => import('../../runtime/session-reader-port.ts').SessionStatusProjection | undefined
+  /** TRUE when the last status read for this session FAILED (the official
+   *  projection authority threw). An `undefined` status then means UNKNOWN —
+   *  the Session's immutable header must NOT be substituted for it. Absent =
+   *  no failure signal (no recorded value ⇒ the header stays the fallback). */
+  readonly sessionStatusFailed?: (sessionId: string) => boolean
   /** The model-selection facts (the command/model owner replaces this). */
   readonly model: {
     readonly selection: () => ModelSelectionValue | undefined
@@ -351,7 +356,10 @@ export function createStatusRuntime(deps: StatusRuntimeDeps): StatusRuntime {
     const provider = current?.provider ?? agent.options.provider
     const model = current?.model ?? agent.options.model
     deps.surface.display.setWelcomeCard({
-      cwd: sessionCwd(),
+      // The displayed workspace fact is the OFFICIAL directory authority; an
+      // unavailable read is an ABSENT fact. `sessionCwd()`'s Client-local
+      // fallback belongs to EXECUTION paths only.
+      cwd: sessionCwdFact() ?? '',
       sessionId: agent.session.id,
       model: `${provider}/${model}`,
       version: versionDisplay(),
@@ -385,11 +393,16 @@ export function createStatusRuntime(deps: StatusRuntimeDeps): StatusRuntime {
   const sessionCwdFact = (): string | undefined => {
     const agent = deps.liveAgent()
     if (agent !== undefined) {
-      // The session status projection is the ONE effective-directory read: an
-      // UNAVAILABLE read is unknown, so the immutable header project must never
-      // be presented as the current workspace (§B2.2, read-failure fence).
+      // The session status projection is the ONE effective-directory read. Its
+      // absence is ambiguous, so the two cases are kept apart (§B2.2):
+      // a FAILED read is UNKNOWN (no fallback at all), while "no recorded
+      // value" keeps the SAME session's immutable header — the official
+      // initial value, never another Session's directory.
       const sessionId = deps.currentSessionId()
-      return sessionId === undefined ? undefined : deps.sessionStatus(sessionId)?.cwd
+      if (sessionId === undefined) return undefined
+      const status = deps.sessionStatus(sessionId)
+      if (status?.cwd !== undefined) return status.cwd
+      return deps.sessionStatusFailed?.(sessionId) === true ? undefined : agent.session.header.cwd
     }
     if (deps.remote !== undefined) {
       const sessionId = deps.currentSessionId()
@@ -457,10 +470,13 @@ export function createStatusRuntime(deps: StatusRuntimeDeps): StatusRuntime {
     if (deps.remote !== undefined) return undefined
     const agent = deps.liveAgent()
     if (agent === undefined) return deps.clientCwd
-    // The terminal-local cwd follows the SAME effective-directory authority; an
-    // unavailable read publishes NOTHING rather than the old header project.
+    // The terminal-local cwd follows the SAME effective-directory authority; a
+    // FAILED read publishes NOTHING rather than a stale project.
     const sessionId = deps.currentSessionId()
-    return sessionId === undefined ? undefined : deps.sessionStatus(sessionId)?.cwd
+    if (sessionId === undefined) return undefined
+    const status = deps.sessionStatus(sessionId)
+    if (status?.cwd !== undefined) return status.cwd
+    return deps.sessionStatusFailed?.(sessionId) === true ? undefined : agent.session.header.cwd
   }
 
   /** Forward the terminal-local cwd to the mounted TUI (it owns the write and
@@ -635,7 +651,7 @@ export function createStatusRuntime(deps: StatusRuntimeDeps): StatusRuntime {
     // unknown live-session cwd renders EMPTY (the footer cwd item omits
     // itself for an empty value) — the client cwd never impersonates the
     // session's Host workspace here.
-    const liveCwd = sessionCwdFact() ?? (deps.currentSessionId() !== undefined && deps.remote !== undefined ? '' : deps.clientCwd)
+    const liveCwd = sessionCwdFact() ?? ''
     // M3-5 PR1 §9.3: the ONE display-subject selector. It answers only
     // "which Session's status is being displayed?" — the current main
     // Session, or the viewed child Session (the viewer's own read model

@@ -384,6 +384,13 @@ export class DirectSessionReader implements SessionReader {
     }
   }
 
+  /** Sessions whose LAST status read threw (see `sessionStatusFailed`). */
+  private readonly statusReadFailures = new Set<string>()
+
+  sessionStatusFailed(sessionId: string): boolean {
+    return this.statusReadFailures.has(sessionId)
+  }
+
   sessionStatus(sessionId: string): SessionStatusProjection | undefined {
     // The projection SUBJECT is the attached/retained Session identity, NOT
     // the live Agent: a retained Session whose Agent is inactive (or was
@@ -392,12 +399,20 @@ export class DirectSessionReader implements SessionReader {
     // as status-unavailable — and would force a cold-resume merely to answer
     // a status question (M3-5 PR1 §9.1).
     const session = this.liveSession(sessionId)
-    if (session === undefined) return undefined
+    if (session === undefined) {
+      // No retained Session to cut: no VALUE was read (not a failure).
+      this.statusReadFailures.delete(sessionId)
+      return undefined
+    }
     // ONE consistent cut over the official projection units of THIS exact
     // session (M3-4/M3-5 foundation). No StatsFolder, no raw-log fold, no
     // other session's values ever ride along.
     const projections = this.sessionProjections()
-    if (projections === undefined) return undefined
+    if (projections === undefined) {
+      // No projection capability in this composition: no VALUE was read.
+      this.statusReadFailures.delete(sessionId)
+      return undefined
+    }
     try {
       const values = projections.snapshot(session, [
         'modelSelection',
@@ -443,10 +458,13 @@ export class DirectSessionReader implements SessionReader {
       // consumer that executes/renders in the session's directory must read
       // the projection.
       const effectiveCwd = projectedWorkingDirectory(values.workingDirectory) ?? session.header.cwd
+      this.statusReadFailures.delete(sessionId)
       return detachedSessionStatus(sessionId, forDisplay, effectiveCwd)
     } catch {
       // A projection authority failure is `undefined` (unknown), never a
-      // crash and never partially invented facts.
+      // crash and never partially invented facts; the failure is REMEMBERED so
+      // a consumer cannot mistake it for "no recorded value".
+      this.statusReadFailures.add(sessionId)
       return undefined
     }
   }

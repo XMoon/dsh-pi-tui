@@ -121,6 +121,14 @@ export interface SessionReader {
    *  the session" — never a parent/main-session fallback, never a
    *  zero-filled guess. */
   sessionStatus(sessionId: string): SessionStatusProjection | undefined
+  /**
+   * TRUE when the LAST `sessionStatus()` read for this session FAILED (the
+   * official projection authority threw). An `undefined` status then means
+   * UNKNOWN — a consumer must not substitute another source for it. An absent
+   * method (or `false`) means only "no recorded value", where the Session's own
+   * immutable header remains the legitimate fallback (S2/PR-B §B2.2).
+   */
+  sessionStatusFailed?(sessionId: string): boolean
 }
 
 /** One detached todo entry of the official `todos` projection (the

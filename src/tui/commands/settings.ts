@@ -202,6 +202,11 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
   const readWebSettings = (): Promise<WebProviderSettings | undefined> => {
     if (webReadInFlight !== undefined) return webReadInFlight
     const task = (async (): Promise<WebProviderSettings | undefined> => {
+      // A fresh read starts UNKNOWN: the previous snapshot is dropped so no
+      // first frame can present a cached value as the current one (the row
+      // shows `Loading…`, then the settled fact).
+      webSettings = undefined
+      webReadSettled = false
       try {
         const settings = await runner.config.web.read()
         // A resolved read (including `undefined` = no readable authority) REPLACES
@@ -544,7 +549,10 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
     const token = {}
     let handle: import('../../tui-app.ts').SettingsWorkspaceHandle | undefined
     handle = app.openSettingsWorkspace(
-      { readSnapshot: readSettingsWorkspaceSnapshot },
+      {
+        readSnapshot: readSettingsWorkspaceSnapshot,
+        onRefresh: () => { startWebSettingsRead(token) },
+      },
       {
         onOpenLegacy: (targetId) => { openLegacySettings(targetId) },
         onCommit: commitSettingsWorkspaceField,
@@ -555,11 +563,17 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
       },
     )
     activeSettingsWorkspace = { token, refresh: () => handle?.refresh() }
-    if (!webSettingsAvailable()) return
+    startWebSettingsRead(token)
+  }
+
+  /** Start ONE authority read for the panel generation `token`; the SAME
+   *  generation refreshes only if it still owns the surface when the read
+   *  settles. */
+  const startWebSettingsRead = (token: object): void => {
     detach('web provider settings read', async () => {
       await readWebSettings()
       if (activeSettingsWorkspace?.token !== token) return
-      handle?.refresh()
+      activeSettingsWorkspace.refresh()
     }, { notify: false })
   }
 
@@ -578,7 +592,9 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
   /** The Web section rows, in the frozen order. An unavailable section renders
    *  its state and OFFERS NO WRITE ENTRY at all. */
   const webSettingItems = (): SettingItem[] => {
-    const available = webSettingsAvailable()
+    // Admission is the VERIFIED authority: a mounted-but-malformed section has
+    // no readable facts, so it offers no write entry either.
+    const available = webSettingsAvailable() && webSettings !== undefined
     const credentialsAvailable = runner.config.credentials.available()
     const section: SettingItem = {
       id: 'web-separator',
@@ -637,8 +653,19 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
             currentValue: webRowValue('web-search-endpoint'),
             submenu: (_currentValue: string, done: (selected?: string) => void) => new WebEndpointPanel(done, {
               current: webSettings?.api.baseURL ?? '',
-              save: async (url: string) => {
+              // The endpoint text write is a Web-section write like any other:
+              // it joins the ONE owner FIFO so a selection and a text edit can
+              // never race the official revision-checked mutation.
+              save: (url: string) => queueWebOperation(async () => {
+                webRowPhases.set('web-search-endpoint', { kind: 'saving' })
+                repaintWebItems?.()
+                try {
                   await runner.config.web.setSearchApiBaseURL(url)
+                } catch (error) {
+                  webRowPhases.set('web-search-endpoint', { kind: 'not-saved' })
+                  repaintWebItems?.()
+                  throw error
+                }
                 const verified = await rereadWebSettings()
                 if (verified === undefined) {
                   webRowPhases.set('web-search-endpoint', { kind: 'outcome-unknown' })
@@ -646,12 +673,11 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
                   throw new WebWriteVerdictError('outcome-unknown', 'the endpoint write could not be verified against the Host — reopen the section to read the current value')
                 }
                 webRowPhases.delete('web-search-endpoint')
+                repaintWebItems?.()
                 if (verified.api.baseURL !== url) {
-                  repaintWebItems?.()
                   throw new WebWriteVerdictError('not-saved', `the Host kept "${verified.api.baseURL}" instead of the submitted endpoint`)
                 }
-                repaintWebItems?.()
-              },
+              }),
               requestRender: () => app.requestRender(),
               run: (label, task) => detach(label, task, { notify: false }),
             }),
