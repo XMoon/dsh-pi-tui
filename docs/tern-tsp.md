@@ -11,6 +11,15 @@ official-product comparisons are in [Upstream reference](./tern-tsp/upstream-ref
 The dated audit and Tern 0.8.3 evidence are in
 [Foundation audit (2026-10-13)](./tern-tsp/evidence/foundation-20261013.md).
 
+**Untrusted node text.** TSP node text props (`ui.text`/`ui.md`/`ui.code`/
+`ui.card.head`/`ui.badge` and picker `label`/`detail`/`title`) use the same
+untrusted-source projection as PiTui ([Terminal output safety](./terminal-output-safety.md)):
+the display text is projected, while raw ids, node keys, answer values, action
+identifiers, SDK frames and currentness stay untouched. A structural node check
+proves the payload carries no raw control; it does NOT prove the closed-source
+Tern client's own rendering, so real-GUI behaviour stays `NOT_VERIFIED` until a
+pinned Tern pane is actually run.
+
 ## Scope and status
 
 - **TSP is not the Tern Luau plugin API.** TSP (Tern Surface Protocol) is an

@@ -25,6 +25,14 @@ spans, Context clusters, tool cards, Thinking) remain separate from preset
 defaults; changing a preset never invents a `lastNonFocusPreset` or transfers
 manual disclosure ownership.
 
+**Untrusted-text invariant.** Full, Compact and expanded Focus share ONE safe
+**display** projection: every externally sourced message/tool/context string is
+projected immediately before its `Text`/`Markdown`/preview/width sink, so a raw
+terminal control can never reach the TTY in any preset. The canonical
+transcript message stays the authority — the projection never mutates
+`TranscriptMessage`, its classification, its chronology or its Work/Context
+membership (see `terminal-output-safety.md`).
+
 ## Layered defaults
 
 | Preset | Turn layer | Process layer | Focus behavioral policy | Availability |
