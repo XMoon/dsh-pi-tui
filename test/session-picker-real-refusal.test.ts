@@ -1,11 +1,21 @@
 /**
- * S2/PR-B §B1 / S2-16 — a REAL unreadable stored Session on the REAL Session
+ * S2/PR-B §B1 / S2-16 — REAL unreadable stored Sessions on the REAL Session
  * Picker path (L6, no authority stand-in).
  *
- * SOURCE → DECISION → SINK: an on-disk JSONL artifact written in a NEWER format
- * version is opened by the official JSONL persistence through the real agent
- * loop; the refusal travels to the real `/sessions` picker on a real `TuiApp`
- * and the unreadable log is never mounted.
+ * CONTRACT (the Owner-accepted limited S2 change, recorded in
+ * `docs/client-server-migration.md`): the official JSONL backend LISTs a
+ * Session from its HEADER only, which splits the user-visible outcomes in two:
+ *
+ *  - LIST_EXCLUDED — a log whose header the reader refuses (a newer format
+ *    version) is never published, so the Picker cannot present it. The
+ *    user-visible sink is a fail-closed OMISSION, and an empty roster states
+ *    `No readable sessions` rather than claiming there are no stored Sessions.
+ *  - OPEN_REFUSED — a log whose header is readable but whose BODY the reader
+ *    refuses (an event type this harness cannot interpret) IS published and IS
+ *    presented as a Picker row; selecting it surfaces the OFFICIAL refusal on
+ *    the painted surface and never mounts the log as an empty Session.
+ *
+ * Both artifacts stay byte-identical across the whole interaction.
  *
  * FIXTURE (real): the official agent-loop testkit, the official JSONL
  * persistence + query engine, a real Session artifact tree, the real runner and
@@ -17,7 +27,7 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { readdirSync, rmSync, writeFileSync } from 'node:fs'
+import { readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { zstdCompressSync } from 'node:zlib'
 import { Context } from '@deepseek-ai/cordis'
@@ -39,12 +49,15 @@ import { installProbe } from './support/runner-session-fixtures.ts'
 import { testLifecycle } from './support/temp-lifecycle.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 
-const CURRENT = SessionId('session-real-current')
-/** A current-format artifact whose BODY is unreadable: its header lists (so the
- *  picker shows the row) while opening it must be refused by the reader. */
-const CORRUPT = SessionId('session-real-corrupt')
-/** A newer-format artifact: the reader cannot even list it as a Session. */
-const NEWER = SessionId('session-real-newer')
+/** Ids stay within the picker's 8-cell display label, so a painted row is
+ *  unambiguous (the row label is the shortened id). */
+const READABLE = SessionId('readable')
+/** A current-version artifact whose HEADER lists while its BODY is refused. */
+const REFUSED = SessionId('refusedx')
+/** A newer-format artifact: the reader refuses its header, so it never lists. */
+const NEWER = SessionId('newerfmt')
+/** The body event type no released harness knows: the official refusal names it. */
+const UNKNOWN_EVENT = 'totally/unknown-event'
 
 /** The backend roots each Session under exactly one project directory. */
 function sessionDirOf(root: string, sessionId: string): string {
@@ -55,7 +68,8 @@ function sessionDirOf(root: string, sessionId: string): string {
   throw new Error(`no session directory for ${sessionId} under ${root}`)
 }
 
-/** Write one generation artifact exactly like the backend does (zstd frames). */
+/** Write one generation artifact exactly like the backend does (zstd frames:
+ *  the header record is the first frame, the event batch the next). */
 function placeArtifact(path: string, plainJsonl: string): void {
   const newline = plainJsonl.indexOf('\n')
   const head = zstdCompressSync(Buffer.from(plainJsonl.slice(0, newline + 1)))
@@ -63,7 +77,7 @@ function placeArtifact(path: string, plainJsonl: string): void {
   writeFileSync(path, Buffer.concat([head, rest]))
 }
 
-test('the REAL Session Picker refuses an unreadable newer-format artifact', async t => {
+test('the REAL Session Picker excludes an unlistable log and surfaces the refusal of an unreadable body', async t => {
   const life = testLifecycle(t)
   const root = life.tempDir('dsh-s2b-real-picker-')
   const home = life.tempDir('dsh-s2b-real-picker-home-')
@@ -80,9 +94,13 @@ test('the REAL Session Picker refuses an unreadable newer-format artifact', asyn
 
   // ── Boot 1: write the real artifact tree through the official persistence ──
   const first = new Context()
+  // Failure-path teardown: every step below can throw before the inline
+  // `dispose()` at the end of this block, and `testLifecycle` only cleans the
+  // resources it was given. Cordis fiber disposal is idempotent, so the
+  // success path simply disposes an already-disposed fiber again.
+  life.defer(() => disposeContext(first))
   await mountAgentLoopTestDependencies(first, { workingDirectory: true })
-  const firstPersistence = await first.plugin(JsonlSessionPersistence, { root })
-  void firstPersistence
+  await first.plugin(JsonlSessionPersistence, { root })
   const persistence = first.get('sessionPersistence') as unknown as {
     create(init: {
       readonly id: ReturnType<typeof SessionId>
@@ -93,57 +111,40 @@ test('the REAL Session Picker refuses an unreadable newer-format artifact', asyn
       readonly delegationDepth: number
     }): Promise<{ flush(): Promise<void>; close(): Promise<void> }>
   }
-  const current = await persistence.create({
-    id: CURRENT,
-    createdAt: 1_700_000_000_000,
-    version: SESSION_FORMAT_VERSION,
-    cwd: '/work',
-    isSeeded: false,
-    delegationDepth: 0,
-  })
-  await current.flush()
-  await current.close()
-  const corrupt = await persistence.create({
-    id: CORRUPT,
-    createdAt: 1_700_000_001_000,
-    version: SESSION_FORMAT_VERSION,
-    cwd: '/work',
-    isSeeded: false,
-    delegationDepth: 0,
-  })
-  await corrupt.flush()
-  await corrupt.close()
-  const newer = await persistence.create({
-    id: NEWER,
-    createdAt: 1_700_000_002_000,
-    version: SESSION_FORMAT_VERSION,
-    cwd: '/work',
-    isSeeded: false,
-    delegationDepth: 0,
-  })
-  await newer.flush()
-  await newer.close()
+  for (const [index, id] of [READABLE, REFUSED, NEWER].entries()) {
+    const handle = await persistence.create({
+      id,
+      createdAt: 1_700_000_000_000 + index,
+      version: SESSION_FORMAT_VERSION,
+      cwd: '/work',
+      isSeeded: false,
+      delegationDepth: 0,
+    })
+    await handle.flush()
+    await handle.close()
+  }
   await first.fiber.dispose()
 
-  const replaceArtifact = (id: string, plainJsonl: string, version: number): void => {
+  const replaceArtifact = (id: string, plainJsonl: string, version: number): string => {
     const dir = sessionDirOf(root, id)
     for (const name of readdirSync(dir)) {
       if (name.startsWith('session.') && name !== 'session.lock') rmSync(join(dir, name), { force: true })
     }
-    placeArtifact(join(dir, `session.v${version}.jsonl.zstd`), plainJsonl)
+    const path = join(dir, `session.v${version}.jsonl.zstd`)
+    placeArtifact(path, plainJsonl)
+    return path
   }
-  // A CURRENT-format artifact with an unreadable body: its header still lists,
-  // so the picker shows the row and the OPEN is what refuses.
-  replaceArtifact(String(CORRUPT), `${JSON.stringify({
-    type: 'session', version: SESSION_FORMAT_VERSION, id: String(CORRUPT),
-    createdAt: 1_700_000_001_000, cwd: '/work', delegationDepth: 0,
-  })}\n${JSON.stringify({ type: 'totally/unknown-event', seq: 1, time: 1, data: {} })}\n`, SESSION_FORMAT_VERSION)
-  // A NEWER-format artifact: the reader cannot present it as a Session at all.
-  const futureVersion = SESSION_FORMAT_VERSION + 1
-  replaceArtifact(String(NEWER), `${JSON.stringify({
-    type: 'session', version: futureVersion, id: String(NEWER),
-    createdAt: 1_700_000_002_000, cwd: '/work', delegationDepth: 0,
-  })}\n${JSON.stringify({ type: 'turn/start', seq: 1, time: 1, data: { turn: 0 } })}\n`, futureVersion)
+  const headerLine = (id: string, version: number): string => `${JSON.stringify({
+    type: 'session', version, id, createdAt: 1_700_000_000_000, cwd: '/work', isSeeded: false, delegationDepth: 0,
+  })}\n`
+  // OPEN_REFUSED: a CURRENT-format header whose body event type this harness
+  // does not know. The listing publishes the header, so the picker shows a row.
+  const refusedPath = replaceArtifact(String(REFUSED), `${headerLine(String(REFUSED), SESSION_FORMAT_VERSION)}${JSON.stringify({ type: UNKNOWN_EVENT, seq: 0, time: 1, data: {} })}\n`, SESSION_FORMAT_VERSION)
+  // LIST_EXCLUDED: a log written by a newer harness. Its header is refused, so
+  // the official listing never publishes it.
+  const newerVersion = SESSION_FORMAT_VERSION + 1
+  const newerPath = replaceArtifact(String(NEWER), `${headerLine(String(NEWER), newerVersion)}${JSON.stringify({ type: 'turn/start', seq: 0, time: 1, data: { turn: 0 } })}\n`, newerVersion)
+  const bytesBefore = new Map([[refusedPath, readFileSync(refusedPath)], [newerPath, readFileSync(newerPath)]])
 
   // ── Boot 2: the real stack + the real runner, over the SAME artifact tree ──
   const context = new Context()
@@ -154,14 +155,10 @@ test('the REAL Session Picker refuses an unreadable newer-format artifact', asyn
     new SqliteSessionQueryEngine(queryCtx, { path: ':memory:', openAt: 'first-search' })
   })
   context.provide('appExit', () => {})
-  context.provide(TUI_STARTUP_SERVICE, { sessionId: String(CURRENT), shippedPresetRoot: home } as never)
+  context.provide(TUI_STARTUP_SERVICE, { sessionId: String(READABLE), shippedPresetRoot: home } as never)
   // The PERIPHERAL registries (command registry + default model) are stand-ins:
   // the authority under test (persistence, agent loop, session query, runner) is
-  // real. The registry serves the runner's own registrations to the real
-  // submission path; `execute` never touches a Session (this fixture owns none
-  // for model-invoked commands).
-  // The OFFICIAL command runtime: the session-scoped catalog `/sessions` is
-  // resolved against must be the real one, not a registry double.
+  // real. The OFFICIAL command runtime resolves the session-scoped `/sessions`.
   await context.plugin(CommandRuntime)
   const peripherals = makeHarness(home, [], { provider: 'p', model: 'm' })
   context.provide('loader', { await: async () => {} } as never)
@@ -169,7 +166,7 @@ test('the REAL Session Picker refuses an unreadable newer-format artifact', asyn
   // needs); the testkit mounts it after its prerequisites are in place.
   await mountAgentLoopTestHarness(context)
   context.provide('agentDefaultModel', peripherals.defaultModel as never)
-  const fiber = await context.plugin(pluginCtx => applyRunner(pluginCtx, TuiConfigSchema({ sessionId: String(CURRENT) } as never)))
+  const fiber = await context.plugin(pluginCtx => applyRunner(pluginCtx, TuiConfigSchema({ sessionId: String(READABLE) } as never)))
   life.defer(() => fiber.dispose())
   const view = (): string => vt.getViewport().map(line => line.replace(/\u001b\[[0-9;]*m/g, '')).join('\n')
   // The REAL agent loop resumes the stored Session: wait (bounded) for the
@@ -181,7 +178,16 @@ test('the REAL Session Picker refuses an unreadable newer-format artifact', asyn
   }
   assert.match(view(), /dsh-pi-tui/u, `the real runner painted:\n${view()}`)
 
-  // ── The real picker: an unreadable artifact is NEVER presented ──
+  // ── The SOURCE fact: the same tree, opened by id ──
+  const persistence2 = context.get('sessionPersistence') as unknown as {
+    open(id: unknown, mode: string): Promise<unknown>
+  }
+  const refusedOfficial = await persistence2.open(REFUSED, 'read').then(() => undefined, (error: unknown) => error as Error)
+  assert.ok(refusedOfficial !== undefined, 'the unreadable body is refused by the official open')
+  assert.match(refusedOfficial.message, new RegExp(`${UNKNOWN_EVENT}.*unknown to this harness`),
+    `the official refusal names the unreadable body: ${refusedOfficial.message}`)
+
+  // ── The real picker: the excluded log is NEVER presented, the refused body IS ──
   vt.sendInput('/sessions')
   await settle()
   await vt.waitForRender()
@@ -192,24 +198,43 @@ test('the REAL Session Picker refuses an unreadable newer-format artifact', asyn
   for (const line of vt.getViewport()) {
     assert.ok(visibleWidth(line) <= 120, `no frame row overflows: ${JSON.stringify(line)}`)
   }
-  assert.match(listed, /1\/1/u,
-    `only the readable Session is presented:\n${listed}`)
-  assert.doesNotMatch(listed, /real-newer|real-corrupt/u,
-    'an unreadable artifact is never listed (and never shown as an empty Session)')
+  assert.ok(listed.includes('readable') && listed.includes('refusedx'),
+    `the readable and the refused Sessions are presented as rows:\n${listed}`)
+  assert.ok(!listed.includes('newerfmt'),
+    `the LIST_EXCLUDED log is never presented (and never shown as an empty Session):\n${listed}`)
 
-  // ── The same real stack, opened by id: the OFFICIAL refusal ──
-  const persistence2 = context.get('sessionPersistence') as unknown as {
-    open(id: unknown, mode: string): Promise<unknown>
+  // ── Selecting the refused row: the OFFICIAL refusal reaches the surface ──
+  // The filter narrows the roster to the one row, so Enter is unambiguous.
+  vt.sendInput('refusedx')
+  for (let attempt = 0; attempt < 40 && !view().includes('refusedx'); attempt += 1) {
+    await settle()
+    await new Promise(resolve => setTimeout(resolve, 10))
+    await vt.waitForRender()
   }
-  const corruptRefusal = await persistence2.open(CORRUPT, 'read').then(() => undefined, (error: unknown) => error as Error)
-  assert.ok(corruptRefusal !== undefined, 'opening the unreadable current-format artifact must fail')
-  const newerRefusal = await persistence2.open(NEWER, 'read').then(() => undefined, (error: unknown) => error as Error)
-  assert.ok(newerRefusal !== undefined, 'opening the newer-format artifact must fail')
-  assert.match(newerRefusal.message, new RegExp(`v${SESSION_FORMAT_VERSION + 1}`),
-    `the refusal names the stored version: ${newerRefusal.message}`)
+  assert.ok(view().includes('refusedx'), `the refused row is reachable:\n${view()}`)
+  vt.sendInput('\r')
+  await settle()
+  await new Promise(resolve => setTimeout(resolve, 60))
+  await vt.waitForRender()
+  const after = view()
+  // The production notice slot carries the official refusal verbatim (the
+  // narrow-width assertion cannot rely on the painted line alone).
+  const noticeText = (probe.apps.at(-1) as unknown as {
+    currentNotice?: () => { readonly text: string } | undefined
+  }).currentNotice?.()?.text
+  assert.ok(noticeText !== undefined && noticeText.includes(UNKNOWN_EVENT) && noticeText.includes('unknown to this harness'),
+    `the refusal notice is the official message, got: ${String(noticeText)}`)
+  assert.ok(after.includes(UNKNOWN_EVENT) && after.includes('unknown to this harness'),
+    `the official refusal reaches the user's surface:\n${after}`)
+  // The unreadable log is never mounted as an empty Session, and the readable
+  // Session still owns the surface.
+  assert.doesNotMatch(after, /type a message to start a session/u,
+    'a refused log is never presented as an empty Session')
+  assert.match(after, /session\s+readable/u, `the readable Session still owns the surface:\n${after}`)
+  assert.match(after, /refusedx/u, 'the refused row is the one this Enter selected')
 
-  // The surface keeps the readable Session: nothing was replaced by a refused log.
-  assert.match(view(), /session-real-current/u, 'the refused artifacts never replace the current Session')
-  assert.doesNotMatch(view(), /no messages yet|type a message to start a session/u,
-    'a refused format is never presented as an empty Session')
+  // ── The artifacts are never rewritten by listing or by a refused open ──
+  for (const [path, before] of bytesBefore) {
+    assert.ok(readFileSync(path).equals(before), `the stored log is byte-identical: ${path}`)
+  }
 })

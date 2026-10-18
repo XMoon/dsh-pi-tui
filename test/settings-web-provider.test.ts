@@ -76,7 +76,13 @@ interface Harness {
     readUndefined: boolean
     /** Artificial delay for one Host write (the FIFO order proof). */
     writeDelayMs: number
+    /** The value the Host actually KEEPS after a successful endpoint write (the
+     *  official store's canonical form of the submitted base); undefined = the
+     *  submitted URL verbatim. */
+    endpointStoredValue: string | undefined
   }
+  /** How many authority reads were ISSUED (the newest-read witnesses). */
+  readonly readCount: () => number
   /** How many Web writes overlapped (must never exceed 1: ONE owner FIFO). */
   readonly maxConcurrentWrites: () => number
   /** The write labels in COMMIT order. */
@@ -102,12 +108,14 @@ function setup(options: {
   let maxActiveWrites = 0
   const log: string[] = []
   let readGate: { readonly promise: Promise<void>; readonly release: () => void } | undefined
+  let readsIssued = 0
   const store = {
     available: options.available ?? true,
     failNext: undefined as string | undefined,
     readThrows: false,
     readUndefined: false,
     writeDelayMs: 0,
+    endpointStoredValue: undefined as string | undefined,
     web: {
       searchProvider: options.searchProvider ?? 'deepseek-official',
       fetchProvider: 'http',
@@ -184,6 +192,7 @@ function setup(options: {
       web: {
         available: () => store.available,
         read: async () => {
+          readsIssued += 1
           const gate = readGate
           readGate = undefined
           // A held read stays the snapshot of the moment it was ISSUED: a real
@@ -200,7 +209,7 @@ function setup(options: {
         setFetchProvider: async (id: string) => { await write(`fetch:${id}`, () => { store.web.fetchProvider = id }) },
         setSearchApiCount: async (count: number) => { await write(`count:${count}`, () => { store.web.api.count = count }) },
         setSendOriginalQuestion: async (enabled: boolean) => { await write(`ori:${String(enabled)}`, () => { store.web.api.sendOriginalQuestion = enabled }) },
-        setSearchApiBaseURL: async (url: string) => { await write(`endpoint:${url}`, () => { store.web.api.baseURL = url }) },
+        setSearchApiBaseURL: async (url: string) => { await write(`endpoint:${url}`, () => { store.web.api.baseURL = store.endpointStoredValue ?? url }) },
       },
     },
     catalog: { models: { available: () => false } },
@@ -235,6 +244,7 @@ function setup(options: {
     writes,
     delegated,
     store,
+    readCount: () => readsIssued,
     maxConcurrentWrites: () => maxActiveWrites,
     log,
     holdRead: () => {
@@ -283,6 +293,21 @@ async function openWebSection(h: Harness): Promise<void> {
     await new Promise(resolve => setTimeout(resolve, 5))
     await h.vt.waitForRender()
   }
+}
+
+/** Let one asynchronous settle land and render to quiescence. */
+async function settle(h: Harness, ms = 20): Promise<void> {
+  await new Promise(resolve => setTimeout(resolve, ms))
+  await h.vt.waitForRender()
+}
+
+/** Open the Web section's endpoint editor on its CURRENT value and confirm the
+ *  draft through the real panel keys (Enter opens the submenu, Enter submits). */
+async function confirmEndpointDraft(h: Harness): Promise<void> {
+  for (let index = 0; index < 4; index += 1) await key(h, DOWN)
+  await key(h, ENTER)
+  await key(h, ENTER)
+  await settle(h)
 }
 
 test('the workspace row reports the configured providers and opens the Web section focused', async t => {
@@ -779,34 +804,177 @@ test('a superseded readback settling while the newer read is STILL pending never
   assert.match(reopened, /\[current\]/u)
 })
 
-test('the endpoint editor reports Outcome unknown (never not-saved) for a superseded unreadable readback', async t => {
+/**
+ * One SUPERSEDED endpoint-readback scenario. R1 (the write's verification read)
+ * is held while it observes an UNREADABLE Host, so a verdict taken from the
+ * superseded snapshot would be wrong in every scenario; the verdict must come
+ * from the NEWEST read. `arrangeNewest` sets what that newest read observes and
+ * `assertVerdict` checks the row's settled state.
+ */
+function supersededEndpointCase(
+  name: string,
+  arrangeNewest: (h: Harness) => void,
+  assertVerdict: (frame: string) => void,
+): void {
+  test(`a superseded endpoint readback is judged by the NEWEST read: ${name}`, async t => {
+    const h = setup()
+    t.after(h.dispose)
+    await openWebSection(h)
+    const readsBefore = h.readCount()
+
+    h.store.readUndefined = true
+    const releaseR1 = h.holdRead()
+    t.after(releaseR1)
+    await confirmEndpointDraft(h)
+    assert.deepEqual(h.writes, ['endpoint:https://api.deepseek.com/v1/tools'], 'the endpoint mutation committed')
+    assert.match(h.view(), /Saving…/u, 'the real endpoint panel verifies before it settles')
+    assert.equal(h.readCount(), readsBefore + 1, 'the write issued its verification read R1')
+
+    // R2: the FIRST Esc only cancels the panel (the open submenu owns the key);
+    // the SECOND leaves the Web section, and the RESTORED Workspace starts the
+    // newer read — held, so it is still pending when R1 settles.
+    h.store.readUndefined = false
+    arrangeNewest(h)
+    const releaseR2 = h.holdRead()
+    t.after(releaseR2)
+    await key(h, ESC)
+    assert.ok(h.view().includes('Search / Fetch API Endpoint'), 'the first Esc only closed the endpoint submenu')
+    await key(h, ESC)
+    assert.ok(h.view().includes('Settings · Other'), 'the restored Workspace owns the surface')
+    assert.match(h.view(), /Loading…/u, 'the newer read R2 is pending')
+    assert.equal(h.readCount(), readsBefore + 2, 'R2 really started — never a no-op witness')
+
+    // R1 settles while R2 is pending: the superseded snapshot must NOT decide.
+    releaseR1()
+    await settle(h)
+    assert.doesNotMatch(h.view(), /\[Outcome unknown\]|\[Not saved\]/u,
+      `a superseded readback must not judge while the newest read is pending:\n${h.view()}`)
+
+    // A read STARTED during the wait (re-entering the section) is the newer
+    // authority: R2's own settlement must not decide either.
+    const releaseR3 = h.holdRead()
+    t.after(releaseR3)
+    await key(h, ENTER)
+    assert.equal(h.readCount(), readsBefore + 3, 're-entering the section issued the newer read R3')
+    releaseR2()
+    await settle(h)
+    assert.doesNotMatch(h.view(), /\[Outcome unknown\]|\[Not saved\]/u,
+      `R2 must not judge while R3 is pending:\n${h.view()}`)
+
+    // R3 (the newest authority) settles: ITS facts decide the verdict.
+    releaseR3()
+    await settle(h)
+    for (let index = 0; index < 4; index += 1) await key(h, DOWN)
+    assertVerdict(h.view())
+  })
+}
+
+supersededEndpointCase(
+  'the newest read observed the submitted endpoint',
+  () => {},
+  frame => {
+    assert.doesNotMatch(frame, /\[Outcome unknown\]|\[Not saved\]/u, `a verified write leaves no verdict:\n${frame}`)
+    assert.ok(frame.includes('Current: https://api.deepseek.com/v1/tools'),
+      `the row states the verified endpoint:\n${frame}`)
+  },
+)
+
+supersededEndpointCase(
+  'the Host kept another value',
+  h => { h.store.web.api.baseURL = 'https://other.example/v1' },
+  frame => {
+    // R1 was UNREADABLE: an `Outcome unknown` here would be the superseded
+    // snapshot's answer, so `Not saved` proves the NEWEST facts decided.
+    assert.match(frame, /\[Not saved\]/u, `a kept value is reported as Not saved:\n${frame}`)
+    assert.doesNotMatch(frame, /Outcome unknown/u, `the superseded snapshot never decides:\n${frame}`)
+    assert.ok(frame.includes('Current: Not saved'), `the row states the verdict:\n${frame}`)
+  },
+)
+
+supersededEndpointCase(
+  'the newest read could not read the Host',
+  h => { h.store.readUndefined = true },
+  frame => {
+    assert.match(frame, /\[Outcome unknown\]/u, `an unobservable result is Outcome unknown:\n${frame}`)
+    assert.ok(frame.includes('Current: Outcome unknown'), `the row states the same verdict:\n${frame}`)
+  },
+)
+
+test('a superseded write holds the ONE owner FIFO until the newest read settles', async t => {
   const h = setup()
   t.after(h.dispose)
+  h.store.writeDelayMs = 150
   await openWebSection(h)
 
-  h.store.readUndefined = true
+  // write1 (a slow provider selection) is queued first and its verification read
+  // R1 is HELD. write2 (the endpoint save) is queued behind it while write1's
+  // Host write still runs — the rows stay selectable until a read starts.
   const releaseR1 = h.holdRead()
   t.after(releaseR1)
-  // Open the endpoint editor and confirm the submitted URL.
+  await key(h, ENTER)
   for (let index = 0; index < 4; index += 1) await key(h, DOWN)
   await key(h, ENTER)
   await key(h, ENTER)
+  await settle(h, 250)
+  assert.deepEqual(h.writes, ['search:deepseek-search-api'], 'write1 committed while write2 still waits')
+  assert.equal(h.maxConcurrentWrites(), 1, 'never two Web writes in flight at once')
+  const readsBeforeR2 = h.readCount()
 
-  // A newer read starts and stays pending while R1 settles.
+  // R2 (the restored Workspace's read) supersedes R1 and stays pending.
   const releaseR2 = h.holdRead()
   t.after(releaseR2)
-  h.store.readUndefined = false
-  await key(h, ESC) // leave the section → the Workspace read is the newer one
-  await new Promise(resolve => setTimeout(resolve, 10))
-  await h.vt.waitForRender()
+  await key(h, ESC)
+  await key(h, ESC)
+  assert.match(h.view(), /Loading…/u, 'the newer read R2 is pending')
+  assert.equal(h.readCount(), readsBeforeR2 + 1, 'R2 really started')
+
+  // R1 settles: write1's verdict waits for R2, so its successor must NOT start.
   releaseR1()
-  await new Promise(resolve => setTimeout(resolve, 20))
-  await h.vt.waitForRender()
-  const frame = h.view()
-  assert.doesNotMatch(frame, /Not saved/u,
-    `an unreadable superseded readback is never reported as not-saved:\n${frame}`)
+  await settle(h)
+  assert.ok(!h.log.some(entry => entry.startsWith('begin:endpoint:')),
+    `write2 must not start while the newest read is pending:\n${h.log.join('\n')}`)
   releaseR2()
-  await new Promise(resolve => setTimeout(resolve, 20))
-  await h.vt.waitForRender()
-  assert.match(h.view(), /Search: DeepSeek Search API|Current: /u, 'the newest facts own the display')
+  await settle(h)
+  assert.ok(h.log.some(entry => entry.startsWith('begin:endpoint:')),
+    `write2 starts once the newest read settled:\n${h.log.join('\n')}`)
+  assert.deepEqual(h.writes, ['search:deepseek-search-api', 'endpoint:https://api.deepseek.com/v1/tools'])
+})
+
+test('a verified endpoint save closes the panel on the Host value', async t => {
+  const h = setup()
+  t.after(h.dispose)
+  await openWebSection(h)
+  await confirmEndpointDraft(h)
+  assert.deepEqual(h.writes, ['endpoint:https://api.deepseek.com/v1/tools'], 'the mutation committed')
+  assert.doesNotMatch(h.view(), /Enter confirm · Esc cancel/u, 'the verified save closed the panel')
+  assert.ok(h.view().includes('Current: https://api.deepseek.com/v1/tools'),
+    `the row states the verified endpoint:\n${h.view()}`)
+})
+
+test('the endpoint editor reports Not saved with the value the Host actually kept', async t => {
+  const h = setup()
+  t.after(h.dispose)
+  await openWebSection(h)
+  // The official store KEEPS a canonical form of the submitted base: the
+  // read-back differs from the request, so the write is never verified.
+  h.store.endpointStoredValue = 'https://other.example/v1'
+  await confirmEndpointDraft(h)
+  const frame = h.view()
+  assert.match(frame, /Not saved/u, `the panel states the Host's own answer:\n${frame}`)
+  assert.ok(frame.includes('the Host keeps "https://other.example/v1"'),
+    `the panel reports the value the Host kept:\n${frame}`)
+  assert.ok(frame.includes('Enter confirm · Esc cancel'), 'the draft stays in the panel for correction')
+})
+
+test('the endpoint editor reports Outcome unknown when the read-back is unreadable', async t => {
+  const h = setup()
+  t.after(h.dispose)
+  await openWebSection(h)
+  h.store.readUndefined = true
+  await confirmEndpointDraft(h)
+  const frame = h.view()
+  assert.match(frame, /Outcome unknown/u, `an unobservable result is never a save:\n${frame}`)
+  assert.ok(frame.includes('the endpoint write could not be verified'),
+    `the panel states what could not be observed:\n${frame}`)
+  assert.doesNotMatch(frame, /Not saved/u, 'an unreadable read-back is never reported as not-saved')
 })

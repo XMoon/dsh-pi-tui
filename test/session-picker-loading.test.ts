@@ -350,6 +350,28 @@ test('a listing failure swaps the loading row for the refusal row', async (t) =>
   assert.ok(!view.includes('Loading sessions…'), 'the refusal replaces the loading row')
 })
 
+test('an EMPTY readable roster states No readable sessions', async (t) => {
+  // The official listing publishes a Session from its header only, so a store
+  // whose logs the reader refuses is indistinguishable from an empty one at
+  // this layer: the empty roster must not claim there are no stored Sessions
+  // (the S2 limited contract).
+  const h = harness({
+    list: async () => [],
+    search: async () => ({ items: [], hasMore: false }),
+    projectionBatch: async () => new Map(),
+    blank: () => undefined, measureContext: () => undefined,
+      turnOutline: () => undefined,
+      sessionStatus: () => undefined,
+  })
+  t.after(() => h.app.stop())
+
+  await h.runSessions()
+  await waitUntil(() => h.view().includes('No readable sessions'))
+  const view = h.view()
+  assert.ok(!view.includes('Loading sessions…'), 'the empty state replaces the loading row')
+  assert.ok(!/no persisted sessions/iu.test(view), `the empty state never claims there are no stored Sessions:\n${view}`)
+})
+
 test('progressive title enrichment preserves the live search query', async (t) => {
   const rows = [
     { id: 'session-needle', updatedAt: 20, cwd: '/ws', live: false },
