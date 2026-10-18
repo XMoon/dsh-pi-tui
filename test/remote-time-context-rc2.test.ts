@@ -41,7 +41,7 @@ import { createRequire } from 'node:module'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import test from 'node:test'
-import { LlmAdapter, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
+import { LlmAdapter, createUserMessage, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
 import { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
 import type { Context } from '@deepseek-ai/cordis'
 import { RemoteSessionLifecycle } from '../src/runtime/remote/session-lifecycle-remote.ts'
@@ -58,6 +58,9 @@ process.env.TZ = 'UTC'
 
 const SESSION = 's3-time-context-main'
 const HOST_ZONE = 'UTC'
+/** The official plugin's PUBLISHED default `refreshIntervalMs` (600000). The
+ *  fixture does NOT pass it: the two-sided window assertions below bracket the
+ *  real default (> 1000 ms and <= 601000 ms of clock advance). */
 const REFRESH_MS = 600_000
 
 interface RequestShape {
@@ -106,8 +109,11 @@ function resolveTimeContextEntry(): string {
   return webAppRequire.resolve('@deepseek-ai/dsh-time-context')
 }
 
-/** Mount the OFFICIAL plugin (its own `apply`/`inject`) on the real Host. */
-async function mountTimeContext(ctx: Context, config: { timeZone: string; refreshIntervalMs: number }): Promise<void> {
+/** Mount the OFFICIAL plugin (its own `apply`/`inject`) on the real Host.
+ *  The config is passed through EXACTLY as given: omitting `refreshIntervalMs`
+ *  exercises the plugin's own published default, and omitting `timeZone`
+ *  exercises its process-zone fallback. */
+async function mountTimeContext(ctx: Context, config: { timeZone?: string; refreshIntervalMs?: number }): Promise<void> {
   const module = await import(pathToFileURL(resolveTimeContextEntry()).href) as {
     readonly name: string
     readonly inject: readonly string[]
@@ -181,15 +187,20 @@ async function waitForTurnEnd(host: Awaited<ReturnType<typeof createRemoteApplic
 }
 
 /** The real Host + official Client fixture this suite runs on. `plugin:false`
- *  reproduces the `minimal` composition state (no time-context row). */
-async function prepareTimeContextHost(life: TestLifecycle, options: { readonly plugin: boolean }) {
+ *  reproduces the `minimal` composition state (no time-context row); the
+ *  default mount deliberately omits `refreshIntervalMs` so the official
+ *  plugin's OWN default window is the one under test. */
+async function prepareTimeContextHost(
+  life: TestLifecycle,
+  options: { readonly plugin: boolean; readonly config?: { timeZone?: string; refreshIntervalMs?: number } },
+) {
   const clock = installClock()
   life.defer(() => clock.restore())
   assert.equal(Intl.DateTimeFormat().resolvedOptions().timeZone, 'UTC',
     'this fixture requires the controlled UTC process zone')
   const llm = new CapturingLlmAdapter()
   const host = await createRemoteApplicationHostFixture(life, 's3-time-context-preset', { llmAdapter: llm })
-  if (options.plugin) await mountTimeContext(host.ctx, { timeZone: HOST_ZONE, refreshIntervalMs: REFRESH_MS })
+  if (options.plugin) await mountTimeContext(host.ctx, options.config ?? { timeZone: HOST_ZONE })
   const runtime = await (await loadExperimentalRemoteRuntime()).createExperimentalRemoteRuntime({
     hostContext: host.ctx,
     waitForHostPrerequisites: async () => {},
@@ -288,6 +299,32 @@ test('L5 negative: without the official plugin no time-context reading is ever i
   assert.equal(timeContextMessages(llm.requests[0]!).length, 0)
   assert.equal(hostEvents(host).some(event => event.type === 'user/message' && event.data.source?.kind === 'time-context'), false,
     'the minimal composition never produces a time-context reading')
+})
+
+test('L5 negative: a message with no Client zone reports the browser zone unavailable, never the process zone', async (t) => {
+  const life = testLifecycle(t)
+  // No `timeZone` config either: the plugin falls back to the PROCESS zone
+  // (UTC in this suite) for the timestamp label, which must NOT be presented as
+  // the user's browser zone.
+  const { host, llm } = await prepareTimeContextHost(life, { plugin: true, config: {} })
+
+  // A Host-local (TUI-free) user message carries no official Client zone.
+  const agent = await host.harness.create(
+    SessionId('s3-time-context-nozone'),
+    { provider: 'smoke', model: 'smoke' },
+    { cwd: host.anchorDir },
+  )
+  agent.followup(createUserMessage({ content: [{ type: 'text', text: 'no browser zone' }], source: { kind: 'user' } }))
+  await waitFor('the no-zone model request', () => llm.requests.length >= 1, 20_000)
+
+  const readings = timeContextMessages(llm.requests[0]!).map(requestText)
+  assert.equal(readings.length, 1)
+  const text = readings[0]!
+  assert.ok(text.includes('Browser time zone for this request: unavailable.'), text)
+  assert.ok(text.includes('Ask the user to clarify otherwise-unqualified dates and times.'), text)
+  // The fallback process zone still labels the TIMESTAMP: the two facts stay
+  // distinct, which is exactly the conflation the plan forbids.
+  assert.ok(text.includes('[UTC]'), text)
 })
 
 test('L6: the real durable reading folds into ONE legal Context row and survives every display preset', async (t) => {

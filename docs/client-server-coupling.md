@@ -255,12 +255,15 @@ reinterpret:
      AFTER the Client transport is disposed. S3's fixed verdict is that this
      receipt IS the product contract: `WriteOutcome.committed` means Host
      admission, never fsync/flush, and no client-side sleep/poll/retry may
-     fabricate a durability barrier. Teardown still guarantees only the SURFACE
-     boundary, pinned in `test/runner-remote-races.test.ts` (surface stops, a
-     writer parked at teardown settles between the stop and the disposal, the
-     selected transport disposes exactly once, no terminal write after the
-     stop); that same suite now also witnesses, ONCE and without resend, that the
-     admitted parked write reaches the Host's own durable log.
+     fabricate a durability barrier. Teardown guarantees the SURFACE boundary,
+     pinned in `test/runner-remote-races.test.ts` (surface stops, a writer parked
+     at teardown settles between the stop and the disposal, the selected
+     transport disposes exactly once, no terminal write after the stop), AND it
+     refuses a write still parked BEFORE dispatch when the surface stops: the
+     composition-owned dispatch admission is closed synchronously at the
+     surface-stop boundary, so the official echo is abandoned and the Host sees
+     nothing (plan §9 "prompt serializer parked then shutdown"). A write that
+     already dispatched keeps its accepted receipt and is never reinterpreted.
   2. **Session creation entry — RESOLVED_BY_S3_PR_C.** `RemoteSessionLifecycle`
      no longer keeps the raw generated `session.create` + `sessions.refresh()`
      path and its `RemoteLifecycleSessionRemotes` seam: ordinary and

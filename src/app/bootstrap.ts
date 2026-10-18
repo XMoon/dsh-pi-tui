@@ -2146,7 +2146,14 @@ export function applyRunnerWithRuntime(
     const surfaceLifecycle = createSurfaceLifecycle({
       diag,
       isCleanedUp: () => cleanedUp,
-      markCleanedUp: () => { cleanedUp = true },
+      markCleanedUp: () => {
+        cleanedUp = true
+        // The surface-stop boundary is the ONE synchronous point where a
+        // selected Remote runtime stops admitting pre-dispatch writes: a prompt
+        // parked in serialization when the surface stopped is refused BEFORE
+        // any Host dispatch, never sent silently after the stop.
+        override?.selected.stopSurfaceAdmission?.()
+      },
       whenRendererAcquired: () => rendererAcquisition,
       surface,
       abortLifecycle: () => lifecycleController.abort(),

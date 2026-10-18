@@ -132,10 +132,19 @@ export async function createRemoteApplicationRuntime(
 
   let backendRuntime: RemoteBackendRuntime | undefined
   let ownerServices: RemoteSessionOwnerServices
+  /**
+   * The composition-owned pre-dispatch write admission: OPEN for the whole live
+   * surface, closed ONCE and synchronously by the application's surface-stop
+   * boundary (`SelectedApplicationRuntime.stopSurfaceAdmission`). A write still
+   * parked before dispatch when the surface stops is then refused before any
+   * Host dispatch instead of being admitted silently.
+   */
+  let dispatchAdmissionOpen = true
   try {
     backendRuntime = await createRemoteBackendRuntime({
       runtime: wire.client,
       fetch: wire.host.carrier.fetch,
+      isDispatchAllowed: () => dispatchAdmissionOpen,
       // Absent = the production serializer (see createRemoteBackendRuntime).
       ...(options.promptSerializer === undefined ? {} : { promptSerializer: options.promptSerializer }),
     })
@@ -198,6 +207,7 @@ export async function createRemoteApplicationRuntime(
       backend: backendRuntime.backend,
       owners: ownerServices.owners,
       retirement: ownerServices.retirement,
+      stopSurfaceAdmission: (): void => { dispatchAdmissionOpen = false },
       disposeTransport: async (): Promise<void> => {
         if (transportDisposed) return
         transportDisposed = true

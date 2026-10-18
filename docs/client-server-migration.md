@@ -6356,9 +6356,9 @@ the integration qualification.
 
 ## S3 status (PR-C IMPLEMENTED; qualification in progress) — Remote parity over rc.2
 
-PR-C is based on `next@ed2c7988` (DSH target `dsh-v0.2.1-rc.2`) and closes the
-Remote lifecycle gaps handed over by the S3-R0 slice above. Remote remains
-EXPERIMENTAL and is still reachable only through the internal
+PR-C targets the current `next` baseline (DSH target `dsh-v0.2.1-rc.2`) and
+closes the Remote lifecycle gaps handed over by the S3-R0 slice above. Remote
+remains EXPERIMENTAL and is still reachable only through the internal
 `RemoteApplicationOverride` seam — there is no public CLI/env/config selector —
 and Direct remains the production default. `M3 = DONE` stays the historical
 migration state; this section claims neither `M4` nor a published `0.5.3`.
@@ -6397,8 +6397,12 @@ migration state; this section claims neither `M4` nor a published `0.5.3`.
   fsync/flush/durability. `RemoteSessionOwnerServices.flush()` stays a
   documented no-op because rc.2 publishes no durable-flush verb; the runtime
   adds no sleep/poll/retry to fabricate one. The Host owns the durable append
-  from admission onward, which the parked-write teardown case now witnesses on
-  the Host log.
+  from admission onward. Teardown does NOT move that boundary: a write still
+  parked before dispatch when the surface stops is refused pre-dispatch (the
+  official echo is abandoned and the Host sees nothing), because the surface
+  the user was looking at is gone. The admission closes through the composition
+  -owned `stopSurfaceAdmission` hook, which the application calls synchronously
+  at its ONE surface-stop boundary.
 - **Time Context stays official (S3 §C5).** The TUI adds no clock, no timezone
   setting surface, no local timer and no second time reducer: the official
   `@deepseek-ai/dsh-time-context` plugin (enabled by the official

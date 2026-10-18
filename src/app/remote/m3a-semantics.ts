@@ -87,9 +87,12 @@ export interface RemoteM3ASemantics {
 }
 
 /** Assembly inputs beyond the shared runtime: the application-owned prompt
- * serializer (the D2.2 submission-path dependency the writer consumes). */
+ * serializer (the D2.2 submission-path dependency the writer consumes) and the
+ * optional composition-owned pre-dispatch dispatch admission (closed
+ * synchronously at the surface-stop boundary). */
 export interface RemoteM3ASemanticsOptions {
   readonly promptSerializer: RemotePromptSerializer
+  readonly isDispatchAllowed?: () => boolean
 }
 
 /** The ONE shared Client sessions service: the intersection of every
@@ -173,7 +176,12 @@ export function createRemoteM3ASemantics(
   return {
     sessionReader: new RemoteSessionReader(sessions, generation),
     pendingInputReader: new RemotePendingInputReader(sessions, generation),
-    sessionWriter: new RemoteSessionWriter(sessions, generation, options.promptSerializer),
+    sessionWriter: new RemoteSessionWriter(
+      sessions,
+      generation,
+      options.promptSerializer,
+      options.isDispatchAllowed === undefined ? undefined : { isDispatchAllowed: options.isDispatchAllowed },
+    ),
     sessionLifecycle: new RemoteSessionLifecycle(sessions, generation),
     subagent: new RemoteSubagentPort(remote.subagents),
     catalog: {
