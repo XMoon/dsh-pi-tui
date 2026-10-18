@@ -142,9 +142,36 @@ reproducible release verification, always name a published version explicitly.
 The 0.2.1-rc.2 target also mounts one new base row that is NOT an optional
 bundle: `@deepseek-ai/dsh-web-deepseek-api` (the DeepSeek Search/Fetch API
 provider). The base keeps its shipped defaults (`web.searchProvider:
-deepseek-official`, `web.fetchProvider: http`); selecting the new provider is an
-official settings decision owned by later stages, and the TUI profile never
-mounts a second web provider row.
+deepseek-official`, `web.fetchProvider: http`); the TUI profile never mounts a
+second web provider row.
+
+### Web Search / Fetch in `/settings`
+
+S2 exposes the official decision in the TUI: `/settings` → `Other` →
+`Web Search / Fetch` opens the existing editor's Web section, where the search
+provider (`Messages`, the official default, or `DeepSeek Search API`), the fetch
+provider (`HTTP`, the official default, or `DeepSeek Fetch API`), the Search API
+result count, `Share Original Question` and the API endpoint base can be chosen.
+The values are the official `web` / `web-deepseek-api` settings sections, so the
+NEXT search/fetch uses them (an already-running operation is never changed);
+`[current]` moves only after the official mutation and its read-back agree, and
+a refused write is reported as `Not saved` (never as a success).
+
+- The DeepSeek APIs are separate billed endpoints and send the request to an
+  external URL; the default Messages search / HTTP fetch are unaffected and stay
+  in place unless the user opts in. Changing the endpoint base sends the
+  credential to that endpoint, so it must be confirmed explicitly.
+- `Share Original Question` (on by default) also sends up to 128 characters of
+  the triggering human question (`ori_question`); switching it off affects the
+  next API call only.
+- The API key is the official credential reference `DEEPSEEK_API_KEY`. The
+  settings section shows only whether it is configured and its source layer; the
+  value is entered and cleared through the existing masked
+  `/login DEEPSEEK_API_KEY` / `/logout DEEPSEEK_API_KEY` commands (the settings
+  surface closes before either runs).
+- Remote backends report the section as unavailable: the wire publishes no
+  web-provider configuration, so no Host namespace or secret is ever named
+  client-side.
 
 ## Data compatibility
 
@@ -152,9 +179,16 @@ Runtime compatibility and data compatibility are separate. A 0.4 runtime
 requires the declared DSH lower bound, but it continues to read
 sessions created by 0.3.x. The 0.2.1-rc.2 target adds Session events and projection facts (for example
 `job/registered`, `job/settled`, `working-directory/change`, and the v2
-external-subagent catalog). Forward reading and the exact downgrade limits are
-qualification work of the Session-data stage; this S1 foundation PR makes no
-claim about them beyond the ordinary Direct/Remote reads it exercises.
+external-subagent catalog). S2 qualifies the READ boundary this target owns: the
+current format is read without rewriting the artifact, a released older
+generation is classified and read through the official migration without a
+write (only a write open publishes the successor), an unsupported newer format is
+refused with its diagnostic instead of reading as an empty Session, and the
+released-v3 reader contract refuses the rc.2-only event types. A generation the
+current promotion cannot represent (surface events before the first step) is
+refused with the official message and keeps its bytes; open it with the runtime
+that wrote it. Back up a Session file before downgrading, and never hand-edit
+JSONL: the TUI only displays what the official reader returns.
 
 The historical DSH `0.1.5-rc.1` runtime persists
 Session V2; `0.1.5-rc.2` and the current `0.1.6-alpha.2` line persist

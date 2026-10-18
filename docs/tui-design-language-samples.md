@@ -1261,6 +1261,101 @@ document come from the `VirtualTerminal` cell read-back, and the SHARED chrome
 the Job bar reuses (rules budget, glyph widths, ` · ` joins, `Esc` last, a
 `textMuted` bar) was verified on a real terminal in the Settings pass.
 
+## 8a. Measured AFTER frames — S2 Web Search / Fetch (PR-B)
+
+Real `TuiApp` + `VirtualTerminal` captures from
+`test/settings-web-visual.test.ts` (the same test asserts the matrix widths,
+the whole `[current]`/`[default]`/`[unavailable]` chips, the action-bar hints
+and the per-cell ink). Provenance: `pnpm build` on the S2 worktree, then
+`node scripts/run-with-temp-root.mjs node --test test/settings-web-visual.test.ts`;
+timestamps normalized here only.
+
+`120×40` — the Workspace `Other` launcher row selected (its Detail carries the
+authoritative summary; `2 editable rows` is unchanged because the row is a
+navigation row, not a field):
+
+```text
+Settings · Other settings · Rows                                   2 editable rows
+Scope: Host Web provider settings · Refreshed <time> · Config Ready
+──────────────────────────────────────────────────────────────────────────────
+Categories (3)          [Rows (2)]                                  Details
+  Appearance              Open existing settings… Existing settin…  Web Search / Fetch
+  Display               > Web Search / Fetch Search: Messages · F…  Value       Search: Messages · Fetch: HTTP
+> Other settings                                                    Scope       Host Web provider settings
+                                                                    Freshness   Ready · on-open snapshot
+                                                                    Description Host Web settings. Defaults: Messages
+                                                                                search · HTTP fetch. The DeepSeek Search
+                                                                                / Fetch APIs are billed separately and
+                                                                                send the request to an external
+                                                                                endpoint; Share Original Question sends
+                                                                                up to 128 characters of the human
+                                                                                question. The API key is stored as a
+                                                                                credential reference and never shown.
+                                                                                Enter configure.
+──────────────────────────────────────────────────────────────────────────────
+Up/Down select · Left back · Right open · Enter open · r refresh · Esc back
+```
+
+`72×24` — the legacy Web section after the Workspace handoff (the state chips
+are whole; the value fact leads the selected row's description):
+
+```text
+╭──────────────────────────────────────────────────────────────────────╮
+│ >                                                                    │
+│                                                                      │
+│   ────────────────────────                                           │
+│   Working directory            /ws                                   │
+│   ────────────────────────                                           │
+│ > Web Search Provider          [current] [default]                   │
+│   Web Fetch Provider           [current] [default]                   │
+│   Search API Result Count      [current] [default]                   │
+│   (21/28)                                                            │
+│                                                                      │
+│   Current: Messages · Messages is the official DeepSeek Messages     │
+│   search; the DeepSeek Search API is a separately billed endpoint.   │
+│   [current] follows a verified write; [default] marks the packaged   │
+│   default. The choice applies to the next search, never to one       │
+│   already running. Esc returns to the Workspace.                     │
+│                                                                      │
+│   Type to search · Enter/Space to change · Esc to cancel             │
+╰──────────────────────────────────────────────────────────────────────╯
+```
+
+`44×20` — the floor: one WHOLE reserved chip survives, the label truncates with
+`…`, the value fact and the return hint stay in the wrapped description, and the
+legacy list's own single-string hint line truncates (pre-existing fork
+behaviour; recorded as NOT_VERIFIED for the painted `Esc` word at this width):
+
+```text
+╭──────────────────────────────────────────╮
+│ >                                        │
+│                                          │
+│   ────────────────────…                  │
+│ > Web Search Provider    [current]       │
+│   (21/28)                                │
+│                                          │
+│   Current: Messages · Messages is the    │
+│   official DeepSeek Messages search;     │
+│   the DeepSeek Search API is a           │
+│   separately billed endpoint.            │
+│   [current] follows a verified write;    │
+│   [default] marks the packaged           │
+│   default. The choice applies to the     │
+│   next search, never to one already      │
+│   running. Esc returns to the            │
+│   Workspace.                             │
+│                                          │
+│   Type to search · Enter/Space to cha... │
+╰──────────────────────────────────────────╯
+```
+
+Measured ink (cell read-back): `[current]`/`[default]` = `textMuted`,
+`[not saved]` = `error`; the light palette supplies the same roles on its own
+open. The surface paints no icon glyph, so `symbols` and `minimal` frames are
+identical. Not run: a physical Tern GUI record (this renderer does not paint
+these Settings surfaces) and a live palette switch inside the pre-painted
+legacy chips.
+
 ## 9. Re-verification recipe
 
 For V2/V3 (and for any later surface PR), the after-evidence must be produced

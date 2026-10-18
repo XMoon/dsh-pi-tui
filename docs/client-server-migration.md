@@ -6354,6 +6354,189 @@ HEAD is proposed for `next`. The temporary staging branch never replaces
 `next` as the release line: `next` advances by a normal promotion merge after
 the integration qualification.
 
+## S2 status (IMPLEMENTED; qualification in progress) — Direct data + effective CWD + Web Search/Fetch
+
+Baseline `next@f16a4421` (DSH target `dsh-v0.2.1-rc.2`). S2 is one stage in the
+S0→S5 sequence: S3-R0's currentness evidence above remains the Remote proof and
+is NOT restated as "S3 done". This section records the four S2 work packages
+(B1 session/persistence boundary, B2 effective CWD, B3 Web Search/Fetch,
+B4 audited model/credential/tool/job/subagent facts) with their owners,
+production changes and positive/negative evidence.
+
+### Contract / invariants (authorities S2 must not duplicate)
+
+- **Session current directory.** `ctx.workingDirectory.get(session)` and the
+  same-session `workingDirectory` projection are the ONE effective-directory
+  authority; `Session.header.cwd` remains the immutable ORIGINAL project
+  (roster grouping, fork lineage, archive attribution). Every Direct consumer
+  that executes or scopes a directory-based operation reads the projection
+  (`test/direct-working-directory-rc2.test.ts`, `test/runner-direct-working-directory.test.ts`);
+  Session listing/grouping, archive export, Client-local `/attach` paths and
+  new-session creation keep the header/launch cwd.
+- **Web provider selection.** `ctx.web` selects a provider at CALL time from the
+  live `web.searchProvider` / `web.fetchProvider` volatile fields; the durable
+  configuration is the official `web` / `web-deepseek-api` settings sections.
+  The TUI adds only a narrow Direct read/write port
+  (`src/runtime/config-port.ts` → `WebProviderConfig`,
+  `src/runtime/direct/config-direct.ts` → `DirectWebProviderConfig`), never a
+  second store, a plugin toggle, or a provider fallback. A settings write is
+  reported only after the official mutation AND its authoritative read-back
+  agree; `Remote` exposes a static unavailable/refuse implementation.
+- **Credentials.** `credentials-local` keeps its fixed precedence (managed file
+  > launch environment > project `.env` > harness-home `.env`); the TUI shows
+  presence/source only and configures the reference through the existing masked
+  `/login DEEPSEEK_API_KEY` / `/logout DEEPSEEK_API_KEY` paths
+  (`test/credentials-precedence-local.test.ts`, `test/login-credentials.test.ts`).
+- **Session format.** The official JSONL persistence + format catalog own
+  reading/migration; a current-format read never rewrites an artifact, an old
+  generation is published forward only by a WRITE open, an unsupported newer
+  format is refused with its diagnostic, and a released generation the current
+  promotion refuses keeps its bytes and reports why
+  (`test/session-v4-rc2-persistence.test.ts`). The TUI folds no raw JSONL.
+
+### Implementation (what changed)
+
+- `src/runtime/direct/working-directory-direct.ts` (new) — the Direct read of
+  the official directory owner, shared by the status/catalog/file adapters.
+- `src/runtime/direct/session-direct.ts` — `sessionStatus()` cwd from the
+  same-session `workingDirectory` projection (header only when no value).
+- `src/app/surface/status-runtime.ts`, `src/app/surface/event-routing.ts`,
+  `src/app/bootstrap.ts` — the footer/welcome/OSC 7/history cwd fact and its
+  `working-directory/change` refresh (the status owner's effective cwd, never a
+  Client/parent substitute).
+- `src/runtime/direct/host-file-direct.ts`,
+  `host-file-augmentation-direct.ts`, `catalog-direct.ts`,
+  `surface-catalog.ts` — the `@`-completion and skill scan scopes read the
+  effective directory; `src/runtime/remote/pi-tui-file-reference-host-bridge.ts`
+  reads the HOST owner for the private Remote method (no Client cwd).
+- `src/app/command/surface.ts`, `src/app/direct/child-view.ts`,
+  `src/app/surface/session-presentation.ts` — command routing, the child
+  viewer's directory (attached projection, else the cold observation's cut) and
+  the hydrated Session cwd follow the same authority; the fork seed keeps
+  `source.header.cwd` so a child's header is the original project and its
+  effective directory comes from the inherited events.
+- `src/runtime/config-port.ts` + `src/runtime/direct/config-direct.ts` +
+  `src/runtime/remote/config-remote.ts` — the `WebProviderConfig` sub-domain and
+  its two adapters.
+- `src/tui/commands/settings.ts`, `src/tui/panels/settings-workspace-panel.ts`,
+  `src/tui/panels/web-provider-panels.ts` (new), `src/tui-app.ts` — the
+  `/settings` Web entry (a navigation row, not an editable field), the legacy
+  editor deeplink/return-to-Workspace path, the FIFO write chain with its
+  read-back reconciliation, and the endpoint/credential submenus.
+- `src/domain/task/browser.ts` + `src/app/surface/task-runtime.ts` +
+  `src/app/surface/task-presentation.ts` — an rc.2 catalog v2
+  `mode: 'external'` leaf is a VISIBLE row kind with no local Session: it is
+  never openable, continuable or stop-capable.
+
+### Evidence (real source → decision → sink)
+
+- B1: `test/session-v4-rc2-persistence.test.ts` — the rc.2 vocabulary
+  round-trips through the real JSONL backend (jobs, working-directory change,
+  catalog v2 external, the log-only DeepSeek Messages `thinking` field), a read
+  open and the cold observation write nothing, the released generation is
+  classified and read without being rewritten, only a write open publishes the
+  successor, a newer format is refused, and the released-v3 reader contract
+  refuses the rc.2-only event types (run through the official released-v3
+  restore — never claimed as an executed old reader).
+- B2: `test/direct-working-directory-rc2.test.ts` (real Agent + real
+  `working_directory` tool + real projections: status/`@`/skill scopes follow
+  the committed directory, the header keeps the original project, a vanished
+  directory recovers through `ensure()`, a REAL fork child gets the original
+  project header + the cut directory, two Sessions never share a directory) and
+  `test/runner-direct-working-directory.test.ts` (the runner/TUI path: the
+  status fact, the physical footer, the OSC 7 write and the roster grouping).
+  `test/direct-session-fork.test.ts` pins the fork-cut seed content.
+- B3: `test/web-provider-config-direct.test.ts` (exact namespace/path/revision,
+  read-back, refusal paths), `test/web-provider-rc2-integration.test.ts` (the
+  real `web` + providers + `tool-web` over the real configuration plane: the
+  shipped defaults select Messages/HTTP, a config write switches the NEXT call
+  to the Search API with count/`ori_question`/credential, the real `web_search`
+  tool delivers the outcome, a missing credential and 401/500 keep the official
+  error and switch nothing, cancellation aborts before dispatch, the Fetch API
+  path maps its payload), `test/settings-web-provider.test.ts` (the real
+  `/settings` journey: launcher → legacy section → selector → read-back →
+  reopen, Esc no-write, rapid intents FIFO, a failed write reverts and reports
+  `Not saved`, Esc restores the Workspace row, a custom provider id is visible
+  and not selectable) and `test/settings-web-visual.test.ts` (the frozen visual
+  matrix incl. cell ink).
+- B4: `test/credentials-precedence-local.test.ts` (the official precedence and
+  external read), `test/model-selection-direct.test.ts`,
+  `test/job-observation-direct.test.ts`, `test/subagent-port.test.ts`,
+  `test/session-v4-dynamic-tools.test.ts` and `test/runner-session-navigation.test.ts`
+  re-run green on this HEAD: Direct model metadata → picker → durable selection
+  → request header, the non-consuming `jobController.follow()` observation, the
+  subagent spawn/fork/continuable facts and the dynamic-tool transcript were
+  VERIFIED_NO_CHANGE. The four official presets' rosters are unchanged by S2
+  (the scoped `tool-web` rows keep their preset policy; `backgroundMode` no
+  longer appears in production preset configs).
+
+### Matrix dispositions (S2-owned rows)
+
+| Row | Disposition | Evidence |
+|---|---|---|
+| C08 session create/open/resume | VERIFIED_NO_CHANGE | official handle path unchanged; B1 read/publication proof |
+| C09 historical format read | FIXED (TUI boundary) | B1: classified read, no rewrite, refusal diagnostics |
+| C10 fork seed/cwd | FIXED | B2 fork cut tests (header vs effective directory) |
+| C21 tool roster/presets | VERIFIED_NO_CHANGE | audit suites + generated preset parity gate |
+| C30 credential precedence | VERIFIED_NO_CHANGE (+ new evidence) | `credentials-precedence-local` |
+| C31 model effort | VERIFIED_NO_CHANGE | `model-selection-direct` / model-profile suites |
+| C33 subagent catalog/spawn | FIXED (external leaf) | external row kind + audit suites |
+| C34 job lifecycle | VERIFIED_NO_CHANGE | `job-observation-direct` + job viewer suites |
+| C44 preset-scoped surfaces | VERIFIED_NO_CHANGE | preset roster/parity + web tool L5 |
+| N03 dynamic cwd | FIXED | B2 |
+| N04 web defaults/opt-in | FIXED | B3 L5/L6 |
+
+### UI / visual authority (frozen design language §11.2)
+
+The new Web surface is a Workspace launcher plus the EXISTING legacy editor's
+Web section: the Workspace keeps its planner/geometry/hit map, the legacy list
+keeps its own focus/keyboard owner, and no new palette token, glyph, icon
+system or fork divergence is introduced.
+
+- Archetypes: `Settings workspace` (launcher row + Detail) and `Overlay` (the
+  legacy editor and its two submenus). Role→token: identity `textStrong`,
+  secondary facts `textDim`, values `text`, chips `textMuted`, problems
+  `warning`, a refused write `error`, cursor/action `primary` — all read from
+  the live palette at render time.
+- Exactly one active device per region (the workspace's bracketed pane label /
+  the list's `> ` cursor); selection, `[current]`, `[default]` and the pending
+  state are separate facts, and the chips are painted whole (a narrow slot drops
+  a chip entirely; the label truncates with `…`).
+- Measured frames (real `TuiApp` + `VirtualTerminal`, captured by
+  `test/settings-web-visual.test.ts`): the launcher Detail at 120×40, the Web
+  section at 72×24 (`[current] [default]` whole, `Esc` hint painted) and at
+  44×20 (only `[current]` survives as the reserved chip, the label truncates,
+  and the selected row's `Current:`/`Esc returns to the Workspace.` text stays
+  readable while the legacy list's own hint line truncates — a pre-existing fork
+  property, not a new surface). The endpoint editor keeps its title, the
+  external-send note and `Enter confirm · Esc cancel` down to 44 columns; the
+  credential panel keeps its title and both actions. Dark and light palettes
+  supply the same chip roles on their own open; a live palette switch while the
+  legacy editor is mounted keeps pre-painted chip ANSI until the next open (the
+  same property as the existing pre-painted theme/preset chips). The surface is
+  icon-style neutral (symbols/minimal frames are identical).
+- Legacy-editor Esc semantics: entering from the Web launcher restores the
+  Workspace on that row; the original `Open existing settings…` entry keeps its
+  conversation return. The credential row closes the settings surface BEFORE the
+  existing `/login` masked question or `/logout` runs (no stacked modals).
+- Not run: a physical Tern GUI record (the TSP renderer does not paint these
+  Settings surfaces) and an automated live-palette switch of the legacy chip
+  ink; both are recorded as NOT_VERIFIED/NOT_RUN rather than PASS.
+
+### Residual risk / deferred
+
+- The released-v0/v1 artifacts in `test/fixtures/session-format/` are refused by
+  rc.2's v2→v3 promotion (surface events before the first step): the refusal is
+  diagnostic-preserving and byte-stable, and it is asserted as such. A positive
+  physical READ of that older generation therefore remains unproven in this
+  tree; the old-generation LOGICAL migration is covered by the official
+  v3→v4 chain (`test/session-v4-tool-result.test.ts`).
+- Remote Web configuration stays unavailable by design (S3/S4 own the generated
+  Remote settings parity); the Remote backend never names a Host namespace.
+- Web provider network success against a billed DeepSeek endpoint is not
+  exercised here (the outer HTTP transport is stubbed); a user-provided account
+  would be required.
+
 ## Open gap (NOT CLOSED) — terminal status on the Remote branch
 
 **Facts.** The terminal-status presentation (the OSC 7501 semantic state and the
