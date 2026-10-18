@@ -50,8 +50,15 @@ test('the composition root folds the reason into the pump option (source lock)',
     'the request is consumed (a later unlabelled wakeup measures)')
   assert.ok(bootstrap.includes('rehydrateFromWindow(sessionId, { measure })'),
     'the pump passes the folded decision into the reconcile')
-  assert.ok(bootstrap.includes('rehydrateFromWindow(sessionId, { measure: false })'),
-    'the DIRECT loadOlder paging caller never measures either')
+  // The direct history-paging caller must NOT re-fold at all: the official
+  // prepend publication drives the ONE serialized pump (with its paging reason),
+  // so a direct commit can never race a recovery reconcile.
+  const loadOlder = bootstrap.slice(
+    bootstrap.indexOf('await remoteSources.presentationReader.loadOlder(sessionId'),
+    bootstrap.indexOf('await remoteSources.presentationReader.loadOlder(sessionId') + 400,
+  )
+  assert.ok(!loadOlder.includes('rehydrateFromWindow'),
+    'the loadOlder path leaves the reconcile to the pump')
   assert.ok(!bootstrap.includes('remoteRefoldMeasure'),
     'no dead measure slot may exist beside the request state')
   // The pump's second-level coalescing must keep the reason severity: the ONLY
