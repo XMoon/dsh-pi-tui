@@ -706,6 +706,14 @@ export function createSessionPresentation<Event extends SessionPresentationEvent
     // the identity proof the fold owner returns to the ingress.
     const proof = deps.remote.windowRefoldProof?.(sessionId, snapshot.revision)
     if (proof === undefined) return undefined
+    // A window reconcile replaces the transcript/stats from the authoritative
+    // window, so the COMPACTION routing state must be re-derived from the SAME
+    // committed window: a compaction that started (or finished) during the
+    // outage is otherwise invisible (`compactingId`/phase/busy/working stay
+    // stale). This is a derive-from-the-window, not a live-state reset: the
+    // window's newest bracket IS the live state, and the revision fence above
+    // proves nothing newer exists.
+    const resumedCompaction = compactingFromLog(snapshot.durableEvents as readonly { type: unknown }[])
     const hydrated = hydrateSessionUi(snapshot.durableEvents as readonly Event[])
     folder = hydrated.folder
     windowController.setTurns(folder.groupedTurns())
@@ -719,6 +727,7 @@ export function createSessionPresentation<Event extends SessionPresentationEvent
     // Re-derive the status from the NEW fold in the same step; the cheap
     // refresh's own fences own the session/binding rules. (The measured
     // performance values are the Host projection's and are unaffected.)
+    deps.surface.applyResumedCompaction(resumedCompaction.id, resumedCompaction.active)
     deps.refreshStatusCheap()
     deps.surface.repaint()
     // The committed proof: the caller acknowledges the ingress with it, so
