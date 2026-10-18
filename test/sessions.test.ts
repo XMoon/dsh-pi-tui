@@ -282,14 +282,17 @@ test('findSessionMatch resolves full ids, session- prefixes, and short ids', () 
 
 test('sanitizeTerminalText strips C0, DEL, C1 and complete ESC sequences', () => {
   // C0: ESC + OSC payload + BEL → the whole sequence is removed by the
-  // fork parser; a lone ESC and other C0 controls are dropped.
+  // shared projection; a lone ESC and other C0 controls are dropped.
   assert.equal(sanitizeTerminalText('\x1b]0;PWNED\x07needle'), 'needle')
-  assert.equal(sanitizeTerminalText('a\x1bb'), 'ab')
+  // A bare ESC plus a final byte is a COMPLETE escape form: the whole pair
+  // is protocol, so it never leaks its payload byte as visible text.
+  assert.equal(sanitizeTerminalText('a\x1bb'), 'a')
   assert.equal(sanitizeTerminalText('a\x00b\x7fc'), 'abc')
   // C1: U+009B (CSI) and U+009D (OSC) in 8-bit form are controls to a
-  // UTF-8 terminal — they must never reach the picker description.
-  assert.equal(sanitizeTerminalText('a\u009b2Jb'), 'a2Jb')
-  assert.equal(sanitizeTerminalText('a\u009d0;PWNED\u0007b'), 'a0;PWNEDb')
+  // UTF-8 terminal — the WHOLE sequence must be consumed, never leaving its
+  // parameter/terminator bytes as visible picker text.
+  assert.equal(sanitizeTerminalText('a\u009b2Jb'), 'ab')
+  assert.equal(sanitizeTerminalText('a\u009d0;PWNED\u0007b'), 'ab')
   // Visible text survives untouched.
   assert.equal(sanitizeTerminalText('plain needle text'), 'plain needle text')
 })
@@ -298,7 +301,7 @@ test('workspaceKey sanitizes terminal control sequences in the group header', ()
   // The group header is rendered straight to the terminal; a malicious
   // cwd (Host boundary value) must never inject ESC/OSC/C1.
   assert.equal(workspaceKey('/ws\x1b]0;PWNED\x07'), '/ws')
-  assert.equal(workspaceKey('/a\u009b2Jb'), '/a2Jb')
+  assert.equal(workspaceKey('/a\u009b2Jb'), '/ab')
   assert.equal(workspaceKey('/home/user/project'), 'user/project')
 })
 
