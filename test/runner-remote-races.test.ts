@@ -445,23 +445,21 @@ test('L6 PR5 §3.9b: teardown with a pending WRITE — observed surface-stop bou
   // A short observation window only widens the chance to SEE a late frame; it
   // is not evidence about durability.
   await new Promise(resolve => setTimeout(resolve, 150))
-  // The official prompt contract is ADMISSION: `session/prompt` answers once
-  // the Host Agent accepted the message (`agent.followup`), and the HOST owns
-  // the durable append from then on — in BOTH baselines. Teardown therefore
-  // guarantees the SURFACE boundary observed above (no render after the surface
-  // stopped, exactly-once transport disposal, the parked write settled between
-  // them); it does NOT guarantee the absence of a Host-owned commit, and this
-  // foundation test deliberately does not pin whether a write parked at
-  // teardown must later become durable or must be refused.
-  //
-  // OPEN OWNER (S3, recorded — not silently accepted): the TUI's Remote
-  // retirement drain can only settle the Client's admission because
-  // `RemoteSessionOwnerServices.flush()` is a documented no-op (no public
-  // Remote durable-flush verb exists). Deciding whether teardown must refuse a
-  // still-parked write or must await the Host's durable commit belongs to the
-  // Remote lifecycle contract (`docs/client-server-coupling.md`) and must be
-  // proven there with paired success/failure tests — never a local sleep/poll
-  // patch, and never pre-decided by this test's assertions.
+  // S3 §C3 fixed verdict: the TUI's Remote write receipt is Host ADMISSION —
+  // `session/prompt` resolves once the Host Agent accepted the message
+  // (`agent.followup`), and `WriteOutcome.committed` means exactly that, never
+  // fsync/flush. `RemoteSessionOwnerServices.flush()` stays a documented no-op
+  // because rc.2 publishes no durable-flush verb, so no sleep/poll/retry is
+  // added to fake one. The HOST owns the append from admission onward; the
+  // assertions below witness the surface boundary and the real Host append.
   assert.equal(surfaceWrites.count - writesAtSurfaceStop.count, 0,
     'the surface stopped for good: no terminal write follows the surface stop')
+  // (b)→(c) REAL witness: the write was PARKED across teardown, then admitted,
+  // and the HOST appended it durably in its own order. The bounded wait below
+  // observes the Host log ONLY — it never re-dispatches, resends or polls the
+  // write path.
+  await waitFor('the admitted write becomes durable on the Host', () =>
+    hostUserRows(fixture, mainId).some(row => row.includes('pending write across teardown sigma')), 20_000)
+  assert.equal(hostUserRows(fixture, mainId).filter(row => row.includes('pending write across teardown sigma')).length, 1,
+    'teardown admits exactly one durable write: no duplicate resend, no fabricated flush')
 })
