@@ -47,13 +47,19 @@ function contextOf(options: {
     snapshot?: (options: SkillViewOptions) => Promise<{ skills: readonly SkillSummary[]; complete: boolean }>
   }
   agentPresets?: { serviceFor: (agent: { ctx: unknown }, name: 'skills') => unknown }
+  /** The official `workingDirectory` owner's read (S2/PR-B). Omitted = a
+   *  composition without the row, whose scope read stays the header cwd. */
+  effectiveCwd?: string
 }): SurfaceCatalogContext {
   return {
-    get: (name: 'commands' | 'agentPresets' | 'skills') => {
+    get: ((name: string) => {
       if (name === 'commands') return options.commands as never
       if (name === 'skills') return options.skills as never
+      if (name === 'workingDirectory') {
+        return options.effectiveCwd === undefined ? undefined : { get: () => options.effectiveCwd }
+      }
       return options.agentPresets as never
-    },
+    }) as SurfaceCatalogContext['get'],
   }
 }
 
@@ -189,6 +195,27 @@ test('skills are read with the agent scope, the session cwd and the signal', asy
   assert.equal(options?.cwd, '/ws/session')
   assert.equal(options?.scope, agent, 'the scope must be the AGENT object, never its context')
   assert.equal(options?.signal, signal)
+})
+
+test('the OFFICIAL working directory outranks the header for the skill scan scope (S2/PR-B)', async () => {
+  // The header is the ORIGINAL project, fixed at Session creation; the skill
+  // scan must follow the directory a committed `working-directory/change`
+  // moved the Session to (the same owner the official tools read).
+  let options: SkillViewOptions | undefined
+  const effectiveDir = fakeAgent('/ws/moved').session.header.cwd
+  const ctx = contextOf({
+    skills: {
+      list: async opts => {
+        options = opts
+        return []
+      },
+    },
+    effectiveCwd: effectiveDir,
+  })
+  const agent = fakeAgent('/ws/original')
+  await readSurfaceCatalog(agent, new AbortController().signal, ctx)
+  assert.equal(options?.cwd, effectiveDir, 'the effective directory is the scan scope')
+  assert.notEqual(options?.cwd, agent.session.header.cwd, 'the header project is never the effective scope')
 })
 
 test('an agentPresets scoped skill service wins over the host registry (apiproxy parity)', async () => {

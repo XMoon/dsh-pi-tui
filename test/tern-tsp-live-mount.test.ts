@@ -271,6 +271,7 @@ async function mountTspHarness(options: {
     exitView: () => {},
     refreshStatusCheap: () => {},
     refreshStatusAndWelcome: () => {},
+    refreshWorkspaceFacts: () => {},
     applyGoalChange: () => {},
     sessionTitleOf: () => undefined,
     extendLoadedHistory: () => false,

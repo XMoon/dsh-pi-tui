@@ -204,13 +204,14 @@ export interface StatusRuntimeDeps {
 export interface StatusRuntime {
   /** Repaint the welcome card from the live agent's current facts. */
   updateWelcomeCard(): void
-  /** The LIVE session's workspace (header cwd, else the client cwd). */
+  /** The LIVE session's workspace (official effective cwd, else the client
+   *  cwd). */
   sessionCwd(): string
   /** Derive + write the terminal window title. */
   refreshTerminalTitle(): void
   /**
    * Derive + forward the terminal-LOCAL cwd (OSC 7, plan §4.3): the eligible
-   * Direct Session header cwd, else the Direct launch cwd. A Remote Host cwd
+   * Direct Session effective cwd, else the Direct launch cwd. A Remote Host cwd
    * is never forwarded — the pane belongs to the Client machine. The TUI owns
    * the actual terminal write.
    */
@@ -359,8 +360,9 @@ export function createStatusRuntime(deps: StatusRuntimeDeps): StatusRuntime {
   }
 
   /**
-   * The LIVE session's workspace: each session carries its own header cwd
-   * (fixed at creation, e.g. a session birthed by the web in another
+   * The LIVE session's workspace: each session carries its own official
+   * effective directory (fixed at creation as the header cwd, then moved by
+   * `working_directory`; e.g. a session birthed by the web in another
    * directory). The footer/welcome/completions AND `!`/`!!` shell runs
    * follow THIS cwd, so a session switch moves the whole surface with the
    * session (pi parity: `executeBash` runs in the session cwd) and a
@@ -374,10 +376,19 @@ export function createStatusRuntime(deps: StatusRuntimeDeps): StatusRuntime {
    * the status presentation then OMITS the cwd fact rather than copying the
    * Client cwd (Host/Client cwd equivalence is forbidden). Never consumed
    * by execution paths (the shell/history owners keep their own fallback).
+   *
+   * Direct reads the SESSION STATUS projection of THIS session (S2/PR-B):
+   * its `cwd` is the official effective working directory, which follows a
+   * committed `working-directory/change`. The immutable header cwd is only
+   * the reader's own fallback when no value is recorded.
    */
   const sessionCwdFact = (): string | undefined => {
     const agent = deps.liveAgent()
-    if (agent !== undefined) return agent.session.header.cwd
+    if (agent !== undefined) {
+      const sessionId = deps.currentSessionId()
+      const effective = sessionId === undefined ? undefined : deps.sessionStatus(sessionId)?.cwd
+      return effective ?? agent.session.header.cwd
+    }
     if (deps.remote !== undefined) {
       const sessionId = deps.currentSessionId()
       if (sessionId === undefined) return deps.clientCwd
@@ -427,21 +438,26 @@ export function createStatusRuntime(deps: StatusRuntimeDeps): StatusRuntime {
    * automatically terminal metadata, because Tern may use the pane cwd for
    * local pane/split behavior. Therefore:
    *
-   * - Direct live Session → the official Session header cwd;
+   * - Direct live Session → the official effective working directory of the
+   *   live Session (its `workingDirectory` projection, S2/PR-B), else the
+   *   original header cwd;
    * - Direct sessionless surface → the Client launch cwd (the process really
    *   runs there);
    * - DSH Remote backend → `undefined`, fail closed: the Host cwd is a
    *   DIFFERENT machine from the terminal that owns the pane, and no
    *   co-location is proven.
    *
-   * A live header WITHOUT a cwd falls back to the launch cwd on the Direct
-   * branch (the pane still sits on this machine), which is why this fact is
-   * not `sessionCwdFact()`.
+   * A live session WITHOUT any official cwd falls back to the launch cwd on the
+   * Direct branch (the pane still sits on this machine), which is why this fact
+   * is not `sessionCwdFact()`.
    */
   const terminalCwdFact = (): string | undefined => {
     if (deps.remote !== undefined) return undefined
     const agent = deps.liveAgent()
-    return agent?.session.header.cwd ?? deps.clientCwd
+    if (agent === undefined) return deps.clientCwd
+    const sessionId = deps.currentSessionId()
+    const effective = sessionId === undefined ? undefined : deps.sessionStatus(sessionId)?.cwd
+    return effective ?? agent.session.header.cwd ?? deps.clientCwd
   }
 
   /** Forward the terminal-local cwd to the mounted TUI (it owns the write and

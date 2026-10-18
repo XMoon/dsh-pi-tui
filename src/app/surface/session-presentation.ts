@@ -143,6 +143,10 @@ export interface SessionPresentationDeps<Event extends SessionPresentationEvent>
     readonly assistantStreamBaselineFor: (agent: LiveSessionAgent<Event>) => readonly AssistantLiveInput[]
     /** Whether the live session is in plan mode (official session projection). */
     readonly planActive: (agent: LiveSessionAgent<Event>) => boolean
+    /** The Session's EFFECTIVE working directory (official `workingDirectory`
+     *  projection read of the exact Session), or `undefined` when the
+     *  composition mounts no directory owner — never a Client-side guess. */
+    readonly effectiveCwd: (agent: LiveSessionAgent<Event>) => string | undefined
   }
   /** The footer/status projections owned by the surface status owner (A5b-2). */
   readonly status: {
@@ -632,7 +636,7 @@ export function createSessionPresentation<Event extends SessionPresentationEvent
       : mergeSessionEventCut(agent.session.snapshotEvents(), opening.events)
     await hydratePresentation({
       sessionId: agent.session.id,
-      cwd: agent.session.header.cwd,
+      cwd: deps.direct.effectiveCwd(agent),
       events,
       liveBaseline: deps.direct.assistantStreamBaselineFor(agent),
       planActive: deps.direct.planActive(agent),

@@ -288,6 +288,12 @@ export interface DirectTspFixtureOptions {
    * `/logout` truthfully instead of reporting success).
    */
   readonly withoutCredentials?: boolean
+  /**
+   * Mount the official `@deepseek-ai/dsh-working-directory` Session directory
+   * owner (the same row the shipped base layer provides) through the testkit's
+   * own switch, so a Session's EFFECTIVE directory is a real Host fact.
+   */
+  readonly workingDirectory?: boolean
 }
 
 export interface DirectTspExternalFixture extends Omit<DirectTspFixture, 'pane'> {}
@@ -368,7 +374,7 @@ export async function createDirectTspFixture(
   ownCleanup(() => ctx.fiber.dispose())
 
   await ctx.plugin(TypertRegistry)
-  await mountAgentLoopTestDependencies(ctx)
+  await mountAgentLoopTestDependencies(ctx, options.workingDirectory === true ? { workingDirectory: true } : {})
   persistenceFiber = await ctx.plugin(JsonlSessionPersistence, { root: join(workRoot, 'persistence') })
   await mountAgentLoopTestHarness(ctx)
   llmAdapter = new ScriptedStreamingAdapter(options.deltas ?? ['B2', '-DIRECT', '-OK'], options.streamHold)
@@ -421,7 +427,9 @@ export async function createDirectTspFixture(
   await ctx.inject(SqliteSessionQueryEngine.inject, queryCtx => {
     new SqliteSessionQueryEngine(queryCtx, { path: ':memory:', openAt: 'first-search' })
   })
-  await ctx.plugin(LocalFileSystem)
+  // The testkit's workingDirectory switch mounts FsLocal itself (when the
+  // composition has no filesystem yet): never mount a second `fs` service.
+  if (ctx.get('fs') === undefined) await ctx.plugin(LocalFileSystem)
   await ctx.plugin(Storage)
   await ctx.plugin(StorageJson, { root: join(workRoot, 'storages') })
   await ctx.plugin(StorageDomain, { backend: 'json' })

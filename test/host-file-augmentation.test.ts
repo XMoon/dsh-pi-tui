@@ -41,6 +41,9 @@ function harness(
     readonly windowsHost?: boolean
     readonly officialAbsent?: boolean
     readonly officialItems?: readonly { path: string; kind: 'file' | 'directory' }[]
+    /** The official Session directory owner (S2/PR-B). Omitted = the
+     *  minimal composition whose scope read stays the header cwd. */
+    readonly effectiveCwd?: string
   } = {},
 ) {
   const workspaceCwd = options.workspaceCwd ?? life.tempDir('dsh-hfa-ws-')
@@ -78,6 +81,9 @@ function harness(
     official: officialDefined,
     driver,
     environment,
+    workingDirectory: options.effectiveCwd === undefined
+      ? undefined
+      : { get: () => options.effectiveCwd as string },
   }
   const agent: LiveAgentLike = { session: { header: { cwd: workspaceCwd } } }
   return { workspaceCwd, homeDir, deps, agent, officialCalls, driverCalls }

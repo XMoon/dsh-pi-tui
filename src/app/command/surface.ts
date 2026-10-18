@@ -871,10 +871,15 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
           // `provider`/`model` are OPTIONAL in the DSH AgentOptions contract and
           // the Direct composition may leave them unset: their absence is real
           // semantic optionality, never an invariant break.
+          // `cwd` is the Session's EFFECTIVE directory (the same-session status
+          // projection), NOT the immutable header project: a committed
+          // `working-directory/change` moves every following command's directory.
           return {
             provider: agent.options.provider,
             model: agent.options.model,
-            cwd: agent.session.header.cwd ?? deps.clientCwd,
+            cwd: deps.backend.sessionReader.sessionStatus(sessionId)?.cwd
+              ?? agent.session.header.cwd
+              ?? deps.clientCwd,
           }
         },
         approvalOverride: (sessionId) =>

@@ -114,6 +114,7 @@ function harness(options: {
       installModelSelection: () => {},
       assistantStreamBaselineFor: () => [],
       planActive: () => false,
+      effectiveCwd: (agent) => agent.session.header.cwd,
     },
     status: {
       setGoalText: () => {}, refresh: () => {}, refreshTerminalTitle: () => {}, refreshTerminalCwd: () => {},
