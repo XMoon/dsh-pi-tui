@@ -156,6 +156,7 @@ function harness(): Harness {
     status: {
       setGoalText: () => {}, refresh: () => {}, refreshTerminalTitle: () => {}, refreshTerminalCwd: () => {},
       updateWelcomeCard: () => {}, scheduleInitialMeasurement: () => {},
+      markContextDirty: () => {}, refreshContextMeasurement: () => {},
     },
     history: { rememberCwd: () => {}, currentCwd: () => '/c', records: () => [], setLastContent: () => {} },
     commands: { register: () => {} },

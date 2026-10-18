@@ -62,6 +62,10 @@ function harness(options: {
   workingSeeds(): ReadonlyArray<{ sessionId: string; transportToken: unknown; fold: boolean; proven: boolean }>
   /** Every deferred context measurement (RFL-007). */
   initialMeasurements(): readonly string[]
+  /** How many times the reconcile marked the context dirty (RFL-009). */
+  contextDirty(): number
+  /** Every explicit measurement reason the reconcile requested (RFL-009). */
+  contextRefreshes(): readonly string[]
   /** Every status-fact commit (RFL-007 planMode witness). */
   statusFacts(): ReadonlyArray<Record<string, unknown>>
 } {
@@ -82,6 +86,9 @@ function harness(options: {
   const workingSeeds: Array<{ sessionId: string; transportToken: unknown; fold: boolean; proven: boolean }> = []
   /** RFL-007: every deferred context measurement the tail scheduled. */
   const initialMeasurements: string[] = []
+  /** RFL-009: the live `compaction/end` measurement contract (dirty -> measure). */
+  let contextDirty = 0
+  const contextRefreshes: string[] = []
   /** Every status-fact commit (planMode and friends). */
   const statusFacts: Array<Record<string, unknown>> = []
   const surface = {
@@ -111,6 +118,7 @@ function harness(options: {
     status: {
       setGoalText: () => {}, refresh: () => {}, refreshTerminalTitle: () => {}, refreshTerminalCwd: () => {},
       updateWelcomeCard: () => {}, scheduleInitialMeasurement: (sessionId: string) => { initialMeasurements.push(sessionId) },
+      markContextDirty: () => { contextDirty += 1 }, refreshContextMeasurement: (reason: string) => { contextRefreshes.push(reason) },
     },
     history: { rememberCwd: () => {}, currentCwd: () => '/c', records: () => [], setLastContent: () => {} },
     commands: { register: () => {} },
@@ -162,6 +170,8 @@ function harness(options: {
     resumedCompactions: () => resumedCompactions,
     workingSeeds: () => workingSeeds,
     initialMeasurements: () => initialMeasurements,
+    contextDirty: () => contextDirty,
+    contextRefreshes: () => contextRefreshes,
     statusFacts: () => statusFacts,
     presentation,
   }
@@ -296,26 +306,94 @@ test('RFL-007: the reconcile publishes the proven working fold, the plan project
     proven: false,
   }, 'a truncated window publishes the official running fallback as UNPROVEN')
 
-  // A compaction that ENDED during the outage re-measures the context once;
-  // a later reconcile without that transition does not measure again.
+  // The working/busy BASELINE is published to the display (the cold hydrate's
+  // order), not only the working-fold cache.
+  assert.ok(h.statusFacts().some(facts => facts.working === true && facts.busy === true),
+    'the committed window publishes the working/busy baseline to the surface')
+
+  // A boundary that did NOT move (a compaction start alone is not a measure
+  // event) stays measurement-free.
   h.setWindow([{ type: 'compaction/start', data: { compactionId: 'c1' } }], false, 33)
   await h.rehydrate()
-  const measurementsAfterStart = h.initialMeasurements().length
+  assert.equal(h.contextDirty(), 0, 'a compaction START alone does not measure')
+
+  // RFL-009/011: a bracket whose START and END both landed during the outage
+  // leaves the committed `active` flag unchanged (inactive -> inactive); the
+  // measure-event identity is what notices it, and the reconcile runs the live
+  // `compaction/end` contract (mark dirty -> measure).
   h.setWindow([
     { type: 'compaction/start', data: { compactionId: 'c1' } },
     { type: 'compaction/end', data: { compactionId: 'c1' } },
   ], false, 34)
   await h.rehydrate()
-  assert.equal(h.initialMeasurements().length, measurementsAfterStart + 1,
-    'the outage-spanning compaction end schedules exactly one measurement')
+  assert.equal(h.contextDirty(), 1, 'the swallowed bracket marks the context dirty')
+  assert.deepEqual(h.contextRefreshes(), ['compaction-end'],
+    'and measures it through the live compaction-end contract')
+
+  // RFL-009: a TURN that ended with no compaction at all is a measure boundary too.
   h.setWindow([
     { type: 'compaction/start', data: { compactionId: 'c1' } },
     { type: 'compaction/end', data: { compactionId: 'c1' } },
     { type: 'turn/start', data: { turn: 2 } },
   ], false, 35)
   await h.rehydrate()
-  assert.equal(h.initialMeasurements().length, measurementsAfterStart + 1,
-    'history/rolling reconciles stay measurement-free')
+  h.setWindow([
+    { type: 'compaction/start', data: { compactionId: 'c1' } },
+    { type: 'compaction/end', data: { compactionId: 'c1' } },
+    { type: 'turn/start', data: { turn: 2 } },
+    { type: 'turn/end', data: { turn: 2, reason: { kind: 'completed' } } },
+  ], false, 36)
+  await h.rehydrate()
+  assert.equal(h.contextDirty(), 2, 'a turn that ended during the outage measures too')
+
+  // A boundary the LIVE routing already measured keeps an ordinary page
+  // reconcile measurement-free (no false positive on paging).
+  h.setWindow([
+    { type: 'compaction/start', data: { compactionId: 'c9' } },
+    { type: 'compaction/end', data: { compactionId: 'c9' } },
+  ], false, 38)
+  h.presentation.noteLiveMeasureEvent('s', { type: 'compaction/end', data: { compactionId: 'c9' } })
+  const dirtyBeforePrepend = h.contextDirty()
+  h.setWindow([
+    { type: 'turn/start', data: { turn: 0 } },
+    { type: 'compaction/start', data: { compactionId: 'c9' } },
+    { type: 'compaction/end', data: { compactionId: 'c9' } },
+  ], true, 39)
+  await h.rehydrate()
+  assert.equal(h.contextDirty(), dirtyBeforePrepend,
+    'a page reconcile after a LIVE-measured boundary does not measure again')
+
+  // An unchanged measure boundary keeps the reconcile measurement-free
+  // (history/rolling paging).
+  // The SAME boundary (an older page joined at the front) stays measurement-free.
+  const stableEvents = [
+    { type: 'turn/start', data: { turn: 0 } },
+    { type: 'compaction/start', data: { compactionId: 'c9' } },
+    { type: 'compaction/end', data: { compactionId: 'c9' } },
+  ]
+  h.setWindow([
+    { type: 'turn/start', data: { turn: -1 } },
+    ...stableEvents,
+  ], true, 40)
+  await h.rehydrate()
+  assert.equal(h.contextDirty(), dirtyBeforePrepend,
+    'a page reconcile whose newest measure boundary is unchanged stays measurement-free')
+
+  // RFL-010: the COLD window is the baseline — a compaction live at hydrate time
+  // that ends during the outage must be detected on the FIRST reconcile.
+  const cold = harness({
+    refoldProof: (_sessionId, revision) => ({ generation: 1, binding: {}, revision }),
+  })
+  cold.setWindow([{ type: 'compaction/start', data: { compactionId: 'c2' } }], false, 41)
+  await cold.coldHydrate()
+  assert.equal(cold.contextDirty(), 0)
+  cold.setWindow([
+    { type: 'compaction/start', data: { compactionId: 'c2' } },
+    { type: 'compaction/end', data: { compactionId: 'c2' } },
+  ], false, 42)
+  await cold.rehydrate()
+  assert.equal(cold.contextDirty(), 1,
+    'a compaction live at the cold hydrate and ended during the outage measures on the first reconcile')
 })
 
 test('S3-R0: read A already in flight → window B commits → A settles last and writes nothing', async (t) => {
