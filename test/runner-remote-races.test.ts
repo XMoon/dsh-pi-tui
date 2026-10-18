@@ -445,21 +445,23 @@ test('L6 PR5 §3.9b: teardown with a pending WRITE — observed surface-stop bou
   // A short observation window only widens the chance to SEE a late frame; it
   // is not evidence about durability.
   await new Promise(resolve => setTimeout(resolve, 150))
-  // S3 §C3 fixed verdict: the TUI's Remote write receipt is Host ADMISSION —
-  // `session/prompt` resolves once the Host Agent accepted the message
-  // (`agent.followup`), and `WriteOutcome.committed` means exactly that, never
-  // fsync/flush. `RemoteSessionOwnerServices.flush()` stays a documented no-op
-  // because rc.2 publishes no durable-flush verb, so no sleep/poll/retry is
-  // added to fake one. The HOST owns the append from admission onward; the
-  // assertions below witness the surface boundary and the real Host append.
+  // S3 §C3 fixed verdict (plan §9): a write PARKED in serialization when the
+  // surface stops is refused PRE-DISPATCH — the surface the user was looking at
+  // is gone, so the message must never be admitted silently afterwards. The
+  // official echo is abandoned, the caller restores the draft exactly once, and
+  // the Host sees NOTHING. `WriteOutcome.committed` still means Host ADMISSION
+  // for a write that did dispatch (never fsync/flush), and
+  // `RemoteSessionOwnerServices.flush()` stays a documented no-op because rc.2
+  // publishes no durable-flush verb.
   assert.equal(surfaceWrites.count - writesAtSurfaceStop.count, 0,
     'the surface stopped for good: no terminal write follows the surface stop')
-  // (b)→(c) REAL witness: the write was PARKED across teardown, then admitted,
-  // and the HOST appended it durably in its own order. The bounded wait below
-  // observes the Host log ONLY — it never re-dispatches, resends or polls the
-  // write path.
-  await waitFor('the admitted write becomes durable on the Host', () =>
-    hostUserRows(fixture, mainId).some(row => row.includes('pending write across teardown sigma')), 20_000)
-  assert.equal(hostUserRows(fixture, mainId).filter(row => row.includes('pending write across teardown sigma')).length, 1,
-    'teardown admits exactly one durable write: no duplicate resend, no fabricated flush')
+  assert.equal(hostUserRows(fixture, mainId).some(row => row.includes('pending write across teardown sigma')), false,
+    'a write parked at the surface stop NEVER dispatches: no Host message, no silent send')
+  // The refusal is the ordinary pre-dispatch refusal (echo abandoned, draft
+  // restored once) — the LIVE-surface half of that contract is proven by the
+  // §3.9a stale-capture case above, which observes the restored draft. Here the
+  // surface is already stopped, so the submission owner's existing disposed
+  // guard (`if (surface.isDisposed()) return`) suppresses the draft re-insertion
+  // and the notice: there is no live surface to receive them, and the guard must
+  // not be weakened to manufacture an observable callback after the stop.
 })

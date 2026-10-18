@@ -215,6 +215,49 @@ test('an unsupported preflight is refused before any official echo or Host mutat
   assert.equal(harness.calls.promptCalls.length, 0)
 })
 
+test('a write parked in serialization is refused when the surface admission closes before dispatch', async () => {
+  const harness = writerHarness()
+  let dispatchAllowed = true
+  // The surface stops WHILE the write is parked in the serializer (the plan §9
+  // "prompt serializer parked then shutdown" interleaving).
+  const serializer = okSerializer({ onSerialize: () => { dispatchAllowed = false } })
+  const writer = new RemoteSessionWriter(harness.source, harness.generation.source, serializer, {
+    isDispatchAllowed: () => dispatchAllowed,
+  })
+
+  const outcome = await writer.prompt('session-a', {}, 'queue')
+  assert.deepEqual(outcome, { kind: 'cancelled' },
+    'a stopped surface refuses the parked write instead of dispatching it')
+  assert.equal(harness.calls.promptCalls.length, 0, 'no Host dispatch happens after the stop')
+  assert.equal(harness.calls.beginInputs.length, 1, 'the official echo existed before the park')
+  assert.equal(harness.calls.abandonCalls, 1, 'the refused echo is abandoned exactly once')
+})
+
+test('the dispatch admission is consulted once: an already-dispatched write is never reinterpreted', async () => {
+  const harness = writerHarness()
+  let dispatchAllowed = true
+  // The surface stops AFTER the dispatch already happened.
+  harness.setPromptHook(() => { dispatchAllowed = false })
+  const writer = new RemoteSessionWriter(harness.source, harness.generation.source, okSerializer(), {
+    isDispatchAllowed: () => dispatchAllowed,
+  })
+
+  const outcome = await writer.prompt('session-a', {}, 'queue')
+  assert.deepEqual(outcome, { kind: 'committed', value: undefined },
+    'the Host accepted the write; teardown never turns it into a refusal')
+  assert.equal(harness.calls.promptCalls.length, 1)
+  assert.equal(harness.calls.abandonCalls, 0)
+})
+
+test('a write is dispatched normally while the admission is open', async () => {
+  const harness = writerHarness()
+  const writer = new RemoteSessionWriter(harness.source, harness.generation.source, okSerializer(), {
+    isDispatchAllowed: () => true,
+  })
+  assert.equal((await writer.prompt('session-a', {}, 'queue')).kind, 'committed')
+  assert.equal(harness.calls.promptCalls.length, 1)
+})
+
 test('the official echo is registered after preflight and before serialization', async () => {
   const harness = writerHarness()
   const order: string[] = []

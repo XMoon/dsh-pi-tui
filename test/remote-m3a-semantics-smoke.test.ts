@@ -732,8 +732,13 @@ test('P11: the rc.2 Question wire surfaces (live request → claim → timeout �
       attachWait(agent: unknown, callId: unknown, signal: AbortSignal): AsyncIterable<{ remainingMs: number }>
     }
 
-    // A — an UNCLAIMED timed request reaches its Host deadline: the question
-    // stays durably answerable as `continued` and never cancels the Turn.
+    // A — an UNCLAIMED timed request: the live request reaches the UI, and after
+    // the Host's own deadline the FOREGROUND wait is gone. The call is NOT
+    // durably "continued" here because the durable continued row comes from the
+    // question's tool events inside a turn, and this fixture asks the service
+    // directly; the wire therefore answers truthfully instead of inventing a
+    // queue. (A real tool-turn deadline→continued case is recorded as a limit
+    // in the PR evidence rather than faked here.)
     const callA = ToolCallId('m3b-call-a')
     const pendingA = await service.askTimed({ questions, agent }, callA, 40)
     assert.deepEqual(pendingA, { pending: true, callId: callA }, 'the Host returns the pending result, not an error')
@@ -741,14 +746,19 @@ test('P11: the rc.2 Question wire surfaces (live request → claim → timeout �
     assert.deepEqual(captured[0], { sessionId: MAIN, callId: 'm3b-call-a', timed: true },
       'the live request carries the derived Session identity, call identity and timed flag')
 
-    // A timed-out call is no longer answerable through the FOREGROUND path:
-    // the same semantic call is not "continued" without the durable tool
-    // events that produce the projection row, so the wire answers truthfully
-    // instead of inventing a queue.
+    // Wait for the REAL Host deadline to elapse before observing the late path.
+    await new Promise(resolve => setTimeout(resolve, 80))
+    assert.equal(await semantics.interaction.questions.claimTimedWait(MAIN, 'm3b-call-a'), undefined,
+      'after its deadline the foreground wait can no longer be claimed')
     assert.equal(
       await semantics.interaction.questions.answerContinued(MAIN, 'm3b-call-a', { answers: [{ id: 'q1', selected: ['yes'] }] }),
       'not-continued',
       'the late-answer boolean maps truthfully when the call is not durably continued',
+    )
+    assert.equal(
+      await semantics.interaction.questions.answerContinued(MAIN, 'm3b-call-a', { answers: [{ id: 'q1', selected: ['no'] }] }),
+      'not-continued',
+      'a repeated late answer is refused identically: no one-shot flag, no replayed Host settlement',
     )
 
     // B — a CLAIMED timed request: the first attachWait frame carries the

@@ -365,6 +365,58 @@ test('the installed rc.2 reader positively reads a released-v1 artifact and retu
   assert.deepEqual(generationFiles(sessionDir), [sourceName], 'a read open publishes no successor')
 })
 
+test('an explicit WRITE open migrates the released generation and publishes the current successor', async t => {
+  const life = testLifecycle(t)
+  const root = life.tempDir('dsh-s2b-b1-released-migrate-')
+  const id = SessionId('session-b1-released-migrate')
+  const first = await boot(life, root)
+  const seedHandle = await first.persistence.create({
+    id,
+    createdAt: 1,
+    version: SESSION_FORMAT_VERSION,
+    cwd: '/work',
+    isSeeded: false,
+    delegationDepth: 0,
+  })
+  await seedHandle.flush()
+  await seedHandle.close()
+  const sessionDir = sessionDirOf(root)
+  rmSync(join(sessionDir, `session.v${SESSION_FORMAT_VERSION}.jsonl${CURRENT_SUFFIX}`), { force: true })
+  const sourceName = 'session.v1.jsonl.zstd'
+  const sourcePath = join(sessionDir, sourceName)
+  placeArtifact(sourcePath, releasedV1PackedSample(String(id)))
+  const sourceHash = createHash('sha256').update(readFileSync(sourcePath)).digest('hex')
+  await first.ctx.fiber.dispose()
+
+  const second = await boot(life, root)
+  assert.equal((await second.persistence.stat(id))?.formatStatus, 'migration-required',
+    'the released generation is classified before either open')
+
+  // A READ open migrates in memory only: no successor, source untouched.
+  const readHandle = await second.persistence.open(id, 'read')
+  const read = await readHandle.read()
+  await readHandle.close()
+  assert.deepEqual(read.events.map(event => event.type),
+    ['turn/start', 'step/start', 'system/message', 'user/message', 'assistant/message', 'step/end', 'turn/end'])
+  assert.deepEqual(generationFiles(sessionDir), [sourceName], 'a read open publishes no successor')
+
+  // The EXPLICIT write open (the user's open/resume intent) publishes the
+  // current-generation successor while the released source stays byte-identical.
+  const writeHandle = await second.persistence.open(id, 'write')
+  assert.equal(writeHandle.header.version, SESSION_FORMAT_VERSION,
+    'the write handle serves the migrated current format')
+  const written = await writeHandle.read()
+  assert.deepEqual(written.events.map(event => event.type),
+    ['turn/start', 'step/start', 'system/message', 'user/message', 'assistant/message', 'step/end', 'turn/end'])
+  await writeHandle.close()
+  const files = generationFiles(sessionDir)
+  assert.ok(files.includes(sourceName), `the released source generation is preserved: ${files.join(', ')}`)
+  assert.ok(files.includes(`session.v${SESSION_FORMAT_VERSION}.jsonl${CURRENT_SUFFIX}`),
+    `an explicit write open publishes the current-generation successor: ${files.join(', ')}`)
+  assert.equal(createHash('sha256').update(readFileSync(sourcePath)).digest('hex'), sourceHash,
+    'the migration never rewrites the released source artifact')
+})
+
 test('a newer stored format is refused explicitly, never read as an empty Session', async t => {
   const life = testLifecycle(t)
   const root = life.tempDir('dsh-s2b-b1-newer-')

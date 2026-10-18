@@ -282,6 +282,31 @@ test('L6 §37 prompt: an idle plain prompt reaches the Host durable log through 
   await waitFor('assistant answer rendered', () => fixture.vt.getViewport().join('').includes('remote reply'), 20_000)
 })
 
+test('L6 §37 prompt negative: an empty or whitespace-only draft dispatches nothing', async (t) => {
+  const life = testLifecycle(t)
+  const mainId = 'm3-4-pr3-empty'
+  const presetId = 'm3-4-pr3-preset'
+  const host = await mountHost(life, presetId)
+  await host.harness.create(SessionId(mainId), { provider: 'smoke', model: 'smoke' }, { cwd: host.anchorDir })
+  const fixture = await mountPr3Runner(life, { presetId, resumeSessionId: mainId, host })
+  await waitFor('mount paint', () => fixture.vt.getViewport().join('').length > 0, 10_000)
+
+  submitDraft(fixture, '')
+  submitDraft(fixture, '   ')
+  // Give any (wrong) dispatch a chance to land, then require NOTHING: no
+  // durable user-rpc event, no official submission echo.
+  await new Promise(resolve => setTimeout(resolve, 500))
+  assert.equal(hostUserRows(fixture, mainId).length, 0,
+    'an empty/whitespace draft never reaches the Host')
+  const pending = fixture.aggregate.presentation.submissionPresentation.snapshot(mainId)
+  assert.ok(pending === undefined || pending.length === 0,
+    'no official submission echo exists for an empty draft')
+  // The real prompt path still works afterwards (the editor was never poisoned).
+  submitDraft(fixture, 'after empty gamma')
+  await waitFor('the real prompt lands', () =>
+    hostUserRows(fixture, mainId).some(row => row.includes('after empty gamma')), 20_000)
+})
+
 test('L6 §37 prompt: a sessionless first prompt creates the Session, then reaches the Host durable log', async (t) => {
   const life = testLifecycle(t)
   const presetId = 'm3-4-pr3-preset'

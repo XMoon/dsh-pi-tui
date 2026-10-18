@@ -138,6 +138,10 @@ export interface RemoteBackendRuntimeOptions {
   readonly promptSerializer?: RemotePromptSerializer
   /** The composition-owned fetch the archive adapter addresses. */
   readonly fetch: InProcessHostCarrier['fetch']
+  /** The composition-owned pre-dispatch dispatch admission (the surface-stop
+   *  fence the Remote session writer consults immediately before dispatch).
+   *  Absent = every pre-dispatch write is admissible (the pre-fence behavior). */
+  readonly isDispatchAllowed?: () => boolean
 }
 
 /** The complete experimental Remote `Backend` plus its disposal owner. */
@@ -194,6 +198,7 @@ export async function createRemoteBackendRuntime(
       // (composition tests) still wins.
       promptSerializer: options.promptSerializer
         ?? RemotePromptSerializerProduction.overSessions(options.runtime.sessions),
+      ...(options.isDispatchAllowed === undefined ? {} : { isDispatchAllowed: options.isDispatchAllowed }),
     })
     unwind.push(() => semantics.dispose())
     const config = new RemoteConfigPort(remoteConfigRuntimeSourceOf(options.runtime))

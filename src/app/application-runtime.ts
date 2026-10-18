@@ -42,6 +42,14 @@ export interface SelectedApplicationRuntime {
   readonly retirement: SessionOwnerRetirement
 
   /**
+   * Synchronously close the pre-dispatch write admission at the surface-stop
+   * boundary: a write parked before dispatch (the serializer window) is then
+   * refused instead of being admitted after the surface stopped. Idempotent.
+   * Absent on Direct (the Direct owner retires its own in-flight writes).
+   */
+  stopSurfaceAdmission?: () => void
+
+  /**
    * Dispose adapter/transport composition after application/session owners
    * have completed their own retirement. Idempotent; error-preserving (a
    * step's failure never skips the remaining steps).
