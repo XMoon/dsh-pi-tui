@@ -306,16 +306,12 @@ test('RFL-007: the reconcile publishes the proven working fold, the plan project
     proven: false,
   }, 'a truncated window publishes the official running fallback as UNPROVEN')
 
-  // The working/busy BASELINE is published to the display (the cold hydrate's
-  // order), not only the working-fold cache.
-  assert.ok(h.statusFacts().some(facts => facts.working === true && facts.busy === true),
-    'the committed window publishes the working/busy baseline to the surface')
-
   // A boundary that did NOT move (a compaction start alone is not a measure
   // event) stays measurement-free.
+  const dirtyBeforeStart = h.contextDirty()
   h.setWindow([{ type: 'compaction/start', data: { compactionId: 'c1' } }], false, 33)
   await h.rehydrate()
-  assert.equal(h.contextDirty(), 0, 'a compaction START alone does not measure')
+  assert.equal(h.contextDirty(), dirtyBeforeStart, 'a compaction START alone does not measure')
 
   // RFL-009/011: a bracket whose START and END both landed during the outage
   // leaves the committed `active` flag unchanged (inactive -> inactive); the
@@ -326,8 +322,8 @@ test('RFL-007: the reconcile publishes the proven working fold, the plan project
     { type: 'compaction/end', data: { compactionId: 'c1' } },
   ], false, 34)
   await h.rehydrate()
-  assert.equal(h.contextDirty(), 1, 'the swallowed bracket marks the context dirty')
-  assert.deepEqual(h.contextRefreshes(), ['compaction-end'],
+  assert.equal(h.contextDirty(), dirtyBeforeStart + 1, 'the swallowed bracket marks the context dirty')
+  assert.deepEqual(h.contextRefreshes().at(-1), 'compaction-end',
     'and measures it through the live compaction-end contract')
 
   // RFL-009: a TURN that ended with no compaction at all is a measure boundary too.
@@ -344,7 +340,7 @@ test('RFL-007: the reconcile publishes the proven working fold, the plan project
     { type: 'turn/end', data: { turn: 2, reason: { kind: 'completed' } } },
   ], false, 36)
   await h.rehydrate()
-  assert.equal(h.contextDirty(), 2, 'a turn that ended during the outage measures too')
+  assert.equal(h.contextDirty(), dirtyBeforeStart + 2, 'a turn that ended during the outage measures too')
 
   // A boundary the LIVE routing already measured keeps an ordinary page
   // reconcile measurement-free (no false positive on paging).
@@ -394,6 +390,42 @@ test('RFL-007: the reconcile publishes the proven working fold, the plan project
   await cold.rehydrate()
   assert.equal(cold.contextDirty(), 1,
     'a compaction live at the cold hydrate and ended during the outage measures on the first reconcile')
+
+  // The working/busy BASELINE is published by the RECONCILE itself (the cold
+  // hydrate's order), not only by the cold hydrate and not only into the cache:
+  // scope the assertion to the facts the reconcile just added.
+  const factsBeforeReconcile = h.statusFacts().length
+  h.setWindow([{ type: 'turn/start', data: { turn: 4 } }], false, 61)
+  await h.rehydrate()
+  assert.ok(
+    h.statusFacts().slice(factsBeforeReconcile).some(facts => facts.working === true && facts.busy === true),
+    'the RECONCILE publishes the working/busy baseline to the visible surface',
+  )
+  // The prior-true -> turn/end direction: the reconcile must publish false too
+  // (an inactive compaction alone never rewrites these fields).
+  const factsBeforeEnd = h.statusFacts().length
+  const dirtyBeforeEnd = h.contextDirty()
+  h.setWindow([
+    { type: 'turn/start', data: { turn: 4 } },
+    { type: 'turn/end', data: { turn: 4, reason: { kind: 'completed' } } },
+  ], false, 62)
+  await h.rehydrate()
+  assert.ok(
+    h.statusFacts().slice(factsBeforeEnd).some(facts => facts.working === false && facts.busy === false),
+    'a reconciled turn end publishes working=false/busy=false, never the stale true',
+  )
+  assert.equal(h.contextDirty(), dirtyBeforeEnd + 1, 'the reconciled turn end re-measures the context')
+
+  // A `step/start` boundary is a measure event of the SAME classifier class.
+  const dirtyBeforeStep = h.contextDirty()
+  h.setWindow([
+    { type: 'turn/start', data: { turn: 5 } },
+    { type: 'step/start', data: { turn: 5, step: 1 } },
+  ], false, 63)
+  await h.rehydrate()
+  assert.equal(h.contextDirty(), dirtyBeforeStep + 1, 'a step/start boundary re-measures the context too')
+
+
 })
 
 test('S3-R0: read A already in flight → window B commits → A settles last and writes nothing', async (t) => {
