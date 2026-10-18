@@ -110,6 +110,7 @@ import {
   type TuiAppOptions,
 } from '../../tui-app.ts'
 import { runSyncDisposalSteps } from '../../runtime/process/disposal.ts'
+import type { CompactionPhase } from './compaction-presentation.ts'
 import type { SubmissionComposerPort } from '../submission/composer-port.ts'
 import type { ModelPresentation } from '../command/model-presentation.ts'
 import type { PresetPresentation } from '../command/preset-presentation.ts'
@@ -690,7 +691,7 @@ export interface SurfaceRuntime<Event extends RoutedSessionEvent> {
    * state (the cold-hydration path keeps the fold; the surface owns the
    * `compactingId` routing state and the phase/busy/working presentation).
    */
-  applyResumedCompaction(id: string | undefined, active: boolean): void
+  applyResumedCompaction(id: string | undefined, active: boolean, phase?: CompactionPhase): void
   /**
    * A4-4 pending-input presentation refresh (plan §13.2): the semantic pending
    * read joined with the local submission echoes and the own-input viewport
@@ -1877,7 +1878,7 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
     routeSettingsRefresh: (namespace) => eventRouting.routeSettingsRefresh(namespace),
     isCurrentAssistantAgent: (agent) => eventRouting.isCurrentAssistantAgent(agent),
     applyAssistantInput: (input) => eventRouting.applyAssistantInput(input),
-    applyResumedCompaction: (id, active) => eventRouting.applyResumedCompaction(id, active),
+    applyResumedCompaction: (id, active, phase) => eventRouting.applyResumedCompaction(id, active, phase),
     refreshPendingInput,
     resetPendingPresentation,
     schedulePaint,

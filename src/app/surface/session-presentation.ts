@@ -29,7 +29,7 @@
  * @module @xmoon76/dsh-pi-tui/app/surface/session-presentation
  */
 
-import { compactingFromLog, measureEventKey, workingFromLog } from './compaction-presentation.ts'
+import { compactionBracketFromLog, measureEventKey, workingFromLog } from './compaction-presentation.ts'
 import type { ContextMeasureReason } from '../../domain/status/context-measurement.ts'
 import { foldGoal, goalTextOf } from '../../domain/status/derive-goal.ts'
 import { recallHistoryForSession, type ParsedHistoryRecord } from '../../client/history/store.ts'
@@ -546,10 +546,10 @@ export function createSessionPresentation<Event extends SessionPresentationEvent
     }
     // A resumed session may be mid-compaction. Reset the old phase first;
     // then re-arm only the newest live bracket, matching the log fold.
-    const resumedCompaction = timedBootstrapScan(deps.diag, 'compaction', events.length, () => compactingFromLog(events))
+    const resumedCompaction = timedBootstrapScan(deps.diag, 'compaction', events.length, () => compactionBracketFromLog(events))
     // A4-7: the `compactingId` routing state and the phase/busy/working
     // presentation are surface-owned (plan §16).
-    deps.surface.applyResumedCompaction(resumedCompaction.id, resumedCompaction.active)
+    deps.surface.applyResumedCompaction(resumedCompaction.id, resumedCompaction.active, resumedCompaction.phase)
     // The hydrate's window IS the baseline for the next reconcile: an outage
     // that swallowed a compaction boundary (its live handler never ran) must be
     // detected against it.
@@ -749,7 +749,7 @@ export function createSessionPresentation<Event extends SessionPresentationEvent
     // stale). This is a derive-from-the-window, not a live-state reset: the
     // window's newest bracket IS the live state, and the revision fence above
     // proves nothing newer exists.
-    const resumedCompaction = compactingFromLog(snapshot.durableEvents as readonly { type: unknown }[])
+    const resumedCompaction = compactionBracketFromLog(snapshot.durableEvents as readonly { type: unknown }[])
     // The plan projection is a CURRENT-VALUE fact: a `plan/mode` increment the
     // replace swallowed is invisible in the window, so the reconcile commits the
     // SAME projection read the cold hydrate used (the projected `plan` authority,
@@ -781,7 +781,7 @@ export function createSessionPresentation<Event extends SessionPresentationEvent
     // without this commit a stale working/busy would stay on screen after an
     // outage-spanning compaction/turn end.
     deps.surface.display.commitStatusFacts({ planMode: planActive, working, busy: working })
-    deps.surface.applyResumedCompaction(resumedCompaction.id, resumedCompaction.active)
+    deps.surface.applyResumedCompaction(resumedCompaction.id, resumedCompaction.active, resumedCompaction.phase)
     // A compaction that ENDED during the outage changed the context occupancy,
     // and its `compaction/end` event (whose live handler marks the context dirty
     // and re-measures) never reached the surface. Re-run the hydrate tail's own

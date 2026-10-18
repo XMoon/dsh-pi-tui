@@ -202,6 +202,48 @@ export function measureEventKey(events: readonly { type: unknown; data?: unknown
   return 'none'
 }
 
+/**
+ * The compaction bracket a LOG/WINDOW shows, rebuilt with the SAME
+ * compactionId-matched fold the live routing uses (`foldCompactionEvent`), so a
+ * window reconcile can never disagree with the live state: a STALE
+ * `compaction/end` for an older compaction does not settle a newer one, and a
+ * bracket whose `compaction/summary` already landed resumes as 'applying'.
+ * `session/end-seed` marks a log reset: nothing before it counts.
+ */
+export function compactionBracketFromLog(
+  events: readonly { type: unknown; data?: unknown }[],
+): { active: boolean; id: string | undefined; phase: CompactionPhase } {
+  let state: { id: string | undefined } = { id: undefined }
+  let active = false
+  let phase: CompactionPhase = 'idle'
+  for (const event of events) {
+    const kind = typeof event.type === 'string' ? event.type : ''
+    if (kind === 'session/end-seed') {
+      state = { id: undefined }
+      active = false
+      phase = 'idle'
+      continue
+    }
+    if (kind !== 'compaction/start' && kind !== 'compaction/summary' && kind !== 'compaction/end') continue
+    const folded = foldCompactionEvent(state, event as { type: string; data: { compactionId?: unknown; error?: unknown } })
+    if (folded.active) {
+      state = { id: folded.id }
+      active = true
+      phase = 'summarizing'
+      continue
+    }
+    if (folded.clear) {
+      state = { id: undefined }
+      active = false
+      phase = 'idle'
+      continue
+    }
+    // A MATCHED summary advances the phase; a stale one changes nothing.
+    if (folded.phase !== undefined) phase = folded.phase
+  }
+  return { active, id: state.id, phase }
+}
+
 export function compactingFromLog(
   events: readonly { type: unknown; data?: unknown }[],
 ): { active: boolean; id: string | undefined } {

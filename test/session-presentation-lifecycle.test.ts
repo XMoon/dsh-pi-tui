@@ -57,7 +57,7 @@ function harness(options: {
   /** The live presentation bridge (fold identity is the commit witness). */
   presentation: ReturnType<typeof createSessionPresentation<SessionPresentationEvent>>
   /** Every `applyResumedCompaction` commit (external review RFL-001 witness). */
-  resumedCompactions(): ReadonlyArray<{ id: string | undefined; active: boolean }>
+  resumedCompactions(): ReadonlyArray<{ id: string | undefined; active: boolean; phase?: string }>
   /** Every working-fold seed the reconcile published (RFL-007). */
   workingSeeds(): ReadonlyArray<{ sessionId: string; transportToken: unknown; fold: boolean; proven: boolean }>
   /** Every deferred context measurement (RFL-007). */
@@ -81,7 +81,7 @@ function harness(options: {
   /** The active-draft drop seam: every call is a dropped user draft. */
   let draftClears = 0
   /** RFL-001 (external review): every resumed-compaction commit the surface saw. */
-  const resumedCompactions: Array<{ id: string | undefined; active: boolean }> = []
+  const resumedCompactions: Array<{ id: string | undefined; active: boolean; phase?: string }> = []
   /** RFL-007 (internal review): every working-fold seed the commit published. */
   const workingSeeds: Array<{ sessionId: string; transportToken: unknown; fold: boolean; proven: boolean }> = []
   /** RFL-007: every deferred context measurement the tail scheduled. */
@@ -99,7 +99,7 @@ function harness(options: {
       commitStatusFacts: (facts: Record<string, unknown>) => { statusFacts.push(facts) },
     }),
     resetSearchPresentation: () => {}, resetTasks: () => {}, resetPendingPresentation: () => {},
-    applyResumedCompaction: (id: string | undefined, active: boolean) => { resumedCompactions.push({ id, active }) }, repaint: () => {}, refreshPendingInput: () => {},
+    applyResumedCompaction: (id: string | undefined, active: boolean, phase?: string) => { resumedCompactions.push({ id, active, phase }) }, repaint: () => {}, refreshPendingInput: () => {},
     refreshTasks: () => {}, refreshAgents: () => {},
   }
   const diag: Diag = { info: () => {}, warn: () => {}, error: () => {}, debug: () => {}, dispose: () => {} } as unknown as Diag
@@ -233,14 +233,14 @@ test('S3-R0/RFL-001: a window reconcile re-derives the compaction routing state 
   ], false, 11)
   await h.coldHydrate()
   const afterCold = h.resumedCompactions().at(-1)
-  assert.deepEqual(afterCold, { id: 'compact-1', active: true },
+  assert.deepEqual(afterCold, { id: 'compact-1', active: true, phase: 'summarizing' },
     'the cold hydrate derives the live bracket')
 
   // A reconcile whose window still carries the live bracket keeps it.
   h.setWindow([{ type: 'turn/start', data: { turn: 1 } }, { type: 'compaction/start', data: { compactionId: 'compact-1' } }], false, 12)
   const committed = await h.rehydrate()
   assert.notEqual(committed, undefined)
-  assert.deepEqual(h.resumedCompactions().at(-1), { id: 'compact-1', active: true },
+  assert.deepEqual(h.resumedCompactions().at(-1), { id: 'compact-1', active: true, phase: 'summarizing' },
     'the reconcile re-derives the still-live bracket from the committed window')
 
   // A reconcile whose window carries the END must clear the stale id.
@@ -249,7 +249,7 @@ test('S3-R0/RFL-001: a window reconcile re-derives the compaction routing state 
     { type: 'compaction/end', data: { compactionId: 'compact-1' } },
   ], false, 13)
   await h.rehydrate()
-  assert.deepEqual(h.resumedCompactions().at(-1), { id: undefined, active: false },
+  assert.deepEqual(h.resumedCompactions().at(-1), { id: undefined, active: false, phase: 'idle' },
     'a compaction that ended during the outage is cleared, never left stale')
 
   // A REFUSED reconcile (superseded read) must not touch the state at all.
@@ -426,6 +426,61 @@ test('RFL-007: the reconcile publishes the proven working fold, the plan project
   assert.equal(h.contextDirty(), dirtyBeforeStep + 1, 'a step/start boundary re-measures the context too')
 
 
+})
+
+test('compaction window fold uses the LIVE compactionId-matched semantics', async (t) => {
+  // The window rebuild must agree with `foldCompactionEvent`: a stale end for an
+  // older compaction never settles a newer one, and a matched summary resumes
+  // the Applying phase (a history prepend must not regress it to Summarizing).
+  const proof = (_sessionId: string, revision: number) => ({ generation: 1, binding: {}, revision })
+  const h = harness({ refoldProof: proof })
+
+  // start A -> start B -> end A: B is STILL the live bracket.
+  h.setWindow([
+    { type: 'compaction/start', data: { compactionId: 'A' } },
+    { type: 'compaction/start', data: { compactionId: 'B' } },
+    { type: 'compaction/end', data: { compactionId: 'A' } },
+  ], false, 71)
+  assert.notEqual(await h.rehydrate(), undefined)
+  assert.deepEqual(h.resumedCompactions().at(-1), { id: 'B', active: true, phase: 'summarizing' },
+    'a stale end for A never settles the newer bracket B')
+
+  // ...then end B settles it.
+  h.setWindow([
+    { type: 'compaction/start', data: { compactionId: 'A' } },
+    { type: 'compaction/start', data: { compactionId: 'B' } },
+    { type: 'compaction/end', data: { compactionId: 'A' } },
+    { type: 'compaction/end', data: { compactionId: 'B' } },
+  ], false, 72)
+  await h.rehydrate()
+  assert.deepEqual(h.resumedCompactions().at(-1), { id: undefined, active: false, phase: 'idle' },
+    'the matching end settles the bracket')
+
+  // start B -> summary B -> PREPEND: the Applying phase survives the re-fold.
+  h.setWindow([
+    { type: 'compaction/start', data: { compactionId: 'B' } },
+    { type: 'compaction/summary', data: { compactionId: 'B' } },
+  ], false, 73)
+  await h.rehydrate()
+  assert.deepEqual(h.resumedCompactions().at(-1), { id: 'B', active: true, phase: 'applying' },
+    'a matched summary rebuilds the Applying phase')
+  h.setWindow([
+    { type: 'turn/start', data: { turn: 0 } },
+    { type: 'compaction/start', data: { compactionId: 'B' } },
+    { type: 'compaction/summary', data: { compactionId: 'B' } },
+  ], true, 74)
+  await h.rehydrate()
+  assert.deepEqual(h.resumedCompactions().at(-1), { id: 'B', active: true, phase: 'applying' },
+    'an ordinary history prepend does NOT regress Applying to Summarizing')
+
+  // ...and a stale summary for another compaction never flips the phase.
+  h.setWindow([
+    { type: 'compaction/start', data: { compactionId: 'B' } },
+    { type: 'compaction/summary', data: { compactionId: 'A' } },
+  ], false, 75)
+  await h.rehydrate()
+  assert.deepEqual(h.resumedCompactions().at(-1), { id: 'B', active: true, phase: 'summarizing' },
+    'a summary for a DIFFERENT compaction does not advance the phase')
 })
 
 test('S3-R0: read A already in flight → window B commits → A settles last and writes nothing', async (t) => {
