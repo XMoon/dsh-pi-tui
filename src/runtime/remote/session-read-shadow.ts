@@ -28,6 +28,7 @@ export type SessionReadMismatchField =
   | 'cwd'
   | 'parentSession'
   | 'origin'
+  | 'formatStatus'
   | 'projection.title'
   | 'projection.agentPreset'
   | 'search'
@@ -47,7 +48,7 @@ export interface SessionReadMismatch {
 
 /** One field deliberately omitted from parity because the official Remote face has no equivalent. */
 export interface SessionReadSkippedField {
-  readonly field: 'createdAt' | 'live' | 'measureContext' | 'formatStatus'
+  readonly field: 'createdAt' | 'live' | 'measureContext'
   readonly reason: string
 }
 
@@ -110,9 +111,6 @@ interface CapturedOperation {
 const SKIPPED_FIELDS: readonly SessionReadSkippedField[] = [
   { field: 'createdAt', reason: 'the official Remote Session list has no creation timestamp' },
   { field: 'live', reason: 'the official running bit is not the Direct attached-session bit' },
-  // The official Client row's on-disk format state has no Direct read
-  // equivalent yet; the Remote passthrough is real but not comparable.
-  { field: 'formatStatus', reason: 'the Direct session list declares no on-disk format state' },
 ]
 const MAX_DIAGNOSTIC_ITEMS = 64
 const MAX_DIAGNOSTIC_TEXT = 512
@@ -239,6 +237,10 @@ function compareRows(
     pushFieldMismatch(mismatches, 'cwd', directRow.id, directRow.cwd, remoteRow.cwd)
     pushFieldMismatch(mismatches, 'parentSession', directRow.id, directRow.parentSession, remoteRow.parentSession)
     pushFieldMismatch(mismatches, 'origin', directRow.id, directRow.origin, remoteRow.origin)
+    // Both backends now carry the official on-disk format state verbatim, so a
+    // divergence in the passthrough is a real parity fact (absent on both sides
+    // compares equal).
+    pushFieldMismatch(mismatches, 'formatStatus', directRow.id, directRow.formatStatus, remoteRow.formatStatus)
 
     const directProjection = directProjections.get(directRow.id)
     const remoteProjection = remoteProjections.get(directRow.id)
