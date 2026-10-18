@@ -33,6 +33,7 @@ import { contextPressureOccupancy, type SessionContentSearchPage, type SessionPr
 import { detachedTurnOutline, type TurnOutlineEntryDto } from '../presentation-read-port.ts'
 import { directTurnOutlineCompat } from './turn-outline-compat.ts'
 import { detachedSessionStatus } from '../session-status-projection.ts'
+import { projectedWorkingDirectory } from './working-directory-direct.ts'
 import type { DurableModelSelectionReader } from './model-selection-direct.ts'
 
 /**
@@ -59,6 +60,10 @@ export interface SessionQueryLike {
   ): Promise<{
     readonly header: SessionHeader
     readonly events: readonly SessionEvent[]
+    /** The official projection baseline at the observation's cut, present
+     *  only when the read asked for (`projectionMode: 'all'`) and the
+     *  registry is mounted. */
+    readonly projections?: { readonly values?: Readonly<Record<string, unknown>> }
     [Symbol.dispose](): void
   }>
   /**
@@ -403,6 +408,11 @@ export class DirectSessionReader implements SessionReader {
         'agentPreset',
         'title',
         'goal',
+        // The official effective directory of THIS Session (S2/PR-B): the
+        // SAME projection the `working_directory` tool commits into and the
+        // official fs/shell tools read. The header below stays the ORIGINAL
+        // project and is only the fallback when the projection records none.
+        'workingDirectory',
         // PR4 §6.1: the committed permission value on the SAME shared
         // semantic (Direct reads the identical projection the Remote
         // binding carries).
@@ -427,7 +437,13 @@ export class DirectSessionReader implements SessionReader {
       const forDisplay = Object.prototype.hasOwnProperty.call(values, 'modelSelection')
         ? values
         : { ...values, modelSelection: this.modelSelections.durableProjectionForSession(session) }
-      return detachedSessionStatus(sessionId, forDisplay, session.header.cwd)
+      // The EFFECTIVE directory of this exact Session, or (no recorded value)
+      // the header's original project. The two are NOT interchangeable: the
+      // header never follows a committed `working-directory/change`, so a
+      // consumer that executes/renders in the session's directory must read
+      // the projection.
+      const effectiveCwd = projectedWorkingDirectory(values.workingDirectory) ?? session.header.cwd
+      return detachedSessionStatus(sessionId, forDisplay, effectiveCwd)
     } catch {
       // A projection authority failure is `undefined` (unknown), never a
       // crash and never partially invented facts.

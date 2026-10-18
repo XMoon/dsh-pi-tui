@@ -37,12 +37,12 @@ function fakeCtx(services: {
       : [{ name: 'globalcmd', description: 'g' }, { name: 'scopedcmd', description: 's' }],
   }
   return {
-    get: (name) => {
+    get: ((name: string) => {
       if (name === 'commands') return commands as never
       if (name === 'skills') return services.skills as never
       if (name === 'agentPresets') return services.presets as never
       return undefined
-    },
+    }) as SurfaceCatalogContext['get'],
   }
 }
 

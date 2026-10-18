@@ -19,6 +19,7 @@
 
 import { safeErrorMessage } from '../process/errors.ts'
 import { readHumanSkillCatalog, resolveLiveSkillTarget, type SkillCatalogContext } from './skill-catalog.ts'
+import { effectiveAgentCwd, type WorkingDirectoryServiceLike } from './working-directory-direct.ts'
 import type { HumanSkillSummary } from '../../domain/catalog/skill.ts'
 import { commandSummaryOf, type SurfaceCatalogIssue, type SurfaceCatalogSnapshot, type SurfaceCommandDescriptor, type SurfaceCommandSummary } from '../../domain/catalog/surface.ts'
 
@@ -42,9 +43,12 @@ export interface SurfaceCommandsService {
 /** The narrow context surface {@link readSurfaceCatalog} consumes. The
  * SKILL services are NOT reached here: every dsh skill/agent-presets
  * access goes through `runtime/direct/skill-catalog.ts` (the single-point
- * adapter, plan appendix B.1). */
+ * adapter, plan appendix B.1). `workingDirectory` is the official Session
+ * directory owner the skill scan scope resolves from — absent in a minimal
+ * composition, where the immutable header cwd remains the read. */
 export interface SurfaceCatalogContext {
   get(name: 'commands'): SurfaceCommandsService | undefined
+  get(name: 'workingDirectory'): WorkingDirectoryServiceLike | undefined
 }
 
 /**
@@ -123,8 +127,14 @@ export async function readSurfaceCatalog(
   let skills: readonly HumanSkillSummary[] = []
   // The skill read goes through the single-point adapter (plan appendix
   // B.1): the agent's own registry (preset-scoped or host) and the AGENT
-  // OBJECT as scope, snapshot-first with the list() compatibility path.
-  const skillTarget = resolveLiveSkillTarget(ctx as unknown as SkillCatalogContext, agent, agent.session.header.cwd ?? process.cwd())
+  // OBJECT as scope, snapshot-first with the list() compatibility path. The
+  // scan scope is the Session's EFFECTIVE directory, so a committed
+  // `working-directory/change` is where newly discovered skills come from.
+  const skillTarget = resolveLiveSkillTarget(
+    ctx as unknown as SkillCatalogContext,
+    agent,
+    effectiveAgentCwd(ctx.get('workingDirectory'), agent) ?? process.cwd(),
+  )
   if (skillTarget !== undefined) {
     try {
       signal.throwIfAborted()

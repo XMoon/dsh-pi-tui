@@ -46,6 +46,7 @@ import {
   type FileReferencesServiceLike,
   type LiveAgentLike,
 } from './host-file-augmentation-direct.ts'
+import { effectiveAgentCwd, type WorkingDirectoryServiceLike } from './working-directory-direct.ts'
 import type {
   HostFileListResult,
   HostFilePort,
@@ -110,17 +111,23 @@ export class DirectHostFilePort implements HostFilePort {
     return this.fdPath
   }
 
+  /** The official working-directory authority of the Direct Host (the SAME
+   *  owner the official fs/shell tools read), when the composition mounts it. */
+  private workingDirectory(): WorkingDirectoryServiceLike | undefined {
+    return this.ctx?.get('workingDirectory') as WorkingDirectoryServiceLike | undefined
+  }
+
   /** The scope's workspace cwd (undefined = the session is unresolvable —
-   * a fail-closed empty discovery). A RESOLVED session without a header
-   * cwd falls back to the process cwd — DIRECT-mode parity with the
-   * runner's sessionCwd() (the Client machine IS the Host machine); a
-   * Remote adapter must NOT inherit this fallback (the plan's locality
-   * rule: remote discovery fails closed on an unresolvable scope). */
+   * a fail-closed empty discovery). A RESOLVED session without any official
+   * cwd falls back to the process cwd — DIRECT-mode parity with the runner's
+   * sessionCwd() (the Client machine IS the Host machine); a Remote adapter
+   * must NOT inherit this fallback (the plan's locality rule: remote
+   * discovery fails closed on an unresolvable scope). */
   private scopeCwd(scope: HostFileScope): string | undefined {
     if (scope.kind === 'workspace') return scope.cwd
     const agent = this.agentFor(scope.sessionId) as LiveAgentLike | undefined
     if (agent === undefined) return undefined
-    return agent.session.header.cwd ?? process.cwd()
+    return effectiveAgentCwd(this.workingDirectory(), agent) ?? process.cwd()
   }
 
   async listReferences(
@@ -148,6 +155,7 @@ export class DirectHostFilePort implements HostFilePort {
         official: this.fileReferences(),
         driver: this.hostDiscovery,
         environment: hostPathQueryEnvironment(),
+        workingDirectory: this.workingDirectory(),
       })
     }
 

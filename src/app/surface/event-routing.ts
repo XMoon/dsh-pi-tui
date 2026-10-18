@@ -174,6 +174,14 @@ export interface SurfaceEventRoutingSource<Event extends RoutedSessionEvent> {
   exitView(): void
   refreshStatusCheap(): void
   refreshStatusAndWelcome(): void
+  /**
+   * The CURRENT Session's effective workspace directory changed
+   * (`working-directory/change`): re-derive the cwd-dependent presentation —
+   * footer/welcome status, the OSC 0 identity fallback and the terminal-local
+   * OSC 7 projection — now, instead of at the next unrelated refresh. Direct
+   * reads the official projection; a Remote Host cwd never reaches OSC 7.
+   */
+  refreshWorkspaceFacts(): void
   /** Fold one `goal/change` into the runner's status goal text. */
   applyGoalChange(event: Event): void
   /** The session title one `session/title` event implies. */
@@ -447,6 +455,12 @@ export function createEventRouting<Event extends RoutedSessionEvent>(
     if (event.type === 'todo/write') options.mounted().commitStatusFacts({ todos: (event.data as { readonly todos: readonly TodoItem[] }).todos })
     if (event.type === 'plan/mode') options.mounted().commitStatusFacts({ planMode: (event.data as { readonly active: boolean }).active })
     if (event.type === 'session/title') options.mounted().commitStatusFacts({ sessionTitle: source.sessionTitleOf(event) })
+    // The Session's EFFECTIVE directory is a projection fact (S2/PR-B): the
+    // committed change reaches the footer, the welcome card, the OSC 0
+    // identity fallback and the terminal-local OSC 7 through THIS refresh —
+    // the header keeps the original project and is never rendered as the
+    // live workspace.
+    if (event.type === 'working-directory/change') source.refreshWorkspaceFacts()
     // A permission switch (command, Shift+Tab, settings panel) lands as
     // knob events between turns: refresh the footer mode badge right away
     // instead of waiting for the next step/turn boundary.

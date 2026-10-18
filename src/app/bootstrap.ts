@@ -125,6 +125,7 @@ import { productionTspConnector, selectRendererMount, tspRequested } from './boo
 import { createTerminalOutputGate } from './bootstrap/terminal-output.ts'
 import { createPluginManagerPanel } from '../tui/plugin-manager/panel.ts'
 import { type SessionQueryLike } from '../runtime/direct/session-direct.ts'
+import { type WorkingDirectoryServiceLike } from '../runtime/direct/working-directory-direct.ts'
 import { serializeTuiSettingsMutation, type TuiSettingsDoc } from '../runtime/config-port.ts'
 import type { AssistantLiveInput } from '../runtime/assistant-stream-port.ts'
 import { requireCreated, requireOpened, type SessionHandle } from '../runtime/session-lifecycle-port.ts'
@@ -1188,6 +1189,11 @@ export function applyRunnerWithRuntime(
           ctx.get('sessionProjections') as PlanProjectionLike | undefined,
           (agent as unknown as Agent).session,
         ) ?? false,
+        // The hydrated workspace cwd is the Session's EFFECTIVE directory
+        // (the official working-directory projection the `working_directory`
+        // tool commits into), never the immutable header project.
+        effectiveCwd: (agent) => (ctx.get('workingDirectory') as WorkingDirectoryServiceLike | undefined)
+          ?.get((agent as unknown as Agent).session),
       },
       status: {
         setGoalText: (text) => status.setGoal(text),
@@ -2230,9 +2236,18 @@ export function applyRunnerWithRuntime(
         observeChild: (childId) => {
           const query = ctx.get('sessionQuery') as SessionQueryLike | undefined
           if (query?.observeSession === undefined) return undefined
-          return query.observeSession(SessionId(childId), { projectionMode: 'none' })
+          // `projectionMode: 'all'` carries the official projection baseline
+          // (including `workingDirectory`) at the SAME cut as the log: the
+          // child's displayed directory must be its effective one, which the
+          // header alone does not follow.
+          return query.observeSession(SessionId(childId), { projectionMode: 'all' })
         },
         childAgent: (childId) => agents.get(SessionId(childId)),
+        childEffectiveCwd: (childId) => {
+          const session = sessions.get(SessionId(childId))
+          if (session === undefined) return undefined
+          return (ctx.get('workingDirectory') as WorkingDirectoryServiceLike | undefined)?.get(session)
+        },
         assistantStreamBaselineFor: (agent) => assistantStreamBaselineFor(agent),
       })
       : remoteSources.childView as unknown as ViewerChildSource<SessionEvent>
@@ -3001,6 +3016,15 @@ export function applyRunnerWithRuntime(
       refreshStatusAndWelcome: () => {
         status.refresh()
         status.updateWelcomeCard()
+      },
+      // The effective-directory projection changed: re-derive every
+      // cwd-dependent presentation fact of THIS session (footer/welcome, the
+      // OSC 0 identity fallback, the terminal-local OSC 7 write).
+      refreshWorkspaceFacts: () => {
+        status.refresh()
+        status.updateWelcomeCard()
+        status.refreshTerminalTitle()
+        status.refreshTerminalCwd()
       },
       applyGoalChange: (event) => status.applyGoalChange(event),
       sessionTitleOf: (event) => foldSessionTitle([event])?.title,

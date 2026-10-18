@@ -32,6 +32,10 @@ export interface DirectChildSession<Event> {
 export interface DirectChildObservation<Event> {
   readonly events: readonly Event[]
   readonly header: { readonly cwd?: unknown }
+  /** The official projection baseline at the observation's cut, when the
+   *  registry is mounted (the `workingDirectory` projection is the child's
+   *  own effective directory — the header keeps the original project). */
+  readonly projections?: { readonly values?: Readonly<Record<string, unknown>> }
   [Symbol.dispose](): void
 }
 
@@ -52,8 +56,20 @@ export interface DirectChildViewDeps<Event> {
   observeChild(childId: string): Promise<DirectChildObservation<Event>> | undefined
   /** The exact live child Agent, or `undefined` when not mounted. */
   childAgent(childId: string): DirectChildAgent | undefined
+  /** The official effective working directory of one ATTACHED child Session
+   *  (`ctx.workingDirectory.get` of that exact Session), or `undefined` when
+   *  the child is not attached or the composition mounts no owner. */
+  childEffectiveCwd(childId: string): string | undefined
   /** The live assistant-stream baseline of one exact Agent. */
   assistantStreamBaselineFor(agent: DirectChildAgent): readonly AssistantLiveInput[]
+}
+
+/** The effective directory recorded by one official projection snapshot: the
+ *  wire view is `string | null` (null = no directory recorded), so only a
+ *  non-empty string answers here. */
+function workingDirectoryValue(values: Readonly<Record<string, unknown>> | undefined): string | undefined {
+  const value = values?.workingDirectory
+  return typeof value === 'string' && value !== '' ? value : undefined
 }
 
 /**
@@ -70,6 +86,9 @@ export function createDirectChildViewSource<Event extends SessionPresentationEve
       const initial = deps.childSession(childId)
       let observedEvents: readonly Event[] = initial?.snapshotEvents() ?? []
       let observedHeader: { readonly cwd?: unknown } | undefined = initial?.header
+      // The cold observation's own projection cut (the child may have moved
+      // its directory before this viewer ever opened it).
+      let observedCwd: string | undefined
       if (initial === undefined) {
         // An inactive child is no longer in the live store; load its log
         // through the semantic session-query seam.
@@ -78,6 +97,7 @@ export function createDirectChildViewSource<Event extends SessionPresentationEve
           try {
             observedEvents = observation.events
             observedHeader = observation.header
+            observedCwd = workingDirectoryValue(observation.projections?.values)
           } finally {
             observation[Symbol.dispose]()
           }
@@ -90,6 +110,12 @@ export function createDirectChildViewSource<Event extends SessionPresentationEve
       const agent = deps.childAgent(childId)
       const durableEvents = current?.snapshotEvents() ?? observedEvents
       const header = current?.header ?? observedHeader
+      // The EFFECTIVE directory of THAT child Session: the attached Session's
+      // official projection, else the cold observation's projection, else the
+      // immutable header project (the same fallback the DTO has always used).
+      const cwd = deps.childEffectiveCwd(childId)
+        ?? (current === undefined ? observedCwd : undefined)
+        ?? (typeof header?.cwd === 'string' ? header.cwd : '')
       let activity: 'running' | 'inactive' = agent === undefined
         ? target.activity
         : agent.status === 'running' ? 'running' : 'inactive'
@@ -103,7 +129,7 @@ export function createDirectChildViewSource<Event extends SessionPresentationEve
         durableEvents,
         liveInputs: agent === undefined ? [] : deps.assistantStreamBaselineFor(agent),
         activity,
-        cwd: typeof header?.cwd === 'string' ? header.cwd : '',
+        cwd,
         revision: undefined,
       }
       let released = false

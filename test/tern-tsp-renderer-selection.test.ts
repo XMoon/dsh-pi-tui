@@ -242,6 +242,7 @@ function mountHarness(): Harness {
     exitView: () => {},
     refreshStatusCheap: () => {},
     refreshStatusAndWelcome: () => {},
+    refreshWorkspaceFacts: () => {},
     applyGoalChange: () => {},
     sessionTitleOf: () => undefined,
     extendLoadedHistory: () => false,

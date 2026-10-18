@@ -253,6 +253,7 @@ function mountHarness(options: {
     exitView: () => { viewed = undefined },
     refreshStatusCheap: () => {},
     refreshStatusAndWelcome: () => {},
+    refreshWorkspaceFacts: () => {},
     applyGoalChange: () => {},
     sessionTitleOf: () => undefined,
     extendLoadedHistory: () => false,
@@ -985,6 +986,7 @@ function mountPresentationHarness(options: {
       installModelSelection: noop,
       assistantStreamBaselineFor: () => [],
       planActive: () => false,
+      effectiveCwd: (agent) => agent.session.header.cwd,
     },
     status: {
       setGoalText: noop,
@@ -1047,6 +1049,7 @@ function mountPresentationHarness(options: {
     exitView: noop,
     refreshStatusCheap: noop,
     refreshStatusAndWelcome: noop,
+    refreshWorkspaceFacts: noop,
     applyGoalChange: noop,
     sessionTitleOf: () => undefined,
     extendLoadedHistory: () => false,
