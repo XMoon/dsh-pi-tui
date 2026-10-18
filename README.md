@@ -344,6 +344,17 @@ L1，零写入。L2 浏览/已结算时，`Enter` 可重新打开可写行的选
 Thinking detail 仍是只读行。旧的完整设置编辑器仍然可用：`Other settings` → `Open existing settings…`
 会先关闭工作区并恢复原界面，再打开原有编辑器，Theme、Plugin Manager、键位、权限与扩展设置的写入路径全部不变。
 
+`/settings` 的 `Other settings` 里新增 `Web Search / Fetch`：选择后先关闭工作区，再打开原有编辑器
+的 Web 段并定位到第一项。段内可切换搜索 Provider（`Messages`，官方默认，或独立计费的
+`DeepSeek Search API`）、Fetch Provider（`HTTP`，官方默认，或 `DeepSeek Fetch API`），设置 Search API
+结果数（1–50，快选 5/10/20/50）、`Share Original Question`（开启时每次新搜索附带最多 128 字符的
+原始人类问题 `ori_question`）与 API endpoint base（必须显式确认 https 地址；凭据会发往该地址）。
+`[current]` 只在官方写入与权威回读一致后移动，失败显示 `Not saved`；选择对下一次搜索/获取生效，
+运行中的操作不会被追溯切换。DeepSeek API key 只显示是否配置与来源层，配置/清除复用现有遮蔽
+`/login DEEPSEEK_API_KEY` / `/logout DEEPSEEK_API_KEY`（先关闭设置界面再执行）。Esc 从 Web 段返回
+同一 `Web Search / Fetch` 行；从 `Open existing settings…` 进入的旧路径仍返回会话。Remote 后端显示
+不可用，不发任何 Host 命名空间。
+
 `/settings` 中的 `Icon style` 可切换 TUI 结构图标的风格:`Emoji`(默认,
 彩色)、`Symbols`(紧凑的单格终端符号)、`Minimal`(隐藏装饰性图标,只
 保留状态/交互标记);切换立即生效并持久化。
