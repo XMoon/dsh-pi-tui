@@ -353,7 +353,7 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
     switch (id) {
       case 'web-search-provider':
         return providerSelectable(WEB_SEARCH_PROVIDER_VALUES, webSettings?.searchProvider)
-          ? `Current: ${current} · Messages is the official DeepSeek Messages search; the DeepSeek Search API is a separately billed endpoint. [current] follows a verified write; [default] marks the packaged default. The choice applies to the next search, never to one already running.`
+          ? `Current: ${current} · Messages is the official DeepSeek Messages search; the DeepSeek Search API is a separately billed endpoint. [current] follows a verified write; [default] marks the packaged default. The choice applies to the next search, never to one already running. Esc returns to the Workspace.`
           : `Current: ${current} · The configured search provider is a custom route: it is displayed as-is and is not selectable here. The official candidates are Messages and DeepSeek Search API.`
       case 'web-fetch-provider':
         return providerSelectable(WEB_FETCH_PROVIDER_VALUES, webSettings?.fetchProvider)
