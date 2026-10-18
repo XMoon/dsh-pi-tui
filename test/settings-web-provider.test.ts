@@ -815,7 +815,7 @@ test('a superseded readback settling while the newer read is STILL pending never
 function supersededEndpointCase(
   name: string,
   arrangeNewest: (h: Harness) => void,
-  assertVerdict: (frame: string, columns: number) => void,
+  assertVerdict: (frame: string, columns: number, h: Harness) => Promise<void> | void,
 ): void {
   for (const [columns, rows] of SUPERSEDED_SIZES) test(`a superseded endpoint readback is judged by the NEWEST read at ${columns}x${rows}: ${name}`, async t => {
     const h = setup({ columns, rows })
@@ -868,7 +868,7 @@ function supersededEndpointCase(
     releaseR3()
     await settle(h)
     for (let index = 0; index < 4; index += 1) await key(h, DOWN)
-    assertVerdict(h.view(), columns)
+    await assertVerdict(h.view(), columns, h)
   })
 }
 
@@ -890,7 +890,7 @@ supersededEndpointCase(
 supersededEndpointCase(
   'the Host kept another value',
   h => { h.store.web.api.baseURL = 'https://other.example/v1' },
-  (frame, columns) => {
+  async (frame, columns, h) => {
     // R1 was UNREADABLE: an `Outcome unknown` here would be the superseded
     // snapshot's answer, so `Not saved` proves the NEWEST facts decided.
     assert.match(frame, /\[Not saved\]/u, `a kept value is reported as Not saved:\n${frame}`)
@@ -898,9 +898,15 @@ supersededEndpointCase(
     // The endpoint panel (whose own message named the Host's value) is already
     // closed when a superseded verdict lands, so the ROW's Detail has to carry
     // the newest authority value or the user never sees it.
-    // The 44-column floor drops the Detail description (the frozen drop order),
-    // so the value is asserted on the sizes that paint it; the verdict CHIP is
-    // asserted at every size above.
+    // The 44-column floor drops the Detail description (the frozen drop order):
+    // there the value is read from the endpoint editor, which always opens on
+    // the authoritative value.
+    if (columns < 80) {
+      await key(h, ENTER)
+      assert.ok(h.view().includes('https://other.example/v1'),
+        `the endpoint editor opens on the value the Host keeps at ${columns} columns:\n${h.view()}`)
+      await key(h, ESC)
+    }
     if (columns >= 80) {
       assert.ok(frame.includes('Current: Not saved'), `the row states the verdict:\n${frame}`)
       assert.ok(frame.includes('the Host keeps "https://other.example/v1"'),

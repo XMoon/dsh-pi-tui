@@ -1423,6 +1423,57 @@ paint these Settings surfaces). The live palette switch is covered in-process
 instead: the mounted rows register a theme observer and rebuild their cached
 chip ANSI, asserted by cell-ink in `test/settings-web-visual.test.ts`.
 
+## 8c. Real-terminal record — S2 review delta (Task Center action bar)
+
+Produced with the same isolated development home and rc.2 CLI as §8b
+(`/home/xmoon/.local/bin/dsh-next` with `DSH_NEXT_ROOT=<the S2 worktree>`,
+`DSH_HOME=~/.dsh-pi-tui-next`), `tmux new-session -d -s <name> -x 120 -y 40`,
+launched with `env -u NO_COLOR`, one key at a time, frames captured with
+`tmux capture-pane -p` (plain, shown here) and `-e` (ANSI: 21 `\e[38;2;…`
+sequences per frame). The run pressed ONLY `/tasks`: no prompt, no tool call, no
+job and no subagent was created, and no DeepSeek endpoint was contacted.
+
+The changed behaviour is the Task Center's action bar, which advertises `s stop`
+only for a row it can actually stop. With an EMPTY roster (no stoppable row
+exists — the state this machine reaches without a model turn or a registered
+external provider) the pre-change build and the reviewed build differ only in
+that segment:
+
+BEFORE (`s stop` painted although no row can be stopped):
+
+```text
+ ╭────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+ │ Tasks [TRACKED]  0 active · 0/0 shown                                                                              │
+ │                                                                                                                    │
+ │ No matching tasks                                                                                                  │
+ │                                                                                                                    │
+ │   Enter open · ↑↓ select · ←→ tree · s stop · / search · a scope · Shift+Tab type · Esc close                      │
+ ╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+```
+
+AFTER (the same action bar without the dead segment):
+
+```text
+ ╭────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+ │ Tasks [TRACKED]  0 active · 0/0 shown                                                                              │
+ │                                                                                                                    │
+ │ No matching tasks                                                                                                  │
+ │                                                                                                                    │
+ │   Enter open · ↑↓ select · ←→ tree · / search · a scope · Shift+Tab type · Esc close                               │
+ ╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+```
+
+NOT_RUN in this record — a real-terminal frame of these states needs an
+environment this machine does not have (a model turn with an authorized
+credential to create a job or subagent row, a registered external subagent
+provider, a Host that keeps a different endpoint value, and an empty readable
+Session roster on the Direct stack): the NON-EMPTY non-stoppable row (a settled
+job / an external catalog leaf), the refused-endpoint row's kept value, and the
+Session Picker's `No readable sessions` empty state. Those states are pinned by
+the L6 fixtures instead (`test/task-center-external-leaf.test.ts`,
+`test/settings-web-provider.test.ts`, `test/settings-web-visual.test.ts`, and
+`test/session-picker-loading.test.ts` at 80×24 AND 44×20).
+
 ## 9. Re-verification recipe
 
 For V2/V3 (and for any later surface PR), the after-evidence must be produced
