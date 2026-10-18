@@ -20,6 +20,7 @@ import { latestLine } from '../../domain/transcript/text.ts'
 import { relativizeToCwd } from '../transcript/tool-presentation.ts'
 import { color } from '../theme/runtime.ts'
 import { thinkingPreviewTail } from './transcript/thinking-preview.ts'
+import { sanitizeDisplayText } from '../presentation/terminal-text.ts'
 import type { PresentedFilePresentation, TranscriptMessage } from '../../transcript.ts'
 
 /** The assistant delivered-files tail folds after this many files. */
@@ -230,7 +231,7 @@ export class ThinkingCompactComponent implements Component {
   render(width: number): string[] {
     const existing = this.cached.get(width)
     if (existing !== undefined) return existing
-    const previewLine = latestLine(this.message.text)
+    const previewLine = latestLine(sanitizeDisplayText(this.message.text))
     const title = color.textDim(`${iconLead('thinking', this.iconStyle)}Thinking`)
     let lines: string[]
     if (previewLine === '') {
@@ -447,14 +448,14 @@ export class DeliveredFilesComponent implements Component {
       descriptionRows: Array<{ row: number; start: number; end: number }>
     }> = []
     for (const [index, file] of shown.entries()) {
-      const path = relativizeToCwd(file.path, this.workspaceRoot).replace(/\r\n|\r|\n/g, ' ')
+      const path = sanitizeDisplayText(relativizeToCwd(file.path, this.workspaceRoot)).replace(/\r\n|\r|\n/g, ' ')
       const pathRow = rows.length
       const pathStart = visibleWidth('  ')
       rows.push(truncateToWidth(color.textDim(`  ${path}`), safeWidth, '…'))
       const descriptionRows: Array<{ row: number; start: number; end: number }> = []
       if (file.description !== undefined && file.description !== '') {
         const descriptionWidth = Math.max(1, safeWidth - 4)
-        for (const line of wrapTextWithAnsi(file.description, descriptionWidth)) {
+        for (const line of wrapTextWithAnsi(sanitizeDisplayText(file.description), descriptionWidth)) {
           const descriptionRow = rows.length
           const start = visibleWidth('    ')
           rows.push(truncateToWidth(color.textDim(`    ${line}`), safeWidth, '…'))

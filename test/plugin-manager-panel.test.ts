@@ -181,3 +181,36 @@ test('an external dispose notifies the host exactly once and never closes it', a
   panel.handleInput('\r')
   assert.equal(disposed, 1)
 })
+
+test('hostile plugin metadata is projected before painting (no raw terminal control)', async () => {
+  const hostile = 'evil\u001b]52;c;YXR0YWNr\u0007\u001b[2J\u009b2Jname'
+  const hostilePort: PluginManagerPort = {
+    ...port(),
+    snapshot: async () => ({
+      bundles: [],
+      plugins: [{ entryId: 'e-x', moduleName: hostile, enabled: true, fiberPhase: 'active', patchId: 'p-x' }],
+      registries: { registry: null, fallbackRegistries: [], resolved: null },
+      exemptions: [],
+      exemptionWarnings: [],
+    }),
+  }
+  const controller = new PluginManagerController(hostilePort, {
+    requestRender: () => {},
+    requestClose: () => {},
+    notify: () => {},
+    isOpen: () => true,
+    diag: createDiag({ filePath: undefined, stderrLevel: 'off' }),
+  }, { observations: () => [] })
+  const panel = new PluginManagerPanel(controller, () => {})
+  panel.setMaxRows(30)
+  controller.open('direct-command')
+  await new Promise<void>(resolve => setTimeout(resolve, 0))
+  await new Promise<void>(resolve => setTimeout(resolve, 0))
+
+  const rendered = panel.render(90)
+  const text = strip(rendered.join('\n'))
+  assert.ok(text.includes('evil'), `the safe plugin identity survives:\n${text}`)
+  assert.ok(!text.includes('YXR0YWNr'), `no OSC payload is painted:\n${text}`)
+  assert.ok(!rendered.join('').includes('\u009b'), 'no raw C1 byte reaches the frame')
+  assert.ok(!rendered.join('').includes('\u001b]52'), 'no raw OSC introducer reaches the frame')
+})

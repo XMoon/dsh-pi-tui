@@ -2090,3 +2090,23 @@ test('a refresh that moves the configured selection keeps the Effort-bound row s
   assert.deepEqual(h.applied, [{ provider: 'p1', model: 'sol', reasoningEffort: 'low' }])
   h.app.stop()
 })
+
+test('hostile catalog metadata never reaches the terminal raw', async () => {
+  const hostile = 'evil\u001b]52;c;YXR0YWNr\u0007\u001b[2J\u009b2Jname'
+  const h = await openPicker({ loading: true })
+  h.hydrate(makeDirectory({
+    groups: [{
+      id: 'p1',
+      name: hostile,
+      models: [model('m1', { name: hostile, efforts: [{ id: 'low', name: hostile }], defaultEffort: 'low' })],
+    }],
+    failures: [{ id: 'p2', name: hostile, message: hostile }],
+    default: { provider: 'p1', model: 'm1' },
+  }))
+  await h.vt.waitForRender()
+  const raw = h.vt.writes.join('')
+  assert.ok(!raw.includes('YXR0YWNr'), `no OSC 52 payload from catalog metadata reaches the terminal:\n${viewOf(h.vt)}`)
+  assert.ok(!raw.includes('\u009b'), 'no raw C1 byte from catalog metadata reaches the terminal')
+  assert.match(viewOf(h.vt), /evil/, 'the readable catalog metadata survives the projection')
+  h.app.stop()
+})

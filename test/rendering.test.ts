@@ -8,6 +8,7 @@
 import assert from 'node:assert/strict'
 import { afterEach, test } from 'node:test'
 import { MessageId, ToolCallId } from '@deepseek-ai/dsh-llm'
+import { CommandId } from '@deepseek-ai/dsh-commands'
 import { SessionSeq } from '@deepseek-ai/dsh-session'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import type { AssistantLiveChunk } from '../src/runtime/assistant-stream-port.ts'
@@ -4922,4 +4923,199 @@ test('minimal keeps the bullet and semantic queue marker; thinking/compaction ti
   assert.ok(lines.some(line => line.startsWith('Thinking')), `thinking title must go bare (no leading space):\n${view}`)
   assert.ok(lines.some(line => line.startsWith('Context compacted')), `compaction title must go bare:\n${view}`)
   assert.ok(view.includes('❯ job done: exit 0'), `the semantic queue marker must survive minimal:\n${view}`)
+})
+
+// ── untrusted terminal output hardening: the transcript wire contract ──────
+
+/** One hostile payload covering every control family the projection drops. */
+const HOSTILE_PAYLOAD =
+  'safe-start'
+  + '\u001b]52;c;YXR0YWNr\u0007' // OSC 52 clipboard
+  + '\u001b]0;hijacked-title\u001b\\' // OSC 0 title (ST-terminated)
+  + '\u001b[2J\u001b[H' // clear + home
+  + '\u001b[?1049h' // alternate screen
+  + '\u001b[?1000h' // mouse mode
+  + '\u001bPbad\u001b\\' // device control string
+  + '\u009b2J' // raw 8-bit C1 CSI
+  + '\u001b[38;2;999;1;1m' // malformed SGR (dropped whole)
+  + 'needle-text'
+  + '\rprogress'
+  + '\tend'
+
+const RAW_HAZARDS = ['YXR0YWNr', 'hijacked-title', '\u001bPbad', '\u001b[38;2;999;1;1m', '\u009b']
+
+test('untrusted transcript text never carries its own terminal controls to the wire', async () => {
+  for (const preset of ['full', 'compact', 'focus'] as const) {
+    const { vt, app, writes } = startAppWithWrites()
+    app.setDisplayPreset(preset)
+    const user: TranscriptMessage = { kind: 'user', turn: 0, text: HOSTILE_PAYLOAD }
+    const assistant: TranscriptMessage = { kind: 'assistant', turn: 0, text: HOSTILE_PAYLOAD }
+    const thinking: TranscriptMessage = { kind: 'thinking', turn: 0, text: HOSTILE_PAYLOAD }
+    const system: TranscriptMessage = {
+      kind: 'system', turn: 0, text: HOSTILE_PAYLOAD, label: HOSTILE_PAYLOAD, summary: HOSTILE_PAYLOAD, context: true,
+    }
+    const command: TranscriptMessage = {
+      kind: 'command',
+      commandId: CommandId('cmd-hostile'),
+      seq: SessionSeq(1),
+      time: 1,
+      name: HOSTILE_PAYLOAD,
+      args: HOSTILE_PAYLOAD,
+      outcome: { kind: 'success', text: HOSTILE_PAYLOAD },
+    }
+    const tool: TranscriptMessage = {
+      kind: 'tool', turn: 0, name: 'bash', args: '{"command":"echo hi"}', result: HOSTILE_PAYLOAD, status: 'ok',
+    }
+    app.setTranscript([user, assistant, thinking, system, command, tool])
+    const view = await viewport(vt)
+    const stream = writes.join('')
+    for (const hazard of RAW_HAZARDS) {
+      assert.ok(!stream.includes(hazard),
+        `${preset}: hostile bytes reached the terminal stream: ${JSON.stringify(hazard)}`)
+    }
+    assert.match(view, /safe-start/, `${preset}: the payload's readable text survives:\n${view}`)
+    // The source objects stay byte-exact (one display projection, no mutation).
+    assert.equal(user.text, HOSTILE_PAYLOAD, `${preset}: the user source text is untouched`)
+    assert.equal(command.outcome?.text, HOSTILE_PAYLOAD, `${preset}: the command outcome is untouched`)
+    assert.equal(tool.result, HOSTILE_PAYLOAD, `${preset}: the tool result is untouched`)
+    // stop() does not release the process's single-live-TUI slot; dispose does.
+    startedApps.delete(app)
+    app.dispose()
+  }
+})
+
+test('a bash tool result keeps whitelisted log SGR at the TTY', async () => {
+  const { vt, app, writes } = startAppWithWrites()
+  const tool: TranscriptMessage = {
+    kind: 'tool', turn: 0, name: 'bash', args: '{"command":"printf"}',
+    result: 'plain \u001b[38;5;196mred\u001b[0m tail', status: 'ok',
+  }
+  app.setTranscript([tool])
+  await viewport(vt)
+  const stream = writes.join('')
+  assert.ok(stream.includes('\u001b[38;5;196m'), 'the whitelisted 256-color SGR reaches the TTY')
+  assert.equal(tool.result, 'plain \u001b[38;5;196mred\u001b[0m tail', 'the raw result is preserved')
+  app.stop()
+})
+
+test('hostile attachment, deliverable and ambient-cluster text never reaches the wire raw', async () => {
+  const { vt, app, writes } = startAppWithWrites()
+  const hostile = 'evil\u001b]52;c;YXR0YWNr\u0007\u001b[2J\u009b2Jname'
+  const user = {
+    kind: 'user', turn: 0, text: 'prompt',
+    content: [{ type: 'file', attachment: { id: 'a1', name: hostile, bytes: 12 } }],
+  } as unknown as TranscriptMessage
+  const assistant = {
+    kind: 'assistant', turn: 0, text: 'done',
+    deliverables: [{ path: hostile, description: hostile }],
+  } as unknown as TranscriptMessage
+  const ambient = (text: string): TranscriptMessage => ({
+    kind: 'system', turn: 0, text, context: true,
+    label: hostile, summary: hostile,
+    source: { kind: 'context', form: 'instructions' },
+  }) as unknown as TranscriptMessage
+  app.setTranscript([user, assistant, ambient('first'), ambient('second')])
+  const view = await viewport(vt)
+  const stream = writes.join('')
+  assert.ok(!stream.includes('YXR0YWNr'), 'no OSC 52 payload from an attachment/deliverable/cluster reaches the stream')
+  assert.ok(!stream.includes('\u009b'), 'no raw C1 byte reaches the stream')
+  assert.ok(!view.includes('YXR0YWNr'), `the painted frame carries no payload:\n${view}`)
+  app.stop()
+})
+
+test('hostile todo content never reaches the dock summary raw', async () => {
+  const { vt, app, writes } = startAppWithWrites()
+  const hostile = 'evil\u001b]52;c;YXR0YWNr\u0007\u001b[2J\u009b2Jtask'
+  app.setTodoSummary([{ content: hostile, status: 'in_progress' }])
+  const view = await viewport(vt)
+  const stream = writes.join('')
+  assert.ok(!stream.includes('YXR0YWNr'), 'no OSC 52 payload from a todo row reaches the terminal stream')
+  assert.ok(!stream.includes('\u009b'), 'no raw C1 byte from a todo row reaches the terminal stream')
+  assert.match(view, /evil/, `the readable todo text survives:\n${view}`)
+  app.stop()
+})
+
+test('an unknown user content block fallback never reaches the wire raw', async () => {
+  const { vt, app, writes } = startAppWithWrites()
+  // JSON.stringify escapes ESC (< U+0020) but leaves C1 characters literal, so
+  // the unknown-block fallback is the path where a raw C1 byte can survive.
+  const hostile = 'evil\u009b2J\u009d0;PWNED\u0007name'
+  const user = {
+    kind: 'user', turn: 0, text: 'prompt',
+    content: [
+      { type: 'text', text: 'ok' },
+      { type: 'future-test-block', payload: { value: hostile } },
+    ],
+  } as unknown as TranscriptMessage
+  app.setTranscript([user])
+  const view = await viewport(vt)
+  const stream = writes.join('')
+  assert.ok(!stream.includes('\u009b'), 'no raw C1 CSI from an unknown block reaches the terminal stream')
+  assert.ok(!stream.includes('\u009d'), 'no raw C1 OSC from an unknown block reaches the terminal stream')
+  assert.match(view, /evil/, `the readable unknown-block text survives:\n${view}`)
+  app.stop()
+})
+
+test('a diff-shaped terminal result keeps its whitelisted log SGR', async () => {
+  const { vt, app, writes } = startAppWithWrites()
+  const tool: TranscriptMessage = {
+    kind: 'tool', turn: 0, name: 'bash', args: '{"command":"git diff"}',
+    result: 'head\n@@ -1 +1 @@\n\u001b[38;5;196mred line\u001b[0m', status: 'ok',
+  }
+  app.setTranscript([tool])
+  ;(app as unknown as { toggleMessageExpanded: (m: TranscriptMessage) => void }).toggleMessageExpanded(tool)
+  await viewport(vt)
+  assert.ok(writes.join('').includes('\u001b[38;5;196m'),
+    'the whitelisted SGR survives a diff-shaped terminal result instead of being re-projected as plain text')
+  app.stop()
+})
+
+test('a real Session fold carries hostile text to a safe transcript paint', async () => {
+  const hostile = 'evil\u001b]52;c;YXR0YWNr\u0007\u001b[2J\u009b2Jname'
+  const folder = new TranscriptFolder()
+  folder.apply([
+    { type: 'turn/start', seq: 0, time: 1, data: { turn: 0 } } as SessionEvent,
+    { type: 'step/start', seq: 1, time: 2, data: { turn: 0, step: 0 } } as SessionEvent,
+    {
+      type: 'user/message', seq: 2, time: 3,
+      data: { id: 'u-hostile', role: 'user', content: [{ type: 'text', text: hostile }], source: { kind: 'user' } },
+    } as unknown as SessionEvent,
+  ])
+  folder.applyLiveInput({
+    kind: 'chunk', sessionId: 'test', attemptId: 'attempt', turn: 0, step: 0, time: 4,
+    chunk: { type: 'text-delta', index: 0, text: hostile },
+  })
+  const messages = folder.messages()
+  assert.ok(messages.length > 0, 'the fold materialized the hostile rows')
+
+  const { vt, app, writes } = startAppWithWrites()
+  app.setTranscript(messages)
+  const view = await viewport(vt)
+  const stream = writes.join('')
+  assert.ok(!stream.includes('YXR0YWNr'), 'no OSC 52 payload reaches the TTY from a real fold')
+  assert.ok(!stream.includes('\u009b'), 'no raw C1 byte reaches the TTY from a real fold')
+  assert.match(view, /evil/, `the readable text survives:\n${view}`)
+  const user = messages.find(message => message.kind === 'user')
+  if (user !== undefined) assert.equal(user.text, hostile, 'the canonical transcript text is untouched')
+  app.stop()
+})
+
+test('hostile question text never reaches the TTY raw', async () => {
+  const { vt, app, writes } = startAppWithWrites()
+  const hostile = 'evil\u001b]52;c;YXR0YWNr\u0007\u001b[2J\u009b2Jname'
+  const pending = app.askQuestions([{
+    id: 'q1',
+    question: hostile,
+    header: hostile,
+    detail: hostile,
+    options: [{ label: hostile, description: hostile }],
+  }])
+  const view = await viewport(vt)
+  const stream = writes.join('')
+  assert.ok(!stream.includes('YXR0YWNr'), `no OSC 52 payload from question text reaches the TTY:\n${view}`)
+  assert.ok(!stream.includes('\u009b'), 'no raw C1 byte from question text reaches the TTY')
+  assert.match(view, /evil/, `the readable question text survives:\n${view}`)
+  vt.sendInput('\x1b')
+  await pending.catch(() => {})
+  app.stop()
 })

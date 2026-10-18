@@ -21,6 +21,7 @@
  */
 
 import { truncateToWidth, visibleWidth, wrapTextWithAnsi } from '@xmoon76/pi-tui'
+import { sanitizeDisplayText } from '../../presentation/terminal-text.ts'
 import { color } from '../../theme/runtime.ts'
 import { formatTokens } from '../../token-format.ts'
 import { iconFor } from '../../icons.ts'
@@ -31,6 +32,7 @@ import {
   compactSlotLine,
   compactThinkSlotLine,
   type CompactActionPresentation,
+  createDisplayProjection,
 } from './compact-process-preview.ts'
 import { compactActionStatParts, formatCompactDuration, type CompactActionStats } from '../../transcript/process-summary.ts'
 import { displayFailureText } from '../../../domain/transcript/failure.ts'
@@ -219,6 +221,8 @@ export function focusCollapsedBody(
   width: number,
   action?: CompactActionPresentation,
   preparingDisplay?: string,
+  /** The caller-owned display projection (see {@link compactWorkBody}). */
+  project: (text: string) => string = sanitizeDisplayText,
 ): string[] {
   const lines: string[] = []
   if (activity.think !== undefined) {
@@ -227,10 +231,10 @@ export function focusCollapsedBody(
     // later output — the preview reads from the start of its LATEST line.
     // The gate is the reasoning lifecycle fact, never `activity.completed`.
     // The line selection lives in the shared helper (post-F6 plan §8.2).
-    lines.push(compactThinkSlotLine({ text: activity.think.text, running: activity.think.running, width }))
+    lines.push(compactThinkSlotLine({ text: project(activity.think.text), running: activity.think.running, width }))
   }
   if (preparingDisplay !== undefined) {
-    lines.push(compactSlotLine('Action:', preparingDisplay, width))
+    lines.push(compactSlotLine('Action:', project(preparingDisplay), width))
   } else if (action !== undefined) {
     // The shared Action slot (addendum v2 §10/§11): status prefix
     // + presenter-first tool display + active PTC sub-call suffix + width
@@ -238,18 +242,18 @@ export function focusCollapsedBody(
     // Activity.
     lines.push(compactActionSlotLine({
       ...(action.status === undefined ? {} : { status: action.status }),
-      display: action.display,
+      display: project(action.display),
       ...(action.rootName === undefined ? {} : { rootName: action.rootName }),
       ...(action.activeSubCalls === undefined ? {} : { activeSubCalls: action.activeSubCalls }),
       width,
     }))
   }
   if (activity.message !== undefined) {
-    lines.push(...previewTailLines('Message:', activity.message.text, width, FOCUS_MESSAGE_MAX_ROWS))
+    lines.push(...previewTailLines('Message:', project(activity.message.text), width, FOCUS_MESSAGE_MAX_ROWS))
   }
   const reason = activity.reason
   if (reason?.kind === 'error' && reason.error !== undefined) {
-    lines.push(compactSlotLine('Error:', displayFailureText(reason.error), width))
+    lines.push(compactSlotLine('Error:', project(displayFailureText(reason.error)), width))
   }
   return lines
 }
@@ -282,6 +286,8 @@ export class FocusActivityComponent {
   private readonly preparingSummary: string | undefined
   private readonly phase: () => RunPhase
   private readonly timing: FocusTimingStore
+  /** Component-lifetime projection memo (see {@link focusCollapsedBody}). */
+  private readonly displayProjection = createDisplayProjection()
 
   constructor(options: {
     activity: TurnActivity
@@ -307,6 +313,11 @@ export class FocusActivityComponent {
     this.timing = options.timing
   }
 
+  /** Diagnostics: how many times this component's projection actually ran. */
+  displayProjectionRunsForTest(): number {
+    return this.displayProjection.projectionRuns()
+  }
+
   /** The Component interface requires invalidate(); the component keeps no
    * render cache (duration is live per frame), so this is a no-op. */
   invalidate(): void {}
@@ -329,7 +340,7 @@ export class FocusActivityComponent {
       this.iconStyle,
     )))
     if (!this.expanded) {
-      for (const line of focusCollapsedBody(this.activity, contentWidth, this.action, this.preparingSummary)) {
+      for (const line of focusCollapsedBody(this.activity, contentWidth, this.action, this.preparingSummary, this.displayProjection.project)) {
         lines.push(color.textDim(line))
       }
     }

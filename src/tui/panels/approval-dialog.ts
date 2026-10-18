@@ -13,6 +13,7 @@
 import { Box, Text, truncateToWidth, wrapTextWithAnsi } from '@xmoon76/pi-tui'
 import type { Component } from '@xmoon76/pi-tui'
 import { color } from '../theme/runtime.ts'
+import { sanitizeDisplayText } from '../presentation/terminal-text.ts'
 
 /**
  * Longest prefix of `text` whose WRAPPED height fits `budget` rows at
@@ -179,7 +180,7 @@ export function buildApprovalDialog(request: ApprovalPromptRequest, geometry: Ap
   // (shrunk when the terminal is too small for it). Fixed chrome = 1
   // title + danger + 1 blank spacer + hint rows + 2 Box paddingY
   // (Box(1,1)) + 2 Frame borders — keep in sync with the geometry below.
-  const titleShown = truncateToWidth(`Approve ${request.toolName}?`, contentWidth, '…')
+  const titleShown = truncateToWidth(`Approve ${sanitizeDisplayText(request.toolName)}?`, contentWidth, '…')
   const dangerShown = request.danger === true
     ? truncateToWidth('⚠ DANGEROUS COMMAND — confirm carefully', contentWidth, '…')
     : ''
@@ -194,7 +195,7 @@ export function buildApprovalDialog(request: ApprovalPromptRequest, geometry: Ap
   // section ends in a `... N more` marker row that rides inside its
   // budget, so the dialog tells the user what was dropped.
   const reasonBudget = Math.max(0, maxHeight - chrome)
-  const reasonRaw = request.reason ?? ''
+  const reasonRaw = sanitizeDisplayText(request.reason ?? '')
   const reasonShown = capWrappedToMarker(reasonRaw, contentWidth, reasonBudget).text
   const reasonWrapped = reasonShown === '' ? 0 : wrapTextWithAnsi(reasonShown, contentWidth).length
   const previewBudget = Math.max(0, maxHeight - chrome - reasonWrapped)
@@ -207,7 +208,7 @@ export function buildApprovalDialog(request: ApprovalPromptRequest, geometry: Ap
     // Preview the first six argument lines; the marker helper owns ALL
     // truncation (a separate 240-char '…' pre-cap left an uncounted cut
     // when the capped string still fit the budget).
-    const sixLines = request.arguments.split('\n').slice(0, 6).join('\n')
+    const sixLines = sanitizeDisplayText(request.arguments).split('\n').slice(0, 6).join('\n')
     const previewShown = capWrappedToMarker(sixLines, contentWidth, previewBudget).text
     if (previewShown !== '') {
       dialog.addChild(new Text(color.textDim(previewShown), 1, 0))

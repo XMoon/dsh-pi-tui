@@ -17,6 +17,9 @@ export class VirtualTerminal implements Terminal {
 	/** Test hook: every cursor visibility sequence written (hide/show), in
 	 * order — asserts the FINAL cursor state after teardown. */
 	readonly cursorWrites: string[] = [];
+	/** Test hook: every raw chunk written to the terminal, in order — the
+	 * FINAL terminal-bound bytes (framing, colors and payload alike). */
+	readonly writes: string[] = [];
 
 	constructor(columns = 80, rows = 24) {
 		this._columns = columns;
@@ -51,6 +54,7 @@ export class VirtualTerminal implements Terminal {
 	}
 
 	write(data: string): void {
+		this.writes.push(data);
 		this.xterm.write(data);
 	}
 

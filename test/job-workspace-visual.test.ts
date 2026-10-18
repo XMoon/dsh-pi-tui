@@ -1051,6 +1051,54 @@ test('D-23 a hostile label is sanitized on the NEW header rows and never reaches
   assert.deepEqual(harness.copied, [hostile], 'the copy payload stays the official original')
 })
 
+// ── D-23b: hostile RETAINED OUTPUT is projected at the body seam ───────────
+
+test('D-23b hostile retained output reaches the TTY only as safe text, keeps whitelisted SGR and copies byte-exact', async () => {
+  const harness = startApp(120, 40)
+  await openFirstJob(harness)
+  const hostile = [
+    '\u001b]52;c;YXR0YWNr\u0007', // clipboard OSC 52
+    '\u001b]0;hijacked-title\u001b\\', // title OSC 0 (ST-terminated)
+    '\u001b[2J\u001b[H', // screen / cursor
+    '\u001b[?1049h', // alternate screen (payload copy of an app-owned sequence)
+    '\u001b[?1000h', // mouse mode
+    '\u001bPbad\u001b\\', // DCS
+    '\u009b2J', // raw 8-bit C1 CSI
+    '\u001b[38;2;999;1;1m', // invalid SGR must be dropped whole
+    'ok ', // plain text survives
+    '\u001b[38;5;196mred\u001b[0m', // whitelisted 256-color SGR survives
+    ' end\r10%\r100%\n', // CR progress frames read as separate records
+  ].join('')
+  harness.observation.latest()!.emit({ text: hostile })
+  await settle(harness.vt)
+  await harness.vt.waitForRender()
+
+  const painted = view(harness.vt)
+  assert.match(painted, /ok/, 'the plain payload text is painted')
+  assert.match(painted, /red/, 'the colored payload text is painted')
+  assert.match(painted, /end/)
+  assert.match(painted, /10%/, 'a CR frame is a readable record')
+  assert.match(painted, /100%/, 'the trailing CR frame too')
+  assert.ok(!painted.includes('[38;5;196m') && !painted.includes('[38;2;999;1;1m'),
+    'no escape payload leaks as literal text into the painted body')
+
+  const stream = harness.vt.writes.join('')
+  // App-owned protocol (alt screen / mouse / clear) legitimately appears; the
+  // payload's OWN bytes must never ride along.
+  assert.ok(!stream.includes('YXR0YWNr'), 'no OSC 52 clipboard payload reaches the terminal stream')
+  assert.ok(!stream.includes('hijacked-title'), 'no OSC 0 title payload reaches the terminal stream')
+  assert.ok(!stream.includes('\u001bPbad'), 'no DCS payload reaches the terminal stream')
+  assert.ok(!stream.includes('\u009b'), 'no raw C1 control byte reaches the terminal stream')
+  assert.ok(!stream.includes('\u001b[38;2;999;1;1m'), 'the malformed SGR is never forwarded')
+  assert.ok(stream.includes('\u001b[38;5;196m'), 'the whitelisted 256-color SGR really reaches the TTY')
+
+  // C on the Output page copies the RAW observation, not the display projection.
+  harness.copied.length = 0
+  harness.vt.sendInput('c')
+  await flush(6)
+  assert.deepEqual(harness.copied, [hostile], 'the output copy stays the official original bytes')
+})
+
 // ── C-19: the `Tab` page toggle is symmetric and `v` is inert ──────────────
 
 test('C-19 Tab switches Output <-> Command in BOTH directions and v is inert', async () => {

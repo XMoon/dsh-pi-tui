@@ -29,6 +29,7 @@ import type { IconStyle } from '../../../domain/display/icons.ts'
 import { longMessageDisclosureWindow, type LongMessageDisclosureGeometry } from '../../transcript/long-message-disclosure.ts'
 import { systemContextBody } from '../../transcript/tool-presentation.ts'
 import { color } from '../../theme/runtime.ts'
+import { sanitizeDisplayText } from '../../presentation/terminal-text.ts'
 import type { TranscriptMessage } from '../../../transcript.ts'
 
 /** One surfaced `system` Context row narrowed for presentation. */
@@ -97,8 +98,9 @@ function indentedWrappedRows(text: string, width: number, paint: (row: string) =
  * system envelopes render their content, never raw XML); plain text keeps its
  * raw body. Every payload row is an indented card body row. */
 function payloadRows(text: string, width: number): string[] {
-  const body = systemContextBody(text)
-  const lines = body ?? text.split('\n')
+  const safe = sanitizeDisplayText(text)
+  const body = systemContextBody(safe)
+  const lines = body ?? safe.split('\n')
   const rows: string[] = []
   for (const line of lines) rows.push(...indentedWrappedRows(line, width, color.textDim))
   return rows
@@ -143,11 +145,11 @@ export class NoticeContextRow implements Component {
   render(width: number): string[] {
     const { message, expanded, expandHint, iconStyle } = this.options
     const icon = iconPrefix(message.icon ?? 'context-notice', iconStyle)
-    const title = message.label === undefined || message.label === '' ? 'Notice' : message.label
+    const title = message.label === undefined || message.label === '' ? 'Notice' : sanitizeDisplayText(message.label)
     const head = `${icon}${title}${expanded ? '' : expandAffordance(expandHint)}`
     const rows = [headerRow(head, width)]
     if (message.summary !== undefined && message.summary !== '') {
-      rows.push(...indentedWrappedRows(message.summary, width, color.text))
+      rows.push(...indentedWrappedRows(sanitizeDisplayText(message.summary), width, color.text))
     }
     if (expanded) rows.push(...payloadRows(message.text, width))
     return rows
@@ -188,12 +190,12 @@ export class RelayContextRow implements Component {
     const { message, expanded, expandHint, iconStyle } = this.options
     const sender = message.contextPresentation?.senderSessionId
     const icon = iconPrefix(message.icon ?? 'context-generic', iconStyle)
-    const title = sender === undefined || sender === '' ? 'Agent message' : `Agent message · ${sender}`
+    const title = sender === undefined || sender === '' ? 'Agent message' : `Agent message · ${sanitizeDisplayText(sender)}`
     // The relay body is the card's body: it wraps at the reduced budget and
     // takes the shared indent so its own disclosure marker (below) sits on
     // the SAME left edge — never a mixed boundary.
     const { indent, contentWidth } = bodyGeometry(width)
-    const bodyRows = wrappedRows(message.text, contentWidth, row => color.text(`${indent}${row}`))
+    const bodyRows = wrappedRows(sanitizeDisplayText(message.text), contentWidth, row => color.text(`${indent}${row}`))
     // The marker is chrome: clip it to the current width so every returned
     // element stays exactly one physical row even on a very narrow terminal.
     const marker = color.textMuted(truncateToWidth(`${indent}…`, Math.max(1, width), '…'))
@@ -226,7 +228,7 @@ export class RecallContextRow implements Component {
     const icon = iconPrefix(message.icon ?? 'context-recall', iconStyle)
     const title = message.label === undefined || message.label === ''
       ? 'Session recall'
-      : `Session recall · ${message.label}`
+      : `Session recall · ${sanitizeDisplayText(message.label)}`
     const rows = [headerRow(`${icon}${title}${expanded ? '' : expandAffordance(expandHint)}`, width)]
     if (expanded) rows.push(...payloadRows(message.text, width))
     return rows
