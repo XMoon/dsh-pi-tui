@@ -21,6 +21,7 @@ const longExcerpt = `The Host-selected excerpt starts away from the matched text
 const currentId = 'session-current'
 const longId = 'session-long'
 const contentId = 'session-content'
+const migrationId = 'session-migration'
 
 const mainRows: SessionSummary[] = [
   {
@@ -55,12 +56,24 @@ const mainRows: SessionSummary[] = [
     parentSession: longId,
     live: false,
   },
+  {
+    // S3 PR-C: the Host-authoritative on-disk format state the Browser renders
+    // read-only. It lives in the OTHER workspace so the workspace-scope row set
+    // (and its counts) stays unchanged.
+    id: migrationId,
+    updatedAt: 7_900,
+    createdAt: 650,
+    cwd: '/workspace/other',
+    live: false,
+    formatStatus: 'migration-required',
+  },
 ]
 
 const projections = new Map<string, SessionProjectionSummary>([
   [currentId, { title: 'Fix API timeout', preset: 'reviewer' }],
   [longId, { title: longTitle, preset: 'reviewer' }],
   [contentId, { title: 'A title without the search term', preset: 'writer' }],
+  [migrationId, { title: 'Legacy record', preset: 'reviewer' }],
 ])
 
 const read: SessionReader = {
