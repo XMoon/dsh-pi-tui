@@ -6592,23 +6592,30 @@ system or fork divergence is introduced.
   Measured on the same real `TuiApp` + `VirtualTerminal` path: the v1→v2 frames
   at 120×40/80×10/44×20 in `test/settings-web-provider.test.ts` (the changed
   state; the 44-column floor drops the description by the frozen drop order, so
-  the verdict chip is asserted there and the description at 120/80), the
+  the verdict chip is asserted there, the description at 120/80, and the
+  endpoint editor — which always opens on the authority — at 44), the
   changed-state frame across the whole size matrix (200×50 … 44×20) and under
   light + custom-symbols + dark-minimal in `test/settings-web-visual.test.ts`,
   and the action bar of the REAL external Task row, which advertises no `s stop`
   (the row's `canStop` is false and `s` latches nothing), at 120×40/80×10/44×20
   in `test/task-center-external-leaf.test.ts` plus the panel's capability pair
-  in `test/task-panel.test.ts`. The changed strings introduce no palette token,
-  glyph or icon, so the icon-style/pre-paint invariants above hold by
-  construction.
-- Review-delta NOT_RUN (not PASS): a real-terminal record of those three changed
-  states is NOT_RUN because each needs a state this machine cannot produce — a
-  Host that KEEPS a different endpoint value (a project layer or the official
-  canonicalization), a registered external subagent provider, and an empty
-  readable roster on the Direct stack (a live Session is always listed). The
-  §8b real-terminal record still covers the Web surface's own journey, and the
-  TSP/native Session Browser keeps its own empty-state wording (that surface
-  belongs to the TSP session-browser PR).
+  in `test/task-panel.test.ts`. The Session Picker's `No readable sessions`
+  empty roster is measured at 80×24 AND at the 44×20 floor (whole sentence
+  readable, rows cell-safe) in `test/session-picker-loading.test.ts`. The
+  changed strings introduce no palette token, glyph or icon, so the
+  icon-style/pre-paint invariants above hold by construction.
+- Review-delta real terminal: the action-bar change has a real-terminal
+  before/after record (`docs/tui-design-language-samples.md` §8c — the empty
+  Task Center roster, the only state this machine reaches without a model turn
+  or a registered external provider). Still NOT_RUN (not PASS) as real-terminal
+  frames: the NON-EMPTY non-stoppable row (a settled job / an external leaf), the
+  refused-endpoint row's kept value, and the Picker's empty roster — each needs a
+  state this machine cannot produce (an authorized model turn, a registered
+  external subagent provider, a Host that keeps a different endpoint value, or a
+  Direct store with no listed Session). Those states are pinned by the L6
+  fixtures named above; the §8b record still covers the Web surface's own
+  journey, and the TSP/native Session Browser keeps its own empty-state wording
+  (that surface belongs to the TSP session-browser PR).
 - Not run: a physical Tern GUI record (the TSP renderer does not paint these
   Settings surfaces), recorded as NOT_VERIFIED/NOT_RUN rather than PASS. The
   live-palette switch of the mounted Web rows IS covered in-process (the theme
