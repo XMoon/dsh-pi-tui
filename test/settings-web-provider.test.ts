@@ -729,3 +729,84 @@ test('a SUPERSEDED write readback never decides the verdict (owner-generation fe
     `the reopened row carries no stale verdict:\n${reopened}`)
   assert.match(reopened, /\[current\]/u, 'the reopened row states the verified value')
 })
+
+test('a superseded readback settling while the newer read is STILL pending never judges', async t => {
+  const h = setup()
+  t.after(h.dispose)
+  await openWebSection(h)
+
+  // R1 (the write's readback) captures an unreadable Host and is held.
+  h.store.readUndefined = true
+  const releaseR1 = h.holdRead()
+  t.after(releaseR1)
+  await key(h, ENTER)
+  await new Promise(resolve => setTimeout(resolve, 20))
+  await h.vt.waitForRender()
+  assert.deepEqual(h.writes, ['search:deepseek-search-api'], 'the mutation committed')
+
+  // A NEWER read R2 starts (Esc → the restored Workspace) and is ALSO held, so
+  // it is pending when R1 settles.
+  const releaseR2 = h.holdRead()
+  t.after(releaseR2)
+  h.store.readUndefined = false
+  await key(h, ESC)
+  await new Promise(resolve => setTimeout(resolve, 10))
+  await h.vt.waitForRender()
+  assert.match(h.view(), /Loading…/u, 'the newer read is still pending')
+
+  // R1 settles first: the row must stay PENDING, never a stale verdict.
+  releaseR1()
+  await new Promise(resolve => setTimeout(resolve, 20))
+  await h.vt.waitForRender()
+  const pending = h.view()
+  assert.doesNotMatch(pending, /Outcome unknown|Not saved/u,
+    `a superseded readback must not judge while the newer read is pending:\n${pending}`)
+
+  // R2 settles: the newest facts decide, with no stale verdict left behind.
+  releaseR2()
+  await new Promise(resolve => setTimeout(resolve, 20))
+  await h.vt.waitForRender()
+  const settled = h.view()
+  assert.match(settled, /Search: DeepSeek Search API/u, `the newest facts win:\n${settled}`)
+  await key(h, ENTER)
+  for (let attempt = 0; attempt < 40 && h.view().includes('Loading…'); attempt += 1) {
+    await new Promise(resolve => setTimeout(resolve, 5))
+    await h.vt.waitForRender()
+  }
+  const reopened = h.view()
+  assert.doesNotMatch(reopened, /\[Outcome unknown\]|\[Not saved\]/u,
+    `the reopened row carries no stale verdict:\n${reopened}`)
+  assert.match(reopened, /\[current\]/u)
+})
+
+test('the endpoint editor reports Outcome unknown (never not-saved) for a superseded unreadable readback', async t => {
+  const h = setup()
+  t.after(h.dispose)
+  await openWebSection(h)
+
+  h.store.readUndefined = true
+  const releaseR1 = h.holdRead()
+  t.after(releaseR1)
+  // Open the endpoint editor and confirm the submitted URL.
+  for (let index = 0; index < 4; index += 1) await key(h, DOWN)
+  await key(h, ENTER)
+  await key(h, ENTER)
+
+  // A newer read starts and stays pending while R1 settles.
+  const releaseR2 = h.holdRead()
+  t.after(releaseR2)
+  h.store.readUndefined = false
+  await key(h, ESC) // leave the section → the Workspace read is the newer one
+  await new Promise(resolve => setTimeout(resolve, 10))
+  await h.vt.waitForRender()
+  releaseR1()
+  await new Promise(resolve => setTimeout(resolve, 20))
+  await h.vt.waitForRender()
+  const frame = h.view()
+  assert.doesNotMatch(frame, /Not saved/u,
+    `an unreadable superseded readback is never reported as not-saved:\n${frame}`)
+  releaseR2()
+  await new Promise(resolve => setTimeout(resolve, 20))
+  await h.vt.waitForRender()
+  assert.match(h.view(), /Search: DeepSeek Search API|Current: /u, 'the newest facts own the display')
+})

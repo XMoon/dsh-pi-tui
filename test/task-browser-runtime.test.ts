@@ -731,7 +731,11 @@ test('PR2 scope: a subagents scope commits EXACTLY the scope child ids, jobs exc
   assert.ok(!rows.some(row => row.kind === 'job'), 'jobs must never leak into a subagents scope')
 })
 
-test('PR2 scope: an external catalog identity named by the scope stays visible (RFL-008)', async () => {
+// IDENTITY GUARD (not producer evidence): today's official producers never make
+// one id both a Workflow member and a Task Browser external catalog row (the
+// Workflow runtime uses caller delivery, which writes no catalog row), but a
+// scope whose ids match a NON-JOB row must never drop that row silently.
+test('PR2 scope: a non-job row named by the scope stays visible (identity guard, RFL-008)', async () => {
   const h = makeHarness()
   h.setJobs([])
   const listing = h.runtime.refreshCatalog()
