@@ -277,7 +277,26 @@ function taskPanelItems(target: readonly TaskBrowserRow[]): TaskPanelItem[] {
   for (const row of target) {
     if (row.kind === 'subagent') labels.set(row.childId, row.label)
   }
-  return target.map(row => row.kind === 'job'
+  return target.map(row => row.kind === 'external'
+    ? {
+        value: row.value,
+        // An external leaf is VISIBLE with its durable classification and is
+        // explicitly not openable/stop-capable: it has no local child Session
+        // (rc.2 catalog v2 `mode: 'external'`, S2-B1 §4A.1).
+        label: `external · ${row.label}`,
+        suffix: 'external',
+        status: 'External',
+        group: rowGroup(row),
+        source: 'subagent' as const,
+        type: 'subagent',
+        active: false,
+        canOpen: false,
+        canStop: false,
+        depth: row.depth,
+        hasChildren: false,
+        mode: 'external',
+      }
+    : row.kind === 'job'
     ? {
         value: row.value,
         // A `subagent`-kind job is the registry's reliable contract
@@ -868,6 +887,12 @@ export function createTaskRuntime(options: TaskRuntimeOptions): TaskRuntime {
     }
     const row = authorityRows.find(candidate => candidate.value === value)
     if (row === undefined) return source.rowSelectionDisposition(undefined, 'keep-open')
+    if (row.kind === 'external') {
+      // No local child Session exists for an external execution: the row is a
+      // fact, never a viewer target (S2-B1 §4A.1).
+      options.mounted().notify('external subagent: no local session to open', 'info')
+      return 'keep-open'
+    }
     if (row.kind === 'subagent') {
       // The viewer target carries the row's OWN parent (plan §6.10:
       // childId + parentId + depth + mode + activity — never just
@@ -900,6 +925,7 @@ export function createTaskRuntime(options: TaskRuntimeOptions): TaskRuntime {
     // overlay (hiding this browser, not destroying it) and returns to
     // the exact browser state on Esc. A job that has already vanished
     // simply opens nothing — the parent stays usable either way.
+    if (row.kind !== 'job') return 'keep-open'
     return source.rowSelectionDisposition(row, openJobView(row.jobId))
   }
 
@@ -1072,7 +1098,7 @@ export function createTaskRuntime(options: TaskRuntimeOptions): TaskRuntime {
       // the CURRENT projection row must still be active, then the ONE
       // `jobObservation.stop` is dispatched. No optimistic local mutation —
       // the authoritative roster/observation streams converge the row.
-      if (!isActiveJobStatus(row.status)) return
+      if (row.kind !== 'job' || !isActiveJobStatus(row.status)) return
       runOwned('job stop from tasks', () => taskCenter().jobObservation.stop(browserSessionId, row.jobId), {
         diag: taskDiag(),
         sessionId: () => browserSessionId,
