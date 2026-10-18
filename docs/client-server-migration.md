@@ -6975,11 +6975,64 @@ the injection cadence stay Host-owned in the official plugin.
 across text / image / file and the unidentified-submission negative control),
 `test/request-time-zone.test.ts` (real Direct runner submit over a real Host →
 durable `UserMessage.source` + the mounted official plugin's own
-`Browser time zone for this request: <zone>` text, plus the refusal/restore
-path), `test/subagent-port.test.ts` / `test/subagent-viewer-submit.test.ts` /
+`Browser time zone for this request: <zone>` text, the refusal/restore path, and
+the rendered Queue/transcript/composer parity case),
+`test/request-time-zone-child.test.ts` (REAL `@deepseek-ai/dsh-subagent` runtime
++ official `spawn` provider → the cold-resumed child's durable source with the
+zone, its per-submit identity, and the foreign-parent refusal),
+`test/subagent-port.test.ts` / `test/subagent-viewer-submit.test.ts` /
 `test/remote-subagent-port.test.ts` (child delivery, single sample, pre-dispatch
 refusal), `test/remote-session-writer.test.ts` (the Remote writer adds no zone
 of its own), `test/runner-remote-presentation.test.ts` (real Client → Gateway →
-Host readback of the client zone plus per-submit re-sampling) and
-`test/runner-viewer-task-integration.test.ts` (real viewer follow-up through the
-REAL `DirectSubagentPort` into the official prompt surface).
+Host readback with an independently controlled Client zone — the Host process
+zone and the plugin's configured fallback are both asserted absent — plus
+per-submit re-sampling), `test/runner-viewer-task-integration.test.ts` (real
+viewer follow-up through the REAL `DirectSubagentPort` into the official prompt
+surface) and `test/runner-remote-task-center.test.ts` (a REAL delegated
+continuable child's follow-up over the real generated Remote route, with the
+accepted child message's source carrying the zone).
+
+### Rendered before/after comparison (plan §7)
+
+The same scripted scenario — one ordinary submit plus one busy queue submit on
+the real Direct TSP surface, with the official `time-context` row mounted — was
+run against the review base and against this change (identical run through the
+existing `support/direct-tsp-fixture.ts`). The folded live node trees (17 nodes),
+the durable event lists (20 events per side) and the recorded messages matched
+with exactly two differences:
+
+1. the Context injection body text: `Browser time zone for this request:
+   unavailable.` → `Browser time zone for this request: Asia/Shanghai.
+   Interpret otherwise-unqualified dates and times in this zone.`;
+2. the human user-message source: `{kind:'user', rpcId}` → `{kind:'user', rpcId,
+   clientTimeZone}`.
+
+The queue row (`queued (followup): <text>`), the steering/transcript/composer
+state, the node and event counts, and the assistant/stream events were identical.
+The ongoing guard for the rendered result is the rendered-parity case in
+`test/request-time-zone.test.ts`.
+
+### Boundary note: the Direct path validates locally
+
+The official Host rejects an invalid `clientTimeZone` at its wire boundary
+(`session/invalid-time-zone` / `subagent/invalid-time-zone`). The Direct path
+persists the source IN-PROCESS and has no such Host validation step, so
+`src/client/time-zone.ts` applies the same strict profile before the send
+instead: the observable outcome (an unusable zone never reaches the durable
+source, and the prompt is refused with the draft restored) matches the official
+wire behaviour, but the rejection is performed by the TUI, not by a Host RPC.
+This substitution is deliberate and limited to the Direct path; the Remote path
+keeps the official Host validation.
+
+### Open upstream gap (pre-existing, not introduced here)
+
+The official rc.2 Client samples the zone INSIDE `SessionFace.prompt()`, after
+its own submission echo has been registered. If the runtime reports no usable
+zone, that sampling throws before the prompt RPC is dispatched, and the official
+failure path retires the echo only for a failed `RemoteResult` — so the remote
+echo can remain after the TUI has restored its draft. The TUI's
+`RemoteSessionWriter` keeps its documented assumption (a thrown `prompt()` is an
+assembly defect and propagates); the fix belongs to the official SessionFace
+(sample before registering the echo, or retire the identified submission when
+the sampler throws). Recorded here as an upstream limitation: it predates this
+change, it affects the Remote path only, and it needs no TUI-local workaround.

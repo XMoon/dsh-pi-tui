@@ -763,6 +763,16 @@ async function awaitChildInitialTurn(
 
 test('L6 §14 step 8 / §5 Must 17: a REAL delegated continuable child receives the viewer follow-up through the official child inbox, and the authoritative child event lands in the SAME viewer', async (t) => {
   const life = testLifecycle(t)
+  // The Client-local request zone IS the sending TUI runtime's zone: pin it so
+  // the zone the Remote viewer forwards is an asserted value. The official
+  // `SessionFace.prompt()` samples it inside the Client, and the Host persists
+  // it on the accepted child message.
+  const previousTz = process.env.TZ
+  process.env.TZ = 'Asia/Shanghai'
+  life.defer(() => {
+    if (previousTz === undefined) delete process.env.TZ
+    else process.env.TZ = previousTz
+  })
   const adapter = new HoldingAdapter()
   const host = await mountRemotePresentationHost(life, PRESET_ID, { llmAdapter: adapter })
   // The REAL Host subagent authority plus the REAL official continuable
@@ -868,11 +878,15 @@ test('L6 §14 step 8 / §5 Must 17: a REAL delegated continuable child receives 
   await waitFor('the child Session log accepted the viewer follow-up', () =>
     childEvents().some(event => event.type === 'user/message' && eventText(event) === REAL_FOLLOW_UP), 20_000)
   const accepted = childEvents().find(event => event.type === 'user/message' && eventText(event) === REAL_FOLLOW_UP)!
-  const source = (accepted.data as { readonly source?: { readonly kind?: string; readonly rpcId?: unknown } }).source
+  const source = (accepted.data as {
+    readonly source?: { readonly kind?: string; readonly rpcId?: unknown; readonly clientTimeZone?: unknown }
+  }).source
   assert.equal(source?.kind, 'user',
     'the accepted child message must carry the official human-prompt provenance')
   assert.equal(typeof source?.rpcId, 'string',
     'the official `subagents.prompt` request id must be persisted on the accepted child message')
+  assert.equal(source?.clientTimeZone, 'Asia/Shanghai',
+    'the Client-sampled request zone must cross the real generated subagents.prompt and reach the Host child source')
 
   // ── The authoritative child event appears in the SAME viewer. TWO independent
   // halves: the viewer's own durable child read carries the accepted event, and
