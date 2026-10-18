@@ -6604,18 +6604,20 @@ system or fork divergence is introduced.
   readable, rows cell-safe) in `test/session-picker-loading.test.ts`. The
   changed strings introduce no palette token, glyph or icon, so the
   icon-style/pre-paint invariants above hold by construction.
-- Review-delta real terminal: the action-bar change has a real-terminal
-  before/after record (`docs/tui-design-language-samples.md` §8c — the empty
-  Task Center roster, the only state this machine reaches without a model turn
-  or a registered external provider). Still NOT_RUN (not PASS) as real-terminal
-  frames: the NON-EMPTY non-stoppable row (a settled job / an external leaf), the
-  refused-endpoint row's kept value, and the Picker's empty roster — each needs a
-  state this machine cannot produce (an authorized model turn, a registered
-  external subagent provider, a Host that keeps a different endpoint value, or a
-  Direct store with no listed Session). Those states are pinned by the L6
-  fixtures named above; the §8b record still covers the Web surface's own
-  journey, and the TSP/native Session Browser keeps its own empty-state wording
-  (that surface belongs to the TSP session-browser PR).
+- Review-delta real terminal: the action-bar change has a real-terminal record
+  (`docs/tui-design-language-samples.md` §8c) from ONE session in which a
+  running job and a settled job share the Task Center roster (the jobs came from
+  one bounded background bash call by the Owner-authorized model run; no DeepSeek
+  endpoint was contacted): the settled row advertises no `s stop`, the running row
+  does, `s` latches `Y confirm stop`, and the killed row drops the segment again;
+  the empty roster's pre-change/reviewed frames are recorded there too. Still
+  NOT_RUN (not PASS) as real-terminal frames: the refused-endpoint row's kept
+  value (needs a Host that keeps a different endpoint value) and the Picker's
+  empty roster (the Direct stack always lists the live Session). Those two
+  states are pinned in-process by the L6 fixtures named above; the §8b record
+  still covers the Web surface's own journey, and the TSP/native Session Browser
+  keeps its own empty-state wording (that surface belongs to the TSP
+  session-browser PR).
 - Not run: a physical Tern GUI record (the TSP renderer does not paint these
   Settings surfaces), recorded as NOT_VERIFIED/NOT_RUN rather than PASS. The
   live-palette switch of the mounted Web rows IS covered in-process (the theme
