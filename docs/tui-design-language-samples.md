@@ -1428,18 +1428,93 @@ chip ANSI, asserted by cell-ink in `test/settings-web-visual.test.ts`.
 Produced with the same isolated development home and rc.2 CLI as §8b
 (`/home/xmoon/.local/bin/dsh-next` with `DSH_NEXT_ROOT=<the S2 worktree>`,
 `DSH_HOME=~/.dsh-pi-tui-next`), `tmux new-session -d -s <name> -x 120 -y 40`,
-launched with `env -u NO_COLOR`, one key at a time, frames captured with
-`tmux capture-pane -p` (plain, shown here) and `-e` (ANSI: 21 `\e[38;2;…`
-sequences per frame). The run pressed ONLY `/tasks`: no prompt, no tool call, no
-job and no subagent was created, and no DeepSeek endpoint was contacted.
+launched with `env -u NO_COLOR`, keys sent one at a time, frames captured with
+`tmux capture-pane -p` (plain, shown verbatim below) and `-e` (ANSI: 29–31
+`\e[38;2;…` sequences per frame). The running and settled jobs were created by
+ONE bounded background bash call from the Owner-authorized model run (no DeepSeek
+endpoint was contacted); every other key press below is Task Center input.
 
-The changed behaviour is the Task Center's action bar, which advertises `s stop`
-only for a row it can actually stop. With an EMPTY roster (no stoppable row
-exists — the state this machine reaches without a model turn or a registered
-external provider) the pre-change build and the reviewed build differ only in
-that segment:
+The changed behaviour is the action bar, which advertises `s stop` only for the
+row it can actually stop. In one session a running job and a settled job share
+the roster, and the bar follows the SELECTED row: the settled job
+(`canStop === false`) advertises no Stop, the running one does, `s` latches the
+confirmation, and after `Y` the killed job drops the segment again.
 
-BEFORE (`s stop` painted although no row can be stopped):
+Settled job selected — no `s stop`:
+
+```text
+ ╭────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+▸│ Tasks [TRACKED]  0 active · 1 done · 1/1 shown                                                                     │
+ │                                                                                                                    │
+ │ ── Jobs / executions ──                                          │ Selected                                        │
+ │ → bash · sleep 20 && echo slow-done              ‣ Completed 20s │ bash · sleep 20 && echo slow-done               │
+ │                                                                  │ kind      bash                                  │
+ │                                                                  │ status    completed                             │
+ │                                                                  │ elapsed   20s                                   │
+▸│                                                                  │ started   2026-10-18T11:45:47.286Z              │
+T│                                                                  │ detail    exit code: 0                          │
+A│                                                                                                                    │
+ │   Enter open · ↑↓ select · ←→ tree · / search · a scope · Shift+Tab type · Esc close                               │
+ ╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+```
+
+Running job selected — `s stop` present:
+
+```text
+ ╭────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+ │ Tasks [TRACKED]  1 active · 1 done · 2/2 shown                                                                     │
+ │                                                                                                                    │
+ │ ── Jobs / executions ──                                          │ Selected                                        │
+ │ → bash · sleep 60 && echo long-done                ‣ Running 21s │ bash · sleep 60 && echo long-done               │
+ │   bash · sleep 20 && echo slow-done              ‣ Completed 20s │ kind      bash                                  │
+▸│                                                                  │ status    running                               │
+ │                                                                  │ elapsed   21s                                   │
+ │                                                                  │ started   2026-10-18T11:46:52.007Z              │
+ │                                                                                                                    │
+ │   Enter open · ↑↓ select · ←→ tree · s stop · / search · a scope · Shift+Tab type · Esc close                      │
+ ╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+```
+
+`s` — the confirmation the advertised key earns:
+
+```text
+▸╭────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+ │ Tasks [TRACKED]  1 active · 1 done · 2/2 shown                                                                     │
+ │                                                                                                                    │
+ │ ── Jobs / executions ──                                          │ Selected                                        │
+ │ → bash · sleep 60 && echo long-done                ‣ Running 40s │ bash · sleep 60 && echo long-done               │
+ │   bash · sleep 20 && echo slow-done              ‣ Completed 20s │ kind      bash                                  │
+ │                                                                  │ status    running                               │
+▸│                                                                  │ elapsed   40s                                   │
+ │                                                                  │ started   2026-10-18T11:46:52.007Z              │
+ │                                                                  │ Stop bash · sleep 60 && echo long-done?  Y con… │
+ │                                                                                                                    │
+ │   Y confirm stop · Esc cancel                                                                                      │
+ ╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+```
+
+`Y` — the job is `Killed` and the bar drops the segment:
+
+```text
+ ╭────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+ │ Tasks [TRACKED]  0 active · 1 done · 2/2 shown                                                                     │
+ │                                                                                                                    │
+ │ ── Jobs / executions ──                                          │ Selected                                        │
+ │ → bash · sleep 60 && echo long-done                 ‣ Killed 55s │ bash · sleep 60 && echo long-done               │
+❯│   bash · sleep 20 && echo slow-done              ‣ Completed 20s │ kind      bash                                  │
+ │                                                                  │ status    killed                                │
+ │                                                                  │ elapsed   55s                                   │
+▸│                                                                  │ started   2026-10-18T11:46:52.007Z              │
+ │                                                                  │ detail    signal: SIGTERM; cancelled by the us… │
+ │                                                                                                                    │
+ │   Enter open · ↑↓ select · ←→ tree · / search · a scope · Shift+Tab type · Esc close                               │
+ ╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+```
+
+The same rule in the EMPTY roster, measured across the pre-change build and the
+reviewed build (nothing can be stopped either way):
+
+BEFORE:
 
 ```text
  ╭────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
@@ -1451,7 +1526,7 @@ BEFORE (`s stop` painted although no row can be stopped):
  ╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 ```
 
-AFTER (the same action bar without the dead segment):
+AFTER:
 
 ```text
  ╭────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
@@ -1463,16 +1538,18 @@ AFTER (the same action bar without the dead segment):
  ╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 ```
 
-NOT_RUN in this record — a real-terminal frame of these states needs an
-environment this machine does not have (a model turn with an authorized
-credential to create a job or subagent row, a registered external subagent
-provider, a Host that keeps a different endpoint value, and an empty readable
-Session roster on the Direct stack): the NON-EMPTY non-stoppable row (a settled
-job / an external catalog leaf), the refused-endpoint row's kept value, and the
-Session Picker's `No readable sessions` empty state. Those states are pinned by
-the L6 fixtures instead (`test/task-center-external-leaf.test.ts`,
-`test/settings-web-provider.test.ts`, `test/settings-web-visual.test.ts`, and
-`test/session-picker-loading.test.ts` at 80×24 AND 44×20).
+The `▸` / `T` / `A` / `❯` cells at column 1 of some rows are the collapsed
+transcript rows and the editor boundary showing through the capturing overlay at
+those rows — a pre-existing compositing artifact of the two surfaces, unrelated
+to the action bar.
+
+NOT_RUN in this record — a real-terminal frame would need an environment this
+machine does not have: the refused-endpoint row's kept value (needs a Host that
+keeps a different endpoint value) and the Session Picker's `No readable
+sessions` empty state (the Direct stack always lists the live Session). Those
+states are pinned in-process instead (`test/settings-web-provider.test.ts`,
+`test/settings-web-visual.test.ts`, and `test/session-picker-loading.test.ts` at
+80×24 AND 44×20).
 
 ## 9. Re-verification recipe
 
