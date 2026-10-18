@@ -68,6 +68,13 @@ query, workspace, and lineage helpers are in
 - Browse rows show compact recent activity from `updatedAt`; Details shows full
   ISO Created/Updated timestamps. An absent `createdAt` is `Unknown` and is
   never inferred from `updatedAt`.
+- `SessionSummary.formatStatus` is the Host-authoritative on-disk format state
+  and is presented read-only: `Migration required` appears as one item after
+  `Updated` in the row detail (kept on the content-search card branch) and in
+  the Details `State` value. `current` and an absent fact add nothing, and no
+  new badge, fact group, control or page exists. The label is a statement, never
+  a veto: the existing Resume/open journey above keeps its normal path, and the
+  official Host `Session.open` owns any migration it performs.
 - Details is one read-only native Overlay Reader. Back or Esc returns to the
   same Picker and retains query/scope/selection. Each reading owns a distinct
   Reader/body/scroll identity; no Resume action is offered from Details.

@@ -6354,6 +6354,79 @@ HEAD is proposed for `next`. The temporary staging branch never replaces
 `next` as the release line: `next` advances by a normal promotion merge after
 the integration qualification.
 
+## S3 status (PR-C IMPLEMENTED; qualification in progress) — Remote parity over rc.2
+
+PR-C is based on `next@ed2c7988` (DSH target `dsh-v0.2.1-rc.2`) and closes the
+Remote lifecycle gaps handed over by the S3-R0 slice above. Remote remains
+EXPERIMENTAL and is still reachable only through the internal
+`RemoteApplicationOverride` seam — there is no public CLI/env/config selector —
+and Direct remains the production default. `M3 = DONE` stays the historical
+migration state; this section claims neither `M4` nor a published `0.5.3`.
+
+### Contract / invariants
+
+- **One Client create entry (C11).** `RemoteSessionLifecycle.create()` calls the
+  official `ClientSessions.create({sessionId, cwd, agentPreset})` exactly ONCE
+  for ordinary and explicit-preset creates alike and adopts the RETURNED
+  identity; the requested `sessionId` is correlation only. rc.2 records the
+  published catalog row before resolving, so the raw generated
+  `session.create` + `sessions.refresh()` reconciliation path and its
+  `RemoteLifecycleSessionRemotes` seam are deleted. `classifyCreateFailure`, the
+  separate operation-ownership axis and the post-publication retain failure are
+  preserved unchanged.
+- **Fork never migrates implicitly (C14).** `fork()` always passes
+  `allowMigration:false`; a source that needs migration is refused with the
+  official `session/migration-required` (classified as a proven rejection,
+  never retried or re-dispatched). The user's explicit `/resume`/open keeps the
+  official `retain → Session.open` path, where the official Host MAY migrate the
+  record. That distinction is deliberate and must not be collapsed in either
+  direction.
+- **Read-only on-disk format state (C12/C13).** `SessionSummary.formatStatus`
+  (`'current' | 'migration-required'`) is passed through VERBATIM from the
+  official Client list row (Remote) and from the official
+  `sessionQuery.listSessions` record (Direct). There is no header parsing, no
+  `cwd`-based inference and no second client-side migration boolean. The
+  existing Session Browser renders `Migration required` as read-only text — an
+  item after `Updated` in the row detail (kept on the content-search card
+  branch) and the existing Details `State` value — while `current` and an
+  absent fact add nothing. The Browser performs no persistence write; the
+  official Host `Session.open` owns any migration.
+- **Write receipt = Host admission (C16/C17, S3 §C3).** A resolved
+  `session/prompt` means the Host ACCEPTED the message into its inbox;
+  `WriteOutcome.committed` names exactly that receipt and must never be read as
+  fsync/flush/durability. `RemoteSessionOwnerServices.flush()` stays a
+  documented no-op because rc.2 publishes no durable-flush verb; the runtime
+  adds no sleep/poll/retry to fabricate one. The Host owns the durable append
+  from admission onward, which the parked-write teardown case now witnesses on
+  the Host log.
+- **Time Context stays official (S3 §C5).** The TUI adds no clock, no timezone
+  setting surface, no local timer and no second time reducer: the official
+  `@deepseek-ai/dsh-time-context` plugin (enabled by the official
+  `standard`/`ptc`/`cordis` presets, never by `minimal`) owns the pre-step
+  reading, the durable `source = { kind: 'time-context', form: 'snapshot' }`
+  message and the default `refreshIntervalMs = 600000` scheduling. The
+  submission-side zone is the official Client's resolved IANA zone.
+
+### Qualification and limits
+
+- L3/L5/L6 evidence and the per-row C11–C18 disposition table live in the PR
+  description of the PR-C branch; this document does not claim them ahead of
+  that run. The suites are `test/remote-session-lifecycle.test.ts`,
+  `test/remote-session-reader.test.ts`, `test/session-reader-port.test.ts`,
+  `test/tern-tsp-session-browser.test.ts`, `test/runner-remote-races.test.ts`
+  and the new `test/remote-time-context-rc2.test.ts`.
+- `test/remote-time-context-rc2.test.ts` mounts the OFFICIAL plugin from its
+  published module path: `@deepseek-ai/dsh-time-context` is only a transitive
+  dependency of the dev-only `@deepseek-ai/dsh-web-app`, so the repository
+  cannot bare-import it nor let the Cordis Loader resolve it by name. The
+  official preset COMPOSITION presence is therefore asserted separately against
+  the generated preset mirrors (`standard`/`ptc`/`cordis` exactly once,
+  `minimal` never). A preset-loader-driven mount is NOT covered.
+- The temporal window "accepted by the Host but not yet physically appended" has
+  no controllable gate in the published Host; the suite witnesses admission and
+  the eventual durable append instead and reports that interleaving as
+  `NOT_FORCED` rather than claiming every interleaving was verified.
+
 ## S2 status (IMPLEMENTED; qualification in progress) — Direct data + effective CWD + Web Search/Fetch
 
 Baseline `next@f16a4421` (DSH target `dsh-v0.2.1-rc.2`). S2 is one stage in the
