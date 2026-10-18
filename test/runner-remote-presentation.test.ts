@@ -17,20 +17,30 @@
  *   `preselected` input), consuming the same presentation-source bundle
  *
  * TEST STAND-INS / SUBSTITUTIONS
- * - prompt serializer (unsupported test double): PR2 owns no production
- *   Remote submission serializer (the M3-4 submission PR's ownership); no
- *   proof below submits a Remote prompt
+ * - prompt serializer: the DEFAULT is an unsupported test double (the cases that
+ *   only read echoes never serialize); the cases that submit a REAL Remote
+ *   prompt (the writer-held PR5 cases, the pending handoff case and the
+ *   request-zone L5 case) pass `productionSerializer: true` and therefore run
+ *   the PRODUCTION Remote submission serializer, the real official
+ *   `SessionFace.prompt()` and the real Host Session Controller
  * - `StubStreamingLlmAdapter`: a scripted real `LlmAdapter` whose `stream`
  *   yields one real text turn — the Host emits REAL `agent/assistant-stream`
  *   frames, the wire forwards them, and the Client eventSource produces REAL
  *   transient entries; the adapter is the LLM endpoint stand-in only
+ * - the request-zone L5 case controls ONLY the Client runtime's reported zone:
+ *   a no-argument `Intl.DateTimeFormat` construction reports the Client zone
+ *   while the Host process zone and every explicit-`timeZone` construction stay
+ *   real (the Host side never sees a stand-in)
  * - hand-provided `agentDefaultModel`/`attachments`/`webServer`: the minimal
  *   readiness inputs (identical to the shared fixture manifest)
  *
  * DELIBERATELY ABSENT
- * - production Remote submission (prompt/queue/steer — the M3-4 PR3 domain);
- *   the pending-submission UI proofs read official Client echoes through
- *   `RemoteSubmissionPresentation`, never a TUI-minted Remote ledger
+ * - a separate Host PROCESS/timezone and a real network transport: the official
+ *   in-process carrier is this product's Remote path today, so the Host and the
+ *   Client share one process; the Client-vs-Host zone control is therefore
+ *   forged at the Client's `Intl` source (above), never by moving the Host
+ * - a real single-tty terminal / Tern GUI: the painted result is read from the
+ *   `VirtualTerminal`
  * - command catalog refresh / tool cards / permission cycle / rewind
  *   (the M3-4 command PR's ownership)
  * - secondary surfaces (Task Center rows, subagent viewer, Plugin Manager —
@@ -1309,7 +1319,7 @@ test('L6 pending: queued -> queue pane, steering -> tail lane, and the echo -> a
   }, 20_000)
 })
 
-test('L5: a real Remote ordinary submit carries the official Client-sampled request zone into the Host source and its time-context injection', async (t) => {
+test('L5: a real Remote ordinary submit carries the Client-sampled request zone — not the Host zone — into the Host source and its time-context injection', async (t) => {
   const life = testLifecycle(t)
   const mainId = 'm3-4-pr2-request-zone'
   const hostPreset = 'm3-4-pr2-preset'
@@ -1319,25 +1329,47 @@ test('L5: a real Remote ordinary submit carries the official Client-sampled requ
     { provider: 'smoke', model: 'smoke-model' } as never,
     { cwd: seedHost.anchorDir },
   )
-  // The official request-clock row, mounted ONLY in this fixture (the shipped
-  // `standard` preset declares the same row).
+  // The HOST side carries its own zone: the process zone is Amsterdam and the
+  // official request-clock row is mounted with an explicit New York display
+  // fallback (the Host-owned fallback the request zone must outrank).
+  const previousTz = process.env.TZ
+  process.env.TZ = 'Europe/Amsterdam'
+  life.defer(() => {
+    if (previousTz === undefined) delete process.env.TZ
+    else process.env.TZ = previousTz
+  })
   const timeContext = await import('@deepseek-ai/dsh-time-context')
-  await seedHost.ctx.plugin(timeContext as never, {} as never)
+  await seedHost.ctx.plugin(timeContext as never, { timeZone: 'America/New_York' } as never)
   const fixture = await mountRemoteRunner(life, {
     presetId: hostPreset,
     resumeSessionId: mainId,
     host: seedHost,
     productionSerializer: true,
   })
-  // The Client runtime's zone for THIS submit. The Remote writer adds no zone
-  // of its own: the official `SessionFace.prompt()` samples the same process
-  // zone and the Host validates it onto the durable source.
-  const previousTz = process.env.TZ
-  process.env.TZ = 'Europe/Paris'
-  life.defer(() => {
-    if (previousTz === undefined) delete process.env.TZ
-    else process.env.TZ = previousTz
-  })
+  // The CLIENT side is independently controlled: the official
+  // `resolvedClientTimeZone()` samples `new Intl.DateTimeFormat()` with no
+  // arguments, so a no-argument construction reports the Client runtime's zone
+  // (Paris) while every explicit-`timeZone` construction — the Host's own
+  // canonicalization and the plugin's formatters — keeps the real behaviour.
+  const originalDateTimeFormat = Intl.DateTimeFormat
+  let clientZone: string | undefined = 'Europe/Paris'
+  const patched = function patchedDateTimeFormat(
+    this: unknown,
+    ...args: unknown[]
+  ): Intl.DateTimeFormat {
+    const formatter = Reflect.construct(originalDateTimeFormat, args) as Intl.DateTimeFormat
+    if (args.length === 0 && clientZone !== undefined) {
+      const resolved = formatter.resolvedOptions.bind(formatter)
+      formatter.resolvedOptions = () => ({ ...resolved(), timeZone: clientZone! })
+    }
+    return formatter
+  }
+  // Keep the real prototype/static surface (instanceof and
+  // `supportedLocalesOf` still resolve) — only the no-argument zone is replaced.
+  patched.prototype = originalDateTimeFormat.prototype
+  Object.setPrototypeOf(patched, originalDateTimeFormat)
+  ;(Intl as { DateTimeFormat: unknown }).DateTimeFormat = patched
+  life.defer(() => { (Intl as { DateTimeFormat: unknown }).DateTimeFormat = originalDateTimeFormat })
   const app = await waitForApp(fixture)
   const editor = fixture.runnerApp() as unknown as { setDraft(text: string): void; submitDraft(): void }
   // The Host's authoritative log for the resumed Session (the JSONL projection
@@ -1357,6 +1389,8 @@ test('L5: a real Remote ordinary submit carries the official Client-sampled requ
   const humanMessages = (): ReturnType<typeof hostUsers> => hostUsers().filter(message => message.source.kind === 'user')
   const baseline = humanMessages().length
   try {
+    assert.equal(new Intl.DateTimeFormat().resolvedOptions().timeZone, 'Europe/Paris',
+      'the Client runtime must report the controlled zone while the Host process zone stays Amsterdam')
     editor.setDraft('remote request zone')
     editor.submitDraft()
     assert.ok(app !== undefined)
@@ -1367,16 +1401,18 @@ test('L5: a real Remote ordinary submit carries the official Client-sampled requ
     const human = humanMessages()
     assert.equal(typeof human[baseline]!.source.rpcId, 'string', 'the official identified prompt kept its request id')
     assert.equal(human[baseline]!.source.clientTimeZone, 'Europe/Paris',
-      'the Client zone crossed the official SessionFace → generated Remote → Host source')
+      'the CLIENT zone crossed the official SessionFace → generated Remote → Host source (never the Host zone)')
     const injected = hostUsers().filter(message => message.source.kind === 'time-context')
     assert.equal(injected.length, 1, 'the mounted official plugin injected one request-clock snapshot')
     const text = injected[0]!.content.map(part => part.text ?? '').join('\n')
     assert.match(text, /Browser time zone for this request: Europe\/Paris\./u,
-      'the model-visible request zone is the Client zone, never "unavailable"')
+      'the model-visible request zone is the Client value, not the Host process zone or the configured fallback')
+    assert.equal(text.includes('Amsterdam'), false, 'the Host process zone must never appear as the request zone')
+    assert.equal(text.includes('New_York'), false, 'the Host display fallback must never appear as the request zone')
 
-    // Per-submit sampling: the NEXT send samples the process zone again, and it
+    // Per-submit sampling: the NEXT send samples the Client runtime again, and it
     // never rewrites the earlier message's stored zone.
-    process.env.TZ = 'UTC'
+    clientZone = 'UTC'
     editor.setDraft('second request zone')
     editor.submitDraft()
     await waitFor('the second Host user message', () => humanMessages().length === baseline + 2, 20_000)

@@ -6,14 +6,32 @@
  * exactly as the shipped `standard` preset declares it
  * (`generated/dsh-presets/standard.patch.yml`).
  *
- * The two cases are the direct-path halves of the plan's acceptance:
+ * The cases are the direct-path halves of the plan's acceptance:
  * a reachable ordinary prompt writes the Client-sampled zone into the durable
  * `UserMessage.source` AND the model-visible request zone becomes that zone
  * instead of `unavailable`; an unsamplable process zone refuses the send
- * before dispatch (draft restored, nothing durable, no model call).
+ * before dispatch (draft restored, nothing durable, no model call); and the
+ * RENDERED surface the user sees keeps its ordinary Queue/transcript/composer
+ * behaviour while that Context body changes (plan §7).
  *
  * The process zone IS the sampled zone (that is the plan's product boundary),
- * so both cases control `TZ` instead of depending on the machine's locale.
+ * so the cases control `TZ` instead of depending on the machine's locale.
+ *
+ * ## L5 fixture manifest
+ *
+ * - PRODUCTION PREREQUISITES REPRODUCED: the real Direct Host composition
+ *   (`support/direct-tsp-fixture.ts`: the rc.2 Agent/Session registry, AgentLoop
+ *   with real live Agents, JSONL Session persistence, the real runner
+ *   composition root and the real Direct submission/writer path), the REAL
+ *   scripted TSP surface the SDK actually paints, and the official
+ *   `@deepseek-ai/dsh-time-context` row mounted exactly as the shipped
+ *   `standard` preset declares it.
+ * - TEST STAND-INS: the model endpoint (the fixture's scripted streaming
+ *   adapter) and the controlled `TZ` used as the Client runtime's reported zone.
+ * - DELIBERATELY ABSENT: a separate Host process/timezone (the same-Host L5
+ *   case with an independently controlled Client zone is
+ *   `test/runner-remote-presentation.test.ts`), the real Tern GUI, and the
+ *   Remote transport (this file is the Direct path).
  *
  * @module @xmoon76/dsh-pi-tui/request-time-zone.test
  */
@@ -21,6 +39,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { createDirectTspFixture, directSettle, waitFor } from './support/direct-tsp-fixture.ts'
+import { wireNodes, type WireNode } from './support/tsp-picker-wire.ts'
 
 interface RecordedPrompt {
   readonly sessionId: string
@@ -30,6 +49,17 @@ interface RecordedPrompt {
 interface DurableUserMessage {
   readonly source: { readonly kind?: string; readonly rpcId?: unknown; readonly clientTimeZone?: unknown }
   readonly content: readonly { readonly text?: string }[]
+}
+
+/** Every rendered text line of the pane's live node tree (the surface's paint). */
+function renderedLines(fixture: Awaited<ReturnType<typeof createDirectTspFixture>>): string[] {
+  const lines: string[] = []
+  const collect = (node: WireNode): void => {
+    if (typeof node.p.text === 'string' && node.p.text !== '') lines.push(node.p.text)
+    for (const child of node.c ?? []) collect(child)
+  }
+  for (const node of wireNodes(fixture.pane)) collect(node)
+  return lines
 }
 
 /** Every durable `user/message` the live Agents of this fixture hold. */
@@ -158,6 +188,73 @@ test('an unsamplable process zone refuses the Direct send before dispatch and re
       assert.equal(messages.length, 1, 'only the corrected retry is durable')
       assert.equal(messages[0]!.source.clientTimeZone, 'Asia/Shanghai')
     } finally {
+      await fixture.settle()
+    }
+  })
+})
+
+test('the rendered surface keeps the ordinary Queue/transcript/composer behaviour while only the Context body changes', async (t) => {
+  // The plan §7 UX contract: no new entry point, gesture, control or
+  // placement — the ONE intended visible difference is the already-existing
+  // Context card's body text. This case asserts that rendered result on the
+  // REAL scripted TSP surface the SDK actually paints: a running-turn queue
+  // submission still renders as the queue row, the transcript still carries
+  // both user rows, the composer is consumed, and the Context body is the
+  // Client zone.
+  const { testLifecycle } = await import('./support/temp-lifecycle.ts')
+  const life = testLifecycle(t)
+  await withProcessZone(life, 'Asia/Shanghai', async () => {
+    let releaseStream!: () => void
+    const held = new Promise<void>(resolve => { releaseStream = resolve })
+    const fixture = await createDirectTspFixture(life, {
+      deltas: ['zone parity reply'],
+      streamHold: () => held,
+    })
+    const timeContext = await import('@deepseek-ai/dsh-time-context')
+    await fixture.ctx.plugin(timeContext as never, {} as never)
+    const prompts: unknown[] = []
+    const recorder = fixture.recordPrompts(call => { prompts.push(call.message) })
+    try {
+      await directSettle(4_000)
+      fixture.pane.input.type('parity question')
+      await directSettle()
+      fixture.pane.input.type('\r')
+      await waitFor('the running turn', () => fixture.pane.output.text().includes('working'), 25_000)
+      await waitFor('the first settled prompt', () => recorder.calls() === 1, 25_000)
+
+      // The busy submission while the turn runs: the ordinary queue placement.
+      fixture.pane.input.type('parity busy follow-up')
+      await directSettle()
+      fixture.pane.input.type('\r')
+      await waitFor('the busy delivery to settle', () => recorder.calls() === 2, 25_000)
+      await directSettle(1_500)
+      assert.deepEqual(prompts.map(message =>
+        (message as { source: { clientTimeZone?: string } }).source.clientTimeZone),
+      ['Asia/Shanghai', 'Asia/Shanghai'],
+      'the ordinary AND the busy (queue) submission carry the same per-submit source zone')
+      const renderedDuringBusy = renderedLines(fixture)
+      assert.ok(renderedDuringBusy.some(line => line.includes('queued (followup): parity busy follow-up')),
+        `the busy submission must render as the ordinary queue row:\n${renderedDuringBusy.join('\n')}`)
+      assert.equal(renderedDuringBusy.some(line => line.includes('parity busy follow-up') && line.includes('steering')),
+        false, 'a queued submission never renders as a steering row')
+      assert.ok(renderedDuringBusy.some(line => line.includes('Browser time zone for this request: Asia/Shanghai.')),
+        `the rendered Context body must carry the Client zone:\n${renderedDuringBusy.join('\n')}`)
+      assert.equal(renderedLines(fixture).some(line => line === 'parity busy follow-up'), false,
+        'the submitted text is consumed from the composer, never left as a draft')
+
+      releaseStream()
+      await waitFor('the scripted reply', () => fixture.pane.output.text().includes('zone parity reply'), 25_000)
+      await directSettle(2_000)
+      const rendered = renderedLines(fixture)
+      assert.ok(rendered.some(line => line === 'parity question'), 'the first user row stays in the transcript')
+      assert.ok(rendered.some(line => line === 'parity busy follow-up'), 'the queued row becomes a transcript row')
+      assert.ok(rendered.some(line => line.includes('zone parity reply')), 'the scripted reply renders')
+      assert.ok(rendered.some(line => line.includes('Browser time zone for this request: Asia/Shanghai.')),
+        'the Context body keeps the Client zone after the turn settles')
+      assert.equal(rendered.some(line => line.includes('queued (followup):')), false,
+        'the queue row is gone once the queued turn is admitted')
+    } finally {
+      releaseStream()
       await fixture.settle()
     }
   })

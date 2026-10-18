@@ -2020,8 +2020,10 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
    *  human submit at the send point (never cached, never the Host's zone): it
    *  rides the durable user-message source the Host's time-context reader
    *  consumes. A Remote selection samples nothing — the official
-   *  `SessionFace.prompt()` owns that request field. */
-  const prepareMessage = (text: string, requestId: string): Promise<unknown> =>
+   *  `SessionFace.prompt()` owns that request field. `async` keeps the declared
+   *  Promise contract for the sampling throw (a refusal is a rejection, never a
+   *  synchronous throw from a Promise-returning entry). */
+  const prepareMessage = async (text: string, requestId: string): Promise<unknown> =>
     deps.prepareTransport !== undefined
       ? deps.prepareTransport(text, requestId)
       : prepareUserMessage(text, deps.drafts.images, submitDeps, { requestId, clientTimeZone: clientTimeZone() })

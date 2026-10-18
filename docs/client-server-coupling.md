@@ -645,11 +645,15 @@ before dispatch (draft restored) instead of sending zone-less or fabricated. The
 Host-owned in the official plugin.
 
 Owning tests: `test/client-time-zone.test.ts`, `test/image-submit.test.ts`,
-`test/attachment-submit.test.ts`, `test/request-time-zone.test.ts`,
-`test/subagent-port.test.ts`, `test/subagent-viewer-submit.test.ts`,
-`test/remote-subagent-port.test.ts`, `test/remote-session-writer.test.ts`,
-`test/runner-remote-presentation.test.ts`,
-`test/runner-viewer-task-integration.test.ts`.
+`test/attachment-submit.test.ts`, `test/request-time-zone.test.ts` (Direct main
+source + rendered parity), `test/request-time-zone-child.test.ts` (REAL official
+subagent runtime → child durable source), `test/subagent-port.test.ts`,
+`test/subagent-viewer-submit.test.ts`, `test/remote-subagent-port.test.ts`,
+`test/remote-session-writer.test.ts`, `test/runner-remote-presentation.test.ts`
+(Client zone ≠ Host zone over the real Remote route),
+`test/runner-viewer-task-integration.test.ts` and
+`test/runner-remote-task-center.test.ts` (real child follow-up → Host child
+source).
 
 ### User shell ownership (shell amendment, M3-4 PR3)
 
