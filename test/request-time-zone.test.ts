@@ -259,3 +259,50 @@ test('the rendered surface keeps the ordinary Queue/transcript/composer behaviou
     }
   })
 })
+
+test('a non-ordinary (Skill) submission carries no fabricated zone and the Context reports it missing', async (t) => {
+  // The plan's negative control on a REAL product path: a resolvable Skill line
+  // is prepared by the SAME Direct pipeline but WITHOUT a request identity, so it
+  // must keep the plain `{ kind: 'user' }` source and must never be dressed up as
+  // a human request with a zone. The official plugin then reports the official
+  // `unavailable` policy text for that turn.
+  const { testLifecycle } = await import('./support/temp-lifecycle.ts')
+  const life = testLifecycle(t)
+  await withProcessZone(life, 'Asia/Shanghai', async () => {
+    const fixture = await createDirectTspFixture(life, {
+      deltas: ['skill zone turn ran'],
+      skills: [{
+        name: 'zone-absent-skill',
+        description: 'A fixture skill',
+        body: 'Do the fixture thing.',
+      }],
+    })
+    const timeContext = await import('@deepseek-ai/dsh-time-context')
+    await fixture.ctx.plugin(timeContext as never, {} as never)
+    try {
+      await directSettle(4_000)
+      fixture.pane.input.type('/zone-absent-skill')
+      await directSettle()
+      fixture.pane.input.type('\r')
+      await waitFor('the skill turn to reach the model', () =>
+        fixture.pane.output.text().includes('skill zone turn ran'), 25_000)
+      const messages = durableUserMessages(fixture)
+      const human = messages.filter(message => message.source.kind === 'user')
+      assert.ok(human.length > 0, 'the Skill turn must carry a durable user-provenance message')
+      assert.equal(human.every(message => message.source.rpcId === undefined), true,
+        'a Skill line keeps the plain user source: no fabricated request identity')
+      assert.equal(human.every(message => message.source.clientTimeZone === undefined), true,
+        'a Skill line never carries a request zone')
+      const injected = messages.filter(message => message.source.kind === 'time-context')
+      assert.equal(injected.length, 1, 'the mounted plugin still injects one request-clock snapshot')
+      const text = injected[0]!.content.map(part => part.text ?? '').join('\n')
+      const requestZoneLine = text.split('\n').find(line => line.startsWith('Browser time zone for this request:'))
+      assert.equal(requestZoneLine,
+        'Browser time zone for this request: unavailable. Ask the user to clarify otherwise-unqualified dates and times.',
+        'with no human-rpc zone the official plugin reports its own unavailable policy — the process zone '
+        + '(which the timestamp line legitimately marks) is never promoted into the request zone')
+    } finally {
+      await fixture.settle()
+    }
+  })
+})
