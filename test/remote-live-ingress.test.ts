@@ -92,8 +92,9 @@ function sourceWith(initial: WindowState): {
 interface SinkLog {
   durable: Array<{ type: string }>
   live: Array<{ kind: string }>
-  /** The unified recovery wakeups (`onWindowRefoldRequired`). */
+  /** The unified recovery wakeups (`onWindowRefoldRequired`) with their reason. */
   refolds: string[]
+  refoldReasons?: Array<string | undefined>
   snapshots?: string[]
   projections?: string[]
 }
@@ -122,7 +123,10 @@ function sinksOf(log: SinkLog): RemoteLiveIngressSinks {
   return {
     onDurableEvent: (_id, event) => { log.durable.push({ type: (event as { type: string }).type }) },
     onLiveInput: input => { log.live.push(input as { kind: string }) },
-    onWindowRefoldRequired: id => { log.refolds.push(id) },
+    onWindowRefoldRequired: (id, reason) => {
+      log.refolds.push(id)
+      log.refoldReasons?.push(reason)
+    },
     onSessionSnapshotChanged: id => { log.snapshots?.push(id) },
     onProjectionsChanged: id => { log.projections?.push(id) },
   }
@@ -624,6 +628,33 @@ test('R0: a COLD attach under a live generation recovers on the opening page rep
   assert.deepEqual(log.refolds, ['s'],
     'the opening page replace reconciles the retained window instead of appending')
   assert.equal(handle.acknowledgeWindowRefold(proofOf(source, generation, 10)), true)
+  handle.dispose()
+})
+
+test('S3-R0: a prepend wakeup is PAGING, a replace/rollover wakeup is recovery', async () => {
+  const log: SinkLog = { durable: [], live: [], refolds: [], refoldReasons: [] }
+  const source = sourceWith({ entries: [], revision: 5, hasMore: false })
+  const generation = generationSource()
+  const ingress = createRemoteLiveIngress(source.sessions, generation)
+  const handle = ingress.subscribe('s', sinksOf(log), {
+    revision: 5,
+    transportToken: { generation: generation.getSnapshot(), binding: source.getBinding() },
+  })
+  // Older history joins the front: no new model-visible event arrived.
+  source.publish({ entries: [], revision: 6, hasMore: true, change: { kind: 'prepend', entries: [durableEntry('user/message', 1)] } })
+  await flushWakeup()
+  assert.deepEqual(log.refoldReasons, ['paging'], 'a prepend is a PAGING wakeup')
+  handle.acknowledgeWindowRefold(proofOf(source, generation, 6))
+  // A replace is a recovery: the window may carry events the surface never saw.
+  source.publish({ entries: [], revision: 7, hasMore: false, change: { kind: 'replace', entries: [] } as never })
+  await flushWakeup()
+  assert.deepEqual(log.refoldReasons, ['paging', 'recovery'], 'a replace is a recovery wakeup')
+  // A generation rollover is a recovery too.
+  handle.acknowledgeWindowRefold(proofOf(source, generation, 7))
+  generation.replace(9)
+  await flushWakeup()
+  assert.deepEqual(log.refoldReasons, ['paging', 'recovery', 'recovery'],
+    'a rollover is a recovery wakeup')
   handle.dispose()
 })
 
