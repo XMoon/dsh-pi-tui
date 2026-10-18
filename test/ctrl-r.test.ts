@@ -291,15 +291,35 @@ test('H3A-14: a Question PARKS the History seat and the SAME tenant (query + sel
   const life = testLifecycle(t)
   const home = tempHome(life)
   const { vt, app } = await makeApp(life, home)
+  // This case needs an UNMATCHING row, because "the `nginx` query committed"
+  // is otherwise unobservable: BOTH shared-fixture rows match `nginx`, so the
+  // old predicate (`fix nginx reload` painted) was already true on the
+  // pre-query page and raced the panel's debounced search.
+  seedHistory(home, '/work/a', [
+    { content: 'fix nginx reload', ts: 3 },
+    { content: 'old nginx prompt from yesterday', ts: 1 },
+    { content: 'unrelated history', ts: 0 },
+  ])
   vt.sendInput('\x12')
   await vt.waitForRender()
   assert.equal(app.focusSeatForTest(), 'editor-panel', 'the History tenant owns the derived keyboard seat')
+  // The unfiltered page first: 3 matches, including the non-matching row.
+  await waitFor(() => strip(vt.getViewport()).includes('Results · 3 matches'))
   vt.sendInput('nginx')
-  await waitFor(() => vt.getViewport().some(line => line.includes('fix nginx reload')))
+  // Acceptance is the FILTERED page (2 matches, `unrelated history` gone) —
+  // never "a read settled" or the initial 3-match page still painted.
+  await waitFor(() => {
+    const frame = strip(vt.getViewport())
+    return frame.includes('Search: > nginx')
+      && frame.includes('Results · 2 matches')
+      && !frame.includes('unrelated history')
+  })
+  const selectedOlderNginxRow = (): boolean =>
+    strip(vt.getViewport()).split('\n').some(line =>
+      line.startsWith('> ') && line.includes('old nginx prompt from yesterday'))
   vt.sendInput('\x1b[B') // select the second (older) row
   await vt.waitForRender()
-  const before = strip(vt.getViewport())
-  assert.ok(before.split('\n').some(line => line.startsWith('> ')), 'a row is selected before the park')
+  assert.ok(selectedOlderNginxRow(), 'the second matching row is selected before the park')
 
   const question = app.askQuestions([{ id: 'q1', question: 'park history?', options: [{ label: 'Yes' }] }])
   await vt.waitForRender()
@@ -313,7 +333,8 @@ test('H3A-14: a Question PARKS the History seat and the SAME tenant (query + sel
   assert.ok(panelVisible(vt.getViewport()), 'the SAME History tenant comes back after the last blocker settles')
   assert.equal(app.focusSeatForTest(), 'editor-panel', 'the restored tenant owns the derived keyboard seat again')
   assert.ok(strip(vt.getViewport()).includes('Search: > nginx'), 'the query survives the park/restore round trip')
-  assert.ok(strip(vt.getViewport()).includes('old prompt from yesterday'), 'the selected row survives too')
+  await waitFor(selectedOlderNginxRow)
+  assert.ok(selectedOlderNginxRow(), 'the SAME selected row survives the park/restore round trip')
   vt.sendInput('\x1b')
   await vt.waitForRender()
   assert.equal(app.focusSeatForTest(), 'editor', 'closing the seat derives the ordinary editor seat again')
