@@ -1419,9 +1419,9 @@ Then the provider was reset to the official default through the same UI
 is left at the shipped selection.
 
 NOT_VERIFIED in this record: a physical Tern GUI frame (this renderer does not
-paint these Settings surfaces) and a live palette switch of the pre-painted
-legacy chip ink (a new open paints the live palette; asserted in
-`test/settings-web-visual.test.ts`).
+paint these Settings surfaces). The live palette switch is covered in-process
+instead: the mounted rows register a theme observer and rebuild their cached
+chip ANSI, asserted by cell-ink in `test/settings-web-visual.test.ts`.
 
 ## 9. Re-verification recipe
 

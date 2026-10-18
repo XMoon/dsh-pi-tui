@@ -13836,6 +13836,11 @@ export class TuiApp {
 
   /** Theme revision for render-cache invalidation; bumped on every switch. */
   private themeRevision = 0
+  /** Live palette-switch observers. A component that PRE-PAINTS ANSI (a fork
+   *  list item's `valueParts`, whose strings are baked at item creation) must
+   *  rebuild them here: the theme contract is "read the palette at render
+   *  time", and a cached string is not a render (S2/PR-B §4A.2). */
+  private readonly themeChangeListeners = new Set<() => void>()
   /** Phase 4: the current theme id ('dark' | 'light' | 'custom'), tracked
    * by applyTheme/applyPalette (the advanced host-state getTheme). */
   private currentThemeId: string = 'dark'
@@ -21780,6 +21785,7 @@ export class TuiApp {
     // outlet refresh reads the revision from the store, so the order
     // matters (F-14 — a theme switch must re-bake extension ANSI).
     this.extensionHost?.updateSurface({ themeId: theme, themeRevision: this.themeRevision })
+    this.notifyThemeChanged()
     this.repaintAllSurfaces()
   }
 
@@ -21791,6 +21797,32 @@ export class TuiApp {
     return this.currentThemeId
   }
 
+  /** Observe a live palette switch. The returned release is idempotent; a
+   *  listener runs AFTER the new palette is installed and BEFORE the repaint,
+   *  so rebuilding pre-painted ANSI in it paints the new skin on this frame. */
+  onThemeChanged(listener: () => void): () => void {
+    this.themeChangeListeners.add(listener)
+    return () => { this.themeChangeListeners.delete(listener) }
+  }
+
+  /** Run every live palette observer. A throwing observer must not abort the
+   *  switch itself: the first failure is reported after every observer ran. */
+  private notifyThemeChanged(): void {
+    let failure: unknown
+    let failed = false
+    for (const listener of [...this.themeChangeListeners]) {
+      try {
+        listener()
+      } catch (error) {
+        if (!failed) {
+          failed = true
+          failure = error
+        }
+      }
+    }
+    if (failed) throw failure
+  }
+
   /** Apply a resolved custom palette and repaint everything. */
   applyPalette(palette: ColorPalette): void {
     setTheme('custom', palette)
@@ -21799,6 +21831,7 @@ export class TuiApp {
     this.themeRevision += 1
     // Same ordering as applyTheme (F-14).
     this.extensionHost?.updateSurface({ themeId: 'custom', themeRevision: this.themeRevision })
+    this.notifyThemeChanged()
     this.repaintAllSurfaces()
   }
 

@@ -81,6 +81,8 @@ interface Harness {
   readonly maxConcurrentWrites: () => number
   /** The write labels in COMMIT order. */
   readonly log: readonly string[]
+  /** Hold the NEXT authority read until the returned release is called. */
+  readonly holdRead: () => () => void
   readonly view: () => string
   readonly invoke: (name?: string) => unknown
   readonly dispose: () => void
@@ -99,6 +101,7 @@ function setup(options: {
   let activeWrites = 0
   let maxActiveWrites = 0
   const log: string[] = []
+  let readGate: { readonly promise: Promise<void>; readonly release: () => void } | undefined
   const store = {
     available: options.available ?? true,
     failNext: undefined as string | undefined,
@@ -181,9 +184,17 @@ function setup(options: {
       web: {
         available: () => store.available,
         read: async () => {
-          if (store.readThrows) throw new Error('settings descriptor unreadable')
-          if (!store.available || store.readUndefined) return undefined
-          return { ...store.web, api: { ...store.web.api } }
+          const gate = readGate
+          readGate = undefined
+          // A held read stays the snapshot of the moment it was ISSUED: a real
+          // Host read cannot observe a write that happens while it is pending.
+          const captured = { ...store.web, api: { ...store.web.api } }
+          const throws = store.readThrows
+          const unreadable = !store.available || store.readUndefined
+          if (gate !== undefined) await gate.promise
+          if (throws) throw new Error('settings descriptor unreadable')
+          if (unreadable) return undefined
+          return captured
         },
         setSearchProvider: async (id: string) => { await write(`search:${id}`, () => { store.web.searchProvider = id }, store.writeDelayMs) },
         setFetchProvider: async (id: string) => { await write(`fetch:${id}`, () => { store.web.fetchProvider = id }) },
@@ -226,6 +237,12 @@ function setup(options: {
     store,
     maxConcurrentWrites: () => maxActiveWrites,
     log,
+    holdRead: () => {
+      let release = (): void => {}
+      const promise = new Promise<void>(resolve => { release = () => resolve() })
+      readGate = { promise, release }
+      return release
+    },
     view,
     invoke,
     dispose: () => {
@@ -259,6 +276,13 @@ async function openWebSection(h: Harness): Promise<void> {
   await openOtherRows(h)
   await key(h, DOWN)
   await key(h, ENTER)
+  // Both the Workspace row and the section start PENDING and settle with the
+  // authoritative read; every assertion below is about the settled facts (the
+  // transient frames have their own tests, which hold the read themselves).
+  for (let attempt = 0; attempt < 40 && h.view().includes('Loading…'); attempt += 1) {
+    await new Promise(resolve => setTimeout(resolve, 5))
+    await h.vt.waitForRender()
+  }
 }
 
 test('the workspace row reports the configured providers and opens the Web section focused', async t => {
@@ -483,4 +507,171 @@ test('a mounted but MALFORMED Web section reads as unavailable and accepts no wr
   assert.deepEqual(h.writes, [], 'a malformed section never accepts a write')
   const providerLine = h.view().split('\n').find(line => line.includes('Web Search Provider')) ?? ''
   assert.doesNotMatch(providerLine, /\[current\]/u)
+})
+
+test('a workspace opened while the authority is pending paints Loading…, never the previous state', async t => {
+  const h = setup()
+  t.after(h.dispose)
+  // A first, settled read: the summary is known and would be the cached value.
+  await openWebSection(h)
+  assert.match(h.view(), /\[current\]/u, 'the settled read paints the verified state')
+  await key(h, ESC)
+  await key(h, ESC)
+  await key(h, ESC)
+
+  const release = h.holdRead()
+  h.invoke('settings')
+  // The held read cannot settle, so every frame painted before it settles is
+  // the pending state (without the pre-snapshot pending entry these frames
+  // would carry the previous summary as current).
+  await h.vt.waitForRender()
+  for (const pressed of h.vt.columns >= 96 ? [TAB, TAB, DOWN, DOWN, ENTER] : [DOWN, DOWN, ENTER]) await key(h, pressed)
+  const firstFrame = h.view()
+  assert.match(firstFrame, /Loading…/u, `the first frames of the reopened workspace are pending:\n${firstFrame}`)
+  assert.doesNotMatch(firstFrame, /Search: Messages/u,
+    'the previous summary is never presented as the current state')
+
+  // The settled read then repaints the SAME generation.
+  release()
+  await new Promise(resolve => setTimeout(resolve, 10))
+  await h.vt.waitForRender()
+  const settled = h.view()
+  assert.match(settled, /Search: Messages/u, `the settled read paints the facts:\n${settled}`)
+  assert.doesNotMatch(settled, /Loading…/u)
+})
+
+test('a new read clears the previous read ERROR: pending, not a stale Unavailable', async t => {
+  const h = setup()
+  t.after(h.dispose)
+  h.store.readThrows = true
+  await openWebSection(h)
+  assert.match(h.view(), /Unavailable/u, 'the failed read is stated')
+  await key(h, ESC)
+  await key(h, ESC)
+  await key(h, ESC)
+
+  h.store.readThrows = false
+  const release = h.holdRead()
+  h.invoke('settings')
+  await h.vt.waitForRender()
+  for (const pressed of h.vt.columns >= 96 ? [TAB, TAB, DOWN, DOWN, ENTER] : [DOWN, DOWN, ENTER]) await key(h, pressed)
+  const firstFrame = h.view()
+  assert.match(firstFrame, /Loading…/u, `the reopened workspace is pending again:\n${firstFrame}`)
+  assert.doesNotMatch(firstFrame, /Unavailable/u, 'the previous error state does not survive into the new read')
+  release()
+  await new Promise(resolve => setTimeout(resolve, 10))
+  await h.vt.waitForRender()
+  assert.match(h.view(), /Search: Messages/u)
+})
+
+test('the workspace `r` refresh re-enters pending instead of repainting the cached summary', async t => {
+  const h = setup()
+  t.after(h.dispose)
+  await openWebSection(h)
+  // Esc returns to the Workspace ON the Web row (rows level, already focused).
+  await key(h, ESC)
+  assert.match(h.view(), /Settings · Other settings/u, 'Esc restored the Workspace rows level')
+  assert.match(h.view(), /Search: Messages/u, 'the settled summary is visible on the rows level')
+
+  const release = h.holdRead()
+  await key(h, 'r')
+  const pending = h.view()
+  assert.match(pending, /Loading…/u, `the refresh enters the pending state:\n${pending}`)
+  assert.doesNotMatch(pending, /Search: Messages/u, 'the cached summary is not repainted while the read is pending')
+  release()
+  await new Promise(resolve => setTimeout(resolve, 10))
+  await h.vt.waitForRender()
+  assert.match(h.view(), /Search: Messages/u)
+})
+
+test('entering the legacy Web section paints Loading…, never the last-known value', async t => {
+  const h = setup()
+  t.after(h.dispose)
+  await openWebSection(h)
+  assert.match(h.view(), /\[current\]/u, 'the settled section paints the verified state')
+  await key(h, ESC)
+  assert.match(h.view(), /Settings · Other settings/u)
+
+  // Hold the read the section's own mount will request.
+  const release = h.holdRead()
+  await key(h, ENTER)
+  const pending = h.view()
+  assert.match(pending, /\[Loading…\]/u, `the section starts pending:\n${pending}`)
+  const pendingRow = pending.split('\n').find(line => line.includes('Web Search Provider')) ?? ''
+  assert.doesNotMatch(pendingRow, /\[current\]|\[default\]/u,
+    'no row claims a current/default value while the read is in flight')
+  assert.match(pending, /Current: Loading…/u, 'the description states the pending fact')
+
+  release()
+  await new Promise(resolve => setTimeout(resolve, 10))
+  await h.vt.waitForRender()
+  const settled = h.view()
+  assert.match(settled, /\[current\]/u, `the mounted read repaints the verified state:\n${settled}`)
+  assert.match(settled, /Current: Messages/u)
+  assert.doesNotMatch(settled, /Loading…/u)
+})
+
+test('a section reopened after a FAILED read states Loading…, not the stale error', async t => {
+  const h = setup()
+  t.after(h.dispose)
+  h.store.readThrows = true
+  await openWebSection(h)
+  assert.match(h.view(), /Unavailable/u, 'the failure is stated')
+  await key(h, ESC)
+
+  h.store.readThrows = false
+  const release = h.holdRead()
+  await key(h, ENTER)
+  const pending = h.view()
+  assert.match(pending, /\[Loading…\]/u, `the reopened section is pending:\n${pending}`)
+  assert.doesNotMatch(pending, /Current: Unavailable/u, 'the previous read error does not survive into the new read')
+  release()
+  await new Promise(resolve => setTimeout(resolve, 10))
+  await h.vt.waitForRender()
+  assert.match(h.view(), /Current: Messages/u)
+})
+
+test('an OLD read settling after a write never repaints the reopened Workspace (owner-generation fence)', async t => {
+  const h = setup()
+  t.after(h.dispose)
+  await openWebSection(h)
+  assert.match(h.view(), /Current: Messages/u, 'the section starts from the settled facts')
+  await key(h, ESC)
+  assert.match(h.view(), /Settings · Other settings/u, 'Esc restored the Workspace rows level')
+
+  // Hold the Workspace's own read (R_ws1): it observes the PRE-write Host state
+  // and will settle LAST, after the write and a newer Workspace read.
+  const release = h.holdRead()
+  await key(h, ESC)
+  await key(h, ESC) // leave the Settings surface entirely
+  // Re-enter: the workspace open starts a read, which the gate holds.
+  h.invoke('settings')
+  await h.vt.waitForRender()
+  for (const pressed of h.vt.columns >= 96 ? [TAB, TAB, DOWN, DOWN, ENTER] : [DOWN, DOWN, ENTER]) await key(h, pressed)
+  await key(h, DOWN)
+  await key(h, ENTER)
+  for (let attempt = 0; attempt < 40 && h.view().includes('Loading…'); attempt += 1) {
+    await new Promise(resolve => setTimeout(resolve, 5))
+    await h.vt.waitForRender()
+  }
+  assert.match(h.view(), /\[current\]/u, 'the section settled from the newest read')
+
+  // A real write, then Esc back to the Workspace (whose own read is newer).
+  await key(h, ENTER)
+  await new Promise(resolve => setTimeout(resolve, 20))
+  await h.vt.waitForRender()
+  assert.deepEqual(h.writes, ['search:deepseek-search-api'], 'the write committed')
+  await key(h, ESC)
+  await new Promise(resolve => setTimeout(resolve, 20))
+  await h.vt.waitForRender()
+  assert.match(h.view(), /Search: DeepSeek Search API/u, `the Workspace shows the committed facts:\n${h.view()}`)
+
+  // The OLD held read settles now: it must NOT repaint the Workspace with the
+  // pre-write summary.
+  release()
+  await new Promise(resolve => setTimeout(resolve, 20))
+  await h.vt.waitForRender()
+  const after = h.view()
+  assert.match(after, /Search: DeepSeek Search API/u, `the committed facts survive the stale settlement:\n${after}`)
+  assert.doesNotMatch(after, /Search: Messages/u, 'the pre-write summary never comes back')
 })

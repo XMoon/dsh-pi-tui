@@ -30,11 +30,14 @@ import {
 } from './support/runner-harness.ts'
 import { installProbe } from './support/runner-session-fixtures.ts'
 import { testLifecycle } from './support/temp-lifecycle.ts'
+import { visibleWidth } from '@xmoon76/pi-tui'
 import { VirtualTerminal } from './virtual-terminal.ts'
 
 const SESSION = 'session-external-parent'
 
-test('the REAL Task Center lists an external leaf as visible, non-openable and stop-less', async t => {
+const SIZES = [[120, 40], [80, 10], [44, 20]] as const
+
+for (const [columns, rows] of SIZES) test(`the REAL Task Center external leaf at ${columns}x${rows}`, async t => {
   const life = testLifecycle(t)
   const home = life.tempDir('dsh-pi-tui-external-leaf-')
   const previousHome = process.env.DSH_HOME
@@ -43,7 +46,7 @@ test('the REAL Task Center lists an external leaf as visible, non-openable and s
     if (previousHome === undefined) delete process.env.DSH_HOME
     else process.env.DSH_HOME = previousHome
   })
-  const vt = new VirtualTerminal(120, 40)
+  const vt = new VirtualTerminal(columns, rows)
   life.defer(installVirtualProcessTerminal(vt))
   const probe = installProbe()
   life.defer(probe.restore)
@@ -85,28 +88,47 @@ test('the REAL Task Center lists an external leaf as visible, non-openable and s
   await vt.waitForRender()
   assert.ok(descendantReads > 0, 'the real Task Center read the official descendant catalog')
   const frame = view()
-  assert.match(frame, /external · external run/u, `the external leaf is listed with its classification:\n${frame}`)
-  assert.match(frame, /External/u, 'the status word states External')
-  assert.match(frame, /local research/u, 'local children keep their own rows')
-
-  // Select the external row and press Enter: no viewer opens, no Stop is
-  // advertised, and the refusal states why.
-  const externalRow = vt.getViewport().findIndex(line => line.replace(/\u001b\[[0-9;]*m/g, '').includes('external · external run'))
-  assert.ok(externalRow >= 0)
-  // The picker cursor starts on the first row; move to the external row.
-  for (let step = 0; step < 4; step += 1) {
-    vt.sendInput('\x1b[B')
-    await settle()
-    if (view().includes('›  external · external run') || view().includes('> external · external run')) break
+  for (const line of vt.getViewport()) {
+    assert.ok(visibleWidth(line) <= columns, `no frame row overflows ${columns} cells: ${JSON.stringify(line)}`)
   }
+  // The roster fact is the same at every size: both catalog entries are known to
+  // the Task Center (narrow grants paint fewer rows, never fewer facts).
+  assert.match(frame, /2\/2 shown/u, `the Task Center knows both catalog entries:\n${frame}`)
+  if (columns >= 120) {
+    assert.match(frame, /external · external run/u, `the external leaf is listed with its classification:\n${frame}`)
+    assert.match(frame, /External/u, 'the status word states External')
+    assert.match(frame, /local research/u, 'local children keep their own rows')
+  }
+
+  // The external entry is the SECOND row (catalog order): one DOWN selects it at
+  // every size, painted or scrolled.
+  vt.sendInput('\u001b[B')
+  await settle()
   await vt.waitForRender()
-  const selected = view()
-  assert.doesNotMatch(selected, /S stop/u, 'an external leaf never advertises Stop')
-  assert.doesNotMatch(selected, /Continue/u, 'an external leaf never advertises Continue')
+  if (columns >= 120) {
+    const selected = view()
+    // The selected external row's Detail states the durable classification. The
+    // Stop/Continue NEGATIVES are row facts owned by the model
+    // (`canStop/canOpen === false`, `task-browser-runtime.test.ts`); the panel's
+    // global key hint always lists `s stop`, so absence of that word is not a
+    // row witness and is not asserted here.
+    assert.match(selected, /mode\s+external/u, `the Detail states the mode:\n${selected}`)
+    assert.match(selected, /activity\s+External/u, 'the Detail states the activity word')
+  }
   const viewersBefore = probe.apps.length
   vt.sendInput('\r')
   await settle()
   await vt.waitForRender()
-  assert.match(view(), /external subagent: no local session to open/u, 'Enter states why nothing opened')
+  // The refusal is a NOTICE (the narrow notice line truncates its PAINT, so the
+  // witness is the production notice slot itself, not the painted prefix).
+  const noticeText = (): string | undefined => (probe.apps.at(-1) as unknown as {
+    currentNotice?: () => { readonly text: string } | undefined
+  }).currentNotice?.()?.text
+  assert.equal(noticeText(), 'external subagent: no local session to open',
+    `Enter states why nothing opened at ${columns}x${rows}`)
   assert.equal(probe.apps.length, viewersBefore, 'no second surface was mounted')
+  if (columns >= 120) {
+    assert.match(view(), /external subagent: no local session to open/u,
+      'the wide notice line paints the whole refusal')
+  }
 })

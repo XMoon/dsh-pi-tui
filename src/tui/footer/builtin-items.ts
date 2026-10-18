@@ -230,7 +230,13 @@ const cwdItem: FooterItemDefinition = {
   defaultFormat: 'short',
   render(snapshot: StatusSnapshot, ref, density) {
     const cwd = snapshot.workspace.cwd
-    if (cwd === '') return null
+    if (cwd === '') {
+      // An UNKNOWN effective directory is a stated fact, not a blank slot.
+      if (snapshot.workspace.cwdUnavailable === true) {
+        return { spans: [{ text: 'Unavailable', emphasis: 'dim' }] }
+      }
+      return null
+    }
     // Density compact reuses the persisted 'basename' style; the user's
     // own format choice is never written back.
     const format = density === 'compact' ? 'basename' : ref.format ?? 'short'
