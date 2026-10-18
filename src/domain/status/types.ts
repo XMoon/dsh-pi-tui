@@ -80,6 +80,11 @@ export interface InteractionStatus {
 /** The workspace the display subject lives in (plan §4.7). */
 export interface WorkspaceStatus {
   readonly cwd: string
+  /** TRUE when the effective directory is UNKNOWN (the owner's read failed or
+   *  the authority is absent): the footer states the unavailability in words
+   *  (plan §B2 UI: 不可用状态有文字) instead of painting an empty value. `cwd`
+   *  stays empty for path math — the state word is never a path. */
+  readonly cwdUnavailable?: boolean
   readonly project?: string
   readonly branch?: string
 }

@@ -187,61 +187,63 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
   let closeLegacyEditor: (() => void) | undefined
   /** Recompute the mounted Web rows' display units after a settle. */
   let repaintWebItems: (() => void) | undefined
+  /** Release for the live palette observer of the MOUNTED Web section (§4A.2:
+   *  the theme is read at render time, so cached chip ANSI is rebuilt on a
+   *  skin switch instead of keeping the palette it was created with). */
+  let releaseWebThemeListener: (() => void) | undefined
 
   /** The last AUTHORITATIVE Web provider read. Never a defaulted value: while
    *  it is undefined the section shows Loading…/Unavailable, never a shipped
    *  default presented as the Host's answer. */
   let webSettings: WebProviderSettings | undefined
   let webReadFailure: string | undefined
-  let webReadInFlight: Promise<WebProviderSettings | undefined> | undefined
+  /** The LATEST read: its serial decides which settlement may commit facts (a
+   *  read that STARTED earlier must never overwrite a newer observation). */
+  let webReadInFlight: { readonly serial: number; readonly promise: Promise<WebProviderSettings | undefined> } | undefined
+  let webReadSerial = 0
   /** Whether at least one read COMPLETED (a resolved `undefined` is
    *  Unavailable, never an eternal `Loading…`). */
   let webReadSettled = false
 
-  /** ONE shared Host read: a burst of opens/refreshes never fans out. */
-  const readWebSettings = (): Promise<WebProviderSettings | undefined> => {
-    if (webReadInFlight !== undefined) return webReadInFlight
-    const task = (async (): Promise<WebProviderSettings | undefined> => {
-      // A fresh read starts UNKNOWN: the previous snapshot is dropped so no
-      // first frame can present a cached value as the current one (the row
-      // shows `Loading…`, then the settled fact).
-      webSettings = undefined
-      webReadSettled = false
-      try {
-        const settings = await runner.config.web.read()
-        // A resolved read (including `undefined` = no readable authority) REPLACES
-        // the previous value: a stale snapshot must never survive as `[current]`.
-        webSettings = settings
-        webReadFailure = undefined
-        webReadSettled = true
-        return settings
-      } catch (error) {
-        // A failed read is UNKNOWN: drop the old snapshot so no row can present
-        // the last-known value as the current one.
-        webSettings = undefined
-        webReadFailure = safeErrorMessage(error)
-        webReadSettled = true
-        return undefined
-      } finally {
-        webReadInFlight = undefined
-      }
-    })()
-    webReadInFlight = task
-    return task
+  /**
+   * ONE Host read per call: the LATEST settlement owns the facts. A read that
+   * started earlier but settles later cannot commit (another read may already
+   * have observed the Host AFTER a write), and every commit repaints the panel
+   * generation that currently owns the surface — so a suspended legacy read or
+   * a Workspace reopened mid-write can never leave the surface permanently on
+   * a pre-write snapshot.
+   */
+  const readWebSettings = async (): Promise<{ settings: WebProviderSettings | undefined; fresh: boolean }> => {
+    const serial = ++webReadSerial
+    const promise = (async (): Promise<WebProviderSettings | undefined> => await runner.config.web.read())()
+    webReadInFlight = { serial, promise }
+    let settings: WebProviderSettings | undefined
+    let failure: string | undefined
+    try {
+      settings = await promise
+    } catch (error) {
+      failure = safeErrorMessage(error)
+    }
+    const fresh = serial === webReadSerial
+    if (fresh) {
+      // A resolved read (including `undefined` = no readable authority)
+      // REPLACES the previous value; a failure is UNKNOWN and drops it.
+      webSettings = failure === undefined ? settings : undefined
+      webReadFailure = failure
+      webReadSettled = true
+      // The committed facts repaint whichever generation owns the surface: a
+      // write's verification read must converge a Workspace reopened mid-write.
+      activeSettingsWorkspace?.refresh()
+    }
+    if (webReadInFlight?.serial === serial) webReadInFlight = undefined
+    return { settings: failure === undefined ? settings : undefined, fresh }
   }
 
-  /** A read issued AFTER a write: the in-flight read may predate the mutation,
-   *  so it is awaited first and a fresh one establishes the committed value. */
+  /** A read issued AFTER a write: it starts from the pending state and its
+   *  settlement (the newest serial) owns the committed facts. */
   const rereadWebSettings = async (): Promise<WebProviderSettings | undefined> => {
-    const inFlight = webReadInFlight
-    if (inFlight !== undefined) {
-      try {
-        await inFlight
-      } catch {
-        // The recorded failure is surfaced by the fresh read below.
-      }
-    }
-    return readWebSettings()
+    beginWebSettingsRead()
+    return (await readWebSettings()).settings
   }
 
   const webSettingsAvailable = (): boolean => runner.config.web.available()
@@ -261,6 +263,17 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
     id: string | undefined,
   ): boolean => id === undefined || values.some(entry => entry.id === id)
 
+  /** The cycle list a provider row may offer: the official candidate LABELS
+   *  (the fork's contract) only while the verified value is one of them; a
+   *  custom route — or an authority that has not answered yet — offers no
+   *  cycle at all. */
+  const providerRowValues = (rowId: 'web-search-provider' | 'web-fetch-provider'): string[] | undefined => {
+    if (webSettings === undefined) return undefined
+    const values = rowId === 'web-search-provider' ? WEB_SEARCH_PROVIDER_VALUES : WEB_FETCH_PROVIDER_VALUES
+    const id = rowId === 'web-search-provider' ? webSettings.searchProvider : webSettings.fetchProvider
+    return providerSelectable(values, id) ? values.map(entry => entry.label) : undefined
+  }
+
   const providerDefault = (
     values: readonly { readonly id: string; readonly default: boolean }[],
     id: string | undefined,
@@ -274,6 +287,9 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
     values: readonly { readonly id: string; readonly label: string; readonly default: boolean }[],
   ): SettingValuePart[] => {
     const phase = webRowPhases.get(rowId)
+    const phaseParts = webPhaseParts(phase)
+    if (phaseParts.length > 0) return phaseParts
+    if (webReadPending()) return [{ kind: 'chip', text: color.textMuted('[Loading…]') }]
     const id = rowId === 'web-search-provider' ? webSettings?.searchProvider : webSettings?.fetchProvider
     const label = providerLabel(values, id)
     // X061 drops a trailing TEXT part unconditionally, so the unavailable /
@@ -285,8 +301,6 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
     // a state chip and a name can never rely on a text tail. The state chips
     // are therefore the row's value slot (the theme/preset picker precedent),
     // and the row's description states `Current: <value>` in full.
-    const phaseParts = webPhaseParts(phase)
-    if (phaseParts.length > 0) return phaseParts
     const parts: SettingValuePart[] = []
     if (webSettings !== undefined) {
       const selectable = providerSelectable(values, id)
@@ -317,30 +331,48 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
 
   /** A non-provider row's value units: the value plus the same chip/state
    *  vocabulary (count / question / endpoint). */
+  /** TRUE while the facts are NOT settled: a read is in flight, or one is
+   *  about to start (the entry/refresh prologue). The rows then state
+   *  `Loading…` instead of presenting a last-known value as current. */
+  const webReadPending = (): boolean => !webReadSettled
+
   const plainValueParts = (
     rowId: WebSettingRowId,
     value: string,
     options: { readonly current: boolean; readonly isDefault: boolean },
   ): SettingValuePart[] => {
     const phase = webRowPhases.get(rowId)
-    if (phase?.kind === 'saving') return [{ kind: 'text', text: color.textDim('Saving…') }]
     const phaseParts = webPhaseParts(phase)
     if (phaseParts.length > 0) return phaseParts
+    if (webReadPending()) return [{ kind: 'chip', text: color.textMuted('[Loading…]') }]
     if (!options.current) return [{ kind: 'chip', text: color.warning('[unavailable]') }]
     const parts: SettingValuePart[] = [{ kind: 'chip', text: color.textMuted('[current]') }]
     if (options.isDefault) parts.push({ kind: 'text', text: ' ' }, { kind: 'chip', text: color.textMuted('[default]') })
     return parts
   }
 
-  const webRowValue = (id: WebSettingRowId): string => {
-    if (webSettings === undefined) return 'Unavailable'
+  /** The SETTLED Host value only (never a transient word): this is what a
+   *  choice row positions itself on and what a failed write reverts to. */
+  const webSettledValue = (id: WebSettingRowId): string | undefined => {
+    if (webSettings === undefined) return undefined
     switch (id) {
-      case 'web-search-provider': return providerLabel(WEB_SEARCH_PROVIDER_VALUES, webSettings.searchProvider) ?? 'Unavailable'
-      case 'web-fetch-provider': return providerLabel(WEB_FETCH_PROVIDER_VALUES, webSettings.fetchProvider) ?? 'Unavailable'
+      case 'web-search-provider': return providerLabel(WEB_SEARCH_PROVIDER_VALUES, webSettings.searchProvider)
+      case 'web-fetch-provider': return providerLabel(WEB_FETCH_PROVIDER_VALUES, webSettings.fetchProvider)
       case 'web-search-count': return String(webSettings.api.count)
       case 'web-send-original-question': return webSettings.api.sendOriginalQuestion ? 'on' : 'off'
       case 'web-search-endpoint': return webSettings.api.baseURL
     }
+  }
+
+  /** The DISPLAYED fact: a pending/failed phase states itself, and an
+   *  unreadable authority is Unavailable — never a last-known value. */
+  const webRowValue = (id: WebSettingRowId): string => {
+    const phase = webRowPhases.get(id)
+    if (phase?.kind === 'saving') return 'Saving…'
+    if (phase?.kind === 'not-saved') return 'Not saved'
+    if (phase?.kind === 'outcome-unknown') return 'Outcome unknown'
+    if (webReadPending()) return 'Loading…'
+    return webSettledValue(id) ?? 'Unavailable'
   }
 
   const webRowValueParts = (id: WebSettingRowId): SettingValuePart[] => {
@@ -399,6 +431,7 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
   }
 
   const webCredentialParts = (): SettingValuePart[] => {
+    if (webReadPending()) return [{ kind: 'chip', text: color.textMuted('[Loading…]') }]
     return webSettings?.credential.configured
       ? [{ kind: 'chip', text: color.textMuted('[current]') }]
       : [{ kind: 'chip', text: color.warning('[unavailable]') }]
@@ -438,6 +471,14 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
     write: () => Promise<void>,
     revert: (previousValue: string) => void,
   ): void => {
+    if (webSettings === undefined) {
+      // No verified authority read: the write is refused with the reason
+      // instead of mutating a state the UI cannot verify (§B3.4).
+      webRowPhases.set(id, { kind: 'not-saved', reason: 'the current Web settings could not be read' })
+      repaintWebItems?.()
+      if (legacyEditorOpen) app.notify('Web settings · Not saved: the current Web settings could not be read', 'error')
+      return
+    }
     const previous = webRowValue(id)
     webRowPhases.set(id, { kind: 'saving' })
     repaintWebItems?.()
@@ -547,6 +588,9 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
 
   const openSettingsWorkspaceAt = (initialRowId?: SettingsWorkspaceRowId): void => {
     const token = {}
+    // The panel snapshots its source in its CONSTRUCTOR, so the pending state
+    // must be in place before the lease is taken.
+    if (webSettingsAvailable()) beginWebSettingsRead()
     let handle: import('../../tui-app.ts').SettingsWorkspaceHandle | undefined
     handle = app.openSettingsWorkspace(
       {
@@ -566,14 +610,25 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
     startWebSettingsRead(token)
   }
 
-  /** Start ONE authority read for the panel generation `token`; the SAME
-   *  generation refreshes only if it still owns the surface when the read
-   *  settles. */
-  const startWebSettingsRead = (token: object): void => {
+  /** Enter the PENDING state synchronously: the previous value AND the
+   *  previous error are dropped, so no snapshot taken from here on (including
+   *  the very first frame of a workspace) can present either as current. */
+  const beginWebSettingsRead = (): void => {
+    webSettings = undefined
+    webReadFailure = undefined
+    webReadSettled = false
+  }
+
+  /** Start ONE authority read for the panel generation `token`: the pending
+   *  state is applied and repainted BEFORE the async read, and the SAME
+   *  generation repaints only if it still owns the surface when it settles. */
+  const startWebSettingsRead = (_token: object): void => {
+    beginWebSettingsRead()
+    activeSettingsWorkspace?.refresh()
     detach('web provider settings read', async () => {
+      // The read's own commit refreshes the generation that currently owns the
+      // surface (never a superseded one).
       await readWebSettings()
-      if (activeSettingsWorkspace?.token !== token) return
-      activeSettingsWorkspace.refresh()
     }, { notify: false })
   }
 
@@ -592,9 +647,12 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
   /** The Web section rows, in the frozen order. An unavailable section renders
    *  its state and OFFERS NO WRITE ENTRY at all. */
   const webSettingItems = (): SettingItem[] => {
-    // Admission is the VERIFIED authority: a mounted-but-malformed section has
-    // no readable facts, so it offers no write entry either.
-    const available = webSettingsAvailable() && webSettings !== undefined
+    // Structural admission: the section's own rows render whenever the
+    // authority exists. Whether a WRITE is acceptable is decided at write time
+    // by the READABLE facts (`queueWebSettingWrite`), so a pending read shows
+    // `Loading…` rows instead of pretending the section is unavailable, and a
+    // settled-unreadable one states Unavailable with no accepted write.
+    const available = webSettingsAvailable() && (!webReadSettled || webSettings !== undefined)
     const credentialsAvailable = runner.config.credentials.available()
     const section: SettingItem = {
       id: 'web-separator',
@@ -608,31 +666,36 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
       currentValue: 'Unavailable',
       valueParts: [{ kind: 'chip', text: color.warning('[unavailable]') }],
     })
-    const customSearch = !providerSelectable(WEB_SEARCH_PROVIDER_VALUES, webSettings?.searchProvider)
-    const customFetch = !providerSelectable(WEB_FETCH_PROVIDER_VALUES, webSettings?.fetchProvider)
+    // A provider row offers its cycle ONLY from a VERIFIED authority: an
+    // unknown (pending/failed) value must never be cycled, because the fork's
+    // cycle would silently replace a custom route with the first candidate.
+    // The list is reconciled on every settle too (`repaintWebItems`), since the
+    // row is created before the authority has answered.
+    const customSearch = providerRowValues('web-search-provider') === undefined
+    const customFetch = providerRowValues('web-fetch-provider') === undefined
     const rows: SettingItem[] = available
       ? [
           {
             id: 'web-search-provider',
             label: 'Web Search Provider',
             description: webRowDescription('web-search-provider'),
-            currentValue: webRowValue('web-search-provider'),
+            currentValue: webSettledValue('web-search-provider') ?? '',
             valueParts: webRowValueParts('web-search-provider'),
-            ...customSearch ? {} : { values: WEB_SEARCH_PROVIDER_VALUES.map(entry => entry.label) },
+            ...customSearch ? {} : { values: providerRowValues('web-search-provider') },
           },
           {
             id: 'web-fetch-provider',
             label: 'Web Fetch Provider',
             description: webRowDescription('web-fetch-provider'),
-            currentValue: webRowValue('web-fetch-provider'),
+            currentValue: webSettledValue('web-fetch-provider') ?? '',
             valueParts: webRowValueParts('web-fetch-provider'),
-            ...customFetch ? {} : { values: WEB_FETCH_PROVIDER_VALUES.map(entry => entry.label) },
+            ...customFetch ? {} : { values: providerRowValues('web-fetch-provider') },
           },
           {
             id: 'web-search-count',
             label: 'Search API Result Count',
             description: webRowDescription('web-search-count'),
-            currentValue: webRowValue('web-search-count'),
+            currentValue: webSettledValue('web-search-count') ?? '',
             valueParts: webRowValueParts('web-search-count'),
             values: [...WEB_SEARCH_COUNT_VALUES],
           },
@@ -640,7 +703,7 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
             id: 'web-send-original-question',
             label: 'Share Original Question',
             description: webRowDescription('web-send-original-question'),
-            currentValue: webRowValue('web-send-original-question'),
+            currentValue: webSettledValue('web-send-original-question') ?? '',
             valueParts: webRowValueParts('web-send-original-question'),
             values: [...WEB_ORIGINAL_QUESTION_VALUES],
           },
@@ -650,13 +713,16 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
             description: webRowDescription('web-search-endpoint'),
             // No state chip on this row: the plain value slot truncates the
             // long URL to the cells it has (the submenu shows it in full).
-            currentValue: webRowValue('web-search-endpoint'),
+            currentValue: webSettledValue('web-search-endpoint') ?? '',
             submenu: (_currentValue: string, done: (selected?: string) => void) => new WebEndpointPanel(done, {
               current: webSettings?.api.baseURL ?? '',
               // The endpoint text write is a Web-section write like any other:
               // it joins the ONE owner FIFO so a selection and a text edit can
               // never race the official revision-checked mutation.
               save: (url: string) => queueWebOperation(async () => {
+                if (webSettings === undefined) {
+                  throw new WebWriteVerdictError('not-saved', 'the current Web settings could not be read')
+                }
                 webRowPhases.set('web-search-endpoint', { kind: 'saving' })
                 repaintWebItems?.()
                 try {
@@ -1384,10 +1450,20 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
         // that no longer exists.
         let settingsOpen = true
         legacyEditorOpen = true
+        // A live palette switch must re-bake the Web rows' cached chips.
+        releaseWebThemeListener?.()
+        releaseWebThemeListener = app.onThemeChanged(() => {
+          if (!legacyEditorOpen) return
+          repaintWebItems?.()
+          app.requestRender()
+        })
         // The return path belongs to THIS open: the Web launcher restores the
         // Workspace on its own row, while the compatibility entry keeps the
         // original conversation return.
         webReturnToWorkspace = targetId === WEB_LAUNCHER_TARGET_ROW
+        // The section snapshots its items BEFORE the mounted read settles:
+        // entering it starts from `Loading…`, never from the last-known value.
+        if (webSettingsAvailable()) beginWebSettingsRead()
         const webItems = webSettingItems()
         const closeSettings = app.openSettings(
           [
@@ -2129,6 +2205,8 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
           () => {
             settingsOpen = false
             legacyEditorOpen = false
+            releaseWebThemeListener?.()
+            releaseWebThemeListener = undefined
           },
           {
             // S2/PR-B §3.3: the Web section deeplink + the authoritative
@@ -2167,6 +2245,11 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
             item.currentValue = webRowValue(rowId)
             item.valueParts = webRowValueParts(rowId)
             item.description = webRowDescription(rowId)
+            if (rowId === 'web-search-provider' || rowId === 'web-fetch-provider') {
+              // The cycle list follows the SETTLED authority: it appears once a
+              // verified value is selectable and disappears for a custom route.
+              item.values = providerRowValues(rowId)
+            }
           }
           app.requestRender()
         }

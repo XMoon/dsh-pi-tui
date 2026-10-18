@@ -269,4 +269,7 @@ test('an UNAVAILABLE working-directory read never falls back to the header proje
     `the failed read must not publish the header project through OSC 7: ${JSON.stringify(cwdWrites)}`)
   assert.ok(statusRow() === '' || !statusRow().includes('roster-project'),
     'the footer cwd fact stays unknown while the authority is unavailable')
+  // Plan §B2 UI: the unavailable state has WORDS, not a blank slot.
+  assert.match(after, /Unavailable/u,
+    `the unreadable effective directory is stated in words:\n${after}`)
 })

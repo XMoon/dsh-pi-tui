@@ -357,9 +357,9 @@ export function createStatusRuntime(deps: StatusRuntimeDeps): StatusRuntime {
     const model = current?.model ?? agent.options.model
     deps.surface.display.setWelcomeCard({
       // The displayed workspace fact is the OFFICIAL directory authority; an
-      // unavailable read is an ABSENT fact. `sessionCwd()`'s Client-local
-      // fallback belongs to EXECUTION paths only.
-      cwd: sessionCwdFact() ?? '',
+      // unreadable one is stated in words (plan §B2 UI), never as the Client
+      // cwd — `sessionCwd()`'s fallback belongs to EXECUTION paths only.
+      cwd: sessionCwdFact() ?? 'Unavailable',
       sessionId: agent.session.id,
       model: `${provider}/${model}`,
       version: versionDisplay(),
@@ -737,7 +737,14 @@ export function createStatusRuntime(deps: StatusRuntimeDeps): StatusRuntime {
     // derivation may speak only for a cwd on THIS process's filesystem — a
     // Remote child's Host cwd is not one, so its branch is omitted.
     const displayCwd = viewed === undefined ? liveCwd : (childStatus?.cwd ?? '')
-    const workspace = deriveWorkspaceStatus(displayCwd, viewed === undefined || deps.remote === undefined)
+    // A LIVE Direct display subject whose effective directory could not be read
+    // states that in words; a sessionless surface keeps its Client launch cwd.
+    const cwdUnavailable = viewed === undefined
+      && liveCwd === ''
+      && (deps.liveAgent() !== undefined || deps.remote !== undefined)
+      && deps.currentSessionId() !== undefined
+    const workspaceBase = deriveWorkspaceStatus(displayCwd, viewed === undefined || deps.remote === undefined)
+    const workspace = cwdUnavailable ? { ...workspaceBase, cwdUnavailable: true } : workspaceBase
     // The Remote branch's event window is BOUNDED: its fold cannot count the
     // session's lifetime tokens, so the official `tokenUsage` projection (and
     // the route's context capacity) own them there. Direct keeps the fold.

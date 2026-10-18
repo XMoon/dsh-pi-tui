@@ -6455,14 +6455,16 @@ production changes and positive/negative evidence.
   status fact, the physical footer, the OSC 7 write and the roster grouping).
   `test/direct-session-fork.test.ts` pins the fork-cut seed content. The
   READ-FAILURE fence is explicit: a THROWING `workingDirectory` projection read
-  is UNKNOWN (`SessionReader.sessionStatusFailed`) — the status/footer/OSC 7
-  fact is omitted and the command routing uses the documented Direct
-  Client-local execution cwd, never the immutable header project (asserted by
-  the third case of `test/runner-direct-working-directory.test.ts`). The two
-  unavailable cases stay apart: NO RECORDED VALUE (no projection unit, no
-  authority in the composition, a Session not yet retained) keeps the SAME
-  Session's immutable header — the official initial value — while a FAILED read
-  has no fallback at all.
+  is UNKNOWN (`SessionReader.sessionStatusFailed`) — the footer weather and the
+  welcome card state `Unavailable` in words, OSC 7 publishes nothing, and the
+  command routing uses the documented Direct Client-local execution cwd, never
+  the immutable header project (asserted by the third case of
+  `test/runner-direct-working-directory.test.ts`). The two unavailable cases
+  stay apart: NO RECORDED VALUE (no projection unit, no authority in the
+  composition, a Session not yet retained) keeps the SAME Session's immutable
+  header — the official initial value — while a FAILED read has no fallback at
+  all; a later non-throwing empty read clears the remembered failure
+  (discriminating test in `test/direct-working-directory-rc2.test.ts`).
 - B3: `test/web-provider-config-direct.test.ts` (exact namespace/path/revision,
   read-back, refusal paths), `test/web-provider-rc2-integration.test.ts` (the
   real `web` + providers + `tool-web` over the real configuration plane: the
@@ -6528,10 +6530,12 @@ system or fork divergence is introduced.
   property, not a new surface). The endpoint editor keeps its title, the
   external-send note and `Enter confirm · Esc cancel` down to 44 columns; the
   credential panel keeps its title and both actions. Dark, light and a CUSTOM
-  palette supply the same chip roles on their own open; a live palette switch
-  while the legacy editor is mounted keeps pre-painted chip ANSI until the next
-  open (the same property as the existing pre-painted theme/preset chips). The
-  surface is icon-style neutral (symbols/minimal frames are identical). A CJK
+  palette supply the same chip roles on their own open, and a LIVE palette
+  switch re-bakes the mounted rows: the surface registers a narrow
+  `TuiApp.onThemeChanged` observer while the legacy section is mounted and
+  rebuilds its cached chip ANSI there (asserted by a cell-ink test), so an
+  open Web row always paints the current skin. The surface is icon-style
+  neutral (symbols/minimal frames are identical). A CJK
   custom provider id stays cell-safe at the narrow sizes. The real-terminal
   record (rc.2 CLI over the isolated development home: entry → provider write →
   Esc → restored Workspace → endpoint editor → credential panel → Esc → reset)
@@ -6541,11 +6545,18 @@ system or fork divergence is introduced.
   workspace rows); the original `Open existing settings…` entry keeps its
   conversation return. The credential row closes the settings surface BEFORE the
   existing `/login` masked question or `/logout` runs (no stacked modals).
-- Authority state vocabulary: `Loading…` only while a read is in flight; a
-  resolved-but-unreadable or thrown read becomes `Unavailable` and DROPS the
-  previous snapshot, so no row can keep a stale `[current]`; the workspace
-  opens immediately and refreshes its own panel generation when the read
-  settles; Esc-return re-reads in that generation.
+- Authority state vocabulary: `Loading…` from the moment a read STARTS (the
+  Workspace lease, the legacy Web section's own mount and the manual refresh
+  all enter pending BEFORE their first snapshot), a resolved-but-unreadable or
+  thrown read becomes `Unavailable` and DROPS the previous snapshot, so no row
+  can keep a stale `[current]`; a provider row offers its cycle only from a
+  VERIFIED value (an unknown one never silently replaces a custom route), and a
+  write is refused with `Not saved` while the authority is unreadable.
+- Read currentness is owner-generated: every read takes an increasing serial and
+  only the LATEST settlement may commit facts and repaint the panel generation
+  that currently owns the surface, so an old read (e.g. one suspended while a
+  write and a Workspace reopen happened) can never leave the surface on a
+  pre-write summary (`test/settings-web-provider.test.ts`, mutation-checked).
 - Not run: a physical Tern GUI record (the TSP renderer does not paint these
   Settings surfaces) and an automated live-palette switch of the legacy chip
   ink; both are recorded as NOT_VERIFIED/NOT_RUN rather than PASS.
@@ -6565,6 +6576,21 @@ system or fork divergence is introduced.
   Session owner on that failure path is NOT_VERIFIED here (the runner harness
   rejects the resume directly; a corrupt on-disk artifact would be needed to
   prove the real restoration).
+- The B1 user-sink tests (`task-center-external-leaf`, `session-picker-format-refusal`)
+  drive the REAL Task Center / Session Picker surfaces and the real row/notice
+  contract, but their authority INPUT is a stand-in (the descendant catalog
+  source, and the resume error the runner harness raises). The reader-level
+  refusal over a REAL newer-format artifact is proven separately in
+  `test/session-v4-rc2-persistence.test.ts`; a single fixture that runs the real
+  agent-loop testkit underneath the real runner (so the refusal travels
+  persistence → agent loop → picker) is NOT_VERIFIED and needs that mount.
+- The RFL-008 question (whether an official Workflow member could ever be an
+  rc.2 external catalog entry) is answered from the official contracts rather
+  than from a producer trace: `ToolWorkflowAgentStartData.childId` documents a
+  member as recorded "after its child Session is published", and the subagent
+  manager's `childId` is a "durable direct-child session id", while an external
+  entry has no local Session. The scoped browser keeps a matching external row
+  visible anyway, so the conservative behaviour holds either way.
 - Web provider network success against a billed DeepSeek endpoint is not
   exercised here (the outer HTTP transport is stubbed); a user-provided account
   would be required.

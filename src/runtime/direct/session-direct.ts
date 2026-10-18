@@ -437,7 +437,12 @@ export class DirectSessionReader implements SessionReader {
         // exact-session cut as every other status key.
         'piTuiPerformance',
       ])?.values
-      if (values === undefined) return undefined
+      if (values === undefined) {
+        // A NON-throwing snapshot without values is "no recorded value", not a
+        // failure: the remembered failure of an EARLIER read must not stick.
+        this.statusReadFailures.delete(sessionId)
+        return undefined
+      }
       // The official `modelSelection` unit is registered by the API
       // SessionController row, which this profile does not compose, so the
       // registry omits the key entirely. ABSENCE of the key — never a

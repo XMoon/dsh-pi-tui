@@ -376,3 +376,44 @@ test('a CUSTOM palette supplies the chip roles on its own open', async t => {
     setTheme('dark')
   }
 })
+
+test('a LIVE palette switch re-bakes the mounted Web chips (frozen §4A.2)', async t => {
+  const h = setup({ columns: 120, rows: 40 })
+  try {
+    await openWebSection(h)
+    const ink = (needle: string): number | undefined => {
+      const lines = h.plain()
+      const row = lines.findIndex(line => line.includes('Web Search Provider') && line.includes(needle))
+      assert.ok(row >= 0, `the frame paints ${needle}:\n${h.view()}`)
+      return h.vt.getCellFgRgb(row, lines[row]!.indexOf(needle))
+    }
+    assert.equal(ink('[current]'), hexToRgb(currentPalette.textMuted), 'the chip starts on the live palette')
+    // The REAL switch path: the app installs the palette and notifies observers
+    // (the Web rows rebuild their pre-painted chips in that callback).
+    h.app.applyPalette({ ...currentPalette, textMuted: '#123456' })
+    await h.vt.waitForRender()
+    assert.equal(ink('[current]'), hexToRgb('#123456'),
+      'the mounted chip follows the NEW palette instead of its creation-time ANSI')
+  } finally {
+    h.dispose()
+    setTheme('dark')
+  }
+})
+
+test('the credential action cursor wears the frozen `primary` role', async t => {
+  const h = setup({ columns: 120, rows: 40 })
+  try {
+    await openWebSection(h)
+    for (let index = 0; index < 5; index += 1) await key(h, DOWN)
+    await key(h, ENTER)
+    const lines = h.plain()
+    const row = lines.findIndex(line => line.includes('Configure…'))
+    assert.ok(row >= 0, `the credential panel paints its actions:\n${h.view()}`)
+    const cursorColumn = lines[row]!.indexOf('›')
+    assert.ok(cursorColumn >= 0, 'the focused action carries the cursor')
+    assert.equal(h.vt.getCellFgRgb(row, cursorColumn), hexToRgb(currentPalette.primary),
+      'the active cursor uses the frozen primary role, never accent')
+  } finally {
+    h.dispose()
+  }
+})

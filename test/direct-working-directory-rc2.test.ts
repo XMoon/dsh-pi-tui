@@ -300,3 +300,46 @@ test('the resolution helper falls back to the header only when no directory owne
   assert.equal(projectedWorkingDirectory(null), undefined, 'the legal null (no recorded directory) stays unavailable')
   assert.equal(projectedWorkingDirectory(project), project)
 })
+
+test('a THROWING status read is remembered, and a later non-throwing empty read clears it', async t => {
+  const life = testLifecycle(t)
+  const fixture = await boot(life)
+  const project = join(fixture.workRoot, 'project')
+  mkdirSync(project, { recursive: true })
+  const agent = await fixture.harness.create(SessionId(`${SESSION}-failure-bit`), {}, { cwd: project })
+  const reader = readerOf(fixture, agent)
+  const sessionId = String(agent.session.id)
+  assert.equal(reader.sessionStatus(sessionId)?.cwd, project, 'the healthy read answers the header initial value')
+
+  const projections = fixture.ctx.get('sessionProjections') as {
+    snapshot(session: unknown, keys?: readonly string[]): unknown
+  }
+  const original = projections.snapshot.bind(projections)
+  let mode: 'throw' | 'empty' | 'ok' = 'throw'
+  projections.snapshot = ((session: unknown, keys?: readonly string[]) => {
+    if (mode === 'throw') throw new Error('projection authority unavailable')
+    // A snapshot object WITHOUT a values table: the reader's
+    // `values === undefined` branch (no recorded value, no throw).
+    if (mode === 'empty') return {}
+    return original(session, keys)
+  }) as typeof projections.snapshot
+
+  // 1) The authority THROWS: the read is UNKNOWN and the failure is remembered,
+  //    so no consumer substitutes the header for it.
+  assert.equal(reader.sessionStatus(sessionId), undefined, 'the throwing read answers UNKNOWN')
+  assert.equal(reader.sessionStatusFailed(sessionId), true, 'the failure is remembered for this Session')
+
+  // 2) A LATER read returns a snapshot WITHOUT that key and does not throw: that
+  //    is "no recorded value", not a failure — the bit clears and the Session's
+  //    own header initial value is available again.
+  mode = 'empty'
+  assert.equal(reader.sessionStatus(sessionId), undefined, 'a snapshot without values still answers no value')
+  assert.equal(reader.sessionStatusFailed(sessionId), false,
+    'a non-throwing empty read must clear the previous failure bit')
+
+  // 3) The healthy read restores the effective directory.
+  mode = 'ok'
+  assert.equal(reader.sessionStatus(sessionId)?.cwd, project)
+  assert.equal(reader.sessionStatusFailed(sessionId), false)
+  void agent
+})

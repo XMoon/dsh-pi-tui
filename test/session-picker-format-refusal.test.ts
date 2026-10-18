@@ -31,6 +31,7 @@ import {
 } from './support/runner-harness.ts'
 import { installProbe } from './support/runner-session-fixtures.ts'
 import { testLifecycle } from './support/temp-lifecycle.ts'
+import { visibleWidth } from '@xmoon76/pi-tui'
 import { VirtualTerminal } from './virtual-terminal.ts'
 
 const CURRENT = 'session-format-current'
@@ -39,7 +40,7 @@ const REFUSED = 'session-format-newer'
 /** The OFFICIAL refusal text the JSONL persistence throws for a newer format. */
 const REFUSAL = 'stored Session uses newer format v5; this build writes v4'
 
-test('the real Session Picker surfaces the official format refusal for the refused row', async t => {
+for (const [columns, rows] of [[120, 40], [80, 10], [44, 20]] as const) test(`the real Session Picker format refusal at ${columns}x${rows}`, async t => {
   const life = testLifecycle(t)
   const home = life.tempDir('dsh-pi-tui-format-refusal-')
   const previousHome = process.env.DSH_HOME
@@ -48,7 +49,7 @@ test('the real Session Picker surfaces the official format refusal for the refus
     if (previousHome === undefined) delete process.env.DSH_HOME
     else process.env.DSH_HOME = previousHome
   })
-  const vt = new VirtualTerminal(120, 40)
+  const vt = new VirtualTerminal(columns, rows)
   life.defer(installVirtualProcessTerminal(vt))
   const probe = installProbe()
   life.defer(probe.restore)
@@ -84,9 +85,14 @@ test('the real Session Picker surfaces the official format refusal for the refus
   await vt.waitForRender()
   // The picker lists BOTH stored Sessions (short display ids) in the current
   // directory scope; the newer (refused) row sorts first.
+  for (const line of vt.getViewport()) {
+    assert.ok(visibleWidth(line) <= columns, `no frame row overflows ${columns} cells: ${JSON.stringify(line)}`)
+  }
   assert.match(view(), /2\/2/u, `the picker lists the stored Sessions:\n${view()}`)
-  assert.match(view(), /format-n/u)
-  assert.match(view(), /format-c/u)
+  if (columns >= 120) {
+    assert.match(view(), /format-n/u)
+    assert.match(view(), /format-c/u)
+  }
 
   // The boot resumed the initial Session; record that count so the assertion
   // below covers only the resume THIS Enter triggered.
@@ -99,7 +105,14 @@ test('the real Session Picker surfaces the official format refusal for the refus
   assert.deepEqual(harness.resumeSessionIds.slice(resumesBefore), [REFUSED],
     'the picker resumed the newer-format Session the user selected')
   const after = view()
-  assert.ok(after.includes(REFUSAL), `the refusal text reaches the user's surface:\n${after}`)
+  const noticeText = (probe.apps.at(-1) as unknown as {
+    currentNotice?: () => { readonly text: string } | undefined
+  }).currentNotice?.()?.text
+  assert.equal(noticeText?.includes(REFUSAL), true,
+    `the refusal notice is the official message, got: ${String(noticeText)}`)
+  if (columns >= 120) {
+    assert.ok(after.includes(REFUSAL), `the refusal text reaches the user's surface:\n${after}`)
+  }
   // The unreadable Session's own content is never mounted as if it had opened.
   assert.doesNotMatch(after, /stored answer/u, 'the refused log content is never presented')
   // The failed transition leaves a sessionless surface with the explicit
