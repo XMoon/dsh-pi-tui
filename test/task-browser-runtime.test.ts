@@ -731,6 +731,32 @@ test('PR2 scope: a subagents scope commits EXACTLY the scope child ids, jobs exc
   assert.ok(!rows.some(row => row.kind === 'job'), 'jobs must never leak into a subagents scope')
 })
 
+test('PR2 scope: an external catalog identity named by the scope stays visible (RFL-008)', async () => {
+  const h = makeHarness()
+  h.setJobs([])
+  const listing = h.runtime.refreshCatalog()
+  h.settleListing(0, [
+    child({ id: 'child-local' as SessionId, label: 'local work', mode: 'continuable', depth: 1 }),
+    // The official catalog v2 external execution: a direct child IDENTITY with
+    // no local Session. The Workflow runtime can name it as a member, so the
+    // scope MUST keep it (identity, not row kind).
+    child({ id: 'child-external' as SessionId, label: 'external work', mode: 'external', depth: 1 }),
+  ])
+  await listing
+  h.setJobs([job({ id: 'job-y', label: 'unrelated job' })])
+  h.runtime.setScope({ kind: 'subagents', childIds: ['child-external'] })
+  const rows = h.commits().at(-1)!
+  assert.deepEqual(rowValue(rows), ['agent:child-external'],
+    `a scope that names the external child keeps its row:\n${JSON.stringify(rows)}`)
+  const external = rows.find(row => row.kind === 'external')
+  assert.ok(external !== undefined, 'the external row kind is preserved inside the scope')
+  assert.equal(external.mode, 'external', 'the durable external classification survives the scope')
+  assert.equal(external.hasChildren, false, 'an external execution has no local child tree')
+  // The open/stop NEGATIVES are panel/selection facts and are asserted on the
+  // real surface in `test/task-center-external-leaf.test.ts`.
+  assert.ok(!rows.some(row => row.kind === 'job'), 'jobs must never leak into a subagents scope')
+})
+
 test('PR2 scope: a live refresh keeps the scope (never a global leak)', async () => {
   const h = makeHarness()
   h.setJobs([])

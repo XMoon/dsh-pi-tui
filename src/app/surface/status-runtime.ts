@@ -737,12 +737,15 @@ export function createStatusRuntime(deps: StatusRuntimeDeps): StatusRuntime {
     // derivation may speak only for a cwd on THIS process's filesystem — a
     // Remote child's Host cwd is not one, so its branch is omitted.
     const displayCwd = viewed === undefined ? liveCwd : (childStatus?.cwd ?? '')
-    // A LIVE Direct display subject whose effective directory could not be read
-    // states that in words; a sessionless surface keeps its Client launch cwd.
+    // The DISPLAY SUBJECT's unknown effective directory is stated in words
+    // (plan §B2 UI: 不可用状态有文字) — for the child viewer too, whose slot
+    // must never be an empty line and must never borrow the parent's workspace.
+    // A sessionless surface keeps its Client launch cwd.
     const cwdUnavailable = viewed === undefined
-      && liveCwd === ''
-      && (deps.liveAgent() !== undefined || deps.remote !== undefined)
-      && deps.currentSessionId() !== undefined
+      ? liveCwd === ''
+        && (deps.liveAgent() !== undefined || deps.remote !== undefined)
+        && deps.currentSessionId() !== undefined
+      : childStatus?.cwd === undefined
     const workspaceBase = deriveWorkspaceStatus(displayCwd, viewed === undefined || deps.remote === undefined)
     const workspace = cwdUnavailable ? { ...workspaceBase, cwdUnavailable: true } : workspaceBase
     // The Remote branch's event window is BOUNDED: its fold cannot count the

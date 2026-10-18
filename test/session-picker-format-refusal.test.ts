@@ -112,6 +112,21 @@ for (const [columns, rows] of [[120, 40], [80, 10], [44, 20]] as const) test(`th
     `the refusal notice is the official message, got: ${String(noticeText)}`)
   if (columns >= 120) {
     assert.ok(after.includes(REFUSAL), `the refusal text reaches the user's surface:\n${after}`)
+  } else {
+    const rows = after.split('\n').map(line => line.trim())
+    const reasonPrefix = REFUSAL.slice(0, 20)
+    if (columns >= 80) {
+      // The notice LINE fits the reason's opening words (plus its own prefix).
+      assert.ok(rows.some(row => row.includes(reasonPrefix)),
+        `a painted row carries the opening of the official refusal at ${columns} columns:\n${after}`)
+    } else {
+      // At the 44-column floor the notice line is clipped to a short fragment:
+      // assert that a fragment of the official reason IS painted (the full text
+      // is asserted on the production notice slot above), instead of pretending
+      // the whole sentence is visible.
+      assert.ok(rows.some(row => row.length >= 3 && REFUSAL.includes(row)),
+        `the notice row still paints a fragment of the official refusal at ${columns} columns:\n${after}`)
+    }
   }
   // The unreadable Session's own content is never mounted as if it had opened.
   assert.doesNotMatch(after, /stored answer/u, 'the refused log content is never presented')

@@ -254,7 +254,12 @@ test('an UNAVAILABLE working-directory read never falls back to the header proje
 
   failing = true
   effective = undefined
-  const statusRow = (): string => (view().split('\n').find(line => line.includes('Working directory')) ?? '')
+  // The footer paints the VALUE, not a label. Its cwd row is the model row
+  // (`[p/m]  <cwd> …`); the welcome card paints a cwd too, so the state word
+  // must be asserted on the FOOTER row specifically.
+  const stripLine = (line: string): string => line.replace(/\u001b\[[0-9;]*m/g, '')
+  const footerRow = (): string => stripLine(vt.getViewport().find(line => stripLine(line).trimStart().startsWith('[p/m]')) ?? '')
+  assert.match(footerRow(), /live-project\/moved/u, 'the footer row carries the effective directory before the failure')
 
   // The durable change event drives the SAME production refresh path
   // (`refreshWorkspaceFacts`), which re-reads the now-failing authority.
@@ -267,9 +272,122 @@ test('an UNAVAILABLE working-directory read never falls back to the header proje
     `the failed read must not present the header project as the workspace:\n${after}`)
   assert.ok(!cwdWrites.some(write => write.includes('roster-project')),
     `the failed read must not publish the header project through OSC 7: ${JSON.stringify(cwdWrites)}`)
-  assert.ok(statusRow() === '' || !statusRow().includes('roster-project'),
+  assert.ok(!footerRow().includes('roster-project'),
     'the footer cwd fact stays unknown while the authority is unavailable')
-  // Plan §B2 UI: the unavailable state has WORDS, not a blank slot.
-  assert.match(after, /Unavailable/u,
-    `the unreadable effective directory is stated in words:\n${after}`)
+  // Plan §B2 UI: the unavailable state has WORDS, not a blank slot — asserted on
+  // the FOOTER row itself.
+  assert.match(footerRow(), /Unavailable/u,
+    `the footer cwd row states the unknown directory:\n${after}`)
+})
+
+test('the child viewer states Unavailable for an unreadable child cwd and never the parent project', async t => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-wd-child-failure-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const previousTerm = process.env.TERM_PROGRAM
+  process.env.TERM_PROGRAM = 'tern'
+  life.defer(() => {
+    if (previousTerm === undefined) delete process.env.TERM_PROGRAM
+    else process.env.TERM_PROGRAM = previousTerm
+  })
+  const vt = new VirtualTerminal(120, 40)
+  life.defer(installVirtualProcessTerminal(vt))
+  const probe = installProbe()
+  life.defer(probe.restore)
+  let context: Context | undefined
+  let fiber: { dispose(): Promise<unknown> } | undefined
+  life.defer(() => { if (context !== undefined) return disposeContext(context) })
+  life.defer(() => { if (fiber !== undefined) return fiber.dispose() })
+
+  const parentProject = join(home, 'roster-project', 'origin')
+  const childProject = join(home, 'child-project')
+  mkdirSync(parentProject, { recursive: true })
+  mkdirSync(childProject, { recursive: true })
+  const parent = fakeSession({
+    id: 'session-child-cwd-parent',
+    header: { id: 'session-child-cwd-parent', cwd: parentProject, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
+    events: [],
+  })
+  const child = fakeSession({
+    id: 'child-cwd-subject',
+    header: {
+      id: 'child-cwd-subject',
+      cwd: childProject,
+      createdAt: 1_700_000_001_000,
+      version: SESSION_FORMAT_VERSION,
+      parentSession: 'session-child-cwd-parent',
+    },
+    events: [],
+  })
+  let childReadable = true
+  const harness = makeHarness(home, [parent, child], { provider: 'p', model: 'm' }, undefined, undefined, {
+    // The child is a REAL local catalog entry (the same source the Task Center
+    // reads); the parent is the display fallback candidate that must never be
+    // borrowed for the child's workspace.
+    listDescendants: async () => [{
+      kind: 'child', id: 'child-cwd-subject', label: 'child subject', mode: 'continuable', parentId: '', depth: 1,
+    }],
+  })
+  context = new Context()
+  context.provide('sessionProjections', {
+    snapshot: (session: { readonly header?: { readonly id?: string; readonly cwd?: string } }, keys?: readonly string[]) => {
+      if (session?.header?.id === 'child-cwd-subject' && !childReadable) {
+        throw new Error('child projection authority unavailable')
+      }
+      return {
+        values: keys?.includes('workingDirectory') === true && session?.header?.cwd !== undefined
+          ? { workingDirectory: session.header.cwd }
+          : {},
+      }
+    },
+    // The registry contract the composition's other readers use (a missing
+    // method here is a fatal, not a degradation).
+    stateOf: () => undefined,
+    cachedSnapshot: () => undefined,
+    register: () => () => {},
+  } as never)
+  // The child is LIVE in this process (the viewer attaches a retained child):
+  // its status read is the authority the footer consults.
+  await (harness.agents as { resume(init: { resumeSessionId: string }): Promise<unknown> })
+    .resume({ resumeSessionId: 'child-cwd-subject' })
+  fiber = await mountRunner(context, home, harness, { sessionId: 'session-child-cwd-parent' }, { sessionId: 'session-child-cwd-parent' })
+  const view = (): string => vt.getViewport().map(line => line.replace(/\u001b\[[0-9;]*m/g, '')).join('\n')
+  await vt.waitForRender()
+
+  // Open the child viewer through the REAL Task Center path.
+  vt.sendInput('/tasks')
+  await settle()
+  await vt.waitForRender()
+  vt.sendInput('\r')
+  await settle()
+  await vt.waitForRender()
+  assert.match(view(), /child subject/u, `the child row is listed:\n${view()}`)
+  vt.sendInput('\r')
+  await settle()
+  await vt.waitForRender()
+  assert.match(view(), /child-project/u, `the readable child cwd is painted:\n${view()}`)
+  const childCwdRow = vt.getViewport().map(line => line.replace(/\u001b\[[0-9;]*m/g, ''))
+    .findIndex(line => line.includes('child-project'))
+  assert.ok(childCwdRow >= 0, 'the child footer row carries the child workspace')
+  assert.ok(!vt.getViewport().map(line => line.replace(/\u001b\[[0-9;]*m/g, ''))[childCwdRow]!.includes('roster-project/origin'),
+    'the parent project is never the child workspace')
+
+  // The child's projection starts FAILING: the child viewer's workspace fact is
+  // UNKNOWN and must be stated in words on the footer line itself.
+  childReadable = false
+  // A durable child event drives the viewer's own refresh (the same production
+  // path a real child change takes), which re-reads the now-failing authority.
+  const childEvent = child.append!('working-directory/change', { cwd: join(home, 'elsewhere') }) as SessionEvent
+  context.emit('session/event', child as never, childEvent)
+  await settle()
+  await vt.waitForRender()
+  const childFooterLine = vt.getViewport().map(line => line.replace(/\u001b\[[0-9;]*m/g, ''))[childCwdRow] ?? ''
+  assert.match(childFooterLine, /Unavailable/u,
+    `the child's unknown directory is stated on the child footer row:\n${view()}`)
+  assert.ok(!childFooterLine.includes('roster-project/origin'), 'still never the parent project')
 })
