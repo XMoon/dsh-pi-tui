@@ -52,7 +52,7 @@ test('reports comparable list/projection/search fields and explicit non-comparab
   assert.equal(report.generation, '1')
   assert.equal(report.comparable, true)
   assert.deepEqual(report.mismatches, [])
-  assert.deepEqual(report.skipped.map(field => field.field), ['createdAt', 'live', 'formatStatus'])
+  assert.deepEqual(report.skipped.map(field => field.field), ['createdAt', 'live'])
   // M3-3A retired the measureContext skip: both backends read the one
   // official contextPressure semantic, so the field compares.
   shadow.dispose()
@@ -92,6 +92,30 @@ test('reports membership/order, row, projection, and search mismatches without c
     'search.snippets',
     'search.hasMore',
   ])
+  shadow.dispose()
+})
+
+test('compares the official formatStatus passthrough on both backends', async () => {
+  const generations = createObservableGenerationHarness()
+  const direct = reader({
+    list: async () => [
+      row('session-a', 10, { cwd: '/a', formatStatus: 'current' }),
+      // Absent on BOTH sides: never a mismatch and never an invented value.
+      row('session-b', 9, { cwd: '/b' }),
+    ],
+  })
+  const remote = reader({
+    list: async () => [
+      row('session-a', 10, { cwd: '/a', formatStatus: 'migration-required' }),
+      row('session-b', 9, { cwd: '/b' }),
+    ],
+  })
+  const shadow = new RemoteSessionReadShadow(direct, remote, generations.source)
+
+  const report = outcomeReport(await shadow.compare())
+  assert.equal(report.comparable, false)
+  assert.deepEqual(report.mismatches.map(mismatch => mismatch.field), ['formatStatus'])
+  assert.equal(report.mismatches[0]?.sessionId, 'session-a')
   shadow.dispose()
 })
 
