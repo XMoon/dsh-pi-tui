@@ -1577,6 +1577,10 @@ export interface SettingsListOpenOptions {
 export interface SettingsWorkspaceHandle {
   /** Leave the Settings workspace and restore the surface that opened it. */
   close(): void
+  /** Re-read the source snapshot and repaint (S2/PR-B §B3.4): the caller's
+   *  asynchronous authority read settles, then THIS workspace generation
+   *  refreshes its own rows. A superseded/closed lease is inert. */
+  refresh(): void
 }
 
 /**
@@ -21483,7 +21487,14 @@ export class TuiApp {
         },
       ])
     }
-    return { close: () => close() }
+    return {
+      close: () => close(),
+      refresh: () => {
+        if (this.disposed || this.settingsWorkspace !== record) return
+        panel.refreshSnapshot()
+        this.requestRender()
+      },
+    }
   }
 
   /**

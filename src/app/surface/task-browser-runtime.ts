@@ -296,7 +296,11 @@ export class TaskBrowserRuntime {
     const scope = this.scope
     const scopedRows = scope.kind === 'all'
       ? rawRows
-      : rawRows.filter(row => row.kind === 'subagent' && scope.childIds.includes(row.childId))
+      // S2-B1: an external catalog leaf carries a real child identity but no
+      // local Session. Scope membership is IDENTITY, so it stays VISIBLE in a
+      // scoped read (and non-openable through the same row contract); only the
+      // job rows are excluded from a child-workflow scope.
+      : rawRows.filter(row => row.kind !== 'job' && scope.childIds.includes(row.childId))
     const currentFailureIds = new Set(rawRows
       .filter(row => row.kind === 'job' && (row.status === 'failed' || row.status === 'timed_out' || row.status === 'lost'))
       .map(row => row.value))

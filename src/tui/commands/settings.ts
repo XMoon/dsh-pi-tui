@@ -55,6 +55,7 @@ import type {
   SettingsWorkspaceEdit,
   SettingsWorkspaceEditOption,
   SettingsWorkspaceFreshness,
+  SettingsWorkspaceRowId,
   SettingsWorkspaceSnapshot,
   SettingsWorkspaceWritableField,
 } from '../panels/settings-workspace-panel.ts'
@@ -193,6 +194,9 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
   let webSettings: WebProviderSettings | undefined
   let webReadFailure: string | undefined
   let webReadInFlight: Promise<WebProviderSettings | undefined> | undefined
+  /** Whether at least one read COMPLETED (a resolved `undefined` is
+   *  Unavailable, never an eternal `Loading…`). */
+  let webReadSettled = false
 
   /** ONE shared Host read: a burst of opens/refreshes never fans out. */
   const readWebSettings = (): Promise<WebProviderSettings | undefined> => {
@@ -200,11 +204,18 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
     const task = (async (): Promise<WebProviderSettings | undefined> => {
       try {
         const settings = await runner.config.web.read()
+        // A resolved read (including `undefined` = no readable authority) REPLACES
+        // the previous value: a stale snapshot must never survive as `[current]`.
         webSettings = settings
         webReadFailure = undefined
+        webReadSettled = true
         return settings
       } catch (error) {
+        // A failed read is UNKNOWN: drop the old snapshot so no row can present
+        // the last-known value as the current one.
+        webSettings = undefined
         webReadFailure = safeErrorMessage(error)
+        webReadSettled = true
         return undefined
       } finally {
         webReadInFlight = undefined
@@ -258,10 +269,12 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
     values: readonly { readonly id: string; readonly label: string; readonly default: boolean }[],
   ): SettingValuePart[] => {
     const phase = webRowPhases.get(rowId)
-    if (phase?.kind === 'saving') return [{ kind: 'text', text: color.textDim('Saving…') }]
     const id = rowId === 'web-search-provider' ? webSettings?.searchProvider : webSettings?.fetchProvider
     const label = providerLabel(values, id)
-    if (label === undefined) return [{ kind: 'text', text: color.textDim('Unavailable') }]
+    // X061 drops a trailing TEXT part unconditionally, so the unavailable /
+    // pending facts ride a WHOLE chip (an unreadable provider must never paint
+    // an empty slot).
+    if (label === undefined) return [{ kind: 'chip', text: color.warning('[unavailable]') }]
     // X061's slot contract: the renderer keeps the longest WHOLE prefix and
     // ALWAYS drops a trailing `text` part, so a value slot that must show both
     // a state chip and a name can never rely on a text tail. The state chips
@@ -271,12 +284,13 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
     if (phaseParts.length > 0) return phaseParts
     const parts: SettingValuePart[] = []
     if (webSettings !== undefined) {
+      const selectable = providerSelectable(values, id)
+      // A custom (not selectable) route leads with its PROBLEM chip: the slot's
+      // reserved first chip is the fact a narrow width must keep.
+      if (!selectable) parts.push({ kind: 'chip', text: color.warning('[unavailable]') }, { kind: 'text', text: ' ' })
       parts.push({ kind: 'chip', text: color.textMuted('[current]') })
       if (providerDefault(values, id)) {
         parts.push({ kind: 'text', text: ' ' }, { kind: 'chip', text: color.textMuted('[default]') })
-      }
-      if (!providerSelectable(values, id)) {
-        parts.push({ kind: 'text', text: ' ' }, { kind: 'chip', text: color.warning('[unavailable]') })
       }
     } else {
       parts.push({ kind: 'chip', text: color.warning('[unavailable]') })
@@ -291,9 +305,9 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
     phase: { readonly kind: WebRowPhase; readonly reason?: string } | undefined,
   ): SettingValuePart[] => {
     if (phase === undefined) return []
-    if (phase.kind === 'saving') return [{ kind: 'chip', text: color.textMuted('[saving…]') }]
-    if (phase.kind === 'not-saved') return [{ kind: 'chip', text: color.error('[not saved]') }]
-    return [{ kind: 'chip', text: color.warning('[outcome unknown]') }]
+    if (phase.kind === 'saving') return [{ kind: 'chip', text: color.textMuted('[Saving…]') }]
+    if (phase.kind === 'not-saved') return [{ kind: 'chip', text: color.error('[Not saved]') }]
+    return [{ kind: 'chip', text: color.warning('[Outcome unknown]') }]
   }
 
   /** A non-provider row's value units: the value plus the same chip/state
@@ -398,7 +412,9 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
       return { summary: 'Unavailable', freshness: 'read-error', description: `${description} Read error: ${webReadFailure}` }
     }
     if (webSettings === undefined) {
-      return { summary: 'Loading…', freshness: 'runtime', description }
+      return webReadSettled
+        ? { summary: 'Unavailable', freshness: 'unavailable', description }
+        : { summary: 'Loading…', freshness: 'runtime', description }
     }
     return {
       summary: `Search: ${providerLabel(WEB_SEARCH_PROVIDER_VALUES, webSettings.searchProvider) ?? 'unavailable'} · Fetch: ${providerLabel(WEB_FETCH_PROVIDER_VALUES, webSettings.fetchProvider) ?? 'unavailable'}`,
@@ -448,6 +464,14 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
       if (display !== previous) revert(display)
       repaintWebItems?.()
     })
+  }
+
+  /** Queue one Web-section operation on the ONE owner FIFO (the endpoint
+   *  editor uses it too: a text write never races a selection). */
+  const queueWebOperation = <T>(task: () => Promise<T>): Promise<T> => {
+    const run = webWriteChain.then(task)
+    webWriteChain = run.then(() => undefined, () => undefined)
+    return run
   }
 
   /** The exact ConfigPort operation one choice row means (undefined = the value
@@ -510,21 +534,42 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
    *  `Open existing settings…` entry keeps its conversation return. */
   let webReturnToWorkspace = false
 
-  /** Restore the Settings workspace on the Web launcher row. A newer owner of
-   *  the surface (a workspace lease, a blocking modal, a dispose) refuses the
-   *  open; the failure is reported, never ignored. */
+  /** The ONE Settings workspace open path: the lease is taken SYNCHRONOUSLY
+   *  (the first frame is immediate), then the Host Web facts are read for THIS
+   *  panel generation and the SAME generation refreshes when the read settles.
+   *  A newer/closed generation never receives the result. */
+  let activeSettingsWorkspace: { readonly token: object; readonly refresh: () => void } | undefined
+
+  const openSettingsWorkspaceAt = (initialRowId?: SettingsWorkspaceRowId): void => {
+    const token = {}
+    let handle: import('../../tui-app.ts').SettingsWorkspaceHandle | undefined
+    handle = app.openSettingsWorkspace(
+      { readSnapshot: readSettingsWorkspaceSnapshot },
+      {
+        onOpenLegacy: (targetId) => { openLegacySettings(targetId) },
+        onCommit: commitSettingsWorkspaceField,
+        ...(initialRowId === undefined ? {} : { initialRowId }),
+        onClose: () => {
+          if (activeSettingsWorkspace?.token === token) activeSettingsWorkspace = undefined
+        },
+      },
+    )
+    activeSettingsWorkspace = { token, refresh: () => handle?.refresh() }
+    if (!webSettingsAvailable()) return
+    detach('web provider settings read', async () => {
+      await readWebSettings()
+      if (activeSettingsWorkspace?.token !== token) return
+      handle?.refresh()
+    }, { notify: false })
+  }
+
+  /** Restore the Settings workspace on the Web launcher row. The workspace is
+   *  always restored (its own readiness row states a non-ready backend); a
+   *  newer owner of the surface refuses the lease and the failure is reported. */
   const reopenSettingsWorkspaceAtWebRow = (): void => {
     if (app.isDisposed()) return
-    if (runner.config.configReadiness() !== 'ready') return
     try {
-      app.openSettingsWorkspace(
-        { readSnapshot: readSettingsWorkspaceSnapshot },
-        {
-          onOpenLegacy: (nextTarget) => { openLegacySettings(nextTarget) },
-          onCommit: commitSettingsWorkspaceField,
-          initialRowId: WEB_LAUNCHER_ROW_ID,
-        },
-      )
+      openSettingsWorkspaceAt(WEB_LAUNCHER_ROW_ID)
     } catch (error) {
       app.notify(`could not restore the settings workspace: ${safeErrorMessage(error)}`, 'error')
     }
@@ -2066,8 +2111,8 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
             onMounted: (rows) => {
               if (!webSettingsAvailable()) return
               detach('web provider settings refresh', async () => {
-                const settings = await rereadWebSettings()
-                if (settings === undefined || !legacyEditorOpen) return
+                await rereadWebSettings()
+                if (!legacyEditorOpen) return
                 for (const rowId of WEB_SETTING_ROW_IDS) {
                   rows.setValue(rowId, webRowValue(rowId as WebSettingRowId))
                 }
@@ -2114,19 +2159,10 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
     registerOne({
       name: 'settings',
       description: 'Open the TUI settings workspace',
-      handler: async () => {
-        // The Web section's facts are HOST reads (the credential store is
-        // asynchronous) while the Settings workspace projection is SYNCHRONOUS:
-        // read them BEFORE the workspace opens, so its Web row paints the
-        // configured facts instead of a placeholder that nothing would refresh.
-        if (webSettingsAvailable()) await readWebSettings()
-        app.openSettingsWorkspace(
-          { readSnapshot: readSettingsWorkspaceSnapshot },
-          {
-            onOpenLegacy: (targetId) => { openLegacySettings(targetId) },
-            onCommit: commitSettingsWorkspaceField,
-          },
-        )
+      handler: () => {
+        // The workspace paints immediately (its Web row starts at `Loading…`);
+        // the Host Web read then refreshes THAT panel generation (§B3.4).
+        openSettingsWorkspaceAt()
         return { kind: 'success' }
       },
     })

@@ -188,3 +188,85 @@ test('the physical footer and the OSC 7 write follow the Session workingDirector
     `the terminal-local OSC 7 write must carry the committed directory (saw ${JSON.stringify(cwdWrites)})`,
   )
 })
+
+test('an UNAVAILABLE working-directory read never falls back to the header project', async t => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-wd-failure-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const previousTerm = process.env.TERM_PROGRAM
+  process.env.TERM_PROGRAM = 'tern'
+  life.defer(() => {
+    if (previousTerm === undefined) delete process.env.TERM_PROGRAM
+    else process.env.TERM_PROGRAM = previousTerm
+  })
+  const vt = new VirtualTerminal(100, 24)
+  life.defer(installVirtualProcessTerminal(vt))
+  const cwdWrites: string[] = []
+  const originalWrite = vt.write.bind(vt)
+  vt.write = (data: string) => {
+    if (data.startsWith('\x1b]7;')) cwdWrites.push(data)
+    originalWrite(data)
+  }
+  const probe = installProbe()
+  life.defer(probe.restore)
+  let context: Context | undefined
+  let fiber: { dispose(): Promise<unknown> } | undefined
+  life.defer(() => { if (context !== undefined) return disposeContext(context) })
+  life.defer(() => { if (fiber !== undefined) return fiber.dispose() })
+
+  const originalProject = join(home, 'roster-project', 'origin')
+  mkdirSync(originalProject, { recursive: true })
+  const sessionId = 'session-working-directory-failure'
+  const session = fakeSession({
+    id: sessionId,
+    header: {
+      id: sessionId,
+      cwd: originalProject,
+      createdAt: 1_700_000_000_000,
+      version: SESSION_FORMAT_VERSION,
+    },
+    events: [],
+  })
+  const harness = makeHarness(home, [session], { provider: 'p', model: 'm' })
+  context = new Context()
+  // The projection authority is READABLE at open (the effective B) and then
+  // starts FAILING: the status owner must treat that as UNKNOWN — never as the
+  // immutable header project.
+  let failing = false
+  let effective: string | undefined = join(home, 'live-project', 'moved')
+  mkdirSync(effective, { recursive: true })
+  context.provide('sessionProjections', {
+    snapshot: (_session: unknown, keys?: readonly string[]) => {
+      if (failing) throw new Error('projection authority unavailable')
+      return { values: keys?.includes('workingDirectory') === true ? { workingDirectory: effective } : {} }
+    },
+    stateOf: () => undefined,
+  })
+  fiber = await mountRunner(context, home, harness, { sessionId }, { sessionId })
+  const view = (): string => vt.getViewport().map(line => line.replace(/\u001b\[[0-9;]*m/g, '')).join('\n')
+  await vt.waitForRender()
+  assert.match(view(), /live-project\/moved/, 'the readable authority paints the effective directory')
+
+  failing = true
+  effective = undefined
+  const statusRow = (): string => (view().split('\n').find(line => line.includes('Working directory')) ?? '')
+
+  // The durable change event drives the SAME production refresh path
+  // (`refreshWorkspaceFacts`), which re-reads the now-failing authority.
+  const next = session.append!('working-directory/change', { cwd: join(home, 'elsewhere') }) as SessionEvent
+  context.emit('session/event', session as never, next)
+  await settle()
+  await vt.waitForRender()
+  const after = view()
+  assert.ok(!after.includes('roster-project/origin'),
+    `the failed read must not present the header project as the workspace:\n${after}`)
+  assert.ok(!cwdWrites.some(write => write.includes('roster-project')),
+    `the failed read must not publish the header project through OSC 7: ${JSON.stringify(cwdWrites)}`)
+  assert.ok(statusRow() === '' || !statusRow().includes('roster-project'),
+    'the footer cwd fact stays unknown while the authority is unavailable')
+})

@@ -1131,7 +1131,13 @@ export class DirectWebProviderConfig implements WebProviderConfig {
 
   available(): boolean {
     const settings = this.settings()
-    return settings !== undefined && readSettingsDescriptor(settings, WEB_PROVIDER_NS) !== undefined
+    if (settings === undefined) return false
+    // Availability is EXACTLY the authority `read()` needs: both official
+    // sections. A half-mounted configuration has no readable Web settings, so
+    // the UI must present it as unavailable instead of offering writes against
+    // facts it cannot read.
+    return readSettingsDescriptor(settings, WEB_PROVIDER_NS) !== undefined
+      && readSettingsDescriptor(settings, WEB_SEARCH_API_NS) !== undefined
   }
 
   async read(): Promise<WebProviderSettings | undefined> {
