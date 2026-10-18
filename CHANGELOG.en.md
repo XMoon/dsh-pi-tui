@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Human prompts now carry the sending TUI process's time zone**, so the official
+  `time-context` injection no longer reports `Browser time zone ... unavailable` for ordinary
+  requests: the Direct main session and both Direct/Remote continuable child follow-ups sample
+  the `Intl` zone at submit time and write it into the official request metadata, while the
+  Remote main session keeps sampling through the official `SessionFace`. That zone is the TUI
+  process's (inside SSH or a container, that host process's `TZ`) — not the terminal observer's
+  real zone; when the process reports no usable zone, the send is refused before dispatch with
+  the draft restored, never fabricated.
+
 ## [0.5.3] - 2026-10-17
 
 ### Install and version pairing

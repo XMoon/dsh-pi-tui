@@ -210,6 +210,7 @@
     "@deepseek-ai/dsh-subagent-spawn-in-process": "0.2.1-rc.2",
     "@deepseek-ai/dsh-system-prompt": "0.2.1-rc.2",
     "@deepseek-ai/dsh-terminal": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-time-context": "0.2.1-rc.2",
     "@deepseek-ai/dsh-timeout": "0.2.1-rc.2",
     "@deepseek-ai/dsh-token-meter": "0.2.1-rc.2",
     "@deepseek-ai/dsh-tool-ask-user": "0.2.1-rc.2",

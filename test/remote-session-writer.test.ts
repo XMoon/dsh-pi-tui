@@ -24,6 +24,8 @@ import { createObservableGenerationHarness, type GenerationHarness } from './sup
 interface SessionCalls {
   beginInputs: unknown[]
   promptCalls: { content: unknown; mode: string; requestId: string | undefined }[]
+  /** The argument count of every `session.prompt` call (the official four: content, mode, signal, requestId). */
+  promptArgCounts: number[]
   updateQueueCalls: { itemId: string; action: unknown }[]
   cancelCalls: number
   renameCalls: string[]
@@ -53,6 +55,7 @@ function writerHarness(): WriterHarness {
   const calls: SessionCalls = {
     beginInputs: [],
     promptCalls: [],
+    promptArgCounts: [],
     updateQueueCalls: [],
     cancelCalls: 0,
     renameCalls: [],
@@ -91,8 +94,9 @@ function writerHarness(): WriterHarness {
         abandon: () => { calls.abandonCalls += 1 },
       }
     },
-    prompt: async (content, mode, _signal, requestId) => {
+    prompt: async (content, mode, _signal, requestId, ...extra: unknown[]) => {
       calls.promptCalls.push({ content, mode, requestId })
+      calls.promptArgCounts.push(4 + extra.length)
       promptHook?.()
       if (promptThrows !== undefined) throw promptThrows
       return promptResult
@@ -179,6 +183,14 @@ test('queue prompt resolves the binding by id, echoes once, and reuses the offic
   assert.equal(harness.calls.promptCalls[0]?.mode, 'queue')
   assert.equal(harness.calls.promptCalls[0]?.requestId, 'req-1')
   assert.equal(harness.calls.abandonCalls, 0)
+})
+
+test('the ordinary Remote prompt adds NO request zone: the official SessionFace samples it inside prompt()', async () => {
+  const harness = writerHarness()
+  const writer = new RemoteSessionWriter(harness.source, harness.generation.source, okSerializer())
+  assert.deepEqual(await writer.prompt('session-a', { prepared: true }, 'queue'), { kind: 'committed', value: undefined })
+  assert.equal(harness.calls.promptArgCounts[0], 4,
+    'the official call stays (content, mode, undefined, requestId) — a TUI-side zone field is the duplication this pins out')
 })
 
 test('steer prompt preserves the official steer mode', async () => {

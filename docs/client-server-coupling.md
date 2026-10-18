@@ -612,6 +612,45 @@ safe full-Session-id convention. `src/client/artifact/save.ts` and
 `src/tui/interaction/save-location.ts` are the Client-local temp/atomic-commit
 sink and the Save Location UI — zero Host coupling.
 
+### Request-zone metadata (Client-local sample, Host-owned interpretation)
+
+One human prompt's request zone is the sending Client runtime's own IANA zone — a
+`CLIENT_LOCAL` sample taken per submit (`src/client/time-zone.ts`, the same
+`Intl.DateTimeFormat().resolvedOptions().timeZone` fact the official
+`SessionFace.prompt()` samples). It is request metadata: never durable TUI state,
+never a Host service read, and never the Host process/fallback zone.
+
+- **Direct ordinary prompt** — `src/app/submission/controller.ts` samples once at
+  the send point and `src/app/submission/direct-message-preparation.ts` maps it
+  onto the official `UserMessage.source.clientTimeZone` (the official `user-rpc`
+  vocabulary) beside the existing `rpcId`; the unidentified Skill/command
+  preparation path keeps its plain `{ kind: 'user' }` source.
+- **Remote ordinary prompt** — zero TUI-side field: the official
+  `SessionFace.prompt()` samples inside the official Client and the Host
+  `SessionController` validates it. `RemoteSessionWriter` must keep calling the
+  official four-argument `prompt(content, mode, undefined, requestId)`.
+- **Continuable child follow-up** — the Viewer composition
+  (`src/app/surface/application-events.ts`) provides the per-call
+  `clientTimeZone()` capability on `SubagentPromptContext`; the Direct and Remote
+  `SubagentPort` adapters sample once immediately before dispatch and put it on
+  the official `subagents.prompt` request. The Remote branch resolves no Host
+  `ctx.subagents`.
+
+Forbidden substitutions: the Host process zone (or any Host-global fallback zone)
+as the human zone; a TUI-owned timezone setting/store; reading the
+`time-context` projection; deriving a zone from rendered timestamps or from the
+TSP/Tern paint area. An unsamplable or reader-incompatible value refuses the send
+before dispatch (draft restored) instead of sending zone-less or fabricated. The
+`resolved`/`mixed`/`unavailable` policy, refresh cadence and display fallback stay
+Host-owned in the official plugin.
+
+Owning tests: `test/client-time-zone.test.ts`, `test/image-submit.test.ts`,
+`test/attachment-submit.test.ts`, `test/request-time-zone.test.ts`,
+`test/subagent-port.test.ts`, `test/subagent-viewer-submit.test.ts`,
+`test/remote-subagent-port.test.ts`, `test/remote-session-writer.test.ts`,
+`test/runner-remote-presentation.test.ts`,
+`test/runner-viewer-task-integration.test.ts`.
+
 ### User shell ownership (shell amendment, M3-4 PR3)
 
 `!` and `!!` are both Host-side user-shell operations; bypass/sandbox are

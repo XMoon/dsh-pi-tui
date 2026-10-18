@@ -178,3 +178,28 @@ test('prepareUserMessage keeps nonexistent mentions verbatim', async () => {
   const message = await prepareUserMessage('see @missing.ts', store, depsOf())
   assert.equal((message.content[0] as { text: string }).text, 'see @missing.ts')
 })
+
+// ── the request-zone source (Client time zone propagation) ─────────────────
+
+test('an identified ordinary prompt carries the request id and the sampled client zone', async () => {
+  const store = new DraftImageStore()
+  const one = staged(store, 'a.png')
+  const message = await prepareUserMessage(
+    `see ${one.placeholder}`,
+    store,
+    depsOf(),
+    { requestId: 'rpc-1', clientTimeZone: 'Asia/Shanghai' },
+  )
+  assert.deepEqual(message.source, {
+    kind: 'user',
+    rpcId: 'rpc-1',
+    clientTimeZone: 'Asia/Shanghai',
+  }, 'the text/image path shares ONE source carrying the request identity and its zone')
+})
+
+test('an unidentified injected submission keeps the plain user source (no fabricated identity or zone)', async () => {
+  const store = new DraftImageStore()
+  const message = await prepareUserMessage('injected context', store, depsOf(), { clientTimeZone: 'Asia/Shanghai' })
+  assert.deepEqual(message.source, { kind: 'user' },
+    'a skill/injected line never gains an rpcId (or a zone tied to human-rpc identity)')
+})

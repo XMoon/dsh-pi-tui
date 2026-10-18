@@ -2561,6 +2561,14 @@ test('F4-R1: a viewer follow-up refusal settles through the production viewer in
     if (previousHome === undefined) delete process.env.DSH_HOME
     else process.env.DSH_HOME = previousHome
   })
+  // The Client-local request zone IS the TUI process zone: pin it so the zone
+  // the adapter forwards is an asserted value, never the machine's locale.
+  const previousTz = process.env.TZ
+  process.env.TZ = 'Asia/Shanghai'
+  life.defer(() => {
+    if (previousTz === undefined) delete process.env.TZ
+    else process.env.TZ = previousTz
+  })
   const vt = new VirtualTerminal(80, 24)
   life.defer(installVirtualProcessTerminal(vt))
   const probe = installProbe()
@@ -2614,7 +2622,12 @@ test('F4-R1: a viewer follow-up refusal settles through the production viewer in
   // The official prompt surface the REAL DirectSubagentPort reads lazily. A
   // held refusal lets the test move the viewer BETWEEN the send and the
   // settlement; an accepting arm is the positive control.
-  const promptCalls: { childSessionId: string; delivery: string; content: readonly { type: string; text?: string }[] }[] = []
+  const promptCalls: {
+    childSessionId: string
+    delivery: string
+    content: readonly { type: string; text?: string }[]
+    clientTimeZone?: string
+  }[] = []
   const held: (() => void)[] = []
   let accepted = false
   const subagents = {
@@ -2628,7 +2641,12 @@ test('F4-R1: a viewer follow-up refusal settles through the production viewer in
       parentId: parent.id,
       depth: 1,
     }],
-    prompt: async (request: { childSessionId: string; delivery: string; content: readonly { type: string; text?: string }[] }) => {
+    prompt: async (request: {
+      childSessionId: string
+      delivery: string
+      content: readonly { type: string; text?: string }[]
+      clientTimeZone?: string
+    }) => {
       promptCalls.push(request)
       if (accepted) return { messageId: 'viewer-settle-accepted' }
       await new Promise<void>(resolve => { held.push(resolve) })
@@ -2676,6 +2694,8 @@ test('F4-R1: a viewer follow-up refusal settles through the production viewer in
   assert.equal(promptCalls.length, 1, 'the production viewer submit must reach the official prompt exactly once')
   assert.equal(promptCalls[0]!.childSessionId, child.id)
   assert.deepEqual(promptCalls[0]!.content, [{ type: 'text', text: 'accepted follow-up' }])
+  assert.equal(promptCalls[0]!.clientTimeZone, 'Asia/Shanghai',
+    'the viewer follow-up carries the Client-local request zone into the official prompt')
   assert.equal(app.getDraft(), '', 'an accepted send must not restore the visible draft')
   input('\x1b')
   await settle()

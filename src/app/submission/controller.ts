@@ -31,6 +31,7 @@ import type { DraftImageStore } from '../../client/media/image/draft-store.ts'
 import { consumeDraftAttachments, draftHasAttachments, draftHasImages, pinDraftAttachments } from '../../client/media/draft-attachments.ts'
 import { prepareUserMessage, type DirectPrepareInputDeps } from './direct-message-preparation.ts'
 import { expandImagePlaceholders } from '../../client/media/image/placeholder.ts'
+import { clientTimeZone } from '../../client/time-zone.ts'
 import { classifyCommandLine, isBareCommandLine, isLocalCommandLine, isPlainExitPrompt, LOCAL_COMMANDS, SESSIONLESS_COMMANDS, shouldConsumeAdvertisedMiss, type CommandLineClassification } from '../../domain/command/policy.ts'
 import { resolveSubmitDelivery } from './command-policy.ts'
 import { isIndeterminateSkillWrite, type HostCommandClaim, type SubmitDelivery } from '../../commands.ts'
@@ -2014,11 +2015,16 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
   }
   /** Abort the local shell + interrupt the live Agent (Esc / cancel-activity). */
   const abortLocalShell = (): void => deps.shell.interrupt()
-  /** Prepare one outgoing message through the shared image/draft pipeline. */
+  /** Prepare one outgoing message through the shared image/draft pipeline.
+   *  The Direct branch samples the Client-local request zone HERE, once per
+   *  human submit at the send point (never cached, never the Host's zone): it
+   *  rides the durable user-message source the Host's time-context reader
+   *  consumes. A Remote selection samples nothing — the official
+   *  `SessionFace.prompt()` owns that request field. */
   const prepareMessage = (text: string, requestId: string): Promise<unknown> =>
     deps.prepareTransport !== undefined
       ? deps.prepareTransport(text, requestId)
-      : prepareUserMessage(text, deps.drafts.images, submitDeps, { requestId })
+      : prepareUserMessage(text, deps.drafts.images, submitDeps, { requestId, clientTimeZone: clientTimeZone() })
 
   return {
     submit,

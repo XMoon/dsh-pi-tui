@@ -105,6 +105,9 @@ export class DirectSubagentPort implements SubagentPort {
           // call (a retry that represents a NEW submit mints a new id).
           mintRequestId: () => randomUUID(),
           canonicalizeText: context.canonicalizeText,
+          // The Client-local zone of THIS follow-up, sampled by the caller at
+          // delivery time (the official request-field semantics).
+          clientTimeZone: context.clientTimeZone,
         })
       } finally {
         releaseTail()
@@ -167,6 +170,10 @@ export interface SubagentViewerSubmitDeps {
    * root, on the main surface and in viewer prompts alike). MAY be async;
    * the default passes the text through untouched. */
   canonicalizeText?(text: string): string | Promise<string>
+  /** The Client-local IANA zone sampled for THIS follow-up (the official
+   * `clientTimeZone` request field). Called once, after the async
+   * canonicalization and cancellation checks, immediately before dispatch. */
+  clientTimeZone(): string
 }
 
 /**
@@ -191,6 +198,7 @@ export async function submitSubagentPrompt(
   let signal: AbortSignal
   let canonical: SubagentPromptContentPart[]
   let requestId: string
+  let timeZone: string
   try {
     // 1. The official control surface, read lazily: the continuation
     //    runtime may appear/disappear between calls (draining / activation
@@ -222,7 +230,12 @@ export async function submitSubagentPrompt(
       }
     }
     if (signal.aborted) return { kind: 'rejected', reason: { kind: 'cancelled' } }
-    // 3. Mint the caller-owned identity in the PRE-DISPATCH phase: it is an
+    // 3. Sample the Client-local request zone ONCE for this follow-up: after
+    //    the async canonicalization and the cancellation check, immediately
+    //    before the dispatch. A throw here is still a known non-dispatch
+    //    (the draft is restorable), never an ambiguous delivery.
+    timeZone = deps.clientTimeZone()
+    // 4. Mint the caller-owned identity in the PRE-DISPATCH phase: it is an
     //    argument evaluated before `prompt()`, so a mint failure is a known
     //    non-dispatch, not an ambiguous delivery.
     requestId = deps.mintRequestId()
@@ -237,7 +250,8 @@ export async function submitSubagentPrompt(
     // resolved queue/steer delivery is passed unchanged to the child;
     // the child owns the selected placement;
     // the requestId (minted fresh for THIS submit, before the call) is
-    // persisted on the accepted message.
+    // persisted on the accepted message, together with the Client-sampled
+    // request zone of this exact follow-up.
     const receipt = await subagents.prompt(
       {
         requestId,
@@ -246,6 +260,7 @@ export async function submitSubagentPrompt(
         mode: 'continuable',
         delivery: request.delivery,
         content: canonical,
+        clientTimeZone: timeZone,
       },
       signal,
     )

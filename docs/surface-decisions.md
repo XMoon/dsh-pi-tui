@@ -2935,3 +2935,32 @@ shown as `[interrupted]` / `N interrupted` while its Job was still running).
   `Interrupted [error] — cancelled by user` Attention card are untouched.
   The `/transcript` export and search still consume the same shared
   `WorkflowProjection`, so they cannot diverge from the card.
+
+## Request-zone metadata adds no surface (2026-10-18)
+
+Carrying the sending Client runtime's time zone on human prompts is a request
+metadata change, not a UI change; the interaction determination is
+`NO_USER_VISIBLE_CHANGE` for every surface this bundle owns:
+
+- **Entry points / gestures** — none added, none moved. Enter, queue, steer and
+  Ctrl+S keep their existing routes; no new keybinding, popup, toast, settings
+  row or command exists for the zone.
+- **Queue, optimistic echo and placement** — unchanged: the local echo still
+  joins the authoritative occurrence by `rpcId` alone, and the source field adds
+  no classification, ledger, or extra queue row. An injected `time-context`
+  snapshot stays Context, never a user row.
+- **Child viewer** — unchanged: follow-up still requires a live continuable
+  child address; a one-shot child remains read-only, and the refusal/draft-sink
+  behavior is the existing settlement.
+- **Transcript / Context Tail / scrolling** — unchanged; the only observable
+  difference is the text of an already existing, already expandable Context
+  injection (the official plugin's own wording), rendered by the existing
+  wrap/truncate path. `Browser time zone` stays the upstream term and is not
+  renamed by the TUI.
+- **Refusal path** — a process that reports no usable zone keeps the existing
+  prepare-failure behavior: the notice plus the restored draft; no new modal or
+  state.
+
+The zone is the sending TUI process's (`TZ`), never the terminal observer's; this
+determination claims no visual or interaction capability beyond the official
+plugin's existing Context text.

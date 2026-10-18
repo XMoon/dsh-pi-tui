@@ -1309,6 +1309,85 @@ test('L6 pending: queued -> queue pane, steering -> tail lane, and the echo -> a
   }, 20_000)
 })
 
+test('L5: a real Remote ordinary submit carries the official Client-sampled request zone into the Host source and its time-context injection', async (t) => {
+  const life = testLifecycle(t)
+  const mainId = 'm3-4-pr2-request-zone'
+  const hostPreset = 'm3-4-pr2-preset'
+  const seedHost = await mountRemotePresentationHost(life, hostPreset, { llmAdapter: new StubStreamingLlmAdapter() })
+  await seedHost.harness.create(
+    SessionId(mainId),
+    { provider: 'smoke', model: 'smoke-model' } as never,
+    { cwd: seedHost.anchorDir },
+  )
+  // The official request-clock row, mounted ONLY in this fixture (the shipped
+  // `standard` preset declares the same row).
+  const timeContext = await import('@deepseek-ai/dsh-time-context')
+  await seedHost.ctx.plugin(timeContext as never, {} as never)
+  const fixture = await mountRemoteRunner(life, {
+    presetId: hostPreset,
+    resumeSessionId: mainId,
+    host: seedHost,
+    productionSerializer: true,
+  })
+  // The Client runtime's zone for THIS submit. The Remote writer adds no zone
+  // of its own: the official `SessionFace.prompt()` samples the same process
+  // zone and the Host validates it onto the durable source.
+  const previousTz = process.env.TZ
+  process.env.TZ = 'Europe/Paris'
+  life.defer(() => {
+    if (previousTz === undefined) delete process.env.TZ
+    else process.env.TZ = previousTz
+  })
+  const app = await waitForApp(fixture)
+  const editor = fixture.runnerApp() as unknown as { setDraft(text: string): void; submitDraft(): void }
+  // The Host's authoritative log for the resumed Session (the JSONL projection
+  // flushes on retirement, so the live log is the readback that exists during
+  // the turn — it is the same event stream persistence stores).
+  const hostUsers = (): readonly {
+    readonly source: { readonly kind?: string; readonly rpcId?: unknown; readonly clientTimeZone?: unknown }
+    readonly content: readonly { readonly text?: string }[]
+  }[] => {
+    const agent = seedHost.ctx.agents.get(SessionId(mainId)) as unknown as {
+      session: { snapshotEvents(): ReadonlyArray<{ type: string; data: unknown }> }
+    }
+    return agent.session.snapshotEvents()
+      .filter(event => event.type === 'user/message')
+      .map(event => event.data as never)
+  }
+  const humanMessages = (): ReturnType<typeof hostUsers> => hostUsers().filter(message => message.source.kind === 'user')
+  const baseline = humanMessages().length
+  try {
+    editor.setDraft('remote request zone')
+    editor.submitDraft()
+    assert.ok(app !== undefined)
+    await waitFor('the Remote turn to complete on the Host', () =>
+      fixture.vt.getViewport().join('\n').includes('remote reply'), 25_000)
+    await waitFor('the Host user message', () => humanMessages().length === baseline + 1, 20_000)
+
+    const human = humanMessages()
+    assert.equal(typeof human[baseline]!.source.rpcId, 'string', 'the official identified prompt kept its request id')
+    assert.equal(human[baseline]!.source.clientTimeZone, 'Europe/Paris',
+      'the Client zone crossed the official SessionFace → generated Remote → Host source')
+    const injected = hostUsers().filter(message => message.source.kind === 'time-context')
+    assert.equal(injected.length, 1, 'the mounted official plugin injected one request-clock snapshot')
+    const text = injected[0]!.content.map(part => part.text ?? '').join('\n')
+    assert.match(text, /Browser time zone for this request: Europe\/Paris\./u,
+      'the model-visible request zone is the Client zone, never "unavailable"')
+
+    // Per-submit sampling: the NEXT send samples the process zone again, and it
+    // never rewrites the earlier message's stored zone.
+    process.env.TZ = 'UTC'
+    editor.setDraft('second request zone')
+    editor.submitDraft()
+    await waitFor('the second Host user message', () => humanMessages().length === baseline + 2, 20_000)
+    assert.deepEqual(humanMessages().map(message => message.source.clientTimeZone).slice(baseline),
+      ['Europe/Paris', 'UTC'],
+      'each human submit carries the zone sampled at ITS OWN send point')
+  } finally {
+    await fixture.dispose()
+  }
+})
+
 test('L6: a projection-owned value changed by ANOTHER writer reaches the surface through the official projection channel', async (t) => {
   const life = testLifecycle(t)
   const mainId = 'm3-4-pr2-projection-live'
@@ -1764,15 +1843,15 @@ async function startWriterHolder(
   return { kill }
 }
 
-/** Read the durable event types straight off the Host persistence root. */
-async function readDurableEventTypes(
+/** Read the durable events straight off the Host persistence root. */
+async function readDurableEvents(
   host: Awaited<ReturnType<typeof mountRemotePresentationHost>>,
   sessionId: string,
-): Promise<readonly string[]> {
+): Promise<readonly { readonly type: string; readonly data?: unknown }[]> {
   const persistence = (host.ctx as unknown as {
     sessionPersistence: {
       open(id: unknown, mode: 'read'): Promise<{
-        read(): Promise<{ events: readonly { type: string }[] }>
+        read(): Promise<{ events: readonly { type: string; data?: unknown }[] }>
         close(): Promise<void>
       }>
     }
@@ -1780,10 +1859,18 @@ async function readDurableEventTypes(
   const handle = await persistence.open(SessionId(sessionId), 'read')
   try {
     const read = await handle.read()
-    return read.events.map(event => event.type)
+    return read.events
   } finally {
     await handle.close()
   }
+}
+
+/** Read the durable event types straight off the Host persistence root. */
+async function readDurableEventTypes(
+  host: Awaited<ReturnType<typeof mountRemotePresentationHost>>,
+  sessionId: string,
+): Promise<readonly string[]> {
+  return (await readDurableEvents(host, sessionId)).map(event => event.type)
 }
 
 test('L6 PR5: a REAL two-process writer-held Remote Session — prompt, /title and /preset recover structurally, and an explicit retry commits after the holder exits', async (t) => {
