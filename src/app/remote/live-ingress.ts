@@ -92,7 +92,7 @@ export interface RemoteLiveIngressSinks {
    *  it can fire while the caller's `handle = subscribe(...)` assignment is
    *  still completing. Every later revision, and the Session's loading→open
    *  transition, re-fires it until the recovery is acknowledged. */
-  readonly onWindowRefoldRequired: (sessionId: string) => void
+  readonly onWindowRefoldRequired: (sessionId: string, reason?: RemoteRefoldReason) => void
   /** The Session snapshot changed (pendingSubmissions/running/etc. — the
    *  uSES channel): the pending-input presentation re-joins from the
    *  official sources. */
@@ -285,10 +285,15 @@ export function createRemoteLiveIngress(
        *  `handle = subscribe(...)` assignment always completes first. Every
        *  later revision, the loading→open transition and any change of the
        *  generation/binding identity re-arm it. */
-      const requireRefold = (): void => {
+      /** The reason of the pending (coalesced) wakeup: a recovery anywhere in the
+       *  window escalates a paging wakeup, never the other way round. */
+      let pendingRefoldReason: RemoteRefoldReason = 'recovery'
+      const requireRefold = (reason: RemoteRefoldReason = 'recovery'): void => {
         if (disposed) return
         const current = attached
         if (current === undefined) return
+        if (reason === 'recovery') pendingRefoldReason = 'recovery'
+        else if (!notifyQueued && notified === undefined) pendingRefoldReason = 'paging'
         mode = 'recovering'
         const window = current.binding.eventSource.getSnapshot()
         const open = current.binding.session.getSnapshot().openState === 'open'
@@ -310,7 +315,8 @@ export function createRemoteLiveIngress(
           if (disposed || mode !== 'recovering') return
           const still = attached
           if (still === undefined || sessions.binding(sessionId) !== still.binding) return
-          sinks.onWindowRefoldRequired(sessionId)
+          sinks.onWindowRefoldRequired(sessionId, pendingRefoldReason)
+          pendingRefoldReason = 'recovery'
         })
       }
 
@@ -414,7 +420,13 @@ export function createRemoteLiveIngress(
           const window = binding.eventSource.getSnapshot()
           if (window.revision === lastDeliveredRevision) return
           const change = (window as { readonly change?: RemoteWindowChange }).change
-          if (change === undefined || change.kind === 'replace' || change.kind === 'prepend') {
+          if (change !== undefined && change.kind === 'prepend') {
+            // Older history joined the front: no new model-visible event arrived,
+            // so this reconcile must not re-measure the context.
+            requireRefold('paging')
+            return
+          }
+          if (change === undefined || change.kind === 'replace') {
             requireRefold()
             return
           }
@@ -567,6 +579,14 @@ export function createRemoteLiveIngress(
 }
 
 /** Structural mirror of the official `SessionEventChange` discriminator. */
+/**
+ * WHY a window reconcile was requested: ordinary history paging (`loadOlder`
+ * joins older events at the front — no new model-visible event arrived) versus a
+ * recovery (rollover, replace, revision discontinuity, hydrate gap) where the
+ * window may carry events the surface never saw.
+ */
+export type RemoteRefoldReason = 'paging' | 'recovery'
+
 type RemoteWindowChange =
   | { readonly kind: 'replace'; readonly entries: readonly RemotePresentationEventEntry[] }
   | { readonly kind: 'prepend'; readonly entries: readonly RemotePresentationEventEntry[] }

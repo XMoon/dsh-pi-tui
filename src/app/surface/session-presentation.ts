@@ -288,7 +288,10 @@ export interface SessionPresentation<Event extends SessionPresentationEvent> {
   /** S3-R0: re-fold the transcript/stats from the CURRENT official window and
    *  return the committed identity/revision proof the caller acknowledges the
    *  ingress with (undefined = the read was superseded; nothing was committed). */
-  rehydrateFromWindow(sessionId: string): Promise<PresentationWindowRefoldProof | undefined>
+  rehydrateFromWindow(
+    sessionId: string,
+    options?: { readonly measure?: boolean },
+  ): Promise<PresentationWindowRefoldProof | undefined>
   /** Record a measure boundary the LIVE routing handled, so a later window
    *  reconcile keeps an already-measured boundary measurement-free. */
   noteLiveMeasureEvent(sessionId: string, event: { readonly type: unknown; readonly data?: unknown }): void
@@ -737,6 +740,7 @@ export function createSessionPresentation<Event extends SessionPresentationEvent
 
   const rehydrateFromWindow = async (
     sessionId: string,
+    options?: { readonly measure?: boolean },
   ): Promise<PresentationWindowRefoldProof | undefined> => {
     if (deps.isCleanedUp()) return undefined
     if (deps.remote === undefined) return undefined
@@ -810,7 +814,11 @@ export function createSessionPresentation<Event extends SessionPresentationEvent
     // the routing sink) or the last committed window's. A boundary the live path
     // measured keeps an ordinary history prepend measurement-free.
     const previousBoundary = lastCommittedMeasureEvent.get(sessionId)
-    if (previousBoundary !== undefined && previousBoundary !== boundary) {
+    // A PAGING reconcile (`loadOlder` widened the bounded window) can show a
+    // boundary the previous window could not prove simply because older history
+    // became visible — no new model-visible event arrived, so it must not
+    // measure. The ingress owns that distinction and passes it here.
+    if (options?.measure !== false && previousBoundary !== undefined && previousBoundary !== boundary) {
       // The window shows a compaction boundary the previous committed window did
       // not: the outage swallowed the lifecycle event whose live handler would
       // have marked the context dirty and re-measured it (including a bracket

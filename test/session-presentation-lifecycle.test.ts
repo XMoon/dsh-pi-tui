@@ -51,7 +51,7 @@ function harness(options: {
   /** The hydrate outcome: undefined means the commit was fenced out. */
   coldHydrate(): Promise<unknown>
   /** S3-R0: the committed proof (or undefined when the read was superseded). */
-  rehydrate(): Promise<unknown>
+  rehydrate(options?: { readonly measure?: boolean }): Promise<unknown>
   resetForGeneration(): void
   draftClears(): number
   /** The live presentation bridge (fold identity is the commit witness). */
@@ -161,7 +161,7 @@ function harness(options: {
       }
     },
     coldHydrate: () => presentation.initLiveRemoteSession('s'),
-    rehydrate: () => presentation.rehydrateFromWindow('s'),
+    rehydrate: (options?: { readonly measure?: boolean }) => presentation.rehydrateFromWindow('s', options),
     resetForGeneration: () => {
       generation += 1
       presentation.resetForGeneration()
@@ -553,6 +553,39 @@ test('compaction window fold uses the LIVE compactionId-matched semantics', asyn
   await h.rehydrate()
   assert.deepEqual(h.resumedCompactions().at(-1), { id: 'B', active: true, phase: 'summarizing' },
     'a summary for a DIFFERENT compaction does not advance the phase')
+})
+
+test('compaction paging: widening the bounded window never re-measures the context', async () => {
+  // External review: the bounded window can PROVE a boundary only because
+  // `loadOlder` made older history visible; that is not a new model-visible
+  // event, so a paging reconcile must not measure — while a recovery reconcile
+  // of the same content must.
+  const proof = (_sessionId: string, revision: number) => ({ generation: 1, binding: {}, revision })
+  const paging = harness({ refoldProof: proof })
+  paging.setWindow([{ type: 'compaction/end', data: { compactionId: 'B' } }], true, 51)
+  await paging.coldHydrate()
+  const base = paging.contextDirty()
+  // The prepend makes the matching `start B` visible: the key moves none -> end:B.
+  paging.setWindow([
+    { type: 'compaction/start', data: { compactionId: 'B' } },
+    { type: 'compaction/end', data: { compactionId: 'B' } },
+  ], true, 52)
+  await paging.rehydrate({ measure: false })
+  assert.equal(paging.contextDirty(), base,
+    'a pure prepend reconcile does NOT measure the newly visible old boundary')
+  // The SAME content change through a RECOVERY reconcile (a fresh owner) DOES
+  // measure — the fix must not blanket-disable reconcile measurement.
+  const recovery = harness({ refoldProof: proof })
+  recovery.setWindow([{ type: 'compaction/end', data: { compactionId: 'B' } }], true, 53)
+  await recovery.coldHydrate()
+  const recoveryBase = recovery.contextDirty()
+  recovery.setWindow([
+    { type: 'compaction/start', data: { compactionId: 'B' } },
+    { type: 'compaction/end', data: { compactionId: 'B' } },
+  ], true, 54)
+  await recovery.rehydrate()
+  assert.equal(recovery.contextDirty(), recoveryBase + 1,
+    'the same boundary through a RECOVERY reconcile still measures once')
 })
 
 test('S3-R0: read A already in flight → window B commits → A settles last and writes nothing', async (t) => {
