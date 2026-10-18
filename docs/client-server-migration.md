@@ -6996,10 +6996,12 @@ accepted child message's source carrying the zone).
 
 The same scripted scenario — one ordinary submit plus one busy queue submit on
 the real Direct TSP surface, with the official `time-context` row mounted — was
-run against the review base and against this change (identical run through the
-existing `support/direct-tsp-fixture.ts`). The folded live node trees (17 nodes),
-the durable event lists (20 events per side) and the recorded messages matched
-with exactly two differences:
+run against the review base `ed2c7988` and against the change `8f350e84`
+(identical run through the existing `support/direct-tsp-fixture.ts`, one
+throwaway probe file in each of two detached worktrees, digest normalized for
+ids/timestamps/epochs). The folded live node trees (17 nodes), the durable event
+lists (20 events per side) and the recorded messages matched with exactly two
+differences:
 
 1. the Context injection body text: `Browser time zone for this request:
    unavailable.` → `Browser time zone for this request: Asia/Shanghai.
@@ -7011,6 +7013,37 @@ The queue row (`queued (followup): <text>`), the steering/transcript/composer
 state, the node and event counts, and the assistant/stream events were identical.
 The ongoing guard for the rendered result is the rendered-parity case in
 `test/request-time-zone.test.ts`.
+
+### Absence / invalid / mixed: who owns which half
+
+The plan's §6 `absence / invalid / mixed` row splits by ownership, and this
+delivery keeps that split visible instead of claiming upstream semantics as its
+own:
+
+- **Absent human-rpc zone (product path, owned here)**: a resolvable Skill line
+  is prepared by the same Direct pipeline without a request identity, so it keeps
+  the plain `{ kind: 'user' }` source; the case in `test/request-time-zone.test.ts`
+  asserts no fabricated `rpcId`/`clientTimeZone` AND the official plugin's own
+  `Browser time zone for this request: unavailable. Ask the user to clarify …`
+  text in the same turn (the Host process zone, which the timestamp line
+  legitimately marks, is never promoted into the request zone).
+- **Invalid zone (owned here)**: the Direct refusal path refuses before dispatch
+  and restores the draft; the strict-profile rules themselves are pinned in
+  `test/client-time-zone.test.ts`.
+- **`missing` / `mixed` derivation (upstream-owned, cited)**: the official
+  `@deepseek-ai/dsh-time-context` package's own semantics are unchanged, and its
+  own suite was run for this record in the DSH source checkout at the pinned rc.2
+  release `687f282e86` (the plan's reference; the installed package is
+  `@deepseek-ai/dsh-time-context@0.2.1-rc.2`): `vitest run
+  packages/context/time-context/tests/request-zone.spec.ts
+  packages/context/time-context/tests/time-context.spec.ts` → 24 tests pass,
+  covering missing/unique/sorted-mixed derivation from user-rpc sources only,
+  per-zone validation before classifying a mixed turn, the model-facing policy
+  text for every context, and the loud failure for an invalid explicit zone or an
+  unavailable process zone. A same-turn two-zone `mixed` result is NOT
+  reproduced in this repository (it needs two different-zone human submits
+  admitted into ONE turn); the derivation is the upstream fact above, and this
+  change only supplies each submit's own zone.
 
 ### Boundary note: the Direct path validates locally
 
