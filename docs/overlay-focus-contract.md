@@ -44,6 +44,17 @@ Non-negotiable distinctions:
 - **logical `zOrder` must match the CURRENT physical visual order** — not the
   creation order. It is promoted only when the fork actually promotes the
   physical order (mount, capturing show, explicit focus).
+- **a forwarding container can be the physical focus owner without owning the
+  keyboard.** The fork's mouse dispatch promotes the seat's physical mount
+  (`EditorSeatMount`) to the focus target, and the vendored `Container` forwards
+  `focused` and input to the child the press named (divergence **X051**). The raw
+  physical focus therefore legitimately stays on the mount while its occupant
+  receives the keys. The host answers "who receives input" by resolving that
+  mount to its one live occupant (`TuiApp.physicalInputOwner()` /
+  `ownsPhysicalKeyboard()`); a consumer must never infer the input owner from raw
+  object identity. The resolution answers the focus question ONLY: every consumer
+  keeps its own ACTIVE/current and modal/tenant admission on top of it, so a
+  resolved occupant still cannot bypass a Question/Approval/Save or overlay gate.
 
 ## 2. The transaction invariant
 

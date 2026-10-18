@@ -109,6 +109,10 @@ uses `@xmoon76/dsh-pi-tui@0.4.8`.
 
 ### Fixed
 
+- Clicking the editor area with the mouse in Transcript Fullscreen no longer breaks the
+  Task Quick `↓` entry or its `↓ view` hint, and the editor's navigation-key priority, the
+  History panel's key ownership and its focus state stay correct too.
+
 - Input is no longer lost after a new or switched Session: same-name Skill commands, an
   unacknowledged draft and `↑` recall all survive.
 
