@@ -319,12 +319,28 @@ test('L6 PR5 §3.9a: teardown with a pending main-path READ — release after th
   app.setDraft('/copy')
   app.submitDraft()
   await waitFor('the parked main-path read began', () => readParked, 10_000)
+  // TERMINAL-WRITE COUNTER (the real render/callback channel). It is installed
+  // BEFORE the stop wrapper below, which samples it synchronously.
+  const surfaceWrites = { count: 0 }
+  const vtWrite = fixture.vt.write.bind(fixture.vt)
+  fixture.vt.write = (data: string): void => {
+    if (data.length > 0) surfaceWrites.count += 1
+    vtWrite(data)
+  }
   // SURFACE-STOP OBSERVER: wrap the mounted TuiApp's REAL stop (the
   // disposeSurface path ends here) — the recorded order is an observed
-  // fact, not a timing guess.
+  // fact, not a timing guess. The write count is sampled SYNCHRONOUSLY when
+  // the real stop RETURNS: that instant is the true stopped-surface baseline,
+  // so a terminal write landing after the stop but before any later sample
+  // cannot hide inside the baseline.
   const observed: string[] = []
+  const writesAtSurfaceStop = { count: -1 }
   const originalStop = app.stop.bind(app)
-  app.stop = (): void => { observed.push('surface-stop'); originalStop() }
+  app.stop = (): void => {
+    observed.push('surface-stop')
+    originalStop()
+    writesAtSurfaceStop.count = surfaceWrites.count
+  }
   // TRANSPORT-DISPOSAL OBSERVER.
   const selected = fixture.aggregate.selected as { disposeTransport(): Promise<void> }
   let transportDisposals = 0
@@ -333,13 +349,6 @@ test('L6 PR5 §3.9a: teardown with a pending main-path READ — release after th
     transportDisposals += 1
     observed.push('transport-dispose')
     await originalDispose()
-  }
-  // TERMINAL-WRITE COUNTER (the real render/callback channel).
-  const surfaceWrites = { count: 0 }
-  const vtWrite = fixture.vt.write.bind(fixture.vt)
-  fixture.vt.write = (data: string): void => {
-    if (data.length > 0) surfaceWrites.count += 1
-    vtWrite(data)
   }
   // START the teardown (unawaited): the registered effect runs
   // disposeSurface SYNCHRONOUSLY (surface-stop) and then begins the
@@ -353,7 +362,6 @@ test('L6 PR5 §3.9a: teardown with a pending main-path READ — release after th
   assert.equal(transportDisposals, 0,
     'the transport has NOT disposed while the surface is stopped and the drain is pending')
   assert.equal(readParked && releaseRead !== undefined, true, 'the pending read is still unsettled inside the drain window')
-  const writesAtRelease = surfaceWrites.count
   // Release the pending read INSIDE the drain window (surface fenced, drain
   // in flight, transport not yet disposed).
   releaseRead?.(undefined)
@@ -365,8 +373,8 @@ test('L6 PR5 §3.9a: teardown with a pending main-path READ — release after th
     'the selected transport disposes exactly once through the runner teardown')
   assert.ok(observed.indexOf('surface-stop') < observed.indexOf('transport-dispose'),
     'observed order: surface stop precedes the transport disposal (the drain ran between)')
-  assert.equal(surfaceWrites.count - writesAtRelease, 0,
-    'the released pending read produced ZERO terminal writes (no visible callback on the disposed surface)')
+  assert.equal(surfaceWrites.count - writesAtSurfaceStop.count, 0,
+    'the released pending read produced ZERO terminal writes after the surface stop (no visible callback on the disposed surface)')
   const rowsAtDisposal = hostUserRows(fixture, mainId).length
   await new Promise(resolve => setTimeout(resolve, 800))
   assert.equal(hostUserRows(fixture, mainId).length, rowsAtDisposal,
@@ -394,9 +402,27 @@ test('L6 PR5 §3.9b: teardown with a pending WRITE — observed surface-stop bou
   // OBSERVERS: the mounted TuiApp's REAL stop (the disposeSurface path) and
   // the selected transport disposer record the observed order.
   const app = fixture.runnerApp() as unknown as { stop(): void }
+  // TERMINAL-WRITE COUNTER (the real render/callback channel): a disposed
+  // surface must never paint again, whatever the Host commits afterwards. It
+  // is installed BEFORE the stop wrapper, which samples it synchronously.
+  const surfaceWrites = { count: 0 }
+  const vtWrite = fixture.vt.write.bind(fixture.vt)
+  fixture.vt.write = (data: string): void => {
+    if (data.length > 0) surfaceWrites.count += 1
+    vtWrite(data)
+  }
   const observed: string[] = []
+  // The STOPPED-SURFACE BASELINE is sampled SYNCHRONOUSLY when the real stop
+  // RETURNS: a late terminal write landing after the stop but before any later
+  // sample must still be caught by the final assertion instead of hiding
+  // inside the baseline.
+  const writesAtSurfaceStop = { count: -1 }
   const originalStop = app.stop.bind(app)
-  app.stop = (): void => { observed.push('surface-stop'); originalStop() }
+  app.stop = (): void => {
+    observed.push('surface-stop')
+    originalStop()
+    writesAtSurfaceStop.count = surfaceWrites.count
+  }
   const selected = fixture.aggregate.selected as { disposeTransport(): Promise<void> }
   let transportDisposals = 0
   const originalDispose = selected.disposeTransport.bind(selected)
@@ -405,20 +431,11 @@ test('L6 PR5 §3.9b: teardown with a pending WRITE — observed surface-stop bou
     observed.push('transport-dispose')
     await originalDispose()
   }
-  // TERMINAL-WRITE COUNTER (the real render/callback channel): a disposed
-  // surface must never paint again, whatever the Host commits afterwards.
-  const surfaceWrites = { count: 0 }
-  const vtWrite = fixture.vt.write.bind(fixture.vt)
-  fixture.vt.write = (data: string): void => {
-    if (data.length > 0) surfaceWrites.count += 1
-    vtWrite(data)
-  }
   // START the teardown; observe the surface stop BEFORE releasing the write.
   const teardownPromise = fixture.runnerFiberDispose()
   await waitFor('the surface stopped (observed)', () => observed.includes('surface-stop'), 10_000)
   assert.equal(transportDisposals, 0,
     'the transport has NOT disposed while the drain is pending the parked write')
-  const writesAtRelease = surfaceWrites.count
   parked.release()
   await teardownPromise
   assert.equal(transportDisposals, 1,
@@ -445,6 +462,6 @@ test('L6 PR5 §3.9b: teardown with a pending WRITE — observed surface-stop bou
   // Remote lifecycle contract (`docs/client-server-coupling.md`) and must be
   // proven there with paired success/failure tests — never a local sleep/poll
   // patch, and never pre-decided by this test's assertions.
-  assert.equal(surfaceWrites.count - writesAtRelease, 0,
-    'the surface stopped for good: no terminal write follows the teardown')
+  assert.equal(surfaceWrites.count - writesAtSurfaceStop.count, 0,
+    'the surface stopped for good: no terminal write follows the surface stop')
 })

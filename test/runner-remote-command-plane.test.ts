@@ -1097,6 +1097,16 @@ test('L6 §7.4-14 stale catalog (M3-6 PR2): refresh A → Connection replacement
   // DIFFERENT id: that proves both the old token's retirement AND that the
   // replacement Connection is actually established (a mere `!== old` would
   // pass while the client is still connecting with no generation at all).
+  //
+  // The readiness gate below reads the product's own APPLY report out of an
+  // append-only log, so it must only accept a line written AFTER this
+  // reconnect: the `skills/change` coalescer also applies with
+  // `source=invalidation`, and an unanchored search accepts such an earlier
+  // line and releases the submit before generation B's catalog is installed.
+  // Take the offset NOW, while the generation-A read is still held and no
+  // other refresh can apply.
+  const logPath = join(fixture.host.workRoot, 'logs', `pi-tui-${process.pid}.log`)
+  const logOffsetAtReconnect = readFileSync(logPath, 'utf8').length
   connection.reconnect()
   // While the old generation is gone (the client publishes `undefined`
   // synchronously on 'connecting'), the HOST TRUTH ITSELF CHANGES: the
@@ -1164,10 +1174,12 @@ test('L6 §7.4-14 stale catalog (M3-6 PR2): refresh A → Connection replacement
   // submitting on the read alone races the install and lets the Client twin
   // claim the line. A user submits what the INSTALLED catalog serves, so wait
   // for the product's own apply report for the reconnect refresh before the
-  // single submit below.
+  // single submit below — searched only in the log written after the
+  // reconnect, so an earlier refresh's apply cannot satisfy the gate.
   await waitFor('the automatic reconnect refresh APPLIED its catalog', () => {
     try {
-      return readFileSync(join(fixture.host.workRoot, 'logs', `pi-tui-${process.pid}.log`), 'utf8')
+      return readFileSync(logPath, 'utf8')
+        .slice(logOffsetAtReconnect)
         .split('\n')
         .some(line => line.includes('catalog applied') && line.includes('source=invalidation'))
     } catch {
