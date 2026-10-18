@@ -52,6 +52,8 @@ function harness(options: {
   draftClears(): number
   /** The live presentation bridge (fold identity is the commit witness). */
   presentation: ReturnType<typeof createSessionPresentation<SessionPresentationEvent>>
+  /** Every `applyResumedCompaction` commit (external review RFL-001 witness). */
+  resumedCompactions(): ReadonlyArray<{ id: string | undefined; active: boolean }>
 } {
   let window: PresentationReadSnapshot | undefined
   let generation = 0
@@ -64,12 +66,14 @@ function harness(options: {
   const journal = createOpeningJournal<Record<string, unknown>>()
   /** The active-draft drop seam: every call is a dropped user draft. */
   let draftClears = 0
+  /** RFL-001 (external review): every resumed-compaction commit the surface saw. */
+  const resumedCompactions: Array<{ id: string | undefined; active: boolean }> = []
   const surface = {
     app,
     openingJournal: journal,
     display: displaySeamStub({ clearActiveDraft: () => { draftClears += 1 } }),
     resetSearchPresentation: () => {}, resetTasks: () => {}, resetPendingPresentation: () => {},
-    applyResumedCompaction: () => {}, repaint: () => {}, refreshPendingInput: () => {},
+    applyResumedCompaction: (id: string | undefined, active: boolean) => { resumedCompactions.push({ id, active }) }, repaint: () => {}, refreshPendingInput: () => {},
     refreshTasks: () => {}, refreshAgents: () => {},
   }
   const diag: Diag = { info: () => {}, warn: () => {}, error: () => {}, debug: () => {}, dispose: () => {} } as unknown as Diag
@@ -135,6 +139,7 @@ function harness(options: {
       presentation.resetForGeneration()
     },
     draftClears: () => draftClears,
+    resumedCompactions: () => resumedCompactions,
     presentation,
   }
 }
@@ -179,6 +184,56 @@ test('S3-R0: a transport rollover during the cold read makes the hydrate uncommi
   transportCurrent = false
   assert.equal(await h.coldHydrate(), undefined,
     'the stale transport token makes the hydrate return undefined (what the retry keys on)')
+})
+
+test('S3-R0/RFL-001: a window reconcile re-derives the compaction routing state from the committed window', async (t) => {
+  // External review RFL-001: the replace path used to run the full cold hydrate,
+  // which also reset `compactingId` and the phase/busy/working presentation from
+  // the log (`applyResumedCompaction`). The in-place reconcile must restore that
+  // same state FROM THE SAME COMMITTED WINDOW, under the same fences.
+  const h = harness({
+    refoldProof: (_sessionId, revision) => ({ generation: 1, binding: {}, revision }),
+  })
+  h.setWindow([
+    { type: 'turn/start', data: { turn: 1 } },
+    { type: 'compaction/start', data: { compactionId: 'compact-1' } },
+  ], false, 11)
+  await h.coldHydrate()
+  const afterCold = h.resumedCompactions().at(-1)
+  assert.deepEqual(afterCold, { id: 'compact-1', active: true },
+    'the cold hydrate derives the live bracket')
+
+  // A reconcile whose window still carries the live bracket keeps it.
+  h.setWindow([{ type: 'turn/start', data: { turn: 1 } }, { type: 'compaction/start', data: { compactionId: 'compact-1' } }], false, 12)
+  const committed = await h.rehydrate()
+  assert.notEqual(committed, undefined)
+  assert.deepEqual(h.resumedCompactions().at(-1), { id: 'compact-1', active: true },
+    'the reconcile re-derives the still-live bracket from the committed window')
+
+  // A reconcile whose window carries the END must clear the stale id.
+  h.setWindow([
+    { type: 'compaction/start', data: { compactionId: 'compact-1' } },
+    { type: 'compaction/end', data: { compactionId: 'compact-1' } },
+  ], false, 13)
+  await h.rehydrate()
+  assert.deepEqual(h.resumedCompactions().at(-1), { id: undefined, active: false },
+    'a compaction that ended during the outage is cleared, never left stale')
+
+  // A REFUSED reconcile (superseded read) must not touch the state at all.
+  let stale = true
+  const refused = harness({
+    refoldProof: (_sessionId, revision) => (
+      stale ? undefined : { generation: 1, binding: {}, revision }
+    ),
+  })
+  refused.setWindow([{ type: 'compaction/start', data: { compactionId: 'compact-3' } }], false, 21)
+  await refused.coldHydrate()
+  const before = refused.resumedCompactions().length
+  stale = true
+  refused.setWindow([{ type: 'compaction/end', data: { compactionId: 'compact-3' } }], false, 22)
+  assert.equal(await refused.rehydrate(), undefined, 'a superseded read commits nothing')
+  assert.equal(refused.resumedCompactions().length, before,
+    'a refused reconcile never touches the compaction routing state')
 })
 
 test('S3-R0: read A already in flight → window B commits → A settles last and writes nothing', async (t) => {

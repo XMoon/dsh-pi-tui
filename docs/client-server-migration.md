@@ -6334,12 +6334,16 @@ LAST synchronous delta, so a latest-change delivery is not a fold.
   description — this document does not claim them ahead of that run; the child
   viewer's reconnect case (§14.5) and the single-publisher/release probes are
   covered by the same snapshot's lane results.
-- S1 is qualified on `integration/dsh-0.2.1-rc.2`; S3-R0 is NOT part of that
-  integration HEAD yet. The slice is qualified on its own frozen S3-R0 snapshot
-  (the same-HEAD stage matrix and the concurrent reproduction runs are recorded in
-  the PR description); it becomes qualified on integration only after it is
-  merged there and the complete product gate is re-run on the resulting
-  integration HEAD (the promotion PR to `next` then runs the same gate again). `M3 = DONE` remains the historical migration state; this
+- Qualification states are DISTINCT and must not be conflated:
+  `S1_FOUNDATION_MERGED_TO_INTEGRATION` — PR #328's foundation code is on
+  `integration/dsh-0.2.1-rc.2`; `S1_FULL_QUALIFICATION_PENDING_S3_R0` — S1's full
+  navigation qualification depended on the reconnect-currentness blocker, so the
+  integration HEAD is NOT a qualified S1 state; `S3_R0_QUALIFIED_ON_ITS_SNAPSHOT`
+  — this slice is qualified on its own frozen S3-R0 snapshot (the same-HEAD stage
+  matrix and the concurrent reproduction runs are recorded in the PR description);
+  `S1_PLUS_R0_QUALIFIED` — reached only after S3-R0 is merged into integration and
+  the complete product gate is re-run on the resulting integration HEAD (the
+  promotion PR to `next` then runs the same gate again). `M3 = DONE` remains the historical migration state; this
   slice claims neither `M4` nor a published `0.5.3`.
 
 ### Staging
