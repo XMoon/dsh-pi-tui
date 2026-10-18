@@ -63,6 +63,9 @@ export function describeTaskRow(row: TaskBrowserRow, now: number): string {
     const elapsed = Math.max(0, Math.floor((now - row.startedAt) / 1000))
     return `${row.status}${row.detail === undefined ? '' : ` — ${row.detail}`} · ${elapsed}s`
   }
+  // An rc.2 catalog v2 external leaf has NO local child Session: it is stated
+  // as such and never offered as an openable child (S2-B1).
+  if (row.kind === 'external') return 'External · no local session'
   return `${row.activity}${row.depth > 1 ? ` · depth ${row.depth}` : ''}`
 }
 

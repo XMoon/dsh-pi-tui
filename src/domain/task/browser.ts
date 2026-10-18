@@ -128,6 +128,23 @@ export type TaskBrowserRow =
       readonly attention?: boolean
     }
   | {
+      /**
+       * An rc.2 catalog v2 `mode: 'external'` leaf: a real child identity the
+       * parent catalog carries, with NO local child Session. It is VISIBLE and
+       * never openable/continuable here (S2-B1 §4A.1), so it is its own kind
+       * instead of a `subagent` row whose mode would have to lie.
+       */
+      readonly kind: 'external'
+      readonly value: string
+      readonly childId: string
+      readonly label: string
+      readonly mode: 'external'
+      /** Catalog label facts for the shared row decorations. */
+      readonly hasChildren: false
+      readonly parentId: string
+      readonly depth: number
+    }
+  | {
       readonly kind: 'subagent'
       readonly value: string
       readonly childId: string
@@ -181,28 +198,46 @@ export function buildTaskRows(
   // Child rows: every healthy classified child — continuable AND one-shot,
   // running AND inactive (a settled one-shot's persisted transcript is
   // still viewable, plan §6.3). The filter is a TYPE GUARD on mode: an
-  // entry whose mode is missing, unclassified (`unknown`) or `external` is
-  // NOT a healthy interactive child — it is dropped like a diagnostic
-  // (never silently defaulted to continuable). An `external` child has no
-  // local Session to open; its Task-Center disposition is owned by the
-  // official Bundle qualification (B13/B14), not by this projection.
+  // entry whose mode is missing or unclassified (`unknown`) is dropped like
+  // a diagnostic (never silently defaulted to continuable), while an
+  // `external` leaf is carried as its OWN row kind — visible with its
+  // durable classification and never openable/continuable, because it has
+  // no local child Session (S2-B1 §4A.1).
   type AgentRow = Extract<TaskBrowserRow, { kind: 'subagent' }>
-  const agentRows: AgentRow[] = agents
-    .filter((agent): agent is TaskBrowserAgentInput & { mode: 'one-shot' | 'continuable' } =>
-      agent.kind === 'child' && (
-        agent.mode === 'continuable' || agent.mode === 'one-shot'
-      ))
-    .map(agent => ({
-      kind: 'subagent' as const,
-      value: `${AGENT_ROW_PREFIX}${agent.id}`,
-      childId: agent.id,
-      label: agent.label ?? agent.id,
-      mode: agent.mode,
-      activity: agent.activity ?? 'inactive',
-      hasChildren: agent.hasChildren ?? false,
-      parentId: agent.parentId ?? '',
-      depth: agent.depth ?? 1,
-    }))
+  // Child rows in ONE catalog-order pass: a healthy classified local child
+  // (continuable / one-shot) is a browsable row, and an rc.2 catalog v2
+  // `mode: 'external'` leaf is carried as its own VISIBLE kind — it has no
+  // local child Session, so it is never openable or continuable here
+  // (S2-B1 §4A.1).
+  const childRows: TaskBrowserRow[] = []
+  for (const entry of agents) {
+    if (entry.kind !== 'child') continue
+    if (entry.mode === 'external') {
+      childRows.push({
+        kind: 'external',
+        value: `${AGENT_ROW_PREFIX}${entry.id}`,
+        childId: entry.id,
+        label: entry.label ?? entry.id,
+        mode: 'external',
+        hasChildren: false,
+        parentId: entry.parentId ?? '',
+        depth: entry.depth ?? 1,
+      })
+      continue
+    }
+    if (entry.mode !== 'continuable' && entry.mode !== 'one-shot') continue
+    childRows.push({
+      kind: 'subagent',
+      value: `${AGENT_ROW_PREFIX}${entry.id}`,
+      childId: entry.id,
+      label: entry.label ?? entry.id,
+      mode: entry.mode,
+      activity: entry.activity ?? 'inactive',
+      hasChildren: entry.hasChildren ?? false,
+      parentId: entry.parentId ?? '',
+      depth: entry.depth ?? 1,
+    })
+  }
   // The tree order is the catalog order: no running-first re-sort.
   const sortedJobs = [...jobs].sort((a, b) => {
     const aTerminal = !isActiveJob(a.status)
@@ -221,7 +256,7 @@ export function buildTaskRows(
     startedAt: job.startedAt,
     finishedAt: job.finishedAt,
   }))
-  return [...agentRows, ...sortedJobs]
+  return [...childRows, ...sortedJobs]
 }
 
 /**

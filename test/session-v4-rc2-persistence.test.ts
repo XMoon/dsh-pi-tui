@@ -329,9 +329,14 @@ test('an rc.2 catalog v2 external leaf is carried through and never becomes a br
   const continuable = { kind: 'child' as const, id: 'child-continuable', label: 'continuable', mode: 'continuable' as const, activity: 'running' as const }
   const rows = buildTaskRows([], [external, oneShot, continuable])
   assert.deepEqual(
-    rows.map(row => row.kind === 'subagent' ? row.childId : row.jobId),
-    ['child-one-shot', 'child-continuable'],
-    'the external leaf is never presented as an openable child',
+    rows.map(row => row.kind === 'job' ? row.jobId : row.childId),
+    ['child-external', 'child-one-shot', 'child-continuable'],
+    'the external leaf is carried in catalog order, never dropped',
   )
-  assert.deepEqual(rows.map(row => row.kind === 'subagent' ? row.mode : undefined), ['one-shot', 'continuable'])
+  assert.deepEqual(
+    rows.map(row => row.kind === 'external' ? row.mode : row.kind === 'subagent' ? row.mode : undefined),
+    ['external', 'one-shot', 'continuable'],
+    'its durable classification stays `external` (never defaulted to a local mode)',
+  )
+  assert.equal(rows[0]?.kind, 'external')
 })
