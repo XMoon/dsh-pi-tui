@@ -173,6 +173,35 @@ export function workingFromLog(events: readonly { readonly type: string }[]): bo
  * inside the seed as abandoned, so they must not re-arm the compacting
  * surface on resume.
  */
+/**
+ * The identity of the NEWEST model-visible MEASURE event the window shows — the
+ * same set the live routing re-measures on (`contextRefreshKind === 'measure'`:
+ * `step/start`, `turn/end`, `compaction/end`) — qualified by its own turn/step/
+ * compaction identity, because a bounded window can show the same event TYPE
+ * across an outage while a NEWER boundary arrived.
+ *
+ * Two committed windows with the same key saw the same measurable lifecycle; a
+ * different key means the outage swallowed a boundary whose live handler would
+ * have marked the context dirty and re-measured it — including a compaction
+ * bracket whose start AND end both landed off-window, and a turn that ended with
+ * no compaction at all.
+ */
+export function measureEventKey(events: readonly { type: unknown; data?: unknown }[]): string {
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index]
+    if (event === undefined) break
+    const kind = typeof event.type === 'string' ? event.type : ''
+    if (kind === '') continue
+    if (contextRefreshKind(kind) !== 'measure') continue
+    const data = (event as { data?: { turn?: unknown; step?: unknown; compactionId?: unknown } }).data
+    const turn = typeof data?.turn === 'number' ? String(data.turn) : ''
+    const step = typeof data?.step === 'number' ? String(data.step) : ''
+    const compaction = typeof data?.compactionId === 'string' ? data.compactionId : ''
+    return `${kind}:${turn}:${step}:${compaction}`
+  }
+  return 'none'
+}
+
 export function compactingFromLog(
   events: readonly { type: unknown; data?: unknown }[],
 ): { active: boolean; id: string | undefined } {

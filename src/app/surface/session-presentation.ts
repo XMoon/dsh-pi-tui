@@ -29,7 +29,8 @@
  * @module @xmoon76/dsh-pi-tui/app/surface/session-presentation
  */
 
-import { compactingFromLog, workingFromLog } from './compaction-presentation.ts'
+import { compactingFromLog, measureEventKey, workingFromLog } from './compaction-presentation.ts'
+import type { ContextMeasureReason } from '../../domain/status/context-measurement.ts'
 import { foldGoal, goalTextOf } from '../../domain/status/derive-goal.ts'
 import { recallHistoryForSession, type ParsedHistoryRecord } from '../../client/history/store.ts'
 import { hydrateSessionUi } from './session-ui-hydrate.ts'
@@ -153,6 +154,10 @@ export interface SessionPresentationDeps<Event extends SessionPresentationEvent>
     readonly refreshTerminalCwd: () => void
     readonly updateWelcomeCard: () => void
     readonly scheduleInitialMeasurement: (sessionId: string) => void
+    /** The live `compaction/end` measurement contract: mark the cached context
+     *  measurement dirty, then measure it through the semantic reader. */
+    readonly markContextDirty: () => void
+    readonly refreshContextMeasurement: (reason: ContextMeasureReason) => void
   }
   /** The per-session client-local input history (A5b-2 owns it). */
   readonly history: {
@@ -284,6 +289,9 @@ export interface SessionPresentation<Event extends SessionPresentationEvent> {
    *  return the committed identity/revision proof the caller acknowledges the
    *  ingress with (undefined = the read was superseded; nothing was committed). */
   rehydrateFromWindow(sessionId: string): Promise<PresentationWindowRefoldProof | undefined>
+  /** Record a measure boundary the LIVE routing handled, so a later window
+   *  reconcile keeps an already-measured boundary measurement-free. */
+  noteLiveMeasureEvent(sessionId: string, event: { readonly type: unknown; readonly data?: unknown }): void
   /** The synchronous surface reset that follows a generation bump (A2 seam). */
   resetForGeneration(): void
 }
@@ -382,6 +390,13 @@ export function createSessionPresentation<Event extends SessionPresentationEvent
   
   const callArgs = new Map<string, string>()
 
+  /** The newest compaction boundary each session's LAST COMMITTED window showed.
+   *  A reconcile compares against it to notice a lifecycle event the outage
+   *  swallowed (including a bracket whose start AND end both landed off-window),
+   *  and the generation reset drops it so a reused owner never compares against
+   *  a retired session's state. */
+  const lastCommittedMeasureEvent = new Map<string, string>()
+
   /**
    * The synchronous surface reset that follows a generation bump (A2 seam).
    * MUST stay synchronous — no await, no microtask — and MUST run while the
@@ -389,8 +404,16 @@ export function createSessionPresentation<Event extends SessionPresentationEvent
    * only AFTER this returns (see the four commit shapes in the A2 plan §4).
    */
   
+  /** Record a measure boundary the LIVE routing handled (so a later window
+   *  reconcile never re-measures one the live path already did). */
+  const noteLiveMeasureEvent = (sessionId: string, event: { readonly type: unknown; readonly data?: unknown }): void => {
+    const key = measureEventKey([event])
+    if (key !== 'none') lastCommittedMeasureEvent.set(sessionId, key)
+  }
+
   const resetForGeneration = (): void => {
     callArgs.clear()
+    lastCommittedMeasureEvent.clear()
     mainStreamingToolPreviews.clear()
     // The new session's subagent delegations are a fresh namespace: stale
     // pending calls from the old session would consume viewer match slots,
@@ -527,6 +550,10 @@ export function createSessionPresentation<Event extends SessionPresentationEvent
     // A4-7: the `compactingId` routing state and the phase/busy/working
     // presentation are surface-owned (plan §16).
     deps.surface.applyResumedCompaction(resumedCompaction.id, resumedCompaction.active)
+    // The hydrate's window IS the baseline for the next reconcile: an outage
+    // that swallowed a compaction boundary (its live handler never ran) must be
+    // detected against it.
+    lastCommittedMeasureEvent.set(input.sessionId, measureEventKey(events))
     // A notice / keyboard exit confirmation from the previous session is
     // stale here; this HYDRATE-TAIL clear touches only those transients — the
     // status facts committed just above (title/todo/working/plan/compaction)
@@ -681,12 +708,6 @@ export function createSessionPresentation<Event extends SessionPresentationEvent
    *  hydration and commit are honored. */
   const planActiveRemote = (sessionId: string): boolean => deps.remote?.plan?.(sessionId) ?? false
 
-  /** The compaction state the LAST reconcile committed, per session: a
-   *  compaction that ENDED during an outage must re-measure the context
-   *  occupancy (its live `compaction/end` handler never ran), while ordinary
-   *  history paging stays measurement-free. */
-  const lastReconciledCompactionActive = new Map<string, boolean>()
-
   /**
    * Re-hydrate the main transcript from the CURRENT reader window after an
    * older-history extension (Remote `loadOlder`): the append-only fold
@@ -754,21 +775,36 @@ export function createSessionPresentation<Event extends SessionPresentationEvent
     // Re-derive the status from the NEW fold in the same step; the cheap
     // refresh's own fences own the session/binding rules. (The measured
     // performance values are the Host projection's and are unaffected.)
+    // The cold hydrate's order: publish the plan projection and the
+    // working/busy BASELINE first, then let an ACTIVE compaction override them.
+    // `applyResumedCompaction(false)` clears only the compaction phase, so
+    // without this commit a stale working/busy would stay on screen after an
+    // outage-spanning compaction/turn end.
+    deps.surface.display.commitStatusFacts({ planMode: planActive, working, busy: working })
     deps.surface.applyResumedCompaction(resumedCompaction.id, resumedCompaction.active)
-    // The plan projection is a CURRENT-VALUE fact: a `plan/mode` increment the
-    // replace swallowed is invisible in the window, so the reconcile commits the
-    // SAME projection read the cold hydrate used (the projected `plan`
-    // authority; absent reads inactive) — never a fold of the bounded window.
-    deps.surface.display.commitStatusFacts({ planMode: planActive })
     // A compaction that ENDED during the outage changed the context occupancy,
     // and its `compaction/end` event (whose live handler marks the context dirty
     // and re-measures) never reached the surface. Re-run the hydrate tail's own
     // deferred measurement for that transition — the reconcile is otherwise
     // measurement-free by design (history paging must not measure).
-    if (lastReconciledCompactionActive.get(sessionId) === true && !resumedCompaction.active) {
-      deps.status.scheduleInitialMeasurement(sessionId)
+    const boundary = measureEventKey(snapshot.durableEvents as readonly { type: unknown }[])
+    // The map holds the boundary the LIVE routing already measured (recorded by
+    // the routing sink) or the last committed window's. A boundary the live path
+    // measured keeps an ordinary history prepend measurement-free.
+    const previousBoundary = lastCommittedMeasureEvent.get(sessionId)
+    if (previousBoundary !== undefined && previousBoundary !== boundary) {
+      // The window shows a compaction boundary the previous committed window did
+      // not: the outage swallowed the lifecycle event whose live handler would
+      // have marked the context dirty and re-measured it (including a bracket
+      // whose start AND end both landed off-window). `scheduleInitialMeasurement`
+      // cannot do this — its deferred callback no-ops for an already-measured
+      // same session — so the reconcile runs the SAME dirty -> measure pair the
+      // live `compaction/end` path runs. Ordinary paging reconciles keep the
+      // same boundary and stay measurement-free.
+      deps.status.markContextDirty()
+      deps.status.refreshContextMeasurement('compaction-end')
     }
-    lastReconciledCompactionActive.set(sessionId, resumedCompaction.active)
+    lastCommittedMeasureEvent.set(sessionId, boundary)
     // Seed the working-fold cache with THIS window's fold under the SAME
     // transport identity the commit was fenced under, so the status refresh
     // below (and every later read) sees the proven fold instead of the
@@ -815,6 +851,7 @@ export function createSessionPresentation<Event extends SessionPresentationEvent
     initLiveRemoteSession,
     applySessionCurrentFacts,
     rehydrateFromWindow,
+    noteLiveMeasureEvent,
     resetForGeneration,
   }
 }

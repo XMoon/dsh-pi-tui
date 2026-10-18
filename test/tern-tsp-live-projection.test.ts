@@ -992,7 +992,7 @@ function mountPresentationHarness(options: {
       refreshTerminalTitle: noop,
       refreshTerminalCwd: noop,
       updateWelcomeCard: noop,
-      scheduleInitialMeasurement: noop,
+      scheduleInitialMeasurement: noop, markContextDirty: noop, refreshContextMeasurement: noop,
     },
     history: { rememberCwd: noop, currentCwd: () => '/tmp', records: () => [], setLastContent: noop },
     commands: { register: noop },
