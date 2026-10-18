@@ -1545,11 +1545,10 @@ to the action bar.
 
 NOT_RUN in this record — a real-terminal frame would need an environment this
 machine does not have: the refused-endpoint row's kept value (needs a Host that
-keeps a different endpoint value) and the Session Picker's `No readable
-sessions` empty state (the Direct stack always lists the live Session). Those
-states are pinned in-process instead (`test/settings-web-provider.test.ts`,
-`test/settings-web-visual.test.ts`, and `test/session-picker-loading.test.ts` at
-80×24 AND 44×20).
+keeps a different endpoint value). That state is pinned in-process instead
+(`test/settings-web-provider.test.ts` and `test/settings-web-visual.test.ts`).
+The Session Picker's empty roster was listed here too; review-delta 3 proved it
+user-reachable and recorded it from a real terminal — see §8e.
 
 ## 8d. Real-terminal record — S2 review delta 2 (Web endpoint row)
 
@@ -1607,6 +1606,72 @@ Host that keeps a DIFFERENT value than the one submitted, which this isolated
 home cannot produce: it stays NOT_RUN as a real-terminal frame (the state is
 pinned in-process at the frozen sizes by `test/settings-web-provider.test.ts`
 and `test/settings-web-visual.test.ts`).
+
+## 8e. Real-terminal record — S2 review delta 3 (Picker empty roster)
+
+Same rc.2 CLI and worktree as §8d (`/home/xmoon/.local/bin/dsh-next` with
+`DSH_NEXT_ROOT=<the S2 worktree>`), but a **FRESH isolated home**
+(`DSH_NEXT_HOME=/tmp/dsh-empty-home`, the profile created by the launcher's own
+`plugin add 'link:.'`), `tmux new-session -d -s <name> -x C -y R`, launched with
+`env -u NO_COLOR`, keys sent one at a time, frames captured with
+`tmux capture-pane -p` (plain, verbatim below) and `-e` (ANSI: 89 `\e[…m`
+sequences at 120×40, 53 at 80×10, 51 at 44×20). Nothing is submitted before the
+capture, so the surface is still the sessionless/deferred start: the command
+surface is registered there (`src/app/bootstrap.ts`), and `/sessions` lists
+nothing, which the picker states as one whole sentence.
+
+120×40 — the refusal row (the box is centred in the frame; that leading offset is
+trimmed here, every cell of the box is verbatim):
+
+```text
+ ╭──────────────────────────────────────────────────────────────────────────╮
+ │ sessions · Current directory                                         1/1 │
+ │                                                                          │
+ │ >                                                                        │
+ │                                                                          │
+ │ > No readable sessions                                                   │
+ │                                                                          │
+ │   Type to filter · ↑↓ navigate · Enter select · Esc close                │
+ ╰──────────────────────────────────────────────────────────────────────────╯
+```
+
+80×10 — the whole capture, verbatim: the shrunken overlay leaves the stopped
+transcript's box columns and the status rows visible at the frame edges (the
+sentence keeps its own row):
+
+```text
+🐋╭──────────────────────────────────────────────────────────────────────────╮
+│ │ sessions · Current directory                                         1/1 │ │
+│ │                                                                          │ │
+│ │ >                                                                        │ │
+╰─│                                                                          │─╯
+──│ > No readable sessions                                                   │──
+❯ │                                                                          │
+──│   Type to filter · ↑↓ navigate · Enter select · Esc close                │──
+[d╰──────────────────────────────────────────────────────────────────────────╯ll
+↑0 ↓0  t0/s0
+```
+
+44×20 — the frozen floor: the whole sentence is readable, only the hint row
+truncates:
+
+```text
+╭──────────────────────────────────────────╮
+│ sessions · Current directory         1/1 │
+│                                          │
+│ >                                        │
+│                                          │
+│ > No readable sessions                   │
+│                                          │
+│   Type to filter · ↑↓ navigate · Enter   │
+╰──────────────────────────────────────────╯
+```
+
+This closes the earlier NOT_RUN entry: the empty roster does NOT require an
+artifact tree whose logs are refused — a sessionless start reaches it directly,
+so §8c's "the Direct stack always lists the live Session" reason was wrong
+(the in-process port-level roster stays as the extra 80×24/44×20 pin). `Esc`
+closes the picker back to the idle surface in every size.
 
 ## 9. Re-verification recipe
 

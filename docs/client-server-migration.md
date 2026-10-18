@@ -6636,14 +6636,17 @@ system or fork divergence is introduced.
   one bounded background bash call by the Owner-authorized model run; no DeepSeek
   endpoint was contacted): the settled row advertises no `s stop`, the running row
   does, `s` latches `Y confirm stop`, and the killed row drops the segment again;
-  the empty roster's pre-change/reviewed frames are recorded there too. Still
-  NOT_RUN (not PASS) as real-terminal frames: the refused-endpoint row's kept
-  value (needs a Host that keeps a different endpoint value) and the Picker's
-  empty roster (the Direct stack always lists the live Session). Those two
-  states are pinned in-process by the L6 fixtures named above; the §8b record
-  still covers the Web surface's own journey, and the TSP/native Session Browser
-  keeps its own empty-state wording (that surface belongs to the TSP
-  session-browser PR).
+  the empty roster's pre-change/reviewed frames are recorded there too. The
+  Session Picker's `No readable sessions` empty roster is ALSO a real-terminal
+  record now (review-delta 3, `docs/tui-design-language-samples.md` §8e): a
+  FRESH isolated `DSH_HOME` starts sessionless (the command surface registers on
+  the deferred branch), so `/sessions` before the first submit paints the whole
+  sentence at 120×40, 80×10 and 44×20. Still NOT_RUN (not PASS) as a
+  real-terminal frame: the refused-endpoint row's kept value, which needs a Host
+  that keeps a DIFFERENT endpoint value than the submitted one. That state is
+  pinned in-process by the L6 fixture named above; the §8b record still covers
+  the Web surface's own journey, and the TSP/native Session Browser keeps its own
+  empty-state wording (that surface belongs to the TSP session-browser PR).
 - Not run: a physical Tern GUI record (the TSP renderer does not paint these
   Settings surfaces), recorded as NOT_VERIFIED/NOT_RUN rather than PASS. The
   live-palette switch of the mounted Web rows IS covered in-process (the theme
@@ -6680,9 +6683,13 @@ system or fork divergence is introduced.
   (S2 owns no external subagent backend) and, for
   `test/session-picker-format-refusal.test.ts` only, the resume error at the
   120/80/44 width matrix. The empty roster wording (`No readable sessions`) is
-  pinned by a port-level roster (`test/session-picker-loading.test.ts`): on the
-  Direct stack a live Session is always listed, so the empty state does not
-  arise from a real artifact tree.
+  pinned in-process by a port-level roster
+  (`test/session-picker-loading.test.ts`, 80×24 and 44×20) AND by a real-terminal
+  record on a fresh sessionless `DSH_HOME`
+  (`docs/tui-design-language-samples.md` §8e): a start with no Session lists
+  nothing, so the picker's refusal row is user-reachable without an artifact
+  tree — the earlier "the Direct stack always lists the live Session" claim was
+  wrong.
 - Can a Workflow member id ALSO be an rc.2 external catalog row? Traced against
   the installed packages: the Workflow runtime starts its children with
   `delivery: 'caller'` (`dsh-workflow-ptc`), and the subagent manager only calls
