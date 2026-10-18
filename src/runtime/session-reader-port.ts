@@ -31,6 +31,13 @@ export interface SessionSummary {
   parentSession?: string
   /** Subagent children carry the `sub` marker. */
   origin?: 'subagent'
+  /** Host-authoritative on-disk format state of this row, passed through
+   * verbatim from the official Client list entry (`formatStatus`). It is a
+   * READ-ONLY state label: `migration-required` means the official reader
+   * would migrate the record when the user explicitly opens it. This port
+   * never derives a second client-side migration fact, never parses a header
+   * to guess it, and absent means the source did not supply the fact. */
+  formatStatus?: 'current' | 'migration-required'
   /** Whether the session is currently loaded in the session store. */
   live: boolean
 }

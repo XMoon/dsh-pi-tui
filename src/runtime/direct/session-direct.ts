@@ -47,8 +47,14 @@ import type { DurableModelSelectionReader } from './model-selection-direct.ts'
 export interface SessionQueryLike {
   /** Returns the semantic live-preferred Session corpus from sessionQuery.
    * ApiSessionList-compatible visibility policy is applied by this adapter:
-   * live rows remain visible; cold rows require cwd. */
-  listSessions(signal?: AbortSignal): Promise<Array<{ header: SessionHeader; live: boolean }>>
+   * live rows remain visible; cold rows require cwd. The official
+   * `SessionRecord.formatStatus` (on-disk format state) is carried through
+   * verbatim when the official read reports it — never inferred here. */
+  listSessions(signal?: AbortSignal): Promise<Array<{
+    header: SessionHeader
+    live: boolean
+    formatStatus?: 'current' | 'migration-required'
+  }>>
   /** One exact live or prepared logical Session observation for explicit
    * viewer/resume paths: header + complete validated event log, caller-owned.
    * NOT the canonical export plane — a cold observation synthesizes
@@ -232,6 +238,7 @@ export class DirectSessionReader implements SessionReader {
         session: live,
         header: live?.header ?? record.header,
         live: live !== undefined,
+        ...(record.formatStatus === undefined ? {} : { formatStatus: record.formatStatus }),
       }
     })
     // Keep filtered headers out of the enrichment snapshot so projectionBatch
@@ -250,6 +257,9 @@ export class DirectSessionReader implements SessionReader {
           cwd: record.header.cwd,
           parentSession: record.header.parentSession,
           origin: record.header.origin,
+          // The official session-query corpus reports the durable record's
+          // on-disk format state; the picker renders it read-only.
+          ...(record.formatStatus === undefined ? {} : { formatStatus: record.formatStatus }),
           live: record.live,
         },
         activity: updatedAt,
