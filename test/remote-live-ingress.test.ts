@@ -644,24 +644,29 @@ test('S3-R0: a prepend wakeup is PAGING, a replace/rollover wakeup is recovery',
   source.publish({ entries: [], revision: 6, hasMore: true, change: { kind: 'prepend', entries: [durableEntry('user/message', 1)] } })
   await flushWakeup()
   assert.deepEqual(log.refoldReasons, ['paging'], 'a prepend is a PAGING wakeup')
-  handle.acknowledgeWindowRefold(proofOf(source, generation, 6))
+  assert.equal(handle.acknowledgeWindowRefold(proofOf(source, generation, 6)), true)
   // A replace is a recovery: the window may carry events the surface never saw.
   source.publish({ entries: [], revision: 7, hasMore: false, change: { kind: 'replace', entries: [] } as never })
   await flushWakeup()
   assert.deepEqual(log.refoldReasons, ['paging', 'recovery'], 'a replace is a recovery wakeup')
-  // A generation rollover is a recovery too.
-  handle.acknowledgeWindowRefold(proofOf(source, generation, 7))
+  assert.equal(handle.acknowledgeWindowRefold(proofOf(source, generation, 7)), true, 'incremental again')
+  // A generation rollover is a recovery too; its opening page restores the
+  // incremental baseline before the coalescing case runs.
   generation.replace(9)
   await flushWakeup()
-  assert.deepEqual(log.refoldReasons, ['paging', 'recovery', 'recovery'],
-    'a rollover is a recovery wakeup')
-  const coalesced = log.refolds.length
-  // SAME-microtask coalescing: a prepend followed by a replace before the wakeup
-  // flushes must deliver ONE wakeup, and it must be the double one.
-  source.publish({ entries: [], revision: 8, hasMore: true, change: { kind: 'prepend', entries: [] } })
-  source.publish({ entries: [], revision: 9, hasMore: false, change: { kind: 'replace', entries: [] } as never })
+  assert.equal(log.refoldReasons.at(-1), 'recovery', 'a rollover is a recovery wakeup')
+  source.publish({ entries: [], revision: 8, hasMore: false, change: { kind: 'replace', entries: [] } as never })
   await flushWakeup()
-  assert.equal(log.refolds.length, coalesced + 1, 'coalesced into ONE wakeup')
+  assert.equal(handle.acknowledgeWindowRefold(proofOf(source, generation, 8)), true,
+    'the new generation baseline is acknowledged: incremental again')
+  // SAME-microtask coalescing IN INCREMENTAL MODE: a prepend followed by a
+  // replace before the wakeup flushes must deliver ONE wakeup, and it must be
+  // the double one (this is the escalation the reason contract promises).
+  const beforeCoalesced = log.refolds.length
+  source.publish({ entries: [], revision: 9, hasMore: true, change: { kind: 'prepend', entries: [] } })
+  source.publish({ entries: [], revision: 10, hasMore: false, change: { kind: 'replace', entries: [] } as never })
+  await flushWakeup()
+  assert.equal(log.refolds.length, beforeCoalesced + 1, 'coalesced into ONE wakeup')
   assert.equal(log.refoldReasons.at(-1), 'recovery',
     'a recovery escalates a paging wakeup coalesced in the same microtask')
   handle.dispose()

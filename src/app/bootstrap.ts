@@ -3031,13 +3031,12 @@ export function applyRunnerWithRuntime(
             }
             const before = await remoteSources.presentationReader.read(sessionId)
             if (before === undefined || !before.hasMore || before.loadingOlder) return
-            const snapshot = await remoteSources.presentationReader.loadOlder(sessionId, lifecycleController.signal)
-            if (snapshot === undefined) return
-            if (ownership.currentSessionId() !== sessionId || cleanedUp) return
-            // This is HISTORY PAGING (`loadOlder` joined older events at the
-            // front): the newly provable compaction boundary is old history, not
-            // a new model-visible event, so it must not re-measure the context.
-            await presentation.rehydrateFromWindow(sessionId, { measure: false })
+            // HISTORY PAGING: `loadOlder` joins older events at the front and the
+            // official publication then drives the ONE serialized reconcile pump
+            // with the `paging` reason (a direct re-fold here would race the pump
+            // and could baseline a boundary a recovery reconcile still has to
+            // measure).
+            await remoteSources.presentationReader.loadOlder(sessionId, lifecycleController.signal)
           } finally {
             if (remoteHistoryLoadingFor === sessionId) remoteHistoryLoadingFor = undefined
           }
