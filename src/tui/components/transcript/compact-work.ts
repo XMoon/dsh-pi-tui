@@ -14,11 +14,13 @@
  */
 
 import { truncateToWidth, visibleWidth, type Component } from '@xmoon76/pi-tui'
+import { sanitizeDisplayText } from '../../presentation/terminal-text.ts'
 import {
   compactActionSlotLine,
   compactSlotLine,
   compactThinkSlotLine,
   type CompactActionPresentation,
+  createDisplayProjection,
 } from './compact-process-preview.ts'
 import { compactActionStatParts, formatCompactDuration } from '../../transcript/process-summary.ts'
 import { summarizeWorkSpan, type CompactWorkSummary } from '../../transcript/work-summary.ts'
@@ -95,17 +97,21 @@ export function compactWorkBody(
   width: number,
   action?: CompactActionPresentation,
   preparingSummary?: string,
+  /** The caller-owned display projection. A component instance passes its OWN
+   *  bounded projection so a steady multi-slot frame never rescans unchanged
+   *  text, and no process-global cache outlives the component. */
+  project: (text: string) => string = sanitizeDisplayText,
 ): string[] {
   const lines: string[] = []
   if (summary.think !== undefined) {
-    lines.push(compactThinkSlotLine({ text: summary.think.text, running: summary.think.running, width }))
+    lines.push(compactThinkSlotLine({ text: project(summary.think.text), running: summary.think.running, width }))
   }
   if (preparingSummary !== undefined) {
-    lines.push(compactSlotLine('Action:', preparingSummary, width))
+    lines.push(compactSlotLine('Action:', project(preparingSummary), width))
   } else if (action !== undefined) {
     lines.push(compactActionSlotLine({
       ...(action.status === undefined ? {} : { status: action.status }),
-      display: action.display,
+      display: project(action.display),
       ...(action.rootName === undefined ? {} : { rootName: action.rootName }),
       ...(action.activeSubCalls === undefined ? {} : { activeSubCalls: action.activeSubCalls }),
       width,
@@ -161,6 +167,8 @@ export class CompactWorkComponent implements Component {
    *  absent clock keeps the legacy member-timing rendering for callers that
    *  have no canonical structure (unit tests, non-TuiApp renderers). */
   private readonly clock: ActivityClock | undefined
+  /** Component-lifetime projection memo (see {@link compactWorkBody}). */
+  private readonly displayProjection = createDisplayProjection()
 
   constructor(options: {
     span: TranscriptWorkSpan
@@ -184,6 +192,11 @@ export class CompactWorkComponent implements Component {
     this.iconStyle = options.iconStyle ?? 'emoji'
     this.now = options.now ?? (() => Date.now())
     this.clock = options.clock
+  }
+
+  /** Diagnostics: how many times this component's projection actually ran. */
+  displayProjectionRunsForTest(): number {
+    return this.displayProjection.projectionRuns()
   }
 
   invalidate(): void {}
@@ -213,7 +226,7 @@ export class CompactWorkComponent implements Component {
     )
     const lines = [color.textDim(header)]
     if (!this.expanded && this.showPreview) {
-      for (const line of compactWorkBody(this.summary, contentWidth, this.action, this.preparingSummary)) {
+      for (const line of compactWorkBody(this.summary, contentWidth, this.action, this.preparingSummary, this.displayProjection.project)) {
         lines.push(color.textDim(line))
       }
     }

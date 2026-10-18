@@ -11,6 +11,7 @@
 import { Input, matchesKey, truncateToWidth, visibleWidth } from '@xmoon76/pi-tui'
 import type { Component, Focusable } from '@xmoon76/pi-tui'
 import { color } from '../theme/runtime.ts'
+import { sanitizeDisplayText } from '../presentation/terminal-text.ts'
 import type { PluginManagerController, PluginInstallView } from '../../app/plugin-manager/controller.ts'
 import type { PluginManagerRow } from '../../app/plugin-manager/model.ts'
 
@@ -272,27 +273,28 @@ export class PluginManagerPanel implements Component, Focusable {
     lines.push('')
     for (const row of rows) {
       if (row.kind === 'section') {
-        lines.push(color.textStrong(truncateToWidth(row.label, width, '…')))
+        lines.push(color.textStrong(truncateToWidth(sanitizeDisplayText(row.label), width, '…')))
         continue
       }
       const isSelected = row.selectable && selected !== undefined && row.value === selected
       if (isSelected) selectedLine = lines.length
       const marker = row.selectable ? (isSelected ? color.accent('▸ ') : '  ') : '  '
-      const label = row.kind === 'info' ? color.textMuted(truncateToWidth(row.label, Math.max(1, width - 2), '…'))
-        : tone(truncateToWidth(row.label, Math.max(1, width - 2), '…'), row.tone)
+      const rowLabel = sanitizeDisplayText(row.label)
+      const label = row.kind === 'info' ? color.textMuted(truncateToWidth(rowLabel, Math.max(1, width - 2), '…'))
+        : tone(truncateToWidth(rowLabel, Math.max(1, width - 2), '…'), row.tone)
       let line = `${marker}${label}`
-      if (row.badge !== undefined) line += ` ${badge(row.badge, row.tone)}`
+      if (row.badge !== undefined) line += ` ${badge(sanitizeDisplayText(row.badge), row.tone)}`
       if (row.secondary !== undefined) {
         const used = visibleWidth(line)
         const room = width - used - 3
-        if (room > 8) line += `  ${color.textDim(truncateToWidth(row.secondary, room, '…'))}`
+        if (room > 8) line += `  ${color.textDim(truncateToWidth(sanitizeDisplayText(row.secondary), room, '…'))}`
       }
       lines.push(line)
     }
     const notice = this.controller.notice()
     if (notice !== undefined) {
       lines.push('')
-      lines.push(color.textMuted(truncateToWidth(notice, width, '…')))
+      lines.push(color.textMuted(truncateToWidth(sanitizeDisplayText(notice), width, '…')))
     }
     const status = this.controller.status()
     if (status.state === 'loading' && rows.every(row => row.kind === 'section' || row.kind === 'info')) {
@@ -312,20 +314,20 @@ export class PluginManagerPanel implements Component, Focusable {
       const options = this.controller.registryOptions()
       const registry = this.customRegistry
         ? `custom ${this.registryInput.render(Math.max(1, width - 16))[0] ?? ''}`
-        : (options[this.registryIndex]?.label ?? 'pnpm configuration default')
+        : (options[this.registryIndex]?.label === undefined ? 'pnpm configuration default' : sanitizeDisplayText(options[this.registryIndex]!.label))
       const focusHint = this.installFocus === 'registry' ? color.accent('‹') : ' '
       lines.push(`Reg     ${focusHint} ${truncateToWidth(registry, Math.max(1, width - 10), '…')}`)
       if (!this.customRegistry) {
-        const hint = options.map(option => option.label).join(' · ')
+        const hint = options.map(option => sanitizeDisplayText(option.label)).join(' · ')
         if (hint !== '') lines.push(color.textMuted(truncateToWidth(`        ${hint}`, width, '…')))
       }
       lines.push('')
-      if (install.message !== undefined) lines.push(color.warning(truncateToWidth(install.message, width, '…')))
+      if (install.message !== undefined) lines.push(color.warning(truncateToWidth(sanitizeDisplayText(install.message), width, '…')))
       lines.push(color.textDim(truncateToWidth('Tab switch field · ↑↓ choose registry · Enter inspect · Esc close', width, '…')))
       return { lines, selectedLine: undefined }
     }
     if (install.phase === 'inspecting') {
-      lines.push(color.textDim(truncateToWidth(`Inspecting ${install.spec}…`, width, '…')))
+      lines.push(color.textDim(truncateToWidth(`Inspecting ${sanitizeDisplayText(install.spec)}…`, width, '…')))
       lines.push('')
       lines.push(color.textDim(truncateToWidth('Esc back', width, '…')))
       return { lines, selectedLine: undefined }
@@ -333,18 +335,18 @@ export class PluginManagerPanel implements Component, Focusable {
     if (install.phase === 'confirm') {
       const inspection = install.inspection
       if (inspection?.status === 'accepted') {
-        lines.push(color.textStrong(truncateToWidth(inspection.name ?? install.spec, width, '…')))
-        if (inspection.version !== undefined) lines.push(color.textDim(truncateToWidth(`version ${inspection.version}`, width, '…')))
-        if (inspection.description !== undefined) lines.push(color.textDim(truncateToWidth(inspection.description, width, '…')))
-        lines.push(color.textDim(truncateToWidth(`source ${inspection.kind} · registry ${inspection.registry ?? 'pnpm default'}${inspection.host === undefined ? '' : ` · host ${inspection.host}`}`, width, '…')))
+        lines.push(color.textStrong(truncateToWidth(sanitizeDisplayText(inspection.name ?? install.spec), width, '…')))
+        if (inspection.version !== undefined) lines.push(color.textDim(truncateToWidth(`version ${sanitizeDisplayText(inspection.version)}`, width, '…')))
+        if (inspection.description !== undefined) lines.push(color.textDim(truncateToWidth(sanitizeDisplayText(inspection.description), width, '…')))
+        lines.push(color.textDim(truncateToWidth(`source ${sanitizeDisplayText(inspection.kind)} · registry ${sanitizeDisplayText(inspection.registry ?? 'pnpm default')}${inspection.host === undefined ? '' : ` · host ${sanitizeDisplayText(inspection.host)}`}`, width, '…')))
         lines.push(color.textDim(truncateToWidth(`bundle: ${inspection.bundle === null ? 'unknown' : inspection.bundle ? 'yes' : 'no'}`, width, '…')))
         lines.push('')
         lines.push(color.textDim(truncateToWidth('Enter install · Esc edit', width, '…')))
       } else if (inspection?.status === 'refused') {
-        lines.push(color.error(truncateToWidth(`refused: ${inspection.problem}`, width, '…')))
-        lines.push(color.textMuted(truncateToWidth(inspection.reason, width, '…')))
+        lines.push(color.error(truncateToWidth(`refused: ${sanitizeDisplayText(inspection.problem)}`, width, '…')))
+        lines.push(color.textMuted(truncateToWidth(sanitizeDisplayText(inspection.reason), width, '…')))
         if (inspection.registries !== undefined && inspection.registries.length > 0) {
-          lines.push(color.textMuted(truncateToWidth(`registries: ${inspection.registries.map(r => r ?? 'pnpm default').join(', ')}`, width, '…')))
+          lines.push(color.textMuted(truncateToWidth(`registries: ${inspection.registries.map(r => sanitizeDisplayText(r ?? 'pnpm default')).join(', ')}`, width, '…')))
         }
         lines.push('')
         lines.push(color.textDim(truncateToWidth('Esc edit', width, '…')))
@@ -352,13 +354,13 @@ export class PluginManagerPanel implements Component, Focusable {
       return { lines, selectedLine: undefined }
     }
     // running / settled
-    lines.push(color.textStrong(truncateToWidth(`${install.phase}${install.spec === '' ? '' : ` · ${install.spec}`}`, width, '…')))
-    if (install.message !== undefined) lines.push(color.textMuted(truncateToWidth(install.message, width, '…')))
+    lines.push(color.textStrong(truncateToWidth(`${install.phase}${install.spec === '' ? '' : ` · ${sanitizeDisplayText(install.spec)}`}`, width, '…')))
+    if (install.message !== undefined) lines.push(color.textMuted(truncateToWidth(sanitizeDisplayText(install.message), width, '…')))
     lines.push('')
     const hint = this.controller.hint()
     const budget = Number.isFinite(this.maxRows) ? Math.max(0, Math.floor(this.maxRows) - lines.length - 1) : install.log.length
     const log = install.log.slice(Math.max(0, install.log.length - budget))
-    for (const line of log) lines.push(color.textDim(truncateToWidth(line, width, '…')))
+    for (const line of log) lines.push(color.textDim(truncateToWidth(sanitizeDisplayText(line), width, '…')))
     lines.push(color.textDim(truncateToWidth(hint, width, '…')))
     return { lines, selectedLine: undefined }
   }

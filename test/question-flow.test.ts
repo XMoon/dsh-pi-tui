@@ -2248,3 +2248,25 @@ test('M3-3B onDraftChange reports every real mutation', () => {
   flow.handleInput('2')
   assert.deepEqual(seen, [1, 2], 'each real mutation reports the current draft')
 })
+
+// Evidence level: component-level render output (the strings the QuestionFrame
+// paints). The real TTY-write capture for the same hostile text lives in
+// `test/rendering.test.ts` ("hostile question text never reaches the TTY raw"),
+// which drives the public `TuiApp.askQuestions()` seat.
+test('hostile question, option and detail text is projected before the themed paint', () => {
+  const hostile = 'evil\u001b]52;c;YXR0YWNr\u0007\u001b[2J\u009b2J\u001b[31mtext'
+  const flow = makeFlow([{
+    id: 'q1',
+    header: hostile,
+    question: hostile,
+    detail: hostile,
+    options: [{ label: hostile, description: hostile }],
+  }], 24)
+  const raw = flow.render(100).join('\n')
+  assert.ok(!raw.includes('YXR0YWNr'), `no OSC payload in the rendered modal:\n${raw}`)
+  assert.ok(!raw.includes('\u009b'), 'no raw C1 byte in the rendered modal')
+  const withoutSgr = raw.replace(/\u001b\[[0-9;]*m/g, '')
+  assert.ok(!withoutSgr.includes('\u001b'), 'no raw ESC survives outside an app-owned SGR paint')
+  assert.ok(withoutSgr.includes('evil'), 'the readable question/option text survives')
+  assert.ok(withoutSgr.includes('text'), 'the readable trailing payload text survives')
+})

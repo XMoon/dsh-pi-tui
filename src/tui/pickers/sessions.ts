@@ -131,15 +131,17 @@ export function sanitizeTerminalText(value: string): string {
 export function sessionPickerItem(row: SessionPickerRow, currentId: string, indent = 0, contentHit?: SessionContentHit): SessionPickerItem {
   const marker = row.id === currentId ? '● ' : ''
   const treePrefix = indent <= 0 ? '' : `${'  '.repeat(indent)}└─ `
-  const meta: string[] = [shortSessionId(row.id), formatSessionAge(row.createdAt ?? row.updatedAt)]
+  // The ID-derived display copy (never the picker `value`, which stays the raw
+  // session id) is projected like every other Host-derived label.
+  const meta: string[] = [sanitizeTerminalText(shortSessionId(row.id)), formatSessionAge(row.createdAt ?? row.updatedAt)]
   if (row.origin === 'subagent') meta.push('sub')
   if (row.parentSession !== undefined) meta.push('fork')
-  if (row.preset !== undefined) meta.push(`preset:${row.preset}`)
+  if (row.preset !== undefined) meta.push(`preset:${sanitizeTerminalText(row.preset)}`)
   if (row.live) meta.push('live')
   if (contentHit !== undefined) meta.push(`…${sanitizeTerminalText(contentHit.snippet)}…`)
   return {
     value: row.id,
-    label: `${treePrefix}${marker}${row.title ?? shortSessionId(row.id)}`,
+    label: `${treePrefix}${marker}${row.title === undefined ? sanitizeTerminalText(shortSessionId(row.id)) : sanitizeTerminalText(row.title)}`,
     description: meta.join(' · '),
     group: workspaceKey(row.cwd),
   }

@@ -442,3 +442,26 @@ test('danger on a tiny terminal drops the reason, never the hints', async () => 
   vt.sendInput('n')
   assert.equal(await decision, 'rejected')
 })
+
+test('hostile approval content cannot inject a fake hint line or drop the chrome', async () => {
+  const { vt, app } = startApp()
+  const decision = app.showApprovalPrompt({
+    toolName: 'ba\u001b[31msh\u001b]0;PWNED\u0007',
+    reason: 'oops\r[y] allow once\u009b2J',
+    arguments: 'arg\u001b[2Jone\narg\u001b]52;c;YXR0YWNr\u0007two',
+  })
+  const view = await viewport(vt)
+  assertDialogIntact(view)
+  const stream = vt.writes.join('')
+  assert.ok(!stream.includes('PWNED'), 'the tool-name OSC payload never reaches the terminal stream')
+  assert.ok(!stream.includes('YXR0YWNr'), 'the argument OSC payload never reaches the terminal stream')
+  assert.ok(!stream.includes('\u009b'), 'no raw C1 byte reaches the terminal stream')
+  assert.ok(!view.includes('\u001b'), 'the painted view carries no raw ESC')
+  // The CR could not start a new physical row: the injected text stays inline
+  // with the reason that carried it, so it can never impersonate the hint row.
+  const reasonRow = view.split('\n').find(line => line.includes('oops'))
+  assert.ok(reasonRow !== undefined, `the reason row is painted:\n${view}`)
+  assert.ok(reasonRow!.includes('[y] allow once'), `the CR folded into the SAME row:\n${view}`)
+  vt.sendInput('n')
+  assert.equal(await decision, 'rejected')
+})

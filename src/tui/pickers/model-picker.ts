@@ -48,7 +48,8 @@ import type {
   ModelPickerDirectory,
   ModelPickerSubject,
 } from '../../app/command/model-presentation.ts'
-import { singlePhysicalLine } from '../presentation/lines.ts'
+import { sanitizedPhysicalLine } from '../presentation/lines.ts'
+import { sanitizeDisplayText } from '../presentation/terminal-text.ts'
 import {
   modelIdentity,
   projectModelDirectory,
@@ -307,11 +308,11 @@ export class ModelPicker implements Component, RowBudgetAware, Focusable {
       const badgeLayoutText = this.widestBadgeOf(row)
       items.push({
         value: identity,
-        label: row.modelName,
+        label: sanitizeDisplayText(row.modelName),
         // The header shows the display name; the GROUP IDENTITY is the
         // provider id, so distinct providers that share a display name (or a
         // provider literally named "Unavailable") never merge into one group.
-        group: row.providerName,
+        group: sanitizeDisplayText(row.providerName),
         groupKey: row.providerId,
         ...(badge === undefined ? {} : { badge }),
         ...(badgeParts === undefined ? {} : { badgeParts }),
@@ -324,8 +325,8 @@ export class ModelPicker implements Component, RowBudgetAware, Focusable {
     for (const failure of this.failures) {
       items.push({
         value: `${FAILURE_PREFIX}${failure.providerId}`,
-        label: failure.providerName,
-        description: failure.message,
+        label: sanitizeDisplayText(failure.providerName),
+        description: sanitizeDisplayText(failure.message),
         group: 'Unavailable',
         groupKey: FAILURE_GROUP_KEY,
         badge: 'unavailable',
@@ -359,7 +360,9 @@ export class ModelPicker implements Component, RowBudgetAware, Focusable {
     if (choice !== undefined) {
       const label = effortLabelOf(this.choicesByModel.get(identity) ?? [], choice)
       if (label !== undefined) {
-        parts.push({ kind: 'text', text: color.textDim(effortTokenOf(label, this.isEffortFocused(identity))) })
+        // A provider-supplied effort name is external: project it BEFORE the
+        // role-4 paint (the picker folds the part onto one row afterwards).
+        parts.push({ kind: 'text', text: color.textDim(effortTokenOf(sanitizeDisplayText(label), this.isEffortFocused(identity))) })
       }
     }
     return parts.length === 0 ? undefined : parts
@@ -383,14 +386,14 @@ export class ModelPicker implements Component, RowBudgetAware, Focusable {
       // painted and leave the layout-only badge one cell short of a wrap.
       let widest = choices[0]!
       for (const choice of choices) {
-        if (visibleWidth(singlePhysicalLine(choice.label)) > visibleWidth(singlePhysicalLine(widest.label))) widest = choice
+        if (visibleWidth(sanitizedPhysicalLine(choice.label)) > visibleWidth(sanitizedPhysicalLine(widest.label))) widest = choice
       }
       // The painted row projects the label onto ONE physical line, so the
       // measurement must measure that same text: `visibleWidth('\n')` is 0, which
       // made the widest badge under-count by a cell or two for an effort name with
       // three or more breaks and let `shouldWrapBadge` decline to wrap a row that
       // overflows.
-      parts.push({ kind: 'text', text: effortTokenOf(singlePhysicalLine(widest.label), true) })
+      parts.push({ kind: 'text', text: effortTokenOf(sanitizedPhysicalLine(widest.label), true) })
     }
     return parts.length === 0 ? undefined : joinBadgeParts(parts)
   }

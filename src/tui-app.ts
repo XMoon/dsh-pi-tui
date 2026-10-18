@@ -161,6 +161,7 @@ import type { DisplayState, DisplayPreset, DisplayPresetApplyResult } from './do
 import { displayPolicyFor } from './tui/transcript/display-policy.ts'
 import { renderViewerSubjectBarLine } from './tui/presentation/viewer-subject-bar.ts'
 import { sanitizedPhysicalLine } from './tui/presentation/lines.ts'
+import { sanitizeDisplayLog, sanitizeDisplayText } from './tui/presentation/terminal-text.ts'
 import { isDisplayPresetAvailable, isFocusDisplayPreset } from './domain/display/preset.ts'
 import type { AccessStatus, ActivityStatus, CompositionStatus, RunPhase, StatusPatch, UsageStatus, WorkspaceStatus } from './domain/status/types.ts'
 import { deriveActivityStatus } from './domain/status/derive-activity.ts'
@@ -675,6 +676,14 @@ export const FOLDED_DIFF_LINES = 4
  */
 export const XML_ENVELOPE_RESULT_TOOLS: ReadonlySet<string> = new Set(['read', 'write', 'read_image', 'skill'])
 
+/**
+ * Tools whose result line is a CAPTURED TERMINAL STREAM (bash/pwsh commands
+ * and the local `!`/`!!` shell card): their display projection keeps only
+ * whitelisted SGR so log colors survive without a raw control escape.
+ * Every other external result uses the plain projection.
+ */
+export const TERMINAL_RESULT_TOOLS: ReadonlySet<string> = new Set(['bash', 'pwsh', 'shell'])
+
 /** First lines of a multi-line text, joined for folded previews. */
 function preview(text: string, lines: number): string {
   const parts = text.split('\n')
@@ -739,7 +748,7 @@ class PendingUserComponent implements Component {
 
   constructor(row: PendingUserRow, running: boolean, compactOptions?: UserBubbleCompactOptions) {
     this.bubble = new UserBubbleComponent(
-      new Text(row.text, 0, 0),
+      new Text(sanitizeDisplayText(row.text), 0, 0),
       `${color.roleUser('❯')} `,
       color.roleUserBg,
       compactOptions,
@@ -10071,7 +10080,7 @@ export class TuiApp {
       const head = `${iconPrefix(toolIconSemantic(name), this.iconStyle)}Preparing ${toolTitle(name)}`
       const summary = preview.summary === undefined
         ? ''
-        : relativizeToCwd(preview.summary, this.workspaceRoot).replace(/\r\n|\r|\n/g, ' ')
+        : sanitizeDisplayText(relativizeToCwd(preview.summary, this.workspaceRoot)).replace(/\r\n|\r|\n/g, ' ')
       const tail = `... · ${formatBytes(preview.argumentBytes)}`
       const tailShown = truncateToWidth(tail, Math.min(safeWidth, visibleWidth(tail)), '…')
       let remaining = Math.max(0, safeWidth - visibleWidth(tailShown))
@@ -14611,7 +14620,9 @@ export class TuiApp {
         if (app.disposed) return
         // The override feeds the working row's effective label: a running
         // compaction keeps its own label, the override applies otherwise.
-        app.workingMessageOverride = message ?? undefined
+        // The public Advanced-host working message is an external string: it is
+        // projected once here, at the display boundary that owns it.
+        app.workingMessageOverride = message === undefined ? undefined : sanitizeDisplayText(message)
         app.reconcileWorkingRow()
         app.requestRender()
       },
@@ -16293,7 +16304,7 @@ export class TuiApp {
     for (const displayBlock of displayBlocks) {
       if (displayBlock.kind === 'open-opaque') {
         flushText()
-        container.addChild(new Text(color.textDim(openOpaqueBlockFallbackText(displayBlock.blockType)), 0, 0))
+        container.addChild(new Text(color.textDim(sanitizeDisplayText(openOpaqueBlockFallbackText(displayBlock.blockType))), 0, 0))
         // An open image block RESERVES its occurrence rank: the ordinal is
         // the block's position among ALL image blocks of the message, so a
         // later block closing first (out-of-order block-end is legal in the
@@ -16328,7 +16339,7 @@ export class TuiApp {
         continue
       } else {
         flushText()
-        container.addChild(new Text(color.textDim(finalizedBlockFallbackText(block)), 0, 0))
+        container.addChild(new Text(color.textDim(sanitizeDisplayText(finalizedBlockFallbackText(block))), 0, 0))
       }
     }
     flushText()
@@ -16372,7 +16383,7 @@ export class TuiApp {
     }
     const hasOrderedRows = content.some(block => block.type === 'file' || (block.type !== 'text' && block.type !== 'image'))
     if (!hasOrderedRows) {
-      bubble(new Text(textWithAttachmentMarkers(content), 0, 0))
+      bubble(new Text(sanitizeDisplayText(textWithAttachmentMarkers(content)), 0, 0))
       let imageIndex = 0
       for (const block of content) {
         if (block.type === 'image') {
@@ -16393,7 +16404,7 @@ export class TuiApp {
     let textBlocks: import('@deepseek-ai/dsh-llm').ContentBlock[] = []
     const flushText = (): void => {
       if (textBlocks.length > 0) {
-        bubble(new Text(textWithAttachmentMarkers(textBlocks), 0, 0))
+        bubble(new Text(sanitizeDisplayText(textWithAttachmentMarkers(textBlocks)), 0, 0))
         textBlocks = []
       }
     }
@@ -16418,7 +16429,7 @@ export class TuiApp {
         bubble(new FileAttachmentComponent(block.attachment, { fallbackColor: color.textDim }))
       } else {
         flushText()
-        bubble(new Text(color.textDim(finalizedBlockFallbackText(block)), 0, 0))
+        bubble(new Text(color.textDim(sanitizeDisplayText(finalizedBlockFallbackText(block))), 0, 0))
       }
     }
     flushText()
@@ -16469,7 +16480,7 @@ export class TuiApp {
       if (this.userDisclosureAffordanceAvailable() && this.messageFoldDisclosureAvailable()) {
         const hint = expandHint
         return new UserBubbleComponent(
-          new Text(message.text, 0, 0),
+          new Text(sanitizeDisplayText(message.text), 0, 0),
           `${color.roleUser('❯')} `,
           color.roleUserBg,
           {
@@ -16482,7 +16493,7 @@ export class TuiApp {
         )
       }
       return new UserBubbleComponent(
-        new Text(message.text, 0, 0),
+        new Text(sanitizeDisplayText(message.text), 0, 0),
         `${color.roleUser('❯')} `,
         color.roleUserBg,
       )
@@ -16498,7 +16509,7 @@ export class TuiApp {
       // re-wrapping a frozen render (the 5a76526 regression).
       const bullet = color.primary(iconPrefix('assistant-bullet', this.iconStyle))
       const makeAssistantText = (text: string): Component =>
-        new BulletedComponent(new Markdown(text, 0, 0, markdownTheme, undefined, HOST_MARKDOWN_OPTIONS), bullet)
+        new BulletedComponent(new Markdown(sanitizeDisplayText(text), 0, 0, markdownTheme, undefined, HOST_MARKDOWN_OPTIONS), bullet)
       const body = message.displayBlocks !== undefined
         ? this.renderAssistantDisplaySequence(message.displayBlocks, makeAssistantText, message)
         : message.content !== undefined && message.content.some(block => block.type !== 'text')
@@ -16527,7 +16538,7 @@ export class TuiApp {
         return new ThinkingCompactComponent(message, this.expandHint(expandHint), this.iconStyle)
       }
       const head = color.textDim(`${iconLead('thinking', this.iconStyle)}Thinking`)
-      const body = message.text === '' ? '' : message.text.split('\n').map(line => `  ${line}`).join('\n')
+      const body = message.text === '' ? '' : sanitizeDisplayText(message.text).split('\n').map(line => `  ${line}`).join('\n')
       return new Text([head, color.textDimItalic(body)].filter(line => line !== '').join('\n'), 0, 0)
     }
     if (message.kind === 'system') {
@@ -16562,8 +16573,9 @@ export class TuiApp {
         // iconPrefix hides the separator entirely when the style hides the
         // icon (minimal) — never a dangling leading space.
         const icon = iconPrefix(message.icon ?? 'context-generic', this.iconStyle)
+        const label = sanitizeDisplayText(message.label)
         if (expanded) {
-          row.addChild(new Text(color.textMuted(`${icon}Context injection ${message.label}`), 0, 0))
+          row.addChild(new Text(color.textMuted(`${icon}Context injection ${label}`), 0, 0))
           // Injected content stays dimmed like tool-card bodies: context is
           // never mistaken for the assistant's actual output. XML-framed
           // envelopes (the skill loader's `<skill_content>` body, the skill
@@ -16574,10 +16586,10 @@ export class TuiApp {
           // text keeps the raw-body behavior.
           const body = systemContextBody(message.text)
           if (body === undefined) {
-            row.addChild(new Text(color.textDim(message.text), 0, 0))
+            row.addChild(new Text(color.textDim(sanitizeDisplayText(message.text)), 0, 0))
           } else {
             for (const line of body) {
-              row.addChild(new Text(color.textDim(line), 0, 0))
+              row.addChild(new Text(color.textDim(sanitizeDisplayText(line)), 0, 0))
             }
           }
         } else {
@@ -16587,22 +16599,22 @@ export class TuiApp {
           // injection without a summary, so the fold still says something
           // about what the model received.
           const summary = message.summary === undefined
-            ? skillFoldedPreview(message.text)
-            : ` — ${message.summary}`
+            ? sanitizeDisplayText(skillFoldedPreview(message.text))
+            : ` — ${sanitizeDisplayText(message.summary)}`
           // Folded rows truncate to one line: a long label/summary must not
           // wrap the context row (same rule as folded thinking). The
           // truncation uses the transcript CONTENT width (the gutter
           // contract), so the baked line fits the paint width exactly and
           // the row can never wrap.
           row.addChild(new Text(truncateToWidth(
-            color.textMuted(`${icon}Context injection ${message.label}${summary} (${this.expandHint(expandHint)} to expand)`),
+            color.textMuted(`${icon}Context injection ${label}${summary} (${this.expandHint(expandHint)} to expand)`),
             width,
             '…',
           ), 0, 0))
         }
         return row
       }
-      const unwrapped = systemContextBody(message.text)?.join('\n') ?? message.text
+      const unwrapped = sanitizeDisplayText(systemContextBody(message.text)?.join('\n') ?? message.text)
       const text = expanded
         ? `${color.textMuted('§')} ${color.textDim(unwrapped)}`
         : color.textMuted(`§ ${truncateToWidth(preview(unwrapped, 2), Math.max(1, width - 22), '…')} (${this.expandHint(expandHint)} to expand)`)
@@ -16610,7 +16622,7 @@ export class TuiApp {
     }
     if (message.kind === 'summary') {
       // Windowing: turns older than the display window collapse to one line.
-      return new Text(color.textDim(message.text), 0, 0)
+      return new Text(color.textDim(sanitizeDisplayText(message.text)), 0, 0)
     }
     if (message.kind === 'compaction') {
       // Compaction card (web CompactionItem parity): a title row with the
@@ -16624,15 +16636,18 @@ export class TuiApp {
       // command's error text and settlement message must not disappear into
       // the hidden row.
       const command = message.sourceCommand
-      const commandName = command?.name === null || command?.name === undefined ? '' : ` /${command.name}`
+      const commandOutcomeText = command?.outcome?.text === undefined ? undefined : sanitizeDisplayText(command.outcome.text)
+      const commandName = command?.name === null || command?.name === undefined ? '' : ` /${sanitizeDisplayText(command.name)}`
       // The command's error KIND drives the failed state even when the
       // normalized outcome omitted its text ('' = failed without a message)
       // — a failed manual /compact must never title `Context compacted`.
       const commandError = command !== undefined && command.outcome?.kind === 'error'
-        ? command.outcome.text ?? ''
+        ? commandOutcomeText ?? ''
         : undefined
       const lead = iconLead('compaction', this.iconStyle)
-      const failed = commandError !== undefined ? commandError : message.error
+      const failed = commandError !== undefined
+        ? commandError
+        : message.error === undefined ? undefined : sanitizeDisplayText(message.error)
       const title = failed !== undefined
         ? color.error(`${lead}Compaction failed${commandName}`)
         : message.running === true
@@ -16646,18 +16661,18 @@ export class TuiApp {
       if (expanded) {
         if (counts !== '') card.addChild(new Text(color.textDim(counts), 0, 0))
         if (message.text !== '') {
-          card.addChild(new Markdown(message.text, 0, 0, markdownTheme, undefined, HOST_MARKDOWN_OPTIONS))
+          card.addChild(new Markdown(sanitizeDisplayText(message.text), 0, 0, markdownTheme, undefined, HOST_MARKDOWN_OPTIONS))
         } else if (failed !== undefined && failed !== '') {
           card.addChild(new Text(color.error(failed), 0, 0))
         }
-        const commandOutcome = command?.outcome?.text
+        const commandOutcome = commandOutcomeText
         if (commandOutcome !== undefined && commandOutcome !== '' && commandOutcome !== failed) {
           card.addChild(new Text(color.textDim(commandOutcome), 0, 0))
         }
       } else {
         // ONE physical preview row: a multiline command outcome folds to its
         // first line (the full body is the expanded presentation).
-        const outcomeFallback = command?.outcome?.text ?? (failed !== undefined && failed !== '' ? failed : undefined)
+        const outcomeFallback = commandOutcomeText ?? (failed !== undefined && failed !== '' ? failed : undefined)
         const outcomePreview = outcomeFallback === undefined ? undefined : firstLine(outcomeFallback)
         const parts = [counts, outcomePreview].filter(part => part !== '' && part !== undefined)
         card.addChild(new Text(truncateToWidth(
@@ -16683,12 +16698,12 @@ export class TuiApp {
       // full body (markdown), and the fold is independent of any Thought
       // root.
       const card = new Container()
-      const title = message.name === null ? 'command' : `/${message.name}`
+      const title = message.name === null ? 'command' : `/${sanitizeDisplayText(message.name)}`
       // The official args are the VERBATIM raw input INCLUDING the separator
       // whitespace after the name (`parseCommand` keeps it), so the separator
       // is never doubled: a verbatim leading space is kept, a spaceless
       // fragment gets exactly one.
-      const rawArgs = message.args
+      const rawArgs = message.args === null ? null : sanitizeDisplayText(message.args)
       const args = rawArgs === null || rawArgs === '' ? ''
         : /^[\s]/.test(rawArgs) ? rawArgs : ` ${rawArgs}`
       const icon = iconPrefix('slash-command', this.iconStyle)
@@ -16707,7 +16722,7 @@ export class TuiApp {
       // rule as the Tool header). The OUTCOME is an anchor-only source while
       // expanded (a markdown body has no provable column mapping); folded,
       // its one-line preview row carries the exact geometry.
-      const outcomeText = message.outcome?.text
+      const outcomeText = message.outcome?.text === undefined ? undefined : sanitizeDisplayText(message.outcome.text)
       const outcomePreview = outcomeText === undefined || outcomeText === '' ? undefined : firstLine(outcomeText)
       {
         const commandRegions: SearchSourceRegion[] = []
@@ -16765,11 +16780,11 @@ export class TuiApp {
       const card = new Container()
       const identity = message.name === '' || message.name === 'tool'
         ? 'Tool request not started'
-        : `Tool request not started · ${toolTitle(message.name)}`
+        : `Tool request not started · ${sanitizeDisplayText(toolTitle(message.name))}`
       card.addChild(new Text(color.error(truncateToWidth(identity, width, '…')), 0, 0))
       if (expanded && message.result !== '') {
         for (const line of message.result.split('\n')) {
-          card.addChild(new Text(color.textDim(line), 0, 0))
+          card.addChild(new Text(color.textDim(sanitizeDisplayText(line)), 0, 0))
         }
       }
       return card
@@ -16780,6 +16795,10 @@ export class TuiApp {
     // pill keeps its semantic color (ok/error/running).
     const card = new Container()
     const header = toolCardHeader(message.name, message.args, this.workspaceRoot)
+    // Display-only projection of the derived header: a tool name or arg that
+    // echoes model/Host text can never carry a terminal control into the row.
+    const headerTitle = sanitizeDisplayText(header.title)
+    const headerSummary = sanitizeDisplayText(header.summary)
     const action = compactToolPresentation(message.name, message.args, message.result, {
       isError: message.status === 'error',
       ...(message.error === undefined ? {} : { error: message.error }),
@@ -16815,7 +16834,7 @@ export class TuiApp {
     const structuredEditDiff = message.name === 'edit' && message.status === 'ok' && resultViewForEdit?.card === 'diff'
     // Action identities use a dot separator (`Send message · child-1`) while
     // the existing Web-style rows retain their historical space separator.
-    const summary = header.summary === '' ? '' : action !== undefined ? ` · ${header.summary}` : ` ${header.summary}`
+    const summary = headerSummary === '' ? '' : action !== undefined ? ` · ${headerSummary}` : ` ${headerSummary}`
     // The glyph resolves through the icon registry against the CURRENT
     // style; iconPrefix drops the separator when the style hides the icon
     // (minimal) — the header starts directly with the title.
@@ -16825,7 +16844,7 @@ export class TuiApp {
       : message.status === 'error'
         ? color.error('[error]')
         : color.textDim('[running]')
-    const headIdentity = color.textDim(`${icon}${header.title}${summary}`)
+    const headIdentity = color.textDim(`${icon}${headerTitle}${summary}`)
     const statusPart = ` ${pill}`
     const statsPart = diffStatsLabel === '' ? '' : `  ${color.textDim(diffStatsLabel)}`
     const head = `${headIdentity}${statusPart}${statsPart}`
@@ -16837,15 +16856,15 @@ export class TuiApp {
     {
       const toolRegions: SearchSourceRegion[] = []
       const nameStart = visibleWidth(icon)
-      const nameEnd = nameStart + visibleWidth(header.title)
+      const nameEnd = nameStart + visibleWidth(headerTitle)
       if (nameEnd > nameStart) {
         // `header.title` is a DESIGN TITLE (`web_search` → `Search`,
         // unknown → `Tool call`), not the raw name: anchor only.
         toolRegions.push({ sourceKey: transcriptSearchSourceKey({ kind: 'tool-field', field: 'name' }), anchorRow: 0, rowStart: 0, rowEnd: 1, columns: { startCol: nameStart, endCol: nameEnd }, enumerable: false })
       }
-      if (header.summary !== '') {
+      if (headerSummary !== '') {
         const argsStart = nameEnd + visibleWidth(action !== undefined ? ' · ' : ' ')
-        const argsEnd = argsStart + visibleWidth(header.summary)
+        const argsEnd = argsStart + visibleWidth(headerSummary)
         toolRegions.push({ sourceKey: transcriptSearchSourceKey({ kind: 'tool-field', field: 'args' }), anchorRow: 0, rowStart: 0, rowEnd: 1, columns: { startCol: argsStart, endCol: argsEnd }, enumerable: false })
       }
       if (toolRegions.length > 0) this.searchSourceRegionsByMessage.set(message, toolRegions)
@@ -16882,10 +16901,11 @@ export class TuiApp {
         // same cached card remains correct after every resize.
         card.addChild(new CompactTextPreview(head, 1, ''))
         if (action.payload !== undefined && action.payload !== '') {
-          card.addChild(new CompactTextPreview(color.textDim(action.payload), 2, '  '))
+          card.addChild(new CompactTextPreview(color.textDim(sanitizeDisplayText(action.payload)), 2, '  '))
         }
         if (action.result !== undefined && action.result !== '') {
-          const result = message.status === 'error' ? color.error(action.result) : color.textDim(action.result)
+          const actionResult = sanitizeDisplayText(action.result)
+          const result = message.status === 'error' ? color.error(actionResult) : color.textDim(actionResult)
           card.addChild(new CompactTextPreview(result, 1, '  '))
         }
         return card
@@ -16910,7 +16930,7 @@ export class TuiApp {
       // so the folded preview only adds a tool identity when the header
       // summary is empty (e.g. an arg shape the generic derivation cannot
       // read). Web/skill/todo never need it — their headers are friendly.
-      const foldedCall = header.summary === '' ? foldedCallPreview(message.name, message.args) : ''
+      const foldedCall = headerSummary === '' ? sanitizeDisplayText(foldedCallPreview(message.name, message.args)) : ''
       let resultPreview: string
       if (message.name === 'read') {
         resultPreview = readFoldedPreview(message.result)
@@ -16970,13 +16990,21 @@ export class TuiApp {
           : ` — ${preview(message.result, RESULT_PREVIEW_LINES)}`
       }
       if (structuredEditDiff) resultPreview = ''
+      // Display-only projection of the folded result preview: captured
+      // terminal stdout keeps whitelisted SGR, every other external result is
+      // plain text. Never applied to the theme-painted head rows.
+      if (resultPreview !== '') {
+        resultPreview = TERMINAL_RESULT_TOOLS.has(message.name)
+          ? sanitizeDisplayLog(resultPreview)
+          : sanitizeDisplayText(resultPreview)
+      }
       const callHead = foldedCall === '' ? '' : foldedCall
       const headWithPreview = `${expandedHead}${callHead}${resultPreview}`
       if (callPreview?.kind === 'bash' && callPreview.command !== '') {
         // The command row owns the result preview's separate line (kimi
         // ShellExecution layout), so the head row carries no result text.
         rows.push(truncateToWidth(`${head}${callHead}`, width, '…'))
-        const commandLines = callPreview.command.split('\n')
+        const commandLines = sanitizeDisplayText(callPreview.command).split('\n')
         const shown = commandLines.slice(0, FOLDED_COMMAND_LINES)
         const prompt = color.shellMode('$ ')
         const indent = '  '
@@ -17054,6 +17082,8 @@ export class TuiApp {
     if (depth >= PTC_MAX_DEPTH) return 0
     let rows = 1
     const header = toolCardHeader(child.name, child.args, this.workspaceRoot)
+    const subTitle = sanitizeDisplayText(header.title)
+    const subSummary = sanitizeDisplayText(header.summary)
     // The DISPLAY status: the durable lifecycle status plus the alpha.2
     // terminal contract (a trailing [exit code: N] / [killed by signal:
     // ...] marker renders a bash/pwsh child failed even when the tool call
@@ -17073,7 +17103,7 @@ export class TuiApp {
       : this.subCallExpanded.has(child.subCallId ?? '') || this.searchForcesSubCallExpanded(child.subCallId ?? '')
     const disclosure = bodyExpanded ? '▼' : '▶'
     const icon = iconPrefix(toolIconSemantic(child.name), this.iconStyle)
-    const head = color.textDim(`${disclosure} ${icon}${header.title}${header.summary === '' ? '' : ` ${header.summary}`}`)
+    const head = color.textDim(`${disclosure} ${icon}${subTitle}${subSummary === '' ? '' : ` ${subSummary}`}`)
     const pad = ' '.repeat(indent)
     card.addChild(new Text(truncateToWidth(`${pad}${head} ${pill}`, width, '…'), 0, 0))
     hits.push({ top: row, height: 1, subCallId: child.subCallId ?? '' })
@@ -17084,14 +17114,14 @@ export class TuiApp {
     // region with no column split.
     const headerRow = row
     const nameStart = indent + visibleWidth(`${disclosure} ${icon}`)
-    const nameEnd = nameStart + visibleWidth(header.title)
+    const nameEnd = nameStart + visibleWidth(subTitle)
     if (nameEnd > nameStart) {
       // `header.title` is a design title, not the raw sub-call name: anchor only.
       regions.push({ sourceKey: transcriptSearchSourceKey({ kind: 'subcall-field', subCallIds: path, field: 'name' }), anchorRow: headerRow, rowStart: headerRow, rowEnd: headerRow + 1, columns: { startCol: nameStart, endCol: nameEnd }, enumerable: false })
     }
-    if (header.summary !== '') {
+    if (subSummary !== '') {
       const argsStart = nameEnd + 1
-      const argsEnd = argsStart + visibleWidth(header.summary)
+      const argsEnd = argsStart + visibleWidth(subSummary)
       // Presenter summary of the raw args: anchor only, never enumerate.
       regions.push({ sourceKey: transcriptSearchSourceKey({ kind: 'subcall-field', subCallIds: path, field: 'args' }), anchorRow: headerRow, rowStart: headerRow, rowEnd: headerRow + 1, columns: { startCol: argsStart, endCol: argsEnd }, enumerable: false })
     }
@@ -17100,16 +17130,21 @@ export class TuiApp {
       // the description, so the real command must never be lost.
       const command = this.terminalCommand(child.name, child.args)
       if (command !== '') {
-        card.addChild(new Text(truncateToWidth(`${pad}  ${this.shellPrompt(child.name)}${color.textDim(command)}`, width, '…'), 0, 0))
+        card.addChild(new Text(truncateToWidth(`${pad}  ${this.shellPrompt(child.name)}${color.textDim(sanitizeDisplayText(command))}`, width, '…'), 0, 0))
         rows += 1
       }
       if (child.result !== '') {
         const resultStart = row + rows
-        const resultLines = child.result.split('\n').length
+        // A captured terminal sub-call stdout keeps whitelisted SGR; every
+        // other external result is plain. The projected line count is the
+        // region height as well, so the display and the search geometry agree.
+        const resultLines = TERMINAL_RESULT_TOOLS.has(child.name)
+          ? sanitizeDisplayLog(child.result).split('\n')
+          : sanitizeDisplayText(child.result).split('\n')
         // Result lines are truncated to the width: a dropped match would shift
         // every later raw ordinal. Anchor the body, never enumerate.
-        regions.push({ sourceKey: transcriptSearchSourceKey({ kind: 'subcall-field', subCallIds: path, field: 'result' }), anchorRow: resultStart, rowStart: resultStart, rowEnd: resultStart + resultLines, enumerable: false })
-        for (const line of child.result.split('\n')) {
+        regions.push({ sourceKey: transcriptSearchSourceKey({ kind: 'subcall-field', subCallIds: path, field: 'result' }), anchorRow: resultStart, rowStart: resultStart, rowEnd: resultStart + resultLines.length, enumerable: false })
+        for (const line of resultLines) {
           card.addChild(new Text(truncateToWidth(`${pad}  ${color.textDim(line)}`, width, '…'), 0, 0))
           rows += 1
         }
@@ -17233,7 +17268,7 @@ export class TuiApp {
   private addTerminalCommandRow(card: Container, command: string, prompt: string): void {
     if (command === '') return
     const styledPrompt = color.shellMode(prompt)
-    const lines = command.split('\n')
+    const lines = sanitizeDisplayText(command).split('\n')
     for (const [index, line] of lines.entries()) {
       const prefix = index === 0 ? styledPrompt : ' '.repeat(visibleWidth(styledPrompt))
       card.addChild(new Text(`${prefix}${color.textDim(line)}`, 0, 0))
@@ -17273,12 +17308,12 @@ export class TuiApp {
     const contentWidth = Math.max(1, width - visibleWidth(indent) - 2)
     const budget = running ? RUNNING_PREVIEW_LINES : SETTLED_PREVIEW_VISUAL_ROWS
     const mode = running ? 'lines' : 'visual'
-    const preview = localShellPreview(message.result, contentWidth, budget, mode)
+    const preview = localShellPreview(sanitizeDisplayLog(message.result), contentWidth, budget, mode)
     const rows = [truncateToWidth(head, width, '…')]
     // The command row (kimi ShellExecution layout): the local shell card's
     // `args` IS the raw command string (never JSON).
     const prompt = color.shellMode('$ ')
-    rows.push(`${indent}${prompt}${truncateToWidth(color.textDim(message.args), contentWidth, '…')}`)
+    rows.push(`${indent}${prompt}${truncateToWidth(color.textDim(sanitizeDisplayText(message.args)), contentWidth, '…')}`)
     for (const line of preview.rows) {
       rows.push(`${indent}${truncateToWidth(color.textDim(line), contentWidth, '…')}`)
     }
@@ -17320,7 +17355,8 @@ export class TuiApp {
     const runOpen = this.workflowRunOpen(message)
     const icon = iconPrefix('workflow', this.iconStyle)
     const disclosure = runOpen ? '▼' : '▶'
-    const head = `${color.textDim(`${disclosure} ${icon}Workflow ${message.name}`)} ${workflowStatusPill(message.status)}`
+    const runName = sanitizeDisplayText(message.name)
+    const head = `${color.textDim(`${disclosure} ${icon}Workflow ${runName}`)} ${workflowStatusPill(message.status)}`
     const rows: string[] = []
     const hits: Array<{ top: number; height: number; hit: WorkflowHit }> = []
     const regions: SearchSourceRegion[] = []
@@ -17345,7 +17381,7 @@ export class TuiApp {
     const runKindStart = visibleWidth(runHeadPrefix)
     const runKindEnd = runKindStart + visibleWidth('Workflow')
     const runNameStart = runKindEnd + 1
-    const runNameEnd = runNameStart + visibleWidth(message.name)
+    const runNameEnd = runNameStart + visibleWidth(runName)
     const runStatusStart = runNameEnd + 1
     const runStatusEnd = runStatusStart + visibleWidth(workflowStatusPill(message.status))
     pushFieldRegion('workflow-run.kind', 0, runKindStart, runKindEnd)
@@ -17363,15 +17399,16 @@ export class TuiApp {
       for (const phase of phases) {
         const phaseOpen = this.workflowPhaseOpen(runId, phase.key, phase)
         const phaseDisclosure = phaseOpen ? '▼' : '▶'
+        const phaseLabel = sanitizeDisplayText(phase.label)
         const countLabel = phase.members.length === 1 ? '1 agent' : `${phase.members.length} agents`
         rows.push(truncateToWidth(
-          `${color.textDim(`  ${phaseDisclosure} ${phase.label}`)} ${color.textMuted(countLabel)}`,
+          `${color.textDim(`  ${phaseDisclosure} ${phaseLabel}`)} ${color.textMuted(countLabel)}`,
           width,
           '…',
         ))
         hits.push({ top: rows.length - 1, height: 1, hit: { kind: 'phase', runId, phaseKey: phase.key } })
         const phasePrefix = `  ${phaseDisclosure} `
-        const phaseSpan = fieldSpans(phasePrefix, phase.label, undefined)
+        const phaseSpan = fieldSpans(phasePrefix, phaseLabel, undefined)
         pushFieldRegion(`workflow-phase.${phase.key}`, rows.length - 1, phaseSpan.labelStart, phaseSpan.labelEnd)
         if (!phaseOpen) continue
         if (phase.mode === 'inline') {
@@ -17380,12 +17417,14 @@ export class TuiApp {
           // members stay visible but never cold-open from the card).
           for (const member of phase.members) {
             const prefix = `    ${workflowMemberMark(member.status)} `
+            const memberLabel = sanitizeDisplayText(member.label)
+            const memberStatus = sanitizeDisplayText(member.status)
             rows.push(truncateToWidth(
-              `${prefix}${member.label} — ${color.textDim(member.status)}`,
+              `${prefix}${memberLabel} — ${color.textDim(memberStatus)}`,
               width,
               '…',
             ))
-            const spans = fieldSpans(prefix, member.label, member.status)
+            const spans = fieldSpans(prefix, memberLabel, memberStatus)
             const memberBase = `workflow-member.${phase.key}.${member.seq}`
             pushFieldRegion(`${memberBase}.label`, rows.length - 1, spans.labelStart, spans.labelEnd)
             pushFieldRegion(`${memberBase}.status`, rows.length - 1, spans.statusStart, spans.statusEnd)
@@ -17402,11 +17441,12 @@ export class TuiApp {
           }
           for (const member of phase.anomalyPreview) {
             const prefix = `    ${workflowMemberMark(member.status)} `
-            rows.push(truncateToWidth(`${prefix}${member.label}`, width, '…'))
+            const memberLabel = sanitizeDisplayText(member.label)
+            rows.push(truncateToWidth(`${prefix}${memberLabel}`, width, '…'))
             // The anomaly-preview row IS the visible row for that member (the
             // context row is deliberately suppressed for previewed members).
             // Its status text is not rendered, so only the label region exists.
-            const spans = fieldSpans(prefix, member.label, undefined)
+            const spans = fieldSpans(prefix, memberLabel, undefined)
             pushFieldRegion(`workflow-member.${phase.key}.${member.seq}.label`, rows.length - 1, spans.labelStart, spans.labelEnd)
           }
           if (phase.hiddenAnomalyCount > 0) {
@@ -17424,12 +17464,14 @@ export class TuiApp {
             : undefined
           if (context !== undefined && !phase.anomalyPreview.some(member => member.seq === context.seq)) {
             const prefix = `    ${color.textDim('↳')} `
+            const contextLabel = sanitizeDisplayText(context.label)
+            const contextStatus = sanitizeDisplayText(context.status)
             rows.push(truncateToWidth(
-              `${prefix}${context.label} — ${color.textDim(context.status)}`,
+              `${prefix}${contextLabel} — ${color.textDim(contextStatus)}`,
               width,
               '…',
             ))
-            const spans = fieldSpans(prefix, context.label, context.status)
+            const spans = fieldSpans(prefix, contextLabel, contextStatus)
             const memberBase = `workflow-member.${phase.key}.${context.seq}`
             pushFieldRegion(`${memberBase}.label`, rows.length - 1, spans.labelStart, spans.labelEnd)
             pushFieldRegion(`${memberBase}.status`, rows.length - 1, spans.statusStart, spans.statusEnd)
@@ -17477,9 +17519,9 @@ export class TuiApp {
     // the live bounded tail, once settled the final output. No presenter,
     // no diff, no image pipeline applies to a local run.
     if (isLocalShellCard(message)) {
-      this.addTerminalCommandRow(card, message.args, '$ ')
+      this.addTerminalCommandRow(card, sanitizeDisplayText(message.args), '$ ')
       if (message.result !== '') {
-        for (const line of message.result.split('\n')) {
+        for (const line of sanitizeDisplayLog(message.result).split('\n')) {
           card.addChild(new Text(color.textDim(line), 0, 0))
         }
       }
@@ -17498,9 +17540,10 @@ export class TuiApp {
         ...(message.error === undefined ? {} : { error: message.error }),
       }) ?? []
       for (const [index, line] of lines.entries()) {
+        const displayLine = sanitizeDisplayText(line)
         const styled = message.status === 'error' && action.result !== undefined && index === lines.length - 1
-          ? color.error(line)
-          : color.textDim(line)
+          ? color.error(displayLine)
+          : color.textDim(displayLine)
         // Reuse the live width-aware wrapper for expanded payload lines too:
         // long coordination text keeps its two-cell continuation indent, and
         // original blank lines (paragraph breaks) stay visible.
@@ -17513,13 +17556,13 @@ export class TuiApp {
       // text belongs above that existing terminal output; do not replace the
       // output/exit-code path merely to make the payload visible.
       if (action.payload !== undefined && action.payload !== '') {
-        for (const line of action.payload.split(/\r\n|\r|\n/)) {
+        for (const line of sanitizeDisplayText(action.payload).split('\n')) {
           card.addChild(new CompactTextPreview(color.textDim(line), Number.MAX_SAFE_INTEGER, '  ', true))
         }
       }
       if (message.status === 'running') return
       if (message.status === 'error') {
-        if (action.result !== undefined) card.addChild(new CompactTextPreview(color.error(action.result), Number.MAX_SAFE_INTEGER, '  ', true))
+        if (action.result !== undefined) card.addChild(new CompactTextPreview(color.error(sanitizeDisplayText(action.result)), Number.MAX_SAFE_INTEGER, '  ', true))
         return
       }
     }
@@ -17534,7 +17577,7 @@ export class TuiApp {
       // shows it immediately (subagentModelDisplay renders nothing when the
       // call carries no override — official subagent calls stay unchanged).
       const modelLine = subagentModelDisplay(message.name, message.args)
-      if (modelLine !== undefined) card.addChild(new Text(color.textDim(modelLine), 0, 0))
+      if (modelLine !== undefined) card.addChild(new Text(color.textDim(sanitizeDisplayText(modelLine)), 0, 0))
       if (message.name === 'edit' && editDiffs !== undefined && editDiffs.length > 0) {
         this.renderDiffBody(card, editDiffs, explicitlyExpanded, message.name)
         return
@@ -17558,14 +17601,14 @@ export class TuiApp {
           this.addTerminalCommandRow(card, this.terminalCommand(message.name, message.args), this.shellPrompt(message.name))
           if (callView.rawInput !== undefined) {
             for (const line of genericRawInputLines(message.name, callView.rawInput)) {
-              card.addChild(new Text(color.textDim(line), 0, 0))
+              card.addChild(new Text(color.textDim(sanitizeDisplayText(line)), 0, 0))
             }
           }
           // UI-facing content blocks (plan/exit_plan_mode carry the plan
           // body here): text blocks render verbatim, others as pretty JSON.
           for (const block of callView.content ?? []) {
-            if (block.type === 'text') card.addChild(new Text(color.textDim(block.text), 0, 0))
-            else card.addChild(new Text(color.textDim(this.blockDisplayText(block)), 0, 0))
+            if (block.type === 'text') card.addChild(new Text(color.textDim(sanitizeDisplayText(block.text)), 0, 0))
+            else card.addChild(new Text(color.textDim(sanitizeDisplayText(this.blockDisplayText(block))), 0, 0))
           }
           return
         }
@@ -17590,12 +17633,12 @@ export class TuiApp {
       const answerText = this.questionAnswerText(message)
       const authoritative = answerText !== message.result
       if (message.error !== undefined && !authoritative) {
-        card.addChild(new Text(color.textDim(`${message.error.name}: ${message.error.code}`), 0, 0))
+        card.addChild(new Text(color.textDim(sanitizeDisplayText(`${message.error.name}: ${message.error.code}`)), 0, 0))
         return
       }
       const summary = message.status === 'ok' || authoritative ? askAnswersSummary(answerText) : undefined
       if (summary !== undefined) {
-        card.addChild(new Text(color.textDim(summary), 0, 0))
+        card.addChild(new Text(color.textDim(sanitizeDisplayText(summary)), 0, 0))
         // The expanded card carries the actual answers, one line per
         // question (`● id → answer`; skipped questions dimmed) — the
         // count alone would leave the user unable to recall their choices
@@ -17603,7 +17646,8 @@ export class TuiApp {
         const answerLines = askAnswersLines(answerText)
         if (answerLines !== undefined) {
           for (const line of answerLines) {
-            card.addChild(new Text(`  ${line.skipped ? color.textMuted(line.text) : color.textDim(line.text)}`, 0, 0))
+            const answerLine = sanitizeDisplayText(line.text)
+            card.addChild(new Text(`  ${line.skipped ? color.textMuted(answerLine) : color.textDim(answerLine)}`, 0, 0))
           }
         }
         return
@@ -17616,13 +17660,13 @@ export class TuiApp {
     // A cancelled/aborted call shows the structured error identity instead.
     if (GOAL_TOOL_NAMES.has(message.name)) {
       if (message.error !== undefined) {
-        card.addChild(new Text(color.textDim(`${message.error.name}: ${message.error.code}`), 0, 0))
+        card.addChild(new Text(color.textDim(sanitizeDisplayText(`${message.error.name}: ${message.error.code}`)), 0, 0))
         return
       }
       const goalLines = message.status === 'ok' ? goalResultLines(message.result) : undefined
       if (goalLines !== undefined) {
         for (const line of goalLines) {
-          card.addChild(new Text(color.textDim(line), 0, 0))
+          card.addChild(new Text(color.textDim(sanitizeDisplayText(line)), 0, 0))
         }
         return
       }
@@ -17636,7 +17680,7 @@ export class TuiApp {
     // A settled subagent-family call keeps its model/provider line above the
     // result (only when the call args carried an explicit override).
     const settledModelLine = subagentModelDisplay(message.name, message.args)
-    if (settledModelLine !== undefined) card.addChild(new Text(color.textDim(settledModelLine), 0, 0))
+    if (settledModelLine !== undefined) card.addChild(new Text(color.textDim(sanitizeDisplayText(settledModelLine)), 0, 0))
     const resultView = message.name === 'edit' && message.status === 'ok'
       ? editResultView?.card === 'diff' ? editResultView : undefined
       : this.toolResultView(message)
@@ -17651,18 +17695,18 @@ export class TuiApp {
       switch (resultView.card) {
         case 'read': {
           for (const line of resultView.lines) {
-            card.addChild(new Text(color.textDim(`  ${line.number} │ ${line.text}`), 0, 0))
+            card.addChild(new Text(color.textDim(`  ${line.number} │ ${sanitizeDisplayText(line.text)}`), 0, 0))
           }
-          card.addChild(new Text(color.textMuted(`  path: ${relativizeToCwd(resultView.path, this.workspaceRoot)}`), 0, 0))
+          card.addChild(new Text(color.textMuted(`  path: ${sanitizeDisplayText(relativizeToCwd(resultView.path, this.workspaceRoot))}`), 0, 0))
           card.addChild(new Text(color.textMuted(`  total lines: ${resultView.totalLines}`), 0, 0))
           return
         }
         case 'search': {
           if (resultView.shape === 'matches') {
             for (const file of resultView.files) {
-              card.addChild(new Text(color.textMuted(`  ${relativizeToCwd(file.path, this.workspaceRoot)}`), 0, 0))
+              card.addChild(new Text(color.textMuted(`  ${sanitizeDisplayText(relativizeToCwd(file.path, this.workspaceRoot))}`), 0, 0))
               for (const match of file.matches) {
-                card.addChild(new Text(color.textDim(`    ${match.lineNumber} │ ${match.line}`), 0, 0))
+                card.addChild(new Text(color.textDim(`    ${match.lineNumber} │ ${sanitizeDisplayText(match.line)}`), 0, 0))
               }
             }
             if (resultView.truncated) {
@@ -17670,7 +17714,7 @@ export class TuiApp {
             }
           } else {
             for (const path of resultView.paths) {
-              card.addChild(new Text(color.textDim(`  ${relativizeToCwd(path, this.workspaceRoot)}`), 0, 0))
+              card.addChild(new Text(color.textDim(`  ${sanitizeDisplayText(relativizeToCwd(path, this.workspaceRoot))}`), 0, 0))
             }
             if (resultView.truncated) {
               card.addChild(new Text(color.textMuted(`  … truncated — ${resultView.total} total paths`), 0, 0))
@@ -17684,7 +17728,7 @@ export class TuiApp {
           // stays visible when the card expands).
           this.addTerminalCommandRow(card, this.terminalCommand(message.name, message.args), this.shellPrompt(message.name))
           if (resultView.output !== undefined && resultView.output !== '') {
-            for (const line of resultView.output.split('\n')) {
+            for (const line of sanitizeDisplayLog(resultView.output).split('\n')) {
               card.addChild(new Text(color.textDim(line), 0, 0))
             }
           }
@@ -17704,7 +17748,7 @@ export class TuiApp {
           // Web WebBlock parity: the structured retrieval (search sources /
           // fetch URL + status) replaces the raw result text.
           for (const line of webCardLines(resultView)) {
-            card.addChild(new Text(color.textDim(line), 0, 0))
+            card.addChild(new Text(color.textDim(sanitizeDisplayText(line)), 0, 0))
           }
           return
         }
@@ -17729,7 +17773,7 @@ export class TuiApp {
               let buffer = ''
               const flush = (): void => {
                 if (buffer !== '') {
-                  card.addChild(new Text(color.textDim(buffer), 0, 0))
+                  card.addChild(new Text(color.textDim(sanitizeDisplayText(buffer)), 0, 0))
                   buffer = ''
                 }
               }
@@ -17744,14 +17788,14 @@ export class TuiApp {
                   // file and unknown blocks use their bounded presentation,
                   // interleaved in order.
                   flush()
-                  card.addChild(new Text(color.textDim(this.blockDisplayText(block)), 0, 0))
+                  card.addChild(new Text(color.textDim(sanitizeDisplayText(this.blockDisplayText(block))), 0, 0))
                 }
               }
               flush()
             } else {
               for (const block of content) {
-                if (block.type === 'text') card.addChild(new Text(color.textDim(block.text), 0, 0))
-                else card.addChild(new Text(color.textDim(this.blockDisplayText(block)), 0, 0))
+                if (block.type === 'text') card.addChild(new Text(color.textDim(sanitizeDisplayText(block.text)), 0, 0))
+                else card.addChild(new Text(color.textDim(sanitizeDisplayText(this.blockDisplayText(block))), 0, 0))
               }
             }
             return
@@ -17791,10 +17835,10 @@ export class TuiApp {
         if (envelopes.length === 1) {
           const envelope = envelopes[0] as (typeof envelopes)[number]
           for (const line of envelope.lines) {
-            card.addChild(new Text(color.textDim(`  ${line.number} │ ${line.text}`), 0, 0))
+            card.addChild(new Text(color.textDim(`  ${line.number} │ ${sanitizeDisplayText(line.text)}`), 0, 0))
           }
           if (envelope.path !== '') {
-            card.addChild(new Text(color.textMuted(`  path: ${relativizeToCwd(envelope.path, this.workspaceRoot)}`), 0, 0))
+            card.addChild(new Text(color.textMuted(`  path: ${sanitizeDisplayText(relativizeToCwd(envelope.path, this.workspaceRoot))}`), 0, 0))
           }
           if (envelope.totalLines !== undefined) {
             card.addChild(new Text(color.textMuted(`  total lines: ${envelope.totalLines}`), 0, 0))
@@ -17804,7 +17848,7 @@ export class TuiApp {
             const branch = index === envelopes.length - 1 ? '└─' : '├─'
             const count = envelope.totalLines ?? (envelope.lines.length > 0 ? envelope.lines.length : undefined)
             card.addChild(new Text(color.textDim(
-              `  ${branch} ${relativizeToCwd(envelope.path, this.workspaceRoot)}${count === undefined ? '' : ` · ${count} lines`}`,
+              `  ${branch} ${sanitizeDisplayText(relativizeToCwd(envelope.path, this.workspaceRoot))}${count === undefined ? '' : ` · ${count} lines`}`,
             ), 0, 0))
           })
         }
@@ -17820,8 +17864,8 @@ export class TuiApp {
       // renders its instructions body + name, never the raw XML.
       const envelope = parseSkillEnvelope(message.result)
       if (envelope !== undefined) {
-        card.addChild(new Text(color.textMuted(`  skill: ${envelope.name}`), 0, 0))
-        for (const line of envelope.instructions.split('\n')) {
+        card.addChild(new Text(color.textMuted(`  skill: ${sanitizeDisplayText(envelope.name)}`), 0, 0))
+        for (const line of sanitizeDisplayText(envelope.instructions).split('\n')) {
           card.addChild(new Text(color.textDim(line), 0, 0))
         }
         return
@@ -17836,8 +17880,8 @@ export class TuiApp {
       // below the summary (the envelope summary + the actual pixels).
       const envelope = parseImageEnvelope(message.result)
       if (envelope !== undefined) {
-        card.addChild(new Text(color.textDim(`  ${envelope.summary}`), 0, 0))
-        card.addChild(new Text(color.textMuted(`  path: ${relativizeToCwd(envelope.path, this.workspaceRoot)}`), 0, 0))
+        card.addChild(new Text(color.textDim(`  ${sanitizeDisplayText(envelope.summary)}`), 0, 0))
+        card.addChild(new Text(color.textMuted(`  path: ${sanitizeDisplayText(relativizeToCwd(envelope.path, this.workspaceRoot))}`), 0, 0))
         this.renderResultImageBlocks(card, message.resultBlocks)
         return
       }
@@ -17852,14 +17896,19 @@ export class TuiApp {
       const envelope = parseWriteEnvelope(message.result)
       if (envelope !== undefined) {
         card.addChild(new Text(color.textDim(
-          `  ${envelope.verb} ${relativizeToCwd(envelope.path, this.workspaceRoot)}`,
+          `  ${sanitizeDisplayText(envelope.verb)} ${sanitizeDisplayText(relativizeToCwd(envelope.path, this.workspaceRoot))}`,
         ), 0, 0))
         return
       }
       if (message.status === 'ok') return
     }
     if (isDiffResult(message.name, message.result)) {
-      for (const line of renderDiffLines(message.result)) {
+      // A captured terminal stream keeps its whitelisted SGR: the source is
+      // already projected under the LOG policy, so the diff colorizer must not
+      // re-apply the plain policy (that would strip the safe colors).
+      const terminal = TERMINAL_RESULT_TOOLS.has(message.name)
+      const diffSource = terminal ? sanitizeDisplayLog(message.result) : sanitizeDisplayText(message.result)
+      for (const line of renderDiffLines(diffSource, terminal)) {
         card.addChild(new Text(line, 0, 0))
       }
     } else {
@@ -17877,7 +17926,7 @@ export class TuiApp {
         let buffer = ''
         const flush = (): void => {
           if (buffer !== '') {
-            card.addChild(new Text(color.textDim(buffer), 0, 0))
+            card.addChild(new Text(color.textDim(sanitizeDisplayText(buffer)), 0, 0))
             buffer = ''
           }
         }
@@ -17891,7 +17940,7 @@ export class TuiApp {
             // Known process blocks keep their legacy JSON form; file and
             // unknown blocks use their bounded presentation, in order.
             flush()
-            card.addChild(new Text(color.textDim(this.blockDisplayText(block)), 0, 0))
+            card.addChild(new Text(color.textDim(sanitizeDisplayText(this.blockDisplayText(block))), 0, 0))
           }
         }
         flush()
@@ -17899,7 +17948,12 @@ export class TuiApp {
         const lines = blocks.length > 0
           ? resultTextLines(blocks, message.status === 'error' ? { name: 'error', code: 'tool' } : undefined)
           : [message.result]
-        for (const line of lines) {
+        // A captured terminal stream keeps whitelisted SGR; every other
+        // external result is plain text.
+        const projectedLines = TERMINAL_RESULT_TOOLS.has(message.name)
+          ? lines.map(sanitizeDisplayLog)
+          : lines.map(sanitizeDisplayText)
+        for (const line of projectedLines) {
           card.addChild(new Text(color.textDim(line), 0, 0))
         }
       }
@@ -18391,7 +18445,8 @@ export class TuiApp {
       return
     }
     const lines = shown.map(todo => {
-      const body = todo.status === 'completed' ? `\x1b[9m${todo.content}\x1b[29m` : todo.content
+      const content = sanitizeDisplayText(todo.content)
+      const body = todo.status === 'completed' ? `\x1b[9m${content}\x1b[29m` : content
       return `${mark(todo)} ${body}`
     })
     this.todoPanel.setText([border, title, ...lines].join('\n'))
@@ -18470,7 +18525,12 @@ export class TuiApp {
     const active = todos.filter(todo => todo.status !== 'completed')
     const done = todos.length - active.length
     const first = active[0]
-    const label = first === undefined ? '' : first.content.length > 40 ? `${first.content.slice(0, 40)}…` : first.content
+    // The active todo's content is model output: the dock summary and the
+    // extension snapshot are display strings, so project it here (the same
+    // display projection the todo panel rows use).
+    const label = first === undefined
+      ? ''
+      : sanitizeDisplayText(first.content.length > 40 ? `${first.content.slice(0, 40)}…` : first.content)
     return [
       done > 0 ? `${done} todo done` : '',
       active.length > 0 ? `${active.length} active` : '',
@@ -19045,7 +19105,7 @@ export class TuiApp {
     // reads as the editor's full-width border.
     const lines = [color.border(` ${'─'.repeat(Math.max(0, safeWidth - 2))} `)]
     for (const item of items) {
-      const text = item.text.replace(/\s+/g, ' ').trim()
+      const text = sanitizeDisplayText(item.text).replace(/\s+/g, ' ').trim()
       // A client-local echo has no authoritative queue item yet: advertise
       // that it is still being admitted, never a plain authoritative row.
       // The suffix is part of the row's width budget, so a narrow pane
@@ -19271,7 +19331,7 @@ export class TuiApp {
    * otherwise (display-only — no verbs yet). */
   private renderGoalLine(): void {
     const goal = this.displayGoal()
-    this.goalLine.setText(goal === undefined || goal === '' ? '' : color.primary(goal))
+    this.goalLine.setText(goal === undefined || goal === '' ? '' : color.primary(sanitizeDisplayText(goal)))
     this.requestRender()
   }
 
@@ -19907,7 +19967,7 @@ export class TuiApp {
    * short — or resized-short — bubble must not consume the press as a no-op). */
   private userMessageCompactsAtCurrentWidth(message: Extract<TranscriptMessage, { kind: 'user' }>): boolean {
     const inner = Math.max(1, this.transcriptRenderWidth() - visibleWidth(`${color.roleUser('❯')} `))
-    return new Text(message.text, 0, 0).render(inner).length > USER_MESSAGE_COMPACT_THRESHOLD_ROWS
+    return new Text(sanitizeDisplayText(message.text), 0, 0).render(inner).length > USER_MESSAGE_COMPACT_THRESHOLD_ROWS
   }
 
   /** Whether one pending-user row ACTUALLY compacts at the current transcript
@@ -19915,7 +19975,7 @@ export class TuiApp {
    * so a stale override on a short row never consumes the Ctrl+O press. */
   private pendingUserCompactsAtCurrentWidth(row: PendingUserRow): boolean {
     const inner = Math.max(1, this.transcriptRenderWidth() - visibleWidth(`${color.roleUser('❯')} `))
-    return new Text(row.text, 0, 0).render(inner).length > USER_MESSAGE_COMPACT_THRESHOLD_ROWS
+    return new Text(sanitizeDisplayText(row.text), 0, 0).render(inner).length > USER_MESSAGE_COMPACT_THRESHOLD_ROWS
   }
 
   /**

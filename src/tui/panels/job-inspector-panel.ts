@@ -42,6 +42,7 @@ import { componentKeymap } from '../keybindings/component-keymap.ts'
 import { JOB_LOCAL_KEYS, formatHintKeys, formatKeyId } from '../keybindings/hints.ts'
 import { renderActionBarRow, type ActionBarSegment } from '../presentation/action-bar.ts'
 import { sanitizedPhysicalLine } from '../presentation/lines.ts'
+import { sanitizeDisplayLog } from '../presentation/terminal-text.ts'
 import { color, taskStatusColor } from '../theme/runtime.ts'
 import { JobCommandReader, type CommandPaintedBox } from './job-command-reader.ts'
 import { JobOutputScrollView } from './job-output-scroll-view.ts'
@@ -928,11 +929,13 @@ class JobInspectorNoticeRow implements Component {
   }
 }
 
-/** The rendered body text of one view (the ScrollView's only child). */
+/** The rendered body text of one view (the ScrollView's only child). The raw
+ *  retained observation stays the source authority (retention, search source
+ *  key and exact copy); only this terminal-bound projection is disposable. */
 const bodyText = (view: JobInspectorView): string => {
   if (view.phase === 'unavailable') return BODY_UNAVAILABLE
   if (view.phase === 'connecting') return BODY_CONNECTING
-  return view.retainedText === '' ? BODY_EMPTY : view.retainedText
+  return view.retainedText === '' ? BODY_EMPTY : sanitizeDisplayLog(view.retainedText)
 }
 
 /** Whether the observed snapshot really is a shell Command the reader may show

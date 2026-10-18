@@ -80,7 +80,10 @@ function plain(view: readonly string[]): string {
   return view.map(line => line.replace(/\x1b\[[0-9;]*m/g, '')).join('\n')
 }
 
-async function mountPluginRunner(t: Parameters<typeof testLifecycle>[0]): Promise<{
+async function mountPluginRunner(
+  t: Parameters<typeof testLifecycle>[0],
+  manager: Record<string, unknown> = fakePluginManager(),
+): Promise<{
   vt: VirtualTerminal
   harness: ReturnType<typeof makeHarness>
   app: TuiApp
@@ -101,7 +104,7 @@ async function mountPluginRunner(t: Parameters<typeof testLifecycle>[0]): Promis
   life.defer(restoreTerminal)
   const ctx = new Context()
   life.defer(() => disposeContext(ctx))
-  ctx.provide('pluginManager', fakePluginManager() as never)
+  ctx.provide('pluginManager', manager as never)
   const fiber = await mountRunner(ctx, home, harness, {}, { fullscreen: 'off' })
   await settle()
   life.defer(() => fiber.dispose())
@@ -193,4 +196,23 @@ test('an external Settings parent teardown releases the Manager owner so a later
   vt.sendInput('\x1b')
   await vt.waitForRender()
   assert.doesNotMatch(plain(vt.getViewport()), /Plugin Manager/)
+})
+
+test('hostile plugin metadata never reaches the mounted panel TTY raw', async (t) => {
+  const hostile = 'evil\u001b]52;c;YXR0YWNr\u0007\u001b[2J\u009b2Jname'
+  const manager = {
+    ...fakePluginManager(),
+    // The Host bundle projection is external package metadata.
+    listBundles: async () => [{
+      name: hostile, version: hostile, enabled: true, installed: true,
+      optional: false, removable: true, rows: [], overrides: [],
+    }],
+  }
+  const { vt, harness } = await mountPluginRunner(t, manager)
+  invokeCommand(harness, 'plugins')
+  await vt.waitForRender()
+  const raw = vt.writes.join('')
+  assert.ok(!raw.includes('YXR0YWNr'), `no OSC 52 payload from plugin metadata reaches the TTY:\n${plain(vt.getViewport())}`)
+  assert.ok(!raw.includes('\u009b'), 'no raw C1 byte from plugin metadata reaches the TTY')
+  assert.match(plain(vt.getViewport()), /evil/, 'the readable plugin metadata survives the projection')
 })

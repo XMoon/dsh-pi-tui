@@ -1019,6 +1019,48 @@ test('B-09 searching CJK, wrapped and ANSI text keeps the rendered row count and
   app.stop()
 })
 
+// ── B-09b: the sanitized body is the ONE search/geometry source ────────────
+
+test('B-09b a CR progress stream paints distinct records and Find navigates to the row actually painted', async () => {
+  for (const width of [40, 80, 160]) {
+    const { vt, app } = startApp({}, {}, width, 24)
+    const harness = attachTasks(app, { jobIds: ['job-a'] })
+    await flush()
+    await openFirstJob(vt, harness)
+    // The RAW observation keeps every CR; only the display projection turns
+    // each frame into its own line, so the search geometry must come from the
+    // painted body, never the raw source.
+    harness.observation.latest()!.emit({ text: 'start\r10%\r100%\n' })
+    await vt.waitForRender()
+    const rows = rawView(vt)
+    const rowOf = (needle: string): number => rows.findIndex(row => row.includes(needle))
+    assert.ok(rowOf('start') >= 0 && rowOf('10%') >= 0 && rowOf('100%') >= 0,
+      `every CR frame is readable at ${width}:\n${view(vt)}`)
+    assert.ok(rowOf('start') < rowOf('10%') && rowOf('10%') < rowOf('100%'),
+      `the frames are distinct, ordered records at ${width}`)
+    assert.ok(!view(vt).includes('\r'), `no raw CR survives the paint at ${width}`)
+
+    // Find over the painted rows: the match the user sees is the one selected.
+    vt.sendInput('\x06')
+    await vt.waitForRender()
+    vt.sendInput('100%')
+    await vt.waitForRender()
+    vt.sendInput('\r') // Enter: EDIT -> NAVIGATE, selecting the current hit
+    await vt.waitForRender()
+    assert.match(view(vt), /1\/1/, `exactly the painted 100% record matches at ${width}`)
+    // The body record, never the Find row that echoes the same query text.
+    const target = rawView(vt).findIndex(row => row.trim() === '100%')
+    assert.ok(target >= 0, `the 100% record is still painted at ${width}`)
+    let background = 0
+    for (let column = 0; column < width; column += 1) {
+      if (vt.getCellBgRgb(target, column) !== undefined) background += 1
+    }
+    assert.ok(background > 0, `the current hit is the painted 100% record at ${width}`)
+    app.dispose()
+    await flush(2)
+  }
+})
+
 // ── B-10: bounded retention and the GAP truth ──────────────────────────────
 
 test('B-10 a truncated retained window rebases a provable anchor, never fabricates GAP, and the footer stays preview-relative', async () => {

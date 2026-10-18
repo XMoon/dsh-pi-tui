@@ -10,6 +10,7 @@
  *  rollout PR5b).
  * @module tui/pickers/preset-presentation-pitui
  */
+import { sanitizeDisplayText } from '../presentation/terminal-text.ts'
 import type { PresetPresentation, PresetPickerRoster } from '../../app/command/preset-presentation.ts'
 import { visibleWidth, type SettingValuePart } from '@xmoon76/pi-tui'
 import { abbreviateName } from './name-label.ts'
@@ -100,17 +101,17 @@ export function pituiPresetPresentation(app: TuiApp): PresetPresentation {
                 // The preset ID is what the user types (`/preset <id>`), so it must
                 // stay WHOLE in the label: only the friendly name is abbreviated,
                 // into whatever the 25-cell column leaves after the ` (id)` suffix.
-                label: presetLabelOf(display.name, preset.id),
+                label: presetLabelOf(sanitizeDisplayText(display.name), sanitizeDisplayText(preset.id)),
                 // The abbreviation above is a DRAWING fact: the list's search
                 // filters on this row's complete `name (id)` (fork X062), so a
                 // keyword from the middle of a long friendly name still finds the
                 // row. The same complete identity leads the description below.
                 searchText: `${display.name} (${preset.id})`,
                 description: [
-                  `${display.name} (${preset.id})`,
-                  display.description,
+                  `${sanitizeDisplayText(display.name)} (${sanitizeDisplayText(preset.id)})`,
+                  display.description === undefined ? undefined : sanitizeDisplayText(display.description),
                   isBuiltInPresetRow(preset) ? 'system' : 'user',
-                  preset.broken,
+                  preset.broken === undefined ? undefined : sanitizeDisplayText(preset.broken),
                 ].filter(Boolean).join(' · '),
                 // A display fact only: the slot paints `valueParts`, so the
                 // fork's own `currentValue` (values cycling, updateValue) keeps
