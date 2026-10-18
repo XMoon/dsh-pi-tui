@@ -697,7 +697,12 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
       if (listed === undefined || listed.length === 0) {
         // The overlay is already open — keep it open on the refusal row
         // (Esc closes as always) instead of leaving a dead loading frame.
-        const text = listed === undefined ? 'session persistence unavailable' : 'no persisted sessions'
+        // An EMPTY roster is `No readable sessions`: the official listing
+        // publishes a Session from its header only, so a store whose logs the
+        // reader refuses is indistinguishable from an empty one here — never
+        // claim "no persisted sessions" (the S2 limited contract, recorded in
+        // docs/client-server-migration.md).
+        const text = listed === undefined ? 'session persistence unavailable' : 'No readable sessions'
         statusRow = { value: '', label: text, description: '', group: '' }
         picker.refresh?.()
         settleOnce({ kind: 'refused', text })

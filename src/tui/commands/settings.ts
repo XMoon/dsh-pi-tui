@@ -201,9 +201,6 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
    *  read that STARTED earlier must never overwrite a newer observation). */
   let webReadInFlight: { readonly serial: number; readonly promise: Promise<WebProviderSettings | undefined> } | undefined
   let webReadSerial = 0
-  /** Rows whose write verdict was deferred to the newest read: the next FRESH
-   *  settlement reconciles them (never a verdict from a superseded snapshot). */
-  const webWriteVerdictOwed = new Set<WebSettingRowId | typeof WEB_CREDENTIAL_ROW_ID>()
   /** Whether at least one read COMPLETED (a resolved `undefined` is
    *  Unavailable, never an eternal `Loading…`). */
   let webReadSettled = false
@@ -234,20 +231,31 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
       webSettings = failure === undefined ? settings : undefined
       webReadFailure = failure
       webReadSettled = true
-      // A write whose readback was superseded waited for THIS settlement: the
-      // newest facts now own its verdict (no stale phase survives).
-      for (const owed of webWriteVerdictOwed) {
-        if (owed === WEB_CREDENTIAL_ROW_ID) webWriteVerdictOwed.delete(owed)
-        else if (webSettledValue(owed) === undefined) webRowPhases.set(owed, { kind: 'outcome-unknown' })
-        else webRowPhases.delete(owed)
-        webWriteVerdictOwed.delete(owed)
-      }
       // The committed facts repaint whichever generation owns the surface: a
       // write's verification read must converge a Workspace reopened mid-write.
       activeSettingsWorkspace?.refresh()
     }
     if (webReadInFlight?.serial === serial) webReadInFlight = undefined
     return { settings: failure === undefined ? settings : undefined, fresh }
+  }
+
+  /** Wait until the NEWEST read has SETTLED (its facts are committed): a write
+   *  verdict is then decided by the newest authority facts, never by a snapshot
+   *  a later read superseded. A read STARTED during the wait is the newer
+   *  authority and must settle first too, so the loop re-checks the in-flight
+   *  serial after every await (bounded: each iteration awaits a read the Host
+   *  already accepted, and the guard only stops a pathological read storm). */
+  const awaitWebSettled = async (): Promise<void> => {
+    for (let guard = 0; guard < 100; guard += 1) {
+      const inFlight = webReadInFlight
+      if (inFlight === undefined) return
+      try {
+        await inFlight.promise
+      } catch {
+        // The failure is recorded by `readWebSettings`; the caller decides from
+        // the committed facts (an unreadable authority is never a verdict).
+      }
+    }
   }
 
   /** A read issued AFTER a write. It starts from the pending state and reports
@@ -509,16 +517,10 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
       }
       const verified = await rereadWebSettings()
       if (!verified.fresh) {
-        // A NEWER read owns the facts: this snapshot is superseded, so it must
-        // never decide a verdict. While that newer read is still PENDING the row
-        // stays pending and the next fresh settlement reconciles it (§B3.4
-        // currentness); once it has settled, the committed facts decide.
-        if (!webReadSettled) {
-          webRowPhases.set(id, { kind: 'saving' })
-          webWriteVerdictOwed.add(id)
-          repaintWebItems?.()
-          return
-        }
+        // A NEWER read owns the facts: this snapshot is superseded. WAIT for the
+        // newest settlement (§B3.4 currentness) and judge by what it committed —
+        // never a verdict from the superseded snapshot, and never a stale phase.
+        await awaitWebSettled()
         const committed = webSettledValue(id)
         if (committed === undefined) webRowPhases.set(id, { kind: 'outcome-unknown' })
         else webRowPhases.delete(id)
@@ -765,15 +767,12 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
                 }
                 const verified = await rereadWebSettings()
                 if (!verified.fresh) {
-                  // Judged by the NEWEST facts, never by this superseded
-                  // snapshot. While the newer read is pending the write is
-                  // honestly UNKNOWN (and the next fresh settlement reconciles
-                  // the row); once it settled, an unreadable authority is still
-                  // UNKNOWN — never "not saved".
-                  if (!webReadSettled) {
-                    webWriteVerdictOwed.add('web-search-endpoint')
-                    throw new WebWriteVerdictError('outcome-unknown', 'a newer read is still verifying this write — reopen the section to read the current value')
-                  }
+                  // The PANEL owns a modal verdict, so it must never be told a
+                  // superseded result: WAIT for the newest read, then judge by
+                  // the facts it committed (success closes the panel, a
+                  // mismatch reports the NEWEST value, an unreadable authority
+                  // stays honestly unknown).
+                  await awaitWebSettled()
                   const committed = webSettledValue('web-search-endpoint')
                   if (committed === url) {
                     webRowPhases.delete('web-search-endpoint')
@@ -787,7 +786,7 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
                   }
                   webRowPhases.set('web-search-endpoint', { kind: 'not-saved' })
                   repaintWebItems?.()
-                  throw new WebWriteVerdictError('not-saved', `the Host keeps "${committed}" (verified by a newer read)`)
+                  throw new WebWriteVerdictError('not-saved', `the Host keeps "${committed}" instead of the submitted endpoint`)
                 }
                 const settings = verified.settings
                 if (settings === undefined) {
@@ -798,7 +797,7 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
                 webRowPhases.delete('web-search-endpoint')
                 repaintWebItems?.()
                 if (settings.api.baseURL !== url) {
-                  throw new WebWriteVerdictError('not-saved', `the Host kept "${settings.api.baseURL}" instead of the submitted endpoint`)
+                  throw new WebWriteVerdictError('not-saved', `the Host keeps "${settings.api.baseURL}" instead of the submitted endpoint`)
                 }
               }),
               requestRender: () => app.requestRender(),

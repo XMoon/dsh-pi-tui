@@ -6393,6 +6393,21 @@ production changes and positive/negative evidence.
   format is refused with its diagnostic, and a released generation the current
   promotion refuses keeps its bytes and reports why
   (`test/session-v4-rc2-persistence.test.ts`). The TUI folds no raw JSONL.
+  **Unreadable stored Sessions split by the OFFICIAL API, not by the TUI** (the
+  Owner-accepted S2 limited contract, 2026-10-18): the backend LISTs from each
+  artifact's header only (`readGenerationHeader` decodes the first zstd frame and
+  the format catalog decides) while `open` decodes the body and admits its
+  events. `LIST_EXCLUDED` = the header itself is refused (a newer format
+  version): the listing never publishes the Session, so the Picker cannot
+  present it and the user-visible sink is a fail-closed OMISSION; an empty
+  roster states `No readable sessions` (never `no persisted sessions`, which
+  would claim nothing was stored). `OPEN_REFUSED` = the header lists but the
+  body is refused (an event type this harness cannot interpret): the Session IS
+  a Picker row, selecting it surfaces the OFFICIAL refusal and mounts nothing,
+  and its bytes stay identical. The accepted user-visibility LOSS is that an
+  unlistable log gets no diagnostic/unopenable row of its own.
+  `test/session-picker-real-refusal.test.ts` proves both outcomes over the real
+  artifact tree (see Evidence).
 
 ### Implementation (what changed)
 
@@ -6437,15 +6452,25 @@ production changes and positive/negative evidence.
   classified and read without being rewritten, only a write open publishes the
   successor, a newer format is refused, and the released-v3 reader contract
   refuses the rc.2-only event types (run through the official released-v3
-  restore — never claimed as an executed old reader). Two REAL user sinks are
-  pinned as L6: `test/task-center-external-leaf.test.ts` (the production
-  `/tasks` path lists the external leaf as `external · <label>` / `External`,
-  offers no Stop/Continue, and Enter states that no local Session exists
-  without mounting a surface) and `test/session-picker-format-refusal.test.ts`
-  (the production `/sessions` picker surfaces the official refusal text and
-  never mounts the unreadable log; the sessionless aftermath of a refused
-  resume is recorded as NOT_VERIFIED — the harness cannot prove the runner
-  restores a previous owner there).
+  restore — never claimed as an executed old reader). Three REAL user sinks are
+  pinned as L6: `test/task-center-external-leaf.test.ts` (a REAL
+  `ctx.subagents.startActivation({ delivery: 'parent' })` against a registered
+  fixture external provider makes the OFFICIAL manager append the parent-owned
+  `subagent/catalog` fact; the official `listDescendants` reads it back through
+  the registered `subagentCatalog` projection and the production `/tasks` path
+  lists the external leaf as `external · <label>` / `External` with its Detail
+  `mode external` / `activity External`, offers no Stop/Continue, and Enter
+  states that no local Session exists without mounting a surface — asserted at
+  120×40, 80×10 and 44×20 with cell safety; the delivery mutation
+  `'caller'` leaves the official catalog empty and fails the fixture),
+  `test/session-picker-real-refusal.test.ts` (a REAL artifact tree under the
+  real persistence/query/agent-loop/runner: the newer-format log is
+  LIST_EXCLUDED from every painted frame, the current-format log with an
+  unknown-event body lists as a Picker row and its selection paints the OFFICIAL
+  refusal while the readable Session keeps the surface, and both artifacts stay
+  byte-identical) and `test/session-picker-format-refusal.test.ts`
+  (the production `/sessions` picker surfaces the official refusal text at
+  120/80/44 columns; its resume error is the harness stand-in).
 - B2: `test/direct-working-directory-rc2.test.ts` (real Agent + real
   `working_directory` tool + real projections: status/`@`/skill scopes follow
   the committed directory, the header keeps the original project, a vanished
@@ -6574,18 +6599,26 @@ system or fork divergence is introduced.
 - Remote Web configuration stays unavailable by design (S3/S4 own the generated
   Remote settings parity); the Remote backend never names a Host namespace.
 - After a REFUSED session resume the Session Picker shows the official
-  refusal and mounts nothing, but whether the runner restores the previous
-  Session owner on that failure path is NOT_VERIFIED here (the runner harness
-  rejects the resume directly; a corrupt on-disk artifact would be needed to
-  prove the real restoration).
-- The B1 user-sink tests (`task-center-external-leaf`, `session-picker-format-refusal`)
-  drive the REAL Task Center / Session Picker surfaces and the real row/notice
-  contract, but their authority INPUT is a stand-in (the descendant catalog
-  source, and the resume error the runner harness raises). The reader-level
-  refusal over a REAL newer-format artifact is proven separately in
-  `test/session-v4-rc2-persistence.test.ts`; a single fixture that runs the real
-  agent-loop testkit underneath the real runner (so the refusal travels
-  persistence → agent loop → picker) is NOT_VERIFIED and needs that mount.
+  refusal and mounts nothing. The REAL fixture
+  (`test/session-picker-real-refusal.test.ts`) additionally shows the readable
+  Session still owns the surface afterwards (its card is still painted and no
+  empty-Session invitation appears), so the previous owner is not lost to the
+  user. An audit of the runner's INTERNAL owner-restoration bookkeeping on that
+  path is still not part of the fixture; that path's retirement logs a
+  pre-existing `flush on a closed handle` warning at teardown (the same warning
+  is emitted by the fixture that only LISTS the unreadable artifact, so it is
+  not caused by the refusal interaction).
+- The B1 user-sink tests drive the REAL Task Center / Session Picker surfaces
+  and, after this round, the REAL authority underneath them: the external leaf
+  is produced by an official parent-delivery activation over the real subagent
+  runtime, and the picker refusal travels real persistence → real agent loop →
+  real runner. The remaining stand-in is the external provider BACKEND itself
+  (S2 owns no external subagent backend) and, for
+  `test/session-picker-format-refusal.test.ts` only, the resume error at the
+  120/80/44 width matrix. The empty roster wording (`No readable sessions`) is
+  pinned by a port-level roster (`test/session-picker-loading.test.ts`): on the
+  Direct stack a live Session is always listed, so the empty state does not
+  arise from a real artifact tree.
 - Can a Workflow member id ALSO be an rc.2 external catalog row? Traced against
   the installed packages: the Workflow runtime starts its children with
   `delivery: 'caller'` (`dsh-workflow-ptc`), and the subagent manager only calls
@@ -6600,7 +6633,11 @@ system or fork divergence is introduced.
   visible ANYWAY (identity, not row kind): dropping a matching id silently would
   be the worse failure if a future producer registers parent-delivered external
   children. `test/task-browser-runtime.test.ts` covers that as an IDENTITY GUARD
-  (a synthetic collision), explicitly NOT as producer evidence.
+  (a synthetic collision), explicitly NOT as producer evidence. The SAME
+  delivery boundary is exercised positively by
+  `test/task-center-external-leaf.test.ts`: an official parent-delivery
+  activation writes the catalog row the real Task Center paints, and mutating
+  the spec to `'caller'` leaves the official catalog empty.
 - Web provider network success against a billed DeepSeek endpoint is not
   exercised here (the outer HTTP transport is stubbed); a user-provided account
   would be required.
