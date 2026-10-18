@@ -1217,7 +1217,10 @@ export class TaskBrowserPanel implements Component, Focusable {
       { text: 'Enter open', priority: 90 },
       { text: '↑↓ select', priority: 80 },
       { text: '←→ tree', priority: 70 },
-      { text: 's stop', priority: 60 },
+      // The hint advertises the SELECTED row's capability: an external catalog
+      // leaf (or any other non-stoppable row) has no Stop action at all, so the
+      // key would be a silent no-op. Dropping the segment keeps the bar truthful.
+      ...(this.canStop(this.selectedItem()) ? [{ text: 's stop', priority: 60 }] : []),
       ...(this.searchEnabled ? [{ text: '/ search', priority: 30 }] : []),
       { text: 'a scope', priority: 20 },
       { text: `${componentKeymap.keyHint('tasks.type.previous')} type`, priority: 10 },

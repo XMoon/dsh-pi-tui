@@ -11,6 +11,12 @@
  * its durable classification and NEVER opens a viewer, offers Stop/Continue, or
  * presents a local child it does not have.
  *
+ * EVIDENCE BOUNDARY: the row and its Detail are asserted on the PAINTED frame
+ * at all three sizes; the action bar advertises no `s stop` for that row (and
+ * `s` latches nothing); Enter's refusal is asserted on the production notice
+ * slot while the panel is open and on the PAINTED frame right after the user
+ * closes it (the panel paints over the notice row while it is open).
+ *
  * FIXTURE (real): the official agent-loop testkit, the official JSONL
  * persistence, the real session-query engine, the official subagent runtime,
  * the real runner and the real `/tasks` path. The ONLY stand-in is the external
@@ -186,12 +192,23 @@ for (const [columns, rows] of SIZES) test(`the REAL Task Center external leaf fr
     assert.match(frame, /activity\s+External/u, 'the Detail states the activity word')
   }
 
+  // The action bar advertises the SELECTED row's capability: the external leaf
+  // cannot be stopped (`canStop === false`), so no Stop hint may be painted and
+  // pressing `s` must never latch the stop confirmation.
+  assert.ok(!/\bs stop\b/u.test(frame), `the non-stoppable external row advertises no Stop hint:\n${frame}`)
+  vt.sendInput('s')
+  await settle()
+  await new Promise(resolve => setTimeout(resolve, 30))
+  await vt.waitForRender()
+  assert.doesNotMatch(view(), /Y confirm stop/u, `pressing s on the external row latches nothing:\n${view()}`)
+
   // Enter: the external leaf is not openable and mounts nothing. The refusal is
   // a NOTICE; it shares the frame with the capturing Task Center panel (the
   // panel paints over the notice row while it is open — a pre-existing layout
-  // fact of two independent surfaces), so the painted witness is read right
-  // after the user closes it. The production notice slot carries the exact
-  // sentence in BOTH states, which is what a narrow paint cannot show.
+  // fact of two independent surfaces), so the PAINTED witness below is read
+  // right after the user closes the panel: that is what this assertion records.
+  // While the panel is open the notice is only in the production slot (asserted
+  // here, never presented as a painted fact).
   const viewersBefore = probe.apps.length
   vt.sendInput('\r')
   await settle()
@@ -207,9 +224,15 @@ for (const [columns, rows] of SIZES) test(`the REAL Task Center external leaf fr
   await new Promise(resolve => setTimeout(resolve, 60))
   await vt.waitForRender()
   const after = view()
+  for (const line of vt.getViewport()) {
+    assert.ok(visibleWidth(line) <= columns, `no refused frame row overflows ${columns} cells: ${JSON.stringify(line)}`)
+  }
   const painted = after.split('\n').map(line => line.trim())
-  assert.ok(painted.some(line => line.includes('external subagent')),
-    `the refusal line is painted at ${columns} columns:\n${after}`)
+  // The refusal REASON must be readable, not just its prefix: the measured
+  // 44-column frame wraps it into `external subagent: no local session to` /
+  // `open`, so the asserted fragment is the part every size keeps on screen.
+  assert.ok(painted.some(line => line.includes('no local session')),
+    `the painted refusal states its reason at ${columns} columns:\n${after}`)
   if (columns >= 120) {
     assert.ok(after.includes(REFUSAL), `the wide notice line paints the whole refusal:\n${after}`)
   }

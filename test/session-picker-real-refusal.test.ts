@@ -77,7 +77,19 @@ function placeArtifact(path: string, plainJsonl: string): void {
   writeFileSync(path, Buffer.concat([head, rest]))
 }
 
-test('the REAL Session Picker excludes an unlistable log and surfaces the refusal of an unreadable body', async t => {
+/**
+ * The frozen sizes with the fragments the MEASURED frames actually paint: the
+ * 80x10 viewport scrolls the transcript to the refusal's tail (so its card is
+ * above the viewport while the tail fragment is on screen), while 120/44 keep
+ * the beginning of the official sentence and the Session card.
+ */
+const SIZES = [
+  { columns: 120, rows: 40, cardVisible: true, fragments: ['transition failed', 'contains event type', 'refusing to interpret the log'] },
+  { columns: 80, rows: 10, cardVisible: false, fragments: ['not marked ignorable', 'refusing to interpret the log'] },
+  { columns: 44, rows: 20, cardVisible: true, fragments: ['transition failed', 'contains event type', '"totally/unknown-event"', 'this harness', 'refusing to interpret the log'] },
+] as const
+
+for (const { columns, rows, cardVisible, fragments } of SIZES) test(`the REAL Session Picker excludes an unlistable log and surfaces a refused body at ${columns}x${rows}`, async t => {
   const life = testLifecycle(t)
   const root = life.tempDir('dsh-s2b-real-picker-')
   const home = life.tempDir('dsh-s2b-real-picker-home-')
@@ -87,7 +99,7 @@ test('the REAL Session Picker excludes an unlistable log and surfaces the refusa
     if (previousHome === undefined) delete process.env.DSH_HOME
     else process.env.DSH_HOME = previousHome
   })
-  const vt = new VirtualTerminal(120, 40)
+  const vt = new VirtualTerminal(columns, rows)
   life.defer(installVirtualProcessTerminal(vt))
   const probe = installProbe()
   life.defer(probe.restore)
@@ -196,10 +208,10 @@ test('the REAL Session Picker excludes an unlistable log and surfaces the refusa
   await vt.waitForRender()
   const listed = view()
   for (const line of vt.getViewport()) {
-    assert.ok(visibleWidth(line) <= 120, `no frame row overflows: ${JSON.stringify(line)}`)
+    assert.ok(visibleWidth(line) <= columns, `no listed frame row overflows ${columns} cells: ${JSON.stringify(line)}`)
   }
-  assert.ok(listed.includes('readable') && listed.includes('refusedx'),
-    `the readable and the refused Sessions are presented as rows:\n${listed}`)
+  assert.match(listed, /2\/2/u, `the picker knows both readable logs:\n${listed}`)
+  assert.ok(listed.includes('readable'), `the live readable Session is painted:\n${listed}`)
   assert.ok(!listed.includes('newerfmt'),
     `the LIST_EXCLUDED log is never presented (and never shown as an empty Session):\n${listed}`)
 
@@ -217,6 +229,9 @@ test('the REAL Session Picker excludes an unlistable log and surfaces the refusa
   await new Promise(resolve => setTimeout(resolve, 60))
   await vt.waitForRender()
   const after = view()
+  for (const line of vt.getViewport()) {
+    assert.ok(visibleWidth(line) <= columns, `no refused frame row overflows ${columns} cells: ${JSON.stringify(line)}`)
+  }
   // The production notice slot carries the official refusal verbatim (the
   // narrow-width assertion cannot rely on the painted line alone).
   const noticeText = (probe.apps.at(-1) as unknown as {
@@ -224,13 +239,23 @@ test('the REAL Session Picker excludes an unlistable log and surfaces the refusa
   }).currentNotice?.()?.text
   assert.ok(noticeText !== undefined && noticeText.includes(UNKNOWN_EVENT) && noticeText.includes('unknown to this harness'),
     `the refusal notice is the official message, got: ${String(noticeText)}`)
-  assert.ok(after.includes(UNKNOWN_EVENT) && after.includes('unknown to this harness'),
-    `the official refusal reaches the user's surface:\n${after}`)
+  for (const fragment of fragments) {
+    assert.ok(after.includes(fragment),
+      `the painted refusal carries "${fragment}" at ${columns} columns:\n${after}`)
+  }
   // The unreadable log is never mounted as an empty Session, and the readable
   // Session still owns the surface.
   assert.doesNotMatch(after, /type a message to start a session/u,
     'a refused log is never presented as an empty Session')
-  assert.match(after, /session\s+readable/u, `the readable Session still owns the surface:\n${after}`)
+  if (cardVisible) {
+    assert.match(after, /session\s+readable/u, `the readable Session still owns the surface:\n${after}`)
+  } else {
+    // The viewport scrolled past the card; the positive fact is the roster's
+    // live readable row (asserted above) plus the refusal naming ONLY the
+    // refused log, and the empty-Session negative asserted here.
+    assert.ok(after.includes('refusing to interpret the log'),
+      `the refusal is the one this Enter produced at ${columns} columns:\n${after}`)
+  }
   assert.match(after, /refusedx/u, 'the refused row is the one this Enter selected')
 
   // ── The artifacts are never rewritten by listing or by a refused open ──

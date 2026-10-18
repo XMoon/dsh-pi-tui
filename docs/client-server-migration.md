@@ -6501,8 +6501,11 @@ production changes and positive/negative evidence.
   `/settings` journey: launcher → legacy section → selector → read-back →
   reopen, Esc no-write, rapid intents FIFO, a failed write reverts and reports
   `Not saved`, Esc restores the Workspace row, a custom provider id is visible
-  and not selectable) and `test/settings-web-visual.test.ts` (the frozen visual
-  matrix incl. cell ink).
+  and not selectable; the endpoint verdict waits for the NEWEST authority read
+  at the 120×40/80×10/44×20 frozen sizes, so a superseded readback never decides
+  and the reopened row reports the value the Host actually keeps) and
+  `test/settings-web-visual.test.ts` (the frozen visual matrix incl. cell ink and
+  the refused-endpoint row under dark/light/custom + emoji/symbols/minimal).
 - B4: `test/credentials-precedence-local.test.ts` (the official precedence and
   external read), `test/model-selection-direct.test.ts`,
   `test/job-observation-direct.test.ts`, `test/subagent-port.test.ts`,
@@ -6582,6 +6585,30 @@ system or fork divergence is introduced.
   that currently owns the surface, so an old read (e.g. one suspended while a
   write and a Workspace reopen happened) can never leave the surface on a
   pre-write summary (`test/settings-web-provider.test.ts`, mutation-checked).
+- Review-delta visible changes (§4A.3): the endpoint row's refused-write state
+  now states the value the Host actually keeps (`Current: Not saved · the Host
+  keeps "<value>" · …`), because a verdict superseded by a newer read lands
+  after the endpoint panel was cancelled — the row is the only surviving sink.
+  Measured on the same real `TuiApp` + `VirtualTerminal` path: the v1→v2 frames
+  at 120×40/80×10/44×20 in `test/settings-web-provider.test.ts` (the changed
+  state; the 44-column floor drops the description by the frozen drop order, so
+  the verdict chip is asserted there and the description at 120/80), the
+  changed-state frame across the whole size matrix (200×50 … 44×20) and under
+  light + custom-symbols + dark-minimal in `test/settings-web-visual.test.ts`,
+  and the action bar of the REAL external Task row, which advertises no `s stop`
+  (the row's `canStop` is false and `s` latches nothing), at 120×40/80×10/44×20
+  in `test/task-center-external-leaf.test.ts` plus the panel's capability pair
+  in `test/task-panel.test.ts`. The changed strings introduce no palette token,
+  glyph or icon, so the icon-style/pre-paint invariants above hold by
+  construction.
+- Review-delta NOT_RUN (not PASS): a real-terminal record of those three changed
+  states is NOT_RUN because each needs a state this machine cannot produce — a
+  Host that KEEPS a different endpoint value (a project layer or the official
+  canonicalization), a registered external subagent provider, and an empty
+  readable roster on the Direct stack (a live Session is always listed). The
+  §8b real-terminal record still covers the Web surface's own journey, and the
+  TSP/native Session Browser keeps its own empty-state wording (that surface
+  belongs to the TSP session-browser PR).
 - Not run: a physical Tern GUI record (the TSP renderer does not paint these
   Settings surfaces), recorded as NOT_VERIFIED/NOT_RUN rather than PASS. The
   live-palette switch of the mounted Web rows IS covered in-process (the theme
