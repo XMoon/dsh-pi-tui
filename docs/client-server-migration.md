@@ -4651,6 +4651,13 @@ Scope note: this section records **M3-5 PR4 only**. M3-5 as a stage was
   each map to exactly ONE invalidation. A lost generation (`undefined`)
   publishes nothing and starts no custom reconnect loop; the official
   Connection owns reconnection.
+- **Generation-fenced Remote results** (`plugin-manager-remote.ts`): every async
+  result — inspection, enable/disable, remove, install, `waitForInstall` and
+  `cancelInstall` — is checked against the Connection generation captured
+  before dispatch. A result carried by a superseded generation raises the
+  transport-neutral `PluginManagerStaleResultError`; the controller never
+  commits it (a stale inspection returns to the editor, mutations/reconcile
+  reread the authoritative inventory).
 - **Demand-aware refreshes** (`src/app/plugin-manager/controller.ts`): the
   controller subscribes once at construction but performs an authoritative
   reread on invalidation only while a surface is showing the inventory. A

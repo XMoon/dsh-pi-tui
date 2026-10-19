@@ -123,23 +123,25 @@ export class RemotePluginManagerPort implements PluginManagerPort {
   }
 
   async inspect(spec: string, registry?: string | null, signal?: AbortSignal): Promise<PluginSpecInspectionFact> {
-    const result = await this.remote.pluginManager.inspect(
-      spec,
-      registry === undefined ? undefined : { registry },
-      signal,
-    )
-    return detachInspection(unwrapRemote(result, 'inspect'))
+    return detachInspection(await this.currentness(
+      'inspect',
+      () => this.remote.pluginManager.inspect(
+        spec,
+        registry === undefined ? undefined : { registry },
+        signal,
+      ),
+    ))
   }
 
   /**
-   * One Remote settlement fenced to the Connection generation captured BEFORE
-   * dispatch. The fence covers success, an official refusal result and a
-   * transport rejection alike: a reply carried by a superseded generation is
-   * never presented as the new generation's definite outcome. The Host may
-   * already have applied a write (or advanced an install), so the caller's
-   * authoritative inventory reread / request-id reconcile decides the visible
-   * outcome. An unchanged generation preserves the original error and its real
-   * refusal taxonomy.
+   * One Remote result (a read or a settlement) fenced to the Connection
+   * generation captured BEFORE dispatch. The fence covers success, an official
+   * refusal result and a transport rejection alike: a reply carried by a
+   * superseded generation is never presented as the new generation's definite
+   * outcome. The Host may already have applied a write (or advanced an
+   * install), so the caller's authoritative inventory reread / request-id
+   * reconcile decides the visible outcome. An unchanged generation preserves
+   * the original error and its real refusal taxonomy.
    */
   private async currentness<T>(operation: string, call: () => Promise<RemoteResultLike<T>>): Promise<T> {
     const captured = this.generation.getSnapshot()

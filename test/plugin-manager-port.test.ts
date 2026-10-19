@@ -1061,6 +1061,22 @@ test('dispose aborts an in-flight inspect, releases both subscriptions and never
   assert.equal(renders(), rendersAtDispose, 'a late inspect result never repaints a disposed controller')
 })
 
+test('a superseded inspection result returns to the editor and never paints confirm', async () => {
+  const inspectGate = deferred<PluginSpecInspectionFact>()
+  const { port } = fakePort({ inspectImpl: () => inspectGate.promise })
+  const { controller } = controllerOf(port)
+  controller.beginManualInstall()
+  controller.inspect('pkg', null)
+  await tick()
+  assert.equal(controller.installView()?.phase, 'inspecting')
+  inspectGate.reject(new PluginManagerStaleResultError('inspect'))
+  await tick()
+  const view = controller.installView()
+  assert.equal(view?.phase, 'editing', 'a superseded inspection stays in the editor')
+  assert.equal(view?.inspection, undefined, 'no stale inspection facts are retained')
+  assert.match(view?.message ?? '', /currentness context was superseded/u)
+})
+
 test('dispose during a Host install neither cancels nor retries it and ignores a late install event', async () => {
   const gate = deferred<PluginChangeFact>()
   const { port, state, emit, installSubscriptions } = fakePort({ installImpl: () => gate.promise })
