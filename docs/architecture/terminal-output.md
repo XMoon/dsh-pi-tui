@@ -171,8 +171,8 @@ multi-line plain policy. The tool's canonical `TranscriptMessage.name` and the
 `ui.tool.name` is projected. Raw ids, node keys, answer values, action/event
 identifiers, SDK frames and currentness are untouched, so source/GUI evidence
 tiers are unchanged. A structural node check proves the payload is safe; it
-does not prove the closed-source Tern client's own rendering — that remains
-`NOT_VERIFIED` until a real pinned pane is tested.
+does not prove the closed-source Tern client's own rendering — that requires
+version-qualified real-pane evidence before it may be claimed.
 
 ## Test matrix and repro
 
