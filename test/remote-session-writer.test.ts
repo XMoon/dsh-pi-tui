@@ -24,7 +24,7 @@ import { createObservableGenerationHarness, type GenerationHarness } from './sup
 interface SessionCalls {
   beginInputs: unknown[]
   promptCalls: { content: unknown; mode: string; requestId: string | undefined }[]
-  /** The argument count of every `session.prompt` call (the official four: content, mode, signal, requestId). */
+  /** The real number of arguments each `session.prompt` call receives (the official four: content, mode, signal, requestId). */
   promptArgCounts: number[]
   updateQueueCalls: { itemId: string; action: unknown }[]
   cancelCalls: number
@@ -94,9 +94,13 @@ function writerHarness(): WriterHarness {
         abandon: () => { calls.abandonCalls += 1 },
       }
     },
-    prompt: async (content, mode, _signal, requestId, ...extra: unknown[]) => {
+    //    A rest-only signature so `args.length` is the REAL argument count:
+    //    declaring `signal`/`requestId` as named parameters would make any
+    //    3-argument call indistinguishable from the official 4.
+    prompt: async (...args: Parameters<RemoteWriteSessionFace['prompt']>) => {
+      const [content, mode, , requestId] = args
       calls.promptCalls.push({ content, mode, requestId })
-      calls.promptArgCounts.push(4 + extra.length)
+      calls.promptArgCounts.push(args.length)
       promptHook?.()
       if (promptThrows !== undefined) throw promptThrows
       return promptResult
