@@ -1087,7 +1087,7 @@ test('the Web provider and Share Original Question rows state defaults, billing 
   await openWebSection(h)
   const compact = (): string => h.view().replace(/[\u2500-\u257f│]/gu, ' ').replace(/\s+/gu, ' ')
   assert.match(compact(), /Messages is the official default and does not call the billed Search API/u)
-  assert.match(compact(), /DeepSeek Search API is opt-in and separately billed \(a Messages plan does not cover it\)/u)
+  assert.match(compact(), /DeepSeek Search API is opt-in and separately billed \(a Messages plan does not guarantee coverage\)/u)
   assert.match(compact(), /up to 128 characters of the triggering question are sent as ori_question/u)
   assert.match(compact(), /The choice applies to the next search/u)
   // The endpoint row is base-owned Web configuration, not a Bundle, and states
@@ -1097,5 +1097,5 @@ test('the Web provider and Share Original Question rows state defaults, billing 
   assert.match(compact(), /never the full history or system prompt/u)
   await key(h, DOWN)
   assert.match(compact(), /base-owned, not an Optional Bundle/u)
-  assert.match(compact(), /Changing it sends the credential and query there; only a trusted https base is accepted/u)
+  assert.match(compact(), /Changing it sends the credential and query there; confirm only a trusted HTTPS base/u)
 })

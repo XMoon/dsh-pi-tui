@@ -272,7 +272,12 @@ function selectedBundles(profileDir: string): string[] {
   return bundles as string[]
 }
 
-function writeProfile(profileDir: string, bundles: readonly string[], dependencies: Readonly<Record<string, string>>): void {
+function writeProfile(
+  profileDir: string,
+  bundles: readonly string[],
+  dependencies: Readonly<Record<string, string>>,
+  installationBoot: boolean,
+): void {
   writeFileSync(join(profileDir, 'package.json'), JSON.stringify({
     name: 's4-d2-optional-bundle-profile',
     private: true,
@@ -280,9 +285,10 @@ function writeProfile(profileDir: string, bundles: readonly string[], dependenci
     dsh: { profile: { bundles, patch: 'cordis.patch.yml' } },
   }, null, 2))
   // HMR is deliberately disabled in this Host-only fixture (no application
-  // readiness owner). The DISK patch carries the same fact so an official
-  // ConfigEditor recompose (a real settings write) does not try to activate it.
-  writeFileSync(join(profileDir, 'cordis.patch.yml'), '- id: hmr\n  disabled: true\n')
+  // readiness owner). Only the installation-boot variant performs official
+  // ConfigEditor recomposes (real settings writes), so only it needs the same
+  // fact on DISK; the default fixture keeps the historical empty profile patch.
+  writeFileSync(join(profileDir, 'cordis.patch.yml'), installationBoot ? '- id: hmr\n  disabled: true\n' : '[]\n')
   writeFileSync(join(profileDir, 'cordis.yml'), '[]\n')
 }
 
@@ -308,6 +314,7 @@ function prepareRoot(
   installation: S4D2Installation,
   bundles: readonly string[],
   profileDependencies: Readonly<Record<string, string>>,
+  installationBoot: boolean,
 ): string {
   const profileDir = join(root, 'profile')
   const home = join(root, 'home')
@@ -330,7 +337,7 @@ function prepareRoot(
     // links the ONE provisioned rc.2 tree instead of duplicating it.
     symlinkSync(installation.nodeModules, join(profileDir, 'node_modules'), 'dir')
   }
-  writeProfile(profileDir, bundles, profileDependencies)
+  writeProfile(profileDir, bundles, profileDependencies, installationBoot)
   return profileDir
 }
 
@@ -569,7 +576,13 @@ export async function startS4D2Host(
   // Teardown releases whichever Context a restart left live, then the lease
   // fallback above observes an already-released lease.
   life.defer(() => tracker.current?.dispose())
-  prepareRoot(root, resolution.installation, [BASE_BUNDLE, ...(settings.bundles ?? [])], settings.profileDependencies ?? {})
+  prepareRoot(
+    root,
+    resolution.installation,
+    [BASE_BUNDLE, ...(settings.bundles ?? [])],
+    settings.profileDependencies ?? {},
+    settings.installationBoot === true,
+  )
   return bootAt(options)
 }
 

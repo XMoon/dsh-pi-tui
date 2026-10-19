@@ -42,7 +42,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **The `/settings → Other → Web Search / Fetch` help now carries the real
   facts.** Both DeepSeek APIs are separate opt-in billed providers that a login
-  or an ordinary Messages plan does not guarantee to cover; the default
+  or an ordinary Messages plan does not guarantee coverage; the default
   Messages/HTTP pair calls no billed API and is not changed by installing or
   enabling another bundle (this is base-profile Web configuration, not an
   Optional Bundle). `Share Original Question` defaults to on and sends only up
@@ -72,6 +72,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `relay`/`recall` Context remain independent.
 
 ### Fixed
+
+- **Selecting the B03 Auto permission preset keeps the current permission
+  fact in the footer.** Auto was missing from the builtin permission label map,
+  so switching to it made the whole Permission badge disappear; it now renders
+  `[auto]` (and keeps the same fact in compact/plain formats), matching the
+  official preset's current value.
 
 - **Human prompts now carry the sending TUI process's time zone**, so the official
   `time-context` injection no longer reports `Browser time zone ... unavailable` for ordinary

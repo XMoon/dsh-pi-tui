@@ -70,6 +70,10 @@ const PERMISSION_LABELS: Readonly<Record<string, string>> = {
   'danger-full-access': 'yolo',
   'read-only': 'read-only',
   'workspace-write': 'workspace-write',
+  // The B03 experimental bundle contributes the official `auto` preset; an
+  // unknown id used to render NO permission fact at all, which made selecting
+  // Auto hide the effective preset from the footer.
+  auto: 'auto',
   custom: 'custom',
 }
 
