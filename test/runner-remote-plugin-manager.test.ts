@@ -621,6 +621,9 @@ test('L6-F (S5 A12): a Remote mutation reply carried by a superseded Connection 
   let hostWrites = 0
   let releaseReply!: () => void
   const replyGate = new Promise<void>(resolve => { releaseReply = resolve })
+  // Teardown fallback: release LIFO before the mounted Host/controller is
+  // disposed, even when an assertion fails before the normal release.
+  life.defer(() => { releaseReply() })
   let replyHeld!: () => void
   const replyReached = new Promise<void>(resolve => { replyHeld = resolve })
   hostService.setBundleEnabled = async function patchedHostWrite(
