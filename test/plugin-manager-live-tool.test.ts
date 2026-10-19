@@ -116,6 +116,8 @@ function fakePluginManager(onEnable: () => void): Record<string, unknown> {
   return {
     listBundles: async () => [{
       name: 'probe-bundle',
+      official: false,
+      availability: 'profile',
       enabled: false,
       installed: true,
       optional: false,

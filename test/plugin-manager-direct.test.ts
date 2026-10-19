@@ -64,6 +64,7 @@ test('snapshot maps bundles/plugins/registries/exemptions onto frozen detached f
         version: '0.4.8',
         official: false,
         availability: 'profile',
+        source: 'file:/home/user/plugins/dsh-pi-tui',
         meta: { title: { en: 'TUI' }, description: 'the surface' },
         description: 'manifest description',
         enabled: true,
@@ -88,6 +89,11 @@ test('snapshot maps bundles/plugins/registries/exemptions onto frozen detached f
   assert.equal(bundle.name, '@xmoon76/dsh-pi-tui')
   assert.equal(bundle.title, 'TUI')
   assert.equal(bundle.description, 'manifest description')
+  // rc.2 catalog/source facts survive the shared mapping unchanged.
+  assert.equal(bundle.official, false)
+  assert.equal(bundle.availability, 'profile')
+  assert.equal(bundle.source, 'file:/home/user/plugins/dsh-pi-tui')
+  assert.equal(bundle.installTarget, undefined)
   assert.equal(bundle.rows[0]!.title, 'App')
   assert.equal(bundle.rows[0]!.entryId, 'e-app')
   assert.deepEqual([...bundle.overrides], ['tool-bash'])
@@ -180,6 +186,75 @@ test('subscribeInvalidation maps the official plugin-manager/changed and unsubsc
 test('a missing pluginManager service fails loud, never silently', async () => {
   const port = new DirectPluginManagerPort({ get: () => undefined, on: () => () => {} })
   await assert.rejects(() => port.snapshot(), /pluginManager service unavailable/)
+})
+
+test('a missing official catalog entry keeps official/availability/installTarget exactly', async () => {
+  const port = new DirectPluginManagerPort(host(fakeService({
+    listBundles: async () => [{
+      name: '@deepseek-ai/dsh-experimental-auto-review',
+      official: true,
+      availability: 'missing',
+      installTarget: { spec: '@deepseek-ai/dsh-experimental-auto-review@0.2.1-rc.2', version: '0.2.1-rc.2' },
+      enabled: false,
+      installed: false,
+      optional: true,
+      removable: false,
+      rows: [],
+      overrides: [],
+    }],
+  })).ctx)
+
+  const snapshot = await port.snapshot()
+  const bundle = snapshot.bundles[0]!
+  assert.equal(bundle.official, true)
+  assert.equal(bundle.availability, 'missing')
+  assert.deepEqual(bundle.installTarget, {
+    spec: '@deepseek-ai/dsh-experimental-auto-review@0.2.1-rc.2',
+    version: '0.2.1-rc.2',
+  })
+  assert.equal(bundle.installed, false)
+  assert.equal(bundle.optional, true)
+})
+
+test('the detached change result preserves the rc.2 restart/version/build facts', async () => {
+  const port = new DirectPluginManagerPort(host(fakeService({
+    installBundle: async () => change({
+      stage: 'install',
+      application: 'restart-required',
+      restartReason: 'no-hmr',
+      bundle: 'pkg',
+      version: '2.3.4',
+      pendingBuilds: ['esbuild'],
+      approvedBuilds: ['sharp'],
+      registries: ['https://r', null],
+      failedAt: 'registry',
+      packageResult: {
+        exitCode: 1,
+        output: 'ERR_PNPM_BUILD_BLOCKED',
+        truncated: false,
+        logPath: '/tmp/run.log',
+        kind: 'build-blocked',
+        timedOut: false,
+        incompatible: [{ name: 'pkg', version: '2.3.4', runtimeVersion: '0.2.1-rc.2', requirements: { 'engines.dsh': '>=9' } }],
+      },
+    }),
+  })).ctx)
+
+  const changeFact = await port.startInstall({ requestId: 'req-1', spec: 'pkg', registry: null, enabled: true })
+  assert.equal(changeFact.application, 'restart-required')
+  assert.equal(changeFact.restartReason, 'no-hmr')
+  assert.equal(changeFact.version, '2.3.4')
+  assert.deepEqual([...changeFact.pendingBuilds!], ['esbuild'])
+  assert.deepEqual([...changeFact.approvedBuilds!], ['sharp'])
+  assert.deepEqual([...changeFact.registries!], ['https://r', null])
+  assert.equal(changeFact.failedAt, 'registry')
+  assert.equal(changeFact.packageResult?.kind, 'build-blocked')
+  assert.equal(changeFact.packageResult?.output, 'ERR_PNPM_BUILD_BLOCKED')
+  assert.equal(changeFact.packageResult?.logPath, '/tmp/run.log')
+  assert.equal(changeFact.packageResult?.incompatible?.[0]?.name, 'pkg')
+  assert.ok(Object.isFrozen(changeFact))
+  assert.ok(Object.isFrozen(changeFact.packageResult))
+  assert.ok(Object.isFrozen(changeFact.pendingBuilds))
 })
 
 test('the TUI plugin-manager source never touches profile/process internals', () => {

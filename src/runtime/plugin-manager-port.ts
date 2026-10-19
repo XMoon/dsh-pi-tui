@@ -36,6 +36,30 @@ export interface PluginErrorFact {
   readonly incompatible?: readonly PluginIncompatibleFact[]
 }
 
+/**
+ * Where a bundle's files live, exactly as the official `BundleInfo.availability`
+ * reports it: shipped with the installation, held by the profile, or not
+ * readable at all (a discoverable on-demand catalog entry included).
+ */
+export type PluginAvailability = 'installation' | 'profile' | 'missing'
+
+/** The official released Host version offered for an on-demand catalog entry. */
+export interface PluginInstallTargetFact {
+  readonly spec: string
+  readonly version: string
+}
+
+/** One package operation's raw completion facts (official `PackageResult`). */
+export interface PluginPackageResultFact {
+  readonly exitCode: number
+  readonly output: string
+  readonly truncated: boolean
+  readonly logPath: string
+  readonly kind?: string
+  readonly timedOut?: boolean
+  readonly incompatible?: readonly PluginIncompatibleFact[]
+}
+
 /** One row a bundle's patch declares. */
 export interface PluginBundleRowFact {
   readonly rowId: string
@@ -48,9 +72,16 @@ export interface PluginBundleRowFact {
   readonly entryId?: string
 }
 
-/** One installed or installation-provided bundle (official `BundleInfo`). */
+/** One shipped, profile-installed, or discoverable bundle (official `BundleInfo`). */
 export interface PluginBundleFact {
   readonly name: string
+  /** Project-maintained shipped optional bundle or on-demand catalog entry,
+   * independent of installation and selection. */
+  readonly official: boolean
+  /** Where the bundle's files live. */
+  readonly availability: PluginAvailability
+  /** The official released Host version offered for an on-demand catalog entry. */
+  readonly installTarget?: PluginInstallTargetFact
   readonly version?: string
   readonly title?: string
   readonly description?: string
@@ -60,6 +91,9 @@ export interface PluginBundleFact {
   readonly installed: boolean
   /** Shipped by the installation for the user to switch on; never removable. */
   readonly optional: boolean
+  /** The spec `pnpm add` accepts for a profile-owned dependency (user
+   * information removed by the Host), when one is declared. */
+  readonly source?: string
   readonly removable: boolean
   readonly readOnlyReason?: PluginReadOnlyReason
   readonly error?: PluginErrorFact
@@ -127,17 +161,33 @@ export type PluginSpecInspectionFact =
   }
 
 /** One persisted change and its independently observed application outcome.
- * Only the facts the TUI renders: the port never mirrors the whole upstream
- * `ChangeResult` (no package output, no Host log path, no profile facts). */
+ * Carries the rc.2 `ChangeResult` facts D1 renders: the restart reason, the
+ * actual installed manifest version, pending/approved build scripts, the raw
+ * package result, the registries asked and what failed to answer. */
 export interface PluginChangeFact {
   readonly changed: boolean
   readonly application: 'applied' | 'restart-required' | 'overridden' | 'failed' | 'cancelled'
+  /** Present with `restart-required`: why the change waits for the next start. */
+  readonly restartReason?: string
   readonly stage: 'install' | 'enable' | 'remove'
   readonly target: string
+  readonly enabled?: boolean
   readonly error?: PluginErrorFact
   readonly warnings?: readonly string[]
   /** The bundle an installation added, once pnpm and the bundle check accepted it. */
   readonly bundle?: string
+  /** The installed bundle's manifest version, when declared. */
+  readonly version?: string
+  /** Exact package names awaiting explicit script approval after a failed run. */
+  readonly pendingBuilds?: readonly string[]
+  /** Package script permissions saved before this installation attempt. */
+  readonly approvedBuilds?: readonly string[]
+  /** One package operation's completion facts. */
+  readonly packageResult?: PluginPackageResultFact
+  /** The registries the installation asked, in order. */
+  readonly registries?: readonly (string | null)[]
+  /** What the last failed run could not reach or get an answer from. */
+  readonly failedAt?: 'registry' | 'spec-host'
 }
 
 /** One user install attempt: exactly one request id owns it. */
@@ -148,6 +198,8 @@ export interface PluginInstallRequest {
   /** The registry asked first; null = the one pnpm's own configuration names. */
   readonly registry: string | null
   readonly enabled?: boolean
+  /** Explicitly allow these pending packages' scripts for this profile. */
+  readonly approvedBuilds?: readonly string[]
 }
 
 /** One official install-phase announcement, correlated by request id. */

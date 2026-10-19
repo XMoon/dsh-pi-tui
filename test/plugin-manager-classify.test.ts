@@ -35,6 +35,8 @@ function observation(overrides: Partial<TuiExtensionObservation> = {}): TuiExten
 function bundle(overrides: Partial<PluginBundleFact> = {}): PluginBundleFact {
   return {
     name: 'ordinary',
+    official: false,
+    availability: 'profile',
     enabled: true,
     installed: true,
     optional: false,

@@ -147,6 +147,7 @@ export class RemotePluginManagerPort implements PluginManagerPort {
       requestId: pluginInstallRequestId(request.requestId),
       registry: request.registry,
       ...(request.enabled === undefined ? {} : { enabled: request.enabled }),
+      ...(request.approvedBuilds === undefined ? {} : { approvedBuilds: [...request.approvedBuilds] }),
     }
     return detachChange(unwrapRemote(await this.remote.pluginManager.installBundle(request.spec, options), 'installBundle'))
   }
