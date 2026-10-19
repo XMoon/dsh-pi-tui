@@ -169,7 +169,7 @@ issues/PRs, not in repository docs.
   migration milestone retires them; current stage status is tracked in GitHub
   issues/PRs, never in repository docs.
 
-Read `docs/architecture/host-client.md` and `docs/architecture/host-client.md`
+Read `docs/architecture/host-client.md` and `docs/architecture/overview.md`
 before changing Host-owned behavior.
 
 ## Extension boundary
