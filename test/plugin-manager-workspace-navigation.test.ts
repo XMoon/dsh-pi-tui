@@ -659,6 +659,37 @@ test('search editing keeps its EXECUTABLE Enter apply hint on a zero-row frame',
   assert.doesNotMatch(plain([harness.viewport().at(-1)!]), /Enter apply/u, 'Enter really applied the search')
 })
 
+test('a resize before the repaint cannot enter invisible Details via Enter/Right', async t => {
+  for (const key of ['\r', '\x1b[C'] as const) {
+    const harness = await open({ columns: 140, rows: 40 })
+    try {
+      // No settle between resize and the key: the panel's paintedChrome still
+      // carries the 140x40 body, while the terminal is already 80x2.
+      harness.vt.resize(80, 2)
+      harness.vt.sendInput(key)
+      await harness.settle()
+      assert.equal(harness.panel.currentView(), 'list',
+        `${key === '\r' ? 'Enter' : 'Right'} must not enter Details from a stale frame`)
+    } finally {
+      started.delete(harness)
+      harness.app.dispose()
+    }
+  }
+
+  const recovered = await open({ columns: 140, rows: 40 })
+  t.after(() => { try { recovered.app.dispose() } catch {} })
+  recovered.vt.resize(80, 2)
+  await recovered.settle()
+  recovered.vt.sendInput('\r')
+  await recovered.settle()
+  assert.equal(recovered.panel.currentView(), 'list', 'the zero-row painted frame still refuses')
+  recovered.vt.resize(140, 40)
+  await recovered.settle()
+  recovered.vt.sendInput('\r')
+  await recovered.settle()
+  assert.equal(recovered.panel.currentView(), 'details', 'a repainted full-size frame admits Enter again')
+})
+
 test('a zero-row body revokes the B03 danger action until it is painted again', async () => {
   const harness = await open(autoReviewCatalog())
   await openAutoConfirm(harness)

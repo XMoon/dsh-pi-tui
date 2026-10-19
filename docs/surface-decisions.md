@@ -3055,7 +3055,9 @@ returns to the untouched conversation/transcript-fullscreen state.
   actually painted. A frame with ZERO body rows paints no body action/choice,
   so its list/details/confirm bar never advertises `Enter` and the list
   Enter/Right admission also refuses to open an invisible card's Details. The
-  80×2 matrix cannot show a fake `Enter cancel`/`Enter action`. Search editing
+  80×2 matrix cannot show a fake `Enter cancel`/`Enter action`. The admission
+  also uses the existing current-frame fence, so a resize followed by Enter
+  before the repaint cannot enter an invisible card's Details. Search editing
   is the deliberate exception: its `Enter apply` still executes when the input
   cell is not painted, so that hint stays truthful.
 - **B03 Auto Review is the ONE destructive confirmation (2026-10-19, S4-D2).**

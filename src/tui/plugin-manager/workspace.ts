@@ -765,6 +765,10 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
   // ── view transitions ─────────────────────────────────────────────────────
 
   private enterDetails(): void {
+    // Admission follows the CURRENT painted frame: after a resize but before
+    // the repaint, `paintedChrome` still describes the old geometry. The same
+    // currentness fence the mouse/Detail/confirm gates use closes that window.
+    if (!this.frameIsCurrent()) return
     // A zero-body frame paints no row; Enter/Right on an invisible selection
     // must not change the page (the bar stops advertising it too).
     if ((this.paintedChrome?.bodyRows ?? 0) <= 0) return
