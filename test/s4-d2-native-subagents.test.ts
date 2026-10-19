@@ -189,3 +189,18 @@ test('fixture restores the process environment after multiple concurrent hosts',
   assert.equal(process.env.DSH_HOME, originalDsh, 'the last release restores the original DSH_HOME')
   assert.equal(process.env.DSH_AGENTS_HOME, originalAgents, 'the last release restores the original agents root')
 })
+
+test('fixture re-applies its own environment on restart while another host is live', { skip }, async t => {
+  const originalHome = process.env.HOME
+  const first = await startS4D2Host(t, { bundles: [] })
+  const second = await startS4D2Host(t, { bundles: [] })
+  const restarted = await first.restart()
+  assert.equal(process.env.HOME, join(restarted.root, 'home'),
+    'the restarted host re-applies its OWN disposable HOME')
+  assert.equal(process.env.DSH_HOME, join(restarted.root, 'home'))
+  await second.dispose()
+  assert.equal(process.env.HOME, join(restarted.root, 'home'),
+    'the live restarted host keeps its isolated environment')
+  await restarted.dispose()
+  assert.equal(process.env.HOME, originalHome, 'the last release restores the original HOME')
+})

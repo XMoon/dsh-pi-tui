@@ -403,6 +403,9 @@ async function bootAt(options: HostOptions): Promise<OptionalBundleHost> {
     },
     async restart() {
       await ctx.fiber.dispose()
+      // A restart is a fresh boot of THIS host's profile root: re-apply its
+      // disposable environment before boot even when another host is live.
+      applyEnvironment(options.root)
       return bootAt(options)
     },
     async dispose() {
@@ -454,7 +457,9 @@ const ISOLATED_ENV_KEYS = [
 
 /** Point every credential/agent/cache/temp location at the disposable root;
  *  `scrubbedParentEnv()` preserves HOME, so native providers must never see the
- *  real one. Returns the exact previous values for restoration. */
+ *  real one. Returns the exact previous values for restoration.
+ *  (`TMPDIR`/`TMP`/`TEMP` intentionally stay ambient; this covers the
+ *  credential/agent/cache roots only.) */
 function environmentValues(root: string): Record<string, string> {
   const home = join(root, 'home')
   return {
