@@ -328,6 +328,7 @@
     "test:product": "node scripts/run-with-temp-root.mjs node --test test/*.test.ts test/tarball-smoke.test.mjs",
     "gen:dsh-presets": "node scripts/generate-dsh-presets.mjs",
     "gate:dsh-preset-parity": "node scripts/generate-dsh-presets.mjs --check",
-    "smoke:p1-profile": "node scripts/dsh-p1-profile-smoke.mjs"
+    "smoke:p1-profile": "node scripts/dsh-p1-profile-smoke.mjs",
+    "smoke:s4-d2-bundles": "node scripts/dsh-s4-d2-bundles-smoke.mjs"
   }
 }
