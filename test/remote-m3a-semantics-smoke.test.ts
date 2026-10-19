@@ -55,7 +55,14 @@ import UserQuestionService from '@deepseek-ai/dsh-user-questions'
 import WorkspaceRegistry from '@deepseek-ai/dsh-workspace'
 import LocalJobRegistry from '@deepseek-ai/dsh-jobs-local'
 import * as toolJobs from '@deepseek-ai/dsh-tool-jobs'
-import { createUserMessage, LlmAdapter, MessageId, ToolCallId } from '@deepseek-ai/dsh-llm'
+import {
+  createUserMessage,
+  LlmAdapter,
+  MessageId,
+  ToolCallId,
+  type GenerateOptions,
+  type StreamChunk,
+} from '@deepseek-ai/dsh-llm'
 import type { AskUserQuestionAnswer } from '@deepseek-ai/dsh-user-questions/types'
 import TokenMeter from '@deepseek-ai/dsh-token-meter'
 import * as toolTodo from '@deepseek-ai/dsh-tool-todo'
@@ -86,6 +93,55 @@ class StubLlmAdapter extends LlmAdapter {
   override async *stream(): AsyncGenerator<never> {}
 }
 
+/** The scripted model for the durable-continued probe: its FIRST step asks the
+ *  real timed `ask_user_question` tool with a one-second foreground wait; every
+ *  later step (the pending continuation and the late-answer turn) replies with
+ *  ordinary text. */
+class TimedQuestionLlmAdapter extends LlmAdapter {
+  calls = 0
+
+  override resolveModel(_provider: string, model: string): Promise<{ provider: string; id: string; name: string }> {
+    return Promise.resolve({ provider: 'smoke', id: model, name: model })
+  }
+
+  override listModels(provider: string): Promise<Array<{ provider: string; id: string; name: string }>> {
+    return Promise.resolve([{ provider, id: 'smoke-model', name: 'Smoke Model' }])
+  }
+
+  override async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+    options.signal?.throwIfAborted()
+    this.calls += 1
+    if (this.calls === 1) {
+      const args = JSON.stringify({
+        questions: [{
+          id: 'q1',
+          question: 'Continue?',
+          options: [{ label: 'yes' }, { label: 'no' }],
+        }],
+        timeout: 1,
+      })
+      yield { type: 'block-start', index: 0, blockType: 'tool-call' }
+      yield {
+        type: 'tool-call-delta', index: 0,
+        id: ToolCallId('m3b-timed-question-call'), name: 'ask_user_question', argumentsDelta: args,
+      }
+      yield {
+        type: 'block-end', index: 0,
+        block: {
+          type: 'tool-call', id: ToolCallId('m3b-timed-question-call'),
+          name: 'ask_user_question', arguments: args,
+        },
+      }
+      yield { type: 'finish', reason: { kind: 'tool-calls' } }
+      return
+    }
+    yield { type: 'block-start', index: 0, blockType: 'text' }
+    yield { type: 'text-delta', index: 0, text: 'continuing independently' }
+    yield { type: 'block-end', index: 0, block: { type: 'text', text: 'continuing independently' } }
+    yield { type: 'finish', reason: { kind: 'stop' } }
+  }
+}
+
 interface HostFixture {
   ctx: Context
   workRoot: string
@@ -107,6 +163,9 @@ async function createHostFixture(
      *  volatile references) on `globalThis.__m3aTuiRowConfig`, so a suite can build
      *  the REAL production `DirectTuiSettings` over the real Host settings plane. */
     readonly captureTuiRowConfig?: boolean
+    /** Replace the inert stub model only for a suite that needs a real scripted
+     *  turn (the durable timed-question probe). */
+    readonly llmAdapter?: LlmAdapter
   } = {},
 ): Promise<HostFixture> {
   const workRoot = life.tempDir('dsh-m3a-')
@@ -125,7 +184,7 @@ async function createHostFixture(
     await ctx.plugin(toolTodo, { allowParallelInProgress: false })
     persistenceFiber = await ctx.plugin(JsonlSessionPersistence, { root: join(workRoot, 'persistence') })
     harness = await mountAgentLoopTestHarness(ctx)
-    ctx.llm.registerAdapter(['smoke'], new StubLlmAdapter())
+    ctx.llm.registerAdapter(['smoke'], options.llmAdapter ?? new StubLlmAdapter())
     // P4: the official discovery registered for the TUI wizard's family.
     ctx.llm.registerModelDiscovery('llm-pi-ai', async () => [{ id: 'discovered-a', name: 'Discovered A' }])
     await ctx.plugin(CommandRuntime)
@@ -777,6 +836,119 @@ test('P11: the rc.2 Question wire surfaces (live request → claim → timeout �
     assert.equal(semantics.interaction.setApprovalPolicy(MAIN, 'ask'), false,
       'the Remote approval-policy write fails closed (no public rc.2 carrier)')
   } finally {
+    semantics.dispose()
+    await runtime.dispose()
+  }
+})
+
+test('P15: a REAL timed tool call produces a durable continued question, accepts the late answer once, and never duplicates it', async (t) => {
+  const life = testLifecycle(t)
+  const host = await createHostFixture(life, { llmAdapter: new TimedQuestionLlmAdapter() })
+  // The REAL model-facing tool, registered on the Host tool runtime exactly as
+  // the shipped `standard`/`ptc`/`cordis` presets do. The scripted model calls
+  // it with `timeout: 1` so the Host's own foreground wait expires instead of
+  // the test asking the service directly.
+  const ToolAskUser = await import('@deepseek-ai/dsh-tool-ask-user')
+  await host.ctx.plugin(ToolAskUser as never, { mode: 'timed', timeout: 1 } as never)
+  const agent = await host.harness.create(
+    SessionId(MAIN),
+    { provider: 'smoke', model: 'smoke-model' } as never,
+    { cwd: host.anchorDir },
+  )
+  const hostSession = agent.session as unknown as {
+    snapshotEvents(): ReadonlyArray<{ readonly type: string; readonly data: unknown }>
+  }
+  const { runtime, semantics } = await compose(host)
+  const reference = acquireMainSurfaceReference(runtime.client.sessions, SessionId(MAIN))
+  await waitFor('the MAIN window to open', () =>
+    runtime.client.sessions.binding(SessionId(MAIN))?.session.getSnapshot().openState === 'open')
+
+  const liveRequests: Array<{ readonly callId?: string; readonly timed?: boolean }> = []
+  const registered = semantics.interaction.questions.onRequest((request) => {
+    liveRequests.push({ callId: request.callId, timed: request.timed })
+    // A live UI that never answers: the Host's own deadline must produce the
+    // pending result. Reject on the request's abort so no provider promise is
+    // left dangling after the timeout.
+    return new Promise((_resolve, reject) => {
+      request.signal?.addEventListener('abort', () => {
+        reject(Object.assign(new Error('ask_user_question was aborted before the user answered'), {
+          name: 'UserQuestionError',
+          code: 'ASK_ABORTED',
+        }))
+      }, { once: true })
+    })
+  })
+  assert.equal(registered, true, 'the forwarded user-questions waterfall is subscribed')
+  try {
+    const binding = runtime.client.sessions.binding(SessionId(MAIN)) as unknown as {
+      session: {
+        prompt(
+          content: readonly { type: 'text'; text: string }[],
+          mode: 'queue' | 'steer',
+        ): Promise<{ ok: boolean; error?: unknown }>
+      }
+    }
+    const accepted = await binding.session.prompt([{ type: 'text', text: 'start the timed question' }], 'queue')
+    assert.equal(accepted.ok, true, `the official prompt must be accepted: ${JSON.stringify(accepted.error)}`)
+
+    await waitFor('the live timed request reaches the UI', () => liveRequests.length === 1, 20_000)
+    assert.deepEqual(liveRequests[0], { callId: 'm3b-timed-question-call', timed: true },
+      'the live request carries the real Host call identity and timed flag')
+
+    // The REAL tool call/result rows are on the Host log; the official
+    // projection folds the pending result into `continued` (not an answer and
+    // not a skipped question).
+    await waitFor('the durable question is continued after the real timeout', () =>
+      semantics.interaction.questions.snapshot(MAIN)?.active.some(question =>
+        question.callId === 'm3b-timed-question-call' && question.state === 'continued') === true, 20_000)
+    const toolEvents = hostSession.snapshotEvents()
+    assert.equal(toolEvents.some(event => event.type === 'tool/call'
+      && (event.data as { readonly name?: unknown }).name === 'ask_user_question'), true,
+      'the real ask_user_question tool ran in the turn')
+    assert.equal(toolEvents.some(event => event.type === 'tool/result'
+      && (event.data as { readonly message?: { readonly toolCallId?: unknown } }).message?.toolCallId === 'm3b-timed-question-call'), true,
+      'the Host recorded the pending tool result that makes the question answerable')
+
+    const answer = { answers: [{ id: 'q1', selected: ['yes'] }] }
+    assert.equal(
+      await semantics.interaction.questions.answerContinued(MAIN, 'm3b-timed-question-call', answer),
+      'queued',
+      'the late answer is accepted into the Host inbox',
+    )
+    await waitFor('the late answer is admitted as a durable user message', () =>
+      hostSession.snapshotEvents().some(event => event.type === 'user/message'
+        && (event.data as { readonly source?: { readonly kind?: unknown } }).source?.kind === 'user-question-reply'), 20_000)
+    const replies = hostSession.snapshotEvents().filter(event => event.type === 'user/message'
+      && (event.data as { readonly source?: { readonly kind?: unknown } }).source?.kind === 'user-question-reply')
+    assert.equal(replies.length, 1, 'the answer is persisted exactly once')
+    assert.deepEqual((replies[0]!.data as {
+      readonly source?: { readonly callId?: unknown }
+      readonly content?: readonly { readonly type?: string; readonly text?: string }[]
+    }).source?.callId, 'm3b-timed-question-call')
+    assert.match((replies[0]!.data as { readonly content?: readonly { readonly text?: string }[] }).content
+      ?.map(part => part.text ?? '').join('') ?? '', /"selected":\["yes"\]/u,
+      'the durable reply carries the user\'s answer batch')
+
+    await waitFor('the projection settles the continued question', () =>
+      semantics.interaction.questions.snapshot(MAIN)?.settled.some(question =>
+        question.callId === 'm3b-timed-question-call') === true, 20_000)
+    const settled = semantics.interaction.questions.snapshot(MAIN)!
+    assert.equal(settled.active.some(question => question.callId === 'm3b-timed-question-call'), false,
+      'a settled question is no longer answerable')
+    assert.deepEqual(settled.settled.find(question => question.callId === 'm3b-timed-question-call')?.answers,
+      [{ id: 'q1', selected: ['yes'] }],
+      'the settled batch is the answer the user actually submitted')
+
+    assert.equal(
+      await semantics.interaction.questions.answerContinued(MAIN, 'm3b-timed-question-call', answer),
+      'not-continued',
+      'a repeated late answer is refused after settlement',
+    )
+    assert.equal(hostSession.snapshotEvents().filter(event => event.type === 'user/message'
+      && (event.data as { readonly source?: { readonly kind?: unknown } }).source?.kind === 'user-question-reply').length,
+    1, 'the repeated answer never reaches the Host log')
+  } finally {
+    reference.release()
     semantics.dispose()
     await runtime.dispose()
   }

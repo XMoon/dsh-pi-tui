@@ -401,7 +401,7 @@ test('L6 PR5 §3.9b: teardown with a pending WRITE — observed surface-stop bou
   await waitFor('parked inside serialize', () => parked.parked(), 10_000)
   // OBSERVERS: the mounted TuiApp's REAL stop (the disposeSurface path) and
   // the selected transport disposer record the observed order.
-  const app = fixture.runnerApp() as unknown as { stop(): void }
+  const app = fixture.runnerApp() as unknown as { stop(): void; getDraft(): string }
   // TERMINAL-WRITE COUNTER (the real render/callback channel): a disposed
   // surface must never paint again, whatever the Host commits afterwards. It
   // is installed BEFORE the stop wrapper, which samples it synchronously.
@@ -448,22 +448,26 @@ test('L6 PR5 §3.9b: teardown with a pending WRITE — observed surface-stop bou
   // S3 §C3 fixed verdict (plan §9): a write PARKED in serialization when the
   // surface stops is refused PRE-DISPATCH — the surface the user was looking at
   // is gone, so the message must never be admitted silently afterwards. The
-  // official echo is abandoned, the caller restores the draft exactly once, and
-  // the Host sees NOTHING. `WriteOutcome.committed` still means Host ADMISSION
-  // for a write that did dispatch (never fsync/flush), and
+  // official echo is abandoned and the Host sees NOTHING. The Owner-approved
+  // terminal contract (plan §9 amendment, 2026-10-19) keeps the restore-once
+  // rule for a refusal on a still-LIVE surface, but forbids any post-shutdown
+  // UI write-back: this surface is already disposed, so the draft is NOT put
+  // back into the destroyed editor. `WriteOutcome.committed` still means Host
+  // ADMISSION for a write that did dispatch (never fsync/flush), and
   // `RemoteSessionOwnerServices.flush()` stays a documented no-op because rc.2
   // publishes no durable-flush verb.
   assert.equal(surfaceWrites.count - writesAtSurfaceStop.count, 0,
     'the surface stopped for good: no terminal write follows the surface stop')
   assert.equal(hostUserRows(fixture, mainId).some(row => row.includes('pending write across teardown sigma')), false,
     'a write parked at the surface stop NEVER dispatches: no Host message, no silent send')
-  // The refusal is the ordinary pre-dispatch refusal (echo abandoned, draft
-  // restored once) — the LIVE-surface half of that contract is proven by the
-  // §3.9a stale-capture case above, which observes the restored draft. Here the
-  // surface is already stopped, so the submission owner's existing disposed
-  // guard (`if (surface.isDisposed()) return`) suppresses the draft re-insertion
-  // and the notice: there is no live surface to receive them, and the guard must
+  // The LIVE-surface half of the contract is proven by the §3.9a stale-capture
+  // case above, which observes the restored draft. Here the surface is already
+  // stopped, so the submission owner's disposed guard
+  // (`if (surface.isDisposed()) return`) suppresses the draft re-insertion and
+  // the notice: there is no live surface to receive them, and the guard must
   // not be weakened to manufacture an observable callback after the stop.
+  assert.equal(app.getDraft(), '',
+    'the stopped surface receives no post-shutdown draft write-back')
 })
 
 test('L6 PR5 §3.9c: a prompt ACCEPTED before teardown keeps its receipt, becomes durable and is never resent', async (t) => {

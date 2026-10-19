@@ -264,6 +264,12 @@ reinterpret:
      surface-stop boundary, so the official echo is abandoned and the Host sees
      nothing (plan §9 "prompt serializer parked then shutdown"). A write that
      already dispatched keeps its accepted receipt and is never reinterpreted.
+     The OWNER-APPROVED terminal contract (plan §9 amendment, 2026-10-19) makes
+     the draft half explicit: a refusal on the still-LIVE surface restores the
+     draft once, but once the surface has stopped there is no post-shutdown UI
+     write-back and restore into the destroyed editor is deliberately not
+     guaranteed; the submission's disposed guard is the authority and must not
+     be weakened to manufacture a callback after the stop.
   2. **Session creation entry — RESOLVED_BY_S3_PR_C.** `RemoteSessionLifecycle`
      no longer keeps the raw generated `session.create` + `sessions.refresh()`
      path and its `RemoteLifecycleSessionRemotes` seam: ordinary and
@@ -276,7 +282,17 @@ reinterpret:
      user open/resume still uses the official `retain → Session.open` path where
      the Host may migrate; the read-only Browser state never acts as a
      migration veto or authority.
-  4. **Reconnect transcript currentness — RESOLVED_BY_S3_R0.** The Remote
+  4. **Explicit open failure — RESOLVED_BY_S3_PR_C.** An explicit Remote
+     open/resume awaits the retained generation's initial-history settlement
+     (`SessionReference.ready`) and then reads the OFFICIAL `openState`/
+     `openError`; `ready` resolves even when `Session.doOpen` recorded an error,
+     so `retain()` success alone is never treated as a successful open. On an
+     error the adapter releases the failed generation exactly once and returns
+     `unavailable` carrying the official reason, so `/resume`, `--session`
+     startup recovery and post-fork adoption all keep the OLD subject/draft and
+     never report a committed switch. Proven on the real Host/Client graph by
+     `test/remote-session-migration-rc2.test.ts`.
+  5. **Reconnect transcript currentness — RESOLVED_BY_S3_R0.** The Remote
      ingress no longer treats the latest `change` as a fold input: delivery is a
      SEQUENCE contract over the official identity (Connection generation +
      exact retained binding + eventSource revision). Any generation rollover,
@@ -303,7 +319,7 @@ reinterpret:
      fresh generation could land in. Direct keeps the journal semantics it has;
      only the Remote live-surface install ends the window early. Direct behaviour
      still shares no state with this path.
-  5. **Post-reconnect catalog re-read — test readiness, not a defect.**
+  6. **Post-reconnect catalog re-read — test readiness, not a defect.**
      `test/runner-remote-command-plane.test.ts` "L6 §7.4-14 stale catalog"
      holds a verified stale catalog snapshot, replaces the official Connection
      (`connection.reconnect()`) and disposes the old claim, then requires the

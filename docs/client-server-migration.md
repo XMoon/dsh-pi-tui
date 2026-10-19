@@ -6403,13 +6403,40 @@ migration state; this section claims neither `M4` nor a published `0.5.3`.
   the user was looking at is gone. The admission closes through the composition
   -owned `stopSurfaceAdmission` hook, which the application calls synchronously
   at its ONE surface-stop boundary.
+- **Explicit open failure never commits.** The Remote open/resume path awaits
+  the retained generation's initial-history settlement and then reads the
+  official `openState`/`openError`; a resolved `SessionReference.ready` is not
+  success evidence because the official `Session.doOpen` records a failed open
+  and still resolves. On `openState: 'error'` the adapter releases that
+  generation exactly once and returns `unavailable` with the official reason;
+  `/resume`, the `--session` startup unwrap and post-fork adoption therefore
+  keep the old owner/draft and never publish the failed target. The Direct path
+  is unchanged. Evidence: `test/remote-session-migration-rc2.test.ts` (real
+  Host/Client/`SessionRuntime`; old owner/draft stand, one release, no success
+  notice/init).
+- **Questions continued is durable (S3-10).** The `continued` reachability is
+  the official `userQuestions` projection's fold, never a client-side speculative
+  map: a REAL timed `ask_user_question` tool call that hits its Host deadline
+  records the pending result, the projection keeps the call answerable as
+  `continued`, a late `answerContinued` queues a `user-question-reply` that the
+  Agent admits exactly once, and the projection moves the call to `settled`.
+  A repeated late answer is refused (`not-continued`) and never reaches the Host
+  log. Evidence: `test/remote-m3a-semantics-smoke.test.ts` P15 (real Host tool,
+  official Client, real projection/Inbox).
 - **Time Context stays official (S3 §C5).** The TUI adds no clock, no timezone
   setting surface, no local timer and no second time reducer: the official
   `@deepseek-ai/dsh-time-context` plugin (enabled by the official
   `standard`/`ptc`/`cordis` presets, never by `minimal`) owns the pre-step
   reading, the durable `source = { kind: 'time-context', form: 'snapshot' }`
   message and the default `refreshIntervalMs = 600000` scheduling. The
-  submission-side zone is the official Client's resolved IANA zone.
+  submission-side zone is the official Client's resolved IANA zone. The real
+  preset-Loader assembly is owned by the separate request-zone/preset PR; this
+  branch adds the Remote L6 proof that the plugin's durable reading reaches the
+  mounted surface through the selected Remote Application → official Client
+  event source → `RemoteLiveIngress` → `SessionPresentation` → `TranscriptFolder`
+  path (`test/runner-remote-presentation.test.ts`), plus the child-viewer
+  source isolation (`test/runner-remote-task-center.test.ts`: the child turn's
+  reading folds into the viewer and never into the parent log).
 
 ### Qualification and limits
 
@@ -6417,15 +6444,21 @@ migration state; this section claims neither `M4` nor a published `0.5.3`.
   description of the PR-C branch; this document does not claim them ahead of
   that run. The suites are `test/remote-session-lifecycle.test.ts`,
   `test/remote-session-reader.test.ts`, `test/session-reader-port.test.ts`,
-  `test/tern-tsp-session-browser.test.ts`, `test/runner-remote-races.test.ts`
-  and the new `test/remote-time-context-rc2.test.ts`.
-- `test/remote-time-context-rc2.test.ts` mounts the OFFICIAL plugin from its
-  published module path: `@deepseek-ai/dsh-time-context` is only a transitive
-  dependency of the dev-only `@deepseek-ai/dsh-web-app`, so the repository
-  cannot bare-import it nor let the Cordis Loader resolve it by name. The
-  official preset COMPOSITION presence is therefore asserted separately against
-  the generated preset mirrors (`standard`/`ptc`/`cordis` exactly once,
-  `minimal` never). A preset-loader-driven mount is NOT covered.
+  `test/tern-tsp-session-browser.test.ts`, `test/runner-remote-races.test.ts`,
+  `test/remote-session-migration-rc2.test.ts`,
+  `test/remote-m3a-semantics-smoke.test.ts`,
+  `test/runner-remote-presentation.test.ts`,
+  `test/runner-remote-task-center.test.ts`
+  and `test/remote-time-context-rc2.test.ts`.
+- `test/remote-time-context-rc2.test.ts` mounts the OFFICIAL plugin module
+  directly (`@deepseek-ai/dsh-time-context` is now a dev dependency on `next`)
+  and asserts the generated preset composition separately
+  (`standard`/`ptc`/`cordis` exactly once, `minimal` never). The real
+  `standard`/`minimal` preset-Loader assembly is NOT covered by this branch; it
+  belongs to the separate request-zone/preset PR. The Remote L6 end-to-end proof
+  and the main/child source-isolation proof live in
+  `test/runner-remote-presentation.test.ts` and
+  `test/runner-remote-task-center.test.ts` as described above.
 - The temporal window "accepted by the Host but not yet physically appended" has
   no controllable gate in the published Host; the suite witnesses admission and
   the eventual durable append instead and reports that interleaving as
