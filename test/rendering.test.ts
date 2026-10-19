@@ -5173,10 +5173,11 @@ test('a folded bash preview keeps the app-owned log reset when the style crosses
   // first would put the app-owned reset after the cut and let bold/background
   // bleed into the next physical row.
   const raw = '\u001b[1mfirst\nsecond\nthird\nfourth\u001b[0m'
+  // The real Ctrl+O master OFF state folds every process card (the production
+  // `renderToolCard` folded-preview path under test).
+  app.setTranscriptDetailExpanded(false)
   const tool: TranscriptMessage = {
-    // A turn outside the recent display window keeps the card FOLDED (the
-    // exact `renderToolCard` folded-preview path under test).
-    kind: 'tool', turn: -1, name: 'bash', args: '{"command":"printf"}', result: raw, status: 'ok',
+    kind: 'tool', turn: 0, name: 'bash', args: '{"command":"printf"}', result: raw, status: 'ok',
   }
   app.setTranscript([tool])
   await viewport(vt)
