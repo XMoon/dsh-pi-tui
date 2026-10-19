@@ -244,7 +244,20 @@ for (const { columns, rows, cardVisible, fragments } of SIZES) test(`the REAL Se
   // ── Selecting the refused row: the OFFICIAL refusal reaches the surface ──
   // The filter narrows the roster to the one row, so Enter is unambiguous.
   vt.sendInput('refusedx')
-  await waitUntil(() => view().includes('refusedx'), `the refused row at ${columns}x${rows}`)
+  // The browse roster ALREADY contained `refusedx`, so a bare row match
+  // proves nothing about the filter. The external-filter projection paints
+  // the Search-results category header and its single-row group count; it
+  // deliberately has NO internal `filtered/total` header (search is off in
+  // external mode), so the group count is the count evidence at every size.
+  await waitUntil(
+    () => {
+      const frame = view()
+      return frame.includes('sessions · Search results')
+        && frame.includes('/work · 1')
+        && frame.includes('refusedx')
+    },
+    `the filtered refused row at ${columns}x${rows}`,
+  )
   await vt.waitForRender()
   assert.ok(view().includes('refusedx'), `the refused row is reachable:\n${view()}`)
   vt.sendInput('\r')
