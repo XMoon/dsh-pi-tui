@@ -347,8 +347,12 @@ Thinking detail 仍是只读行。旧的完整设置编辑器仍然可用：`Oth
 `/settings` 的 `Other settings` 里新增 `Web Search / Fetch`：选择后先关闭工作区，再打开原有编辑器
 的 Web 段并定位到第一项。段内可切换搜索 Provider（`Messages`，官方默认，或独立计费的
 `DeepSeek Search API`）、Fetch Provider（`HTTP`，官方默认，或 `DeepSeek Fetch API`），设置 Search API
-结果数（1–50，快选 5/10/20/50）、`Share Original Question`（开启时每次新搜索附带最多 128 字符的
-原始人类问题 `ori_question`）与 API endpoint base（必须显式确认 https 地址；凭据会发往该地址）。
+结果数（1–50，快选 5/10/20/50）、`Share Original Question`（官方默认为开启；每次新的 Search API
+调用附带最多 128 字符的触发人类问题 `ori_question`，不发送完整历史或系统提示词）与 API endpoint
+base（必须显式确认 https 地址；凭据与查询会发往该地址）。两套 API 都是独立的 opt-in 收费
+provider：登录或普通 Messages 套餐不保证覆盖其费用，默认的 `Messages`/`HTTP` 组合也不会调用收费
+API。Web 配置是 base profile 所有的设置，不是 Bxx Optional Bundle；安装或启用任何其他 Bundle
+都不会改变这两个 provider。
 `[current]` 只在官方写入与权威回读一致后移动，失败显示 `Not saved`；选择对下一次搜索/获取生效，
 运行中的操作不会被追溯切换。DeepSeek API key 只显示是否配置与来源层，配置/清除复用现有遮蔽
 `/login DEEPSEEK_API_KEY` / `/logout DEEPSEEK_API_KEY`（先关闭设置界面再执行）。Esc 从 Web 段返回

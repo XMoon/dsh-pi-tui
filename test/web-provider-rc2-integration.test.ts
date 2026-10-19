@@ -288,3 +288,118 @@ test('cancellation and the DeepSeek Fetch API path keep their official semantics
   assert.deepEqual(fetched.body, { kind: 'text', content: '# fetched page' })
   assert.equal(fetched.statusCode, 200)
 })
+
+// ── D3-2: the settings change → next real tool → mounted TUI sink ──────────
+
+import { LlmAdapter, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
+import { startS4D3Application } from './support/s4-d3-application-fixture.ts'
+import { skippedInstallationReason } from './support/s4-d2-optional-bundle-fixture.ts'
+
+class WebL6Adapter extends LlmAdapter {
+  readonly scripts: { readonly kind: 'tool'; name: string; arguments: string; callId: string }[] | { readonly kind: 'text'; text: string }[] = [] as never
+  private queue: Array<{ readonly kind: 'tool'; name: string; arguments: string; callId: string } | { readonly kind: 'text'; text: string }> = []
+  push(script: { readonly kind: 'tool'; name: string; arguments: string; callId: string } | { readonly kind: 'text'; text: string }): void {
+    this.queue.push(script)
+  }
+  override resolveModel(provider: string, model: string): Promise<{ provider: string; id: string; name: string }> {
+    return Promise.resolve({ provider, id: model, name: model })
+  }
+  override async *stream(): AsyncIterable<StreamChunk> {
+    const script = this.queue.shift()
+    if (script === undefined) {
+      yield { type: 'block-start', index: 0, blockType: 'text' }
+      yield { type: 'text-delta', index: 0, text: 'done' }
+      yield { type: 'block-end', index: 0, block: { type: 'text', text: 'done' } }
+      yield { type: 'finish', reason: { kind: 'stop' } }
+      return
+    }
+    if (script.kind === 'text') {
+      yield { type: 'block-start', index: 0, blockType: 'text' }
+      yield { type: 'text-delta', index: 0, text: script.text }
+      yield { type: 'block-end', index: 0, block: { type: 'text', text: script.text } }
+      yield { type: 'finish', reason: { kind: 'stop' } }
+      return
+    }
+    yield { type: 'block-start', index: 0, blockType: 'tool-call' }
+    yield { type: 'tool-call-delta', index: 0, id: script.callId as never, name: script.name, argumentsDelta: script.arguments }
+    yield {
+      type: 'block-end',
+      index: 0,
+      block: { type: 'tool-call', id: script.callId as never, name: script.name, arguments: script.arguments },
+    }
+    yield { type: 'finish', reason: { kind: 'tool-calls' } }
+  }
+}
+
+test('D3-2: a TUI Web settings write reaches the NEXT real tool call and the mounted transcript', { skip: skippedInstallationReason([]) }, async t => {
+  const adapter = new WebL6Adapter()
+  const app = await startS4D3Application(t, {
+    bundles: [],
+    columns: 140,
+    rows: 40,
+    patches: [{ id: 'agent-default-model', config: { provider: 'scripted', model: 'review-model' } }] as never,
+    prepareHost: async host => {
+      host.ctx.llm.registerAdapter(['scripted'], adapter)
+      await (host.ctx.get('credentials') as { set(ref: unknown, secret: string): Promise<unknown> })
+        .set(credentialRef('DEEPSEEK_API_KEY'), 'd3-web-key')
+    },
+  })
+  const transport = installTransport()
+  t.after(transport.restore)
+  const config = new DirectWebProviderConfig(app.host.ctx as never)
+  await config.setSearchProvider('deepseek-search-api')
+  await config.setSearchApiCount(20)
+  // The settings recompose re-read the persisted profile: re-pin the scripted
+  // transport (the official default-model write path) before the next turn.
+  await (app.host.ctx.get('agentDefaultModel') as { saveSelection(next: unknown): Promise<void> })
+    .saveSelection({ provider: 'scripted', model: 'review-model' })
+  const written = await config.read()
+  assert.equal(written?.searchProvider, 'deepseek-search-api')
+  assert.equal(written?.api.sendOriginalQuestion, true, 'the official rc.2 default stays true')
+  assert.equal(written?.credential.configured, true)
+
+  adapter.push({ kind: 'tool', name: 'web_search', callId: 's4d3-web-call', arguments: JSON.stringify({ queries: ['harness release'] }) })
+  adapter.push({ kind: 'text', text: 'Search complete.' })
+  const agent = await app.submitFirstPrompt('Search the release notes')
+  await agent.whenIdle()
+  await app.waitFor(() => app.view().includes('Search {"queries"'), 'the real web_search Tool card')
+  app.vt.sendInput('\x0f') // the existing global expand reveals the full sources
+  await app.waitFor(() => app.view().includes('https://example.test/api'), 'the selected provider result in the TUI Tool card')
+  assert.equal(transport.requests.length, 1)
+  assert.equal(transport.requests[0]?.url, SEARCH_ENDPOINT, 'the NEXT call used the settings-selected endpoint')
+  assert.equal(transport.requests[0]?.authorization, 'Bearer d3-web-key')
+  assert.deepEqual(transport.requests[0]?.body, {
+    query: 'harness release',
+    // The web_search TOOL declares its own smaller per-request bound (8), which
+    // the row copy documents as winning over the configured 20.
+    count: 8,
+    need_content: false,
+    ori_question: 'Search the release notes',
+  }, 'the effective count and the triggering human question ride the official request')
+  assert.equal(written?.api.count, 20, 'the configured count is still the authoritative settings value')
+  // The original Tool result is the TUI-visible sink; no local provider truth.
+  assert.match(app.view(), /https:\/\/example\.test\/api/u)
+})
+
+test('D3-2: the missing-credential error reaches the TUI and the selected provider is never bypassed', { skip: skippedInstallationReason([]) }, async t => {
+  const adapter = new WebL6Adapter()
+  const app = await startS4D3Application(t, {
+    bundles: [],
+    columns: 140,
+    rows: 40,
+    patches: [{ id: 'agent-default-model', config: { provider: 'scripted', model: 'review-model' } }] as never,
+    prepareHost: host => { host.ctx.llm.registerAdapter(['scripted'], adapter) },
+  })
+  const transport = installTransport()
+  t.after(transport.restore)
+  const config = new DirectWebProviderConfig(app.host.ctx as never)
+  await config.setSearchProvider('deepseek-search-api')
+  await (app.host.ctx.get('agentDefaultModel') as { saveSelection(next: unknown): Promise<void> })
+    .saveSelection({ provider: 'scripted', model: 'review-model' })
+  adapter.push({ kind: 'tool', name: 'web_search', callId: 's4d3-web-missing', arguments: JSON.stringify({ queries: ['no credential'] }) })
+  adapter.push({ kind: 'text', text: 'Search failed.' })
+  const agent = await app.submitFirstPrompt('Search without a credential')
+  await agent.whenIdle()
+  await app.waitFor(() => /credential|DEEPSEEK_API_KEY|MISSING_CREDENTIAL/iu.test(app.view()), 'the official error in the TUI')
+  assert.deepEqual(transport.requests, [], 'no silent fallback and no dispatched request')
+})

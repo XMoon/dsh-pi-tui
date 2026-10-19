@@ -250,7 +250,7 @@ for (const [columns, rows] of SIZES) {
     // The legacy list's own hint row is a single truncatable string (fork
     // behaviour): at the narrow sizes the word lives in the selected row's
     // description instead, and the key itself always works.
-    assert.ok(section.some(line => line.includes('Esc')), `Esc is stated at ${columns}x${rows}`)
+    assert.ok(section.some(line => line.includes('Esc')), `Esc is stated at ${columns}x${rows}:\n${section.join('\n')}`)
     await key(h, ESC)
     assert.ok(h.view().includes('Settings · Other'),
       `Esc returns to the Workspace at ${columns}x${rows}`)
@@ -555,4 +555,33 @@ test('the credential action cursor wears the frozen `primary` role', async t => 
   } finally {
     h.dispose()
   }
+})
+
+// ── D3-2: the existing Web settings help states the real rc.2 facts ────────
+
+test('the launcher and Web rows explain opt-in billing, defaults and ori_question', async t => {
+  const h = setup({ columns: 120, rows: 40 })
+  t.after(h.dispose)
+  await openOtherRows(h)
+  await key(h, DOWN)
+  const compact = (): string => h.plain().join(' ').replace(/[\u2500-\u257f]/gu, ' ').replace(/\s+/gu, ' ')
+  assert.match(compact(), /Host Web settings for the base profile, not an Optional Bundle/u)
+  assert.match(compact(), /other bundles never change them and the defaults call no billed API/u)
+  assert.match(compact(), /a Messages plan does not cover them/u)
+  assert.match(compact(), /Share Original Question is on by default/u)
+  assert.match(compact(), /up to 128 characters of the human question/u)
+  assert.match(compact(), /never the full history or system prompt/u)
+  assert.match(compact(), /Verified only after the Host write and authoritative read-back agree/u)
+
+  await key(h, DOWN)
+  await key(h, ENTER)
+  assert.match(compact(), /Messages is the official default and does not call the billed Search API/u)
+  assert.match(compact(), /DeepSeek Search API is opt-in and separately billed \(a Messages plan does not cover it\)/u)
+  assert.match(compact(), /up to 128 characters of the triggering question are sent as ori_question/u)
+
+  // The Share Original Question row states the packaged ON default and the
+  // exact payload boundary (not the full history/system prompt).
+  for (let index = 0; index < 3; index += 1) await key(h, DOWN)
+  assert.match(compact(), /On \(packed default for the DeepSeek Search API\)/u)
+  assert.match(compact(), /never the full history or system prompt/u)
 })
