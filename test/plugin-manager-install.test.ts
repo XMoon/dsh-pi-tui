@@ -275,3 +275,75 @@ test('a settled install triggers an authoritative inventory refresh', async () =
   await tick()
   assert.ok(harness.counters.snapshotCalls > before, 'settlement re-reads the official inventory')
 })
+
+test('install inspection metadata and progress rows fold hostile values onto ONE physical row', async () => {
+  const hostile = 'First\nSecond\r\nThird\tTabbed\u001b]52;c;YXR0YWNr\u0007tail'
+  const collapsed = 'First Second Third   Tabbedtail'
+  const listeners = new Set<(event: PluginInstallEvent) => void>()
+  const installCalls: unknown[] = []
+  const gate = deferred<PluginChangeFact>()
+  const port: PluginManagerPort = {
+    snapshot: async () => emptySnapshot(),
+    inspect: async () => ({
+      status: 'accepted',
+      kind: hostile,
+      name: hostile,
+      version: hostile,
+      description: hostile,
+      bundle: true,
+      registry: hostile,
+      host: hostile,
+    }),
+    setBundleEnabled: async () => change({ stage: 'enable' }),
+    setPluginEnabled: async () => change({ stage: 'enable' }),
+    removeBundle: async () => change({ stage: 'remove' }),
+    startInstall: async (request) => { installCalls.push(request); return gate.promise },
+    waitForInstall: async () => null,
+    cancelInstall: async () => ({ status: 'not-running' }),
+    subscribeInstall: (listener) => { listeners.add(listener); return () => listeners.delete(listener) },
+    subscribeInvalidation: () => () => {},
+  }
+  const controller = new PluginManagerController(port, {
+    requestRender: () => {},
+    requestClose: () => {},
+    notify: () => {},
+    isOpen: () => true,
+    diag: createDiag({ filePath: undefined, stderrLevel: 'off' }),
+  }, { observations: () => [] })
+  const panel = new PluginManagerPanel(controller, () => {})
+  panel.setMaxRows(40)
+  const assertPhysicalRows = (rendered: readonly string[], where: string): string => {
+    const text = rendered.map(line => line.replace(/\x1b\[[0-9;]*m/g, '')).join('\n')
+    for (const line of rendered) {
+      assert.ok(!line.includes('\n') && !line.includes('\r'),
+        `${where}: a rendered row carries an embedded line break: ${JSON.stringify(line)}`)
+      assert.ok(!line.includes('YXR0YWNr'), `${where}: the OSC payload reaches a row`)
+      assert.ok(!line.includes('\u001b]52') && !line.includes('\u009b'), `${where}: a raw control introducer reaches a row`)
+    }
+    return text
+  }
+
+  controller.openInstall()
+  controller.inspect('pkg', null)
+  await tick()
+  assert.equal(controller.installView()?.phase, 'confirm')
+  const confirmText = assertPhysicalRows(panel.render(160), 'confirm')
+  assert.ok(confirmText.includes(collapsed), `the collapsed inspection metadata survives:\n${confirmText}`)
+
+  controller.confirmInstall()
+  await tick()
+  const requestId = String((installCalls[0] as { requestId: unknown }).requestId)
+  const emit = (event: PluginInstallEvent): void => { for (const listener of listeners) listener(event) }
+  emit({ kind: 'phase', phase: { requestId, phase: 'installing', attempt: { registry: hostile, index: 1, total: 2 } } })
+  emit({ kind: 'log', log: { requestId, jobId: 'j', stream: 'stdout', text: `progress\r\n\t${hostile}` } })
+  const runningText = assertPhysicalRows(panel.render(160), 'running')
+  // The phase message carries the attempt registry on ONE row; the log is
+  // line-oriented (the controller splits LF), so its own hostile TAB/OSC/C1
+  // element must also stay on one row.
+  assert.ok(runningText.includes(`installing from ${collapsed} (1/2)`),
+    `the collapsed progress message survives:\n${runningText}`)
+  assert.ok(runningText.includes('Third   Tabbedtail'), `the collapsed log row survives:\n${runningText}`)
+
+  gate.resolve(change())
+  await tick()
+})

@@ -2110,3 +2110,52 @@ test('hostile catalog metadata never reaches the terminal raw', async () => {
   assert.match(viewOf(h.vt), /evil/, 'the readable catalog metadata survives the projection')
   h.app.stop()
 })
+
+test('hostile catalog metadata is folded onto ONE physical row per picker field', async () => {
+  // LF, CRLF, TAB and an OSC payload in provider/model/effort names: each is a
+  // ONE-line picker field, so the boundary must fold it before the row budget
+  // and the width measurement ever see it.
+  const hostile = 'Evil\nName\r\nSecond\tRow\u001b]52;c;YXR0YWNr\u0007'
+  const collapsed = 'Evil Name Second   Row'
+  const h = await openPicker({ loading: true })
+  h.hydrate(makeDirectory({
+    groups: [{
+      id: 'p1',
+      name: hostile,
+      models: [model('m1', { name: hostile, efforts: [{ id: 'low', name: hostile }], defaultEffort: 'low' })],
+    }],
+    failures: [{ id: 'p2', name: hostile, message: hostile }],
+    default: { provider: 'p1', model: 'm1' },
+  }))
+  await h.vt.waitForRender()
+  const rows = h.picker.render(72)
+  for (const row of rows) {
+    assert.ok(!row.includes('\n') && !row.includes('\r'),
+      `a picker row carries an embedded line break: ${JSON.stringify(row)}`)
+  }
+  const view = viewOf(h.vt)
+  assert.ok(view.includes(collapsed), `the collapsed catalog metadata survives:\n${view}`)
+  const raw = h.vt.writes.join('')
+  assert.ok(!raw.includes('YXR0YWNr'), `no OSC payload from catalog metadata reaches the terminal:\n${view}`)
+  assert.ok(!raw.includes('\u009b'), 'no raw C1 byte from catalog metadata reaches the terminal')
+  h.app.stop()
+})
+
+test('a hostile load error stays ONE safe physical row', async () => {
+  const hostile = 'connection\nreset\r\nby\thost\u001b]52;c;YXR0YWNr\u0007'
+  const h = await openPicker({ loading: true })
+  h.picker.setLoadError(hostile)
+  await h.vt.waitForRender()
+  const rows = h.picker.render(72)
+  for (const row of rows) {
+    assert.ok(!row.includes('\n') && !row.includes('\r'),
+      `the load-error row carries an embedded line break: ${JSON.stringify(row)}`)
+  }
+  const view = viewOf(h.vt)
+  assert.match(view, /Model catalog unavailable: connection reset by   host/,
+    `the collapsed load error is painted on one row:\n${view}`)
+  const raw = h.vt.writes.join('')
+  assert.ok(!raw.includes('YXR0YWNr'), `no OSC payload from the load error reaches the terminal:\n${view}`)
+  assert.ok(!raw.includes('\u009b'), 'no raw C1 byte from the load error reaches the terminal')
+  h.app.stop()
+})

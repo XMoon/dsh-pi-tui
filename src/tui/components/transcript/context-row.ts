@@ -29,6 +29,7 @@ import type { IconStyle } from '../../../domain/display/icons.ts'
 import { longMessageDisclosureWindow, type LongMessageDisclosureGeometry } from '../../transcript/long-message-disclosure.ts'
 import { systemContextBody } from '../../transcript/tool-presentation.ts'
 import { color } from '../../theme/runtime.ts'
+import { sanitizedPhysicalLine } from '../../presentation/lines.ts'
 import { sanitizeDisplayText } from '../../presentation/terminal-text.ts'
 import type { TranscriptMessage } from '../../../transcript.ts'
 
@@ -145,7 +146,7 @@ export class NoticeContextRow implements Component {
   render(width: number): string[] {
     const { message, expanded, expandHint, iconStyle } = this.options
     const icon = iconPrefix(message.icon ?? 'context-notice', iconStyle)
-    const title = message.label === undefined || message.label === '' ? 'Notice' : sanitizeDisplayText(message.label)
+    const title = message.label === undefined || message.label === '' ? 'Notice' : sanitizedPhysicalLine(message.label)
     const head = `${icon}${title}${expanded ? '' : expandAffordance(expandHint)}`
     const rows = [headerRow(head, width)]
     if (message.summary !== undefined && message.summary !== '') {
@@ -190,7 +191,7 @@ export class RelayContextRow implements Component {
     const { message, expanded, expandHint, iconStyle } = this.options
     const sender = message.contextPresentation?.senderSessionId
     const icon = iconPrefix(message.icon ?? 'context-generic', iconStyle)
-    const title = sender === undefined || sender === '' ? 'Agent message' : `Agent message · ${sanitizeDisplayText(sender)}`
+    const title = sender === undefined || sender === '' ? 'Agent message' : `Agent message · ${sanitizedPhysicalLine(sender)}`
     // The relay body is the card's body: it wraps at the reduced budget and
     // takes the shared indent so its own disclosure marker (below) sits on
     // the SAME left edge — never a mixed boundary.
@@ -228,7 +229,7 @@ export class RecallContextRow implements Component {
     const icon = iconPrefix(message.icon ?? 'context-recall', iconStyle)
     const title = message.label === undefined || message.label === ''
       ? 'Session recall'
-      : `Session recall · ${sanitizeDisplayText(message.label)}`
+      : `Session recall · ${sanitizedPhysicalLine(message.label)}`
     const rows = [headerRow(`${icon}${title}${expanded ? '' : expandAffordance(expandHint)}`, width)]
     if (expanded) rows.push(...payloadRows(message.text, width))
     return rows

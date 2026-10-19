@@ -28,7 +28,7 @@
  * @module @xmoon76/dsh-pi-tui/tui/pickers/theme-menu
  */
 
-import { sanitizeDisplayText } from '../presentation/terminal-text.ts'
+import { sanitizedPhysicalLine } from '../presentation/lines.ts'
 import { SettingsList, type Focusable, type RowBudgetAware, type TuiMouseEvent, type TuiMouseEventResult } from '@xmoon76/pi-tui'
 import { color, settingsListTheme } from '../theme/runtime.ts'
 import { abbreviateName } from './name-label.ts'
@@ -117,9 +117,9 @@ export class ThemeSubmenu implements RowBudgetAware, Focusable {
         // true` and filters on `searchText ?? label`. The SELECTED row's
         // description leads with the same complete name, so two long same-prefix
         // theme names cannot paint one indistinguishable pair.
-        label: sanitizeDisplayText(abbreviateName(sanitizeDisplayText(row.displayName), 25)),
+        label: sanitizedPhysicalLine(abbreviateName(sanitizedPhysicalLine(row.displayName), 25)),
         searchText: row.displayName,
-        description: `${sanitizeDisplayText(row.displayName)} · ${row.value.startsWith('plugin:')
+        description: `${sanitizedPhysicalLine(row.displayName)} · ${row.value.startsWith('plugin:')
           ? 'Extension-registered theme'
           : row.value.startsWith('file:')
             ? 'Custom theme file'

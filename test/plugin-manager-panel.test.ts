@@ -214,3 +214,63 @@ test('hostile plugin metadata is projected before painting (no raw terminal cont
   assert.ok(!rendered.join('').includes('\u009b'), 'no raw C1 byte reaches the frame')
   assert.ok(!rendered.join('').includes('\u001b]52'), 'no raw OSC introducer reaches the frame')
 })
+
+test('hostile package metadata is folded onto ONE physical row per list/detail field', async () => {
+  // LF, CRLF, TAB and an OSC payload in package-name/title/description/registry
+  // metadata: every one of them is a single-row field, so none may smuggle a
+  // row break (or its payload) into the panel's row budget.
+  const hostile = 'First\nSecond\r\nThird\tTabbed\u001b]52;c;YXR0YWNr\u0007tail'
+  const collapsed = 'First Second Third   Tabbedtail'
+  const hostilePort: PluginManagerPort = {
+    ...port(),
+    snapshot: async () => ({
+      bundles: [{
+        name: hostile,
+        version: '1.0',
+        title: hostile,
+        description: hostile,
+        enabled: true,
+        installed: true,
+        optional: false,
+        removable: true,
+        rows: [{ rowId: 'r1', moduleName: hostile, title: hostile, description: hostile, entryId: 'e1' }],
+        overrides: [hostile],
+      }],
+      plugins: [],
+      registries: { registry: hostile, fallbackRegistries: [], resolved: hostile },
+      exemptions: [],
+      exemptionWarnings: [hostile],
+    }),
+  }
+  const controller = new PluginManagerController(hostilePort, {
+    requestRender: () => {},
+    requestClose: () => {},
+    notify: () => {},
+    isOpen: () => true,
+    diag: createDiag({ filePath: undefined, stderrLevel: 'off' }),
+  }, { observations: () => [] })
+  const panel = new PluginManagerPanel(controller, () => {})
+  panel.setMaxRows(40)
+  controller.open('direct-command')
+  await new Promise<void>(resolve => setTimeout(resolve, 0))
+  await new Promise<void>(resolve => setTimeout(resolve, 0))
+
+  const assertPhysicalRows = (rendered: readonly string[], where: string): string => {
+    const text = rendered.map(strip).join('\n')
+    for (const line of rendered) {
+      assert.ok(!line.includes('\n') && !line.includes('\r'),
+        `${where}: a rendered row carries an embedded line break: ${JSON.stringify(line)}`)
+      assert.ok(!line.includes('YXR0YWNr'), `${where}: the OSC payload reaches a row`)
+      assert.ok(!line.includes('\u009b'), `${where}: a raw C1 byte reaches a row`)
+      assert.ok(!line.includes('\u001b]52'), `${where}: a raw OSC introducer reaches a row`)
+    }
+    return text
+  }
+
+  const listText = assertPhysicalRows(panel.render(200), 'list')
+  assert.ok(listText.includes(collapsed), `the collapsed list metadata survives:\n${listText}`)
+
+  controller.activate() // the hostile card is the only selectable row
+  const detailText = assertPhysicalRows(panel.render(200), 'detail')
+  assert.ok(detailText.includes(collapsed), `the collapsed detail metadata survives:\n${detailText}`)
+})

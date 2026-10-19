@@ -16,7 +16,7 @@
  */
 
 import { truncateToWidth, type Component } from '@xmoon76/pi-tui'
-import { sanitizeDisplayText } from '../../presentation/terminal-text.ts'
+import { sanitizedPhysicalLine } from '../../presentation/lines.ts'
 import type { ContextCluster } from '../../transcript/context-structure.ts'
 import { contextClusterSummaryParts } from '../../transcript/context-summary.ts'
 import { iconLead } from '../../icons.ts'
@@ -76,7 +76,7 @@ export class ContextClusterComponent implements Component {
     )
     const lines = [color.textDim(header)]
     if (!this.expanded) {
-      const summary = sanitizeDisplayText(contextClusterSummaryParts(this.cluster).join(' · '))
+      const summary = sanitizedPhysicalLine(contextClusterSummaryParts(this.cluster).join(' · '))
       if (summary !== '') lines.push(color.textDim(truncateToWidth(summary, contentWidth, '…')))
     }
     return lines

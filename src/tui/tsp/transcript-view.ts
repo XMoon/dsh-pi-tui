@@ -30,6 +30,7 @@ import type { ContextCluster } from '../transcript/context-structure.ts'
 import { contextClusterSummaryParts } from '../transcript/context-summary.ts'
 import type { TranscriptStructureBlock, TranscriptWorkSpan } from '../transcript/structure.ts'
 import { systemContextBody, toolCardHeader } from '../transcript/tool-presentation.ts'
+import { sanitizedPhysicalLine } from '../presentation/lines.ts'
 import { sanitizeDisplayText } from '../presentation/terminal-text.ts'
 
 /**
@@ -127,7 +128,7 @@ function toolNode(message: Extract<TranscriptMessage, { kind: 'tool' }>, key: st
   if (isUnmatchedToolRow(message)) {
     const provenance = message.origin === 'tool-not-started' ? 'not started' : 'unmatched result'
     return ui.card(
-      { key, head: sanitizeDisplayText(header.title), tone: 'warning' },
+      { key, head: sanitizedPhysicalLine(header.title), tone: 'warning' },
       ui.badge({ key: 'provenance', text: provenance }),
       ...body,
     )
@@ -135,10 +136,10 @@ function toolNode(message: Extract<TranscriptMessage, { kind: 'tool' }>, key: st
   return ui.tool(
     {
       key,
-      name: message.name,
-      title: sanitizeDisplayText(header.title),
+      name: sanitizedPhysicalLine(message.name),
+      title: sanitizedPhysicalLine(header.title),
       status: toolStatus(message.status),
-      ...(header.summary === '' ? {} : { target: sanitizeDisplayText(header.summary), targetKind: 'text' }),
+      ...(header.summary === '' ? {} : { target: sanitizedPhysicalLine(header.summary), targetKind: 'text' }),
     },
     ...body,
   )
@@ -159,7 +160,7 @@ function contextBodyNodes(message: Extract<TranscriptMessage, { kind: 'system' }
 function systemNode(message: Extract<TranscriptMessage, { kind: 'system' }>, key: string): Node {
   if (message.context === true) {
     const kind = contextPresentationKind(message)
-    const head = sanitizeDisplayText(message.label ?? contextFormOf(message) ?? 'Context')
+    const head = sanitizedPhysicalLine(message.label ?? contextFormOf(message) ?? 'Context')
     return ui.card(
       { key, head },
       ui.badge({ key: 'kind', text: kind ?? 'generic' }),
@@ -173,7 +174,7 @@ function systemNode(message: Extract<TranscriptMessage, { kind: 'system' }>, key
 
 function commandNode(message: Extract<TranscriptMessage, { kind: 'command' }>, key: string): Node {
   const name = message.name ?? 'command'
-  const head = sanitizeDisplayText(message.args === null || message.args === '' ? `/${name}` : `/${name} ${message.args}`)
+  const head = sanitizedPhysicalLine(message.args === null || message.args === '' ? `/${name}` : `/${name} ${message.args}`)
   const outcome = message.outcome
   // The official `command/done` kind is the only status authority: a run
   // without a done is running, and a fragment-only fallback invents nothing.
@@ -196,7 +197,7 @@ function compactionNode(message: Extract<TranscriptMessage, { kind: 'compaction'
 
 function workflowNode(message: Extract<TranscriptMessage, { kind: 'workflow' }>, key: string): Node {
   return ui.card(
-    { key, head: sanitizeDisplayText(message.name) },
+    { key, head: sanitizedPhysicalLine(message.name) },
     ui.badge({ key: 'state', text: message.status }),
     ui.badge({ key: 'members', text: `${message.members.length} members` }),
   )
@@ -242,7 +243,7 @@ function workNode(span: TranscriptWorkSpan, keys: TranscriptNodeKeys, options: T
 function clusterNode(cluster: ContextCluster, keys: TranscriptNodeKeys, options: TranscriptViewOptions, prefix: string): Node {
   const parts = contextClusterSummaryParts(cluster)
   return ui.card(
-    { key: `${prefix}ctx-${keys.keyFor(cluster.owner)}`, head: parts.length === 0 ? 'Context' : sanitizeDisplayText(parts.join(' · ')) },
+    { key: `${prefix}ctx-${keys.keyFor(cluster.owner)}`, head: parts.length === 0 ? 'Context' : sanitizedPhysicalLine(parts.join(' · ')) },
     ...cluster.members.map(member => messageNode(member, keys.keyFor(member), options)),
   )
 }

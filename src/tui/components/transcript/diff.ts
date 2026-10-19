@@ -11,6 +11,7 @@
  */
 
 import { color } from '../../theme/runtime.ts'
+import { sanitizedPhysicalLine } from '../../presentation/lines.ts'
 import { sanitizeDisplayText } from '../../presentation/terminal-text.ts'
 import { relativizeToCwd } from '../../transcript/tool-presentation.ts'
 import {
@@ -130,7 +131,7 @@ export function renderDiffView(diffs: readonly DiffInput[], cwd?: string, option
     if (addedCount > 0) stats.push(color.diffAdded(`+${addedCount}`))
     if (removedCount > 0) stats.push(color.diffRemoved(`-${removedCount}`))
     const header = headerMode === 'full'
-      ? `${stats.join(' ')}${stats.length === 0 ? '' : ' '}${sanitizeDisplayText(relativizeToCwd(hunk.path, cwd))}`
+      ? `${stats.join(' ')}${stats.length === 0 ? '' : ' '}${sanitizedPhysicalLine(relativizeToCwd(hunk.path, cwd))}`
       : stats.join(' ')
     // A no-op hunk has no body rows to consume or hide, so it must not turn
     // an exactly-full budget into a false truncation marker.

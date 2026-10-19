@@ -4621,3 +4621,15 @@ test('late-replay provenance (B): a late read never merges with the legal read',
   assert.equal(mirrored.filter(message => message.kind === 'tool').length, 2,
     'the exported mirror applies the same grouping boundary')
 })
+
+test('a hostile action subtype name stays on ONE Focus header row', () => {
+  const folder = new TranscriptFolder()
+  applyMixed(folder, completedTurn(0, 0, 1000))
+  const activity = folder.turnActivity(0)!
+  // The stat tail embeds the raw action subtype (a model-facing tool name):
+  // LF/CRLF/TAB must be folded before the width ladder measures the row.
+  const hostile = 'Evil\r\nTool\tTabbed'
+  const header = formatFocusHeaderLine(activity, false, 'working', '6s', 120, actionStatsOf(1, { [hostile]: 1 }))
+  assert.ok(!/[\u0000-\u001f]/.test(header), `the Focus header is one physical row: ${JSON.stringify(header)}`)
+  assert.ok(header.includes('Evil Tool   Tabbed ×1'), `the collapsed stat survives: ${JSON.stringify(header)}`)
+})

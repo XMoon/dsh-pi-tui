@@ -12,6 +12,7 @@
  */
 
 import { decodeKittyPrintable, getKeybindings, Input, matchesKey, type KeyId, type Keybinding } from '@xmoon76/pi-tui'
+import { sanitizedPhysicalLine } from '../presentation/lines.ts'
 import { sanitizeDisplayText } from '../presentation/terminal-text.ts'
 import type { Component, Focusable } from '@xmoon76/pi-tui'
 import { getGraphemeSegmenter, visibleWidth, wrapTextWithAnsi } from '@xmoon76/pi-tui'
@@ -829,7 +830,7 @@ export class QuestionFlow implements Component, Focusable {
           hits.push(OTHER_ROW)
           continue
         }
-        lines.push(prefix + (this.otherInput.getValue() === '' ? color.textDim(sanitizeDisplayText(row.label)) : inputLine))
+        lines.push(prefix + (this.otherInput.getValue() === '' ? color.textDim(sanitizedPhysicalLine(row.label)) : inputLine))
         hits.push(OTHER_ROW)
         continue
       }
@@ -1538,7 +1539,7 @@ export class QuestionFlow implements Component, Focusable {
     // gets at least one row (the required-first guarantee below).
     const headerShown = header !== undefined && header !== '' && this.budget - lines.length - tail >= 2
     if (headerShown) {
-      lines.push(color.textDim(sanitizeDisplayText(header)))
+      lines.push(color.textDim(sanitizedPhysicalLine(header)))
     }
     // UNIFIED SCROLLPORT: the whole page — question, detail, then every
     // option with its description, then the free-text row — is ONE region.

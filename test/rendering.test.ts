@@ -5119,3 +5119,49 @@ test('hostile question text never reaches the TTY raw', async () => {
   await pending.catch(() => {})
   app.stop()
 })
+
+test('a hostile command/tool identity is folded onto ONE header row in every preset', async () => {
+  // The command title/args, the tool card header and the Activity/Focus stat
+  // tails are SINGLE-row compositions (truncateToWidth + search-region
+  // columns + the width-degradation ladder). An embedded LF/TAB/CR must be
+  // folded before those rows are built, never left to the Text layout.
+  const hostileCommand = 'Evil\nCommand\tTabbed'
+  const hostileTool = 'Evil\r\nTool\tTabbed'
+  for (const preset of ['full', 'compact', 'focus'] as const) {
+    const { vt, app } = startAppWithWrites()
+    app.setDisplayPreset(preset)
+    const command: TranscriptMessage = {
+      kind: 'command',
+      commandId: CommandId('cmd-single-row'),
+      seq: SessionSeq(1),
+      time: 1,
+      name: hostileCommand,
+      args: '',
+      outcome: null,
+    }
+    const tool: TranscriptMessage = {
+      kind: 'tool', turn: 0, name: hostileTool, args: '{"x":"y"}', result: '', status: 'running',
+    }
+    app.setTranscript([command, tool])
+    const view = await viewport(vt)
+    const lines = view.split('\n').map(stripTerminalSequences)
+    assert.ok(lines.some(line => line.includes('/Evil Command   Tabbed')),
+      `${preset}: the command name/args share one head row:\n${view}`)
+    if (preset === 'full') {
+      assert.ok(lines.some(line => line.includes('Evil Tool   Tabbed · y')),
+        `${preset}: the tool name/summary share one head row:\n${view}`)
+    } else if (preset === 'compact') {
+      // Compact folds the tool row into the Activity header stat tail: the
+      // raw subtype name must not break that single header row. (Focus
+      // renders no Work span for this bare fixture; its header tail is the
+      // same projected parts list, covered by the Activity assertion.)
+      assert.ok(lines.some(line => line.includes('Evil Tool   Tabbed ×1')),
+        `${preset}: the action stat tail stays on its header row:\n${view}`)
+      assert.ok(!lines.some(line => line.trim().startsWith('Tool   Tabbed ×1')),
+        `${preset}: no orphan wrapped stat row leaked out of the header:\n${view}`)
+    }
+    assert.equal(command.name, hostileCommand, `${preset}: the command source name is untouched`)
+    assert.equal(tool.name, hostileTool, `${preset}: the tool source name is untouched`)
+    app.dispose()
+  }
+})

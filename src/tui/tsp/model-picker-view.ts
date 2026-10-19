@@ -26,6 +26,7 @@
 import { ui, span, type Node } from '@stencil-hq/tern'
 import type { PickerAction, PickerGroup, PickerItem, PickerProps } from '@stencil-hq/tern'
 import type { ModelPickerFailureRow } from '../pickers/model-directory.ts'
+import { sanitizedPhysicalLine } from '../presentation/lines.ts'
 import { sanitizeDisplayText } from '../presentation/terminal-text.ts'
 import type { ModelPickerIntent } from './model-picker-intents.ts'
 import {
@@ -71,10 +72,10 @@ export interface ModelPickerViewDeps {
 function failureItem(failure: ModelPickerFailureRow): PickerItem {
   return {
     id: failureRowId(failure.providerId),
-    label: `${sanitizeDisplayText(failure.providerName)} · unavailable`,
-    detail: sanitizeDisplayText(failure.message),
-    title: sanitizeDisplayText(failure.message),
-    disabled: sanitizeDisplayText(failure.message),
+    label: `${sanitizedPhysicalLine(failure.providerName)} · unavailable`,
+    detail: sanitizedPhysicalLine(failure.message),
+    title: sanitizedPhysicalLine(failure.message),
+    disabled: sanitizedPhysicalLine(failure.message),
     dot: 'error',
   }
 }
@@ -113,7 +114,7 @@ function modelOrder(panel: ModelPickerPanel): (string | PickerGroup)[] {
   for (const group of panel.directory?.directory.groups ?? []) {
     const rows = visible.filter((row) => row.providerId === group.id && !pinned.includes(row))
     if (rows.length === 0) continue
-    order.push({ group: group.id, label: sanitizeDisplayText(group.name), count: rows.length })
+    order.push({ group: group.id, label: sanitizedPhysicalLine(group.name), count: rows.length })
     for (const row of rows) order.push(modelRowId(row))
   }
   if (panel.failures.length > 0) {
@@ -144,10 +145,10 @@ function modelItems(panel: ModelPickerPanel): PickerItem[] {
     const mark = providerMark(row)
     return {
       id: modelRowId(row),
-      label: sanitizeDisplayText(row.modelName),
-      mark: { text: sanitizeDisplayText(mark.text), seed: mark.seed },
-      detail: sanitizeDisplayText(row.providerName),
-      title: sanitizeDisplayText(row.modelId),
+      label: sanitizedPhysicalLine(row.modelName),
+      mark: { text: sanitizedPhysicalLine(mark.text), seed: mark.seed },
+      detail: sanitizedPhysicalLine(row.providerName),
+      title: sanitizedPhysicalLine(row.modelId),
       badges: [
         ...(row.isCurrent ? [{ text: 'current' }] : []),
         ...(row.isDefault ? [{ text: 'default' }] : []),
@@ -207,7 +208,7 @@ function nativeFocus(panel: ModelPickerPanel): PickerProps['focus'] {
 function pickerState(panel: ModelPickerPanel): Pick<PickerProps, 'state' | 'message' | 'empty'> {
   return {
     state: panel.phase === 'loading' ? 'loading' : panel.phase === 'error' ? 'error' : 'ready',
-    ...(panel.notice === undefined ? {} : { message: sanitizeDisplayText(panel.notice.text) }),
+    ...(panel.notice === undefined ? {} : { message: sanitizedPhysicalLine(panel.notice.text) }),
     // The client is what paints this (if it paints it at all): MEASURED on the real client, a
     // search that matches nothing empties the list and draws NO copy, so one honest sentence
     // covers the state the string can describe.
@@ -256,7 +257,7 @@ function detailsReader(panel: ModelPickerPanel, deps: ModelPickerViewDeps): Node
   // queued while an earlier Reader was open can never address this one's body.
   const scope = `${panel.serial}-${panel.readerEpoch}`
   return ui.overlay(
-    { key: `${MODEL_DETAILS_READER_KEY}-${scope}`, head: sanitizeDisplayText(readerHead(panel)), size: 'lg', modal: true },
+    { key: `${MODEL_DETAILS_READER_KEY}-${scope}`, head: sanitizedPhysicalLine(readerHead(panel)), size: 'lg', modal: true },
     ui.row(
       { key: `${MODEL_DETAILS_BACK_KEY}-${scope}`, onClick: deps.bind({ kind: 'back' }) },
       ui.text(span('Back', 'accent')),
@@ -327,13 +328,13 @@ function modelListPicker(
           strip: {
             label: STRIP_LABEL,
             items: stripItems(panel, stripLabelColumns(deps.paneWidth))
-              .map((item) => ({ ...item, label: sanitizeDisplayText(item.label) })),
+              .map((item) => ({ ...item, label: sanitizedPhysicalLine(item.label) })),
           },
         }
       : {}),
     selected: panel.selected,
     current: panel.rows.filter((item) => item.isCurrent).map(modelRowId),
-    subtitle: sanitizeDisplayText(pickerSubtitle(panel)),
+    subtitle: sanitizedPhysicalLine(pickerSubtitle(panel)),
     focus: nativeFocus(panel),
     ...pickerState(panel),
     actions: renderedActions(panel),

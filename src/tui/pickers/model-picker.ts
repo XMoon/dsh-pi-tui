@@ -49,7 +49,6 @@ import type {
   ModelPickerSubject,
 } from '../../app/command/model-presentation.ts'
 import { sanitizedPhysicalLine } from '../presentation/lines.ts'
-import { sanitizeDisplayText } from '../presentation/terminal-text.ts'
 import {
   modelIdentity,
   projectModelDirectory,
@@ -291,7 +290,11 @@ export class ModelPicker implements Component, RowBudgetAware, Focusable {
     // wrapper does not recolour it (the nested span wins, the outer paint
     // resumes); an ordinary empty-filter message keeps the placeholder ink.
     const failure = color.error('Model catalog unavailable')
-    this.modelsList.setNoMatchText(message === '' ? `  ${failure}` : `  ${failure}: ${message}`)
+    // The load error is a runtime/provider message: project it onto ONE safe
+    // physical row before it enters the picker's single-row no-match line
+    // (the picker's own CR/LF collapse cannot remove an escape sequence).
+    const detail = sanitizedPhysicalLine(message)
+    this.modelsList.setNoMatchText(detail === '' ? `  ${failure}` : `  ${failure}: ${detail}`)
     this.deps.requestRender()
   }
 
@@ -308,11 +311,11 @@ export class ModelPicker implements Component, RowBudgetAware, Focusable {
       const badgeLayoutText = this.widestBadgeOf(row)
       items.push({
         value: identity,
-        label: sanitizeDisplayText(row.modelName),
+        label: sanitizedPhysicalLine(row.modelName),
         // The header shows the display name; the GROUP IDENTITY is the
         // provider id, so distinct providers that share a display name (or a
         // provider literally named "Unavailable") never merge into one group.
-        group: sanitizeDisplayText(row.providerName),
+        group: sanitizedPhysicalLine(row.providerName),
         groupKey: row.providerId,
         ...(badge === undefined ? {} : { badge }),
         ...(badgeParts === undefined ? {} : { badgeParts }),
@@ -325,8 +328,8 @@ export class ModelPicker implements Component, RowBudgetAware, Focusable {
     for (const failure of this.failures) {
       items.push({
         value: `${FAILURE_PREFIX}${failure.providerId}`,
-        label: sanitizeDisplayText(failure.providerName),
-        description: sanitizeDisplayText(failure.message),
+        label: sanitizedPhysicalLine(failure.providerName),
+        description: sanitizedPhysicalLine(failure.message),
         group: 'Unavailable',
         groupKey: FAILURE_GROUP_KEY,
         badge: 'unavailable',
@@ -362,7 +365,7 @@ export class ModelPicker implements Component, RowBudgetAware, Focusable {
       if (label !== undefined) {
         // A provider-supplied effort name is external: project it BEFORE the
         // role-4 paint (the picker folds the part onto one row afterwards).
-        parts.push({ kind: 'text', text: color.textDim(effortTokenOf(sanitizeDisplayText(label), this.isEffortFocused(identity))) })
+        parts.push({ kind: 'text', text: color.textDim(effortTokenOf(sanitizedPhysicalLine(label), this.isEffortFocused(identity))) })
       }
     }
     return parts.length === 0 ? undefined : parts

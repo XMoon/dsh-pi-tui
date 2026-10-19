@@ -71,6 +71,28 @@ Used only for captured terminal streams: bash/pwsh tool results, the local
 - when at least one SGR survives, an app-owned `ESC[0m` is appended so a
   source-controlled style can never bleed past its display block.
 
+### `sanitizedPhysicalLine(source)` — one physical row
+
+`src/tui/presentation/lines.ts` applies the plain policy and then folds every
+surviving `LF` (and any residual `TAB`/`CR`) into one space. It is the required
+projection for display slots that are semantically exactly ONE terminal row:
+list/panel rows and their labels, badges, secondary text, notices, install log
+rows and panel titles; picker item fields (label, group, description, badge /
+effort token); one-line headers (tool / command / workflow card heads, Context
+row titles, the approval tool name, diff hunk headers); the working message,
+dock/todo summary and goal line; and the TSP one-line structured props
+(`ui.card.head`, `ui.tool.name`/`title`/`target`, picker `label`/`detail`/
+`title`/group labels/subtitle). A row budget, click/hit map or width
+measurement is built from one array element; an embedded line break would
+escape both the row count and the geometry it indexes.
+
+Multi-line prose, Markdown, code and result/log bodies keep
+`sanitizeDisplayText` (or `sanitizeDisplayLog`) and are carried by a component
+or node with a real multi-line budget (`Text`, `Markdown`,
+`CompactTextPreview`, `ui.md`, `ui.code`, wrapped rows). Folded terminal
+previews re-derive their ONE row from the log-projected text, because the log
+policy itself turns a lone `CR` into `LF`.
+
 ## SGR whitelist (log policy only)
 
 Only a complete `ESC [` … `m` with numeric semicolon parameters survives:
@@ -118,23 +140,27 @@ tests, not converted to the log policy:
 ## TSP opt-in parity
 
 The experimental Tern renderer (`DSH_PI_TUI_RENDERER=tsp`, off by default) maps
-the same transcript structure onto SDK nodes. Node **text props** use
-`sanitizeDisplayText`: `ui.text`, `ui.md`, `ui.code`, `ui.card.head`,
-`ui.badge` and picker `label`/`detail`/`title`. Raw ids, node keys, answer
-values, action/event identifiers, SDK frames and currentness are untouched, so
-source/GUI evidence tiers are unchanged. A structural node check proves the
-payload is safe; it does not prove the closed-source Tern client's own
-rendering — that remains `NOT_VERIFIED` until a real pinned pane is tested.
+the same transcript structure onto SDK nodes. Multi-line node content
+(`ui.text` bodies, `ui.md`, `ui.code`, `ui.badge`) uses `sanitizeDisplayText`;
+one-line structured props (`ui.card.head`, `ui.tool.name`/`title`/`target`,
+picker `label`/`detail`/`title`, group labels and `subtitle`) use
+`sanitizedPhysicalLine`. The tool's canonical `TranscriptMessage.name` and the
+`SessionEvent` payload stay raw for tool semantics; only the displayed
+`ui.tool.name` is projected. Raw ids, node keys, answer values, action/event
+identifiers, SDK frames and currentness are untouched, so source/GUI evidence
+tiers are unchanged. A structural node check proves the payload is safe; it
+does not prove the closed-source Tern client's own rendering — that remains
+`NOT_VERIFIED` until a real pinned pane is tested.
 
 ## Test matrix and repro
 
 | Contract | Test owner | What it proves |
 |---|---|---|
 | projection semantics (whitelist, CR/TAB, incomplete sequences, 1 MiB bound) | `test/terminal-display-sanitize.test.ts` | pure `string -> string` behaviour |
-| untrusted transcript bytes on the wire | `test/rendering.test.ts` | Full/Compact/Focus, every message class, raw source unchanged |
+| untrusted transcript bytes on the wire | `test/rendering.test.ts` | Full/Compact/Focus, every message class, raw source unchanged, one-row command/tool/Activity identities |
 | Job body / search / copy | `test/job-inspector-workspace.test.ts`, `test/job-output-interaction.test.ts`, `test/job-workspace-visual.test.ts` | hostile output, CR records, Find on the painted row, byte-exact copy |
 | local `!` shell log | `test/local-shell-card.test.ts` | whitelisted SGR only, CR frames readable |
-| sibling surfaces | `test/approval.test.ts`, `test/plugin-manager-panel.test.ts`, `test/job-output-viewer.test.ts`, `test/session-picker-content-search.test.ts` | no fake hint row via CR, no OSC in chrome |
+| sibling surfaces | `test/approval.test.ts`, `test/plugin-manager-panel.test.ts`, `test/plugin-manager-install.test.ts`, `test/model-picker.test.ts`, `test/job-output-viewer.test.ts`, `test/session-picker-content-search.test.ts` | no fake hint row via CR, no OSC in chrome, LF/CRLF/TAB/OSC folded onto ONE row per single-line field |
 | negative controls | `test/footer-ansi-sanitize.test.ts`, `test/terminal-title.test.ts`, `test/history-panel.test.ts` | the specialized contracts above still work |
 
 Minimal reproduction:
