@@ -40,6 +40,11 @@ Consequences that are part of the contract:
   draft intake and artifact output) stay Client-local.
 - A Remote consumer never reads a Host `workingDirectory` to drive a
   Client-local gesture, and the Host never writes terminal bytes.
+- On the Remote branch, `!`/`!!` execute in the Host environment through
+  `HostUserShellPort`; until a qualified one-shot Host carrier exists they fail
+  closed (`{ kind: 'unavailable', reason: 'carrier-gap' }`) and execute nothing,
+  for both policies. The draft external editor stays Client-local; a future
+  Host-filesystem editor/open is a separate capability.
 
 ## Semantic ports and composition
 

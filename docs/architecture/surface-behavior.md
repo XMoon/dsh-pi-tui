@@ -313,6 +313,59 @@ Authority: `src/commands.ts` (`PATH_ARGUMENT_COMMANDS`),
 `src/domain/transcript/content-blocks.ts`,
 `src/tui/components/media/image-thumbnail.ts`.
 
+## Session `@` completion routing
+
+The Session `@` scope has ONE frozen Host-side router, used by BOTH backends:
+
+```text
+bare workspace fuzzy search   -> official ctx.fileReferences
+  @foo @readme @src @.env         (workspace index, cache, exclusions, scoring,
+                                   maxResults stay authoritative)
+
+explicit path navigation      -> dsh-pi-tui Host scoped discovery
+  @src/ @./ @../x @/abs @~/x      (the exact scope the user typed)
+  Windows drive/UNC paths
+```
+
+The route is decided by the TOKEN's own shape (any separator, a root form, or a
+Windows drive/UNC path), never by resolved workspace containment, official
+result count or filesystem existence. The official provider is called ONLY on
+the bare route; an authoritative official empty result stays empty and never
+falls back to the scanner. The scoped route never calls the official provider,
+so explicitly named excluded directories, symlink scopes, parent and absolute
+paths all work; the accepted candidate is materialized as an absolute Host path,
+and ranking scores the SCOPE-RELATIVE candidate (the home prefix never
+fabricates matches).
+
+- POSIX boundary: on a POSIX Host a backslash is an ordinary filename character,
+  but the reused path resolver selects its Windows dialect from the token alone
+  and normalizes separators. An ambiguous POSIX token containing a backslash
+  (`foo\bar`, `dir\name/foo`) therefore stays with the official provider
+  instead of being searched in a normalized (different) directory. This is a
+  deliberate fail-closed narrowing until the shared resolver distinguishes host
+  dialect, token dialect and literal backslashes.
+- Parent-traversal spelling: on a POSIX Host the filesystem backend anchors a
+  path containing a `..` segment with its PHYSICAL spelling (raw
+  `<anchor>/<path>` concatenation, so an intermediate symlink is resolved by
+  the kernel before the parent step) and resolves other paths lexically. The
+  scoped search tests the whole anchored spelling and keeps the raw
+  concatenation when required; the Direct discovery driver joins its base
+  without re-normalizing, so completion and the model's read cannot land in two
+  different physical directories. A home shorthand emits an absolute normalized
+  value; the bare `~`/`~/` root form uses the raw `homedir()` spelling.
+- Direct and Remote share this authority: the Direct adapter reaches it
+  in-process; the Remote Client reaches the SAME router through the private
+  `piTuiFileReferences` endpoint (the official `fileReferences` namespace stays
+  mounted and authoritative for bare queries). The custom endpoint AUGMENTS the
+  official provider; it does not replace it. Bare-query ranking, result bound,
+  exclusion policy, implicit hidden matching and cache/invalidation remain
+  official behavior.
+
+Authority: `src/runtime/direct/file-completion/host-discovery.ts`,
+`src/app/remote/pi-tui-file-reference-host.ts` and the private
+`piTuiFileReferences` contract. Proof: `test/host-file-port.test.ts`,
+`test/remote-host-file-port.test.ts`.
+
 ## `!` / `!!` shell input
 
 `!` and `!!` are EDITOR STATE, not document text. Three modes (`prompt`,
