@@ -57,6 +57,7 @@ class ScriptedAdapter extends LlmAdapter {
   releaseTitle: (() => void) | undefined
   holdRound: Promise<void> | undefined
   releaseRound: (() => void) | undefined
+  roundHeld = false
 
   override resolveModel(provider: string, model: string): Promise<{ provider: string; id: string; name: string }> {
     return Promise.resolve({ provider, id: model, name: model })
@@ -90,6 +91,27 @@ class ScriptedAdapter extends LlmAdapter {
     // phrase alone cannot distinguish the two calls.
     const isRound = messages.includes('Immutable objective:')
     if (isRound) this.roundRequests.push(messages)
+    if (isRound && this.holdRound !== undefined) {
+      const hold = this.holdRound
+      this.holdRound = undefined
+      this.roundHeld = true
+      try {
+        await Promise.race([
+          hold,
+          new Promise<never>((_resolve, reject) => {
+            const signal = options.signal
+            if (signal === undefined) return
+            if (signal.aborted) reject(new Error('round aborted'))
+            else signal.addEventListener('abort', () => reject(new Error('round aborted')), { once: true })
+          }),
+        ])
+      } finally {
+        // The abort path throws out of the generator: the observable hold flag
+        // must clear on BOTH resolutions (teardown-safe).
+        this.roundHeld = false
+      }
+      options.signal?.throwIfAborted()
+    }
     const script = (isRound ? this.roundScripts : this.scripts).shift()
     if (script === undefined) {
       yield* textChunks('done')
@@ -190,6 +212,8 @@ test('B09: the real all-prompts title reaches the mounted TUI title/OSC, manual 
   await app.waitFor(() => app.agent() !== undefined && String(app.agent()!.session.id) !== String(first.session.id),
     'the production /new transition for A2')
   const held = app.requireAgent()
+  const heldId = String(held.session.id)
+  assert.notEqual(heldId, String(first.session.id), 'the first /new really created a separate session')
   adapter.holdTitle = new Promise<void>(resolve => { adapter.releaseTitle = resolve })
   adapter.scripts.push({ kind: 'text', text: 'Held alpha start.' })
   await submitPrompt(app, 'Hold this title request')
@@ -199,14 +223,20 @@ test('B09: the real all-prompts title reaches the mounted TUI title/OSC, manual 
   for (const character of '/new') app.vt.sendInput(character)
   await app.settle()
   app.vt.sendInput('\r')
-  await app.waitFor(() => app.agent() !== undefined && String(app.agent()!.session.id) !== String(first.session.id),
-    'the production /new transition')
+  await app.waitFor(() => app.agent() !== undefined && String(app.agent()!.session.id) !== heldId,
+    'the second /new transition (different from the HELD session)')
+  const replacement = app.requireAgent()
+  assert.notEqual(String(replacement.session.id), heldId, 'B is not the held A2 session')
+  assert.notEqual(String(replacement.session.id), String(first.session.id), 'B is a third, separate session')
   adapter.scripts.push({ kind: 'text', text: 'Beta work started.' })
   adapter.titleResponses.length = 0
   adapter.titleResponses.push('Replacement Title')
   await submitPrompt(app, 'Design the replacement')
   await app.waitFor(() => app.view().includes('Beta work started.'), 'the replacement session turn')
   await app.waitFor(() => headerLine(app).includes('Replacement Title'), "the replacement session's title")
+  await app.waitFor(() => titleService.get(replacement.session)?.title === 'Replacement Title',
+    "the replacement session's settled title")
+  assert.notEqual(String(replacement.session.id), heldId)
   adapter.releaseTitle?.()
   await new Promise<void>(resolve => setTimeout(resolve, 150))
   await app.settle()
@@ -309,6 +339,17 @@ test('B10: the minimal preset never gains a model skill tool (the human /skill s
 
 // ── B11 Ralph ──────────────────────────────────────────────────────────────
 
+/** The exact durable tool result of one call id (never prompt text). */
+function toolResultOf(agent: Agent, callId: string): string | undefined {
+  for (const event of agent.session.snapshotEvents() as readonly { readonly type?: string; data?: unknown }[]) {
+    if (event.type !== 'tool/result') continue
+    const message = (event.data as { message?: { toolCallId?: unknown; content?: readonly { text?: string }[] } }).message
+    if (String(message?.toolCallId) !== callId) continue
+    return (message?.content ?? []).map(block => block.text ?? '').join('')
+  }
+  return undefined
+}
+
 function ralphReport(summary: string): Script {
   const report = JSON.stringify({
     status: 'complete',
@@ -358,18 +399,28 @@ test('B11: a real bounded Ralph round reaches the transcript/Activity UI as a fo
   // abort; the transcript shows an error result, workflow/end settles once,
   // and no orphan Agent survives.
   adapter.holdRound = new Promise<void>(resolve => { adapter.releaseRound = resolve })
+  // A failed assertion must not strand the held child; the release is
+  // idempotent and the abort race below also settles it.
+  t.after(() => { adapter.releaseRound?.() })
   adapter.scripts.push(
     { kind: 'tool', name: 'ralph', callId: 's4d3-b11-cancel', arguments: JSON.stringify({ objective: 'Hold then cancel', maxRounds: 1 }) },
     { kind: 'text', text: 'Cancelled run settled.' },
   )
   await submitPrompt(app, 'Run a cancellable Ralph iteration')
-  await app.waitFor(() => adapter.roundRequests.length === 2, 'the held child round')
+  await app.waitFor(() => adapter.roundRequests.length === 2 && adapter.roundHeld,
+    'the child round is actually held before the cancel')
   app.vt.sendInput('\x1b') // the mounted runner's real single-Esc cancel
+  await app.waitFor(() => !adapter.roundHeld, 'the abort releases the held child stream')
   adapter.releaseRound?.()
   await app.waitFor(() => workflowEvents.filter(event => event === 'end').length === 2,
     'the cancelled run settles its workflow/end exactly once')
-  await app.waitFor(() => app.view().includes('cancelled run settled') || /cancel|abort/iu.test(app.view()),
-    'the cancelled tool result is visible')
+  const cancelled = toolResultOf(agent, 's4d3-b11-cancel')
+  assert.ok(cancelled !== undefined, 'the exact ralph call settles as a tool result')
+  assert.match(cancelled!.replace(/\s+/gu, ' '), /cancel|abort/iu,
+    'the abort/cancel error belongs to the ralph TOOL RESULT, not the user prompt')
+  await app.waitFor(() => app.view().includes('[error]'), 'the ralph tool card paints its error status')
+  assert.ok(!app.view().includes('Cancelled run settled.'),
+    'the aborted turn never runs the following model script')
   await new Promise<void>(resolve => setTimeout(resolve, 250))
   assert.equal(workflowEvents.filter(event => event === 'end').length, 2, 'no duplicate workflow/end')
   await app.waitFor(() => app.host.ctx.agents.list().length === 1, 'no orphan child Agent after the cancelled run')

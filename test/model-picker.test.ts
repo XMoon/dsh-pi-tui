@@ -2257,8 +2257,8 @@ test('the real rc.2 DeepSeek catalog exposes deepseek-flash to the mounted /mode
   const selection = durable.filter(event => event.type === 'model/selection').at(-1)?.data as
     | { provider?: string; model?: string }
     | undefined
-  const selected = selection ?? (agent.session.requestHeader() as { config?: { provider?: string; model?: string } } | undefined)?.config
-  assert.deepEqual({ provider: selected?.provider, model: selected?.model }, {
+  assert.ok(selection !== undefined, 'the picker appends the durable model/selection intent')
+  assert.deepEqual({ provider: selection.provider, model: selection.model }, {
     provider: 'deepseek-official',
     model: 'deepseek-flash',
   }, 'the exact provider+model identity is committed, never the display name')
@@ -2291,4 +2291,56 @@ test('without a readable official catalog deepseek-flash is absent, never fabric
   const overlay = frame.slice(top).map(line => line.slice(left)).join('\n')
   assert.doesNotMatch(overlay, /deepseek-flash|DeepSeek-V4\.1-Flash/u,
     'the picker never fabricates a model row the Host did not offer')
+})
+
+test('a legal non-empty deployment catalog without deepseek-flash is authoritative', { skip: skippedInstallationReason([]) }, async t => {
+  const adapter = new FlashAdapter()
+  const app = await startS4D3Application(t, {
+    bundles: [],
+    columns: 120,
+    rows: 36,
+    patches: [
+      // A legal, NON-EMPTY deployment override of the official rc.2 catalog:
+      // only the Pro model is offered. The picker must respect it.
+      { id: 'llm-deepseek', config: { models: [{ id: 'deepseek-v4-pro', name: 'DeepSeek-V4-Pro' }] } },
+      { id: 'agent-default-model', config: { provider: 'scripted', model: 'review-model' } },
+    ] as never,
+    prepareHost: async host => {
+      host.ctx.llm.registerAdapter(['scripted'], adapter)
+      await (host.ctx.get('credentials') as { set(ref: unknown, secret: string): Promise<unknown> })
+        .set(credentialRef('DEEPSEEK_API_KEY'), 'd3-test-key')
+    },
+  })
+  const llm = app.host.ctx.llm as unknown as { listModels(provider: string): Promise<readonly { id: string; name?: string }[]> }
+  const models = await llm.listModels('deepseek-official')
+  assert.deepEqual(models.map(model => model.id), ['deepseek-v4-pro'], 'the override is the effective official catalog')
+  assert.equal(models.some(model => model.id === 'deepseek-flash'), false)
+
+  const agent = await app.submitFirstPrompt('Start the override catalog check')
+  await agent.whenIdle()
+  for (const character of '/model') app.vt.sendInput(character)
+  await settle()
+  app.vt.sendInput('\r')
+  await settle()
+  if (app.view().includes('❯ /model')) {
+    app.vt.sendInput('\r')
+    await settle()
+  }
+  for (const character of 'flash') app.vt.sendInput(character)
+  await new Promise<void>(resolve => setTimeout(resolve, 200))
+  const frame = app.vt.getViewport().map(line => line.replace(/\x1b\[[0-9;]*m/gu, ''))
+  assert.ok(frame.some(line => /Models\s+0\/1/u.test(line)), `the override catalog is the picker's only source:\n${frame.join('\n')}`)
+  assert.ok(frame.some(line => /No matching models/u.test(line)), 'searching flash has no hit in the override')
+  assert.ok(!frame.some(line => line.includes('DeepSeek-V4.1-Flash')), 'the omitted Flash display name is never painted')
+  app.vt.sendInput('\r') // inert: there is no Flash row to submit
+  await new Promise<void>(resolve => setTimeout(resolve, 150))
+  const durable = agent.session.snapshotEvents() as readonly { readonly type?: string; readonly data?: unknown }[]
+  const selection = durable.filter(event => event.type === 'model/selection').at(-1)?.data as
+    | { provider?: string; model?: string }
+    | undefined
+  const header = agent.session.requestHeader() as { config?: { provider?: string; model?: string } } | undefined
+  assert.deepEqual({
+    provider: selection?.provider ?? header?.config?.provider,
+    model: selection?.model ?? header?.config?.model,
+  }, { provider: 'scripted', model: 'review-model' }, 'no Flash identity can be submitted from the overridden catalog')
 })

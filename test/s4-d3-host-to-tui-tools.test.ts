@@ -179,6 +179,17 @@ test('B05: the real create_worktree result and effective cwd reach the mounted T
 
 // ── B07 persistent terminal ────────────────────────────────────────────────
 
+/** The exact durable tool result of one call id (never a sibling result). */
+function toolResultOf(agent: Agent, callId: string): string | undefined {
+  for (const event of agent.session.snapshotEvents() as readonly { readonly type?: string; data?: unknown }[]) {
+    if (event.type !== 'tool/result') continue
+    const message = (event.data as { message?: { toolCallId?: unknown; content?: readonly { text?: string }[] } }).message
+    if (String(message?.toolCallId) !== callId) continue
+    return (message?.content ?? []).map(block => block.text ?? '').join('')
+  }
+  return undefined
+}
+
 function toolResultTexts(agent: Agent): string[] {
   const events = agent.session.snapshotEvents() as readonly { readonly type?: string; readonly data?: unknown }[]
   const texts: string[] = []
@@ -244,9 +255,12 @@ test('B07: the real retained terminal result, Job and close state reach the moun
   followup(agent, 'Read the background Job and close the terminal')
   await agent.whenIdle()
   await app.waitFor(() => app.view().includes('BG_OK'), 'the real background Job output in the transcript')
-  await app.waitFor(() => /closed terminal session|unknown|closed|lost/iu.test(app.view()), 'the close/refusal tool results')
-  assert.ok(toolResultTexts(agent).some(text => /unknown|closed|lost/iu.test(text)),
-    'the post-close read result is the official refusal')
+  const closed = toolResultOf(agent, 's4d3-b07-close')
+  assert.match(closed ?? '', /closed terminal session/iu, 'the exact close call succeeded')
+  const afterClose = toolResultOf(agent, 's4d3-b07-read-closed')
+  assert.match(afterClose ?? '', /unknown PTY session|unknown|closed|lost/iu,
+    'the SPECIFIC post-close read is the official refusal, not the close success')
+  await app.waitFor(() => /unknown PTY session/iu.test(app.view()), 'the post-close refusal is painted')
 
   // The existing Task Center observes the SAME Host Job without a second
   // registry: open `/tasks` and read the job row, then its retained output.
@@ -256,8 +270,22 @@ test('B07: the real retained terminal result, Job and close state reach the moun
   await app.settle()
   await app.waitFor(() => /Job|jobs|Task/iu.test(app.view()), 'the real Task Center')
   const taskFrame = app.view()
-  assert.match(taskFrame, new RegExp(`${jobId.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')}|terminal|bash`, 'iu'),
-    `the Host Job appears in the existing Task Center:\n${taskFrame}`)
+  // Isolate the Task Center overlay cells; the retained transcript behind it
+  // already contains terminal/job text and can never witness the roster.
+  const frameLines = taskFrame.split('\n')
+  const overlayTop = frameLines.findIndex(line => line.includes('Tasks [TRACKED]'))
+  assert.ok(overlayTop >= 0, `the real Task Center painted:\n${taskFrame}`)
+  const overlayBottom = frameLines.findIndex((line, index) => index > overlayTop && line.includes('╰'))
+  assert.ok(overlayBottom > overlayTop, 'the Task Center overlay has a painted bottom border')
+  const overlay = frameLines.slice(overlayTop, overlayBottom + 1).join('\n')
+  assert.match(overlay.replace(/\s+/gu, ' '), /Tasks \[TRACKED\]/u)
+  assert.match(overlay.replace(/\s+/gu, ' '), /pty-send · pty-1: sleep 0\.2; echo BG_OK/u,
+    `the exact Host Job row is in the Task Center overlay:\n${overlay}`)
+  assert.match(overlay.replace(/\s+/gu, ' '), /status completed/iu)
+  // Enter opens the existing Job reader; the retained output is visible there.
+  app.vt.sendInput('\r')
+  await app.settle()
+  await app.waitFor(() => /Retained preview|BG_OK/iu.test(app.view()), 'the selected Job reader')
 
   // A closed terminal truly released its process tree.
   await app.waitFor(() => {

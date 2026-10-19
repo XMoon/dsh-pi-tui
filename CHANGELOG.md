@@ -50,6 +50,10 @@
 
 ### 修复
 
+- **选择 B03 Auto 权限预设后，Footer 仍显示当前权限事实。** 之前 Auto 不在内置权限标签表里，
+  切到 Auto 会让整个 Permission 徽标消失，看起来像没有生效；现在显示 `[auto]`（compact/plain
+  格式同样保留），与官方 preset 的当前值一致。
+
 - **人类提示现在携带发送端 TUI 进程的时区**，官方 `time-context` 注入不再对普通请求显示
   `Browser time zone ... unavailable`：Direct 主会话、Direct/Remote continuable 子 Agent
   续聊都由发送端在提交时采样 `Intl` 时区并写入官方请求元数据；Remote 主会话继续由官方

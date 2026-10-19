@@ -221,32 +221,80 @@ test('the real rc.2 Host catalog paints all 14 bounded boundaries through the mo
     '@deepseek-ai/dsh-experimental-plugin-market-bundle',
   ]) {
     const card = model.cards.find(candidate => candidate.name === name)!
-    assert.doesNotMatch(card.name, /discover|teamboard|inspector-page/u)
-    assert.ok(!card.name.includes('ui-page'))
+    assert.equal(card.section, 'experimental')
+    assert.equal(card.official, true)
   }
 })
 
 // ── D3-6: B01 and B03 in the mounted application ───────────────────────────
 
-import { LlmAdapter, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
+import { createUserMessage, LlmAdapter, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { startS4D3Application } from './support/s4-d3-application-fixture.ts'
 import { skippedInstallationReason, type S4D2BundleId } from './support/s4-d2-optional-bundle-fixture.ts'
 
+type BoundaryScript =
+  | { readonly kind: 'tool'; readonly name: string; readonly arguments: string; readonly callId: string }
+  | { readonly kind: 'text'; readonly text: string }
+
 class BoundaryAdapter extends LlmAdapter {
+  readonly scripts: BoundaryScript[] = []
+
   override resolveModel(provider: string, model: string): Promise<{ provider: string; id: string; name: string }> {
     return Promise.resolve({ provider, id: model, name: model })
   }
+
   override async *stream(): AsyncIterable<StreamChunk> {
-    yield { type: 'block-start', index: 0, blockType: 'text' }
-    yield { type: 'text-delta', index: 0, text: 'ok' }
-    yield { type: 'block-end', index: 0, block: { type: 'text', text: 'ok' } }
-    yield { type: 'finish', reason: { kind: 'stop' } }
+    const script = this.scripts.shift()
+    if (script === undefined) {
+      yield { type: 'block-start', index: 0, blockType: 'text' }
+      yield { type: 'text-delta', index: 0, text: 'ok' }
+      yield { type: 'block-end', index: 0, block: { type: 'text', text: 'ok' } }
+      yield { type: 'finish', reason: { kind: 'stop' } }
+      return
+    }
+    if (script.kind === 'text') {
+      yield { type: 'block-start', index: 0, blockType: 'text' }
+      yield { type: 'text-delta', index: 0, text: script.text }
+      yield { type: 'block-end', index: 0, block: { type: 'text', text: script.text } }
+      yield { type: 'finish', reason: { kind: 'stop' } }
+      return
+    }
+    yield { type: 'block-start', index: 0, blockType: 'tool-call' }
+    yield { type: 'tool-call-delta', index: 0, id: script.callId as never, name: script.name, argumentsDelta: script.arguments }
+    yield {
+      type: 'block-end',
+      index: 0,
+      block: { type: 'tool-call', id: script.callId as never, name: script.name, arguments: script.arguments },
+    }
+    yield { type: 'finish', reason: { kind: 'tool-calls' } }
   }
+}
+
+function followup(agent: Agent, text: string): void {
+  agent.followup(createUserMessage({ content: [{ type: 'text', text }], source: { kind: 'user' } }))
 }
 
 const B01 = '@deepseek-ai/dsh-experimental-agent-team-profile' satisfies S4D2BundleId
 const B03 = '@deepseek-ai/dsh-experimental-auto-review' satisfies S4D2BundleId
+
+/** Pass-through mutation counter over the REAL plugin-manager service class
+ *  (the prototype is shared by the restarted instance). Every call continues
+ *  through the original unbound function on the real receiver. */
+function countPluginMutations(service: unknown): { readonly counts: Record<'setBundleEnabled' | 'setPluginEnabled' | 'removeBundle', number>; restore(): void } {
+  const proto = Object.getPrototypeOf(service) as Record<string, (...args: unknown[]) => unknown>
+  const counts = { setBundleEnabled: 0, setPluginEnabled: 0, removeBundle: 0 }
+  const originals = new Map<string, (...args: unknown[]) => unknown>()
+  for (const name of Object.keys(counts) as Array<keyof typeof counts>) {
+    const original = proto[name]
+    originals.set(name, original)
+    proto[name] = function (this: unknown, ...args: unknown[]) {
+      counts[name] += 1
+      return original.apply(this, args)
+    }
+  }
+  return { counts, restore() { for (const [name, original] of originals) proto[name] = original } }
+}
 
 test('B01: the mounted TUI keeps Team capability in the existing Tool/Activity views and invents no Team board', { skip: skippedInstallationReason([B01]) }, async t => {
   const adapter = new BoundaryAdapter()
@@ -257,6 +305,7 @@ test('B01: the mounted TUI keeps Team capability in the existing Tool/Activity v
     patches: [{ id: 'agent-default-model', config: { provider: 'scripted', model: 'review-model' } }] as never,
     prepareHost: host => { host.ctx.llm.registerAdapter(['scripted'], adapter) },
   })
+  adapter.scripts.push({ kind: 'text', text: 'Team session ready.' })
   const agent = await app.submitFirstPrompt('Start the team session')
   await agent.whenIdle()
   assert.equal(app.host.hasTool('spawn_teammate', agent), true, 'the real B01 Team tool is Agent-scoped')
@@ -264,6 +313,17 @@ test('B01: the mounted TUI keeps Team capability in the existing Tool/Activity v
   const commands = (app.host.ctx.get('commands') as { list(agent: unknown): readonly { name: string }[] })
     .list(agent).map(command => command.name)
   assert.equal(commands.includes('team'), false, 'no dedicated Team command/board is created by the TUI')
+
+  // The REAL scoped Team operation travels through the same Agent/loop and
+  // lands in the existing Tool output (no Team board is involved).
+  adapter.scripts.push(
+    { kind: 'tool', name: 'team_task_create', callId: 's4d3-b01-task', arguments: JSON.stringify({ subject: 'Scout one file', description: 'Read one file and report its content.' }) },
+    { kind: 'text', text: 'Team task created.' },
+  )
+  followup(agent, 'Create one shared Team task')
+  await agent.whenIdle()
+  await app.waitFor(() => app.view().includes('team_task_create'), 'the real Team tool card')
+  await app.waitFor(() => app.view().includes('Scout one file'), 'the real Team task result in the Tool output')
   for (const character of '/tasks') app.vt.sendInput(character)
   await app.settle()
   app.vt.sendInput('\r')
@@ -280,13 +340,25 @@ test('B03: the real Auto preset and the shared Plugin Manager danger confirmatio
   })
   assert.equal((app.host.ctx.get('permissionPresets') as { names: readonly string[] }).names.includes('auto'), false,
     'Auto is absent while B03 is not mounted')
+  const mutations = countPluginMutations(app.host.ctx.get('pluginManager'))
+  t.after(mutations.restore)
   const enabled = await app.host.pluginManager.setBundleEnabled(B03, true) as { application: string }
   assert.equal(enabled.application, 'restart-required')
+  assert.equal(mutations.counts.setBundleEnabled, 1, 'the pass-through counter observes the real enable mutation')
   const restarted = await app.restart(host => { host.ctx.llm.registerAdapter(['scripted'], adapter) })
   const presets = restarted.host.ctx.get('permissionPresets') as { names: readonly string[] }
   assert.ok(presets.names.includes('auto'), 'the real Auto preset is advertised after the enabling restart')
   const agent: Agent = await restarted.submitFirstPrompt('Start the auto permission session')
   await agent.whenIdle()
+  // The REAL current-application permission path: `/permission auto` applies
+  // through the official preset service and the footer/projection follows.
+  for (const character of '/permission auto') restarted.vt.sendInput(character)
+  await restarted.settle()
+  restarted.vt.sendInput('\r')
+  await restarted.settle()
+  const permission = restarted.host.ctx.get('permissionPresets') as { current(session: unknown): string | null }
+  await restarted.waitFor(() => permission.current(agent.session) === 'auto', 'the real Auto preset selection')
+  assert.match(restarted.view(), /\[auto\]/u, 'the footer/projection shows the selected Auto preset')
 
   // The same exact B03 card now carries the Owner-frozen danger consequence.
   for (const character of '/plugins') restarted.vt.sendInput(character)
@@ -323,5 +395,10 @@ test('B03: the real Auto preset and the shared Plugin Manager danger confirmatio
   await restarted.waitFor(() => !/safety confirmation/u.test(restarted.view()), 'the confirmation closes')
   const before = (await restarted.host.pluginManager.listBundles() as readonly { name: string; enabled: boolean }[])
     .find(bundle => bundle.name === B03)
-  assert.equal(before?.enabled, true, 'Cancel wrote nothing')
+  assert.equal(before?.enabled, true, 'Cancel left the bundle enabled')
+  assert.deepEqual(mutations.counts, {
+    setBundleEnabled: 1,
+    setPluginEnabled: 0,
+    removeBundle: 0,
+  }, 'Cancel dispatched ZERO additional Host mutation (the counter saw only the earlier enable)')
 })

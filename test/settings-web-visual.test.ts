@@ -567,7 +567,7 @@ test('the launcher and Web rows explain opt-in billing, defaults and ori_questio
   const compact = (): string => h.plain().join(' ').replace(/[\u2500-\u257f]/gu, ' ').replace(/\s+/gu, ' ')
   assert.match(compact(), /Host Web settings for the base profile, not an Optional Bundle/u)
   assert.match(compact(), /other bundles never change them and the defaults call no billed API/u)
-  assert.match(compact(), /a Messages plan does not cover them/u)
+  assert.match(compact(), /a Messages plan does not guarantee coverage/u)
   assert.match(compact(), /Share Original Question is on by default/u)
   assert.match(compact(), /up to 128 characters of the human question/u)
   assert.match(compact(), /never the full history or system prompt/u)
@@ -576,7 +576,7 @@ test('the launcher and Web rows explain opt-in billing, defaults and ori_questio
   await key(h, DOWN)
   await key(h, ENTER)
   assert.match(compact(), /Messages is the official default and does not call the billed Search API/u)
-  assert.match(compact(), /DeepSeek Search API is opt-in and separately billed \(a Messages plan does not cover it\)/u)
+  assert.match(compact(), /DeepSeek Search API is opt-in and separately billed \(a Messages plan does not guarantee coverage\)/u)
   assert.match(compact(), /up to 128 characters of the triggering question are sent as ori_question/u)
 
   // The Share Original Question row states the packaged ON default and the

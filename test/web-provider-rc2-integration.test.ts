@@ -292,11 +292,10 @@ test('cancellation and the DeepSeek Fetch API path keep their official semantics
 // ── D3-2: the settings change → next real tool → mounted TUI sink ──────────
 
 import { LlmAdapter, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
-import { startS4D3Application } from './support/s4-d3-application-fixture.ts'
+import { startS4D3Application, type S4D3Application } from './support/s4-d3-application-fixture.ts'
 import { skippedInstallationReason } from './support/s4-d2-optional-bundle-fixture.ts'
 
 class WebL6Adapter extends LlmAdapter {
-  readonly scripts: { readonly kind: 'tool'; name: string; arguments: string; callId: string }[] | { readonly kind: 'text'; text: string }[] = [] as never
   private queue: Array<{ readonly kind: 'tool'; name: string; arguments: string; callId: string } | { readonly kind: 'text'; text: string }> = []
   push(script: { readonly kind: 'tool'; name: string; arguments: string; callId: string } | { readonly kind: 'text'; text: string }): void {
     this.queue.push(script)
@@ -331,6 +330,60 @@ class WebL6Adapter extends LlmAdapter {
   }
 }
 
+/** Read the exact durable tool result of one call id from the same Agent. */
+function toolResultOf(agent: Agent, callId: string): string | undefined {
+  for (const event of agent.session.snapshotEvents() as readonly { readonly type?: string; readonly data?: unknown }[]) {
+    if (event.type !== 'tool/result') continue
+    const message = (event.data as { message?: { toolCallId?: unknown; content?: readonly { text?: string }[] } }).message
+    if (String(message?.toolCallId) !== callId) continue
+    return (message?.content ?? []).map(block => block.text ?? '').join('')
+  }
+  return undefined
+}
+
+const KEY = { down: '\x1b[B', enter: '\r', tab: '\t', esc: '\x1b' } as const
+
+/** Drive the REAL existing `/settings → Other → Web Search / Fetch` surface:
+ *  select the Search API provider and the 20-result count, then leave the
+ *  workspace. The real ConfigPort + Host settings mutate/readback performs the
+ *  write; no Direct config object is used here. */
+async function writeWebSettingsThroughTui(app: S4D3Application, config: DirectWebProviderConfig): Promise<void> {
+  for (const character of '/settings') app.vt.sendInput(character)
+  await app.settle()
+  app.vt.sendInput(KEY.enter)
+  await app.settle()
+  if (app.view().includes('❯ /settings')) {
+    app.vt.sendInput(KEY.enter)
+    await app.settle()
+  }
+  for (const key of [KEY.tab, KEY.tab, KEY.down, KEY.down, KEY.down, KEY.enter]) {
+    app.vt.sendInput(key)
+    await app.settle()
+  }
+  app.vt.sendInput(KEY.down) // the Web Search / Fetch launcher row
+  await app.settle()
+  app.vt.sendInput(KEY.enter)
+  await app.settle()
+  await app.waitFor(() => app.view().includes('Web Search Provider') && !app.view().includes('Loading…'),
+    'the real Web settings section')
+  app.vt.sendInput(KEY.enter) // Messages -> DeepSeek Search API
+  await app.settle()
+  app.vt.sendInput(KEY.down)
+  app.vt.sendInput(KEY.down)
+  await app.settle()
+  app.vt.sendInput(KEY.enter) // count 10 -> 20
+  await app.settle()
+  app.vt.sendInput(KEY.esc) // back to the Settings workspace
+  await app.settle()
+  // A pending authoritative reload may swallow the first close gesture; Esc
+  // is idempotent, so close until the workspace really leaves the frame.
+  for (let attempt = 0; attempt < 4 && app.view().includes('Settings ·'); attempt += 1) {
+    app.vt.sendInput(KEY.esc)
+    await app.settle()
+  }
+  await app.waitFor(() => !app.view().includes('Settings ·'), 'the Settings workspace closes')
+}
+
 test('D3-2: a TUI Web settings write reaches the NEXT real tool call and the mounted transcript', { skip: skippedInstallationReason([]) }, async t => {
   const adapter = new WebL6Adapter()
   const app = await startS4D3Application(t, {
@@ -347,14 +400,14 @@ test('D3-2: a TUI Web settings write reaches the NEXT real tool call and the mou
   const transport = installTransport()
   t.after(transport.restore)
   const config = new DirectWebProviderConfig(app.host.ctx as never)
-  await config.setSearchProvider('deepseek-search-api')
-  await config.setSearchApiCount(20)
+  await writeWebSettingsThroughTui(app, config)
   // The settings recompose re-read the persisted profile: re-pin the scripted
   // transport (the official default-model write path) before the next turn.
   await (app.host.ctx.get('agentDefaultModel') as { saveSelection(next: unknown): Promise<void> })
     .saveSelection({ provider: 'scripted', model: 'review-model' })
   const written = await config.read()
-  assert.equal(written?.searchProvider, 'deepseek-search-api')
+  assert.equal(written?.searchProvider, 'deepseek-search-api', 'the UI write is the authoritative Host value')
+  assert.equal(written?.api.count, 20, 'the UI count write is the authoritative Host value')
   assert.equal(written?.api.sendOriginalQuestion, true, 'the official rc.2 default stays true')
   assert.equal(written?.credential.configured, true)
 
@@ -393,13 +446,19 @@ test('D3-2: the missing-credential error reaches the TUI and the selected provid
   const transport = installTransport()
   t.after(transport.restore)
   const config = new DirectWebProviderConfig(app.host.ctx as never)
-  await config.setSearchProvider('deepseek-search-api')
+  await writeWebSettingsThroughTui(app, config)
+  assert.equal((await config.read())?.searchProvider, 'deepseek-search-api')
   await (app.host.ctx.get('agentDefaultModel') as { saveSelection(next: unknown): Promise<void> })
     .saveSelection({ provider: 'scripted', model: 'review-model' })
   adapter.push({ kind: 'tool', name: 'web_search', callId: 's4d3-web-missing', arguments: JSON.stringify({ queries: ['no credential'] }) })
   adapter.push({ kind: 'text', text: 'Search failed.' })
   const agent = await app.submitFirstPrompt('Search without a credential')
   await agent.whenIdle()
-  await app.waitFor(() => /credential|DEEPSEEK_API_KEY|MISSING_CREDENTIAL/iu.test(app.view()), 'the official error in the TUI')
+  const refused = toolResultOf(agent, 's4d3-web-missing')
+  assert.ok(refused !== undefined, `the exact web_search call settles as a tool result:\n${String(refused)}`)
+  assert.match(refused!, /DEEPSEEK_API_KEY|MISSING_CREDENTIAL|no API key/iu,
+    'the official missing-credential error is the TOOL result, not the user prompt')
+  await app.waitFor(() => /DEEPSEEK_API_KEY|MISSING_CREDENTIAL|no API key/iu.test(app.view()),
+    'the same official error is painted in the TUI')
   assert.deepEqual(transport.requests, [], 'no silent fallback and no dispatched request')
 })
