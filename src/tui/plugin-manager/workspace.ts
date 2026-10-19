@@ -184,7 +184,7 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
   private pressedGesture: PressedGesture | undefined
   private lastRenderWidth = -1
   private lastRenderRows = -1
-  private lastModel: object | undefined
+  private lastModelKey: string | undefined
   private lastView: PluginWorkspaceView | undefined
   private lastPhase: string | undefined
   private lastNotice: string | undefined
@@ -1290,14 +1290,14 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
    * target: model identity, view, install phase, notice, selection/focus,
    * filter/query or terminal geometry. */
   private syncFrameState(width: number, rows: number): void {
-    const model = this.controller.model()
+    const modelKey = this.modelStateKey()
     const install = this.controller.installView()
     const notice = this.controller.notice()
     const appNoticeKey = this.appNoticeKey()
     const statusState = this.controller.status().state
     let changed = false
     if (this.lastRenderWidth >= 0 && (this.lastRenderWidth !== width || this.lastRenderRows !== rows)) changed = true
-    if (this.lastModel !== model) { this.lastModel = model; changed = true }
+    if (this.lastModelKey !== modelKey) { this.lastModelKey = modelKey; changed = true }
     if (this.lastView !== this.view) { this.lastView = this.view; changed = true }
     if (this.lastPhase !== install?.phase) {
       this.lastPhase = install?.phase
@@ -1872,6 +1872,14 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
 
   /** True only while the live terminal geometry and state version still match
    * the frame whose hit map is installed in `paintedTargets`. */
+  /** The semantic presentation key of the inventory. A same-truth reread
+   * creates a new model object but the SAME key, so an invalidation that
+   * returns identical facts cannot invalidate an already-painted action; any
+   * fact that could change a pixel or an action changes the key. */
+  private modelStateKey(): string {
+    return JSON.stringify(this.controller.model())
+  }
+
   private appNoticeKey(): string | undefined {
     const notice = this.intents.notice?.()
     return notice === undefined ? undefined : `${notice.kind}:${notice.text}`
@@ -1885,7 +1893,7 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     return this.paintedRevision === this.revision
       && this.lastRenderWidth === this.intents.columns()
       && this.lastRenderRows === this.intents.rows()
-      && this.controller.model() === this.lastModel
+      && this.modelStateKey() === this.lastModelKey
       && this.controller.installView()?.phase === this.lastPhase
       && this.controller.notice() === this.lastNotice
       && this.appNoticeKey() === this.lastAppNotice
