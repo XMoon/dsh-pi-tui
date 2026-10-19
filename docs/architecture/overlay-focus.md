@@ -411,13 +411,12 @@ has exactly ONE per-open finalizer, and every close route funnels through it:
   closed, so a callback that synchronously opens a newer browser wins; a late
   callback from a retired browser is a strict no-op.
 - **A retired browser's navigation tails are generation-fenced.** The tails
-  close over the monotonic epoch of the browser that opened them, so a browser
+  close over the monotonic epoch of the browser that opened them, so a browser that
   a synchronous callback opened while the old one was closing (for example a
   plugin `onFocus` fired by the restore of physical focus) keeps the slot. The
   retired browser's OWN token cannot express this: its `onRetired` legitimately
   clears it, so "the token is clear" cannot be told apart from "someone newer
-  owns the slot". (The retired Esc → Quick restore tail leaves this fence to guard
-  guards a synchronous open during the close.)
+  owns the slot". (This fence guards a synchronous open during the close.)
 - **The on-demand Task Quick is NOT an overlay**: it is the first-party
   pinned accessory as the LAST pinned row of both roots — under the whole
   footer — and `focused` (written by the TUI
