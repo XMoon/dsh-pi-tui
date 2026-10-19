@@ -8523,9 +8523,10 @@ export class TuiApp {
    * This is the reveal-NECESSITY authority: it resolves the collapsed Focus
    * projection itself (the same visibility rules the renderer uses), so a user
    * prompt, the final assistant, a committed answer, a compaction card, a
-   * surfaced interaction, a mid-turn notice (a post-Thought visible row) or a
-   * fail-open delivered tail that is already on screen never opens — or
-   * promotes — a Thought root. */
+   * surfaced interaction, an UNQUALIFIED mid-turn notice (a post-Thought
+   * visible row) or a fail-open delivered tail that is already on screen never
+   * opens — or promotes — a Thought root. A proven Working `tool-jobs` Notice
+   * is hidden and resolves through the Work/Thought ancestry instead. */
   private searchTargetTurn(): number | undefined {
     if (!this.searchRevealGranted) return undefined
     if (!isFocusDisplayPreset(this.displayState.preset)) return undefined
@@ -8538,8 +8539,9 @@ export class TuiApp {
   /** Whether the COLLAPSED Focus projection hides one row (so the search target
    * needs the Focus-root reveal). Computed from the real `projectFocus`
    * collapsed output — never from "the row has a turn" — and memoized per
-   * window/activity/target. A mid-turn notice is already visible as a
-   * post-Thought row, so it never needs the root reveal. */
+   * window/activity/target. An UNQUALIFIED mid-turn notice is already visible
+   * as a post-Thought row, so it never needs the root reveal; a proven Working
+   * `tool-jobs` Notice is hidden with the Work/Thought and does. */
   private focusRootHidesSearchTarget(message: TranscriptMessage): boolean {
     const memo = this.collapsedFocusHiddenMemo
     if (memo !== undefined && memo.messages === this.messages && memo.activities === this.turnActivities

@@ -1,14 +1,17 @@
 /**
- * Focus collapsed mid-turn Notice disposition (2026-09-30 closure).
+ * Focus collapsed UNQUALIFIED mid-turn Notice disposition (2026-09-30 closure).
  *
  * Collapsed Focus distinguishes CAUSAL INPUT from MID-TURN PROCESS FEEDBACK
- * POSITIONALLY: a `form:'notice'` row in the turn's opening foundation stays
- * BEFORE the Thought (it explains why the turn started), while a mid-turn
- * notice renders AFTER the Thought as visible process feedback — never hidden
- * inside it, and never a candidate for the Thought's Action slot. Expanded
- * Focus restores the exact raw chronology. The decision reads the semantic
- * `form` plus raw position, never a source kind or plugin name; Compact/Full
- * never route through this disposition.
+ * POSITIONALLY: an unqualified `form:'notice'` row in the turn's opening
+ * foundation stays BEFORE the Thought (it explains why the turn started),
+ * while an unqualified mid-turn notice renders AFTER the Thought as visible
+ * process feedback — never hidden inside it, and never a candidate for the
+ * Thought's Action slot. The v2 exception (a proven Working `tool-jobs` Notice
+ * with durable same-turn next-step evidence) is hidden with the Thought and is
+ * covered by the real-Folder suites, not by this synthetic negative-control
+ * file. Expanded Focus restores the exact raw chronology. The decision reads
+ * the semantic `form` plus raw position, never a source kind or plugin name;
+ * Compact/Full never route through this disposition.
  * @module @xmoon76/dsh-pi-tui/focus-notice-suppression.test
  */
 

@@ -1892,3 +1892,82 @@ test('a live Preparing call joins a Work whose trailing row is a Working tool-jo
   assert.ok(!lines.some(line => /Action:\s+Preparing/.test(line)) === false ||
     lines.some(line => /Action:\s+Preparing/.test(line)), 'fixture sanity')
 })
+
+test('a userless wakeup turn keeps its trigger and folds internal Context in Compact and Full', async () => {
+  const folder = new TranscriptFolder()
+  const wakeNotice = {
+    id: MessageId('userless-compact-wake'), role: 'user',
+    content: [{ type: 'text', text: 'WAKE_COMPACT body' }],
+    source: { kind: 'tool-jobs', form: 'notice', summary: 'wakeup cause' },
+  }
+  applyMixed(folder, [
+    eventAt('agent/inbox/spliced', { target: 'next-turn', start: 0, inserted: [wakeNotice] }, T0, 0),
+    eventAt('turn/start', { turn: 1 }, T0 + 1, 1),
+    eventAt('agent/inbox/spliced', { target: 'next-turn', start: 0, removedCount: 1, inserted: [] }, T0 + 2, 2),
+    eventAt('user/message', wakeNotice, T0 + 3, 3),
+    contextEvent('userless-compact-snap', { kind: 'time-context', form: 'snapshot' }, 'USERLESS_COMPACT_SNAPSHOT', T0 + 4, 4),
+    eventAt('assistant/chunk', { turn: 1, step: 0, chunk: { type: 'reasoning-delta', index: 0, text: 'first' } }, T0 + 5, 5),
+    eventAt('tool/call', { turn: 1, step: 0, callId: ToolCallId('userless-compact-c1'), name: 'read', arguments: '{}' }, T0 + 6, 6),
+    eventAt('tool/result', {
+      turn: 1, step: 0,
+      message: {
+        id: MessageId('userless-compact-r1'), role: 'tool', toolCallId: ToolCallId('userless-compact-c1'),
+        content: [{ type: 'text', text: 'ok' }], source: { kind: 'tool', callId: ToolCallId('userless-compact-c1') },
+      },
+    }, T0 + 7, 7),
+    ...workingToolJobsEvents('userless-compact-working', 'USERLESS_COMPACT_NOTICE', T0 + 8, 8),
+    eventAt('assistant/chunk', { turn: 1, step: 1, chunk: { type: 'reasoning-delta', index: 0, text: 'second' } }, T0 + 11, 11),
+    eventAt('tool/call', { turn: 1, step: 1, callId: ToolCallId('userless-compact-c2'), name: 'bash', arguments: '{}' }, T0 + 12, 12),
+    eventAt('assistant/message', {
+      turn: 1, step: 2,
+      message: { id: MessageId('userless-compact-final'), role: 'assistant', content: [{ type: 'text', text: 'done' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+    }, T0 + 13, 13),
+    eventAt('turn/end', { turn: 1, reason: { kind: 'completed' } }, T0 + 9000, 14),
+  ])
+
+  {
+    const { vt, app } = startApp('compact')
+    show(app, folder)
+    await vt.waitForRender()
+    const lines = vt.getViewport()
+    const collapsed = lines.join('\n')
+    assert.equal(workHeaders(collapsed).length, 1, `one Activity for the working turn:\n${collapsed}`)
+    assert.ok(collapsed.includes('wakeup cause'), `the wakeup cause stays outside the Activity:\n${collapsed}`)
+    assert.ok(!collapsed.includes('USERLESS_COMPACT_SNAPSHOT') && !collapsed.includes('USERLESS_COMPACT_NOTICE'),
+      `internal Context stays inside the Activity:\n${collapsed}`)
+    vt.sendInput('\x0f')
+    await vt.waitForRender()
+    const expandedLines = vt.getViewport()
+    const expanded = expandedLines.join('\n')
+    assert.equal(expanded.split('USERLESS_COMPACT_SNAPSHOT').length - 1, 1)
+    assert.equal(expanded.split('USERLESS_COMPACT_NOTICE').length - 1, 1)
+    const wakeRow = expandedLines.findIndex(line => line.includes('wakeup cause'))
+    const snapshotRow = expandedLines.findIndex(line => line.includes('USERLESS_COMPACT_SNAPSHOT'))
+    const wakeNoticeRow = expandedLines.findIndex(line => line.includes('USERLESS_COMPACT_NOTICE'))
+    const readRow = expandedLines.findIndex(line => /Read\b/.test(line))
+    const bashRow = expandedLines.findIndex(line => /Bash\b/.test(line))
+    assert.ok(wakeRow < snapshotRow && snapshotRow < readRow && readRow < wakeNoticeRow && wakeNoticeRow < bashRow,
+      `expanded order keeps the wake trigger, Snapshot, read, working notice, bash:\n${expanded}`)
+    app.dispose()
+    startedApps.delete(app)
+  }
+
+  {
+    const { vt, app } = startApp('full')
+    show(app, folder)
+    await vt.waitForRender()
+    const lines = vt.getViewport()
+    const view = lines.join('\n')
+    assert.equal(workHeaders(view).length, 0, `Full keeps Work flat:\n${view}`)
+    assert.ok(view.includes('wakeup cause'), `the wakeup card stays visible:\n${view}`)
+    assert.ok(view.includes('Context injection time-context'), `the Snapshot card stays visible:\n${view}`)
+    assert.ok(view.includes('job completed'), `the Working notice card stays visible:\n${view}`)
+    const wakeRow = lines.findIndex(line => line.includes('wakeup cause'))
+    const snapshotRow = lines.findIndex(line => line.includes('Context injection time-context'))
+    const workingRow = lines.findIndex(line => line.includes('job completed'))
+    assert.ok(wakeRow < snapshotRow && snapshotRow < workingRow,
+      `Full keeps the raw Context card order:\n${view}`)
+    app.dispose()
+    startedApps.delete(app)
+  }
+})

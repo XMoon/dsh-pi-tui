@@ -677,14 +677,16 @@ The 2026-08-24 UX plan's Focus click behavior is fullscreen-only:
   turn is the expanded Thought foundation and renders before the Thought.
   Human user/steer rows and CAUSAL surfaced context are persistent
   boundaries in collapsed Focus, where they remain visible in raw relative
-  order. A MID-TURN `form:'notice'` (a background job or subagent settling
-  while the Agent works) is visible process feedback: it renders AFTER the
-  Thought as a post-Thought row while collapsed (2026-09-30 closure; the
-  decision reads the semantic `form` and raw position, never a source kind),
-  never enters the Thought's hidden Action candidate set, and returns to its
-  exact raw position when the Thought opens. A notice inside the
-  opening foundation stays before the Thought, and a mid-turn relay stays
-  visible.
+  order. An UNQUALIFIED MID-TURN `form:'notice'` (a background job or subagent
+  settling while the Agent works without durable same-turn next-step evidence)
+  is visible process feedback: it renders AFTER the Thought as a post-Thought
+  row while collapsed (2026-09-30 closure; the decision reads the semantic
+  `form` and raw position, never a source kind), never enters the Thought's
+  hidden Action candidate set, and returns to its exact raw position when the
+  Thought opens. The v2 Owner extension supersedes this sentence for a proven
+  Working `tool-jobs` Notice only (durable same-turn next-step claim): that row
+  follows the Thought hidden set. A notice inside the opening foundation stays
+  before the Thought, and a mid-turn relay stays visible.
   Expanded Focus preserves process chronology after the foundation: later
   steers and surfaced context return to their real positions and remain
   unmarked as owner-only process content. Searching a mid-turn notice needs
