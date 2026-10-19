@@ -14,6 +14,7 @@
  */
 
 import { truncateToWidth, visibleWidth, type Component } from '@xmoon76/pi-tui'
+import { sanitizedPhysicalLine } from '../../presentation/lines.ts'
 import { sanitizeDisplayText } from '../../presentation/terminal-text.ts'
 import {
   compactActionSlotLine,
@@ -65,7 +66,10 @@ export function formatWorkHeaderLine(
   identity: CompactWorkHeaderIdentity = 'activity',
 ): string {
   const head = `${iconLead(sectionDisclosureSemantic(expanded), iconStyle)}${identity === 'thought' ? 'Thought' : 'Activity'}`
-  const parts = compactActionStatParts(summary.actionStats)
+  // The header is ONE physical row: the stat labels embed the raw action
+  // subtype name (a model-facing tool name), so fold each part before the
+  // width-degradation ladder measures it.
+  const parts = compactActionStatParts(summary.actionStats).map(sanitizedPhysicalLine)
   // The degradation ladder: full → … → action total → identity + duration
   // → identity.
   const candidates: string[] = []

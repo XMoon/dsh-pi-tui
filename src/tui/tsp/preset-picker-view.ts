@@ -39,6 +39,7 @@
  */
 import { span, ui, type Node } from '@stencil-hq/tern'
 import type { PickerAction, PickerItem, PickerProps } from '@stencil-hq/tern'
+import { sanitizedPhysicalLine } from '../presentation/lines.ts'
 import { sanitizeDisplayText } from '../presentation/terminal-text.ts'
 import type { PresetPickerIntent } from './preset-picker-intents.ts'
 import {
@@ -91,7 +92,7 @@ function pickerState(panel: PresetPickerPanel): Pick<PickerProps, 'state' | 'mes
   const message = statusMessage(panel)
   return {
     state: panel.phase === 'loading' ? 'loading' : panel.phase === 'error' ? 'error' : 'ready',
-    ...(message === '' ? {} : { message: sanitizeDisplayText(message) }),
+    ...(message === '' ? {} : { message: sanitizedPhysicalLine(message) }),
     // The empty roster is a real, readable state and never a silent fallback to
     // "take the first card".
     empty: 'No agent presets configured.',
@@ -122,9 +123,9 @@ function cataloguePicker(panel: PresetPickerPanel): Node {
   const current = currentId(panel)
   const items: PickerItem[] = presetItems(panel).map((item) => ({
     ...item,
-    label: typeof item.label === 'string' ? sanitizeDisplayText(item.label) : item.label,
-    ...(typeof item.detail === 'string' ? { detail: sanitizeDisplayText(item.detail) } : {}),
-    ...(item.title === undefined ? {} : { title: sanitizeDisplayText(item.title) }),
+    label: typeof item.label === 'string' ? sanitizedPhysicalLine(item.label) : item.label,
+    ...(typeof item.detail === 'string' ? { detail: sanitizedPhysicalLine(item.detail) } : {}),
+    ...(item.title === undefined ? {} : { title: sanitizedPhysicalLine(item.title) }),
   }))
   const props: PickerProps & { readonly key: string } = {
     key: pickerKey(panel),
@@ -232,7 +233,7 @@ function detailsOverlay(panel: PresetPickerPanel, deps: PresetPickerViewDeps): N
   return ui.overlay(
     {
       key: `preset-details-${readingScope(panel)}`,
-      head: sanitizeDisplayText(detailsHead(panel)),
+      head: sanitizedPhysicalLine(detailsHead(panel)),
       size: 'lg',
       modal: true,
     },

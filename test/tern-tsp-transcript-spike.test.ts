@@ -40,6 +40,7 @@ import { TranscriptFolder } from '../src/domain/transcript/folder.ts'
 import type { TranscriptMessage } from '../src/domain/transcript/types.ts'
 import { projectTranscriptStructure, type TranscriptStructureBlock } from '../src/tui/transcript/structure.ts'
 import { TranscriptNodeKeys, transcriptView } from '../scripts/support/tern-tsp-transcript-view.ts'
+import { sanitizedPhysicalLine } from '../src/tui/presentation/lines.ts'
 import {
   applyReplayStep,
   buildReplaySteps,
@@ -770,4 +771,33 @@ test('T10: the spike imports no PiTui owner and no application/client module', a
       assert.ok(allowed.some(pattern => pattern.test(specifier)), `${path} may not import ${specifier}`)
     }
   }
+})
+
+test('T-hardening: a real tool/call keeps its raw name but projects every displayed tool field', () => {
+  const hostileName = 'Evil\nTool\r\nName\tTabbed\u001b]52;c;YXR0YWNr\u0007tail'
+  const collapsedName = sanitizedPhysicalLine(hostileName)
+  const folder = new TranscriptFolder()
+  folder.apply([ev('turn/start', { turn: 1 }, 0)])
+  const call = toolCall(1, 'call-hostile', hostileName, { command: 'echo hi' })
+  folder.apply([call])
+
+  // The canonical transcript/card name stays the model-facing identity.
+  const row = rowOf(folder, message => message.kind === 'tool')
+  assert.equal(row.kind, 'tool')
+  assert.equal(row.kind === 'tool' ? row.name : undefined, hostileName, 'the canonical tool name is untouched')
+  assert.equal((call.data as { name?: string }).name, hostileName, 'the session event name is untouched')
+
+  const view = viewOf(folder, new TranscriptNodeKeys())
+  const tool = flatten(view).find(node => node.kind === 'tool')
+  assert.ok(tool !== undefined, 'the native tool node exists')
+  const nameProp = tool.props['name']
+  assert.equal(nameProp, collapsedName, 'ui.tool.name carries the one-row display projection')
+  const titleProp = String(tool.props['title'] ?? '')
+  const targetProp = String(tool.props['target'] ?? '')
+  assert.ok(targetProp.includes(collapsedName), `the title/summary target carries the readable name:\n${targetProp}`)
+  for (const [field, value] of [['name', String(nameProp)], ['title', titleProp], ['target', targetProp]] as const) {
+    assert.ok(!/[\u0000-\u001f\u007f-\u009f]/.test(value),
+      `ui.tool.${field} carries a raw control character: ${JSON.stringify(value)}`)
+  }
+  assert.ok(!JSON.stringify(tool.props).includes('YXR0YWNr'), 'no OSC payload reaches a tool prop')
 })

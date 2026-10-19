@@ -21,6 +21,7 @@
  */
 
 import { truncateToWidth, visibleWidth, wrapTextWithAnsi } from '@xmoon76/pi-tui'
+import { sanitizedPhysicalLine } from '../../presentation/lines.ts'
 import { sanitizeDisplayText } from '../../presentation/terminal-text.ts'
 import { color } from '../../theme/runtime.ts'
 import { formatTokens } from '../../token-format.ts'
@@ -158,7 +159,8 @@ export function formatFocusHeaderLine(
   const label = focusStatusLabel(activity, phase, duration)
   const head = `${iconFor(focusDisclosureSemantic(expanded), iconStyle)} ${label}`
   const token = activity.totalTokens === undefined ? undefined : `${formatTokens(activity.totalTokens)} tok`
-  const tail = compactActionStatParts(actionStats)
+  // Single-row header: the stat labels carry the raw action subtype name.
+  const tail = compactActionStatParts(actionStats).map(sanitizedPhysicalLine)
   const candidates: string[] = []
   if (token !== undefined) {
     candidates.push(`${head} · ${token}${tail.length > 0 ? ` · ${tail.join(' · ')}` : ''}`)

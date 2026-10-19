@@ -14622,7 +14622,7 @@ export class TuiApp {
         // compaction keeps its own label, the override applies otherwise.
         // The public Advanced-host working message is an external string: it is
         // projected once here, at the display boundary that owns it.
-        app.workingMessageOverride = message === undefined ? undefined : sanitizeDisplayText(message)
+        app.workingMessageOverride = message === undefined ? undefined : sanitizedPhysicalLine(message)
         app.reconcileWorkingRow()
         app.requestRender()
       },
@@ -16573,7 +16573,7 @@ export class TuiApp {
         // iconPrefix hides the separator entirely when the style hides the
         // icon (minimal) — never a dangling leading space.
         const icon = iconPrefix(message.icon ?? 'context-generic', this.iconStyle)
-        const label = sanitizeDisplayText(message.label)
+        const label = sanitizedPhysicalLine(message.label)
         if (expanded) {
           row.addChild(new Text(color.textMuted(`${icon}Context injection ${label}`), 0, 0))
           // Injected content stays dimmed like tool-card bodies: context is
@@ -16599,8 +16599,8 @@ export class TuiApp {
           // injection without a summary, so the fold still says something
           // about what the model received.
           const summary = message.summary === undefined
-            ? sanitizeDisplayText(skillFoldedPreview(message.text))
-            : ` — ${sanitizeDisplayText(message.summary)}`
+            ? sanitizedPhysicalLine(skillFoldedPreview(message.text))
+            : ` — ${sanitizedPhysicalLine(message.summary)}`
           // Folded rows truncate to one line: a long label/summary must not
           // wrap the context row (same rule as folded thinking). The
           // truncation uses the transcript CONTENT width (the gutter
@@ -16637,7 +16637,7 @@ export class TuiApp {
       // the hidden row.
       const command = message.sourceCommand
       const commandOutcomeText = command?.outcome?.text === undefined ? undefined : sanitizeDisplayText(command.outcome.text)
-      const commandName = command?.name === null || command?.name === undefined ? '' : ` /${sanitizeDisplayText(command.name)}`
+      const commandName = command?.name === null || command?.name === undefined ? '' : ` /${sanitizedPhysicalLine(command.name)}`
       // The command's error KIND drives the failed state even when the
       // normalized outcome omitted its text ('' = failed without a message)
       // — a failed manual /compact must never title `Context compacted`.
@@ -16698,12 +16698,12 @@ export class TuiApp {
       // full body (markdown), and the fold is independent of any Thought
       // root.
       const card = new Container()
-      const title = message.name === null ? 'command' : `/${sanitizeDisplayText(message.name)}`
+      const title = message.name === null ? 'command' : `/${sanitizedPhysicalLine(message.name)}`
       // The official args are the VERBATIM raw input INCLUDING the separator
       // whitespace after the name (`parseCommand` keeps it), so the separator
       // is never doubled: a verbatim leading space is kept, a spaceless
       // fragment gets exactly one.
-      const rawArgs = message.args === null ? null : sanitizeDisplayText(message.args)
+      const rawArgs = message.args === null ? null : sanitizedPhysicalLine(message.args)
       const args = rawArgs === null || rawArgs === '' ? ''
         : /^[\s]/.test(rawArgs) ? rawArgs : ` ${rawArgs}`
       const icon = iconPrefix('slash-command', this.iconStyle)
@@ -16780,7 +16780,7 @@ export class TuiApp {
       const card = new Container()
       const identity = message.name === '' || message.name === 'tool'
         ? 'Tool request not started'
-        : `Tool request not started · ${sanitizeDisplayText(toolTitle(message.name))}`
+        : `Tool request not started · ${sanitizedPhysicalLine(toolTitle(message.name))}`
       card.addChild(new Text(color.error(truncateToWidth(identity, width, '…')), 0, 0))
       if (expanded && message.result !== '') {
         for (const line of message.result.split('\n')) {
@@ -16797,8 +16797,8 @@ export class TuiApp {
     const header = toolCardHeader(message.name, message.args, this.workspaceRoot)
     // Display-only projection of the derived header: a tool name or arg that
     // echoes model/Host text can never carry a terminal control into the row.
-    const headerTitle = sanitizeDisplayText(header.title)
-    const headerSummary = sanitizeDisplayText(header.summary)
+    const headerTitle = sanitizedPhysicalLine(header.title)
+    const headerSummary = sanitizedPhysicalLine(header.summary)
     const action = compactToolPresentation(message.name, message.args, message.result, {
       isError: message.status === 'error',
       ...(message.error === undefined ? {} : { error: message.error }),
@@ -16930,7 +16930,7 @@ export class TuiApp {
       // so the folded preview only adds a tool identity when the header
       // summary is empty (e.g. an arg shape the generic derivation cannot
       // read). Web/skill/todo never need it — their headers are friendly.
-      const foldedCall = headerSummary === '' ? sanitizeDisplayText(foldedCallPreview(message.name, message.args)) : ''
+      const foldedCall = headerSummary === '' ? sanitizedPhysicalLine(foldedCallPreview(message.name, message.args)) : ''
       let resultPreview: string
       if (message.name === 'read') {
         resultPreview = readFoldedPreview(message.result)
@@ -16992,11 +16992,17 @@ export class TuiApp {
       if (structuredEditDiff) resultPreview = ''
       // Display-only projection of the folded result preview: captured
       // terminal stdout keeps whitelisted SGR, every other external result is
-      // plain text. Never applied to the theme-painted head rows.
+      // plain text. Never applied to the theme-painted head rows. Either way
+      // the preview is ONE physical row: the log policy maps a lone CR to LF
+      // (progress frames read as history), so its preview is re-derived from
+      // the LOG-PROJECTED text instead of projecting the already-folded row.
       if (resultPreview !== '') {
-        resultPreview = TERMINAL_RESULT_TOOLS.has(message.name)
-          ? sanitizeDisplayLog(resultPreview)
-          : sanitizeDisplayText(resultPreview)
+        if (TERMINAL_RESULT_TOOLS.has(message.name)) {
+          const logged = sanitizeDisplayLog(message.result)
+          resultPreview = logged === '' ? '' : ` — ${preview(logged, RESULT_PREVIEW_LINES)}`
+        } else {
+          resultPreview = sanitizedPhysicalLine(resultPreview)
+        }
       }
       const callHead = foldedCall === '' ? '' : foldedCall
       const headWithPreview = `${expandedHead}${callHead}${resultPreview}`
@@ -17082,8 +17088,8 @@ export class TuiApp {
     if (depth >= PTC_MAX_DEPTH) return 0
     let rows = 1
     const header = toolCardHeader(child.name, child.args, this.workspaceRoot)
-    const subTitle = sanitizeDisplayText(header.title)
-    const subSummary = sanitizeDisplayText(header.summary)
+    const subTitle = sanitizedPhysicalLine(header.title)
+    const subSummary = sanitizedPhysicalLine(header.summary)
     // The DISPLAY status: the durable lifecycle status plus the alpha.2
     // terminal contract (a trailing [exit code: N] / [killed by signal:
     // ...] marker renders a bash/pwsh child failed even when the tool call
@@ -17130,7 +17136,7 @@ export class TuiApp {
       // the description, so the real command must never be lost.
       const command = this.terminalCommand(child.name, child.args)
       if (command !== '') {
-        card.addChild(new Text(truncateToWidth(`${pad}  ${this.shellPrompt(child.name)}${color.textDim(sanitizeDisplayText(command))}`, width, '…'), 0, 0))
+        card.addChild(new Text(truncateToWidth(`${pad}  ${this.shellPrompt(child.name)}${color.textDim(sanitizedPhysicalLine(command))}`, width, '…'), 0, 0))
         rows += 1
       }
       if (child.result !== '') {
@@ -17313,7 +17319,7 @@ export class TuiApp {
     // The command row (kimi ShellExecution layout): the local shell card's
     // `args` IS the raw command string (never JSON).
     const prompt = color.shellMode('$ ')
-    rows.push(`${indent}${prompt}${truncateToWidth(color.textDim(sanitizeDisplayText(message.args)), contentWidth, '…')}`)
+    rows.push(`${indent}${prompt}${truncateToWidth(color.textDim(sanitizedPhysicalLine(message.args)), contentWidth, '…')}`)
     for (const line of preview.rows) {
       rows.push(`${indent}${truncateToWidth(color.textDim(line), contentWidth, '…')}`)
     }
@@ -17355,7 +17361,7 @@ export class TuiApp {
     const runOpen = this.workflowRunOpen(message)
     const icon = iconPrefix('workflow', this.iconStyle)
     const disclosure = runOpen ? '▼' : '▶'
-    const runName = sanitizeDisplayText(message.name)
+    const runName = sanitizedPhysicalLine(message.name)
     const head = `${color.textDim(`${disclosure} ${icon}Workflow ${runName}`)} ${workflowStatusPill(message.status)}`
     const rows: string[] = []
     const hits: Array<{ top: number; height: number; hit: WorkflowHit }> = []
@@ -17399,7 +17405,7 @@ export class TuiApp {
       for (const phase of phases) {
         const phaseOpen = this.workflowPhaseOpen(runId, phase.key, phase)
         const phaseDisclosure = phaseOpen ? '▼' : '▶'
-        const phaseLabel = sanitizeDisplayText(phase.label)
+        const phaseLabel = sanitizedPhysicalLine(phase.label)
         const countLabel = phase.members.length === 1 ? '1 agent' : `${phase.members.length} agents`
         rows.push(truncateToWidth(
           `${color.textDim(`  ${phaseDisclosure} ${phaseLabel}`)} ${color.textMuted(countLabel)}`,
@@ -17417,8 +17423,8 @@ export class TuiApp {
           // members stay visible but never cold-open from the card).
           for (const member of phase.members) {
             const prefix = `    ${workflowMemberMark(member.status)} `
-            const memberLabel = sanitizeDisplayText(member.label)
-            const memberStatus = sanitizeDisplayText(member.status)
+            const memberLabel = sanitizedPhysicalLine(member.label)
+            const memberStatus = sanitizedPhysicalLine(member.status)
             rows.push(truncateToWidth(
               `${prefix}${memberLabel} — ${color.textDim(memberStatus)}`,
               width,
@@ -17441,7 +17447,7 @@ export class TuiApp {
           }
           for (const member of phase.anomalyPreview) {
             const prefix = `    ${workflowMemberMark(member.status)} `
-            const memberLabel = sanitizeDisplayText(member.label)
+            const memberLabel = sanitizedPhysicalLine(member.label)
             rows.push(truncateToWidth(`${prefix}${memberLabel}`, width, '…'))
             // The anomaly-preview row IS the visible row for that member (the
             // context row is deliberately suppressed for previewed members).
@@ -17464,8 +17470,8 @@ export class TuiApp {
             : undefined
           if (context !== undefined && !phase.anomalyPreview.some(member => member.seq === context.seq)) {
             const prefix = `    ${color.textDim('↳')} `
-            const contextLabel = sanitizeDisplayText(context.label)
-            const contextStatus = sanitizeDisplayText(context.status)
+            const contextLabel = sanitizedPhysicalLine(context.label)
+            const contextStatus = sanitizedPhysicalLine(context.status)
             rows.push(truncateToWidth(
               `${prefix}${contextLabel} — ${color.textDim(contextStatus)}`,
               width,
@@ -18445,7 +18451,7 @@ export class TuiApp {
       return
     }
     const lines = shown.map(todo => {
-      const content = sanitizeDisplayText(todo.content)
+      const content = sanitizedPhysicalLine(todo.content)
       const body = todo.status === 'completed' ? `\x1b[9m${content}\x1b[29m` : content
       return `${mark(todo)} ${body}`
     })
@@ -18530,7 +18536,7 @@ export class TuiApp {
     // display projection the todo panel rows use).
     const label = first === undefined
       ? ''
-      : sanitizeDisplayText(first.content.length > 40 ? `${first.content.slice(0, 40)}…` : first.content)
+      : sanitizedPhysicalLine(first.content.length > 40 ? `${first.content.slice(0, 40)}…` : first.content)
     return [
       done > 0 ? `${done} todo done` : '',
       active.length > 0 ? `${active.length} active` : '',
@@ -19331,7 +19337,7 @@ export class TuiApp {
    * otherwise (display-only — no verbs yet). */
   private renderGoalLine(): void {
     const goal = this.displayGoal()
-    this.goalLine.setText(goal === undefined || goal === '' ? '' : color.primary(sanitizeDisplayText(goal)))
+    this.goalLine.setText(goal === undefined || goal === '' ? '' : color.primary(sanitizedPhysicalLine(goal)))
     this.requestRender()
   }
 

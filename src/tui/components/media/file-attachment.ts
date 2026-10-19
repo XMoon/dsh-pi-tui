@@ -8,7 +8,7 @@
 
 import { truncateToWidth, type Component } from '@xmoon76/pi-tui'
 import { fileAttachmentSummary, type FileAttachmentPresentationRef } from '../../../domain/media/file-summary.ts'
-import { sanitizeDisplayText } from '../../presentation/terminal-text.ts'
+import { sanitizedPhysicalLine } from '../../presentation/lines.ts'
 
 /** The caller-owned color surface for attachment rows. */
 export interface FileAttachmentTheme {
@@ -37,7 +37,7 @@ export class FileAttachmentComponent implements Component {
     // The attachment name is external (a Host/tool file name): project it
     // before the theme colors the row.
     const lines = [this.theme.fallbackColor(truncateToWidth(
-      sanitizeDisplayText(fileAttachmentSummary(this.attachment)),
+      sanitizedPhysicalLine(fileAttachmentSummary(this.attachment)),
       safeWidth,
       '…',
     ))]

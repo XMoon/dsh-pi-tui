@@ -13,6 +13,7 @@
 import { Box, Text, truncateToWidth, wrapTextWithAnsi } from '@xmoon76/pi-tui'
 import type { Component } from '@xmoon76/pi-tui'
 import { color } from '../theme/runtime.ts'
+import { sanitizedPhysicalLine } from '../presentation/lines.ts'
 import { sanitizeDisplayText } from '../presentation/terminal-text.ts'
 
 /**
@@ -180,7 +181,7 @@ export function buildApprovalDialog(request: ApprovalPromptRequest, geometry: Ap
   // (shrunk when the terminal is too small for it). Fixed chrome = 1
   // title + danger + 1 blank spacer + hint rows + 2 Box paddingY
   // (Box(1,1)) + 2 Frame borders — keep in sync with the geometry below.
-  const titleShown = truncateToWidth(`Approve ${sanitizeDisplayText(request.toolName)}?`, contentWidth, '…')
+  const titleShown = truncateToWidth(`Approve ${sanitizedPhysicalLine(request.toolName)}?`, contentWidth, '…')
   const dangerShown = request.danger === true
     ? truncateToWidth('⚠ DANGEROUS COMMAND — confirm carefully', contentWidth, '…')
     : ''
