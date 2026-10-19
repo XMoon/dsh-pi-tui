@@ -216,6 +216,10 @@ test('B01 Agent Teams: real patch scopes, four preset rosters and one Lead→tea
     owner: 'scout',
   })
   assert.match(resultText(assigned), /scout/)
+  const listedTasks = await toolCall(host.ctx as never, 'team_task_list', lead, {})
+  assert.match(resultText(listedTasks), /Scout one file/)
+  const readTask = await toolCall(host.ctx as never, 'team_task_get', lead, { task_id: task.id })
+  assert.match(resultText(readTask), /Scout one file/)
 
   // A message is only an ACCEPTANCE: sent:true never proves the member ran it.
   const sent = await toolCall(host.ctx as never, 'send_message', lead, {
@@ -224,6 +228,10 @@ test('B01 Agent Teams: real patch scopes, four preset rosters and one Lead→tea
   })
   assert.notEqual(sent.isError, true, resultText(sent))
   assert.deepEqual(JSON.parse(resultText(sent)), { sent: true })
+  // The Host `wait_agent` tool is the real wait surface (not only a test poll).
+  const waited = await toolCall(host.ctx as never, 'wait_agent', lead, { timeout_ms: 10_000 })
+  assert.notEqual(waited.isError, true, resultText(waited))
+  assert.match(resultText(waited), /"timedOut"/u)
   // The addressed turn really reached the member model transport and the Lead
   // received the member's durable settlement, not just the inbox acceptance.
   await waitFor(() => leadEvents().includes('SCOUT_DONE'))

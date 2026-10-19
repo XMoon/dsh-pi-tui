@@ -54,7 +54,7 @@ M3-6 DONE          (PR1 locality + PR2 reconnect + PR3 teardown + PR4 closure)
 M3 DONE            (M3-1..M3-6 delivered; Direct remains the production backend,
                     the in-process official wire stays experimental/non-public,
                     and no M4 IPC/TCP or public external attach exists)
-S4-D1 PR-D1 IMPLEMENTED (official Plugin Manager catalog + fullscreen workspace:
+S4-D1 PR-D1 MERGED (#337) (official Plugin Manager catalog + fullscreen workspace:
                     complete rc.2 `official/availability/installTarget/source` and
                     `ChangeResult` facts through the shared Direct/Remote mapping,
                     frozen four-section classification, ONE controller with the
@@ -63,8 +63,9 @@ S4-D1 PR-D1 IMPLEMENTED (official Plugin Manager catalog + fullscreen workspace:
                     first-level `Settings → Plugins` page. This closes the
                     `CATALOG_MANAGEABLE` implementation/qualification for the real
                     rc.2 14/14 Host catalog; `HOST_CAPABLE` and
-                    `TUI_FEATURE_SUPPORTED` remain S4-D2/D3 ledger items. Stage
-                    closure/review/merge is pending)
+                    `TUI_FEATURE_SUPPORTED` remain S4-D2/D3 ledger items. The PR
+                    merge is done (#337); stage closure/review is still pending and
+                    D1-A09/A10/A12 remain PARTIAL)
 S4-D2 PR-D2 IMPLEMENTED / STAGE OPEN (B01–B14 Host capability qualification over
                     the real rc.2 published Optional bundle packages: the shared
                     isolated fixture proves real Loader/patch/service/tool/Session/
@@ -7361,6 +7362,14 @@ surface row.
 - B02/B04/B06/B12: `test/s4-d2-web-anchored.test.ts`.
 - D2-0 Settings entry: `test/plugin-manager-settings-entry.test.ts`,
   `test/settings-workspace-visual.test.ts`.
+- **Existing-consumer observations (not a separate Bxx→TUI L6):** B07, B08,
+  B09 and B11 `TUI_FEATURE_SUPPORTED` values describe the existing Job/Activity,
+  Session Browser, title projection and Task Center consumers; the D2 proof is
+  the Host data path plus those existing suites, and D3 owns the final terminal
+  L6 wording. B01 `wait_agent`/`team_task_get`/`team_task_list` and the B03
+  real-Host row `setPluginEnabled` path are executed in the D2 tests. D2-0's
+  Alt-Screen ownership is the existing single Settings workspace lease; the
+  entry test proves one page factory/dispose path, not a second lease counter.
 - The real pinned-npm CLI profile loop (`--network`) was run locally with
   `@deepseek-ai/dsh@0.2.1-rc.2` and the exact B05 package: add selected the
   patch layer, remove deselected it, a re-add reproduced the layer, and

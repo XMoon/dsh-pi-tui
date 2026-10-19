@@ -402,9 +402,14 @@ async function bootAt(options: HostOptions): Promise<OptionalBundleHost> {
       return collectLoaderEntries(ctx.get('loader'))
     },
     async restart() {
+      // A disposed host has released its shared lease; a new boot would never
+      // restore the original environment. Callers must start a fresh host.
+      if (options.lease.released) throw new Error('S4-D2 fixture: cannot restart a disposed host')
       await ctx.fiber.dispose()
       // A restart is a fresh boot of THIS host's profile root: re-apply its
       // disposable environment before boot even when another host is live.
+      // Only the LATEST host returned by restart owns disposal; a stale host
+      // object must not be disposed after a restart.
       applyEnvironment(options.root)
       return bootAt(options)
     },

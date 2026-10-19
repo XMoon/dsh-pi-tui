@@ -204,3 +204,9 @@ test('fixture re-applies its own environment on restart while another host is li
   await restarted.dispose()
   assert.equal(process.env.HOME, originalHome, 'the last release restores the original HOME')
 })
+
+test('fixture rejects restart after dispose', { skip }, async t => {
+  const host = await startS4D2Host(t, { bundles: [] })
+  await host.dispose()
+  await assert.rejects(() => host.restart(), /cannot restart a disposed host/u)
+})
