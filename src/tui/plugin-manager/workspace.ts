@@ -1012,22 +1012,26 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     const install = this.controller.installView()
     if (install === undefined) return
     const outcome = install.outcome
-    const lines: string[] = [
-      ...(install.message === undefined ? [] : [sanitizedPhysicalLine(install.message)]),
-      ...(outcome === undefined ? [] : [sanitizedPhysicalLine(changeSummary(outcome))]),
+    const summary = outcome === undefined ? undefined : sanitizedPhysicalLine(changeSummary(outcome))
+    const message = install.message === undefined ? undefined : sanitizedPhysicalLine(install.message)
+    const output = outcome?.packageResult?.output
+    const lines = [
+      ...(message === undefined || message === summary ? [] : [message]),
+      ...(summary === undefined ? [] : [summary]),
       ...(outcome?.approvedBuilds === undefined ? [] : [
         `approved build scripts: ${outcome.approvedBuilds.map(line => sanitizedPhysicalLine(line)).join(', ')}`,
       ]),
       ...(outcome?.registries === undefined ? [] : [
         `registries: ${outcome.registries.map(registry => maskedSource(registry ?? 'pnpm default')).join(', ')}`,
       ]),
-      ...(outcome?.packageResult?.output === undefined
+      ...(output === undefined
         ? []
-        : outcome.packageResult.output.split(/\r?\n/).filter(line => line !== '').map(line => sanitizedPhysicalLine(line))),
-      ...install.log.map(line => sanitizedPhysicalLine(line)),
+        : output.split(/\r?\n/).filter(line => line !== '').map(line => sanitizedPhysicalLine(line))),
+      ...(output === undefined ? install.log.map(line => sanitizedPhysicalLine(line)) : []),
     ].filter(line => line !== '')
-    if (lines.length === 0) return
-    this.intents.onCopy(lines.join('\n'))
+    const unique = [...new Set(lines)]
+    if (unique.length === 0) return
+    this.intents.onCopy(unique.join('\n'))
   }
 
   private sanitizeSpecInput(): void {
@@ -1199,12 +1203,13 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     if (install.phase === 'editing') {
       actions.push({ value: INSTALL_ACTION.inspect, label: 'Inspect', enabled: true, tone: 'normal' })
     } else if (install.phase === 'inspecting') {
-      actions.push({ value: INSTALL_ACTION.edit, label: 'Back', enabled: true, tone: 'normal' })
+      // Esc back is the only exit; a secondary Back row would not be the
+      // action Enter dispatches in this phase.
     } else if (install.phase === 'confirm') {
       if (install.inspection?.status === 'accepted') {
         actions.push({ value: INSTALL_ACTION.install, label: 'Install', enabled: true, tone: 'normal' })
       }
-      actions.push({ value: INSTALL_ACTION.edit, label: 'Back', enabled: true, tone: 'normal' })
+      // A refused inspection and the confirm step both exit with Esc edit.
     } else if (install.phase === 'starting' || install.phase === 'installing' || install.phase === 'applying' || install.phase === 'cancelling') {
       if (install.cancellable) {
         actions.push({ value: INSTALL_ACTION.stop, label: 'Stop installation', enabled: true, tone: 'warning' })
@@ -1763,46 +1768,49 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
         ).map(line => color.warning(line)))
       }
       const outcome = install.outcome
-      if (outcome !== undefined) {
-        lines.push(...wrapTextWithAnsi(sanitizedPhysicalLine(changeSummary(outcome)), width).map(line => color.text(line)))
-        if (outcome.version !== undefined) {
-          lines.push(color.textDim(`installed version ${sanitizedPhysicalLine(outcome.version)}`))
+      const summary = outcome === undefined ? undefined : sanitizedPhysicalLine(changeSummary(outcome))
+      if (summary !== undefined) {
+        lines.push(...wrapTextWithAnsi(summary, width).map(line => color.text(line)))
+        if (outcome!.version !== undefined) {
+          lines.push(color.textDim(`installed version ${sanitizedPhysicalLine(outcome!.version)}`))
         }
-        if (outcome.application === 'restart-required') {
+        if (outcome!.application === 'restart-required') {
           lines.push(color.warning('Restart required — the change is not active until DSH restarts.'))
-        } else if (outcome.application === 'overridden') {
+        } else if (outcome!.application === 'overridden') {
           lines.push(color.warning('Overridden — a higher-priority composition still wins.'))
         }
-        if (outcome.approvedBuilds !== undefined && outcome.approvedBuilds.length > 0) {
+        if (outcome!.approvedBuilds !== undefined && outcome!.approvedBuilds.length > 0) {
           lines.push(color.textDim(truncateToWidth(
-            `approved build scripts: ${outcome.approvedBuilds.map(line => sanitizedPhysicalLine(line)).join(', ')}`,
+            `approved build scripts: ${outcome!.approvedBuilds.map(line => sanitizedPhysicalLine(line)).join(', ')}`,
             width,
             '…',
           )))
         }
-        if (outcome.registries !== undefined && outcome.registries.length > 0) {
+        if (outcome!.registries !== undefined && outcome!.registries.length > 0) {
           lines.push(color.textDim(truncateToWidth(
-            `registries: ${outcome.registries.map(registry => maskedSource(registry ?? 'pnpm default')).join(', ')}`,
+            `registries: ${outcome!.registries.map(registry => maskedSource(registry ?? 'pnpm default')).join(', ')}`,
             width,
             '…',
           )))
         }
-        const output = outcome.packageResult?.output
+        const output = outcome!.packageResult?.output
         if (output !== undefined && output !== '') {
           lines.push('')
           const outputLines = output.split(/\r?\n/).filter(line => line !== '')
           for (const line of outputLines.slice(-8)) {
             lines.push(truncateToWidth(sanitizedPhysicalLine(line), width, '…'))
           }
-          if (outcome.packageResult?.truncated === true) {
+          if (outcome!.packageResult?.truncated === true) {
             lines.push(color.textMuted('(Host truncated the package output)'))
           }
         }
       }
-      if (install.message !== undefined) {
+      if (install.message !== undefined && sanitizedPhysicalLine(install.message) !== summary) {
         lines.push(color.textMuted(truncateToWidth(sanitizedPhysicalLine(install.message), width, '…')))
       }
-      if (install.log.length > 0) {
+      // The Host packageResult.output is the same captured pnpm output the
+      // install-log events stream; show the log only when there is no output.
+      if (outcome?.packageResult?.output === undefined && install.log.length > 0) {
         lines.push('')
         const visible = this.visibleLogLines(this.paintedChrome)
         const log = install.log.slice(0, LOG_TAIL_LINES)

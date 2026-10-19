@@ -329,6 +329,34 @@ test('official missing card install starts from the Host installTarget, never a 
   assert.equal(controller.installView()?.phase, 'confirm')
 })
 
+test('editing an official install spec drops the official catalog context', async () => {
+  const { port } = fakePort({
+    snapshotImpl: async () => snapshot([
+      bundle({
+        name: '@deepseek-ai/dsh-experimental-auto-review',
+        official: true,
+        availability: 'missing',
+        installed: false,
+        optional: true,
+        removable: false,
+        source: undefined,
+        installTarget: { spec: '@deepseek-ai/dsh-experimental-auto-review@0.2.1-rc.2', version: '0.2.1-rc.2' },
+      }),
+    ]),
+  })
+  const { controller } = controllerOf(port)
+  controller.open('direct-command')
+  await tick()
+  assert.equal(controller.beginOfficialInstall(bundleValue('@deepseek-ai/dsh-experimental-auto-review')), true)
+  await tick()
+  assert.equal(controller.installView()?.officialName, '@deepseek-ai/dsh-experimental-auto-review')
+  controller.inspect('/tmp/local-bundle', null)
+  await tick()
+  assert.equal(controller.installView()?.phase, 'confirm')
+  assert.equal(controller.installView()?.officialName, undefined,
+    'a user-edited spec is a manual install, not an install of the original catalog card')
+})
+
 test('install recovery: an indeterminate throw reconciles through waitForInstall and never retries', async () => {
   const { port, state } = fakePort({
     installImpl: async () => { throw new Error('socket closed') },

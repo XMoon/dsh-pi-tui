@@ -118,6 +118,8 @@ interface ActiveInstall {
   outcome?: PluginChangeFact
   inspectAbort?: AbortController
   officialName?: string
+  /** The exact Host target spec that made `officialName` true. */
+  officialSpec?: string
   approvedBuilds?: readonly string[]
 }
 
@@ -390,6 +392,7 @@ export class PluginManagerController {
       phase: 'editing',
       log: [],
       officialName: card.name,
+      officialSpec: card.installTarget.spec,
     }
     this.message = undefined
     this.inspect(card.installTarget.spec, null)
@@ -412,6 +415,13 @@ export class PluginManagerController {
       active.message = 'registry must be an http(s) URL'
       this.hooks.requestRender()
       return
+    }
+    // A user-edited spec is no longer the official catalog target: drop the
+    // catalog context instead of labelling a manual local/registry install as
+    // an install of the card it was started from.
+    if (active.officialSpec !== undefined && trimmed !== active.officialSpec) {
+      active.officialName = undefined
+      active.officialSpec = undefined
     }
     const epoch = ++this.installEpoch
     active.inspectAbort?.abort()
