@@ -5165,3 +5165,59 @@ test('a hostile command/tool identity is folded onto ONE header row in every pre
     app.dispose()
   }
 })
+
+test('a folded bash preview keeps the app-owned log reset when the style crosses the preview cut', async () => {
+  const { vt, app, writes } = startAppWithWrites()
+  // The whitelisted style starts on line 1; the ONLY reset sits at the end of
+  // line 4, i.e. past the folded preview's 3-line cut. Projecting the full log
+  // first would put the app-owned reset after the cut and let bold/background
+  // bleed into the next physical row.
+  const raw = '\u001b[1mfirst\nsecond\nthird\nfourth\u001b[0m'
+  const tool: TranscriptMessage = {
+    // A turn outside the recent display window keeps the card FOLDED (the
+    // exact `renderToolCard` folded-preview path under test).
+    kind: 'tool', turn: -1, name: 'bash', args: '{"command":"printf"}', result: raw, status: 'ok',
+  }
+  app.setTranscript([tool])
+  await viewport(vt)
+  const stream = writes.join('')
+  const marker = stream.indexOf('first second third')
+  assert.ok(marker >= 0, `the folded preview was painted:\n${stream.slice(-3000)}`)
+  // Take the WHOLE physical row around the marker, including the style that
+  // opens before its first visible character.
+  const rowStart = Math.max(0, stream.lastIndexOf('\n', marker) + 1)
+  const rowEnd = stream.indexOf('\n', marker)
+  const painted = stream.slice(rowStart, rowEnd === -1 ? undefined : rowEnd)
+  assert.ok(painted.includes('\u001b[1m'), 'the whitelisted style survives the folded preview')
+  // The frame itself ends in an app-owned reset; the contract under test is the
+  // reset that CLOSES the external style immediately after its last preview
+  // character (a trailing frame reset would mask a leak).
+  assert.ok(painted.includes('third\u001b[0m'),
+    `the app-owned reset immediately follows the styled preview:\n${JSON.stringify(painted)}`)
+  assert.equal(tool.result, raw, 'the raw result is untouched')
+  app.stop()
+})
+
+test('hostile welcome-card facts never reach the TTY raw and stay one physical line each', async () => {
+  const { vt, app, writes } = startAppWithWrites()
+  const hostile = 'Evil\nName\r\nTabbed\tX\u001b]52;c;YXR0YWNr\u0007tail'
+  const collapsed = 'Evil Name Tabbed   Xtail'
+  // The card's facts are Session/model/preset/package metadata. `setWelcomeCard`
+  // keeps the raw cwd as the workspace-root authority; only the DISPLAY values
+  // may be projected.
+  app.setWelcomeCard({
+    cwd: `/root/${hostile}`,
+    sessionId: hostile,
+    model: `p/${hostile}`,
+    version: hostile,
+    preset: hostile,
+  })
+  const view = await viewport(vt)
+  const stream = writes.join('')
+  assert.ok(!stream.includes('YXR0YWNr'), `no OSC payload from welcome facts reaches the TTY:\n${view}`)
+  assert.ok(!stream.includes('\u009b'), 'no raw C1 byte from welcome facts reaches the TTY')
+  assert.ok(!stream.includes('\u001b]52'), 'no raw OSC introducer from welcome facts reaches the TTY')
+  const plainView = view.replace(/\x1b\[[0-9;]*m/g, '')
+  assert.ok(plainView.includes(collapsed), `the collapsed facts survive on one row:\n${plainView}`)
+  app.stop()
+})

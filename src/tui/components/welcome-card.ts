@@ -11,6 +11,7 @@
 import { visibleWidth, wrapTextWithAnsi } from '@xmoon76/pi-tui'
 import type { Component } from '@xmoon76/pi-tui'
 import { color, hexPaint } from '../theme/runtime.ts'
+import { sanitizedPhysicalLine } from '../presentation/lines.ts'
 
 /** The whale mascot variants: five original designs; one is picked once
  * per process (see WelcomeCard.whaleVariant). */
@@ -252,32 +253,46 @@ export class WelcomeCard implements Component {
 
   /** Session facts in the wide/stacked column layout. The title reads
    * strong, the version muted, labels dim, and values in the body text —
-   * the whale's saturated gradient is balanced by readable facts. */
+   * the whale's saturated gradient is balanced by readable facts. Every fact
+   * is ONE logical line from an external source (Session cwd/id, model
+   * catalog, preset metadata, package version), so each value is folded onto
+   * one safe physical row BEFORE the theme ink; the raw `setFacts()` values
+   * (including the path authority used for workspace math) stay untouched. */
   private factLines(): string[] {
     const facts = this.facts!
     const label = (text: string): string => `${text}${' '.repeat(Math.max(0, WELCOME_FACT_LABEL_WIDTH - text.length))}`
+    const version = sanitizedPhysicalLine(facts.version)
+    const model = facts.model === undefined ? undefined : sanitizedPhysicalLine(facts.model)
+    const preset = facts.preset === undefined ? undefined : sanitizedPhysicalLine(facts.preset)
+    const cwd = sanitizedPhysicalLine(facts.cwd)
+    const sessionId = sanitizedPhysicalLine(facts.sessionId)
     return [
-      `${color.textStrong('dsh-pi-tui')}  ${color.textMuted(facts.version)}`,
+      `${color.textStrong('dsh-pi-tui')}  ${color.textMuted(version)}`,
       // An ABSENT model fact (a Remote projection that cannot answer yet) omits
       // the line entirely — the label never carries an invented business value.
-      ...facts.model === undefined ? [] : [`${color.textDim(label('model'))}${color.text(facts.model)}`],
-      ...(facts.preset === undefined ? [] : [`${color.textDim(label('preset'))}${color.text(facts.preset)}`]),
-      `${color.textDim(label('cwd'))}${color.text(facts.cwd)}`,
-      `${color.textDim(label('session'))}${color.text(facts.sessionId)}`,
+      ...model === undefined ? [] : [`${color.textDim(label('model'))}${color.text(model)}`],
+      ...(preset === undefined ? [] : [`${color.textDim(label('preset'))}${color.text(preset)}`]),
+      `${color.textDim(label('cwd'))}${color.text(cwd)}`,
+      `${color.textDim(label('session'))}${color.text(sessionId)}`,
     ]
   }
 
   /** Session facts in the compact layout (whale emoji replaces the ASCII). */
   private compactFactLines(): string[] {
     const facts = this.facts!
+    const version = sanitizedPhysicalLine(facts.version)
+    const model = facts.model === undefined ? undefined : sanitizedPhysicalLine(facts.model)
+    const preset = facts.preset === undefined ? undefined : sanitizedPhysicalLine(facts.preset)
+    const cwd = sanitizedPhysicalLine(facts.cwd)
+    const sessionId = sanitizedPhysicalLine(facts.sessionId)
     return [
-      `${color.textStrong('🐋 dsh-pi-tui')} ${color.textMuted(facts.version)}`,
+      `${color.textStrong('🐋 dsh-pi-tui')} ${color.textMuted(version)}`,
       [
-        facts.model === undefined ? '' : color.text(facts.model),
-        facts.preset === undefined ? '' : `preset ${color.text(facts.preset)}`,
+        model === undefined ? '' : color.text(model),
+        preset === undefined ? '' : `preset ${color.text(preset)}`,
       ].filter(part => part !== '').join(' · '),
-      color.text(facts.cwd),
-      `${color.textDim('session')} ${color.text(facts.sessionId)}`,
+      color.text(cwd),
+      `${color.textDim('session')} ${color.text(sessionId)}`,
     ]
   }
 }

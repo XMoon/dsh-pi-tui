@@ -20,6 +20,7 @@
  */
 
 import type { StatusSnapshot } from '../../domain/status/types.ts'
+import { sanitizedPhysicalLine } from '../presentation/lines.ts'
 import { visibleWidth } from '@xmoon76/pi-tui'
 import {
   formatCacheHit,
@@ -126,7 +127,9 @@ const modelItem: FooterItemDefinition = {
     // Density compact reuses the persisted 'compact' style (model id
     // only); the user's own format choice is never written back.
     const format = density === 'compact' ? 'compact' : ref.format ?? 'badge'
-    return { spans: [{ text: formatModel(model.provider, model.id, model.reasoningEffort, format) }] }
+    // Provider/id/effort are external catalog/Session facts and a footer row is
+    // ONE physical line: fold the composed identity before it becomes a span.
+    return { spans: [{ text: sanitizedPhysicalLine(formatModel(model.provider, model.id, model.reasoningEffort, format)) }] }
   },
 }
 
@@ -240,7 +243,7 @@ const cwdItem: FooterItemDefinition = {
     // Density compact reuses the persisted 'basename' style; the user's
     // own format choice is never written back.
     const format = density === 'compact' ? 'basename' : ref.format ?? 'short'
-    return { spans: [{ text: formatWorkingDirectory(cwd, format) }] }
+    return { spans: [{ text: sanitizedPhysicalLine(formatWorkingDirectory(cwd, format)) }] }
   },
 }
 
@@ -263,7 +266,7 @@ const gitBranchItem: FooterItemDefinition = {
     // loses its prefix under pressure); the user's own format choice is
     // never written back.
     const format = density === 'compact' ? 'plain' : ref.format ?? 'plain'
-    return { spans: [{ text: formatGitBranch(branch, format) }] }
+    return { spans: [{ text: sanitizedPhysicalLine(formatGitBranch(branch, format)) }] }
   },
 }
 
@@ -440,7 +443,7 @@ const agentPresetItem: FooterItemDefinition = {
     const text = compact && preset.shortLabel !== undefined
       ? preset.shortLabel
       : preset.label
-    return { spans: [{ text: `[${text}]`, tone: 'accent' }] }
+    return { spans: [{ text: `[${sanitizedPhysicalLine(text)}]`, tone: 'accent' }] }
   },
 }
 
@@ -457,7 +460,7 @@ const reasoningItem: FooterItemDefinition = {
     if (snapshot.view.subject.kind !== 'main') return null
     const effort = snapshot.composition.model?.reasoningEffort
     if (effort === undefined) return null
-    return { spans: [{ text: `@${effort}`, tone: 'textMuted' }] }
+    return { spans: [{ text: `@${sanitizedPhysicalLine(effort)}`, tone: 'textMuted' }] }
   },
 }
 
@@ -555,7 +558,7 @@ const projectItem: FooterItemDefinition = {
   render(snapshot: StatusSnapshot) {
     const project = snapshot.workspace.project
     if (project === undefined || project === '') return null
-    return { spans: [{ text: project, tone: 'primary' }] }
+    return { spans: [{ text: sanitizedPhysicalLine(project), tone: 'primary' }] }
   },
 }
 
@@ -790,7 +793,7 @@ const versionItem: FooterItemDefinition = {
   formats: ['tui', 'dsh', 'both'],
   defaultFormat: 'tui',
   render(snapshot: StatusSnapshot, ref) {
-    const text = formatVersion(snapshot.host.dshVersion, snapshot.host.tuiVersion, ref.format ?? 'tui')
+    const text = sanitizedPhysicalLine(formatVersion(snapshot.host.dshVersion, snapshot.host.tuiVersion, ref.format ?? 'tui'))
     if (text === '') return null
     return { spans: [{ text, tone: 'textMuted' }] }
   },

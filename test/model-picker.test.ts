@@ -2159,3 +2159,27 @@ test('a hostile load error stays ONE safe physical row', async () => {
   assert.ok(!raw.includes('\u009b'), 'no raw C1 byte from the load error reaches the terminal')
   h.app.stop()
 })
+
+test('a hostile single-row model label keeps its painted click map', async () => {
+  // The collapsed hostile label paints on ONE row; the picker's hit map is built
+  // from those final rows, so clicking it must select/applying exactly that row.
+  const hostile = 'Evil\nName\r\nSecond\tRow\u001b]52;c;YXR0YWNr\u0007'
+  const directory = makeDirectory({
+    groups: [{
+      id: 'p1',
+      name: 'P1',
+      models: [model('m1', { name: hostile }), model('m2', { name: 'Plain' })],
+    }],
+    default: { provider: 'p1', model: 'm2' },
+  })
+  const h = await openPicker({ directory })
+  const rendered = h.picker.render(72).map(stripAnsi)
+  const row = rendered.findIndex(line => line.includes('Evil Name Second   Row'))
+  assert.ok(row >= 0, `the collapsed hostile row is painted:\n${rendered.join('\n')}`)
+  h.picker.handleMouse(mouse('press', 5, row, 72, 24))
+  h.picker.handleMouse(mouse('click', 5, row, 72, 24))
+  await settle()
+  assert.deepEqual(h.applied, [{ provider: 'p1', model: 'm1' }],
+    `the click map must address the collapsed row itself:\n${rendered.join('\n')}`)
+  h.app.stop()
+})

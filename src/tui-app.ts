@@ -16992,17 +16992,16 @@ export class TuiApp {
       if (structuredEditDiff) resultPreview = ''
       // Display-only projection of the folded result preview: captured
       // terminal stdout keeps whitelisted SGR, every other external result is
-      // plain text. Never applied to the theme-painted head rows. Either way
-      // the preview is ONE physical row: the log policy maps a lone CR to LF
-      // (progress frames read as history), so its preview is re-derived from
-      // the LOG-PROJECTED text instead of projecting the already-folded row.
+      // plain text. Never applied to the theme-painted head rows. The LOG
+      // projection runs LAST so its app-owned reset rides at the tail of this
+      // ONE-row preview: projecting the full result first would put the reset
+      // past `preview()`'s cut, and a styled prefix would then bleed into the
+      // next physical row. The final fold only collapses the CR→LF records
+      // that the log policy introduces, never the reset.
       if (resultPreview !== '') {
-        if (TERMINAL_RESULT_TOOLS.has(message.name)) {
-          const logged = sanitizeDisplayLog(message.result)
-          resultPreview = logged === '' ? '' : ` — ${preview(logged, RESULT_PREVIEW_LINES)}`
-        } else {
-          resultPreview = sanitizedPhysicalLine(resultPreview)
-        }
+        resultPreview = TERMINAL_RESULT_TOOLS.has(message.name)
+          ? sanitizeDisplayLog(resultPreview).replace(/[\r\n]+/g, ' ')
+          : sanitizedPhysicalLine(resultPreview)
       }
       const callHead = foldedCall === '' ? '' : foldedCall
       const headWithPreview = `${expandedHead}${callHead}${resultPreview}`
