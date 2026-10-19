@@ -452,3 +452,147 @@ test('B03 remove uses the same confirmation view with the same risk warning', as
   assert.match(compact(harness.view()), new RegExp(AUTO_WARNING.replace(/[.]/gu, '\\.')))
   assert.deepEqual(harness.removeBundle, [], 'the default Cancel removes nothing')
 })
+
+// ── B03 risk-visibility gating (external review P1) ────────────────────────
+
+const rowOf = (harness: WorkspaceHarness, text: string): number =>
+  harness.viewport().findIndex(line => plain([line]).includes(text))
+const press = (harness: WorkspaceHarness, row: number, col: number): void => {
+  harness.vt.sendInput(`\x1b[<0;${col + 1};${row + 1}M`)
+}
+const release = (harness: WorkspaceHarness, row: number, col: number): void => {
+  harness.vt.sendInput(`\x1b[<0;${col + 1};${row + 1}m`)
+}
+
+async function openAutoConfirm(harness: WorkspaceHarness): Promise<void> {
+  await selectCard(harness, `bundle:${AUTO_REVIEW}`)
+  if (harness.panel.currentView() === 'list') {
+    harness.vt.sendInput('\r')
+    await harness.settle()
+  }
+  if (harness.panel.currentView() === 'details') {
+    // The earlier Cancel can leave the Details cursor anywhere; the first
+    // action is always the bundle-level Disable….
+    harness.vt.sendInput('\x1b[A')
+    harness.vt.sendInput('\x1b[A')
+    harness.vt.sendInput('\r')
+    await harness.settle()
+  }
+  assert.equal(harness.panel.currentView(), 'confirm')
+}
+
+test('B03 danger primary is withheld on 80×5 and 44×8 until its consequence is fully visible', async () => {
+  for (const [columns, rows] of [[80, 5], [44, 8]] as const) {
+    const harness = await open(autoReviewCatalog())
+    await openAutoConfirm(harness)
+    const fullPrimaryRow = rowOf(harness, 'Disable Auto Review')
+    const fullPrimaryCol = plain([harness.viewport()[fullPrimaryRow]!]).indexOf('Disable Auto Review')
+    assert.ok(fullPrimaryRow >= 0, 'the full frame offers the dangerous primary')
+    harness.vt.resize(columns, rows)
+    await harness.settle()
+    assert.equal(harness.panel.currentView(), 'confirm')
+    assert.doesNotMatch(plain([harness.viewport().at(-1)!]), /Enter confirm/u)
+    assert.match(plain([harness.viewport().at(-1)!]), /Enter cancel/u)
+    assert.doesNotMatch(harness.view(), /^  Disable Auto Review\s*$/mu,
+      `${columns}×${rows}: the primary is not painted with an incomplete consequence`)
+
+    // Keyboard Up+Enter, a stale press/release at the old primary, and scroll
+    // must never dispatch the Host write while the warning is incomplete.
+    harness.vt.sendInput('\x1b[A')
+    harness.vt.sendInput('\r')
+    await harness.settle()
+    assert.deepEqual(harness.setBundle, [])
+    const reopened = harness.panel.currentView()
+    if (reopened !== 'confirm') {
+      // Cancel closed the page; reopen at a full size to test the mouse path.
+      harness.vt.resize(140, 40)
+      await harness.settle()
+      await openAutoConfirm(harness)
+      harness.vt.resize(columns, rows)
+      await harness.settle()
+    }
+    press(harness, fullPrimaryRow, fullPrimaryCol)
+    release(harness, fullPrimaryRow, fullPrimaryCol)
+    await harness.settle()
+    assert.deepEqual(harness.setBundle, [], 'a click at the old dangerous target cannot write')
+    harness.vt.sendInput('\x1b[6~') // PgDn
+    await harness.settle()
+    assert.deepEqual(harness.setBundle, [], 'scrolling at this size cannot make an incomplete warning complete')
+    harness.vt.sendInput('\x1b')
+    await harness.settle()
+    started.delete(harness)
+    harness.app.dispose()
+  }
+})
+
+test('B03 danger primary disappears when the warning scrolls out and returns with it', async () => {
+  const harness = await open(autoReviewCatalog())
+  await openAutoConfirm(harness)
+  assert.match(harness.view(), /Disable Auto Review/)
+  harness.vt.resize(80, 10)
+  await harness.settle()
+  assert.match(harness.view(), /Disable Auto Review/, '80×10 can show the whole warning with both choices')
+  harness.vt.sendInput('\x1b[6~') // PgDn: the warning top scrolls out of the 3-row viewport
+  await harness.settle()
+  assert.doesNotMatch(harness.view(), /^  Disable Auto Review\s*$/mu,
+    'the dangerous primary is withheld once its warning is no longer fully visible')
+  assert.match(plain([harness.viewport().at(-1)!]), /Enter cancel/u)
+  harness.vt.sendInput('\r') // selection falls back to Cancel
+  await harness.settle()
+  assert.deepEqual(harness.setBundle, [])
+  // Re-open at the full size, resize to 80×10, scroll back to the top, and the
+  // primary returns; the explicit choice then writes exactly once.
+  harness.vt.resize(140, 40)
+  await harness.settle()
+  await openAutoConfirm(harness)
+  harness.vt.resize(80, 10)
+  await harness.settle()
+  harness.vt.sendInput('\x1b[6~')
+  await harness.settle()
+  harness.vt.sendInput('\x1b[5~') // PgUp
+  await harness.settle()
+  assert.match(harness.view(), /^(?:>|  ) Disable Auto Review\s*$/mu)
+  harness.vt.sendInput('\x1b[A') // ensure the dangerous primary is selected
+  await harness.settle()
+  harness.vt.sendInput('\r')
+  await harness.settle()
+  assert.deepEqual(harness.setBundle, [{ name: AUTO_REVIEW, enabled: false }])
+})
+
+test('ordinary Bundle Remove is withheld at 80×5 but reachable at 80×10', async () => {
+  const short = await open({ columns: 140, rows: 40 })
+  await selectCard(short, 'bundle:@vendor/foo')
+  short.vt.sendInput('\r')
+  await short.settle()
+  short.vt.sendInput('\x1b[B') // Enable… -> Remove…
+  await short.settle()
+  short.vt.sendInput('\r')
+  await short.settle()
+  assert.equal(short.panel.currentView(), 'confirm')
+  short.vt.resize(80, 5)
+  await short.settle()
+  assert.doesNotMatch(short.view(), /^  Remove\s*$/mu, '80×5 cannot show the unload consequence with Remove')
+  assert.match(plain([short.viewport().at(-1)!]), /Enter cancel/u)
+  short.vt.sendInput('\r')
+  await short.settle()
+  assert.deepEqual(short.removeBundle, [])
+  started.delete(short)
+  short.app.dispose()
+
+  const tall = await open({ columns: 140, rows: 40 })
+  await selectCard(tall, 'bundle:@vendor/foo')
+  tall.vt.sendInput('\r')
+  await tall.settle()
+  tall.vt.sendInput('\x1b[B')
+  await tall.settle()
+  tall.vt.sendInput('\r')
+  await tall.settle()
+  tall.vt.resize(80, 10)
+  await tall.settle()
+  assert.match(tall.view(), /^  Remove\s*$/mu, '80×10 shows the consequence with Remove')
+  tall.vt.sendInput('\x1b[A')
+  await tall.settle()
+  tall.vt.sendInput('\r')
+  await tall.settle()
+  assert.deepEqual(tall.removeBundle, ['@vendor/foo'])
+})

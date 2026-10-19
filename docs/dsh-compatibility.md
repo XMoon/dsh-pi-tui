@@ -384,6 +384,9 @@ does not close the S4-D2 stage:
   Search, B09 Session Titles, B10 Badge Skill, B11 Ralph and B12 Plugin Market**
   have real Host positive paths and the documented negative/cleanup controls;
   the evidence index is the S4-D2 ledger in `docs/client-server-migration.md`.
+  B05/B07/B08/B09/B10/B11 keep `HOST_CAPABLE=PASS`, but their real
+  Bundle→mounted-TUI L6 is **PENDING** and `DEFERRED_WITH_OWNER` to S4-D3; the
+  generic existing consumers are not claimed as a full TUI qualification.
 - **B02 Voice** mounts the real speech registry/API controller and reports the
   host-local model as `unprepared` in this isolated Host (no model download is
   performed by tests); the browser microphone surface remains unqualified.
@@ -397,8 +400,8 @@ does not close the S4-D2 stage:
   TUI still has no browser CoT reader.
 - **B12 Plugin Market** has no official default marketplace; an explicitly
   configured offline index is read, while unknown/invalid sources are refused.
-  The Creator `plugin_market` tool and the Web Discover page are not TUI
-  surfaces.
+  The SAME real Host's Creator `plugin_market` tool (cordis preset) reads that
+  configured index and its plugin; the Web Discover page is not a TUI surface.
 - **B13 Claude Code / B14 Codex** are EXTERNAL_UNVERIFIED/BLOCKED: the official
   package, `missing` catalog entry with exact `installTarget`, local profile
   install and one-shot external-child schema are verified. The default suite

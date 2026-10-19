@@ -203,6 +203,7 @@ test('B12 Plugin Market: real empty default, explicit offline index, unknown/inv
   await plain.dispose()
   const host = await startS4D2Host(t, {
     bundles: [B12],
+    presets: true,
     patches: [{ id: 'plugin-market', config: { indexes: [indexUrl, brokenUrl], fetchTimeoutMs: 5_000 } }] as never,
   })
   const market = host.ctx.get('pluginMarket') as {
@@ -226,13 +227,12 @@ test('B12 Plugin Market: real empty default, explicit offline index, unknown/inv
   // it when the profile context + market service are mounted; `minimal` never
   // declares it. This is the real Creator/agent-scope boundary.
   assert.equal(host.ctx.tools.get('plugin_market'), undefined)
-  const presetsHost = await startS4D2Host(t, { bundles: [B12], presets: true })
-  const presets = presetsHost.ctx.get('agentPresets') as { select(agent: unknown, preset: string): Promise<unknown> }
-  const cordis = await presetsHost.createAgent(SessionId('s4-d2-b12-cordis'), { cwd: join(presetsHost.root, 'work') })
+  const presets = host.ctx.get('agentPresets') as { select(agent: unknown, preset: string): Promise<unknown> }
+  const cordis = await host.createAgent(SessionId('s4-d2-b12-cordis'), { cwd: join(host.root, 'work') })
   await presets.select(cordis, 'cordis')
-  assert.equal(presetsHost.hasTool('plugin_market', cordis), true,
+  assert.equal(host.hasTool('plugin_market', cordis), true,
     'the market tool is reachable in the cordis preset when the market service is mounted')
-  const listed = await presetsHost.ctx.tools.execute({
+  const listed = await host.ctx.tools.execute({
     signal: new AbortController().signal,
     callId: ToolCallId('s4-d2-b12-market'),
     name: 'plugin_market',
@@ -240,15 +240,26 @@ test('B12 Plugin Market: real empty default, explicit offline index, unknown/inv
     agent: cordis,
   }) as { isError?: boolean; content?: readonly { type?: string; text?: string }[] }
   assert.notEqual(listed.isError, true)
-  assert.match((listed.content ?? []).map(block => block.text ?? '').join(''), /"indexes":\[\]/u,
-    'no default marketplace exists without user-configured sources')
-  const standard = await presetsHost.createAgent(SessionId('s4-d2-b12-standard'), { cwd: join(presetsHost.root, 'work') })
+  const indexList = (listed.content ?? []).map(block => block.text ?? '').join('')
+  assert.match(indexList, new RegExp(indexUrl.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')),
+    'the Creator tool reads the SAME configured index source as the Host service')
+  const plugins = await host.ctx.tools.execute({
+    signal: new AbortController().signal,
+    callId: ToolCallId('s4-d2-b12-market-plugins'),
+    name: 'plugin_market',
+    arguments: { action: 'list_plugins', target: indexUrl, query: 'local' },
+    agent: cordis,
+  }) as { isError?: boolean; content?: readonly { type?: string; text?: string }[] }
+  assert.notEqual(plugins.isError, true)
+  assert.match((plugins.content ?? []).map(block => block.text ?? '').join(''), /@vendor\/local-plugin/u,
+    'the Creator tool lists the real plugin from the configured index')
+  const standard = await host.createAgent(SessionId('s4-d2-b12-standard'), { cwd: join(host.root, 'work') })
   await presets.select(standard, 'standard')
-  assert.equal(presetsHost.hasTool('plugin_market', standard), false,
+  assert.equal(host.hasTool('plugin_market', standard), false,
     'standard declares the market tool row disabled')
-  const minimal = await presetsHost.createAgent(SessionId('s4-d2-b12-minimal'), { cwd: join(presetsHost.root, 'work') })
+  const minimal = await host.createAgent(SessionId('s4-d2-b12-minimal'), { cwd: join(host.root, 'work') })
   await presets.select(minimal, 'minimal')
-  assert.equal(presetsHost.hasTool('plugin_market', minimal), false,
+  assert.equal(host.hasTool('plugin_market', minimal), false,
     'minimal never declares the market tool')
   const { readFileSync } = await import('node:fs')
   for (const preset of ['standard', 'ptc']) {
