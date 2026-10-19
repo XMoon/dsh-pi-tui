@@ -174,6 +174,34 @@ tiers are unchanged. A structural node check proves the payload is safe; it
 does not prove the closed-source Tern client's own rendering — that requires
 version-qualified real-pane evidence before it may be claimed.
 
+## Terminal title (OSC 0) and terminal-local cwd (OSC 7)
+
+OSC 0 (window title, Session identity) and OSC 7 (terminal-local cwd) are
+DISTINCT authorities. The title source order is fixed:
+
+```text
+1. session title non-empty                    -> dsh · <sanitized session title>
+2. session identity WITH an official cwd      -> dsh · <shortCwd(official session cwd)>
+                                                 (Direct and Remote alike)
+3. session identity WITHOUT an official cwd   -> dsh
+                                                 (never the Client launch cwd)
+4. no session identity (sessionless, either   -> dsh · <shortCwd(Client launch cwd)>
+   backend)
+5. a Remote Host cwd may be shown as OSC 0 identity, but is never published as
+   the OSC 7 terminal-local cwd
+```
+
+Step 3 is the negative control that separates identity from the OSC 7 fallback:
+a session that exists but has no official cwd names itself with the bare brand,
+never with the local directory. Step 4 is legal on both branches — with no
+session identity there is no Host workspace to impersonate.
+
+The seam is `updateTerminalTitle({ sessionTitle, cwd: sessionCwdFact() })`; the
+cwd source is never re-chosen in the terminal adapter. Authority:
+`src/app/surface/status-runtime.ts`, `src/tui/terminal/title.ts`. Proof:
+`test/tern-terminal.test.ts` (fact/observable matrix) and
+`test/terminal-title.test.ts` (connected OSC 0 proof).
+
 ## Test matrix and repro
 
 | Contract | Test owner | What it proves |
