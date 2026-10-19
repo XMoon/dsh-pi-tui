@@ -631,6 +631,32 @@ test('a zero-row list frame advertises no Enter invite and keeps the real Esc', 
   const bar = plain([harness.viewport().at(-1)!])
   assert.doesNotMatch(bar, /Enter/u, 'the zero-row list cannot open Details with Enter')
   assert.match(bar, /Esc close/u, 'the real Esc destination stays advertised')
+  // The hidden row is not just a missing hint: the navigation admission must
+  // agree with it (Enter and Right cannot enter an invisible card's Details).
+  harness.vt.sendInput('\r')
+  await harness.settle()
+  assert.equal(harness.panel.currentView(), 'list', 'Enter on a zero-row list cannot enter Details')
+  harness.vt.sendInput('\x1b[C')
+  await harness.settle()
+  assert.equal(harness.panel.currentView(), 'list', 'Right on a zero-row list cannot enter Details')
+})
+
+test('search editing keeps its EXECUTABLE Enter apply hint on a zero-row frame', async t => {
+  const harness = await open({ columns: 140, rows: 40 })
+  t.after(() => { try { harness.app.dispose() } catch {} })
+  harness.vt.sendInput('/')
+  await harness.settle()
+  for (const character of 'foo') harness.vt.sendInput(character)
+  await harness.settle()
+  harness.vt.resize(80, 2)
+  await harness.settle()
+  const bar = plain([harness.viewport().at(-1)!])
+  assert.match(bar, /Enter apply/u, 'the executable search Enter keeps its hint')
+  assert.match(bar, /Esc clear search/u)
+  harness.vt.sendInput('\r')
+  await harness.settle()
+  assert.equal(harness.panel.currentView(), 'list')
+  assert.doesNotMatch(plain([harness.viewport().at(-1)!]), /Enter apply/u, 'Enter really applied the search')
 })
 
 test('a zero-row body revokes the B03 danger action until it is painted again', async () => {

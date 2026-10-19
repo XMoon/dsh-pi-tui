@@ -75,9 +75,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **The Plugin Manager no longer advertises a fake `Enter` on zero-body-row
   frames (e.g. 80×2).** When the current frame painted no selectable
-  action/choice, the bar keeps the real `Esc` destination and the keys that
-  still resolve, instead of promising an `Enter cancel`/`Enter action` that
-  does nothing; the hints return with the body.
+  action/choice, the list/details/confirm bar drops `Enter` and the list
+  Enter/Right admission also refuses to open an invisible card's Details;
+  `Esc` stays. Search editing keeps its `Enter apply` hint because that action
+  still executes; the other hints return with the body.
 
 - **Selecting the B03 Auto permission preset keeps the current permission
   fact in the footer.** Auto was missing from the builtin permission label map,
