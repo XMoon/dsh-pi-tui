@@ -648,6 +648,10 @@ interface RealHostInstallFixture {
   /** A new panel over the SAME controller (the surface is disposable; the
    *  controller/install request outlives it). */
   panelAt(rows: number, width?: number, t?: import('node:test').TestContext): PluginManagerWorkspacePanel
+  /** Own one cleanup on the fixture lifecycle. Its disposers run LIFO BEFORE
+   *  the Host/controller disposal, so a held test gate can never block
+   *  teardown when an assertion fails before the normal release. */
+  defer(cleanup: () => unknown): void
 }
 
 /** Boot the real Host + the production controller/panel over an isolated,
@@ -682,6 +686,7 @@ async function startRealInstallFixture(
     host,
     controller,
     profileDir: host.pluginManager.profileDir,
+    defer: cleanup => { life.defer(cleanup) },
     panelAt(rows: number, width = 80, testContext?: import('node:test').TestContext): PluginManagerWorkspacePanel {
       const panel = new PluginManagerWorkspacePanel(controller, {
         rows: () => rows,
@@ -822,6 +827,9 @@ test('A09 (too-late): the controller renders the real Host too-late response and
   const applyingGate = new Promise<void>(resolve => { releaseApplying = resolve })
   let markApplyingSeen!: () => void
   const applyingSeen = new Promise<void>(resolve => { markApplyingSeen = resolve })
+  // Teardown fallback: these releases run LIFO before the Host/controller
+  // disposal even when an assertion fails before the normal release.
+  // The applying gate is created BEFORE the fixture boot.
   const fixture = await startRealInstallFixture(t, 's5-pr-e-a09-too-late', {
     portFactory: (host) => {
       const direct = new DirectPluginManagerPort(host.ctx)
@@ -850,6 +858,7 @@ test('A09 (too-late): the controller renders the real Host too-late response and
   })
   const { host, controller, profileDir } = fixture
   assert.ok(inner !== undefined)
+  fixture.defer(() => releaseApplying())
   const hostService = serviceImplementation<{
     installBundle(spec: string, options?: unknown): Promise<unknown>
     publishAndReload(ids?: unknown): Promise<unknown>
@@ -867,6 +876,7 @@ test('A09 (too-late): the controller renders the real Host too-late response and
   const originalPublish = hostService.publishAndReload
   let releaseApply!: () => void
   const applyGate = new Promise<void>(resolve => { releaseApply = resolve })
+  fixture.defer(() => releaseApply())
   hostService.publishAndReload = async function patchedPublish(this: unknown, ids?: unknown): Promise<unknown> {
     await applyGate
     return originalPublish.call(this, ids)

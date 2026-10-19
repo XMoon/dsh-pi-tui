@@ -479,7 +479,7 @@ test('a failed invalidation subscription releases the already-installed listener
   assert.equal(invalidations, 0, 'the rolled-back subscriptions must not deliver')
 })
 
-test('a Remote mutation result carried by a superseded Connection generation is refused, never presented as success', async () => {
+test('a Remote mutation result carried by a superseded Connection generation is refused, never presented as success', async (t) => {
   const remote = remoteFixture()
   const generation = generationFixture(1)
   const original = remote.pluginManager.setBundleEnabled
@@ -492,6 +492,7 @@ test('a Remote mutation result carried by a superseded Connection generation is 
     await gate
     return original(name, enabled)
   }
+  t.after(() => { release() })
   const port = portOf(remote, generation)
   const pending = port.setBundleEnabled('bundle-a', true)
   await started
