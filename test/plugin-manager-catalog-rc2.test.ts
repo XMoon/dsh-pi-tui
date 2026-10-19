@@ -427,6 +427,9 @@ test('the REAL Host -> Direct port -> controller -> workspace page install chain
   // Keep the rendered frame as evidence that the action is actually visible.
   const disableFrame = panel.render(120).join('\n').replace(/\x1b\[[0-9;]*m/g, '')
   assert.match(disableFrame, /> Disable…/, 'the toggle action is painted before it is invoked')
+  await vt.waitForRender()
+  assert.match(vt.getViewport().join('\n').replace(/\x1b\[[0-9;]*m/g, ''), /> Disable…/,
+    'the mounted VirtualTerminal viewport shows the toggle action before the key')
   vt.sendInput('\r') // Disable…
   await waitFor(() => controller.model().cards.find(card => card.name === seeded.bundleName)?.enabled === false,
     'the real Host disable + authoritative reread')
@@ -440,6 +443,9 @@ test('the REAL Host -> Direct port -> controller -> workspace page install chain
   await settle()
   const confirmFrame = panel.render(120).join('\n').replace(/\x1b\[[0-9;]*m/g, '')
   assert.match(confirmFrame, /> Remove/, 'the selected Remove action is painted before confirmation')
+  await vt.waitForRender()
+  assert.match(vt.getViewport().join('\n').replace(/\x1b\[[0-9;]*m/g, ''), /> Remove/,
+    'the mounted VirtualTerminal viewport shows the selected Remove action')
   vt.sendInput('\r') // confirm
   await waitFor(() => controller.model().cards.every(card => card.name !== seeded.bundleName),
     'the real Host removal + authoritative reread')

@@ -360,7 +360,12 @@ export class PluginManagerController {
   beginManualInstall(): boolean {
     if (this.disposed) return false
     const active = this.install
-    if (active !== undefined && active.phase !== 'done' && active.phase !== 'failed' && active.phase !== 'unknown') {
+    if (active?.phase === 'unknown') {
+      this.message = 'the previous install outcome is unknown; check its status before starting a new install'
+      this.hooks.requestRender()
+      return false
+    }
+    if (active !== undefined && active.phase !== 'done' && active.phase !== 'failed') {
       return false
     }
     // A replaced attempt must not leave an old inspect running; its late result
@@ -386,6 +391,13 @@ export class PluginManagerController {
    */
   beginOfficialInstall(value: string): boolean {
     if (this.disposed) return false
+    const active = this.install
+    if (active !== undefined
+      && (active.phase === 'done' || active.phase === 'failed' || active.phase === 'unknown')) {
+      this.message = 'an install result is still open; reopen it, then use New install to replace it'
+      this.hooks.requestRender()
+      return false
+    }
     if (this.hasDispatchedInstall()) return false
     const card = this.card(value)
     if (card === undefined) {

@@ -248,16 +248,24 @@ test('hostile plugin metadata never reaches the mounted panel TTY raw', async (t
       rows: [{ rowId: 'evil-row', moduleName: 'evil', entryId: hostile }],
       overrides: [],
     }],
+    // A live PluginInfo + matching patchId is what makes the row addressable
+    // and therefore produces the dynamic `Enable/Disable row <entryId>` label.
+    listPlugins: async () => [{
+      entryId: hostile, moduleName: 'evil', enabled: true, fiberPhase: 'active', patchId: 'evil-row',
+    }],
   }
   const { vt, harness } = await mountPluginRunner(t, manager)
   invokeCommand(harness, 'plugins')
+  await vt.waitForRender()
+  vt.resize(120, 60)
   await vt.waitForRender()
   vt.sendInput('\r') // open Details; the row action label carries entryId
   await vt.waitForRender()
   const raw = vt.writes.join('')
   assert.ok(!raw.includes('YXR0YWNr'), `no OSC 52 payload from plugin metadata reaches the TTY:\n${plain(vt.getViewport())}`)
   assert.ok(!raw.includes('\u009b'), 'no raw C1 byte from plugin metadata reaches the TTY')
-  assert.match(plain(vt.getViewport()), /evil/, 'the readable plugin metadata survives the projection')
+  assert.match(plain(vt.getViewport()), /Disable row evilname/,
+    'the live row action label is painted with the projected entryId')
 })
 
 test('a hostile Host installTarget spec is projected before the install Input renders it', async (t) => {
@@ -278,8 +286,12 @@ test('a hostile Host installTarget spec is projected before the install Input re
   await vt.waitForRender()
   vt.sendInput('\r') // Details
   await vt.waitForRender()
-  vt.sendInput('\r') // Install… -> official inspect
-  await vt.waitForRender()
+  vt.sendInput('\r') // Install… -> official inspect (fails back to the editor)
+  for (let round = 0; round < 40 && !plain(vt.getViewport()).includes('Inspect'); round += 1) {
+    await new Promise<void>(resolve => setTimeout(resolve, 5))
+    await vt.waitForRender()
+  }
+  assert.match(plain(vt.getViewport()), /Inspect/, 'the errored inspect reached the seeded editor')
   const raw = vt.writes.join('')
   assert.ok(!raw.includes('YXR0YWNr'), `no OSC 52 payload from installTarget.spec reaches the TTY:\n${plain(vt.getViewport())}`)
   assert.ok(!raw.includes('\u009b'), 'no raw C1 byte from installTarget.spec reaches the TTY')
