@@ -16,8 +16,24 @@
   的项可经 inspect、确认、安装流程处理，并显示实际安装版本、待审批构建脚本、重启要求与
   Host 返回的失败；从 Settings 进入返回后保留原分类、滚动与选择，离开安装页不会取消后台任务。
 
+- **Plugin Manager 的 Experimental 详情说明真实终端边界与升级路径。** 14 个官方 rc.2
+  实验包各自显示固定的 TUI 可用面与限制/风险（哪些只有 Web UI、哪些只经现有 Tool/Job/
+  Activity/`/skill`/标题界面可达、B04/B13/B14 仍未验证），这些文字只跟随精确官方包身份，
+  不随启用状态变成“Host 能力通过”。升级指引按 Host 事实区分随 DSH 发行升级、profile 包
+  “先 Remove 再显式 Install”、官方 on-demand 目标与当前 TUI 的外部管理；不提供原地更新、
+  版本选择器或静默重装。
+- **`/model` 可直接选择 rc.2 官方的 `deepseek-flash`。** 候选完全来自 Host 模型目录，以
+  精确 `(provider, model)` 身份搜索与提交（显示名 `DeepSeek-V4.1-Flash` 不作为 ID），
+  选择后由官方 Session/global 默认读回；部署覆盖目录没有该 ID 时不会凭空出现。
+
 ### 变更
 
+- **`/settings → Other → Web Search / Fetch` 的帮助文字补齐真实使用事实。** 两套 DeepSeek
+  API 是独立 opt-in 计费 provider，登录或普通 Messages 套餐不保证覆盖；默认
+  Messages/HTTP 不调用收费 API，且安装/启用其他 Bundle 不会改变它们（这是 base profile
+  的 Web 配置，不是 Optional Bundle）。`Share Original Question` 默认为开，只发送最多 128
+  字符的触发问题（`ori_question`，不含完整历史或系统提示词）；endpoint 必须是可信 HTTPS
+  并会收到凭据与查询；只有 Host 写入与权威回读一致才显示 `Verified`。
 - **Settings 的 Plugins 第二列新增 `Open Plugin Manager` 直接入口**：宽屏/中屏的
   Rows 栏显示真实可点击的导航行（`Rows (1)`），Enter、Right 与鼠标点击打开同一个
   Plugin Manager 页面，不增加中间层或第二焦点；窄屏仍保留原有的一步直达。

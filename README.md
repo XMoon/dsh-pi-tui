@@ -195,6 +195,8 @@ Task Center 的 `ACTIVE` / `TRACKED` 是展示范围：`ACTIVE` 只显示当前�
 
 `/plugins` 打开当前 profile 的全屏 Plugin Manager：目录固定为 TUI & Extensions / Official DSH / Third-party / Experimental（实验组最后），窄屏单栏、宽屏双栏，可搜索、筛选、查看来源与状态，并从官方目录执行安装、启用/禁用与删除；结果以 Host 实际返回的版本、重启要求和错误为准。正在提供当前界面的 `dsh-pi-tui` 只读且不可从自身界面禁用或移除。`/settings` 的顶级 `Plugins` 分类原地打开同一页面，返回时保留 Settings 的分类、滚动与选择。
 
+Experimental 组的 14 个官方 rc.2 实验包在 Detail 中给出固定的终端可用面与限制/风险说明（Web-only、Host-only、B04/B13/B14 未验证等边界），这些说明只随精确官方包身份出现，不随启用状态伪装成 Host 能力通过；升级指引按 Host 事实区分「随 DSH 发行升级」「profile 包先 Remove 再显式 Install」「官方 on-demand 目标」和「当前 TUI 由外部管理」，不提供原地更新、版本选择器或静默重装。
+
 Subagent 按完整 lineage 显示，包括嵌套创建的 descendant：
 
 ```text
@@ -311,7 +313,7 @@ TUI 使用 DSH 提供的模型和设置服务。
 /statusline
 ```
 
-模型切换、Reasoning Effort、权限 Preset、Plan 和 Goal 都沿用 DSH 对应的运行时语义。
+模型切换、Reasoning Effort、权限 Preset、Plan 和 Goal 都沿用 DSH 对应的运行时语义。`/model` 的候选完全来自 Host 的模型目录：rc.2 的 `deepseek-flash` 以精确 `(provider, model)` 身份出现（显示名 `DeepSeek-V4.1-Flash` 不当作 ID），选择后写回官方 Session/global 默认；部署覆盖目录不再提供该 ID 时不会凭空显示。
 
 `/settings` 打开一个真正的全屏工作区，三栏 / 两栏 / 单栏只是同一套
 `分类 → 设置行 → 详情` 三层的投影：宽屏同时显示三栏，中屏按当前层显示

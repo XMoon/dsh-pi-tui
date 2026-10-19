@@ -3111,4 +3111,5 @@ page, tab, shortcut, button, scroll owner or port is introduced.
   version is `unavailable` rather than the running TUI release number. The
   guidance never echoes a full userinfo/token and never dispatches a mutation:
   profile Remove-then-Install stays two explicit user operations with the
-  existing D1 controller actions.
+  existing D1 controller actions. **v9 F10: DONE** — the standard route is
+  stated for every Host shape and no updater/version picker is introduced.

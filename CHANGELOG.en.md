@@ -22,8 +22,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and selection, and leaving the install page never cancels the background
   operation.
 
+- **The Plugin Manager Experimental Detail now states real terminal boundaries
+  and the correct upgrade path.** Each of the 14 official rc.2 bundles shows a
+  fixed TUI surface plus limits/risks (which are Web-only, which are reachable
+  only through the existing Tool/Job/Activity/`/skill`/title surfaces, and the
+  still-unverified B04/B13/B14 boundaries). That copy follows the exact official
+  identity only and never turns enablement into a "Host capability PASS". The
+  upgrade guidance uses Host facts: upgrade with the DSH installation, Remove
+  then explicitly install a profile-owned bundle, use the official on-demand
+  target, or leave the Current TUI bundle to its external manager. There is no
+  in-place update, version picker or silent reinstall.
+- **`/model` can select the rc.2 `deepseek-flash` model directly.** Candidates
+  come only from the Host catalog and are searched/submitted by the exact
+  `(provider, model)` identity (the display name `DeepSeek-V4.1-Flash` is never
+  the ID), with the official Session/global default read-back. A deployment
+  catalog without the ID shows no invented row.
+
 ### Changed
 
+- **The `/settings → Other → Web Search / Fetch` help now carries the real
+  facts.** Both DeepSeek APIs are separate opt-in billed providers that a login
+  or an ordinary Messages plan does not guarantee to cover; the default
+  Messages/HTTP pair calls no billed API and is not changed by installing or
+  enabling another bundle (this is base-profile Web configuration, not an
+  Optional Bundle). `Share Original Question` defaults to on and sends only up
+  to 128 characters of the triggering question (`ori_question`, never the full
+  history or system prompt); the endpoint must be trusted HTTPS and receives
+  the credential plus query; a value reads `Verified` only after the Host write
+  and its authoritative read-back agree.
 - **The Settings Plugins Rows pane now exposes `Open Plugin Manager`.** On the
   multi-column projection the Rows column paints one real clickable navigation
   row (`Rows (1)`); Enter, Right and a mouse click open the same Plugin Manager
