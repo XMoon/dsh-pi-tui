@@ -18,6 +18,13 @@
 
 ### 变更
 
+- **Settings 的 Plugins 第二列新增 `Open Plugin Manager` 直接入口**：宽屏/中屏的
+  Rows 栏显示真实可点击的导航行（`Rows (1)`），Enter、Right 与鼠标点击打开同一个
+  Plugin Manager 页面，不增加中间层或第二焦点；窄屏仍保留原有的一步直达。
+- **停用或移除 Auto Review 前必须先确认风险**：确认页固定说明“停用可能把现有 Auto
+  Session 转为 Full access，Auto Review 不是沙箱”，默认选择 Cancel；未确认前不写 Host，
+  cancel、过期确认和窄屏不可见操作都不会改变权限。移除 Auto Review 时显示同一风险。
+
 - **`time-context` 等 Snapshot 注入不再把同一回合的 Activity/Thought 切成多块**：Compact 中
   它们随 Activity 折叠，Focus 中随 Thought 隐藏并在展开后按原始顺序恢复一次；Full 保持原有
   顺序与 Context 卡片。`instructions`/`catalog` 与 Snapshot 组成的混合 cluster 保持原状，

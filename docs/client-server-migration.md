@@ -65,6 +65,16 @@ S4-D1 PR-D1 IMPLEMENTED (official Plugin Manager catalog + fullscreen workspace:
                     rc.2 14/14 Host catalog; `HOST_CAPABLE` and
                     `TUI_FEATURE_SUPPORTED` remain S4-D2/D3 ledger items. Stage
                     closure/review/merge is pending)
+S4-D2 PR-D2 IMPLEMENTED / STAGE OPEN (B01–B14 Host capability qualification over
+                    the real rc.2 published Optional bundle packages: the shared
+                    isolated fixture proves real Loader/patch/service/tool/Session/
+                    Job paths; B03 gains the Auto Review danger confirmation. Two
+                    bounded Owner decisions remain: B04 Inspector needs the Web
+                    `webServer`/`connection` transport absent from the TUI profile,
+                    so its Host row stays PENDING; B13/B14 native one-shot starts
+                    are launch-verified but EXTERNAL_UNVERIFIED without a native
+                    credential/runtime. No D2 row is promoted by name alone — see
+                    the S4-D2 ledger at the end)
 M4  NOT STARTED   (experimental local Host process / IPC split)
 M5  NOT STARTED   (external attach; localhost/SSH only)
 M6  NOT STARTED   (production dual stack: direct default, wire opt-in)
@@ -7264,3 +7274,94 @@ qualifications stay in the B01–B14 ledger.
   Settings in-place entry/return, resize/stale gesture, real Remote L6).
 - Local qualification does not replace the stage-final CI run on the frozen
   PR HEAD.
+
+## S4-D2 PR-D2 — B01–B14 optional-bundle Host capability qualification
+
+**Stage status: OPEN.** This section is the ONLY current three-layer ledger for
+the 14 rc.2 Optional/On-demand bundles. `CATALOG_MANAGEABLE` is inherited from
+S4-D1 (real Host `listBundles()`); `HOST_CAPABLE` and `TUI_FEATURE_SUPPORTED` are
+the new observations. `ROW_DISPOSITION` is independent: it records whether the
+S4-D2 row can be closed, even when a capability is honestly external or
+web-only. **No row is promoted from a package name, a checkbox, `fiber active`,
+a mock tool or a catalog read.**
+
+### Fixture / evidence topology
+
+`test/support/s4-d2-optional-bundle-fixture.ts` creates an isolated temporary
+installation manifest over the PUBLISHED rc.2 package set, a real profile
+manifest/patch, and the official `loadProfileDirectory()` → `boot()` Loader
+composition (`dsh-base` + the profile agent plane + the four generated preset
+mirrors + the exact bundle patch). The fixture consumes a provisioned official
+artifact tree (`temp/s4-d2-bundles`, or `DSH_PI_TUI_S4_D2_INSTALLATION`); when it
+is absent the test reports `BLOCKED` instead of substituting a local same-name
+package. `scripts/dsh-s4-d2-bundles-smoke.mjs` owns the one-time provisioning
+(`--provision`), the real pinned-npm CLI profile add/remove/restart loop
+(`--network`) and the bounded native gate (`--native`; absent an admitted
+credential/runtime it records `EXTERNAL_UNVERIFIED`). The in-process fixture
+deliberately omits the TUI screen rows; the TUI surfaces are already covered by
+their own L6 suites and D3 owns their final wording.
+
+`PRODUCTION PREREQUISITES REPRODUCED`: published rc.2 `dsh-base` family and the
+14 published bundle packages, the official profile/patch reader, the official
+boot Loader, four generated preset declarations, real Agent/Session/Job/
+ToolRuntime/permission/permission-preset services. `TEST STAND-INS`: the
+temporary profile/installation roots, a controlled local HTTP endpoint for the
+translator and market transport, and scripted LLM/tool transports inside the
+tests that own them. `DELIBERATELY ABSENT`: the user's real `DSH_HOME`, network
+installs inside tests, credentials, a physical browser/microphone, and any TUI
+surface row.
+
+### Ledger (one row per Bxx)
+
+| B | exact package | CATALOG_MANAGEABLE | HOST_CAPABLE | TUI_FEATURE_SUPPORTED | ROW_DISPOSITION | Direct / M3 Remote | positive proof | negative proof | limits / next owner |
+|---|---|---|---|---|---|---|---|---|---|
+| B01 | `@deepseek-ai/dsh-experimental-agent-team-profile` | PASS (D1) | PASS | `HOST_ONLY` (existing Task/Activity/child views; no Team board) | DONE | Direct PASS; M3 not re-run (no new TUI consumer) | real Team service + `tool-agent-team` scoped tools; Lead→`spawn_teammate`→`list_agents`→`team_task_create`/`update`→`send_message`→member `SCOUT_DONE`; four preset rosters | global delegation rows disabled; preset-local `subagent`/`list_agents` retained; unknown target and live-teammate spawn refused; teardown drains children | full roster/board/message UI is a separate product case (D3/owner) |
+| B02 | `@deepseek-ai/dsh-experimental-voice-input-bundle` | PASS (D1) | PASS (mount/readiness/cleanup; no transcription) | `WEB_ONLY` (no TUI microphone surface) | DEFERRED_WITH_OWNER | Direct Host PASS; M3 N/A | real `speechToText` registry: local SenseVoice + API controller rows, host-local model requirement/setup estimate, selection; service released on disable+restart | no model in isolated Host → `unprepared`, never `ready`; no capture/upload performed; no microphone claim | model download/platform binary/auth and the browser mic UI are explicitly unqualified |
+| B03 | `@deepseek-ai/dsh-experimental-auto-review` | PASS (D1) | PASS | PASS (existing permission/tool surface + new danger confirmation) | DONE | Direct PASS; M3 not re-run (D1 shares the permission catalog) | real Auto preset in `/permission`; native allow/deny/ask-grant/ask-reject/reviewer-error with body counts; PTC inner allow/deny; official teardown migrates live Auto sessions to Full access and clears the catalog | denied/errored/aborted bodies execute 0; user rejection 0; non-Auto session unchanged; in-flight review aborted/drained; stale confirmation writes 0; cancel writes 0 | Remote L6 re-run and full permission matrix stay D3/S5 |
+| B04 | `@deepseek-ai/dsh-experimental-inspector-profile` | PASS (D1) | PENDING | `WEB_ONLY` (no Session/Node DevTools page) | PENDING_OWNER_DECISION | Direct Host row pending; M3 N/A | real Loader row present; official `captureFetch:true` declaration read; no debug journal created when unmounted | row waits on `webServer`/`connection`; no unredacted capture occurs in the TUI profile | Owner must accept the web-only prerequisite or provide the official Web transport; local debug/permission/privacy risk remains documented |
+| B05 | `@deepseek-ai/dsh-experimental-tool-worktree` | PASS (D1) | PASS | PASS (existing tool/status/fork/path) | DONE | Direct PASS; M3 not re-run | official `create_worktree`→real branch/checkout/baseCommit/repositoryRoot→official effective `workingDirectory` projection + Session status | invalid branch refused without cwd drift; disabling restart removes the tool; source repo preserved | none |
+| B06 | `@deepseek-ai/dsh-experimental-cot-translation-bundle` | PASS (D1) | PASS (controlled endpoint substitutes transport only) | `WEB_ONLY` (TUI reasoning stays original; no reader) | DEFERRED_WITH_OWNER | Direct Host PASS; M3 N/A | real `translator` route: anonymous provider list, explicit resolved text sent to the controlled endpoint, parsed translation; error and abort paths | HTTP failure/timeout/cancel reject; no TUI reasoning rewrite; external reasoning/private-text egress is recorded as a risk | Browser CoT reader is a separate design; third-party endpoints receive the text when invoked |
+| B07 | `@deepseek-ai/dsh-experimental-terminal-bundle` | PASS (D1) | PASS | PASS (existing Tool/Job/Activity; one-shot `!`/`!!` unchanged) | DONE | Direct PASS; M3 not re-run | real retained terminal process: open→send→read→list→background `pty-send` Job→output→close; existing terminal-text boundary strips control bytes | closed session cannot be read; disable+restart removes the tool and terminal service; restart leaves no session | U11a/U11b Remote shell safety remains unchanged; PTY platform qualification stays outside this row |
+| B08 | `@deepseek-ai/dsh-experimental-session-search` | PASS (D1) | PASS | PASS (existing Session Browser/tools, no local index) | DONE | Direct PASS; M3 not re-run | real `session-query-sqlite` lazy index over persisted logs: two same-workspace sessions matched, one outside-workspace session refused; event search; restart re-index | no-hit result; outside-workspace session never returned; no TUI-side search index | authorization beyond cwd/workspace remains the Host query owner's contract |
+| B09 | `@deepseek-ai/dsh-experimental-session-titles-bundle` | PASS (D1) | PASS | PASS (existing title projection/UI) | DONE | Direct PASS; M3 not re-run | real all-prompts provider generated/updated titles through `ctx.sessionTitle`; source provider recorded; held late result for session A did not paint session B | manual `/title` (`rename`) pins the user source across later turns; disabling+restart restores the base first-prompt provider and removes the B09 provider | the TUI title presentation is the existing official projection; no TUI cache |
+| B10 | `@deepseek-ai/dsh-experimental-badge-skill-bundle` | PASS (D1) | PASS | PASS for skills-capable presets; minimal has no skill tool | DONE | Direct PASS; M3 not re-run | real `dsh-badge` provider contributes the skill; `/skill` surface catalog and real body load visible in standard; provider loaded is separate from the model tool | `minimal` has no `skill` tool and no implicit loader; disable+restart removes the catalog entry while preset tools are unchanged | badge content is Host-owned; no Web `1017` badge claim |
+| B11 | `@deepseek-ai/dsh-experimental-ralph-bundle` | PASS (D1) | PASS (one bounded round; cancel) | PASS (existing Tool/Task/Activity) | DONE | Direct PASS; M3 not re-run | real `ralph` tool with the isolated workflow engine and `spawn` child: one `maxRounds:1` structured round, `workflow/start`+`workflow/end`, parent tool result | cancelled in-flight child settles its workflow/end exactly once and leaves no orphan Agent; no 64-round execution | cost/multi-round warning remains a D3 terminal claim |
+| B12 | `@deepseek-ai/dsh-experimental-plugin-market-bundle` | PASS (D1) | PASS (explicit offline index) | `WEB_ONLY` (no Discover page; Creator `plugin_market` is not a global TUI tool) | DEFERRED_WITH_OWNER | Direct Host PASS; M3 N/A | real `pluginMarket` service: empty default, explicit local index read/search/entry; `plugin_market` tool absent globally | unknown source and invalid index refused; no public marketplace fetch and no market code execution in tests | TUI Discover and the Creator tool surface stay unadopted; user-configured sources only |
+| B13 | `@deepseek-ai/dsh-subagent-claude-code` | PASS (D1; missing + exact `installTarget`) | EXTERNAL_UNVERIFIED | `HOST_ONLY` (one-shot, no Continue/Resume) | PENDING_OWNER_DECISION | Direct Host start verified; native execution unverified | official package locally installed into the profile, official one-shot `subagent_claude_code` schema/tool row, external child catalog, real start returns a child id | no native auth/runtime settle in the isolated Host; no `PONG`/success fabricated; interrupt+drain leaves no in-process orphan; no continuation parameters | Owner must accept the bounded exclusion or provide a real native credential/platform for one read-only task |
+| B14 | `@deepseek-ai/dsh-subagent-codex` | PASS (D1; missing + exact `installTarget`) | EXTERNAL_UNVERIFIED | `HOST_ONLY` (one-shot, no Continue/Resume) | PENDING_OWNER_DECISION | Direct Host start verified; native execution unverified | same local-install + official `subagent_codex` schema/tool row + external child catalog | same missing-auth/startup result, no fabricated success, no orphan, no continuation | same Owner decision as B13; system `claude`/`codex` binaries are never substituted |
+
+### Proof index
+
+- Fixture: `test/support/s4-d2-optional-bundle-fixture.ts`; provisioning/CLI
+  loop: `scripts/dsh-s4-d2-bundles-smoke.mjs` (`pnpm smoke:s4-d2-bundles`).
+- B03: `test/s4-d2-auto-review.test.ts` (native/PTC/permission/teardown);
+  `test/plugin-manager-workspace-navigation.test.ts` and
+  `test/plugin-manager-workspace-visual.test.ts` (shared danger confirmation,
+  stale/cancel/write admission, 80×10/44×20 readability).
+- B01: `test/s4-d2-agent-team.test.ts`.
+- B05/B07/B08: `test/s4-d2-host-tools.test.ts`.
+- B09/B10/B11: `test/s4-d2-projections-workflow.test.ts`.
+- B13/B14: `test/s4-d2-native-subagents.test.ts`.
+- B02/B04/B06/B12: `test/s4-d2-web-anchored.test.ts`.
+- D2-0 Settings entry: `test/plugin-manager-settings-entry.test.ts`,
+  `test/settings-workspace-visual.test.ts`.
+- The real pinned-npm CLI profile loop (`--network`) was run locally with
+  `@deepseek-ai/dsh@0.2.1-rc.2` and the exact B05 package: add selected the
+  patch layer, remove deselected it, a re-add reproduced the layer, and
+  `--dump-config` changed/restored accordingly. This is a composition/restart
+  proof, not a catalog or tool-runtime claim.
+
+### D1 legacy and remaining Owner decisions
+
+- **D1-A09 / D1-A10 / D1-A12 remain PARTIAL** (real Host install cancel/HMR,
+  pending-build approval and the full Direct/Remote mutation L6 matrix). S4-D2
+  does not re-claim them; the local profile installs used published packages and
+  deliberately did not close those D1 evidence gaps.
+- **S4-D2 is NOT stage-DONE.** B04's Host row is PENDING on the Web
+  `webServer`/`connection` transport (no TUI profile mounts it), and B13/B14
+  remain `EXTERNAL_UNVERIFIED` until a real native credential/platform is
+  admitted. The Owner must either accept these bounded exclusions
+  (`ROW_DISPOSITION=DEFERRED_WITH_OWNER`) or provide the missing environment;
+  until then those rows stay open and the stage cannot close. No fake tool,
+  mock native success, second Host authority or TUI Web UI is used to close
+  them.

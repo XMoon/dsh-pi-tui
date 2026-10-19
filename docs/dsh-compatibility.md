@@ -363,3 +363,40 @@ row, peer range or `engines.dsh` value changes here:
   time-context plugin (`@deepseek-ai/dsh-time-context` is only a transitive dev
   dependency of `@deepseek-ai/dsh-web-app` here), the "Host accepted but not yet
   appended" interleaving (`NOT_FORCED`), and any real Tern GUI path.
+
+### 0.2.1-rc.2 Optional-bundle runtime qualification (S4-D2, PR-D2)
+
+S4-D2 qualifies the 14 published rc.2 Optional/On-demand bundle packages over an
+isolated real Host composition (official profile/patch reader, boot Loader,
+`dsh-base`, the four generated preset mirrors and the exact bundle patch). It
+does **not** change the release identity, compatibility matrix, peer ranges or
+`engines.dsh`, and it does not close the S4-D2 stage:
+
+- **B01 Team, B03 Auto Review, B05 Worktree, B07 Persistent Terminal, B08 Session
+  Search, B09 Session Titles, B10 Badge Skill, B11 Ralph and B12 Plugin Market**
+  have real Host positive paths and the documented negative/cleanup controls;
+  the evidence index is the S4-D2 ledger in `docs/client-server-migration.md`.
+- **B02 Voice** mounts the real speech registry/API controller and reports the
+  host-local model as `unprepared` in this isolated Host (no model download is
+  performed by tests); the browser microphone surface remains unqualified.
+- **B04 Inspector** is PENDING: its real Loader row waits on the Web
+  `webServer`/`connection` services that a TUI profile does not compose. No
+  capture/journal is created in that profile, and no DevTools UI is claimed.
+- **B06 CoT Translation** was exercised through the real translator route with a
+  local controlled endpoint (only the external transport is substituted); it
+  demonstrably sends the given reasoning/private text to that endpoint, and the
+  TUI still has no browser CoT reader.
+- **B12 Plugin Market** has no official default marketplace; an explicitly
+  configured offline index is read, while unknown/invalid sources are refused.
+  The Creator `plugin_market` tool and the Web Discover page are not TUI
+  surfaces.
+- **B13 Claude Code / B14 Codex** are EXTERNAL_UNVERIFIED: the official package,
+  `missing` catalog entry with exact `installTarget`, local profile install and
+  one-shot external-child start/schema are verified, but the isolated Host has no
+  native credential/platform result. No mock/system-CLI success is accepted, and
+  no Continue/Resume affordance exists.
+- CI without the provisioned official artifact tree reports `BLOCKED` for the
+  in-process qualification tests instead of substituting packages; the
+  `smoke:s4-d2-bundles` CLI has separate `--provision`, `--network` and
+  `--native` gates. B04 and B13/B14 need an explicit Owner decision before S4-D2
+  can close.
