@@ -236,6 +236,20 @@ interface HostOptions {
   readonly installation: S4D2Installation
   readonly settings: OptionalBundleHostOptions
   readonly tracker: HostTracker
+  readonly environment: EnvironmentOwner
+  readonly lease: HostLease
+}
+
+/** One per-TestContext environment owner: every host shares the SAME captured
+ *  original, and only the last released host restores it (hooks run FIFO). */
+interface EnvironmentOwner {
+  previous: Map<string, string | undefined>
+  refs: number
+  restored: boolean
+}
+
+interface HostLease {
+  released: boolean
 }
 
 interface HostState {
@@ -392,7 +406,11 @@ async function bootAt(options: HostOptions): Promise<OptionalBundleHost> {
       return bootAt(options)
     },
     async dispose() {
-      await ctx.fiber.dispose()
+      try {
+        await ctx.fiber.dispose()
+      } finally {
+        releaseEnvironment(options.environment, options.lease)
+      }
     },
   }
   options.tracker.current = host
@@ -437,9 +455,9 @@ const ISOLATED_ENV_KEYS = [
 /** Point every credential/agent/cache/temp location at the disposable root;
  *  `scrubbedParentEnv()` preserves HOME, so native providers must never see the
  *  real one. Returns the exact previous values for restoration. */
-function isolateEnvironment(root: string): Map<string, string | undefined> {
+function environmentValues(root: string): Record<string, string> {
   const home = join(root, 'home')
-  const values: Record<string, string> = {
+  return {
     HOME: home,
     USERPROFILE: home,
     DSH_HOME: home,
@@ -449,12 +467,46 @@ function isolateEnvironment(root: string): Map<string, string | undefined> {
     XDG_DATA_HOME: join(home, '.local', 'share'),
     XDG_STATE_HOME: join(home, '.local', 'state'),
   }
+}
+
+function applyEnvironment(root: string): void {
+  const values = environmentValues(root)
+  for (const key of ISOLATED_ENV_KEYS) process.env[key] = values[key]
+}
+
+function isolateEnvironment(root: string): Map<string, string | undefined> {
   const previous = new Map<string, string | undefined>()
-  for (const key of ISOLATED_ENV_KEYS) {
-    previous.set(key, process.env[key])
-    process.env[key] = values[key]
-  }
+  for (const key of ISOLATED_ENV_KEYS) previous.set(key, process.env[key])
+  applyEnvironment(root)
   return previous
+}
+
+const environmentOwners = new WeakMap<TestContext, EnvironmentOwner>()
+
+/** Acquire (or share) the test-context environment owner. A second concurrent
+ *  host reuses the SAME original capture and points the process at its own
+ *  disposable root; only the last release restores the original. */
+function acquireEnvironment(t: TestContext, root: string): EnvironmentOwner {
+  const existing = environmentOwners.get(t)
+  if (existing === undefined || existing.refs === 0) {
+    const owner: EnvironmentOwner = { previous: isolateEnvironment(root), refs: 0, restored: false }
+    environmentOwners.set(t, owner)
+    owner.refs += 1
+    return owner
+  }
+  applyEnvironment(root)
+  existing.refs += 1
+  return existing
+}
+
+function releaseEnvironment(owner: EnvironmentOwner, lease: HostLease): void {
+  if (lease.released) return
+  lease.released = true
+  owner.refs -= 1
+  if (owner.refs === 0 && !owner.restored) {
+    owner.restored = true
+    restoreEnvironment(owner.previous)
+  }
 }
 
 function restoreEnvironment(previous: ReadonlyMap<string, string | undefined>): void {
@@ -466,7 +518,8 @@ function restoreEnvironment(previous: ReadonlyMap<string, string | undefined>): 
 
 /**
  * Bind the fixture to one `TestContext` lifecycle and boot the host. Every temp
- * root and the process `DSH_HOME` restore are owned by the test.
+ * root and the per-test environment restore are owned by the test (shared
+ * refcount, so concurrent hosts restore the original only at the last release).
  */
 export async function startS4D2Host(
   t: TestContext,
@@ -477,10 +530,14 @@ export async function startS4D2Host(
   const life = testLifecycle(t)
   const root = life.tempDir('dsh-s4-d2-')
   const tracker: HostTracker = { current: undefined }
-  const options: HostOptions = { root, installation: resolution.installation, settings, tracker }
-  const previousEnvironment = isolateEnvironment(root)
-  life.defer(() => restoreEnvironment(previousEnvironment))
-  // Teardown releases whichever Context a restart left live.
+  const lease: HostLease = { released: false }
+  const environment = acquireEnvironment(t, root)
+  // Fallback release if boot throws before a host exists; the host dispose is
+  // normally the release path and this call is idempotent.
+  life.defer(() => releaseEnvironment(environment, lease))
+  const options: HostOptions = { root, installation: resolution.installation, settings, tracker, environment, lease }
+  // Teardown releases whichever Context a restart left live, then the lease
+  // fallback above observes an already-released lease.
   life.defer(() => tracker.current?.dispose())
   prepareRoot(root, resolution.installation, [BASE_BUNDLE, ...(settings.bundles ?? [])], settings.profileDependencies ?? {})
   return bootAt(options)

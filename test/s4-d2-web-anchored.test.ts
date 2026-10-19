@@ -13,6 +13,8 @@ import assert from 'node:assert/strict'
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
 import { join } from 'node:path'
 import test from 'node:test'
+import { SessionId } from '@deepseek-ai/dsh-session'
+import { ToolCallId } from '@deepseek-ai/dsh-llm'
 import {
   skippedInstallationReason,
   startS4D2Host,
@@ -90,10 +92,10 @@ test('B04 Inspector: the web transport prerequisite is honestly pending, no capt
   assert.equal(host.ctx.get('inspector'), undefined, 'no inspector service is fabricated without webServer/connection')
   const entry = host.loaderEntries().find(candidate => candidate.id === 'experimental-inspector')
   assert.ok(entry !== undefined, 'the real inspector Loader row is present')
-  assert.notEqual(entry.state, 2, 'the row is not active without the Web transport prerequisites')
-  if (entry.error !== undefined) {
-    assert.match(entry.error, /webServer|connection/i, `the failure names the real prerequisite: ${entry.error}`)
-  }
+  assert.equal(entry.state, 0, 'the real Loader row is pending (Cordis state 0), not active')
+  // The exact prerequisites the row waits for are absent from this profile.
+  assert.equal(host.ctx.get('webServer'), undefined)
+  assert.equal(host.ctx.get('connection'), undefined)
   // The installed official patch declares the opt-in capture policy; the
   // capture behavior itself is NOT_VERIFIED because the Web transport row
   // (webServer/connection) is not mounted in a TUI profile.
@@ -219,7 +221,43 @@ test('B12 Plugin Market: real empty default, explicit offline index, unknown/inv
     () => market.search(brokenUrl, { offset: 0, limit: 10, sort: { kind: 'index' } }),
     /invalid-index|fetch-failed|invalid-index-url|must be an array/u,
   )
-  // No TUI Discover surface exists; the Creator `plugin_market` tool is not a
-  // global TUI tool in this composition.
+  // The market tool is a PRESET-scoped Host tool, not a global/TUI one. The
+  // generated `standard`/`ptc` presets declare it disabled; `cordis` enables
+  // it when the profile context + market service are mounted; `minimal` never
+  // declares it. This is the real Creator/agent-scope boundary.
   assert.equal(host.ctx.tools.get('plugin_market'), undefined)
+  const presetsHost = await startS4D2Host(t, { bundles: [B12], presets: true })
+  const presets = presetsHost.ctx.get('agentPresets') as { select(agent: unknown, preset: string): Promise<unknown> }
+  const cordis = await presetsHost.createAgent(SessionId('s4-d2-b12-cordis'), { cwd: join(presetsHost.root, 'work') })
+  await presets.select(cordis, 'cordis')
+  assert.equal(presetsHost.hasTool('plugin_market', cordis), true,
+    'the market tool is reachable in the cordis preset when the market service is mounted')
+  const listed = await presetsHost.ctx.tools.execute({
+    signal: new AbortController().signal,
+    callId: ToolCallId('s4-d2-b12-market'),
+    name: 'plugin_market',
+    arguments: { action: 'list_indexes' },
+    agent: cordis,
+  }) as { isError?: boolean; content?: readonly { type?: string; text?: string }[] }
+  assert.notEqual(listed.isError, true)
+  assert.match((listed.content ?? []).map(block => block.text ?? '').join(''), /"indexes":\[\]/u,
+    'no default marketplace exists without user-configured sources')
+  const standard = await presetsHost.createAgent(SessionId('s4-d2-b12-standard'), { cwd: join(presetsHost.root, 'work') })
+  await presets.select(standard, 'standard')
+  assert.equal(presetsHost.hasTool('plugin_market', standard), false,
+    'standard declares the market tool row disabled')
+  const minimal = await presetsHost.createAgent(SessionId('s4-d2-b12-minimal'), { cwd: join(presetsHost.root, 'work') })
+  await presets.select(minimal, 'minimal')
+  assert.equal(presetsHost.hasTool('plugin_market', minimal), false,
+    'minimal never declares the market tool')
+  const { readFileSync } = await import('node:fs')
+  for (const preset of ['standard', 'ptc']) {
+    const patch = readFileSync(join(process.cwd(), 'generated', 'dsh-presets', `${preset}.patch.yml`), 'utf8')
+    assert.match(patch, /id: tool-plugin-market[\s\S]{0,160}?disabled: true/u,
+      `${preset} declares the market tool row disabled`)
+  }
+  const cordisPatch = readFileSync(join(process.cwd(), 'generated', 'dsh-presets', 'cordis.patch.yml'), 'utf8')
+  assert.match(cordisPatch, /id: tool-plugin-market[\s\S]{0,160}?ctx\.get\('profileContext'\)/u,
+    'cordis keeps the profile-gated market row')
+
 })

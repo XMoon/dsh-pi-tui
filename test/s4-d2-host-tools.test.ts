@@ -296,6 +296,10 @@ test('B08: lazy workspace-scoped session search, paging/no-hit and restart re-in
   })
   assert.notEqual(window.isError, true, resultText(window))
   assert.match(resultText(window), /s4-d2-b08-beta/)
+  assert.match(resultText(window), /Target event seq 0/u)
+  const afterLines = resultText(window).split('\n').filter(line => line.startsWith('- seq '))
+  assert.ok(afterLines.length > 0 && afterLines.length <= 4,
+    `the requested after:4 window is bounded (got ${String(afterLines.length)} lines)`)
 
   // A restart rebuilds the lazy in-memory index from the persisted logs.
   const restarted = await host.restart()
