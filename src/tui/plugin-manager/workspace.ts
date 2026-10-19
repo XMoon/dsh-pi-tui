@@ -1054,7 +1054,7 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
         `approved build scripts: ${outcome.approvedBuilds.map(line => sanitizedPhysicalLine(line)).join(', ')}`,
       ]),
       ...(outcome?.registries === undefined ? [] : [
-        `registries: ${outcome.registries.map(registry => maskedSource(registry ?? 'pnpm default')).join(', ')}`,
+        `registries: ${outcome.registries.map(registry => maskedSource(sanitizedPhysicalLine(registry ?? 'pnpm default'))).join(', ')}`,
       ]),
     ]
     // The raw Host output/log is the copy authority (byte-exact), never the
@@ -1753,7 +1753,7 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
       const field = this.installFocus === 'registry' ? color.primary('> ') : '  '
       lines.push(`${color.textDim('Reg     ')}${field}${color.text(truncateToWidth(registry, Math.max(1, width - 12), '…'))}`)
       if (!this.customRegistry) {
-        const hint = options.map(option => maskedSource(option.label)).join(' · ')
+        const hint = options.map(option => maskedSource(sanitizedPhysicalLine(option.label))).join(' · ')
         if (hint !== '') lines.push(color.textMuted(truncateToWidth(`        ${hint}`, width, '…')))
       }
       if (install.message !== undefined) lines.push(color.warning(truncateToWidth(sanitizedPhysicalLine(install.message), width, '…')))
@@ -1775,7 +1775,7 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
         lines.push(color.warning(truncateToWidth(`${offered}${intent}`, width, '…')))
         const bundle = inspection.bundle === null ? 'unknown' : inspection.bundle ? 'yes' : 'no'
         lines.push(color.textDim(truncateToWidth(
-          `source ${sanitizedPhysicalLine(inspection.kind)} · registry ${maskedSource(inspection.registry ?? 'pnpm default')} · bundle ${bundle}${
+          `source ${sanitizedPhysicalLine(inspection.kind)} · registry ${maskedSource(sanitizedPhysicalLine(inspection.registry ?? 'pnpm default'))} · bundle ${bundle}${
             inspection.host === undefined ? '' : ` · host ${sanitizedPhysicalLine(inspection.host)}`
           }`,
           width,
@@ -1789,7 +1789,7 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
         lines.push(...wrapTextWithAnsi(sanitizedPhysicalLine(inspection.reason), width).map(line => color.textMuted(line)))
         if (inspection.registries !== undefined && inspection.registries.length > 0) {
           lines.push(color.textMuted(truncateToWidth(
-            `registries: ${inspection.registries.map(registry => maskedSource(registry ?? 'pnpm default')).join(', ')}`,
+            `registries: ${inspection.registries.map(registry => maskedSource(sanitizedPhysicalLine(registry ?? 'pnpm default'))).join(', ')}`,
             width,
             '…',
           )))
@@ -1855,7 +1855,7 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
         }
         if (outcome!.registries !== undefined && outcome!.registries.length > 0) {
           lines.push(color.textDim(truncateToWidth(
-            `registries: ${outcome!.registries.map(registry => maskedSource(registry ?? 'pnpm default')).join(', ')}`,
+            `registries: ${outcome!.registries.map(registry => maskedSource(sanitizedPhysicalLine(registry ?? 'pnpm default'))).join(', ')}`,
             width,
             '…',
           )))
@@ -2144,7 +2144,7 @@ interface DetailRender {
 /** Build the Detail body lines and remember which painted lines are actions. */
 function detailLines(detail: PluginDetailView, width: number, focused: boolean, selectedAction: number): DetailRender {
   const lines: string[] = []
-  const versionText = detail.card.version === undefined ? '' : ` ${detail.card.version}`
+  const versionText = detail.card.version === undefined ? '' : ` ${sanitizedPhysicalLine(detail.card.version)}`
   const experimentalText = detail.card.experimental ? ' [experimental]' : ''
   const titleRoom = Math.max(1, width - visibleWidth(versionText) - visibleWidth(experimentalText))
   const titleLine = `${color.textStrong(truncateToWidth(sanitizedPhysicalLine(detail.title), titleRoom, '…'))}${color.textDim(versionText)}${
