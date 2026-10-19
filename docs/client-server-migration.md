@@ -871,16 +871,22 @@ reclassified, not smuggled in.
 
 ### P1-A status — Plugin Manager
 
-`/plugins` (and the lazy `/settings → Plugins  Manage…` submenu) is ONE surface
-over one runner-owned controller: a narrow `PluginManagerPort`, the Direct
+`/plugins` (and, since S4-D1, the first-level `Settings → Plugins` in-place
+page) is ONE surface over one runner-owned controller: a narrow `PluginManagerPort`, the Direct
 adapter (`src/runtime/direct/plugin-manager-direct.ts`, the only module that
 resolves the official `pluginManager` service), a controller that owns operation
-state, and a rendering-only panel. The inventory is classified into Current TUI
+state, and a rendering-only fullscreen page. The inventory is classified into the S4-D1 frozen sections: TUI & Extensions
 (exactly `@xmoon76/dsh-pi-tui`, self-protected by DERIVED effective actions —
-never by forging `readOnlyReason`/`removable`), TUI Extensions (only after an
-exact + unique live-owner association, proven through a package-private
+never by forging `readOnlyReason`/`removable`; plus only exact + unique
+live-owner TUI extensions, proven through a package-private
 owner→Loader-entry-id projection over the shared `piTuiExtensions` runtime; no
-name heuristics, no duplicate card), and DSH Plugins (everything else). Both
+name heuristics, no duplicate card), Official DSH (real Host `official:true` or
+the exact rc.2 base ids), Third-party (Host-proven profile source, with an
+audited `Unverified origin` subsection) and Experimental (the exact rc.2
+B01–B14 identities, always last). S4-D1 retired the P1-A three-role
+`Current TUI / TUI Extensions / DSH Plugins` presentation and its legacy
+`Plugins  Manage…` SettingsList submenu; the port/controller authority below is
+unchanged. Both
 ownership decisions use official identity, never a package/module name: a
 bundle row's `entryId` decides visibility, and a `PluginInfo.patchId` equal to a
 `rowId` the self bundle declares (or an id in its `overrides` — e.g. the base
@@ -7199,10 +7205,14 @@ change, it affects the Remote path only, and it needs no TUI-local workaround.
 
 ## S4-D1 PR-D1 — official Plugin Manager catalog + fullscreen workspace
 
-This section records the S4-D1 / PR-D1 implementation and its evidence. It does
-**not** claim S4-D2 `HOST_CAPABLE` or S4-D3 `TUI_FEATURE_SUPPORTED` for any of
-the 14 official Optional/On-demand bundles; their qualification stays in the
-B01–B14 ledger.
+This section records the S4-D1 / PR-D1 implementation and its evidence.
+**C27** is the official `BundleInfo` catalog/provenance fact set preserved
+through the shared port; **C28** is the catalog lifecycle
+(inspect/install/toggle/remove/wait/cancel/approve) over the official Host
+service; **B01–B14** are the 14 Optional/On-demand rows. This PR closes their
+**CATALOG_MANAGEABLE** implementation/qualification only. It does **not** claim
+S4-D2 `HOST_CAPABLE` or S4-D3 `TUI_FEATURE_SUPPORTED` for any of them; those
+qualifications stay in the B01–B14 ledger.
 
 ### Implemented authority
 

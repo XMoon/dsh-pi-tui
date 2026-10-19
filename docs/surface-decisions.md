@@ -1996,7 +1996,10 @@ applied, exactly as the B1-C section above records.
 72×28 `SettingsList` overlay. The workspace is a read projection of category /
 row / detail navigation over a detached snapshot; since B2-B, exactly TWO of its
 rows (`Configured theme`, `Transcript display`) also own a real write channel,
-and nothing else does.
+and nothing else does. S4-D1 adds the first-level `Plugins` category: it is a
+DIRECT page entry (not an empty Rows level), hosts the one Plugin Manager page
+inside this same screen, and returns to L0 with Plugins selected; see the S4-D1
+section below.
 
 - **Post-B2-A navigation decision: three levels, not focus owners.** The
   workspace always has exactly three levels — L0 `categories`, L1 `rows`, L2
