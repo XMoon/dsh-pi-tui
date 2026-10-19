@@ -421,6 +421,9 @@ test('the REAL Host -> Direct port -> controller -> workspace page install chain
   await settle()
   vt.sendInput('\r') // Details
   await waitFor(() => vt.getViewport().join('\n').includes('[Details]'), 'the Details focus frame')
+  // Re-anchor the painted frame with the current authoritative model before the
+  // action key: an invalidation read may have settled after the last queued paint.
+  panel.render(120)
   vt.sendInput('\r') // Disable…
   await waitFor(() => controller.model().cards.find(card => card.name === seeded.bundleName)?.enabled === false,
     'the real Host disable + authoritative reread')
@@ -432,6 +435,7 @@ test('the REAL Host -> Direct port -> controller -> workspace page install chain
   await settle()
   vt.sendInput('\x1b[A') // Cancel -> Remove
   await settle()
+  panel.render(120)
   vt.sendInput('\r') // confirm
   await waitFor(() => controller.model().cards.every(card => card.name !== seeded.bundleName),
     'the real Host removal + authoritative reread')
