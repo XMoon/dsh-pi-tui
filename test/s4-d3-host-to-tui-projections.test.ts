@@ -215,6 +215,9 @@ test('B09: the real all-prompts title reaches the mounted TUI title/OSC, manual 
   const heldId = String(held.session.id)
   assert.notEqual(heldId, String(first.session.id), 'the first /new really created a separate session')
   adapter.holdTitle = new Promise<void>(resolve => { adapter.releaseTitle = resolve })
+  // A failed assertion must never strand the held title LLM stream; the
+  // release is idempotent and runs on the success path too.
+  t.after(() => { adapter.releaseTitle?.() })
   adapter.scripts.push({ kind: 'text', text: 'Held alpha start.' })
   await submitPrompt(app, 'Hold this title request')
   await app.waitFor(() => app.view().includes('Held alpha start.'), 'the held session turn')

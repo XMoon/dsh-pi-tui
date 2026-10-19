@@ -333,9 +333,16 @@ test('B01: the mounted TUI keeps Team capability in the existing Tool/Activity v
   )
   followup(agent, 'Create one shared Team task')
   await agent.whenIdle()
-  const created = toolResultOf(agent, 's4d3-b01-task')
-  assert.match(created ?? '', /"id"\s*:|"revision"\s*:/u,
-    'the EXACT team_task_create Tool result is the official JSON task record')
+  const created = JSON.parse(toolResultOf(agent, 's4d3-b01-task') ?? '') as {
+    readonly id?: string
+    readonly revision?: number
+    readonly subject?: string
+    readonly status?: string
+  }
+  assert.equal(typeof created.id, 'string', 'the EXACT team_task_create result is the official JSON task record')
+  assert.equal(created.subject, 'Scout one file')
+  assert.equal(created.status, 'pending')
+  assert.equal(typeof created.revision, 'number')
   await app.waitFor(() => app.view().includes('team_task_create'), 'the real Team create Tool card')
 
   // The shared board read returns the created subject through the same Agent
@@ -346,10 +353,20 @@ test('B01: the mounted TUI keeps Team capability in the existing Tool/Activity v
   )
   followup(agent, 'List the shared Team task')
   await agent.whenIdle()
-  const listed = toolResultOf(agent, 's4d3-b01-list')
-  assert.match(listed ?? '', /Scout one file/u,
-    'the EXACT team_task_list Tool result carries the created subject')
+  const listed = JSON.parse(toolResultOf(agent, 's4d3-b01-list') ?? '') as {
+    readonly tasks?: readonly { readonly id?: string; readonly subject?: string; readonly status?: string }[]
+  }
+  assert.equal(listed.tasks?.length, 1, 'the EXACT team_task_list result is the official shared-board JSON')
+  assert.equal(listed.tasks?.[0]?.id, created.id, 'the Host-generated task id crosses create -> list')
+  assert.equal(listed.tasks?.[0]?.subject, 'Scout one file')
+  assert.equal(listed.tasks?.[0]?.status, 'pending')
   await app.waitFor(() => app.view().includes('team_task_list'), 'the real Team list Tool card')
+  // The Host-generated id exists in NO tool argument; after expanding the
+  // cards it is a result-exclusive painted fact, and `{"tasks"` is list-only.
+  app.vt.sendInput('\x0f')
+  await app.settle()
+  await app.waitFor(() => app.view().includes(created.id!), 'the Host-generated Team task id in the painted Tool output')
+  assert.ok(app.view().includes('"tasks"'), 'the list result (not just the create arguments) is painted')
   for (const character of '/tasks') app.vt.sendInput(character)
   await app.settle()
   app.vt.sendInput('\r')
@@ -416,9 +433,10 @@ test('B03: the real Auto preset and the shared Plugin Manager danger confirmatio
   assert.match(restarted.view().replace(/\s+/gu, ' '),
     /Disabling Auto Review can change existing Auto sessions to Full access/u)
   assert.match(restarted.view(), /> Cancel/u, 'the shared confirmation defaults to Cancel')
-  restarted.vt.sendInput('\x1b') // the explicit cancel path (Esc cancel)
+  restarted.vt.sendInput('\r') // activate the DEFAULT Cancel action
   await restarted.settle()
-  await restarted.waitFor(() => !/safety confirmation/u.test(restarted.view()), 'the confirmation closes')
+  await restarted.waitFor(() => !/safety confirmation/u.test(restarted.view()),
+    'the default Cancel action closes the confirmation')
   const before = (await restarted.host.pluginManager.listBundles() as readonly { name: string; enabled: boolean }[])
     .find(bundle => bundle.name === B03)
   assert.equal(before?.enabled, true, 'Cancel left the bundle enabled')
