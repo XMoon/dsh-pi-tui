@@ -49,6 +49,24 @@ import { installProbe } from './support/runner-session-fixtures.ts'
 import { testLifecycle } from './support/temp-lifecycle.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 
+/** Bounded wait on a REAL state (the precedent in
+ *  `test/session-picker-loading.test.ts`): the picker opens immediately and
+ *  loads its roster asynchronously, so one painted frame or a fixed sleep
+ *  cannot prove the listing committed. */
+async function waitUntil(
+  predicate: () => boolean,
+  label: string,
+  timeoutMs = 3_000,
+  stepMs = 10,
+): Promise<void> {
+  const start = Date.now()
+  for (;;) {
+    if (predicate()) return
+    if (Date.now() - start > timeoutMs) throw new Error(`${label}: waitUntil timed out after ${timeoutMs}ms`)
+    await new Promise<void>((resolve) => setTimeout(resolve, stepMs))
+  }
+}
+
 /** Ids stay within the picker's 8-cell display label, so a painted row is
  *  unambiguous (the row label is the shortened id). */
 const READABLE = SessionId('readable')
@@ -206,6 +224,14 @@ for (const { columns, rows, cardVisible, fragments } of SIZES) test(`the REAL Se
   vt.sendInput('\r')
   await settle()
   await vt.waitForRender()
+  // `waitForRender()` proves a FRAME, not that the async Session listing
+  // committed: the picker opens immediately and `Loading sessions…` is a
+  // legitimate intermediate state. Wait for the FINAL roster before judging it.
+  await waitUntil(
+    () => view().includes('2/2') && view().includes('readable') && !view().includes('newerfmt'),
+    `the Session Picker roster at ${columns}x${rows}`,
+  )
+  await vt.waitForRender()
   const listed = view()
   for (const line of vt.getViewport()) {
     assert.ok(visibleWidth(line) <= columns, `no listed frame row overflows ${columns} cells: ${JSON.stringify(line)}`)
@@ -218,15 +244,24 @@ for (const { columns, rows, cardVisible, fragments } of SIZES) test(`the REAL Se
   // ── Selecting the refused row: the OFFICIAL refusal reaches the surface ──
   // The filter narrows the roster to the one row, so Enter is unambiguous.
   vt.sendInput('refusedx')
-  for (let attempt = 0; attempt < 40 && !view().includes('refusedx'); attempt += 1) {
-    await settle()
-    await new Promise(resolve => setTimeout(resolve, 10))
-    await vt.waitForRender()
-  }
+  await waitUntil(() => view().includes('refusedx'), `the refused row at ${columns}x${rows}`)
+  await vt.waitForRender()
   assert.ok(view().includes('refusedx'), `the refused row is reachable:\n${view()}`)
   vt.sendInput('\r')
   await settle()
-  await new Promise(resolve => setTimeout(resolve, 60))
+  // The refusal arrives through the production notice slot; a fixed 60 ms is
+  // not a guarantee under CI load. Wait for the OFFICIAL message itself.
+  const currentNoticeText = (): string | undefined =>
+    (probe.apps.at(-1) as unknown as {
+      currentNotice?: () => { readonly text: string } | undefined
+    }).currentNotice?.()?.text
+  await waitUntil(
+    () => {
+      const notice = currentNoticeText()
+      return notice !== undefined && notice.includes(UNKNOWN_EVENT) && notice.includes('unknown to this harness')
+    },
+    `the official refusal notice at ${columns}x${rows}`,
+  )
   await vt.waitForRender()
   const after = view()
   for (const line of vt.getViewport()) {
@@ -234,9 +269,7 @@ for (const { columns, rows, cardVisible, fragments } of SIZES) test(`the REAL Se
   }
   // The production notice slot carries the official refusal verbatim (the
   // narrow-width assertion cannot rely on the painted line alone).
-  const noticeText = (probe.apps.at(-1) as unknown as {
-    currentNotice?: () => { readonly text: string } | undefined
-  }).currentNotice?.()?.text
+  const noticeText = currentNoticeText()
   assert.ok(noticeText !== undefined && noticeText.includes(UNKNOWN_EVENT) && noticeText.includes('unknown to this harness'),
     `the refusal notice is the official message, got: ${String(noticeText)}`)
   for (const fragment of fragments) {
