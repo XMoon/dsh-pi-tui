@@ -1821,11 +1821,13 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
         // The approval risk is the FIRST fact: at 80x10 the pinned Approve
         // action must never appear above a hidden risk explanation.
         riskStart = lines.length
-        lines.push(color.warning(truncateToWidth(
-          `Build scripts blocked for: ${pending.map(line => sanitizedPhysicalLine(line)).join(', ')}`,
-          width,
-          '…',
-        )))
+        // Every exact package name is part of the authorization: wrap each
+        // one instead of ellipsizing the joined list. `riskEnd` then covers
+        // all lines the user must actually see before Approve is admitted.
+        lines.push(color.warning('Build scripts blocked for:'))
+        for (const name of pending) {
+          lines.push(...wrapTextWithAnsi(`- ${sanitizedPhysicalLine(name)}`, width).map(line => color.warning(line)))
+        }
         lines.push(...wrapTextWithAnsi(
           'These packages execute scripts with your user privileges. Approve only when you trust them.',
           width,
