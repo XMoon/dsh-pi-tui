@@ -16,12 +16,10 @@ Context-aware resolver
 Host handler
 ```
 
-The plan's core claim: the Host app layer used to treat physical keys as
-its architecture interface (`matchesKey(data, 'ctrl+o')` scattered across
-`tui-app.ts`). The migration replaces that with a stable action inventory
-(`app.*`), a context-aware effective keymap, and a semantic dispatcher —
-so a future user override only touches the keymap, never a business
-handler.
+The design keeps the Host app layer from treating physical keys as its
+architecture interface: a stable action inventory (`app.*`), a context-aware
+effective keymap and a semantic dispatcher mean a future user override only
+touches the keymap, never a business handler.
 
 ## The modules (`src/tui/keybindings/`)
 
@@ -175,10 +173,10 @@ rebuild alone.
 3. **Editor-owned submit lives in the unified rule model — winner-aware.**
    `app.input.submit` is `hostResolved: false` — the fork editor's submit
    path owns the backslash-newline workaround.
-   Editor-owned rules PARTICIPATE in the winner selection on equal
-   footing with host/plugin rules (round 9 finding: the resolver used to
-   skip editor rules BEFORE picking a winner, so `submit: ctrl+s`
-   steered at runtime while the read model advertised submit). The
+   Editor-owned rules PARTICIPATE in the winner selection on equal footing with
+   host/plugin rules: the resolver must not skip editor rules before picking a
+   winner, or `submit: ctrl+s` can steer at runtime while the read model
+   advertises submit. The
    resolution carries the winner's OWNER and the caller routes execution
    by it: 'host'/'plugin' → the host dispatcher, 'editor' → the fork
    editor (its `tui.input.submit` is synced by `onEditorSubmitSync`).
@@ -278,8 +276,8 @@ rebuild alone.
 ## User configuration
 
 The `tui-app` plugin's profile-owned Config, field `keybindings` — a
-whole-value volatile raw field since DSH 0.1.7 (the retired `dsh-pi-tui`
-settings namespace is only a legacy-migration input). The parser in
+whole-value volatile raw field (the old `dsh-pi-tui` settings namespace is only
+a legacy-migration input). The parser in
 `src/tui/keybindings/config.ts` remains the only validation authority:
 
 ```yaml
@@ -500,7 +498,7 @@ leader + clears the interrupt double-action window. The host editor
 submits ONLY through the synced `tui.input.submit` binding — a disabled
 submit never fires on Enter or LF (LF is a newline).
 
-**The Stable plugin boundary is capability-enforced (round 12).** The
+**The Stable plugin boundary is capability-enforced.** The
 registry REJECTS at registration: (a) any action string outside the
 public `TuiAction` set (the runtime whitelist `TUI_ACTIONS` — a
 JS/`as any` plugin can never register `app.exit.request` and reach the
@@ -535,7 +533,7 @@ equals a LIVE plugin key disables the leader machine with a diagnostic
 (the leader feeds before the plugin stage — never a silent swallow;
 same fail-soft as a host-key collision).
 
-**Owner-aware winner selection (round 9).** All owners (host/editor/
+**Owner-aware winner selection.** All owners (host/editor/
 plugin) compete in the resolver on equal footing; the resolution carries
 the winner's OWNER and the app routes execution by it ('editor' → the
 fork editor, never the host dispatcher). `hostResolves` is winner-based,
