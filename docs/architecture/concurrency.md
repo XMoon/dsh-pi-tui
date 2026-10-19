@@ -43,9 +43,8 @@ owner.lock / lease / cooling / PINNED stack is removed legacy.
 
 ## DSH Session persistence and v2 event planes
 
-The TUI leaves durable format generation to DSH (V2 on the minimum rc.1 runtime,
-V3 on the compatible rc.2 runtime) while keeping its two Session v2 event planes
-distinct:
+The TUI leaves durable format generation to DSH (Session V2/V3 per the runtime)
+while keeping its two Session v2 event planes distinct:
 
 - durable `assistant/message` is the surface settlement; durable
   `assistant/attempt` is non-surface attempt evidence that may be projected as
@@ -406,7 +405,7 @@ attachment preparation cannot let a later gesture overtake an earlier one.
   never block first creation past shutdown. The fresh create consumes the
   SETTLED persisted Host default and
   never durable-seeds a Session choice: a committed save is observed
-  dynamically, and a FAILED latest intent is walked back in the UI (v2 §0.8.4)
+  dynamically, and a FAILED latest intent is walked back in the UI
   — the create uses the actual Host default, it does NOT seed the failed
   selection (a fabricated choice would freeze a default the user never
   durably set, and the sticky failure would leak into later creates). The
