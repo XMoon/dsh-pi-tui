@@ -3,8 +3,9 @@
  * through the ONE shared mapping → D1 classifier/model → the MOUNTED Plugin
  * Manager workspace, where the bounded capability copy and the allowed
  * actions are read from the actual frame. B01 keeps HOST_ONLY, the web-only
- * bundles stay WEB_ONLY, B13/B14 stay missing Install-only and carry
- * EXTERNAL_UNVERIFIED, and no Team/Discover/mic/Inspector page is invented.
+ * bundles stay WEB_ONLY, B13/B14 stay missing Install-only and carry their
+ * verified one-shot/provider boundaries, and no Team/Discover/mic/Inspector
+ * page is invented.
  *
  * `PRODUCTION PREREQUISITES REPRODUCED`: the published rc.2 installation
  * catalog (the official plugin-manager service over a real profile root), the
@@ -175,16 +176,17 @@ test('the real rc.2 Host catalog paints all 14 bounded boundaries through the mo
     const frame = plain(vt.getViewport()).replace(/\s+/gu, ' ')
     assert.match(frame, SURFACE_HINTS[name]!, `${name} surfaces its exact boundary:\n${frame}`)
     if (ON_DEMAND.includes(name)) {
-      for (let page = 0; page < 10 && !/EXTERNAL_UNVERIFIED/u.test(plain(vt.getViewport()).replace(/\s+/gu, ' ')); page += 1) {
+      for (let page = 0; page < 10 && !/no Continue\/Resume/u.test(plain(vt.getViewport()).replace(/\s+/gu, ' ')); page += 1) {
         vt.sendInput('\x1b[6~')
         await settle()
       }
       const external = plain(vt.getViewport()).replace(/\s+/gu, ' ')
-      assert.match(external, /EXTERNAL_UNVERIFIED/u, `${name} states its unverified external limit`)
+      assert.match(external, /no Continue\/Resume/u, `${name} states its verified one-shot boundary`)
+      assert.doesNotMatch(external, /EXTERNAL_UNVERIFIED/u, `${name} no longer claims an unqualified native start`)
       assert.match(external, /Install…/u, `${name} offers the official Install action`)
       assert.doesNotMatch(external, /> Enable…/u, `${name} is missing and never offers Enable`)
     } else {
-      assert.ok(!frame.includes('EXTERNAL_UNVERIFIED'), `${name} is not an external subagent`)
+      assert.doesNotMatch(frame, /no Continue\/Resume/u, `${name} is not an external subagent`)
     }
     vt.sendInput('\x1b') // leave Details
     await settle()

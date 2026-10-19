@@ -25,8 +25,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **The Plugin Manager Experimental Detail now states real terminal boundaries
   and the correct upgrade path.** Each of the 14 official rc.2 bundles shows a
   fixed TUI surface plus limits/risks (which are Web-only, which are reachable
-  only through the existing Tool/Job/Activity/`/skill`/title surfaces, and the
-  still-unverified B04/B13/B14 boundaries). That copy follows the exact official
+  only through the existing Tool/Job/Activity/`/skill`/title surfaces, the
+  B04 WEB_ONLY/Host-row-pending boundary accepted by the Owner, and the
+  verified B13/B14 one-shot/provider boundaries). That copy follows the exact official
   identity only and never turns enablement into a "Host capability PASS". The
   upgrade guidance uses Host facts: upgrade with the DSH installation, Remove
   then explicitly install a profile-owned bundle, use the official on-demand

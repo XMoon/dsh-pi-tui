@@ -237,7 +237,8 @@ preserves the Settings category, scroll and selection.
 
 The 14 official rc.2 Experimental bundles carry a bounded, identity-exact
 Detail statement of their terminal surface and limits/risks (Web-only,
-Host-only and the B04/B13/B14 unverified boundaries). That copy never follows
+Host-only, the B04 WEB_ONLY/Host-row-pending boundary accepted by the Owner,
+and the B13/B14 verified one-shot/provider boundaries). That copy never follows
 enablement and never claims a live Host capability PASS. Upgrade guidance is
 derived from Host facts only: shipped bundles upgrade with the DSH installation,
 profile-owned bundles require Remove followed by an explicit later install,
