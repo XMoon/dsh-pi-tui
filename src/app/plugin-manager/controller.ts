@@ -34,6 +34,7 @@ import type { Diag } from '../../runtime/process/diagnostics.ts'
 import { classifyPluginPackages, type PluginClassificationInput, type PluginPresentationRole } from './classify.ts'
 import type { TuiExtensionObservation } from './extension-inventory.ts'
 import {
+  AUTO_REVIEW_BUNDLE,
   buildPluginManagerModel,
   bundleValue,
   changeSummary,
@@ -45,6 +46,10 @@ import {
 
 /** Which host opened the shared surface (navigation wording differs only). */
 export type PluginManagerEntryHost = 'direct-command' | 'settings-entry'
+
+/** The exact confirmation target classes. `remove` keeps the D1 behavior; the
+ *  two Auto kinds are the B03 safety gate (no other overlay/manager). */
+export type PluginConfirmationKind = 'remove' | 'auto-disable-bundle' | 'auto-disable-row'
 
 /** The install dialog phases (TUI-only; mapped from official events/results). */
 export type PluginInstallPhase =
@@ -123,10 +128,13 @@ interface ActiveInstall {
   approvedBuilds?: readonly string[]
 }
 
-interface RemoveConfirmation {
+interface PluginConfirmation {
+  readonly kind: PluginConfirmationKind
   readonly value: string
   readonly name: string
   readonly epoch: number
+  /** The addressable B03 row a `auto-disable-row` confirmation targets. */
+  readonly entryId?: string
 }
 
 const EMPTY_SECTION_CARDS: readonly PluginCardView[] = Object.freeze([])
@@ -157,7 +165,7 @@ export class PluginManagerController {
    * successful read can clear it without clobbering an operation message. */
   private refreshErrorMessage: string | undefined
   private entryHost: PluginManagerEntryHost = 'direct-command'
-  private confirming: RemoveConfirmation | undefined
+  private confirming: PluginConfirmation | undefined
   private busyValue: string | undefined
   private message: string | undefined
   private readEpoch = 0
@@ -717,9 +725,18 @@ export class PluginManagerController {
    * Toggle one card through the official authority. Re-resolves the card by
    * stable value against the CURRENT inventory and re-checks the effective
    * capability before dispatch.
+   *
+   * Returns true only when the B03 safety confirmation was opened instead of
+   * dispatching the write (the exact Auto Review bundle, currently enabled).
    */
-  toggleCard(value: string): void {
+  toggleCard(value: string): boolean {
+    if (this.refuseWhileMutating()) return false
+    const card = this.card(value)
+    if (card !== undefined && card.name === AUTO_REVIEW_BUNDLE && card.enabled) {
+      return this.requestAutoDisable(value)
+    }
     this.run('plugin manager toggle', () => this.performToggleCard(value))
+    return false
   }
 
   private async performToggleCard(value: string): Promise<void> {
@@ -728,6 +745,13 @@ export class PluginManagerController {
     if (card === undefined) {
       this.message = 'the plugin inventory changed; refresh and try again'
       this.hooks.requestRender()
+      return
+    }
+    // Defense in depth: a direct semantic caller that bypassed the synchronous
+    // gate above still cannot disable the enabled B03 bundle without the one
+    // shared confirmation. No Host call happens here.
+    if (card.name === AUTO_REVIEW_BUNDLE && card.enabled) {
+      this.requestAutoDisable(card.value)
       return
     }
     if (card.availability === 'missing') {
@@ -759,15 +783,29 @@ export class PluginManagerController {
     await this.finishMutation(token)
   }
 
-  /** Toggle one addressable row of the card identified by stable value. */
-  toggleRow(cardValue: string, entryId: string): void {
+  /**
+   * Toggle one addressable row of the card identified by stable value.
+   * Returns true only when the B03 row confirmation opened (no write).
+   */
+  toggleRow(cardValue: string, entryId: string): boolean {
+    if (this.refuseWhileMutating()) return false
+    const card = this.card(cardValue)
+    const row = card?.rows.find(candidate => candidate.entryId === entryId)
+    if (card !== undefined && card.name === AUTO_REVIEW_BUNDLE && row?.enabled === true) {
+      return this.requestAutoDisable(cardValue, entryId)
+    }
     this.run('plugin manager row toggle', () => this.performToggleRow(cardValue, entryId))
+    return false
   }
 
   private async performToggleRow(cardValue: string, entryId: string): Promise<void> {
     if (this.refuseWhileMutating()) return
     const card = this.card(cardValue)
     const row = card?.rows.find(candidate => candidate.entryId === entryId)
+    if (card !== undefined && card.name === AUTO_REVIEW_BUNDLE && row?.enabled === true) {
+      this.requestAutoDisable(cardValue, entryId)
+      return
+    }
     if (card === undefined || row === undefined) {
       this.message = 'the plugin inventory changed; refresh and try again'
       this.hooks.requestRender()
@@ -805,10 +843,60 @@ export class PluginManagerController {
       this.hooks.requestRender()
       return false
     }
-    this.confirming = { value: card.value, name: card.name, epoch: this.readEpoch }
+    this.confirming = { kind: 'remove', value: card.value, name: card.name, epoch: this.readEpoch }
     this.message = undefined
     this.hooks.requestRender()
     return true
+  }
+
+  /**
+   * Open the ONE shared safety confirmation before disabling the enabled B03
+   * bundle (or one of its addressable rows). Returns false when the current
+   * authoritative card does not prove that exact target. No Host mutation is
+   * dispatched here.
+   */
+  requestAutoDisable(value: string, entryId?: string): boolean {
+    if (this.refuseWhileMutating()) return false
+    const card = this.card(value)
+    if (card === undefined || card.name !== AUTO_REVIEW_BUNDLE || !card.enabled) return false
+    if (entryId === undefined) {
+      if (card.target !== 'bundle' || !card.canToggle) {
+        this.message = card.toggleBlockedReason ?? `cannot disable ${card.name}`
+        this.hooks.requestRender()
+        return false
+      }
+      this.confirming = { kind: 'auto-disable-bundle', value: card.value, name: card.name, epoch: this.readEpoch }
+    } else {
+      const row = card.rows.find(candidate => candidate.entryId === entryId)
+      if (row === undefined || !row.enabled || !row.canToggle) {
+        this.message = row?.selfProtected === true
+          ? `${entryId} is controlled by the Current TUI composition and cannot be changed from here`
+          : `cannot disable ${entryId}: ${row?.readOnlyReason ?? 'not addressable'}`
+        this.hooks.requestRender()
+        return false
+      }
+      const exactEntryId = row.entryId
+      this.confirming = {
+        kind: 'auto-disable-row',
+        value: card.value,
+        name: card.name,
+        epoch: this.readEpoch,
+        entryId: exactEntryId,
+      }
+    }
+    this.message = undefined
+    this.hooks.requestRender()
+    return true
+  }
+
+  /** The exact confirmation class currently open (never inferred by a view). */
+  confirmationKind(): PluginConfirmationKind | undefined {
+    return this.confirming?.kind
+  }
+
+  /** The exact B03 row a row confirmation targets. */
+  confirmationEntryId(): string | undefined {
+    return this.confirming?.entryId
   }
 
   /** The card named by the CURRENT remove confirmation, or undefined when the
@@ -825,22 +913,75 @@ export class PluginManagerController {
     return this.confirming?.name
   }
 
-  /** Abandon the confirmation without touching the Host. */
-  cancelRemove(): void {
+  /** Abandon the open confirmation without touching the Host. */
+  cancelConfirmation(): void {
     if (this.confirming === undefined) return
     this.confirming = undefined
     this.hooks.requestRender()
   }
 
+  /** D1-compatible removal cancel: only a `remove` confirmation is cancelled. */
+  cancelRemove(): void {
+    if (this.confirming?.kind !== 'remove') return
+    this.cancelConfirmation()
+  }
+
   /** Dispatch the confirmed removal against the CURRENT authoritative card. */
   confirmRemove(): void {
+    if (this.confirming?.kind !== 'remove') return
     this.run('plugin manager remove', () => this.performConfirmRemove())
+  }
+
+  /** Dispatch the confirmed B03 disable through the official Host mutation. */
+  confirmAutoDisable(): void {
+    if (this.confirming === undefined || this.confirming.kind === 'remove') return
+    this.run('plugin manager auto-review disable', () => this.performConfirmAutoDisable())
+  }
+
+  private async performConfirmAutoDisable(): Promise<void> {
+    if (this.refuseWhileMutating()) return
+    const confirmation = this.confirming
+    if (confirmation === undefined || confirmation.kind === 'remove') return
+    const card = this.confirmingCard()
+    const row = confirmation.kind === 'auto-disable-row'
+      ? card?.rows.find(candidate => candidate.entryId === confirmation.entryId)
+      : undefined
+    const stillProven = card !== undefined
+      && card.name === AUTO_REVIEW_BUNDLE
+      && card.enabled
+      && (confirmation.kind === 'auto-disable-bundle'
+        ? card.target === 'bundle' && card.canToggle
+        : row !== undefined && row.enabled && row.canToggle)
+    if (!stillProven) {
+      this.confirming = undefined
+      this.message = 'Auto Review changed since the confirmation opened; nothing was changed'
+      this.hooks.requestRender()
+      return
+    }
+    const token = ++this.mutationToken
+    this.busyValue = confirmation.kind === 'auto-disable-row' && confirmation.entryId !== undefined
+      ? rowToggleValueBusy(confirmation.entryId)
+      : confirmation.value
+    this.confirming = undefined
+    this.message = undefined
+    this.hooks.requestRender()
+    try {
+      const change = confirmation.kind === 'auto-disable-bundle'
+        ? await this.port.setBundleEnabled(confirmation.name, false)
+        : await this.port.setPluginEnabled(confirmation.entryId!, false)
+      if (this.disposed || token !== this.mutationToken) return
+      this.message = changeSummary(change)
+    } catch (error) {
+      if (this.disposed || token !== this.mutationToken) return
+      this.message = `disable failed: ${errorMessage(error)}`
+    }
+    await this.finishMutation(token)
   }
 
   private async performConfirmRemove(): Promise<void> {
     if (this.refuseWhileMutating()) return
     const confirmation = this.confirming
-    if (confirmation === undefined) return
+    if (confirmation === undefined || confirmation.kind !== 'remove') return
     const card = this.confirmingCard()
     if (card === undefined || card.isSelf || !card.canRemove) {
       this.confirming = undefined

@@ -16,7 +16,7 @@ import { createDiag } from '../src/runtime/process/diagnostics.ts'
 import type { PluginChangeFact, PluginManagerPort, PluginManagerSnapshot } from '../src/runtime/plugin-manager-port.ts'
 import { SELF_BUNDLE } from '../src/app/plugin-manager/classify.ts'
 import type { TuiApp } from '../src/tui-app.ts'
-import { EXPERIMENTAL_NAMES, bundle, openWorkspace, plain, type WorkspaceHarness } from './support/plugin-workspace-harness.ts'
+import { EXPERIMENTAL_NAMES, bundle, openWorkspace, plain, row, type WorkspaceHarness } from './support/plugin-workspace-harness.ts'
 
 const started = new Set<WorkspaceHarness>()
 afterEach(() => {
@@ -345,4 +345,101 @@ test('CJK identities stay width-safe in the list and complete in Detail/copy', a
   harness.vt.sendInput('c')
   await harness.settle()
   assert.equal(harness.copied[0], `${longName}\nsource: https://***@example.com/foo.git`)
+})
+
+// ── B03 Auto Review safety confirmation (D2-2) ─────────────────────────────
+
+const AUTO_REVIEW_VISUAL = '@deepseek-ai/dsh-experimental-auto-review'
+
+async function selectCard(harness: WorkspaceHarness, value: string): Promise<void> {
+  for (let step = 0; step < 30; step += 1) {
+    if (harness.panel.selectedCardValue() === value) return
+    harness.vt.sendInput('\x1b[B')
+    await harness.settle()
+  }
+  assert.fail(`card ${value} was not selectable`)
+}
+
+test('B03 risk confirmation keeps the frozen warning readable with Cancel default at 80×10 and 44×20', async () => {
+  const warning = 'Disabling Auto Review can change existing Auto sessions to Full access. Auto Review is not a sandbox. Continue?'
+  for (const [columns, rows] of [[80, 10], [44, 20]] as const) {
+    const harness = await open({
+      columns,
+      rows,
+      bundles: [
+        bundle({ name: SELF_BUNDLE, source: 'file:/tmp/tui', rows: [{ rowId: 'tui-app', moduleName: SELF_BUNDLE, entryId: 'e-tui' }] }),
+        bundle({ name: '@deepseek-ai/dsh-base', availability: 'installation', source: undefined }),
+        bundle({
+          name: AUTO_REVIEW_VISUAL,
+          official: true,
+          availability: 'installation',
+          installed: false,
+          optional: true,
+          removable: false,
+          enabled: true,
+          source: undefined,
+          rows: [{ rowId: 'auto-review', moduleName: AUTO_REVIEW_VISUAL, entryId: 'e-auto', title: 'Auto Review' }],
+        }),
+        ...EXPERIMENTAL_NAMES.filter(name => name !== AUTO_REVIEW_VISUAL).map(name => bundle({
+          name,
+          official: true,
+          availability: 'missing',
+          installed: false,
+          optional: true,
+          removable: false,
+          source: undefined,
+          installTarget: { spec: `${name}@0.2.1-rc.2`, version: '0.2.1-rc.2' },
+        })),
+      ],
+      plugins: [
+        row({ entryId: 'e-tui', moduleName: SELF_BUNDLE, patchId: 'tui-app' }),
+        row({ entryId: 'e-auto', moduleName: AUTO_REVIEW_VISUAL, patchId: 'auto-review', enabled: true, fiberPhase: 'active' }),
+      ],
+    })
+    await selectCard(harness, `bundle:${AUTO_REVIEW_VISUAL}`)
+    harness.vt.sendInput('\r')
+    await harness.settle()
+    // A short screen may reveal the selected Detail action first; Enter is the
+    // ONE admission path for both the reveal and the explicit action.
+    for (let step = 0; step < 3 && harness.panel.currentView() === 'details'; step += 1) {
+      harness.vt.sendInput('\r')
+      await harness.settle()
+    }
+    assert.equal(harness.panel.currentView(), 'confirm', `${columns}x${rows} opens the shared confirmation`)
+    const frame = harness.view()
+    assert.doesNotMatch(frame, /\[Details\]/, 'the confirmation is a page, not a detail overlay')
+    // The frozen consequence is fully carried by the painted frame; a long
+    // wrap is allowed, a missing/truncated word is not.
+    const compacted = frame.replace(/\s+/gu, ' ')
+    assert.ok(compacted.includes(warning), `${columns}x${rows} must paint the whole consequence:\n${frame}`)
+    // The warning really wears the semantic warning token.
+    const warningRow = rowOf(harness, 'Disabling Auto Review')
+    assert.ok(warningRow >= 0, `${columns}x${rows} must paint the warning:\n${frame}`)
+    const warningCol = plain([harness.viewport()[warningRow]!]).indexOf('Disabling Auto Review')
+    assert.equal(harness.vt.getCellFgRgb(warningRow, warningCol), hexToRgb(darkColors.warning),
+      `${columns}x${rows} paints the consequence in warning ink`)
+    // Cancel is the default and the visible primary is never Enter-confirmed
+    // by accident.
+    assert.match(plain([harness.viewport().at(-1)!]), /Enter confirm/)
+    harness.vt.sendInput('\r') // default Cancel
+    await harness.settle()
+    assert.equal(harness.panel.currentView(), 'details')
+    assert.deepEqual(harness.setBundle, [], `${columns}x${rows} default Cancel writes nothing`)
+    for (let step = 0; step < 3 && harness.panel.currentView() === 'details'; step += 1) {
+      harness.vt.sendInput('\r') // Disable… again (reveal then dispatch on short screens)
+      await harness.settle()
+    }
+    assert.equal(harness.panel.currentView(), 'confirm')
+    const confirmFrame = harness.view()
+    if (/PgUp\/PgDn details/u.test(plain([harness.viewport().at(-1)!]))) {
+      // A short screen scrolls the explanation; after scrolling to the end the
+      // entire consequence remains readable, and the pinned choices stay.
+      harness.vt.sendInput('\x1b[6~')
+      await harness.settle()
+      assert.match(plain([harness.viewport().at(-1)!]), /Esc cancel/)
+    }
+    assert.match(confirmFrame, /Disable Auto Review/)
+    started.delete(harness)
+    harness.app.dispose()
+  }
 })
