@@ -493,6 +493,8 @@ test('B03 danger primary is withheld on 80×5 and 44×8 until its consequence is
     assert.equal(harness.panel.currentView(), 'confirm')
     assert.doesNotMatch(plain([harness.viewport().at(-1)!]), /Enter confirm/u)
     assert.match(plain([harness.viewport().at(-1)!]), /Enter cancel/u)
+    assert.match(harness.view(), /^> Cancel\s*$/mu,
+      `${columns}×${rows}: the only action is Cancel and it carries the visible cursor`)
     assert.doesNotMatch(harness.view(), /^  Disable Auto Review\s*$/mu,
       `${columns}×${rows}: the primary is not painted with an incomplete consequence`)
 
@@ -537,11 +539,16 @@ test('B03 danger primary disappears when the warning scrolls out and returns wit
   assert.doesNotMatch(harness.view(), /^  Disable Auto Review\s*$/mu,
     'the dangerous primary is withheld once its warning is no longer fully visible')
   assert.match(plain([harness.viewport().at(-1)!]), /Enter cancel/u)
-  harness.vt.sendInput('\r') // selection falls back to Cancel
+  assert.match(harness.view(), /^> Cancel\s*$/mu,
+    'the withheld frame paints the cursor on Cancel')
+  harness.vt.sendInput('\r') // Enter dispatches the PAINTED Cancel, not a hidden primary
   await harness.settle()
   assert.deepEqual(harness.setBundle, [])
-  // Re-open at the full size, resize to 80×10, scroll back to the top, and the
-  // primary returns; the explicit choice then writes exactly once.
+  assert.equal(harness.panel.currentView(), 'details')
+
+  // Re-open; PgDn hides the warning, PgUp restores it. The cursor must remain
+  // on Cancel in the SAME frame that paints the primary, so a direct Enter is
+  // Cancel (no Host write); only Up+Enter may perform the dangerous action.
   harness.vt.resize(140, 40)
   await harness.settle()
   await openAutoConfirm(harness)
@@ -551,9 +558,28 @@ test('B03 danger primary disappears when the warning scrolls out and returns wit
   await harness.settle()
   harness.vt.sendInput('\x1b[5~') // PgUp
   await harness.settle()
-  assert.match(harness.view(), /^(?:>|  ) Disable Auto Review\s*$/mu)
-  harness.vt.sendInput('\x1b[A') // ensure the dangerous primary is selected
+  assert.match(harness.view(), /^(?:> |  )Disable Auto Review\s*$/mu)
+  assert.match(harness.view(), /^> Cancel\s*$/mu,
+    'the re-revealed frame keeps the cursor on the safe default Cancel')
+  assert.match(plain([harness.viewport().at(-1)!]), /Enter confirm/u)
+  harness.vt.sendInput('\r')
   await harness.settle()
+  assert.deepEqual(harness.setBundle, [], 'a direct Enter after PgUp cancels instead of writing')
+  assert.equal(harness.panel.currentView(), 'details')
+
+  // Third pass: the explicit Up+Enter choice is the dangerous write.
+  harness.vt.resize(140, 40)
+  await harness.settle()
+  await openAutoConfirm(harness)
+  harness.vt.resize(80, 10)
+  await harness.settle()
+  harness.vt.sendInput('\x1b[6~')
+  await harness.settle()
+  harness.vt.sendInput('\x1b[5~')
+  await harness.settle()
+  harness.vt.sendInput('\x1b[A') // Cancel -> primary (visible, consequence complete)
+  await harness.settle()
+  assert.match(harness.view(), /^> Disable Auto Review\s*$/mu)
   harness.vt.sendInput('\r')
   await harness.settle()
   assert.deepEqual(harness.setBundle, [{ name: AUTO_REVIEW, enabled: false }])

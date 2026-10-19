@@ -2003,27 +2003,19 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
       ).map(line => color.textDim(line)))
       riskEnd = content.length - 1
     }
-    /** Lay out the content+choices with the CURRENT offset. `riskVisible` is
-     *  evaluated only with the DANGEROUS actions still present, so hiding the
-     *  primary cannot make its own risk test pass (no oscillation). */
-    const layout = (actions: readonly PluginDetailAction[]): {
-      readonly actionBlock: ReturnType<typeof paintActions>
-      readonly actionRows: number
-      readonly contentViewport: number
-      readonly riskVisible: boolean
-    } => {
-      const actionBlock = paintActions([], actions, this.confirmSelection, plan.width, false)
-      const actionRows = Math.min(actionBlock.lines.length, plan.bodyRows)
-      const contentViewport = Math.max(0, plan.bodyRows - actionRows)
-      const riskVisible = riskStart < 0
-        || (contentViewport > 0
-          && riskStart >= this.confirmOffset
-          && riskEnd < this.confirmOffset + contentViewport)
-      return { actionBlock, actionRows, contentViewport, riskVisible }
-    }
-    const dangerous = primary === undefined ? [] : [primary]
-    let layoutResult = layout([...dangerous, { value: CONFIRM_ACTION.cancel, label: 'Cancel', enabled: true, tone: 'normal' }])
-    if (primary !== undefined && !layoutResult.riskVisible) {
+    const cancelAction: PluginDetailAction = { value: CONFIRM_ACTION.cancel, label: 'Cancel', enabled: true, tone: 'normal' }
+    const fullActions: readonly PluginDetailAction[] = primary === undefined ? [cancelAction] : [primary, cancelAction]
+    /** The action rows/content viewport depend only on the action COUNT, never
+     *  on which action is selected. Compute geometry without painting. */
+    const actionRowsFor = (count: number): number => Math.min(count, plan.bodyRows)
+    const contentViewportFor = (count: number): number => Math.max(0, plan.bodyRows - actionRowsFor(count))
+    const fullViewport = contentViewportFor(fullActions.length)
+    const riskVisible = riskStart < 0
+      || (fullViewport > 0
+        && riskStart >= this.confirmOffset
+        && riskEnd < this.confirmOffset + fullViewport)
+    let actions: readonly PluginDetailAction[] = fullActions
+    if (primary !== undefined && !riskVisible) {
       // The dangerous action is inseparable from its consequence. Withhold it
       // from BOTH the paint and the hit map; keep Cancel/Esc and scrolling.
       const hint = wrapTextWithAnsi(
@@ -2031,28 +2023,41 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
         plan.width,
       ).map(line => color.warning(line))
       content.splice(1, 0, ...hint)
-      layoutResult = layout([{ value: CONFIRM_ACTION.cancel, label: 'Cancel', enabled: true, tone: 'normal' }])
+      actions = [cancelAction]
     }
-    this.paintedConfirmScrollMax = Math.max(0, content.length - layoutResult.contentViewport)
-    this.confirmOffset = clampOffset(this.confirmOffset, content.length, layoutResult.contentViewport)
-    const visibleContent = content.slice(this.confirmOffset, this.confirmOffset + layoutResult.contentViewport)
-    const out = padBody([...visibleContent], layoutResult.contentViewport, plan.width)
-    const visibleActions = layoutResult.actionBlock.lines.slice(0, layoutResult.actionRows)
-    for (const line of visibleActions) out.push(fit(line, plan.width))
+    // Resolve the selection AGAINST THE VISIBLE ACTION LIST BEFORE painting, so
+    // the cursor, the painted values and the action bar are one frame. A value
+    // that vanished (primary withheld) falls back to Cancel; Cancel never
+    // becomes a hidden dangerous action.
     const previousValue = this.paintedConfirmActionValues[this.confirmSelection]
+    const visibleCount = Math.min(actions.length, plan.bodyRows)
+    const visibleList = actions.slice(0, visibleCount)
+    const previousIndex = previousValue === undefined ? -1 : visibleList.findIndex(action => action.value === previousValue)
+    const cancelIndex = visibleList.findIndex(action => action.value === CONFIRM_ACTION.cancel)
+    const selection = previousIndex >= 0 ? previousIndex : Math.max(0, cancelIndex)
+    this.confirmSelection = selection
+    const actionBlock = paintActions([], actions, selection, plan.width, false)
+    const actionRows = actionRowsFor(actions.length)
+    const contentViewport = contentViewportFor(actions.length)
+    this.paintedConfirmScrollMax = Math.max(0, content.length - contentViewport)
+    this.confirmOffset = clampOffset(this.confirmOffset, content.length, contentViewport)
+    const visibleContent = content.slice(this.confirmOffset, this.confirmOffset + contentViewport)
+    const out = padBody([...visibleContent], contentViewport, plan.width)
+    const visibleActions = actionBlock.lines.slice(0, actionRows)
+    for (const line of visibleActions) out.push(fit(line, plan.width))
     const values: string[] = []
     this.paintedConfirmActions = new Set()
-    for (const action of layoutResult.actionBlock.actionLines) {
-      const y = layoutResult.contentViewport + action.line
-      if (y < layoutResult.contentViewport || y >= layoutResult.contentViewport + visibleActions.length) continue
+    for (const action of actionBlock.actionLines) {
+      const y = contentViewport + action.line
+      if (y < contentViewport || y >= contentViewport + visibleActions.length) continue
       values.push(action.value)
       this.paintedConfirmActions = new Set([...this.paintedConfirmActions, action.value])
       targets.push({ kind: 'action', value: action.value, row: bodyTop + y, startCol: 0, endCol: plan.width })
     }
     this.paintedConfirmActionValues = values
-    const previousIndex = previousValue === undefined ? -1 : values.indexOf(previousValue)
-    const cancelIndex = values.indexOf(CONFIRM_ACTION.cancel)
-    this.confirmSelection = previousIndex >= 0 ? previousIndex : Math.max(0, cancelIndex)
+    // `selection` is already an index in the visible list; clamp only for the
+    // degenerate zero-row body.
+    this.confirmSelection = Math.min(selection, Math.max(0, values.length - 1))
     return padBody(out, plan.bodyRows, plan.width)
   }
 
