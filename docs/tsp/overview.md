@@ -115,10 +115,11 @@ frame, and `dispose()` releases the observer before the app dies.
   region that must exist is submitted on every frame (an omitted region is
   deleted). Node identity follows the presenter's own key/epoch/revision
   contract ([foundation.md](./foundation.md#node-identity-and-currentness)).
-- Credit-blocked queued Focus is a confirmed upstream SDK defect with a proven
-  protocol rejection and unproven user-visible damage. Do not repair it in the
-  renderer with a second focus queue, frame reconciler, ACK watchdog or deferred
-  focus latch; report/upstream-reference it and keep the SDK boundary intact.
+- Frame credit/queuing and queued focus are SDK-boundary concerns. Do not
+  repair a suspected SDK defect in the renderer with a second focus queue,
+  frame reconciler, ACK watchdog or deferred focus latch; report it upstream
+  and keep the SDK boundary intact. A single protocol rejection is build-specific
+  evidence, not a universal user-visible defect claim.
 - The application remains the desired focus/seat owner; Tern owns rendered node
   effects. `ui.overlay({modal:true})` is not an application input-arbitration
   implementation.

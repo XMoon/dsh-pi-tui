@@ -106,28 +106,26 @@ reduction; a search hit or "two variables" is not proof of entropy.
 6. ACK credits constrain sends. ACK is not business completion, visual
    acceptance, keyboard admission or a per-blob receipt. For business
    currentness use application identity/admission, never frame ACK.
-7. Credit-blocked queued Focus is a confirmed upstream SDK defect: under
-   exhausted credits, `Surface.focus()` can keep historical Focus ops naming a
-   node from a never-sent intermediate View, and a real headless client rejected
-   it with `unknown id`. Protocol rejection is proven; user-visible focus/input
-   damage is unproven. Do not repair it in the renderer with an extra Focus
-   queue, frame reconciler, ACK watchdog or deferred-focus latch. The upstream
-   report is the boundary; isolated candidate experiments are not installed
-   behavior.
-8. ACK loss is a separate unknown: blocked frames rely on client ACK, but that
-   does not establish a practical deadlock or authorize a retry/watchdog. SDK
-   `close()` can force a final flush; it is teardown, not a runtime delivery
-   cure.
+7. The SDK owns frame credit/coalescing and queued focus operations. A queued
+   Focus op delivered against a node from an unsent intermediate View is an
+   SDK-boundary class, not a renderer bug: do not add an extra focus queue,
+   frame reconciler, ACK watchdog or deferred-focus latch. Report it upstream
+   and keep the SDK boundary intact. Treat one observed protocol rejection as
+   evidence for that build, never as a universal user-visible defect claim.
+8. ACK loss or blocked frame delivery is an SDK-boundary unknown. A blocked
+   frame pump does not establish a practical deadlock or authorize a
+   retry/watchdog. SDK `close()` can force a final flush; it is teardown, not a
+   runtime delivery cure.
 
 ## 4. Node identity, event admission and focus
 
 ### Node identity and currentness
 
 - `key` is sibling/node identity. In the pinned SDK, changing a key changes
-  child IDs and can produce `del` + `add`; a measured Picker case showed a
-  client remount and viewport movement from a per-revision key, while a stable
-  per-panel key kept row coordinates unchanged. That closes the measured case,
-  not all client/scroll/focus combinations.
+  child IDs and can produce `del` + `add`; a per-frame key can therefore
+  remount a client and move its viewport. Preserve panel/reading identity where
+  continuity matters, and measure the actual client behavior before
+  generalizing beyond the tested shape.
 - Presenter-specific identity contracts differ. The Model presenter keeps the
   Picker/layer key stable for one panel (`panel.serial`), gives each new Reader
   reading a separate epoch, and revision-tokens mutating/read-operation action
@@ -167,10 +165,9 @@ classify that as a confirmed bug or confirmed correct caret behavior.
 
 The application must route modal keys and guard semantic actions according to
 the active seat; `ui.overlay({modal:true})` alone does not implement input
-arbitration. A real headless modal backdrop intercepted pointer clicks using an
-open/closed same-coordinate control. That is evidence for that client/layout,
-not permission to skip currentness/ownership checks on every UI event or later
-build.
+arbitration. A client may intercept pointer clicks with a modal backdrop, but
+that is not permission to skip currentness/ownership checks on every UI event
+or later build.
 
 ## 5. Layout, native components and capability policy
 
@@ -198,9 +195,8 @@ build.
   conversion in this SDK.
 - A client build's advertised kinds/features/credits/cell size describe that
   run, not other sizes/fonts/builds.
-- `Tab`+`Enter` on a real headless `html.button` returned the keys to the
-  program and produced no button action in the tested scenario. Design keyboard
-  accessibility through the application's actual input path.
+- Do not assume native browser Tab/Enter behavior for `el` nodes. Design
+  keyboard accessibility through the application's actual input path.
 - Avoid fixed pane-pixel/typographic budgets as protocol truth. Prefer
   `caps.cols` for terminal columns and real client geometry for pixels. Preserve
   business authority across wide↔narrow adaptation; component fallback/overflow
@@ -268,12 +264,12 @@ universal/version-independent claim; a tier qualifies a claim, not a repository.
   the list region plus its first row, with the rest reachable by the list's own
   line keys; a clipped span is a measurement, not a contained node.
 - **Real copy/buttons/Back.** Footer painted order is the client's pack rule
-  (non-primary left in array order, `primary` right; the SDK `end` flag is a
-  measured no-op) — assert it against the client tree, not the wire. A disabled
+  (non-primary left in array order, `primary` right) — assert it against the
+  client tree, not the wire. A disabled
   entry is `off` opacity plus a tooltip/title reason; the client paints no
   in-place reason text, so the reason also rides a detail fact. A stylesheet
-  cannot paint border/background on an `el` button, and Tab+Enter on one fires
-  nothing. The way back is a native `ui.row({onClick})` navigation row at the top
+  cannot paint border/background on an `el` button, and native button
+  activation is not assumed. The way back is a native `ui.row({onClick})` navigation row at the top
   of the reading body, with an Esc twin; at the tail, Esc must stay bound to
   back. OSC52 emission into the Tern tty is not an OS-clipboard proof; the agent
   lane may not claim `CLIPBOARD_CHANGED`, and the OS half is Owner-attested.
@@ -284,26 +280,29 @@ universal/version-independent claim; a tier qualifies a claim, not a repository.
   Host descriptor is ordinary submission. Notification has one owner: the
   Direct command-result card carries the text, the card-less Client-registry
   branch publishes an error exactly once, and the owner is frozen at dispatch.
-- **Upstream defects ≠ universal facts.** A confirmed upstream protocol defect
-  is not a fact about the current pin's user-visible behavior. Do not patch the
+- **Upstream defects ≠ universal facts.** An upstream defect observed on one
+  build is not a fact about the current pin's universal behavior. Do not patch the
   SDK boundary in the renderer, add a local focus queue/frame reconciler/ACK
   watchdog/deferred-focus latch or automatic retries. Re-open on upstream/client
   changes or a material real symptom.
 
 ## 8. Remaining unknowns and change gates
 
-| Topic | Current state | Requirement before relying on it |
+The following classes remain unproven in general; a specific run may qualify a
+specific claim, never the class:
+
+| Topic | Durable state | Requirement before relying on it |
 |---|---|---|
-| `focus('layer')` actual caret/editor focus | UNKNOWN; headless positive controls were invalid | Valid actual node IDs plus physical GUI/caret observation when behavior depends on it |
-| Old `select/activate/action` after the drawing frame is replaced | UNKNOWN; no deterministic delayed-event probe | Currentness design/negative integration test; targeted client proof if material |
-| Key change → client scroll/view-state reset | Measured in one Picker case; stable per-panel key avoided it | Other component shapes/builds/fonts stay case-specific; repeat a targeted probe before generalizing |
-| Unsupported/unadvertised kind behavior | Not applicable when the source vocabulary ⊆ advertised kinds | Revisit only on a client where the condition is realizable; avoid phantom PASS |
-| `scroll/reveal` Reader behavior | Model `scroll` verified for its Reader under one headless build; generic `reveal`/physical wheel unverified | Carry only to that exact Reader geometry/build; qualify other consumers independently |
-| Queued stale Focus after blocked frame coalescing | Confirmed protocol defect / upstream-reported; client rejected `unknown id` | Wait for a consumable upstream fix or material regression, then requalify; no local queue replacement |
-| Client `error` diagnostic | Recognized protocol error fields are logged without changing routing/writes/retry | Keep it a diagnostic, not a Focus retry or error-to-fatal policy |
-| Close keep semantics after an initial failure | `RISK_UNPROVEN` | Revisit on a real-client effect or an upstream lifecycle change |
+| Caret/editor focus on a region-root ID | UNKNOWN unless proven with valid node IDs and physical observation | Do not claim caret/editing focus from a protocol ACK or a rect |
+| Delayed `select`/`activate`/`action` after the drawing frame is replaced | UNKNOWN until a deterministic probe/negative test exists | Currentness design/negative integration test; targeted client proof if material |
+| Key change → client scroll/view-state reset | Client/shape-specific; measure before generalizing | Repeat a targeted probe for a new component shape/build |
+| Unsupported/unadvertised kind behavior | Only realizable when the source vocabulary exceeds advertised kinds | Revisit only on such a client; avoid phantom PASS |
+| Generic `reveal` / physical wheel / trackpad | NOT_VERIFIED unless the specific client/path was run | Qualify the exact consumer geometry/build independently |
+| Queued stale Focus after blocked frame coalescing | SDK-boundary class; upstream-owned | Wait for a consumable upstream fix or material regression, then requalify; no local queue replacement |
+| Client `error` diagnostics | Diagnostic surface only | Keep it a diagnostic, never a Focus retry or error-to-fatal policy |
+| Close keep semantics after an initial failure | RISK_UNPROVEN | Revisit on a real-client effect or an upstream lifecycle change |
 | Missing ACK forever | UNKNOWN; the frame pump stays blocked without ACK | No speculative ACK watchdog; re-open only with material symptom/evidence |
-| GUI/IME/fonts/wheel/Remote/full-profile | Outside the headless run | Feature-specific test or explicit Owner limitation, never retroactive PASS |
+| GUI/IME/fonts/wheel/Remote/full-profile | Outside headless verification | Feature-specific test or explicit Owner limitation, never retroactive PASS |
 
 Required review trigger: SDK pin/main changes, Tern build changes, a new surface
 owner, key identity, async event admission, modal precedence, read/write
