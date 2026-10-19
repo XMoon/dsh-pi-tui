@@ -401,7 +401,7 @@ test('approving pending builds uses a NEW request id and the exact Host-reported
   firstAttempt.resolve(change({
     stage: 'install',
     application: 'failed',
-    packageResult: { exitCode: 1, output: 'blocked', truncated: false, logPath: '/tmp/x', kind: 'build-blocked' },
+    packageResult: { exitCode: 1, output: 'blocked', truncated: false, kind: 'build-blocked' },
     pendingBuilds: ['esbuild', 'sharp'],
     failedAt: 'registry',
   }))
@@ -493,7 +493,8 @@ test('an ordinary read-only bundle exposes no enabled mutation affordance and re
   const managed = card(controller, bundleValue('managed'))!
   const detail = buildPluginDetailView(managed)
   assert.equal(detail.actions.find(action => action.value === PLUGIN_ACTION.toggle)?.enabled, false)
-  assert.equal(detail.actions.find(action => action.value === PLUGIN_ACTION.remove)?.enabled, false)
+  assert.ok(!detail.actions.some(action => action.value === PLUGIN_ACTION.remove),
+    'a non-removable shipped/read-only bundle has no Remove action at all')
   await controller.toggleCard(bundleValue('managed'))
   await tick()
   assert.equal(state.setBundle.length, 0)
@@ -520,6 +521,32 @@ test('a late old mutation cannot overwrite a newer refresh', async () => {
   gate.resolve(change())
   await tick()
   assert.equal(controller.card(bundleValue('ordinary')), undefined, 'the newest truth still wins')
+})
+
+test('a second mutation is refused while the first is still in flight (no lost final reread)', async () => {
+  const gate = deferred<PluginChangeFact>()
+  const { port, state } = fakePort({ setBundleImpl: () => gate.promise })
+  const { controller } = controllerOf(port)
+  controller.open('direct-command')
+  await tick()
+
+  controller.toggleCard(bundleValue('ordinary'))
+  await tick()
+  controller.toggleCard(bundleValue('ordinary'))
+  await tick()
+  assert.equal(state.setBundle.length, 1, 'the second dispatch never reaches the Host')
+  assert.match(controller.notice() ?? '', /still in progress/)
+  assert.equal(state.snapshotCalls, 1, 'the first mutation has not settled yet')
+
+  gate.resolve(change())
+  await tick()
+  assert.equal(controller.notice(), 'enable applied')
+  assert.equal(state.snapshotCalls, 2, 'the first mutation still performs its authoritative reread')
+
+  // The guard is released after settlement: a later explicit action dispatches.
+  controller.toggleCard(bundleValue('ordinary'))
+  await tick()
+  assert.equal(state.setBundle.length, 2)
 })
 
 test('row-level self protection never offers a toggle row action', async () => {

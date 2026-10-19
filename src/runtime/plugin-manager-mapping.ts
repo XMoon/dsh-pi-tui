@@ -176,7 +176,6 @@ function detachPackageResult(result: PackageResult): PluginPackageResultFact {
     exitCode: result.exitCode,
     output: result.output,
     truncated: result.truncated,
-    logPath: result.logPath,
     ...(result.kind === undefined ? {} : { kind: result.kind }),
     ...(result.timedOut === undefined ? {} : { timedOut: result.timedOut }),
     ...(result.incompatible === undefined

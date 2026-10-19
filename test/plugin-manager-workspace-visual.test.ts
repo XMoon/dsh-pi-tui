@@ -9,6 +9,7 @@
 import assert from 'node:assert/strict'
 import { afterEach, test } from 'node:test'
 import { visibleWidth } from '@xmoon76/pi-tui'
+import { darkColors, lightColors } from '../src/domain/display/theme.ts'
 import { SELF_BUNDLE } from '../src/app/plugin-manager/classify.ts'
 import type { TuiApp } from '../src/tui-app.ts'
 import { EXPERIMENTAL_NAMES, bundle, openWorkspace, plain, type WorkspaceHarness } from './support/plugin-workspace-harness.ts'
@@ -38,7 +39,7 @@ const release = (harness: WorkspaceHarness, row: number, col: number): void => {
 }
 
 test('the frozen matrix keeps the fullscreen skeleton and a reachable last-row Action Bar', async () => {
-  for (const [columns, rows] of [[200, 50], [120, 40], [100, 40], [80, 24], [80, 10], [72, 24], [44, 20]] as const) {
+  for (const [columns, rows] of [[200, 50], [120, 40], [100, 40], [96, 40], [95, 40], [80, 24], [80, 10], [72, 24], [44, 20]] as const) {
     const harness = await open({ columns, rows })
     const view = harness.viewport()
     assert.ok(view[0]!.includes('Plugins · All'), `${columns}x${rows} header`)
@@ -139,6 +140,52 @@ test('search and the Tab status filter are local projections that keep identity'
   assert.match(harness.view(), /\[available\]/)
 })
 
+const hexToRgb = (hex: string): number =>
+  (parseInt(hex.slice(1, 3), 16) << 16) | (parseInt(hex.slice(3, 5), 16) << 8) | parseInt(hex.slice(5, 7), 16)
+
+test('the page paints the live palette tokens in dark, light and custom themes', async () => {
+  for (const [theme, palette] of [['dark', darkColors], ['light', lightColors]] as const) {
+    const harness = await open({ columns: 120, rows: 30 })
+    harness.app.applyTheme(theme)
+    await harness.settle()
+
+    const chipRow = rowOf(harness, '[current]')
+    const chipCol = plain([harness.viewport()[chipRow]!]).indexOf('[current]')
+    assert.equal(harness.vt.getCellFgRgb(chipRow, chipCol), hexToRgb(palette.textMuted),
+      `${theme}: a state chip uses the textMuted role`)
+
+    const paneRow = rowOf(harness, '[Plugins]')
+    const paneCol = plain([harness.viewport()[paneRow]!]).indexOf('[Plugins]')
+    assert.equal(harness.vt.getCellFgRgb(paneRow, paneCol), hexToRgb(palette.primary),
+      `${theme}: the focused pane label uses primary`)
+
+    harness.app.applyTheme('dark')
+    harness.app.dispose()
+    started.delete(harness)
+  }
+
+  const harness = await open({ columns: 120, rows: 30 })
+  const custom = { ...darkColors, primary: '#445566', textMuted: '#112233' }
+  harness.app.applyPalette(custom)
+  await harness.settle()
+  const chipRow = rowOf(harness, '[current]')
+  const chipCol = plain([harness.viewport()[chipRow]!]).indexOf('[current]')
+  assert.equal(harness.vt.getCellFgRgb(chipRow, chipCol), hexToRgb('#112233'), 'custom textMuted is live')
+  const paneRow = rowOf(harness, '[Plugins]')
+  const paneCol = plain([harness.viewport()[paneRow]!]).indexOf('[Plugins]')
+  assert.equal(harness.vt.getCellFgRgb(paneRow, paneCol), hexToRgb('#445566'), 'custom primary is live')
+  harness.app.applyTheme('dark')
+  harness.app.dispose()
+  started.delete(harness)
+})
+
+test('reader exemption warnings are visible on the page', async () => {
+  const harness = await open({ columns: 120, rows: 30, exemptionWarnings: ['unreadable exemption record'] })
+  assert.match(harness.view(), /version exemptions: unreadable exemption record/,
+    'the model reader warning reaches the notice row')
+  assert.match(plain([harness.viewport().at(-1)!]), /Esc close/, 'the warning never displaces the last-row Action Bar')
+})
+
 test('mouse selection is not an action; a second click enters Details and actions dispatch', async () => {
   const harness = await open({ columns: 140, rows: 40 })
   const targetRow = rowOf(harness, '@vendor/foo')
@@ -174,6 +221,24 @@ test('a resize between press and release refuses the stale gesture', async () =>
   assert.equal(harness.setBundle.length, 0, 'the stale click never activates a card/action')
 })
 
+test('a resize whose repaint has NOT run refuses press+release on the old hit map', async () => {
+  const harness = await open({ columns: 140, rows: 40 })
+  const before = harness.panel.selectedCardValue()
+  const targetRow = rowOf(harness, '@vendor/foo')
+  assert.ok(targetRow >= 0)
+
+  // The terminal geometry changes, but no render is awaited: the painted map
+  // still carries the previous 140x40 targets. Both halves of the gesture are
+  // sent into that window.
+  harness.vt.resize(100, 30)
+  press(harness, targetRow, 3)
+  release(harness, targetRow, 3)
+  await harness.settle()
+
+  assert.equal(harness.panel.selectedCardValue(), before, 'the stale map must not select a card')
+  assert.equal(harness.setBundle.length, 0, 'the stale map must not dispatch an action')
+})
+
 test('CJK identities stay width-safe in the list and complete in Detail/copy', async () => {
   const longName = '@vendor/非常长的中文插件名称用于截断验证'
   const harness = await open({
@@ -188,6 +253,9 @@ test('CJK identities stay width-safe in the list and complete in Detail/copy', a
   for (const line of harness.viewport()) {
     assert.ok(visibleWidth(line) <= 44, `line exceeds 44 columns: ${JSON.stringify(line)}`)
   }
+  const cjkLine = plain([harness.viewport()[rowOf(harness, '非常长')]!])
+  assert.match(cjkLine, /\[(current|enabled|disabled|available)\]/,
+    'the status chip stays whole beside the long CJK identity')
   // With only two cards, Down selects the CJK bundle; Enter opens Detail.
   harness.vt.sendInput('\x1b[B')
   await harness.settle()
@@ -197,6 +265,13 @@ test('CJK identities stay width-safe in the list and complete in Detail/copy', a
   assert.ok(detail.replace(/\s+/g, '').includes(longName), `the complete CJK identity is readable:\n${detail}`)
   assert.match(detail.replace(/\s+/g, ''), /https:\/\/\*\*\*@example\.com\/foo\.git/, 'URL credentials are masked')
   assert.doesNotMatch(detail, /secret/)
+  // The Detail opens at its top; one Down moves the action cursor and reveals
+  // the pinned-by-scroll action block at 44x20.
+  harness.vt.sendInput('\x1b[B')
+  await harness.settle()
+  const withActions = harness.view()
+  assert.match(withActions, /Actions/, 'the action block is reachable at 44x20')
+  assert.match(withActions, /(Back|Remove|Enable)/, 'an action is painted at 44x20')
   harness.vt.sendInput('c')
   await harness.settle()
   assert.equal(harness.copied[0], `${longName}\nsource: https://***@example.com/foo.git`)
