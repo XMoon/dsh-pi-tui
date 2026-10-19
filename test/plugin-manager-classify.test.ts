@@ -841,15 +841,21 @@ test('B02/B06/B12 state their WEB_ONLY boundaries and expose no phantom terminal
   }
 })
 
-test('B04/B13/B14 keep their unverified limits and B11 states foreground/no-guaranteed-Job', () => {
+test('B04 keeps its WEB_ONLY/not-qualified host limit, B13/B14 state their verified provider boundaries, and B11 states foreground/no-guaranteed-Job', () => {
   const model = experimentalModel()
-  for (const name of [B04, B13, B14]) {
-    const risk = fact(cardByName(model, name)!, 'Risk')
-    assert.ok(risk !== undefined, `${name} states an unverified limitation`)
-    assert.match(risk!.value, /not (qualified|been successfully qualified)|EXTERNAL_UNVERIFIED/iu)
-  }
-  assert.match(fact(cardByName(model, B13)!, 'Risk')!.value, /EXTERNAL_UNVERIFIED/u)
-  assert.match(fact(cardByName(model, B14)!, 'Risk')!.value, /EXTERNAL_UNVERIFIED/u)
+  const b04 = fact(cardByName(model, B04)!, 'Risk')
+  assert.ok(b04 !== undefined, 'B04 states its WEB_ONLY host limitation')
+  assert.match(b04!.value, /Host activation is not qualified here/u)
+  assert.doesNotMatch(b04!.value, /EXTERNAL_UNVERIFIED/u)
+  const b13 = fact(cardByName(model, B13)!, 'Risk')
+  const b14 = fact(cardByName(model, B14)!, 'Risk')
+  assert.ok(b13 !== undefined && b14 !== undefined, 'B13/B14 state their external boundaries')
+  assert.match(b13!.value, /DeepSeek Anthropic-compatible endpoint/u)
+  assert.match(b13!.value, /no Continue\/Resume/u)
+  assert.match(b14!.value, /ChatGPT OAuth/u)
+  assert.match(b14!.value, /no Continue\/Resume/u)
+  assert.doesNotMatch(b13!.value, /EXTERNAL_UNVERIFIED/u)
+  assert.doesNotMatch(b14!.value, /EXTERNAL_UNVERIFIED/u)
   assert.match(fact(cardByName(model, B11)!, 'TUI surface')!.value, /foreground tool/u)
   assert.match(fact(cardByName(model, B11)!, 'Risk')!.value, /No dedicated Ralph UI or guaranteed Job/u)
 })

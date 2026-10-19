@@ -195,7 +195,7 @@ Task Center 的 `ACTIVE` / `TRACKED` 是展示范围：`ACTIVE` 只显示当前�
 
 `/plugins` 打开当前 profile 的全屏 Plugin Manager：目录固定为 TUI & Extensions / Official DSH / Third-party / Experimental（实验组最后），窄屏单栏、宽屏双栏，可搜索、筛选、查看来源与状态，并从官方目录执行安装、启用/禁用与删除；结果以 Host 实际返回的版本、重启要求和错误为准。正在提供当前界面的 `dsh-pi-tui` 只读且不可从自身界面禁用或移除。`/settings` 的顶级 `Plugins` 分类原地打开同一页面，返回时保留 Settings 的分类、滚动与选择。
 
-Experimental 组的 14 个官方 rc.2 实验包在 Detail 中给出固定的终端可用面与限制/风险说明（Web-only、Host-only、B04/B13/B14 未验证等边界），这些说明只随精确官方包身份出现，不随启用状态伪装成 Host 能力通过；升级指引按 Host 事实区分「随 DSH 发行升级」「profile 包先 Remove 再显式 Install」「官方 on-demand 目标」和「当前 TUI 由外部管理」，不提供原地更新、版本选择器或静默重装。
+Experimental 组的 14 个官方 rc.2 实验包在 Detail 中给出固定的终端可用面与限制/风险说明（Web-only、Host-only、B04 的 WEB_ONLY/Host 行未挂载（Owner 已接受）、B13/B14 的已验证 one-shot/provider 边界等），这些说明只随精确官方包身份出现，不随启用状态伪装成 Host 能力通过；升级指引按 Host 事实区分「随 DSH 发行升级」「profile 包先 Remove 再显式 Install」「官方 on-demand 目标」和「当前 TUI 由外部管理」，不提供原地更新、版本选择器或静默重装。
 
 Subagent 按完整 lineage 显示，包括嵌套创建的 descendant：
 

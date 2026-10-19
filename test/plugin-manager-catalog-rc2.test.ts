@@ -234,12 +234,13 @@ test('the REAL rc.2 Host listBundles discovers 14/14 official optional/on-demand
       assert.ok(!detail.actions.some(action => action.value === 'action:remove'), 'F10 never adds a Remove action to a shipped bundle')
     }
   }
-  // The two external on-demand rows carry their unverified limit through the
-  // REAL Host catalog (not a static section flag).
+  // The two external on-demand rows carry their verified-boundary copy through
+  // the REAL Host catalog (not a static section flag).
   for (const name of ['@deepseek-ai/dsh-subagent-codex', '@deepseek-ai/dsh-subagent-claude-code']) {
     const card = experimental.find(candidate => candidate.name === name)!
     const risk = buildPluginDetailView(card).groups.flatMap(group => group.facts).find(fact => fact.label === 'Risk')
-    assert.match(risk?.value ?? '', /EXTERNAL_UNVERIFIED/u)
+    assert.match(risk?.value ?? '', /no Continue\/Resume/u)
+    assert.doesNotMatch(risk?.value ?? '', /EXTERNAL_UNVERIFIED/u)
   }
 })
 

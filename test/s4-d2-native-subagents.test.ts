@@ -11,8 +11,8 @@
  */
 
 import assert from 'node:assert/strict'
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
 import test from 'node:test'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import { ToolCallId } from '@deepseek-ai/dsh-llm'
@@ -21,6 +21,7 @@ import {
   startS4D2Host,
   type S4D2BundleId,
 } from './support/s4-d2-optional-bundle-fixture.ts'
+import { testLifecycle } from './support/temp-lifecycle.ts'
 
 const B13 = '@deepseek-ai/dsh-subagent-claude-code' satisfies S4D2BundleId
 const B14 = '@deepseek-ai/dsh-subagent-codex' satisfies S4D2BundleId
@@ -35,30 +36,63 @@ const skip = skippedInstallationReason([B13, B14])
  *    DeepSeek Anthropic-compatible endpoint (`real-deepseek.e2e.ts` shape);
  *    it is injected only through the provider `env` overlay.
  *  - B14: `S5_CODEX_AUTH_FILE` names the caller's native `~/.codex/auth.json`
- *    (ChatGPT OAuth); its bytes are copied into the isolated HOME and never
- *    printed or committed.
+ *    (ChatGPT OAuth); its bytes are copied into the isolated HOME (0600) and
+ *    never printed or committed.
+ * BOTH sources are read ONLY after `DSH_PI_TUI_S4_D2_NATIVE=1` admits the
+ * native run; a credential path alone never triggers a file read or copy.
  * When a credential is absent, that provider stays on the truthful
  * `EXTERNAL_UNVERIFIED` path and no network call is attempted. */
 const NATIVE_ADMITTED = process.env.DSH_PI_TUI_S4_D2_NATIVE === '1'
-const B13_DEEPSEEK_KEY = process.env.S5_B13_DEEPSEEK_API_KEY
-const CODEX_AUTH_FILE = process.env.S5_CODEX_AUTH_FILE
-const B13_DEEPSEEK_ENV = B13_DEEPSEEK_KEY === undefined ? undefined : {
-  ANTHROPIC_AUTH_TOKEN: B13_DEEPSEEK_KEY,
-  ANTHROPIC_BASE_URL: 'https://api.deepseek.com/anthropic',
-  ANTHROPIC_MODEL: 'deepseek-v4-flash',
-  ANTHROPIC_DEFAULT_OPUS_MODEL: 'deepseek-v4-flash',
-  ANTHROPIC_DEFAULT_SONNET_MODEL: 'deepseek-v4-flash',
-  ANTHROPIC_DEFAULT_HAIKU_MODEL: 'deepseek-v4-flash',
-  CLAUDE_CODE_SUBAGENT_MODEL: 'deepseek-v4-flash',
-  CLAUDE_CODE_EFFORT_LEVEL: 'max',
-  CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1',
-  CLAUDE_CODE_DISABLE_OFFICIAL_MARKETPLACE_AUTOINSTALL: '1',
-  DISABLE_TELEMETRY: '1',
-  DISABLE_ERROR_REPORTING: '1',
-  HTTP_PROXY: '',
-  HTTPS_PROXY: '',
-  ALL_PROXY: '',
-  NO_PROXY: '127.0.0.1,localhost',
+const B13_DEEPSEEK_KEY = NATIVE_ADMITTED ? process.env.S5_B13_DEEPSEEK_API_KEY : undefined
+const CODEX_AUTH_FILE = NATIVE_ADMITTED ? process.env.S5_CODEX_AUTH_FILE : undefined
+
+/** The native gate is the ONLY credential admission: the path/key is ignored
+ *  (and its file never read) unless the gate is on. */
+function b13EnvOverlay(admitted: boolean, key: string | undefined): Record<string, string> | undefined {
+  if (!admitted || key === undefined) return undefined
+  return {
+    ANTHROPIC_AUTH_TOKEN: key,
+    ANTHROPIC_BASE_URL: 'https://api.deepseek.com/anthropic',
+    ANTHROPIC_MODEL: 'deepseek-v4-flash',
+    ANTHROPIC_DEFAULT_OPUS_MODEL: 'deepseek-v4-flash',
+    ANTHROPIC_DEFAULT_SONNET_MODEL: 'deepseek-v4-flash',
+    ANTHROPIC_DEFAULT_HAIKU_MODEL: 'deepseek-v4-flash',
+    CLAUDE_CODE_SUBAGENT_MODEL: 'deepseek-v4-flash',
+    CLAUDE_CODE_EFFORT_LEVEL: 'max',
+    CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1',
+    CLAUDE_CODE_DISABLE_OFFICIAL_MARKETPLACE_AUTOINSTALL: '1',
+    DISABLE_TELEMETRY: '1',
+    DISABLE_ERROR_REPORTING: '1',
+    HTTP_PROXY: '',
+    HTTPS_PROXY: '',
+    ALL_PROXY: '',
+    NO_PROXY: '127.0.0.1,localhost',
+  }
+}
+
+interface CodexAuthCopy {
+  readonly path: string
+  /** Remove the credential copy WITHOUT consulting DSH_TEST_KEEP_TMP. */
+  cleanup(): void
+}
+
+/** Copy the native Codex OAuth bytes into the isolated HOME with 0600. The
+ *  credential is read only after the native gate admitted the run. */
+function installCodexAuth(admitted: boolean, source: string | undefined, root: string): CodexAuthCopy | undefined {
+  if (!admitted || source === undefined) return undefined
+  const codexHome = join(root, 'home', '.codex')
+  mkdirSync(codexHome, { recursive: true })
+  const target = join(codexHome, 'auth.json')
+  writeFileSync(target, readFileSync(source), { mode: 0o600 })
+  chmodSync(target, 0o600)
+  return {
+    path: target,
+    cleanup: () => {
+      // The credential copy is deleted even when DSH_TEST_KEEP_TMP keeps the
+      // ordinary disposable root for debugging.
+      rmSync(codexHome, { recursive: true, force: true })
+    },
+  }
 }
 
 const nativeEvidence: Array<{ provider: string; status: string }> = []
@@ -109,29 +143,31 @@ test('B13/B14: official missing catalog, exact installTarget and local profile i
   await catalogHost.dispose()
 
   for (const task of NATIVE_TASKS) {
+    const b13Env = b13EnvOverlay(NATIVE_ADMITTED, B13_DEEPSEEK_KEY)
     const host = await startS4D2Host(t, {
       bundles: [task.bundle],
       profileDependencies: { [task.packageName]: `file:${join(catalogHost.installation.nodeModules, task.packageName)}` },
-      ...(task.provider === 'claude-code' && B13_DEEPSEEK_ENV !== undefined
-        ? { patches: [{ id: 'subagent-claude-code', config: { env: B13_DEEPSEEK_ENV } }] as never }
+      ...(task.provider === 'claude-code' && b13Env !== undefined
+        ? { patches: [{ id: 'subagent-claude-code', config: { env: b13Env } }] as never }
         : {}),
     })
     let restoreCodexHome: (() => void) | undefined
-    if (task.provider === 'codex' && CODEX_AUTH_FILE !== undefined) {
+    let codexAuth: CodexAuthCopy | undefined
+    try {
       // The pinned package-local Codex app-server keeps native auth authoritative
       // through HOME/CODEX_HOME; copy the caller's native auth into the isolated
-      // HOME just before delegation and restore the process variable after.
-      const codexHome = join(host.root, 'home', '.codex')
-      mkdirSync(codexHome, { recursive: true })
-      writeFileSync(join(codexHome, 'auth.json'), readFileSync(CODEX_AUTH_FILE))
-      const previous = process.env.CODEX_HOME
-      process.env.CODEX_HOME = codexHome
-      restoreCodexHome = () => {
-        if (previous === undefined) delete process.env.CODEX_HOME
-        else process.env.CODEX_HOME = previous
+      // HOME (0600) just before delegation and restore the process variable after.
+      codexAuth = task.provider === 'codex'
+        ? installCodexAuth(NATIVE_ADMITTED, CODEX_AUTH_FILE, host.root)
+        : undefined
+      if (codexAuth !== undefined) {
+        const previous = process.env.CODEX_HOME
+        process.env.CODEX_HOME = dirname(codexAuth.path)
+        restoreCodexHome = () => {
+          if (previous === undefined) delete process.env.CODEX_HOME
+          else process.env.CODEX_HOME = previous
+        }
       }
-    }
-    try {
       // The fixture really isolates the credential/agent roots for this Host.
       assert.equal(process.env.HOME, join(host.root, 'home'))
       assert.equal(process.env.DSH_HOME, join(host.root, 'home'))
@@ -215,6 +251,7 @@ test('B13/B14: official missing catalog, exact installTarget and local profile i
       assert.deepEqual(remaining, [], 'no orphan in-process child remains after the native start settles')
     } finally {
       restoreCodexHome?.()
+      codexAuth?.cleanup()
       await host.dispose()
     }
   }
@@ -270,4 +307,49 @@ test('fixture rejects restart after dispose', { skip }, async t => {
   const host = await startS4D2Host(t, { bundles: [] })
   await host.dispose()
   await assert.rejects(() => host.restart(), /cannot restart a disposed host/u)
+})
+
+test('the native gate alone admits credentials: a path/key is never read when the gate is off', (t) => {
+  const life = testLifecycle(t)
+  const root = life.tempDir('dsh-s4-d2-credential-gate-')
+  const source = join(root, 'caller-auth.json')
+  writeFileSync(source, '{"auth_mode":"sentinel"}')
+  assert.equal(b13EnvOverlay(false, 'sentinel-key'), undefined,
+    'the gate off never builds a provider env overlay')
+  assert.equal(installCodexAuth(false, source, root), undefined,
+    'the gate off never copies the caller credential')
+  // A nonexistent path proves the gate-off branch returns BEFORE any read: a
+  // read would throw ENOENT instead of returning undefined.
+  const missing = join(root, 'absent-auth.json')
+  assert.equal(existsSync(missing), false)
+  assert.equal(installCodexAuth(false, missing, root), undefined,
+    'the gate off returns before reading even a missing credential path')
+  assert.equal(existsSync(join(root, 'home', '.codex', 'auth.json')), false,
+    'the gate off never creates a credential copy')
+  assert.equal(readFileSync(source, 'utf8'), '{"auth_mode":"sentinel"}', 'the caller file is untouched')
+})
+
+test('the Codex credential copy is 0600 and is removed even when temp roots are kept', (t) => {
+  const life = testLifecycle(t)
+  const root = life.tempDir('dsh-s4-d2-credential-copy-')
+  const source = join(root, 'caller-auth.json')
+  writeFileSync(source, '{"auth_mode":"sentinel"}')
+  const previousKeep = process.env.DSH_TEST_KEEP_TMP
+  process.env.DSH_TEST_KEEP_TMP = '1'
+  t.after(() => {
+    if (previousKeep === undefined) delete process.env.DSH_TEST_KEEP_TMP
+    else process.env.DSH_TEST_KEEP_TMP = previousKeep
+  })
+  let copy: CodexAuthCopy | undefined
+  try {
+    copy = installCodexAuth(true, source, root)
+    assert.ok(copy !== undefined)
+    assert.equal(statSync(copy.path).mode & 0o777, 0o600, 'the credential copy is owner-only')
+  } finally {
+    // The abnormal-exit path: cleanup removes the credential even though
+    // DSH_TEST_KEEP_TMP keeps the ordinary disposable root.
+    copy?.cleanup()
+  }
+  assert.equal(existsSync(join(root, 'home', '.codex')), false,
+    'the credential copy never survives a kept temp root')
 })

@@ -135,12 +135,12 @@ const EXPERIMENTAL_BUNDLE_SUPPORT: Readonly<Record<string, ExperimentalBundleSup
   },
   '@deepseek-ai/dsh-subagent-codex': {
     surface: 'On-demand external one-shot Codex subagent tool, not a continuable conversation.',
-    limit: 'Native provider/auth has not been successfully qualified; no Continue/Resume; a system CLI is not a substitute. EXTERNAL_UNVERIFIED.',
+    limit: 'One-shot only; no Continue/Resume in PiTui. Qualified with a ChatGPT OAuth (Codex) login; other auth methods and platforms remain unverified. A system CLI is not a substitute.',
     risk: true,
   },
   '@deepseek-ai/dsh-subagent-claude-code': {
     surface: 'On-demand external one-shot Claude Code subagent tool, not a continuable conversation.',
-    limit: 'Native provider/auth has not been successfully qualified; no Continue/Resume. EXTERNAL_UNVERIFIED.',
+    limit: 'One-shot only; no Continue/Resume in PiTui. Qualified with a DeepSeek Anthropic-compatible endpoint; native Anthropic accounts and other platforms remain unverified. A system CLI is not a substitute.',
     risk: true,
   },
 })

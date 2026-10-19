@@ -67,11 +67,12 @@ S4-D1 PR-D1 MERGED (#337) (official Plugin Manager catalog + fullscreen workspac
                     merge is done (#337); stage closure/review is still pending.
                     D1-A12 is closed by the generated-Remote evidence
                     (`test/runner-remote-plugin-manager.test.ts` L6-F). D1-A09/A10
-                    have real official Host lifecycle evidence (real
-                    cancel/too-late and blocked-build approval in
-                    `test/plugin-manager-install.test.ts`), but their mounted-TUI
-                    L6 (real Host + mounted TuiApp hide/re-enter and risk/approve
-                    flow) is still PENDING; neither item is DONE yet.)
+                    are DONE: the real official Host lifecycle (real
+                    cancel/too-late and blocked-build approval) and the
+                    mounted-TUI L6 (real Host + mounted TuiApp hide/re-enter/Stop
+                    and risk/approve flow) are witnessed in
+                    `test/plugin-manager-install.test.ts` and
+                    `test/plugin-manager-runner-integration.test.ts`.)
 S4-D2 PR-D2 IMPLEMENTED / STAGE OPEN (B01–B14 Host capability qualification over
                     the real rc.2 published Optional bundle packages: the shared
                     isolated fixture proves real Loader/patch/service/tool/Session/
@@ -81,19 +82,21 @@ S4-D2 PR-D2 IMPLEMENTED / STAGE OPEN (B01–B14 Host capability qualification ov
                     profile mounts no Web `webServer`/`connection`, its TUI
                     status stays WEB_ONLY and `ROW_DISPOSITION` becomes
                     DEFERRED_WITH_OWNER. B13/B14 native one-shot starts are
-                    launch-verified but EXTERNAL_UNVERIFIED without an admitted
-                    official native credential/runtime; the optional local
-                    credential-gated probe is not accepted as qualification. No
-                    D2 row is promoted by name alone — see the S4-D2 ledger at
+                    HOST_CAPABLE PASS under their admitted provider
+                    configurations (B13: DeepSeek Anthropic-compatible endpoint;
+                    B14: verified ChatGPT OAuth), with the remaining native
+                    account/endpoint and platform scope explicitly unverified.
+                    No D2 row is promoted by name alone — see the S4-D2 ledger at
                     the end)
 S4-D3 PR-D3 DONE  (terminal capability truth: B05/B07/B08/B09/B10/B11 now have a
                     SAME-test official Bundle→mounted-TuiApp L6 PASS with their
                     limits explicit; F10 upgrade guidance is DONE; the exact
                     rc.2 `deepseek-flash` route and the existing Web Search/Fetch
                     help are qualified. B04 stays HOST PENDING/WEB_ONLY under the
-                    Owner-accepted disposition; B13/B14 stay BLOCKED; D1-A12 is
-                    closed by the generated-Remote evidence, while D1-A09/A10
-                    remain HOST-LIFECYCLE PASS / MOUNTED-TUI L6 PENDING — no D3
+                    Owner-accepted disposition; B13/B14 are DONE with their
+                    verified one-shot/provider boundaries; D1-A12 is
+                    closed by the generated-Remote evidence, and D1-A09/A10 are
+                    DONE with their mounted-TUI L6 — no D3
                     row is promoted by name. See the S4-D3 ledger section at the
                     end)
 M4  NOT STARTED   (experimental local Host process / IPC split)
@@ -7325,8 +7328,9 @@ is absent the test reports `BLOCKED` instead of substituting a local same-name
 package. `scripts/dsh-s4-d2-bundles-smoke.mjs` owns the one-time provisioning
 (`--provision`), the real pinned-npm CLI profile add/remove/restart loop
 (`--network`) and the bounded native credential gate (`--native`; it records
-presence and `EXTERNAL_UNVERIFIED`, while the REAL native start is the separate
-unit-test gate `DSH_PI_TUI_S4_D2_NATIVE=1` under the isolated HOME). The
+credential presence only, while the REAL native start is the separate unit-test
+gate `DSH_PI_TUI_S4_D2_NATIVE=1` under the isolated HOME; an admitted run
+asserts the genuine provider settlement). The
 in-process fixture deliberately omits the TUI screen rows; the TUI surfaces are
 already covered by their own L6 suites and D3 owns their final wording.
 
@@ -7364,8 +7368,8 @@ surface row.
 | B10 | `@deepseek-ai/dsh-experimental-badge-skill-bundle` | PASS (D1) | PASS (D2) | PASS (limited: `/skill` list + official `/skill dsh-badge` load into the current Session in skills-capable presets; minimal gets no model skill tool) | DONE | Direct PASS; M3 not re-run | D3-A10: same-test real `dsh-badge` provider → `/skill` list, then the official `/skill dsh-badge` load path writes a durable skill-invocation user/message into the current Session and paints the `Context injection dsh-badge` card in standard; minimal keeps no `skill` tool; disable+restart removes the entry (`test/s4-d3-host-to-tui-projections.test.ts`) | no phantom Web `1017` model badge → model identity; no implicit loader in minimal | badge content remains Host-owned |
 | B11 | `@deepseek-ai/dsh-experimental-ralph-bundle` | PASS (D1) | PASS (D2) | PASS (limited: foreground Tool + generic Activity (Working/Interrupted); no dedicated Ralph UI/Job or durable Workflow run card) | DONE | Direct PASS; M3 not re-run | D3-A11: same-test real `ralph` `maxRounds:1` foreground run paints the running Tool card + `Working...` and settles it `[ok]`; the cancelled run paints `[error]` + `Interrupted cancelled by user`; runtime `workflow/start,end` still settle once and no orphan child (`test/s4-d3-host-to-tui-projections.test.ts`) | cancelled run shows an error result, never a fabricated Job; no duplicate settle; ralph emits runtime workflow events, not the durable `tool-workflow/*` rows the Workflow run card consumes | cost/multi-round warning stays a user-visible D3 claim |
 | B12 | `@deepseek-ai/dsh-experimental-plugin-market-bundle` | PASS (D1) | PASS (explicit offline index) | `WEB_ONLY` (no Discover page; Creator `plugin_market` is not a global TUI tool) | DEFERRED_WITH_OWNER | Direct Host PASS; M3 N/A | D3-A13: real `pluginMarket` service: empty default, explicit local index read/search/entry; SAME Host Creator `plugin_market` tool lists the configured index and its `@vendor/local-plugin`; tool absent globally; `standard`/`ptc` declare the row disabled, `cordis` mounts it, `minimal` omits it | unknown source and invalid index refused; no public marketplace fetch and no market code execution in tests | TUI Discover stays unadopted; the Creator `plugin_market` tool is preset-scoped (cordis), not global; DEFERRED_WITH_OWNER = frozen plan §1.2; user-configured sources only; D3: `test/s4-d3-bundle-boundaries.test.ts` |
-| B13 | `@deepseek-ai/dsh-subagent-claude-code` | PASS (D1; missing + exact `installTarget`) | EXTERNAL_UNVERIFIED | `HOST_ONLY` (one-shot, no Continue/Resume) | BLOCKED | Direct Host install/schema verified; native start only under `DSH_PI_TUI_S4_D2_NATIVE=1` | D3-A14: official package locally installed into the profile, official one-shot `subagent_claude_code` schema/tool row, external child catalog; the parent-supplied local gated isolated-HOME run recorded the real no-auth/401 result (the committed test records `EXTERNAL_UNVERIFIED`, not an asserted 401) | default suite starts no provider; no `PONG`/success fabricated; interrupt+drain leaves no in-process orphan; no continuation parameters | Owner must accept the bounded exclusion (then DEFERRED_WITH_OWNER) or provide a real native credential/platform for one read-only task; D3: `test/s4-d3-bundle-boundaries.test.ts` |
-| B14 | `@deepseek-ai/dsh-subagent-codex` | PASS (D1; missing + exact `installTarget`) | EXTERNAL_UNVERIFIED | `HOST_ONLY` (one-shot, no Continue/Resume) | BLOCKED | Direct Host install/schema verified; native start only under `DSH_PI_TUI_S4_D2_NATIVE=1` | D3-A14: same local-install + official `subagent_codex` schema/tool row + external child catalog; the parent-supplied local gated isolated-HOME run recorded the real 401/no-auth result (the committed test records `EXTERNAL_UNVERIFIED`, not an asserted 401) | default suite starts no provider; no fabricated success, no orphan, no continuation | same Owner decision as B13; system `claude`/`codex` binaries are never substituted; D3: `test/s4-d3-bundle-boundaries.test.ts` |
+| B13 | `@deepseek-ai/dsh-subagent-claude-code` | PASS (D1; missing + exact `installTarget`) | PASS (DeepSeek Anthropic-compatible config) | `HOST_ONLY` (one-shot, no Continue/Resume) | DONE | Direct Host install/schema verified; native one-shot PASS under `DSH_PI_TUI_S4_D2_NATIVE=1` with the admitted DeepSeek-compatible provider config | D2 native: the official package is installed into the profile; the official one-shot `subagent_claude_code` schema/tool row starts the real Claude Code SDK/CLI child against the DeepSeek Anthropic-compatible endpoint in the isolated HOME; the external child settles with the genuine `PONG` (the committed test asserts PASS only from that real settlement) | default suite starts no provider; no `PONG`/success fabricated; interrupt+drain leaves no in-process orphan; no continuation parameters | Unverified: native Anthropic accounts/endpoints and other platforms; system `claude`/`codex` binaries are never substituted; D3: `test/s4-d3-bundle-boundaries.test.ts` |
+| B14 | `@deepseek-ai/dsh-subagent-codex` | PASS (D1; missing + exact `installTarget`) | PASS (verified ChatGPT OAuth config) | `HOST_ONLY` (one-shot, no Continue/Resume) | DONE | Direct Host install/schema verified; native one-shot PASS under `DSH_PI_TUI_S4_D2_NATIVE=1` with the verified ChatGPT OAuth login | D2 native: same local-install + official `subagent_codex` schema/tool row; the pinned package-local Codex app-server runs with the caller's real ChatGPT OAuth (copied 0600 into the isolated HOME) and the external child settles with the genuine `PONG` | default suite starts no provider; no fabricated success, no orphan, no continuation | Unverified: other auth methods and platforms; system `claude`/`codex` binaries are never substituted; D3: `test/s4-d3-bundle-boundaries.test.ts` |
 
 ### Proof index
 
@@ -7406,23 +7410,26 @@ surface row.
   generated Client/Remote mutation and refuses a reply carried by a superseded
   Connection generation; `test/runner-remote-plugin-manager.test.ts` (L6-F) and
   the L3 fence cases in `test/remote-plugin-manager.test.ts` are the witnesses.
-- **D1-A09 / D1-A10 are HOST LIFECYCLE PASS / MOUNTED TUI L6 PENDING**: A09
-  exercises a real official `cancelInstall` (both `cancelled` and
-  `too-late`/applying outcomes, exact profile restoration, same request id);
-  A10 exercises the real pnpm blocked-build -> `pendingBuilds` -> explicit
-  `approvedBuilds` -> marker cycle. Both drive the real official Host through
-  the production controller/panel fixture (`test/plugin-manager-install.test.ts`),
-  but they are not yet one mounted-TuiApp L6: the real-TUI hide/re-enter while
-  installing and the real-TUI risk-prompt -> keyboard approval flow remain the
-  closure work. The mounted TUI L6 is NOT claimed.
+- **D1-A09 / D1-A10 are DONE**: A09 exercises a real official `cancelInstall`
+  (both `cancelled` and `too-late`/applying outcomes, exact profile restoration,
+  same request id); A10 exercises the real pnpm blocked-build ->
+  `pendingBuilds` -> explicit `approvedBuilds` -> marker cycle. Both drive the
+  real official Host through the production controller/panel fixture
+  (`test/plugin-manager-install.test.ts`) AND the mounted TuiApp
+  (`test/plugin-manager-runner-integration.test.ts`): `/plugins` starts the real
+  Host install, hiding and re-entering keeps the same request with no second
+  dispatch, keyboard Stop restores the profile; the blocked-build risk and
+  approval action paint in the mounted terminal, keyboard approval dispatches
+  the second real Host attempt, and the marker exists only afterwards.
 - This live ledger records only the durable technical facts.
 - **S4-D2 is NOT stage-DONE.** B04's web-only exclusion is now
   Owner-accepted (2026-10-19): its Host row remains `PENDING` on the missing
   Web `webServer`/`connection` transport, its TUI status remains `WEB_ONLY`,
   and its `ROW_DISPOSITION` is `DEFERRED_WITH_OWNER` rather than `BLOCKED`.
-  B13/B14 remain `EXTERNAL_UNVERIFIED`/`BLOCKED` until an admitted official
-  native credential/platform is available; the optional local credential-gated
-  probe is a regression lane, not an official qualification. B04's
+  B13/B14 are `HOST_CAPABLE` PASS and `ROW_DISPOSITION` DONE under their
+  admitted provider configurations (B13: DeepSeek Anthropic-compatible
+  endpoint; B14: verified ChatGPT OAuth); native Anthropic accounts/endpoints,
+  other Codex auth methods and other platforms remain unverified. B04's
   Owner-accepted `DEFERRED_WITH_OWNER` rows remain the bounded exclusion; stage
   closure stays a review/Owner decision. No fake tool, mock native success,
   second Host authority or TUI Web UI is used to close them.
@@ -7435,10 +7442,10 @@ truth, not a second Host implementation: it adds the bounded rc.2 Detail copy,
 v9 F10 upgrade guidance, the existing Web Search/Fetch help, the exact
 `deepseek-flash` route evidence and the six same-test Bundle→mounted-TuiApp
 L6s. B04's web-only disposition is Owner-accepted (Host PENDING/TUI WEB_ONLY/
-DEFERRED_WITH_OWNER); B13/B14 stay BLOCKED, D1-A12 is closed by the
-generated-Remote evidence, and D1-A09/A10 remain HOST-LIFECYCLE PASS /
-MOUNTED-TUI L6 PENDING; S4-D2 stays STAGE OPEN on the remaining Owner/review
-decisions — none of them is promoted by this PR.
+DEFERRED_WITH_OWNER); B13/B14 are DONE with their verified one-shot/provider
+boundaries, D1-A12 is closed by the generated-Remote evidence, and D1-A09/A10
+are DONE with their mounted-TUI L6; S4-D2 stays STAGE OPEN on the remaining
+Owner/review decisions — none of them is promoted by this PR.
 PR merge is not stage closure; the four axes below are the claim.
 
 ### Four axes
@@ -7496,13 +7503,13 @@ the merge gate.
 | D3-A11 | B11 Ralph → foreground Tool + generic Activity (Working/Interrupted) + runtime workflow/start,end | `test/s4-d3-host-to-tui-projections.test.ts` B11 (held positive run paints `[running]` + `Working...` then `[ok]`; Escape abort paints the exact call-id error + `Interrupted cancelled by user`; no durable `tool-workflow/run-start`; end once; no orphan/Job) |
 | D3-A12 | B03 real Auto preset (`/permission auto`) + shared danger confirmation | `test/s4-d3-bundle-boundaries.test.ts` B03 (enable→restart; real `/permission auto` selects and paints `[auto]`; a pass-through mutation counter observes the enable and then ZERO calls after default Cancel), inherited D2 native/teardown |
 | D3-A13 | B02/B04/B06/B12 official rows → bounded WEB_ONLY limits | `test/s4-d3-bundle-boundaries.test.ts`, `test/plugin-manager-classify.test.ts` (no phantom page/action) |
-| D3-A14 | B13/B14 missing → on-demand Install + EXTERNAL_UNVERIFIED limits | `test/s4-d3-bundle-boundaries.test.ts` (Install-only, no Enable, EXTERNAL_UNVERIFIED), inherited D2 native/schema evidence |
+| D3-A14 | B13/B14 missing → on-demand Install + verified one-shot/provider boundaries | `test/s4-d3-bundle-boundaries.test.ts` (Install-only, no Enable, verified boundary copy), inherited D2 native/schema evidence |
 
 ### D3 user-visible facts
 
 - The Plugin Manager Detail states each exact rc.2 Experimental bundle's real
-  TUI surface and its limit/risk, including the WEB_ONLY and
-  EXTERNAL_UNVERIFIED boundaries; it never derives that copy from enablement
+  TUI surface and its limit/risk, including the WEB_ONLY and verified
+  one-shot/provider boundaries; it never derives that copy from enablement
   and never claims a live Host PASS.
 - F10 guidance is source-driven: shipped bundles upgrade with DSH,
   profile-owned bundles need Remove then an explicit later install, missing
@@ -7523,10 +7530,11 @@ the merge gate.
 - B04's Host row stays PENDING on the missing Web `webServer`/`connection`
   transport; the Owner accepted the web-only disposition (2026-10-19), so its
   `ROW_DISPOSITION` is DEFERRED_WITH_OWNER (never a Host/TUI PASS). B13/B14
-  stay BLOCKED until an admitted official native credential/platform is
-  available; this stage does not convert any D2 row by name.
-- D1-A12 is DONE; D1-A09/A10 remain HOST-LIFECYCLE PASS / MOUNTED-TUI L6
-  PENDING (see the S4-D1 legacy note); S4-D2 stays STAGE OPEN; final S5 npm/GUI
+  are DONE under their admitted provider configurations; native Anthropic
+  accounts/endpoints, other Codex auth methods and other platforms remain
+  unverified. This stage does not convert any D2 row by name.
+- D1-A12 and D1-A09/A10 are DONE (the latter closed by the mounted-TUI L6; see
+  the S4-D1 legacy note); S4-D2 stays STAGE OPEN; final S5 npm/GUI
   and cross-platform native validation remain out of scope.
 - No real Tern GUI, physical mouse/trackpad matrix, native account or paid
   Search/Fetch/LLM call is claimed. The local tmux/VirtualTerminal evidence and

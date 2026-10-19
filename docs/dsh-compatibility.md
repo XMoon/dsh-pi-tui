@@ -421,14 +421,18 @@ does not close the S4-D2 stage:
   configured offline index is read, while unknown/invalid sources are refused.
   The SAME real Host's Creator `plugin_market` tool (cordis preset) reads that
   configured index and its plugin; the Web Discover page is not a TUI surface.
-- **B13 Claude Code / B14 Codex** are EXTERNAL_UNVERIFIED/BLOCKED: the official
-  package, `missing` catalog entry with exact `installTarget`, local profile
-  install and one-shot external-child schema are verified. The default suite
-  starts no native provider; the real start is opt-in via
-  `DSH_PI_TUI_S4_D2_NATIVE=1` and, under the isolated HOME, recorded the real
-  no-auth result. The CLI `--native` sub-gate records credential presence only
-  and never fabricates a native PASS. No mock/system-CLI success is accepted,
-  and no Continue/Resume affordance exists.
+- **B13 Claude Code / B14 Codex** are qualified on-demand one-shot providers:
+  the official package, `missing` catalog entry with exact `installTarget`, local
+  profile install and one-shot external-child schema are verified. Under the
+  admitted provider configurations the real native start settles with the
+  genuine answer: B13 through the DeepSeek Anthropic-compatible endpoint, B14
+  through the verified ChatGPT OAuth login and pinned Codex app-server. Native
+  Anthropic accounts/endpoints, other Codex auth methods and other platforms
+  remain unverified. The default suite starts no native provider; the real
+  start is opt-in via `DSH_PI_TUI_S4_D2_NATIVE=1` under the isolated HOME. The
+  CLI `--native` sub-gate records credential presence only and never fabricates
+  a native PASS. No mock/system-CLI success is accepted, and no Continue/Resume
+  affordance exists.
 - CI without the provisioned official artifact tree reports `BLOCKED` for the
   in-process qualification tests instead of substituting packages; the
   `smoke:s4-d2-bundles` CLI has separate `--provision`, `--network` and

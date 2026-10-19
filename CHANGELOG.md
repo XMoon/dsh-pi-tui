@@ -18,7 +18,7 @@
 
 - **Plugin Manager 的 Experimental 详情说明真实终端边界与升级路径。** 14 个官方 rc.2
   实验包各自显示固定的 TUI 可用面与限制/风险（哪些只有 Web UI、哪些只经现有 Tool/Job/
-  Activity/`/skill`/标题界面可达、B04/B13/B14 仍未验证），这些文字只跟随精确官方包身份，
+  Activity/`/skill`/标题界面可达、B04 的 WEB_ONLY/Host 行未挂载（Owner 已接受）、B13/B14 的已验证 one-shot/provider 边界），这些文字只跟随精确官方包身份，
   不随启用状态变成“Host 能力通过”。升级指引按 Host 事实区分随 DSH 发行升级、profile 包
   “先 Remove 再显式 Install”、官方 on-demand 目标与当前 TUI 的外部管理；不提供原地更新、
   版本选择器或静默重装。

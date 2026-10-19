@@ -3095,9 +3095,10 @@ page, tab, shortcut, button, scroll owner or port is introduced.
   inherit it. The stale generic `Host capability not yet qualified for TUI`
   line is gone. B03 keeps its existing Owner-frozen danger confirmation as the
   only hazard statement (the static table adds no second one). The wording
-  names `WEB_ONLY` limits (Voice/Inspector/CoT/Market), `EXTERNAL_UNVERIFIED`
-  for the two on-demand native subagents, and the foreground/no-guaranteed-Job
-  fact for Ralph. Availability/Source/Version/Fiber remain separate Host facts.
+  names `WEB_ONLY` limits (Voice/Inspector/CoT/Market), the verified
+  one-shot/provider boundaries for the two on-demand native subagents, and the
+  foreground/no-guaranteed-Job fact for Ralph. Availability/Source/Version/Fiber
+  remain separate Host facts.
 - **Standard upgrade guidance (v9 F10).** The Source group replaces the old
   single `Update not applied automatically` line with a fact derived only from
   `availability`, `canRemove`, `isSelf`, `version` and `installTarget`:
