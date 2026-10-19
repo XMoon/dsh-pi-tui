@@ -320,8 +320,13 @@ test('install inspection metadata and progress rows fold hostile values onto ONE
     isOpen: () => true,
     diag: createDiag({ filePath: undefined, stderrLevel: 'off' }),
   }, { observations: () => [] })
-  const panel = new PluginManagerPanel(controller, () => {})
-  panel.setMaxRows(40)
+  const panel = new PluginManagerWorkspacePanel(controller, {
+    rows: () => 40,
+    columns: () => 160,
+    requestRender: () => {},
+    notice: () => undefined,
+    onCopy: () => {},
+  })
   const assertPhysicalRows = (rendered: readonly string[], where: string): string => {
     const text = rendered.map(line => line.replace(/\x1b\[[0-9;]*m/g, '')).join('\n')
     for (const line of rendered) {
@@ -333,7 +338,7 @@ test('install inspection metadata and progress rows fold hostile values onto ONE
     return text
   }
 
-  controller.openInstall()
+  panel.handleInput('i')
   controller.inspect('pkg', null)
   await tick()
   assert.equal(controller.installView()?.phase, 'confirm')
@@ -356,6 +361,7 @@ test('install inspection metadata and progress rows fold hostile values onto ONE
 
   gate.resolve(change())
   await tick()
+  panel.dispose()
 })
 
 
