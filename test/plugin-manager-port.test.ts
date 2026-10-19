@@ -13,6 +13,7 @@ import { SELF_BUNDLE } from '../src/app/plugin-manager/classify.ts'
 import { PluginManagerController } from '../src/app/plugin-manager/controller.ts'
 import { createDiag } from '../src/runtime/process/diagnostics.ts'
 import { PLUGIN_ACTION, bundleValue, buildPluginDetailView, entryValue } from '../src/app/plugin-manager/model.ts'
+import { PluginManagerStaleResultError } from '../src/runtime/plugin-manager-port.ts'
 import type {
   PluginBundleFact,
   PluginChangeFact,
@@ -477,6 +478,47 @@ test('install cancel: too-late keeps the operation running and applying disables
   assert.match(controller.installView()?.message ?? '', /too late/)
   gate.resolve(change({ stage: 'install' }))
   await tick()
+})
+
+test('a stale-generation cancel is indeterminate and rereads the inventory', async () => {
+  const { port, state } = fakePort({
+    installImpl: () => new Promise<PluginChangeFact>(() => {}),
+    cancelImpl: async () => { throw new PluginManagerStaleResultError('cancelInstall') },
+  })
+  const { controller } = controllerOf(port)
+  controller.beginManualInstall()
+  controller.inspect('pkg', null)
+  await tick()
+  controller.confirmInstall()
+  await tick()
+  const before = state.snapshotCalls
+  controller.cancelInstall()
+  await tick()
+  assert.equal(controller.installView()?.phase, 'unknown')
+  assert.match(controller.installView()?.message ?? '', /superseded currentness context/)
+  assert.ok(state.snapshotCalls > before, 'the authoritative inventory is reread')
+  controller.dispose()
+})
+
+test('a stale-generation install reconcile is indeterminate and rereads the inventory', async () => {
+  const { port, state } = fakePort({
+    installImpl: async () => { throw new Error('carrier lost') },
+    waitImpl: async () => { throw new PluginManagerStaleResultError('waitForInstall') },
+  })
+  const { controller } = controllerOf(port)
+  controller.beginManualInstall()
+  controller.inspect('pkg', null)
+  await tick()
+  controller.confirmInstall()
+  await tick()
+  assert.equal(controller.installView()?.phase, 'unknown')
+  const before = state.snapshotCalls
+  controller.reconcileInstall()
+  await tick()
+  assert.equal(controller.installView()?.phase, 'unknown')
+  assert.match(controller.installView()?.message ?? '', /superseded currentness context/)
+  assert.ok(state.snapshotCalls > before, 'the authoritative inventory is reread')
+  controller.dispose()
 })
 
 test('a custom registry is validated before any Host dispatch', async () => {

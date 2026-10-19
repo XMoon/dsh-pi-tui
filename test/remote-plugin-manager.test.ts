@@ -509,3 +509,120 @@ test('a Remote mutation result carried by a superseded Connection generation is 
   assert.equal(change.stage, 'enable')
   assert.equal(change.target, 'bundle-a:true')
 })
+
+test('a Remote refusal or transport rejection after a generation change is indeterminate; the current generation keeps the real error', async (t) => {
+  const hold = <T>(call: () => Promise<T>): { pending: Promise<T>; release: () => void } => {
+    let release!: () => void
+    const gate = new Promise<void>(resolve => { release = resolve })
+    return { pending: (async () => { await gate; return call() })(), release }
+  }
+
+  // Official refusal carried by a superseded generation.
+  const refused = remoteFixture()
+  refused.refuse('setBundleEnabled', 'host refused')
+  const refusedOriginal = refused.pluginManager.setBundleEnabled
+  const refusedHold = hold(() => refusedOriginal('bundle-a', true))
+  refused.pluginManager.setBundleEnabled = () => refusedHold.pending
+  t.after(() => { refusedHold.release() })
+  const refusedGeneration = generationFixture(1)
+  const refusedPort = portOf(refused, refusedGeneration)
+  const refusedPending = refusedPort.setBundleEnabled('bundle-a', true)
+  refusedGeneration.set(2)
+  refusedHold.release()
+  await assert.rejects(refusedPending, error => error instanceof PluginManagerStaleResultError)
+
+  // Transport rejection carried by a superseded generation.
+  const lost = remoteFixture()
+  let releaseLost!: () => void
+  const lostGate = new Promise<void>(resolve => { releaseLost = resolve })
+  t.after(() => { releaseLost() })
+  lost.pluginManager.setBundleEnabled = async () => {
+    await lostGate
+    throw new Error('transport lost')
+  }
+  const lostGeneration = generationFixture(1)
+  const lostPort = portOf(lost, lostGeneration)
+  const lostPending = lostPort.setBundleEnabled('bundle-a', true)
+  lostGeneration.set(2)
+  releaseLost()
+  await assert.rejects(lostPending, error => error instanceof PluginManagerStaleResultError)
+
+  // An UNCHANGED generation keeps the genuine refusal and transport error.
+  const currentRefused = remoteFixture()
+  currentRefused.refuse('setBundleEnabled', 'host refused')
+  await assert.rejects(
+    portOf(currentRefused).setBundleEnabled('bundle-a', true),
+    /pluginManager\.setBundleEnabled failed: host refused/,
+  )
+  const currentLost = remoteFixture()
+  currentLost.pluginManager.setBundleEnabled = async () => { throw new Error('transport lost') }
+  await assert.rejects(portOf(currentLost).setBundleEnabled('bundle-a', true), /transport lost/)
+})
+
+test('installBundle, waitForInstall and cancelInstall settlements are generation-fenced', async (t) => {
+  const hold = <T>(call: () => Promise<T>): { pending: Promise<T>; release: () => void } => {
+    let release!: () => void
+    const gate = new Promise<void>(resolve => { release = resolve })
+    return { pending: (async () => { await gate; return call() })(), release }
+  }
+
+  // A successful install result carried by a superseded generation.
+  const startRemote = remoteFixture()
+  const startOriginal = startRemote.pluginManager.installBundle
+  const startHold = hold(() => startOriginal('pkg', { requestId: pluginInstallRequestId('r-start') }))
+  startRemote.pluginManager.installBundle = () => startHold.pending
+  t.after(() => { startHold.release() })
+  const startGeneration = generationFixture(1)
+  const startPort = portOf(startRemote, startGeneration)
+  const starting = startPort.startInstall({ requestId: 'r-start', spec: 'pkg', registry: null })
+  startGeneration.set(2)
+  startHold.release()
+  await assert.rejects(starting, error => error instanceof PluginManagerStaleResultError)
+
+  // A refused install result carried by a superseded generation.
+  const refusedRemote = remoteFixture()
+  refusedRemote.refuse('installBundle', 'install refused')
+  const refusedOriginal = refusedRemote.pluginManager.installBundle
+  const refusedHold = hold(() => refusedOriginal('pkg', { requestId: pluginInstallRequestId('r-refused') }))
+  refusedRemote.pluginManager.installBundle = () => refusedHold.pending
+  t.after(() => { refusedHold.release() })
+  const refusedGeneration = generationFixture(1)
+  const refusedPort = portOf(refusedRemote, refusedGeneration)
+  const refusedStarting = refusedPort.startInstall({ requestId: 'r-refused', spec: 'pkg', registry: null })
+  refusedGeneration.set(2)
+  refusedHold.release()
+  await assert.rejects(refusedStarting, error => error instanceof PluginManagerStaleResultError)
+
+  // waitForInstall (a real result) and cancelInstall settlements are fenced too.
+  const waitRemote = remoteFixture()
+  const waitOriginal = waitRemote.pluginManager.waitForInstall
+  const waitHold = hold(() => waitOriginal(pluginInstallRequestId('r-1')))
+  waitRemote.pluginManager.waitForInstall = () => waitHold.pending
+  t.after(() => { waitHold.release() })
+  const waitGeneration = generationFixture(1)
+  const waitPort = portOf(waitRemote, waitGeneration)
+  const waiting = waitPort.waitForInstall('r-1')
+  waitGeneration.set(2)
+  waitHold.release()
+  await assert.rejects(waiting, error => error instanceof PluginManagerStaleResultError)
+
+  const cancelRemote = remoteFixture()
+  const cancelOriginal = cancelRemote.pluginManager.cancelInstall
+  const cancelHold = hold(() => cancelOriginal(pluginInstallRequestId('r-1')))
+  cancelRemote.pluginManager.cancelInstall = () => cancelHold.pending
+  t.after(() => { cancelHold.release() })
+  const cancelGeneration = generationFixture(1)
+  const cancelPort = portOf(cancelRemote, cancelGeneration)
+  const cancelling = cancelPort.cancelInstall('r-1')
+  cancelGeneration.set(2)
+  cancelHold.release()
+  await assert.rejects(cancelling, error => error instanceof PluginManagerStaleResultError)
+
+  // The same settlements on an unchanged generation still resolve normally.
+  const currentStart = remoteFixture()
+  const currentPort = portOf(currentStart)
+  const started = await currentPort.startInstall({ requestId: 'r-current', spec: 'pkg', registry: null })
+  assert.equal(started.stage, 'install')
+  assert.deepEqual(await currentPort.waitForInstall('r-1'), { ...CHANGE, stage: 'install', target: 'r-1' })
+  assert.deepEqual(await currentPort.cancelInstall('r-1'), { status: 'cancelled' })
+})

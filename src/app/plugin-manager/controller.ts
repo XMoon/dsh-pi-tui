@@ -612,8 +612,17 @@ export class PluginManagerController {
       if (this.disposed) return
       const current = this.install
       if (current === undefined || current.requestId !== requestId) return
-      current.phase = 'installing'
-      current.message = `cancel failed: ${errorMessage(error)}`
+      if (error instanceof PluginManagerStaleResultError) {
+        // The cancellation belongs to a superseded currentness context: the
+        // Host may still be installing. This is INDETERMINATE, never a fake
+        // cancelled or a definite failure; reconcile the authoritative truth.
+        current.phase = 'unknown'
+        current.message = 'the cancellation result belongs to a superseded currentness context; check the installation status'
+        this.run('plugin manager read', () => this.read())
+      } else {
+        current.phase = 'installing'
+        current.message = `cancel failed: ${errorMessage(error)}`
+      }
       this.hooks.requestRender()
     }
   }
@@ -667,11 +676,13 @@ export class PluginManagerController {
 
   private async performReconcile(requestId: string): Promise<void> {
     let recovered: PluginChangeFact | null
+    let stale = false
     try {
       recovered = await this.port.waitForInstall(requestId)
     } catch (error) {
       recovered = null
-      if (!this.disposed) {
+      stale = error instanceof PluginManagerStaleResultError
+      if (!this.disposed && !stale) {
         const current = this.install
         if (current !== undefined && current.requestId === requestId) {
           current.message = `installation status check failed: ${errorMessage(error)}`
@@ -686,7 +697,9 @@ export class PluginManagerController {
       this.settleInstall(requestId, recovered)
       return
     }
-    current.message = 'no active Host request carries this id; inventory reread below'
+    current.message = stale
+      ? 'the status check belongs to a superseded currentness context; the authoritative inventory reread below decides the outcome'
+      : 'no active Host request carries this id; inventory reread below'
     this.run('plugin manager read', () => this.read())
     this.hooks.requestRender()
   }
