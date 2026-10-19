@@ -189,6 +189,7 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
   private lastPhase: string | undefined
   private lastNotice: string | undefined
   private lastAppNotice: string | undefined
+  private lastStatusState: 'loading' | 'ready' | 'error' | undefined
   private lastSelectedValue: string | undefined
   private lastFocus: 'list' | 'details' | undefined
   private lastFilter: PluginListFilter | undefined
@@ -1024,14 +1025,12 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
       ...(outcome?.registries === undefined ? [] : [
         `registries: ${outcome.registries.map(registry => maskedSource(registry ?? 'pnpm default')).join(', ')}`,
       ]),
-      ...(output === undefined
-        ? []
-        : output.split(/\r?\n/).filter(line => line !== '').map(line => sanitizedPhysicalLine(line))),
-      ...(output === undefined ? install.log.map(line => sanitizedPhysicalLine(line)) : []),
-    ].filter(line => line !== '')
-    const unique = [...new Set(lines)]
-    if (unique.length === 0) return
-    this.intents.onCopy(unique.join('\n'))
+      ...(output === undefined || output === ''
+        ? install.log.map(line => sanitizedPhysicalLine(line))
+        : output.split(/\r?\n/).map(line => sanitizedPhysicalLine(line))),
+    ]
+    if (lines.length === 0) return
+    this.intents.onCopy(lines.join('\n'))
   }
 
   private sanitizeSpecInput(): void {
@@ -1294,8 +1293,8 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     const model = this.controller.model()
     const install = this.controller.installView()
     const notice = this.controller.notice()
-    const appNotice = this.intents.notice?.()
-    const appNoticeKey = appNotice === undefined ? undefined : `${appNotice.kind}:${appNotice.text}`
+    const appNoticeKey = this.appNoticeKey()
+    const statusState = this.controller.status().state
     let changed = false
     if (this.lastRenderWidth >= 0 && (this.lastRenderWidth !== width || this.lastRenderRows !== rows)) changed = true
     if (this.lastModel !== model) { this.lastModel = model; changed = true }
@@ -1311,6 +1310,7 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     }
     if (this.lastNotice !== notice) { this.lastNotice = notice; changed = true }
     if (this.lastAppNotice !== appNoticeKey) { this.lastAppNotice = appNoticeKey; changed = true }
+    if (this.lastStatusState !== statusState) { this.lastStatusState = statusState; changed = true }
     if (this.lastSelectedValue !== this.selectedValue) { this.lastSelectedValue = this.selectedValue; changed = true }
     if (this.lastFocus !== this.focus) { this.lastFocus = this.focus; changed = true }
     if (this.lastFilter !== this.filter) { this.lastFilter = this.filter; changed = true }
@@ -1872,10 +1872,24 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
 
   /** True only while the live terminal geometry and state version still match
    * the frame whose hit map is installed in `paintedTargets`. */
+  private appNoticeKey(): string | undefined {
+    const notice = this.intents.notice?.()
+    return notice === undefined ? undefined : `${notice.kind}:${notice.text}`
+  }
+
+  /** True only while the live semantic facts AND terminal geometry still match
+   * the frame whose hit map is installed in `paintedTargets`. Comparing only
+   * the panel revision would miss an async controller model/phase/notice update
+   * whose queued repaint has not run yet. */
   private frameIsCurrent(): boolean {
     return this.paintedRevision === this.revision
       && this.lastRenderWidth === this.intents.columns()
       && this.lastRenderRows === this.intents.rows()
+      && this.controller.model() === this.lastModel
+      && this.controller.installView()?.phase === this.lastPhase
+      && this.controller.notice() === this.lastNotice
+      && this.appNoticeKey() === this.lastAppNotice
+      && this.controller.status().state === this.lastStatusState
   }
 
   private bumpRevision(): void {

@@ -375,6 +375,20 @@ test('a Host incompatible error states whether an exact-version exemption applie
   assert.ok(withExemption.groups.some(group => group.facts.some(fact =>
     fact.label === 'Exemption' && fact.tone === 'success' && /exempted for DSH 0\.2\.1-rc\.2/.test(fact.value))),
   'the exact accepted package-version exemption is shown')
+
+  // The REAL Host accepts an exempted package WITHOUT an incompatible error;
+  // the applied exemption still has to be visible on its card.
+  const accepted = buildPluginManagerModel(
+    snapshot([bundle({ name: 'accepted', version: '1.0.0', error: undefined })], []),
+    new Map(),
+  )
+  const acceptedCard = cardByName(accepted, 'accepted')!
+  const acceptedDetail = buildPluginDetailView(acceptedCard, [
+    { packageVersion: 'accepted@1.0.0', runtimeVersions: ['0.2.1-rc.2'] },
+  ])
+  assert.ok(acceptedDetail.groups.some(group => group.facts.some(fact =>
+    fact.label === 'Exemption' && fact.tone === 'success' && /accepted@1\.0\.0/.test(fact.value))),
+  'an applied exemption is visible even when the Host emitted no incompatible error')
 })
 
 test('installation, missing and standalone-entry cards never offer Remove', () => {

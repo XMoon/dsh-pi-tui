@@ -420,7 +420,7 @@ test('the REAL Host -> Direct port -> controller -> workspace page install chain
   vt.sendInput('\r') // apply search
   await settle()
   vt.sendInput('\r') // Details
-  await settle()
+  await waitFor(() => vt.getViewport().join('\n').includes('[Details]'), 'the Details focus frame')
   vt.sendInput('\r') // Disable…
   await waitFor(() => controller.model().cards.find(card => card.name === seeded.bundleName)?.enabled === false,
     'the real Host disable + authoritative reread')
@@ -437,4 +437,65 @@ test('the REAL Host -> Direct port -> controller -> workspace page install chain
     'the real Host removal + authoritative reread')
   assert.match(vt.getViewport().join('\n'), /No matching plugins|No plugins/)
   assert.equal((await port.snapshot()).bundles.find(candidate => candidate.name === seeded.bundleName), undefined)
+})
+
+
+test('an APPLIED real-Host version exemption reaches the card Detail without an incompatible error', async (t) => {
+  const life = testLifecycle(t)
+  const workRoot = life.tempDir('rc2-exempt-')
+  const seeded = seedInstallProfile(workRoot)
+  const profileDir = seeded.profileContext.dir as string
+  // This package requires an impossible engines.dsh; the profile's exact
+  // package-version exemption is the only reason the Host accepts it. The
+  // accepted row therefore has NO incompatible error, but its exemption must
+  // still be visible in the Detail.
+  writeFileSync(join(seeded.bundleDir, 'package.json'), JSON.stringify({
+    name: seeded.bundleName,
+    version: '1.0.0',
+    main: 'index.js',
+    engines: { dsh: '>=9' },
+    dsh: { bundle: { patch: 'cordis.patch.yml' } },
+  }, null, 2))
+  writeFileSync(join(profileDir, 'compatibility.json'), JSON.stringify({
+    [`${seeded.bundleName}@1.0.0`]: ['0.2.1-rc.2'],
+  }, null, 2))
+
+  const ctx = new Context()
+  life.defer(() => disposeContext(ctx))
+  ctx.provide('profileContext', seeded.profileContext as never)
+  await ctx.plugin(Loader)
+  await ctx.plugin(PluginManager, {})
+  const service = ctx.get('pluginManager') as unknown as PluginManagerServiceLike
+  const port = new DirectPluginManagerPort({ get: name => name === 'pluginManager' ? service : undefined, on: () => () => {} })
+
+  const installed = await port.startInstall({
+    requestId: 'rc2-exempt-install',
+    spec: seeded.bundleDir,
+    registry: null,
+    enabled: true,
+  })
+  assert.equal(installed.application, 'restart-required')
+  const snapshot = await port.snapshot()
+  const row = snapshot.bundles.find(bundle => bundle.name === seeded.bundleName)
+  assert.ok(row !== undefined)
+  assert.equal(row.error, undefined, 'the Host accepted the exempted package without an incompatible error')
+  assert.deepEqual(snapshot.exemptions, [
+    { packageVersion: `${seeded.bundleName}@1.0.0`, runtimeVersions: ['0.2.1-rc.2'] },
+  ])
+
+  const inputs: PluginClassificationInput[] = snapshot.bundles.map(bundle => ({
+    key: bundleValue(bundle.name),
+    bundleName: bundle.name,
+    entryIds: bundle.rows.flatMap(entry => entry.entryId === undefined ? [] : [String(entry.entryId)]),
+    official: bundle.official,
+    availability: bundle.availability,
+    installed: bundle.installed,
+    ...(bundle.source === undefined ? {} : { source: bundle.source }),
+  }))
+  const model = buildPluginManagerModel(snapshot, classifyPluginPackages(inputs, []))
+  const card = model.cards.find(candidate => candidate.name === seeded.bundleName)!
+  const detail = buildPluginDetailView(card, snapshot.exemptions)
+  assert.ok(detail.groups.some(group => group.facts.some(fact =>
+    fact.label === 'Exemption' && fact.tone === 'success' && fact.value.includes(`${seeded.bundleName}@1.0.0`))),
+  'the applied real-Host exemption is visible on the card')
 })
