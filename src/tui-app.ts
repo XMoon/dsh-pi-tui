@@ -2039,6 +2039,7 @@ type TranscriptRenderBlock = FocusProjectedBlock | TranscriptWorkBlock | Transcr
 interface CanonicalTranscriptIndex {
   readonly messages: readonly TranscriptMessage[]
   readonly turnActivities: ReadonlyMap<number, TurnActivity>
+  readonly structure: readonly TranscriptStructureBlock[]
   readonly workSpans: readonly TranscriptWorkSpan[]
   readonly workByMember: ReadonlyMap<TranscriptMessage, TranscriptWorkSpan>
   readonly clusterByMember: ReadonlyMap<TranscriptMessage, ContextCluster>
@@ -8152,6 +8153,7 @@ export class TuiApp {
     const next = {
       messages: this.messages,
       turnActivities: this.turnActivities,
+      structure,
       workSpans,
       workByMember: workByMemberOf(structure),
       clusterByMember: clusterByMemberOf(structure),
@@ -9904,11 +9906,13 @@ export class TuiApp {
   /** Find the presentation insertion point for one expanded Thought. The
    * live preview is the NEWEST turn event, so it lands after every durable row
    * of the turn — including a trailing persistent fence such as a settled
-   * surfaced-interaction card (the same boundary the Compact projection uses,
-   * so a live call never jumps back before it). projectFocus appends the
-   * held-back final assistant LAST, so the preview goes immediately before it.
-   * A turn without a projected activity is ignored rather than attaching a
-   * preview to an unrelated Thought. */
+   * surfaced-interaction card or a turnless command boundary (the same boundary
+   * the Compact projection uses, so a live call never jumps back before it).
+   * projectFocus appends the held-back final assistant LAST, so the preview
+   * goes immediately before it; otherwise the pending run belongs at the
+   * transcript tail, after any trailing turnless boundary rows. A turn without
+   * a projected activity is ignored rather than attaching a preview to an
+   * unrelated Thought. */
   private focusPreparingInsertionIndex(
     blocks: readonly TranscriptRenderBlock[],
     turn: number,
@@ -9928,7 +9932,15 @@ export class TuiApp {
       }
       if (block.kind === 'streaming-tool-previews') continue
       if (block.kind === 'pending-tail') continue
-      if (block.kind === 'work') continue
+      if (block.kind === 'work') {
+        // A collapsed nested Work is still a durable turn row: its members are
+        // inside the header block, not separate blocks.
+        if (block.span.turn === turn) {
+          lastTurnIndex = index
+          lastTurnIsHeldBackFinal = false
+        }
+        continue
+      }
       if (block.kind === 'context-cluster') {
         // A fullscreen mid-turn ambient cluster is a durable persistent fence:
         // the live call belongs AFTER it, exactly like a settled interaction
@@ -9946,8 +9958,16 @@ export class TuiApp {
     }
     if (activityIndex === -1) return undefined
     // The held-back final assistant is the LAST row projectFocus emits for the
-    // turn; insert before it. Otherwise insert after every durable row.
-    return lastTurnIsHeldBackFinal ? lastTurnIndex : lastTurnIndex + 1
+    // turn; insert before it.
+    if (lastTurnIsHeldBackFinal) return lastTurnIndex
+    // A pending run starts after every boundary that closed the previous run.
+    // In a live window this turn is the last one, so the transcript tail is the
+    // correct place (a turnless command/summary after the Work is a boundary,
+    // not a later turn). If the projection still carries a LATER turn, keep the
+    // preview next to its own turn instead.
+    const last = blocks.at(-1)
+    const trailingTurn = last === undefined ? undefined : this.focusLiveTurnOf(last)
+    return trailingTurn === undefined || trailingTurn === turn ? blocks.length : lastTurnIndex + 1
   }
 
   /** Build the rendered transcript blocks in visual order. Focus keeps the
@@ -9993,28 +10013,16 @@ export class TuiApp {
   }
 
   /** Whether one turn's contiguous Process run is still OPEN at the transcript
-   * tail: the LAST turn-bearing message of the window belongs to that turn and
-   * is a Work MEMBER under the projection's own canonical structure
-   * ({@link projectTranscriptStructure} + {@link workByMemberOf}). A foldable
-   * Snapshot Context row carried by the span therefore keeps the run open
-   * instead of turning a live Preparing call into a new pending run. ONLY an
-   * open run may absorb a live Preparing call. A live Preparing call is a
-   * Process row that has not landed durably yet, so once an Assistant / Context
-   * boundary — OR a settled surfaced-interaction card — has been recorded, the
-   * call starts a NEW run: drawing it back into the previous Work span would
-   * cross a chronology boundary the canonical projection forbids. */
+   * tail: the canonical structure's TRAILING block is a Work span of that turn.
+   * Any later standalone row is a hard boundary even when it carries no `turn`
+   * (a turnless `kind:'command'`, a window summary, a Context row): the live
+   * call then starts a NEW pending run rather than jumping back into the old
+   * Activity. A foldable Snapshot carried by the span keeps the run open
+   * because it is inside the same trailing Work, not a following block. ONLY an
+   * open run may absorb a live Preparing call. */
   private workRunOpenForTurn(turn: number): boolean {
-    const workByMember = this.canonicalStructureIndex().workByMember
-    for (let index = this.messages.length - 1; index >= 0; index -= 1) {
-      const message = this.messages[index]!
-      if (!('turn' in message)) continue
-      // The run is open only while the trailing turn-bearing row is a Work
-      // MEMBER under the SAME boundary authority the projection uses: a
-      // settled surfaced-interaction card (question / Plan review) closes the
-      // run even though its base semantic class stays `process`.
-      return message.turn === turn && workByMember.has(message)
-    }
-    return false
+    const last = this.canonicalStructureIndex().structure.at(-1)
+    return last?.kind === 'work' && last.span.turn === turn
   }
 
   /**

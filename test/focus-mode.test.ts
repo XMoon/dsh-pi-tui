@@ -3962,6 +3962,49 @@ test('collapsed Focus hides an opening Snapshot Context in the Thought and resto
   assert.ok(snapshotIndex > thoughtIndex, 'the Snapshot lives inside the expanded Thought content')
 })
 
+test('a Snapshot before the initial user stays in raw foundation order, never hidden', () => {
+  const folder = new TranscriptFolder()
+  applyMixed(folder, [
+    eventAt('turn/start', { turn: 0 }, 3500, 0),
+    snapshotContext(0, 'pre-user-snapshot', 'PRE_USER_SNAPSHOT reading', 3501, 1),
+    eventAt('user/message', {
+      id: MessageId('pre-user-prompt'), role: 'user',
+      content: [{ type: 'text', text: 'prompt after the snapshot' }],
+      source: { kind: 'user' },
+    }, 3502, 2),
+    eventAt('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'reasoning-delta', index: 0, text: 'reasoning' } }, 3503, 3),
+    eventAt('tool/call', { turn: 0, step: 0, callId: ToolCallId('pre-user-call'), name: 'read', arguments: '{}' }, 3504, 4),
+    eventAt('tool/result', {
+      turn: 0, step: 0,
+      message: {
+        id: MessageId('pre-user-result'), role: 'tool', toolCallId: ToolCallId('pre-user-call'),
+        content: [{ type: 'text', text: 'ok' }], source: { kind: 'tool', callId: ToolCallId('pre-user-call') },
+      },
+    }, 3505, 5),
+    eventAt('assistant/message', {
+      turn: 0, step: 1,
+      message: { id: MessageId('pre-user-final'), role: 'assistant', content: [{ type: 'text', text: 'done' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+    }, 3506, 6),
+    eventAt('turn/end', { turn: 0, reason: { kind: 'completed' } }, 3507, 7),
+  ])
+  const messages = folder.messages()
+  const snapshot = messages.find(message => message.kind === 'system')
+  assert.ok(snapshot !== undefined)
+  assert.ok(messages.indexOf(snapshot) < messages.findIndex(message => message.kind === 'user'),
+    'fixture: the Snapshot precedes the initial user')
+  const activities = folder.turnActivities()
+  const collapsed = projectTools(messages, activities, new Set())
+  assert.deepEqual(blockKinds(collapsed), ['system', 'user', 'activity', 'assistant'],
+    'a pre-user Snapshot must remain visible at its raw foundation position')
+  const snapshotRow = collapsed.findIndex(block => block.kind === 'message' && block.message === snapshot)
+  const userRow = collapsed.findIndex(block => block.kind === 'message' && block.message.kind === 'user')
+  assert.ok(snapshotRow >= 0 && snapshotRow < userRow, 'the Snapshot stays BEFORE the initial user')
+  const expanded = projectTools(messages, activities, new Set([0]))
+  assert.deepEqual(blockKinds(expanded), ['system', 'user', 'activity', 'thinking', 'tool', 'assistant'],
+    'expanded Focus keeps the same raw foundation order')
+  assert.equal(expanded.filter(block => block.kind === 'message' && block.message === snapshot).length, 1)
+})
+
 test('a Snapshot-only turn hides its rows only when a real Thought owner exists', () => {
   const folder = new TranscriptFolder()
   applyMixed(folder, [

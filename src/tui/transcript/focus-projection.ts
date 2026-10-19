@@ -327,6 +327,7 @@ export function projectFocus(
     const foldableSnapshots: CollapsedFoldableSnapshotScope = {
       clusterByMember: clusterAdjacentAmbientContext(group).byMember,
       thoughtOwned: activity !== undefined,
+      initialUserIndex: group.findIndex(member => member.kind === 'user' && member.steer !== true),
     }
     const firstCommittedIndex = group.findIndex(isCommittedAnswer)
     const hidden: TranscriptMessage[] = []
@@ -481,10 +482,15 @@ type CollapsedFocusRowDisposition = 'pre-thought' | 'post-thought' | 'hidden'
 /** The Snapshot Context rows a collapsed Thought may carry instead of
  * surfacing as turn foundation. `thoughtOwned` is false where no Thought
  * block will be emitted (a truncated window without an activity) — the rows
- * then fail open instead of disappearing. */
+ * then fail open instead of disappearing. `initialUserIndex` is the first
+ * non-steer human row: a Snapshot positioned BEFORE it is causal foundation
+ * and must never be moved across the user (fail open), even when the turn has
+ * a real Thought. `-1` means the turn has no initial user, so every Snapshot
+ * keeps its raw foundation position. */
 interface CollapsedFoldableSnapshotScope {
   readonly clusterByMember: ReadonlyMap<TranscriptMessage, ContextCluster>
   readonly thoughtOwned: boolean
+  readonly initialUserIndex: number
 }
 
 function collapsedFocusRowDisposition(
@@ -495,6 +501,8 @@ function collapsedFocusRowDisposition(
 ): CollapsedFocusRowDisposition {
   if (!isFocusPersistentInputRow(message)) return 'hidden'
   if (foldableSnapshots.thoughtOwned
+    && foldableSnapshots.initialUserIndex >= 0
+    && index > foldableSnapshots.initialUserIndex
     && isFoldableSnapshotContext(message, foldableSnapshots.clusterByMember)) return 'hidden'
   if (index >= leadBoundary && isNoticeContext(message)) return 'post-thought'
   return 'pre-thought'

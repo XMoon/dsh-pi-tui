@@ -852,3 +852,78 @@ test('T-snapshot: a snapshot-only cluster renders as a native card inside the Wo
   assert.ok(contextText.includes('SNAPSHOT_TSP_A') && contextText.includes('SNAPSHOT_TSP_B'),
     `both Snapshot bodies stay reachable through the native tree:\n${contextText}`)
 })
+
+test('T-snapshot ops: a standalone Snapshot cluster reparents into Work with local ops only', () => {
+  const snapshotEvent = (seq: number, id: string, text: string): SessionEvent =>
+    userMessage(seq, id, text, { kind: 'time-context', form: 'snapshot', sections: [{ name: 'time-context', body: text }] })
+  const folder = new TranscriptFolder()
+  folder.apply([
+    ev('turn/start', { turn: 1 }, 0),
+    userMessage(1, 'snap-ops-u1', 'go'),
+    snapshotEvent(2, 'snap-ops-a', 'SNAPSHOT_OPS_A'),
+    snapshotEvent(3, 'snap-ops-b', 'SNAPSHOT_OPS_B'),
+  ])
+  const keys = new TranscriptNodeKeys()
+  const before = viewOf(folder, keys)
+  const user = rowOf(folder, message => message.kind === 'user')
+  const first = rowOf(folder, message => message.kind === 'system' && message.text === 'SNAPSHOT_OPS_A')
+  const second = rowOf(folder, message => message.kind === 'system' && message.text === 'SNAPSHOT_OPS_B')
+  const userNodeId = `main.${keys.keyFor(user)}`
+  const standaloneClusterId = `main.ctx-${keys.keyFor(first)}`
+  assert.equal(nodeOf(before, standaloneClusterId).kind, 'card', 'fixture: the snapshot-only cluster is a standalone card')
+  assert.equal(nodeOf(before, standaloneClusterId).parent, 'main')
+
+  // The first durable Process arrives: the SAME retained carrier objects move
+  // under a new Work section (a legitimate parent migration).
+  folder.apply([toolCall(4, 'snap-ops-c1', 'read', { path: 'a.ts' })])
+  const after = viewOf(folder, keys)
+  const ops = before.ops(after, 's1')
+  const deleted = opIds(ops, 'del')
+  const added = opIds(ops, 'add')
+  const workId = `main.work-${keys.keyFor(first)}`
+  const nestedClusterId = `${workId}.ctx-${keys.keyFor(first)}`
+  assert.ok(deleted.has(standaloneClusterId), 'the standalone Context card is legitimately removed')
+  assert.ok(added.has(workId), 'the Work section is added')
+  // The SDK carries the moved subtree inside the single `add` payload; its
+  // nested ids are therefore asserted on that payload, not as separate ops.
+  const workAdd = ops.find(op => op[0] === 'add' && op[1] === workId)
+  assert.ok(workAdd !== undefined)
+  const workAddPayload = JSON.stringify(workAdd)
+  assert.ok(workAddPayload.includes(nestedClusterId), 'the Context card is re-added under the Work')
+  assert.ok(workAddPayload.includes(`${nestedClusterId}.${keys.keyFor(first)}`),
+    'the first migrated snapshot member is re-added under the nested card')
+  assert.ok(workAddPayload.includes(`${nestedClusterId}.${keys.keyFor(second)}`),
+    'the second migrated snapshot member is re-added under the nested card')
+  // Only the migrated snapshot subtree changes: the unrelated user identity is
+  // never remounted/rewritten.
+  const touched = new Set([...opIds(ops, 'add'), ...opIds(ops, 'del'), ...opIds(ops, 'set'), ...opIds(ops, 'text')])
+  assert.ok(!touched.has(userNodeId), 'the untouched user card is never rewritten')
+  for (const id of deleted) {
+    assert.ok(id !== undefined, 'a del op always carries a target id')
+    assert.ok(id === standaloneClusterId || id.startsWith(`${standaloneClusterId}.`),
+      `unexpected deletion outside the migrated Context subtree: ${id}`)
+  }
+  for (const id of added) {
+    assert.ok(id !== undefined, 'an add op always carries a target id')
+    assert.ok(id === workId || id.startsWith(`${workId}.`),
+      `unexpected addition outside the new Work subtree: ${id}`)
+  }
+  assert.equal(nodeOf(after, userNodeId).kind, 'card', 'the user identity survives the migration')
+
+  // A later final assistant is added standalone and never disturbs the Work.
+  folder.apply([
+    ev('assistant/message', {
+      turn: 1, step: 1,
+      message: { id: MessageId('snap-ops-final'), role: 'assistant', content: [{ type: 'text', text: 'done' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+    }, 5),
+    ev('turn/end', { turn: 1, reason: { kind: 'completed' } }, 6),
+  ])
+  const final = viewOf(folder, keys)
+  const finalOps = after.ops(final, 's2')
+  const assistant = rowOf(folder, message => message.kind === 'assistant')
+  assert.ok(opIds(finalOps, 'add').has(`main.${keys.keyFor(assistant)}`), 'the new final assistant is added')
+  const touchedFinal = new Set([...opIds(finalOps, 'add'), ...opIds(finalOps, 'del'), ...opIds(finalOps, 'set'), ...opIds(finalOps, 'text')])
+  assert.ok(!touchedFinal.has(workId), 'the Work section is not rewritten')
+  assert.ok(!touchedFinal.has(nestedClusterId), 'the nested Context card is not rewritten')
+  assert.equal(opIds(finalOps, 'del').size, 0, 'nothing is deleted')
+})

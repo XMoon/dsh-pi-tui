@@ -197,6 +197,17 @@ TuiApp.setTranscript(...)        onTranscriptProjected (absent in production)
 - `src/tui/transcript/structure.ts` → `projectTranscriptStructure()` remains the
   ONLY Work/Context/standalone segmentation authority; the TSP mapper consumes
   its blocks and never re-groups rows.
+- **Snapshot Context carriage (2026-10-19).** The mapper renders the canonical
+  `TranscriptWorkSpan.parts`: a snapshot-only Context cluster carried by a Work
+  becomes a nested `ui.card` inside the Work `ui.section` (member cards stay
+  under that card) instead of a top-level card. A retained Snapshot whose parent
+  changes from standalone to Work-internal therefore legitimately produces a
+  local `del` of the old top-level card plus one `add` carrying the new Work
+  subtree; the Work and unrelated user/assistant node ids stay stable. Covered
+  by `test/tern-tsp-transcript-spike.test.ts` (`View.from` + `View.ops`) against
+  the pinned `@stencil-hq/tern@0.1.0`; no real Tern pane/GUI was run for this
+  exact nested combination, so its visual reading remains **GUI_NOT_VERIFIED**
+  (no new interaction target or surface is introduced).
 - One fold, one window, one currentness authority. The TSP path adds neither a
   second `TranscriptFolder`, nor a second SessionEvent subscription, nor a new
   Host port, nor a Host service read (`src/app/surface/**` stays Host-free and is
@@ -215,7 +226,7 @@ TuiApp.setTranscript(...)        onTranscriptProjected (absent in production)
 |---|---|
 | `scripts/tern-tsp-transcript-spike.mts` | Manually runnable: SDK `connect` → one `inline` surface → deterministic replay of genuine `SessionEvent`/live inputs into a `TranscriptFolder` → `n` advances, `q`/Ctrl+C closes with `keep: false`. Direct execution is guarded. |
 | `scripts/support/tern-tsp-transcript-view.ts` | Pure `TranscriptStructureBlock[] → native TSP node` mapper, plus `TranscriptNodeKeys`, the replay-local presentation-key allocator. |
-| `test/tern-tsp-transcript-spike.test.ts` | 23 tests: canonical projection, mapper nodes, `View.ops` deltas, duplicate-key `ViewError` control, interaction/command/orphan cards, Context bodies, lifecycle and isolation. |
+| `test/tern-tsp-transcript-spike.test.ts` | 27 tests: canonical projection, mapper nodes, `View.ops` deltas, duplicate-key `ViewError` control, interaction/command/orphan cards, Context bodies, lifecycle and isolation. |
 
 ### PR2 — live projection observation seam (this PR)
 
