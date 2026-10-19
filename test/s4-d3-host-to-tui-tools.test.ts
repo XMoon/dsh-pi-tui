@@ -282,10 +282,14 @@ test('B07: the real retained terminal result, Job and close state reach the moun
   assert.match(overlay.replace(/\s+/gu, ' '), /pty-send · pty-1: sleep 0\.2; echo BG_OK/u,
     `the exact Host Job row is in the Task Center overlay:\n${overlay}`)
   assert.match(overlay.replace(/\s+/gu, ' '), /status completed/iu)
-  // Enter opens the existing Job reader; the retained output is visible there.
+  // Enter opens the existing Job reader as a dedicated SCREEN; the pinned
+  // retained-preview disclosure is unique to that reader (the transcript's
+  // earlier BG_OK cannot witness it). The selected Job's output is then read
+  // from the same reader.
   app.vt.sendInput('\r')
   await app.settle()
-  await app.waitFor(() => /Retained preview|BG_OK/iu.test(app.view()), 'the selected Job reader')
+  await app.waitFor(() => app.view().includes('Retained preview · not full history'), 'the selected Job reader')
+  assert.match(app.view(), /BG_OK/u, 'the selected Job reader shows the retained output')
 
   // A closed terminal truly released its process tree.
   await app.waitFor(() => {

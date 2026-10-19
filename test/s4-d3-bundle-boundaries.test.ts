@@ -275,6 +275,17 @@ function followup(agent: Agent, text: string): void {
   agent.followup(createUserMessage({ content: [{ type: 'text', text }], source: { kind: 'user' } }))
 }
 
+/** The exact durable Tool result of one call id (never the arguments card). */
+function toolResultOf(agent: Agent, callId: string): string | undefined {
+  for (const event of agent.session.snapshotEvents() as readonly { readonly type?: string; data?: unknown }[]) {
+    if (event.type !== 'tool/result') continue
+    const message = (event.data as { message?: { toolCallId?: unknown; content?: readonly { text?: string }[] } }).message
+    if (String(message?.toolCallId) !== callId) continue
+    return (message?.content ?? []).map(block => block.text ?? '').join('')
+  }
+  return undefined
+}
+
 const B01 = '@deepseek-ai/dsh-experimental-agent-team-profile' satisfies S4D2BundleId
 const B03 = '@deepseek-ai/dsh-experimental-auto-review' satisfies S4D2BundleId
 
@@ -322,12 +333,27 @@ test('B01: the mounted TUI keeps Team capability in the existing Tool/Activity v
   )
   followup(agent, 'Create one shared Team task')
   await agent.whenIdle()
-  await app.waitFor(() => app.view().includes('team_task_create'), 'the real Team tool card')
-  await app.waitFor(() => app.view().includes('Scout one file'), 'the real Team task result in the Tool output')
+  const created = toolResultOf(agent, 's4d3-b01-task')
+  assert.match(created ?? '', /"id"\s*:|"revision"\s*:/u,
+    'the EXACT team_task_create Tool result is the official JSON task record')
+  await app.waitFor(() => app.view().includes('team_task_create'), 'the real Team create Tool card')
+
+  // The shared board read returns the created subject through the same Agent
+  // and the existing Tool output (never a Team board).
+  adapter.scripts.push(
+    { kind: 'tool', name: 'team_task_list', callId: 's4d3-b01-list', arguments: '{}' },
+    { kind: 'text', text: 'Team task listed.' },
+  )
+  followup(agent, 'List the shared Team task')
+  await agent.whenIdle()
+  const listed = toolResultOf(agent, 's4d3-b01-list')
+  assert.match(listed ?? '', /Scout one file/u,
+    'the EXACT team_task_list Tool result carries the created subject')
+  await app.waitFor(() => app.view().includes('team_task_list'), 'the real Team list Tool card')
   for (const character of '/tasks') app.vt.sendInput(character)
   await app.settle()
   app.vt.sendInput('\r')
-  await app.waitFor(() => /Task|tasks/iu.test(app.view()), 'the existing Task/Activity surface')
+  await app.waitFor(() => app.view().includes('Tasks ['), 'the existing Task/Activity overlay')
   assert.doesNotMatch(app.view(), /Team board|Team roster/u, 'no Team board page is invented')
 })
 
