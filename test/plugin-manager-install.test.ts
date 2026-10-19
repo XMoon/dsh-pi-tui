@@ -450,6 +450,47 @@ test('a recently completed install also reopens without a new request', async ()
   page.dispose()
 })
 
+test('every pending package name must be fully visible before Approve is admitted', async () => {
+  const pending = ['@vendor/' + 'a'.repeat(40), '@other/' + 'b'.repeat(40)]
+  const { controller, installCalls, gate } = harness()
+  controller.beginManualInstall()
+  controller.inspect('pkg', null)
+  await tick()
+  controller.confirmInstall()
+  await tick()
+  gate.resolve(change({ application: 'failed', pendingBuilds: pending }))
+  await tick()
+
+  const tall = new PluginManagerWorkspacePanel(controller, {
+    rows: () => 24,
+    columns: () => 80,
+    requestRender: () => {},
+    notice: () => undefined,
+    onCopy: () => {},
+  })
+  const tallFrame = tall.render(80).join('\n')
+  for (const name of pending) {
+    assert.ok(tallFrame.includes(`- ${name}`), `the full pending name is visible: ${name}`)
+  }
+  assert.match(tallFrame, /execute scripts with your user privileges/)
+  assert.match(tallFrame, /Approve and retry/)
+  tall.dispose()
+
+  const short = new PluginManagerWorkspacePanel(controller, {
+    rows: () => 10,
+    columns: () => 80,
+    requestRender: () => {},
+    notice: () => undefined,
+    onCopy: () => {},
+  })
+  const shortFrame = short.render(80).join('\n')
+  assert.doesNotMatch(shortFrame, /Approve/, 'a truncated package list removes Approve')
+  short.handleInput('\r')
+  await tick()
+  assert.equal(installCalls.length, 1, 'the short frame cannot authorize hidden package scripts')
+  short.dispose()
+})
+
 test('an unknown install reopens with its request id and reconciliation action', async () => {
   const rejected = new PluginManagerController({
     snapshot: async () => emptySnapshot(),
