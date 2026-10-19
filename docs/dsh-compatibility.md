@@ -189,6 +189,20 @@ a refused write is reported as `Not saved` (never as a success).
   web-provider configuration, so no Host namespace or secret is ever named
   client-side.
 
+### Model catalog (`/model`)
+
+The official rc.2 `@deepseek-ai/dsh-llm-deepseek` catalog lists
+`id: deepseek-flash` with the display name `DeepSeek-V4.1-Flash` (plus
+`deepseek-v4-pro`). `/model` keeps the official provider catalog as its only
+source: the picker projects the exact `(provider, model)` identity, searches
+both the id and the display name, and commits the id — never the display name,
+a Web badge or a locally injected row. A deployment that overrides
+`llm-deepseek`'s `models` array is authoritative: when the effective catalog
+omits `deepseek-flash`, the picker does not show or submit it. An empty official
+catalog (for example the API-key provider without a configured credential and
+without discovery) is shown as no models rather than silently filled from a
+hard-coded list.
+
 ## Data compatibility
 
 Runtime compatibility and data compatibility are separate. A 0.4 runtime

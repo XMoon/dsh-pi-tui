@@ -2183,3 +2183,112 @@ test('a hostile single-row model label keeps its painted click map', async () =>
     `the click map must address the collapsed row itself:\n${rendered.join('\n')}`)
   h.app.stop()
 })
+
+// ── D3-3: the exact rc.2 deepseek-flash catalog route ──────────────────────
+
+import { credentialRef } from '@deepseek-ai/dsh-credentials'
+import { LlmAdapter, type StreamChunk } from '@deepseek-ai/dsh-llm'
+import { startS4D3Application } from './support/s4-d3-application-fixture.ts'
+import { skippedInstallationReason } from './support/s4-d2-optional-bundle-fixture.ts'
+
+class FlashAdapter extends LlmAdapter {
+  override resolveModel(provider: string, model: string): Promise<{ provider: string; id: string; name: string }> {
+    return Promise.resolve({ provider, id: model, name: model })
+  }
+  override async *stream(): AsyncIterable<StreamChunk> {
+    yield { type: 'block-start', index: 0, blockType: 'text' }
+    yield { type: 'text-delta', index: 0, text: 'ready' }
+    yield { type: 'block-end', index: 0, block: { type: 'text', text: 'ready' } }
+    yield { type: 'finish', reason: { kind: 'stop' } }
+  }
+}
+
+test('the real rc.2 DeepSeek catalog exposes deepseek-flash to the mounted /model picker and commits it', { skip: skippedInstallationReason([]) }, async t => {
+  const adapter = new FlashAdapter()
+  const app = await startS4D3Application(t, {
+    bundles: [],
+    columns: 120,
+    rows: 36,
+    patches: [{ id: 'agent-default-model', config: { provider: 'scripted', model: 'review-model' } }] as never,
+    prepareHost: async host => {
+      host.ctx.llm.registerAdapter(['scripted'], adapter)
+      await (host.ctx.get('credentials') as { set(ref: unknown, secret: string): Promise<unknown> })
+        .set(credentialRef('DEEPSEEK_API_KEY'), 'd3-test-key')
+    },
+  })
+  // The REAL published catalog: exact id + display name through the official
+  // Host adapter (never a TUI-injected row), with no network call.
+  const llm = app.host.ctx.llm as unknown as {
+    listModels(provider: string): Promise<readonly { id: string; name?: string }[]>
+    resolveModelInfo(provider: string, model: string): Promise<{ name?: string }>
+  }
+  const models = await llm.listModels('deepseek-official')
+  const flash = models.find(model => model.id === 'deepseek-flash')
+  assert.ok(flash !== undefined, `the official catalog carries deepseek-flash: ${JSON.stringify(models)}`)
+  assert.equal(flash!.name, 'DeepSeek-V4.1-Flash')
+  assert.equal((await llm.resolveModelInfo('deepseek-official', 'deepseek-flash')).name, 'DeepSeek-V4.1-Flash')
+  assert.notEqual(models.find(model => model.name === 'DeepSeek-V4.1-Flash')?.id, 'DeepSeek-V4.1-Flash',
+    'the display name is never used as the model ID')
+
+  const agent = await app.submitFirstPrompt('Start the model route check')
+  await agent.whenIdle()
+  // `/model` through the production command path, then search the exact id.
+  for (const character of '/model') app.vt.sendInput(character)
+  await settle()
+  app.vt.sendInput('\r')
+  await settle()
+  if ((app.vt.getViewport().join('\n')).includes('❯ /model')) {
+    app.vt.sendInput('\r')
+    await settle()
+  }
+  for (const character of 'deepseek-flash') app.vt.sendInput(character)
+  await new Promise<void>(resolve => setTimeout(resolve, 200))
+  const list = app.vt.getViewport().map(line => line.replace(/\x1b\[[0-9;]*m/gu, '')).join('\n')
+  assert.match(list, /DeepSeek-V4.1-Flash/u, `the real flash row is listed:\n${list}`)
+  app.vt.sendInput('\r') // select the highlighted exact identity
+  await new Promise<void>(resolve => setTimeout(resolve, 250))
+  // A model with declared reasoning efforts opens the SAME panel's effort
+  // choice; accept its default with the next Enter (the real apply path).
+  if (/\beffort\b/iu.test(app.vt.getViewport().join('\n'))) {
+    app.vt.sendInput('\r')
+    await new Promise<void>(resolve => setTimeout(resolve, 300))
+  }
+  const durable = agent.session.snapshotEvents() as readonly { readonly type?: string; readonly data?: unknown }[]
+  const selection = durable.filter(event => event.type === 'model/selection').at(-1)?.data as
+    | { provider?: string; model?: string }
+    | undefined
+  const selected = selection ?? (agent.session.requestHeader() as { config?: { provider?: string; model?: string } } | undefined)?.config
+  assert.deepEqual({ provider: selected?.provider, model: selected?.model }, {
+    provider: 'deepseek-official',
+    model: 'deepseek-flash',
+  }, 'the exact provider+model identity is committed, never the display name')
+
+  // Reopen: the committed selection carries the current marker.
+  for (const character of '/model') app.vt.sendInput(character)
+  await settle()
+  app.vt.sendInput('\r')
+  await settle()
+  await new Promise<void>(resolve => setTimeout(resolve, 250))
+  const reopened = app.vt.getViewport().map(line => line.replace(/\x1b\[[0-9;]*m/gu, ''))
+  const flashRow = reopened.findIndex(line => line.includes('DeepSeek-V4.1-Flash'))
+  assert.ok(flashRow >= 0, `the reopened picker lists the model:\n${reopened.join('\n')}`)
+  assert.match(reopened[flashRow]!, /current/u, 'the reopened picker marks the exact (provider,model) current')
+})
+
+test('without a readable official catalog deepseek-flash is absent, never fabricated', { skip: skippedInstallationReason([]) }, async t => {
+  const app = await startS4D3Application(t, { bundles: [], columns: 120, rows: 36 })
+  const llm = app.host.ctx.llm as unknown as { listModels(provider: string): Promise<readonly { id: string }[]> }
+  assert.deepEqual(await llm.listModels('deepseek-official'), [], 'no credential and no discovery result')
+  for (const character of '/model') app.vt.sendInput(character)
+  await settle()
+  app.vt.sendInput('\r')
+  await settle()
+  await new Promise<void>(resolve => setTimeout(resolve, 200))
+  const frame = app.vt.getViewport().map(line => line.replace(/\x1b\[[0-9;]*m/gu, ''))
+  const top = frame.findIndex(line => line.includes('Models'))
+  assert.ok(top >= 0, `the /model picker opened:\n${frame.join('\n')}`)
+  const left = frame[top]!.indexOf('╭')
+  const overlay = frame.slice(top).map(line => line.slice(left)).join('\n')
+  assert.doesNotMatch(overlay, /deepseek-flash|DeepSeek-V4\.1-Flash/u,
+    'the picker never fabricates a model row the Host did not offer')
+})
