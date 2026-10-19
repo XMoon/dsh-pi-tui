@@ -687,6 +687,18 @@ export const TERMINAL_RESULT_TOOLS: ReadonlySet<string> = new Set(['bash', 'pwsh
 /** First lines of a multi-line text, joined for folded previews. */
 function preview(text: string, lines: number): string {
   const parts = text.split('\n')
+  // A final newline TERMINATES the last record; it is not a hidden record.
+  if (text.endsWith('\n') && parts[parts.length - 1] === '') parts.pop()
+  // A non-empty tail that the plain policy reduces to '' is only terminal
+  // style/control (e.g. an `ESC[0m` after the final newline): no visible
+  // record is hidden behind it. Genuinely blank records are NOT trimmed here
+  // (an empty segment is left in place), and a tail with visible whitespace
+  // stays a record.
+  while (parts.length > 0) {
+    const tail = parts[parts.length - 1]
+    if (tail === undefined || tail === '' || sanitizeDisplayText(tail) !== '') break
+    parts.pop()
+  }
   const dropped = parts.length > lines
   const first = parts.slice(0, lines).join(' ').trim()
   // Width-based truncation, not code-unit slicing: a raw slice can split a

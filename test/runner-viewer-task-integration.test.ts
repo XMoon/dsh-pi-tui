@@ -1712,8 +1712,13 @@ test('a parked continued Question is reachable and reopenable from the Task Cent
   let queuedReply = false
   let projectionListener: (() => void) | undefined
   const questionsProjection = context.provide('sessionProjections', {
-    stateOf: (_session: unknown, key: string): unknown => key === 'userQuestions'
-      ? {
+    // Model each read the production runner actually makes: the parked
+    // Question unit and the inbox. `agentPreset` is a STRING projection (the
+    // welcome card and composition read it); returning the inbox shape for it
+    // violated the contract and crashed the card during startup.
+    stateOf: (_session: unknown, key: string): unknown => {
+      if (key === 'userQuestions') {
+        return {
           questions: {
             active: [{
               callId: 'call-parked',
@@ -1723,10 +1728,13 @@ test('a parked continued Question is reachable and reopenable from the Task Cent
             settled: [],
           },
         }
-      : {
-          'next-step': queuedReply ? [{ source: { kind: 'user-question-reply', callId: 'call-parked' } }] : [],
-          'next-turn': [],
-        },
+      }
+      if (key === 'agentPreset') return undefined
+      return {
+        'next-step': queuedReply ? [{ source: { kind: 'user-question-reply', callId: 'call-parked' } }] : [],
+        'next-turn': [],
+      }
+    },
     onChanged: (listener: (session: unknown, key: string) => void) => {
       // The adapter filters by owning session + projected unit, so the
       // notification carries the real arguments (an argument-less call would be
