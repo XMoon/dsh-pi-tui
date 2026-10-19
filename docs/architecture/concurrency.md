@@ -289,8 +289,8 @@ Consequences that are part of the contract:
 
 ### Write settlement
 
-D2.1 makes the current Direct writes asynchronous at the semantic boundary
-without changing the ownership or ordering rules:
+The current Direct writes are asynchronous at the semantic boundary without
+changing the ownership or ordering rules:
 
 - Ordinary input uses `SessionWriter.prompt(sessionId, message, mode)`;
   `queue` and `steer` are explicit. Direct Agent admission exceptions settle as
@@ -409,13 +409,13 @@ attachment preparation cannot let a later gesture overtake an earlier one.
   — the create uses the actual Host default, it does NOT seed the failed
   selection (a fabricated choice would freeze a default the user never
   durably set, and the sticky failure would leak into later creates). The
-  global default is BEST-EFFORT Host state (plan §6.1): a fencing correction
+  global default is BEST-EFFORT Host state: a fencing correction
   that itself fails is warned and leaves the persisted default stale until the
   next save — it never becomes durable Session authority.
 - Fresh create has NO blind retry: one Host dispatch, and a post-publication
   create error is never reported as "the Session was never created" — the
-  requested/published identity is preserved for later reconciliation (D2.4
-  closes the full reconnect-settlement matrix). `/new` keeps the old surface
+  requested/published identity is preserved for later reconciliation. `/new`
+  keeps the old surface
   until the create commits.
 - Remote open is a Client selection, not Host activation:
   `ClientSessions.open()/binding()`. It fails closed for an unaddressable

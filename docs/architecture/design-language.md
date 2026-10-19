@@ -1,6 +1,6 @@
-# TUI design language (v1)
+# TUI design language
 
-> **Status: FROZEN v1.** §1.3 records the Owner decisions and amendments
+> §1.3 records the Owner decisions and amendments
 > (`D5`: the status keeps a glyph marker; `D7`: that marker is `‣`, not `∙`;
 > `D16`: X061/X062 are the only authorized `packages/pi-tui/**` divergences for
 > the settings row state). Any later change to the vocabulary follows §11.1 and
@@ -39,7 +39,7 @@ This is a presentation contract. It must never silently change:
   `PaneBox` geometry. Vocabulary may change; measured geometry may not drift
   without a test update in the same PR.
 - The live theme owner (`src/tui/theme/runtime.ts`) and the palette vocabulary
-  (`src/domain/display/theme.ts`). v1 adds **no** colour token.
+  (`src/domain/display/theme.ts`). This contract adds **no** colour token.
 - The vendored fork (`packages/pi-tui/**`). Nothing here justifies a divergence
   on its own; the only authorized exception is an Owner amendment recorded in
   §1.3 (`D16`, X061/X062).
@@ -167,7 +167,7 @@ can be reviewed against a frame:
 | L5 Status | What state is it in? | status words, markers, notices |
 | L6 Chrome | What is structural only? | rules, gutters, hints, counts |
 
-### 3.2 Role → token table (v1, frozen)
+### 3.2 Role → token table (frozen)
 
 `textMuted` (#6B6B6B dark) is *weaker* than `textDim` (#888888); the ladder is
 `textStrong` > `text` > `textDim` > `textMuted` > `border`.
@@ -351,7 +351,7 @@ coded as `SAFE_EAW = {'neutral','narrow','halfwidth'}`, because VTE/WezTerm
 `cjk-ambiguous-width` paints ambiguous glyphs **two** cells while
 `visibleWidth()` measures them as one.
 
-**v1 extends that rule to all chrome glyphs the design language introduces**:
+**This contract extends that rule to all chrome glyphs the design language introduces**:
 every cursor, separator, bracket, marker or rule glyph is ASCII or EAW
 neutral/narrow/halfwidth. Measured classes (`get-east-asian-width`
 `eastAsianWidthType`):
@@ -367,9 +367,9 @@ neutral/narrow/halfwidth. Measured classes (`get-east-asian-width`
 **Grandfathered, accepted limitation:** several ambiguous glyphs are *already*
 used across the chrome, and the `─` rule is drawn on nearly every fullscreen
 frame — so a `cjk-ambiguous-width` terminal is already outside the supported
-contract for this chrome. v1 therefore does not mass-migrate them, and does not
+contract for this chrome. This contract therefore does not mass-migrate them, and does not
 pretend that swapping one ambiguous separator for an ASCII one fixes the frame.
-Measured, still in use and *not* introduced by v1:
+Measured, still in use and *not* introduced by this contract:
 
 | Glyph | Where it is already painted |
 |---|---|
@@ -586,7 +586,7 @@ anchor, without inventing a fourth meaning for `primary`.
   surface with more than two columns that needs stronger separation must come
   back for an Owner amendment rather than inventing a rule style locally.
 - One older overlay still draws a `│` split for an independently-scrolled
-  master/detail pair (`task-panel.ts:907` at ≥110 columns). v1 does **not**
+  master/detail pair (`task-panel.ts:907` at ≥110 columns). This contract does **not**
   extend that device to the workspaces (D2): a new surface must not add a second
   convention. (The retired History `│`
   earlier overlay implementation was removed; `Ctrl+R` History is an embedded
@@ -709,7 +709,7 @@ implementable at every width**: the Job reading-facts row is granted only at
 place the retained disclosure can live (verified: the captured 80×10 frame shows
 `Esc back | S stop | Follow ON | Retained preview · not full history`).
 
-v1 therefore allows state facts on the bar under §7.1's shape rule, and requires
+This contract therefore allows state facts on the bar under §7.1's shape rule, and requires
 that when the dedicated facts row *is* granted, the bar does not repeat it
 (the existing `facts.readingFacts` gate).
 
@@ -761,7 +761,7 @@ Invariants that hold at every size:
 
 ## 9. Theme and accessibility
 
-- **No new palette tokens in v1.** The role table maps onto the existing
+- **No new palette tokens in this contract.** The role table maps onto the existing
   `ColorPalette`. If a genuine gap appears, re-valuing `borderFocus` or adding a
   token requires dark + light + custom fallback + contrast review + live-theme
   switch tests in the same PR.
@@ -784,7 +784,7 @@ Use these; do not build a parallel owner.
 | Need | Existing owner | Rule |
 |---|---|---|
 | Colours, bold/dim/italic | `src/tui/theme/runtime.ts` (`color`, `hexPaint`) | the only ink source |
-| Palette vocabulary, built-ins | `src/domain/display/theme.ts` | no new token in v1 |
+| Palette vocabulary, built-ins | `src/domain/display/theme.ts` | no new token in this contract |
 | Job status → colour | `taskStatusColor()` (`runtime.ts:116-128`) | extend the *wording* map next to it; do not fork the colour map |
 | Picker / settings-list / editor / markdown palettes | `selectListTheme`, `settingsListTheme()`, `editorTheme`, `markdownTheme` | restyle through these, never by re-painting their components. `SearchablePicker` reads its cursor through the same slot |
 | Semantic structural icons | `src/tui/icons.ts` (`iconFor`, `iconPrefix`, `iconLead`) + `src/domain/display/icons.ts` | chrome punctuation (cursor/brackets/rule) is **not** an icon and does not enter the registry |
@@ -798,7 +798,7 @@ Use these; do not build a parallel owner.
 manager, a generic multi-layer component tree, a whole-repo regex gate for
 chrome (see §11.3).
 
-**The only extraction v1 authorizes** is the action-bar row layout: the Job
+**The only extraction this contract authorizes** is the action-bar row layout: the Job
 `ActionBarSegment` + `renderActionBarRow` pair already implements §7.2 and the
 Settings bar needs exactly it. Extracting it to
 `src/tui/presentation/action-bar.ts` (pure, stateless, no palette capture) is
@@ -992,7 +992,7 @@ line numbers.
 
 ### 13.2 Deliberate divergences
 
-| Decision | What the references do | What v1 does, and why |
+| Decision | What the references do | What this contract does, and why |
 |---|---|---|
 | Surface identity ink | kimi paints the dialog title `primary` + bold; oh-my-pi insets it in the top rule in `accent` | `textStrong` bold, no colour. This repo already uses `primary` for links *and* inline code *and* selection (`markdownTheme.code`, picker prefixes), so a blue title would make "blue" mean brand + clickable + current at once. Keeping the identity weight-only keeps `primary` = active/actionable |
 | Selected row's text | pi/oh-my-pi paint it with their accent token | bold `textStrong`; only the cursor glyph is `primary`. Same reason as above, and it matches this repo's existing picker device |

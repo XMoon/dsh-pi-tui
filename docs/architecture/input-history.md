@@ -185,8 +185,8 @@ plus a `HistorySearchContinuation` when older history remains. A
 continuation resumes exactly where the call stopped (no re-scan of the
 covered suffix, no duplicate rows across pages) and is bound to the request
 context (a mismatched continuation is a typed error). Reaching the scan
-budget is NOT exhausted. The panel currently renders only `page.results`;
-"Search older" is a later UI phase on this contract.
+budget is NOT exhausted. The panel renders only `page.results`; no additional
+page loader is exposed.
 
 The history store is append-only, so a concurrent append between pages does
 not invalidate a continuation: the scan continues by its old snapshot
