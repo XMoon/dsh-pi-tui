@@ -866,3 +866,26 @@ identities. Pure scroll frames must reuse the committed row snapshot and must
 not remeasure.
 
 Proof: `test/fullscreen-scroll-geometry-epoch.test.ts`.
+
+## Display-order and read-grouping convergence
+
+The durable fold appends rows in EVENT order, while the live lane materializes a
+row when its content first becomes visible. For a step whose first visible
+assistant text precedes a later tool call of the same step, the two folds can
+otherwise disagree (`Work[c1] → Assistant → Work[c2]` live vs
+`Work[c1,c2] → Assistant` cold); raw-adjacent settled reads are merged into one
+`N files` card before any display rule can split them.
+
+The convergence contract:
+
+- Compare logical identity across folds (kind + a stable logical key such as the
+  tool callId or assistant text), never raw object references.
+- A display-order move requires proven materialization evidence about that
+  exact step/row; without it, the conservative reachability guard refuses the
+  move (for example across a sibling step's Conversation) rather than guessing.
+- Work membership follows the proven display order; an aggregated read group's
+  representative and result follow the same order.
+- The same rules apply to Compact, Full and Focus; do not add a second
+  display-order fold or re-sort by liveness.
+
+Proof: `test/transcript-display-order-convergence.test.ts`.
