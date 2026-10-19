@@ -533,15 +533,16 @@ class:
 - An opening ambient burst (the initial user plus the immediately following
   surfaced Context rows) stays above the Thought in both Focus states; a
   mid-turn Context row/cluster returns to its chronological position when the
-  Thought is expanded. **Exception (2026-10-19):** a foldable Snapshot after the
-  initial user stops the foundation boundary and follows the Thought instead
-  (hidden while collapsed, restored once in raw order when expanded); a mixed
+  Thought is expanded. **Exception (2026-10-19 / v2):** a foldable Context row
+  (Snapshot or proven Working `tool-jobs` Notice) after the initial user stops
+  the foundation boundary and follows the Thought instead (hidden while
+  collapsed, restored once in raw order when expanded); a mixed
   `instructions`/`catalog` + `snapshot` cluster keeps the foundation position as
-  one indivisible unit. A Snapshot that truly precedes the initial user is never
-  moved across that user.
-- Collapsed Focus also hides a foldable Snapshot-only turn inside its real
-  Thought (it remains recoverable there); without an activity owner the rows
-  fail open.
+  one indivisible unit. A Context row that truly precedes the initial user is
+  never moved across that user.
+- Collapsed Focus also hides a foldable Snapshot-only turn (and a proven Working
+  `tool-jobs` Notice with a Thought owner) inside its real Thought; both remain
+  recoverable there. Without an activity owner the rows fail open.
 - Collapsed Focus distinguishes CAUSAL INPUT from MID-TURN PROCESS FEEDBACK by
   the producer-declared `form` and raw position, never by source kind: a
   mid-turn `form:'notice'` (a background job or subagent settling while the
@@ -554,14 +555,17 @@ class:
   `tool-jobs` Notice with the durable same-turn `next-step` claim flag follows
   the Thought instead (hidden while collapsed, restored once in raw order);
   `next-turn` wakeups and every unqualified/foreign notice keep this existing
-  post-Thought or foundation rule. Expanded Focus
-  restores every notice at its exact raw position. Compact keeps every notice
-  standalone and Full keeps full chronology.
-- A search hit inside a mid-turn notice needs no Focus-root reveal and no
-  special forced-visible path: the row is already visible outside the Thought,
-  so ordinary search addresses it like any other surfaced Context card. A match
-  inside the folded Notice payload still opens through the row's own ordinary
-  message disclosure.
+  post-Thought or foundation rule. Expanded Focus restores every notice at its
+  exact raw position. Compact keeps every UNQUALIFIED notice standalone (a
+  qualified Working `tool-jobs` Notice folds into its Activity), and Full keeps
+  the full chronology for every notice.
+- A search hit inside an UNQUALIFIED mid-turn notice needs no Focus-root
+  reveal and no special forced-visible path: the row is already visible outside
+  the Thought, so ordinary search addresses it like any other surfaced Context
+  card. A match inside the folded Notice payload still opens through the row's
+  own ordinary message disclosure. A QUALIFIED Working `tool-jobs` Notice
+  follows the Work/Thought ancestry instead (the Work/Thought reveal opens it,
+  then its own card disclosure shows the payload).
 - Full keeps the original transcript chronology, with ambient clusters
   substituted in place.
 - Context never enters the Focus Think/Tool/Message slots or the tool counts.
