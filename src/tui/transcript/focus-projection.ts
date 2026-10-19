@@ -209,10 +209,11 @@ function focusActionStatsByTurn(messages: readonly TranscriptMessage[]): Map<num
 /**
  * Project one transcript window into Focus presentation blocks. Collapsed
  * Focus summarizes causal input and opening foundation BEFORE the Thought,
- * renders a durable mid-turn `form:'notice'` AFTER the Thought (visible
- * process feedback, never inside the hidden Action candidate set), and
- * hides ordinary Process inside the collapsed root. Expanded Focus restores
- * the exact raw chronology.
+ * renders an UNQUALIFIED durable mid-turn `form:'notice'` AFTER the Thought
+ * (visible process feedback, never inside the hidden Action candidate set),
+ * and hides ordinary Process inside the collapsed root. A proven Working
+ * `tool-jobs` Notice follows the Thought instead (v2 exception). Expanded
+ * Focus restores the exact raw chronology.
  */
 export function projectFocus(
   messages: readonly TranscriptMessage[],
@@ -310,11 +311,13 @@ export function projectFocus(
     // Collapsed Focus summarizes persistent input/context rows before the
     // Thought in their raw relative order. Both human user/steer rows and
     // injected context marked `context:true` are persistent; all ordinary
-    // process rows stay hidden inside the Thought. A MID-TURN
+    // process rows stay hidden inside the Thought. An UNQUALIFIED MID-TURN
     // `form:'notice'` is the visible exception (see
     // {@link collapsedFocusRowDisposition}): it renders AFTER the Thought as
     // a post-thought row, never inside the hidden Action candidate set. A
-    // committed pre-steer answer is the other exception: from that exact raw
+    // proven Working `tool-jobs` Notice is NOT an exception: it follows the
+    // Thought hidden set (v2). A committed pre-steer answer is the other
+    // exception: from that exact raw
     // boundary onward, preserve the persistent rows and answer in chronology
     // so the answer cannot be swallowed by the Thought or move when the
     // disclosure changes.
@@ -328,7 +331,6 @@ export function projectFocus(
     const foldableSnapshots: CollapsedFoldableSnapshotScope = {
       clusterByMember: clusterAdjacentAmbientContext(group).byMember,
       thoughtOwned: activity !== undefined,
-      initialUserIndex: group.findIndex(member => member.kind === 'user' && member.steer !== true),
     }
     const firstCommittedIndex = group.findIndex(isCommittedAnswer)
     const hidden: TranscriptMessage[] = []
@@ -481,17 +483,14 @@ function isFocusPersistentInputRow(message: TranscriptMessage): boolean {
 type CollapsedFocusRowDisposition = 'pre-thought' | 'post-thought' | 'hidden'
 
 /** The foldable Context rows (Snapshot / proven Working tool-jobs Notice) a
- * collapsed Thought may carry instead of surfacing as turn foundation. `thoughtOwned` is false where no Thought
- * block will be emitted (a truncated window without an activity) — the rows
- * then fail open instead of disappearing. `initialUserIndex` is the first
- * non-steer human row: a Snapshot positioned BEFORE it is causal foundation
- * and must never be moved across the user (fail open), even when the turn has
- * a real Thought. `-1` means the turn has no initial user, so every Snapshot
- * keeps its raw foundation position. */
+ * collapsed Thought may carry instead of surfacing as turn foundation.
+ * `thoughtOwned` is false where no Thought block will be emitted (a truncated
+ * window without an activity) — the rows then fail open instead of disappearing.
+ * The Thought-lead boundary decides WHICH rows are foundation; anything at or
+ * after it is Thought content. */
 interface CollapsedFoldableSnapshotScope {
   readonly clusterByMember: ReadonlyMap<TranscriptMessage, ContextCluster>
   readonly thoughtOwned: boolean
-  readonly initialUserIndex: number
 }
 
 function collapsedFocusRowDisposition(
@@ -502,8 +501,7 @@ function collapsedFocusRowDisposition(
 ): CollapsedFocusRowDisposition {
   if (!isFocusPersistentInputRow(message)) return 'hidden'
   if (foldableSnapshots.thoughtOwned
-    && foldableSnapshots.initialUserIndex >= 0
-    && index > foldableSnapshots.initialUserIndex
+    && index >= leadBoundary
     && isFoldableWorkContext(message, foldableSnapshots.clusterByMember)) return 'hidden'
   if (index >= leadBoundary && isNoticeContext(message)) return 'post-thought'
   return 'pre-thought'
@@ -533,53 +531,25 @@ function consecutiveTurnGroup(messages: readonly TranscriptMessage[], start: num
   return group
 }
 
-/** The end of the turn's LEADING injected-context prefix used only for
- * expanded Thought insertion. Consecutive `kind === 'system'` rows carrying
- * the source-derived `context` marker at the very start of the group count as
- * the opening turn foundation. Other `kind: 'system'` rows (llm/retry,
- * max-tokens) are orchestration, not foundation — they must stay process
- * content, never lifted before the Thought. Mid-process system rows are never
- * included in this expanded lead boundary; collapsed visibility uses
- * isFocusPersistentInputRow instead. */
-function leadingInjectedContextPrefixEnd(group: readonly TranscriptMessage[]): number {
-  let end = 0
-  while (true) {
-    const member = group[end]
-    if (member === undefined || member.kind !== 'system' || member.context !== true) break
-    end += 1
-  }
-  return end
-}
-
-/** The Thought-lead boundary of one turn group: the index AFTER the
- * turn's FIRST unmarked user row AND the surfaced Context rows that
- * immediately follow it. Rows before it (injected context) and the opening
- * foundation (initial user plus its adjacent injected context) stay above the
- * Thought; every later row (same-turn steers included) returns to its
- * chronological position. A FOLDABLE Context row (Snapshot or a proven
- * Working tool-jobs Notice) breaks the foundation: it follows the Thought
- * (these are the narrow forms whose disclosure belongs to the turn's work),
- * while a mixed `instructions`/`catalog` + Snapshot cluster keeps its
- * indivisible foundation position. A turn whose
- * user rows are all marked same-turn steers has no opening human prompt: the
- * boundary falls back to the end of the LEADING injected-context prefix, so an
- * inject-woken turn keeps its foundation before the Thought (never a scan of
- * mid-process system rows, and never orchestration rows like llm/retry).
- * Without steer metadata, the first user remains the initial-prompt fallback;
- * consecutive users are queue/steer input, not a multi-row initial prompt. */
+/** The Thought-lead boundary of one turn group: the prefix that stays above the
+ * Thought. It starts after the FIRST unmarked user row when one exists; a turn
+ * with no human user (an inject-woken / next-turn wakeup turn) starts at the
+ * group beginning. In both cases the boundary then consumes leading surfaced
+ * Context rows that are NOT foldable (the wakeup cause, `instructions`,
+ * `catalog`, an unqualified notice). The first FOLDABLE Context row (Snapshot or
+ * a proven Working tool-jobs Notice) ends the foundation and becomes Thought
+ * content — so a next-turn wakeup notice stays visible while the Snapshot and
+ * next-step notices that arrive during the work fold with it. A mixed
+ * `instructions`/`catalog` + Snapshot cluster keeps its indivisible foundation
+ * position. `llm/retry`/max-token orchestration rows are not surfaced Context,
+ * so they never enter the prefix. Without steer metadata the first user remains
+ * the initial-prompt fallback; consecutive users are queue/steer input. */
 export function focusThoughtLeadBoundary(group: readonly TranscriptMessage[]): number {
   const firstInitialUserIndex = group.findIndex(
     member => member.kind === 'user' && member.steer !== true,
   )
-  let end = firstInitialUserIndex >= 0
-    ? firstInitialUserIndex + 1
-    : leadingInjectedContextPrefixEnd(group)
-  if (firstInitialUserIndex < 0) return end
-  // The opening foundation continues through immediately-following surfaced
-  // Context rows (the provider's opening catalog/instructions burst), so it
-  // never lands below the Thought. A later Context row separated by Process
-  // rows is mid-turn and keeps its chronological position.
   const clusterByMember = clusterAdjacentAmbientContext(group).byMember
+  let end = firstInitialUserIndex >= 0 ? firstInitialUserIndex + 1 : 0
   while (true) {
     const member = group[end]
     if (member === undefined || !isSurfacedContext(member)) break

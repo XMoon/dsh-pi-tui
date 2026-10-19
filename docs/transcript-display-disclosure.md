@@ -741,8 +741,10 @@ under bad input, long sessions and rapid live updates:
 - **Search / disclosure.** A flat/fail-open container never mints an inoperable
   owner; a surface switch during search re-checks the capability; a topology
   mutation re-resolves the current container path instead of a stale identity;
-  and a mid-turn notice is already visible outside the collapsed Thought, so
-  search reaches it through the ordinary row/message disclosure paths.
+  and an UNQUALIFIED mid-turn notice is already visible outside the collapsed
+  Thought, so search reaches it through the ordinary row/message disclosure
+  paths. A proven Working `tool-jobs` Notice is hidden with the Work/Thought
+  and resolves through that ancestor path instead.
 - **Width / grapheme.** Every F4 row family (Work, pending Preparing rows,
   Context cluster, notice, relay, recall) obeys the framebuffer width contract
   at the current width for ASCII, CJK, emoji, combining marks, ZWJ emoji and

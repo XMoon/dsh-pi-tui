@@ -5031,3 +5031,60 @@ test('a next-turn wakeup tool-jobs notice stays visible before the Thought', () 
   const thoughtIndex = collapsed.findIndex(block => block.kind === 'activity')
   assert.ok(noticeIndex >= 0 && noticeIndex < thoughtIndex)
 })
+
+test('a userless next-turn wakeup turn folds the Snapshot and next-step notice into the Thought', () => {
+  const folder = new TranscriptFolder()
+  const wakeNotice = {
+    id: MessageId('userless-wake-notice'), role: 'user',
+    content: [{ type: 'text', text: 'WAKE_NOTICE body' }],
+    source: { kind: 'tool-jobs', form: 'notice', summary: 'wakeup cause' },
+  }
+  applyMixed(folder, [
+    eventAt('agent/inbox/spliced', { target: 'next-turn', start: 0, inserted: [wakeNotice] }, 3900, 0),
+    eventAt('turn/start', { turn: 0 }, 3901, 1),
+    eventAt('agent/inbox/spliced', { target: 'next-turn', start: 0, removedCount: 1, inserted: [] }, 3902, 2),
+    eventAt('user/message', wakeNotice, 3903, 3),
+    snapshotContext(0, 'userless-snapshot', 'USERLESS_SNAPSHOT', 3904, 4),
+    eventAt('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'reasoning-delta', index: 0, text: 'first' } }, 3905, 5),
+    eventAt('tool/call', { turn: 0, step: 0, callId: ToolCallId('userless-c1'), name: 'read', arguments: '{}' }, 3906, 6),
+    eventAt('tool/result', {
+      turn: 0, step: 0,
+      message: {
+        id: MessageId('userless-r1'), role: 'tool', toolCallId: ToolCallId('userless-c1'),
+        content: [{ type: 'text', text: 'ok' }], source: { kind: 'tool', callId: ToolCallId('userless-c1') },
+      },
+    }, 3907, 7),
+    ...workingToolJobsEvents('userless-working-notice', 'USERLESS_WORK_NOTICE', 3908, 8),
+    eventAt('assistant/chunk', { turn: 0, step: 1, chunk: { type: 'reasoning-delta', index: 0, text: 'second' } }, 3911, 11),
+    eventAt('tool/call', { turn: 0, step: 1, callId: ToolCallId('userless-c2'), name: 'bash', arguments: '{}' }, 3912, 12),
+    eventAt('assistant/message', {
+      turn: 0, step: 2,
+      message: { id: MessageId('userless-final'), role: 'assistant', content: [{ type: 'text', text: 'done' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+    }, 3913, 13),
+    eventAt('turn/end', { turn: 0, reason: { kind: 'completed' } }, 3914, 14),
+  ])
+  const messages = folder.messages()
+  const wake = messages.find(message => message.kind === 'system' && message.summary === 'wakeup cause')
+  const snapshot = messages.find(message => message.kind === 'system' && message.text === 'USERLESS_SNAPSHOT')
+  const working = messages.find(message => message.kind === 'system' && message.text === 'USERLESS_WORK_NOTICE')
+  assert.ok(wake !== undefined && wake.kind === 'system')
+  assert.ok(snapshot !== undefined && snapshot.kind === 'system')
+  assert.ok(working !== undefined && working.kind === 'system')
+  assert.equal(wake.contextPresentation?.sameTurnNextStep, undefined, 'next-turn wakeup is unqualified')
+  assert.equal(working.contextPresentation?.sameTurnNextStep, true, 'the next-step notice is qualified')
+  assert.equal(focusThoughtLeadBoundary(messages), 1,
+    'the wakeup notice is the only foundation row; the Snapshot starts Thought content')
+  const collapsed = projectTools(messages, folder.turnActivities(), new Set())
+  assert.deepEqual(blockKinds(collapsed), ['system', 'activity', 'assistant'])
+  assert.ok(collapsed.some(block => block.kind === 'message' && block.message === wake),
+    'the wakeup cause stays visible before the Thought')
+  assert.ok(!collapsed.some(block => block.kind === 'message' && (block.message === snapshot || block.message === working)),
+    'the internal Snapshot and next-step notice must not leak outside the collapsed Thought')
+  const expanded = projectTools(messages, folder.turnActivities(), new Set([0]))
+  assert.deepEqual(blockKinds(expanded), ['system', 'activity', 'system', 'thinking', 'tool', 'system', 'thinking', 'tool', 'assistant'])
+  assert.equal(expanded.filter(block => block.kind === 'message' && block.message === snapshot).length, 1)
+  assert.equal(expanded.filter(block => block.kind === 'message' && block.message === working).length, 1)
+  const wakeIndex = expanded.findIndex(block => block.kind === 'message' && block.message === wake)
+  const activityIndex = expanded.findIndex(block => block.kind === 'activity')
+  assert.ok(wakeIndex >= 0 && wakeIndex < activityIndex, 'the wakeup cause remains foundation when expanded')
+})

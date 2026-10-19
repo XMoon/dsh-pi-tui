@@ -23,7 +23,7 @@ import {
   type TranscriptStructureBlock,
   type TranscriptWorkSpan,
 } from '../src/tui/transcript/structure.ts'
-import type { TranscriptMessage } from '../src/transcript.ts'
+import type { TranscriptMessage, TurnActivity } from '../src/transcript.ts'
 import { TuiApp } from '../src/tui-app.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 
@@ -571,4 +571,62 @@ test('Compact folds the same snapshot-carrying rows into one Activity', async ()
     `one Activity for the turn:\n${view}`)
   assert.ok(!view.includes('SNAP_ONE') && !view.includes('SNAP_TWO'),
     `the snapshots stay inside the collapsed Activity:\n${view}`)
+})
+
+// --- Large Context-cluster linearity (v2 external review) ------------------
+
+const perfSnapshot = (index: number): TranscriptMessage => ({
+  kind: 'system', turn: TURN, text: `reading ${index}`, context: true,
+  contextPresentation: { form: 'snapshot', sourceKind: 'time-context', role: 'inject' },
+})
+const perfInstructions = (): TranscriptMessage => ({
+  kind: 'system', turn: TURN, text: 'AGENTS instructions', context: true,
+  contextPresentation: { form: 'instructions', sourceKind: 'agent-instructions', role: 'inject' },
+})
+const perfActivity: TurnActivity = {
+  turn: TURN,
+  completed: true,
+  assistantMessages: 0,
+  toolCalls: 0,
+  tools: new Map(),
+  revision: 0,
+}
+const perfProcess = (): TranscriptMessage[] => [
+  thinking('work'),
+  tool('read', 'ok'),
+]
+
+/** N raw-adjacent snapshots (one snapshot-only cluster) + real Process. */
+function snapshotClusterWindow(count: number): TranscriptMessage[] {
+  return [...Array.from({ length: count }, (_, index) => perfSnapshot(index)), ...perfProcess()]
+}
+
+/** instructions + N snapshots (one MIXED ambient cluster) + real Process. */
+function mixedClusterWindow(count: number): TranscriptMessage[] {
+  return [perfInstructions(), ...Array.from({ length: count }, (_, index) => perfSnapshot(index)), ...perfProcess()]
+}
+
+test('large snapshot and mixed Context clusters project linearly in structure and Focus', () => {
+  const measure = (count: number): number => {
+    const snapshotWindow = snapshotClusterWindow(count)
+    const mixedWindow = mixedClusterWindow(count)
+    const start = performance.now()
+    const structure = projectTranscriptStructure(snapshotWindow)
+    projectTranscriptStructure(mixedWindow)
+    const snapshotFocus = projectFocus(snapshotWindow, new Map([[TURN, perfActivity]]), new Set(), true)
+    const mixedFocus = projectFocus(mixedWindow, new Map([[TURN, perfActivity]]), new Set(), true)
+    const elapsed = performance.now() - start
+    assert.equal(flattenStructure(structure).length, snapshotWindow.length)
+    assert.equal(snapshotFocus.filter(block => block.kind === 'activity').length, 1,
+      'the snapshot cluster is hidden inside the real Thought')
+    assert.ok(mixedFocus.some(block => block.kind === 'message' && block.message === mixedWindow[0]),
+      'the mixed cluster keeps its foundation row (fail-open atomically)')
+    return elapsed
+  }
+  measure(500) // warm up
+  const small = Math.max(measure(1_000), 0.5)
+  const large = measure(8_000)
+  // Old per-member cluster qualification rescanned the whole run once per
+  // member (64x here); the linear implementation is ~8x. Broad bound only.
+  assert.ok(large < small * 20 + 100, `8x input took ${large.toFixed(1)}ms vs ${small.toFixed(2)}ms`)
 })

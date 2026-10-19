@@ -102,11 +102,22 @@ export function isSnapshotContext(
   return isSurfacedContext(message) && contextFormOf(message) === 'snapshot'
 }
 
+/** Per-cluster memo of {@link isSnapshotOnlyCluster}: cluster wrappers are
+ * freshly allocated per projection pass but may be queried once per member by
+ * the structure scan and the Focus disposition. The WeakMap keeps every scan
+ * linear for one large snapshot run (no per-member `every()` rescan). */
+const snapshotOnlyClusterMemo = new WeakMap<ContextCluster, boolean>()
+
 /** Whether one raw-adjacent ambient cluster consists ONLY of Snapshot rows, so
  * the whole cluster may be carried inside a Work span without tearing a mixed
- * foundation cluster apart. */
+ * foundation cluster apart. Memoized per cluster object; a cluster wrapper is
+ * never reused across projection passes. */
 export function isSnapshotOnlyCluster(cluster: ContextCluster): boolean {
-  return cluster.members.every(isSnapshotContext)
+  const memoized = snapshotOnlyClusterMemo.get(cluster)
+  if (memoized !== undefined) return memoized
+  const result = cluster.members.every(isSnapshotContext)
+  snapshotOnlyClusterMemo.set(cluster, result)
+  return result
 }
 
 /**
@@ -229,16 +240,17 @@ export function projectTranscriptStructure(messages: readonly TranscriptMessage[
   for (const message of messages) {
     const cluster = clustering.byMember.get(message)
     if (cluster !== undefined) {
+      // Non-owner members contribute nothing on their own. Deciding this FIRST
+      // keeps the snapshot-only qualification to one check per cluster (the
+      // former order rescanned the whole run once per member).
+      if (message !== cluster.owner) continue
       if (!isSnapshotOnlyCluster(cluster)) {
         flush()
-        // The first member is the cluster header; other members contribute
-        // nothing on their own.
-        if (message === cluster.owner) out.push({ kind: 'context-cluster', cluster })
+        out.push({ kind: 'context-cluster', cluster })
         continue
       }
       // A snapshot-only cluster is one transparent Work part: all its members
-      // are appended together when its owner is reached.
-      if (message !== cluster.owner) continue
+      // are appended together here.
       if (runMembers.length > 0) {
         if (runTurn === cluster.turn) {
           runParts.push({ kind: 'context-cluster', cluster })

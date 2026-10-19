@@ -209,7 +209,10 @@ TuiApp.setTranscript(...)        onTranscriptProjected (absent in production)
   by `test/tern-tsp-transcript-spike.test.ts` (`View.from` + `View.ops`) against
   the pinned `@stencil-hq/tern@0.1.0`; no real Tern pane/GUI was run for this
   exact nested combination, so its visual reading remains **GUI_NOT_VERIFIED**
-  (no new interaction target or surface is introduced).
+  (no new interaction target or surface is introduced). This is a note about the
+  SHARED STRUCTURE mapping, not a claim that the experimental TSP transcript has
+  PiTui's complete Compact/Focus/Full disclosure model; TSP transcript folding
+  support remains partial and is out of scope for this change.
 - One fold, one window, one currentness authority. The TSP path adds neither a
   second `TranscriptFolder`, nor a second SessionEvent subscription, nor a new
   Host port, nor a Host service read (`src/app/surface/**` stays Host-free and is
@@ -228,7 +231,7 @@ TuiApp.setTranscript(...)        onTranscriptProjected (absent in production)
 |---|---|
 | `scripts/tern-tsp-transcript-spike.mts` | Manually runnable: SDK `connect` → one `inline` surface → deterministic replay of genuine `SessionEvent`/live inputs into a `TranscriptFolder` → `n` advances, `q`/Ctrl+C closes with `keep: false`. Direct execution is guarded. |
 | `scripts/support/tern-tsp-transcript-view.ts` | Pure `TranscriptStructureBlock[] → native TSP node` mapper, plus `TranscriptNodeKeys`, the replay-local presentation-key allocator. |
-| `test/tern-tsp-transcript-spike.test.ts` | 28 tests: canonical projection, mapper nodes, `View.ops` deltas, duplicate-key `ViewError` control, interaction/command/orphan cards, Context bodies, lifecycle and isolation. |
+| `test/tern-tsp-transcript-spike.test.ts` | Covering: canonical projection, mapper nodes, `View.ops` deltas, duplicate-key `ViewError` control, interaction/command/orphan cards, Context bodies, lifecycle and isolation. |
 
 ### PR2 — live projection observation seam (this PR)
 
