@@ -543,6 +543,12 @@ class:
 - Collapsed Focus also hides a foldable Snapshot-only turn (and a proven Working
   `tool-jobs` Notice with a Thought owner) inside its real Thought; both remain
   recoverable there. Without an activity owner the rows fail open.
+- **Userless (next-turn wakeup) turns:** there is no initial user to anchor the
+  foundation. The leading run of NON-foldable Context — the wakeup Notice and
+  any `instructions`/`catalog` — is the foundation; the first foldable Snapshot
+  or proven Working `tool-jobs` Notice starts Thought content. The wakeup cause
+  therefore stays visible while later internal Snapshot / next-step notices
+  fold, and expanded Focus restores them once in raw order.
 - Collapsed Focus distinguishes CAUSAL INPUT from MID-TURN PROCESS FEEDBACK by
   the producer-declared `form` and raw position, never by source kind: a
   mid-turn `form:'notice'` (a background job or subagent settling while the
