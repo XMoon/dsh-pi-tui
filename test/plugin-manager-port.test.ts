@@ -577,6 +577,141 @@ test('a second mutation is refused while the first is still in flight (no lost f
   assert.equal(state.setBundle.length, 2)
 })
 
+test('toggle admission is held until the authoritative reread completes (deferred snapshot)', async () => {
+  let enabled = false
+  let reads = 0
+  const reread = deferred<PluginManagerSnapshot>()
+  const { port, state } = fakePort({
+    snapshotImpl: async () => {
+      reads += 1
+      if (reads === 1) return snapshot([bundle({ name: 'ordinary', enabled })])
+      if (reads === 2) return reread.promise
+      return snapshot([bundle({ name: 'ordinary', enabled })])
+    },
+    setBundleImpl: async (_name, next) => { enabled = next; return change() },
+  })
+  const { controller } = controllerOf(port)
+  controller.open('direct-command')
+  await tick()
+  assert.equal(controller.card(bundleValue('ordinary'))?.enabled, false)
+
+  controller.toggleCard(bundleValue('ordinary'))
+  await tick()
+  assert.equal(state.setBundle.length, 1)
+  assert.equal(controller.busy(), bundleValue('ordinary'), 'busy is held across the post-write read')
+  assert.equal(reads, 2, 'the authoritative read has started and is pending')
+
+  controller.toggleCard(bundleValue('ordinary'))
+  await tick()
+  assert.equal(state.setBundle.length, 1, 'no write may use the pre-read snapshot')
+  assert.equal(controller.card(bundleValue('ordinary'))?.enabled, false)
+
+  reread.resolve(snapshot([bundle({ name: 'ordinary', enabled: true })]))
+  await tick()
+  assert.equal(controller.busy(), undefined)
+  assert.equal(controller.card(bundleValue('ordinary'))?.enabled, true)
+
+  controller.toggleCard(bundleValue('ordinary'))
+  await tick()
+  assert.equal(state.setBundle.length, 2)
+  assert.equal((state.setBundle[1] as { enabled: boolean }).enabled, false,
+    'the second user action is based on the authoritative enabled=true state')
+})
+
+test('row toggle admission is held through the authoritative reread too', async () => {
+  let reads = 0
+  const reread = deferred<PluginManagerSnapshot>()
+  const rowSnapshot = (): PluginManagerSnapshot => ({
+    ...snapshot([bundle({
+      name: 'row-owner',
+      enabled: false,
+      rows: [{ rowId: 'row-a', moduleName: 'row-a', entryId: 'e-row' }],
+    })]),
+    plugins: [{ entryId: 'e-row', moduleName: 'row-a', enabled: false, fiberPhase: 'active', patchId: 'row-a' }],
+  })
+  const { port, state } = fakePort({
+    snapshotImpl: async () => {
+      reads += 1
+      if (reads === 1) return rowSnapshot()
+      if (reads === 2) return reread.promise
+      return rowSnapshot()
+    },
+  })
+  const { controller } = controllerOf(port)
+  controller.open('direct-command')
+  await tick()
+  controller.toggleRow(bundleValue('row-owner'), 'e-row')
+  await tick()
+  assert.equal(state.setPlugin.length, 1, 'the row action is addressable')
+  assert.equal(controller.busy(), 'action:toggle-row:e-row')
+  controller.toggleRow(bundleValue('row-owner'), 'e-row')
+  await tick()
+  assert.equal(state.setPlugin.length, 1, 'the stale snapshot cannot dispatch a second row write')
+  reread.resolve(rowSnapshot())
+  await tick()
+  assert.equal(controller.busy(), undefined)
+})
+
+test('a failed post-write reread blocks further writes until a successful refresh', async () => {
+  let enabled = false
+  let reads = 0
+  const { port, state } = fakePort({
+    snapshotImpl: async () => {
+      reads += 1
+      if (reads === 1) return snapshot([bundle({ name: 'ordinary', enabled })])
+      if (reads === 2) throw new Error('snapshot unavailable')
+      return snapshot([bundle({ name: 'ordinary', enabled })])
+    },
+    setBundleImpl: async (_name, next) => { enabled = next; return change() },
+  })
+  const { controller } = controllerOf(port)
+  controller.open('direct-command')
+  await tick()
+
+  controller.toggleCard(bundleValue('ordinary'))
+  await tick()
+  assert.equal(controller.status().state, 'error')
+  assert.equal(controller.busy(), undefined)
+
+  controller.toggleCard(bundleValue('ordinary'))
+  await tick()
+  assert.equal(state.setBundle.length, 1, 'a stale inventory must not admit another write')
+  assert.match(controller.notice() ?? '', /stale after a failed refresh/)
+
+  controller.refresh()
+  await tick()
+  assert.equal(controller.status().state, 'ready')
+  controller.toggleCard(bundleValue('ordinary'))
+  await tick()
+  assert.equal(state.setBundle.length, 2)
+})
+
+test('remove admission is held through its authoritative reread as well', async () => {
+  let reads = 0
+  const reread = deferred<PluginManagerSnapshot>()
+  const { port, state } = fakePort({
+    snapshotImpl: async () => {
+      reads += 1
+      if (reads === 1) return snapshot([bundle({ name: 'ordinary' })])
+      if (reads === 2) return reread.promise
+      return snapshot([])
+    },
+  })
+  const { controller } = controllerOf(port)
+  controller.open('direct-command')
+  await tick()
+  assert.equal(controller.requestRemove(bundleValue('ordinary')), true)
+  controller.confirmRemove()
+  await tick()
+  assert.equal(state.removeBundle.length, 1)
+  assert.equal(controller.busy(), bundleValue('ordinary'))
+  assert.equal(controller.requestRemove(bundleValue('ordinary')), false, 'no second remove while the reread is pending')
+
+  reread.resolve(snapshot([]))
+  await tick()
+  assert.equal(controller.busy(), undefined)
+})
+
 test('row-level self protection never offers a toggle row action', async () => {
   const { port, state } = fakePort({
     snapshotImpl: async () => ({

@@ -68,6 +68,16 @@ function harness(): { controller: PluginManagerController; installCalls: unknown
   return { controller, installCalls, emit: event => { for (const listener of listeners) listener(event) }, gate }
 }
 
+function installPage(controller: PluginManagerController): PluginManagerWorkspacePanel {
+  return new PluginManagerWorkspacePanel(controller, {
+    rows: () => 40,
+    columns: () => 120,
+    requestRender: () => {},
+    notice: () => undefined,
+    onCopy: () => {},
+  })
+}
+
 test('install events are correlated by request id and unrelated events are ignored', async () => {
   const { controller, installCalls, emit, gate } = harness()
   controller.beginManualInstall()
@@ -346,4 +356,101 @@ test('install inspection metadata and progress rows fold hostile values onto ONE
 
   gate.resolve(change())
   await tick()
+})
+
+
+test('a failed install reopens with the same request id and New install is explicit', async () => {
+  const { controller, installCalls, gate } = harness()
+  controller.beginManualInstall()
+  controller.inspect('pkg', null)
+  await tick()
+  controller.confirmInstall()
+  await tick()
+  const requestId = (installCalls[0] as { requestId: string }).requestId
+  gate.resolve(change({ application: 'failed', pendingBuilds: ['evil-pkg'] }))
+  await tick()
+  assert.equal(controller.installView()?.phase, 'failed')
+  assert.equal(controller.installView()?.requestId, requestId)
+
+  const page = installPage(controller)
+  assert.equal(page.currentView(), 'install', 'a new page restores the failed attempt')
+  const failedFrame = page.render(120).join('\n')
+  assert.match(failedFrame, /Approve and retry evil-pkg/)
+  assert.match(failedFrame, /New install/, 'the explicit new-install action is visible')
+
+  page.handleInput('\x1b') // hide the install view
+  await tick()
+  assert.equal(page.currentView(), 'list')
+  page.handleInput('i') // reopen, never replace
+  await tick()
+  assert.equal(page.currentView(), 'install')
+  assert.equal(controller.installView()?.requestId, requestId, 'i preserves the original request id')
+  assert.equal(controller.installView()?.phase, 'failed')
+
+  page.handleInput('n') // explicit new
+  await tick()
+  assert.equal(page.currentView(), 'install')
+  assert.equal(controller.installView()?.phase, 'editing')
+  assert.notEqual(controller.installView()?.requestId, requestId, 'n creates a genuinely new request')
+  page.dispose()
+})
+
+test('a recently completed install also reopens without a new request', async () => {
+  const { controller, installCalls, gate } = harness()
+  controller.beginManualInstall()
+  controller.inspect('pkg', null)
+  await tick()
+  controller.confirmInstall()
+  await tick()
+  const requestId = (installCalls[0] as { requestId: string }).requestId
+  gate.resolve(change({ application: 'applied' }))
+  await tick()
+  assert.equal(controller.installView()?.phase, 'done')
+
+  const page = installPage(controller)
+  assert.equal(page.currentView(), 'install')
+  page.handleInput('\x1b')
+  page.handleInput('i')
+  await tick()
+  assert.equal(page.currentView(), 'install')
+  assert.equal(controller.installView()?.requestId, requestId)
+  page.dispose()
+})
+
+test('an unknown install reopens with its request id and reconciliation action', async () => {
+  const rejected = new PluginManagerController({
+    snapshot: async () => emptySnapshot(),
+    inspect: async () => ({ status: 'accepted', kind: 'registry', name: 'pkg', version: '1', bundle: true, registry: null }),
+    setBundleEnabled: async () => change({ stage: 'enable' }),
+    setPluginEnabled: async () => change({ stage: 'enable' }),
+    removeBundle: async () => change({ stage: 'remove' }),
+    startInstall: async () => { throw new Error('host lost') },
+    waitForInstall: async () => null,
+    cancelInstall: async () => ({ status: 'not-running' }),
+    subscribeInstall: () => () => {},
+    subscribeInvalidation: () => () => {},
+  }, {
+    requestRender: () => {},
+    requestClose: () => {},
+    notify: () => {},
+    isOpen: () => true,
+    diag: createDiag({ filePath: undefined, stderrLevel: 'off' }),
+  }, { observations: () => [] })
+  rejected.beginManualInstall()
+  rejected.inspect('pkg', null)
+  await tick()
+  rejected.confirmInstall()
+  await tick()
+  const unknownId = rejected.installView()?.requestId
+  assert.equal(rejected.installView()?.phase, 'unknown')
+  const page = installPage(rejected)
+  assert.equal(page.currentView(), 'install')
+  assert.match(page.render(120).join('\n'), /Check installation status/)
+  page.handleInput('\x1b')
+  page.handleInput('i')
+  await tick()
+  assert.equal(rejected.installView()?.requestId, unknownId)
+  assert.equal(rejected.installView()?.phase, 'unknown')
+  page.dispose()
+  rejected.dispose()
 })

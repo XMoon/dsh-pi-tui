@@ -400,6 +400,7 @@ test('the REAL Host -> Direct port -> controller -> workspace page install chain
   assert.match(vt.getViewport().join('\n'), /offered version 1\.0\.0/)
   vt.sendInput('\r') // Install
   await waitFor(() => controller.installView()?.phase === 'done', 'the real Host local install')
+  await waitFor(() => controller.status().state === 'ready', 'the authoritative install reread')
   const view = vt.getViewport().join('\n')
   assert.match(view, /installed version 1\.0\.0/)
   assert.equal((view.match(/Done in/g) ?? []).length, 1, 'the Host package output is shown once, not twice')
@@ -423,7 +424,9 @@ test('the REAL Host -> Direct port -> controller -> workspace page install chain
   await waitFor(() => vt.getViewport().join('\n').includes('[Details]'), 'the Details focus frame')
   // Re-anchor the painted frame with the current authoritative model before the
   // action key: an invalidation read may have settled after the last queued paint.
-  panel.render(120)
+  // Keep the rendered frame as evidence that the action is actually visible.
+  const disableFrame = panel.render(120).join('\n').replace(/\x1b\[[0-9;]*m/g, '')
+  assert.match(disableFrame, /> Disable…/, 'the toggle action is painted before it is invoked')
   vt.sendInput('\r') // Disable…
   await waitFor(() => controller.model().cards.find(card => card.name === seeded.bundleName)?.enabled === false,
     'the real Host disable + authoritative reread')
@@ -435,7 +438,8 @@ test('the REAL Host -> Direct port -> controller -> workspace page install chain
   await settle()
   vt.sendInput('\x1b[A') // Cancel -> Remove
   await settle()
-  panel.render(120)
+  const confirmFrame = panel.render(120).join('\n').replace(/\x1b\[[0-9;]*m/g, '')
+  assert.match(confirmFrame, /> Remove/, 'the selected Remove action is painted before confirmation')
   vt.sendInput('\r') // confirm
   await waitFor(() => controller.model().cards.every(card => card.name !== seeded.bundleName),
     'the real Host removal + authoritative reread')

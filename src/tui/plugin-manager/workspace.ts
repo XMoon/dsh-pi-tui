@@ -86,6 +86,7 @@ const INSTALL_ACTION = {
   hide: 'install:hide',
   approve: 'install:approve',
   reconcile: 'install:reconcile',
+  new: 'install:new',
   back: 'install:back',
 } as const
 
@@ -205,8 +206,9 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     this.controller = controller
     this.intents = intents
     this.onDispose = options.onDispose
-    // A dispatched Host install reopens on the SAME request id/controller.
-    if (controller.hasDispatchedInstall()) this.view = 'install'
+    // A dispatched/failed/unknown/done attempt reopens on the SAME request
+    // id/controller; only the explicit New-install action may replace it.
+    if (controller.hasResumableInstall()) this.view = 'install'
   }
 
   get focused(): boolean {
@@ -416,19 +418,18 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     }
   }
 
-  /** `i`: a fresh manual editor, or the SAME live/reopened install view. */
+  /** `i`: reopen the SAME attempt (including failed/unknown/done), or create
+   * a fresh editor only when no attempt exists. */
   private openInstallView(): void {
-    const created = this.controller.beginManualInstall()
+    const existing = this.controller.installView()
+    if (existing === undefined && !this.controller.beginManualInstall()) return
     const install = this.controller.installView()
-    if (!created && install === undefined) return
+    if (install === undefined) return
     this.view = 'install'
     this.installFocus = 'spec'
-    if (created) {
-      this.specInput.setValue('')
-      this.registryInput.setValue('')
-      this.registryIndex = 0
-      this.customRegistry = false
-    } else if (install?.phase === 'editing' && this.specInput.getValue() === '' && install.spec !== '') {
+    if (existing === undefined) {
+      this.resetInstallInputs()
+    } else if (install.phase === 'editing' && this.specInput.getValue() === '' && install.spec !== '') {
       // A page recreated over an existing editor (or a hidden inspect) seeds
       // the controller's exact spec/registry instead of a blank form.
       this.seedInstallInputs(install)
@@ -437,9 +438,29 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     this.intents.requestRender()
   }
 
+  /** The explicit `n`/New install action; this is the only path allowed to
+   * replace a terminal attempt's evidence with a fresh request. */
+  private startNewInstall(): void {
+    if (!this.controller.beginManualInstall()) return
+    this.view = 'install'
+    this.installFocus = 'spec'
+    this.resetInstallInputs()
+    this.bumpRevision()
+    this.intents.requestRender()
+  }
+
+  private resetInstallInputs(): void {
+    this.specInput.setValue('')
+    this.registryInput.setValue('')
+    this.registryIndex = 0
+    this.customRegistry = false
+  }
+
   /** Seed the editor widgets from the controller's exact editing attempt. */
   private seedInstallInputs(install: PluginInstallView): void {
-    this.specInput.setValue(install.spec)
+    // Host-provided spec/registry are display-bound text: project them before
+    // they reach the Input renderer, never only at the eventual Host call.
+    this.specInput.setValue(sanitizedPhysicalLine(install.spec))
     const options = this.controller.registryOptions()
     if (install.registry === null) {
       this.registryIndex = 0
@@ -455,7 +476,7 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     } else {
       this.registryIndex = options.length
       this.customRegistry = true
-      this.registryInput.setValue(install.registry)
+      this.registryInput.setValue(sanitizedPhysicalLine(install.registry))
     }
   }
 
@@ -655,6 +676,10 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     }
     if (matchesKey(data, 'enter')) {
       this.activateInstallSelection()
+      return
+    }
+    if (data === 'n' || data === 'N') {
+      this.startNewInstall()
       return
     }
     if (data === WORKSPACE_KEYS.logs || data === WORKSPACE_KEYS.logs.toUpperCase()) {
@@ -919,6 +944,9 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
       case INSTALL_ACTION.reconcile:
         this.controller.reconcileInstall()
         return
+      case INSTALL_ACTION.new:
+        this.startNewInstall()
+        return
       case CONFIRM_ACTION.remove:
         this.controller.confirmRemove()
         this.view = 'details'
@@ -1016,7 +1044,7 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     const summary = outcome === undefined ? undefined : sanitizedPhysicalLine(changeSummary(outcome))
     const message = install.message === undefined ? undefined : sanitizedPhysicalLine(install.message)
     const output = outcome?.packageResult?.output
-    const lines = [
+    const headers = [
       ...(message === undefined || message === summary ? [] : [message]),
       ...(summary === undefined ? [] : [summary]),
       ...(outcome?.approvedBuilds === undefined ? [] : [
@@ -1025,12 +1053,12 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
       ...(outcome?.registries === undefined ? [] : [
         `registries: ${outcome.registries.map(registry => maskedSource(registry ?? 'pnpm default')).join(', ')}`,
       ]),
-      ...(output === undefined || output === ''
-        ? install.log.map(line => sanitizedPhysicalLine(line))
-        : output.split(/\r?\n/).map(line => sanitizedPhysicalLine(line))),
     ]
-    if (lines.length === 0) return
-    this.intents.onCopy(lines.join('\n'))
+    // The raw Host output/log is the copy authority (byte-exact), never the
+    // display projection: controls, tabs, CR/LF and repeated lines survive.
+    const diagnostic = output === undefined || output === '' ? install.log.join('\n') : output
+    if (headers.length === 0 && diagnostic === '') return
+    this.intents.onCopy(headers.length === 0 ? diagnostic : `${headers.join('\n')}\n${diagnostic}`)
   }
 
   private sanitizeSpecInput(): void {
@@ -1227,6 +1255,7 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
       if (this.controller.canReconcileInstall()) {
         actions.push({ value: INSTALL_ACTION.reconcile, label: 'Check installation status', enabled: true, tone: 'normal' })
       }
+      actions.push({ value: INSTALL_ACTION.new, label: 'New install', enabled: true, tone: 'normal' })
       actions.push({ value: INSTALL_ACTION.hide, label: 'Back', enabled: true, tone: 'normal' })
     }
     return actions
@@ -1472,6 +1501,7 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
       }
       return [
         { text: 'Enter action', priority: 80 },
+        { text: 'n new', priority: 55 },
         { text: 'l logs', priority: 70 },
         { text: 'c copy', priority: 60 },
         { text: 'Esc back', priority: 100 },
@@ -1483,11 +1513,13 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
         { text: 'Esc cancel', priority: 100 },
       ]
     }
+    // `i` never replaces a terminal attempt; name what it will actually open.
+    const installHint = this.controller.installView() === undefined ? 'i install' : 'i install result'
     if (this.view === 'details') {
       return [
         { text: 'Enter action', priority: 80 },
         { text: '/ search', priority: 70 },
-        { text: 'i install', priority: 60 },
+        { text: installHint, priority: 60 },
         { text: 'c copy', priority: 50 },
         { text: 'r refresh', priority: 40 },
         { text: 'Esc back', priority: 100 },
@@ -1496,7 +1528,7 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     return [
       { text: 'Enter details', priority: 80 },
       { text: '/ search', priority: 70 },
-      { text: 'i install', priority: 60 },
+      { text: installHint, priority: 60 },
       { text: 'Tab filter', priority: 50 },
       { text: 'r refresh', priority: 40 },
       { text: back, priority: 100 },
@@ -1686,8 +1718,8 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
       const options = this.controller.registryOptions()
       const registry = this.customRegistry
         ? `custom ${this.registryInput.render(Math.max(1, width - 16))[0] ?? ''}`
-        : maskedSource(options[this.registryIndex]?.label ?? 'pnpm configuration default')
-      const field = this.installFocus === 'registry' ? color.primary('‹ ') : '  '
+        : maskedSource(sanitizedPhysicalLine(options[this.registryIndex]?.label ?? 'pnpm configuration default'))
+      const field = this.installFocus === 'registry' ? color.primary('> ') : '  '
       lines.push(`${color.textDim('Reg     ')}${field}${color.text(truncateToWidth(registry, Math.max(1, width - 12), '…'))}`)
       if (!this.customRegistry) {
         const hint = options.map(option => maskedSource(option.label)).join(' · ')
@@ -2098,9 +2130,10 @@ function detailLines(detail: PluginDetailView, width: number, focused: boolean, 
   for (let index = 0; index < actions.length; index += 1) {
     const action = actions[index]!
     const cursor = focused && index === selectedAction ? color.primary('> ') : '  '
+    const actionLabel = sanitizedPhysicalLine(action.label)
     const label = action.enabled
-      ? (focused && index === selectedAction ? color.textStrong(action.label) : color.text(action.label))
-      : color.textDim(action.label)
+      ? (focused && index === selectedAction ? color.textStrong(actionLabel) : color.text(actionLabel))
+      : color.textDim(actionLabel)
     const reason = action.enabled || action.reason === undefined
       ? ''
       : color.textMuted(` — ${sanitizedPhysicalLine(action.reason)}`)
@@ -2154,9 +2187,10 @@ function paintActions(
   for (let index = 0; index < actions.length; index += 1) {
     const action = actions[index]!
     const cursor = index === selected ? color.primary('> ') : '  '
+    const actionLabel = sanitizedPhysicalLine(action.label)
     const label = action.enabled
-      ? (index === selected ? color.textStrong(action.label) : color.text(action.label))
-      : color.textDim(action.label)
+      ? (index === selected ? color.textStrong(actionLabel) : color.text(actionLabel))
+      : color.textDim(actionLabel)
     const reason = action.enabled || action.reason === undefined ? '' : color.textMuted(` — ${sanitizedPhysicalLine(action.reason)}`)
     actionLines.push({ value: action.value, line: lines.length })
     lines.push(fit(`${cursor}${label}${reason}`, width))
