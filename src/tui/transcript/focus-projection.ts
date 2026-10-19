@@ -467,15 +467,16 @@ function isFocusPersistentInputRow(message: TranscriptMessage): boolean {
  * The collapsed-Focus disposition of one row: where it renders relative to
  * the Thought (or that it does not render at all while collapsed).
  *
- * Position-aware plus semantic: a MID-TURN `form:'notice'` (a background job
- * or subagent settling while the Agent already works) is process feedback
- * that belongs AFTER the Thought, not causal input hoisted before it; a
- * notice inside the turn's OPENING foundation (`index < leadBoundary`)
- * explains why the turn started and stays BEFORE the Thought. Every other
- * persistent input/context row keeps its existing pre-Thought behavior, and
- * ordinary Process stays hidden inside the collapsed Thought (restored in
- * raw chronology when the Thought opens). A foldable Context row (Snapshot or
- * a proven Working tool-jobs Notice) joins that hidden set when a real Thought
+ * Position-aware plus semantic: an UNQUALIFIED mid-turn `form:'notice'` (a
+ * background job or subagent settling while the Agent already works, without
+ * durable same-turn next-step evidence) is process feedback that belongs AFTER
+ * the Thought, not causal input hoisted before it; a notice inside the turn's
+ * OPENING foundation (`index < leadBoundary`) explains why the turn started and
+ * stays BEFORE the Thought. Every other persistent input/context row keeps its
+ * existing pre-Thought behavior, and ordinary Process stays hidden inside the
+ * collapsed Thought (restored in raw chronology when the Thought opens). A
+ * foldable Context row (Snapshot or a proven Working tool-jobs Notice) joins
+ * that hidden set INSTEAD of the post-Thought rule above when a real Thought
  * owner exists; without one every row must fail open. The decision
  * reads the semantic `form`, the raw adjacency and raw position, never a
  * source kind or plugin name; `Compact` and `Full` do not route through here.
