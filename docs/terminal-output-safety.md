@@ -107,7 +107,10 @@ preview is reduced to ONE row, the ORDER is load-bearing:
 A preview that dropped whole records must end in the hidden-content `…`
 marker even when the retained text fits the width (only the exact record
 budget is unmarked); a width cut already terminates in the same marker, so
-the two causes never double it.
+the two causes never double it. A final newline — and a trailing segment that
+only carries terminal style, such as the app-owned `ESC[0m` — terminates the
+last record and is never itself a hidden record; genuinely blank records
+(including a blank line between two newlines) stay records.
 
 ## SGR whitelist (log policy only)
 

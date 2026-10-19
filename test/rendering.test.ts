@@ -5257,7 +5257,16 @@ test('a folded preview marks records dropped by COUNT, not only by width', async
   const exactly: TranscriptMessage = {
     kind: 'tool', turn: 0, name: 'generic_tool', args: '{"x":"z"}', result: 'alpha\nbeta\ngamma', status: 'ok',
   }
-  app.setTranscript([four, exactly])
+  // The common shell shape: the third record is followed by a trailing LF. It
+  // TERMINATES the record; it is not a hidden fourth record.
+  const trailingLf: TranscriptMessage = {
+    kind: 'tool', turn: 0, name: 'generic_tool', args: '{"x":"lf"}', result: 'eins\nzwei\ndrei\n', status: 'ok',
+  }
+  // Symmetric style tail: the only content after the final LF is a reset.
+  const trailingReset: TranscriptMessage = {
+    kind: 'tool', turn: 0, name: 'generic_tool', args: '{"x":"sgr"}', result: 'red\nblue\ngreen\n\u001b[0m', status: 'ok',
+  }
+  app.setTranscript([four, exactly, trailingLf, trailingReset])
   const view = await viewport(vt)
   const lines = view.split('\n').map(line => stripTerminalSequences(line).trimEnd())
   assert.ok(lines.some(line => line.endsWith('— one two three…')),
@@ -5266,6 +5275,12 @@ test('a folded preview marks records dropped by COUNT, not only by width', async
   assert.ok(lines.some(line => line.endsWith('— alpha beta gamma')),
     `exactly the preview's record budget needs no marker: \n${lines.join('\n')}`)
   assert.ok(!lines.some(line => line.endsWith('— alpha beta gamma…')), 'exactly three records is not a truncation')
+  assert.ok(lines.some(line => line.endsWith('— eins zwei drei')),
+    `a trailing LF terminates the third record; it is not a hidden fourth:\n${lines.join('\n')}`)
+  assert.ok(!lines.some(line => line.endsWith('— eins zwei drei…')), 'the trailing LF itself must not add a marker')
+  assert.ok(lines.some(line => line.endsWith('— red blue green')),
+    `an SGR-only tail after the final LF is not a hidden record:\n${lines.join('\n')}`)
+  assert.ok(!lines.some(line => line.endsWith('— red blue green…')), 'the style-only tail must not add a marker')
   app.stop()
 })
 
