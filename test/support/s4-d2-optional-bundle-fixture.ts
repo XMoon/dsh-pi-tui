@@ -316,6 +316,9 @@ async function bootAt(options: HostOptions): Promise<OptionalBundleHost> {
     overlays: [],
     telemetryDisabledEnv: undefined,
   }
+  // The Loader can write the composed tree back into its root config when a
+  // plugin self-disposes; production boot rewrites the empty root every start.
+  writeFileSync(join(profileDir, 'cordis.yml'), '[]\n')
   process.env.DSH_HOME = join(options.root, 'home')
   const ctx = await boot(BIN_NAME, join(profileDir, 'cordis.yml'), patches, async hostCtx => {
     hostCtx.provide('profileContext', profileContext)
