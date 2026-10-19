@@ -4,8 +4,8 @@
  * ONE manager surface owns the manager at a time across its two entries
  * (`/plugins` and `/settings → Plugins`). The token distinguishes a NORMAL
  * user close (the Close action, or Esc at the root) from an EXTERNAL teardown
- * (the Settings parent overlay being hidden/disposed, which disposes the
- * submenu WITHOUT invoking its `done()`): an external teardown must release
+ * (the Settings parent being hidden/disposed, which disposes the hosted Plugin
+ * page WITHOUT invoking its `done()`): an external teardown must release
  * the owner but never fake a user close — otherwise a later `/plugins` would
  * wrongly believe the manager is still open and refuse to open.
  *

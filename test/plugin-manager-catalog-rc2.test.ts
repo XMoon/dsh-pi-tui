@@ -9,10 +9,14 @@
  * `installTarget`. The real Host output then travels through the shared
  * mapping -> stable identity/origin/section classifier -> model.
  *
+ * `PRODUCTION PREREQUISITES REPRODUCED`: the real rc.2 `@deepseek-ai/dsh-plugin-manager`
+ * Host service, its real profile/patch/installation records, the real
+ * `pnpm`-backed profile package operations (local fixture package only), the
+ * shared Direct adapter/mapping and the real controller/page below.
  * `TEST STAND-INS`: ephemeral profile/installation directories and local
  * package manifests; no public npm download and no network install.
- * `DELIBERATELY ABSENT`: live npm registries, credentials and any unqualified
- * Host bundle consumer.
+ * `DELIBERATELY ABSENT`: live npm registries, credentials, a real external
+ * bundle consumer and S4-D2/D3 Host/TUI feature qualification.
  * @module @xmoon76/dsh-pi-tui/plugin-manager-catalog-rc2.test
  */
 
@@ -32,7 +36,13 @@ import {
 } from '../src/app/plugin-manager/classify.ts'
 import { buildPluginDetailView, buildPluginManagerModel, bundleValue } from '../src/app/plugin-manager/model.ts'
 import { detachPluginManagerSnapshot } from '../src/runtime/plugin-manager-mapping.ts'
+import { DirectPluginManagerPort, type PluginManagerServiceLike } from '../src/runtime/direct/plugin-manager-direct.ts'
 import { testLifecycle } from './support/temp-lifecycle.ts'
+import { TuiApp } from '../src/tui-app.ts'
+import { PluginManagerController } from '../src/app/plugin-manager/controller.ts'
+import { PluginManagerWorkspacePanel } from '../src/tui/plugin-manager/workspace.ts'
+import { createDiag } from '../src/runtime/process/diagnostics.ts'
+import { VirtualTerminal } from './virtual-terminal.ts'
 import { disposeContext } from './support/runner-harness.ts'
 
 const ON_DEMAND = OFFICIAL_ON_DEMAND_CATALOG.map(entry => entry.packageName)
@@ -75,6 +85,55 @@ function seedProfile(workRoot: string): {
     installationAnchor: installAnchor,
     profileContext: {
       name: 'rc2-catalog-fixture',
+      dir: profileDir,
+      patchPath: profilePatchPath,
+      installAnchor,
+      cwd: workRoot,
+      home: workRoot,
+      startedBundles: [],
+      overlays: [],
+      telemetryDisabledEnv: undefined,
+    },
+  }
+}
+
+/** A minimal real profile + local bundle fixture for the Host package lifecycle.
+ *  No network is needed: pnpm installs the local directory link. */
+function seedInstallProfile(workRoot: string): {
+  profileContext: Record<string, unknown>
+  bundleDir: string
+  bundleName: string
+} {
+  const profileDir = join(workRoot, 'profile')
+  const installationDir = join(workRoot, 'installation')
+  const bundleDir = join(workRoot, 'fixture-bundle')
+  const installAnchor = join(installationDir, 'package.json')
+  const profilePatchPath = join(profileDir, 'cordis.patch.yml')
+  mkdirSync(profileDir, { recursive: true })
+  mkdirSync(installationDir, { recursive: true })
+  mkdirSync(bundleDir, { recursive: true })
+  writeFileSync(installAnchor, JSON.stringify({ name: 'rc2-install-fixture-installation', private: true, dependencies: {} }, null, 2))
+  writeFileSync(join(profileDir, 'package.json'), JSON.stringify({
+    name: 'rc2-install-fixture-profile',
+    private: true,
+    dependencies: {},
+    dsh: { profile: { bundles: [], patch: 'cordis.patch.yml' } },
+  }, null, 2))
+  writeFileSync(profilePatchPath, '[]\n')
+  writeFileSync(join(profileDir, 'pnpm-workspace.yaml'), 'packages:\n  - .\n\nnodeLinker: hoisted\nautoInstallPeers: false\n')
+  writeFileSync(join(bundleDir, 'cordis.patch.yml'), '[]\n')
+  writeFileSync(join(bundleDir, 'index.js'), 'export default function fixtureBundle() {}\n')
+  writeFileSync(join(bundleDir, 'package.json'), JSON.stringify({
+    name: 'dsh-s4d1-local-fixture-bundle',
+    version: '1.0.0',
+    main: 'index.js',
+    dsh: { bundle: { patch: 'cordis.patch.yml' } },
+  }, null, 2))
+  return {
+    bundleDir,
+    bundleName: 'dsh-s4d1-local-fixture-bundle',
+    profileContext: {
+      name: 'rc2-install-fixture',
       dir: profileDir,
       patchPath: profilePatchPath,
       installAnchor,
@@ -218,4 +277,163 @@ test('the TUI self package is the only Current-TUI card when the real Host lists
   assert.equal(selfCard.isSelf, true)
   assert.equal(selfCard.canToggle, false)
   assert.equal(selfCard.canRemove, false)
+})
+
+
+test('the REAL rc.2 Host install/toggle/remove lifecycle flows through the ONE Direct port', async (t) => {
+  const life = testLifecycle(t)
+  const workRoot = life.tempDir('rc2-install-')
+  const seeded = seedInstallProfile(workRoot)
+  const ctx = new Context()
+  life.defer(() => disposeContext(ctx))
+  ctx.provide('profileContext', seeded.profileContext as never)
+  await ctx.plugin(Loader)
+  await ctx.plugin(PluginManager, {})
+  const service = ctx.get('pluginManager') as unknown as PluginManagerServiceLike
+  const port = new DirectPluginManagerPort({ get: name => name === 'pluginManager' ? service : undefined, on: () => () => {} })
+
+  const inspection = await port.inspect(seeded.bundleDir)
+  assert.equal(inspection.status, 'accepted')
+  assert.equal(inspection.kind, 'path')
+  assert.equal(inspection.bundle, true)
+  assert.equal(inspection.name, seeded.bundleName)
+  assert.equal(inspection.version, '1.0.0')
+
+  const installed = await port.startInstall({
+    requestId: 'rc2-local-install',
+    spec: seeded.bundleDir,
+    registry: null,
+    enabled: true,
+  })
+  assert.equal(installed.application, 'restart-required')
+  assert.equal(installed.restartReason, 'no-hmr')
+  assert.equal(installed.bundle, seeded.bundleName)
+  assert.equal(installed.version, '1.0.0')
+  assert.deepEqual([...(installed.registries ?? [])], [null])
+  assert.equal(installed.packageResult?.exitCode, 0)
+  assert.equal(installed.packageResult?.truncated, false)
+  assert.ok((installed.packageResult?.output ?? '').includes('Done'))
+  assert.equal('logPath' in (installed.packageResult ?? {}), false, 'no profile log path crosses the port')
+
+  const afterInstall = await port.snapshot()
+  const installedCard = afterInstall.bundles.find(bundle => bundle.name === seeded.bundleName)
+  assert.ok(installedCard !== undefined)
+  assert.equal(installedCard.availability, 'profile')
+  assert.equal(installedCard.installed, true)
+  assert.equal(installedCard.enabled, true)
+  assert.equal(installedCard.removable, true)
+  assert.equal(installedCard.version, '1.0.0')
+  assert.match(installedCard.source ?? '', /^link:/)
+
+  const disabled = await port.setBundleEnabled(seeded.bundleName, false)
+  assert.equal(disabled.changed, true)
+  assert.equal(disabled.application, 'restart-required')
+  const afterDisable = await port.snapshot()
+  assert.equal(afterDisable.bundles.find(bundle => bundle.name === seeded.bundleName)?.enabled, false)
+
+  const removed = await port.removeBundle(seeded.bundleName)
+  assert.equal(removed.stage, 'remove')
+  assert.equal(removed.changed, true)
+  assert.equal(removed.application, 'restart-required')
+  assert.equal('logPath' in (removed.packageResult ?? {}), false)
+  const afterRemove = await port.snapshot()
+  assert.equal(afterRemove.bundles.find(bundle => bundle.name === seeded.bundleName), undefined)
+})
+
+
+test('the REAL Host -> Direct port -> controller -> workspace page install chain reaches the UI', async (t) => {
+  const life = testLifecycle(t)
+  const workRoot = life.tempDir('rc2-ui-install-')
+  const seeded = seedInstallProfile(workRoot)
+  const ctx = new Context()
+  life.defer(() => disposeContext(ctx))
+  ctx.provide('profileContext', seeded.profileContext as never)
+  await ctx.plugin(Loader)
+  await ctx.plugin(PluginManager, {})
+  const service = ctx.get('pluginManager') as unknown as PluginManagerServiceLike
+  const port = new DirectPluginManagerPort({ get: name => name === 'pluginManager' ? service : undefined, on: () => () => {} })
+
+  const vt = new VirtualTerminal(120, 40)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  let close: () => void = () => {}
+  const controller = new PluginManagerController(port, {
+    requestRender: () => app.requestRender(),
+    requestClose: () => close(),
+    notify: () => {},
+    isOpen: () => true,
+    diag: createDiag({ filePath: undefined, stderrLevel: 'off' }),
+  })
+  const panel = new PluginManagerWorkspacePanel(controller, {
+    rows: () => vt.rows,
+    columns: () => vt.columns,
+    requestRender: () => app.requestRender(),
+    notice: () => undefined,
+    onCopy: () => {},
+  }, { onDispose: () => {} })
+  close = app.openPluginManagerWorkspace(panel, () => {})
+  life.defer(() => { try { app.dispose() } catch {} controller.dispose() })
+  controller.open('direct-command')
+
+  const settle = async (rounds = 10): Promise<void> => {
+    for (let index = 0; index < rounds; index += 1) await new Promise<void>(resolve => setTimeout(resolve, 0))
+    await vt.waitForRender()
+  }
+  const waitFor = async (predicate: () => boolean, label: string): Promise<void> => {
+    for (let index = 0; index < 300; index += 1) {
+      if (predicate()) return
+      await new Promise<void>(resolve => setTimeout(resolve, 10))
+      await vt.waitForRender()
+    }
+    throw new Error(`timed out waiting for ${label}: ${vt.getViewport().join('\n')}`)
+  }
+
+  await settle()
+  assert.match(vt.getViewport().join('\n'), /Plugins · All/)
+
+  vt.sendInput('i')
+  await settle()
+  for (const character of seeded.bundleDir) vt.sendInput(character)
+  await settle()
+  vt.sendInput('\r') // Inspect
+  await waitFor(() => controller.installView()?.phase === 'confirm', 'the real Host inspection')
+  assert.match(vt.getViewport().join('\n'), /offered version 1\.0\.0/)
+  vt.sendInput('\r') // Install
+  await waitFor(() => controller.installView()?.phase === 'done', 'the real Host local install')
+  const view = vt.getViewport().join('\n')
+  assert.match(view, /installed version 1\.0\.0/)
+  assert.match(view, /Restart required/)
+  const reread = await port.snapshot()
+  const bundle = reread.bundles.find(candidate => candidate.name === seeded.bundleName)
+  assert.equal(bundle?.installed, true)
+  assert.equal(bundle?.enabled, true)
+
+  // The SAME real chain now toggles and removes through the authoritative
+  // reread and the visible list/detail (no direct controller shortcut).
+  vt.sendInput('\x1b') // leave the install result view
+  await settle()
+  vt.sendInput('/')
+  await settle()
+  for (const character of seeded.bundleName) vt.sendInput(character)
+  await settle()
+  vt.sendInput('\r') // apply search
+  await settle()
+  vt.sendInput('\r') // Details
+  await settle()
+  vt.sendInput('\r') // Disable…
+  await waitFor(() => controller.model().cards.find(card => card.name === seeded.bundleName)?.enabled === false,
+    'the real Host disable + authoritative reread')
+  assert.match(vt.getViewport().join('\n'), /Enabled\s+No/)
+
+  vt.sendInput('\x1b[B') // Enable… -> Remove…
+  await settle()
+  vt.sendInput('\r') // open confirmation
+  await settle()
+  vt.sendInput('\x1b[A') // Cancel -> Remove
+  await settle()
+  vt.sendInput('\r') // confirm
+  await waitFor(() => controller.model().cards.every(card => card.name !== seeded.bundleName),
+    'the real Host removal + authoritative reread')
+  assert.match(vt.getViewport().join('\n'), /No matching plugins|No plugins/)
+  assert.equal((await port.snapshot()).bundles.find(candidate => candidate.name === seeded.bundleName), undefined)
 })

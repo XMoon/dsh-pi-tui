@@ -620,7 +620,9 @@ export class SettingsWorkspacePanel implements Component {
     return lines.slice(0, plan.rows)
   }
 
-  invalidate(): void {}
+  invalidate(): void {
+    this.pluginPage?.invalidate?.()
+  }
 
   /** The ONE level breadcrumb, identical in every layout: `Categories` →
    *  `<Category> · Rows` → `<Category> · <Row label>` (one ` · ` join for every

@@ -232,7 +232,6 @@ test('the detached change result preserves the rc.2 restart/version/build facts'
         exitCode: 1,
         output: 'ERR_PNPM_BUILD_BLOCKED',
         truncated: false,
-        logPath: '/tmp/run.log',
         kind: 'build-blocked',
         timedOut: false,
         incompatible: [{ name: 'pkg', version: '2.3.4', runtimeVersion: '0.2.1-rc.2', requirements: { 'engines.dsh': '>=9' } }],
@@ -250,7 +249,7 @@ test('the detached change result preserves the rc.2 restart/version/build facts'
   assert.equal(changeFact.failedAt, 'registry')
   assert.equal(changeFact.packageResult?.kind, 'build-blocked')
   assert.equal(changeFact.packageResult?.output, 'ERR_PNPM_BUILD_BLOCKED')
-  assert.equal(changeFact.packageResult?.logPath, '/tmp/run.log')
+  assert.equal('logPath' in (changeFact.packageResult ?? {}), false, 'a Host profile path never enters the semantic port')
   assert.equal(changeFact.packageResult?.incompatible?.[0]?.name, 'pkg')
   assert.ok(Object.isFrozen(changeFact))
   assert.ok(Object.isFrozen(changeFact.packageResult))

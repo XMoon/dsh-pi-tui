@@ -356,6 +356,52 @@ test('official:false on a shipped base bundle is not third-party evidence', () =
   assert.equal(base.unverified, false)
 })
 
+test('a Host incompatible error states whether an exact-version exemption applies', () => {
+  const incompatible = { name: 'pkg', version: '2.0.0', runtimeVersion: '0.2.1-rc.2', requirements: { 'engines.dsh': '>=9' } }
+  const snap = snapshot([
+    bundle({
+      name: 'incompatible',
+      error: { code: 'incompatible-version', incompatible: [incompatible] },
+    }),
+  ], [])
+  const model = buildPluginManagerModel(snap, new Map())
+  const card = cardByName(model, 'incompatible')!
+  const without = buildPluginDetailView(card)
+  assert.ok(without.groups.some(group => group.facts.some(fact => /no exact-version exemption applies/.test(fact.value))),
+    'an incompatible package with no exemption says so')
+  const withExemption = buildPluginDetailView(card, [
+    { packageVersion: 'pkg@2.0.0', runtimeVersions: ['0.2.1-rc.2'] },
+  ])
+  assert.ok(withExemption.groups.some(group => group.facts.some(fact =>
+    fact.label === 'Exemption' && fact.tone === 'success' && /exempted for DSH 0\.2\.1-rc\.2/.test(fact.value))),
+  'the exact accepted package-version exemption is shown')
+})
+
+test('installation, missing and standalone-entry cards never offer Remove', () => {
+  const snap = snapshot([
+    bundle({ name: '@deepseek-ai/dsh-base', availability: 'installation', source: undefined }),
+    bundle({
+      name: '@deepseek-ai/dsh-experimental-auto-review',
+      official: true,
+      availability: 'missing',
+      installed: false,
+      optional: true,
+      removable: false,
+      source: undefined,
+      installTarget: { spec: 'x@1', version: '1' },
+    }),
+  ], [row({ entryId: 'e-free', moduleName: 'free', patchId: 'free' })])
+  const model = buildPluginManagerModel(snap, new Map())
+  for (const name of ['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-experimental-auto-review']) {
+    const card = cardByName(model, name)!
+    assert.ok(!buildPluginDetailView(card).actions.some(action => action.value === PLUGIN_ACTION.remove),
+      `${name} must not offer Remove (availability ${card.availability})`)
+  }
+  const entry = model.cards.find(card => card.value === entryValue('e-free'))!
+  assert.ok(!buildPluginDetailView(entry).actions.some(action => action.value === PLUGIN_ACTION.remove),
+    'a standalone Loader entry has no Remove action')
+})
+
 test('a @deepseek-ai scope never proves official and an experimental substring never proves Experimental', () => {
   const claims = classifyPluginPackages(
     inputs([

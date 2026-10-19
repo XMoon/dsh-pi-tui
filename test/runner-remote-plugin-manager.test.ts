@@ -238,6 +238,11 @@ async function selectListRow(vt: VirtualTerminal, name: string): Promise<void> {
 async function enableFixtureBundleThroughPanel(fixture: Fixture, bundle: string): Promise<void> {
   await selectListRow(fixture.vt, bundle)
   fixture.vt.sendInput('\r')
+  // The list preview already paints the Detail action; wait for the REAL
+  // Details focus frame before pressing Enter, otherwise the first Enter only
+  // reveals/focuses and the action admission gate correctly refuses the write.
+  await waitFor('the fixture bundle detail owns the Details focus', () =>
+    /\[Details\]/.test(plain(fixture.vt.getViewport())), 20_000)
   await waitFor('the fixture bundle detail offers the official Enable action', () =>
     /\bEnable\b/.test(plain(fixture.vt.getViewport())), 20_000)
   fixture.vt.sendInput('\r')

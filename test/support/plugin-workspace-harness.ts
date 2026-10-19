@@ -75,6 +75,8 @@ export interface WorkspaceHarnessOptions {
   readonly bundles?: readonly PluginBundleFact[]
   readonly plugins?: readonly PluginRowFact[]
   readonly observations?: readonly TuiExtensionObservation[]
+  /** The exact-version exemption reader warnings the fixture reports. */
+  readonly exemptionWarnings?: readonly string[]
   /** Replaces the fixture install behavior when provided. */
   readonly installImpl?: (request: { requestId: string; spec: string; approvedBuilds?: readonly string[] }) => Promise<PluginChangeFact>
   readonly waitImpl?: (requestId: string) => Promise<PluginChangeFact | null>
@@ -131,7 +133,7 @@ export async function openWorkspace(options: WorkspaceHarnessOptions = {}): Prom
     plugins,
     registries: { registry: null, fallbackRegistries: [], resolved: null },
     exemptions: [],
-    exemptionWarnings: [],
+    exemptionWarnings: options.exemptionWarnings ?? [],
   }
   const installListeners = new Set<(event: PluginInstallEvent) => void>()
   const invalidateListeners = new Set<() => void>()

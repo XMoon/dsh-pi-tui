@@ -54,7 +54,6 @@ export interface PluginPackageResultFact {
   readonly exitCode: number
   readonly output: string
   readonly truncated: boolean
-  readonly logPath: string
   readonly kind?: string
   readonly timedOut?: boolean
   readonly incompatible?: readonly PluginIncompatibleFact[]

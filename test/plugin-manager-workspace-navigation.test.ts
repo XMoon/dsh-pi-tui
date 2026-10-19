@@ -121,11 +121,56 @@ test('the removal confirmation defaults to Cancel and an explicit Remove is requ
 test('Esc advertises the real destination per entry host', async () => {
   const direct = await open({ columns: 120, rows: 30 })
   assert.match(plain([direct.viewport().at(-1)!]), /Esc close/)
+  direct.vt.sendInput('i')
+  await direct.settle()
+  assert.match(plain([direct.viewport().at(-1)!]), /Esc back/,
+    'the direct install editor returns to the LIST, so it must not claim Esc close')
+  direct.vt.sendInput('\x1b')
+  await direct.settle()
+  assert.equal(direct.panel.currentView(), 'list')
   direct.app.dispose()
   started.delete(direct)
 
   const settings = await open({ columns: 120, rows: 30, entryHost: 'settings-entry' })
   assert.match(plain([settings.viewport().at(-1)!]), /Esc back/)
+  settings.vt.sendInput('i')
+  await settings.settle()
+  assert.match(plain([settings.viewport().at(-1)!]), /Esc back/)
+})
+
+test('80x10 keeps the removal consequence and both choices reachable', async () => {
+  const harness = await open({ columns: 80, rows: 10 })
+  await selectCard(harness, 'bundle:@vendor/foo')
+  harness.vt.sendInput('\r')
+  await harness.settle()
+  harness.vt.sendInput('\x1b[B') // Enable… -> Remove…
+  await harness.settle()
+  harness.vt.sendInput('\r')
+  await harness.settle()
+  const view = harness.view()
+  assert.match(view, /Remove @vendor\/foo\?/, 'the exact package is visible')
+  assert.match(view, /unloads the bundle/, 'the dependency consequence is visible')
+  assert.match(view, /Cancel/)
+  assert.match(view, /Remove/)
+  assert.match(plain([harness.viewport().at(-1)!]), /Esc cancel/)
+})
+
+test('80x10 reveals then admits the official Install action and keeps its intent visible', async () => {
+  const harness = await open({ columns: 80, rows: 10 })
+  harness.vt.sendInput('\x1b[F')
+  await harness.settle()
+  harness.vt.sendInput('\r') // Details
+  await harness.settle()
+  harness.vt.sendInput('\r') // first Enter reveals the offscreen action
+  await harness.settle()
+  assert.match(harness.view(), /Actions/)
+  assert.match(harness.view(), /Install…/)
+  harness.vt.sendInput('\r') // now the painted action is admitted
+  await harness.settle()
+  assert.match(harness.view(), /offered version 0\.2\.1-rc\.2/)
+  assert.match(harness.view(), /Activates the bundle/)
+  assert.match(harness.view(), /Install/)
+  assert.match(plain([harness.viewport().at(-1)!]), /Esc edit/)
 })
 
 test('a resize mid-install keeps the same request and a truthful last-row bar', async () => {

@@ -34,10 +34,8 @@ import type { Diag } from '../../runtime/process/diagnostics.ts'
 import { classifyPluginPackages, type PluginClassificationInput, type PluginPresentationRole } from './classify.ts'
 import type { TuiExtensionObservation } from './extension-inventory.ts'
 import {
-  PLUGIN_ACTION,
   buildPluginManagerModel,
   bundleValue,
-  cardStatusChip,
   changeSummary,
   entryValue,
   type PluginCardView,
@@ -274,17 +272,6 @@ export class PluginManagerController {
     return this.busyValue
   }
 
-  /** The current inventory read epoch (remove confirmation fencing). */
-  currentReadEpoch(): number {
-    return this.readEpoch
-  }
-
-  /** A short truthful status chip for one card. */
-  statusChip(value: string): string | undefined {
-    const card = this.card(value)
-    return card === undefined ? undefined : cardStatusChip(card)
-  }
-
   /** Ask the owning host to close the surface (normal user close). */
   requestClose(): void {
     this.hooks.requestClose()
@@ -359,6 +346,9 @@ export class PluginManagerController {
     if (active !== undefined && active.phase !== 'done' && active.phase !== 'failed' && active.phase !== 'unknown') {
       return false
     }
+    // A replaced attempt must not leave an old inspect running; its late result
+    // is already fenced by installEpoch, but the request itself is dropped.
+    active?.inspectAbort?.abort()
     this.installEpoch += 1
     this.install = {
       requestId: nextInstallRequestId(),
@@ -391,6 +381,7 @@ export class PluginManagerController {
       this.hooks.requestRender()
       return false
     }
+    this.install?.inspectAbort?.abort()
     this.installEpoch += 1
     this.install = {
       requestId: nextInstallRequestId(),
@@ -492,7 +483,9 @@ export class PluginManagerController {
         requestId,
         spec: active.spec,
         registry: active.registry,
-        enabled: true,
+        // A non-bundle package has no bundle layer to activate. `null` (the
+        // spec form does not say) keeps the official default activation.
+        enabled: active.inspection?.status === 'accepted' && active.inspection.bundle === false ? false : true,
         ...(active.approvedBuilds === undefined ? {} : { approvedBuilds: [...active.approvedBuilds] }),
       })
     } catch (error) {
@@ -543,6 +536,9 @@ export class PluginManagerController {
       if (cancellation.status === 'cancelled') {
         current.phase = 'done'
         current.message = 'cancelled — profile files restored'
+        // The Host restored the profile files; the visible inventory must be
+        // the authoritative post-restore read, not the previous snapshot.
+        this.run('plugin manager read', () => this.read())
       } else if (cancellation.status === 'too-late') {
         current.phase = 'applying'
         current.message = 'too late to cancel: the bundle is being applied'
@@ -638,6 +634,20 @@ export class PluginManagerController {
   // ── mutations ────────────────────────────────────────────────────────────
 
   /**
+   * ONE mutation in flight at a time. The official Host serializes profile
+   * writes itself, but a second UI dispatch would let a NEWER request settle
+   * first and leave the older Host write's result without a final
+   * authoritative reread. Refuse the second dispatch instead of silently
+   * overwriting the busy identity/token.
+   */
+  private refuseWhileMutating(): boolean {
+    if (this.busyValue === undefined) return false
+    this.message = 'another plugin change is still in progress; wait for it to settle'
+    this.hooks.requestRender()
+    return true
+  }
+
+  /**
    * Toggle one card through the official authority. Re-resolves the card by
    * stable value against the CURRENT inventory and re-checks the effective
    * capability before dispatch.
@@ -647,14 +657,17 @@ export class PluginManagerController {
   }
 
   private async performToggleCard(value: string): Promise<void> {
+    if (this.refuseWhileMutating()) return
     const card = this.card(value)
     if (card === undefined) {
       this.message = 'the plugin inventory changed; refresh and try again'
       this.hooks.requestRender()
       return
     }
-    if (card.availability === 'missing' && card.canInstall) {
-      this.message = `${card.name} is not installed; use Install… from its detail`
+    if (card.availability === 'missing') {
+      this.message = card.canInstall
+        ? `${card.name} is not installed; use Install… from its detail`
+        : card.installBlockedReason ?? `${card.name} is not installed`
       this.hooks.requestRender()
       return
     }
@@ -688,6 +701,7 @@ export class PluginManagerController {
   }
 
   private async performToggleRow(cardValue: string, entryId: string): Promise<void> {
+    if (this.refuseWhileMutating()) return
     const card = this.card(cardValue)
     const row = card?.rows.find(candidate => candidate.entryId === entryId)
     if (card === undefined || row === undefined) {
@@ -761,6 +775,7 @@ export class PluginManagerController {
   }
 
   private async performConfirmRemove(): Promise<void> {
+    if (this.refuseWhileMutating()) return
     const confirmation = this.confirming
     if (confirmation === undefined) return
     const card = this.confirmingCard()

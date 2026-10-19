@@ -191,15 +191,6 @@ export function rowToggleEntryId(value: string): string | undefined {
   return value.startsWith(prefix) ? value.slice(prefix.length) : undefined
 }
 
-/** Human text for one role, shown as the card's classification chip. */
-export function roleLabel(role: PluginPresentationRole): string {
-  switch (role) {
-    case 'current-tui': return 'Current TUI'
-    case 'tui-extension': return 'TUI extension'
-    default: return 'DSH plugin'
-  }
-}
-
 /** Human text for one proven origin. */
 export function originLabel(origin: PluginOrigin): string {
   switch (origin) {
@@ -232,19 +223,6 @@ export function incompatibleText(entry: PluginIncompatibleFact): string {
   return `${entry.name}@${entry.version} rejects DSH ${entry.runtimeVersion}${requirements === '' ? '' : ` (needs ${requirements})`}`
 }
 
-/** Format the exemption list for the diagnostics section. */
-export function exemptionText(entry: PluginExemptionFact): string {
-  return `${entry.packageVersion} → ${entry.runtimeVersions.join(', ')}`
-}
-
-/** The registries summary rendered on the list footer/detail. */
-export function registriesText(registries: PluginRegistriesFact): string {
-  const parts: string[] = [registries.registry === null ? 'pnpm default' : registries.registry]
-  if (registries.fallbackRegistries.length > 0) parts.push(`fallbacks: ${registries.fallbackRegistries.join(', ')}`)
-  if (registries.resolved !== null) parts.push(`resolved: ${registries.resolved}`)
-  return parts.join(' · ')
-}
-
 /**
  * Strip URL credentials from one Host-provided source spec before painting it.
  * The Host already removes user information from dependency sources; this is
@@ -267,12 +245,12 @@ export function cardStatusChip(card: PluginCardView): string | undefined {
   return 'disabled'
 }
 
-/** The chip's semantic tone. */
-export function cardStatusTone(card: PluginCardView): PluginDetailFact['tone'] {
+/** The chip's ink: state chips are `textMuted`; only a failed/unavailable
+ * state escalates to the semantic warning/error token. */
+export function cardStatusTone(card: PluginCardView): 'muted' | 'warning' | 'error' {
   if (card.error !== undefined) return 'error'
-  if (card.availability === 'missing') return card.enabled ? 'normal' : 'dim'
-  if (card.isSelf) return 'normal'
-  return card.enabled ? 'normal' : 'dim'
+  if (card.availability === 'missing' && !card.canInstall) return 'warning'
+  return 'muted'
 }
 
 function cardStatusFacts(card: PluginCardView): PluginDetailFact[] {
@@ -362,10 +340,21 @@ function cardComponentFacts(card: PluginCardView): PluginDetailFact[] {
   return facts
 }
 
-function cardWarningFacts(card: PluginCardView): PluginDetailFact[] {
+function cardWarningFacts(card: PluginCardView, exemptions: readonly PluginExemptionFact[]): PluginDetailFact[] {
   const facts: PluginDetailFact[] = []
   if (card.error !== undefined) {
     facts.push({ label: 'Host error', value: errorText(card.error), tone: 'error' })
+    for (const entry of card.error.incompatible ?? []) {
+      const key = `${entry.name}@${entry.version}`
+      const exemption = exemptions.find(candidate => candidate.packageVersion === key)
+      facts.push({
+        label: 'Exemption',
+        value: exemption === undefined
+          ? `${key}: no exact-version exemption applies`
+          : `${key}: exempted for DSH ${exemption.runtimeVersions.join(', ')}`,
+        tone: exemption === undefined ? 'warning' : 'success',
+      })
+    }
   }
   if (card.isSelf) {
     facts.push({
@@ -436,20 +425,25 @@ function cardActions(card: PluginCardView): PluginDetailAction[] {
         tone: 'warning',
       })
   }
-  actions.push(card.canRemove
-    ? {
-      value: PLUGIN_ACTION.remove,
-      label: 'Remove…',
-      enabled: true,
-      tone: 'warning',
-    }
-    : {
-      value: PLUGIN_ACTION.remove,
-      label: 'Remove…',
-      enabled: false,
-      reason: card.removeBlockedReason ?? 'This bundle is not removable',
-      tone: 'warning',
-    })
+  // Only a profile-owned, Host-removable bundle EVER shows Remove. A shipped
+  // installation bundle, a missing catalog entry and a standalone Loader
+  // entry have no removal action at all (not even a disabled one).
+  if (card.target === 'bundle' && card.availability === 'profile' && card.removable) {
+    actions.push(card.canRemove
+      ? {
+        value: PLUGIN_ACTION.remove,
+        label: 'Remove…',
+        enabled: true,
+        tone: 'warning',
+      }
+      : {
+        value: PLUGIN_ACTION.remove,
+        label: 'Remove…',
+        enabled: false,
+        reason: card.removeBlockedReason ?? 'This bundle is not removable',
+        tone: 'warning',
+      })
+  }
   for (const row of card.rows) {
     if (!row.canToggle) continue
     actions.push({
@@ -463,8 +457,13 @@ function cardActions(card: PluginCardView): PluginDetailAction[] {
   return actions
 }
 
-/** Build the pure Detail projection of one card. */
-export function buildPluginDetailView(card: PluginCardView): PluginDetailView {
+/** Build the pure Detail projection of one card. The profile's exact-version
+ * exemptions are passed in so an incompatible Host error can say whether an
+ * exemption already applies (never guessed locally). */
+export function buildPluginDetailView(
+  card: PluginCardView,
+  exemptions: readonly PluginExemptionFact[] = [],
+): PluginDetailView {
   const groups: PluginDetailGroup[] = [
     { title: 'Status', facts: cardStatusFacts(card) },
     { title: 'Source', facts: cardSourceFacts(card) },
@@ -475,7 +474,7 @@ export function buildPluginDetailView(card: PluginCardView): PluginDetailView {
   if (card.rows.length > 0 || card.overrides.length > 0) {
     groups.push({ title: 'Components', facts: cardComponentFacts(card) })
   }
-  const warnings = cardWarningFacts(card)
+  const warnings = cardWarningFacts(card, exemptions)
   if (warnings.length > 0) groups.push({ title: 'Compatibility', facts: warnings })
   return Object.freeze({
     card,
@@ -533,7 +532,11 @@ function bundleMutationBlocked(bundle: PluginBundleFact, isSelf: boolean): strin
   if (isSelf) return 'This bundle provides the Current TUI and cannot be changed from here.'
   if (bundle.readOnlyReason === 'management-required') return 'Required by DSH management; it cannot be changed here.'
   if (bundle.readOnlyReason === 'unaddressable') return 'Not addressable through the profile patch.'
-  if (bundle.availability === 'missing') return 'The bundle is not installed; install it from its official catalog entry.'
+  if (bundle.availability === 'missing') {
+    return bundle.installTarget === undefined
+      ? 'The bundle is not installed and no official install target is available.'
+      : 'The bundle is not installed; install it from its official catalog entry.'
+  }
   if (bundle.error !== undefined) return errorText(bundle.error)
   return undefined
 }
@@ -732,6 +735,8 @@ export function changeSummary(change: PluginChangeFact): string {
     parts.push(`pending build scripts: ${change.pendingBuilds.join(', ')}`)
   }
   if (change.packageResult?.kind !== undefined) parts.push(`package failure: ${change.packageResult.kind}`)
+  if (change.packageResult?.timedOut === true) parts.push('package run timed out')
+  for (const entry of change.packageResult?.incompatible ?? []) parts.push(incompatibleText(entry))
   if (change.failedAt !== undefined) parts.push(`failed at ${change.failedAt}`)
   if (change.error !== undefined) parts.push(errorText(change.error))
   for (const warning of change.warnings ?? []) parts.push(warning)

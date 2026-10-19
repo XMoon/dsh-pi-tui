@@ -125,6 +125,23 @@ test('the real /plugins entry opens the fullscreen page and Escape closes back t
   assert.doesNotMatch(plain(vt.getViewport()), /Plugins · All/, 'Escape closes the page')
 })
 
+test('closing /plugins restores transcript-fullscreen mode and the live editor draft', async (t) => {
+  const { vt, harness, app } = await mountPluginRunner(t)
+  const draft = 'draft survives the plugin manager round trip'
+  app.setDraft(draft)
+  app.setFullscreen(true)
+  await vt.waitForRender()
+
+  invokeCommand(harness, 'plugins')
+  await vt.waitForRender()
+  assert.match(plain(vt.getViewport()), /Plugins · All/)
+
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+  assert.equal(app.isFullscreen(), true, 'the transcript-fullscreen mode is restored')
+  assert.equal(app.getDraft(), draft, 'the live editor draft is untouched')
+})
+
 test('a second /plugins while open is a no-op, and a later open still mounts (owner released)', async (t) => {
   const { vt, harness } = await mountPluginRunner(t)
   invokeCommand(harness, 'plugins')
@@ -167,6 +184,27 @@ test('the real Settings → Plugins category hosts the same page in place and Ba
   vt.sendInput('\x1b')
   await vt.waitForRender()
   assert.doesNotMatch(plain(vt.getViewport()), /Settings · Categories/, 'closing Settings returns to the editor')
+})
+
+test('a blocking owner arriving over /plugins closes the workspace and releases its owner', async (t) => {
+  const { vt, harness, app } = await mountPluginRunner(t)
+  invokeCommand(harness, 'plugins')
+  await vt.waitForRender()
+  assert.match(plain(vt.getViewport()), /Plugins · All/)
+
+  const approval = app.showApprovalPrompt({ toolName: 'bash', reason: 'blocking-owner probe' })
+  await vt.waitForRender()
+  assert.doesNotMatch(plain(vt.getViewport()), /Plugins · All/, 'the blocking owner pre-empts the workspace')
+  vt.sendInput('\x1b')
+  await approval.catch(() => {})
+
+  // The owner was released with the pre-empted workspace: a later direct entry
+  // mounts normally instead of reporting a phantom lease.
+  invokeCommand(harness, 'plugins')
+  await vt.waitForRender()
+  assert.match(plain(vt.getViewport()), /Plugins · All/)
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
 })
 
 test('an external surface teardown releases the Manager owner so a later /plugins still opens', async (t) => {

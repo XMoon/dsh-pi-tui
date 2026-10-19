@@ -41,8 +41,8 @@ import {
   cardStatusTone,
   changeSummary,
   maskedSource,
-  originLabel,
   rowToggleEntryId,
+  rowToggleValue,
   type PluginCardView,
   type PluginDetailAction,
   type PluginDetailView,
@@ -176,6 +176,11 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
   private paintedTargets: readonly HitTarget[] = []
   private paintedRevision = -1
   private paintedChrome: ChromePlan | undefined
+  /** Whether the selected Detail action was inside the last painted viewport. */
+  private paintedDetailSelectionVisible = false
+  /** The action values actually painted in the last install/confirm frame. */
+  private paintedInstallActions: ReadonlySet<string> = new Set()
+  private paintedConfirmActions: ReadonlySet<string> = new Set()
   private pressedGesture: PressedGesture | undefined
   private lastRenderWidth = -1
   private lastRenderRows = -1
@@ -183,6 +188,7 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
   private lastView: PluginWorkspaceView | undefined
   private lastPhase: string | undefined
   private lastNotice: string | undefined
+  private lastAppNotice: string | undefined
   private lastSelectedValue: string | undefined
   private lastFocus: 'list' | 'details' | undefined
   private lastFilter: PluginListFilter | undefined
@@ -273,6 +279,9 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     if (event.type !== 'wheel') return undefined
     const delta = event.wheelDelta ?? 0
     if (delta === 0) return undefined
+    // A resize (or any state change) that has not painted yet must not scroll a
+    // pane from the previous geometry; consume the wheel and wait for the frame.
+    if (!this.frameIsCurrent()) return { handled: true }
     const plan = this.paintedChrome
     if (plan === undefined) return undefined
     if (plan.bodyRows <= 0) return undefined
@@ -305,6 +314,14 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
 
   onCellPress(x: number, y: number): void {
     if (this.disposed) return
+    // Admission is against the LAST PAINTED frame: a resize/state change whose
+    // repaint has not run must not record a target from the stale hit map.
+    if (!this.frameIsCurrent()) {
+      this.pressedGesture = undefined
+      this.bumpRevision()
+      this.intents.requestRender()
+      return
+    }
     const target = this.targetAt(x, y)
     this.pressedGesture = target === undefined
       ? undefined
@@ -322,6 +339,11 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     if (this.disposed) return
     const pressed = this.pressedGesture
     this.pressedGesture = undefined
+    if (!this.frameIsCurrent()) {
+      this.bumpRevision()
+      this.intents.requestRender()
+      return
+    }
     const target = this.targetAt(x, y)
     if (pressed === undefined || target === undefined) return
     // The gesture must still resolve to the SAME painted target AND the same
@@ -395,15 +417,45 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
 
   /** `i`: a fresh manual editor, or the SAME live/reopened install view. */
   private openInstallView(): void {
-    if (!this.controller.beginManualInstall() && this.controller.installView() === undefined) return
+    const created = this.controller.beginManualInstall()
+    const install = this.controller.installView()
+    if (!created && install === undefined) return
     this.view = 'install'
     this.installFocus = 'spec'
-    if (this.controller.installView()?.phase === 'editing') {
+    if (created) {
       this.specInput.setValue('')
       this.registryInput.setValue('')
+      this.registryIndex = 0
+      this.customRegistry = false
+    } else if (install?.phase === 'editing' && this.specInput.getValue() === '' && install.spec !== '') {
+      // A page recreated over an existing editor (or a hidden inspect) seeds
+      // the controller's exact spec/registry instead of a blank form.
+      this.seedInstallInputs(install)
     }
     this.bumpRevision()
     this.intents.requestRender()
+  }
+
+  /** Seed the editor widgets from the controller's exact editing attempt. */
+  private seedInstallInputs(install: PluginInstallView): void {
+    this.specInput.setValue(install.spec)
+    const options = this.controller.registryOptions()
+    if (install.registry === null) {
+      this.registryIndex = 0
+      this.customRegistry = false
+      this.registryInput.setValue('')
+      return
+    }
+    const index = options.findIndex(option => option.value === install.registry)
+    if (index >= 0) {
+      this.registryIndex = index
+      this.customRegistry = false
+      this.registryInput.setValue('')
+    } else {
+      this.registryIndex = options.length
+      this.customRegistry = true
+      this.registryInput.setValue(install.registry)
+    }
   }
 
   private handleDetailsInput(data: string): void {
@@ -470,7 +522,9 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
       return
     }
     this.searchInput.handleInput(data)
-    const next = this.searchInput.getValue()
+    const raw = this.searchInput.getValue()
+    const next = sanitizedPhysicalLine(raw)
+    if (next !== raw) this.searchInput.setValue(next)
     if (next !== this.query) {
       this.query = next
       this.renarrowSelection()
@@ -502,6 +556,7 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     if (install === undefined) {
       this.view = 'list'
       this.bumpRevision()
+      this.intents.requestRender()
       return
     }
     if (install.phase === 'editing') {
@@ -514,10 +569,12 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
       }
       if (this.installFocus === 'spec') {
         if (matchesKey(data, 'enter')) {
+          if (!this.frameIsCurrent() || !this.paintedInstallActions.has(INSTALL_ACTION.inspect)) return
           this.submitInspect()
           return
         }
         this.specInput.handleInput(data)
+        this.sanitizeSpecInput()
         this.intents.requestRender()
         return
       }
@@ -527,6 +584,7 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
           return
         }
         this.registryInput.handleInput(data)
+        this.sanitizeRegistryInput()
         this.intents.requestRender()
         return
       }
@@ -549,8 +607,10 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     }
     if (install.phase === 'confirm') {
       if (matchesKey(data, 'enter')) {
-        if (install.inspection?.status === 'accepted') this.controller.confirmInstall()
-        else this.controller.editInstall()
+        if (install.inspection?.status === 'accepted') {
+          if (!this.frameIsCurrent() || !this.paintedInstallActions.has(INSTALL_ACTION.install)) return
+          this.controller.confirmInstall()
+        } else this.controller.editInstall()
       }
       return
     }
@@ -736,7 +796,7 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
   private moveDetailSelection(delta: number): void {
     const card = this.selectedCard()
     if (card === undefined) return
-    const detail = buildPluginDetailView(card)
+    const detail = this.detailView(card)
     if (detail.actions.length === 0) return
     const next = Math.min(Math.max(0, this.detailSelection + delta), detail.actions.length - 1)
     if (next === this.detailSelection) return
@@ -821,7 +881,7 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
         return
       case PLUGIN_ACTION.officialInstall: {
         if (card === undefined) return
-        const detail = buildPluginDetailView(card)
+        const detail = this.detailView(card)
         const action = detail.actions.find(candidate => candidate.value === PLUGIN_ACTION.officialInstall)
         if (action !== undefined && !action.enabled) {
           this.controller.explain(action.reason ?? 'this install action is not available')
@@ -839,6 +899,7 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
         this.submitInspect()
         return
       case INSTALL_ACTION.install:
+        if (!this.frameIsCurrent() || !this.paintedInstallActions.has(INSTALL_ACTION.install)) return
         this.controller.confirmInstall()
         return
       case INSTALL_ACTION.edit:
@@ -877,7 +938,15 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
   private activateDetailSelection(): void {
     const card = this.selectedCard()
     if (card === undefined) return
-    const detail = buildPluginDetailView(card)
+    // The keyboard action is admitted only when the CURRENT frame really
+    // painted it: a resize/scroll that left it offscreen reveals it first.
+    if (!this.frameIsCurrent() || !this.paintedDetailSelectionVisible) {
+      this.detailReveal = true
+      this.bumpRevision()
+      this.intents.requestRender()
+      return
+    }
+    const detail = this.detailView(card)
     const action = detail.actions[Math.min(this.detailSelection, detail.actions.length - 1)]
     if (action === undefined) return
     if (!action.enabled) {
@@ -888,13 +957,18 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
   }
 
   private activateConfirmSelection(): void {
-    this.dispatchAction(this.confirmSelection === 0 ? CONFIRM_ACTION.remove : CONFIRM_ACTION.cancel)
+    const value = this.confirmSelection === 0 ? CONFIRM_ACTION.remove : CONFIRM_ACTION.cancel
+    // Only the action this frame actually painted may be invoked from the
+    // keyboard; a stale/short frame does not grant a hidden Remove/Cancel.
+    if (!this.frameIsCurrent() || !this.paintedConfirmActions.has(value)) return
+    this.dispatchAction(value)
   }
 
   private activateInstallSelection(): void {
     const actions = this.installActions()
     const action = actions[Math.min(this.installSelection, Math.max(0, actions.length - 1))]
     if (action === undefined) return
+    if (!this.frameIsCurrent() || !this.paintedInstallActions.has(action.value)) return
     if (!action.enabled) {
       this.controller.explain(action.reason ?? 'this action is not available')
       return
@@ -903,6 +977,8 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
   }
 
   private submitInspect(): void {
+    // The Inspect action is admitted only from the frame that painted it.
+    if (!this.frameIsCurrent() || !this.paintedInstallActions.has(INSTALL_ACTION.inspect)) return
     const registry = this.chosenRegistry()
     this.controller.inspect(this.specInput.getValue(), registry)
     this.intents.requestRender()
@@ -935,13 +1011,35 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
   private copyInstallDiagnostics(): void {
     const install = this.controller.installView()
     if (install === undefined) return
-    const lines = [
-      ...(install.message === undefined ? [] : [install.message]),
-      ...(install.outcome === undefined ? [] : [changeSummary(install.outcome)]),
-      ...install.log,
-    ]
+    const outcome = install.outcome
+    const lines: string[] = [
+      ...(install.message === undefined ? [] : [sanitizedPhysicalLine(install.message)]),
+      ...(outcome === undefined ? [] : [sanitizedPhysicalLine(changeSummary(outcome))]),
+      ...(outcome?.approvedBuilds === undefined ? [] : [
+        `approved build scripts: ${outcome.approvedBuilds.map(line => sanitizedPhysicalLine(line)).join(', ')}`,
+      ]),
+      ...(outcome?.registries === undefined ? [] : [
+        `registries: ${outcome.registries.map(registry => maskedSource(registry ?? 'pnpm default')).join(', ')}`,
+      ]),
+      ...(outcome?.packageResult?.output === undefined
+        ? []
+        : outcome.packageResult.output.split(/\r?\n/).filter(line => line !== '').map(line => sanitizedPhysicalLine(line))),
+      ...install.log.map(line => sanitizedPhysicalLine(line)),
+    ].filter(line => line !== '')
     if (lines.length === 0) return
     this.intents.onCopy(lines.join('\n'))
+  }
+
+  private sanitizeSpecInput(): void {
+    const raw = this.specInput.getValue()
+    const clean = sanitizedPhysicalLine(raw)
+    if (clean !== raw) this.specInput.setValue(clean)
+  }
+
+  private sanitizeRegistryInput(): void {
+    const raw = this.registryInput.getValue()
+    const clean = sanitizedPhysicalLine(raw)
+    if (clean !== raw) this.registryInput.setValue(clean)
   }
 
   private syncInputFocus(): void {
@@ -957,6 +1055,11 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
   private selectedCard(): PluginCardView | undefined {
     if (this.selectedValue === undefined) return undefined
     return this.controller.card(this.selectedValue)
+  }
+
+  /** The pure Detail projection with the profile's current exemptions. */
+  private detailView(card: PluginCardView): PluginDetailView {
+    return buildPluginDetailView(card, this.controller.model().exemptions)
   }
 
   private static matchesQuery(card: PluginCardView, query: string): boolean {
@@ -1007,6 +1110,14 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     if (cards.length === 0) {
       if (this.selectedValue !== undefined) {
         this.selectedValue = undefined
+        this.bumpRevision()
+      }
+      if (this.view === 'details') {
+        this.view = 'list'
+        this.focus = 'list'
+        this.detailSelection = 0
+        this.detailOffset = 0
+        this.detailReveal = false
         this.bumpRevision()
       }
       return
@@ -1144,11 +1255,15 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     if (this.disposed) return []
     const safeWidth = Math.max(1, width)
     const liveRows = Math.max(1, Math.floor(this.intents.rows()))
+    this.syncInputFocus()
     this.syncFrameState(safeWidth, liveRows)
     this.ensureSelection()
     this.ensureDetailSelection()
-    const notice = this.controller.notice()
-    const plan = planChrome(safeWidth, liveRows, notice !== undefined || this.controller.status().state === 'error')
+    const noticeLive = this.controller.notice() !== undefined
+      || this.controller.status().state === 'error'
+      || this.controller.model().exemptionWarnings.length > 0
+      || this.intents.notice?.() !== undefined
+    const plan = planChrome(safeWidth, liveRows, noticeLive)
     this.paintedChrome = plan
     const lines: string[] = []
     const targets: HitTarget[] = []
@@ -1174,6 +1289,8 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     const model = this.controller.model()
     const install = this.controller.installView()
     const notice = this.controller.notice()
+    const appNotice = this.intents.notice?.()
+    const appNoticeKey = appNotice === undefined ? undefined : `${appNotice.kind}:${appNotice.text}`
     let changed = false
     if (this.lastRenderWidth >= 0 && (this.lastRenderWidth !== width || this.lastRenderRows !== rows)) changed = true
     if (this.lastModel !== model) { this.lastModel = model; changed = true }
@@ -1184,9 +1301,11 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
       this.logsExpanded = false
       this.logOffset = 0
       this.installOffset = 0
+      if (install?.phase === 'editing') this.seedInstallInputs(install)
       changed = true
     }
     if (this.lastNotice !== notice) { this.lastNotice = notice; changed = true }
+    if (this.lastAppNotice !== appNoticeKey) { this.lastAppNotice = appNoticeKey; changed = true }
     if (this.lastSelectedValue !== this.selectedValue) { this.lastSelectedValue = this.selectedValue; changed = true }
     if (this.lastFocus !== this.focus) { this.lastFocus = this.focus; changed = true }
     if (this.lastFilter !== this.filter) { this.lastFilter = this.filter; changed = true }
@@ -1198,7 +1317,7 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     if (this.view !== 'details') return
     const card = this.selectedCard()
     if (card === undefined) return
-    const detail = buildPluginDetailView(card)
+    const detail = this.detailView(card)
     if (detail.actions.length === 0) {
       this.detailSelection = 0
       return
@@ -1225,10 +1344,13 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     const lead = `${color.textStrong('Plugins')}${color.textDim(` · ${sanitizedPhysicalLine(trail)}`)}`
     const model = this.controller.model()
     const enabled = model.cards.filter(entry => entry.enabled).length
-    const right = plan.wide
+    const counts = plan.wide
       ? `${model.cards.length} plugins · ${enabled} enabled`
       : `${enabled}/${model.cards.length} enabled`
-    return composeEdge(lead, color.textMuted(right), plan.width)
+    // A failed refresh keeps the last good list visible but must not look
+    // current: the header carries the Stale word (the notice carries the error).
+    const stale = this.controller.status().state === 'error' ? `${color.warning('Stale')} · ` : ''
+    return composeEdge(lead, `${stale}${color.textMuted(counts)}`, plan.width)
   }
 
   private renderMeta(plan: ChromePlan, metaRow: number, targets: HitTarget[]): string[] {
@@ -1249,7 +1371,7 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
       const query = this.query === '' ? '/' : sanitizedPhysicalLine(this.query)
       lines.push(composeEdge(
         `${color.textDim('Search: ')}${color.text(query)}`,
-        this.filterChips(false),
+        this.filterChips(),
         plan.width,
       ))
       const text = this.query === '' ? 'Search: /' : `Search: ${query}`
@@ -1258,7 +1380,7 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     // The chips are painted only when the whole row fits beside the search
     // field; their hit targets are computed from the REAL painted columns.
     if (!this.searchEditing) {
-      const rendered = this.filterChips(false)
+      const rendered = this.filterChips()
       const start = plan.width - visibleWidth(rendered)
       if (start >= visibleWidth(this.query === '' ? 'Search: /' : `Search: ${this.query}`) + 1) {
         let column = start
@@ -1273,18 +1395,23 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     return lines
   }
 
-  private filterChips(active: boolean): string {
+  private filterChips(): string {
     return FILTERS.map((filter) => {
       const label = FILTER_LABELS[filter]
-      if (filter === this.filter) return color.textStrong(active ? `[${label}]` : label)
+      if (filter === this.filter) return color.textStrong(label)
       return color.textDim(label)
     }).join(color.textMuted(' · '))
   }
 
   private renderNotice(plan: ChromePlan): string {
     const appNotice = this.intents.notice?.()
+    const model = this.controller.model()
+    const exemptionWarning = model.exemptionWarnings.length === 0
+      ? undefined
+      : `version exemptions: ${model.exemptionWarnings.join(' · ')}`
     const message = this.controller.notice()
       ?? (this.controller.status().state === 'error' ? this.controller.status().error : undefined)
+      ?? exemptionWarning
       ?? appNotice?.text
     if (message === undefined) return fit('', plan.width)
     const kind = this.controller.status().state === 'error'
@@ -1317,7 +1444,9 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
         return [
           { text: 'Tab switch field', priority: 80 },
           { text: 'Enter inspect', priority: 70 },
-          { text: back, priority: 100 },
+          // Esc returns to the LIST, never closes the page: the hint must name
+          // that real destination on both entry hosts.
+          { text: 'Esc back', priority: 100 },
         ]
       }
       if (install.phase === 'inspecting') {
@@ -1352,8 +1481,10 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     if (this.view === 'details') {
       return [
         { text: 'Enter action', priority: 80 },
-        { text: 'c copy', priority: 60 },
-        { text: 'r refresh', priority: 50 },
+        { text: '/ search', priority: 70 },
+        { text: 'i install', priority: 60 },
+        { text: 'c copy', priority: 50 },
+        { text: 'r refresh', priority: 40 },
         { text: 'Esc back', priority: 100 },
       ]
     }
@@ -1440,7 +1571,10 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     if (entry.kind === 'empty') return color.textMuted(truncateToWidth(`  ${entry.label}`, width, '…'))
     const card = entry.card!
     const selected = card.value === this.selectedValue
-    const chip = cardStatusChip(card)
+    const busyValue = this.controller.busy()
+    const busy = busyValue === card.value
+      || card.rows.some(row => busyValue === rowToggleValue(row.entryId))
+    const chip = busy ? 'busy' : cardStatusChip(card)
     let chipText = chip === undefined ? '' : `[${chip}]`
     let chipWidth = visibleWidth(chipText)
     // The floor guarantee: at an absurdly narrow width the chip yields WHOLE
@@ -1472,13 +1606,17 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     targets: HitTarget[],
     publish: boolean,
   ): string[] {
-    const detail = buildPluginDetailView(card)
+    const detail = this.detailView(card)
     const built = detailLines(detail, width, focused && this.focus === 'details', this.detailSelection)
     const selected = built.actionLines[Math.min(this.detailSelection, Math.max(0, built.actionLines.length - 1))]
     this.detailOffset = focused && this.detailReveal
       ? rebaseOffset(this.detailOffset, selected?.line ?? 0, built.lines.length, viewport)
       : clampOffset(this.detailOffset, built.lines.length, viewport)
     if (focused) this.detailReveal = false
+    this.paintedDetailSelectionVisible = focused
+      && selected !== undefined
+      && selected.line >= this.detailOffset
+      && selected.line < this.detailOffset + viewport
     const visible = built.lines.slice(this.detailOffset, this.detailOffset + viewport)
     if (publish && focused) {
       for (const action of built.actionLines) {
@@ -1505,11 +1643,9 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
       this.bumpRevision()
     }
     const built = this.installLines(install, plan.width, actions)
-    // Pin the explicit action block at the bottom so Stop/Approve/Check/Back
-    // stay reachable at 80x10 even while the log or facts scroll.
-    const actionsStart = built.actionLines[0]?.line === undefined
-      ? built.lines.length
-      : Math.max(0, built.actionLines[0].line - 1)
+    // Pin the explicit action block (no extra title row) at the bottom so the
+    // primary action stays reachable at 80x10 while facts/logs scroll.
+    const actionsStart = built.actionStart
     const actionBlock = built.lines.slice(actionsStart)
     const contentViewport = Math.max(1, plan.bodyRows - Math.min(actionBlock.length, plan.bodyRows))
     const content = built.lines.slice(0, actionsStart)
@@ -1518,9 +1654,11 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     const out = padBody(visible, contentViewport, plan.width)
     for (const line of actionBlock) out.push(fit(line, plan.width))
     const visibleActionBlock = Math.min(actionBlock.length, Math.max(0, plan.bodyRows - contentViewport))
+    this.paintedInstallActions = new Set()
     for (const action of built.actionLines) {
       const y = contentViewport + (action.line - actionsStart)
       if (y < contentViewport || y >= contentViewport + visibleActionBlock) continue
+      this.paintedInstallActions = new Set([...this.paintedInstallActions, action.value])
       targets.push({ kind: 'action', value: action.value, row: bodyTop + y, startCol: 0, endCol: plan.width })
     }
     return padBody(out, plan.bodyRows, plan.width)
@@ -1531,7 +1669,7 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     install: PluginInstallView,
     width: number,
     actions: readonly PluginDetailAction[],
-  ): { lines: string[]; actionLines: PaintedActionLine[] } {
+  ): { lines: string[]; actionLines: PaintedActionLine[]; actionStart: number } {
     const lines: string[] = []
     if (install.officialName !== undefined) {
       lines.push(color.textDim(`Official catalog · ${sanitizedPhysicalLine(install.officialName)}`))
@@ -1543,11 +1681,11 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
       const options = this.controller.registryOptions()
       const registry = this.customRegistry
         ? `custom ${this.registryInput.render(Math.max(1, width - 16))[0] ?? ''}`
-        : (options[this.registryIndex]?.label ?? 'pnpm configuration default')
+        : maskedSource(options[this.registryIndex]?.label ?? 'pnpm configuration default')
       const field = this.installFocus === 'registry' ? color.primary('‹ ') : '  '
       lines.push(`${color.textDim('Reg     ')}${field}${color.text(truncateToWidth(registry, Math.max(1, width - 12), '…'))}`)
       if (!this.customRegistry) {
-        const hint = options.map(option => option.label).join(' · ')
+        const hint = options.map(option => maskedSource(option.label)).join(' · ')
         if (hint !== '') lines.push(color.textMuted(truncateToWidth(`        ${hint}`, width, '…')))
       }
       if (install.message !== undefined) lines.push(color.warning(truncateToWidth(sanitizedPhysicalLine(install.message), width, '…')))
@@ -1560,21 +1698,30 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
       const inspection = install.inspection
       if (inspection?.status === 'accepted') {
         lines.push(color.textStrong(truncateToWidth(sanitizedPhysicalLine(inspection.name ?? install.spec), width, '…')))
-        if (inspection.version !== undefined) lines.push(color.textDim(`offered version ${inspection.version}`))
+        const offered = inspection.version === undefined
+          ? ''
+          : `offered version ${sanitizedPhysicalLine(inspection.version)} · `
+        const intent = inspection.bundle === false
+          ? 'Installs the package; no bundle activation is requested.'
+          : 'Activates the bundle after a successful install.'
+        lines.push(color.warning(truncateToWidth(`${offered}${intent}`, width, '…')))
+        const bundle = inspection.bundle === null ? 'unknown' : inspection.bundle ? 'yes' : 'no'
+        lines.push(color.textDim(truncateToWidth(
+          `source ${sanitizedPhysicalLine(inspection.kind)} · registry ${maskedSource(inspection.registry ?? 'pnpm default')} · bundle ${bundle}${
+            inspection.host === undefined ? '' : ` · host ${sanitizedPhysicalLine(inspection.host)}`
+          }`,
+          width,
+          '…',
+        )))
         if (inspection.description !== undefined) {
           lines.push(...wrapTextWithAnsi(sanitizedPhysicalLine(inspection.description), width).map(line => color.textDim(line)))
         }
-        lines.push(color.textDim(
-          `source ${inspection.kind} · registry ${inspection.registry ?? 'pnpm default'}${inspection.host === undefined ? '' : ` · host ${inspection.host}`}`,
-        ))
-        lines.push(color.textDim(`bundle: ${inspection.bundle === null ? 'unknown' : inspection.bundle ? 'yes' : 'no'}`))
-        lines.push(color.warning('Activates the bundle after a successful install.'))
       } else if (inspection?.status === 'refused') {
-        lines.push(color.error(truncateToWidth(`refused: ${inspection.problem}`, width, '…')))
+        lines.push(color.error(truncateToWidth(`refused: ${sanitizedPhysicalLine(inspection.problem)}`, width, '…')))
         lines.push(...wrapTextWithAnsi(sanitizedPhysicalLine(inspection.reason), width).map(line => color.textMuted(line)))
         if (inspection.registries !== undefined && inspection.registries.length > 0) {
           lines.push(color.textMuted(truncateToWidth(
-            `registries: ${inspection.registries.map(registry => registry ?? 'pnpm default').join(', ')}`,
+            `registries: ${inspection.registries.map(registry => maskedSource(registry ?? 'pnpm default')).join(', ')}`,
             width,
             '…',
           )))
@@ -1592,49 +1739,84 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
         const visible = this.visibleLogLines(this.paintedChrome)
         const start = Math.min(this.logOffset, Math.max(0, log.length - visible))
         for (const line of log.slice(start, start + visible)) {
-          lines.push(color.textDim(truncateToWidth(line, width, '…')))
+          lines.push(truncateToWidth(sanitizedPhysicalLine(line), width, '…'))
         }
       } else {
-        for (const line of collapsed) lines.push(color.textDim(truncateToWidth(line, width, '…')))
+        for (const line of collapsed) lines.push(truncateToWidth(sanitizedPhysicalLine(line), width, '…'))
       }
       lines.push('')
     } else {
       // done / failed / unknown
       lines.push(color.textStrong(`${install.phase}${install.officialName === undefined ? '' : ` · ${sanitizedPhysicalLine(install.officialName)}`}`))
-      if (install.outcome !== undefined) {
-        lines.push(...wrapTextWithAnsi(sanitizedPhysicalLine(changeSummary(install.outcome)), width).map(line => color.text(line)))
-        if (install.outcome.version !== undefined) {
-          lines.push(color.textDim(`installed version ${install.outcome.version}`))
-        }
-        if (install.outcome.application === 'restart-required') {
-          lines.push(color.warning('Restart required — the change is not active until DSH restarts.'))
-        } else if (install.outcome.application === 'overridden') {
-          lines.push(color.warning('Overridden — a higher-priority composition still wins.'))
-        }
-      }
-      if (install.message !== undefined) {
-        lines.push(color.textMuted(truncateToWidth(sanitizedPhysicalLine(install.message), width, '…')))
-      }
       const pending = this.controller.approvableBuilds()
       if (pending !== undefined) {
-        lines.push('')
-        lines.push(color.warning(`Build scripts blocked for: ${pending.join(', ')}`))
+        // The approval risk is the FIRST fact: at 80x10 the pinned Approve
+        // action must never appear above a hidden risk explanation.
+        lines.push(color.warning(truncateToWidth(
+          `Build scripts blocked for: ${pending.map(line => sanitizedPhysicalLine(line)).join(', ')}`,
+          width,
+          '…',
+        )))
         lines.push(...wrapTextWithAnsi(
           'These packages execute scripts with your user privileges. Approve only when you trust them.',
           width,
         ).map(line => color.warning(line)))
+      }
+      const outcome = install.outcome
+      if (outcome !== undefined) {
+        lines.push(...wrapTextWithAnsi(sanitizedPhysicalLine(changeSummary(outcome)), width).map(line => color.text(line)))
+        if (outcome.version !== undefined) {
+          lines.push(color.textDim(`installed version ${sanitizedPhysicalLine(outcome.version)}`))
+        }
+        if (outcome.application === 'restart-required') {
+          lines.push(color.warning('Restart required — the change is not active until DSH restarts.'))
+        } else if (outcome.application === 'overridden') {
+          lines.push(color.warning('Overridden — a higher-priority composition still wins.'))
+        }
+        if (outcome.approvedBuilds !== undefined && outcome.approvedBuilds.length > 0) {
+          lines.push(color.textDim(truncateToWidth(
+            `approved build scripts: ${outcome.approvedBuilds.map(line => sanitizedPhysicalLine(line)).join(', ')}`,
+            width,
+            '…',
+          )))
+        }
+        if (outcome.registries !== undefined && outcome.registries.length > 0) {
+          lines.push(color.textDim(truncateToWidth(
+            `registries: ${outcome.registries.map(registry => maskedSource(registry ?? 'pnpm default')).join(', ')}`,
+            width,
+            '…',
+          )))
+        }
+        const output = outcome.packageResult?.output
+        if (output !== undefined && output !== '') {
+          lines.push('')
+          const outputLines = output.split(/\r?\n/).filter(line => line !== '')
+          for (const line of outputLines.slice(-8)) {
+            lines.push(truncateToWidth(sanitizedPhysicalLine(line), width, '…'))
+          }
+          if (outcome.packageResult?.truncated === true) {
+            lines.push(color.textMuted('(Host truncated the package output)'))
+          }
+        }
+      }
+      if (install.message !== undefined) {
+        lines.push(color.textMuted(truncateToWidth(sanitizedPhysicalLine(install.message), width, '…')))
       }
       if (install.log.length > 0) {
         lines.push('')
         const visible = this.visibleLogLines(this.paintedChrome)
         const log = install.log.slice(0, LOG_TAIL_LINES)
         const shown = this.logsExpanded ? log.slice(this.logOffset, this.logOffset + visible) : log.slice(Math.max(0, log.length - visible))
-        for (const line of shown) lines.push(color.textDim(truncateToWidth(line, width, '…')))
+        for (const line of shown) lines.push(truncateToWidth(sanitizedPhysicalLine(line), width, '…'))
       }
       lines.push('')
     }
-    const actionLines = paintActions(lines, actions, this.installSelection, width)
-    return { lines: actionLines.lines, actionLines: actionLines.actionLines }
+    const actionLines = paintActions(lines, actions, this.installSelection, width, false)
+    return {
+      lines: actionLines.lines,
+      actionLines: actionLines.actionLines,
+      actionStart: actionLines.actionLines[0]?.line ?? actionLines.lines.length,
+    }
   }
 
   private renderConfirmBody(plan: ChromePlan, bodyTop: number, targets: HitTarget[]): string[] {
@@ -1646,26 +1828,26 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     ]
     const content: string[] = []
     content.push(color.textStrong(truncateToWidth(`Remove ${sanitizedPhysicalLine(name)}?`, plan.width, '…')))
-    content.push('')
+    if (card === undefined) {
+      content.push(color.error('This bundle changed since the confirmation opened. Re-open it from the list.'))
+    }
     content.push(...wrapTextWithAnsi(
       'This unloads the bundle and removes the profile dependency. Installed files are removed and DSH does not reinstall it automatically.',
       plan.width,
     ).map(line => color.textDim(line)))
-    if (card === undefined) {
-      content.push('')
-      content.push(color.error('This bundle changed since the confirmation opened. Re-open it from the list.'))
-    }
-    // The two real choices are PINNED to the body floor: at 80x10 they stay
-    // reachable even when the explanation wraps.
-    const actionBlock = paintActions([], actions, this.confirmSelection, plan.width)
+    // The two real choices are PINNED to the body floor without a separate
+    // title row: at 80x10 the exact name, the consequence and both choices fit.
+    const actionBlock = paintActions([], actions, this.confirmSelection, plan.width, false)
     const actionRows = actionBlock.lines.length
     const contentViewport = Math.max(1, plan.bodyRows - Math.min(actionRows, plan.bodyRows))
     const out = padBody(content.slice(0, contentViewport), contentViewport, plan.width)
     const visibleActions = actionBlock.lines.slice(0, Math.max(0, plan.bodyRows - contentViewport))
     for (const line of visibleActions) out.push(fit(line, plan.width))
+    this.paintedConfirmActions = new Set()
     for (const action of actionBlock.actionLines) {
       const y = contentViewport + action.line
       if (y < contentViewport || y >= contentViewport + visibleActions.length) continue
+      this.paintedConfirmActions = new Set([...this.paintedConfirmActions, action.value])
       targets.push({ kind: 'action', value: action.value, row: bodyTop + y, startCol: 0, endCol: plan.width })
     }
     return padBody(out, plan.bodyRows, plan.width)
@@ -1678,6 +1860,14 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
       if (y === target.row && x >= target.startCol && x < target.endCol) return target
     }
     return undefined
+  }
+
+  /** True only while the live terminal geometry and state version still match
+   * the frame whose hit map is installed in `paintedTargets`. */
+  private frameIsCurrent(): boolean {
+    return this.paintedRevision === this.revision
+      && this.lastRenderWidth === this.intents.columns()
+      && this.lastRenderRows === this.intents.rows()
   }
 
   private bumpRevision(): void {
@@ -1836,12 +2026,13 @@ function stripAnsi(text: string): string {
   return text.replace(/\x1b\[[0-9;]*m/g, '')
 }
 
-function paintTone(text: string, tone: 'normal' | 'dim' | 'success' | 'warning' | 'error'): string {
+function paintTone(text: string, tone: 'normal' | 'dim' | 'muted' | 'success' | 'warning' | 'error'): string {
   switch (tone) {
     case 'error': return color.error(text)
     case 'warning': return color.warning(text)
     case 'success': return color.success(text)
     case 'dim': return color.textDim(text)
+    case 'muted': return color.textMuted(text)
     default: return color.text(text)
   }
 }
@@ -1926,9 +2117,10 @@ function paintActions(
   actions: readonly PluginDetailAction[],
   selected: number,
   width: number,
+  showTitle = true,
 ): { lines: string[]; actionLines: PaintedActionLine[] } {
   const actionLines: PaintedActionLine[] = []
-  lines.push(color.textDim('Actions'))
+  if (showTitle) lines.push(color.textDim('Actions'))
   for (let index = 0; index < actions.length; index += 1) {
     const action = actions[index]!
     const cursor = index === selected ? color.primary('> ') : '  '

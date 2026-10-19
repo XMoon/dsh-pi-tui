@@ -1451,7 +1451,7 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
   /**
    * The pre-B2-A complete settings editor, preserved VERBATIM: the original
    * `registerSettings` handler body is the ONE owner of the legacy rows, the
-   * Theme picker, the Plugin Manager submenu, the permission/session rows, the
+   * Theme picker, the first-level Plugin page, the permission/session rows, the
    * HMR/plugin callbacks and every write path. It is called by the compatibility
    * entry of the new Settings workspace (and only there), so it re-reads the live
    * session scope and settings document at the moment of the handoff.
