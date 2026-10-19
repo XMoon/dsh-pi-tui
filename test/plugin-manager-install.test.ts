@@ -7,7 +7,8 @@
  */
 
 import assert from 'node:assert/strict'
-import { existsSync, readFileSync } from 'node:fs'
+import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
 import { symbols } from '@deepseek-ai/cordis'
@@ -608,6 +609,18 @@ test('a zero-row body revokes build-script approval until an explicit re-selecti
 //   The public npm registry, the developer's real HOME/DSH_HOME/credential
 //   store, unknown third-party code, and any paid/native provider.
 
+/** The profile files the official Host may rewrite/restore. */
+const PROFILE_OWNED_FILES = ['package.json', 'pnpm-lock.yaml', 'pnpm-workspace.yaml', 'cordis.patch.yml'] as const
+
+function profileFiles(dir: string): Record<string, string | undefined> {
+  const snapshot: Record<string, string | undefined> = {}
+  for (const name of PROFILE_OWNED_FILES) {
+    const path = join(dir, name)
+    snapshot[name] = existsSync(path) ? readFileSync(path, 'utf8') : undefined
+  }
+  return snapshot
+}
+
 function plainFrame(lines: readonly string[]): string {
   return lines.map(line => line.replace(/\x1b\[[0-9;]*m/g, '')).join('\n')
 }
@@ -679,9 +692,34 @@ async function startRealInstallFixture(
 }
 
 test('A09: the real Host cancel terminates the real pnpm install, restores the profile, and reopens one request', async (t) => {
+  // The fixture must neutralize an ambient package-manager user config, not
+  // just HOME/XDG. Plant a sentinel that would break resolution if inherited.
+  const sentinel = join(tmpdir(), `s5-npmrc-sentinel-${process.pid}-${Date.now()}`)
+  writeFileSync(sentinel, 'registry=http://127.0.0.1:1\n')
+  const hadLower = process.env.npm_config_userconfig
+  const hadUpper = process.env.NPM_CONFIG_USERCONFIG
+  process.env.npm_config_userconfig = sentinel
+  process.env.NPM_CONFIG_USERCONFIG = sentinel
   const fixture = await startRealInstallFixture(t, 's5-pr-e-a09')
+  // Registered AFTER the fixture lifecycle, so the fixture's own restore runs
+  // first and this one restores the process's original values last.
+  t.after(() => {
+    if (hadLower === undefined) delete process.env.npm_config_userconfig
+    else process.env.npm_config_userconfig = hadLower
+    if (hadUpper === undefined) delete process.env.NPM_CONFIG_USERCONFIG
+    else process.env.NPM_CONFIG_USERCONFIG = hadUpper
+    rmSync(sentinel, { force: true })
+  })
   const { host, controller, profileDir } = fixture
   const port = new DirectPluginManagerPort(host.ctx)
+  const isolatedHome = join(host.workRoot, 'home')
+  assert.equal(process.env.npm_config_userconfig, join(isolatedHome, '.npmrc'),
+    'the explicit npm user config is the test-owned file, never the ambient sentinel')
+  assert.equal(process.env.NPM_CONFIG_USERCONFIG, join(isolatedHome, '.npmrc'))
+  assert.equal(process.env.NPM_CONFIG_GLOBALCONFIG, join(isolatedHome, '.npmrc.global'))
+  assert.match(process.env.npm_config_cache ?? '', /dsh-m3-4-pr1-/)
+  assert.equal(process.env.npm_config_registry, undefined, 'the registry is selected by the explicit install option, not ambient env')
+  const profileBefore = profileFiles(profileDir)
 
   // Count real Host dispatches through the unwrapped service implementation:
   // a cancel must never cause a second install.
@@ -746,6 +784,8 @@ test('A09: the real Host cancel terminates the real pnpm install, restores the p
   assert.equal(profile.dependencies?.[manifest.name], undefined, 'the cancelled install never lands in the profile manifest')
   assert.equal(existsSync(join(profileDir, 'node_modules', '@s5-fixture', 'slow-cancel')), false,
     'the cancelled install never lands in the profile node_modules')
+  assert.deepEqual(profileFiles(profileDir), profileBefore,
+    'the cancelled install restores every profile-owned file the Host may rewrite')
 
   const requestPhases = phases.filter(event => event.requestId === requestId).map(event => event.phase)
   assert.ok(requestPhases.includes('installing'), `the real Host announced installing: ${JSON.stringify(requestPhases)}`)
@@ -764,6 +804,74 @@ test('A09: the real Host cancel terminates the real pnpm install, restores the p
   assert.equal(reopened.currentView(), 'install')
   assert.equal(controller.installView()?.requestId, requestId)
   assert.equal(controller.installView()?.phase, 'done')
+})
+
+test('A09 (too-late): a real cancel during applying returns too-late and the Host settles the one install', async (t) => {
+  const fixture = await startRealInstallFixture(t, 's5-pr-e-a09-too-late')
+  const { host, controller, profileDir } = fixture
+  const port = new DirectPluginManagerPort(host.ctx)
+  const hostService = serviceImplementation<{
+    installBundle(spec: string, options?: unknown): Promise<unknown>
+    publishAndReload(ids?: unknown): Promise<unknown>
+  }>(host.ctx.get('pluginManager'))
+  const originalInstall = hostService.installBundle
+  let dispatches = 0
+  hostService.installBundle = function patchedInstall(this: unknown, spec: string, options?: unknown): Promise<unknown> {
+    dispatches += 1
+    return originalInstall.call(this, spec, options)
+  }
+  t.after(() => { hostService.installBundle = originalInstall })
+
+  // Hold the official apply step AFTER the Host announced `applying`, so the
+  // real `too-late` branch is reachable without a timer race.
+  const originalPublish = hostService.publishAndReload
+  let releaseApply!: () => void
+  const applyGate = new Promise<void>(resolve => { releaseApply = resolve })
+  let applyReached!: () => void
+  const applying = new Promise<void>(resolve => { applyReached = resolve })
+  hostService.publishAndReload = async function patchedPublish(this: unknown, ids?: unknown): Promise<unknown> {
+    applyReached()
+    await applyGate
+    return originalPublish.call(this, ids)
+  }
+  t.after(() => { hostService.publishAndReload = originalPublish })
+
+  const manifest = { name: '@s5-fixture/too-late', version: '0.0.1', dsh: { bundle: { patch: [] } } }
+  const packed = packFixturePackage(join(host.workRoot, 'a09-too-late-package'), {
+    name: manifest.name,
+    version: manifest.version,
+    manifest,
+  })
+  const registry = await startLocalNpmRegistry(packed, { manifest })
+  t.after(() => registry.close())
+
+  controller.beginManualInstall()
+  const panel = fixture.panelAt(24, 80, t)
+  panel.render(80)
+  panel.handleInput('i')
+  controller.inspect(manifest.name, registry.url)
+  await waitForState('the accepted inspection', () => controller.installView()?.phase === 'confirm')
+  controller.confirmInstall()
+  await waitForState('the Host announces applying', () => controller.installView()?.phase === 'applying', 60_000)
+  const requestId = controller.installView()!.requestId!
+  await applying
+
+  const cancellation = await port.cancelInstall(requestId)
+  assert.deepEqual(cancellation, { status: 'too-late' }, 'the real Host reports too-late while applying')
+  assert.equal(controller.installView()?.phase, 'applying', 'too-late never fabricates a cancelled view')
+  releaseApply()
+  await waitForState('the one install settles', () => controller.installView()?.phase === 'done', 60_000)
+  const outcome = controller.installView()?.outcome
+  assert.notEqual(outcome?.application, 'cancelled', 'the Host final outcome is observed, never faked')
+  assert.notEqual(outcome?.application, 'failed')
+  assert.equal(dispatches, 1, 'the too-late attempt never starts a second install')
+  const profile = JSON.parse(readFileSync(join(profileDir, 'package.json'), 'utf8')) as {
+    dependencies?: Record<string, string>
+    dsh?: { profile?: { bundles?: string[] } }
+  }
+  assert.ok(profile.dependencies?.[manifest.name] !== undefined, 'the applied install lands in the profile manifest')
+  assert.ok(profile.dsh?.profile?.bundles?.includes(manifest.name), 'the applied bundle is selected')
+  await waitForState('the settled request leaves the installs map', async () => (await port.waitForInstall(requestId)) === null)
 })
 
 test('A10: real pnpm blocked builds become pendingBuilds; only an explicit approval runs the harmless marker script', async (t) => {

@@ -51,6 +51,7 @@ import {
   pluginInstallRequestId,
   type PluginExemptionsValue,
 } from '../plugin-manager-mapping.ts'
+import { PluginManagerStaleResultError } from '../plugin-manager-port.ts'
 import type { RemoteResultLike } from './session-writer-remote.ts'
 import type { RemoteConnectionGenerationSource } from './session-reader-remote.ts'
 import { remoteFailureMessage } from './write-failure.ts'
@@ -143,10 +144,7 @@ export class RemotePluginManagerPort implements PluginManagerPort {
     const captured = this.generation.getSnapshot()
     const value = unwrapRemote(await call(), operation)
     if (!Object.is(captured, this.generation.getSnapshot())) {
-      throw new Error(
-        `pluginManager.${operation} returned after the Connection generation changed; `
-        + 'the authoritative inventory reread decides the outcome',
-      )
+      throw new PluginManagerStaleResultError(operation)
     }
     return value
   }

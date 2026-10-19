@@ -225,6 +225,23 @@ export type PluginInstallEvent =
   | { readonly kind: 'phase'; readonly phase: PluginInstallPhaseFact }
   | { readonly kind: 'log'; readonly log: PluginInstallLogFact }
 
+/**
+ * One plugin mutation's result belongs to a Connection generation that was
+ * already replaced when the reply arrived. The Host may have applied the
+ * write, so this is NOT a refusal: the caller must show the indeterminate
+ * outcome and let the authoritative inventory reread decide what is true.
+ * Only the experimental Remote adapter raises it.
+ */
+export class PluginManagerStaleResultError extends Error {
+  constructor(operation: string) {
+    super(
+      `pluginManager.${operation} returned after the Connection generation changed; `
+      + 'the authoritative inventory reread decides the outcome',
+    )
+    this.name = 'PluginManagerStaleResultError'
+  }
+}
+
 /** Cancellation is confirmed only after Host cleanup has completed. */
 export interface PluginInstallCancellationFact {
   readonly status: 'cancelled' | 'too-late' | 'not-running'
