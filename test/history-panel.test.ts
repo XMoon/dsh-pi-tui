@@ -113,6 +113,27 @@ const flushMicrotasks = async (): Promise<void> => {
 /** Flush microtasks + one timer turn (the panel's 1ms test debounce fires). */
 const settle = (ms = 5): Promise<void> => new Promise(resolve => setTimeout(resolve, ms))
 
+/** Wait (bounded) until the panel's ASYNC search commits the FINAL visible
+ *  state. The debounce + source delay + generation commit can outlive any
+ *  fixed sleep under CI load; `Loading history…` is a legitimate intermediate
+ *  state, never the state these assertions may judge. */
+async function waitForHistoryRender(
+  panel: HistoryPanel,
+  predicate: (lines: string[]) => boolean,
+  label: string,
+  timeoutMs = 2_000,
+): Promise<string[]> {
+  const start = Date.now()
+  for (;;) {
+    const lines = panel.render(100)
+    if (predicate(lines)) return lines
+    if (Date.now() - start > timeoutMs) {
+      assert.fail(`${label}: the async history search never reached its final state:\n${plain(lines).join('\n')}`)
+    }
+    await new Promise<void>(resolve => setTimeout(resolve, 2))
+  }
+}
+
 /** Strip ANSI so the assertions read the plain text the user sees. */
 const plain = (lines: readonly string[]): string[] => lines.map(line => line.replace(/\x1b\[[0-9;]*m/g, ''))
 
@@ -1077,10 +1098,19 @@ test('B3-B placeholders: a no-match is textDim and a failed load paints its word
   empty.rows = []
   const { panel } = makePanel(empty)
   panel.start()
-  await settle()
+  // The INITIAL load is async too: wait for its committed empty state before
+  // typing, so the query cannot race the first search's generation.
+  await waitForHistoryRender(
+    panel,
+    lines => lines.some(line => line.startsWith(color.textDim('  No history yet'))),
+    'initial empty history',
+  )
   panel.handleInput('zzz')
-  await settle()
-  const noMatch = panel.render(100)
+  const noMatch = await waitForHistoryRender(
+    panel,
+    lines => lines.some(line => line.startsWith(color.textDim('  No matching history'))),
+    'no-match placeholder',
+  )
   assert.ok(noMatch.some(line => line.startsWith(color.textDim('  No matching history'))),
     `a no-match is a textDim placeholder:\n${plain(noMatch).join('\n')}`)
 
@@ -1088,8 +1118,11 @@ test('B3-B placeholders: a no-match is textDim and a failed load paints its word
   failing.fail = true
   const { panel: failedPanel } = makePanel(failing)
   failedPanel.start()
-  await settle()
-  const failed = failedPanel.render(100)
+  const failed = await waitForHistoryRender(
+    failedPanel,
+    lines => lines.some(line => line.startsWith(color.error('  History unavailable'))),
+    'failed-load placeholder',
+  )
   assert.ok(failed.some(line => line.startsWith(color.error('  History unavailable'))),
     `a failed load paints its word error:\n${plain(failed).join('\n')}`)
   assert.ok(!failed.some(line => line.startsWith(color.textDim('  History unavailable'))),
