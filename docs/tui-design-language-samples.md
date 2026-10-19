@@ -2148,8 +2148,11 @@ for the full Plugin Manager Detail is the earlier §8f record.
 
 The review found that a 0-row body frame still advertised `Enter` in the
 action bar even though the D2 revoke path makes that activation a no-op. The
-bar now drops every `Enter …` segment when the current frame painted no body
-row, keeping the real Esc destination (and the keys that still resolve).
+bar now drops the body-derived `Enter …` segments when the current frame
+painted no body row, keeping the real Esc destination (and the keys that still
+resolve). Search editing is the deliberate exception: its `Enter apply` is
+still executable, so its hint stays and the real-terminal capture below proves
+the key actually applies.
 
 Method: the same isolated `DSH_HOME` (copied dev profile linking this worktree,
 with the published rc.2 B03 bundle selected for the confirmation frame); the
