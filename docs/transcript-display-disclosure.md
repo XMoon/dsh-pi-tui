@@ -242,9 +242,10 @@ Compact:  User · Work(A)      · Assistant A · Work(B)      · Notice · Work(
   Snapshot or a proven Working `tool-jobs` Notice** (2026-10-19 Owner decision):
   a `form:'snapshot'` singleton, a snapshot-only raw-adjacent cluster, or a
   `tool-jobs`/`notice` row with the durable same-turn `next-step` claim flag is
-  carried by the same-turn Work instead of splitting it. A mixed `instructions`/`catalog` + `snapshot` cluster, a
-  `notice`/`relay`/`recall` row and every unknown form remain boundaries. The
-  carried Snapshot keeps its Context row/cluster disclosure inside the expanded
+  carried by the same-turn Work instead of splitting it. A mixed
+  `instructions`/`catalog` + `snapshot` cluster, an unqualified/foreign
+  `notice`, `relay`, `recall` and every unknown form remain boundaries. The
+  carried Context keeps its own row/cluster disclosure inside the expanded
   Work; a collapsed Work shows neither its header nor its body. Context never
   contributes an Action, ActionStats entry or wall-clock timing to the span.
 - A collapsed `Work` renders `Header`, at most one `Think` row (the latest
