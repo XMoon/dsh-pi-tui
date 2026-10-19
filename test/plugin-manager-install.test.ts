@@ -9,7 +9,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { PluginManagerController } from '../src/app/plugin-manager/controller.ts'
-import { PluginManagerPanel } from '../src/tui/plugin-manager/panel.ts'
+import { PluginManagerWorkspacePanel } from '../src/tui/plugin-manager/workspace.ts'
 import { createDiag } from '../src/runtime/process/diagnostics.ts'
 import type {
   PluginChangeFact,
@@ -70,7 +70,7 @@ function harness(): { controller: PluginManagerController; installCalls: unknown
 
 test('install events are correlated by request id and unrelated events are ignored', async () => {
   const { controller, installCalls, emit, gate } = harness()
-  controller.openInstall()
+  controller.beginManualInstall()
   controller.inspect('pkg', null)
   await tick()
   controller.confirmInstall()
@@ -98,7 +98,7 @@ test('install events are correlated by request id and unrelated events are ignor
 
 test('the presentation log is bounded', async () => {
   const { controller, installCalls, emit, gate } = harness()
-  controller.openInstall()
+  controller.beginManualInstall()
   controller.inspect('pkg', null)
   await tick()
   controller.confirmInstall()
@@ -117,16 +117,16 @@ test('the presentation log is bounded', async () => {
 
 test('close then reopen never dispatches a second installBundle call', async () => {
   const { controller, installCalls, gate } = harness()
-  controller.openInstall()
+  controller.beginManualInstall()
   controller.inspect('pkg', null)
   await tick()
   controller.confirmInstall()
   await tick()
   assert.equal(installCalls.length, 1)
-  controller.closeInstall()
-  controller.openInstall()
-  controller.closeInstall()
-  controller.openInstall()
+  controller.hideInstall()
+  controller.beginManualInstall()
+  controller.hideInstall()
+  controller.beginManualInstall()
   await tick()
   assert.equal(installCalls.length, 1)
   assert.equal(controller.installView()?.requestId, (installCalls[0] as { requestId: string }).requestId)
@@ -181,7 +181,7 @@ test('an interrupted install recovers through the official waitForInstall and ne
     startInstall: async () => { throw new Error('carrier lost') },
     waitForInstall: async () => change({ application: 'restart-required' }),
   })
-  harness.controller.openInstall()
+  harness.controller.beginManualInstall()
   harness.controller.inspect('pkg', null)
   await tick()
   harness.controller.confirmInstall()
@@ -198,7 +198,7 @@ test('an interrupted install with no recoverable run reports unknown, refreshes 
     startInstall: async () => { throw new Error('carrier lost') },
     waitForInstall: async () => null,
   })
-  harness.controller.openInstall()
+  harness.controller.beginManualInstall()
   harness.controller.inspect('pkg', null)
   await tick()
   harness.controller.confirmInstall()
@@ -214,7 +214,7 @@ test('an interrupted install with no recoverable run reports unknown, refreshes 
 test('cancel delegates to the official cancelInstall for the active request id', async () => {
   const gate = deferred<PluginChangeFact>()
   const harness = recoveryHarness({ startInstall: () => gate.promise })
-  harness.controller.openInstall()
+  harness.controller.beginManualInstall()
   harness.controller.inspect('pkg', null)
   await tick()
   harness.controller.confirmInstall()
@@ -232,8 +232,8 @@ test('a whole-panel teardown then reopen preserves the in-flight install and nev
   const gate = deferred<PluginChangeFact>()
   const harness = recoveryHarness({ startInstall: () => gate.promise })
   // The first surface: open the install dialog, inspect and dispatch.
-  const firstPanel = new PluginManagerPanel(harness.controller, () => {}, {})
-  harness.controller.openInstall()
+  const firstPanel = new PluginManagerWorkspacePanel(harness.controller, { rows: () => 24, columns: () => 80, requestRender: () => {}, notice: () => undefined, onCopy: () => {} }, {})
+  harness.controller.beginManualInstall()
   harness.controller.inspect('pkg', null)
   await tick()
   harness.controller.confirmInstall()
@@ -245,7 +245,7 @@ test('a whole-panel teardown then reopen preserves the in-flight install and nev
   // hidden): the panel releases its owner exactly once while the controller —
   // and therefore the official operation — survives.
   const released: number[] = []
-  const ownedPanel = new PluginManagerPanel(harness.controller, () => {}, { onDispose: () => released.push(1) })
+  const ownedPanel = new PluginManagerWorkspacePanel(harness.controller, { rows: () => 24, columns: () => 80, requestRender: () => {}, notice: () => undefined, onCopy: () => {} }, { onDispose: () => released.push(1) })
   firstPanel.dispose()
   ownedPanel.dispose()
   assert.deepEqual(released, [1], 'the panel teardown releases its surface owner exactly once')
@@ -253,7 +253,7 @@ test('a whole-panel teardown then reopen preserves the in-flight install and nev
   // Reopen the surface through the panel-open entry: a NEW panel over the SAME
   // controller resumes the dispatched install with the same request id.
   harness.controller.open('direct-command')
-  const reopened = new PluginManagerPanel(harness.controller, () => {}, {})
+  const reopened = new PluginManagerWorkspacePanel(harness.controller, { rows: () => 24, columns: () => 80, requestRender: () => {}, notice: () => undefined, onCopy: () => {} }, {})
   await tick()
   assert.equal(harness.installCalls.length, 1, 'reopening the surface must not dispatch a second installBundle')
   assert.equal(harness.controller.installView()?.requestId, requestId, 'the same request id is preserved')
@@ -267,7 +267,7 @@ test('a whole-panel teardown then reopen preserves the in-flight install and nev
 
 test('a settled install triggers an authoritative inventory refresh', async () => {
   const harness = recoveryHarness({ startInstall: async () => change() })
-  harness.controller.openInstall()
+  harness.controller.beginManualInstall()
   harness.controller.inspect('pkg', null)
   await tick()
   const before = harness.counters.snapshotCalls

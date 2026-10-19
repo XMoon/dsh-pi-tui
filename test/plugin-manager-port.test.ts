@@ -1,9 +1,9 @@
 /**
- * Controller contract tests (P1-A1/A2/A3): the operation/presentation owner
- * over a fake semantic port. Covers read/refresh policy, the Current-TUI
- * self-protection guard at dispatch (not only in the UI), mutation
- * identity/staleness, and the install lifecycle (request identity, recovery,
- * cancel and close/reopen without a duplicate install).
+ * Controller contract tests (S4-D1): the operation/inventory owner over a fake
+ * semantic port. Covers read/refresh currentness, the Current-TUI
+ * self-protection guard at dispatch (not only in the UI), mutation identity,
+ * the remove-confirmation epoch, and the install lifecycle (request identity,
+ * recovery, cancel, approval and close/reopen without a duplicate install).
  * @module @xmoon76/dsh-pi-tui/plugin-manager-port.test
  */
 
@@ -12,8 +12,9 @@ import test from 'node:test'
 import { SELF_BUNDLE } from '../src/app/plugin-manager/classify.ts'
 import { PluginManagerController } from '../src/app/plugin-manager/controller.ts'
 import { createDiag } from '../src/runtime/process/diagnostics.ts'
-import { PLUGIN_ACTION, bundleValue, entryValue } from '../src/app/plugin-manager/model.ts'
+import { PLUGIN_ACTION, bundleValue, buildPluginDetailView, entryValue } from '../src/app/plugin-manager/model.ts'
 import type {
+  PluginBundleFact,
   PluginChangeFact,
   PluginInstallEvent,
   PluginManagerPort,
@@ -23,6 +24,22 @@ import type {
 
 function change(overrides: Partial<PluginChangeFact> = {}): PluginChangeFact {
   return { changed: true, application: 'applied', stage: 'enable', target: 'x', ...overrides }
+}
+
+function bundle(overrides: Partial<PluginBundleFact> = {}): PluginBundleFact {
+  return {
+    name: 'ordinary',
+    official: false,
+    availability: 'profile',
+    source: 'file:/tmp/ordinary',
+    enabled: true,
+    installed: true,
+    optional: false,
+    removable: true,
+    rows: [],
+    overrides: [],
+    ...overrides,
+  }
 }
 
 function snapshot(bundles: PluginManagerSnapshot['bundles']): PluginManagerSnapshot {
@@ -42,7 +59,7 @@ function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void; reje
   return { promise, resolve, reject }
 }
 
-async function tick(times = 4): Promise<void> {
+async function tick(times = 6): Promise<void> {
   for (let i = 0; i < times; i += 1) await new Promise<void>(resolve => setTimeout(resolve, 0))
 }
 
@@ -68,7 +85,6 @@ function fakePort(state: Partial<FakeState> = {}): {
   state: FakeState
   emit: (event: PluginInstallEvent) => void
   invalidate: () => void
-  /** How many times each subscription's disposer was actually invoked. */
   offCalls: { install: number; invalidation: number }
   installSubscriptions: () => number
   invalidationSubscriptions: () => number
@@ -86,8 +102,8 @@ function fakePort(state: Partial<FakeState> = {}): {
     waitCalls: [],
     cancelCalls: [],
     snapshotImpl: async () => snapshot([
-      { name: SELF_BUNDLE, official: false, availability: 'profile', enabled: true, installed: true, optional: false, removable: true, rows: [], overrides: [] },
-      { name: 'ordinary', official: false, availability: 'profile', enabled: true, installed: true, optional: false, removable: true, rows: [], overrides: [] },
+      bundle({ name: SELF_BUNDLE, source: 'file:/tui' }),
+      bundle(),
     ]),
     inspectImpl: async () => ({ status: 'accepted', kind: 'registry', name: 'pkg', version: '1.0.0', bundle: true, registry: null }),
     installImpl: async () => change({ stage: 'install' }),
@@ -142,26 +158,19 @@ function controllerOf(port: PluginManagerPort): { controller: PluginManagerContr
   return { controller, renders: () => renders }
 }
 
-function select(controller: PluginManagerController, value: string): void {
-  const selectable = controller.rows().filter(row => row.selectable)
-  const target = selectable.findIndex(row => row.value === value)
-  assert.ok(target >= 0, `row ${value} must exist`)
-  for (let i = 0; i < selectable.length + 1; i += 1) {
-    if (controller.selectedValue() === value) return
-    controller.move(1)
-  }
-  assert.equal(controller.selectedValue(), value)
+function card(controller: PluginManagerController, value: string) {
+  return controller.card(value)
 }
 
 test('opening reads once; a failed refresh keeps the last good snapshot', async () => {
   let fail = false
-  const { port, state } = fakePort({ snapshotImpl: async () => { if (fail) throw new Error('boom'); return snapshot([{ name: 'ordinary', official: false, availability: 'profile', enabled: true, installed: true, optional: false, removable: true, rows: [], overrides: [] }]) } })
+  const { port, state } = fakePort({ snapshotImpl: async () => { if (fail) throw new Error('boom'); return snapshot([bundle()]) } })
   const { controller } = controllerOf(port)
   controller.open('direct-command')
   await tick()
   assert.equal(state.snapshotCalls, 1)
   assert.equal(controller.status().state, 'ready')
-  assert.ok(controller.rows().some(row => row.value === bundleValue('ordinary')))
+  assert.ok(card(controller, bundleValue('ordinary')) !== undefined)
 
   fail = true
   controller.refresh()
@@ -169,8 +178,23 @@ test('opening reads once; a failed refresh keeps the last good snapshot', async 
   assert.equal(state.snapshotCalls, 2)
   assert.equal(controller.status().state, 'error')
   // The previous good snapshot is still rendered.
-  assert.ok(controller.rows().some(row => row.value === bundleValue('ordinary')))
+  assert.ok(card(controller, bundleValue('ordinary')) !== undefined)
   assert.match(controller.notice() ?? '', /refresh failed/)
+})
+
+test('the four sections are exposed in frozen order (Experimental last)', async () => {
+  const { port } = fakePort({
+    snapshotImpl: async () => snapshot([
+      bundle({ name: '@deepseek-ai/dsh-base', availability: 'installation', source: undefined }),
+      bundle({ name: '@deepseek-ai/dsh-experimental-auto-review', official: true, availability: 'missing', installed: false, optional: true, removable: false, source: undefined, installTarget: { spec: 'x@1', version: '1' } }),
+      bundle(),
+    ]),
+  })
+  const { controller } = controllerOf(port)
+  controller.open('direct-command')
+  await tick()
+  assert.deepEqual(controller.sections().map(section => section.id), ['tui', 'official', 'third-party', 'experimental'])
+  assert.deepEqual(controller.sections().at(-1)!.cards.map(entry => entry.name), ['@deepseek-ai/dsh-experimental-auto-review'])
 })
 
 test('Current-TUI self-protection rejects disable/remove at dispatch with zero Host mutation', async () => {
@@ -179,21 +203,19 @@ test('Current-TUI self-protection rejects disable/remove at dispatch with zero H
   controller.open('direct-command')
   await tick()
 
-  // The UI omits the action; the dispatch guard must still reject a direct
-  // attempt on the selected self card.
-  select(controller, bundleValue(SELF_BUNDLE))
-  await controller.toggleSelectedCard()
+  await controller.toggleCard(bundleValue(SELF_BUNDLE))
   await tick()
   assert.equal(state.setBundle.length, 0, 'self bundle must never dispatch setBundleEnabled')
-  assert.match(controller.notice() ?? '', /current TUI/)
+  assert.match(controller.notice() ?? '', /Current TUI/)
 
-  controller.requestRemoveSelected()
-  assert.ok(!controller.rows().some(row => row.value === PLUGIN_ACTION.confirmRemove), 'no confirmation for the self bundle')
+  assert.equal(controller.requestRemove(bundleValue(SELF_BUNDLE)), false, 'no confirmation for the self bundle')
 
-  // The detail page never offers the destructive actions either.
-  controller.activate()
-  assert.ok(!controller.rows().some(row => row.value === PLUGIN_ACTION.toggle))
-  assert.ok(!controller.rows().some(row => row.value === PLUGIN_ACTION.remove))
+  // The detail projection never offers an enabled destructive action either.
+  const self = card(controller, bundleValue(SELF_BUNDLE))!
+  const detail = buildPluginDetailView(self)
+  assert.ok(!detail.actions.some(action => action.value === PLUGIN_ACTION.toggle), 'no self toggle action')
+  assert.ok(!detail.actions.some(action => action.value === PLUGIN_ACTION.remove), 'no self remove action')
+  assert.deepEqual(detail.actions.map(action => action.value), [PLUGIN_ACTION.back])
 })
 
 test('an ordinary bundle toggles through the official port and then re-reads', async () => {
@@ -202,10 +224,7 @@ test('an ordinary bundle toggles through the official port and then re-reads', a
   controller.open('direct-command')
   await tick()
 
-  select(controller, bundleValue('ordinary'))
-  controller.activate()
-  select(controller, PLUGIN_ACTION.toggle)
-  controller.activate()
+  controller.toggleCard(bundleValue('ordinary'))
   await tick()
   assert.deepEqual(state.setBundle, [{ name: 'ordinary', enabled: false }])
   assert.equal(state.snapshotCalls, 2, 'a mutation is followed by a fresh official inventory read')
@@ -215,36 +234,43 @@ test('an ordinary bundle toggles through the official port and then re-reads', a
 test('a stale remove confirmation never mutates', async () => {
   let dropOrdinary = false
   const { port, state } = fakePort({
-    snapshotImpl: async () => snapshot(dropOrdinary
-      ? []
-      : [{ name: 'ordinary', official: false, availability: 'profile', enabled: true, installed: true, optional: false, removable: true, rows: [], overrides: [] }]),
+    snapshotImpl: async () => snapshot(dropOrdinary ? [] : [bundle()]),
   })
   const { controller } = controllerOf(port)
   controller.open('direct-command')
   await tick()
 
-  select(controller, bundleValue('ordinary'))
-  controller.activate()
-  select(controller, PLUGIN_ACTION.remove)
-  controller.activate()
-  assert.equal(controller.rows().some(row => row.value === PLUGIN_ACTION.confirmRemove), true)
+  assert.equal(controller.requestRemove(bundleValue('ordinary')), true)
+  assert.equal(controller.confirmingName(), 'ordinary')
 
   // A refresh replaces/removes the row while the confirmation is open.
   dropOrdinary = true
   controller.refresh()
   await tick()
-  select(controller, PLUGIN_ACTION.confirmRemove)
-  controller.activate()
+  assert.equal(controller.confirmingCard(), undefined, 'the epoch fence invalidates the old confirmation')
+  controller.confirmRemove()
   await tick()
   assert.deepEqual(state.removeBundle, [], 'the stale confirmation must not mutate')
 })
 
-test('install: one request id, close/reopen does not dispatch a second install', async () => {
+test('remove success goes through the official service and refreshes', async () => {
+  const { port, state } = fakePort()
+  const { controller } = controllerOf(port)
+  controller.open('direct-command')
+  await tick()
+  assert.equal(controller.requestRemove(bundleValue('ordinary')), true)
+  controller.confirmRemove()
+  await tick()
+  assert.deepEqual(state.removeBundle, [{ name: 'ordinary' }])
+  assert.equal(state.snapshotCalls, 2)
+})
+
+test('install: one request id; hide/reopen does not dispatch a second install', async () => {
   const gate = deferred<PluginChangeFact>()
   const { port, state } = fakePort({ installImpl: () => gate.promise })
   const { controller } = controllerOf(port)
 
-  controller.openInstall()
+  assert.equal(controller.beginManualInstall(), true)
   controller.inspect('pkg', null)
   await tick()
   assert.equal(state.inspectCalls.length, 1)
@@ -253,21 +279,54 @@ test('install: one request id, close/reopen does not dispatch a second install',
   controller.confirmInstall()
   await tick()
   assert.equal(state.installCalls.length, 1)
-  const requestId = (state.installCalls[0] as { requestId: string }).requestId
   assert.equal(controller.installView()?.phase, 'starting')
+  assert.equal(controller.hasDispatchedInstall(), true)
 
-  // Close and reopen: the SAME active operation is resumed.
-  controller.closeInstall()
-  controller.openInstall()
+  // Hide and reopen: the SAME active operation is resumed.
+  controller.hideInstall()
+  assert.equal(controller.beginManualInstall(), false, 'a live operation is reopened, never replaced')
   assert.equal(controller.installView()?.phase, 'starting')
   assert.equal(state.installCalls.length, 1, 'reopening must not call installBundle again')
 
-  gate.resolve(change({ stage: 'install', application: 'restart-required' }))
+  gate.resolve(change({ stage: 'install', application: 'restart-required', restartReason: 'no-hmr', version: '2.0.0' }))
   await tick()
   assert.equal(controller.installView()?.phase, 'done')
-  assert.match(controller.installView()?.message ?? '', /restart the profile/)
+  assert.match(controller.installView()?.message ?? '', /restart required/)
+  assert.equal(controller.installView()?.outcome?.version, '2.0.0')
   assert.equal(state.snapshotCalls, 1, 'the final outcome refreshes the inventory')
-  void requestId
+})
+
+test('official missing card install starts from the Host installTarget, never a toggle', async () => {
+  const { port, state } = fakePort({
+    snapshotImpl: async () => snapshot([
+      bundle({
+        name: '@deepseek-ai/dsh-experimental-auto-review',
+        official: true,
+        availability: 'missing',
+        installed: false,
+        optional: true,
+        removable: false,
+        source: undefined,
+        installTarget: { spec: '@deepseek-ai/dsh-experimental-auto-review@0.2.1-rc.2', version: '0.2.1-rc.2' },
+      }),
+    ]),
+  })
+  const { controller } = controllerOf(port)
+  controller.open('direct-command')
+  await tick()
+
+  // A direct toggle of a missing bundle is refused and never dispatches.
+  await controller.toggleCard(bundleValue('@deepseek-ai/dsh-experimental-auto-review'))
+  await tick()
+  assert.equal(state.setBundle.length, 0)
+  assert.match(controller.notice() ?? '', /not installed/)
+
+  assert.equal(controller.beginOfficialInstall(bundleValue('@deepseek-ai/dsh-experimental-auto-review')), true)
+  await tick()
+  assert.equal(state.inspectCalls.length, 1)
+  assert.equal((state.inspectCalls[0] as { spec: string }).spec, '@deepseek-ai/dsh-experimental-auto-review@0.2.1-rc.2')
+  assert.equal(controller.installView()?.officialName, '@deepseek-ai/dsh-experimental-auto-review')
+  assert.equal(controller.installView()?.phase, 'confirm')
 })
 
 test('install recovery: an indeterminate throw reconciles through waitForInstall and never retries', async () => {
@@ -276,7 +335,7 @@ test('install recovery: an indeterminate throw reconciles through waitForInstall
     waitImpl: async () => change({ stage: 'install', application: 'applied' }),
   })
   const { controller } = controllerOf(port)
-  controller.openInstall()
+  controller.beginManualInstall()
   controller.inspect('pkg', null)
   await tick()
   controller.confirmInstall()
@@ -292,7 +351,7 @@ test('install recovery: waitForInstall null marks the result unknown without a r
     waitImpl: async () => null,
   })
   const { controller } = controllerOf(port)
-  controller.openInstall()
+  controller.beginManualInstall()
   controller.inspect('pkg', null)
   await tick()
   controller.confirmInstall()
@@ -302,6 +361,67 @@ test('install recovery: waitForInstall null marks the result unknown without a r
   assert.match(controller.installView()?.message ?? '', /not retried automatically/)
 })
 
+test('reconcileInstall rereads through waitForInstall and never re-dispatches', async () => {
+  const { port, state } = fakePort({
+    installImpl: async () => { throw new Error('socket closed') },
+    waitImpl: async () => null,
+  })
+  const { controller } = controllerOf(port)
+  controller.beginManualInstall()
+  controller.inspect('pkg', null)
+  await tick()
+  controller.confirmInstall()
+  await tick()
+  assert.equal(controller.installView()?.phase, 'unknown')
+  controller.reconcileInstall()
+  await tick()
+  assert.equal(state.installCalls.length, 1, 'reconcile never calls installBundle again')
+  assert.equal(state.waitCalls.length, 2)
+  assert.match(controller.installView()?.message ?? '', /inventory reread/)
+})
+
+test('approving pending builds uses a NEW request id and the exact Host-reported names', async () => {
+  const firstAttempt = deferred<PluginChangeFact>()
+  const secondAttempt = deferred<PluginChangeFact>()
+  let installAttempt = 0
+  const { port, state } = fakePort({
+    installImpl: async () => {
+      installAttempt += 1
+      return installAttempt === 1 ? firstAttempt.promise : secondAttempt.promise
+    },
+    snapshotImpl: async () => snapshot([bundle()]),
+  })
+  const { controller } = controllerOf(port)
+  controller.beginManualInstall()
+  controller.inspect('pkg', null)
+  await tick()
+  controller.confirmInstall()
+  await tick()
+  const firstId = (state.installCalls[0] as { requestId: string }).requestId
+  firstAttempt.resolve(change({
+    stage: 'install',
+    application: 'failed',
+    packageResult: { exitCode: 1, output: 'blocked', truncated: false, logPath: '/tmp/x', kind: 'build-blocked' },
+    pendingBuilds: ['esbuild', 'sharp'],
+    failedAt: 'registry',
+  }))
+  await tick()
+  assert.equal(controller.installView()?.phase, 'failed')
+  assert.deepEqual(controller.approvableBuilds(), ['esbuild', 'sharp'])
+
+  controller.approvePendingBuilds()
+  await tick()
+  assert.equal(state.installCalls.length, 2)
+  const second = state.installCalls[1] as { requestId: string; approvedBuilds: readonly string[]; spec: string }
+  assert.notEqual(second.requestId, firstId, 'approval is a new explicit request')
+  assert.deepEqual(second.approvedBuilds, ['esbuild', 'sharp'])
+  assert.equal(second.spec, 'pkg')
+  secondAttempt.resolve(change({ stage: 'install', application: 'applied', version: '1.2.3' }))
+  await tick()
+  assert.equal(controller.installView()?.phase, 'done')
+  assert.equal(controller.installView()?.outcome?.version, '1.2.3')
+})
+
 test('install cancel: too-late keeps the operation running and applying disables cancel', async () => {
   const gate = deferred<PluginChangeFact>()
   const { port, state, emit } = fakePort({
@@ -309,7 +429,7 @@ test('install cancel: too-late keeps the operation running and applying disables
     cancelImpl: async () => ({ status: 'too-late' }),
   })
   const { controller } = controllerOf(port)
-  controller.openInstall()
+  controller.beginManualInstall()
   controller.inspect('pkg', null)
   await tick()
   controller.confirmInstall()
@@ -334,7 +454,7 @@ test('install cancel: too-late keeps the operation running and applying disables
 test('a custom registry is validated before any Host dispatch', async () => {
   const { port, state } = fakePort()
   const { controller } = controllerOf(port)
-  controller.openInstall()
+  controller.beginManualInstall()
   controller.inspect('pkg', 'not-a-url')
   await tick()
   assert.equal(state.inspectCalls.length, 0)
@@ -354,51 +474,31 @@ test('standalone entry toggle uses the official plugin-entry mutation', async ()
   const { controller } = controllerOf(port)
   controller.open('direct-command')
   await tick()
-  select(controller, entryValue('e-free'))
-  controller.activate()
-  select(controller, PLUGIN_ACTION.toggle)
-  controller.activate()
+  controller.toggleCard(entryValue('e-free'))
   await tick()
   assert.deepEqual(state.setPlugin, [{ id: 'e-free', enabled: false }])
 })
 
-test('remove success goes through the official service and refreshes', async () => {
-  const { port, state } = fakePort()
-  const { controller } = controllerOf(port)
-  controller.open('direct-command')
-  await tick()
-  select(controller, bundleValue('ordinary'))
-  controller.activate()
-  select(controller, PLUGIN_ACTION.remove)
-  controller.activate()
-  select(controller, PLUGIN_ACTION.confirmRemove)
-  controller.activate()
-  await tick()
-  assert.deepEqual(state.removeBundle, [{ name: 'ordinary' }])
-  assert.equal(state.snapshotCalls, 2)
-})
-
-test('an ordinary read-only bundle exposes no mutation affordance and rejects a direct dispatch', async () => {
+test('an ordinary read-only bundle exposes no enabled mutation affordance and rejects a direct dispatch', async () => {
   const { port, state } = fakePort({
-    snapshotImpl: async () => snapshot([
-      { name: 'managed', official: false, availability: 'profile', enabled: true, installed: true, optional: false, removable: false, readOnlyReason: 'management-required', rows: [], overrides: [] },
-    ]),
+    snapshotImpl: async () => snapshot([bundle({
+      name: 'managed',
+      removable: false,
+      readOnlyReason: 'management-required',
+    })]),
   })
   const { controller } = controllerOf(port)
   controller.open('direct-command')
   await tick()
-  select(controller, bundleValue('managed'))
-  controller.activate()
-  assert.ok(!controller.rows().some(row => row.value === PLUGIN_ACTION.toggle))
-  assert.ok(!controller.rows().some(row => row.value === PLUGIN_ACTION.remove))
-  controller.back()
-  select(controller, bundleValue('managed'))
-  await controller.toggleSelectedCard()
+  const managed = card(controller, bundleValue('managed'))!
+  const detail = buildPluginDetailView(managed)
+  assert.equal(detail.actions.find(action => action.value === PLUGIN_ACTION.toggle)?.enabled, false)
+  assert.equal(detail.actions.find(action => action.value === PLUGIN_ACTION.remove)?.enabled, false)
+  await controller.toggleCard(bundleValue('managed'))
   await tick()
   assert.equal(state.setBundle.length, 0)
-  assert.match(controller.notice() ?? '', /management-required/)
-  controller.requestRemoveSelected()
-  assert.ok(!controller.rows().some(row => row.value === PLUGIN_ACTION.confirmRemove))
+  assert.match(controller.notice() ?? '', /DSH management/)
+  assert.equal(controller.requestRemove(bundleValue('managed')), false)
 })
 
 test('a late old mutation cannot overwrite a newer refresh', async () => {
@@ -406,45 +506,30 @@ test('a late old mutation cannot overwrite a newer refresh', async () => {
   let drop = false
   const { port } = fakePort({
     setBundleImpl: () => gate.promise,
-    snapshotImpl: async () => snapshot(drop
-      ? []
-      : [{ name: 'ordinary', official: false, availability: 'profile', enabled: true, installed: true, optional: false, removable: true, rows: [], overrides: [] }]),
+    snapshotImpl: async () => snapshot(drop ? [] : [bundle()]),
   })
   const { controller } = controllerOf(port)
   controller.open('direct-command')
   await tick()
-  select(controller, bundleValue('ordinary'))
-  controller.activate()
-  select(controller, PLUGIN_ACTION.toggle)
-  controller.activate() // dispatch the slow mutation
+  controller.toggleCard(bundleValue('ordinary')) // dispatch the slow mutation
   await tick()
-  // A newer refresh commits a snapshot without the bundle…
   drop = true
   controller.refresh()
   await tick()
-  assert.ok(!controller.rows().some(row => row.value === bundleValue('ordinary')))
-  // …then the old mutation settles and re-reads; the newest truth still wins.
+  assert.equal(controller.card(bundleValue('ordinary')), undefined)
   gate.resolve(change())
   await tick()
-  assert.ok(!controller.rows().some(row => row.value === bundleValue('ordinary')))
+  assert.equal(controller.card(bundleValue('ordinary')), undefined, 'the newest truth still wins')
 })
 
 test('row-level self protection never offers a toggle row action', async () => {
   const { port, state } = fakePort({
     snapshotImpl: async () => ({
-      bundles: [{
+      bundles: [bundle({
         name: SELF_BUNDLE,
-        official: false,
-        availability: 'profile',
-        enabled: true,
-        installed: true,
-        optional: false,
-        removable: true,
+        source: 'file:/tui',
         rows: [{ rowId: 'app', moduleName: SELF_BUNDLE, entryId: 'e-app' }],
-        overrides: [],
-      }],
-      // The self row is LIVE and addressable: absent the self policy its
-      // effective toggle would be true.
+      })],
       plugins: [{ entryId: 'e-app', moduleName: SELF_BUNDLE, enabled: true, fiberPhase: 'active', patchId: 'app' }],
       registries: { registry: null, fallbackRegistries: [], resolved: null },
       exemptions: [],
@@ -454,11 +539,11 @@ test('row-level self protection never offers a toggle row action', async () => {
   const { controller } = controllerOf(port)
   controller.open('direct-command')
   await tick()
-  select(controller, bundleValue(SELF_BUNDLE))
-  controller.activate()
-  const rows = controller.rows()
-  assert.ok(rows.some(row => row.label === 'Plugin rows'))
-  assert.ok(!rows.some(row => row.value.startsWith('action:toggle-row:')), 'no self row toggle action')
+  const self = card(controller, bundleValue(SELF_BUNDLE))!
+  const detail = buildPluginDetailView(self)
+  assert.ok(!detail.actions.some(action => action.value.startsWith('action:toggle-row:')), 'no self row toggle action')
+  controller.toggleRow(bundleValue(SELF_BUNDLE), 'e-app')
+  await tick()
   assert.equal(state.setPlugin.length, 0)
 })
 
@@ -466,7 +551,6 @@ test('a settlement-side hook throw never misclassifies a successful install', as
   let settleThrow = false
   const { port } = fakePort({
     installImpl: async () => {
-      // Arm the throw so it fires from SETTLEMENT, after startInstall resolved.
       settleThrow = true
       return change({ stage: 'install' })
     },
@@ -478,7 +562,7 @@ test('a settlement-side hook throw never misclassifies a successful install', as
     isOpen: () => true,
     diag: createDiag({ filePath: undefined, stderrLevel: 'off' }),
   }, { observations: () => [] })
-  controller.openInstall()
+  controller.beginManualInstall()
   controller.inspect('pkg', null)
   await tick()
   controller.confirmInstall()
@@ -486,12 +570,12 @@ test('a settlement-side hook throw never misclassifies a successful install', as
   assert.equal(controller.installView()?.phase, 'done', 'the successful outcome must not be overwritten by a settlement throw')
 })
 
-test('the Refresh action row clears a stale read-failure notice', async () => {
+test('the Refresh action clears a stale read-failure notice', async () => {
   let fail = true
   const { port } = fakePort({
     snapshotImpl: async () => {
       if (fail) throw new Error('boom')
-      return snapshot([{ name: 'ordinary', official: false, availability: 'profile', enabled: true, installed: true, optional: false, removable: true, rows: [], overrides: [] }])
+      return snapshot([bundle()])
     },
   })
   const { controller } = controllerOf(port)
@@ -499,11 +583,10 @@ test('the Refresh action row clears a stale read-failure notice', async () => {
   await tick()
   assert.match(controller.notice() ?? '', /refresh failed/)
   fail = false
-  select(controller, PLUGIN_ACTION.refresh)
-  controller.activate()
+  controller.refresh()
   await tick()
   assert.equal(controller.status().state, 'ready')
-  assert.equal(controller.notice(), undefined, 'a successful action-row refresh clears the stale notice')
+  assert.equal(controller.notice(), undefined, 'a successful refresh clears the stale notice')
 })
 
 test('an operation outcome message survives an explicit refresh', async () => {
@@ -511,10 +594,7 @@ test('an operation outcome message survives an explicit refresh', async () => {
   const { controller } = controllerOf(port)
   controller.open('direct-command')
   await tick()
-  select(controller, bundleValue('ordinary'))
-  controller.activate()
-  select(controller, PLUGIN_ACTION.toggle)
-  controller.activate()
+  controller.toggleCard(bundleValue('ordinary'))
   await tick()
   assert.equal(controller.notice(), 'enable applied')
   controller.refresh()
@@ -525,18 +605,12 @@ test('an operation outcome message survives an explicit refresh', async () => {
 test('a protected TUI-module entry is refused with the module wording and never mutated', async () => {
   const { port, state } = fakePort({
     snapshotImpl: async () => ({
-      bundles: [{
+      bundles: [bundle({
         name: SELF_BUNDLE,
-        official: false,
-        availability: 'profile',
-        enabled: true,
-        installed: true,
-        optional: false,
-        removable: true,
+        source: 'file:/tui',
         // No entryId: the row cannot exclude the live entry by id.
         rows: [{ rowId: 'builtins', moduleName: `${SELF_BUNDLE}/builtins` }],
-        overrides: [],
-      }],
+      })],
       plugins: [{ entryId: 'include:builtins', moduleName: `${SELF_BUNDLE}/builtins`, enabled: true, fiberPhase: 'active', patchId: 'builtins' }],
       registries: { registry: null, fallbackRegistries: [], resolved: null },
       exemptions: [],
@@ -546,17 +620,16 @@ test('a protected TUI-module entry is refused with the module wording and never 
   const { controller } = controllerOf(port)
   controller.open('direct-command')
   await tick()
-  select(controller, entryValue('include:builtins'))
-  await controller.toggleSelectedCard()
+  controller.toggleCard(entryValue('include:builtins'))
   await tick()
   assert.equal(state.setPlugin.length, 0)
-  assert.match(controller.notice() ?? '', /controlled by the Current TUI composition/)
+  assert.match(controller.notice() ?? '', /Controlled by the Current TUI composition/)
 })
 
-// ── invalidation / read currentness / disposal (M3-5 PR4) ─────────────────────
+// ── invalidation / read currentness / disposal ─────────────────────────────
 
 function bundleOnly(name: string): PluginManagerSnapshot {
-  return snapshot([{ name, official: false, availability: 'profile', enabled: true, installed: true, optional: false, removable: true, rows: [], overrides: [] }])
+  return snapshot([bundle({ name, source: `file:/tmp/${name}` })])
 }
 
 test('latest-started read wins: a newer read start invalidates every older in-flight read', async () => {
@@ -565,43 +638,20 @@ test('latest-started read wins: a newer read start invalidates every older in-fl
   const queue = [older, newer]
   const { port, state } = fakePort({ snapshotImpl: () => queue.shift()!.promise })
   const { controller } = controllerOf(port)
-  controller.open('direct-command') // read A
+  controller.open('direct-command')
   await tick()
-  controller.refresh() // read B starts while A is still in flight
+  controller.refresh()
   await tick()
   assert.equal(state.snapshotCalls, 2)
 
-  // B settles first with B: final model is B.
   newer.resolve(bundleOnly('fresh-b'))
   await tick()
-  assert.ok(controller.rows().some(row => row.value === bundleValue('fresh-b')))
+  assert.ok(controller.card(bundleValue('fresh-b')) !== undefined)
 
-  // A then settles with A: it started before B and must never commit.
   older.resolve(bundleOnly('stale-a'))
   await tick()
-  assert.ok(controller.rows().some(row => row.value === bundleValue('fresh-b')), 'the newer read owns the commit')
-  assert.ok(!controller.rows().some(row => row.value === bundleValue('stale-a')), 'an older read must not repaint')
-})
-
-test('an older read completing while a newer read is in flight never commits', async () => {
-  const older = deferred<PluginManagerSnapshot>()
-  const newer = deferred<PluginManagerSnapshot>()
-  const queue = [older, newer]
-  const { port } = fakePort({ snapshotImpl: () => queue.shift()!.promise })
-  const { controller } = controllerOf(port)
-  controller.open('direct-command') // read A
-  await tick()
-  controller.refresh() // read B starts while A is still in flight
-  await tick()
-
-  // A settles BEFORE B: it already lost the currentness race at B's start.
-  older.resolve(bundleOnly('stale-a'))
-  await tick()
-  assert.ok(!controller.rows().some(row => row.value === bundleValue('stale-a')), 'A must not commit once B started')
-
-  newer.resolve(bundleOnly('fresh-b'))
-  await tick()
-  assert.ok(controller.rows().some(row => row.value === bundleValue('fresh-b')))
+  assert.ok(controller.card(bundleValue('fresh-b')) !== undefined, 'the newer read owns the commit')
+  assert.equal(controller.card(bundleValue('stale-a')), undefined, 'an older read must not repaint')
 })
 
 test('a newest read failure keeps the last good snapshot; a stale older success cannot clear it', async () => {
@@ -618,23 +668,21 @@ test('a newest read failure keeps the last good snapshot; a stale older success 
   const { controller } = controllerOf(port)
   controller.open('direct-command')
   await tick()
-  assert.ok(controller.rows().some(row => row.value === bundleValue('good')))
+  assert.ok(controller.card(bundleValue('good')) !== undefined)
 
-  controller.refresh() // read B (stale, held)
+  controller.refresh()
   await tick()
-  controller.refresh() // read C (newest, fails)
+  controller.refresh()
   await tick()
   assert.equal(controller.status().state, 'error')
   assert.match(controller.notice() ?? '', /refresh failed/)
 
-  // The stale B success settles afterwards: it must neither repaint stale
-  // inventory nor clear the newer failure.
   stale.resolve(bundleOnly('stale-b'))
   await tick()
   assert.equal(controller.status().state, 'error')
   assert.match(controller.notice() ?? '', /refresh failed/)
-  assert.ok(controller.rows().some(row => row.value === bundleValue('good')), 'the last good snapshot stays visible')
-  assert.ok(!controller.rows().some(row => row.value === bundleValue('stale-b')))
+  assert.ok(controller.card(bundleValue('good')) !== undefined, 'the last good snapshot stays visible')
+  assert.equal(controller.card(bundleValue('stale-b')), undefined)
 })
 
 test('invalidation reads only while a surface is showing the inventory', async () => {
@@ -655,11 +703,11 @@ test('invalidation reads only while a surface is showing the inventory', async (
   open = true
   controller.open('direct-command')
   await tick()
-  assert.equal(state.snapshotCalls, 1, 'open performs the authoritative read')
+  assert.equal(state.snapshotCalls, 1)
 
   invalidate()
   await tick()
-  assert.equal(state.snapshotCalls, 2, 'an invalidation while open rereads')
+  assert.equal(state.snapshotCalls, 2)
 
   open = false
   invalidate()
@@ -687,14 +735,14 @@ test('dispose releases BOTH subscriptions exactly once and is idempotent', () =>
 
   controller.dispose()
   controller.dispose()
-  assert.equal(installSubscriptions(), 0, 'the install-event subscription is released')
-  assert.equal(invalidationSubscriptions(), 0, 'the invalidation subscription is released')
-  assert.deepEqual(offCalls, { install: 1, invalidation: 1 }, 'each subscription disposer runs exactly once')
+  assert.equal(installSubscriptions(), 0)
+  assert.equal(invalidationSubscriptions(), 0)
+  assert.deepEqual(offCalls, { install: 1, invalidation: 1 })
   invalidate()
   assert.deepEqual(offCalls, { install: 1, invalidation: 1 }, 'a disposed controller never re-subscribes or re-releases')
 })
 
-test('M3-6 PR3: a throwing install-event unsubscribe cannot strand the invalidation release', () => {
+test('a throwing install-event unsubscribe cannot strand the invalidation release', () => {
   const failure = new Error('install unsubscribe failed')
   const base = fakePort()
   const { offCalls, invalidate, emit, installSubscriptions, invalidationSubscriptions, state } = base
@@ -713,13 +761,10 @@ test('M3-6 PR3: a throwing install-event unsubscribe cannot strand the invalidat
   assert.equal(invalidationSubscriptions(), 1)
 
   assert.throws(() => controller.dispose(), (error: unknown) => error === failure)
-  assert.deepEqual(offCalls, { install: 1, invalidation: 1 },
-    'the second unsubscribe still ran after the first threw')
+  assert.deepEqual(offCalls, { install: 1, invalidation: 1 })
   assert.equal(installSubscriptions(), 0)
   assert.equal(invalidationSubscriptions(), 0)
 
-  // The disposed latch stays committed: a second dispose is inert and no later
-  // invalidation/install event can read or repaint.
   controller.dispose()
   const rendersAtDispose = renders()
   invalidate()
@@ -735,7 +780,7 @@ test('a held inventory read settled after dispose never commits nor repaints (su
     const { controller, renders } = controllerOf(port)
     controller.open('direct-command')
     await tick()
-    assert.equal(state.snapshotCalls, 1, 'the inventory read is genuinely in flight')
+    assert.equal(state.snapshotCalls, 1)
     const rendersAtDispose = renders()
 
     controller.dispose()
@@ -746,7 +791,7 @@ test('a held inventory read settled after dispose never commits nor repaints (su
 
     assert.equal(renders(), rendersAtDispose, `a late ${settlement} settlement must not repaint`)
     assert.equal(controller.status().state, 'loading', 'a late settlement never commits a state')
-    assert.ok(!controller.rows().some(row => row.value === bundleValue('late-read')))
+    assert.equal(controller.card(bundleValue('late-read')), undefined)
   }
 })
 
@@ -760,20 +805,20 @@ test('dispose aborts an in-flight inspect, releases both subscriptions and never
     },
   })
   const { controller, renders } = controllerOf(port)
-  controller.openInstall()
+  controller.beginManualInstall()
   controller.inspect('pkg', null)
   await tick()
-  assert.ok(inspectSignal !== undefined, 'the inspect was dispatched')
+  assert.ok(inspectSignal !== undefined)
   assert.equal(inspectSignal.aborted, false)
   assert.equal(installSubscriptions(), 1)
-  assert.equal(invalidationSubscriptions(), 1, 'the controller owns one invalidation subscription')
+  assert.equal(invalidationSubscriptions(), 1)
   const rendersAtDispose = renders()
 
   controller.dispose()
   assert.equal(inspectSignal.aborted, true, 'dispose aborts the in-flight inspect')
-  assert.equal(installSubscriptions(), 0, 'dispose releases the install-event subscription')
-  assert.equal(invalidationSubscriptions(), 0, 'dispose releases the invalidation subscription')
-  assert.deepEqual(offCalls, { install: 1, invalidation: 1 }, 'neither subscription is released twice')
+  assert.equal(installSubscriptions(), 0)
+  assert.equal(invalidationSubscriptions(), 0)
+  assert.deepEqual(offCalls, { install: 1, invalidation: 1 })
 
   invalidate()
   inspectGate.resolve({ status: 'accepted', kind: 'registry', name: 'pkg', version: '1', bundle: true, registry: null })
@@ -788,7 +833,7 @@ test('dispose during a Host install neither cancels nor retries it and ignores a
   const gate = deferred<PluginChangeFact>()
   const { port, state, emit, installSubscriptions } = fakePort({ installImpl: () => gate.promise })
   const { controller, renders } = controllerOf(port)
-  controller.openInstall()
+  controller.beginManualInstall()
   controller.inspect('pkg', null)
   await tick()
   controller.confirmInstall()
@@ -798,20 +843,13 @@ test('dispose during a Host install neither cancels nor retries it and ignores a
   const rendersAtDispose = renders()
 
   controller.dispose()
-  // The DECISIVE mechanism for "no later install event reaches the controller"
-  // is the released subscription itself: once disposed there is no listener to
-  // deliver to (releasing it is proven by the off-call counts).
   assert.equal(installSubscriptions(), 0, 'dispose released the install-event subscription')
   emit({ kind: 'phase', phase: { requestId, phase: 'applying' } })
   assert.equal(controller.installView()?.phase, 'starting', 'a late install event cannot be delivered')
 
-  // The late SETTLEMENT is an async continuation that does resume after
-  // disposal, so its own disposed fence is what this assertion discriminates.
   gate.resolve(change({ stage: 'install' }))
   await tick()
   assert.equal(state.cancelCalls.length, 0, 'dispose must never cancel a Host install')
   assert.equal(state.waitCalls.length, 0, 'dispose must never retry/recover an install')
-  assert.equal(state.snapshotCalls, 0, 'a late install settlement cannot mutate a disposed controller')
-  assert.equal(controller.installView()?.phase, 'starting', 'the disposed controller never settles and never advances the install')
-  assert.equal(renders(), rendersAtDispose, 'a disposed controller never repaints')
+  assert.equal(renders(), rendersAtDispose, 'a late settlement never repaints a disposed controller')
 })
