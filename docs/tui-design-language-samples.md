@@ -2143,3 +2143,37 @@ Not run for this delta: the other §8f sizes for these two strings, a
 light/custom-theme real terminal, physical mouse/trackpad, a Tern GUI, native
 credentials and paid API calls. Those remain `NOT_VERIFIED`; the §11.2 matrix
 for the full Plugin Manager Detail is the earlier §8f record.
+
+### 8f.5 Review-delta re-verification — zero-body-row Enter hints (80×2)
+
+The review found that a 0-row body frame still advertised `Enter` in the
+action bar even though the D2 revoke path makes that activation a no-op. The
+bar now drops every `Enter …` segment when the current frame painted no body
+row, keeping the real Esc destination (and the keys that still resolve).
+
+Method: the same isolated `DSH_HOME` (copied dev profile linking this worktree,
+with the published rc.2 B03 bundle selected for the confirmation frame); the
+worktree was rebuilt at the reviewed code snapshot; `TERM=screen-256color`,
+dark theme. A `tmux` 140×40 session opened `/plugins`, then the window was
+resized to 80×2 for the list frame; a second session opened the exact B03
+`Auto Review safety confirmation` and was resized to 80×2. ANSI is stripped
+for the record.
+
+```text
+# 80×2 — Plugin Manager list: no Enter invite; Esc close stays real
+Plugins · All                                                       5/23 enabled
+/ search · i install · Tab filter · r refresh · Esc close
+```
+
+```text
+# 80×2 — B03 safety confirmation: no Enter cancel; Esc cancel stays real
+Plugins · Auto Review                                               5/23 enabled
+Esc cancel
+```
+
+The mounted VirtualTerminal suite covers the same rule for the list, Details
+and confirmation paths (`test/plugin-manager-workspace-navigation.test.ts`) and
+asserts that Enter cannot write from a zero-row Remove/confirm frame.
+
+Not run for this delta: other sizes with a 0-row body, light/custom themes and
+physical mouse/trackpad remain `NOT_VERIFIED`.

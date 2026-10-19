@@ -50,6 +50,10 @@
 
 ### 修复
 
+- **Plugin Manager 在 80×2 等 0 行正文帧不再显示假的 `Enter` 提示。** 当本帧没有绘制
+  任何可选操作/选项时，操作栏只保留真实有效的 `Esc` 与其他仍可解析的键，不再广告
+  按了也不会执行的 `Enter cancel`/`Enter action`；正文恢复后提示照常恢复。
+
 - **选择 B03 Auto 权限预设后，Footer 仍显示当前权限事实。** 之前 Auto 不在内置权限标签表里，
   切到 Auto 会让整个 Permission 徽标消失，看起来像没有生效；现在显示 `[auto]`（compact/plain
   格式同样保留），与官方 preset 的当前值一致。

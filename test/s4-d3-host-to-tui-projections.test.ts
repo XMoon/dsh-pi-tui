@@ -295,6 +295,8 @@ test('B10: the real badge Skill provider reaches the /skill surface in a skills-
   await openSkillPicker(app)
   await app.waitFor(() => app.view().includes('dsh-badge'), 'the real badge Skill in the /skill surface')
   assert.match(app.view(), /dsh-badge/u)
+  app.vt.sendInput('\x1b') // close the picker; execute the official load path next
+  await app.settle()
 
   // The Host skill body is loadable and the provider name is the real one
   // (never a Web 1017 model badge or a fabricated model tool).
@@ -305,6 +307,27 @@ test('B10: the real badge Skill provider reaches the /skill surface in a skills-
   const catalog = await skills.list({ cwd: join(app.host.root, 'work') })
   assert.equal(catalog.find(skill => skill.name === 'dsh-badge')?.provider, 'dsh-badge')
   assert.ok(((await skills.get('dsh-badge'))?.content.length ?? 0) > 0)
+
+  // REAL USER PATH: `/skill dsh-badge` loads the official skill into the
+  // CURRENT Session; the command card and the rendered Context injection are
+  // both visible, and the durable event is the skill-invocation user message.
+  for (const character of '/skill dsh-badge') app.vt.sendInput(character)
+  await app.settle()
+  app.vt.sendInput('\r')
+  await app.settle()
+  await app.waitFor(() => app.view().includes('skill dsh-badge loaded'), 'the official skill load result')
+  await app.waitFor(() => app.view().includes('Context injection dsh-badge'), 'the rendered skill context card')
+  await agent.whenIdle()
+  const skillEvent = (agent.session.snapshotEvents() as readonly { readonly type?: string; readonly data?: unknown }[])
+    .find(event => event.type === 'user/message'
+      && (event.data as { source?: { kind?: string } }).source?.kind === 'skill-invocation')
+  assert.ok(skillEvent !== undefined, 'the skill load is a durable user/message in the current Session')
+  const skillData = skillEvent!.data as { source?: { name?: string; form?: string }; content?: readonly { text?: string }[] }
+  assert.equal(skillData.source?.name, 'dsh-badge')
+  assert.equal(skillData.source?.form, 'instructions')
+  const skillText = (skillData.content ?? []).map(block => block.text ?? '').join('')
+  assert.match(skillText, /<skill_content name="dsh-badge">/u)
+  assert.match(skillText, /powered by dsh/u)
 
   // Disable + restart removes the provider and the `/skill` entry.
   const disabled = await app.host.pluginManager.setBundleEnabled(B10, false) as { application: string }
@@ -381,14 +404,25 @@ test('B11: a real bounded Ralph round reaches the transcript/Activity UI as a fo
   app.host.ctx.on('workflow/end' as never, (() => { workflowEvents.push('end') }) as never)
 
   adapter.roundScripts.push(ralphReport('one bounded round completed'))
+  adapter.holdRound = new Promise<void>(resolve => { adapter.releaseRound = resolve })
+  t.after(() => { adapter.releaseRound?.() })
   adapter.scripts.push(
     { kind: 'tool', name: 'ralph', callId: 's4d3-b11-run', arguments: JSON.stringify({ objective: 'Report one completed round', maxRounds: 1 }) },
     { kind: 'text', text: 'Ralph completed.' },
   )
   const agent = await app.submitFirstPrompt('Run one bounded Ralph iteration')
+  await app.waitFor(() => adapter.roundRequests.length === 1 && adapter.roundHeld, 'the positive child round is held')
+  // The existing Activity surface during the real foreground run: the Tool
+  // card is running and the generic Working activity is painted, both bound
+  // to this exact ralph invocation.
+  assert.match(app.view(), /ralph · Report one completed round \[running\]/u)
+  assert.match(app.view(), /Working\.\.\./u)
+  adapter.releaseRound?.()
   await agent.whenIdle()
   await app.waitFor(() => app.view().includes('ralph'), 'the real ralph Tool card')
   await app.waitFor(() => /Ralph worker reported completion after 1 round/iu.test(app.view()), 'the real ralph result')
+  assert.match(app.view(), /ralph · Report one completed round \[ok\]/u, 'the same Tool/Activity card settles ok')
+  assert.doesNotMatch(app.view(), /Working\.\.\./u, 'the Working activity settles with the run')
   app.vt.sendInput('\x0f')
   await app.settle()
   await app.waitFor(() => /status\s+complete|complete/iu.test(app.view()), 'the expanded structured report')
@@ -421,7 +455,15 @@ test('B11: a real bounded Ralph round reaches the transcript/Activity UI as a fo
   assert.ok(cancelled !== undefined, 'the exact ralph call settles as a tool result')
   assert.match(cancelled!.replace(/\s+/gu, ' '), /cancel|abort/iu,
     'the abort/cancel error belongs to the ralph TOOL RESULT, not the user prompt')
-  await app.waitFor(() => app.view().includes('[error]'), 'the ralph tool card paints its error status')
+  await app.waitFor(() => /ralph · Hold then cancel \[error\]/u.test(app.view()),
+    'the exact ralph Tool card paints its error status')
+  assert.match(app.view(), /Interrupted/u, 'the generic Activity surface paints the interruption')
+  assert.match(app.view(), /cancelled by user/u)
+  // Honest boundary: ralph emits runtime workflow/start,end events, NOT the
+  // durable `tool-workflow/*` run rows the Workflow run card consumes.
+  assert.equal((agent.session.snapshotEvents() as readonly { readonly type?: string }[])
+    .some(event => event.type === 'tool-workflow/run-start'), false,
+  'ralph has no durable Workflow run card; its Activity is the generic Tool/Working/Interrupted surface')
   assert.ok(!app.view().includes('Cancelled run settled.'),
     'the aborted turn never runs the following model script')
   await new Promise<void>(resolve => setTimeout(resolve, 250))

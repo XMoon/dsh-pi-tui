@@ -73,6 +73,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The Plugin Manager no longer advertises a fake `Enter` on zero-body-row
+  frames (e.g. 80×2).** When the current frame painted no selectable
+  action/choice, the bar keeps the real `Esc` destination and the keys that
+  still resolve, instead of promising an `Enter cancel`/`Enter action` that
+  does nothing; the hints return with the body.
+
 - **Selecting the B03 Auto permission preset keeps the current permission
   fact in the footer.** Auto was missing from the builtin permission label map,
   so switching to it made the whole Permission badge disappear; it now renders
