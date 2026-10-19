@@ -4953,6 +4953,18 @@ export class TranscriptFolder {
         // foreign log that records a null/undefined/non-object source folds
         // as standalone injected Context instead of crashing the whole fold.
         const sourcePresentation = contextPresentation(event.data.source)
+        // Narrow Working delivery provenance: a producer-declared tool-jobs
+        // Notice claimed from the SAME turn's next-step inbox is the one
+        // Context the presentation may carry with that turn's Work. It is
+        // derived ONLY from the durable insert/claim identity chain above (no
+        // Agent.status sampling, no summary/wording inference); next-turn
+        // wakeups, foreign/legacy logs and every other producer stay absent
+        // and therefore fail open as independent Context.
+        const isWorkingToolJobsNotice = wasClaimedFromNextStep === true
+          && claimedIdentity !== undefined
+          && claimedIdentity.insertionTurn === this.currentTurn
+          && sourcePresentation.sourceKind === 'tool-jobs'
+          && sourcePresentation.form === 'notice'
         if (sourcePresentation.sourceKind === 'user') {
           if (!userBlocksVisibleNow(blocks)) break
           const activity = this.activityFor(this.currentTurn)
@@ -5000,8 +5012,12 @@ export class TranscriptFolder {
             context: true as const,
             // Presentation-only provenance (form/kind/sender) for the
             // form-aware Context roles Compact and Focus present. The
-            // semantic marker above stays the surfaced authority.
-            contextPresentation: sourcePresentation,
+            // semantic marker above stays the surfaced authority. The narrow
+            // same-turn next-step flag is added only for a proven Working
+            // tool-jobs Notice (see above); it never changes the source facts.
+            contextPresentation: isWorkingToolJobsNotice
+              ? { ...sourcePresentation, sameTurnNextStep: true as const }
+              : sourcePresentation,
           }
           this.appendItem(contextRow)
           // The Context boundary's own first-visible time (the same

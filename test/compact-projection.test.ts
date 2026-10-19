@@ -20,7 +20,7 @@ import {
 } from '../src/tui/transcript/context-structure.ts'
 import { contextPresentation, isTranscriptContextForm } from '../src/domain/transcript/context-semantics.ts'
 import { projectCompact } from '../src/tui/transcript/compact-projection.ts'
-import { clusterByMemberOf, projectTranscriptStructure } from '../src/tui/transcript/structure.ts'
+import { clusterByMemberOf, isWorkingToolJobsNotice, projectTranscriptStructure } from '../src/tui/transcript/structure.ts'
 import { formatWorkHeaderLine, compactWorkBody, CompactWorkComponent } from '../src/tui/components/transcript/compact-work.ts'
 import { summarizeWorkSpan } from '../src/tui/transcript/work-summary.ts'
 import { compactActionPresentation } from '../src/tui/components/transcript/compact-process-preview.ts'
@@ -742,4 +742,191 @@ test('a late post-turn replay row stays a boundary next to a snapshot-carrying W
   }).map(block => block.kind === 'message' ? `message:${block.message.kind}` : block.kind),
   ['work', 'message:assistant', 'message:tool'],
   'the replay row stays standalone and the snapshot never bridges it into the Work')
+})
+
+// --- Working tool-jobs Notice (v2 plan §11) -------------------------------
+
+/** One durable Working tool-jobs delivery: next-step insert → same-turn claim
+ * → the folded `user/message` (the id is preserved through the chain). */
+function workingToolJobsNoticeEvents(id: string, text: string, time: number, seq: number): SessionEvent[] {
+  const message = {
+    id: MessageId(id), role: 'user',
+    content: [{ type: 'text', text }],
+    source: { kind: 'tool-jobs', form: 'notice', summary: 'job completed' },
+  }
+  return [
+    eventAt('agent/inbox/spliced', { target: 'next-step', start: 0, inserted: [message] }, time, seq),
+    eventAt('agent/inbox/spliced', { target: 'next-step', start: 0, removedCount: 1, inserted: [] }, time + 0.1, seq + 1),
+    eventAt('user/message', message, time + 0.2, seq + 2),
+  ]
+}
+
+function toolCallEvent(turn: number, callId: string, seq: number): SessionEvent {
+  return eventAt('tool/call', { turn, step: 0, callId: ToolCallId(callId), name: 'read', arguments: '{}' }, 1000 + seq, seq)
+}
+
+function toolResultEvent(turn: number, callId: string, seq: number): SessionEvent {
+  return eventAt('tool/result', {
+    turn, step: 0,
+    message: {
+      id: MessageId(`result-${callId}`), role: 'tool', toolCallId: ToolCallId(callId),
+      content: [{ type: 'text', text: 'ok' }], source: { kind: 'tool', callId: ToolCallId(callId) },
+    },
+  }, 1000 + seq, seq)
+}
+
+test('a proven Working tool-jobs notice is carried by the same Work', () => {
+  const events: SessionEvent[] = [
+    eventAt('turn/start', { turn: 0 }, 1000, 0),
+    toolCallEvent(0, 'working-a', 1),
+    toolResultEvent(0, 'working-a', 2),
+    ...workingToolJobsNoticeEvents('working-notice', 'JOB_DONE body', 1003, 3),
+    toolCallEvent(0, 'working-b', 6),
+    toolResultEvent(0, 'working-b', 7),
+    eventAt('assistant/message', {
+      turn: 0, step: 1,
+      message: { id: MessageId('working-final'), role: 'assistant', content: [{ type: 'text', text: 'done' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+    }, 1008, 8),
+    eventAt('turn/end', { turn: 0, reason: { kind: 'completed' } }, 1009, 9),
+  ]
+  const folder = new TranscriptFolder()
+  apply(folder, events)
+  const messages = folder.messages()
+  const notice = messages.find(message => message.kind === 'system' && message.contextPresentation?.form === 'notice')
+  assert.ok(notice !== undefined && notice.kind === 'system')
+  assert.equal(notice.contextPresentation?.sourceKind, 'tool-jobs')
+  assert.equal(notice.contextPresentation?.sameTurnNextStep, true,
+    'the fold records the durable same-turn next-step provenance')
+  assert.equal(isWorkingToolJobsNotice(notice), true)
+  const structure = projectTranscriptStructure(messages)
+  assert.deepEqual(structure.map(block => block.kind), ['work', 'message'])
+  const span = onlySpan(structure)
+  assert.deepEqual(span.members, [messages[0], notice, messages[2]],
+    'Process A → qualified Notice → Process B is ONE Work in raw order')
+  const summary = summarizeWorkSpan(span)
+  assert.equal(summary.actionStats.total, 2, 'the Notice adds no Action')
+  // Cold replay folds the SAME durable log to the same provenance: the flag is
+  // event-derived, never live-only state.
+  const cold = new TranscriptFolder()
+  cold.hydrate(events)
+  const coldNotice = cold.messages().find(message => message.kind === 'system')
+  assert.ok(coldNotice !== undefined && coldNotice.kind === 'system')
+  assert.equal(coldNotice.contextPresentation?.sameTurnNextStep, true, 'rehydrate keeps the claim provenance')
+})
+
+test('an unqualified or foreign tool-jobs notice stays an independent boundary', () => {
+  // Same producer form, but no agent/inbox/spliced claim chain: fail open.
+  const folder = new TranscriptFolder()
+  apply(folder, [
+    eventAt('turn/start', { turn: 0 }, 1000, 0),
+    toolCallEvent(0, 'unqualified-a', 1),
+    toolResultEvent(0, 'unqualified-a', 2),
+    eventAt('user/message', {
+      id: MessageId('unqualified-notice'), role: 'user',
+      content: [{ type: 'text', text: 'same notice shape' }],
+      source: { kind: 'tool-jobs', form: 'notice', summary: 'job completed' },
+    }, 1003, 3),
+    toolCallEvent(0, 'unqualified-b', 4),
+    toolResultEvent(0, 'unqualified-b', 5),
+  ])
+  const notice = folder.messages().find(message => message.kind === 'system')
+  assert.ok(notice !== undefined && notice.kind === 'system')
+  assert.equal(notice.contextPresentation?.sameTurnNextStep, undefined, 'no durable claim means no flag')
+  assert.deepEqual(projectTranscriptStructure(folder.messages()).map(block => block.kind),
+    ['work', 'message', 'work'], 'the unqualified notice still splits the Work')
+})
+
+test('a next-turn wakeup or a cross-turn claim is never a Working tool-jobs notice', () => {
+  // Next-turn wakeup: the notice triggers a NEW turn; it must stay the visible
+  // cause before that turn's Thought/Activity.
+  const wake = new TranscriptFolder()
+  const wakeMessage = {
+    id: MessageId('wake-notice'), role: 'user',
+    content: [{ type: 'text', text: 'WAKE_NOTICE body' }],
+    source: { kind: 'tool-jobs', form: 'notice', summary: 'job completed' },
+  }
+  apply(wake, [
+    eventAt('agent/inbox/spliced', { target: 'next-turn', start: 0, inserted: [wakeMessage] }, 900, 0),
+    eventAt('turn/start', { turn: 1 }, 1000, 1),
+    eventAt('agent/inbox/spliced', { target: 'next-turn', start: 0, removedCount: 1, inserted: [] }, 1001, 2),
+    eventAt('user/message', wakeMessage, 1002, 3),
+    toolCallEvent(1, 'wake-a', 4),
+    toolResultEvent(1, 'wake-a', 5),
+  ])
+  const wakeNotice = wake.messages().find(message => message.kind === 'system')
+  assert.ok(wakeNotice !== undefined && wakeNotice.kind === 'system')
+  assert.equal(wakeNotice.contextPresentation?.sameTurnNextStep, undefined)
+  assert.deepEqual(projectTranscriptStructure(wake.messages()).map(block => block.kind),
+    ['message', 'work'], 'the wakeup notice stays outside the Work')
+  assert.equal(wakeNotice.text, 'WAKE_NOTICE body')
+
+  // Next-step inserted during turn 1 but claimed in turn 2: cross-turn is fail
+  // open (the claim is not a Working same-turn delivery).
+  const cross = new TranscriptFolder()
+  const crossMessage = {
+    id: MessageId('cross-notice'), role: 'user',
+    content: [{ type: 'text', text: 'CROSS_NOTICE body' }],
+    source: { kind: 'tool-jobs', form: 'notice', summary: 'job completed' },
+  }
+  apply(cross, [
+    eventAt('turn/start', { turn: 1 }, 1000, 0),
+    eventAt('agent/inbox/spliced', { target: 'next-step', start: 0, inserted: [crossMessage] }, 1001, 1),
+    eventAt('turn/end', { turn: 1, reason: { kind: 'completed' } }, 1002, 2),
+    eventAt('turn/start', { turn: 2 }, 2000, 3),
+    eventAt('agent/inbox/spliced', { target: 'next-step', start: 0, removedCount: 1, inserted: [] }, 2001, 4),
+    eventAt('user/message', crossMessage, 2002, 5),
+    toolCallEvent(2, 'cross-a', 6),
+    toolResultEvent(2, 'cross-a', 7),
+  ])
+  const crossNotice = cross.messages().find(message => message.kind === 'system')
+  assert.ok(crossNotice !== undefined && crossNotice.kind === 'system')
+  assert.equal(crossNotice.contextPresentation?.sameTurnNextStep, undefined,
+    'a claim carried across turns is not a same-turn Working delivery')
+})
+
+test('other notice producers never qualify, even through a next-step claim', () => {
+  const folder = new TranscriptFolder()
+  const foreignMessage = {
+    id: MessageId('foreign-notice'), role: 'user',
+    content: [{ type: 'text', text: 'FOREIGN_NOTICE body' }],
+    source: { kind: 'subagent-settled', form: 'notice', summary: 'child settled' },
+  }
+  apply(folder, [
+    eventAt('turn/start', { turn: 0 }, 1000, 0),
+    toolCallEvent(0, 'foreign-a', 1),
+    toolResultEvent(0, 'foreign-a', 2),
+    eventAt('agent/inbox/spliced', { target: 'next-step', start: 0, inserted: [foreignMessage] }, 1003, 3),
+    eventAt('agent/inbox/spliced', { target: 'next-step', start: 0, removedCount: 1, inserted: [] }, 1003.1, 4),
+    eventAt('user/message', foreignMessage, 1003.2, 5),
+    toolCallEvent(0, 'foreign-b', 6),
+    toolResultEvent(0, 'foreign-b', 7),
+  ])
+  const notice = folder.messages().find(message => message.kind === 'system')
+  assert.ok(notice !== undefined && notice.kind === 'system')
+  assert.equal(notice.contextPresentation?.sameTurnNextStep, undefined,
+    'the durable claim is not enough: sourceKind/form must both be tool-jobs/notice')
+  assert.deepEqual(projectTranscriptStructure(folder.messages()).map(block => block.kind),
+    ['work', 'message', 'work'])
+})
+
+test('a Working tool-jobs notice never bridges attention or interaction boundaries', () => {
+  const notice: TranscriptMessage = {
+    kind: 'system', turn: 0, text: 'WORKING_BOUNDARY_NOTICE', label: 'tool-jobs',
+    context: true,
+    contextPresentation: { form: 'notice', sourceKind: 'tool-jobs', role: 'inject', sameTurnNextStep: true },
+  }
+  const attention = contextRow(0, 'notice', 'other') // any non-qualified boundary row
+  const question: TranscriptMessage = {
+    kind: 'tool', turn: 0, name: 'ask_user_question', args: '{}', result: 'ok', status: 'ok',
+  }
+  assert.deepEqual(
+    projectTranscriptStructure([thinking(0), tool(0), notice, attention, tool(0)]).map(block => block.kind),
+    ['work', 'message', 'work'],
+    'the non-qualified notice still splits the Work',
+  )
+  assert.deepEqual(
+    projectTranscriptStructure([thinking(0), tool(0), notice, question, tool(0)]).map(block => block.kind),
+    ['work', 'message', 'work'],
+    'a settled interaction stays a boundary after a qualified notice',
+  )
 })

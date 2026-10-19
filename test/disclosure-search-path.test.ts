@@ -1050,3 +1050,69 @@ test('a disabled disclosure key fails a nested snapshot cluster open without dea
   assert.ok(!view.includes('Context · 2 injections'), `no dead cluster header:\n${view}`)
   assert.ok(view.includes('NESTED_FAIL_OPEN_TARGET'), `the cluster member renders flat:\n${view}`)
 })
+
+test('a search hit inside a Working tool-jobs notice opens the Work and promotes it', async () => {
+  const { vt, app } = startApp('compact')
+  const notice: TranscriptMessage = {
+    kind: 'system', turn: 1, text: 'WORKING_SEARCH_TARGET body', label: 'tool-jobs', summary: 'job completed',
+    context: true,
+    contextPresentation: { form: 'notice', sourceKind: 'tool-jobs', role: 'inject', sameTurnNextStep: true },
+  }
+  const owner: TranscriptMessage = { kind: 'thinking', turn: 1, text: 'working' }
+  app.setTranscript([
+    owner,
+    notice,
+    { kind: 'tool', turn: 1, name: 'read', args: '{}', result: 'ok', status: 'ok' },
+  ], new Map())
+  await viewport(vt)
+  assert.ok(!vt.getViewport().join('\n').includes('WORKING_SEARCH_TARGET'),
+    'precondition: the notice is inside the collapsed Work')
+  app.setTranscriptSearchTarget(targetFor(notice, 'WORKING_SEARCH_TARGET'))
+  const revealed = await viewport(vt)
+  assert.ok(revealed.includes('WORKING_SEARCH_TARGET'), `the notice body is revealed:\n${revealed}`)
+  assert.ok(revealed.includes('▾ Activity'), `the owning Work opens:\n${revealed}`)
+  assert.equal(app.expandedWorkOwnersForTest().size, 0, 'the search reveal stays presentation-only')
+  assert.match(revealed, /1 action/u, 'the Context never inflates the Activity action count')
+  assert.equal(revealed.split('WORKING_SEARCH_TARGET').length - 1, 1, 'no duplicated notice row')
+  app.finishTranscriptSearchPresentation(new Set(), { preserveCurrentReveal: true })
+  const promoted = await viewport(vt)
+  assert.equal(app.expandedWorkOwnersForTest().has(owner), true,
+    'the ordinary dismiss promotes the Work owner')
+  assert.ok(promoted.includes('WORKING_SEARCH_TARGET'), `the promoted reveal keeps the target visible:\n${promoted}`)
+})
+
+test('regular Focus Ctrl+O collapse revokes a nested-cluster search reveal under a manual root', async () => {
+  const { vt, app } = startApp('focus')
+  const first: TranscriptMessage = {
+    kind: 'system', turn: 1, text: 'time A', label: 'time A', context: true,
+    contextPresentation: { form: 'snapshot', sourceKind: 'time-context', role: 'inject' },
+  }
+  const second: TranscriptMessage = {
+    kind: 'system', turn: 1, text: 'NESTED_REVEAL_TARGET', label: 'time B', context: true,
+    contextPresentation: { form: 'snapshot', sourceKind: 'time-context', role: 'inject' },
+  }
+  app.setTranscript([
+    { kind: 'user', turn: 1, text: 'go' },
+    { kind: 'thinking', turn: 1, text: 'working' },
+    first,
+    second,
+    { kind: 'tool', turn: 1, name: 'read', args: '{}', result: 'ok', status: 'ok' },
+  ], new Map())
+  app.expandFocusTurn(1) // MANUAL root: the Work stays open across Ctrl+O.
+  await viewport(vt)
+  app.setTranscriptSearchTarget(targetFor(second, 'NESTED_REVEAL_TARGET'))
+  const revealed = await viewport(vt)
+  assert.ok(revealed.includes('NESTED_REVEAL_TARGET'), `precondition: the nested cluster is revealed:\n${revealed}`)
+  assert.equal(app.expandedContextClusterOwnersForTest().size, 0, 'precondition: reveal-only cluster state')
+
+  // Ctrl+O clears the materialized cluster owners; the still-granted reveal
+  // must be revoked in the SAME transaction or it would instantly reopen the
+  // cluster (a visual no-op).
+  vt.sendInput('\x0f')
+  const collapsed = await viewport(vt)
+  assert.ok(!collapsed.includes('NESTED_REVEAL_TARGET'),
+    `the collapse must hide the nested cluster member:\n${collapsed}`)
+  assert.match(collapsed, /▸ .*Context · 2 injections/u,
+    `the cluster returns to its collapsed header:\n${collapsed}`)
+  assert.ok(collapsed.includes('▾ Activity'), `the manually expanded Work stays open:\n${collapsed}`)
+})

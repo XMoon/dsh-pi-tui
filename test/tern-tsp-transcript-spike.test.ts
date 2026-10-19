@@ -927,3 +927,37 @@ test('T-snapshot ops: a standalone Snapshot cluster reparents into Work with loc
   assert.ok(!touchedFinal.has(nestedClusterId), 'the nested Context card is not rewritten')
   assert.equal(opIds(finalOps, 'del').size, 0, 'nothing is deleted')
 })
+
+test('T-working: a proven Working tool-jobs notice renders inside the Work section', () => {
+  const noticeMessage = {
+    id: MessageId('working-tsp-notice'), role: 'user',
+    content: [{ type: 'text', text: 'WORKING_TSP_NOTICE body' }],
+    source: { kind: 'tool-jobs', form: 'notice', summary: 'job completed' },
+  }
+  const folder = new TranscriptFolder()
+  folder.apply([
+    ev('turn/start', { turn: 1 }, 0),
+    toolCall(1, 'working-tsp-c1', 'read', { path: 'a.ts' }),
+    toolResult(2, 'working-tsp-c1', 'ok'),
+    ev('agent/inbox/spliced', { target: 'next-step', start: 0, inserted: [noticeMessage] }, 3),
+    ev('agent/inbox/spliced', { target: 'next-step', start: 0, removedCount: 1, inserted: [] }, 4),
+    ev('user/message', noticeMessage, 5),
+    toolCall(6, 'working-tsp-c2', 'bash', { command: 'ls' }),
+    toolResult(7, 'working-tsp-c2', 'ok'),
+  ])
+  const notice = rowOf(folder, message => message.kind === 'system' && message.text === 'WORKING_TSP_NOTICE body')
+  assert.equal(notice.kind === 'system' ? notice.contextPresentation?.sameTurnNextStep : undefined, true)
+  const structure = projectTranscriptStructure(folder.messages())
+  assert.deepEqual(structureKinds(structure), ['work'])
+  const keys = new TranscriptNodeKeys()
+  const view = viewOf(folder, keys)
+  const nodes = flatten(view)
+  const work = nodes.find(node => node.kind === 'section')
+  assert.ok(work !== undefined)
+  const noticeNode = nodes.find(node => node.id === `${work.id}.${keys.keyFor(notice)}`)
+  assert.ok(noticeNode !== undefined, `the notice renders as a direct Work child:\n${JSON.stringify(nodes)}`)
+  assert.equal(noticeNode.kind, 'card')
+  assert.equal(noticeNode.parent, work.id)
+  assert.ok(JSON.stringify(noticeNode.props).includes('tool-jobs'),
+    'the producer identity remains the visible card header')
+})
