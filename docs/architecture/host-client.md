@@ -204,6 +204,27 @@ read-only advice. The exact B01–B14 copy is bounded app presentation for the
 official Experimental bundles, not a public capability API; do not turn it into
 a capability table in docs.
 
+## Agent composition policy
+
+Two independent communication preferences are parsed once and read live at each
+agent-composition assembly:
+
+- `ProgressUpdatesState = off | milestones | frequent` (default `milestones`);
+- `ResponseStyleState = default | concise | explanatory` (default `default`).
+
+`/settings` applies the runtime choice first and then performs the serialized
+whole-document write; a failed save does not undo the live choice. Sections
+register in a fixed order (progress updates 80, response style 81, Focus 90,
+tool guidance 100+), and providers read the live state each assembly. Focus
+suppresses the effective progress section for every cadence while leaving the
+saved cadence untouched (restored on exit); response style stays active.
+
+Locality: the preference state and rendering are Client-local; the Host-side
+agent composition consumes the parsed values. Authority:
+`src/domain/communication/policy.ts`, `src/domain/communication/focus.ts`,
+`src/app/direct/system-prompt.ts`. Proof: `test/communication-policy.test.ts`
+(Focus suppression + pinned section registration).
+
 ## Workflow terminal-state authority
 
 A Workflow run/member status is settled ONLY by its own terminal event:

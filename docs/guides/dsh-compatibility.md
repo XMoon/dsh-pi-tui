@@ -121,7 +121,7 @@ family; that check remains blocking in npm mode.
 For local validation use the isolated driver rather than workspace symlinks:
 
 ```sh
-pnpm compat:dsh:source -- --dsh-dir "$HOME/project/deepseek-harness"
+pnpm compat:dsh:source -- --dsh-dir "/path/to/deepseek-harness"
 pnpm compat:dsh:npm
 ```
 
