@@ -687,12 +687,17 @@ export const TERMINAL_RESULT_TOOLS: ReadonlySet<string> = new Set(['bash', 'pwsh
 /** First lines of a multi-line text, joined for folded previews. */
 function preview(text: string, lines: number): string {
   const parts = text.split('\n')
+  const dropped = parts.length > lines
   const first = parts.slice(0, lines).join(' ').trim()
-  const rest = parts.length > lines ? '…' : ''
   // Width-based truncation, not code-unit slicing: a raw slice can split a
   // surrogate pair / ZWJ emoji in the middle. The overflow marker rides in
   // the ellipsis slot (it is the same '…' the rest-marker would add).
-  return truncateToWidth(first, rest === '' ? 120 : 119, rest)
+  const clipped = truncateToWidth(first, dropped ? 119 : 120, '…')
+  // `truncateToWidth` paints the ellipsis only when the WIDTH overflows. A
+  // preview that dropped whole records must say so too, or the user reads the
+  // shown records as the complete output; the dropped case reserves the last
+  // cell for that marker, and a width-clipped result already ends in one.
+  return dropped && clipped === first ? `${clipped}…` : clipped
 }
 
 
