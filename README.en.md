@@ -235,6 +235,16 @@ and cannot be disabled or removed from its own screen. The first-level
 `Settings → Plugins` category opens the same page in place, and returning
 preserves the Settings category, scroll and selection.
 
+The 14 official rc.2 Experimental bundles carry a bounded, identity-exact
+Detail statement of their terminal surface and limits/risks (Web-only,
+Host-only and the B04/B13/B14 unverified boundaries). That copy never follows
+enablement and never claims a live Host capability PASS. Upgrade guidance is
+derived from Host facts only: shipped bundles upgrade with the DSH installation,
+profile-owned bundles require Remove followed by an explicit later install,
+missing entries use the official on-demand target, and the Current TUI bundle
+is managed outside the screen. There is no in-place update, version picker or
+silent reinstall.
+
 Subagents are shown using their complete lineage, including nested descendants:
 
 ```text
@@ -361,7 +371,7 @@ Common entry points:
 /statusline
 ```
 
-Model selection, Reasoning Effort, permission presets, Plan, and Goal all keep the corresponding DSH runtime semantics.
+Model selection, Reasoning Effort, permission presets, Plan, and Goal all keep the corresponding DSH runtime semantics. `/model` candidates come only from the Host catalog: rc.2's `deepseek-flash` is identified by the exact `(provider, model)` pair (the display name `DeepSeek-V4.1-Flash` is never the ID), and a selection writes the official Session/global default. A deployment catalog that no longer offers the ID shows no invented row.
 
 `/settings` opens a real full-screen workspace where the three-, two- and
 single-column layouts are projections of the SAME `categories → rows → detail`

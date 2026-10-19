@@ -1962,3 +1962,128 @@ from the implemented panels, not from this document:
 4. Report only the states that were really run; an unrun size is `NOT_RUN`,
    never PASS. Visual quality is the Owner/Reviewer judgement, not a test
    result.
+
+## 8f. Real-terminal record — S4-D3 terminal capability truth (PR-D3)
+
+Method: a real `tmux` session (`TERM=screen-256color`, `NO_COLOR` unset) ran the
+worktree's built bundle through an ISOLATED `DSH_HOME` (a copied dev profile
+linking `/home/xmoon/project/dsh-pi-tui-wt/s4-d3`; the user's `pi-tui` profile
+was never touched). Keys were sent with `tmux send-keys` and the pane was read
+with `tmux capture-pane -p`; the ANSI sequences were stripped for this record.
+The screenshots below are excerpts of the physical frames.
+
+### 8f.1 Plugin Manager — the exact B11 Detail (bounded copy + F10)
+
+```text
+# 120×40 — two-column projection, Detail scrolled to the capability group
+Plugins · Ralph loops                                             23 plugins · 4 enabled
+Plugins                                     [Details]
+TUI & Extensions                            Ralph loops 0.2.1-rc.2 [experimental]
+  @xmoon76/dsh-pi-tui            [current]  @deepseek-ai/dsh-experimental-ralph-bundle
+...
+Source
+Availability    Installation
+Origin          Official DSH
+Current version 0.2.1-rc.2
+Upgrade         Upgrade: Shipped with DSH. Upgrade the DSH installation to
+                change this bundle version; Plugin Manager cannot update it
+                in place.
+...
+Compatibility
+TUI surface     ralph is a Host foreground tool; its workflow events and
+                result use existing Tool/Activity views.
+Risk            May run multiple rounds and incur model cost. No dedicated
+                Ralph UI or guaranteed Job.
+Actions
+```
+
+```text
+# 80×24 — one-column projection at the first paint; the existing PgDn scroll
+# reaches the same Compatibility/Actions block (verified in the scrolled frame)
+Ralph loops 0.2.1-rc.2 [experimental]
+@deepseek-ai/dsh-experimental-ralph-bundle
+Official DSH catalog entry
+‣ Status
+Installed       No
+...
+Upgrade         Upgrade: Shipped with DSH. Upgrade the DSH installation to
+                change this bundle version; Plugin Manager cannot update it in
+                place.
+```
+
+```text
+# 80×10 — short-screen body: the Detail scrolls with PgDn; the action bar is
+# the physical last row in every frame
+Compatibility
+TUI surface     ralph is a Host foreground tool; its workflow events and result
+────────────────────────────────────────────────────────────────────────────────
+Enter action · / search · i install · c copy · r refresh · Esc back
+```
+
+Further PgDn presses reach the `Risk` line and the pinned `Actions` block; a
+body that does not paint an action admits no Enter/click for it (the D1/D2
+stale-hit rule is unchanged).
+
+```text
+# 44×20 — narrow projection; the same facts wrap by cells and stay complete
+‣ Status
+...
+Compatibility
+TUI surface   ralph is a Host foreground
+              tool; its workflow events and
+              result use existing
+              Tool/Activity views.
+Risk          May run multiple rounds and
+              incur model cost. No dedicated
+              Ralph UI or guaranteed Job.
+Actions
+> Enable…
+  Back
+```
+
+The `Risk` line used the semantic warning ink and `TUI surface` the neutral
+text ink; the left list kept one `>` cursor and the action block kept one
+focused action at every size. The 80×10 scrolled frame's action bar remained
+the last physical row (`Enter action · / search · i install · c copy · r
+refresh · Esc back`) and no half word or partial chip appeared. The 72×24 frame
+matched the 80×24 wrapping. No CJK identity exists in the official 14-bundle
+catalog; the CJK/wrap proof is the `plugin-manager-workspace-visual.test.ts`
+44-column case.
+
+### 8f.2 Web Search / Fetch rows (existing settings, updated copy)
+
+```text
+# 80×24 — Share Original Question selected
+> Share Original Question      [current] [default]
+  Search / Fetch API Endpoint  https://api.deepseek.com/v1/tools
+  DeepSeek API Key             [unavailable]
+  (27/30)
+
+Current: on · On (packed default for the DeepSeek Search API): each call also
+sends up to 128 characters of the triggering human question (ori_question),
+never the full history or system prompt. Off: never. A running operation is
+unchanged.
+```
+
+The 44×20 projection wrapped the same sentence by cells and kept `Type to
+search · Enter/Space to change · Esc to cancel` readable. The endpoint editor
+kept its title, the full URL and `Enter confirm · Esc cancel`; the panel's
+danger note stated that changing the endpoint sends the credential and query to
+a different endpoint and that only a trusted HTTPS base should be confirmed.
+This isolated profile already carried a custom `commandcode` search provider;
+the row truthfully states the custom route rather than pretending it is one of
+the official candidates. The default `Messages`/`HTTP` copy and the
+`[current] [default]` chip ordering are covered by the VirtualTerminal matrix
+(`settings-web-visual.test.ts`).
+
+### 8f.3 NOT_VERIFIED / boundaries
+
+- No real Tern GUI, physical mouse/trackpad, or native account was used. Mouse
+  hit/cell behavior is covered by `plugin-manager-workspace-visual.test.ts`
+  (`getCellFgRgb`, press/release, stale hit map), not by the tmux record.
+- The tmux host profile had no credential and no paid Web/LLM call was made.
+- Light/custom theme frames for the new copy are the existing palette-token
+  assertions in `plugin-manager-workspace-visual.test.ts`; the tmux record is
+  dark-theme only.
+- Cross-platform terminals/OS and the final published-package matrix remain S5
+  work.
