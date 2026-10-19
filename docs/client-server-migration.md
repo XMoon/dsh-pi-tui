@@ -7329,7 +7329,8 @@ package. `scripts/dsh-s4-d2-bundles-smoke.mjs` owns the one-time provisioning
 (`--provision`), the real pinned-npm CLI profile add/remove/restart loop
 (`--network`) and the bounded native credential gate (`--native`; it records
 credential presence only, while the REAL native start is the separate unit-test
-gate `DSH_PI_TUI_S4_D2_NATIVE=1` under the isolated HOME; an admitted run
+gate `DSH_PI_TUI_S4_D2_NATIVE=1` under the isolated HOME; an admitted run needs
+that provider's own explicit source, scrubs ambient provider auth env, and
 asserts the genuine provider settlement). The
 in-process fixture deliberately omits the TUI screen rows; the TUI surfaces are
 already covered by their own L6 suites and D3 owns their final wording.

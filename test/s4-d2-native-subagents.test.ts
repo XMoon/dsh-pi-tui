@@ -40,11 +40,27 @@ const skip = skippedInstallationReason([B13, B14])
  *    never printed or committed.
  * BOTH sources are read ONLY after `DSH_PI_TUI_S4_D2_NATIVE=1` admits the
  * native run; a credential path alone never triggers a file read or copy.
+ * Each provider ALSO requires its OWN explicit source: with the global gate on
+ * but one source absent, that provider is skipped before any native start (it
+ * never inherits the other provider's or the ambient auth). Ambient
+ * Anthropic/OpenAI/Codex env and `CODEX_HOME` are scrubbed for an admitted run.
  * When a credential is absent, that provider stays on the truthful
  * `EXTERNAL_UNVERIFIED` path and no network call is attempted. */
 const NATIVE_ADMITTED = process.env.DSH_PI_TUI_S4_D2_NATIVE === '1'
 const B13_DEEPSEEK_KEY = NATIVE_ADMITTED ? process.env.S5_B13_DEEPSEEK_API_KEY : undefined
 const CODEX_AUTH_FILE = NATIVE_ADMITTED ? process.env.S5_CODEX_AUTH_FILE : undefined
+
+/** The global gate is necessary but NOT sufficient: each provider needs its
+ *  own explicit source before any native start. */
+function providerAdmitted(
+  admitted: boolean,
+  provider: 'claude-code' | 'codex',
+  b13Key: string | undefined,
+  codexAuthFile: string | undefined,
+): boolean {
+  if (!admitted) return false
+  return provider === 'claude-code' ? b13Key !== undefined : codexAuthFile !== undefined
+}
 
 /** The native gate is the ONLY credential admission: the path/key is ignored
  *  (and its file never read) unless the gate is on. */
@@ -67,6 +83,33 @@ function b13EnvOverlay(admitted: boolean, key: string | undefined): Record<strin
     HTTPS_PROXY: '',
     ALL_PROXY: '',
     NO_PROXY: '127.0.0.1,localhost',
+  }
+}
+
+const NATIVE_AUTH_ENV_KEYS = [
+  'ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_BASE_URL',
+  'CLAUDE_CODE_OAUTH_TOKEN', 'CLAUDE_CONFIG_DIR',
+  'CLAUDE_CODE_USE_BEDROCK', 'CLAUDE_CODE_USE_VERTEX',
+  'OPENAI_API_KEY', 'OPENAI_BASE_URL', 'OPENAI_ORG_ID', 'OPENAI_PROJECT_ID',
+  'AZURE_OPENAI_API_KEY', 'AZURE_OPENAI_ENDPOINT',
+  'CODEX_API_KEY', 'CODEX_HOME', 'DEEPSEEK_API_KEY',
+  'S5_B13_DEEPSEEK_API_KEY', 'S5_CODEX_AUTH_FILE',
+] as const
+
+/** An admitted run may use ONLY its explicit source: remove ambient provider
+ *  credentials for its duration (the explicit provider config still supplies
+ *  its own overlay) and restore them afterwards. */
+function scrubNativeAuthEnv(): () => void {
+  const previous = new Map<string, string | undefined>()
+  for (const key of NATIVE_AUTH_ENV_KEYS) {
+    previous.set(key, process.env[key])
+    delete process.env[key]
+  }
+  return () => {
+    for (const [key, value] of previous) {
+      if (value === undefined) delete process.env[key]
+      else process.env[key] = value
+    }
   }
 }
 
@@ -144,21 +187,32 @@ test('B13/B14: official missing catalog, exact installTarget and local profile i
 
   for (const task of NATIVE_TASKS) {
     const b13Env = b13EnvOverlay(NATIVE_ADMITTED, B13_DEEPSEEK_KEY)
-    const host = await startS4D2Host(t, {
-      bundles: [task.bundle],
-      profileDependencies: { [task.packageName]: `file:${join(catalogHost.installation.nodeModules, task.packageName)}` },
-      ...(task.provider === 'claude-code' && b13Env !== undefined
-        ? { patches: [{ id: 'subagent-claude-code', config: { env: b13Env } }] as never }
-        : {}),
-    })
+    const admittedProvider = providerAdmitted(NATIVE_ADMITTED, task.provider, B13_DEEPSEEK_KEY, CODEX_AUTH_FILE)
+    // Scrub BEFORE booting the Host so no provider mount can capture ambient
+    // auth; the explicit source (B13 provider overlay / B14 copied auth.json)
+    // is the only credential an admitted run can see.
+    const restoreAuthEnv = admittedProvider ? scrubNativeAuthEnv() : undefined
+    let host: Awaited<ReturnType<typeof startS4D2Host>>
+    try {
+      host = await startS4D2Host(t, {
+        bundles: [task.bundle],
+        profileDependencies: { [task.packageName]: `file:${join(catalogHost.installation.nodeModules, task.packageName)}` },
+        ...(task.provider === 'claude-code' && b13Env !== undefined
+          ? { patches: [{ id: 'subagent-claude-code', config: { env: b13Env } }] as never }
+          : {}),
+      })
+    } catch (error) {
+      restoreAuthEnv?.()
+      throw error
+    }
     let restoreCodexHome: (() => void) | undefined
     let codexAuth: CodexAuthCopy | undefined
     try {
       // The pinned package-local Codex app-server keeps native auth authoritative
       // through HOME/CODEX_HOME; copy the caller's native auth into the isolated
       // HOME (0600) just before delegation and restore the process variable after.
-      codexAuth = task.provider === 'codex'
-        ? installCodexAuth(NATIVE_ADMITTED, CODEX_AUTH_FILE, host.root)
+      codexAuth = admittedProvider && task.provider === 'codex'
+        ? installCodexAuth(true, CODEX_AUTH_FILE, host.root)
         : undefined
       if (codexAuth !== undefined) {
         const previous = process.env.CODEX_HOME
@@ -182,9 +236,9 @@ test('B13/B14: official missing catalog, exact installTarget and local profile i
       assert.equal(Object.hasOwn(parameters, 'followup'), false)
 
       const agent = await host.createAgent(SessionId(`s4-d2-native-${task.provider}`), { cwd: join(host.root, 'work') })
-      if (!NATIVE_ADMITTED) {
-        // The default run records the truthful gate state without launching the
-        // external process at all. No catalog child and no fake success exist.
+      if (!admittedProvider) {
+        // The default offline run AND a partially supplied opt-in both launch
+        // no native provider at all: the gate on its own never admits one.
         assert.deepEqual(host.ctx.agents.list().map(candidate => String(candidate.id)), [String(agent.session.id)])
         nativeEvidence.push({ provider: task.provider, status: 'EXTERNAL_UNVERIFIED' })
         continue
@@ -250,9 +304,13 @@ test('B13/B14: official missing catalog, exact installTarget and local profile i
       const remaining = host.ctx.agents.list().map(candidate => String(candidate.id)).filter(id => id !== String(agent.session.id))
       assert.deepEqual(remaining, [], 'no orphan in-process child remains after the native start settles')
     } finally {
-      restoreCodexHome?.()
-      codexAuth?.cleanup()
-      await host.dispose()
+      try {
+        restoreCodexHome?.()
+        codexAuth?.cleanup()
+        await host.dispose()
+      } finally {
+        restoreAuthEnv?.()
+      }
     }
   }
   assert.deepEqual(nativeEvidence.map(entry => entry.provider), ['claude-code', 'codex'])
@@ -264,10 +322,16 @@ test('B13/B14: official missing catalog, exact installTarget and local profile i
     if (B13_DEEPSEEK_KEY !== undefined) {
       assert.equal(evidenceFor('claude-code'), 'PASS',
         'the caller-supplied DeepSeek key must produce a genuine B13 native success')
+    } else {
+      assert.equal(evidenceFor('claude-code'), 'EXTERNAL_UNVERIFIED',
+        'without an explicit B13 key no B13 native start may pass')
     }
     if (CODEX_AUTH_FILE !== undefined) {
       assert.equal(evidenceFor('codex'), 'PASS',
         'the caller-supplied native Codex auth must produce a genuine B14 native success')
+    } else {
+      assert.equal(evidenceFor('codex'), 'EXTERNAL_UNVERIFIED',
+        'without an explicit Codex auth file no B14 native start may pass')
     }
   }
 })
@@ -309,7 +373,7 @@ test('fixture rejects restart after dispose', { skip }, async t => {
   await assert.rejects(() => host.restart(), /cannot restart a disposed host/u)
 })
 
-test('the native gate alone admits credentials: a path/key is never read when the gate is off', (t) => {
+test('the native gate is necessary: a path/key is never read when the gate is off', (t) => {
   const life = testLifecycle(t)
   const root = life.tempDir('dsh-s4-d2-credential-gate-')
   const source = join(root, 'caller-auth.json')
@@ -327,6 +391,47 @@ test('the native gate alone admits credentials: a path/key is never read when th
   assert.equal(existsSync(join(root, 'home', '.codex', 'auth.json')), false,
     'the gate off never creates a credential copy')
   assert.equal(readFileSync(source, 'utf8'), '{"auth_mode":"sentinel"}', 'the caller file is untouched')
+})
+
+test('each native provider needs its own explicit source even with the gate on', () => {
+  assert.equal(providerAdmitted(true, 'claude-code', 'explicit-key', undefined), true)
+  assert.equal(providerAdmitted(true, 'codex', 'explicit-key', undefined), false,
+    'the B13 key never admits the B14 native start')
+  assert.equal(providerAdmitted(true, 'claude-code', undefined, '/caller/auth.json'), false,
+    'the B14 auth file never admits the B13 native start')
+  assert.equal(providerAdmitted(true, 'codex', undefined, '/caller/auth.json'), true)
+  assert.equal(providerAdmitted(false, 'claude-code', 'explicit-key', '/caller/auth.json'), false,
+    'the global gate is still required')
+})
+
+test('an admitted run scrubs ambient native auth env and restores it', (t) => {
+  const values = {
+    ANTHROPIC_API_KEY: 'ambient-anthropic',
+    CODEX_HOME: '/ambient/codex',
+    OPENAI_API_KEY: 'ambient-openai',
+  } as const
+  const before = new Map<string, string | undefined>()
+  for (const [key, value] of Object.entries(values)) {
+    before.set(key, process.env[key])
+    process.env[key] = value
+  }
+  t.after(() => {
+    for (const [key, value] of before) {
+      if (value === undefined) delete process.env[key]
+      else process.env[key] = value
+    }
+  })
+  const restore = scrubNativeAuthEnv()
+  try {
+    for (const key of Object.keys(values)) {
+      assert.equal(process.env[key], undefined, `${key} is scrubbed for an admitted run`)
+    }
+  } finally {
+    restore()
+  }
+  for (const [key, value] of Object.entries(values)) {
+    assert.equal(process.env[key], value, `${key} is restored after the admitted run`)
+  }
 })
 
 test('the Codex credential copy is 0600 and is removed even when temp roots are kept', (t) => {

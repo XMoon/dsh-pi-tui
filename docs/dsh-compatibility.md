@@ -428,13 +428,16 @@ does not close the S4-D2 stage:
   genuine answer: B13 through the DeepSeek Anthropic-compatible endpoint, B14
   through the verified ChatGPT OAuth login and pinned Codex app-server. Native
   Anthropic accounts/endpoints, other Codex auth methods and other platforms
-  remain unverified. The default suite starts no native provider; the real
-  start is opt-in via `DSH_PI_TUI_S4_D2_NATIVE=1` under the isolated HOME. The
+  remain unverified. The default suite starts no native provider; each real
+  start is opt-in via `DSH_PI_TUI_S4_D2_NATIVE=1` PLUS that provider's own
+  explicit source (`S5_B13_DEEPSEEK_API_KEY` / `S5_CODEX_AUTH_FILE`) under the
+  isolated HOME; ambient provider auth env and `CODEX_HOME` are scrubbed for
+  the admitted run. The
   CLI `--native` sub-gate records credential presence only and never fabricates
   a native PASS. No mock/system-CLI success is accepted, and no Continue/Resume
   affordance exists.
 - CI without the provisioned official artifact tree reports `BLOCKED` for the
   in-process qualification tests instead of substituting packages; the
   `smoke:s4-d2-bundles` CLI has separate `--provision`, `--network` and
-  `--native` gates. B04 and B13/B14 need an explicit Owner decision before S4-D2
-  can close.
+  `--native` gates. B04's Owner-accepted `DEFERRED_WITH_OWNER` row remains the
+  bounded exclusion before S4-D2 can close.
