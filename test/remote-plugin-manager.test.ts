@@ -479,6 +479,54 @@ test('a failed invalidation subscription releases the already-installed listener
   assert.equal(invalidations, 0, 'the rolled-back subscriptions must not deliver')
 })
 
+test('a Remote inspection carried by a superseded Connection generation is refused', async (t) => {
+  const remote = remoteFixture()
+  const original = remote.pluginManager.inspect
+  let release!: () => void
+  const gate = new Promise<void>(resolve => { release = resolve })
+  let reached!: () => void
+  const started = new Promise<void>(resolve => { reached = resolve })
+  remote.pluginManager.inspect = async (spec, options, signal) => {
+    reached()
+    await gate
+    return original(spec, options, signal)
+  }
+  t.after(() => { release() })
+  const generation = generationFixture(1)
+  const port = portOf(remote, generation)
+  const pending = port.inspect('pkg', 'https://r.example')
+  await started
+  generation.set(2)
+  release()
+  await assert.rejects(pending, error => error instanceof PluginManagerStaleResultError
+    && /currentness context was superseded/.test(error.message))
+  assert.deepEqual(remote.calls, ['inspect'], 'the real inspect ran; only its stale result was refused')
+
+  // The same inspection on an unchanged generation still resolves normally.
+  remote.pluginManager.inspect = original
+  const accepted = await port.inspect('pkg', 'https://r.example')
+  assert.equal(accepted.status, 'accepted')
+  assert.equal(accepted.name, 'pkg')
+
+  // A refused inspection carried by a superseded generation is indeterminate too.
+  const refused = remoteFixture()
+  refused.refuse('inspect', 'no such package')
+  const refusedOriginal = refused.pluginManager.inspect
+  let refusedRelease!: () => void
+  const refusedGate = new Promise<void>(resolve => { refusedRelease = resolve })
+  refused.pluginManager.inspect = async (spec, options, signal) => {
+    await refusedGate
+    return refusedOriginal(spec, options, signal)
+  }
+  t.after(() => { refusedRelease() })
+  const refusedGeneration = generationFixture(1)
+  const refusedPort = portOf(refused, refusedGeneration)
+  const refusedPending = refusedPort.inspect('bad', 'https://r.example')
+  refusedGeneration.set(2)
+  refusedRelease()
+  await assert.rejects(refusedPending, error => error instanceof PluginManagerStaleResultError)
+})
+
 test('a Remote mutation result carried by a superseded Connection generation is refused, never presented as success', async (t) => {
   const remote = remoteFixture()
   const generation = generationFixture(1)

@@ -120,14 +120,26 @@ interface CodexAuthCopy {
 }
 
 /** Copy the native Codex OAuth bytes into the isolated HOME with 0600. The
- *  credential is read only after the native gate admitted the run. */
-function installCodexAuth(admitted: boolean, source: string | undefined, root: string): CodexAuthCopy | undefined {
+ *  credential is read only after the native gate admitted the run. Any failure
+ *  after the bytes reach disk removes the partial copy before rethrowing, so a
+ *  caller that never received the cleanup handle cannot leak it. */
+function installCodexAuth(
+  admitted: boolean,
+  source: string | undefined,
+  root: string,
+  setMode: (path: string, mode: number) => void = chmodSync,
+): CodexAuthCopy | undefined {
   if (!admitted || source === undefined) return undefined
   const codexHome = join(root, 'home', '.codex')
   mkdirSync(codexHome, { recursive: true })
   const target = join(codexHome, 'auth.json')
-  writeFileSync(target, readFileSync(source), { mode: 0o600 })
-  chmodSync(target, 0o600)
+  try {
+    writeFileSync(target, readFileSync(source), { mode: 0o600 })
+    setMode(target, 0o600)
+  } catch (error) {
+    rmSync(codexHome, { recursive: true, force: true })
+    throw error
+  }
   return {
     path: target,
     cleanup: () => {
@@ -434,27 +446,36 @@ test('an admitted run scrubs ambient native auth env and restores it', (t) => {
   }
 })
 
-test('the Codex credential copy is 0600 and is removed even when temp roots are kept', (t) => {
+test('the Codex credential copy is 0600 and is removed before the temp root is cleaned', (t) => {
   const life = testLifecycle(t)
   const root = life.tempDir('dsh-s4-d2-credential-copy-')
   const source = join(root, 'caller-auth.json')
   writeFileSync(source, '{"auth_mode":"sentinel"}')
-  const previousKeep = process.env.DSH_TEST_KEEP_TMP
-  process.env.DSH_TEST_KEEP_TMP = '1'
-  t.after(() => {
-    if (previousKeep === undefined) delete process.env.DSH_TEST_KEEP_TMP
-    else process.env.DSH_TEST_KEEP_TMP = previousKeep
-  })
   let copy: CodexAuthCopy | undefined
   try {
     copy = installCodexAuth(true, source, root)
     assert.ok(copy !== undefined)
     assert.equal(statSync(copy.path).mode & 0o777, 0o600, 'the credential copy is owner-only')
   } finally {
-    // The abnormal-exit path: cleanup removes the credential even though
-    // DSH_TEST_KEEP_TMP keeps the ordinary disposable root.
+    // The abnormal-exit/retention path: the explicit cleanup removes the
+    // credential even while the disposable root still exists. The root itself
+    // is left to testLifecycle's normal teardown (no global KEEP_TMP toggle).
     copy?.cleanup()
   }
+  assert.equal(existsSync(root), true, 'the disposable root existed when cleanup ran')
   assert.equal(existsSync(join(root, 'home', '.codex')), false,
-    'the credential copy never survives a kept temp root')
+    'the credential copy is gone while the disposable root still exists')
+})
+
+test('a failed permission step removes the credential copy before rethrowing', (t) => {
+  const life = testLifecycle(t)
+  const root = life.tempDir('dsh-s4-d2-credential-failure-')
+  const source = join(root, 'caller-auth.json')
+  writeFileSync(source, '{"auth_mode":"sentinel"}')
+  assert.throws(
+    () => installCodexAuth(true, source, root, () => { throw new Error('chmod refused') }),
+    /chmod refused/u,
+  )
+  assert.equal(existsSync(join(root, 'home', '.codex')), false,
+    'a failed permission step leaves no credential copy')
 })

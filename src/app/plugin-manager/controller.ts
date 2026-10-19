@@ -503,7 +503,12 @@ export class PluginManagerController {
       const current = this.install
       if (current === undefined) return
       current.phase = 'editing'
-      current.message = `inspect failed: ${errorMessage(error)}`
+      current.inspection = undefined
+      current.message = error instanceof PluginManagerStaleResultError
+        // The inspection facts belong to a superseded connection generation:
+        // never present them as this generation's accepted confirmation.
+        ? 'the inspection result arrived after its currentness context was superseded; inspect again'
+        : `inspect failed: ${errorMessage(error)}`
       this.hooks.requestRender()
     }
   }
