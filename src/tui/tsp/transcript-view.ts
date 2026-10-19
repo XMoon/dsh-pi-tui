@@ -230,12 +230,16 @@ function messageNode(message: TranscriptMessage, key: string, options: Transcrip
   }
 }
 
-/** One native Work container keyed by its canonical span owner. */
+/** One native Work container keyed by its canonical span owner. Its ordered
+ * structural parts place a carried snapshot-only Context cluster as a nested
+ * `clusterNode` card; the flat member sequence is never re-derived here. */
 function workNode(span: TranscriptWorkSpan, keys: TranscriptNodeKeys, options: TranscriptViewOptions, prefix: string): Node {
   const head: Spans = ['Work', ` · turn ${span.turn}`]
   return ui.section(
     { key: `${prefix}work-${keys.keyFor(span.owner)}`, head },
-    ...span.members.map(member => messageNode(member, keys.keyFor(member), options)),
+    ...span.parts.map(part => part.kind === 'message'
+      ? messageNode(part.message, keys.keyFor(part.message), options)
+      : clusterNode(part.cluster, keys, options, prefix)),
   )
 }
 

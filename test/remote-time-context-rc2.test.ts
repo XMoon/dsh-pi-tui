@@ -371,13 +371,33 @@ test('L6: the real durable reading folds into ONE legal Context row and survives
       app.dispose()
     }
   }
-  // Ambient context collapses by default in every preset; the DURABLE row is
-  // proven present by the fold assertions above, and the surface must name the
-  // producer without losing or duplicating it.
+  // Full keeps the chronological Context row; this turn has no Process, so
+  // Compact must NOT invent an Activity and keeps the standalone Context
+  // presentation. Focus collapses the Snapshot into the real Thought: it is
+  // no longer a persistent row outside the Thought.
   assert.ok(views.full!.includes('time-context'), views.full)
   assert.ok(views.full!.includes('Context'), views.full)
   assert.match(views.compact!, /Context/u)
-  assert.match(views.focus!, /Context/u)
+  assert.ok(!views.focus!.includes('Context'), views.focus)
+
+  // Expanding the real Thought restores the durable reading exactly once.
+  const expandedVt = new VirtualTerminal(100, 30)
+  const expandedApp = new TuiApp(expandedVt, { onSubmit: () => {}, onExit: () => {} }, { displayState: { preset: 'focus' } })
+  expandedApp.start()
+  try {
+    expandedApp.setTranscript(messages, folder.turnActivities())
+    expandedApp.expandFocusTurn(1)
+    // The two durable Snapshot rows form one raw-adjacent cluster: the
+    // expanded Thought restores its header and its own disclosure, and the
+    // regular master opens the recent cluster.
+    expandedApp.setTranscriptDetailExpanded(true)
+    await expandedVt.waitForRender()
+    const expanded = expandedVt.getViewport().map(line => line.replace(/\x1b\[[0-9;]*m/gu, '')).join('\n')
+    assert.equal(expanded.split('Time sampled while preparing turn 1, step 1:').length - 1, 1,
+      `the expanded Thought restores the Snapshot exactly once:\n${expanded}`)
+  } finally {
+    expandedApp.dispose()
+  }
 })
 
 test('the suite wait still times out while the controlled Date.now is frozen', async () => {

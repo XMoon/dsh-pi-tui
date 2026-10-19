@@ -977,6 +977,18 @@ The 2026-08-24 UX plan's Focus click behavior is fullscreen-only:
   initial user plus immediately following surfaced Context) stays above the
   Focus Thought in both Focus states while a mid-turn burst keeps its
   chronological position.
+- **Snapshot Context follows Work/Thought (2026-10-19 Owner decision).** A
+  producer-declared `form:'snapshot'` Context singleton or snapshot-only
+  raw-adjacent cluster is carried by the same-turn Work/Thought instead of
+  splitting it: Compact shows one Activity, Focus hides it inside the real
+  Thought, Full keeps the original Context row/cluster and chronology. A mixed
+  `instructions`/`catalog` + `snapshot` cluster remains ONE indivisible Work
+  boundary; `notice`/`relay`/`recall`/unknown forms and every other hard
+  boundary keep their current role. The Snapshot stays Context (no Action,
+  timing or tool-count contribution) and no new preset, persisted state or Host
+  behavior is added. This supersedes the old "every surfaced Context is a Work
+  boundary / Focus foundation" rule for this ONE form; the full contract lives
+  in `docs/transcript-display-disclosure.md`.
 - **Performance contract**: a stable Work span's live reasoning/tool updates use
   the existing content-refresh path; a boundary change or member add/remove is a
   legitimate structural reprojection; notice/relay rows are render-time

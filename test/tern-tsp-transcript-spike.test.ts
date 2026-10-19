@@ -801,3 +801,54 @@ test('T-hardening: a real tool/call keeps its raw name but projects every displa
   }
   assert.ok(!JSON.stringify(tool.props).includes('YXR0YWNr'), 'no OSC payload reaches a tool prop')
 })
+
+// ── Snapshot Context nested inside native Work (2026-10-19) ───────────────
+
+test('T-snapshot: a snapshot-only cluster renders as a native card inside the Work section', () => {
+  const snapshotEvent = (seq: number, id: string, text: string): SessionEvent =>
+    userMessage(seq, id, text, { kind: 'time-context', form: 'snapshot', sections: [{ name: 'time-context', body: text }] })
+  const folder = new TranscriptFolder()
+  folder.apply([
+    ev('turn/start', { turn: 1 }, 0),
+    userMessage(1, 'snap-u1', 'go'),
+    toolCall(2, 'snap-c1', 'read', { path: 'a.ts' }),
+    toolResult(3, 'snap-c1', 'ok'),
+  ])
+  const keys = new TranscriptNodeKeys()
+  const before = flatten(viewOf(folder, keys))
+  const beforeWork = before.find(node => node.kind === 'section')
+  const beforeUser = before.find(node => node.kind === 'card' && node.props['head'] === 'You')
+  assert.ok(beforeWork !== undefined && beforeUser !== undefined, 'fixture: Work section and user card exist')
+
+  folder.apply([
+    snapshotEvent(4, 'snap-a', 'SNAPSHOT_TSP_A'),
+    snapshotEvent(5, 'snap-b', 'SNAPSHOT_TSP_B'),
+  ])
+  const structure = projectTranscriptStructure(folder.messages())
+  assert.deepEqual(structureKinds(structure), ['message:user', 'work'])
+  const span = structure[1]
+  assert.ok(span !== undefined && span.kind === 'work')
+  assert.deepEqual(span.span.parts.map(part => part.kind), ['message', 'context-cluster'],
+    'the snapshot-only raw run is ONE nested structural part')
+  const view = viewOf(folder, keys)
+  const nodes = flatten(view)
+  const work = nodes.find(node => node.kind === 'section')
+  assert.ok(work !== undefined)
+  assert.equal(work.id, beforeWork.id, 'the Work section keeps its stable native id')
+  assert.equal(nodes.find(node => node.kind === 'card' && node.props['head'] === 'You')?.id, beforeUser.id,
+    'an unrelated user card keeps its native id')
+  const clusterCard = nodes.find(node => node.parent === work.id && node.kind === 'card')
+  assert.ok(clusterCard !== undefined, `the nested cluster renders as a card inside the section:\n${JSON.stringify(nodes)}`)
+  const first = rowOf(folder, message => message.kind === 'system' && message.text === 'SNAPSHOT_TSP_A')
+  const second = rowOf(folder, message => message.kind === 'system' && message.text === 'SNAPSHOT_TSP_B')
+  const firstNode = nodes.find(node => node.id.endsWith(`.${keys.keyFor(first)}`))
+  const secondNode = nodes.find(node => node.id.endsWith(`.${keys.keyFor(second)}`))
+  assert.equal(firstNode?.parent, clusterCard.id, 'the first snapshot is a child of the nested Context card')
+  assert.equal(secondNode?.parent, clusterCard.id, 'the second snapshot is a child of the nested Context card')
+  const contextText = nodes
+    .filter(node => node.id.startsWith(`${clusterCard.id}.`))
+    .map(node => JSON.stringify(node.props))
+    .join('\n')
+  assert.ok(contextText.includes('SNAPSHOT_TSP_A') && contextText.includes('SNAPSHOT_TSP_B'),
+    `both Snapshot bodies stay reachable through the native tree:\n${contextText}`)
+})

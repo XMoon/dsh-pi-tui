@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Snapshot injections such as `time-context` no longer split one turn's Activity/Thought
+  into multiple blocks.** Compact folds them with the Activity; Focus hides them inside the
+  Thought and restores each exactly once in raw order when expanded; Full keeps the original
+  chronology and Context cards. A mixed `instructions`/`catalog` + Snapshot cluster and every
+  `notice`/`relay`/`recall` boundary keep their current behavior, and Snapshot rows still
+  contribute no tool count or elapsed time.
+
 ### Fixed
 
 - **Human prompts now carry the sending TUI process's time zone**, so the official

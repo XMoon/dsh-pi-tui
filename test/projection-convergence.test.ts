@@ -515,3 +515,60 @@ test('the canonical projector and Compact adapter scale through 50k rows without
   assert.ok(midMs < smallMs * 100 + 100, `10x input took ${midMs.toFixed(1)}ms vs ${smallMs.toFixed(2)}ms`)
   assert.ok(largeMs < smallMs * 400 + 200, `50x input took ${largeMs.toFixed(1)}ms vs ${smallMs.toFixed(2)}ms`)
 })
+
+// --- Snapshot Context carriage (2026-10-19 Owner decision) -----------------
+
+const snapshotRow = (label: string): TranscriptMessage => ({
+  kind: 'system', turn: TURN, text: `${label} reading`, label, context: true,
+  contextPresentation: { form: 'snapshot', sourceKind: 'time-context', role: 'inject' },
+})
+
+test('Full keeps a snapshot-carrying Work flat in raw chronology with no Activity chrome', async () => {
+  const { vt, app } = startApp('full')
+  const first = snapshotRow('SNAP_ONE')
+  const second = snapshotRow('SNAP_TWO')
+  const messages: TranscriptMessage[] = [
+    user('go'),
+    thinking('first reasoning'),
+    tool('read', 'ok'),
+    first,
+    tool('bash', 'ok'),
+    second,
+    assistant('final answer'),
+  ]
+  show(app, messages)
+  await vt.waitForRender()
+  const view = vt.getViewport().join('\n')
+  assert.ok(!workHeader(view), `Full never adds a Work header:\n${view}`)
+  const firstRow = view.split('\n').findIndex(line => line.includes('SNAP_ONE'))
+  const secondRow = view.split('\n').findIndex(line => line.includes('SNAP_TWO'))
+  const finalRow = view.split('\n').findIndex(line => line.includes('final answer'))
+  assert.ok(firstRow >= 0 && secondRow > firstRow, `both snapshots render in raw order:\n${view}`)
+  assert.ok(finalRow > secondRow, `the final assistant stays after the snapshots:\n${view}`)
+  // The canonical structure still owns one Work span carrying both snapshots.
+  const spans = workSpansOf(projectTranscriptStructure(messages))
+  assert.equal(spans.length, 1)
+  assert.deepEqual(spans[0]!.members, [messages[1], messages[2], first, messages[4], second],
+    'the same Work carries both snapshots and the Process rows in raw order')
+})
+
+test('Compact folds the same snapshot-carrying rows into one Activity', async () => {
+  const { vt, app } = startApp('compact')
+  const first = snapshotRow('SNAP_ONE')
+  const second = snapshotRow('SNAP_TWO')
+  show(app, [
+    user('go'),
+    thinking('reasoning'),
+    tool('read', 'ok'),
+    first,
+    tool('bash', 'ok'),
+    second,
+    assistant('final answer'),
+  ])
+  await vt.waitForRender()
+  const view = vt.getViewport().join('\n')
+  assert.equal(view.split('\n').filter(line => /^\s*[▸▾] Activity(?: | ·|$)/.test(line)).length, 1,
+    `one Activity for the turn:\n${view}`)
+  assert.ok(!view.includes('SNAP_ONE') && !view.includes('SNAP_TWO'),
+    `the snapshots stay inside the collapsed Activity:\n${view}`)
+})

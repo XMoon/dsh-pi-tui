@@ -33,7 +33,7 @@ import {
   formatFocusDuration,
   formatFocusHeaderLine,
 } from '../src/tui/components/transcript/focus-activity.ts'
-import { projectFocus, type FocusProjectedBlock } from '../src/tui/transcript/focus-projection.ts'
+import { focusThoughtLeadBoundary, projectFocus, type FocusProjectedBlock } from '../src/tui/transcript/focus-projection.ts'
 import { compactActionPresentation, type CompactActionPresentation } from '../src/tui/components/transcript/compact-process-preview.ts'
 import { COMPACT_ACTION_SUMMARY_MAX_TYPES, compactActionSourceOf, compactActionStatParts, type CompactActionStats } from '../src/tui/transcript/process-summary.ts'
 
@@ -3902,6 +3902,162 @@ test('inject-woken turns surface context before and during the collapsed Thought
   assert.deepEqual(blockKinds(projectTools(messages, folder.turnActivities(), new Set([0]))), ['system', 'activity', 'thinking', 'tool', 'system', 'assistant'])
 })
 
+// ── Snapshot Context follows the Thought (2026-10-19 Owner decision) ──────
+
+/** One durable `time-context` Snapshot injection in its official rc.2 source
+ * shape; the real fold turns it into a surfaced Context row. */
+function snapshotContext(turn: number, id: string, text: string, time: number, seq: number): SessionEvent {
+  return eventAt('user/message', {
+    id: MessageId(id), role: 'user',
+    content: [{ type: 'text', text }],
+    source: { kind: 'time-context', form: 'snapshot', sections: [{ name: 'time-context', body: text }] },
+  }, time, seq)
+}
+
+test('collapsed Focus hides an opening Snapshot Context in the Thought and restores it exactly once', () => {
+  const folder = new TranscriptFolder()
+  applyMixed(folder, [
+    eventAt('turn/start', { turn: 0 }, 3000, 0),
+    eventAt('user/message', {
+      id: MessageId('snap-prompt'), role: 'user',
+      content: [{ type: 'text', text: 'inspect this' }],
+      source: { kind: 'user' },
+    }, 3001, 1),
+    snapshotContext(0, 'snap-open', 'Time sampled while preparing turn 0, step 1.', 3002, 2),
+    eventAt('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'reasoning-delta', index: 0, text: 'reasoning after the snapshot' } }, 3003, 3),
+    eventAt('tool/call', { turn: 0, step: 0, callId: ToolCallId('snap-call'), name: 'read', arguments: '{}' }, 3004, 4),
+    eventAt('tool/result', {
+      turn: 0, step: 0,
+      message: {
+        id: MessageId('snap-result'), role: 'tool',
+        toolCallId: ToolCallId('snap-call'),
+        content: [{ type: 'text', text: 'ok' }],
+        source: { kind: 'tool', callId: ToolCallId('snap-call') },
+      },
+    }, 3005, 5),
+    eventAt('assistant/message', {
+      turn: 0, step: 1,
+      message: { id: MessageId('snap-final'), role: 'assistant', content: [{ type: 'text', text: 'done' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+    }, 3006, 6),
+    eventAt('turn/end', { turn: 0, reason: { kind: 'completed' } }, 3007, 7),
+  ])
+  const messages = folder.messages()
+  const snapshot = messages.find(message => message.kind === 'system')
+  assert.ok(snapshot !== undefined && snapshot.kind === 'system')
+  assert.equal(snapshot.contextPresentation?.form, 'snapshot', 'fixture: the real fold declares the snapshot form')
+  // The lead boundary stops after the initial user: a foldable Snapshot is no
+  // longer opening foundation.
+  assert.equal(focusThoughtLeadBoundary(messages), 1)
+  const activities = folder.turnActivities()
+  const collapsed = projectTools(messages, activities, new Set())
+  assert.deepEqual(blockKinds(collapsed), ['user', 'activity', 'assistant'])
+  assert.ok(!collapsed.some(block => block.kind === 'message' && block.message === snapshot),
+    'the opening Snapshot must not surface outside the collapsed Thought')
+  const expanded = projectTools(messages, activities, new Set([0]))
+  assert.deepEqual(blockKinds(expanded), ['user', 'activity', 'system', 'thinking', 'tool', 'assistant'])
+  assert.equal(expanded.filter(block => block.kind === 'message' && block.message === snapshot).length, 1,
+    'expanding restores the Snapshot exactly once at its raw Work position')
+  const snapshotIndex = expanded.findIndex(block => block.kind === 'message' && block.message === snapshot)
+  const thoughtIndex = expanded.findIndex(block => block.kind === 'activity')
+  assert.ok(snapshotIndex > thoughtIndex, 'the Snapshot lives inside the expanded Thought content')
+})
+
+test('a Snapshot-only turn hides its rows only when a real Thought owner exists', () => {
+  const folder = new TranscriptFolder()
+  applyMixed(folder, [
+    eventAt('turn/start', { turn: 0 }, 3100, 0),
+    eventAt('user/message', {
+      id: MessageId('snap-only-prompt'), role: 'user',
+      content: [{ type: 'text', text: 'just a question' }],
+      source: { kind: 'user' },
+    }, 3101, 1),
+    snapshotContext(0, 'snap-only', 'Time sampled while preparing turn 0, step 1.', 3102, 2),
+    eventAt('assistant/message', {
+      turn: 0, step: 1,
+      message: { id: MessageId('snap-only-final'), role: 'assistant', content: [{ type: 'text', text: 'answered' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+    }, 3103, 3),
+    eventAt('turn/end', { turn: 0, reason: { kind: 'completed' } }, 3104, 4),
+  ])
+  const messages = folder.messages()
+  const snapshot = messages.find(message => message.kind === 'system')
+  assert.ok(snapshot !== undefined)
+  // With a real Thought owner the Snapshot is recoverable inside it.
+  const owned = projectTools(messages, folder.turnActivities(), new Set())
+  assert.deepEqual(blockKinds(owned), ['user', 'activity', 'assistant'])
+  assert.ok(!owned.some(block => block.kind === 'message' && block.message === snapshot))
+  // A window with no activity owner must FAIL OPEN rather than drop the row.
+  // (The final assistant is also activity-derived, so this truncated window
+  // has no held-back final.)
+  const failOpen = projectTools(messages, new Map(), new Set())
+  assert.deepEqual(blockKinds(failOpen), ['user', 'system'])
+  assert.ok(failOpen.some(block => block.kind === 'message' && block.message === snapshot))
+})
+
+test('a snapshot-only raw cluster is hidden as one unit inside a real Thought', () => {
+  const folder = new TranscriptFolder()
+  applyMixed(folder, [
+    eventAt('turn/start', { turn: 0 }, 3200, 0),
+    eventAt('user/message', {
+      id: MessageId('snap-pair-prompt'), role: 'user',
+      content: [{ type: 'text', text: 'just a question' }],
+      source: { kind: 'user' },
+    }, 3201, 1),
+    snapshotContext(0, 'snap-pair-a', 'Time A', 3202, 2),
+    snapshotContext(0, 'snap-pair-b', 'Time B', 3203, 3),
+    eventAt('assistant/message', {
+      turn: 0, step: 1,
+      message: { id: MessageId('snap-pair-final'), role: 'assistant', content: [{ type: 'text', text: 'answered' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+    }, 3204, 4),
+    eventAt('turn/end', { turn: 0, reason: { kind: 'completed' } }, 3205, 5),
+  ])
+  const messages = folder.messages()
+  const rows = messages.filter(message => message.kind === 'system')
+  assert.equal(rows.length, 2, 'fixture: two raw-adjacent snapshot rows')
+  const owned = projectTools(messages, folder.turnActivities(), new Set())
+  assert.deepEqual(blockKinds(owned), ['user', 'activity', 'assistant'], 'the cluster never leaks outside the Thought')
+  const failOpen = projectTools(messages, new Map(), new Set())
+  assert.deepEqual(blockKinds(failOpen), ['user', 'system', 'system'],
+    'without an owner every member fails open')
+  const expanded = projectTools(messages, folder.turnActivities(), new Set([0]))
+  assert.equal(blockKinds(expanded).filter(kind => kind === 'system').length, 2,
+    'both cluster members are restored exactly once when expanded')
+})
+
+test('a mixed instructions+Snapshot cluster keeps its foundation position in collapsed Focus', () => {
+  const folder = new TranscriptFolder()
+  applyMixed(folder, [
+    eventAt('turn/start', { turn: 0 }, 3300, 0),
+    eventAt('user/message', {
+      id: MessageId('mixed-prompt'), role: 'user',
+      content: [{ type: 'text', text: 'go' }],
+      source: { kind: 'user' },
+    }, 3301, 1),
+    eventAt('user/message', {
+      id: MessageId('mixed-instructions'), role: 'user',
+      content: [{ type: 'text', text: 'AGENTS instructions' }],
+      source: { kind: 'agent-instructions', form: 'instructions', changes: [{ path: 'AGENTS.md' }] },
+    }, 3302, 2),
+    snapshotContext(0, 'mixed-snapshot', 'Time sampled with the instructions cluster.', 3303, 3),
+    eventAt('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'reasoning-delta', index: 0, text: 'working' } }, 3304, 4),
+    eventAt('tool/call', { turn: 0, step: 0, callId: ToolCallId('mixed-call'), name: 'read', arguments: '{}' }, 3305, 5),
+    eventAt('assistant/message', {
+      turn: 0, step: 1,
+      message: { id: MessageId('mixed-final'), role: 'assistant', content: [{ type: 'text', text: 'done' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+    }, 3306, 6),
+    eventAt('turn/end', { turn: 0, reason: { kind: 'completed' } }, 3307, 7),
+  ])
+  const messages = folder.messages()
+  const collapsed = projectTools(messages, folder.turnActivities(), new Set())
+  assert.deepEqual(blockKinds(collapsed), ['user', 'system', 'system', 'activity', 'assistant'],
+    'the mixed cluster stays one visible foundation unit before the Thought')
+  const clusterRows = collapsed.flatMap(block => block.kind === 'message' && block.message.kind === 'system' ? [block.message] : [])
+  assert.equal(clusterRows.length, 2)
+  assert.ok(clusterRows.some(message => message.contextPresentation?.form === 'snapshot'),
+    'the Snapshot member is visible because the mixed cluster is indivisible')
+  const expanded = projectTools(messages, folder.turnActivities(), new Set([0]))
+  assert.deepEqual(blockKinds(expanded), ['user', 'system', 'system', 'activity', 'thinking', 'tool', 'assistant'])
+})
+
 test('collapsed context never crosses a committed pre-steer assistant boundary', () => {
   const folder = new TranscriptFolder()
   applyMixed(folder, [
@@ -3944,6 +4100,39 @@ test('collapsed context never crosses a committed pre-steer assistant boundary',
     block.kind === 'message' && block.message.kind === 'system')
   assert.equal(expandedContextRows.length, 2)
   for (const block of expandedContextRows) assert.equal(focusOwnerMark(block), undefined)
+})
+
+test('a Snapshot after a committed pre-steer answer stays in the post-fence chronology', () => {
+  const folder = new TranscriptFolder()
+  applyMixed(folder, [
+    eventAt('turn/start', { turn: 0 }, 3400, 0),
+    eventAt('step/start', { turn: 0, step: 1 }, 3401, 1),
+    eventAt('user/message', steerMessage('fence-initial', 'initial'), 3402, 2),
+    eventAt('assistant/chunk', { turn: 0, step: 1, chunk: { type: 'text-delta', index: 0, text: 'answer A' } }, 3403, 3),
+    queueSteer(steerMessage('fence-steer', 'steer'), 3404, 4),
+    assistantSettlement(0, 1, 'fence-a', 'answer A', 3405, 5, [{ type: 'text', text: 'answer A' }], 3403),
+    eventAt('step/end', { turn: 0, step: 1 }, 3406, 6),
+    claimSteer(3407, 7),
+    eventAt('step/start', { turn: 0, step: 2 }, 3408, 8),
+    eventAt('user/message', steerMessage('fence-steer', 'steer'), 3410, 10),
+    eventAt('assistant/chunk', { turn: 0, step: 2, chunk: { type: 'reasoning-delta', index: 0, text: 'answer B thinking' } }, 3411, 11),
+    snapshotContext(0, 'fence-snapshot', 'Time sampled after the committed answer.', 3412, 12),
+    assistantSettlement(0, 2, 'fence-b', 'answer B', 3413, 13),
+    eventAt('step/end', { turn: 0, step: 2 }, 3414, 14),
+    eventAt('turn/end', { turn: 0, reason: { kind: 'completed' } }, 3415, 15),
+  ])
+  const messages = folder.messages()
+  const snapshot = messages.find(message => message.kind === 'system')
+  assert.ok(snapshot !== undefined, 'fixture: the snapshot row was folded')
+  const collapsed = projectTools(messages, folder.turnActivities(), new Set())
+  const collapsedTexts = collapsed.flatMap(block => {
+    if (block.kind !== 'message') return []
+    const message = block.message
+    return message.kind === 'user' || message.kind === 'assistant' || message.kind === 'system' ? [message.text] : []
+  })
+  assert.deepEqual(collapsedTexts, ['initial', 'answer A', 'steer', 'Time sampled after the committed answer.', 'answer B'],
+    'the snapshot must not be pulled back into the Thought across the committed-answer fence')
+  assert.ok(collapsed.some(block => block.kind === 'message' && block.message === snapshot))
 })
 
 test('expanded and collapsed: multiple opening injected rows keep their order and never duplicate', () => {

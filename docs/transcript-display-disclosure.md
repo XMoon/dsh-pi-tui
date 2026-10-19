@@ -74,7 +74,8 @@ raw TranscriptMessage[]
 projectTranscriptStructure()
         │
         ├── Message
-        ├── Work span        (maximal contiguous same-turn Process run)
+        ├── Work span        (maximal contiguous same-turn Process run,
+        │                      carrying foldable Snapshot Context parts)
         └── Context cluster  (raw-adjacent same-turn ambient Context run)
 ```
 
@@ -82,15 +83,32 @@ projectTranscriptStructure()
   mouse, search state, expanded owners, default depth, Focus root, viewport or
   render width. It answers only where the raw chronology forms a Work span, a
   Context cluster or a standalone row.
-- `isTranscriptWorkMember()` is the single Work membership authority; the live
+- `isTranscriptWorkMember()` is the single Process membership authority; the live
   Preparing ownership consumes the SAME predicate, so a settled surfaced
   interaction (question / Plan review) closes the trailing run everywhere.
+  A same-turn `form:'snapshot'` Context row may be CARRIED by a Work span, but
+  carriage is the separate display predicate `isFoldableSnapshotContext()`
+  (`isSurfacedContext` + `contextFormOf === 'snapshot'` + raw-adjacency
+  eligibility). It never becomes Process, never changes this predicate, and
+  never enters Action/timing aggregates.
 - `clusterAdjacentAmbientContext()` remains the single cluster membership
-  authority, computed from raw adjacency before any row is hidden.
+  authority, computed from raw adjacency before any row is hidden. A
+  snapshot-only cluster can be nested inside a Work span as one structural
+  part; a mixed `instructions`/`catalog` + `snapshot` cluster stays an
+  indivisible Work boundary.
 - Work `owner`/`members` and cluster `owner`/`members` always reference the
   original `TranscriptMessage` objects, so presentation caches compare
-  identity/order (never a synthetic hash or a content-derived owner).
+  identity/order (never a synthetic hash or a content-derived owner). A Work
+  span's `parts` keep the same rows grouped for materialization (single message
+  rows and nested snapshot-only clusters), and `owner` remains `members[0]` —
+  which may be a Snapshot object even though the span still requires at least
+  one real Process row.
 - The projector is a single forward pass plus the linear clustering pass (O(n)).
+  Snapshot rows seen before the first Process of a same-turn run wait in a
+  call-local pending buffer: they join that Work when the Process arrives, or
+  materialize as their original Context row/cluster when a hard boundary or the
+  window end arrives first. The buffer is never long-lived state and never
+  creates a Process-free Work span.
 - **Post-turn replay evidence is transcript evidence, never aggregation
   evidence.** The fold is the ONLY authority that can know a row
   MATERIALIZED after its owning turn's authoritative `turn/end` (the row's
@@ -213,11 +231,20 @@ Compact:  User · Work(A)      · Assistant A · Work(B)      · Notice · Work(
 ```
 
 - `Work.members` preserve raw order; `Work.owner` is the first member
-  `TranscriptMessage`, the stable disclosure identity.
+  `TranscriptMessage`, the stable disclosure identity. `Work.parts` keep the
+  same raw sequence grouped for materialization: single rows plus a nested
+  `context-cluster` for a raw-adjacent snapshot-only run.
 - Conversation (user, steer, intermediate assistant, final assistant) and
   Attention rows always end the current span and stay visible at their
   chronological position.
-- Every surfaced Context presentation is a Work boundary.
+- Every surfaced Context presentation is a Work boundary **except a foldable
+  Snapshot** (2026-10-19 Owner decision): a `form:'snapshot'` singleton or a
+  snapshot-only raw-adjacent cluster is carried by the same-turn Work instead of
+  splitting it. A mixed `instructions`/`catalog` + `snapshot` cluster, a
+  `notice`/`relay`/`recall` row and every unknown form remain boundaries. The
+  carried Snapshot keeps its Context row/cluster disclosure inside the expanded
+  Work; a collapsed Work shows neither its header nor its body. Context never
+  contributes an Action, ActionStats entry or wall-clock timing to the span.
 - A collapsed `Work` renders `Header`, at most one `Think` row (the latest
   reasoning tail, following it while reasoning streams) and at most one `Tool`
   row (presenter-first semantic display, `focusToolDisplay` fallback). There is
@@ -362,6 +389,48 @@ The cluster summary is built from structured labels/forms only (duplicate labels
 compress to `label ×N` for display; the transcript is never deduplicated or
 reordered).
 
+### Snapshot Context follows Work (2026-10-19)
+
+`form:'snapshot'` is the ONE ambient Context form whose disclosure belongs to
+the surrounding turn work. The producer-declared `form` stays the authority; the
+structure layer answers only the display question "may this row be carried by
+the same-turn Work?":
+
+- `isFoldableSnapshotContext()` = surfaced Context + `contextFormOf() ===
+  'snapshot'` + (no raw-adjacent ambient cluster, or a cluster whose members are
+  ALL snapshots). It never changes `isTranscriptWorkMember()`, the Action
+  classifier, the durable message union or the Session facts.
+- A foldable Snapshot (singleton or snapshot-only cluster) no longer ends a
+  same-turn Process run. It can appear at the start, middle or end of the Work;
+  a snapshot-only raw-adjacent run becomes ONE nested Context cluster part of
+  the span.
+- A **mixed cluster** (`instructions`/`catalog` + `snapshot` in one
+  raw-adjacent ambient run) stays one indivisible Work boundary. Neither the
+  cluster nor the Work may tear it apart. `notice`/`relay`/`recall`, unknown
+  forms, Conversation, Attention, commands, compaction and turn boundaries keep
+  their existing boundary semantics.
+- A Work requires at least one real Process row: Snapshot-only segments keep
+  their original Context row/cluster presentation and never mint a zero-action
+  Activity, even when a live Preparing call is waiting.
+- The carried Snapshot stays Context: it contributes no Action, no ActionStats
+  entry and no span timing; the collapsed header and the Focus Action slot never
+  count it. Its payload and its own long-message disclosure stay reachable.
+- Preset behavior: **Full** keeps the raw chronology with the same Context
+  header/body and no Activity chrome; **Compact** folds it under the Activity
+  header and restores its Context row/cluster disclosure when the Work opens;
+  **Focus collapsed** hides it inside the real Thought (also for a
+  Snapshot-only turn with a Thought owner) and **Focus expanded** restores it
+  exactly once in raw order. Without a real activity owner every Snapshot row
+  fails open instead of disappearing.
+- Disclosure/search ancestry is outer-to-inner
+  `[focus-root?, work, context-cluster]`; a search hit inside a nested snapshot
+  cluster opens both ancestors temporarily and an ordinary dismiss promotes
+  both. Ctrl+O/mouse work exactly like any other Work/cluster owner, and a
+  fail-open surface renders the rows flat without a dead header.
+- No new preset, persisted field, state store, Host behavior or classifier
+  authority is introduced: this is a presentation-only refinement of the
+  existing Owner-accepted three-preset contract.
+
 ### Surfaced interaction evidence (settled question / Plan review)
 
 A SETTLED surfaced-interaction tool card is not ordinary Process work: it is
@@ -419,7 +488,15 @@ class:
 - An opening ambient burst (the initial user plus the immediately following
   surfaced Context rows) stays above the Thought in both Focus states; a
   mid-turn Context row/cluster returns to its chronological position when the
-  Thought is expanded.
+  Thought is expanded. **Exception (2026-10-19):** a foldable Snapshot after the
+  initial user stops the foundation boundary and follows the Thought instead
+  (hidden while collapsed, restored once in raw order when expanded); a mixed
+  `instructions`/`catalog` + `snapshot` cluster keeps the foundation position as
+  one indivisible unit. A Snapshot that truly precedes the initial user is never
+  moved across that user.
+- Collapsed Focus also hides a foldable Snapshot-only turn inside its real
+  Thought (it remains recoverable there); without an activity owner the rows
+  fail open.
 - Collapsed Focus distinguishes CAUSAL INPUT from MID-TURN PROCESS FEEDBACK by
   the producer-declared `form` and raw position, never by source kind: a
   mid-turn `form:'notice'` (a background job or subagent settling while the
@@ -549,13 +626,15 @@ hidden match.
 ### Nested Focus Work (F6)
 
 Expanded Focus materializes each canonical Work span as a nested container
-(`[focus-root, work]`). Fullscreen defaults it collapsed with a mouse-owned
-header and search may reveal it temporarily; regular Focus opens it whenever the
-owning Thought is effectively expanded (the historical full-reveal contract).
-An explicit root collapse returns that turn's manual Work owners to the Compact
-default ("reopen compact"); a temporary surface/search-only hiding never clears
-manual Work state. Root bulk Collapse All clears the Work owners of every
-collapsed root.
+(`[focus-root, work]`). Its structural parts keep a snapshot-only Context
+cluster as `[focus-root, work, context-cluster]`, with the cluster's own
+disclosure inside the open Work. Fullscreen defaults Work collapsed with a
+mouse-owned header and search may reveal it temporarily; regular Focus opens it
+whenever the owning Thought is effectively expanded (the historical full-reveal
+contract). An explicit root collapse returns that turn's manual Work owners to
+the Compact default ("reopen compact"); a temporary surface/search-only hiding
+never clears manual Work state. Root bulk Collapse All clears the Work owners of
+every collapsed root.
 
 ### Search reveal path (F6)
 

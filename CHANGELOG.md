@@ -7,6 +7,13 @@
 
 ## [Unreleased]
 
+### 变更
+
+- **`time-context` 等 Snapshot 注入不再把同一回合的 Activity/Thought 切成多块**：Compact 中
+  它们随 Activity 折叠，Focus 中随 Thought 隐藏并在展开后按原始顺序恢复一次；Full 保持原有
+  顺序与 Context 卡片。`instructions`/`catalog` 与 Snapshot 组成的混合 cluster、以及
+  `notice`/`relay`/`recall` 等边界保持原状，Snapshot 仍不计入工具数量或耗时。
+
 ### 修复
 
 - **人类提示现在携带发送端 TUI 进程的时区**，官方 `time-context` 注入不再对普通请求显示

@@ -1003,3 +1003,50 @@ test('a standalone command card owns its own disclosure, independent of the Focu
   assert.equal(overrides.get(tool), undefined,
     'a Thought-owned process detail is still reset by the root collapse')
 })
+
+test('a search hit inside a nested snapshot cluster opens Work + cluster and dismiss promotes both', async () => {
+  const { vt, app } = startApp('compact')
+  const first: TranscriptMessage = {
+    kind: 'system', turn: 1, text: 'time A', label: 'time A', context: true,
+    contextPresentation: { form: 'snapshot', sourceKind: 'time-context', role: 'inject' },
+  }
+  const second: TranscriptMessage = {
+    kind: 'system', turn: 1, text: 'NESTED_SNAPSHOT_TARGET', label: 'time B', context: true,
+    contextPresentation: { form: 'snapshot', sourceKind: 'time-context', role: 'inject' },
+  }
+  app.setTranscript([first, second, { kind: 'thinking', turn: 1, text: 'working' }], new Map())
+  await viewport(vt)
+  assert.ok(!vt.getViewport().join('\n').includes('NESTED_SNAPSHOT_TARGET'),
+    'precondition: the nested cluster is collapsed')
+
+  app.setTranscriptSearchTarget(targetFor(second, 'NESTED_SNAPSHOT_TARGET'))
+  const revealed = await viewport(vt)
+  assert.ok(revealed.includes('NESTED_SNAPSHOT_TARGET'), `the nested cluster member is revealed:\n${revealed}`)
+  assert.ok(revealed.includes('▾ Activity'), `the owning Work is revealed too:\n${revealed}`)
+  assert.equal(app.expandedWorkOwnersForTest().size, 0, 'the Work reveal stays temporary')
+  assert.equal(app.expandedContextClusterOwnersForTest().size, 0, 'the cluster reveal stays temporary')
+
+  app.finishTranscriptSearchPresentation(new Set(), { preserveCurrentReveal: true })
+  const promoted = await viewport(vt)
+  assert.equal(app.expandedWorkOwnersForTest().has(first), true, 'dismiss promotes the Work owner')
+  assert.equal(app.expandedContextClusterOwnersForTest().has(first), true, 'dismiss promotes the cluster owner')
+  assert.ok(promoted.includes('NESTED_SNAPSHOT_TARGET'), `the promoted reveal keeps the target visible:\n${promoted}`)
+})
+
+test('a disabled disclosure key fails a nested snapshot cluster open without dead chrome', async () => {
+  const { vt, app } = startApp('compact')
+  app.keybindingsManager().setUserConfiguration(parseUserKeybindings({ 'app.transcript.toggleExpand': false }))
+  const first: TranscriptMessage = {
+    kind: 'system', turn: 1, text: 'time A', label: 'time A', context: true,
+    contextPresentation: { form: 'snapshot', sourceKind: 'time-context', role: 'inject' },
+  }
+  const second: TranscriptMessage = {
+    kind: 'system', turn: 1, text: 'NESTED_FAIL_OPEN_TARGET', label: 'time B', context: true,
+    contextPresentation: { form: 'snapshot', sourceKind: 'time-context', role: 'inject' },
+  }
+  app.setTranscript([first, second, { kind: 'thinking', turn: 1, text: 'working' }], new Map())
+  const view = await viewport(vt)
+  assert.ok(!/Activity/u.test(view), `no Work header without an operable owner:\n${view}`)
+  assert.ok(!view.includes('Context · 2 injections'), `no dead cluster header:\n${view}`)
+  assert.ok(view.includes('NESTED_FAIL_OPEN_TARGET'), `the cluster member renders flat:\n${view}`)
+})
