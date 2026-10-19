@@ -220,8 +220,12 @@ substring is not identity proof.
 
 `readEpoch` makes the latest-started read win. A failed refresh keeps the last
 good snapshot and marks `state='error'`; no mutation is admitted while
-loading/error/busy. Every mutation is followed by an authoritative reread while
-`busyValue` stays set.
+loading/error/busy, and the controller keeps one mutation in flight. Every
+mutation is followed by an authoritative reread while `busyValue` stays set; a
+failed reread blocks further writes until a successful refresh. A stopped
+surface refuses pre-dispatch writes and does not restore into a destroyed
+editor; a dispatched write keeps its accepted receipt and is never
+reinterpreted.
 
 ### Install state machine
 
@@ -229,7 +233,10 @@ Phases: `editing → inspecting → confirm → starting → installing → appl
 cancelling → done | failed | unknown`.
 
 - Exactly one `requestId` per attempt; inspect before any install; explicit
-  confirmation.
+  confirmation. The same id is used by `waitForInstall`/`cancelInstall`; a new
+  explicit approval gets a NEW id. An unknown result is reconciled through the
+  official wait/reread, never claimed as success and never retried
+  automatically.
 - Explicit cancel is available only while starting/installing. `too-late` means
   the profile is applying and is never reported as cancelled.
 - Unknown/failed reconciles through `waitForInstall` plus an inventory reread
@@ -253,7 +260,8 @@ only to a bundle card with `official === true`, `section === 'experimental'` and
 an exact key in the implementation's explicitly enumerated, Host-source-verified
 official-bundle set. The exact names and copy are owned by the model and its
 tests, not by this document: do not copy the table here. It is bounded app
-presentation for the fixed official-bundle catalog, not a public capability API,
+presentation for explicitly enumerated official-bundle identities, not a
+public capability API,
 not a Host PASS, and is never derived from enabled/fiber/availability. The
 model/tests also own the single Owner-frozen danger confirmation, which is the
 only hazard statement.

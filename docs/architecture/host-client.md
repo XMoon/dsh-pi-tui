@@ -142,17 +142,11 @@ rejected    = a proven pre-commit refusal; the caller may restore intent
 cancelled   = the operation was cancelled before a definitive outcome
 ```
 
-Install work is addressed by one caller-owned `requestId`: the same id is used
-by `waitForInstall`/`cancelInstall`, a new explicit approval gets a NEW id, and
-an unknown result is reconciled through the official wait/reread — never claimed
-as success and never retried automatically.
-
-The controller keeps one mutation in flight, keeps `busyValue` set until the
-authoritative inventory reread completes, refuses writes from a stale/error/
-loading snapshot, and blocks further writes after a failed reread until a
-successful refresh. A stopped surface refuses pre-dispatch writes and does not
-restore into a destroyed editor; a dispatched write keeps its accepted receipt
-and is never reinterpreted.
+The concrete controller/install admission, request-id reconciliation and
+stopped-surface behavior are owned by
+[surface-behavior.md](./surface-behavior.md#plugin-manager-and-plugin-detail);
+this section keeps only the transport-neutral ownership taxonomy and the
+pre-dispatch generation rule.
 
 ## Plugin Manager
 
