@@ -18,6 +18,7 @@ import type {
   ChangeResult,
   IncompatiblePlugin,
   ManagementError,
+  PackageResult,
   PluginInfo,
   PluginInstallLogChunk,
   PluginInstallProgress,
@@ -35,6 +36,7 @@ import type {
   PluginInstallLogFact,
   PluginInstallPhaseFact,
   PluginManagerSnapshot,
+  PluginPackageResultFact,
   PluginRegistriesFact,
   PluginRowFact,
   PluginSpecInspectionFact,
@@ -96,12 +98,18 @@ function detachBundle(bundle: BundleInfo): PluginBundleFact {
   }))
   return Object.freeze({
     name: bundle.name,
+    official: bundle.official,
+    availability: bundle.availability,
+    ...(bundle.installTarget === undefined
+      ? {}
+      : { installTarget: Object.freeze({ spec: bundle.installTarget.spec, version: bundle.installTarget.version }) }),
     ...(bundle.version === undefined ? {} : { version: bundle.version }),
     ...(bundle.meta === undefined ? {} : pickMeta(bundle.meta)),
     ...(bundle.description === undefined ? {} : { description: bundle.description }),
     enabled: bundle.enabled,
     installed: bundle.installed,
     optional: bundle.optional,
+    ...(bundle.source === undefined ? {} : { source: bundle.source }),
     removable: bundle.removable,
     ...(bundle.readOnlyReason === undefined ? {} : { readOnlyReason: bundle.readOnlyReason }),
     ...(bundle.error === undefined ? {} : { error: detachError(bundle.error) }),
@@ -163,16 +171,38 @@ export function detachPluginManagerSnapshot(input: PluginManagerSnapshotInput): 
   })
 }
 
+function detachPackageResult(result: PackageResult): PluginPackageResultFact {
+  return Object.freeze({
+    exitCode: result.exitCode,
+    output: result.output,
+    truncated: result.truncated,
+    logPath: result.logPath,
+    ...(result.kind === undefined ? {} : { kind: result.kind }),
+    ...(result.timedOut === undefined ? {} : { timedOut: result.timedOut }),
+    ...(result.incompatible === undefined
+      ? {}
+      : { incompatible: Object.freeze(result.incompatible.map(detachIncompatible)) }),
+  })
+}
+
 /** Map one persisted change and its observed application outcome. */
 export function detachChange(result: ChangeResult): PluginChangeFact {
   return Object.freeze({
     changed: result.changed,
     application: result.application,
+    ...(result.restartReason === undefined ? {} : { restartReason: result.restartReason }),
     stage: result.stage,
     target: result.target,
+    ...(result.enabled === undefined ? {} : { enabled: result.enabled }),
     ...(result.error === undefined ? {} : { error: detachError(result.error) }),
     ...(result.warnings === undefined ? {} : { warnings: Object.freeze([...result.warnings]) }),
     ...(result.bundle === undefined ? {} : { bundle: result.bundle }),
+    ...(result.version === undefined ? {} : { version: result.version }),
+    ...(result.pendingBuilds === undefined ? {} : { pendingBuilds: Object.freeze([...result.pendingBuilds]) }),
+    ...(result.approvedBuilds === undefined ? {} : { approvedBuilds: Object.freeze([...result.approvedBuilds]) }),
+    ...(result.packageResult === undefined ? {} : { packageResult: detachPackageResult(result.packageResult) }),
+    ...(result.registries === undefined ? {} : { registries: Object.freeze([...result.registries]) }),
+    ...(result.failedAt === undefined ? {} : { failedAt: result.failedAt }),
   })
 }
 

@@ -127,6 +127,7 @@ export class DirectPluginManagerPort implements PluginManagerPort {
       requestId: pluginInstallRequestId(request.requestId),
       registry: request.registry,
       ...(request.enabled === undefined ? {} : { enabled: request.enabled }),
+      ...(request.approvedBuilds === undefined ? {} : { approvedBuilds: [...request.approvedBuilds] }),
     }
     return detachChange(await this.service().installBundle(request.spec, options))
   }

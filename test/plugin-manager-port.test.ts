@@ -86,8 +86,8 @@ function fakePort(state: Partial<FakeState> = {}): {
     waitCalls: [],
     cancelCalls: [],
     snapshotImpl: async () => snapshot([
-      { name: SELF_BUNDLE, enabled: true, installed: true, optional: false, removable: true, rows: [], overrides: [] },
-      { name: 'ordinary', enabled: true, installed: true, optional: false, removable: true, rows: [], overrides: [] },
+      { name: SELF_BUNDLE, official: false, availability: 'profile', enabled: true, installed: true, optional: false, removable: true, rows: [], overrides: [] },
+      { name: 'ordinary', official: false, availability: 'profile', enabled: true, installed: true, optional: false, removable: true, rows: [], overrides: [] },
     ]),
     inspectImpl: async () => ({ status: 'accepted', kind: 'registry', name: 'pkg', version: '1.0.0', bundle: true, registry: null }),
     installImpl: async () => change({ stage: 'install' }),
@@ -155,7 +155,7 @@ function select(controller: PluginManagerController, value: string): void {
 
 test('opening reads once; a failed refresh keeps the last good snapshot', async () => {
   let fail = false
-  const { port, state } = fakePort({ snapshotImpl: async () => { if (fail) throw new Error('boom'); return snapshot([{ name: 'ordinary', enabled: true, installed: true, optional: false, removable: true, rows: [], overrides: [] }]) } })
+  const { port, state } = fakePort({ snapshotImpl: async () => { if (fail) throw new Error('boom'); return snapshot([{ name: 'ordinary', official: false, availability: 'profile', enabled: true, installed: true, optional: false, removable: true, rows: [], overrides: [] }]) } })
   const { controller } = controllerOf(port)
   controller.open('direct-command')
   await tick()
@@ -217,7 +217,7 @@ test('a stale remove confirmation never mutates', async () => {
   const { port, state } = fakePort({
     snapshotImpl: async () => snapshot(dropOrdinary
       ? []
-      : [{ name: 'ordinary', enabled: true, installed: true, optional: false, removable: true, rows: [], overrides: [] }]),
+      : [{ name: 'ordinary', official: false, availability: 'profile', enabled: true, installed: true, optional: false, removable: true, rows: [], overrides: [] }]),
   })
   const { controller } = controllerOf(port)
   controller.open('direct-command')
@@ -381,7 +381,7 @@ test('remove success goes through the official service and refreshes', async () 
 test('an ordinary read-only bundle exposes no mutation affordance and rejects a direct dispatch', async () => {
   const { port, state } = fakePort({
     snapshotImpl: async () => snapshot([
-      { name: 'managed', enabled: true, installed: true, optional: false, removable: false, readOnlyReason: 'management-required', rows: [], overrides: [] },
+      { name: 'managed', official: false, availability: 'profile', enabled: true, installed: true, optional: false, removable: false, readOnlyReason: 'management-required', rows: [], overrides: [] },
     ]),
   })
   const { controller } = controllerOf(port)
@@ -408,7 +408,7 @@ test('a late old mutation cannot overwrite a newer refresh', async () => {
     setBundleImpl: () => gate.promise,
     snapshotImpl: async () => snapshot(drop
       ? []
-      : [{ name: 'ordinary', enabled: true, installed: true, optional: false, removable: true, rows: [], overrides: [] }]),
+      : [{ name: 'ordinary', official: false, availability: 'profile', enabled: true, installed: true, optional: false, removable: true, rows: [], overrides: [] }]),
   })
   const { controller } = controllerOf(port)
   controller.open('direct-command')
@@ -434,6 +434,8 @@ test('row-level self protection never offers a toggle row action', async () => {
     snapshotImpl: async () => ({
       bundles: [{
         name: SELF_BUNDLE,
+        official: false,
+        availability: 'profile',
         enabled: true,
         installed: true,
         optional: false,
@@ -489,7 +491,7 @@ test('the Refresh action row clears a stale read-failure notice', async () => {
   const { port } = fakePort({
     snapshotImpl: async () => {
       if (fail) throw new Error('boom')
-      return snapshot([{ name: 'ordinary', enabled: true, installed: true, optional: false, removable: true, rows: [], overrides: [] }])
+      return snapshot([{ name: 'ordinary', official: false, availability: 'profile', enabled: true, installed: true, optional: false, removable: true, rows: [], overrides: [] }])
     },
   })
   const { controller } = controllerOf(port)
@@ -525,6 +527,8 @@ test('a protected TUI-module entry is refused with the module wording and never 
     snapshotImpl: async () => ({
       bundles: [{
         name: SELF_BUNDLE,
+        official: false,
+        availability: 'profile',
         enabled: true,
         installed: true,
         optional: false,
@@ -552,7 +556,7 @@ test('a protected TUI-module entry is refused with the module wording and never 
 // ── invalidation / read currentness / disposal (M3-5 PR4) ─────────────────────
 
 function bundleOnly(name: string): PluginManagerSnapshot {
-  return snapshot([{ name, enabled: true, installed: true, optional: false, removable: true, rows: [], overrides: [] }])
+  return snapshot([{ name, official: false, availability: 'profile', enabled: true, installed: true, optional: false, removable: true, rows: [], overrides: [] }])
 }
 
 test('latest-started read wins: a newer read start invalidates every older in-flight read', async () => {

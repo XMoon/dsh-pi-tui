@@ -34,6 +34,7 @@ const BUNDLE: BundleInfo = {
   version: '1.2.3',
   official: false,
   availability: 'profile',
+  source: 'file:/tmp/bundle-a',
   meta: { title: { en: 'Bundle A' }, description: 'Local description' },
   enabled: true,
   installed: true,
@@ -252,6 +253,9 @@ test('the Remote snapshot maps bundles, plugins, registries and exemptions like 
   assert.deepEqual(remoteFacts, directFacts)
   assert.deepEqual(remoteFacts.bundles[0], {
     name: 'bundle-a',
+    official: false,
+    availability: 'profile',
+    source: 'file:/tmp/bundle-a',
     version: '1.2.3',
     title: 'Bundle A',
     description: 'Local description',
@@ -320,11 +324,18 @@ test('the Remote mutations map the official change result', async () => {
 test('startInstall preserves the caller requestId, registry and enabled flag', async () => {
   const remote = remoteFixture()
   const port = portOf(remote)
-  await port.startInstall({ requestId: 'req-1', spec: 'pkg', registry: 'https://r.example', enabled: false })
+  await port.startInstall({
+    requestId: 'req-1',
+    spec: 'pkg',
+    registry: 'https://r.example',
+    enabled: false,
+    approvedBuilds: ['esbuild', 'node-gyp'],
+  })
   assert.equal(remote.installOptions.length, 1)
   assert.equal(String(remote.installOptions[0]?.requestId), 'req-1')
   assert.equal(remote.installOptions[0]?.registry, 'https://r.example')
   assert.equal(remote.installOptions[0]?.enabled, false)
+  assert.deepEqual(remote.installOptions[0]?.approvedBuilds, ['esbuild', 'node-gyp'])
 })
 
 test('waitForInstall settles null for an unknown result and maps a real one', async () => {

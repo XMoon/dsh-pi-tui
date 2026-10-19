@@ -18,8 +18,8 @@ const strip = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, '')
 function snapshot(): PluginManagerSnapshot {
   return {
     bundles: [
-      { name: SELF_BUNDLE, version: '0.4.8', enabled: true, installed: true, optional: false, removable: true, rows: [], overrides: [] },
-      { name: 'ordinary', enabled: false, installed: true, optional: false, removable: true, rows: [], overrides: [] },
+      { name: SELF_BUNDLE, version: '0.4.8', official: false, availability: 'profile', enabled: true, installed: true, optional: false, removable: true, rows: [], overrides: [] },
+      { name: 'ordinary', official: false, availability: 'profile', enabled: false, installed: true, optional: false, removable: true, rows: [], overrides: [] },
     ],
     plugins: [],
     registries: { registry: 'https://r', fallbackRegistries: [], resolved: null },
