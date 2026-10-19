@@ -23,7 +23,6 @@ import {
   settle,
 } from './support/runner-harness.ts'
 import { testLifecycle } from './support/temp-lifecycle.ts'
-import { navigateToLegacySettings } from './support/open-legacy-settings.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 
 const startedApps = new Set<TuiApp>()
@@ -114,88 +113,89 @@ async function mountPluginRunner(
   return { vt, harness, app }
 }
 
-test('the real /plugins entry opens the shared panel and Escape closes it back to the editor', async (t) => {
+test('the real /plugins entry opens the fullscreen page and Escape closes back to the editor', async (t) => {
   const { vt, harness } = await mountPluginRunner(t)
   invokeCommand(harness, 'plugins')
   await vt.waitForRender()
-  assert.match(plain(vt.getViewport()), /Plugin Manager/, 'the direct entry mounts the shared panel')
+  const view = plain(vt.getViewport())
+  assert.match(view, /Plugins · All/, 'the direct entry mounts the fullscreen page')
+  assert.match(view, /No plugins/, 'the empty inventory paints an honest empty state')
   vt.sendInput('\x1b')
   await vt.waitForRender()
-  assert.doesNotMatch(plain(vt.getViewport()), /Plugin Manager/, 'Escape closes the panel')
+  assert.doesNotMatch(plain(vt.getViewport()), /Plugins · All/, 'Escape closes the page')
 })
 
 test('a second /plugins while open is a no-op, and a later open still mounts (owner released)', async (t) => {
   const { vt, harness } = await mountPluginRunner(t)
   invokeCommand(harness, 'plugins')
   await vt.waitForRender()
-  // A second open must not stack a second panel/owner.
+  // A second open must not stack a second page/owner.
   invokeCommand(harness, 'plugins')
   await vt.waitForRender()
-  assert.match(plain(vt.getViewport()), /Plugin Manager/)
+  assert.match(plain(vt.getViewport()), /Plugins · All/)
   vt.sendInput('\x1b')
   await vt.waitForRender()
   // The owner was released: the direct entry mounts again.
   invokeCommand(harness, 'plugins')
   await vt.waitForRender()
-  assert.match(plain(vt.getViewport()), /Plugin Manager/, 'a later /plugins mounts normally')
+  assert.match(plain(vt.getViewport()), /Plugins · All/, 'a later /plugins mounts normally')
   vt.sendInput('\x1b')
   await vt.waitForRender()
 })
 
-test('the real /settings → Plugins Manage… row hosts the same panel and Back returns to Settings', async (t) => {
+test('the real Settings → Plugins category hosts the same page in place and Back returns to Settings', async (t) => {
   const { vt, harness } = await mountPluginRunner(t)
   invokeCommand(harness, 'settings')
   await vt.waitForRender()
-  await navigateToLegacySettings(vt)
-  // Filter the settings list down to the Plugins row, then activate it.
-  for (const character of 'plugins') vt.sendInput(character)
+  assert.match(plain(vt.getViewport()), /Settings · Categories/)
+  // L0 starts on Appearance; move to Plugins (third category) and open it.
+  vt.sendInput('\x1b[B')
+  vt.sendInput('\x1b[B')
   await vt.waitForRender()
-  const settingsView = plain(vt.getViewport())
-  assert.match(settingsView, /Plugins/)
-  assert.match(settingsView, /Manage…/)
   vt.sendInput('\r')
   await vt.waitForRender()
-  assert.match(plain(vt.getViewport()), /Plugin Manager/, 'the Settings entry hosts the shared panel')
+  const pluginView = plain(vt.getViewport())
+  assert.match(pluginView, /Plugins · All/, 'the Settings entry hosts the same fullscreen page')
   // Back (Escape) returns to the SAME Settings surface, not to the editor.
   vt.sendInput('\x1b')
   await vt.waitForRender()
   const backView = plain(vt.getViewport())
-  assert.doesNotMatch(backView, /Plugin Manager/)
-  assert.match(backView, /Manage…/, 'Back returns to the Settings list')
-  assert.match(backView, /Type to search/, 'the Settings search surface is back')
+  assert.doesNotMatch(backView, /Plugins · All/)
+  assert.match(backView, /Settings · Categories/)
+  assert.match(backView, /> Plugins/, 'Plugins remains selected at L0')
   // Closing Settings returns to the editor.
   vt.sendInput('\x1b')
   await vt.waitForRender()
-  const editorView = plain(vt.getViewport())
-  assert.doesNotMatch(editorView, /Type to search/, 'closing Settings returns to the editor')
+  assert.doesNotMatch(plain(vt.getViewport()), /Settings · Categories/, 'closing Settings returns to the editor')
 })
 
-test('an external Settings parent teardown releases the Manager owner so a later /plugins still opens', async (t) => {
+test('an external surface teardown releases the Manager owner so a later /plugins still opens', async (t) => {
   const { vt, harness, app } = await mountPluginRunner(t)
   invokeCommand(harness, 'settings')
   await vt.waitForRender()
-  await navigateToLegacySettings(vt)
-  for (const character of 'plugins') vt.sendInput(character)
+  vt.sendInput('\x1b[B')
+  vt.sendInput('\x1b[B')
   await vt.waitForRender()
   vt.sendInput('\r')
   await vt.waitForRender()
-  assert.match(plain(vt.getViewport()), /Plugin Manager/, 'the Settings entry hosts the shared panel')
+  assert.match(plain(vt.getViewport()), /Plugins · All/, 'the Settings entry hosts the shared page')
 
-  // External parent teardown through a real fullscreen screen swap: the whole
-  // legacy Settings overlay (and its hosted submenu) is hidden WITHOUT a user
-  // Back, so the submenu's own close path never runs.
-  app.setFullscreen(true)
+  // External teardown through the surface lifecycle: the whole screen (and the
+  // hosted page) is released WITHOUT the page's normal close path.
+  app.stop()
   await vt.waitForRender()
-  assert.doesNotMatch(plain(vt.getViewport()), /Plugin Manager/, 'the external teardown hides the hosted panel')
+  assert.doesNotMatch(plain(vt.getViewport()), /Plugins · All/, 'the external teardown hides the hosted page')
+  app.start()
+  await vt.waitForRender()
 
   // The owner was released with the parent: the direct entry opens normally
   // (no phantom active host) and closes cleanly.
   invokeCommand(harness, 'plugins')
   await vt.waitForRender()
-  assert.match(plain(vt.getViewport()), /Plugin Manager/, 'a later /plugins opens after the external teardown')
+  assert.match(plain(vt.getViewport()), /Plugins · All/, 'a later /plugins opens after the external teardown')
   vt.sendInput('\x1b')
   await vt.waitForRender()
-  assert.doesNotMatch(plain(vt.getViewport()), /Plugin Manager/)
+  assert.doesNotMatch(plain(vt.getViewport()), /Plugins · All/)
 })
 
 test('hostile plugin metadata never reaches the mounted panel TTY raw', async (t) => {

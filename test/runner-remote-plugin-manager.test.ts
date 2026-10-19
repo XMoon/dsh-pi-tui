@@ -50,7 +50,6 @@ import type { PluginInstallEvent } from '../src/runtime/plugin-manager-port.ts'
 import { waitFor } from './support/remote-application-fixture.ts'
 import { testLifecycle, type TestLifecycle } from './support/temp-lifecycle.ts'
 import { installVirtualProcessTerminal } from './support/runner-harness.ts'
-import { navigateToLegacySettings } from './support/open-legacy-settings.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 
 process.env.NO_COLOR = ''
@@ -69,11 +68,11 @@ function plain(lines: readonly string[]): string {
   return lines.map(line => line.replace(/\x1b\[[0-9;]*m/g, '')).join('\n')
 }
 
-/** The content of the one selected (▸-marked) row of the current viewport. */
+/** The content of the one selected (`> `-marked) list row. */
 function selectedRow(viewport: readonly string[]): string | undefined {
-  const line = plain(viewport).split('\n').find(candidate => candidate.includes('▸ '))
+  const line = plain(viewport).split('\n').find(candidate => candidate.includes('> '))
   if (line === undefined) return undefined
-  return line.slice(line.indexOf('▸ ') + '▸ '.length).trim()
+  return line.slice(line.indexOf('> ') + '> '.length).trim()
 }
 
 /** The rendered list/detail line carrying one bundle name. */
@@ -263,7 +262,7 @@ test('L6-A: the real Remote /plugins reads the real Host PluginManager through t
     plain(fixture.vt.getViewport()).includes(bundle), 20_000)
 
   const view = plain(fixture.vt.getViewport())
-  assert.match(view, /Plugin Manager/)
+  assert.match(view, /Plugins · All/)
   assert.match(view, /Current TUI/)
   assert.match(view, /@xmoon76\/dsh-pi-tui/)
   // A distinctive bundle that exists ONLY in the fixture's managed profile:
@@ -271,7 +270,7 @@ test('L6-A: the real Remote /plugins reads the real Host PluginManager through t
   // adapter -> controller -> panel.
   const line = bundleLine(fixture.vt.getViewport(), bundle)
   assert.ok(line !== undefined, 'the fixture bundle row is visible')
-  assert.match(line, /disabled/, 'the fixture bundle starts disabled (Host truth)')
+  assert.match(line, /\[disabled\]/, 'the fixture bundle starts disabled (Host truth)')
 })
 
 test('L6 (M3-6 PR1): the REAL runner controller consumes the SELECTED Client service observations; a Host-context twin is never reported', async (t) => {
@@ -420,26 +419,25 @@ test('L6-B: the Settings → Plugins entry hosts the SAME Remote controller/pane
 
   submit(fixture, '/settings')
   await waitFor('the Settings workspace opens', () => /Settings · Categories/.test(plain(fixture.vt.getViewport())), 20_000)
-  await navigateToLegacySettings(fixture.vt)
-  await waitFor('the Settings surface opens', () => /Type to search/.test(plain(fixture.vt.getViewport())), 20_000)
-  for (const character of 'plugins') fixture.vt.sendInput(character)
+  // L0 starts on Appearance; move to Plugins (third category) and open it.
+  fixture.vt.sendInput('\x1b[B')
+  fixture.vt.sendInput('\x1b[B')
   await fixture.vt.waitForRender()
-  assert.match(plain(fixture.vt.getViewport()), /Manage…/)
   fixture.vt.sendInput('\r')
-  await waitFor('the Plugin Manager panel opens from Settings', () =>
-    /Plugin Manager/.test(plain(fixture.vt.getViewport())), 20_000)
+  await waitFor('the Plugin Manager page opens from Settings', () =>
+    /Plugins · All/.test(plain(fixture.vt.getViewport())), 20_000)
   // Same owner: the Remote inventory read is live on this entry too.
   await waitFor('the same Remote inventory renders', () =>
     plain(fixture.vt.getViewport()).includes(fixture.host.pluginManager!.bundleName), 20_000)
 
   fixture.vt.sendInput('\x1b')
   await waitFor('Back returns to the SAME Settings surface', () =>
-    /Manage…/.test(plain(fixture.vt.getViewport())), 20_000)
-  assert.doesNotMatch(plain(fixture.vt.getViewport()), /Plugin Manager/)
+    /Settings · Categories/.test(plain(fixture.vt.getViewport())), 20_000)
+  assert.doesNotMatch(plain(fixture.vt.getViewport()), /Plugins · All/)
 
   fixture.vt.sendInput('\x1b')
   await waitFor('closing Settings returns to the editor', () =>
-    !/Type to search/.test(plain(fixture.vt.getViewport())), 20_000)
+    !/Settings · Categories/.test(plain(fixture.vt.getViewport())), 20_000)
 })
 
 test('L6-C: one real Remote mutation reaches Host authority and the authoritative reread repaints', async (t) => {
@@ -477,14 +475,14 @@ test('L6-C: one real Remote mutation reaches Host authority and the authoritativ
   await waitFor('the Host profile truth is written', () =>
     profile.selectedBundles().includes(bundle), 20_000)
   const detail = plain(fixture.vt.getViewport())
-  assert.match(detail, /enabled · DSH plugin/, 'the reread renders the enabled status')
-  assert.doesNotMatch(detail, /disabled · DSH plugin/, 'the stale disabled truth is gone')
+  assert.match(detail, /Enabled\s+Yes/, 'the reread renders the enabled status')
+  assert.doesNotMatch(detail, /Enabled\s+No/, 'the stale disabled truth is gone')
 
   // Truthful disposition: no hmr in this composition, so the Host reports
   // restart-required rather than pretending a live application.
   fixture.vt.sendInput('\x1b')
   await waitFor('the truthful restart-required disposition is shown', () =>
-    /restart the profile to apply/.test(plain(fixture.vt.getViewport())), 20_000)
+    /restart required/i.test(plain(fixture.vt.getViewport())), 20_000)
 })
 
 test('L6-D: an external Host change invalidates an open Remote panel with no manual refresh', async (t) => {
@@ -506,7 +504,7 @@ test('L6-D: an external Host change invalidates an open Remote panel with no man
   // No `R` key is ever sent: only the invalidation-driven authoritative reread
   // can repaint the already-open panel.
   await waitFor('the open panel repaints from the externally changed Host truth', () =>
-    (bundleLine(fixture.vt.getViewport(), bundle) ?? '').includes('active'), 20_000)
+    (bundleLine(fixture.vt.getViewport(), bundle) ?? '').includes('[enabled]'), 20_000)
 })
 
 test('L6-E: a new Connection generation rereads authoritative truth without replaying the prior mutation', async (t) => {
@@ -525,13 +523,14 @@ test('L6-E: a new Connection generation rereads authoritative truth without repl
   fixture.vt.sendInput('\x1b')
   await waitFor('the prior Enable reached both Host truth and the list render', () =>
     profile.selectedBundles().includes(bundle)
-    && (bundleLine(fixture.vt.getViewport(), bundle) ?? '').includes('active'), 20_000)
+    && (selectedRow(fixture.vt.getViewport()) ?? '').includes(bundle)
+    && plain(fixture.vt.getViewport()).includes('[enabled]'), 20_000)
 
   // External hand edit: authoritative truth becomes DISABLED and NOTHING is
   // announced (the official manager only announces its own operations).
   writeProfileBundles(profile.profileDir, [])
   await settle(250)
-  assert.match(bundleLine(fixture.vt.getViewport(), bundle) ?? '', /active/,
+  assert.match(plain(fixture.vt.getViewport()), /\[enabled\]/,
     'without an invalidation the open panel keeps its cached truth')
 
   const connection = fixture.aggregate.wire.client.connection as unknown as {
@@ -546,7 +545,7 @@ test('L6-E: a new Connection generation rereads authoritative truth without repl
   }, 20_000)
 
   await waitFor('the generation invalidation rereads the authoritative inventory', () =>
-    (bundleLine(fixture.vt.getViewport(), bundle) ?? '').includes('disabled'), 20_000)
+    plain(fixture.vt.getViewport()).includes('[disabled]'), 20_000)
 
   // The REPLAY-NEGATIVE: the earlier Enable really happened, so a reconnect
   // that replayed it would flip the durable Host truth back to selected (and

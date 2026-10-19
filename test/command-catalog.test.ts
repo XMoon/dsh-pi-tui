@@ -194,7 +194,7 @@ function stubRunner(
     setTerminalProgressMode: () => {}, setNotificationMethod: () => {},
     updateWelcomeCard: () => {},
     openJobView: () => {},
-    openTasksBrowser: () => {}, openPluginManager: () => {}, createPluginManagerSubmenu: () => ({ render: () => [], invalidate: () => {} }),
+    openTasksBrowser: () => {}, openPluginManager: () => {}, createPluginManagerPage: () => undefined,
     openRewindPicker: () => {},
     sessionTransitionPending: () => options.transitionPending ?? false,
     withSessionTransition: async <T>(task: () => T | Promise<T>) => task(),

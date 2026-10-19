@@ -188,7 +188,7 @@ function setup(options: { columns?: number; rows?: number; tuiSettings?: boolean
       : { get: () => doc, replace: () => undefined },
     extensions: options.themes === undefined ? undefined : { themes: options.themes, settings: new SettingsRegistry() },
     openPluginManager: () => {},
-    createPluginManagerSubmenu: () => ({ render: () => [], invalidate: () => {} }),
+    createPluginManagerPage: () => undefined,
     config: {
       configReadiness: () => 'ready' as const,
       permissions: { presetNames: () => [], defaultPreset: () => undefined, approvalOverrideOf: () => undefined },

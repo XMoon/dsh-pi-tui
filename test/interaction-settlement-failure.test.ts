@@ -63,7 +63,7 @@ async function settleOutcome<T>(
   ])
 }
 
-test('M3-6 PR3: a throwing overlay child dispose still fires the one-shot close notification', () => {
+test('M3-6 PR3: a throwing workspace panel dispose still fires the one-shot close notification', () => {
   const app = startApp()
   const failure = new Error('panel dispose failed')
   let closed = 0
@@ -79,7 +79,7 @@ test('M3-6 PR3: a throwing overlay child dispose still fires the one-shot close 
       throw failure
     },
   } as unknown as Component
-  const closer = app.openPluginManagerPanel(panel, () => { closed += 1 })
+  const closer = app.openPluginManagerWorkspace(panel, () => { closed += 1 })
 
   assert.throws(() => closer(), (error: unknown) => error === failure,
     'the child dispose failure stays observable')

@@ -145,7 +145,7 @@ function setup(options: { readonly columns: number; readonly rows: number; reado
     tuiSettings: { get: () => doc, replace: (next: TuiSettingsDoc) => { Object.assign(doc, next) } },
     extensions: undefined,
     openPluginManager: () => {},
-    createPluginManagerSubmenu: () => ({ render: () => [], dispose: () => {} }),
+    createPluginManagerPage: () => undefined,
     progressUpdatesState: { mode: 'milestones' },
     responseStyleState: { style: 'default' },
     gitAttributionState: { mode: 'off' },
@@ -213,7 +213,7 @@ async function openOtherRows(h: Harness): Promise<void> {
     await new Promise(resolve => setTimeout(resolve, 5))
     await h.vt.waitForRender()
   }
-  const keys = h.vt.columns >= 96 ? [TAB, TAB, DOWN, DOWN, ENTER] : [DOWN, DOWN, ENTER]
+  const keys = h.vt.columns >= 96 ? [TAB, TAB, DOWN, DOWN, DOWN, ENTER] : [DOWN, DOWN, DOWN, ENTER]
   for (const pressed of keys) await key(h, pressed)
 }
 

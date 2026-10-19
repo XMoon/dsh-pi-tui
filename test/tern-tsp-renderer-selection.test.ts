@@ -42,7 +42,7 @@ import { TranscriptFolder } from '../src/domain/transcript/folder.ts'
 import { TranscriptWindowController } from '../src/domain/transcript/window.ts'
 import { installVirtualProcessTerminal } from './support/runner-harness.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
-import { createPluginManagerPanel } from '../src/tui/plugin-manager/panel.ts'
+import { createPluginManagerWorkspacePanel } from '../src/tui/plugin-manager/workspace.ts'
 import { createSurfaceLifecycle } from '../src/app/bootstrap/lifecycle.ts'
 import { createExitController } from '../src/app/bootstrap/exit.ts'
 
@@ -269,7 +269,7 @@ function mountHarness(): Harness {
     notificationMethod: undefined,
     mainProgressAuthority: 'local-events',
     terminalProgress: undefined,
-    createPluginManagerPanel,
+    createPluginManagerPanel: createPluginManagerWorkspacePanel,
   })
   surface.attachEventRouting(source)
   const dispose = async (): Promise<void> => {

@@ -59,7 +59,7 @@ import {
 import type { SurfaceEventRoutingSource } from '../src/app/surface/event-routing.ts'
 import type { AssistantLiveInput } from '../src/runtime/assistant-stream-port.ts'
 import type { SubmissionPresentationItem } from '../src/app/submission/presentation.ts'
-import { createPluginManagerPanel } from '../src/tui/plugin-manager/panel.ts'
+import { createPluginManagerWorkspacePanel } from '../src/tui/plugin-manager/workspace.ts'
 import { TranscriptNodeKeys, transcriptView } from '../scripts/support/tern-tsp-transcript-view.ts'
 import { installVirtualProcessTerminal } from './support/runner-harness.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
@@ -281,7 +281,7 @@ function mountHarness(options: {
     mainProgressAuthority: 'local-events',
     notificationMethod: undefined,
     terminalProgress: undefined,
-    createPluginManagerPanel,
+    createPluginManagerPanel: createPluginManagerWorkspacePanel,
     onTranscriptProjected: frame => {
       frames.push(frame)
       options.onTranscriptProjected(frame)
@@ -966,7 +966,7 @@ function mountPresentationHarness(options: {
     mainProgressAuthority: 'local-events',
     notificationMethod: undefined,
     terminalProgress: undefined,
-    createPluginManagerPanel,
+    createPluginManagerPanel: createPluginManagerWorkspacePanel,
     onTranscriptProjected: frame => {
       frames.push(frame)
       options.onTranscriptProjected(frame)

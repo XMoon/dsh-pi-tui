@@ -42,7 +42,7 @@ import {
 } from '../src/app/surface/runtime.ts'
 import { TranscriptFolder } from '../src/domain/transcript/folder.ts'
 import { TranscriptWindowController } from '../src/domain/transcript/window.ts'
-import { createPluginManagerPanel } from '../src/tui/plugin-manager/panel.ts'
+import { createPluginManagerWorkspacePanel } from '../src/tui/plugin-manager/workspace.ts'
 import { isQuitKey, mountTspRenderer, type TspRenderer } from '../src/tui/tsp/session.ts'
 
 const ENCODER = new TextEncoder()
@@ -299,7 +299,7 @@ async function mountTspHarness(options: {
     notificationMethod: undefined,
     mainProgressAuthority: 'local-events',
     terminalProgress: undefined,
-    createPluginManagerPanel,
+    createPluginManagerPanel: createPluginManagerWorkspacePanel,
   })
   surface.attachEventRouting(source)
 
@@ -1329,7 +1329,7 @@ test('B3: the surface withdraws the interaction owner BEFORE it starts the rende
     notificationMethod: undefined,
     mainProgressAuthority: 'local-events',
     terminalProgress: undefined,
-    createPluginManagerPanel,
+    createPluginManagerPanel: createPluginManagerWorkspacePanel,
   })
   surface.start({
     events: { onSubmit: () => {}, onExit: () => {} },

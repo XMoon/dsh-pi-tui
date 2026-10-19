@@ -43,7 +43,7 @@ import type {
   QuestionWaitClaim,
   UserQuestionProvider,
 } from '../src/runtime/interaction-port.ts'
-import { createPluginManagerPanel } from '../src/tui/plugin-manager/panel.ts'
+import { createPluginManagerWorkspacePanel } from '../src/tui/plugin-manager/workspace.ts'
 import type { Diag } from '../src/runtime/process/diagnostics.ts'
 import { installVirtualProcessTerminal } from './support/runner-harness.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
@@ -540,7 +540,7 @@ function mountSurface(
     terminalProgress: options.terminalProgress,
     mainProgressAuthority: options.mainProgressAuthority ?? 'local-events',
     ...(options.diag === undefined ? {} : { diag: options.diag }),
-    createPluginManagerPanel,
+    createPluginManagerPanel: createPluginManagerWorkspacePanel,
   })
   surface.attachEventRouting(routingSource)
   const controls: SurfaceControls = {

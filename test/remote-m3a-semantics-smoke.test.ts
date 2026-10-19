@@ -526,7 +526,7 @@ async function mountSettingsWorkspace(
     },
     extensions: undefined,
     openPluginManager: () => {},
-    createPluginManagerSubmenu: () => ({ render: () => [], dispose: () => {} }),
+    createPluginManagerPage: () => undefined,
     catalog: { models: { available: () => false } },
   }
   const runner = new Proxy(base, {

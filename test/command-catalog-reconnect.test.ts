@@ -276,7 +276,7 @@ function fakeRunnerDeps(options: {
     setTerminalProgressMode: () => {}, setNotificationMethod: () => {},
     updateWelcomeCard: () => {},
     openJobView: () => {},
-    openTasksBrowser: () => {}, openPluginManager: () => {}, createPluginManagerSubmenu: () => ({ render: () => [], invalidate: () => {} }),
+    openTasksBrowser: () => {}, openPluginManager: () => {}, createPluginManagerPage: () => undefined,
     openRewindPicker: () => {},
     sessionTransitionPending: () => false,
     withSessionTransition: async <T>(task: () => T | Promise<T>) => task(),
@@ -393,7 +393,7 @@ function fakeRunnerDeps(options: {
     },
     pluginManager: {
       open: () => {},
-      submenu: () => ({ render: () => [], invalidate: () => {} }) as never,
+      page: () => undefined,
     },
     client: {
       runCopyCommand: undefined as never,

@@ -35,7 +35,7 @@ import { createSurfaceRuntime, type SurfaceRuntime, type SurfaceRendererMount } 
 import type { SurfaceEventRoutingSource } from '../src/app/surface/event-routing.ts'
 import { TranscriptFolder } from '../src/domain/transcript/folder.ts'
 import { TranscriptWindowController } from '../src/domain/transcript/window.ts'
-import { createPluginManagerPanel } from '../src/tui/plugin-manager/panel.ts'
+import { createPluginManagerWorkspacePanel } from '../src/tui/plugin-manager/workspace.ts'
 import { mountTspRenderer, type TspRenderer } from '../src/tui/tsp/session.ts'
 import type { TuiQuestionStatus } from '../src/app/surface/interaction-presenter.ts'
 type AskUserQuestionAnswer = { readonly answers: readonly { readonly id: string; readonly selected: string[]; readonly custom?: string }[] }
@@ -369,7 +369,7 @@ async function mountRunnerHarness(options: {
     notificationMethod: undefined,
     mainProgressAuthority: 'local-events',
     terminalProgress: undefined,
-    createPluginManagerPanel,
+    createPluginManagerPanel: createPluginManagerWorkspacePanel,
   })
   surface.attachEventRouting(source)
   const withdrawalBatches: number[] = []

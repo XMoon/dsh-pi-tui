@@ -1,7 +1,8 @@
 /**
- * `/settings → Plugins` entry tests (P1-A1.9): the row is a lazy SettingsList
- * submenu over the SAME Plugin Manager surface. Rendering /settings must not
- * read plugin inventory or build the submenu; activating the row builds it.
+ * `Settings → Plugins` entry tests (S4-D1): Plugins is a first-level Settings
+ * category that opens the ONE fullscreen Plugin page IN PLACE (no empty Rows
+ * level, no legacy overlay), and returning restores the same Settings screen
+ * with Plugins still selected.
  * @module @xmoon76/dsh-pi-tui/plugin-manager-settings-entry.test
  */
 
@@ -10,12 +11,12 @@ import { createClientCommandRegistry } from '../src/app/command/client-command-r
 import { parseCommand } from '@deepseek-ai/dsh-commands'
 import { afterEach, test } from 'node:test'
 import { Context } from '@deepseek-ai/cordis'
-import { registerTuiCommands, type TuiCommandRunner } from '../src/commands.ts'
+import type { Component } from '@xmoon76/pi-tui'
+import type { TuiCommandRunner } from '../src/commands.ts'
 import { createDiag } from '../src/runtime/process/diagnostics.ts'
 import { TuiApp } from '../src/tui-app.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 import { registerTuiCommandsWithDirectSeams } from './support/register-tui-commands.ts'
-import { openLegacySettingsPanel } from './support/open-legacy-settings.ts'
 
 const startedApps = new Set<TuiApp>()
 afterEach(() => {
@@ -26,9 +27,18 @@ afterEach(() => {
   }
 })
 
-function setup(): { invoke: (name: string) => unknown; counts: { opened: number; submenu: number }; vt: VirtualTerminal } {
+function plain(view: readonly string[]): string {
+  return view.map(line => line.replace(/\x1b\[[0-9;]*m/g, '')).join('\n')
+}
+
+function setup(): {
+  invoke: (name: string) => unknown
+  counts: { opened: number; page: number }
+  vt: VirtualTerminal
+  done: () => void
+} {
   const ctx = new Context()
-  const vt = new VirtualTerminal(80, 24)
+  const vt = new VirtualTerminal(100, 30)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
   startedApps.add(app)
@@ -41,42 +51,43 @@ function setup(): { invoke: (name: string) => unknown; counts: { opened: number;
   }
   ctx.provide('commands', commands as never)
   ctx.provide('skills', { list: async () => [], get: async () => undefined, find: () => undefined, execute: async () => undefined } as never)
-  const counts = { opened: 0, submenu: 0 }
+  const counts = { opened: 0, page: 0 }
+  let pageDone: (() => void) | undefined
+  const page: Component & { handleInput(data: string): void; dispose(): void } = {
+    render: (width: number) => ['PLUGIN PAGE'.padEnd(Math.max(1, width))],
+    invalidate: () => {},
+    handleInput: (data: string) => {
+      if (data === '\x1b') pageDone?.()
+    },
+    dispose: () => {},
+  }
   const base: Record<string, unknown> = {
     ctx,
     app,
     diag: createDiag({ filePath: undefined, stderrLevel: 'off' }),
     cwd: '/ws',
-    sessionCwd: () => '/ws',
-    progressUpdatesState: { mode: 'milestones' },
-    responseStyleState: { style: 'default' }, gitAttributionState: { mode: 'off' },
     signal: new AbortController().signal,
     commandRegistry: commands,
     clientCommands: createClientCommandRegistry(parseCommand),
     recordExtensionError: () => {},
     clearExtensionError: () => {},
     captureExtensionHealthRef: () => () => {},
-    // A sessionless surface: the completion install and the /settings
-    // session rows must see no live scope.
     currentSessionId: undefined,
     captureLiveSessionScope: () => undefined,
     listScopedCommands: () => [],
     tuiSettings: undefined,
     extensions: undefined,
     openPluginManager: () => { counts.opened += 1 },
-    createPluginManagerSubmenu: () => {
-      counts.submenu += 1
-      return { render: () => [], invalidate: () => {} }
+    createPluginManagerPage: (done: () => void) => {
+      counts.page += 1
+      pageDone = done
+      return page
     },
     config: {
       configReadiness: () => 'ready' as const,
       permissions: { presetNames: () => [], defaultPreset: () => undefined, approvalOverrideOf: () => undefined },
       subagentModelSelection: { available: () => false },
-      // The Web provider section is Host-only (S2/PR-B): this stub composes no
-      // Host settings plane, so the section reports unavailable and offers no write.
       web: { available: () => false },
-      // The credential STORE is not mounted either: the Web section's key row
-      // reports unavailable instead of claiming "not configured".
       credentials: { available: () => false },
     },
     catalog: { models: { available: () => false } },
@@ -90,29 +101,41 @@ function setup(): { invoke: (name: string) => unknown; counts: { opened: number;
     assert.ok(definition?.handler !== undefined, `${name} must be registered`)
     return (definition.handler as (invocation: { rawInput: string }) => unknown)({ rawInput: '' })
   }
-  return { invoke, counts, vt }
+  return { invoke, counts, vt, done: () => pageDone?.() }
 }
 
-test('opening /settings alone never builds the Plugin Manager submenu', () => {
-  const { invoke, counts } = setup()
-  invoke('settings')
-  assert.equal(counts.submenu, 0)
+test('opening /settings alone never builds the inline Plugin page', async () => {
+  const { invoke, counts, vt } = setup()
+  await invoke('settings')
+  await vt.waitForRender()
+  assert.equal(counts.page, 0)
   assert.equal(counts.opened, 0)
+  // The first-level category is visible; Plugins is one of the four.
+  const view = plain(vt.getViewport())
+  assert.match(view, /Settings/)
+  assert.match(view, /Plugins/)
 })
 
-test('the static Plugins / Manage… row is rendered and activating it builds the same submenu', async () => {
+test('Settings → Plugins opens the page in place; Esc returns to the same Settings L0', async () => {
   const { invoke, counts, vt } = setup()
-  await openLegacySettingsPanel(invoke, vt)
-  assert.equal(counts.submenu, 0, 'rendering the row alone must not build the submenu')
-  // Type into the Settings search box to filter down to the Plugins row.
-  for (const ch of 'plugins') {
-    vt.sendInput(ch)
-    await vt.waitForRender()
-  }
-  const view = vt.getViewport().map(line => line.replace(/\x1b\[[0-9;]*m/g, '')).join('\n')
-  assert.match(view, /Plugins/, `viewport:\n${view}`)
-  assert.match(view, /Manage…/)
+  await invoke('settings')
+  await vt.waitForRender()
+  // L0 starts on Appearance; move to Plugins (third category) and open it.
+  vt.sendInput('\x1b[B')
+  vt.sendInput('\x1b[B')
+  await vt.waitForRender()
   vt.sendInput('\r')
   await vt.waitForRender()
-  assert.equal(counts.submenu, 1, 'activating the row builds the shared Plugin Manager panel')
+  assert.equal(counts.page, 1, 'activating the Plugins category builds the shared page')
+  assert.equal(counts.opened, 0)
+  assert.match(plain(vt.getViewport()), /PLUGIN PAGE/)
+
+  // The page's normal close returns to Settings L0 with Plugins selected.
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+  const back = plain(vt.getViewport())
+  assert.doesNotMatch(back, /PLUGIN PAGE/)
+  assert.match(back, /Settings/)
+  assert.match(back, /Plugins/)
+  assert.match(back, /> Plugins/)
 })

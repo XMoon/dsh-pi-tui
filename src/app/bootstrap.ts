@@ -123,7 +123,7 @@ import { createSurfaceRuntime } from '../app/surface/runtime.ts'
 import type { SurfaceRendererMount } from '../app/surface/runtime.ts'
 import { productionTspConnector, selectRendererMount, tspRequested } from './bootstrap/renderer-selection.ts'
 import { createTerminalOutputGate } from './bootstrap/terminal-output.ts'
-import { createPluginManagerPanel } from '../tui/plugin-manager/panel.ts'
+import { createPluginManagerWorkspacePanel } from '../tui/plugin-manager/workspace.ts'
 import { type SessionQueryLike } from '../runtime/direct/session-direct.ts'
 import { type WorkingDirectoryServiceLike } from '../runtime/direct/working-directory-direct.ts'
 import { serializeTuiSettingsMutation, type TuiSettingsDoc } from '../runtime/config-port.ts'
@@ -506,7 +506,7 @@ export function applyRunnerWithRuntime(
       // TS4 §10: the composition zone selects the CONCRETE Plugin Manager panel
       // implementation; the application surface owner consumes only the injected
       // factory and never imports `tui/**` itself.
-      createPluginManagerPanel,
+      createPluginManagerPanel: createPluginManagerWorkspacePanel,
     })
 
     // The live Agent is declared before the TUI-facing facade so every read
@@ -1769,7 +1769,7 @@ export function applyRunnerWithRuntime(
       },
       pluginManager: {
         open: () => pluginManager.open(),
-        submenu: (done) => pluginManager.submenu(done),
+        page: (done) => pluginManager.page(done),
       },
       client: {
         get runCopyCommand() { return clientActions.runCopyCommand },

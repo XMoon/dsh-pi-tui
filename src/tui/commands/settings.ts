@@ -75,7 +75,7 @@ type SettingsCommandRunner = Pick<
   | 'catalog'
   | 'clientCommands'
   | 'config'
-  | 'createPluginManagerSubmenu'
+  | 'createPluginManagerPage'
   | 'currentApprovalOverride'
   | 'currentPreset'
   | 'currentSessionId'
@@ -681,6 +681,7 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
       },
       {
         onOpenLegacy: (targetId) => { openLegacySettings(targetId) },
+        onOpenPlugins: (done) => runner.createPluginManagerPage(done),
         onCommit: commitSettingsWorkspaceField,
         ...(initialRowId === undefined ? {} : { initialRowId }),
         onClose: () => {
@@ -1851,19 +1852,6 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
               currentValue: row.currentValue,
               ...(row.values.length > 0 ? { values: [...row.values] } : {}),
             })),
-            // P1: lazy discovery entry into the SAME Plugin Manager surface.
-            // Opening /settings never reads plugin inventory/registries — the
-            // submenu factory runs only when the row is activated, and the
-            // outer value is static (no eager counts in P1). Placed LAST so the
-            // existing settings row order/index contract is unchanged.
-            {
-              id: 'plugins',
-              label: 'Plugins',
-              description: 'Manage DSH plugins and TUI extensions',
-              currentValue: 'Manage…',
-              submenu: (_currentValue: string, done: (selected?: string) => void) =>
-                runner.createPluginManagerSubmenu(done),
-            },
           ],
           (id, value, revert, navigate) => {
             if (id === 'approval') {
