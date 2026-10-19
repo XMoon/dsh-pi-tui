@@ -75,9 +75,8 @@ readable through the official persistence contract.
 - The official DSH reader/writer is the only authority for the physical Session
   format. The TUI displays what the official reader returns and never parses or
   rewrites the on-disk format itself.
-- Historical DSH `0.1.5-rc.1` persists **Session V2**; `0.1.5-rc.2` and later
-  lines persist **Session V3** and own the V2-to-V3 migration when an older
-  Session is opened. The released-v3 reader contract refuses newer event types
+- An older DSH runtime line persisted **Session V2**; later lines persist
+  **Session V3** and own the V2-to-V3 migration when an older Session is opened. The released-v3 reader contract refuses newer event types
   it cannot represent.
 - Opening an older generation through the official migration performs no write;
   only an explicit write open publishes the successor. A newer unsupported
