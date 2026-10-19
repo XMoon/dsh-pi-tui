@@ -96,6 +96,12 @@ interface HarnessOptions {
    * UI -> adapter -> SettingsForms -> authoritative re-read chain is production.
    */
   tuiSettings?: { get(): TuiSettingsDoc; replace(doc: TuiSettingsDoc): unknown }
+  /**
+   * Build a minimal Plugin page when the Settings Plugins entry activates it
+   * (S4-D2 / D2-0): lets a visual case prove that a frame with no painted
+   * affordance can never dispatch the entry.
+   */
+  pluginPage?: boolean
 }
 
 interface Harness {
@@ -122,6 +128,8 @@ interface Harness {
   readonly writes: () => readonly string[]
   /** Run every owned task the harness is holding (`holdOwned`). */
   readonly releaseOwned: () => void
+  /** How many times the Settings Plugins entry built its page (D2-0). */
+  readonly pluginPages: () => number
   readonly dispose: () => void
 }
 
@@ -137,6 +145,7 @@ function setup(options: HarnessOptions = {}): Harness {
   const held: Array<() => void> = []
   let reads = 0
   let replacements = 0
+  let pluginPages = 0
   const doc: TuiSettingsDoc = { ...DEFAULT_DOC, ...options.doc }
   // A real owned runner: the copy intent must travel the production `runOwned`
   // ownership path instead of a stubbed promise.
@@ -223,7 +232,16 @@ function setup(options: HarnessOptions = {}): Harness {
         },
     extensions: options.themes === undefined ? undefined : { themes: options.themes },
     openPluginManager: () => {},
-    createPluginManagerPage: () => undefined,
+    createPluginManagerPage: () => {
+      if (options.pluginPage !== true) return undefined
+      pluginPages += 1
+      return {
+        render: (width: number) => ['PLUGIN PAGE'.padEnd(Math.max(1, width))],
+        invalidate: () => {},
+        handleInput: () => {},
+        dispose: () => {},
+      }
+    },
     config: {
       configReadiness: () => options.readiness ?? 'ready',
       footerCustomItems: { rawForPersistence: () => ({ kind: 'available', value: undefined }) },
@@ -272,6 +290,7 @@ function setup(options: HarnessOptions = {}): Harness {
     calls: () => calls,
     warnings: () => warnings,
     writes: () => writes,
+    pluginPages: () => pluginPages,
     releaseOwned: () => {
       const list = held.splice(0)
       for (const run of list) run()
@@ -3299,4 +3318,92 @@ test('A-16 the frozen §11.2 matrix keeps the §8 ladder-derived chrome at every
       h.dispose()
     }
   }
+})
+
+// ── D2-0: the UI-only Plugins direct entry in the Rows pane ───────────────
+
+/** Move the L0 selection from Appearance to Plugins (two categories down). */
+const toPlugins = async (h: Harness): Promise<void> => {
+  await key(h, '\x1b[B')
+  await key(h, '\x1b[B')
+}
+
+test('D2-0 120×40 and 80×24 paint the UI-only Plugins entry in the real Rows column', async () => {
+  for (const [columns, rows] of [[120, 40], [80, 24]] as const) {
+    const h = setup({ columns, rows, pluginPage: true })
+    await h.open()
+    await toPlugins(h)
+    const frame = h.rowsPlain()
+    const headerRow = rowOf(h, 'Rows (1)')
+    const entryRow = rowOf(h, 'Open Plugin Manager')
+    // The Rows pane begins after the 22-cell categories column and its 2-cell
+    // gutter at BOTH widths; the action keeps the list's two-cell indent.
+    assert.equal(cellIndexOf(h, headerRow, 'Rows (1)'), 24, `the Rows pane starts at cell 24:\n${h.view()}`)
+    assert.equal(cellIndexOf(h, entryRow, 'Open Plugin Manager'), 26, `the action starts at cell 26:\n${h.view()}`)
+    assert.equal(frame[entryRow]!.slice(24, 26), '  ', 'the affordance is indented like a list row')
+    assert.ok(!frame[entryRow]!.slice(24).includes('>'),
+      'the second column paints no second strong selection cursor')
+    assert.match(frame[entryRow]!, /Open Plugin Manager  Enter \/ Right/,
+      'the complete action name and its weak hint are painted')
+    // The live palette roles: the action name is `textStrong` and the hint is
+    // the weakest readable ink (`textMuted`); neither is `primary`.
+    assert.equal(h.vt.getCellFgRgb(entryRow, 26), hexToRgb(currentPalette.textStrong),
+      'the action name uses textStrong')
+    assert.equal(h.vt.getCellFgRgb(entryRow, cellIndexOf(h, entryRow, 'Enter / Right')), hexToRgb(currentPalette.textMuted),
+      'the Enter / Right hint uses textMuted')
+    assert.notEqual(h.vt.getCellFgRgb(entryRow, 26), hexToRgb(currentPalette.primary),
+      'the entry is not the primary cursor')
+    assert.ok(h.view().includes('[Categories (4)]'), 'L0 keeps its ONE active pane device')
+    assert.ok(!h.view().includes('[Rows'), 'the rows column is not a second focus owner')
+    assertBarIsLastRow(h.rowsPlain(), (row, col) => h.vt.getCellFgRgb(row, col), 'Esc close')
+    h.dispose()
+  }
+})
+
+test('D2-0 80×10 keeps the visible direct entry above the pinned bar', async () => {
+  const h = setup({ columns: 80, rows: 10, pluginPage: true })
+  await h.open()
+  await toPlugins(h)
+  assert.match(h.view(), /Rows \(1\)/, 'the short screen still paints the rows header')
+  assert.match(h.view(), /Open Plugin Manager/, 'and the visible direct entry')
+  assertBarIsLastRow(h.rowsPlain(), (row, col) => h.vt.getCellFgRgb(row, col), 'Esc close')
+  await key(h, '\r')
+  assert.equal(h.pluginPages(), 1, 'the visible entry remains operable at 80×10')
+  h.dispose()
+})
+
+test('D2-0 44×20 narrow paints no second-column affordance and keeps the direct key entry', async () => {
+  const h = setup({ columns: 44, rows: 20, pluginPage: true })
+  await h.open()
+  await toPlugins(h)
+  assert.doesNotMatch(h.view(), /Rows \(/, 'the narrow projection paints no pane header')
+  assert.doesNotMatch(h.view(), /Open Plugin Manager/, 'no second-column affordance exists at 44×20')
+  assert.match(h.view(), /> Plugins/, 'Plugins stays selected in the single column')
+  assertBarIsLastRow(h.rowsPlain(), (row, col) => h.vt.getCellFgRgb(row, col), 'Esc close')
+  await key(h, '\r')
+  assert.equal(h.pluginPages(), 1, 'Enter still opens the direct page from the narrow list')
+  h.dispose()
+})
+
+test('D2-0 below the body floor the entry is not painted and every input is fail-closed', async () => {
+  const h = setup({ columns: 120, rows: 40, pluginPage: true })
+  await h.open()
+  await toPlugins(h)
+  const navRow = rowOf(h, 'Open Plugin Manager')
+  const navCol = cellIndexOf(h, navRow, 'Open Plugin Manager')
+  // 2 terminal rows leave the header and the pinned bar but ZERO body rows.
+  h.vt.resize(120, 2)
+  await h.vt.waitForRender()
+  const short = h.rowsPlain()
+  assert.equal(short.length, 2, `the short frame keeps only the mandatory chrome:\n${h.view()}`)
+  assert.doesNotMatch(short.join('\n'), /Open Plugin Manager/, 'no invisible affordance may be painted')
+  // Neither key nor a stale click coordinate can dispatch what the frame no
+  // longer paints: the body floor refuses both.
+  await key(h, '\r')
+  await key(h, '\x1b[C')
+  press(h, navRow, navCol)
+  release(h, navRow, navCol)
+  await h.vt.waitForRender()
+  assert.equal(h.pluginPages(), 0)
+  h.dispose()
 })

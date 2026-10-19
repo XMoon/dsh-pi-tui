@@ -280,7 +280,7 @@ interface PaneLayout {
 }
 
 interface HitTarget {
-  readonly kind: 'category' | 'row' | 'copy' | 'legacy' | 'pane' | 'change' | 'retry' | 'option' | 'confirm' | 'cancel'
+  readonly kind: 'category' | 'row' | 'plugin-launch' | 'copy' | 'legacy' | 'pane' | 'change' | 'retry' | 'option' | 'confirm' | 'cancel'
   /** The stable identity: a category id, a row id, the pane name, a candidate
    *  value or the button verb. */
   readonly id: string
@@ -766,6 +766,23 @@ export class SettingsWorkspacePanel implements Component {
         continue
       }
       if (pane.page === 'rows') {
+        if (this.categoryId === 'plugins') {
+          // S4-D2 / D2-0: the Plugins category paints ONE UI-only direct-page
+          // affordance instead of a fabricated Settings row. It is not part of
+          // the snapshot, owns no row id/writable field and publishes the hit
+          // target of exactly the cells this pane really painted.
+          if (contentRows > 0) {
+            itemHits.push({
+              kind: 'plugin-launch',
+              id: 'plugins',
+              row: contentTop,
+              startCol: pane.x,
+              endCol: pane.x + pane.width,
+            })
+            paneLines.set('rows', [this.pluginLaunchLine(pane.width)])
+          }
+          continue
+        }
         const rows = this.currentRows()
         const selected = this.indexOfRow(rows)
         if (selected !== this.lastRowIndex || contentRows !== this.lastRowViewport) {
@@ -808,7 +825,7 @@ export class SettingsWorkspacePanel implements Component {
 
     for (const pane of layout) {
       let maxOffset = Math.max(0, CATEGORY_ORDER.length - contentRows)
-      if (pane.page === 'rows') maxOffset = Math.max(0, this.currentRows().length - contentRows)
+      if (pane.page === 'rows') maxOffset = Math.max(0, this.rowsPaneCount() - contentRows)
       else if (pane.page === 'detail') {
         maxOffset = detailProjection === undefined ? 0 : Math.max(0, detailProjection.content.length - detailProjection.viewport)
       }
@@ -851,7 +868,7 @@ export class SettingsWorkspacePanel implements Component {
         const title = pane.page === 'categories'
           ? `Categories (${CATEGORY_ORDER.length})`
           : pane.page === 'rows'
-            ? `Rows (${this.currentRows().length})`
+            ? `Rows (${this.rowsPaneCount()})`
             : 'Details'
         return fit(this.paneHeader(title, this.focus === pane.page), pane.width)
       })
@@ -1463,6 +1480,27 @@ export class SettingsWorkspacePanel implements Component {
     return this.snapshot.rows.filter(row => row.category === this.categoryId)
   }
 
+  /** The count the Rows pane header states: the ONE visible direct-page
+   *  affordance for Plugins, the real snapshot rows for every other category.
+   *  It counts painted rows, never Host settings rows. */
+  private rowsPaneCount(): number {
+    return this.categoryId === 'plugins' ? 1 : this.currentRows().length
+  }
+
+  /** The UI-only Plugins entry affordance (S4-D2 / D2-0): a plain action name
+   *  with a weak `Enter / Right` hint, deliberately WITHOUT the `> ` selection
+   *  cursor — L0 keeps exactly one active signal, and this row is never a
+   *  configurable Settings row. The hint drops WHOLE when it cannot fit. */
+  private pluginLaunchLine(width: number): string {
+    const label = `  ${color.textStrong('Open Plugin Manager')}`
+    const hint = 'Enter / Right'
+    const room = width - visibleWidth(label)
+    const painted = room >= hint.length + 2
+      ? `${label}  ${color.textMuted(hint)}`
+      : label
+    return fit(painted, width)
+  }
+
   private firstRowOf(category: SettingsWorkspaceCategoryId): SettingsWorkspaceRowId {
     const rows = this.snapshot.rows.filter(row => row.category === category)
     return rows[0]?.id ?? this.snapshot.rows[0]?.id ?? 'theme'
@@ -2053,6 +2091,11 @@ export class SettingsWorkspacePanel implements Component {
         }
         this.selectCategory(target.id as SettingsWorkspaceCategoryId, 'categories')
         return
+      case 'plugin-launch':
+        // The painted affordance is the SAME direct entry Enter/Right take: no
+        // L1 transition, no row selection and no second page factory.
+        this.openPluginsPage()
+        return
       case 'row': {
         this.selectRow(target.id as SettingsWorkspaceRowId, 'rows')
         // The row's `open-legacy` action is the ONE navigation verb (never an
@@ -2101,6 +2144,11 @@ export class SettingsWorkspacePanel implements Component {
         return
       case 'pane': {
         const page = target.id as SettingsWorkspacePage
+        // The Plugins category has NO L1/L2 of its own: its Rows and Details
+        // columns are the direct-page description only, so the pane fallback
+        // must never fabricate a level the keyboard cannot return from. Other
+        // categories keep their normal column focus.
+        if (this.categoryId === 'plugins' && page !== 'categories') return
         if (page === 'detail' && this.focus !== 'detail') this.enterDetail()
         else this.takeColumnFocus(page)
         return

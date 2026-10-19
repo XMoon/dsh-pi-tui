@@ -354,6 +354,154 @@ The arrow is gone because `←` (U+2190) is EAW-ambiguous (§4.3), and the chip 
 | 11 | Bar started with `Esc close` / `Esc back` | `Esc close` / `Esc back` moves to the TAIL | D8: the family puts `Esc` last everywhere — every overlay already does, and the two workspaces follow |
 | — | Pane geometry `22 / 42 / 2`, breakpoints `108`/`76`, row-budget order, every write/confirm/status semantic | unchanged | this PR is vocabulary only |
 
+### 3.8 Plugins category — the UI-only Rows navigation affordance (S4-D2 / D2-0)
+
+**AFTER — real output at this HEAD** (captured through the production `/settings`
+command, a `VirtualTerminal` and the real Settings workspace projection; the
+capture is the `getViewport()` text with trailing padding trimmed). The L0
+`Plugins` category keeps its one-step direct entry and, in the multi-column
+projection, paints ONE UI-only affordance in the Rows pane: no `SettingsWorkspaceRowId`,
+value, freshness or editable field exists for it, and a click opens the SAME page
+as `Enter`/`Right` in the same Alt-Screen lease.
+
+`120×40` (wide: Categories | Rows | Details; the Rows header counts the one
+painted affordance, not Host settings rows):
+
+```text
+Settings · Categories                                                                                    2 editable rows
+Scope: TUI preferences · Refreshed 15:11 · Config Ready
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+[Categories (4)]        Rows (1)                                    Details
+  Appearance              Open Plugin Manager  Enter / Right        This category is a direct page entry. Press Enter o…
+  Display
+> Plugins
+  Other settings
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+Up/Down select · Right open · Enter open · Esc close
+```
+
+`80×24` (medium L0: Categories | Rows):
+
+```text
+Settings · Categories                                            2 editable rows
+Scope: TUI preferences · Refreshed 15:11 · Config Ready
+────────────────────────────────────────────────────────────────────────────────
+[Categories (4)]        Rows (1)
+  Appearance              Open Plugin Manager  Enter / Right
+  Display
+> Plugins
+  Other settings
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+────────────────────────────────────────────────────────────────────────────────
+Up/Down select · Right open · Enter open · Esc close
+```
+
+`80×10` (short screen: the entry stays visible above the pinned bar):
+
+```text
+Settings · Categories                                            2 editable rows
+Scope: TUI preferences · Refreshed 15:11 · Config Ready
+────────────────────────────────────────────────────────────────────────────────
+[Categories (4)]        Rows (1)
+  Appearance              Open Plugin Manager  Enter / Right
+  Display
+> Plugins
+  Other settings
+────────────────────────────────────────────────────────────────────────────────
+Up/Down select · Right open · Enter open · Esc close
+```
+
+`44×20` (narrow: one column, no Rows pane and no second-column affordance; the
+direct `Enter` entry is unchanged):
+
+```text
+Settings · Categories
+Scope: TUI preferences · Refreshed 15:11
+────────────────────────────────────────────
+  Appearance
+  Display
+> Plugins
+  Other settings
+
+
+
+
+
+
+
+
+
+
+
+────────────────────────────────────────────
+Right open · Enter open · Esc close
+```
+
+What changes on these frames (relative to the S4-D1 Settings frames above): the
+Plugins Rows pane is no longer painted as an empty `Rows (0)` list; the single
+affordance is indented like a real row (`textStrong` action name, `textMuted`
+`Enter / Right` hint) but paints no `> ` cursor and is never the primary active
+device. Below the body floor (`120×2`) neither the affordance nor any stale hit
+target is painted, so only `Esc` remains available.
+
+**Real-terminal record (2026-10-19, D2-0 candidate).** tmux 3.5a,
+`TERM=tmux-256color`, the default auto-detected dark theme, terminal default
+monospace font, no physical GUI (therefore no `GUI_PASS`). The TUI was launched
+from an isolated `DSH_HOME` profile that links THIS worktree
+(`@deepseek-ai/dsh-base` + `@xmoon76/dsh-pi-tui`; no user sessions, credentials
+or real profile were used). At `120×40` `/settings` painted the frame shown
+above; a real SGR left press+release at the painted row opened the SAME real
+Plugin Manager page as `Enter` (the page reported the live Host catalog:
+`22 plugins · 3 enabled`), `Esc` returned to `Settings · Categories` with
+`> Plugins` selected, and `Enter` opened the same page again. Live resizes to
+`80×24` and `44×20` matched the captured frames (the narrow projection painted
+no Rows pane). Light/custom themes and the `80×10` real-terminal case were not
+exercised in this tmux pass; their headless cell/colour evidence is above.
+
+
 ## 4. Job
 
 ### 4.1 Wide 120×40 — Output, running
