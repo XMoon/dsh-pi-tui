@@ -1740,3 +1740,33 @@ test('an open Work with a nested snapshot cluster keeps the Preparing row after 
     line.includes('SNAPSHOT_PART_A') || line.includes('SNAPSHOT_PART_B') || /Read\b/.test(line) ? index : last, -1)
   assert.ok(preparing > lastPart, `the live call follows every durable part (cluster header/members and Tool):\n${joined}`)
 })
+
+test('a turnless command after a snapshot-tail Work starts a new pending run', async () => {
+  const { vt, app } = startApp('compact')
+  const snapshot: TranscriptMessage = {
+    kind: 'system', turn: 1, text: 'time reading', label: 'time-context', context: true,
+    contextPresentation: { form: 'snapshot', sourceKind: 'time-context', role: 'inject' },
+  }
+  const command = {
+    kind: 'command', commandId: 'cmd-status', seq: 1, time: T0,
+    name: 'status', args: '', outcome: null,
+  } as unknown as TranscriptMessage
+  app.setTranscript([
+    { kind: 'thinking', turn: 1, text: 'working' },
+    snapshot,
+    command,
+  ], new Map(), undefined, [
+    { callId: 'cmd-preparing', argumentBytes: 3, turn: 1, step: 0, index: 0, name: 'bash', summary: 'pnpm test' },
+  ])
+  await vt.waitForRender()
+  const lines = vt.getViewport()
+  const view = lines.join('\n')
+  const commandRow = lines.findIndex(line => line.includes('/status'))
+  const preparingRow = lines.findIndex(line => line.includes('Preparing Bash'))
+  assert.ok(commandRow >= 0, `the command boundary renders:\n${view}`)
+  assert.ok(preparingRow >= 0, `the new pending run renders:\n${view}`)
+  assert.ok(preparingRow > commandRow, `the new run starts AFTER the command boundary:\n${view}`)
+  assert.equal(workHeaders(view).length, 1, `the closed Work renders as its own Activity:\n${view}`)
+  assert.ok(!lines.some(line => /Action:\s+Preparing/.test(line)),
+    `the closed Activity must not own the new run in its Action slot:\n${view}`)
+})

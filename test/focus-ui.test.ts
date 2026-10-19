@@ -4082,3 +4082,34 @@ test('expanded Focus inserts the live Preparing call after every nested Work par
   assert.ok(preparingRow > clusterRow, `the live call follows the nested cluster header:\n${joined}`)
   assert.ok(preparingRow > toolRow, `the live call follows every durable Work part:\n${joined}`)
 })
+
+test('expanded Focus starts a post-command Preparing row after the turnless command', async () => {
+  const { vt, app } = startApp({ preset: 'focus' })
+  const folder = new TranscriptFolder()
+  applyMixed(folder, [
+    eventAt('turn/start', { turn: 1 }, T0, 0),
+    eventAt('user/message', {
+      id: MessageId('cmd-focus-u1'), role: 'user',
+      content: [{ type: 'text', text: 'go' }],
+      source: { kind: 'user' },
+    }, T0 + 1, 1),
+    eventAt('assistant/chunk', { turn: 1, step: 0, chunk: { type: 'reasoning-delta', index: 0, text: 'working' } }, T0 + 2, 2),
+    focusSnapshotEvent('cmd-focus-snap', 'time reading', T0 + 3, 3),
+    eventAt('command/run', { commandId: 'cmd-focus-status', name: 'status' }, T0 + 4, 4),
+  ])
+  show(app, folder, [
+    { callId: 'cmd-focus-preparing', argumentBytes: 3, turn: 1, step: 0, index: 0, name: 'bash', summary: 'pnpm test' },
+  ])
+  app.expandFocusTurn(1)
+  await vt.waitForRender()
+  const lines = vt.getViewport()
+  const view = lines.join('\n')
+  const commandRow = lines.findIndex(line => line.includes('/status'))
+  const preparingRow = lines.findIndex(line => line.includes('Preparing Bash'))
+  assert.ok(hasFocusHeader(view, true), `precondition: the Thought is open:\n${view}`)
+  assert.ok(commandRow >= 0, `the command boundary renders:\n${view}`)
+  assert.ok(preparingRow >= 0, `the new pending run renders:\n${view}`)
+  assert.ok(preparingRow > commandRow, `the pending run follows the command boundary:\n${view}`)
+  assert.ok(!lines.some(line => /Action:\s+Preparing/.test(line)),
+    `the collapsed Action slot never owns a call from a new run:\n${view}`)
+})
