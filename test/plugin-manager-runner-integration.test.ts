@@ -240,17 +240,48 @@ test('hostile plugin metadata never reaches the mounted panel TTY raw', async (t
   const hostile = 'evil\u001b]52;c;YXR0YWNr\u0007\u001b[2J\u009b2Jname'
   const manager = {
     ...fakePluginManager(),
-    // The Host bundle projection is external package metadata.
+    // The Host bundle projection and its Loader row identity are external
+    // package metadata; the row entryId reaches the Detail action label.
     listBundles: async () => [{
       name: hostile, version: hostile, enabled: true, installed: true,
-      optional: false, removable: true, rows: [], overrides: [],
+      optional: false, removable: true,
+      rows: [{ rowId: 'evil-row', moduleName: 'evil', entryId: hostile }],
+      overrides: [],
     }],
   }
   const { vt, harness } = await mountPluginRunner(t, manager)
   invokeCommand(harness, 'plugins')
   await vt.waitForRender()
+  vt.sendInput('\r') // open Details; the row action label carries entryId
+  await vt.waitForRender()
   const raw = vt.writes.join('')
   assert.ok(!raw.includes('YXR0YWNr'), `no OSC 52 payload from plugin metadata reaches the TTY:\n${plain(vt.getViewport())}`)
   assert.ok(!raw.includes('\u009b'), 'no raw C1 byte from plugin metadata reaches the TTY')
   assert.match(plain(vt.getViewport()), /evil/, 'the readable plugin metadata survives the projection')
+})
+
+test('a hostile Host installTarget spec is projected before the install Input renders it', async (t) => {
+  const hostile = 'evil\u001b]52;c;YXR0YWNr\u0007\u001b[2J\u009b2Jname'
+  const manager = {
+    ...fakePluginManager(),
+    listBundles: async () => [{
+      name: 'missing-official', official: true, availability: 'missing',
+      version: '1.0.0', enabled: false, installed: false, optional: true,
+      removable: false, rows: [], overrides: [],
+      installTarget: { spec: hostile, version: '1.0.0' },
+    }],
+    // The refused/errored inspect sends the editor back with the target seeded.
+    inspect: async () => { throw new Error('inspect unavailable') },
+  }
+  const { vt, harness } = await mountPluginRunner(t, manager)
+  invokeCommand(harness, 'plugins')
+  await vt.waitForRender()
+  vt.sendInput('\r') // Details
+  await vt.waitForRender()
+  vt.sendInput('\r') // Install… -> official inspect
+  await vt.waitForRender()
+  const raw = vt.writes.join('')
+  assert.ok(!raw.includes('YXR0YWNr'), `no OSC 52 payload from installTarget.spec reaches the TTY:\n${plain(vt.getViewport())}`)
+  assert.ok(!raw.includes('\u009b'), 'no raw C1 byte from installTarget.spec reaches the TTY')
+  assert.match(plain(vt.getViewport()), /evilname/, 'the readable target survives the projection')
 })

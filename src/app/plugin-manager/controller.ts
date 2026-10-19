@@ -287,6 +287,17 @@ export class PluginManagerController {
     return phase === 'starting' || phase === 'installing' || phase === 'applying' || phase === 'cancelling'
   }
 
+  /**
+   * Whether the current attempt has a result/request worth reopening on a new
+   * page. Failed/unknown outcomes carry pending-build approval, diagnostics and
+   * the original request id; a recently done install carries its result. A
+   * merely editing/inspecting/confirming draft is restored by `i` instead.
+   */
+  hasResumableInstall(): boolean {
+    const phase = this.install?.phase
+    return phase === 'done' || phase === 'failed' || phase === 'unknown' || this.hasDispatchedInstall()
+  }
+
   /** The install dialog view, when an attempt exists. */
   installView(): PluginInstallView | undefined {
     const active = this.install
@@ -341,7 +352,11 @@ export class PluginManagerController {
 
   // ── install lifecycle ────────────────────────────────────────────────────
 
-  /** Open a fresh manual install editor; a live operation is reopened instead. */
+  /**
+   * Explicitly start a fresh manual editor. The UI only calls this when no
+   * attempt exists, or from the explicit New-install action on a terminal
+   * result; reopening an existing attempt must not reach this method.
+   */
   beginManualInstall(): boolean {
     if (this.disposed) return false
     const active = this.install
@@ -651,10 +666,39 @@ export class PluginManagerController {
    * overwriting the busy identity/token.
    */
   private refuseWhileMutating(): boolean {
-    if (this.busyValue === undefined) return false
-    this.message = 'another plugin change is still in progress; wait for it to settle'
-    this.hooks.requestRender()
-    return true
+    if (this.busyValue !== undefined) {
+      this.message = 'another plugin change is still in progress; wait for it to settle'
+      this.hooks.requestRender()
+      return true
+    }
+    if (this.state === 'loading') {
+      this.message = 'the plugin inventory is refreshing; wait for it to settle'
+      this.hooks.requestRender()
+      return true
+    }
+    if (this.state === 'error') {
+      this.message = 'the plugin inventory is stale after a failed refresh; refresh before changing plugins'
+      this.hooks.requestRender()
+      return true
+    }
+    return false
+  }
+
+  /**
+   * The write is not settled until the authoritative inventory has been read
+   * back. Keep `busyValue` set across that read so no second write can be
+   * admitted from the pre-write snapshot; a failed read leaves `state:'error'`
+   * and `refuseWhileMutating()` keeps rejecting stale-state writes until a
+   * successful refresh.
+   */
+  private async finishMutation(token: number): Promise<void> {
+    if (this.disposed || token !== this.mutationToken) return
+    try {
+      await this.read()
+    } finally {
+      if (!this.disposed && token === this.mutationToken) this.busyValue = undefined
+      this.hooks.requestRender()
+    }
   }
 
   /**
@@ -699,10 +743,8 @@ export class PluginManagerController {
     } catch (error) {
       if (this.disposed || token !== this.mutationToken) return
       this.message = `enable/disable failed: ${errorMessage(error)}`
-    } finally {
-      if (!this.disposed && token === this.mutationToken) this.busyValue = undefined
     }
-    await this.read()
+    await this.finishMutation(token)
   }
 
   /** Toggle one addressable row of the card identified by stable value. */
@@ -737,14 +779,13 @@ export class PluginManagerController {
     } catch (error) {
       if (this.disposed || token !== this.mutationToken) return
       this.message = `enable/disable failed: ${errorMessage(error)}`
-    } finally {
-      if (!this.disposed && token === this.mutationToken) this.busyValue = undefined
     }
-    await this.read()
+    await this.finishMutation(token)
   }
 
   /** Open the destructive confirmation for one bundle. Returns whether it opened. */
   requestRemove(value: string): boolean {
+    if (this.refuseWhileMutating()) return false
     const card = this.card(value)
     if (card === undefined || card.target !== 'bundle') return false
     if (!card.canRemove) {
@@ -809,10 +850,8 @@ export class PluginManagerController {
     } catch (error) {
       if (this.disposed || token !== this.mutationToken) return
       this.message = `remove failed: ${errorMessage(error)}`
-    } finally {
-      if (!this.disposed && token === this.mutationToken) this.busyValue = undefined
     }
-    await this.read()
+    await this.finishMutation(token)
   }
 
   // ── internal ─────────────────────────────────────────────────────────────
