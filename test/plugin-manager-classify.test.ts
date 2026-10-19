@@ -21,6 +21,7 @@ import {
 } from '../src/app/plugin-manager/classify.ts'
 import type { TuiExtensionObservation } from '../src/app/plugin-manager/extension-inventory.ts'
 import {
+  AUTO_REVIEW_DISABLE_WARNING,
   PLUGIN_ACTION,
   buildPluginDetailView,
   buildPluginManagerModel,
@@ -661,4 +662,194 @@ test('without the self bundle there is no Current TUI card and no guessed fallba
   // card, never guessed into the Current TUI section.
   assert.equal(card.section, 'third-party')
   assert.equal(card.unverified, true)
+})
+
+// ── D3-0: bounded rc.2 product-support copy ────────────────────────────────
+
+const B01 = '@deepseek-ai/dsh-experimental-agent-team-profile'
+const B02 = '@deepseek-ai/dsh-experimental-voice-input-bundle'
+const B04 = '@deepseek-ai/dsh-experimental-inspector-profile'
+const B06 = '@deepseek-ai/dsh-experimental-cot-translation-bundle'
+const B07 = '@deepseek-ai/dsh-experimental-terminal-bundle'
+const B11 = '@deepseek-ai/dsh-experimental-ralph-bundle'
+const B12 = '@deepseek-ai/dsh-experimental-plugin-market-bundle'
+const B13 = '@deepseek-ai/dsh-subagent-claude-code'
+const B14 = '@deepseek-ai/dsh-subagent-codex'
+
+function experimentalBundles(
+  state: { readonly availability: 'installation' | 'profile' | 'missing'; readonly installed: boolean; readonly enabled: boolean } = {
+    availability: 'missing',
+    installed: false,
+    enabled: false,
+  },
+): PluginBundleFact[] {
+  return EXPERIMENTAL_BUNDLE_IDS.map(name => bundle({
+    name,
+    official: true,
+    availability: state.availability,
+    installed: state.installed,
+    enabled: state.enabled,
+    optional: state.availability !== 'profile',
+    removable: false,
+    source: state.availability === 'profile' ? `file:/tmp/${name.split('/').at(-1)}` : undefined,
+    ...(state.availability === 'missing'
+      ? { installTarget: { spec: `${name}@0.2.1-rc.2`, version: '0.2.1-rc.2' } }
+      : {}),
+  }))
+}
+
+function experimentalModel(options: {
+  readonly extraBundles?: readonly PluginBundleFact[]
+  readonly extraRows?: readonly PluginRowFact[]
+  readonly state?: { readonly availability: 'installation' | 'profile' | 'missing'; readonly installed: boolean; readonly enabled: boolean }
+} = {}): PluginManagerModel {
+  const state = options.state ?? { availability: 'missing' as const, installed: false, enabled: false }
+  const extraBundles = options.extraBundles ?? []
+  const snap = snapshot([...experimentalBundles(state), ...extraBundles], [...(options.extraRows ?? [])])
+  const claims = classifyPluginPackages(
+    inputs([
+      ...EXPERIMENTAL_BUNDLE_IDS.map(name => ({
+        key: bundleValue(name),
+        bundleName: name,
+        entryIds: [],
+        official: true,
+        availability: state.availability,
+        installed: state.installed,
+      })),
+      ...extraBundles.map(item => ({
+        key: bundleValue(item.name),
+        bundleName: item.name,
+        entryIds: item.rows.flatMap(itemRow => itemRow.entryId === undefined ? [] : [String(itemRow.entryId)]),
+        official: item.official,
+        availability: item.availability,
+        installed: item.installed,
+        ...(item.source === undefined ? {} : { source: item.source }),
+      })),
+    ]),
+    [],
+  )
+  return buildPluginManagerModel(snap, claims)
+}
+
+function fact(card: PluginCardView, label: string) {
+  for (const group of buildPluginDetailView(card).groups) {
+    for (const entry of group.facts) if (entry.label === label) return entry
+  }
+  return undefined
+}
+
+test('all 14 rc.2 Experimental identities carry an exact TUI surface fact and never the stale generic copy', () => {
+  const model = experimentalModel()
+  assert.equal(cardsOf(model, 'experimental').length, 14)
+  for (const name of EXPERIMENTAL_BUNDLE_IDS) {
+    const card = cardByName(model, name)!
+    const detail = buildPluginDetailView(card)
+    const surface = fact(card, 'TUI surface')
+    assert.ok(surface !== undefined, `${name} must state its real TUI surface`)
+    assert.equal(surface!.tone, 'normal', `${name} surface copy is neutral text`)
+    assert.ok(surface!.value.length > 0)
+    if (name === '@deepseek-ai/dsh-experimental-auto-review') {
+      // B03's only hazard statement is the Owner-frozen danger confirmation on
+      // the ENABLED Host row; the static table must not add a second one.
+      assert.equal(fact(card, 'Limit'), undefined)
+      assert.equal(fact(card, 'Risk'), undefined)
+    } else {
+      assert.ok(detail.groups.some(group => group.facts.some(entry => entry.label === 'Limit' || entry.label === 'Risk')),
+        `${name} must state its limitation/risk`)
+    }
+    assert.ok(!detail.groups.some(group => group.facts.some(entry =>
+      entry.value.includes('Host capability not yet qualified for TUI'))),
+    `${name} must not keep the stale generic capability warning`)
+    // Availability stays the separate Host fact (these fixtures are missing).
+    assert.equal(card.availability, 'missing')
+  }
+})
+
+test('hazardous rc.2 limitations use warning tone while plain limitations stay dim', () => {
+  const model = experimentalModel()
+  for (const name of [B02, B04, B06, B11, B13, B14]) {
+    assert.equal(fact(cardByName(model, name)!, 'Risk')?.tone, 'warning', `${name} carries a real risk`)
+  }
+  for (const name of [B01, B07]) {
+    assert.equal(fact(cardByName(model, name)!, 'Limit')?.tone, 'dim', `${name} is a neutral limitation`)
+  }
+  // B03 keeps its existing Owner-frozen danger confirmation as the ONLY hazard
+  // statement; the capability copy must not duplicate a conflicting one.
+  const autoReview = cardByName(model, '@deepseek-ai/dsh-experimental-auto-review')!
+  assert.ok(fact(autoReview, 'TUI surface') !== undefined)
+  assert.equal(fact(autoReview, 'Risk'), undefined)
+  assert.equal(fact(autoReview, 'Limit'), undefined)
+})
+
+test('the bounded copy never changes with installed/enabled state (no fake dynamic qualification)', () => {
+  const disabled = experimentalModel()
+  const enabled = experimentalModel({ state: { availability: 'installation', installed: false, enabled: true } })
+  const supportCopy = (card: PluginCardView) => buildPluginDetailView(card).groups
+    .flatMap(group => group.facts)
+    // The B03 Owner-frozen danger confirmation is intentionally tied to the
+    // ENABLED Host row; it is a separate warning, not capability copy.
+    .filter(entry => entry.value !== AUTO_REVIEW_DISABLE_WARNING)
+    .filter(entry => entry.label === 'TUI surface' || entry.label === 'Limit' || entry.label === 'Risk')
+  for (const name of EXPERIMENTAL_BUNDLE_IDS) {
+    assert.deepEqual(supportCopy(cardByName(disabled, name)!), supportCopy(cardByName(enabled, name)!),
+      `${name} support copy is static, not derived from enablement`)
+  }
+  // The disabled host row is not presented as a TUI capability PASS either.
+  const enabledCard = cardByName(enabled, B07)!
+  assert.equal(enabledCard.enabled, true)
+  assert.equal(fact(enabledCard, 'TUI surface')?.value.includes('terminal_*'), true)
+})
+
+test('same-name official:false packages and standalone entries never inherit the official copy', () => {
+  const fakeBundle = bundle({
+    name: B01,
+    official: false,
+    availability: 'profile',
+    installed: true,
+    removable: true,
+    source: 'file:/tmp/not-official',
+  })
+  const fakeName = buildPluginManagerModel(
+    snapshot([fakeBundle], []),
+    classifyPluginPackages(inputs([{
+      key: bundleValue(B01),
+      bundleName: B01,
+      entryIds: [],
+      availability: 'profile',
+      installed: true,
+      source: 'file:/tmp/not-official',
+    }]), []),
+  )
+  const fake = fakeName.cards.find(card => card.name === B01 && card.section === 'third-party')
+  assert.ok(fake !== undefined, 'the same-name non-official package is a Third-party card')
+  assert.equal(fact(fake!, 'TUI surface'), undefined)
+
+  const entryModel = experimentalModel({ extraRows: [row({ entryId: 'include:fake-b01', moduleName: B01, patchId: 'fake-b01' })] })
+  const entry = entryModel.cards.find(card => card.value === entryValue('include:fake-b01'))!
+  assert.equal(fact(entry, 'TUI surface'), undefined)
+})
+
+test('B02/B06/B12 state their WEB_ONLY boundaries and expose no phantom terminal page action', () => {
+  const model = experimentalModel()
+  assert.match(fact(cardByName(model, B02)!, 'TUI surface')!.value, /not available in PiTui/)
+  assert.match(fact(cardByName(model, B06)!, 'TUI surface')!.value, /not translated reasoning/)
+  assert.match(fact(cardByName(model, B12)!, 'TUI surface')!.value, /no PiTui Discover page/)
+  for (const name of [B02, B06, B12]) {
+    const actions = buildPluginDetailView(cardByName(model, name)!).actions
+    assert.deepEqual(actions.map(action => action.value), [PLUGIN_ACTION.officialInstall, PLUGIN_ACTION.back],
+      `${name} must not invent a page action`)
+  }
+})
+
+test('B04/B13/B14 keep their unverified limits and B11 states foreground/no-guaranteed-Job', () => {
+  const model = experimentalModel()
+  for (const name of [B04, B13, B14]) {
+    const risk = fact(cardByName(model, name)!, 'Risk')
+    assert.ok(risk !== undefined, `${name} states an unverified limitation`)
+    assert.match(risk!.value, /not (qualified|been successfully qualified)|EXTERNAL_UNVERIFIED/iu)
+  }
+  assert.match(fact(cardByName(model, B13)!, 'Risk')!.value, /EXTERNAL_UNVERIFIED/u)
+  assert.match(fact(cardByName(model, B14)!, 'Risk')!.value, /EXTERNAL_UNVERIFIED/u)
+  assert.match(fact(cardByName(model, B11)!, 'TUI surface')!.value, /foreground tool/u)
+  assert.match(fact(cardByName(model, B11)!, 'Risk')!.value, /No dedicated Ralph UI or guaranteed Job/u)
 })

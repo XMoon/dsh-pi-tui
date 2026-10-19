@@ -443,3 +443,93 @@ test('B03 risk confirmation keeps the frozen warning readable with Cancel defaul
     harness.app.dispose()
   }
 })
+
+// ── D3-0: bounded capability copy stays readable on the real page ──────────
+
+const RALPH = '@deepseek-ai/dsh-experimental-ralph-bundle'
+const INSPECTOR = '@deepseek-ai/dsh-experimental-inspector-profile'
+
+test('the B11 surface/risk copy is fully readable (scrolled) at 80×24, 72×24 and 44×20', async () => {
+  for (const [columns, rows] of [[80, 24], [72, 24], [44, 20]] as const) {
+    const harness = await open({
+      columns,
+      rows,
+      bundles: [
+        bundle({ name: SELF_BUNDLE, source: 'file:/tmp/tui' }),
+        bundle({ name: '@deepseek-ai/dsh-base', availability: 'installation', source: undefined }),
+        bundle({
+          name: RALPH,
+          official: true,
+          availability: 'installation',
+          installed: false,
+          optional: true,
+          removable: false,
+          enabled: true,
+          source: undefined,
+        }),
+      ],
+      plugins: [],
+    })
+    harness.vt.sendInput('\x1b[F') // End: the Ralph card is the last row
+    await harness.settle()
+    harness.vt.sendInput('\r')
+    await harness.settle()
+    const gather = (): string => plain(harness.viewport())
+    for (let page = 0; page < 12 && !gather().includes('TUI surface'); page += 1) {
+      harness.vt.sendInput('\x1b[6~') // PgDn
+      await harness.settle()
+    }
+    assert.match(gather(), /TUI surface/u, `${columns}x${rows} exposes the surface fact via the existing Detail scroll`)
+    for (let page = 0; page < 12 && !gather().includes('May run multiple rounds'); page += 1) {
+      harness.vt.sendInput('\x1b[6~')
+      await harness.settle()
+    }
+    const frame = gather()
+    assert.match(frame.replace(/\s+/gu, ' '), /ralph is a Host foreground tool/u)
+    assert.match(frame.replace(/\s+/gu, ' '), /May run multiple rounds and incur model cost\. No dedicated Ralph UI or guaranteed Job\./u)
+    for (const line of harness.viewport()) {
+      assert.ok(visibleWidth(line) <= columns, `${columns}x${rows} capability copy never exceeds the width: ${JSON.stringify(line)}`)
+    }
+    // The Risk fact keeps the semantic warning ink (not a text/dim token).
+    const riskRow = harness.viewport().findIndex(line => plain([line]).includes('May run multiple rounds'))
+    assert.ok(riskRow >= 0)
+    const riskCol = plain([harness.viewport()[riskRow]!]).indexOf('May run multiple rounds')
+    assert.equal(harness.vt.getCellFgRgb(riskRow, riskCol), hexToRgb(darkColors.warning),
+      `${columns}x${rows} paints the hazard in warning ink`)
+    started.delete(harness)
+    harness.app.dispose()
+  }
+})
+
+test('B04 keeps its unverified host limit visible in the real Detail', async () => {
+  const harness = await open({
+    columns: 80,
+    rows: 24,
+    bundles: [
+      bundle({ name: SELF_BUNDLE, source: 'file:/tmp/tui' }),
+      bundle({
+        name: INSPECTOR,
+        official: true,
+        availability: 'missing',
+        installed: false,
+        optional: true,
+        removable: false,
+        source: undefined,
+        installTarget: { spec: `${INSPECTOR}@0.2.1-rc.2`, version: '0.2.1-rc.2' },
+      }),
+    ],
+    plugins: [],
+  })
+  harness.vt.sendInput('\x1b[F')
+  await harness.settle()
+  harness.vt.sendInput('\r')
+  await harness.settle()
+  for (let page = 0; page < 12 && !plain(harness.viewport()).includes('Host activation is not qualified here.'); page += 1) {
+    harness.vt.sendInput('\x1b[6~')
+    await harness.settle()
+  }
+  const frame = plain(harness.viewport()).replace(/\s+/gu, ' ')
+  assert.match(frame, /Browser\/Node Inspector has no PiTui inspection page\./u)
+  assert.match(frame, /captureFetch may expose unredacted debugging data\. Host activation is not qualified here\./u)
+  assert.doesNotMatch(frame, /Host capability not yet qualified for TUI/u)
+})

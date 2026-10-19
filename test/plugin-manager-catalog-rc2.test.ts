@@ -209,16 +209,30 @@ test('the REAL rc.2 Host listBundles discovers 14/14 official optional/on-demand
     assert.equal(card.origin, 'official')
     assert.equal(card.unverified, false)
     const detail = buildPluginDetailView(card)
+    const facts = detail.groups.flatMap(group => group.facts)
+    const surface = facts.find(fact => fact.label === 'TUI surface')
+    assert.ok(surface !== undefined, `${card.name} carries the bounded rc.2 TUI surface fact`)
+    assert.equal(surface!.tone, 'normal')
+    assert.ok(!facts.some(fact => fact.value.includes('Host capability not yet qualified for TUI')),
+      `${card.name} never shows the stale generic capability warning`)
     if (ON_DEMAND.includes(card.name)) {
       assert.equal(card.availability, 'missing')
       assert.equal(card.canInstall, true)
       assert.ok(detail.actions.some(action => action.value === 'action:official-install' && action.enabled))
+      assert.equal(card.installTarget?.spec, `${card.name}@0.2.1-rc.2`)
     } else {
       assert.equal(card.availability, 'installation')
       assert.equal(card.canInstall, false)
       assert.equal(card.canToggle, true, 'a shipped Optional bundle is switchable by the Host')
       assert.equal(card.canRemove, false, 'a shipped bundle is never removable')
     }
+  }
+  // The two external on-demand rows carry their unverified limit through the
+  // REAL Host catalog (not a static section flag).
+  for (const name of ['@deepseek-ai/dsh-subagent-codex', '@deepseek-ai/dsh-subagent-claude-code']) {
+    const card = experimental.find(candidate => candidate.name === name)!
+    const risk = buildPluginDetailView(card).groups.flatMap(group => group.facts).find(fact => fact.label === 'Risk')
+    assert.match(risk?.value ?? '', /EXTERNAL_UNVERIFIED/u)
   }
 })
 

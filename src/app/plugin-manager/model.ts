@@ -62,6 +62,89 @@ export const AUTO_REVIEW_BUNDLE = '@deepseek-ai/dsh-experimental-auto-review'
  *  removing its bundle. It is a Host-capability fact, not a TUI risk verdict. */
 export const AUTO_REVIEW_DISABLE_WARNING = 'Disabling Auto Review can change existing Auto sessions to Full access. Auto Review is not a sandbox. Continue?'
 
+/** The bounded, read-only product-support copy of one exact rc.2 Bxx bundle. */
+interface ExperimentalBundleSupport {
+  /** The TUI surface the bundle's capability really reaches today. */
+  readonly surface: string
+  /** Limitation or hazard copy; absent only where a frozen warning already
+   *  carries the whole consequence (B03 Auto Review). */
+  readonly limit?: string
+  /** True when the copy carries a privacy/security/billing/external risk that
+   *  must use the warning tone; otherwise it is a neutral limitation. */
+  readonly risk?: boolean
+}
+
+/**
+ * The FROZEN rc.2 product-support copy (§3). This is bounded presentation
+ * evidence for the exact package identities, NOT Host capability state: it
+ * never reads enablement/fiber/availability and never claims a live Host PASS.
+ * It is deliberately module-private — no runtime qualification store is built
+ * from it (the live ledger stays in `docs/client-server-migration.md`).
+ */
+const EXPERIMENTAL_BUNDLE_SUPPORT: Readonly<Record<string, ExperimentalBundleSupport>> = Object.freeze({
+  '@deepseek-ai/dsh-experimental-agent-team-profile': {
+    surface: 'Host Team tools; child and task activity use existing Tool/Activity views.',
+    limit: 'No native Team roster or task board. Global delegation tools differ from preset-local tools.',
+  },
+  '@deepseek-ai/dsh-experimental-voice-input-bundle': {
+    surface: 'Speech services are Host-side; browser microphone UI is not available in PiTui.',
+    limit: 'Local model preparation or API credentials may be required; no TUI recording/transcription flow.',
+    risk: true,
+  },
+  '@deepseek-ai/dsh-experimental-auto-review': {
+    surface: 'Auto is an official permission preset; tool decisions use the Host authority.',
+  },
+  '@deepseek-ai/dsh-experimental-inspector-profile': {
+    surface: 'Browser/Node Inspector has no PiTui inspection page.',
+    limit: 'Requires Web transport; captureFetch may expose unredacted debugging data. Host activation is not qualified here.',
+    risk: true,
+  },
+  '@deepseek-ai/dsh-experimental-tool-worktree': {
+    surface: 'create_worktree is a Host tool; the effective Session directory appears through the existing status/path views.',
+    limit: 'No dedicated worktree panel; use Host cwd, not original Session header.',
+  },
+  '@deepseek-ai/dsh-experimental-cot-translation-bundle': {
+    surface: 'Host translation service; PiTui shows original reasoning, not translated reasoning.',
+    limit: 'Invoked translators can send reasoning/private text to third-party services.',
+    risk: true,
+  },
+  '@deepseek-ai/dsh-experimental-terminal-bundle': {
+    surface: 'Host terminal_* tools and their results/jobs use existing Tool/Job views.',
+    limit: 'No separate terminal workspace. !/!! one-shot shell behavior is unchanged.',
+  },
+  '@deepseek-ai/dsh-experimental-session-search': {
+    surface: 'session_search and related Host read tools return results as Tool output.',
+    limit: 'Session Browser is not replaced by the Host query tool; search is workspace-scoped.',
+  },
+  '@deepseek-ai/dsh-experimental-session-titles-bundle': {
+    surface: 'Official title provider updates existing Session/title surfaces.',
+    limit: 'Manual title source retains official precedence; no independent title cache.',
+  },
+  '@deepseek-ai/dsh-experimental-badge-skill-bundle': {
+    surface: 'dsh-badge is a Host Skill provider, visible via /skill in skills-capable presets.',
+    limit: 'The minimal preset has no skill tool; this does not add a model tool.',
+  },
+  '@deepseek-ai/dsh-experimental-ralph-bundle': {
+    surface: 'ralph is a Host foreground tool; its workflow events and result use existing Tool/Activity views.',
+    limit: 'May run multiple rounds and incur model cost. No dedicated Ralph UI or guaranteed Job.',
+    risk: true,
+  },
+  '@deepseek-ai/dsh-experimental-plugin-market-bundle': {
+    surface: 'Host market service and cordis-scoped plugin_market tool; no PiTui Discover page.',
+    limit: 'No default marketplace; only user-configured index sources are listed.',
+  },
+  '@deepseek-ai/dsh-subagent-codex': {
+    surface: 'On-demand external one-shot Codex subagent tool, not a continuable conversation.',
+    limit: 'Native provider/auth has not been successfully qualified; no Continue/Resume; a system CLI is not a substitute. EXTERNAL_UNVERIFIED.',
+    risk: true,
+  },
+  '@deepseek-ai/dsh-subagent-claude-code': {
+    surface: 'On-demand external one-shot Claude Code subagent tool, not a continuable conversation.',
+    limit: 'Native provider/auth has not been successfully qualified; no Continue/Resume. EXTERNAL_UNVERIFIED.',
+    risk: true,
+  },
+})
+
 /** One package card: a bundle, or a standalone managed plugin entry. */
 export interface PluginCardView {
   /** Stable logical identity, NEVER a screen index. */
@@ -349,6 +432,29 @@ function cardComponentFacts(card: PluginCardView): PluginDetailFact[] {
   return facts
 }
 
+/**
+ * The exact rc.2 package-support facts of one Experimental card, or none. The
+ * bounded copy is keyed by the PROVEN bundle identity: an `official:false`
+ * same-name package, a standalone entry, a non-Experimental section or an
+ * unlisted row never inherits it.
+ */
+function experimentalSupportFacts(card: PluginCardView): PluginDetailFact[] {
+  if (card.target !== 'bundle' || card.official !== true || card.section !== 'experimental') return []
+  const support = EXPERIMENTAL_BUNDLE_SUPPORT[card.name]
+  if (support === undefined) return []
+  const facts: PluginDetailFact[] = [
+    { label: 'TUI surface', value: support.surface, tone: 'normal' },
+  ]
+  if (support.limit !== undefined) {
+    facts.push({
+      label: support.risk === true ? 'Risk' : 'Limit',
+      value: support.limit,
+      tone: support.risk === true ? 'warning' : 'dim',
+    })
+  }
+  return facts
+}
+
 function cardWarningFacts(card: PluginCardView, exemptions: readonly PluginExemptionFact[]): PluginDetailFact[] {
   const facts: PluginDetailFact[] = []
   if (card.riskNotice !== undefined) {
@@ -398,11 +504,7 @@ function cardWarningFacts(card: PluginCardView, exemptions: readonly PluginExemp
     })
   }
   if (card.experimental) {
-    facts.push({
-      label: 'Capability',
-      value: 'Host capability not yet qualified for TUI',
-      tone: 'warning',
-    })
+    facts.push(...experimentalSupportFacts(card))
   }
   if (card.unverified) {
     facts.push({

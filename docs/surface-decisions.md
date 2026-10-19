@@ -3070,3 +3070,24 @@ returns to the untouched conversation/transcript-fullscreen state.
   a frame that does not paint a choice admits no Enter/click for it. The
   Host-capability consequence is also a bounded `Risk` fact on the exact B03
   card; it does not rewrite `official`/`availability`/`enabled`.
+
+## Plugin Detail states bounded rc.2 bundle support (2026-10-19, S4-D3 / PR-D3)
+
+The existing Plugin Manager Detail gains one read-only projection; no second
+page, tab, shortcut, button, scroll owner or port is introduced.
+
+- **Bounded rc.2 capability copy.** The 14 exact `B01–B14` package identities
+  carry a frozen product-support sentence pair in
+  `src/app/plugin-manager/model.ts`: a neutral `TUI surface` fact and either a
+  `dim` `Limit` or a `warning` `Risk` fact. This is bounded presentation
+  evidence for the fixed rc.2 catalog — it never reads `enabled`, fiber state or
+  availability, never promotes a Host row to a TUI PASS, and is not exported as
+  a capability API. Only a card with `target='bundle'`, `official=true`, the
+  `Experimental` section and an exact key match renders it; a same-name
+  `official:false` package, a standalone entry and every other row never
+  inherit it. The stale generic `Host capability not yet qualified for TUI`
+  line is gone. B03 keeps its existing Owner-frozen danger confirmation as the
+  only hazard statement (the static table adds no second one). The wording
+  names `WEB_ONLY` limits (Voice/Inspector/CoT/Market), `EXTERNAL_UNVERIFIED`
+  for the two on-demand native subagents, and the foreground/no-guaranteed-Job
+  fact for Ralph. Availability/Source/Version/Fiber remain separate Host facts.
