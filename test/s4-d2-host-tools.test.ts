@@ -13,7 +13,8 @@ import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import test from 'node:test'
 import { SessionId } from '@deepseek-ai/dsh-session'
-import { ToolCallId } from '@deepseek-ai/dsh-llm'
+import { createUserMessage, LlmAdapter, ToolCallId, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
+import { sanitizeDisplayText } from '../src/tui/presentation/terminal-text.ts'
 import {
   S4_D2_BUNDLE_IDS,
   profileSelectsBundle,
@@ -42,6 +43,8 @@ function seedRepository(root: string): { project: string; baseCommit: string } {
   git(project, 'commit', '-q', '-m', 'fixture base')
   return { project, baseCommit: git(project, 'rev-parse', 'HEAD') }
 }
+
+let callCounter = 0
 
 function resultText(result: { content?: readonly { type?: string; text?: string }[] }): string {
   return (result.content ?? []).map(block => block.type === 'text' ? block.text ?? '' : '').join('')
@@ -132,3 +135,182 @@ test('D2-1/B05: an official Optional bundle goes off→enable→restart-required
   // file fails if the fixture silently renames an identity).
   assert.equal(S4_D2_BUNDLE_IDS.length, 14)
 })
+
+// ── B07 persistent terminal ────────────────────────────────────────────────
+
+const B07 = '@deepseek-ai/dsh-experimental-terminal-bundle' satisfies S4D2BundleId
+const B08 = '@deepseek-ai/dsh-experimental-session-search' satisfies S4D2BundleId
+
+test('B07: retained terminal process, output read, background job and restart cleanup', { skip: skippedInstallationReason([B07]) }, async t => {
+  let host = await startS4D2Host(t, { bundles: [B07] })
+  const work = join(host.root, 'work')
+  const agent = await host.createAgent(SessionId('s4-d2-b07'), { cwd: work })
+
+  const opened = await execute(host, 'terminal_open', agent, { type: 'shell', name: 'main', cwd: work })
+  assert.notEqual(opened.isError, true, resultText(opened))
+  const sessionId = /started terminal session (\S+)/u.exec(resultText(opened))?.[1]
+  assert.ok(sessionId !== undefined, resultText(opened))
+
+  const sent = await execute(host, 'terminal_send', agent, { sessionId, text: 'echo TERMINAL_OK' })
+  assert.notEqual(sent.isError, true, resultText(sent))
+  assert.match(resultText(sent), /TERMINAL_OK/)
+  assert.match(resultText(sent), /\[session: running\]/u)
+
+  const read = await execute(host, 'terminal_read', agent, { sessionId })
+  assert.notEqual(read.isError, true, resultText(read))
+  assert.match(resultText(read), /TERMINAL_OK/)
+
+  // The retained raw output may carry terminal control bytes; the EXISTING
+  // terminal-text consumer boundary removes them before any TUI paint.
+  await execute(host, 'terminal_send', agent, { sessionId, text: "printf '\\033[31mRED_ESCAPE\\033[0m\\n'" })
+  const colored = await execute(host, 'terminal_read', agent, { sessionId })
+  const coloredText = resultText(colored)
+  assert.ok(coloredText.includes('RED_ESCAPE'))
+  assert.equal(sanitizeDisplayText(coloredText).includes('\u001b'), false,
+    'the existing terminal-text sanitizer removes control sequences from the consumer text')
+
+  const listed = await execute(host, 'terminal_list', agent, {})
+  assert.match(resultText(listed), new RegExp(sessionId.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')))
+
+  // A background send really creates a Host Job the official consumer reads.
+  const background = await execute(host, 'terminal_send', agent, {
+    sessionId,
+    text: 'sleep 0.2; echo BG_OK',
+    run_in_background: true,
+  })
+  assert.notEqual(background.isError, true, resultText(background))
+  const jobId = /started background job (\S+)/u.exec(resultText(background))?.[1]
+  assert.ok(jobId !== undefined, resultText(background))
+  const jobRead = await execute(host, 'job_output', agent, { job_id: jobId, wait: true, timeout_ms: 30_000 })
+  assert.notEqual(jobRead.isError, true, resultText(jobRead))
+  assert.match(resultText(jobRead), /BG_OK/)
+
+  // Closing really releases the retained session: a later read cannot control it.
+  const closed = await execute(host, 'terminal_close', agent, { sessionId })
+  assert.notEqual(closed.isError, true, resultText(closed))
+  assert.match(resultText(closed), /closed terminal session/u)
+  const afterClose = await execute(host, 'terminal_read', agent, { sessionId })
+  assert.equal(afterClose.isError, true, 'a closed terminal can no longer be read')
+  assert.match(resultText(afterClose), /unknown|closed|lost/i)
+
+  // Restart with the bundle still composed: the new Host owns no terminal and
+  // the old process tree was released with the old composition.
+  const restarted = await host.restart()
+  host = restarted
+  const second = await restarted.createAgent(SessionId('s4-d2-b07-after'), { cwd: work })
+  const empty = await execute(restarted, 'terminal_list', second, {})
+  assert.match(resultText(empty), /no terminal sessions/i)
+
+  // OFF: the official manager deselects the bundle and a restart removes the
+  // tools and the terminal service from the real registry.
+  const disabled = await restarted.pluginManager.setBundleEnabled(B07, false) as { application: string }
+  assert.equal(disabled.application, 'restart-required')
+  const off = await restarted.restart()
+  host = off
+  assert.equal(off.hasTool('terminal_open'), false, 'the terminal tools are gone after the disabling restart')
+  assert.equal(off.ctx.get('terminals'), undefined, 'no second terminal service remains mounted')
+})
+
+// ── B08 session search ─────────────────────────────────────────────────────
+
+function markerChunks(text: string): StreamChunk[] {
+  return [
+    { type: 'block-start', index: 0, blockType: 'text' },
+    { type: 'text-delta', index: 0, text },
+    { type: 'block-end', index: 0, block: { type: 'text', text } },
+    { type: 'finish', reason: { kind: 'stop' } },
+  ]
+}
+
+test('B08: lazy workspace-scoped session search, paging/no-hit and restart re-index', { skip: skippedInstallationReason([B08]) }, async t => {
+  const host = await startS4D2Host(t, { bundles: [B08] })
+  const adapter = new MarkerAdapter()
+  host.ctx.llm.registerAdapter(['marker'], adapter)
+  const project = join(host.root, 'work')
+  const outside = join(host.root, 'outside')
+
+  async function seed(id: string, cwd: string, marker: string): Promise<void> {
+    const agent = await host.createAgent(SessionId(id), { provider: 'marker', model: 'marker-model', cwd })
+    adapter.next = marker
+    agent.followup(createUserMessage({ content: [{ type: 'text', text: `Please note ${marker} for later.` }], source: { kind: 'user' } }))
+    await agent.whenIdle()
+  }
+  await seed('s4-d2-b08-alpha', project, 'ALPHA_NEEDLE_PROJECT')
+  await seed('s4-d2-b08-beta', project, 'ALPHA_NEEDLE_PROJECT')
+  await seed('s4-d2-b08-secret', outside, 'SECRET_NEEDLE_PRIVATE')
+  await waitFor(async () => (await persistedSessionCount(host)) >= 3)
+
+  const caller = await host.createAgent(SessionId('s4-d2-b08-caller'), { provider: 'marker', model: 'marker-model', cwd: project })
+  const hit = await execute(host, 'session_search', caller, { query: 'ALPHA_NEEDLE_PROJECT' })
+  assert.notEqual(hit.isError, true, resultText(hit))
+  assert.match(resultText(hit), /s4-d2-b08-alpha/)
+  assert.match(resultText(hit), /s4-d2-b08-beta/)
+  assert.doesNotMatch(resultText(hit), /s4-d2-b08-secret/, 'a session outside the caller workspace is never returned')
+  assert.doesNotMatch(resultText(hit), /SECRET_NEEDLE_PRIVATE/)
+
+  const none = await execute(host, 'session_search', caller, { query: 'NO_SUCH_NEEDLE' })
+  assert.notEqual(none.isError, true, resultText(none))
+  assert.match(resultText(none), /No prior session matches found/i)
+
+  const event = await execute(host, 'session_event_search', caller, {
+    session_id: 's4-d2-b08-beta',
+    query: 'ALPHA_NEEDLE_PROJECT',
+  })
+  assert.notEqual(event.isError, true, resultText(event))
+  assert.match(resultText(event), /ALPHA_NEEDLE_PROJECT/)
+  assert.doesNotMatch(resultText(event), /s4-d2-b08-secret/)
+
+  // A restart rebuilds the lazy in-memory index from the persisted logs.
+  const restarted = await host.restart()
+  const after = await restarted.createAgent(SessionId('s4-d2-b08-after'), { provider: 'marker', model: 'marker-model', cwd: project })
+  const reindexed = await execute(restarted, 'session_search', after, { query: 'ALPHA_NEEDLE_PROJECT' })
+  assert.notEqual(reindexed.isError, true, resultText(reindexed))
+  assert.match(resultText(reindexed), /s4-d2-b08-alpha/)
+  assert.doesNotMatch(resultText(reindexed), /s4-d2-b08-secret/)
+})
+
+class MarkerAdapter extends LlmAdapter {
+  next = 'MARKER'
+
+  override resolveModel(provider: string, model: string): Promise<{ provider: string; id: string; name: string }> {
+    return Promise.resolve({ provider, id: model, name: model })
+  }
+
+  override async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+    options.signal?.throwIfAborted()
+    for (const chunk of markerChunks(this.next)) yield chunk
+  }
+}
+
+async function persistedSessionCount(host: { root: string }): Promise<number> {
+  const { readdirSync } = await import('node:fs')
+  try {
+    return readdirSync(join(host.root, 'home', 'sessions'), { recursive: true, withFileTypes: true })
+      .filter(entry => entry.isDirectory() && entry.name.startsWith('s4-d2-b08-')).length
+  } catch {
+    return 0
+  }
+}
+
+async function waitFor(condition: () => boolean | Promise<boolean>, turns = 2000): Promise<void> {
+  for (let index = 0; index < turns; index += 1) {
+    if (await condition()) return
+    await new Promise<void>(resolve => setTimeout(resolve, 5))
+  }
+  throw new Error('condition did not settle')
+}
+
+function execute(
+  host: { ctx: { tools: { execute(input: unknown): Promise<unknown> } } },
+  name: string,
+  agent: unknown,
+  args: unknown,
+): Promise<{ isError?: boolean; content?: readonly { type?: string; text?: string }[] }> {
+  return host.ctx.tools.execute({
+    signal: new AbortController().signal,
+    callId: ToolCallId(`s4-d2-host-${++callCounter}`),
+    name,
+    arguments: args,
+    agent,
+  }) as never
+}
