@@ -196,9 +196,6 @@ jobs:
       - name: Set DSH source artifact path
         run: echo "DSH_SOURCE_ARTIFACT=$RUNNER_TEMP/dsh-source-pack" >> "$GITHUB_ENV"
 
-      - name: Prepare S5 evidence directory
-        run: mkdir -p "$RUNNER_TEMP/s5-evidence"
-
       - name: Download DSH source pack
         if: env.DSH_MODE == 'source'
         uses: actions/download-artifact@v8
@@ -390,9 +387,6 @@ jobs:
       - name: Set DSH source artifact path
         run: echo "DSH_SOURCE_ARTIFACT=$RUNNER_TEMP/dsh-source-pack" >> "$GITHUB_ENV"
 
-      - name: Prepare S5 evidence directory
-        run: mkdir -p "$RUNNER_TEMP/s5-evidence"
-
       - name: Download DSH source pack
         if: env.DSH_MODE == 'source'
         uses: actions/download-artifact@v8
@@ -438,10 +432,7 @@ jobs:
           # Prevent stale local artifacts from accidentally matching the glob.
           rm -f xmoon76-dsh-pi-tui-*.tgz
 
-          # S5 release evidence: the complete product test + pack output is
-          # uploaded as a CI artifact and referenced from the PR body. Detailed
-          # evidence is never committed to the repository.
-          pnpm pack --pack-destination . 2>&1 | tee "$RUNNER_TEMP/s5-evidence/pack-and-product-tests.log"
+          pnpm pack --pack-destination .
 
       - name: Verify packed artifact
         id: package
@@ -471,7 +462,7 @@ jobs:
 
           echo
           echo "SHA256:"
-          sha256sum "$TARBALL" | tee "$RUNNER_TEMP/s5-evidence/tarball-sha256.txt"
+          sha256sum "$TARBALL"
 
       - name: Source leak gate
         env:
@@ -486,24 +477,13 @@ jobs:
 
       - name: Verify the TUI startup strictness handshake
         if: env.DSH_MODE == 'npm'
-        run: |
-          set -euo pipefail
-          pnpm smoke:startup-strictness -- "${{ steps.package.outputs.tarball }}" 2>&1 | tee "$RUNNER_TEMP/s5-evidence/startup-strictness.log"
+        run: pnpm smoke:startup-strictness -- "${{ steps.package.outputs.tarball }}"
 
       - name: Upload release tarball
         uses: actions/upload-artifact@v7
         with:
           name: dsh-pi-tui-tarball
           path: ${{ steps.package.outputs.tarball }}
-          if-no-files-found: error
-          retention-days: 14
-
-      - name: Upload S5 release evidence logs
-        if: always()
-        uses: actions/upload-artifact@v7
-        with:
-          name: s5-release-evidence
-          path: ${{ runner.temp }}/s5-evidence
           if-no-files-found: error
           retention-days: 14
 
@@ -558,9 +538,6 @@ jobs:
       # existing workspace install for its registry-backed lane.
       - name: Set DSH source artifact path
         run: echo "DSH_SOURCE_ARTIFACT=$RUNNER_TEMP/dsh-source-pack" >> "$GITHUB_ENV"
-
-      - name: Prepare S5 evidence directory
-        run: mkdir -p "$RUNNER_TEMP/s5-evidence"
 
       - name: Download DSH source pack
         if: env.DSH_MODE == 'source'
@@ -755,9 +732,6 @@ jobs:
 
       - name: Set DSH source artifact path
         run: echo "DSH_SOURCE_ARTIFACT=$RUNNER_TEMP/dsh-source-pack" >> "$GITHUB_ENV"
-
-      - name: Prepare S5 evidence directory
-        run: mkdir -p "$RUNNER_TEMP/s5-evidence"
 
       - name: Download DSH source pack
         if: env.DSH_MODE == 'source'
