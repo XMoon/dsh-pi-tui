@@ -168,13 +168,18 @@ NEXT search/fetch uses them (an already-running operation is never changed);
 `[current]` moves only after the official mutation and its read-back agree, and
 a refused write is reported as `Not saved` (never as a success).
 
-- The DeepSeek APIs are separate billed endpoints and send the request to an
-  external URL; the default Messages search / HTTP fetch are unaffected and stay
-  in place unless the user opts in. Changing the endpoint base sends the
-  credential to that endpoint, so it must be confirmed explicitly.
-- `Share Original Question` (on by default) also sends up to 128 characters of
-  the triggering human question (`ori_question`); switching it off affects the
-  next API call only.
+- The DeepSeek APIs are separate, opt-in billed endpoints: they send the
+  request to an external URL, and a login or an ordinary Messages plan does not
+  guarantee coverage of their fees. The default Messages search / HTTP fetch
+  stay in place unless the user opts in, call no billed API, and are not
+  changed by installing or enabling any other bundle — this Web configuration
+  is owned by the base profile (`@deepseek-ai/dsh-web-deepseek-api`), not by a
+  Bxx Optional Bundle. Changing the endpoint base sends the credential and
+  query to that endpoint, so it must be confirmed explicitly.
+- `Share Original Question` is `true` in the official rc.2
+  `@deepseek-ai/dsh-web-deepseek-api` default and sends up to 128 characters of
+  the triggering human question (`ori_question`) only — never the full history
+  or the system prompt. Switching it off affects the next API call only.
 - The API key is the official credential reference `DEEPSEEK_API_KEY`. The
   settings section shows only whether it is configured and its source layer; the
   value is entered and cleared through the existing masked

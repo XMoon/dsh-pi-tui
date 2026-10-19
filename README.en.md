@@ -422,9 +422,14 @@ permissions and extension settings keep every existing write path.
 opens the existing editor's Web section and focuses its first item. The section switches the search
 provider (`Messages`, the official default, or the separately billed `DeepSeek Search API`), the fetch
 provider (`HTTP`, the official default, or `DeepSeek Fetch API`), the Search API result count (1–50,
-quick picks 5/10/20/50), `Share Original Question` (when on, each new search carries up to 128
-characters of the triggering human question as `ori_question`) and the API endpoint base (an https
-address the user must confirm explicitly; the credential is sent to it). `[current]` moves only after
+quick picks 5/10/20/50), `Share Original Question` (on by default; each new Search API call carries
+up to 128 characters of the triggering human question as `ori_question`, never the full history or
+system prompt) and the API endpoint base (an https address the user must confirm explicitly; the
+credential and query are sent to it). Both APIs are separate opt-in billed providers: a login or an
+ordinary Messages plan does not guarantee coverage of their fees, and the default
+`Messages`/`HTTP` combination calls no billed API. This Web configuration belongs to the base
+profile, not to a Bxx Optional Bundle, so installing or enabling another bundle never changes these
+providers. `[current]` moves only after
 the official mutation and its authoritative read-back agree, and a refused write reads `Not saved`.
 The choice applies to the next search/fetch; a running operation is never changed retroactively. The
 DeepSeek API key row shows only whether the reference is configured and its source layer; configure

@@ -192,6 +192,10 @@ export interface OptionalBundleHostOptions {
   readonly prepare?: (ctx: Context) => void | Promise<void>
   /** The working directory handed to fresh Agents (default: `<root>/work`). */
   readonly sessionCwd?: string
+  /** Boot through the PROVISIONED installation's own `dsh-app-boot` module so
+   *  every Host package module identity matches (required by the official
+   *  ConfigEditor settings-write path). Defaults to the test-imported module. */
+  readonly installationBoot?: boolean
 }
 
 export interface CreateAgentOptions {
@@ -275,7 +279,10 @@ function writeProfile(profileDir: string, bundles: readonly string[], dependenci
     dependencies,
     dsh: { profile: { bundles, patch: 'cordis.patch.yml' } },
   }, null, 2))
-  writeFileSync(join(profileDir, 'cordis.patch.yml'), '[]\n')
+  // HMR is deliberately disabled in this Host-only fixture (no application
+  // readiness owner). The DISK patch carries the same fact so an official
+  // ConfigEditor recompose (a real settings write) does not try to activate it.
+  writeFileSync(join(profileDir, 'cordis.patch.yml'), '- id: hmr\n  disabled: true\n')
   writeFileSync(join(profileDir, 'cordis.yml'), '[]\n')
 }
 
@@ -327,6 +334,16 @@ function prepareRoot(
   return profileDir
 }
 
+/** Resolve the OFFICIAL `dsh-app-boot` of the provisioned installation, so the
+ *  Host modules share one instance (the ConfigEditor reload ledger is a
+ *  module-level WeakMap keyed by the boot Context). */
+async function installationBoot(installationManifest: string): Promise<typeof boot> {
+  const packageJson = JSON.parse(readFileSync(join(dirname(installationManifest), 'node_modules', '@deepseek-ai', 'dsh-app-boot', 'package.json'), 'utf8')) as { readonly main?: string }
+  const entry = join(dirname(installationManifest), 'node_modules', '@deepseek-ai', 'dsh-app-boot', packageJson.main ?? 'lib/index.js')
+  const loaded = await import(pathToFileURL(entry).href) as { readonly boot: typeof boot }
+  return loaded.boot
+}
+
 async function bootAt(options: HostOptions): Promise<OptionalBundleHost> {
   const profileDir = join(options.root, 'profile')
   const installationManifest = join(options.root, 'installation', 'package.json')
@@ -363,7 +380,10 @@ async function bootAt(options: HostOptions): Promise<OptionalBundleHost> {
   // The Loader can write the composed tree back into its root config when a
   // plugin self-disposes; production boot rewrites the empty root every start.
   writeFileSync(join(profileDir, 'cordis.yml'), '[]\n')
-  const ctx = await boot(BIN_NAME, join(profileDir, 'cordis.yml'), patches, async hostCtx => {
+  const bootFn = options.settings.installationBoot === true
+    ? await installationBoot(installationManifest)
+    : boot
+  const ctx = await bootFn(BIN_NAME, join(profileDir, 'cordis.yml'), patches, async hostCtx => {
     hostCtx.provide('profileContext', profileContext)
     await options.settings.prepare?.(hostCtx)
   }, pathToFileURL(installationManifest).href)

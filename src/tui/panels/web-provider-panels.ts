@@ -125,7 +125,7 @@ export class WebEndpointPanel implements Component {
       row(color.textStrong('Search / Fetch API Endpoint'), width),
       ...this.input.render(width),
       row(this.statusLine(), width),
-      row(`${color.textDim('Changing this sends the DeepSeek API credential to a different endpoint.')}`, width),
+      row(`${color.textDim('Changing this sends the DeepSeek API credential and the query to a different endpoint; both the Search and Fetch APIs use it. Only a trusted https base should be confirmed.')}`, width),
       row(`${color.textDim('Official base: ')}${color.text('https://api.deepseek.com/v1/tools')}${color.textDim('; /search and /fetch are appended.')}`, width),
       row(color.textDim('Enter confirm · Esc cancel'), width),
     ]

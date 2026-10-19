@@ -443,16 +443,16 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
     switch (id) {
       case 'web-search-provider':
         return providerSelectable(WEB_SEARCH_PROVIDER_VALUES, webSettings?.searchProvider)
-          ? `Current: ${current} · Messages is the official DeepSeek Messages search; the DeepSeek Search API is a separately billed endpoint. [current] follows a verified write; [default] marks the packaged default. The choice applies to the next search, never to one already running. Esc returns to the Workspace.`
+          ? `Current: ${current} · Messages is the official default and does not call the billed Search API. DeepSeek Search API is opt-in and separately billed (a Messages plan does not cover it); with Share Original Question on (default), up to 128 characters of the triggering question are sent as ori_question. The choice applies to the next search. Esc returns to the Workspace.`
           : `Current: ${current} · The configured search provider is a custom route: it is displayed as-is and is not selectable here. The official candidates are Messages and DeepSeek Search API.`
       case 'web-fetch-provider':
         return providerSelectable(WEB_FETCH_PROVIDER_VALUES, webSettings?.fetchProvider)
-          ? `Current: ${current} · HTTP is the official anonymous public-page fetcher; the DeepSeek Fetch API is a separately billed endpoint. The choice applies to the next fetch.`
+          ? `Current: ${current} · HTTP is the official anonymous default. DeepSeek Fetch API is opt-in and separately billed (a Messages plan does not cover it). The choice applies to the next fetch.`
           : `Current: ${current} · The configured fetch provider is a custom route: it is displayed as-is and is not selectable here. The official candidates are HTTP and DeepSeek Fetch API.`
       case 'web-search-count':
         return `Current: ${current} · Results requested per DeepSeek Search API call; the official limit is 1 through 50, and a smaller per-request bound still wins.`
       case 'web-send-original-question':
-        return `Current: ${current} · On: each DeepSeek Search API call also sends up to 128 characters of the human question that triggered it (ori_question). Off: it never does. An already running operation is never changed retroactively.`
+        return `Current: ${current} · On (packed default for the DeepSeek Search API): each call also sends up to 128 characters of the triggering human question (ori_question), never the full history or system prompt. Off: never. A running operation is unchanged.`
       case 'web-search-endpoint': {
         // A refused endpoint write must still say what the Host KEEPS: the
         // panel's own message dies with the panel (a superseded verdict lands
@@ -462,7 +462,7 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
         const kept = webRowPhases.get('web-search-endpoint')?.kind === 'not-saved'
           ? webSettledValue('web-search-endpoint')
           : undefined
-        return `Current: ${current}${kept === undefined ? '' : ` · the Host keeps "${kept}"`} · The API base the DeepSeek Search and Fetch APIs call (/search and /fetch are appended). Changing it sends the credential to that endpoint, so only a trusted https base is accepted.`
+        return `Current: ${current}${kept === undefined ? '' : ` · the Host keeps "${kept}"`} · The API base the DeepSeek Search and Fetch APIs call (/search and /fetch are appended); base-owned, not an Optional Bundle. Changing it sends the credential and query there; only a trusted https base is accepted.`
       }
     }
   }
@@ -490,7 +490,7 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
    *  the first frame already carries authoritative values; a missing or failed
    *  read is stated, never defaulted. */
   const webWorkspaceRowFacts = (): { summary: string; freshness: SettingsWorkspaceFreshness; description: string } => {
-    const description = 'Host Web settings. Defaults: Messages search · HTTP fetch. The DeepSeek Search / Fetch APIs are billed separately and send the request to an external endpoint; Share Original Question sends up to 128 characters of the human question. The API key is stored as a credential reference and never shown. Enter configure.'
+    const description = 'Host Web settings for the base profile, not an Optional Bundle. Defaults: Messages search · HTTP fetch; other bundles never change them and the defaults call no billed API. The Search/Fetch APIs are billed separately as opt-in providers (a Messages plan does not cover them) and send the request to the configured endpoint. Share Original Question is on by default: it sends up to 128 characters of the human question (never the full history or system prompt). The key stays in the official credential reference and is never shown. A value reads Verified only after the Host write and authoritative read-back agree. Enter configure.'
     if (!webSettingsAvailable()) {
       return { summary: 'Unavailable', freshness: 'unavailable', description: `${description} Not supported on this backend.` }
     }

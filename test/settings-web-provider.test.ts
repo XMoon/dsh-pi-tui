@@ -329,10 +329,15 @@ test('the workspace row reports the configured providers and opens the Web secti
   // shows the summary prefix).
   await key(h, DOWN)
   const rowView = h.view()
+  const compactRow = (): string => rowView.replace(/[\u2500-\u257f│]/gu, ' ').replace(/\s+/gu, ' ')
   assert.match(rowView, /Search: Messages · Fetch: HTTP/u, 'the launcher shows the authoritative provider summary')
-  assert.match(rowView, /billed separately/u)
-  assert.match(rowView, /credential reference/u)
-  assert.match(rowView, /Enter configure/u)
+  assert.match(compactRow(), /billed separately/u)
+  assert.match(compactRow(), /not an Optional Bundle/u)
+  assert.match(compactRow(), /Share Original Question is on by default/u)
+  assert.match(compactRow(), /up to 128 characters/u)
+  assert.match(compactRow(), /authoritative read-back agree/u)
+  assert.match(compactRow(), /credential reference/u)
+  assert.match(compactRow(), /Enter configure/u)
 
   // Enter on the launcher row crosses the real Workspace -> Legacy handoff.
   await key(h, ENTER)
@@ -1072,4 +1077,25 @@ test('the endpoint editor reports Outcome unknown when the read-back is unreadab
   assert.ok(frame.includes('the endpoint write could not be verified'),
     `the panel states what could not be observed:\n${frame}`)
   assert.doesNotMatch(frame, /Not saved/u, 'an unreadable read-back is never reported as not-saved')
+})
+
+// ── D3-2: the existing Web rows state the real rc.2 help ───────────────────
+
+test('the Web provider and Share Original Question rows state defaults, billing and the ori_question boundary', async t => {
+  const h = setup()
+  t.after(h.dispose)
+  await openWebSection(h)
+  const compact = (): string => h.view().replace(/[\u2500-\u257f│]/gu, ' ').replace(/\s+/gu, ' ')
+  assert.match(compact(), /Messages is the official default and does not call the billed Search API/u)
+  assert.match(compact(), /DeepSeek Search API is opt-in and separately billed \(a Messages plan does not cover it\)/u)
+  assert.match(compact(), /up to 128 characters of the triggering question are sent as ori_question/u)
+  assert.match(compact(), /The choice applies to the next search/u)
+  // The endpoint row is base-owned Web configuration, not a Bundle, and states
+  // the trusted-https/credential boundary.
+  for (let index = 0; index < 3; index += 1) await key(h, DOWN)
+  assert.match(compact(), /On \(packed default for the DeepSeek Search API\)/u)
+  assert.match(compact(), /never the full history or system prompt/u)
+  await key(h, DOWN)
+  assert.match(compact(), /base-owned, not an Optional Bundle/u)
+  assert.match(compact(), /Changing it sends the credential and query there; only a trusted https base is accepted/u)
 })
