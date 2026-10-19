@@ -94,6 +94,7 @@ export interface WorkspaceHarness {
   readonly copied: string[]
   readonly installCalls: Array<{ requestId: string; spec: string; approvedBuilds?: readonly string[] }>
   readonly setBundle: Array<{ name: string; enabled: boolean }>
+  readonly setPlugin: Array<{ entryId: string; enabled: boolean }>
   readonly removeBundle: string[]
   readonly invalidate: () => void
   readonly emit: (event: PluginInstallEvent) => void
@@ -139,6 +140,7 @@ export async function openWorkspace(options: WorkspaceHarnessOptions = {}): Prom
   const invalidateListeners = new Set<() => void>()
   const installCalls: Array<{ requestId: string; spec: string; approvedBuilds?: readonly string[] }> = []
   const setBundle: Array<{ name: string; enabled: boolean }> = []
+  const setPlugin: Array<{ entryId: string; enabled: boolean }> = []
   const removeBundle: string[] = []
   const port: PluginManagerPort = {
     snapshot: async () => snapshot,
@@ -154,7 +156,10 @@ export async function openWorkspace(options: WorkspaceHarnessOptions = {}): Prom
       setBundle.push({ name, enabled })
       return { changed: true, application: 'applied', stage: 'enable', target: name }
     },
-    setPluginEnabled: async () => ({ changed: true, application: 'applied', stage: 'enable', target: 'row' }),
+    setPluginEnabled: async (entryId, enabled) => {
+      setPlugin.push({ entryId: String(entryId), enabled })
+      return { changed: true, application: 'applied', stage: 'enable', target: String(entryId) }
+    },
     removeBundle: async (name) => {
       removeBundle.push(name)
       return { changed: true, application: 'applied', stage: 'remove', target: name }
@@ -203,6 +208,7 @@ export async function openWorkspace(options: WorkspaceHarnessOptions = {}): Prom
     copied,
     installCalls,
     setBundle,
+    setPlugin,
     removeBundle,
     invalidate: () => { for (const listener of [...invalidateListeners]) listener() },
     emit: event => { for (const listener of [...installListeners]) listener(event) },

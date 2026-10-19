@@ -35,6 +35,8 @@ import { sanitizedPhysicalLine } from '../presentation/lines.ts'
 import { color } from '../theme/runtime.ts'
 import type { PluginInstallView, PluginManagerController } from '../../app/plugin-manager/controller.ts'
 import {
+  AUTO_REVIEW_BUNDLE,
+  AUTO_REVIEW_DISABLE_WARNING,
   PLUGIN_ACTION,
   buildPluginDetailView,
   cardStatusChip,
@@ -92,6 +94,7 @@ const INSTALL_ACTION = {
 
 const CONFIRM_ACTION = {
   remove: 'confirm:remove',
+  autoDisable: 'confirm:auto-disable',
   cancel: 'confirm:cancel',
 } as const
 
@@ -162,6 +165,9 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
    * page keeps its identity/top visible; moving the cursor brings the action in). */
   private detailReveal = false
   private confirmSelection = 1
+  /** The confirm page's own content scroll (the pinned choices never move). */
+  private confirmOffset = 0
+  private paintedConfirmScrollMax = 0
   private installSelection = 0
   private readonly searchInput = new Input({ prompt: '' })
   private readonly specInput = new Input({ prompt: '' })
@@ -299,6 +305,10 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
         this.scrollInstall(delta, plan)
         this.bumpRevision()
         this.intents.requestRender()
+        return { handled: true }
+      }
+      if (this.view === 'confirm') {
+        this.scrollConfirm(delta > 0 ? 1 : -1)
         return { handled: true }
       }
       this.detailOffset = Math.max(0, this.detailOffset + delta)
@@ -559,6 +569,14 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
   }
 
   private handleConfirmInput(data: string): void {
+    if (matchesKey(data, 'pageUp')) {
+      this.scrollConfirm(-1)
+      return
+    }
+    if (matchesKey(data, 'pageDown')) {
+      this.scrollConfirm(1)
+      return
+    }
     if (matchesKey(data, 'up') || matchesKey(data, 'left')) {
       this.confirmSelection = 0
       this.bumpRevision()
@@ -574,6 +592,17 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     if (matchesKey(data, 'enter')) {
       this.activateConfirmSelection()
     }
+  }
+
+  /** Scroll only the confirmation content; the two choices stay pinned. */
+  private scrollConfirm(direction: 1 | -1): void {
+    if (this.paintedConfirmScrollMax <= 0) return
+    const step = Math.max(1, this.paintedChrome?.bodyRows ?? 1)
+    const next = Math.min(Math.max(0, this.confirmOffset + direction * step), this.paintedConfirmScrollMax)
+    if (next === this.confirmOffset) return
+    this.confirmOffset = next
+    this.bumpRevision()
+    this.intents.requestRender()
   }
 
   private handleInstallInput(data: string): void {
@@ -718,10 +747,8 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
       return
     }
     if (this.view === 'confirm') {
-      this.controller.cancelRemove()
-      this.view = 'details'
-      this.bumpRevision()
-      this.intents.requestRender()
+      this.controller.cancelConfirmation()
+      this.closeConfirmation()
       return
     }
     if (this.view === 'details') {
@@ -748,6 +775,23 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     this.view = 'list'
     this.focus = 'list'
     this.detailReveal = false
+    this.bumpRevision()
+    this.intents.requestRender()
+  }
+
+  /** Enter the ONE shared confirmation view with Cancel as the default choice. */
+  private openConfirmation(): void {
+    this.view = 'confirm'
+    this.confirmSelection = 1
+    this.confirmOffset = 0
+    this.bumpRevision()
+    this.intents.requestRender()
+  }
+
+  /** Leave the confirmation view without writing; the controller owns cancel. */
+  private closeConfirmation(): void {
+    this.confirmOffset = 0
+    this.view = 'details'
     this.bumpRevision()
     this.intents.requestRender()
   }
@@ -890,7 +934,7 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     const card = this.selectedCard()
     const rowEntry = rowToggleEntryId(value)
     if (rowEntry !== undefined) {
-      if (card !== undefined) this.controller.toggleRow(card.value, rowEntry)
+      if (card !== undefined && this.controller.toggleRow(card.value, rowEntry)) this.openConfirmation()
       return
     }
     switch (value) {
@@ -898,15 +942,10 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
         this.leaveDetails()
         return
       case PLUGIN_ACTION.toggle:
-        if (card !== undefined) this.controller.toggleCard(card.value)
+        if (card !== undefined && this.controller.toggleCard(card.value)) this.openConfirmation()
         return
       case PLUGIN_ACTION.remove:
-        if (card !== undefined && this.controller.requestRemove(card.value)) {
-          this.view = 'confirm'
-          this.confirmSelection = 1
-          this.bumpRevision()
-          this.intents.requestRender()
-        }
+        if (card !== undefined && this.controller.requestRemove(card.value)) this.openConfirmation()
         return
       case PLUGIN_ACTION.officialInstall: {
         if (card === undefined) return
@@ -952,15 +991,15 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
         return
       case CONFIRM_ACTION.remove:
         this.controller.confirmRemove()
-        this.view = 'details'
-        this.bumpRevision()
-        this.intents.requestRender()
+        this.closeConfirmation()
+        return
+      case CONFIRM_ACTION.autoDisable:
+        this.controller.confirmAutoDisable()
+        this.closeConfirmation()
         return
       case CONFIRM_ACTION.cancel:
-        this.controller.cancelRemove()
-        this.view = 'details'
-        this.bumpRevision()
-        this.intents.requestRender()
+        this.controller.cancelConfirmation()
+        this.closeConfirmation()
         return
       default:
         return
@@ -989,7 +1028,12 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
   }
 
   private activateConfirmSelection(): void {
-    const value = this.confirmSelection === 0 ? CONFIRM_ACTION.remove : CONFIRM_ACTION.cancel
+    const kind = this.controller.confirmationKind()
+    const primary = kind === undefined
+      ? undefined
+      : kind === 'remove' ? CONFIRM_ACTION.remove : CONFIRM_ACTION.autoDisable
+    const value = this.confirmSelection === 1 ? CONFIRM_ACTION.cancel : primary
+    if (value === undefined) return
     // Only the action this frame actually painted may be invoked from the
     // keyboard; a stale/short frame does not grant a hidden Remove/Cancel.
     if (!this.frameIsCurrent() || !this.paintedConfirmActions.has(value)) return
@@ -1379,7 +1423,7 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
         ? (card?.title ?? card?.name ?? 'Details')
         : this.view === 'install'
           ? 'Install'
-          : 'Remove'
+          : this.controller.confirmationKind() === 'remove' ? 'Remove' : 'Auto Review'
     const lead = `${color.textStrong('Plugins')}${color.textDim(` · ${sanitizedPhysicalLine(trail)}`)}`
     const model = this.controller.model()
     const enabled = model.cards.filter(entry => entry.enabled).length
@@ -1396,7 +1440,9 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     if (this.view !== 'list' && this.view !== 'details') {
       const context = this.view === 'install'
         ? 'Official install — inspect, confirm, then observe the Host result'
-        : 'Removal confirmation — the exact package and consequence are shown below'
+        : this.controller.confirmationKind() === 'remove'
+          ? 'Removal confirmation — the exact package and consequence are shown below'
+          : 'Auto Review safety confirmation — no Host change happens before the explicit choice'
       return [fit(color.textDim(context), plan.width)]
     }
     const filterWidth = FILTERS.reduce((sum, filter) => sum + visibleWidth(FILTER_LABELS[filter]) + 3, 0)
@@ -1515,6 +1561,7 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     if (this.view === 'confirm') {
       return [
         { text: 'Enter confirm', priority: 90 },
+        ...(this.paintedConfirmScrollMax > 0 ? [{ text: 'PgUp/PgDn details', priority: 80 }] : []),
         { text: 'Esc cancel', priority: 100 },
       ]
     }
@@ -1898,27 +1945,58 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
 
   private renderConfirmBody(plan: ChromePlan, bodyTop: number, targets: HitTarget[]): string[] {
     const card = this.controller.confirmingCard()
+    const kind = this.controller.confirmationKind()
     const name = this.controller.confirmingName() ?? '(unknown)'
-    const actions: PluginDetailAction[] = [
-      { value: CONFIRM_ACTION.remove, label: 'Remove', enabled: card !== undefined, tone: 'warning' },
-      { value: CONFIRM_ACTION.cancel, label: 'Cancel', enabled: true, tone: 'normal' },
-    ]
+    const entryId = this.controller.confirmationEntryId()
+    const autoDisable = kind === 'auto-disable-bundle' || kind === 'auto-disable-row'
+    const title = kind === 'auto-disable-row'
+      ? `Disable ${sanitizedPhysicalLine(entryId ?? 'the Auto Review row')} in Auto Review?`
+      : autoDisable
+        ? 'Disable Auto Review?'
+        : `Remove ${sanitizedPhysicalLine(name)}?`
+    const actions: PluginDetailAction[] = kind === 'remove'
+      ? [
+          { value: CONFIRM_ACTION.remove, label: 'Remove', enabled: card !== undefined, tone: 'warning' },
+          { value: CONFIRM_ACTION.cancel, label: 'Cancel', enabled: true, tone: 'normal' },
+        ]
+      : autoDisable
+        ? [
+            { value: CONFIRM_ACTION.autoDisable, label: 'Disable Auto Review', enabled: card !== undefined, tone: 'warning' },
+            { value: CONFIRM_ACTION.cancel, label: 'Cancel', enabled: true, tone: 'normal' },
+          ]
+        : [{ value: CONFIRM_ACTION.cancel, label: 'Cancel', enabled: true, tone: 'normal' }]
     const content: string[] = []
-    content.push(color.textStrong(truncateToWidth(`Remove ${sanitizedPhysicalLine(name)}?`, plan.width, '…')))
+    content.push(color.textStrong(truncateToWidth(title, plan.width, '…')))
     if (card === undefined) {
       content.push(color.error('This bundle changed since the confirmation opened. Re-open it from the list.'))
     }
-    content.push(...wrapTextWithAnsi(
-      'This unloads the bundle and removes the profile dependency. Installed files are removed and DSH does not reinstall it automatically.',
-      plan.width,
-    ).map(line => color.textDim(line)))
-    // The two real choices are PINNED to the body floor without a separate
-    // title row: at 80x10 the exact name, the consequence and both choices fit.
+    // The Owner-frozen B03 consequence travels with BOTH destructive paths:
+    // disabling the bundle/row and removing the Auto Review profile bundle.
+    if (autoDisable || (kind === 'remove' && name === AUTO_REVIEW_BUNDLE)) {
+      content.push(...wrapTextWithAnsi(AUTO_REVIEW_DISABLE_WARNING, plan.width).map(line => color.warning(line)))
+    }
+    if (kind === 'remove') {
+      content.push(...wrapTextWithAnsi(
+        'This unloads the bundle and removes the profile dependency. Installed files are removed and DSH does not reinstall it automatically.',
+        plan.width,
+      ).map(line => color.textDim(line)))
+    } else if (autoDisable) {
+      content.push(...wrapTextWithAnsi(
+        'The official Host teardown moves existing Auto sessions to Full access; Auto Review is not a sandbox.',
+        plan.width,
+      ).map(line => color.textDim(line)))
+    }
+    // The choices stay PINNED; only the explanation scrolls when the terminal
+    // cannot show it whole (PgUp/PgDn or the wheel). A frame that cannot paint
+    // a choice publishes no target and admits no Enter for it.
     const actionBlock = paintActions([], actions, this.confirmSelection, plan.width, false)
-    const actionRows = actionBlock.lines.length
-    const contentViewport = Math.max(1, plan.bodyRows - Math.min(actionRows, plan.bodyRows))
-    const out = padBody(content.slice(0, contentViewport), contentViewport, plan.width)
-    const visibleActions = actionBlock.lines.slice(0, Math.max(0, plan.bodyRows - contentViewport))
+    const actionRows = Math.min(actionBlock.lines.length, plan.bodyRows)
+    const contentViewport = Math.max(0, plan.bodyRows - actionRows)
+    this.paintedConfirmScrollMax = Math.max(0, content.length - contentViewport)
+    this.confirmOffset = Math.min(this.confirmOffset, this.paintedConfirmScrollMax)
+    const visibleContent = content.slice(this.confirmOffset, this.confirmOffset + contentViewport)
+    const out = padBody([...visibleContent], contentViewport, plan.width)
+    const visibleActions = actionBlock.lines.slice(0, actionRows)
     for (const line of visibleActions) out.push(fit(line, plan.width))
     this.paintedConfirmActions = new Set()
     for (const action of actionBlock.actionLines) {

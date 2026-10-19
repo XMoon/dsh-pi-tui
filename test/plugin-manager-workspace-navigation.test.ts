@@ -12,8 +12,9 @@ import type { Component } from '@xmoon76/pi-tui'
 import { PluginManagerController } from '../src/app/plugin-manager/controller.ts'
 import { PluginManagerWorkspacePanel } from '../src/tui/plugin-manager/workspace.ts'
 import { createDiag } from '../src/runtime/process/diagnostics.ts'
-import type { PluginChangeFact } from '../src/runtime/plugin-manager-port.ts'
-import { openWorkspace, plain, type WorkspaceHarness } from './support/plugin-workspace-harness.ts'
+import type { PluginBundleFact, PluginChangeFact } from '../src/runtime/plugin-manager-port.ts'
+import { SELF_BUNDLE } from '../src/app/plugin-manager/classify.ts'
+import { EXPERIMENTAL_NAMES, bundle, openWorkspace, plain, row, type WorkspaceHarness } from './support/plugin-workspace-harness.ts'
 
 const started = new Set<WorkspaceHarness>()
 afterEach(() => {
@@ -313,4 +314,141 @@ test('a second workspace lease is refused; an external disposal notifies exactly
   panel.dispose()
   panel.dispose()
   assert.equal(disposals, 1, 'an external teardown releases its owner exactly once')
+})
+
+// ── B03 Auto Review safety confirmation (D2-2) ─────────────────────────────
+
+const AUTO_REVIEW = '@deepseek-ai/dsh-experimental-auto-review'
+const AUTO_WARNING = 'Disabling Auto Review can change existing Auto sessions to Full access. Auto Review is not a sandbox. Continue?'
+
+/** The real catalog shape with B03 enabled and one addressable live row. */
+function autoReviewCatalog(): NonNullable<Parameters<typeof open>[0]> {
+  const missing = (name: string) => bundle({
+    name,
+    official: true,
+    availability: 'missing',
+    installed: false,
+    optional: true,
+    removable: false,
+    source: undefined,
+    installTarget: { spec: `${name}@0.2.1-rc.2`, version: '0.2.1-rc.2' },
+  })
+  return {
+    columns: 140,
+    rows: 40,
+    bundles: [
+      bundle({ name: SELF_BUNDLE, source: 'file:/tmp/tui', enabled: true, rows: [{ rowId: 'tui-app', moduleName: SELF_BUNDLE, entryId: 'e-tui' }] }),
+      bundle({ name: '@deepseek-ai/dsh-base', availability: 'installation', source: undefined }),
+      bundle({
+        name: AUTO_REVIEW,
+        official: true,
+        availability: 'installation',
+        installed: false,
+        optional: true,
+        removable: false,
+        enabled: true,
+        source: undefined,
+        rows: [{ rowId: 'auto-review', moduleName: AUTO_REVIEW, entryId: 'e-auto', title: 'Auto Review' }],
+      }),
+      ...EXPERIMENTAL_NAMES.filter(name => name !== AUTO_REVIEW).map(name => missing(name)),
+    ],
+    plugins: [
+      row({ entryId: 'e-tui', moduleName: SELF_BUNDLE, patchId: 'tui-app' }),
+      row({ entryId: 'e-auto', moduleName: AUTO_REVIEW, patchId: 'auto-review', enabled: true, fiberPhase: 'active' }),
+    ],
+  }
+}
+
+const compact = (view: string): string => view.replace(/\s+/gu, ' ')
+
+test('B03 disable opens the shared risk confirmation and writes only after the explicit choice', async () => {
+  const harness = await open(autoReviewCatalog())
+  await selectCard(harness, `bundle:${AUTO_REVIEW}`)
+  harness.vt.sendInput('\r')
+  await harness.settle()
+  // The first Detail action is Disable….
+  harness.vt.sendInput('\r')
+  await harness.settle()
+  assert.equal(harness.panel.currentView(), 'confirm')
+  assert.match(compact(harness.view()), new RegExp(AUTO_WARNING.replace(/[.]/gu, '\\.')))
+  assert.deepEqual(harness.setBundle, [], 'opening the confirmation never mutates the Host')
+
+  // Default focus is Cancel: Enter abandons without a write.
+  harness.vt.sendInput('\r')
+  await harness.settle()
+  assert.equal(harness.panel.currentView(), 'details')
+  assert.deepEqual(harness.setBundle, [])
+
+  // Re-open and explicitly choose the dangerous action: exactly one official
+  // OFF write is dispatched (never a toggle inversion).
+  harness.vt.sendInput('\r')
+  await harness.settle()
+  harness.vt.sendInput('\x1b[A') // Cancel -> Disable Auto Review
+  await harness.settle()
+  harness.vt.sendInput('\r')
+  await harness.settle()
+  assert.deepEqual(harness.setBundle, [{ name: AUTO_REVIEW, enabled: false }])
+})
+
+test('B03 row disable cannot bypass the confirmation and writes the exact entry id', async () => {
+  const harness = await open(autoReviewCatalog())
+  await selectCard(harness, `bundle:${AUTO_REVIEW}`)
+  harness.vt.sendInput('\r')
+  await harness.settle()
+  // Actions: Disable… (0), Disable row e-auto (1), Back (2).
+  harness.vt.sendInput('\x1b[B')
+  await harness.settle()
+  harness.vt.sendInput('\r')
+  await harness.settle()
+  assert.equal(harness.panel.currentView(), 'confirm')
+  assert.match(compact(harness.view()), /Disable e-auto in Auto Review\?/)
+  assert.match(compact(harness.view()), new RegExp(AUTO_WARNING.replace(/[.]/gu, '\\.')))
+  assert.deepEqual(harness.setPlugin, [], 'a row toggle opens the confirmation instead of writing')
+
+  harness.vt.sendInput('\x1b[A') // Cancel -> Disable Auto Review
+  await harness.settle()
+  harness.vt.sendInput('\r')
+  await harness.settle()
+  assert.deepEqual(harness.setPlugin, [{ entryId: 'e-auto', enabled: false }])
+})
+
+test('B03 stale confirmation never writes after the authoritative inventory changed', async () => {
+  const harness = await open(autoReviewCatalog())
+  await selectCard(harness, `bundle:${AUTO_REVIEW}`)
+  harness.vt.sendInput('\r')
+  await harness.settle()
+  harness.vt.sendInput('\r')
+  await harness.settle()
+  assert.equal(harness.panel.currentView(), 'confirm')
+  // A reread invalidates the epoch the confirmation was opened against.
+  harness.controller.refresh()
+  await harness.settle()
+  harness.vt.sendInput('\x1b[A')
+  await harness.settle()
+  harness.vt.sendInput('\r')
+  await harness.settle()
+  assert.deepEqual(harness.setBundle, [], 'a stale confirmation dispatches no Host write')
+  assert.match(harness.view(), /Auto Review changed since the confirmation opened/)
+})
+
+test('B03 remove uses the same confirmation view with the same risk warning', async () => {
+  const catalog = autoReviewCatalog()
+  const harness = await open({
+    ...catalog,
+    bundles: (catalog.bundles as readonly PluginBundleFact[]).map(entry =>
+      entry.name === AUTO_REVIEW
+        ? { ...entry, availability: 'profile', installed: true, removable: true, enabled: true, source: 'file:/tmp/auto-review' }
+        : entry),
+  })
+  await selectCard(harness, `bundle:${AUTO_REVIEW}`)
+  harness.vt.sendInput('\r')
+  await harness.settle()
+  // Actions: Disable… (0), Remove… (1), Disable row (2), Back.
+  harness.vt.sendInput('\x1b[B')
+  await harness.settle()
+  harness.vt.sendInput('\r')
+  await harness.settle()
+  assert.equal(harness.panel.currentView(), 'confirm')
+  assert.match(compact(harness.view()), new RegExp(AUTO_WARNING.replace(/[.]/gu, '\\.')))
+  assert.deepEqual(harness.removeBundle, [], 'the default Cancel removes nothing')
 })

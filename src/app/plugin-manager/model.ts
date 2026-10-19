@@ -56,6 +56,12 @@ export interface PluginRowView {
   readonly canToggle: boolean
 }
 
+/** The exact rc.2 Auto Review Optional bundle identity (B03). */
+export const AUTO_REVIEW_BUNDLE = '@deepseek-ai/dsh-experimental-auto-review'
+/** The Owner-frozen consequence text shown before disabling Auto Review or
+ *  removing its bundle. It is a Host-capability fact, not a TUI risk verdict. */
+export const AUTO_REVIEW_DISABLE_WARNING = 'Disabling Auto Review can change existing Auto sessions to Full access. Auto Review is not a sandbox. Continue?'
+
 /** One package card: a bundle, or a standalone managed plugin entry. */
 export interface PluginCardView {
   /** Stable logical identity, NEVER a screen index. */
@@ -88,6 +94,9 @@ export interface PluginCardView {
   readonly rows: readonly PluginRowView[]
   readonly overrides: readonly string[]
   readonly extension?: TuiExtensionFacts
+  /** The ONE bounded Host-capability consequence note (exact B03 identity
+   *  only). It never rewrites `official`/`availability`/`enabled`. */
+  readonly riskNotice?: string
   /** Why no direct bundle mutation may be dispatched (undefined = allowed). */
   readonly toggleBlockedReason?: string
   /** Why no removal may be dispatched (undefined = allowed). */
@@ -342,6 +351,9 @@ function cardComponentFacts(card: PluginCardView): PluginDetailFact[] {
 
 function cardWarningFacts(card: PluginCardView, exemptions: readonly PluginExemptionFact[]): PluginDetailFact[] {
   const facts: PluginDetailFact[] = []
+  if (card.riskNotice !== undefined) {
+    facts.push({ label: 'Risk', value: card.riskNotice, tone: 'warning' })
+  }
   if (card.error !== undefined) {
     facts.push({ label: 'Host error', value: errorText(card.error), tone: 'error' })
   }
@@ -642,6 +654,7 @@ export function buildPluginManagerModel(
       rows: Object.freeze(rows),
       overrides: Object.freeze([...bundle.overrides]),
       ...(claim?.extension === undefined ? {} : { extension: claim.extension }),
+      ...(bundle.name === AUTO_REVIEW_BUNDLE && bundle.enabled ? { riskNotice: AUTO_REVIEW_DISABLE_WARNING } : {}),
       ...(toggleBlocked === undefined ? {} : { toggleBlockedReason: toggleBlocked }),
       ...(removeBlocked === undefined ? {} : { removeBlockedReason: removeBlocked }),
       ...(installBlocked === undefined ? {} : { installBlockedReason: installBlocked }),

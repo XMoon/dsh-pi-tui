@@ -3053,3 +3053,20 @@ returns to the untouched conversation/transcript-fullscreen state.
   direct root). `/` search, the Tab status filter, Up/Down/Pg/Home/End, mouse
   selection and action clicks all resolve against the cells the current frame
   actually painted.
+- **B03 Auto Review is the ONE destructive confirmation (2026-10-19, S4-D2).**
+  Disabling the EXACT `@deepseek-ai/dsh-experimental-auto-review` bundle while
+  it is enabled, disabling one of its addressable rows, and removing the
+  profile-owned Auto Review bundle all open the SAME existing confirmation view
+  (no second overlay/manager). The consequence text is fixed: `Disabling Auto
+  Review can change existing Auto sessions to Full access. Auto Review is not a
+  sandbox. Continue?`; the default focus is **Cancel**. No Host mutation is
+  dispatched while the view is open; the explicit primary choice (`Disable Auto
+  Review` or `Remove`) calls the official `setBundleEnabled(name,false)` /
+  `setPluginEnabled(entryId,false)` / `removeBundle` — never a toggle
+  inversion. A reread that changes the authoritative inventory invalidates the
+  confirmation (`Auto Review changed since the confirmation opened; nothing was
+  changed`) instead of acting on a stale target. On 80×10/44×20 the explanation
+  scrolls with PgUp/PgDn or the wheel while both pinned choices stay reachable;
+  a frame that does not paint a choice admits no Enter/click for it. The
+  Host-capability consequence is also a bounded `Risk` fact on the exact B03
+  card; it does not rewrite `official`/`availability`/`enabled`.
