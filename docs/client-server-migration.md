@@ -54,6 +54,17 @@ M3-6 DONE          (PR1 locality + PR2 reconnect + PR3 teardown + PR4 closure)
 M3 DONE            (M3-1..M3-6 delivered; Direct remains the production backend,
                     the in-process official wire stays experimental/non-public,
                     and no M4 IPC/TCP or public external attach exists)
+S4-D1 PR-D1 IMPLEMENTED (official Plugin Manager catalog + fullscreen workspace:
+                    complete rc.2 `official/availability/installTarget/source` and
+                    `ChangeResult` facts through the shared Direct/Remote mapping,
+                    frozen four-section classification, ONE controller with the
+                    official inspect/install/wait/cancel/approve lifecycle, and the
+                    SAME workspace Alt-Screen lease for `/plugins` and the
+                    first-level `Settings → Plugins` page. This closes the
+                    `CATALOG_MANAGEABLE` implementation/qualification for the real
+                    rc.2 14/14 Host catalog; `HOST_CAPABLE` and
+                    `TUI_FEATURE_SUPPORTED` remain S4-D2/D3 ledger items. Stage
+                    closure/review/merge is pending)
 M4  NOT STARTED   (experimental local Host process / IPC split)
 M5  NOT STARTED   (external attach; localhost/SSH only)
 M6  NOT STARTED   (production dual stack: direct default, wire opt-in)
@@ -7184,3 +7195,62 @@ assembly defect and propagates); the fix belongs to the official SessionFace
 (sample before registering the echo, or retire the identified submission when
 the sampler throws). Recorded here as an upstream limitation: it predates this
 change, it affects the Remote path only, and it needs no TUI-local workaround.
+
+
+## S4-D1 PR-D1 — official Plugin Manager catalog + fullscreen workspace
+
+This section records the S4-D1 / PR-D1 implementation and its evidence. It does
+**not** claim S4-D2 `HOST_CAPABLE` or S4-D3 `TUI_FEATURE_SUPPORTED` for any of
+the 14 official Optional/On-demand bundles; their qualification stays in the
+B01–B14 ledger.
+
+### Implemented authority
+
+- **rc.2 facts are preserved, not synthesized.** `PluginBundleFact` carries
+  `official`, `availability` (`installation|profile|missing`),
+  `installTarget?:{spec,version}` and `source?`; `PluginChangeFact` carries the
+  render-relevant `ChangeResult` facts (`restartReason`, actual `version`,
+  `pendingBuilds`, `approvedBuilds`, `packageResult`, `registries`, `failedAt`).
+  Direct and generated-Remote adapters use the SHARED mapping; no adapter
+  fabricates a missing value.
+- **One presentation classifier, four frozen sections.** `TUI & Extensions →
+  Official DSH → Third-party → Experimental` (Experimental always last). The
+  exact rc.2 B01–B14 identities only SELECT a section/order for real Host rows;
+  `@deepseek-ai/` scopes and `experimental` substrings are never evidence.
+  `official:false` on the exact rc.2 base bundle ids is not third-party
+  evidence, and an unprovable standalone entry is an audited
+  `Third-party → Unverified origin` row.
+- **ONE controller and ONE workspace lease.** The controller owns official
+  inventory reads, install request identity/wait/cancel/approve and mutation
+  currentness; the page owns per-open selection/search/filter/focus/scroll/hit
+  map. `/plugins` and the first-level `Settings → Plugins` category host the
+  SAME page through the existing `TuiApp` workspace Alt-Screen primitive; there
+  is no second lease, overlay fallback or empty Settings Plugins row.
+- **Truthful action admission:** missing official + valid `installTarget` →
+  inspect → confirm → install; `installation` → Toggle only; profile-owned →
+  Toggle/Remove; Current TUI and its provably controlled rows expose no write
+  action. `restart-required`, `overridden`, actual installed version, pending
+  build scripts and package failures render as reported; unknown results
+  reconcile through `waitForInstall` + authoritative reread, never an automatic
+  retry.
+
+### Qualification evidence (current PR state)
+
+- **Real Host catalog 14/14:** `test/plugin-manager-catalog-rc2.test.ts`
+  instantiates the real `@deepseek-ai/dsh-plugin-manager` service over a real
+  managed profile/installation fixture seeded from the shipped
+  `OPTIONAL_BUNDLES` + `OFFICIAL_ON_DEMAND_CATALOG`, and asserts 14/14 real
+  `listBundles()` rows, the 12 `installation` + 2 `missing` availability split,
+  real `installTarget` values, and the shared mapping → classifier → model
+  hand-off. `TEST STAND-INS`: ephemeral profile/installation dirs and local
+  package manifests; public npm network/credentials are deliberately absent.
+- **Direct/Remote mapping parity:** `test/plugin-manager-direct.test.ts`,
+  `test/remote-plugin-manager.test.ts`; **controller lifecycle:**
+  `test/plugin-manager-port.test.ts`, `test/plugin-manager-install.test.ts`.
+- **L6 workspace/lease/navigation:** `test/plugin-manager-workspace-visual.test.ts`,
+  `test/plugin-manager-workspace-navigation.test.ts`,
+  `test/plugin-manager-runner-integration.test.ts`,
+  `test/runner-remote-plugin-manager.test.ts` (real TuiApp Alt-Screen frames,
+  Settings in-place entry/return, resize/stale gesture, real Remote L6).
+- Local qualification does not replace the stage-final CI run on the frozen
+  PR HEAD.

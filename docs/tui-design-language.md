@@ -901,14 +901,12 @@ is next touched for another reason** (never by a mass search/replace):
 
 | Surface | Deviation | Trigger |
 |---|---|---|
-| plugin-manager panel | selection marker `▸ ` in `accent` (`plugin-manager/panel.ts:280`) | next plugin-manager change |
 | footer configurator | cursor `›` in `primary` (`footer/configurator.ts:940`) | next configurator change |
 | all overlays | ad-hoc frame sizes (64/72/76/88/100% × 24/26/28) instead of the four-step ladder (D10) | next change to that overlay |
 | keybindings UI list / action editor | its own list hardcodes the cursor `›` in `primary` with a ONE-cell gutter (`keybindings/ui/list.ts:101,115`, `ui/action-editor.ts:61`) where §4.3/D3 want `>` (U+203A is EAW-ambiguous) and the family gutter is two cells; its footer hints read `<Key>: <verb>` (`Enter: details · type: search · ←→: edit · ↑↓: move · Esc: back`) instead of §7.1's `<Key> <verb>` | next keybindings-UI change |
 | question flow hints | lowercase keys with `←`/`←→` (`'← back · ↵ submit · esc cancel'`, `'←→ edit'`) instead of §4.1's `Esc`-style casing and the width-safe arrow rule | next question-flow change |
 | approval dialog | bracketed key choices `[y] allow once   [n] reject   [esc/ctrl+c] cancel` (three-space separator, lowercase keys) | next approval change |
 | task browser | `│` column split for a master/detail pair (`task-panel.ts:869`) | separate Task Center visual change (Phase 3C; not part of B4-B) |
-| plugin-manager | its hint capitalises bare keys (`S stop`) instead of §4.1's lowercase | next change to that bar |
 | footer configurator help lines | capitalised verbs (`'↑↓ Select · Enter Open · S Save · Esc Close'`) where §4.1/§7.1 want lowercase verbs | next configurator change |
 | picker / overlay titles | the picker header is bold `textMuted` (`groupHeader`) and the output-viewer and approval titles carry no ink at all, where role 1 is bold `textStrong` | next change to that overlay |
 | keybindings UI | `Saving…` painted `accent` | next keybindings UI change |
@@ -919,6 +917,12 @@ is next touched for another reason** (never by a mass search/replace):
 | viewer subject bar | `● running` / `○ inactive` (`viewer-subject-bar.ts:88-90`) — same per-status glyph debt, and both glyphs are EAW-ambiguous | next subject-bar change |
 | failed generic tool | the result text stays unpainted/`textDim`; only the `[error]` pill carries the colour | next tool-card change |
 | chrome-wide ambiguous glyphs | ` · `, `─`, `↗`, `▼`/`▶`, `◆`, `▏`, `⇧`, `×`, `○`, `◐`, `●`; measured list in §4.3 | only if CJK-width terminals become a supported target (D5 already removed the Job status `●`) |
+
+The retired plugin-manager overlay's two deviations (the `▸ ` accent
+selection marker and capitalized bare-key hints) were closed by the S4-D1
+fullscreen Plugin Manager workspace, which paints `> ` in `primary` and
+lowercase bare-key hints. The rows were removed from the table above; no new
+visual vocabulary was added.
 
 ## 12. Surface archetypes
 
