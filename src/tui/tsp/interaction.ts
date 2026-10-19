@@ -24,6 +24,7 @@
  */
 
 import { ui } from '@stencil-hq/tern'
+import { sanitizedPhysicalLine } from '../presentation/lines.ts'
 import { sanitizeDisplayText } from '../presentation/terminal-text.ts'
 import type { Key, Node } from '@stencil-hq/tern'
 import { runSyncDisposalSteps } from '../../runtime/process/disposal.ts'
@@ -1026,7 +1027,9 @@ export function createTspInteractionSeat(options: TspInteractionSeatOptions): Ts
   const overlayKey = (): string => `modal-${modalEpoch}`
 
   const approvalOverlay = (slot: ApprovalSlot): Node => {
-    const body: Node[] = [ui.text({ key: 'tool', text: sanitizeDisplayText(`tool: ${slot.request.toolName}`) })]
+    // The tool identity is a ONE-line label: fold it so an embedded LF can never
+    // forge an extra approval row. The reason/args prose below stays multi-line.
+    const body: Node[] = [ui.text({ key: 'tool', text: sanitizedPhysicalLine(`tool: ${slot.request.toolName}`) })]
     if (slot.request.reason !== undefined && slot.request.reason !== '') {
       body.push(ui.text({ key: 'reason', text: sanitizeDisplayText(slot.request.reason) }))
     }
@@ -1058,14 +1061,14 @@ export function createTspInteractionSeat(options: TspInteractionSeatOptions): Ts
     const draft = slot.drafts[slot.tab] as SlotDraft
     body.push(ui.text({ key: 'progress', text: `question ${slot.tab + 1}/${total}` }))
     const statusText = slot.status?.text
-    if (statusText !== undefined && statusText !== '') body.push(ui.text({ key: 'status', text: sanitizeDisplayText(statusText) }))
-    if (question.header !== undefined) body.push(ui.text({ key: 'header', text: sanitizeDisplayText(question.header) }))
+    if (statusText !== undefined && statusText !== '') body.push(ui.text({ key: 'status', text: sanitizedPhysicalLine(statusText) }))
+    if (question.header !== undefined) body.push(ui.text({ key: 'header', text: sanitizedPhysicalLine(question.header) }))
     body.push(ui.text({ key: 'question', text: sanitizeDisplayText(question.question) }))
     if (question.detail !== undefined) body.push(ui.text({ key: 'detail', text: sanitizeDisplayText(question.detail) }))
     const seat = seatRows(slot)
     if (slot.editing === slot.tab) {
       for (const [index, row] of seat.entries()) {
-        body.push(ui.text({ key: `row-${index}`, text: sanitizeDisplayText(`${index === slot.highlight ? '❯' : ' '} ${row.label}`) }))
+        body.push(ui.text({ key: `row-${index}`, text: `${index === slot.highlight ? '❯' : ' '} ${sanitizedPhysicalLine(row.label)}` }))
       }
       const masked = question.masked === true
       body.push(ui.input({
@@ -1095,7 +1098,9 @@ export function createTspInteractionSeat(options: TspInteractionSeatOptions): Ts
           : draft.selected.has(row.value ?? '') ? '(•) ' : '( ) '
       const description = row.description === undefined ? '' : ` — ${row.description}`
       const recommended = row.recommended ? ' [recommended]' : ''
-      body.push(ui.text({ key: `row-${index}`, text: sanitizeDisplayText(`${pointer} ${marker}${row.label}${recommended}${description}`) }))
+      // The label is ONE line; the optional description keeps its prose policy
+      // (a legitimate multi-line description stays multi-line).
+      body.push(ui.text({ key: `row-${index}`, text: `${pointer} ${marker}${sanitizedPhysicalLine(row.label)}${sanitizeDisplayText(`${recommended}${description}`)}` }))
     }
     const custom = draft.custom
     if (hasCustomAnswer(draft) || draft.skipped) {

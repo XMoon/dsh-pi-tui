@@ -80,18 +80,25 @@ list/panel rows and their labels, badges, secondary text, notices, install log
 rows and panel titles; picker item fields (label, group, description, badge /
 effort token); one-line headers (tool / command / workflow card heads, Context
 row titles, the approval tool name, diff hunk headers); the working message,
-dock/todo summary and goal line; and the TSP one-line structured props
+dock/todo summary and goal line; the footer's builtin external fields
+(model provider/id/effort, cwd, branch, project, agent-preset label, reasoning
+effort and host versions) and the welcome card's session facts (cwd, session
+id, model, preset, version); and the TSP one-line structured props
 (`ui.card.head`, `ui.tool.name`/`title`/`target`, picker `label`/`detail`/
-`title`/group labels/subtitle). A row budget, click/hit map or width
-measurement is built from one array element; an embedded line break would
-escape both the row count and the geometry it indexes.
+`title`/group labels/subtitle) plus its single-line interaction labels
+(approval `tool` identity, question `status`/`header`, option labels). A row
+budget, click/hit map or width measurement is built from one array element;
+an embedded line break would escape both the row count and the geometry it
+indexes.
 
 Multi-line prose, Markdown, code and result/log bodies keep
 `sanitizeDisplayText` (or `sanitizeDisplayLog`) and are carried by a component
 or node with a real multi-line budget (`Text`, `Markdown`,
-`CompactTextPreview`, `ui.md`, `ui.code`, wrapped rows). Folded terminal
-previews re-derive their ONE row from the log-projected text, because the log
-policy itself turns a lone `CR` into `LF`.
+`CompactTextPreview`, `ui.md`, `ui.code`, wrapped rows). When a folded terminal
+preview is reduced to ONE row, the LOG projection runs LAST: its app-owned
+`ESC[0m` must ride at the preview tail (projecting the full log first would put
+the reset past `preview()`'s cut and let a styled prefix bleed into the next
+row), and only then are the CR→LF records folded to spaces.
 
 ## SGR whitelist (log policy only)
 
@@ -143,8 +150,11 @@ The experimental Tern renderer (`DSH_PI_TUI_RENDERER=tsp`, off by default) maps
 the same transcript structure onto SDK nodes. Multi-line node content
 (`ui.text` bodies, `ui.md`, `ui.code`, `ui.badge`) uses `sanitizeDisplayText`;
 one-line structured props (`ui.card.head`, `ui.tool.name`/`title`/`target`,
-picker `label`/`detail`/`title`, group labels and `subtitle`) use
-`sanitizedPhysicalLine`. The tool's canonical `TranscriptMessage.name` and the
+picker `label`/`detail`/`title`, group labels and `subtitle`) and the
+single-line interaction labels (approval `tool` identity, question
+`status`/`header`, option labels) use `sanitizedPhysicalLine`; the approval
+reason/arguments, question body/detail and option descriptions keep the
+multi-line plain policy. The tool's canonical `TranscriptMessage.name` and the
 `SessionEvent` payload stay raw for tool semantics; only the displayed
 `ui.tool.name` is projected. Raw ids, node keys, answer values, action/event
 identifiers, SDK frames and currentness are untouched, so source/GUI evidence
@@ -161,6 +171,8 @@ does not prove the closed-source Tern client's own rendering — that remains
 | Job body / search / copy | `test/job-inspector-workspace.test.ts`, `test/job-output-interaction.test.ts`, `test/job-workspace-visual.test.ts` | hostile output, CR records, Find on the painted row, byte-exact copy |
 | local `!` shell log | `test/local-shell-card.test.ts` | whitelisted SGR only, CR frames readable |
 | sibling surfaces | `test/approval.test.ts`, `test/plugin-manager-panel.test.ts`, `test/plugin-manager-install.test.ts`, `test/model-picker.test.ts`, `test/job-output-viewer.test.ts`, `test/session-picker-content-search.test.ts` | no fake hint row via CR, no OSC in chrome, LF/CRLF/TAB/OSC folded onto ONE row per single-line field |
+| builtin footer + welcome chrome | `test/footer-display-safety.test.ts`, `test/rendering.test.ts` | hostile cwd/model/branch/project/preset/version rendered through the REAL default footer and welcome card: one physical row each, no OSC/C1 at the TTY, raw workspace authority untouched |
+| TSP interaction labels | `test/tern-tsp-interaction.test.ts` | approval tool identity / question header / option labels carry no LF or control in their SDK props; question body/detail and option descriptions stay multi-line |
 | negative controls | `test/footer-ansi-sanitize.test.ts`, `test/terminal-title.test.ts`, `test/history-panel.test.ts` | the specialized contracts above still work |
 
 Minimal reproduction:

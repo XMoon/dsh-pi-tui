@@ -30,6 +30,7 @@ import test from 'node:test'
 import { connect as sdkConnect } from '@stencil-hq/tern'
 import type { Op } from '@stencil-hq/tern'
 import { installTspPane, type TspPane } from './support/tsp-terminal-fixture.ts'
+import { wireNodes, type WireNode } from './support/tsp-picker-wire.ts'
 import { mountTspRenderer, type TspRenderer } from '../src/tui/tsp/session.ts'
 import type { ApprovalOutcome, ApprovalPromptRequest, TuiQuestion, TuiQuestionAnswer, TuiQuestionStatus } from '../src/app/surface/interaction-presenter.ts'
 
@@ -153,6 +154,11 @@ function wireText(pane: TspPane): string {
   return pane.output.text()
 }
 
+/** One node of the active modal overlay by its path suffix (wire-derived id). */
+function modalNode(pane: TspPane, suffix: string): WireNode | undefined {
+  return wireNodes(pane).find(node => /^layer\.modal-\d+\./.test(node.id) && node.id.endsWith(suffix))
+}
+
 test('B-hardening: a hostile approval request never emits its raw control bytes to the wire', async () => {
   const harness = await mountHarness()
   try {
@@ -171,6 +177,70 @@ test('B-hardening: a hostile approval request never emits its raw control bytes 
     assert.ok(ops.includes('[y] allow once'), 'the reason text itself still reads inline')
     harness.pane.key('n')
     assert.equal(await outcome, 'rejected')
+  } finally {
+    await harness.dispose()
+  }
+})
+
+test('B-hardening: a hostile approval toolName never forges a second visual row', async () => {
+  const harness = await mountHarness()
+  try {
+    const hostile = 'tool-a\n[y] allow once\t\u001b]52;c;YXR0YWNr\u0007'
+    const outcome = harness.renderer.interaction.showApprovalPrompt(
+      { toolName: hostile, reason: hostile, arguments: '{}' },
+      true,
+    )
+    await waitFor(() => overlayAdds(harness.ops()).length === 1, 'the approval overlay reached the wire')
+    const tool = modalNode(harness.pane, '.tool')
+    assert.ok(tool !== undefined, 'the approval tool label is on the wire')
+    const toolText = String(tool.p.text ?? '')
+    assert.ok(!/[\u0000-\u001f\u007f-\u009f]/.test(toolText),
+      `the tool label is ONE physical row: ${JSON.stringify(toolText)}`)
+    assert.ok(toolText.includes('tool-a') && toolText.includes('[y] allow once'),
+      `the readable label survives collapsed on that row: ${JSON.stringify(toolText)}`)
+    harness.pane.key('n')
+    assert.equal(await outcome, 'rejected')
+  } finally {
+    await harness.dispose()
+  }
+})
+
+test('B-hardening: hostile question header/option labels fold to one prop row while prose stays multiline', async () => {
+  const harness = await mountHarness()
+  const recorder = statusOf()
+  try {
+    const questions = [question({
+      id: 'q-hostile-labels',
+      header: 'Header\n❯ Choice B',
+      question: 'question body\nstays multi-line',
+      detail: 'detail\nstays multi-line',
+      options: [
+        { label: 'Choice A\n❯ Choice B' },
+        { label: 'Choice D', description: 'desc\nstays multi-line' },
+      ],
+    })]
+    const answers = harness.renderer.interaction.askQuestions(questions, undefined, recorder.status, false)
+    await waitFor(() => modalNode(harness.pane, '.header') !== undefined, 'the question overlay reached the wire')
+    const header = modalNode(harness.pane, '.header')
+    const firstRow = modalNode(harness.pane, '.row-0')
+    const secondRow = modalNode(harness.pane, '.row-1')
+    assert.ok(header !== undefined && firstRow !== undefined && secondRow !== undefined,
+      'the header and both option rows are on the wire')
+    const headerText = String(header.p.text ?? '')
+    assert.ok(!/[\u0000-\u001f\u007f-\u009f]/.test(headerText),
+      `the header is ONE physical row: ${JSON.stringify(headerText)}`)
+    const firstText = String(firstRow.p.text ?? '')
+    assert.ok(!/[\u0000-\u001f\u007f-\u009f]/.test(firstText),
+      `the option label is ONE physical row: ${JSON.stringify(firstText)}`)
+    assert.ok(firstText.includes('Choice A ❯ Choice B'),
+      `the collapsed label survives on that row: ${JSON.stringify(firstText)}`)
+    const secondText = String(secondRow.p.text ?? '')
+    assert.ok(secondText.includes('\n'),
+      `the option description keeps its prose line break: ${JSON.stringify(secondText)}`)
+    const questionText = String(modalNode(harness.pane, '.question')?.p.text ?? '')
+    assert.ok(questionText.includes('\n'), 'the question body stays multi-line')
+    harness.pane.key('\x1b')
+    await assert.rejects(answers, /question flow cancelled/)
   } finally {
     await harness.dispose()
   }
