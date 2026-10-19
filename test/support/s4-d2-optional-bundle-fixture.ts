@@ -193,6 +193,8 @@ export interface OptionalBundleHost {
   hasTool(name: string, agent?: Agent): boolean
   /** The durable session events of one Agent. */
   events(agent: Agent): readonly unknown[]
+  /** The real Loader entry states (id, fiber state, failure message). */
+  loaderEntries(): readonly { readonly id: string; readonly state: number; readonly error?: string }[]
   /** Dispose this Context and boot the SAME profile again from disk. */
   restart(): Promise<OptionalBundleHost>
   dispose(): Promise<void>
@@ -287,7 +289,7 @@ function prepareRoot(
 async function bootAt(options: HostOptions): Promise<OptionalBundleHost> {
   const profileDir = join(options.root, 'profile')
   const installationManifest = join(options.root, 'installation', 'package.json')
-  const profile = loadProfileDirectory(BIN_NAME, profileDir, installationManifest, { userLayer: false })
+  const profile = loadProfileDirectory(BIN_NAME, profileDir, installationManifest)
   if (profile.skippedBundles.length > 0) {
     throw new Error(`S4-D2 fixture: the profile could not load its selected bundles: ${profile.skippedBundles
       .map(bundle => `${bundle.packageName}: ${bundle.reason}`).join(' | ')}`)
@@ -303,6 +305,7 @@ async function bootAt(options: HostOptions): Promise<OptionalBundleHost> {
     // no TUI/CLI surface, so the module watcher is deliberately not mounted.
     { id: 'hmr', disabled: true },
     ...bundlePatches,
+    ...profile.patches,
     ...(options.settings.patches ?? []),
   ]
   const profileContext = {
@@ -355,6 +358,9 @@ async function bootAt(options: HostOptions): Promise<OptionalBundleHost> {
     events(agent) {
       return agent.session.snapshotEvents() as unknown as readonly unknown[]
     },
+    loaderEntries() {
+      return collectLoaderEntries(ctx.get('loader'))
+    },
     async restart() {
       await ctx.fiber.dispose()
       return bootAt(options)
@@ -365,6 +371,33 @@ async function bootAt(options: HostOptions): Promise<OptionalBundleHost> {
   }
   options.tracker.current = host
   return host
+}
+
+/** Walk the real Loader tree's own entry groups (never a second registry). */
+function collectLoaderEntries(loader: unknown): Array<{ id: string; state: number; error?: string }> {
+  const out: Array<{ id: string; state: number; error?: string }> = []
+  const seen = new Set<unknown>()
+  const walk = (tree: unknown): void => {
+    if (tree === null || typeof tree !== 'object' || seen.has(tree)) return
+    seen.add(tree)
+    const store = (tree as { store?: Record<string, unknown> }).store
+    if (store === undefined) return
+    for (const raw of Object.values(store)) {
+      const entry = raw as { options?: { id?: unknown }; fiber?: { state?: number; error?: unknown }; error?: unknown; subtree?: unknown }
+      const id = entry.options?.id
+      if (typeof id === 'string') {
+        const error = entry.fiber?.error ?? entry.error
+        out.push({
+          id,
+          state: entry.fiber?.state ?? -1,
+          ...(error === undefined ? {} : { error: error instanceof Error ? error.message : String(error) }),
+        })
+      }
+      walk(entry.subtree)
+    }
+  }
+  walk(loader)
+  return out
 }
 
 function restoreDshHome(previous: string | undefined): void {
