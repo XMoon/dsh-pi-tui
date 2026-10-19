@@ -95,10 +95,15 @@ Multi-line prose, Markdown, code and result/log bodies keep
 `sanitizeDisplayText` (or `sanitizeDisplayLog`) and are carried by a component
 or node with a real multi-line budget (`Text`, `Markdown`,
 `CompactTextPreview`, `ui.md`, `ui.code`, wrapped rows). When a folded terminal
-preview is reduced to ONE row, the LOG projection runs LAST: its app-owned
-`ESC[0m` must ride at the preview tail (projecting the full log first would put
-the reset past `preview()`'s cut and let a styled prefix bleed into the next
-row), and only then are the CR→LF records folded to spaces.
+preview is reduced to ONE row, the ORDER is load-bearing:
+1. project the FULL source under the log policy first — a lone `CR` is a
+   zero-width raw control but a visible record/space after the policy, so
+   measuring the raw text would under-count the folded row's width;
+2. fold the safe `LF` records into the preview (first records, width-capped);
+3. re-project the SHORTENED preview so its app-owned `ESC[0m` reset rides at
+   the preview tail (the full-log reset was cut away), then fold any residual
+   break. Skipping the first step can widen the row past its budget; skipping
+   the third can bleed a styled prefix into the next physical row.
 
 ## SGR whitelist (log policy only)
 

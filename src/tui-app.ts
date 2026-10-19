@@ -16992,16 +16992,24 @@ export class TuiApp {
       if (structuredEditDiff) resultPreview = ''
       // Display-only projection of the folded result preview: captured
       // terminal stdout keeps whitelisted SGR, every other external result is
-      // plain text. Never applied to the theme-painted head rows. The LOG
-      // projection runs LAST so its app-owned reset rides at the tail of this
-      // ONE-row preview: projecting the full result first would put the reset
-      // past `preview()`'s cut, and a styled prefix would then bleed into the
-      // next physical row. The final fold only collapses the CR→LF records
-      // that the log policy introduces, never the reset.
+      // plain text. Never applied to the theme-painted head rows. For captured
+      // terminal streams the order is load-bearing:
+      //   1. project the FULL result first — a lone CR is a zero-width control
+      //      raw but a visible space after the log policy, so previewing raw
+      //      text would under-measure the folded row and let CR records widen
+      //      it past the single-row budget;
+      //   2. fold the SAFE LF records into the preview;
+      //   3. re-project the SHORTENED preview so the app-owned reset rides at
+      //      its tail (the full-log reset was cut away), then fold any
+      //      residual break the policy introduced.
       if (resultPreview !== '') {
-        resultPreview = TERMINAL_RESULT_TOOLS.has(message.name)
-          ? sanitizeDisplayLog(resultPreview).replace(/[\r\n]+/g, ' ')
-          : sanitizedPhysicalLine(resultPreview)
+        if (TERMINAL_RESULT_TOOLS.has(message.name)) {
+          const logged = sanitizeDisplayLog(message.result)
+          const folded = logged === '' ? '' : ` — ${preview(logged, RESULT_PREVIEW_LINES)}`
+          resultPreview = sanitizeDisplayLog(folded).replace(/[\r\n]+/g, ' ')
+        } else {
+          resultPreview = sanitizedPhysicalLine(resultPreview)
+        }
       }
       const callHead = foldedCall === '' ? '' : foldedCall
       const headWithPreview = `${expandedHead}${callHead}${resultPreview}`
