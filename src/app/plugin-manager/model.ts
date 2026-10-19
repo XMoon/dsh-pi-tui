@@ -1,30 +1,41 @@
 /**
- * Pure Plugin Manager presentation projection (P1-A, v2): turns the detached
+ * Pure Plugin Manager presentation projection (S4-D1): turns the detached
  * {@link PluginManagerSnapshot} + presentation classification into package
- * cards and flat selectable rows.
+ * cards grouped into the four FROZEN sections, plus the pure Detail projection.
  *
  * It performs no I/O, owns no state and never re-derives Host truth:
- * enabled/read-only/removable/compatibility facts are rendered exactly as
- * the port delivers them. The ONLY local policy is the Current-TUI
- * surface-safety layer, which NARROWS effective actions (never forges Host
- * fields).
+ * enabled/read-only/removable/availability/official/source/installTarget facts
+ * are rendered exactly as the port delivers them. The ONLY local policies are
+ * the Current-TUI surface-safety layer (which NARROWS effective actions) and
+ * the version-limited rc.2 presentation identity lists (which SELECT a section,
+ * never create a card or fabricate catalog facts).
  *
  * @module @xmoon76/dsh-pi-tui/app/plugin-manager/model
  */
 
 import type {
+  PluginAvailability,
   PluginBundleFact,
   PluginChangeFact,
   PluginErrorFact,
   PluginExemptionFact,
   PluginIncompatibleFact,
+  PluginInstallTargetFact,
   PluginManagerSnapshot,
   PluginReadOnlyReason,
   PluginRegistriesFact,
   PluginRowFact,
 } from '../../runtime/plugin-manager-port.ts'
-import type { PluginPackageClassification, PluginPresentationRole } from './classify.ts'
-import { SELF_BUNDLE } from './classify.ts'
+import {
+  EXPERIMENTAL_BUNDLE_IDS,
+  PLUGIN_SECTION_LABELS,
+  PLUGIN_SECTION_ORDER,
+  SELF_BUNDLE,
+  type PluginOrigin,
+  type PluginPackageClassification,
+  type PluginPresentationRole,
+  type PluginPresentationSection,
+} from './classify.ts'
 import type { TuiExtensionFacts } from './classify.ts'
 
 /** One declared/live plugin row of a package card. */
@@ -50,38 +61,97 @@ export interface PluginCardView {
   /** Stable logical identity, NEVER a screen index. */
   readonly value: string
   /** Whether the card's mutation target is a bundle or a standalone entry. */
-  readonly source: 'bundle' | 'entry'
+  readonly target: 'bundle' | 'entry'
   readonly role: PluginPresentationRole
+  readonly section: PluginPresentationSection
+  readonly origin: PluginOrigin
+  /** One of the 14 rc.2 Experimental identities. */
+  readonly experimental: boolean
+  /** `Third-party → Unverified origin`: provenance could not be proven. */
+  readonly unverified: boolean
   readonly name: string
   readonly version?: string
   readonly title?: string
   readonly description?: string
+  /** Official Host facts, preserved as-is. */
+  readonly official: boolean
+  readonly availability: PluginAvailability
+  readonly installTarget?: PluginInstallTargetFact
+  /** Host profile-owned dependency spec (user information already stripped). */
+  readonly source?: string
   readonly enabled: boolean
   readonly installed: boolean
   readonly optional: boolean
-  /** Official Host fact, preserved as-is. */
   readonly removable: boolean
   readonly readOnlyReason?: PluginReadOnlyReason
   readonly error?: PluginErrorFact
   readonly rows: readonly PluginRowView[]
   readonly overrides: readonly string[]
   readonly extension?: TuiExtensionFacts
+  /** Why no direct bundle mutation may be dispatched (undefined = allowed). */
+  readonly toggleBlockedReason?: string
+  /** Why no removal may be dispatched (undefined = allowed). */
+  readonly removeBlockedReason?: string
+  /** Why no official catalog installation may be dispatched. */
+  readonly installBlockedReason?: string
   /** Effective bundle capability = Host capability ∩ Current-TUI safety. */
   readonly canToggle: boolean
   readonly canRemove: boolean
+  /** `missing` official catalog entry with a real Host installTarget. */
+  readonly canInstall: boolean
   /** True when the Current-TUI safety policy narrows this card's actions: the
    * self bundle itself, or a self-bundle row it provably owns. */
   readonly isSelf: boolean
 }
 
+/** One frozen main section of the inventory. */
+export interface PluginManagerSectionView {
+  readonly id: PluginPresentationSection
+  readonly label: string
+  readonly cards: readonly PluginCardView[]
+}
+
 /** The classified, sectioned view of the official inventory. */
 export interface PluginManagerModel {
-  readonly currentTui: readonly PluginCardView[]
-  readonly tuiExtensions: readonly PluginCardView[]
-  readonly dshPlugins: readonly PluginCardView[]
+  /** The four sections in FROZEN order; Experimental is always last. */
+  readonly sections: readonly PluginManagerSectionView[]
+  /** Every card flattened in section order (the stable selection universe). */
+  readonly cards: readonly PluginCardView[]
   readonly registries: PluginRegistriesFact
   readonly exemptions: readonly PluginExemptionFact[]
   readonly exemptionWarnings: readonly string[]
+}
+
+/** One fact line inside a Detail group. */
+export interface PluginDetailFact {
+  readonly label: string
+  readonly value: string
+  readonly tone: 'normal' | 'dim' | 'success' | 'warning' | 'error'
+}
+
+/** One titled group of the Detail projection. */
+export interface PluginDetailGroup {
+  readonly title: string
+  readonly facts: readonly PluginDetailFact[]
+}
+
+/** One selectable Detail action. A disabled action is readable but inert. */
+export interface PluginDetailAction {
+  readonly value: string
+  readonly label: string
+  readonly enabled: boolean
+  /** The exact refusal reason when `enabled` is false. */
+  readonly reason?: string
+  readonly tone: 'normal' | 'warning' | 'error'
+}
+
+/** The pure Detail projection one card paints. */
+export interface PluginDetailView {
+  readonly card: PluginCardView
+  /** `title ?? name` — localized presentation only. */
+  readonly title: string
+  readonly groups: readonly PluginDetailGroup[]
+  readonly actions: readonly PluginDetailAction[]
 }
 
 /** Stable identity of one bundle card. */
@@ -94,9 +164,10 @@ export function entryValue(entryId: string): string {
   return `entry:${entryId}`
 }
 
-/** The action values the panel maps to operations. */
+/** The action values the workspace maps to controller operations. */
 export const PLUGIN_ACTION = {
   install: 'action:install',
+  officialInstall: 'action:official-install',
   refresh: 'action:refresh',
   close: 'action:close',
   toggle: 'action:toggle',
@@ -104,6 +175,9 @@ export const PLUGIN_ACTION = {
   back: 'action:back',
   confirmRemove: 'action:confirm-remove',
   cancelRemove: 'action:cancel-remove',
+  approveBuilds: 'action:approve-builds',
+  reconcileInstall: 'action:reconcile-install',
+  hideInstall: 'action:hide-install',
 } as const
 
 /** The row-level toggle value for one addressable plugin entry id. */
@@ -117,36 +191,6 @@ export function rowToggleEntryId(value: string): string | undefined {
   return value.startsWith(prefix) ? value.slice(prefix.length) : undefined
 }
 
-/** One rendered row; the panel only draws and selects these. */
-export interface PluginManagerRow {
-  readonly value: string
-  readonly kind: 'card' | 'section' | 'action' | 'info'
-  readonly label: string
-  readonly secondary?: string
-  readonly badge?: string
-  readonly tone: 'normal' | 'dim' | 'success' | 'warning' | 'error'
-  readonly selectable: boolean
-}
-
-function section(label: string): PluginManagerRow {
-  return { value: `section:${label}`, kind: 'section', label, tone: 'dim', selectable: false }
-}
-
-function info(label: string, secondary?: string): PluginManagerRow {
-  return {
-    value: `info:${label}:${secondary ?? ''}`,
-    kind: 'info',
-    label,
-    ...(secondary === undefined ? {} : { secondary }),
-    tone: 'dim',
-    selectable: false,
-  }
-}
-
-function action(value: string, label: string, tone: PluginManagerRow['tone'] = 'normal'): PluginManagerRow {
-  return { value, kind: 'action', label, tone, selectable: true }
-}
-
 /** Human text for one role, shown as the card's classification chip. */
 export function roleLabel(role: PluginPresentationRole): string {
   switch (role) {
@@ -156,32 +200,22 @@ export function roleLabel(role: PluginPresentationRole): string {
   }
 }
 
-function cardBadge(card: PluginCardView): string {
-  if (card.error !== undefined) return 'error'
-  if (card.readOnlyReason !== undefined) return 'read-only'
-  return card.enabled ? 'active' : 'disabled'
-}
-
-function cardTone(card: PluginCardView): PluginManagerRow['tone'] {
-  if (card.error !== undefined) return 'error'
-  if (card.role === 'current-tui') return 'normal'
-  if (card.readOnlyReason !== undefined) return 'warning'
-  return card.enabled ? 'normal' : 'dim'
-}
-
-/** The card's one-line secondary text: description + factual flags. */
-function cardSecondary(card: PluginCardView): string | undefined {
-  const text = card.title ?? card.description
-  const flags: string[] = [roleLabel(card.role)]
-  if (card.role === 'tui-extension' && card.extension !== undefined) {
-    flags.push(`${card.extension.contributionCount} contribution${card.extension.contributionCount === 1 ? '' : 's'}`)
-    flags.push(card.extension.health)
+/** Human text for one proven origin. */
+export function originLabel(origin: PluginOrigin): string {
+  switch (origin) {
+    case 'official': return 'Official DSH'
+    case 'third-party': return 'Third-party'
+    default: return 'Unknown origin'
   }
-  if (!card.installed) flags.push('provided')
-  if (card.optional) flags.push('optional')
-  const head = text ?? ''
-  const tail = flags.join(' · ')
-  return head === '' ? tail : `${head} · ${tail}`
+}
+
+/** Human text for the official availability fact. */
+export function availabilityLabel(availability: PluginAvailability): string {
+  switch (availability) {
+    case 'installation': return 'Installation'
+    case 'profile': return 'Profile'
+    default: return 'Missing'
+  }
 }
 
 /** Render one Host error fact as an actionable line. */
@@ -209,6 +243,249 @@ export function registriesText(registries: PluginRegistriesFact): string {
   if (registries.fallbackRegistries.length > 0) parts.push(`fallbacks: ${registries.fallbackRegistries.join(', ')}`)
   if (registries.resolved !== null) parts.push(`resolved: ${registries.resolved}`)
   return parts.join(' · ')
+}
+
+/**
+ * Strip URL credentials from one Host-provided source spec before painting it.
+ * The Host already removes user information from dependency sources; this is
+ * the presentation boundary that guarantees no `user:secret@` is painted.
+ */
+export function maskedSource(source: string): string {
+  return source.replace(/^([a-z][a-z0-9+.-]*:\/\/)[^/@]*@/i, '$1***@')
+}
+
+/** The truthful one-line status chip of a card (never `active` for `enabled`). */
+export function cardStatusChip(card: PluginCardView): string | undefined {
+  if (card.isSelf) return 'current'
+  if (card.error !== undefined) return 'error'
+  if (card.availability === 'missing') return card.canInstall ? 'available' : 'unavailable'
+  // An ENABLED Host row is enabled whatever ships it. Only a NOT-ENABLED,
+  // NOT-INSTALLED shipped Optional bundle is AVAILABLE (selectable), never
+  // "installed but disabled".
+  if (card.enabled) return 'enabled'
+  if (!card.installed) return 'available'
+  return 'disabled'
+}
+
+/** The chip's semantic tone. */
+export function cardStatusTone(card: PluginCardView): PluginDetailFact['tone'] {
+  if (card.error !== undefined) return 'error'
+  if (card.availability === 'missing') return card.enabled ? 'normal' : 'dim'
+  if (card.isSelf) return 'normal'
+  return card.enabled ? 'normal' : 'dim'
+}
+
+function cardStatusFacts(card: PluginCardView): PluginDetailFact[] {
+  const facts: PluginDetailFact[] = [
+    { label: 'Installed', value: card.installed ? 'Yes' : 'No', tone: card.installed ? 'normal' : 'dim' },
+    { label: 'Enabled', value: card.enabled ? 'Yes' : 'No', tone: card.enabled ? 'normal' : 'dim' },
+    { label: 'Availability', value: availabilityLabel(card.availability), tone: card.availability === 'missing' ? 'warning' : 'dim' },
+    { label: 'Origin', value: originLabel(card.origin), tone: card.origin === 'unknown' ? 'warning' : 'dim' },
+  ]
+  const liveRows = card.rows.filter(row => row.live)
+  if (liveRows.length > 0) {
+    const failed = liveRows.filter(row => row.fiberPhase === 'failed').length
+    const active = liveRows.filter(row => row.fiberPhase === 'active').length
+    facts.push({
+      label: 'Fiber',
+      value: `${active}/${liveRows.length} active${failed === 0 ? '' : ` · ${failed} failed`}`,
+      tone: failed > 0 ? 'warning' : 'dim',
+    })
+  }
+  if (card.error !== undefined) facts.push({ label: 'Error', value: errorText(card.error), tone: 'error' })
+  if (card.readOnlyReason !== undefined) {
+    facts.push({
+      label: 'Read-only',
+      value: card.readOnlyReason === 'management-required'
+        ? 'Required by DSH management'
+        : 'Not addressable through the profile patch',
+      tone: 'warning',
+    })
+  }
+  return facts
+}
+
+function cardSourceFacts(card: PluginCardView): PluginDetailFact[] {
+  const facts: PluginDetailFact[] = [
+    { label: 'Availability', value: availabilityLabel(card.availability), tone: 'dim' },
+    { label: 'Origin', value: originLabel(card.origin), tone: card.origin === 'unknown' ? 'warning' : 'dim' },
+  ]
+  if (card.source !== undefined) {
+    facts.push({ label: 'Source', value: maskedSource(card.source), tone: 'dim' })
+  }
+  if (card.installTarget !== undefined) {
+    facts.push({ label: 'Offered version', value: card.installTarget.version, tone: 'dim' })
+    facts.push({ label: 'Install target', value: maskedSource(card.installTarget.spec), tone: 'dim' })
+  }
+  if (card.version !== undefined) {
+    facts.push({ label: 'Current version', value: card.version, tone: 'dim' })
+  }
+  if (
+    card.installTarget !== undefined
+    && card.version !== undefined
+    && card.installTarget.version !== card.version
+  ) {
+    facts.push({
+      label: 'Update',
+      value: 'Update not applied automatically — remove then install is required',
+      tone: 'warning',
+    })
+  }
+  return facts
+}
+
+function cardComponentFacts(card: PluginCardView): PluginDetailFact[] {
+  const facts: PluginDetailFact[] = []
+  for (const row of card.rows) {
+    const name = row.title ?? row.description ?? row.moduleName
+    const id = row.entryId === '' ? row.moduleName : row.entryId
+    const state = row.live
+      ? `${row.enabled ? 'Enabled' : 'Disabled'} · ${row.fiberPhase ?? 'pending'}`
+      : 'Not live'
+    facts.push({ label: id, value: `${name} · ${state}`, tone: row.live ? 'dim' : 'warning' })
+    if (row.readOnlyReason !== undefined) {
+      facts.push({
+        label: `  ${id}`,
+        value: row.readOnlyReason === 'management-required'
+          ? 'Read-only: required by DSH management'
+          : 'Read-only: not addressable through the profile patch',
+        tone: 'warning',
+      })
+    }
+    if (row.selfProtected) {
+      facts.push({ label: `  ${id}`, value: 'Protected by the Current TUI composition', tone: 'warning' })
+    }
+  }
+  for (const override of card.overrides) {
+    facts.push({ label: 'Override', value: override, tone: 'dim' })
+  }
+  return facts
+}
+
+function cardWarningFacts(card: PluginCardView): PluginDetailFact[] {
+  const facts: PluginDetailFact[] = []
+  if (card.error !== undefined) {
+    facts.push({ label: 'Host error', value: errorText(card.error), tone: 'error' })
+  }
+  if (card.isSelf) {
+    facts.push({
+      label: 'Protection',
+      value: 'This bundle provides the Current TUI and is managed outside this screen.',
+      tone: 'dim',
+    })
+  } else if (card.role === 'tui-extension') {
+    facts.push({
+      label: 'TUI extension',
+      value: 'Live contributions are associated by the exact Loader entry id.',
+      tone: 'dim',
+    })
+  }
+  if (card.experimental) {
+    facts.push({
+      label: 'Capability',
+      value: 'Host capability not yet qualified for TUI',
+      tone: 'warning',
+    })
+  }
+  if (card.unverified) {
+    facts.push({
+      label: 'Provenance',
+      value: 'Source unknown — this is not asserted to be a community package.',
+      tone: 'warning',
+    })
+  }
+  return facts
+}
+
+function cardActions(card: PluginCardView): PluginDetailAction[] {
+  const actions: PluginDetailAction[] = []
+  if (card.isSelf) {
+    // The Current TUI bundle and every row it provably controls NEVER expose a
+    // write action, not even a disabled one (plan MUST #9).
+    actions.push({ value: PLUGIN_ACTION.back, label: 'Back', enabled: true, tone: 'normal' })
+    return actions
+  }
+  if (card.availability === 'missing') {
+    actions.push(card.canInstall
+      ? {
+        value: PLUGIN_ACTION.officialInstall,
+        label: 'Install…',
+        enabled: true,
+        tone: 'normal',
+      }
+      : {
+        value: PLUGIN_ACTION.officialInstall,
+        label: 'Install…',
+        enabled: false,
+        reason: card.installBlockedReason ?? 'No official install target is available',
+        tone: 'warning',
+      })
+  } else {
+    actions.push(card.canToggle
+      ? {
+        value: PLUGIN_ACTION.toggle,
+        label: card.enabled ? 'Disable…' : 'Enable…',
+        enabled: true,
+        tone: 'normal',
+      }
+      : {
+        value: PLUGIN_ACTION.toggle,
+        label: card.enabled ? 'Disable…' : 'Enable…',
+        enabled: false,
+        reason: card.toggleBlockedReason ?? 'This bundle is read-only',
+        tone: 'warning',
+      })
+  }
+  actions.push(card.canRemove
+    ? {
+      value: PLUGIN_ACTION.remove,
+      label: 'Remove…',
+      enabled: true,
+      tone: 'warning',
+    }
+    : {
+      value: PLUGIN_ACTION.remove,
+      label: 'Remove…',
+      enabled: false,
+      reason: card.removeBlockedReason ?? 'This bundle is not removable',
+      tone: 'warning',
+    })
+  for (const row of card.rows) {
+    if (!row.canToggle) continue
+    actions.push({
+      value: rowToggleValue(row.entryId),
+      label: row.enabled ? `Disable row ${row.entryId}` : `Enable row ${row.entryId}`,
+      enabled: true,
+      tone: 'normal',
+    })
+  }
+  actions.push({ value: PLUGIN_ACTION.back, label: 'Back', enabled: true, tone: 'normal' })
+  return actions
+}
+
+/** Build the pure Detail projection of one card. */
+export function buildPluginDetailView(card: PluginCardView): PluginDetailView {
+  const groups: PluginDetailGroup[] = [
+    { title: 'Status', facts: cardStatusFacts(card) },
+    { title: 'Source', facts: cardSourceFacts(card) },
+  ]
+  if (card.description !== undefined && card.description !== '') {
+    groups.push({ title: 'Description', facts: [{ label: 'Description', value: card.description, tone: 'normal' }] })
+  }
+  if (card.rows.length > 0 || card.overrides.length > 0) {
+    groups.push({ title: 'Components', facts: cardComponentFacts(card) })
+  }
+  const warnings = cardWarningFacts(card)
+  if (warnings.length > 0) groups.push({ title: 'Compatibility', facts: warnings })
+  return Object.freeze({
+    card,
+    title: card.title ?? card.name,
+    groups: Object.freeze(groups.map(group => Object.freeze({
+      title: group.title,
+      facts: Object.freeze(group.facts.map(fact => Object.freeze(fact))),
+    }))),
+    actions: Object.freeze(cardActions(card).map(action => Object.freeze(action))),
+  })
 }
 
 function rowView(
@@ -252,10 +529,27 @@ function entryRowView(entry: PluginRowFact, selfOwned: boolean): PluginRowView {
   })
 }
 
+function bundleMutationBlocked(bundle: PluginBundleFact, isSelf: boolean): string | undefined {
+  if (isSelf) return 'This bundle provides the Current TUI and cannot be changed from here.'
+  if (bundle.readOnlyReason === 'management-required') return 'Required by DSH management; it cannot be changed here.'
+  if (bundle.readOnlyReason === 'unaddressable') return 'Not addressable through the profile patch.'
+  if (bundle.availability === 'missing') return 'The bundle is not installed; install it from its official catalog entry.'
+  if (bundle.error !== undefined) return errorText(bundle.error)
+  return undefined
+}
+
+function bundleRemoveBlocked(bundle: PluginBundleFact, isSelf: boolean): string | undefined {
+  const mutation = bundleMutationBlocked(bundle, isSelf)
+  if (mutation !== undefined) return mutation
+  if (!bundle.removable) return 'Shipped with this DSH installation; it is not removable.'
+  if (bundle.availability !== 'profile') return 'Only profile-owned bundles can be removed.'
+  return undefined
+}
+
 /**
  * Build the classified model. `claims` comes from
  * {@link classifyPluginPackages}; an unclassified card falls back to
- * `dsh-plugin`.
+ * `dsh-plugin` and an unproven origin.
  */
 export function buildPluginManagerModel(
   snapshot: PluginManagerSnapshot,
@@ -265,10 +559,7 @@ export function buildPluginManagerModel(
   for (const entry of snapshot.plugins) liveByEntry.set(entry.entryId, entry)
 
   // Live entries referenced by any bundle row are NOT standalone cards. This
-  // is the ONLY de-duplication rule and it is entry-id based: a standalone
-  // Loader entry that merely shares a module specifier with a bundle row (e.g.
-  // `@deepseek-ai/dsh-workspace` used by both the TUI bundle and an unrelated
-  // row) is a DIFFERENT entry and must remain visible.
+  // is the ONLY de-duplication rule and it is entry-id based.
   const bundledEntryIds = new Set<string>()
   for (const bundle of snapshot.bundles) {
     for (const row of bundle.rows) {
@@ -277,14 +568,7 @@ export function buildPluginManagerModel(
   }
 
   // PROTECTION-ONLY (never visibility/role): the official identity proof for a
-  // row the Current TUI composition controls. `BundleRowInfo.rowId` is a row the
-  // TUI bundle declares and `BundleInfo.overrides` are the ids its patch CHANGES
-  // (e.g. the base rows `cordis.patch.yml` disables); `PluginInfo.patchId` is
-  // the same persistent patch row id on a live entry. The set is applied to BOTH
-  // bundle rows (a base bundle's `tool-bash` row is controlled by the TUI patch
-  // layer that overrides it) and standalone entries, WITHOUT any module/package
-  // name guessing. The TUI bundle's own composition is immutable from its own
-  // screen: re-enabling a row it disabled would undo that composition.
+  // row the Current TUI composition controls.
   const selfBundle = snapshot.bundles.find(bundle => bundle.name === SELF_BUNDLE)
   const selfProtectionIds = new Set<string>([
     ...(selfBundle?.rows ?? []).map(row => row.rowId),
@@ -296,24 +580,40 @@ export function buildPluginManagerModel(
     const value = bundleValue(bundle.name)
     const claim = claims.get(value)
     const role: PluginPresentationRole = claim?.role ?? 'dsh-plugin'
+    const section = claim?.section ?? 'third-party'
+    const origin = claim?.origin ?? 'unknown'
     const isSelf = role === 'current-tui'
     const rows = bundle.rows.map(row => {
       const liveId = row.entryId === undefined ? undefined : liveByEntry.get(String(row.entryId))
-      // The self card's own rows AND any row the Current TUI composition
-      // declares/overrides (even inside another bundle, e.g. dsh-base).
       const selfOwned = isSelf || selfProtectionIds.has(row.rowId)
       return rowView(row, liveId, selfOwned)
     })
-    const hostToggle = bundle.readOnlyReason === undefined
-    const hostRemove = bundle.removable && bundle.readOnlyReason === undefined
+    const toggleBlocked = bundleMutationBlocked(bundle, isSelf)
+    const removeBlocked = bundleRemoveBlocked(bundle, isSelf)
+    const installBlocked = bundle.availability !== 'missing'
+      ? 'Only a missing official catalog entry can be installed.'
+      : isSelf
+        ? 'This bundle provides the Current TUI and cannot be installed from here.'
+        : bundle.installTarget === undefined
+          ? 'No official install target is available for this entry.'
+          : undefined
+    const canInstall = bundle.availability === 'missing' && bundle.installTarget !== undefined && !isSelf
     cards.push(Object.freeze({
       value,
-      source: 'bundle' as const,
+      target: 'bundle' as const,
       role,
+      section,
+      origin,
+      experimental: claim?.experimental ?? false,
+      unverified: claim?.unverified ?? (section === 'third-party' && origin === 'unknown'),
       name: bundle.name,
       ...(bundle.version === undefined ? {} : { version: bundle.version }),
       ...(bundle.title === undefined ? {} : { title: bundle.title }),
       ...(bundle.description === undefined ? {} : { description: bundle.description }),
+      official: bundle.official,
+      availability: bundle.availability,
+      ...(bundle.installTarget === undefined ? {} : { installTarget: bundle.installTarget }),
+      ...(bundle.source === undefined ? {} : { source: bundle.source }),
       enabled: bundle.enabled,
       installed: bundle.installed,
       optional: bundle.optional,
@@ -323,8 +623,12 @@ export function buildPluginManagerModel(
       rows: Object.freeze(rows),
       overrides: Object.freeze([...bundle.overrides]),
       ...(claim?.extension === undefined ? {} : { extension: claim.extension }),
-      canToggle: hostToggle && !isSelf,
-      canRemove: hostRemove && !isSelf,
+      ...(toggleBlocked === undefined ? {} : { toggleBlockedReason: toggleBlocked }),
+      ...(removeBlocked === undefined ? {} : { removeBlockedReason: removeBlocked }),
+      ...(installBlocked === undefined ? {} : { installBlockedReason: installBlocked }),
+      canToggle: toggleBlocked === undefined,
+      canRemove: removeBlocked === undefined,
+      canInstall,
       isSelf,
     }))
   }
@@ -334,20 +638,32 @@ export function buildPluginManagerModel(
     const value = entryValue(entry.entryId)
     const claim = claims.get(value)
     // A standalone entry is NEVER guessed into Current TUI: that role is the
-    // self BUNDLE card alone. A standalone entry is a TUI extension only when
-    // its proven entryId was associated, otherwise an ordinary DSH plugin.
+    // self BUNDLE card alone.
     const role: PluginPresentationRole = claim?.role ?? 'dsh-plugin'
-    // Protection-only: proven by the official patch row id, never by a module
-    // name. It never changes visibility or role, only the effective toggle.
+    const section = claim?.section ?? 'third-party'
+    const origin = claim?.origin ?? 'unknown'
     const selfProtected = entry.patchId !== undefined && selfProtectionIds.has(entry.patchId)
     const row = entryRowView(entry, selfProtected)
+    const toggleBlocked = selfProtected
+      ? 'Controlled by the Current TUI composition; it cannot be changed here.'
+      : entry.readOnlyReason === 'management-required'
+        ? 'Required by DSH management; it cannot be changed here.'
+        : entry.readOnlyReason === 'unaddressable'
+          ? 'Not addressable through the profile patch.'
+          : undefined
     cards.push(Object.freeze({
       value,
-      source: 'entry' as const,
+      target: 'entry' as const,
       role,
+      section,
+      origin,
+      experimental: claim?.experimental ?? false,
+      unverified: claim?.unverified ?? (section === 'third-party' && origin === 'unknown'),
       name: entry.moduleName,
       ...(entry.title === undefined ? {} : { title: entry.title }),
       ...(entry.description === undefined ? {} : { description: entry.description }),
+      official: false,
+      availability: 'profile' as const,
       enabled: entry.enabled,
       installed: true,
       optional: false,
@@ -356,138 +672,68 @@ export function buildPluginManagerModel(
       rows: Object.freeze([row]),
       overrides: Object.freeze([]),
       ...(claim?.extension === undefined ? {} : { extension: claim.extension }),
-      canToggle: row.canToggle,
+      ...(toggleBlocked === undefined ? {} : { toggleBlockedReason: toggleBlocked }),
+      removeBlockedReason: 'A standalone Loader entry has no profile package to remove.',
+      installBlockedReason: 'A standalone Loader entry is not an installable bundle.',
+      canToggle: toggleBlocked === undefined,
       canRemove: false,
+      canInstall: false,
       isSelf: selfProtected,
     }))
   }
 
-  const empty: PluginCardView[] = []
-  const currentTui = cards.filter(card => card.role === 'current-tui')
-  const tuiExtensions = cards.filter(card => card.role === 'tui-extension')
-  const dshPlugins = cards.filter(card => card.role === 'dsh-plugin')
+  const grouped: Record<PluginPresentationSection, PluginCardView[]> = {
+    tui: [],
+    official: [],
+    'third-party': [],
+    experimental: [],
+  }
+  for (const card of cards) grouped[card.section].push(card)
+  // Current TUI is first inside its section; the rest keep the official Host
+  // catalog order. Experimental follows the frozen rc.2 B01–B14 order.
+  grouped.tui.sort((left, right) => {
+    if (left.isSelf !== right.isSelf) return left.isSelf ? -1 : 1
+    return 0
+  })
+  const experimentalOrder = new Map(EXPERIMENTAL_BUNDLE_IDS.map((name, index) => [name, index]))
+  grouped.experimental.sort((left, right) => {
+    const leftIndex = experimentalOrder.get(left.name) ?? Number.MAX_SAFE_INTEGER
+    const rightIndex = experimentalOrder.get(right.name) ?? Number.MAX_SAFE_INTEGER
+    return leftIndex - rightIndex
+  })
+  // Third-party keeps proven packages before the audited Unverified subsection.
+  grouped['third-party'].sort((left, right) => Number(left.unverified) - Number(right.unverified))
+
+  const sections = PLUGIN_SECTION_ORDER.map(id => Object.freeze({
+    id,
+    label: PLUGIN_SECTION_LABELS[id],
+    cards: Object.freeze(grouped[id]),
+  }))
+  const flat = sections.flatMap(section => [...section.cards])
   return Object.freeze({
-    currentTui: Object.freeze(currentTui.length > 0 ? currentTui : empty),
-    tuiExtensions: Object.freeze(tuiExtensions),
-    dshPlugins: Object.freeze(dshPlugins),
+    sections: Object.freeze(sections),
+    cards: Object.freeze(flat),
     registries: snapshot.registries,
     exemptions: snapshot.exemptions,
     exemptionWarnings: snapshot.exemptionWarnings,
   })
 }
 
-function cardRow(card: PluginCardView, busyValue: string | undefined): PluginManagerRow {
-  const name = card.version === undefined ? card.name : `${card.name} ${card.version}`
-  const label = busyValue === card.value ? `${name} …` : name
-  return {
-    value: card.value,
-    kind: 'card',
-    label,
-    ...(cardSecondary(card) === undefined ? {} : { secondary: cardSecondary(card)! }),
-    badge: cardBadge(card),
-    tone: cardTone(card),
-    selectable: true,
-  }
-}
-
-/** The top-level list: three sections, then the global actions. */
-export function pluginManagerListRows(
-  model: PluginManagerModel,
-  busyValue: string | undefined,
-): PluginManagerRow[] {
-  const rows: PluginManagerRow[] = []
-  if (model.currentTui.length > 0) {
-    rows.push(section('Current TUI'))
-    for (const card of model.currentTui) rows.push(cardRow(card, busyValue))
-  }
-  if (model.tuiExtensions.length > 0) {
-    rows.push(section('TUI Extensions'))
-    for (const card of model.tuiExtensions) rows.push(cardRow(card, busyValue))
-  }
-  rows.push(section('DSH Plugins'))
-  for (const card of model.dshPlugins) rows.push(cardRow(card, busyValue))
-  rows.push(section('Registries'))
-  rows.push(info('registries', registriesText(model.registries)))
-  if (model.exemptions.length > 0) {
-    rows.push(section('Version exemptions'))
-    for (const entry of model.exemptions) rows.push(info('exemption', exemptionText(entry)))
-  }
-  for (const warning of model.exemptionWarnings) rows.push(info('exemption warning', warning))
-  rows.push(section('Actions'))
-  rows.push(action(PLUGIN_ACTION.install, 'Install…'))
-  rows.push(action(PLUGIN_ACTION.refresh, 'Refresh'))
-  rows.push(action(PLUGIN_ACTION.close, 'Close'))
-  return rows
-}
-
-/** Package detail: metadata, declared rows, diagnostics and item actions.
- * `exemptions` cross-references the profile's exact-version exemptions so a
- * compatibility error says whether one already applies (plan §11). */
-export function cardDetailRows(
-  card: PluginCardView,
-  exemptions: readonly PluginExemptionFact[] = [],
-): PluginManagerRow[] {
-  const rows: PluginManagerRow[] = []
-  const status = [card.enabled ? 'enabled' : 'disabled', roleLabel(card.role)]
-  if (!card.installed) status.push('provided by the installation')
-  if (card.optional) status.push('optional')
-  status.push(card.removable ? 'removable' : 'not removable')
-  rows.push(info('Status', status.join(' · ')))
-  if (card.readOnlyReason !== undefined) rows.push(info('Read-only', card.readOnlyReason))
-  if (card.error !== undefined) {
-    rows.push({ ...info('Error', errorText(card.error)), tone: 'error' })
-    for (const entry of card.error.incompatible ?? []) {
-      const key = `${entry.name}@${entry.version}`
-      const exemption = exemptions.find(candidate => candidate.packageVersion === key)
-      rows.push(info('  exemption', exemption === undefined
-        ? `${key}: no exact-version exemption applies`
-        : `${key}: exempted for DSH ${exemption.runtimeVersions.join(', ')}`))
-    }
-  }
-  if (card.role === 'current-tui') {
-    rows.push(info('This bundle provides the current TUI and is managed outside this screen.'))
-  } else if (card.isSelf) {
-    rows.push(info('This row is controlled by the Current TUI composition; it is not changed from this screen.'))
-  }
-  if (card.extension !== undefined) {
-    const extension = card.extension
-    rows.push(info('TUI contributions', `${extension.contributionCount} · ${extension.health}`))
-    rows.push(info('Contribution kinds', extension.contributionKinds.join(', ')))
-    rows.push(info('Proven entries', extension.entryIds.join(', ')))
-    if (extension.usesAdvancedCapability) rows.push(info('Capability use', 'Uses Advanced capability'))
-    if (extension.usesUnstableCapability) rows.push(info('Capability use', 'Uses Unstable capability'))
-  }
-  if (card.rows.length > 0) {
-    rows.push(info('Plugin rows'))
-    for (const row of card.rows) {
-      const text = row.title ?? row.description ?? row.moduleName
-      const state = row.live ? `${row.enabled ? 'enabled' : 'disabled'} · ${row.fiberPhase ?? 'no live fiber'}` : 'not live'
-      rows.push(info(`  ${row.entryId === '' ? row.moduleName : row.entryId}`, `${text} · ${state}`))
-      if (row.selfProtected && card.role !== 'current-tui') {
-        rows.push(info('    protected', 'controlled by the Current TUI composition'))
-      }
-      // An ordinary addressable row offers its own official toggle; a
-      // Current-TUI row never does (effective capability is false).
-      if (row.canToggle) {
-        rows.push(action(rowToggleValue(row.entryId), row.enabled ? `    Disable row ${row.entryId}` : `    Enable row ${row.entryId}`))
-      }
-    }
-  }
-  if (card.overrides.length > 0) rows.push(info('Overrides', card.overrides.join(', ')))
-  rows.push(info('Actions'))
-  if (card.canToggle) rows.push(action(PLUGIN_ACTION.toggle, card.enabled ? 'Disable' : 'Enable'))
-  if (card.canRemove) rows.push(action(PLUGIN_ACTION.remove, 'Remove…', 'warning'))
-  rows.push(action(PLUGIN_ACTION.back, 'Back'))
-  return rows
-}
-
 /** Human text for one completed mutation, including restart/override facts. */
 export function changeSummary(change: PluginChangeFact): string {
   const parts: string[] = [`${change.stage} ${change.application}`]
   if (change.bundle !== undefined) parts.push(`bundle ${change.bundle}`)
-  if (change.error !== undefined) parts.push(errorText(change.error))
-  if (change.application === 'restart-required') parts.push('restart the profile to apply')
+  if (change.version !== undefined) parts.push(`version ${change.version}`)
+  if (change.application === 'restart-required') {
+    parts.push(`restart required${change.restartReason === undefined ? '' : ` (${change.restartReason})`}`)
+  }
   if (change.application === 'overridden') parts.push('a higher-priority override still wins')
+  if (change.pendingBuilds !== undefined && change.pendingBuilds.length > 0) {
+    parts.push(`pending build scripts: ${change.pendingBuilds.join(', ')}`)
+  }
+  if (change.packageResult?.kind !== undefined) parts.push(`package failure: ${change.packageResult.kind}`)
+  if (change.failedAt !== undefined) parts.push(`failed at ${change.failedAt}`)
+  if (change.error !== undefined) parts.push(errorText(change.error))
   for (const warning of change.warnings ?? []) parts.push(warning)
   return parts.join(' · ')
 }

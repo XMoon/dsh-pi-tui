@@ -1,23 +1,36 @@
 /**
- * Presentation-classification and self-protection tests (P1-A1/A2):
+ * Presentation-classification and self-protection tests (S4-D1):
+ *  - The four frozen sections keep their order; Experimental is always last.
  *  - Current TUI is exactly `@xmoon76/dsh-pi-tui`, appears once, and its
  *    effective capabilities are narrowed without forging Host facts.
  *  - TUI Extensions require an exact + UNIQUE live-owner association; a name
  *    heuristic never classifies, and an ambiguous owner falls back.
- *  - One bundle produces exactly one card.
+ *  - Official evidence comes from real Host facts or the exact rc.2 base ids,
+ *    never from a `@deepseek-ai/` scope or an `experimental` substring.
+ *  - One bundle produces exactly one card, and one primary card per package.
  * @module @xmoon76/dsh-pi-tui/plugin-manager-classify.test
  */
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { SELF_BUNDLE, classifyPluginPackages, type PluginClassificationInput } from '../src/app/plugin-manager/classify.ts'
+import {
+  EXPERIMENTAL_BUNDLE_IDS,
+  SELF_BUNDLE,
+  classifyPluginPackages,
+  type PluginClassificationInput,
+} from '../src/app/plugin-manager/classify.ts'
 import type { TuiExtensionObservation } from '../src/app/plugin-manager/extension-inventory.ts'
 import {
+  PLUGIN_ACTION,
+  buildPluginDetailView,
   buildPluginManagerModel,
   bundleValue,
-  cardDetailRows,
   entryValue,
+  rowToggleValue,
+  type PluginCardView,
+  type PluginManagerModel,
 } from '../src/app/plugin-manager/model.ts'
+import { detachPluginManagerSnapshot } from '../src/runtime/plugin-manager-mapping.ts'
 import type { PluginBundleFact, PluginManagerSnapshot, PluginRowFact } from '../src/runtime/plugin-manager-port.ts'
 
 function observation(overrides: Partial<TuiExtensionObservation> = {}): TuiExtensionObservation {
@@ -37,6 +50,7 @@ function bundle(overrides: Partial<PluginBundleFact> = {}): PluginBundleFact {
     name: 'ordinary',
     official: false,
     availability: 'profile',
+    source: 'file:/tmp/ordinary',
     enabled: true,
     installed: true,
     optional: false,
@@ -67,43 +81,61 @@ function snapshot(bundles: PluginBundleFact[], plugins: PluginRowFact[]): Plugin
   }
 }
 
-function inputs(list: readonly { key: string; bundleName?: string; entryIds: readonly string[] }[]): PluginClassificationInput[] {
+function inputs(list: readonly PluginClassificationInput[]): PluginClassificationInput[] {
   return list.map(item => ({ ...item }))
 }
 
-test('SELF_BUNDLE always classifies as current-tui, even with a matching observation', () => {
-  const claims = classifyPluginPackages(
-    inputs([{ key: bundleValue(SELF_BUNDLE), bundleName: SELF_BUNDLE, entryIds: [] }]),
-    [observation({ entryId: SELF_BUNDLE })],
-  )
-  assert.equal(claims.get(bundleValue(SELF_BUNDLE))?.role, 'current-tui')
-  assert.equal(claims.get(bundleValue(SELF_BUNDLE))?.extension, undefined)
+function cardsOf(model: PluginManagerModel, id: PluginManagerModel['sections'][number]['id']): readonly PluginCardView[] {
+  return model.sections.find(section => section.id === id)?.cards ?? []
+}
+
+function cardByName(model: PluginManagerModel, name: string): PluginCardView | undefined {
+  return model.cards.find(card => card.name === name)
+}
+
+test('the four sections keep the FROZEN order, Experimental last', () => {
+  const model = buildPluginManagerModel(snapshot([bundle()], []), new Map())
+  assert.deepEqual(model.sections.map(section => section.id), ['tui', 'official', 'third-party', 'experimental'])
+  assert.deepEqual(model.sections.map(section => section.label), ['TUI & Extensions', 'Official DSH', 'Third-party', 'Experimental'])
 })
 
-test('a proven Loader entryId association classifies a TUI extension', () => {
+test('SELF_BUNDLE always classifies as current-tui and stays the first TUI card', () => {
   const claims = classifyPluginPackages(
-    inputs([{ key: bundleValue('my-ext'), bundleName: 'my-ext', entryIds: ['e-ext'] }]),
+    inputs([{ key: bundleValue(SELF_BUNDLE), bundleName: SELF_BUNDLE, entryIds: [], official: false, availability: 'profile', installed: true, source: 'file:/tui' }]),
+    [observation({ entryId: SELF_BUNDLE })],
+  )
+  const claim = claims.get(bundleValue(SELF_BUNDLE))!
+  assert.equal(claim.role, 'current-tui')
+  assert.equal(claim.section, 'tui')
+  assert.equal(claim.extension, undefined)
+})
+
+test('a proven Loader entryId association classifies a TUI extension in the TUI section', () => {
+  const claims = classifyPluginPackages(
+    inputs([{ key: bundleValue('my-ext'), bundleName: 'my-ext', entryIds: ['e-ext'], availability: 'profile', installed: true, source: 'file:/ext' }]),
     [observation({ owner: '9:my-ext', entryId: 'e-ext' })],
   )
-  assert.equal(claims.get(bundleValue('my-ext'))?.role, 'tui-extension')
-  assert.deepEqual([...claims.get(bundleValue('my-ext'))!.extension!.entryIds], ['e-ext'])
+  const claim = claims.get(bundleValue('my-ext'))!
+  assert.equal(claim.role, 'tui-extension')
+  assert.equal(claim.section, 'tui')
+  assert.equal(claim.origin, 'third-party')
+  assert.deepEqual([...claim.extension!.entryIds], ['e-ext'])
 })
 
 test('an observation WITHOUT a proven entryId never classifies, even when its owner name equals the package', () => {
   const claims = classifyPluginPackages(
-    inputs([{ key: bundleValue('my-ext'), bundleName: 'my-ext', entryIds: ['e-ext'] }]),
-    [observation({ owner: '9:my-ext', })],
+    inputs([{ key: bundleValue('my-ext'), bundleName: 'my-ext', entryIds: ['e-ext'], availability: 'profile', installed: true, source: 'file:/ext' }]),
+    [observation({ owner: '9:my-ext' })],
   )
-  assert.equal(claims.get(bundleValue('my-ext'))?.role, 'dsh-plugin')
-  assert.equal(claims.get(bundleValue('my-ext'))?.extension, undefined)
+  const claim = claims.get(bundleValue('my-ext'))!
+  assert.equal(claim.role, 'dsh-plugin')
+  assert.equal(claim.section, 'third-party')
+  assert.equal(claim.extension, undefined)
 })
 
 test('a module-name collision is not Loader-entry proof', () => {
-  // The card exposes NO proven entry id; the observation's entryId merely
-  // happens to equal a module specifier the card carries. Module specifiers
-  // are never part of the proven id set, so this must not classify.
   const claims = classifyPluginPackages(
-    inputs([{ key: bundleValue('collide'), bundleName: 'collide', entryIds: [] }]),
+    inputs([{ key: bundleValue('collide'), bundleName: 'collide', entryIds: [], availability: 'profile', installed: true, source: 'file:/c' }]),
     [observation({ owner: '1:collide', entryId: 'e-collide' })],
   )
   assert.equal(claims.get(bundleValue('collide'))?.role, 'dsh-plugin')
@@ -111,7 +143,7 @@ test('a module-name collision is not Loader-entry proof', () => {
 
 test('two proven entryIds of ONE bundle aggregate into one TUI extension card', () => {
   const claims = classifyPluginPackages(
-    inputs([{ key: bundleValue('foo'), bundleName: 'foo', entryIds: ['e-a', 'e-b'] }]),
+    inputs([{ key: bundleValue('foo'), bundleName: 'foo', entryIds: ['e-a', 'e-b'], availability: 'profile', installed: true, source: 'file:/foo' }]),
     [
       observation({ owner: '1:foo-a', entryId: 'e-a', contributionKinds: ['chrome.footer.item'], contributionCount: 1 }),
       observation({ owner: '1:foo-b', entryId: 'e-b', contributionKinds: ['command'], contributionCount: 2, usesAdvancedCapability: true }),
@@ -128,8 +160,8 @@ test('two proven entryIds of ONE bundle aggregate into one TUI extension card', 
 test('an ambiguous entryId (claimed by two cards) classifies neither', () => {
   const claims = classifyPluginPackages(
     inputs([
-      { key: bundleValue('a'), bundleName: 'a', entryIds: ['e-shared'] },
-      { key: bundleValue('b'), bundleName: 'b', entryIds: ['e-shared'] },
+      { key: bundleValue('a'), bundleName: 'a', entryIds: ['e-shared'], availability: 'profile', installed: true, source: 'file:/a' },
+      { key: bundleValue('b'), bundleName: 'b', entryIds: ['e-shared'], availability: 'profile', installed: true, source: 'file:/b' },
     ]),
     [observation({ entryId: 'e-shared' })],
   )
@@ -140,29 +172,38 @@ test('an ambiguous entryId (claimed by two cards) classifies neither', () => {
 test('an unproven observation never classifies (no name heuristic)', () => {
   const claims = classifyPluginPackages(
     inputs([
-      { key: bundleValue('tui-widgets'), bundleName: 'tui-widgets', entryIds: [] },
-      { key: bundleValue('@xmoon76/other'), bundleName: '@xmoon76/other', entryIds: [] },
+      { key: bundleValue('tui-widgets'), bundleName: 'tui-widgets', entryIds: [], availability: 'profile', installed: true, source: 'file:/w' },
+      { key: bundleValue('@xmoon76/other'), bundleName: '@xmoon76/other', entryIds: [], availability: 'profile', installed: true, source: 'file:/o' },
     ]),
-    [
-      observation({ }),
-      observation({ }),
-    ],
+    [observation({}), observation({})],
   )
   assert.equal(claims.get(bundleValue('tui-widgets'))?.role, 'dsh-plugin')
   assert.equal(claims.get(bundleValue('@xmoon76/other'))?.role, 'dsh-plugin')
 })
 
-test('model sections are ordered Current TUI → TUI Extensions → DSH Plugins, and self is self-protected', () => {
+test('model sections are ordered TUI → Official → Third-party → Experimental, and self is self-protected', () => {
   const snap = snapshot(
     [
       bundle({
         name: SELF_BUNDLE,
         version: '0.4.8',
+        source: 'file:/tui',
         removable: true,
         rows: [{ rowId: 'tui-app', moduleName: SELF_BUNDLE, entryId: 'e-app' }],
       }),
-      bundle({ name: 'my-ext', rows: [{ rowId: 'r', moduleName: 'my-ext', entryId: 'e-ext' }] }),
-      bundle({ name: 'ordinary' }),
+      bundle({ name: 'my-ext', source: 'file:/ext', rows: [{ rowId: 'r', moduleName: 'my-ext', entryId: 'e-ext' }] }),
+      bundle({ name: '@deepseek-ai/dsh-base', availability: 'installation', source: undefined }),
+      bundle({ name: 'ordinary', source: 'file:/ordinary' }),
+      bundle({
+        name: '@deepseek-ai/dsh-experimental-auto-review',
+        official: true,
+        availability: 'missing',
+        installed: false,
+        optional: true,
+        removable: false,
+        source: undefined,
+        installTarget: { spec: '@deepseek-ai/dsh-experimental-auto-review@0.2.1-rc.2', version: '0.2.1-rc.2' },
+      }),
     ],
     [
       row({ entryId: 'e-app', moduleName: SELF_BUNDLE, patchId: 'tui-app' }),
@@ -171,18 +212,21 @@ test('model sections are ordered Current TUI → TUI Extensions → DSH Plugins,
   )
   const claims = classifyPluginPackages(
     inputs([
-      { key: bundleValue(SELF_BUNDLE), bundleName: SELF_BUNDLE, entryIds: ['e-app'] },
-      { key: bundleValue('my-ext'), bundleName: 'my-ext', entryIds: ['e-ext'] },
-      { key: bundleValue('ordinary'), bundleName: 'ordinary', entryIds: [] },
+      { key: bundleValue(SELF_BUNDLE), bundleName: SELF_BUNDLE, entryIds: ['e-app'], availability: 'profile', installed: true, source: 'file:/tui' },
+      { key: bundleValue('my-ext'), bundleName: 'my-ext', entryIds: ['e-ext'], availability: 'profile', installed: true, source: 'file:/ext' },
+      { key: bundleValue('@deepseek-ai/dsh-base'), bundleName: '@deepseek-ai/dsh-base', entryIds: [], official: false, availability: 'installation' },
+      { key: bundleValue('ordinary'), bundleName: 'ordinary', entryIds: [], availability: 'profile', installed: true, source: 'file:/ordinary' },
+      { key: bundleValue('@deepseek-ai/dsh-experimental-auto-review'), bundleName: '@deepseek-ai/dsh-experimental-auto-review', entryIds: [], official: true, availability: 'missing', installed: false },
     ]),
     [observation({ entryId: 'e-ext' })],
   )
   const model = buildPluginManagerModel(snap, claims)
-  assert.deepEqual(model.currentTui.map(card => card.name), [SELF_BUNDLE])
-  assert.deepEqual(model.tuiExtensions.map(card => card.name), ['my-ext'])
-  assert.deepEqual(model.dshPlugins.map(card => card.name), ['ordinary'])
+  assert.deepEqual(cardsOf(model, 'tui').map(card => card.name), [SELF_BUNDLE, 'my-ext'])
+  assert.deepEqual(cardsOf(model, 'official').map(card => card.name), ['@deepseek-ai/dsh-base'])
+  assert.deepEqual(cardsOf(model, 'third-party').map(card => card.name), ['ordinary'])
+  assert.deepEqual(cardsOf(model, 'experimental').map(card => card.name), ['@deepseek-ai/dsh-experimental-auto-review'])
 
-  const self = model.currentTui[0]!
+  const self = cardByName(model, SELF_BUNDLE)!
   // Host fact preserved exactly…
   assert.equal(self.removable, true)
   assert.equal(self.readOnlyReason, undefined)
@@ -191,15 +235,155 @@ test('model sections are ordered Current TUI → TUI Extensions → DSH Plugins,
   assert.equal(self.canRemove, false)
   assert.equal(self.rows[0]!.canToggle, false)
 
-  const ordinary = model.dshPlugins[0]!
+  const ordinary = cardByName(model, 'ordinary')!
   assert.equal(ordinary.canToggle, true)
   assert.equal(ordinary.canRemove, true)
+  assert.equal(ordinary.origin, 'third-party')
+  assert.equal(ordinary.canInstall, false)
 
-  const extension = model.tuiExtensions[0]!
+  const extension = cardByName(model, 'my-ext')!
   assert.deepEqual([...extension.extension!.entryIds], ['e-ext'])
-  // A TUI extension uses the SAME official mutation authority.
   assert.equal(extension.canToggle, true)
   assert.equal(extension.rows[0]!.canToggle, true)
+
+  const experimental = cardByName(model, '@deepseek-ai/dsh-experimental-auto-review')!
+  assert.equal(experimental.section, 'experimental')
+  assert.equal(experimental.canToggle, false)
+  assert.equal(experimental.canInstall, true)
+  assert.deepEqual(experimental.installTarget, {
+    spec: '@deepseek-ai/dsh-experimental-auto-review@0.2.1-rc.2',
+    version: '0.2.1-rc.2',
+  })
+})
+
+test('the official Experimental identities keep the rc.2 B01–B14 order, Codex/Claude last', () => {
+  const snap = snapshot(
+    EXPERIMENTAL_BUNDLE_IDS.map(name => bundle({
+      name,
+      official: true,
+      availability: 'missing',
+      installed: false,
+      optional: true,
+      removable: false,
+      source: undefined,
+      installTarget: { spec: `${name}@0.2.1-rc.2`, version: '0.2.1-rc.2' },
+    })),
+    [],
+  )
+  const claims = classifyPluginPackages(
+    inputs(EXPERIMENTAL_BUNDLE_IDS.map(name => ({ key: bundleValue(name), bundleName: name, entryIds: [], official: true, availability: 'missing' as const, installed: false }))),
+    [],
+  )
+  const model = buildPluginManagerModel(snap, claims)
+  assert.deepEqual(cardsOf(model, 'experimental').map(card => card.name), [...EXPERIMENTAL_BUNDLE_IDS])
+  assert.equal(cardsOf(model, 'experimental').at(-2)!.name, '@deepseek-ai/dsh-subagent-codex')
+  assert.equal(cardsOf(model, 'experimental').at(-1)!.name, '@deepseek-ai/dsh-subagent-claude-code')
+})
+
+test('a real Host catalog row reaches the section through shared mapping, not a static card list', () => {
+  const mapped = detachPluginManagerSnapshot({
+    bundles: [
+      {
+        name: '@deepseek-ai/dsh-experimental-voice-input-bundle',
+        official: true,
+        availability: 'missing',
+        installTarget: { spec: '@deepseek-ai/dsh-experimental-voice-input-bundle@0.2.1-rc.2', version: '0.2.1-rc.2' },
+        enabled: false,
+        installed: false,
+        optional: true,
+        removable: false,
+        rows: [],
+        overrides: [],
+      },
+      {
+        name: '@xmoon76/dsh-pi-tui',
+        official: false,
+        availability: 'profile',
+        source: 'file:/repo/dsh-pi-tui',
+        version: '0.5.3',
+        enabled: true,
+        installed: true,
+        optional: false,
+        removable: true,
+        rows: [],
+        overrides: [],
+      },
+    ],
+    plugins: [],
+    registries: { registry: null, fallbackRegistries: [], resolved: null },
+    exemptions: { exemptions: {}, warnings: [] },
+  })
+  const claims = classifyPluginPackages(
+    inputs([
+      {
+        key: bundleValue('@deepseek-ai/dsh-experimental-voice-input-bundle'),
+        bundleName: '@deepseek-ai/dsh-experimental-voice-input-bundle',
+        entryIds: [],
+        official: true,
+        availability: 'missing',
+        installed: false,
+      },
+      {
+        key: bundleValue('@xmoon76/dsh-pi-tui'),
+        bundleName: '@xmoon76/dsh-pi-tui',
+        entryIds: [],
+        official: false,
+        availability: 'profile',
+        installed: true,
+        source: 'file:/repo/dsh-pi-tui',
+      },
+    ]),
+    [],
+  )
+  const model = buildPluginManagerModel(mapped, claims)
+  assert.deepEqual(cardsOf(model, 'experimental').map(card => card.name), ['@deepseek-ai/dsh-experimental-voice-input-bundle'])
+  assert.deepEqual(cardsOf(model, 'tui').map(card => card.name), [SELF_BUNDLE])
+  // A missing row is never rendered as an "installation-provided" card.
+  const voice = cardByName(model, '@deepseek-ai/dsh-experimental-voice-input-bundle')!
+  assert.equal(voice.availability, 'missing')
+  assert.equal(voice.installed, false)
+  assert.equal(buildPluginDetailView(voice).actions.some(action => action.value === PLUGIN_ACTION.officialInstall && action.enabled), true)
+})
+
+test('official:false on a shipped base bundle is not third-party evidence', () => {
+  const model = buildPluginManagerModel(
+    snapshot([bundle({ name: '@deepseek-ai/dsh-base', availability: 'installation', installed: true, source: undefined })], []),
+    classifyPluginPackages(inputs([{ key: bundleValue('@deepseek-ai/dsh-base'), bundleName: '@deepseek-ai/dsh-base', entryIds: [], official: false, availability: 'installation' }]), []),
+  )
+  const base = cardByName(model, '@deepseek-ai/dsh-base')!
+  assert.equal(base.section, 'official')
+  assert.equal(base.origin, 'official')
+  assert.equal(base.unverified, false)
+})
+
+test('a @deepseek-ai scope never proves official and an experimental substring never proves Experimental', () => {
+  const claims = classifyPluginPackages(
+    inputs([
+      { key: bundleValue('@deepseek-ai/evil'), bundleName: '@deepseek-ai/evil', entryIds: [], availability: 'profile', installed: true, source: 'file:/evil' },
+      { key: bundleValue('@deepseek-ai/dsh-my-experimental-tool'), bundleName: '@deepseek-ai/dsh-my-experimental-tool', entryIds: [], availability: 'profile', installed: true, source: 'file:/tool' },
+    ]),
+    [],
+  )
+  const evil = claims.get(bundleValue('@deepseek-ai/evil'))!
+  assert.equal(evil.section, 'third-party')
+  assert.equal(evil.experimental, false)
+  const fake = claims.get(bundleValue('@deepseek-ai/dsh-my-experimental-tool'))!
+  assert.equal(fake.section, 'third-party')
+  assert.equal(fake.experimental, false)
+})
+
+test('a standalone entry without provenance is Third-party → Unverified origin', () => {
+  const model = buildPluginManagerModel(
+    snapshot([], [row({ entryId: 'include:free', moduleName: 'free', patchId: 'free' })]),
+    new Map(),
+  )
+  const card = cardByName(model, 'free')!
+  assert.equal(card.section, 'third-party')
+  assert.equal(card.origin, 'unknown')
+  assert.equal(card.unverified, true)
+  assert.equal(card.canToggle, true)
+  const detail = buildPluginDetailView(card)
+  assert.ok(detail.groups.some(group => group.facts.some(fact => /Source unknown/.test(fact.value))))
 })
 
 test('a bundle row is never emitted as a second standalone card', () => {
@@ -208,7 +392,7 @@ test('a bundle row is never emitted as a second standalone card', () => {
     [row({ entryId: 'e-r', moduleName: 'm', patchId: 'r' }), row({ entryId: 'e-free', moduleName: 'free', patchId: 'free' })],
   )
   const model = buildPluginManagerModel(snap, new Map())
-  const values = [...model.currentTui, ...model.tuiExtensions, ...model.dshPlugins].map(card => card.value)
+  const values = model.cards.map(card => card.value)
   assert.ok(values.includes(bundleValue('holder')))
   assert.ok(values.includes(entryValue('e-free')))
   assert.ok(!values.includes(entryValue('e-r')))
@@ -216,7 +400,7 @@ test('a bundle row is never emitted as a second standalone card', () => {
 
 test('Current TUI is the self BUNDLE card only; a same-module standalone entry stays visible', () => {
   const snap = snapshot(
-    [bundle({ name: SELF_BUNDLE, rows: [{ rowId: 'tui-app', moduleName: SELF_BUNDLE, entryId: 'include:tui-app' }] })],
+    [bundle({ name: SELF_BUNDLE, source: 'file:/tui', rows: [{ rowId: 'tui-app', moduleName: SELF_BUNDLE, entryId: 'include:tui-app' }] })],
     [
       row({ entryId: 'include:tui-app', moduleName: SELF_BUNDLE, patchId: 'tui-app' }),
       // A DIFFERENT Loader row that merely imports the same module: it is not
@@ -225,24 +409,24 @@ test('Current TUI is the self BUNDLE card only; a same-module standalone entry s
     ],
   )
   const claims = classifyPluginPackages(
-    inputs([{ key: bundleValue(SELF_BUNDLE), bundleName: SELF_BUNDLE, entryIds: ['include:tui-app'] }]),
+    inputs([{ key: bundleValue(SELF_BUNDLE), bundleName: SELF_BUNDLE, entryIds: ['include:tui-app'], availability: 'profile', installed: true, source: 'file:/tui' }]),
     [],
   )
   const model = buildPluginManagerModel(snap, claims)
-  assert.deepEqual(model.currentTui.map(card => card.value), [bundleValue(SELF_BUNDLE)])
+  assert.deepEqual(cardsOf(model, 'tui').map(card => card.value), [bundleValue(SELF_BUNDLE)])
   // The row owned by the self bundle is inside that card…
-  assert.ok(model.currentTui[0]!.rows.some(entry => entry.entryId === 'include:tui-app'))
-  // …while the independent same-module entry remains its own DSH Plugin card.
-  // It stays VISIBLE and MANAGEABLE: same module name is not proof of self
-  // ownership (its patch row `other` is not one the self bundle declares).
-  assert.deepEqual(model.dshPlugins.map(card => card.value), [entryValue('include:other')])
-  assert.equal(model.dshPlugins[0]!.canToggle, true)
-  assert.equal(model.dshPlugins[0]!.isSelf, false)
+  assert.ok(cardByName(model, SELF_BUNDLE)!.rows.some(entry => entry.entryId === 'include:tui-app'))
+  // …while the independent same-module entry remains its own (unverified)
+  // Third-party card and stays manageable.
+  const other = model.cards.find(card => card.value === entryValue('include:other'))!
+  assert.equal(other.section, 'third-party')
+  assert.equal(other.canToggle, true)
+  assert.equal(other.isSelf, false)
 })
 
 test('a bundle row module shared with an unrelated standalone entry never swallows it', () => {
   const snap = snapshot(
-    [bundle({ name: SELF_BUNDLE, rows: [
+    [bundle({ name: SELF_BUNDLE, source: 'file:/tui', rows: [
       { rowId: 'workspace', moduleName: '@deepseek-ai/dsh-workspace', entryId: 'include:workspace' },
     ] })],
     [
@@ -252,16 +436,16 @@ test('a bundle row module shared with an unrelated standalone entry never swallo
     ],
   )
   const claims = classifyPluginPackages(
-    inputs([{ key: bundleValue(SELF_BUNDLE), bundleName: SELF_BUNDLE, entryIds: ['include:workspace'] }]),
+    inputs([{ key: bundleValue(SELF_BUNDLE), bundleName: SELF_BUNDLE, entryIds: ['include:workspace'], availability: 'profile', installed: true, source: 'file:/tui' }]),
     [],
   )
   const model = buildPluginManagerModel(snap, claims)
-  const values = [...model.currentTui, ...model.tuiExtensions, ...model.dshPlugins].map(card => card.value)
+  const values = model.cards.map(card => card.value)
   assert.ok(values.includes(entryValue('include:user-workspace')), 'the unrelated workspace entry must stay visible')
-  assert.deepEqual(model.dshPlugins.map(card => card.value), [entryValue('include:user-workspace')])
+  const card = model.cards.find(candidate => candidate.value === entryValue('include:user-workspace'))!
   // A shared HOST package is NOT a TUI module: the independent row stays manageable.
-  assert.equal(model.dshPlugins[0]!.canToggle, true)
-  assert.equal(model.dshPlugins[0]!.isSelf, false)
+  assert.equal(card.canToggle, true)
+  assert.equal(card.isSelf, false)
 })
 
 test('an unproven self-bundle row protects its live entry by patchId proof, not module name', () => {
@@ -269,16 +453,15 @@ test('an unproven self-bundle row protects its live entry by patchId proof, not 
   // entry cannot be excluded by id. `patchId === rowId` is the official proof
   // that this is the row the bundle declares. It stays VISIBLE but protected.
   const snap = snapshot(
-    [bundle({ name: SELF_BUNDLE, rows: [{ rowId: 'pi-tui-builtins', moduleName: `${SELF_BUNDLE}/builtins` }] })],
+    [bundle({ name: SELF_BUNDLE, source: 'file:/tui', rows: [{ rowId: 'pi-tui-builtins', moduleName: `${SELF_BUNDLE}/builtins` }] })],
     [row({ entryId: 'include:pi-tui-builtins', moduleName: `${SELF_BUNDLE}/builtins`, patchId: 'pi-tui-builtins' })],
   )
   const claims = classifyPluginPackages(
-    inputs([{ key: bundleValue(SELF_BUNDLE), bundleName: SELF_BUNDLE, entryIds: [] }]),
+    inputs([{ key: bundleValue(SELF_BUNDLE), bundleName: SELF_BUNDLE, entryIds: [], availability: 'profile', installed: true, source: 'file:/tui' }]),
     [observation({ owner: '1:builtins', entryId: 'include:pi-tui-builtins' })],
   )
   const model = buildPluginManagerModel(snap, claims)
-  const card = [...model.currentTui, ...model.tuiExtensions, ...model.dshPlugins]
-    .find(candidate => candidate.value === entryValue('include:pi-tui-builtins'))
+  const card = model.cards.find(candidate => candidate.value === entryValue('include:pi-tui-builtins'))
   assert.ok(card !== undefined, 'the entry must stay visible')
   assert.equal(card.canToggle, false, 'a proven self row must never be toggleable')
   assert.equal(card.isSelf, true)
@@ -287,15 +470,15 @@ test('an unproven self-bundle row protects its live entry by patchId proof, not 
 
 test('the same TUI module with an unrelated patch row stays manageable (no package-name protection)', () => {
   const snap = snapshot(
-    [bundle({ name: SELF_BUNDLE, rows: [{ rowId: 'pi-tui-builtins', moduleName: `${SELF_BUNDLE}/builtins` }] })],
+    [bundle({ name: SELF_BUNDLE, source: 'file:/tui', rows: [{ rowId: 'pi-tui-builtins', moduleName: `${SELF_BUNDLE}/builtins` }] })],
     [row({ entryId: 'include:my-own', moduleName: `${SELF_BUNDLE}/builtins`, patchId: 'unrelated-row' })],
   )
   const claims = classifyPluginPackages(
-    inputs([{ key: bundleValue(SELF_BUNDLE), bundleName: SELF_BUNDLE, entryIds: [] }]),
+    inputs([{ key: bundleValue(SELF_BUNDLE), bundleName: SELF_BUNDLE, entryIds: [], availability: 'profile', installed: true, source: 'file:/tui' }]),
     [],
   )
   const model = buildPluginManagerModel(snap, claims)
-  const card = model.dshPlugins.find(candidate => candidate.value === entryValue('include:my-own'))
+  const card = model.cards.find(candidate => candidate.value === entryValue('include:my-own'))
   assert.ok(card !== undefined)
   assert.equal(card.canToggle, true, 'a different patch row must not inherit self protection')
   assert.equal(card.isSelf, false)
@@ -303,16 +486,15 @@ test('the same TUI module with an unrelated patch row stays manageable (no packa
 
 test('a shared Host package row declared by the self bundle is protected by patchId proof', () => {
   const snap = snapshot(
-    [bundle({ name: SELF_BUNDLE, rows: [{ rowId: 'workspace', moduleName: '@deepseek-ai/dsh-workspace' }] })],
+    [bundle({ name: SELF_BUNDLE, source: 'file:/tui', rows: [{ rowId: 'workspace', moduleName: '@deepseek-ai/dsh-workspace' }] })],
     [row({ entryId: 'include:workspace', moduleName: '@deepseek-ai/dsh-workspace', patchId: 'workspace' })],
   )
   const claims = classifyPluginPackages(
-    inputs([{ key: bundleValue(SELF_BUNDLE), bundleName: SELF_BUNDLE, entryIds: [] }]),
+    inputs([{ key: bundleValue(SELF_BUNDLE), bundleName: SELF_BUNDLE, entryIds: [], availability: 'profile', installed: true, source: 'file:/tui' }]),
     [],
   )
   const model = buildPluginManagerModel(snap, claims)
-  const card = [...model.currentTui, ...model.tuiExtensions, ...model.dshPlugins]
-    .find(candidate => candidate.value === entryValue('include:workspace'))
+  const card = model.cards.find(candidate => candidate.value === entryValue('include:workspace'))
   assert.ok(card !== undefined)
   // A package name outside the TUI package is protected ONLY because the self
   // bundle provably declares this row.
@@ -327,6 +509,8 @@ test('a base bundle row overridden by the Current TUI bundle is protected in pla
     [
       bundle({
         name: '@deepseek-ai/dsh-base',
+        availability: 'installation',
+        source: undefined,
         rows: [
           { rowId: 'tool-bash', moduleName: '@deepseek-ai/dsh-tool-bash', entryId: 'include:tool-bash' },
           { rowId: 'timer', moduleName: '@deepseek-ai/dsh-timer', entryId: 'include:timer' },
@@ -334,6 +518,7 @@ test('a base bundle row overridden by the Current TUI bundle is protected in pla
       }),
       bundle({
         name: SELF_BUNDLE,
+        source: 'file:/tui',
         rows: [{ rowId: 'tui-app', moduleName: SELF_BUNDLE, entryId: 'include:tui-app' }],
         overrides: ['tool-bash'],
       }),
@@ -346,14 +531,14 @@ test('a base bundle row overridden by the Current TUI bundle is protected in pla
   )
   const claims = classifyPluginPackages(
     inputs([
-      { key: bundleValue('@deepseek-ai/dsh-base'), bundleName: '@deepseek-ai/dsh-base', entryIds: ['include:tool-bash', 'include:timer'] },
-      { key: bundleValue(SELF_BUNDLE), bundleName: SELF_BUNDLE, entryIds: ['include:tui-app'] },
+      { key: bundleValue('@deepseek-ai/dsh-base'), bundleName: '@deepseek-ai/dsh-base', entryIds: ['include:tool-bash', 'include:timer'], official: false, availability: 'installation' },
+      { key: bundleValue(SELF_BUNDLE), bundleName: SELF_BUNDLE, entryIds: ['include:tui-app'], availability: 'profile', installed: true, source: 'file:/tui' },
     ]),
     [],
   )
   const model = buildPluginManagerModel(snap, claims)
-  const base = model.dshPlugins.find(card => card.value === bundleValue('@deepseek-ai/dsh-base'))
-  assert.ok(base !== undefined)
+  const base = cardByName(model, '@deepseek-ai/dsh-base')!
+  assert.equal(base.section, 'official')
   const toolBash = base.rows.find(entry => entry.entryId === 'include:tool-bash')!
   assert.equal(toolBash.canToggle, false, 'the overridden base row must not be toggleable')
   assert.equal(toolBash.selfProtected, true)
@@ -362,13 +547,12 @@ test('a base bundle row overridden by the Current TUI bundle is protected in pla
   assert.equal(timer.selfProtected, false)
   // The overridden row exposes no toggle-row action but IS explained; the
   // untouched row exposes its toggle and no protection note.
-  const detail = cardDetailRows(base, model.exemptions)
-  assert.ok(!detail.some(row => row.value === 'action:toggle-row:include:tool-bash'))
-  assert.ok(detail.some(row => row.value === 'action:toggle-row:include:timer'))
-  assert.ok(detail.some(row => row.secondary?.includes('controlled by the Current TUI composition')))
+  const detail = buildPluginDetailView(base)
+  assert.ok(!detail.actions.some(action => action.value === rowToggleValue('include:tool-bash')))
+  assert.ok(detail.actions.some(action => action.value === rowToggleValue('include:timer')))
+  assert.ok(detail.groups.some(group => group.facts.some(fact => fact.value.includes('Protected by the Current TUI composition'))))
   // The bundled row never becomes a standalone card.
-  const values = [...model.currentTui, ...model.tuiExtensions, ...model.dshPlugins].map(card => card.value)
-  assert.ok(!values.includes(entryValue('include:tool-bash')))
+  assert.ok(!model.cards.some(card => card.value === entryValue('include:tool-bash')))
 })
 
 test('a base row the self bundle overrides is protected by patchId proof', () => {
@@ -376,14 +560,14 @@ test('a base row the self bundle overrides is protected by patchId proof', () =>
   // in BundleInfo.overrides. The TUI bundle's own patch layer must not be
   // undone from its own screen.
   const snap = snapshot(
-    [bundle({ name: SELF_BUNDLE, rows: [], overrides: ['tool-bash', 'tool-web'] })],
+    [bundle({ name: SELF_BUNDLE, source: 'file:/tui', rows: [], overrides: ['tool-bash', 'tool-web'] })],
     [row({ entryId: 'include:tool-bash', moduleName: '@deepseek-ai/dsh-tool-bash', enabled: false, patchId: 'tool-bash' })],
   )
   const model = buildPluginManagerModel(snap, classifyPluginPackages(
-    inputs([{ key: bundleValue(SELF_BUNDLE), bundleName: SELF_BUNDLE, entryIds: [] }]),
+    inputs([{ key: bundleValue(SELF_BUNDLE), bundleName: SELF_BUNDLE, entryIds: [], availability: 'profile', installed: true, source: 'file:/tui' }]),
     [],
   ))
-  const card = model.dshPlugins.find(candidate => candidate.value === entryValue('include:tool-bash'))
+  const card = model.cards.find(candidate => candidate.value === entryValue('include:tool-bash'))
   assert.ok(card !== undefined, 'the overridden base row stays visible')
   assert.equal(card.canToggle, false)
   assert.equal(card.isSelf, true)
@@ -391,15 +575,15 @@ test('a base row the self bundle overrides is protected by patchId proof', () =>
 
 test('a standalone entry unrelated to the self modules keeps its toggle', () => {
   const snap = snapshot(
-    [bundle({ name: SELF_BUNDLE, rows: [{ rowId: 'builtins', moduleName: `${SELF_BUNDLE}/builtins` }] })],
+    [bundle({ name: SELF_BUNDLE, source: 'file:/tui', rows: [{ rowId: 'builtins', moduleName: `${SELF_BUNDLE}/builtins` }] })],
     [row({ entryId: 'include:other', moduleName: 'unrelated-plugin', patchId: 'other' })],
   )
   const claims = classifyPluginPackages(
-    inputs([{ key: bundleValue(SELF_BUNDLE), bundleName: SELF_BUNDLE, entryIds: [] }]),
+    inputs([{ key: bundleValue(SELF_BUNDLE), bundleName: SELF_BUNDLE, entryIds: [], availability: 'profile', installed: true, source: 'file:/tui' }]),
     [],
   )
   const model = buildPluginManagerModel(snap, claims)
-  const card = model.dshPlugins.find(candidate => candidate.value === entryValue('include:other'))
+  const card = model.cards.find(candidate => candidate.value === entryValue('include:other'))
   assert.ok(card !== undefined)
   assert.equal(card.canToggle, true)
   assert.equal(card.isSelf, false)
@@ -411,8 +595,10 @@ test('without the self bundle there is no Current TUI card and no guessed fallba
     [row({ entryId: 'include:tui-app', moduleName: SELF_BUNDLE, patchId: 'tui-app' })],
   )
   const model = buildPluginManagerModel(snap, new Map())
-  assert.deepEqual(model.currentTui, [])
-  // The self-module entry is shown as an ordinary DSH plugin, never guessed
-  // into the Current TUI section.
-  assert.deepEqual(model.dshPlugins.map(card => card.value), [entryValue('include:tui-app')])
+  assert.deepEqual(cardsOf(model, 'tui'), [])
+  const card = model.cards.find(candidate => candidate.value === entryValue('include:tui-app'))!
+  // The self-module entry is shown as an ordinary (unverified) Third-party
+  // card, never guessed into the Current TUI section.
+  assert.equal(card.section, 'third-party')
+  assert.equal(card.unverified, true)
 })
