@@ -554,8 +554,8 @@ have a write channel, and every other row is read-only.
   that opened the workspace is stopped with `preserveScreen: true`, its object
   tree, overlay graph, focus, draft and scroll state survive, and closing restarts
   the SAME instance.
-- **The first-level Settings Plugins page and the direct `/plugins` root
-  (S4-D1) use this ONE lease.** The Plugins category is a direct page entry,
+- **The first-level Settings Plugins page and the direct `/plugins` root use
+this ONE lease.** The Plugins category is a direct page entry,
   not an empty Rows level: the app lazily builds the one
   `PluginManagerWorkspacePanel` only when the category is activated, and that
   page owns paint/keys/mouse INSIDE the already-leased Settings screen;
