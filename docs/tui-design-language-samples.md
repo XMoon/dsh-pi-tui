@@ -2087,3 +2087,58 @@ the official candidates. The default `Messages`/`HTTP` copy and the
   dark-theme only.
 - Cross-platform terminals/OS and the final published-package matrix remain S5
   work.
+
+### 8f.4 Review-delta re-verification — Auto footer and endpoint trust copy
+
+The review on `3251ca3d` required a fresh real-terminal capture for the two
+visible strings that changed after the first §8f record:
+
+1. `/permission auto` now keeps the effective permission fact in the footer
+   (the B03 `auto` preset was missing from the builtin label map).
+2. The Web endpoint row's Detail now says the operator must confirm a trusted
+   HTTPS base and that the program checks the URL SHAPE, not the host's trust.
+
+Method: the same isolated `DSH_HOME` (a copied dev profile linking this
+worktree) with the published `@deepseek-ai/dsh-experimental-auto-review` rc.2
+bundle added to that profile's bundle list; the worktree was rebuilt at
+`3251ca3d`; `TERM=screen-256color`, dark theme; `tmux` 120×40 for the Auto footer
+and 80×24 / 44×20 for the endpoint Detail; keys were sent with
+`tmux send-keys` and the pane read with `tmux capture-pane -p` (ANSI stripped
+for this record). The user's `pi-tui` profile was not touched.
+
+```text
+# 120×40 — after `/permission auto`; the footer's text-token ink is
+# 38;2;224;224;224, the same `text` role used by the other permission labels
+[auto]  [ollama/deepseek-v4.1-flash:1017-cloud @max]  dsh-pi-tui-wt/s4-d3        compact
+↑0 ↓0  t0/s0
+```
+
+```text
+# 80×24 — `/settings → Other → Web Search / Fetch`, endpoint row selected
+> Search / Fetch API Endpoint  https://api.deepseek.com/v1/tools
+...
+Current: https://api.deepseek.com/v1/tools · The API base the
+DeepSeek Search and Fetch APIs call (/search and /fetch are
+appended); base-owned, not an Optional Bundle. Changing it sends
+the credential and query there; confirm only a trusted HTTPS
+base — the URL shape is checked, not the host's trust.
+```
+
+```text
+# 44×20 — the same sentence wraps by cells; no half word or clipped trust fact
+Current:
+https://api.deepseek.com/v1/tools ·
+The API base the DeepSeek Search and
+Fetch APIs call (/search and /fetch
+are appended); base-owned, not an
+Optional Bundle. Changing it sends
+the credential and query there;
+confirm only a trusted HTTPS base —
+the URL shape is checked, not the
+host's trust.
+```
+
+Not run for this delta: the other §8f sizes for these two strings, a
+light/custom-theme real terminal, physical mouse/trackpad, a Tern GUI, native
+credentials and paid API calls. Those remain `NOT_VERIFIED`; the §11.2 matrix
+for the full Plugin Manager Detail is the earlier §8f record.
