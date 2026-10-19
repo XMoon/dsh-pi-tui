@@ -3053,9 +3053,11 @@ returns to the untouched conversation/transcript-fullscreen state.
   direct root). `/` search, the Tab status filter, Up/Down/Pg/Home/End, mouse
   selection and action clicks all resolve against the cells the current frame
   actually painted. A frame with ZERO body rows paints no body action/choice,
-  so its bar never advertises `Enter` (only the real Esc destination and the
-  keys that still resolve are shown); the 80×2 matrix cannot show a fake
-  `Enter cancel`/`Enter action`.
+  so its list/details/confirm bar never advertises `Enter` and the list
+  Enter/Right admission also refuses to open an invisible card's Details. The
+  80×2 matrix cannot show a fake `Enter cancel`/`Enter action`. Search editing
+  is the deliberate exception: its `Enter apply` still executes when the input
+  cell is not painted, so that hint stays truthful.
 - **B03 Auto Review is the ONE destructive confirmation (2026-10-19, S4-D2).**
   Disabling the EXACT `@deepseek-ai/dsh-experimental-auto-review` bundle while
   it is enabled, disabling one of its addressable rows, and removing the

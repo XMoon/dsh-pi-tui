@@ -765,6 +765,9 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
   // ── view transitions ─────────────────────────────────────────────────────
 
   private enterDetails(): void {
+    // A zero-body frame paints no row; Enter/Right on an invisible selection
+    // must not change the page (the bar stops advertising it too).
+    if ((this.paintedChrome?.bodyRows ?? 0) <= 0) return
     if (this.selectedValue === undefined) return
     this.view = 'details'
     this.focus = 'details'
@@ -1534,7 +1537,9 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     // would promise an activation the CURRENT frame cannot perform (the D2
     // revoke path already makes it a no-op); keep the real Esc destination and
     // drop only the fake Enter invitation.
-    return (this.paintedChrome?.bodyRows ?? 0) <= 0
+    // Search editing is the exception: its Enter apply remains executable
+    // even when the input's body cell is not painted, so its hint stays true.
+    return (this.paintedChrome?.bodyRows ?? 0) <= 0 && !this.searchEditing
       ? segments.filter(segment => !segment.text.startsWith('Enter'))
       : segments
   }
