@@ -1155,7 +1155,7 @@ export function registerTuiCommands(
     // OPENED the record is protected by the message guard below (the ledger
     // deduplicates into it, keeping the handler message); one deduplicated
     // INTO a live collision record is not — the documented diagnostic
-    // limitation (docs/surface-decisions.md).
+    // limitation (docs/extensions/stable.md § Command ownership).
     for (const contribution of contributions) {
       const identity = contributionIdentity(contribution)
       if (colliding.has(identity)) continue

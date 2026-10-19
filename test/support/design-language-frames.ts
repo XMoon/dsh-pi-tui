@@ -1,6 +1,6 @@
 /**
  * Shared frame assertions for the design-language governance tests
- * (`docs/tui-design-language.md` §8 responsive ladder + §11.3.2 frame
+ * (`docs/architecture/design-language.md` §8 responsive ladder + §11.3.2 frame
  * invariants).
  *
  * These are deliberately four narrow helpers over a REAL painted frame: the

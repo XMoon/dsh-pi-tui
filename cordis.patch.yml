@@ -76,7 +76,7 @@
     # it also performs the official one-time history bootstrap that groups
     # stored Session headers by canonical cwd into durable workspace records —
     # an upstream migration, not a TUI invention, and the reason the row is
-    # documented in docs/client-server-coupling.md.
+    # documented in docs/architecture/host-client.md.
     - id: workspace
       name: '@deepseek-ai/dsh-workspace'
 

@@ -6,7 +6,7 @@
  * hints and unknown-on-miss semantics, bounded content search); the consumer
  * keeps the picker presentation.
  *
- * Full contract: docs/client-server-migration.md + docs/client-server-coupling.md.
+ * Full contract: docs/architecture/host-client.md + docs/architecture/host-client.md.
  * @module @xmoon76/dsh-pi-tui/runtime/session-reader-port
  */
 

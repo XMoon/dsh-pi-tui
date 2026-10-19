@@ -4,7 +4,7 @@
  * committed row snapshot on frames that did not change transcript geometry,
  * and `fullscreenRowsDirty` is raised by every geometry-mutating path.
  *
- * Pinned contract (see docs/perf-baseline.md):
+ * Pinned contract (see docs/architecture/transcript.md):
  * 1. pure fullscreen scroll frames never remeasure the row map;
  * 2. an async image settle (which invalidates a component WITHOUT a row-map
  *    writer) forces exactly the next painted frame to remeasure, after which

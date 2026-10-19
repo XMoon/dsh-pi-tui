@@ -12,7 +12,7 @@
  * policy, stable sort, deep freeze): this adapter only wires Host service
  * discovery and the session-id → live-agent resolution (runner-injected).
  *
- * Full contract: docs/client-server-migration.md + docs/client-server-coupling.md.
+ * Full contract: docs/architecture/host-client.md + docs/architecture/host-client.md.
  * @module @xmoon76/dsh-pi-tui/runtime/direct/catalog-direct
  */
 

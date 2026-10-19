@@ -12,8 +12,8 @@
  * `child_process.ChildProcess`, no PTY screen parser, no raw Host Context and
  * no generated Remote object ever crosses it.
  *
- * Full contract: docs/client-server-migration.md (user shell section) +
- * docs/client-server-coupling.md (user shell ownership).
+ * Full contract: docs/architecture/host-client.md (user shell section) +
+ * docs/architecture/host-client.md (user shell ownership).
  * @module @xmoon76/dsh-pi-tui/runtime/host-user-shell-port
  */
 

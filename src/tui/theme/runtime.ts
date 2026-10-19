@@ -111,10 +111,10 @@ export const selectListTheme: SearchablePickerTheme = {
 
 /**
  * The readable half of a task/job state: the Title Case status WORD that
- * carries the shared `‣` marker (design language `docs/tui-design-language.md`
+ * carries the shared `‣` marker (design language `docs/architecture/design-language.md`
  * §3.2 role 9 — colour is never the only signal, §3.3.3). The word is paired
  * with {@link taskStatusColor}'s token; the two must stay one vocabulary, so
- * this map lives beside the colour map (`docs/tui-design-language.md` §10) and
+ * this map lives beside the colour map (`docs/architecture/design-language.md` §10) and
  * is never forked.
  *
  * A status the map does not name is Title-cased verbatim: the surface may not

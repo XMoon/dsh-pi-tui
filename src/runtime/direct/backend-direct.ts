@@ -11,7 +11,7 @@
  * resolved lazily INSIDE the assembled adapters themselves (e.g. the Direct
  * Host user-shell adapter resolves the `shell` capability per call).
  *
- * Full contract: docs/client-server-migration.md + docs/client-server-coupling.md.
+ * Full contract: docs/architecture/host-client.md + docs/architecture/host-client.md.
  * @module @xmoon76/dsh-pi-tui/runtime/direct/backend-direct
  */
 

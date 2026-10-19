@@ -11,7 +11,7 @@
  * selection.
  *
  * Capability advertisement is EXACT (the current Remote composition's
- * unsupported set + docs/client-server-migration.md): the set is declared in
+ * unsupported set + docs/architecture/host-client.md): the set is declared in
  * `REMOTE_IMPLEMENTED_CAPABILITIES`, and a capability is advertised only when
  * its port genuinely serves the semantic contract — never to mask a
  * misleading empty/default value.

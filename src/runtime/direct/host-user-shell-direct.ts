@@ -11,7 +11,7 @@
  * `policy-unavailable` admission — it NEVER downgrades to unsandboxed
  * execution (the historical warn-and-fallback behavior is retired).
  *
- * Full contract: docs/client-server-migration.md (user shell section).
+ * Full contract: docs/architecture/host-client.md (user shell section).
  * @module @xmoon76/dsh-pi-tui/runtime/direct/host-user-shell-direct
  */
 

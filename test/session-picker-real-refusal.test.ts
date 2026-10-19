@@ -3,7 +3,7 @@
  * Picker path (L6, no authority stand-in).
  *
  * CONTRACT (the Owner-accepted limited S2 change, recorded in
- * `docs/client-server-migration.md`): the official JSONL backend LISTs a
+ * `docs/architecture/host-client.md`): the official JSONL backend LISTs a
  * Session from its HEADER only, which splits the user-visible outcomes in two:
  *
  *  - LIST_EXCLUDED — a log whose header the reader refuses (a newer format

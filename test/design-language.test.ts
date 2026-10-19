@@ -1,5 +1,5 @@
 /**
- * The design-language machine checks (`docs/tui-design-language.md` §11.3.1).
+ * The design-language machine checks (`docs/architecture/design-language.md` §11.3.1).
  *
  * Two things are cheap enough to enforce and expensive to get wrong:
  *
@@ -35,7 +35,7 @@ import { assertBodyFloor, assertOneActiveDevice, type PaintedFrame } from './sup
  *  registry gate uses). */
 const SAFE_EAW: ReadonlySet<string> = new Set(['neutral', 'narrow', 'halfwidth'])
 
-/** The chrome glyph inventory of `docs/tui-design-language.md` §4.4 that MUST be
+/** The chrome glyph inventory of `docs/architecture/design-language.md` §4.4 that MUST be
  *  width-safe. The current-value arrow `←` is deliberately NOT here: it is
  *  ambiguous and grandfathered (§4.3). The three `← current` marks were retired
  *  by the Settings and picker PRs, but the glyph is still painted in TWO places
@@ -108,7 +108,7 @@ test('the width-safe per-status glyphs are still excluded from the chrome invent
   assert.deepEqual(
     [...WIDTH_UNSAFE_STATUS_GLYPHS, ...WIDTH_SAFE_BUT_REJECTED_STATUS_GLYPHS].sort(),
     ['×', '✓', '✕', '⊘', '○', '◐', '●', '⏳'].sort(),
-    'the rejected-status-glyph sets changed: update docs/tui-design-language.md §4.1 in the same PR',
+    'the rejected-status-glyph sets changed: update docs/architecture/design-language.md §4.1 in the same PR',
   )
 })
 
@@ -154,7 +154,7 @@ test('the grandfathered ambiguous list is stable', () => {
     assert.ok(!SAFE_EAW.has(type), `grandfathered glyph ${JSON.stringify(glyph)} is EAW ${type}: move it to the canonical set`)
   }
   assert.equal(GRANDFATHERED_AMBIGUOUS.length, 13,
-    'the grandfathered list changed: update docs/tui-design-language.md §4.3 in the same PR')
+    'the grandfathered list changed: update docs/architecture/design-language.md §4.3 in the same PR')
   assert.ok(!CANONICAL_CHROME_GLYPHS.some(([, glyph]) => GRANDFATHERED_AMBIGUOUS.some(([other]) => other === glyph)),
     'a glyph cannot be both canonical (must be safe) and grandfathered (may be ambiguous)')
 })

@@ -1343,7 +1343,7 @@ test('EXT2: cold orders the displaced side by evidence; live keeps the conforman
   // side is ordered by materialization evidence — the durable arrival order does
   // NOT decide it. (A conformant row in a fold that already had the Conversation
   // keeps its own slot; unifying that case would cross unrelated visible rows,
-  // which the reachability guard refuses — see docs/surface-decisions.md.)
+  // which the reachability guard refuses — see docs/architecture/transcript.md.)
   assert.deepEqual(logicalRows(cold), ['assistant:reply', 'tool:earlier'])
   assert.equal(toolRows(cold)[0]!.result, 'earlier result\n\nlater result')
   assert.deepEqual(logicalRows(live), logicalRows(cold))

@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
  * Screen-level oracle for the fullscreen Focus replay harness (investigation
- * tooling, NOT production code). See `docs/focus-replay-harness.md`.
+ * tooling, NOT production code). See `docs/guides/tmux-testing.md`.
  *
  * Marker/proxy detectors gave false positives (they matched the Thinking tail or
  * the held-back final block). This one only looks at the TERMINAL SCREEN that

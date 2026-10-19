@@ -14,7 +14,7 @@
  * every physical mount, focus seat and teardown.
  *
  * Advanced is EXPERIMENTAL: minor releases may break; a migration note is
- * required; no long-term shims. See docs/extension-advanced.md.
+ * required; no long-term shims. See docs/extensions/advanced.md.
  * @module @xmoon76/dsh-pi-tui/extensions/advanced
  */
 

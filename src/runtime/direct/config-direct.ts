@@ -12,7 +12,7 @@
  * switch takes the exact host path — the raw commands service never leaks
  * past this adapter.
  *
- * Full contract: docs/client-server-migration.md + docs/client-server-coupling.md.
+ * Full contract: docs/architecture/host-client.md + docs/architecture/host-client.md.
  * @module @xmoon76/dsh-pi-tui/runtime/direct/config-direct
  */
 

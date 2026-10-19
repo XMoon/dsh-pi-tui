@@ -602,7 +602,7 @@ export function createSessionPresentation<Event extends SessionPresentationEvent
     // this sessionId — session-scoped editor recall), so ↑/↓ in a live
     // session never recalls another session's inputs from the same cwd.
     // The CANONICAL last row stays the cwd file's actual last row (the
-    // persistence dedupe anchor stays cwd-scoped — docs/input-history.md);
+    // persistence dedupe anchor stays cwd-scoped — docs/architecture/input-history.md);
     // only the EDITOR's recall is the session projection.
     const historyCwd = deps.history.currentCwd()
     const historyRecords = deps.history.records(historyCwd)

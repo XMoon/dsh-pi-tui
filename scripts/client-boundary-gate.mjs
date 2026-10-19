@@ -7,7 +7,7 @@
  * current (file, pattern) pairs are frozen in
  * scripts/client-boundary-baseline.json, and any NEW pair fails. Existing
  * coupling may stay on the allowlist until its owning migration phase moves
- * it (docs/client-server-coupling.md); the baseline is updated deliberately
+ * it (docs/architecture/host-client.md); the baseline is updated deliberately
  * by a maintainer when a phase legitimately relocates coupling, never to
  * absorb new debt.
  *
@@ -33,7 +33,7 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 const BASELINE_PATH = join(ROOT, 'scripts', 'client-boundary-baseline.json')
 
 // Host services the migration must isolate. Keep in sync with
-// docs/client-server-coupling.md.
+// docs/architecture/host-client.md.
 export const HOST_SERVICES = [
   'agents',
   'sessions',
@@ -189,7 +189,7 @@ function main() {
       console.error('client-boundary-gate: STALE baseline entries no longer present in src/:')
       for (const entry of stale) console.error(`  ${entry}`)
     }
-    console.error('\nSee AGENTS.md "Server/client migration guardrails" and docs/client-server-coupling.md.')
+    console.error('\nSee AGENTS.md "Server/client migration guardrails" and docs/architecture/host-client.md.')
     process.exit(1)
   }
   console.log(`client-boundary-gate: ok (${Object.keys(scanned).length} file(s), no new Host coupling or stale baseline)`)

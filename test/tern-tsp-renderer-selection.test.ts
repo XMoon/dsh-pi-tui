@@ -19,7 +19,7 @@
  * STANDS-IN: the terminal is a scripted tty answering the official handshake
  * (the same fixture family PR2 used); the app graph is the real
  * `SurfaceRuntime` + a minimal routing source, as in PR2. Nothing here claims
- * a real Tern pane (that is the manual smoke in docs/tern-tsp/evidence/pr3-a.md).
+ * a real Tern pane (that is the manual smoke in docs/guides/tern-pane-testing.md).
  *
  * @module @xmoon76/dsh-pi-tui/tern-tsp-renderer-selection.test
  */

@@ -701,7 +701,7 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
         // publishes a Session from its header only, so a store whose logs the
         // reader refuses is indistinguishable from an empty one here — never
         // claim "no persisted sessions" (the S2 limited contract, recorded in
-        // docs/client-server-migration.md).
+        // docs/architecture/host-client.md).
         const text = listed === undefined ? 'session persistence unavailable' : 'No readable sessions'
         statusRow = { value: '', label: text, description: '', group: '' }
         picker.refresh?.()

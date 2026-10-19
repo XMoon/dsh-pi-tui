@@ -1,5 +1,5 @@
 /**
- * Tests for the `!`/`!!` bash completion bridge (docs/input-and-card-polish.md
+ * Tests for the `!`/`!!` bash completion bridge (docs/architecture/surface-behavior.md
  * §1): the cursor-context parser, the compgen-backed suggestion paths
  * (command names, `$VAR` names, git subcommands) against a REAL bash, the
  * degradation when bash is unavailable, and the MentionProvider integration

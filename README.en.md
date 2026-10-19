@@ -40,7 +40,7 @@ dsh --profile pi-tui
 > `0.2.1-alpha.5`, while `@xmoon76/dsh-pi-tui@next` still resolves to
 > `0.5.2-rc.1` (peer floor `>=0.2.0-rc.2`, and npm semver excludes a
 > different-major.minor.patch prerelease). Use the pairing table below and
-> [the compatibility document](docs/dsh-compatibility.md) for the exact pair; the
+> [compatibility guide](docs/guides/dsh-compatibility.md) for the matching rules; the
 > stable `0.5.3` publishes to `@latest`, not `@next`, so no installable compatible
 > combination exists on those two moving channels. Validate this exact checkout
 > with `pnpm compat:dsh:npm`.
@@ -52,7 +52,7 @@ checkout and exercises the full build/test/package path):
 pnpm compat:dsh:npm
 ```
 
-See the [compatibility guide](docs/dsh-compatibility.md) for the stable minimum,
+See the [compatibility guide](docs/guides/dsh-compatibility.md) for the stable minimum,
 next compatibility range, and fallback paths.
 
 ### Requirements
@@ -88,9 +88,10 @@ line keeps its `>=0.1.7-rc.2` floor (exact validation target 0.2.0-rc.1);
 older runtimes fail at the normal
 incompatible-runtime boundary, so install the paired TUI line from the table
 above. The startup notice
-is best-effort rather than a Loader startup-order guarantee. See the [full
-historical compatibility matrix](docs/dsh-compatibility.md) for official-tag
-pairings and fallback commands, and see the [latest `next`
+is best-effort rather than a Loader startup-order guarantee. The pairing table
+above is the published-line summary; see the [compatibility
+guide](docs/guides/dsh-compatibility.md) for general matching, fallback and
+diagnosis, and the [latest `next`
 README](https://github.com/XMoon/dsh-pi-tui/blob/next/README.md) for the current
 integration status.
 
@@ -495,8 +496,8 @@ A `/footer` Custom Command Item is different from `footer: command`: the former 
 
 For the full `/footer` workflow, Custom Text / Command items, YAML reference, security model, and troubleshooting, see:
 
-- [Footer customization guide](docs/footer-customization.md)
-- [Extension API for plugin authors](docs/extension-api.md)
+- [Footer customization guide](docs/guides/footer.md)
+- [Extension API for plugin authors](docs/extensions/stable.md)
 
 `/statusline` is an alias of `/footer`.
 
@@ -729,12 +730,11 @@ export function apply(ctx: Context): void {
 
 Documentation:
 
-* [Extension API](docs/extension-api.md)
-* [Extension tiers](docs/extension-tiers.md)
-* [Advanced API](docs/extension-advanced.md)
-* [Unstable API](docs/extension-unstable.md)
-* [Plugin authoring](docs/plugin-authoring.md)
-* [Capability matrix](docs/extension-capability-matrix.md)
+* [Extension API](docs/extensions/stable.md)
+* [Extension tiers](docs/extensions/tiers.md)
+* [Advanced API](docs/extensions/advanced.md)
+* [Unstable API](docs/extensions/unstable.md)
+* [Plugin authoring](docs/extensions/authoring.md)
 
 ## Development
 
@@ -792,7 +792,7 @@ The published package already contains the Pi TUI fork required at runtime. No s
 
 ### CI validation policy
 
-CI follows the tracked `test/compat/dsh-mode.json` policy for pushes to `next` and pull requests targeting `next`; `main` and every tag use npm Mode. Source Mode reads the source target from `test/compat/dsh-source.json` and validates the complete official DSH tarball family, TUI presets, and the old-runtime boundary; npm Mode uses the DSH version declared by the checkout's `package.json` and frozen lockfile to run the registry lane. The published `pi2dsh` ecosystem check is explicitly marked skipped for an unpublished source family. See [`docs/dsh-compatibility.md`](docs/dsh-compatibility.md) for the full workflow.
+CI follows the tracked `test/compat/dsh-mode.json` policy for pushes to `next` and pull requests targeting `next`; `main` and every tag use npm Mode. Source Mode reads the source target from `test/compat/dsh-source.json` and validates the complete official DSH tarball family, TUI presets, and the old-runtime boundary; npm Mode uses the DSH version declared by the checkout's `package.json` and frozen lockfile to run the registry lane. The published `pi2dsh` ecosystem check is explicitly marked skipped for an unpublished source family. See [`docs/guides/dsh-compatibility.md`](docs/guides/dsh-compatibility.md) for the compatibility method.
 
 ## Repository layout
 
@@ -819,15 +819,13 @@ Contributor-oriented repository structure and development rules are documented i
 
 | Document                                               | Content                           |
 | ------------------------------------------------------ | --------------------------------- |
-| [docs/README.md](docs/README.md)                       | Documentation index               |
-| [docs/architecture.md](docs/architecture.md)           | Architecture and module ownership |
-| [docs/input-history.md](docs/input-history.md)         | Input history                     |
-| [docs/surface-decisions.md](docs/surface-decisions.md) | TUI interaction decisions         |
-| [docs/concurrency.md](docs/concurrency.md)             | Session concurrency               |
-| [docs/failure-model.md](docs/failure-model.md)         | Async failure / cancellation      |
-| [docs/perf-baseline.md](docs/perf-baseline.md)         | Performance baseline              |
-| [docs/local-development.md](docs/local-development.md) | Local development and worktree policy |
-| [docs/extension-api.md](docs/extension-api.md)         | Extension API                     |
+| [docs/README.md](docs/README.md)                             | Documentation policy and index |
+| [docs/architecture/overview.md](docs/architecture/overview.md) | Architecture, layers and dependency direction |
+| [docs/architecture/host-client.md](docs/architecture/host-client.md) | Host/Client boundary and currentness contracts |
+| [docs/architecture/surface-behavior.md](docs/architecture/surface-behavior.md) | Workspace/task/plugin surface behavior |
+| [docs/guides/development.md](docs/guides/development.md)     | Local development, worktrees and benchmark reruns |
+| [docs/extensions/stable.md](docs/extensions/stable.md)       | Extension API                     |
+| [docs/guides/code-review.md](docs/guides/code-review.md)     | Repository review checkpoints     |
 | [AGENTS.md](AGENTS.md)                                 | Contributor operating manual      |
 
 ## Changelog

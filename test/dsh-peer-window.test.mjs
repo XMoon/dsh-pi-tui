@@ -93,7 +93,7 @@ test('all DSH development packages stay pinned to the exact declared target', ()
 test('the package version reserves one consistent release identity across manifest and matrix', () => {
   // Version-coupled fields move ATOMICALLY: an untagged promotion candidate
   // reserves its identity in package.json, matrix current.since, and the
-  // current compatibility row's `tui` (see docs/releasing.md — the version is
+  // current compatibility row's `tui` (see docs/guides/releasing.md — the version is
   // consumed when the corresponding release tag is published). A partial move (e.g.
   // version 0.5.1 with since 0.5.0, or a current row still naming the
   // previous TUI) must fail here instead of shipping a mixed identity.

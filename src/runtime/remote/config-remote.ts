@@ -4,7 +4,7 @@
  * semantic contract as `src/runtime/direct/config-direct.ts`; no Remote-only
  * Config semantics and no Direct fallback exist.
  *
- * Published mapping (see docs/client-server-migration.md):
+ * Published mapping (see docs/architecture/host-client.md):
  *
  * ```text
  * TUI settings / footer trust / custom items / providers / permissions /

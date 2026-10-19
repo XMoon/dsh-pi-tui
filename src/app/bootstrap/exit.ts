@@ -10,7 +10,7 @@
  * → AgentHandle.dispose) runs inside the application-tree disposal that
  * `appExit` starts, under the DSH process-shutdown watchdog — see
  * `src/runtime/direct/owned-session-retirement.ts` and
- * `docs/concurrency.md`. The exit controller may invoke ONE injected
+ * `docs/architecture/concurrency.md`. The exit controller may invoke ONE injected
  * synchronous Host-retirement preparation hook (the Direct owner's first
  * cancel, so it lands before the root teardown unregisters the inbox
  * projection), but it NEVER awaits full Host retirement in front of

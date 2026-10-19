@@ -1,0 +1,593 @@
+# Keybinding architecture
+
+This document records the user-orchestrable keybinding decisions and the
+contracts that must not be broken; the code is the reference for the
+line-by-line behavior.
+
+## The pipeline
+
+```text
+Physical Key
+    ↓
+Semantic Action ID
+    ↓
+Context-aware resolver
+    ↓
+Host handler
+```
+
+The plan's core claim: the Host app layer used to treat physical keys as
+its architecture interface (`matchesKey(data, 'ctrl+o')` scattered across
+`tui-app.ts`). The migration replaces that with a stable action inventory
+(`app.*`), a context-aware effective keymap, and a semantic dispatcher —
+so a future user override only touches the keymap, never a business
+handler.
+
+## The modules (`src/tui/keybindings/`)
+
+| Module | Role |
+|---|---|
+| `types.ts` | The contract types: `AppKeybindingId`, `KeybindingScope`, `AppKeybindingDefinition`, `KeybindingContext`, `EffectiveBindingRule`, `KeybindingResolution`, `KeymapSnapshot`, `KeybindingConflict`, `LeaderConfig`/`LeaderBinding` |
+| `definitions.ts` | The SINGLE action table (`APP_KEYBINDINGS`): default keys, description, category, scope, configurable flag. Every default key MUST match the pre-migration behavior (M0 gate) |
+| `context.ts` | `deriveKeybindingContext`: the resolver's context, built in ONE place per surface. `editorEmpty` is a LAZY getter — the live editor is only read when a rule predicate needs it (the input path must not add a draft read per keystroke) |
+| `effective-keymap.ts` | The rule compiler + resolver: builtin (100) / composition (100) / user (200) / plugin (10) priorities; conflict detection; `includeScopes` (the HOST keymap resolves the non-capturing scopes only) |
+| `conflicts.ts` | The conflict model: same key + overlapping scope + same priority. Capturing scopes (question/approval/overlay/search/viewer/tasks) are mutually exclusive surfaces — they never conflict with non-capturing scopes or each other |
+| `config.ts` | The user settings parser: string / array / `false` / `<leader>X`; unknown action, invalid key, the RUNTIME-BINDABLE gate (a capability table: modified F-keys / modified Escape / unsupported modified Clear can never be matched), plain-printable-to-host-action (text-producing), the SHARED terminal-ambiguous key inventory (TERMINAL_AMBIGUOUS_KEY_IDS: Ctrl+[ / Ctrl+J/M / Ctrl+I/H / Ctrl+_/- / Ctrl+Backspace) and the editor-owned submit pre-submit set; all fail-soft |
+| `manager.ts` | The stateful facade: user config, safe mode, plugin rules, leader machine, diagnostics, snapshot |
+| `action-dispatcher.ts` | The semantic action → host method router (`AppActionHost`). The dispatcher NEVER re-implements business state |
+| `leader.ts` | The leader state machine: pending prefix, timeout, ambiguous prefix, cancel, paste/typing isolation |
+| `hints.ts` | `formatKeyId` / `formatKeyList` — the ONE place that turns a KeyId into the human label the UI renders |
+| `component-keymap.ts` | The read-only focused-component keymap (QuestionFlow, TaskBrowserPanel) |
+
+## The input ladder (what must not be broken)
+
+The `InputRouter` (`src/tui/interaction/input-router.ts`) keeps its protocol/capture/focus
+precedence — the keymap is consulted ONLY when the ladder allows
+keybinding resolution. The rule is explicit: **do not delete the
+InputRouter**. The host ladder in `handleInputCore` is:
+
+```text
+terminal protocol replies / press-filtering
+  ↓
+active question / editor-seat capturing flow
+  ↓
+active approval
+  ↓
+read-only viewer guard
+  ↓
+active overlay (search owns its keys)
+  ↓
+leader sequence machine (only when a leader key is configured)
+  ↓
+host semantic action resolution (the effective keymap)
+  ↓
+focused editor / pi-tui editor action
+  ↓
+non-capturing plugin keybindings
+```
+
+**Fixed overlay-key precedence.** While a capturing overlay is open its
+NON-CONFIGURABLE keys (search close/next/previous, question/tasks flow
+keys) win by precedence — a configurable action (e.g. the search toggle)
+remapped to one of those keys is ECLIPSED inside the overlay (the
+binding still works outside it). The config parser warns on such a
+collision (`FIXED_OVERLAY_KEYS`); the overlay never resolves the
+configurable action first (§3.3).
+
+### The conditional task affordance vs the actual route
+
+The `↓` task admission is a composition rule over `app.tasks.open`
+(`manager.ts`), and the footer's `↓ view` / compact `↓` hint asks the SAME
+question. That hint has ONE input — `TuiApp.taskBrowserAvailable()` —
+shared by the builtin task item's full and compact densities and by every
+custom layout that references the item; never two per-mode branches.
+
+The Down-admission rule: the on-demand Task Quick enters
+from the focused HOST editor's last VISUAL line — the context field is
+`quickDownEligible` (a lazy thunk: the fork classifier runs once per
+candidate Down, never per keystroke), and `editorEmpty` no longer gates this
+composition (a NON-EMPTY draft qualifies on its last visual line; the field
+keeps its own meaning for other rules). `quickDownEligible()` is the ONE
+private predicate behind both the routing and the hint: `tasksActive`, a
+real Quick projection (>= 1 row), the host editor as the physically focused
+seat in prompt mode, and no higher-priority owner. A plugin editor takes no
+claim — the visual boundary is the host fork's protected seam (divergence
+X063 in `packages/pi-tui/vendor-divergences.json`), which no public editor
+API exposes. The retired empty-editor route into the modal Quick is gone;
+`app.tasks.open` now opens the on-demand accessory, and `/tasks` remains the
+Full Task Center's own entry, independent of this action.
+
+Footer admission geometry: before a hidden Quick
+can be admitted, the host composes a read-only candidate of the complete Footer
+with the hint enabled and measures its physical height for the existing Quick
+row grant. This candidate is not committed or iterated to a fixed point. If it
+leaves no Quick row, the hint and Down route both fail closed even when the
+hint-free painted Footer would fit. Once Quick is active, its layout uses the
+actual painted Footer; hiding the hint does not re-run hidden-entry admission
+or close Quick.
+
+The gate must test the ACTIVE input OWNERS, not only physical overlay
+focus: a Question / Save Location frame owns the editor SEAT (it is not a
+managed broker overlay, so `OverlayBroker.hasFocusedOverlay()` stays false
+while `handleInputCore` consumes every key), and an Approval owns a
+managed overlay. A hint derived from overlay focus alone advertised a `↓`
+the ladder refused. `tasksActive`, `?N` (parked attention) and `!N`
+(failure attention) are independent projections: suppressing the hint
+never clears them. Save Location has no `ActivityStatus` section of its
+own, so its present/settle boundaries refresh the footer explicitly
+(`renderFooter()`); Question/Approval ride the status-store notify.
+
+A user binding, or a leader completion, of `app.tasks.open` is another
+TRIGGER of the same action and obeys the same ownership boundary (the
+modal inspection plane refuses non-inspection completions), so it is never
+a way across a modal. `test/surface-modal-affordance.test.ts` locks the
+modal source→route→footer behavior, and the keybinding integration suite
+locks the remap/leader boundary.
+
+The hint also tracks the EFFECTIVE keymap, not only the seat/modal state. It
+advertises the `↓` trigger, so the gate asks whether the action still owns
+that key in the live read model —
+`HostKeybindingManager.keysFor('app.tasks.open').includes('down')`. An
+explicit `app.tasks.open: false` removes every source of the action's keys,
+including the host's synthesized conditional `↓` composition rule
+(`effective-keymap.ts` step 3); a DIFFERENT action bound to `↓` shadows that
+composition rule; a deactivated composition rule leaves the same gap. In
+every case the action may keep another trigger (a remap is ADDITIVE and
+normally keeps the conditional `↓` too) while `↓` itself no longer resolves
+to the task browser, so a gate that only asked "does this action still have
+any key?" would still promise a `↓` the router refuses. Because the footer
+text is derived from the keymap, a keymap rebuild recomposes it
+(`onInvalidate`), so the hint is never left stale by `/keybindings reload`,
+a `/keybindings` save or the settings appliers.
+
+The affordance suite locks all of it: the full, responsive-compact and
+fullscreen footers, the disabled action, the pure-remap case (the conditional
+`↓` survives), the `↓`-taken case, and a positive control proving that
+re-enabling restores both the hint and the real route through the keymap
+rebuild alone.
+
+## Key decisions
+
+1. **One canonical physical-key identity.** Every key spelling collapses
+   onto ONE canonical KeyId (`esc`→`escape`, `return`→`enter`, modifier
+   order → `ctrl`→`shift`→`alt`→`super`, and every base LOWERCASED —
+   including single characters: `A`→`a`, `ctrl+A`→`ctrl+a`) at every rule
+   entry point (builtin defaults, user keys, leader prefix/completions,
+   composition, plugin rules, the fixed-overlay/terminal-unreliable
+   inventories, rule ids and conflict grouping). Aliases and CASING can
+   never bypass conflict detection, leader-prefix collision or dedup
+   (convergence §1/§4.1; the fork's runtime parser lowercases, so
+   `ctrl+A` and `ctrl+a` are one physical key).
+2. **Declared / effective / shadowed / conflicted are distinct states.**
+   The effective keymap compiles declared rules, DEDUPES same-action
+   same-canonical-key declarations, DEACTIVATES same-priority conflicts
+   (with a diagnostic), and SHADOWS lower-priority rules on an
+   overlapping key — but only UNCONDITIONAL higher rules shadow in the
+   read model: a CONDITIONAL top trigger (a context predicate exists)
+   advertises BOTH its claim and the lower rule's fallback, because the
+   fallback genuinely fires in the contexts where the predicate fails
+   (round-9 finding: the read model must never hide a key that fires).
+   Only EFFECTIVE rules feed `resolve`, `keysFor`, `keyHint`,
+   `hostResolves` and `snapshot` — and they all project from the SAME
+   visible-rule set (a working user override never leaves the replaced
+   builtin advertised anywhere), with no fabricated builtin fallback
+   (convergence §2/§4.3/§4.4).
+3. **Editor-owned submit lives in the unified rule model — winner-aware.**
+   `app.input.submit` is `hostResolved: false` — the fork editor's submit
+   path owns the backslash-newline workaround.
+   Editor-owned rules PARTICIPATE in the winner selection on equal
+   footing with host/plugin rules (round 9 finding: the resolver used to
+   skip editor rules BEFORE picking a winner, so `submit: ctrl+s`
+   steered at runtime while the read model advertised submit). The
+   resolution carries the winner's OWNER and the caller routes execution
+   by it: 'host'/'plugin' → the host dispatcher, 'editor' → the fork
+   editor (its `tui.input.submit` is synced by `onEditorSubmitSync`).
+   `hostResolves` is winner-based — an editor-owned winner is never
+   host-reserved, so the key reaches the fork editor. User remaps/`false`
+   sync into the fork editor's binding, conflict and shadow apply,
+   fail-soft (a CONFLICTED direct submit override restores the builtin
+   Enter — convergence §4.5; a DEAD leader-only completion is ignored and restores the action's builtin default,
+   explicit `false` removes everything)
+   is evaluated on the EFFECTIVE rules — never the raw config, and a
+   leader sequence NEVER clears the direct keys (`submit:
+   ['ctrl+z', '<leader>s']` keeps BOTH triggers; only a truly leader-only
+   override removes Enter) (convergence §3/§4.5).
+4. **The viewer guard is action-based.** `viewerParentLockedKey` resolves
+   the key through the effective keymap and blocks
+   `VIEWER_BLOCKED_PARENT_ACTIONS` (which includes `app.agent.interrupt`)
+   — a user remap of a parent action stays blocked automatically,
+   direct and leader triggers alike. The guard never maintains a
+   physical key list.
+5. **Semantic interrupt ≠ physical Escape.** `app.agent.interrupt` on the
+   physical Escape key runs the editor-owned Escape seams (autocomplete
+   pass-through, replacement-editor Esc, shell-mode exit — with the busy
+   cancel keeping Host priority over all of them) then the semantic
+   core; a REMAPPED interrupt key goes straight to the semantic core
+   (`handleInterruptAction` — single/double-action policy, rewind) and
+   never inherits the physical-Escape seams (convergence §5/§4.8). The
+   viewer's fixed Esc close stays independent.
+6. **A declined host action reaches the remainder — once.** When the
+   host dispatcher returns false (GENUINE feature absence, e.g.
+   `pasteMedia` with no handler), the key must reach the editor/plugin
+   remainder and is never re-reserved by the same host rule
+   (convergence §6/§4.9). HOST-GUARDED NO-OPS (empty queue, no history
+   source) are NOT declines: the host owns the key and consumes it.
+7. **Conflicts are deactivated, never last-write-wins.** A conflict
+   (same canonical key + overlapping scope + same priority) disables
+   BOTH rules with a diagnostic; every other rule keeps working
+   (fail-soft). If the highest tier is fully conflict-deactivated, the
+   next DECLARED tier survives — never a fabricated builtin.
+8. **Safe mode** (`DSH_PI_TUI_SAFE_KEYBINDINGS=1`) ignores user overrides
+   and keeps the builtin defaults; plugin keybindings still load.
+9. **The leader is opt-in and availability-aware.** No leader key is
+   configured by default. Esc (any alias) can never be a completion
+   (it is the pending-cancel contract — parser-rejected); a leader with
+   zero EFFECTIVE completions has no machine; a completion dispatches
+   only when the action's context predicate holds (`canActivate` — the
+   ↓ tasks affordance is not bypassable); the viewer parent-action guard
+   blocks leader completions like direct keys. A leader-PREFIX key that
+   collides with an active host or editor-owned key is fail-soft
+   disabled with a diagnostic (convergence §4/§4.6/§4.7).
+10. **Reserved-but-unimplemented actions are not bindable.** The
+    session/model actions (`app.session.*`, `app.model.open`) are
+    `configurable: false` + `availability: 'reserved'`: the parser
+    rejects any user binding with a diagnostic — never a bindable no-op
+    key (convergence §7).
+11. **The static gate** (`scripts/check-host-keybindings.mts`, wired into
+    `verify:prepush`) forbids NEW hard-coded chord labels in user-facing
+    strings across ALL quote styles (single/double/backtick, either
+    casing) and new `matchesKey(data, 'ctrl+…'/'alt+…'/'shift+…')`
+    chords in `src/tui-app.ts`, with a documented allowlist for the
+    sanctioned seams (read-only viewer guard, the Ctrl+C clear-draft
+    semantic discriminator, approval dialog keys, replacement-editor Enter
+    seams, the effective-submit Shift+Enter exclusion).
+12. **A fullscreen Job workspace re-scopes the EFFECTIVE Find binding to
+    its own Output.** While a Job workspace owns the physical screen, the
+    winning resolution of `app.transcript.search` is interpreted as
+    "find in the current retained Output": the key is consumed by the Job
+    panel, the global Transcript search handler is never entered and the
+    fork's built-in search overlay is never opened. This reuses the LIVE
+    winner (so a remap, a disable or a leader-only binding moves the Job
+    key too, and a disabled Find advertises nothing) without creating a
+    second configurable action id or a second keymap truth; `/` stays a
+    non-configurable Job-local alias, active only while the query is not
+    being edited. A leader completion is the same action's effective
+    completion: the Job input branch feeds exactly the exit-bound and
+    Find-bound completing keys to the shared machine and cancels every
+    other completion without dispatching it, and the leader activation
+    wiring intercepts Find for the Job BEFORE the host action dispatch —
+    never "open the Transcript search, then repair it".
+13. **A fullscreen Job workspace has fixed Job-local read-only verbs that
+    are NOT configurable action ids.** `v` opens the shell Command page
+    from the Output page and `C` (`shift+c`) copies the CURRENT reading
+    page's own source — the retained Output on the Output page, the
+    original command label on the Command page — through the existing
+    Client-local clipboard capability. They are component logic, not an
+    entry in `APP_KEYBINDINGS`: they take part in no conflict
+    classification, move with no remap and never shadow the global
+    Transcript, picker or editor bindings, which still own those letters
+    everywhere else. Their precedence inside the workspace is fixed: the
+    physical `Home`/`End` viewport keys and the effective Find binding are
+    matched FIRST (see 11/12 above), `tasks.stop` keeps its existing branch
+    BEFORE the two verbs, and in the search `NAVIGATE` state — and in
+    `EDIT`, where the query Input owns every printable key — all three are
+    inert and the Action Bar advertises none of them. The Command page
+    never advertises or dispatches Stop; `Esc` there is the page's own
+    return to Output, and only an Output-page `Esc` runs the close.
+
+## User configuration
+
+The `tui-app` plugin's profile-owned Config, field `keybindings` — a
+whole-value volatile raw field since DSH 0.1.7 (the retired `dsh-pi-tui`
+settings namespace is only a legacy-migration input). The parser in
+`src/tui/keybindings/config.ts` remains the only validation authority:
+
+```yaml
+keybindings:
+  app.input.steer: ctrl+s
+  app.permission.cycle: [shift+tab, ctrl+shift+p]
+  app.history.search: ctrl+r
+  app.transcript.toggleThinking: false
+  leader: ctrl+x
+  bindings:
+    app.tasks.open: <leader>t
+```
+
+Semantics: string = one key; array = several; `false` = disable the
+action's effective binding; absent = builtin default; `<leader>X` = a
+leader sequence (requires `leader`). Physical `Escape` is reserved for the
+Host lifecycle path and is accepted only for `app.agent.interrupt`; the runtime
+routes it before ordinary user action resolution. A leader completion that the
+current editor-owned submit key would consume (for example,
+`<leader>enter`) is rejected rather than advertised as a dead sequence. The
+validation pipeline is
+**grammar → canonicalize → policy → store** (round-9 finding): every
+policy check (printable, lifecycle collisions, editor-owned constraints)
+runs on the CANONICAL key, so an uppercase spelling (`SPACE`, `ctrl+A`)
+can never bypass the typing guard or the collision sets. A plain
+printable key can never be bound to a Host action (it would swallow
+typing), and `app.input.submit` can never be bound to a key the fork
+editor consumes BEFORE its submit check (tab/backspace/Ctrl+A/E/U/K/W/
+Y/C/D/Home/End/word-moves/undo/copy — the editor would consume it first,
+so the binding could never fire; rejected like Shift+Enter, other
+actions are unaffected). The reload seam is EXPLICIT, never automatic:
+`/keybindings reload` re-reads the settings document and rebuilds the
+keymap without a restart — there is deliberately no settings `watch`
+callback, because the config port (`TuiSettingsConfig`) is get/replace
+only and a callback could not map across the process boundary in the
+future Remote adapter (migration rule: no callbacks across the wire;
+see docs/architecture/host-client.md).
+
+**The UNIFIED override contract.** One rule for every
+action, enforced by the parser AND the effective keymap together:
+
+```text
+absent             -> builtin default keys
+direct user keys   -> REPLACE the builtin
+leader-only        -> REPLACE the builtin (the leader is the only trigger)
+direct + leader    -> both USER triggers, builtin removed
+false              -> remove every trigger (builtin included)
+composition        -> additive affordance (never removed by a remap)
+```
+
+A leader-only declaration is recorded as an EMPTY-ARRAY marker in the
+parsed user bindings, so the effective keymap sees a real user
+declaration and suppresses the builtin (including the editor-owned
+builtin for submit — `resolve(Enter)` is undefined and
+`matches(Enter, submit)` is false for a leader-only submit; the unified
+model has ONE effective truth). The marker is written ONLY after the
+leader prefix is confirmed valid: a missing or
+invalid leader (text-producing, runtime-unbindable, terminal-ambiguous)
+is diagnosed and ignored — fail-soft — and the action falls back to its
+builtin default; the marker must never outlive a leader that was
+rejected. The conflict fail-soft is the only exception: a DIRECT submit
+override that CONFLICTS away (all user rules deactivated) restores the
+builtin Enter — the documented convergence §4.5 rule, never a fabricated
+fallback for a working override. A dead leader (shadowed/ambiguous)
+leaves a leader-only action inert — the diagnostic explains why; no
+silent builtin restoration.
+
+**Conditional affordances are ADDITIVE, never replaced.** A composition
+rule (the empty-editor `↓` task-browser affordance → `app.tasks.open`)
+stays live alongside a user binding of the same action: binding
+`app.tasks.open: ctrl+x` ADDS another trigger — `↓` (with an empty
+editor + active tasks) still opens the browser. Only `false` disables
+the affordance along with every other key of the action. The README
+uses "override" loosely; the effective semantics are: *a user binding
+replaces the action's builtin default keys and adds its triggers;
+`false` removes them all*.
+
+## Diagnostics
+
+`/keybindings` shows the effective table (action, keys, scope, source)
+grouped by category; `/keybindings conflicts` lists only conflicts;
+`/keybindings reload` re-reads the settings document (fail-soft: a
+throwing read keeps the last-known-good keymap and reports an error);
+`/keybindings reset` clears the user overrides THROUGH the settings
+service (never a direct settings.yaml write) AND rebuilds the running
+keymap from the cleared document — the reset takes effect immediately,
+no follow-up reload needed (the reload seam is explicit since the
+automatic settings watch was removed). The reset is ONE transaction:
+read → construct the cleared doc → persist → apply the SAME local
+projection (no post-write re-read of the Host document — a Remote
+adapter's reset is write + local projection, never GET → PUT → GET; a
+post-write read that failed would fork the disk reset from the runtime).
+`/help` and the footer hints render through `keyHint`/`keysFor` — a user
+remap updates every hint automatically.
+
+## Out of scope (first version)
+
+- No VS Code-style `when` expressions (scope is the static contract).
+- No arbitrary JS callback bindings.
+- No raw terminal bytes to plugins; no plugin preemption of the protocol
+  stage; no breaking extension API change (the plugin registry keeps its
+  key-level reservation AND the runtime ACTION whitelist — a Stable
+  plugin registers only the public `TuiAction` set; the Host-private
+  `app.*` actions are never plugin-bindable, round-12 finding).
+- The model-picker / history-panel / output-viewer focused components keep
+  their component-local keys (QuestionFlow and TaskBrowserPanel follow the same pattern).
+
+## Comment and copy convention
+
+Host code must not hard-code physical keys in a way that can drift from
+the user's live bindings:
+
+- **The single source of truth for DEFAULT keys is `definitions.ts`**
+  (plus the `RESERVED_HOST_KEYS` inventory in `extension/internal/keybinding-registry.ts`).
+  `src/tui-app.ts` and `src/index.ts` carry a header note pointing here.
+- **Keyboard exit requests use same-key confirmation.** Every effective exit
+  request that reaches the Host — including full `<leader>X` sequences — arms
+  its own 1.5-second window and must be repeated with the same trigger; a
+  different exit key replaces the armed trigger. The default Ctrl+D remains
+  editor-owned while the visible editor has content. The footer renders the
+  effective trigger label dynamically.
+- **User-facing strings derive key labels from the keymap**
+  (`keyHint()` / `keysFor()` — e.g. the guard notices and the `/settings`
+  row descriptions). A remap updates the copy automatically; a disabled
+  action shows a neutral fallback.
+- **Comments** may name a key only when the SEMANTICS are key-specific
+  (Ctrl+C's clear-draft behavior, the double-Esc window, the
+  read-only viewer's fixed Esc/Ctrl+O policy, the search overlay's fixed
+  keys). Every other mention is shorthand for the default binding and
+  must not be relied on as the live binding.
+- **The static gate** also rejects hard-coded chord labels in
+  user-facing string literals. The scan enumerates EVERY production module
+  under `src/tui/**` recursively (`src/tui/keybindings/**` included), plus `src/index.ts`, `src/commands.ts` and `src/tui-app.ts`, and
+  exempts only individual POSITIONS with a documented rationale: fork
+  editor-level keys (Ctrl+Home/End), the keybinding authority's
+  machine-readable vocabulary (the canonical KeyId grammar tables, the
+  KeyId→label map, the pi-tui binding presets, the shared terminal-ambiguous
+  key inventory) and the diagnostics that NAME a fixed key. Each authority
+  exemption is scoped to its OWNING FILE and its EXACT trimmed line, so it
+  fails closed — editing that line, appending a label to it, or reusing the
+  fragment in another module drops the exemption and the gate re-flags it.
+  Its host-interaction chord scan follows the owner: the TuiApp facade
+  remainder plus `src/tui/interaction/approval-runtime.ts`, while focused
+  components keep their own fixed keys.
+
+## Convergence invariants
+
+The keybinding implementation follows these convergence invariants:
+
+**Canonical physical identity.** `esc`/`escape`, `return`/`enter` and
+modifier order collapse to ONE key identity at every rule entry point
+(`src/tui/keybindings/key-identity.ts`) — aliases can never bypass conflict,
+leader collision or dedup.
+
+**Single effective rule model.** The keymap compiles `declared` rules,
+dedupes same-action canonical keys, deactivates same-priority conflicts,
+and shadows lower-priority overlapping rules. Only `effective` rules
+feed the resolver, the host reservation, the editor submit sync, the
+leader availability check and the read model — `runtime == /help ==
+/keybindings == footer` by construction. No fabricated builtin
+fallback; a guard no-op stays host-owned; a genuinely declined host
+action (pasteMedia with no handler) falls through to the editor/plugin
+remainder exactly once.
+
+**Editor-owned submit as a first-class rule.** `app.input.submit` keeps
+the fork editor's execution semantics while participating in the unified
+model (canonical identity, dedupe, conflict, shadow, fail-soft, read
+model) via its owner/effective state.
+
+**Leader availability.** Escape completions are parser-rejected;
+zero-effective leaders create no machine; completions obey the action's
+context predicate (`canActivate`); direct/leader/remap are blocked in
+viewers alike.
+
+**Semantic interrupt ≠ physical Escape.** Only the physical Escape key
+owns the editor Escape seams; a remapped interrupt goes straight to the
+semantic core. The fixed viewer close stays independent.
+
+**Reserved actions.** Unimplemented session/model actions are
+`configurable: false` + `availability: 'reserved'` — never bindable
+no-ops.
+
+**Remapped interrupt is semantic.** Only the physical Escape key runs
+the editor Escape seams; a remapped interrupt key goes straight to the
+semantic core AND keeps its own consecutive-press idle semantics (its
+first press does not disarm its own double-action window; an intervening
+non-trigger key does). Shift+Enter can never be bound to submit (the
+fork editor's fixed newline key — parser-rejected, aliases included).
+
+**Canonical identity is case-insensitive everywhere.** `canonicalizeKeyId`
+lowercases before the alias map (`ESC`→`esc`→`escape`,
+`ctrl+RETURN`→`ctrl+enter`), named keys canonicalize to lowercase
+(`pageUp`→`pageup`, displayed as `PageUp` — the runtime parser
+lowercases, the fork's matchesKey is case-insensitive), config parsing
+accepts either named-key casing, and the registry canonicalizes the
+plugin NormalizedKey shape at register/storage/lookup (including the
+reserved-key check, which runs AFTER canonicalization so `esc`/`return`
+registrations are rejected as the reserved `escape`/`enter`).
+
+**Legacy terminal collisions are rejected everywhere.** `ctrl+[` (Esc),
+`ctrl+j`/`ctrl+m` (Enter), `ctrl+i` (the Tab byte — `matchesKey('\t',
+'ctrl+i')` is true, so a Host binding fires on Tab presses on legacy
+terminals), `ctrl+h` (the Backspace byte) and `ctrl+_`/`ctrl+-` (ONE
+0x1f byte — the fork's rawCtrlChar maps Ctrl+- to the same 31 as
+Ctrl+_, so both spellings are rejected, round-16 finding) and
+`ctrl+backspace` (raw 0x08 is Ctrl+Backspace on Windows Terminal but
+plain Backspace on legacy/tmux — the fork's matchesRawBackspace branches
+on the session, round-20 finding) are rejected
+as direct bindings, leader prefixes and leader completions — a binding
+indistinguishable from a fixed key on legacy terminals is unsupported,
+never a warning.
+
+**Dynamic plugin lifecycle + edge hardening.** Plugin keybinding rules
+resync on every registry register/dispose (subscribe), plugin rule ids
+are namespaced (`plugin:…`) so they can never deactivate a host rule,
+the manager's leaderTimeoutMs is applied, and stop() cancels a pending
+leader + clears the interrupt double-action window. The host editor
+submits ONLY through the synced `tui.input.submit` binding — a disabled
+submit never fires on Enter or LF (LF is a newline).
+
+**The Stable plugin boundary is capability-enforced (round 12).** The
+registry REJECTS at registration: (a) any action string outside the
+public `TuiAction` set (the runtime whitelist `TUI_ACTIONS` — a
+JS/`as any` plugin can never register `app.exit.request` and reach the
+Host dispatcher), (b) TEXT-PRODUCING keys — bare letters, digits,
+symbols and the spacebar, WITH OR WITHOUT Shift (round-17 finding:
+Shift+A is the raw `A` byte on legacy terminals and `a`+shift on Kitty,
+so the old shift-means-chord guard let a plugin steal typing on some
+terminals; the shared `isTextProducingKeyId` policy treats shift-only
+printables as text on every protocol — the router and the registry
+agree, and the user config parser rejects them too), (c) non-grammar
+key names (the runtime parser can never produce them — `f13`,
+arbitrary strings — round-17 finding), (d) the legacy
+C0 collisions — the registry shares the config parser's terminal-
+ambiguous inventory (`TERMINAL_AMBIGUOUS_KEY_IDS` / isTerminalAmbiguous-
+KeyId), so `ctrl+i`/`ctrl+h`/`ctrl+_`/`ctrl+-`/`ctrl+backspace`/
+`ctrl+[`/`ctrl+j`/`ctrl+m` registrations are rejected too (on a legacy
+terminal the raw byte is Tab/Backspace/0x1f/Esc/Enter — the router's
+normalized plugin lookup could never match it; the old "a plugin may
+claim Ctrl+J" exception is gone, round-13/16/20 findings), and (e) FORK
+EDITOR-owned keys (round-19 finding): Tab, arrows, Home/End,
+PageUp/PageDown, Backspace/Delete, word-moves, kill/yank/undo,
+Shift+Enter — the InputRouter's editorAccepts probe claims the editor's
+whole binding set on every keystroke, so such a registration would be
+an advertised-but-dead rule that even disabled a colliding leader; the
+registry shares the single `EDITOR_OWNED_KEY_IDS` inventory (the
+submit pre-submit set derives from it). The owner-aware
+dispatcher NEVER routes a plugin-owner winner into the
+AppActionDispatcher: only 'host' winners execute Host-private actions,
+'editor' winners go to the fork editor, and 'plugin' winners continue to
+the Stable plugin remainder (`onExtensionAction`). A leader prefix that
+equals a LIVE plugin key disables the leader machine with a diagnostic
+(the leader feeds before the plugin stage — never a silent swallow;
+same fail-soft as a host-key collision).
+
+**Owner-aware winner selection (round 9).** All owners (host/editor/
+plugin) compete in the resolver on equal footing; the resolution carries
+the winner's OWNER and the app routes execution by it ('editor' → the
+fork editor, never the host dispatcher). `hostResolves` is winner-based,
+so `submit: ctrl+s` really submits and NEVER steers, and the read model
+agrees (`/keybindings` shows Ctrl+S under submit only). A submit remap
+onto a fork-editor pre-submit key (tab/backspace/Ctrl+A/E/U/K/W/Y/C/D/
+Home/End/…) is parser-rejected (it could never fire). A leader sequence
+never clears the direct submit keys — `submit: ['ctrl+z', '<leader>s']`
+keeps both triggers; only a truly leader-only override removes Enter.
+The canonical identity lowercases single-character bases too (`ctrl+A`
+≡ `ctrl+a` — one key, conflict-detected), and all policy checks run
+AFTER canonicalization (`SPACE`/`Space` are printable and rejected).
+The read model is ONE projection: `keysFor`/`keyHint`/
+`editorSubmitKeysFor`/`snapshot` all render the same visible rules (a
+working submit remap never leaves the replaced Enter advertised), and a
+CONDITIONAL top claim never permanently hides its context fallback.
+
+## Keyboard Shortcuts Editor
+
+`/help` remains the key-first, read-only help surface. `/keybindings` is the
+separate action-first editor: it groups definitions into non-selectable
+category sections, searches labels/descriptions/action IDs/categories/current
+keys/default keys, and marks `*` customized, `!` conflicts, `Unbound`,
+`Disabled`, fixed, and reserved actions. A standalone leader-key row also
+exposes the optional global leader key.
+
+The editor is client-local presentation and input handling. It reads and writes
+only through `TuiSettingsConfig.get()`/`replace()`, preserves the complete
+settings document, and projects the exact parsed candidate into
+`HostKeybindingManager` only after a successful write. A recorder accepts one
+raw terminal key, parses it with `parseKey`, canonicalizes it to `KeyId`, and
+reuses the shared runtime/text/terminal ambiguity policy. Interactive direct
+and leader mutations are preflighted against the live plugin rules and
+conflict diagnostics before persistence. Since `replace()` is a whole-document
+operation without a compare-and-swap token, all TUI settings writers use the
+shared transaction queue (including `/settings` and `/keybindings reset`), so
+editor controllers sharing a settings port serialize their `get` → candidate →
+`replace` transactions; late panel callbacks are generation-guarded and cannot
+repaint a disposed editor. Untouched builtin bindings that are still effective
+are selectable in the Detail view: `Add shortcut` materializes surviving defaults together with
+the new key; shadowed defaults remain reference-only, while replacing or
+removing one surviving default preserves its siblings.
+Once an action has an explicit user declaration, the unified override contract
+still applies. Safe mode makes the entire editor read-only. Ordinary recording cancels on
+`Esc`; the direct Host interrupt recorder uses a short double-press window
+where one `Esc` cancels and two Escape press events assign physical Escape.
+Repeats and releases do not count, and there is no single-letter Escape
+shortcut. Physical Escape is never available to ordinary actions.
+Context-gated composition affordances are labeled separately from ordinary
+configured bindings (for example, `Down (conditional)` for the task browser).
+
+`/settings` contains one `Keyboard shortcuts` launcher whose submenu uses the
+same controller and editor component. The diagnostic verbs
+`/keybindings conflicts`, `/keybindings reload`, and `/keybindings reset` stay
+available for inspection and recovery; no settings watch callback is used.

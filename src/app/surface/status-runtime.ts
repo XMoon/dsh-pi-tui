@@ -169,7 +169,7 @@ export interface StatusRuntimeDeps {
     } | undefined
   }
   /** The diagnostics channel for OWNED async operations (the permission
-   *  cycle's runOwned settlement; see docs/failure-model.md). */
+   *  cycle's runOwned settlement; see docs/architecture/failure-model.md). */
   readonly diag: Diag
   /** The resolved CLIENT working directory (a composition prerequisite). */
   readonly clientCwd: string
@@ -434,7 +434,7 @@ export function createStatusRuntime(deps: StatusRuntimeDeps): StatusRuntime {
    * `refreshTerminalCwd` publishes the terminal-local cwd and fails closed on
    * Remote. The frozen F6 plan §10.12 line "Remote Host cwd never becomes
    * Client terminal title cwd" conflated the two; the F6 plan-owner ruling
-   * settled it in favour of this contract (see `docs/architecture.md`).
+   * settled it in favour of this contract (see `docs/architecture/overview.md`).
    */
   const refreshTerminalTitle = (): void => {
     deps.updateTerminalTitle({
@@ -918,7 +918,7 @@ export function createStatusRuntime(deps: StatusRuntimeDeps): StatusRuntime {
       const index = current === undefined ? -1 : names.indexOf(current)
       const next = names[(index + 1) % names.length] ?? names[0]
       if (next === undefined || next === current) return
-      // The gesture is an OWNED async operation (docs/failure-model.md): one
+      // The gesture is an OWNED async operation (docs/architecture/failure-model.md): one
       // runOwned settlement, never a bare discard. Every terminal branch
       // re-checks BOTH owner identities after the await: the scope (a TUI
       // owner commit) AND the transport token (a Connection/binding
