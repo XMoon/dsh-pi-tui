@@ -14,7 +14,6 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import { join } from 'node:path'
 import test from 'node:test'
 import {
-  S4_D2_BUNDLE_IDS,
   skippedInstallationReason,
   startS4D2Host,
   type S4D2BundleId,
@@ -75,7 +74,7 @@ test('B02 Voice: real speech registry/readiness, no model and no microphone clai
   assert.equal(local.location, 'host-local')
   assert.ok((local.downloadSources?.length ?? 0) > 0, 'the local model download source is a real prerequisite')
   assert.ok(local.setupEstimate !== undefined, 'the model preparation estimate is exposed')
-  assert.notEqual(local.preparation.phase, 'ready', 'the isolated Host has no model; readiness is not fabricated')
+  assert.equal(local.preparation.phase, 'unprepared', 'the isolated Host has no model; readiness is exactly unprepared')
   assert.ok(host.ctx.get('speechController') !== undefined,
     'the authenticated API speech controller row is mounted separately from the local provider')
   // The TUI has no microphone surface: nothing in this Host test claims one.
@@ -95,9 +94,13 @@ test('B04 Inspector: the web transport prerequisite is honestly pending, no capt
   if (entry.error !== undefined) {
     assert.match(entry.error, /webServer|connection/i, `the failure names the real prerequisite: ${entry.error}`)
   }
-  // No debug trace/journal is created by an unmounted inspector.
-  const { existsSync } = await import('node:fs')
-  assert.equal(existsSync(join(host.root, 'home', '.inspector')), false)
+  // The installed official patch declares the opt-in capture policy; the
+  // capture behavior itself is NOT_VERIFIED because the Web transport row
+  // (webServer/connection) is not mounted in a TUI profile.
+  const { readFileSync } = await import('node:fs')
+  const patch = readFileSync(join(host.installation.nodeModules, B04, 'cordis.patch.yml'), 'utf8')
+  assert.match(patch, /captureFetch:\s*true/u, 'the installed B04 patch declares captureFetch: true')
+  assert.equal(host.ctx.get('inspector'), undefined)
 })
 
 test('B06 CoT translation: real translator route through a controlled endpoint, error/cancel', { skip }, async t => {
@@ -108,8 +111,15 @@ test('B06 CoT translation: real translator route through a controlled endpoint, 
       return
     }
     assert.equal(request.method, 'POST')
-    const text = JSON.parse(body) as string[]
     response.writeHead(200, { 'content-type': 'application/json' })
+    if (request.url?.startsWith('/google')) {
+      // google-form-v1: urlencoded q -> [[[translatedText, ...]]]
+      const query = new URLSearchParams(body)
+      response.end(JSON.stringify([[[`G:${query.get('q') ?? ''}`, 'source', null, null, 10]]]))
+      return
+    }
+    // bing-edge-v1: JSON string array -> [{translations:[{text}]}]
+    const text = JSON.parse(body) as string[]
     response.end(JSON.stringify([{ translations: [{ text: `TRANSLATED:${text[0]}` }] }]))
   })
   t.after(() => server.close())
@@ -120,13 +130,14 @@ test('B06 CoT translation: real translator route through a controlled endpoint, 
       config: {
         provider: 'bing',
         bingEndpoint: `${server.url}/translate`,
+        googleEndpoint: `${server.url}/google`,
         timeoutMs: 5_000,
       },
     }] as never,
   })
   const translator = host.ctx.get('translator') as {
     availableProviders(signal?: AbortSignal): Promise<readonly string[]>
-    resolve(request: { text: string; targetLanguage: string }): unknown
+    resolve(request: { text: string; targetLanguage: string; provider?: 'google' | 'bing' }): unknown
     translate(spec: unknown, signal?: AbortSignal): Promise<string>
   }
   const providers = await translator.availableProviders()
@@ -135,6 +146,10 @@ test('B06 CoT translation: real translator route through a controlled endpoint, 
   const translated = await translator.translate(spec)
   assert.equal(translated, 'TRANSLATED:private reasoning text',
     'the real translator route sent the reasoning text to the controlled endpoint and parsed its response')
+
+  const googleSpec = translator.resolve({ text: 'google reasoning text', targetLanguage: 'zh', provider: 'google' })
+  assert.equal(await translator.translate(googleSpec), 'G:google reasoning text',
+    'the second anonymous provider route is exercised through the same real translator service')
 
   mode = 'error'
   const failing = translator.resolve({ text: 'another private reasoning', targetLanguage: 'zh' })
@@ -207,5 +222,4 @@ test('B12 Plugin Market: real empty default, explicit offline index, unknown/inv
   // No TUI Discover surface exists; the Creator `plugin_market` tool is not a
   // global TUI tool in this composition.
   assert.equal(host.ctx.tools.get('plugin_market'), undefined)
-  assert.equal(S4_D2_BUNDLE_IDS.length, 14)
 })

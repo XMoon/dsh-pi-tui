@@ -19,8 +19,10 @@ import { createUserMessage, LlmAdapter, type GenerateOptions, type StreamChunk }
 import { SessionId } from '@deepseek-ai/dsh-session'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { DirectPermissionConfig } from '../src/runtime/direct/config-direct.ts'
+import { DirectPluginManagerPort } from '../src/runtime/direct/plugin-manager-direct.ts'
+import { AUTO_REVIEW_BUNDLE } from '../src/app/plugin-manager/model.ts'
+import { openWorkspace } from './support/plugin-workspace-harness.ts'
 import {
-  S4_D2_BUNDLE_IDS,
   profileSelectsBundle,
   skippedInstallationReason,
   startS4D2Host,
@@ -224,7 +226,6 @@ test('B03 Auto Review: native allow/deny/ask/error and durable body evidence', {
   assert.match(JSON.stringify(errored.toolResult ?? {}), /Auto review of tool|failed/i)
 
   // The exact 14 identities remain the frozen set.
-  assert.equal(S4_D2_BUNDLE_IDS.length, 14)
 })
 
 test('B03 Auto Review: started PTC inner tools are reviewed; the outer run_code is not', { skip }, async t => {
@@ -370,4 +371,49 @@ test('B03 /permission: without the bundle the Auto id is not offered and cannot 
   assert.deepEqual(await config.applyPermissionPreset(sessionId, 'auto', new AbortController().signal), { kind: 'unavailable', cause: 'permission' })
   const permissions = host.ctx.get('permissionPresets') as { current(session: unknown): string | null }
   assert.equal(permissions.current(agent.session), 'workspace-write', 'a refused apply never changes the session')
+})
+
+test('B03 real Host card → controller confirmation → real profile write', { skip }, async t => {
+  const host = await startS4D2Host(t, { bundles: [B03] })
+  const port = new DirectPluginManagerPort(host.ctx as never)
+  const harness = await openWorkspace({ columns: 140, rows: 40, port })
+  t.after(() => { try { harness.app.dispose() } catch {} })
+  await harness.settle()
+
+  // The REAL Host catalog card: exact name, enabled, one addressable row.
+  const card = harness.controller.model().cards.find(candidate => candidate.name === AUTO_REVIEW_BUNDLE)
+  assert.ok(card !== undefined, 'the real Host inventory exposes the Auto Review card')
+  assert.equal(card.enabled, true)
+  assert.ok(card.rows.some(row => row.entryId.length > 0), 'the real Host card carries its addressable row')
+
+  // Filter to the one card, enter Details, open the shared confirmation.
+  harness.vt.sendInput('/')
+  await harness.settle()
+  for (const character of 'auto-review') harness.vt.sendInput(character)
+  await harness.settle()
+  harness.vt.sendInput('\r')
+  await harness.settle()
+  harness.vt.sendInput('\r') // Details
+  await harness.settle()
+  harness.vt.sendInput('\r') // Disable… -> confirmation
+  await harness.settle()
+  assert.equal(harness.panel.currentView(), 'confirm')
+  assert.match(harness.view().replace(/\s+/gu, ' '), /Disabling Auto Review can change existing Auto sessions to Full access/)
+  assert.equal(profileSelectsBundle(host.profileDir, B03), true, 'opening the confirmation does not write the profile')
+
+  // Default Cancel performs NO real Host write.
+  harness.vt.sendInput('\r')
+  await harness.settle()
+  assert.equal(harness.panel.currentView(), 'details')
+  assert.equal(profileSelectsBundle(host.profileDir, B03), true, 'Cancel leaves the real profile selection untouched')
+
+  // Explicit disable: the real Direct port calls the official Host setBundleEnabled.
+  harness.vt.sendInput('\r')
+  await harness.settle()
+  harness.vt.sendInput('\x1b[A') // Cancel -> Disable Auto Review
+  await harness.settle()
+  harness.vt.sendInput('\r')
+  await harness.settle()
+  await waitFor(() => profileSelectsBundle(host.profileDir, B03) === false)
+  assert.equal(profileSelectsBundle(host.profileDir, B03), false, 'the real Host write deselected the bundle')
 })

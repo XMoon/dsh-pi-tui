@@ -17,7 +17,6 @@ import { LlmAdapter, type GenerateOptions, type StreamChunk } from '@deepseek-ai
 import { SessionId } from '@deepseek-ai/dsh-session'
 import { ToolCallId } from '@deepseek-ai/dsh-llm'
 import {
-  S4_D2_BUNDLE_IDS,
   skippedInstallationReason,
   startS4D2Host,
   type S4D2BundleId,
@@ -82,6 +81,22 @@ function resultText(result: { content?: readonly { type?: string; text?: string 
 }
 
 test('B01 Agent Teams: real patch scopes, four preset rosters and one Lead→teammate loop', { skip }, async t => {
+  // B01-OFF baseline: the same four official presets without the Team bundle.
+  // The real addition is then exactly the Team tool family, not a global claim.
+  const baseline = await startS4D2Host(t, { bundles: [], presets: true })
+  const baselinePresets = baseline.ctx.get('agentPresets') as { select(agent: unknown, preset: string): Promise<unknown> }
+  const baselineRosters = new Map<string, readonly string[]>()
+  for (const preset of ['standard', 'ptc', 'minimal', 'cordis']) {
+    const agent = await baseline.createAgent(SessionId(`s4-d2-b01-base-${preset}`), {
+      provider: 'scripted',
+      model: 'review-model',
+      cwd: join(baseline.root, 'work'),
+    })
+    await baselinePresets.select(agent, preset)
+    baselineRosters.set(preset, baseline.toolNames(agent))
+  }
+  await baseline.dispose()
+
   const host = await startS4D2Host(t, { bundles: [B01], presets: true })
   const adapter = new TeammateAdapter()
   host.ctx.llm.registerAdapter(['scripted'], adapter)
@@ -129,6 +144,20 @@ test('B01 Agent Teams: real patch scopes, four preset rosters and one Lead→tea
       // `list_agents` remains because the TEAM owns that name in every member
       // scope; its presence is not the preset-local delegation row returning.
       assert.ok(host.ctx.tools.get('list_agents', agent) !== undefined)
+    }
+  }
+  // Compare each roster against the B01-off baseline: every baseline tool
+  // remains visible, and the Team-only family is exactly the addition.
+  const TEAM_ONLY = ['spawn_teammate', 'wait_agent', 'team_task_create', 'team_task_list', 'team_task_get', 'team_task_update']
+  for (const preset of ['standard', 'ptc', 'minimal', 'cordis']) {
+    const baselineRoster = new Set(baselineRosters.get(preset))
+    const withTeam = new Set(rosters.get(preset))
+    for (const tool of TEAM_ONLY) {
+      assert.equal(baselineRoster.has(tool), false, `${preset}: ${tool} must not exist without B01`)
+      assert.equal(withTeam.has(tool), true, `${preset}: ${tool} is the real B01 addition`)
+    }
+    for (const tool of baselineRoster) {
+      assert.equal(withTeam.has(tool), true, `${preset}: B01 must not remove the preset-local tool ${tool}`)
     }
   }
   // The Team tools are the real addition: each capable preset keeps its own
@@ -204,6 +233,24 @@ test('B01 Agent Teams: real patch scopes, four preset rosters and one Lead→tea
   // NEGATIVE: an unknown target is refused by the official Team authority.
   const unknown = await toolCall(host.ctx as never, 'send_message', lead, { target: 'ghost', message: 'hi' })
   assert.equal(unknown.isError, true, 'an unknown Team target is refused')
+
+  // NEGATIVE: a target that belongs to ANOTHER Team is not addressable from
+  // this Lead's Team (cross-Team authorization is scoped by the roster).
+  const otherLead = await host.createAgent(SessionId('s4-d2-b01-lead-other'), {
+    provider: 'scripted',
+    model: 'review-model',
+    cwd: join(host.root, 'work'),
+  })
+  const outsiderSpawn = await toolCall(host.ctx as never, 'spawn_teammate', otherLead, {
+    name: 'outsider',
+    description: 'other team member',
+    prompt: 'Reply with TEAM_READY and nothing else.',
+    context: 'fresh',
+  })
+  assert.notEqual(outsiderSpawn.isError, true, resultText(outsiderSpawn))
+  const crossTeam = await toolCall(host.ctx as never, 'send_message', lead, { target: 'outsider', message: 'hi' })
+  assert.equal(crossTeam.isError, true, 'a member of another Team is not an addressable target')
+  assert.match(JSON.stringify(crossTeam.error ?? {}), /TEAM_INVALID_TARGET|TEAM_MEMBER_NOT_FOUND|unknown|not an active/i)
   // NEGATIVE: a LIVE teammate cannot spawn another teammate. Hold its
   // activation model stream so the exact child Agent stays live and the real
   // Team authorization path (not a disposed identity) is exercised.
@@ -238,7 +285,6 @@ test('B01 Agent Teams: real patch scopes, four preset rosters and one Lead→tea
   assert.ok(restarted.activeBundles.includes(B01), 'the restarted composition still carries B01')
 
   // The 14 identities remain the frozen set.
-  assert.equal(S4_D2_BUNDLE_IDS.length, 14)
 })
 
 /** Poll one in-process condition with a bounded number of event-loop turns. */

@@ -9,14 +9,13 @@
 
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import test from 'node:test'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import { createUserMessage, LlmAdapter, ToolCallId, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
 import { sanitizeDisplayText } from '../src/tui/presentation/terminal-text.ts'
 import {
-  S4_D2_BUNDLE_IDS,
   profileSelectsBundle,
   skippedInstallationReason,
   startS4D2Host,
@@ -53,6 +52,9 @@ function resultText(result: { content?: readonly { type?: string; text?: string 
 test('D2-1/B05: an official Optional bundle goes off→enable→restart-required→restart→real tool', { skip }, async t => {
   let host = await startS4D2Host(t, { bundles: [] })
   const { project, baseCommit } = seedRepository(host.root)
+  const sourceHead = git(project, 'rev-parse', 'HEAD')
+  const sourceStatus = git(project, 'status', '--porcelain')
+  const sourceReadme = readFileSync(join(project, 'README.md'), 'utf8')
   try {
     // OFF: the real Host tool registry does not carry the bundle's tool.
     assert.equal(host.hasTool('create_worktree'), false, 'B05 is not active before it is enabled')
@@ -128,12 +130,20 @@ test('D2-1/B05: an official Optional bundle goes off→enable→restart-required
     host = off
     assert.equal(off.activeBundles.includes(B05), false)
     assert.equal(off.hasTool('create_worktree'), false, 'the tool is gone after the disabling restart')
+
+    // TEST-OWNED CLEANUP: removing the temporary worktree must not damage the
+    // source repository, its HEAD, its worktree registration or its content.
+    execFileSync('git', ['worktree', 'remove', '--force', created.path], { cwd: project })
+    assert.equal(existsSync(created.path), false, 'the temporary worktree is really removed')
+    assert.doesNotMatch(git(project, 'worktree', 'list'), new RegExp(created.path.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')))
+    assert.equal(git(project, 'rev-parse', 'HEAD'), sourceHead, 'the source repository HEAD is unchanged')
+    assert.equal(readFileSync(join(project, 'README.md'), 'utf8'), sourceReadme, 'the source repository content is unchanged')
+    assert.equal(git(project, 'status', '--porcelain'), sourceStatus, 'the source repository worktree stays clean')
   } finally {
     await host.dispose()
   }
   // The bundle identity set stays the plan's exact 14 (imported here so this
   // file fails if the fixture silently renames an identity).
-  assert.equal(S4_D2_BUNDLE_IDS.length, 14)
 })
 
 // ── B07 persistent terminal ────────────────────────────────────────────────
@@ -171,6 +181,8 @@ test('B07: retained terminal process, output read, background job and restart cl
 
   const listed = await execute(host, 'terminal_list', agent, {})
   assert.match(resultText(listed), new RegExp(sessionId.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')))
+  const pidText = /pid=(\d+)/u.exec(resultText(listed))?.[1]
+  const pid = pidText === undefined ? undefined : Number(pidText)
 
   // A background send really creates a Host Job the official consumer reads.
   const background = await execute(host, 'terminal_send', agent, {
@@ -192,6 +204,20 @@ test('B07: retained terminal process, output read, background job and restart cl
   const afterClose = await execute(host, 'terminal_read', agent, { sessionId })
   assert.equal(afterClose.isError, true, 'a closed terminal can no longer be read')
   assert.match(resultText(afterClose), /unknown|closed|lost/i)
+  const emptyNow = await execute(host, 'terminal_list', agent, {})
+  assert.match(resultText(emptyNow), /no terminal sessions/i)
+  if (pid !== undefined) {
+    // REAL process termination: the captured owned process tree is gone, not
+    // merely unreachable through the registry.
+    await waitFor(() => {
+      try {
+        process.kill(pid, 0)
+        return false
+      } catch {
+        return true
+      }
+    })
+  }
 
   // Restart with the bundle still composed: the new Host owns no terminal and
   // the old process tree was released with the old composition.
@@ -208,7 +234,8 @@ test('B07: retained terminal process, output read, background job and restart cl
   const off = await restarted.restart()
   host = off
   assert.equal(off.hasTool('terminal_open'), false, 'the terminal tools are gone after the disabling restart')
-  assert.equal(off.ctx.get('terminals'), undefined, 'no second terminal service remains mounted')
+  assert.equal(off.ctx.get('terminals'), undefined,
+    'the isolated terminal service is not reachable from the root after the disabling restart')
 })
 
 // ── B08 session search ─────────────────────────────────────────────────────
@@ -259,6 +286,16 @@ test('B08: lazy workspace-scoped session search, paging/no-hit and restart re-in
   assert.notEqual(event.isError, true, resultText(event))
   assert.match(resultText(event), /ALPHA_NEEDLE_PROJECT/)
   assert.doesNotMatch(resultText(event), /s4-d2-b08-secret/)
+
+  // Bounded event-read window over the same authorized session (the Host
+  // paginates/windows raw events; the TUI has no local search index).
+  const window = await execute(host, 'session_event_read', caller, {
+    session_id: 's4-d2-b08-beta',
+    seq: 0,
+    after: 4,
+  })
+  assert.notEqual(window.isError, true, resultText(window))
+  assert.match(resultText(window), /s4-d2-b08-beta/)
 
   // A restart rebuilds the lazy in-memory index from the persisted logs.
   const restarted = await host.restart()

@@ -59,6 +59,9 @@ after-frames can be regenerated the same way.
 | Settings | `120×40` | wide three-pane, L2 detail focused (commit status visible) |
 | Settings | `80×10` | short screen, minimum chrome |
 | Settings | `44×20` | narrow single pane, L2 detail |
+| Plugin Manager | `120×40` | B03 Auto Review danger confirmation, Cancel default |
+| Plugin Manager | `80×10` | B03 confirmation: consequence wraps, pinned choices, scroll hint |
+| Plugin Manager | `44×20` | B03 confirmation: consequence and choices fit |
 | Job | `120×40` | Output page, running |
 | Job | `120×40` | Output page, failed + gap + settled |
 | Job | `120×40` | Command page |
@@ -498,8 +501,131 @@ Plugin Manager page as `Enter` (the page reported the live Host catalog:
 `22 plugins · 3 enabled`), `Esc` returned to `Settings · Categories` with
 `> Plugins` selected, and `Enter` opened the same page again. Live resizes to
 `80×24` and `44×20` matched the captured frames (the narrow projection painted
-no Rows pane). Light/custom themes and the `80×10` real-terminal case were not
-exercised in this tmux pass; their headless cell/colour evidence is above.
+no Rows pane). The `80×10` short screen was also run from this real terminal and
+painted the same cells as the `80×10` frame above:
+
+```text
+Settings · Categories                                            2 editable rows
+Scope: TUI preferences · Refreshed 16:19 · Config Ready
+────────────────────────────────────────────────────────────────────────────────
+[Categories (4)]        Rows (1)
+  Appearance              Open Plugin Manager  Enter / Right
+  Display
+> Plugins
+  Other settings
+────────────────────────────────────────────────────────────────────────────────
+Up/Down select · Right open · Enter open · Esc close
+```
+
+Light/custom themes were not exercised in this tmux pass and stay `NOT_RUN`;
+their headless cell/colour evidence is above.
+
+
+### 3.9 B03 Auto Review — the shared dangerous confirmation (S4-D2 / D2-2)
+
+**AFTER — real output at this HEAD.** The same confirmation view is reached
+from the exact Auto Review bundle and from its addressable row; it is not a
+second overlay. The consequence text is fixed, Cancel is the default and no
+Host write happens before the explicit primary choice.
+
+`120×40` (real tmux, dark theme):
+
+```text
+Plugins · Auto Review                                                                             22 plugins · 4 enabled
+Auto Review safety confirmation — no Host change happens before the explicit choice
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+Disable Auto Review?
+Disabling Auto Review can change existing Auto sessions to Full access. Auto Review is not a sandbox. Continue?
+The official Host teardown moves existing Auto sessions to Full access; Auto Review is not a sandbox.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+  Disable Auto Review
+> Cancel
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+Enter confirm · Esc cancel
+```
+
+`80×10` (real tmux: the complete consequence wraps above the pinned choices;
+`PgUp/PgDn details` scrolls only the explanation):
+
+```text
+Plugins · Auto Review                                               4/22 enabled
+Auto Review safety confirmation — no Host change happens before the explicit ch…
+────────────────────────────────────────────────────────────────────────────────
+Disable Auto Review?
+Disabling Auto Review can change existing Auto sessions to Full access. Auto
+Review is not a sandbox. Continue?
+  Disable Auto Review
+> Cancel
+────────────────────────────────────────────────────────────────────────────────
+Enter confirm · PgUp/PgDn details · Esc cancel
+```
+
+`44×20` (real tmux: the whole consequence and both choices fit):
+
+```text
+Plugins · Auto Review           4/22 enabled
+Auto Review safety confirmation — no Host c…
+────────────────────────────────────────────
+Disable Auto Review?
+Disabling Auto Review can change existing
+Auto sessions to Full access. Auto Review is
+not a sandbox. Continue?
+The official Host teardown moves existing
+Auto sessions to Full access; Auto Review is
+not a sandbox.
+
+
+
+
+
+
+  Disable Auto Review
+> Cancel
+────────────────────────────────────────────
+Enter confirm · Esc cancel
+```
+
+**Real-terminal record (2026-10-19, D2-2 candidate).** tmux 3.5a,
+`TERM=tmux-256color`, default auto-detected dark theme, terminal default
+monospace font, no physical GUI (no `GUI_PASS`). The TUI was launched from an
+isolated `DSH_HOME` profile that links this worktree and has the published
+`@deepseek-ai/dsh-experimental-auto-review@0.2.1-rc.2` profile package selected.
+At `120×40` `/plugins` → search `auto-review` → Details painted the real Host
+card (`Enabled Yes`, `Risk` warning) and `Disable…` opened the confirmation
+shown above; `Enter` on the default Cancel returned to Details with
+`Enabled Yes` (zero Host write). The same flow was captured at `80×10` and
+`44×20`; at `80×10` the pinned bar advertised `PgUp/PgDn details` and
+`Esc cancel` and the complete warning was readable. Light/custom themes were
+not run (`NOT_RUN`).
 
 
 ## 4. Job

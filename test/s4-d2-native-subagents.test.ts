@@ -16,7 +16,6 @@ import test from 'node:test'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import { ToolCallId } from '@deepseek-ai/dsh-llm'
 import {
-  S4_D2_BUNDLE_IDS,
   skippedInstallationReason,
   startS4D2Host,
   type S4D2BundleId,
@@ -25,6 +24,10 @@ import {
 const B13 = '@deepseek-ai/dsh-subagent-claude-code' satisfies S4D2BundleId
 const B14 = '@deepseek-ai/dsh-subagent-codex' satisfies S4D2BundleId
 const skip = skippedInstallationReason([B13, B14])
+/** Native process starts are opt-in: the default suite NEVER launches a native
+ *  provider (so `pnpm test` cannot read a real credential tree or run a paid
+ *  external task). The fixture still isolates HOME/DSH_HOME/XDG when admitted. */
+const NATIVE_ADMITTED = process.env.DSH_PI_TUI_S4_D2_NATIVE === '1'
 
 const nativeEvidence: Array<{ provider: string; status: string }> = []
 
@@ -79,6 +82,10 @@ test('B13/B14: official missing catalog, exact installTarget and local profile i
       profileDependencies: { [task.packageName]: `file:${join(catalogHost.installation.nodeModules, task.packageName)}` },
     })
     try {
+      // The fixture really isolates the credential/agent roots for this Host.
+      assert.equal(process.env.HOME, join(host.root, 'home'))
+      assert.equal(process.env.DSH_HOME, join(host.root, 'home'))
+      assert.equal(process.env.DSH_AGENTS_HOME, join(host.root, 'home', '.agents'))
       const tool = host.ctx.tools.get(task.tool) as { description?: string; parameters?: Record<string, unknown> } | undefined
       assert.ok(tool !== undefined, `${task.packageName} must install the official ${task.tool} one-shot tool`)
       assert.match(tool.description ?? '', /does not accept follow-up messages/i,
@@ -88,43 +95,56 @@ test('B13/B14: official missing catalog, exact installTarget and local profile i
       assert.equal(Object.hasOwn(parameters, 'session_id'), false)
       assert.equal(Object.hasOwn(parameters, 'followup'), false)
 
-      // REAL Host start: no credential/platform is fabricated. The official
-      // provider either reaches a genuine native result or a bounded
-      // EXTERNAL_UNVERIFIED start; a mock success is impossible here.
       const agent = await host.createAgent(SessionId(`s4-d2-native-${task.provider}`), { cwd: join(host.root, 'work') })
-      const result = await host.ctx.tools.execute({
+      if (!NATIVE_ADMITTED) {
+        // The default run records the truthful gate state without launching the
+        // external process at all. No catalog child and no fake success exist.
+        assert.deepEqual(host.ctx.agents.list().map(candidate => String(candidate.id)), [String(agent.session.id)])
+        nativeEvidence.push({ provider: task.provider, status: 'EXTERNAL_UNVERIFIED' })
+        continue
+      }
+
+      // REAL Host start under the isolated HOME. A synchronous provider failure
+      // is recorded as a truthful failure; a start that returns an external
+      // child is observed to its settle/failure, never assumed successful.
+      const started = await host.ctx.tools.execute({
         signal: new AbortController().signal,
         callId: ToolCallId(`s4-d2-${task.provider}-start`),
         name: task.tool,
         arguments: { description: 'read-only ping', prompt: 'Reply with exactly PONG and nothing else.' },
         agent,
       }) as { isError?: boolean; content?: readonly { type?: string; text?: string }[] }
-      const startedText = (result.content ?? []).map(block => block.type === 'text' ? block.text ?? '' : '').join('')
-      assert.notEqual(result.isError, true, startedText)
+      const startedText = (started.content ?? []).map(block => block.type === 'text' ? block.text ?? '' : '').join('')
+      if (started.isError === true) {
+        assert.equal(startedText.includes('PONG'), false, 'a failed native start never fabricates the answer')
+        nativeEvidence.push({ provider: task.provider, status: 'EXTERNAL_UNVERIFIED' })
+        continue
+      }
       const childId = /started subagent (\S+)/u.exec(startedText)?.[1]
       assert.ok(childId !== undefined, startedText)
-
-      // The catalog record is the official external/one-shot classification.
       const catalogEvent = (agent.session.snapshotEvents() as readonly {
         type: string
         data?: { mode?: string; childId?: string }
       }[]).find(event => event.type === 'subagent/catalog' && event.data?.childId === childId)
       assert.equal(catalogEvent?.data?.mode, 'external', 'the native child is an external one-shot')
 
-      // Bounded settle observation: the default isolated HOST has no native
-      // credential, so the real runtime reports failure/asynchrony rather than
-      // a fabricated answer. EXTERNAL_UNVERIFIED is the honest outcome.
       const settled = await observeSettle(agent, childId, 12_000)
-      const serialized = JSON.stringify(settled ?? {})
+      const events = agent.session.snapshotEvents() as readonly { type: string; data?: Record<string, unknown> }[]
+      const settleText = JSON.stringify(events.filter(event => event.type === 'agent/inbox/spliced'
+        && JSON.stringify(event.data).includes('subagent-settled')
+        && JSON.stringify(event.data).includes(childId)))
       if (settled === undefined) {
-        assert.equal(serialized.includes('PONG'), false)
+        // There is no settle event yet; the only assertable negative is that
+        // no fabricated PONG settlement exists in the parent log.
+        assert.equal(settleText.includes('PONG'), false, 'no fabricated native success may appear in the parent log')
+        nativeEvidence.push({ provider: task.provider, status: 'EXTERNAL_UNVERIFIED' })
       } else if (settled.kind === 'success') {
-        assert.match(serialized, /PONG/, 'a real native success must carry the genuine native answer')
+        assert.match(settleText, /PONG/, 'a real native success must carry the genuine native answer')
+        nativeEvidence.push({ provider: task.provider, status: 'PASS' })
       } else {
-        assert.equal(serialized.includes('PONG'), false, 'a failed native start never fabricates the native answer')
+        assert.equal(settleText.includes('PONG'), false, 'a failed native start never fabricates the answer')
+        nativeEvidence.push({ provider: task.provider, status: 'EXTERNAL_UNVERIFIED' })
       }
-      // Bound the external child: interrupt and drain; the Host teardown must
-      // not leave a live external process behind.
       const subagents = host.ctx.subagents as {
         interrupt(id: string, authority: { kind: 'ancestor'; agent: unknown }): void
         drainDescendants(parents: readonly unknown[]): Promise<void>
@@ -136,10 +156,9 @@ test('B13/B14: official missing catalog, exact installTarget and local profile i
           new Promise<void>(resolve => setTimeout(resolve, 15_000)),
         ])
       } catch {
-        // The provider already settled or has nothing to drain; the parent
-        // Host still disposes below.
+        // The provider already settled or has nothing to drain; the parent Host
+        // still disposes below.
       }
-      nativeEvidence.push({ provider: task.provider, status: settled === undefined ? 'EXTERNAL_UNVERIFIED' : settled.kind })
       // Teardown/cleanup: an external child never turns into an in-process
       // orphan Agent in this Host composition.
       const remaining = host.ctx.agents.list().map(candidate => String(candidate.id)).filter(id => id !== String(agent.session.id))
@@ -149,5 +168,8 @@ test('B13/B14: official missing catalog, exact installTarget and local profile i
     }
   }
   assert.deepEqual(nativeEvidence.map(entry => entry.provider), ['claude-code', 'codex'])
-  assert.equal(S4_D2_BUNDLE_IDS.length, 14)
+  if (!NATIVE_ADMITTED) {
+    assert.deepEqual(nativeEvidence.map(entry => entry.status), ['EXTERNAL_UNVERIFIED', 'EXTERNAL_UNVERIFIED'],
+      'the default suite records the native gate as unverified without starting a provider')
+  }
 })

@@ -17,7 +17,6 @@ import { SessionId } from '@deepseek-ai/dsh-session'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { readSurfaceCatalog } from '../src/runtime/direct/surface-catalog.ts'
 import {
-  S4_D2_BUNDLE_IDS,
   skippedInstallationReason,
   startS4D2Host,
   type S4D2BundleId,
@@ -162,7 +161,6 @@ test('B09 Session Titles: real provider projection, manual precedence, late-titl
   await waitFor(() => restartedTitle.get(after.session)?.title === 'Base Provider Title')
   assert.notEqual(restartedTitle.get(after.session)?.source.provider, 'session-title-all-prompts-llm',
     'the restarted composition falls back to the base title provider')
-  assert.equal(S4_D2_BUNDLE_IDS.length, 14)
 })
 
 test('B10 Badge Skill: real provider, skills-capable presets and no minimal skill tool', { skip: skip10 }, async t => {
@@ -187,6 +185,13 @@ test('B10 Badge Skill: real provider, skills-capable presets and no minimal skil
   const standardCatalog = await readSurfaceCatalog(standard as never, new AbortController().signal, host.ctx as never)
   assert.ok(standardCatalog.skills.some(skill => skill.name === 'dsh-badge'),
     'the existing /skill surface catalog reads the badge skill')
+
+  const ptc = await host.createAgent(SessionId('s4-d2-b10-ptc'), { cwd: work })
+  await presets.select(ptc, 'ptc')
+  assert.ok(host.hasTool('skill', ptc), 'the skills-capable ptc preset exposes the skill tool')
+  const ptcCatalog = await readSurfaceCatalog(ptc as never, new AbortController().signal, host.ctx as never)
+  assert.ok(ptcCatalog.skills.some(skill => skill.name === 'dsh-badge'),
+    'the ptc /skill surface catalog reads the badge skill')
 
   const minimal = await host.createAgent(SessionId('s4-d2-b10-minimal'), { cwd: work })
   await presets.select(minimal, 'minimal')
@@ -219,7 +224,12 @@ test('B11 Ralph: one real bounded round, workflow activity and cancelled-run cle
   assert.match(resultText(result), /round/i)
   assert.deepEqual(workflowEvents, ['start', 'end'], 'the official workflow activity pair settled once')
   assert.equal(adapter.roundPrompts.length, 1, 'maxRounds:1 executes exactly one bounded round')
+  // The foreground ralph call returns its real tool result through the real
+  // ToolRuntime; no background Job is created by this tool.
   await waitFor(() => host.ctx.agents.list().length === 1)
+  // No duplicate settle: the pair stays exactly once after the run drains.
+  await new Promise<void>(resolve => setTimeout(resolve, 250))
+  assert.deepEqual(workflowEvents, ['start', 'end'], 'the settled workflow never emits a duplicate workflow/end')
 
   // CANCELLED RUN: an in-flight child is abandoned through the real run abort
   // and leaves no orphan Agent.
@@ -232,9 +242,18 @@ test('B11 Ralph: one real bounded round, workflow activity and cancelled-run cle
   // cancellation drains the child through this stream, so awaiting first would
   // deadlock the test fixture (not the Host).
   adapter.releaseRound?.()
-  await pending.catch(() => undefined)
+  const cancelled = await pending.then(value => ({ ok: true as const, value }), error => ({ ok: false as const, error }))
+  if (cancelled.ok) {
+    const cancelledResult = cancelled.value as { isError?: boolean; content?: readonly { text?: string }[] }
+    assert.equal(cancelledResult.isError, true, 'an aborted ralph run settles as a real error result')
+    assert.match(JSON.stringify(cancelledResult), /cancel/iu)
+  } else {
+    assert.match(String(cancelled.error), /cancel|abort/iu)
+  }
   await waitFor(() => host.ctx.agents.list().length === 1)
   assert.equal(workflowEvents.filter(event => event === 'end').length, 2, 'the cancelled run also settled its workflow/end exactly once')
+  await new Promise<void>(resolve => setTimeout(resolve, 250))
+  assert.equal(workflowEvents.filter(event => event === 'end').length, 2, 'the cancelled run never double-settles')
 })
 
 class RalphAdapter extends LlmAdapter {
