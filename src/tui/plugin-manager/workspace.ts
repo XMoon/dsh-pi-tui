@@ -1354,7 +1354,20 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     if (plan.metaRows === 1) lines.push(...this.renderMeta(plan, plan.headerRows, targets))
     if (plan.ruleRows >= 1) lines.push(color.border('─'.repeat(plan.width)))
     const bodyTop = this.bodyTop(plan)
-    if (plan.bodyRows > 0) lines.push(...this.renderBody(plan, bodyTop, targets))
+    if (plan.bodyRows > 0) {
+      lines.push(...this.renderBody(plan, bodyTop, targets))
+    } else {
+      // No body row was painted, so no body-derived action is authorized by
+      // this frame. Revoke every painted permission and force a fresh visible
+      // selection when the body returns; `frameIsCurrent()` alone must not
+      // resurrect an old Approve/Disable/Remove from the previous frame.
+      this.paintedDetailSelectionVisible = false
+      this.paintedInstallActions = new Set()
+      this.paintedConfirmActions = new Set()
+      this.paintedConfirmActionValues = []
+      this.paintedConfirmScrollMax = 0
+      this.installSelection = Number.MAX_SAFE_INTEGER
+    }
     if (plan.ruleRows >= 2) lines.push(color.border('─'.repeat(plan.width)))
     if (plan.noticeRows === 1) lines.push(this.renderNotice(plan))
     if (plan.actionRows === 1) lines.push(this.renderActionBar(plan))
@@ -1730,6 +1743,11 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     if (install === undefined) return padBody([color.textDim('No install is open')], plan.bodyRows, plan.width)
     const pending = this.controller.approvableBuilds() !== undefined
     let actions = this.installActions()
+    // Paint the cursor with the FINAL in-range selection: the restored frame
+    // after a zero-row body must show which (safe) action Enter would dispatch.
+    if (actions.length > 0 && this.installSelection >= actions.length) {
+      this.installSelection = actions.length - 1
+    }
     let built = this.installLines(install, plan.width, actions)
     const layout = (rendered: typeof built): {
       actionsStart: number

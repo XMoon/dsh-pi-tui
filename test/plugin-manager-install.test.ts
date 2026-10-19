@@ -542,3 +542,45 @@ test('an unknown install reopens with its request id and reconciliation action',
   page.dispose()
   rejected.dispose()
 })
+
+test('a zero-row body revokes build-script approval until an explicit re-selection', async () => {
+  const { controller, installCalls, gate } = harness()
+  controller.beginManualInstall()
+  controller.inspect('pkg', null)
+  await tick()
+  controller.confirmInstall()
+  await tick()
+  gate.resolve(change({ application: 'failed', pendingBuilds: ['evil-pkg'] }))
+  await tick()
+  assert.equal(controller.installView()?.phase, 'failed')
+
+  let rows = 24
+  const page = new PluginManagerWorkspacePanel(controller, {
+    rows: () => rows,
+    columns: () => 80,
+    requestRender: () => {},
+    notice: () => undefined,
+    onCopy: () => {},
+  })
+  assert.match(page.render(80).join('\n'), /Approve and retry evil-pkg/)
+  rows = 2
+  page.render(80)
+  page.handleInput('\r')
+  await tick()
+  assert.equal(installCalls.length, 1, 'Enter on a zero-row install frame cannot approve')
+  assert.equal(controller.installView()?.phase, 'failed')
+
+  rows = 24
+  const restored = page.render(80).join('\n').replace(/\x1b\[[0-9;]*m/g, '')
+  assert.match(restored, /Approve and retry evil-pkg/)
+  assert.match(restored, /^> Back\s*$/mu, 'the restored selection is the safe last action, not Approve')
+  assert.equal(installCalls.length, 1)
+  page.handleInput('\x1b[A') // Back -> New install
+  page.handleInput('\x1b[A') // New install -> Check installation status
+  page.handleInput('\x1b[A') // Check -> Approve
+  page.render(80)
+  page.handleInput('\r')
+  await tick()
+  assert.equal(installCalls.length, 2, 'only the explicit re-selection approves')
+  page.dispose()
+})
