@@ -54,7 +54,7 @@ Host business coupling and the Direct → Remote migration are tracked separatel
 | `src/tui/components/transcript/**` | PiTui transcript mechanics (TS6: Focus/Activity cards, Context cluster/rows, rendered search highlight) |
 | `src/tui/panels/**` | TUI panels (task browser, history, approval dialog, output viewer) |
 | `src/tui/pickers/**` | TUI pickers, the picker adapters and the marquee/filter seam |
-| `src/tui/plugin-manager/panel.ts` | the concrete Plugin Manager terminal panel (TS4) |
+| `src/tui/plugin-manager/workspace.ts` | the concrete fullscreen Plugin Manager page (S4-D1), shared by `/plugins` and the first-level Settings Plugins category |
 | `src/domain/file-completion/**` | transport/UI-neutral file-completion query/ranking/discovery policy (TS8-A) |
 | `src/client/file-completion/**` | Client-local filesystem completion capability (`/attach`, `/image`, Save Location) (TS8-A) |
 | `src/tui/file-completion/**` | terminal trigger grammar + completion presentation/local pipeline (TS8-A) |
@@ -148,7 +148,7 @@ src/app/command/**   application command authority / lifecycle / execution
 src/tui/commands/**  terminal slash-command definition / presentation
 
 src/app/plugin-manager/**       Plugin Manager application state/policy/controller
-src/tui/plugin-manager/panel.ts concrete terminal panel (TS4), injected as a factory
+src/tui/plugin-manager/workspace.ts concrete fullscreen page (S4-D1), injected as a factory
 
 src/app/surface/**    application surface owner coordinating the mounted surface
 src/domain/status/**  the transport/UI-neutral status primitives it coordinates
@@ -398,7 +398,7 @@ owners:
 | `keybindings/` | `tui/keybindings/` (DONE — `src/keybindings/` is absent) | TS5 DONE |
 | `footer/` | `domain/footer/` + `tui/footer/` (DONE — `src/footer/` is absent) | TS5 DONE |
 | `notification/` | `domain/notification/` + `tui/notification/` (DONE — `src/notification/` is absent) | TS5 DONE |
-| `plugin-manager/` | `app/plugin-manager/` + `tui/plugin-manager/panel.ts` (DONE — `src/plugin-manager/` is absent) | TS3 + TS4 DONE |
+| `plugin-manager/` | `app/plugin-manager/` + `tui/plugin-manager/workspace.ts` (DONE — `src/plugin-manager/` is absent; S4-D1 replaced the old overlay page) | TS3 + TS4 + S4-D1 |
 | `status/` | `domain/status/` (DONE — `src/status/` is absent) | TS3 DONE |
 | `image/` | `domain/media/` (neutral vocabulary/failures/formatting) + `client/media/image/` (Client draft/intake/cache/loader) + `client/clipboard/read.ts` (clipboard read) + `app/submission/direct-image-*.ts` (Direct Host admission/model preflight) (DONE — `src/image/` is absent) | TS8-C DONE |
 | `attachment/` | `domain/media/` (neutral refs) + `client/media/attachment/` (Client draft/intake/source streaming) + `app/submission/direct-file-admission.ts` (the Direct Host `saveFileStream` sink) (DONE — `src/attachment/` is absent) | TS8-C DONE |
@@ -659,8 +659,9 @@ and split `src/app/surface/runtime.ts` into explicit application-level surface
 owners while `createSurfaceRuntime()` stays the one aggregate.
 
 TS4 finished that Plugin Manager relocation in both directions — the concrete
-terminal panel is now `src/tui/plugin-manager/panel.ts`, injected into the
-application through the narrow `PluginManagerPanelFactory` seam — retired
+terminal panel is now `src/tui/plugin-manager/workspace.ts` (S4-D1 replaced the
+old 76×28 overlay panel), injected into the application through the narrow
+`PluginManagerPanelFactory` seam — retired
 `src/components/**` into `src/tui/components/**`, and moved the seven remaining
 historical root TUI modules to their canonical layer paths:
 

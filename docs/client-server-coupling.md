@@ -865,26 +865,6 @@ Host-only catalog source
 - `definitionId` is provenance/discovery metadata ONLY — never authorization,
   trust, or a capability grant.
 
-## How to update this file
-
-1. A migration phase moves coupling into a semantic port: move the entry to
-   the port's row, update `scripts/client-boundary-baseline.json` (the gate
-   then stops flagging the relocated pattern), and record the phase in
-   `docs/client-server-migration.md`.
-2. New feature code must NOT appear here — the gate rejects it first.
-3. Keep the `HOST_SERVICES` list in `scripts/client-boundary-gate.mjs` in
-   sync with this inventory when upstream adds a service the migration must
-   isolate.
-4. Composition ownership changes follow the row classes above:
-   - a semantic coupling move updates the allowlist row and the boundary
-     baseline intentionally;
-   - a composition-owner change updates this ownership inventory (the frozen
-     M3-0 architecture statements were retired by M3-6 PR4);
-   - implementation progress alone never changes frozen ownership;
-   - a fixture that adds a production prerequisite documents its topology and
-     does not automatically grant product composition ownership.
-
-
 ## S4-D1 / PR-D1 — official catalog → fullscreen page source→sink
 
 The Plugin Manager is still ONE authority chain: the real Host
@@ -914,3 +894,22 @@ a catalog authority.
   (real rc.2 Host catalog → page → official action → authoritative reread).
   It does NOT claim `HOST_CAPABLE` or `TUI_FEATURE_SUPPORTED` for the 14
   bundles; those remain S4-D2/D3 ledger items.
+
+## How to update this file
+
+1. A migration phase moves coupling into a semantic port: move the entry to
+   the port's row, update `scripts/client-boundary-baseline.json` (the gate
+   then stops flagging the relocated pattern), and record the phase in
+   `docs/client-server-migration.md`.
+2. New feature code must NOT appear here — the gate rejects it first.
+3. Keep the `HOST_SERVICES` list in `scripts/client-boundary-gate.mjs` in
+   sync with this inventory when upstream adds a service the migration must
+   isolate.
+4. Composition ownership changes follow the row classes above:
+   - a semantic coupling move updates the allowlist row and the boundary
+     baseline intentionally;
+   - a composition-owner change updates this ownership inventory (the frozen
+     M3-0 architecture statements were retired by M3-6 PR4);
+   - implementation progress alone never changes frozen ownership;
+   - a fixture that adds a production prerequisite documents its topology and
+     does not automatically grant product composition ownership.
