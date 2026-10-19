@@ -655,6 +655,11 @@ interface RealHostInstallFixture {
 async function startRealInstallFixture(
   t: import('node:test').TestContext,
   presetId: string,
+  options: {
+    /** Optional test seam over the REAL Direct adapter (e.g. to delay one
+     *  presentation event while the Host already advanced). */
+    readonly portFactory?: (host: Awaited<ReturnType<typeof createRemoteApplicationHostFixture>>) => PluginManagerPort
+  } = {},
 ): Promise<RealHostInstallFixture> {
   const life = testLifecycle(t)
   const host = await createRemoteApplicationHostFixture(life, presetId, {
@@ -662,7 +667,7 @@ async function startRealInstallFixture(
     isolateHome: true,
   })
   assert.ok(host.pluginManager !== undefined)
-  const port = new DirectPluginManagerPort(host.ctx)
+  const port = options.portFactory?.(host) ?? new DirectPluginManagerPort(host.ctx)
   const controller = new PluginManagerController(port, {
     requestRender: () => {},
     requestClose: () => {},
@@ -806,10 +811,45 @@ test('A09: the real Host cancel terminates the real pnpm install, restores the p
   assert.equal(controller.installView()?.phase, 'done')
 })
 
-test('A09 (too-late): a real cancel during applying returns too-late and the Host settles the one install', async (t) => {
-  const fixture = await startRealInstallFixture(t, 's5-pr-e-a09-too-late')
+test('A09 (too-late): the controller renders the real Host too-late response and the one install settles', async (t) => {
+  // Deterministic race window: the Host advances to `applying` and emits the
+  // official phase event, but this test-local PORT WRAPPER withholds that ONE
+  // presentation event until the user's Stop has already been dispatched. The
+  // wrapper delegates every operation to the real Direct adapter/Host; it is
+  // not a fake Host and it fabricates no result.
+  let inner: DirectPluginManagerPort | undefined
+  let releaseApplying!: () => void
+  const applyingGate = new Promise<void>(resolve => { releaseApplying = resolve })
+  let markApplyingSeen!: () => void
+  const applyingSeen = new Promise<void>(resolve => { markApplyingSeen = resolve })
+  const fixture = await startRealInstallFixture(t, 's5-pr-e-a09-too-late', {
+    portFactory: (host) => {
+      const direct = new DirectPluginManagerPort(host.ctx)
+      inner = direct
+      const wrapper: PluginManagerPort = {
+        snapshot: () => direct.snapshot(),
+        inspect: (spec, registry, signal) => direct.inspect(spec, registry, signal),
+        setBundleEnabled: (name, enabled) => direct.setBundleEnabled(name, enabled),
+        setPluginEnabled: (id, enabled) => direct.setPluginEnabled(id, enabled),
+        removeBundle: (name) => direct.removeBundle(name),
+        startInstall: (request) => direct.startInstall(request),
+        waitForInstall: (requestId) => direct.waitForInstall(requestId),
+        cancelInstall: (requestId) => direct.cancelInstall(requestId),
+        subscribeInstall: (listener) => direct.subscribeInstall(event => {
+          if (event.kind === 'phase' && event.phase.phase === 'applying') {
+            markApplyingSeen()
+            void applyingGate.then(() => listener(event))
+            return
+          }
+          listener(event)
+        }),
+        subscribeInvalidation: (listener) => direct.subscribeInvalidation(listener),
+      }
+      return wrapper
+    },
+  })
   const { host, controller, profileDir } = fixture
-  const port = new DirectPluginManagerPort(host.ctx)
+  assert.ok(inner !== undefined)
   const hostService = serviceImplementation<{
     installBundle(spec: string, options?: unknown): Promise<unknown>
     publishAndReload(ids?: unknown): Promise<unknown>
@@ -823,14 +863,11 @@ test('A09 (too-late): a real cancel during applying returns too-late and the Hos
   t.after(() => { hostService.installBundle = originalInstall })
 
   // Hold the official apply step AFTER the Host announced `applying`, so the
-  // real `too-late` branch is reachable without a timer race.
+  // window is stable until the controller has handled the real too-late reply.
   const originalPublish = hostService.publishAndReload
   let releaseApply!: () => void
   const applyGate = new Promise<void>(resolve => { releaseApply = resolve })
-  let applyReached!: () => void
-  const applying = new Promise<void>(resolve => { applyReached = resolve })
   hostService.publishAndReload = async function patchedPublish(this: unknown, ids?: unknown): Promise<unknown> {
-    applyReached()
     await applyGate
     return originalPublish.call(this, ids)
   }
@@ -852,13 +889,20 @@ test('A09 (too-late): a real cancel during applying returns too-late and the Hos
   controller.inspect(manifest.name, registry.url)
   await waitForState('the accepted inspection', () => controller.installView()?.phase === 'confirm')
   controller.confirmInstall()
-  await waitForState('the Host announces applying', () => controller.installView()?.phase === 'applying', 60_000)
-  const requestId = controller.installView()!.requestId!
-  await applying
-
-  const cancellation = await port.cancelInstall(requestId)
-  assert.deepEqual(cancellation, { status: 'too-late' }, 'the real Host reports too-late while applying')
+  // The Host reached applying, but the controller still sees `installing`
+  // because the presentation event is deliberately withheld.
+  await applyingSeen
+  assert.equal(controller.installView()?.phase, 'installing',
+    'the controller has not yet observed the applying event')
+  panel.render(80)
+  panel.handleInput('s') // the real user Stop path: controller.cancelInstall()
+  await waitForState('the controller renders the real Host too-late response', () => {
+    const view = controller.installView()
+    return view?.phase === 'applying' && /too late/.test(view.message ?? '')
+  })
   assert.equal(controller.installView()?.phase, 'applying', 'too-late never fabricates a cancelled view')
+  assert.match(controller.installView()?.message ?? '', /too late/)
+  releaseApplying()
   releaseApply()
   await waitForState('the one install settles', () => controller.installView()?.phase === 'done', 60_000)
   const outcome = controller.installView()?.outcome
@@ -871,7 +915,8 @@ test('A09 (too-late): a real cancel during applying returns too-late and the Hos
   }
   assert.ok(profile.dependencies?.[manifest.name] !== undefined, 'the applied install lands in the profile manifest')
   assert.ok(profile.dsh?.profile?.bundles?.includes(manifest.name), 'the applied bundle is selected')
-  await waitForState('the settled request leaves the installs map', async () => (await port.waitForInstall(requestId)) === null)
+  const requestId = controller.installView()!.requestId!
+  await waitForState('the settled request leaves the installs map', async () => (await inner!.waitForInstall(requestId)) === null)
 })
 
 test('A10: real pnpm blocked builds become pendingBuilds; only an explicit approval runs the harmless marker script', async (t) => {

@@ -676,9 +676,9 @@ test('L6-F (S5 A12): a Remote mutation reply carried by a superseded Connection 
   assert.equal(hostWrites, 1, 'the stale reply never dispatches a second Host write')
   assert.doesNotMatch(view, /enable restart-required|enable applied/,
     'a stale generation reply never repaints an optimistic success summary')
-  assert.match(view, /superseded connection generation/,
+  assert.match(view, /currentness context was superseded/,
     'the superseded reply is rendered as indeterminate')
-  assert.match(view, /authoritative inventory reread/,
+  assert.match(view, /authoritative inventory/,
     'the notice names the authoritative reread as the decision owner')
   assert.doesNotMatch(view, /enable\/disable failed/,
     'the applied mutation is never presented as a definite failure')

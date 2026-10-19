@@ -226,16 +226,17 @@ export type PluginInstallEvent =
   | { readonly kind: 'log'; readonly log: PluginInstallLogFact }
 
 /**
- * One plugin mutation's result belongs to a Connection generation that was
- * already replaced when the reply arrived. The Host may have applied the
- * write, so this is NOT a refusal: the caller must show the indeterminate
- * outcome and let the authoritative inventory reread decide what is true.
- * Only the experimental Remote adapter raises it.
+ * One plugin mutation's result arrived after the operation's authoritative
+ * currentness context was superseded. The write may have been applied, so this
+ * is NOT a refusal: the caller must present the outcome as indeterminate and
+ * let the authoritative inventory reread decide what is true. A backend
+ * adapter raises it only when its own currentness authority proves the reply
+ * belongs to a superseded context; this module names no transport.
  */
 export class PluginManagerStaleResultError extends Error {
   constructor(operation: string) {
     super(
-      `pluginManager.${operation} returned after the Connection generation changed; `
+      `pluginManager.${operation} returned after its currentness context was superseded; `
       + 'the authoritative inventory reread decides the outcome',
     )
     this.name = 'PluginManagerStaleResultError'

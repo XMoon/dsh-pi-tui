@@ -141,14 +141,14 @@ interface PluginConfirmation {
 const EMPTY_SECTION_CARDS: readonly PluginCardView[] = Object.freeze([])
 
 /**
- * One mutation-failure notice. A result carried by a superseded Connection
- * generation is an INDETERMINATE outcome, never a definite failure: the Host
- * may have applied the write, and the authoritative inventory reread (which
- * always follows this notice) decides the visible truth.
+ * One mutation-failure notice. A result from a superseded currentness context
+ * is an INDETERMINATE outcome, never a definite failure: the write may have
+ * been applied, and the authoritative inventory reread (which always follows
+ * this notice) decides the visible truth. The notice stays backend-neutral.
  */
 function mutationFailureText(operation: string, error: unknown): string {
   if (error instanceof PluginManagerStaleResultError) {
-    return 'the plugin change result belongs to a superseded connection generation; '
+    return 'the plugin change result arrived after its currentness context was superseded; '
       + 'the authoritative inventory reread decides the outcome'
   }
   return `${operation} failed: ${errorMessage(error)}`
