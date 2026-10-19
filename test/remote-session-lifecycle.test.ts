@@ -30,7 +30,12 @@ function harness() {
     releases: [] as string[],
   }
   const catalogued = new Set<string>()
-  const generations = new Map<string, { readonly id: string }>()
+  const generations = new Map<string, {
+    readonly id: string
+    readonly session: {
+      getSnapshot(): { readonly openState: 'cold' | 'loading' | 'open' | 'error'; readonly openError: unknown }
+    }
+  }>()
   const counts = new Map<string, number>()
   let generation: { id: number } | undefined = { id: 1 }
   let createResult: string | undefined
@@ -41,6 +46,14 @@ function harness() {
   let forkHook: (() => void) | undefined
   let retainError: unknown
   let retainHook: (() => void) | undefined
+  /** The official initial-open settlement the fake reference exposes. `ready`
+   *  is independent from the open state: the real Client RESOLVES ready even
+   *  when `doOpen` records `openState: 'error'`. */
+  let openState: 'cold' | 'loading' | 'open' | 'error' = 'open'
+  let openError: unknown
+  let readyMode: 'resolve' | 'hold' = 'resolve'
+  let resolveReady: (() => void) | undefined
+  let rejectReady: ((error: unknown) => void) | undefined
   const sessions: RemoteLifecycleSessions = {
     create: async (options = {}) => {
       calls.creates.push(options)
@@ -69,16 +82,39 @@ function harness() {
       if (retainError !== undefined) throw retainError
       if (!catalogued.has(target)) throw new Error(`sessions.retain: unknown session ${target}`)
       counts.set(target, (counts.get(target) ?? 0) + 1)
-      if (!generations.has(target)) generations.set(target, { id: target })
+      if (!generations.has(target)) {
+        generations.set(target, {
+          id: target,
+          session: { getSnapshot: () => ({ openState, openError }) },
+        })
+      }
       let live = true
+      const ready = new Promise<unknown>((resolve, reject) => {
+        if (readyMode === 'resolve') {
+          resolve(undefined)
+          return
+        }
+        resolveReady = () => { resolve(undefined) }
+        rejectReady = reject
+      })
+      const abortSignal = options.signal
+      if (abortSignal !== undefined) {
+        if (abortSignal.aborted) {
+          rejectReady?.(abortSignal.reason)
+        } else {
+          abortSignal.addEventListener('abort', () => { rejectReady?.(abortSignal.reason) }, { once: true })
+        }
+      }
+      // The official reference swallows its readiness rejection itself; a
+      // create that never awaits ready must not turn it into an unhandled one.
+      ready.catch(() => {})
       const reference: RemoteSessionReferenceLike = {
         sessionId: target,
         get binding() {
           if (!live) throw new Error(`Session reference "${target}" is released`)
           return generations.get(target)
         },
-        // Deliberately never resolves: no caller may treat `ready` as a gate.
-        ready: new Promise(() => {}),
+        ready,
         release: () => {
           if (!live) return
           live = false
@@ -111,6 +147,15 @@ function harness() {
     setForkHook: (hook: () => void) => { forkHook = hook },
     setRetainError: (error: unknown) => { retainError = error },
     setRetainHook: (hook: () => void) => { retainHook = hook },
+    /** Hold the next reference's `ready` until resolved/rejected by the test. */
+    setReadyHold: () => { readyMode = 'hold' },
+    resolveReady: () => { resolveReady?.() },
+    rejectReadyWith: (error: unknown) => { rejectReady?.(error) },
+    /** The official open settlement the retained generation reports. */
+    setOpenState: (state: 'cold' | 'loading' | 'open' | 'error', error?: unknown) => {
+      openState = state
+      openError = error
+    },
     setCatalogued: (id: string, present: boolean) => {
       if (present) catalogued.add(id)
       else catalogued.delete(id)
@@ -311,11 +356,76 @@ test('open releases the new reference when a synchronous subscriber supersedes i
   assert.equal(h.bindingOf('session-a'), undefined, 'no generation may stay live for a superseded open')
 })
 
-test('open does not await the reference ready promise', async () => {
+test('open does not report opened before the initial history open settles', async () => {
   const h = harness()
   h.setCatalogued('session-a', true)
+  h.setReadyHold()
+  let settled = false
+  const pending = h.lifecycle.open({ sessionId: 'session-a' }).then((result) => {
+    settled = true
+    return result
+  })
+  // Let the retained reference's pending readiness win any microtask race.
+  await new Promise<void>(resolve => setImmediate(resolve))
+  assert.equal(settled, false, 'retain alone is not a successful open')
+  h.resolveReady()
+  assert.equal((await pending).outcome.kind, 'opened')
+})
+
+test('open reports an official history-open error as unavailable and releases exactly once', async () => {
+  const h = harness()
+  h.setCatalogued('session-a', true)
+  // The real Client RESOLVES ready after `doOpen` records the error.
+  h.setOpenState('error', {
+    code: 'session/format-unsupported',
+    message: 'the generation cannot be promoted',
+  })
   const result = await h.lifecycle.open({ sessionId: 'session-a' })
-  assert.equal(result.outcome.kind, 'opened')
+  assert.equal(result.outcome.kind, 'unavailable')
+  if (result.outcome.kind === 'unavailable') {
+    assert.match(result.outcome.message, /failed to open/u)
+    assert.match(result.outcome.message, /cannot be promoted/u,
+      'the official openError is carried, not replaced by a generic message')
+  }
+  assert.equal(h.calls.releases.length, 1, 'the failed generation is released exactly once')
+  assert.equal(h.bindingOf('session-a'), undefined, 'no leaked generation after a failed open')
+})
+
+test('open reports a rejected readiness as unavailable and releases exactly once', async () => {
+  const h = harness()
+  h.setCatalogued('session-a', true)
+  h.setReadyHold()
+  const pending = h.lifecycle.open({ sessionId: 'session-a' })
+  h.rejectReadyWith(new Error('history read failed'))
+  const result = await pending
+  assert.equal(result.outcome.kind, 'unavailable')
+  if (result.outcome.kind === 'unavailable') assert.match(result.outcome.message, /history read failed/u)
+  assert.equal(h.calls.releases.length, 1)
+  assert.equal(h.bindingOf('session-a'), undefined)
+})
+
+test('a Connection rollover while open waits for readiness is superseded and releases once', async () => {
+  const h = harness()
+  h.setCatalogued('session-a', true)
+  h.setReadyHold()
+  const pending = h.lifecycle.open({ sessionId: 'session-a' })
+  h.setGeneration(2)
+  h.resolveReady()
+  assert.deepEqual(await pending, { ownership: 'superseded', outcome: { kind: 'cancelled' } })
+  assert.equal(h.calls.releases.length, 1)
+  assert.equal(h.bindingOf('session-a'), undefined)
+})
+
+test('an abort while open waits for readiness is superseded and releases once', async () => {
+  const h = harness()
+  h.setCatalogued('session-a', true)
+  h.setReadyHold()
+  const controller = new AbortController()
+  const pending = h.lifecycle.open({ sessionId: 'session-a', signal: controller.signal })
+  controller.abort()
+  assert.deepEqual(await pending, { ownership: 'superseded', outcome: { kind: 'cancelled' } })
+  assert.equal(h.calls.releases.length, 1)
+  assert.equal(h.bindingOf('session-a'), undefined)
 })
 
 test('fork refuses implicit migration and maps only source session plus the optional exact event cut', async () => {

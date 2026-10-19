@@ -16,9 +16,11 @@
  *    the returned id for the TUI's visible main surface. A locally superseded
  *    navigation still reports the real publication but takes no ownership.
  * 2. Open is the official Client semantic `select/open this Session`, now
- *    expressed as `sessions.retain(id, { source: 'tuiMainView' })`. `ready` is
- *    never awaited: official Web navigation commits the new owner before the
- *    initial history open settles.
+ *    expressed as `sessions.retain(id, { source: 'tuiMainView' })`. An explicit
+ *    open DOES await the initial history settlement and then reads the official
+ *    `openState`/`openError`: `ready` resolves even when the Client recorded a
+ *    failed `Session.doOpen`, so returning `opened` on the retain alone would
+ *    turn a failed resume into a committed session switch.
  * 3. Host-owned fork maps to the official `ClientSessions.fork()` exactly once
  *    with `allowMigration:false`, so deriving a child never silently migrates
  *    the source record; the user's explicit open/resume remains the only path
@@ -325,6 +327,48 @@ export class RemoteSessionLifecycle implements SessionLifecycle {
     if (!Object.is(captured, this.generation.getSnapshot()) || isAborted(request.signal)) {
       owner.release()
       return { ownership: 'superseded', outcome: { kind: 'cancelled' } }
+    }
+    // The official `Session.doOpen` records a failed initial history open as
+    // `openState: 'error'` on the retained generation and RESOLVES the ready
+    // promise. An explicit open/resume must therefore wait for the settlement
+    // and read the state: `retain` success is NOT a successful history open.
+    // Without this check the application would commit B while B's history
+    // failed, replacing A and its draft with an unreadable session.
+    try {
+      await owner.ready
+    } catch (error) {
+      owner.release()
+      if (!Object.is(captured, this.generation.getSnapshot())) {
+        return { ownership: 'superseded', outcome: { kind: 'cancelled' } }
+      }
+      if (isAborted(request.signal)) {
+        return { ownership: 'superseded', outcome: { kind: 'cancelled' } }
+      }
+      return {
+        ownership: 'current',
+        outcome: {
+          kind: 'unavailable',
+          message: `session "${request.sessionId}" failed to open: ${remoteFailureMessage(error)}`,
+        },
+      }
+    }
+    // The wait can outlive the navigation/Connection: release the generation
+    // exactly once and commit nothing. An aborted open is a client-local
+    // supersession, never a failed Host operation.
+    if (!Object.is(captured, this.generation.getSnapshot()) || isAborted(request.signal)) {
+      owner.release()
+      return { ownership: 'superseded', outcome: { kind: 'cancelled' } }
+    }
+    const opened = owner.openState()
+    if (opened.openState === 'error') {
+      owner.release()
+      const reason = opened.openError === undefined || opened.openError === null
+        ? 'the official initial history open failed'
+        : remoteFailureMessage(opened.openError)
+      return {
+        ownership: 'current',
+        outcome: { kind: 'unavailable', message: `session "${request.sessionId}" failed to open: ${reason}` },
+      }
     }
     return {
       ownership: 'current',

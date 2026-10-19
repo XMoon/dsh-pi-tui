@@ -23,9 +23,12 @@
  *   Session as a side effect.
  *
  * Both patterns hand out a `release()` that must run exactly once. `ready` is
- * deliberately never awaited here: official Web navigation commits the new
- * owner before the initial history open settles, and `ready` belongs only to
- * operations that genuinely must wait for that open.
+ * exposed but not awaited by acquisition: official Web navigation commits the
+ * new owner before the initial history open settles. An operation that must
+ * distinguish a successful history open from a failed one (the explicit
+ * open/resume path) awaits it and then reads {@link MainSurfaceReference.openState},
+ * because `ready` resolves even when the official `Session.doOpen` recorded
+ * `openState: 'error'`.
  *
  * @module @xmoon76/dsh-pi-tui/runtime/remote/session-reference
  */
@@ -101,11 +104,25 @@ export interface RemoteReferenceSessionsSource<B extends object = object> extend
   binding(id: string): B | undefined
 }
 
+/** The official initial-history open settlement of one retained binding.
+ *  `ready` resolves even when `doOpen` recorded `openState: 'error'`, so the
+ *  state (not the promise) is the failure evidence. An absent `openState`
+ *  means a structural double that does not model the official state. */
+export interface RemoteSessionOpenFacts {
+  readonly openState?: 'cold' | 'loading' | 'open' | 'error'
+  readonly openError?: unknown
+}
+
 /** A TUI-owned visible main surface: one exact generation held until release. */
 export interface MainSurfaceReference {
   readonly sessionId: string
   /** Exact-generation token for the held binding (identity comparison only). */
   readonly bindingIdentity: object
+  /** The official cancellable wait for the initial history `Session.open()`
+   *  attempt to settle. It is NOT an identity and NOT a success signal. */
+  readonly ready: Promise<unknown>
+  /** Read the official open settlement of THIS exact generation. */
+  openState(): RemoteSessionOpenFacts
   /** Release exactly once. */
   release(): void
 }
@@ -162,9 +179,22 @@ export function acquireMainSurfaceReference(
     source: 'tuiMainView',
     ...signal === undefined ? {} : { signal },
   })
+  // Capture the exact binding object ONCE: the official getter refuses after
+  // release, and every fact this handle exposes must belong to the generation
+  // that was retained, never to a later same-id lookup.
+  const binding = reference.binding as object
   return {
     sessionId,
-    bindingIdentity: reference.binding as object,
+    bindingIdentity: binding,
+    ready: reference.ready,
+    openState: (): RemoteSessionOpenFacts => {
+      const session = (binding as {
+        readonly session?: { getSnapshot?: () => RemoteSessionOpenFacts }
+      }).session
+      return session !== undefined && typeof session.getSnapshot === 'function'
+        ? session.getSnapshot()
+        : {}
+    },
     release: (): void => { reference.release() },
   }
 }

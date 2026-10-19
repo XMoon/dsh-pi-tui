@@ -1410,6 +1410,31 @@ test('L5: a real Remote ordinary submit carries the Client-sampled request zone 
     assert.equal(text.includes('Amsterdam'), false, 'the Host process zone must never appear as the request zone')
     assert.equal(text.includes('New_York'), false, 'the Host display fallback must never appear as the request zone')
 
+    // L6: the SAME durable reading reaches the mounted surface through the
+    // selected Remote Application → official Client event source →
+    // RemoteLiveIngress → SessionPresentation → TranscriptFolder path — not by
+    // handing Host events to the folder directly. The Context card's producer
+    // badge is the row identity; the body carries the request-zone policy.
+    const painted = (): string => fixture.vt.getViewport()
+      .map(line => line.replace(/\x1b\[[0-9;]*m/gu, '')).join('\n')
+    // The ambient card is collapsed by default, so the PAINTED identity is the
+    // header/badge; the folded body is read from the same app transcript.
+    await waitFor('the time-context Context card paints through the live ingress', () =>
+      painted().includes('Context') && painted().includes('time-context'), 20_000)
+    const foldedContext = ((app as unknown as {
+      messages?: readonly {
+        kind?: string
+        text?: string
+        contextPresentation?: { sourceKind?: string }
+      }[]
+    }).messages ?? []).filter(message =>
+      message.kind === 'system' && message.contextPresentation?.sourceKind === 'time-context')
+    assert.equal(foldedContext.length, 1,
+      'exactly one time-context row reached the presentation through the live ingress')
+    assert.match(foldedContext[0]!.text ?? '',
+      /Browser time zone for this request: Europe\/Paris\./u,
+      'the folded Context body is the official durable reading, not a rebuilt value')
+
     // Per-submit sampling: the NEXT send samples the Client runtime again, and it
     // never rewrites the earlier message's stored zone.
     clientZone = 'UTC'

@@ -782,6 +782,14 @@ test('L6 §14 step 8 / §5 Must 17: a REAL delegated continuable child receives 
   await host.ctx.plugin(SubagentRuntime as never, { maxDepth: 3 } as never)
   const SpawnProvider = await import('@deepseek-ai/dsh-subagent-spawn-in-process')
   await host.ctx.plugin(SpawnProvider as never, { providerName: 'spawn' } as never)
+  // The official request-clock row: the child follow-up's Client zone must
+  // produce a CHILD-owned durable reading that the viewer folds; the parent
+  // Session must never receive it.
+  const TimeContext = await import('@deepseek-ai/dsh-time-context')
+  // `refreshIntervalMs: 0` is the plugin's own "every eligible step" mode: the
+  // child's first turn and the viewer follow-up are seconds apart, so the
+  // default ten-minute window would legitimately suppress the second reading.
+  await host.ctx.plugin(TimeContext as never, { timeZone: 'Asia/Shanghai', refreshIntervalMs: 0 } as never)
   const subagents = host.ctx.get('subagents') as unknown as {
     startActivation(spec: unknown): Promise<{ readonly childId: string; readonly messageId: string }>
   }
@@ -887,6 +895,44 @@ test('L6 §14 step 8 / §5 Must 17: a REAL delegated continuable child receives 
     'the official `subagents.prompt` request id must be persisted on the accepted child message')
   assert.equal(source?.clientTimeZone, 'Asia/Shanghai',
     'the Client-sampled request zone must cross the real generated subagents.prompt and reach the Host child source')
+
+  // ── The official plugin derives the CHILD turn's Context from that source.
+  // The reading is persisted on the CHILD Session, never on the parent, and the
+  // mounted child viewer folds it through its own remote presentation path.
+  const childContextTexts = (): string[] => childEvents()
+    .filter(event => event.type === 'user/message'
+      && (event.data as { readonly source?: { readonly kind?: string } }).source?.kind === 'time-context')
+    .map(event => {
+      const data = event.data as { readonly content?: readonly { readonly type?: string; readonly text?: string }[] }
+      return data.content?.map(part => part.type === 'text' ? part.text ?? '' : '').join('\n') ?? ''
+    })
+  await waitFor('the child follow-up turn injected its own time-context reading', () =>
+    childContextTexts().some(text => text.includes('preparing turn 2')), 20_000)
+  const followUpContext = childContextTexts().find(text => text.includes('preparing turn 2'))!
+  assert.match(followUpContext, /Browser time zone for this request: Asia\/Shanghai\./u,
+    'the child Context carries the child prompt\'s Client zone')
+  const parentContextTexts = parentSession.snapshotEvents()
+    .filter(event => event.type === 'user/message'
+      && (event.data as { readonly source?: { readonly kind?: string } }).source?.kind === 'time-context')
+    .map(event => {
+      const data = event.data as { readonly content?: readonly { readonly type?: string; readonly text?: string }[] }
+      return data.content?.map(part => part.type === 'text' ? part.text ?? '' : '').join('\n') ?? ''
+    })
+  // The parent may carry its OWN readings; the child follow-up's reading must
+  // never cross into it.
+  assert.equal(parentContextTexts.some(text => text.includes('preparing turn 2')), false,
+    'the child reading must never be appended to the parent Session')
+
+  const viewerContextRows = (): readonly { readonly text?: string; readonly contextPresentation?: { readonly sourceKind?: string } }[] =>
+    ((app as unknown as {
+      messages?: readonly { kind?: string; text?: string; contextPresentation?: { sourceKind?: string } }[]
+    }).messages ?? []).filter(message => message.kind === 'system'
+      && message.contextPresentation?.sourceKind === 'time-context')
+  await waitFor('the child viewer folded the child-owned Context reading', () =>
+    viewerContextRows().some(row => row.text?.includes('preparing turn 2')), 20_000)
+  const viewerFollowUp = viewerContextRows().find(row => row.text?.includes('preparing turn 2'))!
+  assert.match(viewerFollowUp.text ?? '', /Asia\/Shanghai/u,
+    'the viewer shows the child reading with the child request zone, not a parent/other-session row')
 
   // ── The authoritative child event appears in the SAME viewer. TWO independent
   // halves: the viewer's own durable child read carries the accepted event, and

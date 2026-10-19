@@ -24,12 +24,12 @@
  *   the plugin's REAL injection; only the model is synthetic
  *
  * DELIBERATELY ABSENT
- * - the official preset LOADER path: `@deepseek-ai/dsh-time-context` is only a
- *   transitive dependency of the dev-only `@deepseek-ai/dsh-web-app`, so it
- *   cannot be bare-imported nor resolved by name from this repository. The
- *   plugin is loaded from its published module path and mounted directly; the
- *   preset COMPOSITION presence is asserted separately against the generated
- *   official preset mirrors.
+ * - the official preset LOADER path: this suite mounts the published plugin
+ *   module directly (the dev dependency is resolvable; see the generated
+ *   preset mirrors below). The real `standard`/`minimal` preset assembly is
+ *   owned by the separate request-zone/preset PR, so this suite does not claim
+ *   it; the preset COMPOSITION presence is asserted separately against the
+ *   generated official mirrors.
  * - external providers, real accounts, Tern GUI
  *
  * @module @xmoon76/dsh-pi-tui/remote-time-context-rc2.test
@@ -37,9 +37,7 @@
 
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
-import { createRequire } from 'node:module'
 import { join } from 'node:path'
-import { pathToFileURL } from 'node:url'
 import test from 'node:test'
 import { LlmAdapter, createUserMessage, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
 import { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
@@ -104,19 +102,12 @@ function installClock(): { advanceTo(ms: number): void; restore(): void } {
   }
 }
 
-/** The published `@deepseek-ai/dsh-time-context` module path. */
-function resolveTimeContextEntry(): string {
-  const repoRequire = createRequire(import.meta.url)
-  const webAppRequire = createRequire(repoRequire.resolve('@deepseek-ai/dsh-web-app/package.json'))
-  return webAppRequire.resolve('@deepseek-ai/dsh-time-context')
-}
-
 /** Mount the OFFICIAL plugin (its own `apply`/`inject`) on the real Host.
  *  The config is passed through EXACTLY as given: omitting `refreshIntervalMs`
  *  exercises the plugin's own published default, and omitting `timeZone`
  *  exercises its process-zone fallback. */
 async function mountTimeContext(ctx: Context, config: { timeZone?: string; refreshIntervalMs?: number }): Promise<void> {
-  const module = await import(pathToFileURL(resolveTimeContextEntry()).href) as {
+  const module = await import('@deepseek-ai/dsh-time-context') as {
     readonly name: string
     readonly inject: readonly string[]
     readonly apply: unknown
