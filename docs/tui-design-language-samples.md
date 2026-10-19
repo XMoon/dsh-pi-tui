@@ -2190,10 +2190,11 @@ Plugins · All                                                       4/23 enable
 The mounted VirtualTerminal suite covers the same rule for the list, Details
 and confirmation paths (`test/plugin-manager-workspace-navigation.test.ts`) and
 asserts that Enter cannot write from a zero-row Remove/confirm frame. The same
-suite proves the keyboard admission agrees with the hints: list Enter/Right
-cannot enter an invisible card's Details, while search editing's `Enter apply`
-still executes and therefore keeps its hint (the input cell itself is not
-painted at 80×2).
+suite proves the keyboard admission agrees with the hints (including a
+resize followed by Enter/Right before the repaint): list Enter/Right cannot
+enter an invisible card's Details, while search editing's `Enter apply` still
+executes and therefore keeps its hint (the input cell itself is not painted at
+80×2).
 
 Not run for this delta: other sizes with a 0-row body, light/custom themes and
 physical mouse/trackpad remain `NOT_VERIFIED`.
