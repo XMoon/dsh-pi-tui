@@ -7,71 +7,11 @@
 
 ## [Unreleased]
 
-### 新增
-
-- **`/plugins` 与 Settings 顶级 `Plugins` 改为同一个全屏 Plugin Manager。** 目录固定按
-  TUI & Extensions / Official DSH / Third-party / Experimental 分组（实验组最后），窄屏单栏、
-  宽屏双栏，支持搜索、状态筛选、来源/状态事实与键盘/鼠标同一套操作。14 个官方可选/按需
-  Bundle 由真实 Host 目录发现：已随安装提供者可启用/停用，未安装且带官方 `installTarget`
-  的项可经 inspect、确认、安装流程处理，并显示实际安装版本、待审批构建脚本、重启要求与
-  Host 返回的失败；从 Settings 进入返回后保留原分类、滚动与选择，离开安装页不会取消后台任务。
-
-- **Plugin Manager 的 Experimental 详情说明真实终端边界与升级路径。** 14 个官方 rc.2
-  实验包各自显示固定的 TUI 可用面与限制/风险（哪些只有 Web UI、哪些只经现有 Tool/Job/
-  Activity/`/skill`/标题界面可达、B04 的 WEB_ONLY/Host 行未挂载（Owner 已接受）、B13/B14 的已验证 one-shot/provider 边界），这些文字只跟随精确官方包身份，
-  不随启用状态变成“Host 能力通过”。升级指引按 Host 事实区分随 DSH 发行升级、profile 包
-  “先 Remove 再显式 Install”、官方 on-demand 目标与当前 TUI 的外部管理；不提供原地更新、
-  版本选择器或静默重装。
-- **`/model` 可直接选择 rc.2 官方的 `deepseek-flash`。** 候选完全来自 Host 模型目录，以
-  精确 `(provider, model)` 身份搜索与提交（显示名 `DeepSeek-V4.1-Flash` 不作为 ID），
-  选择后由官方 Session/global 默认读回；部署覆盖目录没有该 ID 时不会凭空出现。
-
-### 变更
-
-- **`/settings → Other → Web Search / Fetch` 的帮助文字补齐真实使用事实。** 两套 DeepSeek
-  API 是独立 opt-in 计费 provider，登录或普通 Messages 套餐不保证覆盖；默认
-  Messages/HTTP 不调用收费 API，且安装/启用其他 Bundle 不会改变它们（这是 base profile
-  的 Web 配置，不是 Optional Bundle）。`Share Original Question` 默认为开，只发送最多 128
-  字符的触发问题（`ori_question`，不含完整历史或系统提示词）；endpoint 必须是可信 HTTPS
-  并会收到凭据与查询；只有 Host 写入与权威回读一致才显示 `Verified`。
-- **Settings 的 Plugins 第二列新增 `Open Plugin Manager` 直接入口**：宽屏/中屏的
-  Rows 栏显示真实可点击的导航行（`Rows (1)`），Enter、Right 与鼠标点击打开同一个
-  Plugin Manager 页面，不增加中间层或第二焦点；窄屏仍保留原有的一步直达。
-- **停用或移除 Auto Review 前必须先确认风险**：确认页固定说明“停用可能把现有 Auto
-  Session 转为 Full access，Auto Review 不是沙箱”，默认选择 Cancel；未确认前不写 Host，
-  cancel、过期确认和窄屏不可见操作都不会改变权限。移除 Auto Review 时显示同一风险。
-
-- **`time-context` 等 Snapshot 注入不再把同一回合的 Activity/Thought 切成多块**：Compact 中
-  它们随 Activity 折叠，Focus 中随 Thought 隐藏并在展开后按原始顺序恢复一次；Full 保持原有
-  顺序与 Context 卡片。`instructions`/`catalog` 与 Snapshot 组成的混合 cluster 保持原状，
-  Snapshot 仍不计入工具数量或耗时。同一回合工作中经 `next-step` 投递的后台任务完成通知
-  （`tool-jobs`）也随 Activity/Thought 折叠；空闲唤醒（`next-turn`）、无法证明投递路径的
-  通知，以及 `relay`/`recall` 等其他 Context 仍独立可见。
-
-### 修复
-
-- **Plugin Manager 在 80×2 等 0 行正文帧不再显示假的 `Enter` 提示。** 当本帧没有绘制
-  任何可选操作/选项时，列表/详情/确认页的操作栏不再广告 `Enter`，列表 Enter/Right 也
-  不再能进入不可见卡片的 Details（包括 resize 后、重绘前按下的情况）；`Esc` 仍保留。搜索编辑的 `Enter apply` 在 0 行时仍
-  真实可执行，因此保留提示。正文恢复后提示照常恢复。
-
-- **选择 B03 Auto 权限预设后，Footer 仍显示当前权限事实。** 之前 Auto 不在内置权限标签表里，
-  切到 Auto 会让整个 Permission 徽标消失，看起来像没有生效；现在显示 `[auto]`（compact/plain
-  格式同样保留），与官方 preset 的当前值一致。
-
-- **人类提示现在携带发送端 TUI 进程的时区**，官方 `time-context` 注入不再对普通请求显示
-  `Browser time zone ... unavailable`：Direct 主会话、Direct/Remote continuable 子 Agent
-  续聊都由发送端在提交时采样 `Intl` 时区并写入官方请求元数据；Remote 主会话继续由官方
-  `SessionFace` 采样。该时区是运行 TUI 的进程时区（在 SSH/容器中即该主机进程的 `TZ`），
-  不是观看终端者的真实时区；进程报不出可用时区时，发送在派发前被拒绝并恢复草稿，不会伪造时区。
-
-## [0.5.3] - 2026-10-17
+## [0.5.3] - 2026-10-20
 
 ### 安装与版本对应
 
-本候选版把 DSH 基线推进到已发布的 `0.2.1-rc.2` family：peer floor 为 `>=0.2.1-rc.2`，
-精确验证目标为 `0.2.1-rc.2`。`0.5.3` 目前是 next 线候选身份（reserved
-candidate）：尚未打 tag、未发布到 npm，下面的 TUI 安装命令在发布后才生效。安装
+本版把 DSH 最低版本提高到已发布的 `0.2.1-rc.2`，并以该版本作为精确验证目标。安装
 DSH 需要显式允许其原生安装脚本：
 
 ```sh
@@ -80,16 +20,76 @@ dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@0.5.3
 dsh --profile pi-tui
 ```
 
-中间的 `@deepseek-ai/dsh@0.2.1-rc.1` 没有配对 TUI。旧 runtime 的配对不变：
+`@deepseek-ai/dsh@0.2.1-rc.1` 没有对应的 TUI 版本。旧版本 DSH 的配对关系不变：
 `@deepseek-ai/dsh@0.2.0-rc.2` 使用 `@xmoon76/dsh-pi-tui@0.5.1` 或
 `@xmoon76/dsh-pi-tui@0.5.2-rc.1`；`@deepseek-ai/dsh@0.2.0-rc.1`（含 `0.1.7-rc.2`）使用
 `@xmoon76/dsh-pi-tui@0.5.0`，`@deepseek-ai/dsh@0.1.7-rc.1` 使用
 `@xmoon76/dsh-pi-tui@0.4.8`。
 
+### 新增
+
+- **插件管理统一到一个全屏页面。** `/plugins` 和 Settings 里的一级 `Plugins` 现在打开
+  同一个 Plugin Manager：按 TUI & Extensions / Official DSH / Third-party /
+  Experimental 分组，可以搜索、筛选，键盘和鼠标都能操作。14 个官方插件从真实的 DSH
+  目录读取：已安装的可以启用/停用，未安装的官方插件可以在确认后安装，页面上会显示
+  安装版本、等待批准的执行脚本和是否需要重启。
+- **实验性插件会明确写出它在终端里能做什么、不能做什么。** 每个官方实验插件都会写明
+  可用的界面和限制（有些只能在 Web UI 里用，有些只能通过现有的工具/任务/活动/
+  `/skill`/标题界面使用），不会因为启用就变成“Host 已支持”。升级方式也按实际情况
+  说明：跟随 DSH 升级、先移除再从 profile 安装，或交给外部管理；不提供原地更新，
+  也不会悄悄重装。
+- **`/model` 可以直接选到 DSH 0.2.1-rc.2 提供的 `deepseek-flash`。** 候选只来自 DSH
+  的模型目录，按精确的 `(provider, model)` 身份搜索和提交，显示名不会被当成 ID。
+- **Session 换工作目录后，界面会跟着新目录走。** Footer、历史、`!` Shell、`@` 补全、
+  Skill 目录和命令执行都读取切换后实际生效的目录；会话列表、归档和新会话仍按原始
+  项目目录归类。
+- **新增 `/settings → Other → Web Search / Fetch` 入口。** 沿用现有的设置编辑器，
+  可以在这里选择两套 DeepSeek API、查看 API key 的来源并编辑 endpoint。保存结果以
+  Host 实际读回的值为准，只有写入和读回一致才显示 `Verified`。默认的 Messages/HTTP
+  不会调用收费 API；`Share Original Question` 只发送最多 128 字符的触发问题（不含
+  完整历史或系统提示词），endpoint 必须是可信的 HTTPS。
+- **Task Center 会显示外部 provider 执行的任务。** 这类任务没有本地子会话，会单独
+  显示为一行并标注 `External · no local session`；选中时会说明原因，不会打开不存在
+  的详情页，也不会显示 Stop/Continue。本地子会话的显示不变。
+
 ### 变更
 
-- **要求 DeepSeek Harness `0.2.1-rc.2`，不再支持中间的 `0.2.1-rc.1`。** 已发布的旧
-  runtime 配对不变（见上表）；从更旧 runtime 升级时请按配对表选择 TUI 线。
+- **需要 DeepSeek Harness `0.2.1-rc.2`，不再支持 `0.2.1-rc.1`。** 旧版本 DSH 的配对
+  关系不变（见上面的安装说明）；从更旧的 DSH 升级时，请按上面的配对选择 TUI 版本。
+- **Settings 的 Plugins 页新增 `Open Plugin Manager`。** 宽屏和中屏可以在 Rows 栏
+  直接点这一行，或用 Enter、Right 打开；窄屏仍然一步就能打开。
+- **停用或移除 Auto Review 前会先确认风险。** 确认页会说明这可能把现有的 Auto 会话
+  变成 Full access，且 Auto Review 不是沙箱；默认选择 Cancel，确认之前不会改动 Host。
+
+- **`time-context` 等 Snapshot 注入不再把同一回合的 Activity/Thought 切成多块。**
+  Compact 里随 Activity 折叠，Focus 里随 Thought 隐藏、展开后按原顺序恢复，Full 保持
+  原样；同一回合的后台任务完成通知也会一起折叠，空闲时的唤醒和其他 Context 仍然
+  单独显示。
+
+### 修复
+
+- **Plugin Manager 在正文没有可显示行时不再显示假的 `Enter` 提示。** 例如 80×2 这种
+  窗口：操作栏不再提示 `Enter`，也不能用 Enter/Right 打开看不见的卡片详情；`Esc`
+  仍然可用，搜索编辑里 `Enter apply` 确实会执行，所以仍会提示。
+
+- **选择 B03 Auto 权限预设后，Footer 会继续显示当前权限。** 之前 Auto 不在内置的
+  权限标签里，切过去后整个权限徽标都会消失；现在显示 `[auto]`（compact/plain 格式
+  也一样）。
+
+- **发出去的消息会带上运行 TUI 的进程时区。** 官方 `time-context` 不再显示
+  `Browser time zone ... unavailable`：Direct 主会话和可续聊的子 Agent 在发送时读取
+  时区并写入请求，Remote 主会话仍由官方 `SessionFace` 读取；读不到可用时区时，消息会
+  在发出前被拒绝并恢复草稿，不会伪造时区。
+
+- **Host、模型和工具返回的文本会在显示到终端前统一过滤。** 单行文字和多行正文分别
+  处理，夹带的终端控制序列和换行不会再拆行、凭空多出一行；Job 输出仍保留允许的颜色
+  样式，原始记录、搜索和复制仍然使用原文。
+
+- **全屏下用鼠标点击编辑器区域后，Task Quick 的 `↓` 入口与其 `↓ view` 提示不再失效**，
+  编辑器的导航键优先权、历史面板的按键归属与面板焦点状态也保持一致。
+
+- **工具结果的多行预览只在确实有内容被隐藏时显示 `…`。** 以前结尾的换行会被当成多了
+  一条记录，误显示 `…`；按条数上限丢掉内容时，反而可能不显示。
 
 ## [0.5.2-rc.1] - 2026-10-17
 
@@ -146,9 +146,6 @@ dsh --profile pi-tui
 - **无粘贴标记的终端中，多行粘贴改为在第一个 Enter 提交**；支持粘贴标记的终端行为不变。
 
 ### 修复
-
-- 全屏下用鼠标点击编辑器区域后，Task Quick 的 `↓` 入口与其 `↓ view` 提示不再失效，
-  编辑器的导航键优先权、历史面板的按键归属与面板焦点状态也保持一致。
 
 - 新建或切换 Session 后，同名 Skill 命令、未确认提交的草稿与 `↑` 历史都不再丢失。
 
@@ -1507,8 +1504,8 @@ dsh --profile pi-tui
 - 全屏布局、Ctrl+F 搜索、主题系统。
 - 单包发布模型。
 
-[Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/next-v0.5.3...HEAD
-[0.5.3]: https://github.com/XMoon/dsh-pi-tui/compare/next-v0.5.2-rc.1...next-v0.5.3
+[Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/v0.5.3...HEAD
+[0.5.3]: https://github.com/XMoon/dsh-pi-tui/compare/next-v0.5.2-rc.1...v0.5.3
 [0.5.2-rc.1]: https://github.com/XMoon/dsh-pi-tui/compare/v0.5.1...next-v0.5.2-rc.1
 [0.5.1]: https://github.com/XMoon/dsh-pi-tui/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/XMoon/dsh-pi-tui/compare/v0.4.9...v0.5.0

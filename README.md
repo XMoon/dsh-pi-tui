@@ -38,8 +38,8 @@ dsh --profile pi-tui
 > `@deepseek-ai/dsh@alpha` 指向 `0.2.1-alpha.5`，而 `@xmoon76/dsh-pi-tui@next`
 > 仍指向 `0.5.2-rc.1`（peer floor `>=0.2.0-rc.2`，npm semver 不接受不同
 > major.minor.patch tuple 的 prerelease）。请以下方版本对应表和
-> [兼容性文档](docs/dsh-compatibility.md) 的精确配对为准；前向 TUI 线 `0.5.3`
-> 尚未发布，因此在它发布前，这两个移动 channel 上没有可安装的兼容组合。
+> [兼容性文档](docs/dsh-compatibility.md) 的精确配对为准；稳定版 `0.5.3` 发布在
+> `@latest` 而不是 `@next`，因此这两个移动 channel 上没有可安装的兼容组合。
 > 本 checkout 的精确验证请使用 `pnpm compat:dsh:npm`。
 
 隔离的 npm 驱动仍按本 checkout 声明的精确 DSH 版本运行，并执行完整的
@@ -60,28 +60,26 @@ pnpm compat:dsh:npm
 
 | TUI 包版本 | 对应的官方 DSH tags | 说明 |
 |---|---|---|
-| `0.5.1`（stable / `@latest`） | `dsh-v0.2.0-rc.2` | 当前已发布稳定版；最低与精确验证目标均为 0.2.0-rc.2 family |
-| `0.5.3`（next 线候选，尚未发布、未占 tag） | `dsh-v0.2.1-rc.2` | 当前候选身份：最低与精确验证目标均为 0.2.1-rc.2 family；reserved candidate，尚未打 tag 或发布，也**不是**当前 `@next` dist-tag（`@next` 仍是 `0.5.2-rc.1`） |
-| `dsh-v0.2.1-rc.1`（无配对 TUI） | 无 | 该中间版本没有本矩阵宣称兼容的已发布 TUI；不要为它复用 `0.5.3` |
+| `0.5.3`（stable / `@latest`） | `dsh-v0.2.1-rc.2` | 当前已发布稳定版；最低与精确验证目标均为 0.2.1-rc.2 family |
+| `0.5.1`（stable，历史） | `dsh-v0.2.0-rc.2` | 上一稳定版；最低与精确验证目标均为 0.2.0-rc.2 family |
 | `0.5.2-rc.1`（next 通道预览，已发布） | `dsh-v0.2.0-rc.2` | 上一轮 next 预览：已发布到 npm `next` 通道（2026-10-17）；整套 peer floor 仍是 `>=0.2.0-rc.2`，不覆盖 0.2.1-rc.2 |
+| `dsh-v0.2.1-rc.1`（无配对 TUI） | 无 | 该中间版本没有本矩阵宣称兼容的已发布 TUI；不要为它复用 `0.5.3` |
 | `0.5.0`（stable，历史） | `dsh-v0.1.7-rc.2`、`dsh-v0.2.0-rc.1` | 上一稳定版；最低 0.1.7-rc.2，精确验证目标 0.2.0-rc.1 |
 | `0.4.9`（stable，历史） | `dsh-v0.1.7-rc.2` | 上一稳定版；0.1.7-rc.2 runtime 的兼容 TUI |
 | `0.4.8`（stable，历史） | `dsh-v0.1.7-rc.1` | 上一稳定版；0.1.7-rc.1 runtime 的兼容 TUI |
 | `0.4.6`（stable，历史） | `dsh-v0.1.5-rc.1`、`dsh-v0.1.5-rc.2` | 上一稳定版；0.1.5 runtime 的兼容 TUI |
 | `0.4.7-alpha.2`（next，历史） | `dsh-v0.1.6-alpha.2` | 上一条 next 线；0.1.6-alpha.2 runtime 的兼容 TUI |
 
-不要把稳定线与 `@next` 预发布线混装。`0.5.3` 是当前 next 线候选身份：它的最低
-DSH 版本（peer floor）与精确验证目标都是已发布的 `0.2.1-rc.2` family；在完成资格
-验证并按流程打 tag 之前，它只是 reserved candidate，不代表已发布。中间的
+不要把稳定线与 `@next` 预发布线混装。`0.5.3` 是当前已发布稳定版：它的最低 DSH
+版本（peer floor）与精确验证目标都是 `0.2.1-rc.2` family。中间的
 `dsh-v0.2.1-rc.1` 没有配对 TUI，`0.5.2-rc.1` 是上一轮已发布到 npm `next` 通道的
-预览身份（配对 0.2.0-rc.2；它不覆盖 0.2.1-rc.2，因此本候选线使用新身份
-`0.5.3`）。已发布的稳定版 `0.5.1` 继续配对
-0.2.0-rc.2：它把整个 DSH peer floor 提升到 `>=0.2.0-rc.2`（Question 生命周期消费
-rc.2 才发布的公开契约）。上一稳定版 `0.5.0` 保持 `>=0.1.7-rc.2` floor 不变
-（精确验证目标 0.2.0-rc.1）；旧 runtime 会在正常的不兼容边界以非零状态失败，
-请按上表安装配对的 TUI 线。完整的历史兼容矩阵和 fallback 命令见
-[兼容性文档](docs/dsh-compatibility.md)；要查看 `@next` 的最新集成状态，请看
-[next 分支 README](https://github.com/XMoon/dsh-pi-tui/blob/next/README.md)。
+预览身份（配对 0.2.0-rc.2；它不覆盖 0.2.1-rc.2，因此新的稳定线使用 `0.5.3`
+身份）。上一稳定版 `0.5.1` 继续配对 0.2.0-rc.2：它把整个 DSH peer floor 提升到
+`>=0.2.0-rc.2`（Question 生命周期消费 rc.2 才发布的公开契约）。更早的 `0.5.0`
+保持 `>=0.1.7-rc.2` floor 不变（精确验证目标 0.2.0-rc.1）；旧 runtime 会在正常的
+不兼容边界以非零状态失败，请按上表安装配对的 TUI 线。完整的历史兼容矩阵和
+fallback 命令见[兼容性文档](docs/dsh-compatibility.md)；要查看 `@next` 的最新集成
+状态，请看 [next 分支 README](https://github.com/XMoon/dsh-pi-tui/blob/next/README.md)。
 
 新的 Agent preset 使用当前 roster 中选定的 id。DSH 允许合法的自定义
 `code` preset；只要当前 roster 存在它，显式输入和持久化状态都会保留 `code`。

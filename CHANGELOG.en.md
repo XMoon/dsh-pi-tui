@@ -7,104 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Added
-
-- **`/plugins` and the first-level `Settings → Plugins` category are the same
-  fullscreen Plugin Manager.** The catalog is grouped as TUI & Extensions /
-  Official DSH / Third-party / Experimental (the Experimental group is always
-  last), with a one-column narrow layout and a two-column wide layout, search,
-  status filters, provenance/status facts and one keyboard/mouse action path.
-  The 14 official optional/on-demand bundles come from the real Host catalog:
-  shipped bundles can be toggled, a missing bundle with an official
-  `installTarget` goes through inspect → confirm → install, and the page shows
-  the actual installed version, pending build scripts, restart requirements and
-  Host-reported failures. Returning from Settings restores its category, scroll
-  and selection, and leaving the install page never cancels the background
-  operation.
-
-- **The Plugin Manager Experimental Detail now states real terminal boundaries
-  and the correct upgrade path.** Each of the 14 official rc.2 bundles shows a
-  fixed TUI surface plus limits/risks (which are Web-only, which are reachable
-  only through the existing Tool/Job/Activity/`/skill`/title surfaces, the
-  B04 WEB_ONLY/Host-row-pending boundary accepted by the Owner, and the
-  verified B13/B14 one-shot/provider boundaries). That copy follows the exact official
-  identity only and never turns enablement into a "Host capability PASS". The
-  upgrade guidance uses Host facts: upgrade with the DSH installation, Remove
-  then explicitly install a profile-owned bundle, use the official on-demand
-  target, or leave the Current TUI bundle to its external manager. There is no
-  in-place update, version picker or silent reinstall.
-- **`/model` can select the rc.2 `deepseek-flash` model directly.** Candidates
-  come only from the Host catalog and are searched/submitted by the exact
-  `(provider, model)` identity (the display name `DeepSeek-V4.1-Flash` is never
-  the ID), with the official Session/global default read-back. A deployment
-  catalog without the ID shows no invented row.
-
-### Changed
-
-- **The `/settings → Other → Web Search / Fetch` help now carries the real
-  facts.** Both DeepSeek APIs are separate opt-in billed providers that a login
-  or an ordinary Messages plan does not guarantee coverage; the default
-  Messages/HTTP pair calls no billed API and is not changed by installing or
-  enabling another bundle (this is base-profile Web configuration, not an
-  Optional Bundle). `Share Original Question` defaults to on and sends only up
-  to 128 characters of the triggering question (`ori_question`, never the full
-  history or system prompt); the endpoint must be trusted HTTPS and receives
-  the credential plus query; a value reads `Verified` only after the Host write
-  and its authoritative read-back agree.
-- **The Settings Plugins Rows pane now exposes `Open Plugin Manager`.** On the
-  multi-column projection the Rows column paints one real clickable navigation
-  row (`Rows (1)`); Enter, Right and a mouse click open the same Plugin Manager
-  page with no extra level or second focus. The narrow projection keeps the
-  existing one-step entry.
-- **Disabling or removing Auto Review now asks for the risk confirmation
-  first.** The shared confirmation states that disabling can move existing Auto
-  sessions to Full access and that Auto Review is not a sandbox, defaults to
-  Cancel, and performs no Host write before the explicit choice; cancel, stale
-  confirmations and invisible narrow-screen actions never change permissions.
-  Removing Auto Review shows the same warning.
-
-- **Snapshot injections such as `time-context` no longer split one turn's Activity/Thought
-  into multiple blocks.** Compact folds them with the Activity; Focus hides them inside the
-  Thought and restores each exactly once in raw order when expanded; Full keeps the original
-  chronology and Context cards. A mixed `instructions`/`catalog` + Snapshot cluster keeps its
-  current behavior, and Snapshot rows still contribute no tool count or elapsed time. A
-  `tool-jobs` completion notice delivered through `next-step` during the same working turn
-  folds with the Activity/Thought too; idle `next-turn` wakeups, unproven/foreign notices and
-  `relay`/`recall` Context remain independent.
-
-### Fixed
-
-- **The Plugin Manager no longer advertises a fake `Enter` on zero-body-row
-  frames (e.g. 80×2).** When the current frame painted no selectable
-  action/choice, the list/details/confirm bar drops `Enter` and the list
-  Enter/Right admission also refuses to open an invisible card's Details,
-  including a key pressed after a resize but before the repaint; `Esc` stays. Search editing keeps its `Enter apply` hint because that action
-  still executes; the other hints return with the body.
-
-- **Selecting the B03 Auto permission preset keeps the current permission
-  fact in the footer.** Auto was missing from the builtin permission label map,
-  so switching to it made the whole Permission badge disappear; it now renders
-  `[auto]` (and keeps the same fact in compact/plain formats), matching the
-  official preset's current value.
-
-- **Human prompts now carry the sending TUI process's time zone**, so the official
-  `time-context` injection no longer reports `Browser time zone ... unavailable` for ordinary
-  requests: the Direct main session and both Direct/Remote continuable child follow-ups sample
-  the `Intl` zone at submit time and write it into the official request metadata, while the
-  Remote main session keeps sampling through the official `SessionFace`. That zone is the TUI
-  process's (inside SSH or a container, that host process's `TZ`) — not the terminal observer's
-  real zone; when the process reports no usable zone, the send is refused before dispatch with
-  the draft restored, never fabricated.
-
-## [0.5.3] - 2026-10-17
+## [0.5.3] - 2026-10-20
 
 ### Install and version pairing
 
-This candidate moves the DSH baseline onto the released `0.2.1-rc.2` family: the
-peer floor is `>=0.2.1-rc.2` and the exact validation target is `0.2.1-rc.2`.
-`0.5.3` is still a reserved next-line candidate: it carries no tag and is not
-published to npm, so the TUI install command below takes effect only after that
-release. Installing DSH requires explicitly allowing its native install scripts:
+This release raises the minimum DSH version to the published `0.2.1-rc.2`, which
+is also the exact validation target. Installing DSH requires explicitly allowing
+its native install scripts:
 
 ```sh
 npm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty @deepseek-ai/dsh@0.2.1-rc.2
@@ -112,18 +21,102 @@ dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@0.5.3
 dsh --profile pi-tui
 ```
 
-The intermediate `@deepseek-ai/dsh@0.2.1-rc.1` has no paired TUI. The older-runtime
-pairings are unchanged: `@deepseek-ai/dsh@0.2.0-rc.2` uses
+`@deepseek-ai/dsh@0.2.1-rc.1` has no paired TUI. Older DSH releases keep their
+pairings: `@deepseek-ai/dsh@0.2.0-rc.2` uses
 `@xmoon76/dsh-pi-tui@0.5.1` or `@xmoon76/dsh-pi-tui@0.5.2-rc.1`;
 `@deepseek-ai/dsh@0.2.0-rc.1` (including `0.1.7-rc.2`) uses
 `@xmoon76/dsh-pi-tui@0.5.0`, and `@deepseek-ai/dsh@0.1.7-rc.1` uses
 `@xmoon76/dsh-pi-tui@0.4.8`.
 
+### Added
+
+- **Plugin management now lives on one fullscreen page.** `/plugins` and the
+  first-level `Plugins` category in Settings now open the same Plugin Manager:
+  grouped as TUI & Extensions / Official DSH / Third-party / Experimental, with
+  search, filters and both keyboard and mouse. The 14 official plugins come from
+  the real DSH catalog: installed ones can be enabled or disabled, missing
+  official ones can be installed after confirmation, and the page shows the
+  installed version, scripts waiting for approval and whether a restart is needed.
+- **Experimental plugins now say exactly what they can and cannot do in the
+  terminal.** Each official experimental plugin shows its available surfaces and
+  limits (some work only in the Web UI, some only through the existing
+  tools/jobs/activity/`/skill`/title surfaces), and enabling one never turns that
+  into "the Host supports it". The upgrade path is spelled out as well: upgrade
+  with DSH, remove and reinstall from the profile, or leave it to external
+  management; there is no in-place update or silent reinstall.
+- **`/model` can select the `deepseek-flash` model that ships with DSH 0.2.1-rc.2.**
+  Candidates come only from the DSH model catalog and are searched/submitted by
+  the exact `(provider, model)` identity; the display name is never used as the ID.
+- **When a session changes its working directory, the UI follows the new
+  directory.** The footer, history, `!` shell, `@` completion, skill catalog and
+  command execution read the directory that is actually in effect; the session
+  list, archive export and new sessions still use the original project directory.
+- **New `/settings → Other → Web Search / Fetch` entry.** It reuses the existing
+  settings editor: choose either DeepSeek API, see where the API key comes from
+  and edit the endpoint. A save counts only when the Host reads back the same
+  value, so `Verified` appears only on a matching write and read-back. The default
+  Messages/HTTP pair calls no billed API; `Share Original Question` sends at most
+  128 characters of the triggering question (never the full history or system
+  prompt), and the endpoint must be trusted HTTPS.
+- **The Task Center shows tasks run by external providers.** They have no local
+  child session, so they appear as their own row marked
+  `External · no local session`; selecting one explains why, never opens a missing
+  detail page and never offers Stop/Continue. Local child sessions are unchanged.
+
 ### Changed
 
-- **Requires DeepSeek Harness `0.2.1-rc.2` and drops the intermediate
-  `0.2.1-rc.1`.** The published older-runtime pairings are unchanged (see the
-  table above); upgrading from an older runtime follows that pairing table.
+- **Requires DeepSeek Harness `0.2.1-rc.2` and drops `0.2.1-rc.1`.** Older DSH
+  releases keep their pairings (see the install notes above); when upgrading from
+  an older DSH, pick the TUI version from that pairing.
+- **The Settings Plugins page now has `Open Plugin Manager`.** Wide and medium
+  layouts can click that row in the Rows column, or press Enter/Right; the narrow
+  layout still opens it in one step.
+- **Disabling or removing Auto Review now asks for confirmation first.** The
+  confirmation explains that this can turn existing Auto sessions into Full
+  access and that Auto Review is not a sandbox; it defaults to Cancel and changes
+  nothing on the Host until confirmed.
+
+- **Snapshot injections such as `time-context` no longer split one turn's
+  Activity/Thought.** Compact folds them into the Activity, Focus hides them in
+  the Thought and restores them in their original order when expanded, and Full
+  keeps the original layout; same-turn background-job notices fold the same way,
+  while idle wakeups and other Context stay separate.
+
+### Fixed
+
+- **The Plugin Manager no longer shows a fake `Enter` hint when the body has
+  nothing to display.** In an 80×2 window with no body rows, the action bar no
+  longer advertises `Enter` and Enter/Right cannot open an invisible card; `Esc`
+  still works, and the search editor keeps its `Enter apply` hint because that
+  action really runs.
+
+- **Choosing the B03 Auto permission preset keeps the current permission in the
+  footer.** Auto was missing from the built-in permission labels, so the badge
+  disappeared when it was selected; it now shows `[auto]` (also in compact/plain
+  formats).
+
+- **Outgoing messages now carry the time zone of the process running the TUI.**
+  The official `time-context` no longer reports
+  `Browser time zone ... unavailable`: the Direct main session and continuable
+  child follow-ups read the zone when the message is sent, Remote keeps reading it
+  through the official `SessionFace`, and when no usable zone is available the
+  message is refused before sending and the draft is restored instead of
+  inventing one.
+
+- **Text from the Host, models and tools is now filtered before it reaches the
+  terminal.** Single-row text and multi-line prose are handled separately, so
+  embedded terminal control sequences or line breaks can no longer split a row or
+  add a phantom one; Job output keeps its allowed colour styles, and raw records,
+  search and copy still use the original text.
+
+- **Clicking the editor area with the mouse in fullscreen no longer disables Task
+  Quick's `↓` entry or its `↓ view` hint**, and the editor's navigation-key
+  priority, the history panel's key ownership and the panel focus state stay
+  consistent.
+
+- **A tool result's multi-line preview shows `…` only when something really is
+  hidden.** A trailing newline used to count as an extra record (a false marker),
+  while dropping records at the count limit could show nothing.
 
 ## [0.5.2-rc.1] - 2026-10-17
 
@@ -197,10 +190,6 @@ uses `@xmoon76/dsh-pi-tui@0.4.8`.
   `Enter`**; terminals that support paste markers are unchanged.
 
 ### Fixed
-
-- Clicking the editor area with the mouse in Transcript Fullscreen no longer breaks the
-  Task Quick `↓` entry or its `↓ view` hint, and the editor's navigation-key priority, the
-  History panel's key ownership and its focus state stay correct too.
 
 - Input is no longer lost after a new or switched Session: same-name Skill commands, an
   unacknowledged draft and `↑` recall all survive.
@@ -1925,8 +1914,8 @@ Users who must keep DSH `0.1.1-rc.2` should use `@xmoon76/dsh-pi-tui@0.3`.
 - Fullscreen layout, Ctrl+F transcript search, theme system.
 - Single-package release model.
 
-[Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/next-v0.5.3...HEAD
-[0.5.3]: https://github.com/XMoon/dsh-pi-tui/compare/next-v0.5.2-rc.1...next-v0.5.3
+[Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/v0.5.3...HEAD
+[0.5.3]: https://github.com/XMoon/dsh-pi-tui/compare/next-v0.5.2-rc.1...v0.5.3
 [0.5.2-rc.1]: https://github.com/XMoon/dsh-pi-tui/compare/v0.5.1...next-v0.5.2-rc.1
 [0.5.1]: https://github.com/XMoon/dsh-pi-tui/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/XMoon/dsh-pi-tui/compare/v0.4.9...v0.5.0
