@@ -63,7 +63,7 @@ import type { TerminalNotificationPresentation } from '../src/app/surface/notifi
 import type { TranscriptFolder } from '../src/domain/transcript/folder.ts'
 import { TranscriptWindowController } from '../src/domain/transcript/window.ts'
 import type { PiTuiTerminalProgressFrame } from '../src/runtime/remote/pi-tui-terminal-progress-contract.ts'
-import { createPluginManagerPanel } from '../src/tui/plugin-manager/panel.ts'
+import { createPluginManagerWorkspacePanel } from '../src/tui/plugin-manager/workspace.ts'
 import { isTernTerminal } from '../src/tui/terminal/tern.ts'
 import type { TerminalProgressState } from '@xmoon76/pi-tui'
 import { installVirtualProcessTerminal } from './support/runner-harness.ts'
@@ -221,7 +221,7 @@ function mountSurfaceProbe(
     notificationMethod: undefined,
     terminalProgress: undefined,
     mainProgressAuthority: 'host-snapshot',
-    createPluginManagerPanel,
+    createPluginManagerPanel: createPluginManagerWorkspacePanel,
   })
   surface.attachEventRouting(minimalRoutingSource(sessionId, viewedChildId))
   surface.setCompletionOwner(sessionId)

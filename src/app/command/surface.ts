@@ -292,7 +292,7 @@ export interface CommandSurfaceDeps<Selection extends ModelSelectionValue, Exact
   /** The profile-wide Plugin Manager controller (never session-owned). */
   readonly pluginManager: {
     open(): void
-    submenu(done: (selected?: string) => void): ReturnType<TuiCommandRunner['createPluginManagerSubmenu']>
+    page(done: () => void): ReturnType<TuiCommandRunner['createPluginManagerPage']>
   }
   /** The shared client clipboard delivery policy. */
   readonly client: {
@@ -1111,7 +1111,7 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
       // `/plugins` opens the profile-wide Plugin Manager panel (P1-A). It is
       // NOT session-owned: it never creates or switches a Session.
       openPluginManager: () => deps.pluginManager.open(),
-      createPluginManagerSubmenu: (done) => deps.pluginManager.submenu(done),
+      createPluginManagerPage: (done) => deps.pluginManager.page(done),
       // The attachment-intake UX fence: the ONE production reader of the
       // transition gate. Staging an attachment while a transition is in flight
       // (quiesce → commit) would inject a draft into a session about to be

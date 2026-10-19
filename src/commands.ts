@@ -667,12 +667,12 @@ export interface TuiCommandRunner {
    */
   openPluginManager(): void
   /**
-   * Build the SAME Plugin Manager panel as a lazy `/settings` submenu
-   * component (`/settings → Plugins  Manage…`). The single runner-owned
-   * controller owns operation state; `done` returns to the Settings list.
-   * Opening `/settings` alone never calls this (no eager inventory read).
+   * Build the SAME Plugin Manager page as a lazy `Settings → Plugins` inline
+   * page. The single runner-owned controller owns operation state; `done`
+   * returns to Settings. Opening `/settings` alone never calls this (no eager
+   * inventory read).
    */
-  createPluginManagerSubmenu(done: (selected?: string) => void): Component
+  createPluginManagerPage(done: () => void): Component | undefined
   /**
    * Open the conversation rewind picker (plan: the ONE entry shared by the
    * idle empty-editor double-Esc and `/rewind`). The runner decides what

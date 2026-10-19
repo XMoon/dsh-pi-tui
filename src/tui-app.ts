@@ -1573,6 +1573,14 @@ export interface SettingsWorkspaceOpenOptions {
    * workspace is read-only and its edit verbs report that no writer exists.
    */
   readonly onCommit?: (request: SettingsWorkspaceCommitRequest) => Promise<SettingsWorkspaceCommitOutcome>
+  /**
+   * The lazy factory of the ONE Plugin Manager page hosted INSIDE this
+   * Settings workspace (`Settings → Plugins`). The app owner supplies it from
+   * the shared surface Plugin Manager runtime; it is invoked only when the
+   * Plugins category is activated. `done` is the page's normal close path back
+   * to Settings.
+   */
+  readonly onOpenPlugins?: (done: () => void) => import('@xmoon76/pi-tui').Component | undefined
   /** Fired once when the workspace is torn down by ANY path. */
   readonly onClose?: () => void
   /** The row this open selects first (the Web Settings return path,
@@ -1618,10 +1626,20 @@ export interface SettingsWorkspaceHandle {
  * it is MUTUALLY EXCLUSIVE with the Job lease: at most one workspace owns the
  * terminal at any time.
  */
-interface SettingsWorkspaceRecord {
+/** The layout-root panel a workspace lease hosts (Settings or Plugin page). */
+type WorkspaceLeasePanel = Component & {
+  dispose?(): void
+  onCellPress?(x: number, y: number): void
+  onCellClick?(x: number, y: number): void
+  handleMouse?(event: TuiMouseEvent): TuiMouseEventResult | undefined
+}
+
+/** The ONE temporary fullscreen workspace lease (Settings OR Plugin root). */
+interface WorkspaceLeaseRecord {
+  readonly kind: 'settings' | 'plugin'
   readonly token: object
   readonly screen: TuiAltScreen
-  readonly panel: SettingsWorkspacePanel
+  readonly panel: WorkspaceLeasePanel
   readonly returnScreen: TuiMainScreen | TuiAltScreen
   readonly returnFocus: Component | null
   /** Latch + release this instance's screen and panel exactly once. */
@@ -2975,7 +2993,7 @@ export class TuiApp {
    * freeze latch and one `activeScreen` derivation, so no two physical owners
    * can ever coexist.
    */
-  private settingsWorkspace: SettingsWorkspaceRecord | undefined
+  private settingsWorkspace: WorkspaceLeaseRecord | undefined
   /**
    * Nesting depth of the windows that refuse a NEW workspace screen lease
    * (Job OR Settings) even though the surface is not disposed. Two kinds of
@@ -5563,7 +5581,7 @@ export class TuiApp {
     // keeps input out of the hidden editor, transcript and host actions.
     if (this.settingsWorkspace !== undefined) {
       this.clearExitConfirmation()
-      this.settingsWorkspace.panel.handleInput(data)
+      this.settingsWorkspace.panel.handleInput?.(data)
       return { consume: true }
     }
     // The subagent viewer input policy is MODE-AWARE:
@@ -21006,32 +21024,6 @@ export class TuiApp {
     return () => handle?.hide()
   }
 
-  /**
-   * Host the shared Plugin Manager panel (P1-A) as a standalone overlay. The
-   * panel/controller are runner-owned and outlive this overlay: hiding the
-   * panel never cancels an active install (plan §10.5/§17). `onClosed` fires
-   * on every hide path so the runner can drop its active-host reference.
-   * Returns the closer.
-   */
-  openPluginManagerPanel(panel: Component, onClosed?: () => void): () => void {
-    // A finally-disposed surface must not mount a live panel whose controller
-    // hook could repaint into a dead app.
-    if (this.disposed) return () => {}
-    const configuredWidth = 76
-    const configuredMaxHeight = 28
-    const geometryOf = (): ResponsiveOverlayGeometry => {
-      const width = Math.max(1, Math.min(this.terminal.columns, configuredWidth))
-      const maxHeight = Math.max(1, Math.min(this.terminal.rows, configuredMaxHeight))
-      return { width, maxHeight, key: `${this.terminal.columns}:${this.terminal.rows}:${width}:${maxHeight}` }
-    }
-    const budgetAware = panel as Component & { setMaxRows?: (rows: number) => void }
-    const frame = new ResponsiveOverlayFrame(panel, geometryOf, geometry => {
-      budgetAware.setMaxRows?.(Math.max(1, geometry.maxHeight - 2))
-    }, onClosed)
-    const handle = this.showOverlayOnHost(frame, { width: configuredWidth, maxHeight: configuredMaxHeight })
-    return () => handle.hide()
-  }
-
   /** Track an action-first editor even when it is nested inside the
    * SettingsList submenu rather than mounted as a standalone overlay. The
    * returned unregister callback is idempotent. */
@@ -21433,41 +21425,8 @@ export class TuiApp {
     source: SettingsWorkspaceSource,
     options: SettingsWorkspaceOpenOptions,
   ): SettingsWorkspaceHandle {
-    if (this.disposed) throw new Error('cannot lease a Settings workspace screen on a disposed surface')
-    // A lifecycle transition (stop/suspend) or a blocking owner's commit window
-    // owns the surface right now: a lease opened here would outlive the stop or
-    // coexist with the blocking owner, so it is refused.
-    if (this.workspaceLeaseFreezeDepth > 0) {
-      throw new Error('cannot lease a Settings workspace screen while the surface is completing a transition')
-    }
-    if (this.jobWorkspace !== undefined || this.settingsWorkspace !== undefined) {
-      throw new Error('a workspace screen is already leased')
-    }
-    // A blocking owner outranks the Settings workspace: refuse the lease and
-    // leave the current keyboard owner untouched.
-    if (this.activeQuestions !== undefined || this.approvals.isActive() || this.activeSaveLocation !== undefined) {
-      throw new Error('a blocking modal owns the surface')
-    }
-    if (this.taskQuick.focused) {
-      // A workspace lease retires the transient Quick owner instead of restoring
-      // it after close. Focus changes are synchronous callback boundaries, so
-      // re-prove that no newer owner took the surface before capturing return focus.
-      this.leaveTaskQuick()
-      if (this.disposed) throw new Error('cannot lease a Settings workspace screen on a disposed surface')
-      if (this.workspaceLeaseFreezeDepth > 0) {
-        throw new Error('cannot lease a Settings workspace screen while the surface is completing a transition')
-      }
-      if (this.jobWorkspace !== undefined || this.settingsWorkspace !== undefined) {
-        throw new Error('a workspace screen is already leased')
-      }
-      if (this.activeQuestions !== undefined || this.approvals.isActive() || this.activeSaveLocation !== undefined) {
-        throw new Error('a blocking modal owns the surface')
-      }
-    }
-    const returnScreen: TuiMainScreen | TuiAltScreen = this.fullscreen ?? this.tui
-    const returnFocus = returnScreen.getFocusedComponent()
-    const token: object = {}
-    let record: SettingsWorkspaceRecord
+    this.assertWorkspaceLeaseAvailable('Settings')
+    let record: WorkspaceLeaseRecord
     const panel = new SettingsWorkspacePanel(source, {
       rows: () => this.terminal.rows,
       columns: () => this.terminal.columns,
@@ -21475,14 +21434,14 @@ export class TuiApp {
       notice: () => this.currentNotice(),
       onClose: () => record.close(),
       onOpenLegacy: (targetId?: string) => openLegacy(targetId),
+      ...(options.onOpenPlugins === undefined ? {} : { onOpenPlugins: options.onOpenPlugins }),
       // The clipboard capability stays the SAME Client-local `copySelection` the
       // rest of the surface already uses; the settlement re-proves THIS workspace
-      // record before it may notify, so a stale copy that lands after the user
-      // left Settings can never repaint or address a replacement surface.
+      // record before it may notify.
       onCopy: (text) => {
         const copy = this.copySelection
         const runner = this.events.runOwned
-        if (copy === undefined || runner === undefined || finalized || this.settingsWorkspace !== record) {
+        if (copy === undefined || runner === undefined || this.settingsWorkspace !== record) {
           if (this.settingsWorkspace === record) this.notify('Copy failed', 'error')
           return
         }
@@ -21503,9 +21462,7 @@ export class TuiApp {
       // The ONE owned write channel of a writable row (B2-B). The command owns
       // the Host semantics; this surface only runs it through its owned task
       // entry and re-proves THIS workspace record before the settlement may
-      // repaint: a write that lands after the user left Settings can never
-      // address a replacement surface (the panel drops it a second time through
-      // its own request identity).
+      // repaint.
       onCommit: (request, settle) => {
         const commit = options.onCommit
         const runner = this.events.runOwned
@@ -21530,71 +21487,16 @@ export class TuiApp {
       // row.
       ...options.initialRowId === undefined ? {} : { initialRowId: options.initialRowId },
     })
-    const screen = new TuiAltScreen(this.terminal, undefined, undefined, {
-      deferViewportListener: true,
-      copySelection: this.copySelection,
-      wheelScrollLines: this.wheelScrollLines,
-      // The row cells and the Detail's Copy button are plain painted cells (no
-      // mouse-handling component), so their same-cell press/click arrives here
-      // and the panel re-proves the press-time painted identity before acting.
-      onCellPress: (x, y) => panel.onCellPress(x, y),
-      onCellClick: (x, y) => panel.onCellClick(x, y),
-    })
-    screen.setLayoutRoot(panel)
-    // The workspace defines its OWN copy verb (the painted `Copy value` button /
-    // `C` in the Detail view): the fork's native copy-on-select would otherwise
-    // put a click's character onto the clipboard on a plain click (and a rapid
-    // double-click could clobber the button's payload). B2-A has no drag-copy
-    // contract, so the native path is suspended for this screen.
-    screen.setCopyOnSelect(false)
-    screen.addInputListener((data) => this.routeInput(data))
-    screen.installViewportListener()
-    screen.addInputListener((data) => this.protocolSinkFence(data))
-
-    let finalized = false
-    /** The instance latch + detach: idempotent and non-throwing, committed
-     *  BEFORE any callback of this workspace, so a re-entrant closer can never
-     *  act twice and a stale record can never be treated as the owner. */
-    const finalizeOnce = (): void => {
-      if (finalized) return
-      finalized = true
-      if (this.settingsWorkspace === record) this.settingsWorkspace = undefined
-    }
-    const close = (): void => {
-      if (finalized) return
-      // ONE ordered non-truncating batch: the latch first, then the screen and
-      // panel release, the return-surface restore and the exactly-once owner
-      // notification — a throwing sibling never strands another obligation. The
-      // restore runs BEFORE the notification, so a synchronously opened legacy
-      // editor observes (and may legitimately mount on) the restored surface.
-      runSyncDisposalSteps('settings workspace close', [
-        finalizeOnce,
-        () => screen.stop({ preserveScreen: true }),
-        () => panel.dispose(),
-        () => {
-          // Restore ONLY while no newer physical owner exists: a callback during
-          // the release above may have leased a newer workspace or legitimately
-          // swapped the surface, and a stale workspace never overwrites it.
-          if (!this.disposed && this.settingsWorkspace === undefined && this.activeScreen === returnScreen) {
-            this.resumeReturnSurface(returnScreen, returnFocus)
-          }
-        },
-        () => { options.onClose?.() },
-      ])
-    }
+    record = this.leaseWorkspaceScreen('settings', panel, options.onClose)
+    const close = (): void => record.close()
     /** The compatibility bridge: retire THIS workspace and restore the surface it
      *  paused BEFORE the existing settings editor can mount — the legacy
      *  `app.openSettings()` call may synchronously re-enter, so the lease must
      *  already be gone. A failed open restores the main surface with a real error
      *  and never resurrects the closed workspace. */
     const openLegacy = (targetId?: string): void => {
-      if (finalized) return
+      if (this.settingsWorkspace !== record) return
       close()
-      // `close()` runs the owner notification (and any screen-focus callback)
-      // synchronously: a NEWER owner may have taken the surface — a workspace
-      // lease, a blocking Question/Approval/Save, or a different physical
-      // screen. The legacy editor must never mount on top of any of them, and a
-      // disposed surface must not mount one at all.
       if (this.disposed) return
       if (
         this.jobWorkspace !== undefined ||
@@ -21602,7 +21504,7 @@ export class TuiApp {
         this.activeQuestions !== undefined ||
         this.approvals.isActive() ||
         this.activeSaveLocation !== undefined ||
-        this.activeScreen !== returnScreen
+        this.activeScreen !== record.returnScreen
       ) {
         this.notify('could not open the settings editor: the surface changed', 'error')
         return
@@ -21615,14 +21517,108 @@ export class TuiApp {
         }
       }
     }
-    /** A synchronous callback during ANY physical step of the open sequence may
-     *  close or replace THIS workspace. The stale opener must then abandon its
-     *  own sequence (the catch below rethrows) instead of starting a screen for
-     *  a record that is already gone. */
-    const assertStillOpening = (): void => {
-      if (finalized) throw new Error('the Settings workspace was superseded while it was opening')
+    return {
+      close,
+      refreshRow: (rowId, facts) => {
+        if (this.disposed || this.settingsWorkspace !== record || record.kind !== 'settings') return
+        ;(record.panel as SettingsWorkspacePanel).refreshRow(rowId, facts)
+        this.requestRender()
+      },
     }
-    record = { token, screen, panel, returnScreen, returnFocus, finalizeOnce, close }
+  }
+
+  /**
+   * Refuse a workspace lease unless the surface is idle and unclaimed. A
+   * lifecycle transition, a Job lease, a second workspace, or a blocking
+   * Question/Approval/Save owner all refuse; a focused Task Quick is retired
+   * and the decision is re-proved before returning focus is captured.
+   */
+  private assertWorkspaceLeaseAvailable(which: string): void {
+    if (this.disposed) throw new Error(`cannot lease a ${which} workspace screen on a disposed surface`)
+    if (this.workspaceLeaseFreezeDepth > 0) {
+      throw new Error(`cannot lease a ${which} workspace screen while the surface is completing a transition`)
+    }
+    if (this.jobWorkspace !== undefined || this.settingsWorkspace !== undefined) {
+      throw new Error('a workspace screen is already leased')
+    }
+    if (this.activeQuestions !== undefined || this.approvals.isActive() || this.activeSaveLocation !== undefined) {
+      throw new Error('a blocking modal owns the surface')
+    }
+    if (!this.taskQuick.focused) return
+    this.leaveTaskQuick()
+    if (this.disposed) throw new Error(`cannot lease a ${which} workspace screen on a disposed surface`)
+    if (this.workspaceLeaseFreezeDepth > 0) {
+      throw new Error(`cannot lease a ${which} workspace screen while the surface is completing a transition`)
+    }
+    if (this.jobWorkspace !== undefined || this.settingsWorkspace !== undefined) {
+      throw new Error('a workspace screen is already leased')
+    }
+    if (this.activeQuestions !== undefined || this.approvals.isActive() || this.activeSaveLocation !== undefined) {
+      throw new Error('a blocking modal owns the surface')
+    }
+  }
+
+  /**
+   * The ONE temporary fullscreen lease primitive shared by the Settings
+   * workspace and the direct `/plugins` root: same Alt Screen start/stop,
+   * return-focus restore, re-entrant cleanup and mutual exclusion. It commits
+   * the record to `this.settingsWorkspace` BEFORE the physical switch, so every
+   * render request, input route and closer observes the same current owner.
+   */
+  private leaseWorkspaceScreen(
+    kind: 'settings' | 'plugin',
+    panel: WorkspaceLeasePanel,
+    onClose?: () => void,
+  ): WorkspaceLeaseRecord {
+    this.assertWorkspaceLeaseAvailable(kind === 'settings' ? 'Settings' : 'Plugin Manager')
+    const returnScreen: TuiMainScreen | TuiAltScreen = this.fullscreen ?? this.tui
+    const returnFocus = returnScreen.getFocusedComponent()
+    const token: object = {}
+    const screen = new TuiAltScreen(this.terminal, undefined, undefined, {
+      deferViewportListener: true,
+      copySelection: this.copySelection,
+      wheelScrollLines: this.wheelScrollLines,
+      onCellPress: (x, y) => panel.onCellPress?.(x, y),
+      onCellClick: (x, y) => panel.onCellClick?.(x, y),
+    })
+    screen.setLayoutRoot(panel)
+    screen.setCopyOnSelect(false)
+    screen.addInputListener((data) => this.routeInput(data))
+    screen.installViewportListener()
+    screen.addInputListener((data) => this.protocolSinkFence(data))
+
+    let finalized = false
+    let record!: WorkspaceLeaseRecord
+    /** The instance latch + detach: idempotent and non-throwing, committed
+     *  BEFORE any callback of this workspace, so a re-entrant closer can never
+     *  act twice and a stale record can never be treated as the owner. */
+    const finalizeOnce = (): void => {
+      if (finalized) return
+      finalized = true
+      if (this.settingsWorkspace === record) this.settingsWorkspace = undefined
+    }
+    const close = (): void => {
+      if (finalized) return
+      runSyncDisposalSteps(`${kind} workspace close`, [
+        finalizeOnce,
+        () => screen.stop({ preserveScreen: true }),
+        () => panel.dispose?.(),
+        () => {
+          // Restore ONLY while no newer physical owner exists.
+          if (!this.disposed && this.settingsWorkspace === undefined && this.activeScreen === returnScreen) {
+            this.resumeReturnSurface(returnScreen, returnFocus)
+          }
+        },
+        () => { onClose?.() },
+      ])
+    }
+    /** A synchronous callback during ANY physical step of the open sequence may
+     *  close or replace THIS workspace. The stale opener then abandons its own
+     *  sequence instead of starting a screen for a record that is already gone. */
+    const assertStillOpening = (): void => {
+      if (this.settingsWorkspace !== record) throw new Error(`the ${kind} workspace was superseded while it was opening`)
+    }
+    record = { kind, token, screen, panel, returnScreen, returnFocus, finalizeOnce, close }
     this.settingsWorkspace = record
     try {
       this.leaveTerminalPresentation()
@@ -21631,41 +21627,76 @@ export class TuiApp {
       assertStillOpening()
       screen.start()
       assertStillOpening()
-      // Mode 2031 is per screen: the freshly started screen syncs the CURRENT
-      // tracking choice now that it owns the terminal.
       screen.setTerminalColorSchemeNotifications(this.followingTerminalTheme)
-      // The stopped screen cleared the physical progress indicator; re-assert
-      // the desired state on the new owner and let it hear scheme reports.
       this.enterTerminalPresentation()
       assertStillOpening()
       this.refreshSchemeRegistrations()
       screen.setFocus(panel)
       this.completeScreenHandoff()
     } catch (error) {
-      // A failed mount must never leave half a surface: latch/detach THIS record,
-      // release its screen and panel, restore the surface that opened it, and
-      // rethrow the real failure. A re-entrant closer that already handled this
-      // record left `finalized` set, so every step below is skipped.
-      const alreadyClosed = finalized
-      runSyncDisposalStepsWithPrimary('settings workspace open unwind', error, [
+      const alreadyClosed = this.settingsWorkspace !== record
+      runSyncDisposalStepsWithPrimary(`${kind} workspace open unwind`, error, [
         finalizeOnce,
         () => { if (!alreadyClosed) screen.stop({ preserveScreen: true }) },
-        () => { if (!alreadyClosed) panel.dispose() },
+        () => { if (!alreadyClosed) panel.dispose?.() },
         () => {
           if (!alreadyClosed && !this.disposed && this.settingsWorkspace === undefined && this.activeScreen === returnScreen) {
             this.resumeReturnSurface(returnScreen, returnFocus)
           }
         },
       ])
+      throw error
     }
-    return {
-      close: () => close(),
-      refreshRow: (rowId, facts) => {
-        if (this.disposed || this.settingsWorkspace !== record) return
-        panel.refreshRow(rowId, facts)
-        this.requestRender()
+    return record
+  }
+
+  /**
+   * Host the fullscreen Plugin Manager page from the direct `/plugins` root
+   * through the SAME workspace lease (`Esc close` restores the physical
+   * surface, focus, draft and scroll exactly as Settings does). Returns the
+   * closer the owner uses on a normal close.
+   */
+  openPluginManagerWorkspace(panel: Component, onClosed?: () => void): () => void {
+    if (this.disposed) throw new Error('cannot lease a Plugin Manager workspace screen on a disposed surface')
+    const record = this.leaseWorkspaceScreen('plugin', panel, onClosed)
+    return () => record.close()
+  }
+
+  /** The live terminal row budget for a fullscreen workspace panel. */
+  workspaceRows(): number {
+    return this.terminal.rows
+  }
+
+  /** The live terminal column budget for a fullscreen workspace panel. */
+  workspaceColumns(): number {
+    return this.terminal.columns
+  }
+
+  /** The ONE app-owned transient notice (a workspace paints it, never owns it). */
+  workspaceNotice(): { readonly text: string; readonly kind: 'info' | 'error' } | undefined {
+    return this.currentNotice()
+  }
+
+  /** Deliver exact text through the SAME Client-local clipboard owner the rest
+   * of the surface uses (OSC52 emits bytes; it never claims a system-clipboard
+   * acknowledgement). */
+  copyWorkspaceText(text: string): void {
+    const copy = this.copySelection
+    const runner = this.events.runOwned
+    if (copy === undefined || runner === undefined) {
+      this.notify('Copy failed', 'error')
+      return
+    }
+    runner('workspace copy', () => copy(text), {
+      onResult: (ok) => {
+        if (this.disposed) return
+        this.notify(ok ? 'Copy sent' : 'Copy failed', ok ? 'info' : 'error')
       },
-    }
+      onError: () => {
+        if (this.disposed) return
+        this.notify('Copy failed', 'error')
+      },
+    })
   }
 
   /**
@@ -21931,7 +21962,9 @@ export class TuiApp {
    *  runtime change — including one the workspace's own pending commit applied before
    *  its write settled. */
   private refreshSettingsWorkspaceFacts(): void {
-    this.settingsWorkspace?.panel.rereadFacts()
+    const workspace = this.settingsWorkspace
+    if (workspace === undefined || workspace.kind !== 'settings') return
+    ;(workspace.panel as SettingsWorkspacePanel).rereadFacts()
   }
 
   /** Switch the active color theme and repaint everything. Every surface

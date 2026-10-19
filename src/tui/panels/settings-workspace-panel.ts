@@ -35,8 +35,8 @@ import { renderActionBarRow, type ActionBarSegment } from '../presentation/actio
 import { sanitizedPhysicalLine } from '../presentation/lines.ts'
 import { color } from '../theme/runtime.ts'
 
-/** The three frozen B2-A categories. */
-export type SettingsWorkspaceCategoryId = 'appearance' | 'display' | 'other'
+/** The four frozen Settings categories (S4-D1 adds the direct Plugins page). */
+export type SettingsWorkspaceCategoryId = 'appearance' | 'display' | 'plugins' | 'other'
 
 /** The navigation level: `categories` (L0) → `rows` (L1) → `detail` (L2).
  *  This is the SAME state in every width — the layout only decides which
@@ -179,6 +179,13 @@ export interface SettingsWorkspaceSource {
 
 /** The client-local capabilities the panel consumes. */
 export interface SettingsWorkspacePanelIntents {
+  /**
+   * The Plugins category is a DIRECT page entry, not an empty Rows level: the
+   * app owner builds the ONE PluginManagerWorkspacePanel lazily and returns it.
+   * `done` is the page's normal close path (it returns to Settings); an external
+   * teardown disposes the returned component instead and never calls `done`.
+   */
+  readonly onOpenPlugins?: (done: () => void) => Component | undefined
   /** The live terminal row budget (the panel never reads the terminal itself). */
   readonly rows: () => number
   /** The live terminal column budget (the projection's width). */
@@ -312,11 +319,12 @@ interface DetailProjection {
   readonly confirmCandidateVisible: boolean
 }
 
-const CATEGORY_ORDER: readonly SettingsWorkspaceCategoryId[] = ['appearance', 'display', 'other']
+const CATEGORY_ORDER: readonly SettingsWorkspaceCategoryId[] = ['appearance', 'display', 'plugins', 'other']
 
 const CATEGORY_LABELS: Record<SettingsWorkspaceCategoryId, string> = {
   appearance: 'Appearance',
   display: 'Display',
+  plugins: 'Plugins',
   other: 'Other settings',
 }
 
@@ -518,6 +526,14 @@ export class SettingsWorkspacePanel implements Component {
   /** The per-open commit identity: a settlement that does not match the live
    *  request is refused (a superseded or post-close result can never repaint). */
   private editRequestId = 0
+  /** The lazily built Plugin Manager page currently hosting this screen. */
+  private pluginPage: (Component & {
+    focused?: boolean
+    dispose?(): void
+    onCellPress?(x: number, y: number): void
+    onCellClick?(x: number, y: number): void
+    handleMouse?(event: TuiMouseEvent): TuiMouseEventResult | undefined
+  }) | undefined
   /** The candidate viewport offset of the choice projection. */
   private choiceOffset = 0
   /** The candidate index/viewport/WIDTH the choice list was last rebased against. */
@@ -568,6 +584,7 @@ export class SettingsWorkspacePanel implements Component {
   // ── rendering ────────────────────────────────────────────────────────────
 
   render(width: number): string[] {
+    if (this.pluginPage !== undefined) return this.pluginPage.render(width)
     const liveRows = this.intents.rows()
     // A terminal resize is a gesture boundary: a press recorded against the old
     // geometry must not resolve against the new one, even when the target's own
@@ -990,7 +1007,9 @@ export class SettingsWorkspacePanel implements Component {
     const buttons = row === undefined ? [] : this.detailButtons(row)
     const pinned = buttons.length > 0 && viewport >= 2 ? 1 : 0
     const scrollViewport = Math.max(0, viewport - pinned)
-    const content = row === undefined ? [] : this.detailContent(row, width, includeTitle)
+    const content = row === undefined
+      ? [color.textDim('This category is a direct page entry. Press Enter or Right to open the Plugin Manager.')]
+      : this.detailContent(row, width, includeTitle)
     const offset = Math.min(Math.max(0, this.detailOffset), Math.max(0, content.length - scrollViewport))
     this.detailOffset = offset
     const lines: string[] = []
@@ -1453,7 +1472,10 @@ export class SettingsWorkspacePanel implements Component {
   }
 
   private selectedRow(): SettingsWorkspaceRow | undefined {
-    return this.snapshot.rows.find(row => row.id === this.rowId)
+    const row = this.snapshot.rows.find(candidate => candidate.id === this.rowId)
+    // The Plugins category is a DIRECT page entry (no Rows level): a row of a
+    // different category must never leak into its Detail preview.
+    return row !== undefined && row.category === this.categoryId ? row : undefined
   }
 
   /**
@@ -1526,10 +1548,45 @@ export class SettingsWorkspacePanel implements Component {
     return layoutForWidth(this.projectionWidth())
   }
 
+  // ── the inline Plugin Manager page (S4-D1) ────────────────────────────────
+
+  /**
+   * Enter the ONE Plugin Manager page INSIDE this already-leased workspace.
+   * The page owns paint/keys/mouse while open; this panel keeps its L0/L1/L2
+   * selection and scroll state and restores it on return.
+   */
+  private openPluginsPage(): void {
+    if (this.pluginPage !== undefined || this.disposed) return
+    const page = this.intents.onOpenPlugins?.(() => this.leavePluginsPage())
+    if (page === undefined) return
+    if ('focused' in page) (page as Component & { focused?: boolean }).focused = true
+    this.pluginPage = page
+    this.bumpRevision()
+    this.intents.requestRender()
+  }
+
+  /** The page's NORMAL close path: drop the page and land on L0 with Plugins
+   * selected. The page itself already released its Host claim. */
+  private leavePluginsPage(): void {
+    const page = this.pluginPage
+    if (page === undefined) return
+    this.pluginPage = undefined
+    if ('focused' in page) (page as Component & { focused?: boolean }).focused = false
+    page.dispose?.()
+    this.categoryId = 'plugins'
+    this.focus = 'categories'
+    this.bumpRevision()
+    this.intents.requestRender()
+  }
+
   // ── keyboard ─────────────────────────────────────────────────────────────
 
   handleInput(data: string): void {
     if (this.disposed) return
+    if (this.pluginPage !== undefined) {
+      this.pluginPage.handleInput?.(data)
+      return
+    }
     if (matchesKey(data, 'escape') || matchesKey(data, 'backspace')) return this.goBack()
     // Below the body floor every navigation/action target is invisible; only the
     // lifecycle/back key remains available. Read the live geometry because input
@@ -1705,6 +1762,10 @@ export class SettingsWorkspacePanel implements Component {
       return this.beginChoice()
     }
     if (this.focus === 'categories') {
+      if (this.categoryId === 'plugins') {
+        this.openPluginsPage()
+        return
+      }
       this.leaveDetailTo('rows')
       return
     }
@@ -1911,6 +1972,7 @@ export class SettingsWorkspacePanel implements Component {
    *  through to the alt screen's `onCellPress`/`onCellClick` identity path. */
   handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
     if (this.disposed) return undefined
+    if (this.pluginPage !== undefined) return this.pluginPage.handleMouse?.(event)
     if (event.type !== 'wheel') return undefined
     const delta = event.wheelDelta ?? 0
     if (delta === 0) return undefined
@@ -1931,6 +1993,10 @@ export class SettingsWorkspacePanel implements Component {
 
   onCellPress(x: number, y: number): void {
     if (this.disposed) return
+    if (this.pluginPage !== undefined) {
+      this.pluginPage.onCellPress?.(x, y)
+      return
+    }
     const target = this.targetAt(x, y)
     this.pressedGesture = target === undefined
       ? undefined
@@ -1946,6 +2012,10 @@ export class SettingsWorkspacePanel implements Component {
 
   onCellClick(x: number, y: number): void {
     if (this.disposed) return
+    if (this.pluginPage !== undefined) {
+      this.pluginPage.onCellClick?.(x, y)
+      return
+    }
     const pressed = this.pressedGesture
     this.pressedGesture = undefined
     const target = this.targetAt(x, y)
@@ -1975,6 +2045,10 @@ export class SettingsWorkspacePanel implements Component {
   private activate(target: HitTarget): void {
     switch (target.kind) {
       case 'category':
+        if (target.id === 'plugins' && this.categoryId === 'plugins') {
+          this.openPluginsPage()
+          return
+        }
         this.selectCategory(target.id as SettingsWorkspaceCategoryId, 'categories')
         return
       case 'row': {
@@ -2102,6 +2176,14 @@ export class SettingsWorkspacePanel implements Component {
   dispose(): void {
     if (this.disposed) return
     this.disposed = true
+    // An external Settings teardown releases the hosted Plugin page's owner
+    // exactly once; its own normal close path never runs for this case.
+    const page = this.pluginPage
+    this.pluginPage = undefined
+    if (page !== undefined) {
+      if ('focused' in page) (page as Component & { focused?: boolean }).focused = false
+      page.dispose?.()
+    }
     // The edit phase dies with the panel: a settlement that arrives after the
     // teardown finds no live request and can never repaint a newer surface.
     this.editPhase = { kind: 'browsing' }

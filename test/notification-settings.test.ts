@@ -193,7 +193,7 @@ function setupSettings(options: { notificationMode?: string; notificationMethod?
     setTerminalProgressMode: () => {}, setNotificationMethod: (method) => { appliedMethods.push(method) },
     updateWelcomeCard: () => {},
     openJobView: () => {},
-    openTasksBrowser: () => {}, openPluginManager: () => {}, createPluginManagerSubmenu: () => ({ render: () => [], invalidate: () => {} }),
+    openTasksBrowser: () => {}, openPluginManager: () => {}, createPluginManagerPage: () => undefined,
     openRewindPicker: () => {},
     sessionTransitionPending: () => false,
     withSessionTransition: async <T>(task: () => T | Promise<T>) => task(),

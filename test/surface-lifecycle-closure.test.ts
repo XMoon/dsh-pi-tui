@@ -1465,6 +1465,7 @@ test('B2A-15 a legacy handoff that loses the surface to a NEWER workspace never 
   // Narrow (80x24): categories -> Other settings -> rows -> activate the row.
   vt.sendInput('\x1b[B'); await vt.waitForRender()
   vt.sendInput('\x1b[B'); await vt.waitForRender()
+  vt.sendInput('\x1b[B'); await vt.waitForRender()
   vt.sendInput('\r'); await vt.waitForRender()
   vt.sendInput('\r'); await vt.waitForRender()
   assert.equal(innerOpened, true, 'the close callback really leased a newer workspace')
@@ -1584,6 +1585,7 @@ test('B2A-20 a legacy handoff never crosses a blocking owner started by its own 
   })
   await vt.waitForRender()
   // Narrow (80x24): categories -> Other settings -> rows -> activate the row.
+  vt.sendInput('\x1b[B'); await vt.waitForRender()
   vt.sendInput('\x1b[B'); await vt.waitForRender()
   vt.sendInput('\x1b[B'); await vt.waitForRender()
   vt.sendInput('\r'); await vt.waitForRender()

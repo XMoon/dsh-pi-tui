@@ -12,7 +12,7 @@ import assert from 'node:assert/strict'
 import { afterEach, test } from 'node:test'
 import { TuiApp } from '../src/tui-app.ts'
 import { createSurfaceRuntime, type SurfaceExtensionService } from '../src/app/surface/runtime.ts'
-import { createPluginManagerPanel } from '../src/tui/plugin-manager/panel.ts'
+import { createPluginManagerWorkspacePanel } from '../src/tui/plugin-manager/workspace.ts'
 import { ExtensionLedger } from '../src/extension/internal/ledger.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 
@@ -286,7 +286,7 @@ test('M3-6 PR3: a throwing extension cleanup cannot strand the extension bridge 
     notificationMethod: undefined,
     terminalProgress: undefined,
     mainProgressAuthority: 'local-events',
-    createPluginManagerPanel,
+    createPluginManagerPanel: createPluginManagerWorkspacePanel,
   })
   const failure = new Error('theme hook release failed')
   let themeReleased = 0

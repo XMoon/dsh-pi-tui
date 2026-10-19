@@ -204,7 +204,7 @@ function stubRunner(
     updateWelcomeCard: () => {},
     openJobView: () => {},
     openPluginManager: () => {},
-    createPluginManagerSubmenu: () => ({ render: () => [], invalidate: () => {} }),
+    createPluginManagerPage: () => undefined,
     // The merged /tasks browser: jobs + subagents, Enter routes to
     // openJobView through `this` so a Proxy-wrapped runner can spy on it.
     openTasksBrowser() {

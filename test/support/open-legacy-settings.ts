@@ -26,14 +26,15 @@ const TAB = '\t'
  * Navigate an ALREADY-OPEN Settings workspace to the legacy editor. The key
  * sequence follows the workspace's real focus model:
  *  - wide/medium (>=96 columns) open on the row list: Tab twice reaches the
- *    category list, then two DOWNs select `Other settings`;
- *  - narrow (<96 columns) open on the category list: two DOWNs select it.
+ *    category list, then three DOWNs select `Other settings`
+ *    (`Appearance → Display → Plugins → Other settings`);
+ *  - narrow (<96 columns) open on the category list: three DOWNs select it.
  * Enter then inspects the single legacy row, and the second Enter opens it.
  */
 export async function navigateToLegacySettings(vt: SettingsNavTerminal): Promise<void> {
   const keys = vt.columns >= 96
-    ? [TAB, TAB, DOWN, DOWN, ENTER, ENTER]
-    : [DOWN, DOWN, ENTER, ENTER]
+    ? [TAB, TAB, DOWN, DOWN, DOWN, ENTER, ENTER]
+    : [DOWN, DOWN, DOWN, ENTER, ENTER]
   for (const key of keys) {
     vt.sendInput(key)
     await vt.waitForRender()
