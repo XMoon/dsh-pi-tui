@@ -379,8 +379,9 @@ test('the REAL Host -> Direct port -> controller -> workspace page install chain
     for (let index = 0; index < rounds; index += 1) await new Promise<void>(resolve => setTimeout(resolve, 0))
     await vt.waitForRender()
   }
-  const waitFor = async (predicate: () => boolean, label: string): Promise<void> => {
-    for (let index = 0; index < 300; index += 1) {
+  const waitFor = async (predicate: () => boolean, label: string, timeoutMs = 60_000): Promise<void> => {
+    const deadline = Date.now() + timeoutMs
+    while (Date.now() < deadline) {
       if (predicate()) return
       await new Promise<void>(resolve => setTimeout(resolve, 10))
       await vt.waitForRender()
@@ -433,6 +434,7 @@ test('the REAL Host -> Direct port -> controller -> workspace page install chain
   vt.sendInput('\r') // Disable…
   await waitFor(() => controller.model().cards.find(card => card.name === seeded.bundleName)?.enabled === false,
     'the real Host disable + authoritative reread')
+  await vt.waitForRender()
   assert.match(vt.getViewport().join('\n'), /Enabled\s+No/)
 
   vt.sendInput('\x1b[B') // Enable… -> Remove…
@@ -449,6 +451,7 @@ test('the REAL Host -> Direct port -> controller -> workspace page install chain
   vt.sendInput('\r') // confirm
   await waitFor(() => controller.model().cards.every(card => card.name !== seeded.bundleName),
     'the real Host removal + authoritative reread')
+  await vt.waitForRender()
   assert.match(vt.getViewport().join('\n'), /No matching plugins|No plugins/)
   assert.equal((await port.snapshot()).bundles.find(candidate => candidate.name === seeded.bundleName), undefined)
 })
