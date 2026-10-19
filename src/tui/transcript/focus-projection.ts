@@ -477,9 +477,11 @@ function isFocusPersistentInputRow(message: TranscriptMessage): boolean {
  * collapsed Thought (restored in raw chronology when the Thought opens). A
  * foldable Context row (Snapshot or a proven Working tool-jobs Notice) joins
  * that hidden set INSTEAD of the post-Thought rule above when a real Thought
- * owner exists; without one every row must fail open. The decision
- * reads the semantic `form`, the raw adjacency and raw position, never a
- * source kind or plugin name; `Compact` and `Full` do not route through here.
+ * owner exists; without one every row must fail open. The ORDINARY Notice
+ * position decision reads the semantic `form`, raw adjacency and raw position,
+ * never a producer name; the Working `tool-jobs` exception additionally
+ * requires `sourceKind === 'tool-jobs'` AND `form === 'notice'` AND the durable
+ * same-turn next-step claim. `Compact` and `Full` do not route through here.
  */
 type CollapsedFocusRowDisposition = 'pre-thought' | 'post-thought' | 'hidden'
 
