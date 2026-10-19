@@ -6407,13 +6407,18 @@ migration state; this section claims neither `M4` nor a published `0.5.3`.
   the retained generation's initial-history settlement and then reads the
   official `openState`/`openError`; a resolved `SessionReference.ready` is not
   success evidence because the official `Session.doOpen` records a failed open
-  and still resolves. On `openState: 'error'` the adapter releases that
-  generation exactly once and returns `unavailable` with the official reason;
-  `/resume`, the `--session` startup unwrap and post-fork adoption therefore
-  keep the old owner/draft and never publish the failed target. The Direct path
-  is unchanged. Evidence: `test/remote-session-migration-rc2.test.ts` (real
+  and still resolves. Only the terminal `openState === 'open'` commits; `error`,
+  `cold`, `loading` and an absent state release that generation exactly once and
+  return `unavailable`. The non-error half covers the official
+  `Session.configureSubagent()` address replacement, whose `resync()` sets the
+  SAME binding to `cold`/`loading` and can let the OLD `reference.ready` resolve
+  first; a stale completion never commits history. `/resume`, the `--session`
+  startup unwrap and post-fork adoption therefore keep the old owner/draft and
+  never publish the failed target. The Direct path is unchanged. Evidence:
+  `test/remote-session-migration-rc2.test.ts` (real
   Host/Client/`SessionRuntime`; old owner/draft stand, one release, no success
-  notice/init).
+  notice/init) and the resync/cold/loading/absent-state matrix in
+  `test/remote-session-lifecycle.test.ts`.
 - **Questions continued is durable (S3-10).** The `continued` reachability is
   the official `userQuestions` projection's fold, never a client-side speculative
   map: a REAL timed `ask_user_question` tool call that hits its Host deadline

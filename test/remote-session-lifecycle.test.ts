@@ -33,7 +33,7 @@ function harness() {
   const generations = new Map<string, {
     readonly id: string
     readonly session: {
-      getSnapshot(): { readonly openState: 'cold' | 'loading' | 'open' | 'error'; readonly openError: unknown }
+      getSnapshot(): { readonly openState: 'cold' | 'loading' | 'open' | 'error' | undefined; readonly openError: unknown }
     }
   }>()
   const counts = new Map<string, number>()
@@ -49,7 +49,7 @@ function harness() {
   /** The official initial-open settlement the fake reference exposes. `ready`
    *  is independent from the open state: the real Client RESOLVES ready even
    *  when `doOpen` records `openState: 'error'`. */
-  let openState: 'cold' | 'loading' | 'open' | 'error' = 'open'
+  let openState: 'cold' | 'loading' | 'open' | 'error' | undefined = 'open'
   let openError: unknown
   let readyMode: 'resolve' | 'hold' = 'resolve'
   let resolveReady: (() => void) | undefined
@@ -152,7 +152,7 @@ function harness() {
     resolveReady: () => { resolveReady?.() },
     rejectReadyWith: (error: unknown) => { rejectReady?.(error) },
     /** The official open settlement the retained generation reports. */
-    setOpenState: (state: 'cold' | 'loading' | 'open' | 'error', error?: unknown) => {
+    setOpenState: (state: 'cold' | 'loading' | 'open' | 'error' | undefined, error?: unknown) => {
       openState = state
       openError = error
     },
@@ -389,6 +389,42 @@ test('open reports an official history-open error as unavailable and releases ex
   }
   assert.equal(h.calls.releases.length, 1, 'the failed generation is released exactly once')
   assert.equal(h.bindingOf('session-a'), undefined, 'no leaked generation after a failed open')
+})
+
+test('a resync whose old ready wins is fail-closed, never a committed open', async () => {
+  // The official `Session.configureSubagent()` address replacement calls
+  // `resync()`: it invalidates the old open, sets the SAME binding to `cold`
+  // and starts a new open (`loading`). The OLD reference.ready can resolve
+  // first, so "not error" is not enough to commit.
+  for (const state of ['cold', 'loading'] as const) {
+    const h = harness()
+    h.setCatalogued('session-a', true)
+    h.setReadyHold()
+    const pending = h.lifecycle.open({ sessionId: 'session-a' })
+    h.setOpenState(state)
+    h.resolveReady()
+    const result = await pending
+    assert.equal(result.outcome.kind, 'unavailable', `a ${state} history must not be opened`)
+    if (result.outcome.kind === 'unavailable') {
+      assert.match(result.outcome.message, new RegExp(`not settled \\(state: ${state}\\)`, 'u'))
+    }
+    assert.equal(h.calls.releases.length, 1, `the ${state} stale generation is released exactly once`)
+    assert.equal(h.bindingOf('session-a'), undefined, `no ${state} generation leaks`)
+  }
+})
+
+test('open fails closed when the official open state is absent', async () => {
+  const h = harness()
+  h.setCatalogued('session-a', true)
+  h.setOpenState(undefined)
+  const result = await h.lifecycle.open({ sessionId: 'session-a' })
+  assert.equal(result.outcome.kind, 'unavailable',
+    'a structural binding without the official state is never accepted')
+  if (result.outcome.kind === 'unavailable') {
+    assert.match(result.outcome.message, /open state is unavailable/u)
+  }
+  assert.equal(h.calls.releases.length, 1)
+  assert.equal(h.bindingOf('session-a'), undefined)
 })
 
 test('open reports a rejected readiness as unavailable and releases exactly once', async () => {

@@ -334,6 +334,13 @@ export class RemoteSessionLifecycle implements SessionLifecycle {
     // and read the state: `retain` success is NOT a successful history open.
     // Without this check the application would commit B while B's history
     // failed, replacing A and its draft with an unreadable session.
+    //
+    // The state must be terminal `open`, not merely "not error". The official
+    // `Session.resync()` (an address replacement during child-viewer
+    // discovery) invalidates the old open and reopens the SAME binding: the
+    // old `ready` can resolve while the new generation is `cold`/`loading`.
+    // That is also fail-closed — a stale completion must never commit history
+    // this reference no longer proves.
     try {
       await owner.ready
     } catch (error) {
@@ -360,11 +367,15 @@ export class RemoteSessionLifecycle implements SessionLifecycle {
       return { ownership: 'superseded', outcome: { kind: 'cancelled' } }
     }
     const opened = owner.openState()
-    if (opened.openState === 'error') {
+    if (opened.openState !== 'open') {
       owner.release()
-      const reason = opened.openError === undefined || opened.openError === null
-        ? 'the official initial history open failed'
-        : remoteFailureMessage(opened.openError)
+      const reason = opened.openState === 'error'
+        ? (opened.openError === undefined || opened.openError === null
+            ? 'the official initial history open failed'
+            : remoteFailureMessage(opened.openError))
+        : opened.openState === undefined
+          ? 'the official open state is unavailable'
+          : `the official history open is not settled (state: ${opened.openState})`
       return {
         ownership: 'current',
         outcome: { kind: 'unavailable', message: `session "${request.sessionId}" failed to open: ${reason}` },

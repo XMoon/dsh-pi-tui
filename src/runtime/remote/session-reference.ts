@@ -106,8 +106,10 @@ export interface RemoteReferenceSessionsSource<B extends object = object> extend
 
 /** The official initial-history open settlement of one retained binding.
  *  `ready` resolves even when `doOpen` recorded `openState: 'error'`, so the
- *  state (not the promise) is the failure evidence. An absent `openState`
- *  means a structural double that does not model the official state. */
+ *  state (not the promise) is the failure evidence. Only `'open'` is a
+ *  successful commit boundary: `cold`/`loading` can be a newer `resync()` of
+ *  the same binding whose old `ready` just resolved, and an absent state is
+ *  never proof of an opened history. */
 export interface RemoteSessionOpenFacts {
   readonly openState?: 'cold' | 'loading' | 'open' | 'error'
   readonly openError?: unknown

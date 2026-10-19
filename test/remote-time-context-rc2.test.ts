@@ -46,7 +46,7 @@ import { RemoteSessionLifecycle } from '../src/runtime/remote/session-lifecycle-
 import { loadExperimentalRemoteRuntime } from '../src/runtime/backend-loader.ts'
 import { TranscriptFolder } from '../src/transcript.ts'
 import { TuiApp } from '../src/tui-app.ts'
-import { createRemoteApplicationHostFixture, waitFor } from './support/remote-application-fixture.ts'
+import { createRemoteApplicationHostFixture } from './support/remote-application-fixture.ts'
 import { testLifecycle, type TestLifecycle } from './support/temp-lifecycle.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 
@@ -99,6 +99,18 @@ function installClock(): { advanceTo(ms: number): void; restore(): void } {
   return {
     advanceTo: (ms: number): void => { offset = ms },
     restore: (): void => { Date.now = original },
+  }
+}
+
+/** The shared fixture's `waitFor()` measures its deadline with `Date.now()`,
+ *  which this suite deliberately freezes. A missing prerequisite would then
+ *  loop forever under `run-with-temp-root.mjs` (no test timeout). This local
+ *  wait uses the monotonic clock instead, so a failure is reported. */
+async function waitForContext(label: string, predicate: () => boolean, timeoutMs = 15_000): Promise<void> {
+  const started = performance.now()
+  while (!predicate()) {
+    if (performance.now() - started > timeoutMs) throw new Error(`timed out waiting for ${label}`)
+    await new Promise(resolve => setTimeout(resolve, 10))
   }
 }
 
@@ -175,7 +187,7 @@ async function promptViaClient(
 }
 
 async function waitForTurnEnd(host: Awaited<ReturnType<typeof createRemoteApplicationHostFixture>>, turn: number): Promise<void> {
-  await waitFor(`turn ${turn} to end`, () =>
+  await waitForContext(`turn ${turn} to end`, () =>
     hostEvents(host).some(event => event.type === 'turn/end' && event.data.turn === turn), 20_000)
 }
 
@@ -215,7 +227,7 @@ test('L5: the official time-context plugin injects one durable snapshot per elig
 
   // ── Turn 1: the eligible first step carries ONE time-context reading ──────
   await promptViaClient(sessions, 'first question alpha')
-  await waitFor('the first model request', () => llm.requests.length >= 1, 20_000)
+  await waitForContext('the first model request', () => llm.requests.length >= 1, 20_000)
   await waitForTurnEnd(host, 1)
 
   const first = llm.requests[0]!
@@ -258,7 +270,7 @@ test('L5: the official time-context plugin injects one durable snapshot per elig
   // ── Turn 2: ONE millisecond below the default window → NO new reading ─────
   clock.advanceTo(REFRESH_MS - 1)
   await promptViaClient(sessions, 'second question beta')
-  await waitFor('the second model request', () => llm.requests.length >= 2, 20_000)
+  await waitForContext('the second model request', () => llm.requests.length >= 2, 20_000)
   await waitForTurnEnd(host, 2)
   const second = readingsOf(llm.requests[1]!)
   assert.equal(second.length, 1, `turn 2 carries only the earlier durable reading: ${JSON.stringify(second)}`)
@@ -268,7 +280,7 @@ test('L5: the official time-context plugin injects one durable snapshot per elig
   // ── Turn 3: exactly AT the window → a NEW reading with the elapsed gap ────
   clock.advanceTo(REFRESH_MS)
   await promptViaClient(sessions, 'third question gamma')
-  await waitFor('the third model request', () => llm.requests.length >= 3, 20_000)
+  await waitForContext('the third model request', () => llm.requests.length >= 3, 20_000)
   await waitForTurnEnd(host, 3)
   const third = readingsOf(llm.requests[2]!)
   const turn3 = third.filter(reading => reading.includes('preparing turn 3'))
@@ -292,7 +304,7 @@ test('L5 negative: with NO time-context plugin mounted, no reading is ever injec
   const { host, sessions, llm } = await prepareTimeContextHost(life, { plugin: false })
 
   await promptViaClient(sessions, 'no plugin question')
-  await waitFor('the model request', () => llm.requests.length >= 1, 20_000)
+  await waitForContext('the model request', () => llm.requests.length >= 1, 20_000)
   await waitForTurnEnd(host, 1)
   assert.equal(timeContextMessages(llm.requests[0]!).length, 0)
   assert.equal(hostEvents(host).some(event => event.type === 'user/message' && event.data.source?.kind === 'time-context'), false,
@@ -313,7 +325,7 @@ test('L5 negative: a message with no Client zone reports the browser zone unavai
     { cwd: host.anchorDir },
   )
   agent.followup(createUserMessage({ content: [{ type: 'text', text: 'no browser zone' }], source: { kind: 'user' } }))
-  await waitFor('the no-zone model request', () => llm.requests.length >= 1, 20_000)
+  await waitForContext('the no-zone model request', () => llm.requests.length >= 1, 20_000)
 
   const readings = timeContextMessages(llm.requests[0]!).map(requestText)
   assert.equal(readings.length, 1)
@@ -366,6 +378,18 @@ test('L6: the real durable reading folds into ONE legal Context row and survives
   assert.ok(views.full!.includes('Context'), views.full)
   assert.match(views.compact!, /Context/u)
   assert.match(views.focus!, /Context/u)
+})
+
+test('the suite wait still times out while the controlled Date.now is frozen', async () => {
+  const clock = installClock()
+  try {
+    await assert.rejects(
+      waitForContext('a condition that never becomes true', () => false, 25),
+      /timed out waiting for a condition that never becomes true/u,
+    )
+  } finally {
+    clock.restore()
+  }
 })
 
 test('the generated official presets enable time-context exactly once, and minimal not at all', () => {

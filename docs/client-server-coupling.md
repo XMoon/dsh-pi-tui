@@ -286,12 +286,19 @@ reinterpret:
      open/resume awaits the retained generation's initial-history settlement
      (`SessionReference.ready`) and then reads the OFFICIAL `openState`/
      `openError`; `ready` resolves even when `Session.doOpen` recorded an error,
-     so `retain()` success alone is never treated as a successful open. On an
-     error the adapter releases the failed generation exactly once and returns
-     `unavailable` carrying the official reason, so `/resume`, `--session`
-     startup recovery and post-fork adoption all keep the OLD subject/draft and
-     never report a committed switch. Proven on the real Host/Client graph by
-     `test/remote-session-migration-rc2.test.ts`.
+     so `retain()` success alone is never treated as a successful open. The commit
+     boundary requires the TERMINAL `openState === 'open'`: `error`, `cold`,
+     `loading` and an absent state all release the failed generation exactly once
+     and return `unavailable`. The non-error half is not theoretical — the
+     official `Session.configureSubagent()` address replacement calls
+     `Session.resync()`, which invalidates the old open, sets the SAME binding to
+     `cold` and reopens it (`loading`); the old `reference.ready` can resolve
+     first, and a stale completion must never commit history the reference no
+     longer proves. `/resume`, `--session` startup recovery and post-fork
+     adoption all keep the OLD subject/draft and never report a committed switch.
+     Proven on the real Host/Client graph by
+     `test/remote-session-migration-rc2.test.ts`, plus the resync/cold/loading/
+     absent-state matrix in `test/remote-session-lifecycle.test.ts`.
   5. **Reconnect transcript currentness — RESOLVED_BY_S3_R0.** The Remote
      ingress no longer treats the latest `change` as a fold input: delivery is a
      SEQUENCE contract over the official identity (Connection generation +
