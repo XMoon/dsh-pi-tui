@@ -166,48 +166,26 @@ exemptions. The semantic port projects **detached** `PluginBundleFact`
 `approvedBuilds`, `packageResult`, `registries`, `failedAt`). The port owns no
 installed-package database, no enabled truth and no compatibility evaluation.
 
-The ordering is fixed:
+Direct and Remote use the SAME detach/mapping functions:
 
 ```text
 Host fact
   -> shared detach/mapping (Direct and Remote use the same functions)
   -> detached snapshot
-  -> buildPluginManagerModel / classifier
-  -> controller admission (stable card value, canToggle, availability,
-     self/read-only checks)
-  -> UI action
-  -> official Host mutation
-  -> authoritative snapshot() reread
+  -> surface-behavior controller/UI
 ```
 
-The classifier assigns a presentation section only from exact provenance: exact
-`SELF_BUNDLE`, proven Loader `entryId`, Host `official:true` + exact rc.2 B01–B14
-id, exact base bundle id, proven profile-owned non-official, else an audited
-"Unverified origin". A `@deepseek-ai/` scope or an `experimental` substring is
-never evidence. The UI never guesses a capability from a name, enablement,
-`fiber` or availability.
+Every Remote read/mutation/wait/cancel/inspect result is fenced by the
+pre-dispatch Connection generation and raises `PluginManagerStaleResultError`
+when superseded; the surface contract interprets that as indeterminate plus an
+authoritative reread, never as a refusal or success. The UI never guesses a
+capability from a package name, `@deepseek-ai/` scope, `experimental` substring,
+enablement, `fiber` or availability.
 
-Install lifecycle:
-
-- ONE controller owns the install/reconcile/read epoch/state machine for both
-  `/plugins` and Settings → Plugins; they share the same workspace/physical
-  screen lease.
-- `inspect` → explicit confirm → `installBundle`; approval reuses the exact
-  Host-reported `pendingBuilds` under a NEW request id.
-- `cancelInstall` reports `cancelled | too-late | not-running`; a closed/reopened
-  page restores the current attempt rather than dispatching a second one.
-- A blocked-build risk approval is explicit and dispatches the second real Host
-  attempt only after approval.
-- Disposal never cancels a Host install; an unknown result is not resubmitted.
-
-Upgrade guidance is a source-derived read-only policy (no in-place update, no
-version picker, no silent reinstall): shipped → upgrade DSH; profile-owned →
-Remove then an explicit later Install; missing with an official target → Host
-offered target; missing without a target → not installable; self → managed
-outside the screen. It must not leak tokens and must not perform a mutation from
-read-only advice. The exact B01–B14 copy is bounded app presentation for the
-official Experimental bundles, not a public capability API; do not turn it into
-a capability table in docs.
+The controller, inventory read epoch, install state machine, request-id
+reconciliation, retry/unknown handling, workspace lease and Detail copy/upgrade
+guidance are owned by
+[surface-behavior.md](./surface-behavior.md#plugin-manager-and-plugin-detail).
 
 ## Agent composition policy
 

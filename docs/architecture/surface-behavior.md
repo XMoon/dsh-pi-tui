@@ -208,15 +208,13 @@ Settings L0 with Plugins selected, while direct entry returns to the untouched
 conversation. The controller outlives the page; a second open is a no-op; a
 refused lease leaves no phantom claim.
 
-### Host is the only business authority
+### Host authority is owned elsewhere
 
-`PluginManagerPort` (`snapshot`, `inspect`, `setBundleEnabled`,
-`setPluginEnabled`, `removeBundle`, `startInstall`, `waitForInstall`,
-`cancelInstall`, `subscribeInstall`, `subscribeInvalidation`) carries detached
-facts. Direct and Remote share `src/runtime/plugin-manager-mapping.ts`. The
-model/classifier never invents catalog facts; `@deepseek-ai/` prefixes or
-`experimental` substrings are not identity proof. The full Host authority and
-generation-fencing contract is owned by [host-client.md](./host-client.md).
+The Host package/profile authority, semantic port, Direct/Remote mapping and
+Connection generation fencing are owned by [host-client.md](./host-client.md).
+This surface owns the controller/read-epoch/state-machine/workspace behavior; it
+never invents catalog facts, and a `@deepseek-ai/` scope or `experimental`
+substring is not identity proof.
 
 ### Inventory read epoch
 
@@ -252,10 +250,13 @@ cancelling → done | failed | unknown`.
 The support sentence pair is module-private
 `EXPERIMENTAL_BUNDLE_SUPPORT` in `src/app/plugin-manager/model.ts`. It applies
 only to a bundle card with `official === true`, `section === 'experimental'` and
-an exact B01–B14 key. It is bounded app presentation for the fixed rc.2 catalog,
-not a public capability API, not a Host PASS, never derived from
-enabled/fiber/availability, and must not be copied into docs as a table. B03
-keeps the single Owner-frozen danger confirmation as the only hazard statement.
+an exact key in the implementation's explicitly enumerated, Host-source-verified
+official-bundle set. The exact names and copy are owned by the model and its
+tests, not by this document: do not copy the table here. It is bounded app
+presentation for the fixed official-bundle catalog, not a public capability API,
+not a Host PASS, and is never derived from enabled/fiber/availability. The
+model/tests also own the single Owner-frozen danger confirmation, which is the
+only hazard statement.
 
 ### Detail upgrade guidance
 
