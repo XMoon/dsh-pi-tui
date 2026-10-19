@@ -5222,3 +5222,28 @@ test('hostile welcome-card facts never reach the TTY raw and stay one physical l
   assert.ok(plainView.includes(collapsed), `the collapsed facts survive on one row:\n${plainView}`)
   app.stop()
 })
+
+test('a CR-progress folded preview measures the LOG-PROJECTED records, not raw zero-width CRs', async () => {
+  const { vt, app, writes } = startAppWithWrites()
+  app.setTranscriptDetailExpanded(false)
+  // 61 x-records separated by lone CRs: raw width counts each CR as 0 columns,
+  // so measuring BEFORE the log projection misses the 60 spaces the policy
+  // introduces and the folded row would widen past its budget.
+  const raw = `${'x\r'.repeat(60)}x`
+  const tool: TranscriptMessage = {
+    kind: 'tool', turn: 0, name: 'bash', args: '{"command":"printf"}', result: raw, status: 'ok',
+  }
+  app.setTranscript([tool])
+  const view = await viewport(vt)
+  const stream = writes.join('')
+  const marker = stream.indexOf('— x x x')
+  assert.ok(marker >= 0, `the folded preview was painted:\n${stream.slice(-2000)}`)
+  const rowStart = Math.max(0, stream.lastIndexOf('\n', marker) + 1)
+  const rowEnd = stream.indexOf('\n', marker)
+  const row = stripTerminalSequences(stream.slice(rowStart, rowEnd === -1 ? undefined : rowEnd)).trimEnd()
+  assert.ok(row.endsWith('— x x x'),
+    `the folded preview is exactly the first three SAFE records on ONE bounded row: ${JSON.stringify(row)}`)
+  assert.ok(visibleWidth(row) <= 100, `the folded row stays inside the terminal width: ${JSON.stringify(row)}`)
+  assert.equal(tool.result, raw, 'the raw result is untouched')
+  app.stop()
+})
