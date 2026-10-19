@@ -1,7 +1,7 @@
 /**
  * The renderer-facing display seam (PR3-A, plan §2.3 option 1).
  *
- * The audit in `docs/tern-tsp/evidence/pr3-a.md` (§A0.2) found the set of
+ * The display-seam audit (see `docs/tsp/foundation.md`) found the set of
  * `TuiApp` members the application can reach while a READ-ONLY Tern TSP
  * renderer owns the terminal: the transcript projection commit, a handful of
  * status facts and resets, notices, the welcome card and the pending-input

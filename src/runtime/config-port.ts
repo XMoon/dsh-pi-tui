@@ -23,7 +23,7 @@
  * current Remote composition's unsupported set (credential record read/delete,
  * session approval-policy override, authorization flows).
  *
- * Full contract: docs/client-server-migration.md + docs/client-server-coupling.md.
+ * Full contract: docs/architecture/host-client.md + docs/architecture/host-client.md.
  * @module @xmoon76/dsh-pi-tui/runtime/config-port
  */
 

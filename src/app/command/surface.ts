@@ -752,7 +752,7 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
         // capability-gated cold path (standing key → global → degraded
         // global with a notice), never an Agent probe: probes emit
         // durable session events in this deployment (see
-        // docs/surface-catalog.md).
+        // docs/architecture/surface-catalog.md).
         readStanding: (presetId, readSignal) =>
           deps.catalog.skills.standing(presetId, deps.clientCwd, readSignal),
         // §2.2/§16 final-install fence: the Remote target's admission

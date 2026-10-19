@@ -23,7 +23,7 @@
  *     another one.
  *
  * This driver is NOT part of `pnpm test` or CI: it needs the external Tern CLI
- * and it takes minutes. See `docs/tern-pane-harness.md`.
+ * and it takes minutes. See `docs/guides/tern-pane-testing.md`.
  *
  * Every run creates its OWN directory and deletes nothing: the default is a fresh
  * `<repo>/temp/tern-pane-XXXXXX`, `--out` must name a directory that does not
@@ -49,7 +49,7 @@ const repo = join(here, '..')
  * serve` in the run directory and sends `./launch.sh`. A spaced absolute path is
  * refused outright (`expected run <command>`), and double-quoting one is accepted
  * but starts nothing — both measured against the real client, see
- * `docs/tern-pane-harness.md`.
+ * `docs/guides/tern-pane-testing.md`.
  */
 const RUN_SCRIPT_NAME = 'launch.sh'
 const RUN_SCRIPT = `./${RUN_SCRIPT_NAME}`
@@ -155,7 +155,7 @@ async function createHarness({ ternBin, root, socket = 'tern.sock' }) {
   // The server's cwd is the run directory: `run` takes ONE path-shaped token and
   // resolves it against that cwd, which is how a run directory containing spaces
   // still starts its subject (a spaced absolute path is refused, and quoting it is
-  // accepted but silently runs nothing — measured, see docs/tern-pane-harness.md).
+  // accepted but silently runs nothing — measured, see docs/guides/tern-pane-testing.md).
   const serve = spawn(ternBin, ['serve', '--control', endpoint, '--out', join(root, 'shots')], { stdio: ['ignore', 'pipe', 'pipe'], cwd: root })
   serve.stdout.on('data', (d) => log(`serve.out ${String(d).trim()}`))
   serve.stderr.on('data', (d) => log(`serve.err ${String(d).trim()}`))

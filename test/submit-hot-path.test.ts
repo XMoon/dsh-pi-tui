@@ -4462,7 +4462,7 @@ test('a collision health record clears on recovery, while a HANDLER failure reco
 // that runs under a colliding name — while the ledger keeps one failure
 // generation per record and DEDUPLICATES a repeat (the first message wins).
 // The tests below CHARACTERIZE the resulting limitations; they are accepted
-// and documented in `docs/surface-decisions.md`, NOT a specification of
+// and documented in `docs/extensions/stable.md` (Command ownership), NOT a specification of
 // desired behavior: health is a lossy diagnostic, not an authoritative
 // summary of every unrecovered failure. Routing, claims and the immediate
 // notices are unaffected and are asserted alongside.
@@ -5277,7 +5277,7 @@ test('a deferred start keeps its FIRST prompt in ↑ after the first-session hyd
 })
 
 test('observational: the CWD-level skip spans Sessions while the recall window keeps every accepted input', async (t) => {
-  // DEFERRED SEMANTICS (docs/input-history.md): the persistence dedupe anchor
+  // DEFERRED SEMANTICS (docs/architecture/input-history.md): the persistence dedupe anchor
   // (`lastHistoryContent`) is the CWD file's actual last row, NOT a per-Session
   // one, so an identical repeat writes nothing — while a DIFFERENT submission in
   // the same window does write (the control that proves the write path really

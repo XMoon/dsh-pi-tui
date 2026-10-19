@@ -161,7 +161,7 @@ test('PR5: an exact commands.execute session/writer-held refusal is rejected wit
   // `session/writer-held` command result correctly. PR5 does NOT claim this is
   // normally UI-reachable on a cold held Session (`commands.list(agent)` needs
   // the same Agent lookup and fails first) — see
-  // docs/client-server-migration.md + docs/client-server-coupling.md.
+  // docs/architecture/host-client.md + docs/architecture/host-client.md.
   const h = harness()
   h.setResult({
     ok: false,

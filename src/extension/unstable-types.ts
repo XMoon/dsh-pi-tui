@@ -15,7 +15,7 @@
  *
  * Unstable plugins still never import repository-private paths and never
  * mutate Cordis runtime internals; low-level access is exposed through
- * this supported package entry. See docs/extension-unstable.md.
+ * this supported package entry. See docs/extensions/unstable.md.
  * @module @xmoon76/dsh-pi-tui/extensions/unstable
  */
 

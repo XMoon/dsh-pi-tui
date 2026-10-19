@@ -240,8 +240,8 @@ test('searches delivery paths and final descriptions, including duplicate update
   const folder = new TranscriptFolder()
   folder.hydrate([
     event('turn/start', { turn: 1 }, 0),
-    delivery(1, [{ path: 'docs/client-server-migration.md', description: 'old note' }]),
-    delivery(2, [{ path: 'docs/client-server-migration.md', description: 'closure ledger' }]),
+    delivery(1, [{ path: 'docs/architecture/host-client.md', description: 'old note' }]),
+    delivery(2, [{ path: 'docs/architecture/host-client.md', description: 'closure ledger' }]),
     assistant(3, 0, 'final'),
     event('turn/end', { turn: 1, reason: { kind: 'completed' } }, 4),
   ])
@@ -382,7 +382,7 @@ test('delivery tails reflow without visual overflow at supported widths', async 
     turn: 1,
     text: 'final',
     deliverables: [
-      { path: '/workspace/docs/client-server-migration.md', description: '迁移 🧪 说明 with a longer description' },
+      { path: '/workspace/docs/architecture/host-client.md', description: '迁移 🧪 说明 with a longer description' },
       { path: '/workspace/docs/second-file.md', description: '第二个文件' },
     ],
   }])

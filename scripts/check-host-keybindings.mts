@@ -229,7 +229,7 @@ export function findStringLabelViolations(file: string, source: string): Keybind
   for (let index = 0; index < lines.length; index += 1) {
     const line = lines[index]!
     // Skip comment-only lines (comments are covered by the convention in
-    // docs/keybinding-architecture.md, not by this mechanical check).
+    // docs/architecture/keybindings.md, not by this mechanical check).
     const trimmed = line.trim()
     if (trimmed.startsWith('//') || trimmed.startsWith('*') || trimmed.startsWith('/*')) continue
     // The keybinding table's `defaultKeys` arrays are the machine-readable
@@ -306,7 +306,7 @@ function main(): void {
     }
   }
   if (violations.length > 0) {
-    console.error(`check-host-keybindings: ${violations.length} violation(s) found (see docs/keybinding-architecture.md)`)
+    console.error(`check-host-keybindings: ${violations.length} violation(s) found (see docs/architecture/keybindings.md)`)
     process.exit(1)
   }
   console.log('check-host-keybindings: ok')

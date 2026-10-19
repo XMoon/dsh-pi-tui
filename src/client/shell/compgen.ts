@@ -1,6 +1,6 @@
 /**
  * Client-local shell completion capability (TS8-E): the real-shell `compgen`
- * bridge (docs/input-and-card-polish.md §1). Command names come from
+ * bridge (docs/architecture/surface-behavior.md § "`!` / `!!` shell input"). Command names come from
  * `compgen -A command` (cached per cwd+PATH for 30s), `$VAR` names from
  * `compgen -A variable`, and subcommands from a small per-command table
  * (`git --list-cmds`). Path completion stays with the fork's fd-backed

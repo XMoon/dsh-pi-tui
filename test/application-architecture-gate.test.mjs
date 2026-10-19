@@ -2,7 +2,7 @@
  * Static audit for the long-lived application-layer dependency direction between
  * `src/app/**` owners, `src/runtime/**` semantic/adaptor layers, presentation/TUI
  * modules, and the experimental Remote composition boundary (see
- * `docs/architecture.md`): the real
+ * `docs/architecture/overview.md`): the real
  * production tree must satisfy every application-layer rule, and the gate's
  * AST scanner must catch each synthetic violation while ignoring comments,
  * dynamic imports, package imports, and the deliberate non-Backend Direct

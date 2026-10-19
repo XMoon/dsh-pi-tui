@@ -23,7 +23,7 @@
  *
  * The helper is deliberately structural: it receives plain callbacks and
  * never imports Host types or touches `ctx`, so it adds no Host coupling
- * (see docs/client-server-coupling.md) and cannot be mistaken for a
+ * (see docs/architecture/host-client.md) and cannot be mistaken for a
  * cross-backend capability.
  * @module @xmoon76/dsh-pi-tui/runtime/direct/owned-session-retirement
  */

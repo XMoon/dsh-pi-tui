@@ -31,7 +31,7 @@ const README_FILES = [
   },
 ]
 const ACTIVE_FILES = [
-  'docs/dsh-compatibility.md',
+  'docs/guides/dsh-compatibility.md',
   'src/startup.ts',
   'scripts/dsh-runtime-boundary-smoke.mjs',
   'test/startup.test.ts',
@@ -40,7 +40,6 @@ const ACTIVE_FILES = [
 const STABLE_COMMAND = 'dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@latest'
 const DSH_ALLOW_SCRIPTS_LIST = '@deepseek-ai/dsh-subprocess-local,koffi,node-pty'
 const DSH_ALLOW_SCRIPTS = `--allow-scripts=${DSH_ALLOW_SCRIPTS_LIST}`
-const DSH_TARGET_COMMAND = COMPAT_MATRIX.current.upgradeCommand
 const failures = []
 
 /** Every --allow-scripts package list appearing in a text, in order. */
@@ -61,20 +60,6 @@ function assertConvergedAllowLists(label, text) {
   }
 }
 
-/** The runtime peer floor comes from the package manifest, NOT from the
- * compat matrix's recommended upgrade target: the minimum supported runtime
- * and the recommended published target are deliberately distinct values, so
- * deriving the floor from `current.upgradeDsh` would silently re-couple them.
- * Every DSH runtime peer must declare the same range for one floor to exist. */
-const packagePeers = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8')).peerDependencies ?? {}
-const dshPeerRanges = [...new Set(Object.entries(packagePeers)
-  .filter(([name]) => name.startsWith('@deepseek-ai/dsh-'))
-  .map(([, range]) => range))]
-if (dshPeerRanges.length !== 1) {
-  console.error(`installation-doc-gate FAILED: DSH runtime peers declare ${dshPeerRanges.length} distinct ranges: ${dshPeerRanges.join(', ')}`)
-  process.exit(1)
-}
-const DSH_PEER_FLOOR = dshPeerRanges[0]
 // The matrix's recommended command must carry the SAME converged allow list
 // the READMEs document — exactly (not as a substring, so a silently appended
 // package cannot pass), and present at all.
@@ -157,9 +142,9 @@ for (const relativePath of ACTIVE_FILES) {
   check(!text.includes(forbiddenGlobalTuiInstall), `${relativePath}: forbidden global TUI install command`)
   // Any allow list that appears in an active file must be the converged one.
   assertConvergedAllowLists(relativePath, text)
-  if (relativePath === 'docs/dsh-compatibility.md') {
-    check(text.includes(DSH_TARGET_COMMAND), `${relativePath}: the recommended DSH install command must remain exact`)
-    check(text.includes(DSH_PEER_FLOOR), `${relativePath}: the ${DSH_PEER_FLOOR} peer floor must remain documented`)
+  if (relativePath === 'docs/guides/dsh-compatibility.md') {
+    // The compatibility guide owns the durable persistence-format procedure,
+    // not the live install command or peer floor (manifest/matrix own those).
     check(text.includes('Session V2') && text.includes('Session V3'), `${relativePath}: V2/V3 persistence generations must remain documented`)
   }
 }

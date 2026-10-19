@@ -2180,7 +2180,7 @@ export function applyRunnerWithRuntime(
     // double-cleanup or double-exit. Only the FIRST cancel is brought forward;
     // the full retirement (idle → descendants → flush → dispose) is still NOT
     // awaited here — it runs inside the application-tree disposal that appExit
-    // starts, under the DSH process-shutdown watchdog (see docs/concurrency.md).
+    // starts, under the DSH process-shutdown watchdog (see docs/architecture/concurrency.md).
     const { requestExit } = createExitController({
       diag,
       cleanup: surfaceLifecycle.disposeSurface,
@@ -2862,7 +2862,7 @@ export function applyRunnerWithRuntime(
       // the TuiSettingsConfig port is get/replace only, a future Remote
       // adapter cannot map a callback across the process boundary, and the
       // migration rule forbids callbacks across the wire (see
-      // docs/client-server-migration.md). A settings edit takes effect after
+      // docs/architecture/host-client.md). A settings edit takes effect after
       // `/keybindings reload`; the fail-soft parser above keeps the keymap's
       // last-known-good state on any read/parse error.
       // M2: the plugin contributions compile into the effective keymap at the

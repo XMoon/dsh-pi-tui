@@ -1,8 +1,8 @@
 /**
- * M3-2 Remote Session owner services: the exact-`SessionBinding` provider of
+ * Remote Session owner services: the exact-`SessionBinding` provider of
  * the consumer-owned `SessionOwnerAccess` / `SessionOwnerRetirement` seams.
  *
- * Identity authority (frozen by M3-2; see `docs/client-server-migration.md` M3-2): the exact
+ * Identity authority (see `docs/architecture/host-client.md`): the exact
  * `SessionReference.binding` OBJECT a retained `ClientSessionOwner` carries is
  * the generation token —
  *
@@ -23,7 +23,7 @@
  * exact Client reference exactly once, and `whenIdleOrAbort` observes the
  * official `SessionSnapshot.running` without ever cancelling the Host session.
  *
- * M3-2 composition note: this provider is not wired into any production
+ * Composition note: this provider is not wired into any production
  * bootstrap yet (M3-3B/M3-4 own the Remote runtime selection seam). Tests and
  * the future Remote composition construct it directly.
  *

@@ -1,96 +1,127 @@
 # dsh-pi-tui documentation
 
-This directory is the home for everything that needs more than a paragraph:
-design rationale, hard-won contracts, operational procedures, and measured
-data. The root `AGENTS.md` stays the *operating manual* — it summarizes the
-rules here and points at the details, so a contributor who reads one file
-knows where the rest lives.
+This directory is the repository's durable technical documentation. It is not a
+project journal: the root `AGENTS.md` owns the short hard rule, and this file is
+the canonical policy plus the index of every long-lived document.
 
-## Map
+## Policy (MUST)
 
-| File | Audience | What it records |
+`docs/` contains ONLY durable, cross-version technical facts, current
+load-bearing architecture/behavior contracts, and reusable procedures. A
+contract may change between releases, but it must remain useful without being
+tied to one PR, milestone, run, branch SHA, or candidate version.
+
+The positive/negative test for a proposed document or section:
+
+| Belongs in `docs/` | Does NOT belong in `docs/` (where it goes instead) |
+|---|---|
+| Session writer authority and lifecycle invariants | M3-DONE, S4-D2 progress, qualification ledgers → GitHub Issue/PR |
+| Durable JSONL / Session V2/V3 compatibility handling | An exact npm pairing table for one upgrade → release notes, compat matrix, changelog |
+| The terminal untrusted-text contract | Screenshots, failure dumps, benchmark milliseconds from one PR → PR or test artifacts |
+| How to run headless, tmux or Tern-pane smoke tests | A dated PASS record with counts/versions → CI or PR artifacts |
+| The SDK-vs-client evidence-tier principle | A one-off comparison of one SDK pin against upstream main → PR/investigation reference |
+
+Each long-lived fact has exactly ONE owning document. Link to it; never copy it.
+Source code, tests, manifests and machine-generated inventories remain the
+authority for implementation state. Update a repository document only when its
+durable contract or reusable procedure actually changes — not because a PR,
+milestone or review round progressed.
+
+## STOP / Owner adjudication
+
+If ANY accepted plan, PR task, reviewer, checklist or other instruction requires
+creating or updating a `docs/` artifact that violates this policy, STOP THE
+AFFECTED WORK BEFORE WRITING IT. Do not silently skip the required deliverable,
+rewrite the plan on your own, relocate the artifact to another repository path,
+or self-approve an exception. Report the conflicting requirement, the requested
+path/content, the policy violation, the current owner/source of truth, and one
+recommended compliant disposition; request explicit Owner adjudication. Resume
+only after the Owner resolves the conflict and the accepted plan/contract is
+amended. This applies even when an older plan called its documentation update
+MANDATORY or BLOCKING.
+
+## Canonical map
+
+### Index and assets
+
+| Path | Audience | What it owns |
 |---|---|---|
-| `code-review.md` | contributors/reviewers | Project review checkpoints, contract navigation, evidence/current-state requirements, and PR acceptance vs stage closure; generic review-loop mechanics stay in the reusable skill |
-| `architecture.md` | contributors | The ownership/authority map, the canonical layers, the dependency direction, the source-placement policy (canonical zones + the root-module ledger), the architecture gate rules, and the Post-M3 TS convergence train state |
-| `transcript-display-disclosure.md` | contributors | The canonical DisplayPreset authority, layered disclosure defaults, semantic transcript classes, migration precedence, command compatibility, and Direct/Remote parity boundary |
-| `overlay-focus-contract.md` | contributors | The managed-overlay / focus / fullscreen state model: the authority map, the synchronous-reentrancy transaction invariant, the transition map, the reentrancy matrix, the fork focus-transition rules (X056), the nested row-grant consumption contract, the one-shot closure contract for the output viewer / task browser, the selected-Job workspace's temporary physical-screen lease, the optional editor-seat tenant PARK/REFUSE contract, and the regression checklist for `/model`, new modals, plugin UI and fullscreen work |
-| `concurrency.md` | contributors | Why dsh sessions cannot be shared across processes; the DSH `SessionHandle` / `SessionWriteLease` (kernel flock) as the sole cross-process writer authority, and the TUI's process-local coordination (transition gate, operation barrier, generation/stale fences) |
-| `failure-model.md` | contributors | The async failure & cancellation contract (`runDetached` / `runOwned`, error observation, lifecycle roots) — the rules that prevent unhandled rejections and misclassified cancellations |
-| `input-history.md` | contributors | Per-cwd input history: why it left the settings document, the JSONL file design (v1/v2 rows, read-only load, recall vs. persistence), the recall-order contract, the session-first editor recall scope (↑/↓ session-projected, Ctrl+R broader), the Ctrl+R editor-seat search surface (scope/Preview/accept semantics, exact-original-text copy and fullscreen-only pointer), and the migration path |
-| `surface-decisions.md` | contributors | Plain-`exit` quitting, the semantic pending-input queue pane, the /login credential-target resolution, the Web-parity tool-card rendering rules (web cards, structured rawInput, plan content), the mode-aware subagent viewer contract (continuable = interactive follow-up editor, one-shot = read-only; the single official `ctx.subagents.prompt` write path, per-child drafts, the child-owned footer while viewing), the durable hierarchical task browser (`listDescendants`, stable pre-order, done-one-shot reachability, nested read-only authority), the surface-adaptive Focus disclosure (regular Ctrl+O master with full-reveal, fullscreen Ctrl+O Thought-ROOT bulk — expand recent / collapse all — plus nearest-owner mouse disclosure including the internal blank-row collapse, the unified Thinking detail model — compact by default, Alt+T bulk toggle, per-card click overrides), the selected-row marquee, the single-physical-row presentation contract for task/picker surfaces (CR/LF projected at single-row boundaries; raw domain text untouched), the local-shell display policy (5/20 preview rows, Ctrl+O master outside fullscreen Focus, Alt+K dismiss), the selected-Job fullscreen workspace (typed header / retained body / pinned action bar, End-only follow, Job-local Find over the retained window with its Esc layering, retention re-anchor, Esc back to the same Task Browser, and the mutually exclusive shell Command page with original-text drag selection, Copy All and the Output copy verb over the existing Client clipboard), the History editor-seat tenant (one vertical results+Preview presentation, F2 height toggle, exact-original-text copy, fullscreen-only pointer), and the single-live-TUI-per-process invariant (the vendored keybindings are process-global; the process slot is claimed at the first start and held until the final dispose) |
-| `input-and-card-polish.md` | contributors | The `!`/`!!` compgen completion bridge, the user-shell sandbox policy `/settings` row (default bypass), the `ask_user_question` answers card (folded summary + expanded answer lines), the goal cards (`get_goal`/`create_goal`/`update_goal` folded summary + field lines), the fullscreen todo-dock click mapping, and the web-parity JSON folded-preview audit (schedule/cordis-inspect/ralph) |
-| `terminal-output-safety.md` | contributors/reviewers | The ONE contract for projecting untrusted external text onto a terminal: the two explicit display policies (`sanitizeDisplayText` / `sanitizeDisplayLog`), the SGR whitelist, literal CR/TAB semantics, the raw-source-vs-display authority split, the Copy/Search/History and footer/title exceptions, TSP node-text parity, why final-writer/vendor interception is forbidden, and the test matrix |
-| `transcript-gutter.md` | contributors | The transcript right-gutter width contract (2 cells at the terminal's right edge, transcript surface only): the measurement==render invariant every geometry path must hold, the folded-row truncation rule, and the narrow-terminal test conventions |
-| `tui-design-language.md` | contributors/reviewers | The canonical TUI visual vocabulary: the six semantic layers and the role→token table, case and separator rules, the East-Asian-width glyph-safety rule, the single active device (selection / current / focus), the chrome rule and gutter budget, the action-bar grammar and whole-segment degradation, the responsive ladder, the reuse map (what to reuse, what never to build), and the anti-degradation governance (visual PR checklist, machine checks, known deviations) |
-| `tui-design-language-samples.md` | contributors/reviewers | Real `VirtualTerminal` BEFORE frames plus target AFTER frames for the Settings and Job workspaces at wide/short/narrow sizes, the measured per-cell ink inventory that motivated the role table, the responsive before/after table, and the re-verification recipe |
-| `tui-design-language-rollout.md` | contributors | The per-PR rollout plan for the design language (design gate → shared action-bar row → Settings → Job → governance → sibling surfaces) with scope, non-goals, tests, evidence and rollback per PR |
-| `image-completion-and-markers.md` | contributors | The `/attach` and `/image` path-completion design (the fork's `getArgumentCompletions` extension point, the `shouldTriggerFileCompletion` trim quirk, directory reopen), the `🖼️` U+FE0F marker rationale (1-cell math vs 2-cell emoji fonts), ordered attachment placeholders for mixed user messages, and the fullscreen attachment collapse (constant info bar + click to hide/show the image rows) |
-| `releasing.md` | ops | The version bump, bilingual changelog/README update, verification gates, local commit/tag, explicit push approval, and CI publication checklist |
-| `local-development.md` | ops | The main/next worktree and branch-promotion policy, npm/source DSH modes, read-only doctor, cached source bootstrap, and environment safety rules |
-| `surface-catalog.md` | contributors | The surface catalog design: resume prefetch + standing-scope cold skills; why composition probes are REMOVED (host `session/created` observers write durable knob events) and the standing-key path that replaces them; the coordinator invariants that keep snapshots detached and first submissions correctly routed |
-| `client-server-migration.md` | contributors | The server/client migration source of truth: phase status (M0–M8), backend default, rollback state, hard invariants, the process/qualification governance (stage closure protocol, L1–L6 qualification evidence, production-equivalent fixture manifest, reachability classification, closure evidence template), the M3 closure record, known blockers, startup constraint |
-| `dsh-compatibility.md` | users/contributors | The DSH 0.3/0.4 runtime boundary, target version window, old-runtime recovery, and legacy session/preset data compatibility |
-| `dsh-source-build-debugging.md` | contributors | The local DSH checkout build order, source-artifact linking, unpublished-version traps, duplicate `dsh-scope` diagnosis, and target-profile validation sequence |
-| `client-server-coupling.md` | contributors | The migration coupling allowlist: the (file, pattern) baseline enforced by `scripts/client-boundary-gate.mjs`, the four categories (DIRECT_HOST_REQUIRED / MIGRATABLE / CLIENT_LOCAL / TEMPORARY_EXCEPTION), the composition ownership and generated-wire inventory (owner classes, canonical rows, duplicate-mount prohibition, generated-object identity and receiver binding), and the locality rules for new features |
-| `perf-baseline.md` | contributors | Measured rendering performance before/after the incremental read grouping + render-cache optimization, the fullscreen scroll geometry-epoch snapshot reuse (2026-09-21) with its row-map invalidation contract, the `DSH_TUI_SCROLL_PROFILE` scroll-frame profiler, and how to re-run each measurement |
-| `tmux-testing.md` | contributors | When to test in tmux instead of headless, the manual verification flows, and every trap hit while real-testing |
-| `focus-replay-harness.md` | contributors | The fullscreen Focus replay harness and screen oracle (`scripts/focus-replay-probe.mts`, `scripts/focus-screen-holes.mjs`): what they are, the valid-run preconditions, the switch reference, the per-frame/per-flush evidence, the known false positives, and the before/after acceptance procedure for the transcript-batch lifecycle fix |
-| `footer-customization.md` | users | User guide for `/footer`: builtin items and styles, Custom Text, trusted Custom Command Items, whole-footer commands, extension items, responsive behavior, raw settings reference, and troubleshooting |
-| `extension-api.md` | plugin authors | The extension API v2 author guide: import rules, the surface table, lifecycle/render contracts, deprecation policy, stability |
-| `extension-advanced.md` | plugin authors | The ADVANCED tier author guide (Phase 2/4): normalized input capture, focused interactive surfaces, advanced editor control, the imperative UI broker, custom UI and the host-state facade — the Host-mediated contract and the capture ladder position |
-| `extension-capability-matrix.md` | plugin authors | The Pi capability reference: Pi capability → dsh equivalent → tier → status (roadmap, not a hash gate) |
-| `plugin-authoring.md` | plugin authors | The "which tier should I use?" decision tree and the authoring checklist |
-| `extension-unstable.md` | plugin authors | The UNSTABLE tier author guide (Phase 3): raw input interception, exclusive raw ownership, the emergency fail-safe, the low-level surface seam — NO compatibility guarantee |
-| `keybinding-architecture.md` | contributors | The user-orchestrable keybinding design: the semantic action inventory (`app.*`), the context-aware effective keymap, the input ladder, the leader (M6) machinery, user configuration, and the static gate |
-| `extension-tiers.md` | plugin authors | The three-tier contract table and the current tier status (`ADVANCED_API_LEVEL` / `UNSTABLE_API_LEVEL`) |
-| `tern-tsp.md` | contributors | The Tern Surface Protocol (TSP) integration entry point: the protocol/SDK boundary, implementation status and limits, capability matrix, and per-PR evidence ledger |
-| `tern-tsp/session-browser.md` | TSP contributors | Complete Session Browser authority, workspace/search/Reader semantics, command admission, guarded Resume lifecycle and qualification limits |
-| `tern-tsp/evidence/pr4-b1-a.md` | TSP contributors | PR4-B1-A historical read-path coverage, real Tern headless observations, evidence tiers and explicit unverified limits |
-| `tern-tsp/evidence/pr4-b1-b.md` | TSP contributors | PR4-B1-B command/Resume coverage, Direct source-to-sink evidence, real Tern headless qualification and unverified limits |
-| `tern-tsp/evidence/pr4-b2-a.md` | TSP contributors | PR4-B2-A headless-basic-command coverage (`/new`, `/fork`, `/title`+`/rename`, `/copy`, `/yolo`, `/logout <target>`), Direct source-to-sink evidence, the real-Tern `/copy` channel run and the reported clipboard/logout qualification gaps |
-| `tern-tsp/foundation.md` | TSP contributors | Verified runtime/Surface owners, lifecycle, node/event identity, modal/focus, capability and evidence boundaries; source-qualified, not a universal protocol specification |
-| `tern-tsp/upstream-reference.md` | TSP contributors | Version-pinned official SDK / oh-my-pi / protocol reference, semantic differences and reusable patterns without copying another runtime |
-| `tern-tsp/evidence/foundation-20261013.md` | TSP contributors | Dated audit (A1–A7), the observed Tern 0.8.3 headless evidence tiers, exact provenance, and remaining unknowns |
-| `tern-pane-harness.md` | contributors | The real-pane Tern harness (`scripts/tern-pane-drive.mjs`, the committed `scripts/tern-pane-smoke.mjs` smoke, and the pure `scripts/tern-pane-geometry.mjs` / `scripts/tern-pane-instrument.mjs` rules, covered by `test/tern-pane-*.test.mjs`): when a real client run is needed instead of headless, the flow/subject split, the run artifacts, the assertion-vs-measurement rules, the clipping and click-point traps, the once-only-input rule, the fresh-directory contract, and its limits |
-| `tmux/` | — | Helper scripts (`ansi2html.mjs`, `tui-demo.sh`) with their own tests |
-| `dsh-pi-tui.png` | — | Screenshot used by the root README |
+| `README.md` | everyone | This policy and the complete documentation index |
+| `dsh-pi-tui.png` | readers of the root README | The published screenshot asset; not a contract document |
 
-Other documentation, and why it is not here:
+### `architecture/` — long-lived product and application contracts
 
-- Root `CHANGELOG.md` — the 简体中文 release history, maintained on every
-  release per the hard rule in `AGENTS.md` (Keep a Changelog 1.1.0 format),
-  with `CHANGELOG.en.md` kept in sync as the English version.
-- Root `AGENTS.md` — the repository constitution: execution discipline,
-  ownership and correctness boundaries, development/release pointers, and
-  links into this directory.
-- `packages/pi-tui/vendor-divergences.json` — the authoritative schema-v2
-  ledger: every local fix, dependency audit, upstream comparison, and
-  retirement condition. Run `pnpm generate:pi-divergences` to produce the
-  generated `packages/pi-tui/DIVERGENCES.md` report.
-- `packages/pi-tui/AGENTS.md` — the vendored fork's contributor/re-vendor guide;
-  it points to the structured ledger and records the hard gates.
-- `packages/pi-tui/UPSTREAM.json` — the single source of truth for the
-  vendored upstream version/commit. The generated divergence report repeats
-  the pin for audit readability; the fork's `package.json` `repository.note`
-  defers to this file.
-- `README.md` — the repository root is the published package, so the root
-  README is the npm page (user-facing install instructions).
-- `.agents/AGENTS.md` — private, gitignored environment handbook for this
-  machine only; never commit it.
+| Path | Audience | What it owns |
+|---|---|---|
+| `architecture/overview.md` | contributors | Ownership map and canonical layers, dependency direction, composition zone, source-placement policy and root ledger, architecture-gate scope |
+| `architecture/host-client.md` | contributors | Host-owned vs Client-local locality, the semantic-port boundary, Direct/Remote equivalence, currentness/identity fences, Plugin Manager Host authority, workflow-terminal authority, coupling guard and qualification tiers |
+| `architecture/concurrency.md` | contributors | Session writer authority (`SessionHandle` / `SessionWriteLease`), process-local transition/operation barriers, stale/generation fences |
+| `architecture/failure-model.md` | contributors | `runDetached` / `runOwned` promise ownership, error observation and cancellation taxonomy |
+| `architecture/surface-behavior.md` | contributors | Durable non-transcript workspace behavior: quit/queue, Task Center/Browser, Job Workspace, Settings, Task Quick, Plugin Manager/Detail, input completion and attachment intake |
+| `architecture/surface-catalog.md` | contributors | Command/skill catalog ownership, standing scope, Host vs TUI authority and refresh semantics |
+| `architecture/overlay-focus.md` | contributors | Managed-overlay / editor-seat / focus contract, synchronous reentrancy, one-shot closure and physical-screen leases |
+| `architecture/transcript.md` | contributors | One DisplayPreset authority, semantic transcript classification, folding/reveal, Context/Work/Thinking disclosure |
+| `architecture/terminal-output.md` | contributors | Untrusted-text projection: display policies, SGR whitelist, raw-vs-display authority, copy/search/terminal-sink constraints |
+| `architecture/keybindings.md` | contributors | Physical key → semantic action → resolver → handler, the input ladder, leader machinery and the static gate |
+| `architecture/input-history.md` | contributors | Per-cwd input-history persistence format, recall scopes, and the current-session vs broader-history split |
+| `architecture/design-language.md` | contributors/reviewers | TUI visual vocabulary: semantic layers, role→token table, glyph safety, active device, responsive ladder, governance and visual checklist |
 
-## How these docs evolve
+### `extensions/` — public extension contracts
 
-The point of this documentation is to keep knowledge that was expensive to
-gain: **human decisions** (why something is done this way) and **traps** that
-only surfaced after repeated testing. When you change behavior:
+| Path | Audience | What it owns |
+|---|---|---|
+| `extensions/tiers.md` | plugin authors | The three public tiers and their compatibility policy |
+| `extensions/stable.md` | plugin authors | The Stable v2 public API contract and examples |
+| `extensions/advanced.md` | plugin authors | The Advanced-tier author guide |
+| `extensions/unstable.md` | plugin authors | The Unstable-tier API and its safety/preemption behavior |
+| `extensions/authoring.md` | plugin authors | Tier-selection guidance and general authoring practice |
 
-- Record the decision and its rationale at the same time as the code, in the
-  doc that owns the topic. A fix without a recorded reason is a trap waiting
-  to be re-introduced.
-- Write the rule and the *why* — not a walkthrough of the implementation.
-  If the reader needs the code's line-by-line behavior, the code and its
-  tests are the reference; the doc should say why the behavior is the way it
-  is and what must not be broken.
-- Keep a new fact in exactly one place. If a doc needs to reference it,
-  link, don't copy — stale copies are how this directory got messy.
-- English only, unless the user explicitly asks otherwise.
+### `tsp/` — Tern Surface Protocol product boundary
+
+| Path | Audience | What it owns |
+|---|---|---|
+| `tsp/overview.md` | TSP contributors | TSP-vs-Luau boundary, renderer ownership, capability/admission, run/verify entry points |
+| `tsp/foundation.md` | TSP contributors | SDK/client/app authority split, node identity/revision, seat ownership, async currentness and evidence tiers |
+| `tsp/model-selection.md` | TSP contributors | The current two-page `/model` semantics and the single explicit writer |
+| `tsp/preset-selection.md` | TSP contributors | The current two-page `/preset` semantics, footer writer and Reader |
+| `tsp/session-browser.md` | TSP contributors | SessionReader, listing/search/lineage/workspace, guarded resume and the native viewer contract |
+
+### `guides/` — reusable procedures
+
+| Path | Audience | What it owns |
+|---|---|---|
+| `guides/code-review.md` | contributors/reviewers | Repository review checkpoints, evidence tiers, documentation-policy gate, PR acceptance vs stage closure |
+| `guides/development.md` | contributors | Worktree policy, npm/source DSH modes, doctor/bootstrap, source-build diagnosis, benchmark/replay method |
+| `guides/releasing.md` | ops | Versioning, bilingual changelog/README metadata, verification, tag and publication procedure |
+| `guides/tmux-testing.md` | contributors | When/how to verify in tmux, capture flow, Focus-replay and measurement procedures, traps |
+| `guides/tern-pane-testing.md` | TSP contributors | Real Tern-pane harness vs headless evidence, run conditions, assertion-vs-measurement and limits |
+| `guides/footer.md` | users | `/footer` builtin items, styles, custom text/commands, extension items and troubleshooting |
+| `guides/dsh-compatibility.md` | users/contributors | Semver/prerelease matching method, manifest/matrix/mode authority, Session V2/V3 data handling, Source Mode validation |
+
+## Source-of-truth boundaries
+
+- **Behavior:** `src/**` plus its tests prove what the product does. A document
+  explains the durable *why*, the owning authority, the sink and the must-not
+  rules; it never becomes a second implementation inventory.
+- **Allowed Host couplings:** `scripts/client-boundary-baseline.json` and
+  `scripts/client-boundary-gate.mjs` are the authority for permitted Host
+  coupling sites. Do not hand-maintain the allowlist in prose.
+- **Architecture placement:** `scripts/source-root-baseline.json` plus
+  `scripts/application-architecture-gate.mjs` own the root ledger and the
+  dependency rules.
+- **Versions and compatibility:** `package.json`, `src/dsh-compat-matrix.json`,
+  `test/compat/dsh-mode.json`, `test/compat/dsh-source.json` and the release
+  notes/changelog own live versions, floors and pairing. `README.md` /
+  `README.en.md` own the published pairing summary.
+- **Stage/task progress:** GitHub Issues and PRs own open obligations, review
+  rounds, qualification records and handoffs. Documentation does not track them.
+- **Generated inventories:** regeneration commands (for example
+  `pnpm generate:pi-divergences`) and their JSON ledgers own generated reports;
+  commit only the generated artifact the owning gate requires.
+
+## How these documents evolve
+
+Record a decision and its rationale in the owning document at the same time as
+the behavior change. Write the rule and the *why*, not a walkthrough of the
+implementation. Keep a new fact in exactly one place: link, don't copy. English
+only, unless the user explicitly asks otherwise.

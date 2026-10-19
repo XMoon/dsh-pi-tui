@@ -9,8 +9,8 @@
  * A future Remote adapter maps the same port onto the official client
  * contract; nothing here may name a transport.
  *
- * Full contract: docs/client-server-migration.md §P1 capability ledger and
- * docs/client-server-coupling.md.
+ * Full contract: docs/architecture/host-client.md (Host authority and
+ * currentness) and docs/architecture/surface-behavior.md (controller/workspace).
  * @module @xmoon76/dsh-pi-tui/runtime/plugin-manager-port
  */
 

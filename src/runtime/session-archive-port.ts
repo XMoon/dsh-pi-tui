@@ -7,7 +7,7 @@
  * Remote adapter maps the SAME port onto the official DSH Connection
  * `GET/HEAD /api/session.export` stream; the Client save UX never changes.
  *
- * Full contract: docs/client-server-migration.md + docs/client-server-coupling.md.
+ * Full contract: docs/architecture/host-client.md + docs/architecture/host-client.md.
  * @module @xmoon76/dsh-pi-tui/runtime/session-archive-port
  */
 

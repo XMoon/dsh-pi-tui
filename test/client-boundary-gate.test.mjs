@@ -26,7 +26,7 @@ test('baseline matches the current src/ tree (no drift, no new debt)', () => {
   assert.deepEqual(
     debt,
     [],
-    `new Host coupling detected — see docs/client-server-coupling.md; ` +
+    `new Host coupling detected — see docs/architecture/host-client.md; ` +
       `if a migration phase legitimately relocated coupling, update the baseline deliberately:\n${debt.join('\n')}`,
   )
 })

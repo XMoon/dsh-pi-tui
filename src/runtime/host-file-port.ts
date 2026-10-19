@@ -50,7 +50,7 @@
  * `dsh-file-reference-local` provider (mounted by the TUI's composition) is
  * the Host-side authority that delegation reaches.
  *
- * Full contract: docs/client-server-migration.md + docs/client-server-coupling.md.
+ * Full contract: docs/architecture/host-client.md + docs/architecture/host-client.md.
  * @module @xmoon76/dsh-pi-tui/runtime/host-file-port
  */
 

@@ -14,7 +14,7 @@
  * and the preset composition. It keeps the real AgentHandle ownership escape
  * required by the current Direct runner.
  *
- * Full contract: docs/client-server-migration.md + docs/client-server-coupling.md.
+ * Full contract: docs/architecture/host-client.md + docs/architecture/host-client.md.
  * @module @xmoon76/dsh-pi-tui/runtime/direct/session-lifecycle-direct
  */
 

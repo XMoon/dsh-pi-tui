@@ -38,7 +38,7 @@ dsh --profile pi-tui
 > `@deepseek-ai/dsh@alpha` 指向 `0.2.1-alpha.5`，而 `@xmoon76/dsh-pi-tui@next`
 > 仍指向 `0.5.2-rc.1`（peer floor `>=0.2.0-rc.2`，npm semver 不接受不同
 > major.minor.patch tuple 的 prerelease）。请以下方版本对应表和
-> [兼容性文档](docs/dsh-compatibility.md) 的精确配对为准；稳定版 `0.5.3` 发布在
+> [兼容性指南](docs/guides/dsh-compatibility.md) 的通用匹配原则为准；稳定版 `0.5.3` 发布在
 > `@latest` 而不是 `@next`，因此这两个移动 channel 上没有可安装的兼容组合。
 > 本 checkout 的精确验证请使用 `pnpm compat:dsh:npm`。
 
@@ -49,7 +49,7 @@ build/test/package 路径：
 pnpm compat:dsh:npm
 ```
 
-具体的稳定版最低版本、next 兼容范围和回退路径见[兼容性文档](docs/dsh-compatibility.md)。
+具体的稳定版最低版本、next 兼容范围和回退路径见[兼容性指南](docs/guides/dsh-compatibility.md)。
 
 ### 环境要求
 
@@ -77,8 +77,8 @@ pnpm compat:dsh:npm
 身份）。上一稳定版 `0.5.1` 继续配对 0.2.0-rc.2：它把整个 DSH peer floor 提升到
 `>=0.2.0-rc.2`（Question 生命周期消费 rc.2 才发布的公开契约）。更早的 `0.5.0`
 保持 `>=0.1.7-rc.2` floor 不变（精确验证目标 0.2.0-rc.1）；旧 runtime 会在正常的
-不兼容边界以非零状态失败，请按上表安装配对的 TUI 线。完整的历史兼容矩阵和
-fallback 命令见[兼容性文档](docs/dsh-compatibility.md)；要查看 `@next` 的最新集成
+不兼容边界以非零状态失败，请按上表安装配对的 TUI 线。上方的版本对应表是已发布
+线的摘要；通用版本匹配原则与回退/诊断流程见[兼容性指南](docs/guides/dsh-compatibility.md)；要查看 `@next` 的最新集成
 状态，请看 [next 分支 README](https://github.com/XMoon/dsh-pi-tui/blob/next/README.md)。
 
 新的 Agent preset 使用当前 roster 中选定的 id。DSH 允许合法的自定义
@@ -399,8 +399,8 @@ DSH Host 不支持**这套上报(它没有对应的事件源)。
 
 完整的 `/footer` 使用方法、Custom Text / Command、YAML 配置、安全模型和排错说明见：
 
-- [Footer 自定义完整指南](docs/footer-customization.md)
-- [Extension API（插件作者）](docs/extension-api.md)
+- [Footer 自定义完整指南](docs/guides/footer.md)
+- [Extension API（插件作者）](docs/extensions/stable.md)
 
 `/statusline` 是 `/footer` 的别名。
 
@@ -622,12 +622,11 @@ export function apply(ctx: Context): void {
 
 详细文档：
 
-* [Extension API](docs/extension-api.md)
-* [Extension tiers](docs/extension-tiers.md)
-* [Advanced API](docs/extension-advanced.md)
-* [Unstable API](docs/extension-unstable.md)
-* [Plugin authoring](docs/plugin-authoring.md)
-* [Capability matrix](docs/extension-capability-matrix.md)
+* [Extension API](docs/extensions/stable.md)
+* [Extension tiers](docs/extensions/tiers.md)
+* [Advanced API](docs/extensions/advanced.md)
+* [Unstable API](docs/extensions/unstable.md)
+* [Plugin authoring](docs/extensions/authoring.md)
 
 ## 开发
 
@@ -682,7 +681,7 @@ symlink 写入发布 package。
 
 ### CI 验证策略
 
-CI 对 push 到 `next` 以及目标为 `next` 的 PR 遵循跟踪的 `test/compat/dsh-mode.json` 策略；`main` 和所有 tag 使用 npm Mode。Source Mode 从 `test/compat/dsh-source.json` 读取 source target 并验证完整的官方 DSH tarball family、TUI 预设和旧 runtime 边界；npm Mode 则使用 checkout 的 `package.json`/冻结 lockfile 中声明的 DSH 版本运行 registry lane。对于尚未发布的 source family，已发布 `pi2dsh` 的生态检查会明确标记为 skipped。详细流程见 [`docs/dsh-compatibility.md`](docs/dsh-compatibility.md)。
+CI 对 push 到 `next` 以及目标为 `next` 的 PR 遵循跟踪的 `test/compat/dsh-mode.json` 策略；`main` 和所有 tag 使用 npm Mode。Source Mode 从 `test/compat/dsh-source.json` 读取 source target 并验证完整的官方 DSH tarball family、TUI 预设和旧 runtime 边界；npm Mode 则使用 checkout 的 `package.json`/冻结 lockfile 中声明的 DSH 版本运行 registry lane。对于尚未发布的 source family，已发布 `pi2dsh` 的生态检查会明确标记为 skipped。详细流程见 [`docs/guides/dsh-compatibility.md`](docs/guides/dsh-compatibility.md)。
 
 ## 项目结构
 
@@ -711,15 +710,13 @@ packages/pi-tui/AGENTS.md
 
 | 文档                                                     | 内容                           |
 | ------------------------------------------------------ | ---------------------------- |
-| [docs/README.md](docs/README.md)                       | 文档索引                         |
-| [docs/architecture.md](docs/architecture.md)           | 架构和模块职责                      |
-| [docs/input-history.md](docs/input-history.md)         | 输入历史                         |
-| [docs/surface-decisions.md](docs/surface-decisions.md) | TUI 交互设计决策                   |
-| [docs/concurrency.md](docs/concurrency.md)             | Session 并发                   |
-| [docs/failure-model.md](docs/failure-model.md)         | Async failure / cancellation |
-| [docs/perf-baseline.md](docs/perf-baseline.md)         | 性能基线                         |
-| [docs/local-development.md](docs/local-development.md) | 本地开发环境与 worktree 约定       |
-| [docs/extension-api.md](docs/extension-api.md)         | Extension API                |
+| [docs/README.md](docs/README.md)                             | 文档政策与完整索引               |
+| [docs/architecture/overview.md](docs/architecture/overview.md) | 架构、分层与依赖方向           |
+| [docs/architecture/host-client.md](docs/architecture/host-client.md) | Host/Client 边界与当前性契约 |
+| [docs/architecture/surface-behavior.md](docs/architecture/surface-behavior.md) | 工作区/任务/插件界面行为 |
+| [docs/guides/development.md](docs/guides/development.md)     | 本地开发、worktree 与性能重跑方法 |
+| [docs/extensions/stable.md](docs/extensions/stable.md)       | Extension API                |
+| [docs/guides/code-review.md](docs/guides/code-review.md)     | 仓库评审检查点               |
 | [AGENTS.md](AGENTS.md)                                 | Contributor operating manual |
 
 ## Changelog

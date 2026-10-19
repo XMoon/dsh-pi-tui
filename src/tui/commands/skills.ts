@@ -169,7 +169,7 @@ export function registerReloadCommand(deps: SkillsCommandDeps): void {
         // refreshes its authoritative surface; the sessionless state refreshes
         // the STANDING skill catalog of the effective preset (no Agent, no
         // session — the standing scope replaces the composition probe, which
-        // emits durable events in this deployment, see docs/surface-catalog.md).
+        // emits durable events in this deployment, see docs/architecture/surface-catalog.md).
         // The handler awaits the attempt and reports the outcome (counts,
         // degradation notice, partial issues, supersession); provider or
         // composition failures never prevent the settings portion below.

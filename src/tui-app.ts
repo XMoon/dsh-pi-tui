@@ -3550,7 +3550,7 @@ export class TuiApp {
    * (and its component) in this batch but is NOT wrapped in a gutter, so it has
    * no mounted counterpart. The identity invariant is therefore over the batch's
    * components, with zero-height blocks having no mounted row — see
-   * `docs/focus-replay-harness.md`.
+   * `docs/guides/tmux-testing.md`.
    */
   private mountedTranscriptBlocks: readonly RenderedTranscriptBlock[] = []
   /** Whether one structural transcript batch has been mounted. */
@@ -11317,7 +11317,7 @@ export class TuiApp {
   /** An async image settle invalidates ONLY the thumbnail component: the
    * resolved bytes can change the attachment's rendered rows, so the next
    * paint-snapshot commit must remeasure instead of reusing the committed
-   * row geometry (geometry epoch — docs/perf-baseline.md). Every
+   * row geometry (geometry epoch — docs/architecture/transcript.md). Every
    * `ImageThumbnail` render-request wiring MUST go through here. */
   private settleThumbnailRender(): void {
     this.fullscreenRowsDirty = true
@@ -11808,7 +11808,7 @@ export class TuiApp {
    * click-time live re-checks keep their own `refreshMessageRows` calls,
    * so the press/release fence still measures live state. Chrome heights
    * and scroll state are re-read fresh on EVERY commit. Contract:
-   * docs/perf-baseline.md ("geometry-epoch snapshot reuse"). The snapshot
+   * docs/architecture/transcript.md ("Fullscreen geometry-epoch snapshot reuse"). The snapshot
    * keeps STABLE values only. */
   private commitFullscreenPaintSnapshot(): void {
     const snapshotStart = this.scrollProfiler.enabled ? performance.now() : 0

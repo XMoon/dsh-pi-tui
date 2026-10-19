@@ -6,7 +6,7 @@
  * later milestones (M2/M3) behind the SAME port interfaces — never a second
  * feature semantics.
  *
- * Full contract: docs/client-server-migration.md + docs/client-server-coupling.md.
+ * Full contract: docs/architecture/host-client.md + docs/architecture/host-client.md.
  * @module @xmoon76/dsh-pi-tui/runtime/backend
  */
 

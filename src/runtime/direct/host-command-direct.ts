@@ -5,7 +5,7 @@
  * in the runner; this adapter passes the selected line and attachments
  * through unchanged.
  *
- * Full contract: docs/client-server-migration.md + docs/client-server-coupling.md.
+ * Full contract: docs/architecture/host-client.md + docs/architecture/host-client.md.
  * @module @xmoon76/dsh-pi-tui/runtime/direct/host-command-direct
  */
 

@@ -1,6 +1,6 @@
 /**
  * Fullscreen Focus replay harness (investigation tooling, NOT production code).
- * See `docs/focus-replay-harness.md` for the full contract: valid-run
+ * See `docs/guides/tmux-testing.md` for the full contract: valid-run
  * preconditions, every switch, the recorded evidence, the known false positives
  * and the acceptance procedure.
  *

@@ -17,7 +17,7 @@
  * TSP pane is a scripted tty that answers the official handshake and acks
  * frames under credit flow control. The two terminals are DIFFERENT objects:
  * PiTui never shares stdin with the SDK. Nothing here is L5 (real Host wire) or
- * L6 (a real pane running the app); see `docs/tern-tsp/evidence/pr2.md`.
+ * L6 (a real pane running the app); see `docs/tsp/overview.md`.
  *
  * @module @xmoon76/dsh-pi-tui/tern-tsp-live-projection.test
  */

@@ -1,0 +1,480 @@
+# Extension API v2 — Stable author guide and stability contract
+
+The dsh-pi-tui STABLE extension surface (`@xmoon76/dsh-pi-tui/extensions`)
+is the compatibility-oriented public seam for third-party plugins. This
+document is the STABLE API author guide and stability record (plan §16 —
+now at **API v2**). Advanced and Unstable tiers are
+documented in `docs/extensions/tiers.md`.
+
+`api().apiVersion` reports **2**. The version was bumped with the breaking
+client-command contribution contract below; a plugin that must support both
+schemas branches on `api().apiVersion` (`1` = the v1 foundation), and a
+plugin that declared the removed v1 ownership shape is rejected loudly at
+registration instead of being silently reinterpreted.
+
+## Import rules (hard gate — Stable)
+
+A STABLE plugin imports ONLY `@xmoon76/dsh-pi-tui/extensions`. The packed
+declaration gate (scripts/tarball-smoke.mjs) and the editor acceptance
+gate (scripts/vim-plugin-smoke.mjs) fail on:
+
+- `@xmoon76/pi-tui` (the private vendored fork — bundled, never
+  importable);
+- `src/tui-app`, `TuiApp`, `TuiMainScreen`, `TuiAltScreen`;
+- any repository-relative internal path;
+- dynamic `import(...)` / `require(...)` of the same.
+
+If a STABLE plugin NEEDS a private import, the SDK is missing a capability —
+report it; there is deliberately no `unsafeGetTuiApp()` escape hatch. Higher
+freedom belongs to the Advanced / Unstable entries, which expose low-level
+capability through their own supported package boundary (never
+repository-private imports).
+
+## API tiers
+
+The extension surface ships three tiers (plan §4/§5). A plugin imports
+ONE tier entry — never the stable entry's internals, `TuiApp`,
+`TuiMainScreen`, `TuiAltScreen` or repository-relative paths.
+
+All extension plugins remain standard DeepSeek Harness / Cordis plugins using
+`name`, `inject`, and `apply(ctx)`. The tier entries are package-export
+boundaries: they may expose different types/helpers, but at runtime there is
+ONE `piTuiExtensions` service and ONE shared Extension Runtime — never three
+plugin systems, three loaders, or three HMR/lifecycle runtimes.
+
+| Tier | Entry | Contract |
+|---|---|---|
+| Stable | `@xmoon76/dsh-pi-tui/extensions` | Compatibility-oriented; additive-first; existing semantics never silently change; public removal requires a planned breaking change. |
+| Advanced | `@xmoon76/dsh-pi-tui/extensions/advanced` | Experimental; minor releases may break; a migration note is required; no long-term shims. |
+| Unstable | `@xmoon76/dsh-pi-tui/extensions/unstable` | NO compatibility guarantee; implementation may change at any time. |
+
+All tiers reuse the SAME shared extension runtime: caller-fiber
+ownership, surface lifecycle, invalidation, capability discovery. Do not fork a
+second ownership/lifecycle model per tier.
+tiers have since grown:
+
+- **Advanced** (`ADVANCED_API_LEVEL = 1`): normalized input
+  capture, focused interactive surfaces (interactive managed overlays) and
+  advanced editor control — still Host-mediated, never raw terminal bytes.
+  See `docs/extensions/advanced.md`.
+- **Unstable** (`UNSTABLE_API_LEVEL = 1`): raw input
+  interception (observe/consume/rewrite, exclusive raw ownership), the
+  Host emergency fail-safe (triple-Esc), and a selected low-level surface
+  seam. Its component mount defaults to the full responsive terminal width
+  unless the plugin supplies an explicit width — NO compatibility guarantee;
+  a broken plugin can disrupt Host behavior. See `docs/extensions/unstable.md`.
+
+Such access is provided through the supported tier package entry
+(`./extensions/advanced` / `./extensions/unstable`), never through
+repository-private imports.
+
+## The surface
+
+| Area | Entry point | Capability | Since |
+|---|---|---|---|
+| Header badge slot | `register('chrome.header.badge', ...)` | `slot.chrome.header.badge` | v2 |
+| Dock item slot | `register('input.dock.item', ...)` | `slot.input.dock.item` | v2 |
+| Footer segment slot | `register('chrome.footer.status', ...)` | `slot.chrome.footer.status` | v2 |
+| Configurable footer item | `register('chrome.footer.item', ...)` | `slot.chrome.footer.item` | v2 |
+| Widget slots | `register('input.widget.above'\|'input.widget.below', ...)` | `slot.input.widget` | v2 |
+| Component kit | `ExtensionView` tree values | (compiled by the host) | v2 |
+| Command ownership | `registerCommand(...)` | (always available) | v2 |
+| Theme registry | `registerTheme(...)` | (always available) | v2 |
+| Settings rows | `registerSetting(...)` | (always available) | v2 |
+| Autocomplete | `registerAutocomplete(...)` | (always available) | v2 |
+| Keybindings | `registerKeybinding(...)` | (always available) | v2 |
+| Message renderer | `registerMessageRenderer(...)` | (always available) | v2 |
+| Tool renderer | `registerToolRenderer(...)` | (always available) | v2 |
+| Managed overlay | `showOverlay(view, options)` | (always available) | v2 |
+| Editor replacement | `registerEditor(...)` | (always available) | v2 |
+
+**Stable widget layout.** `input.widget.above` /
+`input.widget.below` contributions are passive, display-only rows. The SAME
+registered contribution renders on both the regular document and the
+fullscreen surface, in the same above/below relationship to the editor seat,
+from one `ExtensionLedger` registration — the host mounts one pair of Text
+rows, never a per-screen copy. The host owns the row grant and the widget
+zones are the LOWEST-priority pinned decoration on the fixed-height
+fullscreen layout: their effective grant falls to **zero** before the editor,
+the footer or the minimum one-row transcript viewport loses space. A zero
+grant hides the rows physically; it never removes the registration, so a
+later resize or a taller surface repaints the same contribution without
+re-registering. The grant follows the surface's LIVE pinned-chrome height, not
+only the terminal geometry: a growing draft, an opened Todo panel, queue or
+busy rows, or a Question / Save Location frame replacing the editor seat
+re-derive it before the next paint (a shrinking chrome restores the zones the
+same way). Widgets never take keyboard focus or mouse targets, keep
+their registered ordering/importance inside the granted zone, and re-bake
+their palette on a theme switch. An empty zone paints no row at all. Public
+signatures are unchanged.
+
+**Keybinding registration contract.** `registerKeybinding` accepts
+a normalized key (never raw terminal bytes) + one of the PUBLIC semantic
+actions (`submit-draft`, `queue-draft`, `steer-draft`,
+`cancel-activity`, `open-search`, `toggle-fullscreen`,
+`cycle-permission` — the `TuiAction` set). Registrations are validated
+and REJECTED loudly (a thrown error, nothing is silently dropped) when:
+the action is outside the public set (Host-private `app.*` actions are
+never plugin-triggerable); the key name is outside the host's key
+grammar (the runtime parser can never produce it, so the binding could
+never fire — e.g. `f13`, arbitrary strings); the key is a Host-reserved
+lifecycle key (Exit/steer/search/fold/todo/external-editor/history/
+clipboard/queue/submit/Esc/Shift+Tab/Alt+Up/Alt+T/Alt+K defaults); the
+key is TEXT-PRODUCING — a bare letter, digit, symbol or the spacebar,
+WITH OR WITHOUT Shift (Shift+A is the raw `A` byte on legacy terminals
+and `a`+shift on Kitty — either way it produces text, so a binding on
+it would steal the user's typing on some terminals; `Ctrl+Alt+X`-style
+chords and named keys like `Shift+Left` are NOT
+text-producing and stay bindable); or the key can never be MATCHED by
+the runtime (the fork matcher's capability table: any modifier on F1-F12
+or Esc is hard-rejected, and `clear` supports only exactly `shift` or
+exactly `ctrl` — all other bases accept any grammar-supported modifier
+via CSI-u/modifyOtherKeys); or the key is a legacy-terminal
+collision (`ctrl+[`, `ctrl+j`, `ctrl+m`, `ctrl+i`, `ctrl+h`, `ctrl+_`,
+`ctrl+-`, `ctrl+backspace` — on legacy terminals these are indistinguishable from
+Esc/Enter/Tab/Backspace/Ctrl+-, so the binding could never fire through
+the normalized lookup; the plugin registry shares the Host config
+parser's legacy inventory); or the key is a FORK EDITOR-owned key (Tab,
+arrows, Home/End, PageUp/PageDown, Backspace/Delete, word-moves,
+kill/yank/undo, Shift+Enter — the focused editor consumes these before
+the plugin stage on every keystroke, so the binding could never fire;
+the registry shares the `EDITOR_OWNED_KEY_IDS` inventory). Keys are
+canonicalized (aliases `esc`→`escape`, `return`→`enter`, modifier
+order) before every check, so a spelling variant cannot bypass the
+policy. Duplicate keys are an explicit conflict error; every
+registration is fiber-bound and removed on owner unload.
+Editor replacement input is the ONE deliberate exception to the
+normalized-key rule: while a replacement occupies the seat, its optional
+`handleInput(event)` hook receives a SEMANTIC {@link EditorInputEvent} —
+`{ kind: 'key', key }`, `{ kind: 'text', text }` or `{ kind: 'paste',
+text }` — never raw terminal bytes. The Host decodes the terminal protocol
+(legacy + Kitty CSI-u + modifyOtherKeys encodings, paste bursts, key
+release/repeat filtering) BEFORE the plugin sees anything, so a plugin
+editor behaves identically on every terminal. Returning `true` consumes the
+event; returning `false` or `undefined` hands it back — the declined event
+may fall back to Host editing behavior at the replacement's current text
+and cursor, and the resulting draft/cursor may be synchronized back to the
+visible replacement (the exact fallback internals are NOT part of the
+Stable contract). Enter remains host-owned and submits through the normal
+host path.
+
+The editor id `host` is RESERVED for the built-in host editor: a
+`registerEditor({ id: 'host', ... })` contribution is rejected. The host seat
+is the fallback that occupies the seat whenever no plugin editor wins; the
+host's input-routing guard distinguishes the host seat from display-only
+replacements by this id (a plugin claiming it could never occupy the
+replacement seat and would corrupt the seat-ownership checks). A display-only
+replacement (no `handleInput` hook) never receives ordinary typing, and
+ordinary typing is never silently routed into the hidden host editor while the
+plugin seat is visible. The exact guard implementation is a Host detail, not
+part of the Stable contract.
+
+An `EditorHost` is bound to the editor-seat owner that created it. After a
+handoff, every operation from the old host (`getSnapshot`, `replaceText`,
+`dispatch`, `subscribe`, and `invalidate`) is inert; subscriptions created
+while `create()` is running are registered but become live only after that
+editor successfully commits the seat, while all create-time snapshot,
+mutation, dispatch, and invalidation operations are inert. A host restore
+stages the host adapter before disposing the old occupant, so an adapter
+construction or restore failure leaves the old seat available.
+
+Always `service.api().capabilities.has(...)` before relying on a
+capability — never parse the package version.
+
+## Command ownership
+
+`registerCommand(contribution)` declares a CLIENT-OWNED command — the DSH
+client command contribution shape: a slash name whose behavior lives
+entirely on the client (no host descriptor), carried by the required
+`handler`. It is merged into the `/` menu with the host catalog and runs
+locally, never steered.
+
+- **Bare-token invocation.** A contribution is a slash-MENU entry, so it
+  claims the BARE `/name` token only — the DSH decision table
+  (`ui-commands` `matchEnter`) checks a contribution with `if (!bare) return
+  undefined`. `/deploy` runs the handler; `/deploy explain` is NOT an
+  invocation: it is an ordinary submission that reaches the model (with its
+  attachments), and the handler never runs for it. A contribution therefore
+  receives an `invocation.rawInput` with no non-whitespace input (trailing
+  whitespace is preserved verbatim, like every other command surface), and one
+  can never be invoked with a composer attachment (any attachment makes the line
+  argued).
+- **Host authority.** A LINE the current host catalog CLAIMS is a host
+  command: it executes through the command plane and a contribution can
+  never shadow it — not in the dispatch, and not in the attachment gate (a
+  host command's own `input.attachments` declaration decides whether the
+  composer may attach anything). The claim belongs to the line, exactly like
+  the DSH decision table: every host command claims its BARE token, and a
+  `leadingInput` descriptor claims its argued line too. An argued line of an
+  execute-kind command (`/compact now`) is not an invocation at all — it is an
+  ordinary submission. A name the host catalog RESOLVES is host territory in
+  both states: the contribution of that name never runs for such a line, and
+  the line is never classified as a local client command.
+- **Two collision mechanisms.** A name owned by the TUI's OWN static catalog
+  (`/status`, `/kill`, ...) is rejected at REGISTRATION: `registerCommand`
+  throws and the plugin fails to load loudly. A name the SESSION's host
+  catalog resolves (a preset/plugin command that may appear only after the
+  session exists) is a SYNTHESIS-time collision: the candidate pass fails as
+  a whole — upstream `source-failed` parity, so its command rows are removed
+  until a synthesis succeeds again — while the host claims stay refreshed
+  (input authority is never lost) and the collision is recorded on the
+  contribution's health and surfaced once, naming every collision of that
+  failed pass. That health record is a best-effort diagnostic: a handler
+  failure overlapping a live collision can be masked or cleared by it.
+  **Known diagnostic limitation:** one contribution identity has three writers
+  of its single extension-health record (candidate synthesis, the client
+  handler settlement, and the session command path reporting a colliding Host
+  command), and the ledger keeps one failure generation per record and
+  deduplicates a repeat (the first message wins). Health is therefore a lossy
+  diagnostic, not an authoritative summary of every unrecovered failure;
+  routing, claims and the immediate notices are unaffected.
+  "The host keeps its claim" is a claim on the LINES its descriptor owns: the
+  bare token for every command, plus the argued line for a `leadingInput` one.
+  A contribution colliding with an execute-kind host command therefore loses
+  that command's ARGUED line as well — the host never claimed it, so neither
+  the host nor the colliding contribution runs it: the line falls through to an
+  ordinary submission.
+- **`sessionless`.** `true` lets the command run before a session exists
+  (pure client commands: an overlay toggle, a picker). `false` (default)
+  resolves/creates the session first — the host command surface is
+  session-keyed — and only then runs the handler.
+- **Deferred reloads.** A `sessionless: false` contribution submitted before
+  the first session exists resolves the session first; if the plugin unloads
+  or replaces it during that window, the submission is aborted with a
+  `/<name> is no longer available` notice and the draft is restored — the new
+  generation's handler never runs, and the line never reaches the model.
+  The session's own catalog is consulted first, in both directions: a command
+  that appears and CLAIMS the line executes it, and a command that resolves the
+  name without claiming the line (an argued line of an execute-kind command)
+  makes the submission an ordinary one — the contribution does not run for it.
+- **`handler`** receives `invocation.rawInput` verbatim, like every other
+  command surface — for a contribution that is the bare token's remainder,
+  which carries no non-whitespace input (only the bare `/name` line invokes
+  one).
+
+**Breaking change (Unreleased) — API v1 → v2.** `api().apiVersion` reports
+`2` from this release on. The previous `execution: 'local' |
+'submission'` ownership metadata is REMOVED, and the never-wired
+`argumentProvider` field is gone with it (use `registerAutocomplete` for
+plugin suggestions — it was a dead public surface). A contribution is a client
+command, full stop: the `'submission'` variant is gone, and an unclaimed slash
+line is an ordinary prompt (the host pre-step owns skill expansion, and the
+inline skill lexicon owns its discovery). Migration: drop `execution` (and
+declare `handler`, now required); a contribution that used `submission` to
+advertise a prompt-style name should instead not register a contribution at all
+— its line reaches the model as an ordinary prompt.
+
+The bare-token invocation is part of the same alignment and is itself a
+behaviour change for plugins that declared arguments before: `/name args` no
+longer reaches `handler` (the line is an ordinary submission, and its
+`rawInput` was never a stable argument channel to begin with — the handler is
+the CLI-entered *bare* command gesture on the web too, where a contribution
+opens its popup). A plugin that needs arguments should own them client-side
+(a picker/overlay opened by the bare command) or expose the capability to the
+MODEL as a tool instead.
+
+## Theme registry
+
+`registerTheme(contribution)` registers a named color palette into the
+host's `/settings` theme picker. The contribution carries an `id`, the
+**display `name`** shown in the picker, the semantic `palette` and an
+optional `description`. Owner unload removes the theme; if the removed
+theme is the one currently applied, the host falls back to its built-in
+dark palette.
+
+**Selection identity is SOURCE-QUALIFIED.** The picker/apply/persist path
+never addresses a theme by its display name — plugin themes are
+identified by the selectable value `plugin:<owner>/<id>` (the owner is
+the plugin's STABLE fiber name, the same identity the canonical footer
+keys use; both segments are percent-encoded), custom theme files by
+`file:<name>`, and builtins by `auto|dark|light`. A plugin theme can
+therefore never shadow or collide with a custom file of the same name,
+and a persisted plugin selection degrades deterministically when the
+plugin unloads (it resolves nothing — the built-in fallback, never
+silently the same-named file). The registry's read-side view exposes
+`selectableValues()` / `paletteForSelectable(value)` /
+`displayNameForSelectable(value)` / `hasSelectable(value)` for the
+picker; the bare `name` is a display label, never an identity. The legacy
+bare-name read `paletteFor(name)` remains on the view as a DEPRECATED
+source-compatibility shim (it stays functional for the current API
+version and is removed only in the next breaking API version) — new code
+addresses themes by selectable value. The
+`/settings` picker carries the identity end-to-end: every picker row's
+id IS the source-qualified value (display labels are unique per row —
+builtin/file/plugin collisions are source-tagged — but are presentational
+only and never round-tripped back to an identity at confirm time, so an
+HMR unload between open and confirm can never redirect a selection to a
+same-named new contribution). The `[current]` state chip compares the
+selection's source-qualified IDENTITY against the live row values — a
+same-labeled row from another source (a file created while a plugin theme
+is selected) can never steal the marker. The choice commit is
+transactional: only a successful apply moves the current choice and the
+outer row; a stale selection (the contribution unloaded between open and
+confirm) or an apply failure rolls both back to the previous choice — a
+failed pick can never fake a current selection nor steal an in-flight
+`auto` terminal detection. A `file:<name>` value is untrusted persisted
+input: the name must be a directory-local basename (no `..`, no path
+separators, no control characters) and a symlink escaping the themes
+directory is not loaded — a traversal value degrades to the deterministic
+missing-theme fallback. The vendored SettingsList submenu contract
+writes the RAW selected value into the outer row's display; the host
+rewrites it back to the friendly label through the openSettings
+updateValue seam after a successful apply, so the panel never shows a raw
+`plugin:` string.
+
+## Configurable footer items
+
+`chrome.footer.item` is the configurable footer item slot: a plugin
+contributes a **plain-data** item (`FooterItemContribution` — label,
+description, a `FooterSegment` with its own `minWidth`, default zone,
+importance) that
+becomes a first-class citizen of the footer configurator — users can
+show/hide, reorder and zone-place it like any builtin item. The
+`FooterSegment.minWidth` is the item's minimum renderable width (never
+truncated below it — it is the authority when both are set; the legacy
+top-level `FooterItemContribution.minWidth` is DEPRECATED and honored
+only when the segment carries none). Dynamic
+updates use the standard `handle.replace(...)` / `handle.invalidate()`
+pattern (async producer → cache → replace plain data → host render).
+
+```ts
+const quota = service.register<FooterItemContribution>('chrome.footer.item', {
+  id: 'quota',
+  order: 200,
+  description: 'API quota footer item',
+}, {
+  label: 'API quota',
+  defaultZone: 'right',
+  importance: 50,
+  segment: { spans: [{ text: 'quota 82%', tone: 'success' }], minWidth: 8 },
+})
+
+// later
+quota.replace({
+  label: 'API quota',
+  defaultZone: 'right',
+  importance: 50,
+  segment: { spans: [{ text: 'quota 21%', tone: 'warning' }], minWidth: 8 },
+})
+```
+
+The item's config identity is the canonical key `ext:<owner>/<id>` where
+the owner is the registering plugin fiber's stable name (the nearest named
+ancestor's display name; anonymous plugins share `root`) — stable across
+HMR, because a reloaded plugin gets a NEW fiber (new uid) but the same
+name. An npm-scoped plugin name (`@scope/name`) is legal: its `/` is
+percent-ENCODED in the key via `encodeURIComponent`
+(`ext:%40scope%2Fname/<id>`) — an injective encoding, so scoped plugins get
+an unambiguous identity and a literal `~` owner can never collide with an
+encoded slash owner; the id itself must not contain `/` or terminal
+control characters (both rejected at registration: a control-char id
+would be persisted into user layouts and rendered raw by the configurator
+when the plugin is gone — the same injection class as a malicious
+layout). A layout
+referencing an unloaded plugin's item keeps the reference (the item is
+skipped at render) and recovers automatically when the plugin reloads. The
+ledger's (slot, owner, id) uniqueness still rejects two LIVE registrations
+of the same id under the SAME owner — while DIFFERENT owners may
+simultaneously register the same local id (their canonical keys embed the
+stable owner, so the config identities stay distinct; the public contract:
+an id is unique per (slot, owner)). The RUNTIME ownership identity is
+separate from the config identity: the ledger's owner is UID-qualified
+(`<uid>:<name>`), so two anonymous sibling fibers are DISTINCT owners (a
+second live plugin registering the same id never hits a duplicate-owner
+conflict, and owner-scoped disposal never conflates neighbors); only the
+PERSISTED canonical key uses the stable name (a
+name-based runtime owner would conflate anonymous plugins into one). A
+duplicate canonical key (same stable owner AND id) among LIVE
+registrations is an explicit registration error — a reload disposes the
+old registration first, so HMR never hits it. The legacy
+`chrome.footer.status` slot is unchanged: its segments aggregate into the
+single `ext:*` item (show/hide as a whole, no per-segment ordering).
+
+A Stable footer item can never control: row count, terminal writes, the
+cursor, the root layout, the Host instruction surface, arbitrary ANSI,
+shell, or keyboard focus — the host owns all of it.
+
+## Lifecycle contract
+
+- Every registration is FIBER-BOUND: the host disposes it when the
+  plugin's Cordis fiber unloads (HMR, disable). Explicit `dispose()` is
+  idempotent, and a handle names ONE registration: a repeated or LATE
+  `dispose()` (a fiber cleanup arriving after an HMR reload re-registered the
+  same id) never removes the newer registration, and it never drops that
+  registration's health record.
+- Registrations may happen BEFORE any surface exists; the host renders
+  them when the surface attaches.
+- The surface GENERATION is stable across start/stop/fullscreen/
+  external-editor round-trips; only a final surface dispose invalidates
+  old handles (they become inert no-ops).
+- A STABLE plugin can never touch: the terminal, focus, submission policy,
+  approvals/questions, session lock, the overlay stack, the editor
+  seat's internals, or the root layout. These boundaries are Stable-tier
+  limits; Advanced / Unstable may later expose higher-freedom access through
+  their own supported entry.
+
+## Rendering contract
+
+- Contributions are plain data (`ExtensionView` trees / styled spans);
+  the host owns ANSI compilation, width measurement, wrapping and
+  budgets.
+- Rendering is synchronous, I/O-free, Promise-free.
+- Empty content abdicates (renders nothing).
+- `ExtensionView` trees / styled spans are the STABLE rendering model (the
+  main way a Stable plugin expresses UI); advances on it belong to the
+  Advanced/Unstable tiers, not to an unbounded Stable convenience surface.
+- A throwing contribution is isolated (health ledger) — it can never
+  stall the host.
+- Stable plugins never receive raw terminal data: keys are normalized,
+  tool snapshots are semantic + deeply frozen. (Advanced/Unstable may
+  deliberately expose raw or lower-level input later, through their own
+  entries.)
+
+## Deprecation policy
+
+`api().deprecations` maps deprecated capability ids / API names to their
+migration note. A deprecated surface stays FUNCTIONAL in the current API
+version and is REMOVED in the next version bump. Migrate before then.
+
+## Stability
+
+The extension surface is **early, stabilizing** (documented in the README).
+The 0.x policy is deliberately NOT a freeze: no source-hash gate, no protocol
+hash, no compatibility database is introduced to pin the surface. The tiers
+carry the actual contract (see "API tiers" above):
+
+- **Stable** (`./extensions`) is compatibility-oriented and additive-first;
+  a documented semantic never silently changes, and a public removal is a
+  planned breaking change with a migration path.
+- **Advanced** (`./extensions/advanced`) is experimental; minor releases may
+  break; a migration note is required; no long-term shims.
+- **Unstable** (`./extensions/unstable`) carries NO compatibility guarantee;
+  implementation may change at any time.
+
+### Live session vs. display subject
+
+The Stable `SessionSnapshot` means **"the live session's identity and mode"**
+and that meaning is UNCHANGED in `API_VERSION = 2`: `sessionId`,
+`workspaceRoot`, `title`, `model`, `cwd`, `branch`, `permission`, `turns` and
+`steps` keep describing the LIVE session owner, and the activity
+`todoCount`/`todoSummary` keep describing the LIVE session's todo state.
+Mounting a subagent viewer never re-points those fields.
+
+The session the user is currently LOOKING AT (the viewed child while a child
+viewer is mounted) is published ADDITIVELY as the optional
+`session.displaySubject`: its own `sessionId`, `title`, `workspaceRoot`,
+`cwd`, `branch`, `model`, `permission`, `turns`, `steps`, `todoCount` and
+`todoSummary`, resolved from that child Session's own Session status. It is
+present only while `viewerMode` is true. Plugins that render surface chrome
+should prefer `displaySubject` when it is present; plugins that correlate
+durable state with the live session keep reading the live-session fields.
+
+The first-party todo dock item follows this rule (it renders
+`displaySubject.todoSummary` when a viewer is mounted). No existing field
+changed meaning and no version bump is required.
+
+A full modal editor (Vim-class) is NOT a Stable-API proof target — it
+belongs to the Advanced/Unstable roadmap. The vim test fixture validates the
+editor-extension seam: the public package is consumable, the replacement
+editor lifecycle works, and plugin editors consume semantic
+`EditorInputEvent`s (never raw terminal bytes).
