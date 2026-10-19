@@ -369,7 +369,8 @@ row, peer range or `engines.dsh` value changes here:
 S4-D2 qualifies the 14 published rc.2 Optional/On-demand bundle packages over an
 isolated real Host composition (official profile/patch reader, boot Loader,
 `dsh-base`, the four generated preset mirrors and the exact bundle patch). The
-fixture isolates `HOME`/`DSH_HOME`/`DSH_AGENTS_HOME`/XDG/temp, and provenance is
+fixture isolates `HOME`/`DSH_HOME`/`DSH_AGENTS_HOME` and the four XDG roots
+(`CONFIG`/`CACHE`/`DATA`/`STATE`); `TMPDIR`/`TMP`/`TEMP` stay ambient. Provenance is
 exact package name + `0.2.1-rc.2` + the official `deepseek-ai/deepseek-harness`
 repository URL. The rows marked PASS are **local qualification on the
 provisioned official artifact tree**; a clean checkout/CI without that tree

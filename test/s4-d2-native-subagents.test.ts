@@ -173,3 +173,19 @@ test('B13/B14: official missing catalog, exact installTarget and local profile i
       'the default suite records the native gate as unverified without starting a provider')
   }
 })
+
+test('fixture restores the process environment after multiple concurrent hosts', { skip }, async t => {
+  const originalHome = process.env.HOME
+  const originalDsh = process.env.DSH_HOME
+  const originalAgents = process.env.DSH_AGENTS_HOME
+  const first = await startS4D2Host(t, { bundles: [] })
+  const firstHome = process.env.HOME
+  const second = await startS4D2Host(t, { bundles: [] })
+  assert.notEqual(process.env.HOME, firstHome, 'the second host points the process at its own root')
+  await first.dispose()
+  assert.notEqual(process.env.HOME, originalHome, 'the remaining host keeps the isolated environment')
+  await second.dispose()
+  assert.equal(process.env.HOME, originalHome, 'the last release restores the original HOME')
+  assert.equal(process.env.DSH_HOME, originalDsh, 'the last release restores the original DSH_HOME')
+  assert.equal(process.env.DSH_AGENTS_HOME, originalAgents, 'the last release restores the original agents root')
+})
