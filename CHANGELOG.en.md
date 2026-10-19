@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`/plugins` and the first-level `Settings → Plugins` category are the same
+  fullscreen Plugin Manager.** The catalog is grouped as TUI & Extensions /
+  Official DSH / Third-party / Experimental (the Experimental group is always
+  last), with a one-column narrow layout and a two-column wide layout, search,
+  status filters, provenance/status facts and one keyboard/mouse action path.
+  The 14 official optional/on-demand bundles come from the real Host catalog:
+  shipped bundles can be toggled, a missing bundle with an official
+  `installTarget` goes through inspect → confirm → install, and the page shows
+  the actual installed version, pending build scripts, restart requirements and
+  Host-reported failures. Returning from Settings restores its category, scroll
+  and selection, and leaving the install page never cancels the background
+  operation.
+
 ### Changed
 
 - **Snapshot injections such as `time-context` no longer split one turn's Activity/Thought

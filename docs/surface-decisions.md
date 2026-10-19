@@ -2996,3 +2996,45 @@ evidence list; the ongoing guard is
 The zone is the sending TUI process's (`TZ`), never the terminal observer's; this
 determination claims no visual or interaction capability beyond the official
 plugin's existing Context text.
+
+## Plugin Manager is one fullscreen workspace with a frozen four-section catalog (2026-10-19, S4-D1 / PR-D1)
+
+`/plugins` and the first-level `Settings → Plugins` category open the SAME
+`PluginManagerWorkspacePanel` inside the EXISTING workspace Alt-Screen lease.
+There is no second screen owner, no Plugin Manager overlay, and no empty
+`Settings → Plugins → Rows` intermediate page. Settings keeps its L0/L1/L2
+selection, row/detail scroll and focus while the Plugin page is on top; Esc
+returns to the same Settings L0 with `Plugins` selected, and the direct entry
+returns to the untouched conversation/transcript-fullscreen state.
+
+- **Frozen sections and order:** `TUI & Extensions` → `Official DSH` →
+  `Third-party` → `Experimental` (always last). One primary card per Host
+  package entry; status is a fact/filter dimension, never a second card.
+  `Third-party` may paint an audited `Unverified origin` subsection for a
+  standalone entry whose provenance the Host cannot prove; the UI never calls
+  it community-authored.
+- **Host facts only:** section/origin decisions read the real
+  `BundleInfo.official/availability/installTarget/source` and the exact rc.2
+  Base/Optional identities. A `@deepseek-ai/` scope or an `experimental`
+  substring is never identity evidence. The 14 `B01–B14` identities are
+  version-limited display evidence; a missing Host item is a catalog
+  discrepancy, never a generated card.
+- **Actions follow Host capability:** `missing` official with a real
+  `installTarget` opens the official inspect → confirm → install path;
+  `installation` is Toggle-only and never Remove; profile-owned bundles may be
+  Toggle/Remove. Current TUI and the rows it provably controls expose no write
+  action at all. `enabled` is never painted as `active/running`; `restart
+  required`, `overridden`, the actual `ChangeResult.version`, pending build
+  scripts and failures are rendered as the official result reports them.
+- **Leaving never cancels:** hiding the install view leaves the Host operation
+  owned by the same request id; `i` reopens the same controller state. A
+  `cancel` is shown only while starting/installing, `too-late` never claims
+  cancellation, and an unknown result reconciles through
+  `waitForInstall`/authoritative inventory reread — never an automatic retry.
+- **Responsive navigation:** at `>=96` columns the page is a 2-cell-gutter
+  list/preview+actions pair; below 96 it is one column with the same semantic
+  navigation. The Action Bar is the last physical row at every size, and Esc
+  names the real destination (`Esc back` inside Settings, `Esc close` on the
+  direct root). `/` search, the Tab status filter, Up/Down/Pg/Home/End, mouse
+  selection and action clicks all resolve against the cells the current frame
+  actually painted.

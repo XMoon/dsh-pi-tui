@@ -224,11 +224,16 @@ Transcript's tool card. Explicit `run_in_background: true` jobs (and jobs
 promoted to the background after a foreground timeout) remain visible in
 `TRACKED` after completion as long as the Job Registry keeps their record.
 
-`/plugins` opens the active profile's Plugin Manager: installed bundles and
-plugins are grouped into Current TUI / TUI Extensions / DSH Plugins, with
-enable/disable, remove and install; the `dsh-pi-tui` bundle currently providing
-the surface is read-only and cannot be disabled or removed from its own screen.
-The `Plugins  Manage…` row in `/settings` opens the same surface on demand.
+`/plugins` opens the active profile's fullscreen Plugin Manager: the catalog is
+grouped as TUI & Extensions / Official DSH / Third-party / Experimental (the
+Experimental group is always last), with a two-column wide layout and a
+one-column narrow layout. Search, status filters, provenance/status facts,
+official catalog installs, enablement and removal are available from the page;
+the actual Host-reported version, restart requirement and errors are shown
+verbatim. The `dsh-pi-tui` bundle currently providing the surface is read-only
+and cannot be disabled or removed from its own screen. The first-level
+`Settings → Plugins` category opens the same page in place, and returning
+preserves the Settings category, scroll and selection.
 
 Subagents are shown using their complete lineage, including nested descendants:
 

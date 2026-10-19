@@ -7,6 +7,15 @@
 
 ## [Unreleased]
 
+### 新增
+
+- **`/plugins` 与 Settings 顶级 `Plugins` 改为同一个全屏 Plugin Manager。** 目录固定按
+  TUI & Extensions / Official DSH / Third-party / Experimental 分组（实验组最后），窄屏单栏、
+  宽屏双栏，支持搜索、状态筛选、来源/状态事实与键盘/鼠标同一套操作。14 个官方可选/按需
+  Bundle 由真实 Host 目录发现：已随安装提供者可启用/停用，未安装且带官方 `installTarget`
+  的项可经 inspect、确认、安装流程处理，并显示实际安装版本、待审批构建脚本、重启要求与
+  Host 返回的失败；从 Settings 进入返回后保留原分类、滚动与选择，离开安装页不会取消后台任务。
+
 ### 变更
 
 - **`time-context` 等 Snapshot 注入不再把同一回合的 Activity/Thought 切成多块**：Compact 中
