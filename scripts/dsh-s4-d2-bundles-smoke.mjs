@@ -15,9 +15,14 @@
  *   profile, compose/restart the profile with `--dump-config`, then remove the
  *   dependency and dump again. Requires an explicit flag because it downloads
  *   public npm artifacts.
- * - `--native`: the bounded external Claude Code / Codex gate. Without an
- *   explicitly admitted native credential/platform it records
- *   `EXTERNAL_UNVERIFIED`; it never fabricates a native success.
+ * - `--native`: the explicit external Claude Code / Codex credential gate. It
+ *   records the presence/absence of the official environment credentials and
+ *   `EXTERNAL_UNVERIFIED`; the REAL native start lives behind the unit-test gate
+ *   `DSH_PI_TUI_S4_D2_NATIVE=1` (`test/s4-d2-native-subagents.test.ts`) under an
+ *   isolated HOME. This CLI never fabricates a native success.
+ * - `--gate`: operator/CI gate mode. Exit nonzero whenever the provisioned
+ *   fixture is BLOCKED instead of silently treating the offline inspection as a
+ *   pass.
  * - `--provision`: install the official rc.2 package set into the fixture's
  *   `temp/s4-d2-bundles` tree (a local test artifact, never a tracked
  *   dependency). This is the one-time setup the in-process fixture consumes.
@@ -112,12 +117,13 @@ function packageVersion(nodeModules, packageName) {
 }
 
 function parseArgs(argv) {
-  const options = { network: false, native: false, provision: false, bundle: SHIPPED_OPTIONAL[4], evidence: undefined }
+  const options = { network: false, native: false, provision: false, gate: false, bundle: SHIPPED_OPTIONAL[4], evidence: undefined }
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index]
     if (arg === '--network') options.network = true
     else if (arg === '--native') options.native = true
     else if (arg === '--provision') options.provision = true
+    else if (arg === '--gate') options.gate = true
     else if (arg === '--bundle') {
       const value = argv[++index]
       if (value === undefined || !ALL_BUNDLES.includes(value)) fail('USAGE', `--bundle must be one of the 14 exact identities: ${value}`)
@@ -318,13 +324,21 @@ function runNetworkLoop(bundle, evidence) {
   }
 }
 
-/** The native one-shot gate: never fabricate a success without real runtime/auth. */
+/** The native credential gate: record presence only; the REAL start is the
+ *  explicitly gated unit test under an isolated HOME, never a fabricated pass. */
 function runNativeGate(bundle, evidence) {
+  const credentialPresence = {
+    anthropicEnv: process.env.ANTHROPIC_API_KEY === undefined ? 'absent' : 'present',
+    openaiEnv: process.env.OPENAI_API_KEY === undefined ? 'absent' : 'present',
+  }
   evidence.native = {
     status: 'EXTERNAL_UNVERIFIED',
     bundle,
-    reason: 'no admitted native credential/platform runtime was supplied; the official provider start/failure path is '
-      + 'exercised by test/s4-d2-native-subagents.test.ts, and a native one-shot PASS needs a real account on this machine',
+    credentialPresence,
+    execution: 'not-run',
+    reason: '--native records credential presence only. The real native start is gated by '
+      + 'DSH_PI_TUI_S4_D2_NATIVE=1 in test/s4-d2-native-subagents.test.ts under an isolated HOME; '
+      + 'without a real result the row stays EXTERNAL_UNVERIFIED. No system claude/codex CLI is substituted.',
   }
 }
 
@@ -355,7 +369,7 @@ function main() {
   else evidence.native = { status: 'EXTERNAL_UNVERIFIED', reason: '--native was not supplied' }
   emit(evidence, options)
   const blocked = evidence.fixture.status === 'BLOCKED' || evidence.network?.status === 'FAIL' || evidence.provision?.status === 'FAIL'
-  if (blocked && (options.network || options.provision)) process.exitCode = 1
+  if (blocked && (options.gate || options.network || options.provision)) process.exitCode = 1
 }
 
 if (process.argv[1] !== undefined && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

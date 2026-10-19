@@ -84,6 +84,9 @@ export interface WorkspaceHarnessOptions {
   readonly inspectImpl?: (spec: string) => Promise<PluginSpecInspectionFact>
   /** The entry host the controller reports (Esc wording only). */
   readonly entryHost?: 'direct-command' | 'settings-entry'
+  /** A REAL Host-backed port (an L6 source->sink test supplies it); the
+   *  default fake catalog below is never used in that case. */
+  readonly port?: PluginManagerPort
 }
 
 export interface WorkspaceHarness {
@@ -142,7 +145,7 @@ export async function openWorkspace(options: WorkspaceHarnessOptions = {}): Prom
   const setBundle: Array<{ name: string; enabled: boolean }> = []
   const setPlugin: Array<{ entryId: string; enabled: boolean }> = []
   const removeBundle: string[] = []
-  const port: PluginManagerPort = {
+  const fixturePort: PluginManagerPort = {
     snapshot: async () => snapshot,
     inspect: options.inspectImpl ?? (async (spec: string) => ({
       status: 'accepted',
@@ -176,6 +179,7 @@ export async function openWorkspace(options: WorkspaceHarnessOptions = {}): Prom
     subscribeInstall: (listener) => { installListeners.add(listener); return () => installListeners.delete(listener) },
     subscribeInvalidation: (listener) => { invalidateListeners.add(listener); return () => invalidateListeners.delete(listener) },
   }
+  const port = options.port ?? fixturePort
   let closeSurface: () => void = () => {}
   const copied: string[] = []
   const controller = new PluginManagerController(port, {

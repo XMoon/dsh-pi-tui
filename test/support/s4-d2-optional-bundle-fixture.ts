@@ -36,7 +36,7 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import { boot, loadOverlayPatches, loadProfileDirectory, OPTIONAL_BUNDLES } from '@deepseek-ai/dsh-app-boot'
+import { boot, loadOverlayPatches, loadProfileDirectory, OFFICIAL_ON_DEMAND_CATALOG, OPTIONAL_BUNDLES } from '@deepseek-ai/dsh-app-boot'
 import type { SessionId } from '@deepseek-ai/dsh-session'
 import type { TestContext } from 'node:test'
 import { testLifecycle } from './temp-lifecycle.ts'
@@ -65,6 +65,22 @@ export const S4_D2_BUNDLE_IDS = [
 ] as const
 
 export type S4D2BundleId = typeof S4_D2_BUNDLE_IDS[number]
+
+/** The official rc.2 Optional + on-demand identity set (12 + 2). */
+const OFFICIAL_BUNDLE_IDS = [
+  ...OPTIONAL_BUNDLES,
+  ...OFFICIAL_ON_DEMAND_CATALOG.map(entry => entry.packageName),
+] as const
+
+/** Prove the fixture identity set against the OFFICIAL catalog constants, so a
+ *  rename/shape drift fails loudly instead of comparing a constant to itself. */
+function assertOfficialBundleIdentitySet(): void {
+  const expected = new Set(OFFICIAL_BUNDLE_IDS)
+  const actual = new Set(S4_D2_BUNDLE_IDS)
+  if (expected.size !== actual.size || [...expected].some(name => !actual.has(name as S4D2BundleId))) {
+    throw new Error(`S4-D2 fixture: bundle identity drift; official=${[...expected].join(',')} fixture=${[...actual].join(',')}`)
+  }
+}
 
 /** The exact TUI-overlay agent-plane rows this Host-only composition keeps:
  *  the preset registry and its prerequisites. The TUI screen rows are NOT
@@ -122,6 +138,7 @@ export function skippedInstallationReason(required: readonly S4D2BundleId[] = S4
  * a local same-name substitute.
  */
 export function resolveS4D2Installation(required: readonly S4D2BundleId[] = S4_D2_BUNDLE_IDS): S4D2InstallationResolution {
+  assertOfficialBundleIdentitySet()
   const requiredPackages = [BASE_BUNDLE, ...required]
   const attempts: string[] = []
   for (const root of installationCandidates()) {
@@ -133,8 +150,18 @@ export function resolveS4D2Installation(required: readonly S4D2BundleId[] = S4_D
         problems.push(`${packageName} is absent`)
         continue
       }
+      if (manifest['name'] !== packageName) {
+        problems.push(`${packageName} has mismatched manifest name ${String(manifest['name'])}`)
+      }
       if (manifest['version'] !== TARGET_DSH_VERSION) {
         problems.push(`${packageName}@${String(manifest['version'])} is not @${TARGET_DSH_VERSION}`)
+      }
+      const repository = manifest['repository']
+      const repositoryUrl = typeof repository === 'string'
+        ? repository
+        : (repository as { url?: unknown } | undefined)?.url
+      if (typeof repositoryUrl !== 'string' || !repositoryUrl.includes('deepseek-ai/deepseek-harness')) {
+        problems.push(`${packageName} lacks the official deepseek-harness repository provenance`)
       }
     }
     if (problems.length === 0) return { ok: true, installation: { root, nodeModules } }
@@ -322,7 +349,6 @@ async function bootAt(options: HostOptions): Promise<OptionalBundleHost> {
   // The Loader can write the composed tree back into its root config when a
   // plugin self-disposes; production boot rewrites the empty root every start.
   writeFileSync(join(profileDir, 'cordis.yml'), '[]\n')
-  process.env.DSH_HOME = join(options.root, 'home')
   const ctx = await boot(BIN_NAME, join(profileDir, 'cordis.yml'), patches, async hostCtx => {
     hostCtx.provide('profileContext', profileContext)
     await options.settings.prepare?.(hostCtx)
@@ -400,9 +426,42 @@ function collectLoaderEntries(loader: unknown): Array<{ id: string; state: numbe
   return out
 }
 
-function restoreDshHome(previous: string | undefined): void {
-  if (previous === undefined) delete process.env.DSH_HOME
-  else process.env.DSH_HOME = previous
+// TMPDIR/TMP/TEMP stay ambient: the test-lifecycle temp roots must not nest
+// inside a previous host's disposable tree. They carry no credential/agent
+// state, so leaving them alone does not weaken the isolation boundary.
+const ISOLATED_ENV_KEYS = [
+  'HOME', 'USERPROFILE', 'DSH_HOME', 'DSH_AGENTS_HOME',
+  'XDG_CONFIG_HOME', 'XDG_CACHE_HOME', 'XDG_DATA_HOME', 'XDG_STATE_HOME',
+] as const
+
+/** Point every credential/agent/cache/temp location at the disposable root;
+ *  `scrubbedParentEnv()` preserves HOME, so native providers must never see the
+ *  real one. Returns the exact previous values for restoration. */
+function isolateEnvironment(root: string): Map<string, string | undefined> {
+  const home = join(root, 'home')
+  const values: Record<string, string> = {
+    HOME: home,
+    USERPROFILE: home,
+    DSH_HOME: home,
+    DSH_AGENTS_HOME: join(home, '.agents'),
+    XDG_CONFIG_HOME: join(home, '.config'),
+    XDG_CACHE_HOME: join(home, '.cache'),
+    XDG_DATA_HOME: join(home, '.local', 'share'),
+    XDG_STATE_HOME: join(home, '.local', 'state'),
+  }
+  const previous = new Map<string, string | undefined>()
+  for (const key of ISOLATED_ENV_KEYS) {
+    previous.set(key, process.env[key])
+    process.env[key] = values[key]
+  }
+  return previous
+}
+
+function restoreEnvironment(previous: ReadonlyMap<string, string | undefined>): void {
+  for (const [key, value] of previous) {
+    if (value === undefined) delete process.env[key]
+    else process.env[key] = value
+  }
 }
 
 /**
@@ -419,8 +478,8 @@ export async function startS4D2Host(
   const root = life.tempDir('dsh-s4-d2-')
   const tracker: HostTracker = { current: undefined }
   const options: HostOptions = { root, installation: resolution.installation, settings, tracker }
-  const previousDshHome = process.env.DSH_HOME
-  life.defer(() => restoreDshHome(previousDshHome))
+  const previousEnvironment = isolateEnvironment(root)
+  life.defer(() => restoreEnvironment(previousEnvironment))
   // Teardown releases whichever Context a restart left live.
   life.defer(() => tracker.current?.dispose())
   prepareRoot(root, resolution.installation, [BASE_BUNDLE, ...(settings.bundles ?? [])], settings.profileDependencies ?? {})
