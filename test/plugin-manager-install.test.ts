@@ -710,9 +710,10 @@ test('A09: the real Host cancel terminates the real pnpm install, restores the p
   const hadUpper = process.env.NPM_CONFIG_USERCONFIG
   process.env.npm_config_userconfig = sentinel
   process.env.NPM_CONFIG_USERCONFIG = sentinel
-  const fixture = await startRealInstallFixture(t, 's5-pr-e-a09')
-  // Registered AFTER the fixture lifecycle, so the fixture's own restore runs
-  // first and this one restores the process's original values last.
+  // Registered BEFORE the fixture boot so an initialization failure still
+  // restores the process env and removes the sentinel. The fixture's own
+  // restore runs first (this hook is registered after testLifecycle's), so
+  // this one restores the process's original values last.
   t.after(() => {
     if (hadLower === undefined) delete process.env.npm_config_userconfig
     else process.env.npm_config_userconfig = hadLower
@@ -720,6 +721,7 @@ test('A09: the real Host cancel terminates the real pnpm install, restores the p
     else process.env.NPM_CONFIG_USERCONFIG = hadUpper
     rmSync(sentinel, { force: true })
   })
+  const fixture = await startRealInstallFixture(t, 's5-pr-e-a09')
   const { host, controller, profileDir } = fixture
   const port = new DirectPluginManagerPort(host.ctx)
   const isolatedHome = join(host.workRoot, 'home')
