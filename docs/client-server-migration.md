@@ -69,18 +69,21 @@ S4-D1 PR-D1 MERGED (#337) (official Plugin Manager catalog + fullscreen workspac
 S4-D2 PR-D2 IMPLEMENTED / STAGE OPEN (B01–B14 Host capability qualification over
                     the real rc.2 published Optional bundle packages: the shared
                     isolated fixture proves real Loader/patch/service/tool/Session/
-                    Job paths; B03 gains the Auto Review danger confirmation. Two
-                    bounded Owner decisions remain: B04 Inspector needs the Web
-                    `webServer`/`connection` transport absent from the TUI profile,
-                    so its Host row stays PENDING; B13/B14 native one-shot starts
-                    are launch-verified but EXTERNAL_UNVERIFIED without a native
+                    Job paths; B03 gains the Auto Review danger confirmation.
+                    B04 Inspector's web-only disposition is Owner-accepted
+                    (2026-10-19): its Host row stays PENDING because the TUI
+                    profile mounts no Web `webServer`/`connection`, its TUI
+                    status stays WEB_ONLY and `ROW_DISPOSITION` becomes
+                    DEFERRED_WITH_OWNER. B13/B14 native one-shot starts are
+                    launch-verified but EXTERNAL_UNVERIFIED without a native
                     credential/runtime. No D2 row is promoted by name alone — see
                     the S4-D2 ledger at the end)
 S4-D3 PR-D3 IMPLEMENTED / QUALIFICATION PENDING (terminal capability truth: B05/B07/B08/B09/B10/B11 now have a
                     SAME-test official Bundle→mounted-TuiApp L6 PASS with their
                     limits explicit; F10 upgrade guidance is DONE; the exact
                     rc.2 `deepseek-flash` route and the existing Web Search/Fetch
-                    help are qualified. B04 and B13/B14 stay BLOCKED/PENDING and
+                    help are qualified. B04 stays HOST PENDING/WEB_ONLY under the
+                    Owner-accepted disposition; B13/B14 stay BLOCKED and
                     D1-A09/A10/A12 stay PARTIAL — no D3 row is promoted by name.
                     See the S4-D3 ledger section at the end)
 M4  NOT STARTED   (experimental local Host process / IPC split)
@@ -7342,7 +7345,7 @@ surface row.
 | B01 | `@deepseek-ai/dsh-experimental-agent-team-profile` | PASS (D1) | PASS | `HOST_ONLY` (existing Task/Activity/child views; no Team board) | DONE | Direct PASS; M3 not re-run (no new TUI consumer) | D3-A01/B01 boundary: real Team service + `tool-agent-team` scoped tools; B01-off baseline vs four preset rosters; Lead→`spawn_teammate`→`list_agents`→`team_task_create`/`update`→`send_message`→member `SCOUT_DONE` | global delegation rows disabled; preset-local `subagent`/`list_agents` retained; unknown and cross-Team targets refused; live-teammate spawn refused; teardown drains children (Team spawn creates no Job) | full roster/board/message UI is a separate product case (D3/owner); D3: `test/s4-d3-bundle-boundaries.test.ts` |
 | B02 | `@deepseek-ai/dsh-experimental-voice-input-bundle` | PASS (D1) | PASS (mount/readiness/cleanup; no transcription) | `WEB_ONLY` (no TUI microphone surface) | DEFERRED_WITH_OWNER | Direct Host PASS; M3 N/A | D3-A13: real `speechToText` registry: local SenseVoice + API controller rows, host-local model requirement/setup estimate, selection; service released on disable+restart | no model in isolated Host → `unprepared`, never `ready`; no model → exactly `unprepared`, no capture/upload; no microphone claim | model download/platform binary/auth and the browser mic UI are unqualified; DEFERRED_WITH_OWNER = frozen plan §1.2 (S4-D3/separate product design); D3: `test/s4-d3-bundle-boundaries.test.ts` |
 | B03 | `@deepseek-ai/dsh-experimental-auto-review` | PASS (D1) | PASS | PASS (existing permission/tool surface + new danger confirmation; re-review pending) | DONE (re-review pending) | Direct PASS; M3 not re-run (D1 shares the permission catalog) | D3-A12: real Host Auto card → real controller confirmation → real profile write; real Auto preset in `/permission`; native allow/deny/ask-grant/ask-reject/reviewer-error with body counts; PTC inner allow/deny; official teardown migrates live Auto sessions to Full access and clears the catalog | denied/errored/aborted bodies execute 0; user rejection 0; non-Auto session unchanged; in-flight review aborted/drained; stale confirmation writes 0; cancel writes 0 | Remote L6 re-run and full permission matrix stay D3/S5; D3: `test/s4-d3-bundle-boundaries.test.ts` |
-| B04 | `@deepseek-ai/dsh-experimental-inspector-profile` | PASS (D1) | PENDING | `WEB_ONLY` (no Session/Node DevTools page) | BLOCKED | Direct Host row pending; M3 N/A | D3-A13: real Loader row pending (Cordis state 0); installed official patch declares `captureFetch:true` | `webServer` and `connection` are absent; the inspector service is absent; capture behavior is `NOT_VERIFIED`, not a proven negative | Owner must accept the web-only prerequisite (then DEFERRED_WITH_OWNER) or provide the official Web transport; local debug/permission/privacy risk remains documented; D3: `test/s4-d3-bundle-boundaries.test.ts` |
+| B04 | `@deepseek-ai/dsh-experimental-inspector-profile` | PASS (D1) | PENDING | `WEB_ONLY` (no Session/Node DevTools page) | DEFERRED_WITH_OWNER (Owner 2026-10-19: web-only accepted) | Direct Host row pending; M3 N/A | D3-A13: real Loader row pending (Cordis state 0); installed official patch declares `captureFetch:true` | `webServer` and `connection` are absent; the inspector service is absent; capture behavior is `NOT_VERIFIED`, not a proven negative | Owner accepted the web-only prerequisite on 2026-10-19 (Host stays PENDING; no terminal UI is claimed); local debug/permission/privacy risk remains documented; D3: `test/s4-d3-bundle-boundaries.test.ts` |
 | B05 | `@deepseek-ai/dsh-experimental-tool-worktree` | PASS (D1) | PASS (D2) | PASS (limited; re-review pending: existing status/path views + Tool result; no dedicated panel) | DONE (re-review pending) | Direct PASS; M3 not re-run | D3-A06: same-test real `create_worktree` → official `workingDirectory` projection → mounted TuiApp footer + Tool result (`test/s4-d3-host-to-tui-tools.test.ts`) | invalid branch refused with no cwd drift; `/new` never inherits the worktree cwd; test-owned removal leaves source HEAD/content/status intact | no dedicated worktree panel; Session header keeps the original project (D3) |
 | B06 | `@deepseek-ai/dsh-experimental-cot-translation-bundle` | PASS (D1) | PASS (controlled endpoint substitutes transport only) | `WEB_ONLY` (TUI reasoning stays original; no reader) | DEFERRED_WITH_OWNER | Direct Host PASS; M3 N/A | D3-A13: real `translator` route: anonymous provider list, explicit resolved text sent to the controlled endpoint, parsed translation; error and abort paths | both anonymous routes (Bing + Google) via controlled endpoints; HTTP failure/timeout/cancel reject; no TUI reasoning rewrite; external reasoning/private-text egress is recorded as a risk | Browser CoT reader is a separate design; DEFERRED_WITH_OWNER = frozen plan §1.2 (S4-D3/separate design); third-party endpoints receive the text when invoked; D3: `test/s4-d3-bundle-boundaries.test.ts` |
 | B07 | `@deepseek-ai/dsh-experimental-terminal-bundle` | PASS (D1) | PASS (D2) | PASS (limited; re-review pending: existing Tool/Job views; no terminal workspace) | DONE (re-review pending) | Direct PASS; M3 not re-run | D3-A07: same-test open/send/read/list/background Job/close results reach the mounted transcript/Job view; the existing sanitizer keeps control bytes out of the paint; the closed process tree is gone (`test/s4-d3-host-to-tui-tools.test.ts`) | closed session read refused; the Task Center sees the same Host Job; `!`/`!!` one-shot unchanged (inherited D2 evidence, no production diff) | U11a/U11b Remote shell safety remains unchanged; PTY platform qualification stays outside this row |
@@ -7393,15 +7396,14 @@ surface row.
   pending-build approval and the full Direct/Remote mutation L6 matrix). S4-D2
   does not re-claim them; the local profile installs used published packages and
   deliberately did not close those D1 evidence gaps.
-- **S4-D2 is NOT stage-DONE.** B04's Host row is `BLOCKED` on the Web
-  `webServer`/`connection` transport (no TUI profile mounts it), and B13/B14
-  remain `EXTERNAL_UNVERIFIED`/`BLOCKED` until a real native
-  credential/platform is admitted. The Owner must either accept these bounded
-  exclusions (which would change the disposition to
-  `ROW_DISPOSITION=DEFERRED_WITH_OWNER`) or provide the missing environment;
-  until then those rows stay open and the stage cannot close. No fake tool,
-  mock native success, second Host authority or TUI Web UI is used to close
-  them.
+- **S4-D2 is NOT stage-DONE.** B04's web-only exclusion is now
+  Owner-accepted (2026-10-19): its Host row remains `PENDING` on the missing
+  Web `webServer`/`connection` transport, its TUI status remains `WEB_ONLY`,
+  and its `ROW_DISPOSITION` is `DEFERRED_WITH_OWNER` rather than `BLOCKED`.
+  B13/B14 remain `EXTERNAL_UNVERIFIED`/`BLOCKED` until a real native
+  credential/platform is admitted; those rows still keep the stage open. No
+  fake tool, mock native success, second Host authority or TUI Web UI is used
+  to close them.
 
 
 ## S4-D3 PR-D3 — terminal capability truth and TUI qualification
@@ -7410,9 +7412,10 @@ surface row.
 truth, not a second Host implementation: it adds the bounded rc.2 Detail copy,
 v9 F10 upgrade guidance, the existing Web Search/Fetch help, the exact
 `deepseek-flash` route evidence and the six same-test Bundle→mounted-TuiApp
-L6s. B04 and B13/B14 remain blocked/pending, D1-A09/A10/A12 remain PARTIAL,
-and S4-D2 stays STAGE OPEN on those Owner decisions — none of them is promoted
-by this PR. PR merge is not stage closure; the four axes below are the claim.
+L6s. B04's web-only disposition is Owner-accepted (Host PENDING/TUI WEB_ONLY/
+DEFERRED_WITH_OWNER); B13/B14 remain blocked, D1-A09/A10/A12 remain PARTIAL,
+and S4-D2 stays STAGE OPEN on those remaining Owner decisions — none of them
+is promoted by this PR. PR merge is not stage closure; the four axes below are the claim.
 
 ### Four axes
 
@@ -7481,10 +7484,11 @@ by this PR. PR merge is not stage closure; the four axes below are the claim.
 
 ### D3 remaining / not verified
 
-- B04's Host row stays PENDING/BLOCKED on the missing Web
-  `webServer`/`connection` transport; B13/B14 stay BLOCKED until a native
-  credential/platform is admitted. The Owner must decide those bounded
-  exclusions; this stage does not convert them to PASS.
+- B04's Host row stays PENDING on the missing Web `webServer`/`connection`
+  transport; the Owner accepted the web-only disposition (2026-10-19), so its
+  `ROW_DISPOSITION` is DEFERRED_WITH_OWNER (never a Host/TUI PASS). B13/B14
+  stay BLOCKED until a native credential/platform is admitted; this stage does
+  not convert them to PASS.
 - D1-A09/A10/A12 stay PARTIAL; S4-D2 stays STAGE OPEN; final S5 npm/GUI and
   cross-platform native validation remain out of scope.
 - No real Tern GUI, physical mouse/trackpad matrix, native account or paid
