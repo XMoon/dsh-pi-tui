@@ -33,7 +33,7 @@ import type { RemoteConnectionGenerationSource, RemoteSessionsReadSource } from 
 import type { RemoteLlmRemotes, RemoteModelRemotes, RemoteModelSessionsSource } from '../../runtime/remote/model-remote.ts'
 import type { RemotePendingSessionsSource } from '../../runtime/remote/pending-input-reader-remote.ts'
 import type { RemoteWriteSessionsSource } from '../../runtime/remote/session-writer-remote.ts'
-import type { RemoteLifecycleSessions, RemoteLifecycleSessionRemotes } from '../../runtime/remote/session-lifecycle-remote.ts'
+import type { RemoteLifecycleSessions } from '../../runtime/remote/session-lifecycle-remote.ts'
 import type { RemoteSubagentSource } from '../../runtime/remote/subagent-remote.ts'
 import type { RemotePresetRemotes } from '../../runtime/remote/preset-remote.ts'
 import type { RemoteSkillRemotes } from '../../runtime/remote/skill-remote.ts'
@@ -87,9 +87,12 @@ export interface RemoteM3ASemantics {
 }
 
 /** Assembly inputs beyond the shared runtime: the application-owned prompt
- * serializer (the D2.2 submission-path dependency the writer consumes). */
+ * serializer (the D2.2 submission-path dependency the writer consumes) and the
+ * optional composition-owned pre-dispatch dispatch admission (closed
+ * synchronously at the surface-stop boundary). */
 export interface RemoteM3ASemanticsOptions {
   readonly promptSerializer: RemotePromptSerializer
+  readonly isDispatchAllowed?: () => boolean
 }
 
 /** The ONE shared Client sessions service: the intersection of every
@@ -111,7 +114,7 @@ export interface RemoteM3ARuntimeSource {
   readonly sessions: RemoteM3ASessionsSource
   /** The ONE shared generated Remote namespaces the M3-3A adapters map. */
   readonly remote: {
-    readonly session: RemoteModelRemotes & RemoteLifecycleSessionRemotes
+    readonly session: RemoteModelRemotes
     readonly llm: RemoteLlmRemotes
     readonly agentPresets: RemotePresetRemotes
     readonly skills: RemoteSkillRemotes
@@ -173,8 +176,13 @@ export function createRemoteM3ASemantics(
   return {
     sessionReader: new RemoteSessionReader(sessions, generation),
     pendingInputReader: new RemotePendingInputReader(sessions, generation),
-    sessionWriter: new RemoteSessionWriter(sessions, generation, options.promptSerializer),
-    sessionLifecycle: new RemoteSessionLifecycle(sessions, remote.session, generation),
+    sessionWriter: new RemoteSessionWriter(
+      sessions,
+      generation,
+      options.promptSerializer,
+      options.isDispatchAllowed === undefined ? undefined : { isDispatchAllowed: options.isDispatchAllowed },
+    ),
+    sessionLifecycle: new RemoteSessionLifecycle(sessions, generation),
     subagent: new RemoteSubagentPort(remote.subagents),
     catalog: {
       models: modelCatalog,

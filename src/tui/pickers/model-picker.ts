@@ -39,69 +39,45 @@ import {
   type TuiMouseEventResult,
 } from '@xmoon76/pi-tui'
 import type { OwnedTaskOptions } from '../../runtime/process/tasks.ts'
-import type { ModelDirectoryDto, ModelSelectionDto } from '../../runtime/catalog-port.ts'
-import { SearchablePicker, type SearchablePickerItem } from './searchable-picker.ts'
-import { selectListTheme } from '../theme/runtime.ts'
+import type { ModelSelectionDto } from '../../runtime/catalog-port.ts'
+import { SearchablePicker, joinBadgeParts, type SearchablePickerBadgePart, type SearchablePickerItem } from './searchable-picker.ts'
+import { color, selectListTheme } from '../theme/runtime.ts'
 
-/** The semantic settlement of one applied selection, as the picker needs it:
- *  a rejected/cancelled/unsupported write never committed, so the picker stays
- *  usable; a committed/indeterminate settle dismisses it. */
-export type ModelApplyOutcome = 'committed' | 'rejected' | 'cancelled' | 'indeterminate' | 'unsupported' | 'superseded'
-
-/** The loaded/effective selection the picker highlights and badges. */
-export interface ModelPickerCurrent {
-  readonly provider: string
-  readonly model: string
-  /** The EXPLICIT effective reasoning effort, when the Session projection has
-   *  one; absent means the picker must NOT invent a "current effort". */
-  readonly reasoningEffort?: string
-}
-
-/** One flattened model presentation row, identity-complete: provider/model are
- *  kept separately so duplicate model ids across providers never collapse. */
-export interface ModelPickerModelRow {
-  readonly providerId: string
-  readonly providerName: string
-  readonly modelId: string
-  readonly modelName: string
-  readonly efforts: readonly { readonly id: string; readonly name: string }[]
-  readonly defaultEffort?: string
-  readonly isCurrent: boolean
-  readonly isDefault: boolean
-  /** The explicit effort of the CURRENT Session selection (fact badge only). */
-  readonly currentEffort?: string
-  /**
-   * The explicit effort of the picker's CONFIGURED selection (the live Session
-   * selection, or — sessionless — the directory default). Seeds the inline
-   * effort value WITHOUT implying a `current` badge, so a sessionless global
-   * default of high never silently downgrades to the model default.
-   */
-  readonly configuredEffort?: string
-}
-
-/** One provider whose catalog read failed; inert in the list. */
-export interface ModelPickerFailureRow {
-  readonly providerId: string
-  readonly providerName: string
-  readonly message: string
-}
-
-export interface ModelPickerProjection {
-  readonly models: readonly ModelPickerModelRow[]
-  readonly failures: readonly ModelPickerFailureRow[]
-}
-
-/** The hydration payload the command layer supplies once the directory read
- *  settles (the panel may already be visible in its loading state). */
-export interface ModelPickerDirectory {
-  readonly directory: ModelDirectoryDto
-  readonly current: ModelPickerCurrent | undefined
-  readonly sessionless: boolean
-}
+import type {
+  ModelApplyOutcome,
+  ModelPickerDirectory,
+  ModelPickerSubject,
+} from '../../app/command/model-presentation.ts'
+import { sanitizedPhysicalLine } from '../presentation/lines.ts'
+import {
+  modelIdentity,
+  projectModelDirectory,
+  effortChoicesOf,
+  initialEffortOf,
+  PROVIDER_DEFAULT,
+  type ModelPickerModelRow,
+  type ModelPickerFailureRow,
+  type InlineEffortChoice,
+} from './model-directory.ts'
+export { modelIdentity, projectModelDirectory } from './model-directory.ts'
+export type {
+  ModelPickerCurrent,
+  ModelPickerModelRow,
+  ModelPickerFailureRow,
+  ModelPickerProjection,
+} from './model-directory.ts'
+export type {
+  ModelApplyOutcome,
+  ModelPickerDirectory,
+  ModelPickerSubject,
+} from '../../app/command/model-presentation.ts'
 
 /** The picker's dependencies: the command layer's write/lifecycle seams. The
  *  directory arrives later through {@link ModelPicker.setDirectory}. */
 export interface ModelPickerDeps {
+  /** The write subject the command captured at open: whether the user was
+   *  sessionless. Fixed for this picker's whole life (never re-derived here). */
+  subject: ModelPickerSubject
   /** Commit a selection and resolve with its semantic settlement. */
   apply(selection: ModelSelectionDto): Promise<ModelApplyOutcome> | ModelApplyOutcome
   /** Request a frame so a hydration/effort/selecting change renders. */
@@ -118,102 +94,17 @@ export interface ModelPickerDeps {
 }
 
 const IDENTITY_SEP = '\u0000'
-/** The synthetic `provider default` effort choice (submit without an effort). */
-const PROVIDER_DEFAULT = `${IDENTITY_SEP}provider-default`
 const FAILURE_PREFIX = `${IDENTITY_SEP}failure${IDENTITY_SEP}`
 /** One shared group key for EVERY failed provider, so all failures collapse
  *  into a single private `Unavailable` section (a real provider's own
  *  `groupKey` is its id and can never collide with this NUL-prefixed key). */
 const FAILURE_GROUP_KEY = `${IDENTITY_SEP}unavailable`
 /** Model-mode footer hint: Enter either focuses the inline effort (reasoning
- *  model) or commits directly (no-effort model). */
-const MODEL_MODE_HINT = '↑↓ model · enter effort/select · esc close'
+ *  model) or commits directly (no-effort model). §4.1/§7.1 key tokens are
+ *  Capitalized, verbs lowercase, and `Esc` is last (§7.2/D8). */
+const MODEL_MODE_HINT = '↑↓ model · Enter effort/select · Esc close'
 /** Effort-mode footer hint: the same row, now editing its effort. */
-const EFFORT_MODE_HINT = '←→ effort · enter select · esc back'
-
-/** Full logical identity of a model row. Model ids are not globally unique. */
-export function modelIdentity(providerId: string, modelId: string): string {
-  return `${providerId}${IDENTITY_SEP}${modelId}`
-}
-
-/**
- * Project the Host directory into identity-complete presentation rows. Pure:
- * no terminal/component state, so the current/default/effort rules are unit
- * testable without a rendering snapshot.
- */
-export function projectModelDirectory(
-  directory: ModelDirectoryDto,
-  current: ModelPickerCurrent | undefined,
-  sessionless: boolean,
-): ModelPickerProjection {
-  const models: ModelPickerModelRow[] = []
-  for (const group of directory.groups) {
-    for (const model of group.models) {
-      // Full (provider, model) identity: a same-id model under another
-      // provider must never be marked current/default.
-      const matchesConfigured = current !== undefined
-        && current.provider === group.id
-        && current.model === model.id
-      const isCurrentModel = !sessionless && matchesConfigured
-      const isDefault = directory.default.provider === group.id && directory.default.model === model.id
-      models.push({
-        providerId: group.id,
-        providerName: group.name,
-        modelId: model.id,
-        modelName: model.name,
-        efforts: model.reasoning?.efforts ?? [],
-        ...(model.reasoning?.defaultEffort === undefined ? {} : { defaultEffort: model.reasoning.defaultEffort }),
-        isCurrent: isCurrentModel,
-        isDefault,
-        // Only the current model can carry a current effort; it must be the
-        // EXPLICIT projection effort (an absent one stays absent).
-        ...(isCurrentModel && current?.reasoningEffort !== undefined ? { currentEffort: current.reasoningEffort } : {}),
-        // The configured selection's effort is independent of the `current`
-        // badge: sessionless has no current model, yet its global default's
-        // effort must still seed the inline effort value.
-        ...(matchesConfigured && current?.reasoningEffort !== undefined ? { configuredEffort: current.reasoningEffort } : {}),
-      })
-    }
-  }
-  const failures: ModelPickerFailureRow[] = directory.failures.map(failure => ({
-    providerId: failure.id,
-    providerName: failure.name,
-    message: failure.message,
-  }))
-  return { models, failures }
-}
-
-/** One picker-local effort candidate: the PROTOCOL `value` (effort id, or the
- *  synthetic provider-default sentinel) plus the HUMAN-facing `label` the row
- *  renders. State and write payloads use `value`; only the display uses the
- *  label, so a renamed effort can never change what is submitted. */
-interface InlineEffortChoice {
-  readonly value: string
-  readonly label: string
-}
-
-/** The picker-local effort CHOICES for one model, in cycle order. A model with
- *  NO effort metadata has none — the effort keys must be a true no-op there.
- *  The synthetic `provider default` joins the cycle only when the model
- *  declares efforts but no concrete default. */
-function effortChoicesOf(row: ModelPickerModelRow): readonly InlineEffortChoice[] {
-  if (row.efforts.length === 0) return []
-  const efforts = row.efforts.map(effort => ({ value: effort.id, label: effort.name }))
-  return row.defaultEffort === undefined
-    ? [{ value: PROVIDER_DEFAULT, label: 'Default' }, ...efforts]
-    : efforts
-}
-
-/** The initial picker-local effort VALUE for one model: the configured/current
- *  explicit effort when advertised, else the model default, else the first
- *  candidate (provider default); `undefined` for a model with no effort
- *  metadata at all. */
-function initialEffortOf(row: ModelPickerModelRow, choices: readonly InlineEffortChoice[]): string | undefined {
-  if (choices.length === 0) return undefined
-  const advertised = (value: string | undefined): string | undefined =>
-    value !== undefined && choices.some(choice => choice.value === value) ? value : undefined
-  return advertised(row.configuredEffort) ?? advertised(row.defaultEffort) ?? choices[0]!.value
-}
+const EFFORT_MODE_HINT = '←→ effort · Enter select · Esc back'
 
 /** The human-facing label for one effort value within a row's candidates. */
 function effortLabelOf(choices: readonly InlineEffortChoice[], value: string): string | undefined {
@@ -309,7 +200,7 @@ export class ModelPicker implements Component, RowBudgetAware, Focusable {
     // Every (re-)hydration starts from a clean latch: only THIS refresh may
     // consume the next key, and only if it actually drops the bound model.
     this.swallowNextKey = false
-    const projection = projectModelDirectory(input.directory, input.current, input.sessionless)
+    const projection = projectModelDirectory(input.directory, input.current, this.deps.subject.sessionless)
     // A refresh must NOT discard the user's picker-local effort edits: keep the
     // previous value for every surviving identity while it is still advertised,
     // and only (re-)anchor to configured/default/provider-default otherwise.
@@ -363,6 +254,23 @@ export class ModelPicker implements Component, RowBudgetAware, Focusable {
     this.deps.requestRender()
   }
 
+  /** Enter the loading presentation: the command layer's read owner started
+   *  (re-)reading the directory. Restores exactly the constructor's state while
+   *  keeping the mounted panel, so a retry never closes and reopens it. */
+  setLoading(): void {
+    if (this.disposed) return
+    this.swallowNextKey = false
+    this.modelRows.clear()
+    this.effortChoices.clear()
+    this.choicesByModel.clear()
+    this.interactionMode = { kind: 'models' }
+    this.modelsList.setHint(MODEL_MODE_HINT)
+    this.failures = []
+    this.modelsList.setItems([])
+    this.modelsList.setNoMatchText('  Loading models…')
+    this.deps.requestRender()
+  }
+
   /** Replace the loading state with an in-panel error (never close + print in
    *  the transcript). No retry; Esc still closes; Enter is inert. */
   setLoadError(message: string): void {
@@ -377,9 +285,16 @@ export class ModelPicker implements Component, RowBudgetAware, Focusable {
     this.modelsList.setHint(MODEL_MODE_HINT)
     this.failures = []
     this.modelsList.setItems([])
-    this.modelsList.setNoMatchText(message === ''
-      ? '  Model catalog unavailable'
-      : `  Model catalog unavailable: ${message}`)
+    // §12.2/role 16: only a REAL failure names a failure, and that word is
+    // painted `error`. Pre-paint it here so the picker's `noMatch` (`textMuted`)
+    // wrapper does not recolour it (the nested span wins, the outer paint
+    // resumes); an ordinary empty-filter message keeps the placeholder ink.
+    const failure = color.error('Model catalog unavailable')
+    // The load error is a runtime/provider message: project it onto ONE safe
+    // physical row before it enters the picker's single-row no-match line
+    // (the picker's own CR/LF collapse cannot remove an escape sequence).
+    const detail = sanitizedPhysicalLine(message)
+    this.modelsList.setNoMatchText(detail === '' ? `  ${failure}` : `  ${failure}: ${detail}`)
     this.deps.requestRender()
   }
 
@@ -387,19 +302,23 @@ export class ModelPicker implements Component, RowBudgetAware, Focusable {
     const items: SearchablePickerItem[] = []
     for (const row of this.modelRows.values()) {
       const identity = modelIdentity(row.providerId, row.modelId)
-      const badge = this.modelBadgeOf(row)
+      // ONE parts array per row: the picker's wrap-trim drops WHOLE parts, so
+      // an effort NAME containing ` · ` must never be mistaken for a boundary.
+      const badgeParts = this.modelBadgePartsOf(row)
+      const badge = badgeParts === undefined ? undefined : joinBadgeParts(badgeParts)
       // Layout measurement uses the WIDEST badge any effort value of this
       // model could render, so cycling the effort never toggles one/two lines.
       const badgeLayoutText = this.widestBadgeOf(row)
       items.push({
         value: identity,
-        label: row.modelName,
+        label: sanitizedPhysicalLine(row.modelName),
         // The header shows the display name; the GROUP IDENTITY is the
         // provider id, so distinct providers that share a display name (or a
         // provider literally named "Unavailable") never merge into one group.
-        group: row.providerName,
+        group: sanitizedPhysicalLine(row.providerName),
         groupKey: row.providerId,
         ...(badge === undefined ? {} : { badge }),
+        ...(badgeParts === undefined ? {} : { badgeParts }),
         ...(badgeLayoutText === undefined ? {} : { badgeLayoutText }),
         // Search covers provider/model NAME + ID only: the (hidden) model
         // description and effort descriptions are deliberately NOT searchable.
@@ -409,8 +328,8 @@ export class ModelPicker implements Component, RowBudgetAware, Focusable {
     for (const failure of this.failures) {
       items.push({
         value: `${FAILURE_PREFIX}${failure.providerId}`,
-        label: failure.providerName,
-        description: failure.message,
+        label: sanitizedPhysicalLine(failure.providerName),
+        description: sanitizedPhysicalLine(failure.message),
         group: 'Unavailable',
         groupKey: FAILURE_GROUP_KEY,
         badge: 'unavailable',
@@ -420,21 +339,36 @@ export class ModelPicker implements Component, RowBudgetAware, Focusable {
     return items
   }
 
-  /** The right-aligned badge: factual state (`current`/`default`) plus the
-   *  picker-local effort token. The token is `[ Name ]` while THIS model owns
-   *  the inline effort focus and `‹Name›` otherwise, so the active state is
-   *  legible without relying on color. */
-  private modelBadgeOf(row: ModelPickerModelRow): string | undefined {
-    const parts: string[] = []
-    if (row.isCurrent) parts.push('current')
-    if (row.isDefault) parts.push('default')
+  /** The right-aligned badge PARTS: factual state (`current`/`default`) as
+   *  `chip` parts plus the picker-local effort token — its provider-supplied
+   *  NAME verbatim, ` · ` or not, as ONE `text` part — so the picker's
+   *  wrap-trim never has to reverse-engineer boundaries from the joined text.
+   *  The token is `[ Name ]` while THIS model owns the inline effort focus and
+   *  `‹Name›` otherwise, so the active state is legible without relying on
+   *  color. The caller joins the parts with `joinBadgeParts` — two adjacent state chips a single space apart, ` · ` otherwise — for the `badge` string. */
+  private modelBadgePartsOf(row: ModelPickerModelRow): SearchablePickerBadgePart[] | undefined {
+    const parts: SearchablePickerBadgePart[] = []
     const identity = modelIdentity(row.providerId, row.modelId)
     const choice = this.effortChoices.get(identity)
+    // §4.5/§12.2: a row state is a `[current]` / `[default]` state chip in
+    // `textMuted`, pre-painted so the badge slot's selected-dependent paint
+    // (`primary` on the cursor row, `textDim` otherwise) never recolours it.
+    if (row.isCurrent) parts.push({ kind: 'chip', text: color.textMuted('[current]') })
+    if (row.isDefault) parts.push({ kind: 'chip', text: color.textMuted('[default]') })
+    // The effort token keeps the LAST position — the wrapped badge drops from the LEFT,
+    // so the tail is the fact the user is acting on — and it is painted its OWN role-4
+    // ink: a nested span's reset ends the outer ink for everything after it (ANSI cannot
+    // resume a style), so an unstyled tail would fall back to the terminal's default
+    // colour on the selected row (measured in the real `/model` frame).
     if (choice !== undefined) {
       const label = effortLabelOf(this.choicesByModel.get(identity) ?? [], choice)
-      if (label !== undefined) parts.push(effortTokenOf(label, this.isEffortFocused(identity)))
+      if (label !== undefined) {
+        // A provider-supplied effort name is external: project it BEFORE the
+        // role-4 paint (the picker folds the part onto one row afterwards).
+        parts.push({ kind: 'text', text: color.textDim(effortTokenOf(sanitizedPhysicalLine(label), this.isEffortFocused(identity))) })
+      }
     }
-    return parts.length === 0 ? undefined : parts.join(' · ')
+    return parts.length === 0 ? undefined : parts
   }
 
   /** The widest badge this row could ever render (the facts plus the longest
@@ -442,18 +376,29 @@ export class ModelPicker implements Component, RowBudgetAware, Focusable {
    *  measurement so neither cycling nor entering/leaving effort focus can
    *  change the physical row count. */
   private widestBadgeOf(row: ModelPickerModelRow): string | undefined {
-    const parts: string[] = []
-    if (row.isCurrent) parts.push('current')
-    if (row.isDefault) parts.push('default')
+    const parts: SearchablePickerBadgePart[] = []
+    // Measurement uses the CHIP text (wider than the bare word) and the SAME
+    // joiner as the painted badge, so the one/two-line wrap decision stays honest.
+    if (row.isCurrent) parts.push({ kind: 'chip', text: '[current]' })
+    if (row.isDefault) parts.push({ kind: 'chip', text: '[default]' })
     const choices = this.choicesByModel.get(modelIdentity(row.providerId, row.modelId)) ?? []
     if (choices.length > 0) {
+      // Compare the PROJECTED width, the same text the inline row paints: an
+      // effort name with line breaks measures 0 for its `\n` but paints a space, so
+      // comparing raw labels could pick a candidate that is not the widest once
+      // painted and leave the layout-only badge one cell short of a wrap.
       let widest = choices[0]!
       for (const choice of choices) {
-        if (visibleWidth(choice.label) > visibleWidth(widest.label)) widest = choice
+        if (visibleWidth(sanitizedPhysicalLine(choice.label)) > visibleWidth(sanitizedPhysicalLine(widest.label))) widest = choice
       }
-      parts.push(effortTokenOf(widest.label, true))
+      // The painted row projects the label onto ONE physical line, so the
+      // measurement must measure that same text: `visibleWidth('\n')` is 0, which
+      // made the widest badge under-count by a cell or two for an effort name with
+      // three or more breaks and let `shouldWrapBadge` decline to wrap a row that
+      // overflows.
+      parts.push({ kind: 'text', text: effortTokenOf(sanitizedPhysicalLine(widest.label), true) })
     }
-    return parts.length === 0 ? undefined : parts.join(' · ')
+    return parts.length === 0 ? undefined : joinBadgeParts(parts)
   }
 
   /** Whether `identity` is the model currently owning the inline effort focus. */

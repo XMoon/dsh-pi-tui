@@ -51,7 +51,7 @@ import { createSurfaceRuntime } from '../src/app/surface/runtime.ts'
 import type { SurfaceEventRoutingSource } from '../src/app/surface/event-routing.ts'
 import type { TranscriptFolder } from '../src/domain/transcript/folder.ts'
 import { TranscriptWindowController } from '../src/domain/transcript/window.ts'
-import { createPluginManagerPanel } from '../src/tui/plugin-manager/panel.ts'
+import { createPluginManagerWorkspacePanel } from '../src/tui/plugin-manager/workspace.ts'
 import { installVirtualProcessTerminal } from './support/runner-harness.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 
@@ -230,7 +230,7 @@ async function createProbe(adapter: LlmAdapter): Promise<Probe> {
     notificationMethod: undefined,
     terminalProgress: undefined,
     mainProgressAuthority: 'local-events',
-    createPluginManagerPanel,
+    createPluginManagerPanel: createPluginManagerWorkspacePanel,
   })
   surface.attachEventRouting(routingSource)
   surface.setCompletionOwner(agent.id)
@@ -244,7 +244,7 @@ async function createProbe(adapter: LlmAdapter): Promise<Probe> {
     imageScope: () => undefined,
     present: { call: () => undefined, result: () => undefined },
     sessionCwd: () => '/tmp',
-    sessionId: () => MAIN,
+    captureHistoryScope: () => ({ sessionId: MAIN, isCurrent: () => true }),
     onTerminalResize: () => {},
     copySelection: async () => false,
     openExternalUrl: () => {},

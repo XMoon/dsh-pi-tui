@@ -84,7 +84,6 @@ import {
   type TranscriptWorkflowMessage,
   type WorkflowChildSessionId,
   type WorkflowMemberView,
-  type WorkflowOwner,
   type WorkflowRunId,
   type WorkflowRunStatus,
 } from './workflow-projection.ts'
@@ -342,6 +341,13 @@ export { textWithAttachmentMarkers }
 export { userBlocksVisibleNow }
 
 /** Key identifying one step's model output (turn + step). */
+/** Durable identity of one Tool call inside its OWN step: never the tool name,
+ *  never a pending-call entry, and never a bare call id (ids can be reused by
+ *  another step or turn). */
+function toolCallKey(turn: number, step: number, callId: string): string {
+  return `${stepKey(turn, step)}\u0000${callId}`
+}
+
 function stepKey(turn: number, step: number): string {
   return `${turn}/${step}`
 }
@@ -703,13 +709,50 @@ export class TranscriptFolder {
    * are pure presentation order — every raw-index-keyed structure (search
    * ids, turn boundaries, read groups, compaction/workflow cards) keeps its
    * physical meaning and needs no remap. Mutate ONLY through
-   * `setLaneDisplay`/`dropLaneDisplayFor` (they keep the two inverse maps
+   * `setLaneDisplay`/`dropLaneDisplacement`/`dropLaneAnchor` (they keep the two inverse maps
    * in sync and bump the search revision). */
-  private readonly laneDisplayByDisplaced = new Map<number, { anchor: number; position: 'before' | 'after' }>()
-  /** Inverse of {@link laneDisplayByDisplaced}: anchor Assistant row → the
-   * displaced Thinking row emitted at the anchor during
-   * `displayOrderedRawIds`. */
-  private readonly laneDisplayByAnchor = new Map<number, number>()
+  private readonly laneDisplayByDisplaced = new Map<number, {
+    anchor: number
+    position: 'before' | 'after'
+    /** The step whose convergence established this relation, when known: a later
+     *  visibility change re-validates the affected relations with it. */
+    owner?: { turn: number; step: number }
+    /** The raw interval this move spans (its own slot to its anchor's slot). */
+    lo: number
+    hi: number
+    /** Its position inside the anchor's side list (rebuilt lazily after splices). */
+    at: number
+  }>()
+  /** Inverse of {@link laneDisplayByDisplaced}: one anchor row (the settled
+   * Assistant row of a step) → the rows emitted around it during
+   * `displayOrderedRawIds`. `before`/`after` keep the displaced raw indexes in
+   * RAW order, so the emitted sequence is deterministic and evidence-backed
+   * rather than dependent on the order relations were recorded in. One anchor
+   * owns at most one Thinking lane row (the existing lane authority) plus the
+   * step's Tool rows whose own materialization time proves they belong on the
+   * other side of the Conversation. */
+  private readonly laneDisplayByAnchor = new Map<number, { before: number[]; after: number[] }>()
+  /** Highest recorded TOOL displacement interval end. Lane (Thinking/Assistant)
+   *  intervals are never the subject of the Tool guard, so they must not raise
+   *  this bound: an ordinary thinking-first cold history has zero Tool relations
+   *  and therefore answers every coverage query in O(1). */
+  private maxToolDisplacementHi = 0
+  /** Set when a TOOL removal may have lowered the recorded maximum. */
+  private maxToolDisplacementHiDirty = false
+  /** Test-only: entries visited while rebuilding the maximum. */
+  private maxHiScanCount = 0
+  /** Test-only: how many times a stale side position had to be rebuilt (the
+   *  O(1) substitute for the quadratic `indexOf` scans). */
+  private positionRebuildCount = 0
+  /** Test-only: native slot inspections performed by the reachability guard. */
+  private slotCheckCount = 0
+  /** Raw item index of each GENUINE `tool/call` card, keyed by its durable
+   * `(turn, step, callId)` identity (never the tool name). The index is recorded
+   * once at append and the card's object identity is re-verified before use, so
+   * a stale index can never displace another row — including a call id reused by
+   * another step or turn. This is NOT a replacement for `pendingCalls` (that one
+   * is deleted when the call settles and never owns a long-lived identity). */
+  private readonly toolCardIndexOf = new Map<string, number>()
   /** In-flight live block state keyed by logical step. This is required for
    * authoritative block-end replacement: deltas may be partial, while a
    * completed block replaces the entire indexed state without duplication. */
@@ -766,6 +809,10 @@ export class TranscriptFolder {
    * consumes its entry (the request started); any `tool/result` for the id
    * consumes it too (the request settled). Never a transcript row — only
    * identity evidence for a not-started recovery diagnostic. */
+  /** Durable tool-call REQUESTS (TOOL_NOT_STARTED compat), keyed by the same
+   *  `(turn, step, callId)` identity as the tool index: two steps that request
+   *  the same call id own separate entries, and one step can never consume or
+   *  overwrite another's request. */
   private readonly requestedToolCalls = new Map<string, { turn: number; step: number; name: string }>()
   /** The real command lifecycle index (post-PR166 plan §5): commandId → the
    * ONE `kind: 'command'` row plus its raw item index. Entries survive
@@ -816,10 +863,20 @@ export class TranscriptFolder {
    * (turn, step, index) fallback identity, and each entry carries its
    * OWNING step so a retry/boundary clears BOTH key shapes — a reused call
    * id in a later attempt must never inherit a dead attempt's timer. */
-  private readonly toolCallPreparingStarts = new Map<string, { at: number; owner: string }>()
-  /** Active Workflow runs: the shared semantic projection (owner tracking,
-   * interruption projection, member/run settlement) plus the raw item index
-   * of each active run's card for search dirty marking. */
+  /** `authorized` separates TIMING evidence from membership AUTHORIZATION: only a
+   *  record the current successful owner (or the live stream) established may
+   *  serve as ownership proof for a later durable `tool/call`; a lower-authority
+   *  late attempt still contributes its time but never qualifies a call. */
+  private readonly toolCallPreparingStarts = new Map<string, { at: number; owner: string; authorized: boolean }>()
+  /** The current successful owner's DECLARED Tool ids per step: the stream's
+   *  Preparing records plus the durable tool-call blocks. REPLACED by each
+   *  settlement, so an id the current message no longer names is not a member —
+   *  membership must never be inferred from a layout artifact such as an existing
+   *  displacement, which differs between the live and cold raw placements. */
+  private readonly declaredToolCallsByStep = new Map<string, ReadonlySet<string>>()
+  /** Active Workflow runs: the shared semantic projection (durable open
+   * records, terminal-event settlement) plus the raw item index of each
+   * active run's card for search dirty marking. */
   private readonly workflow = new WorkflowProjection(runId => {
     const index = this.workflowIndexes.get(runId)
     if (index !== undefined) this.markSearchEntryDirty(index)
@@ -860,7 +917,7 @@ export class TranscriptFolder {
   private readonly dirtySearchEntries = new Set<number>()
   /** Bumped on EVERY search-projection change — entry mutation (append,
    * settlement, group reflow) AND display-order change (lane displacement
-   * via `setLaneDisplay`/`dropLaneDisplayFor`): the projection's content
+   * via `setLaneDisplay`/`dropLaneDisplacement`/`dropLaneAnchor`): the projection's content
    * and its ORDER are both part of the revision, so query refinement must
    * not reuse previous candidates across one. */
   private searchRevisionCounter = 0
@@ -876,6 +933,32 @@ export class TranscriptFolder {
    * (proves the query path is O(#dirty), never O(history)). */
   private searchDirtyScanCount = 0
   private searchFullScanCount = 0
+  /** Test-only: the row count of the LAST regroup envelope. It bounds the
+   * normal serial case (a display-order change re-groups its affected relation
+   * neighborhood); a late/distant settlement may legitimately require a wide
+   * envelope spanning the rows between the displaced row and its anchor. */
+  private lastRegroupSpanRows = 0
+  /** Seeds accumulated while a convergence coalesces its relation changes. */
+  private pendingRegroupSeeds: number[] | undefined = undefined
+  /** Test-only: how many regroup operations actually ran. */
+  private regroupOperationCount = 0
+  /** Test-only: how many anchor-side re-sorts actually ran. */
+  private sideSortOperationCount = 0
+  /** Bumped whenever a Lane relation changes what an anchor slot EMITS, so the
+   *  Tool batch only re-validates when the emission really changed. */
+  private laneEmissionChanges = 0
+  /** Test-only: how many emitted rows the closure helpers actually VISITED.
+   *  This is the real neighbour/closure work (an allocation-free substitute for
+   *  the old emission copies), so a displacement over a large side can be proven
+   *  linear instead of quadratic. */
+  private emittedRowVisits = 0
+  /** Test-only: how many times the displacement interval map was WALKED. A
+   *  normal serial tail settlement must never walk it (the O(1) end exclusion). */
+  private displacementScanCount = 0
+  /** Test-only: how many group members the LAST envelope closure visited. A
+   *  deterministic guard that a late-result regroup is linear in the affected
+   *  run, never quadratic. */
+  private lastRegroupMemberVisits = 0
   private searchRefineCount = 0
   /** Test-only: the number of CANDIDATE CARDS re-scanned by refinement
    * (proves refinement is O(candidate cards), never O(previous occurrences)). */
@@ -1524,13 +1607,14 @@ export class TranscriptFolder {
    * Runs are TURN-BOUND by the walks above (`continuesReadRun`), so all
    * members share one turn; the cross-turn drop paths downstream stay as
    * defensive guards for that invariant. */
-  private makeReadGroup(start: number, end: number): {
+  private makeReadGroup(memberIndexes: readonly number[]): {
     group: ReadGroupCard
     members: number[]
     firstTurn: number
     spansTurns: boolean
   } | undefined {
-    const first = this.items[start]
+    const firstIndex = memberIndexes[0]
+    const first = firstIndex === undefined ? undefined : this.items[firstIndex]
     if (first === undefined || !TranscriptFolder.groupable(first)) return undefined
     const members: number[] = []
     const results: string[] = []
@@ -1538,7 +1622,9 @@ export class TranscriptFolder {
     let firstResult: string | undefined
     let maxTurn = first.turn
     let callCount = 0
-    for (let index = start; index <= end; index += 1) {
+    // The members arrive in FINAL DISPLAY order (plan §7.2): the caller owns the
+    // adjacency decision, this builder owns only the aggregate facts.
+    for (const index of memberIndexes) {
       const member = this.items[index]
       if (member === undefined || !TranscriptFolder.groupable(member)) continue
       members.push(index)
@@ -1697,6 +1783,30 @@ export class TranscriptFolder {
     const visible = this.isVisible(item)
     if (visible === wasVisible) return
     if (markSearchDirty) this.markStreamingEntryDirty(`assistant:${stepKey(turn, step)}`)
+    // Visibility IS display adjacency: a Conversation that becomes visible
+    // between two reads must split them, and one that disappears must let them
+    // merge. Re-group the neighborhood from the FINAL visibility state (this is
+    // deliberately before the dirty-index early return below).
+    const index = this.searchIndexByStepKey.get(`assistant:${stepKey(turn, step)}`)
+    if (index !== undefined) {
+      // A hidden anchor may not order anything: revoke the Tool relations it
+      // owned, then re-derive the neighborhood from the FINAL visibility state.
+      if (!visible) this.dropLaneAnchor(index)
+      // A row that already existed can sit INSIDE a recorded displacement
+      // interval; a freshly materialized one cannot (it is newer than every
+      // interval end), so the common "new Conversation becomes visible" case
+      // skips the scan entirely — the re-validation stays bounded.
+      // Bounded twice over: a row appended at the raw tail cannot sit inside any
+      // recorded interval, so it skips the coverage scan without looking at the
+      // map at all; otherwise the scan is limited to the displaced rows. The
+      // re-validation AND the visibility regroup share ONE batch.
+      this.coalescingRegroups(() => {
+        if (index !== this.items.length - 1 && this.mayCoverExistingDisplacement(index)) {
+          this.revalidateRelationsCovering(index)
+        }
+        this.scheduleDisplayRegroup(index)
+      })
+    }
     if (this.groupedTurnIndexDirty) return
     if (visible) this.addGroupedTurn(turn)
     else this.removeGroupedTurn(turn)
@@ -1781,55 +1891,16 @@ export class TranscriptFolder {
      this.groupedTurnValues = []
      this.groupedToolCount = 0
     this.crossTurnGroups = 0
-    for (let start = 0; start < this.items.length;) {
-      const item = this.items[start]!
-      // Tombstoned failed-attempt text is never visible output and never
-      // separates an adjacent read run.
-      if (!this.isVisible(item)) {
-        start += 1
-        continue
-      }
-      if (item.kind !== 'tool' || item.name !== 'read' || item.status !== 'ok') {
-        if (item.kind === 'tool') this.groupedToolCount += 1
-         if ('turn' in item) this.addGroupedTurn(item.turn)
-        start += 1
-        continue
-      }
-      let end = start + 1
-      while (end < this.items.length && TranscriptFolder.continuesReadRun(this.items[end]!, item.turn)) end += 1
-      if (end - start === 1) {
-         this.addGroupedTurn(item.turn)
-         // The single read has no merged card yet.
-        this.groupedToolCount += 1
-        start = end
-        continue
-      }
-      const built = this.makeReadGroup(start, end - 1)
-      if (built === undefined) {
-        for (let memberIndex = start; memberIndex < end; memberIndex += 1) {
-          const member = this.items[memberIndex]
-          if (member !== undefined && 'turn' in member) this.addGroupedTurn(member.turn)
-        }
-        // The run was checked above; keep a defensive fallback that preserves
-        // the output count if a future item shape invalidates that invariant.
-        this.groupedToolCount += 1
-        start = end
-        continue
-      }
-      for (const member of built.members) this.groupOf.set(member, built.group)
-      this.groupMembers.set(built.group, built.members)
-      this.groupMeta.set(built.group, { firstTurn: built.firstTurn, spansTurns: built.spansTurns })
-       this.addGroupedTurn(built.group.turn)
-      this.groupedToolCount += 1
-      if (built.spansTurns) this.crossTurnGroups += 1
-      start = end
-    }
-    // The cold finalize rebuilds every group: eagerly normalize each
-    // merged card's REPRESENTATIVE entry to the shared group text (one
-    // normalize per group — the allowed one-time O(history) cost).
-    // Non-representative members keep their own raw entries and are
-    // skipped at scan time.
     this.groupingRebuildCount += 1
+    // The ONE adjacency definition: the FINAL display order, visible rows only
+    // (plan §7.1/§7.3). A displaced Tool or lane row therefore separates — or
+    // joins — a read run exactly as the user sees it, and a hidden row never
+    // fabricates a boundary.
+    this.buildDisplayGroups(0, this.items.length - 1, true)
+    // The cold finalize rebuilds every group: eagerly normalize each merged
+    // card's REPRESENTATIVE entry to the shared group text (one normalize per
+    // group — the allowed one-time O(history) cost). Non-representative members
+    // keep their own raw entries and are skipped at scan time.
     for (const [group, members] of this.groupMembers) {
       const first = members[0]
       if (first === undefined) continue
@@ -1844,21 +1915,526 @@ export class TranscriptFolder {
     }
   }
 
+  /** The VISIBLE raw ids of one raw range, in FINAL display order (plan §7.1:
+   *  a hidden row is neither an output row nor a boundary). */
+  private *visibleDisplayIds(start: number, end: number): Iterable<number> {
+    for (const index of this.displayOrderedRawIds(start, end)) {
+      const item = this.items[index]
+      if (item === undefined || !this.isVisible(item)) continue
+      yield index
+    }
+  }
 
+  /** Build the read groups of one raw range from the FINAL display order: a run
+   *  is a maximal sequence of groupable reads of the SAME turn with no VISIBLE
+   *  non-read row between them. The caller owns detaching the range's previous
+   *  groups and the search-dirty marking. */
+  private buildDisplayGroups(start: number, end: number, absoluteCounts: boolean): void {
+    let run: number[] = []
+    let runTurn: number | undefined
+    // `groupedToolCount` counts OUTPUT TOOL CARDS. The cold rebuild starts from
+    // zero and therefore counts every card absolutely; a live re-group already
+    // holds the per-row counts (appended with each tool item and split back by
+    // `detachGroupsInRange`), so it applies only the MERGE delta.
+    const flush = (): void => {
+      if (run.length === 0) return
+      const members = run
+      run = []
+      if (members.length === 1) {
+        this.addGroupedTurn(runTurn!)
+        if (absoluteCounts) this.groupedToolCount += 1
+        return
+      }
+      const built = this.makeReadGroup(members)
+      if (built === undefined) {
+        // Defensive: every member was checked groupable above.
+        if (absoluteCounts) this.groupedToolCount += 1
+        return
+      }
+      for (const member of built.members) this.groupOf.set(member, built.group)
+      this.groupMembers.set(built.group, built.members)
+      this.groupMeta.set(built.group, { firstTurn: built.firstTurn, spansTurns: built.spansTurns })
+      this.addGroupedTurn(built.group.turn)
+      this.groupedToolCount += absoluteCounts ? 1 : -(built.members.length - 1)
+      if (built.spansTurns) this.crossTurnGroups += 1
+    }
+    for (const index of this.visibleDisplayIds(start, end)) {
+      const item = this.items[index]!
+      if (TranscriptFolder.groupable(item)) {
+        // Same turn → extend the run; a DIFFERENT turn closes the previous run
+        // and STARTS a new one with this read (a turn/start emits no row, so
+        // consecutive-turn reads are ordinary production input).
+        if (runTurn !== undefined && item.turn !== runTurn) flush()
+        run.push(index)
+        runTurn = item.turn
+        continue
+      }
+      flush()
+      runTurn = undefined
+      // A not-yet-settled read and a non-read Tool are each their own output
+      // card. The `groupable` guard narrows the negative branch, so read the
+      // kind structurally instead of through the narrowed union.
+      if ((item as { kind: string }).kind === 'tool' && absoluteCounts) this.groupedToolCount += 1
+      if ('turn' in item) this.addGroupedTurn(item.turn)
+    }
+    flush()
+  }
 
-   /**
-    * Extend a groupable card that was just settled at the item-list tail.
-   * Normal live delivery follows this path, so an adjacent read run does not
-   * scan its history on every result. A non-tail settlement still falls back
-   * to the defensive reflow path below because it may bridge two runs.
-   */
-  private appendTailGrouping(index: number): boolean {
+  /** Detach every existing group whose members lie inside one raw range: the
+   *  shared bookkeeping of a bounded re-group (counters, meta, member runs).
+   *  A group partially inside keeps its surviving members' evidence only. */
+  private detachGroupsInRange(start: number, end: number): void {
+    for (let index = start; index <= end; index += 1) {
+      const group = this.groupOf.get(index)
+      if (group === undefined) continue
+      const members = this.groupMembers.get(group)
+      if (members !== undefined) {
+        const remaining = members.filter(member => member < start || member > end)
+        if (remaining.length === 0) {
+          // The whole group lives inside the range: its merged card splits back
+          // into `members.length` independent output rows, which the rebuild may
+          // merge again — `groupedToolCount` counts OUTPUT CARDS, so the split is
+          // exactly `members.length - 1` extra cards. The superseded card's
+          // merged timing is dropped with it: a split must never keep an
+          // aggregate spanning members that no longer share a card.
+          transcriptTimings.delete(group)
+          this.groupMembers.delete(group)
+          const spansTurns = this.groupMeta.get(group)?.spansTurns ?? this.crossTurn(members)
+          this.groupMeta.delete(group)
+          this.groupedToolCount += members.length - 1
+          if (spansTurns) this.crossTurnGroups -= 1
+        } else {
+          this.groupMembers.set(group, remaining)
+          const first = this.items[remaining[0]!]
+          if (first !== undefined && TranscriptFolder.groupable(first)) {
+            const spansTurns = this.crossTurn(remaining)
+            this.groupMeta.set(group, { firstTurn: first.turn, spansTurns })
+            this.mergedReadGroupTiming(group, remaining, spansTurns)
+          }
+        }
+      }
+      this.groupOf.delete(index)
+    }
+  }
+
+  /** The local raw span whose display adjacency and grouping can change around
+   *  one row: the row itself, its anchor (and that anchor's other displaced rows)
+   *  when it is displaced, the rows displayed immediately around it, and every
+   *  group that contains one of them. Deliberately NOT derived from a turn's
+   *  positional range: late/non-monotonic replay can append a turn's rows outside
+   *  its `turnStarts` span, so the affected rows — not the turn — define the work. */
+  private affectedSpanAround(seeds: number | readonly number[]): { start: number; end: number } {
+    const list = typeof seeds === 'number' ? [seeds] : seeds
+    const rows = new Set<number>(list)
+    let low = Math.min(...list)
+    let high = Math.max(...list)
+    // Each involved GROUP is expanded once per operation: re-enumerating a big
+    // read group's members for every covered row made a late-result regroup
+    // quadratic in the run size.
+    const expandedGroups = new Set<unknown>()
+    const expandedAnchors = new Set<number>()
+    let memberVisits = 0
+    const extendTo = (candidate: number | undefined): boolean => {
+      if (candidate === undefined) return false
+      let changed = !rows.has(candidate)
+      rows.add(candidate)
+      if (candidate < low) {
+        low = candidate
+        changed = true
+      }
+      if (candidate > high) {
+        high = candidate
+        changed = true
+      }
+      return changed
+    }
+    const expandGroup = (row: number): boolean => {
+      const group = this.groupOf.get(row)
+      if (group === undefined || expandedGroups.has(group)) return false
+      expandedGroups.add(group)
+      const members = this.groupMembers.get(group)
+      if (members === undefined) return false
+      let changed = false
+      for (const member of members) {
+        memberVisits += 1
+        changed = extendTo(member) || changed
+      }
+      return changed
+    }
+    // One hop of display adjacency for every SEED (the run boundary each moves
+    // across); chaining adjacency transitively would swallow the whole turn.
+    for (const seed of list) {
+      extendTo(this.displayPredecessorOf(seed))
+      extendTo(this.displaySuccessorOf(seed))
+    }
+    let grew = true
+    while (grew) {
+      grew = false
+      // Every involved row pulls in its relations and its whole group.
+      for (const row of [...rows]) {
+        const anchor = this.laneDisplayByDisplaced.get(row)?.anchor
+        if (anchor !== undefined) grew = extendTo(anchor) || grew
+        for (const owner of anchor === undefined ? [row] : [row, anchor]) {
+          const owned = this.laneDisplayByAnchor.get(owner)
+          if (owned === undefined) continue
+          // Each anchor's peer lists are expanded ONCE per operation: a side with
+          // many members would otherwise re-scan them for every member row.
+          if (expandedAnchors.has(owner)) continue
+          expandedAnchors.add(owner)
+          for (const peer of owned.before) grew = extendTo(peer) || grew
+          for (const peer of owned.after) grew = extendTo(peer) || grew
+        }
+        grew = expandGroup(row) || grew
+      }
+      // EVERY row INSIDE the (possibly unioned) envelope closes it too: an anchor
+      // emits its lists there even when they sit outside the raw range, and a
+      // grouped row brings its group.
+      for (let row = low; row <= high; row += 1) {
+        const owned = this.laneDisplayByAnchor.get(row)
+        if (owned !== undefined) {
+          for (const peer of owned.before) grew = extendTo(peer) || grew
+          for (const peer of owned.after) grew = extendTo(peer) || grew
+        }
+        grew = expandGroup(row) || grew
+      }
+      // Every groupable read the envelope covers pulls in its DISPLAY run — the
+      // next row the user actually SEES decides it, so an invisible row is not a
+      // boundary and a departing non-read row does not stop the expansion.
+      for (let row = low; row <= high; row += 1) {
+        const item = this.items[row]
+        if (item === undefined || !TranscriptFolder.groupable(item)) continue
+        grew = this.extendDisplayRun(row, -1, extendTo) || grew
+        grew = this.extendDisplayRun(row, 1, extendTo) || grew
+      }
+    }
+    this.lastRegroupMemberVisits = memberVisits
+    return { start: low, end: high }
+  }
+
+  /** Extend the envelope over the DISPLAY run of groupable reads leaving `from`
+   *  in one direction: the next row the user actually SEES decides the run, so an
+   *  invisible row never stops it. `extend` reports whether it added a row. */
+  private extendDisplayRun(
+    from: number,
+    direction: -1 | 1,
+    extend: (candidate: number | undefined) => boolean,
+  ): boolean {
+    const start = this.items[from]
+    if (start === undefined || !TranscriptFolder.groupable(start) || !('turn' in start)) return false
+    const turn = start.turn
+    let grew = false
+    let cursor = from
+    for (;;) {
+      const next = direction < 0 ? this.displayPredecessorOf(cursor) : this.displaySuccessorOf(cursor)
+      if (next === undefined) return grew
+      const item = this.items[next]
+      if (item === undefined || !TranscriptFolder.groupable(item) || !('turn' in item) || item.turn !== turn) return grew
+      // Also includes any relations/groups the newly added row brings in.
+      if (!extend(next)) return grew
+      grew = true
+      cursor = next
+    }
+  }
+
+  /** The turn value of one raw row, when it carries one. */
+  private turnOfRaw(index: number): number | undefined {
+    const item = this.items[index]
+    return item !== undefined && 'turn' in item ? item.turn : undefined
+  }
+
+  /** Re-group one LOCAL span from the display order: detach its existing groups,
+   *  then rebuild the runs over the final display order (bounded by the span). */
+  private regroupDisplaySpan(span: { start: number; end: number }): void {
+    this.regroupOperationCount += 1
+    this.lastRegroupSpanRows = span.end - span.start + 1
+    this.groupedTurnIndexDirty = true
+    this.detachGroupsInRange(span.start, span.end)
+    this.markSpanSearchDirty(span)
+    this.buildDisplayGroups(span.start, span.end, false)
+    // The rebuilt runs' representatives may have moved: the lazy normalization
+    // re-derives every entry from its current card. Only the span's GROUPABLE
+    // rows can change role (a merged card replaces its members, and a member
+    // that becomes standalone needs its own corpus) — a Conversation/user row
+    // that merely sits in the span keeps its own entry untouched.
+    this.markSpanSearchDirty(span)
+  }
+
+  /** Re-derive the search corpus of the span's groupable rows only. */
+  private markSpanSearchDirty(span: { start: number; end: number }): void {
+    for (let row = span.start; row <= span.end; row += 1) {
+      const item = this.items[row]
+      if (item !== undefined && TranscriptFolder.groupable(item)) this.markSearchEntryDirty(row)
+    }
+  }
+
+  /** The raw index displayed immediately BEFORE `index` (visible rows only): a
+   *  displaced row is emitted at its anchor, and an anchor is followed by its
+   *  `after` list. */
+  /** The rows ONE raw slot emits, in order: an anchor emits its `before` list,
+   *  itself, then its `after` list; a displaced row emits nothing at its own
+   *  slot (it is emitted at its anchor). This is the same emission rule
+   *  `displayOrderedRawIds` applies, so these helpers stay equivalent to it. */
+  /** Visit one raw slot's emitted rows IN ORDER without building an array: the
+   *  anchor's `before` list, the anchor itself, then its `after` list. A
+   *  displaced row emits nothing at its own slot. Visiting with no allocation is
+   *  what keeps the closure paths linear. Returns true when `visit` asked to stop. */
+  private emitSlot(index: number, visit: (row: number) => boolean | void): boolean {
+    if (this.laneDisplayByDisplaced.has(index)) return false
+    const owned = this.laneDisplayByAnchor.get(index)
+    if (owned === undefined) return visit(index) === true
+    for (const row of owned.before) {
+      this.emittedRowVisits += 1
+      if (visit(row) === true) return true
+    }
+    this.emittedRowVisits += 1
+    if (visit(index) === true) return true
+    for (const row of owned.after) {
+      this.emittedRowVisits += 1
+      if (visit(row) === true) return true
+    }
+    return false
+  }
+
+  /** The position of one displaced row inside its anchor's side list. A splice
+   *  can make the recorded position stale, so the side is re-indexed once here
+   *  (bulk removals stay linear: one rebuild per side, not one per lookup). */
+  private positionOf(displaced: number, relation: { anchor: number; position: 'before' | 'after'; at: number }): number {
+    const owned = this.laneDisplayByAnchor.get(relation.anchor)
+    if (owned === undefined) return -1
+    const side = relation.position === 'before' ? owned.before : owned.after
+    if (side[relation.at] === displaced) return relation.at
+    this.positionRebuildCount += 1
+    for (let at = 0; at < side.length; at += 1) {
+      const row = side[at]!
+      const entry = this.laneDisplayByDisplaced.get(row)
+      if (entry !== undefined) entry.at = at
+    }
+    const repaired = this.laneDisplayByDisplaced.get(displaced)
+    return repaired === undefined ? side.indexOf(displaced) : repaired.at
+  }
+
+  /** The last VISIBLE row emitted by one raw slot, when it has any. */
+  private lastVisibleEmittedAt(index: number): number | undefined {
+    let found: number | undefined
+    this.emitSlot(index, row => {
+      if (this.isVisible(this.items[row]!)) found = row
+    })
+    return found
+  }
+
+  /** The first VISIBLE row emitted by one raw slot, when it has any. */
+  private firstVisibleEmittedAt(index: number): number | undefined {
+    let found: number | undefined
+    this.emitSlot(index, row => {
+      if (!this.isVisible(this.items[row]!)) return false
+      found = row
+      return true
+    })
+    return found
+  }
+
+  /** Whether one raw slot blocks a displacement of this step's Tool rows: any
+   *  visible row that is not itself a same-side proven Tool of `(turn, step)`. */
+  private slotBlocksMove(
+    candidate: number,
+    turn: number,
+    step: number,
+    side: 'before' | 'after',
+  ): boolean {
+    let blocked = false
+    this.slotCheckCount += 1
+    this.emitSlot(candidate, row => {
+      if (!this.isVisible(this.items[row]!)) return false
+      const item = this.items[row]
+      if (item === undefined || item.kind !== 'tool' || item.callId === undefined || item.turn !== turn) {
+        blocked = true
+        return true
+      }
+      // ONLY a Tool proven on the SAME side may be crossed: a sibling proven on
+      // the opposite side is a visible boundary like any foreign row.
+      const sibling = this.toolRowEvidence(turn, step, item.callId)
+      if (sibling === undefined || sibling.index !== row || sibling.position !== side) {
+        blocked = true
+        return true
+      }
+      return false
+    })
+    return blocked
+  }
+
+  /** The raw index displayed immediately BEFORE `index` in the FINAL display
+   *  order. A DISPLACED row is emitted inside its anchor's slot, so its
+   *  predecessor is the previous visible row of that emission (its sibling in the
+   *  before/after list) or, at the start of the emission, the slot before the
+   *  anchor. */
+  private displayPredecessorOf(index: number): number | undefined {
+    const relation = this.laneDisplayByDisplaced.get(index)
+    if (relation !== undefined) {
+      const owned = this.laneDisplayByAnchor.get(relation.anchor)
+      if (owned !== undefined) {
+        const side = relation.position === 'before' ? owned.before : owned.after
+        // Scan the live list backwards from the O(1) position — no copy, no indexOf.
+        for (let at = this.positionOf(index, relation) - 1; at >= 0; at -= 1) {
+          const row = side[at]!
+          if (this.isVisible(this.items[row]!)) return row
+        }
+        if (relation.position === 'after') {
+          // The anchor itself (and its before list) precede an after-list row.
+          if (this.isVisible(this.items[relation.anchor]!)) return relation.anchor
+          for (let at = owned.before.length - 1; at >= 0; at -= 1) {
+            const row = owned.before[at]!
+            if (this.isVisible(this.items[row]!)) return row
+          }
+        }
+      }
+      return this.slotPredecessorOf(relation.anchor)
+    }
+    const own = this.laneDisplayByAnchor.get(index)
+    if (own !== undefined) {
+      for (let at = own.before.length - 1; at >= 0; at -= 1) {
+        const row = own.before[at]!
+        if (this.isVisible(this.items[row]!)) return row
+      }
+    }
+    return this.slotPredecessorOf(index)
+  }
+
+  /** The raw index displayed immediately AFTER `index` in the FINAL display
+   *  order (see {@link displayPredecessorOf} for the displaced-row rule). */
+  private displaySuccessorOf(index: number): number | undefined {
+    const relation = this.laneDisplayByDisplaced.get(index)
+    if (relation !== undefined) {
+      const owned = this.laneDisplayByAnchor.get(relation.anchor)
+      if (owned !== undefined) {
+        const side = relation.position === 'before' ? owned.before : owned.after
+        for (let at = this.positionOf(index, relation) + 1; at < side.length; at += 1) {
+          const row = side[at]
+          if (row !== undefined && this.isVisible(this.items[row]!)) return row
+        }
+        if (relation.position === 'before') {
+          // A before-list row is followed by the anchor and its after list.
+          if (this.isVisible(this.items[relation.anchor]!)) return relation.anchor
+          for (const row of owned.after) {
+            if (this.isVisible(this.items[row]!)) return row
+          }
+        }
+      }
+      return this.slotSuccessorOf(relation.anchor)
+    }
+    const own = this.laneDisplayByAnchor.get(index)
+    if (own !== undefined) {
+      for (const row of own.after) {
+        if (this.isVisible(this.items[row]!)) return row
+      }
+    }
+    return this.slotSuccessorOf(index)
+  }
+
+  /** The last VISIBLE row emitted by the raw slots before `index`. */
+  private slotPredecessorOf(index: number): number | undefined {
+    let candidate = index - 1
+    while (candidate >= 0) {
+      const visible = this.lastVisibleEmittedAt(candidate)
+      if (visible !== undefined) return visible
+      candidate -= 1
+    }
+    return undefined
+  }
+
+  /** The first VISIBLE row emitted by the raw slots after `index`. */
+  private slotSuccessorOf(index: number): number | undefined {
+    let candidate = index + 1
+    while (candidate < this.items.length) {
+      const visible = this.firstVisibleEmittedAt(candidate)
+      if (visible !== undefined) return visible
+      candidate += 1
+    }
+    return undefined
+  }
+
+  /** Re-sort the relation list owning `rawIndex` (a refreshed materialization
+   *  key can move the row inside its side even when the relation is unchanged). */
+  private resortAnchorSideOf(rawIndex: number): void {
+    const current = this.laneDisplayByDisplaced.get(rawIndex)
+    if (current === undefined) return
+    this.resortAnchorSide(current.anchor, current.position)
+  }
+
+  /** Sort one side of an anchor by the rows' own materialization evidence,
+   *  bumping the search revision only when the visible order really changed. */
+  private resortAnchorSide(anchor: number, position: 'before' | 'after'): void {
+    const owned = this.laneDisplayByAnchor.get(anchor)
+    if (owned === undefined) return
+    const list = position === 'before' ? owned.before : owned.after
+    const before = [...list]
+    this.sideSortOperationCount += 1
+    list.sort((left, right) => {
+      const a = this.displacedOrderOf(left)
+      const b = this.displacedOrderOf(right)
+      if (a.evidenced !== b.evidenced) return a.evidenced ? -1 : 1
+      return a.key - b.key || left - right
+    })
+    // Re-index the side: the neighbours need O(1) positions, and a stale
+    // `indexOf` per row was quadratic over a large displaced run.
+    for (let at = 0; at < list.length; at += 1) {
+      const row = list[at]!
+      const entry = this.laneDisplayByDisplaced.get(row)
+      if (entry !== undefined) entry.at = at
+    }
+    if (!list.some((row, at) => row !== before[at])) return
+    this.searchRevisionCounter += 1
+    // The visible order of this side changed, and every derived read-group fact
+    // follows the DISPLAY order: member order, representative, aggregated result
+    // and search corpus must be rebuilt (a bare revision bump would leave the
+    // group describing the OLD order).
+    this.scheduleDisplayRegroup(anchor)
+  }
+
+  /** Route a display-relation or visibility change into the grouping: while
+   *  hydrating the final rebuild covers it; live, only the LOCAL affected span is
+   *  re-grouped. */
+  private scheduleDisplayRegroup(rawIndex: number, alsoSeeds: number | readonly number[] = []): void {
+    const item = this.items[rawIndex]
+    if (item === undefined || !('turn' in item)) return
+    if (this.hydrating) {
+      // The final cold rebuild must run even when no read settled.
+      this.groupingDirty = true
+      return
+    }
+    const extra = typeof alsoSeeds === 'number' ? [alsoSeeds] : alsoSeeds
+    // Inside a coalesced convergence the seeds accumulate and ONE joint closure
+    // runs at the end, so a step with many Tool rows does not regroup N times.
+    if (this.pendingRegroupSeeds !== undefined) {
+      this.pendingRegroupSeeds.push(rawIndex, ...extra)
+      return
+    }
+    // ONE joint closure over every seed and the resulting envelope: the union of
+    // separately closed spans is not closed by itself.
+    this.regroupDisplaySpan(this.affectedSpanAround([rawIndex, ...extra]))
+  }
+
+  /** Run `body` while coalescing every display regroup it triggers into ONE
+   *  joint closure over all of the seeds. Nested calls keep the outer batch. */
+  private coalescingRegroups<T>(body: () => T): T {
+    if (this.pendingRegroupSeeds !== undefined) return body()
+    const seeds: number[] = []
+    this.pendingRegroupSeeds = seeds
+    try {
+      return body()
+    } finally {
+      this.pendingRegroupSeeds = undefined
+      if (seeds.length > 0) this.regroupDisplaySpan(this.affectedSpanAround(seeds))
+    }
+  }
+
+  private appendTailGrouping(index: number, previousIndex: number | undefined): boolean {
     if (index !== this.items.length - 1) return false
     const item = this.items[index]
     if (item === undefined || !TranscriptFolder.groupable(item)) return false
-    const previousIndex = index - 1
-    const previous = this.items[previousIndex]
-    if (previous === undefined || !TranscriptFolder.groupable(previous)) return true
+    const previous = previousIndex === undefined ? undefined : this.items[previousIndex]
+    // No display predecessor: this read IS the first visible row of its run.
+    if (previous === undefined || previousIndex === undefined) return true
+    if (!TranscriptFolder.groupable(previous)) return true
     // A group never crosses turns (post-F6 plan §10.2/§12.11): a next-turn
     // read starts its OWN run instead of extending the previous turn's
     // group/singleton, so every span's count and timing stay attributable.
@@ -1937,84 +2513,17 @@ export class TranscriptFolder {
       this.groupingDirty = true
       return
     }
-    if (this.appendTailGrouping(index)) return
-    this.reflowGrouping(index)
-  }
-
-  /**
-   * Rebuild the grouping of the groupable run containing `index` (bounded
-   * by non-groupable items). Called when an item BECOMES groupable (a read
-   * settles ok) or a groupable item is appended; the run is re-flowed into
-   * one merged card and any superseded group card is dropped.
-   */
-  private reflowGrouping(index: number): void {
-    const item = this.items[index]
-    if (item === undefined || !TranscriptFolder.groupable(item)) return
-    this.groupedTurnIndexDirty = true
-    // The re-flown run stays within the settled read's OWN turn: a group
-    // never crosses turns (post-F6 plan §10.2/§12.11).
-    const runTurn = item.turn
-     let start = index
-    while (start > 0 && TranscriptFolder.continuesReadRun(this.items[start - 1]!, runTurn)) start -= 1
-    let end = index
-    while (end + 1 < this.items.length && TranscriptFolder.continuesReadRun(this.items[end + 1]!, runTurn)) end += 1
-    // Detach the run's items from any existing groups (a settle can splice
-    // a previously-running item into the middle of the run).
-    for (let i = start; i <= end; i += 1) {
-      const group = this.groupOf.get(i)
-      if (group !== undefined) {
-        const members = this.groupMembers.get(group)
-        if (members !== undefined) {
-          const remaining = members.filter(member => member < start || member > end)
-          if (remaining.length === 0) {
-            // The whole group lives inside the run: its output card becomes
-            // `members.length` independent read cards, then the rebuild
-            // merges them into one card again — keep the counters in sync.
-            this.groupMembers.delete(group)
-            const spansTurns = this.groupMeta.get(group)?.spansTurns ?? this.crossTurn(members)
-            this.groupMeta.delete(group)
-            this.groupedToolCount += members.length - 1
-            if (spansTurns) this.crossTurnGroups -= 1
-          } else {
-            this.groupMembers.set(group, remaining)
-            const first = this.items[remaining[0]!]
-            if (first !== undefined && TranscriptFolder.groupable(first)) {
-              // The surviving group keeps only ITS remaining members'
-              // evidence: recompute the timing from `remaining` (or drop
-              // it) — never keep a span aggregated over members that left.
-              const spansTurns = this.crossTurn(remaining)
-              this.groupMeta.set(group, { firstTurn: first.turn, spansTurns })
-              this.mergedReadGroupTiming(group, remaining, spansTurns)
-            }
-          }
-        }
-        this.groupOf.delete(i)
-      }
+    // The cheap fast path is valid only when the settled read IS the display
+    // tail: the last raw row, not itself displaced. Its display predecessor is
+    // computed locally (displaced and invisible neighbours are skipped), so a
+    // turn carrying displacements still settles in O(local) work instead of
+    // re-walking the turn.
+    if (index === this.items.length - 1 && !this.laneDisplayByDisplaced.has(index)) {
+      if (this.appendTailGrouping(index, this.displayPredecessorOf(index))) return
     }
-    // After the detach, the run's items stand alone: mark their search
-    // entries dirty (the rebuilt group below re-marks the representative
-    // when the run still merges). The defensive reflow path is O(run) —
-    // rare, correctness-first.
-    this.markSearchRangeDirty(start, end)
-    if (start === end) return
-    // Rebuild the whole run as one group. The result is assembled with one
-    // final join so a long adjacent-read run stays linear in the cold path.
-    const built = this.makeReadGroup(start, end)
-    if (built === undefined) return
-    for (const member of built.members) this.groupOf.set(member, built.group)
-    this.groupMembers.set(built.group, built.members)
-    this.groupMeta.set(built.group, { firstTurn: built.firstTurn, spansTurns: built.spansTurns })
-       this.addGroupedTurn(built.group.turn)
-    // The whole run collapsed into one output card.
-    this.groupedToolCount -= built.members.length - 1
-    if (built.spansTurns) this.crossTurnGroups += 1
-    // The rebuilt group's representative may have MOVED (a late settle can
-    // extend the run backwards): mark the whole run dirty so the lazy
-    // normalization re-derives every entry from its current card.
-    this.markSearchRangeDirty(start, end)
+    this.regroupDisplaySpan(this.affectedSpanAround(index))
   }
 
-  /** Whether the members at these indices span more than one turn. */
   private crossTurn(members: readonly number[]): boolean {
     if (members.length <= 1) return false
     const first = this.items[members[0]!]!
@@ -2144,7 +2653,7 @@ export class TranscriptFolder {
     // A tombstoned anchor Assistant row can no longer honor a display
     // displacement — drop the mapping so the Thinking lane falls back to
     // its physical slot (the raw index stays the stable TranscriptItemId).
-    this.dropLaneDisplayFor(this.searchIndexByStepKey.get(`assistant:${key}`) ?? -1)
+    this.dropLaneAnchor(this.searchIndexByStepKey.get(`assistant:${key}`) ?? -1)
     const activity = this.activityByTurn.get(turn)
     const clearLatestVisibility = activity !== undefined
       && activity.lastAssistantStep === step
@@ -2292,6 +2801,7 @@ export class TranscriptFolder {
             }
           }
           this.syncLiveAssistantPresentation(turn, step, time)
+          this.recordAssistantVisibleTime(turn, step)
           // Accepted reasoning evidence is the Thinking row's honest end
           // candidate: remember it so a streamless settlement can close the
           // row at its real reasoning end instead of end-less (post-F6 plan
@@ -2368,6 +2878,29 @@ export class TranscriptFolder {
     if (text !== '') activity.lastAssistantStep = Math.max(activity.lastAssistantStep ?? -1, step)
     this.syncMessage(activity)
     activity.revision += 1
+  }
+
+  /** Record (never regress) the EARLIEST proven first-visible Conversation
+   * time on the step's assistant row. The sidecar is display-only: it tells a
+   * Work Activity where the Conversation boundary actually appeared, so a late
+   * durable settlement can never move that boundary later. `firstVisibleAt` is
+   * reply-text evidence (reasoning/tool-call chunks are excluded by
+   * `assistantChunkHasVisibleReply`), so no Thinking evidence is mistaken for
+   * the Conversation lane.
+   *
+   * A settlement whose embedded stream proves no reply-text time (streamless,
+   * or a stream without the Conversation lane) still proves ONE thing: a
+   * VISIBLE durable message became visible by its own settlement — the caller
+   * passes that `settlementTime` and it is used only when no earlier
+   * first-visible evidence exists (plan §5.2: "streamless 只能使用实际可证明的
+   * settlement 时间"). */
+  private recordAssistantVisibleTime(turn: number, step: number, settlementTime?: number): void {
+    const row = this.assistantEntries.get(stepKey(turn, step))
+    if (row === undefined) return
+    const at = this.activityByTurn.get(turn)?.firstVisibleAssistantTimes.get(step) ?? settlementTime
+    if (at === undefined) return
+    const known = transcriptTimingOf(row)
+    if (known === undefined || at < known.startedAt) setTranscriptTiming(row, pointTiming(at))
   }
 
   /** Project the current live block map without duplicating block-end text. */
@@ -2568,17 +3101,21 @@ export class TranscriptFolder {
   private recordPreparingDelta(turn: number, step: number, callId: string, index: number, time: number): void {
     const owner = `${turn}:${step}`
     if (callId !== '') {
+      // Keyed by the durable (turn, step, callId) identity: a call id reused by
+      // another step or turn must never occupy — or be blocked by — this step's
+      // own entry.
+      const key = toolCallKey(turn, step, callId)
       const fallbackKey = preparingFallbackKey(turn, step, index)
       const fallback = this.toolCallPreparingStarts.get(fallbackKey)
-      if (!this.toolCallPreparingStarts.has(callId)) {
-        this.toolCallPreparingStarts.set(callId, { at: fallback?.at ?? time, owner })
+      if (!this.toolCallPreparingStarts.has(key)) {
+        this.toolCallPreparingStarts.set(key, { at: fallback?.at ?? time, owner, authorized: true })
       }
       if (fallback !== undefined) this.toolCallPreparingStarts.delete(fallbackKey)
       return
     }
     const fallbackKey = preparingFallbackKey(turn, step, index)
     if (!this.toolCallPreparingStarts.has(fallbackKey)) {
-      this.toolCallPreparingStarts.set(fallbackKey, { at: time, owner })
+      this.toolCallPreparingStarts.set(fallbackKey, { at: time, owner, authorized: true })
     }
   }
 
@@ -2591,6 +3128,12 @@ export class TranscriptFolder {
     for (const [key, start] of this.toolCallPreparingStarts) {
       if (start.owner === owner) this.toolCallPreparingStarts.delete(key)
     }
+    // NOTE: the DECLARED membership (see `declaredToolCallsByStep`) is deliberately
+    // NOT cleared here. This helper resets a dead ATTEMPT's Preparing timers, while
+    // the declaration answers what the current PERMANENT successful settlement
+    // names — a step that merely COMPLETED (`step/end`, a retry) still owns its
+    // membership, and clearing it there made a later factual update converge
+    // differently between the live and cold placements.
   }
 
   /** Drop every preparing-start evidence of one turn (its `turn/end`). */
@@ -2599,18 +3142,82 @@ export class TranscriptFolder {
     for (const [key, start] of this.toolCallPreparingStarts) {
       if (start.owner.startsWith(ownerPrefix)) this.toolCallPreparingStarts.delete(key)
     }
+    // The TURN boundary ends the successful owner's declaration: a later turn owns
+    // its own membership, and a completed turn's facts are never re-derived.
+    const stepPrefix = `${turn}/`
+    for (const key of [...this.declaredToolCallsByStep.keys()]) {
+      if (key.startsWith(stepPrefix)) this.declaredToolCallsByStep.delete(key)
+    }
   }
 
   /** First-wins merge of one durable stream's tool-call preparing starts
    * into the folder-wide map, owned by the stream's own (turn, step)
    * (post-F6 plan §12.14). */
-  private absorbPreparingStarts(starts: ReadonlyMap<string, number>, turn: number, step: number): void {
+  private absorbPreparingStarts(
+    starts: ReadonlyMap<string, number>,
+    turn: number,
+    step: number,
+    allowNewRelations = true,
+  ): void {
     const owner = `${turn}:${step}`
-    for (const [key, at] of starts) {
-      if (!this.toolCallPreparingStarts.has(key)) {
-        this.toolCallPreparingStarts.set(key, { at, owner })
+    const refreshed: string[] = []
+    const touchedGroups = new Set<unknown>()
+    for (const [callId, at] of starts) {
+      const key = toolCallKey(turn, step, callId)
+      const cached = this.toolCallPreparingStarts.get(key)
+      // FIRST-WINS is wrong across settlements: a later settlement that proves an
+      // EARLIER Preparing time must replace the recorded one, otherwise a durable
+      // card materializing afterwards starts at the stale, later timestamp.
+      if (cached === undefined) this.toolCallPreparingStarts.set(key, { at, owner, authorized: allowNewRelations })
+      else if (at < cached.at) {
+        cached.at = at
+        cached.owner = owner
+        // A lower-authority refresh never WITHDRAWS an authorization the current
+        // owner already gave this id.
+        cached.authorized = cached.authorized || allowNewRelations
+      } else if (allowNewRelations && !cached.authorized) {
+        cached.authorized = true
       }
+      // The card may have materialized BEFORE its Preparing evidence became
+      // visible (a durable `tool/call` whose streamed arguments delta only
+      // arrives with the settlement). Its wall span must still start at its
+      // earliest authoritative evidence — otherwise the displayed elapsed time
+      // AND the display order disagree between live and cold.
+      const index = this.toolCardIndexOf.get(key)
+      const card = this.items[index ?? -1]
+      if (index === undefined || card === undefined || card.kind !== 'tool' || card.callId !== callId) continue
+      const timing = transcriptTimingOf(card)
+      if (timing === undefined || timing.startedAt <= at) continue
+      setTranscriptTiming(card, { ...timing, startedAt: at })
+      refreshed.push(callId)
+      const group = this.groupOf.get(index)
+      if (group !== undefined) touchedGroups.add(group)
     }
+    if (refreshed.length === 0) return
+    // ONE coalesced pass for the whole refresh: the merged groups' aggregated
+    // timing is re-derived once per group, the relations are re-applied without
+    // sorting, and each touched side is ordered exactly once. Refreshing N
+    // timestamps used to run N sorts and N regroups.
+    this.coalescingRegroups(() => {
+      for (const group of touchedGroups) {
+        const members = this.groupMembers.get(group as never)
+        if (members === undefined) continue
+        this.mergedReadGroupTiming(group as never, members, this.crossTurn(members))
+      }
+      const anchorIndex = this.searchIndexByStepKey.get(`assistant:${stepKey(turn, step)}`)
+      // The cohort is the refreshed ids PLUS every own-step Tool row the anchor
+      // already relates: restoring a slot can invalidate a SIBLING whose own
+      // timestamp did not change, and that sibling is not in `refreshed`.
+      const cohort = new Set<string>(refreshed)
+      const owned = anchorIndex === undefined ? undefined : this.laneDisplayByAnchor.get(anchorIndex)
+      for (const row of [...(owned?.before ?? []), ...(owned?.after ?? [])]) {
+        const item = this.items[row]
+        if (item !== undefined && item.kind === 'tool' && item.callId !== undefined) cohort.add(item.callId)
+      }
+      const touched = this.applyToolConvergenceBatch(turn, step, [...cohort], anchorIndex, allowNewRelations)
+      if (anchorIndex === undefined) return
+      for (const position of touched) this.resortAnchorSide(anchorIndex, position)
+    })
   }
 
   /** The durable lane-order authority for one settled assistant step: the
@@ -2625,6 +3232,375 @@ export class TranscriptFolder {
     blocks: readonly ContentBlock[],
   ): 'thinking' | 'assistant' | undefined {
     return projection?.firstLane ?? contentLaneOrder(blocks)
+  }
+
+  /** Converge the step's TOOL rows around its Assistant anchor from each row's
+   *  own materialization evidence.
+   *
+   * The durable settlement is appended at its own event index, while a Tool row
+   * materializes when its earliest evidence arrived (a Preparing delta or the
+   * durable `tool/call`). For a step whose first VISIBLE assistant text preceded
+   * a later Tool call, the cold fold therefore showed `Work[c1, c2] → Assistant`
+   * where the live fold showed `Work[c1] → Assistant → Work[c2]`.
+   *
+   * The evidence is per-step and identity-based: only the call ids the step's
+   * OWN durable stream requested (`toolCallStarts`) are considered, resolved
+   * through the recorded raw index and re-verified against the live card object.
+   * A Tool whose own start is unknown, or equal to the first visible text, gets
+   * NO displacement — an unprovable order is never guessed. Re-application is
+   * idempotent (the relation is only recorded when it actually changes). */
+  private convergeStepToolOrder(
+    turn: number,
+    step: number,
+    projection: AssistantStreamProjection | undefined,
+    messageBlocks: readonly ContentBlock[],
+  ): void {
+    // Candidate calls come from the step's OWN durable evidence: the ids its
+    // embedded stream named AND the tool-call blocks of its durable message (a
+    // block whose delta was not streamed still carries its step identity).
+    const callIds = new Set<string>(projection?.toolCallStarts.keys() ?? [])
+    for (const block of messageBlocks) {
+      if (block.type === 'tool-call') callIds.add(block.id)
+    }
+    // A relation whose call this step's durable evidence no longer names has no
+    // owner: drop it (never inherit it, never re-add it as a candidate).
+    const anchorIndex = this.searchIndexByStepKey.get(`assistant:${stepKey(turn, step)}`)
+    this.coalescingRegroups(() => {
+      // Expired relations are revoked inside the SAME batch: a step that owned
+      // hundreds of displaced rows must not regroup once per revoked relation.
+      const anchored = anchorIndex === undefined ? undefined : this.laneDisplayByAnchor.get(anchorIndex)
+      for (const displaced of anchored === undefined ? [] : [...anchored.before, ...anchored.after]) {
+        const row = this.items[displaced]
+        if (row === undefined || row.kind !== 'tool' || row.callId === undefined) continue
+        if (!callIds.has(row.callId)) this.dropLaneDisplacement(displaced)
+      }
+      // The batch DEFERS its own ordering: it collects the sides it touched and
+      // orders each of them once at the end (the existing Lane relation keeps its
+      // own single sort), so the sort count per settlement is constant instead of
+      // growing with the Tool count — and the final sort still sees every member
+      // of the side, Thinking included.
+      const touched = new Set<'before' | 'after'>()
+      const laneEmissionBefore = this.laneEmissionChanges
+      const candidates = [...callIds]
+      for (const position of this.applyToolConvergenceBatch(turn, step, candidates, anchorIndex)) {
+        touched.add(position)
+      }
+      if (anchorIndex !== undefined) {
+        for (const position of touched) this.resortAnchorSide(anchorIndex, position)
+        // ONLY when this batch actually adopted/relocated a Lane row (which
+        // changes what the anchor's slot emits) is a re-validation warranted: a
+        // plain Tool settlement must not scan the displacement map.
+        if (this.laneEmissionChanges !== laneEmissionBefore) {
+          this.revalidateToolDisplacementsAt(anchorIndex)
+        }
+      }
+    })
+    // The latest settlement is the step's authority: Preparing evidence for a
+    // call it no longer names must not survive to qualify a LATER durable call
+    // (a replacement that drops the call also drops its eligibility).
+    const prefix = `${stepKey(turn, step)}\u0000`
+    for (const cacheKey of [...this.toolCallPreparingStarts.keys()]) {
+      if (!cacheKey.startsWith(prefix)) continue
+      if (!callIds.has(cacheKey.slice(prefix.length))) this.toolCallPreparingStarts.delete(cacheKey)
+    }
+    // The durable REQUESTS (TOOL_NOT_STARTED compat) are the same authority: a
+    // replacement that stops naming a call removes its request too, so a later
+    // durable call cannot be qualified by the superseded block.
+    for (const requestKey of [...this.requestedToolCalls.keys()]) {
+      if (!requestKey.startsWith(prefix)) continue
+      if (!callIds.has(requestKey.slice(prefix.length))) this.requestedToolCalls.delete(requestKey)
+    }
+  }
+
+  /** Converge ONE Tool row against its step's Assistant anchor from the row's
+   *  own materialization evidence. Called from BOTH directions, because either
+   *  side can arrive last: the settlement converges the calls its own durable
+   *  stream named, and a `tool/call` whose durable event carries the step
+   *  converges itself against an Assistant row that already settled. */
+  /** The PURE evidence outcome for one Tool row of a step: which side of its
+   *  VISIBLE Conversation its own materialization time proves, when it is proven
+   *  at all. Applies nothing (the reachability guard asks this about siblings). */
+  private toolRowEvidence(
+    turn: number,
+    step: number,
+    callId: string,
+  ): { index: number; position: 'before' | 'after' } | undefined {
+    const key = stepKey(turn, step)
+    const assistantRow = this.assistantEntries.get(key)
+    const assistantIndex = this.searchIndexByStepKey.get(`assistant:${key}`)
+    if (assistantRow === undefined || assistantIndex === undefined || !this.isVisible(assistantRow)) return undefined
+    const visibleAt = this.activityByTurn.get(turn)?.firstVisibleAssistantTimes.get(step)
+    if (visibleAt === undefined) return undefined
+    const index = this.toolCardIndexOf.get(toolCallKey(turn, step, callId))
+    const card = index === undefined ? undefined : this.items[index]
+    if (index === undefined || card === undefined || card.kind !== 'tool' || card.callId !== callId) return undefined
+    if (card.turn !== turn) return undefined
+    const startedAt = transcriptTimingOf(card)?.startedAt
+    if (startedAt === undefined || startedAt === visibleAt) return undefined
+    return { index, position: startedAt > visibleAt ? 'after' : 'before' }
+  }
+
+  /** Apply ONE Tool convergence batch over `candidates`.
+   *
+   *  PASS 1 restores the OWN slot of every candidate this batch will NOT displace
+   *  — a known-side conformant row, or one whose side is UNPROVABLE (equal/absent
+   *  evidence, never guessed). The shared side reach is then taken on that FINAL
+   *  emission, and a move the reach REFUSES restores another slot, so the
+   *  decisions are re-derived once more from that state (a bounded 2-iteration
+   *  fixpoint — O(N) per pass, never a per-card raw walk). Both producers
+   *  (`assistant/message` settlement and the `assistant/attempt` refresh) go
+   *  through here so the snapshot cannot drift between them. */
+  private applyToolConvergenceBatch(
+    turn: number,
+    step: number,
+    candidates: readonly string[],
+    anchorIndex: number | undefined,
+    allowNewRelations = true,
+  ): Set<'before' | 'after'> {
+    const touched = new Set<'before' | 'after'>()
+    const restoreSlots = (): boolean => {
+      let restored = false
+      for (const callId of candidates) {
+        const evidence = this.toolRowEvidence(turn, step, callId)
+        const index = this.toolCardIndexOf.get(toolCallKey(turn, step, callId))
+        if (index === undefined || !this.laneDisplayByDisplaced.has(index)) continue
+        if (evidence !== undefined && !this.toolRowIsConformant(evidence, anchorIndex)) continue
+        this.dropLaneDisplacement(index)
+        restored = true
+      }
+      return restored
+    }
+    restoreSlots()
+    for (let pass = 0; pass < 2; pass += 1) {
+      const reach = anchorIndex === undefined ? undefined : this.sideReachFrom(turn, step, anchorIndex)
+      let dropped = false
+      for (const callId of candidates) {
+        const index = this.toolCardIndexOf.get(toolCallKey(turn, step, callId))
+        const hadRelation = index !== undefined && this.laneDisplayByDisplaced.has(index)
+        if (!allowNewRelations && !hadRelation && !this.isDeclaredToolCall(turn, step, callId)) {
+          // A lower-authority refresh re-derives facts ONLY for ids the CURRENT
+          // successful owner still declares: an expired id stays expired, while a
+          // still-declared one converges even when its raw placement differs
+          // between live and cold (an existing displacement is not authorization,
+          // and neither is the absence of one).
+          continue
+        }
+        const outcome = this.convergeToolRowAgainstAnchor(turn, step, callId, false, reach)
+        if (outcome !== undefined) touched.add(outcome.position)
+        if (hadRelation && (index === undefined || !this.laneDisplayByDisplaced.has(index))) dropped = true
+      }
+      if (!dropped || !restoreSlots()) break
+    }
+    return touched
+  }
+
+  /** Whether the current successful settlement still declares this Tool id for
+   *  the step (see `declaredToolCallsByStep`). */
+  private isDeclaredToolCall(turn: number, step: number, callId: string): boolean {
+    return this.declaredToolCallsByStep.get(stepKey(turn, step))?.has(callId) === true
+  }
+
+  /** Whether a proven Tool row already sits on the physical side its evidence
+   *  asks for (so it keeps its own slot and needs no relation). */
+  private toolRowIsConformant(
+    evidence: { index: number; position: 'before' | 'after' },
+    anchorIndex: number | undefined,
+  ): boolean {
+    if (anchorIndex === undefined) return false
+    return evidence.position === 'after' ? evidence.index > anchorIndex : evidence.index < anchorIndex
+  }
+
+  private convergeToolRowAgainstAnchor(
+    turn: number,
+    step: number,
+    callId: string,
+    resort = true,
+    reach?: Record<'before' | 'after', { backward: number; forward: number }>,
+  ): { index: number; position: 'before' | 'after' } | undefined {
+    const key = stepKey(turn, step)
+    const assistantRow = this.assistantEntries.get(key)
+    const assistantIndex = this.searchIndexByStepKey.get(`assistant:${key}`)
+    const index = this.toolCardIndexOf.get(toolCallKey(turn, step, callId))
+    const card = index === undefined ? undefined : this.items[index]
+    const stale = index !== undefined && card !== undefined && card.kind === 'tool' && card.callId === callId
+    // Only a PROVEN first-visible reply time is order evidence. The streamless
+    // settlement fallback (which exists so the Activity can still close) is
+    // deliberately NOT: without a stream there is no order authority, so no
+    // relation may be created — and an inherited one is dropped here.
+    const visibleAt = this.activityByTurn.get(turn)?.firstVisibleAssistantTimes.get(step)
+    // The anchor must be the CURRENTLY visible Conversation: a stream that once
+    // carried visible text does not make the settled row visible (an empty
+    // authoritative replacement hides it), and a hidden anchor may not order
+    // anything.
+    if (assistantRow === undefined || assistantIndex === undefined || visibleAt === undefined
+      || !this.isVisible(assistantRow)) {
+      if (stale) this.dropLaneDisplacement(index!)
+      return
+    }
+    if (index === undefined || card === undefined || card.kind !== 'tool' || card.callId !== callId) return
+    const startedAt = transcriptTimingOf(card)?.startedAt
+    if (startedAt === undefined || startedAt === visibleAt) {
+      // Unknown or equal evidence cannot prove which side came first.
+      this.dropLaneDisplacement(index)
+      return undefined
+    }
+    const shouldFollow = startedAt > visibleAt
+    const position: 'before' | 'after' = shouldFollow ? 'after' : 'before'
+    const sideReach = reach?.[position]
+    const reachable = sideReach === undefined
+      ? this.sideMoveIsReachable(index, assistantIndex, position, turn, step)
+      : (index < assistantIndex
+        ? assistantIndex - index <= sideReach.backward
+        : index - assistantIndex <= sideReach.forward)
+    if (!reachable) {
+      // Moving the row to the anchor's slot would cross a visible row of another
+      // step or lane: the conservative choice keeps every row where it is.
+      this.dropLaneDisplacement(index)
+      return { index, position }
+    }
+    if (shouldFollow === (index > assistantIndex)) {
+      // Already in the physical position the evidence asks for: it keeps its own
+      // slot (and any relation is dropped). The CALLER decides whether the whole
+      // side must be evidence-ordered instead (two or more proven siblings).
+      this.dropLaneDisplacement(index)
+      return { index, position }
+    }
+    // A lane row the lane authority already finds physically conformant keeps its
+    // physical slot and is therefore emitted AFTER the whole displaced list —
+    // which would put this Tool on the wrong side of it (a later reasoning lane
+    // row must follow a Tool that started before it). Adopt that row into the
+    // SAME relation list so the evidence order decides between them.
+    const thinkingIndex = this.searchIndexByStepKey.get(`thinking:${key}`)
+    // Only a lane row WITHOUT a relation is adopted: one the lane authority
+    // already placed (thinking-first) must keep that side.
+    if (thinkingIndex !== undefined && this.thinkingEntries.get(key) !== undefined
+      && !this.laneDisplayByDisplaced.has(thinkingIndex)) {
+      if (shouldFollow && thinkingIndex > assistantIndex) {
+        this.setLaneDisplay(thinkingIndex, assistantIndex, 'after')
+        this.laneEmissionChanges += 1
+      }
+      if (!shouldFollow && thinkingIndex < assistantIndex) {
+        this.setLaneDisplay(thinkingIndex, assistantIndex, 'before')
+        this.laneEmissionChanges += 1
+      }
+    }
+    this.setLaneDisplay(index, assistantIndex, position, resort, { turn, step })
+    return { index, position }
+  }
+
+  /** A change to what a raw slot EMITS — a Lane relation created, relocated or
+   *  tombstoned — can invalidate an existing Tool displacement that crosses that
+   *  slot, exactly like a visibility change does. Never applies the Tool guard to
+   *  the Lane relation itself. */
+  private revalidateToolDisplacementsAt(index: number | undefined): void {
+    if (index === undefined) return
+    this.coalescingRegroups(() => {
+      if (this.mayCoverExistingDisplacement(index)) this.revalidateRelationsCovering(index)
+    })
+  }
+
+  /** Fast exclusion for the visibility re-validation: does any recorded
+   *  displacement interval strictly contain `row`? */
+  private mayCoverExistingDisplacement(row: number): boolean {
+    // O(1) exclusion: an interval needs hi > row, so a row at or past the highest
+    // recorded end cannot be inside ANY interval — the normal serial tail case,
+    // which used to walk the whole map on every settlement.
+    // A removal only LOWERS the true maximum, so the recorded value is a safe
+    // upper bound even while dirty: exclude on it FIRST. A fresh tail row past it
+    // must never pay for a history rebuild it cannot need.
+    if (row >= this.maxToolDisplacementHi) return false
+    if (this.maxToolDisplacementHiDirty) {
+      this.maxToolDisplacementHiDirty = false
+      this.refreshMaxToolDisplacementHi()
+    }
+    if (row >= this.maxToolDisplacementHi) return false
+    this.displacementScanCount += 1
+    for (const [displaced, relation] of this.laneDisplayByDisplaced) {
+      // Only Tool displacements are ever revoked by this guard, so a Lane
+      // relation's interval is not part of the coverage question.
+      const item = this.items[displaced]
+      if (item === undefined || item.kind !== 'tool') continue
+      if (row > relation.lo && row < relation.hi) return true
+    }
+    return false
+  }
+
+  /** Recompute the running highest TOOL interval end after a removal. */
+  private refreshMaxToolDisplacementHi(): void {
+    let max = 0
+    for (const [displaced, relation] of this.laneDisplayByDisplaced) {
+      this.maxHiScanCount += 1
+      const item = this.items[displaced]
+      if (item === undefined || item.kind !== 'tool') continue
+      if (relation.hi > max) max = relation.hi
+    }
+    this.maxToolDisplacementHi = max
+  }
+
+  /** Re-validate every existing displacement whose interval covers `row`: a row
+   *  that just became (in)visible can invalidate a relation that was legal when
+   *  it was established. Bounded by the displaced-row map, never the transcript. */
+  private revalidateRelationsCovering(row: number): void {
+    for (const [displaced, relation] of [...this.laneDisplayByDisplaced]) {
+      if (row <= relation.lo || row >= relation.hi) continue
+      const owner = relation.owner
+      if (owner === undefined) continue
+      // ONLY Tool displacements are re-validated here: a Thinking/Assistant LANE
+      // relation is owned by the lane authority, and the Tool reachability guard
+      // (invisible rows plus same-step proven Tools) has no authority over it —
+      // applying it could push a Thinking row in front of its own Assistant.
+      const item = this.items[displaced]
+      if (item === undefined || item.kind !== 'tool') continue
+      if (this.sideMoveIsReachable(displaced, relation.anchor, relation.position, owner.turn, owner.step)) continue
+      this.dropLaneDisplacement(displaced)
+    }
+  }
+
+  /** How far a displacement may travel from the anchor's slot in each direction
+   *  before it would cross a visible row that is not a same-side proven Tool:
+   *  `backward`/`forward` are the counts of consecutive passable slots. Computed
+   *  ONCE per settlement batch (the per-row walk made a batch of N rows O(N²)). */
+  private sideReachFrom(
+    turn: number,
+    step: number,
+    anchorIndex: number,
+  ): Record<'before' | 'after', { backward: number; forward: number }> {
+    const reachFor = (side: 'before' | 'after'): { backward: number; forward: number } => {
+      let backward = 0
+      for (let candidate = anchorIndex - 1; candidate >= 0; candidate -= 1) {
+        if (this.slotBlocksMove(candidate, turn, step, side)) break
+        backward += 1
+      }
+      let forward = 0
+      for (let candidate = anchorIndex + 1; candidate < this.items.length; candidate += 1) {
+        if (this.slotBlocksMove(candidate, turn, step, side)) break
+        forward += 1
+      }
+      return { backward, forward }
+    }
+    return { before: reachFor('before'), after: reachFor('after') }
+  }
+
+  /** Whether the anchor's slot and `row` are connected through rows that may be
+   *  crossed: invisible rows, and this step's own Tool rows proven on the SAME
+   *  side. Any other visible row blocks the move, so a displacement can never
+   *  reorder an unrelated (other step/lane) row. */
+  private sideMoveIsReachable(
+    row: number,
+    anchorIndex: number,
+    position: 'before' | 'after',
+    turn: number,
+    step: number,
+  ): boolean {
+    // A displacement lifts the row out of its physical slot and emits it at the
+    // anchor's slot: it crosses every RAW slot in between, which is allowed only
+    // when none of them blocks the move (see `slotBlocksMove`).
+    const from = Math.min(row, anchorIndex) + 1
+    const to = Math.max(row, anchorIndex) - 1
+    for (let candidate = from; candidate <= to; candidate += 1) {
+      if (this.slotBlocksMove(candidate, turn, step, position)) return false
+    }
+    return true
   }
 
   /** Converge one step's Thinking/Assistant rows to its stored lane
@@ -2647,34 +3623,24 @@ export class TranscriptFolder {
     const assistantIndex = this.searchIndexByStepKey.get(`assistant:${key}`)
     if (thinkingIndex === undefined || assistantIndex === undefined) return
     if ((thinkingIndex < assistantIndex) === (authority === 'thinking')) {
-      // Conformant: drop stale mappings from an earlier flipped authority.
-      this.dropLaneDisplayFor(thinkingIndex)
-      this.dropLaneDisplayFor(assistantIndex)
+      // Conformant: drop a stale mapping from an earlier flipped authority —
+      // ONLY the Thinking relation, never the step's Tool displacements that
+      // share this Assistant anchor.
+      this.dropLaneDisplacement(thinkingIndex)
+      // Dropping the relation restores the Thinking row's OWN physical slot as a
+      // visible emitter, so that slot has to be re-validated too — not only the
+      // anchor (a Tool displacement crossing the restored slot stays invalid).
+      this.revalidateToolDisplacementsAt(assistantIndex)
+      this.revalidateToolDisplacementsAt(thinkingIndex)
       return
     }
     // The Assistant row anchors the step; the Thinking row is displayed
     // immediately before (thinking-first) or after (assistant-first) it.
-    this.setLaneDisplay(thinkingIndex, assistantIndex, authority === 'thinking' ? 'before' : 'after')
-  }
-
-  /** Drop any lane display mapping that references one raw item index (as
-   * displaced row or as anchor). Called when a lane row is tombstoned so a
-   * stale mapping can never strand the surviving row's display slot. Bumps
-   * the search revision only when a mapping was actually removed. */
-  private dropLaneDisplayFor(index: number): void {
-    const entry = this.laneDisplayByDisplaced.get(index)
-    if (entry !== undefined) {
-      this.laneDisplayByDisplaced.delete(index)
-      this.laneDisplayByAnchor.delete(entry.anchor)
-      this.searchRevisionCounter += 1
-      return
-    }
-    const displaced = this.laneDisplayByAnchor.get(index)
-    if (displaced !== undefined) {
-      this.laneDisplayByAnchor.delete(index)
-      this.laneDisplayByDisplaced.delete(displaced)
-      this.searchRevisionCounter += 1
-    }
+    this.setLaneDisplay(thinkingIndex, assistantIndex, authority === 'thinking' ? 'before' : 'after', true, { turn, step })
+    // Displacing the row EMPTIES its own physical slot and fills the anchor's:
+    // both ends can invalidate a covering Tool displacement.
+    this.revalidateToolDisplacementsAt(assistantIndex)
+    this.revalidateToolDisplacementsAt(thinkingIndex)
   }
 
   /** THE single display-order traversal of the raw items: raw physical
@@ -2690,19 +3656,27 @@ export class TranscriptFolder {
    * pair together; an arbitrary raw slice could split one. */
   private *displayOrderedRawIds(start = 0, end: number = this.items.length - 1): Iterable<number> {
     for (let index = start; index <= end; index += 1) {
-      // A displaced lane row is emitted at its anchor below, never at its
-      // physical slot.
+      // A displaced row is emitted at its anchor below, never at its physical
+      // slot (so every visible raw index is yielded exactly once).
       if (this.laneDisplayByDisplaced.has(index)) continue
-      const displaced = this.laneDisplayByAnchor.get(index)
-      if (displaced === undefined) {
+      const owned = this.laneDisplayByAnchor.get(index)
+      if (owned === undefined) {
         yield index
         continue
       }
-      const placement = this.laneDisplayByDisplaced.get(displaced)
-      if (placement?.position === 'before') yield displaced
+      for (const displaced of owned.before) yield displaced
       yield index
-      if (placement?.position === 'after') yield displaced
+      for (const displaced of owned.after) yield displaced
     }
+  }
+
+  /** The ordering key of one displaced row: its own proven materialization
+   *  time when it has one (evidence), else its raw index as a stable proxy that
+   *  never interleaves with evidenced rows. */
+  private displacedOrderOf(rawIndex: number): { evidenced: boolean; key: number } {
+    const item = this.items[rawIndex]
+    const startedAt = item === undefined ? undefined : transcriptTimingOf(item)?.startedAt
+    return startedAt === undefined ? { evidenced: false, key: rawIndex } : { evidenced: true, key: startedAt }
   }
 
   /** The only mutation entry for the lane display maps: records the pair
@@ -2712,11 +3686,105 @@ export class TranscriptFolder {
    * display-relation change alters the order matches are emitted in, so
    * refinement against previous matches must be invalidated even when no
    * searchable text changed. */
-  private setLaneDisplay(displaced: number, anchor: number, position: 'before' | 'after'): void {
+  private setLaneDisplay(
+    displaced: number,
+    anchor: number,
+    position: 'before' | 'after',
+    resort = true,
+    owner?: { turn: number; step: number },
+  ): void {
     const current = this.laneDisplayByDisplaced.get(displaced)
-    if (current?.anchor === anchor && current.position === position) return
-    this.laneDisplayByDisplaced.set(displaced, { anchor, position })
-    this.laneDisplayByAnchor.set(anchor, displaced)
+    if (current?.anchor === anchor && current.position === position) {
+      // The relation is unchanged, but a refreshed materialization key can move
+      // this row within its side: re-sort without recording a new relation
+      // (bulk callers collect every member first and sort once instead).
+      if (resort) this.resortAnchorSide(anchor, position)
+      return
+    }
+    const previousAnchor = current?.anchor
+    if (current !== undefined) this.removeDisplacedRelation(displaced, current)
+    const lo = Math.min(displaced, anchor)
+    const hi = Math.max(displaced, anchor)
+    this.laneDisplayByDisplaced.set(displaced, {
+      anchor,
+      position,
+      ...(owner === undefined ? {} : { owner }),
+      lo,
+      hi,
+      at: -1,
+    })
+    if (this.items[displaced]?.kind === 'tool' && hi > this.maxToolDisplacementHi) this.maxToolDisplacementHi = hi
+    const owned = this.laneDisplayByAnchor.get(anchor) ?? { before: [], after: [] }
+    this.laneDisplayByAnchor.set(anchor, owned)
+    const list = position === 'before' ? owned.before : owned.after
+    list.push(displaced)
+    const entry = this.laneDisplayByDisplaced.get(displaced)
+    if (entry !== undefined) entry.at = list.length - 1
+    // Ordering goes through `resortAnchorSide` (which the diagnostic counts):
+    // the immediate path sorts now, a bulk caller passes `resort = false` and
+    // orders each touched side ONCE after its batch.
+    if (resort) this.resortAnchorSide(anchor, position)
+    this.searchRevisionCounter += 1
+    // A real display-relation change can split or join a read run: the ONE
+    // adjacency definition must follow it — at the NEW anchor AND at the old one
+    // when the relation was replaced.
+    this.scheduleDisplayRegroup(anchor)
+    if (previousAnchor !== undefined && previousAnchor !== anchor) this.scheduleDisplayRegroup(previousAnchor)
+  }
+
+  /** Remove ONE displaced row's relation, leaving the anchor's OTHER displaced
+   *  rows (its Thinking lane row, the step's other Tool rows) untouched. */
+  private dropLaneDisplacement(displaced: number): void {
+    const current = this.laneDisplayByDisplaced.get(displaced)
+    if (current === undefined) return
+    const anchor = current.anchor
+    this.removeDisplacedRelation(displaced, current)
+    // A departure changes the neighborhood of BOTH endpoints, and the relation
+    // that used to link them is gone: seed the regroup with each of them.
+    this.scheduleDisplayRegroup(displaced, anchor)
+  }
+
+  /** Remove EVERY relation anchored at `anchor` — its displaced rows fall back
+   *  to their physical slots. Used when the anchor row itself is tombstoned. */
+  private dropLaneAnchor(anchor: number): void {
+    const owned = this.laneDisplayByAnchor.get(anchor)
+    if (owned === undefined) return
+    const departing = [...owned.before, ...owned.after]
+    for (const displaced of departing) {
+      const relation = this.laneDisplayByDisplaced.get(displaced)
+      this.laneDisplayByDisplaced.delete(displaced)
+      // Route the departure through the same TOOL bound maintenance as a single
+      // drop: a stale-high maximum stays safe, but the bound must never be left
+      // too LOW for a surviving Tool relation.
+      const item = this.items[displaced]
+      if (relation !== undefined && item !== undefined && item.kind === 'tool'
+        && relation.hi >= this.maxToolDisplacementHi) {
+        this.maxToolDisplacementHiDirty = true
+      }
+    }
+    this.laneDisplayByAnchor.delete(anchor)
+    this.searchRevisionCounter += 1
+    // The anchor AND every row that left it all change neighborhood now.
+    this.scheduleDisplayRegroup(anchor, departing)
+  }
+
+  /** The shared inverse-map removal: drop the forward record, the anchor's list
+   *  entry and (when it was the last one) the anchor record itself. */
+  private removeDisplacedRelation(displaced: number, current: { anchor: number; position: 'before' | 'after'; lo: number; hi: number }): void {
+    this.laneDisplayByDisplaced.delete(displaced)
+    // Do NOT recompute per removal (a bulk expiry would scan the map M times):
+    // mark it dirty and let the next coverage query rebuild it ONCE.
+    const removed = this.items[displaced]
+    if (removed !== undefined && removed.kind === 'tool' && current.hi >= this.maxToolDisplacementHi) {
+      this.maxToolDisplacementHiDirty = true
+    }
+    const owned = this.laneDisplayByAnchor.get(current.anchor)
+    if (owned !== undefined) {
+      const list = current.position === 'before' ? owned.before : owned.after
+      const at = list.indexOf(displaced)
+      if (at !== -1) list.splice(at, 1)
+      if (owned.before.length === 0 && owned.after.length === 0) this.laneDisplayByAnchor.delete(current.anchor)
+    }
     this.searchRevisionCounter += 1
   }
 
@@ -3174,7 +4242,7 @@ export class TranscriptFolder {
 
   /** The search-projection revision: bumped on EVERY projection change —
    * entry mutations (append, settlement, group reflow) and lane
-   * display-order mutations (`setLaneDisplay`/`dropLaneDisplayFor`). The
+   * display-order mutations (`setLaneDisplay`/`dropLaneDisplacement`/`dropLaneAnchor`). The
    * runner's query refinement must never reuse previous candidates across
    * a revision — the projection may hold new matches OR a new match order
    * the old candidate list cannot see. */
@@ -3293,6 +4361,15 @@ export class TranscriptFolder {
     fullScans: number
     refinedScans: number
     refinedCandidates: number
+    lastRegroupSpanRows: number
+    lastRegroupMemberVisits: number
+    emittedRowVisits: number
+    displacementScans: number
+    maxHiScans: number
+    positionRebuilds: number
+    slotChecks: number
+    regroupOperations: number
+    sideSortOperations: number
   } {
     return {
       entries: this.searchEntries.length,
@@ -3302,6 +4379,15 @@ export class TranscriptFolder {
       fullScans: this.searchFullScanCount,
       refinedScans: this.searchRefineCount,
       refinedCandidates: this.searchRefineCandidates,
+      lastRegroupSpanRows: this.lastRegroupSpanRows,
+      lastRegroupMemberVisits: this.lastRegroupMemberVisits,
+      emittedRowVisits: this.emittedRowVisits,
+      displacementScans: this.displacementScanCount,
+      maxHiScans: this.maxHiScanCount,
+      positionRebuilds: this.positionRebuildCount,
+      slotChecks: this.slotCheckCount,
+      regroupOperations: this.regroupOperationCount,
+      sideSortOperations: this.sideSortOperationCount,
     }
   }
 
@@ -3333,18 +4419,26 @@ export class TranscriptFolder {
     const key = stepKey(turn, step)
     const entry = this.thinkingEntries.get(key)
     if (entry === undefined) return
-    // A tombstoned lane row can no longer honor a display displacement —
-    // drop the mapping so the surviving lane falls back to its physical
-    // slot (the raw index stays the stable TranscriptItemId).
-    this.dropLaneDisplayFor(this.searchIndexByStepKey.get(`thinking:${key}`) ?? -1)
-    entry.text = ''
-    this.closeThinking(entry)
-    this.thinkingEntries.delete(key)
+    const index = this.searchIndexByStepKey.get(`thinking:${key}`)
+    const formerAnchor = index === undefined ? undefined : this.laneDisplayByDisplaced.get(index)?.anchor
+    // The row becomes invisible FIRST: visibility is display adjacency, so the
+    // grouping must be re-derived from the FINAL state — a hidden row is not a
+    // boundary, and the two reads it separated may merge.
     if (!this.hiddenThinkingEntries.has(entry)) {
       this.hiddenThinkingEntries.add(entry)
       this.markStreamingEntryDirty(`thinking:${key}`)
       this.removeGroupedTurn(entry.turn)
     }
+    // A tombstoned lane row can no longer honor a display displacement —
+    // drop the mapping so the surviving lane falls back to its physical
+    // slot (the raw index stays the stable TranscriptItemId).
+    this.dropLaneDisplacement(index ?? -1)
+    entry.text = ''
+    this.closeThinking(entry)
+    this.thinkingEntries.delete(key)
+    if (index !== undefined) this.scheduleDisplayRegroup(index)
+    this.revalidateToolDisplacementsAt(index)
+    this.revalidateToolDisplacementsAt(formerAnchor)
   }
 
   /** Reset same-step presentation and first-visible boundary at the scheduled
@@ -3428,7 +4522,7 @@ export class TranscriptFolder {
    * so a resumed session still shows its compaction records.
    */
   private applyCompactionEvent(
-    event: { type: string; data: Record<string, unknown>; seq?: unknown },
+    event: { type: string; data: Record<string, unknown>; seq?: unknown; time: number },
     kind: string,
   ): void {
     const data = event.data as { compactionId?: unknown } & Record<string, unknown>
@@ -3448,8 +4542,16 @@ export class TranscriptFolder {
     const compactionId = typeof data.compactionId === 'string' ? data.compactionId : undefined
     let index = compactionId === undefined ? undefined : this.compacting.get(compactionId)
     if (index === undefined) {
-      this.appendItem({ kind: 'compaction', turn: this.currentTurn, text: '', items: 0, tokens: 0, running: true })
+      const created: Extract<TranscriptMessage, { kind: 'compaction' }> = {
+        kind: 'compaction', turn: this.currentTurn, text: '', items: 0, tokens: 0, running: true,
+      }
+      this.appendItem(created)
       index = this.items.length - 1
+      // The compaction row's authoritative first-visible time closes any
+      // preceding Activity at the moment the checkpoint appeared (the row is a
+      // Context boundary; the point sidecar is display-only and never enters
+      // the Process member walk).
+      setTranscriptTiming(created, pointTiming(event.time))
       if (compactionId !== undefined) this.compacting.set(compactionId, index)
     }
     const entry = this.items[index]
@@ -3674,7 +4776,7 @@ export class TranscriptFolder {
       return
     }
     if (kind === 'compaction/start' || kind === 'compaction/summary' || kind === 'compaction/end' || kind === 'session/end-seed') {
-      this.applyCompactionEvent(event as { type: string; data: Record<string, unknown>; seq?: unknown }, kind)
+      this.applyCompactionEvent(event as { type: string; data: Record<string, unknown>; seq?: unknown; time: number }, kind)
       return
     }
     if (kind === 'llm/retry-started') {
@@ -3711,7 +4813,10 @@ export class TranscriptFolder {
       // One durable stream projection per settlement: lane order, restored
       // reasoning and usage come from the same pass (plan §4.4/§12.5).
       const projection = this.assistantStreamProjection(stream, data.turn, data.step)
-      this.absorbPreparingStarts(projection.toolCallStarts, data.turn, data.step)
+      // A late attempt on an ALREADY-SETTLED step keeps its independent timing
+      // facts but has no authority over display membership: it may revoke an
+      // invalid relation, never resurrect an id the current message expired.
+      this.absorbPreparingStarts(projection.toolCallStarts, data.turn, data.step, !alreadySettled)
       if (!alreadySettled) {
         // Store/refresh the step's lane authority from the attempt; a later
         // message settlement (higher authority) overwrites it.
@@ -3768,10 +4873,6 @@ export class TranscriptFolder {
           }
         }
         this.usage.onStepStart(event.data.turn, event.data.step)
-        // Owner lifecycle: the step is now open (plan §5.1). Guarded by the
-        // same replay fence as the usage accounting — a late step/start
-        // after turn/end must not reopen the step for owner capture.
-        this.workflow.onStepStart(event.data.turn, event.data.step)
         const candidate = activity.messageCandidate
         if (candidate !== undefined && candidate.step < event.data.step) {
           this.confirmMessageCandidate(activity)
@@ -3798,10 +4899,6 @@ export class TranscriptFolder {
         this.clearPreparingStartsForStep(event.data.turn, event.data.step)
         this.usage.onStepEnd(event.data.turn, event.data.step)
         this.syncUsage(activity)
-        // Owner lifecycle: the step closed — clear the matching open step
-        // and project interrupted for step-owned Workflow runs without a
-        // terminal fact (plan §5.1/§5.3).
-        this.workflow.onStepEnd(event.data.turn, event.data.step)
         break
       }
       case 'turn/start': {
@@ -3829,7 +4926,6 @@ export class TranscriptFolder {
         activity.reason = undefined
         if (event.data.turn === this.currentTurn) {
           this.openTurn = event.data.turn
-          this.workflow.onTurnStart(event.data.turn)
         }
         activity.revision += 1
         break
@@ -3857,6 +4953,18 @@ export class TranscriptFolder {
         // foreign log that records a null/undefined/non-object source folds
         // as standalone injected Context instead of crashing the whole fold.
         const sourcePresentation = contextPresentation(event.data.source)
+        // Narrow Working delivery provenance: a producer-declared tool-jobs
+        // Notice claimed from the SAME turn's next-step inbox is the one
+        // Context the presentation may carry with that turn's Work. It is
+        // derived ONLY from the durable insert/claim identity chain above (no
+        // Agent.status sampling, no summary/wording inference); next-turn
+        // wakeups, foreign/legacy logs and every other producer stay absent
+        // and therefore fail open as independent Context.
+        const isWorkingToolJobsNotice = wasClaimedFromNextStep === true
+          && claimedIdentity !== undefined
+          && claimedIdentity.insertionTurn === this.currentTurn
+          && sourcePresentation.sourceKind === 'tool-jobs'
+          && sourcePresentation.form === 'notice'
         if (sourcePresentation.sourceKind === 'user') {
           if (!userBlocksVisibleNow(blocks)) break
           const activity = this.activityFor(this.currentTurn)
@@ -3870,13 +4978,19 @@ export class TranscriptFolder {
                && firstVisible < claimedIdentity.insertionTime) this.commitPreSteerAnswer(activity)
             else if (!isMidTurnSteer) activity.pendingPreSteerAnswerStep = undefined
           }
-          this.appendItem({
+          const userRow: Extract<TranscriptMessage, { kind: 'user' }> = {
             kind: 'user',
             turn: this.currentTurn,
             text,
             content: blocks,
             ...(isMidTurnSteer ? { steer: true as const } : {}),
-          })
+          }
+          this.appendItem(userRow)
+          // The Conversation boundary's OWN first-actually-visible time: the
+          // authoritative event time, never a later settlement/arrival. It only
+          // tells an Activity where to close — the row's semantic class is
+          // untouched and the point sidecar never joins a Work span.
+          setTranscriptTiming(userRow, pointTiming(event.time))
         } else {
           if (text === '') break
           // Injected context: name the producer the way the Web row does
@@ -3885,7 +4999,7 @@ export class TranscriptFolder {
           // live icon-style switch repaints already-folded cards.
           const provenance = contextProvenance(event.data.source)
           const summary = contextSummary(event.data.source)
-          this.appendItem({
+          const contextRow: Extract<TranscriptMessage, { kind: 'system' }> = {
             kind: 'system',
             turn: this.currentTurn,
             text,
@@ -3898,9 +5012,18 @@ export class TranscriptFolder {
             context: true as const,
             // Presentation-only provenance (form/kind/sender) for the
             // form-aware Context roles Compact and Focus present. The
-            // semantic marker above stays the surfaced authority.
-            contextPresentation: sourcePresentation,
-          })
+            // semantic marker above stays the surfaced authority. The narrow
+            // same-turn next-step flag is added only for a proven Working
+            // tool-jobs Notice (see above); it never changes the source facts.
+            contextPresentation: isWorkingToolJobsNotice
+              ? { ...sourcePresentation, sameTurnNextStep: true as const }
+              : sourcePresentation,
+          }
+          this.appendItem(contextRow)
+          // The Context boundary's own first-visible time (the same
+          // authoritative event time): Work B starts from its own members, so
+          // this only freezes the preceding Activity.
+          setTranscriptTiming(contextRow, pointTiming(event.time))
           // Focus aggregation: injected context (skill-invocation,
           // skill-catalog, system reminders) is orchestration, NOT one of
           // the three process slots — it never enters Think/Message/Tool
@@ -3930,7 +5053,11 @@ export class TranscriptFolder {
         const projection = event.data.stream !== undefined && event.data.stream.length > 0
           ? this.assistantStreamProjection(event.data.stream, event.data.turn, event.data.step)
           : undefined
-        if (projection !== undefined) this.absorbPreparingStarts(projection.toolCallStarts, event.data.turn, event.data.step)
+        if (projection !== undefined) {
+          // A durable assistant/message IS the step's membership authority, so it
+          // may (re)establish relations regardless of an earlier settlement.
+          this.absorbPreparingStarts(projection.toolCallStarts, event.data.turn, event.data.step, true)
+        }
         const messageUsage = event.data.usage ?? projection?.usage
         const alreadySettled = activity.settledSteps.has(event.data.step)
         const messageBlocks = event.data.message.content
@@ -3942,12 +5069,19 @@ export class TranscriptFolder {
         // display text, never the embedded stream.
         for (const block of messageBlocks) {
           if (block.type !== 'tool-call') continue
-          this.requestedToolCalls.set(block.id, {
+          this.requestedToolCalls.set(toolCallKey(event.data.turn, event.data.step, block.id), {
             turn: event.data.turn,
             step: event.data.step,
             name: block.name,
           })
         }
+        // The settlement REPLACES this step's declared membership: a late
+        // lower-authority refresh may only re-derive facts for ids the current
+        // successful owner still names.
+        this.declaredToolCallsByStep.set(key, new Set([
+          ...(projection?.toolCallStarts.keys() ?? []),
+          ...messageBlocks.flatMap(block => block.type === 'tool-call' ? [block.id] : []),
+        ]))
         const firstVisible = projection?.firstVisibleAt
         if (firstVisible === undefined) activity.firstVisibleAssistantTimes.delete(event.data.step)
         else activity.firstVisibleAssistantTimes.set(event.data.step, firstVisible)
@@ -4002,6 +5136,17 @@ export class TranscriptFolder {
         }
         const settledEntry = this.assistantEntries.get(key)
         if (settledEntry !== undefined) this.syncAssistantVisibility(event.data.turn, event.data.step, settledEntry, wasVisible, false)
+        // The durable settlement re-affirms the SAME boundary the live lane
+        // recorded (a cold hydration has only this evidence); the earliest
+        // proven time wins, so a replacement settlement never regresses it. A
+        // VISIBLE streamless settlement contributes its own settlement time as
+        // the last provable boundary — an invisible one proves no Conversation
+        // row and contributes nothing.
+        this.recordAssistantVisibleTime(
+          event.data.turn,
+          event.data.step,
+          settledEntry !== undefined && this.isVisible(settledEntry) ? event.time : undefined,
+        )
         // The step is complete: its thinking entry stops streaming and leaves
         // the open-lifecycle index, so a later turn/end never revisits it.
         // On a COLD replay no live reasoning deltas ever arrived — the
@@ -4018,6 +5163,9 @@ export class TranscriptFolder {
         if (alreadySettled || !thinkingRowPreExisting) {
           this.convergeStepLaneOrder(event.data.turn, event.data.step)
         }
+        // Converge this step's Tool rows around the Assistant anchor from the
+        // SAME durable stream evidence (idempotent on repeated settlements).
+        this.convergeStepToolOrder(event.data.turn, event.data.step, projection, messageBlocks)
         // Focus aggregation: the settled assistant text OVERWRITES the
         // candidate's text (authoritative — plan §5.4) but does NOT decide
         // whether it is the final answer; the candidate keeps its step
@@ -4102,11 +5250,15 @@ export class TranscriptFolder {
       }
       case 'tool/call': {
         const key = event.data.callId
+        // Read the durable request identity BEFORE this branch consumes it: it is
+        // this call's ownership proof for the reverse convergence direction.
+        const requestKey = toolCallKey(event.data.turn, event.data.step, key)
+        const requestedForStep = this.requestedToolCalls.get(requestKey)
         this.callNames.set(key, event.data.name)
         // The request started: its identity is no longer unresolved. A
         // later TOOL_NOT_STARTED-coded result for this id would be a
         // malformed contradiction, not a not-started request.
-        this.requestedToolCalls.delete(key)
+        this.requestedToolCalls.delete(requestKey)
         // The call's OWN turn (event.data.turn) — never this.currentTurn:
         // a turn-start-less replay fragment must still attribute the call
         // to the right turn (review finding).
@@ -4128,8 +5280,17 @@ export class TranscriptFolder {
         // evidence: the first streamed arguments delta when the call was
         // preparing, else the tool/call event (post-F6 plan §12.7/§12.14 —
         // never a Preparing → durable elapsed reset).
-        const preparingStart = this.toolCallPreparingStarts.get(key)
-        this.toolCallPreparingStarts.delete(key)
+        // The cache key IS the durable (turn, step, callId) identity, so a call id
+        // reused by another step or turn can neither supply nor block this card's
+        // Preparing evidence.
+        const preparingKey = toolCallKey(callTurn, event.data.step, key)
+        const preparingStart = this.toolCallPreparingStarts.get(preparingKey)
+        // ONLY an AUTHORIZED record proves the stream declared this call: a late
+        // lower-authority attempt may still contribute its timing below, but mere
+        // cache presence must never resurrect ownership the current successful
+        // message expired.
+        const provedByStream = preparingStart?.authorized === true
+        if (preparingStart !== undefined) this.toolCallPreparingStarts.delete(preparingKey)
         setTranscriptTiming(card, {
           startedAt: preparingStart === undefined ? event.time : Math.min(preparingStart.at, event.time),
           running: true,
@@ -4140,6 +5301,20 @@ export class TranscriptFolder {
         // non-completed activity for the turn).
         if (this.activityByTurn.get(callTurn)?.completed === true) markPostTurnReplayEvidence(card)
         this.appendItem(card)
+        // Long-lived identity for the display-order convergence: the card's raw
+        // index by call id (its object identity is re-verified before use).
+        // `pendingCalls` cannot serve here — it is deleted once the call
+        // settles.
+        this.toolCardIndexOf.set(toolCallKey(callTurn, event.data.step, key), this.items.length - 1)
+        // The durable payload carries this call's OWN step: converge the row
+        // against a step Assistant row that settled BEFORE this call arrived —
+        // the mirror direction of the settlement-side convergence (either side
+        // can be the one that arrives last). Only a call this step's OWN evidence
+        // owns may be reordered: a streamed Preparing delta for THIS (turn, step)
+        // or a durable message block that requested it.
+        if (provedByStream || requestedForStep !== undefined) {
+          this.convergeToolRowAgainstAnchor(callTurn, event.data.step, key)
+        }
         this.pendingCalls.set(key, {
           name: event.data.name,
           args: event.data.arguments,
@@ -4198,7 +5373,11 @@ export class TranscriptFolder {
         // tool/call can be a not-started recovery (the `pending ===
         // undefined` guard keeps a malformed contradictory log from
         // rewriting an actually observed call as not started).
-        const notStartedRequest = pending === undefined ? this.requestedToolCalls.get(key) : undefined
+        // The result's OWN step keys the request: a request another step made for
+        // the same call id is never this result's authority.
+        const notStartedRequest = pending === undefined
+          ? this.requestedToolCalls.get(toolCallKey(event.data.turn, event.data.step, key))
+          : undefined
         const name = this.callNames.get(key) ?? 'tool'
         const text = textOf(message.content)
         const status = message.isError === true ? 'error' : 'ok'
@@ -4209,7 +5388,7 @@ export class TranscriptFolder {
         const turn = pending?.turn ?? event.data.turn
         this.pendingCalls.delete(key)
         this.callNames.delete(key)
-        this.requestedToolCalls.delete(key)
+        this.requestedToolCalls.delete(toolCallKey(event.data.turn, event.data.step, key))
         if (pending !== undefined) {
           // The call's own running card: parallel same-name calls pair
           // correctly because the card is keyed by callId, not by name.
@@ -4384,15 +5563,6 @@ export class TranscriptFolder {
         // synthetic cards or re-settle the activity (review finding).
         const endTurn = event.data.turn
         if (this.openTurn === endTurn) this.openTurn = undefined
-        // Owner lifecycle: the turn closed — a still-open step of this turn
-        // must not leak into the next turn-less/session-level segment (plan
-        // §5.1/§14.2). The shared projection clears its open step/turn and
-        // projects interrupted on every turn-owned AND step-owned Workflow
-        // run of this turn without a terminal fact (plan §5.3 — upstream
-        // `locationClosed(step)` is `step closed OR owning turn closed`).
-        // Called BEFORE the replay fence: a replayed turn/end must still not
-        // leave a stale open step behind (re-projection is idempotent).
-        this.workflow.onTurnEnd(endTurn)
         const endActivity = this.activityFor(endTurn)
         endActivity.pendingPreSteerAnswerStep = undefined
         if (endActivity.completed) break
@@ -4463,12 +5633,15 @@ export class TranscriptFolder {
         break
       }
       case 'tool-workflow/run-start': {
-        // The shared projection captures the authoritative owner (the open
-        // step wins, then the open turn, else the session — plan §5.2) and
-        // creates the durable message.
+        // The shared projection creates the open durable record. A run
+        // without a terminal `run-end` remains an open `running` record
+        // regardless of which Step/Turn owns its position in the transcript.
         const message = this.workflow.onRunStart(event.data.runId, event.data.name, this.currentTurn)
         const index = this.appendItem(message)
         this.workflowIndexes.set(event.data.runId, index)
+        // The workflow card is a Context boundary row: its authoritative
+        // first-visible time (the run-start event) closes a preceding Activity.
+        setTranscriptTiming(message, pointTiming(event.time))
         // Focus aggregation: a workflow run is a durable lifecycle event,
         // NOT a model tool/call — it never touches the Tool slot or the
         // tool count (plan §17).
@@ -4478,9 +5651,9 @@ export class TranscriptFolder {
         const { runId, seq, label, phase, childId } = event.data
         // The member folds INTO the run card (Web WorkflowRunPanel parity):
         // phase grouping happens at render time over the arrival-ordered
-        // rows. A member starting after its owner closed is interrupted
-        // from birth (plan §6.2 — the projection comes from the current
-        // fold facts, no invented recovery flow).
+        // rows. Members are `running` from birth — a late member after
+        // step/end or turn/end is an ordinary live append, never
+        // "interrupted from birth".
         this.workflow.onAgentStart(runId, seq, label, phase === undefined ? null : phase, childId)
         break
       }

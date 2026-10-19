@@ -462,11 +462,18 @@ export class ActionEditorPanel implements Component {
     }
     if (this.message !== undefined) lines.push(color.error(truncateToWidth(this.message, width)))
     lines.push('', color.textDim('Enter: choose · d/l: choose directly · Esc: back'))
-    const limit = Math.max(1, this.maxRows())
+    // The two choice rows are the only selectable lines; the shared
+    // viewport keeps them (and their painted ordinal) aligned with the
+    // footer on a short grant instead of head-slicing the hint away.
+    const selectableLineIndices = [3, 4]
+    const viewport = actionViewport(lines, selectableLineIndices[this.selectedIndex], this.maxRows(), selectableLineIndices)
     this.lastRenderWidth = Math.max(1, width)
-    this.hitMap = lines.slice(0, limit).map((_, row) =>
-      row === 3 ? { kind: 'select', key: 'choice:direct' } : row === 4 ? { kind: 'select', key: 'choice:leader' } : { kind: 'inert' })
-    return lines.slice(0, limit)
+    this.hitMap = viewport.lines.map((_, row) => {
+      const selectable = viewport.selectableRows.find(candidate => candidate.row === row)
+      if (selectable === undefined) return { kind: 'inert' }
+      return { kind: 'select', key: selectable.ordinal === 0 ? 'choice:direct' : 'choice:leader' }
+    })
+    return viewport.lines
   }
 
   private handleBindingChoice(data: string): void {

@@ -24,6 +24,8 @@ import test from 'node:test'
 import { Context } from '@deepseek-ai/cordis'
 import { detachedSessionStatus } from '../src/runtime/session-status-projection.ts'
 import { createStatusRuntime, type StatusRuntimeDeps } from '../src/app/surface/status-runtime.ts'
+import { displaySeamStub } from './support/display-seam-stub.ts'
+import { DirectPermissionConfig } from '../src/runtime/direct/config-direct.ts'
 
 /* ──────────────────────── the projection mapper ──────────────────────── */
 
@@ -63,9 +65,10 @@ function harness(options: {
     // operation since PR4 §6.3).
     diag: { info: () => {}, warn: () => {}, error: () => {}, debug: () => {}, dispose: () => {} },
     surface: {
-      app: {
-        notify: (message: string, kind: 'info' | 'error') => { notices.push({ message, kind }) },
-      },
+      // The cycle's notices commit through the renderer-neutral display seam.
+      display: displaySeamStub({
+        notify: (message, kind) => { notices.push({ message, kind: kind ?? 'info' }) },
+      }),
       status: { snapshot: () => ({}) },
       commitStatus: () => {},
     },
@@ -217,4 +220,15 @@ test('§7.5 negative lock: the authority path never touches the Host permissionP
     'the authority path reads the projection + ConfigPort, never the Host preset service')
   assert.equal(authorityBlock.includes('.set('), false,
     'the authority path never calls a synchronous preset set')
+})
+
+test('§6.2 the Direct permission catalog exposes the composed Auto contribution without leaking a mutable table', () => {
+  const ctx = new Context()
+  const names = ['read-only', 'workspace-write', 'auto']
+  ctx.provide('permissionPresets', { names } as never)
+  const config = new DirectPermissionConfig(ctx as never, () => undefined)
+  assert.deepEqual(config.presetNames(), names, 'Auto is visible exactly because the real integration contributes it')
+  const copy = [...config.presetNames()]
+  copy.push('mutated')
+  assert.deepEqual(config.presetNames(), names, 'the Host-owned table is never exposed by reference')
 })

@@ -17,6 +17,7 @@
  */
 
 import { truncateToWidth, visibleWidth } from '@xmoon76/pi-tui'
+import { sanitizeDisplayText } from '../../presentation/terminal-text.ts'
 import { focusToolDisplay, toolTitle, type ToolPresenter } from '../../transcript/tool-presentation.ts'
 import { thinkingPreviewTail } from './thinking-preview.ts'
 import { activeSubCallsOf, THINKING_TAIL_CAP, type TranscriptMessage, type TranscriptToolMessage } from '../../../transcript.ts'
@@ -158,6 +159,43 @@ export interface CompactPreparingPreview {
   readonly index: number
   readonly name?: string
 }
+
+/**
+ * A BOUNDED display-projection memo. The compact slot renderers project several
+ * INDEPENDENT sources per frame (Think, Preparing, Action, Message, Error), so a
+ * single last-value slot would thrash between them and rescan every frame. A
+ * small source-keyed cache keeps every unchanged slot projected once, and its
+ * cap bounds memory; eviction order is insertion order (oldest first). The
+ * underlying projection is pure, so a hit and a miss are indistinguishable
+ * except for the work skipped.
+ */
+export interface DisplayProjection {
+  project(text: string): string
+  /** How many times the underlying projection actually ran (diagnostics). */
+  readonly projectionRuns: () => number
+}
+
+export function createDisplayProjection(limit = 32): DisplayProjection {
+  const cache = new Map<string, string>()
+  let runs = 0
+  return {
+    project(text: string): string {
+      const hit = cache.get(text)
+      if (hit !== undefined) return hit
+      runs += 1
+      const value = sanitizeDisplayText(text)
+      if (cache.size >= limit) {
+        const oldest = cache.keys().next().value
+        if (oldest !== undefined) cache.delete(oldest)
+      }
+      cache.set(text, value)
+      return value
+    },
+    projectionRuns: () => runs,
+  }
+}
+
+
 
 /**
  * The compact Action-slot text for live Preparing rows — the ONE summary

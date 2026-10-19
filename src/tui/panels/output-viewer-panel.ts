@@ -10,6 +10,7 @@
 
 import { Text } from '@xmoon76/pi-tui'
 import type { Component } from '@xmoon76/pi-tui'
+import { sanitizeDisplayLog, sanitizeDisplayText } from '../presentation/terminal-text.ts'
 
 /** The job-output viewer overlay width (cells) and max height (rows); the
  * responsive shell and the fork overlay share these so the body row budget
@@ -61,10 +62,12 @@ export class OutputViewerPanel implements Component {
   private disposed = false
 
   constructor(title: string, initial: string, hint: string, hintFallback: string) {
-    this.title = new Text(title, 0, 0)
-    this.body = new Text(initial, 0, 0)
-    this.hint = new Text(hint, 0, 0)
-    this.hintFallback = new Text(hintFallback, 0, 0)
+    // The title/hint are app chrome over Host-supplied identity; the body is
+    // the live Job log stream (whitelisted SGR only).
+    this.title = new Text(sanitizeDisplayText(title), 0, 0)
+    this.body = new Text(sanitizeDisplayLog(initial), 0, 0)
+    this.hint = new Text(sanitizeDisplayText(hint), 0, 0)
+    this.hintFallback = new Text(sanitizeDisplayText(hintFallback), 0, 0)
   }
 
   invalidate(): void {
@@ -76,7 +79,7 @@ export class OutputViewerPanel implements Component {
 
   /** Replace the output body (the caller refreshes it on a timer). */
   setBody(text: string): void {
-    this.body.setText(text)
+    this.body.setText(sanitizeDisplayLog(text))
     this.body.invalidate()
   }
 
@@ -102,13 +105,13 @@ export class OutputViewerPanel implements Component {
     this.liveHint = liveHint
     this.timer = setInterval(() => {
       if (this.disposed) return
-      this.body.setText(this.refresh!())
+      this.body.setText(sanitizeDisplayLog(this.refresh!()))
       this.body.invalidate()
       if (this.liveHint !== undefined) {
         const next = this.liveHint()
-        this.hint.setText(next.hint)
+        this.hint.setText(sanitizeDisplayText(next.hint))
         this.hint.invalidate()
-        this.hintFallback.setText(next.fallback)
+        this.hintFallback.setText(sanitizeDisplayText(next.fallback))
         this.hintFallback.invalidate()
       }
       this.requestRender!()

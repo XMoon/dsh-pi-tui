@@ -42,18 +42,44 @@ afterEach(() => {
 })
 
 
-function startApp(): { vt: VirtualTerminal; app: TuiApp; submitted: string[]; get exits(): number } {
+function startApp(): {
+  vt: VirtualTerminal
+  app: TuiApp
+  submitted: string[]
+  /** Settle the submission at `index` (the order it was submitted in), with
+   *  the occurrence token THAT submission carried. */
+  settleAt: (index: number, owner: string | undefined, outcome: 'written' | 'skipped') => void
+  get exits(): number
+} {
   const vt = new VirtualTerminal(80, 24)
   const submitted: string[] = []
+  const tokens: (number | undefined)[] = []
   let exits = 0
   const app = new TuiApp(vt, {
-    onSubmit: (text) => submitted.push(text),
+    onSubmit: (text, _request, scopeToken) => {
+      submitted.push(text)
+      tokens.push(scopeToken)
+    },
     onExit: () => { exits += 1 },
   })
   app.start()
   startedApps.add(app)
   // `exits` is a number: returning it by value would copy 0, so expose a getter.
-  return { vt, app, submitted, get exits(): number { return exits } }
+  return {
+    vt,
+    app,
+    submitted,
+    settleAt: (index, owner, outcome) => {
+      const token = tokens[index]
+      app.settleScopeInput({
+        ...(token === undefined ? {} : { token }),
+        owner,
+        outcome,
+        text: submitted[index]!,
+      })
+    },
+    get exits(): number { return exits },
+  }
 }
 
 /** Pause longer than the todo click-coalescing window (500ms): a
@@ -928,7 +954,7 @@ test('height-only resize refreshes the extension widget row budget', async () =>
   assert.equal(widgetRows(), 3)
 })
 
-test('history overlay preserves background cells outside its physical frame', async () => {
+test('History replaces the EDITOR SEAT: the transcript stays above it and no floating frame is painted', async () => {
   const rows = [
     { id: 'a', content: 'entry alpha', cwd: '/work/project', ts: 1_700_000_000_000, sourceFile: '/history.jsonl', sourceByteOffset: 0 },
   ]
@@ -936,43 +962,30 @@ test('history overlay preserves background cells outside its physical frame', as
     search: async () => ({ results: rows, exhausted: true }),
   }
   const vt = new VirtualTerminal(120, 30)
-  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { historySearchSource: source })
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { historySearchSource: source, captureHistoryScope: () => ({ sessionId: undefined, isCurrent: () => true }) })
   app.start()
   startedApps.add(app)
+  app.setTranscript([{ kind: 'assistant', turn: 0, text: 'transcript marker above the seat' }])
   await vt.waitForRender()
-  const background = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ'.repeat(5).slice(0, 116)
-  app.setDraft(Array.from({ length: 12 }, () => background).join('\n'))
-  await vt.waitForRender()
-  const plainViewport = (): string[] => vt.getViewport()
-    .map(line => stripTerminalSequences(line).padEnd(vt.columns, ' '))
-  const before = plainViewport()
-
   app.openHistorySearch()
   await vt.waitForRender()
   await new Promise(resolve => setTimeout(resolve, 100))
   await vt.waitForRender()
-  const after = plainViewport()
-  const frameTop = after.findIndex(line => line.includes('╭'))
-  assert.ok(frameTop >= 0, `history frame must be painted:\n${after.join('\n')}`)
-  const leftBorder = after[frameTop]!.indexOf('╭')
-  const rightBorder = after[frameTop]!.indexOf('╮', leftBorder)
-  assert.ok(leftBorder > 0, 'history frame must have a background area on the left')
-  assert.ok(rightBorder > leftBorder, 'history frame right border must be present')
-  const coveredRow = frameTop + 1
-  assert.ok(before[coveredRow]!.includes(background.slice(0, 20)), 'the selected background row must contain the sentinel pattern')
-  assert.equal(
-    after[coveredRow]!.slice(0, leftBorder),
-    before[coveredRow]!.slice(0, leftBorder),
-    'cells to the left of the history frame must remain owned by the background',
-  )
-  assert.equal(
-    after[coveredRow]!.slice(rightBorder + 1),
-    before[coveredRow]!.slice(rightBorder + 1),
-    'cells to the right of the history frame must remain owned by the background',
-  )
+  const viewport = vt.getViewport().map(line => stripTerminalSequences(line))
+  const transcriptRow = viewport.findIndex(line => line.includes('transcript marker above the seat'))
+  const headerRow = viewport.findIndex(line => line.includes('Input History'))
+  assert.ok(transcriptRow >= 0, `the transcript must stay visible:\n${viewport.join('\n')}`)
+  assert.ok(headerRow > transcriptRow, `the History seat must sit BELOW the live transcript:\n${viewport.join('\n')}`)
+  // A SEAT is full-width and flush: no centered floating frame, no outer border
+  // and no horizontal margin.
+  assert.ok(viewport[headerRow]!.startsWith(' Input History'),
+    `the seat header must start at column 0:\n${JSON.stringify(viewport[headerRow])}`)
+  assert.ok(viewport.some(line => line.includes('entry alpha')), 'the results are painted')
+  assert.ok(viewport.some(line => line.includes('Esc cancel')), 'the seat action bar is painted')
+  app.stop()
 })
 
-test('history overlay reflows geometry without restarting its search state', async () => {
+test('History reflows across a resize without restarting its search state', async () => {
   const rows = [
     { id: 'a', content: 'entry alpha', cwd: '/work/project', ts: 1_700_000_000_000, sourceFile: '/history.jsonl', sourceByteOffset: 0 },
     { id: 'b', content: 'entry beta', cwd: '/work/project', ts: 1_700_000_000_001, sourceFile: '/history.jsonl', sourceByteOffset: 1 },
@@ -981,7 +994,7 @@ test('history overlay reflows geometry without restarting its search state', asy
     search: async () => ({ results: rows, exhausted: true }),
   }
   const vt = new VirtualTerminal(50, 10)
-  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { historySearchSource: source })
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { historySearchSource: source, captureHistoryScope: () => ({ sessionId: undefined, isCurrent: () => true }) })
   app.start()
   startedApps.add(app)
   app.openHistorySearch()
@@ -998,25 +1011,24 @@ test('history overlay reflows geometry without restarting its search state', asy
   await vt.waitForRender()
   view = vt.getViewport().join('\n')
   assert.ok(view.includes('entry beta'), `history selection lost after grow:\n${view}`)
-  // The overlay design width is capped at 100 and the Frame consumes 4 of
-  // its columns, so the panel inner width (≤ 96) never reaches the 100-wide
-  // split threshold — the grown layout stays stacked. Assert the frame
-  // actually reflowed to span the grown width instead of a split marker.
-  const stripAnsi = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, '')
-  const frameTop = vt.getViewport().map(stripAnsi).find(line => line.includes('╭'))
-  assert.ok(frameTop !== undefined && visibleWidth(frameTop.trimEnd()) >= 100,
-    `history frame must span the grown terminal:\n${view}`)
-  assert.ok(view.includes('Current directory'), `history tabs did not reflow after grow:\n${view}`)
+  // The seat spans the terminal's CURRENT content width (never the retired
+  // 100-column overlay cap) and the header reflows with it.
+  const headerRow = vt.getViewport().map(line => stripTerminalSequences(line))
+    .find(line => line.includes('Input History'))
+  assert.ok(headerRow !== undefined, `the seat header must survive the resize:\n${view}`)
+  assert.ok(visibleWidth(headerRow!.trimEnd()) > 80,
+    `the seat must reflow to the grown width:\n${JSON.stringify(headerRow)}`)
+  assert.ok(view.includes('Current Directory'), `the scope tabs did not reflow after grow:\n${view}`)
   vt.resize(50, 10)
   await vt.waitForRender()
   view = vt.getViewport().join('\n')
-  assert.ok(view.includes('╭') && view.includes('╰'), `history frame must survive shrink:\n${view}`)
-  assert.ok(view.includes('type filter') && view.includes('╰'), `history footer must survive shrink:\n${view}`)
+  assert.ok(view.includes('Input History'), `the seat must survive shrink:\n${view}`)
+  assert.ok(view.includes('Esc cancel'), `the seat hint must survive shrink:\n${view}`)
   vt.sendInput('\x1b')
   await vt.waitForRender()
 })
 
-test('history overlay preserves query and selection across fullscreen rebinds', async () => {
+test('History preserves query and selection across fullscreen rebinds', async () => {
   const rows = [
     { id: 'a', content: 'entry alpha', cwd: '/work/project', ts: 1_700_000_000_000, sourceFile: '/history.jsonl', sourceByteOffset: 0 },
     { id: 'b', content: 'entry beta', cwd: '/work/project', ts: 1_700_000_000_001, sourceFile: '/history.jsonl', sourceByteOffset: 1 },
@@ -1025,7 +1037,7 @@ test('history overlay preserves query and selection across fullscreen rebinds', 
     search: async () => ({ results: rows, exhausted: true }),
   }
   const vt = new VirtualTerminal(120, 30)
-  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { historySearchSource: source })
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { historySearchSource: source, captureHistoryScope: () => ({ sessionId: undefined, isCurrent: () => true }) })
   app.start()
   startedApps.add(app)
   app.openHistorySearch()
@@ -1038,7 +1050,7 @@ test('history overlay preserves query and selection across fullscreen rebinds', 
   const strip = (line: string): string => stripTerminalSequences(line)
   const hasSelectedBeta = (viewport: string[]): boolean => viewport.some(line => {
     const plain = strip(line)
-    return plain.includes('entry beta') && plain.includes('›')
+    return plain.includes('entry beta') && plain.startsWith('> ')
   })
   const before = vt.getViewport().map(strip).join('\n')
   assert.ok(before.includes('Search: > x'), `history query must be visible before fullscreen:\n${before}`)
@@ -1059,51 +1071,6 @@ test('history overlay preserves query and selection across fullscreen rebinds', 
   await vt.waitForRender()
 })
 
-test('a history-overlay click before the post-resize repaint is rejected at capped geometry', async () => {
-  const rows = [
-    { id: 'a', content: 'entry alpha', cwd: '/work/project', ts: 1_700_000_000_000, sourceFile: '/history.jsonl', sourceByteOffset: 0 },
-    { id: 'b', content: 'entry beta', cwd: '/work/project', ts: 1_700_000_000_001, sourceFile: '/history.jsonl', sourceByteOffset: 1 },
-  ]
-  const source: import('../src/client/history/search.ts').HistorySearchSource = {
-    search: async () => ({ results: rows, exhausted: true }),
-  }
-  const vt = new VirtualTerminal(120, 40)
-  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { historySearchSource: source })
-  app.start()
-  startedApps.add(app)
-  app.setFullscreen(true) // only the alt screen dispatches overlay mouse events
-  app.openHistorySearch()
-  await vt.waitForRender()
-  await new Promise(resolve => setTimeout(resolve, 100))
-  await vt.waitForRender()
-  const strip = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, '')
-  const rowY = vt.getViewport().map(strip).findIndex(line => line.includes('entry alpha'))
-  assert.ok(rowY >= 0, `history rows must be painted:\n${vt.getViewport().map(strip).join('\n')}`)
-  // SGR x is 1-based; the item content starts two cells right of the frame's
-  // left border (`│` + one padding cell).
-  const leftBorder = vt.getViewport().map(strip)[rowY]?.indexOf('│') ?? -1
-  assert.ok(leftBorder >= 0, 'history frame left border missing')
-  const clickX = leftBorder + 3
-  // 40 -> 41 keeps the history maxHeight clamped at 30, so only the RAW
-  // terminal dimensions change; the fence must still reject the stale click.
-  vt.resize(120, 41)
-  vt.sendInput(`\x1b[<0;${clickX};${rowY + 1}M`)
-  vt.sendInput(`\x1b[<0;${clickX};${rowY + 1}m`)
-  await new Promise(resolve => setTimeout(resolve, 30))
-  assert.ok(vt.getViewport().map(strip).some(line => line.includes('entry alpha')),
-    `a stale-geometry click must not accept a history row:\n${vt.getViewport().map(strip).join('\n')}`)
-  assert.equal(app.seatTextForTest(), '', 'the editor draft must be untouched by the stale click')
-  // After the repaint adopts the new geometry, the click accepts.
-  await vt.waitForRender()
-  const repaintedY = vt.getViewport().map(strip).findIndex(line => line.includes('entry alpha'))
-  assert.ok(repaintedY >= 0)
-  const repaintedX = (vt.getViewport().map(strip)[repaintedY]?.indexOf('│') ?? -1) + 3
-  vt.sendInput(`\x1b[<0;${repaintedX};${repaintedY + 1}M`)
-  vt.sendInput(`\x1b[<0;${repaintedX};${repaintedY + 1}m`)
-  await new Promise(resolve => setTimeout(resolve, 30))
-  assert.equal(app.seatTextForTest(), 'entry alpha', 'a fresh post-resize click must accept the entry')
-  app.stop()
-})
 
 test('task browser no-match state fits a short terminal without clipping the hint', async () => {
   const { vt, app } = startApp()
@@ -1168,8 +1135,10 @@ test('Task Center full mode keeps search input and the selected task at 10 rows'
     })),
     () => 'close',
     () => {},
-    { mode: 'full', header: 'Tasks', maxVisible: 10, initialSearchMode: true },
+    { mode: 'full', header: 'Tasks', maxVisible: 10, enableSearch: true },
   )
+  await vt.waitForRender()
+  vt.sendInput('/')
   await vt.waitForRender()
   for (let index = 0; index < 2; index += 1) vt.sendInput('\x1b[B') // select task 2
   await vt.waitForRender()
@@ -1284,7 +1253,7 @@ test('generic picker preserves its selected row and hint after a short resize', 
   await vt.waitForRender()
   const view = vt.getViewport().join('\n')
   assert.ok(view.includes('choice 17'), `selected picker row must remain visible:\n${view}`)
-  assert.ok(view.includes('esc close'), `picker hint must remain visible:\n${view}`)
+  assert.ok(view.includes('Esc close'), `picker hint must remain visible:\n${view}`)
   vt.sendInput('\x1b')
   await vt.waitForRender()
 })
@@ -1315,15 +1284,19 @@ test('settings list preserves its selected row and hint after a short resize', a
   await vt.waitForRender()
 })
 
-test('down opens the task browser only with active tasks and an empty editor; ctrl+j is inert', async () => {
+test('down opens the on-demand Task Quick only when the B4-B admission holds; ctrl+j is inert', async () => {
   const vt = new VirtualTerminal(80, 24)
   let opened = 0
   const app = new TuiApp(vt, {
     onSubmit: () => {},
     onExit: () => {},
-    // The real runner opens a picker (which renders); the test mimics that.
-    onOpenTasks: () => { opened += 1; app.requestRender() },
   })
+  const realEntry = app.enterTaskQuick.bind(app)
+  app.enterTaskQuick = () => {
+    const entered = realEntry.call(app)
+    if (entered) opened += 1
+    return entered
+  }
   app.start()
 
   startedApps.add(app)
@@ -1332,27 +1305,36 @@ test('down opens the task browser only with active tasks and an empty editor; ct
   // No active tasks: ↓ is inert.
   vt.sendInput('\x1b[B')
   await sleep(20)
-  assert.equal(opened, 0, `no tasks means no browser`)
+  assert.equal(opened, 0, `no tasks means no Quick`)
+  // B4-B: the admission needs the Quick projection alongside the badge.
+  app.setQuickTaskItems([{ value: 'job:bash-1', label: 'pnpm build', status: 'running', source: 'job' }])
   app.setTasks([{ id: 'bash-1', label: 'pnpm build', status: 'running', kind: 'bash' }])
   await vt.waitForRender()
-  // Empty editor + active tasks: ↓ opens the browser.
+  // Empty editor on its last visual line + active tasks: ↓ enters Quick.
   vt.sendInput('\x1b[B')
   await sleep(20)
-  assert.equal(opened, 1, `down must open the task browser with an empty editor`)
+  assert.equal(opened, 1, `down must enter the Task Quick`)
   // Ctrl+J is deliberately unbound: legacy terminals send it as LF, which
-  // the editor treats as Enter — it must NOT open the browser (the task
-  // surface is ↓ + `/tasks`).
+  // the editor treats as Enter — it must NOT enter Quick (the task surface
+  // is ↓ + `/tasks`).
   vt.sendInput('\n') // ctrl+j is LF
   await sleep(20)
-  assert.equal(opened, 1, `ctrl+j must not open the task browser`)
-  // Non-empty draft: the key keeps its editing meaning (no browser).
-  app.setDraft('ls -la')
+  assert.equal(opened, 1, `ctrl+j must not enter the Task Quick`)
+  // B4-B: the press above ENTERED Quick — leave it before the draft witness.
+  vt.sendInput('\x1b')
+  await sleep(20)
+  // A NON-last-visual-line draft: ↓ keeps its editing meaning (no Quick).
+  app.setDraft('ls -la\nsecond line')
   await vt.waitForRender()
+  // Park the cursor on the first visual line.
+  vt.sendInput('\x1b[A')
+  await sleep(20)
   vt.sendInput('\x1b[B')
   await sleep(20)
-  assert.equal(opened, 1, `down must not open the browser while a draft is being edited`)
+  assert.equal(opened, 1, `down must not enter Quick from a non-last visual line`)
   // Tasks cleared: the trigger disarms.
   app.setTasks([])
+  app.setQuickTaskItems([])
   app.setDraft('')
   await vt.waitForRender()
   vt.sendInput('\x1b[B')
@@ -1363,16 +1345,30 @@ test('down opens the task browser only with active tasks and an empty editor; ct
 
 test('the footer badges active tasks and advertises the ↓ trigger on an empty editor', async () => {
   const { vt, app } = startApp()
+  await vt.waitForRender()
+  // B4-B: the hint follows the admission facts — badge + projection together.
+  app.setQuickTaskItems([{ value: 'job:bash-1', label: 'pnpm build', status: 'running', source: 'job' }])
   app.setTasks([{ id: 'bash-1', label: 'pnpm build', status: 'running', kind: 'bash' }])
+  await vt.waitForRender()
   await vt.waitForRender()
   let view = vt.getViewport().join('\n')
   assert.ok(view.includes('[1 task running · ↓ view]'), `footer task badge missing:\n${view}`)
-  app.setDraft('typed text')
+  // B4-B: a NON-last-visual-line draft drops the hint (the ↓ stays the
+  // editor's); the badge survives.
+  app.setDraft('typed text\nsecond')
+  await vt.waitForRender()
+  // Park the cursor on a NON-last visual line: the ↓ admission drops. The
+  // footer hint is a compose-time projection — settle it with a real status
+  // commit (the same churn production uses) and read the recomposed frame.
+  vt.sendInput('\x1b[A')
+  await vt.waitForRender()
+  app.setStatus({ model: 'probe' })
   await vt.waitForRender()
   view = vt.getViewport().join('\n')
   assert.ok(view.includes('[1 task running]'), `badge must stay with a draft:\n${view}`)
-  assert.ok(!view.includes('↓ view'), `the ↓ hint must not show while a draft is being edited:\n${view}`)
+  assert.ok(!view.includes('↓ view'), `the ↓ hint must not show while the ↓ is the editor's:\n${view}`)
   app.setTasks([])
+  app.setQuickTaskItems([])
   await vt.waitForRender()
   assert.ok(!vt.getViewport().join('\n').includes('task running'), `badge survived clearing:\n${view}`)
 })
@@ -1383,8 +1379,13 @@ test('live continuable subagents arm the task browser trigger through setAgents'
   const app = new TuiApp(vt, {
     onSubmit: () => {},
     onExit: () => {},
-    onOpenTasks: () => { opened += 1; app.requestRender() },
   })
+  const realEntry = app.enterTaskQuick.bind(app)
+  app.enterTaskQuick = () => {
+    const entered = realEntry.call(app)
+    if (entered) opened += 1
+    return entered
+  }
   app.start()
 
   startedApps.add(app)
@@ -1395,6 +1396,8 @@ test('live continuable subagents arm the task browser trigger through setAgents'
   await sleep(20)
   assert.equal(opened, 0, `no agents means no browser`)
   // A live continuable child arms the trigger even with zero jobs.
+  // B4-B: the admission needs the Quick projection too.
+  app.setQuickTaskItems([{ value: 'agent:child-abc', label: 'research', status: 'running', source: 'subagent' }])
   app.setAgents([{ id: 'child-abc', label: 'research', activity: 'running' }])
   await vt.waitForRender()
   vt.sendInput('\x1b[B')
@@ -1404,17 +1407,23 @@ test('live continuable subagents arm the task browser trigger through setAgents'
   vt.sendInput('\n') // ctrl+j is LF
   await sleep(20)
   assert.equal(opened, 1, `ctrl+j must not open the task browser with a live subagent`)
+  // B4-B: the press above ENTERED Quick — leave it before the disarm witness.
+  vt.sendInput('\x1b')
+  await sleep(20)
   // Clearing agents disarms; clearing jobs while agents live must not.
   app.setAgents([])
+  app.setQuickTaskItems([])
   app.setTasks([])
   await vt.waitForRender()
   vt.sendInput('\x1b[B')
   await sleep(20)
   assert.equal(opened, 1, `the trigger must disarm when no agents are active`)
   app.setTasks([{ id: 'bash-1', label: 'pnpm build', status: 'running', kind: 'bash' }])
+  app.setQuickTaskItems([{ value: 'job:bash-1', label: 'pnpm build', status: 'running', source: 'job' }])
   app.setAgents([])
   await vt.waitForRender()
   app.setTasks([])
+  app.setQuickTaskItems([{ value: 'agent:child-abc', label: 'research', status: 'running', source: 'subagent' }])
   app.setAgents([{ id: 'child-abc', label: 'research', activity: 'running' }])
   await vt.waitForRender()
   vt.sendInput('\x1b[B')
@@ -1986,21 +1995,36 @@ test('fullscreen transcript click: a question-frame press clears the stale backg
   app.stop()
 })
 
-test('the footer badge combines tasks and live agents, hint only on an empty editor', async () => {
+test('the footer badge combines tasks and live agents, hint only at the eligible Editor visual boundary', async () => {
   const { vt, app } = startApp()
+  await vt.waitForRender()
+  // B4-B: the hint follows the admission facts — badge + projection together.
+  app.setQuickTaskItems([{ value: 'agent:child-abc', label: 'research', status: 'running', source: 'subagent' }])
   app.setAgents([{ id: 'child-abc', label: 'research', activity: 'running' }])
+  await vt.waitForRender()
   await vt.waitForRender()
   let view = vt.getViewport().join('\n')
   assert.ok(view.includes('[1 agent · ↓ view]'), `agent-only badge missing:\n${view}`)
+  app.setQuickTaskItems([
+    { value: 'agent:child-abc', label: 'research', status: 'running', source: 'subagent' },
+    { value: 'job:bash-1', label: 'pnpm build', status: 'running', source: 'job' },
+  ])
   app.setTasks([{ id: 'bash-1', label: 'pnpm build', status: 'running', kind: 'bash' }])
+  await vt.waitForRender()
   await vt.waitForRender()
   view = vt.getViewport().join('\n')
   assert.ok(view.includes('[1 task running · 1 agent · ↓ view]'), `combined badge missing:\n${view}`)
-  app.setDraft('typed text')
+  app.setDraft('typed text\nsecond')
+  await vt.waitForRender()
+  // Park the cursor on a NON-last visual line: the ↓ admission drops (the
+  // footer hint is a compose-time projection — settle with a real commit).
+  vt.sendInput('\x1b[A')
+  await vt.waitForRender()
+  app.setStatus({ model: 'probe' })
   await vt.waitForRender()
   view = vt.getViewport().join('\n')
   assert.ok(view.includes('[1 task running · 1 agent]'), `badge must stay with a draft:\n${view}`)
-  assert.ok(!view.includes('↓ view'), `the ↓ hint must not show while a draft is being edited:\n${view}`)
+  assert.ok(!view.includes('↓ view'), `the ↓ hint must not show while the ↓ is the editor's:\n${view}`)
   app.setTasks([])
   app.setAgents([])
   await vt.waitForRender()
@@ -2431,7 +2455,7 @@ test('a Job View opened from Quick returns to the exact parent browser state on 
       return 'keep-open'
     },
     () => {},
-    { mode: 'quick', header: 'Tasks', enableSearch: true, maxVisible: 8 },
+    { mode: 'full', header: 'Tasks', enableSearch: true, maxVisible: 8 },
   )
   await vt.waitForRender()
   vt.sendInput('\x1b[B') // move to the second row
@@ -2461,17 +2485,17 @@ test('a Job View opened from Quick returns to the exact parent browser state on 
   vt.sendInput('\x1b') // close only the Job View
   await vt.waitForRender()
   assert.ok(!view().includes('job detail'), `Esc must close the Job View:\n${view()}`)
-  assert.ok(view().includes('Open Task Center'), `Quick must be restored:\n${view()}`)
+  assert.ok(view().includes('Tasks [TRACKED]'), `the parent browser must be restored:\n${view()}`)
   assert.ok(view().includes('bash · lint (updated)'), `the hidden parent must have absorbed the live refresh:\n${view()}`)
-  assert.equal(app.overlayGraphState().handles, 1, 'only Quick remains tracked')
+  assert.equal(app.overlayGraphState().handles, 1, 'only the browser remains tracked')
   assert.equal(handle.getViewState!().selectedId, 'job:2', 'the parent selection must be preserved')
   assert.equal(app.focusSeatForTest(), 'overlay')
   assert.notEqual(app.focusedComponentForTest(), app.seatEditorForTest().component,
-    'the restored Quick holds physical focus')
+    'the restored browser holds physical focus')
 
   vt.sendInput('\x1b')
   await vt.waitForRender()
-  assert.ok(!view().includes('Open Task Center'), `the second Esc must close Quick:\n${view()}`)
+  assert.ok(!view().includes('Tasks [TRACKED]'), `the second Esc must close the browser:\n${view()}`)
   assert.equal(app.focusSeatForTest(), 'editor')
   assert.equal(app.focusedComponentForTest(), app.seatEditorForTest().component)
   vt.sendInput('Z')
@@ -2588,6 +2612,434 @@ test('resetInputHistory replaces the recall history wholesale (session switch)',
   app.stop()
 })
 
+/** Type into the editor and press Enter through the REAL submit entry. */
+async function submitThroughEditor(app: TuiApp, vt: VirtualTerminal, text: string): Promise<void> {
+  app.setDraft('')
+  vt.sendInput(text)
+  vt.sendInput('\r')
+  await vt.waitForRender()
+}
+
+test('the recall scope reconciles written, skipped and pending occurrences in the append order', async () => {
+  const { vt, app, submitted, settleAt } = startApp()
+  const submit = (text: string): Promise<void> => submitThroughEditor(app, vt, text)
+  // A hydration commit for a real Session closes the sessionless pool.
+  app.resetInputHistory(['a old row'], 'session-a')
+  // A replacement owner publishes: the scope takes the new owner.
+  app.beginInputHistoryScope('session-b')
+  await submit('a')
+  await submit('b')
+  await submit('c')
+  assert.deepEqual(submitted, ['a', 'b', 'c'])
+  // The outgoing Session's rows are gone as soon as the new owner was published:
+  // its hydration has not committed yet, and ↑ must never recall Session A here.
+  assert.deepEqual(app.getInputHistory(), ['c', 'b', 'a'])
+  // The write owner reports `a` SKIPPED (the CWD-level policy) and `b` WRITTEN,
+  // in append order; `c` is still unsettled. The reseed keeps the append order
+  // for the rows (`b`) and places the skipped `a` where its settlement sits,
+  // with the unsettled `c` at its own rank in the scope's submission order.
+  settleAt(0, 'session-b', 'skipped')
+  settleAt(1, 'session-b', 'written')
+  app.resetInputHistory(['b'], 'session-b')
+  assert.deepEqual(app.getInputHistory(), ['c', 'b', 'a'],
+    'skipped/written/unsettled occurrences interleave in submission order, never reordered')
+  assert.equal(app.getInputHistory().filter(entry => entry === 'b').length, 1, 'exactly one b occurrence')
+  // The window is closed: ordinary submissions and ↑ use the plain path again.
+  await submit('settled entry')
+  app.setDraft('')
+  vt.sendInput('\x1b[A')
+  await vt.waitForRender()
+  assert.equal(app.getDraft(), 'settled entry', '↑ recalls the settled submission')
+  // A NEWER owner publishes before this scope's hydration ever committed: the
+  // replaced scope's occurrences never cross into it.
+  app.beginInputHistoryScope('session-c')
+  await submit('c transient')
+  app.beginInputHistoryScope('session-d')
+  app.resetInputHistory(['new owner row'], 'session-d')
+  assert.deepEqual(app.getInputHistory(), ['new owner row'],
+    'the replaced scope inherits nothing into the new owner')
+  app.stop()
+})
+
+test('a skipped occurrence is placed by its settlement, not ahead of every row', async () => {
+  // F2-R4 case 1: the only scope occurrence was SKIPPED and a later Ctrl+S steer
+  // wrote a row. Its settlement precedes the steer's append, so the steer's row
+  // is NEWER and must come first (the old text walk inlined the skipped text at
+  // the front and produced ['a','z']).
+  const { vt, app, settleAt } = startApp()
+  app.resetInputHistory(['anchor'], 'session-a')
+  app.beginInputHistoryScope('session-b')
+  await submitThroughEditor(app, vt, 'a')
+  settleAt(0, 'session-b', 'skipped')
+  // The steer has no occurrence token: its row is the other writer's.
+  app.settleScopeInput({ owner: 'session-b', outcome: 'written', text: 'z' })
+  app.resetInputHistory(['z'], 'session-b')
+  assert.deepEqual(app.getInputHistory(), ['z', 'a'],
+    'the skipped occurrence sits after the row appended later, at its settlement rank')
+  app.stop()
+})
+
+test('repeated identical submissions settle by occurrence token, and keep their ranks', async () => {
+  // F2-R4 case 2: a(skipped) → b(written) → a(written) → Ctrl+S z(written).
+  // The token attributes each settlement to ITS occurrence, so the first `a`
+  // stays skipped while the third one owns the appended row.
+  const { vt, app, submitted, settleAt } = startApp()
+  app.resetInputHistory(['anchor'], 'session-a')
+  app.beginInputHistoryScope('session-b')
+  const submit = (text: string): Promise<void> => submitThroughEditor(app, vt, text)
+  await submit('a')
+  await submit('b')
+  await submit('a')
+  assert.deepEqual(submitted, ['a', 'b', 'a'])
+  settleAt(0, 'session-b', 'skipped')      // the FIRST a is the one the policy skipped
+  settleAt(1, 'session-b', 'written')      // b
+  settleAt(2, 'session-b', 'written')      // the LATER a owns the appended row
+  app.settleScopeInput({ owner: 'session-b', outcome: 'written', text: 'z' })
+  app.resetInputHistory(['z', 'a', 'b'], 'session-b')
+  assert.deepEqual(app.getInputHistory(), ['z', 'a', 'b', 'a'],
+    'every occurrence survives with its own rank: both a occurrences, b and the steer row')
+  app.stop()
+})
+
+test('a scope submission identical to the outgoing Session\'s newest row still survives the reseed', async () => {
+  // The mirror keeps the outgoing Session's rows until the new owner's reseed,
+  // so its head must not decide the OPEN scope's consecutive duplicate: B's
+  // first input may legitimately repeat A's last one.
+  const { vt, app, submitted } = startApp()
+  app.resetInputHistory(['same'], 'session-a')
+  app.beginInputHistoryScope('session-b')
+  await submitThroughEditor(app, vt, 'same')
+  assert.deepEqual(submitted, ['same'])
+  assert.deepEqual(app.getInputHistory(), ['same'], 'the text is already the mirror head')
+  app.resetInputHistory([], 'session-b')
+  assert.deepEqual(app.getInputHistory(), ['same'],
+    'the fresh Session\'s empty snapshot must not drop the accepted input')
+  app.stop()
+})
+
+test('a same-Session earlier-window repeat block never consumes the open scope\'s own occurrences', async () => {
+  // /resume back into a Session whose disk rows already end with the same block
+  // the user submits again: the snapshot rows are EARLIER occurrences, and
+  // nothing is settled in this window.
+  const { vt, app, submitted } = startApp()
+  app.resetInputHistory(['old'], 'session-a')
+  app.beginInputHistoryScope('session-b')
+  const submit = (text: string): Promise<void> => submitThroughEditor(app, vt, text)
+  await submit('a')
+  await submit('b')
+  await submit('c')
+  assert.deepEqual(submitted, ['a', 'b', 'c'])
+  app.resetInputHistory(['b', 'a'], 'session-b')
+  assert.deepEqual(app.getInputHistory(), ['c', 'b', 'a', 'b', 'a'],
+    'every occurrence survives: the three accepted submissions in front of the earlier-window rows')
+  app.stop()
+})
+
+test('the sessionless pool covers a mounted surface whose owner hydration is still awaited', async () => {
+  // No publication call at all: the pool scope is open from construction. A
+  // mounted surface can accept input while the owner's hydration is still
+  // awaited (the Remote startup resume's `remote.read`), and the reseed that
+  // finally commits must adopt those entries instead of dropping them.
+  const { vt, app, submitted } = startApp()
+  await submitThroughEditor(app, vt, 'pool entry')
+  assert.deepEqual(submitted, ['pool entry'])
+  app.resetInputHistory(['resumed row'], 'resumed-session')
+  assert.deepEqual(app.getInputHistory(), ['pool entry', 'resumed row'],
+    'the resumed owner\'s reseed adopts the pool entry')
+  app.stop()
+})
+
+test('a written occurrence whose row is beyond the recall window is not re-inlined', async () => {
+  // The row cap: a settled write older than the snapshot's window has no row in
+  // the projection at all, exactly like the baseline snapshot — the occurrence
+  // is not re-added as a synthetic extra entry.
+  const { vt, app, settleAt } = startApp()
+  app.resetInputHistory(['anchor'], 'session-a')
+  app.beginInputHistoryScope('session-b')
+  await submitThroughEditor(app, vt, 'beyond the cap')
+  settleAt(0, 'session-b', 'written')
+  app.resetInputHistory(['someone else row', 'older'], 'session-b')
+  assert.deepEqual(app.getInputHistory(), ['someone else row', 'older'],
+    'a claimed row outside the recall window adds nothing')
+  app.stop()
+})
+
+test('a sessionless occurrence another owner wrote never re-enters the new Session', async () => {
+  // F6: a deferred `/help` writes a SESSIONLESS row. The occurrence IS settled,
+  // but its row is not part of any Session's projection, so the reseed that
+  // adopts the pool must not re-inline it.
+  const { vt, app, submitted, settleAt } = startApp()
+  await submitThroughEditor(app, vt, '/help')          // the sessionless pool occurrence
+  await submitThroughEditor(app, vt, 'first B prompt') // the occurrence that creates B
+  assert.deepEqual(submitted, ['/help', 'first B prompt'])
+  settleAt(0, undefined, 'written')                    // the row is sessionless
+  app.beginInputHistoryScope('B')                      // the pool is adopted by B
+  app.resetInputHistory([], 'B')
+  assert.deepEqual(app.getInputHistory(), ['first B prompt'],
+    'a row written under another identity adds nothing to the new Session')
+  app.stop()
+})
+
+test('a cap-evicted settlement keeps its fact and expires behind the window', async () => {
+  // F2-R5: the settlement queue is bounded, so the OLDEST settlement is evicted
+  // once 100 newer ones arrive. The evicted occurrence is still settled (its
+  // durable fact lives outside the queue) and it was settled before every
+  // retained append, so it expires behind the window instead of being promoted
+  // to the newest end.
+  const { vt, app, submitted, settleAt } = startApp()
+  app.resetInputHistory(['anchor'], 'session-a')
+  app.beginInputHistoryScope('session-b')
+  await submitThroughEditor(app, vt, 'old Enter')
+  settleAt(0, 'session-b', 'skipped')                  // oldest settlement: evicted below
+  const rows: string[] = []
+  for (let index = 1; index <= 100; index += 1) {
+    const text = `steer ${index}`
+    rows.push(text)
+    app.settleScopeInput({ owner: 'session-b', outcome: 'written', text })
+  }
+  assert.deepEqual(submitted, ['old Enter'])
+  const newestFirst = [...rows].reverse()             // steer 100 … steer 1
+  app.resetInputHistory(newestFirst, 'session-b')
+  assert.deepEqual(app.getInputHistory(), newestFirst,
+    'the evicted occurrence must not displace a real row: only the newest 100 rows are recalled')
+  app.stop()
+})
+
+test('an Enter accepted after another writer\'s row keeps its own occurrence and rank', async () => {
+  // F7: a steer writes a row WITHOUT updating the scope, so a later identical
+  // Enter is NOT a consecutive duplicate of the scope head — it is a real new
+  // occurrence that must survive the reseed (the old head check dropped it).
+  const { vt, app, submitted, settleAt } = startApp()
+  app.resetInputHistory(['anchor'], 'session-a')
+  app.beginInputHistoryScope('session-b')
+  const submit = (text: string): Promise<void> => submitThroughEditor(app, vt, text)
+  await submit('a')
+  settleAt(0, 'session-b', 'skipped')
+  app.settleScopeInput({ owner: 'session-b', outcome: 'written', text: 'b' })
+  await submit('a')                                   // accepted, still unsettled
+  assert.deepEqual(submitted, ['a', 'a'])
+  app.resetInputHistory(['b'], 'session-b')
+  assert.deepEqual(app.getInputHistory(), ['a', 'b', 'a'],
+    'the late occurrence keeps its own token and rank around the other writer\'s row')
+  app.stop()
+})
+
+test('the recall reconcile is linear in the scope and the window', async () => {
+  // F8: the frozen plan bounds this reconcile at O(100). The rank lookup is one
+  // map built once, and the reconstruction walks the window and the occurrences
+  // with a single cursor, so the visited positions stay linear in both.
+  const { vt, app, submitted, settleAt } = startApp()
+  app.resetInputHistory(['anchor'], 'session-a')
+  app.beginInputHistoryScope('session-b')
+  const submit = (text: string): Promise<void> => submitThroughEditor(app, vt, text)
+  for (let index = 1; index <= 100; index += 1) await submit(`pending ${index}`)
+  assert.equal(submitted.length, 100)
+  const rows: string[] = []
+  for (let index = 1; index <= 100; index += 1) {
+    const text = `written ${index}`
+    rows.push(text)
+    app.settleScopeInput({ owner: 'session-b', outcome: 'written', text })
+  }
+  app.resetInputHistory([...rows].reverse(), 'session-b')
+  const recalled = app.getInputHistory()
+  assert.equal(recalled.length, 100, 'the seed caps the recall at 100 entries')
+  assert.equal(recalled[0], 'pending 100', 'the newest occurrence is recalled first')
+  assert.ok(app.reconcileStepsForTest() <= 4 * (100 + 100),
+    `the reconcile must visit a linear number of positions: ${app.reconcileStepsForTest()}`)
+  void settleAt
+  app.stop()
+})
+
+test('an evicted SKIP expires behind the whole window, not only the retained one', async () => {
+  // F2-R5 boundary: a skip, then a write, then 100 further skips evict BOTH the
+  // skip and the write from the queue. The write's row is still part of the
+  // projection (the durable append watermark knows the window's row count), and
+  // the evicted skip is older than every appended row, so it expires behind it.
+  const { vt, app, settleAt } = startApp()
+  app.resetInputHistory(['anchor'], 'session-a')
+  app.beginInputHistoryScope('session-b')
+  await submitThroughEditor(app, vt, 'a')
+  settleAt(0, 'session-b', 'skipped')                       // evicted below
+  app.settleScopeInput({ owner: 'session-b', outcome: 'written', text: 'z' })   // evicted below
+  for (let index = 0; index < 100; index += 1) {
+    app.settleScopeInput({ owner: 'session-b', outcome: 'skipped', text: 'z' })
+  }
+  app.resetInputHistory(['z', 'older B'], 'session-b')
+  assert.deepEqual(app.getInputHistory(), ['z', 'a', 'older B'],
+    'the evicted write keeps its row and the evicted skip expires behind it')
+  app.stop()
+})
+
+test('the durable settlement facts stay bounded by the scope occurrence cap', async () => {
+  // The fact map must not become an unbounded per-token leak: a long window
+  // (here 150 accepted occurrences, each settled) drops the occurrences beyond
+  // the cap together with their facts.
+  const { vt, app, submitted, settleAt } = startApp()
+  app.beginInputHistoryScope('session-b')
+  for (let index = 1; index <= 150; index += 1) {
+    await submitThroughEditor(app, vt, `submission ${index}`)
+    settleAt(index - 1, 'session-b', 'skipped')   // settle THAT occurrence
+  }
+  assert.equal(submitted.length, 150)
+  assert.ok(app.scopeFactCountForTest() <= 100,
+    `the durable facts must be bounded by the scope cap: ${app.scopeFactCountForTest()}`)
+  app.stop()
+})
+
+test('a long run of identical pending submissions never evicts an older occurrence', async () => {
+  // The scope's cap counts RUNS, exactly like the editor/mirror recall it feeds:
+  // one pending `a` plus 100 consecutive pending `b`s must still recall both.
+  const { vt, app, submitted } = startApp()
+  app.beginInputHistoryScope('session-b')
+  await submitThroughEditor(app, vt, 'a')
+  for (let index = 1; index <= 100; index += 1) await submitThroughEditor(app, vt, 'b')
+  assert.equal(submitted.length, 101)
+  app.resetInputHistory([], 'session-b')
+  assert.deepEqual(app.getInputHistory(), ['b', 'a'],
+    'the run of duplicates collapses to one entry and the older occurrence survives')
+  app.stop()
+})
+
+test('an evicted SKIP that settled after an evicted write stays newer than its row', async () => {
+  // F2: the covered window also carries rows whose WRITE settlement the cap
+  // evicted, so the skip's rank cannot be "behind the whole window" — it sits at
+  // the append boundary its own settlement recorded.
+  const { vt, app, settleAt } = startApp()
+  app.resetInputHistory(['anchor'], 'session-a')
+  app.beginInputHistoryScope('session-b')
+  const submit = (text: string): Promise<void> => submitThroughEditor(app, vt, text)
+  await submit('w')
+  await submit('s')
+  settleAt(0, 'session-b', 'written')    // w's row is appended first
+  settleAt(1, 'session-b', 'skipped')   // s settles after that append: s is newer
+  for (let index = 0; index < 100; index += 1) {
+    app.settleScopeInput({ owner: 'session-b', outcome: 'skipped', text: 'x' })
+  }
+  app.resetInputHistory(['w'], 'session-b')
+  assert.deepEqual(app.getInputHistory(), ['s', 'w'],
+    'the later skip is newer than the evicted write row it settled after')
+  app.stop()
+})
+
+test('two evicted skips keep their own boundaries across evicted writes', async () => {
+  // N1: the evicted skips must be consumed in boundary order, so a skip that
+  // settled early is not dumped behind a row it is newer than just because a
+  // later skip exists.
+  const { vt, app, settleAt } = startApp()
+  app.resetInputHistory(['anchor'], 'session-a')
+  app.beginInputHistoryScope('session-b')
+  const submit = (text: string): Promise<void> => submitThroughEditor(app, vt, text)
+  await submit('w')
+  await submit('s1')
+  await submit('w2')
+  await submit('s2')
+  settleAt(0, 'session-b', 'written')    // w   (appendsBefore 0)
+  settleAt(1, 'session-b', 'skipped')    // s1  (newerRows 1)
+  settleAt(2, 'session-b', 'written')    // w2  (appendsBefore 1)
+  settleAt(3, 'session-b', 'skipped')    // s2  (newerRows 0)
+  for (let index = 0; index < 100; index += 1) {
+    app.settleScopeInput({ owner: 'session-b', outcome: 'skipped', text: 'x' })
+  }
+  app.resetInputHistory(['w2', 'w'], 'session-b')
+  assert.deepEqual(app.getInputHistory(), ['s2', 'w2', 's1', 'w'],
+    'each evicted skip lands at the boundary its own settlement recorded')
+  app.stop()
+})
+
+test('a published owner drops the outgoing Session recall before its hydration commits', async () => {
+  // The transition window, measured from the SYNCHRONOUS publication: Session B is
+  // current, its hydration is still pending, and ↑ must already be B's alone.
+  const { vt, app } = startApp()
+  app.resetInputHistory(['A old prompt'], 'session-a')
+  app.beginInputHistoryScope('session-b')
+  app.setDraft('')
+  vt.sendInput('\x1b[A')
+  await vt.waitForRender()
+  assert.notEqual(app.getDraft(), 'A old prompt',
+    'the outgoing Session must not be recallable once the new owner is published')
+  // An input accepted for B is recalled even though hydration has not committed.
+  await submitThroughEditor(app, vt, 'B new prompt')
+  app.setDraft('')
+  vt.sendInput('\x1b[A')
+  await vt.waitForRender()
+  assert.equal(app.getDraft(), 'B new prompt', 'the accepted B input is recallable')
+  app.resetInputHistory(['B persisted'], 'session-b')
+  assert.deepEqual(app.getInputHistory(), ['B new prompt', 'B persisted'],
+    'the commit keeps the new Session records AND the occurrence accepted before it landed')
+  app.stop()
+})
+
+test('the first Session publication isolates the boot recall of the CWD history', async () => {
+  // No Session yet: the boot recall holds the CWD history of earlier Sessions. The
+  // FIRST publication must isolate it as well, while the occurrence it just
+  // accepted stays recallable until hydration folds it.
+  const { vt, app, submitted } = startApp()
+  app.resetInputHistory(['old A prompt', 'older B prompt'])
+  await submitThroughEditor(app, vt, 'first prompt')
+  assert.deepEqual(submitted, ['first prompt'])
+  app.beginInputHistoryScope('session-b')
+  app.setDraft('')
+  vt.sendInput('\x1b[A')
+  await vt.waitForRender()
+  assert.equal(app.getDraft(), 'first prompt',
+    'only the occurrence accepted for the new Session is recallable, not the CWD pool')
+  app.setDraft('')
+  vt.sendInput('\x1b[A')
+  vt.sendInput('\x1b[A')
+  await vt.waitForRender()
+  assert.notEqual(app.getDraft(), 'old A prompt', 'the boot recall is isolated at publication')
+  app.resetInputHistory(['new row'], 'session-b')
+  assert.deepEqual(app.getInputHistory(), ['first prompt', 'new row'],
+    'hydration folds the snapshot under the accepted occurrence')
+  app.stop()
+})
+
+test('the first publication never re-seeds an occurrence another identity already wrote', async () => {
+  // A sessionless `/help` (its row is written with `sessionId: undefined`) followed
+  // by the prompt that creates Session B: the publication must NOT re-seed the
+  // sessionless occurrence into B's temporary recall, while the accepted but still
+  // unpersisted prompt stays.
+  const { vt, app, submitted, settleAt } = startApp()
+  await submitThroughEditor(app, vt, '/help')
+  await submitThroughEditor(app, vt, 'first prompt')
+  assert.deepEqual(submitted, ['/help', 'first prompt'])
+  settleAt(0, undefined, 'written')       // /help wrote a SESSIONLESS row
+  app.beginInputHistoryScope('B')         // the boot recall is dropped, B published
+  app.setDraft('')
+  vt.sendInput('\x1b[A')
+  await vt.waitForRender()
+  assert.equal(app.getDraft(), 'first prompt', 'the unpersisted B prompt is recallable')
+  app.setDraft('')
+  vt.sendInput('\x1b[A')
+  vt.sendInput('\x1b[A')
+  await vt.waitForRender()
+  assert.notEqual(app.getDraft(), '/help',
+    'a sessionless occurrence already written under another identity is not re-seeded')
+  app.resetInputHistory([], 'B')
+  assert.deepEqual(app.getInputHistory(), ['first prompt'],
+    'hydration keeps the B projection: the sessionless row adds nothing')
+  app.stop()
+})
+
+test('a skipped sessionless occurrence is not re-seeded into the new Session either', async () => {
+  // The sessionless identity decides cross-Session visibility, not whether a row
+  // happened to be written: `/help` skipped by the CWD-level dedupe is as foreign
+  // as a written sessionless row, and must not appear in the new Session's recall
+  // even before hydration replaces the mirror.
+  const { vt, app, settleAt } = startApp()
+  await submitThroughEditor(app, vt, '/help')
+  await submitThroughEditor(app, vt, 'first prompt')
+  settleAt(0, undefined, 'written')    // a sessionless row
+  settleAt(0, undefined, 'skipped')    // (idempotent: the durable fact stays sessionless)
+  app.beginInputHistoryScope('B')
+  assert.deepEqual(app.getInputHistory(), ['first prompt'],
+    'only the occurrence this owner can still own is re-seeded')
+  app.resetInputHistory([], 'B')
+  assert.deepEqual(app.getInputHistory(), ['first prompt'],
+    'hydration agrees with the publication: the sessionless occurrence adds nothing')
+  app.stop()
+})
+
 test('the pre-session welcome invites the first message and clears on facts', async () => {
   const { vt, app } = startApp()
   app.setWelcomeIdle(true)
@@ -2682,7 +3134,7 @@ test('fixed-width overlays fill the declared width: no border-external mask regi
       [{ value: 'job:1', label: 'bash · build', status: 'running', startedAt: Date.now(), group: 'jobs' }],
       () => 'close',
       () => {},
-      { mode: 'quick', header: 'tasks' },
+      { mode: 'full', header: 'tasks', width: 72, maxHeight: 16 },
     )
     await vt.waitForRender()
     const strip = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, '').replace(/\s+$/, '')
@@ -2700,7 +3152,9 @@ test('fixed-width overlays fill the declared width: no border-external mask regi
     // overlay still occupied the declared 72 — the compositor padded the
     // gap, and the border's right edge sat far short of the overlay edge
     // (the black mask). The right-border position is the detector.
-    const declared = Math.min(72, columns)
+    // B4-B: full mode keeps the 1-cell margin each side, so the resolved
+    // width is min(declared, columns - 2).
+    const declared = Math.min(72, columns - 2)
     const left = box[0]!.indexOf('╭')
     assert.ok(left >= 0, `top border missing:\n${box.join('\n')}`)
     for (const line of box) {
@@ -2724,7 +3178,7 @@ test('a fixed-width overlay keeps its frame geometry across fullscreen, resize a
       [{ value: 'job:1', label: 'bash · build', status: 'running', startedAt: Date.now(), group: 'jobs' }],
       () => 'close',
       () => {},
-      { mode: 'quick', header: 'tasks' },
+      { mode: 'full', header: 'tasks', width: 72, maxHeight: 16 },
     )
   }
   const assertRightEdge = (label: string): void => {
@@ -3592,7 +4046,7 @@ test('ctrl+o still folds the viewed transcript while the viewer is up', async ()
   app.stop()
 })
 
-test('openTaskBrowser renders status dots and live counts in the overlay', async () => {
+test('openTaskBrowser renders semantic statuses and live counts in the overlay', async () => {
   const { vt, app } = startApp()
   app.openTaskBrowser(
     [
@@ -3608,8 +4062,9 @@ test('openTaskBrowser renders status dots and live counts in the overlay', async
   const strip = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, '').replace(/\s+$/, '')
   const view = vt.getViewport().map(strip).join('\n')
   assert.ok(view.includes('tasks · subagents'), `header missing:\n${view}`)
-  assert.ok(view.includes('●'), `status dots missing:\n${view}`)
-  assert.ok(view.includes('running'), `running status missing:\n${view}`)
+  assert.ok(view.includes('‣ Running'), `running status marker and word missing:\n${view}`)
+  assert.ok(view.includes('‣ Completed'), `completed status marker and word missing:\n${view}`)
+  assert.ok(view.includes('running'), `running detail status missing:\n${view}`)
   assert.ok(view.includes('3s'), `elapsed missing:\n${view}`)
   assert.ok(view.includes('1m'), `completed elapsed missing:\n${view}`)
   assert.ok(view.includes('── jobs ──') && view.includes('── subagents ──'), `group headers missing:\n${view}`)
@@ -3685,22 +4140,28 @@ test('Quick Tasks overlay consumes non-whitelisted printable input (no editor le
     ],
     () => 'close',
     () => {},
-    { mode: 'quick', header: 'Tasks', enableSearch: true, maxVisible: 8 },
+    { mode: 'full', header: 'Tasks', enableSearch: true, maxVisible: 8 },
   )
   await vt.waitForRender()
   const strip = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, '').replace(/\s+$/, '')
-  for (const key of ['s', '/', 't', 'a', 'r', 'n', 'x', 'S', 'N', 'T']) vt.sendInput(key)
+  vt.sendInput('s')
+  await vt.waitForRender()
+  // Full's stop chord: s arms, a navigation key cancels (the same contract
+  // the Quick whitelist used to prove by ignoring the key entirely).
+  vt.sendInput('\x1b[B')
+  await vt.waitForRender()
+  for (const key of ['t', 'x', 'N', 'T']) vt.sendInput(key)
   await vt.waitForRender()
   let view = vt.getViewport().map(strip).join('\n')
-  assert.ok(view.includes('Open Task Center'), `Quick must stay open:\n${view}`)
+  assert.ok(view.includes('Tasks [TRACKED]'), `the browser must stay open:\n${view}`)
   assert.ok(!view.includes('confirm stop'), `no hidden stop confirmation:\n${view}`)
   assert.ok(!view.includes('type to filter'), `no hidden search mode:\n${view}`)
   assert.equal(app.seatTextForTest(), 'keep-this-draft', 'printables must not reach the editor')
-  // A single Esc closes Quick; the editor regains input ownership.
+  // A single Esc closes the browser; the editor regains input ownership.
   vt.sendInput('\x1b')
   await vt.waitForRender()
   view = vt.getViewport().map(strip).join('\n')
-  assert.ok(!view.includes('Open Task Center'), `one Esc must close Quick:\n${view}`)
+  assert.ok(!view.includes('Tasks [TRACKED]'), `one Esc must close the browser:\n${view}`)
   vt.sendInput('Z')
   await vt.waitForRender()
   assert.equal(app.seatTextForTest(), 'keep-this-draftZ', 'the editor owns input again after the single Esc')
@@ -3715,45 +4176,60 @@ test('Quick Tasks: S then a single Esc returns to the editor (original regressio
     [{ value: 'job:1', label: 'bash · build', status: 'running', active: true, source: 'job', type: 'bash', canStop: true, startedAt: Date.now(), group: 'jobs' }],
     () => 'close',
     () => {},
-    { mode: 'quick', header: 'Tasks', enableSearch: true, maxVisible: 8 },
+    { mode: 'full', header: 'Tasks', enableSearch: true, maxVisible: 8 },
   )
   await vt.waitForRender()
   const strip = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, '').replace(/\s+$/, '')
+  // B4-B: this surface is the FULL browser now — S arms the destructive
+  // chord (the Full contract; the retired Quick ignored it), Esc cancels the
+  // chord, and the SECOND Esc closes the browser back to the editor.
   vt.sendInput('S')
   await vt.waitForRender()
-  assert.ok(!vt.getViewport().map(strip).join('\n').includes('confirm stop'),
-    'S must not arm a stop confirmation in Quick')
+  assert.ok(vt.getViewport().map(strip).join('\n').includes('confirm stop'),
+    'S arms the stop chord (never confirms without Y)')
   vt.sendInput('\x1b')
   await vt.waitForRender()
-  assert.ok(!vt.getViewport().map(strip).join('\n').includes('Open Task Center'),
-    'one Esc must close Quick')
+  assert.ok(!vt.getViewport().map(strip).join('\n').includes('confirm stop'),
+    'Esc cancels the armed chord')
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+  assert.ok(!vt.getViewport().map(strip).join('\n').includes('Tasks [TRACKED]'),
+    'the second Esc closes the browser')
   vt.sendInput('Z')
   await vt.waitForRender()
   assert.equal(app.seatTextForTest(), 'draftZ', 'the editor owns input again after Esc')
   app.stop()
 })
 
-test('Quick Tasks overlay drops a query restored from the full Task Center (Full→Quick regression)', async () => {
-  // index.ts reopens Quick with the full view's current state after
-  // Full → Esc → Esc, which can carry the query typed in Full. Quick owns
-  // no search, so the overlay must drop it instead of stranding the user in
-  // a filtered view with no pseudo-row (and therefore no way back to Full).
+test('the Full browser owns its own search state (B4-B: no modal Quick to drop into)', async () => {
+  // B4-B retired the modal Quick together with its restore input: the Full
+  // browser OWNS its query — typing one filters its rows and stays visible
+  // in the search input; one Esc still closes the browser.
   const { vt, app } = startApp()
   const strip = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, '').replace(/\s+$/, '')
   app.openTaskBrowser(
     [{ value: 'job:1', label: 'bash · build', status: 'running', active: true, source: 'job', type: 'bash', startedAt: Date.now(), group: 'jobs' }],
     () => 'close',
     () => {},
-    { mode: 'quick', header: 'Tasks', enableSearch: true, maxVisible: 8, initialQuery: 'no-match', initialSearchMode: false },
+    { mode: 'full', header: 'Tasks', enableSearch: true, maxVisible: 8 },
   )
   await vt.waitForRender()
   const view = vt.getViewport().map(strip).join('\n')
-  assert.ok(view.includes('Open Task Center'), `the pseudo-row must survive a restored query:\n${view}`)
-  assert.ok(!view.includes('no-match'), `the restored query must be dropped in Quick:\n${view}`)
+  assert.ok(view.includes('Tasks [TRACKED]'), `the browser must open:\n${view}`)
+  vt.sendInput('/')
+  vt.sendInput('no-match')
+  await vt.waitForRender()
+  const filtered = vt.getViewport().map(strip).join('\n')
+  assert.ok(!filtered.includes('bash · build'), 'the query must filter the rows')
+  // One Esc leaves search mode, the second closes the browser.
   vt.sendInput('\x1b')
   await vt.waitForRender()
-  assert.ok(!vt.getViewport().map(strip).join('\n').includes('Open Task Center'),
-    'one Esc must still close Quick')
+  assert.ok(vt.getViewport().map(strip).join('\n').includes('Tasks [TRACKED]'),
+    'the first Esc only leaves search mode')
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+  assert.ok(!vt.getViewport().map(strip).join('\n').includes('Tasks [TRACKED]'),
+    'the second Esc closes the browser')
   app.stop()
 })
 
@@ -3762,7 +4238,7 @@ test('openTaskBrowser repaints a subagent row in place on runtime re-projection 
   // the CACHED catalog from the Agent registry and commits through
   // handle.setItems — the open browser must flip the SAME row's status
   // word to inactive WITHOUT closing (plan §6.2 Case A), repainting the
-  // state glyph with it.
+  // shared marker and semantic word together.
   const { vt, app } = startApp()
   const handle = app.openTaskBrowser(
     [{
@@ -3783,7 +4259,7 @@ test('openTaskBrowser repaints a subagent row in place on runtime re-projection 
   const strip = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, '').replace(/\s+$/, '')
   let view = vt.getViewport().map(strip).join('\n')
   assert.ok(view.includes('running'), `running row missing:\n${view}`)
-  assert.ok(view.includes('●'), `a running row must paint the active glyph:\n${view}`)
+  assert.ok(view.includes('‣ Running'), `a running row must paint the shared marker and word:\n${view}`)
   // The child's driver goes idle: the runtime-only commit re-projects
   // the row (SAME value, new status) — this is exactly what the runner's
   // commitRows hook does on agent/status.
@@ -3801,7 +4277,8 @@ test('openTaskBrowser repaints a subagent row in place on runtime re-projection 
   view = vt.getViewport().map(strip).join('\n')
   assert.ok(view.includes('inactive'), `the row must repaint to inactive in place:\n${view}`)
   assert.ok(!view.includes('running'), `the old status word must be gone:\n${view}`)
-  assert.ok(view.includes('○'), `an idle row must paint the settled glyph:\n${view}`)
+  assert.ok(view.includes('‣ Inactive'), `an idle row must paint the shared marker and word:\n${view}`)
+  assert.ok(!view.includes('‣ Running'), `the old status marker/word must be gone:\n${view}`)
   assert.ok(view.includes('tasks · subagents'), `the browser must stay open:\n${view}`)
   app.stop()
 })
@@ -4774,26 +5251,51 @@ test('question: Esc between press and release cannot re-enter the free-text edit
   app.stop()
 })
 
-test('a nonCapturing overlay does not suppress the Host shortcut ladder (↓ Quick Tasks)', async () => {
+test('a nonCapturing overlay does not suppress the Host shortcut ladder (↓ Task Quick)', async () => {
   const vt = new VirtualTerminal(80, 24)
   let opened = 0
   const app = new TuiApp(vt, {
     onSubmit: () => {},
     onExit: () => {},
-    onOpenTasks: () => { opened += 1 },
   })
+  const realEntry = app.enterTaskQuick.bind(app)
+  app.enterTaskQuick = () => {
+    const entered = realEntry.call(app)
+    if (entered) opened += 1
+    return entered
+  }
   app.start()
   startedApps.add(app)
   await vt.waitForRender()
+  // B4-B: the admission needs the Quick projection alongside the badge.
+  app.setQuickTaskItems([{ value: 'job:job-1', label: 'build', status: 'running', source: 'job' }])
   app.setTasks([{ id: 'job:1', label: 'build', status: 'running' }])
   await vt.waitForRender()
-  // A nonCapturing notice owns no keyboard: the empty-editor ↓ affordance
-  // (focusedSeat 'editor' + tasksActive) must still reach the resolver.
+  // A nonCapturing notice owns no keyboard: the ↓ admission (focusedSeat
+  // 'editor' + tasksActive + the Quick projection) must still reach the
+  // resolver.
   app.showExtensionOverlay({ kind: 'text', spans: [{ text: 'HUD notice' }] }, { nonCapturing: true })
   await vt.waitForRender()
   vt.sendInput('\x1b[B') // down
   await vt.waitForRender()
-  assert.equal(opened, 1, '↓ must open Quick Tasks under a nonCapturing overlay')
+  assert.equal(opened, 1, '↓ must enter Task Quick under a nonCapturing overlay')
+  // B4-B: leave Quick before the capturing witness.
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+  // A capturing overlay HOLDS the keyboard: the same ↓ belongs to it, so the
+  // conditional affordance must be refused while it is focused.
+  const capturing = app.showExtensionOverlay({ kind: 'text', spans: [{ text: 'modal notice' }] })
+  await vt.waitForRender()
+  assert.equal(app.focusSeatForTest(), 'overlay', 'the capturing overlay must own the seat')
+  vt.sendInput('\x1b[B') // down
+  await vt.waitForRender()
+  assert.equal(opened, 1, 'a focused capturing overlay must own ↓')
+  // Releasing it restores the editor's ↓ route.
+  capturing.close()
+  await vt.waitForRender()
+  vt.sendInput('\x1b[B') // down
+  await vt.waitForRender()
+  assert.equal(opened, 2, '↓ must open Quick Tasks again once the capturing overlay closes')
   app.stop()
 })
 

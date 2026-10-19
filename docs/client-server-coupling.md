@@ -120,11 +120,14 @@ lands.
 | `userQuestions` Client Remote | Client-local consumption of a Host authority | `GENERATED_CLIENT_REMOTE` | official client contribution (`@deepseek-ai/dsh-user-questions/remote`) | `QuestionInteractionPort` + the `userQuestions` Session projection | generated `/remote` namespace | additive Client contribution; preserve the generated object identity | `test/remote-m3a-semantics-smoke.test.ts` |
 | `configEditor` | Host-owned | `BASE_HOST_PREREQUISITE` | profile/base composition (`profileContext` config plane) | `ConfigPort` settings mirror | Host settings/config plane | reuse; `RemoteHostRuntime` must not mount it | M3-3B same-Host smoke (fixture-mounted only per `docs/client-server-migration.md`) |
 | `settings` | Host-owned | `BASE_HOST_PREREQUISITE` | profile/base composition | Remote Config adapter | generated `settings` Remote | reuse; no second settings authority or namespace | `test/remote-config-port.test.ts` + same-Host smoke |
+| `workingDirectory` Host service | Host-owned | `BASE_HOST_PREREQUISITE` | `@deepseek-ai/dsh-base` (row `working-directory`) | Direct status/catalog/file/command/child-view adapters (`sessionStatus().cwd`, `@`/skill scopes, command routing, child viewer) | the same-session `workingDirectory` Session projection; the header stays the immutable ORIGINAL project | reuse; the TUI never caches a second cwd, never substitutes the process cwd, and a Remote consumer never reads a Host cwd for Client-local shell/OSC 7 | `test/direct-working-directory-rc2.test.ts` + `test/runner-direct-working-directory.test.ts` |
+| `web` / `web-deepseek-api` settings sections | Host-owned | `BASE_HOST_PREREQUISITE` | `@deepseek-ai/dsh-base` (rows `web`, `web-deepseek-api`; providers and `dsh-web` selection at call time) | Direct `ConfigPort.web` (`DirectWebProviderConfig`) → `/settings` Web section; `ctx.web.search/fetch` + `tool-web` at call time | the official revision-checked `settings.describe/mutate` plane; the live provider selection is `ctx.web`'s own volatile state | reuse; never a second YAML/store, never a plugin enabled flag as the selection, and the Remote adapter is a static unavailable/refuse implementation (no Host namespace on the wire) | `test/web-provider-config-direct.test.ts` + `test/web-provider-rc2-integration.test.ts` + `test/settings-web-provider.test.ts` |
 | `jobController` | Host-owned | `BASE_HOST_PREREQUISITE` | the existing TUI row | `JobObservationPort` | `IJobs` + generated `job` Remote | reuse; no second job observation authority | `test/remote-job-observation.test.ts` + the Job roster in `test/remote-client-runtime.test.ts` |
 | M3 Host API/session helper rows | Host-owned | `MIGRATION_ADDITIVE_HOST` | `RemoteHostRuntime` | the M3 adapters | official Host plugins + generated Remotes | additive; mount only the frozen additive closure | `test/remote-client-runtime.test.ts` |
 | TUI Task Center / Question presentation | Client-local | `CLIENT_LOCAL` | TUI application surface | user-facing surfaces | semantic ports/projections only | never becomes Host authority; the Remote Task composition resolves no Host `ctx.jobs`/`ctx.subagents` (Direct-only gate, M3-5 PR6) | `test/runner-viewer-task-integration.test.ts` + `test/runner-remote-task-center.test.ts` + the Remote Task locality source lock in `test/application-runtime-selection.test.ts` |
 | Application runtime selection (`SelectedApplicationRuntime`) | Client-local composition | composition spine (M3-4 PR1) | `src/app/remote/application-runtime.ts` (Remote aggregate) + `selectApplicationRuntime` in `src/app/bootstrap/runtime-selection.ts` (the seam) | `bindSessionRuntime` common inputs (`owners`/`retirement`/`lifecycle`) and the runner's `backend` | Remote aggregate reuses the M3-1 wire + M3-3B backend + M3-2 owner services; reached ONLY through `runtime/backend-loader.ts` (the ONE frozen dynamic edge into `app/remote/runtime.ts`, which statically re-exports the aggregate) | exactly ONE Remote Host/Client graph, ONE semantic assembly, ONE owner registry per selected runtime; no second construction site; no public/config/env selector — normal `apply()` stays Direct | `test/remote-application-runtime.test.ts` + `test/application-runtime-selection.test.ts` + the dynamic-boundary rules in `test/application-architecture-gate.test.mjs` |
 | PiTui Client UI subtree (`RemoteClientUiRuntime`) | CLIENT_LOCAL | `CLIENT_LOCAL` | `src/app/remote/client-ui-runtime.ts`, composed by the Remote application runtime (M3-6 PR1) on the EXISTING official Client Context (`wire.client.context` — `client-runtime.ts` stays the official transport/data core and creates that Context exactly once) | SurfaceRuntime / extension-facing TUI owners (through `RemoteApplicationOverride.extensionService` — the narrow service object; it does not expose the Client Context or plugin fibers, only the selected PiTuiExtensionService capability crosses the in-process composition seam) | none for extension callbacks (TUI-local `src/extensions.ts`/`src/builtins.ts` plugin fibers); plugins may separately consume public Client/Remote facts | one subtree per Remote application aggregate: exactly three fibers (Client-local tuiStartup facts provider → extension host → builtins), no second Client Context, no generic Loader/profile/bundle discovery | `test/remote-client-ui-runtime.test.ts` (component) + `test/remote-application-runtime.test.ts` (aggregate) + `test/runner-remote-command-plane.test.ts` (L6 locality) |
+| Host performance projection (`piTuiPerformance`) | Host-owned | `HOST_OWNED` (bundle row; NOT a base prerequisite) | `@xmoon76/dsh-pi-tui/performance-host` (`src/app/host/performance-host.ts`): the Direct profile row `pi-tui-performance-host` in `cordis.patch.yml`, and the experimental `RemoteHostRuntime` mount right after the official `sessionStats` unit | Client carriers: the Session's `SessionStatusProjection.performance` → `derivePerformance` → `UsageStatus.performance`, consumed by `/status` and the Footer (PR-3's `full` / `speed` / `speed-all` / `speed-both` / `latency` formats) | the bundle's OWN `sessionProjections.register('piTuiPerformance')` unit (see "Permanent Host-plane plugin boundary" below for the sanctioned reflect read); snapshot / change feed / control-frame projection and checkpoint replay stay the official seam's (no new RPC, no Client-side sample ring) | exactly ONE registration per Host Context — the Direct row registers on the base Host Context, `RemoteHostRuntime` on its own; the TUI runner injects `piTuiPerformanceReady`, so a composition without the row fails loud instead of estimating | `test/performance-host-projection.test.ts` (fold, route epoch, checkpoint/restore replay, registration lifetime), `test/performance-host-remote-wire.test.ts` (real Host→Client projection face), `test/footer-items.test.ts` + `test/footer-density.test.ts` (the five styles and their compact forms) and the L6 `test/runner-remote-presentation.test.ts` (Host → Client → rendered Footer) + the shipped-row lock |
 
 The exact package/row names may evolve; the ownership rule must remain explicit.
 
@@ -208,6 +211,150 @@ const on = source.remote.$on.bind(source.remote)
 
 or an equivalent call that preserves the receiver. This applies to any generated
 Client method whose contract is receiver-sensitive, not only `$on`.
+
+### Carrier Peer, `./client` conditions and the working-directory prerequisite (0.2.1-rc.2 baseline)
+
+The 0.2.1-rc.2 re-qualification of the experimental M3 composition keeps the
+frozen ownership rows above and adds four facts the implementation must not
+reinterpret:
+
+- **One owner Peer, two paths.** `createInProcessCarrier()` passes
+  `hostContext.connection.browserPeer` — the Peer the `HostConnectionService`
+  constructor creates with `principal: { kind: 'owner' }` and disposes with the
+  Connection plugin fiber — to BOTH `shared.fetch(request, peer)` and
+  `gateway.wireStream.open(endpoint, payload, uplink, peer, signal)`. The carrier
+  never creates, caches, or disposes a Peer; the peer's lifetime stays the
+  Connection fiber's, so a retired Connection really does refuse later work.
+- **`interactions: 'answer'` is declared, not inherited.** The official
+  Connection default is `answer` only for a page carrier (one with a location)
+  and `none` otherwise, and `none` refuses forwarded events outright. This
+  in-process Client is the TUI's only answering surface, so
+  `installConnection(..., { interactions: 'answer' })` states it explicitly.
+- **`./client` entries are condition-selected.** The official packages publish a
+  standalone Node ESM half (`node`) and a `__ModuleLoader__`-registering browser
+  factory (`browser`/`default`). The in-process Client composes the Node half
+  where the package publishes one and the registering browser factory otherwise,
+  through ONE module table, so a registering factory can still resolve a
+  Node-half dependency (`src/app/remote/client-runtime.ts`).
+- **The real `workingDirectory` owner is a base prerequisite.** 0.2.1-rc.2's
+  `SubagentRuntime`, the SessionController's nested skill catalog and
+  `@deepseek-ai/dsh-file-reference-local` all inject it; without that row the
+  affected Remotes silently never register (which surfaces as a bare 404).
+  Production inherits the `dsh-base` row; the Host runtime asserts it, and every
+  independent Host fixture must mount the official owner rather than fake it.
+
+- **Remote lifecycle gaps (S3 PR-C status).** These behaviours are reachable
+  with the 0.2.1-rc.2 composition. The M3 Remote parity stage owned them; PR-C
+  resolves the ones below and leaves the rest recorded, never papered over:
+  1. **Admission is not the durable append — RULED_BY_S3.** The official
+     `session/prompt` Remote answers when the Host Agent ACCEPTED the message
+     (`agent.followup`/`steer`); the HOST then owns the durable append and the
+     runtime-context message it composes with the first accepted prompt.
+     `RemoteSessionOwnerServices.flush()` stays a documented no-op — there is no
+     public Remote durable-flush verb — so an accepted write may become durable
+     AFTER the Client transport is disposed. S3's fixed verdict is that this
+     receipt IS the product contract: `WriteOutcome.committed` means Host
+     admission, never fsync/flush, and no client-side sleep/poll/retry may
+     fabricate a durability barrier. Teardown guarantees the SURFACE boundary,
+     pinned in `test/runner-remote-races.test.ts` (surface stops, a writer parked
+     at teardown settles between the stop and the disposal, the selected
+     transport disposes exactly once, no terminal write after the stop), AND it
+     refuses a write still parked BEFORE dispatch when the surface stops: the
+     composition-owned dispatch admission is closed synchronously at the
+     surface-stop boundary, so the official echo is abandoned and the Host sees
+     nothing (plan §9 "prompt serializer parked then shutdown"). A write that
+     already dispatched keeps its accepted receipt and is never reinterpreted.
+     The OWNER-APPROVED terminal contract (plan §9 amendment, 2026-10-19) makes
+     the draft half explicit: a refusal on the still-LIVE surface restores the
+     draft once, but once the surface has stopped there is no post-shutdown UI
+     write-back and restore into the destroyed editor is deliberately not
+     guaranteed; the submission's disposed guard is the authority and must not
+     be weakened to manufacture a callback after the stop.
+  2. **Session creation entry — RESOLVED_BY_S3_PR_C.** `RemoteSessionLifecycle`
+     no longer keeps the raw generated `session.create` + `sessions.refresh()`
+     path and its `RemoteLifecycleSessionRemotes` seam: ordinary and
+     explicit-preset creates share the ONE official
+     `ClientSessions.create({sessionId, cwd, agentPreset})` entry and adopt the
+     returned identity.
+  3. **Fork migration — RESOLVED_BY_S3_PR_C.** `fork()` always passes
+     `allowMigration:false` and classifies the official
+     `session/migration-required` refusal as a proven rejection. The explicit
+     user open/resume still uses the official `retain → Session.open` path where
+     the Host may migrate; the read-only Browser state never acts as a
+     migration veto or authority.
+  4. **Explicit open failure — RESOLVED_BY_S3_PR_C.** An explicit Remote
+     open/resume awaits the retained generation's initial-history settlement
+     (`SessionReference.ready`) and then reads the OFFICIAL `openState`/
+     `openError`; `ready` resolves even when `Session.doOpen` recorded an error,
+     so `retain()` success alone is never treated as a successful open. The commit
+     boundary requires the TERMINAL `openState === 'open'`: `error`, `cold`,
+     `loading` and an absent state all release the failed generation exactly once
+     and return `unavailable`. The non-error half is not theoretical — the
+     official `Session.configureSubagent()` address replacement calls
+     `Session.resync()`, which invalidates the old open, sets the SAME binding to
+     `cold` and reopens it (`loading`); the old `reference.ready` can resolve
+     first, and a stale completion must never commit history the reference no
+     longer proves. `/resume`, `--session` startup recovery and post-fork
+     adoption all keep the OLD subject/draft and never report a committed switch.
+     Proven on the real Host/Client graph by
+     `test/remote-session-migration-rc2.test.ts`, plus the resync/cold/loading/
+     absent-state matrix in `test/remote-session-lifecycle.test.ts`.
+  5. **Reconnect transcript currentness — RESOLVED_BY_S3_R0.** The Remote
+     ingress no longer treats the latest `change` as a fold input: delivery is a
+     SEQUENCE contract over the official identity (Connection generation +
+     exact retained binding + eventSource revision). Any generation rollover,
+     same-generation revision discontinuity, window `replace`/`prepend`, missing
+     change or hydrate gap puts the ONE ingress handle into `recovering`, which
+     suppresses partial increments and asks the fold OWNER to reconcile the
+     CURRENT official window; delivery resumes only after the owner acknowledges
+     the exact committed `{generation, binding, revision}` (the window must
+     still BE that revision and the Session must be open). The main fold owner
+     is `src/app/surface/session-presentation.ts` (`rehydrateFromWindow`, now
+     revision-fenced before it replaces the fold), the child owner is
+     `src/app/surface/viewer-runtime.ts` (`rehydrateViewedChild`); the bootstrap
+     runs ONE single-flight re-fold per surface and never disposes or
+     re-creates the ingress for a window reconcile (the previous
+     `onWindowReplaced → initRemoteLiveSurface` path released the only live
+     ingress before its ownership-fenced hydrate could abort — the
+     dispose-before-rearm hazard that left the transcript on the dead window).
+     A same-id BINDING replacement still retires the handle, and the owner's
+     existing commit/acquire path installs the next one. Installing that
+     ingress also CLOSES the opening journal for the session
+     (`OpeningJournal.close`): the journal's pre-commit buffering exists for the
+     hydrate gap, and keeping it open past the live subscription recorded events
+     that `clearOpening` then DISCARDED — a real lost-event window a reconnect's
+     fresh generation could land in. Direct keeps the journal semantics it has;
+     only the Remote live-surface install ends the window early. Direct behaviour
+     still shares no state with this path.
+  6. **Post-reconnect catalog re-read — test readiness, not a defect.**
+     `test/runner-remote-command-plane.test.ts` "L6 §7.4-14 stale catalog"
+     holds a verified stale catalog snapshot, replaces the official Connection
+     (`connection.reconnect()`) and disposes the old claim, then requires the
+     NEW generation to re-read the Host catalog on its own and route a mounted
+     command to the real Host handler exactly once. It used to time out under
+     full-suite concurrency because the test treated the automatic refresh's
+     authoritative READ as readiness, while the coordinator installs it an
+     instant later: the single submit was classified against the previous
+     claims and the same-named Client-context twin claimed the line (the
+     `catalog applied … source=invalidation` report followed the submit). The
+     test now waits for the product's own apply report before submitting, and
+     the end-to-end path (generation subscription → refresh → install →
+     classification → real Host handler) is green.
+     **NEEDS-DECISION (Owner handoff, not a fix):** the read→apply window
+     itself is unchanged PRODUCT BEHAVIOUR — a submission classified inside it
+     is routed against the previous claims (and a same-named Client-context
+     definition can claim the line). Whether the command plane must serialize a
+     submission behind an in-flight catalog install, or whether the last-good
+     claim rule already covers it, belongs to the command-plane stage (PR4/S4);
+     this PR only re-witnesses the test's readiness and records the window. The
+     handoff needs the Owner's explicit acceptance before it counts as
+     dispositioned.
+
+Evidence: the `PEER` block in `test/remote-client-runtime.test.ts` (owner identity
+observed inside the real Gateway on the stream path, the same object on the Fetch
+path, a no-policy guest refused with `remote-access/denied`, a disposed Peer
+refused with `gateway/peer-disposed`, and the owner Peer aborted with the
+Connection fiber).
 
 ### L5 fixture topology
 
@@ -420,10 +567,10 @@ convergence sections in `docs/client-server-migration.md`.
 | `src/runtime/direct/host-command-direct.ts` | `commands` | The Direct D2.1 `HostCommandPort` adapter — resolves the live Agent by session id at call time and invokes the official `commands.execute` service. It preserves the selected line, attachments, signal and settled command result; it does not parse, claim or route commands. Baseline entry added with the new Direct adapter. |
 | `src/runtime/direct/plugin-manager-direct.ts` | `pluginManager` | The Direct P1-A `PluginManagerPort` adapter — the ONLY module that resolves the official `@deepseek-ai/dsh-plugin-manager` Host service and maps its records/events onto detached TUI facts. It performs package/profile mutations ONLY through the official service (never pnpm, package.json, patch YAML or a profile path) and exposes no Host object above the port. The base layer already mounts the service; this is a P1 Host seam that M3 later re-points at the official client contract. Pre-M3 extracts the pure record mapping into the shared `plugin-manager-mapping.ts` (the Remote adapter uses the SAME mapping). M3-5 PR4: the official `plugin-manager/changed` notification maps to ONE transport-neutral invalidation hint (`subscribeInvalidation`) — the payload is never treated as inventory truth. Baseline entry added with the module. |
 | `src/runtime/direct/job-observation-direct.ts` | `jobController`, `jobs` | The Direct P1-B `JobObservationPort` adapter — the ONLY module that resolves the official `@deepseek-ai/dsh-api-job-controller` service and consumes `follow()`, the official NON-CONSUMING Host observer (it reads only `JobRegistry.readAt()`; it never calls `jobs.read()`, never advances the model `job_output` cursor and never acknowledges a completion notice). It also resolves the official local `jobs` registry for the port's ONE human mutation: `jobs.get` proves the row is still in the caller's visible list, then `jobs.kill` yields the registry's admission, mapped onto `JobStopOutcome` with no local roster/status mutation and no retry. The TUI inserts the same `job-controller` row the rc.1 web bundle mounts; the adapter owns only the observer lifetime, frame mapping and stop admission. Pre-M3 serves this port through the `Backend` (`backend.jobObservation`) instead of a runner-local construction. Same process/Context — NOT M3. Baseline entry added with the module; M3-5 PR3 added the local `jobs` registry for the selected-Job Stop seam (a deliberate Direct seam relocation, not new Remote-path coupling). |
-| `src/runtime/plugin-manager-mapping.ts` | (none) | The ONE pure Plugin Manager record mapping (P1, shared by Pre-M3): official `@deepseek-ai/dsh-plugin-manager` records → detached `PluginManagerPort` facts, used by BOTH the Direct Host-service adapter and the generated-Remote adapter so the presentation semantics cannot drift. No Cordis context, Host service or `RemoteResult` crosses it. |
+| `src/runtime/plugin-manager-mapping.ts` | (none) | The ONE pure Plugin Manager record mapping (P1, shared by Pre-M3): official `@deepseek-ai/dsh-plugin-manager` records → detached `PluginManagerPort` facts, used by BOTH the Direct Host-service adapter and the generated-Remote adapter so the presentation semantics cannot drift. S4-D1 forwards the complete rc.2 `BundleInfo.official/availability/installTarget/source` facts and the render-relevant `ChangeResult` facts (`restartReason`, actual `version`, `pendingBuilds`, `approvedBuilds`, `packageResult`, `registries`, `failedAt`) plus `InstallBundleOptions.approvedBuilds` unchanged. No Cordis context, Host service or `RemoteResult` crosses it. |
 | `src/runtime/remote/plugin-manager-remote.ts` | (none) | Experimental `PluginManagerPort` adapter over the official generated `pluginManager` Remote namespace plus the typed Remote's forwarded `plugin-manager/changed\|install-state\|install-log` events. Mapped through the shared pure mapping; a refused `RemoteResult` becomes one thrown Error (the controller's failure entry), with no retry and no second install state. Composed by the M3 Remote application runtime (`src/app/remote/m3a-semantics.ts`) and served through `Backend.pluginManager`; the forwarded `plugin-manager/changed` AND a new official Connection generation each map to ONE transport-neutral invalidation hint, while an authoritative `snapshot()` reread remains the only business truth (M3-5 PR4). |
-| `src/runtime/remote/job-observation-remote.ts` | (none) | Experimental P1 `JobObservationPort` adapter over the official Client `IJobs` (`state.rows` metadata authority, `state.observed` text/gap/streaming/error, reference-counted `watchRows`/`observe`). It owns no follow/cursor/reconnect state machine and never re-clips the official bounded render tail; both leases release exactly once. NOT production-composed. |
-| `src/app/plugin-manager/**` | the Plugin Manager APPLICATION owner (TS3): `controller.ts` (operation/presentation state machine, inventory read epochs, install request identity, mutation/currentness/disposal), `host-registry.ts` (one active surface claim/token), `extension-inventory.ts` (read-only extension observation projection), `classify.ts` (package-role classification policy) and `model.ts` (pure detached view projection). The Host business authority stays in `runtime/plugin-manager-port.ts` + `runtime/direct/plugin-manager-direct.ts`; the concrete terminal panel is `src/tui/plugin-manager/panel.ts` (TS4) and reaches the application only through the injected `PluginManagerPanelFactory` seam. | none | current (TS4) |
+| `src/runtime/remote/job-observation-remote.ts` | (none) | Experimental P1 `JobObservationPort` adapter over the official Client `IJobs` (`state.rows` metadata authority, `state.observed` text/gap/streaming/error, reference-counted `watchRows`/`observe`). It owns no follow/cursor/reconnect state machine and never re-clips the official bounded render tail; both leases release exactly once. NOT production-composed. See the open evidence gap recorded in `client-server-migration.md` (section "Open evidence gap — Remote same-run Job Command producer attribution"). |
+| `src/app/plugin-manager/**` | the Plugin Manager APPLICATION owner (TS3/S4-D1): `controller.ts` (official inventory read epochs, install request identity/recovery/approval, mutation currentness and disposal — it no longer owns list selection, search/filter, focus or scroll), `host-registry.ts` (one active surface claim/token), `extension-inventory.ts` (read-only extension observation projection), `classify.ts` (frozen four-section/provenance classification; the exact rc.2 B01–B14/base identity lists are version-limited presentation evidence, never catalog authority) and `model.ts` (pure detached section/card/Detail projection). The Host business authority stays in `runtime/plugin-manager-port.ts` + the shared mapping; the concrete fullscreen page is `src/tui/plugin-manager/workspace.ts` (S4-D1) and reaches the application only through the injected `PluginManagerPanelFactory` seam. | none | current (S4-D1) |
 | `src/app/plugin-manager/extension-inventory.ts` | (none) | The TUI-internal read-only projection over the shared `piTuiExtensions` runtime: it aggregates the runtime's own contribution-health records and the internal owner→Loader-entry-id projection into detached observations, used ONLY for presentation classification. It is not a second inventory, loader or enable/disable authority, and is not part of the public Extension API. The service-side seam (`_ownerEntryIds()`, `recordOwnerEntry()`) is package-private. Zero Host-service coupling (the ledger view is injected). |
 | `src/runtime/host-file-port.ts` | (none) | The Host-file port interface (M1.10, contract review) — path-only candidates (`{path, kind}`, the official `FileReferenceCandidate` shape). The Host discovery authority owns filtering, ranking, result bounds and order (the client presents them verbatim); only the TUI's quoting/`@`-insertion value/label/description/directory-continuation are CLIENT policy in `src/tui/interaction/autocomplete/provider.ts` + `src/tui/file-completion/presentation.ts`, never Host data. Zero Host coupling. |
 | `src/runtime/direct/host-file-direct.ts` | `fileReferences` (read lazily per call through `this.ctx?.get('fileReferences')` — the Direct Host context seam) | The Direct `HostFilePort` adapter (M1.10, TS8-HF1 routing) — the mapper over the session `@` router: the SESSION scope resolves the live Agent and hands it to `runtime/direct/host-file-augmentation-direct.ts`, which owns the bare-vs-explicit decision (bare → official `ctx.fileReferences.list(agent, query, signal)`, the `dsh-file-reference-local` service the composition mounts; explicit → the Host scoped scanner), while the WORKSPACE scope has no Host service and delegates to the Direct-only compatibility scanner. Since TS8-A the filesystem mechanics live in the canonical Direct owner `src/runtime/direct/file-completion/host-discovery.ts` (fd discovery or the bounded recursive fallback scan; renamed from `workspace-discovery.ts` by TS8-HF1 when it gained its second consumer); the `resolveReference` existence probe and its private `resolveReferenceCandidate()` path resolution (`~` expansion, absolute passthrough, relative against the Host workspace) stay here. Returns path-only DTOs; discovery bounds only, no presentation. |
@@ -501,6 +648,49 @@ safe full-Session-id convention. `src/client/artifact/save.ts` and
 `src/tui/interaction/save-location.ts` are the Client-local temp/atomic-commit
 sink and the Save Location UI — zero Host coupling.
 
+### Request-zone metadata (Client-local sample, Host-owned interpretation)
+
+One human prompt's request zone is the sending Client runtime's own IANA zone — a
+`CLIENT_LOCAL` sample taken per submit (`src/client/time-zone.ts`, the same
+`Intl.DateTimeFormat().resolvedOptions().timeZone` fact the official
+`SessionFace.prompt()` samples). It is request metadata: never durable TUI state,
+never a Host service read, and never the Host process/fallback zone.
+
+- **Direct ordinary prompt** — `src/app/submission/controller.ts` samples once at
+  the send point and `src/app/submission/direct-message-preparation.ts` maps it
+  onto the official `UserMessage.source.clientTimeZone` (the official `user-rpc`
+  vocabulary) beside the existing `rpcId`; the unidentified Skill/command
+  preparation path keeps its plain `{ kind: 'user' }` source.
+- **Remote ordinary prompt** — zero TUI-side field: the official
+  `SessionFace.prompt()` samples inside the official Client and the Host
+  `SessionController` validates it. `RemoteSessionWriter` must keep calling the
+  official four-argument `prompt(content, mode, undefined, requestId)`.
+- **Continuable child follow-up** — the Viewer composition
+  (`src/app/surface/application-events.ts`) provides the per-call
+  `clientTimeZone()` capability on `SubagentPromptContext`; the Direct and Remote
+  `SubagentPort` adapters sample once immediately before dispatch and put it on
+  the official `subagents.prompt` request. The Remote branch resolves no Host
+  `ctx.subagents`.
+
+Forbidden substitutions: the Host process zone (or any Host-global fallback zone)
+as the human zone; a TUI-owned timezone setting/store; reading the
+`time-context` projection; deriving a zone from rendered timestamps or from the
+TSP/Tern paint area. An unsamplable or reader-incompatible value refuses the send
+before dispatch (draft restored) instead of sending zone-less or fabricated. The
+`resolved`/`mixed`/`unavailable` policy, refresh cadence and display fallback stay
+Host-owned in the official plugin.
+
+Owning tests: `test/client-time-zone.test.ts`, `test/image-submit.test.ts`,
+`test/attachment-submit.test.ts`, `test/request-time-zone.test.ts` (Direct main
+source + rendered parity), `test/request-time-zone-child.test.ts` (REAL official
+subagent runtime → child durable source), `test/subagent-port.test.ts`,
+`test/subagent-viewer-submit.test.ts`, `test/remote-subagent-port.test.ts`,
+`test/remote-session-writer.test.ts`, `test/runner-remote-presentation.test.ts`
+(Client zone ≠ Host zone over the real Remote route),
+`test/runner-viewer-task-integration.test.ts` and
+`test/runner-remote-task-center.test.ts` (real child follow-up → Host child
+source).
+
 ### User shell ownership (shell amendment, M3-4 PR3)
 
 `!` and `!!` are both Host-side user-shell operations; bypass/sandbox are
@@ -568,6 +758,38 @@ service presence through `ctx.reflect.get(...)` for fail-fast diagnostics. This
 is Host-side composition sanctioned by the frozen M3-0 contract, not Client-side
 business coupling; the M3-4 bootstrap integration owns any future inventory
 relocation.
+
+### Permanent Host-plane plugin boundary (2026-10-10)
+
+`src/app/host/**` is the bundle's own HOST plane: a Cordis row that computes a
+Host-owned projection over committed Session events and publishes it on the
+official seam. Registering a projection there is Host-owned work, NOT a
+Client/application surface reaching into a Host service, and it is NOT a
+Direct→Remote migration debt item — this boundary is permanent, so it is
+deliberately NOT listed under `TEMPORARY_EXCEPTION` above.
+
+`src/app/host/performance-host.ts` registers the bundle's `piTuiPerformance`
+unit. It resolves the registry with `ctx.reflect.get('sessionProjections')`
+(the same Host-plane reflect read the Remote composition owner above uses)
+because a Loader row has no composition owner to hand the service in, and it
+declares `inject: ['sessionProjections']` so Cordis, not a lookup, owns the
+ordering. The consumer-side rules are what keep this from becoming a second
+authority:
+
+| Item | Rule |
+|---|---|
+| Registration inside `src/app/host/**` | allowed |
+| `ctx.reflect.get('sessionProjections')` inside `src/app/host/**` | allowed, only with the two rows below |
+| `inject = ['sessionProjections']` on the row | REQUIRED (replaces any lazy lookup) |
+| Host ownership row in this file | REQUIRED |
+| `src/app/surface/**` or `src/tui/**` reading `sessionProjections` directly | FORBIDDEN |
+| Editing `scripts/client-boundary-baseline.json` to absorb new coupling | FORBIDDEN |
+
+The `reflect.get` read is an access-mechanics exception, not an absence of
+coupling: the row IS the Host plane, and every Client/application consumer must
+still read the resulting values through the semantic DTO / port boundary
+(`src/domain/status/performance-view.ts` and, from PR-2 on,
+`SessionStatusProjection.performance`).
 
 ## Locality rules for new features
 
@@ -642,6 +864,36 @@ Host-only catalog source
   flow back into origin authority.
 - `definitionId` is provenance/discovery metadata ONLY — never authorization,
   trust, or a capability grant.
+
+## S4-D1 / PR-D1 — official catalog → fullscreen page source→sink
+
+The Plugin Manager is still ONE authority chain: the real Host
+`PluginManager.listBundles()/listPlugins()` (Direct service or generated
+Remote face) → the SHARED `detachPluginManagerSnapshot()` mapping →
+`app/plugin-manager/classify.ts` (frozen four sections, exact rc.2 B01–B14/base
+identity evidence, exact `SELF_BUNDLE`, proven Loader-entry-id extension
+association) → `model.ts` (pure section/card/Detail projection) → the ONE
+`PluginManagerController` → `PluginManagerWorkspacePanel`. No Web React list,
+static 14-item card set, package-scope heuristic or `experimental` substring is
+a catalog authority.
+
+- **One controller, one page:** the controller outlives the page and owns only
+  the official read/operation lifecycle. The page owns per-open selection,
+  search/filter, focus, scroll, painted hit map/revision and view mode.
+- **One screen lease:** the direct `/plugins` root and the in-place
+  `Settings → Plugins` page use the SAME `TuiApp` workspace Alt-Screen
+  primitive (`leaseWorkspaceScreen`). There is no nested Alt Screen, no second
+  focus broker and no overlay fallback; the workspace record is a
+  `settings | plugin` union, and Settings-only `rereadFacts()/refreshRow()`
+  paths are type-guarded.
+- **Direct/Remote parity:** both adapters share the mapping; `approvedBuilds`
+  is forwarded through `InstallBundleOptions` on both, and the Remote
+  generation/invalidation hints remain hints for an authoritative `snapshot()`
+  reread (never inventory truth).
+- **Qualification boundary:** this PR proves `CATALOG_MANAGEABLE`
+  (real rc.2 Host catalog → page → official action → authoritative reread).
+  It does NOT claim `HOST_CAPABLE` or `TUI_FEATURE_SUPPORTED` for the 14
+  bundles; those remain S4-D2/D3 ledger items.
 
 ## How to update this file
 

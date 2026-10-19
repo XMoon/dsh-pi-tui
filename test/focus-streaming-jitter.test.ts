@@ -77,7 +77,13 @@ function frame(app: TuiApp): [number, number, number, boolean] {
 const TABLE_PREFIX = '| one | two | three |\n| --- | --- | --- |\n| alpha | beta | gamma |\n| delta | eps'
 
 test('expanded live Markdown preserves wheel intent across historical growth and shrink', async () => {
-  const { vt, app } = startApp(22, 29)
+  // TPS plan PR-2: the bare app's empty status no longer paints fabricated
+  // `TTFB 0s · 0 tok/s` performance items (the measured values are the Host
+  // projection's and are ABSENT here), so the footer is one row shorter and
+  // the fullscreen viewport one row taller. The terminal height is reduced by
+  // one to keep the EXACT geometry this wheel-intent test asserts (a viewport
+  // that fits the content cannot exercise a wheel-up off the tail).
+  const { vt, app } = startApp(22, 28)
   const folder = new TranscriptFolder()
   folder.apply([
     eventAt('turn/start', { turn: 1 }, 1),
@@ -340,7 +346,7 @@ test('automatic Workflow completion releases a running Focus presentation floor'
     eventAt('turn/start', { turn: 1 }, 30),
     eventAt('tool-workflow/run-start', { runId: 'run-1', name: 'audit' }, 31),
     eventAt('tool-workflow/agent-start', {
-      runId: 'run-1', seq: 0, label: 'worker', childId: 'child-1',
+      runId: 'run-1', seq: 1, label: 'worker', childId: 'child-1',
     }, 32),
   ])
   try {
@@ -353,7 +359,7 @@ test('automatic Workflow completion releases a running Focus presentation floor'
     const running = height(app)
 
     folder.apply([eventAt('tool-workflow/agent-end', {
-      runId: 'run-1', seq: 0, outcome: 'completed',
+      runId: 'run-1', seq: 1, outcome: 'completed',
     }, 33)])
     show(app, folder)
     await vt.waitForRender()

@@ -31,6 +31,7 @@ import {
 } from '../src/domain/communication/git-attribution.ts'
 import { installGitAttributionPrompt, type SystemPromptLike } from '../src/app/direct/system-prompt.ts'
 import { registerTuiCommandsWithDirectSeams } from './support/register-tui-commands.ts'
+import { navigateToLegacySettings } from './support/open-legacy-settings.ts'
 
 /** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file
  * is disposed after each test (the process slot is released by the FINAL
@@ -184,7 +185,7 @@ function setupSettings(options: { gitAttribution?: string; failWrite?: boolean }
     setTerminalProgressMode: () => {}, setNotificationMethod: () => {},
     updateWelcomeCard: () => {},
     openJobView: () => {},
-    openTasksBrowser: () => {}, openPluginManager: () => {}, createPluginManagerSubmenu: () => ({ render: () => [], invalidate: () => {} }),
+    openTasksBrowser: () => {}, openPluginManager: () => {}, createPluginManagerPage: () => undefined,
     openRewindPicker: () => {},
     sessionTransitionPending: () => false,
     withSessionTransition: async <T>(task: () => T | Promise<T>) => task(),
@@ -206,6 +207,7 @@ function setupSettings(options: { gitAttribution?: string; failWrite?: boolean }
       signal: new AbortController().signal,
     })
     await vt.flush()
+    await navigateToLegacySettings(vt)
   }
   const view = async (): Promise<string> => {
     await vt.waitForRender()

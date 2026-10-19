@@ -29,7 +29,8 @@
  * @module @xmoon76/dsh-pi-tui/app/surface/session-presentation
  */
 
-import { compactingFromLog, workingFromLog } from './compaction-presentation.ts'
+import { compactionBracketFromLog, foldLiveMeasureEvent, measureEventKey, workingFromLog } from './compaction-presentation.ts'
+import type { ContextMeasureReason } from '../../domain/status/context-measurement.ts'
 import { foldGoal, goalTextOf } from '../../domain/status/derive-goal.ts'
 import { recallHistoryForSession, type ParsedHistoryRecord } from '../../client/history/store.ts'
 import { hydrateSessionUi } from './session-ui-hydrate.ts'
@@ -39,8 +40,12 @@ import { TranscriptFolder } from '../../domain/transcript/folder.ts'
 import { TranscriptWindowController } from '../../domain/transcript/window.ts'
 import type { Diag } from '../../runtime/process/diagnostics.ts'
 import type { AssistantLiveInput } from '../../runtime/assistant-stream-port.ts'
-import type { PresentationReadSnapshot } from '../../runtime/presentation-read-port.ts'
-import type { TuiApp } from '../../tui-app.ts'
+import type {
+  PresentationReadSnapshot,
+  PresentationWindowRefoldProof,
+} from '../../runtime/presentation-read-port.ts'
+import type { TodoItem } from '../../tui-app.ts'
+import type { SurfaceDisplaySeam } from './display-seam.ts'
 import type { RoutedSessionEvent, SurfaceMainPresentation, SurfaceRuntime } from './runtime.ts'
 
 /**
@@ -70,11 +75,10 @@ export interface PresentationCurrentFacts {
 function applyCurrentFacts(
   facts: PresentationCurrentFacts,
   status: { setGoalText: (text: string | undefined) => void },
-  app: TuiApp,
+  display: Pick<SurfaceDisplaySeam, 'commitStatusFacts'>,
 ): void {
   status.setGoalText(facts.goal === undefined || facts.goal === null ? undefined : goalTextOf(facts.goal))
-  app.setSessionTitle(facts.title)
-  app.setTodoSummary(facts.todos ?? [])
+  display.commitStatusFacts({ sessionTitle: facts.title, todos: facts.todos ?? [] })
 }
 
 /**
@@ -139,6 +143,10 @@ export interface SessionPresentationDeps<Event extends SessionPresentationEvent>
     readonly assistantStreamBaselineFor: (agent: LiveSessionAgent<Event>) => readonly AssistantLiveInput[]
     /** Whether the live session is in plan mode (official session projection). */
     readonly planActive: (agent: LiveSessionAgent<Event>) => boolean
+    /** The Session's EFFECTIVE working directory (official `workingDirectory`
+     *  projection read of the exact Session), or `undefined` when the
+     *  composition mounts no directory owner — never a Client-side guess. */
+    readonly effectiveCwd: (agent: LiveSessionAgent<Event>) => string | undefined
   }
   /** The footer/status projections owned by the surface status owner (A5b-2). */
   readonly status: {
@@ -150,6 +158,10 @@ export interface SessionPresentationDeps<Event extends SessionPresentationEvent>
     readonly refreshTerminalCwd: () => void
     readonly updateWelcomeCard: () => void
     readonly scheduleInitialMeasurement: (sessionId: string) => void
+    /** The live `compaction/end` measurement contract: mark the cached context
+     *  measurement dirty, then measure it through the semantic reader. */
+    readonly markContextDirty: () => void
+    readonly refreshContextMeasurement: (reason: ContextMeasureReason) => void
   }
   /** The per-session client-local input history (A5b-2 owns it). */
   readonly history: {
@@ -207,6 +219,23 @@ export interface SessionPresentationDeps<Event extends SessionPresentationEvent>
      *  invalidates the pending visible commit — plan §6.5). */
     readonly isTransportTokenCurrent?: (sessionId: string, token: unknown) => boolean
     /**
+     * S3-R0 read→commit fence + acknowledge proof. Answers the official
+     * identity (Connection generation + exact retained binding) plus the given
+     * revision ONLY while that binding's eventSource still reports the SAME
+     * revision; `undefined` means a newer window (or a replaced identity) made
+     * this read superseded, so the fold must NOT be replaced with it.
+     */
+    readonly windowRefoldProof?: (sessionId: string, revision: number) => PresentationWindowRefoldProof | undefined
+    /** Seed the working-fold cache from the SAME committed window (the cold
+     *  hydrate publishes the identical value; a reconcile must not leave the
+     *  cache invalidated behind an official-`running` fallback). */
+    readonly seedWindowWorkingFold?: (input: {
+      readonly sessionId: string
+      readonly transportToken: { readonly generation: unknown; readonly binding: unknown }
+      readonly fold: boolean
+      readonly proven: boolean
+    }) => void
+    /**
      * The VISIBLE-COMMIT fence token (plan §6.5/§7.5): the caller captures
      * the ownership GENERATION before starting the hydration; after the
      * reader await, the commit may run only while the CURRENT owner reads
@@ -260,29 +289,16 @@ export interface SessionPresentation<Event extends SessionPresentationEvent> {
    * take a front-joined page incrementally, so the bounded window re-folds
    * (the honest model for a bounded window; the fold stays cheap).
    */
-  rehydrateFromWindow(sessionId: string): Promise<void>
-  /**
-   * PR5 truthfulness (plan §3.2): whether the main stats fold's
-   * RECENT-performance figures are AUTHORITATIVE for presentation. `true`
-   * on Direct (the fold reads the COMPLETE in-process session log) and on a
-   * Remote window that proved its recent-sample evidence (the window
-   * reached the history start, or the fold retained enough valid samples —
-   * the SAME fold's retained evidence). `false` while a bounded Remote
-   * window cannot prove either: the footer/status must OMIT the recent
-   * metrics (never a numeric `0s · 0 tok/s` stand-in). This is the ONE
-   * presentation-owned availability authority beside the stats fold; it is
-   * committed in the SAME fenced hydrate that commits the fold itself, so
-   * a stale hydrate can never flip the replacement subject's bit.
-   */
-  mainRecentPerformanceAvailable(): boolean
-  /**
-   * F1 (PR5 §3.2): re-answer the availability bit off the SAME fold the live
-   * ingress just mutated, so a bounded window that committed `false` can flip
-   * on ordinary appended evidence without a `loadOlder`/rehydrate. It answers in
-   * BOTH directions (the fold's evidence is not monotonic), and it re-derives the
-   * status whenever the answered value changes.
-   */
-  refreshRecentPerformanceAvailability(): void
+  /** S3-R0: re-fold the transcript/stats from the CURRENT official window and
+   *  return the committed identity/revision proof the caller acknowledges the
+   *  ingress with (undefined = the read was superseded; nothing was committed). */
+  rehydrateFromWindow(
+    sessionId: string,
+    options?: { readonly measure?: boolean },
+  ): Promise<PresentationWindowRefoldProof | undefined>
+  /** Record a measure boundary the LIVE routing handled, so a later window
+   *  reconcile keeps an already-measured boundary measurement-free. */
+  noteLiveMeasureEvent(sessionId: string, event: { readonly type: unknown; readonly data?: unknown }): void
   /** The synchronous surface reset that follows a generation bump (A2 seam). */
   resetForGeneration(): void
 }
@@ -348,30 +364,6 @@ export function createSessionPresentation<Event extends SessionPresentationEvent
 
   let statsFolder = new StatsFolder()
 
-  /**
-   * PR5 (plan §3.2): the presentation-owned recent-performance availability of
-   * the CURRENT main stats fold (see `mainRecentPerformanceAvailable`). Starts
-   * `false` (no authoritative window is committed yet), is answered inside every
-   * fenced hydrate commit that replaces `statsFolder`, and is re-answered in
-   * BOTH directions by the live refresh as the SAME fold's evidence moves.
-   */
-  let recentPerformanceAvailable = false
-  /**
-   * F1 (PR5 §3.2): the LAST COMMITTED fold's COVERAGE-completeness fact — the
-   * ONE second authority beside the fold's own evidence. It is `true` where the
-   * committed event set provably covers the whole session (Direct's complete
-   * log; a Remote window that reached the history start), in which case
-   * availability is authoritative even with ZERO valid recent samples, and
-   * `false` for a truncated Remote window that must be judged by the SAME
-   * fold's retained evidence alone.
-   *
-   * It is committed inside the SAME fenced hydrate block that replaces the fold
-   * (never pre-computed by the caller, so a merge that adds opening-journal
-   * events cannot drift it), and it is cleared by the generation reset exactly
-   * like the fold.
-   */
-  let recentCoverageComplete = false
-
   // Coalesced repaint is surface-owned (A4-8): the runner no longer owns
   // the flush timer; the surface routing schedules its own repaint.
   // Ephemeral previews are isolated per presentation owner: the main live
@@ -399,14 +391,21 @@ export function createSessionPresentation<Event extends SessionPresentationEvent
     get window() { return windowController },
     get previews() { return mainStreamingToolPreviews },
     applyToolPreview: (event: Event) => applyStreamingToolPreviewEvent(mainStreamingToolPreviews, event),
-    // Forwarded to the owner's own live refresh (declared below the fold state
-    // it reads); a live accessor so a session commit cannot capture a stale one.
-    refreshRecentPerformanceAvailability: () => refreshRecentPerformanceAvailability(),
   }
 
   // Tool-call arguments by callId, for the approval-preview dialog.
   
   const callArgs = new Map<string, string>()
+
+  /** The newest compaction boundary each session's LAST COMMITTED window showed.
+   *  A reconcile compares against it to notice a lifecycle event the outage
+   *  swallowed (including a bracket whose start AND end both landed off-window),
+   *  and the generation reset drops it so a reused owner never compares against
+   *  a retired session's state. */
+  const lastCommittedMeasureEvent = new Map<string, string>()
+  /** The live compaction bracket each session's routing sink has folded so far
+   *  (the same `foldCompactionEvent`, so a stale end is recognised as stale). */
+  const liveMeasureBracket = new Map<string, { id: string | undefined }>()
 
   /**
    * The synchronous surface reset that follows a generation bump (A2 seam).
@@ -415,15 +414,23 @@ export function createSessionPresentation<Event extends SessionPresentationEvent
    * only AFTER this returns (see the four commit shapes in the A2 plan §4).
    */
   
+  /** Record a measure boundary the LIVE routing handled (so a later window
+   *  reconcile never re-measures one the live path already did). */
+  const noteLiveMeasureEvent = (sessionId: string, event: { readonly type: unknown; readonly data?: unknown }): void => {
+    // The live routing measures on a MATCHED compaction settle (and on
+    // step/start, turn/end); a stale `compaction/end` measures nothing, so it
+    // must not advance the baseline either. The bracket is folded with the SAME
+    // shared fold the routing uses.
+    const folded = foldLiveMeasureEvent(liveMeasureBracket.get(sessionId) ?? { id: undefined }, event)
+    liveMeasureBracket.set(sessionId, folded.state)
+    if (folded.key !== 'none') lastCommittedMeasureEvent.set(sessionId, folded.key)
+  }
+
   const resetForGeneration = (): void => {
     callArgs.clear()
+    lastCommittedMeasureEvent.clear()
+    liveMeasureBracket.clear()
     mainStreamingToolPreviews.clear()
-    // PR5 (plan §3.2): the replacement subject has NO authoritative window
-    // yet — the recent-performance availability bit returns to `false` until
-    // the new subject's own fenced hydrate proves otherwise (the old
-    // subject's `true` must not leak into the hydrate-pending window).
-    recentPerformanceAvailable = false
-    recentCoverageComplete = false
     // The new session's subagent delegations are a fresh namespace: stale
     // pending calls from the old session would consume viewer match slots,
     // and dead callId→child maps would silently disable the auto-pop.
@@ -432,8 +439,20 @@ export function createSessionPresentation<Event extends SessionPresentationEvent
     deps.surface.resetSearchPresentation()
     windowController.latest()
     windowController.setTurns(folder.groupedTurns())
-    deps.surface.app.setSearchResult(0, 0)
-    deps.surface.app.clearSessionOverrides()
+    deps.surface.display.setSearchResult(0, 0)
+    // PR3-A: the generation bump is the ONE hydration-window signal. The new
+    // owner has been published but its fold has not committed yet, so the
+    // renderer raises its explicit Loading state and FENCES the retired
+    // projection source: a late repaint still reading the OLD fold can never
+    // lift Loading nor relabel old rows as the new subject.
+    // (PR3-B §7.3: the draft DROP is deliberately NOT here — the generation
+    // reset is an invalidation signal, not a confirmed owner switch. The
+    // first-session creation bumps too, and a pre-publication failure bumps
+    // while the OLD owner still stands; dropping the draft at every bump
+    // loses the user's in-flight text in exactly those shapes. The drop
+    // lives at the COMMITTED cross-owner publication in the session runtime,
+    // which knows both the outgoing and the incoming owner.)
+    deps.surface.display.beginSessionHydration()
     // A new session owns the surface: the whole Task Center (the Job child
     // overlay FIRST, then the browser, then the cached catalog + the
     // synchronous badge/summary/row mirrors) is reset by the surface owner
@@ -490,14 +509,6 @@ export function createSessionPresentation<Event extends SessionPresentationEvent
     readonly planActive: boolean
     readonly working: boolean
     /**
-     * F1 (PR5 §3.2): whether the event set being committed provably COVERS the
-     * whole session — Direct's complete log, or a Remote window that reached
-     * the history start (`!snapshot.hasMore`). Committed with the fold so the
-     * availability answer below is always taken from the SAME committed fold,
-     * never from a caller pre-computation over a pre-merge snapshot.
-     */
-    readonly recentCoverageComplete?: boolean
-    /**
      * The official CURRENT-VALUE facts (M3-4 PR2). Present on the Remote
      * branch, where `events` is only a BOUNDED window: the title/goal/todos of
      * a long session may have been written before the window and must come
@@ -515,18 +526,6 @@ export function createSessionPresentation<Event extends SessionPresentationEvent
     folder = hydrated.folder
     windowController.setTurns(folder.groupedTurns())
     statsFolder = hydrated.statsFolder
-    // PR5: the availability bit commits with the SAME fold it describes —
-    // one fenced commit, one subject (a stale hydrate cannot flip the
-    // replacement subject's bit because the §6.5 fences above already
-    // dropped it before reaching this line).
-    // F1: the ONE availability formula, answered from the fold THIS commit just
-    // installed (`statsFolder` is already `hydrated.statsFolder` above) plus the
-    // coverage fact. A merge that added opening-journal events therefore cannot
-    // drift the answer, and Direct's unconditional `true` cannot be revoked by a
-    // fold-local shrink.
-    recentCoverageComplete = input.recentCoverageComplete ?? false
-    recentPerformanceAvailable = recentCoverageComplete
-      || statsFolder.hasEnoughRecentEvidence()
     for (const liveInput of input.liveBaseline) {
       applyAssistantLiveInput(folder, statsFolder, mainStreamingToolPreviews, liveInput, deps.summaryKeys)
     }
@@ -540,38 +539,47 @@ export function createSessionPresentation<Event extends SessionPresentationEvent
       eventCount: events.length,
       elapsedMs: Number(hydrated.scanTimings.statsMs.toFixed(3)),
     })
-    deps.surface.app.setPlanMode(input.planActive)
-    deps.surface.app.setWorking(input.working)
-    deps.surface.app.setBusy(input.working)
+    deps.surface.display.commitStatusFacts({ planMode: input.planActive, working: input.working, busy: input.working })
     if (input.facts !== undefined) {
       // REMOTE: the official projections ARE the current-value authority. An
       // unavailable one is OMITTED — the bounded window never stands in for a
       // session-global fact (a recent window is not a session's current title,
       // goal or standing todo list).
-      applyCurrentFacts(input.facts, deps.status, deps.surface.app)
+      applyCurrentFacts(input.facts, deps.status, deps.surface.display)
     } else {
       // DIRECT: the COMPLETE log is the fold authority for the same facts.
       deps.status.setGoalText(timedBootstrapScan(deps.diag, 'goal', events.length, () => foldGoal(events)))
-      deps.surface.app.setSessionTitle(timedBootstrapScan(deps.diag, 'title', events.length, () => deps.folds.title(events)))
-      deps.surface.app.setTodoSummary(timedBootstrapScan(deps.diag, 'todo', events.length, () => {
-        for (let index = events.length - 1; index >= 0; index -= 1) {
-          const event = events[index]
-          if (event?.type === 'todo/write') return (event.data as { readonly todos: Parameters<TuiApp['setTodoSummary']>[0] }).todos
-        }
-        return []
-      }))
+      deps.surface.display.commitStatusFacts({
+        sessionTitle: timedBootstrapScan(deps.diag, 'title', events.length, () => deps.folds.title(events)),
+        todos: timedBootstrapScan(deps.diag, 'todo', events.length, () => {
+          for (let index = events.length - 1; index >= 0; index -= 1) {
+            const event = events[index]
+            if (event?.type === 'todo/write') return (event.data as { readonly todos: readonly TodoItem[] }).todos
+          }
+          return []
+        }),
+      })
     }
     // A resumed session may be mid-compaction. Reset the old phase first;
     // then re-arm only the newest live bracket, matching the log fold.
-    const resumedCompaction = timedBootstrapScan(deps.diag, 'compaction', events.length, () => compactingFromLog(events))
+    const resumedCompaction = timedBootstrapScan(deps.diag, 'compaction', events.length, () => compactionBracketFromLog(events))
     // A4-7: the `compactingId` routing state and the phase/busy/working
     // presentation are surface-owned (plan §16).
-    deps.surface.applyResumedCompaction(resumedCompaction.id, resumedCompaction.active)
-    deps.surface.app.clearLocalMessages()
-    deps.surface.app.clearNotify() // a notice from the previous session is stale here
-    // Issue #8: a stale keyboard exit confirmation must not exit the NEW
-    // session.
-    deps.surface.app.clearExitConfirmation()
+    deps.surface.applyResumedCompaction(resumedCompaction.id, resumedCompaction.active, resumedCompaction.phase)
+    // The routing's bracket is now this window's: the LIVE tracker must agree,
+    // or a later live `compaction/end` for that restored bracket would be folded
+    // as stale and fail to advance the baseline (making the next reconcile
+    // measure a boundary the live path already measured).
+    liveMeasureBracket.set(input.sessionId, { id: resumedCompaction.id })
+    // The hydrate's window IS the baseline for the next reconcile: an outage
+    // that swallowed a compaction boundary (its live handler never ran) must be
+    // detected against it.
+    lastCommittedMeasureEvent.set(input.sessionId, measureEventKey(events))
+    // A notice / keyboard exit confirmation from the previous session is
+    // stale here; this HYDRATE-TAIL clear touches only those transients — the
+    // status facts committed just above (title/todo/working/plan/compaction)
+    // and the transcript stay.
+    deps.surface.display.resetSessionFacts()
     deps.surface.repaint()
     // PR D2: the first usable frame paints with the cached measurement
     // (or none); the context measure is deferred one event-loop turn so
@@ -602,7 +610,7 @@ export function createSessionPresentation<Event extends SessionPresentationEvent
     // File order is oldest-first; TuiApp's recall API takes newest-first,
     // so the session-filtered projection is reversed at the seed.
     const sessionRecall = recallHistoryForSession(historyRecords, input.sessionId)
-    deps.surface.app.resetInputHistory([...sessionRecall].reverse())
+    deps.surface.display.resetInputHistory([...sessionRecall].reverse(), input.sessionId)
     // Session identity commit (create/resume/switch): the title AND the
     // terminal-local cwd follow the NEW session.
     deps.status.refreshTerminalTitle()
@@ -614,8 +622,10 @@ export function createSessionPresentation<Event extends SessionPresentationEvent
   const initLiveSession = async (agent: LiveSessionAgent<Event>): Promise<void> => {
     if (deps.isCleanedUp()) return
     // Session transitions invalidate transient keyboard confirmation before
-    // any asynchronous hydration or bootstrap work begins.
-    deps.surface.app.clearExitConfirmation()
+    // any asynchronous hydration or bootstrap work begins, and open the
+    // hydration window (PR3-A: Loading + retired-source fence until the new
+    // fold's first commit).
+    deps.surface.display.beginSessionHydration()
     // Setup installs this before publication; the idempotent call also
     // covers test/direct adapters that hand an already-live Agent back to
     // the runner. Its fold is the resume source of truth.
@@ -626,16 +636,11 @@ export function createSessionPresentation<Event extends SessionPresentationEvent
       : mergeSessionEventCut(agent.session.snapshotEvents(), opening.events)
     await hydratePresentation({
       sessionId: agent.session.id,
-      cwd: agent.session.header.cwd,
+      cwd: deps.direct.effectiveCwd(agent),
       events,
       liveBaseline: deps.direct.assistantStreamBaselineFor(agent),
       planActive: deps.direct.planActive(agent),
       working: workingFromLog(events),
-      // F1 (v4 §3.2, Direct): the Direct `events` IS the complete log, so its
-      // coverage is COMPLETE by construction — the availability formula then
-      // answers `true` unconditionally and a fold-local shrink (a route change
-      // clears the retained windows) can never revoke it.
-      recentCoverageComplete: true,
     })
   }
 
@@ -651,7 +656,8 @@ export function createSessionPresentation<Event extends SessionPresentationEvent
   const initLiveRemoteSession = async (sessionId: string): Promise<RemoteHydrationOutcome | undefined> => {
     if (deps.isCleanedUp()) return undefined
     if (deps.remote === undefined) return undefined
-    deps.surface.app.clearExitConfirmation()
+    // PR3-A: the same hydration-window signal on the Remote branch.
+    deps.surface.display.beginSessionHydration()
     // The fence tokens are captured BEFORE the await (plan §7.5 order:
     // capture subject/generation/transport identity → read → verify →
     // hydrate): the TUI ownership generation AND the Remote transport
@@ -688,12 +694,10 @@ export function createSessionPresentation<Event extends SessionPresentationEvent
     // Only a TRUNCATED window (hasMore) defers to the official running bit.
     const foldProven = !snapshot.hasMore
     const working = foldProven ? workingFromLog(events) : (deps.remote.running(sessionId) ?? false)
-    // PR5 (plan §3.2): the bounded window's recent-performance authority —
-    // the window reaches the history start (its zero is a measured zero) OR
-    // the fold retained enough valid samples for both recent windows. A
-    // truncated window short of both keeps the footer's recent metrics
-    // OMITTED (unknown), never a numeric zero stand-in.
-    const recentCoverageComplete = foldProven
+    // The measured performance values are NOT this fold's business (TPS plan
+    // PR-2): they come from the Session's own Host `piTuiPerformance`
+    // projection, so a truncated window can no longer make the footer's
+    // recent figures unknown.
     // The official CURRENT-VALUE facts (title/goal/todos/cwd) — their source
     // events may precede this bounded window, so the projection owns them.
     const facts = deps.remote.facts?.(sessionId)
@@ -709,9 +713,6 @@ export function createSessionPresentation<Event extends SessionPresentationEvent
       // which hydratePresentation expresses through the injected value.
       planActive: planActiveRemote(sessionId),
       working,
-      // PR5 (F1): only the COVERAGE fact travels with the fold; the availability
-      // answer itself is taken inside the commit, from the fold it installs.
-      recentCoverageComplete,
     })
     // The committed window revision: the caller feeds it to the live ingress
     // so the hydrate→subscribe gap is detected and recovered (never lost).
@@ -738,70 +739,121 @@ export function createSessionPresentation<Event extends SessionPresentationEvent
    */
   const applySessionCurrentFacts = (sessionId: string): void => {
     if (deps.remote === undefined) return
-    applyCurrentFacts(deps.remote.facts(sessionId), deps.status, deps.surface.app)
+    applyCurrentFacts(deps.remote.facts(sessionId), deps.status, deps.surface.display)
   }
 
-  const rehydrateFromWindow = async (sessionId: string): Promise<void> => {
-    if (deps.isCleanedUp()) return
-    if (deps.remote === undefined) return
+  const rehydrateFromWindow = async (
+    sessionId: string,
+    options?: { readonly measure?: boolean },
+  ): Promise<PresentationWindowRefoldProof | undefined> => {
+    if (deps.isCleanedUp()) return undefined
+    if (deps.remote === undefined) return undefined
     const fenceGeneration = deps.remote.captureGeneration?.()
     const fenceTransport = deps.remote.captureTransportToken?.(sessionId)
     const snapshot = await deps.remote.read(sessionId)
-    if (deps.isCleanedUp() || snapshot === undefined) return
+    if (deps.isCleanedUp() || snapshot === undefined) return undefined
     // §6.5 visible-commit fence (same double rule as the cold hydrate).
-    if (deps.remote.isStillCurrent?.(sessionId, fenceGeneration ?? 0) === false) return
+    if (deps.remote.isStillCurrent?.(sessionId, fenceGeneration ?? 0) === false) return undefined
     if (fenceTransport !== undefined
-      && deps.remote.isTransportTokenCurrent?.(sessionId, fenceTransport) === false) return
+      && deps.remote.isTransportTokenCurrent?.(sessionId, fenceTransport) === false) return undefined
+    // S3-R0 read→commit fence: the async read above may have been overtaken by
+    // a newer official revision (or a replaced generation/binding). Replacing
+    // the fold with the older window would both lose the newer events and
+    // acknowledge a superseded recovery, so the commit is valid ONLY while the
+    // official window still IS the revision that was read. The same step builds
+    // the identity proof the fold owner returns to the ingress.
+    const proof = deps.remote.windowRefoldProof?.(sessionId, snapshot.revision)
+    if (proof === undefined) return undefined
+    // A window reconcile replaces the transcript/stats from the authoritative
+    // window, so the COMPACTION routing state must be re-derived from the SAME
+    // committed window: a compaction that started (or finished) during the
+    // outage is otherwise invisible (`compactingId`/phase/busy/working stay
+    // stale). This is a derive-from-the-window, not a live-state reset: the
+    // window's newest bracket IS the live state, and the revision fence above
+    // proves nothing newer exists.
+    const resumedCompaction = compactionBracketFromLog(snapshot.durableEvents as readonly { type: unknown }[])
+    // The plan projection is a CURRENT-VALUE fact: a `plan/mode` increment the
+    // replace swallowed is invisible in the window, so the reconcile commits the
+    // SAME projection read the cold hydrate used (the projected `plan` authority,
+    // absent reads inactive) — never a fold of the bounded window.
+    const planActive = planActiveRemote(sessionId)
+    // The working/busy fold obeys the SAME rule as the cold hydrate: a COMPLETE
+    // window proves the log fold, a TRUNCATED one defers to the official
+    // `running` bit (an official fact, never a guess).
+    const foldProven = !snapshot.hasMore
+    const working = foldProven
+      ? workingFromLog(snapshot.durableEvents as readonly Event[])
+      : (deps.remote.running(sessionId) ?? false)
     const hydrated = hydrateSessionUi(snapshot.durableEvents as readonly Event[])
     folder = hydrated.folder
     windowController.setTurns(folder.groupedTurns())
     statsFolder = hydrated.statsFolder
-    // PR5: the widened window re-proves (or disproves) its recent-sample
-    // evidence in the SAME fenced commit that replaced the fold — a
-    // `loadOlder` that reaches enough samples (or the history start) flips
-    // the footer's omitted metrics on with the new fold, never after it.
-    recentCoverageComplete = !snapshot.hasMore
-    recentPerformanceAvailable = recentCoverageComplete
-      || statsFolder.hasEnoughRecentEvidence()
     for (const liveInput of snapshot.liveInputs) {
       applyAssistantLiveInput(folder, statsFolder, mainStreamingToolPreviews, liveInput, deps.summaryKeys)
     }
     // F10 (round 4): the stats fold was just REPLACED by the wider window —
-    // the footer's status derivation still reads the pre-hydrate snapshot,
-    // so a repaint alone would keep rendering the stale (often all-zero)
-    // recent figures. Re-derive the status from the NEW fold in the same
-    // step; the cheap refresh's own fences own the session/binding rules.
+    // the lifetime turns/steps/llmMs the status derives from it are otherwise
+    // stale, so a repaint alone would keep rendering the pre-hydrate figures.
+    // Re-derive the status from the NEW fold in the same step; the cheap
+    // refresh's own fences own the session/binding rules. (The measured
+    // performance values are the Host projection's and are unaffected.)
+    // The cold hydrate's order: publish the plan projection and the
+    // working/busy BASELINE first, then let an ACTIVE compaction override them.
+    // `applyResumedCompaction(false)` clears only the compaction phase, so
+    // without this commit a stale working/busy would stay on screen after an
+    // outage-spanning compaction/turn end.
+    deps.surface.display.commitStatusFacts({ planMode: planActive, working, busy: working })
+    deps.surface.applyResumedCompaction(resumedCompaction.id, resumedCompaction.active, resumedCompaction.phase)
+    // Same parity as the cold hydrate: the routing's bracket is this window's
+    // now, so the LIVE tracker must agree — otherwise a later matched live end
+    // would fold as stale and the next reconcile would measure it again.
+    liveMeasureBracket.set(sessionId, { id: resumedCompaction.id })
+    // A compaction that ENDED during the outage changed the context occupancy,
+    // and its `compaction/end` event (whose live handler marks the context dirty
+    // and re-measures) never reached the surface. Re-run the hydrate tail's own
+    // deferred measurement for that transition — the reconcile is otherwise
+    // measurement-free by design (history paging must not measure).
+    const boundary = measureEventKey(snapshot.durableEvents as readonly { type: unknown }[])
+    // The map holds the boundary the LIVE routing already measured (recorded by
+    // the routing sink) or the last committed window's. A boundary the live path
+    // measured keeps an ordinary history prepend measurement-free.
+    const previousBoundary = lastCommittedMeasureEvent.get(sessionId)
+    // A PAGING reconcile (`loadOlder` widened the bounded window) can show a
+    // boundary the previous window could not prove simply because older history
+    // became visible — no new model-visible event arrived, so it must not
+    // measure. The ingress owns that distinction and passes it here.
+    if (options?.measure !== false && previousBoundary !== undefined && previousBoundary !== boundary) {
+      // The window shows a compaction boundary the previous committed window did
+      // not: the outage swallowed the lifecycle event whose live handler would
+      // have marked the context dirty and re-measured it (including a bracket
+      // whose start AND end both landed off-window). `scheduleInitialMeasurement`
+      // cannot do this — its deferred callback no-ops for an already-measured
+      // same session — so the reconcile runs the SAME dirty -> measure pair the
+      // live `compaction/end` path runs. Ordinary paging reconciles keep the
+      // same boundary and stay measurement-free.
+      deps.status.markContextDirty()
+      deps.status.refreshContextMeasurement('compaction-end')
+    }
+    lastCommittedMeasureEvent.set(sessionId, boundary)
+    // Seed the working-fold cache with THIS window's fold under the SAME
+    // transport identity the commit was fenced under, so the status refresh
+    // below (and every later read) sees the proven fold instead of the
+    // invalidated cache's official-`running` fallback.
+    deps.remote.seedWindowWorkingFold?.({
+      sessionId,
+      transportToken: { generation: proof.generation, binding: proof.binding },
+      fold: working,
+      proven: foldProven,
+    })
     deps.refreshStatusCheap()
     deps.surface.repaint()
+    // The committed proof: the caller acknowledges the ingress with it, so
+    // incremental delivery resumes exactly at the revision the fold now holds.
+    return proof
   }
 
   const mainFolder = (): TranscriptFolder => folder
   const mainStats = (): StatsFolder => statsFolder
-  const mainRecentPerformanceAvailable = (): boolean => recentPerformanceAvailable
-  /**
-   * F1 (PR5 §3.2): the availability bit must follow the SAME fold's LIVE
-   * evidence. A bounded Remote window that committed `false` (truncated, not
-   * enough valid samples yet) can cross the completeness threshold through
-   * ordinary appended events — with no `loadOlder` and no rehydrate. Re-answer
-   * the predicate off the fold the append already updated (never a second scan
-   * or a second fold) and, when it flips, re-derive the status in the same step
-   * so the footer and `/status` stop omitting the recent figures immediately.
-   *
-   * A replacement subject returns to `false` in `resetForGeneration`, and the
-   * next fenced hydrate re-proves it (or disproves it) as before.
-   */
-  const refreshRecentPerformanceAvailability = (): void => {
-    // The fold's evidence is NOT monotonic: a route change clears BOTH recent
-    // windows, and a late authoritative message replacement can drop a
-    // throughput candidate. So the answer is re-answered in BOTH directions off
-    // the SAME fold (`recentCoverageComplete` still keeps a fully-covered window
-    // available, as v4 requires), and the status is re-derived whenever the bit
-    // actually changes — never only on the way up.
-    const next = recentCoverageComplete || statsFolder.hasEnoughRecentEvidence()
-    if (next === recentPerformanceAvailable) return
-    recentPerformanceAvailable = next
-    deps.refreshStatusCheap()
-  }
   const mainWindow = (): TranscriptWindowController => windowController
   const restoreMainTranscriptAnchor = (): void => {
     windowController.isLatest()
@@ -819,8 +871,6 @@ export function createSessionPresentation<Event extends SessionPresentationEvent
     main: mainPresentation,
     mainFolder,
     mainStats,
-    mainRecentPerformanceAvailable,
-    refreshRecentPerformanceAvailability,
     mainWindow,
     applyAssistantInput,
     setToolArgs,
@@ -831,6 +881,7 @@ export function createSessionPresentation<Event extends SessionPresentationEvent
     initLiveRemoteSession,
     applySessionCurrentFacts,
     rehydrateFromWindow,
+    noteLiveMeasureEvent,
     resetForGeneration,
   }
 }

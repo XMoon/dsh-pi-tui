@@ -35,6 +35,15 @@ import {
 import { testLifecycle } from './support/temp-lifecycle.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 
+/**
+ * Phase 3B / B1-A: a Job detail opened from `/tasks` is a dedicated temporary
+ * SCREEN (`JobInspectorPanel`) whose pinned bottom disclosure the Task Browser
+ * never paints — the user-visible ownership signal these cases assert on,
+ * instead of an overlay handle count.
+ */
+const JOB_WORKSPACE_MARK = 'Retained preview · not full history'
+const jobWorkspaceOpen = (rendered: string): boolean => rendered.includes(JOB_WORKSPACE_MARK)
+
 process.env.NO_COLOR = ''
 process.env.FORCE_COLOR = ''
 process.env.CI = ''
@@ -549,7 +558,7 @@ test('the parent Preparing projection and child viewer lifecycle rollover stay l
   assert.deepEqual(rolloverActivity?.usage, { inputTokens: 11, outputTokens: 3, cacheReadTokens: 0, cacheWriteTokens: 0 })
   const viewerUsage = probe.capturedViewerUsage as {
     tokens?: { input: number; output: number }
-    performance?: { firstTokenMs: number }
+    performance?: { firstTokenMs?: number; tokensPerSec?: number; sessionTokensPerSec?: number }
   } | undefined
   // M3-5 PR1 §9.5: the child's CUMULATIVE tokens are a SessionStatus fact.
   // This fixture has no `sessionProjections` service, so the child's official
@@ -557,9 +566,16 @@ test('the parent Preparing projection and child viewer lifecycle rollover stay l
   // never be presented as a session total.
   assert.equal(viewerUsage?.tokens, undefined,
     'the bounded child fold token sum must not masquerade as the child cumulative usage')
-  // The recent-performance figures stay presentation-local and still reach the
-  // child stats footer.
-  assert.ok((viewerUsage?.performance?.firstTokenMs ?? 0) > 0, 'B first-token timing must reach the child stats footer')
+  // TPS plan PR-2: the measured performance values are the child's OWN Host
+  // `piTuiPerformance` projection — this fixture mounts no `sessionProjections`
+  // service, so they are UNAVAILABLE and must stay absent. The bounded child
+  // transcript fold may not stand in (the same rule as `tokens` above); the
+  // positive main/child routing path is covered by
+  // `test/status-display-subject.test.ts` and the PR-1 real-wire test.
+  assert.equal(viewerUsage?.performance?.firstTokenMs, undefined,
+    'without a child Host projection the child footer shows no first-token timing (never a fold stand-in)')
+  assert.equal(viewerUsage?.performance?.tokensPerSec, undefined,
+    'without a child Host projection the child footer shows no rate')
 
   // Parent events continue through the runner while the child owns the
   // visible transcript. Updating A and adding B must both survive the visit.
@@ -784,7 +800,8 @@ test('a Job detail opened from /tasks keeps its parent mounted and live-refreshe
   input('\r') // open the selected running job's status detail
   await settle()
   await vt.waitForRender()
-  assert.equal(app.overlayGraphState().handles, 2, 'the Job detail must keep the parent browser mounted')
+  assert.equal(app.overlayGraphState().handles, 1, 'the Job workspace is a SCREEN: the parent browser stays the only overlay')
+  assert.equal(jobWorkspaceOpen(view()), true, 'the Job workspace owns the surface')
 
   // The job settles WHILE the parent is hidden. In a jobs-only session the
   // only channel is jobs.events.subscribe → refreshTasks, which must repaint the
@@ -1084,18 +1101,20 @@ test('a failed jobs read never blanks the retained Task Browser parent', async (
   assert.equal(app.overlayGraphState().handles, 1, 'the Task Center must be the only overlay')
   assert.ok(view().includes('build'), `the browser must show the job:\n${view()}`)
 
-  input('\r') // Job detail; the parent stays mounted but hidden
+  input('\r') // Job workspace; the parent stays mounted
   await settle()
   await vt.waitForRender()
-  assert.equal(app.overlayGraphState().handles, 2)
+  assert.equal(app.overlayGraphState().handles, 1)
+  assert.equal(jobWorkspaceOpen(view()), true, 'the Job workspace owns the surface')
 
   // The close-time refresh hits a transient registry failure: that must NOT
   // be interpreted as an authoritative empty catalog.
   jobs.setListFailure(new Error('registry unavailable'))
-  input('\x1b') // close the Job detail → onClose → refreshTasks()
+  input('\x1b') // close the Job workspace → onClose → refreshTasks()
   await settle()
   await vt.waitForRender()
-  assert.equal(app.overlayGraphState().handles, 1, 'Esc must close only the Job detail')
+  assert.equal(jobWorkspaceOpen(view()), false, 'Esc must close only the Job workspace')
+  assert.equal(app.overlayGraphState().handles, 1, 'the parent browser must remain')
   assert.ok(view().includes('build'),
     `the retained parent must keep its rows across a failed registry read:\n${view()}`)
 })
@@ -1270,19 +1289,25 @@ test('switching sessions tears down the Job status viewer with its Task Browser'
   await settle()
   await vt.waitForRender()
   assert.ok(view().includes('build'), `the browser must show the job:\n${view()}`)
+  assert.ok(view().includes('↑↓ select'), `the open Task Browser owns the task chrome:\n${view()}`)
 
   input('\r') // open the Job status detail (a child overlay of the browser)
   await settle()
   await vt.waitForRender()
-  assert.equal(app.overlayGraphState().handles, 2, 'browser + Job detail')
-  assert.ok(view().includes('Esc back'), `the Job detail shows Esc back:\n${view()}`)
+  assert.equal(app.overlayGraphState().handles, 1, 'the browser only (the Job is a SCREEN)')
+  assert.equal(jobWorkspaceOpen(view()), true, 'the Job workspace owns the surface')
+  assert.ok(view().includes('Esc back'), `the Job workspace shows Esc back:\n${view()}`)
 
   await resume({ rawInput: sessionB.id })
   await settle()
   await vt.waitForRender()
   assert.equal(app.overlayGraphState().handles, 0, 'the whole Task Center stack is torn down')
   assert.ok(!view().includes('Esc back'), `the old Job View must not survive the switch:\n${view()}`)
-  assert.ok(!view().includes('build'), `the old browser must not survive the switch:\n${view()}`)
+  // The BROWSER's own chrome is the discriminator: the new session's
+  // first-party Task Quick accessory may legitimately paint the same fixture
+  // roster label below the editor, so a bare label search can no longer tell
+  // "browser gone" from "passive window repainted".
+  assert.ok(!view().includes('↑↓ select'), `the old browser must not survive the switch:\n${view()}`)
   assert.equal(app.focusSeatForTest(), 'editor', 'the new-session editor owns the keyboard')
 })
 
@@ -1687,8 +1712,13 @@ test('a parked continued Question is reachable and reopenable from the Task Cent
   let queuedReply = false
   let projectionListener: (() => void) | undefined
   const questionsProjection = context.provide('sessionProjections', {
-    stateOf: (_session: unknown, key: string): unknown => key === 'userQuestions'
-      ? {
+    // Model each read the production runner actually makes: the parked
+    // Question unit and the inbox. `agentPreset` is a STRING projection (the
+    // welcome card and composition read it); returning the inbox shape for it
+    // violated the contract and crashed the card during startup.
+    stateOf: (_session: unknown, key: string): unknown => {
+      if (key === 'userQuestions') {
+        return {
           questions: {
             active: [{
               callId: 'call-parked',
@@ -1698,10 +1728,13 @@ test('a parked continued Question is reachable and reopenable from the Task Cent
             settled: [],
           },
         }
-      : {
-          'next-step': queuedReply ? [{ source: { kind: 'user-question-reply', callId: 'call-parked' } }] : [],
-          'next-turn': [],
-        },
+      }
+      if (key === 'agentPreset') return undefined
+      return {
+        'next-step': queuedReply ? [{ source: { kind: 'user-question-reply', callId: 'call-parked' } }] : [],
+        'next-turn': [],
+      }
+    },
     onChanged: (listener: (session: unknown, key: string) => void) => {
       // The adapter filters by owning session + projected unit, so the
       // notification carries the real arguments (an argument-less call would be
@@ -1735,21 +1768,22 @@ test('a parked continued Question is reachable and reopenable from the Task Cent
   assert.ok(idle.includes('? 1 awaiting'), `the footer counts it as human attention:\n${idle}`)
   assert.ok(idle.includes('↓ view'), `and advertises the reopen trigger:\n${idle}`)
 
-  // The MANDATORY keyboard path: the literal ↓ opens Quick for a Questions-only
-  // session.
+  // The MANDATORY keyboard path: the literal ↓ enters the on-demand Task
+  // Quick for a Questions-only session (B4-B: the accessory, not a modal).
   vt.sendInput('\x1b[B')
   await settle()
   await vt.waitForRender()
   const quickByKey = vt.getViewport().join('\n')
-  assert.equal(app.overlayGraphState().handles, 1, `↓ opens Quick Tasks:\n${quickByKey}`)
-  assert.equal(app.focusSeatForTest(), 'overlay', 'Quick owns keyboard focus while open')
-  assert.ok(quickByKey.includes('Needs attention'), `with the attention group:\n${quickByKey}`)
+  assert.equal(app.overlayGraphState().handles, 0, `↓ enters the on-demand Quick (no modal):\n${quickByKey}`)
+  assert.ok(quickByKey.includes('Task Quick'), `the accessory band paints:\n${quickByKey}`)
   assert.ok(quickByKey.includes('Use staging or production?'), `and the parked Question row:\n${quickByKey}`)
-  assert.ok(quickByKey.includes('awaiting answer'), `marked as awaiting an answer:\n${quickByKey}`)
+  assert.ok(quickByKey.includes('Awaiting answer'), `marked as awaiting an answer (the accessory's status word):\n${quickByKey}`)
+  // Enter routes the typed selection through the production openQuickTaskItem
+  // → the controller entry reopens.
   input('\r')
   await settle()
   await vt.waitForRender()
-  assert.equal(app.overlayGraphState().handles, 0, 'Enter reopens the Question from Quick')
+  assert.equal(app.overlayGraphState().handles, 0, 'Enter reopens the Question from the on-demand Quick')
   const fromQuick = vt.getViewport().join('\n')
   assert.ok(fromQuick.includes('Type your answer…'), `the QuestionFlow is reopened:\n${fromQuick}`)
   assert.equal(app.focusSeatForTest(), 'overlay', 'the reopened Question owns keyboard focus')
@@ -1787,7 +1821,8 @@ test('a parked continued Question is reachable and reopenable from the Task Cent
   await settle()
   await vt.waitForRender()
   const quickAfterPark = vt.getViewport().join('\n')
-  assert.equal(app.overlayGraphState().handles, 1, `↓ opens Quick after the park:\n${quickAfterPark}`)
+  assert.equal(app.overlayGraphState().handles, 0, `↓ enters the on-demand Quick after the park:\n${quickAfterPark}`)
+  assert.ok(quickAfterPark.includes('Task Quick'), `the accessory band paints:\n${quickAfterPark}`)
   assert.ok(quickAfterPark.includes('Use staging or production?'), `with the Question row:\n${quickAfterPark}`)
   input('\r')
   await settle()
@@ -2079,6 +2114,25 @@ test('M3-5 PR1 L6: the Direct child viewer derives its display subject from Sess
   assert.ok(!viewA.includes('p/parent-model'), `the parent model must not render anywhere on the child surface:\n${viewA}`)
   assert.ok(!viewA.includes('display-subject-parent'), `the parent session identity must not render anywhere on the child surface:\n${viewA}`)
 
+  // ── UX-1 (three-UX-fixes plan §4/§7 E1): the working row follows the
+  // DISPLAYED child's own activity through the REAL Direct viewer path. The
+  // child's `turn/end` durable event parks the viewer activity
+  // (`viewer.endTurn()` → `refreshFooter`/`refreshStatus` →
+  // `commitDisplaySubject` → `reconcileWorkingRow`); the next `turn/start`
+  // re-activates it. The Main session is idle throughout (its own fixture turn
+  // already ended), so the row can only describe the child.
+  assert.ok(viewA.includes('Working...'), `a running child must own the working row:\n${viewA}`)
+  context.emit('session/event', childA as never, event('turn/end', { turn: 1, reason: { kind: 'completed' } }, 44))
+  await settle()
+  await vt.waitForRender()
+  assert.ok(!vt.getViewport().join('\n').includes('Working...'),
+    `the child's turn/end must clear the working row:\n${vt.getViewport().join('\n')}`)
+  context.emit('session/event', childA as never, event('turn/start', { turn: 2 }, 45))
+  await settle()
+  await vt.waitForRender()
+  assert.ok(vt.getViewport().join('\n').includes('Working...'),
+    `the child's next turn/start must re-arm the working row:\n${vt.getViewport().join('\n')}`)
+
   // INVALIDATION (M3-5 PR1 review R4): a child `session/title` alone — with NO
   // step/end / turn/end boundary around it — must re-derive the display subject
   // immediately. The Host commits the event AND its projection moves.
@@ -2175,6 +2229,170 @@ test('M3-5 PR1 L6: the Direct child viewer derives its display subject from Sess
   assert.equal(probe.capturedChildStatus?.composition.model?.id, 'child-a-model-v2')
   assert.deepEqual(probe.capturedDisplaySubject?.presentation?.todos, childATodos)
 
+  // UX-1 discriminator (plan §4): the parent's own turn is LIVE now
+  // (`workingActive` true), while the DISPLAYED child A is still running — the
+  // row belongs to the child. Parking the child (`turn/end`) must clear the row
+  // EVEN THOUGH Main is running: the visible row follows the committed display
+  // subject, never the Main drivers.
+  assert.ok(vt.getViewport().join('\n').includes('Working...'),
+    `precondition: the displayed running child owns the row:\n${vt.getViewport().join('\n')}`)
+  context.emit('session/event', childA as never, event('turn/end', { turn: 2, reason: { kind: 'completed' } }, 46))
+  await settle()
+  await vt.waitForRender()
+  assert.ok(!vt.getViewport().join('\n').includes('Working...'),
+    `an inactive displayed child must hide the row even while Main runs:\n${vt.getViewport().join('\n')}`)
+  context.emit('session/event', childA as never, event('turn/start', { turn: 3 }, 47))
+  await settle()
+  await vt.waitForRender()
+  assert.ok(vt.getViewport().join('\n').includes('Working...'),
+    `the displayed child's own turn/start must re-arm the row:\n${vt.getViewport().join('\n')}`)
+
+  // ── UX-2 (§7 E4/E5, L6): the DISPLAYED child's Activity LIFETIME through the
+  // production Session-event route (`context.emit('session/event')` → the
+  // event routing → the mounted viewer's own folder → canonical structure →
+  // the compact card → the painted viewport). The Compact preset is required
+  // for the collapsed Activity header; it is restored right after.
+  const plain = (text: string): string => text.replace(/\x1b\[[0-9;]*m/g, '')
+  const activitySeconds = (text: string): number | undefined => {
+    const match = /(?:Activity|Thought) (\d+)s/u.exec(plain(text))
+    return match === null ? undefined : Number(match[1])
+  }
+  app.setDisplayPreset('compact')
+  await settle()
+  await vt.waitForRender()
+  // A bounded wait for the coalesced runner commit + paint (a raw `settle()`
+  // does not guarantee the transcript commit has been flushed).
+  const waitForView = async (needle: string): Promise<void> => {
+    for (let attempt = 0; attempt < 120; attempt += 1) {
+      if (plain(vt.getViewport().join('\n')).includes(needle)) return
+      await new Promise(resolve => setTimeout(resolve, 50))
+      await vt.waitForRender()
+    }
+    assert.fail(`the viewport never rendered ${JSON.stringify(needle)}:\n${plain(vt.getViewport().join('\n'))}`)
+  }
+  // Growth driven ONLY by the shared working repaint (this loop flushes the
+  // terminal; it feeds no event and re-commits no transcript).
+  const waitForGrowth = async (previous: number): Promise<number> => {
+    for (let attempt = 0; attempt < 24; attempt += 1) {
+      await new Promise(resolve => setTimeout(resolve, 300))
+      await vt.waitForRender()
+      const current = activitySeconds(vt.getViewport().join('\n'))
+      if (current !== undefined && current > previous) return current
+    }
+    assert.fail(`the Activity duration never grew past ${previous}s with no new event:\n${plain(vt.getViewport().join('\n'))}`)
+  }
+  context.emit('session/event', childA as never, childA.append!('tool/call', {
+    turn: 3, step: 0, callId: 'ux2-child-call' as ToolCallId, name: 'bash', arguments: '{"command":"echo hi"}',
+  }) as SessionEvent)
+  context.emit('session/event', childA as never, childA.append!('tool/result', {
+    turn: 3, step: 0,
+    message: {
+      id: MessageId('ux2-child-result'), role: 'tool',
+      toolCallId: 'ux2-child-call' as ToolCallId,
+      content: [{ type: 'text', text: 'hi' }],
+      source: { kind: 'tool', callId: 'ux2-child-call' as ToolCallId },
+    },
+  }) as SessionEvent)
+  await waitForView('Bash echo hi')
+  // The tool has SETTLED: from here the only driver is the working repaint.
+  const childStill = activitySeconds(vt.getViewport().join('\n'))
+  assert.ok(childStill !== undefined,
+    `the displayed child's settled Activity must render:\n${vt.getViewport().join('\n')}`)
+  const childSilent = await waitForGrowth(childStill)
+  // The child's first visible assistant text is the proven boundary: the frozen
+  // value must be what the user was just seeing (a streamless durable message
+  // still proves its settlement time — plan §5.2), and it must then STOP.
+  context.emit('session/event', childA as never, childA.append!('assistant/message', {
+    turn: 3, step: 0,
+    message: {
+      id: MessageId('ux2-child-answer'), role: 'assistant',
+      content: [{ type: 'text', text: 'child answer ux2' }], source: { kind: 'assistant' },
+    },
+  }) as SessionEvent)
+  await waitForView('child answer ux2')
+  const childFrozenView = plain(vt.getViewport().join('\n'))
+  const childFrozen = activitySeconds(vt.getViewport().join('\n'))
+  assert.ok(childFrozen !== undefined && childFrozen >= childSilent && childFrozen <= childSilent + 2,
+    `the child's boundary must freeze the value the user saw (${childSilent}s -> ${childFrozen}s):\n${childFrozenView}`)
+  await new Promise(resolve => setTimeout(resolve, 1_200))
+  await vt.waitForRender()
+  assert.equal(activitySeconds(vt.getViewport().join('\n')), childFrozen,
+    `a closed child Activity must stop counting:\n${plain(vt.getViewport().join('\n'))}`)
+  // ── UX-2 E5 at L6 (the plan's §7 chain): a settled Work closed BY an injected
+  // Context row, a Reasoning lane closed by its own first VISIBLE assistant
+  // text, and the owning turn/end — all through real `session/event` routing
+  // into the mounted viewer's folder. Deterministic event times (the `event()`
+  // helper stamps `base + seq` seconds), so the frozen durations are exact.
+  context.emit('session/event', childA as never, event('turn/start', { turn: 4 }, 300))
+  context.emit('session/event', childA as never, event('tool/call', {
+    turn: 4, step: 0, callId: 'ux2-e5-a' as ToolCallId, name: 'bash', arguments: '{"command":"echo a"}',
+  }, 301))
+  context.emit('session/event', childA as never, event('tool/result', {
+    turn: 4, step: 0,
+    message: {
+      id: MessageId('ux2-e5-a-result'), role: 'tool',
+      toolCallId: 'ux2-e5-a' as ToolCallId,
+      content: [{ type: 'text', text: 'a' }],
+      source: { kind: 'tool', callId: 'ux2-e5-a' as ToolCallId },
+    },
+  }, 302))
+  // An injected Context row (a merge-extensible producer kind, so the event is
+  // assembled structurally like the other suites' `eventAt` fixtures).
+  context.emit('session/event', childA as never, {
+    type: 'user/message',
+    seq: 310,
+    time: 1_700_000_000_000 + 310_000,
+    data: {
+      id: MessageId('ux2-e5-ctx'), role: 'user',
+      content: [{ type: 'text', text: 'injected context e5' }],
+      source: { kind: 'skill-invocation', name: 'demo' },
+    },
+  } as unknown as SessionEvent)
+  context.emit('session/event', childA as never, event('assistant/message', {
+    turn: 4, step: 0,
+    message: {
+      id: MessageId('ux2-e5-reasoning'), role: 'assistant',
+      content: [{ type: 'reasoning', text: 'e5 thought' }, { type: 'text', text: 'e5 answer' }],
+      source: { kind: 'model', provider: 'p', model: 'm' },
+    },
+    stream: [
+      { type: 'chunk', time: 1_700_000_000_000 + 322_000, chunk: { type: 'block-start', index: 0, blockType: 'reasoning' } },
+      { type: 'chunk', time: 1_700_000_000_000 + 322_000, chunk: { type: 'reasoning-delta', index: 0, text: 'e5 thought' } },
+      { type: 'chunk', time: 1_700_000_000_000 + 323_000, chunk: { type: 'block-end', index: 0, block: { type: 'reasoning', text: 'e5 thought' } } },
+      { type: 'chunk', time: 1_700_000_000_000 + 324_000, chunk: { type: 'block-start', index: 1, blockType: 'text' } },
+      { type: 'chunk', time: 1_700_000_000_000 + 324_000, chunk: { type: 'text-delta', index: 1, text: 'e5 answer' } },
+      { type: 'chunk', time: 1_700_000_000_000 + 325_000, chunk: { type: 'block-end', index: 1, block: { type: 'text', text: 'e5 answer' } } },
+    ],
+  }, 321))
+  // A THIRD Work that is still OPEN when turn/end arrives: this is the decisive
+  // L6 turn-end sink (deleting the turn/end event would leave it open and render
+  // no duration, so the assertion below fails).
+  context.emit('session/event', childA as never, event('tool/call', {
+    turn: 4, step: 1, callId: 'ux2-e5-c' as ToolCallId, name: 'bash', arguments: '{"command":"echo c"}',
+  }, 327))
+  context.emit('session/event', childA as never, event('tool/result', {
+    turn: 4, step: 1,
+    message: {
+      id: MessageId('ux2-e5-c-result'), role: 'tool',
+      toolCallId: 'ux2-e5-c' as ToolCallId,
+      content: [{ type: 'text', text: 'c' }],
+      source: { kind: 'tool', callId: 'ux2-e5-c' as ToolCallId },
+    },
+  }, 328))
+  context.emit('session/event', childA as never, event('turn/end', { turn: 4, reason: { kind: 'completed' } }, 330))
+  await settle()
+  await vt.waitForRender()
+  const e5View = plain(vt.getViewport().join('\n'))
+  assert.ok(e5View.includes('Context injection demo'),
+    `the injected Context boundary row must render (collapsed form shows its provenance label):\n${e5View}`)
+  const e5Durations = [...e5View.matchAll(/(?:Activity|Thought) (\d+)s/gu)].map(match => match[1])
+  assert.deepEqual(e5Durations.slice(-3), ['9', '2', '3'],
+    `at L6: Context(+10s) closes the settled Tool Work (9s); the visible assistant text(+324s) closes the Reasoning lane (322s..324s = 2s); the owning turn/end(+330s) closes the still-open third Work (327s..330s = 3s):\n${e5View}`)
+
+  app.setDisplayPreset('full')
+  await settle()
+  await vt.waitForRender()
+
   // Child A → child B through the SAME real Task Center entry: no A residue.
   input('\x1b')
   await settle()
@@ -2220,6 +2438,11 @@ test('M3-5 PR1 L6: the Direct child viewer derives its display subject from Sess
   assert.ok(!restored.includes('[subagent · continuable]'), `the viewer badge must clear:\n${restored}`)
   assert.ok(!restored.includes('‹ back'), `the subject bar must clear on exit:\n${restored}`)
   assert.ok(!restored.includes('child-b-ws'), `the child workspace must clear:\n${restored}`)
+  // UX-1: the exit re-derives the row from the LATEST Main fields, not the
+  // entry-time snapshot — the parent's own `turn/start` (emitted while the child
+  // owned the surface) is still live, so the row returns as a MAIN row.
+  assert.ok(restored.includes('Working...'),
+    `the exit must show the LATEST Main working state:\n${restored}`)
 
   // NEGATIVE CONTROL: with child A's official SessionStatus projection REMOVED,
   // its bounded transcript fold sum (10/2) must NOT be presented as the
@@ -2251,6 +2474,80 @@ test('M3-5 PR1 L6: the Direct child viewer derives its display subject from Sess
     `an absent official child model must render the unknown token, never a parent value:\n${viewNoOfficial}`)
   assert.ok(!viewNoOfficial.includes('child-a-model'),
     `the removed official model must not linger in the subject bar:\n${viewNoOfficial}`)
+
+  // ── UX-3 (three-UX-fixes plan §7 E6): the FULLSCREEN `‹ back` glyph runs the
+  // REAL viewer exit. This is a real SGR press/release on the painted subject
+  // bar through the production `onCellPress`/`onCellClick` seam and the
+  // production `onSingleEscape` → `viewerRuntime.exitView()` route — never a
+  // synthetic `setViewerMode(undefined)`.
+  const generationBeforeBack = app.getViewerGeneration()
+  app.setFullscreen(true)
+  await settle()
+  await vt.waitForRender()
+  // A real interactive child draft: typing reaches the child's OWN seat slot,
+  // so the exit's draft lifecycle is observable (the child draft is parked and
+  // the preserved MAIN draft is written back to the seat).
+  input('ux3 child draft')
+  await settle()
+  assert.ok(app.seatTextForTest().includes('ux3 child draft'),
+    `the child draft must reach the seat before the exit:\n${app.seatTextForTest()}`)
+  const fullscreenRows = vt.getViewport().map(line => line.replace(/\x1b\[[0-9;]*m/g, ''))
+  const barRow = fullscreenRows.findIndex(row => row.includes('‹ back'))
+  assert.ok(barRow >= 0, `the subject bar must be painted in fullscreen:\n${fullscreenRows.join('\n')}`)
+  vt.sendInput(`\x1b[<0;2;${barRow + 1}M`) // press the `‹` glyph cell
+  vt.sendInput(`\x1b[<0;2;${barRow + 1}m`) // release on the same cell
+  await settle()
+  await vt.waitForRender()
+  assert.equal(probe.capturedViewerMode, undefined,
+    'the glyph click must run the production viewer exit (setViewerMode(undefined))')
+  assert.ok(app.getViewerGeneration() > generationBeforeBack,
+    'the real exit must bump the viewer generation')
+  const backToMain = vt.getViewport().map(line => line.replace(/\x1b\[[0-9;]*m/g, '')).join('\n')
+  assert.ok(!backToMain.includes('‹ back'),
+    `the subject bar must clear after the glyph exit:\n${backToMain}`)
+  assert.ok(backToMain.includes('display-subject-parent'),
+    `the MAIN session must be restored after the glyph exit:\n${backToMain}`)
+  // The draft lifecycle ran through the REAL exit: the child draft left the
+  // seat and the preserved MAIN draft (empty in this fixture) was written back
+  // — the child's text must never leak into the main draft. (The child ingress
+  // release / focus / scroll restoration are the SAME `exitView()` route the
+  // Esc suites exercise; this click proves the route is reached and completes.)
+  assert.equal(app.seatTextForTest(), '',
+    `the exit must restore the MAIN draft, never keep the child draft:\n${app.seatTextForTest()}`)
+  // Independent lifecycle sinks of the CLICK exit (not inherited from the Esc
+  // suites): the focus seat returns to the editor and the main transcript's
+  // follow state is live (the viewer scope is fully unwound).
+  assert.equal(app.focusSeatForTest(), 'editor',
+    'the glyph exit must return the focus seat to the editor')
+  const restoredScroll = app.fullscreenScrollForTest()
+  assert.ok(restoredScroll !== undefined && restoredScroll.isFollowingEnd,
+    `the glyph exit must leave the MAIN transcript following its end:\n${JSON.stringify(restoredScroll)}`)
+
+  // ── UX-2 Main (L6): the MAIN subject's Activity lifetime through the same
+  // production Session-event route, after the exit restored the main surface.
+  app.setDisplayPreset('compact')
+  await settle()
+  await vt.waitForRender()
+  context.emit('session/event', parent as never, parent.append!('tool/call', {
+    turn: 1, step: 0, callId: 'ux2-main-call' as ToolCallId, name: 'bash', arguments: '{"command":"echo main"}',
+  }) as SessionEvent)
+  context.emit('session/event', parent as never, parent.append!('tool/result', {
+    turn: 1, step: 0,
+    message: {
+      id: MessageId('ux2-main-result'), role: 'tool',
+      toolCallId: 'ux2-main-call' as ToolCallId,
+      content: [{ type: 'text', text: 'main' }],
+      source: { kind: 'tool', callId: 'ux2-main-call' as ToolCallId },
+    },
+  }) as SessionEvent)
+  await waitForView('Bash echo main')
+  const mainStill = activitySeconds(vt.getViewport().join('\n'))
+  assert.ok(mainStill !== undefined,
+    `the MAIN settled Activity must render:\n${vt.getViewport().join('\n')}`)
+  const mainSilent = await waitForGrowth(mainStill)
+  assert.ok(mainSilent > mainStill,
+    `the MAIN settled Activity must keep counting (${mainStill}s -> ${mainSilent}s):\n${vt.getViewport().join('\n')}`)
+  app.setDisplayPreset('full')
 })
 
 test('F4-R1: a viewer follow-up refusal settles through the production viewer into the right draft sink (current merge vs stale map-only) and an accepted send restores nothing', async (t) => {
@@ -2271,6 +2568,14 @@ test('F4-R1: a viewer follow-up refusal settles through the production viewer in
   life.defer(() => {
     if (previousHome === undefined) delete process.env.DSH_HOME
     else process.env.DSH_HOME = previousHome
+  })
+  // The Client-local request zone IS the TUI process zone: pin it so the zone
+  // the adapter forwards is an asserted value, never the machine's locale.
+  const previousTz = process.env.TZ
+  process.env.TZ = 'Asia/Shanghai'
+  life.defer(() => {
+    if (previousTz === undefined) delete process.env.TZ
+    else process.env.TZ = previousTz
   })
   const vt = new VirtualTerminal(80, 24)
   life.defer(installVirtualProcessTerminal(vt))
@@ -2325,7 +2630,12 @@ test('F4-R1: a viewer follow-up refusal settles through the production viewer in
   // The official prompt surface the REAL DirectSubagentPort reads lazily. A
   // held refusal lets the test move the viewer BETWEEN the send and the
   // settlement; an accepting arm is the positive control.
-  const promptCalls: { childSessionId: string; delivery: string; content: readonly { type: string; text?: string }[] }[] = []
+  const promptCalls: {
+    childSessionId: string
+    delivery: string
+    content: readonly { type: string; text?: string }[]
+    clientTimeZone?: string
+  }[] = []
   const held: (() => void)[] = []
   let accepted = false
   const subagents = {
@@ -2339,7 +2649,12 @@ test('F4-R1: a viewer follow-up refusal settles through the production viewer in
       parentId: parent.id,
       depth: 1,
     }],
-    prompt: async (request: { childSessionId: string; delivery: string; content: readonly { type: string; text?: string }[] }) => {
+    prompt: async (request: {
+      childSessionId: string
+      delivery: string
+      content: readonly { type: string; text?: string }[]
+      clientTimeZone?: string
+    }) => {
       promptCalls.push(request)
       if (accepted) return { messageId: 'viewer-settle-accepted' }
       await new Promise<void>(resolve => { held.push(resolve) })
@@ -2387,6 +2702,8 @@ test('F4-R1: a viewer follow-up refusal settles through the production viewer in
   assert.equal(promptCalls.length, 1, 'the production viewer submit must reach the official prompt exactly once')
   assert.equal(promptCalls[0]!.childSessionId, child.id)
   assert.deepEqual(promptCalls[0]!.content, [{ type: 'text', text: 'accepted follow-up' }])
+  assert.equal(promptCalls[0]!.clientTimeZone, 'Asia/Shanghai',
+    'the viewer follow-up carries the Client-local request zone into the official prompt')
   assert.equal(app.getDraft(), '', 'an accepted send must not restore the visible draft')
   input('\x1b')
   await settle()
@@ -2884,4 +3201,109 @@ test('PERF (plan §5): the Direct compat read adds no perceptible refresh cost o
     + ` p95 ${(compat.p95 - official.p95).toFixed(3)} max ${(compat.max - official.max).toFixed(3)} ms/event`)
   assert.ok(compat.p95 < 50,
     `no refresh lane may stall pathologically; measured p95 ${compat.p95.toFixed(3)} ms/event`)
+})
+
+// ── Task Browser Host-text safety on the REAL runner composition ───────────
+//
+// Independent fix PR: the ONE Task Browser Host-text terminal boundary. This
+// case drives the REAL production route end to end — `/tasks` → the row's
+// interrupt → bootstrap's `SessionRuntime.withWriter` writer admission →
+// `DirectSubagentPort` → `ctx.subagents.interrupt` → the app's ONE transient
+// notice line — with a HOSTILE official label, and asserts on the RAW stream
+// the TUI writes to the terminal (never a `stripTerminalSequences()` shot).
+
+test('S-03 L6: the real /tasks Subagent interrupt admits through the session writer and a hostile label never reaches the terminal stream', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-task-interrupt-text-safety-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const vt = new VirtualTerminal(100, 30)
+  life.defer(installVirtualProcessTerminal(vt))
+  const probe = installProbe()
+  life.defer(probe.restore)
+  let context: Context | undefined
+  let fiber: { dispose: () => Promise<unknown> } | undefined
+  life.defer(() => { if (context !== undefined) return disposeContext(context) })
+  life.defer(() => { if (fiber !== undefined) return fiber.dispose() })
+
+  const parent: FakeSession = fakeSession({
+    id: 'task-interrupt-safety-parent',
+    header: { id: 'task-interrupt-safety-parent', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('parent answer'),
+  })
+  const child: FakeSession = fakeSession({
+    id: 'task-interrupt-safety-child',
+    header: { id: 'task-interrupt-safety-child', cwd: home, createdAt: 1_700_000_000_001, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('child answer'),
+  })
+  // The task's verified hostile fixture: OSC 52 clipboard write + readable
+  // text + CSI erase, carried by the OFFICIAL subagent label.
+  const HOSTILE = '\x1b]52;c;UFdORUQ=\x07echo ok\x1b[2J'
+  const interrupts: Array<{ childSessionId: string; authority: { kind: string; parentSessionId: string } }> = []
+  const subagents = {
+    listDescendants: async () => [{
+      kind: 'child', id: child.id, label: HOSTILE, mode: 'continuable', activity: 'running',
+      hasChildren: false, parentId: parent.id, depth: 1,
+    }],
+    // The official Direct interrupt surface: a synchronous authority call.
+    interrupt: (childSessionId: string, authority: { kind: string; parentSessionId: string }): void => {
+      interrupts.push({ childSessionId, authority })
+    },
+  }
+  const harness = makeHarness(home, [parent, child], { provider: 'p', model: 'm' }, undefined, undefined, subagents)
+  const childHandle = await (harness.agents as { resume: (options: { resumeSessionId: string }) => Promise<{ dispose: () => Promise<void> }> }).resume({ resumeSessionId: child.id })
+  life.defer(() => childHandle.dispose())
+  // The interrupt branch re-reads the LIVE driver at confirmation time: the
+  // child's Agent really runs now (never inferred from the catalog).
+  ;(liveAgentOf(harness, child.id) as { status: string }).status = 'running'
+
+  context = new Context()
+  fiber = await mountRunner(context, home, harness, { sessionId: parent.id }, { sessionId: parent.id })
+  const app = probe.apps.at(-1)
+  assert.ok(app, 'the production runner must create a TuiApp')
+  const input = (data: string): void => {
+    (app as unknown as { tui: { handleTerminalInput(data: string): void } }).tui.handleTerminalInput(data)
+  }
+
+  // Capture the RAW byte stream from BEFORE the browser opens, so the hostile
+  // ROW text is in scope as well as the notice line.
+  const written: string[] = []
+  const originalWrite = vt.write.bind(vt)
+  vt.write = (data: string) => { written.push(data); originalWrite(data) }
+
+  const tasksHandler = (harness.commands as { handler(name: string): ((...args: never[]) => unknown) | undefined }).handler('tasks')
+  assert.ok(tasksHandler, 'the real runner must register /tasks')
+  await settle()
+  await tasksHandler()
+  await settle()
+  await vt.waitForRender()
+
+  input('S')
+  await settle()
+  await vt.waitForRender()
+  input('y')
+  await settle()
+  await vt.waitForRender()
+
+  // The production-composition witness: the writer-admitted interrupt really
+  // reached `ctx.subagents` with the exact durable parent/child authority.
+  assert.deepEqual(interrupts, [{
+    childSessionId: child.id,
+    authority: { kind: 'user', parentSessionId: parent.id },
+  }], 'the writer-admitted interrupt must name the exact durable parent/child authority')
+  // The committed settlement produced the ONE transient notice from the RAW
+  // official label (the draw-boundary projection of that notice is proven by
+  // the dedicated Task Browser suite; here the full-screen `/tasks` overlay
+  // legitimately covers the transcript gutter, so the notice row is not
+  // asserted against this geometry).
+  const appWithNotice = app as unknown as { notifyTextForTest(): string }
+  assert.equal(appWithNotice.notifyTextForTest(), `stopping ${HOSTILE}`,
+    'the committed settlement must produce the notice from the official raw label')
+  const stream = written.join('')
+  assert.ok(!stream.includes(']52;c;'), 'no Host OSC reaches the terminal stream')
+  assert.ok(!stream.includes('UFdORUQ='), 'no Host clipboard payload reaches the terminal stream')
 })

@@ -17,20 +17,30 @@
  *   `preselected` input), consuming the same presentation-source bundle
  *
  * TEST STAND-INS / SUBSTITUTIONS
- * - prompt serializer (unsupported test double): PR2 owns no production
- *   Remote submission serializer (the M3-4 submission PR's ownership); no
- *   proof below submits a Remote prompt
+ * - prompt serializer: the DEFAULT is an unsupported test double (the cases that
+ *   only read echoes never serialize); the cases that submit a REAL Remote
+ *   prompt (the writer-held PR5 cases, the pending handoff case and the
+ *   request-zone L5 case) pass `productionSerializer: true` and therefore run
+ *   the PRODUCTION Remote submission serializer, the real official
+ *   `SessionFace.prompt()` and the real Host Session Controller
  * - `StubStreamingLlmAdapter`: a scripted real `LlmAdapter` whose `stream`
  *   yields one real text turn — the Host emits REAL `agent/assistant-stream`
  *   frames, the wire forwards them, and the Client eventSource produces REAL
  *   transient entries; the adapter is the LLM endpoint stand-in only
+ * - the request-zone L5 case controls ONLY the Client runtime's reported zone:
+ *   a no-argument `Intl.DateTimeFormat` construction reports the Client zone
+ *   while the Host process zone and every explicit-`timeZone` construction stay
+ *   real (the Host side never sees a stand-in)
  * - hand-provided `agentDefaultModel`/`attachments`/`webServer`: the minimal
  *   readiness inputs (identical to the shared fixture manifest)
  *
  * DELIBERATELY ABSENT
- * - production Remote submission (prompt/queue/steer — the M3-4 PR3 domain);
- *   the pending-submission UI proofs read official Client echoes through
- *   `RemoteSubmissionPresentation`, never a TUI-minted Remote ledger
+ * - a separate Host PROCESS/timezone and a real network transport: the official
+ *   in-process carrier is this product's Remote path today, so the Host and the
+ *   Client share one process; the Client-vs-Host zone control is therefore
+ *   forged at the Client's `Intl` source (above), never by moving the Host
+ * - a real single-tty terminal / Tern GUI: the painted result is read from the
+ *   `VirtualTerminal`
  * - command catalog refresh / tool cards / permission cycle / rewind
  *   (the M3-4 command PR's ownership)
  * - secondary surfaces (Task Center rows, subagent viewer, Plugin Manager —
@@ -65,6 +75,8 @@ import type { RemoteApplicationOverride } from '../src/app/application-runtime.t
 import { TUI_STARTUP_SERVICE } from '../src/startup.ts'
 import { createRemoteApplicationRuntime } from '../src/app/remote/runtime.ts'
 import { testPromptSerializer, waitFor } from './support/remote-application-fixture.ts'
+import { appendHistoryRecord, historyFilePath, loadHistoryRecords } from '../src/client/history/store.ts'
+import { dshHome } from '../src/runtime/process/diagnostics.ts'
 import { testLifecycle, type TestLifecycle } from './support/temp-lifecycle.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 
@@ -209,6 +221,10 @@ export async function mountRemoteRunner(
     /** Extra preset ids registered on the Host roster (PR5 §3.5 needs a
      *  second selectable preset). */
     extraPresetIds?: readonly string[]
+    /** Invoked with the Remote presentation bundle BEFORE the runner fiber
+     *  mounts: a suite that must hold the startup hydration wraps the
+     *  presentation reader here (the runner reads it lazily at call time). */
+    beforeRunnerMount?: (presentation: RemoteApplicationOverride['presentation']) => void
   } = {},
 ): Promise<RemoteRunnerFixture> {
   const presetId = options.presetId ?? 'm3-4-pr2-preset'
@@ -270,6 +286,7 @@ export async function mountRemoteRunner(
     return originalStart.call(this)
   }
   life.defer(() => { TuiApp.prototype.start = originalStart })
+  options.beforeRunnerMount?.(override.presentation)
   const runnerFiber = runnerCtx.plugin(pluginCtx => {
     applyRunnerWithRuntime(pluginCtx, TuiConfigSchema({ fullscreen: 'off', sessionId: options.resumeSessionId } as never), override)
   })
@@ -371,6 +388,146 @@ test('L6: a Remote resumed session hydrates the real transcript and status throu
   // duplicate identity (the local-echo ledger never ran: no submit happened).
   assert.equal(frame.includes('hello remote'), true, 'the resumed user row is rendered')
   assert.equal(frame.includes('remote answer one'), true, 'the resumed assistant row is rendered')
+})
+
+test('L6: the resumed Remote startup keeps input accepted while its hydration read is held', async (t) => {
+  // The Remote startup resume awaits `remote.read` AFTER the terminal is already
+  // accepting input. A submission accepted in that window is owned by the
+  // resumed Session, and its own persistence is ordered behind the hydration
+  // continuation — so the reseed provably reads a snapshot WITHOUT it. The
+  // editor-recall scope must keep it, while the submission that did persist is
+  // never doubled, and the late row must land under the SAME Session.
+  const life = testLifecycle(t)
+  const mainId = 'm3-4-pr2-remote-startup-window'
+  const hostPreset = 'm3-4-pr2-preset'
+  const host = await mountRemotePresentationHost(life, hostPreset)
+  await host.harness.create(SessionId(mainId), undefined, { cwd: host.anchorDir })
+  {
+    const session = host.ctx.sessions.get(SessionId(mainId)) as unknown as {
+      append(type: string, data: unknown, options?: { surfaceOp?: 'append' }): void
+    }
+    session.append('turn/start', { turn: 1 })
+    session.append('step/start', { turn: 1, step: 1 })
+    session.append('user/message', {
+      id: 'u-1', role: 'user', content: [{ type: 'text', text: 'earlier remote turn' }], source: { kind: 'user' },
+    }, { surfaceOp: 'append' })
+    session.append('assistant/message', {
+      turn: 1, step: 1,
+      message: {
+        id: 'a-1', role: 'assistant',
+        content: [{ type: 'text', text: 'earlier remote answer' }],
+        source: { kind: 'model', provider: 'smoke', model: 'smoke' },
+      },
+      stream: [], usage: { inputTokens: 4, outputTokens: 2 },
+    }, { surfaceOp: 'append' })
+    session.append('step/end', { turn: 1, step: 1 })
+    session.append('turn/end', { turn: 1, reason: { kind: 'completed' } })
+  }
+  let readEntered = false
+  let releaseRead!: () => void
+  const readGate = new Promise<void>(resolve => { releaseRead = resolve })
+  let gated = false
+  const fixture = await mountRemoteRunner(life, {
+    presetId: hostPreset,
+    resumeSessionId: mainId,
+    host,
+    productionSerializer: true,
+    beforeRunnerMount: (presentation) => {
+      // The boot recall reads the CLIENT cwd's history file (the launch cwd), not
+      // the Host workspace's: a FOREIGN Session's row is already there, and a live
+      // owner IS current (the resume published before this mount), so ↑ must never
+      // be seeded with other Sessions' rows.
+      appendHistoryRecord(
+        historyFilePath(dshHome(process.env), process.cwd()),
+        { v: 2, content: 'foreign client-cwd prompt', cwd: process.cwd(), ts: Date.now(), sessionId: 'session-foreign-earlier' },
+        undefined,
+      )
+      const reader = presentation.presentationReader as unknown as {
+        read(sessionId: string, signal?: AbortSignal): Promise<unknown>
+      }
+      const real = reader.read
+      reader.read = async function gatedRead(sessionId: string, signal?: AbortSignal): Promise<unknown> {
+        if (gated) return real.call(reader, sessionId, signal)
+        gated = true
+        // The REAL read completes first (its wire round trip is exactly what
+        // production awaits); the gate then holds its RESULT, so releasing it
+        // resumes the hydration continuation immediately — the same
+        // "hydration still pending while the terminal accepts input" window a
+        // slow production read produces.
+        const captured = await real.call(reader, sessionId, signal)
+        readEntered = true
+        await readGate
+        return captured
+      }
+    },
+  })
+  // Bounded readiness: a startup read that never runs (or a first persist that
+  // never lands) fails this test instead of parking it.
+  await waitFor('the held startup read to be entered', () => readEntered, 20_000)
+  const editor = fixture.runnerApp() as unknown as {
+    setDraft(text: string): void
+    submitDraft(): void
+    getDraft(): string
+    getInputHistory(): readonly string[]
+    resetInputHistory(entries: readonly string[], owner?: string): void
+  }
+  // Capture what the resumed Session's hydration reseed commits.
+  assert.ok(!editor.getInputHistory().includes('foreign client-cwd prompt'),
+    `the boot recall of the client cwd must not back a live owner: ${JSON.stringify(editor.getInputHistory())}`)
+  const commits: { readonly entries: readonly string[]; readonly recall: readonly string[] }[] = []
+  const originalReset = editor.resetInputHistory.bind(editor)
+  editor.resetInputHistory = ((entries: readonly string[], owner?: string) => {
+    originalReset(entries, owner)
+    // The recall EXACTLY as this commit left it: the decisive moment, before
+    // any later append can repair it.
+    commits.push({ entries: [...entries], recall: [...editor.getInputHistory()] })
+  }) as typeof editor.resetInputHistory
+  const historyFile = historyFilePath(host.workRoot, host.anchorDir)
+  const ownersOf = (text: string): readonly (string | undefined)[] => loadHistoryRecords(historyFile)
+    .filter(row => row.content === text).map(row => row.sessionId)
+  try {
+
+  // The first submission persists BEFORE the held hydration commits.
+  editor.setDraft('first remote prompt')
+  editor.submitDraft()
+  await waitFor('the first submission persisted under the resumed Session', () =>
+    ownersOf('first remote prompt').includes(mainId), 20_000)
+
+  // Release the hydration and accept the second submission in the SAME
+  // synchronous stack: its persistence continuation is queued BEHIND the
+  // released hydration continuation.
+  releaseRead()
+  editor.setDraft('pending remote prompt')
+  editor.submitDraft()
+  await waitFor('the resumed hydration committed', () => commits.length > 0, 20_000)
+  // The reseed that commits while the second submission's row is still absent
+  // from the file: its snapshot carries the persisted submission only …
+  const first = commits[0]!
+  assert.deepEqual(first.entries, ['first remote prompt'],
+    `the snapshot carries the persisted submission only: ${JSON.stringify(first.entries)}`)
+  assert.equal(first.entries.includes('pending remote prompt'), false,
+    'the accepted-but-unpersisted submission is NOT in the snapshot')
+  // … and the recall it commits still holds that input, at its submission rank.
+  assert.deepEqual(first.recall, ['pending remote prompt', 'first remote prompt'],
+    `the hydration reconcile keeps the pending submission: ${JSON.stringify(first.recall)}`)
+  assert.deepEqual([...editor.getInputHistory()], ['pending remote prompt', 'first remote prompt'],
+    'the hydration reconcile keeps the pending submission and never doubles the persisted one')
+
+  // The late append lands under the SAME Session after the reseed, and the
+  // recall is unchanged by it (its occurrence is already represented).
+  await waitFor('the pending submission persists after the reseed', () =>
+    ownersOf('pending remote prompt').includes(mainId), 20_000)
+  assert.deepEqual([...editor.getInputHistory()], ['pending remote prompt', 'first remote prompt'],
+    'the late append never re-adds an already-recalled occurrence')
+
+  // The REAL ↑ sink recalls the input accepted during the held read.
+  fixture.vt.sendInput('\x1b[A')
+  await waitFor('↑ recalls the input accepted during the held read', () =>
+    editor.getDraft() === 'pending remote prompt', 5_000)
+  } finally {
+    // Never leave the startup hydration parked, whatever failed above.
+    releaseRead()
+  }
 })
 
 test('L6: the Remote branch performs zero Direct graph construction', async (t) => {
@@ -884,6 +1041,65 @@ function seedTurns(
   }
 }
 
+test('L6/S3-R0: a failed/fence-dropped hydrate under a LIVE generation retries once (behavioral witness)', async (t) => {
+  // RFL-002 behavioral seam — the IMMEDIATE retry branch, not the
+  // transport-absent listener: the official Connection generation IS live here
+  // (the fixture's wire is mounted), the FIRST cold read answers undefined, so
+  // `initLiveRemoteSession` returns undefined and the composition root's
+  // identity-change retry runs once under that generation. The separate
+  // transport-absent `armRemoteInitRetry` channel listener is covered by its
+  // source lock only, and the same-id owner-commit cancellation of an armed
+  // listener is static fence review — neither is exercised here.
+  const life = testLifecycle(t)
+  const presetId = 'm3-4-pr2-preset'
+  const sessionId = 'm3-4-pr2-s3r0-retry'
+  const host = await mountRemotePresentationHost(life, presetId)
+  await host.harness.create(SessionId(sessionId), undefined, { cwd: host.anchorDir })
+  const append = host.ctx.sessions.get(SessionId(sessionId)) as unknown as {
+    append(type: string, data: unknown, options?: { surfaceOp?: 'append' }): void
+  }
+  seedTurns(append, 1, 1, 'retry')
+  let failFirstRead = true
+  let liveSubscriptions = 0
+  const fixture = await mountRemoteRunner(life, {
+    presetId,
+    resumeSessionId: sessionId,
+    host,
+    beforeRunnerMount: (presentation) => {
+      // Count the LIVE ingress subscriptions this composition installs.
+      const ingress = presentation.liveIngress as unknown as {
+        subscribe: (...args: never[]) => unknown
+      }
+      const realSubscribe = ingress.subscribe
+      ingress.subscribe = function countedSubscribe(this: unknown, ...args: never[]) {
+        liveSubscriptions += 1
+        return (realSubscribe as (...a: never[]) => unknown).apply(this, args)
+      }
+      life.defer(() => { ingress.subscribe = realSubscribe })
+      // The first cold read deliberately returns undefined at the reader
+      // boundary (no real transport fence is triggered here) while the Connection
+      // generation REMAINS live: the identity-change retry branch.
+      const reader = presentation.presentationReader as unknown as {
+        read: (id: string, signal?: AbortSignal) => Promise<unknown>
+      }
+      const realRead = reader.read
+      reader.read = function failingOnce(this: unknown, id: string, signal?: AbortSignal) {
+        if (failFirstRead) {
+          failFirstRead = false
+          return Promise.resolve(undefined)
+        }
+        return realRead.call(this, id, signal)
+      }
+      life.defer(() => { reader.read = realRead })
+    },
+  })
+  await waitFor('the recovered transcript is painted', () => fixture.vt.getViewport().join('').includes('retry answer 1'), 20_000)
+  assert.equal(failFirstRead, false, 'the first hydrate really failed (the identity-change retry ran)')
+  assert.equal(liveSubscriptions, 1,
+    'exactly ONE ingress subscription exists after the retry (the failed attempt installed none)')
+  fixture.dispose()
+})
+
 test('L6 navigation: switch, same-id rollover and reconnect re-init the presentation without leaking the old subject', async (t) => {
   const life = testLifecycle(t)
   const sessionA = 'm3-4-pr2-nav-a'
@@ -1101,6 +1317,136 @@ test('L6 pending: queued -> queue pane, steering -> tail lane, and the echo -> a
   await waitFor('durable user row painted', () => {
     return fixture.vt.getViewport().join('\n').includes('queued echo body')
   }, 20_000)
+})
+
+test('L5: a real Remote ordinary submit carries the Client-sampled request zone — not the Host zone — into the Host source and its time-context injection', async (t) => {
+  const life = testLifecycle(t)
+  const mainId = 'm3-4-pr2-request-zone'
+  const hostPreset = 'm3-4-pr2-preset'
+  const seedHost = await mountRemotePresentationHost(life, hostPreset, { llmAdapter: new StubStreamingLlmAdapter() })
+  await seedHost.harness.create(
+    SessionId(mainId),
+    { provider: 'smoke', model: 'smoke-model' } as never,
+    { cwd: seedHost.anchorDir },
+  )
+  // The HOST side carries its own zone: the process zone is Amsterdam and the
+  // official request-clock row is mounted with an explicit New York display
+  // fallback (the Host-owned fallback the request zone must outrank).
+  const previousTz = process.env.TZ
+  process.env.TZ = 'Europe/Amsterdam'
+  life.defer(() => {
+    if (previousTz === undefined) delete process.env.TZ
+    else process.env.TZ = previousTz
+  })
+  const timeContext = await import('@deepseek-ai/dsh-time-context')
+  await seedHost.ctx.plugin(timeContext as never, { timeZone: 'America/New_York' } as never)
+  const fixture = await mountRemoteRunner(life, {
+    presetId: hostPreset,
+    resumeSessionId: mainId,
+    host: seedHost,
+    productionSerializer: true,
+  })
+  // The CLIENT side is independently controlled: the official
+  // `resolvedClientTimeZone()` samples `new Intl.DateTimeFormat()` with no
+  // arguments, so a no-argument construction reports the Client runtime's zone
+  // (Paris) while every explicit-`timeZone` construction — the Host's own
+  // canonicalization and the plugin's formatters — keeps the real behaviour.
+  const originalDateTimeFormat = Intl.DateTimeFormat
+  let clientZone: string | undefined = 'Europe/Paris'
+  const patched = function patchedDateTimeFormat(
+    this: unknown,
+    ...args: unknown[]
+  ): Intl.DateTimeFormat {
+    const formatter = Reflect.construct(originalDateTimeFormat, args) as Intl.DateTimeFormat
+    if (args.length === 0 && clientZone !== undefined) {
+      const resolved = formatter.resolvedOptions.bind(formatter)
+      formatter.resolvedOptions = () => ({ ...resolved(), timeZone: clientZone! })
+    }
+    return formatter
+  }
+  // Keep the real prototype/static surface (instanceof and
+  // `supportedLocalesOf` still resolve) — only the no-argument zone is replaced.
+  patched.prototype = originalDateTimeFormat.prototype
+  Object.setPrototypeOf(patched, originalDateTimeFormat)
+  ;(Intl as { DateTimeFormat: unknown }).DateTimeFormat = patched
+  life.defer(() => { (Intl as { DateTimeFormat: unknown }).DateTimeFormat = originalDateTimeFormat })
+  const app = await waitForApp(fixture)
+  const editor = fixture.runnerApp() as unknown as { setDraft(text: string): void; submitDraft(): void }
+  // The Host's authoritative log for the resumed Session (the JSONL projection
+  // flushes on retirement, so the live log is the readback that exists during
+  // the turn — it is the same event stream persistence stores).
+  const hostUsers = (): readonly {
+    readonly source: { readonly kind?: string; readonly rpcId?: unknown; readonly clientTimeZone?: unknown }
+    readonly content: readonly { readonly text?: string }[]
+  }[] => {
+    const agent = seedHost.ctx.agents.get(SessionId(mainId)) as unknown as {
+      session: { snapshotEvents(): ReadonlyArray<{ type: string; data: unknown }> }
+    }
+    return agent.session.snapshotEvents()
+      .filter(event => event.type === 'user/message')
+      .map(event => event.data as never)
+  }
+  const humanMessages = (): ReturnType<typeof hostUsers> => hostUsers().filter(message => message.source.kind === 'user')
+  const baseline = humanMessages().length
+  try {
+    assert.equal(new Intl.DateTimeFormat().resolvedOptions().timeZone, 'Europe/Paris',
+      'the Client runtime must report the controlled zone while the Host process zone stays Amsterdam')
+    editor.setDraft('remote request zone')
+    editor.submitDraft()
+    assert.ok(app !== undefined)
+    await waitFor('the Remote turn to complete on the Host', () =>
+      fixture.vt.getViewport().join('\n').includes('remote reply'), 25_000)
+    await waitFor('the Host user message', () => humanMessages().length === baseline + 1, 20_000)
+
+    const human = humanMessages()
+    assert.equal(typeof human[baseline]!.source.rpcId, 'string', 'the official identified prompt kept its request id')
+    assert.equal(human[baseline]!.source.clientTimeZone, 'Europe/Paris',
+      'the CLIENT zone crossed the official SessionFace → generated Remote → Host source (never the Host zone)')
+    const injected = hostUsers().filter(message => message.source.kind === 'time-context')
+    assert.equal(injected.length, 1, 'the mounted official plugin injected one request-clock snapshot')
+    const text = injected[0]!.content.map(part => part.text ?? '').join('\n')
+    assert.match(text, /Browser time zone for this request: Europe\/Paris\./u,
+      'the model-visible request zone is the Client value, not the Host process zone or the configured fallback')
+    assert.equal(text.includes('Amsterdam'), false, 'the Host process zone must never appear as the request zone')
+    assert.equal(text.includes('New_York'), false, 'the Host display fallback must never appear as the request zone')
+
+    // L6: the SAME durable reading reaches the mounted surface through the
+    // selected Remote Application → official Client event source →
+    // RemoteLiveIngress → SessionPresentation → TranscriptFolder path — not by
+    // handing Host events to the folder directly. The Context card's producer
+    // badge is the row identity; the body carries the request-zone policy.
+    const painted = (): string => fixture.vt.getViewport()
+      .map(line => line.replace(/\x1b\[[0-9;]*m/gu, '')).join('\n')
+    // The ambient card is collapsed by default, so the PAINTED identity is the
+    // header/badge; the folded body is read from the same app transcript.
+    await waitFor('the time-context Context card paints through the live ingress', () =>
+      painted().includes('Context') && painted().includes('time-context'), 20_000)
+    const foldedContext = ((app as unknown as {
+      messages?: readonly {
+        kind?: string
+        text?: string
+        contextPresentation?: { sourceKind?: string }
+      }[]
+    }).messages ?? []).filter(message =>
+      message.kind === 'system' && message.contextPresentation?.sourceKind === 'time-context')
+    assert.equal(foldedContext.length, 1,
+      'exactly one time-context row reached the presentation through the live ingress')
+    assert.match(foldedContext[0]!.text ?? '',
+      /Browser time zone for this request: Europe\/Paris\./u,
+      'the folded Context body is the official durable reading, not a rebuilt value')
+
+    // Per-submit sampling: the NEXT send samples the Client runtime again, and it
+    // never rewrites the earlier message's stored zone.
+    clientZone = 'UTC'
+    editor.setDraft('second request zone')
+    editor.submitDraft()
+    await waitFor('the second Host user message', () => humanMessages().length === baseline + 2, 20_000)
+    assert.deepEqual(humanMessages().map(message => message.source.clientTimeZone).slice(baseline),
+      ['Europe/Paris', 'UTC'],
+      'each human submit carries the zone sampled at ITS OWN send point')
+  } finally {
+    await fixture.dispose()
+  }
 })
 
 test('L6: a projection-owned value changed by ANOTHER writer reaches the surface through the official projection channel', async (t) => {
@@ -1406,7 +1752,7 @@ test('L6 §7.4-5 literal skill gesture over a mounted Remote surface: the Client
 
 /* ───────── §7.4-7 mounted /status over a paged performance window (F8) ──── */
 
-test('L6 §7.4-7 mounted /status: lifetime totals render from the projections; the RECENT figures fold the MOUNTED window', async (t) => {
+test('L6 §7.4-7 mounted /status: lifetime totals render from the projections; the RECENT figures come from the Session\'s own Host projection', async (t) => {
   const life = testLifecycle(t)
   const mainId = 'm3-4-pr4-status-paged'
   const hostPreset = 'm3-4-pr2-preset'
@@ -1415,22 +1761,26 @@ test('L6 §7.4-7 mounted /status: lifetime totals render from the projections; t
   const session = host.ctx.sessions.get(SessionId(mainId)) as unknown as {
     append(type: string, data: unknown, options?: { surfaceOp?: 'append' }): void
   }
-  // The OLDEST turns carry the recent-sample evidence. CLOCK CONTRACT
-  // (round-5 hardening, review F8.2): the fold's TTFT is
-  // max(0, first-chunk-time − step/start event time) and its decode span is
-  // max(0, assistant/message event time − first-chunk-time) — BOTH event
-  // times are the official Session's real wall clock (append assigns
-  // Date.now()), while the STREAM chunk times are fixture-controlled. So a
-  // legal non-zero sample needs: chunks anchored slightly AHEAD of the
-  // step/start append (non-zero TTFT), and the assistant/message appended
-  // only AFTER a real wait past the first chunk (non-zero decode span).
-  // The seeded span is ~100ms TTFT and ~300ms decode per sampled turn
-  // (settlement lands ≈anchor+400 after the real wait; the first chunk is
-  // at anchor+100 — ±loop jitter), i.e. 200 tokens over ~0.3s ≈ 667 tok/s:
-  // a `TTFB 0.1s`-class and bounded three-digit `tok/s` rendering —
-  // asserted as a REQUIRED MATCH (assert.match throws on failure; the
-  // previous `exec() !== undefined` form was vacuously true because exec
-  // returns null, not undefined).
+  // The seeded committed turns carry the recent-sample evidence, folded by the
+  // Session's OWN Host `piTuiPerformance` projection (TPS plan PR-2: the Client
+  // no longer folds its bounded window, and the recent figures no longer
+  // depend on how much history that window holds). CLOCK CONTRACT (round-5
+  // hardening, review F8.2; wording corrected by TPS plan PR-3): the
+  // projection's TTFB takes its first-token evidence from the FIRST visible
+  // STREAM CHUNK time minus the `step/start` EVENT time (an earlier
+  // `assistant/attempt` stream may supply that chunk time; this fixture
+  // appends no attempt, so the `assistant/message` stream does), and its
+  // per-step model span is the `assistant/message` EVENT time minus the
+  // `step/start` EVENT time — both event times are the official Session's real
+  // wall clock (append assigns Date.now()), while the stream chunk times are
+  // fixture-controlled. So a legal non-zero sample needs the chunk times
+  // anchored slightly after the step start AND a real wait before the
+  // `assistant/message` append. The seeded span is ~100ms TTFB and ~400ms
+  // model wall per sampled turn (settlement lands ≈anchor+400 after the real
+  // wait), i.e. 200 tokens over ~0.4s ≈ 500 tok/s: a `TTFB 0.1s`-class and
+  // bounded three-digit `tok/s` rendering — asserted as a REQUIRED MATCH
+  // (assert.match throws on failure; the previous `exec() !== undefined` form
+  // was vacuously true because exec returns null, not undefined).
   for (let turn = 1; turn <= 5; turn += 1) {
     const anchor = Date.now()
     session.append('turn/start', { turn })
@@ -1438,10 +1788,10 @@ test('L6 §7.4-7 mounted /status: lifetime totals render from the projections; t
     session.append('user/message', {
       id: `u-paged-${turn}`, role: 'user', content: [{ type: 'text', text: `paged prompt ${turn}` }], source: { kind: 'user' },
     }, { surfaceOp: 'append' })
-    // The assistant/message must land at a WALL time after the first chunk
-    // time for the decode span to be observable: wait past the whole seeded
-    // chunk window BEFORE appending the settlement (the event time is the
-    // Session's real Date.now(), the chunk times are the fixture's).
+    // The assistant/message must land at a WALL time after the step start for
+    // the model span to be observable: wait past the whole seeded chunk window
+    // BEFORE appending the settlement (the event time is the Session's real
+    // Date.now(), the chunk times are the fixture's).
     await new Promise(resolve => setTimeout(resolve, 400))
     session.append('assistant/message', {
       turn, step: 1,
@@ -1470,48 +1820,55 @@ test('L6 §7.4-7 mounted /status: lifetime totals render from the projections; t
   // bounded-window read could not produce them — the projections must.
   await waitFor('the projection-backed lifetime totals rendered', () =>
     /↑[0-9.]+k/u.test(fixture.vt.getViewport().join('')), 20_000)
-  // RECENT evidence: the MOUNTED window (the exact one the Remote status
-  // composition folds) carries admitted throughput samples.
-  const snapshot = await fixture.aggregate.presentation.presentationReader.read(mainId)
-  assert.ok(snapshot !== undefined, 'the mounted Remote window is readable')
-  const statsMod = await import('../src/domain/status/stats.ts')
-  const recent = statsMod.recentPerformanceOf(snapshot!.durableEvents as never[])
-  assert.ok(recent.tokensPerSec > 0,
-    'the mounted window admits recent throughput samples (the composed /status recent figure is fold-backed, never a window-only zero)')
-  // ROUND-4 hardening — the RENDERED panel row is the authority, not the
-  // source-level fold above: the Stats row carries the EXACT projection-
-  // backed lifetime totals (5 sampled turns × 1000/200 + 40 newer × 1/1 =
-  // ↑5.0k ↓1.0k) AND non-zero rendered recent figures (TTFB ≠ 0s,
-  // tok/s ≠ 0), so a future /status wiring break cannot hide behind a
-  // green source-level assertion. The samples live ONLY in the oldest
-  // turns (outside the initial bounded window), so non-zero rendered
-  // figures also prove the composition's loadOlder paging actually ran.
+  // RECENT evidence (TPS plan PR-2): the measured performance values come
+  // from the SESSION's own Host `piTuiPerformance` projection, which folds
+  // the SAME committed turns regardless of how much history the Client's
+  // bounded window happens to hold — no `loadOlder()` and no window fold can
+  // influence them. The seeded turns are REAL committed events, so the Host
+  // projection carries their samples.
+  await waitFor('the projection-backed lifetime totals rendered', () =>
+    /↑[0-9.]+k/u.test(fixture.vt.getViewport().join('')), 20_000)
+  // ROUND-5 hardening — REQUIRED MATCHES on the RENDERED row (assert.match
+  // throws when the pattern does not match; the round-4 `exec() !== undefined`
+  // guards were vacuously true — exec returns null). The seeded first chunk
+  // lands ~100ms after `step/start` → a `0.1s`-class TTFB rendering (a broken
+  // wiring that renders 0 fails: `0.0s`/`0s` does not match); the rate is
+  // 200 tokens over the ~400ms request wall → a non-zero tok/s figure. The
+  // upper bound keeps the match honest against the seeded arithmetic.
   await waitFor('the panel rendered the exact lifetime totals', () =>
     fixture.vt.getViewport().join('').includes('↑5.0k ↓1.0k'), 20_000)
-  // ROUND-5 hardening — REQUIRED MATCHES on the RENDERED row (assert.match
-  // throws when the pattern does not match; the round-4 `exec() !==
-  // undefined` guards were vacuously true — exec returns null). The TTFT
-  // window is seeded at ~100ms per sampled turn → a `0.1s`-class rendering
-  // (a broken wiring that renders 0 fails: `0.0s`/`0s` does not match);
-  // the throughput window is 200 tokens over a ~300ms decode span → a
-  // three-digit tok/s figure (a broken wiring that renders 0 fails). The
-  // upper bound keeps the match honest against the seeded arithmetic.
+  // The RENDERED status surface of this fixture is the footer row: the
+  // /status panel keeps its formatted facts in each row's DESCRIPTION, which
+  // the overlay does not paint for an unfocused row (observed with a probe —
+  // the Stats row renders label-only while its description carries the
+  // figures). The footer and the panel read the SAME status facts, so this
+  // assertion still proves the Host-projection figures reach a rendered
+  // surface; the panel row's own formatting is covered by
+  // `test/footer-items.test.ts` / `test/status-semantics.test.ts`.
   const panelView = fixture.vt.getViewport().join('')
   assert.match(panelView, /TTFB 0\.[1-9]\d*s/u,
-    `the panel's rendered recent TTFB must be the seeded non-zero figure:\n${panelView}`)
-  assert.match(panelView, /([1-9]\d{1,3}) tok\/s/u,
-    `the panel's rendered recent throughput must be the seeded non-zero figure:\n${panelView}`)
-  // FOOTER consistency after the /status paging (F10): the footer's own
-  // stats row re-derived from the WIDENED fold — it must no longer show the
-  // no-sample zeros the initial bounded window produced.
+    `the rendered status must show the seeded non-zero TTFB:\n${panelView}`)
+  // `displayRate` renders ONE decimal below 100 tok/s and an integer at or
+  // above it, so a rate is asserted as a NON-ZERO bounded number, never as an
+  // integer: the seeded model wall is real elapsed time, and a loaded machine
+  // can legitimately push either scope below the decimal threshold.
+  assert.match(panelView, /[1-9]\d{0,3}(?:\.\d)? tok\/s/u,
+    `the rendered status must show a seeded non-zero rate:\n${panelView}`)
+  // FOOTER consistency: the footer reads the SAME status facts, so it shows
+  // the same Host-projection figures — never the no-sample zeros.
   const footerRows = (fixture.runnerApp() as unknown as {
     footerRenderRowsForTest(): readonly string[]
   }).footerRenderRowsForTest()
   const footerText = footerRows.join(' ')
   assert.match(footerText, /TTFB 0\.[1-9]\d*s/u,
-    `the footer re-derived its recent figures from the widened fold after the /status paging:\n${footerText}`)
-  assert.match(footerText, /([1-9]\d{1,3}) tok\/s/u,
-    `the footer's recent throughput re-derived from the widened fold:\n${footerText}`)
+    `the footer's recent figures are the Host projection's:\n${footerText}`)
+  // TPS plan PR-3: the DEFAULT footer layout shows the combined pair — the
+  // real Host → Client → Footer chain must deliver BOTH scopes to the
+  // rendered footer row, with the singular `tok/s` unit. Each scope keeps its
+  // own decimal policy (see `displayRate`): the assertion must not encode an
+  // integer-only assumption the load-dependent wall time can break.
+  assert.match(footerText, /R5 [1-9]\d*(?:\.\d)? · All [1-9]\d*(?:\.\d)? tok\/s/u,
+    `the footer must render the default R5 + All pair from the Host projection:\n${footerText}`)
 })
 
 /* ─────────── PR5 §12 Slice E: real-holder writer-held recovery ─────────── */
@@ -1547,15 +1904,15 @@ async function startWriterHolder(
   return { kill }
 }
 
-/** Read the durable event types straight off the Host persistence root. */
-async function readDurableEventTypes(
+/** Read the durable events straight off the Host persistence root. */
+async function readDurableEvents(
   host: Awaited<ReturnType<typeof mountRemotePresentationHost>>,
   sessionId: string,
-): Promise<readonly string[]> {
+): Promise<readonly { readonly type: string; readonly data?: unknown }[]> {
   const persistence = (host.ctx as unknown as {
     sessionPersistence: {
       open(id: unknown, mode: 'read'): Promise<{
-        read(): Promise<{ events: readonly { type: string }[] }>
+        read(): Promise<{ events: readonly { type: string; data?: unknown }[] }>
         close(): Promise<void>
       }>
     }
@@ -1563,10 +1920,18 @@ async function readDurableEventTypes(
   const handle = await persistence.open(SessionId(sessionId), 'read')
   try {
     const read = await handle.read()
-    return read.events.map(event => event.type)
+    return read.events
   } finally {
     await handle.close()
   }
+}
+
+/** Read the durable event types straight off the Host persistence root. */
+async function readDurableEventTypes(
+  host: Awaited<ReturnType<typeof mountRemotePresentationHost>>,
+  sessionId: string,
+): Promise<readonly string[]> {
+  return (await readDurableEvents(host, sessionId)).map(event => event.type)
 }
 
 test('L6 PR5: a REAL two-process writer-held Remote Session — prompt, /title and /preset recover structurally, and an explicit retry commits after the holder exits', async (t) => {

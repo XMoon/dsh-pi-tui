@@ -176,6 +176,15 @@ function stubRunner(ctx: Context, app: TuiApp): TuiCommandRunner {
         get: () => undefined,
         set: async () => {},
       },
+      web: {
+        available: () => false,
+        read: async () => undefined,
+        setSearchProvider: async () => {},
+        setFetchProvider: async () => {},
+        setSearchApiCount: async () => {},
+        setSendOriginalQuestion: async () => {},
+        setSearchApiBaseURL: async () => {},
+      },
     },
     hostFile: new DirectHostFilePort(() => undefined, null),
     hostShellCompletion: true,
@@ -213,7 +222,7 @@ function stubRunner(ctx: Context, app: TuiApp): TuiCommandRunner {
     setTerminalProgressMode: () => {}, setNotificationMethod: () => {},
     updateWelcomeCard: () => {},
     openJobView: () => {},
-    openTasksBrowser: () => {}, openPluginManager: () => {}, createPluginManagerSubmenu: () => ({ render: () => [], invalidate: () => {} }),
+    openTasksBrowser: () => {}, openPluginManager: () => {}, createPluginManagerPage: () => undefined,
     openRewindPicker: () => {},
     sessionTransitionPending: () => false,
     withSessionTransition: async <T>(task: () => T | Promise<T>) => task(),
@@ -872,10 +881,8 @@ async function mountRunner(
   return fiber
 }
 
-/** Drive one editor submit through the app's terminal input. The text is
- * sent as ONE chunk (a multi-char read resets the editor's paste-burst
- * tracker — per-character typing past the burst threshold would turn the
- * trailing Enter into a newline instead of a submit). */
+/** Drive one editor submit through the app's terminal input: the text as one
+ * input event, then `\r` to submit it. */
 function submitText(app: TuiApp, text: string): void {
   const tui = (app as unknown as { tui: { handleTerminalInput(data: string): void } }).tui
   tui.handleTerminalInput(text)

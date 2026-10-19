@@ -33,6 +33,7 @@ import { contextPressureOccupancy, type SessionContentSearchPage, type SessionPr
 import { detachedTurnOutline, type TurnOutlineEntryDto } from '../presentation-read-port.ts'
 import { directTurnOutlineCompat } from './turn-outline-compat.ts'
 import { detachedSessionStatus } from '../session-status-projection.ts'
+import { projectedWorkingDirectory } from './working-directory-direct.ts'
 import type { DurableModelSelectionReader } from './model-selection-direct.ts'
 
 /**
@@ -46,8 +47,14 @@ import type { DurableModelSelectionReader } from './model-selection-direct.ts'
 export interface SessionQueryLike {
   /** Returns the semantic live-preferred Session corpus from sessionQuery.
    * ApiSessionList-compatible visibility policy is applied by this adapter:
-   * live rows remain visible; cold rows require cwd. */
-  listSessions(signal?: AbortSignal): Promise<Array<{ header: SessionHeader; live: boolean }>>
+   * live rows remain visible; cold rows require cwd. The official
+   * `SessionRecord.formatStatus` (on-disk format state) is carried through
+   * verbatim when the official read reports it — never inferred here. */
+  listSessions(signal?: AbortSignal): Promise<Array<{
+    header: SessionHeader
+    live: boolean
+    formatStatus?: 'current' | 'migration-required'
+  }>>
   /** One exact live or prepared logical Session observation for explicit
    * viewer/resume paths: header + complete validated event log, caller-owned.
    * NOT the canonical export plane — a cold observation synthesizes
@@ -59,6 +66,10 @@ export interface SessionQueryLike {
   ): Promise<{
     readonly header: SessionHeader
     readonly events: readonly SessionEvent[]
+    /** The official projection baseline at the observation's cut, present
+     *  only when the read asked for (`projectionMode: 'all'`) and the
+     *  registry is mounted. */
+    readonly projections?: { readonly values?: Readonly<Record<string, unknown>> }
     [Symbol.dispose](): void
   }>
   /**
@@ -227,6 +238,7 @@ export class DirectSessionReader implements SessionReader {
         session: live,
         header: live?.header ?? record.header,
         live: live !== undefined,
+        ...(record.formatStatus === undefined ? {} : { formatStatus: record.formatStatus }),
       }
     })
     // Keep filtered headers out of the enrichment snapshot so projectionBatch
@@ -245,6 +257,9 @@ export class DirectSessionReader implements SessionReader {
           cwd: record.header.cwd,
           parentSession: record.header.parentSession,
           origin: record.header.origin,
+          // The official session-query corpus reports the durable record's
+          // on-disk format state; the picker renders it read-only.
+          ...(record.formatStatus === undefined ? {} : { formatStatus: record.formatStatus }),
           live: record.live,
         },
         activity: updatedAt,
@@ -379,6 +394,13 @@ export class DirectSessionReader implements SessionReader {
     }
   }
 
+  /** Sessions whose LAST status read threw (see `sessionStatusFailed`). */
+  private readonly statusReadFailures = new Set<string>()
+
+  sessionStatusFailed(sessionId: string): boolean {
+    return this.statusReadFailures.has(sessionId)
+  }
+
   sessionStatus(sessionId: string): SessionStatusProjection | undefined {
     // The projection SUBJECT is the attached/retained Session identity, NOT
     // the live Agent: a retained Session whose Agent is inactive (or was
@@ -387,12 +409,20 @@ export class DirectSessionReader implements SessionReader {
     // as status-unavailable — and would force a cold-resume merely to answer
     // a status question (M3-5 PR1 §9.1).
     const session = this.liveSession(sessionId)
-    if (session === undefined) return undefined
+    if (session === undefined) {
+      // No retained Session to cut: no VALUE was read (not a failure).
+      this.statusReadFailures.delete(sessionId)
+      return undefined
+    }
     // ONE consistent cut over the official projection units of THIS exact
     // session (M3-4/M3-5 foundation). No StatsFolder, no raw-log fold, no
     // other session's values ever ride along.
     const projections = this.sessionProjections()
-    if (projections === undefined) return undefined
+    if (projections === undefined) {
+      // No projection capability in this composition: no VALUE was read.
+      this.statusReadFailures.delete(sessionId)
+      return undefined
+    }
     try {
       const values = projections.snapshot(session, [
         'modelSelection',
@@ -403,12 +433,26 @@ export class DirectSessionReader implements SessionReader {
         'agentPreset',
         'title',
         'goal',
+        // The official effective directory of THIS Session (S2/PR-B): the
+        // SAME projection the `working_directory` tool commits into and the
+        // official fs/shell tools read. The header below stays the ORIGINAL
+        // project and is only the fallback when the projection records none.
+        'workingDirectory',
         // PR4 §6.1: the committed permission value on the SAME shared
         // semantic (Direct reads the identical projection the Remote
         // binding carries).
         'permissions',
+        // The bundle's OWN Host performance projection (TPS plan PR-2): the
+        // single authority for the R5/All/TTFB facts, read off the same
+        // exact-session cut as every other status key.
+        'piTuiPerformance',
       ])?.values
-      if (values === undefined) return undefined
+      if (values === undefined) {
+        // A NON-throwing snapshot without values is "no recorded value", not a
+        // failure: the remembered failure of an EARLIER read must not stick.
+        this.statusReadFailures.delete(sessionId)
+        return undefined
+      }
       // The official `modelSelection` unit is registered by the API
       // SessionController row, which this profile does not compose, so the
       // registry omits the key entirely. ABSENCE of the key — never a
@@ -423,10 +467,19 @@ export class DirectSessionReader implements SessionReader {
       const forDisplay = Object.prototype.hasOwnProperty.call(values, 'modelSelection')
         ? values
         : { ...values, modelSelection: this.modelSelections.durableProjectionForSession(session) }
-      return detachedSessionStatus(sessionId, forDisplay, session.header.cwd)
+      // The EFFECTIVE directory of this exact Session, or (no recorded value)
+      // the header's original project. The two are NOT interchangeable: the
+      // header never follows a committed `working-directory/change`, so a
+      // consumer that executes/renders in the session's directory must read
+      // the projection.
+      const effectiveCwd = projectedWorkingDirectory(values.workingDirectory) ?? session.header.cwd
+      this.statusReadFailures.delete(sessionId)
+      return detachedSessionStatus(sessionId, forDisplay, effectiveCwd)
     } catch {
       // A projection authority failure is `undefined` (unknown), never a
-      // crash and never partially invented facts.
+      // crash and never partially invented facts; the failure is REMEMBERED so
+      // a consumer cannot mistake it for "no recorded value".
+      this.statusReadFailures.add(sessionId)
       return undefined
     }
   }

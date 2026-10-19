@@ -75,6 +75,78 @@ binding still works outside it). The config parser warns on such a
 collision (`FIXED_OVERLAY_KEYS`); the overlay never resolves the
 configurable action first (plan §3.3).
 
+### The conditional task affordance vs the actual route
+
+The `↓` task admission is a composition rule over `app.tasks.open`
+(`manager.ts`), and the footer's `↓ view` / compact `↓` hint asks the SAME
+question. That hint has ONE input — `TuiApp.taskBrowserAvailable()` —
+shared by the builtin task item's full and compact densities and by every
+custom layout that references the item; never two per-mode branches.
+
+Phase 3B/B4-B changed WHAT the rule admits: the on-demand Task Quick enters
+from the focused HOST editor's last VISUAL line — the context field is
+`quickDownEligible` (a lazy thunk: the fork classifier runs once per
+candidate Down, never per keystroke), and `editorEmpty` no longer gates this
+composition (a NON-EMPTY draft qualifies on its last visual line; the field
+keeps its own meaning for other rules). `quickDownEligible()` is the ONE
+private predicate behind both the routing and the hint: `tasksActive`, a
+real Quick projection (>= 1 row), the host editor as the physically focused
+seat in prompt mode, and no higher-priority owner. A plugin editor takes no
+claim — the visual boundary is the host fork's protected seam (divergence
+X063 in `packages/pi-tui/vendor-divergences.json`), which no public editor
+API exposes. The retired empty-editor route into the modal Quick is gone;
+`app.tasks.open` now opens the on-demand accessory, and `/tasks` remains the
+Full Task Center's own entry, independent of this action.
+
+Owner-approved Footer admission geometry (2026-10-15): before a hidden Quick
+can be admitted, the host composes a read-only candidate of the complete Footer
+with the hint enabled and measures its physical height for the existing Quick
+row grant. This candidate is not committed or iterated to a fixed point. If it
+leaves no Quick row, the hint and Down route both fail closed even when the
+hint-free painted Footer would fit. Once Quick is active, its layout uses the
+actual painted Footer; hiding the hint does not re-run hidden-entry admission
+or close Quick.
+
+The gate must test the ACTIVE input OWNERS, not only physical overlay
+focus: a Question / Save Location frame owns the editor SEAT (it is not a
+managed broker overlay, so `OverlayBroker.hasFocusedOverlay()` stays false
+while `handleInputCore` consumes every key), and an Approval owns a
+managed overlay. A hint derived from overlay focus alone advertised a `↓`
+the ladder refused. `tasksActive`, `?N` (parked attention) and `!N`
+(failure attention) are independent projections: suppressing the hint
+never clears them. Save Location has no `ActivityStatus` section of its
+own, so its present/settle boundaries refresh the footer explicitly
+(`renderFooter()`); Question/Approval ride the status-store notify.
+
+A user binding, or a leader completion, of `app.tasks.open` is another
+TRIGGER of the same action and obeys the same ownership boundary (the
+modal inspection plane refuses non-inspection completions), so it is never
+a way across a modal. `test/surface-modal-affordance.test.ts` locks the
+modal source→route→footer behavior, and the keybinding integration suite
+locks the remap/leader boundary.
+
+The hint also tracks the EFFECTIVE keymap, not only the seat/modal state. It
+advertises the `↓` trigger, so the gate asks whether the action still owns
+that key in the live read model —
+`HostKeybindingManager.keysFor('app.tasks.open').includes('down')`. An
+explicit `app.tasks.open: false` removes every source of the action's keys,
+including the host's synthesized conditional `↓` composition rule
+(`effective-keymap.ts` step 3); a DIFFERENT action bound to `↓` shadows that
+composition rule; a deactivated composition rule leaves the same gap. In
+every case the action may keep another trigger (a remap is ADDITIVE and
+normally keeps the conditional `↓` too) while `↓` itself no longer resolves
+to the task browser, so a gate that only asked "does this action still have
+any key?" would still promise a `↓` the router refuses. Because the footer
+text is derived from the keymap, a keymap rebuild recomposes it
+(`onInvalidate`), so the hint is never left stale by `/keybindings reload`,
+a `/keybindings` save or the settings appliers.
+
+The affordance suite locks all of it: the full, responsive-compact and
+fullscreen footers, the disabled action, the pure-remap case (the conditional
+`↓` survives), the `↓`-taken case, and a positive control proving that
+re-enabling restores both the hint and the real route through the keymap
+rebuild alone.
+
 ## Key decisions
 
 1. **One canonical physical-key identity.** Every key spelling collapses
@@ -103,7 +175,7 @@ configurable action first (plan §3.3).
    (convergence §2/§4.3/§4.4).
 3. **Editor-owned submit lives in the unified rule model — winner-aware.**
    `app.input.submit` is `hostResolved: false` — the fork editor's submit
-   path owns paste-burst suppression and the backslash-newline workaround.
+   path owns the backslash-newline workaround.
    Editor-owned rules PARTICIPATE in the winner selection on equal
    footing with host/plugin rules (round 9 finding: the resolver used to
    skip editor rules BEFORE picking a winner, so `submit: ctrl+s`
@@ -170,6 +242,39 @@ configurable action first (plan §3.3).
     sanctioned seams (read-only viewer guard, the Ctrl+C clear-draft
     semantic discriminator, approval dialog keys, replacement-editor Enter
     seams, the effective-submit Shift+Enter exclusion).
+12. **A fullscreen Job workspace re-scopes the EFFECTIVE Find binding to
+    its own Output.** While a Job workspace owns the physical screen, the
+    winning resolution of `app.transcript.search` is interpreted as
+    "find in the current retained Output": the key is consumed by the Job
+    panel, the global Transcript search handler is never entered and the
+    fork's built-in search overlay is never opened. This reuses the LIVE
+    winner (so a remap, a disable or a leader-only binding moves the Job
+    key too, and a disabled Find advertises nothing) without creating a
+    second configurable action id or a second keymap truth; `/` stays a
+    non-configurable Job-local alias, active only while the query is not
+    being edited. A leader completion is the same action's effective
+    completion: the Job input branch feeds exactly the exit-bound and
+    Find-bound completing keys to the shared machine and cancels every
+    other completion without dispatching it, and the leader activation
+    wiring intercepts Find for the Job BEFORE the host action dispatch —
+    never "open the Transcript search, then repair it".
+13. **A fullscreen Job workspace has fixed Job-local read-only verbs that
+    are NOT configurable action ids.** `v` opens the shell Command page
+    from the Output page and `C` (`shift+c`) copies the CURRENT reading
+    page's own source — the retained Output on the Output page, the
+    original command label on the Command page — through the existing
+    Client-local clipboard capability. They are component logic, not an
+    entry in `APP_KEYBINDINGS`: they take part in no conflict
+    classification, move with no remap and never shadow the global
+    Transcript, picker or editor bindings, which still own those letters
+    everywhere else. Their precedence inside the workspace is fixed: the
+    physical `Home`/`End` viewport keys and the effective Find binding are
+    matched FIRST (see 11/12 above), `tasks.stop` keeps its existing branch
+    BEFORE the two verbs, and in the search `NAVIGATE` state — and in
+    `EDIT`, where the query Input owns every printable key — all three are
+    inert and the Action Bar advertises none of them. The Command page
+    never advertises or dispatches Stop; `Esc` there is the page's own
+    return to Output, and only an Output-page `Esc` runs the B1-A close.
 
 ## User configuration
 

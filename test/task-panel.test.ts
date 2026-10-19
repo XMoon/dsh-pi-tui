@@ -1,5 +1,5 @@
 /**
- * Unit tests for the TaskBrowserPanel presentation layer: status dots,
+ * Unit tests for the TaskBrowserPanel presentation layer: status groups,
  * aligned columns, group headers, live elapsed ticking, selection movement,
  * search filtering, and the empty state. The row MODEL is tested separately
  * in tasks-browser.test.ts; this file only covers the panel's rendering and
@@ -62,6 +62,19 @@ function makePanel(
   return { panel, rendered: () => panel.render(100) }
 }
 
+test('the action bar advertises Stop only for a row that can be stopped', () => {
+  const stoppable = makePanel([subagent()])
+  const stoppableFrame = stoppable.rendered().map(strip).join('\n')
+  assert.ok(stoppableFrame.includes('s stop'), `a stoppable row advertises Stop:\n${stoppableFrame}`)
+  // An external catalog leaf (or any other non-stoppable row) has no Stop
+  // action at all — `requestStop()` is a silent no-op there — so the bar must
+  // not advertise a key that does nothing.
+  const external = makePanel([subagent({ value: 'agent:ext', label: 'external · external run', canStop: false })])
+  const externalFrame = external.rendered().map(strip).join('\n')
+  assert.ok(!externalFrame.includes('s stop'), `a non-stoppable row advertises no Stop:\n${externalFrame}`)
+  assert.ok(externalFrame.includes('Enter open'), 'the remaining hints stay listed')
+})
+
 test('the extreme no-match grant keeps the message over the header', () => {
   const { panel, rendered } = makePanel([runningJob()], { enableSearch: true })
   panel.handleInput('/') // explicit search mode
@@ -87,13 +100,13 @@ test('a 1-row search-mode grant paints only the search input and acks nothing', 
       mode: 'full',
       header: 'tasks · subagents',
       enableSearch: true,
-      initialSearchMode: true,
       onViewportExpose: (ids) => { exposed.push(...ids) },
     },
     () => {},
     () => {},
     () => {},
   )
+  panel.handleInput('/') // explicit search mode
   panel.setMaxRows(1)
   panel.render(100)
   // The degraded layout drops the selected main row (only the search
@@ -107,7 +120,7 @@ test('a 1-row search-mode grant paints only the search input and acks nothing', 
   assert.ok(!joined.includes('bash · pnpm build'), `the selected task must not be painted:\n${joined}`)
 })
 
-test('rows render a status dot, kind · label, and right-aligned status + elapsed', () => {
+test('rows render a shared status marker, kind · label, and right-aligned status + elapsed', () => {
   const now = Date.now()
   const { panel, rendered } = makePanel([
     runningJob({ startedAt: now - 2_000 }),
@@ -115,17 +128,45 @@ test('rows render a status dot, kind · label, and right-aligned status + elapse
   ])
   const lines = rendered().map(strip)
   const joined = lines.join('\n')
-  assert.ok(joined.includes('●'), `status dot missing:\n${joined}`)
+  assert.ok(joined.includes('‣ Running'), `shared running status group missing:\n${joined}`)
   assert.ok(joined.includes('bash · pnpm build'), `label missing:\n${joined}`)
-  assert.ok(joined.includes('running'), `status word missing:\n${joined}`)
   assert.ok(joined.includes('2s'), `elapsed missing:\n${joined}`)
-  assert.ok(joined.includes('completed'), `completed status missing:\n${joined}`)
+  assert.ok(joined.includes('‣ Completed'), `shared completed status group missing:\n${joined}`)
   assert.ok(joined.includes('2m'), `completed elapsed missing:\n${joined}`)
+  for (const glyph of ['●', '○', '◐', '×', '?']) {
+    assert.ok(!joined.includes(glyph), `legacy per-status glyph ${glyph} must be absent:\n${joined}`)
+  }
   // The right column is right-aligned: the tail ends at the line's end
   // (after trimming, the status/elapsed sit at the far right).
   const row = lines.find(line => line.includes('pnpm build'))!
-  assert.ok(row.trimEnd().endsWith('running 2s'), `tail must be right-aligned:\n${row}`)
+  assert.ok(row.trimEnd().endsWith('‣ Running 2s'), `tail must be right-aligned:\n${row}`)
   void panel
+})
+
+test('all full Task Center states use the shared marker and a readable word', () => {
+  const items: TaskPanelItem[] = [
+    runningJob({ value: 'job:running', label: 'bash · build' }),
+    doneJob({ value: 'job:completed', label: 'bash · complete' }),
+    { value: 'job:stopping', label: 'bash · stopping', status: 'stopping', group: 'jobs' },
+    { value: 'job:failed', label: 'bash · failure', status: 'failed', group: 'jobs' },
+    { value: 'question:q1', label: 'question · input', status: 'awaiting answer', source: 'question', group: 'questions' },
+  ]
+  const lines = makePanel(items).rendered().map(strip)
+  const expected = [
+    ['bash · build', '‣ Running'],
+    ['bash · complete', '‣ Completed'],
+    ['bash · stopping', '‣ Stopping'],
+    ['bash · failure', '‣ Failed'],
+    ['question · input', '‣ Awaiting answer'],
+  ] as const
+  for (const [label, status] of expected) {
+    const row = lines.find(line => line.includes(label))
+    assert.ok(row?.includes(status), `expected ${status} beside ${label}:\n${lines.join('\n')}`)
+  }
+  assert.equal(lines.filter(line => line.includes('‣')).length, expected.length, 'each row has exactly one shared status marker')
+  for (const glyph of ['●', '○', '◐', '×', '?']) {
+    assert.ok(!lines.some(line => line.includes(glyph)), `legacy per-status glyph ${glyph} must be absent:\n${lines.join('\n')}`)
+  }
 })
 
 test('group headers render as dim dividers between groups', () => {
@@ -175,46 +216,23 @@ test('A toggles the scope chip while getViewState().scope stays the internal act
   assert.equal(panel.getViewState().scope, 'all')
 })
 
-test('Quick keeps the ACTIVE chip and consumes A as a no-op', () => {
-  const panel = new TaskBrowserPanel(
-    [runningJob()],
-    8,
-    { mode: 'quick', header: 'Quick Tasks', noMatchText: 'no active tasks' },
-    () => {},
-    () => {},
-    () => {},
-  )
-  const rendered = (): string[] => panel.render(100).map(strip)
-  const first = rendered().join('\n')
-  assert.ok(first.includes('[ACTIVE]'), `Quick shows the active scope chip:\n${first}`)
-  assert.ok(!first.includes('[TRACKED]'), `Quick never claims the tracked scope:\n${first}`)
-  assert.equal(panel.getViewState().scope, 'active')
-  // Quick is navigation-only: A is consumed as a no-op and cannot flip
-  // the scope (the Quick/Full input-ownership whitelist).
-  panel.handleInput('a')
-  const after = rendered().join('\n')
-  assert.ok(after.includes('[ACTIVE]'), `a must stay a no-op in Quick:\n${after}`)
-  assert.equal(panel.getViewState().scope, 'active')
-  panel.dispose()
-})
-
 test('selected row shows the pointer and bold label', () => {
   const { panel, rendered } = makePanel([runningJob(), doneJob()])
   const first = rendered().map(strip).join('\n')
-  assert.ok(first.includes('→ ● bash · pnpm build'), `selected row must show the pointer:\n${first}`)
+  assert.ok(first.includes('→ bash · pnpm build'), `selected row must show the pointer:\n${first}`)
   panel.handleInput('\x1b[B')
   const second = rendered().map(strip).join('\n')
-  assert.ok(second.includes('→ ○ bash · lint'), `selection must move down:\n${second}`)
-  assert.ok(!second.includes('→ ● bash · pnpm build'), `old row must lose the pointer:\n${second}`)
+  assert.ok(second.includes('→ bash · lint'), `selection must move down:\n${second}`)
+  assert.ok(!second.includes('→ bash · pnpm build'), `old row must lose the pointer:\n${second}`)
 })
 
 test('↑↓ clamp at the ends (no wrap-around)', () => {
   const { panel, rendered } = makePanel([runningJob(), doneJob()])
   panel.handleInput('\x1b[A') // at the top: stays
-  assert.ok(rendered().map(strip).join('\n').includes('→ ● bash · pnpm build'), `↑ at top must not move:\n${rendered().map(strip).join('\n')}`)
+  assert.ok(rendered().map(strip).join('\n').includes('→ bash · pnpm build'), `↑ at top must not move:\n${rendered().map(strip).join('\n')}`)
   panel.handleInput('\x1b[B')
   panel.handleInput('\x1b[B') // at the bottom: stays
-  assert.ok(rendered().map(strip).join('\n').includes('→ ○ bash · lint'), `↓ at bottom must not wrap:\n${rendered().map(strip).join('\n')}`)
+  assert.ok(rendered().map(strip).join('\n').includes('→ bash · lint'), `↓ at bottom must not wrap:\n${rendered().map(strip).join('\n')}`)
 })
 
 test('Enter fires onSelect with the selected value; Esc fires onCancel', () => {
@@ -277,7 +295,7 @@ const typed = (item: TaskPanelItem, type: string): TaskPanelItem => ({ ...item, 
 test('an UNTOUCHED selection follows the enriched list head (the /tasks race)', () => {
   // The browser opens on the jobs half only…
   const { panel, rendered } = makePanel([runningJob(), doneJob()], { enableSearch: true })
-  assert.ok(rendered().map(strip).join('\n').includes('→ ● bash · pnpm build'),
+  assert.ok(rendered().map(strip).join('\n').includes('→ bash · pnpm build'),
     `precondition — first job selected before enrichment`)
   // …then the subagent catalog lands: the running subagent heads the
   // enriched list, and an untouched selection must MOVE onto it (the old
@@ -288,7 +306,7 @@ test('an UNTOUCHED selection follows the enriched list head (the /tasks race)', 
     doneJob({ type: 'bash' }),
   ])
   const enriched = rendered().map(strip).join('\n')
-  assert.ok(enriched.includes('→ ● subagent · research'),
+  assert.ok(enriched.includes('→ subagent · research'),
     `untouched selection must follow the preferred head (first running subagent):\n${enriched}`)
 })
 
@@ -306,7 +324,7 @@ test('an UNTOUCHED selection honors an EXPLICIT preferredValue without moving th
     { value: 'agent:grand', label: 'subagent · deep', status: 'running', group: 'subagents', treePrefix: '  ├─ ' },
   ], 'agent:grand')
   const view = rendered().map(strip).join('\n')
-  assert.ok(view.includes('→ ●   ├─ subagent · deep'), `preferred row must be selected:\n${view}`)
+  assert.ok(view.includes('→   ├─ subagent · deep'), `preferred row must be selected:\n${view}`)
   // The row ORDER must not have changed (the cursor moved, the tree did
   // not) — the tree renderer never re-sorts for the cursor.
   const parentIndex = view.indexOf('subagent · planner')
@@ -331,7 +349,7 @@ test('a USER-touched selection survives a later enrichment (no focus stealing)',
   )
   // The user moves down to the second row…
   panel.handleInput('\x1b[B')
-  assert.ok(rendered().map(strip).join('\n').includes('→ ○ bash · lint'), `precondition — user on the lint row:\n${rendered().map(strip).join('\n')}`)
+  assert.ok(rendered().map(strip).join('\n').includes('→ bash · lint'), `precondition — user on the lint row:\n${rendered().map(strip).join('\n')}`)
   // …then a refresh inserts a running subagent at the head.
   panel.setItems([
     typed(subagent(), 'subagent'),
@@ -339,9 +357,9 @@ test('a USER-touched selection survives a later enrichment (no focus stealing)',
     typed(doneJob(), 'bash'),
   ])
   const after = rendered().map(strip).join('\n')
-  assert.ok(after.includes('→ ○ bash · lint'),
+  assert.ok(after.includes('→ bash · lint'),
     `a touched selection must stay on the user's row, not jump to the new head:\n${after}`)
-  assert.ok(!after.includes('→ ● subagent · research'), `the head must not steal the focus:\n${after}`)
+  assert.ok(!after.includes('→ subagent · research'), `the head must not steal the focus:\n${after}`)
 })
 
 test('a user-touched selection whose row vanished resets to the head (not a stale value)', () => {
@@ -353,7 +371,7 @@ test('a user-touched selection whose row vanished resets to the head (not a stal
   // The subagent settles and disappears; the refresh must not resurrect it.
   panel.setItems([typed(runningJob(), 'bash')])
   const after = rendered().map(strip).join('\n')
-  assert.ok(after.includes('→ ● bash · pnpm build'), `a vanished row must fall back to the head:\n${after}`)
+  assert.ok(after.includes('→ bash · pnpm build'), `a vanished row must fall back to the head:\n${after}`)
 })
 
 // ── the Tab type filter (initial item 2) ──────────────────────────────────
@@ -410,11 +428,52 @@ test('rows without a type never match a type filter (they only appear under All)
 
 test('the Full hint always advertises the Tab type cycle', () => {
   const single = makePanel([typed(runningJob(), 'bash')], { enableSearch: true })
-  assert.ok(single.rendered().map(strip).join('\n').includes('Tab type'),
+  assert.ok(single.rendered().map(strip).join('\n').includes('Shift+Tab type'),
     `a single-kind list still toggles All↔type:\n${single.rendered().map(strip).join('\n')}`)
   const multi = makePanel([typed(runningJob(), 'bash'), typed(subagent(), 'subagent')], { enableSearch: true })
-  assert.ok(multi.rendered().map(strip).join('\n').includes('Tab type'),
+  assert.ok(multi.rendered().map(strip).join('\n').includes('Shift+Tab type'),
     `mixed list advertises the Tab cycle:\n${multi.rendered().map(strip).join('\n')}`)
+})
+
+test('the Full action bar keeps the real Esc outcome last and visible at 44/80/120 columns', () => {
+  const panel = new TaskBrowserPanel(
+    [runningJob(), doneJob(), subagent()],
+    10,
+    { mode: 'full', header: 'tasks · subagents', enableSearch: true },
+    () => {},
+    () => {},
+    () => {},
+  )
+  const assertEscLast = (width: number, outcome: 'close' | 'back'): void => {
+    const rows = panel.render(width).map(strip)
+    assertPhysicalRows(rows, width)
+    const hint = rows.at(-1)!
+    assert.equal(visibleWidth(hint) <= width, true,
+      `width ${width}: the painted hint fits (${visibleWidth(hint)} > ${width}): ${JSON.stringify(hint)}`)
+    const segments = hint.trim().split(' · ')
+    const allowed = outcome === 'close'
+      ? new Set(['Enter open', '↑↓ select', '←→ tree', 's stop', '/ search', 'a scope', 'Shift+Tab type', 'Esc close'])
+      : new Set(['Enter open', '↑↓ select', '←→ edit', 'Shift+Tab type', 'type to filter', 'Esc back'])
+    assert.ok(segments.every(segment => allowed.has(segment)),
+      `width ${width}: only complete advertised segments remain: ${JSON.stringify(segments)}`)
+    assert.equal(segments.at(-1), `Esc ${outcome}`,
+      `width ${width}: the real Esc outcome is the final painted segment:\n${rows.join('\n')}`)
+    if (width === 44) {
+      assert.deepEqual(segments, ['Enter open', '↑↓ select', `Esc ${outcome}`],
+        `width ${width}: lower-priority actions drop whole before Esc`)
+    }
+  }
+
+  for (const width of [44, 80, 120]) {
+    assertEscLast(width, 'close')
+    panel.handleInput('/') // enter the real search mode
+    assertEscLast(width, 'back')
+    panel.handleInput('\x1b') // Esc backs out of search; it does not close Full
+    assertEscLast(width, 'close')
+    assert.ok(panel.render(width).map(strip).some(line => line.includes('bash · pnpm build')),
+      `width ${width}: Esc back leaves the Full Task Center open`)
+  }
+  panel.dispose()
 })
 
 test('a vanished active type snaps the filter back to All on setItems', () => {
@@ -444,7 +503,7 @@ test('a Tab type filter counts as a user interaction (no head-stealing on refres
   panel.handleInput('\t') // bash (marks the selection touched)
   panel.handleInput('\x1b[B') // onto the lint row
   const before = rendered().map(strip).join('\n')
-  assert.ok(before.includes('→ ○ bash · lint'), `precondition — a row selected within the type scope:\n${before}`)
+  assert.ok(before.includes('→ bash · lint'), `precondition — a row selected within the type scope:\n${before}`)
   // An enrichment arrives with a NEW bash job at the head of the filtered
   // scope; the touched selection must not jump.
   panel.setItems([
@@ -454,7 +513,7 @@ test('a Tab type filter counts as a user interaction (no head-stealing on refres
     typed(subagent(), 'subagent'),
   ])
   const after = rendered().map(strip).join('\n')
-  assert.ok(after.includes('→ ○ bash · lint'),
+  assert.ok(after.includes('→ bash · lint'),
     `the touched selection must survive the refresh inside the typed scope:\n${after}`)
 })
 
@@ -554,17 +613,17 @@ test('Kitty CSI-u arrow keys navigate the panel (zellij/WezTerm/Windows Terminal
   // CSI-u ↓ (`\x1b[1;1B`) and the zellij repro's super-mod form (`\x1b[1;129B`)
   // must both move the selection down; legacy `\x1b[B` still works.
   panel.handleInput('\x1b[1;1B')
-  assert.ok(rendered().map(strip).join('\n').includes('→ ○ bash · lint'), `CSI-u down must move the selection:\n${rendered().map(strip).join('\n')}`)
+  assert.ok(rendered().map(strip).join('\n').includes('→ bash · lint'), `CSI-u down must move the selection:\n${rendered().map(strip).join('\n')}`)
   panel.handleInput('\x1b[1;129B') // at the bottom (2 rows): stays
-  assert.ok(rendered().map(strip).join('\n').includes('→ ○ bash · lint'), `CSI-u down (super mod) must keep the selection at the bottom:\n${rendered().map(strip).join('\n')}`)
+  assert.ok(rendered().map(strip).join('\n').includes('→ bash · lint'), `CSI-u down (super mod) must keep the selection at the bottom:\n${rendered().map(strip).join('\n')}`)
   panel.handleInput('\x1b[1;1A')
-  assert.ok(rendered().map(strip).join('\n').includes('→ ● bash · pnpm build'), `CSI-u up must move the selection back:\n${rendered().map(strip).join('\n')}`)
+  assert.ok(rendered().map(strip).join('\n').includes('→ bash · pnpm build'), `CSI-u up must move the selection back:\n${rendered().map(strip).join('\n')}`)
   // CSI-u pageUp/pageDown (`\x1b[5;1~` / `\x1b[6;1~`) page the list.
   const { panel: p2, rendered: r2 } = makePanel(Array.from({ length: 15 }, (_, i) => runningJob({ value: `job:b${i}`, label: `bash · job ${i}` })), { maxVisible: 10 })
   p2.handleInput('\x1b[6;1~')
-  assert.ok(r2().map(strip).join('\n').includes('→ ● bash · job 10'), `CSI-u pageDown must page the list:\n${r2().map(strip).join('\n')}`)
+  assert.ok(r2().map(strip).join('\n').includes('→ bash · job 10'), `CSI-u pageDown must page the list:\n${r2().map(strip).join('\n')}`)
   p2.handleInput('\x1b[5;1~')
-  assert.ok(r2().map(strip).join('\n').includes('→ ● bash · job 0'), `CSI-u pageUp must page back:\n${r2().map(strip).join('\n')}`)
+  assert.ok(r2().map(strip).join('\n').includes('→ bash · job 0'), `CSI-u pageUp must page back:\n${r2().map(strip).join('\n')}`)
 })
 
 test('Kitty CSI-u Esc cancels and CSI-u Enter confirms', () => {
@@ -662,7 +721,7 @@ test('the mode suffix is a HARD layout right: extreme widths compress label and 
   const wide = render(60)
   assert.ok(wide.includes('subagent · a-very-long-reviewer'), `label clipped too far:\n${wide}`)
   assert.ok(wide.includes('· one-shot'), `mode missing:\n${wide}`)
-  assert.ok(wide.includes('inactive'), `tail missing:\n${wide}`)
+  assert.ok(wide.includes('‣ Inactive'), `status tail missing:\n${wide}`)
   // 30 cols: the label clips, the mode and the tail survive.
   const medium = render(30)
   assert.ok(medium.includes('· one-shot'), `mode must survive 30 cols:\n${medium}`)
@@ -671,8 +730,8 @@ test('the mode suffix is a HARD layout right: extreme widths compress label and 
   // status tail stay fixed (plan §7.5).
   assert.ok(!medium.split('\n').find(line => line.includes('one-shot'))!.includes('…'),
     `a selected overflow row must marquee, not ellipsis:\n${medium}`)
-  assert.ok(medium.includes('inactive'), `tail must survive 30 cols:\n${medium}`)
-  // 16 cols (physically fits `→ ○ one-shot`): the label and tail yield
+  assert.ok(medium.includes('‣ Inactive'), `status tail must survive 30 cols:\n${medium}`)
+  // 16 cols (physically fits `→ one-shot`): the label and tail yield
   // entirely, the MODE stays — the viewer's interactivity is a pre-Enter
   // fact and the final whole-line truncation may never cut it.
   const narrow = render(16)
@@ -724,7 +783,7 @@ test('the selected row marquees under a fake clock while unselected rows stay fi
   // Initial render: the selected label shows its start (pause).
   // A narrow frame forces the selected label to overflow its budget.
   const initial = panel.render(46).map(strip).join('\n')
-  assert.ok(initial.includes('→ ●   ├─ subagent · a-ve'),
+  assert.ok(initial.includes('→   ├─ subagent · a-ve'),
     `selected label window (initial pause) must show:\n${initial}`)
   assert.ok(initial.includes('├─ subagent · a-short…'), `unselected tree row must ellipsis:\n${initial}`)
   // Repaint storm with interleaved unselected rows, then advance the clock
@@ -735,7 +794,7 @@ test('the selected row marquees under a fake clock while unselected rows stay fi
   }
   now.value = 800 + 3 * MARQUEE_STEP_MS
   const moved = panel.render(46).map(strip).join('\n')
-  assert.ok(!moved.includes('→ ●   ├─ subagent · a-ve'),
+  assert.ok(!moved.includes('→   ├─ subagent · a-ve'),
     `the selected label must have scrolled past its start:\n${moved}`)
   assert.ok(moved.includes('├─ subagent · a-short…'), `unselected rows must stay put:\n${moved}`)
   panel.dispose()
@@ -1066,7 +1125,7 @@ test('Quick Tasks: a multiline job label stays ONE physical row and the raw item
   const panel = new TaskBrowserPanel(
     [item],
     10,
-    { mode: 'quick' },
+    { mode: 'full' },
     () => {},
     () => {},
     () => {},
@@ -1167,9 +1226,8 @@ test('caller-provided header and no-match text project to ONE physical row', () 
   assertPhysicalRows(noMatch, 100)
   assert.ok(noMatch.some(line => line.includes('nothing here')), `the collapsed no-match text must render:\n${noMatch.join('\n')}`)
   // Narrow grants: a LONG no-match message is also width-truncated (the
-  // same one-row contract as the refresh-error banner). Only the
-  // no-match rows are asserted — the static hint text's pre-existing
-  // overflow is separate behavior, unchanged by this containment.
+  // same one-row contract as the refresh-error banner). The Task Center hint
+  // has separate rendered-row width and Esc-order coverage above.
   const longPanel = new TaskBrowserPanel(
     [],
     10,
@@ -1206,9 +1264,8 @@ test('a multiline refresh error stays ONE physical row', () => {
   assert.ok(lines.join('\n').includes('fetch failed retry later EOF'), 'the collapsed error must stay visible')
   assert.ok(lines.length <= 12, 'the banner must stay a single row')
   // Narrow grant: the banner is also WIDTH-truncated — a long dynamic
-  // error must not wrap into extra terminal rows in a direct embedding
-  // (only the banner rows are asserted; the static hint text is a
-  // separate pre-existing behavior, unchanged by this containment).
+  // error must not wrap into extra terminal rows in a direct embedding.
+  // The Task Center hint has separate rendered-row width and Esc-order coverage.
   const narrow = panel.render(20).map(strip)
   const banner = narrow.filter(line => line.includes('fetch failed'))
   assert.ok(banner.length >= 1, `the truncated banner must stay visible:\n${narrow.join('\n')}`)
@@ -1230,11 +1287,11 @@ const questionRow = (overrides: Partial<TaskPanelItem> = {}): TaskPanelItem => (
   ...overrides,
 })
 
-test('Quick shows a parked Question in Needs attention ABOVE active work', () => {
+test('the Full Task Center shows a parked Question in Needs attention ABOVE active work', () => {
   const panel = new TaskBrowserPanel(
     [questionRow(), runningJob(), subagent()],
     10,
-    { mode: 'quick', header: 'tasks' },
+    { mode: 'full', header: 'tasks' },
     () => {},
     () => {},
     () => {},
@@ -1242,20 +1299,22 @@ test('Quick shows a parked Question in Needs attention ABOVE active work', () =>
   const lines = panel.render(100).map(strip)
   const joined = lines.join('\n')
   assert.ok(joined.includes('Needs attention'), `the attention group renders:\n${joined}`)
-  assert.ok(joined.includes('? Use staging or production?'), `the Question row renders with its glyph:\n${joined}`)
+  const question = lines.find(line => line.includes('Use staging or production?'))
+  assert.ok(question?.includes('‣ Awaiting answer'), `the Question row uses the shared status group:\n${joined}`)
+  assert.ok(!question?.includes('? Use staging or production?'), `the old Question glyph is retired:\n${joined}`)
   assert.ok(
     joined.indexOf('Needs attention') < joined.indexOf('jobs') || !joined.includes('jobs'),
     'attention precedes the work groups',
   )
 })
 
-test('a pending Question stays visible in Quick even with running work', () => {
+test('a pending Question stays visible in the Full Task Center with running work', () => {
   // The generic failure-attention rule only includes inactive rows when there
   // is NO live work; a human-required Question must not depend on that.
   const panel = new TaskBrowserPanel(
     [questionRow(), runningJob()],
     10,
-    { mode: 'quick', header: 'tasks' },
+    { mode: 'full', header: 'tasks' },
     () => {},
     () => {},
     () => {},
@@ -1275,7 +1334,7 @@ test('a visible Question is answering, and Question rows are searchable', () => 
     () => {},
   )
   const joined = panel.render(100).map(strip).join('\n')
-  assert.ok(joined.includes('answering'), `Full renders the answering status:\n${joined}`)
+  assert.ok(joined.includes('‣ Answering'), `Full renders the Title Case answering status group:\n${joined}`)
 
   panel.handleInput('/')
   for (const char of 'staging') panel.handleInput(char)

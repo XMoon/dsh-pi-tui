@@ -276,7 +276,7 @@ function fakeRunnerDeps(options: {
     setTerminalProgressMode: () => {}, setNotificationMethod: () => {},
     updateWelcomeCard: () => {},
     openJobView: () => {},
-    openTasksBrowser: () => {}, openPluginManager: () => {}, createPluginManagerSubmenu: () => ({ render: () => [], invalidate: () => {} }),
+    openTasksBrowser: () => {}, openPluginManager: () => {}, createPluginManagerPage: () => undefined,
     openRewindPicker: () => {},
     sessionTransitionPending: () => false,
     withSessionTransition: async <T>(task: () => T | Promise<T>) => task(),
@@ -294,6 +294,7 @@ function fakeRunnerDeps(options: {
     diag: silentDiag,
     signal: new AbortController().signal,
     app: () => app,
+    notify: () => {},
     liveAgent: () => undefined,
     sessionScope: {
       capture: () => scopeFacts.captureSessionScope(),
@@ -356,6 +357,7 @@ function fakeRunnerDeps(options: {
       withWriter: async (_scope, task) => task(),
       switchSession: async () => undefined,
       forkSession: async () => ({ kind: 'committed', value: undefined }) as never,
+      isNavigationCurrent: () => false,
       transitionTo: runner.transitionTo,
     },
     status: {
@@ -391,7 +393,7 @@ function fakeRunnerDeps(options: {
     },
     pluginManager: {
       open: () => {},
-      submenu: () => ({ render: () => [], invalidate: () => {} }) as never,
+      page: () => undefined,
     },
     client: {
       runCopyCommand: undefined as never,

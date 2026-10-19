@@ -39,7 +39,7 @@ import type {
 import { QuestionAnswerError, QUESTION_BAD_ANSWER, QUESTION_REPLY_QUEUED } from '../../runtime/interaction-port.ts'
 import { SupersededReadError } from '../../runtime/read-error.ts'
 import type { Diag } from '../../runtime/process/diagnostics.ts'
-import { runDetached } from '../../runtime/process/tasks.ts'
+import { cancellationError, runDetached } from '../../runtime/process/tasks.ts'
 import { runSyncDisposalSteps } from '../../runtime/process/disposal.ts'
 import type { QuestionFlowDraft, TuiQuestion, TuiQuestionAnswer, TuiQuestionStatus } from '../../tui-app.ts'
 
@@ -116,6 +116,16 @@ export interface QuestionControllerDeps {
   /** Best-effort repaint after a status/countdown mutation. */
   readonly repaint: () => void
   readonly currentSessionId: () => string | undefined
+  /**
+   * ADMISSION/PRESENTATION currentness (B3 findings F10/F12): whether a request
+   * for this Session may still be PRESENTED. `true` for the Session this surface
+   * shows AND for a Session currently being opened (a tentative opening is not an
+   * owner replacement); `false` for a replaced subject's late request, which is
+   * never mounted. The SAME authority decides the continuous retirement of an
+   * already-presented flow, so a legitimate opening target is never withdrawn by
+   * an ordinary poll.
+   */
+  readonly isAdmissibleSession: (sessionId: string) => boolean
   /** Monotonic-enough local clock (tests inject). */
   readonly now?: () => number
   /** Countdown tick interval (tests inject a short one). */
@@ -182,6 +192,24 @@ export class QuestionSurfaceController {
   private subscribedSessionId: string | undefined
   /** Teardown hooks of in-flight live requests (countdown + claim release). */
   private readonly activeCleanups = new Set<() => void>()
+  /**
+   * The live foreground flows this controller started, keyed by the EXACT
+   * lifetime object the presenter received (`handleLive`'s combined signal):
+   * the ONE identity both owners share, so a presentation withdrawal never
+   * needs a session id of its own to cross the presenter seam.
+   */
+  private readonly livePresentations = new Map<AbortSignal, {
+    readonly sessionId: string
+    /**
+     * Whether the OFFICIAL request carries its own cancellation lifetime. When it
+     * does, only the Host may end it (P2-2): the presentation retirement never
+     * settles it. When it does NOT, this controller is the only possible owner of
+     * its end, so a real subject replacement must settle it (`retire`).
+     */
+    readonly hasHostLifetime: boolean
+    /** The owner-retirement settlement for a request with no Host lifetime. */
+    readonly retire: () => void
+  }>()
   private disposal: (() => void) | undefined
   private disposed = false
 
@@ -237,6 +265,10 @@ export class QuestionSurfaceController {
     this.attentionListeners.clear()
     const cleanups = [...this.activeCleanups]
     this.activeCleanups.clear()
+    // The live foreground flows die with the surface; their own `handleLive`
+    // finally clears each entry, and no reconcile may withdraw against a
+    // retired presenter afterwards.
+    this.livePresentations.clear()
     runSyncDisposalSteps('question surface disposal', [
       () => disposal?.(),
       () => subscription?.(),
@@ -270,9 +302,37 @@ export class QuestionSurfaceController {
   }
 
   /**
+   * Withdraw every live foreground presentation that is no longer ADMISSIBLE
+   * (findings C/F10/F12) — the SAME authority that admits a request decides
+   * whether it may keep owning the seat, so a replaced subject's late flow and a
+   * rolled-back opening target are retired by one rule while a Session the
+   * surface is still OPENING keeps its flow. The Host request is untouched (the
+   * presenter only drops the presentation, never the promise).
+   */
+  private collectReplacedLivePresentations(): { lifetimes: AbortSignal[]; settle: Array<() => void> } {
+    const lifetimes: AbortSignal[] = []
+    const settle: Array<() => void> = []
+    for (const [lifetime, live] of [...this.livePresentations]) {
+      if (this.deps.isAdmissibleSession(live.sessionId)) continue
+      this.livePresentations.delete(lifetime)
+      lifetimes.push(lifetime)
+      // P2-2/P2-E: a request with NO official cancellation lifetime has no other
+      // owner that could ever end it, so the replacement will settle it — but the
+      // abort is DEFERRED until the presentation batch has taken every replaced
+      // slot out of the seat (an abort here would settle its slot synchronously,
+      // promote another replaced slot and paint it).
+      // A request that HAS a Host lifetime keeps it: only the Host ends that one.
+      if (!live.hasHostLifetime) settle.push(live.retire)
+    }
+    return { lifetimes, settle }
+  }
+
+  /**
    * Re-derive the continued-Question MODEL from authority. Nothing is
    * reconstructed from a local timer or the transcript:
    *
+   * 0. a live foreground flow of another session is withdrawn from the
+   *    presentation (its official request keeps its own lifetime);
    * 1. entries whose call is no longer answerable are deleted (queued reply,
    *    settled, vanished) — the notice names the fact the projection owns;
    * 2. entries of another session are dropped, so a session switch never
@@ -286,10 +346,48 @@ export class QuestionSurfaceController {
    * Only a live foreground transition (see {@link awaitContinued}) or an
    * explicit {@link reopen} may make a continued Question visible.
    */
+  /**
+   * The SYNCHRONOUS publication-commit half (external reviews P2-B/P2-C/P2-D):
+   * take the replaced subject's live presentation OUT of the model and drop its
+   * mounted continued forms WITHOUT reading the projection and WITHOUT calling the
+   * presenter — the commit section performs no Host read and no frame of its own,
+   * because the caller hands every collected lifetime to the renderer in ONE
+   * atomic withdrawal (an intermediate promotion of a slot that is about to be
+   * withdrawn would otherwise paint a replaced modal under the new owner).
+   *
+   * @returns the collected presentation lifetimes plus whether anything left the
+   * model (the caller's stale-count signal).
+   */
+  withdrawReplacedPresentation(): { dropped: boolean; lifetimes: AbortSignal[]; settle: () => void } {
+    if (this.disposed) return { dropped: false, lifetimes: [], settle: () => {} }
+    const live = this.collectReplacedLivePresentations()
+    const lifetimes = [...live.lifetimes]
+    const settle = [...live.settle]
+    let dropped = lifetimes.length > 0
+    for (const [key, entry] of [...this.entries]) {
+      if (this.deps.isAdmissibleSession(entry.sessionId)) continue
+      // The mounted form's OWN lifetime joins the presentation batch, and its abort
+      // is deferred to the settle step exactly like the live flows above.
+      const mounted = entry.mounted
+      this.entries.delete(key)
+      entry.mounted = undefined
+      if (mounted !== undefined) {
+        lifetimes.push(mounted.signal)
+        settle.push(() => { mounted.abort() })
+      }
+      dropped = true
+    }
+    return { dropped, lifetimes, settle: () => { for (const run of settle) run() } }
+  }
+
   reconcile(): void {
     if (this.disposed) return
     this.ensureSubscription()
     const sessionId = this.deps.currentSessionId()
+    // 0. Live foreground flows that are no longer admissible are withdrawn by
+    //    `withdrawReplacedPresentation()` (external review P2-D: the CALLER
+    //    batches them together with the approval presentations and commits ONE
+    //    frame), so this pass only re-derives the continued-entry model.
     if (sessionId === undefined) {
       // No session owns the surface: whatever is mounted belongs to a session
       // that is no longer shown.
@@ -521,6 +619,16 @@ export class QuestionSurfaceController {
         timer = undefined
       }
     }
+    /**
+     * Wait for this flow's OWN lifetime. Used for a request that must never be
+     * presented: the promise settles only when its own signal ends (the ordinary
+     * catch classifies the Host's end), never by a fabricated outcome.
+     */
+    const awaitOwnLifetime = (): Promise<never> => new Promise<never>((_resolve, reject) => {
+      const onAbort = (): void => { reject(cancellationError('question flow aborted')) }
+      if (signal.aborted) { onAbort(); return }
+      signal.addEventListener('abort', onAbort, { once: true })
+    })
     const tick = (): void => {
       if (frozen || timedOut) return
       const remaining = deadline - this.now()
@@ -548,7 +656,24 @@ export class QuestionSurfaceController {
       claim?.release()
     }
     this.activeCleanups.add(teardown)
-    if (timed && callId !== undefined) {
+    // The presentation INTENT is registered BEFORE any await (B3 finding F7): a
+    // Session replacement that lands while this flow is still opening its timed
+    // claim must be able to retire it, so the form can never mount afterwards.
+    // `retiredByAdmission` (P2-2) records a retirement THIS controller initiated
+    // because the official request has no lifetime of its own to end it.
+    let retiredByAdmission = false
+    this.livePresentations.set(signal, {
+      sessionId: request.sessionId,
+      hasHostLifetime: request.signal !== undefined,
+      retire: () => {
+        retiredByAdmission = true
+        local.abort()
+      },
+    })
+    // ADMISSION currentness (B3 finding F10): a request whose Session the surface
+    // no longer shows never presents — and never takes a Host claim either.
+    const admissible = this.deps.isAdmissibleSession(request.sessionId)
+    if (admissible && timed && callId !== undefined) {
       status.text = 'Claiming this question’s foreground wait…'
       this.deps.repaint()
       try {
@@ -591,11 +716,28 @@ export class QuestionSurfaceController {
       }
       this.deps.repaint()
     }
-    // A surface disposed while the claim was still opening must NOT mount a
-    // flow (the countdown UI would outlive its owner). This is a Host-side
-    // abort from the surface's point of view, never a user cancel.
-    if (this.disposed) throw questionRejection(ASK_ABORTED)
     try {
+      // A surface disposed while the claim was still opening must NOT mount a
+      // flow (the countdown UI would outlive its owner). This is a Host-side
+      // abort from the surface's point of view, never a user cancel.
+      if (this.disposed) throw questionRejection(ASK_ABORTED)
+      if (!admissible) {
+        // A replaced subject's late request (F10) is never mounted. With a
+        // Host-owned lifetime only the Host ends it, classified by the ordinary
+        // catch below. With NO Host lifetime there is no later retirement to wait
+        // for (the request arrives after its Session was replaced), so this
+        // controller settles it at admission (external review P2-A) as a
+        // Host-side end instead of leaving it pending until the TUI exits.
+        if (request.signal === undefined) {
+          retiredByAdmission = true
+          throw questionRejection(ASK_ABORTED)
+        }
+        await awaitOwnLifetime()
+      }
+      // A Session replacement may have retired this flow while the claim was
+      // opening: the presenter then refuses the mount by itself (the lifetime is
+      // on its retirement list) and the request keeps its own lifetime — so the
+      // SAME call is harmless here and there is no second presentation path.
       const answers = await this.deps.ask(request.questions.map(toTuiQuestion), signal, status, true)
       return { answers: answers.map(toAnswerItem) }
     } catch (error) {
@@ -605,9 +747,13 @@ export class QuestionSurfaceController {
       // (Esc / Ctrl+C). Reporting a Host-driven end as a user cancel would
       // record a cancellation the human never made.
       if (hostEnded || this.disposed || request.signal?.aborted === true) throw questionRejection(ASK_ABORTED)
+      // This controller ended it because the official request had no lifetime of
+      // its own and its Session stopped being admissible (P2-2): a Host-side end.
+      if (retiredByAdmission) throw questionRejection(ASK_ABORTED)
       throw questionRejection(ASK_CANCELLED)
     } finally {
       settled = true
+      this.livePresentations.delete(signal)
       this.activeCleanups.delete(teardown)
       stopTimer()
       claim?.release()
@@ -638,6 +784,11 @@ export class QuestionSurfaceController {
     // the Host records the timed result, which is what we wait for.
     const attempts = Math.max(1, Math.ceil(this.continuedDeadlineMs / 100))
     for (let attempt = 0; attempt < attempts && !this.disposed; attempt += 1) {
+      // P2-1: EVERY async resume re-checks the same admission authority the
+      // reconcile uses. An offer that only becomes available AFTER a replacement
+      // was published must never mount into it; stopping the local offer leaves
+      // the official `continued` call exactly as answerable as it already is.
+      if (!this.deps.isAdmissibleSession(sessionId)) return
       const snapshot = this.deps.port.snapshot(sessionId)
       if (snapshot !== undefined) {
         const call = snapshot.active.find(entry => entry.callId === callId)

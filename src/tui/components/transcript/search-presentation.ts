@@ -255,6 +255,61 @@ export function selectRenderedSearchScrollRange(
   return { startRow: selection.selectedRow, endRow: selection.selectedRow }
 }
 
+/** One visible-column range to decorate on one rendered row. */
+export interface RenderedColumnRange {
+  readonly startCol: number
+  readonly endCol: number
+}
+
+/** One range plus the style its visible text is wrapped in. */
+export interface RenderedColumnHighlight {
+  readonly range: RenderedColumnRange
+  readonly style: (text: string) => string
+}
+
+/**
+ * Decorate visible column ranges of ALREADY rendered rows without changing
+ * their visible width or row count. This is the ONE ansi-safe column-range
+ * highlighter: the transcript search and the Job Command drag selection both
+ * route through it, so neither re-implements the assembly.
+ *
+ * Each painted row is re-assembled ascending from the ORIGINAL line — never
+ * from a partially highlighted one — because re-slicing an already highlighted
+ * line can drop a trailing ANSI reset at the slice edge. The run of zero-width
+ * escape sequences at the END of the original line (a reset after the visible
+ * tail, an OSC8 terminator, …) is part of no column slice and is restored
+ * verbatim unless the assembled output already ends with it; otherwise the
+ * terminal state leaks into the following output.
+ */
+export function highlightColumnRanges(
+  lines: readonly string[],
+  rangesByRow: ReadonlyMap<number, readonly RenderedColumnHighlight[]>,
+): string[] {
+  const result = [...lines]
+  for (const [row, highlights] of rangesByRow) {
+    const line = result[row]
+    if (line === undefined || isImageLine(line) || highlights.length === 0) continue
+    const lineWidth = visibleWidth(line)
+    const sorted = [...highlights].sort((left, right) => left.range.startCol - right.range.startCol)
+    let output = ''
+    let cursor = 0
+    for (const highlight of sorted) {
+      const startCol = Math.min(highlight.range.startCol, lineWidth)
+      const endCol = Math.min(highlight.range.endCol, lineWidth)
+      if (endCol <= startCol) continue
+      if (startCol > cursor) output += sliceByColumn(line, cursor, startCol - cursor, true)
+      const highlighted = sliceByColumn(line, startCol, endCol - startCol, true)
+      output += styleVisibleText(highlighted, highlight.style)
+      cursor = endCol
+    }
+    if (cursor < lineWidth) output += sliceByColumn(line, cursor, lineWidth - cursor, true)
+    const trailing = trailingZeroWidthSequences(line)
+    if (trailing !== '' && !output.endsWith(trailing)) output += trailing
+    result[row] = output
+  }
+  return result
+}
+
 /** Decorate every visible occurrence of `selection.matches` without changing
  * row count or visible width. `selectedIndex >= 0` marks that occurrence
  * strong; `-1` with matches present decorates all of them weak (the other
@@ -265,44 +320,20 @@ export function highlightSearchLines(
   lines: readonly string[],
   selection: RenderedSearchSelection,
 ): string[] {
-  const result = [...lines]
+  let result = [...lines]
   if (selection.matches.length > 0) {
-    const rangesByRow = new Map<number, Array<{ startCol: number; endCol: number; current: boolean }>>()
+    const rangesByRow = new Map<number, RenderedColumnHighlight[]>()
     selection.matches.forEach((match, matchIndex) => {
       for (const segment of match.segments) {
-        const ranges = rangesByRow.get(segment.row) ?? []
-        ranges.push({ startCol: segment.startCol, endCol: segment.endCol, current: matchIndex === selection.selectedIndex })
-        rangesByRow.set(segment.row, ranges)
+        const highlights = rangesByRow.get(segment.row) ?? []
+        highlights.push({
+          range: { startCol: segment.startCol, endCol: segment.endCol },
+          style: matchIndex === selection.selectedIndex ? SEARCH_CURRENT_MATCH_STYLE : SEARCH_MATCH_STYLE,
+        })
+        rangesByRow.set(segment.row, highlights)
       }
     })
-    for (const [row, ranges] of rangesByRow) {
-      const line = result[row]
-      if (line === undefined || isImageLine(line)) continue
-      const lineWidth = visibleWidth(line)
-      // Assemble ascending from the ORIGINAL line: re-slicing an already
-      // highlighted line could drop a trailing ANSI reset at the slice edge.
-      const sorted = [...ranges].sort((left, right) => left.startCol - right.startCol)
-      let output = ''
-      let cursor = 0
-      for (const range of sorted) {
-        const startCol = Math.min(range.startCol, lineWidth)
-        const endCol = Math.min(range.endCol, lineWidth)
-        if (endCol <= startCol) continue
-        if (startCol > cursor) output += sliceByColumn(line, cursor, startCol - cursor, true)
-        const highlighted = sliceByColumn(line, startCol, endCol - startCol, true)
-        output += styleVisibleText(highlighted, range.current ? SEARCH_CURRENT_MATCH_STYLE : SEARCH_MATCH_STYLE)
-        cursor = endCol
-      }
-      if (cursor < lineWidth) output += sliceByColumn(line, cursor, lineWidth - cursor, true)
-      // Zero-width escape sequences at the END of the original line (a color
-      // reset after the visible tail, an OSC8 hyperlink terminator, …) are not
-      // part of any column slice: restore them from the ORIGINAL line unless the
-      // assembled output already ends with them. Keyed on the final output, not
-      // on `cursor >= lineWidth`: a reset can follow visible tail text too.
-      const trailing = trailingZeroWidthSequences(line)
-      if (trailing !== '' && !output.endsWith(trailing)) output += trailing
-      result[row] = output
-    }
+    result = highlightColumnRanges(result, rangesByRow)
   }
   // The ANCHOR-ONLY current result (plan S3 §6.3): no proven occurrence, so
   // every match stays weak — but the owning source/card row gets a weaker

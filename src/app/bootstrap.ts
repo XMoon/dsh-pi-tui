@@ -18,6 +18,8 @@
  */
 
 import { randomUUID } from 'node:crypto'
+import type { RemoteRefoldReason } from './remote/live-ingress.ts'
+import type { ContextMeasureReason } from '../domain/status/context-measurement.ts'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent, ModelSelection } from '@deepseek-ai/dsh-agent'
 import { SessionId } from '@deepseek-ai/dsh-session'
@@ -72,6 +74,7 @@ import { resolveDisplayPreset, type DisplayState } from '../domain/display/prese
 import { guardedStreamWriter } from '../tui/notification/terminal-notifier.ts'
 import { createTerminalNotificationPresentation } from '../tui/notification/runtime.ts'
 import { sessionStatsFactsOf } from '../domain/status/stats.ts'
+import { derivePerformance } from '../domain/status/performance-view.ts'
 import { isAssistantTokenDelta } from '../domain/transcript/usage.ts'
 import { projectedPlanActive, type PlanProjectionLike } from '../domain/status/derive-plan.ts'
 import { migrateLegacySettings } from './bootstrap/legacy-settings-migration.ts'
@@ -103,6 +106,12 @@ import { selectApplicationRuntime } from './bootstrap/runtime-selection.ts'
 import { createPresentationBridge } from './bootstrap/presentation-bridge.ts'
 import { createTaskSource } from './bootstrap/task-source.ts'
 import { installRuntimeEventWiring, installSessionEventWiring } from './bootstrap/event-wiring.ts'
+import { armRemoteInitRetry } from './bootstrap/remote-init-retry.ts'
+import {
+  IDLE_REMOTE_REFOLD_REQUEST,
+  requestRemoteRefold,
+  type RemoteRefoldRequestState,
+} from './bootstrap/remote-refold-request.ts'
 import { createFatalLifecycle, createSurfaceLifecycle } from './bootstrap/lifecycle.ts'
 import { createSessionStartupHelpers, quiesceResumedOwner } from './bootstrap/session-startup.ts'
 import { createSessionOwnershipCore } from '../app/session/ownership-core.ts'
@@ -111,8 +120,12 @@ import { createSessionScopeAuthority, type LiveSessionScope } from '../app/sessi
 import { bindSubmissionRuntime, type SubmissionRuntime } from '../app/submission/runtime.ts'
 import type { SessionOwnerRef, SessionSubject } from '../app/session/subject.ts'
 import { createSurfaceRuntime } from '../app/surface/runtime.ts'
-import { createPluginManagerPanel } from '../tui/plugin-manager/panel.ts'
+import type { SurfaceRendererMount } from '../app/surface/runtime.ts'
+import { productionTspConnector, selectRendererMount, tspRequested } from './bootstrap/renderer-selection.ts'
+import { createTerminalOutputGate } from './bootstrap/terminal-output.ts'
+import { createPluginManagerWorkspacePanel } from '../tui/plugin-manager/workspace.ts'
 import { type SessionQueryLike } from '../runtime/direct/session-direct.ts'
+import { type WorkingDirectoryServiceLike } from '../runtime/direct/working-directory-direct.ts'
 import { serializeTuiSettingsMutation, type TuiSettingsDoc } from '../runtime/config-port.ts'
 import type { AssistantLiveInput } from '../runtime/assistant-stream-port.ts'
 import { requireCreated, requireOpened, type SessionHandle } from '../runtime/session-lifecycle-port.ts'
@@ -218,10 +231,21 @@ export function applyRunnerWithRuntime(
   // into the shell. The guarded writer swallows broken-stream async
   // errors; every use is additionally wrapped for synchronous throws.
   const notificationWriter = guardedStreamWriter(process.stdout)
+  // The ONE physical-terminal output gate: the application may only write terminal
+  // control sequences while PiTui owns the tty (see `app/bootstrap/terminal-output`).
+  const terminalOutput = createTerminalOutputGate()
   // The composition zone selects the concrete terminal notification
   // presentation (TS5 §14.3); the application surface consumes the structural
-  // port and keeps the completion lifecycle.
-  const notificationPresentation = createTerminalNotificationPresentation({ writer: notificationWriter })
+  // port and keeps the completion lifecycle. Its writer is ALSO the focus-reporting
+  // path (the exit cleanup disables the mode through it), so gating it here covers
+  // both — no unmanaged OSC 9/777 or CSI ?1004 while the SDK owns the tty.
+  const notificationPresentation = createTerminalNotificationPresentation({
+    writer: {
+      write: (sequence: string) => {
+        if (terminalOutput.applicationOwnsTerminal()) notificationWriter.write(sequence)
+      },
+    },
+  })
   // A process-wide guarded stderr writer for user-visible warnings: the
   // error listener swallows async stream errors (EPIPE when the terminal
   // closed — a plain try/catch around write() cannot see those), and every
@@ -349,6 +373,12 @@ export function applyRunnerWithRuntime(
         // from their own authorities, so the old permission preset can
         // never survive an identity change.
         surface.resetSubjectStatus()
+        // Phase 3B / B3-B: a generation bump has ALREADY moved the authoritative
+        // generation here (see `runGenerationBump`), so any History seat captured
+        // against the old generation is stale — a same-owner bump included. This
+        // closes the physical tenant through the app's ONE revalidation path
+        // without changing the owner or fabricating a Session commit.
+        surface.retireStaleHistorySeat()
       },
     })
     // The A3 command/submission scope authority (plan A3 §1.1): ONE synchronous
@@ -476,7 +506,7 @@ export function applyRunnerWithRuntime(
       // TS4 §10: the composition zone selects the CONCRETE Plugin Manager panel
       // implementation; the application surface owner consumes only the injected
       // factory and never imports `tui/**` itself.
-      createPluginManagerPanel,
+      createPluginManagerPanel: createPluginManagerWorkspacePanel,
     })
 
     // The live Agent is declared before the TUI-facing facade so every read
@@ -613,6 +643,14 @@ export function applyRunnerWithRuntime(
     const captureMatches = (subject: SessionSubject | undefined): boolean =>
       subject === undefined ? ownership.owner() === undefined : ownership.isSubjectCurrent(subject)
     /**
+     * PR3-B §7.3 (B2 F2): whether the OWNER a captured subject pinned has
+     * been REPLACED by a different one (opaque owner-ref comparison through
+     * the ownership core's subject authority — never a session-id
+     * comparison, which A→B→A and a same-id re-publication would defeat).
+     */
+    const ownerWasReplaced = (subject: SessionSubject | undefined): boolean =>
+      ownership.subjectAuthority.ownerReplaced(subject)
+    /**
      * Whether one exact Direct Agent object IS the current owner: the ownership
      * core is the identity authority, the registry resolves its attachment.
      */
@@ -668,12 +706,33 @@ export function applyRunnerWithRuntime(
         },
         isSurfaceDisposed: () => cleanedUp,
         beginOpening: (sessionId) => surface.openingJournal.begin(sessionId),
-        clearOpening: (token) => surface.openingJournal.clear(token as object),
+        clearOpening: (token) => {
+          // The journal's own token identity contract is unchanged (a stale token
+          // is still ignored).
+          surface.openingJournal.clear(token as object)
+          // PR3-B B3 (finding F14): ENDING an opening changes the presentation
+          // authority — a rolled-back target's flow is no longer admissible — so
+          // the FULL presentation pass runs HERE. Without this producer the
+          // retired target's modal could survive on an idle surface: a rollback
+          // need not publish anything and need not produce a later main-session
+          // event, so no other trigger would ever reconcile it.
+          surface.reconcileInteractionPresentation()
+        },
         settlePendingQueueRecalls: (committed) => submissionRuntime.settleQueueRecalls(committed),
         settleLocalSubmitAck: (reason) => submission.settleLocalSubmitAck(reason),
         resetSubmitLatency: () => submission.resetSubmitLatency(),
+        // Phase 3B / B3-B: the publication-commit History retirement (see the
+        // three `publishOwner` seams in app/session/runtime.ts).
+        retireStaleHistorySeat: () => surface.retireStaleHistorySeat(),
         setCompletionOwner: (identity) => surface.setCompletionOwner(identity),
         initLiveSession: (owner) => {
+          // PR3-B B3 (findings C/F6): the committed owner takes the
+          // presentation BEFORE its first frame. A replaced subject's live
+          // Question form AND live approval prompt are withdrawn from the modal
+          // seat here (presentation only — each official request keeps its own
+          // lifetime), so no stale form, count, prompt or input seat can survive
+          // into the new session's presentation.
+          surface.reconcileInteractionPresentation()
           const agent = directAgentOfOwner(owner)
           if (agent === undefined) {
             // M3-4 PR2: a Remote-owned generation initializes its whole
@@ -712,6 +771,32 @@ export function applyRunnerWithRuntime(
           draftImages.clearUnpinned()
           draftFiles.clearUnpinned()
         },
+        withdrawReplacedPresentation: () => {
+          // PR3-B B3 (external review P2-B): the SAME synchronous publication
+          // commit as the draft drop — a replaced subject's modal must leave the
+          // seat before any post-commit await (source retirement, quiesce,
+          // hydration), never only at the later `initLiveSession` reconcile.
+          surface.withdrawReplacedPresentation()
+        },
+        beginInputHistoryScope: (owner) => {
+          // The editor-recall scope of the owner this commit section publishes
+          // or creates: the owner's hydration reseeds ↕ recall from its
+          // session-scoped disk rows afterwards, while a submission accepted in
+          // between has its own append ordered behind the transition (submit
+          // FIFO turn + ensureSession), so the row can land after that read.
+          // Recording the scope-bound temporary submissions lets the reseed
+          // reconcile them instead of dropping them (PiTui editor history).
+          surface.display.beginInputHistoryScope(owner)
+        },
+        dropOutgoingActiveDraft: () => {
+          // PR3-B §7.3: the committed cross-owner switch drops the outgoing
+          // session's active editor draft through the renderer-neutral display
+          // seam. The PiTui adapter is deliberately inert (its cross-session
+          // main-draft retention is its own contract); the TSP renderer
+          // clears. Reached ONLY from the session runtime's two committed
+          // post-publication sites — never the generation reset.
+          surface.display.clearActiveDraft()
+        },
         reportSwitchFailure: (sessionId, message) => {
           ctx.logger.warn(`tui-runner: switch to ${sessionId} failed: ${message}`)
           diag.error('switch failed', { session: sessionId, error: message })
@@ -725,7 +810,7 @@ export function applyRunnerWithRuntime(
         },
         notifyResumeFailure: () => {
           if (resumeFailure !== undefined) {
-            app.notify(resumeFailure, 'error')
+            surface.display.notify(resumeFailure, 'error')
             resumeFailure = undefined
           }
         },
@@ -733,7 +818,12 @@ export function applyRunnerWithRuntime(
         newSessionId: () => String(SessionId(`session-${randomUUID()}`)),
         sessionCreateCwd: () => process.cwd(),
         currentOpening: () => surface.openingJournal.current(),
-        resetOpening: () => surface.openingJournal.reset(),
+        resetOpening: () => {
+          // The whole journal is dropped (the first-session finally): the SAME
+          // authority change, the SAME pass (F14).
+          surface.openingJournal.reset()
+          surface.reconcileInteractionPresentation()
+        },
       },
       isScopeCurrent: (scope) => sessionScope.isCurrent(scope),
       diag,
@@ -1099,6 +1189,11 @@ export function applyRunnerWithRuntime(
           ctx.get('sessionProjections') as PlanProjectionLike | undefined,
           (agent as unknown as Agent).session,
         ) ?? false,
+        // The hydrated workspace cwd is the Session's EFFECTIVE directory
+        // (the official working-directory projection the `working_directory`
+        // tool commits into), never the immutable header project.
+        effectiveCwd: (agent) => (ctx.get('workingDirectory') as WorkingDirectoryServiceLike | undefined)
+          ?.get((agent as unknown as Agent).session),
       },
       status: {
         setGoalText: (text) => status.setGoal(text),
@@ -1107,6 +1202,8 @@ export function applyRunnerWithRuntime(
         refreshTerminalCwd: () => status.refreshTerminalCwd(),
         updateWelcomeCard: () => status.updateWelcomeCard(),
         scheduleInitialMeasurement: (sessionId) => status.scheduleInitialMeasurement(sessionId),
+        markContextDirty: () => status.markContextDirty(),
+        refreshContextMeasurement: (reason: ContextMeasureReason) => status.refreshContextMeasurement(reason),
       },
       history: {
         rememberCwd: (cwd) => history.rememberCwd(cwd),
@@ -1143,6 +1240,29 @@ export function applyRunnerWithRuntime(
           captureTransportToken: (sessionId) => remoteSources.sessionFacts.captureTransportToken(sessionId),
           isTransportTokenCurrent: (sessionId, token) =>
             remoteSources.sessionFacts.isTransportTokenCurrent(sessionId, token),
+          // S3-R0: the read→commit revision/identity proof of a window re-fold
+          // (the caller acknowledges the ingress with it).
+          windowRefoldProof: (sessionId, revision) => {
+            // S3-R0 provenance PRE-commit fence: a window read at the revision the
+            // DEAD generation published is not eligible to replace the fold at
+            // all (acknowledging afterwards would already have overwritten it).
+            const handle = remoteIngressHandle
+            if (handle !== undefined && !handle.refoldEligible(revision)) return undefined
+            return remoteSources.sessionFacts.windowRefoldProof(sessionId, revision)
+          },
+          // S3-R0: a window reconcile publishes the SAME proven working/busy
+          // fold the cold hydrate does, stamped with the transport identity the
+          // commit was fenced under and the CURRENT owner generation — the cache
+          // is never left invalidated behind the official-`running` fallback.
+          seedWindowWorkingFold: input => {
+            seedWorkingFold({
+              generation: ownership.generation(),
+              sessionId: input.sessionId,
+              transportToken: input.transportToken,
+              fold: input.fold,
+              proven: input.proven,
+            })
+          },
           // The official CURRENT-VALUE facts a bounded window cannot own. A
           // field is included ONLY when its projection answered: an absent
           // field means "unavailable" (the owner falls back to the window
@@ -1184,13 +1304,101 @@ export function applyRunnerWithRuntime(
     /** R2 §7.1: the ONE Remote Host terminal-progress watch of the CURRENT main
      *  session owner. Its controller is the watch's cancellation lifetime. */
     let remoteProgressHandle: { dispose(): void } | undefined
+    /** S3-R0: the ONE pending re-init of a Remote live surface whose hydrate
+     *  could not commit because the transport was unavailable. Driven by the
+     *  OFFICIAL Connection generation channel — never a timer or a poll. */
+    let remoteInitRetryHandle: { dispose(): void } | undefined
+    const disposeRemoteInitRetry = (): void => {
+      remoteInitRetryHandle?.dispose()
+      remoteInitRetryHandle = undefined
+    }
     const disposeRemoteLiveSurface = (): void => {
+      disposeRemoteInitRetry()
       remoteIngressHandle?.dispose()
       remoteIngressHandle = undefined
       remoteProgressHandle?.dispose()
       remoteProgressHandle = undefined
     }
+    /** The ONE immediate init retry already granted to an attempt: keyed by the
+     *  TUI owner generation AND the Connection generation, so a NEW owner init
+     *  always gets its single retry while a repeat failure inside the same
+     *  attempt falls back to the official channel (no recursion, no stale
+     *  marker blocking a later attempt — the exact-binding transport identity is
+     *  narrower than the Connection generation, so an owner attempt is the
+     *  honest budget unit). */
+    let lastInitRetry: { readonly ownerGeneration: number; readonly connectionGeneration: unknown } | undefined
+    /** Arm the official-signal retry for one FAILED attempt (the production
+     *  helper owns the attempt fence, the official-channel wakeup and the
+     *  same-tick re-check; see `app/bootstrap/remote-init-retry.ts`). */
+    const armInitRetry = (sessionId: string, failedAttemptGeneration: number): void => {
+      if (remoteSources === undefined || remoteInitRetryHandle !== undefined) return
+      const sources = remoteSources
+      remoteInitRetryHandle = armRemoteInitRetry({
+        isCleanedUp: () => cleanedUp,
+        currentSessionId: () => ownership.currentSessionId(),
+        ownerGeneration: () => ownership.generation(),
+        connectionGeneration: () => sources.commandSource.connectionGeneration(),
+        subscribeConnectionGeneration: listener => sources.commandSource.subscribeConnectionGeneration(listener),
+        runInit: () => initRemoteLiveSurface(sessionId),
+        runDetached: (name, run) => runDetached(name, run, { diag, sessionId: () => sessionId }),
+      }, sessionId, failedAttemptGeneration)
+    }
     lifecycleController.signal.addEventListener('abort', disposeRemoteLiveSurface, { once: true })
+
+    /**
+     * S3-R0: the ONE in-flight window re-fold of the current Remote main owner.
+     * A recovery notification only marks INTENT: this pump serializes the async
+     * re-folds, acknowledges the committed revision through the ingress handle,
+     * and runs again when a newer official revision arrived while it folded (the
+     * ingress re-fires on every revision, so this is never a busy loop). It
+     * NEVER disposes or re-creates the ingress: reconciling a window is not an
+     * owner replacement, and a second publisher must never appear.
+     */
+    let remoteRefoldInFlight = false
+    let remoteRefoldPending = false
+    /** The pending reconcile request (queued + whether it may re-measure the
+     *  context); a paging wakeup must not, a recovery always does. */
+    let remoteRefoldRequest: RemoteRefoldRequestState = IDLE_REMOTE_REFOLD_REQUEST
+    const pumpRemoteWindowRefold = (): void => {
+      if (remoteRefoldInFlight) return
+      remoteRefoldInFlight = true
+      runDetached('remote window refold', async () => {
+        try {
+          while (remoteRefoldPending) {
+            remoteRefoldPending = false
+            const handle = remoteIngressHandle
+            const sessionId = ownership.currentSessionId()
+            if (cleanedUp || handle === undefined || sessionId === undefined) return
+            // The old window's working-fold proof is VOID: rehydrateFromWindow
+            // re-seeds it from the NEW window's fold.
+            invalidateWorkingFold()
+            // Consume the request BEFORE the read: a wakeup that lands during the
+            // await must fold into a fresh state (a paging wakeup during an
+            // in-flight recovery reconcile still keeps its no-measure decision).
+            const measure = remoteRefoldRequest.measure
+            remoteRefoldRequest = IDLE_REMOTE_REFOLD_REQUEST
+            const proof = await presentation.rehydrateFromWindow(sessionId, { measure })
+            if (cleanedUp || remoteIngressHandle !== handle) return
+            // An uncommitted re-fold (fence-dropped read) leaves the handle
+            // recovering: the next official revision / open transition wakes us.
+            if (proof === undefined) continue
+            if (handle.acknowledgeWindowRefold(proof)) return
+          }
+        } finally {
+          remoteRefoldInFlight = false
+          // A wakeup that landed between the last check and this point must not
+          // be lost (the notification is never a timer: the ingress re-fires it
+          // on the next official revision).
+          if (remoteRefoldPending) pumpRemoteWindowRefold()
+        }
+      }, { diag, sessionId: () => ownership.currentSessionId() })
+    }
+    const requestRemoteWindowRefold = (sessionId: string, reason?: RemoteRefoldReason): void => {
+      if (cleanedUp || ownership.currentSessionId() !== sessionId) return
+      remoteRefoldRequest = requestRemoteRefold(remoteRefoldRequest, reason)
+      remoteRefoldPending = true
+      pumpRemoteWindowRefold()
+    }
 
     /**
      * Initialize the WHOLE Remote live surface for one session: hydrate
@@ -1200,8 +1408,12 @@ export function applyRunnerWithRuntime(
      * and transient chunks through the SAME assistant-input entry the
      * Direct branch uses — one canonical pipeline, two ingress owners.
      */
+    /** The newest init attempt: an older in-flight init bails before it installs
+     *  an ingress, so two attempts can never become two publishers. */
+    let remoteInitAttempt = 0
     const initRemoteLiveSurface = async (sessionId: string): Promise<void> => {
       if (remoteSources === undefined || cleanedUp) return
+      const attempt = ++remoteInitAttempt
       disposeRemoteLiveSurface()
       // §6.5 lifecycle fence (subscribe side): the token is captured BEFORE
       // the hydrate await; a superseded owner (switch/new/fork or a same-id
@@ -1210,11 +1422,46 @@ export function applyRunnerWithRuntime(
       const initGeneration = ownership.generation()
       const hydrate = await presentation.initLiveRemoteSession(sessionId)
       if (cleanedUp) return
+      // A newer attempt (a same-id owner commit, another retry) superseded this
+      // one while it hydrated: it must not install anything.
+      if (attempt !== remoteInitAttempt) return
       if (ownership.currentSessionId() !== sessionId || ownership.generation() !== initGeneration) return
-      // An uncommitted hydrate (fence-dropped inside the presentation owner)
-      // means this init lost the race — its revision is undefined and its
-      // subscription would resurrect the stale window: abort here.
-      if (hydrate === undefined) return
+      // An uncommitted hydrate means either a superseded owner (fenced above)
+      // or an unavailable transport. The latter must NOT complete as a healthy
+      // init: without a transcript and without an ingress, only an unrelated
+      // owner commit could ever recover it. Arm the OFFICIAL generation-driven
+      // retry instead (plan §2.2/§2.5: an explicit not-ready state completed by
+      // a real signal, never a poll).
+      if (hydrate === undefined) {
+        const liveGeneration = remoteSources.commandSource.connectionGeneration()
+        if (liveGeneration === undefined) {
+          // The transport is absent right now: wait for the OFFICIAL generation.
+          armInitRetry(sessionId, initGeneration)
+        } else {
+          const attempt = { ownerGeneration: initGeneration, connectionGeneration: liveGeneration }
+          const alreadyRetried = lastInitRetry !== undefined
+            && lastInitRetry.ownerGeneration === attempt.ownerGeneration
+            && Object.is(lastInitRetry.connectionGeneration, attempt.connectionGeneration)
+          if (!alreadyRetried) {
+            // The generation is already live: the hydrate was dropped by a
+            // transport IDENTITY change between its read and its commit (the
+            // owner fences above passed). Re-run the init ONCE for THIS attempt
+            // — never a loop (a repeat failure inside the attempt falls back to
+            // the official channel) and never a stale marker for a later owner
+            // attempt (a new owner commit grants its own retry).
+            lastInitRetry = attempt
+            runDetached('remote live surface retry', () => initRemoteLiveSurface(sessionId), {
+              diag,
+              sessionId: () => sessionId,
+            })
+          } else {
+            armInitRetry(sessionId, initGeneration)
+          }
+        }
+        return
+      }
+      // A committed init releases the attempt's retry budget.
+      lastInitRetry = undefined
       // Seed the compaction working-fold cache from the PROVEN cold-hydrate
       // fold (no first-use gap: the first settle reads the authoritative
       // complete-window answer, never the bare running bit).
@@ -1232,6 +1479,10 @@ export function applyRunnerWithRuntime(
       remoteIngressHandle = remoteSources.liveIngress.subscribe(sessionId, {
         onDurableEvent: (id, event) => {
           surface.routeSessionEvent({ id }, event as SessionEvent)
+          // The live routing just handled (and measured) this event: record the
+          // measure boundary so a later window reconcile never re-measures one
+          // the live path already did.
+          presentation.noteLiveMeasureEvent(id, event as { readonly type: unknown; readonly data?: unknown })
         },
         onLiveInput: (input) => {
           // Defense in depth: the ingress fences by exact binding + Connection
@@ -1263,33 +1514,25 @@ export function applyRunnerWithRuntime(
           status.refresh()
           status.updateWelcomeCard()
         },
-        onWindowReplaced: (id) => {
-          // Reconnect/gap repair: the official new window is authoritative —
-          // re-run the full Remote hydration for the CURRENT session only
-          // (a replaced owner must not repaint through this subscription).
-          // The old window's working-fold proof is VOID: drop the cache now
-          // (initRemoteLiveSurface re-seeds it from the NEW window's fold).
-          if (ownership.currentSessionId() !== id || cleanedUp) return
-          invalidateWorkingFold()
-          runDetached('remote window re-hydration', () => initRemoteLiveSurface(id), {
-            diag,
-            sessionId: () => id,
-          })
+        onWindowRefoldRequired: (id, reason) => {
+          // S3-R0: the incremental sequence is no longer trustworthy (generation
+          // rollover, revision discontinuity, window replace/prepend, missing
+          // change, hydrate gap). The fold OWNER re-folds the CURRENT official
+          // window — never a destructive surface dispose/re-init (that path
+          // releases the ONE live ingress before its ownership-fenced hydrate can
+          // abort, which is how a reconnect used to leave the transcript on the
+          // dead window). The ingress handle stays the SINGLE publisher.
+          requestRemoteWindowRefold(id, reason)
         },
-        onWindowPrepended: (id) => {
-          // F10 (round 4): an official `loadOlder` page joined the window
-          // front — whoever requested it (keyboard extension, /status facts
-          // composition, copy paging). Re-fold the transcript/stats
-          // presentation from the widened window for the CURRENT session
-          // only; `rehydrateFromWindow` owns the generation/transport fences
-          // and re-derives the footer status from the new fold.
-          if (ownership.currentSessionId() !== id || cleanedUp) return
-          runDetached('remote window front re-hydration', () => presentation.rehydrateFromWindow(id), {
-            diag,
-            sessionId: () => id,
-          })
-        },
-      }, hydrate.revision)
+      }, { revision: hydrate.revision, transportToken: hydrate.transportToken })
+      // S3-R0: the Remote ingress now owns event delivery for this committed
+      // owner (it is subscribed and its own hydrate→subscribe gap recovery is
+      // armed), so the opening journal's pre-commit buffering window is OVER.
+      // Without this, events arriving between the hydrate and the transition's
+      // `clearOpening` are recorded and then DISCARDED at clear (the surface is
+      // already live, so nothing merges the cut) — a real lost-event window that
+      // a reconnect's fresh generation can land in.
+      surface.openingJournal.close(sessionId)
       // R2 §7.1/§7.2/§7.3: the Remote terminal-progress authority. The Host
       // evidence stream is the ONLY writer of the main interval on this branch
       // (the durable ingress above keeps feeding the transcript and is gated
@@ -1394,6 +1637,12 @@ export function applyRunnerWithRuntime(
       diag,
       signal: lifecycleController.signal,
       app: () => app,
+      modelPresentation: () => surface.modelPresentation,
+              sessionBrowserPresentation: () => surface.sessionBrowserPresentation,
+      presetPresentation: () => surface.presetPresentation,
+      // PR3-A: registration/refresh failures are background-reachable under a
+      // read-only TSP renderer; the notice goes through the display seam.
+      notify: (text, kind) => surface.display.notify(text, kind),
       liveAgent: () => agentNow(),
       sessionScope,
       ownership,
@@ -1444,12 +1693,6 @@ export function applyRunnerWithRuntime(
         blank: () => sessionBlank(),
       },
       clientCwd: cwd,
-      // PR5 (plan §3.2): the /status panel reads the presentation-owned
-      // recent-performance availability beside the composed stats (Remote
-      // only — Direct's complete-log fold is authoritative by construction).
-      ...(remoteSources === undefined ? {} : {
-        recentPerformanceAvailable: () => presentation.mainRecentPerformanceAvailable(),
-      }),
       surface: {
         setNotificationMode: (mode) => surface.setNotificationMode(mode),
         setNotificationMethod: (method) => surface.setNotificationMethod(method),
@@ -1479,8 +1722,12 @@ export function applyRunnerWithRuntime(
       session: {
         ensureSession: () => sessionRuntime.ensureSession(),
         withWriter: (scope, task) => sessionRuntime.withWriter(scope, task),
-        switchSession: (sessionId) => sessionRuntime.switchSession(sessionId),
+        switchSession: (sessionId, expectedScope) => sessionRuntime.switchSession(sessionId, expectedScope),
         forkSession: (sourceSessionId) => sessionRuntime.forkSession(sourceSessionId),
+        // The `/fork` success notice's currentness fence: the command surface
+        // reads the SAME navigation authority the fork adopted against, never a
+        // second epoch counter.
+        isNavigationCurrent: (expected) => sessionRuntime.isNavigationCurrent(expected),
         transitionTo: (steps) => sessionRuntime.transitionTo(steps),
       },
       status: {
@@ -1522,7 +1769,7 @@ export function applyRunnerWithRuntime(
       },
       pluginManager: {
         open: () => pluginManager.open(),
-        submenu: (done) => pluginManager.submenu(done),
+        page: (done) => pluginManager.page(done),
       },
       client: {
         get runCopyCommand() { return clientActions.runCopyCommand },
@@ -1549,19 +1796,28 @@ export function applyRunnerWithRuntime(
           if (commands === undefined) throw new Error('commands service unavailable')
           return commands.list(agentNow()).map(commandSummaryOf)
         },
+        // TPS plan PR-2: the measured performance values come from the SAME
+        // Session's own Host `piTuiPerformance` projection on BOTH branches —
+        // the /status subject is the session id this seam was asked about.
         sessionStats: (sessionId, signal) => remoteSources === undefined
-          ? Promise.resolve(sessionStatsFactsOf(presentationBridge.directSessionStats(sessionId)))
-          : composeRemoteSessionStats({
-            sessionId,
-            reader: remoteSources.presentationReader,
-            fence: presentationBridge.remoteTransportFenceOf(sessionId),
-            facts: {
-              sessionStats: presentationBridge.sessionStatsProjectionOf(sessionId),
-              usage: remoteSources.sessionFacts.sessionStatus(sessionId)?.usage,
-              contextWindow: remoteSources.sessionFacts.sessionStatus(sessionId)?.context?.contextWindow,
-            },
-            signal,
-          }),
+          ? Promise.resolve(sessionStatsFactsOf(
+              presentationBridge.directSessionStats(sessionId),
+              derivePerformance(backend.sessionReader.sessionStatus(sessionId)?.performance),
+            ))
+          : (() => {
+              const status = remoteSources.sessionFacts.sessionStatus(sessionId)
+              return composeRemoteSessionStats({
+                sessionId,
+                fence: presentationBridge.remoteTransportFenceOf(sessionId),
+                facts: {
+                  sessionStats: presentationBridge.sessionStatsProjectionOf(sessionId),
+                  usage: status?.usage,
+                  contextWindow: status?.context?.contextWindow,
+                  performance: status?.performance,
+                },
+                signal,
+              })
+            })(),
         lastAssistantText: (sessionId, signal) => remoteSources === undefined
           ? Promise.resolve(presentationBridge.directLastAssistantText(sessionId))
           : composeRemoteLastAssistantText({
@@ -1617,7 +1873,12 @@ export function applyRunnerWithRuntime(
       // The composition owns the terminal policy: the status owner supplies
       // the semantic identity facts and this applies OSC 0 (width/ANSI
       // mechanics stay in `tui/terminal/title.ts`).
-      updateTerminalTitle: (context) => setTerminalTitle(terminalTitleOf(context)),
+      updateTerminalTitle: (context) => {
+        // The window title is terminal output too: while the SDK owns the tty the
+        // session identity stays a display fact (the renderer's own status line).
+        if (!terminalOutput.applicationOwnsTerminal()) return
+        setTerminalTitle(terminalTitleOf(context))
+      },
       isCleanedUp: () => cleanedUp,
       liveAgent: () => agentNow(),
       // PR4 §6.2/§6.3: the permission-cycle authority — the projection's
@@ -1658,6 +1919,7 @@ export function applyRunnerWithRuntime(
       // Remote this is the same function the branch facts used to expose).
       // The subject id is ALWAYS explicit: selection belongs to StatusRuntime.
       sessionStatus: (sessionId) => backend.sessionReader.sessionStatus(sessionId),
+      sessionStatusFailed: (sessionId) => backend.sessionReader.sessionStatusFailed?.(sessionId) === true,
       model: {
         selection: () => model.selected.current,
         currentOf: (agent) => model.currentOf(agent),
@@ -1674,10 +1936,6 @@ export function applyRunnerWithRuntime(
       }),
       presentation: {
         mainStats: () => presentation.mainStats(),
-        // PR5 (plan §3.2): the presentation-owned recent-performance
-        // availability authority (one bit beside the fold, committed in the
-        // same fenced hydrate).
-        mainRecentPerformanceAvailable: () => presentation.mainRecentPerformanceAvailable(),
       },
       viewer: { read: () => viewerRef?.read() },
       clientCwd: cwd,
@@ -1691,9 +1949,11 @@ export function applyRunnerWithRuntime(
     })
     // A5b-2: the client-local input-history owner (known cwds, the canonical
     // last row and the per-session recall projection). Constructed before the
-    // mount; it only touches the app inside `activateBootRecall`.
+    // mount; it only touches the display seam inside `activateBootRecall`.
     const history = createInputHistory({
-      surface: { get app() { return app } },
+      // Late-bound: the seam exists only after `surface.start` below; the
+      // owner reads it inside `activateBootRecall` (a post-mount step).
+      surface: { get display() { return surface.display } },
       clientCwd: cwd,
       sessionCwd: () => status.sessionCwd(),
       diag,
@@ -1704,7 +1964,15 @@ export function applyRunnerWithRuntime(
     // surface, so the guard is initialized before any refresh callback exists.
     let cleanedUp = false
 
-    let app: TuiApp
+    let app: TuiApp | undefined
+    /**
+     * PR3-B B2: whether the mounted surface is the experimental TSP renderer.
+     * Settled when the renderer selection transfers ownership (before
+     * `surface.start` returns) and read LIVE by the shell admission — a
+     * pre-selection predicate would misreport the SDK-decline fallback,
+     * where PiTui mounts and its shell CARDS ARE available.
+     */
+    let tspRendererActive = false
     /**
      * The stable display-subject lifetime tokens for image reads (M3-5 PR2): one
      * slot for the MAIN presentation (keyed by owner generation + session id) and
@@ -1832,7 +2100,12 @@ export function applyRunnerWithRuntime(
     // (M3-4 PR3 shell amendment; the frozen selection-boundary contract).
     const userShellPort = backend.hostUserShell
     const localShell = createUserShell<Agent>({
-      app: () => app,
+      app: () => app as TuiApp,
+      // PR3-B §B0-7: failure/interrupt notices are renderer-neutral. The Esc
+      // interrupt path can run under a non-PiTui renderer (the turn cancel is
+      // renderer-independent), so its error notice must never touch PiTui
+      // members; the local-card `app` above stays run()-only (PiTui).
+      notify: (message, kind) => surface.display.notify(message, kind),
       diag,
       isCleanedUp: () => cleanedUp,
       liveAgent: () => agentNow(),
@@ -1851,6 +2124,21 @@ export function applyRunnerWithRuntime(
       },
     })
 
+    // PR3-A acquisition stage: the SDK renderer's tty lifetime STARTS when the
+    // connector returns the mounted renderer and ENDS when the surface's ordered
+    // teardown releases it. Between those two points the tty is OWNED but not
+    // yet transferred, so the teardown transaction must AWAIT this stage — a
+    // quit arriving during the SDK handshake would otherwise print the resume
+    // hint and request `appExit` while the renderer still owned the terminal.
+    // Settled on EVERY path: at the ownership transfer, or — when the runner was
+    // disposed mid-flight — after the acquired renderer has been released.
+    // The stage is INERT until the attempt actually starts (immediately before
+    // the connector runs, below): an unexecuted phase must read as already
+    // settled, or a startup failure BEFORE the attempt leaves the teardown
+    // transaction waiting on a stage that no producer will ever settle.
+    let rendererAcquisition: Promise<void> = Promise.resolve()
+    let settleAcquisition: (() => void) | undefined
+    let failAcquisition: ((error: unknown) => void) | undefined
     // The ONE idempotent client-surface teardown + fiber disposer (TS2
     // §11/§12): the orchestration is owned by `app/bootstrap/lifecycle.ts`;
     // every released resource is an already-owned callback. The frozen §12
@@ -1858,7 +2146,15 @@ export function applyRunnerWithRuntime(
     const surfaceLifecycle = createSurfaceLifecycle({
       diag,
       isCleanedUp: () => cleanedUp,
-      markCleanedUp: () => { cleanedUp = true },
+      markCleanedUp: () => {
+        cleanedUp = true
+        // The surface-stop boundary is the ONE synchronous point where a
+        // selected Remote runtime stops admitting pre-dispatch writes: a prompt
+        // parked in serialization when the surface stopped is refused BEFORE
+        // any Host dispatch, never sent silently after the stop.
+        override?.selected.stopSurfaceAdmission?.()
+      },
+      whenRendererAcquired: () => rendererAcquisition,
       surface,
       abortLifecycle: () => lifecycleController.abort(),
       disposeViewer: () => viewerRef?.dispose(),
@@ -1948,9 +2244,18 @@ export function applyRunnerWithRuntime(
         observeChild: (childId) => {
           const query = ctx.get('sessionQuery') as SessionQueryLike | undefined
           if (query?.observeSession === undefined) return undefined
-          return query.observeSession(SessionId(childId), { projectionMode: 'none' })
+          // `projectionMode: 'all'` carries the official projection baseline
+          // (including `workingDirectory`) at the SAME cut as the log: the
+          // child's displayed directory must be its effective one, which the
+          // header alone does not follow.
+          return query.observeSession(SessionId(childId), { projectionMode: 'all' })
         },
         childAgent: (childId) => agents.get(SessionId(childId)),
+        childEffectiveCwd: (childId) => {
+          const session = sessions.get(SessionId(childId))
+          if (session === undefined) return undefined
+          return (ctx.get('workingDirectory') as WorkingDirectoryServiceLike | undefined)?.get(session)
+        },
         assistantStreamBaselineFor: (agent) => assistantStreamBaselineFor(agent),
       })
       : remoteSources.childView as unknown as ViewerChildSource<SessionEvent>
@@ -1977,7 +2282,10 @@ export function applyRunnerWithRuntime(
     // in SubmissionRuntime + SessionRuntime.withWriter; this owner only
     // supplies the semantic hooks.
     const submission = createSubmissionController<Agent>({
-      app: () => app,
+      // PR3-B §3.1: the composer projection — the live PiTui `TuiApp` on the
+      // default branch (structural compatibility), the renderer's own
+      // composer on a TSP branch. The controller never reads chrome members.
+      app: () => surface.composer,
       diag,
       signal,
       isCleanedUp: () => cleanedUp,
@@ -2069,6 +2377,23 @@ export function applyRunnerWithRuntime(
         run: (text, ackToken) => localShell.run(text, ackToken),
         interrupt: () => localShell.interrupt(),
       },
+      // PR3-B B2-5: the TSP renderer has no local-shell cards; the
+      // SubmissionController refuses `!`/`!!` at its ORIGINAL shell-branch
+      // admission. Read LIVE (the renderer is selected after this owner is
+      // constructed); the SDK-decline fallback mounts PiTui, so the cards
+      // stay available there.
+      get supportsLocalShellCards() { return !tspRendererActive },
+      // PR3-B B2-3: the TSP renderer has no PiTui builtin panels/pickers, so
+      // Only renderer-supported TUI builtins pass post-classification
+      // admission. The native Model presenter is supplied separately below.
+      get supportsTuiBuiltinUi() { return !tspRendererActive },
+      supportsModelPickerUi: () => surface.modelPresentation !== undefined,
+      supportsPresetPickerUi: () => surface.presetPresentation !== undefined,
+       supportsSessionBrowserUi: () => surface.sessionBrowserPresentation !== undefined,
+      // PR3-B §7.3 (F2): PiTui retains a stale submission's draft restore
+      // across a switch (its contract); the TSP renderer's committed switch
+      // DROPPED the outgoing draft, so the stale restore is suppressed.
+      get retainsStaleDraftRestore() { return !tspRendererActive },
       model: { selected: { get current() { return model.selected.current } } },
       image: {
         // D12 (TS8-C): the Direct Host attachment/model services are injected
@@ -2084,6 +2409,7 @@ export function applyRunnerWithRuntime(
       },
       tuiSettings,
       captureMatches,
+      ownerWasReplaced,
       direct: {
         withPromptAdmission: (agent, hasImages, task) => {
           const runtime = directRuntime()
@@ -2099,7 +2425,7 @@ export function applyRunnerWithRuntime(
     // `/transcript`), including its in-flight dedupe set and save-location
     // dialog. Consumed by the session dispatch below.
     const artifacts = createArtifactSaveOwner<Agent>({
-      app: () => app,
+      app: () => app as TuiApp,
       isCleanedUp: () => cleanedUp,
       signal,
       diag,
@@ -2228,13 +2554,114 @@ export function applyRunnerWithRuntime(
         signal: () => lifecycleController.signal,
       },
     })
+    // PR3-A (experimental): the ONE renderer selection, before the mount.
+    // `DSH_PI_TUI_RENDERER=tsp` opts into the Tern TSP renderer: the official
+    // SDK connects BEFORE PiTui could take stdin. `null` (no TSP in this
+    // terminal) falls back to the unchanged PiTui mount below; a connect
+    // FAILURE propagates to this root's fatal catch — never a silent
+    // fallback. The import is lazy, so the default path never loads the SDK
+    // (and `src/startup.ts` stays dependency-free). No `TERM_PROGRAM`
+    // inference: the SDK's own probe is the only capability authority.
+    // The mounted-renderer FATAL route (F6): an SDK input-loop failure after
+    // mount goes through the runner's fatal lifecycle (error outcome, no
+    // resume hint) — never a normal appExit(0).
+    const rendererOnFatal = (error: unknown): void => {
+      void fatalLifecycle.handleStartupFailure(error) // allowlist: fatal lifecycle root — see AGENTS.md
+    }
+    let rendererMount: SurfaceRendererMount | undefined
+    let rendererTransferred = false
+    /**
+     * Release the ACQUIRED-but-not-transferred renderer, exactly once (inert
+     * after the ownership transfer, where the surface's ordered teardown owns
+     * it). Shared by the cancellation and the rejected-mount paths.
+     */
+    const releaseAcquiredRenderer = async (): Promise<void> => {
+      const acquired = rendererMount
+      rendererMount = undefined
+      if (rendererTransferred || acquired === undefined) return
+      await acquired.releaseUnmounted()
+    }
+    // An accepted cancellation has ALREADY completed its teardown transaction
+    // (against the inert acquisition stage): this boot must never acquire the
+    // tty afterwards — that would hand the renderer to an already-finished exit.
+    if (cleanedUp) return
+    // The attempt STARTS here: from this point the pending stage has a real
+    // producer (the ownership transfer, the cancellation release, or a failure).
+    rendererAcquisition = new Promise<void>((resolve, reject) => {
+      settleAcquisition = resolve
+      failAcquisition = reject
+    })
+    // The TSP attempt owns the tty from the moment the connector starts; an honest
+    // decline hands it back to PiTui (the unchanged default). A boot that never
+    // asked for TSP must NOT suspend: `selectRendererMount` returns undefined for
+    // it after an `await`, and suspending would drop PiTui's own queued output.
+    const tspAttempt = tspRequested(process.env)
+    if (tspAttempt) terminalOutput.suspend()
+    try {
+      rendererMount = await selectRendererMount({
+        log: (message, fields) => diag.info(message, fields),
+        connectTsp: productionTspConnector({
+          cwd,
+          requestExit: () => requestExit(),
+          onFatal: rendererOnFatal,
+          log: (message, fields) => diag.info(message, fields),
+          logError: (message, fields) => diag.error(message, fields),
+        }),
+        env: process.env,
+      })
+    } catch (error) {
+      // A REAL connect failure: the runner's fatal path owns it. The acquisition
+      // stage is settled so the teardown transaction cannot wait on a renderer
+      // that was never acquired.
+      settleAcquisition?.()
+      throw error
+    }
+    if (tspAttempt && rendererMount === undefined && !cleanedUp) terminalOutput.resume()
+    if (cleanedUp) {
+      // CANCELLED while the SDK handshake was in flight: release the acquired tty
+      // owner (ONE close, raw restored), skip the mount AND the PiTui fallback,
+      // and stop this boot — the exit already owns the resume hint and
+      // `appExit`. The surface was correctly disposed, so `start` is NOT
+      // attempted: nothing is resurrected and no hot fallback starts a second
+      // renderer. A release failure is NOT a startup failure — but it must reach
+      // the shared teardown OUTCOME (the published transaction rejects), never a
+      // fulfilled teardown with a tty still held.
+      let releaseFailed = false
+      let releaseFailure: unknown
+      try {
+        await releaseAcquiredRenderer()
+      } catch (releaseError) {
+        releaseFailed = true
+        releaseFailure = releaseError
+      }
+      if (releaseFailed) {
+        try {
+          diag.error('tsp renderer: release failed after a cancelled startup', {
+            error: safeErrorMessage(releaseFailure),
+          })
+        } catch {
+          // A throwing diagnostics channel must not block the exit.
+        }
+        failAcquisition?.(releaseFailure)
+      } else {
+        settleAcquisition?.()
+      }
+      return
+    }
+    // PR3-B B2 (§3.3): the renderer CAPABILITY settles here, before the mount
+    // and before any held input can be consumed — the surface's live getters
+    // (`supportsLocalShellCards`, `supportsTuiBuiltinUi`) must report the TSP
+    // renderer from the first bound key.
+    tspRendererActive = rendererMount !== undefined
     // A4: mount through the surface owner. The surface builds the surface-local
     // option wiring (image loader, history-search binding, clipboard/link
     // capabilities, extension registries + input routes, resize/workflow hooks)
     // from these narrow injected capabilities and owns the mounted TuiApp from
     // here on.
-    surface.start({
+    try {
+      surface.start({
       events: applicationEvents.events,
+      ...(rendererMount === undefined ? {} : { renderer: rendererMount }),
       workspaceRoot: cwd,
       // The structural icon palette: read ONCE at startup from the persisted
       // document; runtime switches go through app.setIconStyle (the /settings
@@ -2296,7 +2723,7 @@ export function applyRunnerWithRuntime(
           }
           return imageScopeMain
         }
-        const key = `child:${app.getViewerGeneration()}:${sessionId}`
+        const key = `child:${surface.display.getViewerGeneration()}:${sessionId}`
         if (imageScopeChild !== undefined && imageScopeChild.key === key) return imageScopeChild
         imageScopeChild = {
           key,
@@ -2336,12 +2763,15 @@ export function applyRunnerWithRuntime(
       },
       present,
       sessionCwd: () => status.sessionCwd(),
-      // The session scope's identity — a GETTER like the cwd: a session switch
-      // must make the next Ctrl+R search the NEW session (the panel captures it
-      // once at open time). PR5 v2 §2.12: the SELECTED OWNERSHIP authority is
-      // the source (transport-neutral — a Remote session has no Direct agent),
-      // never `agentNow()`.
-      sessionId: () => ownership.currentSessionId(),
+      // Phase 3B / B3-B: the ONE atomic History currentness bridge. It captures
+      // the runtime's single `SessionScopeAuthority` scope ONCE per Ctrl+R open
+      // and hands the TUI only `{ sessionId, isCurrent }`; PR5 v2 §2.12: the
+      // SELECTED OWNERSHIP authority is the source (transport-neutral — a Remote
+      // session has no Direct agent), never `agentNow()`.
+      captureHistoryScope: () => {
+        const scope = sessionScope.capture()
+        return { sessionId: scope.sessionId, isCurrent: () => sessionScope.isCurrent(scope) }
+      },
       // M5: a material width change refreshes the command surface (the runner
       // coalesces to its interval).
       onTerminalResize: () => settings.requestFooterCommandRefresh(),
@@ -2365,83 +2795,134 @@ export function applyRunnerWithRuntime(
       // injects the image fallback colour, so `app/surface/**` never imports a
       // `tui/theme/**` path.
       imageFallbackColor: color.textDim,
-    })
-    // The mounted surface is now live; the runner borrows the reference (the
-    // surface owner keeps the lifetime).
-    app = surface.app
-    settings.applySafeKeybindingsMode()
-    settings.applyUserKeybindings()
-    // M3: the user keybindings reload seam is EXPLICIT — `/keybindings
-    // reload` re-reads the settings document and re-validates/rebuilds the
-    // keymap (plan §12/§16). There is deliberately NO automatic settings
-    // watch here: a `watch(callback)` would be a Direct-only dependency —
-    // the TuiSettingsConfig port is get/replace only, a future Remote
-    // adapter cannot map a callback across the process boundary, and the
-    // migration rule forbids callbacks across the wire (see
-    // docs/client-server-migration.md). A settings edit takes effect after
-    // `/keybindings reload`; the fail-soft parser above keeps the keymap's
-    // last-known-good state on any read/parse error.
-    // M2: the plugin contributions compile into the effective keymap at the
-    // LOWEST priority (a Host action always wins). A4-5: the sync and its
-    // registry subscription are surface-owned (`surface.bindPluginKeybinds`);
-    // the surface syncs on every invalidation (the manager skips unchanged
-    // rules, so the rebuild is cheap) and releases the subscription with the
-    // surface teardown.
-    surface.bindPluginKeybinds()
-
-    // The Task Browser opener, the browser-scope reset and the Workflow card
-    // action sink are A4-6 surface-owned (`surface.openTasksBrowser` /
-    // `surface.resetTasks` / the surface-internal workflow handler wired as the
-    // app's `onWorkflowAction`); the runner only forwards the `/tasks` entry
-    // below.
-    // M3: attach the extension host to the mounted surface chrome once per
-    // generation (F-1): the header/dock/footer merge extension content, and the
-    // service's capability set + state bridge become live. A4-5: the whole
-    // attach composition is surface-owned; the runner supplies only the
-    // late-bound command-completion refresh (a client command contribution may
-    // join the `/` menu after mount).
-    surface.attachSurfaceSeams({ refreshCommandCompletions: () => command.refreshCompletions() })
-    // (new installs default to 'on' — alt screen by default): boot applies
-    // it FIRST so the alt screen owns the terminal input handler before any
-    // theme query below targets "the active screen" — a query sent while the
-    // main screen still owned input would have its reply swallowed by the
-    // alt screen's OSC 11 consumer and time out, silently disabling `auto`.
-    // Focus Mode's TUI projection is a persisted visual preference like
-    // Home/End/fullscreen/theme: the app must reflect the RESTORED state
-    // before the first frame — otherwise the system prompt would tell the
-    // model the user cannot see the process while the UI still shows it in
-    // full (review blocker: the two halves of Focus would split).
-    // The app already receives the shared displayState at construction, so the
-    // first mounted frame cannot flash a different preset.
-    // Terminal focus reporting (CSI ? 1004) for the completion
-    // notification policy: enabled at TUI mount, disabled in cleanup so
-    // the mode never leaks into the shell after exit. The app already
-    // passes the ESC[I/ESC[O reports through to the surface's tracker
-    // (A4-4). The guarded writer swallows a broken-stream error; a
-    // synchronous throw is contained so a dead stdout can never fail the
-    // TUI mount.
-    surface.enableFocusReporting()
-    // A5b-2: the RESTORED display preferences (Home/End, wheel, fullscreen,
-    // theme) are applied by their owner at this SAME startup position — before
-    // the first frame and after the alt screen owns input.
-    settings.applyBootDisplay()
-    settings.applyFooterSettings()
-    // The retired per-cwd input history (which used to live inside the old
-    // settings namespace) is deliberately NOT migrated in PR A (plan §8.5):
-    // it stays in the read-only legacy settings.yaml(.imported); the JSONL
-    // history store remains the sole live history authority.
-    // Input history is loaded PER SESSION by initLiveSession (keyed on the
-    // live session's cwd), never once at boot: a session switch to another
-    // workspace must replace the recall history, not keep the old one. With
-    // a DEFERRED start no session exists yet, so initLiveSession has not
-    // run: seed the recall history from the LAUNCH cwd now, so ↑ works
-    // immediately in a fresh window (the per-session reseed replaces it
-    // when the first session is born).
-    history.activateBootRecall()
+      })
+    } catch (error) {
+      // PR3-A ownership handshake: the surface rejected the mount — most often
+      // because a teardown disposed it while the SDK handshake was in flight.
+      // The connected session is OWNED and must be closed before the error
+      // reaches the fatal path (otherwise raw-mode stdin stays held with no
+      // registered disposer) — and a rejection that coincides with an ALREADY
+      // running teardown is the CANCELLATION of this startup, not a startup
+      // failure: the exit transaction (which awaits the acquisition stage)
+      // finishes with the tty restored and owns the hint/`appExit`. `start()`
+      // keeps its disposed rejection: nothing is resurrected here.
+      // R2-3: the PRIMARY startup error keeps propagating; a secondary release
+      // failure is recorded (a silent `catch {}` would hide a tty that stayed in
+      // raw mode). Its PRESENCE is tracked separately from its value: a release
+      // that legally rejects `undefined` is still a failure.
+      let releaseFailed = false
+      let releaseFailure: unknown
+      try {
+        await releaseAcquiredRenderer()
+      } catch (error_) {
+        releaseFailed = true
+        releaseFailure = error_
+      }
+      if (releaseFailed) {
+        try {
+          diag.error('tsp renderer: release failed after a rejected mount', {
+            error: safeErrorMessage(releaseFailure),
+            primary: safeErrorMessage(error),
+          })
+        } catch {
+          // A throwing diagnostics channel must not replace the primary.
+        }
+        // The acquired tty owner was NOT released: the shared teardown outcome
+        // must carry that failure too — never a fulfilled teardown.
+        failAcquisition?.(releaseFailure)
+      } else {
+        settleAcquisition?.()
+      }
+      if (cleanedUp) return
+      throw error
+    }
+    // The ownership transfer is COMPLETE on both branches: the TSP renderer (if
+    // any) now belongs to the surface's ordered teardown, and the PiTui branch
+    // acquired no renderer at all. The exit/fatal/HMR transaction may proceed.
+    rendererTransferred = rendererMount !== undefined
+    settleAcquisition?.()
+    // The mounted surface is now live. On the PiTui branch the runner borrows
+    // the TuiApp reference (the surface owner keeps the lifetime); the TSP
+    // renderer branch has NO TuiApp (the slot stays undefined: command
+    // registrations skip their completions install, input-gated execution
+    // paths never run) — every PiTui-only step below (the
+    // keymap/theme/footer boot application, the plugin-keybinding sync, the
+    // extension chrome seams, focus reporting) is skipped for it, exactly as
+    // the A0 audit classified them (display-preference chrome, never business
+    // state: Tern owns its own theme, keymap and chrome).
+    const tspRenderer = rendererMount !== undefined
+    if (!tspRenderer) {
+      app = surface.app
+      settings.applySafeKeybindingsMode()
+      settings.applyUserKeybindings()
+      // M3: the user keybindings reload seam is EXPLICIT — `/keybindings
+      // reload` re-reads the settings document and re-validates/rebuilds the
+      // keymap (plan §12/§16). There is deliberately NO automatic settings
+      // watch here: a `watch(callback)` would be a Direct-only dependency —
+      // the TuiSettingsConfig port is get/replace only, a future Remote
+      // adapter cannot map a callback across the process boundary, and the
+      // migration rule forbids callbacks across the wire (see
+      // docs/client-server-migration.md). A settings edit takes effect after
+      // `/keybindings reload`; the fail-soft parser above keeps the keymap's
+      // last-known-good state on any read/parse error.
+      // M2: the plugin contributions compile into the effective keymap at the
+      // LOWEST priority (a Host action always wins). A4-5: the sync and its
+      // registry subscription are surface-owned (`surface.bindPluginKeybinds`);
+      // the surface syncs on every invalidation (the manager skips unchanged
+      // rules, so the rebuild is cheap) and releases the subscription with the
+      // surface teardown.
+      surface.bindPluginKeybinds()
+      surface.attachSurfaceSeams({ refreshCommandCompletions: () => command.refreshCompletions() })
+      // Terminal focus reporting (CSI ? 1004) for the completion notification
+      // policy: enabled at TUI mount, disabled in cleanup so the mode never
+      // leaks into the shell after exit. Skipped on TSP: the ANSI write would
+      // fight the SDK-owned tty (Tern owns focus presentation).
+      surface.enableFocusReporting()
+      // A5b-2: the RESTORED display preferences (Home/End, wheel, fullscreen,
+      // theme) are applied by their owner at this SAME startup position. They
+      // are PiTui chrome; Tern owns the equivalent presentation natively.
+      settings.applyBootDisplay()
+      settings.applyFooterSettings()
+      // The editor recall seed is PiTui-only on this branch (the read-only
+      // renderer has no editor); the JSONL history store still accumulates.
+      // A startup RESUME publishes its Session owner BEFORE this mount and its
+      // hydration reseeds ↑ from that Session's own rows, so seeding the launch
+      // cwd's whole history here would expose every earlier Session's rows — and
+      // let them be resubmitted into this one — for as long as that reseed takes
+      // (arbitrarily long on Remote, where the read is awaited). A fresh start has
+      // no owner yet, so the boot recall is exactly what it is for.
+      if (ownership.currentSessionId() === undefined) history.activateBootRecall()
+    }
     // Fresh/deferred startup title: no session yet — cwd identity only. The
     // terminal-local cwd is published alongside it (OSC 7; no-op off Tern).
     status.refreshTerminalTitle()
     status.refreshTerminalCwd()
+    /** Persist one completed turn. Direct keeps its durability hint; the
+     *  Remote branch is a DELIBERATE no-op (plan §7.9: no public Client
+     *  flush verb exists — the Host owns durability; never a hidden Host
+     *  `sessions.flush` fallback).
+     *
+     *  Declared BEFORE `attachEventRouting` because the registered handlers
+     *  can run during the SAME startup: the Remote event firehose delivers
+     *  events while the first hydration is still open, and `turn/end` calls
+     *  this through the routing source. It must therefore already be
+     *  initialized — a `const` arrow here used to raise a temporal-dead-zone
+     *  error inside the firehose subscriber instead of the documented no-op. */
+    const flushTurn = (): void => {
+      if (remoteSources !== undefined) return
+      const agent = agentNow()
+      if (agent === undefined) return
+      const flushed = agent.session
+      runDetached('turn flush', () => sessions.flush(flushed), {
+        diag,
+        sessionId: () => flushed.id,
+        notify: (message) => surface.display.notify(
+          `session persistence failed: ${message} — the session log was removed externally; this session can no longer be persisted (restart to recover)`,
+          'error',
+        ),
+        recoverable: (error) => (error as NodeJS.ErrnoException | undefined)?.code === 'ENOENT',
+      })
+    }
     surface.attachEventRouting({
       isCleanedUp: () => cleanedUp,
       isAttachedSession: (session) => {
@@ -2544,6 +3025,15 @@ export function applyRunnerWithRuntime(
         status.refresh()
         status.updateWelcomeCard()
       },
+      // The effective-directory projection changed: re-derive every
+      // cwd-dependent presentation fact of THIS session (footer/welcome, the
+      // OSC 0 identity fallback, the terminal-local OSC 7 write).
+      refreshWorkspaceFacts: () => {
+        status.refresh()
+        status.updateWelcomeCard()
+        status.refreshTerminalTitle()
+        status.refreshTerminalCwd()
+      },
       applyGoalChange: (event) => status.applyGoalChange(event),
       sessionTitleOf: (event) => foldSessionTitle([event])?.title,
       // M3-4 PR2 / M3-5 PR2 Step 7: the Remote bounded-window history
@@ -2573,10 +3063,12 @@ export function applyRunnerWithRuntime(
             }
             const before = await remoteSources.presentationReader.read(sessionId)
             if (before === undefined || !before.hasMore || before.loadingOlder) return
-            const snapshot = await remoteSources.presentationReader.loadOlder(sessionId, lifecycleController.signal)
-            if (snapshot === undefined) return
-            if (ownership.currentSessionId() !== sessionId || cleanedUp) return
-            await presentation.rehydrateFromWindow(sessionId)
+            // HISTORY PAGING: `loadOlder` joins older events at the front and the
+            // official publication then drives the ONE serialized reconcile pump
+            // with the `paging` reason (a direct re-fold here would race the pump
+            // and could baseline a boundary a recovery reconcile still has to
+            // measure).
+            await remoteSources.presentationReader.loadOlder(sessionId, lifecycleController.signal)
           } finally {
             if (remoteHistoryLoadingFor === sessionId) remoteHistoryLoadingFor = undefined
           }
@@ -2743,10 +3235,31 @@ export function applyRunnerWithRuntime(
           command.runner().withPromptAdmission(scope, line, task),
         isDisposed: () => cleanedUp,
         isScopeCurrent: (scope) => sessionScope.isCurrent(scope),
+        // PR3-B B2: the submission runtime's editor hooks are reachable on
+        // BOTH renderers now that the TSP pane submits. They must go through the
+        // renderer-neutral composer projection — the PiTui-only `app` binding is
+        // undefined on the TSP branch (the B2 review's newly-reachable-consumer
+        // requirement).
         mergeDraftIntoEditor: (text) => {
-          const merged = mergeDraft(app.getDraft(), text)
-          app.setEditorText(merged)
+          const merged = mergeDraft(surface.composer.getDraft(), text)
+          surface.composer.setEditorText(merged)
           return merged === text
+        },
+        restoreStaleDraftIntoEditor: (text, capturedSubject) => {
+          // PR3-B §7.3 (F2): suppress ONLY when BOTH facts hold — the OWNER
+          // the submission's subject pinned was genuinely REPLACED (the
+          // ownership core's opaque-ref authority; a same-owner generation
+          // invalidation — e.g. a failed switch kept the old owner — is NOT
+          // a replacement) AND this renderer drops drafts at committed
+          // switches (TSP; its publication already cleared the text). Every
+          // other stale shape merges exactly like the ordinary restore.
+          if (!surface.display.retainsStaleDraftRestore()
+            && ownership.subjectAuthority.ownerReplaced(capturedSubject as SessionSubject | undefined)) {
+            return 'dropped'
+          }
+          const merged = mergeDraft(surface.composer.getDraft(), text)
+          surface.composer.setEditorText(merged)
+          return merged === text ? 'merged-verbatim' : 'merged'
         },
         consumeDraftAttachments: (text) => consumeDraftAttachments(text, draftImages, draftFiles),
         markDispatch: (sessionId) => submission.markDispatch(sessionId),
@@ -2771,12 +3284,12 @@ export function applyRunnerWithRuntime(
         },
         settleLocalSubmission: (requestId) => submission.settleLocalSubmission(requestId),
         settleSubmitAck: (reason, options) => submission.settleLocalSubmitAck(reason, options),
-        notify: (message, kind) => app.notify(message, kind),
+        notify: (message, kind) => surface.display.notify(message, kind),
         refuseByTransitionFence: (text) => refuseByTransitionFence(
           text,
-          () => app.getDraft(),
-          (t) => app.setEditorText(t),
-          (m, k) => app.notify(m, k),
+          () => surface.composer.getDraft(),
+          (t) => surface.composer.setEditorText(t),
+          (m, k) => surface.display.notify(m, k),
         ),
         prepareMessage: (text, requestId) => remoteSources === undefined
           // Direct: the Direct UserMessage preparation runs the Host
@@ -2805,7 +3318,7 @@ export function applyRunnerWithRuntime(
       // duplicate refresh.
       await presentation.initLiveSession(startupAgent)
     } else {
-      app.setWelcomeIdle(true)
+      surface.display.setWelcomeIdle(true)
       status.refresh()
       status.refreshTerminalTitle()
       status.refreshTerminalCwd()
@@ -2835,11 +3348,11 @@ export function applyRunnerWithRuntime(
       }
     }
     if (surfaceNotice !== undefined) {
-      app.notify(surfaceNotice, 'error')
+      surface.display.notify(surfaceNotice, 'error')
       surfaceNotice = undefined
     }
     if (resumeFailure !== undefined) {
-      app.notify(resumeFailure, 'error')
+      surface.display.notify(resumeFailure, 'error')
       resumeFailure = undefined
     }
     // A4-7 (plan §16): the presentation event routing is SURFACE-owned. The
@@ -2847,25 +3360,6 @@ export function applyRunnerWithRuntime(
     // attached EARLIER, before `surface.attachTasks` and the startup
     // `surface.refreshPendingInput()` calls, because the A4-4/A4-8 surface
     // methods read the source during startup.
-    /** Persist one completed turn. Direct keeps its durability hint; the
-     *  Remote branch is a DELIBERATE no-op (plan §7.9: no public Client
-     *  flush verb exists — the Host owns durability; never a hidden Host
-     *  `sessions.flush` fallback). */
-    const flushTurn = (): void => {
-      if (remoteSources !== undefined) return
-      const agent = agentNow()
-      if (agent === undefined) return
-      const flushed = agent.session
-      runDetached('turn flush', () => sessions.flush(flushed), {
-        diag,
-        sessionId: () => flushed.id,
-        notify: (message) => app.notify(
-          `session persistence failed: ${message} — the session log was removed externally; this session can no longer be persisted (restart to recover)`,
-          'error',
-        ),
-        recoverable: (error) => (error as NodeJS.ErrnoException | undefined)?.code === 'ENOENT',
-      })
-    }
     // The six application-level Host subscriptions (TS2 §10): installation is
     // owned by `app/bootstrap/event-wiring.ts`; each handler stays a thin
     // delegation into the surface-owned routing methods. The Direct-only
@@ -2919,6 +3413,19 @@ export function applyRunnerWithRuntime(
     // session-owned bootstrap work there avoids a second full-log scan on
     // resume and also makes session switches restore the same state.
 
+    // The approval/question presentation providers are A4-7 surface-owned
+    // (`surface.attachInteraction`, plan §13.3/§16). The runner injects only
+    // the narrow presentation inputs: the paired tool-call argument lookup
+    // (the surface never reads the session-event feed) and the pure
+    // dangerous-command predicate.
+    // PR3-B §3.3: the ONE input bind. It runs here because the renderer's held
+    // pre-bind keys must be consumed against READY facts: the renderer
+    // capability settled before the mount, the command catalog is registered
+    // (`/exit`, `/quit` and every Host claim are live) and the runtime event
+    // wiring is installed. The Question/Approval attach just below is NOT a
+    // prerequisite — it owns modals, not the input projection. A no-op on the
+    // PiTui branch.
+    surface.bindRendererInput()
     // The approval/question presentation providers are A4-7 surface-owned
     // (`surface.attachInteraction`, plan §13.3/§16). The runner injects only
     // the narrow presentation inputs: the paired tool-call argument lookup

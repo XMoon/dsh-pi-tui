@@ -33,6 +33,7 @@ import {
   createPiTuiHostFileReferenceRuntime,
   type PiTuiHostFileReferenceBridgeDeps,
   type PiTuiHostFileReferenceRuntime,
+  type WorkingDirectoryServiceLike,
 } from '../../runtime/remote/pi-tui-file-reference-host-bridge.ts'
 import { PI_TUI_FILE_REFERENCES_NAMESPACE } from '../../runtime/remote/pi-tui-file-reference-contract.ts'
 import type { HostFileListResult } from '../../runtime/host-file-port.ts'
@@ -41,6 +42,7 @@ export type {
   FileReferencesServiceLike,
   LiveAgentLike,
   PiTuiHostFileReferenceBridgeDeps,
+  WorkingDirectoryServiceLike,
 } from '../../runtime/remote/pi-tui-file-reference-host-bridge.ts'
 
 /** The Host facts the composition resolves for the row. */
@@ -61,7 +63,12 @@ export class PiTuiFileReferenceHostService extends TypertRemoteService {
    */
   constructor(ctx: Context, deps: PiTuiFileReferenceHostDeps) {
     super(ctx, PI_TUI_FILE_REFERENCES_NAMESPACE)
-    this.runtime = createPiTuiHostFileReferenceRuntime(deps)
+    // The Host plane owns the Session directory read: the private Remote
+    // method answers the Host's OWN effective directory, never the Client's.
+    this.runtime = createPiTuiHostFileReferenceRuntime({
+      ...deps,
+      workingDirectory: () => ctx.get('workingDirectory') as WorkingDirectoryServiceLike | undefined,
+    })
   }
 
   /**

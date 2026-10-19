@@ -141,3 +141,16 @@ test('host state: a disposed surface is inert', async () => {
   assert.equal(host.getTheme(), 'dark', 'the disposed surface keeps the last theme')
   app.stop()
 })
+
+test('host state: a hostile working message is projected before the working row', async () => {
+  const { app } = await appWithHostState()
+  const host = app.advancedHostStateForTest()
+  host.setWorkingMessage('evil\u001b]52;c;YXR0YWNr\u0007\u009b2Jname')
+  app.setWorking(true)
+  const text = app.workingTextForTest()
+  assert.ok(!text.includes('YXR0YWNr'), `no OSC 52 payload in the working label: ${JSON.stringify(text)}`)
+  assert.ok(!text.includes('\u009b'), `no raw C1 byte in the working label: ${JSON.stringify(text)}`)
+  assert.ok(text.includes('evil'), `the readable message survives: ${JSON.stringify(text)}`)
+  host.setWorkingMessage(undefined)
+  app.stop()
+})

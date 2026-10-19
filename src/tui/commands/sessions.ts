@@ -12,8 +12,10 @@
 import { scheduler } from 'node:timers/promises'
 import type { CommandInvocation, CommandResult } from '@deepseek-ai/dsh-commands'
 import type { PickerCategory, TuiApp } from '../../tui-app.ts'
+import { createSessionBrowserReadOwner, type SessionBrowserReadOwner, type SessionBrowserReadSettlement } from '../../app/command/session-browser-read.ts'
+import type { SessionBrowserPresentation } from '../../app/command/session-browser-presentation.ts'
 import { TransitionInProgressError } from '../../app/session/operation-barrier.ts'
-import { SessionScopeSupersededError } from '../../app/session/scope.ts'
+import { SessionScopeSupersededError, type SessionScope } from '../../app/session/scope.ts'
 import { cancellationError, isCancellation, runOwned } from '../../runtime/process/tasks.ts'
 import { safeErrorMessage } from '../../runtime/process/errors.ts'
 import { LifecycleError } from '../../runtime/session-lifecycle-port.ts'
@@ -62,6 +64,7 @@ type SessionCommandRunner = Pick<
   | 'requireLiveSessionScope'
   | 'sessionCwd'
   | 'sessionReader'
+  | 'sessionBrowserPresentation'
   | 'sessionWriter'
   | 'signal'
   | 'switchSession'
@@ -78,6 +81,25 @@ export interface SessionCommandDeps {
   detach: DetachTask
   recordCommandDraftDisposition: (commandId: string | undefined, disposition: 'restored' | 'suppressed') => void
   newSessionId: NewSessionId
+  /**
+   * PR4-B2-A: the renderer-neutral notice entry (see `registerTuiCommands`).
+   * It replaces the direct `app.notify` calls in the title handler, which
+   * would dereference a `TuiApp` that does not exist on the TSP renderer.
+   */
+  notify: (text: string, kind?: 'info' | 'error') => void
+  /**
+   * PR4-B2-A: the `/title`/`/rename` refusal notice. It publishes only where the
+   * handler is that refusal's visible owner (the PiTui surface beside the Direct
+   * command-result card); the card owns the TSP Direct text, and the submission
+   * settlement owns the card-less Client-command text.
+   */
+  notifyTitleRefusal: (text: string) => void
+  /**
+   * PR4-B2-A: the `/title`/`/rename` CONFIRMED-success notice — a new line the
+   * base handler never emitted. It publishes only on the card-less TSP path, so
+   * PiTui behavior is unchanged and every other mount has a single owner.
+   */
+  notifyTitleSuccess: (text: string) => void
 }
 
 export interface SessionCommandRegistrars {
@@ -221,6 +243,9 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
     detach,
     recordCommandDraftDisposition,
     newSessionId,
+    notify,
+    notifyTitleRefusal,
+    notifyTitleSuccess,
   } = deps
   const { cwd, signal } = runner
 
@@ -258,13 +283,71 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
    * in-flight content search exactly like its scan. */
   let activeContentSearchTimer: ReturnType<typeof setTimeout> | undefined
   let activeContentSearch: AbortController | undefined
+  let nativeReadOwner: SessionBrowserReadOwner | undefined
+  let nativePresentation: SessionBrowserPresentation | undefined
+
+  const nativeReadOwnerFor = (presentation: SessionBrowserPresentation): SessionBrowserReadOwner => {
+    if (nativeReadOwner !== undefined && nativePresentation === presentation) return nativeReadOwner
+    nativeReadOwner?.dispose()
+    nativePresentation = presentation
+    nativeReadOwner = createSessionBrowserReadOwner({
+      reader: runner.sessionReader,
+      presentation,
+      captureSubject: () => {
+        const scope = runner.captureSessionScope()
+        return {
+          scope,
+          subject: {
+            currentSessionId: scope.sessionId,
+            currentCwd: runner.sessionCwd(),
+            isCurrent: () => runner.isSessionScopeCurrent(scope),
+          },
+        }
+      },
+      diag: runner.diag,
+      sessionId: () => runner.currentSessionId,
+      onResumeIntent: (intent, scope, settle) => {
+        if (!runner.isSessionScopeCurrent(scope)
+          || intent.currentSessionId !== scope.sessionId
+          || intent.sessionId === scope.sessionId) {
+          settle()
+          return
+        }
+        runOwned('session browser resume', () => runner.switchSession(intent.sessionId, scope), {
+          diag: runner.diag,
+          sessionId: () => intent.sessionId,
+          isCancellation: () => runner.signal.aborted,
+          onResult: (error) => {
+            try {
+              if (error !== undefined && runner.isSessionScopeCurrent(scope)) {
+                presentation.notify(sanitizeTerminalText(error), 'error')
+              }
+            } finally {
+              settle()
+            }
+          },
+          onCancel: settle,
+          onError: (error) => {
+            try {
+              if (runner.isSessionScopeCurrent(scope)) {
+                presentation.notify(`session switch failed: ${sanitizeTerminalText(safeErrorMessage(error))}`, 'error')
+              }
+            } finally {
+              settle()
+            }
+          },
+        })
+      },
+    })
+    return nativeReadOwner
+  }
 
   /** The narrow open options the three Session Browser entries really need
    * (plan §8.2) — not a controller/framework abstraction. */
   interface SessionPickerOpenOptions {
     readonly header: 'sessions' | 'resume' | 'search'
     /** `/resume <arg>`: after the ONE shared listing lands, resolve the
-     * argument as a direct id/prefix match — a unique match closes the
+     * argument as a direct id/prefix match — the first listed match closes the
      * picker and switches; no match falls through to the filtered picker
      * (the argument stays as the live search query). */
     readonly directMatchQuery?: string
@@ -272,6 +355,35 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
      * rejected BEFORE the overlay opens. */
     readonly requireQuery?: boolean
   }
+  const openNativeSessionBrowser = (
+    invocation: { rawInput: string },
+    options: SessionPickerOpenOptions,
+    presentation: SessionBrowserPresentation,
+  ): Promise<{ kind: 'success' } | { kind: 'error'; text: string }> => {
+    const initialQuery = options.header === 'sessions' || options.header === 'search'
+      ? invocation.rawInput.trim()
+      : undefined
+    const directMatch = options.directMatchQuery === undefined
+      ? undefined
+      : {
+          query: options.directMatchQuery,
+          // Owner ruling: Native TSP typed `/resume` matches the Browser's
+          // listed main-session rows only. The PiTui fallback retains its
+          // existing matcher behavior.
+          find: (rows: readonly SessionPickerRow[], query: string) => findSessionMatch(rows, query),
+        }
+    const handle = nativeReadOwnerFor(presentation).open({
+      ...(initialQuery === undefined ? {} : { initialQuery }),
+      ...(directMatch === undefined ? {} : { directMatch }),
+    })
+    if (directMatch === undefined) return Promise.resolve({ kind: 'success' })
+    return handle.settlement.then((result: SessionBrowserReadSettlement) => {
+      if (result.kind === 'matched' || result.kind === 'ready') return { kind: 'success' }
+      if (result.kind === 'refused') return { kind: 'error', text: result.text }
+      return { kind: 'error', text: 'resume cancelled' }
+    })
+  }
+
   const openSessionPicker = async (
     invocation: { rawInput: string },
     options: SessionPickerOpenOptions,
@@ -279,6 +391,8 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
     if (options.requireQuery === true && invocation.rawInput.trim() === '') {
       return { kind: 'error', text: 'search needs a query' }
     }
+    const presentation = runner.sessionBrowserPresentation
+    if (presentation !== undefined) return openNativeSessionBrowser(invocation, options, presentation)
     // The current marker is the live session's id; before the first session
     // (deferred start) no row is marked current, and the picker can still
     // browse and switch to a persisted session without creating one.
@@ -583,7 +697,12 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
       if (listed === undefined || listed.length === 0) {
         // The overlay is already open — keep it open on the refusal row
         // (Esc closes as always) instead of leaving a dead loading frame.
-        const text = listed === undefined ? 'session persistence unavailable' : 'no persisted sessions'
+        // An EMPTY roster is `No readable sessions`: the official listing
+        // publishes a Session from its header only, so a store whose logs the
+        // reader refuses is indistinguishable from an empty one here — never
+        // claim "no persisted sessions" (the S2 limited contract, recorded in
+        // docs/client-server-migration.md).
+        const text = listed === undefined ? 'session persistence unavailable' : 'No readable sessions'
         statusRow = { value: '', label: text, description: '', group: '' }
         picker.refresh?.()
         settleOnce({ kind: 'refused', text })
@@ -699,6 +818,10 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
   const titleHandler = async (invocation: CommandInvocation): Promise<CommandResult> => {
     const scope = await runner.requireLiveSessionScope()
     const current = (): boolean => !runner.signal.aborted && runner.isSessionScopeCurrent(scope)
+    // NOTE (PR4-B2-A): these terminal error outcomes deliberately get NO extra
+    // notice. Their existing owners are the Direct command card and — on the
+    // sessionless local-command path — the controller's own error notice; a
+    // third line from here would be a duplicate on the same Dock.
     const stale = (): CommandResult => ({
       kind: 'error',
       text: 'the session changed while updating the title — try again',
@@ -729,8 +852,11 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
             // only outcome — on the Remote Client-owned command path there is
             // no official command card either, so the indeterminate no-retry
             // notice is emitted with the same inline pattern as the rejected
-            // branch below and the `/preset`/`/model` handlers.
-            app.notify(message, 'error')
+            // branch below and the `/preset`/`/model` handlers. PR4-B2-A: the
+            // entry is the title-scoped result sink, so the TSP Dock receives it
+            // ONLY where the command-result card does not already carry the same
+            // text (RFL-001), and the PiTui notice is unchanged.
+            notifyTitleRefusal(message)
             return { kind: 'error', text: message }
           }
           const message = outcome.kind === 'rejected' ? outcome.error.message : outcome.reason
@@ -738,10 +864,12 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
           // official command card (the Host executor's `command/run` row does
           // not exist there), so the handler surfaces its own refusal — the
           // same inline notice the `/preset` and `/model` handlers already
-          // emit. On Direct this is a transient notice beside the command card.
-          // The rejected branch is the writer-held (`session/writer-held`)
-          // proven pre-commit refusal: its message is the centralized guidance.
-          app.notify(message, 'error')
+          // emit. On Direct this is a transient notice beside the command card
+          // on PiTui, and is suppressed on the TSP renderer where that card is
+          // the single owner of the same text. The rejected branch is the
+          // writer-held (`session/writer-held`) proven pre-commit refusal: its
+          // message is the centralized guidance.
+          notifyTitleRefusal(message)
           return { kind: 'error', text: message }
         }
       } catch (error) {
@@ -750,6 +878,10 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
         if (isCancellation(error)) throw error
         return { kind: 'error', text: safeErrorMessage(error) }
       }
+      // PR4-B2-A: the confirmed authoritative title write. The notice is the
+      // text-bearing result's fallback where the official command-result card
+      // does not carry it; on the TSP Direct mount the card IS the single owner.
+      notifyTitleSuccess(`title set: ${acceptedTitle}`)
       return { kind: 'success', text: `title set: ${acceptedTitle}` }
     }
     try {
@@ -762,10 +894,10 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
         return { kind: 'error', text: outcome.reason }
       }
       if (outcome.title === undefined) {
-        app.notify('no conversation yet — title left as-is', 'info')
+        notify('no conversation yet — title left as-is', 'info')
         return { kind: 'success' }
       }
-      app.notify(`title regenerated: ${outcome.title}`, 'info')
+      notify(`title regenerated: ${outcome.title}`, 'info')
       return { kind: 'success' }
     } catch (error) {
       if (error instanceof TransitionInProgressError) return transitioning()

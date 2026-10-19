@@ -1136,3 +1136,224 @@ test('keybinding editor: keyboard mode transition before repaint cannot start a 
   assert.ok(!viewport.some(line => line.includes('Record shortcut')), 'no recorder may start from the stale press')
   app.stop()
 })
+
+// ── Phase 3A / PR-C: the live content-row grant (setMaxRows) ────────────
+
+test('keybinding editor: the parent grant caps the standalone budget without resetting the query or selection', () => {
+  const { manager, panel } = makePanel(() => {})
+  try {
+    for (const character of 'submit') panel.handleInput(character)
+    const standalone = panel.render(88)
+    const marked = plain(standalone.join('\n')).split('\n').find(line => line.includes('›'))
+    assert.ok(marked !== undefined, 'the selected row must be painted')
+    assert.ok(standalone.length <= 30, 'the standalone budget applies before any parent grant')
+
+    panel.setMaxRows(4)
+    const nested = panel.render(88)
+    assert.ok(nested.length <= 4, `the parent grant must cap the frame (got ${nested.length})`)
+    const nestedText = plain(nested.join('\n'))
+    assert.match(nestedText, /Search: submit/, 'setMaxRows must not reset the query')
+    assert.match(nestedText, /Esc: clear/, 'the operation hint must survive the grant')
+    assert.equal(nestedText.split('\n').find(line => line.includes('›')), marked, 'setMaxRows must not reset the selection')
+
+    // A non-finite parent grant restores the standalone budget exactly.
+    panel.setMaxRows(Number.POSITIVE_INFINITY)
+    assert.deepEqual(panel.render(88), standalone)
+  } finally {
+    manager.dispose()
+  }
+})
+
+test('keybinding editor: degenerate grants keep the operation hint and only paint real hits', () => {
+  const { manager, panel } = makePanel(() => {})
+  try {
+    panel.setMaxRows(1)
+    let view = panel.render(88).map(plain)
+    assert.equal(view.length, 1)
+    assert.match(view[0]!, /Esc: close/)
+    assert.equal(panel.handleMouse(mouse('press', 10, 0, 88, 30)), undefined, 'the hint row is inert')
+
+    panel.setMaxRows(2)
+    view = panel.render(88).map(plain)
+    assert.equal(view.length, 2)
+    assert.match(view[0]!, /^Keyboard shortcuts$/)
+    assert.match(view[1]!, /Esc: close/)
+
+    panel.setMaxRows(3)
+    view = panel.render(88).map(plain)
+    assert.deepEqual(view.length, 3)
+    assert.match(view[1]!, /^Search: /, 'the search row is the third-row survivor')
+    assert.match(view[2]!, /Esc: close/)
+    assert.equal(panel.handleMouse(mouse('press', 10, 0, 88, 30)), undefined, 'the title row is inert')
+    assert.ok(panel.handleMouse(mouse('press', 10, 1, 88, 30))?.handled, 'the painted search row must stay clickable')
+    assert.equal(panel.handleMouse(mouse('press', 10, 2, 88, 30)), undefined, 'the hint row is inert')
+  } finally {
+    manager.dispose()
+  }
+})
+
+test('keybinding editor: a short grant keeps a real error over the optional chrome', () => {
+  const manager = new HostKeybindingManager()
+  const parsed = parseUserKeybindings(undefined)
+  manager.setUserConfiguration(parsed)
+  const model = buildKeybindingEditorModel(manager, parsed)
+  const panel = new KeybindingEditorPanel({
+    model,
+    runMutation: (_mutation, _onResult, onError) => onError(new Error('could not save the leader key')),
+    onClose: () => {},
+    maxRows: () => 30,
+  })
+  try {
+    panel.handleInput('\r') // leader editor
+    panel.handleInput('\r') // start the recorder
+    panel.handleInput('\x1b[121;5u') // capture ctrl+y → the failing mutation
+    const full = plain(panel.render(88).join('\n'))
+    assert.match(full, /could not save the leader key/)
+    panel.setMaxRows(5)
+    const short = plain(panel.render(88).join('\n'))
+    assert.match(short, /could not save the leader key/, 'a real error must survive the short grant')
+    assert.match(short, /Esc: back/, 'the operation row must survive the short grant')
+  } finally {
+    panel.dispose()
+    manager.dispose()
+  }
+})
+
+test('keybinding editor: the leader editor keeps Esc: back and Saving… instead of blank spacers', () => {
+  const manager = new HostKeybindingManager()
+  const parsed = parseUserKeybindings(undefined)
+  manager.setUserConfiguration(parsed)
+  const model = buildKeybindingEditorModel(manager, parsed)
+  const panel = new KeybindingEditorPanel({
+    model,
+    runMutation: () => {}, // never settles: the panel stays pending
+    onClose: () => {},
+    maxRows: () => 30,
+  })
+  try {
+    panel.handleInput('\r') // leader editor
+    panel.handleInput('\r') // start the recorder
+    panel.handleInput('\x1b[121;5u') // capture ctrl+y → the pending mutation
+    let view = panel.render(88).map(plain)
+    assert.match(view.join('\n'), /Saving…/)
+    assert.match(view.join('\n'), /Esc: back/)
+
+    panel.setMaxRows(4)
+    view = panel.render(88).map(plain)
+    assert.ok(view.length <= 4, `the grant must cap the leader editor (got ${view.length})`)
+    assert.match(view.join('\n'), /Saving…/, 'the pending state must not be displaced by blank spacers')
+    assert.match(view.join('\n'), /Esc: back/)
+
+    panel.setMaxRows(1)
+    view = panel.render(88).map(plain)
+    assert.deepEqual(view.length, 1)
+    assert.match(view[0]!, /Esc: back/, 'a one-row grant shows only the operation hint')
+  } finally {
+    panel.dispose()
+    manager.dispose()
+  }
+})
+
+test('action editor: a short choose-binding grant keeps the painted choice hit map', () => {
+  const manager = new HostKeybindingManager()
+  const parsed = parseUserKeybindings(undefined)
+  manager.setUserConfiguration(parsed)
+  const model = buildKeybindingEditorModel(manager, parsed)
+  const row = model.rows.find(candidate => candidate.id === 'app.input.submit')!
+  const editor = new ActionEditorPanel({
+    model,
+    action: row,
+    runMutation: () => {},
+    onModelChange: () => {},
+    onBack: () => {},
+    maxRows: () => 4,
+  })
+  try {
+    editor.handleInput('a') // enter choose-binding
+    const view = editor.render(88).map(plain)
+    assert.ok(view.length <= 4, `the grant must cap the binding choice (got ${view.length})`)
+    assert.match(view.join('\n'), /Esc: back/, 'the binding-choice hint must survive the short grant')
+    const directRow = view.findIndex(line => line.includes('Direct shortcut'))
+    assert.ok(directRow >= 0, `the Direct choice must stay painted:\n${view.join('\n')}`)
+    assert.notEqual(directRow, 3, 'the hit map must follow the painted rows, not a fixed row index')
+    assert.ok(editor.handleMouse(mouse('press', 10, directRow, 88, 4))?.handled, 'the painted Direct row is clickable')
+    editor.handleMouse(mouse('click', 10, directRow, 88, 4))
+    assert.match(plain(editor.render(88).join('\n')), /Record shortcut/, 'the painted Direct row must start its recorder')
+  } finally {
+    editor.dispose()
+    manager.dispose()
+  }
+})
+
+test('keybinding editor: the unavailable fallback degrades to its Esc row on a short grant', () => {
+  const panel = new KeybindingEditorUnavailablePanel(() => {})
+  assert.equal(panel.render(40).length, 4, 'an ample grant keeps the four-row fallback verbatim')
+  panel.setMaxRows(3)
+  assert.deepEqual(panel.render(40).map(plain), [
+    'Keyboard shortcuts unavailable',
+    'The settings service could not be read.',
+    'Esc: back',
+  ])
+  panel.setMaxRows(2)
+  assert.deepEqual(panel.render(40).map(plain), ['Keyboard shortcuts unavailable', 'Esc: back'])
+  panel.setMaxRows(1)
+  assert.deepEqual(panel.render(40).map(plain), ['Esc: back'])
+  panel.setMaxRows(Number.POSITIVE_INFINITY)
+  assert.equal(panel.render(40).length, 4, 'a non-finite grant restores the full fallback')
+})
+
+test('action editor: the scrolled choose-binding Leader row keeps its painted ordinal (mouse parity)', () => {
+  const manager = new HostKeybindingManager()
+  // A configured leader key keeps the Leader choice available.
+  const parsed = parseUserKeybindings({ leader: 'ctrl+q' })
+  manager.setUserConfiguration(parsed)
+  const model = buildKeybindingEditorModel(manager, parsed)
+  const row = model.rows.find(candidate => candidate.id === 'app.input.submit')!
+  const editor = new ActionEditorPanel({
+    model,
+    action: row,
+    runMutation: () => {},
+    onModelChange: () => {},
+    onBack: () => {},
+    maxRows: () => 5,
+  })
+  try {
+    editor.handleInput('a') // choose-binding: Direct is selected
+    editor.render(60)
+    editor.handleInput('\x1b[B') // Down: Leader selected, the window re-centers
+    const view = editor.render(60).map(plain)
+    const leaderRow = view.findIndex(line => line.includes('Leader completion'))
+    assert.ok(leaderRow >= 0, `the scrolled Leader choice must stay painted:\n${view.join('\n')}`)
+    assert.notEqual(leaderRow, 4, 'the scrolled window must not assume the fixed row 4')
+    assert.ok(editor.handleMouse(mouse('press', 10, leaderRow, 60, 5))?.handled, 'the painted Leader row is clickable')
+    editor.handleMouse(mouse('click', 10, leaderRow, 60, 5))
+    // The recorder title is SHARED with the direct recorder, so the
+    // discriminating evidence is the leader-completion copy: a mis-mapped
+    // ordinal would start the direct recorder ('Press a key for Submit draft.').
+    const recording = plain(editor.render(60).join('\n'))
+    assert.match(recording, /Press a key for the leader completion\./, 'the painted Leader row must start the LEADER recorder')
+    assert.match(recording, /This key completes the leader sequence\./)
+  } finally {
+    editor.dispose()
+    manager.dispose()
+  }
+})
+
+test('keybinding editor: the key recorder view is NOT row-budgeted (documented short-grant degradation)', () => {
+  const { manager, panel } = makePanel(() => {})
+  try {
+    panel.handleInput('\r') // leader editor
+    panel.handleInput('\r') // start the recorder
+    assert.match(plain(panel.render(60).join('\n')), /Record shortcut/, 'the recorder must be active')
+    const full = panel.render(60)
+    // The independent recorder view is a fixed, grant-independent assembly:
+    // plan C3 keeps this degradation instead of adding a second scrollport.
+    panel.setMaxRows(1)
+    const short = panel.render(60)
+    assert.equal(short.length, 8, `the recorder view is fixed (${short.length} rows observed at this revision)`)
+    assert.deepEqual(short, full, 'the recorder view must ignore the panel grant')
+    assert.match(plain(short[short.length - 1]!), /Esc: cancel/, 'its own footer still ends the view')
+  } finally {
+    manager.dispose()
+  }
+})

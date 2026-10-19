@@ -27,6 +27,7 @@ import { DirectCatalogPort } from '../src/runtime/direct/catalog-direct.ts'
 import { DirectConfigPort } from '../src/runtime/direct/config-direct.ts'
 import { DirectHostFilePort } from '../src/runtime/direct/host-file-direct.ts'
 import { registerTuiCommandsWithDirectSeams } from './support/register-tui-commands.ts'
+import { visibleWidth, type SettingItem } from '@xmoon76/pi-tui'
 
 
 /** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file
@@ -193,7 +194,7 @@ function stubRunner(
     setTerminalProgressMode: () => {}, setNotificationMethod: () => {},
     updateWelcomeCard: () => {},
     openJobView: () => {},
-    openTasksBrowser: () => {}, openPluginManager: () => {}, createPluginManagerSubmenu: () => ({ render: () => [], invalidate: () => {} }),
+    openTasksBrowser: () => {}, openPluginManager: () => {}, createPluginManagerPage: () => undefined,
     openRewindPicker: () => {},
     sessionTransitionPending: () => options.transitionPending ?? false,
     withSessionTransition: async <T>(task: () => T | Promise<T>) => task(),
@@ -406,6 +407,78 @@ test('a scoped override blocks a same-name skill wrapper; the effective command 
   )
   assert.equal(wasAdvertised('scoped-cmd'), true, 'the effective command stays advertised')
   app.stop()
+})
+
+/** One frozen effective-catalog snapshot with explicit command rows (the
+ * mirror-provenance cases need a `definitionId` the shorthands never carry). */
+function snapshotWithCommands(
+  commands: readonly { name: string; description: string; definitionId?: string }[],
+  skills: readonly { name: string; description: string }[],
+): SurfaceCatalogSnapshot {
+  return Object.freeze({
+    commands: Object.freeze(commands.map(command => Object.freeze({ ...command }))),
+    scopedCommands: Object.freeze([]),
+    skills: Object.freeze(skills.map(skill => Object.freeze({ ...skill }))),
+    issues: Object.freeze([]),
+  })
+}
+
+test('the TUI\'s OWN Direct mirror never self-collides with its own skill wrapper (exact definitionId provenance)', () => {
+  const ctx = new Context()
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  const services = fakeServices()
+  ctx.provide('commands', services.commands as never)
+  ctx.provide('skills', services.skills as never)
+  const { installSnapshot, wasAdvertised, isSkillWrapper } = registerTuiCommandsWithDirectSeams(
+    stubRunner(ctx, app, { agent: undefined }),
+    { snapshot: snapshotOf({ skills: [{ name: 'wf', description: 'a workflow skill' }] }) },
+  )
+  assert.equal(isSkillWrapper('wf'), true, 'the wrapper installs')
+  // The NEXT effective Host catalog read still carries this surface's OWN global
+  // compatibility mirror — stamped with the EXACT definitionId it registered.
+  // The skill must not collide with the mirror of ITSELF.
+  installSnapshot(snapshotWithCommands(
+    [
+      { name: 'alpha', description: 'alpha' },
+      { name: 'wf', description: '[skill] a workflow skill', definitionId: '@xmoon76/dsh-pi-tui/mirror/wf' },
+    ],
+    [{ name: 'wf', description: 'a workflow skill' }],
+  ))
+  assert.deepEqual(services.registered.filter(name => name === 'wf'), ['wf'],
+    'the TUI mirror is not genuine Host authority: the wrapper must survive its own refresh')
+  assert.equal(isSkillWrapper('wf'), true, 'the live wrapper stays a live wrapper')
+  assert.equal(wasAdvertised('wf'), true, 'the wrapper stays advertised after the refresh')
+})
+
+test('a GENUINE same-name Host command still blocks the skill wrapper (the mirror exclusion is not a bypass)', () => {
+  const ctx = new Context()
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  const services = fakeServices()
+  ctx.provide('commands', services.commands as never)
+  ctx.provide('skills', services.skills as never)
+  // The genuine command is LIVE in the global layer …
+  services.commands.register({ name: 'wf', description: 'the genuine Host wf' })
+  const { wasAdvertised, isSkillWrapper } = registerTuiCommandsWithDirectSeams(
+    stubRunner(ctx, app, { agent: undefined }),
+    // … and the effective read carries ITS OWN provenance, never this
+    // surface's mirror id.
+    { snapshot: snapshotWithCommands(
+      [
+        { name: 'alpha', description: 'alpha' },
+        { name: 'wf', description: 'the genuine Host wf', definitionId: '@host/genuine/wf' },
+      ],
+      [{ name: 'wf', description: 'a workflow skill' }],
+    ) },
+  )
+  assert.equal(isSkillWrapper('wf'), false,
+    'a genuine Host same-name winner keeps the name: the wrapper never registers')
+  assert.equal(wasAdvertised('wf'), true, 'the genuine Host command stays advertised')
 })
 
 test('a commands/change event re-merges completions without re-probing and without losing the saved scoped overrides', () => {
@@ -775,6 +848,190 @@ test('the /skill picker offers only human-invocable skills', async () => {
   const view = vt.getViewport().join('\n')
   assert.ok(view.includes('human-skill'), `the human skill must be offered:\n${view}`)
   assert.ok(!view.includes('model-only'), `a model-only skill must not be offered:\n${view}`)
+  app.stop()
+})
+
+test('the /skill picker keeps two same-prefix long names distinguishable (PR #309 review)', async () => {
+  const ctx = new Context()
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  const services = fakeServices()
+  ctx.provide('commands', services.commands as never)
+  const agent = fakeAgent('session-a')
+  // Two names wider than the 36-cell label column, sharing their first 35
+  // characters, with NO description: the vendored list's head-keeping clip
+  // would paint both as the same prefix + `\u2026` while Enter still runs
+  // different ids. The rows keep the name's TAIL and expand the full name of
+  // the SELECTED row in its description; neither changes the row's identity.
+  const prefix = 'x'.repeat(35)
+  const first = { name: `${prefix}AA`, description: '', invocation: { modelInvocable: false, userInvocable: true }, source: 'bundled', provider: 't' }
+  const second = { name: `${prefix}BB`, description: '', invocation: { modelInvocable: false, userInvocable: true }, source: 'bundled', provider: 't' }
+  ctx.provide('skills', { list: async () => [first, second], get: async () => undefined } as never)
+  const { defs } = services
+  registerTuiCommandsWithDirectSeams(stubRunner(ctx, app, { agent }))
+  // Capture the REAL rows the command hands to the overlay (the wrapper still
+  // opens the real overlay, so the painted frame below stays production output).
+  const originalOpenSettings = app.openSettings.bind(app)
+  let captured: { items: readonly SettingItem[] } | undefined
+  app.openSettings = ((items, onChange, onCancel, onHidden) => {
+    captured = { items }
+    return originalOpenSettings(items, onChange, onCancel, onHidden)
+  }) as typeof app.openSettings
+  const skillDef = defs.find(def => def.name === 'skill')
+  assert.ok(skillDef?.handler !== undefined)
+  await (skillDef!.handler as (invocation: { rawInput: string }) => Promise<unknown>)({ rawInput: '' })
+  await vt.waitForRender()
+  const rows = vt.getViewport()
+  const view = rows.join('\n')
+  const firstRow = rows.find(line => line.includes('AA'))
+  const secondRow = rows.find(line => line.includes('BB'))
+  assert.ok(firstRow !== undefined && secondRow !== undefined, `both names must keep their distinguishing tail:\n${view}`)
+  assert.notEqual(firstRow, secondRow, `the two rows must not paint identically:\n${view}`)
+  assert.ok(view.includes(first.name), `the selected row's description must expand the FULL name:\n${view}`)
+  // Identity untouched: the delivered id is still the FULL name, and it is the
+  // row the user saw (its label carries this name's tail). The submit path
+  // itself is pinned by the /skill delivery tests above.
+  const items = captured?.items ?? []
+  assert.deepEqual(items.map(item => item.id), [first.name, second.name])
+  assert.ok(items[0]!.label.endsWith('AA') && items[1]!.label.endsWith('BB'),
+    `the labels must keep each name's tail: ${JSON.stringify(items.map(item => item.label))}`)
+  assert.ok(items.every(item => visibleWidth(item.label) <= 36), 'a label must fit the 36-cell column')
+  app.stop()
+})
+
+test('the /skill abbreviation also separates two names that share a SUFFIX (PR #309 review)', async () => {
+  // The symmetric counter-case the earlier tail-only form introduced: different
+  // prefixes, identical 35-cell suffixes. A head+tail abbreviation must differ,
+  // and an astral (emoji) name must not break the width budget.
+  const ctx = new Context()
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  const services = fakeServices()
+  ctx.provide('commands', services.commands as never)
+  const suffix = `${'y'.repeat(33)}ZZ`
+  const front = { name: `frontend-common-workflow-${suffix}`, description: '', invocation: { modelInvocable: false, userInvocable: true }, source: 'bundled', provider: 't' }
+  const back = { name: `backend--common-workflow-${suffix}`, description: '', invocation: { modelInvocable: false, userInvocable: true }, source: 'bundled', provider: 't' }
+  // Six astral characters at the END: the 34-cell budget (33 + the ellipsis) must
+  // keep them all WHOLE in the label. A loop that walked UTF-16 CODE UNITS would
+  // spend a unit per surrogate half and stop short of (or inside) the sixth
+  // rocket, so the count and the lone-surrogate check below are the witness.
+  const rockets = '\u{1F680}'.repeat(6)
+  const emoji = { name: `${'e'.repeat(30)}${rockets}`, description: '', invocation: { modelInvocable: false, userInvocable: true }, source: 'bundled', provider: 't' }
+  ctx.provide('skills', { list: async () => [front, back, emoji], get: async () => undefined } as never)
+  const { defs } = services
+  const originalOpenSettings = app.openSettings.bind(app)
+  let captured: { items: readonly SettingItem[] } | undefined
+  app.openSettings = ((items, onChange, onCancel, onHidden) => {
+    captured = { items }
+    return originalOpenSettings(items, onChange, onCancel, onHidden)
+  }) as typeof app.openSettings
+  registerTuiCommandsWithDirectSeams(stubRunner(ctx, app, { agent: fakeAgent('session-a') }))
+  const skillDef = defs.find(def => def.name === 'skill')
+  assert.ok(skillDef?.handler !== undefined)
+  await (skillDef!.handler as (invocation: { rawInput: string }) => Promise<unknown>)({ rawInput: '' })
+  await vt.waitForRender()
+  const rows = vt.getViewport()
+  const view = rows.join('\n')
+  const frontRow = rows.find(line => line.includes('frontend'))
+  const backRow = rows.find(line => line.includes('backend'))
+  assert.ok(frontRow !== undefined && backRow !== undefined, `both prefixes must stay visible:\n${view}`)
+  assert.notEqual(frontRow, backRow, `two same-suffix names must not paint identically:\n${view}`)
+  const emojiRow = rows.find(line => line.includes('eeee'))
+  assert.ok(emojiRow !== undefined, `an astral-character name must still paint:\n${view}`)
+  // Assert on the REAL row label, not on the terminal-bounded viewport line: the
+  // label must spend its 34 cells on whole code points.
+  const emojiItem = captured!.items.find(item => item.id === emoji.name)
+  assert.ok(emojiItem !== undefined, `the astral-name row must be handed to the overlay:\n${view}`)
+  const emojiLabel = emojiItem.label
+  assert.equal([...emojiLabel].filter(char => char === '\u{1F680}').length, 6,
+    `every astral character must survive whole: ${JSON.stringify(emojiLabel)}`)
+  assert.equal(visibleWidth(emojiLabel), 34, `the label must fill its budget: ${JSON.stringify(emojiLabel)}`)
+  assert.ok(!/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/u.test(emojiLabel),
+    `no lone surrogate may reach the label: ${JSON.stringify(emojiLabel)}`)
+  app.stop()
+})
+
+test('the /skill tail survives the 44-column floor budget (PR #309 review)', async () => {
+  const ctx = new Context()
+  const vt = new VirtualTerminal(44, 20)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  const services = fakeServices()
+  ctx.provide('commands', services.commands as never)
+  ctx.provide('skills', {
+    list: async () => [
+      { name: `${'x'.repeat(35)}AA`, description: '', invocation: { modelInvocable: false, userInvocable: true }, source: 'bundled', provider: 't' },
+      { name: `${'x'.repeat(35)}BB`, description: '', invocation: { modelInvocable: false, userInvocable: true }, source: 'bundled', provider: 't' },
+    ],
+    get: async () => undefined,
+  } as never)
+  const { defs } = services
+  registerTuiCommandsWithDirectSeams(stubRunner(ctx, app, { agent: fakeAgent('session-a') }))
+  const skillDef = defs.find(def => def.name === 'skill')
+  assert.ok(skillDef?.handler !== undefined)
+  await (skillDef!.handler as (invocation: { rawInput: string }) => Promise<unknown>)({ rawInput: '' })
+  await vt.waitForRender()
+  const rows = vt.getViewport()
+  const view = rows.join('\n')
+  const firstRow = rows.find(line => line.includes('AA'))
+  const secondRow = rows.find(line => line.includes('BB'))
+  assert.ok(firstRow !== undefined && secondRow !== undefined,
+    `at 44 columns each row must still keep its own tail:\n${view}`)
+  assert.notEqual(firstRow, secondRow, `the two rows must not paint identically at 44 columns:\n${view}`)
+  app.stop()
+})
+
+test('the /skill search still finds a keyword the label abbreviation cut away (PR #309 review)', async () => {
+  // The label keeps both ends of an over-wide name so the column can hold it, so
+  // the list's search must read the row's COMPLETE name (fork X062) — otherwise a
+  // keyword from the middle answers an empty list (the external review's finding).
+  const ctx = new Context()
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  const services = fakeServices()
+  ctx.provide('commands', services.commands as never)
+  // 42 cells: the 34-cell label is the head's 17 + `…` + the tail's 16, so the
+  // keyword in the middle is gone from the label AND from the fuzzy subsequence
+  // (no `q` survives anywhere in it).
+  const long = {
+    name: `${'x'.repeat(18)}quasar${'y'.repeat(18)}`,
+    description: '',
+    invocation: { modelInvocable: false, userInvocable: true },
+    source: 'bundled',
+    provider: 't',
+  }
+  ctx.provide('skills', { list: async () => [long], get: async () => undefined } as never)
+  const { defs } = services
+  const originalOpenSettings = app.openSettings.bind(app)
+  let captured: { items: readonly SettingItem[] } | undefined
+  app.openSettings = ((items, onChange, onCancel, onHidden) => {
+    captured = { items }
+    return originalOpenSettings(items, onChange, onCancel, onHidden)
+  }) as typeof app.openSettings
+  registerTuiCommandsWithDirectSeams(stubRunner(ctx, app, { agent: fakeAgent('session-a') }))
+  const skillDef = defs.find(def => def.name === 'skill')
+  assert.ok(skillDef?.handler !== undefined)
+  await (skillDef!.handler as (invocation: { rawInput: string }) => Promise<unknown>)({ rawInput: '' })
+  await vt.waitForRender()
+  const item = captured!.items[0]
+  assert.ok(item !== undefined, `the skill row must reach the overlay:\n${vt.getViewport().join('\n')}`)
+  assert.equal(item.id, long.name)
+  assert.equal(item.searchText, long.name, 'the COMPLETE name must stay the search basis')
+  assert.ok(!item.label.includes('quasar') && item.label.includes('\u2026'),
+    `the label is the abbreviation that cut the keyword: ${JSON.stringify(item.label)}`)
+  // The search goes through the REAL overlay input, not the row object.
+  vt.sendInput('quasar')
+  await vt.waitForRender()
+  const view = vt.getViewport().join('\n')
+  assert.ok(!view.includes('No matching settings'), `a middle keyword must still find the skill:\n${view}`)
+  assert.ok(view.includes(long.name), `the found row must carry the complete name:\n${view}`)
   app.stop()
 })
 

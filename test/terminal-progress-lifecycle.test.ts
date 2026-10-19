@@ -30,9 +30,11 @@ import { createSurfaceRuntime, type SurfaceRuntime } from '../src/app/surface/ru
 import { createTerminalProgressInterval } from '../src/domain/terminal-progress/interval.ts'
 import { createSurfaceLifecycle } from '../src/app/bootstrap/lifecycle.ts'
 import { createInteractionRuntime } from '../src/app/surface/interaction-runtime.ts'
+import { pituiSurfaceInteractionPresenter } from '../src/app/surface/interaction-presenter.ts'
 import type { MainProgressAuthority, RoutedSessionEvent, SurfaceEventRoutingSource } from '../src/app/surface/event-routing.ts'
 import type { TerminalNotificationPresentation } from '../src/app/surface/notification-runtime.ts'
 import type { ApprovalOutcome } from '../src/tui/panels/approval-dialog.ts'
+import { isTernTerminal } from '../src/tui/terminal/tern.ts'
 import type {
   ApprovalRequestLike,
   InteractionPort,
@@ -41,7 +43,7 @@ import type {
   QuestionWaitClaim,
   UserQuestionProvider,
 } from '../src/runtime/interaction-port.ts'
-import { createPluginManagerPanel } from '../src/tui/plugin-manager/panel.ts'
+import { createPluginManagerWorkspacePanel } from '../src/tui/plugin-manager/workspace.ts'
 import type { Diag } from '../src/runtime/process/diagnostics.ts'
 import { installVirtualProcessTerminal } from './support/runner-harness.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
@@ -538,7 +540,7 @@ function mountSurface(
     terminalProgress: options.terminalProgress,
     mainProgressAuthority: options.mainProgressAuthority ?? 'local-events',
     ...(options.diag === undefined ? {} : { diag: options.diag }),
-    createPluginManagerPanel,
+    createPluginManagerPanel: createPluginManagerWorkspacePanel,
   })
   surface.attachEventRouting(routingSource)
   const controls: SurfaceControls = {
@@ -553,8 +555,15 @@ function mountSurface(
     endOpening: () => { surface.openingJournal.reset() },
   }
   beforeStart?.(controls)
+  // The mount goes through the production entry (`startProcessTui`), which reads
+  // the HOST terminal identity: a suite started inside a Tern pane would
+  // otherwise silently switch every non-Tern fixture to the X059 stateful
+  // projection. The fixture owns the identity for its mount window, so an
+  // INHERITED Tern identity is removed; an explicitly pinned non-Tern program
+  // (the `realProgress` keepalive cases) is preserved.
   const previousTermProgram = process.env.TERM_PROGRAM
   if (options.tern === true) process.env.TERM_PROGRAM = 'tern'
+  else if (isTernTerminal()) delete process.env.TERM_PROGRAM
   try {
     surface.start({
       events: { onSubmit: () => {}, onExit: () => {} },
@@ -566,7 +575,7 @@ function mountSurface(
       imageScope: () => undefined,
       present: { call: () => undefined, result: () => undefined },
       sessionCwd: () => '/tmp',
-      sessionId: () => 'session-terminal-progress-test',
+      captureHistoryScope: () => ({ sessionId: 'session-terminal-progress-test', isCurrent: () => true }),
       onTerminalResize: () => {},
       copySelection: async () => false,
       openExternalUrl: () => {},
@@ -607,13 +616,16 @@ function mountSurface(
     setApprovalPolicy: () => true,
   } as unknown as InteractionPort
   const agentInteraction = createInteractionRuntime({
-    mounted: () => surface.app,
-    liveApp: () => surface.app,
+    // PR3-B B3: the PiTui presenter is the narrow delegating adapter over the
+    // live app (the app itself cannot satisfy `withdrawPending`).
+    presenter: () => pituiSurfaceInteractionPresenter(surface.app),
+    livePresenter: () => pituiSurfaceInteractionPresenter(surface.app),
+    display: () => surface.display,
     currentSessionId: () => 'session-terminal-progress-test',
+    isAdmissibleSession: () => true,
     schedulePaint: () => {},
     diag: () => SILENT_DIAG,
     isCleanedUp: () => false,
-    setQuestionAttention: () => {},
     onAttentionChanged: () => {},
   })
   agentInteraction.attach(interactionPort, { lookupCallArgs: () => undefined, dangerCommand: () => false })
@@ -2850,6 +2862,8 @@ function disposeThroughProductionLifecycle(h: SurfaceHarness): () => void {
     retireOwnedSession: async () => ({}) as never,
     disposeSelectedTransport: async () => {},
     registerDisposal: () => {},
+    // No renderer acquisition in this harness: the stage is already settled.
+    whenRendererAcquired: () => Promise.resolve(),
   })
   return () => lifecycle.disposeSurface()
 }

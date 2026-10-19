@@ -20,6 +20,10 @@ applicable requirements/contracts to the reviewer. It supplements the generic
 review loop; subsystem contracts remain authoritative. PR acceptance is not
 stage closure or permission to merge.
 
+Before adding a surface or restyling one, read `docs/tui-design-language.md`
+(the canonical TUI visual vocabulary, role→token table and governance) and walk
+its §11.2 checklist for any change that alters what a surface paints.
+
 ## Naming and writing
 
 - Repository/profile/package names are `dsh-pi-tui`, `pi-tui`, `@xmoon76/pi-tui`
@@ -230,6 +234,35 @@ the same code. State which lanes were already green (and against which state)
 and which were run for the delta, so the evidence stays auditable. CI runs the
 full pipeline on the PR; the local stage-final pass exists to catch failures
 before pushing, not to reproduce CI.
+
+**Start a long lane only on a frozen tree.** Begin a stage-final pass — or any
+lane that takes minutes — only once every known finding is fixed, no review
+round or acceptance item is in flight, and you cannot name a reason another edit
+is expected; until then run only the delta-targeted tests. An edit made while a
+lane runs voids that run: kill it explicitly, record why, and re-run once after
+the tree is frozen instead of letting it finish and then running the same state
+twice.
+
+`ci.yml` coverage is what makes a green PR check evidence instead of work to
+reproduce: `Source checks` runs `build:fork`, `typecheck:fork`,
+`typecheck:bench`, `test:fork`, the `smoke:remote-*` parity/closure lanes (five
+of them only when the resolved DSH mode is `source`), `test:docs`,
+`gate:installation-doc`, `test:tooling`, `gate:pi-surface-compat`,
+`generate:pi-divergences` with a `git diff --exit-code` on `DIVERGENCES.md`,
+`gate:pi-divergence-ledger`, `gate:pi-vendor-diff --strict` and the naming gate;
+`Build and pack` runs the root `build`, `typecheck:bundle` and `test:product`
+through `pack`, the public-package smokes and `smoke:startup-strictness`; the
+remaining jobs run `smoke:boundary`, `smoke:official-presets`,
+`compat:dsh:client-family`, the tarball smokes and `pnpm audit`. The lanes CI
+does NOT run — therefore the only ones a stage-final pass must run locally — are
+`compat:dsh:npm`, `gate:keybindings`, `gate:boundary`, `gate:architecture`,
+`scripts/check-no-session-events.mjs`, `gate:dsh-preset-parity`,
+`smoke:remote-d2-fork` and `smoke:remote-session-lifecycle-parity`; a mode-gated
+CI step that was skipped counts as not covered.
+
+**Keep one run ledger per session** (lane → last green state → its inputs) and
+consult it before every run: having to run a lane again is a fact to state, not
+a habit to fall back on.
 
 Validation mechanics for this toolchain:
 

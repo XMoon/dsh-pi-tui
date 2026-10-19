@@ -1224,6 +1224,149 @@ test('notice, relay, and recall are standalone Context rows and never enter Work
   assert.ok(!view.includes('Context injection agent-message'), 'a known relay is never generic Context copy')
 })
 
+// ── Snapshot Context follows Work (2026-10-19 Owner decision) ─────────────
+
+/** One durable `time-context` Snapshot injection in its official source shape. */
+function snapshotEvent(id: string, text: string, time: number, seq: number): SessionEvent {
+  return contextEvent(id, { kind: 'time-context', form: 'snapshot' }, text, time, seq)
+}
+
+test('real time-context snapshots fold into ONE Compact Activity and expand in raw order', async () => {
+  const { vt, app } = startApp('compact')
+  const folder = new TranscriptFolder()
+  applyMixed(folder, [
+    eventAt('turn/start', { turn: 1 }, T0, 0),
+    eventAt('user/message', {
+      id: MessageId('snap-u1'), role: 'user',
+      content: [{ type: 'text', text: 'fix it' }],
+      source: { kind: 'user' },
+    }, T0 + 1, 1),
+    eventAt('assistant/chunk', { turn: 1, step: 0, chunk: { type: 'reasoning-delta', index: 0, text: 'first reasoning' } }, T0 + 2, 2),
+    eventAt('tool/call', { turn: 1, step: 0, callId: ToolCallId('snap-c1'), name: 'read', arguments: '{}' }, T0 + 3, 3),
+    eventAt('tool/result', {
+      turn: 1, step: 0,
+      message: {
+        id: MessageId('snap-r1'), role: 'tool', toolCallId: ToolCallId('snap-c1'),
+        content: [{ type: 'text', text: 'ok' }], source: { kind: 'tool', callId: ToolCallId('snap-c1') },
+      },
+    }, T0 + 4, 4),
+    snapshotEvent('snap-a', 'SNAPSHOT_ALPHA time reading', T0 + 5, 5),
+    eventAt('assistant/chunk', { turn: 1, step: 1, chunk: { type: 'reasoning-delta', index: 0, text: 'second reasoning' } }, T0 + 6, 6),
+    eventAt('tool/call', { turn: 1, step: 1, callId: ToolCallId('snap-c2'), name: 'bash', arguments: '{}' }, T0 + 7, 7),
+    eventAt('tool/result', {
+      turn: 1, step: 1,
+      message: {
+        id: MessageId('snap-r2'), role: 'tool', toolCallId: ToolCallId('snap-c2'),
+        content: [{ type: 'text', text: 'ok' }], source: { kind: 'tool', callId: ToolCallId('snap-c2') },
+      },
+    }, T0 + 8, 8),
+    snapshotEvent('snap-b', 'SNAPSHOT_BETA time reading', T0 + 9, 9),
+    eventAt('tool/call', { turn: 1, step: 2, callId: ToolCallId('snap-c3'), name: 'edit', arguments: '{}' }, T0 + 10, 10),
+    eventAt('tool/result', {
+      turn: 1, step: 2,
+      message: {
+        id: MessageId('snap-r3'), role: 'tool', toolCallId: ToolCallId('snap-c3'),
+        content: [{ type: 'text', text: 'ok' }], source: { kind: 'tool', callId: ToolCallId('snap-c3') },
+      },
+    }, T0 + 11, 11),
+    eventAt('assistant/message', {
+      turn: 1, step: 3,
+      message: { id: MessageId('snap-final'), role: 'assistant', content: [{ type: 'text', text: 'fixed' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+    }, T0 + 12, 12),
+    eventAt('turn/end', { turn: 1, reason: { kind: 'completed' } }, T0 + 9000, 13),
+  ])
+  show(app, folder)
+  await vt.waitForRender()
+  const collapsed = vt.getViewport().join('\n')
+  assert.equal(workHeaders(collapsed).length, 1, `exactly ONE Activity for the whole turn:\n${collapsed}`)
+  assert.match(collapsed, /3 actions/u, `read + bash + edit are counted without snapshots:\n${collapsed}`)
+  assert.equal(clusterHeaders(collapsed).length, 0, 'the two isolated snapshots are not a Context cluster')
+  assert.ok(!collapsed.includes('SNAPSHOT_ALPHA') && !collapsed.includes('SNAPSHOT_BETA'),
+    `the snapshots must not surface outside the collapsed Activity:\n${collapsed}`)
+  assert.equal(folder.turnActivity(1)?.toolCalls, 3, 'Snapshot Context never changes the turn tool count')
+
+  vt.sendInput('\x0f')
+  await vt.waitForRender()
+  const expanded = vt.getViewport()
+  const joined = expanded.join('\n')
+  assert.equal(workHeaders(joined, true).length, 1, `the same Activity opens in place:\n${joined}`)
+  const alpha = rowOf(expanded, /SNAPSHOT_ALPHA/)
+  const beta = rowOf(expanded, /SNAPSHOT_BETA/)
+  assert.ok(alpha >= 0 && beta >= 0, `both expanded snapshots render exactly once:\n${joined}`)
+  assert.ok(alpha < beta, 'the expanded snapshots keep their raw order')
+  assert.equal(joined.split('SNAPSHOT_ALPHA').length - 1, 1, 'no duplicated Snapshot row')
+  assert.equal(joined.split('SNAPSHOT_BETA').length - 1, 1, 'no duplicated Snapshot row')
+})
+
+test('an opening time-context snapshot joins the first Compact Activity', async () => {
+  const { vt, app } = startApp('compact')
+  const folder = new TranscriptFolder()
+  applyMixed(folder, [
+    eventAt('turn/start', { turn: 1 }, T0, 0),
+    eventAt('user/message', {
+      id: MessageId('opening-u1'), role: 'user',
+      content: [{ type: 'text', text: 'go' }],
+      source: { kind: 'user' },
+    }, T0 + 1, 1),
+    snapshotEvent('opening-snap', 'OPENING_SNAPSHOT reading', T0 + 2, 2),
+    eventAt('assistant/chunk', { turn: 1, step: 0, chunk: { type: 'reasoning-delta', index: 0, text: 'reasoning' } }, T0 + 3, 3),
+    eventAt('tool/call', { turn: 1, step: 0, callId: ToolCallId('opening-c1'), name: 'read', arguments: '{}' }, T0 + 4, 4),
+    eventAt('assistant/message', {
+      turn: 1, step: 1,
+      message: { id: MessageId('opening-final'), role: 'assistant', content: [{ type: 'text', text: 'done' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+    }, T0 + 5, 5),
+    eventAt('turn/end', { turn: 1, reason: { kind: 'completed' } }, T0 + 9000, 6),
+  ])
+  show(app, folder)
+  await vt.waitForRender()
+  const collapsed = vt.getViewport().join('\n')
+  assert.equal(workHeaders(collapsed).length, 1, `one Activity starts at the opening snapshot:\n${collapsed}`)
+  assert.ok(!collapsed.includes('OPENING_SNAPSHOT'), `the opening snapshot is inside the Activity:\n${collapsed}`)
+  vt.sendInput('\x0f')
+  await vt.waitForRender()
+  const expanded = vt.getViewport()
+  const joined = expanded.join('\n')
+  const snapshotRow = rowOf(expanded, /OPENING_SNAPSHOT/)
+  const readRow = rowOf(expanded, /Read\b/)
+  assert.ok(snapshotRow >= 0, `expanding restores the opening snapshot:\n${joined}`)
+  assert.ok(readRow < 0 || snapshotRow < readRow, 'the snapshot keeps its position before the durable Process rows')
+})
+
+test('a mixed instructions/catalog/snapshot cluster stays one visible boundary in Compact', async () => {
+  const { vt, app } = startApp('compact')
+  const folder = new TranscriptFolder()
+  applyMixed(folder, [
+    eventAt('turn/start', { turn: 1 }, T0, 0),
+    eventAt('user/message', {
+      id: MessageId('mixed-u1'), role: 'user',
+      content: [{ type: 'text', text: 'go' }],
+      source: { kind: 'user' },
+    }, T0 + 1, 1),
+    contextEvent('mixed-instructions', { kind: 'agent-instructions', form: 'instructions', changes: [{ path: 'AGENTS.md' }] }, 'instructions body', T0 + 2, 2),
+    contextEvent('mixed-catalog', { kind: 'skill-invocation', form: 'catalog', name: 'skill-catalog' }, 'catalog body', T0 + 3, 3),
+    snapshotEvent('mixed-snapshot', 'MIXED_SNAPSHOT reading', T0 + 4, 4),
+    eventAt('assistant/chunk', { turn: 1, step: 0, chunk: { type: 'reasoning-delta', index: 0, text: 'reasoning' } }, T0 + 5, 5),
+    eventAt('tool/call', { turn: 1, step: 0, callId: ToolCallId('mixed-c1'), name: 'read', arguments: '{}' }, T0 + 6, 6),
+    eventAt('assistant/message', {
+      turn: 1, step: 1,
+      message: { id: MessageId('mixed-final'), role: 'assistant', content: [{ type: 'text', text: 'done' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+    }, T0 + 7, 7),
+    eventAt('turn/end', { turn: 1, reason: { kind: 'completed' } }, T0 + 9000, 8),
+  ])
+  show(app, folder)
+  await vt.waitForRender()
+  const collapsed = vt.getViewport().join('\n')
+  assert.equal(clusterHeaders(collapsed).length, 1, `the mixed cluster keeps one header:\n${collapsed}`)
+  assert.match(collapsed, /Context · 3 injections/u)
+  assert.equal(workHeaders(collapsed).length, 1, 'the cluster remains a Work boundary')
+  assert.ok(!collapsed.includes('MIXED_SNAPSHOT'), 'the cluster members stay behind their own header')
+  vt.sendInput('\x0f')
+  await vt.waitForRender()
+  const expanded = vt.getViewport().join('\n')
+  assert.equal(clusterHeaders(expanded, true).length, 1, `the master expands the cluster:\n${expanded}`)
+  assert.ok(expanded.includes('MIXED_SNAPSHOT'), 'the snapshot member is reachable through the cluster disclosure')
+})
+
 test('Context rows never occupy the Focus slots or counts', async () => {
   const { vt, app } = startApp('focus')
   const folder = new TranscriptFolder()
@@ -1515,4 +1658,316 @@ test('Compact keeps a TOOL_NOT_STARTED diagnostic standalone with no Activity Ac
   const expanded = vt.getViewport().join('\n')
   assert.ok(expanded.includes('interrupted before the Harness recorded it as started'),
     `the expanded diagnostic keeps the DSH recovery guidance:\n${expanded}`)
+})
+
+// ── Snapshot Context and live Preparing ownership (A9) ────────────────────
+
+test('a snapshot-tail Work stays the live Preparing owner; a process-free snapshot mints no Activity', async () => {
+  const snapshotRow = (label: string): TranscriptMessage => ({
+    kind: 'system', turn: 1, text: `${label} body`, label, context: true,
+    contextPresentation: { form: 'snapshot', sourceKind: 'time-context', role: 'inject' },
+  })
+  const preview = {
+    callId: 'snap-preparing', argumentBytes: 3, turn: 1, step: 0, index: 0, name: 'bash', summary: 'pnpm test',
+  }
+  const preparingRows = (view: string): number[] =>
+    view.split('\n').flatMap((line, index) => line.includes('Preparing') ? [index] : [])
+
+  // Process -> snapshot: the trailing snapshot is a carried Work part, so the
+  // live call stays in the SAME Activity instead of minting a new run.
+  {
+    const { vt, app } = startApp('compact')
+    app.setTranscript([
+      { kind: 'thinking', turn: 1, text: 'working' },
+      { kind: 'tool', turn: 1, name: 'read', args: '{}', result: 'ok', status: 'ok' },
+      snapshotRow('time-context'),
+    ], new Map(), undefined, [preview])
+    await vt.waitForRender()
+    const view = vt.getViewport().join('\n')
+    assert.equal(workHeaders(view).length, 1, `the trailing snapshot does not split the Activity:\n${view}`)
+    assert.equal(preparingRows(view).length, 1, `the call renders exactly once in the Tool slot:\n${view}`)
+    assert.ok(!view.includes('Action:  Preparing') || view.includes('Action:'),
+      'the call is the Activity Tool slot, never a duplicate fail-open row')
+    app.dispose()
+    startedApps.delete(app)
+  }
+
+  // snapshot -> (no durable Process yet): no zero-action Activity is invented;
+  // the live call fails open exactly like any ownerless pending run.
+  {
+    const { vt, app } = startApp('compact')
+    app.setTranscript([snapshotRow('time-context')], new Map(), undefined, [preview])
+    await vt.waitForRender()
+    const view = vt.getViewport().join('\n')
+    assert.equal(workHeaders(view).length, 0, `no Activity without a real Process member:\n${view}`)
+    assert.equal(preparingRows(view).length, 1, `the pending call still renders once:\n${view}`)
+    assert.ok(!view.includes('Action:'), `no pseudo Action slot without an owner:\n${view}`)
+    app.dispose()
+    startedApps.delete(app)
+  }
+})
+
+test('an open Work with a nested snapshot cluster keeps the Preparing row after every part', async () => {
+  const { vt, app } = startApp('compact')
+  const first: TranscriptMessage = {
+    kind: 'system', turn: 1, text: 'SNAPSHOT_PART_A', label: 'time A', context: true,
+    contextPresentation: { form: 'snapshot', sourceKind: 'time-context', role: 'inject' },
+  }
+  const second: TranscriptMessage = {
+    kind: 'system', turn: 1, text: 'SNAPSHOT_PART_B', label: 'time B', context: true,
+    contextPresentation: { form: 'snapshot', sourceKind: 'time-context', role: 'inject' },
+  }
+  app.setTranscript([
+    first,
+    second,
+    { kind: 'thinking', turn: 1, text: 'working' },
+    { kind: 'tool', turn: 1, name: 'read', args: '{}', result: 'ok', status: 'ok' },
+  ], new Map(), undefined, [
+    { callId: 'nested-preparing', argumentBytes: 3, turn: 1, step: 0, index: 0, name: 'bash', summary: 'pnpm test' },
+  ])
+  await vt.waitForRender()
+  app.toggleWorkSpan(first)
+  app.toggleContextCluster(first)
+  await vt.waitForRender()
+  const lines = vt.getViewport()
+  const joined = lines.join('\n')
+  assert.equal(workHeaders(joined, true).length, 1, `the Work is open:\n${joined}`)
+  assert.ok(joined.includes('SNAPSHOT_PART_A') && joined.includes('SNAPSHOT_PART_B'),
+    `the nested cluster is open:\n${joined}`)
+  const preparing = lines.findIndex(line => line.includes('Preparing Bash'))
+  assert.ok(preparing >= 0, `the live call renders:\n${joined}`)
+  const lastPart = lines.reduce((last, line, index) =>
+    line.includes('SNAPSHOT_PART_A') || line.includes('SNAPSHOT_PART_B') || /Read\b/.test(line) ? index : last, -1)
+  assert.ok(preparing > lastPart, `the live call follows every durable part (cluster header/members and Tool):\n${joined}`)
+})
+
+test('a turnless command after a snapshot-tail Work starts a new pending run', async () => {
+  const { vt, app } = startApp('compact')
+  const snapshot: TranscriptMessage = {
+    kind: 'system', turn: 1, text: 'time reading', label: 'time-context', context: true,
+    contextPresentation: { form: 'snapshot', sourceKind: 'time-context', role: 'inject' },
+  }
+  const command = {
+    kind: 'command', commandId: 'cmd-status', seq: 1, time: T0,
+    name: 'status', args: '', outcome: null,
+  } as unknown as TranscriptMessage
+  app.setTranscript([
+    { kind: 'thinking', turn: 1, text: 'working' },
+    snapshot,
+    command,
+  ], new Map(), undefined, [
+    { callId: 'cmd-preparing', argumentBytes: 3, turn: 1, step: 0, index: 0, name: 'bash', summary: 'pnpm test' },
+  ])
+  await vt.waitForRender()
+  const lines = vt.getViewport()
+  const view = lines.join('\n')
+  const commandRow = lines.findIndex(line => line.includes('/status'))
+  const preparingRow = lines.findIndex(line => line.includes('Preparing Bash'))
+  assert.ok(commandRow >= 0, `the command boundary renders:\n${view}`)
+  assert.ok(preparingRow >= 0, `the new pending run renders:\n${view}`)
+  assert.ok(preparingRow > commandRow, `the new run starts AFTER the command boundary:\n${view}`)
+  assert.equal(workHeaders(view).length, 1, `the closed Work renders as its own Activity:\n${view}`)
+  assert.ok(!lines.some(line => /Action:\s+Preparing/.test(line)),
+    `the closed Activity must not own the new run in its Action slot:\n${view}`)
+})
+
+// ── Working tool-jobs Notice (v2 plan §11) ────────────────────────────────
+
+function workingToolJobsEvents(id: string, text: string, time: number, seq: number): SessionEvent[] {
+  const message = {
+    id: MessageId(id), role: 'user',
+    content: [{ type: 'text', text }],
+    source: { kind: 'tool-jobs', form: 'notice', summary: 'job completed' },
+  }
+  return [
+    eventAt('agent/inbox/spliced', { target: 'next-step', start: 0, inserted: [message] }, time, seq),
+    eventAt('agent/inbox/spliced', { target: 'next-step', start: 0, removedCount: 1, inserted: [] }, time + 0.1, seq + 1),
+    eventAt('user/message', message, time + 0.2, seq + 2),
+  ]
+}
+
+test('a proven Working tool-jobs notice folds into ONE Compact Activity and expands in place', async () => {
+  const { vt, app } = startApp('compact')
+  const folder = new TranscriptFolder()
+  applyMixed(folder, [
+    eventAt('turn/start', { turn: 1 }, T0, 0),
+    eventAt('user/message', {
+      id: MessageId('working-u1'), role: 'user',
+      content: [{ type: 'text', text: 'go' }],
+      source: { kind: 'user' },
+    }, T0 + 1, 1),
+    eventAt('assistant/chunk', { turn: 1, step: 0, chunk: { type: 'reasoning-delta', index: 0, text: 'first' } }, T0 + 2, 2),
+    eventAt('tool/call', { turn: 1, step: 0, callId: ToolCallId('working-c1'), name: 'read', arguments: '{}' }, T0 + 3, 3),
+    eventAt('tool/result', {
+      turn: 1, step: 0,
+      message: {
+        id: MessageId('working-r1'), role: 'tool', toolCallId: ToolCallId('working-c1'),
+        content: [{ type: 'text', text: 'ok' }], source: { kind: 'tool', callId: ToolCallId('working-c1') },
+      },
+    }, T0 + 4, 4),
+    ...workingToolJobsEvents('working-notice', 'WORKING_NOTICE body', T0 + 5, 5),
+    eventAt('assistant/chunk', { turn: 1, step: 1, chunk: { type: 'reasoning-delta', index: 0, text: 'second' } }, T0 + 8, 8),
+    eventAt('tool/call', { turn: 1, step: 1, callId: ToolCallId('working-c2'), name: 'bash', arguments: '{}' }, T0 + 9, 9),
+    eventAt('tool/result', {
+      turn: 1, step: 1,
+      message: {
+        id: MessageId('working-r2'), role: 'tool', toolCallId: ToolCallId('working-c2'),
+        content: [{ type: 'text', text: 'ok' }], source: { kind: 'tool', callId: ToolCallId('working-c2') },
+      },
+    }, T0 + 10, 10),
+    eventAt('assistant/message', {
+      turn: 1, step: 2,
+      message: { id: MessageId('working-final'), role: 'assistant', content: [{ type: 'text', text: 'done' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+    }, T0 + 11, 11),
+    eventAt('turn/end', { turn: 1, reason: { kind: 'completed' } }, T0 + 9000, 12),
+  ])
+  show(app, folder)
+  await vt.waitForRender()
+  const collapsed = vt.getViewport().join('\n')
+  assert.equal(workHeaders(collapsed).length, 1, `one Activity for the Working turn:\n${collapsed}`)
+  assert.match(collapsed, /2 actions/u, `read + bash are the only actions:\n${collapsed}`)
+  assert.ok(!collapsed.includes('WORKING_NOTICE'), `the Working notice stays inside the Activity:\n${collapsed}`)
+  vt.sendInput('\x0f')
+  await vt.waitForRender()
+  const lines = vt.getViewport()
+  const expanded = lines.join('\n')
+  assert.equal(expanded.split('WORKING_NOTICE').length - 1, 1, `the notice is restored exactly once:\n${expanded}`)
+  const noticeRow = lines.findIndex(line => line.includes('WORKING_NOTICE'))
+  const readRow = lines.findIndex(line => /Read\b/.test(line))
+  const bashRow = lines.findIndex(line => /Bash\b/.test(line))
+  assert.ok(readRow < noticeRow && noticeRow < bashRow, `the notice keeps its raw position:\n${expanded}`)
+})
+
+test('a next-turn wakeup tool-jobs notice stays visible outside the Compact Activity', async () => {
+  const { vt, app } = startApp('compact')
+  const folder = new TranscriptFolder()
+  const wakeMessage = {
+    id: MessageId('wake-notice'), role: 'user',
+    content: [{ type: 'text', text: 'WAKEUP_NOTICE body' }],
+    source: { kind: 'tool-jobs', form: 'notice', summary: 'job completed' },
+  }
+  applyMixed(folder, [
+    eventAt('agent/inbox/spliced', { target: 'next-turn', start: 0, inserted: [wakeMessage] }, T0, 0),
+    eventAt('turn/start', { turn: 1 }, T0 + 1, 1),
+    eventAt('agent/inbox/spliced', { target: 'next-turn', start: 0, removedCount: 1, inserted: [] }, T0 + 2, 2),
+    eventAt('user/message', wakeMessage, T0 + 3, 3),
+    eventAt('assistant/chunk', { turn: 1, step: 0, chunk: { type: 'reasoning-delta', index: 0, text: 'woken' } }, T0 + 4, 4),
+    eventAt('tool/call', { turn: 1, step: 0, callId: ToolCallId('wake-c1'), name: 'read', arguments: '{}' }, T0 + 5, 5),
+    eventAt('assistant/message', {
+      turn: 1, step: 1,
+      message: { id: MessageId('wake-final'), role: 'assistant', content: [{ type: 'text', text: 'done' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+    }, T0 + 6, 6),
+    eventAt('turn/end', { turn: 1, reason: { kind: 'completed' } }, T0 + 9000, 7),
+  ])
+  show(app, folder)
+  await vt.waitForRender()
+  const lines = vt.getViewport()
+  const view = lines.join('\n')
+  const wakeRow = lines.findIndex(line => line.includes('job completed'))
+  const activityRow = lines.findIndex(line => /^\s*[▸▾] Activity(?: | ·|$)/.test(line))
+  assert.ok(wakeRow >= 0, `the wakeup notice summary remains visible:\n${view}`)
+  assert.ok(activityRow >= 0 && wakeRow < activityRow, `the wakeup notice precedes the Work:\n${view}`)
+  assert.equal(workHeaders(view).length, 1, `the wakeup notice is not absorbed into the Activity:\n${view}`)
+})
+
+test('a live Preparing call joins a Work whose trailing row is a Working tool-jobs notice', async () => {
+  const { vt, app } = startApp('compact')
+  const notice: TranscriptMessage = {
+    kind: 'system', turn: 1, text: 'WORKING_TAIL_NOTICE', label: 'Background job', context: true,
+    contextPresentation: { form: 'notice', sourceKind: 'tool-jobs', role: 'inject', sameTurnNextStep: true },
+  }
+  app.setTranscript([
+    { kind: 'thinking', turn: 1, text: 'working' },
+    { kind: 'tool', turn: 1, name: 'read', args: '{}', result: 'ok', status: 'ok' },
+    notice,
+  ], new Map(), undefined, [
+    { callId: 'working-preparing', argumentBytes: 3, turn: 1, step: 0, index: 0, name: 'bash', summary: 'pnpm test' },
+  ])
+  await vt.waitForRender()
+  const lines = vt.getViewport()
+  const view = lines.join('\n')
+  assert.equal(workHeaders(view).length, 1, `the notice tail keeps ONE Activity:\n${view}`)
+  assert.equal(lines.filter(line => line.includes('Preparing Bash')).length, 1,
+    `the live call renders once in the Activity Tool slot:\n${view}`)
+  assert.ok(!lines.some(line => /Action:\s+Preparing/.test(line)) === false ||
+    lines.some(line => /Action:\s+Preparing/.test(line)), 'fixture sanity')
+})
+
+test('a userless wakeup turn keeps its trigger and folds internal Context in Compact and Full', async () => {
+  const folder = new TranscriptFolder()
+  const wakeNotice = {
+    id: MessageId('userless-compact-wake'), role: 'user',
+    content: [{ type: 'text', text: 'WAKE_COMPACT body' }],
+    source: { kind: 'tool-jobs', form: 'notice', summary: 'wakeup cause' },
+  }
+  applyMixed(folder, [
+    eventAt('agent/inbox/spliced', { target: 'next-turn', start: 0, inserted: [wakeNotice] }, T0, 0),
+    eventAt('turn/start', { turn: 1 }, T0 + 1, 1),
+    eventAt('agent/inbox/spliced', { target: 'next-turn', start: 0, removedCount: 1, inserted: [] }, T0 + 2, 2),
+    eventAt('user/message', wakeNotice, T0 + 3, 3),
+    contextEvent('userless-compact-snap', { kind: 'time-context', form: 'snapshot' }, 'USERLESS_COMPACT_SNAPSHOT', T0 + 4, 4),
+    eventAt('assistant/chunk', { turn: 1, step: 0, chunk: { type: 'reasoning-delta', index: 0, text: 'first' } }, T0 + 5, 5),
+    eventAt('tool/call', { turn: 1, step: 0, callId: ToolCallId('userless-compact-c1'), name: 'read', arguments: '{}' }, T0 + 6, 6),
+    eventAt('tool/result', {
+      turn: 1, step: 0,
+      message: {
+        id: MessageId('userless-compact-r1'), role: 'tool', toolCallId: ToolCallId('userless-compact-c1'),
+        content: [{ type: 'text', text: 'ok' }], source: { kind: 'tool', callId: ToolCallId('userless-compact-c1') },
+      },
+    }, T0 + 7, 7),
+    ...workingToolJobsEvents('userless-compact-working', 'USERLESS_COMPACT_NOTICE', T0 + 8, 8),
+    eventAt('assistant/chunk', { turn: 1, step: 1, chunk: { type: 'reasoning-delta', index: 0, text: 'second' } }, T0 + 11, 11),
+    eventAt('tool/call', { turn: 1, step: 1, callId: ToolCallId('userless-compact-c2'), name: 'bash', arguments: '{}' }, T0 + 12, 12),
+    eventAt('assistant/message', {
+      turn: 1, step: 2,
+      message: { id: MessageId('userless-compact-final'), role: 'assistant', content: [{ type: 'text', text: 'done' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+    }, T0 + 13, 13),
+    eventAt('turn/end', { turn: 1, reason: { kind: 'completed' } }, T0 + 9000, 14),
+  ])
+
+  {
+    const { vt, app } = startApp('compact')
+    show(app, folder)
+    await vt.waitForRender()
+    const lines = vt.getViewport()
+    const collapsed = lines.join('\n')
+    assert.equal(workHeaders(collapsed).length, 1, `one Activity for the working turn:\n${collapsed}`)
+    assert.ok(collapsed.includes('wakeup cause'), `the wakeup cause stays outside the Activity:\n${collapsed}`)
+    assert.ok(!collapsed.includes('USERLESS_COMPACT_SNAPSHOT') && !collapsed.includes('USERLESS_COMPACT_NOTICE'),
+      `internal Context stays inside the Activity:\n${collapsed}`)
+    vt.sendInput('\x0f')
+    await vt.waitForRender()
+    const expandedLines = vt.getViewport()
+    const expanded = expandedLines.join('\n')
+    assert.equal(expanded.split('USERLESS_COMPACT_SNAPSHOT').length - 1, 1)
+    assert.equal(expanded.split('USERLESS_COMPACT_NOTICE').length - 1, 1)
+    const wakeRow = expandedLines.findIndex(line => line.includes('wakeup cause'))
+    const snapshotRow = expandedLines.findIndex(line => line.includes('USERLESS_COMPACT_SNAPSHOT'))
+    const wakeNoticeRow = expandedLines.findIndex(line => line.includes('USERLESS_COMPACT_NOTICE'))
+    const readRow = expandedLines.findIndex(line => /Read\b/.test(line))
+    const bashRow = expandedLines.findIndex(line => /Bash\b/.test(line))
+    assert.ok(wakeRow < snapshotRow && snapshotRow < readRow && readRow < wakeNoticeRow && wakeNoticeRow < bashRow,
+      `expanded order keeps the wake trigger, Snapshot, read, working notice, bash:\n${expanded}`)
+    app.dispose()
+    startedApps.delete(app)
+  }
+
+  {
+    const { vt, app } = startApp('full')
+    show(app, folder)
+    await vt.waitForRender()
+    const lines = vt.getViewport()
+    const view = lines.join('\n')
+    assert.equal(workHeaders(view).length, 0, `Full keeps Work flat:\n${view}`)
+    assert.ok(view.includes('wakeup cause'), `the wakeup card stays visible:\n${view}`)
+    assert.ok(view.includes('Context injection time-context'), `the Snapshot card stays visible:\n${view}`)
+    assert.ok(view.includes('job completed'), `the Working notice card stays visible:\n${view}`)
+    const wakeRow = lines.findIndex(line => line.includes('wakeup cause'))
+    const snapshotRow = lines.findIndex(line => line.includes('Context injection time-context'))
+    const workingRow = lines.findIndex(line => line.includes('job completed'))
+    assert.ok(wakeRow < snapshotRow && snapshotRow < workingRow,
+      `Full keeps the raw Context card order:\n${view}`)
+    app.dispose()
+    startedApps.delete(app)
+  }
 })

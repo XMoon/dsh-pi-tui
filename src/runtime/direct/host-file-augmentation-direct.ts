@@ -75,6 +75,12 @@ import {
 import type { PathCompletionQuery } from '../../domain/file-completion/types.ts'
 import { rankPathCandidates } from '../../domain/file-completion/ranking.ts'
 import type { HostFileCandidate, HostFileListResult } from '../host-file-port.ts'
+import { effectiveAgentCwd, type WorkingDirectoryServiceLike } from './working-directory-direct.ts'
+
+/** Re-exported for the Host-side Remote bridge, whose only reviewed
+ *  `runtime/remote/** -> runtime/direct/**` edges are this module and
+ *  `file-completion/host-discovery.ts` (see the architecture gate). */
+export type { WorkingDirectoryServiceLike } from './working-directory-direct.ts'
 
 /** A live agent as the router resolves the session scope (structural
  * projection: the workspace cwd). */
@@ -95,11 +101,14 @@ export interface FileReferencesServiceLike {
 
 /** The Host facts the router answers with. The environment and the driver are
  * the HOST machine's, never the Client's; `official` is read per call so an
- * unmounted provider is an unavailable bare answer, not a constructor error. */
+ * unmounted provider is an unavailable bare answer, not a constructor error;
+ * `workingDirectory` is the official Session directory owner (absent in a
+ * minimal composition, where the immutable header cwd remains the read). */
 export interface PiTuiHostFileReferenceDeps {
   readonly official: FileReferencesServiceLike | undefined
   readonly driver: LocalDiscoveryDriver
   readonly environment: PathQueryEnvironment
+  readonly workingDirectory: WorkingDirectoryServiceLike | undefined
 }
 
 /** Whether the token names an EXPLICIT path scope (the frozen classifier,
@@ -226,9 +235,10 @@ export async function listPiTuiHostFileReferences(
   }
 
   // EXPLICIT path navigation: resolve the user-typed scope against the exact
-  // Session workspace cwd ON THE HOST (never a Client cwd) and discover inside
-  // that scope with the shared TS8-A path/query machinery.
-  const workspaceCwd = agent.session.header.cwd ?? process.cwd()
+  // Session's EFFECTIVE working directory ON THE HOST (never a Client cwd, and
+  // never the immutable header once `working_directory` moved the Session) and
+  // discover inside that scope with the shared TS8-A path/query machinery.
+  const workspaceCwd = effectiveAgentCwd(deps.workingDirectory, agent) ?? process.cwd()
   const resolved = resolvePathQuery(query, workspaceCwd, deps.environment)
   const searchBase = scopeSearchBase(resolved, query, workspaceCwd, deps.environment)
   const scope = searchBase === resolved.searchBase ? resolved : { ...resolved, searchBase }

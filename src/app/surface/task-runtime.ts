@@ -25,15 +25,17 @@
 
 import { buildTaskRows, isActiveJobStatus, isSubagentRowInterruptible, subagentInterruptParent, viewerAccessOf, workflowMemberViewerTarget, type TaskBrowserJobInput, type TaskBrowserRow } from '../../domain/task/browser.ts'
 import { TaskBrowserRuntime, type TaskBrowserDatasetScope, type TaskBrowserRuntimeHooks, type TaskBrowserSummary } from './task-browser-runtime.ts'
-import { rowGroup, taskRowLabel, taskTreePrefix, viewerAccessHint, type TaskPanelItem, type TaskScope } from './task-presentation.ts'
+import { isTaskItemActive, projectTaskItems, rowGroup, taskRowLabel, taskTreePrefix, viewerAccessHint, type TaskPanelItem, type TaskScope } from './task-presentation.ts'
 import { fullQuestionRows, questionIdentityOf, quickQuestionRows } from './task-attention.ts'
 import type { QuestionAttentionRow } from './question-controller.ts'
-import type { TaskBrowserHandle, TuiApp, WorkflowAction } from '../../tui-app.ts'
+import type { JobInspectorHandle, TaskBrowserHandle, TuiApp, WorkflowAction } from '../../tui-app.ts'
+import type { SurfaceDisplaySeam } from './display-seam.ts'
 import type { Diag } from '../../runtime/process/diagnostics.ts'
 import type { SessionSubject } from '../session/subject.ts'
 import type { JobObservationPort, JobObservedSnapshot, JobStopOutcome } from '../../runtime/job-observation-port.ts'
 import type { SubagentInterruptOutcome } from '../../runtime/subagent-port.ts'
 import { runOwned } from '../../runtime/process/tasks.ts'
+import { runSyncDisposalSteps, runSyncDisposalStepsWithPrimary } from '../../runtime/process/disposal.ts'
 import { safeErrorMessage } from '../../runtime/process/errors.ts'
 
 /**
@@ -145,18 +147,19 @@ export interface TaskQuestionAttention {
 }
 
 /**
- * The presentation state carried from Quick Tasks into the full Task Center
- * (and back out through `getViewState()`).
+ * The Full Task Browser's presentation snapshot (the panel's current scope,
+ * search state and selection — what the Handle exposes for embedders/tests;
+ * the Quick→Full restore round trip retired with the modal Quick, B4-B).
  *
- * The lifecycle owner is this runtime — it stores `quickTaskState` and
- * `restoreState` — so the type lives here and the TUI panel consumes it as a
- * TYPE only (TS4 plan §13/§14). The row model (`TaskPanelItem`, `TaskScope`)
- * stays presentation-owned in `task-presentation.ts`, and the concrete
- * `TaskBrowserPanel` stays TUI-owned.
+ * The lifecycle owner is this runtime, so the type lives here and the TUI
+ * panel consumes it as a TYPE only (TS4 plan §13/§14). The row model
+ * (`TaskPanelItem`, `TaskScope`) stays presentation-owned in
+ * `task-presentation.ts`, and the concrete `TaskBrowserPanel` stays
+ * TUI-owned.
  */
 export interface TaskBrowserViewState {
-  readonly mode: 'quick' | 'full'
-  readonly openedFrom: 'quick' | 'command'
+  readonly mode: 'full'
+  readonly openedFrom: 'command'
   readonly scope: TaskScope
   readonly typeFilter: string | null
   readonly searchMode: boolean
@@ -168,8 +171,15 @@ export interface TaskBrowserViewState {
 
 /** The narrow inputs of the Task Center owner; one cohesive lifetime. */
 export interface TaskRuntimeOptions {
-  /** The mounted app (throws before `start()`), read through the aggregate. */
+  /** The mounted app (throws before `start()`), read through the aggregate.
+   * PiTui-only sinks (browser/viewer/panel chrome, action receipts) read it;
+   * background-reachable roster commits go through {@link display}. */
   readonly mounted: () => TuiApp
+  /** PR3-A: the renderer-facing display seam. Background roster/summary
+   * commits and the attention reset are reachable while a read-only TSP
+   * renderer owns the terminal; they consult the seam's capability flags and
+   * are skipped (not faked) when the renderer presents no Task Center. */
+  readonly display: () => SurfaceDisplaySeam
   /** The runner's cleanup latch (the ORIGINAL `cleanedUp` fence). */
   readonly isCleanedUp: () => boolean
   /** The injected Question-attention read/subscription (never the controller). */
@@ -201,13 +211,28 @@ export interface TaskRuntime {
   hasTask(childId: string): boolean
   /** Reset the whole Task Center on a session-generation bump. */
   resetTasks(): void
-  /** Open the Task Browser (`quick` = the ↓ trigger, `full` = `/tasks`). */
+  /** Open the Task Browser (the `/tasks` Full Task Center and the
+   *  Workflow-scoped views). The `quick` modal and its Quick→Full restore
+   *  round trip are retired (Phase 3B/B4-B): the on-demand Task Quick
+   *  accessory replaced the modal, and every close lands on the editor. */
   openTasksBrowser(
-    viewMode: 'quick' | 'full',
-    restoreState?: TaskBrowserViewState,
+    viewMode: 'full',
     scope?: TaskBrowserDatasetScope,
     header?: string,
   ): void
+  /**
+   * The on-demand Task Quick's typed selection route (Phase 3B/B4-B). The
+   * value is a CURRENT `TaskPanelItem.value` of the Quick projection
+   * (`quickTaskProjection` over the runtime's GLOBAL rows + the detached
+   * attention rows). Resolves the ONE existing open/reopen path — Question
+   * `attention.reopen`, subagent `enterView`, Job view — exactly as the
+   * Full browser's selection does; never a Stop; never a second authority.
+   * Returns `false` (no surface opened) when the row is unreachable in the
+   * current projection, the session fence fails, cleanup has started, or
+   * the Question row went stale (`attention.reopen` refuses); a Job /
+   * subagent row that survives the fences always opens its routed surface.
+   */
+  openQuickTaskItem(value: string): boolean
   /** Open one Job from the Task Browser (a subagent job may replace it). */
   openJobView(jobId: string): 'close' | 'keep-open'
   /** The Workflow card action sink (PR2 plan §9/§10/§14.5). */
@@ -252,7 +277,26 @@ function taskPanelItems(target: readonly TaskBrowserRow[]): TaskPanelItem[] {
   for (const row of target) {
     if (row.kind === 'subagent') labels.set(row.childId, row.label)
   }
-  return target.map(row => row.kind === 'job'
+  return target.map(row => row.kind === 'external'
+    ? {
+        value: row.value,
+        // An external leaf is VISIBLE with its durable classification and is
+        // explicitly not openable/stop-capable: it has no local child Session
+        // (rc.2 catalog v2 `mode: 'external'`, S2-B1 §4A.1).
+        label: `external · ${row.label}`,
+        suffix: 'external',
+        status: 'External',
+        group: rowGroup(row),
+        source: 'subagent' as const,
+        type: 'subagent',
+        active: false,
+        canOpen: false,
+        canStop: false,
+        depth: row.depth,
+        hasChildren: false,
+        mode: 'external',
+      }
+    : row.kind === 'job'
     ? {
         value: row.value,
         // A `subagent`-kind job is the registry's reliable contract
@@ -304,23 +348,58 @@ function taskPanelItems(target: readonly TaskBrowserRow[]): TaskPanelItem[] {
       })
 }
 
-/** One-line viewer hint for a job state (never touches the read cursor). */
-function jobStatusHint(status: string, detail: string | undefined): string {
-  const tail = status === 'running' || status === 'stopping'
-    ? ' — opening the non-consuming retained-output stream…'
-    : ` — final output is delivered to the agent via job_output${detail === undefined ? '' : ` (${detail})`}`
-  return `${status}${tail}`
+/**
+ * The ONE passive Quick projection (Phase 3B / B4-A): the active/ancestor/
+ * attention policy over the composed rows (parked Question attention above
+ * the work rows). The modal-only `view-full` promotion row is retired with
+ * the modal Quick (B4-B) — a keyboard promotion action is not a task.
+ *
+ * It is a pure read over the runtime's already-committed row facts plus the
+ * Question controller's detached attention model: it never lists a source,
+ * never reads the footer badge back and never keeps a second registry. `N` (the
+ * row total the accessory's window shows) is therefore exactly the number of
+ * rows the accessory can scroll to.
+ */
+export function quickTaskProjection(
+  rows: readonly TaskBrowserRow[],
+  attention: readonly QuestionAttentionRow[],
+): TaskPanelItem[] {
+  const items = [...quickQuestionRows(attention), ...taskPanelItems(rows)]
+  return projectTaskItems(items, {
+    scope: 'active',
+    autoExpandRunning: true,
+    // Quick surfaces attention rows only while no live work is present —
+    // the same condition the retired modal Quick evaluated at open.
+    includeAttentionInActive: !items.some(isTaskItemActive),
+  }).rows
 }
 
-/** The Job detail body from the detached observation (never a Host read). */
-function formatJobObservation(observed: JobObservedSnapshot): string {
-  const lines: string[] = [observed.status]
-  if (observed.progress !== undefined) lines.push(`progress: ${observed.progress}`)
-  if (observed.detail !== undefined) lines.push(`detail: ${observed.detail}`)
-  if (observed.gapBefore) lines.push('note: earlier output was evicted before this retained preview')
-  if (observed.error !== undefined) lines.push(`follow error: ${observed.error}`)
-  lines.push('', 'best-effort retained output preview (not a complete transcript):', '', observed.text)
-  return lines.join('\n')
+/**
+ * The opening Task-Browser row projection of ONE Job workspace (Phase 3B /
+ * B1-A). It is the FIRST-FRAME identity fallback of the selected-Job view — the
+ * observer's snapshots are the authority from the first one on — and it is
+ * owned here because this runtime captures it at open time.
+ */
+export interface JobInspectorOpeningRow {
+  readonly jobId: string
+  readonly kind: string
+  readonly label: string
+  readonly status: string
+  readonly detail?: string
+}
+
+/**
+ * The ONE captured state a Job workspace presents: the opening row plus the
+ * latest detached observation, or the failure of the observation itself. The
+ * TUI panel consumes it as a TYPE only and folds it into its display projection
+ * (`deriveJobInspectorView`); the presenter never becomes a second authority
+ * over Job facts.
+ */
+export interface JobInspectorState {
+  readonly opening: JobInspectorOpeningRow
+  readonly observed?: JobObservedSnapshot
+  /** Set only when the observation port refused to open a stream at all. */
+  readonly observationError?: string
 }
 
 /**
@@ -356,14 +435,30 @@ export function createTaskRuntime(options: TaskRuntimeOptions): TaskRuntime {
   let refreshAgents: () => void = () => {}
   let refreshAgentRuntimeOnly: () => void = () => {}
   let taskBrowserRows: TaskBrowserRow[] = []
+  /**
+   * The GLOBAL projection of the last row commit, before the open browser's
+   * dataset scope filtered it. The resident below-editor window is NOT a dataset
+   * view: it must keep showing the whole session (Jobs included) while a
+   * Workflow-scoped Task Browser is open, so it projects from HERE.
+   */
+  let taskBrowserGlobalRows: TaskBrowserRow[] = []
   let taskRuntime: TaskBrowserRuntime | undefined
   let taskBrowserScope: TaskBrowserDatasetScope = { kind: 'all' }
-  let quickTaskState: TaskBrowserViewState | undefined
   let activeTaskBrowser: TaskBrowserHandle | undefined
   let activeTaskBrowserToken: object | undefined
-  /** The open browser's mode: Question attention rows are mode-dependent
-   *  (Quick lists parked ones only, Full lists every actionable one). */
-  let activeTaskBrowserMode: 'quick' | 'full' | undefined
+  /** The open browser's mode (always `'full'` when a browser is open — the
+   *  Quick modal is retired; Full lists every actionable attention row).
+   *  `undefined` = no browser open. */
+  let activeTaskBrowserMode: 'full' | undefined
+  /**
+   * Monotonic identity of the LAST opened Task Browser. The close tails
+   * close over the epoch of the browser that opened them, so a browser a
+   * synchronous callback opened while the old one was closing can never be
+   * overwritten. A retired browser's own token is NOT such a fence: its own
+   * `onRetired` legitimately clears it, so "token is clear" cannot be told
+   * apart from "someone newer owns the slot".
+   */
+  let taskBrowserEpoch = 0
   let activeJobViewerClose: (() => void) | undefined
   /**
    * The CURRENT selected-Job viewer instance. The ownership SessionSubject is
@@ -490,24 +585,48 @@ export function createTaskRuntime(options: TaskRuntimeOptions): TaskRuntime {
    */
   const taskPanelItemsWithAttention = (
     rows: readonly TaskBrowserRow[],
-    mode: 'quick' | 'full',
   ): TaskPanelItem[] => {
     const attention = options.attention.rows()
-    const questionItems = mode === 'quick' ? quickQuestionRows(attention) : fullQuestionRows(attention)
-    return [...questionItems, ...taskPanelItems(rows)]
+    return [...fullQuestionRows(attention), ...taskPanelItems(rows)]
   }
 
-  const commitRows = (rows: readonly TaskBrowserRow[], preferred?: string): void => {
+  /**
+   * Publish the passive Quick accessory window (B4-A). The accessory is
+   * PiTui-only chrome exactly like the roster badge and the summary: a renderer
+   * without a Task Center (read-only TSP) skips the commit instead of mounting a
+   * fake projection. The rows are re-projected from the runtime's committed GLOBAL
+   * row facts + the controller's detached attention model on every call — this sink
+   * is NEVER a second catalog, never a dataset view, and it never acknowledges a
+   * failure.
+   */
+  const publishQuickProjection = (): void => {
+    if (options.isCleanedUp()) return
+    if (!options.display().supportsTaskCenter) return
+    options.mounted().setQuickTaskItems(quickTaskProjection(taskBrowserGlobalRows, options.attention.rows()))
+  }
+
+  const commitRows = (rows: readonly TaskBrowserRow[], preferred?: string, globalRows?: readonly TaskBrowserRow[]): void => {
     if (options.isCleanedUp()) return
     taskBrowserRows = [...rows]
+    // The open browser's rows may be dataset-SCOPED (a Workflow phase/run); the
+    // resident window is not that view, so it projects from the SAME commit's
+    // global rows and never from a narrower dataset.
+    if (globalRows !== undefined) taskBrowserGlobalRows = [...globalRows]
+    // The passive below-editor accessory projects from THIS commit whether or
+    // not a modal browser is open (B4-A): an unopened browser is not a reason
+    // to leave the live task window stale.
+    publishQuickProjection()
     if (activeTaskBrowserMode === undefined) {
       // No browser open: only the select-path identity source is updated.
       return
     }
-    activeTaskBrowser?.setItems(taskPanelItemsWithAttention(rows, activeTaskBrowserMode), preferred)
+    activeTaskBrowser?.setItems(taskPanelItemsWithAttention(rows), preferred)
   }
   const commitBadge = (running: ReadonlyArray<{ id: string; label: string }>): void => {
     if (options.isCleanedUp()) return
+    // PR3-A: the roster badge is Task-Center chrome; a renderer without it
+    // (read-only TSP) legitimately skips the commit — never a fake roster.
+    if (!options.display().supportsTaskCenter) return
     options.mounted().setAgents(running.map(entry => ({
       id: entry.id,
       label: entry.label,
@@ -521,6 +640,7 @@ export function createTaskRuntime(options: TaskRuntimeOptions): TaskRuntime {
     // browser too — and it excludes the Job rows that `rows()` carries.
     taskCatalogDescendants = summary.totalAgents
     if (options.isCleanedUp()) return
+    if (!options.display().supportsTaskCenter) return
     options.mounted().setTaskSummary(summary)
   }
   const commitRefreshState = (state: 'loading' | 'ready' | 'stale', error?: string): void => {
@@ -538,48 +658,78 @@ export function createTaskRuntime(options: TaskRuntimeOptions): TaskRuntime {
    */
   const openJobStatusViewer = (
     jobId: string,
-    title: string,
     row: { readonly jobKind: string; readonly label: string; readonly status: string; readonly detail?: string },
   ): void => {
     const source = taskCenter()
-    // One viewer at a time, and a fresh selection replaces the previous.
-    activeJobViewerClose?.()
     const ownerSessionId = source.sessionId()
-    if (ownerSessionId === undefined) return
+    if (ownerSessionId === undefined) {
+      // No live root session: nothing to observe. Retire the previous viewer
+      // (it belonged to the session that just went away) rather than leaving a
+      // ghost observation behind; never open a new one on a dead session.
+      const previousCloser = activeJobViewerClose
+      activeJobViewerClose = undefined
+      previousCloser?.()
+      return
+    }
     // The destructive-intent fence is captured at OPEN time (like the browser
     // fence): a Stop confirmed later belongs to THIS viewer's subject.
     const viewerSubject = source.captureSubject()
     // …and the viewer INSTANCE token is the currentness fence: the ownership
     // subject alone stays current across a same-Session Job A -> Job B
     // replacement, so a stale settlement is dropped by identity.
+    //
+    // The NEW intent is committed BEFORE the previous viewer is closed:
+    // closing it runs owner code (its onClose) that may synchronously re-enter
+    // this opener, and that newer selection must win.
     const viewerToken = {}
+    const previousCloser = activeJobViewerClose
     activeJobViewerToken = viewerToken
+    activeJobViewerClose = undefined
+    previousCloser?.()
+    if (activeJobViewerToken !== viewerToken) return
     const viewerCurrent = (): boolean => activeJobViewerToken === viewerToken
-    const fallbackText = row.jobKind === 'subagent'
-      ? source.subagentJobViewHint(row.status, row.detail)
-      : jobStatusHint(row.status, row.detail)
-    // The selected Job is the ONLY observed Job (P1-B1). The observer is
-    // event-driven at its data source: the official follow stream updates
-    // this local snapshot and the viewer's existing refresh timer merely
-    // repaints it — the tick never reads Host output.
-    let observed: JobObservedSnapshot | undefined
-    let observationError: string | undefined
+    // The ONE captured state of this workspace instance: the opening Task row is
+    // the first-frame identity fallback, and every Job fact after the first
+    // snapshot comes from the SAME observed object.
+    let state: JobInspectorState = {
+      opening: {
+        jobId,
+        kind: row.jobKind,
+        label: row.label,
+        status: row.status,
+        ...(row.detail === undefined ? {} : { detail: row.detail }),
+      },
+    }
+    // The selected Job is the ONLY observed Job (P1-B1). The follow stream is
+    // opened EXACTLY once and pushes each snapshot straight into the workspace —
+    // no refresh timer, no `jobs.read()`, no second subscription. An open may
+    // emit synchronously, so the latest state is cached locally and the UI is
+    // pushed through a hook that is inert until the handle exists.
+    let handle: JobInspectorHandle | undefined
+    const publish = (): void => {
+      if (viewerCurrent()) handle?.update(state)
+    }
     let closeObserver: () => void = () => {}
     try {
-      closeObserver = source.jobObservation.open(ownerSessionId, jobId, (next) => { observed = next })
+      closeObserver = source.jobObservation.open(ownerSessionId, jobId, (next) => {
+        state = { ...state, observed: next }
+        publish()
+      })
     } catch (error) {
       // A composition without the official job-controller row (the injected
-      // production row guarantees it) degrades to the status-only detail —
-      // the documented safety valve — and says so explicitly.
-      observationError = safeErrorMessage(error)
+      // production row guarantees it) degrades to the opening row plus the
+      // VISIBLE reason — the documented safety valve — and never to a fabricated
+      // "finished with no output".
+      state = { ...state, observationError: safeErrorMessage(error) }
     }
-    const refreshBody = (): string => {
-      if (observed !== undefined) return formatJobObservation(observed)
-      // Only the opening row projection before the first observed snapshot:
-      // never a registry/roster re-read on the timer.
-      return observationError === undefined
-        ? fallbackText
-        : `${fallbackText}\nlive observation unavailable: ${observationError}`
+    // ONE release owner for THIS open's subscription: Esc, the parent browser
+    // retiring, a session reset and the final surface teardown all funnel
+    // through the same closer, which releases exactly once.
+    let observationReleased = false
+    const releaseOnce = (): void => {
+      if (observationReleased) return
+      observationReleased = true      // before releasing the external subscription
+      closeObserver()
     }
     // The Stop key and its hint share ONE live capability source: THIS viewer
     // instance still current, the captured subject still current, and the
@@ -587,46 +737,77 @@ export function createTaskRuntime(options: TaskRuntimeOptions): TaskRuntime {
     const activeForStop = (): boolean =>
       viewerCurrent()
       && source.subjectMatches(viewerSubject)
-      && isActiveJobStatus(observed?.status ?? row.status)
-    activeJobViewerClose = options.mounted().openOutputViewer({
-      title,
-      initial: fallbackText,
-      refresh: refreshBody,
-      onStop: () => {
-        // Re-check both fences at dispatch: a stale viewer/session
-        // confirmation dispatches nothing.
-        if (!activeForStop()) return
-        runOwned('job stop', () => source.jobObservation.stop(ownerSessionId, jobId), {
-          diag: taskDiag(),
-          sessionId: () => ownerSessionId,
-          onResult: (outcome) => {
-            if (options.isCleanedUp() || !viewerCurrent() || !source.subjectMatches(viewerSubject)) return
-            const notice = jobStopNotice(outcome, row.label)
-            options.mounted().notify(notice.message, notice.level)
-          },
-          onError: (error) => {
-            if (options.isCleanedUp() || !viewerCurrent() || !source.subjectMatches(viewerSubject)) return
-            options.mounted().notify(`could not stop ${row.label}: ${safeErrorMessage(error)}`, 'error')
-          },
-        })
-        // No optimistic local mutation: the official roster/observation
-        // streams converge on their own.
-      },
-      canStop: activeForStop,
-      // The viewer was opened from the Task Center browser: Esc returns
-      // to the parent browser, not to the editor.
-      closeHint: 'back',
-      onClose: () => {
-        // Invalidate THIS viewer's instance fence BEFORE releasing, so a Stop
-        // settlement still in flight can never notify a replacement surface.
-        if (activeJobViewerToken === viewerToken) activeJobViewerToken = undefined
-        // Closing the viewer always releases the observer (Esc, the parent
-        // browser closing, a session transition, or surface teardown).
-        closeObserver()
-        activeJobViewerClose = undefined
-        refreshTasks()
-      },
-    })
+      && isActiveJobStatus(state.observed?.status ?? row.status)
+    const stopOnce = (): void => {
+      // Re-check both fences at dispatch: a stale viewer/session
+      // confirmation dispatches nothing.
+      if (!activeForStop()) return
+      runOwned('job stop', () => source.jobObservation.stop(ownerSessionId, jobId), {
+        diag: taskDiag(),
+        sessionId: () => ownerSessionId,
+        onResult: (outcome) => {
+          if (options.isCleanedUp() || !viewerCurrent() || !source.subjectMatches(viewerSubject)) return
+          const notice = jobStopNotice(outcome, row.label)
+          options.mounted().notify(notice.message, notice.level)
+        },
+        onError: (error) => {
+          if (options.isCleanedUp() || !viewerCurrent() || !source.subjectMatches(viewerSubject)) return
+          options.mounted().notify(`could not stop ${row.label}: ${safeErrorMessage(error)}`, 'error')
+        },
+      })
+      // No optimistic local mutation: the official roster/observation streams
+      // converge on their own.
+    }
+    try {
+      handle = options.mounted().openJobInspector({
+        initial: state,
+        canStop: activeForStop,
+        onStop: stopOnce,
+        // The viewer was opened from the Task Center browser: closing the
+        // workspace returns to that same browser, not to the editor.
+        onClose: () => {
+          // Read the currentness ONCE: a stale (replaced) viewer must neither
+          // clear the live closer nor repaint with its own context.
+          const wasCurrent = activeJobViewerToken === viewerToken
+          // Invalidate THIS viewer's instance fence BEFORE releasing, so a Stop
+          // settlement still in flight can never notify a replacement surface.
+          if (wasCurrent) {
+            activeJobViewerToken = undefined
+            activeJobViewerClose = undefined
+          }
+          // Leaving the workspace always releases the observer (Esc, the parent
+          // browser closing, a session transition, or surface teardown); the
+          // owner repaint is an INDEPENDENT obligation.
+          runSyncDisposalSteps('job viewer finalization', [
+            releaseOnce,
+            () => {
+              if (wasCurrent && activeJobViewerToken === undefined && !options.isCleanedUp()) refreshTasks()
+            },
+          ])
+        },
+      })
+    } catch (error) {
+      // The workspace mount/start failed: the lease never published, so release
+      // THIS open's observation exactly once, retire the instance fence, and
+      // rethrow the real failure — never a silent "no output" and never a leaked
+      // background stream.
+      runSyncDisposalStepsWithPrimary('job viewer open failure', error, [
+        releaseOnce,
+        () => {
+          if (!viewerCurrent()) return
+          activeJobViewerToken = undefined
+          activeJobViewerClose = undefined
+        },
+      ])
+    }
+    // First-frame guarantee: the observation may have emitted BEFORE the handle
+    // existed; present the captured state once now that the workspace can.
+    publish()
+    // Only the STILL-current selection owns the global closer slot: if the mount
+    // synchronously closed/replaced this workspace, the newer owner's slot must
+    // survive and this stale handle is closed on its own.
+    if (activeJobViewerToken === viewerToken) activeJobViewerClose = () => handle?.close()
+    else handle?.close()
   }
 
   /**
@@ -673,20 +854,126 @@ export function createTaskRuntime(options: TaskRuntimeOptions): TaskRuntime {
       // fallback and let /tasks (which owns child identities through
       // the merged browser) perform transcript selection; never substitute
       // label/order/time matching.
-      openJobStatusViewer(jobId, `subagent ${row.jobId} · ${row.label}`, row)
+      openJobStatusViewer(jobId, row)
       return 'keep-open'
     }
-    openJobStatusViewer(jobId, `${row.jobKind} ${row.jobId} · ${row.label}`, row)
+    openJobStatusViewer(jobId, row)
     return 'keep-open'
   }
 
   /**
-   * Open the Task Browser. `quick` is the ↓ trigger, `full` is the `/tasks`
-   * surface; the SAME browser serves both.
+   * The ONE typed selection router (Phase 3B/B4-B): resolve a stable row
+   * value against an explicit authority row list and run the existing
+   * open/reopen path. Full browser and on-demand Quick share this — never a
+   * second open path, never a Stop, never a registry re-read. The inputs
+   * are exactly the plan's: the CURRENT authority rows, the selected value,
+   * and the captured session/subject implicitly bound by the existing
+   * openers (their own fences decide currentness at dispatch).
+   */
+  const resolveTaskSelection = (
+    value: string,
+    authorityRows: readonly TaskBrowserRow[],
+  ): 'close' | 'keep-open' => {
+    if (options.isCleanedUp()) return 'close'
+    const source = taskCenter()
+    // A Question attention row is NOT a Job: it never enters the Job
+    // stop/detail paths. Enter reopens the SAME controller entry, and a row
+    // that went stale between rendering and selection (another client
+    // queued/settled the call) fails closed and keeps the caller usable.
+    const questionIdentity = questionIdentityOf(value)
+    if (questionIdentity !== undefined) {
+      const reopened = options.attention.reopen(questionIdentity.sessionId, questionIdentity.callId)
+      return reopened ? 'close' : 'keep-open'
+    }
+    const row = authorityRows.find(candidate => candidate.value === value)
+    if (row === undefined) return source.rowSelectionDisposition(undefined, 'keep-open')
+    if (row.kind === 'external') {
+      // No local child Session exists for an external execution: the row is a
+      // fact, never a viewer target (S2-B1 §4A.1).
+      options.mounted().notify('external subagent: no local session to open', 'info')
+      return 'keep-open'
+    }
+    if (row.kind === 'subagent') {
+      // The viewer target carries the row's OWN parent (plan §6.10:
+      // childId + parentId + depth + mode + activity — never just
+      // childId + mode). A nested row's durable parent is the exact
+      // direct parent recorded by DSH; only a direct child falls back
+      // to the browser root (the live main session).
+      const parentSessionId = row.parentId !== '' ? row.parentId : source.sessionId()
+      if (parentSessionId === undefined) return 'close'
+      // The row carries the catalog MODE + projected activity + DEPTH:
+      // the viewer target is pinned to them (continuable → interactive
+      // editor only at depth 1, one-shot → read-only, depth > 1 →
+      // nested read-only), and the follow-up write path to the exact
+      // parent.
+      runOwned('subagent view from tasks', () => source.enterView(
+        row.childId, row.label, row.mode, parentSessionId, row.activity, row.depth,
+      ), {
+        diag: taskDiag(),
+        sessionId: () => source.sessionId(),
+        onError: (error) => {
+          if (options.isCleanedUp()) return
+          options.mounted().notify(`could not open the subagent view: ${safeErrorMessage(error)}`, 'error')
+        },
+      })
+      // The subagent transcript is a session/viewer surface, not a
+      // child overlay of the browser: it REPLACES the Task Center and
+      // keeps its own Esc semantics.
+      return source.rowSelectionDisposition(row, 'keep-open')
+    }
+    // A Job View is the selected row's DETAIL: it opens as a child
+    // overlay (hiding this browser, not destroying it) and returns to
+    // the exact browser state on Esc. A job that has already vanished
+    // simply opens nothing — the parent stays usable either way.
+    if (row.kind !== 'job') return 'keep-open'
+    return source.rowSelectionDisposition(row, openJobView(row.jobId))
+  }
+
+  /**
+   * The on-demand Task Quick's typed selection route (B4-B). The value is a
+   * `TaskPanelItem.value` the accessory showed; it is verified against the
+   * CURRENT Quick projection (`quickTaskProjection` over the runtime's
+   * GLOBAL authority rows + the detached attention rows) before any open —
+   * never the modal-scoped rows, a label, or the footer badge. The open
+   * itself runs the ONE `resolveTaskSelection` router. `false` = no surface
+   * opened (stale/unreachable row, fence, cleanup); the app never re-opens
+   * the hidden Quick on a refusal; `true` = the routed surface opened
+   * (the only refusal is a stale Question row).
+   */
+  const openQuickTaskItem = (value: string): boolean => {
+    if (options.isCleanedUp()) return false
+    const source = taskCenter()
+    const sessionId = source.sessionId()
+    if (sessionId === undefined) return false
+    // The CURRENT Quick projection is the only admission list.
+    const projection = quickTaskProjection(taskBrowserGlobalRows, options.attention.rows())
+    if (!projection.some(item => item.value === value)) return false
+    // The captured subject fence: a selection dispatched after the session
+    // switched must not open the OLD session's detail.
+    const subject = source.captureSubject()
+    if (!source.subjectMatches(subject)) return false
+    // The only REFUSAL the router can produce is a stale Question row
+    // (`attention.reopen` false — plan §9.2: false, nothing opens, the
+    // caller stays usable). A Job / subagent row that survives the
+    // projection and the subject fence always opens its routed surface
+    // (the Job detail overlay or the subagent transcript), even though its
+    // browser disposition is `'keep-open'` — that disposition describes the
+    // CALLER's survival, not whether a surface opened.
+    const questionIdentity = questionIdentityOf(value)
+    if (questionIdentity !== undefined) {
+      return options.attention.reopen(questionIdentity.sessionId, questionIdentity.callId)
+    }
+    resolveTaskSelection(value, taskBrowserGlobalRows)
+    return true
+  }
+
+  /**
+   * Open the Task Browser. `full` is the `/tasks` surface and every scoped
+   * view; the `quick` modal is retired (B4-B — the on-demand Task Quick
+   * accessory replaced it) and with it the Quick→Full restore input.
    */
   const openTasksBrowser = (
-    viewMode: 'quick' | 'full',
-    restoreState?: TaskBrowserViewState,
+    viewMode: 'full',
     scope?: TaskBrowserDatasetScope,
     header?: string,
   ): void => {
@@ -694,10 +981,9 @@ export function createTaskRuntime(options: TaskRuntimeOptions): TaskRuntime {
     const browserSessionId = source.sessionId()
     if (options.isCleanedUp() || browserSessionId === undefined) return
     // PR2 plan §10.5/§10.8: an EXPLICIT scope (a Workflow phase/run
-    // dataset) becomes the browser's dataset scope; a transition
-    // (Quick→Full / Full→Quick) without one keeps the current scope; a
-    // fresh ordinary open after a close always starts from `all` (the
-    // close paths reset it). The scope applies at EVERY runtime commit.
+    // dataset) becomes the browser's dataset scope; a fresh ordinary open
+    // after a close always starts from `all` (the close paths reset it).
+    // The scope applies at EVERY runtime commit.
     if (scope !== undefined) taskBrowserScope = scope
     taskRuntime?.setScope(taskBrowserScope)
     // The destructive-intent fence is captured at OPEN time: a Stop
@@ -707,6 +993,7 @@ export function createTaskRuntime(options: TaskRuntimeOptions): TaskRuntime {
     // bound to the browser that hosted the confirmation (PR review P1).
     const browserSubject = source.captureSubject()
     const browserToken = {}
+    const browserEpoch = (taskBrowserEpoch += 1)
     activeTaskBrowserToken = browserToken
     let jobSnapshots: readonly TaskBrowserJobInput[] = []
     const jobs = source.jobs
@@ -745,50 +1032,9 @@ export function createTaskRuntime(options: TaskRuntimeOptions): TaskRuntime {
     }
     const selectRow = (value: string): 'close' | 'keep-open' => {
       if (options.isCleanedUp()) return 'close'
-      // A Question attention row is NOT a Job: it never enters the Job
-      // stop/detail paths. Enter reopens the SAME controller entry, and a row
-      // that went stale between rendering and selection (another client
-      // queued/settled the call) fails closed and keeps the browser usable.
-      const questionIdentity = questionIdentityOf(value)
-      if (questionIdentity !== undefined) {
-        const reopened = options.attention.reopen(questionIdentity.sessionId, questionIdentity.callId)
-        return reopened ? 'close' : 'keep-open'
-      }
-      const row = taskBrowserRows.find(candidate => candidate.value === value)
-      if (row === undefined) return source.rowSelectionDisposition(undefined, 'keep-open')
-      if (row.kind === 'subagent') {
-        // The viewer target carries the row's OWN parent (plan §6.10:
-        // childId + parentId + depth + mode + activity — never just
-        // childId + mode). A nested row's durable parent is the exact
-        // direct parent recorded by DSH; only a direct child falls back
-        // to the browser root (the live main session).
-        const parentSessionId = row.parentId !== '' ? row.parentId : source.sessionId()
-        if (parentSessionId === undefined) return 'close'
-        // The row carries the catalog MODE + projected activity + DEPTH:
-        // the viewer target is pinned to them (continuable → interactive
-        // editor only at depth 1, one-shot → read-only, depth > 1 →
-        // nested read-only), and the follow-up write path to the exact
-        // parent.
-        runOwned('subagent view from tasks', () => source.enterView(
-          row.childId, row.label, row.mode, parentSessionId, row.activity, row.depth,
-        ), {
-          diag: taskDiag(),
-          sessionId: () => source.sessionId(),
-          onError: (error) => {
-            if (options.isCleanedUp()) return
-            options.mounted().notify(`could not open the subagent view: ${safeErrorMessage(error)}`, 'error')
-          },
-        })
-        // The subagent transcript is a session/viewer surface, not a
-        // child overlay of the browser: it REPLACES the Task Center and
-        // keeps its own Esc semantics.
-        return source.rowSelectionDisposition(row, 'keep-open')
-      }
-      // A Job View is the selected row's DETAIL: it opens as a child
-      // overlay (hiding this browser, not destroying it) and returns to
-      // the exact browser state on Esc. A job that has already vanished
-      // simply opens nothing — the parent stays usable either way.
-      return source.rowSelectionDisposition(row, openJobView(row.jobId))
+      // The ONE typed selection router (B4-B): the same resolver the
+      // on-demand Quick uses, over the CURRENT browser rows.
+      return resolveTaskSelection(value, taskBrowserRows)
     }
     const stopRow = (value: string): void => {
       if (options.isCleanedUp()) return
@@ -852,7 +1098,7 @@ export function createTaskRuntime(options: TaskRuntimeOptions): TaskRuntime {
       // the CURRENT projection row must still be active, then the ONE
       // `jobObservation.stop` is dispatched. No optimistic local mutation —
       // the authoritative roster/observation streams converge the row.
-      if (!isActiveJobStatus(row.status)) return
+      if (row.kind !== 'job' || !isActiveJobStatus(row.status)) return
       runOwned('job stop from tasks', () => taskCenter().jobObservation.stop(browserSessionId, row.jobId), {
         diag: taskDiag(),
         sessionId: () => browserSessionId,
@@ -874,14 +1120,10 @@ export function createTaskRuntime(options: TaskRuntimeOptions): TaskRuntime {
     // Re-publish the parked count with the same fresh authority: the footer
     // affordance must never lag a Question that is already known to be pending.
     options.attention.publish()
-    const initialScope = restoreState?.scope ?? (viewMode === 'quick' ? 'active' : 'all')
-    const initialQuery = restoreState?.searchQuery ?? ''
-    const initialSelected = restoreState?.selectedId === 'task:view-all' ? undefined : restoreState?.selectedId ?? undefined
-    const initialPreferred = initialSelected
-      ?? taskBrowserRows.find(row => row.kind === 'subagent' && row.activity === 'running')?.value
+    const initialPreferred = taskBrowserRows.find(row => row.kind === 'subagent' && row.activity === 'running')?.value
       ?? taskBrowserRows.find(row => row.kind === 'job' && isActiveJobStatus(row.status))?.value
     const handle = options.mounted().openTaskBrowser(
-      taskPanelItemsWithAttention(taskBrowserRows, viewMode),
+      taskPanelItemsWithAttention(taskBrowserRows),
       // Selection disposition decides whether the browser survives: a Job
       // detail keeps it MOUNTED underneath (the overlay stack hides and
       // restores the exact instance/state on Esc); a terminal navigation
@@ -893,40 +1135,46 @@ export function createTaskRuntime(options: TaskRuntimeOptions): TaskRuntime {
         if (options.isCleanedUp()) return 'close'
         const disposition = selectRow(value)
         if (disposition === 'keep-open') return 'keep-open'
-        activeTaskBrowser = undefined
-        activeTaskBrowserToken = undefined
-        activeTaskBrowserMode = undefined
-        resetTaskBrowserScope()
+        // A terminal navigation retires THIS browser's slot only while it is
+        // still the current one: a reentrant open from the selection callback
+        // already owns the slot and must not be zeroed (nor have its scope
+        // reset under it).
+        if (activeTaskBrowserToken === browserToken) {
+          activeTaskBrowser = undefined
+          activeTaskBrowserToken = undefined
+          activeTaskBrowserMode = undefined
+          resetTaskBrowserScope()
+        }
         return 'close'
       },
       () => {
         if (options.isCleanedUp()) return
-        const current = activeTaskBrowser?.getViewState?.()
-        activeTaskBrowser = undefined
-        activeTaskBrowserToken = undefined
-        activeTaskBrowserMode = undefined
-        resetTaskBrowserScope()
-        if (viewMode === 'full' && restoreState !== undefined) {
-          // Esc from a promoted full view returns to Quick with the latest
-          // shared context, not the state from the promotion moment.
-          const state = current ?? quickTaskState ?? restoreState
-          openTasksBrowser('quick', state)
+        // The close tail belongs to the browser GENERATION that opened it:
+        // a browser a synchronous callback opened while this one was closing
+        // (the physical hide restores plugin focus) already owns the slot and
+        // must not be overwritten by a stale browser. The retired browser's own
+        // token cannot express this — `onRetired` just cleared it.
+        if (taskBrowserEpoch !== browserEpoch) return
+        if (activeTaskBrowserToken === browserToken) {
+          activeTaskBrowser = undefined
+          activeTaskBrowserToken = undefined
+          activeTaskBrowserMode = undefined
+          resetTaskBrowserScope()
         }
+        // B4-B: the Quick→Full promotion restore tail is retired with the
+        // modal Quick — a Full browser closes to the editor (the on-demand
+        // Quick no longer exists as a modal to return into).
       },
       {
         header: header ?? 'Tasks',
         enableSearch: true,
         mode: viewMode,
-        openedFrom: viewMode === 'full' && restoreState !== undefined ? 'quick' : 'command',
-        scope: initialScope,
-        typeFilter: restoreState?.typeFilter,
-        initialQuery,
-        initialSearchMode: restoreState?.searchMode,
-        expandedIds: [...(restoreState?.expandedIds ?? [])],
-        collapsedIds: [...(restoreState?.collapsedIds ?? [])],
-        selectedId: initialSelected,
+        openedFrom: 'command',
+        scope: 'all',
+        expandedIds: [],
+        collapsedIds: [],
         preferredValue: initialPreferred,
-        maxVisible: viewMode === 'quick' ? 8 : 18,
+        maxVisible: 18,
         loading: runtime !== undefined && taskBrowserRows.length === 0,
         groupLabels: true,
         onRefresh: () => {
@@ -947,20 +1195,38 @@ export function createTaskRuntime(options: TaskRuntimeOptions): TaskRuntime {
           // rejects (PR review P1).
           refreshAgents()
         },
-        onViewFull: state => {
-          if (options.isCleanedUp()) return
+        onStop: stopRow,
+        onViewportExpose: ids => { if (!options.isCleanedUp()) runtime?.acknowledge(ids) },
+        onRetired: reason => {
+          // A retire of a browser that is no longer the current one is a
+          // strict no-op: it must never touch the newer browser, its Job child
+          // or its dataset scope.
+          if (activeTaskBrowserToken !== browserToken) return
+          // Retire this browser's identity BEFORE closing the Job child: the
+          // child's own finalizer (and any user callback it runs) may open a
+          // newer Task Browser synchronously, and that newer owner must win.
           activeTaskBrowser = undefined
           activeTaskBrowserToken = undefined
           activeTaskBrowserMode = undefined
-          quickTaskState = state
-          openTasksBrowser('full', state)
+          // The child's OWN finalizer clears its token/closer; this browser
+          // only asks it to close. (B4-B removed the `promote` scope-
+          // preservation branch with the modal Quick.)
+          const childCloser = activeJobViewerClose
+          runSyncDisposalSteps('task browser retire', [
+            () => resetTaskBrowserScope(),
+            () => childCloser?.(),
+          ])
         },
-        onStop: stopRow,
-        onViewportExpose: ids => { if (!options.isCleanedUp()) runtime?.acknowledge(ids) },
       },
     )
-    activeTaskBrowser = handle
-    activeTaskBrowserMode = viewMode
+    // A synchronously retired/replaced browser must not be re-installed as the
+    // active handle: close the stale handle on its own (idempotent) instead.
+    if (activeTaskBrowserToken === browserToken) {
+      activeTaskBrowser = handle
+      activeTaskBrowserMode = viewMode
+    } else {
+      handle.close()
+    }
     // Acknowledging failures is CONTINUOUS, not one-shot-at-open: the
     // panel reports each attention row the first time it enters the
     // open viewport (first frame AND every later scroll/page/jump), and
@@ -1035,7 +1301,7 @@ export function createTaskRuntime(options: TaskRuntimeOptions): TaskRuntime {
         const header = action.kind === 'open-phase-agents'
           ? `Workflow · ${action.name} · ${action.phaseLabel} · ${count} agent${count === 1 ? '' : 's'}`
           : `Workflow · ${action.name} · ${count} agent${count === 1 ? '' : 's'}`
-        openTasksBrowser('full', undefined, { kind: 'subagents', childIds: action.childIds }, header)
+        openTasksBrowser('full', { kind: 'subagents', childIds: action.childIds }, header)
         return
       }
     }
@@ -1078,14 +1344,22 @@ export function createTaskRuntime(options: TaskRuntimeOptions): TaskRuntime {
             startedAt: job.startedAt,
             finishedAt: job.finishedAt,
           }))
-          options.mounted().setTasks(tasks)
+          if (options.display().supportsTaskCenter) options.mounted().setTasks(tasks)
           // A jobs-only session has no catalog coordinator, so this is the
-          // ONLY refresh channel for an OPEN browser. Keep it in step with
-          // the registry, or a Job detail's hidden parent returns with stale
-          // status (the subagents path commits through TaskBrowserRuntime).
-          if (taskRuntime === undefined && activeTaskBrowser !== undefined && activeTaskBrowserMode !== undefined) {
+          // ONLY refresh channel for the OPEN browser AND for the passive
+          // accessory. The rows are kept in step with the registry even while
+          // no browser is open — otherwise a Job detail's hidden parent returns
+          // with a stale status (the subagents path commits through
+          // TaskBrowserRuntime) and the below-editor window goes stale.
+          if (taskRuntime === undefined) {
+            // No coordinator means no dataset scope either: the jobs-only
+            // projection IS the global one.
             taskBrowserRows = buildTaskRows(snapshots, [])
-            activeTaskBrowser.setItems(taskPanelItemsWithAttention(taskBrowserRows, activeTaskBrowserMode))
+            taskBrowserGlobalRows = taskBrowserRows
+            publishQuickProjection()
+            if (activeTaskBrowser !== undefined && activeTaskBrowserMode !== undefined) {
+              activeTaskBrowser.setItems(taskPanelItemsWithAttention(taskBrowserRows))
+            }
           }
         }
         // Events route by SEMANTICS, mirroring the TaskBrowserRuntime's own
@@ -1156,7 +1430,7 @@ export function createTaskRuntime(options: TaskRuntimeOptions): TaskRuntime {
         refreshAgents = (): void => {
           if (options.isCleanedUp()) return
           if (source.sessionId() === undefined) {
-            options.mounted().setAgents([])
+            if (options.display().supportsTaskCenter) options.mounted().setAgents([])
             return
           }
           taskCatalogRefreshPendingInvalidations += 1
@@ -1169,7 +1443,7 @@ export function createTaskRuntime(options: TaskRuntimeOptions): TaskRuntime {
         refreshAgentRuntimeOnly = (): void => {
           if (options.isCleanedUp()) return
           if (source.sessionId() === undefined) {
-            options.mounted().setAgents([])
+            if (options.display().supportsTaskCenter) options.mounted().setAgents([])
             return
           }
           taskRuntime!.refreshRuntime()
@@ -1199,7 +1473,7 @@ export function createTaskRuntime(options: TaskRuntimeOptions): TaskRuntime {
       // A session switch drops the old session's Question attention with the
       // rest of the Task Center state: its parked count must not arm the new
       // session's footer trigger.
-      options.mounted().setQuestionAttention(0)
+      if (options.display().supportsTaskCenter) options.mounted().setQuestionAttention(0)
       // Invalidate the coalescing gate BEFORE any close/dispose that can
       // synchronously run a callback: the old session's slow traversal must
       // neither hold the new session's refresh back (`inFlight`) nor clear the
@@ -1214,24 +1488,53 @@ export function createTaskRuntime(options: TaskRuntimeOptions): TaskRuntime {
       // (so closing the hidden parent cannot leave the child alive), then
       // the browser, then reset the coordinator + the synchronous
       // badge/summary/row mirrors (the new session's first listing is async
-      // and the old session's state must not hang on screen).
-      activeJobViewerClose?.()
+      // and the old session's state must not hang on screen). The identity
+      // slots are retired BEFORE any closer runs, so a stale onClose cannot
+      // touch the new session; the independent obligations are all attempted
+      // even when one of them throws.
+      const viewerCloser = activeJobViewerClose
+      const browserHandle = activeTaskBrowser
       activeJobViewerClose = undefined
-      activeTaskBrowser?.close()
+      activeJobViewerToken = undefined
       activeTaskBrowser = undefined
       activeTaskBrowserToken = undefined
       activeTaskBrowserMode = undefined
-      taskRuntime?.reset()
-      // The dataset scope is session-scoped too: a switched-in session must
-      // never inherit a Workflow-scoped browser (PR2 plan §10.8).
-      taskBrowserScope = { kind: 'all' }
-      options.mounted().setTaskSummary({ runningAgents: 0, totalAgents: 0, runningJobs: 0, totalJobs: 0, failedAttention: 0, failedTotal: 0 })
-      options.mounted().setTasks([])
-      options.mounted().setAgents([])
-      taskBrowserRows = []
+      // Retire the browser GENERATION as part of the same precommit, BEFORE any
+      // closer runs: a pending navigation tail that closed over the retired
+      // browser (a reset triggered synchronously from a plugin focus callback
+      // while that browser was closing) must not open a stale Quick afterwards.
+      // The browser's own token cannot express this — it is already cleared.
+      taskBrowserEpoch += 1
+      // EVERY session-scoped obligation is an independent step, so one
+      // throwing closer can neither strand the other closers nor leave the old
+      // session's scope/chrome on screen. The step ORDER is the baseline
+      // non-throwing order (closers, coordinator, dataset scope, mirrors, rows)
+      // — the batch only makes each step non-truncating.
+      runSyncDisposalSteps('task runtime reset', [
+        () => viewerCloser?.(),
+        () => browserHandle?.close(),
+        () => taskRuntime?.reset(),
+        () => { taskBrowserScope = { kind: 'all' } },
+        () => {
+          if (options.display().supportsTaskCenter) {
+            options.mounted().setTaskSummary({ runningAgents: 0, totalAgents: 0, runningJobs: 0, totalJobs: 0, failedAttention: 0, failedTotal: 0 })
+          }
+        },
+        () => { if (options.display().supportsTaskCenter) options.mounted().setTasks([]) },
+        () => { if (options.display().supportsTaskCenter) options.mounted().setAgents([]) },
+        () => { taskBrowserRows = [] },
+        () => { taskBrowserGlobalRows = [] },
+        // The passive below-editor window is session-scoped state like the
+        // badge/summary mirrors: the new session must never paint the old
+        // session's tasks. No acknowledgement is ever issued here.
+        () => { if (options.display().supportsTaskCenter) options.mounted().setQuickTaskItems([]) },
+      ])
     },
-    openTasksBrowser(viewMode, restoreState, scope, header) {
-      openTasksBrowser(viewMode, restoreState, scope, header)
+    openTasksBrowser(viewMode, scope, header) {
+      openTasksBrowser(viewMode, scope, header)
+    },
+    openQuickTaskItem(value) {
+      return openQuickTaskItem(value)
     },
     openJobView(jobId) {
       return openJobView(jobId)
@@ -1242,28 +1545,45 @@ export function createTaskRuntime(options: TaskRuntimeOptions): TaskRuntime {
     refreshAttentionRows() {
       // The Question-attention subscription is a PRESENTATION-only refresh: it
       // never re-lists the Subagent catalog or touches the Job registry.
-      if (options.isCleanedUp() || activeTaskBrowserMode === undefined) return
-      activeTaskBrowser?.setItems(taskPanelItemsWithAttention(taskBrowserRows, activeTaskBrowserMode))
+      if (options.isCleanedUp()) return
+      // The passive accessory reads the SAME detached attention authority as
+      // the modal rows, so a parked Question appears in (and leaves) the
+      // below-editor window with the modal projection — an unopened browser is
+      // not a reason to miss human attention.
+      publishQuickProjection()
+      if (activeTaskBrowserMode === undefined) return
+      activeTaskBrowser?.setItems(taskPanelItemsWithAttention(taskBrowserRows))
     },
     disposeJobEvents() {
       jobsEventsDispose?.()
       jobsEventsDispose = undefined
     },
     disposeJobObservation() {
-      // Release the selected-Job follow stream explicitly: TuiApp.dispose()
-      // does not invoke the viewer's onClose, so the observer would otherwise
-      // outlive the surface.
-      activeJobViewerClose?.()
+      // The runner's explicit release position for the selected-Job follow
+      // stream. The viewer's own physical finalization also releases it, so
+      // this is idempotent (`releaseOnce`); the identity is retired BEFORE the
+      // closer runs, so a re-entrant finalization cannot repaint the dead
+      // surface.
+      const closer = activeJobViewerClose
       activeJobViewerClose = undefined
+      activeJobViewerToken = undefined
+      closer?.()
     },
     disposeTaskBrowser() {
-      // TuiApp.dispose() hides overlays without invoking their user cancel
-      // callbacks. Drop the browser handle and invalidate the token so an
-      // action already waiting on Direct/Host work cannot notify or repaint
-      // the dead surface after teardown.
+      // TuiApp.dispose() physically disposes overlays without invoking their
+      // cancel callback (a browser's owner notification is `onRetired`, which
+      // the frame's physical disposal already delivered). Drop the browser
+      // handle, invalidate the token and retire the browser generation
+      // (symmetrically with `resetTasks`) so an action already waiting on
+      // Direct/Host work — including a pending navigation tail — cannot notify,
+      // open or repaint the dead surface after teardown. In production this
+      // runs under the runner's cleanup latch, so `openTasksBrowser` is already
+      // refused; the generation advance is the same retirement primitive, not a
+      // separately reachable path.
       activeTaskBrowser = undefined
       activeTaskBrowserToken = undefined
       activeTaskBrowserMode = undefined
+      taskBrowserEpoch += 1
     },
   }
 }

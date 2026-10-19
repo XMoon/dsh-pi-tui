@@ -72,6 +72,9 @@ import { isUserInvocableSkill, type HumanSkillCatalog, type HumanSkillSummary } 
 import { registerExitCommand, registerHelpCommand } from './tui/commands/utility.ts'
 import { registerPluginsCommand, registerTasksCommand } from './tui/commands/tasks.ts'
 import { createModelCommands } from './tui/commands/models.ts'
+import type { ModelPresentation } from './app/command/model-presentation.ts'
+import type { PresetPresentation } from './app/command/preset-presentation.ts'
+import type { SessionBrowserPresentation } from './app/command/session-browser-presentation.ts'
 import { registerReloadCommand, registerSkillCommand, type SkillsCommandDeps } from './tui/commands/skills.ts'
 import { createArtifactsCommands } from './tui/commands/artifacts.ts'
 import { createAuthCommands } from './tui/commands/auth.ts'
@@ -186,9 +189,9 @@ export { sessionPickerCategories, sessionSearchCategory } from './tui/commands/s
 /** The /status extension-health rows (moved to `src/tui/commands/status.ts`,
  * re-exported here to keep the stable command-surface import path). */
 export { extensionHealthRows } from './tui/commands/status.ts'
-/** The shipped-preset display copy (moved to `src/tui/commands/models.ts`,
+/** The shipped-preset display copy (moved to `src/tui/pickers/preset-display.ts`,
  * re-exported here to keep the stable command-surface import path). */
-export { isBuiltInPresetRow, presetDisplayText } from './tui/commands/models.ts'
+export { isBuiltInPresetRow, presetDisplayText } from './tui/pickers/preset-display.ts'
 
 /**
  * The effective mode ONE submission resolved at the submit boundary: whether
@@ -270,7 +273,11 @@ export type PermissionPresetResult =
 /** Everything the TUI-owned commands read from the runner. */
 export interface TuiCommandRunner {
   ctx: Context
-  app: TuiApp
+  /** PR3-A: undefined while a non-PiTui renderer owns the terminal; the
+   * boot-mandatory completions install skips, executions are input-gated. */
+  app: TuiApp | undefined
+  /** The native Session Browser presenter, when the mounted renderer supports it. */
+  readonly sessionBrowserPresentation?: SessionBrowserPresentation
   /** The runner's diagnostics channel (stderr + $DSH_HOME/logs). */
   diag: Diag
   /** The current session id. SYNC display/diagnostics ONLY — never an operation
@@ -491,7 +498,7 @@ export interface TuiCommandRunner {
   captureExtensionHealthRef?: (slot: string, id: string) => { slot: string; id: string; owner: string } | undefined
   recordExtensionError?: (ref: { slot: string; id: string; owner: string }, error: unknown) => void
   clearExtensionError?: (ref: { slot: string; id: string; owner: string }) => void
-  switchSession(sessionId: string): Promise<string | undefined>
+  switchSession(sessionId: string, expectedScope?: SessionScope): Promise<string | undefined>
   /** Host-owned /fork navigation. The runner dispatches the semantic fork
    * outside the destructive transition FIFO and only commits the visible child
    * while the captured navigation intent is still current. Optional keeps
@@ -567,12 +574,6 @@ export interface TuiCommandRunner {
    */
   currentSessionStats(scope: LiveSessionScope, signal?: AbortSignal): Promise<SessionStatsFacts | undefined>
   /**
-   * PR5 (plan §3.2): whether the CURRENT main window's recent-performance
-   * figures are presentation-authoritative (Direct full log, or a Remote
-   * window that proved its samples / reached the history start). Absent on
-   * stub compositions = `true` (the fold's own complete-log semantics).
-   */
-  readonly recentPerformanceAvailable?: () => boolean
   /**
    * The pinned Session's last assistant-message text ('' when the message
    * carries no text block), or `undefined` when there is none. Async since
@@ -649,15 +650,15 @@ export interface TuiCommandRunner {
   updateWelcomeCard(): void
   /**
    * Open one job's detail from a task list: bash jobs show the status
-   * viewer, subagent jobs the child transcript. Shared by the footer ↓
-   * Quick Tasks browser and `/tasks`.
+   * viewer, subagent jobs the child transcript. Shared by the on-demand
+   * Task Quick and `/tasks`.
    */
   openJobView(jobId: string): void
   /**
    * Open the full Task Center (jobs + subagents, searchable, with
    * confirmed row-level Stop on capable rows). This is the command-side
    * entry behind `/tasks` (and its `subagents` alias); the footer ↓ opens
-   * the compact Quick Tasks view.
+   * the on-demand Task Quick.
    */
   openTasksBrowser(): void
   /**
@@ -666,12 +667,12 @@ export interface TuiCommandRunner {
    */
   openPluginManager(): void
   /**
-   * Build the SAME Plugin Manager panel as a lazy `/settings` submenu
-   * component (`/settings → Plugins  Manage…`). The single runner-owned
-   * controller owns operation state; `done` returns to the Settings list.
-   * Opening `/settings` alone never calls this (no eager inventory read).
+   * Build the SAME Plugin Manager page as a lazy `Settings → Plugins` inline
+   * page. The single runner-owned controller owns operation state; `done`
+   * returns to Settings. Opening `/settings` alone never calls this (no eager
+   * inventory read).
    */
-  createPluginManagerSubmenu(done: (selected?: string) => void): Component
+  createPluginManagerPage(done: () => void): Component | undefined
   /**
    * Open the conversation rewind picker (plan: the ONE entry shared by the
    * idle empty-editor double-Esc and `/rewind`). The runner decides what
@@ -808,6 +809,16 @@ export type HostCommandClaim =
  * @param catalogSeams - the narrow Direct catalog seams (the composition root
  *   adapts the Direct Host global-layer read into detached summaries); absent
  *   on the Remote branch, whose `commandRegistry` is undefined.
+ * @param modelPresentation - the mounted native Model presenter, if any.
+ * @param presetPresentation - the mounted native Preset presenter, if any.
+ * @param presentation - PR4-B2-A: the internal presentation seams for the B2-A
+ *   registrars — the renderer-neutral notice sink (`CommandSurfaceDeps.notify`;
+ *   the PiTui route and the TSP Dock are the same seam) plus the one narrow
+ *   suppression fact the title handler needs (whether the official Direct
+ *   command-result card already carries a title result's text on this mount).
+ *   No public `TuiCommandRunner` member and no second notice owner is
+ *   introduced. Absent (tests/legacy calls) the sink degrades to the PiTui
+ *   `app.notify` route and nothing is suppressed.
  */
 export interface CommandCatalogSeams {
   /** The Direct Host global-layer command summaries (already detached). Absent
@@ -815,10 +826,27 @@ export interface CommandCatalogSeams {
   readonly listGlobalCommands?: () => readonly SurfaceCommandSummary[]
 }
 
+/** PR4-B2-A: the internal presentation seams `registerTuiCommands` consumes. */
+export interface TuiCommandPresentation {
+  /** The renderer-neutral notice sink (see the parameter documentation). */
+  readonly notify: (text: string, kind?: 'info' | 'error') => void
+  /** WHO owns a `/title`/`/rename` refusal's visible text on this mount (see
+   *  `titleRefusalNoticeOwner`): exactly one of the handler, the official
+   *  command-result card, or the submission settlement. */
+  readonly titleRefusalNoticeOwner: 'handler' | 'result-card' | 'submission-settlement'
+  /** Whether a CONFIRMED `/title`/`/rename` write publishes its own notice on
+   *  this mount (only the card-less TSP path — see
+   *  `titleSuccessNoticeVisible`). */
+  readonly titleSuccessNoticeVisible: boolean
+}
+
 export function registerTuiCommands(
   runner: TuiCommandRunner,
   initial?: InitialCommandCatalog,
   catalogSeams: CommandCatalogSeams = {},
+  modelPresentation?: ModelPresentation,
+  presetPresentation?: PresetPresentation,
+  presentation?: TuiCommandPresentation,
 ): {
   /** Per-name registration failures (a Host-claimed name degraded loudly;
    *  later registrations still installed). */
@@ -861,6 +889,10 @@ export function registerTuiCommands(
   withDelivery<T>(delivery: SubmitDelivery, run: () => T): T
 } {
   const { ctx, app } = runner
+  // PR3-A: `app` is undefined while a non-PiTui renderer owns the terminal
+  // (the read-only TSP mount). The boot-mandatory completions install skips
+  // with a diagnostic; every command EXECUTION path is input-gated (no editor
+  // input exists on that renderer) and keeps its typed access.
   const cwd = runner.cwd
   const signal = runner.signal
   const commands = runner.commandRegistry
@@ -1036,7 +1068,7 @@ export function registerTuiCommands(
       diag: runner.diag,
       // Diagnostics name the live session at settle time, never the payload.
       sessionId: () => runner.currentSessionId,
-      notify: options.notify === true ? (message) => app.notify(message, 'error') : undefined,
+      notify: options.notify === true ? (message) => (app as TuiApp).notify(message, 'error') : undefined,
       recoverable: options.notify === true ? () => true : undefined,
     })
   }
@@ -1216,6 +1248,10 @@ export function registerTuiCommands(
     // after the host's own provider returns null. The registry's suggest()
     // handles cancellation (latest-only commit) and per-provider isolation.
     const extensionAutocomplete = runner.extensions?.autocomplete
+    if (app === undefined) {
+      runner.diag.info('command completions install skipped: no PiTui editor surface', {})
+      return
+    }
     app.setCommandCompletions(
       display.map(command => ({
         name: command.name,
@@ -1371,7 +1407,8 @@ export function registerTuiCommands(
       const fresh = reported.filter(entry => !notifiedCollisions.has(entry.identity))
       if (fresh.length > 0) {
         for (const entry of fresh) notifiedCollisions.add(entry.identity)
-        app.notify(reported.map(entry => entry.message).join(' · '), 'error')
+        if (app === undefined) runner.diag.warn('command completions collisions', { collisions: reported.map(entry => entry.message).join(' · ') })
+        else app.notify(reported.map(entry => entry.message).join(' · '), 'error')
       }
       try {
         ctx.logger.error(`tui-runner: ${message}`)
@@ -1499,11 +1536,61 @@ export function registerTuiCommands(
   // exact historical position. Do not reorder by module grouping: the
   // synchronous `commands/change` effects and the Direct compatibility mirror
   // depend on the sequence.
+  /**
+   * PR4-B2-A: the renderer-neutral notice entries the B2-A command handlers
+   * use.
+   *
+   * `notify` IS the existing surface notice sink (`CommandSurfaceDeps.notify`
+   * threaded in by the composition root): on PiTui it is the long-standing
+   * `app.notify` route, on the TSP renderer the current surface's own Dock. It
+   * REPLACES those handlers' direct `app.notify` calls, which would dereference
+   * a `TuiApp` that does not exist on a non-PiTui renderer.
+   *
+   * `notifyOutcome` adds the ONE missing feedback for the other B2-A commands:
+   * a TSP renderer presents no PiTui command card, and the Remote Client-command
+   * registry appends no `command/run` row either, so a CONFIRMED SUCCESS would
+   * otherwise leave no visible line. Refusal/cancellation/indeterminate outcomes
+   * are deliberately NOT re-notified for those commands — they already have an
+   * owner (the Direct command card, the controller's local-command error notice,
+   * or the handler's own inline `notify`). `runner.app === undefined` is the
+   * mounted-fact discriminator ("no PiTui presentation is installed") — never a
+   * Host/Remote backend decision.
+   *
+   * The `/title`/`/rename` entries are split by the outcome they carry, because
+   * their base behavior differs, and each mount has exactly ONE visible owner
+   * (see `titleRefusalNoticeOwner`):
+   *
+   * - `notifyTitleRefusal` publishes only where the HANDLER is the refusal's
+   *   owner — the PiTui surface beside the Direct command-result card. On the
+   *   TSP Direct mount the card carries the text; on the card-less Client route
+   *   the submission settlement publishes the returned error instead.
+   * - `notifyTitleSuccess` is a NEW line (the base handler reported a successful
+   *   title write only through the card). It publishes only where no card exists
+   *   AND no PiTui presentation is mounted (the TSP client-command path), so
+   *   PiTui keeps its previous silence and the TSP Direct mount stays
+   *   card-owned.
+   */
+  const notify: (text: string, kind?: 'info' | 'error') => void =
+    presentation?.notify ?? ((text, kind) => { app?.notify(text, kind) })
+  const notifyOutcome = (text: string, kind: 'info' | 'error' = 'info'): void => {
+    if (app !== undefined) return
+    notify(text, kind)
+  }
+  const notifyTitleRefusal = (text: string): void => {
+    // Without the internal presentation seam (legacy/test compositions) the
+    // handler keeps its pre-B2-A notice behavior.
+    if ((presentation?.titleRefusalNoticeOwner ?? 'handler') !== 'handler') return
+    notify(text, 'error')
+  }
+  const notifyTitleSuccess = (text: string): void => {
+    if (presentation?.titleSuccessNoticeVisible !== true) return
+    notify(text, 'info')
+  }
   registerExitCommand({ runner, registerTuiCommand })
 
   const settingsCommands = createSettingsCommands({
     runner,
-    app,
+    app: app as TuiApp,
     registerOne,
     registerTuiCommand,
     detach,
@@ -1518,12 +1605,15 @@ export function registerTuiCommands(
 
   const sessionCommands = createSessionCommands({
     runner,
-    app,
+    app: app as TuiApp,
     registerOne,
     registerTuiCommand,
     detach,
     recordCommandDraftDisposition,
     newSessionId,
+    notify,
+    notifyTitleRefusal,
+    notifyTitleSuccess,
   })
   sessionCommands.registerSessions()
 
@@ -1756,8 +1846,9 @@ export function registerTuiCommands(
       }
     } catch (error) {
       if (error instanceof TransitionInProgressError) {
-        const merged = mergeDraft(app.getDraft(), line)
-        app.setEditorText(merged)
+        const liveApp = app as TuiApp
+        const merged = mergeDraft(liveApp.getDraft(), line)
+        liveApp.setEditorText(merged)
         recordCommandDraftDisposition(commandId, 'restored')
         return { kind: 'error', text: merged === line
           ? 'a session transition is in progress — try again in a moment'
@@ -1812,11 +1903,18 @@ export function registerTuiCommands(
     const view = runner.listScopedCommands()
     for (const command of view) if (!owned.has(command.name)) taken.add(command.name)
     for (const name of scopedNames) taken.add(name)
-    // §D3: the AUTHORITATIVE Host catalog participates in the collision
+    // §D3: the GENUINE HOST-ORIGIN names participate in the collision
     // baseline — a skill wrapper must never register over a live Host
     // command name (on Remote, `listScopedCommands()` is the Client
     // registry's view, which does NOT carry the Host descriptors).
-    for (const command of authoritativeHostCatalog) taken.add(command.name)
+    // The raw catalog is NOT the authority here (§1C-3): on Direct it carries
+    // this surface's OWN global compatibility mirrors, so a wrapper would
+    // collide with the mirror of ITSELF and disappear on the next refresh.
+    // `hostOriginDescriptors` already answers the exact question — the
+    // EFFECTIVE winner per name, excluding this surface's mirrors by exact
+    // `definitionId` provenance — so a genuine same-name Host command (global
+    // or Agent-scoped, before or after the mirror) keeps blocking the wrapper.
+    for (const name of hostOriginDescriptors.keys()) taken.add(name)
     for (const dispose of skillDisposers.values()) dispose()
     skillDisposers.clear()
     let count = 0
@@ -2006,7 +2104,7 @@ export function registerTuiCommands(
 
   const skillsCommandDeps: SkillsCommandDeps = {
     runner,
-    app,
+    app: app as TuiApp,
     registerOne,
     detach,
     recordExtensionError,
@@ -2022,7 +2120,12 @@ export function registerTuiCommands(
 
 
   registerReloadCommand(skillsCommandDeps)
-  const modelCommands = createModelCommands({ runner, app, registerOne, recordCommandDraftDisposition })
+  const modelCommands = createModelCommands({
+    runner, app: app as TuiApp, registerOne, recordCommandDraftDisposition,
+    notifyOutcome,
+    ...(modelPresentation === undefined ? {} : { modelPresentation }),
+    ...(presetPresentation === undefined ? {} : { presetPresentation }),
+  })
   modelCommands.registerModel()
 
   sessionCommands.registerNew()
@@ -2049,7 +2152,7 @@ export function registerTuiCommands(
 
   sessionCommands.registerTitle()
 
-  const artifactCommands = createArtifactsCommands({ runner, app, registerOne, registerTuiCommand, detach })
+  const artifactCommands = createArtifactsCommands({ runner, app: app as TuiApp, registerOne, registerTuiCommand, detach, notifyOutcome })
   artifactCommands.registerCopy()
 
 
@@ -2065,7 +2168,7 @@ export function registerTuiCommands(
 
   registerStatusCommand({ runner, registerOne })
 
-  const authCommands = createAuthCommands({ runner, app, registerOne })
+  const authCommands = createAuthCommands({ runner, app: app as TuiApp, registerOne, notifyOutcome })
   authCommands.registerLogin()
 
   authCommands.registerLogout()

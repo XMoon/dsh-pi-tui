@@ -2,7 +2,6 @@ import type { AutocompleteProvider, AutocompleteSuggestions } from "../autocompl
 import { getKeybindings } from "../keybindings.ts";
 import { decodePrintableKey, matchesKey } from "../keys.ts";
 import { KillRing } from "../kill-ring.ts";
-import { PasteBurst } from "../paste-burst.ts";
 import {
 	type Component,
 	CURSOR_MARKER,
@@ -14,6 +13,8 @@ import {
 } from "../tui.ts";
 import { UndoStack } from "../undo-stack.ts";
 import {
+	autocompleteBoundaryRegex,
+	autocompleteSeparatorRegex,
 	cjkBreakRegex,
 	getGraphemeSegmenter,
 	getWordSegmenter,
@@ -263,16 +264,6 @@ export interface EditorTheme {
 export interface EditorOptions {
 	paddingX?: number;
 	autocompleteMaxVisible?: number;
-	/**
-	 * Disable the non-bracketed paste-burst fallback (dsh-pi-tui divergence
-	 * X038). Default false (the fallback is ON): terminals that lose
-	 * bracketed-paste markers (iTerm2/tmux) deliver pastes as rapid plain
-	 * character streams, and the trailing Enter must insert a newline
-	 * instead of submitting the half-pasted draft. Exposed as an option so
-	 * tests and integrations that legitimately type fast sequences followed
-	 * by Enter can opt out.
-	 */
-	disablePasteBurst?: boolean;
 }
 
 const SLASH_COMMAND_SELECT_LIST_LAYOUT: SelectListLayoutOptions = {
@@ -282,18 +273,28 @@ const SLASH_COMMAND_SELECT_LIST_LAYOUT: SelectListLayoutOptions = {
 
 const ATTACHMENT_AUTOCOMPLETE_DEBOUNCE_MS = 20;
 const DEFAULT_AUTOCOMPLETE_TRIGGER_CHARACTERS = ["@", "#"];
+// Unquoted completions end at whitespace or CJK punctuation; quoted paths may contain either.
+const unquotedAutocompleteSuffixRegex = new RegExp(`(?:(?!${autocompleteSeparatorRegex.source}).)*`, "u");
+// Trigger tokens may be wrapped in prose, e.g. "(@src/foo" or "`@src/foo".
+const autocompleteTokenStartSource = `${autocompleteBoundaryRegex.source}[([{<\`]*`;
 
 function escapeCharacterClass(value: string): string {
 	return value.replace(/[\\^$.*+?()[\]{}|-]/g, "\\$&");
 }
 
 function buildTriggerPattern(triggerCharacters: string[]): RegExp {
-	return new RegExp(`(?:^|[\\s])[${triggerCharacters.map(escapeCharacterClass).join("")}][^\\s]*$`);
+	return new RegExp(
+		`${autocompleteTokenStartSource}(?:@"[^"]*|[${triggerCharacters.map(escapeCharacterClass).join("")}]${unquotedAutocompleteSuffixRegex.source})$`,
+		"u",
+	);
 }
 
 function buildDebouncePattern(triggerCharacters: string[]): RegExp {
 	const escapedWithoutAt = triggerCharacters.filter((character) => character !== "@").map(escapeCharacterClass);
-	return new RegExp(`(?:^|[ \\t])(?:@(?:"[^"]*|[^\\s]*)|[${escapedWithoutAt.join("")}][^\\s]*)$`);
+	return new RegExp(
+		`${autocompleteTokenStartSource}(?:@(?:"[^"]*|${unquotedAutocompleteSuffixRegex.source})|[${escapedWithoutAt.join("")}]${unquotedAutocompleteSuffixRegex.source})$`,
+		"u",
+	);
 }
 
 function createScrollBorder(direction: "↑" | "↓", hiddenLineCount: number, width: number): string {
@@ -413,28 +414,30 @@ export class Editor implements Component, Focusable {
 	// Undo support
 	private undoStack = new UndoStack<EditorSnapshot>();
 
-	// Non-bracketed paste-burst fallback (dsh-pi-tui divergence X038)
-	private pasteBurst = new PasteBurst();
-	private disablePasteBurst = false;
-
 	public onSubmit?: (text: string) => void;
 	public onChange?: (text: string) => void;
+	/** The Down-admission's editor-owned facts MAY have changed (dsh-pi-tui
+	 * divergence X063 — the admission is a visual-line + transient-mode
+	 * fact the base editor exposes no onChange for). The reason names the
+	 * transition class: consecutive events may carry the same visual-line
+	 * truth and still flip admission (for example autocomplete open/close at
+	 * an unchanged cursor). Fired after:
+	 * - "navigation": cursor movement (Up/Down/PageUp/PageDown, Left/Right,
+	 *   word/line jumps and mouse repositioning);
+	 * - "autocomplete": the dropdown opened or closed;
+	 * - "history": history browsing changed;
+	 * - "paste": a bracketed paste completed;
+	 * - "programmatic": setText/setTextAndCursor/clear changed document or cursor;
+	 * - "jump": jump mode armed, cancelled, completed or aborted.
+	 * The payload is the post-transition raw boundary; the host may consume it
+	 * in the same turn while the classifier still checks live mode gates. */
+	public onVisualLineBoundaryChanged?: (reason: "navigation" | "autocomplete" | "history" | "paste" | "programmatic" | "jump", onLastVisualLine: boolean) => void;
 	public disableSubmit: boolean = false;
-
-	/**
-	 * Toggle the non-bracketed paste-burst fallback at runtime
-	 * (dsh-pi-tui divergence X038). Default: enabled.
-	 */
-	setDisablePasteBurst(disabled: boolean): void {
-		this.disablePasteBurst = disabled;
-		if (disabled) this.pasteBurst.reset();
-	}
 
 	constructor(tui: TUI, theme: EditorTheme, options: EditorOptions = {}) {
 		this.tui = tui;
 		this.theme = theme;
 		this.borderColor = theme.borderColor;
-		this.disablePasteBurst = options.disablePasteBurst ?? false;
 		const paddingX = options.paddingX ?? 0;
 		this.paddingX = Number.isFinite(paddingX) ? Math.max(0, Math.floor(paddingX)) : 0;
 		const maxVisible = options.autocompleteMaxVisible ?? 5;
@@ -513,6 +516,81 @@ export class Editor implements Component, Focusable {
 		return currentVisualLine === visualLines.length - 1;
 	}
 
+	// X063 publish state: the LAST navigation move's wrap-map facts. A move
+	// that built its own map (pageScroll, the Up/Down cursor move) publishes
+	// the post-move cursor visual line; the shared notify reuses it instead
+	// of rebuilding. A move with O(1) cursor bookkeeping (setCursorCol
+	// paths) leaves it unset and the notify does the single authoritative
+	// rebuild.
+	private lastVisualLineCount: number | null = null;
+	private lastCursorVisualLine: number | null = null;
+	/** The last render's exact visual layout facts. Unlike the navigation
+	 *  payload above, this survives until a newer frame is rendered so the
+	 *  host can read the painted boundary without rebuilding the wrap map. */
+	private lastRenderedVisualLineLayout: {
+		layoutWidth: number;
+		cursorVisualLine: number;
+		visualLineCount: number;
+	} | null = null;
+
+	/** The X063 shared notify (dsh-pi-tui divergence X063): fire the host's
+	 * observation callback for `reason`, consuming the move's own published
+	 * wrap-map facts when present (else one authoritative rebuild). The
+	 * callback ALWAYS fires — its post-transition boundary can be reused by
+	 * the host in the same turn; the editor cannot know whether the host's
+	 * painted hint still matches. */
+	private notifyVisualLineBoundary(reason: "navigation" | "autocomplete" | "history" | "paste" | "programmatic" | "jump"): void {
+		if (this.lastVisualLineCount === null || this.lastCursorVisualLine === null) {
+			// No published facts: ONE authoritative rebuild (single map, both
+			// facts read from it — review R8-F3).
+			const visualLines = this.buildVisualLineMap(this.lastWidth);
+			this.lastCursorVisualLine = this.findCurrentVisualLine(visualLines);
+			this.lastVisualLineCount = visualLines.length;
+		}
+		const onLast = this.lastCursorVisualLine === this.lastVisualLineCount - 1;
+		this.lastVisualLineCount = null;
+		this.lastCursorVisualLine = null;
+		// The payload: the transition class PLUS the post-transition raw
+		// boundary state (computed from the move's own map facts — review
+		// R8-F3: never computed-and-discarded).
+		this.onVisualLineBoundaryChanged?.(reason, onLast);
+	}
+
+	/**
+	 * True only when a real Down press may leave THIS editor at the last visual
+	 * line (fork divergence X063). The host cannot derive this from the logical
+	 * cursor position: soft-wrapped lines, history browsing, autocomplete, jump
+	 * mode and bracketed paste all change what Down means, and only the editor's
+	 * own word-wrap layout knows where the cursor visually sits. The method is
+	 * read-only and side-effect free; `expectedLayoutWidth` must be the SAME
+	 * layout width `render()` used for the painted frame, so a stale caller
+	 * width can never classify against a wrap map the user is not looking at.
+	 * A current `onVisualLineBoundaryChanged` payload may supply the raw boundary
+	 * so a same-turn host compose reuses the move's map facts. The private mode
+	 * gates below are always checked against live editor state.
+	 */
+	protected canYieldDownAtLastVisualLine(expectedLayoutWidth: number, knownOnLastVisualLine?: boolean): boolean {
+		return this.lastWidth === expectedLayoutWidth
+			&& (knownOnLastVisualLine ?? this.isOnLastVisualLine())
+			&& this.historyIndex === -1
+			&& this.autocompleteState === null
+			&& this.jumpMode === null
+			&& !this.isInPaste;
+	}
+
+	/** The RAW last-visual-line state of the latest rendered layout (no mode
+	 * gates; X063). `render()` already computed the exact cursor/line facts,
+	 * so this baseline is O(1) and never rebuilds the visual map. A width that
+	 * does not match the latest frame fails closed until that width is rendered.
+	 * Read-only, side-effect free. */
+	protected isOnLastVisualLineRaw(expectedLayoutWidth: number): boolean {
+		const layout = this.lastRenderedVisualLineLayout;
+		return this.lastWidth === expectedLayoutWidth
+			&& layout !== null
+			&& layout.layoutWidth === expectedLayoutWidth
+			&& layout.cursorVisualLine === layout.visualLineCount - 1;
+	}
+
 	private navigateHistory(direction: 1 | -1): void {
 		this.lastAction = null;
 		if (this.history.length === 0) return;
@@ -544,6 +622,9 @@ export class Editor implements Component, Focusable {
 		}
 
 		this.historyIndex = newIndex;
+		// X063 (review R7-F2): the caller (cursorUp/Down, the dedicated
+		// history actions) notifies once after the move — firing here too
+		// would double-notify on every recall.
 
 		if (this.historyIndex === -1) {
 			const draft = this.historyDraft;
@@ -600,6 +681,10 @@ export class Editor implements Component, Focusable {
 		if (this.onChange) {
 			this.onChange(this.getText());
 		}
+		// X063: a document/cursor replacement moves the visual boundary with
+		// no navigation event — the host hint follows (the recall path fires
+		// its own "history" event too; the host deduplicates per event).
+		this.notifyVisualLineBoundary("programmatic");
 	}
 
 	invalidate(): void {
@@ -638,6 +723,13 @@ export class Editor implements Component, Focusable {
 		// Find the cursor line index in layoutLines
 		let cursorLineIndex = layoutLines.findIndex((line) => line.hasCursor);
 		if (cursorLineIndex === -1) cursorLineIndex = 0;
+		// X063: publish the exact painted boundary from the layout this render
+		// already built; Footer refreshes must not rebuild a second wrap map.
+		this.lastRenderedVisualLineLayout = {
+			layoutWidth,
+			cursorVisualLine: cursorLineIndex,
+			visualLineCount: layoutLines.length,
+		};
 
 		// Adjust scroll offset to keep cursor visible
 		if (cursorLineIndex < this.scrollOffset) {
@@ -781,7 +873,7 @@ export class Editor implements Component, Focusable {
 			// private SelectList is not mounted in the TUI tree, so X018
 			// gesture liveness (isMouseTargetLive) would clear the gesture
 			// on release and the synthetic click would never reach the
-			// list. (Mirrors the Search/X049 wrapper semantics.)
+			// list. (The same private-inner-component wrapper pattern.)
 			return {
 				...result,
 				...(result.focus ? { focusTarget: this } : {}),
@@ -840,6 +932,9 @@ export class Editor implements Component, Focusable {
 		this.lastAction = null;
 		this.exitHistoryBrowsing();
 		if (this.autocompleteState) this.updateAutocomplete();
+		// X063: a click repositions the cursor (and can leave history
+		// browsing) with no keyboard event — the host hint follows.
+		this.notifyVisualLineBoundary("navigation");
 		return { handled: true, focus: true };
 	}
 
@@ -854,9 +949,11 @@ export class Editor implements Component, Focusable {
 
 		// Handle character jump mode (awaiting next character to jump to)
 		if (this.jumpMode !== null) {
-			// Cancel if the hotkey is pressed again
+			// Cancel if the hotkey is pressed again (X063: the admission
+			// flips back to admissible — notify).
 			if (kb.matches(data, "tui.editor.jumpForward") || kb.matches(data, "tui.editor.jumpBackward")) {
 				this.jumpMode = null;
+				this.notifyVisualLineBoundary("jump");
 				return;
 			}
 
@@ -866,11 +963,17 @@ export class Editor implements Component, Focusable {
 				const direction = this.jumpMode;
 				this.jumpMode = null;
 				this.jumpToChar(printable, direction);
+				// X063: completing a jump ends the armed-jump refusal even
+				// when no matching character exists or the cursor stays on
+				// the same visual line.
+				this.notifyVisualLineBoundary("jump");
 				return;
 			}
 
-			// Control character - cancel and fall through to normal handling
+			// Control character cancels the armed-jump refusal and then
+			// falls through to normal handling.
 			this.jumpMode = null;
+			this.notifyVisualLineBoundary("jump");
 		}
 
 		// Handle bracketed paste mode
@@ -891,37 +994,17 @@ export class Editor implements Component, Focusable {
 				this.isInPaste = false;
 				const remaining = this.pasteBuffer.substring(endIndex + 6);
 				this.pasteBuffer = "";
+				// X063: isInPaste flipping to false re-admits Down with no
+				// cursor move — the host hint must hear the paste completion.
 				if (remaining.length > 0) {
 					this.handleInput(remaining);
+					this.notifyVisualLineBoundary("paste");
+				} else {
+					this.notifyVisualLineBoundary("paste");
 				}
 				return;
 			}
 			return;
-		}
-
-		// Non-bracketed paste-burst tracking (dsh-pi-tui divergence X038,
-		// kimi-exact semantics): a rapid stream of SINGLE plain characters
-		// followed by Enter is treated as a lost-marker paste. Enter itself
-		// keeps the burst alive; a single printable character feeds it; any
-		// other input (multi-char chunks, arrows, chords, escapes) breaks
-		// it — multi-char reads are ordinary typed-ahead text or an explicit
-		// whole-line injection, not a terminal dribbling a paste one
-		// character at a time. Disabled integrations skip the tracking
-		// entirely.
-		//
-		// The burst's Enter is the PHYSICAL Enter that currently carries
-		// the submit binding (X037 × X038 cross-divergence): a remapped
-		// submit key (e.g. Ctrl+X) is a chord, not a paste's trailing
-		// Enter — it must reset the burst and submit, never be suppressed
-		// into a newline.
-		const isPhysicalSubmitEnter =
-			data !== "\n" &&
-			matchesKey(data, "enter") &&
-			kb.matches(data, "tui.editor.submit");
-		const burstChar = decodePrintableKey(data)
-			?? (data.length === 1 && data.charCodeAt(0) >= 32 && data.charCodeAt(0) !== 0x7f ? data : undefined);
-		if (!this.disablePasteBurst && !isPhysicalSubmitEnter && burstChar === undefined) {
-			this.pasteBurst.reset();
 		}
 
 		// Ctrl+C - let parent handle (exit/clear)
@@ -1042,29 +1125,37 @@ export class Editor implements Component, Focusable {
 		if (kb.matches(data, "tui.editor.historyPrevious")) {
 			this.cancelAutocomplete();
 			this.navigateHistory(-1);
+			this.notifyVisualLineBoundary("navigation");
 			return;
 		}
 		if (kb.matches(data, "tui.editor.historyNext")) {
 			this.cancelAutocomplete();
 			this.navigateHistory(1);
+			this.notifyVisualLineBoundary("navigation");
 			return;
 		}
 
-		// Cursor movement actions
+		// Cursor movement actions (X063: LineStart/End and word jumps can
+		// cross the last-visual-line boundary on hard-multiline or
+		// soft-wrapped bodies — same notify contract as the arrow keys).
 		if (kb.matches(data, "tui.editor.cursorLineStart")) {
 			this.moveToLineStart();
+			this.notifyVisualLineBoundary("navigation");
 			return;
 		}
 		if (kb.matches(data, "tui.editor.cursorLineEnd")) {
 			this.moveToLineEnd();
+			this.notifyVisualLineBoundary("navigation");
 			return;
 		}
 		if (kb.matches(data, "tui.editor.cursorWordLeft")) {
 			this.moveWordBackwards();
+			this.notifyVisualLineBoundary("navigation");
 			return;
 		}
 		if (kb.matches(data, "tui.editor.cursorWordRight")) {
 			this.moveWordForwards();
+			this.notifyVisualLineBoundary("navigation");
 			return;
 		}
 
@@ -1101,29 +1192,21 @@ export class Editor implements Component, Focusable {
 				return;
 			}
 
-			// Paste-burst fallback (dsh-pi-tui divergence X038): this Enter
-			// directly follows a rapid plain-character stream — a lost-marker
-			// paste's trailing Enter. Insert a newline instead of submitting
-			// the half-pasted draft (and keep the window open: a multi-line
-			// paste ends with several Enter-delimited lines). Only a PHYSICAL
-			// Enter that currently carries the submit binding is suppressed
-			// (X037 × X038): a remapped submit chord (Ctrl+X) submits even
-			// mid-burst.
-			if (
-				!this.disablePasteBurst &&
-				isPhysicalSubmitEnter &&
-				this.pasteBurst.shouldInsertNewlineInsteadOfSubmit(Date.now())
-			) {
-				this.addNewLine();
-				this.pasteBurst.extendWindow(Date.now());
-				return;
-			}
-
 			this.submitValue();
 			return;
 		}
 
-		// Arrow key navigation (with history support)
+		// Arrow key navigation (with history support). Every branch that can
+		// move the cursor across a VISUAL line notifies the host afterwards
+		// (dsh-pi-tui divergence X063): the host's on-demand Task Quick
+		// admission is a visual-line fact, and its painted ↓ hint must track
+		// the boundary. The notification carries the boundary STATE after
+		// the move; the host decides whether anything changed, so a no-op
+		// press costs the callback dispatch and one boolean compare, never a
+		// re-measure. The shared notify reads the cursor's CURRENT visual
+		// line index OFF THE MOVE'S OWN wrap map where the move built one
+		// (pageScroll publishes it via lastPageVisualIndex) — the extra cost
+		// over the move itself is O(1).
 		if (kb.matches(data, "tui.editor.cursorUp")) {
 			if (
 				this.isOnFirstVisualLine() &&
@@ -1136,6 +1219,7 @@ export class Editor implements Component, Focusable {
 			} else {
 				this.moveCursor(-1, 0);
 			}
+			this.notifyVisualLineBoundary("navigation");
 			return;
 		}
 		if (kb.matches(data, "tui.editor.cursorDown")) {
@@ -1147,34 +1231,44 @@ export class Editor implements Component, Focusable {
 			} else {
 				this.moveCursor(1, 0);
 			}
+			this.notifyVisualLineBoundary("navigation");
 			return;
 		}
 		if (kb.matches(data, "tui.editor.cursorRight")) {
 			this.moveCursor(0, 1);
+			this.notifyVisualLineBoundary("navigation");
 			return;
 		}
 		if (kb.matches(data, "tui.editor.cursorLeft")) {
 			this.moveCursor(0, -1);
+			this.notifyVisualLineBoundary("navigation");
 			return;
 		}
 
-		// Page up/down - scroll by page and move cursor
+		// Page up/down - scroll by page and move cursor (the move publishes
+		// its own wrap-map facts; the notify reuses them).
 		if (kb.matches(data, "tui.editor.pageUp")) {
 			this.pageScroll(-1);
+			this.notifyVisualLineBoundary("navigation");
 			return;
 		}
 		if (kb.matches(data, "tui.editor.pageDown")) {
 			this.pageScroll(1);
+			this.notifyVisualLineBoundary("navigation");
 			return;
 		}
 
-		// Character jump mode triggers
+		// Character jump mode triggers (X063: an armed jump REFUSES Down —
+		// the admission flips with no cursor move; the same-hotkey cancel
+		// flips it back. Both notify.)
 		if (kb.matches(data, "tui.editor.jumpForward")) {
-			this.jumpMode = "forward";
+			this.jumpMode = this.jumpMode === "forward" ? null : "forward";
+			this.notifyVisualLineBoundary("jump");
 			return;
 		}
 		if (kb.matches(data, "tui.editor.jumpBackward")) {
-			this.jumpMode = "backward";
+			this.jumpMode = this.jumpMode === "backward" ? null : "backward";
+			this.notifyVisualLineBoundary("jump");
 			return;
 		}
 
@@ -1186,14 +1280,12 @@ export class Editor implements Component, Focusable {
 
 		const printable = decodePrintableKey(data);
 		if (printable !== undefined) {
-			if (!this.disablePasteBurst) this.pasteBurst.onPlainChar(Date.now());
 			this.insertCharacter(printable);
 			return;
 		}
 
 		// Regular characters
 		if (data.charCodeAt(0) >= 32) {
-			if (!this.disablePasteBurst) this.pasteBurst.onPlainChar(Date.now());
 			this.insertCharacter(data);
 		}
 	}
@@ -1415,6 +1507,7 @@ export class Editor implements Component, Focusable {
 		this.state.cursorLine = line;
 		this.setCursorCol(col);
 		this.scrollOffset = 0;
+		this.notifyVisualLineBoundary("programmatic");
 		this.tui.requestRender();
 	}
 
@@ -1445,6 +1538,7 @@ export class Editor implements Component, Focusable {
 		this.state.cursorLine = line;
 		this.setCursorCol(col);
 		this.scrollOffset = 0;
+		this.notifyVisualLineBoundary("programmatic");
 		// The whole document is replaced: PRUNE the paste registry to the
 		// markers that actually survive in the new text. Staged replacement
 		// text (a plugin editor's document) otherwise leaves orphaned
@@ -1580,13 +1674,12 @@ export class Editor implements Component, Focusable {
 			else if (this.autocompleteTriggerCharacters.includes(char)) {
 				const currentLine = this.state.lines[this.state.cursorLine] || "";
 				const textBeforeCursor = currentLine.slice(0, this.state.cursorCol);
-				const charBeforeSymbol = textBeforeCursor[textBeforeCursor.length - 2];
-				if (textBeforeCursor.length === 1 || charBeforeSymbol === " " || charBeforeSymbol === "\t") {
+				if (this.autocompleteTriggerPattern.test(textBeforeCursor)) {
 					this.tryTriggerAutocomplete();
 				}
 			}
 			// Also auto-trigger when typing letters in a slash command or symbol completion context
-			else if (/[a-zA-Z0-9.\-_]/.test(char)) {
+			else if (/[a-zA-Z0-9.\-_]/.test(char) || cjkBreakRegex.test(char)) {
 				const currentLine = this.state.lines[this.state.cursorLine] || "";
 				const textBeforeCursor = currentLine.slice(0, this.state.cursorCol);
 				// Check if we're in a slash command (with or without space for arguments)
@@ -2287,6 +2380,10 @@ export class Editor implements Component, Focusable {
 			}
 		}
 
+		// X063: publish this move's own wrap-map facts for the host notify —
+		// the shared notify consumes them instead of a second build (§9.3).
+		this.lastCursorVisualLine = this.findVisualLineAt(visualLines, this.state.cursorLine, this.state.cursorCol);
+		this.lastVisualLineCount = visualLines.length;
 		// Keep an open autocomplete picker in sync with the new cursor
 		// position: cursor movement changes the text before the cursor, so a
 		// picker computed for the old position is stale. Re-query so it
@@ -2314,6 +2411,10 @@ export class Editor implements Component, Focusable {
 		const targetVisualLine = Math.max(0, Math.min(visualLines.length - 1, currentVisualLine + direction * pageSize));
 
 		this.moveToVisualLine(visualLines, currentVisualLine, targetVisualLine);
+		// X063: publish the post-move boundary fact from THIS map — the
+		// notify reads the published value instead of rebuilding (§9.3).
+		this.lastVisualLineCount = visualLines.length;
+		this.lastCursorVisualLine = this.findVisualLineAt(visualLines, this.state.cursorLine, this.state.cursorCol);
 	}
 
 	private moveWordBackwards(): void {
@@ -2847,7 +2948,17 @@ export class Editor implements Component, Focusable {
 			this.autocompleteList.setSelectedIndex(bestMatchIndex);
 		}
 
-		this.autocompleteState = state;
+		// X063 (review R7-F2): the admission-relevant fact is the OPEN flip
+		// (null → state refuses Down with no cursor move). A refresh while
+		// the picker is already open changes NO admission fact — notifying
+		// here would cost a wrap-map scan per keystroke for an event the
+		// host would drop. Notify ONLY on the open transition.
+		if (this.autocompleteState === null) {
+			this.autocompleteState = state;
+			this.notifyVisualLineBoundary("autocomplete");
+		} else {
+			this.autocompleteState = state;
+		}
 	}
 
 	private cancelAutocompleteRequest(): void {
@@ -2877,7 +2988,12 @@ export class Editor implements Component, Focusable {
 	 */
 	protected cancelAutocomplete(): void {
 		this.cancelAutocompleteRequest();
+		const hadDropdown = this.autocompleteState !== null;
 		this.clearAutocompleteUi();
+		// X063: closing the dropdown flips the Down admission from refused to
+		// admissible with NO cursor move and NO onChange — the host hint must
+		// hear about it or it stays dark while Down works again.
+		if (hadDropdown) this.notifyVisualLineBoundary("autocomplete");
 	}
 
 	public isShowingAutocomplete(): boolean {

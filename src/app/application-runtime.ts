@@ -42,6 +42,14 @@ export interface SelectedApplicationRuntime {
   readonly retirement: SessionOwnerRetirement
 
   /**
+   * Synchronously close the pre-dispatch write admission at the surface-stop
+   * boundary: a write parked before dispatch (the serializer window) is then
+   * refused instead of being admitted after the surface stopped. Idempotent.
+   * Absent on Direct (the Direct owner retires its own in-flight writes).
+   */
+  stopSurfaceAdmission?: () => void
+
+  /**
    * Dispose adapter/transport composition after application/session owners
    * have completed their own retirement. Idempotent; error-preserving (a
    * step's failure never skips the remaining steps).
@@ -260,21 +268,40 @@ export interface RemoteLiveIngressFactory {
     sinks: {
       onDurableEvent: (sessionId: string, event: { readonly type: string; readonly seq: number; readonly time: number }) => void
       onLiveInput: (input: import('../runtime/assistant-stream-port.ts').AssistantLiveInput) => void
-      onWindowReplaced: (sessionId: string) => void
-      /** Older history prepended to the window front (an official
-       * `loadOlder` by any consumer): re-fold the presentation from the
-       * widened window. */
-      onWindowPrepended: (sessionId: string) => void
+      /** S3-R0: the incremental sequence is no longer trustworthy (generation
+       *  rollover, revision discontinuity, window replace/prepend, missing
+       *  change, hydrate gap). Intent only — the fold owner re-folds the
+       *  CURRENT official window and then acknowledges the committed revision
+       *  through the handle. */
+      onWindowRefoldRequired: (sessionId: string, reason?: 'paging' | 'recovery') => void
       onSessionSnapshotChanged: (sessionId: string) => void
       /** The official PROJECTION store changed: the only channel carrying
        *  projection-owned current values (the Session snapshot never does). */
       onProjectionsChanged: (sessionId: string) => void
     },
-    /** The cold-hydration snapshot revision: a higher subscription-time
-     *  revision means events landed in the hydrate→subscribe gap and the
-     *  ingress recovers through `onWindowReplaced` (never a lost event). */
-    hydrateRevision?: number,
-  ): { dispose(): void } | undefined
+    /** The caller's hydrate/read baseline: the committed revision plus the
+     *  EXACT transport identity it was fenced under. A rollover/replacement or
+     *  a revision change between the read and this subscription makes the
+     *  baseline unusable, so the ingress recovers through
+     *  `onWindowRefoldRequired` (never a lost event). */
+    hydrate?: {
+      readonly revision: number
+      readonly transportToken?: unknown
+    },
+  ): {
+    dispose(): void
+    /** S3-R0: acknowledge one committed window re-fold (exact generation +
+     *  binding + revision, Session open). `true` resumes incremental delivery. */
+    acknowledgeWindowRefold(proof: {
+      readonly generation: unknown
+      readonly binding: unknown
+      readonly revision: number
+    }): boolean
+    /** Whether a window read at `revision` may REPLACE the fold (the retained
+     *  window of a rolled-over generation may not; checked before the commit,
+     *  not after it). */
+    refoldEligible(revision: number): boolean
+  }
 }
 
 /** The pre-composed Remote application input for the internal L6
@@ -303,6 +330,13 @@ export interface RemoteSessionFactsSource {
    *  generation + exact binding object; see the owning module). */
   captureTransportToken(sessionId: string): unknown
   isTransportTokenCurrent(sessionId: string, token: unknown): boolean
+  /** S3-R0: the read→commit revision/identity proof of one window re-fold
+   *  (undefined when a newer window or a replaced identity made the read
+   *  superseded; see the owning module). */
+  windowRefoldProof(
+    sessionId: string,
+    revision: number,
+  ): { readonly generation: unknown; readonly binding: unknown; readonly revision: number } | undefined
   /** The official whole-log `sessionStats` projection value off the exact
    *  retained binding (PR4 §3.3; unknown-shaped — the composer narrows it;
    * an absent capability reads undefined, never a window-fold substitute). */

@@ -11,6 +11,7 @@
  */
 
 import type { TurnOutlineEntryDto } from './presentation-read-port.ts'
+import type { PiTuiPerformanceProjection } from '../domain/status/performance-view.ts'
 
 /** One persisted session summary (the picker's row shape, minus the
  * enriched title). */
@@ -30,6 +31,13 @@ export interface SessionSummary {
   parentSession?: string
   /** Subagent children carry the `sub` marker. */
   origin?: 'subagent'
+  /** Host-authoritative on-disk format state of this row, passed through
+   * verbatim from the official Client list entry (`formatStatus`). It is a
+   * READ-ONLY state label: `migration-required` means the official reader
+   * would migrate the record when the user explicitly opens it. This port
+   * never derives a second client-side migration fact, never parses a header
+   * to guess it, and absent means the source did not supply the fact. */
+  formatStatus?: 'current' | 'migration-required'
   /** Whether the session is currently loaded in the session store. */
   live: boolean
 }
@@ -120,6 +128,14 @@ export interface SessionReader {
    *  the session" — never a parent/main-session fallback, never a
    *  zero-filled guess. */
   sessionStatus(sessionId: string): SessionStatusProjection | undefined
+  /**
+   * TRUE when the LAST `sessionStatus()` read for this session FAILED (the
+   * official projection authority threw). An `undefined` status then means
+   * UNKNOWN — a consumer must not substitute another source for it. An absent
+   * method (or `false`) means only "no recorded value", where the Session's own
+   * immutable header remains the legitimate fallback (S2/PR-B §B2.2).
+   */
+  sessionStatusFailed?(sessionId: string): boolean
 }
 
 /** One detached todo entry of the official `todos` projection (the
@@ -187,6 +203,13 @@ export interface SessionStatusProjection {
    *  render the null state (the official Web shows an empty panel). */
   readonly todos?: readonly SessionStatusTodoItem[] | null
   readonly usage?: SessionStatusUsageProjection
+  /** THIS Session's own Host performance projection (the bundle's
+   *  `piTuiPerformance` unit): the R5 (last eligible completed steps of the
+   *  current route generation) and All (whole Session) model-request rate
+   *  counters plus the recent first-token evidence. ABSENT means the Host
+   *  cannot serve the key — the Client never estimates it from local history
+   *  or a bounded page window. */
+  readonly performance?: PiTuiPerformanceProjection
 }
 
 /** A detached provider/model/effort selection value (the official

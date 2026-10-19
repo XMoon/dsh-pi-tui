@@ -21,6 +21,7 @@ import {
   type ModelPickerCurrent,
 } from '../src/tui/pickers/model-picker.ts'
 import type { ModelDirectoryDto, ModelDirectoryModelDto, ModelSelectionDto } from '../src/runtime/catalog-port.ts'
+import { currentPalette } from '../src/tui/theme/runtime.ts'
 import { runOwned, type OwnedTaskOptions } from '../src/runtime/process/tasks.ts'
 import { createDiag } from '../src/runtime/process/diagnostics.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
@@ -40,13 +41,32 @@ const stripAnsi = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, '').
 const viewOf = (vt: VirtualTerminal): string => vt.getViewport().map(stripAnsi).join('\n')
 const linesOf = (vt: VirtualTerminal): string[] => vt.getViewport().map(stripAnsi)
 /** Viewport lines with the overlay frame's left border stripped, so a row's
- *  own prefix (`→ `) is observable. */
+ *  own prefix (`> `) is observable. */
 const contentLinesOf = (vt: VirtualTerminal): string[] => linesOf(vt).map((line) => {
   const index = line.indexOf('│ ')
   return index === -1 ? line : line.slice(index + 2)
 })
-const selectedRow = (vt: VirtualTerminal): string | undefined =>
-  contentLinesOf(vt).find(line => line.startsWith('→ '))
+const selectedRow = (vt: VirtualTerminal): string | undefined => {
+  // The search Input's own prompt is also `> `, and it is painted FIRST; the
+  // LIST cursor is the next `> ` row after it.
+  const rows = contentLinesOf(vt).filter(line => line.startsWith('> '))
+  return rows[1] ?? rows[0]
+}
+const hexToRgb = (hex: string): number =>
+  (parseInt(hex.slice(1, 3), 16) << 16) | (parseInt(hex.slice(3, 5), 16) << 8) | parseInt(hex.slice(5, 7), 16)
+/** The terminal row of the first painted occurrence of `needle`. */
+const rowOf = (vt: VirtualTerminal, needle: string): number => {
+  const row = linesOf(vt).findIndex(line => line.includes(needle))
+  assert.ok(row >= 0, `the frame must contain ${JSON.stringify(needle)}:\n${viewOf(vt)}`)
+  return row
+}
+/** The terminal-CELL column of the first painted occurrence of `needle`. */
+const cellIndexOf = (vt: VirtualTerminal, row: number, needle: string): number => {
+  const plain = linesOf(vt)[row] ?? ''
+  const index = plain.indexOf(needle)
+  assert.ok(index >= 0, `row ${row} must contain ${JSON.stringify(needle)}:\n${plain}`)
+  return visibleWidth(plain.slice(0, index))
+}
 const rowLine = (vt: VirtualTerminal, label: string): string | undefined =>
   contentLinesOf(vt).find(line => line.includes(label))
 
@@ -200,7 +220,7 @@ interface Harness {
   applied: ModelSelectionDto[]
   closeCount: () => number
   close: () => void
-  hydrate: (directory: ModelDirectoryDto, current?: ModelPickerCurrent, sessionless?: boolean) => void
+  hydrate: (directory: ModelDirectoryDto, current?: ModelPickerCurrent) => void
 }
 
 async function openPicker(options: HarnessOptions): Promise<Harness> {
@@ -213,6 +233,7 @@ async function openPicker(options: HarnessOptions): Promise<Harness> {
   const diag = createDiag({ filePath: undefined, stderrLevel: 'off' })
   let closeCount = 0
   const picker = new ModelPicker({
+    subject: { sessionless: options.sessionless ?? false },
     apply: (selection) => {
       applied.push(selection)
       return options.apply === undefined ? options.outcome ?? 'committed' : options.apply(selection)
@@ -229,7 +250,6 @@ async function openPicker(options: HarnessOptions): Promise<Harness> {
     picker.setDirectory({
       directory: options.directory ?? EFFORT_DIRECTORY,
       current: options.current,
-      sessionless: options.sessionless ?? false,
     })
   }
   await vt.waitForRender()
@@ -240,7 +260,7 @@ async function openPicker(options: HarnessOptions): Promise<Harness> {
     applied,
     closeCount: () => closeCount,
     close: () => closer(),
-    hydrate: (directory, current, sessionless) => picker.setDirectory({ directory, current, sessionless: sessionless ?? false }),
+    hydrate: (directory, current) => picker.setDirectory({ directory, current }),
   }
 }
 
@@ -297,6 +317,13 @@ test('a failed directory read becomes an in-panel error state, not a second over
   const view = viewOf(h.vt)
   assert.ok(view.includes('Model catalog unavailable'), `the error state must render in the same panel:\n${view}`)
   assert.ok(view.includes('connection refused'), `the failure detail must render:\n${view}`)
+  // §12.2 role 16: only the failure WORD is `error`; the placeholder wrapper
+  // (and the transport detail) keep the ordinary `textMuted` ink.
+  const failureRow = rowOf(h.vt, 'Model catalog unavailable')
+  assert.equal(h.vt.getCellFgRgb(failureRow, cellIndexOf(h.vt, failureRow, 'Model catalog unavailable')), hexToRgb(currentPalette.error),
+    `the failure word is painted error:\n${viewOf(h.vt)}`)
+  assert.equal(h.vt.getCellFgRgb(failureRow, cellIndexOf(h.vt, failureRow, 'connection refused')), hexToRgb(currentPalette.textMuted),
+    `the failure detail keeps the placeholder ink:\n${viewOf(h.vt)}`)
   h.vt.sendInput(ENTER)
   await settle()
   assert.deepEqual(h.applied, [], 'Enter on the error state must be inert')
@@ -311,6 +338,9 @@ test('a settled empty catalog says No models available', async () => {
   h.hydrate(makeDirectory({ groups: [], failures: [], default: { provider: 'p', model: 'm' } }))
   await h.vt.waitForRender()
   assert.ok(viewOf(h.vt).includes('No models available'), `empty catalog message:\n${viewOf(h.vt)}`)
+  const emptyRow = rowOf(h.vt, 'No models available')
+  assert.equal(h.vt.getCellFgRgb(emptyRow, cellIndexOf(h.vt, emptyRow, 'No models available')), hexToRgb(currentPalette.textMuted),
+    `an ordinary empty message keeps the placeholder ink:\n${viewOf(h.vt)}`)
   h.app.stop()
 })
 
@@ -333,9 +363,37 @@ test('the initial selection is the full current identity, not a same-id other pr
 
 test('current and default badges are independent, using the full identity', async () => {
   const h = await openPicker({ directory: TWO_PROVIDERS, current: { provider: 'openai', model: 'shared-id' } })
-  assert.ok(rowLine(h.vt, 'Sol')?.includes('current'), viewOf(h.vt))
-  assert.ok(rowLine(h.vt, 'Pro')?.includes('default'), viewOf(h.vt))
-  assert.ok(!rowLine(h.vt, 'Opus')?.includes('current'), 'the duplicate-id row must not be current')
+  assert.ok(rowLine(h.vt, 'Sol')?.includes('[current]'), viewOf(h.vt))
+  assert.ok(rowLine(h.vt, 'Pro')?.includes('[default]'), viewOf(h.vt))
+  assert.ok(!rowLine(h.vt, 'Opus')?.includes('[current]'), 'the duplicate-id row must not be current')
+  h.app.stop()
+})
+
+test('the real /model frame paints the §12.2 overlay roles (cursor, title, count, group, chips)', async () => {
+  const h = await openPicker({ directory: TWO_PROVIDERS, current: { provider: 'openai', model: 'shared-id' } })
+  // Role 1 title (bold `textStrong`) and role 12 count (`textMuted`), right
+  // aligned on the SAME row — not a title suffix.
+  const titleRow = rowOf(h.vt, 'Models')
+  assert.equal(h.vt.getCellFgRgb(titleRow, cellIndexOf(h.vt, titleRow, 'Models')), hexToRgb(currentPalette.textStrong),
+    `the title is role 1 bold textStrong:\n${viewOf(h.vt)}`)
+  assert.equal(h.vt.getCellFgRgb(titleRow, cellIndexOf(h.vt, titleRow, '3/3')), hexToRgb(currentPalette.textMuted),
+    `the right-aligned count is role 12 textMuted:\n${viewOf(h.vt)}`)
+  // Role 5 group header: label `textDim`, count `textMuted`.
+  const groupRow = rowOf(h.vt, 'OpenAI')
+  assert.equal(h.vt.getCellFgRgb(groupRow, cellIndexOf(h.vt, groupRow, 'OpenAI')), hexToRgb(currentPalette.textDim),
+    `the group label is role 5 textDim:\n${viewOf(h.vt)}`)
+  assert.equal(h.vt.getCellFgRgb(groupRow, cellIndexOf(h.vt, groupRow, '·')), hexToRgb(currentPalette.textMuted),
+    `the group count is textMuted:\n${viewOf(h.vt)}`)
+  // Role 6 cursor glyph `primary` on the selected row.
+  const selectedSol = rowOf(h.vt, 'Sol')
+  assert.equal(h.vt.getCellFgRgb(selectedSol, cellIndexOf(h.vt, selectedSol, '>')), hexToRgb(currentPalette.primary),
+    `the selection cursor glyph is role 6 primary:\n${viewOf(h.vt)}`)
+  // The state chip keeps `textMuted` in BOTH selection states.
+  assert.equal(h.vt.getCellFgRgb(selectedSol, cellIndexOf(h.vt, selectedSol, '[current]')), hexToRgb(currentPalette.textMuted),
+    `the [current] chip stays textMuted on the SELECTED row:\n${viewOf(h.vt)}`)
+  const unselectedPro = rowOf(h.vt, 'Pro')
+  assert.equal(h.vt.getCellFgRgb(unselectedPro, cellIndexOf(h.vt, unselectedPro, '[default]')), hexToRgb(currentPalette.textMuted),
+    `the [default] chip stays textMuted on the unselected row:\n${viewOf(h.vt)}`)
   h.app.stop()
 })
 
@@ -454,7 +512,7 @@ test('a sessionless inline effort seeds from the global default, with no current
     sessionless: true,
   })
   const sol = rowLine(h.vt, 'Sol')!
-  assert.ok(!sol.includes('current'), `sessionless must not show a current badge: ${sol}`)
+  assert.ok(!sol.includes('[current]'), `sessionless must not show a current chip: ${sol}`)
   assert.ok(sol.includes('effort ‹High›'), `the global default effort must seed the inline value: ${sol}`)
   h.app.stop()
 })
@@ -466,7 +524,7 @@ test('a non-current model seeds its own default effort, never the Session effort
   })
   const sol = rowLine(h.vt, 'Sol')!
   assert.ok(sol.includes('effort ‹Medium›'), `Sol must use its own default (medium): ${sol}`)
-  assert.ok(!sol.includes('current'), `a non-current model must not be current: ${sol}`)
+  assert.ok(!sol.includes('[current]'), `a non-current model must not be current: ${sol}`)
   const plain = rowLine(h.vt, 'Plain')!
   assert.ok(!plain.includes('effort ‹'), `a no-effort model must not show an effort token: ${plain}`)
   h.app.stop()
@@ -814,13 +872,14 @@ test('a fullscreen swap while LOADING hydrates the migrated picker in place', as
 test('mounting a new picker supersedes the previous one (no lingering overlay)', async () => {
   const h = await openPicker({ loading: true })
   const second = new ModelPicker({
+    subject: { sessionless: false },
     apply: () => 'committed',
     requestRender: () => h.app.requestRender(),
     close: () => {},
     runOwned: <T>(_label: string, task: () => T | Promise<T>, _options: Omit<OwnedTaskOptions<T>, 'diag' | 'sessionId'>) => { void task() },
   })
   h.app.openModelPicker(second)
-  second.setDirectory({ directory: TWO_PROVIDERS, current: { provider: 'openai', model: 'shared-id' }, sessionless: false })
+  second.setDirectory({ directory: TWO_PROVIDERS, current: { provider: 'openai', model: 'shared-id' } })
   await h.vt.waitForRender()
   assert.equal(h.picker.isDisposed(), true, 'the previous picker must be disposed on supersession')
   assert.ok(viewOf(h.vt).includes('Sol'), `the new picker must own the surface:\n${viewOf(h.vt)}`)
@@ -930,7 +989,7 @@ test('an 80x6 terminal still shows the selected model primary row and its arrow'
   await settle()
   await h.vt.waitForRender()
   assert.ok(linesOf(h.vt).length <= 6, `frame must fit the terminal:\n${viewOf(h.vt)}`)
-  assert.ok(contentLinesOf(h.vt).some(line => line.startsWith('→ ') && line.includes('Model 0')),
+  assert.ok(contentLinesOf(h.vt).some(line => line.startsWith('> ') && line.includes('Model 0')),
     `the selected primary row/arrow must survive the tiny grant:\n${viewOf(h.vt)}`)
   h.app.stop()
 })
@@ -986,7 +1045,7 @@ test('an unlisted current model selects nothing wrongly and never fakes a catalo
   assert.ok(!viewOf(h.vt).includes('ghost'), `no fabricated current row:\n${viewOf(h.vt)}`)
   const selected = selectedRow(h.vt)
   assert.ok(selected?.includes('Sol'), `the first catalog row wins: ${selected}`)
-  assert.ok(!selected!.includes('current'), 'an unmatched current must not badge a catalog row as current')
+  assert.ok(!selected!.includes('[current]'), 'an unmatched current must not chip a catalog row as current')
   h.app.stop()
 })
 
@@ -1020,7 +1079,7 @@ test('search matches a provider display name and a provider id independently', a
   h.app.stop()
 })
 
-test('a current model that is also the default composes current · default · effort', async () => {
+test('a current model that is also the default composes [current] [default] · effort', async () => {
   const directory = makeDirectory({
     groups: [{ id: 'p1', name: 'P1', models: [model('sol', { name: 'Sol', efforts: [
       { id: 'low', name: 'Low' }, { id: 'medium', name: 'Medium' }, { id: 'high', name: 'High' },
@@ -1028,8 +1087,8 @@ test('a current model that is also the default composes current · default · ef
     default: { provider: 'p1', model: 'sol' },
   })
   const h = await openPicker({ directory, current: { provider: 'p1', model: 'sol', reasoningEffort: 'medium' } })
-  assert.ok(rowLine(h.vt, 'Sol')?.includes('current · default · effort ‹Medium›'),
-    `the factual badges and the inline effort must compose:\n${viewOf(h.vt)}`)
+  assert.ok(rowLine(h.vt, 'Sol')?.includes('[current] [default] · effort ‹Medium›'),
+    `the state chips and the inline effort must compose:\n${viewOf(h.vt)}`)
   h.app.stop()
 })
 
@@ -1170,20 +1229,48 @@ const LAYOUT_DIRECTORY = makeDirectory({
 
 const renderAt = (h: Harness, width: number): string[] => h.picker.render(width).map(stripAnsi)
 
+test('the /model selected row is role 8 textStrong and the effort token keeps its own role-4 textDim ink', async () => {
+  // Two effort models: Sol is the selected current+default row, Other is an
+  // UNSELECTED row that also carries an effort token.
+  const directory = makeDirectory({
+    groups: [{ id: 'p1', name: 'P1', models: [
+      model('sol', { name: 'Sol', efforts: [{ id: 'high', name: 'High' }], defaultEffort: 'high' }),
+      model('other', { name: 'Other', efforts: [{ id: 'low', name: 'Low' }], defaultEffort: 'low' }),
+    ] }],
+    default: { provider: 'p1', model: 'sol' },
+  })
+  const h = await openPicker({ directory, current: { provider: 'p1', model: 'sol' } })
+  const selectedSol = rowOf(h.vt, 'Sol')
+  // Role 8: the selected row's LABEL is bold `textStrong` (only the cursor
+  // glyph is `primary`). It used to be the terminal default (chalk.bold only).
+  assert.equal(h.vt.getCellFgRgb(selectedSol, cellIndexOf(h.vt, selectedSol, 'Sol')), hexToRgb(currentPalette.textStrong),
+    `the selected row label is role 8 textStrong:\n${viewOf(h.vt)}`)
+  // Role 4: the effort token carries its OWN `textDim` span, so a nested chip's
+  // reset can never drop it to the terminal default — on either selection state.
+  assert.equal(h.vt.getCellFgRgb(selectedSol, cellIndexOf(h.vt, selectedSol, 'effort ‹')), hexToRgb(currentPalette.textDim),
+    `the effort token keeps its own textDim ink on the SELECTED row:\n${viewOf(h.vt)}`)
+  const unselectedOther = rowOf(h.vt, 'Other')
+  assert.equal(h.vt.getCellFgRgb(unselectedOther, cellIndexOf(h.vt, unselectedOther, 'effort ‹')), hexToRgb(currentPalette.textDim),
+    `the effort token keeps its own textDim ink on the UNSELECTED row:\n${viewOf(h.vt)}`)
+  assert.ok(rowLine(h.vt, 'Sol')?.includes('[current] [default] · effort ‹High›'),
+    `the chips come first and the effort token last:\n${viewOf(h.vt)}`)
+  h.app.stop()
+})
+
 test('a normal-width badge row stays on one line', async () => {
   const h = await openPicker({ directory: LAYOUT_DIRECTORY, current: { provider: 'p1', model: 'sol' } })
   const lines = renderAt(h, 72)
-  assert.ok(lines.some(line => line.includes('GPT-5.6 Sol') && line.includes('current · default · effort ‹High›')),
+  assert.ok(lines.some(line => line.includes('GPT-5.6 Sol') && line.includes('[current] [default] · effort ‹High›')),
     `must stay single-line at 72:\n${lines.join('\n')}`)
   h.app.stop()
 })
 
 test('the badge wraps exactly when label + badge no longer fit (no width threshold)', async () => {
   const h = await openPicker({ directory: LAYOUT_DIRECTORY, current: { provider: 'p1', model: 'sol' } })
-  const badge = 'current · default · effort ‹High›'
+  const badge = '[current] [default] · effort ‹High›'
   // The wrap is measured from the WIDEST form (the active `[ High ]`), so the
   // single/two-line boundary is that width, not the inactive rendering.
-  const measure = 'current · default · effort [ High ]'
+  const measure = '[current] [default] · effort [ High ]'
   const exact = 2 + visibleWidth('GPT-5.6 Sol') + 2 + visibleWidth(measure)
   const fits = renderAt(h, exact)
   assert.ok(fits.some(line => line.includes('GPT-5.6 Sol') && line.includes(badge)),
@@ -1228,7 +1315,7 @@ test('effort cycling never toggles a row between one and two lines', async () =>
   const h = await openPicker({ directory, current: { provider: 'p1', model: 'sol', reasoningEffort: 'a' } })
   // The SHORT badge would fit here, but the LONGEST candidate does not, so the
   // stable measurement must wrap from the start.
-  const short = 'current · default · effort ‹A›'
+  const short = '[current] [default] · effort ‹A›'
   const width = 2 + visibleWidth('Sol') + 2 + visibleWidth(short)
   const before = renderAt(h, width)
   assert.ok(!before.some(line => line.includes('Sol') && line.includes('effort ‹A›')),
@@ -1408,8 +1495,181 @@ test('the badge is right-aligned against the row edge', async () => {
   assert.equal(visibleWidth(wide), 72, `a single-line badge row must sit flush right:\n${wide}`)
   assert.ok(wide.trimEnd().endsWith('›'), `the badge must be the last thing on the row:\n${wide}`)
   const narrow = renderAt(h, 34)
-    .find(line => line.includes('current'))!
+    .find(line => line.includes('‹High›'))!
   assert.equal(visibleWidth(narrow), 34, `the wrapped badge line must sit flush right:\n${narrow}`)
+  h.app.stop()
+})
+
+test('a multi-line effort choice never truncates the model label', async () => {
+  // WITNESS for the projected-width comparison in `widestBadgeOf` (mutation-proven:
+  // reverting it to raw labels fails this test). The widest CANDIDATE badge is 30
+  // cells once projected — `[current] · effort [ A B C D ]` — but 29 measured on the
+  // RAW label, because `A\nB\nC\nD` is 4 cells raw and 7 projected. The wrap
+  // threshold is therefore exactly `2 + 20 + 2 + 29 = 53` cells, and this test
+  // renders AT it: the projected comparison sees 54 > 53 and WRAPS, painting the
+  // 20-cell model label in full, while the raw comparison sees 53 > 53 false and
+  // keeps the 32-cell badge inline — leaving the label `53 - 2 - 32 = 19` cells and
+  // cutting its last character. (Widths below 53 wrap either way, which is why the
+  // earlier 36..44 sweep could not discriminate.)
+  const label = 'Model name 123456789' // exactly 20 cells
+  const directory = makeDirectory({
+    groups: [{ id: 'p1', name: 'P1', models: [model('sol', { name: label, efforts: [
+      { id: 'multi', name: 'A\nB\nC\nD' }, { id: 'medium', name: 'Medium' },
+    ], defaultEffort: 'medium' })] }],
+    default: { provider: 'p2', model: 'ghost' },
+  })
+  const h = await openPicker({ directory, current: { provider: 'p1', model: 'sol', reasoningEffort: 'medium' } })
+  h.vt.sendInput('\r') // focus this model's inline effort
+  await h.vt.waitForRender()
+  h.vt.sendInput('\x1b[C') // cycle Medium -> the multi-line choice
+  await h.vt.waitForRender()
+  const rows = h.picker.render(53).map(line => line.replace(/\x1b\[[0-9;]*m/g, ''))
+  assert.ok(rows.some(line => line.includes('[ A B C D ]')),
+    `the effort must really be on the multi-line choice:\n${rows.join('\n')}`)
+  assert.ok(rows.some(line => line.includes(label)),
+    `the complete model label must survive — the projection must WRAP, not truncate it:\n${rows.join('\n')}`)
+  h.app.stop()
+})
+
+test('a narrow wrapped badge drops whole chips instead of slicing one', async () => {
+  const h = await openPicker({ directory: LAYOUT_DIRECTORY, current: { provider: 'p1', model: 'sol' }, fullscreen: true })
+  // `[current] [default] · effort ‹High›` is 35 cells (two state chips a single
+  // space apart): at 34 the pre-painted `[current]` chip must drop WHOLE — the
+  // pre-paint makes a char-wise left trim produce both a `…rent]` fragment and,
+  // potentially, a broken SGR sequence.
+  for (const width of [34, 20]) {
+    const rows = h.picker.render(width)
+    const raw = rows.find(line => line.includes('‹High›') && !line.includes('GPT-5.6 Sol'))
+    assert.ok(raw !== undefined, `width ${width}: the wrapped badge row must render:\n${rows.join('\n')}`)
+    // The escape-aware trim only lands BETWEEN tokens: no broken SGR survives.
+    assert.ok(!raw.replace(/\x1b\[[0-9;]*m/g, '').includes('\x1b'),
+      `width ${width}: a broken escape survived:\n${JSON.stringify(raw)}`)
+    const badge = stripAnsi(raw)
+    assert.ok(!badge.includes('rent]'), `width ${width}: a partial state chip survived:\n${badge}`)
+    // Every `]` closes a WHOLE chip: no `[`-less remnant may survive.
+    const wholeChips = badge.match(/\[[^\]]*\]/g) ?? []
+    assert.equal((badge.match(/\]/g) ?? []).length, wholeChips.length,
+      `width ${width}: a chip survived in fragments:\n${badge}`)
+    // The ellipsis may only prefix a WHOLE surviving unit (`…[default]` /
+    // `…effort ‹High›`), never a chip fragment (`…rent]`).
+    assert.match(badge, /…(?:\[(?:current|default)\]|effort ‹High›)/,
+      `width ${width}: the ellipsis landed inside a chip:\n${badge}`)
+    assert.ok(badge.includes('effort ‹High›'), `width ${width}: the effort token must survive whole:\n${badge}`)
+    for (const line of rows) {
+      assert.ok(visibleWidth(line) <= width, `width ${width}: over-wide row ${JSON.stringify(line)}`)
+    }
+  }
+  // A real narrow frame: the dropped `[current]` leaves a WHOLE `[default]`, and
+  // the surviving chip keeps its own `textMuted` ink. The width is 38, not 40:
+  // the badge lost the two cells the ` · ` join used to spend, so it first
+  // overflows (and wraps) two columns earlier.
+  h.vt.resize(38, 24)
+  await h.vt.waitForRender()
+  const chipRow = rowOf(h.vt, '…')
+  const frame = linesOf(h.vt)
+  assert.ok(frame[chipRow]!.includes('[default]'), `the frame must keep the whole [default] chip:\n${viewOf(h.vt)}`)
+  assert.ok(!frame[chipRow]!.includes('rent]'), `the frame must not slice a chip:\n${viewOf(h.vt)}`)
+  assert.equal(h.vt.getCellFgRgb(chipRow, cellIndexOf(h.vt, chipRow, '[default]')),
+    hexToRgb(currentPalette.textMuted),
+    `the surviving chip must keep its textMuted ink:\n${viewOf(h.vt)}`)
+  h.app.stop()
+})
+
+test('a lone state chip is dropped whole, never sliced', async () => {
+  // A current model with NO effort: the whole badge is the single `[current]`
+  // chip (the directory default points elsewhere, so no `[default]` chip).
+  const directory = makeDirectory({
+    groups: [{ id: 'p1', name: 'P1', models: [model('sol', { name: 'Sol' })] }],
+    default: { provider: 'p2', model: 'ghost' },
+  })
+  const h = await openPicker({ directory, current: { provider: 'p1', model: 'sol' } })
+  for (const width of [8, 7]) {
+    const rows = h.picker.render(width)
+    const plain = rows.map(stripAnsi)
+    assert.ok(plain.some(line => line.includes('Sol')), `width ${width}: the label must stay painted:\n${rows.join('\n')}`)
+    // `[current]` (9) cannot fit: the LONE chip must be absent whole — no
+    // `urrent]`/`rrent]` fragment and no `[`-less remnant anywhere.
+    assert.ok(!plain.some(line => line.includes('[') || line.includes(']')),
+      `width ${width}: the lone chip must be absent whole:\n${rows.join('\n')}`)
+    // The wrapped badge slot stays reserved as a blank row padded to the grant
+    // (the whole chip dropped, nothing sliced).
+    const blank = rows.find(line => stripAnsi(line) === '' && visibleWidth(line) === width)
+    assert.ok(blank !== undefined, `width ${width}: the blank wrapped badge row stays reserved:\n${rows.join('\n')}`)
+    for (const line of rows) {
+      assert.ok(visibleWidth(line) <= width, `width ${width}: over-wide row ${JSON.stringify(line)}`)
+    }
+  }
+  h.app.stop()
+})
+
+test('a provider effort name containing ` · ` is never split into badge parts', async () => {
+  const directory = makeDirectory({
+    groups: [{ id: 'p1', name: 'P1', models: [
+      model('sol', { name: 'Sol', efforts: [{ id: 'high', name: 'High · Adaptive' }], defaultEffort: 'high' }),
+    ] }],
+    default: { provider: 'p1', model: 'sol' },
+  })
+  const h = await openPicker({ directory, current: { provider: 'p1', model: 'sol' } })
+  const token = 'effort ‹High · Adaptive›'
+  // Badge parts: `[current]` + `[default]` chips then ONE effort `text` part.
+  // The buggy joined-text ` · `-split tears the name, drops the `effort ‹High`
+  // head and paints `…Adaptive›` at 25 and 24 columns.
+  for (const width of [26, 25, 24]) {
+    const rows = h.picker.render(width)
+    const raw = rows.find(line => line.includes('Adaptive'))
+    assert.ok(raw !== undefined, `width ${width}: the wrapped badge row must render:\n${rows.join('\n')}`)
+    // The trim still only lands BETWEEN whole SGR sequences.
+    assert.ok(!raw.replace(/\x1b\[[0-9;]*m/g, '').includes('\x1b'),
+      `width ${width}: a broken escape survived:\n${JSON.stringify(raw)}`)
+    const badge = stripAnsi(raw)
+    assert.ok(!badge.includes('…Adaptive›'),
+      `width ${width}: the name separator was treated as a part boundary:\n${badge}`)
+    assert.ok(badge.includes('‹High · Adaptive›'), `width ${width}: the effort name head must survive:\n${badge}`)
+    if (width >= 25) {
+      assert.ok(badge.includes(token), `width ${width}: the whole effort token must survive:\n${badge}`)
+    }
+    for (const line of rows) {
+      assert.ok(visibleWidth(line) <= width, `width ${width}: over-wide row ${JSON.stringify(line)}`)
+    }
+  }
+  h.app.stop()
+})
+
+test('a provider effort name carrying CR/LF never breaks the single-row contract', async () => {
+  // Two break forms in one frame: the current+default row (`[current]` +
+  // `[default]`, so the badge is long enough to trim) carries `\n`; the second
+  // row carries `\r\n`. Both names come verbatim from the model directory.
+  const directory = makeDirectory({
+    groups: [{ id: 'p1', name: 'P1', models: [
+      model('sol', { name: 'Sol', efforts: [{ id: 'high', name: 'High\nAdaptive' }], defaultEffort: 'high' }),
+      model('luna', { name: 'Luna', efforts: [{ id: 'low', name: 'Low\r\nAdaptive' }], defaultEffort: 'low' }),
+    ] }],
+    default: { provider: 'p1', model: 'sol' },
+  })
+  const h = await openPicker({ directory, current: { provider: 'p1', model: 'sol' } })
+  const cases = [
+    { rowNeedle: 'High', name: 'High Adaptive', whole: 'effort ‹High Adaptive›' },
+    { rowNeedle: 'Low', name: 'Low Adaptive', whole: 'effort ‹Low Adaptive›' },
+  ]
+  // Every width here takes the wrapped-badge path (the widest-form measurement
+  // is longer than the grant) and trims the effort PART.
+  for (const width of [26, 23, 20]) {
+    const rows = h.picker.render(width)
+    for (const row of rows) {
+      assert.equal(/[\r\n]/.test(row), false, `width ${width}: a row break leaked: ${JSON.stringify(row)}`)
+      assert.ok(visibleWidth(row) <= width, `width ${width}: over-wide row ${JSON.stringify(row)}`)
+    }
+    for (const { rowNeedle, name, whole } of cases) {
+      const raw = rows.find(line => line.includes(rowNeedle) && line.includes('‹'))
+      assert.ok(raw !== undefined, `width ${width}: ${rowNeedle}'s effort token must survive:\n${rows.join('\n')}`)
+      const badge = stripAnsi(raw)
+      assert.ok(badge.includes(`‹${name}›`),
+        `width ${width}: ${rowNeedle}'s name head must survive with the break projected to a space:\n${badge}`)
+      if (width >= 23) {
+        assert.ok(badge.includes(whole), `width ${width}: the whole effort token must survive:\n${badge}`)
+      }
+    }
+  }
   h.app.stop()
 })
 
@@ -1475,7 +1735,7 @@ test('mixed wrapped/unwrapped rows keep a stable height as the cursor moves', as
   await h.vt.waitForRender()
   const after = renderAt(h, width)
   assert.equal(after.length, heightBefore, `selection move must not change the height:\n${after.join('\n')}`)
-  assert.ok(after.some(line => line.startsWith('→ ') && line.includes('Another Long')),
+  assert.ok(after.some(line => line.startsWith('> ') && line.includes('Another Long')),
     `the selected identity must stay visible:\n${after.join('\n')}`)
   h.app.stop()
 })
@@ -1494,9 +1754,9 @@ test('a wrapped badge under a tight row grant stays in budget and keeps the sele
   h.picker.setMaxRows(grant)
   const lines = renderAt(h, width)
   assert.ok(lines.length <= grant, `render must respect the grant ${grant}:\n${lines.join('\n')}`)
-  assert.ok(lines.some(line => line.startsWith('→ ') && line.includes('A Long')),
+  assert.ok(lines.some(line => line.startsWith('> ') && line.includes('A Long')),
     `the selected primary identity must survive:\n${lines.join('\n')}`)
-  const badgeRow = lines.findIndex(line => line.includes('effort') && !line.startsWith('→ '))
+  const badgeRow = lines.findIndex(line => line.includes('effort') && !line.startsWith('> '))
   if (badgeRow >= 0) {
     assert.equal(h.picker.handleMouse(mouse('press', 3, badgeRow, width, 24)), undefined,
       'a wrapped badge row must stay inert under the tight grant')
@@ -1518,7 +1778,7 @@ test('effort edit mode consumes ↑/↓ and printable keys (no model move, no qu
   await h.vt.waitForRender()
   const view = viewOf(h.vt)
   assert.ok(rowLine(h.vt, 'Sol')?.includes('effort [ Medium ]'), `the effort must not change:\n${view}`)
-  assert.ok(!contentLinesOf(h.vt).some(line => line.startsWith('→ ') && line.includes('Plain')),
+  assert.ok(!contentLinesOf(h.vt).some(line => line.startsWith('> ') && line.includes('Plain')),
     `↑/↓ must not move the selected model:\n${view}`)
   const searchAfter = contentLinesOf(h.vt).find(line => line.trimStart().startsWith('>'))!
   assert.equal(searchAfter, searchBefore, `printable keys must not edit the query:\n${view}`)
@@ -1539,7 +1799,7 @@ test('entering and leaving effort edit preserves the query and the selected mode
   await h.vt.waitForRender()
   const view = viewOf(h.vt)
   assert.ok(rowLine(h.vt, 'Sol')?.includes('effort ‹High›'), `the effort must persist:\n${view}`)
-  assert.ok(contentLinesOf(h.vt).some(line => line.startsWith('→ ') && line.includes('Sol')),
+  assert.ok(contentLinesOf(h.vt).some(line => line.startsWith('> ') && line.includes('Sol')),
     `the selected model must persist:\n${view}`)
   const searchAfter = contentLinesOf(h.vt).find(line => line.trimStart().startsWith('>'))!
   assert.equal(searchAfter, searchBefore, `the query (and cursor) must survive the round trip:\n${view}`)
@@ -1758,8 +2018,8 @@ test('a refresh that drops the reasoning metadata exits Effort mode to the no-ef
   await h.vt.waitForRender()
   const view = viewOf(h.vt)
   assert.ok(!view.includes('[ '), `the focus must be released:\n${view}`)
-  assert.ok(!view.includes('esc back'), `the effort-mode hint must be dropped:\n${view}`)
-  assert.ok(view.includes('enter effort/select'), `the model-mode hint must return:\n${view}`)
+  assert.ok(!view.includes('Esc back'), `the effort-mode hint must be dropped:\n${view}`)
+  assert.ok(view.includes('Enter effort/select'), `the model-mode hint must return:\n${view}`)
   h.vt.sendInput(ENTER) // the no-effort fast path commits directly
   await settle()
   assert.deepEqual(h.applied, [{ provider: 'p1', model: 'sol' }])
@@ -1819,7 +2079,7 @@ test('a refresh that moves the configured selection keeps the Effort-bound row s
   h.hydrate(two, { provider: 'p1', model: 'other' }) // the configured selection moves
   await h.vt.waitForRender()
   const view = viewOf(h.vt)
-  assert.ok(contentLinesOf(h.vt).some(line => line.startsWith('→ ') && line.includes('Sol')),
+  assert.ok(contentLinesOf(h.vt).some(line => line.startsWith('> ') && line.includes('Sol')),
     `the effort-bound row must stay selected:\n${view}`)
   assert.ok(rowLine(h.vt, 'Sol')?.includes('effort [ High ]'), `the active token must sit on the selected row:\n${view}`)
   h.vt.sendInput(LEFT) // still acts on Sol
@@ -1829,4 +2089,258 @@ test('a refresh that moves the configured selection keeps the Effort-bound row s
   await settle()
   assert.deepEqual(h.applied, [{ provider: 'p1', model: 'sol', reasoningEffort: 'low' }])
   h.app.stop()
+})
+
+test('hostile catalog metadata never reaches the terminal raw', async () => {
+  const hostile = 'evil\u001b]52;c;YXR0YWNr\u0007\u001b[2J\u009b2Jname'
+  const h = await openPicker({ loading: true })
+  h.hydrate(makeDirectory({
+    groups: [{
+      id: 'p1',
+      name: hostile,
+      models: [model('m1', { name: hostile, efforts: [{ id: 'low', name: hostile }], defaultEffort: 'low' })],
+    }],
+    failures: [{ id: 'p2', name: hostile, message: hostile }],
+    default: { provider: 'p1', model: 'm1' },
+  }))
+  await h.vt.waitForRender()
+  const raw = h.vt.writes.join('')
+  assert.ok(!raw.includes('YXR0YWNr'), `no OSC 52 payload from catalog metadata reaches the terminal:\n${viewOf(h.vt)}`)
+  assert.ok(!raw.includes('\u009b'), 'no raw C1 byte from catalog metadata reaches the terminal')
+  assert.match(viewOf(h.vt), /evil/, 'the readable catalog metadata survives the projection')
+  h.app.stop()
+})
+
+test('hostile catalog metadata is folded onto ONE physical row per picker field', async () => {
+  // LF, CRLF, TAB and an OSC payload in provider/model/effort names: each is a
+  // ONE-line picker field, so the boundary must fold it before the row budget
+  // and the width measurement ever see it.
+  const hostile = 'Evil\nName\r\nSecond\tRow\u001b]52;c;YXR0YWNr\u0007'
+  const collapsed = 'Evil Name Second   Row'
+  const h = await openPicker({ loading: true })
+  h.hydrate(makeDirectory({
+    groups: [{
+      id: 'p1',
+      name: hostile,
+      models: [model('m1', { name: hostile, efforts: [{ id: 'low', name: hostile }], defaultEffort: 'low' })],
+    }],
+    failures: [{ id: 'p2', name: hostile, message: hostile }],
+    default: { provider: 'p1', model: 'm1' },
+  }))
+  await h.vt.waitForRender()
+  const rows = h.picker.render(72)
+  for (const row of rows) {
+    assert.ok(!row.includes('\n') && !row.includes('\r'),
+      `a picker row carries an embedded line break: ${JSON.stringify(row)}`)
+  }
+  const view = viewOf(h.vt)
+  assert.ok(view.includes(collapsed), `the collapsed catalog metadata survives:\n${view}`)
+  const raw = h.vt.writes.join('')
+  assert.ok(!raw.includes('YXR0YWNr'), `no OSC payload from catalog metadata reaches the terminal:\n${view}`)
+  assert.ok(!raw.includes('\u009b'), 'no raw C1 byte from catalog metadata reaches the terminal')
+  h.app.stop()
+})
+
+test('a hostile load error stays ONE safe physical row', async () => {
+  const hostile = 'connection\nreset\r\nby\thost\u001b]52;c;YXR0YWNr\u0007'
+  const h = await openPicker({ loading: true })
+  h.picker.setLoadError(hostile)
+  await h.vt.waitForRender()
+  const rows = h.picker.render(72)
+  for (const row of rows) {
+    assert.ok(!row.includes('\n') && !row.includes('\r'),
+      `the load-error row carries an embedded line break: ${JSON.stringify(row)}`)
+  }
+  const view = viewOf(h.vt)
+  assert.match(view, /Model catalog unavailable: connection reset by   host/,
+    `the collapsed load error is painted on one row:\n${view}`)
+  const raw = h.vt.writes.join('')
+  assert.ok(!raw.includes('YXR0YWNr'), `no OSC payload from the load error reaches the terminal:\n${view}`)
+  assert.ok(!raw.includes('\u009b'), 'no raw C1 byte from the load error reaches the terminal')
+  h.app.stop()
+})
+
+test('a hostile single-row model label keeps its painted click map', async () => {
+  // The collapsed hostile label paints on ONE row; the picker's hit map is built
+  // from those final rows, so clicking it must select/applying exactly that row.
+  const hostile = 'Evil\nName\r\nSecond\tRow\u001b]52;c;YXR0YWNr\u0007'
+  const directory = makeDirectory({
+    groups: [{
+      id: 'p1',
+      name: 'P1',
+      models: [model('m1', { name: hostile }), model('m2', { name: 'Plain' })],
+    }],
+    default: { provider: 'p1', model: 'm2' },
+  })
+  const h = await openPicker({ directory })
+  const rendered = h.picker.render(72).map(stripAnsi)
+  const row = rendered.findIndex(line => line.includes('Evil Name Second   Row'))
+  assert.ok(row >= 0, `the collapsed hostile row is painted:\n${rendered.join('\n')}`)
+  h.picker.handleMouse(mouse('press', 5, row, 72, 24))
+  h.picker.handleMouse(mouse('click', 5, row, 72, 24))
+  await settle()
+  assert.deepEqual(h.applied, [{ provider: 'p1', model: 'm1' }],
+    `the click map must address the collapsed row itself:\n${rendered.join('\n')}`)
+  h.app.stop()
+})
+
+// ── D3-3: the exact rc.2 deepseek-flash catalog route ──────────────────────
+
+import { credentialRef } from '@deepseek-ai/dsh-credentials'
+import { LlmAdapter, type StreamChunk } from '@deepseek-ai/dsh-llm'
+import { startS4D3Application } from './support/s4-d3-application-fixture.ts'
+import { skippedInstallationReason } from './support/s4-d2-optional-bundle-fixture.ts'
+
+class FlashAdapter extends LlmAdapter {
+  override resolveModel(provider: string, model: string): Promise<{ provider: string; id: string; name: string }> {
+    return Promise.resolve({ provider, id: model, name: model })
+  }
+  override async *stream(): AsyncIterable<StreamChunk> {
+    yield { type: 'block-start', index: 0, blockType: 'text' }
+    yield { type: 'text-delta', index: 0, text: 'ready' }
+    yield { type: 'block-end', index: 0, block: { type: 'text', text: 'ready' } }
+    yield { type: 'finish', reason: { kind: 'stop' } }
+  }
+}
+
+test('the real rc.2 DeepSeek catalog exposes deepseek-flash to the mounted /model picker and commits it', { skip: skippedInstallationReason([]) }, async t => {
+  const adapter = new FlashAdapter()
+  const app = await startS4D3Application(t, {
+    bundles: [],
+    columns: 120,
+    rows: 36,
+    patches: [{ id: 'agent-default-model', config: { provider: 'scripted', model: 'review-model' } }] as never,
+    prepareHost: async host => {
+      host.ctx.llm.registerAdapter(['scripted'], adapter)
+      await (host.ctx.get('credentials') as { set(ref: unknown, secret: string): Promise<unknown> })
+        .set(credentialRef('DEEPSEEK_API_KEY'), 'd3-test-key')
+    },
+  })
+  // The REAL published catalog: exact id + display name through the official
+  // Host adapter (never a TUI-injected row), with no network call.
+  const llm = app.host.ctx.llm as unknown as {
+    listModels(provider: string): Promise<readonly { id: string; name?: string }[]>
+    resolveModelInfo(provider: string, model: string): Promise<{ name?: string }>
+  }
+  const models = await llm.listModels('deepseek-official')
+  const flash = models.find(model => model.id === 'deepseek-flash')
+  assert.ok(flash !== undefined, `the official catalog carries deepseek-flash: ${JSON.stringify(models)}`)
+  assert.equal(flash!.name, 'DeepSeek-V4.1-Flash')
+  assert.equal((await llm.resolveModelInfo('deepseek-official', 'deepseek-flash')).name, 'DeepSeek-V4.1-Flash')
+  assert.notEqual(models.find(model => model.name === 'DeepSeek-V4.1-Flash')?.id, 'DeepSeek-V4.1-Flash',
+    'the display name is never used as the model ID')
+
+  const agent = await app.submitFirstPrompt('Start the model route check')
+  await agent.whenIdle()
+  // `/model` through the production command path, then search the exact id.
+  for (const character of '/model') app.vt.sendInput(character)
+  await settle()
+  app.vt.sendInput('\r')
+  await settle()
+  if ((app.vt.getViewport().join('\n')).includes('❯ /model')) {
+    app.vt.sendInput('\r')
+    await settle()
+  }
+  for (const character of 'deepseek-flash') app.vt.sendInput(character)
+  await new Promise<void>(resolve => setTimeout(resolve, 200))
+  const list = app.vt.getViewport().map(line => line.replace(/\x1b\[[0-9;]*m/gu, '')).join('\n')
+  assert.match(list, /DeepSeek-V4.1-Flash/u, `the real flash row is listed:\n${list}`)
+  app.vt.sendInput('\r') // select the highlighted exact identity
+  await new Promise<void>(resolve => setTimeout(resolve, 250))
+  // A model with declared reasoning efforts opens the SAME panel's effort
+  // choice; accept its default with the next Enter (the real apply path).
+  if (/\beffort\b/iu.test(app.vt.getViewport().join('\n'))) {
+    app.vt.sendInput('\r')
+    await new Promise<void>(resolve => setTimeout(resolve, 300))
+  }
+  const durable = agent.session.snapshotEvents() as readonly { readonly type?: string; readonly data?: unknown }[]
+  const selection = durable.filter(event => event.type === 'model/selection').at(-1)?.data as
+    | { provider?: string; model?: string }
+    | undefined
+  assert.ok(selection !== undefined, 'the picker appends the durable model/selection intent')
+  assert.deepEqual({ provider: selection.provider, model: selection.model }, {
+    provider: 'deepseek-official',
+    model: 'deepseek-flash',
+  }, 'the exact provider+model identity is committed, never the display name')
+
+  // Reopen: the committed selection carries the current marker.
+  for (const character of '/model') app.vt.sendInput(character)
+  await settle()
+  app.vt.sendInput('\r')
+  await settle()
+  await new Promise<void>(resolve => setTimeout(resolve, 250))
+  const reopened = app.vt.getViewport().map(line => line.replace(/\x1b\[[0-9;]*m/gu, ''))
+  const flashRow = reopened.findIndex(line => line.includes('DeepSeek-V4.1-Flash'))
+  assert.ok(flashRow >= 0, `the reopened picker lists the model:\n${reopened.join('\n')}`)
+  assert.match(reopened[flashRow]!, /current/u, 'the reopened picker marks the exact (provider,model) current')
+})
+
+test('without a readable official catalog deepseek-flash is absent, never fabricated', { skip: skippedInstallationReason([]) }, async t => {
+  const app = await startS4D3Application(t, { bundles: [], columns: 120, rows: 36 })
+  const llm = app.host.ctx.llm as unknown as { listModels(provider: string): Promise<readonly { id: string }[]> }
+  assert.deepEqual(await llm.listModels('deepseek-official'), [], 'no credential and no discovery result')
+  for (const character of '/model') app.vt.sendInput(character)
+  await settle()
+  app.vt.sendInput('\r')
+  await settle()
+  await new Promise<void>(resolve => setTimeout(resolve, 200))
+  const frame = app.vt.getViewport().map(line => line.replace(/\x1b\[[0-9;]*m/gu, ''))
+  const top = frame.findIndex(line => line.includes('Models'))
+  assert.ok(top >= 0, `the /model picker opened:\n${frame.join('\n')}`)
+  const left = frame[top]!.indexOf('╭')
+  const overlay = frame.slice(top).map(line => line.slice(left)).join('\n')
+  assert.doesNotMatch(overlay, /deepseek-flash|DeepSeek-V4\.1-Flash/u,
+    'the picker never fabricates a model row the Host did not offer')
+})
+
+test('a legal non-empty deployment catalog without deepseek-flash is authoritative', { skip: skippedInstallationReason([]) }, async t => {
+  const adapter = new FlashAdapter()
+  const app = await startS4D3Application(t, {
+    bundles: [],
+    columns: 120,
+    rows: 36,
+    patches: [
+      // A legal, NON-EMPTY deployment override of the official rc.2 catalog:
+      // only the Pro model is offered. The picker must respect it.
+      { id: 'llm-deepseek', config: { models: [{ id: 'deepseek-v4-pro', name: 'DeepSeek-V4-Pro' }] } },
+      { id: 'agent-default-model', config: { provider: 'scripted', model: 'review-model' } },
+    ] as never,
+    prepareHost: async host => {
+      host.ctx.llm.registerAdapter(['scripted'], adapter)
+      await (host.ctx.get('credentials') as { set(ref: unknown, secret: string): Promise<unknown> })
+        .set(credentialRef('DEEPSEEK_API_KEY'), 'd3-test-key')
+    },
+  })
+  const llm = app.host.ctx.llm as unknown as { listModels(provider: string): Promise<readonly { id: string; name?: string }[]> }
+  const models = await llm.listModels('deepseek-official')
+  assert.deepEqual(models.map(model => model.id), ['deepseek-v4-pro'], 'the override is the effective official catalog')
+  assert.equal(models.some(model => model.id === 'deepseek-flash'), false)
+
+  const agent = await app.submitFirstPrompt('Start the override catalog check')
+  await agent.whenIdle()
+  for (const character of '/model') app.vt.sendInput(character)
+  await settle()
+  app.vt.sendInput('\r')
+  await settle()
+  if (app.view().includes('❯ /model')) {
+    app.vt.sendInput('\r')
+    await settle()
+  }
+  for (const character of 'flash') app.vt.sendInput(character)
+  await new Promise<void>(resolve => setTimeout(resolve, 200))
+  const frame = app.vt.getViewport().map(line => line.replace(/\x1b\[[0-9;]*m/gu, ''))
+  assert.ok(frame.some(line => /Models\s+0\/1/u.test(line)), `the override catalog is the picker's only source:\n${frame.join('\n')}`)
+  assert.ok(frame.some(line => /No matching models/u.test(line)), 'searching flash has no hit in the override')
+  assert.ok(!frame.some(line => line.includes('DeepSeek-V4.1-Flash')), 'the omitted Flash display name is never painted')
+  app.vt.sendInput('\r') // inert: there is no Flash row to submit
+  await new Promise<void>(resolve => setTimeout(resolve, 150))
+  const durable = agent.session.snapshotEvents() as readonly { readonly type?: string; readonly data?: unknown }[]
+  const selection = durable.filter(event => event.type === 'model/selection').at(-1)?.data as
+    | { provider?: string; model?: string }
+    | undefined
+  const header = agent.session.requestHeader() as { config?: { provider?: string; model?: string } } | undefined
+  assert.deepEqual({
+    provider: selection?.provider ?? header?.config?.provider,
+    model: selection?.model ?? header?.config?.model,
+  }, { provider: 'scripted', model: 'review-model' }, 'no Flash identity can be submitted from the overridden catalog')
 })

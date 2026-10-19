@@ -61,7 +61,7 @@ export function normalizeInputEvent(data: string): AdvancedInputEvent | undefine
   const parsed = parseKey(data)
   if (parsed !== undefined) return { kind: 'key', key: keyIdToNormalized(parsed) }
   // A plain printable run: multi-char chunks that are not a single key
-  // (fast typing / non-bracketed paste heuristic) are TEXT.
+  // (fast typing or a non-bracketed paste) are TEXT.
   if (data.length > 0 && [...data].every(char => char.charCodeAt(0) >= 32 && char.charCodeAt(0) < 127)) {
     return { kind: 'text', text: data }
   }

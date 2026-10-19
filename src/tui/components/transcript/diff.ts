@@ -11,6 +11,8 @@
  */
 
 import { color } from '../../theme/runtime.ts'
+import { sanitizedPhysicalLine } from '../../presentation/lines.ts'
+import { sanitizeDisplayText } from '../../presentation/terminal-text.ts'
 import { relativizeToCwd } from '../../transcript/tool-presentation.ts'
 import {
   isAnchoredFileDiff,
@@ -22,18 +24,25 @@ import {
 /**
  * Colorize one unified-diff line.
  * @param line - one line of a unified diff.
+ * @param alreadyProjected - the caller already applied the display policy for
+ *   this line (the log policy, which keeps whitelisted SGR); skip the plain
+ *   projection so those safe colors survive.
  * @returns the colorized line (unchanged when not diff content).
  */
-export function renderDiffLine(line: string): string {
-  if (line.startsWith('+') && !line.startsWith('+++')) return color.diffAdded(line)
-  if (line.startsWith('-') && !line.startsWith('---')) return color.diffRemoved(line)
+export function renderDiffLine(line: string, alreadyProjected = false): string {
+  // Untrusted diff/file content is projected before the theme paint so a raw
+  // terminal control can never ride along inside a colored diff row. A caller
+  // that already projected under the LOG policy passes `alreadyProjected`.
+  const safe = alreadyProjected ? line : sanitizeDisplayText(line)
+  if (line.startsWith('+') && !line.startsWith('+++')) return color.diffAdded(safe)
+  if (line.startsWith('-') && !line.startsWith('---')) return color.diffRemoved(safe)
   if (
     line.startsWith('@@') || line.startsWith('diff ') || line.startsWith('index ')
     || line.startsWith('---') || line.startsWith('+++')
   ) {
-    return color.diffMeta(line)
+    return color.diffMeta(safe)
   }
-  return line
+  return safe
 }
 
 /**
@@ -41,8 +50,8 @@ export function renderDiffLine(line: string): string {
  * @param text - the diff document.
  * @returns the colorized lines.
  */
-export function renderDiffLines(text: string): string[] {
-  return text.split('\n').map(renderDiffLine)
+export function renderDiffLines(text: string, alreadyProjected = false): string[] {
+  return text.split('\n').map(line => renderDiffLine(line, alreadyProjected))
 }
 
 /** One diff body row: dim line-number gutter plus the colored/plain code.
@@ -50,10 +59,11 @@ export function renderDiffLines(text: string): string[] {
  * (`oldStart`/`newStart`) — without one the relative hunk line numbers would
  * masquerade as file line numbers (plan: never guess a gutter). */
 function formatDiffRow(line: DiffLine, showLineNumber: boolean): string {
+  const code = sanitizeDisplayText(line.code)
   const gutter = showLineNumber ? color.diffGutter(`${String(line.lineNum).padStart(4)} `) : ''
-  if (line.kind === 'add') return gutter + color.diffAdded(`+ ${line.code}`)
-  if (line.kind === 'delete') return gutter + color.diffRemoved(`- ${line.code}`)
-  return gutter + `  ${line.code}`
+  if (line.kind === 'add') return gutter + color.diffAdded(`+ ${code}`)
+  if (line.kind === 'delete') return gutter + color.diffRemoved(`- ${code}`)
+  return gutter + `  ${code}`
 }
 
 /** Options for {@link renderDiffView}. */
@@ -121,7 +131,7 @@ export function renderDiffView(diffs: readonly DiffInput[], cwd?: string, option
     if (addedCount > 0) stats.push(color.diffAdded(`+${addedCount}`))
     if (removedCount > 0) stats.push(color.diffRemoved(`-${removedCount}`))
     const header = headerMode === 'full'
-      ? `${stats.join(' ')}${stats.length === 0 ? '' : ' '}${relativizeToCwd(hunk.path, cwd)}`
+      ? `${stats.join(' ')}${stats.length === 0 ? '' : ' '}${sanitizedPhysicalLine(relativizeToCwd(hunk.path, cwd))}`
       : stats.join(' ')
     // A no-op hunk has no body rows to consume or hide, so it must not turn
     // an exactly-full budget into a false truncation marker.

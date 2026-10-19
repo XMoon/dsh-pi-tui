@@ -31,3 +31,31 @@ export function runSyncDisposalSteps(label: string, steps: readonly (() => void)
   if (failures.length === 1) throw failures[0]
   if (failures.length > 1) throw new AggregateError(failures, label)
 }
+
+/**
+ * The same non-truncating attempt, for a batch that rolls back a PRIMARY failure:
+ * every rollback step is attempted in caller-provided order, then the PRIMARY
+ * value is thrown — aggregated by IDENTITY with the collected rollback failures,
+ * the primary first and the rollback values FLAT, in step order
+ * (`AggregateError([primary, r1, r2])`). One rollback obligation must never be
+ * skipped because an earlier one threw, and every value a step threw stays ONE
+ * entry — a user `AggregateError` is never flattened into its `.errors`. The step
+ * loop is inlined (not delegated to {@link runSyncDisposalSteps}, which would
+ * nest its own aggregate one level down).
+ */
+export function runSyncDisposalStepsWithPrimary(
+  label: string,
+  primary: unknown,
+  steps: readonly (() => void)[],
+): never {
+  const failures: unknown[] = []
+  for (const step of steps) {
+    try {
+      step()
+    } catch (error) {
+      failures.push(error)
+    }
+  }
+  if (failures.length === 0) throw primary
+  throw new AggregateError([primary, ...failures], label)
+}

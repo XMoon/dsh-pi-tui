@@ -2174,8 +2174,8 @@ test('workflow run events fold into one workflow card with member rows', () => {
   const messages = foldTranscript([
     event('turn/start', { turn: 0 }, 0),
     rawEvent('tool-workflow/run-start', { runId: 'run-1', name: 'audit' }, 1),
-    rawEvent('tool-workflow/agent-start', { runId: 'run-1', seq: 0, label: 'checker', phase: 'review', childId: 'session-x' }, 2),
-    rawEvent('tool-workflow/agent-end', { runId: 'run-1', seq: 0, outcome: 'completed' }, 3),
+    rawEvent('tool-workflow/agent-start', { runId: 'run-1', seq: 1, label: 'checker', phase: 'review', childId: 'session-x' }, 2),
+    rawEvent('tool-workflow/agent-end', { runId: 'run-1', seq: 1, outcome: 'completed' }, 3),
     rawEvent('tool-workflow/run-end', { runId: 'run-1', stopReason: 'completed' }, 4),
   ])
   assert.deepEqual(kinds(messages), ['workflow'])
@@ -2185,7 +2185,7 @@ test('workflow run events fold into one workflow card with member rows', () => {
   assert.equal(run.runId, 'run-1')
   assert.equal(run.status, 'completed')
   assert.deepEqual(run.members, [{
-    seq: 0,
+    seq: 1,
     label: 'checker',
     phase: 'review',
     childId: 'session-x',
@@ -2197,8 +2197,8 @@ test('a failed workflow member settles its row as failed', () => {
   const messages = foldTranscript([
     event('turn/start', { turn: 0 }, 0),
     rawEvent('tool-workflow/run-start', { runId: 'run-2', name: 'audit' }, 1),
-    rawEvent('tool-workflow/agent-start', { runId: 'run-2', seq: 0, label: 'checker', childId: 'session-x' }, 2),
-    rawEvent('tool-workflow/agent-end', { runId: 'run-2', seq: 0, outcome: 'failed' }, 3),
+    rawEvent('tool-workflow/agent-start', { runId: 'run-2', seq: 1, label: 'checker', childId: 'session-x' }, 2),
+    rawEvent('tool-workflow/agent-end', { runId: 'run-2', seq: 1, outcome: 'failed' }, 3),
   ])
   const run = messages[0]
   assert.ok(run !== undefined && run.kind === 'workflow')
@@ -2212,8 +2212,8 @@ test('workflow: a complete run folds into one workflow card (plan §8.1)', () =>
     event('turn/start', { turn: 0 }, 0),
     event('step/start', { turn: 0, step: 0 }, 1),
     rawEvent('tool-workflow/run-start', { runId: 'run-1', name: 'audit' }, 2),
-    rawEvent('tool-workflow/agent-start', { runId: 'run-1', seq: 0, label: 'checker', phase: 'review', childId: 'session-x' }, 3),
-    rawEvent('tool-workflow/agent-end', { runId: 'run-1', seq: 0, outcome: 'completed' }, 4),
+    rawEvent('tool-workflow/agent-start', { runId: 'run-1', seq: 1, label: 'checker', phase: 'review', childId: 'session-x' }, 3),
+    rawEvent('tool-workflow/agent-end', { runId: 'run-1', seq: 1, outcome: 'completed' }, 4),
     rawEvent('tool-workflow/run-end', { runId: 'run-1', stopReason: 'completed' }, 5),
     event('step/end', { turn: 0, step: 0 }, 6),
     event('turn/end', { turn: 0, reason: { kind: 'completed' } }, 7),
@@ -2225,7 +2225,7 @@ test('workflow: a complete run folds into one workflow card (plan §8.1)', () =>
   assert.equal(run.runId, 'run-1')
   assert.equal(run.status, 'completed')
   assert.deepEqual(run.members, [{
-    seq: 0,
+    seq: 1,
     label: 'checker',
     phase: 'review',
     childId: 'session-x',
@@ -2237,8 +2237,8 @@ test('workflow: run-end error maps to failed, never error (plan §8.2)', () => {
   const messages = foldTranscript([
     event('turn/start', { turn: 0 }, 0),
     rawEvent('tool-workflow/run-start', { runId: 'run-2', name: 'audit' }, 1),
-    rawEvent('tool-workflow/agent-start', { runId: 'run-2', seq: 0, label: 'checker', childId: 'session-x' }, 2),
-    rawEvent('tool-workflow/agent-end', { runId: 'run-2', seq: 0, outcome: 'failed' }, 3),
+    rawEvent('tool-workflow/agent-start', { runId: 'run-2', seq: 1, label: 'checker', childId: 'session-x' }, 2),
+    rawEvent('tool-workflow/agent-end', { runId: 'run-2', seq: 1, outcome: 'failed' }, 3),
     rawEvent('tool-workflow/run-end', { runId: 'run-2', stopReason: 'error' }, 4),
   ])
   const run = messages[0]
@@ -2251,8 +2251,8 @@ test('workflow: cancelled member and run stay cancelled (plan §8.3)', () => {
   const messages = foldTranscript([
     event('turn/start', { turn: 0 }, 0),
     rawEvent('tool-workflow/run-start', { runId: 'run-3', name: 'audit' }, 1),
-    rawEvent('tool-workflow/agent-start', { runId: 'run-3', seq: 0, label: 'checker', childId: 'session-x' }, 2),
-    rawEvent('tool-workflow/agent-end', { runId: 'run-3', seq: 0, outcome: 'cancelled' }, 3),
+    rawEvent('tool-workflow/agent-start', { runId: 'run-3', seq: 1, label: 'checker', childId: 'session-x' }, 2),
+    rawEvent('tool-workflow/agent-end', { runId: 'run-3', seq: 1, outcome: 'cancelled' }, 3),
     rawEvent('tool-workflow/run-end', { runId: 'run-3', stopReason: 'cancelled' }, 4),
   ])
   const run = messages[0]
@@ -2265,8 +2265,8 @@ test('workflow: absent phase stays null and empty phase stays distinct (plan §8
   const messages = foldTranscript([
     event('turn/start', { turn: 0 }, 0),
     rawEvent('tool-workflow/run-start', { runId: 'run-4', name: 'audit' }, 1),
-    rawEvent('tool-workflow/agent-start', { runId: 'run-4', seq: 0, label: 'a', childId: 's-a' }, 2),
-    rawEvent('tool-workflow/agent-start', { runId: 'run-4', seq: 1, label: 'b', phase: '', childId: 's-b' }, 3),
+    rawEvent('tool-workflow/agent-start', { runId: 'run-4', seq: 1, label: 'a', childId: 's-a' }, 2),
+    rawEvent('tool-workflow/agent-start', { runId: 'run-4', seq: 2, label: 'b', phase: '', childId: 's-b' }, 3),
   ])
   const run = messages[0]
   assert.ok(run !== undefined && run.kind === 'workflow')
@@ -2291,91 +2291,142 @@ test('workflow: a zero-member run settles completed (plan §8.5)', () => {
   assert.deepEqual(run.members, [])
 })
 
-test('workflow: step/end without terminal facts projects interrupted (plan §8.6)', () => {
+test('workflow: a background run stays running across step/end and turn/end (W1)', () => {
+  // The real background shape (session archive): the `workflow` tool call
+  // carries the official `{script, meta, run_in_background}` args, returns the
+  // official background acknowledgement, the owning step AND turn close while
+  // the run keeps executing, and six members (1-based seq, real archive
+  // arrival order) register after step/end. Step/Turn closure is NOT a
+  // Workflow terminal fact: only agent-end/run-end may settle.
+  const messages = foldTranscript([
+    event('turn/start', { turn: 0 }, 0),
+    event('step/start', { turn: 0, step: 0 }, 1),
+    event('tool/call', {
+      turn: 0, step: 0, callId: ToolCallId('call-wf'), name: 'workflow',
+      arguments: JSON.stringify({
+        script: 'return "audit complete"',
+        meta: { name: 'audit', description: 'Audit the rc.2/rc.1 workflow contract' },
+        run_in_background: true,
+      }),
+    }, 2),
+    rawEvent('tool-workflow/run-start', { runId: 'run-bg', name: 'audit' }, 3),
+    toolResult(4, 'call-wf', 'workflow "audit" started in the background as job workflow-1. Its return value arrives with the completion notice; check on it with job_output, stop it with job_kill.', 'workflow'),
+    event('step/end', { turn: 0, step: 0 }, 5),
+    ...([3, 2, 6, 1, 4, 5] as const).map((seq, index) =>
+      rawEvent('tool-workflow/agent-start', {
+        runId: 'run-bg', seq, label: `member-${seq}`, childId: `session-${seq}`,
+      }, 6 + index)),
+    event('turn/end', { turn: 0, reason: { kind: 'aborted', reason: { kind: 'user' } } }, 12),
+  ])
+  const run = messages.find(message => message.kind === 'workflow')
+  assert.ok(run !== undefined && run.kind === 'workflow')
+  assert.equal(run.status, 'running', 'no run-end was observed: the record stays open')
+  assert.deepEqual(run.members.map(member => member.seq), [3, 2, 6, 1, 4, 5],
+    'members keep their durable 1-based seq in arrival order')
+  assert.deepEqual(run.members.map(member => member.status), Array.from({ length: 6 }, () => 'running'))
+  // The main Turn keeps its independent interrupted Attention card.
+  const attention = messages.filter(message => message.kind === 'tool' && message.origin === 'turn-interrupted')
+  assert.equal(attention.length, 1, 'the aborted main Turn keeps its own card')
+})
+
+test('workflow: late terminal facts settle an open record after step/end + turn/end (W2)', () => {
   const folder = new TranscriptFolder()
   folder.apply([
     event('turn/start', { turn: 0 }, 0),
     event('step/start', { turn: 0, step: 0 }, 1),
-    rawEvent('tool-workflow/run-start', { runId: 'run-6', name: 'audit' }, 2),
-    rawEvent('tool-workflow/agent-start', { runId: 'run-6', seq: 0, label: 'checker', childId: 'session-x' }, 3),
+    rawEvent('tool-workflow/run-start', { runId: 'run-late', name: 'audit' }, 2),
+    ...Array.from({ length: 6 }, (_, index) =>
+      rawEvent('tool-workflow/agent-start', { runId: 'run-late', seq: index + 1, label: `member-${index + 1}`, childId: `session-${index + 1}` }, 3 + index)),
+    event('step/end', { turn: 0, step: 0 }, 9),
+    event('turn/end', { turn: 0, reason: { kind: 'aborted', reason: { kind: 'user' } } }, 10),
   ])
-  const before = folder.messages()[0]
-  assert.ok(before !== undefined && before.kind === 'workflow')
-  assert.equal(before.status, 'running')
-  assert.equal(before.members[0]?.status, 'running')
-  folder.apply([event('step/end', { turn: 0, step: 0 }, 4)])
-  const after = folder.messages()[0]
-  assert.ok(after !== undefined && after.kind === 'workflow')
-  assert.equal(after.status, 'interrupted')
-  assert.equal(after.members[0]?.status, 'interrupted')
-})
-
-test('workflow: late durable terminal facts override the derived interrupted state', () => {
-  // `interrupted` is a projection of a MISSING terminal fact plus a closed
-  // owner — never a durable stop reason. The fold state stays alive after
-  // the projection, so a LATER agent-end / run-end must override it with
-  // the real terminal fact (plan §2.2/§6.4).
-  const cases = [
-    { runId: 'run-a', outcome: 'completed', stopReason: 'completed', member: 'completed', run: 'completed' },
-    { runId: 'run-b', outcome: 'failed', stopReason: 'error', member: 'failed', run: 'failed' },
-    { runId: 'run-c', outcome: 'cancelled', stopReason: 'cancelled', member: 'cancelled', run: 'cancelled' },
-  ] as const
-  for (const c of cases) {
-    const folder = new TranscriptFolder()
-    folder.apply([
-      event('turn/start', { turn: 0 }, 0),
-      event('step/start', { turn: 0, step: 0 }, 1),
-      rawEvent('tool-workflow/run-start', { runId: c.runId, name: 'audit' }, 2),
-      rawEvent('tool-workflow/agent-start', { runId: c.runId, seq: 0, label: 'checker', childId: 'session-x' }, 3),
-      event('step/end', { turn: 0, step: 0 }, 4),
-    ])
-    const interrupted = folder.messages()[0]
-    assert.ok(interrupted !== undefined && interrupted.kind === 'workflow')
-    assert.equal(interrupted.status, 'interrupted', `${c.runId} run must project interrupted`)
-    assert.equal(interrupted.members[0]?.status, 'interrupted', `${c.runId} member must project interrupted`)
-    // Late durable facts override the derived projection.
-    folder.apply([
-      rawEvent('tool-workflow/agent-end', { runId: c.runId, seq: 0, outcome: c.outcome }, 5),
-      rawEvent('tool-workflow/run-end', { runId: c.runId, stopReason: c.stopReason }, 6),
-    ])
-    const settled = folder.messages()[0]
-    assert.ok(settled !== undefined && settled.kind === 'workflow')
-    assert.equal(settled.members[0]?.status, c.member, `${c.runId} member must settle to the durable outcome`)
-    assert.equal(settled.status, c.run, `${c.runId} run must settle to the durable stop reason`)
+  const open = folder.messages().find(message => message.kind === 'workflow')
+  assert.ok(open !== undefined && open.kind === 'workflow')
+  assert.equal(open.status, 'running')
+  assert.equal(open.members.length, 6)
+  // Members settle BEFORE the run (each agent-end is its own fact); all
+  // members are closed before the run-end, as the official invariant requires.
+  for (let seq = 1; seq <= 6; seq += 1) {
+    folder.apply([rawEvent('tool-workflow/agent-end', {
+      runId: 'run-late', seq, outcome: seq === 3 ? 'failed' : 'completed',
+    }, 10 + seq)])
+    const current = folder.messages().find(message => message.kind === 'workflow')
+    assert.ok(current !== undefined && current.kind === 'workflow')
+    assert.equal(current.status, 'running', `member ${seq} settling must not settle the run`)
+    assert.equal(current.members[seq - 1]?.status, seq === 3 ? 'failed' : 'completed')
+    assert.equal(folder.activeWorkflowIndexCount(), 1, 'the open run keeps its search index')
   }
+  folder.apply([rawEvent('tool-workflow/run-end', { runId: 'run-late', stopReason: 'completed' }, 20)])
+  const settled = folder.messages().find(message => message.kind === 'workflow')
+  assert.ok(settled !== undefined && settled.kind === 'workflow')
+  assert.equal(settled, open, 'run-end must update the existing transcript row, never append a new one')
+  assert.equal(settled.status, 'completed')
+  assert.equal(settled.members[2]?.status, 'failed', 'a separately failed member keeps its fact')
+  assert.equal(folder.activeWorkflowIndexCount(), 0, 'the settled run releases its index')
 })
 
-test('workflow: turn/end without terminal facts projects interrupted (plan §8.7)', () => {
-  const messages = foldTranscript([
-    event('turn/start', { turn: 0 }, 0),
-    rawEvent('tool-workflow/run-start', { runId: 'run-7', name: 'audit' }, 1),
-    rawEvent('tool-workflow/agent-start', { runId: 'run-7', seq: 0, label: 'checker', childId: 'session-x' }, 2),
-    event('turn/end', { turn: 0, reason: { kind: 'aborted', reason: { kind: 'user' } } }, 3),
-  ])
-  const run = messages[0]
-  assert.ok(run !== undefined && run.kind === 'workflow')
-  assert.equal(run.status, 'interrupted')
-  assert.equal(run.members[0]?.status, 'interrupted')
-})
-
-test('workflow: turn/end closes a step-owned run without step/end (plan §8.8)', () => {
+test('workflow: a foreground cancel shows cancelled, never interrupted (W3)', () => {
   const messages = foldTranscript([
     event('turn/start', { turn: 0 }, 0),
     event('step/start', { turn: 0, step: 0 }, 1),
-    rawEvent('tool-workflow/run-start', { runId: 'run-8', name: 'audit' }, 2),
-    rawEvent('tool-workflow/agent-start', { runId: 'run-8', seq: 0, label: 'checker', childId: 'session-x' }, 3),
-    event('turn/end', { turn: 0, reason: { kind: 'aborted', reason: { kind: 'user' } } }, 4),
+    rawEvent('tool-workflow/run-start', { runId: 'run-cancel', name: 'audit' }, 2),
+    rawEvent('tool-workflow/agent-start', { runId: 'run-cancel', seq: 1, label: 'checker', childId: 'session-x' }, 3),
+    rawEvent('tool-workflow/agent-end', { runId: 'run-cancel', seq: 1, outcome: 'cancelled' }, 4),
+    rawEvent('tool-workflow/run-end', { runId: 'run-cancel', stopReason: 'cancelled' }, 5),
+    event('step/end', { turn: 0, step: 0 }, 6),
+    event('turn/end', { turn: 0, reason: { kind: 'aborted', reason: { kind: 'user' } } }, 7),
   ])
-  const run = messages[0]
+  const run = messages.find(message => message.kind === 'workflow')
   assert.ok(run !== undefined && run.kind === 'workflow')
-  assert.equal(run.status, 'interrupted')
-  assert.equal(run.members[0]?.status, 'interrupted')
+  assert.equal(run.status, 'cancelled')
+  assert.equal(run.members[0]?.status, 'cancelled')
+  // The main Turn's own cancellation stays a separate Attention card.
+  const attention = messages.filter(message => message.kind === 'tool' && message.origin === 'turn-interrupted')
+  assert.equal(attention.length, 1)
+  assert.equal(attention[0]?.kind === 'tool' ? attention[0].result : undefined, 'cancelled by user')
+})
+
+test('workflow: run-end failure keeps each member outcome (W4)', () => {
+  const messages = foldTranscript([
+    event('turn/start', { turn: 0 }, 0),
+    rawEvent('tool-workflow/run-start', { runId: 'run-fail', name: 'audit' }, 1),
+    rawEvent('tool-workflow/agent-start', { runId: 'run-fail', seq: 1, label: 'a', childId: 'session-a' }, 2),
+    rawEvent('tool-workflow/agent-start', { runId: 'run-fail', seq: 2, label: 'b', childId: 'session-b' }, 3),
+    rawEvent('tool-workflow/agent-start', { runId: 'run-fail', seq: 3, label: 'c', childId: 'session-c' }, 4),
+    // The official invariant requires every started member to be settled
+    // before run-end; the members' outcomes are independent facts.
+    rawEvent('tool-workflow/agent-end', { runId: 'run-fail', seq: 1, outcome: 'failed' }, 5),
+    rawEvent('tool-workflow/agent-end', { runId: 'run-fail', seq: 2, outcome: 'completed' }, 6),
+    rawEvent('tool-workflow/agent-end', { runId: 'run-fail', seq: 3, outcome: 'cancelled' }, 7),
+    rawEvent('tool-workflow/run-end', { runId: 'run-fail', stopReason: 'error' }, 8),
+  ])
+  const run = messages.find(message => message.kind === 'workflow')
+  assert.ok(run !== undefined && run.kind === 'workflow')
+  assert.equal(run.status, 'failed')
+  assert.deepEqual(run.members.map(member => member.status), ['failed', 'completed', 'cancelled'],
+    'members keep their own agent-end facts; the run status never back-fills them')
+})
+
+test('workflow: a cold replay without run-end keeps an open record, not interrupted (W5)', () => {
+  const messages = foldTranscript([
+    event('turn/start', { turn: 0 }, 0),
+    event('step/start', { turn: 0, step: 0 }, 1),
+    rawEvent('tool-workflow/run-start', { runId: 'run-cold', name: 'audit' }, 2),
+    rawEvent('tool-workflow/agent-start', { runId: 'run-cold', seq: 1, label: 'checker', childId: 'session-x' }, 3),
+    event('step/end', { turn: 0, step: 0 }, 4),
+    event('turn/end', { turn: 0, reason: { kind: 'completed' } }, 5),
+  ])
+  const run = messages.find(message => message.kind === 'workflow')
+  assert.ok(run !== undefined && run.kind === 'workflow')
+  // A missing terminal fact is NOT evidence of death: the record stays open.
+  assert.equal(run.status, 'running')
+  assert.equal(run.members[0]?.status, 'running')
 })
 
 test('workflow: a session-level run without terminal facts stays running (plan §8.9)', () => {
   const messages = foldTranscript([
     rawEvent('tool-workflow/run-start', { runId: 'run-9', name: 'audit' }, 0),
-    rawEvent('tool-workflow/agent-start', { runId: 'run-9', seq: 0, label: 'checker', childId: 'session-x' }, 1),
+    rawEvent('tool-workflow/agent-start', { runId: 'run-9', seq: 1, label: 'checker', childId: 'session-x' }, 1),
   ])
   const run = messages[0]
   assert.ok(run !== undefined && run.kind === 'workflow')
@@ -2388,10 +2439,10 @@ test('workflow: live append and cold replay produce the same model (plan §8.10)
     event('turn/start', { turn: 0 }, 0),
     event('step/start', { turn: 0, step: 0 }, 1),
     rawEvent('tool-workflow/run-start', { runId: 'run-10', name: 'audit' }, 2),
-    rawEvent('tool-workflow/agent-start', { runId: 'run-10', seq: 0, label: 'a', phase: '', childId: 's-a' }, 3),
-    rawEvent('tool-workflow/agent-start', { runId: 'run-10', seq: 1, label: 'b', childId: 's-b' }, 4),
-    rawEvent('tool-workflow/agent-end', { runId: 'run-10', seq: 0, outcome: 'completed' }, 5),
-    rawEvent('tool-workflow/agent-end', { runId: 'run-10', seq: 1, outcome: 'failed' }, 6),
+    rawEvent('tool-workflow/agent-start', { runId: 'run-10', seq: 1, label: 'a', phase: '', childId: 's-a' }, 3),
+    rawEvent('tool-workflow/agent-start', { runId: 'run-10', seq: 2, label: 'b', childId: 's-b' }, 4),
+    rawEvent('tool-workflow/agent-end', { runId: 'run-10', seq: 1, outcome: 'completed' }, 5),
+    rawEvent('tool-workflow/agent-end', { runId: 'run-10', seq: 2, outcome: 'failed' }, 6),
     rawEvent('tool-workflow/run-end', { runId: 'run-10', stopReason: 'error' }, 7),
     event('step/end', { turn: 0, step: 0 }, 8),
     event('turn/end', { turn: 0, reason: { kind: 'completed' } }, 9),
@@ -2415,25 +2466,103 @@ test('workflow: live member mutations are visible through fresh references (plan
   // the change through the members ARRAY reference — capture it before the
   // mutation to prove the replacement.
   const firstMembers = first.members
-  folder.apply([rawEvent('tool-workflow/agent-start', { runId: 'run-11', seq: 0, label: 'checker', childId: 'session-x' }, 2)])
+  folder.apply([rawEvent('tool-workflow/agent-start', { runId: 'run-11', seq: 1, label: 'checker', childId: 'session-x' }, 2)])
   const second = folder.messages()[0]
   assert.ok(second !== undefined && second.kind === 'workflow')
   assert.equal(second.members.length, 1)
   assert.notEqual(second.members, firstMembers, 'agent-start must replace the members array reference')
   const secondMembers = second.members
   const secondMember = second.members[0]
-  folder.apply([rawEvent('tool-workflow/agent-end', { runId: 'run-11', seq: 0, outcome: 'completed' }, 3)])
+  folder.apply([rawEvent('tool-workflow/agent-end', { runId: 'run-11', seq: 1, outcome: 'completed' }, 3)])
   const third = folder.messages()[0]
   assert.ok(third !== undefined && third.kind === 'workflow')
   assert.equal(third.members[0]?.status, 'completed')
   assert.notEqual(third.members, secondMembers, 'agent-end must replace the members array reference')
   assert.notEqual(third.members[0], secondMember, 'agent-end must replace the settled member object')
   const thirdMembers = third.members
+  // A later Turn close is NOT a Workflow terminal fact: the row keeps its
+  // member array and its open record.
   folder.apply([event('turn/end', { turn: 0, reason: { kind: 'aborted', reason: { kind: 'user' } } }, 4)])
-  const interrupted = folder.messages()[0]
-  assert.ok(interrupted !== undefined && interrupted.kind === 'workflow')
-  assert.equal(interrupted.status, 'interrupted')
-  assert.notEqual(interrupted.members, thirdMembers, 'interruption must replace the members array reference')
+  const stillOpen = folder.messages()[0]
+  assert.ok(stillOpen !== undefined && stillOpen.kind === 'workflow')
+  assert.equal(stillOpen.status, 'running')
+  assert.equal(stillOpen.members, thirdMembers, 'a Turn close must not replace the members array')
+  folder.apply([rawEvent('tool-workflow/run-end', { runId: 'run-11', stopReason: 'completed' }, 5)])
+  const settled = folder.messages()[0]
+  assert.ok(settled !== undefined && settled.kind === 'workflow')
+  assert.equal(settled.status, 'completed')
+  assert.equal(settled.members, thirdMembers, 'run-end settles the run field only')
+})
+
+test('workflow: interleaved runs settle independently (W10)', () => {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    event('turn/start', { turn: 0 }, 0),
+    rawEvent('tool-workflow/run-start', { runId: 'run-a', name: 'audit-a' }, 1),
+    rawEvent('tool-workflow/run-start', { runId: 'run-b', name: 'audit-b' }, 2),
+    rawEvent('tool-workflow/agent-start', { runId: 'run-a', seq: 1, label: 'a', childId: 'session-a' }, 3),
+    rawEvent('tool-workflow/agent-start', { runId: 'run-b', seq: 1, label: 'b', childId: 'session-b' }, 4),
+    // Run A settles completely while run B is still open.
+    rawEvent('tool-workflow/agent-end', { runId: 'run-a', seq: 1, outcome: 'completed' }, 5),
+    rawEvent('tool-workflow/run-end', { runId: 'run-a', stopReason: 'completed' }, 6),
+  ])
+  const runs = folder.messages().filter(message => message.kind === 'workflow')
+  assert.equal(runs.length, 2)
+  const a = runs.find(run => run.kind === 'workflow' && run.runId === 'run-a')
+  const b = runs.find(run => run.kind === 'workflow' && run.runId === 'run-b')
+  assert.ok(a !== undefined && a.kind === 'workflow')
+  assert.ok(b !== undefined && b.kind === 'workflow')
+  assert.equal(a.status, 'completed')
+  assert.equal(b.status, 'running', 'a sibling run is unaffected by run-a settlement')
+  assert.equal(b.members[0]?.status, 'running')
+  // Run B settles later from its own terminal facts.
+  folder.apply([
+    rawEvent('tool-workflow/agent-end', { runId: 'run-b', seq: 1, outcome: 'failed' }, 7),
+    rawEvent('tool-workflow/run-end', { runId: 'run-b', stopReason: 'error' }, 8),
+  ])
+  const settledB = folder.messages().find(message => message.kind === 'workflow' && message.runId === 'run-b')
+  assert.ok(settledB !== undefined && settledB.kind === 'workflow')
+  assert.equal(settledB.status, 'failed')
+  assert.equal(settledB.members[0]?.status, 'failed')
+})
+
+test('workflow: duplicate terminal facts are ignored (invalid-input defense, not an official sequence)', () => {
+  // The official @deepseek-ai/dsh-tool-workflow invariant REJECTS a second
+  // agent-end/run-end, so this sequence is NOT reachable in a valid Session.
+  // The fold still must not resurrect or rewrite a settled record.
+  const folder = new TranscriptFolder()
+  folder.apply([
+    event('turn/start', { turn: 0 }, 0),
+    rawEvent('tool-workflow/run-start', { runId: 'run-dup', name: 'audit' }, 1),
+    rawEvent('tool-workflow/agent-start', { runId: 'run-dup', seq: 1, label: 'a', childId: 'session-a' }, 2),
+    rawEvent('tool-workflow/agent-end', { runId: 'run-dup', seq: 1, outcome: 'completed' }, 3),
+    rawEvent('tool-workflow/run-end', { runId: 'run-dup', stopReason: 'completed' }, 4),
+  ])
+  folder.apply([
+    rawEvent('tool-workflow/agent-end', { runId: 'run-dup', seq: 1, outcome: 'failed' }, 5),
+    rawEvent('tool-workflow/run-end', { runId: 'run-dup', stopReason: 'error' }, 6),
+  ])
+  const run = folder.messages().find(message => message.kind === 'workflow')
+  assert.ok(run !== undefined && run.kind === 'workflow')
+  assert.equal(run.status, 'completed', 'the first terminal fact stands')
+  assert.equal(run.members[0]?.status, 'completed')
+})
+
+test('workflow: a late agent-end across a new Turn updates the original run (W10)', () => {
+  const messages = foldTranscript([
+    event('turn/start', { turn: 0 }, 0),
+    rawEvent('tool-workflow/run-start', { runId: 'run-cross-turn', name: 'audit' }, 1),
+    rawEvent('tool-workflow/agent-start', { runId: 'run-cross-turn', seq: 1, label: 'checker', childId: 'session-x' }, 2),
+    event('turn/end', { turn: 0, reason: { kind: 'aborted', reason: { kind: 'user' } } }, 3),
+    event('turn/start', { turn: 1 }, 4),
+    rawEvent('tool-workflow/agent-end', { runId: 'run-cross-turn', seq: 1, outcome: 'completed' }, 5),
+    rawEvent('tool-workflow/run-end', { runId: 'run-cross-turn', stopReason: 'completed' }, 6),
+  ])
+  const run = messages.find(message => message.kind === 'workflow')
+  assert.ok(run !== undefined && run.kind === 'workflow')
+  assert.equal(run.turn, 0, 'the run keeps its start Turn')
+  assert.equal(run.status, 'completed')
+  assert.equal(run.members[0]?.status, 'completed')
 })
 
 test('llm/retry folds into a system line with the delay', () => {
@@ -4353,8 +4482,8 @@ test('lane displacement keeps TranscriptItemId and search/window/group contracts
     event('tool/call', { turn: 0, step: 0, callId: ToolCallId('r2'), name: 'read', arguments: '{"file_path":"r2.ts"}' }, 6),
     toolResult(7, 'r2', 'r2 ok', 'read'),
   ])
-  // [Assistant, read r1, Thinking, read r2] — the two reads are separated
-  // by the Thinking row's physical slot and stay individual cards.
+  // [Assistant, read r1, Thinking, read r2] — the visible Thinking row sits
+  // between the two reads, so they stay individual cards.
   assert.deepEqual(kinds(folder.messages()), ['assistant', 'tool', 'thinking', 'tool'])
   // Hold the pre-displacement search identities: the displacement must not
   // renumber ANY raw item (the overlay recovers the open hit by id). The
@@ -4368,8 +4497,14 @@ test('lane displacement keeps TranscriptItemId and search/window/group contracts
   folder.apply([messageSettlement(8, laneOrderedStep('thinking'))])
   // The replacement displaces the Thinking row BEFORE the Assistant row in
   // DISPLAY order only — physical ids are untouched, so the same id still
-  // resolves to the same logical row even though its text was replaced.
-  assert.deepEqual(kinds(folder.messages()), ['thinking', 'assistant', 'tool', 'tool'])
+  // resolves to the same logical row even though its text was replaced. The
+  // two reads are now display-ADJACENT (nothing visible between them), which is
+  // the fold's one adjacency definition, so they merge into one card.
+  assert.deepEqual(kinds(folder.messages()), ['thinking', 'assistant', 'tool'])
+  const mergedRead = folder.messages().find(message => message.kind === 'tool')
+  assert.ok(mergedRead !== undefined && mergedRead.kind === 'tool')
+  assert.equal(mergedRead.callCount, 2, 'a display-merged read pair keeps both genuine calls')
+  assert.match(mergedRead.args, /2 files/u)
   assert.equal(folder.search('late diagnostic').length, 0, 'the authoritative replacement replaced the diagnostic text in place')
   const thinkingAfter = folder.search('thought')
   const readAfter = folder.search('r1 ok')
@@ -4385,10 +4520,10 @@ test('lane displacement keeps TranscriptItemId and search/window/group contracts
     [thinkingAfter[0]?.id, folder.search('ordered answer')[0]?.id],
     'search emits hits in display order — the displaced Thinking row first',
   )
-  // Window and grouped-turn projections stay consistent; the reads stay
-  // separate cards (grouping follows PHYSICAL adjacency — conservative).
+  // Window and grouped-turn projections stay consistent: the merged card is
+  // emitted once, in display order, by the shared traversal.
   const windowed = folder.window({ maxTurns: 1 })
-  assert.deepEqual(windowed.messages.map(message => message.kind), ['thinking', 'assistant', 'tool', 'tool'])
+  assert.deepEqual(windowed.messages.map(message => message.kind), ['thinking', 'assistant', 'tool'])
   assert.deepEqual([...folder.groupedTurns()], [0])
 })
 
@@ -4411,8 +4546,8 @@ test('a displaced lane pair stays unique and ordered inside a bounded window', (
   }
   folder.apply([messageSettlement(9, laneOrderedStep('thinking'))])
   // Physical: [Assistant, r1, r2, r3, Thinking(displaced before Assistant)].
-  // Grouping follows PHYSICAL adjacency: the three consecutive reads merge
-  // into one card regardless of the display displacement.
+  // Display:  [Thinking, Assistant, r1, r2, r3] — the three reads are adjacent
+  // in the ONE display adjacency, so they merge into one card exactly once.
   const full = folder.messages()
   assert.deepEqual(full.map(message => message.kind), ['thinking', 'assistant', 'tool'])
   const windowed = folder.window({ maxTurns: 1 })
@@ -5592,8 +5727,8 @@ test('workflow lifecycle events survive the markdown export (plan §8.13)', () =
     header: { id: 'session-export' as never, cwd: '/workspace' },
     snapshotEvents: () => [
       rawEvent('tool-workflow/run-start', { runId: 'run-1', name: 'audit' }, 1),
-      rawEvent('tool-workflow/agent-start', { runId: 'run-1', seq: 0, label: 'checker', phase: 'review', childId: 'session-x' }, 2),
-      rawEvent('tool-workflow/agent-end', { runId: 'run-1', seq: 0, outcome: 'completed' }, 3),
+      rawEvent('tool-workflow/agent-start', { runId: 'run-1', seq: 1, label: 'checker', phase: 'review', childId: 'session-x' }, 2),
+      rawEvent('tool-workflow/agent-end', { runId: 'run-1', seq: 1, outcome: 'completed' }, 3),
       rawEvent('tool-workflow/run-end', { runId: 'run-1', stopReason: 'completed' }, 4),
     ],
   } as never)
@@ -5606,61 +5741,63 @@ test('a workflow run without a terminal event still exports its current state', 
     header: { id: 'session-export' as never, cwd: '/workspace' },
     snapshotEvents: () => [
       rawEvent('tool-workflow/run-start', { runId: 'run-2', name: 'audit' }, 1),
-      rawEvent('tool-workflow/agent-start', { runId: 'run-2', seq: 0, label: 'checker', childId: 'session-x' }, 2),
+      rawEvent('tool-workflow/agent-start', { runId: 'run-2', seq: 1, label: 'checker', childId: 'session-x' }, 2),
     ],
   } as never)
   assert.match(markdown, /Workflow: audit — running/)
   assert.match(markdown, /checker — running/)
 })
 
-test('a workflow run whose step owner closed without a terminal event exports as interrupted', () => {
+test('a workflow run whose step closed without a terminal event exports as running', () => {
   const markdown = renderTranscriptMarkdown({
     header: { id: 'session-export' as never, cwd: '/workspace' },
     snapshotEvents: () => [
       rawEvent('turn/start', { turn: 0 }, 0),
       rawEvent('step/start', { turn: 0, step: 0 }, 1),
       rawEvent('tool-workflow/run-start', { runId: 'run-3', name: 'audit' }, 2),
-      rawEvent('tool-workflow/agent-start', { runId: 'run-3', seq: 0, label: 'checker', childId: 'session-x' }, 3),
-      // The step closes with no run-end: the run is interrupted, exactly
+      rawEvent('tool-workflow/agent-start', { runId: 'run-3', seq: 1, label: 'checker', childId: 'session-x' }, 3),
+      // The step closes with no run-end: the record is still open, exactly
       // like the visual Transcript projection (shared WorkflowProjection).
       rawEvent('step/end', { turn: 0, step: 0 }, 4),
     ],
   } as never)
-  assert.match(markdown, /Workflow: audit — interrupted/)
-  assert.match(markdown, /checker — interrupted/)
+  assert.match(markdown, /Workflow: audit — running/)
+  assert.match(markdown, /checker — running/)
+  assert.doesNotMatch(markdown, /interrupted/)
 })
 
-test('a workflow run whose owning turn closed without a terminal event exports as interrupted', () => {
+test('a workflow run whose turn closed without a terminal event exports as running', () => {
   const markdown = renderTranscriptMarkdown({
     header: { id: 'session-export' as never, cwd: '/workspace' },
     snapshotEvents: () => [
       rawEvent('turn/start', { turn: 0 }, 0),
       rawEvent('tool-workflow/run-start', { runId: 'run-4', name: 'audit' }, 1),
-      rawEvent('tool-workflow/agent-start', { runId: 'run-4', seq: 0, label: 'checker', childId: 'session-x' }, 2),
+      rawEvent('tool-workflow/agent-start', { runId: 'run-4', seq: 1, label: 'checker', childId: 'session-x' }, 2),
       rawEvent('turn/end', { turn: 0, reason: { kind: 'aborted', reason: { kind: 'user' } } }, 3),
     ],
   } as never)
-  assert.match(markdown, /Workflow: audit — interrupted/)
-  assert.match(markdown, /checker — interrupted/)
+  assert.match(markdown, /Workflow: audit — running/)
+  assert.match(markdown, /checker — running/)
+  assert.doesNotMatch(markdown, /interrupted/)
 })
 
-test('a settled member keeps its durable outcome when the run is interrupted', () => {
+test('a settled member keeps its durable outcome while the run record is still open', () => {
   const markdown = renderTranscriptMarkdown({
     header: { id: 'session-export' as never, cwd: '/workspace' },
     snapshotEvents: () => [
       rawEvent('turn/start', { turn: 0 }, 0),
       rawEvent('step/start', { turn: 0, step: 0 }, 1),
       rawEvent('tool-workflow/run-start', { runId: 'run-5', name: 'audit' }, 2),
-      rawEvent('tool-workflow/agent-start', { runId: 'run-5', seq: 0, label: 'checker', childId: 'session-x' }, 3),
-      rawEvent('tool-workflow/agent-end', { runId: 'run-5', seq: 0, outcome: 'completed' }, 4),
+      rawEvent('tool-workflow/agent-start', { runId: 'run-5', seq: 1, label: 'checker', childId: 'session-x' }, 3),
+      rawEvent('tool-workflow/agent-end', { runId: 'run-5', seq: 1, outcome: 'completed' }, 4),
       rawEvent('step/end', { turn: 0, step: 0 }, 5),
     ],
   } as never)
-  assert.match(markdown, /Workflow: audit — interrupted/)
+  assert.match(markdown, /Workflow: audit — running/)
   assert.match(markdown, /checker — completed/)
 })
 
-test('a replayed step fragment after turn/end cannot reopen the export owner lifecycle', () => {
+test('a replayed step fragment after turn/end cannot fabricate a Workflow terminal fact', () => {
   const markdown = renderTranscriptMarkdown({
     header: { id: 'session-export' as never, cwd: '/workspace' },
     snapshotEvents: () => [
@@ -5670,38 +5807,100 @@ test('a replayed step fragment after turn/end cannot reopen the export owner lif
       rawEvent('step/end', { turn: 0, step: 0 }, 3),
       rawEvent('turn/end', { turn: 0, reason: { kind: 'aborted', reason: { kind: 'user' } } }, 4),
       // Replayed fragment: a late step/start + step/end for the closed turn
-      // must not reopen the owner lifecycle (the visual fold fences these
-      // events after turn/end — the export applies the same fence).
+      // must not affect any Workflow record.
       rawEvent('step/start', { turn: 0, step: 0 }, 5),
       rawEvent('tool-workflow/run-start', { runId: 'run-2', name: 'audit' }, 6),
       rawEvent('step/end', { turn: 0, step: 0 }, 7),
     ],
   } as never)
-  // run-1 was interrupted by its own step/end; run-2 started after the turn
-  // closed and is session-owned — it must stay running, exactly like the
-  // visual projection, never interrupted by the replayed step/end.
-  assert.match(markdown, /Workflow: audit — interrupted/)
-  assert.match(markdown, /Workflow: audit — running/)
-})
-
-test('a replayed turn/start for an older closed turn cannot reopen the export owner lifecycle', () => {
-  const markdown = renderTranscriptMarkdown({
-    header: { id: 'session-export' as never, cwd: '/workspace' },
-    snapshotEvents: () => [
-      rawEvent('turn/start', { turn: 2 }, 0),
-      rawEvent('turn/end', { turn: 2, reason: { kind: 'aborted', reason: { kind: 'user' } } }, 1),
-      // Replayed fragment: a late turn/start for the OLDER turn 1 must not
-      // open the workflow turn (the visual fold only opens the NEWEST
-      // turn's turn/start).
-      rawEvent('turn/start', { turn: 1 }, 2),
-      rawEvent('tool-workflow/run-start', { runId: 'run-1', name: 'audit' }, 3),
-      rawEvent('turn/end', { turn: 1, reason: { kind: 'aborted', reason: { kind: 'user' } } }, 4),
-    ],
-  } as never)
-  // The run started with no open turn and is session-owned: it must stay
-  // running, exactly like the visual projection.
+  // Both runs have no terminal fact: open records, never interrupted by a
+  // replayed step/end.
   assert.match(markdown, /Workflow: audit — running/)
   assert.doesNotMatch(markdown, /Workflow: audit — interrupted/)
+})
+
+test('W7: the markdown export settles W1/W2/W3 from the same terminal facts as the fold', () => {
+  // The SAME event prefix feeds the real TranscriptFolder and the real
+  // Markdown formatter: the two derivations must agree on the exact status
+  // words, so the export can never drift from the visual projection.
+  const prefix = (runId: string): SessionEvent[] => [
+    rawEvent('turn/start', { turn: 0 }, 0),
+    rawEvent('step/start', { turn: 0, step: 0 }, 1),
+    rawEvent('tool-workflow/run-start', { runId, name: 'audit' }, 2),
+    rawEvent('tool-workflow/agent-start', { runId, seq: 1, label: 'checker', childId: 'session-x' }, 3),
+    rawEvent('step/end', { turn: 0, step: 0 }, 4),
+    rawEvent('turn/end', { turn: 0, reason: { kind: 'aborted', reason: { kind: 'user' } } }, 5),
+  ]
+  const cases = [
+    { runId: 'run-w1', run: 'running', member: 'running' },
+    { runId: 'run-w2', run: 'completed', member: 'completed' },
+    { runId: 'run-w3', run: 'cancelled', member: 'cancelled' },
+  ] as const
+  for (const c of cases) {
+    const events = c.run === 'running'
+      ? prefix(c.runId)
+      : [
+          ...prefix(c.runId),
+          // Late durable facts after step/end + turn/end: the export must
+          // settle from these, not from the closed owner locations.
+          rawEvent('tool-workflow/agent-end', { runId: c.runId, seq: 1, outcome: c.member }, 6),
+          rawEvent('tool-workflow/run-end', {
+            runId: c.runId,
+            stopReason: c.run === 'completed' ? 'completed' : 'cancelled',
+          }, 7),
+        ]
+    const folder = new TranscriptFolder()
+    folder.apply(events)
+    const run = folder.messages().find(message => message.kind === 'workflow')
+    assert.ok(run !== undefined && run.kind === 'workflow')
+    assert.equal(run.status, c.run, `${c.runId} fold run status`)
+    assert.equal(run.members[0]?.status, c.member, `${c.runId} fold member status`)
+    const markdown = renderTranscriptMarkdown({
+      header: { id: 'session-export' as never, cwd: '/workspace' },
+      snapshotEvents: () => events,
+    } as never)
+    assert.match(markdown, new RegExp(`Workflow: audit — ${c.run}`), `${c.runId} export run status`)
+    assert.match(markdown, new RegExp(`checker — ${c.member}`), `${c.runId} export member status`)
+    assert.doesNotMatch(markdown, /Workflow: audit — interrupted/, `${c.runId} must never synthesize interrupted`)
+  }
+})
+
+test('a run whose open owner closed before its terminal facts stays open until run-end', () => {
+  // Discriminating shape for the original defect: run-start captures a REAL
+  // open step (the old projector owned it), the step AND turn close while the
+  // run has no terminal fact, then a member registers after that close.
+  const folder = new TranscriptFolder()
+  folder.apply([
+    rawEvent('turn/start', { turn: 0 }, 0),
+    rawEvent('step/start', { turn: 0, step: 0 }, 1),
+    rawEvent('tool-workflow/run-start', { runId: 'run-owned', name: 'audit' }, 2),
+    rawEvent('tool-workflow/agent-start', { runId: 'run-owned', seq: 1, label: 'early', childId: 'session-early' }, 3),
+    rawEvent('step/end', { turn: 0, step: 0 }, 4),
+    rawEvent('turn/end', { turn: 0, reason: { kind: 'aborted', reason: { kind: 'user' } } }, 5),
+  ])
+  const open = folder.messages().find(message => message.kind === 'workflow')
+  assert.ok(open !== undefined && open.kind === 'workflow')
+  // The old owner-close projector reported `interrupted` here.
+  assert.equal(open.status, 'running', 'a closed Step/Turn is not a Workflow terminal fact')
+  assert.equal(open.members[0]?.status, 'running')
+  // A member registered AFTER the close is running from birth.
+  folder.apply([
+    rawEvent('tool-workflow/agent-start', { runId: 'run-owned', seq: 2, label: 'late', childId: 'session-late' }, 6),
+  ])
+  const late = folder.messages().find(message => message.kind === 'workflow')
+  assert.ok(late !== undefined && late.kind === 'workflow')
+  assert.equal(late.members[1]?.status, 'running', 'a post-close member is never interrupted from birth')
+  // Only the late terminal facts settle the run and its members.
+  folder.apply([
+    rawEvent('tool-workflow/agent-end', { runId: 'run-owned', seq: 1, outcome: 'completed' }, 7),
+    rawEvent('tool-workflow/agent-end', { runId: 'run-owned', seq: 2, outcome: 'failed' }, 8),
+    rawEvent('tool-workflow/run-end', { runId: 'run-owned', stopReason: 'error' }, 9),
+  ])
+  const settled = folder.messages().find(message => message.kind === 'workflow')
+  assert.ok(settled !== undefined && settled.kind === 'workflow')
+  assert.equal(settled, open, 'the terminal fact updates the same row')
+  assert.equal(settled.status, 'failed')
+  assert.deepEqual(settled.members.map(member => member.status), ['completed', 'failed'])
 })
 
 test('workflow: completed runs drop their fold index at run-end', () => {

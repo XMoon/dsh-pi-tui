@@ -177,7 +177,51 @@ describe("TuiAltScreen", () => {
 		tui.stop();
 	});
 
-	it("leaves the scrollbar clickable when the jump-to-end indicator spans the transcript", async () => {
+	it("keeps the jump-to-end indicator centered as the auto scrollbar hides and reappears", async () => {
+		// Regression test for #9136: auto scrollbar visibility must not move the indicator.
+		const terminal = new VirtualTerminal(80, 6);
+		const label = " ↓ Jump to latest message · End ";
+		const tui = new TuiAltScreen(terminal, undefined, undefined, {
+			scrollToEndIndicator: () => label,
+		});
+		const transcript = new ScrollView(
+			new Text(Array.from({ length: 20 }, (_, index) => `line ${index + 1}`).join("\n"), 0, 0),
+			{ follow: "end", primary: true, scrollbar: "auto", scrollbarHideDelayMs: 0 },
+		);
+		tui.setLayoutRoot(transcript);
+		tui.start();
+		try {
+			await terminal.waitForRender();
+
+			// Scrolling over the track keeps the scrollbar visible until the pointer leaves.
+			terminal.sendInput("\x1b[<64;80;1M");
+			await terminal.waitForRender();
+			assert.strictEqual(transcript.isScrollbarVisible, true);
+			assert.strictEqual(transcript.isFollowingEnd, false);
+			const scrollTop = transcript.scrollTop;
+			const visibleColumn = terminal.getViewport()[5].indexOf(label);
+
+			// Leaving the track lets the auto-hide timer expire without changing the content.
+			terminal.sendInput("\x1b[<35;79;1M");
+			await terminal.waitForRender();
+			assert.strictEqual(transcript.isScrollbarVisible, false);
+			assert.strictEqual(transcript.scrollTop, scrollTop);
+			const hiddenColumn = terminal.getViewport()[5].indexOf(label);
+
+			terminal.sendInput("\x1b[<35;80;1M");
+			await terminal.waitForRender();
+			assert.strictEqual(transcript.isScrollbarVisible, true);
+			assert.strictEqual(transcript.scrollTop, scrollTop);
+			const revealedColumn = terminal.getViewport()[5].indexOf(label);
+
+			assert.deepStrictEqual([visibleColumn, hiddenColumn, revealedColumn], [24, 24, 24]);
+		} finally {
+			tui.stop();
+		}
+	});
+
+	it("leaves the scrollbar visible and clickable when the jump-to-end indicator spans the transcript", async () => {
+		// Regression coverage for #9136: centering must not paint or capture clicks over the scrollbar.
 		const terminal = new VirtualTerminal(30, 6);
 		const tui = new TuiAltScreen(terminal, undefined, undefined, {
 			scrollToEndIndicator: () => "↓".repeat(30),
@@ -200,6 +244,7 @@ describe("TuiAltScreen", () => {
 		assert.strictEqual(transcript.isFollowingEnd, false);
 
 		// The indicator must not intercept a press on the scrollbar's last column.
+		assert.strictEqual(terminal.getViewport()[3], `${"↓".repeat(29)}┃`);
 		terminal.sendInput("\x1b[<0;30;4M");
 		terminal.sendInput("\x1b[<0;30;4m");
 		await terminal.waitForRender();
@@ -640,6 +685,31 @@ describe("TuiAltScreen", () => {
 		tui.stop();
 	});
 
+	// #9758: wheel line counts can change at runtime; Alt keeps its multiplier.
+	it("applies runtime wheel line count updates", async () => {
+		const terminal = new VirtualTerminal(20, 4);
+		const tui = new TuiAltScreen(terminal, undefined, undefined, { wheelScrollLines: 3 });
+		const deltas: Array<number | undefined> = [];
+		tui.addChild(
+			new MouseRegion(new Text("wheel target", 0, 0), (event) => {
+				if (event.type !== "wheel") return undefined;
+				deltas.push(event.wheelDelta);
+				return { handled: true };
+			}),
+		);
+		tui.start();
+		try {
+			await terminal.waitForRender();
+			terminal.sendInput("\x1b[<64;1;1M");
+			tui.setWheelScrollLines(2);
+			terminal.sendInput("\x1b[<65;1;1M");
+			terminal.sendInput("\x1b[<72;1;1M");
+			assert.deepStrictEqual(deltas, [-3, 2, -10]);
+		} finally {
+			tui.stop();
+		}
+	});
+
 	it("chains unused wheel delta to an outer scroll view", async () => {
 		const terminal = new VirtualTerminal(20, 4);
 		const tui = new TuiAltScreen(terminal, undefined, undefined, { wheelScrollLines: 3 });
@@ -687,14 +757,14 @@ describe("TuiAltScreen", () => {
 			["line 5", "line 6", "line 7", "line 8", "line 9", "line 10", "line 11", "line 12"],
 		);
 
-		terminal.sendInput("\x1bOH");
+		terminal.sendInput("\x1b[7^");
 		await terminal.waitForRender();
 		assert.deepStrictEqual(
 			terminal.getViewport().map((line) => line.trimEnd()),
 			["line 1", "line 2", "line 3", "line 4", "line 5", "line 6", "line 7", "line 8"],
 		);
 
-		terminal.sendInput("\x1bOF");
+		terminal.sendInput("\x1b[8^");
 		await terminal.waitForRender();
 		assert.deepStrictEqual(
 			terminal.getViewport().map((line) => line.trimEnd()),
@@ -781,64 +851,6 @@ describe("TuiAltScreen", () => {
 		assert.ok(!populated.some((line) => line.includes("Find in transcript")));
 	});
 
-	it("positions the search query cursor on mouse press (X049)", () => {
-		let query = "";
-		const component = new AltScreenSearchComponent((next) => {
-			query = next;
-		});
-		component.render(48);
-		component.handleInput("hello");
-		component.render(48);
-		// Content starts at col 1 (left border); the Input prompt " " is one
-		// column, so value column 2 (between e and l) is at component col 4.
-		const result = component.handleMouse({
-			type: "press",
-			button: "left",
-			x: 4,
-			y: 1,
-			screenX: 4,
-			screenY: 1,
-			width: 48,
-			height: 3,
-			shift: false,
-			alt: false,
-			ctrl: false,
-		});
-		assert.ok(result?.handled, "press on the query row must be handled");
-		assert.strictEqual(result?.focus, true, "press must request focus");
-		component.handleInput("X");
-		assert.strictEqual(query, "heXllo", "typing after the click must insert at the clicked column");
-	});
-
-	it("keeps the search result-count suffix and borders inert (X049)", () => {
-		const component = new AltScreenSearchComponent(() => {});
-		component.render(48);
-		component.handleInput("needle");
-		component.setResult(0, 2);
-		component.render(48);
-		const press = (x: number, y: number) =>
-			component.handleMouse({
-				type: "press",
-				button: "left",
-				x,
-				y,
-				screenX: x,
-				screenY: y,
-				width: 48,
-				height: 3,
-				shift: false,
-				alt: false,
-				ctrl: false,
-			});
-		// The result-count suffix (" 1/2 ") sits after the Input (which ends
-		// at component col 41 for this render); a press on the suffix must
-		// not reach the Input.
-		assert.strictEqual(press(45, 1), undefined, "result-count suffix must be inert");
-		// Top and bottom borders (rows 0 and 2) are inert.
-		assert.strictEqual(press(4, 0), undefined, "top border must be inert");
-		assert.strictEqual(press(4, 2), undefined, "navigation-button row must be inert here");
-	});
-
 	it("navigates transcript search with hoverable arrow buttons and toggles it with its shortcut", async () => {
 		const terminal = new RecordingTerminal(120, 6);
 		const tui = new TuiAltScreen(terminal, undefined, undefined, {
@@ -883,38 +895,6 @@ describe("TuiAltScreen", () => {
 		terminal.sendInput("\x1b[102;6u");
 		await terminal.waitForRender();
 		assert.ok(!terminal.getViewport().some((line) => line.includes("↑ Shift+Enter · ↓ Enter")));
-		tui.stop();
-	});
-
-	it("positions the fullscreen search query cursor on mouse click (X049)", async () => {
-		const terminal = new RecordingTerminal(120, 6);
-		const tui = new TuiAltScreen(terminal);
-		tui.addChild(new Text("needle one\nmiddle\nneedle two\nend", 0, 0));
-		tui.start();
-		await terminal.waitForRender();
-
-		terminal.sendInput("\x1b[102;6u");
-		terminal.sendInput("needle");
-		await terminal.waitForRender();
-		let viewport = terminal.getViewport();
-		const contentRow = viewport.findIndex((line) => line.includes("1/2"));
-		assert.ok(contentRow >= 0, "search overlay content row must be visible");
-		// The transcript may also contain "needle"; the overlay's query is
-		// the LAST occurrence on the content row.
-		const needleCol = viewport[contentRow]?.lastIndexOf("needle") ?? -1;
-		assert.ok(needleCol >= 0);
-		// Click on the "e" cell (between n and e): the overlay content starts
-		// at col 1 (border) plus the Input prompt " " (col 2 = n), so the e
-		// cell is needleCol + 2. SGR coordinates are 1-based.
-		terminal.sendInput(`\x1b[<0;${needleCol + 2};${contentRow + 1}M`);
-		await terminal.waitForRender();
-		terminal.sendInput("X");
-		await terminal.waitForRender();
-		viewport = terminal.getViewport();
-		assert.ok(
-			viewport.some((line) => line.includes("nXeedle")),
-			"typing after the click must insert at the clicked query column",
-		);
 		tui.stop();
 	});
 
@@ -1105,7 +1085,7 @@ describe("TuiAltScreen", () => {
 		}
 	});
 
-	it("routes Ctrl-modified viewport navigation to the focused component", async () => {
+	it("routes Home and End to the focused component and Ctrl+Home/End to the transcript", async () => {
 		const terminal = new VirtualTerminal(20, 6);
 		const tui = new TuiAltScreen(terminal);
 		const transcript = new ScrollView(
@@ -1129,22 +1109,34 @@ describe("TuiAltScreen", () => {
 		tui.start();
 		await terminal.waitForRender();
 
-		terminal.sendInput("\x1bOH");
+		const bottom = transcript.scrollTop;
+		assert.ok(bottom > 0);
+
+		// #10314: unmodified Home/End belong to the editor in every UI mode.
+		const editorKeys = ["\x1bOH", "\x1b[F", "\x1b[57423u", "\x1b[5;5~", "\x1b[6;5~"];
+		for (const input of editorKeys) terminal.sendInput(input);
+		await terminal.waitForRender();
+		assert.strictEqual(transcript.scrollTop, bottom);
+		assert.deepStrictEqual(editorInputs, editorKeys);
+
+		terminal.sendInput("\x1b[1;5H");
 		await terminal.waitForRender();
 		assert.strictEqual(transcript.scrollTop, 0);
-		assert.deepStrictEqual(editorInputs, []);
 
-		const modifiedInputs = ["\x1b[1;5H", "\x1b[1;5F", "\x1b[5;5~", "\x1b[6;5~", "\x1b[57423;5u"];
-		for (const input of modifiedInputs) terminal.sendInput(input);
+		terminal.sendInput("\x1b[1;5F");
+		await terminal.waitForRender();
+		assert.strictEqual(transcript.scrollTop, bottom);
+		assert.strictEqual(transcript.isFollowingEnd, true);
+
+		terminal.sendInput("\x1b[57423;5u");
 		terminal.sendInput("\x1b[57423;5:3u");
 		await terminal.waitForRender();
 		assert.strictEqual(transcript.scrollTop, 0);
-		assert.deepStrictEqual(editorInputs, modifiedInputs);
 
 		terminal.sendInput("\x1b[6~");
 		await terminal.waitForRender();
 		assert.strictEqual(transcript.scrollTop, 1);
-		assert.deepStrictEqual(editorInputs, modifiedInputs);
+		assert.deepStrictEqual(editorInputs, editorKeys);
 
 		tui.stop();
 	});
@@ -1267,6 +1259,47 @@ describe("TuiAltScreen", () => {
 		);
 
 		tui.stop();
+	});
+
+	it("redraws WezTerm Kitty images after writes to covered rows", async () => {
+		// Regression test for #10319: a scrollbar update below an unchanged image anchor erased its cells.
+		const weztermPane = process.env.WEZTERM_PANE;
+		let tui: TuiAltScreen | undefined;
+		process.env.WEZTERM_PANE = "1";
+		setCapabilities({ images: "kitty", trueColor: true, hyperlinks: true });
+		try {
+			const terminal = new RecordingTerminal(20, 4);
+			const imageId = 10319;
+			const imageLine = encodeKitty("AAAA", { columns: 2, rows: 3, imageId, moveCursor: false });
+			registerKittyImageMetadata({ imageId, columns: 2, rows: 3, widthPx: 100, heightPx: 100 });
+			let coveredLine = "";
+			tui = new TuiAltScreen(terminal);
+			tui.setLayoutRoot({
+				render: () => [imageLine, coveredLine, "", "after"],
+				invalidate: () => {},
+			});
+			tui.start();
+			await terminal.waitForRender();
+			const eventCount = terminal.events.length;
+
+			coveredLine = "changed";
+			tui.requestRender();
+			await terminal.waitForRender();
+			const redrawWrites = terminal.events
+				.slice(eventCount)
+				.filter((event): event is { type: "write"; data: string } => event.type === "write")
+				.map((event) => event.data)
+				.join("");
+			const placementIndex = redrawWrites.indexOf("\x1b_Ga=p,q=2");
+			assert.ok(redrawWrites.includes("\x1b_Ga=d,d=a,q=2\x1b\\"));
+			assert.ok(placementIndex > redrawWrites.indexOf("changed"));
+			assert.ok(!redrawWrites.includes("\x1b_Ga=T"));
+		} finally {
+			tui?.stop();
+			resetCapabilitiesCache();
+			if (weztermPane === undefined) delete process.env.WEZTERM_PANE;
+			else process.env.WEZTERM_PANE = weztermPane;
+		}
 	});
 
 	it("reuses moved Kitty images without dropping HStack siblings", async () => {
@@ -1544,18 +1577,19 @@ describe("TuiAltScreen", () => {
 		tui.stop();
 	});
 
-	it("filters only the copy source of a row via selectionLineText (X057)", async () => {
-		const terminal = new RecordingTerminal(20, 4);
-		const copied: string[] = [];
+	it("flashes a specific error returned by the injected copySelection handler", async () => {
+		// Regression test for #9618.
+		const terminal = new RecordingTerminal(80, 4);
 		const tui = new TuiAltScreen(terminal, undefined, undefined, {
-			copySelection: async (text) => {
-				copied.push(text);
-				return true;
-			},
-			// Row 0 is presentation chrome: it copies as a blank separator,
-			// while every other row is copied verbatim.
-			selectionLineText: ({ row, line }) => (row === 0 ? "" : line.toUpperCase()),
+			copyOnSelect: false,
+			copySelection: async () => "Clipboard unavailable: install wl-clipboard",
 		});
+		let flashDuration: number | undefined;
+		const flash = tui.flash.bind(tui);
+		tui.flash = (message, durationMs) => {
+			flashDuration = durationMs;
+			flash(message, durationMs);
+		};
 		tui.addChild(new Text("alpha\nbeta\ngamma\ndelta", 0, 0));
 		tui.start();
 		await terminal.waitForRender();
@@ -1564,124 +1598,12 @@ describe("TuiAltScreen", () => {
 		terminal.sendInput("\x1b[<32;4;2M");
 		terminal.sendInput("\x1b[<0;4;2m");
 		await terminal.waitForRender();
-
-		// The overridden row copies blank; the untouched row is copied from
-		// the override text (proving the seam replaces the copy source), and
-		// the PAINT still shows the original rendered lines.
-		assert.deepStrictEqual(copied, ["\nBETA"]);
-		assert.ok(terminal.getViewport().some((line) => line.includes("alpha")));
-		assert.ok(terminal.getViewport().some((line) => line.includes("beta")));
-
-		tui.stop();
-	});
-
-	it("keeps the copied text unchanged when selectionLineText returns undefined (X057)", async () => {
-		const terminal = new RecordingTerminal(20, 4);
-		const copied: string[] = [];
-		const tui = new TuiAltScreen(terminal, undefined, undefined, {
-			copySelection: async (text) => {
-				copied.push(text);
-				return true;
-			},
-			selectionLineText: () => undefined,
-		});
-		tui.addChild(new Text("alpha\nbeta\ngamma\ndelta", 0, 0));
-		tui.start();
+		assert.strictEqual(await tui.copyActiveSelectionToClipboard(), false);
 		await terminal.waitForRender();
 
-		terminal.sendInput("\x1b[<0;1;1M");
-		terminal.sendInput("\x1b[<32;4;2M");
-		terminal.sendInput("\x1b[<0;4;2m");
-		await terminal.waitForRender();
-
-		assert.deepStrictEqual(copied, ["alpha\nbeta"]);
-		tui.stop();
-	});
-
-	it("computes word selection on the rendered line but copies the override (X057)", async () => {
-		const terminal = new RecordingTerminal(20, 4);
-		const copied: string[] = [];
-		const tui = new TuiAltScreen(terminal, undefined, undefined, {
-			copySelection: async (text) => {
-				copied.push(text);
-				return true;
-			},
-			selectionLineText: ({ row }) => (row === 0 ? "" : undefined),
-		});
-		tui.addChild(new Text("alpha\nbeta\ngamma\ndelta", 0, 0));
-		tui.start();
-		await terminal.waitForRender();
-
-		// Double-click "beta" (row 1, no override): the word range is computed
-		// on the RENDERED line and copied unchanged.
-		terminal.sendInput("\x1b[<0;1;2M");
-		terminal.sendInput("\x1b[<0;1;2m");
-		terminal.sendInput("\x1b[<0;1;2M");
-		terminal.sendInput("\x1b[<0;1;2m");
-		await terminal.waitForRender();
-		assert.deepStrictEqual(copied, ["beta"]);
-
-		// Double-click "alpha" (row 0, overridden to blank): the gesture still
-		// selects the word on the rendered line, but the copied text is empty.
-		copied.length = 0;
-		terminal.sendInput("\x1b[<0;1;1M");
-		terminal.sendInput("\x1b[<0;1;1m");
-		terminal.sendInput("\x1b[<0;1;1M");
-		terminal.sendInput("\x1b[<0;1;1m");
-		await terminal.waitForRender();
-		assert.deepStrictEqual(copied, []);
-
-		tui.stop();
-	});
-
-	it("computes the copy range on the rendered line for a non-empty override (X057)", async () => {
-		const terminal = new RecordingTerminal(20, 1);
-		const copied: string[] = [];
-		const tui = new TuiAltScreen(terminal, undefined, undefined, {
-			copySelection: async (text) => {
-				copied.push(text);
-				return true;
-			},
-			// The override is NARROWER than the rendered wide glyph: the
-			// selection still covers the glyph's two cells, so the copied
-			// override must be sliced with the RENDERED line's column range.
-			selectionLineText: ({ row }) => (row === 0 ? "XY" : undefined),
-		});
-		tui.addChild(new Text("日", 0, 0));
-		tui.start();
-		await terminal.waitForRender();
-
-		// Drag from the glyph's second cell to the end of the line.
-		terminal.sendInput("\x1b[<0;2;1M");
-		terminal.sendInput("\x1b[<32;3;1M");
-		terminal.sendInput("\x1b[<0;3;1m");
-		await terminal.waitForRender();
-
-		assert.deepStrictEqual(copied, ["XY"]);
-		tui.stop();
-	});
-
-	it("filters the OSC 52 clipboard text too when no handler is injected (X057)", async () => {
-		const terminal = new RecordingTerminal(20, 4);
-		const tui = new TuiAltScreen(terminal, undefined, undefined, {
-			selectionLineText: ({ row }) => (row === 0 ? "" : undefined),
-		});
-		tui.addChild(new Text("alpha\nbeta\ngamma\ndelta", 0, 0));
-		tui.start();
-		await terminal.waitForRender();
-
-		terminal.sendInput("\x1b[<0;1;1M");
-		terminal.sendInput("\x1b[<32;4;2M");
-		terminal.sendInput("\x1b[<0;4;2m");
-		await terminal.waitForRender();
-
-		const osc = terminal.events
-			.filter((event): event is { type: "write"; data: string } => event.type === "write" && event.data.includes("\x1b]52;c;"))
-			.map((event) => event.data)[0];
-		assert.ok(osc !== undefined, "an OSC 52 copy must be emitted without an injected handler");
-		const payload = /\]52;c;([A-Za-z0-9+/=]+)\x07/.exec(osc)![1]!;
-		assert.strictEqual(Buffer.from(payload, "base64").toString("utf8"), "\nbeta");
-
+		assert.ok(terminal.getViewport().some((line) => line.includes("Clipboard unavailable: install wl-clipboard")));
+		assert.ok(terminal.getViewport().every((line) => !line.includes("Copy failed")));
+		assert.strictEqual(flashDuration, 5000);
 		tui.stop();
 	});
 
@@ -2578,14 +2500,14 @@ describe("TuiAltScreen", () => {
 			["line 5", "line 6", "line 7", "line 8", "line 9", "line 10", "line 11", "line 12"],
 		);
 
-		terminal.sendInput("\x1bOH");
+		terminal.sendInput("\x1b[7^");
 		await terminal.waitForRender();
 		assert.deepStrictEqual(
 			terminal.getViewport().map((line) => line.trimEnd()),
 			["line 1", "line 2", "line 3", "line 4", "line 5", "line 6", "line 7", "line 8"],
 		);
 
-		terminal.sendInput("\x1bOF");
+		terminal.sendInput("\x1b[8^");
 		await terminal.waitForRender();
 		assert.deepStrictEqual(
 			terminal.getViewport().map((line) => line.trimEnd()),
@@ -3821,3 +3743,43 @@ describe("TuiAltScreen viewport listener registration order (X043)", () => {
 		assert.deepStrictEqual(actions, ["row1"], "a fresh press at the new row must activate the right row");
 		tui.stop();
 	});
+
+describe("resetTextSelection (upstream #9311 absorption)", () => {
+	const lastClickOf = (tui: TuiAltScreen): unknown => (tui as unknown as { lastClick?: unknown }).lastClick;
+
+	it("drops the active selection", async () => {
+		const terminal = new RecordingTerminal(20, 4);
+		const tui = new TuiAltScreen(terminal);
+		tui.addChild(new Text("alpha\nbeta\ngamma\ndelta", 0, 0));
+		tui.start();
+		await terminal.waitForRender();
+
+		// Drag-select two rows.
+		terminal.sendInput("\x1b[<0;1;1M");
+		terminal.sendInput("\x1b[<32;4;2M");
+		terminal.sendInput("\x1b[<0;4;2m");
+		await terminal.waitForRender();
+		assert.strictEqual(tui.hasActiveSelection(), true, "the drag must leave an active selection");
+
+		tui.resetTextSelection();
+		assert.strictEqual(tui.hasActiveSelection(), false, "resetTextSelection must drop the selection");
+		tui.stop();
+	});
+
+	it("drops the multi-click history a real click recorded", async () => {
+		const terminal = new RecordingTerminal(20, 4);
+		const tui = new TuiAltScreen(terminal);
+		tui.addChild(new Text("alpha\nbeta\ngamma\ndelta", 0, 0));
+		tui.start();
+		await terminal.waitForRender();
+
+		terminal.sendInput("\x1b[<0;1;1M");
+		terminal.sendInput("\x1b[<0;1;1m");
+		await terminal.waitForRender();
+		assert.notStrictEqual(lastClickOf(tui), undefined, "a real click records the multi-click history");
+
+		tui.resetTextSelection();
+		assert.strictEqual(lastClickOf(tui), undefined, "resetTextSelection must drop the multi-click history");
+		tui.stop();
+	});
+});

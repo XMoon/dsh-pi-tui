@@ -27,6 +27,7 @@ import { DirectCatalogPort } from '../src/runtime/direct/catalog-direct.ts'
 import { DirectConfigPort } from '../src/runtime/direct/config-direct.ts'
 import { DirectHostFilePort } from '../src/runtime/direct/host-file-direct.ts'
 import { registerTuiCommandsWithDirectSeams } from './support/register-tui-commands.ts'
+import { navigateToLegacySettings } from './support/open-legacy-settings.ts'
 
 
 /** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file
@@ -248,7 +249,7 @@ function setup(options: { busyEnter?: string; localShellSandbox?: string; extens
     setTerminalProgressMode: () => {}, setNotificationMethod: () => {},
     updateWelcomeCard: () => {},
     openJobView: () => {},
-    openTasksBrowser: () => {}, openPluginManager: () => {}, createPluginManagerSubmenu: () => ({ render: () => [], invalidate: () => {} }),
+    openTasksBrowser: () => {}, openPluginManager: () => {}, createPluginManagerPage: () => undefined,
     openRewindPicker: () => {},
     sessionTransitionPending: () => false,
     withSessionTransition: async <T>(task: () => T | Promise<T>) => task(),
@@ -262,13 +263,17 @@ function setup(options: { busyEnter?: string; localShellSandbox?: string; extens
   const installed = registerTuiCommandsWithDirectSeams(runner)
   const def = commands.defs.find(entry => entry.name === 'settings')
   assert.ok(def?.handler !== undefined, 'settings handler missing')
-  const run = async (rawInput: string): Promise<unknown> =>
-    (def!.handler as (inv: { commandId: string; agent: never; rawInput: string; signal: AbortSignal }) => unknown)({
+  /** Run `/settings` and cross the B2-A workspace bridge into the legacy editor. */
+  const run = async (rawInput: string): Promise<unknown> => {
+    const result = (def!.handler as (inv: { commandId: string; agent: never; rawInput: string; signal: AbortSignal }) => unknown)({
       commandId: CommandId('cmd-test-1'),
       agent: undefined as never,
       rawInput,
       signal: new AbortController().signal,
     })
+    await navigateToLegacySettings(vt)
+    return result
+  }
   // Run ANY registered command (defaults to /settings for the existing
   // tests; /help uses the same surface).
   const runCommand = async (name: string, rawInput = ''): Promise<unknown> => {
@@ -621,6 +626,7 @@ test('/settings describes the user-shell sandbox policy as conditional on Host e
   let captured: Parameters<TuiApp['openSettings']>[0] | undefined
   t.app.openSettings = ((items: Parameters<TuiApp['openSettings']>[0]) => { captured = items }) as unknown as TuiApp['openSettings']
   await t.runCommand('settings', '')
+  await navigateToLegacySettings(t.vt)
   const row = captured?.find(candidate => candidate.id === 'local-shell-sandbox')
   assert.ok(row !== undefined, 'the local-shell-sandbox row must exist')
   assert.match(row.description ?? '', /when Host user-shell execution is available/i,

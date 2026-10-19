@@ -32,9 +32,12 @@ function escapeRegExp(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')
 }
 
-function createFixture(life, { version, englishDate = '2026-08-28', chineseDate = englishDate, guidance = undefined, channel = 'latest' }) {
+function createFixture(life, { version, englishDate = '2026-08-28', chineseDate = englishDate, guidance = undefined, channel = 'latest', baseTag = undefined }) {
   const root = life.tempDir('dsh-pi-tui-release-notes-')
   const comparePrefix = channel === 'next' ? 'next-v' : 'v'
+  // The version link's compare base is the PREVIOUS release tag, which is
+  // independent of the channel this release publishes to.
+  const compareBaseTag = baseTag ?? `${comparePrefix}0.0.0`
   const output = join(root, 'release-notes.md')
   const packageJson = join(root, 'package.json')
   const chinese = join(root, 'CHANGELOG.md')
@@ -48,8 +51,8 @@ function createFixture(life, { version, englishDate = '2026-08-28', chineseDate 
   cpSync(join(repo, 'scripts/lib/dsh-compat.mjs'), join(root, 'scripts', 'lib', 'dsh-compat.mjs'))
   cpSync(join(repo, 'src', 'dsh-compat-matrix.json'), join(root, 'src', 'dsh-compat-matrix.json'))
   writeFileSync(packageJson, `${JSON.stringify({ name: '@xmoon76/dsh-pi-tui', version }, null, 2)}\n`)
-  writeFileSync(chinese, `# 更新日志\n\n## [Unreleased]\n\n## [${version}] - ${chineseDate}\n\n### 变更\n\n- 中文迁移说明。${injectedGuidance}\n\n[Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/${comparePrefix}${version}...HEAD\n[${version}]: https://github.com/XMoon/dsh-pi-tui/compare/${comparePrefix}0.0.0...${comparePrefix}${version}\n`)
-  writeFileSync(english, `# Changelog\n\n## [Unreleased]\n\n## [${version}] - ${englishDate}\n\n### Changes\n\n- English migration note.${injectedGuidance}\n\n[Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/${comparePrefix}${version}...HEAD\n[${version}]: https://github.com/XMoon/dsh-pi-tui/compare/${comparePrefix}0.0.0...${comparePrefix}${version}\n`)
+  writeFileSync(chinese, `# 更新日志\n\n## [Unreleased]\n\n## [${version}] - ${chineseDate}\n\n### 变更\n\n- 中文迁移说明。${injectedGuidance}\n\n[Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/${comparePrefix}${version}...HEAD\n[${version}]: https://github.com/XMoon/dsh-pi-tui/compare/${compareBaseTag}...${comparePrefix}${version}\n`)
+  writeFileSync(english, `# Changelog\n\n## [Unreleased]\n\n## [${version}] - ${englishDate}\n\n### Changes\n\n- English migration note.${injectedGuidance}\n\n[Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/${comparePrefix}${version}...HEAD\n[${version}]: https://github.com/XMoon/dsh-pi-tui/compare/${compareBaseTag}...${comparePrefix}${version}\n`)
   return { root, output, packageJson, chinese, english }
 }
 
@@ -142,10 +145,24 @@ test('release-notes requires a dated current section directly after Unreleased a
   assert.notEqual(missingReferencesResult.status, 0)
   assert.match(missingReferencesResult.stderr, /release reference links/u)
 
-  const wrongChannel = createFixture(life, { version: '1.2.3-rc.1' })
-  const wrongChannelResult = run(wrongChannel, 'next-v1.2.3-rc.1')
-  assert.notEqual(wrongChannelResult.status, 0)
-  assert.match(wrongChannelResult.stderr, /matching next release reference links/u)
+  // The `[Unreleased]` link names the tag being created, so a link written for
+  // the other prefix still fails.
+  const wrongUnreleasedTag = createFixture(life, { version: '1.2.3-rc.1' })
+  const wrongUnreleasedTagResult = run(wrongUnreleasedTag, 'next-v1.2.3-rc.1')
+  assert.notEqual(wrongUnreleasedTagResult.status, 0)
+  assert.match(wrongUnreleasedTagResult.stderr, /matching release reference links/u)
+
+  // The compare base is the PREVIOUS release tag, not a channel statement: a
+  // next-channel release cut after a latest-channel one compares from `v…`.
+  const crossChannelBase = createFixture(life, { version: '1.2.3-rc.1', channel: 'next', baseTag: 'v1.2.2' })
+  const crossChannelBaseResult = run(crossChannelBase, 'next-v1.2.3-rc.1')
+  assert.equal(crossChannelBaseResult.status, 0, crossChannelBaseResult.stderr)
+
+  // The base must still be a release tag with a channel prefix.
+  const malformedBase = createFixture(life, { version: '1.2.3-rc.1', channel: 'next', baseTag: '1.2.2' })
+  const malformedBaseResult = run(malformedBase, 'next-v1.2.3-rc.1')
+  assert.notEqual(malformedBaseResult.status, 0)
+  assert.match(malformedBaseResult.stderr, /matching release reference links/u)
 
   const wrongRepository = createFixture(life, { version: '1.2.3' })
   for (const path of [wrongRepository.chinese, wrongRepository.english]) {
@@ -153,7 +170,7 @@ test('release-notes requires a dated current section directly after Unreleased a
   }
   const wrongRepositoryResult = run(wrongRepository, 'v1.2.3')
   assert.notEqual(wrongRepositoryResult.status, 0)
-  assert.match(wrongRepositoryResult.stderr, /matching latest release reference links/u)
+  assert.match(wrongRepositoryResult.stderr, /matching release reference links/u)
 
   const lookalikeRepository = createFixture(life, { version: '1.2.3' })
   for (const path of [lookalikeRepository.chinese, lookalikeRepository.english]) {
@@ -161,7 +178,7 @@ test('release-notes requires a dated current section directly after Unreleased a
   }
   const lookalikeRepositoryResult = run(lookalikeRepository, 'v1.2.3')
   assert.notEqual(lookalikeRepositoryResult.status, 0)
-  assert.match(lookalikeRepositoryResult.stderr, /matching latest release reference links/u)
+  assert.match(lookalikeRepositoryResult.stderr, /matching release reference links/u)
 })
 
 test('the current release body documents every matrix install pairing under either tag prefix', (t) => {

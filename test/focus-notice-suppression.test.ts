@@ -1,14 +1,17 @@
 /**
- * Focus collapsed mid-turn Notice disposition (2026-09-30 closure).
+ * Focus collapsed UNQUALIFIED mid-turn Notice disposition (2026-09-30 closure).
  *
  * Collapsed Focus distinguishes CAUSAL INPUT from MID-TURN PROCESS FEEDBACK
- * POSITIONALLY: a `form:'notice'` row in the turn's opening foundation stays
- * BEFORE the Thought (it explains why the turn started), while a mid-turn
- * notice renders AFTER the Thought as visible process feedback — never hidden
- * inside it, and never a candidate for the Thought's Action slot. Expanded
- * Focus restores the exact raw chronology. The decision reads the semantic
- * `form` plus raw position, never a source kind or plugin name; Compact/Full
- * never route through this disposition.
+ * POSITIONALLY: an unqualified `form:'notice'` row in the turn's opening
+ * foundation stays BEFORE the Thought (it explains why the turn started),
+ * while an unqualified mid-turn notice renders AFTER the Thought as visible
+ * process feedback — never hidden inside it, and never a candidate for the
+ * Thought's Action slot. The v2 exception (a proven Working `tool-jobs` Notice
+ * with durable same-turn next-step evidence) is hidden with the Thought and is
+ * covered by the real-Folder suites, not by this synthetic negative-control
+ * file. Expanded Focus restores the exact raw chronology. The decision reads
+ * the semantic `form` plus raw position, never a source kind or plugin name;
+ * Compact/Full never route through this disposition.
  * @module @xmoon76/dsh-pi-tui/focus-notice-suppression.test
  */
 
@@ -50,6 +53,9 @@ const steer = (text: string): TranscriptMessage => ({ kind: 'user', turn: TURN, 
 const thinking = (text: string): TranscriptMessage => ({ kind: 'thinking', turn: TURN, text, running: true })
 const tool = (): TranscriptMessage => ({ kind: 'tool', turn: TURN, name: 'read', args: '{}', result: 'ok', status: 'ok' })
 const assistant = (text: string): TranscriptMessage => ({ kind: 'assistant', turn: TURN, text })
+/** An UNQUALIFIED notice by construction: no `sameTurnNextStep` durable flag,
+ * so it must stay an independent Context boundary (a proven Working tool-jobs
+ * notice is covered by the v2 J1 suites instead). */
 const notice = (label: string, summary: string, sourceKind: string): TranscriptMessage => ({
   kind: 'system', turn: TURN, text: 'notice payload', label, summary, icon: 'context-notice', context: true,
   contextPresentation: { form: 'notice', sourceKind, role: 'inject' },
@@ -103,7 +109,7 @@ function collapsedBlockOrder(
 
 // --- F1: busy tool-jobs Notice renders AFTER the Thought ---------------------
 
-test('F1. a busy-turn tool-jobs notice is visible after the Thought and never a hidden Action candidate', () => {
+test('F1. an UNQUALIFIED busy-turn tool-jobs notice stays visible after the Thought and is never a hidden Action candidate', () => {
   const noticeRow = notice('Background job', 'job finished', 'tool-jobs')
   const messages = [user('go'), thinking('first'), tool(), noticeRow, thinking('second'), tool(), assistant('final')]
   const collapsedRows = collapsed(messages)
@@ -134,7 +140,7 @@ test('F1. a busy-turn tool-jobs notice is visible after the Thought and never a 
 
 // --- F2: by form + raw position, never hardcoded source kinds ----------------
 
-test('F2. a busy-turn subagent-settled and future-producer notice render by form, not source kind', () => {
+test('F2. unqualified busy-turn notices render by form, not source kind', () => {
   for (const sourceKind of ['tool-jobs', 'subagent-settled', 'future-producer']) {
     const noticeRow = notice('Agent notice', 'child settled', sourceKind)
     const messages = [user('go'), thinking('first'), tool(), noticeRow, assistant('final')]
@@ -183,7 +189,7 @@ test('F4. a mid-turn relay remains visible while collapsed', () => {
 
 // --- F5: notice between two Process regions ----------------------------------
 
-test('F5. a notice between Process regions renders after the Thought; expanded restores in place', () => {
+test('F5. an unqualified notice between Process regions renders after the Thought; expanded restores in place', () => {
   const noticeRow = notice('Background job', 'between', 'subagent-settled')
   const firstProcess = thinking('before')
   const secondProcess = thinking('after')
@@ -220,7 +226,7 @@ test('F7. the notice disposition never moves or swallows a user/steer row', () =
 
 // --- F7c: mid-turn Notice across the committed-answer fence -------------------
 
-test('F7c. a mid-turn notice before a committed answer keeps Thought -> Notice -> Answer -> Steer (fence preserved)', () => {
+test('F7c. an UNQUALIFIED mid-turn notice before a committed answer keeps Thought -> Notice -> Answer -> Steer (fence preserved)', () => {
   // The exact high-risk combination this PR touched: User -> Process ->
   // mid-turn Notice -> Assistant A committed-before-steer -> Steer. The
   // collapsed emit must keep the committed-answer fence: the answer and the
@@ -309,6 +315,8 @@ function eventAt(type: string, data: Record<string, unknown>, time: number, seq:
 }
 
 function busyTurnWithNoticeFixture(): { folder: TranscriptFolder; noticeRow: TranscriptMessage } {
+  // Deliberately UNQUALIFIED: a hand-authored tool-jobs notice without the
+  // durable `agent/inbox/spliced` insert/claim chain must remain independent.
   const folder = new TranscriptFolder()
   const source = { kind: 'tool-jobs', form: 'notice', summary: 'NOTICE_SUMMARY', senderSessionId: 'job-1' }
   folder.apply([
@@ -325,7 +333,7 @@ function busyTurnWithNoticeFixture(): { folder: TranscriptFolder; noticeRow: Tra
   return { folder, noticeRow }
 }
 
-test('F6. searching a durable mid-turn notice needs no Focus root reveal and dismiss keeps it visible', async () => {
+test('F6. searching an UNQUALIFIED durable mid-turn notice needs no Focus root reveal and dismiss keeps it visible', async () => {
   const { vt, app } = startApp('focus')
   const { folder, noticeRow } = busyTurnWithNoticeFixture()
   app.setTranscript(folder.messages(), folder.turnActivities())
@@ -350,7 +358,7 @@ test('F6. searching a durable mid-turn notice needs no Focus root reveal and dis
   assert.equal(app.focusExpandedTurnsForTest().size, 0, 'no manual disclosure state is created')
 })
 
-test('F9. a Compact notice stays a standalone row (this disposition is Focus-only)', async () => {
+test('F9. an UNQUALIFIED Compact notice stays a standalone row (this disposition is Focus-only)', async () => {
   const { vt, app } = startApp('compact')
   const { folder } = busyTurnWithNoticeFixture()
   app.setTranscript(folder.messages(), folder.turnActivities())

@@ -300,8 +300,15 @@ test('4.7 leader completion obeys the action context predicate', async () => {
   const app = new TuiApp(vt, {
     onSubmit: () => {},
     onExit: () => {},
-    onOpenTasks: () => { tasksOpened += 1 },
   })
+  // B4-B: the retired onOpenTasks event becomes a spy on the production
+  // entry (the keymap action calls it directly).
+  const realEntry = app.enterTaskQuick.bind(app)
+  app.enterTaskQuick = () => {
+    const entered = realEntry.call(app)
+    if (entered) tasksOpened += 1
+    return entered
+  }
   app.start()
   startedApps.add(app)
   app.keybindingsManager().setUserConfiguration(parseUserKeybindings({
@@ -309,17 +316,28 @@ test('4.7 leader completion obeys the action context predicate', async () => {
     bindings: { 'app.tasks.open': '<leader>t' },
   }))
   await vt.waitForRender()
-  // Editor has text → the tasks predicate is false → the leader must NOT open tasks.
-  app.setDraft('text')
+  // B4-B: the admission needs the Quick projection alongside the badge.
+  app.setQuickTaskItems([{ value: 'job:job-1', label: 'bash', status: 'running', source: 'job' }])
+  app.setTasks([{ id: 'job-1', label: 'bash', status: 'running', kind: 'job' }])
+  await vt.waitForRender()
+  // Editor has text → the tasks predicate is false (the cursor is on the
+  // only visual line, but the ADJACENT visual boundary is not what gates a
+  // LEADER completion — the LEADER data '' dispatches the action through the
+  // same predicate, which now requires the last-visual-line state; a cursor
+  // on the last visual line WITH text still qualifies, so park the cursor at
+  // col 0 of a NON-last visual line by adding a second line).
+  app.setDraft('text\nmore')
+  await vt.waitForRender()
+  // Park the cursor on the FIRST visual line (a real Up press from the end).
+  vt.sendInput('\x1b[A')
   await vt.waitForRender()
   vt.sendInput('\x18') // leader
   await vt.waitForRender()
   vt.sendInput('t')
   await vt.waitForRender()
-  assert.equal(tasksOpened, 0, 'a non-empty editor must not open tasks via the leader')
-  // Empty editor + tasks ACTIVE → opens (the predicate needs live tasks).
+  assert.equal(tasksOpened, 0, 'a non-last-visual-line editor must not open tasks via the leader')
+  // Cursor back to the last visual line → opens (the predicate holds).
   app.setDraft('')
-  app.setTasks([{ id: 'job-1', label: 'bash', status: 'running', kind: 'job' }])
   await vt.waitForRender()
   vt.sendInput('\x18')
   await vt.waitForRender()
@@ -622,11 +640,16 @@ test('4.6c a leader-only action actually fires its completion', async () => {
 test('4.3b a conditional high-priority rule does not shadow a lower rule when its predicate is false', () => {
   const manager = new HostKeybindingManager()
   manager.setUserConfiguration(parseUserKeybindings({ 'app.tasks.open': 'ctrl+s' }))
-  // tasks.open (user, 200) inherits the empty-editor+tasks predicate;
-  // steer (builtin, 100) is on ctrl+s. When the tasks predicate is false
-  // (editor non-empty / no tasks), Ctrl+S must still STEER.
-  const contextWithTasks = deriveKeybindingContext({ focusedSeat: 'editor', editorEmpty: true, tasksActive: true })
-  const contextNoTasks = deriveKeybindingContext({ focusedSeat: 'editor', editorEmpty: false, tasksActive: false })
+  // tasks.open (user, 200) inherits the B4-B admission predicate
+  // (quickDownEligible + prompt + tasks); steer (builtin, 100) is on ctrl+s.
+  // When the tasks predicate is false (not admission-eligible / no tasks),
+  // Ctrl+S must still STEER.
+  const contextWithTasks = deriveKeybindingContext({
+    focusedSeat: 'editor', editorPromptMode: true, tasksActive: true, quickDownEligible: true,
+  })
+  const contextNoTasks = deriveKeybindingContext({
+    focusedSeat: 'editor', editorPromptMode: true, tasksActive: false, quickDownEligible: false,
+  })
   assert.equal(manager.resolve('\x13', contextWithTasks)?.action, 'app.tasks.open', 'predicate holds → tasks')
   assert.equal(manager.resolve('\x13', contextNoTasks)?.action, 'app.input.steer',
     'predicate false → the shadowed lower rule fires (context-aware shadow)')
@@ -672,7 +695,13 @@ test('4.11b legacy terminal collisions are rejected bindings', () => {
 test('5.4 stop() cancels a pending leader sequence', async () => {
   const vt = new VirtualTerminal(80, 24)
   let tasksOpened = 0
-  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {}, onOpenTasks: () => { tasksOpened += 1 } })
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  const realEntry5 = app.enterTaskQuick.bind(app)
+  app.enterTaskQuick = () => {
+    const entered = realEntry5.call(app)
+    if (entered) tasksOpened += 1
+    return entered
+  }
   app.start()
   startedApps.add(app)
   app.keybindingsManager().setUserConfiguration(parseUserKeybindings({
@@ -825,8 +854,21 @@ test('5.11 a reserved key ALIAS (esc/return) is rejected at registration', async
   ), /reserved by the host/, 'return is the reserved enter and must be rejected')
 })
 
-test('5.12 canonical named keys still display as PageUp/PageDown', async () => {
-  const { formatKeyId, formatKeyList } = await import('../src/tui/keybindings/hints.ts')
+test('5.12b an Action Bar hint lowercases a bare letter and keeps the list spacing', async () => {
+  const { formatHintKeys, formatKeyList } = await import('../src/tui/keybindings/hints.ts')
+  // The Stop hint is a key LIST: a bare letter is lowercase in prose (design
+  // language §4.1), a modified chord keeps its capital, and the list keeps its
+  // OWN ` / ` separator spacing. A formatter that re-joined the parts painted
+  // `s/Shift+S`, which no longer matches the list formatter's shape (and the
+  // same bar paints `Ctrl+F / Ctrl+Shift+F` with spaces).
+  assert.equal(formatKeyList(['s', 'shift+s'] as never), 'S / Shift+S')
+  assert.equal(formatHintKeys(formatKeyList(['s', 'shift+s'] as never)), 's / Shift+S')
+  assert.equal(formatHintKeys('s'), 's')
+  assert.equal(formatHintKeys('Shift+Tab'), 'Shift+Tab')
+  assert.equal(formatHintKeys('Ctrl+F / Ctrl+Shift+F'), 'Ctrl+F / Ctrl+Shift+F')
+})
+
+test('5.12 canonical named keys still display as PageUp/PageDown', async () => {  const { formatKeyId, formatKeyList } = await import('../src/tui/keybindings/hints.ts')
   const { canonicalizeKeyId } = await import('../src/tui/keybindings/key-identity.ts')
   assert.equal(canonicalizeKeyId('pageUp' as never), 'pageup')
   assert.equal(canonicalizeKeyId('pageDown' as never), 'pagedown')

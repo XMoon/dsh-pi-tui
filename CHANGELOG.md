@@ -7,6 +7,166 @@
 
 ## [Unreleased]
 
+## [0.5.3] - 2026-10-20
+
+### 安装与版本对应
+
+本版把 DSH 最低版本提高到已发布的 `0.2.1-rc.2`，并以该版本作为精确验证目标。安装
+DSH 需要显式允许其原生安装脚本：
+
+```sh
+npm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty @deepseek-ai/dsh@0.2.1-rc.2
+dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@0.5.3
+dsh --profile pi-tui
+```
+
+`@deepseek-ai/dsh@0.2.1-rc.1` 没有对应的 TUI 版本。旧版本 DSH 的配对关系不变：
+`@deepseek-ai/dsh@0.2.0-rc.2` 使用 `@xmoon76/dsh-pi-tui@0.5.1` 或
+`@xmoon76/dsh-pi-tui@0.5.2-rc.1`；`@deepseek-ai/dsh@0.2.0-rc.1`（含 `0.1.7-rc.2`）使用
+`@xmoon76/dsh-pi-tui@0.5.0`，`@deepseek-ai/dsh@0.1.7-rc.1` 使用
+`@xmoon76/dsh-pi-tui@0.4.8`。
+
+### 新增
+
+- **插件管理统一到一个全屏页面。** `/plugins` 和 Settings 里的一级 `Plugins` 现在打开
+  同一个 Plugin Manager：按 TUI & Extensions / Official DSH / Third-party /
+  Experimental 分组，可以搜索、筛选，键盘和鼠标都能操作。14 个官方插件从真实的 DSH
+  目录读取：已安装的可以启用/停用，未安装的官方插件可以在确认后安装，页面上会显示
+  安装版本、等待批准的执行脚本和是否需要重启。
+- **实验性插件会明确写出它在终端里能做什么、不能做什么。** 每个官方实验插件都会写明
+  可用的界面和限制（有些只能在 Web UI 里用，有些只能通过现有的工具/任务/活动/
+  `/skill`/标题界面使用），不会因为启用就变成“Host 已支持”。升级方式也按实际情况
+  说明：跟随 DSH 升级、先移除再从 profile 安装，或交给外部管理；不提供原地更新，
+  也不会悄悄重装。
+- **`/model` 可以直接选到 DSH 0.2.1-rc.2 提供的 `deepseek-flash`。** 候选只来自 DSH
+  的模型目录，按精确的 `(provider, model)` 身份搜索和提交，显示名不会被当成 ID。
+- **Session 换工作目录后，界面会跟着新目录走。** Footer、历史、`!` Shell、`@` 补全、
+  Skill 目录和命令执行都读取切换后实际生效的目录；会话列表、归档和新会话仍按原始
+  项目目录归类。
+- **新增 `/settings → Other → Web Search / Fetch` 入口。** 沿用现有的设置编辑器，
+  可以在这里选择两套 DeepSeek API、查看 API key 的来源并编辑 endpoint。保存结果以
+  Host 实际读回的值为准，只有写入和读回一致才显示 `Verified`。默认的 Messages/HTTP
+  不会调用收费 API；`Share Original Question` 只发送最多 128 字符的触发问题（不含
+  完整历史或系统提示词），endpoint 必须是可信的 HTTPS。
+- **Task Center 会显示外部 provider 执行的任务。** 这类任务没有本地子会话，会单独
+  显示为一行并标注 `External · no local session`；选中时会说明原因，不会打开不存在
+  的详情页，也不会显示 Stop/Continue。本地子会话的显示不变。
+
+### 变更
+
+- **需要 DeepSeek Harness `0.2.1-rc.2`，不再支持 `0.2.1-rc.1`。** 旧版本 DSH 的配对
+  关系不变（见上面的安装说明）；从更旧的 DSH 升级时，请按上面的配对选择 TUI 版本。
+- **Settings 的 Plugins 页新增 `Open Plugin Manager`。** 宽屏和中屏可以在 Rows 栏
+  直接点这一行，或用 Enter、Right 打开；窄屏仍然一步就能打开。
+- **停用或移除 Auto Review 前会先确认风险。** 确认页会说明这可能把现有的 Auto 会话
+  变成 Full access，且 Auto Review 不是沙箱；默认选择 Cancel，确认之前不会改动 Host。
+
+- **`time-context` 等 Snapshot 注入不再把同一回合的 Activity/Thought 切成多块。**
+  Compact 里随 Activity 折叠，Focus 里随 Thought 隐藏、展开后按原顺序恢复，Full 保持
+  原样；同一回合的后台任务完成通知也会一起折叠，空闲时的唤醒和其他 Context 仍然
+  单独显示。
+
+### 修复
+
+- **Plugin Manager 在正文没有可显示行时不再显示假的 `Enter` 提示。** 例如 80×2 这种
+  窗口：操作栏不再提示 `Enter`，也不能用 Enter/Right 打开看不见的卡片详情；`Esc`
+  仍然可用，搜索编辑里 `Enter apply` 确实会执行，所以仍会提示。
+
+- **选择 B03 Auto 权限预设后，Footer 会继续显示当前权限。** 之前 Auto 不在内置的
+  权限标签里，切过去后整个权限徽标都会消失；现在显示 `[auto]`（compact/plain 格式
+  也一样）。
+
+- **发出去的消息会带上运行 TUI 的进程时区。** 官方 `time-context` 不再显示
+  `Browser time zone ... unavailable`：Direct 主会话和可续聊的子 Agent 在发送时读取
+  时区并写入请求，Remote 主会话仍由官方 `SessionFace` 读取；读不到可用时区时，消息会
+  在发出前被拒绝并恢复草稿，不会伪造时区。
+
+- **Host、模型和工具返回的文本会在显示到终端前统一过滤。** 单行文字和多行正文分别
+  处理，夹带的终端控制序列和换行不会再拆行、凭空多出一行；Job 输出仍保留允许的颜色
+  样式，原始记录、搜索和复制仍然使用原文。
+
+- **全屏下用鼠标点击编辑器区域后，Task Quick 的 `↓` 入口与其 `↓ view` 提示不再失效**，
+  编辑器的导航键优先权、历史面板的按键归属与面板焦点状态也保持一致。
+
+- **工具结果的多行预览只在确实有内容被隐藏时显示 `…`。** 以前结尾的换行会被当成多了
+  一条记录，误显示 `…`；按条数上限丢掉内容时，反而可能不显示。
+
+## [0.5.2-rc.1] - 2026-10-17
+
+### 安装与版本对应
+
+本预览版与 `0.5.1` 使用同一已发布 DSH 基线：peer floor 为 `>=0.2.0-rc.2`，精确验证目标为
+`0.2.0-rc.2`。安装 DSH 需要显式允许其原生安装脚本：
+
+```sh
+npm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty @deepseek-ai/dsh@0.2.0-rc.2
+dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@0.5.2-rc.1
+dsh --profile pi-tui
+```
+
+旧 runtime 的配对不变：`@deepseek-ai/dsh@0.2.0-rc.1`（含 `0.1.7-rc.2`）使用
+`@xmoon76/dsh-pi-tui@0.5.0`，`@deepseek-ai/dsh@0.1.7-rc.1` 使用
+`@xmoon76/dsh-pi-tui@0.4.8`。
+
+### 新增
+
+- **Task Quick 改为按需窗口。** 有任务时默认不占行，只在编辑器最后一个可视行按 `↓` 展开到
+  Footer 之下；`↑↓`/`PgUp`/`PgDn` 选择，`Enter` 打开既有详情，`↑`/`Esc` 返回编辑器并保留
+  草稿。列表末尾的 `➜ Open Task Center…` 行进入完整任务中心且不计入任务数；旧的模态 Quick
+  已退役。
+
+- **`Ctrl+R` 历史搜索接管底部编辑席位。** 席位包含查询、结果与可独立滚动的 Preview；
+  `Enter` 把原文写回编辑器且不自动发送，`Alt+C` 复制。切换会话时旧席位立即关闭，其操作与
+  异步搜索结果都不会落到新会话。
+
+- **`/settings` 成为全屏工作区，`Configured theme` 与 `Transcript display` 可直接写入。**
+  三栏 / 两栏 / 单栏是同一套 `分类 → 设置行 → 详情` 投影（`Right`/`Enter` 前进一层，
+  `Left`/`Esc` 返回一层），`R` 重读、`C` 复制原始值；写入沿既有串行路径落盘并从权威来源
+  核对，失败时如实显示 `Not saved` 或 `Outcome unknown`。
+
+- **Job 详情成为独立的全屏工作区。** 显示 Job 身份、状态与 `[GAP]`/`[ERROR]`/`[SETTLED]`，
+  `Tab` 在 `Output` / `Command` 两页切换；输出可滚动、可查找、默认跟随最新（手动浏览即暂停，
+  `End` 恢复），Command 页显示未经改写的原始命令并可复制。不消耗 `job_output` 游标，也不
+  写入会话历史。
+
+- **Footer 性能项新增「全 Session 速率」**，数值改由 TUI 自有的 Host 投影提供：Direct 与
+  Remote 同源，重连与分页不再影响数值，无合格样本时省略而不是显示 `0 tok/s`。
+
+### 变更
+
+- **`/fork` 真正切换到新子会话后会给出一次明确提示。** 只有子会话确实被采用、且该次导航
+  仍然有效时才显示 `Forked to a new session`；Fork 失败、子会话只被 park 或被更新的导航
+  取代时不提示，`/rewind`、`/new`、`/resume` 的既有反馈不变。
+
+- **选择器与状态标记统一到同一套视觉词汇**：覆盖层使用 `primary` 游标与 `Esc` 置尾的提示行，
+  `/settings` 与 `/preset` 的当前值改为 `[current]` / `[default]` chip。
+
+- **长用户消息的 `▴ Collapse` 尾部行移除**，改为单击正文任意位置收起。
+
+- **无粘贴标记的终端中，多行粘贴改为在第一个 Enter 提交**；支持粘贴标记的终端行为不变。
+
+### 修复
+
+- 新建或切换 Session 后，同名 Skill 命令、未确认提交的草稿与 `↑` 历史都不再丢失。
+
+- Footer 的 `↓ view` 提示始终与真实可进入状态一致：模态占用输入、显式禁用或改键时不显示，
+  历史浏览返回或 Todo 折叠改变 Task Quick 空间时随之恢复。
+
+- 查看子会话时 `working` 行不再泄漏主会话事实，全屏下 `‹ back` 可点击返回。
+
+- 全屏下插件 `input.widget` 两行不再消失，零行授权成为合法的空投影。
+
+- 嵌套的 `/settings → Keyboard shortcuts` 子页不再占满整屏；独立 `/keybindings` 不变。
+
+- 实时与冷启动的转录分组收敛，冷启动恢复出的 Work 成员与读取分组与实时一致。
+
+- workflow 卡片只在官方终态事件结算，运行中的 workflow 不再显示为 `[interrupted]`。
+
+- Task Browser 的 Host 标签在终端边界投影，夹带的 ANSI/OSC/CSI 不再送到终端。
+
+> **已知限制：** OSC 7 窗格工作目录与 OSC 9;4 的「等待输入」细化当前只在识别为 Tern 的
+> 终端启用。
+
 ## [0.5.1] - 2026-10-08
 
 ### 安装与版本对应
@@ -1344,7 +1504,9 @@ dsh --profile pi-tui
 - 全屏布局、Ctrl+F 搜索、主题系统。
 - 单包发布模型。
 
-[Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/v0.5.1...HEAD
+[Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/v0.5.3...HEAD
+[0.5.3]: https://github.com/XMoon/dsh-pi-tui/compare/next-v0.5.2-rc.1...v0.5.3
+[0.5.2-rc.1]: https://github.com/XMoon/dsh-pi-tui/compare/v0.5.1...next-v0.5.2-rc.1
 [0.5.1]: https://github.com/XMoon/dsh-pi-tui/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/XMoon/dsh-pi-tui/compare/v0.4.9...v0.5.0
 [0.4.9]: https://github.com/XMoon/dsh-pi-tui/compare/v0.4.8...v0.4.9

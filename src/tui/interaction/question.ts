@@ -12,6 +12,8 @@
  */
 
 import { decodeKittyPrintable, getKeybindings, Input, matchesKey, type KeyId, type Keybinding } from '@xmoon76/pi-tui'
+import { sanitizedPhysicalLine } from '../presentation/lines.ts'
+import { sanitizeDisplayText } from '../presentation/terminal-text.ts'
 import type { Component, Focusable } from '@xmoon76/pi-tui'
 import { getGraphemeSegmenter, visibleWidth, wrapTextWithAnsi } from '@xmoon76/pi-tui'
 import { Frame } from '../components/frame.ts'
@@ -767,7 +769,7 @@ export class QuestionFlow implements Component, Focusable {
       lines,
       `${color.primary('?')}  `,
       '    ',
-      color.textStrong(question.question),
+      color.textStrong(sanitizeDisplayText(question.question)),
       width,
       left,
     )
@@ -780,7 +782,7 @@ export class QuestionFlow implements Component, Focusable {
           appendWrappedBudgeted(lines, '   ', '   ', color.textDim('... more content hidden'), width, left)
           break
         }
-        left = appendWrappedBudgeted(lines, '   ', '   ', color.textDim(line), width, left)
+        left = appendWrappedBudgeted(lines, '   ', '   ', color.textDim(sanitizeDisplayText(line)), width, left)
       }
     }
     hits.push(...new Array(lines.length - hits.length).fill(undefined))
@@ -805,9 +807,11 @@ export class QuestionFlow implements Component, Focusable {
       // masked for secrets). Only a blank draft keeps "Type something.".
       // (The row's badge stays empty there — rows() builds the OTHER row
       // with recommended: false — so the saved answer renders bare.)
-      const rowLabel = row.key === OTHER_ROW && !this.editingOther && customAnswer
+      // The option label (or a saved custom answer) is external text: project
+      // it BEFORE the cursor's themed paint.
+      const rowLabel = sanitizeDisplayText(row.key === OTHER_ROW && !this.editingOther && customAnswer
         ? this.presentCustom(question, draft)
-        : row.label
+        : row.label)
       const label = isCursor ? color.textStrong(rowLabel) : rowLabel
       // The free-text row swaps its label for the live Input while editing.
       // An EMPTY input renders only a subtle fake cursor — show the row's
@@ -826,7 +830,7 @@ export class QuestionFlow implements Component, Focusable {
           hits.push(OTHER_ROW)
           continue
         }
-        lines.push(prefix + (this.otherInput.getValue() === '' ? color.textDim(row.label) : inputLine))
+        lines.push(prefix + (this.otherInput.getValue() === '' ? color.textDim(sanitizedPhysicalLine(row.label)) : inputLine))
         hits.push(OTHER_ROW)
         continue
       }
@@ -836,7 +840,7 @@ export class QuestionFlow implements Component, Focusable {
       }
       if (row.description !== undefined && row.description !== '' && !(row.key === OTHER_ROW && this.editingOther)) {
         const descWidth = Math.max(1, width - visibleWidth(indent))
-        for (const wrapped of wrapTextWithAnsi(color.textDim(row.description), descWidth)) {
+        for (const wrapped of wrapTextWithAnsi(color.textDim(sanitizeDisplayText(row.description)), descWidth)) {
           if (!this.pushPageRow(lines, hits, indent + wrapped, row.key)) return { lines, hits }
         }
       }
@@ -1452,7 +1456,7 @@ export class QuestionFlow implements Component, Focusable {
     // math below accounts for it. It never renders without room.
     const statusText = this.status?.text
     if (statusText !== undefined && this.budget > MIN_SUPPORTED_BUDGET + 1) {
-      appendWrappedBudgeted(lines, '', '', color.textDim(statusText), safeWidth, 1)
+      appendWrappedBudgeted(lines, '', '', color.textDim(sanitizeDisplayText(statusText)), safeWidth, 1)
     }
     lines.push(tabs.join('  '))
     lines.push('')
@@ -1496,7 +1500,7 @@ export class QuestionFlow implements Component, Focusable {
           lines,
           `${color.textDim(`Q${qi + 1}`)}  `,
           '       ',
-          question.question,
+          sanitizeDisplayText(question.question),
           safeWidth,
           reviewBudget,
         )
@@ -1505,7 +1509,7 @@ export class QuestionFlow implements Component, Focusable {
             lines,
             '  ',
             '    ',
-            value === '' ? color.textDim('(no answer)') : value,
+            value === '' ? color.textDim('(no answer)') : sanitizeDisplayText(value),
             safeWidth,
             reviewBudget,
           )
@@ -1535,7 +1539,7 @@ export class QuestionFlow implements Component, Focusable {
     // gets at least one row (the required-first guarantee below).
     const headerShown = header !== undefined && header !== '' && this.budget - lines.length - tail >= 2
     if (headerShown) {
-      lines.push(color.textDim(header))
+      lines.push(color.textDim(sanitizedPhysicalLine(header)))
     }
     // UNIFIED SCROLLPORT: the whole page — question, detail, then every
     // option with its description, then the free-text row — is ONE region.

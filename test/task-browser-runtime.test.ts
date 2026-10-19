@@ -533,7 +533,8 @@ test('a session switch closes the open task browser, CLEARS the badge synchronou
   const bump = presentationSource.slice(bumpStart, bumpEnd)
   assert.ok(bump.includes('surface.resetTasks()'), 'the session bump must reset the surface-owned Task Center')
   const reset = taskSource.slice(taskSource.indexOf('resetTasks() {'))
-  assert.ok(reset.includes('activeTaskBrowser?.close()'), 'the session bump must close the open browser')
+  assert.ok(reset.includes('const browserHandle = activeTaskBrowser'), 'the session bump must capture the open browser')
+  assert.ok(reset.includes('browserHandle?.close()'), 'the session bump must close the open browser')
   assert.ok(reset.includes('taskRuntime?.reset()'), 'the session bump must drop the cached catalog')
   // PR review P2: the OLD session's running badge must not hang on the
   // footer until the new session's async listing lands (a failed listing
@@ -612,16 +613,13 @@ test('Task Center dispatch re-validates session, driver and job state at confirm
     'a subagent stop must not call ctx.subagents directly')
 })
 
-test('Esc from a promoted full view returns to Quick ONLY for the quick-opener stack (review round)', () => {
+test('the modal Quick promotion/restore tail is retired (Phase 3B/B4-B)', () => {
   const marker = 'const openTasksBrowser = ('
   const open = taskSource.slice(taskSource.indexOf(marker), taskSource.indexOf('const handleWorkflowAction'))
-  const cancelBlock = open.slice(open.indexOf("() => {"), open.indexOf('},', open.indexOf('() => {')) + 3)
-  assert.ok(cancelBlock.includes("viewMode === 'full' && restoreState !== undefined"),
-    'Esc must reopen Quick only when the full view was promoted from Quick')
-  assert.ok(cancelBlock.includes("openTasksBrowser('quick', state)"),
-    'the Esc path must restore the shared context into Quick')
-  assert.ok(cancelBlock.includes('quickTaskState'),
-    'Quick state must be carried across the promote/demote round-trip')
+  assert.ok(!open.includes("openTasksBrowser('quick'"),
+    'no production path may reopen the retired quick modal')
+  assert.ok(!open.includes('quickTaskState'),
+    'the Quick→Full→Quick state carrier is retired with the modal')
 })
 
 test('the Task Center surface never calls the consuming jobs read API (review round)', () => {
@@ -733,6 +731,36 @@ test('PR2 scope: a subagents scope commits EXACTLY the scope child ids, jobs exc
   assert.ok(!rows.some(row => row.kind === 'job'), 'jobs must never leak into a subagents scope')
 })
 
+// IDENTITY GUARD (not producer evidence): today's official producers never make
+// one id both a Workflow member and a Task Browser external catalog row (the
+// Workflow runtime uses caller delivery, which writes no catalog row), but a
+// scope whose ids match a NON-JOB row must never drop that row silently.
+test('PR2 scope: a non-job row named by the scope stays visible (identity guard, RFL-008)', async () => {
+  const h = makeHarness()
+  h.setJobs([])
+  const listing = h.runtime.refreshCatalog()
+  h.settleListing(0, [
+    child({ id: 'child-local' as SessionId, label: 'local work', mode: 'continuable', depth: 1 }),
+    // The official catalog v2 external execution: a direct child IDENTITY with
+    // no local Session. The Workflow runtime can name it as a member, so the
+    // scope MUST keep it (identity, not row kind).
+    child({ id: 'child-external' as SessionId, label: 'external work', mode: 'external', depth: 1 }),
+  ])
+  await listing
+  h.setJobs([job({ id: 'job-y', label: 'unrelated job' })])
+  h.runtime.setScope({ kind: 'subagents', childIds: ['child-external'] })
+  const rows = h.commits().at(-1)!
+  assert.deepEqual(rowValue(rows), ['agent:child-external'],
+    `a scope that names the external child keeps its row:\n${JSON.stringify(rows)}`)
+  const external = rows.find(row => row.kind === 'external')
+  assert.ok(external !== undefined, 'the external row kind is preserved inside the scope')
+  assert.equal(external.mode, 'external', 'the durable external classification survives the scope')
+  assert.equal(external.hasChildren, false, 'an external execution has no local child tree')
+  // The open/stop NEGATIVES are panel/selection facts and are asserted on the
+  // real surface in `test/task-center-external-leaf.test.ts`.
+  assert.ok(!rows.some(row => row.kind === 'job'), 'jobs must never leak into a subagents scope')
+})
+
 test('PR2 scope: a live refresh keeps the scope (never a global leak)', async () => {
   const h = makeHarness()
   h.setJobs([])
@@ -821,7 +849,7 @@ test('PR2 review: the surface wires onWorkflowAction through the single authorit
     'the member open path must use the single authority resolver')
   assert.ok(!handler.replace(/\/\/.*$/gm, '').includes("row.depth !== 1"),
     'the surface must not re-implement the authority conditions')
-  assert.ok(handler.includes("openTasksBrowser('full', undefined, { kind: 'subagents', childIds: action.childIds }"),
+  assert.ok(handler.includes("openTasksBrowser('full', { kind: 'subagents', childIds: action.childIds }"),
     'the scoped-agent actions must open the existing Task Browser with the exact child-id scope')
 })
 
@@ -835,15 +863,18 @@ test('PR2 review: every task-browser close path resets the dataset scope', () =>
     'the selection close path must reset the dataset scope')
   assert.ok(selectBlock.includes('activeTaskBrowserToken = undefined'),
     'the selection close path must invalidate delayed actions')
-  const cancelBlock = open.slice(open.indexOf('() => {'), open.indexOf('},', open.indexOf('() => {')) + 3)
+  const cancelMarker = '() => {'
+  const cancelBlock = open.slice(open.indexOf(cancelMarker), open.indexOf('},', open.indexOf(cancelMarker)) + 3)
   assert.ok(cancelBlock.includes('resetTaskBrowserScope()'),
     'the Esc close path must reset the dataset scope')
   assert.ok(cancelBlock.includes('activeTaskBrowserToken = undefined'),
     'the Esc close path must invalidate delayed actions')
-  // The Quick→Full transition must NOT reset the scope (it preserves it).
-  const viewFullBlock = open.slice(open.indexOf('onViewFull:'), open.indexOf('onStop:'))
-  assert.ok(!viewFullBlock.includes('resetTaskBrowserScope'),
-    'the Quick→Full promotion must preserve the dataset scope')
+  // B4-B: the modal Quick and its Quick→Full promotion are retired — no
+  // promotion callback/option survives in the production source.
+  assert.ok(!open.includes('onViewFull'),
+    'the retired promotion callback must not reappear in the open path')
+  assert.ok(!open.includes('restoreState'),
+    'the retired Quick→Full restore input must not reappear in the open path')
 })
 
 test('PR2 review: a scoped viewer never re-arms acknowledged global failures (review P2)', async () => {

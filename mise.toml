@@ -1,0 +1,8 @@
+# node matches CI; pnpm is read from package.json's packageManager field.
+# The ambient pin is what dev-doctor/dev-bootstrap compare, because they disable
+# pnpm's own version switching.
+[tools]
+node = "24"
+
+[settings]
+idiomatic_version_file_enable_tools = ["pnpm"]

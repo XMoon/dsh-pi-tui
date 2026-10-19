@@ -52,6 +52,13 @@ export interface SurfaceTeardownOwner {
   disposeJobObservation(): void
   disposeTaskBrowser(): void
   dispose(): void
+  /**
+   * PR3-A: the ONE renderer-release promise (settles with the terminal
+   * restored). `disposeSurface()` returns it so the exit/fatal/fiber
+   * orchestrations can AWAIT the release before writing the resume hint,
+   * exiting or starting the next renderer.
+   */
+  whenRendererReleased(): Promise<void>
 }
 
 /**
@@ -83,12 +90,26 @@ export interface SurfaceLifecycleDeps {
   readonly disposeSelectedTransport: () => Promise<void>
   /** The Cordis fiber-effect registration (`ctx.effect`); the effect body stays here. */
   readonly registerDisposal: (dispose: () => unknown) => void
+  /**
+   * PR3-A: the ACQUISITION-stage tty lifetime — settles at the application
+   * ownership transfer, or after a renderer acquired mid-flight has been
+   * released when the runner was disposed during the SDK handshake. The
+   * teardown transaction AWAITS it, so a quit arriving before the handoff can
+   * never print the resume hint or request `appExit` while the connected
+   * renderer still owns the terminal.
+   */
+  readonly whenRendererAcquired: () => Promise<void>
 }
 
 /** The surface/fiber lifecycle of one composition instance. */
 export interface SurfaceLifecycle {
-  /** The ONE idempotent client-surface teardown (frozen §12 order). */
-  disposeSurface(): void
+  /**
+   * The ONE idempotent client-surface teardown (frozen §12 order). Every
+   * caller — the one that runs the ordered batch and a synchronous re-entrant
+   * one (R3-1) — awaits the SAME transaction: the renderer release followed by
+   * the batch failure, which the caller surfaces before hint/exit/retirement.
+   */
+  disposeSurface(): Promise<void> | void
   /** Register the fiber disposer: surface teardown, retirement, transport. */
   registerRunnerDisposal(): void
 }
@@ -115,6 +136,7 @@ export function createSurfaceLifecycle(deps: SurfaceLifecycleDeps): SurfaceLifec
     retireOwnedSession,
     disposeSelectedTransport,
     registerDisposal,
+    whenRendererAcquired,
   } = deps
 
   // Idempotent CLIENT-SURFACE teardown: abort lifecycle loads, stop the
@@ -122,9 +144,35 @@ export function createSurfaceLifecycle(deps: SurfaceLifecycleDeps): SurfaceLifec
   // path. The Direct owned-session retirement is a SEPARATE step
   // (retireOwnedSession below) that runs after the surface stops — diag
   // stays open until the retirement diagnostics are recorded.
-  const disposeSurface = (): void => {
-    if (isCleanedUp()) return
+  /**
+   * The release promise of the FIRST teardown, kept so an idempotent SECOND
+   * cleanup (a second fiber disposer, a late fatal) still AWAITS the same
+   * renderer release instead of racing ahead to retirement/transport.
+   *
+   * R3-1: this slot holds the COMPLETE teardown transaction and is published
+   * BEFORE the ordered batch runs, so it is settled with the renderer release
+   * AND the batch failure that follows it.
+   */
+  let disposeRelease: Promise<void> | undefined
+  const disposeSurface = (): Promise<void> | void => {
+    // Already torn down: hand back the SAME transaction (never `void` — a
+    // second caller must still await the tty restore and the batch failure).
+    if (isCleanedUp()) return disposeRelease
     markCleanedUp()
+    // R3-1: publish the shared transaction BEFORE any step of the ordered batch
+    // runs. The batch can synchronously RE-ENTER this entry — `abortLifecycle`
+    // below runs the real `AbortController.abort()`, whose listeners include the
+    // exit path (`requestExit` -> `cleanup` -> this function). Assigning the slot
+    // after the batch would hand that re-entrant caller the surface's
+    // not-yet-started release (an already-resolved promise), so the hint and
+    // `appExit` would run while the renderer STILL owns the tty. Every caller now
+    // awaits ONE promise and observes the same complete outcome.
+    let settleRelease!: () => void
+    let failRelease!: (error: unknown) => void
+    disposeRelease = new Promise<void>((resolve, reject) => {
+      settleRelease = resolve
+      failRelease = reject
+    })
     // Fence the completion-notification controller (surface-owned, A4-4):
     // after teardown a late `agent/status` idle from the old live agent must
     // never emit a notification into a dead surface (the identity fence drops
@@ -140,6 +188,9 @@ export function createSurfaceLifecycle(deps: SurfaceLifecycleDeps): SurfaceLifec
     // M3-6 PR3: ONE ordered non-truncating batch. A throwing sibling cleanup
     // must never skip a later surface owner, the Session retirement or the
     // selected transport disposal (the plan's frozen top-level order).
+    let batchFailed = false
+    let batchFailure: unknown
+    try {
     runSyncDisposalSteps('surface disposal', [
       () => surface.retireCompletionOwner(),
       // Disable terminal focus reporting FIRST among the THROWABLE steps —
@@ -194,9 +245,41 @@ export function createSurfaceLifecycle(deps: SurfaceLifecycleDeps): SurfaceLifec
       // still owns.
       () => surface.dispose(),
     ])
+    } catch (error) {
+      // runSyncDisposalSteps already attempted EVERY sibling in the frozen
+      // order; keep its aggregated failure to surface AFTER the release.
+      // The PRESENCE of a failure is tracked SEPARATELY from its value: a
+      // disposer may legally `throw undefined`, and the value alone cannot
+      // distinguish that from "nothing failed".
+      batchFailed = true
+      batchFailure = error
+    }
     // NOTE: diag.dispose() is NOT here — the Direct owned-session
     // retirement (retireOwnedSession) records its diagnostics first and
     // closes diag last (see below).
+    // PR3-A: the ONE tty-release transaction — the SDK renderer's release
+    // (immediate on PiTui) AND the acquisition stage, which settles at the
+    // ownership transfer or after a renderer acquired mid-flight has been
+    // released on cancellation. Captured on EVERY path — including a throwing
+    // sibling — so the exit/fatal/fiber callers always await the tty restore
+    // before the hint/`appExit`/retirement; the aggregated sync failure is then
+    // rethrown to their non-truncating recorder (awaited first, never dropped,
+    // never truncated).
+    const release = Promise.all([
+      surface.whenRendererReleased(),
+      whenRendererAcquired(),
+    ]).then(() => undefined)
+    const composed = !batchFailed
+      ? release
+      : release.then(
+        () => { throw batchFailure },
+        releaseError => { throw new AggregateError([batchFailure, releaseError], 'surface disposal') },
+      )
+    // Publish the COMPLETE outcome (release + batch failure) to every caller of
+    // this teardown — the first one included, which is why the slot is returned
+    // rather than the private `composed` intermediate.
+    void composed.then(settleRelease, failRelease) // allowlist: the published transaction IS this outcome — every caller awaits it, so its rejection is delivered, never dropped
+    return disposeRelease
   }
 
   // Stop the TUI when this fiber is disposed (a loader hot-reload unloads
@@ -210,15 +293,34 @@ export function createSurfaceLifecycle(deps: SurfaceLifecycleDeps): SurfaceLifec
   // always returned.
   const registerRunnerDisposal = (): void => {
     registerDisposal(() => {
-      try {
-        disposeSurface()
-      } catch (error) {
+      // PR3-A: the surface teardown returns its renderer-release promise (a
+      // no-op resolution on PiTui). Await it BEFORE the session retirement so
+      // an HMR unload can never start the next renderer while the old SDK
+      // still owns stdin; a release failure is recorded and never skips the
+      // retirement.
+      const released = (() => {
         try {
+          return disposeSurface()
+        } catch (error) {
+          try {
+            diag.error('surface dispose failed', { error: safeErrorMessage(error) })
+          } catch {
+            // No lower sink.
+          }
+          return undefined
+        }
+      })()
+      const releaseSettled = Promise.resolve(released).catch(error => {
+        try {
+          // The teardown transaction rejects with the batch failure and/or the
+          // renderer release failure: ONE honest label covers both (the exact
+          // error text stays in the field, and the terminal-total fatal path
+          // records the same failure under the same message).
           diag.error('surface dispose failed', { error: safeErrorMessage(error) })
         } catch {
           // No lower sink.
         }
-      }
+      })
       // M3-4 PR1 teardown order: the session retirement SETTLES first,
       // then the selected runtime's transport disposer runs and is
       // AWAITED (a no-op on Direct today) — the fiber unload observes the
@@ -226,7 +328,7 @@ export function createSurfaceLifecycle(deps: SurfaceLifecycleDeps): SurfaceLifec
       // unloading fiber or race it. The retirement's settlement is the
       // returned outcome; a disposal failure is recorded, never swapped
       // in front of a retirement failure.
-      return retireOwnedSession()
+      return releaseSettled.then(() => retireOwnedSession())
         .then(
           report => disposeSelectedTransport()
             .catch(error => { diag.warn('selected transport disposal failed', { error: safeErrorMessage(error) }) })
@@ -318,7 +420,7 @@ export function createFatalLifecycle(deps: FatalLifecycleDeps): FatalLifecycle {
       // The cordis logger must not block the teardown.
     }
     try {
-      diag.error('fatal', { error: message })
+      diag.error('fatal', { error: message, ...(error instanceof Error && error.stack ? { stack: error.stack } : {}) })
     } catch {
       // A throwing diagnostics channel must not block the teardown.
     }
@@ -335,8 +437,12 @@ export function createFatalLifecycle(deps: FatalLifecycleDeps): FatalLifecycle {
     // assume a mounted surface.
     const cleanup = surfaceCleanup()
     if (cleanup !== undefined) {
+      // PR3-A: AWAIT the renderer release (a no-op on PiTui; the SDK tty
+      // restore on the TSP branch) BEFORE the retirement/exit below, so the
+      // fatal path never exits with the previous renderer still owning the
+      // terminal. A failure is recorded and never blocks the exit.
       try {
-        cleanup()
+        await cleanup()
       } catch (cleanupError) {
         // Cleanup errors are secondary diagnostics; they must never replace
         // the fatal root or block the retirement/exit below.

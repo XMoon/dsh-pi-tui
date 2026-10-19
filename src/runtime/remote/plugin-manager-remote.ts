@@ -51,6 +51,7 @@ import {
   pluginInstallRequestId,
   type PluginExemptionsValue,
 } from '../plugin-manager-mapping.ts'
+import { PluginManagerStaleResultError } from '../plugin-manager-port.ts'
 import type { RemoteResultLike } from './session-writer-remote.ts'
 import type { RemoteConnectionGenerationSource } from './session-reader-remote.ts'
 import { remoteFailureMessage } from './write-failure.ts'
@@ -122,24 +123,54 @@ export class RemotePluginManagerPort implements PluginManagerPort {
   }
 
   async inspect(spec: string, registry?: string | null, signal?: AbortSignal): Promise<PluginSpecInspectionFact> {
-    const result = await this.remote.pluginManager.inspect(
-      spec,
-      registry === undefined ? undefined : { registry },
-      signal,
-    )
-    return detachInspection(unwrapRemote(result, 'inspect'))
+    return detachInspection(await this.currentness(
+      'inspect',
+      () => this.remote.pluginManager.inspect(
+        spec,
+        registry === undefined ? undefined : { registry },
+        signal,
+      ),
+    ))
+  }
+
+  /**
+   * One Remote result (a read or a settlement) fenced to the Connection
+   * generation captured BEFORE dispatch. The fence covers success, an official
+   * refusal result and a transport rejection alike: a reply carried by a
+   * superseded generation is never presented as the new generation's definite
+   * outcome. The Host may already have applied a write (or advanced an
+   * install), so the caller's authoritative inventory reread / request-id
+   * reconcile decides the visible outcome. An unchanged generation preserves
+   * the original error and its real refusal taxonomy.
+   */
+  private async currentness<T>(operation: string, call: () => Promise<RemoteResultLike<T>>): Promise<T> {
+    const captured = this.generation.getSnapshot()
+    const stillCurrent = (): boolean => Object.is(captured, this.generation.getSnapshot())
+    let value: T
+    try {
+      value = unwrapRemote(await call(), operation)
+    } catch (error) {
+      // A refusal or a transport rejection is just as generation-bound as a
+      // success: a stale failure must never be presented as the new
+      // generation's definite outcome. Only an UNCHANGED generation preserves
+      // the original error (and its real refusal taxonomy).
+      if (!stillCurrent()) throw new PluginManagerStaleResultError(operation)
+      throw error
+    }
+    if (!stillCurrent()) throw new PluginManagerStaleResultError(operation)
+    return value
   }
 
   async setBundleEnabled(name: string, enabled: boolean): Promise<PluginChangeFact> {
-    return detachChange(unwrapRemote(await this.remote.pluginManager.setBundleEnabled(name, enabled), 'setBundleEnabled'))
+    return detachChange(await this.currentness('setBundleEnabled', () => this.remote.pluginManager.setBundleEnabled(name, enabled)))
   }
 
   async setPluginEnabled(id: string, enabled: boolean): Promise<PluginChangeFact> {
-    return detachChange(unwrapRemote(await this.remote.pluginManager.setPluginEnabled(id, enabled), 'setPluginEnabled'))
+    return detachChange(await this.currentness('setPluginEnabled', () => this.remote.pluginManager.setPluginEnabled(id, enabled)))
   }
 
   async removeBundle(name: string): Promise<PluginChangeFact> {
-    return detachChange(unwrapRemote(await this.remote.pluginManager.removeBundle(name), 'removeBundle'))
+    return detachChange(await this.currentness('removeBundle', () => this.remote.pluginManager.removeBundle(name)))
   }
 
   async startInstall(request: PluginInstallRequest): Promise<PluginChangeFact> {
@@ -147,22 +178,23 @@ export class RemotePluginManagerPort implements PluginManagerPort {
       requestId: pluginInstallRequestId(request.requestId),
       registry: request.registry,
       ...(request.enabled === undefined ? {} : { enabled: request.enabled }),
+      ...(request.approvedBuilds === undefined ? {} : { approvedBuilds: [...request.approvedBuilds] }),
     }
-    return detachChange(unwrapRemote(await this.remote.pluginManager.installBundle(request.spec, options), 'installBundle'))
+    return detachChange(await this.currentness('installBundle', () => this.remote.pluginManager.installBundle(request.spec, options)))
   }
 
   async waitForInstall(requestId: string): Promise<PluginChangeFact | null> {
-    const result = unwrapRemote(
-      await this.remote.pluginManager.waitForInstall(pluginInstallRequestId(requestId)),
+    const result = await this.currentness(
       'waitForInstall',
+      () => this.remote.pluginManager.waitForInstall(pluginInstallRequestId(requestId)),
     )
     return result === null ? null : detachChange(result)
   }
 
   async cancelInstall(requestId: string): Promise<PluginInstallCancellationFact> {
-    const result = unwrapRemote(
-      await this.remote.pluginManager.cancelInstall(pluginInstallRequestId(requestId)),
+    const result = await this.currentness(
       'cancelInstall',
+      () => this.remote.pluginManager.cancelInstall(pluginInstallRequestId(requestId)),
     )
     return Object.freeze({ status: result.status })
   }

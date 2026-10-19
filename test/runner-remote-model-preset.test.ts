@@ -162,15 +162,15 @@ test('L6 PR5 §3.4: the Remote /preset picker reads blankness + current from the
     const text = fixture.vt.getViewport().join('\n')
     return text.includes('m3-4-pr2-preset') && text.includes('m3-4-pr5-alt-preset')
   }, 15_000)
-  // The settings panel renders the row's description on its own wrapped
-  // line (the overlay is width-constrained): the selected row `›` and the
-  // `← current` marker land on ADJACENT lines of the same panel.
+  // The state chip lives in the row's own value slot (rollout PR5b moved it
+  // out of the selected row's description block): the selected row's `>` and
+  // the `[current]` chip are on the SAME line.
   const lines = fixture.vt.getViewport().join('\n').split('\n').map(line => line.replace(/\x1b\[[0-9;]*m/g, ''))
-  const selectedRow = lines.findIndex(line => line.includes('›') && line.includes('m3-4-pr2-preset'))
+  const selectedRow = lines.findIndex(line => line.includes('> ') && line.includes('m3-4-pr2-preset'))
   assert.ok(selectedRow !== -1, 'the recorded preset is the picker\'s selected row')
   const context = lines.slice(selectedRow, selectedRow + 4).join('\n')
-  assert.ok(context.includes('← current'),
-    'the projection-owned preset row carries the current marker')
+  assert.ok(context.includes('[current]'),
+    'the projection-owned preset row carries the current chip')
   assert.equal(fixture.override.presentation.sessionFacts.sessionStatus(mainId)?.preset, hostPreset,
     'the official agentPreset projection carries the recorded preset')
 })

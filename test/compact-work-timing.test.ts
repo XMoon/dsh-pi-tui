@@ -231,23 +231,64 @@ test('timing: overlapping evidence uses the wall span, never the summed duration
   assert.equal(summary.timing?.endedAt, T0 + 9_000, 'wall span 9s, not 4s + 7s = 11s')
 })
 
-test('timing: a running Tool shows a live duration that follows now', () => {
+test('timing: the ActivityClock live flag makes a running span read `now` at render', () => {
   const folder = fold([
     eventAt('turn/start', { turn: 1 }, T0, 0),
     toolCall(1, 'c1', 'bash', T0 + 1_000, 1),
   ])
   const span = spansOf(folder.messages())[0]!
   const summary = summarizeWorkSpan(span)
+  // The MEMBER fact stays what it is; the Activity LIFETIME (the clock TuiApp
+  // finalizes from the canonical structure + display subject) is what makes the
+  // card live.
   assert.equal(summary.timing?.running, true)
   let now = T0 + 4_000
-  const component = new CompactWorkComponent({ span, expanded: false, action: { kind: 'tool', display: 'Bash x', rootName: 'bash' }, now: () => now })
+  const component = new CompactWorkComponent({
+    span, expanded: false, action: { kind: 'tool', display: 'Bash x', rootName: 'bash' }, now: () => now,
+    clock: { startedAt: T0 + 1_000, open: true, trailing: true, isLive: () => true },
+  })
   const line = (component.render(120)[0] ?? '').replace(/\x1b\[[0-9;]*m/g, '')
-  assert.match(line, /Activity 3s/, `the running header reads now at render:\n${line}`)
+  assert.match(line, /Activity 3s/, `the live header reads now at render:\n${line}`)
   now = T0 + 6_500
   const line2 = (component.render(120)[0] ?? '').replace(/\x1b\[[0-9;]*m/g, '')
   assert.match(line2, /Activity 5s/, 'the duration advances with the repaint heartbeat')
   assert.equal(summary.action?.kind, 'tool')
   assert.equal(summary.action?.message.status, 'running')
+})
+
+test('timing: a member `running` flag alone never extends the duration', () => {
+  // The old algorithm used the member running flag as the live authority; the
+  // Activity lifetime now owns it, so a clock-less render must NOT read `now`
+  // (it would resurrect exactly the silent-wait jump the fix removes).
+  const folder = fold([
+    eventAt('turn/start', { turn: 1 }, T0, 0),
+    toolCall(1, 'c1', 'bash', T0 + 1_000, 1),
+  ])
+  const span = spansOf(folder.messages())[0]!
+  assert.equal(summarizeWorkSpan(span).timing?.running, true)
+  const component = new CompactWorkComponent({
+    span, expanded: false, action: { kind: 'tool', display: 'Bash x', rootName: 'bash' }, now: () => T0 + 999_999,
+  })
+  const line = (component.render(120)[0] ?? '').replace(/\x1b\[[0-9;]*m/g, '')
+  assert.ok(!line.includes('998s'), `no member-running live extension may survive:\n${line}`)
+  assert.ok(!/Activity \d/u.test(line), `no duration is provable without a clock:\n${line}`)
+})
+
+test('timing: a proven boundary freezes the duration while the member still runs', () => {
+  // The silent-model-wait shape: the tool settled at +5s but the Activity
+  // lifetime runs to the next actually-visible boundary at +45s.
+  const folder = fold([
+    eventAt('turn/start', { turn: 1 }, T0, 0),
+    toolCall(1, 'c1', 'bash', T0 + 1_000, 1),
+    toolResultEvent(1, 'c1', T0 + 5_000, 2),
+  ])
+  const span = spansOf(folder.messages())[0]!
+  const component = new CompactWorkComponent({
+    span, expanded: false, now: () => T0 + 999_999,
+    clock: { startedAt: T0 + 1_000, endedAt: T0 + 45_000, open: false, trailing: true, isLive: () => false },
+  })
+  const line = (component.render(120)[0] ?? '').replace(/\x1b\[[0-9;]*m/g, '')
+  assert.match(line, /Activity 44s/, `the proven boundary owns the duration:\n${line}`)
 })
 
 test('timing: a settled Activity duration stops changing', () => {
@@ -732,9 +773,12 @@ test('timing: a running Thinking shows a live Activity duration', () => {
   assert.equal(summary.timing?.running, true, 'the reasoning row is still streaming')
   assert.equal(summary.timing?.startedAt, T0 + 1_000)
   assert.equal(summary.think?.running, true)
-  const component = new CompactWorkComponent({ span, expanded: false, now: () => T0 + 4_500 })
+  const component = new CompactWorkComponent({
+    span, expanded: false, now: () => T0 + 4_500,
+    clock: { startedAt: T0 + 1_000, open: true, trailing: true, isLive: () => true },
+  })
   const line = (component.render(120)[0] ?? '').replace(/\x1b\[[0-9;]*m/g, '')
-  assert.match(line, /Activity 3s/, `the running header reads now at render:\n${line}`)
+  assert.match(line, /Activity 3s/, `the live header reads now at render:\n${line}`)
 })
 
 // ── Activity header degradation + the no-token contract (addendum v2 §24/§25/§50) ──
@@ -765,4 +809,30 @@ test('Activity header degrades duration→stats without tokens and never fabrica
     const header = formatWorkHeaderLine(summary, false, width, 'emoji', '9s')
     assert.ok(!header.includes('tok'), `no fabricated span tokens at width ${width}:\n${header}`)
   }
+})
+
+test('timing: a carried Snapshot Context row never widens the Activity wall span', () => {
+  const snapshot = (id: string, text: string, time: number, seq: number): SessionEvent => eventAt('user/message', {
+    id: MessageId(id), role: 'user',
+    content: [{ type: 'text', text }],
+    source: { kind: 'time-context', form: 'snapshot', sections: [{ name: 'time-context', body: text }] },
+  }, time, seq)
+  const folder = fold([
+    eventAt('turn/start', { turn: 1 }, T0, 0),
+    // Its point timing (T0+50) precedes the first Process evidence: it must not
+    // pull the Activity start earlier.
+    snapshot('snap-start', 'opening reading', T0 + 50, 1),
+    toolCall(1, 'c1', 'read', T0 + 100, 2),
+    toolResultEvent(1, 'c1', T0 + 200, 3),
+    // Its point timing (T0+1000) follows the last Process evidence: it must not
+    // stretch the Activity end.
+    snapshot('snap-end', 'closing reading', T0 + 1_000, 4),
+  ])
+  const span = spansOf(folder.messages())[0]!
+  assert.equal(span.members.length, 3, 'fixture: both snapshots are carried by the Work')
+  const summary = summarizeWorkSpan(span)
+  assert.deepEqual(statsOf(summary), { total: 1, types: { read: 1 } }, 'Context adds no Action')
+  assert.equal(summary.timing?.startedAt, T0 + 100, 'the span starts at the first REAL Process evidence')
+  assert.equal(summary.timing?.endedAt, T0 + 200, 'the span ends at the last REAL Process evidence')
+  assert.equal(summary.timing?.running, false)
 })

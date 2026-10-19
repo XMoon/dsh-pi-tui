@@ -206,7 +206,11 @@ test('M3-5 PR1: an unavailable child SessionStatus leaves the Session-owned fiel
   const snap = h.store.snapshot()
   assert.deepEqual(snap.composition, {}, 'no parent model may fill the child’s composition')
   assert.deepEqual(snap.access, {}, 'no parent permission may fill the child’s access')
-  assert.deepEqual(snap.workspace, { cwd: '' }, 'no parent cwd may fill the child’s workspace')
+  // The child's workspace carries NO parent value; the display-only
+  // `cwdUnavailable` flag states the unknown directory in words (S2/PR-B §B2 UI)
+  // and is not a Session-owned fact.
+  assert.deepEqual(snap.workspace, { cwd: '', cwdUnavailable: true },
+    'no parent cwd may fill the child’s workspace, and the unknown state is stated')
   assert.equal(snap.usage.tokens, undefined, 'no fold total may stand in for the child’s cumulative usage')
   assert.equal(snap.usage.context, undefined)
   assert.equal(commit.legacy?.cwd, '/client', 'the live-session legacy fields still describe the LIVE session')
@@ -382,4 +386,48 @@ test('the viewer subject bar projects the SAME atomic snapshot the status runtim
   h.runtime.refresh()
   assert.equal(renderViewerSubjectBar({ snapshot: h.store.snapshot(), width: 120 }), '',
     'the main subject renders no bar (zero rows)')
+})
+
+test('TPS PR-2: the display subject’s OWN Host projection is the performance authority', () => {
+  const h = makeHarness()
+  // The MAIN session answers with a Host projection; the child does not.
+  h.setStatus('main', {
+    sessionId: 'main',
+    performance: {
+      recent: { outputTokens: 200, modelMs: 2000, samples: 2, firstTokenMs: 300, firstTokenSamples: 2 },
+      all: { outputTokens: 500, modelMs: 5000, samples: 5 },
+    },
+  })
+  h.setStatus('child-a', { sessionId: 'child-a', cwd: '/child-a/ws' })
+  h.runtime.refresh()
+  assert.deepEqual(h.commits.at(-1)!.patch.usage?.performance, {
+    llmMs: 0,
+    firstTokenMs: 150,
+    tokensPerSec: 100,
+    sessionTokensPerSec: 100,
+  }, 'the main subject renders its own R5 + All + recent TTFB')
+
+  // Main → child: the child has NO Host projection, so NOTHING is invented —
+  // the parent's figures must not leak and no zero stand-in may appear.
+  h.setChild(childRead('child-a', 'research'))
+  h.runtime.refresh()
+  assert.deepEqual(h.commits.at(-1)!.patch.usage?.performance, { llmMs: 0 },
+    'an absent child projection omits every measured value (no parent fallback, no 0)')
+
+  // The child's OWN projection then renders — not the parent's numbers.
+  h.setStatus('child-a', {
+    sessionId: 'child-a',
+    cwd: '/child-a/ws',
+    performance: {
+      recent: { outputTokens: 30, modelMs: 1000, samples: 1, firstTokenMs: 0, firstTokenSamples: 1 },
+      all: { outputTokens: 30, modelMs: 1000, samples: 1 },
+    },
+  })
+  h.runtime.refresh()
+  assert.deepEqual(h.commits.at(-1)!.patch.usage?.performance, {
+    llmMs: 0,
+    firstTokenMs: 0,
+    tokensPerSec: 30,
+    sessionTokensPerSec: 30,
+  }, 'the child renders its own figures; a measured 0ms TTFB stays a visible zero, never absence')
 })

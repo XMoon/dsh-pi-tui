@@ -100,11 +100,40 @@ export const color = {
  * Editor's autocomplete theme slot). */
 export const selectListTheme: SearchablePickerTheme = {
   selectedPrefix: (text: string) => color.primary(text),
-  selectedText: (text: string) => chalk.bold(text),
+  selectedText: (text: string) => chalk.bold.hex(currentPalette.textStrong)(text),
   description: (text: string) => color.textDim(text),
   scrollInfo: (text: string) => color.textMuted(text),
   noMatch: (text: string) => color.textMuted(text),
-  groupHeader: (text: string) => chalk.bold.hex(currentPalette.textMuted)(text),
+  // Role 5: the group label is `textDim`, never bold. Its ` · count` suffix is
+  // painted `textMuted` at the call site (the picker's split-span).
+  groupHeader: (text: string) => color.textDim(text),
+}
+
+/**
+ * The readable half of a task/job state: the Title Case status WORD that
+ * carries the shared `‣` marker (design language `docs/tui-design-language.md`
+ * §3.2 role 9 — colour is never the only signal, §3.3.3). The word is paired
+ * with {@link taskStatusColor}'s token; the two must stay one vocabulary, so
+ * this map lives beside the colour map (`docs/tui-design-language.md` §10) and
+ * is never forked.
+ *
+ * A status the map does not name is Title-cased verbatim: the surface may not
+ * rename a real state it does not know, and a future wire status must still
+ * paint a readable word.
+ */
+export function taskStatusWord(status: string): string {
+  switch (status) {
+    case 'running': return 'Running'
+    case 'stopping': return 'Stopping'
+    case 'completed': return 'Completed'
+    case 'failed': return 'Failed'
+    case 'killed': return 'Killed'
+    case 'timed_out': return 'Timed out'
+    case 'lost': return 'Lost'
+    case 'inactive': return 'Inactive'
+    case 'awaiting answer': return 'Awaiting answer'
+    default: return status.charAt(0).toUpperCase() + status.slice(1)
+  }
 }
 
 /**
@@ -138,7 +167,7 @@ export function settingsListTheme(): SettingsListTheme {
     label: (text: string, selected: boolean) => selected ? chalk.bold.hex(currentPalette.textStrong)(text) : color.text(text),
     value: (text: string, selected: boolean) => selected ? color.primary(text) : color.textDim(text),
     description: (text: string) => color.textDim(text),
-    cursor: color.primary('›'),
+    cursor: color.primary('> '),
     hint: (text: string) => color.textMuted(text),
   }
 }

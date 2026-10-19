@@ -94,10 +94,9 @@ function officialSessionWriter(
 
 function officialSessionLifecycle(
   sessions: ISessions,
-  session: ClientRemote['session'],
   generation: ConnectionGenerationState,
 ): RemoteSessionLifecycle {
-  return new RemoteSessionLifecycle(sessions, session, generation)
+  return new RemoteSessionLifecycle(sessions, generation)
 }
 
 function officialModelCatalog(

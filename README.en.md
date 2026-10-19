@@ -35,6 +35,16 @@ dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@next
 dsh --profile pi-tui
 ```
 
+> **Those two channels are not an installable compatible pair today.** They are
+> channel pointers only: `@deepseek-ai/dsh@alpha` currently resolves to
+> `0.2.1-alpha.5`, while `@xmoon76/dsh-pi-tui@next` still resolves to
+> `0.5.2-rc.1` (peer floor `>=0.2.0-rc.2`, and npm semver excludes a
+> different-major.minor.patch prerelease). Use the pairing table below and
+> [the compatibility document](docs/dsh-compatibility.md) for the exact pair; the
+> stable `0.5.3` publishes to `@latest`, not `@next`, so no installable compatible
+> combination exists on those two moving channels. Validate this exact checkout
+> with `pnpm compat:dsh:npm`.
+
 Use the isolated npm driver (it installs the exact DSH version declared by this
 checkout and exercises the full build/test/package path):
 
@@ -54,18 +64,26 @@ next compatibility range, and fallback paths.
 
 | TUI package line | Official DSH tags for the pairing | Notes |
 |---|---|---|
-| `0.5.1` (stable / `@latest`) | `dsh-v0.2.0-rc.2` | Current stable line; both the minimum and the exact validation target are the 0.2.0-rc.2 family |
+| `0.5.3` (stable / `@latest`) | `dsh-v0.2.1-rc.2` | Current published stable line; both the minimum and the exact validation target are the 0.2.1-rc.2 family |
+| `0.5.1` (stable, previous) | `dsh-v0.2.0-rc.2` | Previous stable line; both the minimum and the exact validation target are the 0.2.0-rc.2 family |
+| `0.5.2-rc.1` (published next-channel preview) | `dsh-v0.2.0-rc.2` | Previous next preview: published to the npm `next` dist-tag on 2026-10-17; its whole peer floor stays `>=0.2.0-rc.2`, so it does not cover 0.2.1-rc.2 |
+| `dsh-v0.2.1-rc.1` (no paired TUI) | none | No released TUI in this matrix claims that intermediate release; never reuse `0.5.3` for it |
 | `0.5.0` (stable, previous) | `dsh-v0.1.7-rc.2`, `dsh-v0.2.0-rc.1` | Previous stable; 0.1.7-rc.2 minimum, exact validation target 0.2.0-rc.1 |
 | `0.4.9` (stable, previous) | `dsh-v0.1.7-rc.2` | Previous stable; the compatible TUI for a 0.1.7-rc.2 runtime |
 | `0.4.8` (stable, previous) | `dsh-v0.1.7-rc.1` | Previous stable; the compatible TUI for a 0.1.7-rc.1 runtime |
 | `0.4.6` (stable, previous) | `dsh-v0.1.5-rc.1`, `dsh-v0.1.5-rc.2` | Previous stable; the compatible TUI for a 0.1.5 runtime |
 | `0.4.7-alpha.2` (next, previous) | `dsh-v0.1.6-alpha.2` | Previous next line; the compatible TUI for a 0.1.6-alpha.2 runtime |
 
-Do not mix the stable and `@next` prerelease lines. `0.5.1` lifts the whole DSH
-peer floor to `>=0.2.0-rc.2`: the Question lifecycle
-consumes contracts published only in rc.2 (the `userQuestions.attachWait`/
-`answer` Remotes and the `userQuestions` Session projection), so mixing in the
-rc.1 family would be a false compatibility statement. The previous stable `0.5.0`
+Do not mix the stable and `@next` prerelease lines. `0.5.3` is the current
+published stable release: its minimum DSH version (peer floor) and its exact
+validation target are both the `0.2.1-rc.2` family. The intermediate
+`dsh-v0.2.1-rc.1` has no paired TUI, and `0.5.2-rc.1` is the previous preview
+published to the npm `next` channel (its pairing, 0.2.0-rc.2, stays in the table
+above; it does not cover 0.2.1-rc.2, which is why the new stable line uses the
+`0.5.3` identity). The previous stable
+`0.5.1` keeps pairing with 0.2.0-rc.2: it lifts the whole DSH peer floor to
+`>=0.2.0-rc.2` (the Question lifecycle consumes contracts published only in
+that rc.2 family). The previous stable `0.5.0`
 line keeps its `>=0.1.7-rc.2` floor (exact validation target 0.2.0-rc.1);
 older runtimes fail at the normal
 incompatible-runtime boundary, so install the paired TUI line from the table
@@ -185,10 +203,14 @@ Regular `↑` / `↓` history recall is still available for recent input.
 
 `/tasks` opens the full Task Center, showing the work the current Session's
 Job Registry / Subagent catalog still tracks; the Footer's `↓` opens the
-lightweight Quick Tasks view for the current active work. Selecting a Job
-opens a detail with the official non-consuming live
-output preview (status, progress and the retained output tail); it never consumes
-the model's `job_output` cursor and never becomes session history.
+lightweight Quick Tasks view for the current active work. Selecting a Job opens
+the fullscreen Job workspace: one status row with the Job identity, the themed
+status and the `[GAP]`/`[ERROR]`/`[SETTLED]` facts, followed by the real
+progress/detail, the command summary and the `Output` / `Command` reading tabs.
+Output is the official non-consuming live preview (scrollable, searchable and
+explicitly labelled as a retained tail rather than the full history), and the
+Command page shows and copies the original shell command. It never consumes the
+model's `job_output` cursor and never becomes session history.
 
 Task Center is a live tracked/control projection, not an execution-history
 list. `ACTIVE` / `TRACKED` are presentation scopes: `ACTIVE` shows only the
@@ -201,11 +223,27 @@ Transcript's tool card. Explicit `run_in_background: true` jobs (and jobs
 promoted to the background after a foreground timeout) remain visible in
 `TRACKED` after completion as long as the Job Registry keeps their record.
 
-`/plugins` opens the active profile's Plugin Manager: installed bundles and
-plugins are grouped into Current TUI / TUI Extensions / DSH Plugins, with
-enable/disable, remove and install; the `dsh-pi-tui` bundle currently providing
-the surface is read-only and cannot be disabled or removed from its own screen.
-The `Plugins  Manage…` row in `/settings` opens the same surface on demand.
+`/plugins` opens the active profile's fullscreen Plugin Manager: the catalog is
+grouped as TUI & Extensions / Official DSH / Third-party / Experimental (the
+Experimental group is always last), with a two-column wide layout and a
+one-column narrow layout. Search, status filters, provenance/status facts,
+official catalog installs, enablement and removal are available from the page;
+the actual Host-reported version, restart requirement and errors are shown
+verbatim. The `dsh-pi-tui` bundle currently providing the surface is read-only
+and cannot be disabled or removed from its own screen. The first-level
+`Settings → Plugins` category opens the same page in place, and returning
+preserves the Settings category, scroll and selection.
+
+The 14 official rc.2 Experimental bundles carry a bounded, identity-exact
+Detail statement of their terminal surface and limits/risks (Web-only,
+Host-only, the B04 WEB_ONLY/Host-row-pending boundary accepted by the Owner,
+and the B13/B14 verified one-shot/provider boundaries). That copy never follows
+enablement and never claims a live Host capability PASS. Upgrade guidance is
+derived from Host facts only: shipped bundles upgrade with the DSH installation,
+profile-owned bundles require Remove followed by an explicit later install,
+missing entries use the official on-demand target, and the Current TUI bundle
+is managed outside the screen. There is no in-place update, version picker or
+silent reinstall.
 
 Subagents are shown using their complete lineage, including nested descendants:
 
@@ -333,7 +371,82 @@ Common entry points:
 /statusline
 ```
 
-Model selection, Reasoning Effort, permission presets, Plan, and Goal all keep the corresponding DSH runtime semantics.
+Model selection, Reasoning Effort, permission presets, Plan, and Goal all keep the corresponding DSH runtime semantics. `/model` candidates come only from the Host catalog: rc.2's `deepseek-flash` is identified by the exact `(provider, model)` pair (the display name `DeepSeek-V4.1-Flash` is never the ID), and a selection writes the official Session/global default. A deployment catalog that no longer offers the ID shows no invented row.
+
+`/settings` opens a real full-screen workspace where the three-, two- and
+single-column layouts are projections of the SAME `categories → rows → detail`
+levels: wide terminals show all three columns, medium ones show
+`categories + rows` or `rows + details` for the current level, and narrow ones
+show only the current level. At every width ASCII `Right` advances exactly one
+level and `Left` returns one level (inert at L0); `Enter` follows the same
+transitions, and `Esc`/`Backspace` step back, closing at the outermost level.
+`Tab`/`Shift+Tab` remain inert. The Action Bar stays pinned to the last physical
+row. Multi-column choosing retains the active `[Details]` marker unless that
+heading would consume the only content row. It presents the real Appearance /
+Display facts: the theme's source-qualified raw value plus its friendly name,
+Icon style, the live Transcript display preset alongside the persisted preference,
+the live Thinking detail state, and each row's configuration Scope and backend
+readiness. `R`
+re-reads and `C` copies the selected row's exact source value. Browsing, choosing
+and copying alone never write configuration.
+
+The **`Configured theme` and `Transcript display` rows are directly editable**:
+from L1, `Right` or `Enter`, the painted `[Change…]` button, or ordinary visible
+Detail content opens the candidate choice in the SAME L2 pane. Current-value and
+Runtime/Persisted facts stay in the same pane above the candidate region and scroll
+independently. `Up`/`Down`/`Home`/`End` move the candidate; `PgUp`/`PgDn` and the
+wheel over facts scroll only the fact region, while the candidate wheel scrolls
+independently. During choice, `C` copies the original row value only while the
+Action Bar paints `c copy`; it never copies or commits the draft candidate. `Enter`
+or `[Confirm]` confirms explicitly, and `Left`/`Esc`/`Backspace` or `[Cancel]`
+cancels directly to L1 without writing anything. If the selected candidate identity
+has scrolled out of view, the first Enter only reveals it; confirmation requires a
+later Enter. From L2 browse or a settled outcome, Enter reopens choice for a
+writable non-pending row. At 44×8, a long identity may first reclaim the optional
+`Choose value` heading; if still needed, the fact area shrinks only to one original
+`Value` row. The complete identity, `Confirm` and `Enter confirm` must be visible
+before a write.
+An identity beyond the remaining candidate capacity stays unconfirmable. Only
+buttons and candidates that are really painted can be clicked. A confirmed change is stored through the existing
+serialized whole-document write path and then re-read from the authority: the
+detail names the live runtime fact (`Runtime`, e.g. the current palette) and the
+stored preference (`Persisted`) separately and states `Saving…`, `Verified`,
+`Not saved · <reason>`, `Commit accepted · verification unavailable` or
+`Outcome unknown · <reason>` — only a completed write whose authoritative
+re-read agrees is called Verified; a rejected write re-reads the authority first
+and reports Not saved only while it still carries the value the request started
+from; a third value, a value already in place or an unreadable authority is
+Outcome unknown, and a success whose readable readback disagrees is a failure
+rather than "verification unavailable". On a non-ready backend the theme is
+neither applied nor written; a display preset may already be live locally and
+then says that it was not stored instead of pretending it was. A plugin theme is
+resolved again by its source-qualified identity at confirm time, so an unloaded
+plugin theme is listed as unavailable and refused rather than degrading into a
+same-named file theme. Icon style and Thinking detail stay read-only rows. The
+existing complete settings editor is still available: `Other settings` → `Open
+existing settings…` retires the workspace and restores the surface it paused
+before opening the original editor, so Theme, the Plugin Manager, keybindings,
+permissions and extension settings keep every existing write path.
+
+`Other settings` in `/settings` now has a `Web Search / Fetch` row: it retires the workspace,
+opens the existing editor's Web section and focuses its first item. The section switches the search
+provider (`Messages`, the official default, or the separately billed `DeepSeek Search API`), the fetch
+provider (`HTTP`, the official default, or `DeepSeek Fetch API`), the Search API result count (1–50,
+quick picks 5/10/20/50), `Share Original Question` (on by default; each new Search API call carries
+up to 128 characters of the triggering human question as `ori_question`, never the full history or
+system prompt) and the API endpoint base (an https address the user must confirm explicitly; the
+credential and query are sent to it). Both APIs are separate opt-in billed providers: a login or an
+ordinary Messages plan does not guarantee coverage of their fees, and the default
+`Messages`/`HTTP` combination calls no billed API. This Web configuration belongs to the base
+profile, not to a Bxx Optional Bundle, so installing or enabling another bundle never changes these
+providers. `[current]` moves only after
+the official mutation and its authoritative read-back agree, and a refused write reads `Not saved`.
+The choice applies to the next search/fetch; a running operation is never changed retroactively. The
+DeepSeek API key row shows only whether the reference is configured and its source layer; configure
+or clear it through the existing masked `/login DEEPSEEK_API_KEY` / `/logout DEEPSEEK_API_KEY` paths,
+which run after the settings surface closes. Esc from the Web section restores the same
+`Web Search / Fetch` row; the original `Open existing settings…` entry still returns to the
+conversation. A Remote backend reports the section unavailable and names no Host namespace.
 
 The `Icon style` option in `/settings` switches the TUI's structural icons:
 `Emoji` (default, colorful), `Symbols` (compact single-cell terminal

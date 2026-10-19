@@ -21,7 +21,7 @@ import type { TranscriptWorkSpan } from '../src/tui/transcript/structure.ts'
 
 const thinking = (turn: number, text = 'reasoning'): TranscriptMessage => ({ kind: 'thinking', turn, text, running: true })
 const workSpan = (owner: TranscriptMessage, members: readonly TranscriptMessage[] = [owner]): TranscriptWorkSpan =>
-  ({ kind: 'work', turn: 1, members, owner })
+  ({ kind: 'work', turn: 1, members, owner, parts: members.map(message => ({ kind: 'message', message })) })
 const clusterOf = (owner: TranscriptMessage, members: readonly TranscriptMessage[] = [owner]): ContextCluster =>
   ({ kind: 'context-cluster', turn: 1, members, owner })
 
@@ -125,4 +125,29 @@ test('a flat fail-open container mints no node even while the membership maps kn
   })
   assert.deepEqual(flat, {})
   assert.equal(transcriptRevealPathFor(flat, allClosed), undefined)
+})
+
+test('a nested snapshot cluster member resolves Work then cluster ancestors', () => {
+  const first: TranscriptMessage = {
+    kind: 'system', turn: 1, text: 'A', context: true,
+    contextPresentation: { form: 'snapshot', sourceKind: 'time-context', role: 'inject' },
+  }
+  const second: TranscriptMessage = { ...first, text: 'B' }
+  const process = thinking(1)
+  const cluster = clusterOf(first, [first, second])
+  const span: TranscriptWorkSpan = {
+    kind: 'work', turn: 1, members: [first, second, process], owner: first,
+    parts: [{ kind: 'context-cluster', cluster }, { kind: 'message', message: process }],
+  }
+  const inputs = {
+    workByMember: new Map<TranscriptMessage, TranscriptWorkSpan>([[first, span], [second, span], [process, span]]),
+    clusterByMember: new Map<TranscriptMessage, ContextCluster>([[first, cluster], [second, cluster]]),
+    workIsContainer: true,
+    clusterIsContainer: true,
+  }
+  assert.deepEqual(transcriptRevealAncestryFor(second, inputs), { work: span, cluster })
+  assert.deepEqual(transcriptRevealPathFor({ work: span, cluster }, allClosed), [
+    { kind: 'work', owner: first },
+    { kind: 'context-cluster', owner: first },
+  ], 'the reveal path is outer-to-inner: Work, then the nested cluster')
 })

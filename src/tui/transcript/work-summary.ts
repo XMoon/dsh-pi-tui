@@ -16,7 +16,7 @@
  * @module @xmoon76/dsh-pi-tui/tui/transcript/work-summary
  */
 
-import { type TranscriptWorkSpan } from './structure.ts'
+import { isTranscriptWorkMember, type TranscriptWorkSpan } from './structure.ts'
 import {
   addCompactActionStats,
   compactActionSourceOf,
@@ -75,8 +75,10 @@ export function summarizeWorkSpan(span: TranscriptWorkSpan): CompactWorkSummary 
   for (const member of span.members) {
     // Span-local wall timing from the member's OWN sidecar evidence
     // (post-F6 plan §12.2/§12.12): point rows simply have
-    // start === end; members without evidence contribute nothing.
-    const memberTiming = transcriptTimingOf(member)
+    // start === end; members without evidence contribute nothing. A carried
+    // Context row (Snapshot / Working tool-jobs Notice) is NOT Process
+    // evidence: its point timing must never widen the Activity duration.
+    const memberTiming = isTranscriptWorkMember(member) ? transcriptTimingOf(member) : undefined
     if (memberTiming !== undefined) {
       startedAt = startedAt === undefined ? memberTiming.startedAt : Math.min(startedAt, memberTiming.startedAt)
       if (memberTiming.endedAt !== undefined) {

@@ -165,6 +165,28 @@ export const SCOPED_STRING_ALLOWLIST: ReadonlyArray<{ readonly file: string; rea
   // comparison and the message it returns for that one key.
   { file: 'src/tui/keybindings/ui/recorder.ts', line: "if (key === 'shift+enter') {" },
   { file: 'src/tui/keybindings/ui/recorder.ts', line: "return { key: undefined, message: 'Shift+Enter is reserved for inserting a newline.' }" },
+  // (8) The key-label vocabulary's FIXED TSP inspection chord
+  // (`keybindings/hints.ts`): the TSP seat owns no keymap action (the chord is
+  // dispatched from the raw SDK key stream), so the label cannot come from
+  // `keyHint` — and it cannot lie either, because no remap exists for it. The
+  // label lives in the key-label authority and the renderer imports it, which
+  // is why this row is owned by the keybindings tree.
+  { file: 'src/tui/keybindings/hints.ts', line: "export const TSP_CONTINUED_INSPECTION_LABEL = 'Alt+Q'" },
+  // (9) The History editor-seat tenant's FIXED labels (B3-A, same category as
+  // (8)): the seat is a per-surface component contract, so its panel may not
+  // hard-code the chords and they cannot come from `keyHint` — no keymap action
+  // and no remap exists. The labels live in the key-label authority and the
+  // panel imports them.
+  { file: 'src/tui/keybindings/hints.ts', line: "export const HISTORY_PREVIEW_SCROLL_LABEL = 'Alt+↑/↓'" },
+  { file: 'src/tui/keybindings/hints.ts', line: "export const HISTORY_COPY_LABEL = 'Alt+C'" },
+  // (10) The History editor-seat tenant's ONE fixed-chord table (B3-B): the
+  // machine KeyIds `handleInput` dispatches on and the display label painted for
+  // each. The seat owns no Host keymap action (no remap exists), so this table
+  // IS its key authority — the same category as (8)/(9), in the same file.
+  { file: 'src/tui/keybindings/hints.ts', line: "accept: { keys: ['enter', 'ctrl+j'], label: 'Enter' }," },
+  { file: 'src/tui/keybindings/hints.ts', line: "preview: { keys: ['alt+up', 'alt+down', 'alt+pageUp', 'alt+pageDown', 'alt+home', 'alt+end'], label: HISTORY_PREVIEW_SCROLL_LABEL }," },
+  { file: 'src/tui/keybindings/hints.ts', line: "copy: { keys: ['alt+c'], label: HISTORY_COPY_LABEL }," },
+  { file: 'src/tui/keybindings/hints.ts', line: "cancel: { keys: ['escape', 'ctrl+c'], label: 'Esc' }," },
 ]
 
 /** One detected violation (a host chord or a hard-coded label). */

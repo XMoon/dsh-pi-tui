@@ -116,6 +116,8 @@ function fakePluginManager(onEnable: () => void): Record<string, unknown> {
   return {
     listBundles: async () => [{
       name: 'probe-bundle',
+      official: false,
+      availability: 'profile',
       enabled: false,
       installed: true,
       optional: false,
@@ -138,15 +140,6 @@ function fakePluginManager(onEnable: () => void): Record<string, unknown> {
 
 async function tick(times = 6): Promise<void> {
   for (let index = 0; index < times; index += 1) await new Promise<void>(resolve => setTimeout(resolve, 0))
-}
-
-/** Select one bundle card by its semantic value through the real controller. */
-function select(controller: PluginManagerController, value: string): void {
-  for (let index = 0; index < controller.rows().length + 1; index += 1) {
-    if (controller.selectedValue() === value) return
-    controller.move(1)
-  }
-  assert.fail(`plugin manager row ${value} was not selectable`)
 }
 
 function toolNames(agent: Agent): readonly string[] {
@@ -184,8 +177,7 @@ test('a live tool-registry change through the production Plugin Manager seam rea
   }, { observations: () => [] })
   controller.open('direct-command')
   await tick()
-  select(controller, bundleValue('probe-bundle'))
-  await controller.toggleSelectedCard()
+  controller.toggleCard(bundleValue('probe-bundle'))
   await tick()
 
   // Request 2 on the SAME Agent/Session.

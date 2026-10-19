@@ -10,7 +10,7 @@
  *
  * Scope semantics (plan §4): the static context contract used for conflict
  * detection and diagnostics. The resolver additionally honors per-rule
- * predicates (e.g. the empty-editor ↓ affordance).
+ * predicates (e.g. the Task Quick last-visual-line ↓ affordance).
  * @module @xmoon76/dsh-pi-tui/tui/keybindings/definitions
  */
 
@@ -214,9 +214,10 @@ export const APP_KEYBINDINGS: Record<AppKeybindingId, AppKeybindingDefinition> =
   },
   'app.tasks.open': {
     id: 'app.tasks.open',
-    // The main path is the CONDITIONAL affordance (↓ + empty editor +
-    // active tasks — plan §5); no plain default key. Never reintroduce
-    // Ctrl+J (legacy terminals send it as LF — plan §5 note).
+    // The main path is the conditional affordance: ↓ from the focused host
+    // Editor's last visual line with an eligible Task Quick projection (plan §5).
+    // There is no plain default key; never reintroduce Ctrl+J (legacy terminals
+    // send it as LF — plan §5 note).
     defaultKeys: [],
     description: 'Open the task browser',
     category: 'Panels',

@@ -34,11 +34,13 @@ import { normalizeSkillInvocation } from '../../domain/command/policy.ts'
 import type { SurfaceCatalogSnapshot, SurfaceCommandSummary } from '../../domain/catalog/surface.ts'
 import type { SkillCatalogCapability } from '../../runtime/catalog-port.ts'
 import type { SessionScopeAuthority } from '../session/scope.ts'
+import type { SessionRuntime as ApplicationSessionRuntime } from '../session/runtime.ts'
 import { CatalogRefreshCoordinator, CoalescingRefreshGate, type CatalogRefreshOutcome, type CatalogRefreshRequest, type CatalogRefreshSource } from './catalog-refresh.ts'
 import { registerTuiCommands, type CommandRegistryLike, type HostCommandClaim, type InitialCommandCatalog, type SubmitDelivery, type TuiCommandRunner } from '../../commands.ts'
 import type { ClientCommandRegistry } from './client-command-registry.ts'
 import type { RemoteCommandSourceFace } from '../application-runtime.ts'
 import { bindCommandRuntime, type CommandRuntimeSurface, type CommandSessionRuntime } from './runtime.ts'
+import { titleRefusalNoticeOwner, titleSuccessNoticeVisible } from './tsp-capability.ts'
 import { copyToClipboard } from '../../client/clipboard/copy.ts'
 import { isFocusDisplayPreset, type DisplayState } from '../../domain/display/preset.ts'
 import { draftHasImages } from '../../client/media/draft-attachments.ts'
@@ -48,6 +50,9 @@ import type { SessionScope } from '../session/scope.ts'
 import type { TuiApp } from '../../tui-app.ts'
 import type { CommandRuntime } from './runtime.ts'
 import type { ModelSelectionOwner, SelectionRef } from './model-selection.ts'
+import type { ModelPresentation } from './model-presentation.ts'
+import type { PresetPresentation } from './preset-presentation.ts'
+import type { SessionBrowserPresentation } from './session-browser-presentation.ts'
 
 /** The catalog capability slice the command surface subscribes to. */
 export interface CommandCatalogCapability {
@@ -114,8 +119,24 @@ export interface CommandSurfaceDeps<Selection extends ModelSelectionValue, Exact
   readonly diag: Diag
   /** The runner lifetime signal (the catalog coordinator). */
   readonly signal: AbortSignal
-  /** The mounted app, read live (the mount precedes every command path). */
-  readonly app: () => TuiApp
+  /**
+   * The mounted PiTui app, read live. OPTIONAL: on the experimental TSP
+   * renderer branch no `TuiApp` exists, so this reads `undefined` — never a
+   * synthesized placeholder (PR3-B B2-3). The PiTui-only editor/panel sinks
+   * below are unreachable there: the post-classification builtin admission
+   * refuses PiTui-only builtins. The exit pair and a supported native Model
+   * presenter use their own seams, so no handler that dereferences this runs.
+   */
+  readonly app: () => TuiApp | undefined
+  /** Only the Model presenter; never an alternate command executor. */
+  readonly modelPresentation?: () => ModelPresentation | undefined
+  /** Only the Preset presenter; never an alternate command executor. */
+  readonly presetPresentation?: () => PresetPresentation | undefined
+  /** Native Session Browser presenter, read live; absent on unsupported renderers. */
+  readonly sessionBrowserPresentation?: () => SessionBrowserPresentation | undefined
+  /** PR3-A: the renderer-neutral notice sink (registration/refresh failures
+   *  are background-reachable under a read-only TSP renderer). */
+  readonly notify: (text: string, kind?: 'error' | 'info') => void
   /** The exact live Agent of the current owner, or undefined. */
   readonly liveAgent: () => ExactAgent | undefined
   /** The session scope authority (the ONLY currentness source). */
@@ -192,19 +213,14 @@ export interface CommandSurfaceDeps<Selection extends ModelSelectionValue, Exact
   }
   /** The resolved CLIENT working directory (the standing read scope). */
   readonly clientCwd: string
-  /**
-   * PR5 (plan §3.2): the presentation-owned recent-performance availability
-   * of the current main window (one bit beside the stats fold). Provided on
-   * the Remote branch; absent on Direct (the complete log is authoritative).
-   */
-  readonly recentPerformanceAvailable?: () => boolean
   /** The mounted-surface seams the runner facade delegates to. */
   readonly surface: {
     setNotificationMode(mode: string): void
     setNotificationMethod(method: string): void
     setTerminalProgressMode(mode: string): void
     openJobView(jobId: string): void
-    openTasksBrowser(viewMode: 'quick' | 'full'): void
+    /** B4-B: the Full Task Center only — the quick modal is retired. */
+    openTasksBrowser(viewMode: 'full'): void
   }
   /** The semantic backend port slices the runner exposes unchanged. */
   readonly backend: {
@@ -229,8 +245,13 @@ export interface CommandSurfaceDeps<Selection extends ModelSelectionValue, Exact
   readonly session: {
     ensureSession(): Promise<void>
     withWriter: CommandSessionRuntime['withWriter']
-    switchSession(sessionId: string): Promise<string | undefined>
-    forkSession: NonNullable<TuiCommandRunner['forkSession']>
+    switchSession(sessionId: string, expectedScope?: SessionScope): Promise<string | undefined>
+    /** The application Session runtime's `/fork` entry. Its `SessionForkOutcome`
+     *  carries the POST-ADOPTION navigation identity, so the facade can tell a
+     *  real adoption from a superseded/parked child that also reports success. */
+    forkSession: ApplicationSessionRuntime['forkSession']
+    /** Whether a captured navigation identity still owns the visible surface. */
+    isNavigationCurrent: ApplicationSessionRuntime['isNavigationCurrent']
     transitionTo: TuiCommandRunner['transitionTo']
   }
   /** The status owner seams the runner delegates to. */
@@ -271,7 +292,7 @@ export interface CommandSurfaceDeps<Selection extends ModelSelectionValue, Exact
   /** The profile-wide Plugin Manager controller (never session-owned). */
   readonly pluginManager: {
     open(): void
-    submenu(done: (selected?: string) => void): ReturnType<TuiCommandRunner['createPluginManagerSubmenu']>
+    page(done: () => void): ReturnType<TuiCommandRunner['createPluginManagerPage']>
   }
   /** The shared client clipboard delivery policy. */
   readonly client: {
@@ -505,14 +526,14 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
         // follow-up cannot be double-settled (a second settle would clear
         // the follow-up's in-flight flag while it is still running).
         if (outcome !== undefined && outcome.kind === 'applied' && outcome.notice !== undefined) {
-          deps.app().notify(outcome.notice, 'error')
+          deps.notify(outcome.notice, 'error')
         }
         skillsChangeGate.settled()
       },
       onCancel: () => { skillsChangeGate.settled() },
       onError: (error) => {
         skillsChangeGate.settled()
-        deps.app().notify(`skill catalog refresh failed: ${safeErrorMessage(error)}`, 'error')
+        deps.notify(`skill catalog refresh failed: ${safeErrorMessage(error)}`, 'error')
       },
     })
   })
@@ -663,9 +684,31 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
     if (commandsRegistered) return
     commandsRegistered = true
     try {
-      const installed = registerTuiCommands(runner(), initial, {
-        ...(deps.directCatalog === undefined ? {} : { listGlobalCommands: deps.directCatalog.listGlobalCommands }),
-      })
+      const installed = registerTuiCommands(
+        runner(), initial,
+        { ...(deps.directCatalog === undefined ? {} : { listGlobalCommands: deps.directCatalog.listGlobalCommands }) },
+        deps.modelPresentation?.(),
+        deps.presetPresentation?.(),
+        // PR4-B2-A: the internal presentation seams the B2-A registrars consume.
+        // The notice sink is the renderer-neutral one (the PiTui route and the
+        // TSP Dock are the same seam); the ownership facts are read HERE because
+        // the composition root owns both of their inputs — whether a PiTui
+        // presentation is mounted (`deps.app`, the same live read every other
+        // seam uses) and which command plane executes the invocation
+        // (`deps.backend.kind`). Registration runs after the surface mount, so
+        // the app fact is the real mounted state.
+        {
+          notify: deps.notify,
+          titleRefusalNoticeOwner: titleRefusalNoticeOwner({
+            pituiPresentation: deps.app() !== undefined,
+            backendKind: deps.backend.kind,
+          }),
+          titleSuccessNoticeVisible: titleSuccessNoticeVisible({
+            pituiPresentation: deps.app() !== undefined,
+            backendKind: deps.backend.kind,
+          }),
+        },
+      )
       // Per-name degradation notice (M3-4 PR2): a Host-claimed name (the
       // Remote Host composition mounts `/export` itself) fails only ITS own
       // registration — later commands still installed. The user sees the
@@ -674,7 +717,7 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
         const names = installed.registrationFailures.join('; ')
         deps.logError(`tui-runner: commands not registered (claimed by the Host composition): ${names}`)
         deps.diag.warn('command name collisions', { failures: [...installed.registrationFailures] })
-        deps.app().notify(`not registered (claimed elsewhere): ${names}`, 'error')
+        deps.notify(`not registered (claimed elsewhere): ${names}`, 'error')
       }
       wasAdvertisedClaim = installed.wasAdvertised
       hostClaimOf = installed.hostClaimOf
@@ -774,8 +817,8 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
       commandsRegistered = false
       const message = safeErrorMessage(error)
       deps.logError(`tui-runner: command registration failed: ${message}`)
-      deps.diag.error('command registration failed', { error: message })
-      deps.app().notify(`command registration failed: ${message}`, 'error')
+      deps.diag.error('command registration failed', { error: message, ...(error instanceof Error && error.stack ? { stack: error.stack } : {}) })
+      deps.notify(`command registration failed: ${message}`, 'error')
     }
   }
 
@@ -828,10 +871,15 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
           // `provider`/`model` are OPTIONAL in the DSH AgentOptions contract and
           // the Direct composition may leave them unset: their absence is real
           // semantic optionality, never an invariant break.
+          // `cwd` is the Session's EFFECTIVE directory (the same-session status
+          // projection), NOT the immutable header project: a committed
+          // `working-directory/change` moves every following command's directory,
+          // and an UNAVAILABLE read falls back to the documented Direct
+          // Client-local execution cwd — never to the old header project.
           return {
             provider: agent.options.provider,
             model: agent.options.model,
-            cwd: agent.session.header.cwd ?? deps.clientCwd,
+            cwd: deps.backend.sessionReader.sessionStatus(sessionId)?.cwd ?? deps.clientCwd,
           }
         },
         approvalOverride: (sessionId) =>
@@ -883,6 +931,7 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
     const facade: RunnerFacade<Selection, Id> = {
       ctx: deps.ctx,
       app: deps.app(),
+      get sessionBrowserPresentation() { return deps.sessionBrowserPresentation?.() },
       diag: deps.diag,
       get currentSessionId() { return deps.ownership.currentSessionId() },
       // The A3-5 semantic command runtime (scope/currentness, scoped catalog,
@@ -944,13 +993,6 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
       // send-time canonicalization against the Host filesystem.
       hostFile: deps.backend.hostFile,
       hostShellCompletion: deps.backend.hostShellCompletion,
-      // PR5 (plan §3.2): the presentation-owned recent-performance
-      // availability of the CURRENT main window — the /status panel reads
-      // it beside the composed stats. Absent on Direct-shaped compositions
-      // (the full log is authoritative by construction).
-      ...(deps.recentPerformanceAvailable === undefined ? {} : {
-        recentPerformanceAvailable: deps.recentPerformanceAvailable,
-      }),
       // The readable-transcript business capability (round 5): explicitly
       // backend-owned, NEVER derived from the commandRegistry mirror below
       // (that mirror retires with M8).
@@ -972,7 +1014,9 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
       // The deployment image policy, re-read dynamically so a runtime
       // reconfiguration is picked up (plan §10.1: never a cached copy).
       imageLimits: () => deps.imageLimits(),
-      insertIntoEditor: (text) => deps.app().insertIntoEditor(text),
+      // Post-admission only (an image placeholder insert): the TSP renderer
+      // never runs this path, so an absent PiTui app is a committed no-op.
+      insertIntoEditor: (text) => deps.app()?.insertIntoEditor(text),
       // The shared prepared-input pipeline (skills build their message
       // through this — review finding 4).
       prepareDraftMessage: (text) => prepareUserMessage(text, deps.drafts.images, deps.submission.prepareDeps()),
@@ -1034,8 +1078,23 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
         deps.backend.interaction.setApprovalPolicy(scope.sessionId, value)
         return 'applied' as const
       },
-      switchSession: (sessionId) => deps.session.switchSession(sessionId),
-      forkSession: (sourceSessionId) => deps.session.forkSession(sourceSessionId),
+      switchSession: (sessionId, expectedScope) => deps.session.switchSession(sessionId, expectedScope),
+      forkSession: async (sourceSessionId) => {
+        const result = await deps.session.forkSession(sourceSessionId)
+        // The ONE `/fork` success notice. `kind: 'success'` alone also covers a
+        // superseded/parked child, so the adopted navigation identity — and its
+        // currentness — is the only admissible proof that the user is now IN the
+        // forked session. Emitted AFTER the await: the child's hydration (whose
+        // tail clears the notice area) is awaited inside the fork, so this
+        // notice survives on the new session's surface. `/rewind` has its own
+        // adoption path and its own notice.
+        if (result.kind === 'success'
+          && result.adoptedNavigation !== undefined
+          && deps.session.isNavigationCurrent(result.adoptedNavigation)) {
+          deps.notify('Forked to a new session', 'info')
+        }
+        return result
+      },
       transitionTo: (steps) => deps.session.transitionTo(steps),
       currentPreset: deps.presets.current,
       sessionBlank: deps.presets.blank,
@@ -1052,7 +1111,7 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
       // `/plugins` opens the profile-wide Plugin Manager panel (P1-A). It is
       // NOT session-owned: it never creates or switches a Session.
       openPluginManager: () => deps.pluginManager.open(),
-      createPluginManagerSubmenu: (done) => deps.pluginManager.submenu(done),
+      createPluginManagerPage: (done) => deps.pluginManager.page(done),
       // The attachment-intake UX fence: the ONE production reader of the
       // transition gate. Staging an attachment while a transition is in flight
       // (quiesce → commit) would inject a draft into a session about to be

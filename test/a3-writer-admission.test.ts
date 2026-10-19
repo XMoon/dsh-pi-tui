@@ -127,7 +127,8 @@ function recordingSurface(overrides: Partial<SubmissionRuntimeSurface>): {
     withPromptAdmission: async (_scope, _line, task) => task(),
     isDisposed: () => false,
     isScopeCurrent: () => true,
-    mergeDraftIntoEditor: () => { calls.push('merge'); return true },
+    mergeDraftIntoEditor: () => { calls.push("merge"); return true },
+    restoreStaleDraftIntoEditor: () => { calls.push("restoreStale"); return "merged-verbatim" },
     consumeDraftAttachments: () => { calls.push('consume') },
     markDispatch: () => { calls.push('dispatch') },
     beginLocalSubmission: () => { calls.push('echo') },
@@ -172,8 +173,11 @@ test('a stale scope refused at admission takes the distinct stale path and runs 
   })
   const runtime = bindSubmissionRuntime({ surface })
   await runtime.submitPrompt(SUBMISSION)
+  // PR3-B §7.3 (F2): the stale settle routes through the STALE restore
+  // member (which a switch-dropping renderer may suppress); the recording
+  // fake keeps the PiTui contract (merged-verbatim ⇒ the retry notice).
   assert.deepEqual(calls, [
-    'merge',
+    'restoreStale',
     'settleLocal',
     'ack:submit stale',
     `notify:error:the session changed while sending — try again`,
@@ -755,6 +759,238 @@ test('P1 lock: a session/writer-held steer rejection is settled by the submissio
     'a proven refusal never tells the user to try again')
   assert.deepEqual(calls.filter(call => call.startsWith('restore:')), [],
     'the helper never restores behind the owner (no double restore)')
+})
+
+test('PR3-B §7.3 (F2): a steer gone stale across a REPLACED owner does not reseed a switch-dropping renderer', async () => {
+  // The B2 external review's pollution path, at the REAL submission runtime
+  // with the REAL ownership subject authority: the busy steer's prepare
+  // awaits; the owner is REPLACED (a different owner ref publishes — what a
+  // committed A→B switch does); the runtime settles the gesture stale. On a
+  // renderer that DROPPED the outgoing draft at the switch AND the pinned
+  // owner was genuinely replaced, the stale restore is SUPPRESSED — no
+  // editor write, a truthful "cleared by the switch" notice.
+  const calls: string[] = []
+  const diag = { debug: () => {}, info: () => {}, warn: () => {}, error: () => {}, dispose: () => {} }
+  const agentA = { session: { id: 'session-a' }, status: 'running' }
+  const subjectModule = await import('../src/app/session/subject.ts')
+  const { createSessionSubjectAuthority } = subjectModule
+  type SessionOwnerRef = import('../src/app/session/subject.ts').SessionOwnerRef
+  type SessionSubject = import('../src/app/session/subject.ts').SessionSubject
+  const ownerA = {} as SessionOwnerRef
+  const ownerB = {} as SessionOwnerRef
+  const slot: { owner: SessionOwnerRef; generation: number } = { owner: ownerA, generation: 1 }
+  const authority = createSessionSubjectAuthority(() => ({ owner: slot.owner, generation: slot.generation }))
+  let staleRestores = 0
+  let merges = 0
+  const deps = {
+    isDisposed: () => false,
+    isViewing: () => false,
+    currentAgent: () => agentA,
+    currentGeneration: () => slot.generation,
+    captureOwnerToken: () => authority.capture(),
+    isOwnerTokenCurrent: (token: unknown) => authority.isCurrent(token as SessionSubject),
+    readPendingInput: () => ({ running: true, items: [] }),
+    draftHasAttachments: () => false,
+    draftHasImages: () => false,
+    clearSettledLocalMessages: () => {},
+    mergeDraftIntoEditor: (text: string) => { merges += 1; calls.push(`merge:${text}`); return true },
+    restoreStaleDraftIntoEditor: (text: string, subject: unknown) => {
+      staleRestores += 1
+      calls.push(`restoreStale:${text}`)
+      if (!authority.ownerReplaced(subject as SessionSubject | undefined)) return 'merged-verbatim'
+      return 'dropped' as const
+    },
+    notify: (message: string, kind: string) => { calls.push(`notify:${kind}:${message}`) },
+    acceptSubmitAck: () => 11,
+    settleLocalSubmission: () => { calls.push('settleLocal') },
+    settleSubmitAck: (reason: string) => { calls.push(`ack:${reason}`) },
+    beginLocalSteerEcho: () => {},
+    takeSubmitTurn: () => ({ wait: Promise.resolve(), release: () => {} }),
+    pinDraftAttachments: () => () => {},
+    persistAfterSession: async (resolve: () => Promise<string | undefined>, persist: (id: string | undefined) => void) => {
+      const id = await resolve()
+      if (id !== undefined) persist(id)
+    },
+    ensureSession: async () => {},
+    withPromptAdmission: async (_agent: unknown, _hasImages: boolean, task: () => Promise<unknown>) => task(),
+    prepareMessage: async () => {
+      slot.owner = ownerB
+      slot.generation = 2
+      return {}
+    },
+    markDispatch: () => { calls.push('dispatch') },
+    restoreSubmissionDraft: (text: string) => { calls.push(`restore:${text}`) },
+    notifySubmissionFailure: () => { calls.push('notifyFailure') },
+    consumeDraftAttachments: () => { calls.push('consume') },
+    writerSection: async (task: () => Promise<unknown>) => task(),
+    pendingInputReader: { snapshot: () => ({ running: true, items: [] }) },
+    writer: {
+      prompt: async () => ({ kind: 'committed' as const, value: undefined }),
+      updateQueue: async () => ({ kind: 'committed' as const, value: undefined }),
+    },
+    diag,
+  }
+  deliverBusy(deps as unknown as SteerSubmissionDeps, { text: 'pending from A' })
+  assert.equal(await drainUntil(() => calls.some(call => call.startsWith('ack:'))), true,
+    'the stale steer must settle its ack')
+  assert.equal(staleRestores, 1, 'the stale settle consulted the real-authority restore exactly once')
+  assert.equal(merges, 0, 'NO editor write happened — the old session\'s text never seeded the new composer')
+  assert.ok(calls.some(call => call.startsWith('ack:steer stale')),
+    'the gesture settled stale')
+  assert.ok(calls.some(call => call.includes('cleared by the switch')),
+    'the notice tells the user the draft was dropped by the switch (never a "preserved below" retry promise)')
+  assert.deepEqual(calls.filter(call => call.startsWith('restore:')), [],
+    'the enclosing flow never restores behind the owner')
+})
+
+test('PR3-B §7.3 (F2): the SAME-OWNER invalidated shape still restores (a failed switch kept the owner)', async () => {
+  // The review's probe-887 shape: the generation was invalidated (a failed
+  // switch bumped it) but the OWNER is unchanged — no committed replacement
+  // happened, nothing cleared the draft, and a switch-dropping renderer must
+  // NOT swallow the restore or claim "cleared by the switch". The pinned
+  // owner's exact identity (not its session id) decides.
+  const calls: string[] = []
+  const diag = { debug: () => {}, info: () => {}, warn: () => {}, error: () => {}, dispose: () => {} }
+  const agentA = { session: { id: 'session-a' }, status: 'running' }
+  const subjectModule = await import('../src/app/session/subject.ts')
+  const { createSessionSubjectAuthority } = subjectModule
+  type SessionOwnerRef = import('../src/app/session/subject.ts').SessionOwnerRef
+  type SessionSubject = import('../src/app/session/subject.ts').SessionSubject
+  const ownerA = {} as SessionOwnerRef
+  const slot: { owner: SessionOwnerRef; generation: number } = { owner: ownerA, generation: 1 }
+  const authority = createSessionSubjectAuthority(() => ({ owner: slot.owner, generation: slot.generation }))
+  let staleRestores = 0
+  const deps = {
+    isDisposed: () => false,
+    isViewing: () => false,
+    currentAgent: () => agentA,
+    currentGeneration: () => slot.generation,
+    captureOwnerToken: () => authority.capture(),
+    isOwnerTokenCurrent: (token: unknown) => authority.isCurrent(token as SessionSubject),
+    readPendingInput: () => ({ running: true, items: [] }),
+    draftHasAttachments: () => false,
+    draftHasImages: () => false,
+    clearSettledLocalMessages: () => {},
+    mergeDraftIntoEditor: (text: string) => { calls.push(`merge:${text}`); return true },
+    restoreStaleDraftIntoEditor: (text: string, subject: unknown) => {
+      staleRestores += 1
+      calls.push(`restoreStale:${text}`)
+      if (!authority.ownerReplaced(subject as SessionSubject | undefined)) {
+        calls.push(`merge:${text}`)
+        return 'merged-verbatim' as const
+      }
+      return 'dropped' as const
+    },
+    notify: (message: string, kind: string) => { calls.push(`notify:${kind}:${message}`) },
+    acceptSubmitAck: () => 13,
+    settleLocalSubmission: () => { calls.push('settleLocal') },
+    settleSubmitAck: (reason: string) => { calls.push(`ack:${reason}`) },
+    beginLocalSteerEcho: () => {},
+    takeSubmitTurn: () => ({ wait: Promise.resolve(), release: () => {} }),
+    pinDraftAttachments: () => () => {},
+    persistAfterSession: async (resolve: () => Promise<string | undefined>, persist: (id: string | undefined) => void) => {
+      const id = await resolve()
+      if (id !== undefined) persist(id)
+    },
+    ensureSession: async () => {},
+    withPromptAdmission: async (_agent: unknown, _hasImages: boolean, task: () => Promise<unknown>) => task(),
+    prepareMessage: async () => {
+      slot.generation = 2
+      return {}
+    },
+    markDispatch: () => {},
+    restoreSubmissionDraft: () => {},
+    notifySubmissionFailure: () => {},
+    consumeDraftAttachments: () => {},
+    writerSection: async (task: () => Promise<unknown>) => task(),
+    pendingInputReader: { snapshot: () => ({ running: true, items: [] }) },
+    writer: {
+      prompt: async () => ({ kind: 'committed' as const, value: undefined }),
+      updateQueue: async () => ({ kind: 'committed' as const, value: undefined }),
+    },
+    diag,
+  }
+  deliverBusy(deps as unknown as SteerSubmissionDeps, { text: 'pending from A' })
+  assert.equal(await drainUntil(() => calls.some(call => call.startsWith('ack:'))), true,
+    'the stale steer must settle its ack')
+  assert.equal(staleRestores, 1, 'the stale settle consulted the restore')
+  assert.ok(calls.includes('restoreStale:pending from A'),
+    'the same-owner stale RESTORED the draft — no committed switch happened, nothing cleared it')
+  assert.ok(!calls.some(call => call.includes('cleared by the switch')),
+    'never a fabricated "cleared by the switch" notice for a same-owner invalidation')
+  assert.ok(calls.some(call => call.includes('try again')),
+    'the notice promises the restored retry')
+})
+
+test('PR3-B §7.3 (F2): the SAME stale shape on a retaining renderer (PiTui) still restores the draft', async () => {
+  // The PiTui half of the contract: the identical replaced-owner stale shape
+  // merges the text back (steer.test.ts's restore family is the PiTui
+  // editor's long-standing behavior). The renderer policy is the second
+  // axis: even a genuinely replaced owner restores on a retaining renderer.
+  const calls: string[] = []
+  const diag = { debug: () => {}, info: () => {}, warn: () => {}, error: () => {}, dispose: () => {} }
+  const agentA = { session: { id: 'session-a' }, status: 'running' }
+  const subjectModule = await import('../src/app/session/subject.ts')
+  const { createSessionSubjectAuthority } = subjectModule
+  type SessionOwnerRef = import('../src/app/session/subject.ts').SessionOwnerRef
+  type SessionSubject = import('../src/app/session/subject.ts').SessionSubject
+  const ownerA = {} as SessionOwnerRef
+  const ownerB = {} as SessionOwnerRef
+  const slot: { owner: SessionOwnerRef; generation: number } = { owner: ownerA, generation: 1 }
+  const authority = createSessionSubjectAuthority(() => ({ owner: slot.owner, generation: slot.generation }))
+  const deps = {
+    isDisposed: () => false,
+    isViewing: () => false,
+    currentAgent: () => agentA,
+    currentGeneration: () => slot.generation,
+    captureOwnerToken: () => authority.capture(),
+    isOwnerTokenCurrent: (token: unknown) => authority.isCurrent(token as SessionSubject),
+    readPendingInput: () => ({ running: true, items: [] }),
+    draftHasAttachments: () => false,
+    draftHasImages: () => false,
+    clearSettledLocalMessages: () => {},
+    mergeDraftIntoEditor: (text: string) => { calls.push(`merge:${text}`); return true },
+    restoreStaleDraftIntoEditor: (text: string) => {
+      calls.push(`restoreStale:${text}`)
+      return 'merged-verbatim' as const
+    },
+    notify: (message: string, kind: string) => { calls.push(`notify:${kind}:${message}`) },
+    acceptSubmitAck: () => 12,
+    settleLocalSubmission: () => { calls.push('settleLocal') },
+    settleSubmitAck: (reason: string) => { calls.push(`ack:${reason}`) },
+    beginLocalSteerEcho: () => {},
+    takeSubmitTurn: () => ({ wait: Promise.resolve(), release: () => {} }),
+    pinDraftAttachments: () => () => {},
+    persistAfterSession: async (resolve: () => Promise<string | undefined>, persist: (id: string | undefined) => void) => {
+      const id = await resolve()
+      if (id !== undefined) persist(id)
+    },
+    ensureSession: async () => {},
+    withPromptAdmission: async (_agent: unknown, _hasImages: boolean, task: () => Promise<unknown>) => task(),
+    prepareMessage: async () => {
+      slot.owner = ownerB
+      slot.generation = 2
+      return {}
+    },
+    markDispatch: () => {},
+    restoreSubmissionDraft: () => {},
+    notifySubmissionFailure: () => {},
+    consumeDraftAttachments: () => {},
+    writerSection: async (task: () => Promise<unknown>) => task(),
+    pendingInputReader: { snapshot: () => ({ running: true, items: [] }) },
+    writer: {
+      prompt: async () => ({ kind: 'committed' as const, value: undefined }),
+      updateQueue: async () => ({ kind: 'committed' as const, value: undefined }),
+    },
+    diag,
+  }
+  deliverBusy(deps as unknown as SteerSubmissionDeps, { text: 'pending from A' })
+  assert.equal(await drainUntil(() => calls.some(call => call.startsWith('ack:'))), true,
+    'the stale steer must settle its ack')
+  assert.ok(calls.some(call => call === 'restoreStale:pending from A'),
+    'the retaining renderer received the restore')
+  assert.ok(calls.some(call => call.includes('try again')),
+    'the PiTui stale notice still promises the restored retry')
 })
 
 /* ── PR5 (plan §3.8): stale Host-command settlement makes no visible commit ── */

@@ -16,6 +16,7 @@
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import test from 'node:test'
+import { WelcomeCard } from '../src/tui/components/welcome-card.ts'
 
 const source = (relative: string): string =>
   readFileSync(new URL(`../src/${relative}`, import.meta.url), 'utf8')
@@ -445,70 +446,6 @@ test('PR5 §3C-4 (R7-4): the rewind settlement owner is phase-specific', () => {
 })
 
 
-/* ── PR5 F1: the availability bit follows the SAME fold's live evidence ── */
-
-test('PR5 §3.2 (F1): the live ingress re-answers availability off the SAME fold — never a second scan', () => {
-  const presentation = code('app/surface/session-presentation.ts')
-  // The flip reads THIS fold's retained evidence (no second StatsFolder, no
-  // second event scan through the whole-log helper).
-  const refresh = presentation.slice(
-    presentation.indexOf('const refreshRecentPerformanceAvailability = ('),
-    presentation.indexOf('const refreshRecentPerformanceAvailability = (') + 900,
-  )
-  assert.ok(refresh.includes('statsFolder.hasEnoughRecentEvidence()'),
-    'the flip is answered by the live fold itself')
-  assert.equal(refresh.includes('hasEnoughRecentPerformanceSamples('),
-    false, 'the live flip must not run a second event scan')
-  assert.ok(refresh.includes('deps.refreshStatusCheap()'),
-    'the flip re-derives the status so the footer stops omitting the figures')
-  // BOTH directions, off the SAME fold: the fold's evidence is not monotonic
-  // (a route change clears both windows; a late replacement can drop a
-  // candidate), and a history-start window stays available regardless.
-  assert.ok(refresh.includes('recentCoverageComplete || statsFolder.hasEnoughRecentEvidence()'),
-    'the answer is recomputed from the committed coverage fact OR the live fold')
-  assert.ok(refresh.includes('if (next === recentPerformanceAvailable) return'),
-    'the status is re-derived only when the answered value actually changes')
-  assert.equal(refresh.includes('if (recentPerformanceAvailable) return'),
-    false, 'the bit must NOT be monotonic-only: a shrink must be able to flip it back')
-  // The history-start fact commits with the fold and resets with the generation.
-  assert.ok(presentation.includes('recentCoverageComplete = input.recentCoverageComplete ?? false'),
-    'the coverage fact commits inside the same fenced hydrate block')
-  assert.ok(presentation.includes('recentCoverageComplete = !snapshot.hasMore'),
-    'the widened window re-proves the coverage fact in its own fenced commit')
-  // The availability answer itself is taken INSIDE the commit, from the fold the
-  // commit just installed — never from a caller pre-computation over a pre-merge
-  // snapshot (the opening-journal drift), and Direct commits complete coverage.
-  assert.ok(presentation.includes('recentPerformanceAvailable = recentCoverageComplete\n      || statsFolder.hasEnoughRecentEvidence()'),
-    'the fenced commit answers from the committed fold plus coverage')
-  assert.equal(presentation.includes('recentCoverageComplete = input.recentCoverageComplete ?? false\n    recentPerformanceAvailable = input'),
-    false, 'no caller-precomputed availability may survive')
-  assert.ok(presentation.includes('recentCoverageComplete: true,'),
-    "Direct commits COMPLETE coverage (v4: Direct availability is unconditionally true)")
-  assert.equal(presentation.includes('recentHistoryComplete'), false,
-    'the old incomplete-coverage name is gone everywhere')
-  const reset = presentation.slice(
-    presentation.indexOf('const resetForGeneration = ('),
-    presentation.indexOf('const resetForGeneration = (') + 700,
-  )
-  assert.ok(reset.includes('recentCoverageComplete = false'),
-    'the generation reset clears the coverage fact with the bit')
-  // The live ingress performs the pair on the same fold, at BOTH append sites.
-  // TS3 §36: the routing bodies (and their append/pair calls) live in the
-  // presentation event router owner.
-  const routing = code('app/surface/event-routing.ts')
-  const pairs = routing.split('main.stats.apply([event])').length - 1
-  const refreshes = routing.split('main.refreshRecentPerformanceAvailability()').length - 1
-  assert.ok(pairs > 0 && refreshes === pairs,
-    'every live stats append re-answers the availability predicate')
-  // ONE predicate shared by the fold accessor and the whole-log helper.
-  const stats = code('domain/status/stats.ts')
-  assert.ok(stats.includes('return recentEvidenceComplete(foldSessionStats(events).recent)'),
-    'the whole-log helper delegates to the one predicate')
-  assert.ok(stats.includes('return recentEvidenceComplete(this.recent)'),
-    'the live fold accessor delegates to the SAME predicate')
-})
-
-
 /* ── PR5 F2: an unavailable Remote model fact is never a business value ── */
 
 test('PR5 F2: an absent `model` projection fact is passed THROUGH, never rendered as a business value', () => {
@@ -525,12 +462,33 @@ test('PR5 F2: an absent `model` projection fact is passed THROUGH, never rendere
   assert.equal(branch.includes("'unconfigured'"),
     false, 'an unavailable projection must never become "unconfigured"')
   assert.equal(branch.includes('???'), false)
-  // The card renders the fact only when it is present. TS4 §51: the card's
-  // rendering owner is now the TUI component module, so this source lock
-  // follows the real owner (path-only migration — same exact substrings).
+  // The card renders the fact only when it is present — asserted through its
+  // REAL render in both responsive layouts, not by matching its source text
+  // (a projection refactor must not break this guard while behavior is kept).
+  const plainRows = (rows: readonly string[]): string =>
+    rows.join('\n').replace(/\x1b\[[0-9;]*m/g, '')
+  for (const width of [100, 20]) {
+    const absentCard = new WelcomeCard()
+    absentCard.setFacts({ cwd: '/ws', sessionId: 'sess1', version: '0.1.0' })
+    const absent = plainRows(absentCard.render(width))
+    assert.ok(absent.includes('sess1'), `the facts still render at width ${width}:\n${absent}`)
+    assert.equal(/\bmodel\b/u.test(absent), false, `no model line may render at width ${width}:\n${absent}`)
+    assert.equal(absent.includes('no model'), false,
+      `an unavailable projection is not the legacy "no model" literal at width ${width}`)
+
+    const presentCard = new WelcomeCard()
+    presentCard.setFacts({
+      cwd: '/ws',
+      sessionId: 'session-x',
+      model: '\u001b]52;c;YXR0YWNr\u0007p/m',
+      version: '0.1.0',
+    })
+    const present = plainRows(presentCard.render(width))
+    assert.ok(present.includes('p/m'), `a PRESENT model fact renders at width ${width}:\n${present}`)
+    assert.ok(!present.includes('YXR0YWNr'),
+      `the card's display projection still strips a hostile model fact at width ${width}`)
+  }
   const card = code('tui/components/welcome-card.ts')
-  assert.ok(card.includes("...facts.model === undefined ? [] : [`${color.textDim(label('model'))}"),
-    'the card omits the model line when the fact is absent')
   assert.ok(card.includes('model?: string'),
     'the card accepts an absent model fact')
 })

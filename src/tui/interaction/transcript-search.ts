@@ -75,9 +75,9 @@ export class TranscriptSearchComponent implements Component, Focusable {
   }
 
   /**
-   * Mouse parity (mirrors vendor X049 for the alt-screen search): the
-   * query Input row (row 1, the Input's own render at full width)
-   * click-positions the private Input; title and hint rows stay inert.
+   * Query-row mouse parity: the query Input row (row 1, the Input's own
+   * render at full width) click-positions the private Input; title and
+   * hint rows stay inert.
    * The dispatch target/focus are rewritten to THIS component: the
    * private Input is not mounted in the TUI tree (isMouseTargetLive
    * would clear the gesture on release), so the mounted wrapper must

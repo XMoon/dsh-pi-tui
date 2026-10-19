@@ -57,3 +57,34 @@ test('Esc closes the viewer through the single close path', async () => {
     app.dispose()
   }
 })
+
+test('hostile viewer title/body are projected at the TTY and keep whitelisted log SGR', async () => {
+  const { vt, app } = startApp(process.cwd())
+  try {
+    const hostile = 'job '
+      + '\u001b]52;c;YXR0YWNr\u0007'
+      + '\u001b[?1049h'
+      + '\u001b[2J'
+      + '\u001b[38;2;999;1;1m'
+      + '\u001b[38;5;196mred\u001b[0m'
+      + '\r10%\r100%\n'
+    const close = app.openOutputViewer({
+      title: 'bash \u001b]0;PWNED\u0007· job-9',
+      initial: hostile,
+      refresh: () => hostile,
+      intervalMs: 10,
+    })
+    await vt.waitForRender()
+    const view = strip(vt.getViewport().join('\n'))
+    const stream = vt.writes.join('')
+    assert.ok(!stream.includes('YXR0YWNr'), 'no OSC 52 payload reaches the terminal stream')
+    assert.ok(!stream.includes('PWNED'), 'no title OSC payload reaches the terminal stream')
+    assert.ok(!stream.includes('\u001b[38;2;999;1;1m'), 'the malformed SGR is never forwarded')
+    assert.ok(stream.includes('\u001b[38;5;196m'), 'the whitelisted SGR survives the viewer body')
+    assert.ok(view.includes('10%') && view.includes('100%'), `CR frames read as records:\n${view}`)
+    close()
+    await vt.waitForRender()
+  } finally {
+    app.dispose()
+  }
+})

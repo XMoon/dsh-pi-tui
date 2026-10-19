@@ -677,14 +677,16 @@ The 2026-08-24 UX plan's Focus click behavior is fullscreen-only:
   turn is the expanded Thought foundation and renders before the Thought.
   Human user/steer rows and CAUSAL surfaced context are persistent
   boundaries in collapsed Focus, where they remain visible in raw relative
-  order. A MID-TURN `form:'notice'` (a background job or subagent settling
-  while the Agent works) is visible process feedback: it renders AFTER the
-  Thought as a post-Thought row while collapsed (2026-09-30 closure; the
-  decision reads the semantic `form` and raw position, never a source kind),
-  never enters the Thought's hidden Action candidate set, and returns to its
-  exact raw position when the Thought opens. A notice inside the
-  opening foundation stays before the Thought, and a mid-turn relay stays
-  visible.
+  order. An UNQUALIFIED MID-TURN `form:'notice'` (a background job or subagent
+  settling while the Agent works without durable same-turn next-step evidence)
+  is visible process feedback: it renders AFTER the Thought as a post-Thought
+  row while collapsed (2026-09-30 closure; the decision reads the semantic
+  `form` and raw position, never a source kind), never enters the Thought's
+  hidden Action candidate set, and returns to its exact raw position when the
+  Thought opens. The v2 Owner extension supersedes this sentence for a proven
+  Working `tool-jobs` Notice only (durable same-turn next-step claim): that row
+  follows the Thought hidden set. A notice inside the opening foundation stays
+  before the Thought, and a mid-turn relay stays visible.
   Expanded Focus preserves process chronology after the foundation: later
   steers and surfaced context return to their real positions and remain
   unmarked as owner-only process content. Searching a mid-turn notice needs
@@ -753,15 +755,97 @@ The 2026-08-24 UX plan's Focus click behavior is fullscreen-only:
   directly beside the identity, never `· 18s`), the `· thinking` marker is
   gone (thinking presence is not a lifecycle state; the Think slot owns the
   content), and the degradation ladder drops the LAST stat first and keeps
-  duration with the identity to the end. The header duration is the span's
-  OWN wall clock: the fold records a presentation-only `TranscriptTiming`
+  duration with the identity to the end. The header duration is the Activity's
+  structural LIFETIME (`src/tui/transcript/activity-clock.ts`), not the member
+  settle: the fold still records a presentation-only `TranscriptTiming`
   sidecar (`SessionEvent.time` only) on thinking/tool/retry rows (a command row
   and a subagent descriptor are never span members, so they carry no Activity
-  timing);
-  `summarizeWorkSpan` aggregates earliest-start/latest-end/any-running in its
-  existing single walk, running spans re-read `now()` per
-  render (the shared repaint heartbeat — no per-card timers), missing
-  evidence omits the duration (never `0s`), and read grouping never crosses
+  timing), and `summarizeWorkSpan` still aggregates
+  earliest-start/latest-end/any-running in its existing single walk. On top of
+  that member evidence the lifetime starts at the earliest member start and
+  closes at the EARLIEST real boundary, which is either (a) the start of a
+  human-interaction tool inside the run — a RUNNING `ask_user_question` /
+  `exit_plan_mode` is still a Process member while its active panel owns the UI,
+  and it is matched by NAME exactly like the fold's work accounting, so the
+  waiting time is never counted and the value is identical once the tool settles
+  and the card leaves the span — or (b) the first FOLLOWING canonical block that
+  provably became visible after the Activity started (the fold records a point
+  sidecar on the actually-visible Conversation/Context rows: assistant
+  first-visible reply text, user/injected-context messages, workflow runs,
+  compaction cards), and finally the owning turn's `turn/end` — which is a TIME
+  CAP, never a mere fallback: an Activity can never end after its own turn, so a
+  later turn's prompt/Context/Work can never lengthen an already-frozen
+  Activity. The close boundary is POSITION- and TIME-qualified: only a block
+  positioned AFTER the Activity whose own proven time is not EARLIER than the
+  Activity's start can close it, so a preceding row (a Context the Activity
+  started after) closes nothing, and neither does a reordered row that provably
+  became visible STRICTLY BEFORE it (cold hydration can order a Conversation row
+  after the Process rows it chronologically preceded — such a row also does not
+  disqualify the span as the live tail). An EQUAL-time following row does close
+  it, from that same instant: a coarse clock that stamps a whole step with one
+  millisecond must freeze the Activity (a point span hides its duration) rather
+  than leave it counting a Conversation that is already visible. The lookup is an exact offline dominance-min: two
+  bounded structure passes, two sorts and one indexed query per Activity —
+  O(n log n), never a per-Activity re-walk of the window (the structure reads are
+  locked by a Proxy-count regression). A following block with no proven
+  first-visible time keeps the span out of the live tail without closing it. **Display-order convergence (fold unit):** the
+  canonical Work MEMBERSHIP — which Process rows share one Activity — follows the
+  fold's ONE display order, and the fold now CONVERGES that order from durable
+  evidence instead of the accidental append order:
+  a step's Tool row is displaced around its Assistant anchor from the row's OWN
+  materialization evidence (the earliest of its Preparing delta and its durable
+  `tool/call`) compared with the Assistant row's proven first-visible reply time,
+  from EITHER arrival direction (`assistant/message` converges the calls its own
+  durable stream named; a durable `tool/call` carries its own step and converges
+  itself against an Assistant row that already settled). Read grouping asks ONE
+  adjacency question — the final display order, visible rows only — so a
+  Conversation visible between two reads keeps them apart (each with its own
+  `callCount`, timing, search corpus and window slot) while reads the display
+  order genuinely brings together still merge; cold builds the groups once after
+  `hydrate`, a live settlement re-groups only its own turn, and the cheap
+  raw-tail fast path is kept whenever the raw tail IS the display tail.
+  **The evidence rule (one rule, both arrival directions):** a Tool row is only
+  reordered when its OWN materialization evidence (the earliest of its streamed
+  Preparing delta and its durable `tool/call`) and the Conversation's PROVEN
+  first-visible reply time are both known and strictly different, and when the
+  call's durable `(turn, step, callId)` identity matches this step's own
+  candidates (its embedded stream's deltas or its durable message's tool-call
+  blocks). Every settlement re-derives the relations it already anchors, so an
+  authoritative replacement can never inherit stale order.
+  **Expressiveness limit of the anchor model (documented, not hidden):** a
+  displacement emits a whole side of one anchor contiguously (`before…, anchor,
+  after…`), so it cannot express "after the anchor, interleaved with a row that
+  stays put". A Tool displacement is therefore REFUSED when the move would cross
+  a visible row that is not itself one of the same step's proven same-side Tool
+  rows (an invisible row is never a boundary, so it can be crossed). In that case
+  every row keeps its physical order: the row order is the durable one, not the
+  full chronological one, and live vs cold are not guaranteed to agree for such a
+  log. This is the accepted conservative choice — it never lets a read jump across
+  another step's (or another lane's) visible row, and the Work/read grouping stays
+  internally consistent — rather than a claim of full convergence.
+  **Still conservative — never a guess, and no universal parity:** the streamless
+  settlement fallback (which exists only so an Activity can close) is NOT order
+  evidence, so without an embedded stream the durable append order stands; an
+  equal timestamp proves nothing; a call id the step never named, or one reused
+  by another step or turn, is not this step's evidence. Those logs keep the
+  durable append order, so an evidence-poor replay can still differ from the live
+  run. Read grouping is bounded work by construction for the NORMAL serial tail: a
+  `tool/result` that is the display tail settles through the local fast path with
+  no regroup at all, and a real display-order change re-groups only its affected
+  envelope (the changed row, its anchor and that anchor's other displaced rows,
+  their display neighbours, every group containing them, and the DISPLAY runs of every groupable read the envelope covers). That envelope is bounded by the affected RELATION, not by
+  a constant: a LATE or DISTANT settlement — a delayed replay whose displaced row
+  sits far from its anchor — can legitimately span the intervening rows, including
+  rows of other turns, so no universal "well below a turn" cap is claimed. Only an open, non-blocked
+  trailing span of a live-tail window
+  whose committed display subject is running is live; the live predicate is
+  re-read per render (never a latched boolean) and re-reads `now()` on the
+  shared repaint heartbeat (no per-card timers). An Activity with no proven end
+  and no provable liveness renders NO duration at all — the last member's own
+  end is never presented as the Activity's end, and no value can regress a
+  duration the user was already watching (a Remote snapshot-only
+  `running: false` flip, a history window, an inactive subject); a point-only
+  span omits it too (never `0s`). Read grouping never crosses
   a turn boundary so no Activity span ever inherits another turn's count or
   timing (a group's action cardinality and wall span stay on the turn that
   renders the card). The shared Think/Action/Preparing slot geometry lives
@@ -895,6 +979,24 @@ The 2026-08-24 UX plan's Focus click behavior is fullscreen-only:
   initial user plus immediately following surfaced Context) stays above the
   Focus Thought in both Focus states while a mid-turn burst keeps its
   chronological position.
+- **Snapshot and proven Working tool-jobs Context follow Work/Thought
+  (2026-10-19 Owner decision; v2 same day).** A producer-declared
+  `form:'snapshot'` Context singleton or snapshot-only raw-adjacent cluster is
+  carried by the same-turn Work/Thought instead of splitting it: Compact shows
+  one Activity, Focus hides it inside the real Thought, Full keeps the original
+  Context row/cluster and chronology. The SAME carriage applies to a
+  `kind:'tool-jobs'` / `form:'notice'` completion Notice **only** when the fold
+  proves it was delivered through `agent/inbox/spliced` `next-step` during the
+  same working turn (presentation-only `sameTurnNextStep` flag). `next-turn`
+  wakeups, cross-turn/foreign/missing claims and every other notice remain
+  independent visible Context. A mixed `instructions`/`catalog` + `snapshot`
+  cluster remains ONE indivisible Work boundary; `relay`/`recall`/unknown forms
+  and every other hard boundary keep their current role. The carried rows stay
+  Context (no Action, timing or tool-count contribution) and no new preset,
+  persisted state, Host behavior or `Agent.status` sampling is added. This
+  supersedes the old "every surfaced Context is a Work boundary / Focus
+  foundation" rule for exactly these narrow forms; the full contract lives in
+  `docs/transcript-display-disclosure.md` § "Working tool-jobs Notice".
 - **Performance contract**: a stable Work span's live reasoning/tool updates use
   the existing content-refresh path; a boundary change or member add/remove is a
   legitimate structural reprojection; notice/relay rows are render-time
@@ -1446,16 +1548,17 @@ they carry no `startedAt`, never join the active-work count, never inherit stop
 semantics, and the panel includes them by an explicit rule so a running Job can
 never hide a pending Question. `Enter` on such a row reopens the controller
 entry (closing the browser and returning the seat); a row that went stale
-between rendering and selection fails closed and keeps the browser usable. Scope, type, search, selection, and disclosure are
-presentation state, so promoting Quick to Full never reorders or deduplicates
-rows and Esc can restore the prior context. Their keyboard ownership is
-deliberately asymmetric: Quick is navigation-only (arrows, `←`/`→` tree,
-`Tab` type, `Enter` open, `Esc` close) and consumes every other key as a no-op,
-so no printable can arm a hidden search/stop/action state and `Esc` is always
-exactly one layer; the full Task Center owns search, scope, stop, refresh,
-paging and reverse (`Shift+Tab`) type cycling. The only keyboard path from
-Quick to Full is the `Open Task Center` pseudo-row plus `Enter`. Active scope
-retains every ancestor
+between rendering and selection fails closed and keeps the browser usable.
+
+**Retired pre-B4-B Quick/Full interaction contract.** The former modal promotion
+and Esc-restore flow, Quick `←`/`→`/`Tab` controls, and promotion pseudo-row
+route are superseded; do not use them as current behavior. Current on-demand
+Quick navigation and its optional Full action are specified in [The on-demand
+Task Quick](#the-on-demand-task-quick-hidden-by-default-keyboard-focusable-b4-b).
+The Full Task Center continues to own search, scope, stop, refresh, paging and
+reverse (`Shift+Tab`) type cycling.
+
+Active scope retains every ancestor
 needed to explain an active descendant but does not promote that descendant to a
 root. Terminal job failures are acknowledged only when a visible Task Center
 row is opened; until then the footer keeps a failure marker and the ↓ affordance.
@@ -1482,12 +1585,761 @@ execution-history list. Invariants (DSH `0.1.7` JobRegistry contract):
    the TUI never guesses provenance from kind, tool args, Transcript cards,
    or timing.
 6. **Transitions** — Quick defaults to Active; direct `/tasks` defaults to
-   Tracked; Quick→Full preserves Active; `A` toggles Active ↔ Tracked
+   Tracked. Quick's Full action calls the same `openTasksBrowser('full')` route
+   as `/tasks` and does not inherit Quick's Active scope. `A` toggles the Full browser between Active and Tracked
    (presentation only).
 7. **Footer denominator** — the job denominator is the current tracked
    roster (preferred density says `tracked jobs`), not a session lifetime
    total; it may shrink when upstream removes a record. Compact density
    keeps the bare `1/3j` form.
+
+## The selected-Job detail is a fullscreen workspace, not an overlay
+
+Opening a Job row (`bash`/`pwsh`/`other`, or a `subagent` Job without a stable
+child id) leaves the Task Center for a dedicated fullscreen Job workspace: a
+typed header (the status title, the real metadata, the page's summary and the
+Output/Command reading tabs), a retained-output body with its own Find row, an
+optional reading-facts row, and a pinned bottom Action Bar. Between the body and
+that bar a TRANSIENT notice row renders the app's own live notice while the
+workspace owns the terminal, so a Stop settlement (a refused or unproven stop in
+particular) is visible without leaving the Job view; it reuses the single app
+notice and its lifetime rather than a second Stop state. The visual layout itself
+is owned by the B1-D section below.
+
+One chrome plan (`planChrome()`) budgets every fixed row from the live terminal
+grant, in a fixed priority: the Action Bar first (it is NEVER budgeted away),
+then the status title (from two rows), then one readable body row (from three),
+then the Search row, the summary, the tabs, the transient notice, the metadata
+row and finally the reading-facts row. Every optional row is granted only while
+the reserved body row survives, and the metadata / reading-facts rows need enough
+body left to stay worth reading, so a transient notice never squeezes the last
+output row away and no optional row can push the Action Bar off the screen. A
+Search row is only granted from four rows up, so a shorter frame cannot enter
+Find at all, and a resize that takes the row away leaves the search (keeping the
+paused viewport and its anchor) instead of pointing the physical focus at a hidden
+editor. The workspace is its own screen, so the main transcript, the original
+editor and the footer never take part in its layout, and the previous screen
+(regular or transcript fullscreen) is paused with the Task Browser kept alive
+underneath — `Esc` returns to the SAME browser instance, its selected row and the
+original draft/scroll state.
+
+Facts stay separated by construction: the workspace presents ONE captured
+`JobInspectorState` (the opening row plus the latest detached observation), and
+the body is exactly the port's retained tail — never a concatenation of status,
+label and output. The three placeholders are distinct and honest: `Waiting for
+retained output…` (no snapshot yet), `No retained output` (observed, nothing
+retained) and `Retained output unavailable` (the observation port refused). A
+`subagent` Job shows `Label` instead of pretending to be a shell command, and
+every frame discloses `Retained preview · not full history` (on the reading-facts
+row where the grant allows one, otherwise on the pinned Action Bar) — the tail is
+bounded and is not the Job's archive. `Esc` and the `tasks.stop`
+component action remain the only write intents; the Stop write stays the
+existing capability-gated `jobObservation.stop`, and ordinary typing never
+reaches the background editor or transcript.
+
+## Job Output follow is End-only, and Find is Job-local
+
+The Job Output is the ONE scrollable region of the workspace: `PgUp`/`PgDn`,
+`↑`/`↓`, `Home` and the real terminal wheel (and an equivalent scrollbar jump)
+move only that viewport, never the background transcript or Task Browser, and
+never submit editor input. Follow is an explicit client-local intent owned by the
+Job's own viewport, deliberately NOT the fork's automatic end-follow: opening a
+Job follows the retained tail, ANY manual browse — paging, one line, `Home`, a
+wheel notch, a scrollbar drag, or landing a search hit — pauses it, and `End` is
+the ONLY key that resumes it. Reaching the last row by hand, a content shrink, a
+viewport growth (terminal resize or a chrome row appearing/disappearing), a newer
+snapshot and leaving the search all leave the intent paused, so the Action Bar's
+`Follow on` / `Follow paused · End resume` text is the user's truth rather than a
+`scrollTop` coincidence. `Ctrl+Home`/`Ctrl+End` stay pure browsing aliases (they
+pause), and `End` is honoured even after the Job settled: it means "show the
+newest retained tail", never a claim that new Job output appeared. The physical
+`Home`/`End` viewport keys are RESERVED to the workspace: they are matched before
+any Find binding, so a user who remaps the effective Find onto one of them still
+gets End as the only follow re-arm (and Home as the preview top), while `/` —
+never reserved — remains the Job-local Find entry; the Action Bar's Find hint
+drops such a reserved binding rather than promising a key the workspace
+consumes.
+
+`Tab` is reserved the same way, for the workspace's own page toggle: the owner
+matches it BEFORE the Find check — **unconditionally, in every search state** — so
+a Find remapped onto `Tab` can never shadow the page switch the bar advertises
+nor reach `openFind()` (in NAVIGATE that would flip the search back to EDIT). The
+Find hint filters it out exactly like Home/End, only the inactive state performs
+the switch, and while a Find owns the ordinary keys `Tab` is a consumed no-op. `/`
+remains the always-available Job-local Find entry, so no remap can strand the
+search.
+
+`Ctrl+F` (or whatever the live keymap really resolves `app.transcript.search`
+to, leader sequences included) and the non-configurable `/` alias open a Find
+over the CURRENT retained Output only: the header, the `Command`/`Label`
+summary row, the tabs, the notice and the background transcript are never
+searchable, and an
+empty/unavailable body reports `0/0 · No matches` instead of inventing a hit. The
+binding is scoped to the Job — the Transcript search handler and the fork's
+built-in search overlay are never entered from inside the workspace — while a
+Find that is disabled or rebound stops advertising the old key. `Enter` moves
+from editing to result navigation, where `n`/`N` cycle the matches; in the editor
+those letters are query text, and in navigation every other printable key is
+inert. The Search row shows its own `i/N` fact, the current match is strongly
+highlighted while the other visible matches stay weak-underlined, and the
+rendered row count and every visible width are unchanged. The first `Esc` leaves
+only the search (keeping the paused viewport next to the still-open Job, with its
+query remembered for the next `Ctrl+F`); the next `Esc` is the existing Back to
+the Task Browser. `End` while a result view is up leaves the search and returns to
+the tail as well — and the physical focus returns from the hidden Search row to
+the workspace root. The Action Bar only promises keys the current search state
+really accepts: while a Find owns the ordinary keys it does not advertise Stop
+(the Search row consumes ordinary letters while editing and the read-only result
+view keeps them inert), and while the query is being EDITED it also drops the
+`End resume` suffix and the Find entry hint, because `End`, `Home` and the Find
+chord belong to the query Input there; the result view keeps `End resume` and the
+Find re-entry, and leaving the search restores the normal bar.
+
+The retained window is the ONLY source any of this may read. The anchor and the
+search hit are both carried against ONE baseline: the retained window that was
+actually DRAWN last (its source, width and rendered rows) plus the proven row
+eviction applied to it since. When the port's bounded tail evicts old bytes, the
+newest window is compared with that baseline — by ANSI-stripped visible content —
+and the total eviction moves the visible top row and the current hit together, so
+several snapshots landing before the next frame keep the exact same row instead of
+re-applying or discarding an eviction, and a different occurrence that happens to
+reuse the old row/column coordinates can never inherit the current hit. A window
+with no provable overlap (a width re-wrap, a fully replaced preview) keeps the
+offset and lets the viewport clamp it, never guessing and never fabricating a
+`GAP`; `[GAP]`
+still comes only from the official `gapBefore` fact, `[ERROR]` from the
+observation error and `[SETTLED]` from the official settlement, and they remain
+independently co-visible. The Action Bar's `rows a-b/N` is the position inside
+THIS retained preview, never a Job-history line number, and it yields to the
+disclosure when the row is narrow. Search indexes are rebuilt for the current
+window/width/query only; a match that left the window cannot leave a stale
+highlight or `i/N` behind. A surviving current hit stays current across a newer
+window while its row is still provable (a pure append never resets `n`/`N`),
+because the hit is carried through the SAME proven row mapping as the anchor —
+never as a bare coordinate key, which an eviction could hand to a different
+occurrence. A width change has no such mapping at all (the rows are re-wrapped),
+so the carried identity is dropped there rather than compared across widths. Only
+when the current match itself cannot be proven in the new window does the
+selection fall back to the nearest PROVABLE match at or after the visible anchor
+rather than to an old ordinal, and that visible anchor is the viewport the frame
+ACTUALLY painted — synchronised at every frame commit, so a plain scroll moves it
+even when no Job output arrived.
+
+Not yet claimed here: the Command reader, the exact original-text selection and
+the two Copy verbs live in their own sections below. Search, follow and the
+retention anchor above are B1-B.
+
+## The Command page is a mutually exclusive second body of the SAME workspace
+
+A shell Job (`bash`/`pwsh`) whose OBSERVED `label` is non-empty gains a Command
+page inside the same workspace, the same `TuiAltScreen`, the same Job and the
+same observation: `Tab` on either page toggles between Output and Command, or a
+click on the visible Command summary / its `↗ Command` entry / the `Command` tab
+switches to it; `Esc` returns to Output (it never closes the workspace
+and never releases the observer). `Tab` replaced the former Job-local `v` open
+verb: one symmetric key now owns the page toggle in both directions, and `v` is
+inert. `Label:` Jobs (`subagent` and every non-shell
+kind) never grow one — the entry is gated on the OBSERVED kind plus a non-empty
+label, so an opening Task row that merely looks like a shell command can show a
+read-only summary but cannot open or copy a Command, and a Job whose eligibility
+disappears returns to Output synchronously, dropping the Command hit map, the
+selection and the editing focus with it.
+
+Both bodies and both Search rows are mounted ONCE for the whole panel lifetime
+and made mutually invisible by the layout's own `visible` entries, so exactly one
+body is ever laid out and exactly one is the primary ScrollView. The Output page
+therefore keeps its follow intent, its viewport, its anchor and its query across
+any number of round trips; entering or leaving the Command page never calls
+`pauseFollow`/`resumeFollow`, and the Command page never shows an Output Follow
+state, never shows the Output retained-preview disclosure (it shows `Full
+command` instead) and never advertises Stop. `End` on the Command page is that
+document's end (it has no follow to re-arm), while `Home`/`End`/`PgUp`/`PgDn`/
+arrow/wheel/scrollbar all move only the page the user is reading.
+
+`Ctrl+F` (or the live effective binding) and `/` open the CURRENT page's own
+Find: two independent `JobOutputSearch` instances with their own query, mode,
+epoch, `i/N` fact and reveal, so a Command query never inherits the Output query
+or its match ordinal. Switching pages ends the current Find's INPUT ownership
+(the query is kept for the next open) and returns the physical focus to the
+workspace root, and `C` while a Find owns the ordinary keys is query text —
+never a copy.
+
+## Command copy is original-text only, through the existing Client clipboard
+
+Three verbs share the ONE existing Client-local capability
+(`ClientActions.copySelection`, injected into `TuiApp`); no Host port, no new
+clipboard service, no remote OS clipboard and no `process.stdout` write is
+introduced.
+
+- **Output Copy** (`C` while no Find owns the ordinary keys) sends the
+  `JobObservedSnapshot.text` captured at the keypress, verbatim: no trim, no ANSI
+  strip, no header/marker/decoration, no Command source, and no claim about
+  evicted history.
+- **Command Copy All** (`c` on the Command page, or a click on the painted
+  `Copy All [C]` button) sends the ORIGINAL `JobObservedSnapshot.label`: leading and
+  trailing whitespace, TABs, CRLF and a trailing newline all survive, and the
+  display prefix, ellipsis, escapes and alignment spaces are never part of the
+  payload. On a frame too narrow to paint the whole button no click target is
+  created at all, and `C` remains the reachable path.
+- **Command drag selection** sends `label.slice(start, end)` for the half-open
+  UTF-16 range the gesture covered.
+
+Every DYNAMIC field the workspace CHROME paints crosses ONE display boundary that
+strips complete CSI/OSC/APC/DCS sequences and drops any remaining C0/C1/DEL byte:
+the header rows (Job identity, kind, status, progress, detail, the Command/Label
+summary and the follow-stream error) AND the transient notice row, which embeds
+the Job label in a Stop settlement. Both rows carry Host-supplied metadata on a
+screen the fork also uses for its own terminal control, and the theme's own
+styling is applied AFTER that projection, so it is never stripped with it. The OFFICIAL bytes are
+never rewritten: the `View`, the Command document and every copy payload keep the
+raw `label`/`detail`/`progress`, and the Command body shows control bytes as
+visible escapes rather than executing them. A `label` carrying its own OSC 52 is
+therefore painted as plain text and can never reach the terminal stream from
+either row. (The Task Browser's own stop notices interpolated the roster label the
+same way; that pre-existing sibling was outside B1-C and was reported there. It is
+closed by the Task Browser Host-text terminal-safety boundary recorded below.)
+
+The Command page renders a dedicated document model rather than the vendored
+`Text` renderer, because `Text` expands TAB to three spaces, word-wraps and
+`trimEnd()`s every wrapped row — round-tripping those rows could never reproduce
+the original bytes. The model scans the label once per (source, width) and keeps,
+for every painted cell run, the exact original UTF-16 range it came from:
+`\n`/`\r\n` are real hard-break tokens whose offsets stay in the source, soft
+wrapping inserts nothing, TAB paints three cells but maps one `\t`, a lone `\r`
+and every other C0/C1/DEL byte are painted as safe text escapes (`\x1b`, `\x00`,
+`\r`, …) that still map back to their single original character, and a grapheme
+wider than the whole grant paints one placeholder cell while still mapping in
+full. Padding to the terminal's right edge forms no run, so it can never be
+dragged into the payload. A changed label, a width change, a page switch, a blur
+or a dispose cancels the gesture instead of re-mapping stale offsets.
+
+The selection itself is consumer-layer: the published `MouseRegion` wraps the
+Command body as the ScrollView's only child, returns `capture: true` on a left
+press, and resolves every press/drag/release against the LAST PAINTED viewport
+geometry (read at the frame-painted boundary) plus the live scroll position —
+never the press-time captured origin, which goes stale as soon as an edge scroll
+moves the viewport. The range is SYMMETRIC and inclusive at both ends: the
+document-order earlier endpoint aligns to its grapheme's start and the later one
+to its grapheme's end, whichever end the user pressed first, so `a → c` and
+`c → a` over the same line copy identical bytes and the pressed grapheme is never
+dropped. A same-cell click selects nothing and copies nothing. The wheel is
+deliberately left UNHANDLED so the fork's own routing scrolls the active
+viewport, and the scrollbar keeps the fork's existing interaction.
+
+Auto-scroll follows the fork's own gesture feel: a PRESS only anchors (it never
+starts a timer), and once the gesture has really dragged, reaching the body's
+visible FIRST or LAST row — or leaving the body entirely, which keeps the clamp —
+starts a temporary 50 ms timer that scrolls one row and grows the selection over
+the rows that scroll in. A one-row viewport has no distinct edges, so the same
+cell never implies both directions: it scrolls only when the pointer clearly
+leaves the body. The timer stops as soon as the real document boundary cannot
+move the viewport any further, and it belongs to the gesture alone — it is
+released on release, page switch, resize, blur, label change, workspace exit and
+dispose. Only the Command viewport moves; the Output page's follow intent and
+scroll position are untouched by any of it.
+
+Both Copy verbs capture the payload SYNCHRONOUSLY and only then hand it to the
+app, so a snapshot arriving while the promise is in flight can never rewrite what
+was requested. The settlement re-proves the exact Job workspace record before it
+may notify: a copy that lands after the user left that Job — or after a
+replacement viewer opened — is dropped silently. `true` from the clipboard
+strategy only proves the bytes were EMITTED (OSC52 has no clipboard ACK), so the
+notice reads `Copy sent` and never claims the system clipboard received them; a
+`false` result and a rejection both read `Copy failed`, and a composition that
+does not wire the owned-task entry reports the same failure instead of looking
+inert.
+
+An intent with NO payload is answered by the reason the panel captured, never by
+a generic silence and never by a clipboard write: an observed-but-empty retained
+Output reads `Nothing to copy`, a not-yet-observed (or refused-observation)
+Output reads `Output unavailable`, and a Command copy that lost its eligibility
+reads `Command unavailable`. The workspace does not guess and does not reshuffle
+the sources: a Command page that cannot be entered makes no request at all, and
+an empty gesture (a click, or a drag that covers no cell) is not a copy intent, so
+neither produces a request or a notice.
+
+The header's Command summary, its `↗ Command` entry, its `Copy All [C]` button
+and the other page's tab are plain painted cells, so they route through the alt
+screen's existing press/click callbacks against a hit map produced by the LAST
+PAINTED header frame (the header's own painted top row included). A region is
+exactly the painted TEXT it names: the summary and the `↗ Command` entry are two
+separate regions, the `Copy All [C]` button is its own, and the padding in between
+stays inert. The release must re-prove the SAME action, the SAME page, the SAME
+Command source identity AND the same relative row/cell range the press named, so a
+repaint between press and release — another Job, a re-flowed header row, a
+narrowed button — can never fire a ghost open or a copy of different bytes. Both verbs also
+have their fixed Job-local keyboard fallbacks (`Tab` for the page, `c` on either
+page), so nothing is mouse-only. The keyboard and the pointer are separate
+intents: while a Command Find owns the ordinary keys a plain `c` types into the
+query (or stays inert in result navigation) and neither state advertises a
+keyboard Copy, yet the still-painted `Copy All [C]` remains clickable — one click
+copies only the official original label, and it never touches the query, the
+current hit, the search mode or the search input's focus.
+
+The Action Bar keeps B1-A/B's retention order and simply appends the two
+read-only verbs at the LOWEST priority, so a narrow row drops `C copy output`
+before `Tab switch` and both before any pre-existing truth (`Esc back`, Stop,
+Follow, `[GAP]`, the retained/full disclosure, the position fact and the Find
+hint). At 80 columns that means the verbs are usually not advertised at all while
+their KEYS stay fully functional: no half-painted affordance is ever shown, no
+action that cannot execute is advertised, and a `Copy All [C]` whose row the
+frame could not grant leaves no click target behind. The B1-D reading tabs are the
+long-term entry point for these verbs; the KEYBOARD fallbacks and the drop order
+above are unchanged there.
+
+The Command page therefore suspends the fork's OWN copy-on-select while it is
+shown (and restores whatever the screen started with on Output), because that
+native path classifies a SECOND click inside the fork's 500 ms double-click window
+as a word selection and would copy the word under the pointer through its own
+trimmed screen-text path — overwriting the exact command copy the button just
+made. The Command body's precise drag selection does not depend on it: it is the
+`MouseRegion` path above. The Output page keeps B1-A's native selection copy on
+purpose (dragging the retained body still copies screen text), which also means a
+rapid double click on the Output page's `Command` summary (or its `↗ Command`
+entry) copies a screen word instead of opening the Command page — the pre-existing screen-wide behaviour, not
+a B1-C regression; a single click always opens the page as documented.
+
+## Job Workspace visual layout after B1-C (B1-D)
+
+B1-D is a PRESENTATION change on top of the merged B1-A/B/C behaviour: the same
+panel, the same ONE observer, the same two reading pages, the same copy sources
+and the same press-time hit-map owner, with a readable hierarchy. The frozen
+visual order of one frame is: the status title, the optional metadata row, the
+page's summary row, the reading tabs, the current page's optional Search row, the
+body, the optional reading-facts row, the transient notice row, and the pinned
+bottom Action Bar. `planChrome()` above remains the ONE budget; no component
+computes its own `terminal.rows` share.
+
+- **Status title** (from two rows): the fixed `Job` label, the Job id and kind,
+  then the ONE shared `‣` marker plus the Title Case status word in
+  `taskStatusColor` and the independent `[GAP]`/`[ERROR]`/`[SETTLED]` markers
+  (warning/error/muted). The
+  status and its markers are laid out FIRST, so a long identity truncates itself
+  and can never push the status out of its row, and the markers stay readable
+  without colour.
+- **Metadata** (standard frames only): the real `progress`/`detail` plus the
+  descriptive `Earlier output evicted` / `error: …` facts. Progress outranks
+  detail, and the descriptive facts claim at most half the row, so an unbounded
+  progress value can never make the independent gap/error reason unreachable. No
+  row is drawn when the view has no such fact — never a blank placeholder.
+- **Summary**: on Output, `<Command|Label>  <label>` with the right-aligned
+  `↗ Command` entry ONLY while a shell Command is really observed (the opening row
+  may show the read-only summary but never grows the entry); on Command,
+  `Full command` with the right-aligned `Copy All [C]` button. Every non-shell
+  kind reads `Label`, and no arrow, button or Command tab exists for it.
+- **Reading tabs** (one row): the CURRENT page is bracketed and emphasised
+  (`[Output]`/`[Command]`, compact `[Out]`/`[Cmd]`), the other page is plain, and
+  a themed `─` run fills the rest of the row (CJK/wide labels included: the run is
+  sized in terminal cells). The tabs derive from the existing `readState.view` —
+  there is no second `selectedTab`/`activeReadView` state — and only the OTHER
+  page's label is a hit target: the current page's bracketed label is a status
+  marker, so clicking it changes nothing.
+- **Body**: the same B1-B/B1-C renderers on the terminal's own background — never
+  a second card, frame, `$` prefix or injected colour that could reach a payload.
+- **Reading facts** (wide and tall frames only): ONE unflanked status row carrying
+  the page's own disclosure (`Retained preview · not full history` / `Full command`)
+  on the left and the real `rows a-b/N` position of THIS retained preview on the
+  right. Where the frame
+  grants no such row, the pinned Action Bar keeps the bounded disclosure instead:
+  one fact is never advertised twice in the same frame, and neither form ever
+  claims a complete history.
+- **Action Bar**: pinned last and painted with the theme's muted token —
+  `Esc back`/`Esc output` (last), the legal `tasks.stop` primary hint, the strict
+  `Follow on`/`Follow paused` truth, `[GAP]`, the effective Find key, the Job-local
+  `Tab` page toggle and `c` copy verbs and a pure `PgUp/PgDn` browsing hint, each
+  yielding in the B1-B priority
+  order. Every entry is gated on the LIVE frame: the Find hint appears only while
+  the frame can host a SearchRow and the query is not being edited, the page hint
+  only while a body row is really painted and the query does not own the ordinary
+  keys, and the preview position only while a body is painted — a frame that
+  cannot act on a hint never advertises it.
+
+Responsive grants use the same 80×10 boundary B1-B already owned: `rows>=4`
+grants the SearchRow, `rows>=5` the summary and the tabs, `rows>=6` the transient
+notice, `cols>=80 && rows>=10` the metadata row (and only with at least four body
+rows left), and `cols>=100 && rows>=12` the reading-facts row (with at least six
+body rows left). Below those floors the optional rows disappear in that order and
+the body keeps at least one row from three rows up: `rows=2` is status + Action
+Bar, `rows=1` is the Action Bar alone with `Esc` still reachable. A live notice
+therefore yields at five rows and takes its own row at six only because one body
+row survives.
+
+Copy payloads are UNCHANGED: Output Copy is still `observed.text`, Command Copy
+All is still the original `observed.label`, and a Command drag is still
+`label.slice(start,end)`. The new chrome adds no copy source, and a rendered,
+highlighted or truncated string is never fed into a payload. The Command page
+still suspends the fork's native copy-on-select (the Output page restores the
+setting the screen started with), and the Output page keeps B1-A's native
+selection copy on purpose.
+
+The hit map remains "the LAST PAINTED frame, and only its painted text": the
+header produces the regions its own render really painted — the summary and the
+`↗ Command` entry as two separate regions, the `Copy All [C]` button, and the
+other page's tab — and a release re-proves the same action, page, Command source
+identity and the same relative row/cell range. Hidden and zero-grant affordances
+keep no target, and a row the frame had to truncate keeps only the label cells it
+really painted: the ellipsis `truncateToWidth` substitutes is inert, so a frame
+too narrow for the label can never be triggered through its own overflow marker. The `open-output` action added for the Output tab
+routes to the existing `showOutput()`, so a tab click is the SAME page switch as
+`Esc`/`Tab` (Search exit, selection cancel, native copy-on-select restore and the
+repaint included) and never a display-only body swap.
+
+No Job fact is invented: the chrome renders only the fields
+`deriveJobInspectorView` already projects, and every Host-supplied string
+(`label`, `detail`, `progress`, the follow-stream error, the notice text) crosses
+the SAME `chromeText()` control-sequence boundary BEFORE the theme styling is
+applied, exactly as the B1-C section above records.
+
+## The Settings workspace: a three-level projection whose Theme and Display rows are editable (B2-A → B2-B)
+
+`/settings` opens a dedicated fullscreen Settings workspace instead of a
+72×28 `SettingsList` overlay. The workspace is a read projection of category /
+row / detail navigation over a detached snapshot; since B2-B, exactly TWO of its
+rows (`Configured theme`, `Transcript display`) also own a real write channel,
+and nothing else does. S4-D1 adds the first-level `Plugins` category: it is a
+DIRECT page entry (not an empty Rows level), hosts the one Plugin Manager page
+inside this same screen, and returns to L0 with Plugins selected; see the S4-D1
+section below.
+
+**S4-D2 / D2-0 Owner amendment (2026-10-19).** The one-step direct entry is
+KEPT, and the multi-column `Rows` pane now displays ONE UI-only navigation
+affordance (`Open Plugin Manager`) for the Plugins category. It is not a
+Settings row: it has no `SettingsWorkspaceRowId`, value, freshness or editable
+field, it is not part of `SettingsWorkspaceSnapshot.rows`, and it is not counted
+in the Host settings row list. The pane header counts what is really painted
+(`Rows (1)`); a click on the affordance opens the SAME page as `Enter`/`Right`
+inside the same Alt-Screen lease and the same `openPluginsPage()` path. The
+narrow projection still has no Rows pane (it keeps the direct key entry), and a
+pane click in the Plugins Rows/Details area never fabricates an L1/L2 focus that
+the real navigation cannot produce.
+
+- **Post-B2-A navigation decision: three levels, not focus owners.** The
+  workspace always has exactly three levels — L0 `categories`, L1 `rows`, L2
+  `detail` — and the panel's `focus` is the only navigation state. `Right`
+  advances exactly one level; `Left` returns one level and is inert at L0.
+  `Enter` follows the same level transition, while `Esc`/`Backspace` step back
+  (and close at L0), at EVERY width. `Up`/`Down` act on the current level.
+  `Tab`/`Shift+Tab` remain inert; the retired medium-only Tab focus cycle and
+  header category switch are not restored. A writable row enters L2 choosing
+  in one step from L1; a read-only row enters L2 browse. A new open always
+  starts on L0.
+- **Responsive three / two / one projection.** Width only decides how many panes
+  of the current level are painted: `>=108` columns render the three-column
+  `Categories | Settings | Details` layout; `76..107` derive their two columns
+  purely from the current level (`focus === 'categories'` → `Categories |
+  Settings`, otherwise `Settings | Details`); `<76` renders the current level
+  alone. Hidden panes are neither painted nor addressable — they publish no hit
+  target and own no wheel — and row text is laid out against the pane width it
+  is actually painted in, so the medium rows column may differ between L0 and
+  L1. The single width breakpoint table is the panel's own freeze, not a
+  project-wide rule.
+- **The pilot rows are real read facts.** Appearance shows `Configured theme`
+  and `Icon style`; Display shows `Transcript display` (the LIVE
+  `runner.displayPreset()`, with the persisted `.displayPreset` named as a
+  separate last-read fact) and `Thinking detail` (the live
+  `app.isThinkingExpanded()`). Every row states its Scope and freshness; a
+  missing document is `unavailable` and a `get()` throw is a `read-error`, never
+  a fabricated default. The theme row's `value` is the source-qualified
+  configured identity (`plugin:…`/`file:…`) and its summary is the friendly
+  display name — the raw identity is what `C` copies. The header is a pure level
+  breadcrumb (`Categories` / `<Category> · Rows` / `<Category> · <Row>`) plus an
+  `N editable rows` badge at 76+ columns; it paints no interactive cell.
+- **Browse and copy never write.** Navigation and `R` (re-read the same
+  authorities, no subscription and no shadow store) never touch the configuration
+  document. `C` copies the captured row's exact `value`; during L2 choosing it is
+  active only while the painted Action Bar advertises `c copy`, using the existing
+  `copySelected()` path and never the draft candidate. A row without a write
+  channel says so (`read-only here · Other settings edits this row`) and paints no
+  edit verb.
+- **The L2 edit phase is transient, not a fourth level.** On the two writable
+  rows, `Right`/`Enter` (or the painted `[Change…]`) opens an in-pane choice
+  directly from L1; the same Detail pane keeps current-value and Runtime/Persisted
+  facts above the candidates. `Up`/`Down`/`Home`/`End` move candidates without
+  writing, `PgUp`/`PgDn` and the wheel over facts scroll only the fact region, and
+  the candidate list scrolls independently under its own wheel region. The active
+  multi-column pane title (for example `[Details]`) remains while one content row
+  remains; it yields only when it would replace the sole content/candidate row.
+  `Enter` or `[Confirm]` is the only commit; `Left`/`Esc`/`Backspace` or `[Cancel]`
+  cancels directly to L1 with ZERO writes. Only an explicit confirm dispatches,
+  and a candidate whose source is gone (an unloaded `plugin:` theme) is listed as
+  `unavailable` and refused at confirm and at retry. The heading `Choose value`
+  names the shared in-pane selector; a long or CJK candidate WRAPS rather than
+  being truncated, every painted candidate row is a real hit target, and the
+  exact candidate value (source-qualified for themes, never its label) must be
+  visible before keyboard confirmation. If it has scrolled out of view, the first
+  Enter reveals it and the next Enter confirms. The frozen 44×8 allocation remains
+  the default; under the owner-approved bounded exception, an identity that needs
+  more candidate rows first reclaims the optional `Choose value` heading and, only
+  if still needed, reduces facts to one original `Value` row. Confirm and `Enter confirm` are
+  painted only when the complete identity fits; identities beyond that capacity
+  remain unconfirmable at 44×8 and require more height. A layout WIDTH change
+  re-flows wrapped candidates and participates in the reveal rebase exactly like a
+  candidate or viewport change (while a plain repaint never fights the user's own
+  scrolling), and a source that unloads under an open choice re-anchors it on the
+  candidate VALUE. One commit at a time: while a write is pending the edit verbs
+  are not painted, and the panel holds exactly one request identity, so a
+  superseded or post-close settlement can never repaint.
+- **Runtime and persisted are two facts, always drawn apart.** A writable row's
+  Detail names the live runtime fact (`Runtime` for the theme palette —
+  `app.currentTheme()`/`app.activePluginTheme()`, never the configured value) and
+  the stored preference (`Persisted`, or `Value` where the row's primary value IS
+  the persisted one). The stored fact is the one the READ proved: the value, `not
+  set` for a readable document that carries no value, or an explicit
+  `unknown — …` when there was no document to read — the panel never guesses which
+  of those it is. The commit status is field-scoped and shown only on the row
+  that owns the phase: `Saving…`, `Verified · the authoritative read agrees`,
+  `Not saved · <real reason>`, `Commit accepted · verification unavailable ·
+  <reason>` or `Outcome unknown · <reason>`. `Verified` requires a completed
+  mutation, a `configReadiness() === 'ready'` re-read and a matching authoritative
+  value (theme after canonical normalization, display preset exact). A write that
+  returned success but could not be re-read is `Commit accepted · verification
+  unavailable`; one that returned success while the authority READABLY disagrees is a
+  failure (`Not saved · the write reported success, but the authoritative document
+  reads …`), never "verification unavailable" — the readback was performed and
+  disagreed. A REJECTED write is classified on a fresh authoritative read against the
+  value the request STARTED from (its base): only an authority still carrying that
+  base REFUTES it (`Not saved · <the real error>`), while a third value (someone else
+  wrote in between), the requested value already in place — an external writer may
+  have reached it first — or an unreadable authority proves nothing about THIS request
+  and is reported as `Outcome unknown`, never as a claimed acceptance and never as a
+  refusal the authority contradicts.
+- **The write path is the existing one.** The commit runs through
+  `serializeTuiSettingsMutation` over `ConfigPort.tuiSettings`, re-reads the
+  document inside the queued task, preserves the raw USER `footerCustomItems`
+  (fail-closed when unavailable) and changes exactly one field. The Display preset
+  applies through the SAME `TuiApp` DisplayState owner `/display` and `/focus`
+  use and then persists ONCE: the runner's own `setDisplayPreset` (apply-first
+  plus a detached best-effort write) is deliberately NOT used, because it would
+  dispatch a second write. `/display`, `/focus`, `/footer` and the legacy editor
+  keep their existing semantics.
+- **A non-ready backend never fakes a save.** A theme commit is refused before
+  anything is applied when `configReadiness() !== 'ready'`; a display commit may
+  still apply the Client-local runtime fact and then reports exactly that
+  (`applied locally, but the configuration is stale so it could not be stored`).
+  A refused write leaves the runtime ahead of the document and says so instead of
+  silently rolling the applied palette back.
+- **The theme `auto` apply is the terminal query, fenced on ONE runtime-owned
+  intent.** Choosing `auto` drops the plugin-theme record FIRST (the unload fallback of
+  a theme the user has left must never force `dark` and stop the terminal tracking over
+  a stored `auto`), starts the one OSC 11 detection and enables tracking — starting the
+  detection IS the apply, exactly like `/display`'s runtime-first policy. Every
+  DELIBERATE selection records the runtime owner's intent
+  (`TuiApp.noteThemeSelection()`: the boot restore, the legacy `/settings` theme row,
+  the Settings workspace, the reload re-apply, the advanced host-state `setTheme`),
+  and both the settled detection (`runAutoDetect`) and the live scheme listener are
+  fenced on it instead of on the asynchronous document — an explicit theme applies
+  runtime-first, so the persisted value can still read `auto` while its write is in
+  flight, and neither a late answer nor an already-queued scheme report may colour
+  over the newer choice. Derived applies (a detection's own answer, a report, the
+  plugin-unload fallback) never record the intent. The detection is issued for the screen
+  that owned the terminal, and a screen hand-off RELEASES that observation with it — the
+  answer is dropped rather than trusted about a screen the user has left. Every hand-off
+  completion (both directions of a fullscreen swap, the Job/Settings workspace opens and
+  the return to the surface they paused) re-samples ONCE when the latest intent still
+  follows the terminal, awaiting the abandoned observation so it starts a fresh one on the
+  screen that now owns the terminal. A stale answer therefore cannot colour a new screen
+  AND an in-flight query is never simply lost. Mode 2031 is per screen: the leased workspace screen joins the same tracking
+  sync, so `auto` chosen INSIDE the workspace subscribes the screen that really owns the
+  terminal (and a manual choice releases it) instead of waiting for the lease to end.
+- **Navigation never loses identity.** Selection is the stable row/category id,
+  and width changes only re-project the layout: the level, the category and the
+  row survive a resize in both directions, and the list rebases to keep the
+  selected row (or the highlighted candidate) visible instead of scrolling the
+  whole screen.
+- **Mouse follows the last painted frame.** A category/row click selects the
+  clicked item and takes its level's focus without advancing; clicking ordinary
+  visible Detail content from L1 enters L2 (the same one-step choice for a
+  writable row, browse for a read-only row). Any click that leaves L2 cancels an
+  uncommitted choice atomically, including a click on the same row/category.
+  Painted `Copy value`/`[Change…]`/`[Retry save]`/`[Confirm]`/candidate/legacy
+  cells act on the item they are painted for regardless of the keyboard level,
+  and a click is refused unless release re-proves the press-time kind, id, painted
+  row, cell range, state version, level and category. A button that does not fit
+  the pane WHOLE is not painted and publishes no hit target; wheel events scroll
+  only the painted region under the pointer (facts and candidates are independent
+  while choosing).
+- **The legacy complete editor stays reachable.** The permanently visible
+  `Other settings` category holds one row, `Open existing settings…`. Activating
+  it retires the workspace (restoring the surface it paused) and only then opens
+  the pre-B2-A `SettingsList`, so Icon style, Thinking detail, the Plugin Manager
+  submenu, permission/session rows, extension settings and every existing write
+  path are unchanged; `TuiApp.openSettings()` and its other callers keep their
+  exact semantics.
+- **The workspace is a physical screen lease** (§10.3 of
+  `overlay-focus-contract.md`), mutually exclusive with the Job workspace and
+  pre-empted by Question/Approval/Save. A dispatched commit survives the close
+  under its runner owner, but its settlement is fenced by the screen record and
+  the panel's request identity: it never repaints, notifies or addresses a
+  replacement workspace.
+- **Still read-only / still later.** `Icon style` and `Thinking detail` remain
+  readable rows in this slice (their full editors stay behind `Other settings`);
+  the remaining Settings migration and B4 Task Quick are later slices, and
+  closing B2-B on these two rows is not Gate-3B closure.
+
+## History is an Editor-seat tenant with an independent Preview (B3-A)
+
+`Ctrl+R` no longer opens a managed overlay. Phase 3B / B3-A projects the
+`HistoryPanel` into the editor seat through the Phase-3A optional tenant, so the
+live Transcript keeps rendering above it and the ordinary footer below it while
+the seat shows the History surface.
+
+- **One vertical presentation at every width.** Header (`Input History` + the
+  responsive scope tabs + the `F2` hint), query row, a `Results · N matches`
+  counter, a single-line results window capped at eight painted rows, a divider,
+  the `Preview` + `rows X-Y/N` heading with the copy actions, the soft-wrapped ORIGINAL
+  prompt and one trailing metadata row. The retired 100-column split/stacked
+  overlay layout, its width cap, its 7-row detail clamp and its `… more` marker
+  are gone: the Preview never truncates the source, only its viewport.
+- **The grant is live.** `planHistorySeatLayout()` derives the row budget from
+  the real terminal rows (63% normal / 80% expanded by `F2`) and the measured
+  non-History pinned chrome minus one reserved transcript row; the header, query
+  and footer hint have first claim, and the shrinkable body splits between the
+  results window and the Preview. A small grant drops the Preview (and then the
+  footer with the hint folded into the header) LONG before it drops the visible
+  selected result; a grant too small for any body row disables acceptance of an
+  unpainted row.
+- **The Preview keeps its place across a re-wrap.** The scroll anchor is the
+  SOURCE UTF-16 offset of the first painted source row (`previewAnchorOffset`),
+  and the visual row is derived from it at every width, so narrowing or widening
+  the terminal keeps the reader on the same TEXT instead of the same row number.
+- **The Preview is the copy authority.** List labels are single sanitized lines;
+  the Preview is built from the shared neutral source-text layout
+  (`src/tui/components/source-text-layout.ts`, extracted from the Job Command
+  document, whose named exports and tests are unchanged), so every painted cell
+  maps back to an exact original UTF-16 range. `Alt+C` / `Copy All [Alt+C]` copy
+  the stored `content` byte for byte and the Fullscreen Preview drag copies an
+  exact original substring — never a rendered or truncated row.
+- **Pointer support is Transcript Fullscreen only.** The alt screen's existing
+  component dispatch delivers press/drag/wheel to the panel, which resolves
+  against its last painted frame (width/height, painted result identity, search
+  generation). A result click selects; the explicit `Use Selected [Enter]` and
+  `Copy All [Alt+C]` cells act, and each action is bound to the result ID it was
+  pressed for. Only the LEFT button may start, extend or finish a gesture: a
+  right or middle press falls through to the terminal's own handling (e.g. the
+  Windows right-click paste path) and can never select, drag or activate a
+  button. A Preview drag copies only when its RELEASE lands inside the painted
+  Preview of the same last-painted frame, and the release position IS the final
+  endpoint (a terminal may fold the last motion into the release event) — a
+  release outside it, on another painted region, or after a width/height change
+  safely cancels (no copy, no surviving selection), and an ended gesture can
+  never be extended or resurrected by a later motion event. The regular main screen writes no mouse mode and installs no
+  bridge: the panel refuses every pointer event there, and the terminal's native
+  selection/scrollback is untouched.
+- **Draft and cancellation.** Accept writes the accepted `content` into the
+  CURRENT editor winner through `setEditorText` (never a submit, never the hidden
+  host editor), after the tenant lease is retired and the captured session
+  identity re-validated. `Esc` / `Ctrl+C` close the seat and leave the draft,
+  cursor, input mode and pending paste content exactly as they were; those two
+  keys are consumed by History while it is the active seat tenant, so closing it
+  can never interrupt the agent or quit the TUI.
+- **Currentness at every ACTING entry.** The host's `isCurrent()` (B3-B: the
+  captured `SessionScopeAuthority` pair — the exact owner + generation — see the
+  B3-B section below; B3-A used the live session-id string plus the surface
+  generation) is injected into the panel as `tenantIsCurrent` and evaluated at
+  the pointer entry (the fork dispatches mouse
+  events outside the Host key ladder, so nothing else would notice a session
+  change first), at the acceptance/copy eligibility checks and at the async search
+  commit — a page that was in flight for a previous session is never published
+  (the seat keeps its current rows and stays inert: no acceptance, no copy, no
+  pointer action) and the CALLER keeps the lifecycle: the panel never retires
+  itself from that async path, so the fire-and-forget search cannot reject. The
+  host's next revalidation entry retires the stale tenant through its ONE close
+  path; treating the session-switch publication itself as a revalidation entry is
+  deliberately NOT done in B3-A (it would extend the Phase-3A revalidation seam
+  and let UI teardown failure propagate into the session commit). B3-B later
+  supersedes this with the SEPARATE, non-throwing `retireStaleHistorySeat()`
+  publication port (see its section below), so the seam extension B3-A avoided
+  never happens.
+- **B3-B closes the lifecycle and currentness.** The full Question/Approval
+  FIFO PARK/restore, the publication-time retirement, the authoritative Session
+  owner generation with ABA protection across async queries/acceptance, and the
+  L6 closure are B3-B (see its section below). B3-A's basic park/restore and
+  refusal path are the foundation; closing B3-B is not Gate-3B closure.
+
+## History Session lifecycle and design-language closure (B3-B)
+
+B3-B closes the two B3-A deferrals without a second authority and restyles the
+seat to the frozen design language.
+
+- **One Session authority, captured once.** At `Ctrl+R` the application
+  composition calls the runtime's single `SessionScopeAuthority.capture()` and
+  injects `{ sessionId, isCurrent }` (`HistoryOpenScope`) into `TuiApp`; the
+  seat's search/accept/copy/async/pointer guards all re-read that ONE capture.
+  The old History-only `historySearchSessionId` getter and the mixed
+  `TuiApp.generation` check are deleted. A session switch, a same-id reopen
+  (A→B→A), a same-owner generation bump and the sessionless→first-session
+  publication all fail the exact-owner/generation fence — no History epoch, no
+  shadow counter, no Session class reaches the TUI.
+- **Publication-time physical retirement.** `SurfaceRuntime` gains a PRIVATE
+  `retireStaleHistorySeat()` instance port (never on `SurfaceDisplaySeam` or any
+  TSP/Host API) that delegates to `TuiApp.retireStaleHistorySeat()`, which
+  reuses the ONE existing `revalidateOptionalSeat()`. The runner calls it from
+  the three `publishOwner` seams immediately after `beginInputHistoryScope`
+  (ordinary switch, fork adoption, first-session), before any post-commit await,
+  and the ownership core's single `resetForGeneration` hook calls it for a
+  same-owner generation bump. The call is synchronous, state-only and strictly
+  non-throwing: a tenant cleanup failure routes to the owned-failure reporting
+  channel and can never roll back or mask the already-published Session. The
+  owner commit is the logical fence; this port performs the physical close.
+- **Accept reentrancy.** `onAccept` closes its OWN lease, then re-reads the
+  captured scope (not the now-closed panel instance) plus the live
+  blocker/newer-tenant/focused-overlay facts before `setEditorText`, so a newer
+  owner that took the seat during the close keeps the keyboard and the current
+  editor.
+- **Design-language alignment (History only).** Identity/Header, active scope
+  `[Label]` (bold `primary`), `> ` + bold `textStrong` selection, per-span
+  secondary facts, `Results`/count tokens, bracket-less
+  `Copy All [Alt+C]` / `Use Selected [Enter]`, labeled metadata facts, and a
+  History-local whole-segment action bar with `Esc` last. Geometry, the
+  0.63/0.80 grant, the eight-row list cap and the Preview's independent source
+  anchoring are unchanged from B3-A; the shared `ACTION_BAR_SEPARATOR` is not
+  touched.
+
+## Task Browser Host-text terminal-safety boundary
+
+A Task Center row is a projection of arbitrary Host/external text: the official
+Job/Subagent label, a parent label, a Job detail, a caller header and a transport
+error message. None of those bytes are trusted to be terminal-safe, and the Task
+Browser owns no second text model — the whole surface is closed at its two real
+display boundaries, both reusing the existing `sanitizedPhysicalLine()` projection
+(recognized CSI/OSC/APC sequences stripped whole, then every remaining C0/C1/DEL
+byte — ESC included — dropped, and line breaks/tabs collapsed to spaces, so no
+control byte can survive even when a sequence is not recognized and its tail
+stays as inert visible text) rather than a new sanitizer or a second
+single-line helper:
+
+- **The panel chrome** (`TaskBrowserPanel`): every dynamic field entering the
+  list row, the inline/wide detail pane (`Selected`, label, parentLabel, parent
+  id, detail, mode/status/access, and the `Stop …?  Y confirm` line that embeds
+  the label), the header (the caller's run/phase text), the stale-refresh banner
+  and the caller's no-match text is projected to one SAFE physical row BEFORE
+  `truncateToWidth`/`visibleWidth`/the theme's `color.*` are applied. Cleaning
+  after coloring would strip legitimate theme SGR, so the order is deliberate.
+- **The ONE transient notice line** (`TuiApp.notify()`'s transcript-gutter row):
+  a Task Browser Stop or a Subagent interrupt settlement embeds the same official
+  label, and a dispatch failure embeds an `Error.message`. That row is the actual
+  draw boundary and projects the notice text there, before the theme styling.
+  `TuiApp.notify()`'s public semantics are unchanged: the STORED notice
+  (`notifyText` / `currentNotice()`) stays the caller's raw string, and the Job
+  Workspace notice row keeps its own `chromeText()` projection of it.
+
+The business layer is untouched: the raw `TaskBrowserRow`/`TaskPanelItem` label,
+the `JobStopOutcome`/`SubagentInterruptOutcome` and their message text are never
+rewritten, so Stop/interrupt identity, currentness fences, once-only dispatch and
+the success/error notice levels are unchanged. Projection happens only on the way
+to the terminal; the official bytes still reach every copy verb. The production
+route is exercised end to end — `/tasks` → the row's interrupt → the composition's
+`SessionRuntime.withWriter` writer admission → the Direct subagent port →
+`ctx.subagents.interrupt` → the notice line — by the L6 regression, which drives a
+hostile official label and asserts on the raw `Terminal.write` stream.
+
+Scope honesty: this record covers the Task Browser panel and the app transient
+notice line (which is also the dock/pinned notice sink). It does not claim that
+any other surface's dynamic text is safe; each surface keeps its own documented
+boundary. In particular the Task Browser SEARCH row is the `Input` component's own
+styled render of USER/query text (the vendored editor legitimately emits its own
+cursor SGR there), not a Host Job/Subagent label, so it is outside this boundary
+and is tracked separately.
 
 ## Long user messages collapse at the presentation layer only
 
@@ -1526,31 +2378,23 @@ into fullscreen without Focus, exactly like the ephemeral pending lane: the
 master is a cross-surface preference that also drives tool/system detail, so it
 is deliberately NOT reset on the transition. Disabling the toggleExpand key
 removes only the KEYBOARD affordance — in fullscreen the surface is never
-stranded: every expanded prompt still shows the tail `▴ Collapse · click`
-control and every folded one still shows the `click to expand` marker, so the
-mouse round-trip works with no key. In regular the expanded prompt simply
-renders full (no label), and Ctrl+O is the collapse owner.
+stranded: every expanded prompt still collapses by a plain click on its BODY
+and every folded one still shows the `click to expand` marker, so the mouse
+round-trip works with no key. In regular the expanded prompt simply renders
+full (no label), and Ctrl+O is the collapse owner.
 
 The collapsed state exposes the compact marker; in FULLSCREEN the EXPANDED
-state exposes a tail collapse control at the message tail — reusing the
-trailing separator row when one follows, or one dedicated presentation row for
-the final block. The direction is explicit in the shared disclosure metadata
-(`expand` vs `collapse`) and in the fullscreen hit identity, so a stale press
-can never transfer an expand target to a collapse target (or to a replacement
-pending row). The tail label is `▴ Collapse · click / <key>` without Focus and
-`▴ Collapse · click` inside a Focus (Ctrl+O owns the Thought-root bulk there, so
-the card never advertises a dead key). The tail control is deliberately
-FULLSCREEN-ONLY: regular draws into the terminal main screen, where no
-app-owned copy pipeline exists, so a visible label there would be picked up by
-the terminal's native selection — and regular has no mouse disclosure anyway, so
-its only job would be a keyboard hint not worth polluting scrollback copy. In
-fullscreen the tail row is presentation chrome: the fork's copy-source seam
-(X057) copies it as the blank separator it replaced, while paint, search,
-word/line selection and the mouse hit map keep reading the rendered line. The
-excluded rows are derived at the PAINT boundary (`copyBlankRows` on the
-last-painted snapshot), so the copy filter shares the same frame epoch as the
-scroll content the user actually saw — a rebuild that has not repainted yet can
-never leak the chrome or blank the wrong row.
+state is collapsed by a plain click anywhere on the message BODY. The direction
+is explicit in the shared disclosure metadata (`expand` vs `collapse`) and in
+the fullscreen hit identity, so a stale press can never transfer an expand
+target to a collapse target (or to a replacement pending row). A dedicated
+trailing `▴ Collapse` control row is deliberately NOT painted on any surface:
+the whole-bubble click is the single affordance, no presentation label can be
+picked up by the terminal's native selection on the regular main screen, and no
+keyboard hint needs to pollute scrollback copy. The fullscreen copy source is
+therefore the real transcript content: the retired fork copy-source seam (X057)
+and its blank-row bookkeeping are gone, so nothing has to be filtered out of a
+selection.
 
 Ctrl+O keeps its existing ownership: in regular/fullscreen-non-Focus it turns
 the recent-turn master off and clears the true long-user overrides when either
@@ -1600,11 +2444,11 @@ reveal is not a permanent pin: the next explicit Ctrl+O collapse hides it
 again, and a later search jump reveals it afresh.
 
 The long-user bubble is ONE local disclosure surface in fullscreen: collapsed,
-a plain single click anywhere on the bubble (head text, compact marker, or
-tail text) expands that message; expanded, a plain single click anywhere on
-the bubble collapses it, with the existing tail Collapse row as an explicit
-fallback. The compact marker stays as the visual affordance naming the
-behavior — it is not the only hit target. Every non-bubble row (the pending
+a plain single click anywhere on the bubble (head text, compact marker, or the
+folded tail text) expands that message; expanded, a plain single click anywhere
+on the bubble BODY collapses it. The compact marker stays as the visual
+affordance naming the behavior — it is not the only hit target, and no
+separate collapse row exists on any surface. Every non-bubble row (the pending
 status line included) has an inert hit identity. Drag selection retains
 selection ownership, and the bubble intentionally gives plain single-click to
 disclosure in BOTH states, so double-click word selection is not available on
@@ -1758,6 +2602,80 @@ Decisions (all terminal-native; none of them copies a Web button):
    repaint, because the answer no longer describes the live surface (the new
    generation re-derives its own truth). A disconnected Connection likewise
    presents no answerable card from a last-known binding.
+10. **A PUBLISHED Session owns the presentation: the replaced subject's live form
+    leaves the seat.** The runner calls
+    `SurfaceRuntime.reconcileInteractionPresentation()` from its published-session
+    seam (`initLiveSession`), BEFORE the new owner's first frame, and the
+    interaction owner withdraws every live presentation whose Session is no longer
+    the surface's current one — a Question flow through the ONE controller, and an
+    APPROVAL prompt through the same registry (its Session identity comes from the
+    official request's OWN Agent, never a fabricated one). A flow whose timed
+    claim is still OPENING is retired too: its form is never mounted once the
+    claim lands. The identity used for that withdrawal is PER REQUEST (a borrowed
+    Host cancellation scope may be shared by several requests, so it is never
+    itself the address), and a replaced subject's request that only ARRIVES after
+    the replacement was published is refused at ADMISSION against the surface's
+    own currentness authority — the Session it shows or is currently OPENING (a
+    tentative opening is not an owner replacement). A refused admission presents
+    nothing. With a Host-owned cancellation lifetime only the Host ends it — and
+    because the seat never received it, THIS owner registers that wait and drains it
+    on teardown, detaching the borrowed listener. With NO Host lifetime nothing else
+    could ever end it, so the refusal settles it AT ADMISSION instead of waiting for
+    the TUI to exit: the approval answers `cancelled` (fail-closed) and the Question
+    `ASK_ABORTED` (a Host-side end, never a user cancel). Admission, retirement and
+    the ordinary activity reconcile all consult the SAME authority, so a Session
+    being OPENED keeps its flow while a replaced subject (or a rolled-back opening)
+    loses it; that authority is enabled ONLY for a renderer-owned presentation (the
+    TSP mount) — the default PiTui branch, including the SDK-declined fallback,
+    answers `true` unconditionally and keeps its original delegation semantics.
+    The authority has a PRODUCER at every place it changes: the runner's own
+    opening `clear`/`reset` seams run the full pass after mutating the journal (a
+    rollback need not publish anything and there is no periodic reconcile), and an
+    ended owner refuses admission outright — a request that only arrives during or
+    after exit teardown takes the fail-closed cancellation instead of registering a
+    presentation nothing can drain. Two further rules complete the contract: EVERY
+    async presentation producer re-checks that same authority before it mounts (the
+    bounded late-answer offer included, so a `continued` projection that only
+    becomes visible after a replacement can never remount the replaced subject's
+    form); and a request with NO Host-owned cancellation lifetime (the official
+    signal is optional) is settled by this owner at a real replacement — the
+    Question as `ASK_ABORTED`, the approval `cancelled` — because nothing else could
+    ever end it, while a request carrying a Host signal keeps the Host's own
+    settlement right. A request that is ALREADY inadmissible when it reaches the
+    answerer (a legal upstream delay) has no later retirement to wait for, so the
+    same rule applies AT ADMISSION (Question `ASK_ABORTED`, approval `cancelled`).
+    The transient Alt+Q list is closed at a real replacement too (it belongs to the
+    subject that opened it), and the whole withdrawal ALSO rides the SYNCHRONOUS
+    owner-publication commit — in the same commit section as the outgoing-draft
+    drop, before any post-commit await — so a replaced subject's modal can never
+    keep the seat (or accept its keys through modal-first routing) while the new
+    owner's initialization is still pending. That commit-section half is
+    state-only and non-throwing, it performs NO Host read at all, and it withdraws
+    every replaced presentation as ONE ATOMIC BATCH (the controller collects the
+    lifetimes, the interaction owner adds the approvals and the renderer removes
+    them all before it picks the successor), so a member of the batch is never
+    promoted — and never painted — in between; the local settlement of a
+    signal-less request (and of a mounted continued form) runs only AFTER that
+    batch, so a synchronous abort can never settle — and thereby promote — a slot
+    the batch is about to withdraw; it clears the
+    stale displayed count locally and the full pass republishes the authoritative
+    count (a projection read inside the commit section could throw after the owner
+    was published and strand the commit bookkeeping that follows it).
+
+    The withdrawal is PRESENTATION ONLY: the official
+    request keeps its own Host-owned lifetime, so the Host's own cancellation
+    still ends it (classified `ASK_ABORTED`, never a user cancel), a surface
+    teardown still settles it exactly once, and the replacement subject inherits
+    neither the form, nor the input seat, nor the previous subject's parked count
+    or callbacks. The renderer-facing member is
+    `withdrawPresentation(lifetime)` — the TSP seat implements it (its
+    `layer` modal must not outlive the owner that opened it) while the PiTui
+    adapter is deliberately inert, exactly like `withdrawPending`. The pre-commit
+    quiesce deliberately leaves the outgoing owner's form mounted and answerable:
+    the withdrawal is driven by the PUBLISHED-session seam or by the ordinary
+    activity reconcile against the SAME currentness authority, never by a
+    tentative opening.
+    Evidence: `docs/tern-tsp/evidence/pr3-b.md` (rounds 5–9).
 
 ## A credential backend that cannot enumerate records still has a usable /logout
 
@@ -1775,3 +2693,431 @@ Credential operations also re-check the Connection generation before reporting
 their outcome: a `setReference` that completed against a replaced Host is
 reported as unconfirmed (never as a new-Host success), and a superseded
 `describeReference` degrades to "not configured" in the picker.
+
+## The passive Task Quick accessory below the editor (B4-A)
+
+B4-A installs the passive half of the locked Task Quick UX: a bounded,
+non-focusable task window directly below the editor seat (B4-B moved the band
+under the whole footer — see the on-demand section below). It is a first-party
+PRIVATE sibling on BOTH physical roots (the regular document, between the seat
+and the public `input.widget.below` Text, and the fullscreen pinned stack in the
+same position) — never an overlay, never an editor-seat tenant, never a public
+extension widget, and never a second focus owner. B4-B owns the keyboard
+crossing, the row selection and the typed row clicks; the legacy modal Quick
+(the existing `↓` / `app.tasks.open`) and `/tasks` Full stay the reachable
+entries, and their routing/wordings are unchanged.
+
+- **One data authority.** The rows are the SAME `Task Runtime` projection the
+  Task Center uses. `TaskBrowserRuntime.commitRows` now publishes the passive
+  window on EVERY commit (not only while a modal browser is open),
+  `TaskRuntime.refreshAttentionRows` republishes it from the controller's
+  detached attention model, and the Jobs-only fallback (`source.jobs` without a
+  `taskRead`) keeps `taskBrowserRows` and the window in step with the registry
+  even while no browser is open. The projection helper
+  (`quickTaskProjection`) applies exactly the modal Quick's Active/ancestor/
+  attention policy and drops the modal-only `view-full` promotion row, so the
+  window's `N` is the number of rows that can actually be scrolled to. There is
+  no second catalog, no second summary and no second acknowledgement ledger; a
+  transient roster read failure keeps the retained same-session snapshot rather
+  than publishing an authoritative empty.
+- **Failure attention is never silently acknowledged.** Passive painting,
+  refresh, resize and wheel never call `TaskBrowserRuntime.acknowledge()`: while
+  live work exists the Active scope keeps the failure out of the window (the
+  footer `!N` attention stays pending), and once it surfaces the window only
+  paints the `‣ Failed` word. Opening the modal Task Browser still performs the
+  original "the user actually saw the row" acknowledgement.
+- **Row budget.** The grant is derived from the LIVE frame: the terminal rows,
+  the measured pinned chrome (header, subject bar, dock, todo, goal, queue, busy
+  indicator, BOTH widget zones, the footer AND the editor seat) plus exactly one
+  visible transcript row, further capped by the accessory's own proportional
+  share of the terminal height and by its own four-row ceiling (identity + three
+  task rows). A one-row grant is spent on task content, never on a header, and an
+  empty projection or a frame with no room paints NO row and installs no hit
+  geometry. The public widget zones keep their placement, their own budget and
+  their lifecycle: the accessory never borrows a row from them, from the editor,
+  from the footer or from the transcript floor.
+- **One projection, never a dataset view.** A Workflow phase/run opens the modal
+  Task Browser with a child-id dataset scope; the resident window is not that
+  view, so it projects from the SAME commit's GLOBAL rows (the coordinator hands
+  both to the surface), and opening a scoped browser never narrows or hides the
+  session's other active Jobs and Subagents.
+- **Nesting without a new glyph.** A nested Subagent row is painted with
+  indentation derived from its durable depth; the modal panel's `├─ ` connector
+  (U+2500 is East-Asian-Width ambiguous) is deliberately NOT carried into this new
+  surface.
+- **Window anchoring.** The durable anchor is the first visible row's stable
+  `value`; a status update never moves the window, an inserted/removed row
+  rebases onto the surviving anchored row, and a vanished anchor falls back to
+  the bounded previous index — never to a label, a position or a time guess.
+  `showing x-y/N` reports the painted window, the mode suffix is dropped whole
+  when it cannot be painted whole, and the label is the only part that truncates.
+- **Pointer contract (Transcript Fullscreen only).** The regular main screen
+  stays a keyboard-only surface (the accepted H3A-16 contract: no mouse mode is
+  written, no pointer is dispatched, native terminal selection/scrollback is
+  untouched), so the wheel over the window is deliberately NOT reachable there —
+  it is recorded as such rather than emulated. Inside Transcript Fullscreen the
+  alt screen's EXISTING component dispatch delivers the wheel to the accessory,
+  which resolves it only against its LAST PAINTED frame — the painted box AND the
+  live terminal geometry recorded at paint time, so a resize that has not been
+  repainted yet is refused even though the event itself still carries the stale
+  layout's box dimensions — moves its own window by one row, requests no focus and
+  acknowledges nothing. The whole painted band owns the wheel: while the pointer
+  is on the window the transcript underneath never scrolls, and a wheel at a
+  window boundary — or one dispatched against a frame that is stale because a
+  resize has not been repainted, or because the projection just emptied and the
+  blank frame is not painted yet — is consumed with `render: false` instead of
+  falling through. The last painted hit geometry therefore lives until
+  `render()` really paints zero rows, which is when the band leaves the screen.
+  Press/release/click are refused: the accessory cannot open, stop or acknowledge
+  anything in B4-A.
+- **Session currentness.** A session-generation reset clears the window together
+  with the badge/summary/roster mirrors, and every publish inherits the
+  coordinator's session key + request-epoch fence: a late catalog commit of a
+  superseded session can never paint into the new session's window.
+
+Evidence: `test/task-quick-b4a-composition.test.ts` (real `TuiApp` +
+`VirtualTerminal` + `createTaskRuntime`: roster → commit → projection → painted
+below-editor rows on both roots, the Jobs-only fallback, a transient read
+failure, the frozen size matrix, the fullscreen transcript floor, the parked vs
+visible Question case, the SGR wheel with its negative controls, the
+acknowledgement negative with a modal positive control, resize anchoring and the
+no-Task-Center-capability skip) and `test/task-quick-accessory.test.ts` (the pure
+grant ladder, the single-physical-row projection and the window anchor).
+
+## The on-demand Task Quick: hidden by default, keyboard-focusable (B4-B)
+
+Owner product revision (2026-10-14): even with live tasks the accessory paints
+ZERO rows by default; the ONLY automatic crossing is an effective
+`app.tasks.open` Down from the focused HOST editor whose cursor sits on its
+last VISUAL line. `focused` is the one visibility authority — the component
+keeps no second `open` flag, and losing focus hides it again.
+
+- **The visual boundary is the fork editor's own (divergence X063).**
+  `TuiEditor.canEnterTaskQuickFromDown` delegates to the new protected
+  read-only seam `canYieldDownAtLastVisualLine(expectedLayoutWidth)` — the
+  editor's private word-wrap map plus its transient-mode flags
+  (history/autocomplete/jump/paste) are the only authority for "a real Down
+  would leave this editor at the last visual line". The host predicate
+  (`quickDownEligible`) adds the ownership facts: live surface, `tasksActive`,
+  a real projection (>=1 row), the host editor as the PHYSICALLY focused seat
+  in prompt mode, and no Question/Approval/Save/tenant/overlay/workspace/
+  leader owner. A plugin editor takes no claim. Any miss is a DECLINE: the key
+  is consumed without a replay.
+- **Admission and hint share ONE predicate.** `taskBrowserAvailable()` feeds
+  the footer `↓ view` / compact `↓` from the SAME `quickDownEligible()` the
+  routing resolves — the hint may never advertise a route the ladder refuses,
+  and `editorEmpty` no longer gates this composition (a non-empty draft
+  qualifies on its last visual line). The footer hint is a compose-time
+  projection of the latest Editor-rendered layout. A stale width fails closed; the next Editor render
+   at the new width
+   republishes the boundary and coalesces the Footer correction.
+- **Owner-approved hidden-entry geometry (2026-10-15).** HIDDEN→ACTIVE admission
+  is measured against a read-only candidate of the complete Footer composed
+  with `taskBrowserAvailable=true`, including the `↓ view` hint. The candidate's
+  actual physical height feeds the existing Quick row planner; it is never
+  committed, mutated or iterated to a fixed point. If that candidate leaves no
+  Quick row, both the hint and Down route fail closed—even if the hint-free
+  painted Footer would leave room. Once Quick is ACTIVE, its geometry uses the
+  actual painted Footer; a disappearing hint may free rows but does not revoke
+  focus by re-running hidden-entry eligibility.
+- **Keyboard surface.** The component keymap's task actions drive it. With `N`
+  real tasks and the Full callback, navigation is exactly
+  `task[0] … task[N-1], open-full`; without that callback it remains task-only.
+  Every entry selects `task[0]`, never the action. ↑↓ move through that one
+  windowed sequence without wrapping; Down on the final target clamps, PgUp/PgDn
+  page by the PAINTED navigation-row count, and Up on `task[0]` exits. `Esc`
+  exits (Host physical-Escape seam: never arms the double-Esc cancel, never
+  reaches the background editor), Enter dispatches the selected typed target,
+  every other key is a consumed no-op. Real-task selection remains an ephemeral
+  stable `value`, reconciled by stable ID with a bounded successor/predecessor
+  fallback; `open-full` is a distinct target and is never encoded as a value.
+- **Typed commit.** Enter (and a Fullscreen same-row press→release click —
+  the value-identity latch forbids press A → release B) first leave Quick,
+  then route the CURRENT projected row through `openQuickTaskItem`: the value
+  is verified against the CURRENT Quick projection and the session subject,
+  then resolved by the ONE `resolveTaskSelection` router the Full browser uses
+  (Question `attention.reopen`, subagent `enterView`, Job view). A stale value,
+  a switched session or cleanup refuse with `false` — the hidden Quick never
+  re-opens and nothing reports "opened".
+- **Open Full action.** When real tasks exist and the first-party callback is
+  available, `➜ Open Task Center…` is one appended navigation target in the same
+  bounded window, with no task status or fabricated `TaskPanelItem.value`. Enter
+  and the Fullscreen same-row press→release click first commit Quick HIDDEN and
+  restore the current Editor seat, then call `TaskRuntime.openTasksBrowser('full')`
+  — the existing `/tasks` owner. A focus loss, changed painted frame, empty
+  projection, stale geometry or mismatched press/release is inert. `/tasks`
+  remains available when Quick is hidden or has no tasks.
+- **Owner displacement.** Every blocking owner (Question/Approval/Save,
+  optional tenant, managed capturing overlay, Job Workspace, Settings, plugin
+  editor winner, session reset, screen swap) terminates Quick at its own
+  composition commit; a commit that empties the ACTIVE projection exits
+  through `onEmpty` (guarded to the real focused component). The exit restores
+  the CURRENT seat occupant, never a hard-coded editor.
+- **The modal Quick is retired.** `openTasksBrowser` narrows to `'full'`
+  (`/tasks` and the Workflow-scoped views); the Quick→Full promotion pseudo-row,
+  the Esc restore-into-Quick tail, the modal-only state carrier and the panel's
+  `quick` mode are removed with their consumers — no shim, no dead branch. The
+  Full browser's Scope/Search/Type/Stop/Job-child semantics are untouched.
+- **Row budget while ACTIVE.** The B4-B addendum's live-frame grant keeps one
+  transcript row, the proportional share and the five-row ceiling (at most one
+  divider + identity + three task/action navigation rows). Hidden-to-ACTIVE
+  admission guarantees an initial real task row; identity and decorative
+  divider yield as needed. After entry, a one-row grant may scroll to show only
+  the selected Full action, which uses one of the same three navigation slots.
+  Footer badges and `showing x-y/N` count real tasks only. A frame with no room
+  for an initial task row DECLINES entry. `>` in `primary` remains D6's sole
+  active device; the action's `➜` is muted type information, not another
+  selection/focus marker.
+
+Evidence: `test/task-quick-b4b-interaction.test.ts` (S1–S14 minus the pointer
+matrix: hidden-by-default both with and without tasks, the boundary drives the
+entry with the draft preserved, navigation with the global-first Up exit, the
+typed route's refusal + open sides, the parked-Question reopen through the
+production sink, shell-mode/non-last-line fail-closed, the disabled action's
+hint + route drop, the 44-column CJK wrapped entry and the 0-grant decline,
+the session-reset exit, `/tasks` Full filtering with Quick hidden; X063
+same-turn facts, zero normal-input map scans/composes, stale-width resize hint
+restoration and width-4 clamp; focused Quick blocks Host submit/steer actions;
+jump transitions; hint-enabled Footer candidate denial/positive admission and
+ACTIVE geometry independence), `test/task-quick-b4a-composition.test.ts` (the
+ACTIVE-frame witnesses of the same production composition) and
+`packages/pi-tui/test/editor-task-quick-boundary.test.ts` (wrap segments,
+transient modes, stale-width rejection, rendered-snapshot/map edge equivalence,
+and non-consuming negative). Post-B4-B action coverage lives in
+`test/task-quick-accessory.test.ts` (typed target, task-only counts, glyph/ink,
+keyboard and stale/cross-row mouse fences) and
+`test/task-quick-b4b-interaction.test.ts` (real TaskRuntime Full route, Quick
+hidden/Editor restored first, `/tasks` dataset parity and Fullscreen SGR click).
+
+**Owner revision 2026-10-15 (footer-below layout addendum):** the accessory
+band moved UNDER THE WHOLE FOOTER — the LAST visible region of both roots
+(editor seat → public below widgets → footer → separator → accessory). The
+band owns exactly ONE top separator rule (role 15 `border`, the
+Owner-authorized Footer↔Quick boundary — never `primary`/`borderFocus`, no
+bottom rule, no frame); it paints only when every desired task/action navigation
+row already fits (`grant ≥ desired + 2`) and yields to navigation rows on a low
+budget. The active ceiling is 5 rows: 1 separator + 1 identity + 3 task/action
+rows. The Footer's
+own budget is untouched (the chrome measurement includes the footer; the band
+takes the remainder), the painted hit geometry includes the separator row as
+inert chrome, and the mouse/wheel contract is unchanged. The owner-revision
+authority is the addendum document (`temp/panel/…footer-below-quick-layout
+-addendum-v1-20261015.md`) except for Footer admission geometry: the Owner-approved
+2026-10-15 hint-present candidate preflight above supersedes conflicting B4-B
+main-plan Step 2 and addendum §2.3 wording. Default-hidden behavior and the
+`app.tasks.open`/Editor-boundary authorities remain unchanged.
+
+**Owner clarification — Main Root Transcript Floor Exception:** Fullscreen is a
+fixed-height root and continues to reserve at least one visible Transcript row;
+its widgets/Quick yield when the budget is short. The ordinary Main Root remains
+a flowing document with its historical public-widget grants. At extreme heights
+such as 80×8, existing chrome may move Transcript above the current viewport
+while preserving it in terminal scrollback. B4-B must not worsen Main visibility
+relative to the Quick-hidden frame: Quick remains zero-row while hidden, and
+entry admission still uses the measured Footer candidate, Editor, below-widget
+rows and a one-row Transcript reserve; if no Quick task row fits, entry is
+refused. This exception does not authorize changing Main widget grants, Footer
+capacity or root layout, and it does not apply to Fullscreen or to clipping
+introduced by an ACTIVE Quick.
+
+## Workflow settlement authority is the Workflow terminal event (2026-10-17, PR #324)
+
+The Workflow card's run/member status is derived ONLY from the Workflow
+lifecycle events that carry a terminal fact. This decision fixes the
+background-run misprojection reported from a real session archive (a
+`run_in_background` Workflow whose owning Step and Turn had already closed was
+shown as `[interrupted]` / `N interrupted` while its Job was still running).
+
+- **Old assumption (replaced).** The previous projection reused the upstream
+  Web `locationClosed(step/turn)` rule: a run with no terminal fact whose
+  owning Step or Turn had closed was synthesized as `interrupted`, and members
+  registering after that close were "interrupted from birth". That rule is NOT
+  valid for this durable contract, in either execution mode: `run-start`
+  carries no foreground/background mode, `run_in_background` is an independent
+  Job, the run may outlive both `step/end` and `turn/end`, and a legitimate
+  foreground log prefix may also be missing its terminal event when a recorder
+  write fails. A missing terminal fact is therefore never evidence that the run
+  stopped. Only `agent-end` (`runId` + `seq`) and `run-end` (`runId` +
+  `stopReason`) settle Workflow state; `tool/call` parameters, `tool/result`
+  prose, names, labels and adjacent events are not evidence. The contract was
+  checked against `@deepseek-ai/dsh-tool-workflow` in `dsh-v0.2.0-rc.2`
+  (`639ed015397290b3745d163aafe02ffee4aa3f84`) and `dsh-v0.2.1-rc.1`
+  (`1600d8a1e140dcde43a1a0941940a0480712c011`); this change keeps the
+  repository's rc.2 pin.
+- **New contract.** `run-start` creates an OPEN record whose status is
+  `running`; only the matching `run-end` changes it to `completed` /
+  `cancelled` / `failed` (`error` maps to `failed`). `agent-start` creates a
+  `running` member; only the matching `agent-end` changes it to `completed` /
+  `failed` / `cancelled`. Step, Turn, an aborted main Turn and the next
+  `turn/start` have NO Workflow authority and are never routed into Workflow
+  state transitions.
+- **What `running` means here.** On the Workflow card, `running` means "the
+  durable record is open / no terminal event has been observed". It is NOT
+  proof that a runtime driver is alive and does not authorize killing a Job or
+  counting live work. Live Job/driver state remains owned by the existing Task
+  Center / Job Observation authority; direct member navigation still requires
+  the current live one-shot catalog row and driver, so an open record never
+  grants a Viewer by itself.
+- **Known limitation.** Historical, crash-truncated or append-failed logs may
+  be missing a terminal event; with no `runId -> mode` / `runId -> jobId`
+  durable link, such a record must stay `running` rather than invent a death
+  fact. Users should read current Job state from the Task Center.
+- **Unchanged semantics.** Run/Phase disclosure state, abnormal-first display
+  (`failed` > `interrupted` > `cancelled` > `running` > `completed`), real
+  `cancelled` / `failed` terminal presentation, the `interrupted` presentation
+  vocabulary (now never produced by the shared Workflow projection), the live
+  catalog gate for the Viewer, and the independent main-Turn
+  `Interrupted [error] — cancelled by user` Attention card are untouched.
+  The `/transcript` export and search still consume the same shared
+  `WorkflowProjection`, so they cannot diverge from the card.
+
+## Request-zone metadata adds no surface or interaction (2026-10-18)
+
+Carrying the sending Client runtime's time zone on human prompts is a request
+metadata change, not a new surface: the interaction determination is
+`NO_NEW_SURFACE_OR_INTERACTION`. ONE rendered difference is intended and is part
+of the delivery — the body text of the already existing, already expandable
+Context injection names the real request zone instead of `unavailable`. Every
+other rendered/pending state stays as it was:
+
+- **Entry points / gestures** — none added, none moved. Enter, queue, steer and
+  Ctrl+S keep their existing routes; no new keybinding, popup, toast, settings
+  row or command exists for the zone.
+- **Queue, optimistic echo and placement** — unchanged: the local echo still
+  joins the authoritative occurrence by `rpcId` alone, and the source field adds
+  no classification, ledger, or extra queue row. A running-turn submission still
+  renders as the ordinary queue row, and an injected `time-context` snapshot
+  stays Context, never a user row.
+- **Child viewer** — unchanged: follow-up still requires a live continuable
+  child address; a one-shot child remains read-only, and the refusal/draft-sink
+  behavior is the existing settlement.
+- **Transcript / Context Tail / scrolling / composer** — unchanged apart from the
+  Context body text above, rendered by the existing wrap/truncate path.
+  `Browser time zone` stays the upstream term and is not renamed by the TUI.
+- **Refusal path** — a process that reports no usable zone keeps the existing
+  prepare-failure behavior: the notice plus the restored draft; no new modal or
+  state.
+
+The rendered comparison behind this determination: the same scripted scenario
+(one ordinary submit plus one busy queue submit on the real Direct TSP surface,
+with the official `time-context` row mounted) was run against the review base and
+against this change; the folded node trees (17 nodes), the durable event lists
+(20 events) and the recorded messages matched line for line, with exactly two
+differences — the Context body text (`unavailable` → the sampled zone) and the
+`clientTimeZone` field on the human source. Recorded in the migration document's
+evidence list; the ongoing guard is
+`test/request-time-zone.test.ts`'s rendered-parity case.
+
+The zone is the sending TUI process's (`TZ`), never the terminal observer's; this
+determination claims no visual or interaction capability beyond the official
+plugin's existing Context text.
+
+## Plugin Manager is one fullscreen workspace with a frozen four-section catalog (2026-10-19, S4-D1 / PR-D1)
+
+`/plugins` and the first-level `Settings → Plugins` category open the SAME
+`PluginManagerWorkspacePanel` inside the EXISTING workspace Alt-Screen lease.
+There is no second screen owner, no Plugin Manager overlay, and no empty
+`Settings → Plugins → Rows` intermediate page. Settings keeps its L0/L1/L2
+selection, row/detail scroll and focus while the Plugin page is on top; Esc
+returns to the same Settings L0 with `Plugins` selected, and the direct entry
+returns to the untouched conversation/transcript-fullscreen state.
+
+- **Frozen sections and order:** `TUI & Extensions` → `Official DSH` →
+  `Third-party` → `Experimental` (always last). One primary card per Host
+  package entry; status is a fact/filter dimension, never a second card.
+  `Third-party` may paint an audited `Unverified origin` subsection for a
+  standalone entry whose provenance the Host cannot prove; the UI never calls
+  it community-authored.
+- **Host facts only:** section/origin decisions read the real
+  `BundleInfo.official/availability/installTarget/source` and the exact rc.2
+  Base/Optional identities. A `@deepseek-ai/` scope or an `experimental`
+  substring is never identity evidence. The 14 `B01–B14` identities are
+  version-limited display evidence; a missing Host item is a catalog
+  discrepancy, never a generated card.
+- **Actions follow Host capability:** `missing` official with a real
+  `installTarget` opens the official inspect → confirm → install path;
+  `installation` is Toggle-only and never Remove; profile-owned bundles may be
+  Toggle/Remove. Current TUI and the rows it provably controls expose no write
+  action at all. `enabled` is never painted as `active/running`; `restart
+  required`, `overridden`, the actual `ChangeResult.version`, pending build
+  scripts and failures are rendered as the official result reports them.
+- **Leaving never cancels:** hiding the install view leaves the Host operation
+  owned by the same request id; `i` reopens the same controller state. A
+  `cancel` is shown only while starting/installing, `too-late` never claims
+  cancellation, and an unknown result reconciles through
+  `waitForInstall`/authoritative inventory reread — never an automatic retry.
+- **Responsive navigation:** at `>=96` columns the page is a 2-cell-gutter
+  list/preview+actions pair; below 96 it is one column with the same semantic
+  navigation. The Action Bar is the last physical row at every size, and Esc
+  names the real destination (`Esc back` inside Settings, `Esc close` on the
+  direct root). `/` search, the Tab status filter, Up/Down/Pg/Home/End, mouse
+  selection and action clicks all resolve against the cells the current frame
+  actually painted. A frame with ZERO body rows paints no body action/choice,
+  so its list/details/confirm bar never advertises `Enter` and the list
+  Enter/Right admission also refuses to open an invisible card's Details. The
+  80×2 matrix cannot show a fake `Enter cancel`/`Enter action`. The admission
+  also uses the existing current-frame fence, so a resize followed by Enter
+  before the repaint cannot enter an invisible card's Details. Search editing
+  is the deliberate exception: its `Enter apply` still executes when the input
+  cell is not painted, so that hint stays truthful.
+- **B03 Auto Review is the ONE destructive confirmation (2026-10-19, S4-D2).**
+  Disabling the EXACT `@deepseek-ai/dsh-experimental-auto-review` bundle while
+  it is enabled, disabling one of its addressable rows, and removing the
+  profile-owned Auto Review bundle all open the SAME existing confirmation view
+  (no second overlay/manager). The consequence text is fixed: `Disabling Auto
+  Review can change existing Auto sessions to Full access. Auto Review is not a
+  sandbox. Continue?`; the default focus is **Cancel**. No Host mutation is
+  dispatched while the view is open; the explicit primary choice (`Disable Auto
+  Review` or `Remove`) calls the official `setBundleEnabled(name,false)` /
+  `setPluginEnabled(entryId,false)` / `removeBundle` — never a toggle
+  inversion. A reread that changes the authoritative inventory invalidates the
+  confirmation (`Auto Review changed since the confirmation opened; nothing was
+  changed`) instead of acting on a stale target. On 80×10/44×20 the explanation
+  scrolls with PgUp/PgDn or the wheel while both pinned choices stay reachable;
+  a frame that does not paint a choice admits no Enter/click for it. The
+  Host-capability consequence is also a bounded `Risk` fact on the exact B03
+  card; it does not rewrite `official`/`availability`/`enabled`.
+
+## Plugin Detail states bounded rc.2 support and the standard upgrade route (2026-10-19, S4-D3 / PR-D3)
+
+The existing Plugin Manager Detail gains two read-only projections; no second
+page, tab, shortcut, button, scroll owner or port is introduced.
+
+- **Bounded rc.2 capability copy.** The 14 exact `B01–B14` package identities
+  carry a frozen product-support sentence pair in
+  `src/app/plugin-manager/model.ts`: a neutral `TUI surface` fact and either a
+  `dim` `Limit` or a `warning` `Risk` fact. This is bounded presentation
+  evidence for the fixed rc.2 catalog — it never reads `enabled`, fiber state or
+  availability, never promotes a Host row to a TUI PASS, and is not exported as
+  a capability API. Only a card with `target='bundle'`, `official=true`, the
+  `Experimental` section and an exact key match renders it; a same-name
+  `official:false` package, a standalone entry and every other row never
+  inherit it. The stale generic `Host capability not yet qualified for TUI`
+  line is gone. B03 keeps its existing Owner-frozen danger confirmation as the
+  only hazard statement (the static table adds no second one). The wording
+  names `WEB_ONLY` limits (Voice/Inspector/CoT/Market), the verified
+  one-shot/provider boundaries for the two on-demand native subagents, and the
+  foreground/no-guaranteed-Job fact for Ralph. Availability/Source/Version/Fiber
+  remain separate Host facts.
+- **Standard upgrade guidance (v9 F10).** The Source group replaces the old
+  single `Update not applied automatically` line with a fact derived only from
+  `availability`, `canRemove`, `isSelf`, `version` and `installTarget`:
+  - shipment-owned → upgrade the DSH installation; no in-place update and no
+    Remove/Update action;
+  - profile-owned → Remove first, then explicitly install the desired version;
+    when the Host says removal is not permitted the copy says so instead of
+    suggesting a reinstall;
+  - missing with an official target → `Install: Use the official offered target
+    <masked spec> (version <version>)`; the existing `Install…` action remains
+    the only install path;
+  - missing without a target → `Install unavailable: No official install
+    target was supplied.`;
+  - Current TUI → managed outside this screen, with no remove/install advice.
+  When the current and offered versions are both known and differ, a separate
+  `Version difference: Current <version> · offered <version>.` fact is painted;
+  equal versions do not claim anything is the latest, and an unreadable current
+  version is `unavailable` rather than the running TUI release number. The
+  guidance never echoes a full userinfo/token and never dispatches a mutation:
+  profile Remove-then-Install stays two explicit user operations with the
+  existing D1 controller actions. **v9 F10: DONE** — the standard route is
+  stated for every Host shape and no updater/version picker is introduced.

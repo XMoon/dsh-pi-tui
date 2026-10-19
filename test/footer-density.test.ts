@@ -73,7 +73,7 @@ function richSnapshot(): StatusSnapshot {
   snap.usage = {
     tokens: { input: 34_000, output: 8_100, cacheRead: 520_000, cacheWrite: 0 },
     cacheHitPct: 93.9,
-    performance: { llmMs: 138_800, firstTokenMs: 2_600, tokensPerSec: 659 },
+    performance: { llmMs: 138_800, firstTokenMs: 2_600, tokensPerSec: 659, sessionTokensPerSec: 44 },
     turns: 4,
     steps: 191,
   }
@@ -150,20 +150,26 @@ test('responsive items: compact is never wider than preferred (every declared fo
   }
 })
 
-test('performance compact shortens EVERY persisted style (full/speed/latency)', () => {
+test('performance compact shortens EVERY persisted style', () => {
   const snap = richSnapshot()
+  const at = (format: string, density: 'preferred' | 'compact'): string =>
+    renderDensity('performance', snap, { id: 'performance', format }, density)
   // Latency: the TTFB marker drops under pressure (`TTFB 2.6s` → `2.6s`).
-  const latencyRef: FooterItemRef = { id: 'performance', format: 'latency' }
-  assert.equal(renderDensity('performance', snap, latencyRef, 'preferred'), 'TTFB 2.6s')
-  assert.equal(renderDensity('performance', snap, latencyRef, 'compact'), '2.6s')
-  // Speed: the tok/s unit shortens (`659 tok/s` → `659t/s`).
-  const speedRef: FooterItemRef = { id: 'performance', format: 'speed' }
-  assert.equal(renderDensity('performance', snap, speedRef, 'preferred'), '659 tok/s')
-  assert.equal(renderDensity('performance', snap, speedRef, 'compact'), '659t/s')
-  // The full style keeps BOTH facts with the shortened units — it never
-  // degrades to a single-fact style.
-  assert.equal(renderDensity('performance', snap, { id: 'performance', format: 'full' }, 'preferred'), 'TTFB 2.6s · 659 tok/s')
-  assert.equal(renderDensity('performance', snap, { id: 'performance', format: 'full' }, 'compact'), '2.6s 659t/s')
+  assert.equal(at('latency', 'preferred'), 'TTFB 2.6s')
+  assert.equal(at('latency', 'compact'), '2.6s')
+  // Speed: the tok/s unit shortens and the scope label survives.
+  assert.equal(at('speed', 'preferred'), 'R5 659 tok/s')
+  assert.equal(at('speed', 'compact'), 'R5 659t/s')
+  assert.equal(at('speed-all', 'preferred'), 'All 44 tok/s')
+  assert.equal(at('speed-all', 'compact'), 'All 44t/s')
+  // The default pair shows both scopes with ONE unit, and collapses to its
+  // leading fact under pressure (never two rates in a narrow row).
+  assert.equal(at('speed-both', 'preferred'), 'R5 659 · All 44 tok/s')
+  assert.equal(at('speed-both', 'compact'), 'R5 659t/s')
+  // The full (legacy) style keeps BOTH facts with the shortened unit — it
+  // never degrades to a single-fact style.
+  assert.equal(at('full', 'preferred'), 'TTFB 2.6s · R5 659 tok/s')
+  assert.equal(at('full', 'compact'), '2.6s R5 659t/s')
 })
 
 test('token-usage compact never exceeds a shorter persisted io style (cache-heavy)', () => {
@@ -194,7 +200,7 @@ test('B-class compact presentations match the agreed golden strings', () => {
     ['queue', 'q3'],
     ['agents', 'a2'],
     ['todo', 'td3'],
-    ['performance', '2.6s 659t/s'],
+    ['performance', '2.6s R5 659t/s'],
     ['stats-line', '↑34k ↓8.1k · TTFB 2.6s · 659t/s'],
   ]
   for (const [id, expected] of cases) {

@@ -26,6 +26,7 @@ import { parseProgressUpdates, parseResponseStyle, type ProgressUpdatesState, ty
 import { installProgressUpdatesPrompt, installResponseStylePrompt, installFocusPrompt, type SystemPromptLike } from '../src/app/direct/system-prompt.ts'
 import type { DisplayState } from '../src/domain/display/preset.ts'
 import { registerTuiCommandsWithDirectSeams } from './support/register-tui-commands.ts'
+import { navigateToLegacySettings } from './support/open-legacy-settings.ts'
 
 /** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file
  * is disposed after each test — the process slot (the vendored fork
@@ -192,7 +193,7 @@ function setupSettings(options: { notificationMode?: string; notificationMethod?
     setTerminalProgressMode: () => {}, setNotificationMethod: (method) => { appliedMethods.push(method) },
     updateWelcomeCard: () => {},
     openJobView: () => {},
-    openTasksBrowser: () => {}, openPluginManager: () => {}, createPluginManagerSubmenu: () => ({ render: () => [], invalidate: () => {} }),
+    openTasksBrowser: () => {}, openPluginManager: () => {}, createPluginManagerPage: () => undefined,
     openRewindPicker: () => {},
     sessionTransitionPending: () => false,
     withSessionTransition: async <T>(task: () => T | Promise<T>) => task(),
@@ -213,6 +214,7 @@ function setupSettings(options: { notificationMode?: string; notificationMethod?
       rawInput: '',
       signal: new AbortController().signal,
     })
+    await navigateToLegacySettings(vt)
   }
   const view = async (): Promise<string> => {
     await vt.waitForRender()

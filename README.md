@@ -34,6 +34,14 @@ dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@next
 dsh --profile pi-tui
 ```
 
+> **这两个 channel 今天不构成可安装的兼容 pair。** 它们只是通道指针：当前
+> `@deepseek-ai/dsh@alpha` 指向 `0.2.1-alpha.5`，而 `@xmoon76/dsh-pi-tui@next`
+> 仍指向 `0.5.2-rc.1`（peer floor `>=0.2.0-rc.2`，npm semver 不接受不同
+> major.minor.patch tuple 的 prerelease）。请以下方版本对应表和
+> [兼容性文档](docs/dsh-compatibility.md) 的精确配对为准；稳定版 `0.5.3` 发布在
+> `@latest` 而不是 `@next`，因此这两个移动 channel 上没有可安装的兼容组合。
+> 本 checkout 的精确验证请使用 `pnpm compat:dsh:npm`。
+
 隔离的 npm 驱动仍按本 checkout 声明的精确 DSH 版本运行，并执行完整的
 build/test/package 路径：
 
@@ -52,22 +60,26 @@ pnpm compat:dsh:npm
 
 | TUI 包版本 | 对应的官方 DSH tags | 说明 |
 |---|---|---|
-| `0.5.1`（stable / `@latest`） | `dsh-v0.2.0-rc.2` | 当前稳定版；最低与精确验证目标均为 0.2.0-rc.2 family |
+| `0.5.3`（stable / `@latest`） | `dsh-v0.2.1-rc.2` | 当前已发布稳定版；最低与精确验证目标均为 0.2.1-rc.2 family |
+| `0.5.1`（stable，历史） | `dsh-v0.2.0-rc.2` | 上一稳定版；最低与精确验证目标均为 0.2.0-rc.2 family |
+| `0.5.2-rc.1`（next 通道预览，已发布） | `dsh-v0.2.0-rc.2` | 上一轮 next 预览：已发布到 npm `next` 通道（2026-10-17）；整套 peer floor 仍是 `>=0.2.0-rc.2`，不覆盖 0.2.1-rc.2 |
+| `dsh-v0.2.1-rc.1`（无配对 TUI） | 无 | 该中间版本没有本矩阵宣称兼容的已发布 TUI；不要为它复用 `0.5.3` |
 | `0.5.0`（stable，历史） | `dsh-v0.1.7-rc.2`、`dsh-v0.2.0-rc.1` | 上一稳定版；最低 0.1.7-rc.2，精确验证目标 0.2.0-rc.1 |
 | `0.4.9`（stable，历史） | `dsh-v0.1.7-rc.2` | 上一稳定版；0.1.7-rc.2 runtime 的兼容 TUI |
 | `0.4.8`（stable，历史） | `dsh-v0.1.7-rc.1` | 上一稳定版；0.1.7-rc.1 runtime 的兼容 TUI |
 | `0.4.6`（stable，历史） | `dsh-v0.1.5-rc.1`、`dsh-v0.1.5-rc.2` | 上一稳定版；0.1.5 runtime 的兼容 TUI |
 | `0.4.7-alpha.2`（next，历史） | `dsh-v0.1.6-alpha.2` | 上一条 next 线；0.1.6-alpha.2 runtime 的兼容 TUI |
 
-不要把稳定线与 `@next` 预发布线混装。`0.5.1` 把整个 DSH peer
-floor 提升到 `>=0.2.0-rc.2`：Question 生命周期消费 rc.2 才发布的公开契约
-（`userQuestions.attachWait`/`answer` Remote 与 `userQuestions` Session
-projection），rc.1 family 不提供这些契约，混装属于虚假的兼容声明。上一稳定版
-`0.5.0` 保持 `>=0.1.7-rc.2` floor 不变（精确验证目标 0.2.0-rc.1）；旧
-runtime 会在正常的不兼容边界以非零状态失败，
-请按上表安装配对的 TUI 线。完整的历史兼容矩阵和 fallback 命令见
-[兼容性文档](docs/dsh-compatibility.md)；要查看 `@next` 的最新集成状态，请看
-[next 分支 README](https://github.com/XMoon/dsh-pi-tui/blob/next/README.md)。
+不要把稳定线与 `@next` 预发布线混装。`0.5.3` 是当前已发布稳定版：它的最低 DSH
+版本（peer floor）与精确验证目标都是 `0.2.1-rc.2` family。中间的
+`dsh-v0.2.1-rc.1` 没有配对 TUI，`0.5.2-rc.1` 是上一轮已发布到 npm `next` 通道的
+预览身份（配对 0.2.0-rc.2；它不覆盖 0.2.1-rc.2，因此新的稳定线使用 `0.5.3`
+身份）。上一稳定版 `0.5.1` 继续配对 0.2.0-rc.2：它把整个 DSH peer floor 提升到
+`>=0.2.0-rc.2`（Question 生命周期消费 rc.2 才发布的公开契约）。更早的 `0.5.0`
+保持 `>=0.1.7-rc.2` floor 不变（精确验证目标 0.2.0-rc.1）；旧 runtime 会在正常的
+不兼容边界以非零状态失败，请按上表安装配对的 TUI 线。完整的历史兼容矩阵和
+fallback 命令见[兼容性文档](docs/dsh-compatibility.md)；要查看 `@next` 的最新集成
+状态，请看 [next 分支 README](https://github.com/XMoon/dsh-pi-tui/blob/next/README.md)。
 
 新的 Agent preset 使用当前 roster 中选定的 id。DSH 允许合法的自定义
 `code` preset；只要当前 roster 存在它，显式输入和持久化状态都会保留 `code`。
@@ -175,11 +187,13 @@ Rewind 会从选中的历史 User Turn 创建新的 Child Session，并把对应
 
 ### Subagent 与 Task Center
 
-`/tasks` 打开完整 Task Center，显示当前 Session 中仍由 Job Registry / Subagent catalog 跟踪的工作；Footer 的 `↓` 打开轻量 Quick Tasks，只看当前活动（active）工作。选中 Job 后，详情会显示官方非消耗式的实时输出预览（状态、进度与保留的输出尾部），不会消耗模型的 `job_output` 游标，也不写入会话历史。
+`/tasks` 打开完整 Task Center，显示当前 Session 中仍由 Job Registry / Subagent catalog 跟踪的工作；Footer 的 `↓`（仅在光标位于编辑器最后一个可视行时）打开按需的 Quick 窗口，它默认不占行、出现在整个 Footer 之下。选中 Job 后进入全屏 Job 工作区：顶部一行显示 Job 身份、主题状态与大写状态及 `[GAP]`/`[ERROR]`/`[SETTLED]` 事实，下面是真实进度/说明、命令摘要与 `Output`/`Command` 阅读标签。Output 是官方非消耗式的实时输出预览（可滚动、可搜索，并明确标注为保留尾部而非完整历史），Command 页可阅读并按原文复制 shell 命令。工作区不会消耗模型的 `job_output` 游标，也不写入会话历史。
 
 Task Center 的 `ACTIVE` / `TRACKED` 是展示范围：`ACTIVE` 只显示当前活动项，`TRACKED` 显示当前跟踪源（Job Registry / Subagent catalog）仍列出的全部项；`TRACKED` 不是 Session 执行历史。DSH `0.1.7` 会在普通前台 `bash` / `pwsh` 执行期间临时注册 Job，使其可以在 Task Center 中观察和停止；如果命令在前台等待内完成，DSH 会移除该临时记录，最终结果仍保留在 Transcript 的 tool card 中。显式 `run_in_background: true` 或被提升为后台的 Job 在完成后，只要 Job Registry 继续保留其记录，就仍可在 `TRACKED` 中查看。
 
-`/plugins` 打开当前 profile 的 Plugin Manager：按 Current TUI / TUI Extensions / DSH Plugins 分区查看已安装的 bundle 与插件，并执行启用/禁用、删除与安装；正在提供当前界面的 `dsh-pi-tui` 只读且不可从自身界面禁用或移除。`/settings` 中的 `Plugins  Manage…` 按需打开同一界面。
+`/plugins` 打开当前 profile 的全屏 Plugin Manager：目录固定为 TUI & Extensions / Official DSH / Third-party / Experimental（实验组最后），窄屏单栏、宽屏双栏，可搜索、筛选、查看来源与状态，并从官方目录执行安装、启用/禁用与删除；结果以 Host 实际返回的版本、重启要求和错误为准。正在提供当前界面的 `dsh-pi-tui` 只读且不可从自身界面禁用或移除。`/settings` 的顶级 `Plugins` 分类原地打开同一页面，返回时保留 Settings 的分类、滚动与选择。
+
+Experimental 组的 14 个官方 rc.2 实验包在 Detail 中给出固定的终端可用面与限制/风险说明（Web-only、Host-only、B04 的 WEB_ONLY/Host 行未挂载（Owner 已接受）、B13/B14 的已验证 one-shot/provider 边界等），这些说明只随精确官方包身份出现，不随启用状态伪装成 Host 能力通过；升级指引按 Host 事实区分「随 DSH 发行升级」「profile 包先 Remove 再显式 Install」「官方 on-demand 目标」和「当前 TUI 由外部管理」，不提供原地更新、版本选择器或静默重装。
 
 Subagent 按完整 lineage 显示，包括嵌套创建的 descendant：
 
@@ -198,9 +212,9 @@ main
 * nested descendant
 * Job Registry 跟踪的 Job（含运行中的前台 shell）
 
-Footer `↓` 打开的 Quick Tasks 是轻量浏览视图，只提供方向键导航、左右展开/折叠、`Tab` 类型过滤、`Enter` 打开和 `Esc` 关闭。底部 “Open Task Center” 行可进入完整 Task Center。
+Footer `↓` 打开的 Quick 窗口默认不占行，只在编辑器最后一个可视行按 `↓` 时展开到 Footer 之下：`↑↓` / `PgUp` / `PgDn` 选择，`Enter` 用真实任务身份打开既有详情，`↑`（首行）或 `Esc` 返回编辑器并保留草稿；列表末尾的 “Open Task Center” 行进入完整 Task Center。
 
-完整 Task Center 额外提供 `A` 切换 Active / Tracked、`/` 搜索、`Tab` / `Shift+Tab` 双向切换类型、`S`（确认后）停止所选任务以及 `R` 刷新 / 重试。Quick Tasks 只消费上述白名单按键，其余输入一律 no-op，不会进入搜索、停止确认或任务管理状态，因此 `Esc` 始终一层关闭。
+完整 Task Center 额外提供 `A` 切换 Active / Tracked、`/` 搜索、`Tab` / `Shift+Tab` 双向切换类型、`S`（确认后）停止所选任务以及 `R` 刷新 / 重试。Quick 窗口只消费上述导航键，其余输入一律 no-op，不会进入搜索、停止确认或任务管理状态，因此 `Esc` 始终一层关闭。
 
 已经结束的 one-shot Subagent 仍可以打开并查看持久化 Transcript。
 
@@ -297,7 +311,53 @@ TUI 使用 DSH 提供的模型和设置服务。
 /statusline
 ```
 
-模型切换、Reasoning Effort、权限 Preset、Plan 和 Goal 都沿用 DSH 对应的运行时语义。
+模型切换、Reasoning Effort、权限 Preset、Plan 和 Goal 都沿用 DSH 对应的运行时语义。`/model` 的候选完全来自 Host 的模型目录：rc.2 的 `deepseek-flash` 以精确 `(provider, model)` 身份出现（显示名 `DeepSeek-V4.1-Flash` 不当作 ID），选择后写回官方 Session/global 默认；部署覆盖目录不再提供该 ID 时不会凭空显示。
+
+`/settings` 打开一个真正的全屏工作区，三栏 / 两栏 / 单栏只是同一套
+`分类 → 设置行 → 详情` 三层的投影：宽屏同时显示三栏，中屏按当前层显示
+`分类 + 设置行` 或 `设置行 + 详情`，窄屏只显示当前层。所有宽度上 `Right` 只前进一层，
+`Left` 返回一层（在最外层无效）；`Enter` 遵循相同层级，`Esc`/`Backspace` 逐级返回，
+最外层关闭工作区。`Tab`/`Shift+Tab` 不承担导航，底部操作栏始终固定在最后一行。多栏编辑态仍
+保留 `[Details]` 焦点标识；只有标题会占掉唯一内容行时才让位。
+它展示 Appearance / Display 的真实事实：主题的 source-qualified 原始值与友好名称、
+Icon style、Transcript display 的运行时当前值与持久偏好、Thinking detail 的当前运行
+态，以及每个条目的配置来源 Scope 与 backend 就绪状态；`R` 重新读取、`C` 复制所选行的
+原始值；浏览、选择与复制本身都不写入配置。
+
+其中**「Configured theme」和「Transcript display」两行可以直接修改**：在 L1 设置行按
+`Right` 或 `Enter`，或点击 `[Change…]` / 可见的 Detail 内容，即可在同一 L2 详情中打开
+候选选择；当前值与 Runtime / Persisted 事实留在同一详情事实区，并与候选列表独立滚动。`Up`/`Down`/`Home`/`End`
+移动候选，`PgUp`/`PgDn` 和事实区上的滚轮只滚动详情事实，候选区滚轮独立滚动候选；
+选择期间可按 `C` 复制仍未更改的原始值，但仅当动作栏实际绘出 `c copy`，它不会提交候选。
+`Enter` 或点击 `[Confirm]` 明确确认，`Left`/`Esc`/`Backspace` 或 `[Cancel]` 取消并直接回到
+L1，零写入。L2 浏览/已结算时，`Enter` 可重新打开可写行的选择；pending 写入时不触发新选择。若当前候选身份已滚出可见区域，第一次 `Enter` 只将其重新显示，之后才能确认；
+44×8 短屏在长身份需要空间时先省略可选的 `Choose value` 标题；若仍不足，再将事实区压到只保留旧 `Value` 的一行。只有完整身份、`Confirm` 与 `Enter confirm` 同屏可见时才能确认，超过剩余容量仍拒绝写入。只有实际绘制出来的
+按钮与候选行可以点击。确认后走既有的串行整文档写入路径落盘，再从权威来源重读目标字段核对：
+详情里分别显示运行态（`Runtime`，如当前 palette）与持久偏好（`Persisted`），并显示
+`Saving…` / `Verified` / `Not saved · 原因` / `Commit accepted · verification unavailable` /
+`Outcome unknown · 原因`，只有写入完成、backend `ready` 且权威回读一致才显示 Verified；
+被拒绝的写入会先重读权威：仍停留在请求起点值才报 Not saved，出现第三个值、已是目标值或无法读取
+则如实报 Outcome unknown；写返回成功但权威可读地不一致同样按失败显示，而不是
+"verification unavailable"。backend 不 ready 时主题不会被应用或写入；显示预设可以先在本机生效，
+此时会明确说明未能保存，而不是假装保存成功。插件主题在确认时再次按 source-qualified 身份解析，
+已卸载的插件主题标记为 unavailable 并拒绝确认，不会退化成同名文件主题。Icon style 与
+Thinking detail 仍是只读行。旧的完整设置编辑器仍然可用：`Other settings` → `Open existing settings…`
+会先关闭工作区并恢复原界面，再打开原有编辑器，Theme、Plugin Manager、键位、权限与扩展设置的写入路径全部不变。
+
+`/settings` 的 `Other settings` 里新增 `Web Search / Fetch`：选择后先关闭工作区，再打开原有编辑器
+的 Web 段并定位到第一项。段内可切换搜索 Provider（`Messages`，官方默认，或独立计费的
+`DeepSeek Search API`）、Fetch Provider（`HTTP`，官方默认，或 `DeepSeek Fetch API`），设置 Search API
+结果数（1–50，快选 5/10/20/50）、`Share Original Question`（官方默认为开启；每次新的 Search API
+调用附带最多 128 字符的触发人类问题 `ori_question`，不发送完整历史或系统提示词）与 API endpoint
+base（必须显式确认 https 地址；凭据与查询会发往该地址）。两套 API 都是独立的 opt-in 收费
+provider：登录或普通 Messages 套餐不保证覆盖其费用，默认的 `Messages`/`HTTP` 组合也不会调用收费
+API。Web 配置是 base profile 所有的设置，不是 Bxx Optional Bundle；安装或启用任何其他 Bundle
+都不会改变这两个 provider。
+`[current]` 只在官方写入与权威回读一致后移动，失败显示 `Not saved`；选择对下一次搜索/获取生效，
+运行中的操作不会被追溯切换。DeepSeek API key 只显示是否配置与来源层，配置/清除复用现有遮蔽
+`/login DEEPSEEK_API_KEY` / `/logout DEEPSEEK_API_KEY`（先关闭设置界面再执行）。Esc 从 Web 段返回
+同一 `Web Search / Fetch` 行；从 `Open existing settings…` 进入的旧路径仍返回会话。Remote 后端显示
+不可用，不发任何 Host 命名空间。
 
 `/settings` 中的 `Icon style` 可切换 TUI 结构图标的风格:`Emoji`(默认,
 彩色)、`Symbols`(紧凑的单格终端符号)、`Minimal`(隐藏装饰性图标,只

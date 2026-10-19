@@ -7,6 +7,218 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.3] - 2026-10-20
+
+### Install and version pairing
+
+This release raises the minimum DSH version to the published `0.2.1-rc.2`, which
+is also the exact validation target. Installing DSH requires explicitly allowing
+its native install scripts:
+
+```sh
+npm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty @deepseek-ai/dsh@0.2.1-rc.2
+dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@0.5.3
+dsh --profile pi-tui
+```
+
+`@deepseek-ai/dsh@0.2.1-rc.1` has no paired TUI. Older DSH releases keep their
+pairings: `@deepseek-ai/dsh@0.2.0-rc.2` uses
+`@xmoon76/dsh-pi-tui@0.5.1` or `@xmoon76/dsh-pi-tui@0.5.2-rc.1`;
+`@deepseek-ai/dsh@0.2.0-rc.1` (including `0.1.7-rc.2`) uses
+`@xmoon76/dsh-pi-tui@0.5.0`, and `@deepseek-ai/dsh@0.1.7-rc.1` uses
+`@xmoon76/dsh-pi-tui@0.4.8`.
+
+### Added
+
+- **Plugin management now lives on one fullscreen page.** `/plugins` and the
+  first-level `Plugins` category in Settings now open the same Plugin Manager:
+  grouped as TUI & Extensions / Official DSH / Third-party / Experimental, with
+  search, filters and both keyboard and mouse. The 14 official plugins come from
+  the real DSH catalog: installed ones can be enabled or disabled, missing
+  official ones can be installed after confirmation, and the page shows the
+  installed version, scripts waiting for approval and whether a restart is needed.
+- **Experimental plugins now say exactly what they can and cannot do in the
+  terminal.** Each official experimental plugin shows its available surfaces and
+  limits (some work only in the Web UI, some only through the existing
+  tools/jobs/activity/`/skill`/title surfaces), and enabling one never turns that
+  into "the Host supports it". The upgrade path is spelled out as well: upgrade
+  with DSH, remove and reinstall from the profile, or leave it to external
+  management; there is no in-place update or silent reinstall.
+- **`/model` can select the `deepseek-flash` model that ships with DSH 0.2.1-rc.2.**
+  Candidates come only from the DSH model catalog and are searched/submitted by
+  the exact `(provider, model)` identity; the display name is never used as the ID.
+- **When a session changes its working directory, the UI follows the new
+  directory.** The footer, history, `!` shell, `@` completion, skill catalog and
+  command execution read the directory that is actually in effect; the session
+  list, archive export and new sessions still use the original project directory.
+- **New `/settings → Other → Web Search / Fetch` entry.** It reuses the existing
+  settings editor: choose either DeepSeek API, see where the API key comes from
+  and edit the endpoint. A save counts only when the Host reads back the same
+  value, so `Verified` appears only on a matching write and read-back. The default
+  Messages/HTTP pair calls no billed API; `Share Original Question` sends at most
+  128 characters of the triggering question (never the full history or system
+  prompt), and the endpoint must be trusted HTTPS.
+- **The Task Center shows tasks run by external providers.** They have no local
+  child session, so they appear as their own row marked
+  `External · no local session`; selecting one explains why, never opens a missing
+  detail page and never offers Stop/Continue. Local child sessions are unchanged.
+
+### Changed
+
+- **Requires DeepSeek Harness `0.2.1-rc.2` and drops `0.2.1-rc.1`.** Older DSH
+  releases keep their pairings (see the install notes above); when upgrading from
+  an older DSH, pick the TUI version from that pairing.
+- **The Settings Plugins page now has `Open Plugin Manager`.** Wide and medium
+  layouts can click that row in the Rows column, or press Enter/Right; the narrow
+  layout still opens it in one step.
+- **Disabling or removing Auto Review now asks for confirmation first.** The
+  confirmation explains that this can turn existing Auto sessions into Full
+  access and that Auto Review is not a sandbox; it defaults to Cancel and changes
+  nothing on the Host until confirmed.
+
+- **Snapshot injections such as `time-context` no longer split one turn's
+  Activity/Thought.** Compact folds them into the Activity, Focus hides them in
+  the Thought and restores them in their original order when expanded, and Full
+  keeps the original layout; same-turn background-job notices fold the same way,
+  while idle wakeups and other Context stay separate.
+
+### Fixed
+
+- **The Plugin Manager no longer shows a fake `Enter` hint when the body has
+  nothing to display.** In an 80×2 window with no body rows, the action bar no
+  longer advertises `Enter` and Enter/Right cannot open an invisible card; `Esc`
+  still works, and the search editor keeps its `Enter apply` hint because that
+  action really runs.
+
+- **Choosing the B03 Auto permission preset keeps the current permission in the
+  footer.** Auto was missing from the built-in permission labels, so the badge
+  disappeared when it was selected; it now shows `[auto]` (also in compact/plain
+  formats).
+
+- **Outgoing messages now carry the time zone of the process running the TUI.**
+  The official `time-context` no longer reports
+  `Browser time zone ... unavailable`: the Direct main session and continuable
+  child follow-ups read the zone when the message is sent, Remote keeps reading it
+  through the official `SessionFace`, and when no usable zone is available the
+  message is refused before sending and the draft is restored instead of
+  inventing one.
+
+- **Text from the Host, models and tools is now filtered before it reaches the
+  terminal.** Single-row text and multi-line prose are handled separately, so
+  embedded terminal control sequences or line breaks can no longer split a row or
+  add a phantom one; Job output keeps its allowed colour styles, and raw records,
+  search and copy still use the original text.
+
+- **Clicking the editor area with the mouse in fullscreen no longer disables Task
+  Quick's `↓` entry or its `↓ view` hint**, and the editor's navigation-key
+  priority, the history panel's key ownership and the panel focus state stay
+  consistent.
+
+- **A tool result's multi-line preview shows `…` only when something really is
+  hidden.** A trailing newline used to count as an extra record (a false marker),
+  while dropping records at the count limit could show nothing.
+
+## [0.5.2-rc.1] - 2026-10-17
+
+### Install and version pairing
+
+This preview uses the same released DSH baseline as `0.5.1`: the peer floor stays
+`>=0.2.0-rc.2` and the exact validation target stays `0.2.0-rc.2`. Installing DSH
+requires explicitly allowing its native install scripts:
+
+```sh
+npm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty @deepseek-ai/dsh@0.2.0-rc.2
+dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@0.5.2-rc.1
+dsh --profile pi-tui
+```
+
+The older-runtime pairings are unchanged: `@deepseek-ai/dsh@0.2.0-rc.1` (including
+`0.1.7-rc.2`) uses `@xmoon76/dsh-pi-tui@0.5.0`, and `@deepseek-ai/dsh@0.1.7-rc.1`
+uses `@xmoon76/dsh-pi-tui@0.4.8`.
+
+### Added
+
+- **Task Quick is now an on-demand window.** With live tasks it still takes no rows by
+  default: it appears below the whole Footer only when you press `↓` on the editor's
+  last visible line, where `↑↓`/`PgUp`/`PgDn` select, `Enter` opens the existing detail
+  for that real task identity, and `↑` (first row) or `Esc` returns to the editor with
+  the draft preserved. The trailing `➜ Open Task Center…` row opens the full Task Center
+  without counting as a task; the legacy modal Quick is retired.
+
+- **`Ctrl+R` history search takes over the bottom editor seat.** The seat holds the query,
+  the results and a Preview that soft-wraps the full prompt and scrolls on its own;
+  `Enter` writes the entry back to the editor without submitting, and `Alt+C` copies it.
+  Switching sessions closes the old seat immediately, so its actions and async results
+  never land in the new session.
+
+- **`/settings` is now a fullscreen workspace, and `Configured theme` and
+  `Transcript display` write directly.** Three, two and one column are the same
+  `categories → rows → detail` projection (`Right`/`Enter` move one level in, `Left`/
+  `Esc` one level back), `R` re-reads and `C` copies the raw value, and a confirmed
+  change goes through the existing serialized write path and is re-read from the
+  authority — a failure is reported as `Not saved` or `Outcome unknown`, never as
+  success.
+
+- **A Job detail is now its own fullscreen workspace.** It shows the Job identity, its
+  status and the `[GAP]`/`[ERROR]`/`[SETTLED]` facts, and `Tab` switches between the
+  `Output` and `Command` pages. Output scrolls, searches, and follows the newest output
+  by default (a manual browse pauses it until `End`), the Command page shows the
+  unmodified original command and copies it, and the workspace never consumes the
+  `job_output` cursor or writes session history.
+
+- **The Footer's Performance item gains the whole-Session rate**, now sourced from the
+  TUI's own Host projection: identical on Direct and Remote and unaffected by
+  reconnects or paging, with the main session and a viewed child each showing their own
+  Session's figures, and an ineligible scope omitted instead of shown as `0 tok/s`.
+
+### Changed
+
+- **A `/fork` that really switches to the new child session now says so.** The
+  `Forked to a new session` notice appears once, and only while the child was actually
+  adopted and that navigation is still in effect; a failed fork, a merely parked child
+  or a superseded navigation stays silent, and the `/rewind`, `/new` and `/resume`
+  feedback is unchanged.
+
+- **Pickers and state markers share one visual vocabulary**: overlay pickers use a
+  `primary` cursor and an `Esc`-last hint line, and `/settings` and `/preset` show the
+  current value as a `[current]` / `[default]` chip.
+
+- **The `▴ Collapse` tail row is removed from long user messages**, replaced by a click
+  anywhere in the body.
+
+- **In terminals without paste markers, a multi-line paste submits at the first
+  `Enter`**; terminals that support paste markers are unchanged.
+
+### Fixed
+
+- Input is no longer lost after a new or switched Session: same-name Skill commands, an
+  unacknowledged draft and `↑` recall all survive.
+
+- The Footer's `↓ view` hint always matches the real admission: it is withheld while a
+  modal owns the input or the action is disabled or rebound, and it returns with history
+  browsing or a Todo fold that changes the Quick window's room.
+
+- Viewing a child session no longer leaks the main session's facts, and the fullscreen
+  `‹ back` is clickable.
+
+- Plugin widgets no longer disappear in fullscreen; a zero-row grant is a legal empty
+  projection.
+
+- The nested `/settings → Keyboard shortcuts` subpage no longer fills the whole screen;
+  standalone `/keybindings` is unchanged.
+
+- Live and cold-start transcript grouping converge, so a restored session matches the
+  live one.
+
+- workflow cards settle only on the official terminal event and are no longer shown as
+  `[interrupted]`.
+
+- Task Browser Host labels are projected at the terminal boundary, so embedded
+  ANSI/OSC/CSI never reaches the terminal.
+
+> **Known limitations:** The OSC 7 pane working directory and the OSC 9;4 "waiting for
+> input" refinement are currently enabled only for terminals identified as Tern.
+
 ## [0.5.1] - 2026-10-08
 
 ### Installation and version pairing
@@ -1702,7 +1914,9 @@ Users who must keep DSH `0.1.1-rc.2` should use `@xmoon76/dsh-pi-tui@0.3`.
 - Fullscreen layout, Ctrl+F transcript search, theme system.
 - Single-package release model.
 
-[Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/v0.5.1...HEAD
+[Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/v0.5.3...HEAD
+[0.5.3]: https://github.com/XMoon/dsh-pi-tui/compare/next-v0.5.2-rc.1...v0.5.3
+[0.5.2-rc.1]: https://github.com/XMoon/dsh-pi-tui/compare/v0.5.1...next-v0.5.2-rc.1
 [0.5.1]: https://github.com/XMoon/dsh-pi-tui/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/XMoon/dsh-pi-tui/compare/v0.4.9...v0.5.0
 [0.4.9]: https://github.com/XMoon/dsh-pi-tui/compare/v0.4.8...v0.4.9

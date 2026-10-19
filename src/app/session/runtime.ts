@@ -63,6 +63,49 @@ export interface SessionRuntimeSurface {
   reportSwitch(from: string | undefined, to: SessionOwnerRef): void
   /** Drop the unpinned per-session drafts after a committed switch/fork. */
   clearUnpinnedDrafts(): void
+  /**
+   * PR3-B §7.3 (the B2 external-review F1): drop the ACTIVE editor draft at
+   * a COMMITTED cross-owner switch. Called ONLY at the two sites that have
+   * already proven the publication (the ordinary switch's and the fork
+   * adoption's post-commit phases) — never at the generation reset (an
+   * invalidation signal the first-session creation and a pre-publication
+   * failure also produce) and never for a same-session resume. The surface
+   * implementation routes to the display seam (the PiTui adapter keeps its
+   * own retention contract).
+   */
+  dropOutgoingActiveDraft(): void
+  /**
+   * PR3-B B3 (external review P2-B): withdraw the REPLACED subject's live
+   * interaction presentation at the SAME synchronous publication commit. The
+   * commit section is state-only and must not throw, so the implementation
+   * performs no Host read and routes any renderer frame failure to that
+   * renderer's fatal sink. Called immediately after `setCurrentOwner`, before any
+   * post-commit await.
+   */
+  withdrawReplacedPresentation(): void
+  /**
+   * Open the editor-recall scope of the owner this commit section is about to
+   * publish (or create): the owner's hydration reseeds ↕ recall from its
+   * session-scoped JSONL rows, while a submission accepted in the
+   * publication→hydration gap has its own append ordered behind the transition
+   * (the submit FIFO turn and `ensureSession()`), so the row can land after
+   * that read. The seam starts the scope-bound temporary submissions so the
+   * reseed reconciles them instead of dropping them, drops the previous
+   * owner's entries with them, and ADOPTS the sessionless pool's entries for
+   * the first Session. State-only and synchronous: called INSIDE the commit
+   * section, right after `setCurrentOwner`, before any post-commit await.
+   * @param owner - the published Session's id.
+   */
+  beginInputHistoryScope(owner: string): void
+  /**
+   * Phase 3B / B3-B: physically close a mounted History editor-seat tenant whose
+   * captured Session scope is no longer current. Called at the SAME synchronous
+   * publication commit, right after `beginInputHistoryScope`, and from the
+   * ownership core's generation-reset hook. The implementation is state-only and
+   * non-throwing: it never lets a UI cleanup failure roll back or mask the
+   * already-published Session.
+   */
+  retireStaleHistorySeat(): void
   /** Report a failed switch (the runner owns the logger + diagnostics). */
   reportSwitchFailure(sessionId: string, message: string): void
   // First-session (deferred creation) runner operations.
@@ -172,8 +215,10 @@ export interface SessionRuntime {
   withWriter<T>(scope: LiveSessionScope, task: () => Promise<T> | T): Promise<T>
   /** Run one ordinary session transition/switch (plan §4A). */
   transitionTo<T>(steps: TransitionSteps<T>): Promise<TransitionOutcome<T>>
-  /** Hand the TUI over to another persisted session (never throws). */
-  switchSession(sessionId: string): Promise<string | undefined>
+  /** Hand the TUI over to another persisted session (never throws). A scoped
+   *  UI intent can supply its captured scope so a queued stale request is
+   *  refused inside the transition gate before navigation side effects. */
+  switchSession(sessionId: string, expectedScope?: SessionScope): Promise<string | undefined>
   /** Adopt one forked child inside the gate (plan §4B). Resolves to the
    * navigation identity captured INSIDE the publication commit (PR5 v2
    * §3C — the caller's final settlement consumes exactly this saved
@@ -313,7 +358,43 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
                 const sessionId = deps.owners.sessionId(nextOwner)
                 committedOwner = nextOwner
                 committedSessionId = sessionId
+                // PR3-B §7.3 (F1): the active-draft drop rides the
+                // publication's SYNCHRONOUS commit block — after the
+                // captured facts are resolved, inside the same seam as
+                // `setCurrentOwner`, BEFORE the first await (retirement,
+                // hydration, catalog) and therefore before any new-source
+                // frame can lift the input fence: the outgoing text is gone
+                // before the new session is editable, and no post-hydration
+                // keystroke can be wiped by a late clear. The discriminator
+                // is the OPAQUE OWNER REF (the same axis the stale-restore
+                // policy reads): only a genuinely REPLACED owner drops —
+                // aligned with `SessionSubjectAuthority.ownerReplaced`, so
+                // a same-id re-publication and a same-owner generation bump
+                // answer consistently on both surfaces. The first-session
+                // creation publishes without an outgoing owner; a
+                // pre-publication failure never reaches this seam.
+                if (oldOwner !== undefined && oldOwner !== nextOwner) {
+                  deps.surface.dropOutgoingActiveDraft()
+                }
                 core.setCurrentOwner(nextOwner, sessionId)
+                // The editor-recall scope follows the SAME synchronous
+                // publication: the new owner's hydration reseeds ↕ recall
+                // from its disk rows, and an input accepted before that
+                // reseed must survive it (the owner is current here, so the
+                // entry belongs to the new Session). State-only.
+                deps.surface.beginInputHistoryScope(sessionId)
+                // Phase 3B / B3-B: the old Session's History seat is logically
+                // dead the instant the new owner is published; close its physical
+                // tenant in the same synchronous commit, before the post-commit
+                // awaits, so the new owner's first editable frame never paints a
+                // stale History. State-only and non-throwing.
+                deps.surface.retireStaleHistorySeat()
+                // External review P2-B: the new owner IS published here, so the
+                // replaced subject's modal must already be out of the seat before
+                // the post-commit awaits below (retirement, quiesce, hydration).
+                if (oldOwner !== undefined && oldOwner !== nextOwner) {
+                  deps.surface.withdrawReplacedPresentation()
+                }
                 // The publication is the transition's COMMIT POINT: only from
                 // here on does the `finally` below stop restoring the queued
                 // recalls (a pre-publication failure settles them aborted).
@@ -447,9 +528,8 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
    * (open → commit) runs inside the session-transition gate, so it can never
    * interleave with another ordinary transition.
    */
-  const switchSession = (sessionId: string): Promise<string | undefined> => {
-    core.bumpNavigationEpoch()
-    return core.gate.run(() => core.barrier.runTransition(async () => {
+  const switchSession = (sessionId: string, expectedScope?: SessionScope): Promise<string | undefined> => {
+    const runLocked = (): Promise<string | undefined> => core.barrier.runTransition(async () => {
       try {
         return await switchSessionLocked(sessionId)
       } finally {
@@ -457,7 +537,19 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
         // recall that was waiting on this transition in that case.
         deps.surface.settlePendingQueueRecalls(false)
       }
-    }))
+    })
+    if (expectedScope === undefined) {
+      core.bumpNavigationEpoch()
+      return core.gate.run(runLocked)
+    }
+    if (!deps.isScopeCurrent(expectedScope)) return Promise.resolve(undefined)
+    return core.gate.run(() => {
+      // A previous queued transition may have published a new owner while this
+      // intent waited. Recheck before this request bumps navigation or opens B.
+      if (!deps.isScopeCurrent(expectedScope)) return undefined
+      core.bumpNavigationEpoch()
+      return runLocked()
+    })
   }
 
   const switchSessionLocked = async (sessionId: string): Promise<string | undefined> => {
@@ -507,6 +599,12 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
       // keep their pinned drafts so a stale submission can still restore its
       // text with a live backing draft.
       deps.surface.clearUnpinnedDrafts()
+      // (PR3-B §7.3: the ACTIVE-draft drop moved onto the publication's
+      // synchronous commit block — see the publishOwner seam in
+      // `transitionTo`. Keeping it here left the race the review probed: the
+      // new session's hydration had already lifted the input fence, so a
+      // post-hydration keystroke was wiped by this late clear, and the old
+      // text stayed in the composer through B's first editable frames.)
       return undefined
     } catch (error) {
       const message = safeErrorMessage(error)
@@ -739,7 +837,28 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
               // publication; after `setCurrentOwner` the commit point is
               // seamless (plain assignments only).
               const identity = deps.owners.completionIdentity(nextOwner)
+              // PR3-B §7.3 (F1): the active-draft drop rides the SAME
+              // synchronous publication commit as the ordinary switch —
+              // before any post-commit await (source retirement, quiesce,
+              // hydration, catalog), so the adopted child's first editable
+              // frame never shows the source session's text and no
+              // post-hydration keystroke is wiped. The discriminator is the
+              // OPAQUE OWNER REF (the same axis as the ordinary seam and the
+              // stale-restore policy): only a genuinely replaced owner drops.
+              if (oldOwner !== undefined && oldOwner !== nextOwner) {
+                deps.surface.dropOutgoingActiveDraft()
+              }
               core.setCurrentOwner(nextOwner, nextSessionId)
+              // The editor-recall scope follows the same synchronous
+              // publication (see the ordinary commit seam).
+              deps.surface.beginInputHistoryScope(nextSessionId)
+              // Phase 3B / B3-B: see the ordinary commit seam — retire a stale
+              // History seat inside the same synchronous publication.
+              deps.surface.retireStaleHistorySeat()
+              // External review P2-B: same publication commit, same rule.
+              if (oldOwner !== undefined && oldOwner !== nextOwner) {
+                deps.surface.withdrawReplacedPresentation()
+              }
               // PR5 v2 §3C (plan-owner amendment): the operation-owned
               // settlement identity composes the PUBLISHED CHILD session id
               // with the epoch THIS rewind claimed at its admission bump —
@@ -926,6 +1045,8 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
         return { kind: 'success' as const, text: `forked as ${outcome.handle.session.id}` }
       }
       deps.surface.clearUnpinnedDrafts()
+      // (PR3-B §7.3: the ACTIVE-draft drop moved onto the adoption's
+      // synchronous publication commit — see the publishOwner seam above.)
       return { kind: 'success' as const, text: `forked as ${outcome.handle.session.id}`, adoptedNavigation }
     } catch (error) {
       // An owner the adoption cleanup already released exactly once must not
@@ -968,6 +1089,19 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
     return runFirstSessionCommit({
       publishOwner: () => {
         core.setCurrentOwner(childOwner, deps.owners.sessionId(childOwner))
+        // The editor-recall scope follows the same synchronous publication:
+        // the deferred first session's hydration reseeds ↕ recall afterwards,
+        // and the sessionless submission that CREATED it was accepted in the
+        // sessionless pool BEFORE this create — the seam ADOPTS those pending
+        // entries instead of clearing them, because their row is written under
+        // THIS Session and can therefore not be in the snapshot yet.
+        deps.surface.beginInputHistoryScope(deps.owners.sessionId(childOwner))
+        // Phase 3B / B3-B: the first published Session kills a sessionless
+        // History seat even though no id string moved (the capture's
+        // subject-undefined branch fails the moment an owner exists). The
+        // generation bump below would also catch it; retiring here keeps the
+        // commit's own first frame clean.
+        deps.surface.retireStaleHistorySeat()
         return deps.owners.completionIdentity(childOwner)
       },
       setCompletionOwner: deps.surface.setCompletionOwner,
@@ -1005,7 +1139,17 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
       publishOwner: (owner) => {
         const resumed = owner as SessionHandle | undefined
         const nextOwner = resumed === undefined ? undefined : deps.owners.fromHandle(resumed)
+        // NO editor-recall scope call here: the resume publication happens
+        // BEFORE the surface is mounted, so the mounted app's SESSIONLESS POOL
+        // scope is already open and the resumed owner's hydration reseed closes
+        // it. That is what covers the Remote startup resume, whose
+        // `remote.read` await leaves the terminal accepting input: the entries
+        // accepted in that window are pool entries and the resumed owner's
+        // reseed adopts them (the Direct startup has no await before the reset,
+        // and the TSP renderer holds input until bind — both stay empty).
         core.setCurrentOwner(nextOwner, nextOwner === undefined ? undefined : deps.owners.sessionId(nextOwner))
+        // External review P2-B: a resume publishes a new owner too.
+        if (nextOwner !== undefined) deps.surface.withdrawReplacedPresentation()
         return nextOwner === undefined ? undefined : deps.owners.completionIdentity(nextOwner)
       },
       setCompletionOwner: deps.surface.setCompletionOwner,

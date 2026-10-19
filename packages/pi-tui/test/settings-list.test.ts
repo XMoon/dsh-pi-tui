@@ -2,6 +2,7 @@ import assert from "node:assert";
 import { describe, it } from "node:test";
 import { SettingsList, type SettingsListTheme, type RowBudgetAware } from "../src/components/settings-list.ts";
 import type { Component } from "../src/tui.ts";
+import { visibleWidth } from "../src/utils.ts";
 
 const testTheme: SettingsListTheme = {
 	label: (text) => text,
@@ -515,4 +516,120 @@ describe("SettingsList mouse parity (last-painted rows)", () => {
 		assert.deepStrictEqual(changes, [], "a click without a fresh press must not activate");
 	});
 
+});
+
+describe("SettingsList structured value parts (dsh-pi-tui extension X061)", () => {
+	/** The design language's state-chip pair, in the caller's priority order
+	 *  (`[current]` first) with the pre-painted ` · ` joiner BETWEEN the chips. */
+	const stateParts = [
+		{ kind: "chip" as const, text: "[current]" },
+		{ kind: "text" as const, text: " · " },
+		{ kind: "chip" as const, text: "[default]" },
+	];
+	const renderOne = (row: Record<string, unknown>, width: number): string => {
+		const list = new SettingsList([{ ...row } as never], 10, testTheme, () => {}, () => {});
+		return list.render(width)[0] ?? "";
+	};
+
+	it("keeps a state chip whole and drops the rest whole, never leaving a dangling separator", () => {
+		const row = { id: "p", label: "Standard mode (standard)", currentValue: "", valueParts: stateParts };
+		// 60: both chips fit (label 24 + 6 + 21 <= 60).
+		const wide = renderOne(row, 60);
+		assert.match(wide, /\[current\] · \[default\]$/, `wide row: ${JSON.stringify(wide)}`);
+		// 45: only the first chip fits — the second chip AND its separator go.
+		const mid = renderOne(row, 45);
+		assert.match(mid, /\[current\]$/, `mid row: ${JSON.stringify(mid)}`);
+		assert.ok(!mid.includes("·"), `the dropped chip must take its separator with it: ${JSON.stringify(mid)}`);
+		// 15: the label yields entirely so the reserved chip still fits whole.
+		const tight = renderOne(row, 15);
+		assert.match(tight, /\[current\]$/, `tight row: ${JSON.stringify(tight)}`);
+		// 14: below the reservation the slot yields WHOLE — no `[curre`.
+		const belowFloor = renderOne(row, 14);
+		assert.ok(!/\[[a-z]/.test(belowFloor), `no partial chip below the reservation: ${JSON.stringify(belowFloor)}`);
+	});
+
+	it("reserves one whole chip by clipping a label wider than its column (no row overflow)", () => {
+		const row = {
+			id: "long",
+			label: "A deliberately very long custom preset name (custom-long-name-here)",
+			currentValue: "",
+			valueParts: stateParts,
+		};
+		// A long custom preset at a narrow frame: the label is clipped with `…`
+		// so the state chip survives INSIDE the row.
+		const narrow = renderOne(row, 40);
+		assert.match(narrow, /\[current\]/, `narrow row: ${JSON.stringify(narrow)}`);
+		assert.ok(!narrow.includes("[default"), `the second chip yields whole: ${JSON.stringify(narrow)}`);
+		assert.ok(narrow.includes("…"), `the label is the thing that truncates: ${JSON.stringify(narrow)}`);
+		assert.ok(visibleWidth(narrow) <= 40, `row width ${visibleWidth(narrow)} <= 40`);
+		const wide = renderOne(row, 120);
+		assert.match(wide, /\[current\] · \[default\]$/, `wide row: ${JSON.stringify(wide)}`);
+		assert.ok(visibleWidth(wide) <= 120, `row width ${visibleWidth(wide)} <= 120`);
+	});
+
+	it("clamps a label wider than its column even without value parts", () => {
+		const row = { id: "long", label: "A deliberately very long custom preset name (custom-long-name-here)", currentValue: "regular" };
+		const narrow = renderOne(row, 40);
+		assert.ok(visibleWidth(narrow) <= 40, `row width ${visibleWidth(narrow)} <= 40`);
+		assert.ok(narrow.includes("…"), `the label is clipped: ${JSON.stringify(narrow)}`);
+		// A normal width keeps the value AND the label column intact.
+		const wide = renderOne(row, 120);
+		assert.match(wide, /regular$/, `wide row: ${JSON.stringify(wide)}`);
+	});
+
+	it("leaves currentValue and the values cycle untouched (the parts are a display fact)", () => {
+		const changes: Array<{ id: string; value: string }> = [];
+		const rows = [
+			{
+				id: "a",
+				label: "Alpha",
+				currentValue: "regular",
+				values: ["regular", "fullscreen"],
+				valueParts: [{ kind: "chip" as const, text: "[pinned]" }],
+			},
+		];
+		const list = new SettingsList(rows.map((row) => ({ ...row })), 10, testTheme, (id, value) => changes.push({ id, value }), () => {});
+		assert.match(list.render(80)[0] ?? "", /\[pinned\]$/);
+		list.handleInput("\r");
+		assert.deepStrictEqual(changes, [{ id: "a", value: "fullscreen" }]);
+		// The fork's own value semantics advanced; the painted slot stays the
+		// structured display fact instead of the raw `currentValue`.
+		assert.match(list.render(80)[0] ?? "", /\[pinned\]$/);
+	});
+
+	it("reflows both chips back after a wide → narrow → wide resize (no cached width)", () => {
+		const row = { id: "p", label: "Standard mode (standard)", currentValue: "", valueParts: stateParts };
+		const list = new SettingsList([{ ...row }], 10, testTheme, () => {}, () => {});
+		assert.match(list.render(60)[0] ?? "", /\[current\] · \[default\]$/);
+		assert.match(list.render(45)[0] ?? "", /\[current\]$/);
+		assert.match(list.render(60)[0] ?? "", /\[current\] · \[default\]$/);
+	});
+});
+
+describe("SettingsList search text (dsh-pi-tui extension X062)", () => {
+	const renderAfterSearch = (rows: Array<Record<string, unknown>>, query: string): string => {
+		const list = new SettingsList(rows as never, 10, testTheme, () => {}, () => {}, { enableSearch: true });
+		for (const character of query) list.handleInput(character);
+		return list.render(80).join("\n");
+	};
+
+	it("filters on searchText when the painted label is an abbreviation", () => {
+		// The label is what the column paints; the search must still see the name
+		// the abbreviation was cut from, or a keyword from its middle is lost.
+		const rendered = renderAfterSearch([
+			{ id: "a", label: "Classic Dark…l Edition v9", searchText: "Classic Dark quasar Special Edition v9", currentValue: "" },
+			{ id: "b", label: "Solarized", currentValue: "" },
+		], "quasar");
+		assert.match(rendered, /Classic Dark…l Edition v9/, `the abbreviated row must survive the filter:\n${rendered}`);
+		assert.doesNotMatch(rendered, /No matching settings/, `the filter must not answer empty:\n${rendered}`);
+	});
+
+	it("keeps the label as the search basis when no searchText is declared", () => {
+		// The historical contract, unchanged: absent searchText the label IS the
+		// search basis — so an abbreviation declared without one really is lost.
+		const rendered = renderAfterSearch([
+			{ id: "a", label: "Classic Dark…l Edition v9", currentValue: "" },
+		], "quasar");
+		assert.match(rendered, /No matching settings/, `the label-only fallback must be preserved:\n${rendered}`);
+	});
 });

@@ -9,6 +9,7 @@
 
 import { SettingsList } from '@xmoon76/pi-tui'
 import type { ComposerSubmitGesture, TuiApp } from '../../tui-app.ts'
+import { abbreviateName } from '../pickers/name-label.ts'
 import { safeErrorMessage } from '../../runtime/process/errors.ts'
 import { SupersededReadError } from '../../runtime/read-error.ts'
 import type { HumanSkillCatalog } from '../../domain/catalog/skill.ts'
@@ -99,8 +100,16 @@ export function registerSkillCommand(deps: SkillsCommandDeps): void {
         app.openSettings(
           catalog.skills.map(skill => ({
             id: skill.name,
-            label: skill.name,
-            description: skill.description,
+            // The label column keeps BOTH ends of a long name (head…tail around
+            // one `…`), so two long skill names that share a prefix cannot paint
+            // identically while Enter still runs different ids. That abbreviation
+            // is a DRAWING fact only: the list's search would otherwise lose the
+            // middle of the name, so the COMPLETE name is declared as the search
+            // basis (fork X062). The SELECTED row's description (below) carries
+            // the full name too — the row's identity (id/values) is untouched.
+            label: abbreviateName(skill.name, 34),
+            searchText: skill.name,
+            description: skill.description === '' ? skill.name : `${skill.name} — ${skill.description}`,
             currentValue: '',
             values: ['✓'],
           })),
@@ -207,6 +216,10 @@ export function registerReloadCommand(deps: SkillsCommandDeps): void {
           // reload-time theme, never a re-read of the doc: a settings write
           // from the panel may still be in flight when the reply lands.
           const reloadTheme = doc.theme
+          // This re-apply makes the persisted preference current again: it becomes the
+          // runtime owner's deliberate intent, so a detection it starts (or a report
+          // arriving later) is fenced on the same fact as every other selection.
+          if (reloadTheme !== undefined && reloadTheme !== '') app.noteThemeSelection(reloadTheme)
           if (reloadTheme === 'auto') {
             app.clearActivePluginTheme()
             detach('theme autodetect', () => app.autoDetectTheme({

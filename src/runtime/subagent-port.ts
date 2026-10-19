@@ -66,8 +66,8 @@ export type SubagentPromptOutcome =
   | { readonly kind: 'indeterminate'; readonly message: string }
 
 /** The caller-owned per-call context for a prompt delivery (cancellation,
- * text canonicalization). The runner provides these; the port never reaches
- * into the session itself. */
+ * text canonicalization, request zone). The runner provides these; the port
+ * never reaches into the session itself. */
 export interface SubagentPromptContext {
   /** A fresh per-call cancellation source (the caller owns aborting it). */
   makeSignal(): AbortSignal
@@ -75,6 +75,11 @@ export interface SubagentPromptContext {
    * `@`-file mention expansion). MAY be async (migration M1.10 — the
    * Host-file port); the default passes text through. */
   canonicalizeText?(text: string): string | Promise<string>
+  /** The Client-local IANA zone sampled for THIS human follow-up (the official
+   * `clientTimeZone` request field). Called exactly once per delivery, after
+   * the async canonicalization and cancellation checks and immediately before
+   * dispatch; a throw is a pre-dispatch refusal (never a durable port state). */
+  clientTimeZone(): string
 }
 
 /** The explicit semantic target for stopping a continuable child. */

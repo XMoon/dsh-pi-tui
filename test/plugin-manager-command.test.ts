@@ -1,8 +1,7 @@
 /**
- * `/plugins` and `/settings → Plugins` entry tests (P1-A1.8/A1.9): the
- * canonical direct entry opens the shared surface, and the Settings entry is
- * LAZY — merely rendering /settings must never build the Plugin Manager
- * submenu (and therefore never read plugin inventory).
+ * `/plugins` entry tests (S4-D1): the canonical direct entry opens the shared
+ * fullscreen Plugin Manager page, and opening `/settings` alone never builds
+ * the inline Plugin page (and therefore never reads plugin inventory).
  * @module @xmoon76/dsh-pi-tui/plugin-manager-command.test
  */
 
@@ -40,7 +39,7 @@ function fakeCommands(): { defs: { name: string; handler?: unknown }[]; commands
   return { defs, commands }
 }
 
-function proxyRunner(ctx: Context, app: TuiApp, commands: Record<string, unknown>, counts: { opened: number; submenu: number }): TuiCommandRunner {
+function proxyRunner(ctx: Context, app: TuiApp, commands: Record<string, unknown>, counts: { opened: number; page: number }): TuiCommandRunner {
   const base: Record<string, unknown> = {
     ctx,
     app,
@@ -60,8 +59,8 @@ function proxyRunner(ctx: Context, app: TuiApp, commands: Record<string, unknown
     tuiSettings: undefined,
     extensions: undefined,
     openPluginManager: () => { counts.opened += 1 },
-    createPluginManagerSubmenu: () => {
-      counts.submenu += 1
+    createPluginManagerPage: () => {
+      counts.page += 1
       return { render: () => [], invalidate: () => {} }
     },
     config: {
@@ -72,6 +71,12 @@ function proxyRunner(ctx: Context, app: TuiApp, commands: Record<string, unknown
         approvalOverrideOf: () => undefined,
       },
       subagentModelSelection: { available: () => false },
+      // The Web provider section is Host-only (S2/PR-B): this stub composes no
+      // Host settings plane, so the section reports unavailable and offers no write.
+      web: { available: () => false },
+      // The credential STORE is not mounted either: the Web section's key row
+      // reports unavailable instead of claiming "not configured".
+      credentials: { available: () => false },
     },
     catalog: { models: { available: () => false } },
   }
@@ -80,16 +85,16 @@ function proxyRunner(ctx: Context, app: TuiApp, commands: Record<string, unknown
   }) as unknown as TuiCommandRunner
 }
 
-function setup(): { invoke: (name: string) => unknown; counts: { opened: number; submenu: number }; app: TuiApp } {
+function setup(): { invoke: (name: string) => unknown; counts: { opened: number; page: number }; app: TuiApp } {
   const ctx = new Context()
-  const vt = new VirtualTerminal(80, 24)
+  const vt = new VirtualTerminal(100, 30)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
   startedApps.add(app)
   const services = fakeCommands()
   ctx.provide('commands', services.commands as never)
   ctx.provide('skills', { list: async () => [], get: async () => undefined, find: () => undefined, execute: async () => undefined } as never)
-  const counts = { opened: 0, submenu: 0 }
+  const counts = { opened: 0, page: 0 }
   registerTuiCommandsWithDirectSeams(proxyRunner(ctx, app, services.commands, counts))
   const invoke = (name: string): unknown => {
     const definition = services.defs.find(candidate => candidate.name === name)
@@ -99,18 +104,20 @@ function setup(): { invoke: (name: string) => unknown; counts: { opened: number;
   return { invoke, counts, app }
 }
 
-test('/plugins is registered and opens the shared Plugin Manager surface', () => {
+test('/plugins is registered and opens the fullscreen Plugin Manager page', () => {
   const { invoke, counts } = setup()
   const result = invoke('plugins') as { kind: string }
   assert.equal(result.kind, 'success')
   assert.equal(counts.opened, 1)
-  assert.equal(counts.submenu, 0)
+  assert.equal(counts.page, 0, 'the direct entry never builds the Settings-hosted page')
 })
 
-test('/settings renders the Plugins row lazily (no submenu build, no inventory read)', () => {
+test('/settings renders lazily (no inline Plugin page build, no inventory read)', async () => {
   const { invoke, counts } = setup()
-  const result = invoke('settings') as { kind: string }
+  // `/settings` reads the Host Web provider facts before it leases the
+  // workspace screen (S2/PR-B §B3.4), so its handler is asynchronous.
+  const result = await invoke('settings') as { kind: string }
   assert.equal(result.kind, 'success')
-  assert.equal(counts.submenu, 0, 'opening /settings must not build the Plugin Manager submenu')
+  assert.equal(counts.page, 0, 'opening /settings must not build the Plugin Manager page')
   assert.equal(counts.opened, 0)
 })

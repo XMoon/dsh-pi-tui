@@ -80,6 +80,11 @@ export interface InteractionStatus {
 /** The workspace the display subject lives in (plan §4.7). */
 export interface WorkspaceStatus {
   readonly cwd: string
+  /** TRUE when the effective directory is UNKNOWN (the owner's read failed or
+   *  the authority is absent): the footer states the unavailability in words
+   *  (plan §B2 UI: 不可用状态有文字) instead of painting an empty value. `cwd`
+   *  stays empty for path math — the state word is never a path. */
+  readonly cwdUnavailable?: boolean
   readonly project?: string
   readonly branch?: string
 }
@@ -145,23 +150,23 @@ export interface UsageStatus {
   /** Model performance facts. Field names are frozen for the status
    * contract; the SEMANTICS are: `llmMs` = the session LIFETIME LLM wall
    * (kept for /stats and analysis, not shown in the default footer),
-   * `firstTokenMs` = the RECENT (last 5) average time-to-first-token,
-   * `tokensPerSec` = the RECENT (last 5) observable decode throughput
-   * (Σ output / Σ (first token → assistant/message) over steps whose final
-   * attempt delivered token deltas at two distinct timestamps).
+   * `firstTokenMs` = the recent (R5) average time-to-first-token,
+   * `tokensPerSec` = the recent (R5) weighted model-request output rate
+   * (Σ output / Σ model wall over the last five eligible completed steps of
+   * the current provider/model route generation), and `sessionTokensPerSec` =
+   * the SAME weighted rate over every eligible step of the Session ("All").
    *
-   * PR5 truthfulness (M3-4 PR5 §3.2): `firstTokenMs`/`tokensPerSec` are
-   * ABSENT when the presentation owner cannot prove the recent-sample
-   * evidence authoritative — a bounded Remote window that has neither
-   * reached the history start nor retained enough valid samples must not
-   * paint a numeric `TTFB 0s · 0 tok/s` as if it were measured. Numeric
-   * zero stays a legitimate measured value (a complete history with zero
-   * valid samples). `llmMs` is lifetime data and always numeric.
-   * Availability is NEVER inferred from the numeric values. */
+   * TPS plan PR-2: all three performance values are the bundle's own Host
+   * `piTuiPerformance` projection — the ONE authority. Each is ABSENT when its
+   * authoritative source cannot answer (no Host projection, or a scope with no
+   * eligible sample): a zero-sample scope must never paint `0 tok/s` as if it
+   * were measured, and no value is inferred from a bounded page window or a
+   * local fold. `llmMs` is lifetime data and always numeric. */
   readonly performance: {
     readonly llmMs: number
     readonly firstTokenMs?: number
     readonly tokensPerSec?: number
+    readonly sessionTokensPerSec?: number
   }
   readonly turns: number
   readonly steps: number
@@ -217,7 +222,9 @@ export function emptyStatusSnapshot(): StatusSnapshot {
     },
     usage: {
       tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-      performance: { llmMs: 0, firstTokenMs: 0, tokensPerSec: 0 },
+      // No Host projection has answered yet: the three measured performance
+      // values are ABSENT, never fabricated zeros (plan PR-2 truthfulness).
+      performance: { llmMs: 0 },
       turns: 0,
       steps: 0,
     },

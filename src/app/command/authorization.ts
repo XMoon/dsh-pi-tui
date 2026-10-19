@@ -184,6 +184,9 @@ export function createAuthorizationFlow(
   close(): void
 } {
   let noticeHandle: (() => void) | undefined
+  /** The identity of the ONE open notice: a late `onClose` from a previous
+   *  notice must never clear the CURRENT notice's handle. */
+  let noticeToken: object | undefined
   let noticeBody = ''
   /** The prompt UI open per PROMPT id (a withdrawal closes exactly the
    * prompt it names; answers settle exactly the prompt they answer). */
@@ -208,19 +211,36 @@ export function createAuthorizationFlow(
   const showNotice = (notice: AuthorizationNoticeEvent): void => {
     noticeBody = formatAuthorizationNotice(notice)
     if (noticeHandle === undefined) {
-      noticeHandle = app.openOutputViewer({
+      // Attempt-scoped identity for THIS notice: the closer and the onClose
+      // are bound to the same token, so only the notice that actually opened
+      // may clear the slot.
+      const token = {}
+      noticeToken = token
+      const closer = app.openOutputViewer({
         title: 'Sign in',
         initial: noticeBody,
         refresh: () => noticeBody,
-        onClose: () => { noticeHandle = undefined },
+        onClose: () => {
+          if (noticeToken !== token) return
+          noticeToken = undefined
+          noticeHandle = undefined
+        },
       })
+      if (noticeToken === token) noticeHandle = closer
+      // A synchronously finalized attempt (the surface was already gone):
+      // close ONLY that stale view, never the newer notice's.
+      else closer()
     }
   }
   const close = (): void => {
     for (const open of openPrompts.values()) open.withdraw()
     openPrompts.clear()
-    noticeHandle?.()
+    // Retire the handle/token BEFORE the closer runs: its onClose may
+    // synchronously open a NEW notice whose handle must survive this close.
+    const closer = noticeHandle
     noticeHandle = undefined
+    noticeToken = undefined
+    closer?.()
     buffered.clear()
     closed = true
   }

@@ -187,7 +187,11 @@ test('the armed Ctrl+D instruction never pushes the footer out of a narrow fulls
     const view = lines.join('\n')
     assert.ok(view.includes('Press Ctrl+D again to exit'), `the exit hint must stay visible:\n${view}`)
     assert.ok(view.includes('workspace-write') || view.includes('ww'), `the status row must survive beside the hint:\n${view}`)
-    assert.ok(view.includes('12.3s'), `the stats row must survive beside the hint (the latency keeps its compact form):\n${view}`)
+    // TPS plan PR-3: at 40 columns the latency placement is the first to
+    // drop, so the stats row's surviving witness is the R5 placement's
+    // compact form (and the counters beside it).
+    assert.ok(view.includes('R5 0t/s') && view.includes('t3/s7'),
+      `the stats row must survive beside the hint (the R5 placement keeps its compact form):\n${view}`)
     const footerLines = [...app.footerRenderRowsForTest()]
     assert.equal(footerLines.length, 3, `the footer with its instruction must stay inside the effective budget:\n${view}`)
     assert.ok(footerLines[footerLines.length - 1]!.includes('Press Ctrl+D again'), `the hint must be the footer's last line:\n${view}`)
@@ -257,13 +261,15 @@ test('the armed Ctrl+D instruction on a chrome-heavy 20x10 viewport is NEVER cli
   }
 })
 
-test('a regular -> fullscreen switch recomposes the budget (widgets are fullscreen-inactive)', async () => {
-  // PR #57 review R3 P1: the widget zones mount ONLY on the regular
-  // surface. With populated widgets on a short terminal the REGULAR
-  // budget is squeezed (widgets + header + editor), while the FULLSCREEN
-  // root does not mount the widgets at all — the same geometry must
-  // grant the fullscreen footer its full effective budget, which proves
-  // BOTH the conditional accounting and the mode-switch recomposition.
+test('a regular -> fullscreen switch recomposes the budget (a short fullscreen leaves the widgets zero room)', async () => {
+  // PR #57 review R3 P1 + PR-D. The widget zones are mounted on BOTH roots
+  // now, but a SHORT fullscreen has no room left for them: at 80x8 the
+  // protected pinned chrome (header + editor) plus the full supported footer
+  // capacity plus the one-row transcript minimum already exceeds the screen,
+  // so the zones retire at a ZERO grant — and the fullscreen footer still
+  // receives its full effective budget. The REGULAR surface keeps its own
+  // grants (it is a flowing document). The tall-screen positive parity is
+  // covered by the test below and by test/fullscreen-widget-parity.test.ts.
   const { ExtensionLedger } = await import('../src/extension/internal/ledger.ts')
   const { SurfaceHost } = await import('../src/extension/internal/surface-host.ts')
   const { Text } = await import('@xmoon76/pi-tui')
@@ -304,12 +310,16 @@ test('a regular -> fullscreen switch recomposes the budget (widgets are fullscre
   // fullscreen clipping for regular information loss).
   const regularRows = [...app.footerRenderRowsForTest()]
   assert.equal(regularRows.length, 2, `the regular footer keeps its full demand inside the capacity, saw ${regularRows.length}:\n${regularRows.join('\n')}`)
-  // FULLSCREEN at unchanged geometry: the widgets are NOT mounted (and
-  // the widgets stay unrendered), but the pinned chrome IS — the budget
-  // recomposes to the surface capacity (8 - header 1 - editor 3 = 4 →
-  // capacity-capped; the demand-limited footer keeps its rows).
+  assert.ok(host.widgetsBelowText().includes('widget-row-1'),
+    'the regular grant is unaffected — the zero-room explanation below is a FULLSCREEN fact')
+  // FULLSCREEN at unchanged geometry: no widget room remains, so BOTH zones
+  // project nothing while the pinned chrome (header + editor + footer) IS
+  // painted — the budget recomposes to the surface capacity (8 - header 1 -
+  // editor 3 = 4 → capacity-capped; the demand-limited footer keeps its rows).
   app.setFullscreen(true)
   await vt.waitForRender()
+  assert.equal(host.widgetsBelowText(), '', 'a zero fullscreen grant projects no widget text')
+  assert.equal(host.hasWidgetsBelow(), false, 'the zone is physically empty without room')
   const view = vt.getViewport().join('\n')
   const fullscreenRows = [...app.footerRenderRowsForTest()]
   assert.ok(fullscreenRows.length >= 2, `the fullscreen footer must survive beside its pinned chrome:\n${fullscreenRows.join('\n')}`)
@@ -319,8 +329,48 @@ test('a regular -> fullscreen switch recomposes the budget (widgets are fullscre
       `a fullscreen footer row was clipped: ${JSON.stringify(text)}\n${view}`)
   }
   for (const line of vt.getViewport()) {
-    assert.ok(!line.includes('widget-row'), `an unmounted widget must not paint in fullscreen:\n${line}`)
+    assert.ok(!line.includes('widget-row'), `a zero-grant widget must not paint in fullscreen:\n${line}`)
   }
+  app.stop()
+})
+
+test('a tall fullscreen paints the same widget contribution directly above the editor', async () => {
+  // PR-D positive counterpart of the short-screen negative above: with room
+  // to spare, the SAME contribution is painted on the fullscreen root in the
+  // same above-the-editor position it occupies on the regular document.
+  const { ExtensionLedger } = await import('../src/extension/internal/ledger.ts')
+  const { SurfaceHost } = await import('../src/extension/internal/surface-host.ts')
+  const { Text } = await import('@xmoon76/pi-tui')
+  const ledger = new ExtensionLedger(() => {})
+  const vt = new VirtualTerminal(80, 24)
+  let app!: TuiApp
+  const host = new SurfaceHost(ledger, () => app.requestRender())
+  app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { extensionHost: host })
+  app.start()
+  startedApps.add(app)
+  host.attach({ header: new Text('', 0, 0), dock: new Text('', 0, 0), footer: new Text('', 0, 0) }, {
+    surfaceId: host.surfaceId,
+    generation: 1,
+    width: 80,
+    height: 24,
+    fullscreen: false,
+    focusedSeat: 'editor',
+    themeId: 'dark',
+    themeRevision: 0,
+  })
+  ledger.register('input.widget.above', { id: 'a1', order: 1 }, {
+    view: { kind: 'text', spans: [{ text: 'tall-widget' }] },
+    importance: 0,
+  }, 'p1')
+  await vt.waitForRender()
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  const lines = vt.getViewport().map(line => line.replace(/\x1b\[[0-9;]*m/g, '').trimEnd())
+  const widgetRow = lines.findIndex(line => line.includes('tall-widget'))
+  const editorTop = lines.findIndex(line => line.includes('─'.repeat(10)))
+  assert.ok(widgetRow >= 0, `the tall fullscreen must paint the widget:\n${lines.join('\n')}`)
+  assert.ok(editorTop >= 0, `the editor border must be painted:\n${lines.join('\n')}`)
+  assert.equal(widgetRow, editorTop - 1, `the widget sits directly above the editor:\n${lines.join('\n')}`)
   app.stop()
 })
 

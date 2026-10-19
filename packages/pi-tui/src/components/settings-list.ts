@@ -4,15 +4,44 @@ import type { Component, Focusable, TuiMouseEvent, TuiMouseEventResult } from ".
 import { truncateToWidth, visibleWidth, wrapTextWithAnsi } from "../utils.ts";
 import { Input } from "./input.ts";
 
+/**
+ * One whole unit of a row's structured value slot (dsh-pi-tui divergence
+ * X061). The slot's paint (`SettingsListTheme.value`) only knows how to fill
+ * the cells it is given, and it truncates by raw width — which can cut a state
+ * chip in half (``[default``) or leave a dangling separator. A row that
+ * declares `valueParts` instead hands the renderer whole units, and the
+ * renderer keeps the longest prefix that fits.
+ */
+export interface SettingValuePart {
+	/** `chip` is atomic chrome: at least one chip per list is RESERVED, so the
+	 *  label column yields cells rather than ever squeezing it out. `text` is a
+	 *  droppable token with no such reservation. */
+	kind: "chip" | "text";
+	/** The part's literal (already themed) cells. */
+	text: string;
+}
+
 export interface SettingItem {
 	/** Unique identifier for this setting */
 	id: string;
 	/** Display label (left side) */
 	label: string;
+	/** Search basis for this row when it differs from the painted `label`
+	 *  (dsh-pi-tui divergence X062). A caller that abbreviates a long name to
+	 *  fit the label column would otherwise hide the middle of that name from
+	 *  the list's own search; declaring the complete text here keeps the label
+	 *  a DRAWING fact and the search a separate one. Absent => the label is the
+	 *  search basis, byte-for-byte the historical behavior. */
+	searchText?: string;
 	/** Optional description shown when selected */
 	description?: string;
 	/** Current value to display (right side) */
 	currentValue: string;
+	/** Structured replacement for `currentValue` in the value slot (X061):
+	 *  whole units kept or dropped, never truncated. A display fact only — it
+	 *  neither reads nor writes `currentValue`, so the fork's own
+	 *  activate/update semantics stay exactly as they are. */
+	valueParts?: readonly SettingValuePart[];
 	/** If provided, Enter/Space cycles through these values */
 	values?: string[];
 	/** If provided, Enter opens this submenu. Receives current value and done callback.
@@ -21,6 +50,31 @@ export interface SettingItem {
 		currentValue: string,
 		done: (selectedValue?: string, options?: { navigateTo?: string }) => void,
 	) => Component;
+}
+
+/**
+ * X061: the longest WHOLE prefix of `parts` that fits `maxWidth` cells. A part
+ * is kept or dropped, never cut — so a state chip cannot be painted as
+ * ``[defaul`` — and the kept prefix never ends on a `text` part: a `text` part
+ * is the token BETWEEN chips (the design language's single ` · ` separator,
+ * pre-painted by the caller), so dropping the chip it introduced must drop the
+ * separator with it. The caller orders the parts by priority, so the drop
+ * starts at the tail.
+ */
+function fitValueParts(parts: readonly SettingValuePart[], maxWidth: number): string {
+	let kept = 0;
+	let used = 0;
+	for (const part of parts) {
+		const partWidth = visibleWidth(part.text);
+		if (used + partWidth > maxWidth) break;
+		used += partWidth;
+		kept += 1;
+	}
+	while (kept > 0 && parts[kept - 1]?.kind === "text") kept -= 1;
+	return parts
+		.slice(0, kept)
+		.map((part) => part.text)
+		.join("");
 }
 
 export interface SettingsListTheme {
@@ -236,8 +290,16 @@ export class SettingsList implements Component, Focusable {
 			return this.finalizeEmpty(lines);
 		}
 
-		// Calculate max label width for alignment
-		const maxLabelWidth = Math.min(36, Math.max(...this.items.map((item) => visibleWidth(item.label))));
+		// Calculate max label width for alignment. X061: the column is CLAMPED
+		// to what the row actually owns — `width` minus the fixed cells
+		// (`prefix + gap + the value guard`, the same budget the value slot
+		// uses) minus the widest state chip that must survive. A label wider
+		// than its column is clipped with `…` instead of overflowing the row
+		// and pushing the value slot (and its chips) outside the paint.
+		const maxLabelWidth = Math.max(
+			0,
+			Math.min(36, Math.max(...this.items.map((item) => visibleWidth(item.label))), width - this.stateReserveWidth() - 6),
+		);
 
 		let visibleCount = this.maxVisible;
 		let window = this.renderItemWindow(width, maxLabelWidth, displayItems, visibleCount);
@@ -312,6 +374,24 @@ export class SettingsList implements Component, Focusable {
 		return compact.slice(0, limit);
 	}
 
+	/** X061: the widest state chip declared anywhere in the list. The label
+	 * column yields these cells, so the chip a row leads with is painted WHOLE
+	 * at any width that fits it — the same reservation is a budget, not an
+	 * exception, and the row's own label is what truncates instead. 0 when no
+	 * row declares a chip: the label column is then capped by `width - 6`
+	 * alone (the clamp below is global — every row obeys its column), while the
+	 * value slot keeps its historical plain-string path. */
+	private stateReserveWidth(): number {
+		let widest = 0;
+		for (const item of this.items) {
+			for (const part of item.valueParts ?? []) {
+				if (part.kind !== "chip") continue;
+				widest = Math.max(widest, visibleWidth(part.text));
+			}
+		}
+		return widest;
+	}
+
 	/** Render the item window (rows + scroll indicator) at `visibleCount`,
 	 * centered on the selected row. */
 	private renderItemWindow(
@@ -339,8 +419,11 @@ export class SettingsList implements Component, Focusable {
 			const prefix = isSelected ? this.theme.cursor : "  ";
 			const prefixWidth = visibleWidth(prefix);
 
-			// Pad label to align values
-			const labelPadded = item.label + " ".repeat(Math.max(0, maxLabelWidth - visibleWidth(item.label)));
+			// Pad label to align values. X061: clamp it to the column it owns
+			// FIRST — a wider label used to overflow the row and push the value
+			// slot (state chips included) outside the paint.
+			const labelClipped = truncateToWidth(item.label, maxLabelWidth, "…");
+			const labelPadded = labelClipped + " ".repeat(Math.max(0, maxLabelWidth - visibleWidth(labelClipped)));
 			const labelText = this.theme.label(labelPadded, isSelected);
 
 			// Calculate space for value
@@ -348,7 +431,12 @@ export class SettingsList implements Component, Focusable {
 			const usedWidth = prefixWidth + maxLabelWidth + visibleWidth(separator);
 			const valueMaxWidth = width - usedWidth - 2;
 
-			const valueText = this.theme.value(truncateToWidth(item.currentValue, valueMaxWidth, ""), isSelected);
+			const valueText = this.theme.value(
+				item.valueParts === undefined
+					? truncateToWidth(item.currentValue, valueMaxWidth, "")
+					: fitValueParts(item.valueParts, valueMaxWidth),
+				isSelected,
+			);
 
 			// The mouse mapping is built from the FINAL painted rows: the
 			// physical row → item ID pair is recorded here, exactly as the
@@ -594,7 +682,9 @@ export class SettingsList implements Component, Focusable {
 	}
 
 	private applyFilter(query: string): void {
-		this.filteredItems = fuzzyFilter(this.items, query, (item) => item.label);
+		// X062: the row may separate its search basis from the painted label, so
+		// an abbreviated label cannot hide the name it was abbreviated from.
+		this.filteredItems = fuzzyFilter(this.items, query, (item) => item.searchText ?? item.label);
 		this.selectedIndex = 0;
 		this.recomputeVisibleBudget();
 	}

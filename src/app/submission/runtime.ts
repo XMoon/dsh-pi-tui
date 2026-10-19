@@ -71,6 +71,12 @@ export interface PromptSubmission {
   readonly generation: number
   /** Whether the caller already installed the local echo synchronously. */
   readonly echoInstalled: boolean
+  /**
+   * PR3-B §7.3 (F2): the ownership SUBJECT the submission pinned (the
+   * stale-restore policy's owner-replacement discriminator). Optional for
+   * direct/unit callers; the production caller always supplies it.
+   */
+  readonly staleSubject?: unknown
 }
 
 /** The runner-supplied TUI operations the runtime drives. */
@@ -86,6 +92,19 @@ export interface SubmissionRuntimeSurface {
   isScopeCurrent(scope: LiveSessionScope): boolean
   /** Merge `text` into the editor, returning whether it came back VERBATIM. */
   mergeDraftIntoEditor(text: string): boolean
+  /**
+   * PR3-B §7.3 (the B2 external-review F2): restore a STALE submission's
+   * text — called ONLY by sites that have already detected the submission's
+   * scope/owner was superseded. `capturedSubject` is the subject the
+   * submission pinned; the implementation suppresses the merge ONLY when
+   * the owner it pinned was genuinely REPLACED by a different one (the
+   * ownership authority's opaque-ref comparison — a same-owner generation
+   * invalidation is not a replacement) on a renderer that dropped the
+   * outgoing draft at the committed switch (TSP). Every other stale shape
+   * (a failed switch kept the owner; a same-session rollover; a retaining
+   * renderer) merges exactly like the ordinary restore.
+   */
+  restoreStaleDraftIntoEditor(text: string, capturedSubject?: unknown): 'merged-verbatim' | 'merged' | 'dropped'
   /** Consume ONLY the image/file drafts referenced by one committed write. */
   consumeDraftAttachments(text: string): void
   /** Start the latency dispatch mark for one session. */
@@ -145,6 +164,9 @@ const STALE_NOTICE =
   'the session changed while sending — try again'
 const STALE_MERGED_NOTICE =
   'the draft changed while sending — review it before submitting again (the earlier text was preserved below)'
+/** PR3-B §7.3 (F2): the switch authority dropped the outgoing draft. */
+const STALE_DROPPED_NOTICE =
+  'the session changed while sending — the draft was cleared by the switch'
 
 export function bindSubmissionRuntime(deps: SubmissionRuntimeDeps): SubmissionRuntime {
   const surface = deps.surface
@@ -172,10 +194,17 @@ export function bindSubmissionRuntime(deps: SubmissionRuntimeDeps): SubmissionRu
 
   /** Restore the submission and settle its gesture as stale (the ORIGINAL branch). */
   const settleStaleSubmission = (submission: PromptSubmission): void => {
-    const verbatim = surface.mergeDraftIntoEditor(submission.text)
+    // PR3-B §7.3 (F2): a STALE restore may be suppressed — ONLY when the
+    // owner the submission pinned was genuinely replaced AND the renderer
+    // drops drafts at committed switches (the implementation decides). The
+    // notice then reflects the REAL restore outcome, never a fabricated
+    // "cleared by the switch" for a same-owner invalidation.
+    const restored = surface.restoreStaleDraftIntoEditor(submission.text, submission.staleSubject)
     surface.settleLocalSubmission(submission.requestId)
     surface.settleSubmitAck('submit stale', { token: submission.ackToken, terminal: true })
-    surface.notify(verbatim ? STALE_NOTICE : STALE_MERGED_NOTICE, 'error')
+    surface.notify(restored === 'merged-verbatim' ? STALE_NOTICE
+      : restored === 'merged' ? STALE_MERGED_NOTICE
+        : STALE_DROPPED_NOTICE, 'error')
   }
 
   const submitPrompt = async (submission: PromptSubmission): Promise<void> => {
@@ -693,6 +722,12 @@ export interface SteerSubmissionDeps {
   readonly clearSettledLocalMessages: () => void
   /** Merge the draft into the editor; returns whether it came back VERBATIM. */
   readonly mergeDraftIntoEditor: (text: string) => boolean
+  /**
+   * PR3-B §7.3 (F2): restore a STALE submission's text with its pinned
+   * ownership SUBJECT (the owner-replacement discriminator; a same-owner
+   * invalidation is not a replacement and still restores).
+   */
+  readonly restoreStaleDraftIntoEditor: (text: string, capturedSubject?: unknown) => 'merged-verbatim' | 'merged' | 'dropped'
   readonly notify: (message: string, kind: 'info' | 'error') => void
   readonly acceptSubmitAck: () => number
   readonly settleLocalSubmission: (requestId: string) => void
@@ -874,12 +909,16 @@ function steerSubmission(deps: SteerSubmissionDeps, input: SteerSubmissionInput)
       )
       if (deps.isDisposed()) return
       if (submittedAgent !== undefined && !deps.isOwnerTokenCurrent(submittedSubject)) {
-        const verbatim = deps.mergeDraftIntoEditor(text)
+        // PR3-B §7.3 (F2): the stale restore may be suppressed — only when
+        // the pinned owner was genuinely REPLACED and the renderer drops
+        // drafts at committed switches (the implementation decides; a
+        // same-owner invalidation still restores).
+        const restored = deps.restoreStaleDraftIntoEditor(text, submittedSubject)
         deps.settleLocalSubmission(steerRequestId)
         deps.settleSubmitAck('steer stale', { token: steerAckToken, terminal: true })
-        deps.notify(verbatim
-          ? 'the session changed while sending — try again'
-          : 'the draft changed while sending — review it before submitting again (the earlier text was preserved below)', 'error')
+        deps.notify(restored === 'merged-verbatim' ? 'the session changed while sending — try again'
+          : restored === 'merged' ? 'the draft changed while sending — review it before submitting again (the earlier text was preserved below)'
+            : 'the session changed while sending — the draft was cleared by the switch', 'error')
         return
       }
       const steerAgent = deps.currentAgent()
@@ -922,12 +961,15 @@ function steerSubmission(deps: SteerSubmissionDeps, input: SteerSubmissionInput)
           // Re-check the identity after async admission, before entering the
           // writer barrier.
           if (!deps.isOwnerTokenCurrent(steerSubject)) {
-            const verbatim = deps.mergeDraftIntoEditor(text)
+            // PR3-B §7.3 (F2): the stale restore may be suppressed — only
+            // when the pinned owner was genuinely REPLACED and the renderer
+            // drops drafts at committed switches.
+            const restored = deps.restoreStaleDraftIntoEditor(text, steerSubject)
             deps.settleLocalSubmission(steerRequestId)
             deps.settleSubmitAck('steer stale', { token: steerAckToken, terminal: true })
-            deps.notify(verbatim
-              ? 'the session changed while sending — try again'
-              : 'the draft changed while sending — review it before submitting again (the earlier text was preserved below)', 'error')
+            deps.notify(restored === 'merged-verbatim' ? 'the session changed while sending — try again'
+              : restored === 'merged' ? 'the draft changed while sending — review it before submitting again (the earlier text was preserved below)'
+                : 'the session changed while sending — the draft was cleared by the switch', 'error')
             return { kind: 'stale' }
           }
           // T1 BEFORE the dispatch.
@@ -941,9 +983,18 @@ function steerSubmission(deps: SteerSubmissionDeps, input: SteerSubmissionInput)
             },
             restoreDraft: (draft) => {
               if (deps.isDisposed()) return false
-              const verbatim = deps.mergeDraftIntoEditor(draft)
+              // PR3-B §7.3 (F2): steerAll aborts stale for TWO shapes — a
+              // same-owner generation bump (queue races; the restore MUST
+              // happen) and a genuinely REPLACED owner (the TSP switch
+              // authority dropped the outgoing draft; restoring would reseed
+              // the new session's composer). Route BOTH through the stale
+              // restore member with the pinned SUBJECT: it suppresses only
+              // the replaced-owner shape on a switch-dropping renderer (the
+              // ownership authority's opaque-ref comparison — never a raw
+              // session-id match, which A→B→A would defeat).
+              const restored = deps.restoreStaleDraftIntoEditor(draft, steerSubject)
               steerRestored = true
-              return verbatim
+              return restored === 'merged-verbatim'
             },
             // The admitted steer writer must never re-read the transition gate:
             // the writerSection holds the barrier, so a transition that arrives
@@ -1081,6 +1132,9 @@ export interface HostCommandSubmissionInput {
   readonly wasAdvertisedAtSubmit: boolean
   readonly parsedName: string | undefined
   readonly submitTurn: { readonly wait: Promise<void>; readonly release: () => void }
+  /** PR3-B §7.3 (F2): the ownership subject pinned at the gesture's admission
+   *  (the fallback prompt's stale-restore discriminator). */
+  readonly staleSubject?: unknown
 }
 
 /**
@@ -1205,9 +1259,17 @@ export function executeHostCommandSubmission(
         deps.settleSubmitAck('submit consumed by a command', { token: submitAckToken, terminal: true })
       }
       // An advertised command the real session's catalog lacks: consume the
-      // slash input with an explicit error — never a plain model message.
+      // slash input with an explicit error — never a plain model message. The
+      // refusal is a DETERMINED non-execution (the plane owned the line and the
+      // handler never ran), so it hands the COMPLETE submitted line back to the
+      // editor, attachments or not: swallowing a plain-text line loses the
+      // user's words with no recovery path (the editor is already cleared).
+      // `restoreSubmissionDraft` merges, so a draft the user typed meanwhile
+      // stays ABOVE the restored line (`mergeDraft` = current + blank line +
+      // submitted), and the handoff pin is still held here — it is released on
+      // the way out.
       if (deps.shouldConsumeAdvertisedMiss(execution, planeAdvertised)) {
-        if (deps.draftHasAttachments(text)) deps.restoreSubmissionDraft(text)
+        deps.restoreSubmissionDraft(text)
         deps.notify(`/${input.parsedName ?? '?'} is not available in the created session`, 'error')
         deps.settleLocalSubmission(submitRequestId)
         deps.settleSubmitAck('submit consumed by an unadvertised command', { token: submitAckToken, terminal: true })
@@ -1229,6 +1291,7 @@ export function executeHostCommandSubmission(
                 ackToken: submitAckToken,
                 generation,
                 echoInstalled: localEchoInstalled,
+                staleSubject: input.staleSubject,
               }),
               restore: (t) => deps.restoreSubmissionDraft(t),
             }, text)

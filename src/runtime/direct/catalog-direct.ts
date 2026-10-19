@@ -34,6 +34,7 @@ import {
   type SkillCatalogContext,
   type SkillCatalogEventsContext,
 } from './skill-catalog.ts'
+import { effectiveAgentCwd, type WorkingDirectoryServiceLike } from './working-directory-direct.ts'
 import type { SkillSummaryLike } from '../../domain/catalog/skill.ts'
 import type {
   Catalog,
@@ -180,11 +181,13 @@ export class DirectCatalogPort implements Catalog {
   }
 }
 
-/** The session workspace of one live agent (the header cwd, falling back
- * to the process cwd — in Direct mode the Client machine IS the Host
- * machine). */
-function agentCwd(agent: LiveAgentLike): string {
-  return agent.session.header.cwd ?? process.cwd()
+/** The session workspace of one live agent: the official effective working
+ * directory when the `workingDirectory` owner is mounted (a committed
+ * `working-directory/change` moves it), else the header cwd falling back to
+ * the process cwd — in Direct mode the Client machine IS the Host machine. */
+function agentCwd(ctx: HostContextLike, agent: LiveAgentLike): string {
+  return effectiveAgentCwd(ctx.get('workingDirectory') as WorkingDirectoryServiceLike | undefined, agent)
+    ?? process.cwd()
 }
 
 /** The Direct model/provider catalog (`ctx.llm` + `ctx.agentDefaultModel`). */
@@ -669,7 +672,7 @@ export class DirectSkillCatalog implements SkillCatalogCapability {
   async listHumanSkills(sessionId: string, signal?: AbortSignal): Promise<import('../../domain/catalog/skill.ts').HumanSkillCatalog | undefined> {
     const agent = this.liveAgent(sessionId)
     if (agent === undefined) return undefined
-    const target = resolveLiveSkillTarget(this.ctx as unknown as SkillCatalogContext, agent, agentCwd(agent))
+    const target = resolveLiveSkillTarget(this.ctx as unknown as SkillCatalogContext, agent, agentCwd(this.ctx, agent))
     if (target === undefined) return undefined
     return readHumanSkillCatalog(target.registry, { cwd: target.cwd, scope: target.scope, signal })
   }
@@ -677,7 +680,7 @@ export class DirectSkillCatalog implements SkillCatalogCapability {
   async resolveSkill(sessionId: string, name: string): Promise<SkillDefinitionResult> {
     const agent = this.liveAgent(sessionId)
     if (agent === undefined) return { kind: 'unavailable' }
-    const target = resolveLiveSkillTarget(this.ctx as unknown as SkillCatalogContext, agent, agentCwd(agent))
+    const target = resolveLiveSkillTarget(this.ctx as unknown as SkillCatalogContext, agent, agentCwd(this.ctx, agent))
     if (target === undefined) return { kind: 'unavailable' }
     const skill = await target.registry.get?.(name, { cwd: target.cwd, scope: target.scope })
     if (skill === undefined) return { kind: 'unknown' }

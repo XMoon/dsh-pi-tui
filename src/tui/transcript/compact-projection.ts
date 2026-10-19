@@ -3,9 +3,10 @@
  *
  * The semantic segmentation is owned by `structure.ts`; this module
  * only decides how Compact PRESENTS it: a collapsed Work span emits its header
- * block, an expanded span emits the header followed by its raw member rows, and
- * an ambient Context cluster emits a header (or flat members on a surface with
- * no operable cluster owner) with its members revealed on expansion. Search
+ * block, an expanded span emits the header followed by its structural parts
+ * (raw member rows and nested snapshot-only Context clusters), and an ambient
+ * Context cluster emits a header (or flat members on a surface with no
+ * operable cluster owner) with its members revealed on expansion. Search
  * forces exactly the owning span/cluster open while content refresh keeps the
  * collapsed header in place.
  * @module @xmoon76/dsh-pi-tui/tui/transcript/compact-projection
@@ -70,13 +71,36 @@ function clusterExpanded(cluster: ContextCluster, options: CompactProjectionOpti
 }
 
 /**
+ * Emit one Context cluster at its semantic ancestry. A surface without an
+ * operable cluster owner gets the FLAT member sequence; otherwise the header
+ * block is emitted (plus its members while open).
+ */
+function appendContextCluster(
+  cluster: ContextCluster,
+  ancestorPath: TranscriptContainerPath,
+  header: boolean,
+  out: CompactProjectedBlock[],
+  options: CompactProjectionOptions,
+): void {
+  const containerPath: TranscriptContainerPath = [...ancestorPath, { kind: 'context-cluster', owner: cluster.owner }]
+  if (!header) {
+    for (const member of cluster.members) out.push({ kind: 'message', message: member, containerPath })
+    return
+  }
+  const expanded = clusterExpanded(cluster, options)
+  out.push({ kind: 'context-cluster', cluster, expanded, containerPath })
+  if (expanded) for (const member of cluster.members) out.push({ kind: 'message', message: member, containerPath })
+}
+
+/**
  * Materialize the canonical structure for Compact.
  *
  * A collapsed Work span emits only its header block; an expanded span emits
- * the header followed by its raw member rows (the existing message
- * renderers own each child). A collapsed ambient cluster emits only its
- * header block; an expanded cluster emits the header followed by every
- * member. Search-forced members open exactly the owning span/cluster.
+ * the header followed by its structural parts (raw message renderers own each
+ * child; a nested snapshot-only cluster keeps its own Context disclosure).
+ * A collapsed ambient cluster emits only its header block; an expanded cluster
+ * emits the header followed by every member. Search-forced members open
+ * exactly the owning span/cluster.
  * @param messages - the transcript window in raw chronology.
  * @param options - manual disclosures and the temporary search reveal.
  */
@@ -94,26 +118,30 @@ export function projectCompact(
       const span = block.span
       const containerPath: TranscriptContainerPath = [{ kind: 'work', owner: span.owner }]
       if (options.workHeader === false) {
-        for (const member of span.members) out.push({ kind: 'message', message: member, containerPath })
+        for (const part of span.parts) {
+          if (part.kind === 'message') {
+            out.push({ kind: 'message', message: part.message, containerPath })
+          } else {
+            appendContextCluster(part.cluster, containerPath, false, out, options)
+          }
+        }
         continue
       }
       out.push({ kind: 'work', span, containerPath })
       if (workExpanded(span, options)) {
-        for (const member of span.members) out.push({ kind: 'message', message: member, containerPath })
+        for (const part of span.parts) {
+          if (part.kind === 'message') {
+            out.push({ kind: 'message', message: part.message, containerPath })
+          } else {
+            appendContextCluster(part.cluster, containerPath, options.clusterHeader !== false, out, options)
+          }
+        }
       }
       continue
     }
     // The first member is the cluster header; expanding re-emits EVERY
     // member (owner included) as an ordinary Context row.
-    const cluster = block.cluster
-    const containerPath: TranscriptContainerPath = [{ kind: 'context-cluster', owner: cluster.owner }]
-    if (options.clusterHeader === false) {
-      for (const member of cluster.members) out.push({ kind: 'message', message: member, containerPath })
-      continue
-    }
-    const expanded = clusterExpanded(cluster, options)
-    out.push({ kind: 'context-cluster', cluster, expanded, containerPath })
-    if (expanded) for (const member of cluster.members) out.push({ kind: 'message', message: member, containerPath })
+    appendContextCluster(block.cluster, [], options.clusterHeader !== false, out, options)
   }
   return out
 }

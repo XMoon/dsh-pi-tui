@@ -28,6 +28,7 @@ export type SessionReadMismatchField =
   | 'cwd'
   | 'parentSession'
   | 'origin'
+  | 'formatStatus'
   | 'projection.title'
   | 'projection.agentPreset'
   | 'search'
@@ -236,6 +237,10 @@ function compareRows(
     pushFieldMismatch(mismatches, 'cwd', directRow.id, directRow.cwd, remoteRow.cwd)
     pushFieldMismatch(mismatches, 'parentSession', directRow.id, directRow.parentSession, remoteRow.parentSession)
     pushFieldMismatch(mismatches, 'origin', directRow.id, directRow.origin, remoteRow.origin)
+    // Both backends now carry the official on-disk format state verbatim, so a
+    // divergence in the passthrough is a real parity fact (absent on both sides
+    // compares equal).
+    pushFieldMismatch(mismatches, 'formatStatus', directRow.id, directRow.formatStatus, remoteRow.formatStatus)
 
     const directProjection = directProjections.get(directRow.id)
     const remoteProjection = remoteProjections.get(directRow.id)

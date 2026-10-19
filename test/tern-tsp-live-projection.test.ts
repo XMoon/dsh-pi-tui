@@ -58,7 +58,8 @@ import {
 } from '../src/app/surface/runtime.ts'
 import type { SurfaceEventRoutingSource } from '../src/app/surface/event-routing.ts'
 import type { AssistantLiveInput } from '../src/runtime/assistant-stream-port.ts'
-import { createPluginManagerPanel } from '../src/tui/plugin-manager/panel.ts'
+import type { SubmissionPresentationItem } from '../src/app/submission/presentation.ts'
+import { createPluginManagerWorkspacePanel } from '../src/tui/plugin-manager/workspace.ts'
 import { TranscriptNodeKeys, transcriptView } from '../scripts/support/tern-tsp-transcript-view.ts'
 import { installVirtualProcessTerminal } from './support/runner-harness.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
@@ -185,6 +186,12 @@ interface Harness {
 function mountHarness(options: {
   readonly onTranscriptProjected: (frame: TranscriptProjectionFrame) => void
   readonly duringCommit?: () => void
+  /** PR3-A F10: a controllable pending subject (the own-input scroll guard). */
+  readonly pending?: {
+    readonly subjectId: string
+    readonly echoes: () => readonly SubmissionPresentationItem[] | undefined
+    readonly snapshot?: () => { readonly running: boolean; readonly items: readonly unknown[] } | undefined
+  }
 }): Harness {
   const vt = new VirtualTerminal(100, 30)
   const restoreTerminal = installVirtualProcessTerminal(vt)
@@ -239,13 +246,14 @@ function mountHarness(options: {
     viewedChild: () => childPresentation(),
     mainFolder: () => folder,
     viewedChildFolder: () => viewed!.folder,
-    pendingSubjectId: () => undefined,
-    pendingSnapshot: () => undefined,
-    submissionEchoes: () => undefined,
+    pendingSubjectId: () => options.pending?.subjectId,
+    pendingSnapshot: () => options.pending?.snapshot?.() as never,
+    submissionEchoes: () => options.pending?.echoes(),
     queueTextOf: () => '',
     exitView: () => { viewed = undefined },
     refreshStatusCheap: () => {},
     refreshStatusAndWelcome: () => {},
+    refreshWorkspaceFacts: () => {},
     applyGoalChange: () => {},
     sessionTitleOf: () => undefined,
     extendLoadedHistory: () => false,
@@ -273,7 +281,7 @@ function mountHarness(options: {
     mainProgressAuthority: 'local-events',
     notificationMethod: undefined,
     terminalProgress: undefined,
-    createPluginManagerPanel,
+    createPluginManagerPanel: createPluginManagerWorkspacePanel,
     onTranscriptProjected: frame => {
       frames.push(frame)
       options.onTranscriptProjected(frame)
@@ -290,7 +298,7 @@ function mountHarness(options: {
     imageScope: () => undefined,
     present: { call: () => undefined, result: () => undefined },
     sessionCwd: () => '/tmp',
-    sessionId: () => SESSION_ID,
+    captureHistoryScope: () => ({ sessionId: SESSION_ID, isCurrent: () => true }),
     onTerminalResize: () => {},
     copySelection: async () => false,
     openExternalUrl: () => {},
@@ -869,8 +877,10 @@ test('P2-12/P2-14: the TSP sink owns its own tty and no product source imports t
     harness.dispose()
   }
 
-  // The SDK stays OUT of the product build graph and out of the production
-  // composition: the production path never injects the observer.
+  // PR3-A: the SDK now legitimately lives in the product graph, but ONLY in
+  // the TSP renderer module (src/tui/tsp/**); everywhere else in src/** the
+  // specifier stays forbidden, and the production composition still never
+  // injects the PR2 observer.
   const sources: string[] = []
   const walk = (dir: string): void => {
     for (const entry of readdirSync(dir, { withFileTypes: true })) {
@@ -882,6 +892,7 @@ test('P2-12/P2-14: the TSP sink owns its own tty and no product source imports t
   walk(join(ROOT, 'src'))
   assert.ok(sources.length > 0)
   for (const path of sources) {
+    if (relative(ROOT, path).replaceAll('\\', '/').startsWith('src/tui/tsp/')) continue
     assert.doesNotMatch(readFileSync(path, 'utf8'), /@stencil-hq\/tern/u, `${relative(ROOT, path)} must not import the TSP SDK`)
   }
   const bootstrap = readFileSync(join(ROOT, 'src', 'app', 'bootstrap.ts'), 'utf8')
@@ -955,7 +966,7 @@ function mountPresentationHarness(options: {
     mainProgressAuthority: 'local-events',
     notificationMethod: undefined,
     terminalProgress: undefined,
-    createPluginManagerPanel,
+    createPluginManagerPanel: createPluginManagerWorkspacePanel,
     onTranscriptProjected: frame => {
       frames.push(frame)
       options.onTranscriptProjected(frame)
@@ -975,6 +986,7 @@ function mountPresentationHarness(options: {
       installModelSelection: noop,
       assistantStreamBaselineFor: () => [],
       planActive: () => false,
+      effectiveCwd: (agent) => agent.session.header.cwd,
     },
     status: {
       setGoalText: noop,
@@ -982,7 +994,7 @@ function mountPresentationHarness(options: {
       refreshTerminalTitle: noop,
       refreshTerminalCwd: noop,
       updateWelcomeCard: noop,
-      scheduleInitialMeasurement: noop,
+      scheduleInitialMeasurement: noop, markContextDirty: noop, refreshContextMeasurement: noop,
     },
     history: { rememberCwd: noop, currentCwd: () => '/tmp', records: () => [], setLastContent: noop },
     commands: { register: noop },
@@ -1006,6 +1018,14 @@ function mountPresentationHarness(options: {
       captureTransportToken: () => liveTransportToken,
       isTransportTokenCurrent: (_sessionId, token) => Object.is(token, liveTransportToken),
       isStillCurrent: () => current,
+      // S3-R0: the widened-window commit is valid only while the official window
+      // still IS the revision the reader returned (this harness models a
+      // current window; the staleness cases are driven by the fences above).
+      windowRefoldProof: (_sessionId: string, revision: number) => ({
+        generation: 1,
+        binding: liveTransportToken,
+        revision,
+      }),
     },
   })
 
@@ -1029,6 +1049,7 @@ function mountPresentationHarness(options: {
     exitView: noop,
     refreshStatusCheap: noop,
     refreshStatusAndWelcome: noop,
+    refreshWorkspaceFacts: noop,
     applyGoalChange: noop,
     sessionTitleOf: () => undefined,
     extendLoadedHistory: () => false,
@@ -1059,7 +1080,7 @@ function mountPresentationHarness(options: {
     imageScope: () => undefined,
     present: { call: () => undefined, result: () => undefined },
     sessionCwd: () => '/tmp',
-    sessionId: () => options.sessionId,
+    captureHistoryScope: () => ({ sessionId: options.sessionId, isCurrent: () => true }),
     onTerminalResize: () => {},
     copySelection: async () => false,
     openExternalUrl: () => {},
@@ -1247,6 +1268,114 @@ test('P2-07: a stale Remote read installs no fold and publishes nothing', async 
     await harness.rehydrate()
     assert.equal(seen.length, 2, 'the current widening commits')
     assert.ok(hasUserText(seen[1]!.messages, 'older prompt'))
+  } finally {
+    harness.dispose()
+  }
+})
+
+// ── F10: the pending refresh only scrolls for NEW OWN input (PiTui default) ──
+
+test('F10: a background pending refresh never yanks the reader; a new own echo does', async () => {
+  const ownEcho = (requestId: string, text: string): SubmissionPresentationItem => ({
+    requestId,
+    placement: 'transcript',
+    text,
+    createdAt: 1,
+    attachments: [],
+    foldableText: true,
+  })
+  let echoes: readonly SubmissionPresentationItem[] | undefined
+  let snapshot: { readonly running: boolean; readonly items: readonly unknown[] } | undefined
+  const harness = mountHarness({
+    onTranscriptProjected: () => {},
+    pending: {
+      subjectId: SESSION_ID,
+      echoes: () => echoes,
+      snapshot: () => snapshot,
+    },
+  })
+  try {
+    const app = harness.app
+    const prototype = Object.getPrototypeOf(app) as { scrollToBottom: TuiApp['scrollToBottom'] }
+    const original = prototype.scrollToBottom
+    let scrolls = 0
+    app.scrollToBottom = (...args: Parameters<TuiApp['scrollToBottom']>) => {
+      scrolls += 1
+      return original.call(app, ...args)
+    }
+    try {
+      // An empty refresh (another client's activity) never moves the viewport.
+      harness.surface.refreshPendingInput()
+      assert.equal(scrolls, 0, 'an empty refresh never scrolls')
+
+      // An authoritative BACKGROUND `context` occurrence is not own input.
+      snapshot = {
+        running: true,
+        items: [{ id: 'bg-1', placement: 'context', content: [{ type: 'text', text: 'background context' }] }],
+      }
+      harness.surface.refreshPendingInput()
+      harness.surface.refreshPendingInput()
+      assert.equal(scrolls, 0, 'a background Context occurrence never scrolls (even repeated)')
+
+      // A NEW client-local own echo takes the viewport exactly once.
+      echoes = [ownEcho('local-1', 'my own input')]
+      harness.surface.refreshPendingInput()
+      assert.equal(scrolls, 1, 'a NEW own echo scrolls exactly once')
+      harness.surface.refreshPendingInput()
+      assert.equal(scrolls, 1, 'an unchanged own echo does not scroll again')
+    } finally {
+      app.scrollToBottom = original
+    }
+  } finally {
+    harness.dispose()
+  }
+})
+
+// ── R2-2: ONE atomic display-subject commit on the PiTui branch ─────────────
+
+test('R2-2: surface.commitStatus publishes ONE atomic store transaction on PiTui', async () => {
+  const harness = mountHarness({ onTranscriptProjected: () => {} })
+  try {
+    // A MAIN commit first, so the store starts from a known subject.
+    harness.surface.commitStatus({ workspace: { cwd: '/w' } } as never, {}, undefined)
+    const notifications: { subject: string; todoCount: number }[] = []
+    const unsubscribe = harness.surface.status.subscribe(() => {
+      const snapshot = harness.surface.status.snapshot()
+      notifications.push({
+        subject: snapshot.view.subject.kind,
+        todoCount: snapshot.activity.todoCount,
+      })
+    })
+    try {
+      // The CHILD commit: the presentation projection plus the store patch are
+      // ONE transaction. A pre-empting store write would publish an
+      // intermediate snapshot (child subject beside the parent activity).
+      harness.surface.commitStatus(
+        {
+          collaboration: { plan: { effective: true } },
+          view: { subject: { kind: 'subagent', id: CHILD_ID, mode: 'continuable' } },
+        } as never,
+        {},
+        {
+          sessionId: CHILD_ID,
+          title: 'child title',
+          workspaceRoot: '/w',
+          todos: [
+            { content: 'child todo one', status: 'pending' },
+            { content: 'child todo two', status: 'pending' },
+          ],
+        } as never,
+      )
+      await settle()
+    } finally {
+      unsubscribe()
+    }
+    assert.equal(notifications.length, 1,
+      `exactly ONE store transaction per commitStatus (saw ${JSON.stringify(notifications)})`)
+    assert.equal(notifications[0]!.subject, 'subagent',
+      'the single published snapshot already carries the child display subject')
+    assert.equal(notifications[0]!.todoCount, 2,
+      'and the SAME snapshot already carries the child activity (never a parent-activity intermediate)')
   } finally {
     harness.dispose()
   }

@@ -48,6 +48,7 @@ import type { OwnedTaskOptions } from '../../runtime/process/tasks.ts'
 import type { ModelDirectoryDto } from '../../runtime/catalog-port.ts'
 import type { SubagentAllowedModelRoute, SubagentModelSelectionConfig } from '../../runtime/config-port.ts'
 import { SearchablePicker, type SearchablePickerItem } from './searchable-picker.ts'
+import { sanitizedPhysicalLine } from '../presentation/lines.ts'
 import { selectListTheme } from '../theme/runtime.ts'
 
 /** The catalog surface the allowlist picker needs: the OFFICIAL grouped
@@ -267,7 +268,7 @@ export class SubagentModelAllowlistPicker implements Component, Focusable, RowBu
       enableSearch: true,
       showHint: true,
       header: 'Subagent allowed models',
-      hint: '↑↓ move · enter toggle · esc back',
+      hint: '↑↓ move · Enter toggle · Esc back',
       noMatchText: '  Loading models…',
       descriptionMode: 'selected-below',
     })
@@ -320,7 +321,7 @@ export class SubagentModelAllowlistPicker implements Component, Focusable, RowBu
     const items: SearchablePickerItem[] = projection.models.map((row) => {
       const value = allowlistRouteKey(row.providerId, row.modelId)
       this.modelRoutes.set(value, { provider: row.providerId, model: row.modelId })
-      const label = row.modelName ?? row.modelId
+      const label = sanitizedPhysicalLine(row.modelName ?? row.modelId)
       const savedNote = row.savedRoute === undefined ? undefined : row.savedRoute === 'absent'
         ? 'saved route not in the current catalog'
         : row.savedRoute === 'catalog-loading'
@@ -333,8 +334,8 @@ export class SubagentModelAllowlistPicker implements Component, Focusable, RowBu
         label,
         ...(savedNote !== undefined
           ? { description: savedNote }
-          : row.modelName === undefined || row.modelName === row.modelId ? {} : { description: row.modelId }),
-        group: row.savedRoute === undefined ? row.providerName : 'Saved routes',
+          : row.modelName === undefined || row.modelName === row.modelId ? {} : { description: sanitizedPhysicalLine(row.modelId) }),
+        group: row.savedRoute === undefined ? sanitizedPhysicalLine(row.providerName) : 'Saved routes',
         groupKey: row.savedRoute === undefined ? row.providerId : SAVED_GROUP_KEY,
         ...(row.allowed ? { badge: 'allowed' } : {}),
         searchText: `${row.providerId} ${row.modelId} ${row.providerName} ${row.modelName ?? ''}`,
@@ -343,8 +344,8 @@ export class SubagentModelAllowlistPicker implements Component, Focusable, RowBu
     for (const failure of projection.failures) {
       items.push({
         value: `${FAILURE_PREFIX}${failure.providerId}`,
-        label: failure.providerName,
-        description: failure.message,
+        label: sanitizedPhysicalLine(failure.providerName),
+        description: sanitizedPhysicalLine(failure.message),
         group: 'Unavailable',
         // ALL failures share one private group key → a single `Unavailable`
         // section (a real provider named "Unavailable" keeps its own id key).

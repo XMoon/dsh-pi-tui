@@ -31,6 +31,24 @@ import { editorModeFromHistoryEntry, type EditorInputMode } from './editor-input
 import { extractInlineSkillPrefix } from './autocomplete/skill-reference.ts'
 
 /** Host render-routing options for the host editor. */
+export interface TuiEditorRenderLayout {
+  readonly physicalWidth: number
+  readonly layoutWidth: number
+  readonly onLastVisualLine: boolean
+  readonly editorRows: number
+  /**
+   * The Editor's OWN Down admission for this frame: the exact
+   * `canEnterTaskQuickFromDown` answer (prompt mode plus the editor-internal
+   * history-browse / autocomplete / jump / paste gates beyond the raw visual
+   * line). The host's painted `↓` hint must follow the ROUTE, and the raw
+   * boundary alone cannot express every route flip — returning from history
+   * browse to the draft keeps the boundary true while Down is refused.
+   * Computed from the boundary THIS render already produced, so publishing it
+   * never builds a second visual wrap map.
+   */
+  readonly downEligible: boolean
+}
+
 export interface TuiEditorOptions {
   /**
    * Routes every render request the editor makes for its OWN visible state —
@@ -163,6 +181,9 @@ export class TuiEditor extends Editor {
    * be a paste marker split across chunks; stitched onto the next chunk
    * at the top of handleInput. */
   private pendingPasteMarker: string | null = null
+  /** The host observes the layout facts computed by the actual Editor render;
+   *  this is not a paint-completion hook (render may also be measured). */
+  onVisualLayoutRendered?: (layout: TuiEditorRenderLayout) => void
 
   constructor(tui: TUI, theme: EditorTheme, options: TuiEditorOptions = {}) {
     // paddingX: 2 reserves the left two cells for the mode prompt painted
@@ -202,6 +223,46 @@ export class TuiEditor extends Editor {
   /** The current input mode (read-only for the host). */
   getInputMode(): EditorInputMode {
     return this.inputMode
+  }
+
+  /**
+   * Whether a real Down press at the CURRENT state would leave this editor at
+   * its last VISUAL line (the Task Quick on-demand entry seam, Phase 3B/B4-B).
+   * The optional boundary is an X063 post-transition fact supplied by the
+   * host within the same editor turn; absent it, classify the live map.
+   *
+   * The classification is the fork editor's own (divergence X063): soft wrap,
+   * CJK width, empty lines, history browsing, autocomplete, jump mode and
+   * bracketed paste are all editor-internal state the host cannot re-derive.
+   * `physicalWidth` is the live terminal column count; the layout width is
+   * derived here with the SAME rule `render()` uses, so a mid-resize caller
+   * can never classify against the wrap map of a frame that is no longer
+   * painted. Read-only: this predicate never mutates editor state and never
+   * processes the key itself.
+   *
+   * This local bool alone never routes input — the host additionally requires
+   * the real focused seat, prompt mode, a valid `app.tasks.open` resolution
+   * and no higher-priority owner before Down enters Task Quick.
+   */
+  private layoutWidthForPhysicalWidth(physicalWidth: number): number {
+    const maxPadding = Math.max(0, Math.floor((physicalWidth - 1) / 2))
+    const padding = Math.min(this.getPaddingX(), maxPadding)
+    const contentWidth = Math.max(1, physicalWidth - padding * 2)
+    return Math.max(1, contentWidth - (padding > 0 ? 0 : 1))
+  }
+
+  canEnterTaskQuickFromDown(physicalWidth: number, knownOnLastVisualLine?: boolean): boolean {
+    const layoutWidth = this.layoutWidthForPhysicalWidth(physicalWidth)
+    return this.getInputMode() === 'prompt'
+      && this.canYieldDownAtLastVisualLine(layoutWidth, knownOnLastVisualLine)
+  }
+
+  /** The last rendered raw visual boundary (X063, no mode gates). The Editor
+   *  render already computed this exact layout fact; a width mismatch fails
+   *  closed until that width is rendered. */
+  isOnLastVisualLineRawForHost(physicalWidth: number): boolean {
+    const layoutWidth = this.layoutWidthForPhysicalWidth(physicalWidth)
+    return this.isOnLastVisualLineRaw(layoutWidth)
   }
 
   /** Dispose resources owned by the permanent host editor at final surface
@@ -300,10 +361,20 @@ export class TuiEditor extends Editor {
     if (!this.isShowingAutocomplete()) {
       this.fileCompletionMarquee.reset()
     }
-    if (this.inputMode === 'prompt' && this.placeholderText !== '' && this.getText().trim() === '') {
-      return injectEditorPlaceholder(lines, this.placeholderText, width)
-    }
-    return injectEditorPrompt(lines, this.inputMode)
+    const rendered = this.inputMode === 'prompt' && this.placeholderText !== '' && this.getText().trim() === ''
+      ? injectEditorPlaceholder(lines, this.placeholderText, width)
+      : injectEditorPrompt(lines, this.inputMode)
+    const onLastVisualLine = this.isOnLastVisualLineRawForHost(width)
+    this.onVisualLayoutRendered?.({
+      physicalWidth: width,
+      layoutWidth: this.layoutWidthForPhysicalWidth(width),
+      onLastVisualLine,
+      editorRows: rendered.length,
+      // Reuses the ONE classifier (with this frame's boundary as the known
+      // fact) instead of restating its editor-internal gates here.
+      downEligible: this.canEnterTaskQuickFromDown(width, onLastVisualLine),
+    })
+    return rendered
   }
 
   override handleInput(data: string): void {

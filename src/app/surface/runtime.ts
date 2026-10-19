@@ -98,7 +98,9 @@
 
 import {
   startProcessTui,
+  type ComposerSubmitRequest,
   type DisplaySubjectPresentation,
+  type HistoryOpenScope,
   type StatusData,
   type TranscriptSearchCloseReason,
   type TranscriptSearchPresentation,
@@ -108,8 +110,14 @@ import {
   type TuiAppOptions,
 } from '../../tui-app.ts'
 import { runSyncDisposalSteps } from '../../runtime/process/disposal.ts'
+import type { CompactionPhase } from './compaction-presentation.ts'
+import type { SubmissionComposerPort } from '../submission/composer-port.ts'
+import type { ModelPresentation } from '../command/model-presentation.ts'
+import type { PresetPresentation } from '../command/preset-presentation.ts'
+import type { SessionBrowserPresentation } from '../command/session-browser-presentation.ts'
+import { pituiSurfaceInteractionPresenter, type SurfaceInteractionPresenter } from './interaction-presenter.ts'
 import type { TaskBrowserDatasetScope } from './task-browser-runtime.ts'
-import type { TaskBrowserViewState } from './task-runtime.ts'
+import type { QuestionAttentionRow } from './question-controller.ts'
 import type { InteractionPort } from '../../runtime/interaction-port.ts'
 import type { AssistantLiveInput } from '../../runtime/assistant-stream-port.ts'
 import { ImageLoader } from '../../client/media/image/loader.ts'
@@ -153,6 +161,8 @@ import {
   type RoutedSessionEvent,
   type SurfaceEventRoutingSource,
 } from './event-routing.ts'
+import type { SurfaceDisplaySeam } from './display-seam.ts'
+import { pituiDisplaySeam } from './display-seam-pitui.ts'
 
 // The moved public/internal surface types stay importable from this exact path
 // (the aggregate remains the stable entry for its consumers).
@@ -173,10 +183,128 @@ export type {
 
 /** Coalesced repaint interval for streaming events, in ms (A4-8, plan §17). */
 const REPAINT_FLUSH_MS = 50
+
+/**
+ * PR3-B §3.3 (the B1 slice): the renderer-facing input binding — a NARROW
+ * structural projection of the existing `TuiAppEvents` (the lifecycle/user
+ * activity members), constructed at the `SurfaceRuntime.start` composition
+ * site from the exact already-built callbacks. B2 widens this with the
+ * submission members (`submit`/`steer`/`cancel`); B1 binds editor-local +
+ * lifecycle only, so no pre-bind key can act as an application gesture.
+ */
+export interface SurfaceInputBinding {
+  /** The keyboard exit intent (the SAME orchestration as `/exit`). */
+  exit(): void
+  /**
+   * The interrupt/cancel intent (the SAME orchestration as PiTui's
+   * Ctrl+C/Esc: abort a running local shell and interrupt the live Agent —
+   * never an unconditional exit; PR3-B §3.4 fixed keymap row 3).
+   */
+  cancel(): void
+  /**
+   * The submission entry (PR3-B B2): the EXISTING application submit path
+   * (`ApplicationEvents.events.onSubmit`), so a TSP Enter rides the ONE
+   * `SubmissionController` — never a renderer-owned writer. The renderer
+   * clears the composer BEFORE this call (§3.4 ordering).
+   */
+  submit(text: string, request: ComposerSubmitRequest): void
+  /** The draft-steer entry (B2): `ApplicationEvents.events.onSteer`. */
+  steer(text: string): void
+  /** Real user input on the editor seat (editable/submit keys). */
+  noteUserInput(): void
+  /**
+   * PR3-B B3 (§3.8): the FRESH authoritative continued-Question rows. A
+   * PRESENTATION projection of the ONE `QuestionSurfaceController` — the
+   * renderer filters `presentation === 'parked'` itself and never keeps a
+   * second registry. An absent controller reads `[]`.
+   */
+  listContinuedQuestions(): readonly QuestionAttentionRow[]
+  /**
+   * PR3-B B3 (§3.8): reopen one continued Question through the ORIGINAL
+   * controller (its own authoritative recheck decides). `false` means the
+   * entry is no longer answerable; the renderer mounts nothing by itself and
+   * never writes to a Host/port answer path.
+   */
+  reopenContinuedQuestion(sessionId: string, callId: string): boolean
+}
+
+/**
+ * PR3-A: one already-connected renderer mount the composition root hands to
+ * {@link SurfaceRuntime.start} instead of the default PiTui process mount.
+ * The mount owns its own terminal (the TSP SDK session); the surface never
+ * constructs a `TuiApp` on this branch, and the returned disposer is invoked
+ * ONCE inside the surface's own ordered disposal.
+ */
+export interface SurfaceRendererMount {
+  /**
+   * Mount the renderer. Runs at the exact original `startProcessTui` position;
+   * a throw is the runner's fatal path (never a silent PiTui fallback).
+   */
+  mount(): {
+    /** The renderer-facing display seam implementation. */
+    readonly display: SurfaceDisplaySeam
+    /**
+     * PR3-B §3.1: the renderer's composer projection (B1: the TSP
+     * renderer's ONE program-owned composer; the PiTui branch is the live
+     * `TuiApp` itself).
+     */
+    readonly composer: SubmissionComposerPort
+    readonly modelPresentation?: ModelPresentation | undefined
+    /** The native `/preset` presenter, beside the Model one. */
+    readonly presetPresentation?: PresetPresentation | undefined
+    /** Internal read-only Session Browser presenter; no production command opens it in B1-A. */
+    readonly sessionBrowserPresentation?: SessionBrowserPresentation | undefined
+    /**
+     * PR3-B §3.2: the renderer's modal presenter. B1 keeps the INERT
+     * implementation (no TSP form exists; every ask rejects — fail-closed,
+     * consistent with `supportsModals === false`); B3 replaces it with the
+     * real TSP interaction presenter.
+     */
+    readonly interaction: SurfaceInteractionPresenter
+    /**
+     * PR3-B §3.3 (the B1 review F4 contract): bind the application input
+     * handlers ONCE. The renderer holds pre-bind keys in a bounded
+     * renderer-local queue and consumes them exactly once here; a dispose
+     * before the bind discards the queue unconsumed. B1 binds the
+     * editor-local/lifecycle projection; B2 widens it with submissions.
+     */
+    readonly bindInput: (handlers: SurfaceInputBinding) => void
+    /**
+     * Stop the renderer and release its terminal ONCE (the TSP branch closes
+     * the SDK surface then the session). May be async; the surface disposal
+     * awaits it inside its ordered batch after the interaction owner dies.
+     */
+    readonly dispose: () => Promise<void>
+  }
+  /**
+   * PR3-A ownership handshake: release a renderer that was CONNECTED but
+   * NEVER mounted — the surface was already disposed, or the mount was
+   * rejected (a handshake that outlived its HMR'd runner, a startup abort).
+   * Without it the connected SDK session would keep owning raw-mode stdin
+   * with no registered disposer. Idempotent, and a no-op once {@link mount}
+   * transferred ownership to the surface's own disposal.
+   */
+  releaseUnmounted(): Promise<void>
+}
+/**
+ * Phase 3B / B3-B: `SurfaceMountDeps.captureHistoryScope` reuses the ONE
+ * `HistoryOpenScope` declaration owned by `src/tui-app.ts` (type-only import in
+ * the same direction as `TuiAppOptions`). Keeping the declaration on the TUI
+ * side is what stops the DOM-less bench program (`scripts/bench.mts` imports
+ * `src/tui-app.ts`) from pulling this whole surface/extension graph in.
+ */
+
 /** The capabilities the mount needs; each is resolved by the runner/bootstrap. */
 export interface SurfaceMountDeps {
   /** The application input contract (session/submission/command owners). */
   readonly events: TuiAppEvents
+  /**
+   * PR3-A (experimental): an already-connected renderer mount that owns the
+   * terminal instead of the default PiTui process mount. When present, no
+   * `TuiApp` is constructed (`surface.app` throws); the surface commits
+   * through the mount's display seam and disposes it in its ordered teardown.
+   */
+  readonly renderer?: SurfaceRendererMount
   /** The surface workspace root (path summaries display relative to it). */
   readonly workspaceRoot: OptionCapability<'workspaceRoot'>
   /** The structural icon palette, read once from the persisted settings. */
@@ -205,8 +333,13 @@ export interface SurfaceMountDeps {
   readonly present: OptionCapability<'present'>
   /** The live session cwd the history search's `current` scope resolves against. */
   readonly sessionCwd: () => string
-  /** The live session identity the history panel captures at open time. */
-  readonly sessionId: () => string | undefined
+  /** The ONE atomic History currentness capture (Phase 3B / B3-B): the
+   *  application composition reads the runtime's single `SessionScopeAuthority`
+   *  ONCE per Ctrl+R open and hands the TUI a `{ sessionId, isCurrent }` pair.
+   *  The UI never sees an owner subject or re-derives an identity from separate
+   *  reads; `isCurrent` answers the exact-owner/generation question the whole
+   *  surface already uses. */
+  readonly captureHistoryScope: () => HistoryOpenScope
   /** Material terminal-width change (the command surface coalesces its refresh). */
   readonly onTerminalResize: OptionCapability<'onTerminalResize'>
   /** Fullscreen drag-selection copy (the runner owns the clipboard policy). */
@@ -317,8 +450,41 @@ export interface TranscriptProjectionFrame {
 
 /** The surface owner the runner/bootstrap consumes. */
 export interface SurfaceRuntime<Event extends RoutedSessionEvent> {
-  /** The mounted TuiApp. Throws if read before {@link SurfaceRuntime.start}. */
+  /**
+   * The mounted TuiApp (the PiTui renderer). Throws if read before
+   * {@link SurfaceRuntime.start} — and on the TSP renderer branch, where no
+   * TuiApp exists; application owners that are renderer-neutral read
+   * {@link display} instead.
+   */
   readonly app: TuiApp
+  /**
+   * PR3-B §3.1: the live composer projection. On the PiTui branch this is the
+   * mounted `TuiApp` (structurally compatible); on a TSP renderer branch it
+   * is the renderer's own composer port. Throws if read before
+   * {@link SurfaceRuntime.start}.
+   */
+  readonly composer: SubmissionComposerPort
+  /** Native /model presentation, absent until a supported renderer mounts. */
+  readonly modelPresentation?: ModelPresentation | undefined
+  /** Native /preset presentation, absent until a supported renderer mounts. */
+  readonly presetPresentation?: PresetPresentation | undefined
+  /** Internal read-only Session Browser seam; absent on PiTui and unsupported TSP panes. */
+  readonly sessionBrowserPresentation?: SessionBrowserPresentation | undefined
+  /**
+   * PR3-A: the renderer-facing display seam (PiTui adapter or the TSP
+   * renderer). Throws if read before {@link SurfaceRuntime.start}.
+   */
+  readonly display: SurfaceDisplaySeam
+  /**
+   * PR3-A: the ONE renderer-release promise. Resolves immediately on the
+   * PiTui branch (the app disposal is synchronous); on the TSP branch it
+   * settles only after the SDK restored the tty (its input drain included).
+   * The exit/fatal/fiber orchestrations AWAIT it before writing the resume
+   * hint, starting the next renderer or finishing the unload — a rejection is
+   * the renderer's own cleanup failure and is recorded by those callers
+   * (never swallowed here).
+   */
+  whenRendererReleased(): Promise<void>
   /** The unified status projection store (surface-owned instance). */
   readonly status: StatusStore
   /** The opening-session journal (surface-owned instance). */
@@ -431,10 +597,11 @@ export interface SurfaceRuntime<Event extends RoutedSessionEvent> {
   hasTask(childId: string): boolean
   /** Reset the whole Task Center on a session-generation bump. */
   resetTasks(): void
-  /** Open the Task Browser (`quick` = the ↓ trigger, `full` = `/tasks`). */
+  /** Open the Full Task Browser (`/tasks` and the scoped views). The
+   *  `quick` modal is retired (Phase 3B/B4-B): the on-demand Task Quick
+   *  accessory replaced it and `openQuickTaskItem` routes its selections. */
   openTasksBrowser(
-    viewMode: 'quick' | 'full',
-    restoreState?: TaskBrowserViewState,
+    viewMode: 'full',
     scope?: TaskBrowserDatasetScope,
     header?: string,
   ): void
@@ -442,6 +609,40 @@ export interface SurfaceRuntime<Event extends RoutedSessionEvent> {
   openJobView(jobId: string): 'close' | 'keep-open'
   /** Register the approval/question presentation providers (A4-7, §13.3/§16). */
   attachInteraction(port: InteractionPort, deps: SurfaceInteractionDeps): void
+  /**
+   * PR3-B B3 (findings C/F6): a newly committed Session takes the surface, so
+   * re-derive the WHOLE interaction presentation against it BEFORE the new
+   * subject's first frame. A replaced subject's live foreground form (and a live
+   * approval prompt) is withdrawn from the modal seat — PRESENTATION only: the
+   * official request keeps its own lifetime and the Host's own cancellation still
+   * settles it — and its continued entries leave the model, so no form, count,
+   * prompt or input seat of the replaced subject can leak into the replacement.
+   * Called from the runner's published `initLiveSession` seam; a no-op before the
+   * interaction owner is attached.
+   */
+  reconcileInteractionPresentation(): void
+  /**
+   * PR3-B B3 (external review P2-B): the SYNCHRONOUS publication-commit half of
+   * the same currentness policy. The runner calls it from the commit section,
+   * immediately after the new owner is published and BEFORE any post-commit
+   * await, so a replaced subject's modal can never keep the seat (or accept keys
+   * through the modal-first input routing) while the new owner's initialization
+   * is still pending. State-only and non-throwing: it performs no Host read, and
+   * a renderer frame failure routes to that renderer's fatal sink.
+   */
+  withdrawReplacedPresentation(): void
+  /**
+   * Phase 3B / B3-B: retire a mounted History editor-seat tenant whose captured
+   * Session scope is no longer current. It is the runner's publication-commit
+   * half of the History currentness policy, called from the three `publishOwner`
+   * seams (ordinary transition, fork adoption, first-session creation) right
+   * after the new owner is published, and from the ownership core's single
+   * generation-reset hook (a same-owner generation bump). It is STRICTLY
+   * non-throwing: the commit section must never fail because UI cleanup did. It
+   * performs no Host read and is a no-op when no PiTui app is mounted (TSP
+   * renderer, pre-mount, disposed).
+   */
+  retireStaleHistorySeat(): void
   /**
    * Attach the A4-7 presentation event routing source (plan §16). The surface
    * owns every routing decision and the apply/paint calls; the runner keeps the
@@ -490,7 +691,7 @@ export interface SurfaceRuntime<Event extends RoutedSessionEvent> {
    * state (the cold-hydration path keeps the fold; the surface owns the
    * `compactingId` routing state and the phase/busy/working presentation).
    */
-  applyResumedCompaction(id: string | undefined, active: boolean): void
+  applyResumedCompaction(id: string | undefined, active: boolean, phase?: CompactionPhase): void
   /**
    * A4-4 pending-input presentation refresh (plan §13.2): the semantic pending
    * read joined with the local submission echoes and the own-input viewport
@@ -534,6 +735,14 @@ export interface SurfaceRuntime<Event extends RoutedSessionEvent> {
   /** Mount the process TUI. Runs at most once. */
   start(deps: SurfaceMountDeps): void
   /**
+   * PR3-B §3.3: bind the renderer's input projection ONCE. Called by the
+   * composition root AFTER it has settled the renderer capability and the
+   * command catalog, so no held pre-bind key can act on stale facts, and so a
+   * key cannot submit before the application handlers are ready. A no-op on the
+   * PiTui branch (its events table is wired by the mount itself).
+   */
+  bindRendererInput(): void
+  /**
    * Early teardown: release the Plugin Manager install-event subscription at
    * its original EARLY cleanup position (a late install event must never
    * notify/repaint a dying surface).
@@ -548,6 +757,46 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
   const status = new StatusStore(initialStatusSnapshot(options.tuiVersion))
   const openingJournal = createOpeningJournal<Event>()
   let app: TuiApp | undefined
+  /**
+   * PR3-A: the renderer-facing display seam. On the PiTui path this is the
+   * pitui adapter over the mounted app (assigned in `start()`); a non-PiTui
+   * renderer mount injects its own seam implementation instead of a TuiApp.
+   * Application owners commit display facts through the seam; `app` stays the
+   * PiTui-only surface.
+   */
+  let display: SurfaceDisplaySeam | undefined
+  /**
+   * PR3-B §3.1: the live composer projection. PiTui assigns the mounted app
+   * (structurally a `SubmissionComposerPort`); a renderer mount injects its
+   * own composer port instead of a TuiApp.
+   */
+  let composerPort: SubmissionComposerPort | undefined
+  let modelPresentation: ModelPresentation | undefined
+  let presetPresentation: PresetPresentation | undefined
+  let sessionBrowserPresentation: SessionBrowserPresentation | undefined
+  /**
+   * PR3-B §3.3: the renderer input projection constructed at `start()` and the
+   * mount that will receive it. `bindRendererInput()` performs the ONE bind
+   * once the application input facts are ready.
+   */
+  let pendingInputBinding: SurfaceInputBinding | undefined
+  let inputBindTarget: { bindInput(handlers: SurfaceInputBinding): void } | undefined
+  /**
+   * PR3-B §3.2: the live modal presenter projection. PiTui assigns the
+   * mounted app (structurally a `SurfaceInteractionPresenter`); a renderer
+   * mount injects its own presenter.
+   */
+  let interactionPresenter: SurfaceInteractionPresenter | undefined
+  /**
+   * PR3-A: the non-PiTui renderer's disposer (assigned by `start()` on the
+   * renderer branch; released once in `dispose()`).
+   */
+  let rendererDispose: (() => Promise<void>) | undefined
+  /**
+   * PR3-A: the ONE renderer-release promise (settles with the tty restored).
+   * Awaitable through {@link SurfaceRuntime.whenRendererReleased}.
+   */
+  let rendererRelease: Promise<void> = Promise.resolve()
   let disposed = false
   // The surface-owned completion notification / focus presentation (A4-4) is
   // owned by its own module (TS3 §31); it exists from construction on and has
@@ -589,6 +838,34 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
   const mounted = (): TuiApp => {
     if (app === undefined) throw new Error('the surface is not mounted')
     return app
+  }
+
+  /**
+   * PR3-B §3.2: the live modal presenter projection (renderer-neutral read;
+   * see {@link interactionPresenter}).
+   */
+  const presenterSeam = (): SurfaceInteractionPresenter => {
+    if (interactionPresenter === undefined) throw new Error('the surface is not mounted')
+    return interactionPresenter
+  }
+
+  /**
+   * PR3-A: the live display seam. Sub-owners that only commit display facts
+   * read this; PiTui-only owners keep {@link mounted}.
+   */
+  const displaySeam = (): SurfaceDisplaySeam => {
+    if (display === undefined) throw new Error('the surface is not mounted')
+    return display
+  }
+
+  /**
+   * PR3-B §3.1: the live composer projection. PiTui-only before the renderer
+   * branches exist, but the read is renderer-neutral by contract: a TSP
+   * renderer's composer is the same port shape.
+   */
+  const composerSeam = (): SubmissionComposerPort => {
+    if (composerPort === undefined) throw new Error('the surface is not mounted')
+    return composerPort
   }
 
   /**
@@ -661,16 +938,13 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
     interval.turnEnd(turn, reasonKind)
   }
 
-  // The approval/question presentation owner (TS3 §35) holds the ONE
-  // `QuestionSurfaceController` plus its attention subscription. The attention
-  // publication stays a PRESENTATION-only refresh: the count goes to the app
-  // chrome and the Task Center (commit 7 moves the latter into its own owner).
   // The Task Center / Job viewer owner (TS3 §34) holds the ONE
   // `TaskBrowserRuntime`, the browser/viewer state and the catalog refresh gate.
   // Question attention crosses as an injected read/subscription only (the
   // controller stays with its own owner below).
   const task = createTaskRuntime({
     mounted: () => mounted(),
+    display: () => displaySeam(),
     isCleanedUp: () => isCleanedUp(),
     attention: {
       rows: () => interaction.attentionRows(),
@@ -680,18 +954,40 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
     },
   })
 
+  /**
+   * Whether the STARTED surface owns a renderer mount (the TSP branch) rather
+   * than the default process TuiApp (F13). Set by `start()` BEFORE the
+   * interaction owner is attached; the new admission/presentation currentness
+   * policy is authorized for that branch only.
+   */
+  let rendererOwnedPresentation = false
+
   // The approval/question presentation owner (TS3 §35) holds the ONE
   // `QuestionSurfaceController` plus its attention subscription. The attention
-  // publication stays a PRESENTATION-only refresh: the count goes to the app
-  // chrome and the OPEN Task Center browser repaints through its own owner.
+  // publication stays a PRESENTATION-only refresh: the count goes to the
+  // renderer's own presenter (the PiTui app chrome or the TSP dock line) and
+  // the Task Center (commit 7 moves the latter into its own owner).
+  // PR3-B §3.2: the modal presentation arrives through the narrow presenter
+  // projection — the PiTui adapter over the mounted app, or a renderer's own
+  // presenter. No owner reads a PiTui-only chrome member on the TSP branch.
   const interaction = createInteractionRuntime({
-    mounted: () => mounted(),
-    liveApp: () => app,
+    presenter: () => presenterSeam(),
+    livePresenter: () => interactionPresenter,
+    display: () => displaySeam(),
     currentSessionId: () => routingSource?.currentSessionId(),
+    // ADMISSION/PRESENTATION currentness (B3 findings F10/F12/F13): the surface's
+    // OWN authority — the Session it shows, plus a Session it is currently
+    // OPENING (a tentative opening is not an owner replacement, so its request is
+    // still admitted and keeps its flow). A renderer-OWNED presentation (the TSP
+    // modal seat) is the only branch this policy was authorized for: the PiTui
+    // branch — the default and the SDK-declined fallback — answers `true`
+    // unconditionally and keeps its original delegation semantics.
+    isAdmissibleSession: sessionId => rendererOwnedPresentation
+      ? sessionId === routingSource?.currentSessionId() || openingJournal.isOpening(sessionId)
+      : true,
     schedulePaint: () => schedulePaint(),
     diag: () => task.diag(),
     isCleanedUp: () => isCleanedUp(),
-    setQuestionAttention: (parkedCount) => mounted().setQuestionAttention(parkedCount),
     onAttentionChanged: () => task.refreshAttentionRows(),
   })
 
@@ -700,9 +996,12 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
   // cross-owner effect arrives as an injected callback.
   const eventRouting = createEventRouting<Event>({
     source: () => routing(),
-    mounted: () => mounted(),
+    mounted: () => displaySeam(),
     openingJournal,
-    reconcileQuestions: () => interaction.controller()?.reconcile(),
+    // The ordinary event-driven reconcile runs the WHOLE presentation pass, so a
+    // presentation that stopped being admissible is retired by the same rule that
+    // admitted it (F12) — never only at the next publication.
+    reconcileQuestions: () => interaction.reconcilePresentation(),
     refreshAgents: () => task.refreshAgents(),
     refreshAgentRuntimeOnly: () => task.refreshAgentRuntimeOnly(),
     hasTaskChild: (childId) => task.hasTask(childId),
@@ -830,12 +1129,12 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
     // Capture the subject identity and its source at ONE instant BEFORE the
     // commit; the frame publishes only if all four are still live afterwards.
     const target = projectionObserver === undefined ? undefined : captureProjectionTarget(folder, controller)
-    mounted().setTranscript(projection.messages, folder.turnActivities(), {
+    displaySeam().setTranscript(projection.messages, folder.turnActivities(), {
       ...controller.state(),
       firstTurn: projection.firstTurn,
       lastTurn: projection.lastTurn,
       hasNewer: projection.hasNewer,
-    }, streamingToolPreviews, (searchPresentation ?? searchBindingForRepaint)?.())
+    }, streamingToolPreviews, (searchPresentation ?? searchBindingForRepaint)?.(), projectionTokenFor(folder))
     if (target !== undefined) publishProjected(target, projection.messages)
   }
   /** Repaint the ACTIVE target (main or the mounted viewed child). */
@@ -921,7 +1220,6 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
     // its existing own input does not re-fire as "new".
     if (ownLaneKeys.size === 0) pendingOwnInputBySubject.delete(subjectKey)
     else pendingOwnInputBySubject.set(subjectKey, ownLaneKeys)
-    const live = mounted()
     if (hasNewOwnInput) {
       // The live tail may be outside the current virtual window (the reader
       // paged into history): move the subject's window back to latest BEFORE
@@ -935,16 +1233,19 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
         controller.latest()
         repaintTarget(activeFolder(), controller, activeStreamingToolPreviews(), searchBindingForRepaint)
       }
-      live.setPendingInputPresentation({ queued, tail, running })
-      live.scrollToBottom()
-      return
     }
-    live.setPendingInputPresentation({ queued, tail, running })
+    // PR3-A: the presentation commit is renderer-neutral (the seam). The
+    // viewport scroll stays gated on NEW OWN INPUT exactly as before (a
+    // background `context` occurrence or another client's steering must
+    // never yank a reader out of history) and is PiTui-only chrome (the TSP
+    // pane owns its scrolling).
+    displaySeam().setPendingInputPresentation({ queued, tail, running })
+    if (hasNewOwnInput) app?.scrollToBottom()
   }
   /** Clear the pending-input presentation + own-input memory (generation bump). */
   const resetPendingPresentation = (): void => {
     pendingOwnInputBySubject.clear()
-    mounted().setPendingInputPresentation({ queued: [], tail: [], running: false })
+    displaySeam().setPendingInputPresentation({ queued: [], tail: [], running: false })
   }
 
   // ── A4-8 search/transcript presentation wiring (plan §17) ───────────────
@@ -1063,6 +1364,15 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
     const folder = activeFolder()
     searchBoundRevision = folder.searchRevision()
     if (lastSearchQuery === '' || lastSearchFolder === undefined || folder !== lastSearchFolder) return undefined
+    // A PASSIVE commit (a settlement, a read-group split) can replace the card a
+    // stored match was resolved against: the old representative then no longer
+    // contains the query, and binding it would highlight the wrong card until
+    // the next explicit navigation. Re-run the same lightweight query and
+    // re-derive the representative set BEFORE binding, so the highlight/target
+    // always follows the occurrence (the refresh is inert when the revision did
+    // not move).
+    refreshSearchMatchesIfStale()
+    refreshSearchMatchMessages()
     return { matchMessages: resolveSearchMatchMessages(), target: resolveSearchTarget(), grantReveal: false }
   }
   // PR D1 P1: while the search overlay is open the transcript keeps
@@ -1082,7 +1392,7 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
     searchCurrent = refreshed.current
     lastSearchRevision = refreshed.revision
     lastSearchFolder = folder
-    mounted().setSearchResult(searchCurrent + 1, searchMatches.length)
+    displaySeam().setSearchResult(searchCurrent + 1, searchMatches.length)
   }
   /** The search presentation for an EXPLICIT navigation: `grantReveal` so the
    * temporary reveal is (re-)granted, and the representative set / target
@@ -1119,7 +1429,7 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
       // step (same empty set, target already cleared) is a no-op and MUST NOT
       // be reported as a rebuild.
       if (mounted().setTranscriptSearchPresentation(presentation)) searchProfiler.stage('search.rebuild')
-      mounted().setSearchResult(0, 0)
+      displaySeam().setSearchResult(0, 0)
       return
     }
     const folder = activeFolder()
@@ -1140,7 +1450,7 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
       if (mounted().setTranscriptSearchPresentation(presentation)) searchProfiler.stage('search.rebuild')
       mounted().scrollToSearchTarget()
       searchProfiler.stage('search.scroll')
-      mounted().setSearchResult(searchCurrent + 1, searchMatches.length)
+      displaySeam().setSearchResult(searchCurrent + 1, searchMatches.length)
       return
     }
     // Off-window: ONE fold snapshot (plan §19) — the anchored message window
@@ -1165,7 +1475,7 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
     searchBoundRevision = folder.searchRevision()
     mounted().scrollToSearchTarget()
     searchProfiler.stage('search.scroll')
-    mounted().setSearchResult(searchCurrent + 1, searchMatches.length)
+    displaySeam().setSearchResult(searchCurrent + 1, searchMatches.length)
   }
 
   // Virtual history boundaries preserve the rendered overlap anchor;
@@ -1347,10 +1657,10 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
     // lifecycle (plan §27 — TuiApp never touches the filesystem).
     historySearchSource: deps.historySearchSource,
     historySearchCwd: () => deps.sessionCwd(),
-    // The session scope's identity — a GETTER like the cwd: a session switch
-    // must make the next Ctrl+R search the NEW session (the panel captures it
-    // once at open time).
-    historySearchSessionId: () => deps.sessionId(),
+    // The Session currentness bridge (Phase 3B / B3-B): the application
+    // composition captured ONE scope authority pair for this open; the TUI
+    // stores the pair and never re-derives a session identity.
+    captureHistoryScope: deps.captureHistoryScope,
     // The transcript image surface (plan M8/M9): the durable loader plus the
     // dim fallback coloring.
     imageLoader: new ImageLoader((ref, context) => deps.readImage(ref, context)),
@@ -1398,6 +1708,14 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
     // browse). A4-6 moved the handler into the surface owner (it reads the
     // browser's row-identity source); the closure only runs on a user click.
     onWorkflowAction: action => task.handleWorkflowAction(action),
+    // B4-B: the on-demand Task Quick's typed selection route. The app calls
+    // this AFTER the accessory has left Quick; the SAME TaskRuntime owner
+    // resolves the row against its CURRENT global authority (the ONE open/
+    // reopen path the Full browser uses — never a second registry).
+    onQuickTaskSelect: value => task.openQuickTaskItem(value),
+    // Post-B4-B: Quick's distinct navigation action opens the same Full Task
+    // Center owner as `/tasks`, without manufacturing a TaskPanelItem value.
+    onQuickTaskOpenFull: () => task.openTasksBrowser('full'),
   })
 
   return {
@@ -1405,6 +1723,16 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
       if (app === undefined) throw new Error('the surface is not mounted')
       return app
     },
+    get composer(): SubmissionComposerPort {
+      return composerSeam()
+    },
+    get modelPresentation() { return modelPresentation },
+    get presetPresentation() { return presetPresentation },
+    get sessionBrowserPresentation() { return sessionBrowserPresentation },
+    get display(): SurfaceDisplaySeam {
+      return displaySeam()
+    },
+    whenRendererReleased: () => rendererRelease,
     status,
     openingJournal,
     setCompletionOwner(identity) {
@@ -1456,7 +1784,17 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
       // A4-4 (plan §13.1): the semantic derivation stays with the runner; the
       // commit coordination is surface-owned. The three parts are ONE atomic
       // display-subject commit (M3-5 PR1 §9.7).
-      mounted().commitDisplaySubject(patch, legacyFacts, presentation)
+      //
+      // OWNERSHIP (R2-2): the PiTui branch's ONE atomic commit lives INSIDE
+      // `TuiApp.commitDisplaySubject` (store patch + activity section + legacy
+      // projection published together). Committing the patch here as well
+      // would SPLIT that transaction into two publications (an observer would
+      // see the child view beside the parent activity/presentation). So the
+      // surface only supplies the store commit for a renderer that has no such
+      // chrome projection — the TSP mount — keeping exactly ONE store update
+      // per commit on BOTH branches.
+      if (app === undefined) status.update(patch)
+      displaySeam().commitDisplaySubject(patch, legacyFacts, presentation)
     },
     setNotificationMode(mode) {
       notification.setMode(mode)
@@ -1509,14 +1847,26 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
     resetTasks() {
       task.resetTasks()
     },
-    openTasksBrowser(viewMode, restoreState, scope, header) {
-      task.openTasksBrowser(viewMode, restoreState, scope, header)
+    openTasksBrowser(viewMode, scope, header) {
+      task.openTasksBrowser(viewMode, scope, header)
     },
     openJobView(jobId) {
       return task.openJobView(jobId)
     },
     attachInteraction(port, deps) {
       interaction.attach(port, deps)
+    },
+    reconcileInteractionPresentation() {
+      interaction.reconcilePublishedPresentation()
+    },
+    withdrawReplacedPresentation() {
+      interaction.withdrawReplacedPresentation()
+    },
+    retireStaleHistorySeat() {
+      // The PiTui-only mounted app owns the optional seat; a TSP renderer mount
+      // (no `app`) and a pre-mount/disposed surface are strict no-ops. The app's
+      // own entry is state-only and non-throwing.
+      if (app !== undefined) app.retireStaleHistorySeat()
     },
     attachEventRouting(source) {
       routingSource = source
@@ -1528,7 +1878,7 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
     routeSettingsRefresh: (namespace) => eventRouting.routeSettingsRefresh(namespace),
     isCurrentAssistantAgent: (agent) => eventRouting.isCurrentAssistantAgent(agent),
     applyAssistantInput: (input) => eventRouting.applyAssistantInput(input),
-    applyResumedCompaction: (id, active) => eventRouting.applyResumedCompaction(id, active),
+    applyResumedCompaction: (id, active, phase) => eventRouting.applyResumedCompaction(id, active, phase),
     refreshPendingInput,
     resetPendingPresentation,
     schedulePaint,
@@ -1548,7 +1898,53 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
     },
     start(deps) {
       if (disposed) throw new Error('the surface is already disposed')
-      if (app !== undefined) throw new Error('the surface is already mounted')
+      if (app !== undefined || display !== undefined) throw new Error('the surface is already mounted')
+      // F13: only a renderer-OWNED presentation (the TSP mount) enables the new
+      // admission/presentation currentness policy; the default PiTui branch keeps
+      // its original delegation semantics. This is read by the interaction owner,
+      // which is attached AFTER this call.
+      rendererOwnedPresentation = deps.renderer !== undefined
+      // PR3-A: the composition root already connected a non-PiTui renderer
+      // (the experimental TSP mount). Mount it at the SAME position; no
+      // TuiApp exists on this branch, so every PiTui-only owner below simply
+      // never receives a mounted app (their entries are input-gated).
+      if (deps.renderer !== undefined) {
+        const mounted = deps.renderer.mount()
+        display = mounted.display
+        composerPort = mounted.composer
+        modelPresentation = mounted.modelPresentation
+        presetPresentation = mounted.presetPresentation
+        sessionBrowserPresentation = mounted.sessionBrowserPresentation
+        interactionPresenter = mounted.interaction
+        rendererDispose = mounted.dispose
+        // PR3-B §3.3: the input projection is constructed HERE (from the EXACT
+        // already-built callbacks, preserving their receiver/signature) but
+        // BOUND LATER, through `bindRendererInput()`. Binding at this instant
+        // would replay the renderer's held keys BEFORE the composition root has
+        // settled the renderer capability and registered the command catalog —
+        // a held `!` line would then pass the shell admission and a held
+        // `/exit` would classify against an empty catalog (the B2 review's F2).
+        pendingInputBinding = {
+          exit: () => deps.events.onExit(),
+          cancel: () => deps.events.onCancel?.(),
+          submit: (text, request) => deps.events.onSubmit(text, request),
+          // `onSteer` is optional on the events table (the capability is
+          // guarded at construction): an absent one leaves the gesture a
+          // committed no-op rather than a fabricated submission.
+          steer: (text) => deps.events.onSteer?.(text),
+          noteUserInput: () => deps.events.onUserInput?.(),
+          // PR3-B B3 (§3.8): the Alt+Q continued-Question read/reopen cross
+          // through the SAME interaction owner. They are bound here but can
+          // only run on a real user key AFTER `attachInteraction()`; with no
+          // controller yet they read empty / answer `false` — never a
+          // fabricated fallback form.
+          listContinuedQuestions: () => interaction.attentionRows(),
+          reopenContinuedQuestion: (sessionId, callId) =>
+            interaction.controller()?.reopen(sessionId, callId) ?? false,
+        }
+        inputBindTarget = mounted
+        return
+      }
       // A4-8 (plan §17): the transcript-navigation and Ctrl+R search
       // presentation callbacks are surface-owned wiring. The runner's input
       // contract arrives as `deps.events` and the surface overlays exactly the
@@ -1578,6 +1974,28 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
         initialTerminalProgress: interval.snapshot().active,
         terminalProgressMode: parseTerminalProgressMode(options.terminalProgress),
       })
+      display = pituiDisplaySeam(app)
+      // PR3-B §3.1/§3.2: the PiTui branch's projections are the ONE live app
+      // itself (structural compatibility is the contract). The modal presenter
+      // is the narrow DELEGATING adapter over it (PR3-B B3): the app has no
+      // `withdrawPending`, whose PiTui owner stays the app's own disposal.
+      composerPort = app
+      interactionPresenter = pituiSurfaceInteractionPresenter(app)
+      // B4-B: any Task Center commit that ran BEFORE this mount (a cold
+      // parked-Question discovery can publish before the terminal exists)
+      // hit an unmounted display seam and skipped the below-editor Quick
+      // projection. The mount is the ONE point where the seam becomes live:
+      // republish the presentation-only projections so a quiet session (no
+      // later churn) still paints its badge + Quick window.
+      task.refreshAttentionRows()
+    },
+    bindRendererInput() {
+      const target = inputBindTarget
+      const handlers = pendingInputBinding
+      inputBindTarget = undefined
+      pendingInputBinding = undefined
+      if (target === undefined || handlers === undefined) return
+      target.bindInput(handlers)
     },
     disposePluginManager() {
       // Release the Plugin Manager install-event subscription at its original
@@ -1592,6 +2010,20 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
       // app dies, so no synchronous teardown callback can publish another frame
       // to a sink that is about to be released.
       projectionObserver = undefined
+      // PR3-A: retire the non-PiTui renderer's disposer slot (it is STARTED
+      // below, after the interaction owner's logical cancellation); the seam
+      // object itself stays readable so a late scheduled repaint after dispose
+      // commits into the renderer's own dropped-frame path (the SDK surface is
+      // closed) — the same contract the PiTui branch keeps via the
+      // disposed-but-present TuiApp.
+      const releaseRenderer = rendererDispose
+      rendererDispose = undefined
+      modelPresentation = undefined
+      presetPresentation = undefined
+      sessionBrowserPresentation = undefined
+      // A disposed surface never binds its renderer input afterwards.
+      pendingInputBinding = undefined
+      inputBindTarget = undefined
       // M3-6 PR3: the aggregate teardown is ONE ordered non-truncating batch
       // (the plan's frozen order) across the sub-owners. Each sub-owner retires
       // its own one-shot slots before its callbacks run, so a throwing
@@ -1609,9 +2041,26 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
         () => retireMainAgentProgress(),
         // The question attachment first (its answer lookup is cleared before the
         // app dies), then the mounted app, then the extension surface resources
-        // in the runner's original cleanup order.
+        // in the runner's original cleanup order. PR3-B B3: `interaction.dispose()`
+        // itself retires the Question controller BEFORE withdrawing the
+        // presenter's pending promises, so a teardown keeps the Host outcome
+        // classification (ASK_ABORTED/ASK_CANCELLED) instead of manufacturing a
+        // user cancellation.
         () => interaction.dispose(),
         () => app?.dispose(),
+        // PR3-B B3 (§3.3.3): the renderer/SDK release STARTS here — after the
+        // interaction owner's synchronous logical cancellation (every queued and
+        // active modal promise is settled) and after the PiTui app's own
+        // disposal, and before the extension resources. Starting it earlier
+        // would close the terminal under a question/approval whose promises had
+        // not been withdrawn yet; the non-truncating batch still starts it even
+        // when an earlier synchronous step threw. The promise is OWNED by this
+        // surface and awaited by the exit/fatal/fiber orchestrations: it is
+        // deliberately NOT caught here, because a renderer cleanup failure must
+        // reach those callers' error aggregation instead of being swallowed.
+        () => {
+          rendererRelease = releaseRenderer === undefined ? Promise.resolve() : releaseRenderer()
+        },
         () => extension.dispose(),
       ])
     },

@@ -20,6 +20,7 @@ import { DirectHostFilePort } from '../src/runtime/direct/host-file-direct.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 import { sessionScopeFacts } from './session-scope-facts.ts'
 import { registerTuiCommandsWithDirectSeams } from './support/register-tui-commands.ts'
+import { navigateToLegacySettings } from './support/open-legacy-settings.ts'
 
 /** Re-vendor lifecycle follow-up P3: every TuiApp started in this file is
  * stopped after each test — the process's single-live-TUI slot (the
@@ -244,7 +245,7 @@ function makeHarness(initial: SettingsDoc, options: { realSettings?: boolean; li
     setTerminalProgressMode: () => {}, setNotificationMethod: () => {},
     updateWelcomeCard: () => {},
     openJobView: () => {},
-    openTasksBrowser: () => {}, openPluginManager: () => {}, createPluginManagerSubmenu: () => ({ render: () => [], invalidate: () => {} }),
+    openTasksBrowser: () => {}, openPluginManager: () => {}, createPluginManagerPage: () => undefined,
     openRewindPicker: () => {},
     sessionTransitionPending: () => false,
     withSessionTransition: async <T>(task: () => T | Promise<T>) => task(),
@@ -273,11 +274,14 @@ function makeHarness(initial: SettingsDoc, options: { realSettings?: boolean; li
   }
 }
 
-/** Open the /settings panel through the registered command. */
+/** Open the /settings panel through the registered command, crossing the B2-A
+ *  workspace's `Other settings → Open existing settings…` bridge. */
 async function openSettingsPanel(harness: ReturnType<typeof makeHarness>): Promise<void> {
   const settings = harness.defs.find(entry => entry.name === 'settings')
   assert.ok(settings?.handler !== undefined, 'the settings command must be registered')
   await (settings.handler as (invocation: { rawInput: string }) => Promise<unknown>)({ rawInput: '' })
+  await harness.vt.waitForRender()
+  await navigateToLegacySettings(harness.vt)
 }
 
 test('the /settings panel exposes the official subagent model-selection rows', async () => {

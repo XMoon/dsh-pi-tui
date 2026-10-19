@@ -11,6 +11,13 @@ import { defineConfig } from 'tsdown'
 // (`extensions`), and the Loader-only first-party contributor (`builtins`).
 // Flat entry files keep tsdown's nested-output-path rules out of the way;
 // the subpath names come from package.json#exports.
+//
+// `performance-host` is a NESTED source module exposed as a FLAT entry: it is
+// a Host-plane Loader row (`src/app/host/performance-host.ts`), so it belongs
+// to the application layer, while the package subpath stays
+// `@xmoon76/dsh-pi-tui/performance-host`. The root source ledger is closed, so
+// the flat DIST name comes from this object entry, never from a new
+// `src/*.ts` module (AGENTS.md "Source module placement").
 export default defineConfig({
   entry: [
     './src/index.ts',
@@ -19,6 +26,7 @@ export default defineConfig({
     './src/builtins.ts',
     './src/extension/advanced.ts',
     './src/extension/unstable.ts',
+    { 'performance-host': './src/app/host/performance-host.ts' },
   ],
   format: ['esm'],
   outDir: 'dist',

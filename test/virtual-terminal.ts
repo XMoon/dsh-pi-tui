@@ -17,6 +17,9 @@ export class VirtualTerminal implements Terminal {
 	/** Test hook: every cursor visibility sequence written (hide/show), in
 	 * order — asserts the FINAL cursor state after teardown. */
 	readonly cursorWrites: string[] = [];
+	/** Test hook: every raw chunk written to the terminal, in order — the
+	 * FINAL terminal-bound bytes (framing, colors and payload alike). */
+	readonly writes: string[] = [];
 
 	constructor(columns = 80, rows = 24) {
 		this._columns = columns;
@@ -51,6 +54,7 @@ export class VirtualTerminal implements Terminal {
 	}
 
 	write(data: string): void {
+		this.writes.push(data);
 		this.xterm.write(data);
 	}
 
@@ -106,6 +110,11 @@ export class VirtualTerminal implements Terminal {
 	}
 
 	setProgress(_active: boolean): void {}
+
+	/** OSC 7501 program status (upstream v1.1.0 interface): the host never
+	 *  drives it — `TuiApp` owns the single OSC 7501 writer — so the test
+	 *  terminal only satisfies the Terminal contract. */
+	setProgramStatus(): void {}
 
 	/** The richer OSC 9;4 state projection (fork X059): a no-op here so a Tern
 	 *  fixture can observe `paused` instead of falling back to the boolean
@@ -183,6 +192,17 @@ export class VirtualTerminal implements Terminal {
 		const line = buffer.getLine(buffer.viewportY + row);
 		const cell = line?.getCell(col);
 		return (cell?.isInverse() ?? 0) !== 0;
+	}
+
+	/**
+	 * Whether one viewport cell carries the BOLD attribute — the Task Quick
+	 * selected row's `textStrong` label ink (B4-B addendum).
+	 */
+	getCellBold(row: number, col: number): boolean {
+		const buffer = this.xterm.buffer.active;
+		const line = buffer.getLine(buffer.viewportY + row);
+		const cell = line?.getCell(col);
+		return (cell?.isBold() ?? 0) !== 0;
 	}
 
 	/**

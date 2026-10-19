@@ -699,26 +699,55 @@ test('workflow search text follows the live run status (plan §8.12)', () => {
   assert.equal(folder.search('running').length, 0, 'the settled run must not keep the start-time status in the corpus')
 })
 
+test('workflow search keeps an open run indexed as running across step/turn close (W6)', () => {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    turnStart(0, 0),
+    rawEvent('step/start', { turn: 0, step: 0 }, 1),
+    rawEvent('tool-workflow/run-start', { runId: 'run1', name: 'audit' }, 2),
+    rawEvent('tool-workflow/agent-start', { runId: 'run1', seq: 1, label: 'checker', childId: 'session-x' }, 3),
+    rawEvent('step/end', { turn: 0, step: 0 }, 4),
+    rawEvent('turn/end', { turn: 0, reason: { kind: 'completed' } }, 5),
+  ])
+  // The open record is indexed under its real status; Step/Turn closure must
+  // never inject a fabricated `interrupted` corpus entry.
+  const running = folder.search('running')
+  assert.ok(running.some(match => transcriptSearchSourceKey(match.source) === 'workflow-run.status'),
+    'the open run status must be indexed')
+  assert.equal(folder.search('interrupted').length, 0, 'no fabricated interrupted status enters the corpus')
+  folder.apply([
+    rawEvent('tool-workflow/agent-end', { runId: 'run1', seq: 1, outcome: 'completed' }, 6),
+    rawEvent('tool-workflow/run-end', { runId: 'run1', stopReason: 'completed' }, 7),
+  ])
+  assert.equal(folder.search('running').length, 0, 'the settled run must drop its old status')
+  const completed = folder.search('completed')
+  const statusHit = completed.find(match => transcriptSearchSourceKey(match.source) === 'workflow-run.status')
+  assert.ok(statusHit !== undefined, 'the settled status must be indexed')
+  assert.equal(folder.resolveSearchMatch(statusHit)?.kind, 'workflow', 'the hit must open the Workflow card')
+})
+
 test('workflow search indexes phase labels and member labels/statuses (PR2 plan §13)', () => {
   const folder = new TranscriptFolder()
   folder.apply([
     turnStart(0, 0),
     rawEvent('tool-workflow/run-start', { runId: 'run1', name: 'audit' }, 1),
-    rawEvent('tool-workflow/agent-start', { runId: 'run1', seq: 0, label: 'dependency-scan', phase: 'Research', childId: 'session-x' }, 2),
-    rawEvent('tool-workflow/agent-start', { runId: 'run1', seq: 1, label: 'schema-check', phase: '', childId: 'session-y' }, 3),
-    rawEvent('tool-workflow/agent-start', { runId: 'run1', seq: 2, label: 'orphan', phase: null, childId: 'session-z' }, 4),
+    rawEvent('tool-workflow/agent-start', { runId: 'run1', seq: 1, label: 'dependency-scan', phase: 'Research', childId: 'session-x' }, 2),
+    rawEvent('tool-workflow/agent-start', { runId: 'run1', seq: 2, label: 'schema-check', phase: '', childId: 'session-y' }, 3),
+    // The official event omits `phase` for the absent case (the event type
+    // only permits a present string); the folder projects that to null.
+    rawEvent('tool-workflow/agent-start', { runId: 'run1', seq: 3, label: 'orphan', childId: 'session-z' }, 4),
   ])
   assertCorpusParity(folder, ['audit', 'Research', 'dependency-scan', 'running'])
-  // The readable phase labels are indexed: Unassigned (null) and Empty ('')
+  // The readable phase labels are indexed: Unassigned (absent) and Empty ('')
   // are distinct searchable words.
-  assert.equal(folder.search('unassigned').length, 1, 'the null phase readable label must be searchable')
+  assert.equal(folder.search('unassigned').length, 1, 'the absent phase readable label must be searchable')
   assert.equal(folder.search('empty').length, 1, 'the empty phase readable label must be searchable')
   assert.equal(folder.search('schema-check').length, 1, 'a member label must be searchable')
   // Machine identities are never indexed.
   assert.equal(folder.search('session-x').length, 0, 'childId must never be indexed')
   assert.equal(folder.search('run1').length, 0, 'runId must never be indexed')
   // Member status words are indexed.
-  folder.apply([rawEvent('tool-workflow/agent-end', { runId: 'run1', seq: 0, outcome: 'failed' }, 5)])
+  folder.apply([rawEvent('tool-workflow/agent-end', { runId: 'run1', seq: 1, outcome: 'failed' }, 5)])
   assertCorpusParity(folder, ['failed'])
   assert.equal(folder.search('failed').length, 1, 'a member status must be searchable')
 })
@@ -730,7 +759,7 @@ test('a member hidden inside a large phase summary still hits its Workflow card 
     rawEvent('tool-workflow/run-start', { runId: 'run1', name: 'audit' }, 1),
     // 6 members: the phase renders as a summary; member 5 is never inline.
     ...Array.from({ length: 6 }, (_, i) =>
-      rawEvent('tool-workflow/agent-start', { runId: 'run1', seq: i, label: `shard-${i}`, phase: 'Migration', childId: `session-${i}` }, 2 + i)),
+      rawEvent('tool-workflow/agent-start', { runId: 'run1', seq: i + 1, label: `shard-${i}`, phase: 'Migration', childId: `session-${i}` }, 2 + i)),
   ])
   const matches = folder.search('shard-5')
   assert.equal(matches.length, 1, 'the hidden member must still hit the card')
@@ -1119,8 +1148,8 @@ test('occurrence: Workflow phase/member/run occurrences carry their semantic sou
   folder.apply([
     turnStart(0, 0),
     rawEvent('tool-workflow/run-start', { runId: 'run1', name: 'audit', }, 1),
-    rawEvent('tool-workflow/agent-start', { runId: 'run1', seq: 0, label: 'dependency-scan', phase: 'Research', childId: 'session-x' }, 2),
-    rawEvent('tool-workflow/agent-start', { runId: 'run1', seq: 1, label: 'schema-scan', phase: 'Research', childId: 'session-y' }, 3),
+    rawEvent('tool-workflow/agent-start', { runId: 'run1', seq: 1, label: 'dependency-scan', phase: 'Research', childId: 'session-x' }, 2),
+    rawEvent('tool-workflow/agent-start', { runId: 'run1', seq: 2, label: 'schema-scan', phase: 'Research', childId: 'session-y' }, 3),
   ])
   const run = folder.search('audit')
   assert.equal(run.length, 1)
@@ -1130,7 +1159,7 @@ test('occurrence: Workflow phase/member/run occurrences carry their semantic sou
   assert.deepEqual(phase[0]!.source, { kind: 'workflow-phase', phaseKey: 'value:8:Research' })
   const member = folder.search('dependency-scan')
   assert.equal(member.length, 1)
-  assert.deepEqual(member[0]!.source, { kind: 'workflow-member', phaseKey: 'value:8:Research', seq: 0, field: 'label' })
+  assert.deepEqual(member[0]!.source, { kind: 'workflow-member', phaseKey: 'value:8:Research', seq: 1, field: 'label' })
   const status = folder.search('running')
   assert.equal(status.length, 3, 'the run status plus both member status words')
   assert.equal(transcriptSearchSourceKey(status[0]!.source), 'workflow-run.status')
@@ -1304,14 +1333,14 @@ test('cross-span: a workflow member label+status query keeps the member source',
     turnStart(0, 0),
     rawEvent('tool-workflow/run-start', { runId: 'run1', name: 'audit' }, 1),
     ...Array.from({ length: 6 }, (_, i) =>
-      rawEvent('tool-workflow/agent-start', { runId: 'run1', seq: i, label: `shard-${i}`, phase: 'Migration', childId: `session-${i}` }, 2 + i)),
+      rawEvent('tool-workflow/agent-start', { runId: 'run1', seq: i + 1, label: `shard-${i}`, phase: 'Migration', childId: `session-${i}` }, 2 + i)),
   ])
   const matches = folder.search('shard-5 running')
   assert.equal(matches.length, 1, 'the cross-span occurrence is preserved')
   assert.deepEqual(matches[0]!.source, {
     kind: 'workflow-member',
     phaseKey: 'value:9:Migration',
-    seq: 5,
+    seq: 6,
     field: 'label',
   }, 'the occurrence keeps the FIRST chunk owner so reveal/context-row still trigger')
 })

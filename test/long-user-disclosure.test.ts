@@ -2,10 +2,11 @@
  * Long user-message disclosure: a text-only durable user prompt whose
  * render-time VISUAL ROW COUNT exceeds the threshold renders head + compact
  * marker + tail, `Ctrl+O` expands it (recent-turn fold master), and in
- * fullscreen the WHOLE bubble is the local disclosure surface — a plain click
- * anywhere on a collapsed bubble expands that message, a plain click anywhere
- * on an expanded bubble collapses it (the tail control row remains an
- * explicit fallback) — the Claude-style local block toggle. Drag selection
+ * fullscreen the WHOLE bubble BODY is the local disclosure surface — a plain
+ * click anywhere on a collapsed bubble expands that message, a plain click
+ * anywhere on an expanded bubble collapses it (the dedicated tail control row
+ * is retired, so no collapse label is ever painted) — the Claude-style local
+ * block toggle. Drag selection
  * never mutates the disclosure; double-click word selection is deliberately
  * NOT available on the long-user bubble in either state (the first complete
  * click acts immediately). The canonical `TranscriptMessage.text` is never
@@ -919,12 +920,12 @@ test('a pathological always-mutating renderer fails closed instead of trusting a
   app.stop()
 })
 
-// ── Bidirectional fullscreen mouse disclosure (tail collapse control) ────
+// ── Bidirectional fullscreen mouse disclosure (whole-BODY click) ─────────
 //
-// The compact marker EXPANDS; the expanded message tail carries the ONE
-// collapse affordance (reusing the trailing separator row, or one dedicated
-// row for the final block). Every other bubble row stays inert so ordinary
-// user text keeps selection/copy semantics.
+// The compact marker EXPANDS; the expanded message BODY carries the ONE
+// collapse affordance. No tail control row is painted on any surface, and
+// every other bubble row stays inert so ordinary user text keeps
+// selection/copy semantics.
 
 const COLLAPSE_LABEL = '▴ Collapse'
 
@@ -932,34 +933,35 @@ function collapseFooterRows(rows: readonly string[]): number[] {
   return rows.flatMap((row, index) => row.includes(COLLAPSE_LABEL) ? [index] : [])
 }
 
-test('fullscreen: the durable long user round-trips expand → collapse via the tail control', async () => {
+test('fullscreen: the durable long user round-trips expand → collapse via the message BODY', async () => {
   const { vt, app } = startApp(100, 40)
   app.setTranscript([user(lines(11)), { kind: 'assistant', turn: 0, text: 'done' }])
   app.setFullscreen(true)
   let rows = await viewRows(vt)
   assert.equal(compactMarkerCount(rows), 1, 'the prompt starts compact')
   assert.ok(!rows.some(row => row.includes('line5')), 'the middle is hidden')
-  assert.equal(collapseFooterRows(rows).length, 0, 'no collapse control while collapsed')
+  assert.equal(collapseFooterRows(rows).length, 0, 'the dedicated tail control is retired')
 
   const markerY = rows.findIndex(row => row.includes('rows compacted'))
   clickCell(vt, 10, markerY)
   rows = await viewRows(vt)
   assert.ok(rows.some(row => row.includes('line5')), 'the marker click expands the prompt')
   assert.equal(compactMarkerCount(rows), 0, 'no marker while expanded')
-  const footerY = collapseFooterRows(rows)
-  assert.equal(footerY.length, 1, `exactly one tail collapse control:\n${rows.join('\n')}`)
-  assert.ok(rows[footerY[0]!]!.includes('click / ctrl+o'), 'fullscreen without Focus names click AND the effective key')
+  assert.equal(collapseFooterRows(rows).length, 0, `no collapse control exists while expanded:\n${rows.join('\n')}`)
+  assert.ok(!rows.join('\n').includes('▴ Collapse'), 'the retired label must never be painted')
 
-  clickCell(vt, 50, footerY[0]!)
+  // The BODY is the collapse owner: a plain click on any user-text row.
+  const bodyY = rows.findIndex(row => row.includes('line5'))
+  assert.ok(bodyY >= 0, `an expanded body row must be visible:\n${rows.join('\n')}`)
+  clickCell(vt, 50, bodyY)
   rows = await viewRows(vt)
-  assert.equal(compactMarkerCount(rows), 1, 'the tail click restores compact')
+  assert.equal(compactMarkerCount(rows), 1, 'the body click restores compact')
   assert.ok(!rows.some(row => row.includes('line5')), 'the middle is hidden again')
-  assert.equal(collapseFooterRows(rows).length, 0, 'the tail control disappears when collapsed')
   app.setFullscreen(false)
   app.stop()
 })
 
-test('fullscreen: the FINAL long user block still offers a collapse row', async () => {
+test('fullscreen: the FINAL long user block stays complete and collapses by body click (no extra row)', async () => {
   const { vt, app } = startApp(100, 40)
   app.setTranscript([user(lines(11))])
   app.setFullscreen(true)
@@ -967,17 +969,23 @@ test('fullscreen: the FINAL long user block still offers a collapse row', async 
   const markerY = rows.findIndex(row => row.includes('rows compacted'))
   clickCell(vt, 10, markerY)
   rows = await viewRows(vt)
-  const footerY = collapseFooterRows(rows)
-  assert.equal(footerY.length, 1, `the final block must not lose its collapse affordance:\n${rows.join('\n')}`)
+  // The final block must keep every one of its own rows: no synthetic trailing
+  // control row may be charged to it (the retired `+1` height rule).
+  assert.ok(rows.some(row => row.includes('line11')), `the final block must stay complete:\n${rows.join('\n')}`)
+  assert.equal(collapseFooterRows(rows).length, 0, `no dedicated collapse row exists:\n${rows.join('\n')}`)
 
-  clickCell(vt, 50, footerY[0]!)
+  // ...and its own last content row is a live collapse target.
+  const lastBodyY = rows.findIndex(row => row.includes('line11'))
+  assert.ok(lastBodyY >= 0)
+  clickCell(vt, 50, lastBodyY)
   rows = await viewRows(vt)
-  assert.equal(compactMarkerCount(rows), 1, 'the final-block tail control collapses back')
+  assert.equal(compactMarkerCount(rows), 1, 'the final-block body click collapses back')
+  assert.equal(collapseFooterRows(rows).length, 0, 'no residual tail row after the collapse')
   app.setFullscreen(false)
   app.stop()
 })
 
-test('fullscreen Focus: the tail control is click-only (Ctrl+O owns the Thought bulk)', async () => {
+test('fullscreen Focus: the expanded user collapses by a BODY click with no tail chrome', async () => {
   const { vt, app } = startApp(100, 40)
   app.setTranscript([user(lines(11)), { kind: 'assistant', turn: 0, text: 'done' }])
   app.setFocusMode(true)
@@ -986,10 +994,14 @@ test('fullscreen Focus: the tail control is click-only (Ctrl+O owns the Thought 
   const markerY = rows.findIndex(row => row.includes('rows compacted'))
   clickCell(vt, 10, markerY)
   rows = await viewRows(vt)
-  const footerY = collapseFooterRows(rows)
-  assert.equal(footerY.length, 1)
-  assert.ok(rows[footerY[0]!]!.includes('click'), 'the fullscreen Focus tail advertises the click')
-  assert.ok(!rows[footerY[0]!]!.includes('ctrl+o'), 'no dead Ctrl+O hint inside fullscreen Focus')
+  assert.ok(rows.some(row => row.includes('line5')), 'the marker expands inside fullscreen Focus')
+  assert.equal(collapseFooterRows(rows).length, 0, `no tail chrome inside fullscreen Focus:\n${rows.join('\n')}`)
+
+  const bodyY = rows.findIndex(row => row.includes('line5'))
+  assert.ok(bodyY >= 0)
+  clickCell(vt, 10, bodyY)
+  rows = await viewRows(vt)
+  assert.equal(compactMarkerCount(rows), 1, 'the click-only body collapse works')
   app.setFullscreen(false)
   app.setFocusMode(false)
   app.stop()
@@ -1035,11 +1047,11 @@ test('fullscreen: a disabled toggleExpand key still round-trips entirely by mous
   clickCell(vt, 10, markerY)
   rows = await viewRows(vt)
   assert.ok(rows.some(row => row.includes('line5')), 'the marker click expands')
+  assert.equal(collapseFooterRows(rows).length, 0, `no collapse chrome is painted:\n${rows.join('\n')}`)
 
-  const footerY = collapseFooterRows(rows)
-  assert.equal(footerY.length, 1)
-  assert.ok(!rows[footerY[0]!]!.includes('ctrl+o'), 'never a dead key hint')
-  clickCell(vt, 50, footerY[0]!)
+  const bodyY = rows.findIndex(row => row.includes('line5'))
+  assert.ok(bodyY >= 0)
+  clickCell(vt, 50, bodyY)
   rows = await viewRows(vt)
   assert.equal(compactMarkerCount(rows), 1, 'the mouse alone returns to compact')
   app.setFullscreen(false)
@@ -1075,7 +1087,7 @@ test('fullscreen: a plain click on expanded long-user BODY collapses only that m
   app.stop()
 })
 
-test('fullscreen: search reveal shows the tail control and it restores compact', async () => {
+test('fullscreen: a search-revealed prompt paints no collapse chrome', async () => {
   const { vt, app } = startApp(100, 40)
   const message = user(lines(11))
   app.setTranscript([message, { kind: 'assistant', turn: 0, text: 'done' }])
@@ -1083,15 +1095,10 @@ test('fullscreen: search reveal shows the tail control and it restores compact',
   assert.equal(compactMarkerCount(await viewRows(vt)), 1)
 
   app.revealSearchMatch(message)
-  let rows = await viewRows(vt)
+  const rows = await viewRows(vt)
   assert.ok(rows.some(row => row.includes('line5')), 'the hidden middle is revealed')
-  const footerY = collapseFooterRows(rows)
-  assert.equal(footerY.length, 1, 'a search-revealed prompt still offers the tail control')
-
-  clickCell(vt, 50, footerY[0]!)
-  rows = await viewRows(vt)
-  assert.equal(compactMarkerCount(rows), 1, 'the tail click restores compact')
-  assert.ok(!rows.some(row => row.includes('line5')))
+  assert.equal(collapseFooterRows(rows).length, 0, `a search reveal paints no collapse chrome:\n${rows.join('\n')}`)
+  assert.ok(!rows.join('\n').includes('▴ Collapse'))
   app.setFullscreen(false)
   app.stop()
 })
@@ -1166,7 +1173,7 @@ test('fullscreen: the first complete click on an expanded body collapses immedia
   app.stop()
 })
 
-test('fullscreen: the tail control chrome never reaches the clipboard', async () => {
+test('fullscreen: a copy across the expanded message carries no presentation label', async () => {
   const vt = new VirtualTerminal(100, 40)
   const copied: string[] = []
   const app = new TuiApp(
@@ -1182,14 +1189,13 @@ test('fullscreen: the tail control chrome never reaches the clipboard', async ()
   const markerY = rows.findIndex(row => row.includes('rows compacted'))
   clickCell(vt, 10, markerY)
   rows = await viewRows(vt)
-  const footerY = collapseFooterRows(rows)
-  assert.equal(footerY.length, 1, `tail control missing:\n${rows.join('\n')}`)
+  assert.equal(collapseFooterRows(rows).length, 0, `no collapse chrome exists:\n${rows.join('\n')}`)
+  const lastUserY = rows.findIndex(row => row.includes('line11'))
   const answerY = rows.findIndex(row => row.includes('TAILANSWER'))
-  assert.ok(answerY > footerY[0]!, `the assistant must follow the tail control:\n${rows.join('\n')}`)
+  assert.ok(lastUserY >= 0 && answerY > lastUserY, `the user tail and the answer must be in order:\n${rows.join('\n')}`)
 
-  // Select from the last user body row, ACROSS the presentation tail control,
-  // to the assistant answer.
-  const lastUserY = footerY[0]! - 1
+  // Drag from the LAST user body row across the block boundary to the answer:
+  // the real content is copied and no presentation label exists to leak.
   vt.sendInput(`\x1b[<0;1;${lastUserY + 1}M`)
   vt.sendInput(`\x1b[<32;40;${answerY + 1}M`)
   vt.sendInput(`\x1b[<0;40;${answerY + 1}m`)
@@ -1197,11 +1203,45 @@ test('fullscreen: the tail control chrome never reaches the clipboard', async ()
 
   assert.ok(copied.length >= 1, `expected a copy gesture:\n${rows.join('\n')}`)
   const text = copied.join('\n')
-  assert.ok(!text.includes('Collapse'), `clipboard leaked the collapse chrome:\n${text}`)
+  assert.ok(!text.includes('Collapse'), `clipboard leaked collapse chrome:\n${text}`)
   assert.ok(!text.includes('ctrl+o'), `clipboard leaked the key hint:\n${text}`)
-  assert.ok(!text.includes('click'), `clipboard leaked the click hint:\n${text}`)
+  assert.ok(!text.includes('click'), `clipboard leaked a click hint:\n${text}`)
+  assert.ok(text.includes('line11'), `the real last user row must be copied:\n${text}`)
   assert.ok(text.includes('TAILANSWER'), `the answer must still be copied:\n${text}`)
-  assert.ok(text.split('\n').some(line => line === ''), `the tail row must copy as the blank separator:\n${text}`)
+  // The end-of-message semantics stay the plain transcript boundary: the last
+  // user row keeps its own line and the answer follows on the next one.
+  assert.ok(text.includes('line11\n'), `the user tail must end its own line:\n${text}`)
+  app.setFullscreen(false)
+  app.stop()
+})
+
+test('fullscreen: selecting the complete expanded message copies its real text', async () => {
+  const vt = new VirtualTerminal(100, 40)
+  const copied: string[] = []
+  const app = new TuiApp(
+    vt,
+    { onSubmit: () => {}, onExit: () => {} },
+    { copySelection: async (text) => { copied.push(text); return true } },
+  )
+  app.start()
+  startedApps.add(app)
+  app.setTranscript([user(lines(11)), { kind: 'assistant', turn: 0, text: 'done' }])
+  app.setFullscreen(true)
+  let rows = await viewRows(vt)
+  const markerY = rows.findIndex(row => row.includes('rows compacted'))
+  clickCell(vt, 10, markerY)
+  rows = await viewRows(vt)
+
+  const headY = rows.findIndex(row => row.includes('line1'))
+  const lastY = rows.findIndex(row => row.includes('line11'))
+  assert.ok(headY >= 0 && lastY > headY, `the whole body must be visible:\n${rows.join('\n')}`)
+  vt.sendInput(`\x1b[<0;1;${headY + 1}M`)
+  vt.sendInput(`\x1b[<32;40;${lastY + 1}M`)
+  vt.sendInput(`\x1b[<0;40;${lastY + 1}m`)
+  await vt.waitForRender()
+
+  const expected = ['❯ line1', ...Array.from({ length: 10 }, (_, index) => `line${index + 2}`)].join('\n')
+  assert.equal(copied.join('\n'), expected, 'the complete expanded text must copy verbatim (with its prompt prefix)')
   app.setFullscreen(false)
   app.stop()
 })
@@ -1253,108 +1293,83 @@ test('fullscreen: a persisted Ctrl+O master stays mouse-round-trippable after th
   app.keybindingsManager().setUserConfiguration(parseUserKeybindings({ 'app.transcript.toggleExpand': false }))
   app.setFullscreen(true)
   let rows = await viewRows(vt)
-  const footerY = collapseFooterRows(rows)
-  assert.equal(footerY.length, 1, `the master expansion keeps the click collapse:\n${rows.join('\n')}`)
-  assert.ok(rows[footerY[0]!]!.includes('click'), 'the fullscreen non-Focus tail names the click')
-  assert.ok(!rows[footerY[0]!]!.includes('ctrl+o'), 'the disabled key is never advertised')
+  assert.ok(rows.some(row => row.includes('line12')), `the master expansion survives into fullscreen:\n${rows.join('\n')}`)
+  assert.equal(collapseFooterRows(rows).length, 0, `no collapse chrome is painted:\n${rows.join('\n')}`)
 
-  clickCell(vt, 60, footerY[0]!)
+  const bodyY = rows.findIndex(row => row.includes('line12'))
+  assert.ok(bodyY >= 0)
+  clickCell(vt, 60, bodyY)
   rows = await viewRows(vt)
-  assert.equal(compactMarkerCount(rows), 1, 'the tail click collapses without the key')
+  assert.equal(compactMarkerCount(rows), 1, 'the body click collapses without the key')
   const markerY = rows.findIndex(row => row.includes('rows compacted'))
   assert.ok(rows[markerY]!.includes('click to expand'), 'the marker keeps the working click affordance')
   clickCell(vt, 10, markerY)
   rows = await viewRows(vt)
   assert.equal(compactMarkerCount(rows), 0, 'the marker click expands again without the key')
-  assert.equal(collapseFooterRows(rows).length, 1, 'never stranded')
+  assert.equal(collapseFooterRows(rows).length, 0, 'never stranded, never a tail control')
   app.setFullscreen(false)
   app.stop()
 })
 
-test('fullscreen: a stale collapsed-bubble press never collapses via the tail that repainted onto its cell', async () => {
+test('fullscreen: a stale collapsed-bubble press never collapses through the body that repainted onto its cell', async () => {
   const { vt, app } = startApp(100, 40)
-  const message = user(lines(11), 0)
-  app.setTranscript([message, { kind: 'assistant', turn: 0, text: lines(60, 'a-') }])
+  app.setTranscript([user(lines(11)), { kind: 'assistant', turn: 0, text: 'done' }])
   app.setFullscreen(true)
-  app.scrollToBottom()
-  for (let i = 0; i < 3; i += 1) {
-    vt.sendInput('\x1b[5~')
-    await viewRows(vt)
-  }
   let rows = await viewRows(vt)
   const markerY = rows.findIndex(row => row.includes('rows compacted'))
   assert.ok(markerY >= 0, `the compact marker must be in view:\n${rows.join('\n')}`)
 
-  // Press the marker but do NOT release.
+  // Press the marker (EXPAND identity) but do NOT release.
   vt.sendInput(`\x1b[<0;10;${markerY + 1}M`)
 
-  // Repaint to EXPANDED through another path (a search reveal) while the
-  // press is still down.
-  app.revealSearchMatch(message)
+  // Expand through the keyboard while the press is still down: the pressed cell
+  // is now part of the user BODY, whose hit carries the opposite direction.
+  vt.sendInput('\x0f')
   rows = await viewRows(vt)
   assert.ok(rows.some(row => row.includes('line5')), 'the message is now expanded')
-  const tailY = rows.findIndex(row => row.includes('▴ Collapse'))
-  assert.ok(tailY > markerY, 'the tail control appears below the pressed cell')
-
-  // Align the new tail control onto the pressed cell (the expansion added
-  // rows above it). One wheel step is one line.
-  for (let i = 0; i < tailY - markerY; i += 1) {
-    vt.sendInput(`\x1b[<65;10;${markerY + 1}M`)
-    await viewRows(vt)
-  }
-  rows = await viewRows(vt)
-  assert.ok(rows[markerY]!.includes('▴ Collapse'), `the tail must now sit on the pressed cell:\n${rows.join('\n')}`)
+  assert.match(rows[markerY] ?? '', /line\d/, `the pressed cell must now show user body text:\n${rows.join('\n')}`)
 
   // Release at the pressed cell: the stale EXPAND identity must never run the
-  // COLLAPSE target that repainted onto the same cell.
+  // COLLAPSE that repainted onto the same cell.
   vt.sendInput(`\x1b[<0;10;${markerY + 1}m`)
   rows = await viewRows(vt)
   assert.equal(compactMarkerCount(rows), 0, 'the stale press must not collapse the message')
-  assert.equal(collapseFooterRows(rows).length, 1, 'the message stays expanded')
+  assert.ok(rows.some(row => row.includes('line5')), 'the message stays expanded')
   app.setFullscreen(false)
   app.stop()
 })
 
-test('fullscreen: a stale body press never collapses via the tail scrolled onto its cell', async () => {
+test('fullscreen: a stale body press never expands through the collapsed bubble that repainted onto its cell', async () => {
   const { vt, app } = startApp(100, 40)
-  app.setTranscript([user(lines(11), 0), { kind: 'assistant', turn: 0, text: lines(60, 'a-') }])
+  app.setTranscript([user(lines(11)), { kind: 'assistant', turn: 0, text: 'done' }])
   app.setFullscreen(true)
-  app.scrollToBottom()
-  for (let i = 0; i < 3; i += 1) {
-    vt.sendInput('\x1b[5~')
-    await viewRows(vt)
-  }
   let rows = await viewRows(vt)
-  // The Ctrl+O master expands the recent user from the start.
-  vt.sendInput('\x0f')
+  vt.sendInput('\x0f') // the Ctrl+O master expands the recent user
   rows = await viewRows(vt)
   const bodyY = rows.findIndex(row => row.includes('line2'))
-  const tailY = rows.findIndex(row => row.includes('▴ Collapse'))
-  assert.ok(bodyY >= 0 && tailY > bodyY, `the expanded body and its tail control must be in view:\n${rows.join('\n')}`)
+  assert.ok(bodyY >= 0, `the expanded body must be in view:\n${rows.join('\n')}`)
 
-  // Press the BODY but do NOT release.
+  // Press the BODY (COLLAPSE identity) but do NOT release.
   vt.sendInput(`\x1b[<0;10;${bodyY + 1}M`)
 
-  // Scroll the tail control onto the pressed cell (one wheel step is one
-  // line): the reflow must not transfer the body gesture to the tail slot.
-  for (let i = 0; i < tailY - bodyY; i += 1) {
-    vt.sendInput(`\x1b[<65;10;${bodyY + 1}M`)
-    await viewRows(vt)
-  }
+  // Collapse the same message through the keyboard while the press is down: the
+  // pressed cell is now inside the COLLAPSED bubble, whose whole-bubble hit
+  // carries the opposite direction.
+  vt.sendInput('\x0f')
   rows = await viewRows(vt)
-  assert.ok(rows[bodyY]!.includes('▴ Collapse'), `the tail must now sit on the pressed cell:\n${rows.join('\n')}`)
+  assert.equal(compactMarkerCount(rows), 1, 'the keyboard collapse takes effect')
 
-  // Release at the pressed cell: the stale BODY identity must never run the
-  // TAIL control that scrolled onto the same cell.
+  // Release at the pressed cell: the stale COLLAPSE identity must never run the
+  // EXPAND that repainted onto the same cell.
   vt.sendInput(`\x1b[<0;10;${bodyY + 1}m`)
   rows = await viewRows(vt)
-  assert.equal(compactMarkerCount(rows), 0, 'the stale body press must not collapse the message')
-  assert.equal(collapseFooterRows(rows).length, 1, 'the message stays expanded')
+  assert.equal(compactMarkerCount(rows), 1, 'the stale body press must not re-expand the message')
+  assert.ok(!rows.some(row => row.includes('line5')), 'the message stays collapsed')
   app.setFullscreen(false)
   app.stop()
 })
 
-test('fullscreen: the copy chrome filter follows the last-painted frame, not a newer rebuild', async () => {
+test('fullscreen: a rebuild between press and release still copies the real painted content', async () => {
   const vt = new VirtualTerminal(100, 40)
   const copied: string[] = []
   const app = new TuiApp(
@@ -1367,85 +1382,87 @@ test('fullscreen: the copy chrome filter follows the last-painted frame, not a n
   const message = user(lines(11), 1)
   app.setTranscript([message, { kind: 'assistant', turn: 1, text: lines(20, 'a-') }])
   app.setFullscreen(true)
-  vt.sendInput('\x0f') // expand the recent user: the painted frame has the footer
+  vt.sendInput('\x0f') // expand the recent user: every painted row is real content
   await viewRows(vt)
   let rows = await viewRows(vt)
-  const footerY = rows.findIndex(row => row.includes('▴ Collapse'))
-  assert.ok(footerY >= 0, `the painted frame must carry the footer:\n${rows.join('\n')}`)
-  const paintedBelow = rows[footerY + 2]!
-  assert.ok(paintedBelow.trim() !== '' && !paintedBelow.includes('Collapse'))
+  const lastUserY = rows.findIndex(row => row.includes('line11'))
+  assert.ok(lastUserY >= 0, `the expanded user tail must be painted:\n${rows.join('\n')}`)
+  const paintedBelow = rows[lastUserY + 2]!
+  assert.ok(paintedBelow.trim() !== '')
 
-  // Start a drag selection across the footer (+ the real text below it) and
+  // Start a drag selection across the user tail (+ the real text below it) and
   // do NOT release yet.
-  vt.sendInput(`\x1b[<0;1;${footerY}M`)
-  vt.sendInput(`\x1b[<32;90;${footerY + 3}M`)
+  vt.sendInput(`\x1b[<0;1;${lastUserY}M`)
+  vt.sendInput(`\x1b[<32;90;${lastUserY + 3}M`)
 
-  // A transcript update rebuilds the projection and moves the footer down two
+  // A transcript update rebuilds the projection and shifts this entry down two
   // rows, but the frame is NOT repainted before the release.
   app.setTranscript([user('short', 0), message, { kind: 'assistant', turn: 1, text: lines(20, 'a-') }])
-  vt.sendInput(`\x1b[<0;90;${footerY + 3}m`)
+  vt.sendInput(`\x1b[<0;90;${lastUserY + 3}m`)
   await viewRows(vt)
 
   assert.ok(copied.length >= 1, `expected a copy gesture:\n${rows.join('\n')}`)
   const text = copied.join('\n')
-  // The painted footer row must still copy blank (no leak)...
-  assert.ok(!text.includes('Collapse'), `painted footer chrome leaked into the clipboard:\n${text}`)
-  // ...and the painted REAL row that the newer projection now calls a footer
-  // must NOT be blanked.
+  assert.ok(!text.includes('Collapse'), `no collapse chrome may ever be copied:\n${text}`)
+  // No copy filter exists any more: the painted REAL row below the user tail is
+  // copied verbatim, never blanked.
   assert.ok(text.includes(paintedBelow.trim()), `a real painted row was wrongly blanked:\n${text}`)
   app.setFullscreen(false)
   app.stop()
 })
 
-test('fullscreen resize re-derives the expanded tail control (no stale chrome)', async () => {
+test('fullscreen resize re-derives the expanded state with no stale chrome', async () => {
   const { vt, app } = startApp(80, 40)
   const text = Array.from({ length: 8 }, () => 'x'.repeat(100)).join('\n')
   app.setTranscript([user(text, 0), { kind: 'assistant', turn: 0, text: 'done' }])
   app.setFullscreen(true)
   vt.sendInput('\x0f') // expand the recent user
   let rows = await viewRows(vt)
-  assert.equal(collapseFooterRows(rows).length, 1, 'narrow: the expanded prompt needs the tail control')
+  assert.equal(collapseFooterRows(rows).length, 0, `narrow: no collapse chrome exists:\n${rows.join('\n')}`)
+  assert.equal(compactMarkerCount(rows), 0, 'the narrow prompt is expanded')
 
   // Widen: the same 8 logical lines now render as 8 visual rows, below the
-  // threshold, so the bubble is no longer collapse-capable and the separate
-  // tail child must be dropped with it (the width change rebuilds the tree).
+  // threshold, so the bubble is no longer collapse-capable (the width change
+  // rebuilds the tree).
   vt.resize(200, 40)
   rows = await viewRows(vt)
-  assert.equal(collapseFooterRows(rows).length, 0, `wide: stale tail chrome:\n${rows.join('\n')}`)
+  assert.equal(collapseFooterRows(rows).length, 0, `wide: no stale chrome:\n${rows.join('\n')}`)
   assert.equal(compactMarkerCount(rows), 0, 'a non-compactable prompt has no marker either')
 
-  // Narrow again: the persisted master re-expands the recent prompt, and the
-  // tail control comes back with it.
+  // Narrow again: the persisted master re-expands the recent prompt.
   vt.resize(80, 40)
   rows = await viewRows(vt)
-  assert.equal(collapseFooterRows(rows).length, 1, `narrow again: the tail control must return:\n${rows.join('\n')}`)
+  assert.equal(compactMarkerCount(rows), 0, 'the narrow prompt is expanded again')
+  assert.equal(collapseFooterRows(rows).length, 0, `narrow again: still no collapse chrome:\n${rows.join('\n')}`)
 
-  const footerY = collapseFooterRows(rows)[0]!
-  clickCell(vt, 60, footerY)
+  const bodyY = rows.findIndex(row => row.includes('xxxx'))
+  assert.ok(bodyY >= 0, `the re-derived body must be visible:\n${rows.join('\n')}`)
+  clickCell(vt, 60, bodyY)
   rows = await viewRows(vt)
-  assert.equal(compactMarkerCount(rows), 1, 'the re-derived tail control still collapses')
+  assert.equal(compactMarkerCount(rows), 1, 'the re-derived body remains click-collapsible')
   app.setFullscreen(false)
   app.stop()
 })
 
-test('fullscreen: a tail press whose projection shifts above it never collapses on release', async () => {
+test('fullscreen: a stale body press never acts on the message that shifted onto its cell', async () => {
   const { vt, app } = startApp(100, 40)
   const message = user(lines(24, 'b-'), 1)
   app.setTranscript([message, { kind: 'assistant', turn: 1, text: lines(20, 'a-') }])
   app.setFullscreen(true)
-  vt.sendInput('\x0f') // expand the recent user: the painted frame has the footer
+  vt.sendInput('\x0f') // expand the recent user
   let rows = await viewRows(vt)
-  const footerY = collapseFooterRows(rows)[0]!
-  assert.ok(rows[footerY]!.includes('▴ Collapse'))
+  const bodyY = rows.findIndex(row => row.includes('b-12'))
+  assert.ok(bodyY >= 0, `the expanded body must be in view:\n${rows.join('\n')}`)
 
-  // Press the tail control, then insert a preceding message (a rebuild that
-  // moves this entry down) before releasing.
-  vt.sendInput(`\x1b[<0;60;${footerY + 1}M`)
-  app.setTranscript([user('short', 0), message, { kind: 'assistant', turn: 1, text: lines(20, 'a-') }])
-  vt.sendInput(`\x1b[<0;60;${footerY + 1}m`)
+  // Press the BODY, then insert a LONG preceding message (a rebuild that pushes
+  // this entry far down) before releasing: the pressed cell is now covered by a
+  // DIFFERENT message, whose body must never receive the stale gesture.
+  vt.sendInput(`\x1b[<0;60;${bodyY + 1}M`)
+  app.setTranscript([user(lines(24, 'z-'), 0), message, { kind: 'assistant', turn: 1, text: lines(20, 'a-') }])
+  vt.sendInput(`\x1b[<0;60;${bodyY + 1}m`)
   rows = await viewRows(vt)
-  assert.equal(compactMarkerCount(rows), 0, 'the stale tail press must not collapse the shifted message')
-  assert.equal(collapseFooterRows(rows).length, 1, 'no disclosure mutation ran from the shifted cell')
+  assert.equal(compactMarkerCount(rows), 0, 'no message may collapse or expand from the stale press')
+  assert.ok(rows.some(row => row.includes('b-12')), 'the originally expanded message stays expanded')
   app.setFullscreen(false)
   app.stop()
 })
@@ -1534,6 +1551,33 @@ test('fullscreen Compact: a body click collapses only the user, the Work bulk ke
   assert.equal(compactMarkerCount(rows), 1, 'only the user collapses')
   assert.ok(!rows.some(row => row.includes('u-5')), 'the user middle is hidden again')
   assert.ok(rows.some(row => row.includes('Read')), 'the Work bulk state is unchanged (still expanded)')
+  app.setFullscreen(false)
+  app.stop()
+})
+
+test('fullscreen: two expanded long users keep exactly one normal separator row', async () => {
+  const { vt, app } = startApp(100, 40)
+  app.setTranscript([user(lines(11, 'a-'), 0), user(lines(11, 'b-'), 1)])
+  app.setFullscreen(true)
+  let rows = await viewRows(vt)
+  assert.equal(compactMarkerCount(rows), 2, 'both long prompts start compact')
+
+  // Expand BOTH messages through their markers (the second marker moves after
+  // the first expansion, so resolve it from the repainted view).
+  clickCell(vt, 10, rows.findIndex(row => row.includes('rows compacted')))
+  rows = await viewRows(vt)
+  clickCell(vt, 10, rows.findIndex(row => row.includes('rows compacted')))
+  rows = await viewRows(vt)
+  assert.ok(rows.some(row => row.includes('a-11')) && rows.some(row => row.includes('b-11')), `both are expanded:\n${rows.join('\n')}`)
+
+  // Between the two blocks sits exactly ONE ordinary separator row: the retired
+  // tail control must never occupy or replace it.
+  const aTail = rows.findIndex(row => row.includes('a-11'))
+  const bHead = rows.findIndex(row => row.includes('b-1'))
+  assert.ok(aTail >= 0 && bHead > aTail, `both blocks must be in order:\n${rows.join('\n')}`)
+  assert.equal(bHead - aTail, 2, `exactly one separator row between the blocks:\n${rows.join('\n')}`)
+  assert.equal((rows[aTail + 1] ?? '').trim(), '', `the separator row stays blank:\n${rows.join('\n')}`)
+  assert.equal(collapseFooterRows(rows).length, 0, 'no label occupies the separator')
   app.setFullscreen(false)
   app.stop()
 })

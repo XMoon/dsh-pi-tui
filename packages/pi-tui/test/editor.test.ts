@@ -1,4 +1,7 @@
 import assert from "node:assert";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, it } from "node:test";
 import { stripVTControlCharacters } from "node:util";
 import { type AutocompleteProvider, CombinedAutocompleteProvider } from "../src/autocomplete.ts";
@@ -2314,6 +2317,218 @@ describe("Editor component", () => {
 	});
 
 	describe("Autocomplete", () => {
+		it("triggers and debounces symbol completion after CJK punctuation", async (t) => {
+			t.mock.timers.enable({ apis: ["setTimeout"] });
+			for (const before of [
+				"查看，",
+				"\u3000",
+				..."，．：；！？（）［］｛｝“”‘’…—。、「」『』《》【】",
+				"(",
+				"see (",
+				"`",
+				"[",
+			]) {
+				for (const trigger of ["@", "#", "$", "-"]) {
+					const editor = new Editor(createTestTUI(), defaultEditorTheme);
+					const requests: string[] = [];
+					editor.setAutocompleteProvider({
+						triggerCharacters: ["$", "-"],
+						getSuggestions: async (lines, cursorLine, cursorCol) => {
+							requests.push(lines[cursorLine]!.slice(0, cursorCol));
+							return null;
+						},
+						applyCompletion,
+					});
+					editor.setText(before);
+					editor.handleInput(trigger);
+					t.mock.timers.tick(19);
+					await flushAutocomplete();
+					assert.deepStrictEqual(requests, []);
+					t.mock.timers.tick(1);
+					await flushAutocomplete();
+					assert.deepStrictEqual(requests, [before + trigger]);
+
+					editor.handleInput("r");
+					editor.handleInput("e");
+					t.mock.timers.tick(19);
+					await flushAutocomplete();
+					assert.strictEqual(requests.length, 1);
+					t.mock.timers.tick(1);
+					await flushAutocomplete();
+					assert.deepStrictEqual(requests, [before + trigger, `${before}${trigger}re`]);
+				}
+			}
+		});
+
+		it("does not auto-trigger after CJK letters or for unprefixed paths", async (t) => {
+			t.mock.timers.enable({ apis: ["setTimeout"] });
+			const editor = new Editor(createTestTUI(), defaultEditorTheme);
+			let requests = 0;
+			editor.setAutocompleteProvider({
+				getSuggestions: async () => {
+					requests++;
+					return null;
+				},
+				applyCompletion,
+			});
+			for (const text of [
+				"user@example.com",
+				"张三@example.com",
+				"查看@src",
+				"あ@src",
+				"カ@src",
+				"한@src",
+				"ㄅ@src",
+				"𠮷@src",
+				"か\u3099@src",
+				"禰\u{e0100}@src",
+				"々@src",
+				"Ａ@src",
+				"文档@备份",
+				"prefix#123",
+				"foo(@src",
+				"问题#123",
+				"查看，/path/",
+				"查看，./文档/",
+				"src/index.ts",
+				"./文档/说明.md",
+				"文档/说明.md",
+				"查看src/index.ts",
+			]) {
+				editor.setText("");
+				for (const char of text) editor.handleInput(char);
+				t.mock.timers.tick(20);
+				await flushAutocomplete();
+				assert.strictEqual(requests, 0, text);
+			}
+		});
+
+		it("requests path completion after CJK punctuation only on Tab", async (t) => {
+			t.mock.timers.enable({ apis: ["setTimeout"] });
+			const editor = new Editor(createTestTUI(), defaultEditorTheme);
+			const requests: Array<{ text: string; force: boolean | undefined }> = [];
+			editor.setAutocompleteProvider({
+				getSuggestions: async (lines, cursorLine, cursorCol, options) => {
+					requests.push({ text: lines[cursorLine]!.slice(0, cursorCol), force: options.force });
+					return null;
+				},
+				applyCompletion,
+			});
+			const text = "查看，/path/";
+			for (const char of text) editor.handleInput(char);
+			t.mock.timers.tick(20);
+			await flushAutocomplete();
+			assert.deepStrictEqual(requests, []);
+			editor.handleInput("\t");
+			await flushAutocomplete();
+			assert.deepStrictEqual(requests, [{ text, force: true }]);
+		});
+
+		it("completes Chinese path prefixes after whitespace or CJK punctuation with Tab", async (t) => {
+			const baseDir = mkdtempSync(join(tmpdir(), "pi-editor-autocomplete-"));
+			t.after(() => rmSync(baseDir, { recursive: true, force: true }));
+			mkdirSync(join(baseDir, "文档"));
+			writeFileSync(join(baseDir, "文档", "说明.md"), "text");
+			const editor = new Editor(createTestTUI(), defaultEditorTheme);
+			editor.setAutocompleteProvider(new CombinedAutocompleteProvider([], baseDir));
+			for (const separator of [" ", "\t", "\u3000", "\u00a0", "，", "。"]) {
+				editor.setText(`查看${separator}`);
+				const before = editor.getText();
+				editor.handleInput("文");
+				editor.handleInput("\t");
+				await flushAutocomplete();
+				assert.strictEqual(editor.getText(), `${before}文档/`);
+				editor.handleInput("说");
+				editor.handleInput("\t");
+				await flushAutocomplete();
+				assert.strictEqual(editor.getText(), `${before}文档/说明.md`);
+				assert.deepStrictEqual(editor.getCursor(), { line: 0, col: editor.getText().length });
+			}
+		});
+
+		it("ends unquoted trigger and debounce contexts at whitespace or CJK punctuation", async (t) => {
+			t.mock.timers.enable({ apis: ["setTimeout"] });
+			for (const separator of [" ", "\u3000", "，", "。"]) {
+				for (const trigger of ["@", "#", "$"]) {
+					const editor = new Editor(createTestTUI(), defaultEditorTheme);
+					const requests: string[] = [];
+					const prefix = `${trigger}src`;
+					editor.setAutocompleteProvider({
+						triggerCharacters: ["$"],
+						getSuggestions: async (lines, cursorLine, cursorCol) => {
+							const text = lines[cursorLine]!.slice(0, cursorCol);
+							requests.push(text);
+							return text === prefix ? { prefix, items: [{ value: `${prefix}/`, label: "src/" }] } : null;
+						},
+						applyCompletion,
+					});
+					editor.setText(`${trigger}sr`);
+					editor.handleInput("c");
+					t.mock.timers.tick(20);
+					await flushAutocomplete();
+					assert.strictEqual(editor.isShowingAutocomplete(), true);
+					editor.handleInput(separator);
+					await flushAutocomplete();
+					assert.deepStrictEqual(requests, [prefix, prefix + separator]);
+					assert.strictEqual(editor.isShowingAutocomplete(), false);
+					editor.handleInput("文");
+					t.mock.timers.tick(20);
+					await flushAutocomplete();
+					assert.deepStrictEqual(requests, [prefix, prefix + separator]);
+				}
+			}
+		});
+
+		it("re-triggers CJK path completion after accepting directories and deleting", async (t) => {
+			t.mock.timers.enable({ apis: ["setTimeout"] });
+			const provider = new CombinedAutocompleteProvider([], process.cwd());
+			for (const directory of ["文档", "我的 文档", "资料，归档"]) {
+				const quoted = directory !== "文档";
+				const initial = quoted ? `@"${directory.slice(0, 2)}` : "@文";
+				const directoryValue = quoted ? `@"${directory}/"` : `@${directory}/`;
+				const fileValue = quoted ? `@"${directory}/说明.md"` : `@${directory}/说明.md`;
+				const filePrefix = quoted ? `@"${directory}/说` : `@${directory}/说`;
+				const editor = new Editor(createTestTUI(), defaultEditorTheme);
+				editor.setAutocompleteProvider({
+					getSuggestions: async (lines, cursorLine, cursorCol) => {
+						const before = lines[cursorLine]!.slice(0, cursorCol);
+						const prefix = before.slice(before.indexOf("@"));
+						if (prefix === initial) {
+							return { prefix, items: [{ value: directoryValue, label: `${directory}/` }] };
+						}
+						return prefix === filePrefix ? { prefix, items: [{ value: fileValue, label: "说明.md" }] } : null;
+					},
+					applyCompletion: (...args) => provider.applyCompletion(...args),
+				});
+				editor.setText(`查看：${initial}`);
+				editor.handleInput("\t");
+				await flushAutocomplete();
+				assert.strictEqual(editor.getText(), `查看：${directoryValue}`);
+				assert.strictEqual(editor.isShowingAutocomplete(), false);
+
+				editor.handleInput("说");
+				t.mock.timers.tick(20);
+				await flushAutocomplete();
+				assert.strictEqual(editor.isShowingAutocomplete(), true);
+
+				for (const deletion of ["\x7f", "\x1b[3~"]) {
+					editor.handleInput("错");
+					t.mock.timers.tick(20);
+					await flushAutocomplete();
+					assert.strictEqual(editor.isShowingAutocomplete(), false);
+					if (deletion === "\x1b[3~") editor.handleInput("\x1b[D");
+					editor.handleInput(deletion);
+					t.mock.timers.tick(20);
+					await flushAutocomplete();
+					assert.strictEqual(editor.isShowingAutocomplete(), true);
+				}
+
+				editor.handleInput("\t");
+				assert.strictEqual(editor.getText(), `查看：${fileValue} `);
+				assert.deepStrictEqual(editor.getCursor(), { line: 0, col: editor.getText().length });
+			}
+		});
+
 		it("auto-applies single force-file suggestion without showing menu", async () => {
 			const editor = new Editor(createTestTUI(), defaultEditorTheme);
 
@@ -4531,114 +4746,55 @@ describe("Oversized paste and undo snapshot isolation", () => {
 	});
 });
 
-describe("paste-burst fallback (X038)", () => {
-	it("inserts a newline instead of submitting when Enter follows a rapid character stream", () => {
+describe("rapid typing submits without the retired paste-burst heuristic (X038 retired)", () => {
+	it("submits exactly once when a rapid character stream is followed by Enter", () => {
 		const editor = new Editor(createTestTUI(), defaultEditorTheme);
-		let submitted: string | undefined;
+		const submitted: string[] = [];
 		editor.onSubmit = (text) => {
-			submitted = text;
+			submitted.push(text);
 		};
 
-		for (const ch of "hello world pasted") editor.handleInput(ch);
+		// Eleven single-character reads back to back: the retired heuristic
+		// treated >= 8 plain chars inside 8ms as a lost-marker paste and turned
+		// the trailing physical Enter into a newline. Rapid typing must submit
+		// the complete draft exactly once.
+		for (const ch of "hello world") editor.handleInput(ch);
 		editor.handleInput("\r");
 
-		assert.strictEqual(submitted, undefined, "the trailing Enter of a lost-marker paste must not submit");
-		assert.strictEqual(editor.getText(), "hello world pasted\n");
+		assert.deepStrictEqual(submitted, ["hello world"]);
+		assert.strictEqual(editor.getText(), "", "a submit must not leave a substituted newline behind");
 	});
 
-	it("keeps converting Enter to newline across consecutive paste lines", () => {
+	it("submits once per Enter across a rapid multi-line stream (no newline substitution)", () => {
 		const editor = new Editor(createTestTUI(), defaultEditorTheme);
-		let submitted: string | undefined;
+		const submitted: string[] = [];
 		editor.onSubmit = (text) => {
-			submitted = text;
+			submitted.push(text);
 		};
 
-		for (const ch of "first line!!") editor.handleInput(ch);
-		editor.handleInput("\r"); // paste line 1 end -> newline
-		for (const ch of "second") editor.handleInput(ch); // paste dribbles one char per chunk
-		editor.handleInput("\r"); // still inside the paste window -> newline
+		for (const ch of "first line") editor.handleInput(ch);
+		editor.handleInput("\r");
+		for (const ch of "second line") editor.handleInput(ch);
+		editor.handleInput("\r");
 
-		assert.strictEqual(submitted, undefined);
-		assert.strictEqual(editor.getText(), "first line!!\nsecond\n");
+		assert.deepStrictEqual(submitted, ["first line", "second line"]);
 	});
 
-	it("submits normally when the input is slow (not a burst)", () => {
+	it("keeps Shift+Enter (tui.input.newLine) as a newline in a rapid stream", () => {
 		const editor = new Editor(createTestTUI(), defaultEditorTheme);
-		let submitted: string | undefined;
+		const submitted: string[] = [];
 		editor.onSubmit = (text) => {
-			submitted = text;
+			submitted.push(text);
 		};
 
-		// Fewer than the 8-char burst minimum
-		editor.handleInput("h");
-		editor.handleInput("i");
-		editor.handleInput("\r");
+		for (const ch of "abcdefgh") editor.handleInput(ch);
+		editor.handleInput("\n");
 
-		assert.strictEqual(submitted, "hi");
+		assert.deepStrictEqual(submitted, []);
+		assert.strictEqual(editor.getText(), "abcdefgh\n");
 	});
 
-	it("resets the burst on a non-printable key between chars and Enter", () => {
-		const editor = new Editor(createTestTUI(), defaultEditorTheme);
-		let submitted: string | undefined;
-		editor.onSubmit = (text) => {
-			submitted = text;
-		};
-
-		for (const ch of "hello world pasted") editor.handleInput(ch);
-		editor.handleInput("\x1b[D"); // Left arrow breaks the burst
-		editor.handleInput("\x1b[C"); // Right arrow restores the cursor
-		editor.handleInput("\r");
-
-		assert.strictEqual(submitted, "hello world pasted", "an intervening navigation key must end the burst");
-	});
-
-	it("a multi-char chunk resets the burst (kimi-exact semantics)", () => {
-			const editor = new Editor(createTestTUI(), defaultEditorTheme);
-			let submitted: string | undefined;
-			editor.onSubmit = (text) => {
-				submitted = text;
-			};
-
-			for (const ch of "hello world pasted") editor.handleInput(ch);
-			editor.handleInput("tail"); // one multi-char read: typed-ahead text, not a dribbled paste
-			editor.handleInput("\r");
-
-			assert.strictEqual(submitted, "hello world pastedtail");
-		});
-
-		it("disablePasteBurst option opts out (submits the burst)", () => {
-		const editor = new Editor(createTestTUI(), defaultEditorTheme, { disablePasteBurst: true });
-		let submitted: string | undefined;
-		editor.onSubmit = (text) => {
-			submitted = text;
-		};
-
-		for (const ch of "hello world pasted") editor.handleInput(ch);
-		editor.handleInput("\r");
-
-		assert.strictEqual(submitted, "hello world pasted");
-	});
-
-	it("setDisablePasteBurst toggles the fallback at runtime", () => {
-		const editor = new Editor(createTestTUI(), defaultEditorTheme);
-		let submitted: string | undefined;
-		editor.onSubmit = (text) => {
-			submitted = text;
-		};
-
-		editor.setDisablePasteBurst(true);
-		for (const ch of "hello world pasted") editor.handleInput(ch);
-		editor.handleInput("\r");
-		assert.strictEqual(submitted, "hello world pasted");
-
-		submitted = undefined;
-		editor.setDisablePasteBurst(false);
-		for (const ch of "again a burst") editor.handleInput(ch);
-		editor.handleInput("\r");
-		assert.strictEqual(submitted, undefined, "re-enabling must restore the fallback");
-	});
-
-	it("a remapped submit chord submits even mid-burst (X037 × X038)", () => {
+	it("keeps the X037 remapped submit contract in a rapid stream", () => {
 		setKeybindings(
 			new KeybindingsManager(TUI_KEYBINDINGS, {
 				"tui.editor.submit": "ctrl+x",
@@ -4646,49 +4802,23 @@ describe("paste-burst fallback (X038)", () => {
 		);
 		try {
 			const editor = new Editor(createTestTUI(), defaultEditorTheme);
-			let submitted: string | undefined;
+			const submitted: string[] = [];
 			editor.onSubmit = (text) => {
-				submitted = text;
+				submitted.push(text);
 			};
 
-			for (const ch of "abcdefgh") editor.handleInput(ch); // rapid burst
-			editor.handleInput("\x18"); // ctrl+x — the remapped submit
-
-			assert.strictEqual(
-				submitted,
-				"abcdefgh",
-				"a remapped submit chord must submit even mid-burst (the burst suppresses only a physical Enter)",
-			);
-		} finally {
-			setKeybindings(new KeybindingsManager(TUI_KEYBINDINGS));
-		}
-	});
-
-	it("a physical Enter under a remapped submit breaks the burst instead of submitting (X037 × X038)", () => {
-		setKeybindings(
-			new KeybindingsManager(TUI_KEYBINDINGS, {
-				"tui.editor.submit": "ctrl+x",
-			}),
-		);
-		try {
-			const editor = new Editor(createTestTUI(), defaultEditorTheme);
-			let submitted: string | undefined;
-			editor.onSubmit = (text) => {
-				submitted = text;
-			};
-
-			for (const ch of "abcdefgh") editor.handleInput(ch); // rapid burst
-			editor.handleInput("\r"); // physical Enter: no longer the submit key
-			assert.strictEqual(submitted, undefined, "Enter must not submit under the remap");
-			assert.strictEqual(editor.getText(), "abcdefgh", "Enter is not a newline under the remap either");
+			for (const ch of "abcdefgh") editor.handleInput(ch);
+			editor.handleInput("\r"); // physical Enter no longer carries the submit binding
+			assert.deepStrictEqual(submitted, [], "Enter must not submit under the remap");
 
 			editor.handleInput("\x18"); // ctrl+x
-			assert.strictEqual(submitted, "abcdefgh", "the chord must submit after the burst was broken");
+			assert.deepStrictEqual(submitted, ["abcdefgh"], "the remapped chord submits exactly once");
 		} finally {
 			setKeybindings(new KeybindingsManager(TUI_KEYBINDINGS));
 		}
 	});
 });
+
 
 describe("editor submit binding split (X037)", () => {
 	it("the editor submits on tui.editor.submit, not tui.input.submit", () => {

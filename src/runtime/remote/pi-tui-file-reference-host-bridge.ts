@@ -26,10 +26,11 @@ import {
   listPiTuiHostFileReferences,
   type FileReferencesServiceLike,
   type LiveAgentLike,
+  type WorkingDirectoryServiceLike,
 } from '../direct/host-file-augmentation-direct.ts'
 import type { HostFileListResult } from '../host-file-port.ts'
 
-export type { FileReferencesServiceLike, LiveAgentLike } from '../direct/host-file-augmentation-direct.ts'
+export type { FileReferencesServiceLike, LiveAgentLike, WorkingDirectoryServiceLike } from '../direct/host-file-augmentation-direct.ts'
 
 /** The Host facts the bridge answers with. The composition supplies them from
  * the running Host Context; no Client fact participates. */
@@ -42,6 +43,10 @@ export interface PiTuiHostFileReferenceBridgeDeps {
    *  probes the Host PATH, `null` forces the bounded fallback (deterministic
    *  tests), a string pins one finder. */
   readonly fdPath?: string | null | undefined
+  /** The Host Session directory owner (`ctx.workingDirectory`): the scoped
+   *  discovery resolves the Host Agent's EFFECTIVE directory through it.
+   *  Absent = the immutable header cwd remains the scope read. */
+  readonly workingDirectory?: () => WorkingDirectoryServiceLike | undefined
 }
 
 /** The private Remote method's Host-side implementation. */
@@ -70,6 +75,7 @@ export function createPiTuiHostFileReferenceRuntime(
         official: deps.official(),
         driver,
         environment,
+        workingDirectory: deps.workingDirectory?.(),
       })
     },
   }

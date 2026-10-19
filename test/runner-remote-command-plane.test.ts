@@ -48,6 +48,8 @@
  */
 
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import test from 'node:test'
 import type { Fiber } from '@deepseek-ai/cordis'
 import { symbols } from '@deepseek-ai/cordis'
@@ -62,6 +64,7 @@ import { waitFor } from './support/remote-application-fixture.ts'
 import { testLifecycle, type TestLifecycle } from './support/temp-lifecycle.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 import { LlmAdapter } from '@deepseek-ai/dsh-llm'
+import { wireNodes } from './support/tsp-picker-wire.ts'
 
 process.env.NO_COLOR = ''
 process.env.FORCE_COLOR = ''
@@ -351,6 +354,329 @@ test('L6 §7.4-1 TUI built-in: the Client handler runs and the Host executor is 
     'a TUI built-in must never reach the Host command executor (zero command/run rows)')
 })
 
+/**
+ * F1 (PR4-B2-A review): a TUI-owned command executing through the card-less
+ * Client command registry must still publish its returned error text. The Direct
+ * command plane appends the official `command/run`/`command/done` rows (the
+ * transcript card); the Client registry appends none, so before the fix the user
+ * saw only a restored draft.
+ */
+function recordNotifications(life: TestLifecycle): string[] {
+  const notifications: string[] = []
+  const originalNotify = TuiApp.prototype.notify
+  TuiApp.prototype.notify = function patchedNotify(this: TuiApp, message: string, kind?: 'error' | 'info'): void {
+    notifications.push(message)
+    return originalNotify.call(this, message, kind)
+  }
+  life.defer(() => { TuiApp.prototype.notify = originalNotify })
+  return notifications
+}
+
+  // A REAL conversation subject (one completed user turn, no assistant
+  // answer) — the Remote runner only attaches a hydrated Session.
+  const seedWithoutAnswer = (append: (type: string, data: unknown, options?: { surfaceOp?: 'append' }) => void): void => {
+    append('turn/start', { turn: 1 })
+    append('step/start', { turn: 1, step: 1 })
+    append('user/message', {
+      id: 'u-f1', role: 'user', content: [{ type: 'text', text: 'a conversation without an answer' }], source: { kind: 'user' },
+    }, { surfaceOp: 'append' })
+    append('step/end', { turn: 1, step: 1 })
+    append('turn/end', { turn: 1, reason: { kind: 'completed' } })
+  }
+
+test('F-UX-02 Remote: a real /fork announces the adopted child exactly once and stays off the Host executor', async (t) => {
+  const life = testLifecycle(t)
+  const mainId = 'm3-4-pr4-cmd-fork'
+  const fixture = await mountRunner(life, {
+    resumeSessionId: mainId,
+    seed: (append) => {
+      // One COMPLETED turn WITH an assistant answer: the legal Host fork
+      // boundary (the fork seed cuts at the latest completed prefix).
+      append('turn/start', { turn: 1 })
+      append('step/start', { turn: 1, step: 1 })
+      append('user/message', {
+        id: 'u-fork-1', role: 'user', content: [{ type: 'text', text: 'fork source prompt' }], source: { kind: 'user' },
+      }, { surfaceOp: 'append' })
+      append('assistant/message', {
+        turn: 1, step: 1,
+        message: {
+          id: 'a-fork-1', role: 'assistant', content: [{ type: 'text', text: 'fork source answer' }],
+          source: { kind: 'model', provider: 'smoke', model: 'smoke' },
+        },
+        stream: [], usage: { inputTokens: 1, outputTokens: 1 },
+      }, { surfaceOp: 'append' })
+      append('step/end', { turn: 1, step: 1 })
+      append('turn/end', { turn: 1, reason: { kind: 'completed' } })
+    },
+  })
+  await waitFor('the remote runner mount', () => fixture.vt.getViewport().join('').length > 0, 20_000)
+  const notifications = recordNotifications(life)
+  const clientSessions = clientSessionsOf(fixture)
+  const sourcesBefore = clientSessionIds(clientSessions)
+  submit(fixture, '/fork')
+  await waitFor('the fork success notice', () => notifications.includes('Forked to a new session'), 20_000)
+  await settle(400)
+
+  const childIds = clientSessionIds(clientSessions).filter(id => !sourcesBefore.includes(id))
+  assert.equal(childIds.length, 1, 'the Host fork created exactly one child Session')
+  const childId = childIds[0]!
+  assert.equal(childParentId(clientSessions, childId), mainId,
+    'the new Session is the fork child of the source (official lineage)')
+  // The adopted navigation: the TUI main view retains the CHILD and no longer
+  // retains the source — the official Client retain bookkeeping, not a guess.
+  assert.deepEqual(retainFacts(clientSessions, childId).retainedBy, { tuiMainView: 1 },
+    'the TUI main view must retain the forked child')
+  assert.deepEqual(retainFacts(clientSessions, mainId).retainedBy, {},
+    'the source must no longer be the presented Session')
+  assert.equal(notifications.filter(message => message === 'Forked to a new session').length, 1,
+    `exactly one /fork success notice: ${JSON.stringify(notifications)}`)
+  assert.equal(fixture.hostCommandRuns(mainId), 0,
+    'the Remote /fork Client route produces no Host command/run row')
+})
+
+test('F-UX-05 Remote: a refused /fork keeps its failure feedback and never the success notice', async (t) => {
+  const life = testLifecycle(t)
+  const mainId = 'm3-4-pr4-cmd-fork-refused'
+  // NO completed turn: the Host has no legal fork boundary.
+  const fixture = await mountRunner(life, { resumeSessionId: mainId, seed: () => {} })
+  await waitFor('the remote runner mount', () => fixture.vt.getViewport().join('').length > 0, 20_000)
+  const notifications = recordNotifications(life)
+  const sessionsBefore = fixture.host.ctx.sessions.list().length
+  submit(fixture, '/fork')
+  await waitFor('the fork refusal', () => notifications.some(message => message.includes('session/fork-unavailable')), 20_000)
+  await settle(400)
+  assert.ok(!notifications.includes('Forked to a new session'),
+    `a refused fork must never announce success: ${JSON.stringify(notifications)}`)
+  assert.equal(fixture.host.ctx.sessions.list().length, sessionsBefore,
+    'a refused fork creates no child Session')
+})
+
+/** The official Client sessions face the retention/lineage reads need. */
+interface ClientSessionsFace {
+  list: { getSnapshot(): { ids: readonly string[]; byId: Record<string, { parentId?: string }> } }
+  retainInfo(id: unknown): { getSnapshot(): { referenceCount: number; retainedBy: Readonly<Record<string, number>> } }
+}
+
+function clientSessionsOf(fixture: Fixture): ClientSessionsFace {
+  return (fixture.aggregate.wire.client as unknown as { sessions: ClientSessionsFace }).sessions
+}
+
+function clientSessionIds(sessions: ClientSessionsFace): string[] {
+  return [...sessions.list.getSnapshot().ids]
+}
+
+function childParentId(sessions: ClientSessionsFace, id: string): string | undefined {
+  return sessions.list.getSnapshot().byId[id]?.parentId
+}
+
+/** The official local retain facts (`retainedBy` is handed out with a NULL
+ *  prototype, so it is copied for `deepEqual`). */
+function retainFacts(sessions: ClientSessionsFace, id: string): { referenceCount: number; retainedBy: Record<string, number> } {
+  const snapshot = sessions.retainInfo(SessionId(id)).getSnapshot()
+  return { referenceCount: snapshot.referenceCount, retainedBy: { ...snapshot.retainedBy } }
+}
+
+test('F1 Remote: a card-less /copy failure is published once and produces no Host command row', async (t) => {
+  const life = testLifecycle(t)
+  const mainId = 'b2a-f1-copy'
+  const fixture = await mountRunner(life, { resumeSessionId: mainId, seed: seedWithoutAnswer })
+  await waitFor('the remote runner mount', () => fixture.vt.getViewport().join('').length > 0, 20_000)
+  const notifications = recordNotifications(life)
+  submit(fixture, '/copy')
+  await waitFor('the card-less copy refusal is published', () =>
+    notifications.some(message => message.includes('no assistant message yet')), 20_000)
+  await settle(400)
+  assert.equal(
+    notifications.filter(message => message.includes('no assistant message yet')).length, 1,
+    'the card-less refusal is published EXACTLY once')
+  assert.equal(fixture.hostCommandRuns(mainId), 0,
+    'the Client registry route produced no Host command/run row (so no result card exists)')
+})
+
+test('F1 Remote: a card-less /yolo unavailability is published, never reported as applied', async (t) => {
+  const life = testLifecycle(t)
+  const mainId = 'b2a-f1-yolo'
+  const fixture = await mountRunner(life, { resumeSessionId: mainId, seed: seedWithoutAnswer })
+  await waitFor('the remote runner mount', () => fixture.vt.getViewport().join('').length > 0, 20_000)
+  const notifications = recordNotifications(life)
+  submit(fixture, '/yolo')
+  await waitFor('the card-less permission refusal is published', () =>
+    notifications.some(message => /unavailable/.test(message)), 20_000)
+  await settle(400)
+  assert.ok(!notifications.some(message => message.includes('approvals off')),
+    'an unavailable permission writer is never reported as applied')
+  assert.equal(fixture.hostCommandRuns(mainId), 0,
+    'the Client registry route produced no Host command/run row')
+})
+
+test('F1 Remote: a sessionless /logout target error is settled ONCE by the local command path', async (t) => {
+  const life = testLifecycle(t)
+  // No resumed Session: a sessionless command runs through the controller's
+  // local-command path, which already notifies its errors — the new card-less
+  // settlement must not add a second line.
+  const fixture = await mountRunner(life)
+  await waitFor('the remote runner mount', () => fixture.vt.getViewport().join('').length > 0, 20_000)
+  const notifications = recordNotifications(life)
+  submit(fixture, '/logout No-Such-Route')
+  await waitFor('the local-command logout error is published', () =>
+    notifications.some(message => message.includes('unknown credential target')), 20_000)
+  await settle(400)
+  assert.equal(
+    notifications.filter(message => message.includes('unknown credential target')).length, 1,
+    'the sessionless error is reported EXACTLY once (no double notification)')
+})
+
+/**
+ * F1 Remote + TSP: the card-less route's error must reach the TSP Dock (the
+ * same renderer-neutral sink, mounted through the real Remote composition).
+ * Everything here is production except the scripted model and the TSP pane.
+ */
+/**
+ * F4 (PR4-B2-A review): the result-presentation owner is FROZEN at dispatch.
+ * The Host-origin catalog is live; re-deriving the owner at settlement could
+ * hide a Client-route error or duplicate a Host-route one when the catalog
+ * changes mid-flight. Both directions are driven deterministically below.
+ */
+test('F4 Remote: a Client-route error is still published once when the Host catalog claims the name mid-flight', async (t) => {
+  // The POSIX helper gates are cleared (and macOS/Windows skipped) so the copy
+  // policy's failure is deterministic; the OSC 52 write is the mid-flight hook.
+  if (process.platform === 'darwin' || process.platform === 'win32') {
+    t.skip('the native clipboard helper is attempted unconditionally on this platform')
+    return
+  }
+  const life = testLifecycle(t)
+  const mainId = 'b2a-f4-client'
+  const fixture = await mountRunner(life, {
+    resumeSessionId: mainId,
+    seed: (append) => {
+      append('turn/start', { turn: 1 })
+      append('step/start', { turn: 1, step: 1 })
+      append('user/message', {
+        id: 'u-f4', role: 'user', content: [{ type: 'text', text: 'copy source prompt' }], source: { kind: 'user' },
+      }, { surfaceOp: 'append' })
+      append('assistant/message', {
+        turn: 1, step: 1,
+        message: { id: 'a-f4', role: 'assistant', content: [{ type: 'text', text: 'COPY-F4-TEXT' }], source: { kind: 'model', provider: 'smoke', model: 'smoke' } },
+        stream: [], usage: { inputTokens: 1, outputTokens: 1 },
+      }, { surfaceOp: 'append' })
+      append('step/end', { turn: 1, step: 1 })
+      append('turn/end', { turn: 1, reason: { kind: 'completed' } })
+    },
+  })
+  await waitFor('the remote runner mount', () => fixture.vt.getViewport().join('').length > 0, 20_000)
+  const notifications = recordNotifications(life)
+  const clipboardEnvKeys = ['TMUX', 'DISPLAY', 'WAYLAND_DISPLAY'] as const
+  for (const key of clipboardEnvKeys) delete process.env[key]
+  life.defer(() => {
+    for (const key of clipboardEnvKeys) delete process.env[key]
+  })
+  // MID-FLIGHT CATALOG CHANGE: the copy's own tty write registers a genuine
+  // Host `/copy` claim before the handler returns its error. The dispatch route
+  // (Client registry) is already decided, so the error must still be published.
+  let hostClaimRegistered = false
+  const stdout = process.stdout as unknown as { write(data: unknown): boolean }
+  const previousWrite = stdout.write
+  const originalWrite = previousWrite.bind(stdout)
+  stdout.write = ((data: unknown, ...rest: unknown[]): boolean => {
+    if (typeof data === 'string' && data.includes(']52;c;') && !hostClaimRegistered) {
+      hostClaimRegistered = true
+      fixture.host.ctx.commands.register({
+        name: 'copy',
+        description: 'late genuine Host copy claim',
+        handler: () => ({ kind: 'success', text: 'late host copy ran' }),
+      })
+      throw new Error('controlled tty write failure')
+    }
+    return (originalWrite as (...args: unknown[]) => boolean)(data, ...rest)
+  }) as typeof stdout.write
+  life.defer(() => { stdout.write = previousWrite })
+
+  submit(fixture, '/copy')
+  await waitFor('the Client-route copy failure is published', () =>
+    notifications.some(message => message.includes('failed to copy last assistant message')), 20_000)
+  await settle(600) // let the injected claim reach the live catalog too
+  assert.equal(hostClaimRegistered, true,
+    'the mid-flight Host claim really was registered during the command')
+  assert.equal(
+    notifications.filter(message => message.includes('failed to copy last assistant message')).length, 1,
+    'the Client-route error is published EXACTLY once, even though the catalog now claims the name')
+  assert.equal(fixture.hostCommandRuns(mainId), 0,
+    'the invocation stayed on the Client registry route (no Host command/run row)')
+})
+
+test('F1 Remote TSP: a card-less command failure reaches the TSP Dock', async (t) => {
+  const life = testLifecycle(t)
+  const mainId = 'b2a-f1-tsp'
+  const { createRemoteApplicationHostFixture } = await import('./support/remote-application-fixture.ts')
+  const host = await createRemoteApplicationHostFixture(life, 'b2a-f1-tsp-preset', {
+    llmAdapter: new StubStreamingLlmAdapter(),
+  })
+  const TokenMeter = (await import('@deepseek-ai/dsh-token-meter')).default
+  const toolTodo = await import('@deepseek-ai/dsh-tool-todo')
+  const title = await import('@deepseek-ai/dsh-session-title')
+  const goalUnit = await import('@deepseek-ai/dsh-goal')
+  const turnOutline = await import('@deepseek-ai/dsh-session-turn-outline')
+  await host.ctx.plugin(TokenMeter)
+  await host.ctx.plugin(toolTodo, { allowParallelInProgress: false })
+  await host.ctx.plugin(title.default as never, { fallbackMaxWords: 5, fallbackMaxBytes: 40, maxTitleBytes: 80 } as never)
+  await host.ctx.plugin(goalUnit.default as never, { defaultMaxGoalRounds: 5 } as never)
+  await host.ctx.plugin(turnOutline)
+  await host.harness.create(SessionId(mainId), { provider: 'smoke', model: 'smoke' }, { cwd: host.anchorDir })
+  const session = host.ctx.sessions.get(SessionId(mainId)) as unknown as {
+    append(type: string, data: unknown, options?: { surfaceOp?: 'append' }): void
+  }
+  seedWithoutAnswer((type, data, appendOptions) => session.append(type, data, appendOptions))
+
+  const runnerCtx = host.ctx
+  const { TUI_STARTUP_SERVICE } = await import('../src/startup.ts')
+  runnerCtx.provide(TUI_STARTUP_SERVICE, { sessionId: mainId, shippedPresetRoot: host.workRoot })
+  const aggregate = await createRemoteApplicationRuntime({
+    hostContext: host.ctx,
+    waitForHostPrerequisites: async () => {},
+    clientUiStartup: { sessionId: mainId },
+  })
+  life.defer(() => aggregate.selected.disposeTransport().catch(() => {}))
+
+  const { installTspPane } = await import('./support/tsp-terminal-fixture.ts')
+  const pane = installTspPane({})
+  life.defer(() => pane.restore())
+  const previousRenderer = process.env.DSH_PI_TUI_RENDERER
+  process.env.DSH_PI_TUI_RENDERER = 'tsp'
+  life.defer(() => {
+    if (previousRenderer === undefined) delete process.env.DSH_PI_TUI_RENDERER
+    else process.env.DSH_PI_TUI_RENDERER = previousRenderer
+  })
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = host.workRoot
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  runnerCtx.provide('appExit', () => {})
+  const override: RemoteApplicationOverride = {
+    selected: aggregate.selected,
+    presentation: aggregate.presentation,
+    extensionService: aggregate.clientUi.extensionService,
+  }
+  const runnerFiber = runnerCtx.plugin(pluginCtx => {
+    applyRunnerWithRuntime(pluginCtx, TuiConfigSchema({ fullscreen: 'off', sessionId: mainId } as never), override)
+  })
+  await runnerFiber
+  life.defer(() => { runnerFiber.dispose() })
+  await waitFor('the TSP surface mounted over the Remote composition', () =>
+    pane.output.text().includes('dock.composer'), 25_000)
+
+  pane.input.type('/copy')
+  await waitFor('the composer holds the command', () => {
+    const composer = wireNodes(pane).find(node => node.id === 'dock.composer')
+    return composer?.p.text === '/copy'
+  }, 20_000)
+  pane.input.type('\r')
+  await waitFor('the card-less copy failure reaches the TSP Dock', () =>
+    wireNodes(pane).some(node => node.id.startsWith('dock.notice-')
+      && typeof node.p.text === 'string' && node.p.text.includes('no assistant message yet')), 25_000)
+})
+
 test('L6 §7.4-2 extension (M3-6 PR1): the CLIENT-CONTEXT callback runs through the selected Client service; the Host-context twin and the Host executor are NEVER entered', async (t) => {
   const life = testLifecycle(t)
   const mainId = 'm3-4-pr4-cmd-ext'
@@ -414,6 +740,34 @@ test('L6 §7.4-3 Host command: executes EXACTLY ONCE through HostCommandPort', a
   assert.equal(calls, 1, 'exactly one handler entry')
   assert.equal(fixture.hostCommandRuns(mainId), 1,
     'exactly ONE command/run row — the Host command is never auto-retried or double-dispatched')
+})
+
+test('B1-B/Remote: the Remote command catalogue routes Host /sessions to its real Host sink', async (t) => {
+  const life = testLifecycle(t)
+  const mainId = 'b1-b-remote-sessions-command'
+  let calls = 0
+  const fixture = await mountRunner(life, {
+    resumeSessionId: mainId,
+    hostCommands: [{
+      name: 'sessions',
+      handler: () => { calls += 1; return { kind: 'success', text: 'Remote Host /sessions ran' } },
+    }],
+  })
+  await settle(120)
+  const catalog = await fixture.aggregate.presentation.commandSource.readCommands(mainId)
+  assert.ok(catalog?.some(command => command.name === 'sessions'),
+    'the genuine Remote Host /sessions descriptor is in the authoritative command catalogue')
+  const runsBefore = fixture.hostCommandRuns(mainId)
+  submit(fixture, '/sessions')
+  await waitFor('the genuine Remote Host /sessions handler', () => calls === 1, 15_000)
+  await waitFor('the official Remote /sessions lifecycle rows', () => {
+    const kinds = fixture.events(mainId).map(event => event.type)
+    return kinds.includes('command/run') && kinds.includes('command/done')
+  }, 15_000)
+  await settle()
+  assert.equal(calls, 1, 'the Remote Host command handler ran exactly once')
+  assert.equal(fixture.hostCommandRuns(mainId) - runsBefore, 1,
+    'the Remote Host winner produced exactly one official command/run row')
 })
 
 test('L6 §7.4-4 collision (M3-6 PR1): the Host claim wins and the same-named CLIENT-CONTEXT extension callback is never invoked', async (t) => {
@@ -743,6 +1097,16 @@ test('L6 §7.4-14 stale catalog (M3-6 PR2): refresh A → Connection replacement
   // DIFFERENT id: that proves both the old token's retirement AND that the
   // replacement Connection is actually established (a mere `!== old` would
   // pass while the client is still connecting with no generation at all).
+  //
+  // The readiness gate below reads the product's own APPLY report out of an
+  // append-only log, so it must only accept a line written AFTER this
+  // reconnect: the `skills/change` coalescer also applies with
+  // `source=invalidation`, and an unanchored search accepts such an earlier
+  // line and releases the submit before generation B's catalog is installed.
+  // Take the offset NOW, while the generation-A read is still held and no
+  // other refresh can apply.
+  const logPath = join(fixture.host.workRoot, 'logs', `pi-tui-${process.pid}.log`)
+  const logOffsetAtReconnect = readFileSync(logPath, 'utf8').length
   connection.reconnect()
   // While the old generation is gone (the client publishes `undefined`
   // synchronously on 'connecting'), the HOST TRUTH ITSELF CHANGES: the
@@ -804,6 +1168,24 @@ test('L6 §7.4-14 stale catalog (M3-6 PR2): refresh A → Connection replacement
   // discriminator that makes a no-op install of the automatic B refresh
   // fail this whole block instead of passing vacuously).
   const commandRunsBefore = fixture.hostCommandRuns(sessionA)
+  // Readiness is the APPLY, not the read: the automatic refresh's authoritative
+  // read settles a few milliseconds before the coordinator installs it
+  // (measured: read at T, `catalog applied … source=invalidation` at T+3ms), so
+  // submitting on the read alone races the install and lets the Client twin
+  // claim the line. A user submits what the INSTALLED catalog serves, so wait
+  // for the product's own apply report for the reconnect refresh before the
+  // single submit below — searched only in the log written after the
+  // reconnect, so an earlier refresh's apply cannot satisfy the gate.
+  await waitFor('the automatic reconnect refresh APPLIED its catalog', () => {
+    try {
+      return readFileSync(logPath, 'utf8')
+        .slice(logOffsetAtReconnect)
+        .split('\n')
+        .some(line => line.includes('catalog applied') && line.includes('source=invalidation'))
+    } catch {
+      return false
+    }
+  }, 15_000)
   submit(fixture, '/b-fresh-cmd')
   await waitFor('the B Host command entered its real handler', () => bHostRuns === 1, 15_000)
   await settle()

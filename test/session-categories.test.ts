@@ -516,7 +516,7 @@ test('the session picker marquees a long SELECTED title while the marker and lin
   const strip = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, '').replace(/\s+$/, '')
   let view = vt.getViewport().map(strip).join('\n')
   // The FIRST row is selected initially (the long row is second).
-  assert.ok(view.includes('→ ● short-title'), `first row selected:\n${view}`)
+  assert.ok(view.includes('> ● short-title'), `first row selected:\n${view}`)
   // Move down: the long title becomes the selected row.
   vt.sendInput('\x1b[B')
   await vt.waitForRender()

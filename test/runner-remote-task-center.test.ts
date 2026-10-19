@@ -219,7 +219,7 @@ async function mountTaskCenterFixture(
   // the official wire (the same row the production base patch mounts).
   const SubagentRuntime = (await import('@deepseek-ai/dsh-subagent')).default
   await host.ctx.plugin(SubagentRuntime as never, { maxDepth: 3 } as never)
-  const { snapshotSubagentDescriptor } = await import('@deepseek-ai/dsh-subagent')
+  const { snapshotSubagentDescriptor, SUBAGENT_DESCRIPTOR_VERSION } = await import('@deepseek-ai/dsh-subagent')
 
   const parentCwd = host.anchorDir
   const childCwd = (dir: string): string => {
@@ -246,7 +246,10 @@ async function mountTaskCenterFixture(
   // The child's durable identity/classification (the official descriptor the
   // establishing provider appends). A child without it cannot be classified.
   aAppend('subagent/descriptor', snapshotSubagentDescriptor({ mode: 'continuable', provider: 'fixture', label: LABEL_A }))
-  appenderOf(host.ctx, CHILD_B_ID)('subagent/descriptor', snapshotSubagentDescriptor({ mode: 'one-shot', provider: 'fixture', label: LABEL_B }))
+  // 0.2.1-rc.1 removed the one-shot overload of the official descriptor builder (only
+  // the continuable composition has one), so the fixture writes the published
+  // versioned one-shot payload shape directly.
+  appenderOf(host.ctx, CHILD_B_ID)('subagent/descriptor', { version: SUBAGENT_DESCRIPTOR_VERSION, mode: 'one-shot', provider: 'fixture', label: LABEL_B })
   appenderOf(host.ctx, CHILD_C_ID)('subagent/descriptor', snapshotSubagentDescriptor({ mode: 'continuable', provider: 'fixture', label: LABEL_C }))
   seedTurns(parentAppend, 1, 2, 'parent')
   // Child A carries enough turns that the official opening window truncates
@@ -473,8 +476,8 @@ test('L6 §14.9: the RENDERED /tasks row and badge follow the official Client Se
   await waitFor('the rendered child A row shows running', () =>
     /child A m3-5-pr2-child-a · mode\s+continuable · activity\s+running/u.test(viewport()), 20_000)
   const runningView = viewport()
-  assert.match(runningView, /subagent · child A m3-5-pr2-child-a · continuable\s+running/u,
-    `the row's own status tail must read running:\n${runningView}`)
+  assert.match(runningView, /subagent · child A m3-5-pr2-child-a · continuable\s+‣ Running/u,
+    `the row's own status tail must show the shared marker and Running word:\n${runningView}`)
   // The dock/agents badge (the StatusStore activity projection) arms from the
   // same projected activity.
   assert.equal(app.statusStore.snapshot().activity?.childAgentCount, 1,
@@ -495,6 +498,9 @@ test('L6 §14.9: the RENDERED /tasks row and badge follow the official Client Se
     sessions.list.getSnapshot().byId[CHILD_A_ID]?.running === false, 15_000)
   await waitFor('the rendered child A row converges to inactive', () =>
     /child A m3-5-pr2-child-a · mode\s+continuable · activity\s+inactive/u.test(viewport()), 20_000)
+  const inactiveView = viewport()
+  assert.match(inactiveView, /subagent · child A m3-5-pr2-child-a · continuable\s+‣ Inactive/u,
+    `the row's own status tail must converge to the shared marker and Inactive word:\n${inactiveView}`)
   assert.equal(app.statusStore.snapshot().activity?.childAgentCount, 0,
     'the agents badge must converge back to zero')
   const idle = await fixture.aggregate.presentation.task.readDescendants(PARENT_ID)
@@ -661,7 +667,7 @@ test('L6 negative control §14: no Remote Task/child path reads the process-loca
 // §14 step 8 / §5 Must 17: the REAL continuation follow-up.
 //
 // This test deliberately does NOT fabricate the child catalog/descriptor. The
-// child below is established by the REAL `ctx.subagents.startContinuable`
+// child below is established by the REAL `ctx.subagents.startActivation`
 // delegation over the official `spawn` provider (an existing devDependency
 // row — no base-owned Host service is duplicated). That distinction IS the
 // proof: a fabricated child is a plain live Host Agent, so a viewer follow-up
@@ -757,6 +763,16 @@ async function awaitChildInitialTurn(
 
 test('L6 §14 step 8 / §5 Must 17: a REAL delegated continuable child receives the viewer follow-up through the official child inbox, and the authoritative child event lands in the SAME viewer', async (t) => {
   const life = testLifecycle(t)
+  // The Client-local request zone IS the sending TUI runtime's zone: pin it so
+  // the zone the Remote viewer forwards is an asserted value. The official
+  // `SessionFace.prompt()` samples it inside the Client, and the Host persists
+  // it on the accepted child message.
+  const previousTz = process.env.TZ
+  process.env.TZ = 'Asia/Shanghai'
+  life.defer(() => {
+    if (previousTz === undefined) delete process.env.TZ
+    else process.env.TZ = previousTz
+  })
   const adapter = new HoldingAdapter()
   const host = await mountRemotePresentationHost(life, PRESET_ID, { llmAdapter: adapter })
   // The REAL Host subagent authority plus the REAL official continuable
@@ -766,8 +782,16 @@ test('L6 §14 step 8 / §5 Must 17: a REAL delegated continuable child receives 
   await host.ctx.plugin(SubagentRuntime as never, { maxDepth: 3 } as never)
   const SpawnProvider = await import('@deepseek-ai/dsh-subagent-spawn-in-process')
   await host.ctx.plugin(SpawnProvider as never, { providerName: 'spawn' } as never)
+  // The official request-clock row: the child follow-up's Client zone must
+  // produce a CHILD-owned durable reading that the viewer folds; the parent
+  // Session must never receive it.
+  const TimeContext = await import('@deepseek-ai/dsh-time-context')
+  // `refreshIntervalMs: 0` is the plugin's own "every eligible step" mode: the
+  // child's first turn and the viewer follow-up are seconds apart, so the
+  // default ten-minute window would legitimately suppress the second reading.
+  await host.ctx.plugin(TimeContext as never, { timeZone: 'Asia/Shanghai', refreshIntervalMs: 0 } as never)
   const subagents = host.ctx.get('subagents') as unknown as {
-    startContinuable(spec: unknown): Promise<{ readonly childId: string; readonly messageId: string }>
+    startActivation(spec: unknown): Promise<{ readonly childId: string; readonly messageId: string }>
   }
   const sessionOf = (id: string): HostSessionFace | undefined =>
     host.ctx.sessions.get(SessionId(id)) as unknown as HostSessionFace | undefined
@@ -783,7 +807,11 @@ test('L6 §14 step 8 / §5 Must 17: a REAL delegated continuable child receives 
   const parentSession = sessionOf(PARENT_ID)
   assert.ok(parentSession !== undefined, 'the live parent Host Session must exist')
   seedTurns(appenderOf(host.ctx, PARENT_ID), 1, 2, 'parent')
-  const started = await subagents.startContinuable({
+  // 0.2.1-rc.2 replaced `startContinuable()` with the managed
+  // `startActivation()` (a reserved `childId` requires a local backend and
+  // guarantees the accepted message id; `delivery: 'parent'` is the same
+  // parent-notifying route the old entry used).
+  const started = await subagents.startActivation({
     provider: 'spawn',
     label: REAL_LABEL,
     childId: SessionId(REAL_CHILD_ID),
@@ -792,6 +820,7 @@ test('L6 §14 step 8 / §5 Must 17: a REAL delegated continuable child receives 
       parent: agents.get(SessionId(PARENT_ID)),
     },
     signal: new AbortController().signal,
+    delivery: 'parent',
   })
   assert.equal(started.childId, REAL_CHILD_ID,
     'the continuation manager must establish the reserved durable child identity')
@@ -857,11 +886,53 @@ test('L6 §14 step 8 / §5 Must 17: a REAL delegated continuable child receives 
   await waitFor('the child Session log accepted the viewer follow-up', () =>
     childEvents().some(event => event.type === 'user/message' && eventText(event) === REAL_FOLLOW_UP), 20_000)
   const accepted = childEvents().find(event => event.type === 'user/message' && eventText(event) === REAL_FOLLOW_UP)!
-  const source = (accepted.data as { readonly source?: { readonly kind?: string; readonly rpcId?: unknown } }).source
+  const source = (accepted.data as {
+    readonly source?: { readonly kind?: string; readonly rpcId?: unknown; readonly clientTimeZone?: unknown }
+  }).source
   assert.equal(source?.kind, 'user',
     'the accepted child message must carry the official human-prompt provenance')
   assert.equal(typeof source?.rpcId, 'string',
     'the official `subagents.prompt` request id must be persisted on the accepted child message')
+  assert.equal(source?.clientTimeZone, 'Asia/Shanghai',
+    'the Client-sampled request zone must cross the real generated subagents.prompt and reach the Host child source')
+
+  // ── The official plugin derives the CHILD turn's Context from that source.
+  // The reading is persisted on the CHILD Session, never on the parent, and the
+  // mounted child viewer folds it through its own remote presentation path.
+  const childContextTexts = (): string[] => childEvents()
+    .filter(event => event.type === 'user/message'
+      && (event.data as { readonly source?: { readonly kind?: string } }).source?.kind === 'time-context')
+    .map(event => {
+      const data = event.data as { readonly content?: readonly { readonly type?: string; readonly text?: string }[] }
+      return data.content?.map(part => part.type === 'text' ? part.text ?? '' : '').join('\n') ?? ''
+    })
+  await waitFor('the child follow-up turn injected its own time-context reading', () =>
+    childContextTexts().some(text => text.includes('preparing turn 2')), 20_000)
+  const followUpContext = childContextTexts().find(text => text.includes('preparing turn 2'))!
+  assert.match(followUpContext, /Browser time zone for this request: Asia\/Shanghai\./u,
+    'the child Context carries the child prompt\'s Client zone')
+  const parentContextTexts = parentSession.snapshotEvents()
+    .filter(event => event.type === 'user/message'
+      && (event.data as { readonly source?: { readonly kind?: string } }).source?.kind === 'time-context')
+    .map(event => {
+      const data = event.data as { readonly content?: readonly { readonly type?: string; readonly text?: string }[] }
+      return data.content?.map(part => part.type === 'text' ? part.text ?? '' : '').join('\n') ?? ''
+    })
+  // The parent may carry its OWN readings; the child follow-up's reading must
+  // never cross into it.
+  assert.equal(parentContextTexts.some(text => text.includes('preparing turn 2')), false,
+    'the child reading must never be appended to the parent Session')
+
+  const viewerContextRows = (): readonly { readonly text?: string; readonly contextPresentation?: { readonly sourceKind?: string } }[] =>
+    ((app as unknown as {
+      messages?: readonly { kind?: string; text?: string; contextPresentation?: { sourceKind?: string } }[]
+    }).messages ?? []).filter(message => message.kind === 'system'
+      && message.contextPresentation?.sourceKind === 'time-context')
+  await waitFor('the child viewer folded the child-owned Context reading', () =>
+    viewerContextRows().some(row => row.text?.includes('preparing turn 2')), 20_000)
+  const viewerFollowUp = viewerContextRows().find(row => row.text?.includes('preparing turn 2'))!
+  assert.match(viewerFollowUp.text ?? '', /Asia\/Shanghai/u,
+    'the viewer shows the child reading with the child request zone, not a parent/other-session row')
 
   // ── The authoritative child event appears in the SAME viewer. TWO independent
   // halves: the viewer's own durable child read carries the accepted event, and
@@ -1429,7 +1500,7 @@ test('L6 M3-6 PR2 §14.5: the OPEN Task Center + child viewer survive a normal r
 
   // ── Return to the Task Center and prove a B-side Task/descendant change
   // appears WITHOUT restarting the runner: a NEW grandchild under A.
-  const { snapshotSubagentDescriptor } = await import('@deepseek-ai/dsh-subagent')
+  const { SUBAGENT_DESCRIPTOR_VERSION } = await import('@deepseek-ai/dsh-subagent')
   const CHILD_D_ID = 'm3-6-pr2-child-d'
   const childDwd = join(host.anchorDir, 'd-ws')
   mkdirSync(childDwd, { recursive: true })
@@ -1439,7 +1510,7 @@ test('L6 M3-6 PR2 §14.5: the OPEN Task Center + child viewer survive a normal r
     { cwd: childDwd, parentSession: SessionId(CHILD_A_ID), origin: 'subagent' } as never,
   )
   appenderOf(host.ctx, CHILD_D_ID)('subagent/descriptor',
-    snapshotSubagentDescriptor({ mode: 'one-shot', provider: 'fixture', label: `child D ${CHILD_D_ID}` }))
+    { version: SUBAGENT_DESCRIPTOR_VERSION, mode: 'one-shot', provider: 'fixture', label: `child D ${CHILD_D_ID}` })
   aAppend('subagent/catalog', { version: 1, childId: CHILD_D_ID, childCreatedAt: 5_000, mode: 'one-shot', label: `child D ${CHILD_D_ID}` })
   const LABEL_D = `child D ${CHILD_D_ID}`
   submit(app, '/tasks')
@@ -1471,17 +1542,29 @@ async function openTaskRow(
 ): Promise<void> {
   submit(app, '/tasks')
   await waitFor(`the Task Center rendered ${rowLabel}`, () => viewport().includes(rowLabel), 20_000)
-  const selected = (): boolean => viewport().split('\n')
-    .some(line => line.includes('→') && line.includes(rowLabel))
-  for (let step = 0; step <= 8; step += 1) {
-    if (selected()) {
+  // The dock strip on the MAIN surface also carries running-subagent labels
+  // (the passive quick-task projection commits with no browser open), so the
+  // label alone does not prove the Task Center painted. Wait for the browser's
+  // own chrome (its hint line) before reading the selection, or the first
+  // Down below races the browser's first frame and pushes the selection —
+  // which STARTS on the panel's running-subagent preference — off the row.
+  await waitFor('the Task Center browser frame painted', () => viewport().includes('↑↓ select · ←→ tree'), 20_000)
+  const lines = (): string[] => viewport().split('\n')
+  const selectedLine = (): number =>
+    lines().findIndex(line => line.includes('→') && line.includes(rowLabel))
+  for (let step = 0; step < 12; step += 1) {
+    if (selectedLine() >= 0) {
       fixture.vt.sendInput('\r')
       return
     }
-    fixture.vt.sendInput('\x1b[B')
+    // Walk TOWARD the target row: the initial selection is the panel's own
+    // preference (the first running subagent), which may sit above or below.
+    const target = lines().findIndex(line => line.includes(rowLabel))
+    const pointer = lines().findIndex(line => line.includes('→'))
+    fixture.vt.sendInput(target >= 0 && pointer > target ? '\x1b[A' : '\x1b[B')
     await new Promise(resolve => setTimeout(resolve, 80))
   }
-  throw new Error(`the Task Center never selected ${rowLabel}`)
+  throw new Error(`the Task Center never selected ${rowLabel}:\n${viewport()}`)
 }
 
 test('L6 §14 step 14: a main-Session switch fences the in-flight child open — no stale child operation reaches the replacement surface', async (t) => {
@@ -1692,13 +1775,21 @@ test('L6 P2 sink: the MOUNTED Remote child viewer converges its committed subjec
   // footer would keep the stale activity.
   let suppressedDurableEvents = 0
   let suppressedProjectionEvents = 0
+  // The channel that MUST carry the activity flip: the official Session
+  // snapshot sink. A `running` flip is a snapshot fact — it does not have to
+  // produce a projection change — so the snapshot counter (not the projection
+  // counter) is the witness that the flip really arrived and was re-derived.
+  let snapshotNotifications = 0
   // The window sinks drive `rehydrateViewedChild`, which ALSO re-derives the
   // subject status (`deps.refreshStatus()` + `target.activity` from the binding).
   // They are suppressed and counted too: if they ever fired inside the measured
   // window the causality claim below would be false, so a non-zero count fails
   // loudly instead of silently weakening the proof.
-  let suppressedWindowReplaced = 0
-  let suppressedWindowPrepended = 0
+  // S3-R0: the window channels are unified into ONE recovery requirement. It is
+  // FORWARDED (the engine must stay correct if it fires) and COUNTED: a non-zero
+  // count inside the measured window would mean the convergence could have come
+  // from a window reconcile instead of the snapshot channel.
+  let windowRefoldRequirements = 0
   const ingress = fixture.aggregate.presentation.liveIngress as unknown as {
     subscribe(
       sessionId: string,
@@ -1711,10 +1802,16 @@ test('L6 P2 sink: the MOUNTED Remote child viewer converges its committed subjec
     if (sessionId !== CHILD_A_ID) return realSubscribe.call(ingress, sessionId, sinks, hydrateRevision)
     return realSubscribe.call(ingress, sessionId, {
       ...sinks,
+      onSessionSnapshotChanged: (changedSessionId: string) => {
+        snapshotNotifications += 1
+        ;(sinks.onSessionSnapshotChanged as (id: string) => void)(changedSessionId)
+      },
       onDurableEvent: () => { suppressedDurableEvents += 1 },
       onProjectionsChanged: () => { suppressedProjectionEvents += 1 },
-      onWindowReplaced: () => { suppressedWindowReplaced += 1 },
-      onWindowPrepended: () => { suppressedWindowPrepended += 1 },
+      onWindowRefoldRequired: (id: string) => {
+        windowRefoldRequirements += 1
+        ;(sinks.onWindowRefoldRequired as (id: string) => void)(id)
+      },
     }, hydrateRevision)
   }
   life.defer(() => { ingress.subscribe = realSubscribe })
@@ -1726,6 +1823,18 @@ test('L6 P2 sink: the MOUNTED Remote child viewer converges its committed subjec
   const subjectLine = (): string => app.viewerSubjectBarRenderRowsForTest().join('\n')
   const subjectActivity = (): string | undefined => app.statusStore.snapshot().view?.subject?.activity
   const clientRunning = (): boolean | undefined => sessions.list.getSnapshot().byId[CHILD_A_ID]?.running
+  // The PUBLISHED extension surface facts of the mounted app (the real
+  // SurfaceHost the runner attached): `activity.working` and `session.busy` are
+  // the LIVE/Main session's, so a CHILD activity flip must not move either.
+  const extensionState = (): { readonly working: boolean; readonly busy: boolean } => {
+    const host = (app as unknown as {
+      extensionHost?: { state(): { activity: { working: boolean }; session: { busy: boolean } } }
+    }).extensionHost
+    assert.ok(host !== undefined, 'the mounted Remote app must carry the real extension SurfaceHost')
+    const state = host.state()
+    return { working: state.activity.working, busy: state.session.busy }
+  }
+  const extensionBefore = extensionState()
 
   // ── (1) The child is RUNNING through the official Client fact before the
   // viewer opens, so the initial committed state is not vacuous.
@@ -1755,12 +1864,12 @@ test('L6 P2 sink: the MOUNTED Remote child viewer converges its committed subjec
     subjectActivity() === 'inactive', 15_000)
   assert.ok(suppressedDurableEvents > 0,
     'the isolation witness must have suppressed real durable events, or this proof is vacuous')
+  assert.ok(snapshotNotifications > 0,
+    'the official Session-snapshot sink must be the channel that delivered the flip')
   assert.ok(suppressedProjectionEvents > 0,
     'the projection witness must have suppressed real projection events for the child')
-  assert.equal(suppressedWindowReplaced, 0,
-    'a window replacement would independently re-derive the subject status in this window')
-  assert.equal(suppressedWindowPrepended, 0,
-    'a window prepend would independently re-derive the subject status in this window')
+  assert.equal(windowRefoldRequirements, 0,
+    'a window reconcile would independently re-derive the subject status in this window')
   assert.equal(subjectActivity(), 'inactive',
     'the committed display subject must follow the official running flip')
   await waitFor('the subject bar converges to the inactive activity', () =>
@@ -1769,10 +1878,22 @@ test('L6 P2 sink: the MOUNTED Remote child viewer converges its committed subjec
     `the rendered subject bar must show the converged activity:\n${subjectLine()}`)
   assert.equal(subjectLine().includes('● running'), false,
     `the stale running line must leave the subject bar:\n${subjectLine()}`)
+  // UX-1 (§7 E2): the SAME snapshot-only flip drives the visible working row —
+  // the committed display subject is the row's only selector, so the inactive
+  // flip clears it without any durable event or viewer reopen.
+  await waitFor('the working row follows the inactive flip', () =>
+    !viewport().includes('Working...'), 15_000)
+  // The PUBLIC extension facts stay the LIVE/Main session's: the child's
+  // activity flip (and the visible child row) must not move them.
+  const extensionAfterFlip = extensionState()
+  assert.equal(extensionAfterFlip.working, extensionBefore.working,
+    'the extension activity.working is the LIVE/Main fact, never the displayed child activity')
+  assert.equal(extensionAfterFlip.busy, extensionBefore.busy,
+    'the extension session.busy is the Main machine fact, never the displayed child activity')
 
   // ── (4) The reverse flip through the same isolated channel.
   const suppressedBefore = suppressedDurableEvents
-  const suppressedProjectionsBefore = suppressedProjectionEvents
+  const snapshotBefore = snapshotNotifications
   const releaseSecond = adapter.hold()
   life.defer(() => releaseSecond())
   childAgent.followup({
@@ -1785,13 +1906,40 @@ test('L6 P2 sink: the MOUNTED Remote child viewer converges its committed subjec
     subjectLine().includes('● running'), 15_000)
   assert.ok(suppressedDurableEvents > suppressedBefore,
     'the reverse flip must also be observed with the durable sink suppressed')
-  assert.ok(suppressedProjectionEvents > suppressedProjectionsBefore,
-    'the reverse flip must also be observed with the projection sink suppressed')
-  assert.equal(suppressedWindowReplaced, 0, 'no window replacement may fire on the reverse flip either')
-  assert.equal(suppressedWindowPrepended, 0, 'no window prepend may fire on the reverse flip either')
+  assert.ok(snapshotNotifications > snapshotBefore,
+    'the reverse flip must also arrive through the official Session-snapshot sink')
+  assert.equal(windowRefoldRequirements, 0, 'no window reconcile may fire on the reverse flip either')
   assert.equal(subjectActivity(), 'running', 'the reverse flip must converge as well')
   assert.equal(subjectLine().includes('● running'), true,
     `the rendered subject bar must show running again:\n${subjectLine()}`)
+  await waitFor('the working row re-arms on the running flip', () =>
+    viewport().includes('Working...'), 15_000)
+  const extensionAfterReverse = extensionState()
+  assert.equal(extensionAfterReverse.working, extensionBefore.working,
+    'the reverse child flip must not move the LIVE/Main activity.working either')
+  assert.equal(extensionAfterReverse.busy, extensionBefore.busy,
+    'the reverse child flip must not move the Main session.busy either')
+
+  // ── UX-3 E6 on the REAL Remote viewer: a fullscreen `‹ back` glyph click runs
+  // the production exit route and releases the official Client generation the
+  // viewer retained (the ingress/reference sink, NOT inherited from the Esc
+  // suites — this is the CLICK route).
+  const clientSessions = fixture.aggregate.wire.client.sessions
+  const retainedBeforeExit = retainFacts(clientSessions, CHILD_A_ID).referenceCount
+  assert.ok(retainedBeforeExit > 0, 'precondition: the mounted viewer holds the child generation')
+  app.setFullscreen(true)
+  await waitFor('the fullscreen subject bar painted', () => viewport().includes('‹ back'), 15_000)
+  const exitBarRow = viewport().split('\n').findIndex(row => row.includes('‹ back'))
+  assert.ok(exitBarRow >= 0, `the bar must be painted:\n${viewport()}`)
+  fixture.vt.sendInput(`\x1b[<0;2;${exitBarRow + 1}M`) // press the `‹` glyph cell
+  fixture.vt.sendInput(`\x1b[<0;2;${exitBarRow + 1}m`) // release on the same cell
+  await waitFor('the glyph click exits the viewer', () => !viewport().includes('‹ back'), 15_000)
+  assert.equal(app.statusStore.snapshot().view?.subject?.kind, 'main',
+    'the glyph click must run the production viewer exit')
+  await waitFor('the official Client generation is released by the click exit', () =>
+    retainFacts(clientSessions, CHILD_A_ID).referenceCount === 0, 15_000)
+  assert.equal(retainFacts(clientSessions, CHILD_A_ID).referenceCount, 0,
+    'the click exit must release the child generation exactly like the Esc route')
   releaseSecond()
 })
 

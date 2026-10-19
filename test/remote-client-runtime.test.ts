@@ -29,11 +29,14 @@ import { mountAgentLoopTestDependencies, mountAgentLoopTestHarness } from '@deep
 import CommandRuntime from '@deepseek-ai/dsh-commands'
 import AgentPresetRegistry from '@deepseek-ai/dsh-agent-preset-registry'
 import TypertGatewayService from '@deepseek-ai/dsh-api-gateway'
+import { RemoteAccessService } from '@deepseek-ai/dsh-api-remote-access'
 import JobController from '@deepseek-ai/dsh-api-job-controller'
 import { CredentialProvider } from '@deepseek-ai/dsh-credentials'
+import { HostConnectionService } from '@deepseek-ai/dsh-client-connection'
 import FileUploads from '@deepseek-ai/dsh-client-file-upload'
 import LocalFileSystem from '@deepseek-ai/dsh-fs-local'
-import JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
+import WorkingDirectory from '@deepseek-ai/dsh-working-directory'
+import * as JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import { SESSION_LOG_EXPORT_PATH } from '@deepseek-ai/dsh-session-log-export'
 import { SqliteSessionQueryEngine } from '@deepseek-ai/dsh-session-query-sqlite'
@@ -188,6 +191,10 @@ async function createHostFixture(
       new SqliteSessionQueryEngine(queryCtx, { path: ':memory:', openAt: 'first-search' })
     })
     await ctx.plugin(LocalFileSystem)
+    // 0.2.1-rc.2's SessionController nests the official skill catalog and the real
+    // `@`-file reference provider injects the directory owner: both require
+    // the real `workingDirectory` service (the same row dsh-base mounts once).
+    await ctx.plugin(WorkingDirectory)
     await ctx.plugin(Storage)
     await ctx.plugin(StorageJson, { root: join(workRoot, 'storages') })
     await ctx.plugin(StorageDomain, { backend: 'json' })
@@ -203,6 +210,10 @@ async function createHostFixture(
     // background-job starts (the registry refuses starts without one).
     await ctx.plugin(toolJobs)
     await ctx.plugin(JobController, {})
+    // 0.2.1-rc.1 requires the Gateway's access decider: `TypertGatewayService.inject`
+    // is ['typert', 'remoteAccess'], so the official RemoteAccess owner mounts
+    // first (the base layer's order) — never a fake `remoteAccess` provide.
+    await ctx.plugin(RemoteAccessService)
     await ctx.inject(TypertGatewayService.inject, gatewayCtx => {
       new TypertGatewayService(gatewayCtx, { websocketHeartbeatIntervalMs: 50 })
     })
@@ -353,14 +364,45 @@ test('B. the scoped loader capture is exact, single-flight, and restores the pro
   )
   assert.throws(
     () => loader.assertComplete(),
-    /@deepseek-ai\/dsh-api-gateway never registered through __ModuleLoader__/,
-    'a missing expected registration id must be rejected',
+    /@deepseek-ai\/dsh-api-gateway was neither registered through __ModuleLoader__ nor imported as a Node module/,
+    'a missing expected id must be rejected on both admission channels',
   )
   assert.deepEqual(loader.registeredIds(), ['@deepseek-ai/dsh-typert-registry'])
   const completeLoader = createScopedClientModuleLoader(EXPECTED_REGISTRATION_IDS)
   for (const id of EXPECTED_REGISTRATION_IDS) completeLoader.load({ id, factory })
   assert.deepEqual(completeLoader.registeredIds(), EXPECTED_REGISTRATION_IDS)
   assert.doesNotThrow(() => completeLoader.assertComplete(), 'the exact six ids must pass the completeness check')
+
+  // 0.2.1-rc.1 and later publish `./client` with an explicit node/browser condition split:
+  // the browser variant registers through the shim, the standalone Node variant
+  // never does. A directly imported bundle is admitted into the SAME /client
+  // table (so a registering factory can depend on a Node-variant one) and is
+  // subject to the same unknown-id / double-admission rules.
+  const directLoader = createScopedClientModuleLoader([
+    '@deepseek-ai/dsh-typert-registry',
+    '@deepseek-ai/dsh-api-gateway',
+  ])
+  const directModule = { apply: () => {}, inject: [] }
+  directLoader.acceptImported('@deepseek-ai/dsh-typert-registry', directModule)
+  assert.ok(Object.is(directLoader.requireModule('@deepseek-ai/dsh-typert-registry/client'), directModule),
+    'a directly imported bundle must be resolvable through the same /client table')
+  // A bundle the loader registered keeps its registration: the import
+  // namespace the loader already saw is not a second provider.
+  directLoader.load({ id: '@deepseek-ai/dsh-api-gateway', factory: () => directModule })
+  assert.doesNotThrow(() => directLoader.acceptImported('@deepseek-ai/dsh-api-gateway', { apply: () => {}, inject: [] }),
+    'a registered bundle ignores its import namespace')
+  assert.throws(
+    () => directLoader.acceptImported('@deepseek-ai/dsh-typert-registry', directModule),
+    /imported as a Node module twice/,
+    'a doubly imported bundle must be rejected',
+  )
+  assert.throws(
+    () => directLoader.acceptImported('@deepseek-ai/dsh-not-allowed', directModule),
+    /unexpected id/,
+    'an unknown directly imported id must be rejected',
+  )
+  assert.doesNotThrow(() => directLoader.assertComplete(),
+    'both admission channels together must satisfy the completeness check')
 
   // The capture shim is gone after the capture.
   assert.equal('window' in globalThis, false, 'the temporary window global must be restored')
@@ -1016,3 +1058,162 @@ test('M3. disposeRemoteContributions isolates failures and runs every disposer i
 })
 
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// PEER - the canonical owner Peer on both carrier paths (0.2.1-rc.2 L5 gate)
+// ---------------------------------------------------------------------------
+
+/**
+ * One test-only non-owner principal kind. The augmentation targets the
+ * DECLARING module (`.../types`): the package root only re-exports
+ * `PrincipalMap`, and a module augmentation must merge with the declaration
+ * itself. Nothing in production declares this kind — it exists only to prove
+ * that the official Gateway decides by the Peer it was given.
+ */
+declare module '@deepseek-ai/dsh-typert-protocol/types' {
+  interface PrincipalMap {
+    'test-guest': { readonly kind: 'test-guest'; readonly guest: string }
+  }
+}
+
+/** The fixed private base URL the in-process carrier constructs Requests on;
+ * only the pathname matters to the shared Fetch handler. */
+const IN_PROCESS_BASE = 'http://dsh-pi-tui-remote.in-process'
+
+/** One unary Remote request envelope for the shared `/api` channel. */
+function unaryRemoteRequest(endpoint: string, rpcId: string): Request {
+  return new Request(`${IN_PROCESS_BASE}/api/${endpoint}`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    // The Gateway's unary payload is the decoded `RemoteRequest`: exactly one
+    // plain-object `args` field (the reserved empty `session/list` request).
+    body: JSON.stringify({ type: 'client-request', rpcId, method: endpoint, payload: { args: {} } }),
+  })
+}
+
+type UnaryEnvelope = { readonly result: { readonly ok: boolean; readonly error?: { readonly code?: string } } }
+
+test('PEER. the carrier speaks for the Host Connection owner Peer on Fetch and Stream, with guest and disposed controls', async (t) => {
+  const life = testLifecycle(t)
+  const host = await createHostFixture(life)
+  seedHostSession(host)
+  const gateway = host.ctx.typertGateway
+
+  // Observation happens INSIDE the real official carriers: the shared Fetch
+  // entry the Host Connection serves, and the Gateway's own `wireStream.open`
+  // (its public handler). Both production functions are saved UNBOUND and
+  // restored with their original identity — nothing is re-implemented, bound,
+  // or stubbed. The Fetch entry is observed on the PROTOTYPE because the
+  // carrier captures its handler during composition (the Host Connection
+  // service itself is mounted by the Host runtime, not by this fixture).
+  const originalCreateSharedFetchHandler = HostConnectionService.prototype.createSharedFetchHandler
+  const fetchObservations: Array<{ readonly peer: unknown; readonly path: string }> = []
+  HostConnectionService.prototype.createSharedFetchHandler = function (channel: '/api') {
+    const shared = originalCreateSharedFetchHandler.call(this, channel)
+    return {
+      ...shared,
+      async fetch(request: Request, peer: never): Promise<Response> {
+        fetchObservations.push({ peer, path: new URL(request.url).pathname })
+        return shared.fetch(request, peer)
+      },
+    }
+  }
+  const wireStream = gateway.wireStream as unknown as {
+    open: (
+      endpoint: string,
+      payload: unknown,
+      uplink: AsyncIterable<unknown>,
+      peer: unknown,
+      signal: AbortSignal,
+    ) => Promise<AsyncIterable<unknown>>
+  }
+  const originalOpen = wireStream.open
+  const streamObservations: Array<{ readonly peer: unknown; readonly endpoint: string }> = []
+  wireStream.open = function (endpoint, payload, uplink, peer, signal) {
+    streamObservations.push({ peer, endpoint })
+    return originalOpen.call(wireStream, endpoint, payload, uplink, peer, signal)
+  }
+  const restoreFetchObservation = (): void => {
+    HostConnectionService.prototype.createSharedFetchHandler = originalCreateSharedFetchHandler
+  }
+  const restoreObservation = (): void => {
+    restoreFetchObservation()
+    wireStream.open = originalOpen
+  }
+  // Registered BEFORE the composition: a throwing composition must not leave
+  // the prototype patch behind for the next test in this process (the cleanup
+  // for the composed runtime is registered only once it exists).
+  t.after(() => { restoreObservation() })
+
+  const composed = await (await loadRuntimeModule()).createExperimentalRemoteRuntime({
+    hostContext: host.ctx,
+    waitForHostPrerequisites: async () => {},
+  })
+  const client = composed.client
+  const connection = host.ctx.connection
+  t.after(async () => {
+    await composed.dispose()
+    await host.dispose()
+  })
+
+  await t.test('PEER-1. the real unary Fetch carrier passes the exact Host Connection owner Peer', () => {
+    assert.ok(fetchObservations.length > 0, 'runtime readiness must have issued at least one real unary call through the carrier')
+    for (const observation of fetchObservations) {
+      assert.ok(Object.is(observation.peer, connection.browserPeer),
+        'the unary Fetch path must speak for HostConnectionService.browserPeer')
+      assert.ok(observation.path.startsWith('/api/'),
+        `every carrier Fetch call reaches the shared /api channel (observed ${observation.path})`)
+    }
+  })
+
+  await t.test('PEER-2. the real Gateway stream carrier passes the SAME owner Peer and opens a real logical stream', async () => {
+    const reference = client.sessions.retain(SessionId(SEED_SESSION_ID), { source: 'controllerOperation' })
+    try {
+      await reference.ready
+      await waitFor('the Gateway to open a logical stream for the retained Session', () => streamObservations.length > 0)
+    } finally {
+      reference.release()
+    }
+    assert.ok(Object.is(streamObservations[0].peer, connection.browserPeer),
+      'the Gateway must receive the identical browserPeer object on the stream path')
+    const distinctPeers = new Set(streamObservations.map(observation => observation.peer))
+    assert.equal(distinctPeers.size, 1, 'Fetch and Stream must share ONE Peer, never a per-path copy')
+    assert.ok(streamObservations.every(observation => Object.is(observation.peer, connection.browserPeer)),
+      'every logical stream must speak for browserPeer')
+  })
+
+  await t.test('PEER-3. the same official Gateway admits the owner and refuses a no-policy guest for the IDENTICAL request', async () => {
+    restoreFetchObservation()
+    const shared = connection.createSharedFetchHandler('/api')
+    const ownerEnvelope = await (await shared.fetch(unaryRemoteRequest('session/list', 'm3-peer-owner'), connection.browserPeer))
+      .json() as UnaryEnvelope
+    assert.equal(ownerEnvelope.result.ok, true, `the owner Peer must be admitted by the official Gateway: ${JSON.stringify(ownerEnvelope)}`)
+
+    const guest = connection.createPeer({ principal: { kind: 'test-guest', guest: 'negative' } })
+    try {
+      const guestEnvelope = await (await shared.fetch(unaryRemoteRequest('session/list', 'm3-peer-guest'), guest))
+        .json() as UnaryEnvelope
+      assert.equal(guestEnvelope.result.ok, false, 'a guest Peer without a policy must be refused')
+      assert.equal(guestEnvelope.result.error?.code, 'remote-access/denied',
+        'the refusal must be the official access-denied code')
+    } finally {
+      // Only the Peer THIS test created is disposed — never `browserPeer`.
+      await guest.dispose()
+    }
+  })
+
+  await t.test('PEER-4. a disposed Peer is refused by the Gateway, and the owner Peer dies with the Connection fiber', async () => {
+    const disposedGuest = connection.createPeer({ principal: { kind: 'test-guest', guest: 'disposed' } })
+    await disposedGuest.dispose()
+    const shared = connection.createSharedFetchHandler('/api')
+    const envelope = await (await shared.fetch(unaryRemoteRequest('session/list', 'm3-peer-disposed'), disposedGuest))
+      .json() as UnaryEnvelope
+    assert.equal(envelope.result.ok, false, 'a disposed Peer must not complete a new request')
+    assert.equal(envelope.result.error?.code, 'gateway/peer-disposed',
+      'the official Gateway owns the disposal refusal')
+
+    await composed.dispose()
+    assert.equal(connection.browserPeer.signal.aborted, true,
+      'the owner Peer lifetime is the Host Connection fiber: disposing the runtime must abort it')
+  })
+})

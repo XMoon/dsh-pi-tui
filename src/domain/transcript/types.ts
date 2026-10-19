@@ -54,6 +54,15 @@ export interface TranscriptContextPresentation {
   readonly senderSessionId?: string
   /** recall for a cross-session reference; inject for everything else. */
   readonly role: 'inject' | 'recall'
+  /**
+   * Durable delivery provenance: this injected row entered the agent inbox as
+   * a `next-step` item during the SAME turn it materialized in (derived by the
+   * fold from the `agent/inbox/spliced` insert/claim identity chain). Only a
+   * producer-declared `tool-jobs` / `notice` row may carry it; every other
+   * source and every missing/foreign claim stays absent and therefore fails
+   * open (independent Context). Presentation-only — never a Session fact.
+   */
+  readonly sameTurnNextStep?: true
 }
 
 /** The role and producer name to present for one logged context source. */

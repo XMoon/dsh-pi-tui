@@ -173,8 +173,12 @@ release date `YYYY-MM-DD`:
 3. In both changelogs, add `## [X.Y.Z] - YYYY-MM-DD` immediately below the
    empty `## [Unreleased]` heading, then move the accumulated entries under
    that version. Leave a fresh empty `[Unreleased]` section at the top.
-4. Update both changelog reference blocks. Use the tag prefix of the selected
-   publication channel for both links:
+4. Update both changelog reference blocks. `[Unreleased]` names the tag being
+   created, so it carries this release's own tag prefix. The version link's
+   compare base is the previous release tag on the actual timeline and may
+   carry either prefix — the publication channel decides where a release is
+   published, never which tag came before it. A next-channel release cut after
+   a latest-channel one therefore compares from the `v…` tag:
 
    ```text
    # latest channel (v tags)
@@ -183,7 +187,10 @@ release date `YYYY-MM-DD`:
 
    # next channel (next-v tags)
    [Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/next-vX.Y.Z...HEAD
-   [X.Y.Z]: https://github.com/XMoon/dsh-pi-tui/compare/next-v<previous>...next-vX.Y.Z
+   [X.Y.Z]: https://github.com/XMoon/dsh-pi-tui/compare/<previous>...next-vX.Y.Z
+
+   # a next-channel release cut after a latest-channel one
+   [X.Y.Z]: https://github.com/XMoon/dsh-pi-tui/compare/v<previous>...next-vX.Y.Z
    ```
 
 5. Keep the Chinese and English changelog sections in the same order and make
@@ -359,4 +366,5 @@ listed); these are derived from `src/dsh-compat-matrix.json`, enforced by the
 release-notes gate, and must not be replaced by a manually edited summary.
 
 For the next cycle, `[Unreleased]` is intentionally empty. Its comparison link
-should use the tag prefix of the channel being continued (`v...` or `next-v...`).
+names the tag just published (`v...` or `next-v...`, whichever this release
+used).

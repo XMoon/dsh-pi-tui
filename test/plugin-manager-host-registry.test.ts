@@ -10,14 +10,14 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { PluginManagerController } from '../src/app/plugin-manager/controller.ts'
 import { PluginManagerHostRegistry } from '../src/app/plugin-manager/host-registry.ts'
-import { PluginManagerPanel } from '../src/tui/plugin-manager/panel.ts'
+import { PluginManagerWorkspacePanel } from '../src/tui/plugin-manager/workspace.ts'
 import type { PluginManagerPort } from '../src/runtime/plugin-manager-port.ts'
 import { createDiag } from '../src/runtime/process/diagnostics.ts'
 
 function port(): PluginManagerPort {
   return {
     snapshot: async () => ({
-      bundles: [{ name: 'ordinary', enabled: true, installed: true, optional: false, removable: true, rows: [], overrides: [] }],
+      bundles: [{ name: 'ordinary', official: false, availability: 'profile', enabled: true, installed: true, optional: false, removable: true, rows: [], overrides: [] }],
       plugins: [],
       registries: { registry: null, fallbackRegistries: [], resolved: null },
       exemptions: [],
@@ -38,8 +38,8 @@ function port(): PluginManagerPort {
 /** Mirrors the src/index.ts wiring of both entries over one registry. */
 function wiring(): {
   registry: PluginManagerHostRegistry
-  openDirect: () => { panel: PluginManagerPanel } | undefined
-  createSubmenu: (done: (selected?: string) => void) => PluginManagerPanel
+  openDirect: () => { panel: PluginManagerWorkspacePanel } | undefined
+  createPage: (done: () => void) => PluginManagerWorkspacePanel
 } {
   const registry = new PluginManagerHostRegistry()
   const controller = new PluginManagerController(port(), {
@@ -55,26 +55,26 @@ function wiring(): {
       if (registry.isOpen()) return undefined
       let closeSurface: () => void = () => {}
       const claim = registry.claim(() => closeSurface())
-      const panel = new PluginManagerPanel(controller, () => {}, { onDispose: () => claim.releaseExternally() })
+      const panel = new PluginManagerWorkspacePanel(controller, { rows: () => 24, columns: () => 80, requestRender: () => {}, notice: () => undefined, onCopy: () => {} }, { onDispose: () => claim.releaseExternally() })
       // Simulate the overlay: hiding it disposes the panel (its onDispose runs).
       closeSurface = () => panel.dispose()
       controller.open('direct-command')
       return { panel }
     },
-    createSubmenu: (done) => {
+    createPage: (done) => {
       let claim: ReturnType<PluginManagerHostRegistry['claim']> | undefined
-      const panel = new PluginManagerPanel(controller, () => {}, { onDispose: () => claim?.releaseExternally() })
+      const panel = new PluginManagerWorkspacePanel(controller, { rows: () => 24, columns: () => 80, requestRender: () => {}, notice: () => undefined, onCopy: () => {} }, { onDispose: () => claim?.releaseExternally() })
       claim = registry.claim(() => claim?.closeNormally(), done)
-      controller.open('settings-submenu')
+      controller.open('settings-entry')
       return panel
     },
   }
 }
 
 test('an external Settings teardown releases the owner without a user close, and /plugins then opens', () => {
-  const { registry, openDirect, createSubmenu } = wiring()
+  const { registry, openDirect, createPage } = wiring()
   let doneCalls = 0
-  const submenu = createSubmenu(() => { doneCalls += 1 })
+  const submenu = createPage(() => { doneCalls += 1 })
   assert.equal(registry.isOpen(), true)
 
   // The Settings parent is hidden: it disposes the submenu WITHOUT calling done().
@@ -88,9 +88,9 @@ test('an external Settings teardown releases the owner without a user close, and
 })
 
 test('a normal close runs the user close path exactly once and releases the owner', () => {
-  const { registry, createSubmenu } = wiring()
+  const { registry, createPage } = wiring()
   let doneCalls = 0
-  const submenu = createSubmenu(() => { doneCalls += 1 })
+  const submenu = createPage(() => { doneCalls += 1 })
   registry.closeActive()
   assert.equal(doneCalls, 1)
   assert.equal(registry.isOpen(), false)

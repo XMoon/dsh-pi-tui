@@ -98,6 +98,11 @@ export const TUI_KEYBINDINGS = {
 		description: "Move cursor word right",
 	},
 	"tui.editor.cursorLineStart": {
+		// `ctrl+home` is kept as an editor binding on purpose (dsh-pi-tui
+		// divergence X037): the host's Home/End preset (`viewport` mode)
+		// remaps `tui.altScreen.top/bottom` back to home/end, so Ctrl+Home/End
+		// must still reach the editor. Upstream v1.1.0 dropped them here when
+		// it moved the viewport shortcuts onto Ctrl+Home/End.
 		defaultKeys: ["home", "ctrl+home", "ctrl+a"],
 		description: "Move to line start",
 	},
@@ -216,8 +221,8 @@ export const TUI_KEYBINDINGS = {
 		defaultKeys: "escape",
 		description: "Close transcript search",
 	},
-	"tui.altScreen.top": { defaultKeys: "home", description: "Scroll viewport to top" },
-	"tui.altScreen.bottom": { defaultKeys: "end", description: "Scroll viewport to bottom" },
+	"tui.altScreen.top": { defaultKeys: "ctrl+home", description: "Scroll viewport to top" },
+	"tui.altScreen.bottom": { defaultKeys: "ctrl+end", description: "Scroll viewport to bottom" },
 } as const satisfies KeybindingDefinitions;
 
 export interface KeybindingConflict {

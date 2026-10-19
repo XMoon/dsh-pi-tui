@@ -30,6 +30,7 @@ import { DirectConfigPort } from '../src/runtime/direct/config-direct.ts'
 import { DirectHostFilePort } from '../src/runtime/direct/host-file-direct.ts'
 import { WHEEL_SCROLL_LINE_VALUES, wheelScrollLinesOf } from '../src/domain/display/wheel-scroll.ts'
 import { registerTuiCommandsWithDirectSeams } from './support/register-tui-commands.ts'
+import { navigateToLegacySettings } from './support/open-legacy-settings.ts'
 
 
 /** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file
@@ -197,7 +198,7 @@ function setupSettings(options: { wheelScrollLines?: string } = {}) {
     setTerminalProgressMode: () => {}, setNotificationMethod: () => {},
     updateWelcomeCard: () => {},
     openJobView: () => {},
-    openTasksBrowser: () => {}, openPluginManager: () => {}, createPluginManagerSubmenu: () => ({ render: () => [], invalidate: () => {} }),
+    openTasksBrowser: () => {}, openPluginManager: () => {}, createPluginManagerPage: () => undefined,
     openRewindPicker: () => {},
     sessionTransitionPending: () => false,
     withSessionTransition: async <T>(task: () => T | Promise<T>) => task(),
@@ -218,6 +219,7 @@ function setupSettings(options: { wheelScrollLines?: string } = {}) {
       rawInput: '',
       signal: new AbortController().signal,
     })
+    await navigateToLegacySettings(vt)
   }
   const view = async (): Promise<string> => {
     await vt.waitForRender()
@@ -234,7 +236,11 @@ test('/settings lists the Mouse wheel lines row; missing and invalid persisted v
   t.vt.sendInput('Mouse wheel lines')
   const view = await t.view()
   assert.ok(view.includes('Mouse wheel lines'), `row missing:\n${view}`)
-  const row = stripTerminalSequences(view).split('\n').find(line => line.includes('›Mouse wheel lines'))
+  // The detail's TITLE row paints the same `> Mouse wheel lines` shape earlier in the
+  // frame; the list row is the one carrying its value column.
+  const content = (line: string): string => line.slice(line.indexOf('│') + 1, line.lastIndexOf('│')).trim()
+  const row = stripTerminalSequences(view).split('\n')
+    .find(line => line.includes('│') && /^> Mouse wheel lines {2,}\S/.test(content(line)))
   assert.ok(row !== undefined && row.includes('1'),
     `missing persisted value must fall back to 1 (row: ${row}):\n${view}`)
   t.app.dispose()

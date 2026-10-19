@@ -30,7 +30,11 @@ export class ComponentKeymap {
     return [...(APP_KEYBINDINGS[action]?.defaultKeys ?? [])]
   }
 
-  /** The human hint for one component action. */
+  /** The human hint for one component action. Every default key is listed: this
+   *  helper is for surfaces whose hint must name each physical key a user can
+   *  press (the transcript search overlay advertises `esc/ctrl+c` close). An
+   *  ACTION-BAR segment advertises only the primary key — it takes `keysFor()[0]`
+   *  itself (design language §7.1). */
   keyHint(action: AppKeybindingId): string {
     const keys = this.keysFor(action)
     return keys.length === 0 ? '' : keys.map(formatKeyId).join(' / ')

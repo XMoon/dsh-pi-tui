@@ -62,6 +62,8 @@ import type {
   SubagentAllowedModelRoute,
   SubagentModelSelectionConfig,
   TuiSettingsConfig,
+  WebProviderConfig,
+  WebProviderSettings,
   ConfigReadiness,
 } from '../config-port.ts'
 
@@ -136,6 +138,7 @@ export class DirectConfigPort implements ConfigPort {
   readonly permissions: PermissionConfig
   readonly presetDefault: PresetDefaultConfig
   readonly subagentModelSelection: SubagentModelSelectionConfig
+  readonly web: WebProviderConfig
 
   constructor(
     ctx: HostContextLike,
@@ -151,6 +154,7 @@ export class DirectConfigPort implements ConfigPort {
     this.permissions = new DirectPermissionConfig(ctx, agentFor)
     this.presetDefault = new DirectPresetDefaultConfig(ctx)
     this.subagentModelSelection = new DirectSubagentModelSelectionConfig(ctx)
+    this.web = new DirectWebProviderConfig(ctx)
   }
 }
 
@@ -1090,5 +1094,182 @@ function assertOfficialSubagentRoutes(routes: readonly SubagentAllowedModelRoute
       throw new Error(`subagent model selection repeats route "${route.provider}/${route.model}"`)
     }
     seen.add(key)
+  }
+}
+
+/** The OFFICIAL settings section ids the Web provider config addresses. Both
+ *  are row ids of the shipped `dsh-base` composition; the adapter owns this
+ *  schema knowledge so no consumer ever names a namespace or path. */
+const WEB_PROVIDER_NS = 'web'
+const WEB_SEARCH_API_NS = 'web-deepseek-api'
+/** The credential reference the official DeepSeek web providers resolve
+ *  (`apiKeyEnv`'s shipped default); the TUI never writes a literal key. */
+const WEB_API_KEY_REF = 'DEEPSEEK_API_KEY'
+/** Shipped range of the official `web-deepseek-api.count` schema. */
+const WEB_SEARCH_API_COUNT_MIN = 1
+const WEB_SEARCH_API_COUNT_MAX = 50
+
+/** The Direct Web provider config (`ctx.settings` + `ctx.credentials`): the
+ *  official `web` / `web-deepseek-api` sections behind the semantic
+ *  `WebProviderConfig` sub-domain. The Host owns the values and the live
+ *  selection; this adapter only reads them and routes revision-checked writes
+ *  to the exact official paths. */
+export class DirectWebProviderConfig implements WebProviderConfig {
+  private readonly ctx: HostContextLike
+
+  constructor(ctx: HostContextLike) {
+    this.ctx = ctx
+  }
+
+  private settings(): SettingsServiceLike | undefined {
+    return this.ctx.get('settings') as SettingsServiceLike | undefined
+  }
+
+  private credentials(): CredentialsServiceLike | undefined {
+    return this.ctx.get('credentials') as CredentialsServiceLike | undefined
+  }
+
+  available(): boolean {
+    const settings = this.settings()
+    if (settings === undefined) return false
+    // Availability is EXACTLY the authority `read()` needs: both official
+    // sections. A half-mounted configuration has no readable Web settings, so
+    // the UI must present it as unavailable instead of offering writes against
+    // facts it cannot read.
+    return readSettingsDescriptor(settings, WEB_PROVIDER_NS) !== undefined
+      && readSettingsDescriptor(settings, WEB_SEARCH_API_NS) !== undefined
+  }
+
+  async read(): Promise<WebProviderSettings | undefined> {
+    const settings = this.settings()
+    if (settings === undefined) return undefined
+    // Both official descriptors must be readable form projections: a missing
+    // or malformed one is UNAVAILABLE, never a defaulted value.
+    const provider = formValueOf(readSettingsDescriptor(settings, WEB_PROVIDER_NS))
+    const api = formValueOf(readSettingsDescriptor(settings, WEB_SEARCH_API_NS))
+    if (provider === undefined || api === undefined) return undefined
+    const baseURL = api.baseURL
+    const count = api.count
+    const sendOriginalQuestion = api.sendOriginalQuestion
+    if (typeof baseURL !== 'string' || baseURL === '') return undefined
+    if (typeof count !== 'number' || !Number.isInteger(count)) return undefined
+    if (typeof sendOriginalQuestion !== 'boolean') return undefined
+    return {
+      searchProvider: optionalId(provider.searchProvider),
+      fetchProvider: optionalId(provider.fetchProvider),
+      api: { baseURL, count, sendOriginalQuestion },
+      credential: await this.credentialFact(),
+    }
+  }
+
+  /** Presence/source of the official reference (never the value). An unmounted
+   *  credential store is `configured: false` — the same answer the Direct
+   *  `/login` port gives, and the UI's own guidance names the command. */
+  private async credentialFact(): Promise<WebProviderSettings['credential']> {
+    const credentials = this.credentials()
+    if (credentials === undefined) return { configured: false }
+    const info = await credentials.describe(WEB_API_KEY_REF as CredentialRef)
+    return {
+      configured: info.configured === true,
+      ...(typeof info.source === 'string' && info.source !== '' ? { source: info.source } : {}),
+    }
+  }
+
+  async setSearchProvider(id: 'deepseek-official' | 'deepseek-search-api'): Promise<void> {
+    assertSearchProviderId(id)
+    await this.mutate('web', [{ op: 'set', path: ['searchProvider'], value: id }])
+  }
+
+  async setFetchProvider(id: 'http' | 'deepseek-fetch-api'): Promise<void> {
+    assertFetchProviderId(id)
+    await this.mutate('web', [{ op: 'set', path: ['fetchProvider'], value: id }])
+  }
+
+  async setSearchApiCount(count: number): Promise<void> {
+    assertSearchApiCount(count)
+    await this.mutate(WEB_SEARCH_API_NS, [{ op: 'set', path: ['count'], value: count }])
+  }
+
+  async setSendOriginalQuestion(enabled: boolean): Promise<void> {
+    await this.mutate(WEB_SEARCH_API_NS, [{ op: 'set', path: ['sendOriginalQuestion'], value: enabled }])
+  }
+
+  async setSearchApiBaseURL(url: string): Promise<void> {
+    assertSearchApiBaseURL(url)
+    await this.mutate(WEB_SEARCH_API_NS, [{ op: 'set', path: ['baseURL'], value: url }])
+  }
+
+  /** One revision-checked official settings mutation. The section must be a
+   *  real configured entry: an unmounted section is an explicit failure rather
+   *  than a write against an invented namespace. */
+  private async mutate(
+    ns: typeof WEB_PROVIDER_NS | typeof WEB_SEARCH_API_NS,
+    ops: readonly { op: 'set'; path: readonly string[]; value: unknown }[],
+  ): Promise<void> {
+    const settings = this.settings()
+    if (settings === undefined) throw new Error('settings service unavailable')
+    if (readSettingsDescriptor(settings, ns) === undefined) {
+      throw new Error(`the official Host settings section "${ns}" is not mounted`)
+    }
+    await mutateSettings(settings, ns, ops)
+  }
+}
+
+/** The form-projected value of one settings descriptor (volatile fields only),
+ *  or `undefined` when the descriptor or its value is unusable. */
+function formValueOf(descriptor: SettingsDescriptorLike | undefined): Record<string, unknown> | undefined {
+  const value = descriptor?.value
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined
+  return value as Record<string, unknown>
+}
+
+/** A configured provider id, or `undefined` for an absent/empty selection. */
+function optionalId(value: unknown): string | undefined {
+  return typeof value === 'string' && value !== '' ? value : undefined
+}
+
+/** The official candidate ids (the only values this UI ever writes). */
+function assertSearchProviderId(id: string): void {
+  if (id !== 'deepseek-official' && id !== 'deepseek-search-api') {
+    throw new Error(`unsupported web search provider id "${id}"`)
+  }
+}
+
+function assertFetchProviderId(id: string): void {
+  if (id !== 'http' && id !== 'deepseek-fetch-api') {
+    throw new Error(`unsupported web fetch provider id "${id}"`)
+  }
+}
+
+/** The official `count` rule, checked before the write (the Host validates
+ *  again on the section boundary). */
+function assertSearchApiCount(count: number): void {
+  if (!Number.isInteger(count) || count < WEB_SEARCH_API_COUNT_MIN || count > WEB_SEARCH_API_COUNT_MAX) {
+    throw new Error(`the web search API count must be an integer from ${WEB_SEARCH_API_COUNT_MIN} through ${WEB_SEARCH_API_COUNT_MAX}`)
+  }
+}
+
+/**
+ * The API base rule for the human write entry: an absolute `https:` URL with no
+ * userinfo, query, fragment, or trailing `/search` / `/fetch` action name. The
+ * official provider still owns runtime availability — this only keeps an
+ * unusable or dangerous base out of the durable configuration.
+ */
+function assertSearchApiBaseURL(url: string): void {
+  let parsed: URL
+  try {
+    parsed = new URL(url)
+  } catch {
+    throw new Error('the Search/Fetch API endpoint must be an absolute https:// URL')
+  }
+  if (parsed.protocol !== 'https:') throw new Error('the Search/Fetch API endpoint must use https://')
+  if (parsed.username !== '' || parsed.password !== '') {
+    throw new Error('the Search/Fetch API endpoint must not carry credentials in the URL')
+  }
+  if (parsed.search !== '' || parsed.hash !== '') {
+    throw new Error('the Search/Fetch API endpoint must not carry a query or fragment')
+  }
+  if (/\/(?:search|fetch)$/u.test(parsed.pathname)) {
+    throw new Error('the Search/Fetch API endpoint is the API base: drop the trailing /search or /fetch action')
   }
 }

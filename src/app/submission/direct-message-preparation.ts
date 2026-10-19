@@ -62,7 +62,10 @@ export interface DirectPrepareInputDeps {
  *   participating in the local-submission echo flow persists the id minted
  *   before its first asynchronous await as the message source `rpcId`, so the
  *   local echo and the authoritative occurrence share one correlation key.
- *   Injected context and non-prompt workflows omit it.
+ *   Injected context and non-prompt workflows omit it — and with it the
+ *   request zone, because only an identified ordinary human prompt carries
+ *   one. `clientTimeZone` is the Client-sampled zone of THIS submit (see
+ *   `client/time-zone.ts`), supplied by the caller at the send point.
  * @returns the frozen user message.
  * @throws ImageAdmissionError/FileInputError when the deployment has no
  *   attachment service but the live draft references an attachment;
@@ -72,9 +75,9 @@ export async function prepareUserMessage(
   text: string,
   store: DraftImageStoreLike,
   deps: DirectPrepareInputDeps,
-  options: { readonly requestId?: string } = {},
+  options: { readonly requestId?: string; readonly clientTimeZone?: string } = {},
 ): Promise<UserMessage> {
-  const source = userSource(options.requestId)
+  const source = userSource(options)
   // Host `@`-mention canonicalization must run before strict local
   // attachment-placeholder expansion. Canonical placeholders contain no `@`.
   deps.signal?.throwIfAborted()
@@ -128,13 +131,22 @@ export async function prepareUserMessage(
  * The Direct user-message source. `MessageSourceMap` is documented
  * merge-extensible; this Direct adaptation of the official `user-rpc` source
  * carries the plain correlation id so a local submission echo can be retired
- * by an authoritative occurrence. The cast keeps the extra field out of the
- * base `@deepseek-ai/dsh-llm` shape, which does not yet declare `rpcId`.
+ * by an authoritative occurrence, plus the Client-sampled request zone the
+ * Host's time-context reader derives from (`kind:'user'` + string `rpcId` +
+ * `clientTimeZone`). The cast keeps the extra fields out of the base
+ * `@deepseek-ai/dsh-llm` shape, which does not yet declare `rpcId`.
+ *
+ * The zone is attached ONLY to the identified ordinary prompt: an
+ * unidentified injected/skill submission must not be dressed up as a human
+ * request (`time-context` derives a zone from human-rpc identity alone).
  */
-function userSource(requestId: string | undefined): MessageSource {
-  return (requestId === undefined
-    ? { kind: 'user' }
-    : { kind: 'user', rpcId: requestId }) as MessageSource
+function userSource(options: { readonly requestId?: string; readonly clientTimeZone?: string }): MessageSource {
+  if (options.requestId === undefined) return { kind: 'user' } as MessageSource
+  return {
+    kind: 'user',
+    rpcId: options.requestId,
+    ...(options.clientTimeZone === undefined ? {} : { clientTimeZone: options.clientTimeZone }),
+  } as MessageSource
 }
 
 function buildAttachmentContentBlocks(

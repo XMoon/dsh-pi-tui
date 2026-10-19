@@ -506,3 +506,37 @@ test('two Thought runs of one turn keep independent Focus component identities',
   assert.notStrictEqual(mountedComponents(app)[0], mounted[0],
     'an evicted run never resurrects its stale component (it is rebuilt, not reused)')
 })
+
+// ── steady-render display projection (no per-frame rescan) ─────────────────
+
+test('a steady MULTI-SLOT compact render never rescans its unchanged text', async () => {
+  const { CompactWorkComponent } = await import('../src/tui/components/transcript/compact-work.ts')
+  // The real render sequence: ONE component frame projects Think and Action
+  // (two DIFFERENT sources); the next frame projects the same pair again.
+  const summary = {
+    actionStats: { total: 1, calls: 1, types: new Map(), retries: 0 },
+    think: { text: 'long reasoning text '.repeat(200), running: false },
+  } as never
+  const action = { kind: 'tool', display: 'Bash · npm test' } as never
+  const component = new CompactWorkComponent({
+    span: {} as never,
+    expanded: false,
+    summary,
+    action,
+    showPreview: true,
+  })
+  component.render(80)
+  const afterFirstFrame = component.displayProjectionRunsForTest()
+  assert.ok(afterFirstFrame >= 2, `the first frame projects both slots (${afterFirstFrame})`)
+  // A second, UNCHANGED frame must project NOTHING new: a single-slot memo
+  // would thrash Think→Action and rescan both.
+  component.render(80)
+  component.render(80)
+  assert.equal(component.displayProjectionRunsForTest(), afterFirstFrame,
+    'a steady multi-slot frame rescans neither source')
+  // A changed Think source reprojects immediately (and only it).
+  ;(summary as unknown as { think: { text: string; running: boolean } }).think = { text: 'changed reasoning', running: false }
+  component.render(80)
+  assert.equal(component.displayProjectionRunsForTest(), afterFirstFrame + 1,
+    'only the changed slot is reprojected')
+})

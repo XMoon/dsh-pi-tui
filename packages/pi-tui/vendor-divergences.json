@@ -3,17 +3,17 @@
  "baseline": {
   "repository": "earendil-works/pi",
   "package": "packages/tui",
-  "tag": "v0.85.1",
-  "commit": "d981de1229ef899957bbe968bc8dcda02a21f477"
+  "tag": "v1.1.0",
+  "commit": "abe508e1b89912adde45528136c3221eb69acdd7"
  },
  "verification": {
-  "auditedAt": "2026-09-09",
-  "branch": "chore/revendor-pi-tui-v0.85.1",
-  "auditedSourceCommit": "d9cfef25b9a9b98ce6b7818bcd14601538d1f1de",
+  "auditedAt": "2026-10-11",
+  "branch": "chore/div-retire-c-collapse-tail",
+  "auditedSourceCommit": "653a2aab4ea00de2e4056f6774d21bd216848917",
   "referenceSnapshots": {
    "upstream": {
     "repository": "earendil-works/pi",
-    "commit": "d981de1229ef899957bbe968bc8dcda02a21f477"
+    "commit": "abe508e1b89912adde45528136c3221eb69acdd7"
    },
    "kimi": {
     "repository": "MoonshotAI/kimi-code",
@@ -21,10 +21,22 @@
    }
   },
   "method": [
-   "PR3 re-vendor audit: replaced the Earendil packages/tui baseline with exact v0.85.1 (d981de1), re-audited every source-active divergence against the new baseline, re-applied only retained DSH seams, adopted the upstream renderer, mouse, search, Loader and terminal changes, and validated the current Host question/transcript/focus/input surfaces against the immutable source snapshot recorded in verification.auditedSourceCommit."
+   "v1.1.0 diff-first re-vendor: froze the fork base commit, produced the U0->local, U0->U1 and local-test diffs, built a hunk-level conflict matrix for every local hunk, constructed the candidate from the Earendil v1.1.0 tree and transplanted the local hunks with a per-file three-way merge, then reconciled each conflict against the upstream implementation and its callers.",
+   "Every ACTIVE record was re-verified as a contract at v1.1.0: its local hunk is still present in the candidate source, its upstream comparison still holds against the pinned v1.1.0 tree, and its guarding test still covers the behavior.",
+   "Historical records (ABSORBED_UPSTREAM, MOVED_TO_HOST, SUPERSEDED, REMOVED_UNUSED) were re-pinned to the new baseline for gate consistency but were not re-applied; none was resurrected.",
+   "Host-visible API changes were migrated with the minimum edit: TuiApp queries the fork's queryTerminalColors and derives the initial scheme from the reported background (upstream removed the DSR 996 probe), and the Host test/bench terminal fakes implement the new Terminal.setProgramStatus interface without ever driving it.",
+   "Validated against the immutable source snapshot recorded in verification.auditedSourceCommit.",
+   "Post-PR272 DIV retirement audit (PR A): X027 and X049 were retired by product decision, their fork hunks deleted and packages/pi-tui/src/autocomplete.ts plus src/alt-screen-search.ts restored to the pinned v1.1.0 blobs byte-for-byte; both records describe the post-retirement reality, including the deliberate loss of the retired local behavior.",
+   "Post-PR272 DIV retirement audit (PR B): X038 was retired by product decision — src/paste-burst.ts deleted, the Editor paste-burst state/option/setter/feeds and the Enter-suppression branch removed — and the record describes the post-retirement reality, including the deliberate loss of the lost-marker paste fallback; true bracketed paste and X037 submit remapping stay intact.",
+   "Post-PR272 DIV retirement audit (PR C): X057 was retired by product decision — the dedicated expanded-user tail control row (its hit slot, height rule, mount branch and renderer), the painted-frame copyBlankRows cache and the fork copy-source seam were deleted together — and the record describes the post-retirement reality, including the deliberate loss of the tail label and its copy filter."
   ],
   "notes": [
-   "Upstream v0.85.1 (c505f4c19 'fix(tui): remove coding-agent config reads from pi-tui') intentionally removed the PI_HARDWARE_CURSOR / PI_CLEAR_ON_SHRINK / PI_CODING_AGENT_DIR environment knobs that existed in v0.84.4; the re-vendor follows upstream (hardcoded defaults, constructor parameters remain the contract). Guarded by the showHardwareCursor constructor-parameter test in tui-alt-screen.test.ts."
+   "The v0.85.1 baseline (c505f4c19 'fix(tui): remove coding-agent config reads from pi-tui') had already removed the PI_HARDWARE_CURSOR / PI_CLEAR_ON_SHRINK / PI_CODING_AGENT_DIR environment knobs that existed in v0.84.4; the fork follows upstream (hardcoded defaults, constructor parameters remain the contract). Guarded by the showHardwareCursor constructor-parameter test in tui-alt-screen.test.ts.",
+   "v1.1.0 removed queryTerminalBackgroundColor/queryTerminalColorScheme in favour of queryTerminalColors (OSC 10/11/4 + DA1), moved the viewport shortcuts onto Ctrl+Home/End, and added the required Terminal.setProgramStatus plus the native/ prebuild surface. The fork keeps its host-visible contracts: the host observes the terminal background through the narrow OSC 11 seam (X060, which replaced the retired X008 serialization in PR #272), X037 keeps the editor Ctrl+Home/End bindings for the host Home/End preset, the host keeps its single OSC 7501 writer, and native/ prebuilds stay unvendored (X025).",
+   "PR #272 closure: X008 (full-query serialization) is SUPERSEDED and the narrow OSC 11 observation took its place (X060). The upstream full-query implementation and its tests are used verbatim; the host no longer issues the full transaction.",
+   "PR A closure: X027 (fd trailing-separator-independent directory typing) and X049 (fork built-in fullscreen search query-Input mouse forwarding) are REMOVED_UNUSED. The surviving host surfaces are the upstream provider path and the host-owned TranscriptSearchComponent, whose routing is pinned by test/transcript-search-interaction.test.ts.",
+   "PR B closure: X038 (PasteBurst non-bracketed paste fallback and its opt-out API) is REMOVED_UNUSED. Rapid plain typing followed by a submit key now submits normally; real bracketed paste, X004A paste markers, X004B undo/redo and the X037 editor-owned submit binding are unchanged and still covered.",
+   "PR C closure: X057 (copy-source line filter for host presentation chrome) is REMOVED_UNUSED. The expanded long-user message is collapsed by a plain click on its BODY in every surface, no `▴ Collapse` chrome is painted, the copy source is the real transcript content, and Ctrl+O keeps its existing ownership."
   ]
  },
  "categoryDefinitions": {
@@ -151,7 +163,7 @@
    "records": [
     "X011"
    ],
-   "reason": "Earendil v0.85.1 clips Input prompts at extremely narrow widths; direct width-0/1 regressions guard the absorbed behavior."
+   "reason": "The pinned v1.1.0 Earendil input.ts clips Input prompts at extremely narrow widths; direct width-0/1 regressions guard the absorbed behavior."
   },
   {
    "decision": "NOT_MOVABLE",
@@ -172,7 +184,7 @@
    "records": [
     "X050"
    ],
-   "reason": "Editor visual-line/wrapped-segment cursor mapping and slash-autocomplete click-submit are internal Editor semantics (two distinct bugs confirmed against upstream v0.85.1 and main); they cannot be reproduced through the public Editor surface from a host wrapper."
+   "reason": "Editor visual-line/wrapped-segment cursor mapping and slash-autocomplete click-submit are internal Editor semantics (two distinct bugs confirmed against the pinned v1.1.0 baseline); they cannot be reproduced through the public Editor surface from a host wrapper."
   },
   {
    "decision": "NOT_MOVABLE",
@@ -307,8 +319,8 @@
     "equivalence": "NO",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "d981de1229ef899957bbe968bc8dcda02a21f477",
-     "referenceRef": "d981de1229ef899957bbe968bc8dcda02a21f477"
+     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
+     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
     },
     "relevantFiles": [
      "packages/tui/src/components/select-list.ts"
@@ -409,8 +421,8 @@
     "equivalence": "NO",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "d981de1229ef899957bbe968bc8dcda02a21f477",
-     "referenceRef": "d981de1229ef899957bbe968bc8dcda02a21f477"
+     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
+     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
     },
     "relevantFiles": [
      "packages/tui/src/components/select-list.ts"
@@ -494,8 +506,8 @@
     "equivalence": "YES",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "d981de1229ef899957bbe968bc8dcda02a21f477",
-     "referenceRef": "d981de1229ef899957bbe968bc8dcda02a21f477"
+     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
+     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
     },
     "relevantFiles": [
      "packages/tui/src/components/editor.ts"
@@ -587,8 +599,8 @@
     "equivalence": "NO",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "d981de1229ef899957bbe968bc8dcda02a21f477",
-     "referenceRef": "d981de1229ef899957bbe968bc8dcda02a21f477"
+     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
+     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
     },
     "relevantFiles": [
      "packages/tui/src/components/editor.ts"
@@ -605,7 +617,7 @@
     "evidence": []
    },
    "audit": {
-    "lastAuditedAt": "2026-09-03",
+    "lastAuditedAt": "2026-10-11",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -677,8 +689,8 @@
     "equivalence": "NO",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "d981de1229ef899957bbe968bc8dcda02a21f477",
-     "referenceRef": "d981de1229ef899957bbe968bc8dcda02a21f477"
+     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
+     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
     },
     "relevantFiles": [
      "packages/tui/src/components/editor.ts",
@@ -695,7 +707,7 @@
     "evidence": []
    },
    "audit": {
-    "lastAuditedAt": "2026-09-03",
+    "lastAuditedAt": "2026-10-11",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -770,8 +782,8 @@
     "equivalence": "PARTIAL",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "d981de1229ef899957bbe968bc8dcda02a21f477",
-     "referenceRef": "d981de1229ef899957bbe968bc8dcda02a21f477"
+     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
+     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
     },
     "relevantFiles": [
      "packages/tui/src/components/editor.ts"
@@ -788,7 +800,7 @@
     "evidence": []
    },
    "audit": {
-    "lastAuditedAt": "2026-09-03",
+    "lastAuditedAt": "2026-10-11",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -858,8 +870,8 @@
     "equivalence": "NO",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "d981de1229ef899957bbe968bc8dcda02a21f477",
-     "referenceRef": "d981de1229ef899957bbe968bc8dcda02a21f477"
+     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
+     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
     },
     "relevantFiles": [
      "packages/tui/src/word-navigation.ts"
@@ -875,7 +887,7 @@
     "evidence": []
    },
    "audit": {
-    "lastAuditedAt": "2026-09-03",
+    "lastAuditedAt": "2026-10-11",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -936,7 +948,7 @@
       "src/tui/pickers/model-picker.ts ModelPicker ownership-safe external dispose (idempotent disposed latch; teardown never closes/applies/navigates, and a late write settlement cannot act on a dead surface)",
       "src/tui/pickers/subagent-model-menu.ts SubagentModelAllowlistPicker ownership-safe external dispose (idempotent disposed latch; a late allowlist settle cannot repaint or toast after the submenu closed)"
      ],
-     "notes": "Host final teardown relies on exactly-once release. Post-v0.85.1 audit: the SettingsList submenu consumer (theme-menu) and the SearchablePicker-based submenu components (/settings SubagentModelAllowlistPicker and /model ModelPicker) implement ownership-safe external dispose so a late async settle cannot repaint or apply after teardown (regressions in test/model-picker.test.ts and test/subagent-model-menu.test.ts)."
+     "notes": "Host final teardown relies on exactly-once release. Post-revendor audit: the SettingsList submenu consumer (theme-menu) and the SearchablePicker-based submenu components (/settings SubagentModelAllowlistPicker and /model ModelPicker) implement ownership-safe external dispose so a late async settle cannot repaint or apply after teardown (regressions in test/model-picker.test.ts and test/subagent-model-menu.test.ts)."
     },
     "publicExtension": {
      "audited": true,
@@ -972,8 +984,8 @@
     "equivalence": "NO",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "d981de1229ef899957bbe968bc8dcda02a21f477",
-     "referenceRef": "d981de1229ef899957bbe968bc8dcda02a21f477"
+     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
+     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
     },
     "relevantFiles": [
      "packages/tui/src/tui.ts",
@@ -996,7 +1008,7 @@
     "evidence": []
    },
    "audit": {
-    "lastAuditedAt": "2026-09-09",
+    "lastAuditedAt": "2026-10-11",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -1005,12 +1017,12 @@
      "behavioral",
      "tests"
     ],
-    "notes": "Known ownership graph was re-read in the audited checkout. X007 remains KEEP HARD; no source deletion or upstream absorption experiment was attempted. Re-audited after the v0.85.1 mouse-parity pass: the Model/Effort async submenu ownership chain is closed by external disposal."
+    "notes": "Known ownership graph was re-read in the audited checkout. X007 remains KEEP HARD; no source deletion or upstream absorption experiment was attempted. Re-audited after the v0.85.1 mouse-parity pass: the Model/Effort async submenu ownership chain is closed by external disposal. Re-verified for the v1.1.0 re-vendor (abe508e1): the Box/Container/SettingsList disposal seams are untouched upstream and the transplant kept every dispose exactly-once guard."
    }
   },
   "X008": {
-   "title": "Serialized OSC 11 queries with late-reply tombstone",
-   "status": "ACTIVE",
+   "title": "Serialized terminal color queries with a late-reply tombstone (retired)",
+   "status": "SUPERSEDED",
    "category": [
     "BUGFIX_MISSING_UPSTREAM"
    ],
@@ -1018,77 +1030,89 @@
    "files": [
     "src/tui.ts"
    ],
-   "why": "OSC 11 replies carry no request id, so a reply that arrives after its query timed out cannot be paired by content. The fork serializes queries: at most one query is ever in flight, and a timed-out query stays as the active tombstone until a late reply consumes it — the next waiting query is sent only after consumption, so a late reply can never be misattributed to a different query.",
+   "why": "The fork serialized the upstream full color query so a late reply could never be attributed to a later query, and ended each burst with its own sentinel. Both halves are retired: the external review of PR #272 showed the DA1 sentinel shared ProcessTerminal's keyboard-negotiation accounting (X016) and a later DSR 6/CPR sentinel collided with the legacy modified-F3 key encoding. The host never needed the full transaction (it reads only the background), so the serialization, tombstone, sentinels and the DA-debt window were deleted and the whole full-query region of packages/pi-tui/src/tui.ts restored to upstream verbatim; the host uses the narrow OSC 11 observation instead (X060).",
    "changedSurface": [
-    "OSC 11 queries are serialized through a single active slot plus a waiting queue",
-    "a timed-out in-flight query remains the active late-reply tombstone until consumed",
-    "late OSC 11 replies are swallowed by the tombstone (or the no-reply-expected path) before generic counter handling"
+    "retired: queryTerminalColors wrote at most one outstanding burst (terminalColorQueryWritten / pumpTerminalColorQueries)",
+    "retired: a timed-out head query stayed the outstanding tombstone until its sentinel arrived, and a query that timed out behind it was dropped as never written",
+    "retired: the burst ended with a fork sentinel (a DA1 request, then a DSR 6 request) instead of upstream's DA1, with DEVICE_ATTRIBUTES_DEBT_TIMEOUT_MS bounding the keyboard-negotiation debt",
+    "retired: an unowned OSC color reply, a cursor-position report and a DA1 were swallowed at the TUI layer"
    ],
    "dependencies": {
     "vendorInternal": {
      "audited": true,
      "items": [
-      "TuiBase query queue, timeout callback, response classifier, and reply counter are one protocol state machine."
+      "No vendor code calls the retired serialization helpers: pumpTerminalColorQueries/terminalColorQueryWritten were private to TuiBase and were deleted with it.",
+      "ProcessTerminal keeps upstream's DA1 consumption and stop/restart semantics (X016); the DA-debt deadline that only existed for X008 was deleted with it."
      ],
-     "notes": "Queue and counter order cannot be changed independently."
+     "notes": "The retirement removed private helpers only; no vendor-internal consumer remained."
     },
     "inheritanceStructural": {
      "audited": true,
-     "items": [
-      "TuiBase is shared by regular and alternate screens."
-     ],
-     "notes": "Both screens inherit the protocol handling path."
+     "items": [],
+     "notes": "The serialization introduced no inheritance edge; TuiMainScreen and TuiAltScreen inherit queryTerminalColors from TuiBase either way."
     },
     "host": {
      "audited": true,
      "items": [
-      "src/tui-app.ts TuiApp.runAutoDetect issues OSC 11 background queries",
-      "src/theme.ts provides palette/detection helpers but does not own the query"
+      "TuiApp no longer calls queryTerminalColors at all: runAutoDetect uses queryTerminalBackgroundColor (X060), and trackTerminalTheme only toggles Mode 2031."
      ],
-     "notes": "The query is issued by the host app and routed through the active screen; theme.ts is recorded only as a helper boundary."
+     "notes": "The host was the only local consumer of the serialized full query; its theme path now uses the narrow seam."
     },
     "publicExtension": {
      "audited": true,
-     "items": [],
-     "notes": "No extension directly owns terminal protocol replies."
+     "items": [
+      "queryTerminalColors stays public and upstream-verbatim (OSC 10/11/4 + DA1, FIFO attribution, onLateReply); a consumer that needs the foreground or the palette still uses it, now with upstream's semantics instead of the fork's serialized ones."
+     ],
+     "notes": "The retirement removes a fork-specific guarantee from a public method, not the method or its return shape."
     },
     "behavioral": {
      "audited": true,
      "items": [
-      "a sole late timed-out reply is swallowed by its tombstone and never resolves a different query",
-      "background autodetect remains ordered across retries",
-      "a terminal that never replies leaves the tombstone in place: every waiting query settles on its own referenced timeout (by-design liveness tradeoff — no future query is sent until the tombstone is consumed)"
+      "input hygiene for OSC 11 replies is now owned by the narrow seam on screens that use it (X060); other color replies follow upstream again",
+      "the keyboard-negotiation DA accounting is back to upstream's unbounded count pairing (X016)"
      ],
-     "notes": "Serialization removes the protocol ambiguity (a reply always pairs with the single in-flight query or its tombstone) at the cost of blocking later queries while a timed-out query awaits its late reply; that tradeoff is deliberate and documented."
+     "notes": "Both behavioral changes are deliberate and are pinned by the X060 tests plus the upstream suite."
     }
    },
    "tests": [
-    "packages/pi-tui/test/osc11-query.test.ts: timed-out query queue/counter alignment",
-    "packages/pi-tui/test/terminal-colors.test.ts: active-screen query routing",
-    "packages/pi-tui/test/osc11-query.test.ts: serialized queries — a late reply to a timed-out query is swallowed by its tombstone and never resolves a concurrent or later query (A-timeout/B-pending and A-timeout-then-B-later regressions)"
+    "retired: packages/pi-tui/test/terminal-colors.test.ts now runs the upstream v1.1.0 suite verbatim against the restored implementation (no DSR/CPR sentinel, no write serialization)",
+    "retired: the retired serialization/sentinel tests (osc11-query.test.ts and the DA1 cross-layer describe in terminal.test.ts) were deleted rather than left asserting a mechanism that no longer exists",
+    "replacement coverage: the host-visible behavior the retirement kept lives in packages/pi-tui/test/terminal-background-query.test.ts (X060) and test/rendering.test.ts (X060)"
    ],
    "upstream": {
-    "equivalence": "NO",
+    "equivalence": "YES",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "d981de1229ef899957bbe968bc8dcda02a21f477",
-     "referenceRef": "d981de1229ef899957bbe968bc8dcda02a21f477"
+     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
+     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
     },
     "relevantFiles": [
-     "packages/tui/src/tui.ts"
+     "packages/tui/src/tui.ts",
+     "packages/tui/src/terminal.ts"
     ],
     "relevantIssues": [],
-    "semanticDelta": "Upstream keeps timed-out queries in the pending queue and uses a different counter check; it is not equivalent under a late reply."
+    "semanticDelta": "The full-query region of packages/pi-tui/src/tui.ts is upstream v1.1.0 verbatim: one OSC 10 + OSC 11 + OSC 4 x16 burst ending in a DA1 request, FIFO attribution to the oldest pending query, and late replies delivered to onLateReply. Only the narrow background observation (X060) is local, and it never writes the full transaction."
    },
    "retirement": {
     "conditions": [
-     "Retire only after upstream proves the same timeout, late-reply, retry, and active-screen ordering semantics with protocol tests."
+     "Delete the serialization/sentinel machinery rather than re-tuning it, restoring the upstream tui.ts full-query region and the upstream terminal.ts DA consumption verbatim.",
+     "Move the host's theme detection onto a narrow OSC 11 observation, so the retired transaction has no local consumer.",
+     "Keep the upstream full-query tests verbatim and replace the retired-scenario tests with the narrow seam's own tests before changing the status."
     ],
-    "replacementMapping": [],
-    "evidence": []
+    "replacementMapping": [
+     "full-query write serialization + fork sentinel -> retired; upstream queryTerminalColors is used verbatim (test: packages/pi-tui/test/terminal-colors.test.ts)",
+     "host theme detection over the full transaction -> X060 narrow OSC 11 background observation (test: packages/pi-tui/test/terminal-background-query.test.ts and test/rendering.test.ts)",
+     "keyboard-negotiation DA debt window -> upstream X016 count pairing, unbounded (test: packages/pi-tui/test/terminal.test.ts)"
+    ],
+    "evidence": [
+     "packages/pi-tui/src/tui.ts full-query region and terminal.ts negotiation handler diff clean against the pinned upstream abe508e1 snapshot",
+     "fork suite green on the new source (upstream color-query suite included, retired-transaction tests deleted)",
+     "root bundle typecheck + product suite green with the host on the narrow seam",
+     "pi-vendor-diff --strict, pi-divergence-ledger and pi-surface-compat gates green on the new source"
+    ]
    },
    "audit": {
-    "lastAuditedAt": "2026-09-03",
+    "lastAuditedAt": "2026-10-11",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -1097,7 +1121,7 @@
      "behavioral",
      "tests"
     ],
-    "notes": "Protocol queue ownership and the reply-swallowing order were checked; no host grep-only conclusion was used."
+    "notes": "Retired in PR #272 after the external review: the CPR/F3 blocker is closed by deleting the CPR consumption logic, and the DA1 cross-layer blocker by the host no longer issuing a full query. The record is kept as history; it must not be read as a claim that upstream's full query was fixed."
    }
   },
   "X009": {
@@ -1158,8 +1182,8 @@
     "equivalence": "NO",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "d981de1229ef899957bbe968bc8dcda02a21f477",
-     "referenceRef": "d981de1229ef899957bbe968bc8dcda02a21f477"
+     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
+     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
     },
     "relevantFiles": [
      "packages/tui/src/tui-main-screen.ts"
@@ -1175,7 +1199,7 @@
     "evidence": []
    },
    "audit": {
-    "lastAuditedAt": "2026-09-03",
+    "lastAuditedAt": "2026-10-11",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -1244,8 +1268,8 @@
     "equivalence": "NO",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "d981de1229ef899957bbe968bc8dcda02a21f477",
-     "referenceRef": "d981de1229ef899957bbe968bc8dcda02a21f477"
+     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
+     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
     },
     "relevantFiles": [
      "packages/tui/src/stdin-buffer.ts"
@@ -1261,7 +1285,7 @@
     "evidence": []
    },
    "audit": {
-    "lastAuditedAt": "2026-09-03",
+    "lastAuditedAt": "2026-10-11",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -1333,14 +1357,14 @@
     "equivalence": "YES",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "d981de1229ef899957bbe968bc8dcda02a21f477",
-     "referenceRef": "d981de1229ef899957bbe968bc8dcda02a21f477"
+     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
+     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
     },
     "relevantFiles": [
      "packages/tui/src/components/input.ts"
     ],
     "relevantIssues": [],
-    "semanticDelta": "The pinned v0.85.1 baseline (d981de1) already clips the prompt at tiny widths (availableWidth <= 0 returns truncateToWidth(this.prompt, width, \"\")); the local source matches the upstream baseline exactly for this behavior."
+    "semanticDelta": "The pinned v1.1.0 baseline (abe508e1) already clips the prompt at tiny widths (availableWidth <= 0 returns truncateToWidth(this.prompt, width, \"\")); the local source matches the upstream baseline exactly for this behavior."
    },
    "retirement": {
     "conditions": [
@@ -1349,7 +1373,7 @@
     "replacementMapping": [],
     "evidence": [
      "git blob comparison at the pinned commit shows no local source divergence for the prompt-clipping path.",
-     "The pinned v0.85.1 upstream input.ts returns truncateToWidth(this.prompt, width, \"\") when availableWidth <= 0.",
+     "The pinned v1.1.0 upstream input.ts returns truncateToWidth(this.prompt, width, \"\") when availableWidth <= 0.",
      "Gate evidence: fork typecheck, fork tests, generated-ledger validation, and strict source-diff coverage pass with the record absorbed."
     ]
    },
@@ -1363,7 +1387,7 @@
      "behavioral",
      "tests"
     ],
-    "notes": "Absorbed upstream: the pinned v0.85.1 baseline (d981de1) already clips Input prompts at extremely narrow widths, so the fork keeps the pinned upstream behavior with no local source divergence; direct width-0/1 regressions guard the absorbed behavior (equivalence YES)."
+    "notes": "Absorbed upstream: the pinned v1.1.0 baseline (abe508e1) already clips Input prompts at extremely narrow widths, so the fork keeps the pinned upstream behavior with no local source divergence; direct width-0/1 regressions guard the absorbed behavior (equivalence YES; re-confirmed at v1.1.0)."
    }
   },
   "X012": {
@@ -1423,8 +1447,8 @@
     "equivalence": "YES",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "d981de1229ef899957bbe968bc8dcda02a21f477",
-     "referenceRef": "d981de1229ef899957bbe968bc8dcda02a21f477"
+     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
+     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
     },
     "relevantFiles": [
      "packages/tui/src/fuzzy.ts",
@@ -1509,8 +1533,8 @@
     "equivalence": "YES",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "d981de1229ef899957bbe968bc8dcda02a21f477",
-     "referenceRef": "d981de1229ef899957bbe968bc8dcda02a21f477"
+     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
+     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
     },
     "relevantFiles": [
      "packages/tui/src/components/loader.ts"
@@ -1598,14 +1622,14 @@
    "tests": [
     "packages/pi-tui/test/layout.test.ts: indirect measure and scrollbar layout correctness",
     "packages/pi-tui/test/render-churn-bench.ts: total layout/render churn with representative workload",
-    "Missing direct measure-count/cache-hit, invalidation, and cache-versus-no-cache performance assertion"
+    "docs/perf-baseline.md: DIV cache A/B evidence (2026-10-11) — scripts/bench/div-cache-ab.mts, BASE vs NO_LAYOUT_CACHE, 21 paired rounds per width 80/120/160 including the corrected churn fixture (real auto-basis HStack rows; the earlier VStack-of-Texts shape never called measureWidth at all): paired medians 0.92x-1.05x with sign tests 4/21-14/21 (no robust direction), so the fixed 5%/10% retirement thresholds are NOT_PROVEN and the verdict is INCONCLUSIVE; per-frame instrumented counts — auto stack 96 calls / 96 pairs, churn 60/60, host tree 0, aliased 5/2 — i.e. 0 cache-serviceable calls per frame in every reachable shape; equivalence is checked on the painted frame (every byte the alt screen wrote) and is discriminating (measured width x4 fails with HASH MISMATCH, while a +-1 column error is absorbed by allocateStackSizes)"
    ],
    "upstream": {
     "equivalence": "NO",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "d981de1229ef899957bbe968bc8dcda02a21f477",
-     "referenceRef": "d981de1229ef899957bbe968bc8dcda02a21f477"
+     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
+     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
     },
     "relevantFiles": [
      "packages/tui/src/layout.ts"
@@ -1622,7 +1646,7 @@
     "evidence": []
    },
    "audit": {
-    "lastAuditedAt": "2026-09-03",
+    "lastAuditedAt": "2026-10-11",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -1689,8 +1713,8 @@
     "equivalence": "YES",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "d981de1229ef899957bbe968bc8dcda02a21f477",
-     "referenceRef": "d981de1229ef899957bbe968bc8dcda02a21f477"
+     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
+     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
     },
     "relevantFiles": [
      "packages/tui/src/keys.ts"
@@ -1787,8 +1811,8 @@
     "equivalence": "NO",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "d981de1229ef899957bbe968bc8dcda02a21f477",
-     "referenceRef": "d981de1229ef899957bbe968bc8dcda02a21f477"
+     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
+     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
     },
     "relevantFiles": [
      "packages/tui/src/terminal.ts"
@@ -1805,7 +1829,7 @@
     "evidence": []
    },
    "audit": {
-    "lastAuditedAt": "2026-09-03",
+    "lastAuditedAt": "2026-10-11",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -1876,8 +1900,8 @@
     "equivalence": "YES",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "d981de1229ef899957bbe968bc8dcda02a21f477",
-     "referenceRef": "d981de1229ef899957bbe968bc8dcda02a21f477"
+     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
+     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
     },
     "relevantFiles": [
      "packages/tui/src/tui-main-screen.ts",
@@ -1939,7 +1963,9 @@
     "a stationary first press on a HIDDEN auto scrollbar jumps the track / starts a drag immediately (includeHiddenAuto on the press path, matching the hover path)",
     "when a mounted overlay is hit, in-flight pointer gestures that started outside are cancelled (selection gesture + snapshot, scrollbar drag) — the hidden selection must not reappear after the overlay closes and the drag must not resume on release",
     "the retained mouse-press target's click synthesis is painted-placement fenced: a still-mounted component whose overlay moved or reflowed (e.g. a centered overlay that grew after the press selected a described row) does not receive a synthetic click retargeted with the old origin",
-    "the painted-placement liveness check re-derives a nested descendant's CURRENT painted origin from the last-painted child layouts (Box padding + preceding sibling heights): a descendant that reflowed INSIDE a stable overlay root (a preceding sibling grew) no longer receives a synthetic click retargeted with the old origin"
+    "the painted-placement liveness check re-derives a nested descendant's CURRENT painted origin from the last-painted child layouts (Box padding + preceding sibling heights): a descendant that reflowed INSIDE a stable overlay root (a preceding sibling grew) no longer receives a synthetic click retargeted with the old origin",
+    "a delegated (forwarded) mouse result re-targets the gesture owner: the forwarding component becomes the retained press target with its own origin recomputed, so a delegating component that is not a Container (e.g. a SettingsList that renders its submenu itself) can be located by the painted-placement liveness check and re-routes the release click through its own current hit-testing",
+    "upstream's resetTextSelection() is adopted AND wired: the Host drops the vendor text selection (and its multi-click history) when a transcript WINDOW replacement puts different content under the selection coordinates; ordinary re-renders, disclosure toggles, theme changes and streaming appends keep the user selection (upstream #9311, whose coding-agent calls it before rendering a replaced transcript)"
    ],
    "dependencies": {
     "vendorInternal": {
@@ -2005,14 +2031,17 @@
     "packages/pi-tui/test/tui-alt-screen.test.ts: a child nested inside a padded Box overlay root still receives the synthetic click (the painted-placement check compares the ROOT placement snapshot, not the child's padding-offset origin)",
     "packages/pi-tui/test/tui-alt-screen.test.ts: a descendant that reflowed inside a stable overlay root (sibling heights changed, root bounds identical) does not receive a ghost synthetic click at the original cell; a fresh press at the new row works",
     "packages/pi-tui/test/tui-alt-screen.test.ts: a layout-root descendant that reflowed inside its ancestor (header shrank, target moved) does not receive a ghost synthetic click at the original cell — the click fence compares the target's CURRENT painted origin (ancestor rect + last-painted child offset), not old-origin containment; a fresh press at the new row works",
-    "packages/pi-tui/test/tui-alt-screen.test.ts: an implicit-document child (legacy single-document mode, no setLayoutRoot) that reflowed after a sibling shrank does not receive a ghost synthetic click at the original cell — the click fence compares the target's CURRENT painted origin (implicit document box origin + TuiBase last-painted child offset), not mounted liveness; a fresh press at the new row works"
+    "packages/pi-tui/test/tui-alt-screen.test.ts: an implicit-document child (legacy single-document mode, no setLayoutRoot) that reflowed after a sibling shrank does not receive a ghost synthetic click at the original cell — the click fence compares the target's CURRENT painted origin (implicit document box origin + TuiBase last-painted child offset), not mounted liveness; a fresh press at the new row works",
+    "packages/pi-tui/test/mouse-components.test.ts: keeps a settings list focused when a click in its submenu closes the submenu (the delegated press target is the forwarding component and re-routes the release click)",
+    "packages/pi-tui/test/tui-alt-screen.test.ts: resetTextSelection drops an active selection and the multi-click history a real click recorded",
+    "test/compact-window-hardening.test.ts: a window replacement resets the fullscreen selection while a same-window rebuild and an expand rebuild keep it (mutation-checked)"
    ],
    "upstream": {
     "equivalence": "NO",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "d981de1229ef899957bbe968bc8dcda02a21f477",
-     "referenceRef": "d981de1229ef899957bbe968bc8dcda02a21f477"
+     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
+     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
     },
     "relevantFiles": [
      "packages/tui/src/tui-alt-screen.ts"
@@ -2028,7 +2057,7 @@
     "evidence": []
    },
    "audit": {
-    "lastAuditedAt": "2026-09-29",
+    "lastAuditedAt": "2026-10-11",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -2037,7 +2066,7 @@
      "behavioral",
      "tests"
     ],
-    "notes": "Confirmed the host callback is a structural and behavioral seam, not a convenience import. 2026-09-29: host dependency re-verified after PR #197 declared the long-user bubble's ordinary user-text rows (collapsed and expanded alike) Host disclosure targets — a selection-owned → disclosure-owned ownership change recorded in why/host above; the fork's click-granularity classifier itself is unchanged."
+    "notes": "Confirmed the host callback is a structural and behavioral seam, not a convenience import. 2026-09-29: host dependency re-verified after PR #197 declared the long-user bubble's ordinary user-text rows (collapsed and expanded alike) Host disclosure targets — a selection-owned → disclosure-owned ownership change recorded in why/host above; the fork's click-granularity classifier itself is unchanged. External review observation (PR #272): the adopted upstream resetTextSelection() initially had no caller in this repository; the Host now calls it exactly on a transcript window replacement, which is the path whose selection coordinates point into replaced content."
    }
   },
   "X019": {
@@ -2102,8 +2131,8 @@
     "equivalence": "PARTIAL",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "d981de1229ef899957bbe968bc8dcda02a21f477",
-     "referenceRef": "d981de1229ef899957bbe968bc8dcda02a21f477"
+     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
+     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
     },
     "relevantFiles": [
      "packages/tui/src/components/text.ts",
@@ -2204,8 +2233,8 @@
     "equivalence": "NO",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "d981de1229ef899957bbe968bc8dcda02a21f477",
-     "referenceRef": "d981de1229ef899957bbe968bc8dcda02a21f477"
+     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
+     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
     },
     "relevantFiles": [
      "packages/tui/src/components/editor.ts"
@@ -2221,7 +2250,7 @@
     "evidence": []
    },
    "audit": {
-    "lastAuditedAt": "2026-09-03",
+    "lastAuditedAt": "2026-10-11",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -2294,8 +2323,8 @@
     "equivalence": "PARTIAL",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "d981de1229ef899957bbe968bc8dcda02a21f477",
-     "referenceRef": "d981de1229ef899957bbe968bc8dcda02a21f477"
+     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
+     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
     },
     "relevantFiles": [
      "packages/tui/src/utils.ts",
@@ -2313,7 +2342,7 @@
     "evidence": []
    },
    "audit": {
-    "lastAuditedAt": "2026-09-03",
+    "lastAuditedAt": "2026-10-11",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -2387,8 +2416,8 @@
     "equivalence": "NO",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "d981de1229ef899957bbe968bc8dcda02a21f477",
-     "referenceRef": "d981de1229ef899957bbe968bc8dcda02a21f477"
+     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
+     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
     },
     "relevantFiles": [
      "packages/tui/src/components/editor.ts"
@@ -2404,7 +2433,7 @@
     "evidence": []
    },
    "audit": {
-    "lastAuditedAt": "2026-09-03",
+    "lastAuditedAt": "2026-10-11",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -2486,8 +2515,8 @@
     "equivalence": "NO",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "d981de1229ef899957bbe968bc8dcda02a21f477",
-     "referenceRef": "d981de1229ef899957bbe968bc8dcda02a21f477"
+     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
+     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
     },
     "relevantFiles": [
      "packages/tui/src/components/editor.ts"
@@ -2504,7 +2533,7 @@
     "evidence": []
    },
    "audit": {
-    "lastAuditedAt": "2026-09-03",
+    "lastAuditedAt": "2026-10-11",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -2579,8 +2608,8 @@
     "equivalence": "NO",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "d981de1229ef899957bbe968bc8dcda02a21f477",
-     "referenceRef": "d981de1229ef899957bbe968bc8dcda02a21f477"
+     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
+     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
     },
     "relevantFiles": [
      "packages/tui/src/tui-alt-screen.ts"
@@ -2597,7 +2626,7 @@
     "evidence": []
    },
    "audit": {
-    "lastAuditedAt": "2026-09-03",
+    "lastAuditedAt": "2026-10-11",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -2623,7 +2652,8 @@
    "why": "The vendored package has an XMoon package shell and must build from its own CWD without the root tsdown config shadowing it. Native self-reference must follow the package rename.",
    "changedSurface": [
     "package-local tsdown entry/output/declaration configuration",
-    "TUI_PACKAGE_NAME native-module self-reference uses @xmoon76/pi-tui"
+    "TUI_PACKAGE_NAME native-module self-reference uses @xmoon76/pi-tui",
+    "native/ prebuilds stay unvendored: the upstream-prebuilt assertions in test/native-platform.test.ts skip when the prebuild is absent, and a degradation test asserts getNativeClipboard() fails closed instead of loading another platform's binary"
    ],
    "dependencies": {
     "vendorInternal": {
@@ -2665,21 +2695,22 @@
    "tests": [
     "packages/pi-tui/test/native-module-path.test.ts: renamed package lookup and graceful fallback",
     "pnpm --dir packages/pi-tui build and root bundle build",
-    "scripts/tarball-smoke.mjs package/export checks"
+    "scripts/tarball-smoke.mjs package/export checks",
+    "packages/pi-tui/test/native-platform.test.ts: no-prebuild ELF/X11 packaging tests skip; the Linux clipboard degrades to undefined"
    ],
    "upstream": {
     "equivalence": "NO",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "d981de1229ef899957bbe968bc8dcda02a21f477",
-     "referenceRef": "d981de1229ef899957bbe968bc8dcda02a21f477"
+     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
+     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
     },
     "relevantFiles": [
      "packages/tui/src/native-module-path.ts",
      "packages/tui/package.json"
     ],
     "relevantIssues": [],
-    "semanticDelta": "Upstream package metadata and build contract use the Earendil scope/tooling. Copying them would break the private @xmoon76 package shell and root bundle build."
+    "semanticDelta": "Upstream package metadata and build contract use the Earendil scope/tooling. Copying them would break the private @xmoon76 package shell and root bundle build. v1.1.0 also ships native/ prebuilds (including the new linux X11 clipboard helper); the fork keeps them unvendored and adapts the upstream prebuild assertions to the degradation contract."
    },
    "retirement": {
     "conditions": [
@@ -2690,7 +2721,7 @@
     "evidence": []
    },
    "audit": {
-    "lastAuditedAt": "2026-09-03",
+    "lastAuditedAt": "2026-10-11",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -2699,7 +2730,7 @@
      "behavioral",
      "tests"
     ],
-    "notes": "Non-src packaging divergence was explicitly included in the structured ledger; the source diff gate will continue to ignore it while the ledger gate validates it."
+    "notes": "Non-src packaging divergence was explicitly included in the structured ledger; the source diff gate will continue to ignore it while the ledger gate validates it. Re-verified at v1.1.0 (abe508e1): the package shell and the renamed self-reference are unchanged, and the new native platform module fails closed without prebuilds."
    }
   },
   "X026": {
@@ -2763,8 +2794,8 @@
     "equivalence": "YES",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "d981de1229ef899957bbe968bc8dcda02a21f477",
-     "referenceRef": "d981de1229ef899957bbe968bc8dcda02a21f477"
+     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
+     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
     },
     "relevantFiles": [
      "packages/tui/src/tui-alt-screen.ts"
@@ -2799,8 +2830,8 @@
    }
   },
   "X027": {
-   "title": "fd directory typing does not rely on trailing separator",
-   "status": "ACTIVE",
+   "title": "fd directory typing does not rely on trailing separator (retired)",
+   "status": "REMOVED_UNUSED",
    "category": [
     "BUGFIX_MISSING_UPSTREAM"
    ],
@@ -2808,79 +2839,70 @@
    "files": [
     "src/autocomplete.ts"
    ],
-   "why": "fd output can identify a directory without a trailing slash, including through symlinks. statSync classification preserves the directory path and uses the separator only as a fallback.",
+   "why": "Retired by product decision (post-PR272 DIV retirement plan, PR A). The former patch typed fd plain-text stdout lines with statSync so a BARE directory line (no trailing separator) still classified as a directory, and normalized result paths WITHOUT that separator so the provider never sliced a directory name. The helper, its walkDirectoryWithFd call site and the caller-side slicing exception were deleted, and packages/pi-tui/src/autocomplete.ts is upstream v1.1.0 verbatim again: fd lines are typed by the trailing separator alone. The surviving CombinedAutocompleteProvider (including its fd branch) is upstream-owned, and the host @-mention and /image paths use HostFilePort / ClientLocalDiscoveryDriver, so nothing consumes the removed classifier; this record is not a claim that the optional fd-backed provider path is unreachable.",
    "changedSurface": [
-    "typeDirectoryOutputLines stat-based directory classification",
-    "trailing separator fallback only when stat fails"
+    "retired: typeDirectoryOutputLines stat-based directory classification (upstream inline trailing-separator typing is restored)",
+    "retired: the provider path normalization that avoided slicing a directory line trailing separator"
    ],
    "dependencies": {
     "vendorInternal": {
      "audited": true,
-     "items": [
-      "CombinedAutocompleteProvider and directory-output typing share path normalization and completion item construction."
-     ],
-     "notes": "The provider owns the behavior below host wrappers."
+     "items": [],
+     "notes": "The retired helper had one vendor-internal caller (walkDirectoryWithFd), which uses upstream inline trailing-separator classification again; no other fork file referenced it."
     },
     "inheritanceStructural": {
      "audited": true,
-     "items": [
-      "MentionProvider wraps the fork's CombinedAutocompleteProvider for shell-mode/path positions; the wrapper does not replace the fork classifier."
-     ],
-     "notes": "The current host passes fdPath=null to this inner provider for deterministic fallback, so no claim is made that the host's @-mention HostFilePort path exercises fd output."
+     "items": [],
+     "notes": "MentionProvider still wraps CombinedAutocompleteProvider but never participated in the retired classifier (the host passes fdPath=null); no override or inheritance edge depended on the local delta."
     },
     "host": {
      "audited": true,
-     "items": [
-      "src/tui/interaction/autocomplete/provider.ts delegates shell-mode command/path positions and slash-command-name completion to CombinedAutocompleteProvider",
-      "public AutocompleteProvider consumers may provide an fd-backed provider"
-     ],
-     "notes": "The current @ flow uses HostFilePort/discoverMention and the /image path uses completePathArgument over ClientLocalDiscoveryDriver (its own Client finder); neither is counted as a direct fd consumer of X027."
+     "items": [],
+     "notes": "Host completion is HostFilePort/discoverMention for @ and ClientLocalDiscoveryDriver for /image; src/tui/interaction/autocomplete/provider.ts constructs the upstream provider unchanged, so no host path consumed the removed classifier."
     },
     "publicExtension": {
      "audited": true,
-     "items": [
-      "AutocompleteProvider output is public through editor completion integration",
-      "CombinedAutocompleteProvider accepts an fd-backed path for callers that opt into it"
-     ],
-     "notes": "Directory item type and insertion behavior are observable when the fd-backed provider path is used."
+     "items": [],
+     "notes": "CombinedAutocompleteProvider stays public and still accepts an fd-backed path, now with upstream typing; no public or extension contract promised the removed stat-based classification."
     },
     "behavioral": {
      "audited": true,
-     "items": [
-      "bare directory lines remain directories",
-      "symlinks are followed by stat",
-      "failed stat keeps a trailing separator as a fallback"
-     ],
-     "notes": "The audited upstream reference also changed nested/fuzzy ordering, which is not part of X027."
+     "items": [],
+     "notes": "Deliberate product tradeoff: upstream types an fd line as a directory only when it carries a trailing separator (fd 10.2.0 does print `dir/`), so a bare directory line types as a file. The host never used the fd-backed provider path, so the host completion suites are the green evidence here. The restored upstream fd typing was also executed fd-enabled (an `fd` shim over the locally installed fdfind 10.2.0): the whole fd @ file suggestions block ran and passed, including the empty-@ directory typing, directory-ordering and symlink-directory cases."
     }
    },
    "tests": [
-    "packages/pi-tui/test/autocomplete.test.ts: typeDirectoryOutputLines and fd-backed provider cases",
-    "test/file-completion-convergence.test.ts: host file completion is explicitly separate and does not prove fd-path usage"
+    "retired: packages/pi-tui/test/autocomplete.test.ts is upstream v1.1.0 verbatim again (the typeDirectoryOutputLines describe block and its import were deleted rather than left asserting a removed mechanism)",
+    "fd coverage in both states: the upstream fd @ file suggestions cases skip when no `fd` binary is on PATH (the local binary is `fdfind`, an upstream-owned environment gate that predates this PR) and pass 23/23 when an `fd` shim exposes fd 10.2.0 — including the empty-@ directory typing, directory-before-file ordering, symlink-directory and .git-exclusion cases",
+    "surviving coverage (host routing): test/file-completion-convergence.test.ts, test/autocomplete-provider.test.ts, test/directory-completion.test.ts, test/image-arg-completion.test.ts, test/client-file-completion.test.ts, test/shell-completion.test.ts"
    ],
    "upstream": {
-    "equivalence": "NO",
+    "equivalence": "YES",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "d981de1229ef899957bbe968bc8dcda02a21f477",
-     "referenceRef": "d981de1229ef899957bbe968bc8dcda02a21f477"
+     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
+     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
     },
     "relevantFiles": [
      "packages/tui/src/autocomplete.ts"
     ],
     "relevantIssues": [],
-    "semanticDelta": "Both the pinned baseline and the audited upstream reference classify plain fd lines by trailing slash and slice directory names; the local path uses stat first and avoids dropping the final character."
+    "semanticDelta": "packages/pi-tui/src/autocomplete.ts matches the pinned v1.1.0 blob byte-for-byte: fd stdout lines are typed by a trailing separator and the provider slices that separator before building items. No local delta remains."
    },
    "retirement": {
     "conditions": [
-     "Retire only when upstream directory completion classifies bare and symlinked directories with the same insertion text and fallback behavior.",
-     "Run fd, symlink, trailing-slash, and host @ completion tests."
+     "Product decision: keep upstream trailing-separator typing; do not restore a stat-based classifier or a caller-side slicing exception.",
+     "Recheck this record only if a future host consumer actually opts into an fd-backed provider path."
     ],
     "replacementMapping": [],
-    "evidence": []
+    "evidence": [
+     "Deletion evidence: typeDirectoryOutputLines and both call sites are removed; the helper name, its import and the retired slicing exception have no live source or test reference.",
+     "Source evidence: packages/pi-tui/src/autocomplete.ts and packages/pi-tui/test/autocomplete.test.ts match the pinned v1.1.0 blobs (diff empty).",
+     "Gate evidence: fork typecheck, the targeted fork tests, gate:pi-vendor-diff --strict, gate:pi-divergence-ledger and the host completion suites pass with this record retired; the fd-gated fd @ file suggestions block (skipped by default because the local binary is named fdfind) also passes 23/23 fd-enabled via an `fd` shim over fdfind 10.2.0."
+    ]
    },
    "audit": {
-    "lastAuditedAt": "2026-09-03",
+    "lastAuditedAt": "2026-10-11",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -2889,7 +2911,7 @@
      "behavioral",
      "tests"
     ],
-    "notes": "Separated X027 from upstream's unrelated nested/fuzzy autocomplete changes. The current host's @ and /image paths are separate from fd output; the public fd-backed provider path remains a supported vendor capability, so this is not classified as unused."
+    "notes": "Retirement audit for the post-PR272 DIV retirement plan PR A. The relocationAudit NOT_MOVABLE decision naming this ID predates the retirement and is kept as a historical audit record."
    }
   },
   "X028": {
@@ -2935,7 +2957,7 @@
      "items": [
       "src/tui-app.ts wires onBeforeViewportInput and onScrollBoundary, owns virtual transcript paging/Home/End, calls clearSearch for jumpLatest and prompt navigation, and wires scrollToEndIndicator/shouldShowScrollToEndIndicator/onScrollToEndIndicator to the semantic TranscriptWindowController state",
       "src/search-presentation.ts consumes the root matcher export to decorate the host full-history search occurrences (weak/current styles, image lines untouched, visible width and stripped text preserved)",
-       "src/tui-app.ts attaches the exported AltScreenSearchIndex to each live MessageComponentEntry so unchanged rendered lines reuse the native corpus/results cache"
+      "src/tui-app.ts attaches the exported AltScreenSearchIndex to each live MessageComponentEntry so unchanged rendered lines reuse the native corpus/results cache"
      ],
      "notes": "Host wires the callbacks and clearSearch; ScrollView.canScroll is consumed internally by TuiAltScreen as fallback state, not called by the host."
     },
@@ -2956,7 +2978,7 @@
       "jump-latest resets built-in search",
       "the jump-to-end label is host-forced for a virtual-history window and a host-consumed click skips the local scrollToBottom fallback",
       "the exported matcher computes the same occurrence segments as the native fullscreen search (query normalization, ANSI stripping, grapheme-safe columns)",
-       "AltScreenSearchIndex reuses full matches only when rendered lines and the normalized query are unchanged, and rebuilds its corpus when rendered lines change"
+      "AltScreenSearchIndex reuses full matches only when rendered lines and the normalized query are unchanged, and rebuilds its corpus when rendered lines change"
      ],
      "notes": "Restoring upstream can silently consume navigation keys or bypass virtual transcript ownership."
     }
@@ -2966,15 +2988,15 @@
     "packages/pi-tui/test/tui-shrink.test.ts and ScrollView canScroll coverage",
     "test/home-end-keys.test.ts: bundle Home/End ownership and the fullscreen jump-to-latest indicator",
     "test/transcript-search-presentation.test.ts: host consumes the root matcher (ANSI/CJK/wrap, current vs weak style, width/text preserved)",
-     "packages/pi-tui/test/tui-alt-screen.test.ts: root export constructs AltScreenSearchIndex",
-     "test/transcript-search-performance.test.ts: Host per-message index lookup/result-cache reuse and rendered-line invalidation"
+    "packages/pi-tui/test/tui-alt-screen.test.ts: root export constructs AltScreenSearchIndex",
+    "test/transcript-search-performance.test.ts: Host per-message index lookup/result-cache reuse and rendered-line invalidation"
    ],
    "upstream": {
     "equivalence": "NO",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "d981de1229ef899957bbe968bc8dcda02a21f477",
-     "referenceRef": "d981de1229ef899957bbe968bc8dcda02a21f477"
+     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
+     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
     },
     "relevantFiles": [
      "packages/tui/src/tui-alt-screen.ts",
@@ -2992,7 +3014,7 @@
     "evidence": []
    },
    "audit": {
-    "lastAuditedAt": "2026-09-19",
+    "lastAuditedAt": "2026-10-11",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -3068,8 +3090,8 @@
     "equivalence": "NO",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "d981de1229ef899957bbe968bc8dcda02a21f477",
-     "referenceRef": "d981de1229ef899957bbe968bc8dcda02a21f477"
+     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
+     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
     },
     "relevantFiles": [
      "packages/tui/src/components/editor.ts"
@@ -3085,7 +3107,7 @@
     "evidence": []
    },
    "audit": {
-    "lastAuditedAt": "2026-09-03",
+    "lastAuditedAt": "2026-10-11",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -3158,8 +3180,8 @@
     "equivalence": "NO",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "d981de1229ef899957bbe968bc8dcda02a21f477",
-     "referenceRef": "d981de1229ef899957bbe968bc8dcda02a21f477"
+     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
+     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
     },
     "relevantFiles": [
      "packages/tui/src/index.ts",
@@ -3177,7 +3199,7 @@
     "evidence": []
    },
    "audit": {
-    "lastAuditedAt": "2026-09-03",
+    "lastAuditedAt": "2026-10-11",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -3251,8 +3273,8 @@
     "equivalence": "NO",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "d981de1229ef899957bbe968bc8dcda02a21f477",
-     "referenceRef": "d981de1229ef899957bbe968bc8dcda02a21f477"
+     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
+     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
     },
     "relevantFiles": [
      "packages/tui/src/components/markdown.ts"
@@ -3269,7 +3291,7 @@
     "evidence": []
    },
    "audit": {
-    "lastAuditedAt": "2026-09-03",
+    "lastAuditedAt": "2026-10-11",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -3342,8 +3364,8 @@
     "equivalence": "NO",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "d981de1229ef899957bbe968bc8dcda02a21f477",
-     "referenceRef": "d981de1229ef899957bbe968bc8dcda02a21f477"
+     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
+     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
     },
     "relevantFiles": [
      "packages/tui/src/tui.ts"
@@ -3359,7 +3381,7 @@
     "evidence": []
    },
    "audit": {
-    "lastAuditedAt": "2026-09-03",
+    "lastAuditedAt": "2026-10-11",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -3433,8 +3455,8 @@
     "equivalence": "NO",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "d981de1229ef899957bbe968bc8dcda02a21f477",
-     "referenceRef": "d981de1229ef899957bbe968bc8dcda02a21f477"
+     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
+     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
     },
     "relevantFiles": [
      "packages/tui/src/tui-main-screen.ts"
@@ -3451,7 +3473,7 @@
     "evidence": []
    },
    "audit": {
-    "lastAuditedAt": "2026-09-03",
+    "lastAuditedAt": "2026-10-11",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -3524,8 +3546,8 @@
     "equivalence": "NO",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "d981de1229ef899957bbe968bc8dcda02a21f477",
-     "referenceRef": "d981de1229ef899957bbe968bc8dcda02a21f477"
+     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
+     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
     },
     "relevantFiles": [
      "packages/tui/src/components/editor.ts"
@@ -3541,7 +3563,7 @@
     "evidence": []
    },
    "audit": {
-    "lastAuditedAt": "2026-09-03",
+    "lastAuditedAt": "2026-10-11",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -3569,7 +3591,7 @@
    "changedSurface": [
     "previousRawLines and previousLineImageIds caches",
     "value-equality processing fast path",
-    "asciiVisibleWidth and exported SEGMENT_RESET support",
+    "asciiVisibleWidthEarlyExit (renamed from asciiVisibleWidth after upstream v1.1.0 introduced its own private asciiVisibleWidth fast path) and exported SEGMENT_RESET support",
     "cache invalidation on width/state restore"
    ],
    "dependencies": {
@@ -3618,14 +3640,14 @@
     "packages/pi-tui/test/tui-render.test.ts: equal primitive-line frame and steady-frame performance regression",
     "packages/pi-tui/test/render-preprocess-bench.ts: 1k-10k line benchmark",
     "test/rendering.test.ts: indirect host component-array stability only; it does not prove main-screen cache identity",
-    "Missing direct cache invalidation, cold/cached equivalence, image-ID alignment, and instrumentation assertions"
+    "docs/perf-baseline.md: DIV cache A/B evidence (2026-10-11) — scripts/bench/div-cache-ab.mts, BASE vs NO_RAW_REUSE, 9 rounds x 11 workloads driven through the Regular screen class TuiMainScreen with a synthetic streaming component (the full TuiApp composition is not exercised): every real workload is slower without the fast path in 9/9 rounds (paired median 1.78x-176.8x; steady 10k 153.7x, over-wide rows 176.8x); corrected fixtures give 1% injected dirty 7.06x, 10% injected 2.79x, ASCII-only-visible corpus 4.35x, width cycle 80/120/160 1.60x (8/9 rounds), 100%-dirty control 1.00x — injection is per frame, so the adjacent-frame delta is about 2N%; the terminal write stream hashes identically across variants for all 11 workloads incl. kitty moves, append/shrink and width changes (32-bit FNV over every written byte, not a byte-for-byte comparison); instrumented probe: 10k steady = 10,014 lines processed and 130,000 reused over 14 frames, 0 reused at 100% dirty; asciiVisibleWidthEarlyExit 1-2% of preprocessing time; nearest-rank p95 with 9 rounds equals the maximum round"
    ],
    "upstream": {
     "equivalence": "NO",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "d981de1229ef899957bbe968bc8dcda02a21f477",
-     "referenceRef": "d981de1229ef899957bbe968bc8dcda02a21f477"
+     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
+     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
     },
     "relevantFiles": [
      "packages/tui/src/tui-main-screen.ts",
@@ -3633,7 +3655,7 @@
      "packages/tui/src/tui.ts"
     ],
     "relevantIssues": [],
-    "semanticDelta": "Both the pinned baseline and the audited upstream reference reprocess every line each frame. Its bounded writer prevents huge output formation but does not replace value-based per-frame line reuse or the host render-cost contract."
+    "semanticDelta": "Both the pinned baseline and the audited upstream reference reprocess every line each frame. Its bounded writer prevents huge output formation but does not replace value-based per-frame line reuse or the host render-cost contract. Upstream v1.1.0 adds its own private asciiVisibleWidth fast path inside visibleWidth plus a flattenLines call; the fork's earlier exported early-exit helper was renamed asciiVisibleWidthEarlyExit so both coexist, and neither upstream addition replaces the processed-line value reuse."
    },
    "retirement": {
     "conditions": [
@@ -3644,7 +3666,7 @@
     "evidence": []
    },
    "audit": {
-    "lastAuditedAt": "2026-09-03",
+    "lastAuditedAt": "2026-10-11",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -3653,7 +3675,7 @@
      "behavioral",
      "tests"
     ],
-    "notes": "KEEP PERF CONTRACT. The audit corrected the old reference-identity wording: the implementation compares primitive string values, so fresh equal strings also reuse processed output. Performance behavior still requires benchmark evidence rather than host imports alone."
+    "notes": "KEEP PERF CONTRACT. The audit corrected the old reference-identity wording: the implementation compares primitive string values, so fresh equal strings also reuse processed output. Performance behavior still requires benchmark evidence rather than host imports alone. Re-verified at v1.1.0 (abe508e1): the upstream fast path is complementary (visibleWidth measures the whole line; the fork's helper early-exits at the viewport width), so the divergence stays ACTIVE."
    }
   },
   "X036": {
@@ -3718,8 +3740,8 @@
     "equivalence": "NO",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "d981de1229ef899957bbe968bc8dcda02a21f477",
-     "referenceRef": "d981de1229ef899957bbe968bc8dcda02a21f477"
+     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
+     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
     },
     "relevantFiles": [
      "packages/tui/src/tui-alt-screen.ts"
@@ -3735,7 +3757,7 @@
     "evidence": []
    },
    "audit": {
-    "lastAuditedAt": "2026-09-03",
+    "lastAuditedAt": "2026-10-11",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -3759,17 +3781,17 @@
     "src/keybindings.ts",
     "src/components/editor.ts"
    ],
-   "why": "Editor submission must be remappable without changing plain Input submission. The editor binding is also shared by physical-submit detection, PasteBurst, and backslash-Enter fallback.",
+   "why": "Editor submission must be remappable without changing plain Input submission. The editor binding is also shared by the backslash-Enter fallback.",
    "changedSurface": [
     "process-global tui.editor.submit binding definition",
     "Editor submit and backslash-enter checks use the editor binding",
-    "X038 physical Enter detection reads the same effective binding"
+    "the editor keeps its Ctrl+Home/End bindings (tui.editor.cursorLineStart/cursorLineEnd) that upstream v1.1.0 dropped while moving the viewport shortcuts onto tui.altScreen.top/bottom, so the host's Home/End 'viewport' preset still reaches the editor"
    ],
    "dependencies": {
     "vendorInternal": {
      "audited": true,
      "items": [
-      "Editor submit branch, PasteBurst physical-submit check, backslash-enter fallback, and keybinding registry share tui.editor.submit."
+      "Editor submit branch, backslash-enter fallback and keybinding registry share tui.editor.submit."
      ],
      "notes": "All three Editor paths must move together."
     },
@@ -3804,38 +3826,40 @@
       "physical Enter under a remapped binding is distinguished from the remapped chord",
       "backslash-enter uses the effective editor submit keys"
      ],
-     "notes": "A host-only interception would bypass or duplicate X038 and Editor internal semantics."
+     "notes": "A host-only interception would bypass or duplicate the Editor's internal submit semantics."
     }
    },
    "tests": [
     "packages/pi-tui/test/editor.test.ts: editor submit binding split",
     "test/keybinding-integration.test.ts: anti-pollution and default restore",
-    "packages/pi-tui/test/keybindings.test.ts: binding registry"
+    "packages/pi-tui/test/keybindings.test.ts: binding registry",
+    "packages/pi-tui/test/keybindings.test.ts: tui.editor.cursorLineStart keeps ctrl+home while tui.altScreen.top moves to ctrl+home (the host Home/End preset contract)",
+    "test/home-end-keys.test.ts: both Home/End presets end to end"
    ],
    "upstream": {
     "equivalence": "NO",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "d981de1229ef899957bbe968bc8dcda02a21f477",
-     "referenceRef": "d981de1229ef899957bbe968bc8dcda02a21f477"
+     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
+     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
     },
     "relevantFiles": [
      "packages/tui/src/keybindings.ts",
      "packages/tui/src/components/editor.ts"
     ],
     "relevantIssues": [],
-    "semanticDelta": "Upstream has only tui.input.submit; it cannot express the editor-only binding or its shared physical-submit semantics."
+    "semanticDelta": "Upstream v1.1.0 has only tui.input.submit (no editor-only binding) and moved the viewport shortcuts onto Ctrl+Home/End by dropping tui.editor.cursorLineStart/End's Ctrl+Home/End keys; the fork keeps both the editor-only submit binding and the editor Ctrl+Home/End bindings the host's Home/End 'viewport' preset depends on."
    },
    "retirement": {
     "conditions": [
-     "Upstream must provide a per-editor binding/action consumed by submit, PasteBurst physical-submit detection, and backslash-enter fallback.",
-     "Run anti-pollution, remap, PasteBurst, history, and editor input tests before changing either half."
+     "Upstream must provide a per-editor binding/action consumed by submit and the backslash-enter fallback.",
+     "Run anti-pollution, remap, history and editor input tests before changing either half."
     ],
     "replacementMapping": [],
     "evidence": []
    },
    "audit": {
-    "lastAuditedAt": "2026-09-03",
+    "lastAuditedAt": "2026-10-11",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -3844,12 +3868,12 @@
      "behavioral",
      "tests"
     ],
-    "notes": "KEEP HARD. Cross-audited with X038; both the binding definition and editor call sites are required."
+    "notes": "KEEP HARD. Both the binding definition and the editor call sites are required; the former X038 cross-audit no longer applies (X038 was retired in PR B). Re-verified at v1.1.0 (abe508e1): the editor submit split is unchanged upstream, and the upstream Home/End rebinding was reconciled so the host's two presets keep working."
    }
   },
   "X038": {
-   "title": "PasteBurst non-bracketed paste fallback",
-   "status": "ACTIVE",
+   "title": "PasteBurst non-bracketed paste fallback (retired)",
+   "status": "REMOVED_UNUSED",
    "category": [
     "BUGFIX_MISSING_UPSTREAM"
    ],
@@ -3858,80 +3882,74 @@
     "src/paste-burst.ts",
     "src/components/editor.ts"
    ],
-   "why": "Terminals and tmux can lose bracketed-paste markers and deliver a paste as rapid plain characters. The trailing physical Enter must insert a newline rather than submit a partial draft.",
+   "why": "Retired by product decision (post-PR272 DIV retirement plan, PR B). The former fallback inferred a paste from timing alone: eight or more single printable characters within 8ms made the editor turn the following physical Enter into a newline instead of submitting, and the typing remained the only paste evidence. The product decision is that rapidly typed characters followed by a submit key must behave like normal typing and submission, so src/paste-burst.ts is deleted, the Editor pasteBurst state, the disablePasteBurst option and the setDisablePasteBurst setter are removed, and the submit branch no longer converts a physical Enter into a newline. Real bracketed paste (CSI 200~/201~), the X004A paste-marker registry, undo/redo (X004B) and the editor-owned submit binding (X037) are unchanged; no replacement heuristic was added, and lost bracketed-paste markers are deliberately no longer compensated for.",
    "changedSurface": [
-    "PasteBurst single-character timing detector",
-    "Editor disablePasteBurst option/setter and integration",
-    "physical-submit Enter suppression with X037 remap distinction"
+    "retired: the PasteBurst single-character timing detector (src/paste-burst.ts deleted)",
+    "retired: the Editor disablePasteBurst option, the disablePasteBurst field and the setDisablePasteBurst setter",
+    "retired: the physical-Enter suppression branch inside the tui.editor.submit handling (X037 remapping itself is untouched)",
+    "retired: the pasteBurst reset/feed calls in the input loop and the two printable-insertion branches"
    ],
    "dependencies": {
     "vendorInternal": {
      "audited": true,
-     "items": [
-      "PasteBurst state, Editor input loop, bracketed-paste path, insert-point feeds, and submit binding are one input-ordering contract."
-     ],
-     "notes": "The multi-character chunk reset is intentional for typed-ahead/test input."
+     "items": [],
+     "notes": "The only vendor-internal consumer was Editor (field, setter, input-loop reset and the two printable-insertion feeds, plus the submit branch); no other fork file imported PasteBurst, and src/paste-burst.ts is deleted."
     },
     "inheritanceStructural": {
      "audited": true,
-     "items": [
-      "TuiEditor exposes the disablePasteBurst setter through its Editor integration."
-     ],
-     "notes": "No host copy can observe each physical character after the fork parser consumes it."
+     "items": [],
+     "notes": "The retired state lived entirely in Editor. src/tui/interaction/tui-editor.ts:150 extends Editor and forwards every keystroke through super.handleInput (line 415) while constructing it without the option (line 175), so the host editor inherited the fallback enabled by default and never called the setter; the inherited behavior is deleted with the implementation, so no super/override edge needs migration."
     },
     "host": {
      "audited": true,
-     "items": [
-      "Host editor paste path across SSH, tmux, iTerm2, and remapped submit configurations."
-     ],
-     "notes": "The bugfix is editor-internal and deliberately has no single host import consumer."
+     "items": [],
+     "notes": "The retired fallback WAS reachable on the host submit path by inheritance: src/tui-app.ts:3454 constructs TuiEditor, which extends Editor and forwards every keystroke through super.handleInput, and the host never passed the disablePasteBurst option, so the fallback was enabled by default. No host module imported PasteBurst or called the setter, but the retirement is a product decision to drop that reachable host behavior (rapid typing followed by Enter now submits), not a no-consumer finding, and no host code needs migration because the implementation is deleted."
     },
     "publicExtension": {
      "audited": true,
-     "items": [
-      "Editor constructor option and setDisablePasteBurst integration surface."
-     ],
-     "notes": "Integrations can opt out while the default remains enabled."
+     "items": [],
+     "notes": "PasteBurst is not exported from the package entry, and the disablePasteBurst constructor option belonged to the private vendored Editor; the published extension surface exposes its own structural autocomplete/editor types and never this option."
     },
     "behavioral": {
      "audited": true,
-     "items": [
-      "eight or more single chars within the burst window mark a paste",
-      "physical Enter is suppressed to newline",
-      "remapped submit chord still submits mid-burst",
-      "physical Enter under a remap breaks the burst"
-     ],
-     "notes": "The X037 cross-semantics are part of this record."
+     "items": [],
+     "notes": "Deliberate product tradeoff: a rapid plain-character stream followed by a physical submit key now submits the complete draft instead of inserting a newline; terminals or multiplexers that expose only undifferentiated keystrokes no longer receive a paste fallback. True bracketed paste keeps its multiline text and undo behavior."
     }
    },
    "tests": [
-    "packages/pi-tui/test/editor.test.ts: PasteBurst fallback and X037 cross tests",
-    "docs/tmux-testing.md: two-step terminal driving guidance",
-    "test/editor-input-mode.test.ts: submit behavior"
+    "retired: the describe(\"paste-burst fallback (X038)\") suite in packages/pi-tui/test/editor.test.ts is deleted together with its opt-out, runtime-toggle and X037-cross cases",
+    "replacement regression: packages/pi-tui/test/editor.test.ts pins the retired behavior as a negative control — eight or more rapidly injected printable characters followed by a physical Enter submit exactly once with the original text and never substitute a newline, and a remapped submit chord still submits once (X037)",
+    "surviving coverage: the independent describe(\"editor submit binding split (X037)\") suite plus the host submit/keybinding suites (test/keybinding-integration.test.ts, test/editor-input-mode.test.ts, test/shell-editor-mode.test.ts)",
+    "surviving coverage (real paste): the bracketed-paste and paste-marker/undo suites (X004A/X004B) plus test/shell-editor-mode.test.ts and test/editor-input-mode.test.ts host normalization cases"
    ],
    "upstream": {
-    "equivalence": "NO",
+    "equivalence": "YES",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "d981de1229ef899957bbe968bc8dcda02a21f477",
-     "referenceRef": "d981de1229ef899957bbe968bc8dcda02a21f477"
+     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
+     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
     },
     "relevantFiles": [
      "packages/tui/src/components/editor.ts"
     ],
     "relevantIssues": [],
-    "semanticDelta": "Both the pinned baseline and the audited upstream reference have no PasteBurst fallback or disable option. The local editor-internal terminal behavior cannot be judged unused from host imports."
+    "semanticDelta": "The pinned v1.1.0 baseline has no PasteBurst module and no paste-burst state in the Editor input loop or submit branch; the retired regions of packages/pi-tui/src/components/editor.ts now match the upstream handling (a submit-binding match submits, backslash-Enter still inserts a newline, disableSubmit still returns early). The other local divergences that share this file (X004A/X004B, X037, X050, X051 and friends) are untouched, so the comparison is region-scoped."
    },
    "retirement": {
     "conditions": [
-     "Retire only if supported terminal environments provide reliable bracketed paste markers or upstream implements an equivalent fallback and opt-out contract.",
-     "Run terminal/tmux timing, remapped submit, and editor input tests."
+     "Product decision: no timing-based paste inference and no opt-out toggle; do not re-add a PasteBurst-like heuristic or a substitute API.",
+     "True bracketed paste (CSI 200~/201~) and the X004A paste-marker registry remain the only paste contract.",
+     "Recheck this record only if upstream ships an equivalent fallback plus an opt-out contract and the product reverses the decision."
     ],
     "replacementMapping": [],
-    "evidence": []
+    "evidence": [
+     "Deletion evidence: src/paste-burst.ts is absent, and the PasteBurst import, class file, disablePasteBurst option/field, setDisablePasteBurst setter, onPlainChar feeds, reset call and Enter-suppression branch have no live source, test or documentation reference.",
+     "Source evidence: the retired regions of packages/pi-tui/src/components/editor.ts match the pinned v1.1.0 handling, and upstream has no paste-burst module at all.",
+     "Gate evidence: fork typecheck, the fork editor suite (including the new negative regression), the host editor/keybinding suites, gate:pi-vendor-diff --strict and gate:pi-divergence-ledger pass with this record retired."
+    ]
    },
    "audit": {
-    "lastAuditedAt": "2026-09-03",
+    "lastAuditedAt": "2026-10-11",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -3940,7 +3958,7 @@
      "behavioral",
      "tests"
     ],
-    "notes": "Restored and re-audited after the earlier incorrect no-host-consumer removal."
+    "notes": "Retirement audit for the post-PR272 DIV retirement plan PR B. An earlier removal of this behavior was reverted because it was judged from host imports; this retirement is a recorded product decision, not a no-consumer finding, and the true bracketed-paste path stays covered."
    }
   },
   "X039": {
@@ -3997,14 +4015,14 @@
    "tests": [
     "packages/pi-tui/test/layout.test.ts and wrap-ansi.test.ts: width correctness",
     "packages/pi-tui/test/render-preprocess-bench.ts: X035 render benchmark with incidental CJK workload",
-    "Missing isolated 4096-vs-512 cache-size assertion and reproducible CJK burst benchmark"
+    "docs/perf-baseline.md: DIV cache A/B evidence (2026-10-11) — scripts/bench/div-cache-ab.mts, BASE(4096) vs W512, 7 interleaved rounds; the timed interval covers two corpus walks (cold fill + repeat): the CJK working sets are 1.89x (1024 strings) and 1.96x (4096 strings) slower at 512, plain long CJK 1.78x, and the post-wrap width re-measure workload (wrapTextWithAnsi runs before the timer) 59.6x, which is workload-specific and not a full render pass; insensitive controls: ASCII fast path 0.99x, 8192-string superset 0.97x; instrumented cache counters show 100% second-pass hits at 4096 vs 0% at 512 for the 1024/4096 working sets"
    ],
    "upstream": {
     "equivalence": "NO",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "d981de1229ef899957bbe968bc8dcda02a21f477",
-     "referenceRef": "d981de1229ef899957bbe968bc8dcda02a21f477"
+     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
+     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
     },
     "relevantFiles": [
      "packages/tui/src/utils.ts"
@@ -4021,7 +4039,7 @@
     "evidence": []
    },
    "audit": {
-    "lastAuditedAt": "2026-09-03",
+    "lastAuditedAt": "2026-10-11",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -4099,8 +4117,8 @@
     "equivalence": "NO",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "d981de1229ef899957bbe968bc8dcda02a21f477",
-     "referenceRef": "d981de1229ef899957bbe968bc8dcda02a21f477"
+     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
+     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
     },
     "relevantFiles": [
      "packages/tui/src/components/input.ts",
@@ -4117,7 +4135,7 @@
     "evidence": []
    },
    "audit": {
-    "lastAuditedAt": "2026-09-03",
+    "lastAuditedAt": "2026-10-11",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -4198,8 +4216,8 @@
     "equivalence": "NO",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "d981de1229ef899957bbe968bc8dcda02a21f477",
-     "referenceRef": "d981de1229ef899957bbe968bc8dcda02a21f477"
+     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
+     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
     },
     "relevantFiles": [
      "packages/tui/src/components/select-list.ts",
@@ -4314,8 +4332,8 @@
     "equivalence": "NO",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "d981de1229ef899957bbe968bc8dcda02a21f477",
-     "referenceRef": "d981de1229ef899957bbe968bc8dcda02a21f477"
+     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
+     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
     },
     "relevantFiles": [
      "packages/tui/src/components/select-list.ts",
@@ -4340,7 +4358,7 @@
     ]
    },
    "audit": {
-    "lastAuditedAt": "2026-09-09",
+    "lastAuditedAt": "2026-10-11",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -4349,7 +4367,7 @@
      "behavioral",
      "tests"
     ],
-    "notes": "The SelectList side of this divergence moved to the Host SearchablePicker; the record now covers only the SettingsList vendor seam. Re-audited after the v0.85.1 mouse-parity pass: the Host SettingsList submenu wrapper ThemeSubmenu implements Focusable and forwards the focused flag to its inner SettingsList, and the SearchablePicker-based submenu components (/settings SubagentModelAllowlistPicker and /model ModelPicker) forward focus to their active SearchablePicker (which forwards to its search Input), so the focus edge reaches every focus-sensitive child; CURSOR_MARKER regressions cover ThemeSubmenu and ModelPicker, and no IME/cursor path is lost at any wrapper boundary."
+    "notes": "The SelectList side of this divergence moved to the Host SearchablePicker; the record now covers only the SettingsList vendor seam. Re-audited after the v0.85.1 mouse-parity pass and re-verified for the v1.1.0 re-vendor (abe508e1, where upstream's #10067 mouse-forwarding fix was adopted in dispatchMouseEvent while the fork's focus-forwarding seam stayed): the Host SettingsList submenu wrapper ThemeSubmenu implements Focusable and forwards the focused flag to its inner SettingsList, and the SearchablePicker-based submenu components (/settings SubagentModelAllowlistPicker and /model ModelPicker) forward focus to their active SearchablePicker (which forwards to its search Input), so the focus edge reaches every focus-sensitive child; CURSOR_MARKER regressions cover ThemeSubmenu and ModelPicker, and no IME/cursor path is lost at any wrapper boundary."
    }
   },
   "X043": {
@@ -4419,8 +4437,8 @@
     "equivalence": "NO",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "d981de1229ef899957bbe968bc8dcda02a21f477",
-     "referenceRef": "d981de1229ef899957bbe968bc8dcda02a21f477"
+     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
+     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
     },
     "relevantFiles": [
      "packages/tui/src/tui-alt-screen.ts"
@@ -4437,7 +4455,7 @@
     "evidence": []
    },
    "audit": {
-    "lastAuditedAt": "2026-09-03",
+    "lastAuditedAt": "2026-10-11",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -4517,8 +4535,8 @@
     "equivalence": "NO",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "d981de1229ef899957bbe968bc8dcda02a21f477",
-     "referenceRef": "d981de1229ef899957bbe968bc8dcda02a21f477"
+     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
+     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
     },
     "relevantFiles": [
      "packages/tui/src/components/editor.ts"
@@ -4535,7 +4553,7 @@
     "evidence": []
    },
    "audit": {
-    "lastAuditedAt": "2026-09-06",
+    "lastAuditedAt": "2026-10-11",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -4612,8 +4630,8 @@
     "equivalence": "NO",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "d981de1229ef899957bbe968bc8dcda02a21f477",
-     "referenceRef": "d981de1229ef899957bbe968bc8dcda02a21f477"
+     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
+     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
     },
     "relevantFiles": [
      "packages/tui/src/components/editor.ts"
@@ -4630,7 +4648,7 @@
     "evidence": []
    },
    "audit": {
-    "lastAuditedAt": "2026-09-03",
+    "lastAuditedAt": "2026-10-11",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -4705,8 +4723,8 @@
     "equivalence": "NO",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "d981de1229ef899957bbe968bc8dcda02a21f477",
-     "referenceRef": "d981de1229ef899957bbe968bc8dcda02a21f477"
+     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
+     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
     },
     "relevantFiles": [
      "packages/tui/src/tui.ts"
@@ -4723,7 +4741,7 @@
     "evidence": []
    },
    "audit": {
-    "lastAuditedAt": "2026-09-03",
+    "lastAuditedAt": "2026-10-11",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -4800,8 +4818,8 @@
     "equivalence": "NO",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "d981de1229ef899957bbe968bc8dcda02a21f477",
-     "referenceRef": "d981de1229ef899957bbe968bc8dcda02a21f477"
+     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
+     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
     },
     "relevantFiles": [
      "packages/tui/src/keys.ts",
@@ -4820,7 +4838,7 @@
     "evidence": []
    },
    "audit": {
-    "lastAuditedAt": "2026-09-03",
+    "lastAuditedAt": "2026-10-11",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -4892,14 +4910,14 @@
     "equivalence": "NO",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "d981de1229ef899957bbe968bc8dcda02a21f477",
-     "referenceRef": "d981de1229ef899957bbe968bc8dcda02a21f477"
+     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
+     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
     },
     "relevantFiles": [
      "packages/tui/src/components/input.ts"
     ],
     "relevantIssues": [],
-    "semanticDelta": "Upstream v0.85.1 (and current upstream main) hardcode event.x - 2 in Input.handleMouse, so custom prompts misplace the cursor; the fork offsets by visibleWidth(this.prompt)."
+    "semanticDelta": "The pinned v1.1.0 baseline (abe508e1) hardcodes event.x - 2 in Input.handleMouse, so custom prompts misplace the cursor; the fork offsets by visibleWidth(this.prompt)."
    },
    "retirement": {
     "conditions": [
@@ -4909,7 +4927,7 @@
     "evidence": []
    },
    "audit": {
-    "lastAuditedAt": "2026-09-08",
+    "lastAuditedAt": "2026-10-11",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -4918,12 +4936,12 @@
      "behavioral",
      "tests"
     ],
-    "notes": "Confirmed upstream v0.85.1 and current upstream main both use event.x - 2; the fork fix is a one-line arithmetic change with click-position regressions."
+    "notes": "Confirmed the pinned v1.1.0 baseline still uses event.x - 2; the fork fix is a one-line arithmetic change with click-position regressions."
    }
   },
   "X049": {
-   "title": "Fullscreen transcript-search query Input mouse forwarding",
-   "status": "ACTIVE",
+   "title": "Fullscreen transcript-search query Input mouse forwarding (retired)",
+   "status": "REMOVED_UNUSED",
    "category": [
     "BUGFIX_MISSING_UPSTREAM"
    ],
@@ -4931,74 +4949,70 @@
    "files": [
     "src/alt-screen-search.ts"
    ],
-   "why": "AltScreenSearchComponent renders a mouse-aware Input and forwards keyboard/focus to it, but had no component-level mouse forwarding: a click on the query Input fell through to the overlay component, which has no handleMouse(), so the fullscreen transcript-search query cursor could not be positioned by mouse. The Host cannot fix this cleanly because the component and its private Input are inside the vendored fork.",
+   "why": "Retired by product decision (post-PR272 DIV retirement plan, PR A). The former patch added component-level handleMouse forwarding (with the last-painted lastInputWidth) so a press on AltScreenSearchComponent private query Input positioned that Input cursor. The forwarding, its field and its render assignment were deleted, and packages/pi-tui/src/alt-screen-search.ts is upstream v1.1.0 verbatim again. No surviving surface consumed it: the host transcript search is TranscriptSearchComponent with its own query-row mouse parity, and the host consumes tui.altScreen.search in onBeforeViewportInput before the fork built-in fullscreen search can open.",
    "changedSurface": [
-    "AltScreenSearchComponent.handleMouse forwards press events on the last-painted query-content row to its private Input, with the gesture/focus target rewritten to the component (X018 liveness tracks the mounted unit); the result-count suffix and borders stay inert"
+    "retired: AltScreenSearchComponent.handleMouse forwarding of press events on the query-content row to its private Input",
+    "retired: the lastInputWidth render cache that backed that hit test"
    ],
    "dependencies": {
     "vendorInternal": {
      "audited": true,
-     "items": [
-      "AltScreenSearchComponent owns the private Input; the component-level handleMouse uses the last-painted input width (cached in render) and the same previous/current query comparison as handleInput."
-     ],
-     "notes": "Single-component forwarding inside the fork; no other component reads the search query row."
+     "items": [],
+     "notes": "No other vendor component referenced the removed handleMouse or lastInputWidth; TuiAltScreen keyboard and navigation-button handling (X028) is untouched."
     },
     "inheritanceStructural": {
      "audited": true,
-     "items": [
-      "AltScreenSearchComponent implements Component and Focusable; the new handleMouse follows the MouseRegion/Frame wrapper pattern (dispatch to the private child, rewrite target/focus to the mounted unit)."
-     ],
-     "notes": "No override/super edge affected."
+     "items": [],
+     "notes": "The removed handler was a Component-level override on AltScreenSearchComponent; no super/override edge or fan-out depended on it."
     },
     "host": {
      "audited": true,
-     "items": [
-      "The built-in fullscreen transcript search relies on this vendor-owned component; TuiAltScreen.handleSearchMouseEvent still owns the navigation buttons."
-     ],
-     "notes": "Host behavior improves for the query Input; navigation-button handling is unchanged."
+     "items": [],
+     "notes": "The host mounts its own TranscriptSearchComponent (src/tui/interaction/transcript-search.ts, unchanged) and suppresses the fork native search key, so no host path consumed the removed forwarding."
     },
     "publicExtension": {
      "audited": true,
-     "items": [
-      "AltScreenSearchComponent is not part of the public extension surface; the change is vendor-internal."
-     ],
-     "notes": "No extension API change."
+     "items": [],
+     "notes": "AltScreenSearchComponent is not part of the public extension surface; the removed behavior was vendor-internal, so no public contract loses a published guarantee."
     },
     "behavioral": {
      "audited": true,
-     "items": [
-      "press on the query-content row positions the Input cursor at the clicked value column",
-      "the result-count suffix, top/bottom borders, and the navigation-button row stay inert",
-      "typing after the click inserts at the clicked query position"
-     ],
-     "notes": "Regression tests cover cursor positioning, inert chrome, and the fullscreen integration path."
+     "items": [],
+     "notes": "Deliberate product tradeoff: a click on the fork built-in fullscreen search query row no longer positions the cursor (upstream behavior). The Host search box keeps its own query-row click-to-position behavior."
     }
    },
    "tests": [
-    "packages/pi-tui/test/tui-alt-screen.test.ts: X049 — query Input press positions the cursor, typing inserts at the clicked column, result-count suffix and borders inert, and the fullscreen TuiAltScreen click-to-position integration"
+    "retired: the three X049 cases in packages/pi-tui/test/tui-alt-screen.test.ts were deleted (query-cursor press, inert result-count/borders, fullscreen click-to-position); the remaining native search cases stay upstream-owned",
+    "surviving coverage (host search routing): test/transcript-search-interaction.test.ts asserts that the Host shortcut opens the Host box, that the fork native search is never painted, and that a remapped Host action keeps the old defaults suppressed",
+    "surviving coverage (host query-row mouse parity): test/transcript-search.test.ts plus the in-box click cases in test/transcript-search-interaction.test.ts"
    ],
    "upstream": {
-    "equivalence": "NO",
+    "equivalence": "YES",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "d981de1229ef899957bbe968bc8dcda02a21f477",
-     "referenceRef": "d981de1229ef899957bbe968bc8dcda02a21f477"
+     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
+     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
     },
     "relevantFiles": [
      "packages/tui/src/alt-screen-search.ts"
     ],
     "relevantIssues": [],
-    "semanticDelta": "Upstream v0.85.1 (d981de1) and current upstream main (aa23e784c) both lack component-level mouse forwarding for the transcript-search query Input; the fork forwards press events to the private Input with last-painted geometry and wrapper target/focus ownership."
+    "semanticDelta": "packages/pi-tui/src/alt-screen-search.ts matches the pinned v1.1.0 blob byte-for-byte: AltScreenSearchComponent renders the query Input but has no component-level mouse forwarding. No local delta remains."
    },
    "retirement": {
     "conditions": [
-     "Retire only when pinned upstream includes semantically equivalent query-Input mouse forwarding in AltScreenSearchComponent (or the component is restructured so the Host can forward without changing the vendor surface), then run the query-cursor, inert-chrome, and fullscreen integration tests."
+     "Product decision: the fork built-in fullscreen search stays upstream-owned; do not re-add query-row mouse forwarding or a substitute API.",
+     "The Host transcript search keeps its own query-row click-to-position contract in TranscriptSearchComponent."
     ],
     "replacementMapping": [],
-    "evidence": []
+    "evidence": [
+     "Deletion evidence: the handleMouse override, the lastInputWidth field and its render assignment are removed and have no live source or test reference.",
+     "Source evidence: packages/pi-tui/src/alt-screen-search.ts matches the pinned v1.1.0 blob (diff empty) and the three X049 test cases are gone.",
+     "Gate evidence: fork typecheck, the targeted fork tests, gate:pi-vendor-diff --strict, gate:pi-divergence-ledger and the host transcript-search suites pass with this record retired."
+    ]
    },
    "audit": {
-    "lastAuditedAt": "2026-09-09",
+    "lastAuditedAt": "2026-10-11",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -5007,7 +5021,7 @@
      "behavioral",
      "tests"
     ],
-    "notes": "Confirmed upstream v0.85.1 and current upstream main both lack the query-Input mouse forwarding; the fork fix is component-level forwarding with last-painted geometry and wrapper target/focus ownership."
+    "notes": "Retirement audit for the post-PR272 DIV retirement plan PR A. The relocationAudit NOT_MOVABLE and UPSTREAM_LEVER decisions naming this ID predate the retirement and are kept as historical audit records."
    }
   },
   "X050": {
@@ -5077,14 +5091,14 @@
     "equivalence": "NO",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "d981de1229ef899957bbe968bc8dcda02a21f477",
-     "referenceRef": "d981de1229ef899957bbe968bc8dcda02a21f477"
+     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
+     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
     },
     "relevantFiles": [
      "packages/tui/src/components/editor.ts"
     ],
     "relevantIssues": [],
-    "semanticDelta": "Upstream v0.85.1 (d981de1) and current upstream main (aa23e784c) both force targetIndex = lastGraphemeIndex for clicks at/after the end of a non-last wrapped segment, and both apply slash-prefix autocomplete completions on click without submitting; the fork keeps the natural end-of-segment position and submits slash completions like the keyboard path."
+    "semanticDelta": "The pinned v1.1.0 baseline (abe508e1) forces targetIndex = lastGraphemeIndex for clicks at/after the end of a non-last wrapped segment, and applies slash-prefix autocomplete completions on click without submitting; the fork keeps the natural end-of-segment position and submits slash completions like the keyboard path."
    },
    "retirement": {
     "conditions": [
@@ -5094,7 +5108,7 @@
     "evidence": []
    },
    "audit": {
-    "lastAuditedAt": "2026-09-09",
+    "lastAuditedAt": "2026-10-11",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -5103,7 +5117,7 @@
      "behavioral",
      "tests"
     ],
-    "notes": "Confirmed upstream v0.85.1 and current upstream main both keep the decrement and the non-submitting slash onSelect; the fork fixes both editor mouse paths."
+    "notes": "Confirmed the pinned v1.1.0 baseline keeps the decrement and the non-submitting slash onSelect; the fork fixes both editor mouse paths."
    }
   },
   "X051": {
@@ -5179,8 +5193,8 @@
     "equivalence": "NO",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "d981de1229ef899957bbe968bc8dcda02a21f477",
-     "referenceRef": "d981de1229ef899957bbe968bc8dcda02a21f477"
+     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
+     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
     },
     "relevantFiles": [
      "packages/tui/src/tui.ts",
@@ -5197,7 +5211,7 @@
     "evidence": []
    },
    "audit": {
-    "lastAuditedAt": "2026-09-09",
+    "lastAuditedAt": "2026-10-11",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -5273,7 +5287,7 @@
     "evidence": []
    },
    "audit": {
-    "lastAuditedAt": "2026-09-09",
+    "lastAuditedAt": "2026-10-11",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -5282,7 +5296,7 @@
      "behavioral",
      "tests"
     ],
-    "notes": "Confirmed upstream SelectList (v0.85.1 and current main) still derives the pressed row from the live visible range and latches an array index; the fork fences mouse dispatch to the last-painted rows with item-identity gesture tracking."
+    "notes": "Confirmed the pinned v1.1.0 SelectList still derives the pressed row from the live visible range and latches an array index; the fork fences mouse dispatch to the last-painted rows with item-identity gesture tracking."
    },
    "tests": [
     "packages/pi-tui/test/select-list.test.ts: a press on a painted row resolves to the painted item even when the live visible range moved without a repaint (setSelectedIndex after render)",
@@ -5295,8 +5309,8 @@
     "equivalence": "NO",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "d981de1229ef899957bbe968bc8dcda02a21f477",
-     "referenceRef": "d981de1229ef899957bbe968bc8dcda02a21f477"
+     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
+     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
     },
     "relevantFiles": [
      "packages/tui/src/components/select-list.ts"
@@ -5369,8 +5383,8 @@
     "equivalence": "NO",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "d981de1229ef899957bbe968bc8dcda02a21f477",
-     "referenceRef": "d981de1229ef899957bbe968bc8dcda02a21f477"
+     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
+     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
     },
     "relevantFiles": [
      "packages/tui/src/components/input.ts"
@@ -5386,7 +5400,7 @@
     "evidence": []
    },
    "audit": {
-    "lastAuditedAt": "2026-09-09",
+    "lastAuditedAt": "2026-10-11",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -5478,8 +5492,8 @@
     "equivalence": "NO",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "d981de1229ef899957bbe968bc8dcda02a21f477",
-     "referenceRef": "d981de1229ef899957bbe968bc8dcda02a21f477"
+     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
+     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
     },
     "relevantFiles": [
      "packages/tui/src/tui-alt-screen.ts"
@@ -5495,7 +5509,7 @@
     "evidence": []
    },
    "audit": {
-    "lastAuditedAt": "2026-09-09",
+    "lastAuditedAt": "2026-10-11",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -5576,8 +5590,8 @@
     "equivalence": "NO",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "d981de1229ef899957bbe968bc8dcda02a21f477",
-     "referenceRef": "d981de1229ef899957bbe968bc8dcda02a21f477"
+     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
+     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
     },
     "relevantFiles": [
      "packages/tui/src/components/scroll-view.ts"
@@ -5593,7 +5607,7 @@
     "evidence": []
    },
    "audit": {
-    "lastAuditedAt": "2026-09-14",
+    "lastAuditedAt": "2026-10-11",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -5602,7 +5616,7 @@
      "behavioral",
      "tests"
     ],
-    "notes": "Checked upstream v0.85.1 updateLayout (identical re-arm clause), the ScrollView follow/scroll field graph, and the host fullscreen consumer; the guard only suppresses the re-arm branch on viewport growth."
+    "notes": "Checked the pinned v1.1.0 updateLayout (identical re-arm clause), the ScrollView follow/scroll field graph, and the host fullscreen consumer; the guard only suppresses the re-arm branch on viewport growth."
    }
   },
   "X056": {
@@ -5726,8 +5740,8 @@
     "equivalence": "NO",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "d981de1229ef899957bbe968bc8dcda02a21f477",
-     "referenceRef": "d981de1229ef899957bbe968bc8dcda02a21f477"
+     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
+     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
     },
     "relevantFiles": [
      "packages/tui/src/tui.ts"
@@ -5744,7 +5758,7 @@
     "evidence": []
    },
    "audit": {
-    "lastAuditedAt": "2026-09-17",
+    "lastAuditedAt": "2026-10-11",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -5757,8 +5771,8 @@
    }
   },
   "X057": {
-   "title": "Copy-source line filter for host presentation chrome",
-   "status": "ACTIVE",
+   "title": "Copy-source line filter for host presentation chrome (retired)",
+   "status": "REMOVED_UNUSED",
    "category": [
     "PUBLIC_COMPONENT_CONTRACT"
    ],
@@ -5766,78 +5780,72 @@
    "files": [
     "src/tui-alt-screen.ts"
    ],
-   "why": "The host paints presentation-only chrome inside the transcript scroll content (the expanded long-user disclosure tail control). That row must stay visible and clickable, but it is not transcript text: a selection crossing it must copy the blank separator the row replaced, never the label. Upstream derives the copied text directly from the rendered scroll lines with no host hook, so the only way to keep paint, search, mouse hit-testing and word/line selection on the RENDERED line while filtering the clipboard is a narrow copy-source override. The seam is generic (any row, any host reason) and consulted ONLY in getActiveSelectionText; word/line range computation, search and the mouse hit map keep reading the rendered line, so double-click/triple-click and hit-testing semantics are unchanged.",
+   "why": "Retired by product decision (post-PR272 DIV retirement plan, PR C). The seam existed so that a selection crossing the host-owned expanded-user tail control (`▴ Collapse · …`) copied a blank row instead of the presentation label (the separator row it replaced for a non-final block, or an empty row for the final block, which reserved no separator). The product decision removed that dedicated tail row entirely: the whole-bubble BODY click is now the only disclosure affordance, no collapse label is painted on any surface, and the final block no longer reserves an extra presentation row. With no chrome inside the copyable transcript content the per-row copy-source override has no consumer, so TuiAltScreenOptions.selectionLineText, its private field, its constructor assignment and the getActiveSelectionText override are deleted; that method is the pinned upstream implementation again (apart from X024 line-head indent normalization), and the host no longer needs the painted-frame copy-blank-row cache (copyBlankRows) or the tail-slot hit bookkeeping.",
    "changedSurface": [
-    "TuiAltScreenOptions.selectionLineText?: (context: { row, line, scrollView? }) => string | undefined — replaces that scroll-content row contribution to the copied selection; undefined keeps the rendered line"
+    "retired: TuiAltScreenOptions.selectionLineText (the optional per-row copy-source override) and its doc",
+    "retired: the private selectionLineText field plus its constructor assignment",
+    "retired: the getActiveSelectionText override lookup and the slicing of the override line (the rendered line is sliced again)"
    ],
    "dependencies": {
     "vendorInternal": {
      "audited": true,
-     "items": [
-      "getActiveSelectionText consults this.selectionLineText once per selected row (after resolving sourceLines and before getSelectionColumns/sliceByColumn) and slices the override line; returning undefined keeps the upstream path byte-identical."
-     ],
-     "notes": "One additive lookup on the copy path; no other fork code reads the field."
+     "items": [],
+     "notes": "The removed override was the only reader of the field inside getActiveSelectionText; no other fork file referenced selectionLineText, and the surrounding selection helpers (getSelectionBounds, getSelectionColumns, sliceByColumn) are untouched."
     },
     "inheritanceStructural": {
      "audited": true,
-     "items": [
-      "No subclass or structural edge: the option is a plain constructor field on TuiAltScreen."
-     ],
-     "notes": "None."
+     "items": [],
+     "notes": "The option was a plain constructor field on TuiAltScreen; no subclass or structural edge consumed it, so no override/super path needs migration."
     },
     "host": {
      "audited": true,
-     "items": [
-      "src/tui-app.ts passes selectionLineText and returns an empty string for the expanded long-user tail control row only, identified from its own messageRows userDisclosureHits range geometry (the collapse+tail-slot hit rows); every other row — the whole-bubble body range included — returns undefined.",
-      "src/tui-app.ts selectionLineText returns undefined unless the context scrollView is the transcript ScrollView, so overlay/editor selections are never filtered."
-     ],
-     "notes": "The host owns the semantic meaning of its chrome; the fork never learns what the row is."
+     "items": [],
+     "notes": "The host DID consume the seam: src/tui-app.ts passed selectionLineText and returned an empty string for the expanded tail-control rows derived from its own messageRows hit geometry. That tail row and its copyBlankRows cache are retired in the same change, so the host paints no chrome inside the copyable transcript content any more and no host code needs migration — the retirement is a recorded product decision, not a no-consumer finding."
     },
     "publicExtension": {
      "audited": true,
-     "items": [
-      "TuiAltScreenOptions is a public type; the new field is optional and additive, so existing consumers compile and behave unchanged."
-     ],
-     "notes": "No behavioural change when the option is absent."
+     "items": [],
+     "notes": "TuiAltScreenOptions is a public type, so removing an optional field is an intentional public API deletion for @xmoon76/pi-tui consumers; the published @xmoon76/dsh-pi-tui extension entries use their own structural types and never exposed this option, so no published extension contract loses a promise."
     },
     "behavioral": {
      "audited": true,
-     "items": [
-      "A row whose override is a string copies that string (an empty string copies as the blank separator); rows returning undefined copy the rendered line.",
-      "The paint, the word/line selection ranges, the search corpus/highlight and the mouse hit map are unaffected.",
-      "With no handler (or one returning undefined) the copied text is identical to the pinned upstream behavior."
-     ],
-     "notes": "Guarded by packages/pi-tui/test/tui-alt-screen.test.ts (X057) plus the host tail-control clipboard regression in test/long-user-disclosure.test.ts."
+     "items": [],
+     "notes": "Deliberate product tradeoff: a selection crossing the former tail location now copies the real rendered rows (there is no presentation row left to filter); word/line range computation, search and the mouse hit map keep reading the rendered line exactly as before."
     }
    },
    "tests": [
-    "packages/pi-tui/test/tui-alt-screen.test.ts: filters only the copy source of a row via selectionLineText (X057)",
-    "packages/pi-tui/test/tui-alt-screen.test.ts: keeps the copied text unchanged when selectionLineText returns undefined (X057)",
-    "packages/pi-tui/test/tui-alt-screen.test.ts: computes word selection on the rendered line but copies the override (X057)",
-    "test/long-user-disclosure.test.ts: the tail control chrome never reaches the clipboard"
+    "retired: the five X057 cases in packages/pi-tui/test/tui-alt-screen.test.ts were deleted (copy-source filter, undefined-override passthrough, word range on the rendered line, non-empty-override range, filtered OSC 52 path); the independent copy/selection/word/double-click cases and the plain copySelection handler content assertions stay",
+    "replacement coverage (host copy contract): test/long-user-disclosure.test.ts pins that a copy across the expanded message carries no presentation label, that the last user row keeps its own line before the answer, and that selecting the complete expanded message copies its real text verbatim",
+    "replacement coverage (disclosure): the rewritten long-user and pending disclosure suites pin the whole-bubble BODY click in fullscreen/Focus/compact plus the resize and stale-press fences, and assert that no `▴ Collapse` chrome is painted in any state (including the separator case that pins exactly one ordinary separator row between two expanded long users)"
    ],
    "upstream": {
-    "equivalence": "NO",
+    "equivalence": "YES",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "d981de1229ef899957bbe968bc8dcda02a21f477",
-     "referenceRef": "d981de1229ef899957bbe968bc8dcda02a21f477"
+     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
+     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
     },
     "relevantFiles": [
      "packages/tui/src/tui-alt-screen.ts"
     ],
     "relevantIssues": [],
-    "semanticDelta": "Upstream copies selected scroll-content rows verbatim; the fork adds an optional per-row copy-source override consulted only when building the copied text. Default behavior is unchanged."
+    "semanticDelta": "getActiveSelectionText is the pinned v1.1.0 implementation again: each selected row contributes its rendered line, sliced by the rendered column range and trimmed. The other local divergences that share this file (X024 indent normalization, X018/X028/X054 seams) are untouched, so the comparison is region-scoped."
    },
    "retirement": {
     "conditions": [
-     "Retire when upstream exposes a host hook for non-copyable presentation rows (or the host stops painting chrome inside the copyable transcript content), then run the X057 copy regressions."
+     "Product decision: no dedicated tail control row and no copy-source override; do not re-add a substitute label or a second disclosure affordance.",
+     "The whole-bubble BODY click and Ctrl+O remain the disclosure owners, and the copy path stays upstream-verbatim.",
+     "Recheck only if a future host surface paints presentation chrome inside copyable transcript content and upstream still exposes no hook for it."
     ],
     "replacementMapping": [],
-    "evidence": []
+    "evidence": [
+     "Deletion evidence: selectionLineText, its field, its constructor assignment and the getActiveSelectionText override lookup are removed, and the host tail row, its height rule, its mount branch, userCollapseControlText, the copyBlankRows snapshot field and the selectionLineText wiring have no live source, test or documentation reference.",
+     "Source evidence: packages/pi-tui/src/tui-alt-screen.ts getActiveSelectionText matches the pinned v1.1.0 implementation apart from the X024 indent rule, and the fork test file no longer contains a selectionLineText reference.",
+     "Gate evidence: fork typecheck, the fork alt-screen suite, the rewritten disclosure suites, gate:pi-vendor-diff --strict and gate:pi-divergence-ledger pass with this record retired."
+    ]
    },
    "audit": {
-    "lastAuditedAt": "2026-09-29",
+    "lastAuditedAt": "2026-10-11",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -5846,7 +5854,7 @@
      "behavioral",
      "tests"
     ],
-    "notes": "Confirmed upstream getActiveSelectionText slices the rendered scroll lines with no host override hook; the fork adds one optional lookup on the copy path only. 2026-09-29: host dependency re-verified after PR #197 moved the host hit geometry to plural userDisclosureHits ranges — the override still targets only the tail-slot collapse rows."
+    "notes": "Retirement audit for the post-PR272 DIV retirement plan PR C. The seam was genuinely consumed by the host tail control; this retirement is a recorded product decision that removed that control, and the whole-bubble BODY click replaces the affordance."
    }
   },
   "X058": {
@@ -5927,8 +5935,8 @@
     "equivalence": "NO",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "d981de1229ef899957bbe968bc8dcda02a21f477",
-     "referenceRef": "d981de1229ef899957bbe968bc8dcda02a21f477"
+     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
+     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
     },
     "relevantFiles": [
      "packages/tui/src/tui.ts",
@@ -5945,7 +5953,7 @@
     "evidence": []
    },
    "audit": {
-    "lastAuditedAt": "2026-09-19",
+    "lastAuditedAt": "2026-10-11",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -6004,7 +6012,7 @@
      "audited": true,
      "items": [
       "src/tui-app.ts owns the effective state: reconcileTerminalProgress() runs from setTerminalProgress() and from every activity projection (projectActivity), so a wait opening or settling while the main Agent runs moves the pane immediately — including the question FIFO handover, where the phase is unchanged but the new flow's agentInputWait is not.",
-     "Only a wait the main Agent is BLOCKED on pauses the pane: agentInputWait is supplied by the interaction lifecycle that owns the wait (the LIVE foreground Agent question wait and the Agent approval port pass true; a CONTINUED late-answer form whose Agent already continued, the /login authorization prompt and every other Client-local flow stay false), so neither the canonical phase nor the interaction SOURCE alone can claim waiting_input.",
+      "Only a wait the main Agent is BLOCKED on pauses the pane: agentInputWait is supplied by the interaction lifecycle that owns the wait (the LIVE foreground Agent question wait and the Agent approval port pass true; a CONTINUED late-answer form whose Agent already continued, the /login authorization prompt and every other Client-local flow stay false), so neither the canonical phase nor the interaction SOURCE alone can claim waiting_input.",
       "The Tern-only guard keeps the richer method off every non-Tern path (plan §9.2), and a Tern terminal that lacks setProgressState fails soft to the boolean working/clear projection (plan §9.3).",
       "The PR #230 ownership lifecycle is preserved: while the TuiApp does not own the terminal the desired state is only folded, and every screen (re)start re-asserts the CURRENT effective state.",
       "The terminalProgress preference gates only the physical write: setTerminalProgressEnabled(false) asserts one clear and then suppresses active/paused writes while the desired logical state keeps folding; (re)enabling reprojects the current effective state immediately, and an acquisition while disabled asserts clear. It is a presentation gate, never a second Agent-state authority."
@@ -6057,8 +6065,8 @@
     "equivalence": "NO",
     "checkedAgainst": {
      "repo": "earendil-works/pi",
-     "baselineRef": "d981de1229ef899957bbe968bc8dcda02a21f477",
-     "referenceRef": "d981de1229ef899957bbe968bc8dcda02a21f477"
+     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
+     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
     },
     "relevantFiles": [
      "packages/tui/src/terminal.ts"
@@ -6074,7 +6082,7 @@
     "evidence": []
    },
    "audit": {
-    "lastAuditedAt": "2026-10-07",
+    "lastAuditedAt": "2026-10-11",
     "scope": [
      "vendor-internal",
      "inheritance-structural",
@@ -6084,6 +6092,405 @@
      "tests"
     ],
     "notes": "Re-audited the whole OSC 9;4 physical state machine after the heartbeat convergence and the working-encoding change. The three-state LOGICAL projection is unchanged (clear / unknown-progress working / paused); its WORKING physical payload is now OSC 9;4;1;0 instead of 9;4;3, so the boolean contract no longer keeps its exact working bytes (it keeps one write per explicit call, its true->indeterminate / false->clear mapping and the clear payload). The paused state is optional and consumed by the Tern ANSI path only, and the widened lifecycle rule (stop() clearing a physically paused state) is unchanged. The previous universal 1 s active refresh was narrowed to terminals known to expire OSC 9;4 state (Ghostty / Monstar); persistent terminals including Tern are one-shot. The host-side consumer contract is THREE inputs (main-Agent running + canonical RunPhase + the lifecycle-owned agentInputWait) plus the terminalProgress presentation gate: a re-vendor or retirement audit must keep the third input, never collapse it back to the phase alone, and must not let the gate become a second Agent-state authority."
+   }
+  },
+  "X060": {
+   "title": "Narrow OSC 11 background observation for the host's Theme: auto",
+   "status": "ACTIVE",
+   "category": [
+    "HARD_HOST_API"
+   ],
+   "risk": "MEDIUM",
+   "files": [
+    "src/tui.ts"
+   ],
+   "why": "The host decides Dark/Light from the terminal's default BACKGROUND only. Upstream's queryTerminalColors writes a full OSC 10 + OSC 11 + OSC 4 x16 transaction and needs a sentinel to know when a burst ended; the fork instead exposes one narrow OSC 11 observation, so the host never issues the full transaction, never depends on a sentinel that another layer could claim or that a key could imitate, and never leaves a timed-out query holding the wire. Upstream's full API stays available verbatim for consumers that need the foreground or the palette.",
+   "changedSurface": [
+    "TUI.queryTerminalBackgroundColor({ timeoutMs }) (TuiBase implementation) returning Promise<RgbColor | undefined>",
+    "exactly one OSC 11 query (`ESC ] 11 ; ? BEL`) per observation: no OSC 10, no OSC 4 palette, no DA1 and no DSR request",
+    "one in-flight observation per screen: a concurrent call shares the same promise instead of writing a second query",
+    "the timeout resolves undefined, and stop() releases the pending observation and its timer so a stopped screen never applies a late result",
+    "no request-id correlation: the value is an observation of the CURRENT terminal background, not a reply strictly attributable to one request; callers own the still-relevant guard (screen identity, stopped screen, newer explicit choice)",
+    "once ANY screen in this process has issued an observation, a well-formed OSC 11 reply (a stray, late or cross-screen one included) is consumed at the TUI layer and can never reach the editor or a raw input listener: the physical terminal input chain is shared while an observation belongs to one screen, so forwarding such a reply would surface it as user activity on whichever screen owns the terminal now. A process that only uses upstream's API keeps upstream's forwarding behavior",
+    "the narrow seam is served from the same parse as queryTerminalColors, so a concurrent full query still records the reply"
+   ],
+   "dependencies": {
+    "vendorInternal": {
+     "audited": true,
+     "items": [
+      "TuiBase owns the in-flight observation; TuiMainScreen and TuiAltScreen inherit it, and ProcessTerminal is untouched (upstream DA/keyboard semantics, X016)."
+     ],
+     "notes": "No vendor-internal caller exists: the seam is consumed by the host through the TUI interface."
+    },
+    "inheritanceStructural": {
+     "audited": true,
+     "items": [],
+     "notes": "No inheritance edge is introduced or relied on; the seam is a TuiBase method like the rest of the interface."
+    },
+    "host": {
+     "audited": true,
+     "items": [
+      "TuiApp.runAutoDetect observes the ACTIVE screen and drops the result when the active screen changed while it was in flight; Emoji/themeOptOut and shouldApply guards are unchanged.",
+      "TuiApp.trackTerminalTheme toggles Mode 2031 only and never samples; the boot wiring keeps autoDetectTheme as the single sample, and the live scheme-report listener respects the colour opt-out now that enabling Mode 2031 makes such reports reachable.",
+      "TuiApp.start() re-registers the per-screen scheme fan-out, so a full stop/start keeps receiving reports, and the live-report listener is registered once for every persisted theme, so a runtime switch to auto (which enables Mode 2031) is heard as well."
+     ],
+     "notes": "The host is the primary consumer; the narrow seam replaced its use of the full transaction."
+    },
+    "publicExtension": {
+     "audited": true,
+     "items": [
+      "The accessor is part of the public TUI interface (structural types only) and resolves to RgbColor | undefined, so no internal class or terminal object leaks."
+     ],
+     "notes": "Additive public surface; upstream's queryTerminalColors contract is unchanged."
+    },
+    "behavioral": {
+     "audited": true,
+     "items": [
+      "one query and one reply per observation; coalesced concurrent calls; bounded timeout; stop() releases the pending resolver and timer",
+      "OSC 11 replies are consumed on screens that use the seam, while ordinary keys, modified keys (e.g. legacy Shift+F3 `CSI 1;2R`) and other color replies still flow"
+     ],
+     "notes": "The seam intentionally does not implement per-request pairing; that limit is documented on the API and pinned by a test."
+    }
+   },
+   "tests": [
+    "packages/pi-tui/test/terminal-background-query.test.ts: one OSC 11 query and no OSC 10/4/DA1/DSR traffic; coalesced concurrent calls; timeout then a consumed late reply; a late reply after a new observation counts as the current observation; stop() releases the pending observation; an unowned background reply landing on ANOTHER screen is consumed there; ordinary and modified keys plus other color replies still flow; a concurrent full query still records the reply",
+    "test/rendering.test.ts: Theme auto observes only the OSC 11 background (bright -> light, dark -> dark), COLORFGBG fallback, silent-terminal no-op, the ACTIVE screen in fullscreen, an observation that resolves before a screen switch is dropped, a late reply across a Main/Fullscreen swap in BOTH directions is never counted as user input, coalescing, shouldApply refusal, a late reply never reaches the editor, the colour opt-out issues no query, detection still works after returning from fullscreen, and a full app stop/start keeps receiving reports",
+    "test/rendering.test.ts: Mode 2031 follows the tracking choice across a Main/Fullscreen switch, and tracking never samples the terminal",
+    "test/settings-theme-boot.test.ts: the boot wiring samples once through autoDetectTheme, enables tracking without sampling, a live scheme report only changes the theme while the preference is auto (a runtime switch from a manual theme to auto included), and a live report cannot bypass the colour opt-out",
+    "packages/pi-tui/test/terminal-colors.test.ts: the upstream full-query suite stays verbatim and green next to the narrow seam"
+   ],
+   "upstream": {
+    "equivalence": "NO",
+    "checkedAgainst": {
+     "repo": "earendil-works/pi",
+     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
+     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
+    },
+    "relevantFiles": [
+     "packages/tui/src/tui.ts",
+     "packages/tui/src/terminal-colors.ts"
+    ],
+    "relevantIssues": [],
+    "semanticDelta": "Upstream has no background-only accessor: queryTerminalColors writes the OSC 10 + OSC 11 + OSC 4 x16 burst plus a DA1 request, attributes replies FIFO to the oldest pending query, and forwards unowned color replies to the input pipeline. The fork keeps that method verbatim and adds the narrow observation, which writes one OSC 11 query, coalesces per screen, resolves undefined on timeout or stop, and consumes OSC 11 replies process-wide once the seam is in use."
+   },
+   "retirement": {
+    "conditions": [
+     "Upstream gains a background-only accessor with the same host-visible guarantees (coalescing, bounded timeout, input isolation).",
+     "Or the host stops needing terminal background detection."
+    ],
+    "replacementMapping": [],
+    "evidence": []
+   },
+   "audit": {
+    "lastAuditedAt": "2026-10-11",
+    "scope": [
+     "vendor-internal",
+     "inheritance-structural",
+     "host",
+     "public-extension",
+     "behavioral",
+     "tests"
+    ],
+    "notes": "Introduced in PR #272 as the replacement for the retired X008 serialization. Scope checked against both screens and the shared terminal input chain (a reply that outlives its observation must not become user activity on the screen that owns the terminal now, including across a Main/Fullscreen swap in either direction), the host boot/track wiring (Mode 2031 enablement must not bypass the colour opt-out), the shared TUI color consumer parse order, the upstream full-query suite, and the modified-key input path."
+   }
+  },
+  "X061": {
+   "title": "Structured value parts and a reserved label column for the SettingsList value slot",
+   "status": "ACTIVE",
+   "category": [
+    "PUBLIC_COMPONENT_CONTRACT",
+    "BUGFIX_MISSING_UPSTREAM"
+   ],
+   "risk": "MEDIUM",
+   "files": [
+    "src/components/settings-list.ts",
+    "src/index.ts"
+   ],
+   "why": "The host's state chips (`[current]`/`[default]`) live in the vendored value slot, which truncates its text by RAW width after the label column has taken `min(36, longest label)` cells. Three defects follow from the renderer owning that layout: a chip is cut in half (`[defaul`), a separator can survive without the chip it joined, and a label wider than its column overflows the row so the value slot — the only in-row `current` signal — leaves the painted row entirely, at 120 columns as well as at the 44-column floor. The host cannot repair this through the public surface: only `render(width)` knows the final value width, so no call-site string can be shaped correctly, and duplicating the layout math in every caller would drift from the fork. Upstream has neither the structured slot nor the label clamp.",
+   "changedSurface": [
+    "`SettingItem.valueParts?: readonly SettingValuePart[]` (`{ kind: 'chip' | 'text'; text: string }`) — a structured, whole-unit replacement for the value slot; `currentValue`, `values`, `updateValue` and `activateItem` semantics are untouched (the parts are a paint-time display fact)",
+    "the value slot keeps the longest WHOLE prefix of `valueParts` that fits its budget and never cuts a part; a kept prefix never ENDS on a `text` part, so a dropped chip takes its separator with it (`fitValueParts`)",
+    "the label column is clamped to `min(36, longest label, width - widest chip - 6)` (the same fixed-cell budget the value slot uses) and the label itself is truncated with `…` to that column (`stateReserveWidth`), so one chip is reserved and no painted row exceeds `render(width)`",
+    "no `valueParts` => the VALUE field keeps its historical expression (`truncateToWidth(currentValue, valueMaxWidth, '')`) byte-for-byte; the LABEL-column clamp is GLOBAL, so every row whose label exceeds its column (a user `/skills` name, a dynamic command/keybinding label) now clips with `…` instead of painting past its column",
+    "`SettingValuePart` is exported from the package entry next to `SettingItem`"
+   ],
+   "dependencies": {
+    "vendorInternal": {
+     "audited": true,
+     "items": [
+      "`fitValueParts` and `SettingsList.stateReserveWidth` are private to `settings-list.ts`; no other vendored component reads `valueParts`.",
+      "`SettingsListTheme.value` still wraps the joined parts, so the existing `selected ? primary : textDim` paint contract is unchanged."
+     ],
+     "notes": "No vendor-internal consumer changes; the renderer is the single owner of the layout math."
+    },
+    "inheritanceStructural": {
+     "audited": true,
+     "items": [],
+     "notes": "No inheritance edge is introduced or relied on."
+    },
+    "host": {
+     "audited": true,
+     "items": [
+      "`src/tui/pickers/preset-presentation-pitui.ts` hands the `/preset` rows the `[current]`/`[default]` chips as parts, current before default (drop priority).",
+      "`src/tui/pickers/theme-menu.ts` hands the Theme submenu row its `[current]` chip as a part.",
+      "Every other SettingsList caller (`commands/settings.ts` rows, `commands/status.ts`, `commands/skills.ts`, `commands/utility.ts`) declares no parts and keeps the historical value path; the label clamp is the only shared change they see."
+     ],
+     "notes": "The host is the only consumer of the structured slot today (the two PR5b pickers)."
+    },
+    "publicExtension": {
+     "audited": true,
+     "items": [
+      "The additive `SettingValuePart` type and `valueParts` field are structural members of the public component contract; the bundled declaration rolls up through `src/index.ts` and stays inside the allowlisted entry regions."
+     ],
+     "notes": "Additive only: no existing member is repurposed or removed."
+    },
+    "behavioral": {
+     "audited": true,
+     "items": [
+      "whole-part keep/drop with trailing-`text` trimming",
+      "label clamp with `…` (no row overflow)",
+      "chip reservation down to the 44-column floor; no cached width (per-render, so a resize reflows)",
+      "the value field's plain-string path is unchanged; the label-column clamp applies to every row"
+     ],
+     "notes": "The reservation is a budget, not an exception: the chip outranks the label's tail (spec §6.4/§8, Owner decision 2026-10-14)."
+    }
+   },
+   "tests": [
+    "packages/pi-tui/test/settings-list.test.ts: a chip is kept whole and the rest dropped whole (no `[curre`, no dangling separator) at 60/45/15/14 cells; a label wider than its column is clipped with `…` and the chip survives at 40 and 120 cells; a label wider than its column is clamped even without parts; `currentValue`/`values` still cycle while the slot paints the parts; a wide -> narrow -> wide resize reflows both chips back",
+    "test/preset-command.test.ts: the real `/preset` overlay paints both chips whole and no retired prose marker; the 120/67/66/59/58/57/56/52/48/44-column matrix (one whole chip, no half chip, no separator, no row wider than the terminal); a wide -> narrow -> wide resize restores both chips and a click on the long-name row at the narrow geometry still selects THAT row",
+    "test/surface-row-grant.test.ts: the Theme submenu chip keeps `textMuted` in both selection states; the chip survives 120/48/44 columns with an over-wide plugin theme name (label clipped, no overflow)",
+    "test/theme-picker.test.ts: the identity matcher follows the painted prefix of an over-wide label; the `file:`/plugin identity marker is unaffected"
+   ],
+   "upstream": {
+    "equivalence": "NO",
+    "checkedAgainst": {
+     "repo": "earendil-works/pi",
+     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
+     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
+    },
+    "relevantFiles": [
+     "packages/tui/src/components/settings-list.ts"
+    ],
+    "relevantIssues": [],
+    "semanticDelta": "Upstream's `SettingItem` has no structured value slot: the renderer pads the label to `min(36, longest label)` but never CLAMPS it, and truncates the value with a raw `truncateToWidth`. A label wider than its column therefore overflows the row, and a chip in the value slot can be sliced (`[defaul`) or pushed out of the paint. The fork adds `valueParts` (longest whole prefix, trailing-separator trimming) and closes the label column to the width it allocates (the clamp is global; the value field's plain-string path is unchanged)."
+   },
+   "retirement": {
+    "conditions": [
+     "Upstream gains a structured value slot with whole-unit drops plus a label clamp (or a per-width value provider a call site can shape correctly).",
+     "Or the host stops placing state chips in a vendored fixed-width value slot."
+    ],
+    "replacementMapping": [],
+    "evidence": []
+   },
+   "audit": {
+    "lastAuditedAt": "2026-10-14",
+    "scope": [
+     "vendor-internal",
+     "inheritance-structural",
+     "host",
+     "public-extension",
+     "behavioral",
+     "tests"
+    ],
+    "notes": "Introduced in PR #309 (rollout PR5b) after the external review P2 (a chip cut or pushed out of the row on supported narrow frames). Scope checked against every SettingsList caller, the fork's own value-paint theme, the real-overlay frames at 120/67/66/59/58/57/56/52/48/44 columns, the over-wide-label case at 120 and 44 columns, and the mouse hit map after a resize."
+   }
+  },
+  "X063": {
+   "title": "A read-only Down-boundary seam on the Editor's own visual-line classifier",
+   "status": "ACTIVE",
+   "category": [
+    "HARD_HOST_API"
+   ],
+   "risk": "MEDIUM",
+   "files": [
+    "src/components/editor.ts"
+   ],
+   "why": "The host's Task Quick on-demand entry (Phase 3B/B4-B) must fire on a Down press at the editor's last VISUAL line only. The visual boundary lives entirely inside the fork editor: soft word-wrap, CJK/astral width, empty lines, history browsing, autocomplete, jump mode and bracketed paste all change what Down means, and the Editor's own render layout plus its private wrap-map classifier and transient mode flags are the only sources that can prove the painted boundary and live Down behavior. The host cannot re-derive it from the public surface — a `cursor.line === lastLine` or character-count guess answers the LOGICAL line, not the wrapped one, and re-implementing the wrap would drift from the exact layout the user sees. Upstream has no such seam.",
+   "changedSurface": [
+    "`protected canYieldDownAtLastVisualLine(expectedLayoutWidth: number, knownOnLastVisualLine?: boolean): boolean` — the live Down admission classifier; plus `protected isOnLastVisualLineRaw(expectedLayoutWidth: number): boolean` — an O(1), width-guarded read of the last rendered visual boundary. Both methods are synchronous, read-only and side-effect free.",
+    "`public onVisualLineBoundaryChanged?(reason: 'navigation' | 'autocomplete' | 'history' | 'paste' | 'programmatic' | 'jump', onLastVisualLine: boolean): void` — an observation-only callback fired after every editor transition that can change the Down-admission fact; the payload carries the transition CLASS plus the post-transition raw boundary state. It includes navigation moves, autocomplete open/close, history recall, paste completion, programmatic changes, and jump arm/cancel/completion/abort. The host may consume the boundary in the same editor turn without rebuilding the wrap map; an onChange invalidates the host's rendered-layout snapshot until the next Editor render republishes it.",
+    "True only when `lastWidth === expectedLayoutWidth`, the cursor is on the last VISUAL line of the editor's own wrap map, and NO transient mode owns Down: `historyIndex === -1`, `autocompleteState === null`, `jumpMode === null`, `isInPaste === false`.",
+    "`expectedLayoutWidth` must be the SAME layout width `render()` derived for the painted frame, so a stale caller width can never classify against a wrap map the user is not looking at.",
+    "No private field becomes public, no wrap logic is duplicated, and the editor's own key routing, cursor and document are untouched: the callback payload is computed from the moving code's own wrap-map facts, and the host can pass that current fact back through the protected classifier without another boundary-map build.",
+    "The host `TuiEditor` subclass exposes `canEnterTaskQuickFromDown(physicalWidth, knownOnLastVisualLine?)` and `isOnLastVisualLineRawForHost(physicalWidth)` over the protected fork methods (host-side code, not this ledger). Both fork deltas serve the same host consumer; no public package surface changes."
+   ],
+   "dependencies": {
+    "vendorInternal": {
+     "audited": true,
+     "items": [
+      "The live classifier reads the existing private state (`lastWidth`, `buildVisualLineMap`, `findCurrentVisualLine`, `historyIndex`, `autocompleteState`, `jumpMode`, `isInPaste`) through `isOnLastVisualLine`. The raw accessor copies the current cursor/line facts from `render()`'s already-computed `layoutLines`; no vendored caller behavior changes and no vendored component consumes either method.",
+      "The live classifier keeps ordinary printable-key input paths free of a new editor content scan. Navigation publishes its own map facts; mode/programmatic notifications build one authoritative map only when no facts exist. The raw accessor reuses the render's layout facts in O(1), so an onChange-only edit adds neither a second map build nor a Footer compose when boundary, row count and hint ownership are unchanged."
+     ],
+     "notes": "No vendor-internal consumer exists; the fork method is consumed exclusively through the host subclass."
+    },
+    "inheritanceStructural": {
+     "audited": true,
+     "items": [
+      "Exactly one inheritance edge relies on X063: `TuiEditor extends Editor` (`src/tui/interaction/tui-editor.ts`) calls both protected methods through its admission and raw-boundary host wrappers. No other subclass exists in the bundle, and both fork methods remain `protected`, invisible to non-subclass consumers including the public Extension API."
+     ],
+     "notes": "The structural edge is the intended contract: a read-only capability granted to the first-party subclass only."
+    },
+    "host": {
+     "audited": true,
+     "items": [
+      "`src/tui/interaction/tui-editor.ts` — `canEnterTaskQuickFromDown(physicalWidth, knownOnLastVisualLine?)` derives layout width with the same clamped-padding rule as `render()` (including physical width 4), requires prompt input mode, and delegates transient-mode gates to the seam. Its render observer publishes physical/layout widths, the raw boundary and Editor row count from the just-rendered component.",
+      "`src/tui-app.ts` — `quickDownEligible()` remains the single route/hint admission. Footer composition consumes a current X063 fact or the latest matching-width Editor render snapshot; ordinary onChange invalidates the host snapshot and waits for the next rendered layout, while live key routing without an event still uses the classifier. The render observer coalesces boundary-eligibility and Editor geometry changes, and corrects a fail-closed resize compose. The predicate still requires the real focused host editor and no higher-priority owner; the local bool alone never routes input."
+     ],
+     "notes": "The host consumes the seam through one guarded predicate; the seam never decides routing by itself."
+    },
+    "publicExtension": {
+     "audited": true,
+     "items": [
+      "Both fork methods are `protected` on the vendored `Editor` class and are NOT re-exported, declared, or reachable through the package entry (`src/index.ts`) or any public structural type — the public Extension Editor API is unchanged."
+     ],
+     "notes": "No public surface change: a plugin editor sees the same class shape as before."
+    },
+    "behavioral": {
+     "audited": true,
+     "items": [
+      "an empty editor and a cursor at the end of the last line yield true on a live painted frame",
+      "a hard-multiline draft answers false above the last visual line and true only after Down reaches it",
+      "a soft-wrapped single logical line answers false on middle segments and true only on the last segment (the boundary a logical-line classifier gets wrong)",
+      "history browsing, an open autocomplete dropdown, armed jump mode and an in-flight bracketed paste each force false, and return to true only when the editor itself leaves the mode",
+      "a caller width that does not match the latest Editor-rendered layout forces false until Editor renders at that width; the raw-boundary accessor shares this width guard",
+      "the seam consumes nothing: a real Down after a false answer still moves the cursor natively",
+      "the boundary-notification callback fires with the transition class and post-transition raw boundary on admission-affecting transitions, including navigation, autocomplete open/close, history, paste, programmatic edits and jump arm/cancel/completion/abort; host same-turn admission consumes the published fact without a second map build, while onChange-only text rewrap uses the next render's layout snapshot without another map build, with raw-snapshot equivalence verified at exact-fit, wrap, trailing-space, wide/astral and trailing-blank-line edges"
+     ],
+     "notes": "The seam answers one question — may a real Down leave this editor at its last visual line — and owns no state."
+    }
+   },
+   "tests": [
+    "packages/pi-tui/test/editor-task-quick-boundary.test.ts: live-frame and hard/soft-wrap boundary witnesses; transient history/autocomplete/jump/paste gates; stale-width guard; native Down preservation; jump arm/no-match completion/control abort reason; and known-fact consumption and raw snapshot/map edge equivalence without a second map build; test/task-quick-b4b-interaction.test.ts: zero same-layout input composes/map builds, rewrap and resize correction, width-4 clamp, and coalesced same-turn payloads"
+   ],
+   "upstream": {
+    "equivalence": "NO",
+    "checkedAgainst": {
+     "repo": "earendil-works/pi",
+     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
+     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
+    },
+    "relevantFiles": [
+     "packages/tui/src/components/editor.ts"
+    ],
+    "relevantIssues": [],
+    "semanticDelta": "Upstream's `Editor` keeps `isOnLastVisualLine` and mode flags private with no protected classifier, raw-boundary accessor or transition callback. The fork adds those two protected read-only seams and observation-only `onVisualLineBoundaryChanged` facts; the host may consume a current event fact during the same compose, while onChange-only rewrap consumes Editor.render's already-computed layout facts and composes Footer only when hint-relevant layout/owner facts change. The fork does not alter native wrapping, history, autocomplete, jump or paste behavior."
+   },
+   "retirement": {
+    "conditions": [
+     "Upstream gains equivalent safe read-only classifier/raw-boundary seams plus transition facts (or one callback that also covers text-only rewrap) the host can consume instead.",
+     "Or the host no longer needs the editor's visual Down boundary (the Task Quick on-demand entry is retired or re-owned)."
+    ],
+    "replacementMapping": [],
+    "evidence": []
+   },
+   "audit": {
+    "lastAuditedAt": "2026-10-14",
+    "scope": [
+     "vendor-internal",
+     "inheritance-structural",
+     "host",
+     "public-extension",
+     "behavioral",
+     "tests"
+    ],
+    "notes": "Introduced for Phase 3B/B4-B (the implementation plan's X061 slot; renumbered X063 because rollout PR5b claimed X061/X062 — Owner-approved 2026-10-14). The 2026-10-15 delta rechecks the fork input path, single host subclass, package entry and callback facts, including same-turn boundary consumption and jump completion/abort."
+   }
+  },
+  "X062": {
+   "title": "A row's search basis kept separate from its painted label",
+   "status": "ACTIVE",
+   "category": [
+    "PUBLIC_COMPONENT_CONTRACT",
+    "BUGFIX_MISSING_UPSTREAM"
+   ],
+   "risk": "MEDIUM",
+   "files": [
+    "src/components/settings-list.ts"
+   ],
+   "why": "The host abbreviates a long row NAME (head…tail around one `…`) so the label column can hold a name that would otherwise be clipped to its head — two same-prefix names would otherwise paint identically while Enter still runs different ids. The list's own search, however, filters on `item.label` ONLY, so the abbreviation made a keyword from the MIDDLE of the name unfindable: the Theme submenu runs with `enableSearch: true` and /preset and /skill use the same list, and the description never participates in search. The host cannot repair this through the public surface: one string is both painted and searched, and no call-site shaping can be the abbreviation for the column and the complete name for the filter. Upstream has neither the abbreviation need nor the split.",
+   "changedSurface": [
+    "`SettingItem.searchText?: string` — an optional search basis for a row whose painted `label` is not what the user should be able to type.",
+    "`SettingsList.applyFilter()` filters on `item.searchText ?? item.label`; absent `searchText` the label is the search basis byte-for-byte as before."
+   ],
+   "dependencies": {
+    "vendorInternal": {
+     "audited": true,
+     "items": [
+      "`applyFilter` is the only search entry in the fork; no other vendored component reads `searchText` or filters on a label.",
+      "The rendered label is untouched: `renderItemWindow` still truncates `item.label` to the label column with `…` (X061), so `searchText` is a filter-only field and changes no paint."
+     ],
+     "notes": "No vendor-internal consumer changes; the search predicate is the single owner of the field."
+    },
+    "inheritanceStructural": {
+     "audited": true,
+     "items": [],
+     "notes": "No inheritance edge is introduced or relied on."
+    },
+    "host": {
+     "audited": true,
+     "items": [
+      "`src/tui/pickers/theme-menu.ts` (Theme submenu, `enableSearch: true`) declares the complete display name as `searchText` while the label is the 25-cell abbreviation.",
+      "`src/tui/pickers/preset-presentation-pitui.ts` declares the complete `name (id)` as `searchText` while the label is the 25-cell abbreviation.",
+      "`src/tui/commands/skills.ts` declares the complete skill name as `searchText` while the label is the 34-cell abbreviation (the 44-column floor budget).",
+      "Every other SettingsList caller declares no `searchText` and keeps the historical label-as-search-basis behavior."
+     ],
+     "notes": "The field is additive and optional, so no non-declaring caller changes behavior."
+    },
+    "publicExtension": {
+     "audited": true,
+     "items": [
+      "`searchText` is an optional structural member of the public `SettingItem`; it rolls up through the existing `SettingItem` export in `src/index.ts` inside the allowlisted entry regions — no new export and no entry-graph change."
+     ],
+     "notes": "Additive only: no existing member is repurposed or removed."
+    },
+    "behavioral": {
+     "audited": true,
+     "items": [
+      "a row that declares `searchText` is found by a keyword from the middle of its complete text while painting the abbreviation",
+      "a row that declares none is found exactly as before (label-only), so the change is inert for every existing caller",
+      "the filter result set, the selected index reset and `recomputeVisibleBudget()` are unchanged"
+     ],
+     "notes": "The split answers one question — what text may the user type to find this row — and never touches identity, ordering or the write path."
+    }
+   },
+   "tests": [
+    "packages/pi-tui/test/settings-list.test.ts: a row painting an abbreviation (`Classic Dark…l Edition v9`) is still found by a middle keyword (`quasar`) declared in `searchText`; a row with no `searchText` keeps the historical label-only basis (the same query answers `No matching settings`), which is also the mutation witness for the split",
+    "test/command-catalog.test.ts: the real `/skill` picker answers a middle keyword of a long skill name through the real search input, and a row hands the COMPLETE name as `searchText` while its label stays the 34-cell abbreviation",
+    "test/preset-command.test.ts: the real `/preset` overlay answers a middle keyword of a long preset name; the 44-column regressions keep the abbreviation and the whole-ID labeling intact",
+    "test/surface-row-grant.test.ts: the real Theme submenu (the case the external review reported) answers `quasar` for `Classic Dark quasar Special Edition v9`, and the two long same-prefix theme names still paint apart at 44 columns"
+   ],
+   "upstream": {
+    "equivalence": "NO",
+    "checkedAgainst": {
+     "repo": "earendil-works/pi",
+     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
+     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
+    },
+    "relevantFiles": [
+     "packages/tui/src/components/settings-list.ts"
+    ],
+    "relevantIssues": [],
+    "semanticDelta": "Upstream's `SettingsList` filters its items on `item.label` too, but upstream has no row that abbreviates its label for the column, so the two never diverge there. The fork adds the optional `searchText` split so a caller can abbreviate for the column without hiding the name from the search."
+   },
+   "retirement": {
+    "conditions": [
+     "Upstream gains a per-row search basis distinct from the painted label (or a structured row model where the search text is a separate field).",
+     "Or the host stops abbreviating a row label, so the painted label is again the complete name."
+    ],
+    "replacementMapping": [],
+    "evidence": []
+   },
+   "audit": {
+    "lastAuditedAt": "2026-10-14",
+    "scope": [
+     "vendor-internal",
+     "inheritance-structural",
+     "host",
+     "public-extension",
+     "behavioral",
+     "tests"
+    ],
+    "notes": "Introduced in PR #309 (rollout PR5b) after the external review found the pre-abbreviated label had broken the search contract on the Theme submenu, /preset and /skill. Scope checked against every SettingsList caller (the three abbreviated-name rows declare `searchText`; every other caller declares none and inherits the label basis), the fork's own render path (the field is filter-only), and the real pickers' search inputs."
    }
   }
  }

@@ -21,11 +21,23 @@ problem surfaces in tmux, add the regression test to headless.
 ## Environment prep
 
 - tmux is required; `dsh --profile pi-tui-dev` (link dependency on this
-  repo — `pnpm build` takes effect immediately).
+  repo — `pnpm build` takes effect immediately). **In a WORKTREE that profile
+  still points at the main checkout**, so it paints the main checkout's build,
+  not the worktree's: for worktree verification create a throwaway profile that
+  LINKS the worktree instead — `DSH_HOME=<worktree>/temp/dsh-wt` with
+  `profiles/<name>/package.json` declaring
+  `"@xmoon76/dsh-pi-tui": "link:<worktree>"`, a
+  `node_modules/@xmoon76/dsh-pi-tui -> <worktree>` symlink, and a
+  `dsh.profile.bundles` list that includes `@deepseek-ai/dsh-base` (without it
+  the TUI never mounts and the pane only shows the loader warnings), then
+  `env -u NO_COLOR DSH_HOME=<worktree>/temp/dsh-wt dsh --profile <name>`. No
+  `pnpm pack` is needed for this.
 - **This machine's shell exports `NO_COLOR=1`**: the theme autodetect's
   opt-out guard skips detection, so wrap launches with `env -u NO_COLOR`.
-- Model end-to-end needs working credentials for the agent-default-model in
-  `~/.dsh/settings.yaml` (opencode-go/deepseek-v4-flash are configured here).
+- Model end-to-end needs credentials available in the disposable `DSH_HOME`.
+  Never inspect or display credential contents; copy files from a real profile
+  into the isolated test home only when the user explicitly authorizes those
+  exact inputs.
 
 ## Basic flow
 
@@ -43,13 +55,24 @@ sleep 5                                            # wait for startup
 tmux capture-pane -t demo -p > /tmp/pane.txt
 tmux capture-pane -t demo -e -p > /tmp/pane.ansi
 
-# send a command: same two-step rhythm (see the PasteBurst trap)
+# send a command (two steps: the delay only waits for the prompt to be ready)
 tmux send-keys -t demo -l "/settings"
 sleep 0.4
 tmux send-keys -t demo Enter
 
 tmux kill-session -t demo 2>/dev/null              # cleanup
 ```
+
+## B4-B Task Quick terminal check
+
+Use this only after the corresponding headless interaction/geometry tests pass. Follow **Environment prep**: use a fresh disposable worktree-local `DSH_HOME` with a test profile that links the worktree build; never reuse an isolated home containing old sessions. For a model-backed run, the authorized source inputs are `$HOME/.dsh/.credentials.yaml` and `$HOME/.dsh/profiles/pi-tui-dev/cordis.patch.yml`; copy only after explicit authorization for those exact files, preserving mode `0600` for credentials. Do not copy the whole profile or `sessions/`, `storages/` and `user-history/`; configure test-only options in the isolated home as needed. Never read or print copied contents. Save evidence under a private worktree `temp/` directory and report the artifact paths/status in the PR review record, not as a durable pass claim in this procedure.
+
+1. Start a bounded background task using the existing real-model procedure below (for example, `sleep 20 && echo slow-done`, with `run_in_background=true`). Capture a plain and ANSI pane before opening Quick. The Main view must keep Quick hidden and preserve the Footer badge.
+2. Use a **non-empty** multi-line draft with the cursor on its final visual line. Send one effective `Down`; capture the frame and verify the physical order `Editor → widgetsBelow (if any) → complete Footer → Quick-owned divider (if spare) → Quick identity/items`. The Footer must keep every prior row. Send `Esc`, capture again, and verify the draft/cursor return and no stale Quick rule or blank reservation remains.
+3. Repeat in the real Fullscreen profile. Count the actual painted Quick rows (including divider/identity) rather than inferring a grant from window size. Exercise same-task-row SGR press/release, then negative clicks on the divider, identity/header and Footer badge; use a release on a different row and a resize-before-release as stale-intent negatives. A wheel over Quick may move only its window; a wheel over Footer/Transcript must not be intercepted by hidden Quick.
+4. Check Todo/Dock hit geometry at **actual** Quick heights 0, 1 and 5 when the size/task/widget configuration can produce them. Keep Footer and Editor intact; Fullscreen must retain a visible Transcript row. The ordinary Main Root keeps its historical flowing-document/widget grant: at 80×8 its Transcript may be outside the current viewport, but Quick must not make that worse or reduce the grant. Do not call a case “height 1” or “height 5” unless those exact physical rows are visible. Click the Todo/Dock row and a neighboring non-target row in each case.
+5. For a parked Question, first capture the actual Quick height (0/1/5), then activate the Question through its normal owner. Wait for Quick to retire and the new Question frame to paint at Quick height 0 before clicking an option; verify the option and an outside-frame negative control. This is a **height-transition** witness (1→0 / 5→0), not Quick and Question coexisting. Do not force a forbidden focus state to create a same-frame test.
+6. At minimum capture Main and Fullscreen at 80×24, short 80×10/80×9/80×8 frames, and 44×20 with CJK/soft-wrapped input. Also vary Footer full/compact/custom and public below-widget occupancy when the environment permits. At 80×8 Main, record the accepted flowing-root exception: the Transcript may be outside the viewport while hidden/denied Quick preserves the historical widget grant, and it must reappear when the viewport grows; the matching Fullscreen case must retain a visible Transcript row. Save both `tmux capture-pane -p` and `tmux capture-pane -e -p` before/active/after frames; record unsupported/unrun items as `NOT_RUN`, and never substitute `VirtualTerminal` output for this real-terminal evidence.
 
 ## Theme color verification
 
@@ -87,7 +110,7 @@ private `/tmp/tui-demo.XXXXXX/` (`.txt` plain + `.html` colored).
 2. **Background bash job**: have the model run
    `Run this in the background: sleep 20 && echo slow-done. Use the bash tool with run_in_background=true, do not wait.`
    Verify: the dock's semantic `❯ bash-1 · …` row, the footer's
-   `[N tasks running · ↓ view]` badge, `↓` opening the task browser while
+   `[N tasks running · ↓ view]` badge, `↓` entering focused Task Quick while
    running, Enter showing the output viewer, and the completion notification
    being handled by the model.
 3. **Subagent viewing — mode-aware**: `/tasks` → the subagent rows must
@@ -127,10 +150,7 @@ private `/tmp/tui-demo.XXXXXX/` (`.txt` plain + `.html` colored).
    recall API takes newest-first — the runner must reverse before seeding
    (see `docs/input-history.md`). Verify the file exists:
    `ls $DSH_HOME/user-history/` (md5(cwd) filenames).
-3. **Migration**: with legacy history in `~/.dsh/settings.yaml`, the first
-   boot writes the entries to the JSONL file and removes the `history` key
-   from the settings document — `grep history ~/.dsh/settings.yaml` must
-   come up empty afterwards.
+3. **Legacy migration**: use an isolated pre-upgrade history fixture; never seed or inspect a live profile. Verify the migrated JSONL output through the regression test.
 
 Note: whether the model registers a subagent in the jobs registry depends on
 it passing `run_in_background: true` (both local runs took the continuable
@@ -165,13 +185,14 @@ Manual acceptance under tmux:
 
 ## Trap list (every item hit in real testing)
 
-1. **PasteBurst turns a batched Enter into a newline**: `send-keys 'text'
-   Enter` delivers the text fast enough for the editor's lost-marker paste
-   heuristic (X038: ≥8 plain chars within 8ms → the trailing Enter inserts
-   a newline instead of submitting, 120ms window) to treat it as a paste.
-   Restored with the kimi baseline after the Earendil re-vendor briefly
-   dropped it (DIVERGENCES.md X038). Always drive the editor in two steps:
-   `send-keys -l 'text'` → `sleep 0.3+` → `send-keys Enter`.
+1. **A batched Enter must submit**: `send-keys 'text' Enter` is a valid way
+   to send a command and must submit the draft — the per-character paste
+   heuristic that used to turn that trailing Enter into a newline is retired
+   (DIVERGENCES.md X038), so verify a rapid typed/pasted burst followed by
+   Enter submits exactly once. The two-step `send-keys -l 'text'` →
+   `sleep 0.3+` → `send-keys Enter` rhythm used above is still the reliable
+   way to drive the CLI, but its pacing only waits for the prompt/UI to be
+   ready.
 2. **zsh treats `;` as a command separator**: `COLORFGBG=15;0 dsh …` runs
    `0`. Quote the env value (`COLORFGBG='15;0' dsh …`) and mind nested quotes
    in scripts (wrap the whole thing in double quotes).
@@ -189,16 +210,10 @@ Manual acceptance under tmux:
 6. **Ghost overlay (fixed, still watch for it)**: if a `/subagents` action
    leaves input being eaten by a SettingsList search box, an overlay is
    still open (current versions close it automatically); clear with Esc.
-7. **The demo writes `~/.dsh/settings.yaml`** (theme/permission) — restore
-   afterwards (`theme: auto`, `defaultPreset: workspace-write`).
-   `docs/tmux/tui-demo.sh` now byte-backups settings.yaml before launch and
-   `cmp`-verifies it (refuses to run if the backup fails); cleanup hangs only
-   on the EXIT trap (idempotent), INT/TERM handlers explicitly `exit
-   130/143` so EXIT runs once; every run uses private output/backup dirs and
-   holds a process lock on the settings file before backing up (concurrent
-   instances fail closed); the tmux session name carries a PID + random
-   suffix and the script kills only its own session — do not replace the
-   restore with "write auto at the end".
+ 7. **Theme demo isolation**: `docs/tmux/tui-demo.sh` creates a fresh
+    worktree-linked `DSH_HOME`, persists theme changes through the UI, and
+    keeps captures plus the temporary profile in a private output directory.
+    It never reads or writes the real profile; the script owns tmux cleanup.
 8. **Never manually kill leftover dsh processes**: the
    `dsh --profile pi-tui-dev` process may be the one hosting your own
    session — killing it kills the session you are running in (hit for real
@@ -216,13 +231,9 @@ Manual acceptance under tmux:
     response can remain in the pty and render as garbage shell input on the
     next command. After a crash, start the next run in a FRESH
     session/window, not the same pane.
-11. **Before debugging a rendered symptom, check `~/.dsh/settings.yaml` for
-    leftover TUI settings**: values toggled during an earlier test matrix
-    persist across launches and silently change appearance/behavior — hit
-    for real with `footer: compact` (hides the stats line) and
-    `fullscreen: on` (freezes the TUI under a pipe/tee with no interactive
-    TTY). Reset them (`theme: auto`, `defaultPreset: workspace-write`,
-    fullscreen off) before re-testing in a different launch environment.
+ 11. **Recheck the disposable profile before each capture**: prior test state
+     can persist across launches and change theme, Footer density or Fullscreen.
+     Use a fresh isolated home or reset options through the UI before retesting.
 12. **tmux does not forward focus events by default on all versions**: the
     completion notification's `mode=unfocused` silently never fires when
     the multiplexer eats the focus reports. Either `set -g focus-events

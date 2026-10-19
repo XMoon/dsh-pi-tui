@@ -12,7 +12,7 @@ import assert from 'node:assert/strict'
 import { afterEach, test } from 'node:test'
 import { TuiApp } from '../src/tui-app.ts'
 import { createSurfaceRuntime, type SurfaceExtensionService } from '../src/app/surface/runtime.ts'
-import { createPluginManagerPanel } from '../src/tui/plugin-manager/panel.ts'
+import { createPluginManagerWorkspacePanel } from '../src/tui/plugin-manager/workspace.ts'
 import { ExtensionLedger } from '../src/extension/internal/ledger.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 
@@ -286,7 +286,7 @@ test('M3-6 PR3: a throwing extension cleanup cannot strand the extension bridge 
     notificationMethod: undefined,
     terminalProgress: undefined,
     mainProgressAuthority: 'local-events',
-    createPluginManagerPanel,
+    createPluginManagerPanel: createPluginManagerWorkspacePanel,
   })
   const failure = new Error('theme hook release failed')
   let themeReleased = 0
@@ -327,4 +327,66 @@ test('M3-6 PR3: one throwing tracked keybinding-editor disposal cannot strand it
 
   app.dispose()
   assert.deepEqual(disposed, ['first', 'second'], 'a second dispose is inert')
+})
+
+test('a terminal observation released by stop() is re-sampled by the restarted surface', async () => {
+  const saved = {
+    NO_COLOR: process.env.NO_COLOR,
+    FORCE_COLOR: process.env.FORCE_COLOR,
+    CI: process.env.CI,
+    COLORFGBG: process.env.COLORFGBG,
+  }
+  process.env.NO_COLOR = ''
+  process.env.FORCE_COLOR = ''
+  process.env.CI = ''
+  delete process.env.COLORFGBG
+  try {
+    const vt = new VirtualTerminal(80, 24)
+    const app = new TuiApp(vt, {
+      onSubmit: () => {},
+      onExit: () => {},
+      runOwned: (_label, task, options) => {
+        void Promise.resolve()
+          .then(() => task())
+          .then(
+            result => options.onResult?.(result),
+            error => options.onError?.(error),
+          )
+      },
+    })
+    app.start()
+    startedApps.add(app)
+    const writes: string[] = []
+    const originalWrite = vt.write.bind(vt)
+    vt.write = (data: string): void => {
+      writes.push(data)
+      originalWrite(data)
+    }
+    const queries = (): number => writes.join('').split('\x1b]11;?\x07').length - 1
+
+    app.noteThemeSelection('auto')
+    const pending = app.autoDetectTheme({ shouldApply: () => app.themeFollowsTerminal() })
+    assert.equal(queries(), 1, 'the observation is issued on the live screen')
+
+    // A plain stop/start round trip: the same surface generation, the SAME screen object,
+    // and the probe is released by the stop.
+    app.stop()
+    app.start()
+    await pending
+    await vt.waitForRender()
+    assert.ok(queries() > 1, `the restarted surface issues a FRESH observation:\n${JSON.stringify(writes)}`)
+
+    vt.sendInput('\x1b]11;rgb:ffff/ffff/ffff\x1b\\')
+    await vt.waitForRender()
+    assert.equal(app.currentTheme(), 'light', 'and applies its answer')
+  } finally {
+    if (saved.NO_COLOR === undefined) delete process.env.NO_COLOR
+    else process.env.NO_COLOR = saved.NO_COLOR
+    if (saved.FORCE_COLOR === undefined) delete process.env.FORCE_COLOR
+    else process.env.FORCE_COLOR = saved.FORCE_COLOR
+    if (saved.CI === undefined) delete process.env.CI
+    else process.env.CI = saved.CI
+    if (saved.COLORFGBG === undefined) delete process.env.COLORFGBG
+    else process.env.COLORFGBG = saved.COLORFGBG
+  }
 })

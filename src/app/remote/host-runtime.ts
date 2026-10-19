@@ -31,6 +31,7 @@ import * as sessionStats from '@deepseek-ai/dsh-session-stats'
 import * as sessionTurnOutline from '@deepseek-ai/dsh-session-turn-outline'
 import { PiTuiFileReferenceHostService, type FileReferencesServiceLike, type LiveAgentLike } from './pi-tui-file-reference-host.ts'
 import { PiTuiTerminalProgressHostService, type LiveAgentLike as TerminalProgressLiveAgentLike } from './terminal-progress-host.ts'
+import * as performanceHost from '../host/performance-host.ts'
 import { PI_TUI_HOST_CONTRIBUTION } from '../../runtime/remote/pi-tui-remote-contribution.ts'
 
 /**
@@ -60,6 +61,12 @@ const HOST_PREREQUISITE_SERVICES = [
   // query at all. Required rather than silently degraded.
   'fileReferences',
   'fs',
+  // 0.2.1-rc.2's SessionController nests the official skill catalog, whose inject
+  // requires the real `workingDirectory` owner: without it the `skills/list`
+  // Remote never registers (the failure surfaces as a bare HTTP 404). The
+  // official dsh-base layer mounts this row, so a Host missing it is a
+  // composition error, not a degradable state.
+  'workingDirectory',
   'llm',
   'sessions',
   'sessionProjections',
@@ -142,9 +149,19 @@ function assertHostPrerequisites(hostContext: Context): void {
   }
 }
 
-/** Build the in-process carrier over the Host connection + gateway seams. */
+/** Build the in-process carrier over the Host connection + gateway seams.
+ *
+ * The carrier speaks for the Host Connection's OWN owner Peer
+ * (`HostConnectionService.browserPeer`, created inside the service constructor
+ * with `principal: { kind: 'owner' }` and disposed by the Connection plugin
+ * fiber). The SAME reference is passed to the shared Fetch handler and to
+ * `wireStream.open`, so one identity — and one lifetime — covers both the
+ * unary and the streaming path; the carrier never creates, caches, or disposes
+ * a Peer of its own. */
 function createInProcessCarrier(hostContext: Context): InProcessHostCarrier {
-  const shared = hostContext.connection.createSharedFetchHandler('/api')
+  const connection = hostContext.connection
+  const peer = connection.browserPeer
+  const shared = connection.createSharedFetchHandler('/api')
   const gateway: TypertGateway = hostContext.typertGateway
   return {
     ownsHost: true,
@@ -152,11 +169,11 @@ function createInProcessCarrier(hostContext: Context): InProcessHostCarrier {
       const request = input instanceof Request
         ? new Request(input, init)
         : new Request(new URL(String(input), IN_PROCESS_BASE_URL), init)
-      return shared.fetch(request)
+      return shared.fetch(request, peer)
     },
     openStream(endpoint, payload, signal, uplink) {
       return (async function* () {
-        yield* await gateway.wireStream.open(endpoint, payload, uplink ?? emptyUplink(), undefined, signal)
+        yield* await gateway.wireStream.open(endpoint, payload, uplink ?? emptyUplink(), peer, signal)
       })()
     },
   }
@@ -273,6 +290,15 @@ export async function createRemoteHostRuntime(
     const statsFiber = hostContext.plugin(sessionStats)
     fibers.push(statsFiber)
     await statsFiber
+    // 4b. The bundle's OWN Host performance projection (plan PR-1 §4): the one
+    //     authority for the R5/All model-request rate and the recent TTFB.
+    //     Mounted right after the official `sessionStats` unit it mirrors and
+    //     before the Session controller / Client carrier, on THIS Host Context
+    //     (the Direct profile registers its own row on the base Host Context —
+    //     one registration per context is the contract).
+    const performanceFiber = hostContext.plugin(performanceHost)
+    fibers.push(performanceFiber)
+    await performanceFiber
     const outlineFiber = hostContext.plugin(sessionTurnOutline)
     fibers.push(outlineFiber)
     await outlineFiber

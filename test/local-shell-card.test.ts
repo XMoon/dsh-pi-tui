@@ -198,3 +198,31 @@ test('a RUNNING preview with many SHORT lines keeps the 5-line budget and is not
   assert.equal(hidden, 95)
   assert.equal(partial, false, 'whole lines are hidden, not a partial cut')
 })
+
+// --- hostile local shell output (terminal-text projection) ---
+
+test('a hostile local shell result reaches the TTY as safe text, keeping only whitelisted SGR', async () => {
+  const vt = new VirtualTerminal(80, 60)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  const hostile = 'ok '
+    + '\u001b]52;c;YXR0YWNr\u0007' // clipboard OSC 52
+    + '\u001b[?1049h' // alternate screen
+    + '\u001b[2J' // clear
+    + '\u001b[38;2;999;1;1m' // malformed SGR
+    + '\u001b[38;5;196mred\u001b[0m' // whitelisted SGR
+    + '\r10%\r100%\n'
+  app.pushLocalMessage({
+    kind: 'tool', turn: Number.POSITIVE_INFINITY, name: 'shell',
+    args: 'run', result: hostile, status: 'ok',
+  })
+  const view = await viewport(vt)
+  const stream = vt.writes.join('')
+  assert.ok(!stream.includes('YXR0YWNr'), 'no OSC 52 clipboard payload reaches the terminal stream')
+  assert.ok(!stream.includes('\u001b[38;2;999;1;1m'), 'the malformed SGR is never forwarded')
+  assert.ok(stream.includes('\u001b[38;5;196m'), 'the whitelisted 256-color SGR survives the log projection')
+  assert.ok(view.includes('10%') && view.includes('100%'), `CR frames read as distinct records:\n${view}`)
+  assert.ok(view.includes('red'), 'the readable text survives')
+  app.stop()
+})

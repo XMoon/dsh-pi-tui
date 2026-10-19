@@ -8,6 +8,7 @@
 import assert from 'node:assert/strict'
 import { afterEach, test } from 'node:test'
 import { MessageId, ToolCallId } from '@deepseek-ai/dsh-llm'
+import { CommandId } from '@deepseek-ai/dsh-commands'
 import { SessionSeq } from '@deepseek-ai/dsh-session'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import type { AssistantLiveChunk } from '../src/runtime/assistant-stream-port.ts'
@@ -17,6 +18,9 @@ import {
   foldedCallPreview, genericRawInputLines, parseReadEnvelopes, parseSkillEnvelope, resultTextLines, subagentModelDisplay, systemContextBody, toolPresenterFrom, webCardLines,
 } from '../src/tui/transcript/tool-presentation.ts'
 import { parseUserKeybindings } from '../src/tui/keybindings/config.ts'
+import { HostKeybindingManager } from '../src/tui/keybindings/manager.ts'
+import { KeybindingEditorPanel } from '../src/tui/keybindings/ui/list.ts'
+import { buildKeybindingEditorModel } from '../src/tui/keybindings/ui/model.ts'
 import { RendererRegistry } from '../src/extension/internal/renderer-registry.ts'
 import { darkColors, lightColors } from '../src/domain/display/theme.ts'
 import { color, currentPalette, setTheme } from '../src/tui/theme/runtime.ts'
@@ -64,6 +68,41 @@ function startApp(width = 100, height = 24): { vt: VirtualTerminal; app: TuiApp 
 async function viewport(vt: VirtualTerminal): Promise<string> {
   await vt.waitForRender()
   return vt.getViewport().join('\n')
+}
+/** A started app whose terminal writes are recorded (protocol queries included). */
+function startAppWithWrites(width = 100, height = 24): { vt: VirtualTerminal; app: TuiApp; writes: string[] } {
+  const vt = new VirtualTerminal(width, height)
+  const writes: string[] = []
+  const spy = new Proxy(vt, {
+    get(target, prop) {
+      if (prop === 'write') {
+        return (data: string): void => { writes.push(data); target.write(data) }
+      }
+      const value = Reflect.get(target, prop)
+      return typeof value === 'function' ? value.bind(target) : value
+    },
+  }) as unknown as Terminal
+  const app = new TuiApp(spy, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  return { vt, app, writes }
+}
+/** A started app whose user-activity signal is observable (the input boundary). */
+function startAppWithEvents(): { vt: VirtualTerminal; app: TuiApp; userInputs: () => number } {
+  const vt = new VirtualTerminal(100, 24)
+  let userInputs = 0
+  const app = new TuiApp(vt, {
+    onSubmit: () => {},
+    onExit: () => {},
+    onUserInput: () => { userInputs += 1 },
+  })
+  app.start()
+  startedApps.add(app)
+  return { vt, app, userInputs: () => userInputs }
+}
+/** Mode 2031 writes, in order (the tracking lifecycle contract). */
+function mode2031Writes(writes: string[]): string[] {
+  return writes.filter(data => data === '\x1b[?2031h' || data === '\x1b[?2031l')
 }
 
 test('diff detection and line colorization', () => {
@@ -659,6 +698,55 @@ test('queued question flows transfer the seat and suspension without restoring',
   await vt.waitForRender()
   view = vt.getViewport().map(strip).join('\n')
   assert.ok(view.includes('Settings row A'), `settings must return after the LAST flow:\n${view}`)
+})
+
+test('standalone keybindings editor keeps the full terminal budget (PR-C standalone control)', async () => {
+  // The nested /settings submenu is capped by the parent overlay grant; the
+  // standalone /keybindings overlay is NOT (it never receives setMaxRows),
+  // so its own whole-terminal budget and navigation must be unchanged.
+  const { vt, app } = startApp(120, 40)
+  const manager = new HostKeybindingManager()
+  const parsed = parseUserKeybindings(undefined)
+  manager.setUserConfiguration(parsed)
+  const model = buildKeybindingEditorModel(manager, parsed)
+  const panel = new KeybindingEditorPanel({
+    model,
+    onClose: () => {},
+    runMutation: () => {},
+    maxRows: () => app.keybindingEditorMaxRows(),
+  })
+  const close = app.openKeybindingEditor(panel)
+  try {
+    await vt.waitForRender()
+    const strip = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, '')
+    let lines = vt.getViewport().map(strip)
+    const hintRow = lines.findIndex(line => line.includes('Enter: details'))
+    assert.ok(hintRow > 0, `the standalone operation hint must be painted:\n${lines.join('\n')}`)
+    assert.ok(lines[hintRow]!.includes('│'), 'the hint must be painted INSIDE the frame')
+    assert.ok((lines[hintRow + 1] ?? '').includes('╰'), 'the frame bottom border must follow the hint')
+    assert.equal(panel.render(84).length, 35, 'the standalone editor keeps its own whole-terminal budget')
+    // Search/navigation still works end to end.
+    for (const character of 'submit') {
+      vt.sendInput(character)
+      await vt.waitForRender()
+    }
+    lines = vt.getViewport().map(strip)
+    assert.ok(lines.some(line => line.includes('Search: submit')), `the query must render:\n${lines.join('\n')}`)
+    vt.sendInput('\r')
+    await vt.waitForRender()
+    lines = vt.getViewport().map(strip)
+    assert.ok(lines.some(line => line.includes('Keyboard shortcuts › ')), `the detail must open:\n${lines.join('\n')}`)
+    vt.sendInput('\x1b')
+    await vt.waitForRender()
+    lines = vt.getViewport().map(strip)
+    assert.ok(lines.some(line => line.includes('Search: submit')), `the query must survive the return:\n${lines.join('\n')}`)
+    // The real closer removes the editor (the returned handle owns the hide).
+    close()
+    await vt.waitForRender()
+    assert.ok(!vt.getViewport().map(strip).some(line => line.includes('Enter: details')), 'the closer must remove the editor')
+  } finally {
+    manager.dispose()
+  }
 })
 
 test('a question preempts a visible approval and restores it on settle', async () => {
@@ -1670,6 +1758,27 @@ test('footer preset hides the stats line in compact mode', async () => {
   assert.ok(view.includes('TTFB 8.1s'), `stats line not restored:\n${view}`)
 })
 
+test('autoDetectTheme observes only the OSC 11 background', async () => {
+  const { vt, app, writes } = startAppWithWrites()
+  const before = writes.length
+  const pending = app.autoDetectTheme()
+  assert.deepEqual(writes.slice(before), ['\x1b]11;?\x07'], 'one narrow OSC 11 query')
+  const fullTransaction = writes.filter(data =>
+    data.includes('\x1b]10;?') || data.includes('\x1b]4;') || data.endsWith('\x1b[c') || data.includes('\x1b[6n'))
+  assert.deepEqual(fullTransaction, [], 'no OSC 10 / OSC 4 / DA1 / DSR traffic')
+  vt.sendInput('\x1b]11;#eeeeee\x07') // bright background -> light
+  await pending
+  assert.equal(currentPalette, lightColors, 'a bright background selects the light palette')
+})
+
+test('autoDetectTheme maps a dark background to the dark palette', async () => {
+  const { vt, app } = startApp()
+  const pending = app.autoDetectTheme()
+  vt.sendInput('\x1b]11;#111111\x07') // dark background -> dark
+  await pending
+  assert.equal(currentPalette, darkColors, 'a dark background selects the dark palette')
+})
+
 test('autoDetectTheme resolves without changing the theme when the terminal is silent', async () => {
   const { vt, app } = startApp()
   const before = currentPalette
@@ -1677,48 +1786,96 @@ test('autoDetectTheme resolves without changing the theme when the terminal is s
   assert.equal(currentPalette, before, 'silent terminal must not change the palette')
 })
 
+test('autoDetectTheme falls back to COLORFGBG when the terminal never answers', async () => {
+  const previous = process.env.COLORFGBG
+  process.env.COLORFGBG = '0;15' // black on white: a light background
+  try {
+    const { app } = startApp()
+    setTheme('dark')
+    await app.autoDetectTheme()
+    assert.equal(currentPalette, lightColors, 'COLORFGBG decides when the terminal is silent')
+  } finally {
+    if (previous === undefined) delete process.env.COLORFGBG
+    else process.env.COLORFGBG = previous
+  }
+})
+
 test('autoDetectTheme applies the detected theme through the ACTIVE screen in fullscreen mode', async () => {
   const { vt, app } = startApp()
   app.setFullscreen(true)
   await viewport(vt)
   // The alt screen owns the terminal input handler: the OSC 11 reply must
-  // resolve the query registered on the ACTIVE screen. A query on the
-  // stopped main screen would have its reply swallowed by the alt screen's
-  // OSC 11 consumer and time out — the bug that made `auto` a silent no-op
-  // in fullscreen mode.
+  // resolve the observation registered on the ACTIVE screen. An observation
+  // on the stopped main screen would be released by its stop() and the
+  // detection would silently no-op in fullscreen mode.
   const pending = app.autoDetectTheme()
   vt.sendInput('\x1b]11;#eeeeee\x07') // bright background -> light palette
   await pending
   assert.equal(currentPalette, lightColors, 'fullscreen autodetect must apply the detected palette')
 })
 
-test('autoDetectTheme coalesces concurrent calls onto one shared query', async () => {
-  const vt = new VirtualTerminal(100, 24)
-  const writes: string[] = []
-  const spy = new Proxy(vt, {
-    get(target, prop) {
-      if (prop === 'write') {
-        return (data: string): void => { writes.push(data); target.write(data) }
-      }
-      const value = Reflect.get(target, prop)
-      return typeof value === 'function' ? value.bind(target) : value
-    },
-  }) as unknown as Terminal
-  const app = new TuiApp(spy, { onSubmit: () => {}, onExit: () => {} })
-  app.start()
+test('autoDetectTheme drops an observation that resolves before a screen switch', async () => {
+  const { vt, app } = startApp()
+  setTheme('dark')
+  const pending = app.autoDetectTheme()
+  // The observation RESOLVES with a value and the swap happens in the same tick,
+  // before the continuation runs: the result belongs to the screen the user left.
+  vt.sendInput('\x1b]11;#eeeeee\x07')
+  app.setFullscreen(true)
+  await pending
+  await viewport(vt)
+  assert.equal(currentPalette, darkColors, 'a swapped-away screen may not colour the new one')
+})
 
-  startedApps.add(app)
-  try {
-    const first = app.autoDetectTheme()
-    const second = app.autoDetectTheme()
-    assert.equal(writes.filter(data => data.includes('\x1b]11;?')).length, 1,
-      'concurrent autodetect calls must share one OSC 11 query')
-    vt.sendInput('\x1b]11;#eeeeee\x07')
-    await Promise.all([first, second])
-    assert.equal(currentPalette, lightColors, 'the shared query result must apply once')
-  } finally {
-    app.stop()
-  }
+test('a late background reply across a Main/Fullscreen switch is not user input', async () => {
+  const { vt, app, userInputs } = startAppWithEvents()
+  setTheme('dark')
+  const pending = app.autoDetectTheme() // the observation belongs to the main screen
+  app.setFullscreen(true) // the main screen stops; the alt screen owns the terminal
+  await viewport(vt)
+  vt.sendInput('\x1b]11;#eeeeee\x07') // the main screen's reply arrives at the alt screen
+  await pending
+  assert.equal(userInputs(), 0, 'a terminal protocol reply must never count as user activity')
+  vt.sendInput('x') // control: real typing still counts
+  assert.equal(userInputs(), 1, 'ordinary input must still reach the user-activity signal')
+})
+
+test('a late background reply across a Fullscreen/Main switch is not user input', async () => {
+  const { vt, app, userInputs } = startAppWithEvents()
+  setTheme('dark')
+  app.setFullscreen(true)
+  await viewport(vt)
+  const pending = app.autoDetectTheme() // the observation belongs to the alt screen
+  app.setFullscreen(false) // the alt screen stops; the main screen owns the terminal
+  await viewport(vt)
+  vt.sendInput('\x1b]11;#eeeeee\x07')
+  await pending
+  assert.equal(userInputs(), 0, 'a terminal protocol reply must never count as user activity')
+  assert.equal(currentPalette, darkColors, 'and it must not colour the screen the user returned to')
+})
+
+test('a full stop/start keeps receiving live scheme reports', async () => {
+  const { vt, app } = startApp()
+  const received: string[] = []
+  app.onTerminalThemeChange((theme) => { received.push(theme) })
+  vt.sendInput('\x1b[?997;2n')
+  assert.deepEqual(received, ['light'], 'a report reaches the listener while the app is running')
+  app.stop()
+  app.start()
+  vt.sendInput('\x1b[?997;1n')
+  assert.deepEqual(received, ['light', 'dark'], 'a restarted app must still receive scheme reports')
+})
+
+test('autoDetectTheme coalesces concurrent calls onto one shared observation', async () => {
+  const { vt, app, writes } = startAppWithWrites()
+  const before = writes.length
+  const first = app.autoDetectTheme()
+  const second = app.autoDetectTheme()
+  assert.equal(writes.slice(before).filter(data => data.includes('\x1b]11;?')).length, 1,
+    'concurrent autodetect calls must share one OSC 11 observation')
+  vt.sendInput('\x1b]11;#eeeeee\x07')
+  await Promise.all([first, second])
+  assert.equal(currentPalette, lightColors, 'the shared observation result must apply once')
 })
 
 test('autoDetectTheme drops the settled result when shouldApply returns false', async () => {
@@ -1730,34 +1887,86 @@ test('autoDetectTheme drops the settled result when shouldApply returns false', 
   assert.equal(currentPalette, before, 'a refused result must not change the palette')
 })
 
-test('trackTerminalTheme enables DSR 996 scheme tracking idempotently', async () => {
-  const vt = new VirtualTerminal(100, 24)
-  const writes: string[] = []
-  const spy = new Proxy(vt, {
-    get(target, prop) {
-      if (prop === 'write') {
-        return (data: string): void => { writes.push(data); target.write(data) }
-      }
-      const value = Reflect.get(target, prop)
-      return typeof value === 'function' ? value.bind(target) : value
-    },
-  }) as unknown as Terminal
-  const app = new TuiApp(spy, { onSubmit: () => {}, onExit: () => {} })
-  app.start()
+test('a late colour reply never reaches the editor', async () => {
+  const { vt, app } = startApp()
+  setTheme('dark')
+  await app.autoDetectTheme() // silent: the observation times out
+  vt.sendInput('\x1b]11;#eeeeee\x07') // stray reply with nothing pending
+  vt.sendInput('\x1b[1;2R') // legacy Shift+F3 is a KEY, not a protocol reply
+  vt.sendInput('Z')
+  const view = await viewport(vt)
+  assert.ok(view.includes('Z'), `the editor must still receive typing:\n${view}`)
+  assert.ok(!view.includes(']11;'), 'the stray reply must never be typed into the editor')
+  assert.equal(currentPalette, darkColors, 'a stray reply must not change the theme')
+})
 
-  startedApps.add(app)
+test('autoDetectTheme honours the colour opt-out without querying', async () => {
+  const previous = process.env.NO_COLOR
+  process.env.NO_COLOR = '1'
   try {
-    app.trackTerminalTheme(true)
-    app.trackTerminalTheme(true) // idempotent: no second query
-    assert.equal(writes.filter(data => data.includes('\x1b[?996n')).length, 1,
-      'enabling tracking must query DSR 996 exactly once')
-    app.trackTerminalTheme(false)
-    app.trackTerminalTheme(true) // re-enabling after disable queries again
-    assert.equal(writes.filter(data => data.includes('\x1b[?996n')).length, 2,
-      're-enabling after disable must query again')
+    const { app, writes } = startAppWithWrites()
+    setTheme('dark')
+    const before = writes.length
+    await app.autoDetectTheme()
+    assert.equal(writes.slice(before).filter(data => data.includes('\x1b]11;?')).length, 0,
+      'an opted-out environment must not query the terminal')
+    assert.equal(currentPalette, darkColors, 'the opt-out keeps the safe dark palette')
   } finally {
-    app.stop()
+    if (previous === undefined) delete process.env.NO_COLOR
+    else process.env.NO_COLOR = previous
   }
+})
+
+test('autoDetectTheme still detects after returning from fullscreen', async () => {
+  const { vt, app } = startApp()
+  app.setFullscreen(true)
+  await viewport(vt)
+  app.setFullscreen(false)
+  await viewport(vt)
+  const pending = app.autoDetectTheme()
+  vt.sendInput('\x1b]11;#eeeeee\x07')
+  await pending
+  assert.equal(currentPalette, lightColors, 'the regular screen detects again after the switch')
+})
+
+test('trackTerminalTheme toggles Mode 2031 without sampling the terminal', async () => {
+  const { vt, app, writes } = startAppWithWrites()
+  const received: string[] = []
+  app.onTerminalThemeChange((theme) => { received.push(theme) })
+  app.trackTerminalTheme(true)
+  app.trackTerminalTheme(true) // idempotent
+  assert.deepEqual(mode2031Writes(writes), ['\x1b[?2031h'], 'enabling tracking writes ?2031h once')
+  assert.equal(writes.filter(data => data.includes('\x1b]11;?')).length, 0,
+    'tracking never samples the terminal: the boot observation is the only query')
+  app.trackTerminalTheme(false)
+  assert.deepEqual(mode2031Writes(writes), ['\x1b[?2031h', '\x1b[?2031l'], 'disabling writes ?2031l')
+  app.trackTerminalTheme(true)
+  assert.deepEqual(mode2031Writes(writes), ['\x1b[?2031h', '\x1b[?2031l', '\x1b[?2031h'], 're-enabling writes ?2031h again')
+  vt.sendInput('\x1b[?997;2n')
+  assert.deepEqual(received, ['light'], 'reports still fan out to the listeners')
+})
+
+test('Mode 2031 follows the tracking choice across a Main/Fullscreen switch', async () => {
+  const { vt, app, writes } = startAppWithWrites()
+  app.trackTerminalTheme(true)
+  assert.deepEqual(mode2031Writes(writes), ['\x1b[?2031h'])
+  app.setFullscreen(true)
+  await viewport(vt)
+  assert.deepEqual(mode2031Writes(writes), ['\x1b[?2031h', '\x1b[?2031l', '\x1b[?2031h'],
+    'entering fullscreen disables on the main screen and enables on the alt screen')
+  app.setFullscreen(false)
+  await viewport(vt)
+  assert.deepEqual(mode2031Writes(writes), ['\x1b[?2031h', '\x1b[?2031l', '\x1b[?2031h', '\x1b[?2031l', '\x1b[?2031h'],
+    'returning to regular disables on the alt screen and re-enables on the main screen')
+
+  // A screen that was stopped when tracking was switched off records the flag
+  // and must not restore the old mode when it starts again.
+  app.trackTerminalTheme(false)
+  assert.deepEqual(mode2031Writes(writes).slice(-1), ['\x1b[?2031l'])
+  app.setFullscreen(true)
+  await viewport(vt)
+  assert.deepEqual(mode2031Writes(writes).slice(-1), ['\x1b[?2031l'],
+    'a newly started screen must not re-enable a disabled mode')
 })
 
 test('scheme reports reach listeners while the alt screen owns input', async () => {
@@ -3853,7 +4062,7 @@ test('workflow live member/status updates invalidate the cached card (plan §8.1
   assert.ok(!view.includes('checker'), `no member before agent-start:\n${view}`)
   // agent-start: the members array reference changes → the card rebuilds.
   folder.apply([
-    { type: 'tool-workflow/agent-start', seq: 2, time: 1_700_000_000_002, data: { runId: 'run-1', seq: 0, label: 'checker', childId: 'session-x' } } as SessionEvent,
+    { type: 'tool-workflow/agent-start', seq: 2, time: 1_700_000_000_002, data: { runId: 'run-1', seq: 1, label: 'checker', childId: 'session-x' } } as SessionEvent,
   ])
   app.setTranscript(folder.messages())
   const secondComponent = cache.get(first)?.component
@@ -3863,7 +4072,7 @@ test('workflow live member/status updates invalidate the cached card (plan §8.1
   // agent-end: the member status changes → rebuild. The phase is now fully
   // completed, so the PR2 completion auto-close folds it (plan §7.6).
   folder.apply([
-    { type: 'tool-workflow/agent-end', seq: 3, time: 1_700_000_000_003, data: { runId: 'run-1', seq: 0, outcome: 'completed' } } as SessionEvent,
+    { type: 'tool-workflow/agent-end', seq: 3, time: 1_700_000_000_003, data: { runId: 'run-1', seq: 1, outcome: 'completed' } } as SessionEvent,
   ])
   app.setTranscript(folder.messages())
   const thirdComponent = cache.get(first)?.component
@@ -4714,4 +4923,390 @@ test('minimal keeps the bullet and semantic queue marker; thinking/compaction ti
   assert.ok(lines.some(line => line.startsWith('Thinking')), `thinking title must go bare (no leading space):\n${view}`)
   assert.ok(lines.some(line => line.startsWith('Context compacted')), `compaction title must go bare:\n${view}`)
   assert.ok(view.includes('❯ job done: exit 0'), `the semantic queue marker must survive minimal:\n${view}`)
+})
+
+// ── untrusted terminal output hardening: the transcript wire contract ──────
+
+/** One hostile payload covering every control family the projection drops. */
+const HOSTILE_PAYLOAD =
+  'safe-start'
+  + '\u001b]52;c;YXR0YWNr\u0007' // OSC 52 clipboard
+  + '\u001b]0;hijacked-title\u001b\\' // OSC 0 title (ST-terminated)
+  + '\u001b[2J\u001b[H' // clear + home
+  + '\u001b[?1049h' // alternate screen
+  + '\u001b[?1000h' // mouse mode
+  + '\u001bPbad\u001b\\' // device control string
+  + '\u009b2J' // raw 8-bit C1 CSI
+  + '\u001b[38;2;999;1;1m' // malformed SGR (dropped whole)
+  + 'needle-text'
+  + '\rprogress'
+  + '\tend'
+
+const RAW_HAZARDS = ['YXR0YWNr', 'hijacked-title', '\u001bPbad', '\u001b[38;2;999;1;1m', '\u009b']
+
+test('untrusted transcript text never carries its own terminal controls to the wire', async () => {
+  for (const preset of ['full', 'compact', 'focus'] as const) {
+    const { vt, app, writes } = startAppWithWrites()
+    app.setDisplayPreset(preset)
+    const user: TranscriptMessage = { kind: 'user', turn: 0, text: HOSTILE_PAYLOAD }
+    const assistant: TranscriptMessage = { kind: 'assistant', turn: 0, text: HOSTILE_PAYLOAD }
+    const thinking: TranscriptMessage = { kind: 'thinking', turn: 0, text: HOSTILE_PAYLOAD }
+    const system: TranscriptMessage = {
+      kind: 'system', turn: 0, text: HOSTILE_PAYLOAD, label: HOSTILE_PAYLOAD, summary: HOSTILE_PAYLOAD, context: true,
+    }
+    const command: TranscriptMessage = {
+      kind: 'command',
+      commandId: CommandId('cmd-hostile'),
+      seq: SessionSeq(1),
+      time: 1,
+      name: HOSTILE_PAYLOAD,
+      args: HOSTILE_PAYLOAD,
+      outcome: { kind: 'success', text: HOSTILE_PAYLOAD },
+    }
+    const tool: TranscriptMessage = {
+      kind: 'tool', turn: 0, name: 'bash', args: '{"command":"echo hi"}', result: HOSTILE_PAYLOAD, status: 'ok',
+    }
+    app.setTranscript([user, assistant, thinking, system, command, tool])
+    const view = await viewport(vt)
+    const stream = writes.join('')
+    for (const hazard of RAW_HAZARDS) {
+      assert.ok(!stream.includes(hazard),
+        `${preset}: hostile bytes reached the terminal stream: ${JSON.stringify(hazard)}`)
+    }
+    assert.match(view, /safe-start/, `${preset}: the payload's readable text survives:\n${view}`)
+    // The source objects stay byte-exact (one display projection, no mutation).
+    assert.equal(user.text, HOSTILE_PAYLOAD, `${preset}: the user source text is untouched`)
+    assert.equal(command.outcome?.text, HOSTILE_PAYLOAD, `${preset}: the command outcome is untouched`)
+    assert.equal(tool.result, HOSTILE_PAYLOAD, `${preset}: the tool result is untouched`)
+    // stop() does not release the process's single-live-TUI slot; dispose does.
+    startedApps.delete(app)
+    app.dispose()
+  }
+})
+
+test('a bash tool result keeps whitelisted log SGR at the TTY', async () => {
+  const { vt, app, writes } = startAppWithWrites()
+  const tool: TranscriptMessage = {
+    kind: 'tool', turn: 0, name: 'bash', args: '{"command":"printf"}',
+    result: 'plain \u001b[38;5;196mred\u001b[0m tail', status: 'ok',
+  }
+  app.setTranscript([tool])
+  await viewport(vt)
+  const stream = writes.join('')
+  assert.ok(stream.includes('\u001b[38;5;196m'), 'the whitelisted 256-color SGR reaches the TTY')
+  assert.equal(tool.result, 'plain \u001b[38;5;196mred\u001b[0m tail', 'the raw result is preserved')
+  app.stop()
+})
+
+test('hostile attachment, deliverable and ambient-cluster text never reaches the wire raw', async () => {
+  const { vt, app, writes } = startAppWithWrites()
+  const hostile = 'evil\u001b]52;c;YXR0YWNr\u0007\u001b[2J\u009b2Jname'
+  const user = {
+    kind: 'user', turn: 0, text: 'prompt',
+    content: [{ type: 'file', attachment: { id: 'a1', name: hostile, bytes: 12 } }],
+  } as unknown as TranscriptMessage
+  const assistant = {
+    kind: 'assistant', turn: 0, text: 'done',
+    deliverables: [{ path: hostile, description: hostile }],
+  } as unknown as TranscriptMessage
+  const ambient = (text: string): TranscriptMessage => ({
+    kind: 'system', turn: 0, text, context: true,
+    label: hostile, summary: hostile,
+    source: { kind: 'context', form: 'instructions' },
+  }) as unknown as TranscriptMessage
+  app.setTranscript([user, assistant, ambient('first'), ambient('second')])
+  const view = await viewport(vt)
+  const stream = writes.join('')
+  assert.ok(!stream.includes('YXR0YWNr'), 'no OSC 52 payload from an attachment/deliverable/cluster reaches the stream')
+  assert.ok(!stream.includes('\u009b'), 'no raw C1 byte reaches the stream')
+  assert.ok(!view.includes('YXR0YWNr'), `the painted frame carries no payload:\n${view}`)
+  app.stop()
+})
+
+test('hostile todo content never reaches the dock summary raw', async () => {
+  const { vt, app, writes } = startAppWithWrites()
+  const hostile = 'evil\u001b]52;c;YXR0YWNr\u0007\u001b[2J\u009b2Jtask'
+  app.setTodoSummary([{ content: hostile, status: 'in_progress' }])
+  const view = await viewport(vt)
+  const stream = writes.join('')
+  assert.ok(!stream.includes('YXR0YWNr'), 'no OSC 52 payload from a todo row reaches the terminal stream')
+  assert.ok(!stream.includes('\u009b'), 'no raw C1 byte from a todo row reaches the terminal stream')
+  assert.match(view, /evil/, `the readable todo text survives:\n${view}`)
+  app.stop()
+})
+
+test('an unknown user content block fallback never reaches the wire raw', async () => {
+  const { vt, app, writes } = startAppWithWrites()
+  // JSON.stringify escapes ESC (< U+0020) but leaves C1 characters literal, so
+  // the unknown-block fallback is the path where a raw C1 byte can survive.
+  const hostile = 'evil\u009b2J\u009d0;PWNED\u0007name'
+  const user = {
+    kind: 'user', turn: 0, text: 'prompt',
+    content: [
+      { type: 'text', text: 'ok' },
+      { type: 'future-test-block', payload: { value: hostile } },
+    ],
+  } as unknown as TranscriptMessage
+  app.setTranscript([user])
+  const view = await viewport(vt)
+  const stream = writes.join('')
+  assert.ok(!stream.includes('\u009b'), 'no raw C1 CSI from an unknown block reaches the terminal stream')
+  assert.ok(!stream.includes('\u009d'), 'no raw C1 OSC from an unknown block reaches the terminal stream')
+  assert.match(view, /evil/, `the readable unknown-block text survives:\n${view}`)
+  app.stop()
+})
+
+test('a diff-shaped terminal result keeps its whitelisted log SGR', async () => {
+  const { vt, app, writes } = startAppWithWrites()
+  const tool: TranscriptMessage = {
+    kind: 'tool', turn: 0, name: 'bash', args: '{"command":"git diff"}',
+    result: 'head\n@@ -1 +1 @@\n\u001b[38;5;196mred line\u001b[0m', status: 'ok',
+  }
+  app.setTranscript([tool])
+  ;(app as unknown as { toggleMessageExpanded: (m: TranscriptMessage) => void }).toggleMessageExpanded(tool)
+  await viewport(vt)
+  assert.ok(writes.join('').includes('\u001b[38;5;196m'),
+    'the whitelisted SGR survives a diff-shaped terminal result instead of being re-projected as plain text')
+  app.stop()
+})
+
+test('a real Session fold carries hostile text to a safe transcript paint', async () => {
+  const hostile = 'evil\u001b]52;c;YXR0YWNr\u0007\u001b[2J\u009b2Jname'
+  const folder = new TranscriptFolder()
+  folder.apply([
+    { type: 'turn/start', seq: 0, time: 1, data: { turn: 0 } } as SessionEvent,
+    { type: 'step/start', seq: 1, time: 2, data: { turn: 0, step: 0 } } as SessionEvent,
+    {
+      type: 'user/message', seq: 2, time: 3,
+      data: { id: 'u-hostile', role: 'user', content: [{ type: 'text', text: hostile }], source: { kind: 'user' } },
+    } as unknown as SessionEvent,
+  ])
+  folder.applyLiveInput({
+    kind: 'chunk', sessionId: 'test', attemptId: 'attempt', turn: 0, step: 0, time: 4,
+    chunk: { type: 'text-delta', index: 0, text: hostile },
+  })
+  const messages = folder.messages()
+  assert.ok(messages.length > 0, 'the fold materialized the hostile rows')
+
+  const { vt, app, writes } = startAppWithWrites()
+  app.setTranscript(messages)
+  const view = await viewport(vt)
+  const stream = writes.join('')
+  assert.ok(!stream.includes('YXR0YWNr'), 'no OSC 52 payload reaches the TTY from a real fold')
+  assert.ok(!stream.includes('\u009b'), 'no raw C1 byte reaches the TTY from a real fold')
+  assert.match(view, /evil/, `the readable text survives:\n${view}`)
+  const user = messages.find(message => message.kind === 'user')
+  if (user !== undefined) assert.equal(user.text, hostile, 'the canonical transcript text is untouched')
+  app.stop()
+})
+
+test('hostile question text never reaches the TTY raw', async () => {
+  const { vt, app, writes } = startAppWithWrites()
+  const hostile = 'evil\u001b]52;c;YXR0YWNr\u0007\u001b[2J\u009b2Jname'
+  const pending = app.askQuestions([{
+    id: 'q1',
+    question: hostile,
+    header: hostile,
+    detail: hostile,
+    options: [{ label: hostile, description: hostile }],
+  }])
+  const view = await viewport(vt)
+  const stream = writes.join('')
+  assert.ok(!stream.includes('YXR0YWNr'), `no OSC 52 payload from question text reaches the TTY:\n${view}`)
+  assert.ok(!stream.includes('\u009b'), 'no raw C1 byte from question text reaches the TTY')
+  assert.match(view, /evil/, `the readable question text survives:\n${view}`)
+  vt.sendInput('\x1b')
+  await pending.catch(() => {})
+  app.stop()
+})
+
+test('a hostile command/tool identity is folded onto ONE header row in every preset', async () => {
+  // The command title/args, the tool card header and the Activity/Focus stat
+  // tails are SINGLE-row compositions (truncateToWidth + search-region
+  // columns + the width-degradation ladder). An embedded LF/TAB/CR must be
+  // folded before those rows are built, never left to the Text layout.
+  const hostileCommand = 'Evil\nCommand\tTabbed'
+  const hostileTool = 'Evil\r\nTool\tTabbed'
+  for (const preset of ['full', 'compact', 'focus'] as const) {
+    const { vt, app } = startAppWithWrites()
+    app.setDisplayPreset(preset)
+    const command: TranscriptMessage = {
+      kind: 'command',
+      commandId: CommandId('cmd-single-row'),
+      seq: SessionSeq(1),
+      time: 1,
+      name: hostileCommand,
+      args: '',
+      outcome: null,
+    }
+    const tool: TranscriptMessage = {
+      kind: 'tool', turn: 0, name: hostileTool, args: '{"x":"y"}', result: '', status: 'running',
+    }
+    app.setTranscript([command, tool])
+    const view = await viewport(vt)
+    const lines = view.split('\n').map(stripTerminalSequences)
+    assert.ok(lines.some(line => line.includes('/Evil Command   Tabbed')),
+      `${preset}: the command name/args share one head row:\n${view}`)
+    if (preset === 'full') {
+      assert.ok(lines.some(line => line.includes('Evil Tool   Tabbed · y')),
+        `${preset}: the tool name/summary share one head row:\n${view}`)
+    } else if (preset === 'compact') {
+      // Compact folds the tool row into the Activity header stat tail: the
+      // raw subtype name must not break that single header row. (Focus
+      // renders no Work span for this bare fixture; its header tail is the
+      // same projected parts list, covered by the Activity assertion.)
+      assert.ok(lines.some(line => line.includes('Evil Tool   Tabbed ×1')),
+        `${preset}: the action stat tail stays on its header row:\n${view}`)
+      assert.ok(!lines.some(line => line.trim().startsWith('Tool   Tabbed ×1')),
+        `${preset}: no orphan wrapped stat row leaked out of the header:\n${view}`)
+    }
+    assert.equal(command.name, hostileCommand, `${preset}: the command source name is untouched`)
+    assert.equal(tool.name, hostileTool, `${preset}: the tool source name is untouched`)
+    app.dispose()
+  }
+})
+
+test('a folded bash preview keeps the app-owned log reset when the style crosses the preview cut', async () => {
+  const { vt, app, writes } = startAppWithWrites()
+  // The whitelisted style starts on line 1; the ONLY reset sits at the end of
+  // line 4, i.e. past the folded preview's 3-line cut. Projecting the full log
+  // first would put the app-owned reset after the cut and let bold/background
+  // bleed into the next physical row.
+  const raw = '\u001b[1mfirst\nsecond\nthird\nfourth\u001b[0m'
+  // The real Ctrl+O master OFF state folds every process card (the production
+  // `renderToolCard` folded-preview path under test).
+  app.setTranscriptDetailExpanded(false)
+  const tool: TranscriptMessage = {
+    kind: 'tool', turn: 0, name: 'bash', args: '{"command":"printf"}', result: raw, status: 'ok',
+  }
+  app.setTranscript([tool])
+  await viewport(vt)
+  const stream = writes.join('')
+  const marker = stream.indexOf('first second third')
+  assert.ok(marker >= 0, `the folded preview was painted:\n${stream.slice(-3000)}`)
+  // Take the WHOLE physical row around the marker, including the style that
+  // opens before its first visible character.
+  const rowStart = Math.max(0, stream.lastIndexOf('\n', marker) + 1)
+  const rowEnd = stream.indexOf('\n', marker)
+  const painted = stream.slice(rowStart, rowEnd === -1 ? undefined : rowEnd)
+  assert.ok(painted.includes('\u001b[1m'), 'the whitelisted style survives the folded preview')
+  // The frame itself ends in an app-owned reset; the contract under test is the
+  // reset that CLOSES the external style immediately after its last preview
+  // character (a trailing frame reset would mask a leak).
+  assert.ok(painted.includes('third…\u001b[0m'),
+    `the app-owned reset immediately follows the styled preview (and its dropped-record marker):\n${JSON.stringify(painted)}`)
+  assert.equal(tool.result, raw, 'the raw result is untouched')
+  app.stop()
+})
+
+test('hostile welcome-card facts never reach the TTY raw and stay one physical line each', async () => {
+  const { vt, app, writes } = startAppWithWrites()
+  const hostile = 'Evil\nName\r\nTabbed\tX\u001b]52;c;YXR0YWNr\u0007tail'
+  const collapsed = 'Evil Name Tabbed   Xtail'
+  // The card's facts are Session/model/preset/package metadata. `setWelcomeCard`
+  // keeps the raw cwd as the workspace-root authority; only the DISPLAY values
+  // may be projected.
+  app.setWelcomeCard({
+    cwd: `/root/${hostile}`,
+    sessionId: hostile,
+    model: `p/${hostile}`,
+    version: hostile,
+    preset: hostile,
+  })
+  const view = await viewport(vt)
+  const stream = writes.join('')
+  assert.ok(!stream.includes('YXR0YWNr'), `no OSC payload from welcome facts reaches the TTY:\n${view}`)
+  assert.ok(!stream.includes('\u009b'), 'no raw C1 byte from welcome facts reaches the TTY')
+  assert.ok(!stream.includes('\u001b]52'), 'no raw OSC introducer from welcome facts reaches the TTY')
+  const plainView = view.replace(/\x1b\[[0-9;]*m/g, '')
+  assert.ok(plainView.includes(collapsed), `the collapsed facts survive on one row:\n${plainView}`)
+  app.stop()
+})
+
+test('a CR-progress folded preview measures the LOG-PROJECTED records, not raw zero-width CRs', async () => {
+  const { vt, app, writes } = startAppWithWrites()
+  app.setTranscriptDetailExpanded(false)
+  // 61 x-records separated by lone CRs: raw width counts each CR as 0 columns,
+  // so measuring BEFORE the log projection misses the 60 spaces the policy
+  // introduces and the folded row would widen past its budget.
+  const raw = `${'x\r'.repeat(60)}x`
+  const tool: TranscriptMessage = {
+    kind: 'tool', turn: 0, name: 'bash', args: '{"command":"printf"}', result: raw, status: 'ok',
+  }
+  app.setTranscript([tool])
+  const view = await viewport(vt)
+  const stream = writes.join('')
+  const marker = stream.indexOf('— x x x')
+  assert.ok(marker >= 0, `the folded preview was painted:\n${stream.slice(-2000)}`)
+  const rowStart = Math.max(0, stream.lastIndexOf('\n', marker) + 1)
+  const rowEnd = stream.indexOf('\n', marker)
+  const row = stripTerminalSequences(stream.slice(rowStart, rowEnd === -1 ? undefined : rowEnd)).trimEnd()
+  assert.ok(row.endsWith('— x x x…'),
+    `the folded preview shows the first three SAFE records AND the dropped-record marker on ONE bounded row: ${JSON.stringify(row)}`)
+  assert.ok(visibleWidth(row) <= 100, `the folded row stays inside the terminal width: ${JSON.stringify(row)}`)
+  assert.equal(tool.result, raw, 'the raw result is untouched')
+  app.stop()
+})
+
+test('a folded preview marks records dropped by COUNT, not only by width', async () => {
+  const { vt, app } = startAppWithWrites()
+  app.setTranscriptDetailExpanded(false)
+  const four: TranscriptMessage = {
+    kind: 'tool', turn: 0, name: 'generic_tool', args: '{"x":"y"}', result: 'one\ntwo\nthree\nfour', status: 'ok',
+  }
+  const exactly: TranscriptMessage = {
+    kind: 'tool', turn: 0, name: 'generic_tool', args: '{"x":"z"}', result: 'alpha\nbeta\ngamma', status: 'ok',
+  }
+  // The common shell shape: the third record is followed by a trailing LF. It
+  // TERMINATES the record; it is not a hidden fourth record.
+  const trailingLf: TranscriptMessage = {
+    kind: 'tool', turn: 0, name: 'generic_tool', args: '{"x":"lf"}', result: 'eins\nzwei\ndrei\n', status: 'ok',
+  }
+  // Symmetric style tail: the only content after the final LF is a reset.
+  const trailingReset: TranscriptMessage = {
+    kind: 'tool', turn: 0, name: 'generic_tool', args: '{"x":"sgr"}', result: 'red\nblue\ngreen\n\u001b[0m', status: 'ok',
+  }
+  app.setTranscript([four, exactly, trailingLf, trailingReset])
+  const view = await viewport(vt)
+  const lines = view.split('\n').map(line => stripTerminalSequences(line).trimEnd())
+  assert.ok(lines.some(line => line.endsWith('— one two three…')),
+    `a dropped fourth record must be marked: \n${lines.join('\n')}`)
+  assert.ok(!lines.some(line => line.includes('four')), 'the dropped record must not leak into the row')
+  assert.ok(lines.some(line => line.endsWith('— alpha beta gamma')),
+    `exactly the preview's record budget needs no marker: \n${lines.join('\n')}`)
+  assert.ok(!lines.some(line => line.endsWith('— alpha beta gamma…')), 'exactly three records is not a truncation')
+  assert.ok(lines.some(line => line.endsWith('— eins zwei drei')),
+    `a trailing LF terminates the third record; it is not a hidden fourth:\n${lines.join('\n')}`)
+  assert.ok(!lines.some(line => line.endsWith('— eins zwei drei…')), 'the trailing LF itself must not add a marker')
+  assert.ok(lines.some(line => line.endsWith('— red blue green')),
+    `an SGR-only tail after the final LF is not a hidden record:\n${lines.join('\n')}`)
+  assert.ok(!lines.some(line => line.endsWith('— red blue green…')), 'the style-only tail must not add a marker')
+  app.stop()
+})
+
+test('a width-clipped ANSI/CJK folded preview keeps exactly ONE hidden-content marker and its reset', async () => {
+  const { vt, app, writes } = startAppWithWrites(200, 24)
+  app.setTranscriptDetailExpanded(false)
+  const raw = `\u001b[1m${'界'.repeat(70)}\u001b[0m\nsecond\nthird\nfourth`
+  const tool: TranscriptMessage = {
+    kind: 'tool', turn: 0, name: 'bash', args: '{"command":"printf"}', result: raw, status: 'ok',
+  }
+  app.setTranscript([tool])
+  await viewport(vt)
+  const stream = writes.join('')
+  const marker = stream.indexOf('界')
+  assert.ok(marker >= 0, `the folded CJK preview was painted:\n${stream.slice(-2000)}`)
+  const rowStart = Math.max(0, stream.lastIndexOf('\n', marker) + 1)
+  const rowEnd = stream.indexOf('\n', marker)
+  const rawRow = stream.slice(rowStart, rowEnd === -1 ? undefined : rowEnd)
+  const plainRow = stripTerminalSequences(rawRow).trimEnd()
+  assert.ok(plainRow.endsWith('…'), `a width-clipped preview ends in the hidden-content marker:\n${JSON.stringify(plainRow)}`)
+  assert.equal((plainRow.match(/…/g) ?? []).length, 1,
+    `the count and width markers are never doubled:\n${JSON.stringify(plainRow)}`)
+  assert.ok(visibleWidth(plainRow) <= 200, `the row stays inside the terminal width:\n${JSON.stringify(plainRow)}`)
+  assert.ok(rawRow.includes('\u001b[1m'), 'the whitelisted style survives the clip')
+  assert.ok(rawRow.includes('\u001b[0m'), 'the app-owned reset closes the clipped style')
+  assert.ok(!plainRow.includes('second'), 'the records past the width cut are not painted')
+  assert.equal(tool.result, raw, 'the raw result is untouched')
+  app.stop()
 })

@@ -24,6 +24,18 @@
       name: '@xmoon76/dsh-pi-tui/builtins'
       inject: [tuiStartup, piTuiExtensions]
 
+    # The bundle's OWN Host performance projection (plan PR-1): the single
+    # authority for the R5 / All model-request output rate and the recent TTFB.
+    # It registers the `piTuiPerformance` unit on the official
+    # `sessionProjections` seam — the same seam the official `sessionStats` row
+    # uses — and then publishes the `piTuiPerformanceReady` gate. Gating on
+    # `tuiStartup` keeps `--help` from mounting it; the `sessionProjections`
+    # inject makes the row wait for the Host registry instead of registering
+    # into a missing seam.
+    - id: pi-tui-performance-host
+      name: '@xmoon76/dsh-pi-tui/performance-host'
+      inject: [tuiStartup, sessionProjections]
+
     - id: tui-app
       name: '@xmoon76/dsh-pi-tui'
       # `workspaceRegistry` is injected, not merely looked up: D2.4 Direct fork
@@ -36,7 +48,11 @@
       # dsh-base layer already mounts it (disabled only without a profile),
       # so this is an explicit lifecycle ordering dependency, never a second
       # package-manager row.
-      inject: [tuiStartup, piTuiExtensions, authorization, workspaceRegistry, pluginManager, jobController]
+      # `piTuiPerformanceReady` is the bundle's own Host projection gate: the
+      # surface must not mount without its performance authority, so a profile
+      # that disables the `pi-tui-performance-host` row fails loudly here
+      # instead of silently falling back to a Client-side estimate.
+      inject: [tuiStartup, piTuiExtensions, authorization, workspaceRegistry, pluginManager, jobController, piTuiPerformanceReady]
       config:
         sessionId: ''
 
@@ -77,18 +93,6 @@
     - id: file-reference-local
       name: '@deepseek-ai/dsh-file-reference-local'
 
-    # The authorization seam (`ctx.authorization`): plugin-owned credential-
-    # obtaining flows, one attempt per key, transport-neutral notices and
-    # prompts. The dsh host does NOT mount it anywhere (the base layer ships
-    # only `credentials` + `llm-pi-ai`), so the TUI profile inserts the row
-    # itself — the TUI is the interactive surface that can answer its
-    # prompts. `AuthorizationService` injects `credentials`, so this row
-    # activates only after the base's credentials row; llm-pi-ai's
-    # provider login flows register once both services are up (it injects
-    # `authorization` optionally and degrades without it).
-    - id: authorization
-      name: '@deepseek-ai/dsh-authorization'
-
     # The 0.1.7 declarative preset registry: preset identity, revisions and
     # default/selection policy are registry-owned (deployment `default` here;
     # the user's `selectedDefault` rides the profile form). The four shipped
@@ -101,39 +105,6 @@
       name: '@deepseek-ai/dsh-agent-preset-registry'
       config:
         default: standard
-
-    # Production hardening for per-session preset composition. A live Agent
-    # whose standing preset generation disappears (the DSH registry owns that
-    # lifetime; the TUI must not remount/reparent/recreate an Agent) would
-    # otherwise keep addressing the model with only its Agent-own rows — the
-    # observed failure mode was a request whose tool list had collapsed to
-    # `subagent` alone, with no error anywhere. This official companion turns
-    # that into a loud, early failure at the next prompt assembly instead.
-    #
-    # The allowlist is deliberate and minimal: this bundle introduces exactly
-    # ONE production invariant, so a future layer shipping another invariant
-    # companion cannot silently enable itself here. The companion's own
-    # `/invariant` entry declares `inject = ['invariants']`; no second
-    # dependency management is written here.
-    #
-    # DEPENDENCY CONTRACT: `@deepseek-ai/dsh-invariants` is a COMPOSITION row
-    # resolved by the dsh Host (the package ships inside the dsh installation),
-    # not a module-graph peer — exactly like `@deepseek-ai/dsh-agent-preset`,
-    # which the same rule keeps in devDependencies. It therefore carries an
-    # exact devDependency pin for the real-mount tests and deliberately NO
-    # peerDependency: `scripts/naming-gate.mjs` rejects a `@deepseek-ai/*` peer
-    # that `src/` never imports as a dead peer, and a phantom peer would invite
-    # duplicate in-box copies in the profile. The companion subpath below is
-    # covered by the registry's own runtime peer.
-    - id: invariants
-      name: '@deepseek-ai/dsh-invariants'
-      config:
-        enabled: true
-        package_allowlist:
-          - '^@deepseek-ai/dsh-agent-preset-registry$'
-
-    - id: agent-preset-registry-invariant
-      name: '@deepseek-ai/dsh-agent-preset-registry/invariant'
 
     # The official standard preset composes its `subagent` tool with
     # `modelSelectionSettings: true`, which injects this Host-owned setting
@@ -231,9 +202,6 @@
   disabled: true
 
 - id: tool-workflow
-  disabled: true
-
-- id: tool-ralph
   disabled: true
 
 - id: agent-instructions

@@ -25,6 +25,7 @@ const request = {
 function context(overrides: Partial<SubagentPromptContext> = {}): SubagentPromptContext {
   return {
     makeSignal: () => new AbortController().signal,
+    clientTimeZone: () => 'Asia/Shanghai',
     ...overrides,
   }
 }
@@ -36,6 +37,7 @@ interface RecordedCall {
   mode: string
   delivery: string
   content: readonly SubagentPromptContentPart[]
+  clientTimeZone: string | undefined
 }
 
 function service(calls: RecordedCall[]): SubagentPromptService {
@@ -48,6 +50,7 @@ function service(calls: RecordedCall[]): SubagentPromptService {
         mode: payload.mode,
         delivery: payload.delivery,
         content: payload.content,
+        clientTimeZone: payload.clientTimeZone,
       })
       return { messageId: `inbox-${payload.childSessionId}-1` }
     },
@@ -87,6 +90,31 @@ test('forwards the resolved steer delivery to the official service', async () =>
   const outcome = await port.prompt({ ...request, delivery: 'steer' }, context())
   assert.equal(outcome.kind, 'ok')
   assert.equal(calls[0]!.delivery, 'steer')
+})
+
+test('carries the Client-local request zone sampled once for this follow-up', async () => {
+  const calls: RecordedCall[] = []
+  const port = new DirectSubagentPort(host(service(calls)))
+  let samples = 0
+  const outcome = await port.prompt(request, context({
+    clientTimeZone: () => { samples += 1; return 'Europe/Paris' },
+  }))
+  assert.equal(outcome.kind, 'ok')
+  assert.equal(samples, 1, 'the zone is sampled exactly once per delivery')
+  assert.equal(calls[0]!.clientTimeZone, 'Europe/Paris', 'the sampled zone rides the official request')
+})
+
+test('a zone that cannot be sampled is a pre-dispatch refusal, never a delivery', async () => {
+  const calls: RecordedCall[] = []
+  const port = new DirectSubagentPort(host(service(calls)))
+  const outcome = await port.prompt(request, context({
+    clientTimeZone: () => { throw new Error('the TUI process reports no time zone') },
+  }))
+  assert.deepEqual(outcome, {
+    kind: 'rejected',
+    reason: { kind: 'error', message: 'the TUI process reports no time zone' },
+  })
+  assert.equal(calls.length, 0, 'the child inbox never receives a prompt with no proven zone')
 })
 
 test('applies the caller canonicalization before delivery', async () => {

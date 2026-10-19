@@ -77,6 +77,15 @@ export type UserQuestionProvider = (
 export interface ApprovalRequestLike {
   signal?: AbortSignal
   callId?: string
+  /**
+   * The owning Session identity, when the backend can derive it from the
+   * official request (the Direct branch reads the request's OWN Agent). It lets
+   * the surface retire a REPLACED subject's approval presentation at a session
+   * publication (B3 findings C/F6). An absent identity (a backend whose
+   * approval carrier is not Session-scoped) leaves that request's presentation
+   * to its own lifetime — never a fabricated identity.
+   */
+  readonly sessionId?: string
   /** The tool asking for permission (the TUI renders the prompt for it). */
   toolName: string
   reason?: string

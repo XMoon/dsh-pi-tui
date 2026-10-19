@@ -38,10 +38,12 @@ import { foldGoal, goalTextOf } from '../../domain/status/derive-goal.ts'
 import { derivePlanStatus, deriveRemotePlanStatus, type PlanModeLike, type PlanProjectionLike } from '../../domain/status/derive-plan.ts'
 import { deriveRunnerPermission } from '../../domain/status/derive-permission.ts'
 import { usageFromStats } from '../../domain/status/derive-usage.ts'
+import { derivePerformance } from '../../domain/status/performance-view.ts'
 import { plainSectionEqual } from '../../domain/status/equal.ts'
 import { resolveDisplaySubject } from '../../domain/status/resolve-subject.ts'
 import type { CompositionStatus, HostStatus, StatusPatch, StatusSnapshot, ViewStatus, WorkspaceStatus } from '../../domain/status/types.ts'
-import type { StatusData, TuiApp } from '../../tui-app.ts'
+import type { StatusData } from '../../tui-app.ts'
+import type { SurfaceDisplaySeam } from './display-seam.ts'
 
 /** The live-agent facts the status derivation reads. */
 export interface StatusLiveAgent {
@@ -81,7 +83,8 @@ export interface StatusRemoteFacts {
 
 /** The narrow surface capabilities the status owner needs. */
 export interface StatusSurface {
-  readonly app: TuiApp
+  /** PR3-A: renderer-neutral display commits (welcome/title/cwd/notify). */
+  readonly display: SurfaceDisplaySeam
   readonly status: { snapshot(): StatusSnapshot }
   /** ONE atomic display-subject commit (M3-5 PR1 §9.7): the store patch
    *  (including `view`), the legacy display fields and the presentation
@@ -126,6 +129,11 @@ export interface StatusRuntimeDeps {
    * never "infer the subject from global state".
    */
   readonly sessionStatus: (sessionId: string) => import('../../runtime/session-reader-port.ts').SessionStatusProjection | undefined
+  /** TRUE when the last status read for this session FAILED (the official
+   *  projection authority threw). An `undefined` status then means UNKNOWN —
+   *  the Session's immutable header must NOT be substituted for it. Absent =
+   *  no failure signal (no recorded value ⇒ the header stays the fallback). */
+  readonly sessionStatusFailed?: (sessionId: string) => boolean
   /** The model-selection facts (the command/model owner replaces this). */
   readonly model: {
     readonly selection: () => ModelSelectionValue | undefined
@@ -145,11 +153,6 @@ export interface StatusRuntimeDeps {
   /** The live-session presentation owner (the legacy stats facts). */
   readonly presentation: {
     readonly mainStats: () => StatsFolder
-    /** PR5 (plan §3.2): whether the main fold's RECENT-performance figures
-     *  are authoritative (Direct full log, or a proven Remote window). When
-     *  `false` the usage section OMITS the two recent metrics — never a
-     *  numeric `0s · 0 tok/s` stand-in for unknown evidence. */
-    readonly mainRecentPerformanceAvailable?: () => boolean
   }
   /** The viewer owner: the viewed child's IDENTITY + presentation facts, or
    *  `undefined` when no child viewer is mounted. Only the display-subject
@@ -206,13 +209,14 @@ export interface StatusRuntimeDeps {
 export interface StatusRuntime {
   /** Repaint the welcome card from the live agent's current facts. */
   updateWelcomeCard(): void
-  /** The LIVE session's workspace (header cwd, else the client cwd). */
+  /** The LIVE session's workspace (official effective cwd, else the client
+   *  cwd). */
   sessionCwd(): string
   /** Derive + write the terminal window title. */
   refreshTerminalTitle(): void
   /**
    * Derive + forward the terminal-LOCAL cwd (OSC 7, plan §4.3): the eligible
-   * Direct Session header cwd, else the Direct launch cwd. A Remote Host cwd
+   * Direct Session effective cwd, else the Direct launch cwd. A Remote Host cwd
    * is never forwarded — the pane belongs to the Client machine. The TUI owns
    * the actual terminal write.
    */
@@ -331,10 +335,10 @@ export function createStatusRuntime(deps: StatusRuntimeDeps): StatusRuntime {
       // fallback, never guessed defaults).
       const facts = deps.remote === undefined ? undefined : mainSessionStatus()
       if (facts === undefined) {
-        deps.surface.app.setWelcomeIdle(true)
+        deps.surface.display.setWelcomeIdle(true)
         return
       }
-      deps.surface.app.setWelcomeCard({
+      deps.surface.display.setWelcomeCard({
         cwd: facts.cwd ?? '',
         sessionId: facts.sessionId,
         // F2/PR5 truthfulness: an ABSENT `model` projection fact is
@@ -351,8 +355,11 @@ export function createStatusRuntime(deps: StatusRuntimeDeps): StatusRuntime {
     const current = deps.model.selection()
     const provider = current?.provider ?? agent.options.provider
     const model = current?.model ?? agent.options.model
-    deps.surface.app.setWelcomeCard({
-      cwd: sessionCwd(),
+    deps.surface.display.setWelcomeCard({
+      // The displayed workspace fact is the OFFICIAL directory authority; an
+      // unreadable one is stated in words (plan §B2 UI), never as the Client
+      // cwd — `sessionCwd()`'s fallback belongs to EXECUTION paths only.
+      cwd: sessionCwdFact() ?? 'Unavailable',
       sessionId: agent.session.id,
       model: `${provider}/${model}`,
       version: versionDisplay(),
@@ -361,8 +368,9 @@ export function createStatusRuntime(deps: StatusRuntimeDeps): StatusRuntime {
   }
 
   /**
-   * The LIVE session's workspace: each session carries its own header cwd
-   * (fixed at creation, e.g. a session birthed by the web in another
+   * The LIVE session's workspace: each session carries its own official
+   * effective directory (fixed at creation as the header cwd, then moved by
+   * `working_directory`; e.g. a session birthed by the web in another
    * directory). The footer/welcome/completions AND `!`/`!!` shell runs
    * follow THIS cwd, so a session switch moves the whole surface with the
    * session (pi parity: `executeBash` runs in the session cwd) and a
@@ -376,10 +384,26 @@ export function createStatusRuntime(deps: StatusRuntimeDeps): StatusRuntime {
    * the status presentation then OMITS the cwd fact rather than copying the
    * Client cwd (Host/Client cwd equivalence is forbidden). Never consumed
    * by execution paths (the shell/history owners keep their own fallback).
+   *
+   * Direct reads the SESSION STATUS projection of THIS session (S2/PR-B):
+   * its `cwd` is the official effective working directory, which follows a
+   * committed `working-directory/change`. The immutable header cwd is only
+   * the reader's own fallback when no value is recorded.
    */
   const sessionCwdFact = (): string | undefined => {
     const agent = deps.liveAgent()
-    if (agent !== undefined) return agent.session.header.cwd
+    if (agent !== undefined) {
+      // The session status projection is the ONE effective-directory read. Its
+      // absence is ambiguous, so the two cases are kept apart (§B2.2):
+      // a FAILED read is UNKNOWN (no fallback at all), while "no recorded
+      // value" keeps the SAME session's immutable header — the official
+      // initial value, never another Session's directory.
+      const sessionId = deps.currentSessionId()
+      if (sessionId === undefined) return undefined
+      const status = deps.sessionStatus(sessionId)
+      if (status?.cwd !== undefined) return status.cwd
+      return deps.sessionStatusFailed?.(sessionId) === true ? undefined : agent.session.header.cwd
+    }
     if (deps.remote !== undefined) {
       const sessionId = deps.currentSessionId()
       if (sessionId === undefined) return deps.clientCwd
@@ -414,7 +438,7 @@ export function createStatusRuntime(deps: StatusRuntimeDeps): StatusRuntime {
    */
   const refreshTerminalTitle = (): void => {
     deps.updateTerminalTitle({
-      sessionTitle: deps.surface.app.getSessionTitle(),
+      sessionTitle: deps.surface.display.getSessionTitle(),
       // The OFFICIAL fact (a live session whose row carries no cwd yields
       // the plain 'dsh' title — the client cwd never impersonates the
       // session's Host workspace).
@@ -429,27 +453,41 @@ export function createStatusRuntime(deps: StatusRuntimeDeps): StatusRuntime {
    * automatically terminal metadata, because Tern may use the pane cwd for
    * local pane/split behavior. Therefore:
    *
-   * - Direct live Session → the official Session header cwd;
+   * - Direct live Session → the official effective working directory of the
+   *   live Session (its `workingDirectory` projection, S2/PR-B), else the
+   *   original header cwd;
    * - Direct sessionless surface → the Client launch cwd (the process really
    *   runs there);
    * - DSH Remote backend → `undefined`, fail closed: the Host cwd is a
    *   DIFFERENT machine from the terminal that owns the pane, and no
    *   co-location is proven.
    *
-   * A live header WITHOUT a cwd falls back to the launch cwd on the Direct
-   * branch (the pane still sits on this machine), which is why this fact is
-   * not `sessionCwdFact()`.
+   * A live session WITHOUT any official cwd falls back to the launch cwd on the
+   * Direct branch (the pane still sits on this machine), which is why this fact
+   * is not `sessionCwdFact()`.
    */
   const terminalCwdFact = (): string | undefined => {
     if (deps.remote !== undefined) return undefined
     const agent = deps.liveAgent()
-    return agent?.session.header.cwd ?? deps.clientCwd
+    if (agent === undefined) return deps.clientCwd
+    // The terminal-local cwd follows the SAME effective-directory authority; a
+    // FAILED read publishes NOTHING rather than a stale project.
+    const sessionId = deps.currentSessionId()
+    if (sessionId !== undefined) {
+      const status = deps.sessionStatus(sessionId)
+      if (status?.cwd !== undefined) return status.cwd
+      if (deps.sessionStatusFailed?.(sessionId) === true) return undefined
+    }
+    // NO recorded value (or no session id yet): the pane still sits on this
+    // machine, so the launch cwd is the honest terminal-local fact — the same
+    // fallback the Direct branch had before S2, never another Session's project.
+    return agent.session.header.cwd ?? deps.clientCwd
   }
 
   /** Forward the terminal-local cwd to the mounted TUI (it owns the write and
    *  the terminal-ownership lifecycle; see TuiApp.setTerminalCwd). */
   const refreshTerminalCwd = (): void => {
-    deps.surface.app.setTerminalCwd(terminalCwdFact())
+    deps.surface.display.setTerminalCwd(terminalCwdFact())
   }
 
   /** The footer model label: the live selection (with effort) when one exists,
@@ -618,7 +656,7 @@ export function createStatusRuntime(deps: StatusRuntimeDeps): StatusRuntime {
     // unknown live-session cwd renders EMPTY (the footer cwd item omits
     // itself for an empty value) — the client cwd never impersonates the
     // session's Host workspace here.
-    const liveCwd = sessionCwdFact() ?? (deps.currentSessionId() !== undefined && deps.remote !== undefined ? '' : deps.clientCwd)
+    const liveCwd = sessionCwdFact() ?? ''
     // M3-5 PR1 §9.3: the ONE display-subject selector. It answers only
     // "which Session's status is being displayed?" — the current main
     // Session, or the viewed child Session (the viewer's own read model
@@ -704,7 +742,17 @@ export function createStatusRuntime(deps: StatusRuntimeDeps): StatusRuntime {
     // derivation may speak only for a cwd on THIS process's filesystem — a
     // Remote child's Host cwd is not one, so its branch is omitted.
     const displayCwd = viewed === undefined ? liveCwd : (childStatus?.cwd ?? '')
-    const workspace = deriveWorkspaceStatus(displayCwd, viewed === undefined || deps.remote === undefined)
+    // The DISPLAY SUBJECT's unknown effective directory is stated in words
+    // (plan §B2 UI: 不可用状态有文字) — for the child viewer too, whose slot
+    // must never be an empty line and must never borrow the parent's workspace.
+    // A sessionless surface keeps its Client launch cwd.
+    const cwdUnavailable = viewed === undefined
+      ? liveCwd === ''
+        && (deps.liveAgent() !== undefined || deps.remote !== undefined)
+        && deps.currentSessionId() !== undefined
+      : childStatus?.cwd === undefined
+    const workspaceBase = deriveWorkspaceStatus(displayCwd, viewed === undefined || deps.remote === undefined)
+    const workspace = cwdUnavailable ? { ...workspaceBase, cwdUnavailable: true } : workspaceBase
     // The Remote branch's event window is BOUNDED: its fold cannot count the
     // session's lifetime tokens, so the official `tokenUsage` projection (and
     // the route's context capacity) own them there. Direct keeps the fold.
@@ -730,18 +778,11 @@ export function createStatusRuntime(deps: StatusRuntimeDeps): StatusRuntime {
     const childContextTokens = childStatus?.context === undefined
       ? undefined
       : contextPressureOccupancy(childStatus.context)
-    const usage = viewed === undefined
+    const baseUsage = viewed === undefined
       ? usageFromStats(
           subjectStats,
           contextTokens,
           remoteUsageFacts,
-          // PR5 (plan §3.2): an unproven recent window omits the recent
-          // metrics. A viewer CHILD keeps the numeric figures (its own fold is
-          // its whole subject; the availability authority is the MAIN
-          // presentation's).
-          deps.presentation.mainRecentPerformanceAvailable?.() === false
-            ? { recentPerformanceAvailable: false }
-            : undefined,
         )
       : usageFromStats(
           subjectStats,
@@ -753,6 +794,19 @@ export function createStatusRuntime(deps: StatusRuntimeDeps): StatusRuntime {
               : { contextWindow: childStatus.context.contextWindow },
           },
         )
+    // TPS plan PR-2: the DISPLAY SUBJECT's own Host `piTuiPerformance`
+    // projection is the single authority for the measured performance values
+    // (R5 + All + recent first-token). The child subject reads the child
+    // Session's own Host facts; the main subject its own — never the other's,
+    // never a bounded page window's re-fold, and an absent projection omits
+    // the values instead of painting zeros.
+    const derivedPerformance = derivePerformance(
+      viewed === undefined ? mainSessionStatus()?.performance : childStatus?.performance,
+    )
+    const usage = {
+      ...baseUsage,
+      performance: { ...baseUsage.performance, ...derivedPerformance },
+    }
     const host = deriveHostStatus()
     const patch: {
       view?: ViewStatus
@@ -877,7 +931,7 @@ export function createStatusRuntime(deps: StatusRuntimeDeps): StatusRuntime {
         if (!authority.isScopeCurrent(scope)) return
         if (!authority.isTransportTokenCurrent(transportToken)) return
         if (outcome.kind === 'unavailable') {
-          deps.surface.app.notify(outcome.cause === 'commands'
+          deps.surface.display.notify(outcome.cause === 'commands'
             ? 'permission switch unavailable (commands service)'
             : 'permission switch unavailable (presets not composed)', 'error')
           return
@@ -888,7 +942,7 @@ export function createStatusRuntime(deps: StatusRuntimeDeps): StatusRuntime {
           // and NEVER retry automatically (an ambiguous dispatch must not
           // duplicate). The pushed projection repaints the committed value
           // if the switch landed.
-          deps.surface.app.notify(
+          deps.surface.display.notify(
             `permission switch to ${next} was dispatched but the result is unknown — check the footer before relying on it`,
             'error',
           )
@@ -897,7 +951,7 @@ export function createStatusRuntime(deps: StatusRuntimeDeps): StatusRuntime {
         // APPLIED: do NOT install next as committed locally — the pushed
         // permissions projection repaints the footer (§D7). The notice is
         // the gesture's own feedback, never a committed-value claim.
-        deps.surface.app.notify(next === 'danger-full-access'
+        deps.surface.display.notify(next === 'danger-full-access'
           ? `⚠ ${next} — no approvals`
           : `permission: ${next}`,
         next === 'danger-full-access' ? 'error' : 'info')
@@ -910,7 +964,7 @@ export function createStatusRuntime(deps: StatusRuntimeDeps): StatusRuntime {
           if (deps.isCleanedUp()) return
           if (!authority.isScopeCurrent(scope)) return
           if (!authority.isTransportTokenCurrent(transportToken)) return
-          deps.surface.app.notify(`permission switch failed: ${safeErrorMessage(error)}`, 'error')
+          deps.surface.display.notify(`permission switch failed: ${safeErrorMessage(error)}`, 'error')
         },
       })
       return
@@ -927,7 +981,7 @@ export function createStatusRuntime(deps: StatusRuntimeDeps): StatusRuntime {
     const next = names[(index + 1) % names.length] ?? names[0]
     if (next === undefined || next === current) return
     permission.set(agent.session, next)
-    deps.surface.app.notify(next === 'danger-full-access'
+    deps.surface.display.notify(next === 'danger-full-access'
       ? `⚠ ${next} — no approvals`
       : `permission: ${next}`,
     next === 'danger-full-access' ? 'error' : 'info')

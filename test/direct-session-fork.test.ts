@@ -88,6 +88,50 @@ test('Direct exact turn/end cut uses the official buildForkSeed and Host metadat
   })
 })
 
+test('a fork cut inherits only the working-directory changes INSIDE it, and the child meta repeats the original project', async () => {
+  // The child header identifies the ORIGINAL project while its EFFECTIVE
+  // directory is the cut's own committed value: the seed carries exactly the
+  // in-cut `working-directory/change` records, and the official projection
+  // re-initializes from the header and replays them.
+  const source = observation({
+    header: { id: 'session-source', cwd: '/original' },
+    events: [
+      { type: 'turn/start', seq: 0, time: T0, data: { turn: 1 } },
+      { type: 'working-directory/change', seq: 1, time: T0, data: { cwd: '/first' } },
+      { type: 'turn/end', seq: 2, time: T0, data: { turn: 1, reason: { kind: 'completed' } } },
+      { type: 'turn/start', seq: 3, time: T0, data: { turn: 2 } },
+      { type: 'working-directory/change', seq: 4, time: T0, data: { cwd: '/second' } },
+      { type: 'turn/end', seq: 5, time: T0, data: { turn: 2, reason: { kind: 'completed' } } },
+    ],
+  })
+  const { lifecycle, calls } = directLifecycle(source)
+  const changesOf = (seed: readonly Record<string, unknown>[], from: number): readonly unknown[] => seed
+    .slice(from)
+    .filter(entry => entry.type === 'working-directory/change')
+    .map(entry => (entry.data as { readonly cwd?: unknown }).cwd)
+
+  const oldCut = await lifecycle.fork({ sourceSessionId: 'session-source', atSeq: 2 })
+  assert.equal(oldCut.outcome.kind, 'forked')
+  assert.deepEqual(
+    (calls[0]?.meta as { readonly cwd?: unknown }).cwd,
+    '/original',
+    'the old-cut child meta is the ORIGINAL project, never the current directory',
+  )
+  const oldSeed = calls[0]?.seed as readonly Record<string, unknown>[]
+  assert.deepEqual(oldSeed.slice(0, 3), source.events.slice(0, 3))
+  assert.deepEqual(changesOf(oldSeed, 3), [], 'a change committed after the cut never rides the seed')
+
+  const newestCut = await lifecycle.fork({ sourceSessionId: 'session-source', atSeq: 5 })
+  assert.equal(newestCut.outcome.kind, 'forked')
+  assert.deepEqual((calls[1]?.meta as { readonly cwd?: unknown }).cwd, '/original')
+  const newestSeed = calls[1]?.seed as readonly Record<string, unknown>[]
+  assert.deepEqual(
+    changesOf(newestSeed, 0),
+    ['/first', '/second'],
+    'the newest cut carries every committed change in order',
+  )
+})
+
 test('Direct explicit mid-turn cut stays EXACT: inheritedEventCount is the cut, never the closing turn/end', async () => {
   // The clearest old-semantic-is-gone regression (plan §21): the old D2.4
   // adapter moved atSeq=1 forward to the closing turn/end at seq 4 and

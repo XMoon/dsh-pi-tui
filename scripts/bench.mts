@@ -65,6 +65,7 @@ class BenchTerminal implements Terminal {
   clearScreen(): void {}
   setTitle(_title: string): void {}
   setProgress(_active: boolean): void {}
+  setProgramStatus(): void {}
 }
 
 /** Every benchmark surface owns one final dispose, including failed sections. */
@@ -1074,8 +1075,6 @@ async function main(): Promise<void> {
       turns: 5000,
       steps: 12_000,
       llmMs: 900_000,
-      firstTokenMsAvg: 2100,
-      tokensPerSec: 14,
       cacheHitPct: 62,
       inputTokens: 48_000_000,
       outputTokens: 2_100_000,

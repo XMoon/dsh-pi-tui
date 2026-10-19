@@ -11,6 +11,15 @@ Each worktree owns its own `node_modules`. The worktrees may share the pnpm
 store and the source-pack cache, but a `node_modules` directory must never be
 copied or symlinked between them.
 
+The root `mise.toml` pins Node 24 (as CI does) and turns on mise's
+`idiomatic_version_file_enable_tools` for pnpm, so the pnpm version comes from
+`package.json`'s `packageManager` field alone; run `mise install` once per
+worktree to materialize both tools. That ambient pin is what the doctor and the
+bootstrap compare, because they read pnpm with pnpm's own version switching
+disabled. When bumping `packageManager`, commit the regenerated `pnpm-lock.yaml`
+too: pnpm 12 records the resolved pnpm under `packageManagerDependencies`, and
+`--frozen-lockfile` fails without it.
+
 ## Daily entry point
 
 Run this before coding in either worktree:
@@ -438,15 +447,15 @@ The launcher never copies auth state; a fresh isolated home has none.
 Interactive runs therefore need one of:
 
 - **User-configured auth (default):** the user configures the isolated home
-  themselves (provider keys, `settings.yaml`, credentials) before the agent
-  runs the launcher.
-- **Copy the two auth files (only with explicit user permission):** copy
-  `~/.dsh/.credentials.yaml` and `~/.dsh/settings.yaml` into `$DSH_HOME/`,
-  preserving the 0600 mode of `.credentials.yaml` (e.g. `install -m 600`).
-  By default only these two files are copied; session data (`sessions/`,
-  `storages/`, `user-history/`) is left fresh unless the user explicitly
-  asks to copy it too. After the copy the two homes' auth may drift
-  independently.
+  themselves before the agent runs the launcher.
+- **Copy the approved real-model test inputs (only with explicit permission
+  for these exact files):** copy `$HOME/.dsh/.credentials.yaml` to
+  `$DSH_HOME/.credentials.yaml`, preserving mode `0600`, and copy
+  `$HOME/.dsh/profiles/pi-tui-dev/cordis.patch.yml` to
+  `$DSH_HOME/profiles/<test-profile>/cordis.patch.yml`. Copy no other real
+  profile data; configure test-only options in the isolated home as needed.
+  Keep `sessions/`, `storages/` and `user-history/`
+  fresh, and never inspect or display copied file contents.
 
 ## Full Source compatibility
 

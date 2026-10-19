@@ -29,6 +29,7 @@ import { emptyStatusSnapshot } from '../src/domain/status/types.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 import { sessionScopeFacts } from './session-scope-facts.ts'
 import { registerTuiCommandsWithDirectSeams } from './support/register-tui-commands.ts'
+import { navigateToLegacySettings } from './support/open-legacy-settings.ts'
 
 
 /** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file
@@ -295,7 +296,7 @@ test('/footer is sessionless and opens the configurator; S saves and persists', 
     setTerminalProgressMode: () => {}, setNotificationMethod: () => {},
     updateWelcomeCard: () => {},
     openJobView: () => {},
-    openTasksBrowser: () => {}, openPluginManager: () => {}, createPluginManagerSubmenu: () => ({ render: () => [], invalidate: () => {} }),
+    openTasksBrowser: () => {}, openPluginManager: () => {}, createPluginManagerPage: () => undefined,
     openRewindPicker: () => {},
     sessionTransitionPending: () => false,
     withSessionTransition: async <T>(task: () => T | Promise<T>) => task(),
@@ -477,7 +478,7 @@ test('/footer serializes overlapping saves and re-reads future USER definitions'
     setTerminalProgressMode: () => {}, setNotificationMethod: () => {},
     updateWelcomeCard: () => {},
     openJobView: () => {},
-    openTasksBrowser: () => {}, openPluginManager: () => {}, createPluginManagerSubmenu: () => ({ render: () => [], invalidate: () => {} }),
+    openTasksBrowser: () => {}, openPluginManager: () => {}, createPluginManagerPage: () => undefined,
     openRewindPicker: () => {},
     sessionTransitionPending: () => false,
     withSessionTransition: async <T>(task: () => T | Promise<T>) => task(),
@@ -499,6 +500,7 @@ test('/footer serializes overlapping saves and re-reads future USER definitions'
   await (footer.handler as (invocation: { rawInput: string }) => Promise<unknown>)({ rawInput: '' })
   await (footer.handler as (invocation: { rawInput: string }) => Promise<unknown>)({ rawInput: '' })
   await (settingsCommand.handler as (invocation: { rawInput: string }) => Promise<unknown>)({ rawInput: '' })
+  await navigateToLegacySettings(vt)
   assert.equal(saveCallbacks.length, 2)
   assert.ok(settingsChange !== undefined)
   const displayRow = settingsItems?.find(item => item.id === 'display-preset')
@@ -636,7 +638,7 @@ test('/footer Esc cancels without writing', async () => {
     reconcileDefaultIntent: () => {},
     sessionBlank: () => undefined,
     refreshStatus: () => {}, progressUpdatesState: { mode: 'milestones' }, responseStyleState: { style: 'default' }, gitAttributionState: { mode: 'off' }, focusEnabled: () => false, setFocusMode: () => {}, setNotificationMode: () => {}, setTerminalProgressMode: () => {}, setNotificationMethod: () => {}, updateWelcomeCard: () => {},
-    openJobView: () => {}, openTasksBrowser: () => {}, openPluginManager: () => {}, createPluginManagerSubmenu: () => ({ render: () => [], invalidate: () => {} }), openRewindPicker: () => {},
+    openJobView: () => {}, openTasksBrowser: () => {}, openPluginManager: () => {}, createPluginManagerPage: () => undefined, openRewindPicker: () => {},
     sessionTransitionPending: () => false,
     withSessionTransition: async <T>(task: () => T | Promise<T>) => task(),
     withWriter: async <T>(_scope: unknown, task: () => T | Promise<T>) => task(),
@@ -720,7 +722,7 @@ test('/footer starts from the persisted custom layout when active', async () => 
     reconcileDefaultIntent: () => {},
     sessionBlank: () => undefined,
     refreshStatus: () => {}, progressUpdatesState: { mode: 'milestones' }, responseStyleState: { style: 'default' }, gitAttributionState: { mode: 'off' }, focusEnabled: () => false, setFocusMode: () => {}, setNotificationMode: () => {}, setTerminalProgressMode: () => {}, setNotificationMethod: () => {}, updateWelcomeCard: () => {},
-    openJobView: () => {}, openTasksBrowser: () => {}, openPluginManager: () => {}, createPluginManagerSubmenu: () => ({ render: () => [], invalidate: () => {} }), openRewindPicker: () => {},
+    openJobView: () => {}, openTasksBrowser: () => {}, openPluginManager: () => {}, createPluginManagerPage: () => undefined, openRewindPicker: () => {},
     sessionTransitionPending: () => false,
     withSessionTransition: async <T>(task: () => T | Promise<T>) => task(),
     withWriter: async <T>(_scope: unknown, task: () => T | Promise<T>) => task(),
@@ -804,7 +806,7 @@ test('/footer starts from the EFFECTIVE COMPACT layout (a compact user pressing 
     reconcileDefaultIntent: () => {},
     sessionBlank: () => undefined,
     refreshStatus: () => {}, progressUpdatesState: { mode: 'milestones' }, responseStyleState: { style: 'default' }, gitAttributionState: { mode: 'off' }, focusEnabled: () => false, setFocusMode: () => {}, setNotificationMode: () => {}, setTerminalProgressMode: () => {}, setNotificationMethod: () => {}, updateWelcomeCard: () => {},
-    openJobView: () => {}, openTasksBrowser: () => {}, openPluginManager: () => {}, createPluginManagerSubmenu: () => ({ render: () => [], invalidate: () => {} }), openRewindPicker: () => {},
+    openJobView: () => {}, openTasksBrowser: () => {}, openPluginManager: () => {}, createPluginManagerPage: () => undefined, openRewindPicker: () => {},
     sessionTransitionPending: () => false,
     withSessionTransition: async <T>(task: () => T | Promise<T>) => task(),
     withWriter: async <T>(_scope: unknown, task: () => T | Promise<T>) => task(),
@@ -921,7 +923,7 @@ test('/footer Enter with a FAILED settings write keeps the old layout and notifi
     reconcileDefaultIntent: () => {},
     sessionBlank: () => undefined,
     refreshStatus: () => {}, progressUpdatesState: { mode: 'milestones' }, responseStyleState: { style: 'default' }, gitAttributionState: { mode: 'off' }, focusEnabled: () => false, setFocusMode: () => {}, setNotificationMode: () => {}, setTerminalProgressMode: () => {}, setNotificationMethod: () => {}, updateWelcomeCard: () => {},
-    openJobView: () => {}, openTasksBrowser: () => {}, openPluginManager: () => {}, createPluginManagerSubmenu: () => ({ render: () => [], invalidate: () => {} }), openRewindPicker: () => {},
+    openJobView: () => {}, openTasksBrowser: () => {}, openPluginManager: () => {}, createPluginManagerPage: () => undefined, openRewindPicker: () => {},
     sessionTransitionPending: () => false,
     withSessionTransition: async <T>(task: () => T | Promise<T>) => task(),
     withWriter: async <T>(_scope: unknown, task: () => T | Promise<T>) => task(),
@@ -1017,7 +1019,7 @@ test('/settings footer change is PERSIST-FIRST: a failed write keeps the old lay
     reconcileDefaultIntent: () => {},
     sessionBlank: () => undefined,
     refreshStatus: () => {}, progressUpdatesState: { mode: 'milestones' }, responseStyleState: { style: 'default' }, gitAttributionState: { mode: 'off' }, focusEnabled: () => false, setFocusMode: () => {}, setNotificationMode: () => {}, setTerminalProgressMode: () => {}, setNotificationMethod: () => {}, updateWelcomeCard: () => {},
-    openJobView: () => {}, openTasksBrowser: () => {}, openPluginManager: () => {}, createPluginManagerSubmenu: () => ({ render: () => [], invalidate: () => {} }), openRewindPicker: () => {},
+    openJobView: () => {}, openTasksBrowser: () => {}, openPluginManager: () => {}, createPluginManagerPage: () => undefined, openRewindPicker: () => {},
     sessionTransitionPending: () => false,
     withSessionTransition: async <T>(task: () => T | Promise<T>) => task(),
     withWriter: async <T>(_scope: unknown, task: () => T | Promise<T>) => task(),
@@ -1032,6 +1034,7 @@ test('/settings footer change is PERSIST-FIRST: a failed write keeps the old lay
   // rows and wires the persist-first footer branch into onChange).
   await (def.handler as (invocation: { rawInput: string }) => Promise<unknown>)({ rawInput: '' })
   await vt.waitForRender()
+  await navigateToLegacySettings(vt)
   // The FIRST row is the footer Status line (default): Enter cycles it to
   // compact → the handler runs the persist-first branch → the WRITE
   // throws → applyFooterSettings must NEVER run.
@@ -1101,7 +1104,7 @@ test('/settings footer change PERSISTS footerFallbackMode (the command-mode rest
     reconcileDefaultIntent: () => {},
     sessionBlank: () => undefined,
     refreshStatus: () => {}, progressUpdatesState: { mode: 'milestones' }, responseStyleState: { style: 'default' }, gitAttributionState: { mode: 'off' }, focusEnabled: () => false, setFocusMode: () => {}, setNotificationMode: () => {}, setTerminalProgressMode: () => {}, setNotificationMethod: () => {}, updateWelcomeCard: () => {},
-    openJobView: () => {}, openTasksBrowser: () => {}, openPluginManager: () => {}, createPluginManagerSubmenu: () => ({ render: () => [], invalidate: () => {} }), openRewindPicker: () => {},
+    openJobView: () => {}, openTasksBrowser: () => {}, openPluginManager: () => {}, createPluginManagerPage: () => undefined, openRewindPicker: () => {},
     sessionTransitionPending: () => false,
     withSessionTransition: async <T>(task: () => T | Promise<T>) => task(),
     withWriter: async <T>(_scope: unknown, task: () => T | Promise<T>) => task(),
@@ -1114,6 +1117,7 @@ test('/settings footer change PERSISTS footerFallbackMode (the command-mode rest
   assert.ok(def?.handler !== undefined, 'settings handler missing')
   await (def.handler as (invocation: { rawInput: string }) => Promise<unknown>)({ rawInput: '' })
   await vt.waitForRender()
+  await navigateToLegacySettings(vt)
   // Walk to the footer row: SettingsList rows cycle their value on Enter
   // (firing onChange) and ↓ moves to the next row. The footer row is not
   // necessarily the first row (theme/expand/thinking precede it), so keep
@@ -1225,7 +1229,7 @@ test('/footer save failures notify exactly once (validation and write failures)'
     setTerminalProgressMode: () => {}, setNotificationMethod: () => {},
     updateWelcomeCard: () => {},
     openJobView: () => {},
-    openTasksBrowser: () => {}, openPluginManager: () => {}, createPluginManagerSubmenu: () => ({ render: () => [], invalidate: () => {} }),
+    openTasksBrowser: () => {}, openPluginManager: () => {}, createPluginManagerPage: () => undefined,
     openRewindPicker: () => {},
     sessionTransitionPending: () => false,
     withSessionTransition: async <T>(task: () => T | Promise<T>) => task(),
@@ -1334,7 +1338,7 @@ test('PR D: an unsaved custom command draft NEVER executes (preview, resize, Kee
       reconcileDefaultIntent: () => {},
       sessionBlank: () => undefined,
       refreshStatus: () => {}, progressUpdatesState: { mode: 'milestones' }, responseStyleState: { style: 'default' }, gitAttributionState: { mode: 'off' }, focusEnabled: () => false, setFocusMode: () => {}, setNotificationMode: () => {}, setTerminalProgressMode: () => {}, setNotificationMethod: () => {}, updateWelcomeCard: () => {},
-      openJobView: () => {}, openTasksBrowser: () => {}, openPluginManager: () => {}, createPluginManagerSubmenu: () => ({ render: () => [], invalidate: () => {} }), openRewindPicker: () => {},
+      openJobView: () => {}, openTasksBrowser: () => {}, openPluginManager: () => {}, createPluginManagerPage: () => undefined, openRewindPicker: () => {},
       sessionTransitionPending: () => false,
       withSessionTransition: async <T>(task: () => T | Promise<T>) => task(),
       withWriter: async <T>(_scope: unknown, task: () => T | Promise<T>) => task(),
@@ -1462,7 +1466,7 @@ test('PR D: a FAILED save never executes the new command (draft preserved, marke
       reconcileDefaultIntent: () => {},
       sessionBlank: () => undefined,
       refreshStatus: () => {}, progressUpdatesState: { mode: 'milestones' }, responseStyleState: { style: 'default' }, gitAttributionState: { mode: 'off' }, focusEnabled: () => false, setFocusMode: () => {}, setNotificationMode: () => {}, setTerminalProgressMode: () => {}, setNotificationMethod: () => {}, updateWelcomeCard: () => {},
-      openJobView: () => {}, openTasksBrowser: () => {}, openPluginManager: () => {}, createPluginManagerSubmenu: () => ({ render: () => [], invalidate: () => {} }), openRewindPicker: () => {},
+      openJobView: () => {}, openTasksBrowser: () => {}, openPluginManager: () => {}, createPluginManagerPage: () => undefined, openRewindPicker: () => {},
       sessionTransitionPending: () => false,
       withSessionTransition: async <T>(task: () => T | Promise<T>) => task(),
       withWriter: async <T>(_scope: unknown, task: () => T | Promise<T>) => task(),
@@ -1576,7 +1580,7 @@ test('PR D: a SUCCESSFUL save is the ONLY event that arms the runtime (marker ap
       reconcileDefaultIntent: () => {},
       sessionBlank: () => undefined,
       refreshStatus: () => {}, progressUpdatesState: { mode: 'milestones' }, responseStyleState: { style: 'default' }, gitAttributionState: { mode: 'off' }, focusEnabled: () => false, setFocusMode: () => {}, setNotificationMode: () => {}, setTerminalProgressMode: () => {}, setNotificationMethod: () => {}, updateWelcomeCard: () => {},
-      openJobView: () => {}, openTasksBrowser: () => {}, openPluginManager: () => {}, createPluginManagerSubmenu: () => ({ render: () => [], invalidate: () => {} }), openRewindPicker: () => {},
+      openJobView: () => {}, openTasksBrowser: () => {}, openPluginManager: () => {}, createPluginManagerPage: () => undefined, openRewindPicker: () => {},
       sessionTransitionPending: () => false,
       withSessionTransition: async <T>(task: () => T | Promise<T>) => task(),
       withWriter: async <T>(_scope: unknown, task: () => T | Promise<T>) => task(),

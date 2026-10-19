@@ -15,7 +15,7 @@
  *
  * Covered flows (sub-plan §8):
  * - A ordinary create            (ClientSessions.create -> Host Session Controller)
- * - B explicit-preset create     (atomic generated session.create({agentPreset}))
+ * - B explicit-preset create     (the SAME ClientSessions.create({agentPreset}) entry)
  * - C open / retain              (ClientSessions.retain, no invented resume RPC)
  * - D model select               (session.modelCatalog / session.selectModel)
  * - E preset select + locked     (agentPresets.select normal + refusal)
@@ -75,7 +75,9 @@ import commandsRemote from '@deepseek-ai/dsh-commands/remote'
 import presetsRemote from '@deepseek-ai/dsh-agent-preset-registry/remote'
 import subagentsRemote from '@deepseek-ai/dsh-subagent/remote'
 import LocalFileSystem from '@deepseek-ai/dsh-fs-local'
-import JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
+import { RemoteAccessService } from '@deepseek-ai/dsh-api-remote-access'
+import WorkingDirectory from '@deepseek-ai/dsh-working-directory'
+import * as JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
 import SessionTitle from '@deepseek-ai/dsh-session-title'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import { SqliteSessionQueryEngine } from '@deepseek-ai/dsh-session-query-sqlite'
@@ -90,12 +92,6 @@ import { RemotePresetCatalog } from '../src/runtime/remote/preset-remote.ts'
 import { RemoteSessionWriter } from '../src/runtime/remote/session-writer-remote.ts'
 import { RemotePromptSerializerProduction } from '../src/runtime/remote/prompt-serializer-remote.ts'
 import { SESSION_WRITER_HELD_GUIDANCE } from '../src/runtime/remote/write-failure.ts'
-
-const PACKAGE_IDS = {
-  connection: '@deepseek-ai/dsh-client-connection',
-  gateway: '@deepseek-ai/dsh-api-gateway',
-  session: '@deepseek-ai/dsh-api-session-controller',
-}
 
 const PROVIDER = 'smoke'
 const MODEL = 'smoke'
@@ -166,8 +162,24 @@ function installModuleLoader() {
     },
   }
   globalThis.location = { hostname: 'localhost', origin: 'http://dsh-prem3-lifecycle.local', search: '' }
+  /**
+   * Import one official Client bundle from whichever channel its published
+   * `./client` entry selects. DSH 0.2.1-rc.1+ splits that entry into a
+   * standalone Node ESM half (`node`, which never registers through
+   * `__ModuleLoader__`) and a browser loader factory (`browser`/`default`).
+   * A browser registration always wins; the Node namespace only fills a gap,
+   * into the SAME table the registering factories resolve `/client`
+   * dependencies from.
+   */
+  const importClient = async (specifier) => {
+    const id = specifier.slice(0, -'/client'.length)
+    const imported = await import(specifier)
+    if (!modules.has(id)) modules.set(id, imported)
+    return modules.get(id)
+  }
   return {
     modules,
+    importClient,
     restore() {
       if (previousWindow === undefined) delete globalThis.window
       else globalThis.window = previousWindow
@@ -208,6 +220,9 @@ async function createHost(workRoot) {
   let persistenceFiber
   try {
     await ctx.plugin(TypertRegistry)
+    // rc.2: the Gateway and the SessionController both inject the official
+    // access decider, so the Host mounts it before either is injected.
+    await ctx.plugin(RemoteAccessService)
     await mountAgentLoopTestDependencies(ctx)
     persistenceFiber = await ctx.plugin(JsonlSessionPersistence, { root: join(workRoot, 'persistence') })
     const loop = await mountAgentLoopTestHarness(ctx)
@@ -230,6 +245,7 @@ async function createHost(workRoot) {
       new SqliteSessionQueryEngine(queryCtx, { path: ':memory:', openAt: 'first-search' })
     })
     await ctx.plugin(LocalFileSystem)
+    await ctx.plugin(WorkingDirectory)
     await ctx.plugin(Storage)
     await ctx.plugin(StorageJson, { root: join(workRoot, 'storages') })
     await ctx.plugin(StorageDomain, { backend: 'json' })
@@ -264,7 +280,11 @@ async function createHost(workRoot) {
 }
 
 function hostTransport(host) {
-  const shared = host.ctx.get('connection').createSharedFetchHandler('/api')
+  const connection = host.ctx.get('connection')
+  const shared = connection.createSharedFetchHandler('/api')
+  // The official Gateway speaks for the Host Connection's own owner Peer on
+  // both carrier paths (DSH 0.2.1-rc.2 requires an explicit Peer).
+  const peer = connection.browserPeer
   async function* emptyUplink() {}
   return {
     ownsHost: true,
@@ -272,11 +292,11 @@ function hostTransport(host) {
       const request = input instanceof Request
         ? new Request(input, init)
         : new Request(new URL(String(input), 'http://dsh-prem3-lifecycle.local'), init)
-      return shared.fetch(request)
+      return shared.fetch(request, peer)
     },
     openStream(endpoint, payload, signal, uplink) {
       return (async function* () {
-        yield* await host.ctx.get('typertGateway').wireStream.open(endpoint, payload, uplink ?? emptyUplink(), undefined, signal)
+        yield* await host.ctx.get('typertGateway').wireStream.open(endpoint, payload, uplink ?? emptyUplink(), peer, signal)
       })()
     },
   }
@@ -301,12 +321,9 @@ async function main() {
   let holder
   let holderExited
   try {
-    await import('@deepseek-ai/dsh-client-connection/client')
-    await import('@deepseek-ai/dsh-api-gateway/client')
-    await import('@deepseek-ai/dsh-api-session-controller/client')
-    const connectionClient = loader.modules.get(PACKAGE_IDS.connection)
-    const gatewayClient = loader.modules.get(PACKAGE_IDS.gateway)
-    const sessionClient = loader.modules.get(PACKAGE_IDS.session)
+    const connectionClient = await loader.importClient('@deepseek-ai/dsh-client-connection/client')
+    const gatewayClient = await loader.importClient('@deepseek-ai/dsh-api-gateway/client')
+    const sessionClient = await loader.importClient('@deepseek-ai/dsh-api-session-controller/client')
     assert.ok(connectionClient !== undefined, 'official Connection Client did not load')
     assert.ok(gatewayClient !== undefined, 'official API Gateway Client did not load')
     assert.ok(sessionClient !== undefined, 'official Session Controller Client did not load')
@@ -346,7 +363,7 @@ async function main() {
     ))
 
     const generation = connection.generation
-    const lifecycle = new RemoteSessionLifecycle(sessions, sessionRemoteFace, generation)
+    const lifecycle = new RemoteSessionLifecycle(sessions, generation)
     const models = new RemoteModelCatalog(sessionRemoteFace, sessions, generation)
     const presets = new RemotePresetCatalog(presetRemoteFace, generation)
     const hostSession = id => host.ctx.sessions.get(SessionId(id))
@@ -376,6 +393,46 @@ async function main() {
       assert.ok(sessions.retainInfo(SessionId(requested)).getSnapshot().referenceCount
         < referenceCount, 'Flow A release must return the reference')
       flows.ordinaryCreate = { status: 'covered', sessionId: requested }
+    }
+
+    // ---- Flow A2: a BLANK requested Session is reused ---------------------
+    {
+      const requested = 'lifecycle-blank-reuse'
+      const first = await lifecycle.create({ sessionId: requested, cwd: anchorDir })
+      assert.equal(first.outcome.kind, 'created', `Flow A2 first create failed: ${first.ownership}/${first.outcome.kind}`)
+      first.outcome.handle.client?.release()
+      const second = await lifecycle.create({ sessionId: requested, cwd: anchorDir })
+      assert.equal(second.outcome.kind, 'created', `Flow A2 reuse create failed: ${second.ownership}/${second.outcome.kind}`)
+      assert.equal(second.outcome.handle.session.id, requested,
+        'the Host REUSES a still-reusable blank Session and reports that identity')
+      assert.equal(host.hostCreateCalls.filter(id => id === requested).length, 2,
+        'each create dispatches its own Host request (the Host decides reuse)')
+      second.outcome.handle.client?.release()
+      flows.blankReuse = { status: 'covered', sessionId: requested }
+    }
+
+    // ---- Flow A3: a NON-BLANK requested id is never reused ---------------
+    {
+      // Flow A's Session is still blank; run one turn so the Host cannot reuse it.
+      const requested = 'lifecycle-ordinary'
+      const agent = host.ctx.agents.get(SessionId(requested))
+      assert.ok(agent !== undefined, 'Flow A3 needs the live Host Agent of the created Session')
+      agent.followup(createUserMessage({
+        content: [{ type: 'text', text: 'make this Session non-blank' }],
+        source: { kind: 'user' },
+      }))
+      await waitFor('Flow A3 turn to settle', () =>
+        hostSession(requested).snapshotEvents().some(event => event.type === 'turn/end'), 20_000)
+
+      const result = await lifecycle.create({ sessionId: requested, cwd: anchorDir })
+      assert.equal(result.outcome.kind, 'created', `Flow A3 create failed: ${result.ownership}/${result.outcome.kind}`)
+      const published = result.outcome.handle.session.id
+      assert.notEqual(published, requested,
+        'the Host publishes ANOTHER identity when the requested id is not reusable (returned id is the authority)')
+      assert.ok(hostSession(published) !== undefined, 'the returned identity names the real new Host Session')
+      assert.ok(catalogIds().includes(published), 'the returned identity is the Client catalog authority')
+      result.outcome.handle.client?.release()
+      flows.returnedIdDiffers = { status: 'covered', requested, published }
     }
 
     // ---- Flow B: explicit-preset create ----------------------------------

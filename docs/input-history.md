@@ -75,8 +75,11 @@ dedicated data file keyed by the working directory. We adopt that shape.
 
 ## Ctrl+R history search
 
-`Ctrl+R` opens the input-history search panel (host-reserved key; plugins
-can never claim it). It is "find and EDIT", never "find and run":
+`Ctrl+R` replaces the EDITOR SEAT with the input-history search surface
+(host-reserved key; plugins can never claim it). It is "find and EDIT", never
+"find and run": the Transcript keeps rendering above it and the ordinary footer
+below it, and the panel is an editor-seat tenant — not an overlay and not a
+second screen.
 
 - **Scopes**: `Tab` cycles the scope; the query survives the switch.
   - `Current session` (the default when a live session exists) — only the
@@ -90,20 +93,68 @@ can never claim it). It is "find and EDIT", never "find and run":
     hidden — a session tab with no identity would always be empty.
 - **Filtering**: case-insensitive substring over the content; an empty
   query browses the most recent history.
-- **Details**: the selected row's FULL multi-line content, plus its
-  directory, timestamp and session — legacy rows honestly show
-  `Unknown (legacy history)` (never a fabricated time). The list shows
-  the prompt only; the directory prefix appears in `All directories` only.
-- **Enter** puts the selected text back into the editor (via
-  `setEditorText`) and closes the panel — it never submits. **Esc** closes
-  with the draft untouched (the panel never previews into the editor).
+- **Layout (one vertical presentation at every width)**: a top boundary `─`
+  (Owner decision D15), then the `Input History` header with the scope tabs and
+  the `F2` hint, the query row, a `Results · N matches` counter, a single-line
+  results window (at most eight painted rows, following the selection), the
+  Results/Preview divider, then the `Preview`, the action bar and a bottom
+  boundary `─` (below the action bar, against the footer). The two boundary
+  rules are preferred and may compress the Results/Preview regions, but they
+  never cost the mandatory Header/Query/Action Bar, at least one result row or at
+  least one Preview content row: when the budget cannot satisfy all of those the
+  bottom rule is removed first, then the top one; a loading/empty/failed state
+  keeps at least its one status/message row. A rule never takes a
+  transcript/footer row.
+  `F2` toggles the seat between its normal (≈63% of the terminal) and expanded
+  (≈80%) target height; the real grant also reserves the live non-seat chrome
+  and one transcript row, so a small terminal drops the Preview before it drops
+  the visible selected result.
+- **Preview**: the selected row's FULL soft-wrapped multi-line content with its
+  OWN scroll position (`Alt+↑`/`Alt+↓` one row, `Alt+PgUp`/`Alt+PgDn` one page,
+  `Alt+Home`/`Alt+End` first/last) and ONE trailing metadata row
+  (`Scope: … · Directory: … · Time: … · Session: …`; a legacy row honestly shows
+  `Time unknown`, never a fabricated time). The Preview never truncates the
+  source with a marker. `↑`/`↓`/`PgUp`/`PgDn` keep selecting in the results list;
+  the list shows the prompt only, with the directory prefix in
+  `All directories` only.
+- **Copy**: `Alt+C` copies the EXACT stored prompt (both roots); in Transcript
+  Fullscreen the Preview heading also carries clickable `Copy All [Alt+C]` and
+  `Use Selected [Enter]` (the verb is never bracketed; the whole item is hidden
+  when it cannot fit, while `Alt+C`/Enter stay available).
+- **Enter** puts the selected text back into the CURRENT editor (via
+  `setEditorText`) and closes the seat — it never submits and never writes a
+  hidden host editor behind a plugin winner. **Esc**/**Ctrl+C** close it with
+  the draft, cursor, input mode and pending paste content untouched, and those
+  two keys are consumed by the seat while it is active (closing History never
+  interrupts the agent or quits the TUI).
+- **Session currentness (B3-B)**: `Ctrl+R` captures the runtime's SINGLE
+  `SessionScopeAuthority` scope once (exact owner + generation) and the seat's
+  search/accept/copy/async guards re-read that same capture. A session switch, a
+  same-id reopen (A→B→A), a same-owner generation bump or the sessionless→first
+  session publication therefore makes the old seat logically dead the instant the
+  new owner is published: the runner physically closes it in the same synchronous
+  commit (before the new Session's first editable frame), a UI cleanup failure can
+  never roll the published Session back, and Enter/Copy/async results from the old
+  scope are refused rather than written into the new Session. A live blocking
+  owner (Question / Approval / Save Location) PARKS the seat instead — the SAME
+  instance with its query/selection/Preview anchor returns after the LAST blocker
+  settles.
+- **Pointer (Transcript Fullscreen only)**: clicking a result row SELECTS it
+  (it does not accept); the explicit `Use Selected [Enter]` / `Copy All [Alt+C]`
+  cells act,
+  the wheel scrolls the list or the Preview under the pointer only, and a
+  Preview drag copies the exact original source substring. The regular main
+  screen has NO application mouse: it is fully keyboard-driven and the
+  terminal's native selection/scrollback is untouched.
 - **Storage**: v2 rows carry `cwd` + `ts` + `sessionId`; v1 rows inherit
   the cwd from a v2 row that validates the file hash (Rule 1) or a
   known-cwd identity map (Rule 2). Unresolved legacy files are excluded
   from `All directories` (Rule 3 — never a guessed directory).
 - **Search source**: `src/client/history/search.ts` (replaceable; a SQLite/FTS
   backend can swap in without touching the panel) and
-  `src/tui/panels/history-panel.ts` (the overlay).
+  `src/tui/panels/history-panel.ts` (the editor-seat surface). The exact
+  original-text cell mapping the Preview drag shares with the Job Command page
+  lives in `src/tui/components/source-text-layout.ts`.
 
 ### The session-scope persist gate (deferred start)
 
@@ -194,6 +245,96 @@ recall — they are not guessed into any session. Ctrl+R remains the
 broader search (its `Current directory` / `All directories` scopes cover
 legacy rows; `Current session` filters to the live session exactly like
 the editor recall).
+
+### Publication→hydration window (trap: the reseed races the submission's OWN write)
+
+A Session publication (ordinary `/new` / switch, `/fork` adoption, the
+first-session creation) makes the new owner current BEFORE its hydration
+reseeds ↑/↓ from the session-scoped JSONL rows. A submission accepted inside
+that window is already owned by the NEW Session, but its own persistence is
+ordered behind the transition — the submit FIFO turn and `ensureSession()`
+(`persistAfterSession`) — so the write can run AFTER the snapshot read: the row
+lands on disk under the new `sessionId` (and Ctrl+R `Current session` /
+`Current directory` find it) while the reseed does not see it and would
+otherwise drop it from ↑. The append itself is synchronous inside the detached
+task (`runDetached` invokes its factory synchronously and `appendFileSync` runs
+there); the ORDERING between the submission body and the reseed is what races,
+never the append.
+
+`TuiApp` therefore keeps the open scope's SCOPE-BOUND TEMPORARY SUBMISSIONS as
+the scope's TRUE submission sequence (newest first), and the hydration reseed
+reconciles them:
+
+- the scope is OPEN FROM CONSTRUCTION: the SESSIONLESS POOL is a real scope (a
+  deferred start, and the Remote startup resume whose `remote.read` await leaves
+  the terminal accepting input). The first published owner ADOPTS the pool's
+  entries — a pool submission's row is written under the new Session, so the
+  snapshot cannot carry it yet — and the resume publication needs no call at all
+  (the pool is already open; that owner's reseed commits it);
+- `beginInputHistoryScope(owner)` runs at the synchronous publication seam of the
+  ordinary transition, the fork adoption and the first-session creation. A
+  REPLACED owner's entries are dropped with the scope, so Session A's input can
+  never cross into Session B's recall;
+- `rememberInput()` records every accepted input in the scope while it is open —
+  it never compresses a repeat away, because only the FINAL seed can see where
+  another writer's row lands between two identical submissions. The scope's own
+  cap counts RUNS of consecutive identical text, exactly like the editor/mirror
+  recall it feeds, and keeps a run's oldest occurrence plus its newest (which
+  carries the run's rank), so a long run of pending duplicates costs constant state
+  and can never evict an older, distinct occurrence. (A steer, a shell line or any
+  other writer's row can land between two identical submissions and move the
+  CWD-level consecutive dedupe anchor, so a later run member can legitimately
+  append: its row is simply re-emitted from the snapshot.) The mirror keeps its unchanged duplicate rule, so an input identical
+  to the outgoing Session's last row is still recalled after the reseed;
+- EVERY accepted Enter — each editor seat, a sessionless or local command, a
+  `!`/`!!` shell line — becomes an occurrence with its own internal OCCURRENCE
+  TOKEN that rides its submission into the persistence record. The token — never
+  the text — is what attributes a settlement to exactly one occurrence, so
+  repeated identical submissions stay distinguishable (`a → b → a` keeps both
+  `a`s), and no occurrence is discarded before the final seed compresses
+  adjacent duplicates;
+- the write owner reports EVERY settled submission, in APPEND ORDER, through
+  `settleScopeInput({ token?, owner, outcome, text })` — a successful append and a
+  policy SKIP alike, from the SAME synchronous stack that performed it. The
+  append order is the file's row order, and a skipped submission still occupies
+  its position there. The only session-history writers that report NO token are
+  the steers that never pass `rememberInput` (a raw Ctrl+S steer, the editor steer
+  action, an application extension steer): their row is kept where the disk put
+  it and is never claimed by a scope occurrence;
+- the settled FACT of an occurrence is kept per token, independently of the
+  session id its row carries and of the capped settlement queue. It exists only
+  for occurrences the scope still holds — a fact is dropped together with the
+  occurrence the cap removed, and a late settlement of a dropped occurrence adds
+  nothing — so the metadata stays bounded by the scope, never by how many
+  submissions the window saw. The number of appends each row owner produced is
+  kept separately and is NEVER evicted, which is what tells the reseed how many of
+  the snapshot's newest rows the window owns: the appends whose settlements the cap
+  evicted are still emitted, in disk order. A pool occurrence written sessionless is
+  settled but is not part of the new Session's projection (it adds nothing). A
+  skipped occurrence whose settlement the cap evicted keeps its rank as well: the
+  owner's append count at settlement time is durable, so the skip still lands at the
+  append boundary it recorded — after the rows that preceded it and before those
+  that followed, whether or not their own settlements survived the cap (only a skip
+  whose whole boundary lies outside the covered window falls at its end);
+- `resetInputHistory(entries, owner)` commits that owner's reseed from that
+  evidence alone, in ONE linear pass (the frozen plan bounds it at O(100)):
+  occurrence token → rank is built once, the snapshot's newest written-count rows
+  ARE the owner's appends in reverse (a count watermark, never text matching), and
+  a single ordered cursor interleaves the occurrences the window does not carry —
+  a never-settled one is NEWER than every settled submission of the writers that
+  share the submit turn, so it stays in front of their rows. An occurrence written under another identity (a
+  sessionless pool row) is not part of this Session's projection and adds
+  nothing, and a written row older than the recall window (the 100-row cap) is not
+  in the projection at all. The seed then performs the adjacent-duplicate
+  compression and the 100-entry truncation LAST, exactly as the baseline did.
+
+While a reseed is still pending, the outgoing Session's rows remain recallable
+(`resetForGeneration` is an invalidation signal, not a confirmed switch); they
+are replaced by the new owner's projection at the commit above.
+
+No second history authority is created: the per-cwd JSONL stays the snapshot
+authority, and the write policy (trim, empty / consecutive-repeat / attachment
+skips, cwd `lastHistoryContent`, the `sessionId` field) is unchanged.
 
 ## Migration
 

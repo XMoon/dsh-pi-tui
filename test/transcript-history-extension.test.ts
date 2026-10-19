@@ -23,7 +23,7 @@ import { TranscriptFolder } from '../src/transcript.ts'
 import { TranscriptWindowController } from '../src/domain/transcript/window.ts'
 import { createSurfaceRuntime } from '../src/app/surface/runtime.ts'
 import type { SurfaceEventRoutingSource } from '../src/app/surface/event-routing.ts'
-import { createPluginManagerPanel } from '../src/tui/plugin-manager/panel.ts'
+import { createPluginManagerWorkspacePanel } from '../src/tui/plugin-manager/workspace.ts'
 import { installVirtualProcessTerminal } from './support/runner-harness.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 
@@ -251,7 +251,7 @@ function mountBoundaryHarness(turns: number, options: {
     notificationMethod: undefined,
     terminalProgress: undefined,
     mainProgressAuthority: 'local-events',
-    createPluginManagerPanel,
+    createPluginManagerPanel: createPluginManagerWorkspacePanel,
   })
   surface.attachEventRouting(routingSource)
   surface.start({
@@ -264,7 +264,7 @@ function mountBoundaryHarness(turns: number, options: {
     imageScope: () => undefined,
     present: { call: () => undefined, result: () => undefined },
     sessionCwd: () => '/tmp',
-    sessionId: () => 'session-boundary-test',
+    captureHistoryScope: () => ({ sessionId: 'session-boundary-test', isCurrent: () => true }),
     onTerminalResize: () => {},
     copySelection: async () => false,
     openExternalUrl: () => {},

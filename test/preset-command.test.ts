@@ -41,7 +41,43 @@ import { DirectCatalogPort } from '../src/runtime/direct/catalog-direct.ts'
 import { DirectConfigPort } from '../src/runtime/direct/config-direct.ts'
 import { DirectHostFilePort } from '../src/runtime/direct/host-file-direct.ts'
 import { registerTuiCommandsWithDirectSeams } from './support/register-tui-commands.ts'
+import { navigateToLegacySettings } from './support/open-legacy-settings.ts'
+import { visibleWidth } from '@xmoon76/pi-tui'
+import { currentPalette } from '../src/tui/theme/runtime.ts'
 
+
+/** The plain (ANSI-stripped) viewport of one VT frame. */
+const plainViewport = (vt: VirtualTerminal): string[] => vt.getViewport().map(line => line.replace(/\x1b\[[0-9;]*m/g, ''))
+
+/** The row inside an overlay Frame's borders (trimmed), so the SettingsList
+ *  cursor marker is observable. */
+const frameContent = (line: string): string => {
+  const start = line.indexOf('│')
+  const end = line.lastIndexOf('│')
+  return start >= 0 && end > start ? line.slice(start + 1, end).trim() : line.trim()
+}
+
+/** Whether the row carries the SettingsList cursor marker. */
+const isCursorRow = (vt: VirtualTerminal, row: number): boolean =>
+  frameContent(plainViewport(vt)[row] ?? '').startsWith('>')
+
+/** The viewport row of the first painted occurrence of `needle`. */
+function rowOfText(vt: VirtualTerminal, needle: string): number {
+  const row = plainViewport(vt).findIndex(line => line.includes(needle))
+  assert.ok(row >= 0, `the painted frame must contain ${JSON.stringify(needle)}:\n${plainViewport(vt).join('\n')}`)
+  return row
+}
+
+/** The terminal-CELL column of the first painted occurrence of `needle`. */
+function cellIndexOfText(vt: VirtualTerminal, row: number, needle: string): number {
+  const plain = plainViewport(vt)[row] ?? ''
+  const index = plain.indexOf(needle)
+  assert.ok(index >= 0, `row ${row} must contain ${JSON.stringify(needle)}:\n${plain}`)
+  return visibleWidth(plain.slice(0, index))
+}
+
+const hexToRgb = (hex: string): number =>
+  (parseInt(hex.slice(1, 3), 16) << 16) | (parseInt(hex.slice(3, 5), 16) << 8) | parseInt(hex.slice(5, 7), 16)
 
 /** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file
  * is disposed after each test — the process slot (the vendored fork
@@ -224,7 +260,7 @@ function stubRunner(options: {
   /** Defaults to a pass-through capture (the test themes use id === name). */
   captureExtensionHealthRef?: (slot: string, id: string) => { slot: string; id: string; owner: string } | undefined
   /** The runner's displayed/current Session preset read (`/preset status`, the
-   *  picker's "← current" mark). Absent = undefined (no live subject). */
+   *  picker's "[current]" state chip). Absent = undefined (no live subject). */
   currentPreset?: () => string | undefined
   /** Replace the preset catalog sub-domain with a scripted port (the /preset
    *  handler's only business authority). Used by the command-settlement
@@ -342,7 +378,7 @@ function stubRunner(options: {
     setTerminalProgressMode: () => {}, setNotificationMethod: () => {},
     updateWelcomeCard: () => {},
     openJobView: () => {},
-    openTasksBrowser: () => {}, openPluginManager: () => {}, createPluginManagerSubmenu: () => ({ render: () => [], invalidate: () => {} }),
+    openTasksBrowser: () => {}, openPluginManager: () => {}, createPluginManagerPage: () => undefined,
     openRewindPicker: () => {},
     sessionTransitionPending: () => false,
     withSessionTransition: async <T>(task: () => T | Promise<T>) => task(),
@@ -565,6 +601,71 @@ test('/preset <id> with no session rejects an unknown id', async () => {
   t.app.stop()
 })
 
+test('/preset with an EMPTY roster keeps the original command success text', async () => {
+  const t = setup({ roster: async () => ({ presets: [] }) })
+  const result = await t.run('') as { kind: string; text?: string }
+  // The PiTui command settlement is part of the frozen surface: an empty roster
+  // is a successful command whose text the command path owns.
+  assert.deepEqual(result, { kind: 'success', text: 'no agent presets configured' })
+  assert.deepEqual(t.ensureCalls, [], '/preset must not create a session')
+  const view = await t.view()
+  assert.ok(!view.includes('Standard mode (standard)'), `an empty roster opens no overlay:\n${view}`)
+  t.app.stop()
+})
+
+test('/preset roster failure keeps the original command failure settlement', async () => {
+  const t = setup({ roster: async () => { throw new Error('catalog is unreachable') } })
+  // The read failure is rethrown to the command path (which owns the notice,
+  // the health record and the draft restore) — never swallowed into a success
+  // plus a late background notice.
+  await assert.rejects(async () => { await t.run('') }, /catalog is unreachable/u)
+  const view = await t.view()
+  assert.ok(!view.includes('Standard mode (standard)'), `no overlay after a failed read:\n${view}`)
+  t.app.stop()
+})
+
+test('a standing-catalog notice never lands on a newer /preset surface', async () => {
+  let release!: () => void
+  const gate = new Promise<void>((resolve) => { release = resolve })
+  let held = false
+  const t = setup({
+    refreshCatalog: async () => {
+      if (held) {
+        await gate
+        return standingOutcome(['glab'], 'stale standing notice')
+      }
+      return standingOutcome(['glab'], 'owned standing notice')
+    },
+  })
+  try {
+    // POSITIVE CONTROL: while the operation still owns the surface, its notice
+    // is visible — the fence cannot be a blanket silence.
+    const owned = await t.run('minimal') as { kind: string; text?: string }
+    assert.equal(owned.kind, 'success')
+    assert.ok((await t.view()).includes('owned standing notice'),
+      'the owned standing notice must be visible')
+
+    // STALE CASE: the operation holds its standing refresh while a newer bare
+    // `/preset` takes the surface; the older notice must not describe it.
+    held = true
+    const older = t.run('standard')
+    for (let i = 0; i < 100 && t.refreshes.filter(r => r.source === 'preset').length < 3; i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 10))
+    }
+    const newer = await t.run('') as { kind: string; text?: string }
+    assert.equal(newer.kind, 'success', 'the newer invocation still settles')
+    release()
+    await older
+    await t.view()
+    const view = await t.view()
+    assert.ok(!view.includes('stale standing notice'),
+      `a replaced surface must not receive the older notice:\n${view}`)
+  } finally {
+    release()
+    t.app.stop()
+  }
+})
+
 test('/preset default refuses a declared-but-broken preset without writing', async () => {
   const writes: unknown[] = []
   const t = setup({
@@ -737,6 +838,230 @@ test('/preset on a blank session opens the roster (Host blank authority, not the
   assert.equal(result.kind, 'success')
   const view = await t.view()
   assert.ok(view.includes('Standard mode (standard)'), `a blank session must offer the roster:\n${view}`)
+  t.app.stop()
+})
+
+test('PR5b: the preset picker [current] chip keeps textMuted on BOTH the selected and the unselected row (real overlay frame)', async () => {
+  // §4.5/§12.2 + rollout PR5b requirement 4: the chip lives in the vendored
+  // SettingsList value slot, whose own paint is `selected ? primary : textDim`
+  // — so the cell colour is asserted in the REAL painted frame in both states,
+  // never from the rendered string.
+  const t = setup({ agent: fakeAgent('s1', []), sessionBlank: true, currentPreset: () => 'standard' })
+  const result = await t.run('') as { kind: string }
+  assert.equal(result.kind, 'success')
+  await t.view()
+  // The `standard` row is both the deployment default and the current Session
+  // preset, and the picker opens on it: the first frame is the SELECTED state.
+  const selectedRow = rowOfText(t.vt, '[current]')
+  assert.ok(isCursorRow(t.vt, selectedRow), `the first frame must have the cursor ON the [current] row:\n${plainViewport(t.vt).join('\n')}`)
+  assert.equal(t.vt.getCellFgRgb(selectedRow, cellIndexOfText(t.vt, selectedRow, '[current]')), hexToRgb(currentPalette.textMuted),
+    `the [current] chip is textMuted on the SELECTED row (not primary):\n${plainViewport(t.vt).join('\n')}`)
+  // Move the cursor off the current row: the UNSELECTED state must keep the
+  // SAME ink (not textDim).
+  t.vt.sendInput('\x1b[B')
+  await t.view()
+  const unselectedRow = rowOfText(t.vt, '[current]')
+  assert.ok(!isCursorRow(t.vt, unselectedRow), `the second frame must have the cursor OFF the [current] row:\n${plainViewport(t.vt).join('\n')}`)
+  assert.equal(t.vt.getCellFgRgb(unselectedRow, cellIndexOfText(t.vt, unselectedRow, '[current]')), hexToRgb(currentPalette.textMuted),
+    `the [current] chip is textMuted on the UNSELECTED row (not textDim):\n${plainViewport(t.vt).join('\n')}`)
+  t.app.stop()
+})
+
+test('PR5b: the preset picker paints BOTH state chips whole and no retired prose marker (real overlay frame)', async () => {
+  // §4.5/§12.2 + rollout PR5b requirement 4: the `default` fact left the
+  // description and became a second chip beside `[current]`; the retired
+  // `default · ← current` prose must not come back in any ink. This is the
+  // frame the committed AFTER sample is generated from, so a stale sample
+  // (the pre-migration description) fails here instead of shipping in docs/.
+  const t = setup({ agent: fakeAgent('s1', []), sessionBlank: true, currentPreset: () => 'standard' })
+  const result = await t.run('') as { kind: string }
+  assert.equal(result.kind, 'success')
+  await t.view()
+  const view = plainViewport(t.vt)
+  const currentRow = rowOfText(t.vt, '[current]')
+  assert.ok(view[currentRow]!.includes('[current] [default]'),
+    `the current row must paint BOTH chips whole in its value slot:\n${view.join('\n')}`)
+  const description = view.slice(currentRow + 1).join('\n')
+  assert.ok(!/ default\b/.test(description),
+    `the description must not carry the retired bare \`default\` prose:\n${view.join('\n')}`)
+  assert.ok(!view.some(line => line.includes('← current')),
+    `the retired \`← current\` prose must not be painted anywhere:\n${view.join('\n')}`)
+  t.app.stop()
+})
+
+test('PR5b/X061: the preset state chips stay WHOLE at every supported frame width (real overlay frames)', async () => {
+  // The PR #309 review P2 acceptance matrix. The vendored value slot truncates
+  // by raw width, so the chip is handed to it as a WHOLE part (X061) and the
+  // label column yields: the state is never cut (`[defaul`), never left with a
+  // dangling separator, and never pushed out of the row.
+  const longId = 'a-very-long-custom-preset-name-here'
+  // The custom row publishes no `name`, so its label is `<id> (<id>)` — 73
+  // cells, wider than the 36-cell label column, exactly the review's case.
+  const rows = [{ id: 'standard' }, { id: longId }]
+  for (const width of [120, 67, 66, 59, 58, 57, 56, 52, 48, 44]) {
+    const t = setup({
+      agent: fakeAgent('s1', []),
+      sessionBlank: true,
+      currentPreset: () => 'standard',
+      rows,
+      width,
+      height: 20,
+    })
+    const result = await t.run('') as { kind: string }
+    assert.equal(result.kind, 'success')
+    await t.view()
+    const view = plainViewport(t.vt)
+    const chipRows = view.filter(line => line.includes('[current]'))
+    assert.equal(chipRows.length, 1, `at ${width} columns exactly the current row is marked:\n${view.join('\n')}`)
+    const marked = chipRows[0]!
+    assert.ok(!/\[default(?!\])/.test(marked), `no half chip at ${width} columns:\n${view.join('\n')}`)
+    // §4.5: the pair is two chips — a dropped chip takes its separator with it.
+    assert.ok(!marked.includes('·'), `no dangling separator at ${width} columns:\n${marked}`)
+    // The long label is clipped INSIDE its column: nothing may overflow.
+    for (const line of view) {
+      assert.ok(visibleWidth(line) <= width, `no painted row may exceed ${width} columns:\n${line}`)
+    }
+    t.app.stop()
+    // The process slot is released only by the final dispose (the keybindings
+    // are process-global), so the next width needs its own fresh slot.
+    t.app.dispose()
+  }
+})
+
+test('PR5b/X061: a wide → narrow → wide resize restores both chips and keeps the row clickable', async () => {
+  const longId = 'a-very-long-custom-preset-name-here'
+  const t = setup({
+    agent: fakeAgent('s1', []),
+    sessionBlank: true,
+    currentPreset: () => 'standard',
+    rows: [{ id: 'standard' }, { id: longId }],
+    width: 120,
+    height: 20,
+  })
+  // Overlay mouse integration is a fullscreen-screen behavior (the main-screen
+  // terminal never enables SGR reporting) — the same frame the mouse parity
+  // suites drive.
+  t.app.setFullscreen(true)
+  const result = await t.run('') as { kind: string }
+  assert.equal(result.kind, 'success')
+  await t.view()
+  assert.ok(plainViewport(t.vt).some(line => line.includes('[current] [default]')),
+    `the wide frame paints both chips:\n${plainViewport(t.vt).join('\n')}`)
+  // Shrink: the second chip yields WHOLE, the current chip survives (the label
+  // yields its cells — X061's reservation).
+  t.vt.resize(48, 20)
+  await t.view()
+  let view = plainViewport(t.vt)
+  assert.ok(view.some(line => line.includes('[current]')), `the current chip survives the shrink:\n${view.join('\n')}`)
+  assert.ok(!view.some(line => line.includes('[default')), `the second chip yields whole:\n${view.join('\n')}`)
+  // Widen back: both chips return (no cached width state in the slot).
+  t.vt.resize(120, 20)
+  await t.view()
+  assert.ok(plainViewport(t.vt).some(line => line.includes('[current] [default]')),
+    `both chips must come back after widening:\n${plainViewport(t.vt).join('\n')}`)
+  // Shrink again and click: the hit map is rebuilt for the NARROW geometry, so
+  // a click on the long-name row still selects THAT row (not the chip row).
+  t.vt.resize(48, 20)
+  await t.view()
+  view = plainViewport(t.vt)
+  // The label is the shared head…tail abbreviation now, so match its head only.
+  const targetRow = view.findIndex(line => line.includes('a-very-long'))
+  assert.ok(targetRow >= 0, `the long-name row must be painted:\n${view.join('\n')}`)
+  const leftBorder = view[targetRow]!.indexOf('│')
+  assert.ok(leftBorder >= 0, `frame left border missing:\n${view.join('\n')}`)
+  t.vt.sendInput(`\x1b[<0;${leftBorder + 3};${targetRow + 1}M`)
+  t.vt.sendInput(`\x1b[<0;${leftBorder + 3};${targetRow + 1}m`)
+  await t.view()
+  assert.deepEqual(t.presets.selected, [longId], `the click must select the clicked row:\n${plainViewport(t.vt).join('\n')}`)
+  t.app.stop()
+})
+
+test('X061: two long same-prefix preset names stay distinguishable at 44 columns (PR #309 review)', async () => {
+  // The label column at 44 columns is 25 cells for a chip-bearing row, so the
+  // shared head…tail abbreviation must keep each name's own tail and the SELECTED
+  // row must paint the complete `name (id)` identity in its description.
+  const prefix = 'x'.repeat(30)
+  const rows = [{ id: `a-${prefix}AA` }, { id: `a-${prefix}BB` }]
+  const t = setup({
+    agent: fakeAgent('s1', []),
+    sessionBlank: true,
+    currentPreset: () => rows[0]!.id,
+    rows,
+    width: 44,
+    height: 20,
+  })
+  const result = await t.run('') as { kind: string }
+  assert.equal(result.kind, 'success')
+  await t.view()
+  const view = plainViewport(t.vt)
+  const firstRow = view.find(line => line.includes('AA'))
+  const secondRow = view.find(line => line.includes('BB'))
+  assert.ok(firstRow !== undefined && secondRow !== undefined,
+    `each preset row must keep its own tail:\n${view.join('\n')}`)
+  assert.notEqual(firstRow, secondRow, `the two rows must not paint identically:\n${view.join('\n')}`)
+  // Both ENDS must survive: the head identifies the id, the tail separates the pair.
+  assert.ok(firstRow.includes('a-xxx') && secondRow.includes('a-xxx'),
+    `each row must keep the name's head too:\n${view.join('\n')}`)
+  assert.ok(view.join('\n').includes(rows[0]!.id),
+    `the selected row's description must expand the complete name (id):\n${view.join('\n')}`)
+  t.app.stop()
+})
+
+test('PR5b: a 19-22 character preset id stays whole in the 44-column label (PR #309 review)', async () => {
+  // The ` (id)` suffix must never be traded away while it fits: with only 0-3
+  // cells left for the friendly name a 4-cell floor made the composed label exceed
+  // the 25-cell column and the renderer clipped the ID's own tail. Each of these
+  // ids is the row's own name too, so the label must still end on the whole id.
+  for (const length of [19, 20, 22]) {
+    const id = 'x'.repeat(length)
+    const t = setup({
+      agent: fakeAgent('s1', []),
+      sessionBlank: true,
+      currentPreset: () => id,
+      rows: [{ id }],
+      width: 44,
+      height: 20,
+    })
+    const result = await t.run('') as { kind: string }
+    assert.equal(result.kind, 'success')
+    await t.view()
+    const rows = plainViewport(t.vt)
+    // The LABEL row itself must carry the whole id: the description also holds it,
+    // so a view-wide search would pass even when the label clipped it.
+    const labelRow = rows.find(line => line.includes('[current]'))
+    assert.ok(labelRow !== undefined && labelRow.includes(id),
+      `a ${length}-character id must stay whole in the LABEL:\n${rows.join('\n')}`)
+    t.app.stop()
+    t.app.dispose()
+  }
+})
+
+test('/preset search still finds a keyword the label abbreviation cut away (PR #309 review)', async () => {
+  // The 25-cell label abbreviates an over-wide row, so the list's search must read
+  // the COMPLETE `name (id)` (fork X062) — otherwise a keyword from the middle of
+  // the name answers an empty list. The 30-cell id abbreviates to the head's 12 +
+  // `…` + the tail's 12, so `quasar` (cells 11-16) is cut AND leaves no `u` behind.
+  const id = `${'k'.repeat(11)}quasar${'z'.repeat(13)}`
+  const t = setup({
+    agent: fakeAgent('s1', []),
+    sessionBlank: true,
+    currentPreset: () => id,
+    rows: [{ id }],
+    width: 44,
+    height: 20,
+  })
+  const result = await t.run('') as { kind: string }
+  assert.equal(result.kind, 'success')
+  await t.view()
+  const labelRow = plainViewport(t.vt).find(line => line.includes('[current]'))
+  assert.ok(labelRow !== undefined && labelRow.includes('\u2026') && !labelRow.includes('quasar'),
+    `the label is the abbreviation that cut the keyword:\n${plainViewport(t.vt).join('\n')}`)
+  // The search goes through the REAL overlay input, not the row object.
+  t.vt.sendInput('quasar')
+  await t.view()
+  const view = plainViewport(t.vt).join('\n')
+  assert.ok(!view.includes('No matching settings'), `a middle keyword must still find the preset row:\n${view}`)
+  assert.ok(view.includes(id), `the found row must carry the complete identity:\n${view}`)
   t.app.stop()
 })
 
@@ -1296,11 +1621,12 @@ test('/settings keeps the keyboard-shortcuts fallback when the settings read thr
   const t = setup({ tuiSettings })
   const result = await t.runCommand('settings')
   assert.equal((result as { kind: string }).kind, 'success')
+  await navigateToLegacySettings(t.vt)
   t.vt.sendInput('keyboard')
   const view = await t.view()
   assert.match(view, /Keyboard shortcuts/)
   assert.match(view, /Unavailable/)
-  assert.equal(reads, 1, 'the settings command should make one guarded initial read')
+  assert.equal(reads, 2, 'each settings surface makes exactly one guarded initial read (the B2-A workspace snapshot, then the legacy editor)')
   t.app.stop()
 })
 
@@ -1374,7 +1700,7 @@ async function settlePresetThroughOuterOwner(
   const commandId = 'cmd-preset-exec'
   const selects: unknown[] = []
   // The authoritative displayed/current preset baseline the command reads
-  // (`/preset status`, the picker's "← current" mark). It must never become the
+  // (`/preset status`, the picker's "[current]" state chip). It must never become the
   // requested alternate on a refused or indeterminate switch.
   const displayed = { preset: 'standard' as string | undefined }
   const t = setup({

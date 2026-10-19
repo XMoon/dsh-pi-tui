@@ -23,7 +23,7 @@ import {
   type TranscriptStructureBlock,
   type TranscriptWorkSpan,
 } from '../src/tui/transcript/structure.ts'
-import type { TranscriptMessage } from '../src/transcript.ts'
+import type { TranscriptMessage, TurnActivity } from '../src/transcript.ts'
 import { TuiApp } from '../src/tui-app.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 
@@ -514,4 +514,119 @@ test('the canonical projector and Compact adapter scale through 50k rows without
   // noise cannot make this flaky while a quadratic regression still fails it.
   assert.ok(midMs < smallMs * 100 + 100, `10x input took ${midMs.toFixed(1)}ms vs ${smallMs.toFixed(2)}ms`)
   assert.ok(largeMs < smallMs * 400 + 200, `50x input took ${largeMs.toFixed(1)}ms vs ${smallMs.toFixed(2)}ms`)
+})
+
+// --- Snapshot Context carriage (2026-10-19 Owner decision) -----------------
+
+const snapshotRow = (label: string): TranscriptMessage => ({
+  kind: 'system', turn: TURN, text: `${label} reading`, label, context: true,
+  contextPresentation: { form: 'snapshot', sourceKind: 'time-context', role: 'inject' },
+})
+
+test('Full keeps a snapshot-carrying Work flat in raw chronology with no Activity chrome', async () => {
+  const { vt, app } = startApp('full')
+  const first = snapshotRow('SNAP_ONE')
+  const second = snapshotRow('SNAP_TWO')
+  const messages: TranscriptMessage[] = [
+    user('go'),
+    thinking('first reasoning'),
+    tool('read', 'ok'),
+    first,
+    tool('bash', 'ok'),
+    second,
+    assistant('final answer'),
+  ]
+  show(app, messages)
+  await vt.waitForRender()
+  const view = vt.getViewport().join('\n')
+  assert.ok(!workHeader(view), `Full never adds a Work header:\n${view}`)
+  const firstRow = view.split('\n').findIndex(line => line.includes('SNAP_ONE'))
+  const secondRow = view.split('\n').findIndex(line => line.includes('SNAP_TWO'))
+  const finalRow = view.split('\n').findIndex(line => line.includes('final answer'))
+  assert.ok(firstRow >= 0 && secondRow > firstRow, `both snapshots render in raw order:\n${view}`)
+  assert.ok(finalRow > secondRow, `the final assistant stays after the snapshots:\n${view}`)
+  // The canonical structure still owns one Work span carrying both snapshots.
+  const spans = workSpansOf(projectTranscriptStructure(messages))
+  assert.equal(spans.length, 1)
+  assert.deepEqual(spans[0]!.members, [messages[1], messages[2], first, messages[4], second],
+    'the same Work carries both snapshots and the Process rows in raw order')
+})
+
+test('Compact folds the same snapshot-carrying rows into one Activity', async () => {
+  const { vt, app } = startApp('compact')
+  const first = snapshotRow('SNAP_ONE')
+  const second = snapshotRow('SNAP_TWO')
+  show(app, [
+    user('go'),
+    thinking('reasoning'),
+    tool('read', 'ok'),
+    first,
+    tool('bash', 'ok'),
+    second,
+    assistant('final answer'),
+  ])
+  await vt.waitForRender()
+  const view = vt.getViewport().join('\n')
+  assert.equal(view.split('\n').filter(line => /^\s*[▸▾] Activity(?: | ·|$)/.test(line)).length, 1,
+    `one Activity for the turn:\n${view}`)
+  assert.ok(!view.includes('SNAP_ONE') && !view.includes('SNAP_TWO'),
+    `the snapshots stay inside the collapsed Activity:\n${view}`)
+})
+
+// --- Large Context-cluster linearity (v2 external review) ------------------
+
+const perfSnapshot = (index: number): TranscriptMessage => ({
+  kind: 'system', turn: TURN, text: `reading ${index}`, context: true,
+  contextPresentation: { form: 'snapshot', sourceKind: 'time-context', role: 'inject' },
+})
+const perfInstructions = (): TranscriptMessage => ({
+  kind: 'system', turn: TURN, text: 'AGENTS instructions', context: true,
+  contextPresentation: { form: 'instructions', sourceKind: 'agent-instructions', role: 'inject' },
+})
+const perfActivity: TurnActivity = {
+  turn: TURN,
+  completed: true,
+  assistantMessages: 0,
+  toolCalls: 0,
+  tools: new Map(),
+  revision: 0,
+}
+const perfProcess = (): TranscriptMessage[] => [
+  thinking('work'),
+  tool('read', 'ok'),
+]
+
+/** N raw-adjacent snapshots (one snapshot-only cluster) + real Process. */
+function snapshotClusterWindow(count: number): TranscriptMessage[] {
+  return [...Array.from({ length: count }, (_, index) => perfSnapshot(index)), ...perfProcess()]
+}
+
+/** instructions + N snapshots (one MIXED ambient cluster) + real Process. */
+function mixedClusterWindow(count: number): TranscriptMessage[] {
+  return [perfInstructions(), ...Array.from({ length: count }, (_, index) => perfSnapshot(index)), ...perfProcess()]
+}
+
+test('large snapshot and mixed Context clusters project linearly in structure and Focus', () => {
+  const measure = (count: number): number => {
+    const snapshotWindow = snapshotClusterWindow(count)
+    const mixedWindow = mixedClusterWindow(count)
+    const start = performance.now()
+    const structure = projectTranscriptStructure(snapshotWindow)
+    projectTranscriptStructure(mixedWindow)
+    const snapshotFocus = projectFocus(snapshotWindow, new Map([[TURN, perfActivity]]), new Set(), true)
+    const mixedFocus = projectFocus(mixedWindow, new Map([[TURN, perfActivity]]), new Set(), true)
+    const elapsed = performance.now() - start
+    assert.equal(flattenStructure(structure).length, snapshotWindow.length)
+    assert.equal(snapshotFocus.filter(block => block.kind === 'activity').length, 1,
+      'the snapshot cluster is hidden inside the real Thought')
+    assert.ok(mixedFocus.some(block => block.kind === 'message' && block.message === mixedWindow[0]),
+      'the mixed cluster keeps its foundation row (fail-open atomically)')
+    return elapsed
+  }
+  measure(500) // warm up
+  const small = Math.max(measure(1_000), 0.5)
+  const large = measure(8_000)
+  // Old per-member cluster qualification rescanned the whole run once per
+  // member (64x here); the linear implementation is ~8x. Broad bound only.
+  assert.ok(large < small * 20 + 100, `8x input took ${large.toFixed(1)}ms vs ${small.toFixed(2)}ms`)
 })

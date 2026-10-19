@@ -28,6 +28,7 @@ import { isDisplayPresetAvailable, resolveDisplayPreset, type DisplayPreset, typ
 import { safeErrorMessage } from '../../runtime/process/errors.ts'
 import { isFooterLayout, parseFooterLayout, resolveCommandFooterFallback } from '../../domain/footer/layout.ts'
 import { activeFooterItemIds, executableCommandItemIds, parseFooterCustomItems, type FooterCustomCommandItemSettings, type FooterCustomItemSettings } from '../../domain/footer/custom-items.ts'
+import { themeOptOut } from '../../client/theme/environment.ts'
 import { normalizePersistedTheme } from '../../domain/display/theme-selection.ts'
 import { resolveThemeSelection } from './theme-selection.ts'
 import { wheelScrollLinesOf } from '../../domain/display/wheel-scroll.ts'
@@ -199,9 +200,18 @@ export function createSettingsRuntime(deps: SettingsRuntimeDeps): SettingsRuntim
   // ONCE (bounded), never per repaint.
   
   let footerCommandItemWarningShown = false
+  /**
+   * Whether THIS runtime has handed the per-item command runners to a mounted
+   * `TuiApp` (the `footer: command` boot). Only the runtime arms them, so an
+   * unarmed runtime — the TSP renderer branch, or a teardown before the boot
+   * applied the stored document — has NO Pi footer resource to release, and the
+   * teardown must not read an app that does not exist there.
+   */
+  let footerCommandArmed = false
 
   const disableFooterCommand = (): void => {
     deps.surface.app.disableFooterCommand()
+    footerCommandArmed = false
   }
 
   const busyEnter = (): string | undefined => deps.tuiSettings?.get().busyEnter
@@ -245,6 +255,7 @@ export function createSettingsRuntime(deps: SettingsRuntimeDeps): SettingsRuntim
       // The TUI runtime reconciles the per-item runners against the trusted
       // definitions, the USER-authorized ids and the CURRENT effective layout.
       deps.surface.app.syncFooterCommandItems(trustedCommands, authorizedIds, deps.signal)
+      footerCommandArmed = true
       if (!footerCommandItemWarningShown) {
         const mergedCommands = parseFooterCustomItems(doc.footerCustomItems).items
           .filter((item): item is FooterCustomCommandItemSettings => item.kind === 'command')
@@ -321,6 +332,7 @@ export function createSettingsRuntime(deps: SettingsRuntimeDeps): SettingsRuntim
       // command (undefined rows) falls back to the user's OWN
       // default/compact/custom layout, never the builtin default.
       deps.surface.app.applyFooterCommandConfig(config, deps.signal)
+      footerCommandArmed = true
       return
     }
     disableFooterCommand()
@@ -433,6 +445,8 @@ export function createSettingsRuntime(deps: SettingsRuntimeDeps): SettingsRuntim
     const themeRef = deps.extensions()?._recordRegistryHealthRef('theme', selectable)
     try {
       deps.surface.app.applyPluginPalette(selectable, palette)
+      // A deliberate selection: it owns the terminal detections from here on.
+      deps.surface.app.noteThemeSelection(selectable)
       if (themeRef !== undefined) deps.extensions()?._clearRegistryError(themeRef)
     } catch (error) {
       if (themeRef !== undefined) deps.extensions()?._recordRegistryError(themeRef, error)
@@ -465,6 +479,21 @@ export function createSettingsRuntime(deps: SettingsRuntimeDeps): SettingsRuntim
    * step must precede the first fullscreen entry.
    */
   const applyBootDisplay = (): void => {
+  // The live scheme-report listener is registered for EVERY persisted theme: the
+  // apply-time guards below decide whether a report may win, and a runtime switch
+  // to `auto` (the settings/skills paths) enables Mode 2031 without re-entering
+  // this boot wiring — an `auto`-only registration would silently drop those
+  // reports. Registered once, so the fan-out has exactly one apply site.
+  deps.surface.app.onTerminalThemeChange((theme) => {
+    // The opt-out owns the palette: a terminal that reports a scheme change
+    // must not override NO_COLOR / FORCE_COLOR=0 / CI by switching the user to
+    // the light palette.
+    if (themeOptOut()) return
+    // The runtime owner's own INTENT, not the asynchronous document: a report that
+    // arrives while a newer explicit choice's write is still in flight must not colour
+    // over it.
+    if (deps.surface.app.themeFollowsTerminal()) deps.surface.app.applyTheme(theme)
+  })
   // The Home/End preset is TUI-owned (TS5 §12): the application owner hands
   // the persisted raw value to the mounted surface.
   deps.surface.app.setHomeEndMode(deps.tuiSettings?.get().homeEndKeys)
@@ -475,6 +504,10 @@ export function createSettingsRuntime(deps: SettingsRuntimeDeps): SettingsRuntim
   deps.surface.app.setWheelScrollLines(wheelScrollLinesOf(deps.tuiSettings?.get().wheelScrollLines))
   if (deps.tuiSettings?.get().fullscreen === 'on') deps.surface.app.setFullscreen(true)
   const storedTheme = deps.tuiSettings?.get().theme
+  // The runtime owner's intent starts from the RESTORED preference; every later
+  // deliberate selection updates it (legacy editor, Settings workspace, reload,
+  // advanced setTheme).
+  if (storedTheme !== undefined && storedTheme !== '') deps.surface.app.noteThemeSelection(storedTheme)
   if (storedTheme === 'auto') {
     // Follow the terminal: query once at boot, then track scheme reports.
     // The boot query is detached: a terminal that never answers (or a
@@ -484,11 +517,9 @@ export function createSettingsRuntime(deps: SettingsRuntimeDeps): SettingsRuntim
     runDetached('theme autodetect', () => deps.surface.app.autoDetectTheme({
       shouldApply: () => deps.tuiSettings?.get().theme === 'auto',
     }), { diag: deps.diag })
-    deps.surface.app.onTerminalThemeChange((theme) => {
-      if (deps.tuiSettings?.get().theme === 'auto') deps.surface.app.applyTheme(theme)
-    })
-    // Ask for DSR 996 once: xterm-class terminals only start reporting
-    // scheme changes after being queried.
+    // Enable Mode 2031 on the screens: the terminal reports live scheme
+    // changes only while the mode is set. The boot sample above is the only
+    // color query — tracking does not sample again.
     deps.surface.app.trackTerminalTheme(true)
   } else if (storedTheme === 'dark' || storedTheme === 'light') {
     deps.surface.app.applyTheme(storedTheme)
@@ -548,11 +579,16 @@ export function createSettingsRuntime(deps: SettingsRuntimeDeps): SettingsRuntim
    * Release the footer command runner + per-item runtime. The lifecycle abort
    * already disposes an armed runner through its own abort listener; the
    * explicit unsubscribe + dispose keeps the release symmetric with the arm
-   * path and also covers the teardown-before-arm window (both idempotent).
-   * Every owner slot is retired before its callback runs, so a throwing
+   * path. Every owner slot is retired before its callback runs, so a throwing
    * unsubscribe/runner disposal cannot strand its siblings (M3-6 PR3).
    */
   const disposeFooterCommand = (): void => {
+    // Release only what this runtime actually ARMED: the runners live in the
+    // mounted `TuiApp`, and a renderer branch without one (the TSP renderer) or
+    // a teardown before the boot applied the document has no Pi footer resource
+    // — reading the app there throws `the surface is not mounted` and turns a
+    // legal exit into a recorded cleanup failure.
+    if (!footerCommandArmed) return
     // The TUI footer runtime retires its own slots before their callbacks run
     // (the whole-footer runner, its status subscription and every per-item
     // runner), so no child/timer/abort listener survives.

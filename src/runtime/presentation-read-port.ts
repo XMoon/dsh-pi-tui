@@ -14,6 +14,29 @@ export type PresentationDurableEvent = Readonly<Record<string, unknown>> & {
   readonly time: number
 }
 
+/** The identity proof of one COMMITTED window re-fold (Remote branch): the
+ *  official Connection generation and exact retained binding the fold was
+ *  fenced under, plus the window revision it committed. The producer is the
+ *  Remote presentation source (it reads the official snapshot); the consumer is
+ *  the live ingress, which re-validates every field before it resumes
+ *  incremental delivery. `unknown` keeps the layers independent — the objects
+ *  are compared by identity, never introspected. */
+export interface PresentationWindowRefoldProof {
+  readonly generation: unknown
+  readonly binding: unknown
+  readonly revision: number
+}
+
+/**
+ * The working/busy fold derived from the SAME committed window the proof
+ * describes, plus whether that window PROVES the fold (a complete window does;
+ * a truncated one defers to the official `running` bit).
+ */
+export interface PresentationWindowWorkingFold {
+  readonly fold: boolean
+  readonly proven: boolean
+}
+
 /** A current official Client Session event-window observation. */
 export interface PresentationReadSnapshot {
   readonly sessionId: string

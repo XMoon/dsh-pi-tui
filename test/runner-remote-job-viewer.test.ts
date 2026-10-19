@@ -50,6 +50,8 @@ import type { Context } from '@deepseek-ai/cordis'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import { JobId, type JobHandle, type JobOutcome } from '@deepseek-ai/dsh-jobs'
 import { RemoteJobObservationPort, type RemoteJobKillResult } from '../src/runtime/remote/job-observation-remote.ts'
+import { componentKeymap } from '../src/tui/keybindings/component-keymap.ts'
+import { formatHintKeys } from '../src/tui/keybindings/hints.ts'
 import { mountRemotePresentationHost, mountRemoteRunner } from './runner-remote-presentation.test.ts'
 import { waitFor } from './support/remote-application-fixture.ts'
 import { testLifecycle, type TestLifecycle } from './support/temp-lifecycle.ts'
@@ -314,6 +316,33 @@ function submit(app: MountedApp, line: string): void {
   app.submitDraft()
 }
 
+/** The Job workspace Action Bar's OWN `tasks.stop` advertisement (Phase 3B /
+ *  B1-A): the workspace handler and its hint both read the component keymap, so
+ *  the hint always names the keys the handler really accepts. */
+function viewerStopHint(): string {
+  const hint = componentKeymap.keyHint('tasks.stop')
+  assert.ok(hint !== '', 'the component keymap must advertise a tasks.stop key')
+  return hint
+}
+
+/** Whether the B1-B Action Bar advertises the `tasks.stop` segment in either
+ *  legal compaction: the full `${keys} stop` or the primary-key-only `s stop`
+ *  (B1-A). Bare unmodified letters stay lowercase (design language §4.1), so the
+ *  painted hint is derived through the SAME `formatHintKeys` the bar uses. */
+function viewerStopSegmentPainted(rendered: string): boolean {
+  const hint = viewerStopHint()
+  const full = `${formatHintKeys(hint)} stop`
+  const short = `${formatHintKeys(hint.split(' / ')[0]!)} stop`
+  return rendered.includes(full) || rendered.includes(short)
+}
+
+/** The Job workspace is a dedicated temporary SCREEN (Phase 3B / B1-A): its
+ *  pinned bottom disclosure is the user-visible physical-ownership signal the
+ *  Task Browser never paints, so these waits never depend on an overlay handle
+ *  count. */
+const JOB_WORKSPACE_MARK = 'Retained preview · not full history'
+const jobWorkspacePainted = (rendered: string): boolean => rendered.includes(JOB_WORKSPACE_MARK)
+
 /** The `tasks.stop` key as the mounted app advertises it (never hard-coded). */
 function stopKey(app: MountedApp): string {
   const keybindings = (app as unknown as { keybindings: { keyHint(id: string): string } }).keybindings
@@ -367,15 +396,18 @@ test('L6 §15 steps 1-8 + negatives (c)/no-retry/no-ctx.jobs.read: the REAL Job 
   const browserView = view()
   assert.match(browserView, /bash · m3-5-pr3-build-one/u, `the Job row must render in the Task Center:\n${browserView}`)
 
-  // ── §15 step 5: Enter opens the REAL selected-Job OutputViewer; the body is
-  // the Remote observation's retained output (handles 2 = browser + detail).
+  // ── §15 step 5: Enter opens the REAL fullscreen Job workspace (a dedicated
+  // SCREEN, never an enlarged overlay); the body is the Remote observation's
+  // retained output.
   fx.fixture.vt.sendInput('\r')
-  await waitFor('the Job detail viewer opened', () => app.overlayGraphState().handles === 2, 10_000)
+  await waitFor('the Job workspace painted', () => jobWorkspacePainted(view()), 10_000)
+  assert.equal(app.overlayGraphState().handles, 1,
+    'the Job workspace is a dedicated SCREEN: the browser stays the only overlay')
   assert.equal(fx.observeAcquires(), 1,
     'the viewer must acquire its one observer through the official Client `IJobs.observe` (never a Direct `jobController.follow`)')
   await waitFor('the viewer body shows the retained output from the Remote observation', () =>
     view().includes(JOB_ONE_INITIAL.trim()), 20_000)
-  assert.match(view(), /retained output preview/u, `the Remote observation body must render:\n${view()}`)
+  assert.match(view(), new RegExp(JOB_WORKSPACE_MARK, 'u'), `the retained-preview disclosure must render:\n${view()}`)
   const readCallsBeforeAppend = fx.hostReadCalls()
 
   // ── §15 step 6: append MORE output; the viewer body grows from the live
@@ -386,18 +418,59 @@ test('L6 §15 steps 1-8 + negatives (c)/no-retry/no-ctx.jobs.read: the REAL Job 
   // §15 step 9: a live PROGRESS change converges through the same observation.
   job.handle().updateProgress('3/10 compiling')
   await waitFor('the live progress line converged into the viewer body', () =>
-    view().includes('progress: 3/10 compiling'), 20_000)
+    view().includes('Progress: 3/10 compiling'), 20_000)
   assert.equal(fx.observedText(job.id).includes(JOB_ONE_APPENDED.trim()), true,
     'the growth must come through the official observation, not the opening row')
   assert.equal(fx.hostReadCalls(), readCallsBeforeAppend,
     'the viewer path must never consume model `job_output` (`ctx.jobs.read`)')
   assert.equal(fx.hostReadCalls(), 0, 'no `ctx.jobs.read` may run on the Remote application path')
 
+  // ── B1-B (§15 extension): the Remote-backed retained Output really supports
+  // the Job Find, the strict pause and the explicit End over the SAME
+  // observation stream — no second observation, no Host read.
+  let bulk = ''
+  for (let index = 0; index < 80; index += 1) bulk += `pr3-one bulk ${index}\n`
+  job.handle().append(bulk)
+  await waitFor('the bulk retained tail converged', () =>
+    fx.observedText(job.id).includes('pr3-one bulk 79'), 20_000)
+  const observesBeforeInteraction = fx.observeAcquires()
+  const readsBeforeInteraction = fx.hostReadCalls()
+
+  fx.fixture.vt.sendInput('\x06')
+  await waitFor('the Job Find row opened over the Remote-backed Output', () =>
+    view().includes('Find Output:'), 10_000)
+  fx.fixture.vt.sendInput('bulk 42')
+  await waitFor('the Remote retained body is searchable in the Job', () => /1\/1/u.test(view()), 10_000)
+  assert.equal(fx.hostReadCalls(), readsBeforeInteraction,
+    'the Job Find never consumes `ctx.jobs.read`')
+  fx.fixture.vt.sendInput('\x1b')
+  await waitFor('the search closed while the Job stayed open', () =>
+    !view().includes('Find Output:') && view().includes(JOB_ONE_LABEL), 10_000)
+
+  fx.fixture.vt.sendInput('\x1b[5~')
+  await waitFor('the manual browse paused follow', () => view().includes('Follow paused'), 10_000)
+  job.handle().append('pr3-one newest tail\n')
+  await waitFor('the newest Remote line converged into the observation', () =>
+    fx.observedText(job.id).includes('pr3-one newest tail'), 20_000)
+  await fx.fixture.vt.waitForRender()
+  const paused = view()
+  assert.ok(!paused.includes('pr3-one newest tail'),
+    `a PAUSED Job viewport must not follow a newer Remote tail:\n${paused}`)
+  assert.equal(fx.observeAcquires(), observesBeforeInteraction,
+    'the search/scroll interaction never opens a second observation')
+  assert.equal(fx.hostReadCalls(), readsBeforeInteraction,
+    'the search/scroll interaction never consumes `ctx.jobs.read`')
+  fx.fixture.vt.sendInput('\x1b[F')
+  await waitFor('End returned to the newest Remote tail', () =>
+    view().includes('pr3-one newest tail'), 10_000)
+  assert.match(view(), /Follow on/u, 'End restored follow over the Remote stream')
+
   // ── §15 step 7: the viewer advertises the stop hint and the REAL Stop key
   // dispatches through the semantic port.
   const key = stopKey(app)
-  assert.match(view(), new RegExp(`${key} stop · Esc back`, 'u'),
-    `the viewer must advertise the app's tasks.stop hint before Stop:\n${view()}`)
+  assert.ok(viewerStopSegmentPainted(view()),
+    `the workspace must advertise the component keymap's tasks.stop hint before Stop:\n${view()}`)
+  assert.ok(view().includes('Esc back'), `the Action Bar must keep Esc back:\n${view()}`)
 
   // ── Negative control (c): a PROVEN `requested` admission that never reaches
   // the Host (the settled path is injected as requested) must still not be
@@ -410,8 +483,8 @@ test('L6 §15 steps 1-8 + negatives (c)/no-retry/no-ctx.jobs.read: the REAL Job 
   assert.equal(fx.hostKillCalls(), 0, 'the inert requested kill must not reach the Host')
   assert.equal(fx.rosterStatus(job.id), 'running',
     'a requested admission must not optimistically rewrite the official roster')
-  assert.match(view(), /running/u, `no optimistic local status may replace the official running fact:\n${view()}`)
-  assert.match(view(), new RegExp(`${key} stop · Esc back`, 'u'),
+  assert.match(view(), /Running/u, `no optimistic local status may replace the official running fact:\n${view()}`)
+  assert.ok(viewerStopSegmentPainted(view()),
     'canStop must follow the latest OBSERVED status, not the local request')
 
   // ── Negative control: an INDETERMINATE kill is never auto-retried and never
@@ -428,8 +501,8 @@ test('L6 §15 steps 1-8 + negatives (c)/no-retry/no-ctx.jobs.read: the REAL Job 
     'the injected inert/indeterminate probes must not reach the Host registry at all')
   assert.equal(fx.rosterStatus(job.id), 'running',
     'the injected indeterminate kill must not change the official roster')
-  assert.match(view(), /running/u, `no optimistic local status may replace the official running fact:\n${view()}`)
-  assert.match(view(), new RegExp(`${key} stop · Esc back`, 'u'),
+  assert.match(view(), /Running/u, `no optimistic local status may replace the official running fact:\n${view()}`)
+  assert.ok(viewerStopSegmentPainted(view()),
     'canStop must stay advertised while the latest OBSERVED status is active')
 
   // ── §15 step 8: the REAL Stop converges through the official roster/follow.
@@ -437,18 +510,18 @@ test('L6 §15 steps 1-8 + negatives (c)/no-retry/no-ctx.jobs.read: the REAL Job 
   fx.fixture.vt.sendInput(key)
   await waitFor('the official roster converged to the terminal status', () =>
     fx.rosterStatus(job.id) === 'killed', 20_000)
-  await waitFor('the viewer rendered the terminal status', () => view().includes('killed'), 20_000)
+  await waitFor('the viewer rendered the terminal status', () => view().includes('Killed'), 20_000)
   await waitFor('the viewer Stop capability disappeared after settlement', () =>
-    !new RegExp(`${key} stop`, 'u').test(view()), 10_000)
+    !viewerStopSegmentPainted(view()), 10_000)
   await waitFor('the observation stream settled', () =>
     fx.clientJobs.state.getSnapshot().observed[String(job.id)]?.streaming === false, 20_000)
   await waitFor('the settled body rendered its detail and dropped the live progress', () =>
-    view().includes('killed') && view().includes('detail: cancelled by the user')
-    && !view().includes('progress: 3/10 compiling'), 20_000)
-  assert.match(view(), /killed/u, `the terminal status must render in the viewer:\n${view()}`)
-  assert.match(view(), /detail: cancelled by the user/u,
+    view().includes('Killed') && view().includes('Detail: cancelled by the user')
+    && !view().includes('Progress: 3/10 compiling'), 20_000)
+  assert.match(view(), /Killed/u, `the terminal status must render in the viewer:\n${view()}`)
+  assert.match(view(), /Detail: cancelled by the user/u,
     `the official settlement detail must converge into the viewer body:\n${view()}`)
-  assert.equal(view().includes('progress: 3/10 compiling'), false,
+  assert.equal(view().includes('Progress: 3/10 compiling'), false,
     'the settlement must clear the live progress line')
   assert.equal(fx.rosterStatus(job.id), 'killed', 'the Job\'s official roster status must be terminal')
   assert.equal(fx.hostKillCalls(), 1,
@@ -458,10 +531,11 @@ test('L6 §15 steps 1-8 + negatives (c)/no-retry/no-ctx.jobs.read: the REAL Job 
 
   // ── §15 step 9: Esc returns to the SAME Task Center with its state preserved.
   fx.fixture.vt.sendInput('\x1b')
-  await waitFor('Esc closed only the Job detail', () => app.overlayGraphState().handles === 1, 10_000)
-  // The overlay graph commits synchronously; wait for the repaint that reveals
-  // the restored browser (the viewer body owns the old frame until then).
-  await waitFor('the restored browser frame painted', () => !view().includes('retained output preview'), 10_000)
+  await waitFor('Esc closed only the Job workspace', () => !jobWorkspacePainted(view()), 10_000)
+  // The screen swap commits synchronously; wait for the repaint that reveals
+  // the restored browser (the workspace owns the old frame until then).
+  await waitFor('the restored browser frame painted', () => view().includes('bash · m3-5-pr3-build-one'), 10_000)
+  assert.equal(app.overlayGraphState().handles, 1, 'the Task Browser survived the workspace round trip')
   const restored = view()
   assert.match(restored, /bash · m3-5-pr3-build-one/u, `the parent browser must be preserved:\n${restored}`)
   assert.match(restored, /killed/u, `the restored browser row must show the converged status:\n${restored}`)
@@ -509,13 +583,13 @@ test('L6 §15 step 10 + 11(b): a SECOND real Job stops through the Task-Center r
   // A settled row is still openable (the terminal detail is readable).
   const acquiresBeforeDetail = fx.observeAcquires()
   await openJobRow(fx, JOB_TWO_LABEL)
-  await waitFor('the second Job detail opened', () => app.overlayGraphState().handles === 2, 10_000)
+  await waitFor('the second Job workspace painted', () => jobWorkspacePainted(view()), 10_000)
   await waitFor('the settled detail renders its terminal observation', () =>
-    view().includes('killed') && view().includes('pr3-two retained line'), 20_000)
+    view().includes('Killed') && view().includes('pr3-two retained line'), 20_000)
   assert.equal(fx.observeAcquires(), acquiresBeforeDetail + 1,
     'one Job-detail open must acquire exactly one selected-Job observer')
   fx.fixture.vt.sendInput('\x1b')
-  await waitFor('Esc closed the second Job detail', () => app.overlayGraphState().handles === 1, 10_000)
+  await waitFor('Esc closed the second Job workspace', () => !jobWorkspacePainted(view()), 10_000)
   await waitFor('closing the detail released its observer', () =>
     fx.observeReleases() === acquiresBeforeDetail + 1, 10_000)
 
@@ -530,7 +604,7 @@ test('L6 §15 step 10 + 11(b): a SECOND real Job stops through the Task-Center r
   // Discriminating witness: re-opening the detail DOES acquire again, so the
   // zero-growth assertion above is not vacuous.
   await openJobRow(fx, JOB_TWO_LABEL)
-  await waitFor('the detail re-opened as a non-vacuous witness', () => app.overlayGraphState().handles === 2, 10_000)
+  await waitFor('the detail re-opened as a non-vacuous witness', () => jobWorkspacePainted(view()), 10_000)
   assert.equal(fx.observeAcquires(), acquiresAtClose + 1,
     'the observer counter must move on a real Job-detail open')
   assert.equal(fx.observeReleases(), fx.observeAcquires() - 1,
@@ -573,7 +647,7 @@ test('L6 M3-6 PR2 §14.6: the OPEN Job viewer recovers after reconnect — same 
   // ── Open the SECOND Job's detail (the surface that must recover).
   submit(app, '/tasks')
   await openJobRow(fx, JOB_TWO_LABEL)
-  await waitFor('the live Job detail opened', () => app.overlayGraphState().handles === 2, 10_000)
+  await waitFor('the live Job workspace painted', () => jobWorkspacePainted(view()), 10_000)
   await waitFor('the pre-reconnect retained output rendered', () =>
     view().includes('pr3-two retained line'), 20_000)
   const acquiresBeforeReconnect = fx.observeAcquires()
@@ -605,9 +679,9 @@ test('L6 M3-6 PR2 §14.6: the OPEN Job viewer recovers after reconnect — same 
   await waitFor('the post-reconnect output reached the same viewer', () =>
     view().includes('pr3-two post-reconnect line'), 20_000)
   await waitFor('the post-reconnect progress converged', () =>
-    view().includes('progress: 7/10 linking'), 20_000)
-  assert.equal(app.overlayGraphState().handles, 2,
-    'the reconnect neither closed nor duplicated the Job detail')
+    view().includes('Progress: 7/10 linking'), 20_000)
+  assert.equal(jobWorkspacePainted(view()), true,
+    'the reconnect neither closed nor duplicated the Job workspace')
   assert.equal(fx.observeAcquires(), acquiresBeforeReconnect,
     'the reconnect created NO duplicate observer')
 
@@ -627,7 +701,7 @@ test('L6 M3-6 PR2 §14.6: the OPEN Job viewer recovers after reconnect — same 
   fx.fixture.vt.sendInput(key)
   await waitFor('the post-B Stop converged the live Job', () =>
     fx.rosterStatus(liveJob.id) === 'killed', 20_000)
-  await waitFor('the viewer rendered the terminal status', () => view().includes('killed'), 20_000)
+  await waitFor('the viewer rendered the terminal status', () => view().includes('Killed'), 20_000)
   assert.equal(fx.killControl.calls, killCallsAtReconnect + 1,
     'exactly ONE Client kill dispatched after B (the post-B Stop), nothing else')
   assert.equal(fx.hostKillCalls(), hostKillsAtReconnect + 1,
@@ -652,12 +726,14 @@ test('L6 §15 negative control 11(a): a `kind:subagent` Job with NO stable child
   // The row has NO `childSessionId` on rc.2, so `subagentJobTranscriptId`
   // resolves undefined and the row must fall back to the Job detail — a child
   // OVERLAY (handles 2), not a replacing transcript (handles 0/1).
-  await waitFor('the subagent Job opened as a detail overlay', () => app.overlayGraphState().handles === 2, 10_000)
+  await waitFor('the subagent Job opened as a workspace screen', () => jobWorkspacePainted(view()), 10_000)
   await waitFor('the subagent Job detail rendered its observed retained output', () =>
     view().includes('pr3-subagent retained line'), 20_000)
   const detail = view()
-  assert.match(detail, new RegExp(`subagent ${String(subagentJob.id)} · ${SUBAGENT_JOB_LABEL}`, 'u'),
-    `the detail title must name the Job, never a guessed child:\n${detail}`)
+  assert.match(detail, new RegExp(`Job · ${String(subagentJob.id)} · subagent.*‣ Running`, 'u'),
+    `the workspace header must name the Job, never a guessed child:\n${detail}`)
+  assert.match(detail, new RegExp(`Label {2}${SUBAGENT_JOB_LABEL}`, 'u'),
+    `a subagent Job shows the Label identity row (never a faked $ command):\n${detail}`)
   // A guessed transcript would have replaced the surface and committed a child
   // subject; the main subject must stay untouched.
   assert.equal(app.statusStore.snapshot().view?.subject?.kind, 'main',
@@ -674,7 +750,7 @@ test('L6 §15 negative control 11(a): a `kind:subagent` Job with NO stable child
   assert.equal('childSessionId' in row, false,
     'the rc.2 JobView carries no stable child id — the detail fallback is the only truthful path')
   fx.fixture.vt.sendInput('\x1b')
-  await waitFor('the subagent Job detail closed', () => app.overlayGraphState().handles === 1, 10_000)
+  await waitFor('the subagent Job workspace closed', () => !jobWorkspacePainted(view()), 10_000)
 })
 
 test('L6 §15 step 12: a main-Session switch with a Stop in flight drops the stale settlement and releases the observer without mutating the replacement surface', async (t) => {
@@ -691,7 +767,7 @@ test('L6 §15 step 12: a main-Session switch with a Stop in flight drops the sta
   const job = startJob(fx.jobs, { owner: MAIN_ID, kind: 'bash', label: JOB_ONE_LABEL, text: JOB_ONE_INITIAL })
   submit(app, '/tasks')
   await openJobRow(fx, JOB_ONE_LABEL)
-  await waitFor('the Job detail viewer opened', () => app.overlayGraphState().handles === 2, 10_000)
+  await waitFor('the Job workspace painted', () => jobWorkspacePainted(view()), 10_000)
   await waitFor('the observation body arrived', () => view().includes(JOB_ONE_INITIAL.trim()), 20_000)
   const key = stopKey(app)
 
@@ -712,7 +788,7 @@ test('L6 §15 step 12: a main-Session switch with a Stop in flight drops the sta
   assert.equal(app.statusStore.snapshot().workspace?.project, MAIN_B_DIR,
     'the replacement workspace must be the new main Session cwd')
   await waitFor('the switched-out Job/Browser stack was torn down', () =>
-    app.overlayGraphState().handles === 0, 10_000)
+    app.overlayGraphState().handles === 0 && !jobWorkspacePainted(view()), 10_000)
   const replacement = view()
   assert.equal(replacement.includes(JOB_ONE_LABEL), false,
     `the superseded Job row must not survive the switch:\n${replacement}`)
@@ -744,7 +820,7 @@ test('L6 §15 step 12 (teardown variant): disposing the surface with a Stop in f
   const job = startJob(fx.jobs, { owner: MAIN_ID, kind: 'bash', label: JOB_ONE_LABEL, text: JOB_ONE_INITIAL })
   submit(app, '/tasks')
   await openJobRow(fx, JOB_ONE_LABEL)
-  await waitFor('the Job detail viewer opened', () => app.overlayGraphState().handles === 2, 10_000)
+  await waitFor('the Job workspace painted', () => jobWorkspacePainted(view()), 10_000)
   await waitFor('the observation body arrived', () => view().includes(JOB_ONE_INITIAL.trim()), 20_000)
 
   fx.killControl.mode = 'held'
@@ -771,7 +847,7 @@ test('L6 §14/J12: a same-Session Job A -> Job B viewer replacement (with a brow
   const jobB = startJob(fx.jobs, { owner: MAIN_ID, kind: 'bash', label: JOB_TWO_LABEL, text: 'pr3-b retained line\n' })
   submit(app, '/tasks')
   await openJobRow(fx, JOB_ONE_LABEL)
-  await waitFor('the A viewer opened', () => app.overlayGraphState().handles === 2, 10_000)
+  await waitFor('the A workspace painted', () => jobWorkspacePainted(view()), 10_000)
   await waitFor('the A body arrived', () => view().includes('pr3-a retained line'), 20_000)
   const key = stopKey(app)
 
@@ -786,13 +862,13 @@ test('L6 §14/J12: a same-Session Job A -> Job B viewer replacement (with a brow
   // SAME main Session, so the ownership subject NEVER changes and only the
   // viewer-instance fence can drop A's late settlement.
   fx.fixture.vt.sendInput('\x1b')
-  await waitFor('the A viewer closed', () => app.overlayGraphState().handles === 1, 10_000)
+  await waitFor('the A workspace closed', () => !jobWorkspacePainted(view()), 10_000)
   fx.fixture.vt.sendInput('\x1b')
   await waitFor('the browser closed', () => app.overlayGraphState().handles === 0, 10_000)
   submit(app, '/tasks')
   await waitFor('the browser re-opened', () => app.overlayGraphState().handles === 1, 10_000)
   await openJobRow(fx, JOB_TWO_LABEL)
-  await waitFor('the B viewer opened', () => app.overlayGraphState().handles === 2, 10_000)
+  await waitFor('the B workspace painted', () => jobWorkspacePainted(view()), 10_000)
   await waitFor('the B body arrived', () => view().includes('pr3-b retained line'), 20_000)
   assert.equal(app.statusStore.snapshot().view?.subject?.kind, 'main',
     'the same main Session owns the replacement viewer')
@@ -830,7 +906,7 @@ test('L6 §14/J12: a same-Session A -> B replacement drops A\'s stale Stop ERROR
   startJob(fx.jobs, { owner: MAIN_ID, kind: 'bash', label: JOB_TWO_LABEL, text: 'pr3-b retained line\n' })
   submit(app, '/tasks')
   await openJobRow(fx, JOB_ONE_LABEL)
-  await waitFor('the A viewer opened', () => app.overlayGraphState().handles === 2, 10_000)
+  await waitFor('the A workspace painted', () => jobWorkspacePainted(view()), 10_000)
   await waitFor('the A body arrived', () => view().includes('pr3-a retained line'), 20_000)
   const key = stopKey(app)
 
@@ -841,13 +917,13 @@ test('L6 §14/J12: a same-Session A -> B replacement drops A\'s stale Stop ERROR
 
   // Same-Session replacement: A closes, the browser closes/reopens, B mounts.
   fx.fixture.vt.sendInput('\x1b')
-  await waitFor('the A viewer closed', () => app.overlayGraphState().handles === 1, 10_000)
+  await waitFor('the A workspace closed', () => !jobWorkspacePainted(view()), 10_000)
   fx.fixture.vt.sendInput('\x1b')
   await waitFor('the browser closed', () => app.overlayGraphState().handles === 0, 10_000)
   submit(app, '/tasks')
   await waitFor('the browser re-opened', () => app.overlayGraphState().handles === 1, 10_000)
   await openJobRow(fx, JOB_TWO_LABEL)
-  await waitFor('the B viewer opened', () => app.overlayGraphState().handles === 2, 10_000)
+  await waitFor('the B workspace painted', () => jobWorkspacePainted(view()), 10_000)
   await waitFor('the B body arrived', () => view().includes('pr3-b retained line'), 20_000)
 
   // Reject A's held settlement: the retired viewer's ERROR notice must be dropped.
@@ -865,4 +941,46 @@ test('L6 §14/J12: a same-Session A -> B replacement drops A\'s stale Stop ERROR
   fx.fixture.vt.sendInput(key)
   await waitFor('the current viewer stop error notified', () =>
     fx.notices.slice(noticesBefore).some(message => message.includes(`could not stop ${JOB_TWO_LABEL}`)), 10_000)
+})
+
+test('L6 B1-C: the Remote Client roster label reaches the Command page and Copy All copies the ORIGINAL command without a Host read', async (t) => {
+  const life = testLifecycle(t)
+  const fx = await mountJobViewerFixture(life)
+  const { app, view } = fx
+
+  // A real Host background Job whose label is a shell command with a TAB, a
+  // quoted argument and trailing spaces: the Remote Client roster row carries it
+  // verbatim, and NOTHING may reshape it on the way to the clipboard.
+  const command = '  remote-build\t--flag "a b"  '
+  const job = startJob(fx.jobs, { owner: MAIN_ID, kind: 'bash', label: command, text: 'remote retained\n' })
+  submit(app, '/tasks')
+  await openJobRow(fx, 'remote-build')
+  await waitFor('the Job workspace painted', () => jobWorkspacePainted(view()), 10_000)
+  await waitFor('the Remote observation reached the workspace', () => view().includes('remote retained'), 20_000)
+  const readsBefore = fx.hostReadCalls()
+  const observesBefore = fx.observeAcquires()
+
+  // `Tab` opens the Command page of the SAME observation instance.
+  fx.fixture.vt.sendInput('\t')
+  await waitFor('the Command reader painted', () => view().includes('Copy All [C]'), 10_000)
+  assert.match(view(), /Full command/u, 'the Command page discloses that it shows the full command')
+  assert.match(view(), /Esc output/u, 'Esc on the Command page returns to Output, never out of the workspace')
+
+  // The clipboard capability is the SAME Client-local one the surface uses.
+  const copied: string[] = []
+  const copyTarget = app as unknown as { copySelection?: (text: string) => Promise<boolean> }
+  copyTarget.copySelection = async (text: string) => {
+    copied.push(text)
+    return true
+  }
+  fx.fixture.vt.sendInput('c')
+  await waitFor('the copy settled with a success notice', () => fx.notices.includes('Copy sent'), 10_000)
+  assert.deepEqual(copied, [command],
+    'the Remote roster label is the Command source byte for byte (TAB, quotes and trailing spaces kept)')
+  assert.equal(fx.observeAcquires(), observesBefore,
+    'the Command page reuses the ONE observation and never opens a second one')
+  assert.equal(fx.hostReadCalls(), readsBefore,
+    'the Command page never consumes `ctx.jobs.read`')
+  assert.equal(fx.hostReadCalls(), 0, 'no `ctx.jobs.read` may run on the Remote application path')
+  assert.equal(fx.rosterStatus(job.id), 'running', 'the official Client roster really carries the copied job')
 })

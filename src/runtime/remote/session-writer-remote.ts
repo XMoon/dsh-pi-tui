@@ -162,6 +162,18 @@ function generationChanged(generation: RemoteConnectionGenerationSource, capture
   return !Object.is(captured, generation.getSnapshot())
 }
 
+/**
+ * The composition-owned pre-dispatch admission fence. The lifetime owner of the
+ * mounted surface closes it SYNCHRONOUSLY at the surface-stop boundary, so a
+ * write that is still parked before dispatch (the serializer window) is refused
+ * instead of being silently admitted after the surface stopped. A write that
+ * already dispatched is never reinterpreted: this fence is consulted exactly
+ * once, immediately before `SessionFace.prompt`.
+ */
+export interface RemoteWriterDispatchAdmission {
+  isDispatchAllowed(): boolean
+}
+
 /** A local failure that happens BEFORE the identified prompt dispatch: the Host
  * was never called, so the caller may safely restore its draft (unlike an
  * indeterminate write). */
@@ -177,15 +189,18 @@ export class RemoteSessionWriter implements SessionWriter {
   private readonly sessions: RemoteWriteSessionsSource
   private readonly generation: RemoteConnectionGenerationSource
   private readonly serializer: RemotePromptSerializer
+  private readonly admission: RemoteWriterDispatchAdmission | undefined
 
   constructor(
     sessions: RemoteWriteSessionsSource,
     generation: RemoteConnectionGenerationSource,
     serializer: RemotePromptSerializer,
+    admission?: RemoteWriterDispatchAdmission,
   ) {
     this.sessions = sessions
     this.generation = generation
     this.serializer = serializer
+    this.admission = admission
   }
 
   /**
@@ -271,6 +286,16 @@ export class RemoteSessionWriter implements SessionWriter {
       // PRESENCE must never authorize a write, only binding IDENTITY.
       if (generationChanged(this.generation, captured)
         || !Object.is(binding, this.sessions.binding(sessionId))) {
+        handle.abandon()
+        return remoteNotDispatched()
+      }
+      // The surface/lifetime admission is the LAST gate before dispatch: a
+      // write parked across the surface-stop boundary must be refused here —
+      // the human message must never be admitted silently after the surface the
+      // user was looking at has stopped. The echo is abandoned and the caller
+      // restores the draft exactly once; an already-dispatched write is never
+      // reinterpreted by this fence (it is consulted once, before dispatch).
+      if (this.admission?.isDispatchAllowed() === false) {
         handle.abandon()
         return remoteNotDispatched()
       }

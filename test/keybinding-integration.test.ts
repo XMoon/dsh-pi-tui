@@ -10,8 +10,10 @@ import assert from 'node:assert/strict'
 import { afterEach, test } from 'node:test'
 import { EditorRegistry } from '../src/extension/internal/editor-registry.ts'
 import { TuiApp } from '../src/tui-app.ts'
+import type { SaveLocationDeps } from '../src/tui/interaction/save-location.ts'
 import { parseUserKeybindings } from '../src/tui/keybindings/config.ts'
 import { HostKeybindingManager } from '../src/tui/keybindings/manager.ts'
+import { testLifecycle } from './support/temp-lifecycle.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 
 
@@ -33,15 +35,33 @@ function startApp(
   configure?: (manager: HostKeybindingManager) => void,
 ): { vt: VirtualTerminal; app: TuiApp } {
   const vt = new VirtualTerminal(80, 24)
+  // B4-B: the retired `onOpenTasks` event override becomes a spy on the
+  // production entry (the keymap action calls it directly).
+  const { onOpenTasks, ...rest } = overrides as { onOpenTasks?: () => void }
   const app = new TuiApp(vt, {
     onSubmit: () => {},
     onExit: () => {},
-    ...overrides,
+    ...rest,
   })
+  if (onOpenTasks !== undefined) {
+    const realEntry = app.enterTaskQuick.bind(app)
+    app.enterTaskQuick = () => {
+      const entered = realEntry.call(app)
+      if (entered) onOpenTasks()
+      return entered
+    }
+  }
   app.start()
   startedApps.add(app)
   if (configure !== undefined) configure(app.keybindingsManager())
   return { vt, app }
+}
+
+/** B4-B: the entry admission needs the Quick projection alongside the badge
+ *  sink (the ↓ hint and the route share the same facts). */
+function oneRunningTask(app: TuiApp): void {
+  app.setQuickTaskItems([{ value: 'job:job-1', label: 'bash', status: 'running', source: 'job' }])
+  app.setTasks([{ id: 'job-1', label: 'bash', status: 'running', kind: 'job' }])
 }
 
 function managerWith(config: Record<string, unknown>): (manager: HostKeybindingManager) => void {
@@ -261,13 +281,165 @@ test('leader sequence: leader+t opens the task browser when the action predicate
     leader: 'ctrl+x',
     bindings: { 'app.tasks.open': '<leader>t' },
   }))
-  app.setTasks([{ id: 'job-1', label: 'bash', status: 'running', kind: 'job' }])
+  oneRunningTask(app)
   await vt.waitForRender()
   vt.sendInput('\x18') // leader
   await vt.waitForRender()
   vt.sendInput('t') // completing key
   await vt.waitForRender()
   assert.equal(tasksOpened, 1, 'the leader sequence must fire when the predicate holds')
+  app.stop()
+})
+
+test('a remapped app.tasks.open trigger never bypasses a Question capture', async () => {
+  // E-T08: a user binding ADDS a trigger for the same semantic action; it
+  // must obey the same ownership boundary as the conditional ↓ affordance
+  // (the response modal owns the input plane, so no trigger may open the
+  // browser there). MODAL_INSPECTION_ACTIONS is never extended with tasks.
+  let tasksOpened = 0
+  const { vt, app } = startApp({ onOpenTasks: () => { tasksOpened += 1 } }, managerWith({ 'app.tasks.open': 'ctrl+n' }))
+  oneRunningTask(app)
+  await vt.waitForRender()
+  vt.sendInput('\x0e') // ctrl+n — the remapped direct trigger
+  await vt.waitForRender()
+  assert.equal(tasksOpened, 1, 'the remapped trigger must fire outside a modal')
+  const question = app.askQuestions([{ id: 'q1', question: 'proceed?', options: [{ label: 'Yes' }] }])
+  void question.catch(() => {})
+  await vt.waitForRender()
+  vt.sendInput('\x0e') // ctrl+n
+  await vt.waitForRender()
+  assert.equal(tasksOpened, 1, 'the remapped trigger must not open tasks under a Question')
+  // The Question still owns the response plane: it can be answered.
+  vt.sendInput('1')
+  await vt.waitForRender()
+  vt.sendInput('\r')
+  await vt.waitForRender()
+  assert.deepEqual(await question, [{ id: 'q1', selected: ['Yes'] }])
+  vt.sendInput('\x0e')
+  await vt.waitForRender()
+  assert.equal(tasksOpened, 2, 'the remapped trigger must fire again after the Question settles')
+  app.stop()
+})
+
+test('a leader completion of app.tasks.open is consumed while a Question owns input', async () => {
+  // E-T08: the modal inspection plane may arm the shared leader machine,
+  // but a non-inspection action may never complete through it.
+  let tasksOpened = 0
+  const { vt, app } = startApp({ onOpenTasks: () => { tasksOpened += 1 } }, managerWith({
+    leader: 'ctrl+x',
+    bindings: { 'app.tasks.open': '<leader>t' },
+  }))
+  oneRunningTask(app)
+  await vt.waitForRender()
+  const question = app.askQuestions([{ id: 'q1', question: 'proceed?', options: [{ label: 'Yes' }] }])
+  void question.catch(() => {})
+  await vt.waitForRender()
+  vt.sendInput('\x18') // leader prefix
+  await vt.waitForRender()
+  vt.sendInput('t') // completing key
+  await vt.waitForRender()
+  assert.equal(tasksOpened, 0, 'a leader completion must not open tasks under a Question')
+  assert.ok(vt.getViewport().join('\n').includes('proceed?'), 'the Question must stay mounted')
+  vt.sendInput('1')
+  await vt.waitForRender()
+  vt.sendInput('\r')
+  await vt.waitForRender()
+  assert.deepEqual(await question, [{ id: 'q1', selected: ['Yes'] }])
+  vt.sendInput('\x18') // leader prefix
+  await vt.waitForRender()
+  vt.sendInput('t') // completing key
+  await vt.waitForRender()
+  assert.equal(tasksOpened, 1, 'the leader completion must fire again after the Question settles')
+  app.stop()
+})
+
+test('a remapped trigger and leader completion stay inert under an Approval', async () => {
+  // E-T08: all THREE blocking owners must refuse the additive triggers. The
+  // array binding declares the direct key and the leader completion of the
+  // same action in ONE user config (a second declaration would be ignored).
+  let tasksOpened = 0
+  const { vt, app } = startApp({ onOpenTasks: () => { tasksOpened += 1 } }, managerWith({
+    leader: 'ctrl+x',
+    'app.tasks.open': ['ctrl+n', '<leader>t'],
+  }))
+  oneRunningTask(app)
+  await vt.waitForRender()
+  const decision = app.showApprovalPrompt({ toolName: 'bash', reason: 'run a command' })
+  await vt.waitForRender()
+  vt.sendInput('\x0e') // ctrl+n — the remapped direct trigger
+  await vt.waitForRender()
+  assert.equal(tasksOpened, 0, 'the remapped direct trigger must not open tasks under an Approval')
+  vt.sendInput('\x18') // leader prefix
+  await vt.waitForRender()
+  vt.sendInput('t') // completing key
+  await vt.waitForRender()
+  assert.equal(tasksOpened, 0, 'the leader completion must not open tasks under an Approval')
+  assert.ok(vt.getViewport().join('\n').includes('Approve bash?'), 'the Approval must stay mounted')
+  vt.sendInput('n')
+  assert.equal(await decision, 'rejected')
+  await vt.waitForRender()
+  vt.sendInput('\x0e')
+  await vt.waitForRender()
+  assert.equal(tasksOpened, 1, 'the remapped trigger must fire after the Approval settles')
+  // B4-B: the trigger ENTERED Quick — leave it so the leader completion is
+  // witnessed from the editor seat (a real user leaves before reopening).
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+  vt.sendInput('\x18')
+  await vt.waitForRender()
+  vt.sendInput('t')
+  await vt.waitForRender()
+  assert.equal(tasksOpened, 2, 'the leader completion must fire after the Approval settles')
+  app.stop()
+})
+
+test('a remapped trigger and leader completion stay inert under a Save Location prompt', async (t) => {
+  // E-T08: the Save Location prompt consumes every key BEFORE the modal
+  // inspection plane, so neither trigger may reach the resolver.
+  const life = testLifecycle(t)
+  const root = life.tempDir('dsh-pr-e-kb-')
+  const deps: SaveLocationDeps = {
+    resolveDirectory: (input) => input === './' ? root : input,
+    isDirectory: () => true,
+    targetExists: () => false,
+    complete: async () => null,
+  }
+  let tasksOpened = 0
+  const { vt, app } = startApp({ onOpenTasks: () => { tasksOpened += 1 } }, managerWith({
+    leader: 'ctrl+x',
+    'app.tasks.open': ['ctrl+n', '<leader>t'],
+  }))
+  oneRunningTask(app)
+  await vt.waitForRender()
+  const prompt = app.askSaveLocation(
+    { title: 'Save session archive', filename: 'dsh-session-abc.zip', initialDirectory: './' },
+    deps,
+  )
+  void prompt.catch(() => {})
+  await vt.waitForRender()
+  vt.sendInput('\x0e') // ctrl+n
+  await vt.waitForRender()
+  assert.equal(tasksOpened, 0, 'the remapped direct trigger must not open tasks under a Save Location prompt')
+  vt.sendInput('\x18') // the leader prefix is ordinary prompt input here
+  await vt.waitForRender()
+  vt.sendInput('t')
+  await vt.waitForRender()
+  assert.equal(tasksOpened, 0, 'the leader completion must not open tasks under a Save Location prompt')
+  assert.ok(vt.getViewport().join('\n').includes('Save session archive'), 'the prompt must stay mounted')
+  vt.sendInput('\x1b')
+  assert.deepEqual(await prompt, { kind: 'cancelled' })
+  await vt.waitForRender()
+  vt.sendInput('\x0e')
+  await vt.waitForRender()
+  assert.equal(tasksOpened, 1, 'the remapped trigger must fire after the prompt settles')
+  // B4-B: leave the entered Quick before the leader witness (same reason).
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
+  vt.sendInput('\x18')
+  await vt.waitForRender()
+  vt.sendInput('t')
+  await vt.waitForRender()
+  assert.equal(tasksOpened, 2, 'the leader completion must fire after the prompt settles')
   app.stop()
 })
 
@@ -470,15 +642,20 @@ test('app.input.submit remap does NOT leak into question free-text Inputs (X037)
 
 test('app.input.submit remap does NOT leak into the history search Input (X037)', async () => {
   const vt = new VirtualTerminal(80, 24)
-  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
+    // Ctrl+R opens the seat; a source must be wired for it to open at all.
+    historySearchSource: {
+      search: async () => ({
+        results: [{ id: 'a', content: 'alpha', cwd: '/work/a', ts: 1, sourceFile: '/h.jsonl', sourceByteOffset: 1 }],
+        exhausted: true,
+      }),
+    },
+    captureHistoryScope: () => ({ sessionId: undefined, isCurrent: () => true }),
+  })
   app.start()
   startedApps.add(app)
   app.keybindingsManager().setUserConfiguration(parseUserKeybindings({ 'app.input.submit': 'ctrl+x' }))
   await vt.waitForRender()
-  // Ctrl+R opens the panel; a source must be wired for it to open at all.
-  ;(app as unknown as { historySearchSource: unknown }).historySearchSource = {
-    query: async () => ({ rows: [{ text: 'alpha' }, { text: 'beta' }] }),
-  }
   app.openHistorySearch()
   await vt.waitForRender()
   vt.sendInput('a')
@@ -680,7 +857,13 @@ test('a remapped submit does not leak into a NEW TuiApp instance (PR review P1)'
 test('disposing the app with an armed leader prefix clears the pending timer (PR review P2)', async () => {
   const vt = new VirtualTerminal(80, 24)
   let tasksOpened = 0
-  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {}, onOpenTasks: () => { tasksOpened += 1 } })
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  const realEntry = app.enterTaskQuick.bind(app)
+  app.enterTaskQuick = () => {
+    const entered = realEntry.call(app)
+    if (entered) tasksOpened += 1
+    return entered
+  }
   app.start()
   startedApps.add(app)
   app.keybindingsManager().setUserConfiguration(parseUserKeybindings({

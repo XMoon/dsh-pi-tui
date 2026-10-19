@@ -41,6 +41,7 @@ function deps(overrides: Partial<SubagentViewerSubmitDeps> = {}): SubagentViewer
     subagents: () => undefined,
     makeSignal: () => new AbortController().signal,
     mintRequestId: () => `request-${Math.random()}`,
+    clientTimeZone: () => 'Asia/Shanghai',
     ...overrides,
   }
 }
@@ -290,6 +291,47 @@ test('a pre-dispatch request-identity mint failure is rejected, never indetermin
     mintRequestId: () => { throw new Error('mint failed') },
   }))
   assert.deepEqual(outcome, { kind: 'rejected', reason: { kind: 'error', message: 'mint failed' } })
+})
+
+test('carries the Client-local request zone, sampled once after the cancellation check', async () => {
+  const calls: RecordedCall[] = []
+  let samples = 0
+  const outcome = await submitSubagentPrompt(request, deps({
+    subagents: () => service(calls),
+    clientTimeZone: () => { samples += 1; return 'Europe/Paris' },
+  }))
+  assert.equal(outcome.kind, 'ok')
+  assert.equal(samples, 1, 'exactly one sample per follow-up')
+  assert.equal(calls[0]!.clientTimeZone, 'Europe/Paris',
+    'the sampled zone rides the official ctx.subagents.prompt request')
+})
+
+test('a cancelled follow-up samples no zone', async () => {
+  const calls: RecordedCall[] = []
+  const controller = new AbortController()
+  controller.abort()
+  let samples = 0
+  const outcome = await submitSubagentPrompt(request, deps({
+    subagents: () => service(calls),
+    makeSignal: () => controller.signal,
+    clientTimeZone: () => { samples += 1; return 'Europe/Paris' },
+  }))
+  assert.deepEqual(outcome, { kind: 'rejected', reason: { kind: 'cancelled' } })
+  assert.equal(samples, 0, 'a stale send never samples the request zone')
+  assert.equal(calls.length, 0)
+})
+
+test('an unsamplable request zone is a pre-dispatch refusal, never indeterminate', async () => {
+  const calls: RecordedCall[] = []
+  const outcome = await submitSubagentPrompt(request, deps({
+    subagents: () => service(calls),
+    clientTimeZone: () => { throw new Error('the TUI process reports no time zone') },
+  }))
+  assert.deepEqual(outcome, {
+    kind: 'rejected',
+    reason: { kind: 'error', message: 'the TUI process reports no time zone' },
+  })
+  assert.equal(calls.length, 0, 'the child inbox never receives a zone-less human prompt')
 })
 
 function makeError(code: string): Error {

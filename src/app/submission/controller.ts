@@ -31,10 +31,12 @@ import type { DraftImageStore } from '../../client/media/image/draft-store.ts'
 import { consumeDraftAttachments, draftHasAttachments, draftHasImages, pinDraftAttachments } from '../../client/media/draft-attachments.ts'
 import { prepareUserMessage, type DirectPrepareInputDeps } from './direct-message-preparation.ts'
 import { expandImagePlaceholders } from '../../client/media/image/placeholder.ts'
+import { clientTimeZone } from '../../client/time-zone.ts'
 import { classifyCommandLine, isBareCommandLine, isLocalCommandLine, isPlainExitPrompt, LOCAL_COMMANDS, SESSIONLESS_COMMANDS, shouldConsumeAdvertisedMiss, type CommandLineClassification } from '../../domain/command/policy.ts'
 import { resolveSubmitDelivery } from './command-policy.ts'
 import { isIndeterminateSkillWrite, type HostCommandClaim, type SubmitDelivery } from '../../commands.ts'
 import type { ClientCommandRegistry } from '../command/client-command-registry.ts'
+import { TSP_B2A_RESULT_NOTICE_COMMANDS, tspBuiltinAvailability } from '../command/tsp-capability.ts'
 import type { TuiLocalCommandHandler } from '../../extension/public-types.ts'
 import { PendingSubmissions, type PendingSubmissionPlacement } from './pending-submission.ts'
 import { queueInboxMessageOf } from './pending-input.ts'
@@ -48,7 +50,8 @@ import { freshSubmitAckState, acceptSubmitAck, settleSubmitAck, type SubmitAckSt
 import { SubmitLatencyTracker, type SubmitLatencyPhase } from './latency.ts'
 import { DirectSubmissionPresentation, type SubmissionPresentationSource } from './presentation.ts'
 import { mergeDraft, refuseByTransitionFence } from './steer.ts'
-import type { ComposerSubmitRequest, TuiApp } from '../../tui-app.ts'
+import type { ComposerSubmitRequest } from '../../tui-app.ts'
+import type { SubmissionComposerPort } from './composer-port.ts'
 import { SessionScopeSupersededError, type LiveSessionScope } from '../session/scope.ts'
 import type { SessionSubject } from '../session/subject.ts'
 import { deliverBusy, executeHostCommandSubmission, pullBackQueue, steer, type PendingQueueRecall, type PromptSubmission, type SteerSubmissionAgent, type SteerSubmissionDeps } from '../submission/runtime.ts'
@@ -120,8 +123,14 @@ export interface SubmissionExtensionsDeps {
 
 /** The narrow capabilities the submission controller consumes. */
 export interface SubmissionControllerDeps<ExactAgent extends SubmissionAgentLike> {
-  /** The mounted app (editor, notifications, submit-pending row). */
-  readonly app: () => TuiApp
+  /**
+   * The composer surface (editor draft/restore/insert, notices, the
+   * submit-ack row and the settled-card clear). PR3-B §3.1: this is the
+   * narrow `SubmissionComposerPort` — the PiTui branch injects the live
+   * `TuiApp` (structurally compatible); a TSP renderer injects its own
+   * composer. The submission owner never reads panel/chrome members.
+   */
+  readonly app: () => SubmissionComposerPort
   readonly diag: Diag
   /** The runner lifetime signal (a disposed gesture never restores/notifies). */
   readonly signal: AbortSignal
@@ -205,6 +214,39 @@ export interface SubmissionControllerDeps<ExactAgent extends SubmissionAgentLike
     run(text: string, ackToken: number | undefined): void
     interrupt(): void
   }
+  /**
+   * PR3-B B2 (§4 B2-5): whether this renderer presents the PiTui local-shell
+   * progress CARDS. PiTui = true; the TSP renderer = false, which refuses
+   * `!`/`!!` at the ORIGINAL shell-branch admission — BEFORE any
+   * persistHistory / ensureSession / acceptLocalSubmitAck / shell.run, so a
+   * refused shell line creates no Host process, no history row and no
+   * Session. The refusal keeps the draft, exactly like the attachment
+   * refusal beside it.
+   */
+  readonly supportsLocalShellCards: boolean
+  /**
+   * PR3-B B2-3: whether this renderer can present the PiTui UI that most
+   * TUI-owned builtins are made of (panels/pickers). PiTui = true; the TSP
+   * renderer = false, which refuses every TUI-origin builtin EXCEPT the
+   * `/exit`//`quit` pair at the post-classification admission — a single
+   * shared refusal, never a per-builtin ad-hoc message and never a naive
+   * `/name` pre-parse ahead of the genuine Host claims.
+   */
+  readonly supportsTuiBuiltinUi: boolean
+  /** The installed native Model presenter, including its terminal capability. */
+  readonly supportsModelPickerUi?: () => boolean
+  /** The installed native Preset presenter, including its terminal capability. */
+  readonly supportsPresetPickerUi?: () => boolean
+  /** The installed native Session Browser presenter, including its capabilities. */
+  readonly supportsSessionBrowserUi?: () => boolean
+  /**
+   * PR3-B §7.3 (F2): whether this renderer RETAINS a stale submission's
+   * draft restore across a session switch. PiTui = true (steer.test.ts's
+   * restore family is its contract); the TSP renderer = false (its
+   * committed switch drops the outgoing active draft, so a late stale
+   * restore is suppressed instead of reseeding the new session's composer).
+   */
+  readonly retainsStaleDraftRestore: boolean
   /** The live model-selection read (the outgoing message's provider/model). */
   readonly model: {
     readonly selected: { readonly current: { readonly provider: string; readonly model: string } | undefined }
@@ -218,6 +260,15 @@ export interface SubmissionControllerDeps<ExactAgent extends SubmissionAgentLike
   readonly tuiSettings: { get(): TuiSettingsDoc } | undefined
   /** The exact owner-subject currentness fence. */
   readonly captureMatches: (subject: SessionSubject | undefined) => boolean
+  /**
+   * PR3-B §7.3 (B2 F2): whether the OWNER a captured subject pinned has been
+   * REPLACED by a different one (the ownership core's opaque-ref comparison —
+   * never a session-id comparison). The stale-restore policy consults it:
+   * only a genuinely replaced owner suppresses the restore on a
+   * switch-dropping renderer; a same-owner generation invalidation still
+   * restores.
+   */
+  readonly ownerWasReplaced: (subject: SessionSubject | undefined) => boolean
   /** The transport-forked prepare seam (M3-4 PR3 §10/§12): absent keeps the
    * Direct prepareUserMessage pipeline; a Remote selection injects the SAME
    * PreparedPrompt path the plain-prompt flow uses, so steer and prompt share
@@ -237,7 +288,7 @@ export interface SubmissionControllerDeps<ExactAgent extends SubmissionAgentLike
 /** The submission controller as the rest of the application consumes it. */
 export interface SubmissionController {
   /** Submit one user input end to end. */
-  submit(text: string, request?: ComposerSubmitRequest): void
+  submit(text: string, request?: ComposerSubmitRequest, scopeToken?: number): void
   /** Steer one draft into the running turn.
    *  `consumeDraft: true` makes THIS owner clear the editor after snapshotting
    *  the persist facts; the caller leaves it unset when it already consumed the
@@ -655,6 +706,47 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
    *   this submission; bound for the command execution so a TUI-owned
    *   skill handler accepts it instead of re-deriving it. */
   
+  /**
+   * PR3-B §7.3 (B2 F2, round 10): the ONE stale-restore policy the
+   * controller's own async exits share with the submission runtime's —
+   * suppress ONLY when the OWNER the gesture's captured subject pinned was
+   * genuinely REPLACED (the ownership core's opaque-ref authority) AND the
+   * renderer drops drafts at committed switches (TSP). A same-owner
+   * invalidation and every retaining renderer merge exactly like the
+   * ordinary restore. Returns the REAL outcome so the notice follows it.
+   *
+   * This policy answers WHICH draft may land in the CURRENT editor; it never
+   * answers whether this controller still owns one — that is the LIFETIME
+   * fence below, and every async-reachable caller applies it first.
+   */
+  const restoreStaleDraft = (value: string, capturedSubject: SessionSubject | undefined): 'merged-verbatim' | 'merged' | 'dropped' => {
+    if (!deps.retainsStaleDraftRestore && deps.ownerWasReplaced(capturedSubject)) {
+      return 'dropped'
+    }
+    const merged = mergeDraft(deps.app().getDraft(), value)
+    deps.app().setEditorText(merged)
+    return merged === value ? 'merged-verbatim' : 'merged'
+  }
+
+  /**
+   * PR3-B §7.3 (B2 round 11): the LIFETIME fence the controller's own
+   * async-reachable restores apply before the shared stale policy — the
+   * `signal.aborted` guard the ordinary `restoreSubmissionDraft` primitive
+   * has always carried, restated for the async-reachable stale restores
+   * (plus the equivalent cleaned-up read). A cancelled or disposed gesture
+   * owns neither the editor nor a notice: `runOwned` routes that cancellation
+   * to onCancel precisely so nothing is written or announced after the user
+   * left the surface, and a retaining renderer (PiTui) never suppresses the
+   * merge by itself — without the fence the old draft lands in a dead
+   * composer.
+   *
+   * The submission runtime keeps its OWN lifetime authority (its
+   * `isDisposed`, checked before each of its restores), so the policy hook it
+   * borrows through the steer deps is not re-gated here; every restore the
+   * CONTROLLER reaches after an await is.
+   */
+  const lifetimeOwnsSurface = (): boolean => !deps.signal.aborted && !deps.isCleanedUp()
+
   const dispatchViaSession = (text: string, persistHistory: (sessionId: string | undefined) => void, delivery: SubmitDelivery): void => {
     // Admission identity is captured synchronously, before this gesture
     // waits behind an earlier submit. A later session must never inherit
@@ -896,13 +988,21 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
         // projection).
         const directAgent = 'inbox' in (agent as object) ? (agent as ExactAgent) : undefined
         if (submittedAgent !== undefined && !deps.captureMatches(submittedSubject)) {
-          const merged = mergeDraft(deps.app().getDraft(), text)
-          deps.app().setEditorText(merged)
+          // PR3-B §7.3 (round 10 F1): the controller's own async stale exit
+          // takes the SAME two-fact policy as the submission runtime — the
+          // captured subject's owner must have been genuinely REPLACED on a
+          // switch-dropping renderer before the restore is suppressed. The
+          // lifetime fence precedes it (round 11): a cancelled gesture writes
+          // nothing at all.
+          if (!lifetimeOwnsSurface()) return
+          const restored = restoreStaleDraft(text, submittedSubject)
           settleLocalSubmission(submitRequestId)
           settleLocalSubmitAck('submit stale', { token: submitAckToken, terminal: true })
-          deps.app().notify(merged === text
+          deps.app().notify(restored === 'merged-verbatim'
             ? 'the session changed while waiting for submission — try again'
-            : 'the draft changed while waiting for submission — review it before submitting again (the earlier text was preserved below)', 'error')
+            : restored === 'merged'
+              ? 'the draft changed while waiting for submission — review it before submitting again (the earlier text was preserved below)'
+              : 'the session changed while waiting for submission — the draft was cleared by the switch', 'error')
           return
         }
       // Capture THIS agent's session identity so the write below can
@@ -916,13 +1016,20 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
       // identity was captured from, or the submission is aborted for a
       // retry against the new session.
       if (!deps.scope.isCurrent(scope)) {
-        const merged = mergeDraft(deps.app().getDraft(), text)
-        deps.app().setEditorText(merged)
+        // PR3-B §7.3 (round 10 F1): the scope-recheck stale exit takes the
+        // SAME two-fact policy (the scope superseded because the OWNER was
+        // replaced — the submission runtime's own `settleStaleSubmission`
+        // behaves identically for the plain-prompt flow). Lifetime fence
+        // first (round 11).
+        if (!lifetimeOwnsSurface()) return
+        const restored = restoreStaleDraft(text, submittedSubject)
         settleLocalSubmission(submitRequestId)
         settleLocalSubmitAck('submit stale', { token: submitAckToken, terminal: true })
-        deps.app().notify(merged === text
+        deps.app().notify(restored === 'merged-verbatim'
           ? 'the session changed while sending — try again'
-          : 'the draft changed while sending — review it before submitting again (the earlier text was preserved below)', 'error')
+          : restored === 'merged'
+            ? 'the draft changed while sending — review it before submitting again (the earlier text was preserved below)'
+            : 'the session changed while sending — the draft was cleared by the switch', 'error')
         return
       }
       // From here on the CAPTURED agent is used — never the mutable
@@ -942,6 +1049,22 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
           && deps.isPlanActive(agent) === true
           ? '/plan off'
           : text
+        // PR5 v2 §1C-7: the TUI-owned route is the classifier's
+        // client-command (tui) family evaluated against the FINAL catalog — a
+        // genuine Host-origin name (mirrors excluded) disqualifies it first.
+        // (Distinct question from the line classification: a skill invocation
+        // is agent-facing INPUT yet its handler still lives in the TUI's own
+        // registry, so the skill/wrapper terms stay OUT of this predicate.)
+        const isTuiOwnedCommandLine = (): boolean => parsedAtSubmit !== undefined
+          && classifyCommandLine({
+            // §1C-5 (whole-PR F1): the sticky submit-time non-invocation.
+            hostOriginClaim: effectiveOriginClaim(parsedAtSubmit),
+            // §1C-6 (whole-PR F4): the LIVE Client registry claim.
+            tuiCommand: deps.command.clientClaimsLine(parsedAtSubmit)
+              || deps.command.isSkillWrapperName(parsedAtSubmit.name) === true,
+            extensionCommand: false,
+            skillInvocation: false,
+          }).kind === 'client-command'
         // The HostCommandPort submission + the agent-facing fallback live in
         // the submission runtime; the runner supplies the command-plane and
         // TUI hooks.
@@ -1020,23 +1143,7 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
             return attachmentRefusal(parsed, text, finalClassification)
           },
           commandSubmitAttachments: (value) => commandSubmitAttachments(value),
-          isTuiOwnedCommand: () => parsedAtSubmit !== undefined
-            // §1C-7: the TUI-owned route is the classifier's client-command
-            // (tui) family evaluated against the FINAL catalog — a genuine
-            // Host-origin name (mirrors excluded) disqualifies it first.
-            // (Distinct question from the line classification: a skill
-            // invocation is agent-facing INPUT yet its handler still lives in
-            // the TUI's own registry, so the skill/wrapper terms stay OUT of
-            // this predicate.)
-            && classifyCommandLine({
-              // §1C-5 (whole-PR F1): the sticky submit-time non-invocation.
-              hostOriginClaim: effectiveOriginClaim(parsedAtSubmit),
-              // §1C-6 (whole-PR F4): the LIVE Client registry claim.
-              tuiCommand: deps.command.clientClaimsLine(parsedAtSubmit)
-                || deps.command.isSkillWrapperName(parsedAtSubmit.name) === true,
-              extensionCommand: false,
-              skillInvocation: false,
-            }).kind === 'client-command',
+          isTuiOwnedCommand: isTuiOwnedCommandLine,
           commandPlaneOwnsLine,
           submittedHostClaim: () => parsedAtSubmit === undefined ? undefined : deps.command.hostOriginClaimOf(parsedAtSubmit),
           commandSignal: () => deps.signal,
@@ -1059,7 +1166,28 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
                       : { kind: 'committed', matched: true, execution } as const
                   })
                 }
+                // F1/F4: THIS branch is the card-less route. The Client command
+                // registry appends no `command/run` row, so nothing renders the
+                // handler's `CommandResult.text` — publish a returned error once,
+                // HERE, where the route is already decided. The owner is never
+                // re-derived at settlement (the Host-origin catalog is live and
+                // may have changed mid-flight). Scope: the B2-A notice set, so
+                // sibling TUI commands keep their own refusal notices.
                 return deps.command.clientCommands.execute({ line: commandLine, signal: commandSignal }).then((execution) => {
+                  // F5: the Client execution can outlive the Session it was
+                  // admitted against (an async /resume can publish the
+                  // replacement while the handler is still running), so the
+                  // notice is fenced by the SAME captured scope the settlement
+                  // uses — a replaced owner must not receive the old result.
+                  if (execution !== undefined
+                    && execution.result.kind === 'error'
+                    && execution.result.text !== ''
+                    && !deps.isCleanedUp()
+                    && deps.scope.isCurrent(scope)
+                    && parsedAtSubmit !== undefined
+                    && TSP_B2A_RESULT_NOTICE_COMMANDS.has(parsedAtSubmit.name)) {
+                    deps.app().notify(execution.result.text, 'error')
+                  }
                   return execution === undefined
                     ? { kind: 'committed', matched: false } as const
                     : { kind: 'committed', matched: true, execution } as const
@@ -1112,11 +1240,19 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
           wasAdvertisedAtSubmit,
           parsedName: parsedAtSubmit?.name,
           submitTurn,
+          // PR3-B §7.3 (F2): the subject pinned at the gesture's admission —
+          // the fallback prompt's stale-restore discriminator.
+          staleSubject: submittedSubject,
         })
         return
       }
       },
-      restore: (t) => restoreSubmissionDraft(t),
+      // PR3-B §7.3 (round 10 F1): this restore fires on a THROW after the
+      // flow's awaits, so the owner may have been replaced meanwhile — the
+      // same two-fact policy decides (a same-owner invalidation and every
+      // retaining renderer still merge). The lifetime fence precedes it
+      // (round 11): a cancelled or disposed gesture restores nothing.
+      restore: (t) => { if (lifetimeOwnsSurface()) restoreStaleDraft(t, submittedSubject) },
     }, text), {
       diag: deps.diag,
       sessionId: () => deps.liveAgent()?.session.id,
@@ -1284,6 +1420,12 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
         deps.app().setEditorText(merged)
         return merged === value
       },
+      restoreStaleDraftIntoEditor: (value, capturedSubject) =>
+        // PR3-B §7.3 (round 10 F1): ONE policy — the steer deps hook, the
+        // controller's async stale exits and the submission runtime all
+        // route through the same two-fact decision (see
+        // `restoreStaleDraft` above).
+        restoreStaleDraft(value, capturedSubject as SessionSubject | undefined),
       notify: (message, kind) => {
         if (deps.isCleanedUp()) return
         deps.app().notify(message, kind)
@@ -1354,7 +1496,11 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
    * @param request - the request the submission was raised by.
    */
   
-  const dispatchUserInput = (text: string, request: ComposerSubmitRequest = 'enter'): void => {
+  const dispatchUserInput = (
+    text: string,
+    request: ComposerSubmitRequest = 'enter',
+    scopeToken?: number,
+  ): void => {
     // P0 (empty-submission semantics): an EMPTY serialized wire form is
     // a silent no-op — no history write, no session creation, no
     // followup/steer, no attachment admission, no queue mutation. Judged on
@@ -1417,7 +1563,13 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
      * input-history owner's write policy.
      */
     const persistHistory = (sessionId: string | undefined): void => {
-      deps.history.persist({ text, sessionId, hasAttachments: historyHasAttachments, timestamp: historyTs })
+      deps.history.persist({
+        text,
+        sessionId,
+        hasAttachments: historyHasAttachments,
+        timestamp: historyTs,
+        ...(scopeToken === undefined ? {} : { scopeToken }),
+      })
     }
     // `!` runs the command on the Host and submits the completed
     // command+output to the session (kimi parity); `!!` runs on the Host
@@ -1427,6 +1579,17 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
     // gesture ensures one first and executes in that Session's Host
     // workspace, persisting the history row under that Session identity.
     if (text.startsWith('!')) {
+      // PR3-B B2 (§4 B2-5): the TSP renderer presents no shell cards, so a
+      // `!`/`!!` line is refused HERE — the ORIGINAL shell-branch admission,
+      // before any persistHistory / ensureSession / acceptLocalSubmitAck /
+      // shell.run. No Host process, no history row, no Session is created;
+      // the submitted text is merged back into the live composer so the user
+      // can edit it. PiTui (supportsLocalShellCards = true) is unchanged.
+      if (!deps.supportsLocalShellCards) {
+        deps.app().setEditorText(mergeDraft(deps.app().getDraft(), text))
+        deps.app().notify('User-shell UI is not available in TSP yet', 'error')
+        return
+      }
       // A user-shell line is a UI control with NO attachment delivery path
       // (the shell owner neither admits nor consumes drafts): a staged
       // attachment must never become shell arguments, and the success path
@@ -1546,6 +1709,31 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
         return
       }
     }
+    // PR3-B B2-3: the ONE shared renderer-capability refusal for TUI-owned
+    // builtins. It sits at the POST-CLASSIFICATION admission: the winner is
+    // already the authoritative classifier's `client-command` + `source:'tui'`
+    // result, so a genuine Host-origin command of the same spelling was never
+    // captured here and a Host claim keeps its precedence. The exit pair and
+    // the mounted native Model/Preset presenters are available; PiTui-only
+    // builtins are refused with an actionable notice and the draft restored — no
+    // false success, no silent no-op, no session created for a UI that cannot run.
+    if (parsed !== undefined) {
+      const availability = tspBuiltinAvailability(classification, parsed.name, {
+        modelPicker: deps.supportsModelPickerUi?.() === true,
+        presetPicker: deps.supportsPresetPickerUi?.() === true,
+        sessionBrowser: deps.supportsSessionBrowserUi?.() === true,
+      }, parsed.rawInput)
+      // ONLY the TUI-owned builtin family is this gate's business. A Host
+      // command, an extension contribution, a skill invocation or an ordinary
+      // submission keeps its OWN routing below — the family decision comes
+      // from the predicate's result, never from a guard the caller may forget
+      // (the B2 review's F1).
+      if (availability.kind === 'unsupported' && !deps.supportsTuiBuiltinUi) {
+        deps.app().setEditorText(mergeDraft(deps.app().getDraft(), text))
+        deps.app().notify("This command's UI is not available in TSP yet", 'info')
+        return
+      }
+    }
     // §1C-7 (whole-PR F4/F5): the sessionless LOCAL route consumes the ONE
     // classification — the TUI client-command family — instead of re-judging a
     // name against `SESSIONLESS_COMMANDS` alone. A genuine Host name whose
@@ -1634,6 +1822,10 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
       // here so the post-await resolution can never run a generation the
       // user did not submit (see the fence inside).
       const submitted = contribution
+      // PR3-B §7.3 (round 10 F1): the ownership subject pinned at THIS
+      // gesture's admission — the async restores below run after
+      // `ensureSession`, so they share the two-fact stale-restore policy.
+      const contributionSubject = deps.ownership.captureSubject()
       runOwned('client command session', () => runReservedSubmit({
         // The submit-flow core's ordering contract. A contribution is only
         // ever invoked by its BARE token, so the line references no drafts
@@ -1664,13 +1856,22 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
           // `runLocalCommand`'s name-only lookup (which would either run
           // the new generation's handler or deliver the line to the MODEL).
           if (deps.extensions.findContribution(parsed.name) !== submitted) {
-            deps.app().notify(`/${parsed.name} is no longer available — the draft was restored, submit it again`, 'error')
-            restoreSubmissionDraft(text)
+            // Reached AFTER `await ensureSession`: the owner may have been
+            // replaced AND the lifetime may have ended meanwhile — the
+            // lifetime fence precedes the shared policy (round 11), and the
+            // restore comes FIRST so the notice follows its REAL outcome.
+            if (!lifetimeOwnsSurface()) return
+            const restored = restoreStaleDraft(text, contributionSubject)
+            deps.app().notify(restored === 'dropped'
+              ? `/${parsed.name} is no longer available — the draft was cleared by the switch`
+              : `/${parsed.name} is no longer available — the draft was restored, submit it again`, 'error')
             return
           }
           runLocalCommand(parsed, text, persistHistory, delivery, deps.liveAgent()?.session.id)
         },
-        restore: (draft) => restoreSubmissionDraft(draft),
+        // PR3-B §7.3 (round 10 F1): same async-restore class as the Host
+        // command flow above; the lifetime fence precedes it (round 11).
+        restore: (draft) => { if (lifetimeOwnsSurface()) restoreStaleDraft(draft, contributionSubject) },
       }, text), {
         diag: deps.diag,
         sessionId: () => deps.liveAgent()?.session.id,
@@ -1795,7 +1996,8 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
     }
 
 
-  const submit = (text: string, request: ComposerSubmitRequest = 'enter'): void => dispatchUserInput(text, request)
+  const submit = (text: string, request: ComposerSubmitRequest = 'enter', scopeToken?: number): void =>
+    dispatchUserInput(text, request, scopeToken)
   /**
    * The surface steer entry (Ctrl+S / steer-draft): snapshot the persist facts
    * BEFORE the draft is consumed, then steer the draft only (explicitly queued
@@ -1813,11 +2015,18 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
   }
   /** Abort the local shell + interrupt the live Agent (Esc / cancel-activity). */
   const abortLocalShell = (): void => deps.shell.interrupt()
-  /** Prepare one outgoing message through the shared image/draft pipeline. */
-  const prepareMessage = (text: string, requestId: string): Promise<unknown> =>
+  /** Prepare one outgoing message through the shared image/draft pipeline.
+   *  The Direct branch samples the Client-local request zone HERE, once per
+   *  human submit at the send point (never cached, never the Host's zone): it
+   *  rides the durable user-message source the Host's time-context reader
+   *  consumes. A Remote selection samples nothing — the official
+   *  `SessionFace.prompt()` owns that request field. `async` keeps the declared
+   *  Promise contract for the sampling throw (a refusal is a rejection, never a
+   *  synchronous throw from a Promise-returning entry). */
+  const prepareMessage = async (text: string, requestId: string): Promise<unknown> =>
     deps.prepareTransport !== undefined
       ? deps.prepareTransport(text, requestId)
-      : prepareUserMessage(text, deps.drafts.images, submitDeps, { requestId })
+      : prepareUserMessage(text, deps.drafts.images, submitDeps, { requestId, clientTimeZone: clientTimeZone() })
 
   return {
     submit,

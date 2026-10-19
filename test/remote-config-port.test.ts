@@ -19,7 +19,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { RemoteConfigPort } from '../src/runtime/remote/config-remote.ts'
 import type { ProviderCatalogEntry } from '../src/domain/catalog/provider.ts'
-import type { TuiSettingsDoc } from '../src/runtime/config-port.ts'
+import { serializeTuiSettingsMutation, type TuiSettingsDoc } from '../src/runtime/config-port.ts'
 import { createObservableGenerationHarness } from './support/remote-generation.ts'
 
 /* ------------------------------------------------------------------------- *
@@ -200,6 +200,16 @@ function createBackend(seed?: (state: FakeState) => void) {
         if (state.mutateApplies) {
           const entry = state.namespaces.get(ns)
           if (entry !== undefined) {
+            // The official `settings.mutate` checks the caller's revision
+            // ATOMICALLY: a base revision that no longer matches the live
+            // document is refused with a conflict instead of being applied to
+            // the newer state.
+            if (revision !== undefined && revision !== entry.revision) {
+              return {
+                ok: false as const,
+                error: { code: 'settings/conflict', message: `revision ${revision} != ${entry.revision}` },
+              }
+            }
             for (const op of ops) {
               if (op.op === 'set') applyPath(entry.value, op.path, op.value)
               else unsetPath(entry.value, op.path)
@@ -394,7 +404,7 @@ test('a reconnect marks the snapshot stale until a fresh describe commits', asyn
   assert.equal(port.tuiSettings?.get().theme, 'light', 'the reconnect snapshot is the new authority')
 })
 
-test('writes are serialized against other writes on the same mirror', async () => {
+test('writes are serialized against other writes, and a superseded whole-document write is refused', async () => {
   const { port, state } = createBackend(current => {
     current.namespaces.set(TUI_NS, { ns: TUI_NS, value: { theme: 'dark' }, revision: 1 })
   })
@@ -403,15 +413,67 @@ test('writes are serialized against other writes on the same mirror', async () =
   state.mutateGate = () => new Promise<void>(resolve => { release = resolve })
 
   const settings = port.tuiSettings!
+  // BOTH documents are reconciled against revision 1: the second caller read
+  // the mirror BEFORE the first write settled. The second write must therefore
+  // be refused by the official revision check instead of being re-authorized
+  // against the revision the first write produced.
   const first = settings.replace({ ...settings.get(), theme: 'light' })
   const second = settings.replace({ ...settings.get(), theme: 'solar' })
   await tick()
   assert.equal(state.mutateCalls.length, 1, 'the second write waits for the first to settle')
 
   release()
-  await Promise.all([first, second])
+  await first
+  await assert.rejects(async () => { await second }, /revision 1 != 2/)
   assert.equal(state.mutateCalls.length, 2)
-  assert.deepEqual(state.mutateCalls.map(call => call.ns), [TUI_NS, TUI_NS])
+  assert.deepEqual(
+    state.mutateCalls.map(call => call.revision),
+    [1, 1],
+    'each write carries the revision its ops were reconciled against',
+  )
+  assert.equal(state.namespaces.get(TUI_NS)!.value.theme, 'light', 'the superseded write never reached the document')
+})
+
+test('two serialized whole-document writes reconcile against the revision they just read', async () => {
+  const { port, state } = createBackend(current => {
+    current.namespaces.set(TUI_NS, { ns: TUI_NS, value: { ...TUI_DEFAULTS, theme: 'dark' }, revision: 1 })
+  })
+  await port.describe()
+  const settings = port.tuiSettings!
+  // The production caller shape: get → modify → replace INSIDE the shared
+  // serialization queue, so every write reads a document whose revision the
+  // previous write's authoritative refresh already committed. No spurious
+  // conflict may appear here.
+  await serializeTuiSettingsMutation(settings, async () => { await settings.replace({ ...settings.get(), theme: 'light' }) })
+  await serializeTuiSettingsMutation(settings, async () => { await settings.replace({ ...settings.get(), theme: 'dark' }) })
+  assert.deepEqual(state.mutateCalls.map(call => call.revision), [1, 2])
+  assert.equal(state.namespaces.get(TUI_NS)!.value.theme, 'dark')
+  assert.equal(settings.get().theme, 'dark', 'the mirror follows authority after each write')
+})
+
+test('a whole-document write whose reconciliation base moved is refused, never applied on the newer revision', async () => {
+  const { port, state, emit } = createBackend(current => {
+    current.namespaces.set(TUI_NS, { ns: TUI_NS, value: { ...TUI_DEFAULTS, theme: 'dark' }, revision: 1 })
+  })
+  await port.describe()
+  const settings = port.tuiSettings!
+  const write = settings.replace({ ...settings.get(), theme: 'light' })
+  // Between the reconciliation and the queued write's pre-flight refresh, an
+  // EXTERNAL writer commits a different value at the next revision.
+  const entry = state.namespaces.get(TUI_NS)!
+  entry.value.theme = 'solar'
+  entry.revision = 2
+  emit('settings/document-updated', TUI_NS, 2)
+
+  await assert.rejects(async () => { await write }, /revision 1 != 2/)
+  assert.deepEqual(
+    state.mutateCalls.map(call => call.revision),
+    [1],
+    'the fence is the revision the ops were reconciled against, not the refreshed one',
+  )
+  assert.equal(entry.value.theme, 'solar', 'the concurrent external write is preserved')
+  assert.equal(settings.get().theme, 'solar', 'and the mirror reports the authoritative value')
+  assert.equal(port.configReadiness(), 'ready')
 })
 
 test('a write refreshes from authority after settlement and never patches optimistically', async () => {
@@ -1001,18 +1063,79 @@ test('a failed FIRST read yields no authoritative values and refuses writes with
   assert.equal(port.configReadiness(), 'unavailable', 'no committed snapshot: nothing to present')
   assert.equal(port.tuiSettings, undefined, 'the port serves no settings facade without a read')
   assert.ok(port.lastRefreshFailure() !== undefined, 'the failure is recorded for the UI')
+  assert.equal(state.namespaces.get(TUI_NS)?.value.theme, TUI_DEFAULTS.theme,
+    'the Host value is untouched: no write was dispatched without a read')
+})
 
-  // The write path names the actual reason rather than claiming a stale value.
-  const facade = {
-    get: () => ({ ...TUI_DEFAULTS }),
-    replace: async () => {},
-  }
+test('a committed write whose post-settlement refresh fails is not a refusal — but stays one for a rereading consumer', async () => {
+  const { port, state } = createBackend(current => {
+    current.namespaces.set(TUI_NS, { ns: TUI_NS, value: { ...TUI_DEFAULTS, theme: 'dark' }, revision: 1 })
+  })
+  await port.describe()
+  assert.equal(port.configReadiness(), 'ready')
+
+  // The OTHER direction: the official mutate ITSELF is refused. That IS a refusal
+  // and must keep rejecting, with the mirror left authoritative.
+  state.mutateFailure = { code: 'settings/rejected', message: 'refused' }
+  await assert.rejects(
+    async () => { await port.tuiSettings!.replace({ ...port.tuiSettings!.get(), theme: 'light' }) },
+    /settings\.mutate\(tui-app\) failed: refused/u,
+  )
+  assert.equal(port.configReadiness(), 'ready', 'a refused mutate leaves the mirror current')
+  assert.equal(port.tuiSettings!.get().theme, 'dark', 'and its authoritative value intact')
+  state.mutateFailure = undefined
+
+  // The official write LANDS; only the authoritative refresh that follows it fails.
+  state.describeFailure = { code: 'gateway/unavailable', message: 'offline again' }
+  await port.tuiSettings!.replace({ ...port.tuiSettings!.get(), theme: 'light' })
+  assert.notEqual(port.configReadiness(), 'ready', 'the committed write makes the last snapshot non-current')
+  assert.ok(port.lastRefreshFailure() !== undefined, 'the failed refresh is recorded, never swallowed')
+  assert.notEqual(port.tuiSettings!.get().theme, 'light', 'the mirror never patches the committed value optimistically')
+
+  // An EXTERNAL writer moved the Host to the value this client is about to request
+  // WITHOUT delivering an invalidation: the diff still emits its op (its base is the
+  // mirror's previous value), the write is refused, and the forced authoritative re-read
+  // then shows that the authority already carries the requested value. That proves the
+  // VALUE is in place, never that THIS request was accepted — so a caller can only report
+  // an unknown outcome, and must not contradict the authority with a refusal either.
   state.describeFailure = undefined
   await port.describe()
   assert.equal(port.configReadiness(), 'ready')
-  state.describeFailure = { code: 'gateway/unavailable', message: 'offline again' }
-  await assert.rejects(async () => { await port.tuiSettings!.replace({ ...port.tuiSettings!.get(), theme: 'light' }) },
-    /settings\.describe failed/u)
+  const entry = state.namespaces.get(TUI_NS)!
+  const external = entry.value.theme === 'dark' ? 'light' : 'dark'
+  entry.value.theme = external
+  entry.revision += 1
+  state.mutateFailure = { code: 'settings/conflict', message: 'the revision moved' }
+  await assert.rejects(
+    async () => { await port.tuiSettings!.replace({ ...port.tuiSettings!.get(), theme: external }) },
+    /settings\.mutate\(tui-app\) failed/u,
+  )
+  assert.equal(port.configReadiness(), 'ready', 'the forced re-read committed a current snapshot')
+  assert.equal(port.tuiSettings!.get().theme, external, 'which already carries the requested value')
+  state.mutateFailure = undefined
+
+  // NEGATIVE CONTROL: a direct `mutate` consumer keeps the FAILURE. Its caller
+  // re-reads the mirror and would otherwise present a last-known value as the
+  // committed one (the subagent model-selection toggle does exactly that).
+  const subagent = createBackend(current => {
+    current.namespaces.set(SUBAGENT_NS, {
+      ns: SUBAGENT_NS,
+      value: { enabled: false, allowedModels: [] },
+      revision: 1,
+    })
+  })
+  await subagent.port.describe()
+  subagent.state.describeFailure = { code: 'gateway/unavailable', message: 'offline again' }
+  await assert.rejects(
+    async () => {
+      await subagent.port.subagentModelSelection.set({
+        enabled: true,
+        allowedModels: [{ provider: 'smoke', model: 'smoke-model' }],
+      })
+    },
+    /settings\.describe failed/u,
+    'the rereading consumer must not treat a stale snapshot as a committed write',
+  )
 })
 
 test('an empty replace diff is a no-op only once the mirror is current', async () => {

@@ -246,11 +246,12 @@ export class SurfaceHost {
 
   /** The host-owned row budget for the above-editor widget zone (plan §19:
    * minimum editor usability always wins — the host shrinks widgets before
-   * the editor). */
+   * the editor). ZERO is legal: a fullscreen surface whose protected chrome
+   * leaves no room retires the zone entirely. */
   private widgetRowsAbove = 3
   setWidgetRowsAbove(rows: number): void {
     if (this.disposed) return
-    this.widgetRowsAbove = Math.max(1, Math.floor(rows))
+    this.widgetRowsAbove = Math.max(0, Math.floor(rows))
     const state = this.store.get().surface
     const width = state.width > 0 ? Math.max(1, state.width) : 80
     this.widgetsAbove.refresh(state.themeRevision, width, this.widgetRowsAbove)
@@ -260,7 +261,7 @@ export class SurfaceHost {
   private widgetRowsBelow = 3
   setWidgetRowsBelow(rows: number): void {
     if (this.disposed) return
-    this.widgetRowsBelow = Math.max(1, Math.floor(rows))
+    this.widgetRowsBelow = Math.max(0, Math.floor(rows))
     const state = this.store.get().surface
     const width = state.width > 0 ? Math.max(1, state.width) : 80
     this.widgetsBelow.refresh(state.themeRevision, width, this.widgetRowsBelow)

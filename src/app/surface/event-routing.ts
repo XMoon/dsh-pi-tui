@@ -21,7 +21,8 @@
  * @module @xmoon76/dsh-pi-tui/app/surface/event-routing
  */
 
-import type { TodoItem, TuiApp } from '../../tui-app.ts'
+import type { TodoItem } from '../../tui-app.ts'
+import type { SurfaceDisplaySeam } from './display-seam.ts'
 import type { StreamingToolPreview } from './streaming-tool-preparing.ts'
 import type { AssistantLiveInput } from '../../runtime/assistant-stream-port.ts'
 import type { TranscriptFolder } from '../../domain/transcript/folder.ts'
@@ -30,6 +31,7 @@ import type { PendingInputSnapshot } from '../../runtime/pending-input-reader-po
 import type { SubmissionPresentationItem } from '../submission/presentation.ts'
 import type { SubmitLatencyPhase } from '../submission/latency.ts'
 import type { ContextMeasureReason } from '../../domain/status/context-measurement.ts'
+import type { CompactionPhase } from './compaction-presentation.ts'
 import {
   busyAfterTurnBoundary,
   contextRefreshKind,
@@ -72,13 +74,6 @@ export interface SurfaceMainPresentation<Event> {
   readonly previews: Map<string, StreamingToolPreview>
   /** Apply one event to the main streaming tool-preview projection. */
   applyToolPreview(event: Event): void
-  /**
-   * F1 (PR5 §3.2): let the recent-performance availability bit follow the
-   * SAME fold this sink just mutated. Called by the live ingress after the
-   * stats append; the owner decides whether the predicate is now proven and
-   * re-derives the status when it flips.
-   */
-  refreshRecentPerformanceAvailability(): void
 }
 
 /**
@@ -179,6 +174,14 @@ export interface SurfaceEventRoutingSource<Event extends RoutedSessionEvent> {
   exitView(): void
   refreshStatusCheap(): void
   refreshStatusAndWelcome(): void
+  /**
+   * The CURRENT Session's effective workspace directory changed
+   * (`working-directory/change`): re-derive the cwd-dependent presentation —
+   * footer/welcome status, the OSC 0 identity fallback and the terminal-local
+   * OSC 7 projection — now, instead of at the next unrelated refresh. Direct
+   * reads the official projection; a Remote Host cwd never reaches OSC 7.
+   */
+  refreshWorkspaceFacts(): void
   /** Fold one `goal/change` into the runner's status goal text. */
   applyGoalChange(event: Event): void
   /** The session title one `session/title` event implies. */
@@ -223,7 +226,7 @@ export interface SurfaceEventRoutingSource<Event extends RoutedSessionEvent> {
 export interface EventRoutingDeps<Event extends RoutedSessionEvent> {
   /** The injected routing source; throws while routing is not attached. */
   readonly source: () => SurfaceEventRoutingSource<Event>
-  readonly mounted: () => TuiApp
+  readonly mounted: () => SurfaceDisplaySeam
   readonly openingJournal: OpeningJournal<Event>
   /** Any current-Session activity re-derives continued-question answerability. */
   readonly reconcileQuestions: () => void
@@ -290,7 +293,7 @@ export interface EventRoutingRuntime<Event extends RoutedSessionEvent> {
   /** The neutral live-input routing (main target vs the mounted viewed child). */
   applyAssistantInput(input: AssistantLiveInput): void
   /** The resumed-compaction routing (a startup/resume fact, not a session event). */
-  applyResumedCompaction(id: string | undefined, active: boolean): void
+  applyResumedCompaction(id: string | undefined, active: boolean, phase?: CompactionPhase): void
 }
 
 /**
@@ -432,18 +435,12 @@ export function createEventRouting<Event extends RoutedSessionEvent>(
         // the settled card, not the running one.
         main.folder.apply([event])
         main.stats.apply([event])
-        main.refreshRecentPerformanceAvailability()
         source.exitView()
         return
       }
     }
     main.folder.apply([event])
     main.stats.apply([event])
-    // F1 (PR5 §3.2): the appended event may be exactly the sample that
-    // completes the recent-performance window — re-answer the availability
-    // predicate off the fold that append just updated, so the footer/`/status`
-    // stop omitting the recent figures without waiting for a `loadOlder`.
-    main.refreshRecentPerformanceAvailability()
     // The goal badge folds incrementally: the newest goal/change event
     // decides, so one event is enough (clear/completed hide the badge).
     if (event.type === 'goal/change') source.applyGoalChange(event)
@@ -455,9 +452,15 @@ export function createEventRouting<Event extends RoutedSessionEvent>(
     // instead, and the next real session event repaints the transcript.
     const isKnob = event.type === 'permission/preset' || event.type === 'approval/policy' || event.type === 'sandbox/mode'
     if (!isKnob) options.schedulePaint()
-    if (event.type === 'todo/write') options.mounted().setTodoSummary((event.data as { readonly todos: readonly TodoItem[] }).todos)
-    if (event.type === 'plan/mode') options.mounted().setPlanMode((event.data as { readonly active: boolean }).active)
-    if (event.type === 'session/title') options.mounted().setSessionTitle(source.sessionTitleOf(event))
+    if (event.type === 'todo/write') options.mounted().commitStatusFacts({ todos: (event.data as { readonly todos: readonly TodoItem[] }).todos })
+    if (event.type === 'plan/mode') options.mounted().commitStatusFacts({ planMode: (event.data as { readonly active: boolean }).active })
+    if (event.type === 'session/title') options.mounted().commitStatusFacts({ sessionTitle: source.sessionTitleOf(event) })
+    // The Session's EFFECTIVE directory is a projection fact (S2/PR-B): the
+    // committed change reaches the footer, the welcome card, the OSC 0
+    // identity fallback and the terminal-local OSC 7 through THIS refresh —
+    // the header keeps the original project and is never rendered as the
+    // live workspace.
+    if (event.type === 'working-directory/change') source.refreshWorkspaceFacts()
     // A permission switch (command, Shift+Tab, settings panel) lands as
     // knob events between turns: refresh the footer mode badge right away
     // instead of waiting for the next step/turn boundary.
@@ -520,13 +523,12 @@ export function createEventRouting<Event extends RoutedSessionEvent>(
     const compacted = foldCompactionEvent({ id: compactingId }, event as never)
     compactingId = compacted.id
     if (compacted.phase === 'summarizing') {
-      options.mounted().setCompactionPhase('summarizing')
       // Busy while compacting: a single Esc cancels the compaction (pi
       // parity — compaction rides the turn signal).
-      options.mounted().setBusy(true)
+      options.mounted().commitStatusFacts({ compactionPhase: 'summarizing', busy: true })
     }
     if (compacted.phase === 'applying') {
-      options.mounted().setCompactionPhase('applying')
+      options.mounted().commitStatusFacts({ compactionPhase: 'applying' })
     }
     if (compacted.clear) {
       // The compacted replacement has committed to the live session
@@ -538,7 +540,13 @@ export function createEventRouting<Event extends RoutedSessionEvent>(
       // Compaction rewrites the model-visible surface: re-measure NOW
       // (the footer would otherwise show stale pressure until the next
       // step/start or turn/end).
-      settleCompactionSurface(options.mounted(), () => {
+      // PR3-A: the PUBLIC settle contract keeps its three setters; the seam
+      // side adapts onto it (one aggregated commit).
+      settleCompactionSurface({
+        setCompactionPhase: phase => options.mounted().commitStatusFacts({ compactionPhase: phase }),
+        setBusy: busy => options.mounted().commitStatusFacts({ busy }),
+        setWorking: working => options.mounted().commitStatusFacts({ working }),
+      }, () => {
         source.markContextDirty()
         source.refreshContextMeasurement('compaction-end')
       }, source.currentWorkingFromLog())
@@ -561,10 +569,9 @@ export function createEventRouting<Event extends RoutedSessionEvent>(
       // and the submit timeline stamps the turn boundary.
       source.settleLocalSubmitAck('turn started')
       source.markSubmitLatency(ownerSessionId, 'turn.start')
-      options.mounted().setWorking(true)
-      options.mounted().setBusy(true)
+      options.mounted().commitStatusFacts({ working: true, busy: true })
     } else if (event.type === 'turn/end') {
-      options.mounted().setWorking(false)
+      options.mounted().commitStatusFacts({ working: false })
       // NOTE: the submit-latency timeline is deliberately NOT reset on
       // turn/end — a submission accepted while this turn was running
       // (busy/queue) is processed by the NEXT turn, and resetting here
@@ -575,7 +582,7 @@ export function createEventRouting<Event extends RoutedSessionEvent>(
       // A turn end must not clear the busy flag while a compaction is
       // still in flight (an interrupted turn can close before its
       // compaction settles) — the single-Esc cancel stays armed.
-      options.mounted().setBusy(busyAfterTurnBoundary('turn/end', compactingId !== undefined))
+      options.mounted().commitStatusFacts({ busy: busyAfterTurnBoundary('turn/end', compactingId !== undefined) })
       options.paintNow()
       // Persist each completed turn so a crash loses at most the live
       // turn. Detached: a flush rejection must never surface as an
@@ -704,13 +711,13 @@ export function createEventRouting<Event extends RoutedSessionEvent>(
     options.schedulePaint()
   }
 
-  const applyResumedCompaction = (id: string | undefined, active: boolean): void => {
+  const applyResumedCompaction = (id: string | undefined, active: boolean, phase?: CompactionPhase): void => {
     compactingId = id
-    options.mounted().setCompactionPhase(active ? 'summarizing' : 'idle')
-    if (active) {
-      options.mounted().setBusy(true)
-      options.mounted().setWorking(true)
-    }
+    // The caller may rebuild the EXACT phase from the window (a bracket whose
+    // summary already landed resumes as 'applying'); without it an active
+    // bracket defaults to 'summarizing'.
+    options.mounted().commitStatusFacts({ compactionPhase: active ? (phase ?? 'summarizing') : 'idle' })
+    if (active) options.mounted().commitStatusFacts({ busy: true, working: true })
   }
 
   return {

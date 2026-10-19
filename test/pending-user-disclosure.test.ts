@@ -1,8 +1,8 @@
 /**
  * Pending steering long-user disclosure: an ephemeral text-only steering /
  * sending row joins the SAME visual-row compaction as a durable text-only user
- * message — head + compact marker + tail while collapsed, a tail collapse
- * control while expanded, and the status line always visible. The identity is
+ * message — head + compact marker + tail while collapsed, its whole BODY
+ * clickable to collapse while expanded, and the status line always visible. The identity is
  * the stable `rpc:<id>` / `id:<id>` key, so a local echo and its authoritative
  * replacement share the explicit disclosure state, while a stale press can
  * never transfer to a replacement row. None of this state is durable: it is
@@ -119,7 +119,7 @@ test('pending: an UNKNOWN foldability fact fails open to full', async () => {
   app.stop()
 })
 
-test('pending: fullscreen marker expands, keeps the status line, and the tail collapses', async () => {
+test('pending: fullscreen marker expands, keeps the status line, and paints no collapse chrome', async () => {
   const { vt, app } = startApp(100, 40)
   app.setTranscript([])
   steering(app, [longRow('p1', 'p-', 'r1')])
@@ -131,12 +131,14 @@ test('pending: fullscreen marker expands, keeps the status line, and the tail co
   rows = await viewRows(vt)
   assert.ok(rows.some(row => row.includes('p-12')), 'the marker click expands the pending row')
   assert.ok(rows.some(row => row.includes('steering…')), 'the status line survives expansion')
-  const footerY = collapseFooterRows(rows)
-  assert.equal(footerY.length, 1, `tail control missing:\n${rows.join('\n')}`)
+  assert.equal(collapseFooterRows(rows).length, 0, `no collapse chrome exists:\n${rows.join('\n')}`)
 
-  clickCell(vt, 60, footerY[0]!)
+  // The BODY owns the collapse: there is no tail control row to click.
+  const bodyY = rows.findIndex(row => row.includes('p-2'))
+  assert.ok(bodyY >= 0, `a pending body row must be visible:\n${rows.join('\n')}`)
+  clickCell(vt, 60, bodyY)
   rows = await viewRows(vt)
-  assert.equal(compactMarkerCount(rows), 1, 'the tail click restores compact')
+  assert.equal(compactMarkerCount(rows), 1, 'the body click restores compact')
   assert.ok(!rows.some(row => row.includes('p-12')))
   assert.ok(rows.some(row => row.includes('steering…')))
   app.setFullscreen(false)
@@ -239,9 +241,8 @@ test('pending: fullscreen Focus defaults compact and advertises click only', asy
   const markerY = rows.findIndex(row => row.includes('rows compacted'))
   clickCell(vt, 10, markerY)
   rows = await viewRows(vt)
-  const footer = rows[collapseFooterRows(rows)[0]!] ?? ''
-  assert.ok(footer.includes('click'), 'the tail offers the click')
-  assert.ok(!footer.includes('ctrl+o'), 'the tail never promises Ctrl+O inside fullscreen Focus')
+  assert.ok(rows.some(row => row.includes('p-12')), 'the marker expands the pending row')
+  assert.equal(collapseFooterRows(rows).length, 0, `no tail chrome inside fullscreen Focus:\n${rows.join('\n')}`)
   app.setFullscreen(false)
   app.setFocusMode(false)
   app.stop()
@@ -259,10 +260,11 @@ test('pending: a disabled toggleExpand key keeps the fullscreen mouse round-trip
   clickCell(vt, 10, markerY)
   rows = await viewRows(vt)
   assert.ok(rows.some(row => row.includes('p-12')))
-  const footerY = collapseFooterRows(rows)
-  assert.equal(footerY.length, 1)
-  assert.ok(!rows[footerY[0]!]!.includes('ctrl+o'), 'never a dead key hint')
-  clickCell(vt, 60, footerY[0]!)
+  assert.equal(collapseFooterRows(rows).length, 0, `no collapse chrome is painted:\n${rows.join('\n')}`)
+
+  const bodyY = rows.findIndex(row => row.includes('p-2'))
+  assert.ok(bodyY >= 0, `a pending body row must be visible:\n${rows.join('\n')}`)
+  clickCell(vt, 60, bodyY)
   rows = await viewRows(vt)
   assert.equal(compactMarkerCount(rows), 1, 'mouse alone returns to compact')
   app.setFullscreen(false)

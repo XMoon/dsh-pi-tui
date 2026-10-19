@@ -4,6 +4,7 @@ import { Context } from '@deepseek-ai/cordis'
 import { SESSION_FORMAT_VERSION } from '@deepseek-ai/dsh-session'
 import { disposeContext, fakeSession, installVirtualProcessTerminal, makeHarness, mountRunner, sessionEvents, settle } from './support/runner-harness.ts'
 import { testLifecycle } from './support/temp-lifecycle.ts'
+import { navigateToLegacySettings } from './support/open-legacy-settings.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 import { composeAgent } from '../src/index.ts'
 import { FOCUS_MODE_PROMPT } from '../src/domain/communication/focus.ts'
@@ -335,6 +336,7 @@ test('production startup resolves both settings before compose and settings swit
   const commands = harness.commands as { handler(name: string): (input: { rawInput: string }) => unknown }
   await commands.handler('settings')({ rawInput: '' })
   await vt.waitForRender()
+  await navigateToLegacySettings(vt)
   vt.sendInput('Response style')
   vt.sendInput('\r') // explanatory -> default
   await settle()

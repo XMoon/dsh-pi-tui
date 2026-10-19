@@ -45,6 +45,12 @@ export interface ArtifactsCommandDeps {
   registerOne: RegisterOne
   registerTuiCommand: RegisterTuiCommand
   detach: DetachTaskLike
+  /**
+   * PR4-B2-A: the TSP-only CONFIRMED-SUCCESS notice (a no-op wherever a PiTui
+   * command card already presents the outcome). Only `/copy` uses it; the
+   * attachment/export/transcript routes are unchanged.
+   */
+  notifyOutcome: (text: string, kind?: 'info' | 'error') => void
 }
 
 /** The coordinator's fire-and-forget seam (see the local `detach`). */
@@ -67,7 +73,7 @@ export interface ArtifactsCommandRegistrars {
  * checks and the currentness re-check after the async read are unchanged.
  */
 export function createArtifactsCommands(deps: ArtifactsCommandDeps): ArtifactsCommandRegistrars {
-  const { runner, app, registerOne, registerTuiCommand, detach } = deps
+  const { runner, app, registerOne, registerTuiCommand, detach, notifyOutcome } = deps
 
   const stageAttachmentCommand = (
     invocation: CommandInvocation,
@@ -186,9 +192,20 @@ export function createArtifactsCommands(deps: ArtifactsCommandDeps): ArtifactsCo
         // terminal-client OSC 52 leg plus an independent native/platform
         // compatibility leg. A helper success never suppresses the OSC 52 leg.
         const ok = await runner.copyToClipboard(text)
-        return ok
-          ? { kind: 'success', text: 'copied last assistant message' }
-          : { kind: 'error', text: 'failed to copy last assistant message' }
+        if (!ok) return { kind: 'error', text: 'failed to copy last assistant message' }
+        // PR4-B2-A: the CONFIRMED success is supplemented through the
+        // renderer-neutral outcome notice, so a renderer without a PiTui
+        // command card still reports it. The text states only what the policy
+        // established (accepted/emitted), never that the OS clipboard was
+        // verified; the failure branches keep their existing owner (the Direct
+        // command card) and add no second Dock line.
+        // F5: the clipboard policy can outlive the Session it was pinned to (a
+        // native helper awaits across a /resume commit), so a late success is
+        // never announced on the replacement owner's surface.
+        if (runner.isSessionScopeCurrent(scope) && !runner.signal.aborted) {
+          notifyOutcome('copied last assistant message')
+        }
+        return { kind: 'success', text: 'copied last assistant message' }
       },
     })
   }

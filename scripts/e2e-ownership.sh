@@ -164,26 +164,33 @@ cat > "$E2E_HOME/seed.mjs" <<'EOF'
 // Usage: node seed.mjs <sessionsRoot> <sessionId> [cwd]
 import { Context } from '@deepseek-ai/cordis'
 import { SESSION_FORMAT_VERSION } from '@deepseek-ai/dsh-session'
-import JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
+import * as JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
 
 const root = process.argv[2]
 const id = process.argv[3]
 const cwd = process.argv[4] ?? process.cwd()
 
+// 0.2.1-rc.1 publishes the backend as a plugin module (named `apply` + `Config`),
+// not a default-exported class: mount it and read the service it provides.
 const ctx = new Context()
-const persistence = new JsonlSessionPersistence(ctx, { root })
-const handle = await persistence.create({
-  version: SESSION_FORMAT_VERSION,
-  id,
-  createdAt: Date.now(),
-  isSeeded: false,
-  delegationDepth: 0,
-  cwd,
-  agentPreset: 'standard',
-})
-await handle.flush()
-await handle.close()
-console.log(`seeded ${id}`)
+const persistenceFiber = await ctx.plugin(JsonlSessionPersistence, { root })
+const persistence = ctx.sessionPersistence
+try {
+  const handle = await persistence.create({
+    version: SESSION_FORMAT_VERSION,
+    id,
+    createdAt: Date.now(),
+    isSeeded: false,
+    delegationDepth: 0,
+    cwd,
+    agentPreset: 'standard',
+  })
+  await handle.flush()
+  await handle.close()
+  console.log(`seeded ${id}`)
+} finally {
+  await persistenceFiber.dispose()
+}
 EOF
 
 cat > "$E2E_HOME/writer.mjs" <<'EOF'
@@ -200,39 +207,46 @@ cat > "$E2E_HOME/writer.mjs" <<'EOF'
 //                                READ-OK <id>: <n> events or
 //                                READ-FAILED <id>: <message>.
 import { Context } from '@deepseek-ai/cordis'
-import JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
+import * as JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
 
 const [mode, root, id, holdMsRaw] = process.argv.slice(2)
 const holdMs = holdMsRaw === undefined ? 30000 : Number(holdMsRaw)
-const ctx = new Context()
-const persistence = new JsonlSessionPersistence(ctx, { root })
-
-if (mode === 'hold') {
-  const handle = await persistence.open(id, 'write')
-  console.log(`HOLDING ${id}`)
-  await new Promise((resolve) => setTimeout(resolve, holdMs))
-  await handle.close()
-  console.log(`RELEASED ${id}`)
-} else if (mode === 'tryopen') {
-  try {
-    const handle = await persistence.open(id, 'write')
-    console.log(`ACQUIRED ${id}`)
-    await handle.close()
-  } catch (error) {
-    console.log(`REFUSED ${id}: ${error?.message ?? String(error)}`)
-  }
-} else if (mode === 'read') {
-  try {
-    const handle = await persistence.open(id, 'read')
-    const events = await handle.read(0)
-    console.log(`READ-OK ${id}: ${events.length} events`)
-    await handle.close()
-  } catch (error) {
-    console.log(`READ-FAILED ${id}: ${error?.message ?? String(error)}`)
-  }
-} else {
+if (mode !== 'hold' && mode !== 'tryopen' && mode !== 'read') {
   console.error(`unknown mode: ${mode}`)
   process.exit(2)
+}
+// 0.2.1-rc.1 publishes the backend as a plugin module (named `apply` + `Config`),
+// not a default-exported class: mount it and read the service it provides.
+const ctx = new Context()
+const persistenceFiber = await ctx.plugin(JsonlSessionPersistence, { root })
+const persistence = ctx.sessionPersistence
+try {
+  if (mode === 'hold') {
+    const handle = await persistence.open(id, 'write')
+    console.log(`HOLDING ${id}`)
+    await new Promise((resolve) => setTimeout(resolve, holdMs))
+    await handle.close()
+    console.log(`RELEASED ${id}`)
+  } else if (mode === 'tryopen') {
+    try {
+      const handle = await persistence.open(id, 'write')
+      console.log(`ACQUIRED ${id}`)
+      await handle.close()
+    } catch (error) {
+      console.log(`REFUSED ${id}: ${error?.message ?? String(error)}`)
+    }
+  } else {
+    try {
+      const handle = await persistence.open(id, 'read')
+      const events = await handle.read(0)
+      console.log(`READ-OK ${id}: ${events.length} events`)
+      await handle.close()
+    } catch (error) {
+      console.log(`READ-FAILED ${id}: ${error?.message ?? String(error)}`)
+    }
+  }
+} finally {
+  await persistenceFiber.dispose()
 }
 EOF
 
@@ -264,7 +278,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { dirname, join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
 import { SESSION_FORMAT_VERSION } from '@deepseek-ai/dsh-session'
-import JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
+import * as JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
 
 const root = process.argv[2]
 const id = process.argv[3] ?? 'session-native-lease-probe'
@@ -302,80 +316,92 @@ await flock.tryLockExclusive(fd2)
 closeSync(fd2)
 console.log(`FLOCK-PRIMITIVE-OK: ${flockEntry} (contention refused, release + reacquire)`)
 
-// Seed the probe session through the official API (create + flush + close).
+// Seed the probe session through the official API (create + flush + close),
+// then hold one write open so a second process must be refused.
+// 0.2.1-rc.1 publishes the backend as a plugin module (named `apply` + `Config`),
+// not a default-exported class: mount it and read the service it provides.
 const ctx = new Context()
-const persistence = new JsonlSessionPersistence(ctx, { root })
-{
-  const handle = await persistence.create({
-    version: SESSION_FORMAT_VERSION,
-    id,
-    createdAt: Date.now(),
-    isSeeded: false,
-    delegationDepth: 0,
-    cwd: here,
-    agentPreset: 'standard',
-  })
-  await handle.flush()
-  await handle.close()
-}
+const persistenceFiber = await ctx.plugin(JsonlSessionPersistence, { root })
+const persistence = ctx.sessionPersistence
+try {
+  {
+    const handle = await persistence.create({
+      version: SESSION_FORMAT_VERSION,
+      id,
+      createdAt: Date.now(),
+      isSeeded: false,
+      delegationDepth: 0,
+      cwd: here,
+      agentPreset: 'standard',
+    })
+    await handle.flush()
+    await handle.close()
+  }
 
-// Child: try the same write open; print ACQUIRED or the refusal. Only the
-// official SessionAlreadyOwnedError counts as the expected contention
-// refusal — any other failure is reported distinctly and exits nonzero so
-// the parent cannot mistake an unrelated error for kernel contention.
-const childScript = `
+  // Child: try the same write open; print ACQUIRED or the refusal. Only the
+  // official SessionAlreadyOwnedError counts as the expected contention
+  // refusal — any other failure is reported distinctly and exits nonzero so
+  // the parent cannot mistake an unrelated error for kernel contention.
+  const childScript = `
 import { Context } from '@deepseek-ai/cordis'
-import JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
+import * as JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
 const root = process.argv[1]
 const id = process.argv[2]
-const { join } = await import('node:path')
 const ctx = new Context()
-const persistence = new JsonlSessionPersistence(ctx, { root })
+const persistenceFiber = await ctx.plugin(JsonlSessionPersistence, { root })
+const persistence = ctx.sessionPersistence
 try {
-  const handle = await persistence.open(id, 'write')
-  console.log('ACQUIRED')
-  await handle.close()
-} catch (error) {
-  if (error?.name === 'SessionAlreadyOwnedError') {
-    console.log('REFUSED: ' + (error?.message ?? String(error)))
-  } else {
-    console.log('OPEN-ERROR [' + (error?.name ?? 'AnonymousError') + ']: ' + (error?.message ?? String(error)))
-    process.exitCode = 1
+  try {
+    const handle = await persistence.open(id, 'write')
+    console.log('ACQUIRED')
+    await handle.close()
+  } catch (error) {
+    if (error?.name === 'SessionAlreadyOwnedError') {
+      console.log('REFUSED: ' + (error?.message ?? String(error)))
+    } else {
+      console.log('OPEN-ERROR [' + (error?.name ?? 'AnonymousError') + ']: ' + (error?.message ?? String(error)))
+      process.exitCode = 1
+    }
   }
+} finally {
+  await persistenceFiber.dispose()
 }
 `
-const runChild = () => new Promise((resolve) => {
-  const child = spawn(process.execPath, ['--input-type=module', '-e', childScript, root, id], {
-    cwd: here,
-    stdio: ['ignore', 'pipe', 'inherit'],
+  const runChild = () => new Promise((resolve) => {
+    const child = spawn(process.execPath, ['--input-type=module', '-e', childScript, root, id], {
+      cwd: here,
+      stdio: ['ignore', 'pipe', 'inherit'],
+    })
+    let out = ''
+    child.stdout.on('data', (chunk) => { out += chunk })
+    child.on('close', (code) => resolve({ code, out: out.trim() }))
   })
-  let out = ''
-  child.stdout.on('data', (chunk) => { out += chunk })
-  child.on('close', (code) => resolve({ code, out: out.trim() }))
-})
 
-// 1. Open with write access (the official seam → SessionWriteLease.acquire).
-const handle = await persistence.open(id, 'write')
-console.log(`ACQUIRED ${id}`)
+  // 1. Open with write access (the official seam → SessionWriteLease.acquire).
+  const handle = await persistence.open(id, 'write')
+  console.log(`ACQUIRED ${id}`)
 
-// 2. Contention from a second process must be an OWNERSHIP refusal with a
-// clean child exit (real kernel flock; an errored child is not contention).
-const contended = await runChild()
-if (contended.code === 0 && contended.out.startsWith('REFUSED')) {
-  console.log(`CONTENTION-REFUSED: ${contended.out}`)
-} else {
-  console.log(`CONTENTION-FAILED: exit=${contended.code} ${contended.out}`)
-  process.exitCode = 1
-}
+  // 2. Contention from a second process must be an OWNERSHIP refusal with a
+  // clean child exit (real kernel flock; an errored child is not contention).
+  const contended = await runChild()
+  if (contended.code === 0 && contended.out.startsWith('REFUSED')) {
+    console.log(`CONTENTION-REFUSED: ${contended.out}`)
+  } else {
+    console.log(`CONTENTION-FAILED: exit=${contended.code} ${contended.out}`)
+    process.exitCode = 1
+  }
 
-// 3. Close; the second process must now acquire cleanly (exit 0).
-await handle.close()
-const after = await runChild()
-if (after.code === 0 && after.out === 'ACQUIRED') {
-  console.log('RELEASED-REACQUIRED')
-} else {
-  console.log(`RELEASE-FAILED: exit=${after.code} ${after.out}`)
-  process.exitCode = 1
+  // 3. Close; the second process must now acquire cleanly (exit 0).
+  await handle.close()
+  const after = await runChild()
+  if (after.code === 0 && after.out === 'ACQUIRED') {
+    console.log('RELEASED-REACQUIRED')
+  } else {
+    console.log(`RELEASE-FAILED: exit=${after.code} ${after.out}`)
+    process.exitCode = 1
+  }
+} finally {
+  await persistenceFiber.dispose()
 }
 EOF
 

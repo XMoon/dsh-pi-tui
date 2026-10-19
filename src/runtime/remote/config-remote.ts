@@ -65,6 +65,8 @@ import type {
   ProviderProfileConfig,
   SubagentAllowedModelRoute,
   SubagentModelSelectionConfig,
+  WebProviderConfig,
+  WebProviderSettings,
   TuiSettingsConfig,
   TuiSettingsDoc,
   ConfigReadiness,
@@ -610,14 +612,37 @@ class RemoteConfigMirror {
   /**
    * Serialized namespace write.
    *
-   * A write first guarantees a CURRENT mirror (so the revision fence it
-   * carries was read from the live document), dispatches the official
-   * `settings.mutate` with that revision, and only then refreshes from
-   * authority. The mutate's returned view is deliberately NOT trusted as the
-   * mirror's new state: the refreshed `describe` snapshot is the only new
-   * authority, which is what makes "never an optimistic local write" true.
+   * A write first guarantees a CURRENT mirror (so it can dispatch at all),
+   * dispatches the official `settings.mutate` with the revision the CALLER's
+   * decision unit was read at, and only then refreshes from authority. The
+   * mutate's returned view is deliberately NOT trusted as the mirror's new
+   * state: the refreshed `describe` snapshot is the only new authority, which
+   * is what makes "never an optimistic local write" true.
+   *
+   * `baseRevision` is the revision of the snapshot an op set was RECONCILED
+   * against (`RemoteTuiSettingsConfig.replace` diffing a whole document). The
+   * refresh above must not replace it: re-reading the fence here would
+   * re-authorize a decision taken against the older document, letting the
+   * stale op silently supersede a concurrent external write instead of
+   * surfacing the conflict. Callers that build their ops directly from the
+   * current mirror (provider profiles, permission presets, …) omit it and keep
+   * the refreshed revision.
+   *
+   * `refreshFailure` owns the ONE ambiguity left: the official mutate may have
+   * committed while the post-settlement refresh could not complete. `reject`
+   * (default) keeps that as a failed write, which is what a caller that RE-READS
+   * the mirror afterwards needs — it must never mistake a last-known value for the
+   * committed one (`RemoteSubagentModelSelectionConfig.set`). `record` reports the
+   * committed write as committed, marks the snapshot non-current and records the
+   * cause; the whole-document `replace` uses it so its consumer re-reads the
+   * authority itself and reports accepted-but-unverified instead of a refusal.
    */
-  async mutate(ns: string, ops: readonly RemoteSettingsPathOp[]): Promise<void> {
+  async mutate(
+    ns: string,
+    ops: readonly RemoteSettingsPathOp[],
+    baseRevision?: number,
+    refreshFailure: 'reject' | 'record' = 'reject',
+  ): Promise<void> {
     await this.enqueueWrite(async () => {
       await this.ensureCurrent()
       const snapshot = this.lastKnown()
@@ -649,10 +674,35 @@ class RemoteConfigMirror {
       if (descriptor === undefined) {
         throw new Error(`settings namespace "${ns}" is not available in this deployment`)
       }
-      const result = await settledResult(this.settings.mutate(ns, [...ops], descriptor.revision))
-      if (!result.ok) throw new Error(`settings.mutate(${ns}) failed: ${remoteFailureMessage(result.error)}`)
-      // Authoritative refresh AFTER the official settlement.
-      await this.describe()
+      const result = await settledResult(this.settings.mutate(ns, [...ops], baseRevision ?? descriptor.revision))
+      if (!result.ok) {
+        // A failed write RPC does NOT prove the Host refused it: the official
+        // controller applies the edit and then performs its OWN post-write describe,
+        // reporting a failure of that read as an error even though the write
+        // committed. The last-known snapshot may therefore already be behind a
+        // committed write, so it is marked non-current AND re-read here — a consumer
+        // then sees the committed value, the previous value (a real refusal) or an
+        // explicitly non-current authority, and never has to guess.
+        this.invalidate()
+        try {
+          await this.describe()
+        } catch (error) {
+          this.recordFailure(error)
+        }
+        throw new Error(`settings.mutate(${ns}) failed: ${remoteFailureMessage(result.error)}`)
+      }
+      // Authoritative refresh AFTER the official settlement. The write is already
+      // committed; a FAILED refresh is a currentness uncertainty, not a refusal —
+      // `readiness()` reports the real state in both of its failure modes.
+      if (refreshFailure === 'reject') {
+        await this.describe()
+        return
+      }
+      try {
+        await this.describe()
+      } catch (error) {
+        this.recordFailure(error)
+      }
     })
   }
 
@@ -863,8 +913,15 @@ class RemoteTuiSettingsConfig implements TuiSettingsConfig {
       // document into the USER layer.
       throw new Error('settings entry "tui-app" exposes no form projection')
     }
+    // The ops are reconciled against THIS descriptor, so ITS revision is the
+    // fence the official mutate must check: the queued write may refresh the
+    // mirror first and would otherwise re-authorize this diff against a newer
+    // document (silently superseding a concurrent external write).
     const ops = diffTuiSettings(descriptor.value, descriptor.user, doc)
-    await this.mirror.mutate(TUI_SETTINGS_NS, ops)
+    // `record`: this port's consumer re-reads the authority itself and classifies a
+    // commit it cannot confirm as unverified, so a failed post-settlement refresh
+    // must not be reported as a refusal.
+    await this.mirror.mutate(TUI_SETTINGS_NS, ops, descriptor.revision, 'record')
   }
 }
 
@@ -1397,6 +1454,7 @@ export class RemoteConfigPort implements ConfigPort {
   readonly permissions: PermissionConfig
   readonly presetDefault: PresetDefaultConfig
   readonly subagentModelSelection: SubagentModelSelectionConfig
+  readonly web: WebProviderConfig
 
   /** `undefined` while the `tui-app` namespace is absent from the mirror
    *  (the port's documented absence contract). */
@@ -1433,6 +1491,11 @@ export class RemoteConfigPort implements ConfigPort {
     this.permissions = new RemotePermissionConfig(this.mirror, source.remote.commands)
     this.presetDefault = new RemotePresetDefaultConfig(this.mirror)
     this.subagentModelSelection = new RemoteSubagentModelSelectionConfig(this.mirror)
+    // S2/PR-B §3.2: the Host web-provider setting stays DIRECT-only. The wire
+    // publishes no provider-selection read or write, so this backend reports a
+    // static unavailable and refuses every write — it never names a Host
+    // settings namespace and never claims a success.
+    this.web = new RemoteUnsupportedWebProviderConfig()
   }
 
   /** Commit one fresh mirror snapshot (or leave the last-known value). A
@@ -1476,5 +1539,48 @@ export class RemoteConfigPort implements ConfigPort {
   dispose(): void {
     this.mirror.dispose()
     this.credentialConfig.dispose()
+  }
+}
+
+/**
+ * The Remote backend's Web provider sub-domain: INTENTIONALLY unsupported in
+ * S2. The wire carries no web-provider selection read (the `settings` mirror
+ * exposes plugin forms for the CLIENT-owned surfaces only) and no write RPC for
+ * a Host namespace, so the section is presented as unsupported on this backend
+ * and every write fails closed instead of naming a Host settings namespace or
+ * reporting a success it cannot observe. Remote web-provider support is owned
+ * by a later stage (S3/S4) together with the Host generated-settings parity.
+ */
+class RemoteUnsupportedWebProviderConfig implements WebProviderConfig {
+  available(): boolean {
+    return false
+  }
+
+  async read(): Promise<WebProviderSettings | undefined> {
+    return undefined
+  }
+
+  private refuse(): never {
+    throw new Error('web provider settings are not supported on this backend')
+  }
+
+  async setSearchProvider(): Promise<void> {
+    this.refuse()
+  }
+
+  async setFetchProvider(): Promise<void> {
+    this.refuse()
+  }
+
+  async setSearchApiCount(): Promise<void> {
+    this.refuse()
+  }
+
+  async setSendOriginalQuestion(): Promise<void> {
+    this.refuse()
+  }
+
+  async setSearchApiBaseURL(): Promise<void> {
+    this.refuse()
   }
 }

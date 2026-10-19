@@ -72,6 +72,20 @@ proof through authoritative production input -> derived decision -> route/policy
 the missing production connection. This checkpoint does not create a runtime
 qualification requirement for documentation-only or unrelated changes.
 
+**If the diff touches a rendering path, walk the visual checklist.** For PiTui-painted changes, copy
+`docs/tui-design-language.md` §11.2 into the PR and answer every line — role →
+token per painted string, exactly one active device per region, whole-segment
+action-bar drops, keymap-derived keys, the frozen size matrix, dark/light plus the
+icon densities, before/after frames from the real `VirtualTerminal` **and** a real
+terminal check — then record what was actually run. Visual quality itself is an
+**Owner/Reviewer judgement**: "all tests pass" never closes a visual item, and an
+unrun frame or terminal check is reported `NOT_RUN`, never as PASS. The vocabulary
+lives in that one document; do not restate it here.
+
+**Renderer-qualified visual review:** For PiTui-painted ANSI changes, keep the VirtualTerminal and real-terminal checks above. For changes to **TSP-native** nodes (Picker, Strip, Reader, native overlay), the VirtualTerminal is not evidence of Tern's layout, scroll or input. In addition to the source→intent→admission→business sink proof, require the relevant versioned Tern headless client lane, real pane dimensions, node/ancestor clipping and PNG plus pointer/keyboard paths appropriate to the changed behavior. Treat physical GUI, IME, wheel/trackpad, font scaling and theme modes not actually run as `NOT_VERIFIED` or Owner-accepted limitations, never `PASS`. A unit CI pass cannot close Owner visual acceptance. See [`tern-tsp/foundation.md`](./tern-tsp/foundation.md) §6 and the owning TSP product contract; do not duplicate their specification here.
+
+**Major UX supersession:** When a review contains a frozen product redesign, compare the PR to the **current Owner-accepted contract**, not a historical plan's retired Must list. Confirm that the docs mark retired screens, event semantics, tests and evidence as historical, while business authority/currentness and still-valid acceptance remain intact. Avoid promoting a single panel's measured geometry into a shared SDK/renderer rule.
+
 ## 3. Qualification and evidence
 
 Use [migration qualification governance](client-server-migration.md#migration-process-and-qualification-governance)

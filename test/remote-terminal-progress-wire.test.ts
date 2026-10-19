@@ -383,33 +383,63 @@ test('L5: Host fiber disposal withdraws the descriptor and closes live watchers 
         for await (const _fact of wire.source.open(disposedSession, new AbortController().signal)) liveFrames += 1
       })()
       await waitFor('the live watcher opened', () => liveFrames >= 1, 10_000)
+      const endpoint = `${PI_TUI_TERMINAL_PROGRESS_WATCH.namespace}/${PI_TUI_TERMINAL_PROGRESS_WATCH.method}`
+      const localRegistry = wire.host.ctx.typert.local
+      // Positive control for the withdrawal witness below: while the additive
+      // Host fiber lives, this composition really serves the strict descriptor.
+      assert.notEqual(localRegistry.get(endpoint), undefined,
+        'the live Host fiber serves its strict terminal-progress descriptor')
 
       await wire.hostRuntime.dispose()
-      // The row closed the live watcher (its subscriber queue ended) and the
-      // iteration completed instead of hanging.
-      await live
-      assert.ok(liveFrames >= 1, 'the watcher received its opening frame')
+      // The strict descriptor is really WITHDRAWN, not merely unreachable. The
+      // Host Typert registry belongs to the fixture (the disposed runtime only
+      // owned the contribution), so it still reports the endpoint's history:
+      // `get` is gone because the contribution disposer withdrew it, while
+      // `hasSeen` stays true because it existed. A disposer that never ran
+      // leaves `get` defined; a registration that never happened leaves
+      // `hasSeen` false — either way this pair fails, so the Peer-death refusal
+      // below cannot mask a broken descriptor withdrawal.
+      assert.equal(localRegistry.get(endpoint), undefined,
+        'the disposed Host fiber withdrew its strict terminal-progress descriptor')
+      assert.equal(localRegistry.hasSeen(endpoint), true,
+        'that endpoint really was registered and then withdrawn (not never-registered)')
+      // Disposal ends the live watcher instead of leaving it hanging. 0.2.1-rc.2
+      // ties the owner Peer to the Host Connection fiber, so the iterated
+      // stream now TERMINATES WITH the official cancellation failure rather
+      // than a quiet completion: both are "the watch is over", and the failure
+      // is the truthful taxonomy for a peer that was disposed.
+      let watcherEnd: unknown
+      try {
+        await live
+      } catch (error) {
+        watcherEnd = error
+      }
+      assert.equal((watcherEnd as { code?: unknown } | undefined)?.code, 'gateway/cancelled',
+        'a disposed Peer ends the live watcher with the official cancellation code')
+      assert.ok(liveFrames >= 1, 'the watcher received its opening frame before disposal')
 
-      // A fresh watch now fails on the Host with the real withdrawn descriptor.
-      // The raw typed client watch is used because the retained Binding itself
-      // is released when the Host Connection composition goes away.
+      // A fresh watch cannot complete any more. 0.2.1-rc.2 ties the owner Peer
+      // to the Host Connection fiber (the mandated lifetime), so the official
+      // Gateway refuses the disposed Peer itself — the same `assertPeerLive`
+      // refusal a live caller would see — instead of reaching the withdrawn
+      // strict definition (that refusal is only observable while the peer is
+      // live). What this test still proves is the user-visible guarantee: no
+      // frames, and the real Remote failure code from the official Gateway.
       let withdrawnError: unknown
       try {
         for await (const _frame of wire.client.remote.piTuiTerminalProgress.watch(disposedSession)) {
-          assert.fail('a withdrawn descriptor must not yield frames')
+          assert.fail('a disposed transport must not yield frames')
         }
       } catch (error) {
         withdrawnError = error
       }
-      assert.ok(withdrawnError instanceof Error, `the withdrawn descriptor must fail: ${String(withdrawnError)}`)
-      assert.equal((withdrawnError as Error).message,
-        'typert gateway: piTuiTerminalProgress/watch: its strict definition was withdrawn and SRC fallback is forbidden',
-        'the real withdrawn-descriptor message')
+      assert.ok(withdrawnError instanceof Error, `a disposed transport must fail: ${String(withdrawnError)}`)
+      assert.equal((withdrawnError as { code?: unknown }).code, 'gateway/peer-disposed',
+        'the official Gateway refuses the disposed owner Peer')
 
       // PROOF 5: no physical socket; the private method travelled the in-process carrier.
       assert.equal(wire.hostRuntime.carrier.ownsHost, true, 'the transport is the in-process carrier')
-      const transportEndpoint = `${PI_TUI_TERMINAL_PROGRESS_WATCH.namespace}/${PI_TUI_TERMINAL_PROGRESS_WATCH.method}`
-      assert.ok(wire.carrierOpenEndpoints.includes(transportEndpoint),
+      assert.ok(wire.carrierOpenEndpoints.includes(endpoint),
         `the private endpoint travelled through carrier.openStream: ${JSON.stringify(wire.carrierOpenEndpoints)}`)
       assert.equal(webSocketConstructions, 0, 'no physical WebSocket client was constructed')
     } finally {

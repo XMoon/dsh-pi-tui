@@ -105,8 +105,7 @@ export const inject = ['cmdlineArgs']
  * bundle's own version cannot be read, so the message stays truthful.
  *
  * The current line has a minimum of the published npm release
- * dsh-v0.2.0-rc.2 (M3-3B: the Question lifecycle consumes rc.2-only
- * published contracts). The recovery guidance names the recommended published
+ * dsh-v0.2.1-rc.2. The recovery guidance names the recommended published
  * upgrade target — which may be NEWER than the floor — and allows its native
  * install scripts. The already-published 0.5.0 line keeps its own
  * rc.1-era contract and remains the compatible fallback for a

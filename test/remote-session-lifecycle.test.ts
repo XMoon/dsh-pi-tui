@@ -1,14 +1,14 @@
 /**
- * Contract tests for the Remote SessionLifecycle adapter under the alpha2
- * explicit-reference Client contract: ordinary create, explicit-preset raw
- * create + public refresh, open-as-retain, and publication-only fork.
+ * Contract tests for the Remote SessionLifecycle adapter under the rc.2
+ * explicit-reference Client contract: ONE official Client create for ordinary
+ * and preset creates alike, open-as-retain, and publication-only fork that
+ * passes `allowMigration:false` (never an implicit migration).
  */
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import {
   RemoteSessionLifecycle,
-  type RemoteLifecycleSessionRemotes,
   type RemoteLifecycleSessions,
 } from '../src/runtime/remote/session-lifecycle-remote.ts'
 import type { RemoteSessionReferenceLike, TuiSessionReferenceSource } from '../src/runtime/remote/session-reference.ts'
@@ -19,32 +19,49 @@ interface RetainCall {
   readonly source: TuiSessionReferenceSource
 }
 
-/** A faithful model of the alpha2 Client reference lifetime: a binding
+/** A faithful model of the rc.2 Client reference lifetime: a binding
  * generation exists only while at least one reference is retained, and a
  * same-id re-retain after full release yields a NEW binding object. */
 function harness() {
   const calls = {
     creates: [] as unknown[],
-    remoteCreates: [] as unknown[],
     forks: [] as unknown[],
     retains: [] as RetainCall[],
     releases: [] as string[],
-    refreshes: 0,
   }
   const catalogued = new Set<string>()
-  const generations = new Map<string, { readonly id: string }>()
+  const generations = new Map<string, {
+    readonly id: string
+    readonly session: {
+      getSnapshot(): { readonly openState: 'cold' | 'loading' | 'open' | 'error' | undefined; readonly openError: unknown }
+    }
+  }>()
   const counts = new Map<string, number>()
   let generation: { id: number } | undefined = { id: 1 }
+  let createResult: string | undefined
+  let createError: unknown
+  let createHook: (() => void) | undefined
   let forkResult = 'session-child'
   let forkError: unknown
   let forkHook: (() => void) | undefined
   let retainError: unknown
-  let refreshError: unknown
   let retainHook: (() => void) | undefined
+  /** The official initial-open settlement the fake reference exposes. `ready`
+   *  is independent from the open state: the real Client RESOLVES ready even
+   *  when `doOpen` records `openState: 'error'`. */
+  let openState: 'cold' | 'loading' | 'open' | 'error' | undefined = 'open'
+  let openError: unknown
+  let readyMode: 'resolve' | 'hold' = 'resolve'
+  let resolveReady: (() => void) | undefined
+  let rejectReady: ((error: unknown) => void) | undefined
   const sessions: RemoteLifecycleSessions = {
     create: async (options = {}) => {
       calls.creates.push(options)
-      const id = String(options.sessionId)
+      createHook?.()
+      if (createError !== undefined) throw createError
+      // The Host owns the returned identity: a blank reuse returns the named
+      // id, a nonblank create allocates another one.
+      const id = createResult ?? String(options.sessionId)
       catalogued.add(id)
       return id
     },
@@ -54,11 +71,6 @@ function harness() {
       if (forkError !== undefined) throw forkError
       catalogued.add(forkResult)
       return forkResult
-    },
-    refresh: async () => {
-      calls.refreshes += 1
-      if (refreshError !== undefined) throw refreshError
-      reconcile()
     },
     retain: (target, options) => {
       // This adapter only ever addresses plain Session ids; the structural
@@ -70,16 +82,39 @@ function harness() {
       if (retainError !== undefined) throw retainError
       if (!catalogued.has(target)) throw new Error(`sessions.retain: unknown session ${target}`)
       counts.set(target, (counts.get(target) ?? 0) + 1)
-      if (!generations.has(target)) generations.set(target, { id: target })
+      if (!generations.has(target)) {
+        generations.set(target, {
+          id: target,
+          session: { getSnapshot: () => ({ openState, openError }) },
+        })
+      }
       let live = true
+      const ready = new Promise<unknown>((resolve, reject) => {
+        if (readyMode === 'resolve') {
+          resolve(undefined)
+          return
+        }
+        resolveReady = () => { resolve(undefined) }
+        rejectReady = reject
+      })
+      const abortSignal = options.signal
+      if (abortSignal !== undefined) {
+        if (abortSignal.aborted) {
+          rejectReady?.(abortSignal.reason)
+        } else {
+          abortSignal.addEventListener('abort', () => { rejectReady?.(abortSignal.reason) }, { once: true })
+        }
+      }
+      // The official reference swallows its readiness rejection itself; a
+      // create that never awaits ready must not turn it into an unhandled one.
+      ready.catch(() => {})
       const reference: RemoteSessionReferenceLike = {
         sessionId: target,
         get binding() {
           if (!live) throw new Error(`Session reference "${target}" is released`)
           return generations.get(target)
         },
-        // Deliberately never resolves: no caller may treat `ready` as a gate.
-        ready: new Promise(() => {}),
+        ready,
         release: () => {
           if (!live) return
           live = false
@@ -94,24 +129,7 @@ function harness() {
       return reference
     },
   }
-  let remoteResult: { ok: true; value: { sessionId: string; agentPreset?: string } } | { ok: false; error: unknown } = {
-    ok: true,
-    value: { sessionId: 'session-remote' },
-  }
-  let remoteCreateHook: (() => void) | undefined
-  const remote: RemoteLifecycleSessionRemotes = {
-    create: async request => {
-      calls.remoteCreates.push(request)
-      remoteCreateHook?.()
-      return remoteResult
-    },
-  }
-  /** The Host list reconciliation `refresh()` performs: every id the Host
-   * published becomes addressable, whether or not the Client recorded it. */
-  const reconcile = (): void => {
-    if (remoteResult.ok) catalogued.add(remoteResult.value.sessionId)
-  }
-  const lifecycle = new RemoteSessionLifecycle(sessions, remote, {
+  const lifecycle = new RemoteSessionLifecycle(sessions, {
     getSnapshot: () => generation,
     subscribe: () => () => {},
   })
@@ -121,14 +139,23 @@ function harness() {
     sessions,
     bindingOf: (id: string) => generations.get(id),
     setGeneration: (id: number | undefined) => { generation = id === undefined ? undefined : { id } },
+    setCreateResult: (id: string | undefined) => { createResult = id },
+    setCreateError: (error: unknown) => { createError = error },
+    setCreateHook: (hook: () => void) => { createHook = hook },
     setForkResult: (id: string) => { forkResult = id },
     setForkError: (error: unknown) => { forkError = error },
     setForkHook: (hook: () => void) => { forkHook = hook },
     setRetainError: (error: unknown) => { retainError = error },
-    setRefreshError: (error: unknown) => { refreshError = error },
     setRetainHook: (hook: () => void) => { retainHook = hook },
-    setRemoteCreateHook: (hook: () => void) => { remoteCreateHook = hook },
-    setRemoteResult: (result: typeof remoteResult) => { remoteResult = result },
+    /** Hold the next reference's `ready` until resolved/rejected by the test. */
+    setReadyHold: () => { readyMode = 'hold' },
+    resolveReady: () => { resolveReady?.() },
+    rejectReadyWith: (error: unknown) => { rejectReady?.(error) },
+    /** The official open settlement the retained generation reports. */
+    setOpenState: (state: 'cold' | 'loading' | 'open' | 'error' | undefined, error?: unknown) => {
+      openState = state
+      openError = error
+    },
     setCatalogued: (id: string, present: boolean) => {
       if (present) catalogued.add(id)
       else catalogued.delete(id)
@@ -136,12 +163,43 @@ function harness() {
   }
 }
 
-test('ordinary create maps explicit cwd to ClientSessions.create', async () => {
+test('ordinary create maps explicit cwd to the one official ClientSessions.create', async () => {
   const h = harness()
   const result = await h.lifecycle.create({ sessionId: 'session-a', cwd: '/ws' })
   assert.equal(result.outcome.kind, 'created')
   assert.deepEqual(h.calls.creates, [{ sessionId: 'session-a', cwd: '/ws' }])
-  assert.deepEqual(h.calls.remoteCreates, [])
+})
+
+test('an explicit preset rides the SAME single official ClientSessions.create call', async () => {
+  const h = harness()
+  h.setCreateResult('session-remote')
+  const result = await h.lifecycle.create({ sessionId: 'session-a', cwd: '/ws', agentPreset: 'minimal' })
+  assert.equal(result.outcome.kind, 'created')
+  assert.deepEqual(h.calls.creates,
+    [{ sessionId: 'session-a', cwd: '/ws', agentPreset: 'minimal' }],
+    'rc.2 ClientSessions.create accepts agentPreset atomically; there is no raw session.create path')
+  assert.deepEqual(h.calls.retains, [{ target: 'session-remote', source: 'tuiMainView' }],
+    'the PUBLISHED id, not the requested id, is retained')
+})
+
+test('create adopts the Host-returned identity, never the requested correlation id', async () => {
+  const h = harness()
+  h.setCreateResult('session-host-chosen')
+  const result = await h.lifecycle.create({ sessionId: 'session-requested' })
+  assert.equal(result.outcome.kind, 'created')
+  if (result.outcome.kind !== 'created') throw new Error('unreachable')
+  assert.equal(result.outcome.handle.session.id, 'session-host-chosen')
+  assert.equal(h.bindingOf('session-requested'), undefined, 'the requested id is correlation only')
+  assert.ok(h.bindingOf('session-host-chosen') !== undefined, 'the returned id is the retained generation')
+})
+
+test('a blank reuse returns the reused id and still retains exactly once', async () => {
+  const h = harness()
+  // A blank reuse: the Host returns the named id it reused.
+  const result = await h.lifecycle.create({ sessionId: 'session-blank' })
+  assert.equal(result.outcome.kind, 'created')
+  assert.deepEqual(h.calls.creates, [{ sessionId: 'session-blank' }])
+  assert.deepEqual(h.calls.retains, [{ target: 'session-blank', source: 'tuiMainView' }])
 })
 
 test('a current create retains the published Session exactly once for the visible main surface', async () => {
@@ -190,6 +248,38 @@ test('create retain failure is published-with-error and never retries creation',
   assert.equal(h.calls.creates.length, 1, 'a post-publication failure must not re-create')
 })
 
+test('a preset create failure is classified by the SAME proven-code policy', async () => {
+  const h = harness()
+  h.setCreateError({ rpcError: { code: 'agent-preset/not-found', message: 'unknown preset' } })
+  const result = await h.lifecycle.create({ sessionId: 'session-a', agentPreset: 'missing' })
+  assert.equal(result.outcome.kind, 'rejected')
+  if (result.outcome.kind === 'rejected') assert.equal(result.outcome.error.code, 'agent-preset/not-found')
+  assert.equal(h.calls.creates.length, 1, 'a proven refusal must never be resent')
+})
+
+test('a create failure with a proven published identity is published-with-error', async () => {
+  const h = harness()
+  h.setCreateError({
+    rpcError: {
+      code: 'session/workspace-attach-failed',
+      message: 'attach failed',
+      details: { sessionId: 'session-published' },
+    },
+  })
+  const result = await h.lifecycle.create({ sessionId: 'session-a' })
+  assert.equal(result.outcome.kind, 'published-with-error')
+  if (result.outcome.kind === 'published-with-error') assert.equal(result.outcome.sessionId, 'session-published')
+})
+
+test('an unproven create failure stays indeterminate with the requested id as correlation', async () => {
+  const h = harness()
+  h.setCreateError(new Error('socket closed'))
+  const result = await h.lifecycle.create({ sessionId: 'session-a' })
+  assert.equal(result.outcome.kind, 'indeterminate')
+  if (result.outcome.kind === 'indeterminate') assert.equal(result.outcome.requestedSessionId, 'session-a')
+  assert.equal(h.calls.creates.length, 1, 'an indeterminate create must never be retried')
+})
+
 test('same-id release and re-retain yields a different binding generation', async () => {
   const h = harness()
   const first = await h.lifecycle.create({ sessionId: 'session-a' })
@@ -207,56 +297,12 @@ test('same-id release and re-retain yields a different binding generation', asyn
   assert.notEqual(secondOwner.bindingIdentity, firstOwner.bindingIdentity)
 })
 
-test('explicit preset create uses generated session.create, then refresh, then retain', async () => {
+test('create is a pre-dispatch cancellation on a disconnected client', async () => {
   const h = harness()
-  h.setRemoteResult({ ok: true, value: { sessionId: 'session-remote' } })
-  const result = await h.lifecycle.create({ sessionId: 'session-a', cwd: '/ws', agentPreset: 'minimal' })
-  assert.equal(result.outcome.kind, 'created')
-  assert.deepEqual(h.calls.remoteCreates, [{ sessionId: 'session-a', cwd: '/ws', agentPreset: 'minimal' }])
-  assert.deepEqual(h.calls.creates, [], 'the explicit-preset path must not use ordinary ClientSessions.create')
-  assert.equal(h.calls.refreshes, 1, 'the raw create must be reconciled through the public refresh')
-  assert.deepEqual(h.calls.retains, [{ target: 'session-remote', source: 'tuiMainView' }],
-    'the PUBLISHED id, not the requested id, is retained')
-})
-
-test('explicit preset refresh failure preserves the published identity', async () => {
-  const h = harness()
-  h.setRemoteResult({ ok: true, value: { sessionId: 'session-remote' } })
-  h.setRefreshError(new Error('list unavailable'))
-  const result = await h.lifecycle.create({ sessionId: 'session-a', agentPreset: 'minimal' })
-  assert.equal(result.outcome.kind, 'published-with-error')
-  if (result.outcome.kind === 'published-with-error') assert.equal(result.outcome.sessionId, 'session-remote')
-  assert.equal(h.calls.remoteCreates.length, 1, 'a reconcile failure must not duplicate the Host create')
-  assert.deepEqual(h.calls.retains, [])
-})
-
-test('explicit preset retain failure preserves the published identity', async () => {
-  const h = harness()
-  h.setRemoteResult({ ok: true, value: { sessionId: 'session-remote' } })
-  h.setRetainError(new Error('unknown session'))
-  const result = await h.lifecycle.create({ sessionId: 'session-a', agentPreset: 'minimal' })
-  assert.equal(result.outcome.kind, 'published-with-error')
-  if (result.outcome.kind === 'published-with-error') assert.equal(result.outcome.sessionId, 'session-remote')
-  assert.deepEqual(h.calls.retains, [{ target: 'session-remote', source: 'tuiMainView' }])
-})
-
-test('explicit preset create superseded before adoption neither refreshes nor retains', async () => {
-  const h = harness()
-  h.setRemoteResult({ ok: true, value: { sessionId: 'session-remote' } })
-  h.setRemoteCreateHook(() => h.setGeneration(2))
-  const result = await h.lifecycle.create({ sessionId: 'session-a', agentPreset: 'minimal' })
-  assert.equal(result.ownership, 'superseded')
-  assert.equal(result.outcome.kind, 'created')
-  assert.equal(h.calls.refreshes, 0, 'a superseded create must not reconcile Client state')
-  assert.deepEqual(h.calls.retains, [], 'a superseded create must not retain the child')
-})
-
-test('explicit preset create reports indeterminate for a malformed success payload', async () => {
-  const h = harness()
-  h.setRemoteResult({ ok: true, value: { sessionId: '' } })
-  const result = await h.lifecycle.create({ sessionId: 'session-a', agentPreset: 'minimal' })
-  assert.equal(result.outcome.kind, 'indeterminate')
-  if (result.outcome.kind === 'indeterminate') assert.equal(result.outcome.requestedSessionId, 'session-a')
+  h.setGeneration(undefined)
+  const result = await h.lifecycle.create({ sessionId: 'session-a' })
+  assert.deepEqual(result, { ownership: 'current', outcome: { kind: 'cancelled' } })
+  assert.deepEqual(h.calls.creates, [])
 })
 
 test('open acquires the Session through retain and never through a selection verb', async () => {
@@ -285,7 +331,6 @@ test('open reports an unknown identity as unavailable, never as a created Sessio
   const result = await h.lifecycle.open({ sessionId: 'session-missing' })
   assert.equal(result.outcome.kind, 'unavailable')
   assert.deepEqual(h.calls.creates, [])
-  assert.deepEqual(h.calls.remoteCreates, [])
   // `retain` refuses an unknown identity before any reference exists, so there
   // is nothing to release.
   assert.deepEqual(h.calls.releases, [])
@@ -311,30 +356,131 @@ test('open releases the new reference when a synchronous subscriber supersedes i
   assert.equal(h.bindingOf('session-a'), undefined, 'no generation may stay live for a superseded open')
 })
 
-test('open does not await the reference ready promise', async () => {
+test('open does not report opened before the initial history open settles', async () => {
   const h = harness()
   h.setCatalogued('session-a', true)
-  const result = await h.lifecycle.open({ sessionId: 'session-a' })
-  assert.equal(result.outcome.kind, 'opened')
+  h.setReadyHold()
+  let settled = false
+  const pending = h.lifecycle.open({ sessionId: 'session-a' }).then((result) => {
+    settled = true
+    return result
+  })
+  // Let the retained reference's pending readiness win any microtask race.
+  await new Promise<void>(resolve => setImmediate(resolve))
+  assert.equal(settled, false, 'retain alone is not a successful open')
+  h.resolveReady()
+  assert.equal((await pending).outcome.kind, 'opened')
 })
 
-test('fork maps only source session and the optional exact event cut, without ordinary create', async () => {
+test('open reports an official history-open error as unavailable and releases exactly once', async () => {
+  const h = harness()
+  h.setCatalogued('session-a', true)
+  // The real Client RESOLVES ready after `doOpen` records the error.
+  h.setOpenState('error', {
+    code: 'session/format-unsupported',
+    message: 'the generation cannot be promoted',
+  })
+  const result = await h.lifecycle.open({ sessionId: 'session-a' })
+  assert.equal(result.outcome.kind, 'unavailable')
+  if (result.outcome.kind === 'unavailable') {
+    assert.match(result.outcome.message, /failed to open/u)
+    assert.match(result.outcome.message, /cannot be promoted/u,
+      'the official openError is carried, not replaced by a generic message')
+  }
+  assert.equal(h.calls.releases.length, 1, 'the failed generation is released exactly once')
+  assert.equal(h.bindingOf('session-a'), undefined, 'no leaked generation after a failed open')
+})
+
+test('a resync whose old ready wins is fail-closed, never a committed open', async () => {
+  // The official `Session.configureSubagent()` address replacement calls
+  // `resync()`: it invalidates the old open, sets the SAME binding to `cold`
+  // and starts a new open (`loading`). The OLD reference.ready can resolve
+  // first, so "not error" is not enough to commit.
+  for (const state of ['cold', 'loading'] as const) {
+    const h = harness()
+    h.setCatalogued('session-a', true)
+    h.setReadyHold()
+    const pending = h.lifecycle.open({ sessionId: 'session-a' })
+    h.setOpenState(state)
+    h.resolveReady()
+    const result = await pending
+    assert.equal(result.outcome.kind, 'unavailable', `a ${state} history must not be opened`)
+    if (result.outcome.kind === 'unavailable') {
+      assert.match(result.outcome.message, new RegExp(`not settled \\(state: ${state}\\)`, 'u'))
+    }
+    assert.equal(h.calls.releases.length, 1, `the ${state} stale generation is released exactly once`)
+    assert.equal(h.bindingOf('session-a'), undefined, `no ${state} generation leaks`)
+  }
+})
+
+test('open fails closed when the official open state is absent', async () => {
+  const h = harness()
+  h.setCatalogued('session-a', true)
+  h.setOpenState(undefined)
+  const result = await h.lifecycle.open({ sessionId: 'session-a' })
+  assert.equal(result.outcome.kind, 'unavailable',
+    'a structural binding without the official state is never accepted')
+  if (result.outcome.kind === 'unavailable') {
+    assert.match(result.outcome.message, /open state is unavailable/u)
+  }
+  assert.equal(h.calls.releases.length, 1)
+  assert.equal(h.bindingOf('session-a'), undefined)
+})
+
+test('open reports a rejected readiness as unavailable and releases exactly once', async () => {
+  const h = harness()
+  h.setCatalogued('session-a', true)
+  h.setReadyHold()
+  const pending = h.lifecycle.open({ sessionId: 'session-a' })
+  h.rejectReadyWith(new Error('history read failed'))
+  const result = await pending
+  assert.equal(result.outcome.kind, 'unavailable')
+  if (result.outcome.kind === 'unavailable') assert.match(result.outcome.message, /history read failed/u)
+  assert.equal(h.calls.releases.length, 1)
+  assert.equal(h.bindingOf('session-a'), undefined)
+})
+
+test('a Connection rollover while open waits for readiness is superseded and releases once', async () => {
+  const h = harness()
+  h.setCatalogued('session-a', true)
+  h.setReadyHold()
+  const pending = h.lifecycle.open({ sessionId: 'session-a' })
+  h.setGeneration(2)
+  h.resolveReady()
+  assert.deepEqual(await pending, { ownership: 'superseded', outcome: { kind: 'cancelled' } })
+  assert.equal(h.calls.releases.length, 1)
+  assert.equal(h.bindingOf('session-a'), undefined)
+})
+
+test('an abort while open waits for readiness is superseded and releases once', async () => {
+  const h = harness()
+  h.setCatalogued('session-a', true)
+  h.setReadyHold()
+  const controller = new AbortController()
+  const pending = h.lifecycle.open({ sessionId: 'session-a', signal: controller.signal })
+  controller.abort()
+  assert.deepEqual(await pending, { ownership: 'superseded', outcome: { kind: 'cancelled' } })
+  assert.equal(h.calls.releases.length, 1)
+  assert.equal(h.bindingOf('session-a'), undefined)
+})
+
+test('fork refuses implicit migration and maps only source session plus the optional exact event cut', async () => {
   const h = harness()
   const result = await h.lifecycle.fork({ sourceSessionId: 'session-source', atSeq: 42 })
   assert.equal(result.ownership, 'current')
   assert.equal(result.outcome.kind, 'forked')
-  assert.deepEqual(h.calls.forks, [{ sessionId: 'session-source', atSeq: 42 }])
+  assert.deepEqual(h.calls.forks, [{ sessionId: 'session-source', atSeq: 42, allowMigration: false }])
   // No local seed construction: the forwarded payload carries only the official
   // fields — the Host owns the cut, seed, repair and child identity.
-  assert.deepEqual(h.calls.forks.map(payload => Object.keys(payload).sort()), [['atSeq', 'sessionId']])
+  assert.deepEqual(h.calls.forks.map(payload => Object.keys(payload).sort()),
+    [['allowMigration', 'atSeq', 'sessionId']])
   assert.deepEqual(h.calls.creates, [])
-  assert.deepEqual(h.calls.remoteCreates, [])
 })
 
 test('fork omits atSeq rather than encoding an empty prefix', async () => {
   const h = harness()
   await h.lifecycle.fork({ sourceSessionId: 'session-source' })
-  assert.deepEqual(h.calls.forks, [{ sessionId: 'session-source' }])
+  assert.deepEqual(h.calls.forks, [{ sessionId: 'session-source', allowMigration: false }])
 })
 
 test('non-canonical fork cuts are rejected before Client dispatch', async () => {
@@ -342,6 +488,14 @@ test('non-canonical fork cuts are rejected before Client dispatch', async () => 
   const result = await h.lifecycle.fork({ sourceSessionId: 'session-source', atSeq: 0.5 })
   assert.equal(result.outcome.kind, 'rejected')
   assert.deepEqual(h.calls.forks, [])
+})
+
+test('an official migration-required fork refusal is rejected and never retried', async () => {
+  const h = harness()
+  h.setForkError({ rpcError: { code: 'session/migration-required', message: 'open the source Session first' } })
+  const result = await h.lifecycle.fork({ sourceSessionId: 'session-source' })
+  assert.equal(result.outcome.kind, 'rejected')
+  assert.equal(h.calls.forks.length, 1)
 })
 
 test('official fork refusal is rejected and never retried', async () => {
@@ -377,7 +531,7 @@ test('a resolved fork is publication only: no binding is required and none is re
   assert.equal(h.calls.forks.length, 1)
   assert.deepEqual(h.calls.retains, [], 'fork publication must never retain the child')
   assert.equal(h.bindingOf('session-reconciled'), undefined,
-    'alpha2 does not guarantee a binding for a catalogued fork child')
+    'rc.2 does not guarantee a binding for a catalogued fork child')
 })
 
 test('a superseded fork child stays real but is never adopted', async () => {
@@ -440,9 +594,9 @@ test('a create superseded by a synchronous retain subscriber releases the new ow
   assert.equal(h.bindingOf('session-a'), undefined, 'no generation may stay live for a superseded create')
 })
 
-test('an explicit-preset create superseded by a synchronous retain subscriber releases the new owner', async () => {
+test('a preset create superseded by a synchronous retain subscriber releases the new owner', async () => {
   const h = harness()
-  h.setRemoteResult({ ok: true, value: { sessionId: 'session-remote' } })
+  h.setCreateResult('session-remote')
   h.setRetainHook(() => h.setGeneration(2))
   const result = await h.lifecycle.create({ sessionId: 'session-a', agentPreset: 'minimal' })
   assert.equal(result.ownership, 'superseded')

@@ -31,17 +31,21 @@ import type {
   UserKeybindingsConfig,
 } from './types.ts'
 
-/** The conditional affordance rules (plan §5): the empty-editor ↓ task
- * browser. Kept as a composition rule so a user remap of app.tasks.open
- * replaces the ACTION, while the affordance itself stays conditional.
- * PROMPT-mode only: a shell-mode empty body is composing a command — ↓
- * keeps its editing meaning there, never the browser (the shell-mode
- * exclusion pre-keybindings main had on the raw ↓ routing; the footer's
- * ↓ hint and the routing share this single gate). */
+/** The conditional affordance rules (plan §5): the ↓ task admission. Kept
+ * as a composition rule so a user remap of app.tasks.open replaces the
+ * ACTION, while the affordance itself stays conditional. Phase 3B/B4-B:
+ * the on-demand Task Quick enters from the last VISUAL line of a NON-EMPTY
+ * draft too — the context's `quickDownEligible` admits the exact editor
+ * boundary state (prompt mode, focused host editor, no transient editor
+ * mode owning Down), and `editorEmpty` no longer gates this composition
+ * (the field keeps its own meaning elsewhere). PROMPT-mode only: a
+ * shell-mode body is composing a command — ↓ keeps its editing meaning
+ * there, never the Quick (the footer's ↓ hint and the routing share this
+ * single gate). */
 const TASKS_OPEN_AFFORDANCE: CompositionRule = {
   action: 'app.tasks.open',
   key: 'down',
-  predicate: (context) => context.focusedSeat === 'editor' && context.editorEmpty
+  predicate: (context) => context.focusedSeat === 'editor' && context.quickDownEligible
     && context.editorPromptMode && context.tasksActive,
 }
 

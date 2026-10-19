@@ -206,7 +206,7 @@ test('A opens the Add picker; typing filters; Enter adds and closes', async () =
   let view = vt.getViewport().join('\n')
   assert.ok(view.includes('Add Item → Row 1 · Left'), `picker title missing (the add side is shown):\n${view}`)
   assert.ok(view.includes('Search:'), `search line missing:\n${view}`)
-  // Type to filter (one chunk — the paste-burst path). The label 'cache
+  // Type to filter (one input event). The label 'cache
   // hit' pins the match: the unfiltered catalog also carries stats-line,
   // whose description contains 'cache'.
   vt.sendInput('cache hit')

@@ -39,8 +39,23 @@ const GROUP_GAP_MIN_CELLS = 2
 /** The explicit unknown-model stand-in — never the parent's model. */
 const UNKNOWN_MODEL = 'model ?'
 
+/** One rendered bar line plus the hit metadata of the SAME formatting pass. */
+export interface ViewerSubjectBarLine {
+  /** The single-line bar, or `''` on the main subject (zero rows). */
+  readonly text: string
+  /** The leading cells `[0, navigationCells)` that ARE the `‹ back` (or the
+   *  narrow `‹`) affordance actually painted on THIS line. `0` when no
+   *  navigation glyph survived (the main subject, or an extreme width whose
+   *  final truncation replaced the glyph) — a hit set that could never be
+   *  resolved to the painted affordance. */
+  readonly navigationCells: number
+}
+
 /**
- * Render the viewer subject bar.
+ * Render the viewer subject bar AND report its navigation hit cells from the
+ * SAME formatting result (viewer UX plan §6.1): the caller must never re-guess
+ * the width ladder at click time, and the hit set is exactly the painted
+ * glyph cells — every other cell of the row stays inert.
  *
  * @param input.snapshot - the committed status snapshot (the ONLY state read).
  * @param input.childTitle - the committed child display-projection title; the
@@ -48,15 +63,14 @@ const UNKNOWN_MODEL = 'model ?'
  *   (`displaySubjectPresentation.sessionId === view.subject.id`). A title
  *   equal to the label is not repeated.
  * @param input.width - the terminal width in cells.
- * @returns the single-line bar, or `''` on the main subject (zero rows).
  */
-export function renderViewerSubjectBar(input: {
+export function renderViewerSubjectBarLine(input: {
   snapshot: StatusSnapshot
   childTitle?: string
   width: number
-}): string {
+}): ViewerSubjectBarLine {
   const subject = input.snapshot.view.subject
-  if (subject.kind !== 'subagent') return ''
+  if (subject.kind !== 'subagent') return { text: '', navigationCells: 0 }
   const width = Number.isFinite(input.width) ? Math.max(1, Math.floor(input.width)) : 1
   // Every rendered text field is a Host projection string (external data):
   // normalize each to ONE display line before measuring. The single-physical-
@@ -106,8 +120,9 @@ export function renderViewerSubjectBar(input: {
     const identity = identityOf(label, step.title ? title : undefined)
     const statusText = activity === undefined ? '' : (step.activityFull ? activity.full : activity.short)
     const modelText = paintModel(modelVariants[Math.min(step.modelStage, modelVariants.length - 1)]!)
+    const navigationText = step.navigationFull ? navigation.full : navigation.short
     const line = composeCandidate({
-      navigationText: step.navigationFull ? navigation.full : navigation.short,
+      navigationText,
       identity,
       statusText,
       modelText,
@@ -115,7 +130,7 @@ export function renderViewerSubjectBar(input: {
       trimLabel: step.trimLabel,
       trimModel: step.trimModel,
     })
-    if (line !== undefined) return line
+    if (line !== undefined) return { text: line, navigationCells: visibleWidth(navigationText) }
   }
   // Ultimate safety for a width that cannot hold the terse ladder entry at
   // all: cell-safe truncation of the plain terse composition (never a wrap).
@@ -125,7 +140,31 @@ export function renderViewerSubjectBar(input: {
     ...activity === undefined ? [] : [activity.short],
     paintModel(modelVariants[modelVariants.length - 1]!),
   ].join(' ')
-  return truncateToWidth(terse, width, '…')
+  const text = truncateToWidth(terse, width, '…')
+  // Truncation only ever removes the TAIL, so the glyph (the FIRST cell of
+  // `terse`) survives exactly while at least one content cell fits beside the
+  // ellipsis; when the ellipsis itself eats the whole budget the line IS the
+  // replacement and the navigation cells must be EMPTY (clicking the
+  // replacement would exit from a cell the user never saw as `back`).
+  const navigationWidth = visibleWidth(NAVIGATION_SHORT)
+  const ellipsisWidth = visibleWidth('…')
+  return {
+    text,
+    navigationCells: ellipsisWidth < width ? Math.min(navigationWidth, visibleWidth(text)) : 0,
+  }
+}
+
+/**
+ * Render the viewer subject bar.
+ *
+ * @returns the single-line bar, or `''` on the main subject (zero rows).
+ */
+export function renderViewerSubjectBar(input: {
+  snapshot: StatusSnapshot
+  childTitle?: string
+  width: number
+}): string {
+  return renderViewerSubjectBarLine(input).text
 }
 
 /** The child identity text: label plus the optional title description. */

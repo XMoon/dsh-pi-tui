@@ -26,6 +26,7 @@ import { CompactTextPreview } from './compact-text-preview.ts'
 import { iconPrefix } from '../../icons.ts'
 import type { IconStyle } from '../../../domain/display/icons.ts'
 import { color } from '../../theme/runtime.ts'
+import { sanitizeDisplayText } from '../../presentation/terminal-text.ts'
 
 /**
  * The waiting-status line. While the subject RUNS the occurrence waits for
@@ -50,7 +51,7 @@ export class PendingContextComponent implements Component {
   constructor(text: string, running: boolean, iconStyle: IconStyle) {
     // Newlines flatten to spaces: the preview is one bounded paragraph, not
     // a multi-line card body.
-    this.preview = new CompactTextPreview(text.replace(/\r\n|\r|\n/g, ' '), 2, '  ')
+    this.preview = new CompactTextPreview(sanitizeDisplayText(text).replace(/\r\n|\r|\n/g, ' '), 2, '  ')
     this.running = running
     this.iconStyle = iconStyle
   }

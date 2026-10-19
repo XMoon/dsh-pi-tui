@@ -213,10 +213,13 @@ test('duplicate placements: the same id appends independent, separately styled r
   // The cursor sits on the second placement: style it Speed (full → speed).
   m.cycleFormat()
   assert.equal(refs()[1]!.format, 'speed', 'the second placement styles Speed')
-  // Walk back onto the first placement and style it Latency (full → speed
-  // → latency; a third cycle would return to the default and drop the
+  // Walk back onto the first placement and style it Latency: the declared
+  // format cycle is full → speed → speed-all → speed-both → latency, so it
+  // takes four cycles (a fifth would return to the default and drop the
   // override again).
   while (m.state().cursor !== m.state().layout.rows[0]!.left.indexOf(refs()[0]!)) m.moveUp()
+  m.cycleFormat()
+  m.cycleFormat()
   m.cycleFormat()
   m.cycleFormat()
   assert.equal(refs()[0]!.format, 'latency', 'the first placement styles Latency')

@@ -11,6 +11,7 @@ import { basename, dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import test from 'node:test'
 
+import { COMPAT_MATRIX } from '../scripts/lib/dsh-compat.mjs'
 import { testLifecycle } from './support/temp-lifecycle.ts'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
@@ -45,12 +46,17 @@ function candidateFiles() {
     'dist/builtins.mjs': 'export const BUILTINS_PROBE = true\n',
     'dist/extension/advanced.mjs': 'export const ADVANCED_API_LEVEL = 1\n',
     'dist/extension/unstable.mjs': 'export const UNSTABLE_API_LEVEL = 1\n',
+    // The bundle's Host-plane Loader row entry. The synthetic candidate must
+    // mirror the REAL published entry set (the tarball smoke imports every
+    // public subpath), including the plugin name the row is loaded by.
+    'dist/performance-host.mjs': "export const name = 'pi-tui-performance-host'\n",
     'dist/index.d.mts': 'export declare const SOURCE_PROBE: boolean\n',
     'dist/startup.d.mts': 'export declare const STARTUP_PROBE: boolean\n',
     'dist/extensions.d.mts': 'export declare const EXTENSIONS_PROBE: boolean\n',
     'dist/builtins.d.mts': 'export declare const BUILTINS_PROBE: boolean\n',
     'dist/extension/advanced.d.mts': 'export declare const ADVANCED_API_LEVEL: 1\n',
     'dist/extension/unstable.d.mts': 'export declare const UNSTABLE_API_LEVEL: 1\n',
+    'dist/performance-host.d.mts': 'export declare const name: string\n',
     'cordis.patch.yml': 'patch: []\n',
     'README.md': '# source probe\n',
     'README.en.md': '# source probe\n',
@@ -106,8 +112,13 @@ function makeFixture(life, { includePresets = true, candidatePeers = { [DSH_CLI]
       './extensions/advanced': './dist/extension/advanced.mjs',
       './extensions/unstable': './dist/extension/unstable.mjs',
       './builtins': './dist/builtins.mjs',
+      './performance-host': './dist/performance-host.mjs',
     },
     peerDependencies: candidatePeers,
+    // The smoke asserts the packed manifest restates the repo matrix floor, so
+    // the synthetic candidate must mirror that REAL field: a fixture without it
+    // would fail a production manifest contract for the wrong reason.
+    engines: { node: '^22.19.0 || >=24', dsh: `>=${COMPAT_MATRIX.matrix.at(-1).dshFrom}` },
   }, candidateFiles())
   return { root, distribution, candidate, registryTarball }
 }

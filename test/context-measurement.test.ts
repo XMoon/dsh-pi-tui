@@ -327,7 +327,7 @@ test('P1: a session switch never shows the OLD session context through the statu
   app.start()
   startedApps.add(app)
   const stats = (inputTokens: number): SessionStats => ({
-    turns: 5, steps: 9, llmMs: 100, firstTokenMsAvg: 50, tokensPerSec: 10, cacheHitPct: 0,
+    turns: 5, steps: 9, llmMs: 100, cacheHitPct: 0,
     inputTokens, outputTokens: 200, cacheReadTokens: 0, cacheWriteTokens: 0, contextWindow: 128_000,
   })
   try {

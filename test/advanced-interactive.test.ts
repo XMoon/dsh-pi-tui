@@ -328,7 +328,9 @@ test('advanced input route: a throwing capture fails open (the editor still rece
   app.stop()
 })
 
-/** A TuiApp whose empty-editor ↓ affordance is observable (Host shortcut probe). */
+/** A TuiApp whose ↓ admission is observable (Host shortcut probe). B4-B:
+ *  the admission needs the Quick projection alongside the badge, and the
+ *  spy wraps the public production entry. */
 async function appWithTasksTrigger() {
   const { VirtualTerminal } = await import('./virtual-terminal.ts')
   const { TuiApp } = await import('../src/tui-app.ts')
@@ -337,12 +339,19 @@ async function appWithTasksTrigger() {
   const app = new TuiApp(vt, {
     onSubmit: () => {},
     onExit: () => {},
-    onOpenTasks: () => { opened += 1 },
   })
+  const realEntry = app.enterTaskQuick.bind(app)
+  app.enterTaskQuick = () => {
+    const entered = realEntry.call(app)
+    if (entered) opened += 1
+    return entered
+  }
   app.start()
   startedApps.add(app)
   await vt.waitForRender()
+  app.setQuickTaskItems([{ value: 'job:job-1', label: 'build', status: 'running', source: 'job' }])
   app.setTasks([{ id: 'job:1', label: 'build', status: 'running' }])
+  await vt.waitForRender()
   await vt.waitForRender()
   return { vt, app, opened: () => opened }
 }
@@ -376,6 +385,9 @@ test('an advanced overlay blur() releases the keyboard seat; focus() reclaims it
   vt.sendInput('\x1b[B')
   await vt.waitForRender()
   assert.equal(opened(), 1, '↓ must work while the capturing overlay is blurred')
+  // B4-B: the press ENTERED Quick — leave it before the typing witness.
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
   vt.sendInput('x')
   await vt.waitForRender()
   assert.equal(app.seatTextForTest(), 'x', 'typing reaches the editor while the overlay is blurred')
@@ -408,6 +420,9 @@ test('an advanced overlay hide()/show() moves the keyboard owner', async () => {
   vt.sendInput('\x1b[B')
   await vt.waitForRender()
   assert.equal(opened(), 1, '↓ must work while the capturing overlay is hidden')
+  // B4-B: leave the entered Quick before show() reclaims the seat.
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
 
   lease.show()
   await vt.waitForRender()
@@ -448,6 +463,9 @@ test('a blurred capturing overlay stays blurred when a child overlay closes', as
   vt.sendInput('\x1b[B')
   await vt.waitForRender()
   assert.equal(opened(), 1, 'Host shortcuts still work after the blurred overlay is restored')
+  // B4-B: leave the entered Quick before closing the lease.
+  vt.sendInput('\x1b')
+  await vt.waitForRender()
   a.close()
   app.stop()
 })

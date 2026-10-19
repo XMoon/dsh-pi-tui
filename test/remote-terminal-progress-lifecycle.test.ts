@@ -63,7 +63,8 @@ import type { TerminalNotificationPresentation } from '../src/app/surface/notifi
 import type { TranscriptFolder } from '../src/domain/transcript/folder.ts'
 import { TranscriptWindowController } from '../src/domain/transcript/window.ts'
 import type { PiTuiTerminalProgressFrame } from '../src/runtime/remote/pi-tui-terminal-progress-contract.ts'
-import { createPluginManagerPanel } from '../src/tui/plugin-manager/panel.ts'
+import { createPluginManagerWorkspacePanel } from '../src/tui/plugin-manager/workspace.ts'
+import { isTernTerminal } from '../src/tui/terminal/tern.ts'
 import type { TerminalProgressState } from '@xmoon76/pi-tui'
 import { installVirtualProcessTerminal } from './support/runner-harness.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
@@ -220,27 +221,38 @@ function mountSurfaceProbe(
     notificationMethod: undefined,
     terminalProgress: undefined,
     mainProgressAuthority: 'host-snapshot',
-    createPluginManagerPanel,
+    createPluginManagerPanel: createPluginManagerWorkspacePanel,
   })
   surface.attachEventRouting(minimalRoutingSource(sessionId, viewedChildId))
   surface.setCompletionOwner(sessionId)
-  surface.start({
-    events: { onSubmit: () => {}, onExit: () => {} },
-    workspaceRoot: '/tmp',
-    iconStyle: 'emoji',
-    displayState: { preset: 'compact' },
-    historySearchSource: { search: () => Promise.reject(new Error('not exercised')) },
-    readImage: () => Promise.reject(new Error('not exercised')),
-    imageScope: () => undefined,
-    present: { call: () => undefined, result: () => undefined },
-    sessionCwd: () => '/tmp',
-    sessionId: () => sessionId,
-    onTerminalResize: () => {},
-    copySelection: async () => false,
-    openExternalUrl: () => {},
-    readClipboardText: async () => undefined,
-    imageFallbackColor: (text) => text,
-  })
+  // The mount goes through the production entry (`startProcessTui`), which reads
+  // the HOST terminal identity: a suite started inside a Tern pane would
+  // otherwise silently switch this fixture — which asserts the boolean OSC 9;4
+  // contract — to the X059 stateful projection.
+  const previousTermProgram = process.env.TERM_PROGRAM
+  if (isTernTerminal()) delete process.env.TERM_PROGRAM
+  try {
+    surface.start({
+      events: { onSubmit: () => {}, onExit: () => {} },
+      workspaceRoot: '/tmp',
+      iconStyle: 'emoji',
+      displayState: { preset: 'compact' },
+      historySearchSource: { search: () => Promise.reject(new Error('not exercised')) },
+      readImage: () => Promise.reject(new Error('not exercised')),
+      imageScope: () => undefined,
+      present: { call: () => undefined, result: () => undefined },
+      sessionCwd: () => '/tmp',
+      captureHistoryScope: () => ({ sessionId: sessionId, isCurrent: () => true }),
+      onTerminalResize: () => {},
+      copySelection: async () => false,
+      openExternalUrl: () => {},
+      readClipboardText: async () => undefined,
+      imageFallbackColor: (text) => text,
+    })
+  } finally {
+    if (previousTermProgram === undefined) delete process.env.TERM_PROGRAM
+    else process.env.TERM_PROGRAM = previousTermProgram
+  }
   let disposed = false
   return {
     surface,

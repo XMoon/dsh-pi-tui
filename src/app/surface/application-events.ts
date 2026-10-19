@@ -38,6 +38,7 @@ import { safeErrorMessage } from '../../runtime/process/errors.ts'
 import type { DraftImageStore } from '../../client/media/image/draft-store.ts'
 import { checkImageLimits } from '../../client/media/image/intake.ts'
 import { draftHasAttachments, draftHasImages, pruneUnreferencedDraftAttachments } from '../../client/media/draft-attachments.ts'
+import { clientTimeZone } from '../../client/time-zone.ts'
 import { resolveComposerDelivery } from '../../commands.ts'
 import { rewindCandidateOfLoadedWindow } from '../../domain/session/rewind.ts'
 import { rewindOutlineRows } from './rewind-presentation.ts'
@@ -57,6 +58,7 @@ import { viewerCanonicalizeScope } from './viewer-submission.ts'
 import type { SubagentPromptOutcome, SubagentViewerSubmitRequest } from '../../runtime/subagent-port.ts'
 import type { SessionForkOutcome } from '../session/runtime.ts'
 import type { SubmissionController } from '../submission/controller.ts'
+import type { SubmissionComposerPort } from '../submission/composer-port.ts'
 import type { ClientActions } from './client-actions.ts'
 import type { SettingsRuntime } from './settings-runtime.ts'
 import type { StatusRuntime } from './status-runtime.ts'
@@ -96,9 +98,20 @@ export interface ApplicationEventsViewer {
 /** The mounted-surface capabilities the event adapter drives. */
 export interface ApplicationEventsSurface {
   readonly app: TuiApp
+  /**
+   * PR3-B B2-6: the renderer-neutral composer projection. The MAIN composer
+   * draft lives here (on the PiTui branch it is the same live `TuiApp`; on the
+   * TSP branch it is the renderer's own composer), so the newly reachable
+   * submission-path reads never touch a PiTui-only member. `app` stays for the
+   * PiTui-only chrome (clipboard panels, plugin actions, viewer/child drafts),
+   * which are NOT reachable on the TSP renderer in B2.
+   */
+  readonly composer: SubmissionComposerPort
   handleTerminalFocus(focused: boolean): void
   noteUserInput(): void
-  openTasksBrowser(viewMode: 'quick' | 'full'): void
+  /** Open the Full Task Center. The `quick` modal is retired (B4-B): the
+   *  on-demand Task Quick accessory replaced it. */
+  openTasksBrowser(viewMode: 'full'): void
 }
 
 /**
@@ -415,10 +428,10 @@ export function createApplicationEvents(deps: ApplicationEventsDeps): Applicatio
     // ONE submission entry: the request (the Enter gesture, the accelerated
     // chord, or the explicit queue action) rides along — the boundary resolves
     // its delivery mode.
-    onSubmit: (text, request) => deps.submission.submit(text, request),
+    onSubmit: (text, request, scopeToken) => deps.submission.submit(text, request, scopeToken),
     // The image-only submit gate (plan §11.1): an empty-text draft with staged
     // images is a real submission.
-    isImageDraft: () => draftHasImages(deps.surface.app.getDraft(), deps.drafts.images),
+    isImageDraft: () => draftHasImages(deps.surface.composer.getDraft(), deps.drafts.images),
     // The in-process EDITOR history must never recall a multimodal line after
     // its drafts were consumed — the placeholders would re-send as plain text
     // (the persisted JSONL history has the same guard; review finding: the
@@ -612,10 +625,9 @@ export function createApplicationEvents(deps: ApplicationEventsDeps): Applicatio
     // editor draft. The gesture is disabled in every viewer so it cannot mutate
     // a hidden main or child queue.
     onDequeue: () => deps.submission.dequeue(),
-    // ↓ with an empty editor: the Quick Tasks browser. Task Center merges the
-    // JobRegistry roster with the subagent descendant catalog; the SAME browser
-    // is the `/tasks` surface.
-    onOpenTasks: () => deps.surface.openTasksBrowser('quick'),
+    // B4-B retired the old modal-Quick event route: the on-demand Task Quick
+    // opens through the app's own `enterTaskQuick()` (the keymap's
+    // `app.tasks.open` action), NOT through this event surface.
     // A submit gesture in an INTERACTIVE (continuable) subagent viewer: resolve
     // queue/steer delivery, then deliver the human prompt through the OFFICIAL
     // `subagents.prompt` control API — the child inbox (a distinct FIFO turn:
@@ -726,6 +738,10 @@ export function createApplicationEvents(deps: ApplicationEventsDeps): Applicatio
           viewerCanonicalizeScope(promptViewerCwd, request.parentSessionId),
           text,
         ),
+        // The Client-local request zone of THIS follow-up, sampled by the
+        // adapter once, immediately before its dispatch (never the Host's
+        // zone, never a cached session fact).
+        clientTimeZone: () => clientTimeZone(),
       }), {
         sessionId: () => deps.lifecycle.liveAgent()?.session.id,
         onResult: (outcome) => deps.viewer.settleSubmit(request, submit.text, outcome, viewerGeneration),

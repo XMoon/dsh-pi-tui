@@ -34,11 +34,13 @@ import {
   type Tree,
 } from '@stencil-hq/tern'
 import { MessageId, ToolCallId } from '@deepseek-ai/dsh-llm'
+import { CommandId } from '@deepseek-ai/dsh-commands'
 import { SessionSeq, type SessionEvent } from '@deepseek-ai/dsh-session'
 import { TranscriptFolder } from '../src/domain/transcript/folder.ts'
 import type { TranscriptMessage } from '../src/domain/transcript/types.ts'
 import { projectTranscriptStructure, type TranscriptStructureBlock } from '../src/tui/transcript/structure.ts'
 import { TranscriptNodeKeys, transcriptView } from '../scripts/support/tern-tsp-transcript-view.ts'
+import { sanitizedPhysicalLine } from '../src/tui/presentation/lines.ts'
 import {
   applyReplayStep,
   buildReplaySteps,
@@ -147,6 +149,52 @@ function keyInput(name: string, ctrl = false): SessionInput {
 function structureKinds(blocks: readonly TranscriptStructureBlock[]): string[] {
   return blocks.map(block => block.kind === 'message' ? `message:${block.message.kind}` : block.kind)
 }
+
+// ── untrusted terminal output hardening: native View props stay clean ──────
+
+/** One hostile payload: every control family the projection must drop. */
+const HOSTILE_TSP =
+  'safe-start'
+  + '\u001b]52;c;YXR0YWNr\u0007'
+  + '\u001b]0;hijacked-title\u001b\\'
+  + '\u001b[2J'
+  + '\u001bPbad\u001b\\'
+  + '\u009b2J'
+  + '\u001b[38;2;999;1;1m'
+  + 'needle-text'
+
+test('T-hardening: hostile transcript text never reaches a native View prop', () => {
+  const user: TranscriptMessage = { kind: 'user', turn: 0, text: HOSTILE_TSP }
+  const assistant: TranscriptMessage = { kind: 'assistant', turn: 0, text: HOSTILE_TSP }
+  const thinking: TranscriptMessage = { kind: 'thinking', turn: 0, text: HOSTILE_TSP }
+  const system: Extract<TranscriptMessage, { kind: 'system' }> = {
+    kind: 'system', turn: 0, text: HOSTILE_TSP, label: HOSTILE_TSP, context: true,
+  }
+  const tool: Extract<TranscriptMessage, { kind: 'tool' }> = {
+    kind: 'tool', turn: 0, name: 'bash',
+    // A RAW argument payload (not JSON-escaped): the projection must remove
+    // the control bytes themselves, not merely rely on JSON escaping.
+    args: `{"command":"${HOSTILE_TSP}"}`, result: HOSTILE_TSP, status: 'ok',
+  }
+  const command = {
+    kind: 'command', commandId: CommandId('cmd-hostile'), seq: SessionSeq(1), time: 1,
+    name: HOSTILE_TSP, args: HOSTILE_TSP, outcome: { kind: 'success', text: HOSTILE_TSP },
+  } as unknown as TranscriptMessage
+  const summary: Extract<TranscriptMessage, { kind: 'summary' }> = { kind: 'summary', text: HOSTILE_TSP }
+
+  const messages = [user, assistant, thinking, system, tool, command, summary]
+  const view = View.from({ main: transcriptView(projectTranscriptStructure(messages), new TranscriptNodeKeys()) })
+  const props = JSON.stringify(flatten(view).map(node => node.props))
+  assert.ok(!props.includes('\u001b'), `no raw ESC may reach a node prop:\n${props}`)
+  assert.ok(!props.includes('YXR0YWNr'), 'no OSC 52 clipboard payload passes through')
+  assert.ok(!props.includes('hijacked-title'), 'no OSC 0 title payload passes through')
+  assert.ok(!props.includes('\u009b'), 'no raw C1 byte passes through')
+  assert.ok(props.includes('needle-text'), 'the readable payload text survives for every row')
+  // The source objects stay authoritative and byte-exact.
+  assert.equal(user.text, HOSTILE_TSP)
+  assert.equal(tool.result, HOSTILE_TSP)
+  assert.equal(system.label, HOSTILE_TSP)
+})
 
 // ── T3: real fold -> canonical projection -> native view ───────────────────
 
@@ -712,6 +760,7 @@ test('T10: the spike imports no PiTui owner and no application/client module', a
     /^\.\/support\/tern-tsp-transcript-view\.ts$/,
     /^(?:\.\.\/)+src\/domain\//,
     /^(?:\.\.\/)+src\/tui\/transcript\//,
+    /^(?:\.\.\/)+src\/tui\/tsp\/transcript-view\.ts$/,
     /^(?:\.\.\/)+src\/runtime\/assistant-stream-port\.ts$/,
   ]
   for (const path of ['scripts/tern-tsp-transcript-spike.mts', 'scripts/support/tern-tsp-transcript-view.ts']) {
@@ -722,4 +771,193 @@ test('T10: the spike imports no PiTui owner and no application/client module', a
       assert.ok(allowed.some(pattern => pattern.test(specifier)), `${path} may not import ${specifier}`)
     }
   }
+})
+
+test('T-hardening: a real tool/call keeps its raw name but projects every displayed tool field', () => {
+  const hostileName = 'Evil\nTool\r\nName\tTabbed\u001b]52;c;YXR0YWNr\u0007tail'
+  const collapsedName = sanitizedPhysicalLine(hostileName)
+  const folder = new TranscriptFolder()
+  folder.apply([ev('turn/start', { turn: 1 }, 0)])
+  const call = toolCall(1, 'call-hostile', hostileName, { command: 'echo hi' })
+  folder.apply([call])
+
+  // The canonical transcript/card name stays the model-facing identity.
+  const row = rowOf(folder, message => message.kind === 'tool')
+  assert.equal(row.kind, 'tool')
+  assert.equal(row.kind === 'tool' ? row.name : undefined, hostileName, 'the canonical tool name is untouched')
+  assert.equal((call.data as { name?: string }).name, hostileName, 'the session event name is untouched')
+
+  const view = viewOf(folder, new TranscriptNodeKeys())
+  const tool = flatten(view).find(node => node.kind === 'tool')
+  assert.ok(tool !== undefined, 'the native tool node exists')
+  const nameProp = tool.props['name']
+  assert.equal(nameProp, collapsedName, 'ui.tool.name carries the one-row display projection')
+  const titleProp = String(tool.props['title'] ?? '')
+  const targetProp = String(tool.props['target'] ?? '')
+  assert.ok(targetProp.includes(collapsedName), `the title/summary target carries the readable name:\n${targetProp}`)
+  for (const [field, value] of [['name', String(nameProp)], ['title', titleProp], ['target', targetProp]] as const) {
+    assert.ok(!/[\u0000-\u001f\u007f-\u009f]/.test(value),
+      `ui.tool.${field} carries a raw control character: ${JSON.stringify(value)}`)
+  }
+  assert.ok(!JSON.stringify(tool.props).includes('YXR0YWNr'), 'no OSC payload reaches a tool prop')
+})
+
+// ── Snapshot Context nested inside native Work (2026-10-19) ───────────────
+
+test('T-snapshot: a snapshot-only cluster renders as a native card inside the Work section', () => {
+  const snapshotEvent = (seq: number, id: string, text: string): SessionEvent =>
+    userMessage(seq, id, text, { kind: 'time-context', form: 'snapshot', sections: [{ name: 'time-context', body: text }] })
+  const folder = new TranscriptFolder()
+  folder.apply([
+    ev('turn/start', { turn: 1 }, 0),
+    userMessage(1, 'snap-u1', 'go'),
+    toolCall(2, 'snap-c1', 'read', { path: 'a.ts' }),
+    toolResult(3, 'snap-c1', 'ok'),
+  ])
+  const keys = new TranscriptNodeKeys()
+  const before = flatten(viewOf(folder, keys))
+  const beforeWork = before.find(node => node.kind === 'section')
+  const beforeUser = before.find(node => node.kind === 'card' && node.props['head'] === 'You')
+  assert.ok(beforeWork !== undefined && beforeUser !== undefined, 'fixture: Work section and user card exist')
+
+  folder.apply([
+    snapshotEvent(4, 'snap-a', 'SNAPSHOT_TSP_A'),
+    snapshotEvent(5, 'snap-b', 'SNAPSHOT_TSP_B'),
+  ])
+  const structure = projectTranscriptStructure(folder.messages())
+  assert.deepEqual(structureKinds(structure), ['message:user', 'work'])
+  const span = structure[1]
+  assert.ok(span !== undefined && span.kind === 'work')
+  assert.deepEqual(span.span.parts.map(part => part.kind), ['message', 'context-cluster'],
+    'the snapshot-only raw run is ONE nested structural part')
+  const view = viewOf(folder, keys)
+  const nodes = flatten(view)
+  const work = nodes.find(node => node.kind === 'section')
+  assert.ok(work !== undefined)
+  assert.equal(work.id, beforeWork.id, 'the Work section keeps its stable native id')
+  assert.equal(nodes.find(node => node.kind === 'card' && node.props['head'] === 'You')?.id, beforeUser.id,
+    'an unrelated user card keeps its native id')
+  const clusterCard = nodes.find(node => node.parent === work.id && node.kind === 'card')
+  assert.ok(clusterCard !== undefined, `the nested cluster renders as a card inside the section:\n${JSON.stringify(nodes)}`)
+  const first = rowOf(folder, message => message.kind === 'system' && message.text === 'SNAPSHOT_TSP_A')
+  const second = rowOf(folder, message => message.kind === 'system' && message.text === 'SNAPSHOT_TSP_B')
+  const firstNode = nodes.find(node => node.id.endsWith(`.${keys.keyFor(first)}`))
+  const secondNode = nodes.find(node => node.id.endsWith(`.${keys.keyFor(second)}`))
+  assert.equal(firstNode?.parent, clusterCard.id, 'the first snapshot is a child of the nested Context card')
+  assert.equal(secondNode?.parent, clusterCard.id, 'the second snapshot is a child of the nested Context card')
+  const contextText = nodes
+    .filter(node => node.id.startsWith(`${clusterCard.id}.`))
+    .map(node => JSON.stringify(node.props))
+    .join('\n')
+  assert.ok(contextText.includes('SNAPSHOT_TSP_A') && contextText.includes('SNAPSHOT_TSP_B'),
+    `both Snapshot bodies stay reachable through the native tree:\n${contextText}`)
+})
+
+test('T-snapshot ops: a standalone Snapshot cluster reparents into Work with local ops only', () => {
+  const snapshotEvent = (seq: number, id: string, text: string): SessionEvent =>
+    userMessage(seq, id, text, { kind: 'time-context', form: 'snapshot', sections: [{ name: 'time-context', body: text }] })
+  const folder = new TranscriptFolder()
+  folder.apply([
+    ev('turn/start', { turn: 1 }, 0),
+    userMessage(1, 'snap-ops-u1', 'go'),
+    snapshotEvent(2, 'snap-ops-a', 'SNAPSHOT_OPS_A'),
+    snapshotEvent(3, 'snap-ops-b', 'SNAPSHOT_OPS_B'),
+  ])
+  const keys = new TranscriptNodeKeys()
+  const before = viewOf(folder, keys)
+  const user = rowOf(folder, message => message.kind === 'user')
+  const first = rowOf(folder, message => message.kind === 'system' && message.text === 'SNAPSHOT_OPS_A')
+  const second = rowOf(folder, message => message.kind === 'system' && message.text === 'SNAPSHOT_OPS_B')
+  const userNodeId = `main.${keys.keyFor(user)}`
+  const standaloneClusterId = `main.ctx-${keys.keyFor(first)}`
+  assert.equal(nodeOf(before, standaloneClusterId).kind, 'card', 'fixture: the snapshot-only cluster is a standalone card')
+  assert.equal(nodeOf(before, standaloneClusterId).parent, 'main')
+
+  // The first durable Process arrives: the SAME retained carrier objects move
+  // under a new Work section (a legitimate parent migration).
+  folder.apply([toolCall(4, 'snap-ops-c1', 'read', { path: 'a.ts' })])
+  const after = viewOf(folder, keys)
+  const ops = before.ops(after, 's1')
+  const deleted = opIds(ops, 'del')
+  const added = opIds(ops, 'add')
+  const workId = `main.work-${keys.keyFor(first)}`
+  const nestedClusterId = `${workId}.ctx-${keys.keyFor(first)}`
+  assert.ok(deleted.has(standaloneClusterId), 'the standalone Context card is legitimately removed')
+  assert.ok(added.has(workId), 'the Work section is added')
+  // The SDK carries the moved subtree inside the single `add` payload; its
+  // nested ids are therefore asserted on that payload, not as separate ops.
+  const workAdd = ops.find(op => op[0] === 'add' && op[1] === workId)
+  assert.ok(workAdd !== undefined)
+  const workAddPayload = JSON.stringify(workAdd)
+  assert.ok(workAddPayload.includes(nestedClusterId), 'the Context card is re-added under the Work')
+  assert.ok(workAddPayload.includes(`${nestedClusterId}.${keys.keyFor(first)}`),
+    'the first migrated snapshot member is re-added under the nested card')
+  assert.ok(workAddPayload.includes(`${nestedClusterId}.${keys.keyFor(second)}`),
+    'the second migrated snapshot member is re-added under the nested card')
+  // Only the migrated snapshot subtree changes: the unrelated user identity is
+  // never remounted/rewritten.
+  const touched = new Set([...opIds(ops, 'add'), ...opIds(ops, 'del'), ...opIds(ops, 'set'), ...opIds(ops, 'text')])
+  assert.ok(!touched.has(userNodeId), 'the untouched user card is never rewritten')
+  for (const id of deleted) {
+    assert.ok(id !== undefined, 'a del op always carries a target id')
+    assert.ok(id === standaloneClusterId || id.startsWith(`${standaloneClusterId}.`),
+      `unexpected deletion outside the migrated Context subtree: ${id}`)
+  }
+  for (const id of added) {
+    assert.ok(id !== undefined, 'an add op always carries a target id')
+    assert.ok(id === workId || id.startsWith(`${workId}.`),
+      `unexpected addition outside the new Work subtree: ${id}`)
+  }
+  assert.equal(nodeOf(after, userNodeId).kind, 'card', 'the user identity survives the migration')
+
+  // A later final assistant is added standalone and never disturbs the Work.
+  folder.apply([
+    ev('assistant/message', {
+      turn: 1, step: 1,
+      message: { id: MessageId('snap-ops-final'), role: 'assistant', content: [{ type: 'text', text: 'done' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+    }, 5),
+    ev('turn/end', { turn: 1, reason: { kind: 'completed' } }, 6),
+  ])
+  const final = viewOf(folder, keys)
+  const finalOps = after.ops(final, 's2')
+  const assistant = rowOf(folder, message => message.kind === 'assistant')
+  assert.ok(opIds(finalOps, 'add').has(`main.${keys.keyFor(assistant)}`), 'the new final assistant is added')
+  const touchedFinal = new Set([...opIds(finalOps, 'add'), ...opIds(finalOps, 'del'), ...opIds(finalOps, 'set'), ...opIds(finalOps, 'text')])
+  assert.ok(!touchedFinal.has(workId), 'the Work section is not rewritten')
+  assert.ok(!touchedFinal.has(nestedClusterId), 'the nested Context card is not rewritten')
+  assert.equal(opIds(finalOps, 'del').size, 0, 'nothing is deleted')
+})
+
+test('T-working: a proven Working tool-jobs notice renders inside the Work section', () => {
+  const noticeMessage = {
+    id: MessageId('working-tsp-notice'), role: 'user',
+    content: [{ type: 'text', text: 'WORKING_TSP_NOTICE body' }],
+    source: { kind: 'tool-jobs', form: 'notice', summary: 'job completed' },
+  }
+  const folder = new TranscriptFolder()
+  folder.apply([
+    ev('turn/start', { turn: 1 }, 0),
+    toolCall(1, 'working-tsp-c1', 'read', { path: 'a.ts' }),
+    toolResult(2, 'working-tsp-c1', 'ok'),
+    ev('agent/inbox/spliced', { target: 'next-step', start: 0, inserted: [noticeMessage] }, 3),
+    ev('agent/inbox/spliced', { target: 'next-step', start: 0, removedCount: 1, inserted: [] }, 4),
+    ev('user/message', noticeMessage, 5),
+    toolCall(6, 'working-tsp-c2', 'bash', { command: 'ls' }),
+    toolResult(7, 'working-tsp-c2', 'ok'),
+  ])
+  const notice = rowOf(folder, message => message.kind === 'system' && message.text === 'WORKING_TSP_NOTICE body')
+  assert.equal(notice.kind === 'system' ? notice.contextPresentation?.sameTurnNextStep : undefined, true)
+  const structure = projectTranscriptStructure(folder.messages())
+  assert.deepEqual(structureKinds(structure), ['work'])
+  const keys = new TranscriptNodeKeys()
+  const view = viewOf(folder, keys)
+  const nodes = flatten(view)
+  const work = nodes.find(node => node.kind === 'section')
+  assert.ok(work !== undefined)
+  const noticeNode = nodes.find(node => node.id === `${work.id}.${keys.keyFor(notice)}`)
+  assert.ok(noticeNode !== undefined, `the notice renders as a direct Work child:\n${JSON.stringify(nodes)}`)
+  assert.equal(noticeNode.kind, 'card')
+  assert.equal(noticeNode.parent, work.id)
+  assert.ok(JSON.stringify(noticeNode.props).includes('tool-jobs'),
+    'the producer identity remains the visible card header')
 })

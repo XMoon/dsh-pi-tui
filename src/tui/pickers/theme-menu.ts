@@ -28,8 +28,10 @@
  * @module @xmoon76/dsh-pi-tui/tui/pickers/theme-menu
  */
 
+import { sanitizedPhysicalLine } from '../presentation/lines.ts'
 import { SettingsList, type Focusable, type RowBudgetAware, type TuiMouseEvent, type TuiMouseEventResult } from '@xmoon76/pi-tui'
-import { settingsListTheme } from '../theme/runtime.ts'
+import { color, settingsListTheme } from '../theme/runtime.ts'
+import { abbreviateName } from './name-label.ts'
 import type { ThemeRegistry } from '../../extension/internal/theme-registry.ts'
 import { themePickerRows } from '../../app/surface/theme-selection.ts'
 import { normalizePersistedTheme } from '../../domain/display/theme-selection.ts'
@@ -64,7 +66,7 @@ export function themeDisplayName(value: string | undefined, themes: ThemeRegistr
  *
  * `currentSelection` is the CURRENT SELECTION's SOURCE-QUALIFIED IDENTITY
  * (the /settings handler's synchronous `lastThemeChoice` — normalized
- * here). The `← current` marker compares ROW VALUES, never display
+ * here). The `[current]` state chip compares ROW VALUES, never display
  * labels: theme sources are dynamic, so a same-labeled row from a
  * DIFFERENT source (a file `Solarized.json` created while a plugin theme
  * `Solarized` is selected) must never steal the marker — the review's
@@ -107,16 +109,35 @@ export class ThemeSubmenu implements RowBudgetAware, Focusable {
       rows.map(row => ({
         // The row id IS the identity — no display round-trip anywhere.
         id: row.value,
-        label: row.displayName,
-        description: row.value.startsWith('plugin:')
+        // 25 = the label column at the 44-column floor (40 child width minus the
+        // one 9-cell state chip this list reserves minus the 6 fixed cells). The
+        // label keeps BOTH ends of a long name (head…tail around one `…`); that
+        // abbreviation is a DRAWING fact, so the COMPLETE display name is declared
+        // as the search basis (fork X062) — this list runs with `enableSearch:
+        // true` and filters on `searchText ?? label`. The SELECTED row's
+        // description leads with the same complete name, so two long same-prefix
+        // theme names cannot paint one indistinguishable pair.
+        label: sanitizedPhysicalLine(abbreviateName(sanitizedPhysicalLine(row.displayName), 25)),
+        searchText: row.displayName,
+        description: `${sanitizedPhysicalLine(row.displayName)} · ${row.value.startsWith('plugin:')
           ? 'Extension-registered theme'
           : row.value.startsWith('file:')
             ? 'Custom theme file'
-            : 'Built-in palette',
+            : 'Built-in palette'}`,
         // The marker is a VALUE comparison against the live selection
         // identity — never a display-label comparison (a same-labeled row
-        // from another source cannot steal it).
-        currentValue: row.value === current ? '← current' : '',
+        // from another source cannot steal it). §4.5/§12.2: the state chip
+        // is `textMuted` and is NEVER recoloured by the row's selection,
+        // while `settingsListTheme().value` paints `selected ? primary :
+        // textDim` — so the chip is PRE-PAINTED here (the `status.ts:110`
+        // precedent) and handed to the renderer as a WHOLE part (X061): the
+        // slot drops it entirely rather than ever painting `[curre`, and the
+        // row's own `currentValue` keeps the fork's values/update semantics
+        // untouched (it is unused for these rows).
+        currentValue: '',
+        valueParts: row.value === current
+          ? [{ kind: 'chip' as const, text: color.textMuted('[current]') }]
+          : undefined,
         values: ['✓'],
       })),
       Math.min(8, Math.max(3, rows.length)),

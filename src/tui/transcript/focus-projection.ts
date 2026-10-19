@@ -8,6 +8,11 @@
  * its original foundation position before the Thought. Collapsed turns HIDE
  * process rows (a committed pre-steer answer is the explicit exception) and
  * expanded turns restore raw chronology with the final assistant held back.
+ * A foldable Context row (producer-declared Snapshot, or a `tool-jobs` Notice
+ * with durable same-turn next-step evidence) follows the same rule unless it
+ * shares a raw-adjacent cluster with `instructions`/`catalog`: it joins the
+ * Thought instead of becoming turn foundation, while a mixed ambient cluster
+ * keeps its indivisible foundation position.
  *
  * This module owns the pure policy only. The PiTui disclosure card, its width
  * formatting, its theme/icon chrome and its live duration provider live in
@@ -24,8 +29,13 @@ import {
 } from '../../domain/transcript/folder.ts'
 import type { TranscriptMessage, TurnActivity } from '../../domain/transcript/types.ts'
 import { isSurfacedContext, isSurfacedInteractionTool } from '../../domain/transcript/semantics.ts'
-import { isNoticeContext } from './context-structure.ts'
-import { projectTranscriptStructure, type TranscriptStructureBlock, type TranscriptWorkSpan } from './structure.ts'
+import { clusterAdjacentAmbientContext, isNoticeContext, type ContextCluster } from './context-structure.ts'
+import {
+  isFoldableWorkContext,
+  projectTranscriptStructure,
+  type TranscriptStructureBlock,
+  type TranscriptWorkSpan,
+} from './structure.ts'
 import type { TranscriptContainerPath } from './container-owner.ts'
 import {
   addCompactActionStats,
@@ -199,10 +209,11 @@ function focusActionStatsByTurn(messages: readonly TranscriptMessage[]): Map<num
 /**
  * Project one transcript window into Focus presentation blocks. Collapsed
  * Focus summarizes causal input and opening foundation BEFORE the Thought,
- * renders a durable mid-turn `form:'notice'` AFTER the Thought (visible
- * process feedback, never inside the hidden Action candidate set), and
- * hides ordinary Process inside the collapsed root. Expanded Focus restores
- * the exact raw chronology.
+ * renders an UNQUALIFIED durable mid-turn `form:'notice'` AFTER the Thought
+ * (visible process feedback, never inside the hidden Action candidate set),
+ * and hides ordinary Process inside the collapsed root. A proven Working
+ * `tool-jobs` Notice follows the Thought instead (v2 exception). Expanded
+ * Focus restores the exact raw chronology.
  */
 export function projectFocus(
   messages: readonly TranscriptMessage[],
@@ -300,11 +311,13 @@ export function projectFocus(
     // Collapsed Focus summarizes persistent input/context rows before the
     // Thought in their raw relative order. Both human user/steer rows and
     // injected context marked `context:true` are persistent; all ordinary
-    // process rows stay hidden inside the Thought. A MID-TURN
+    // process rows stay hidden inside the Thought. An UNQUALIFIED MID-TURN
     // `form:'notice'` is the visible exception (see
     // {@link collapsedFocusRowDisposition}): it renders AFTER the Thought as
     // a post-thought row, never inside the hidden Action candidate set. A
-    // committed pre-steer answer is the other exception: from that exact raw
+    // proven Working `tool-jobs` Notice is NOT an exception: it follows the
+    // Thought hidden set (v2). A committed pre-steer answer is the other
+    // exception: from that exact raw
     // boundary onward, preserve the persistent rows and answer in chronology
     // so the answer cannot be swallowed by the Thought or move when the
     // disclosure changes.
@@ -315,6 +328,10 @@ export function projectFocus(
     // held-back final and every visible persistent boundary can never
     // duplicate themselves in the Action slot.
     const leadBoundary = focusThoughtLeadBoundary(group)
+    const foldableSnapshots: CollapsedFoldableSnapshotScope = {
+      clusterByMember: clusterAdjacentAmbientContext(group).byMember,
+      thoughtOwned: activity !== undefined,
+    }
     const firstCommittedIndex = group.findIndex(isCommittedAnswer)
     const hidden: TranscriptMessage[] = []
     // Collect first, emit once: the pre-thought rows, the post-thought rows
@@ -324,7 +341,7 @@ export function projectFocus(
     if (firstCommittedIndex < 0) {
       for (let index = 0; index < group.length; index += 1) {
         const member = group[index]!
-        const disposition = collapsedFocusRowDisposition(member, index, leadBoundary)
+        const disposition = collapsedFocusRowDisposition(member, index, leadBoundary, foldableSnapshots)
         if (disposition === 'pre-thought' || disposition === 'post-thought') {
           (disposition === 'pre-thought' ? preThought : postThought).push(member)
         } else if (member.kind !== 'compaction' && member !== final?.message) {
@@ -343,7 +360,7 @@ export function projectFocus(
       const beforeCommitted = group.slice(0, firstCommittedIndex)
       for (let index = 0; index < beforeCommitted.length; index += 1) {
         const member = beforeCommitted[index]!
-        const disposition = collapsedFocusRowDisposition(member, index, leadBoundary)
+        const disposition = collapsedFocusRowDisposition(member, index, leadBoundary, foldableSnapshots)
         if (disposition === 'pre-thought' || disposition === 'post-thought') {
           (disposition === 'pre-thought' ? preThought : postThought).push(member)
         } else if (member.kind !== 'compaction') {
@@ -355,12 +372,18 @@ export function projectFocus(
       // The committed-answer fence is preserved: from the first committed
       // answer onward every persistent row and the answer keep their raw
       // chronology (they are neither hoisted above the Thought nor moved
-      // across their semantic boundary).
+      // across their semantic boundary). A Snapshot that arrives after the
+      // committed answer therefore stays visible there instead of being
+      // pulled back into the earlier Thought disclosure.
+      const postCommittedFoldableSnapshots: CollapsedFoldableSnapshotScope = {
+        ...foldableSnapshots,
+        thoughtOwned: false,
+      }
       const postCommitted: TranscriptMessage[] = []
       for (let index = firstCommittedIndex; index < group.length; index += 1) {
         const member = group[index]!
         if (final !== undefined && member === final.message) continue
-        const disposition = collapsedFocusRowDisposition(member, index, leadBoundary)
+        const disposition = collapsedFocusRowDisposition(member, index, leadBoundary, postCommittedFoldableSnapshots)
         if (disposition !== 'hidden' || member.kind === 'compaction' || isCommittedAnswer(member)) {
           postCommitted.push(member)
         } else {
@@ -444,25 +467,45 @@ function isFocusPersistentInputRow(message: TranscriptMessage): boolean {
  * The collapsed-Focus disposition of one row: where it renders relative to
  * the Thought (or that it does not render at all while collapsed).
  *
- * Position-aware plus semantic: a MID-TURN `form:'notice'` (a background job
- * or subagent settling while the Agent already works) is process feedback
- * that belongs AFTER the Thought, not causal input hoisted before it; a
- * notice inside the turn's OPENING foundation (`index < leadBoundary`)
- * explains why the turn started and stays BEFORE the Thought. Every other
- * persistent input/context row keeps its existing pre-Thought behavior, and
- * ordinary Process stays hidden inside the collapsed Thought (restored in
- * raw chronology when the Thought opens). The decision reads the semantic
- * `form` and raw position, never a source kind or plugin name; `Compact` and
- * `Full` do not route through here.
+ * Position-aware plus semantic: an UNQUALIFIED mid-turn `form:'notice'` (a
+ * background job or subagent settling while the Agent already works, without
+ * durable same-turn next-step evidence) is process feedback that belongs AFTER
+ * the Thought, not causal input hoisted before it; a notice inside the turn's
+ * OPENING foundation (`index < leadBoundary`) explains why the turn started and
+ * stays BEFORE the Thought. Every other persistent input/context row keeps its
+ * existing pre-Thought behavior, and ordinary Process stays hidden inside the
+ * collapsed Thought (restored in raw chronology when the Thought opens). A
+ * foldable Context row (Snapshot or a proven Working tool-jobs Notice) joins
+ * that hidden set INSTEAD of the post-Thought rule above when a real Thought
+ * owner exists; without one every row must fail open. The ORDINARY Notice
+ * position decision reads the semantic `form`, raw adjacency and raw position,
+ * never a producer name; the Working `tool-jobs` exception additionally
+ * requires `sourceKind === 'tool-jobs'` AND `form === 'notice'` AND the durable
+ * same-turn next-step claim. `Compact` and `Full` do not route through here.
  */
 type CollapsedFocusRowDisposition = 'pre-thought' | 'post-thought' | 'hidden'
+
+/** The foldable Context rows (Snapshot / proven Working tool-jobs Notice) a
+ * collapsed Thought may carry instead of surfacing as turn foundation.
+ * `thoughtOwned` is false where no Thought block will be emitted (a truncated
+ * window without an activity) — the rows then fail open instead of disappearing.
+ * The Thought-lead boundary decides WHICH rows are foundation; anything at or
+ * after it is Thought content. */
+interface CollapsedFoldableSnapshotScope {
+  readonly clusterByMember: ReadonlyMap<TranscriptMessage, ContextCluster>
+  readonly thoughtOwned: boolean
+}
 
 function collapsedFocusRowDisposition(
   message: TranscriptMessage,
   index: number,
   leadBoundary: number,
+  foldableSnapshots: CollapsedFoldableSnapshotScope,
 ): CollapsedFocusRowDisposition {
   if (!isFocusPersistentInputRow(message)) return 'hidden'
+  if (foldableSnapshots.thoughtOwned
+    && index >= leadBoundary
+    && isFoldableWorkContext(message, foldableSnapshots.clusterByMember)) return 'hidden'
   if (index >= leadBoundary && isNoticeContext(message)) return 'post-thought'
   return 'pre-thought'
 }
@@ -491,50 +534,29 @@ function consecutiveTurnGroup(messages: readonly TranscriptMessage[], start: num
   return group
 }
 
-/** The end of the turn's LEADING injected-context prefix used only for
- * expanded Thought insertion. Consecutive `kind === 'system'` rows carrying
- * the source-derived `context` marker at the very start of the group count as
- * the opening turn foundation. Other `kind: 'system'` rows (llm/retry,
- * max-tokens) are orchestration, not foundation — they must stay process
- * content, never lifted before the Thought. Mid-process system rows are never
- * included in this expanded lead boundary; collapsed visibility uses
- * isFocusPersistentInputRow instead. */
-function leadingInjectedContextPrefixEnd(group: readonly TranscriptMessage[]): number {
-  let end = 0
-  while (true) {
-    const member = group[end]
-    if (member === undefined || member.kind !== 'system' || member.context !== true) break
-    end += 1
-  }
-  return end
-}
-
-/** The Thought-lead boundary of one turn group: the index AFTER the
- * turn's FIRST unmarked user row AND the surfaced Context rows that
- * immediately follow it. Rows before it (injected context) and the opening
- * foundation (initial user plus its adjacent injected context) stay above the
- * Thought; every later row (same-turn steers included) returns to its
- * chronological position. A turn whose user rows are all marked same-turn
- * steers has no opening human prompt: the boundary falls back to the end of
- * the LEADING injected-context prefix, so an inject-woken turn keeps its
- * foundation before the Thought (never a scan of mid-process system rows, and
- * never orchestration rows like llm/retry). Without steer metadata, the first
- * user remains the initial-prompt fallback; consecutive users are queue/steer
- * input, not a multi-row initial prompt. */
+/** The Thought-lead boundary of one turn group: the prefix that stays above the
+ * Thought. It starts after the FIRST unmarked user row when one exists; a turn
+ * with no human user (an inject-woken / next-turn wakeup turn) starts at the
+ * group beginning. In both cases the boundary then consumes leading surfaced
+ * Context rows that are NOT foldable (the wakeup cause, `instructions`,
+ * `catalog`, an unqualified notice). The first FOLDABLE Context row (Snapshot or
+ * a proven Working tool-jobs Notice) ends the foundation and becomes Thought
+ * content — so a next-turn wakeup notice stays visible while the Snapshot and
+ * next-step notices that arrive during the work fold with it. A mixed
+ * `instructions`/`catalog` + Snapshot cluster keeps its indivisible foundation
+ * position. `llm/retry`/max-token orchestration rows are not surfaced Context,
+ * so they never enter the prefix. Without steer metadata the first user remains
+ * the initial-prompt fallback; consecutive users are queue/steer input. */
 export function focusThoughtLeadBoundary(group: readonly TranscriptMessage[]): number {
   const firstInitialUserIndex = group.findIndex(
     member => member.kind === 'user' && member.steer !== true,
   )
-  let end = firstInitialUserIndex >= 0
-    ? firstInitialUserIndex + 1
-    : leadingInjectedContextPrefixEnd(group)
-  // The opening foundation continues through immediately-following surfaced
-  // Context rows (the provider's opening snapshot/catalog burst), so it never
-  // lands below the Thought. A later Context row separated by Process rows is
-  // mid-turn and keeps its chronological position.
+  const clusterByMember = clusterAdjacentAmbientContext(group).byMember
+  let end = firstInitialUserIndex >= 0 ? firstInitialUserIndex + 1 : 0
   while (true) {
     const member = group[end]
     if (member === undefined || !isSurfacedContext(member)) break
+    if (isFoldableWorkContext(member, clusterByMember)) break
     end += 1
   }
   return end

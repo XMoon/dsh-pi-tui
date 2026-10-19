@@ -27,12 +27,12 @@ import { dshHome, type Diag } from '../../runtime/process/diagnostics.ts'
 import { runDetached } from '../../runtime/process/tasks.ts'
 import { historyFilePath, loadHistoryFile, loadHistoryRecords, type ParsedHistoryRecord } from '../../client/history/store.ts'
 import { historySessionIdFor, persistAfterSession, persistHistoryRecord } from '../submission/history-persist.ts'
-import type { TuiApp } from '../../tui-app.ts'
+import type { SurfaceDisplaySeam } from './display-seam.ts'
 
 /** The narrow capabilities the history owner consumes. */
 export interface InputHistoryDeps {
   /** The mounted app (the editor recall API). */
-  readonly surface: { readonly app: TuiApp }
+  readonly surface: { readonly display: SurfaceDisplaySeam }
   /** The resolved CLIENT working directory (a composition prerequisite). */
   readonly clientCwd: string
   /** The LIVE session's workspace (the status owner). */
@@ -51,6 +51,11 @@ export interface InputHistoryPersistRequest {
   readonly sessionId: string | undefined
   /** Whether the submission carries staged attachments (never persisted). */
   readonly hasAttachments: boolean
+  /** The editor-recall OCCURRENCE this submission was accepted as (see
+   *  `TuiApp.rememberInput`): the write owner reports it back with the
+   *  settlement so the scope can attribute the outcome to exactly that
+   *  occurrence. Absent for every other session-history writer. */
+  readonly scopeToken?: number
   /** The USER's submission time (epoch-ms) — never the disk-write time. */
   readonly timestamp: number
 }
@@ -133,7 +138,7 @@ export function createInputHistory(deps: InputHistoryDeps): InputHistory {
     const entries = loadHistoryFile(historyFilePath(dshHome(process.env), deps.clientCwd))
     lastHistoryContent = entries.at(-1)
     // File order is oldest-first; TuiApp's recall API takes newest-first.
-    deps.surface.app.resetInputHistory([...entries].reverse())
+    deps.surface.display.resetInputHistory([...entries].reverse())
   }
 
   /**
@@ -147,7 +152,21 @@ export function createInputHistory(deps: InputHistoryDeps): InputHistory {
    */
   const persist = (record: InputHistoryPersistRequest): void => {
     const content = record.text.trim()
-    if (content === '' || content === lastHistoryContent || record.hasAttachments) return
+    // EVERY settled submission is reported, in append order: a policy skip
+    // settles without a row, and its position among the appends is what places
+    // the occurrence in the recall.
+    const settle = (outcome: 'written' | 'skipped'): void => {
+      deps.surface.display.settleScopeInput({
+        ...(record.scopeToken === undefined ? {} : { token: record.scopeToken }),
+        owner: record.sessionId,
+        outcome,
+        text: content,
+      })
+    }
+    if (content === '' || content === lastHistoryContent || record.hasAttachments) {
+      settle('skipped')
+      return
+    }
     const cwd = deps.sessionCwd()
     const file = historyFilePath(dshHome(process.env), cwd)
     runDetached('input history write', () => {
@@ -160,12 +179,17 @@ export function createInputHistory(deps: InputHistoryDeps): InputHistory {
         hasAttachments: record.hasAttachments,
         file,
       })
-      if (written) lastHistoryContent = content
+      if (!written) return
+      lastHistoryContent = content
+      // Settlement evidence for the editor-recall scope: this factory is
+      // invoked SYNCHRONOUSLY and the append above is synchronous, so the row is
+      // on disk as of this very stack and its position is this append's position.
+      settle('written')
     }, {
       diag: deps.diag,
       notify: (message) => {
         if (deps.isCleanedUp()) return
-        deps.surface.app.notify(message, 'error')
+        deps.surface.display.notify(message, 'error')
       },
       recoverable: () => true,
     })

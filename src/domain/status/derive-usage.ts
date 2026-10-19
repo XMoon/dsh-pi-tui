@@ -31,22 +31,19 @@ export interface OfficialUsageFacts {
  *   fold cannot count the session's lifetime tokens, so the projection owns
  *   them here. When this override is present it is the ONLY authority for
  *   those facts — a piece it cannot supply is omitted, never folded. The
- *   recent-window performance metrics and the turn/step counters stay the
- *   fold's own (they are window-scoped facts).
- * @param options - PR5: `recentPerformanceAvailable === false` omits the two
- *   recent metrics (the presentation owner could not prove the sample
- *   evidence authoritative — plan §3.2). Absent options keep them (Direct
- *   full-log semantics); availability is never inferred from the numbers.
+ *   turn/step counters stay the fold's own (they are window-scoped facts).
+ *
+ * TPS plan PR-2: the measured performance values are NOT derived here. The
+ * bundle's own Host `piTuiPerformance` projection is their only authority, and
+ * `StatusRuntime` injects the derived figures into the returned section (see
+ * `domain/status/performance-view.ts`); this projection contributes only the
+ * lifetime `llmMs` that the fold genuinely owns.
  */
 export function usageFromStats(
   stats: SessionStats,
   contextTokens?: number,
   official?: OfficialUsageFacts,
-  options?: { readonly recentPerformanceAvailable?: boolean },
 ): UsageStatus {
-  const recentPerformance = options?.recentPerformanceAvailable === false
-    ? {}
-    : { firstTokenMs: stats.firstTokenMsAvg, tokensPerSec: stats.tokensPerSec }
   if (official !== undefined) {
     // Projection-owned: an unavailable piece is ABSENT (unknown), never the
     // bounded window's guess.
@@ -78,7 +75,6 @@ export function usageFromStats(
         : {},
       performance: {
         llmMs: stats.llmMs,
-        ...recentPerformance,
       },
       turns: stats.turns,
       steps: stats.steps,
@@ -109,11 +105,9 @@ export function usageFromStats(
     },
     ...cacheReadTokens > 0 || cacheWriteTokens > 0 ? { cacheHitPct } : {},
     performance: {
-      // llmMs stays the session LIFETIME wall; the two status performance
-      // metrics are the RECENT (last-5) averages folded by StatsFolder,
-      // omitted when the sample evidence is not authoritative (PR5).
+      // llmMs stays the session LIFETIME wall. The measured performance
+      // values are the Host projection's, injected by StatusRuntime.
       llmMs: stats.llmMs,
-      ...recentPerformance,
     },
     turns: stats.turns,
     steps: stats.steps,

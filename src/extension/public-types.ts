@@ -960,7 +960,7 @@ export type EditorInputEvent =
       readonly kind: 'text'
       readonly text: string
     }
-  /** A paste burst (bracketed-paste or the host's paste heuristic). */
+  /** A bracket-paste burst (`CSI 200~` … `CSI 201~`). */
   | {
       readonly kind: 'paste'
       readonly text: string

@@ -48,6 +48,9 @@ export interface RemoteSessionListRow {
   readonly running: boolean
   readonly updatedAt: number
   readonly projectionValues?: RemoteProjectionValues
+  /** Official Client on-disk format state (rc.2 `SessionListEntry.formatStatus`).
+   * Passed through verbatim; this adapter never infers it. */
+  readonly formatStatus?: 'current' | 'migration-required'
   /** Official Client host-authoritative blank bit (v2 §0.6). */
   readonly blank?: boolean
 }
@@ -162,6 +165,11 @@ const STATUS_PROJECTION_KEYS = [
   // projection (the footer's preset row repaints from it, never an
   // optimistic local install).
   'permissions',
+  // TPS plan PR-2: the bundle's OWN Host performance projection (R5/All/TTFB)
+  // rides the SAME live channel and the SAME exact retained binding read, so
+  // a pushed frame refreshes the performance facts with every other status
+  // key — never a bounded-page re-fold and never `loadOlder()`.
+  'piTuiPerformance',
 ] as const
 
 /** The projection keys the Remote STATUS/WELCOME current facts are read from:
@@ -208,6 +216,9 @@ export class RemoteSessionReader implements SessionReader {
         cwd: row.cwd,
         ...(row.parentId === undefined ? {} : { parentSession: row.parentId }),
         ...(row.origin === undefined ? {} : { origin: row.origin }),
+        // The official Client row's `formatStatus` is passed through VERBATIM:
+        // no header parsing, no `cwd`-missing inference, no client-side decoder.
+        ...(row.formatStatus === undefined ? {} : { formatStatus: row.formatStatus }),
         // The Client row's `running` bit is not the Direct reader's attached
         // Session-store bit. Keep Remote rows conservatively detached and let
         // shadow parity mark the field non-comparable.

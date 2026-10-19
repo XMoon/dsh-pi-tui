@@ -14,15 +14,20 @@
  */
 
 import { truncateToWidth, visibleWidth, type Component } from '@xmoon76/pi-tui'
+import { sanitizedPhysicalLine } from '../../presentation/lines.ts'
+import { sanitizeDisplayText } from '../../presentation/terminal-text.ts'
 import {
   compactActionSlotLine,
   compactSlotLine,
   compactThinkSlotLine,
   type CompactActionPresentation,
+  createDisplayProjection,
 } from './compact-process-preview.ts'
 import { compactActionStatParts, formatCompactDuration } from '../../transcript/process-summary.ts'
 import { summarizeWorkSpan, type CompactWorkSummary } from '../../transcript/work-summary.ts'
+import type { ActivityClock } from '../../transcript/activity-clock.ts'
 import type { TranscriptWorkSpan } from '../../transcript/structure.ts'
+import type { TranscriptTiming } from '../../../domain/transcript/types.ts'
 import { iconLead } from '../../icons.ts'
 import { sectionDisclosureSemantic, type IconStyle } from '../../../domain/display/icons.ts'
 import { color } from '../../theme/runtime.ts'
@@ -61,7 +66,10 @@ export function formatWorkHeaderLine(
   identity: CompactWorkHeaderIdentity = 'activity',
 ): string {
   const head = `${iconLead(sectionDisclosureSemantic(expanded), iconStyle)}${identity === 'thought' ? 'Thought' : 'Activity'}`
-  const parts = compactActionStatParts(summary.actionStats)
+  // The header is ONE physical row: the stat labels embed the raw action
+  // subtype name (a model-facing tool name), so fold each part before the
+  // width-degradation ladder measures it.
+  const parts = compactActionStatParts(summary.actionStats).map(sanitizedPhysicalLine)
   // The degradation ladder: full → … → action total → identity + duration
   // → identity.
   const candidates: string[] = []
@@ -93,17 +101,21 @@ export function compactWorkBody(
   width: number,
   action?: CompactActionPresentation,
   preparingSummary?: string,
+  /** The caller-owned display projection. A component instance passes its OWN
+   *  bounded projection so a steady multi-slot frame never rescans unchanged
+   *  text, and no process-global cache outlives the component. */
+  project: (text: string) => string = sanitizeDisplayText,
 ): string[] {
   const lines: string[] = []
   if (summary.think !== undefined) {
-    lines.push(compactThinkSlotLine({ text: summary.think.text, running: summary.think.running, width }))
+    lines.push(compactThinkSlotLine({ text: project(summary.think.text), running: summary.think.running, width }))
   }
   if (preparingSummary !== undefined) {
-    lines.push(compactSlotLine('Action:', preparingSummary, width))
+    lines.push(compactSlotLine('Action:', project(preparingSummary), width))
   } else if (action !== undefined) {
     lines.push(compactActionSlotLine({
       ...(action.status === undefined ? {} : { status: action.status }),
-      display: action.display,
+      display: project(action.display),
       ...(action.rootName === undefined ? {} : { rootName: action.rootName }),
       ...(action.activeSubCalls === undefined ? {} : { activeSubCalls: action.activeSubCalls }),
       width,
@@ -112,18 +124,28 @@ export function compactWorkBody(
   return lines
 }
 
-/** The span's duration text at `now`: running spans read the wall clock at
- * RENDER time (the shared repaint heartbeat refreshes them — no per-card
- * timer, post-F6 plan §12.13); settled spans use their authoritative end.
- * Missing evidence omits the duration (never `0s`, §12.16) — a POINT-only
- * span (one instant of evidence, start === end) is not a span and omits it
- * too. */
-function activityDurationText(summary: CompactWorkSummary, now: () => number): string | undefined {
-  const timing = summary.timing
+/** The span's duration text at `now`.
+ *
+ * With an ActivityClock the displayed value is PROVEN evidence only:
+ *   - live → `now - startedAt` (the shared repaint heartbeat refreshes it), and
+ *   - a proven close boundary → `endedAt - startedAt`.
+ * A span with NO proven end and no provable liveness renders NO duration
+ * (unknown): the last member's own end is never presented as the Activity's
+ * end, and no value can regress a duration the user was already watching (a
+ * Remote snapshot-only `running: false` flip, a history window, an inactive
+ * subject). A POINT-only span (start === end) is not a span and omits it too.
+ *
+ * Without a clock (unit/non-TuiApp callers with no canonical structure) only
+ * the members' own PROVEN end is renderable — never a live extension. */
+function activityDurationText(timing: TranscriptTiming | undefined, clock: ActivityClock | undefined, now: () => number): string | undefined {
   if (timing === undefined) return undefined
-  if (timing.running) return formatCompactDuration(Math.max(0, now() - timing.startedAt))
-  if (timing.endedAt === undefined || timing.endedAt === timing.startedAt) return undefined
-  return formatCompactDuration(Math.max(0, timing.endedAt - timing.startedAt))
+  if (clock === undefined) {
+    if (timing.endedAt === undefined || timing.endedAt === timing.startedAt) return undefined
+    return formatCompactDuration(Math.max(0, timing.endedAt - timing.startedAt))
+  }
+  if (clock.isLive()) return formatCompactDuration(Math.max(0, now() - timing.startedAt))
+  if (clock.endedAt === undefined || clock.endedAt === timing.startedAt) return undefined
+  return formatCompactDuration(Math.max(0, clock.endedAt - timing.startedAt))
 }
 
 /**
@@ -145,6 +167,12 @@ export class CompactWorkComponent implements Component {
   private readonly showPreview: boolean
   private readonly iconStyle: IconStyle
   private readonly now: () => number
+  /** The span's Activity lifetime clock (TuiApp's structural authority). An
+   *  absent clock keeps the legacy member-timing rendering for callers that
+   *  have no canonical structure (unit tests, non-TuiApp renderers). */
+  private readonly clock: ActivityClock | undefined
+  /** Component-lifetime projection memo (see {@link compactWorkBody}). */
+  private readonly displayProjection = createDisplayProjection()
 
   constructor(options: {
     span: TranscriptWorkSpan
@@ -155,6 +183,7 @@ export class CompactWorkComponent implements Component {
     showPreview?: boolean
     iconStyle?: IconStyle
     now?: () => number
+    clock?: ActivityClock
   }) {
     this.summary = options.summary ?? summarizeWorkSpan(options.span)
     this.expanded = options.expanded
@@ -166,6 +195,12 @@ export class CompactWorkComponent implements Component {
     this.showPreview = options.showPreview ?? true
     this.iconStyle = options.iconStyle ?? 'emoji'
     this.now = options.now ?? (() => Date.now())
+    this.clock = options.clock
+  }
+
+  /** Diagnostics: how many times this component's projection actually ran. */
+  displayProjectionRunsForTest(): number {
+    return this.displayProjection.projectionRuns()
   }
 
   invalidate(): void {}
@@ -190,12 +225,12 @@ export class CompactWorkComponent implements Component {
       this.expanded,
       contentWidth,
       this.iconStyle,
-      activityDurationText(this.summary, this.now),
+      activityDurationText(this.summary.timing, this.clock, this.now),
       historicalThinkOnly ? 'thought' : 'activity',
     )
     const lines = [color.textDim(header)]
     if (!this.expanded && this.showPreview) {
-      for (const line of compactWorkBody(this.summary, contentWidth, this.action, this.preparingSummary)) {
+      for (const line of compactWorkBody(this.summary, contentWidth, this.action, this.preparingSummary, this.displayProjection.project)) {
         lines.push(color.textDim(line))
       }
     }

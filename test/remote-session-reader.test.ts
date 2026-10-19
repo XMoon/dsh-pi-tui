@@ -134,6 +134,32 @@ test('read operations never touch a write-capable source surface', async () => {
   assert.deepEqual(writes, [])
 })
 
+test('list passes the official formatStatus through verbatim and never invents one', async () => {
+  const generations = createObservableGenerationHarness()
+  const source = remoteSource({
+    state: state(
+      ['session-current', 'session-migrating', 'session-absent'],
+      {
+        'session-current': listRow('session-current', 30, { cwd: '/x', formatStatus: 'current' }),
+        'session-migrating': listRow('session-migrating', 20, { cwd: '/y', formatStatus: 'migration-required' }),
+        // The Client omitted the fact: the adapter must not guess from cwd or a
+        // header, so the field stays ABSENT (never an empty string/boolean).
+        'session-absent': listRow('session-absent', 10, { cwd: '/a' }),
+      },
+    ),
+  })
+  const reader = new RemoteSessionReader(source, generations.source)
+
+  const rows = await reader.list(undefined)
+  assert.deepEqual(rows, [
+    { id: 'session-current', updatedAt: 30, cwd: '/x', live: false, formatStatus: 'current' },
+    { id: 'session-migrating', updatedAt: 20, cwd: '/y', live: false, formatStatus: 'migration-required' },
+    { id: 'session-absent', updatedAt: 10, cwd: '/a', live: false },
+  ])
+  assert.equal(Object.hasOwn(rows?.[2] ?? {}, 'formatStatus'), false,
+    'an absent official fact must not become a client-side value')
+})
+
 test('list distinguishes pending/disconnected from an established empty list', async () => {
   const generations = createObservableGenerationHarness()
   const pendingSource = remoteSource({ state: state([], {}, 'pending') })
@@ -580,7 +606,10 @@ test('the live status projection list is EXACTLY what the status reads (no stati
     // projection-authoritative, and a successful permission write is
     // COMMITTED by the pushed projection — the live channel must carry it or
     // the row would render statically after a cycle.
-    ['agentPreset', 'contextBreakdown', 'contextPressure', 'goal', 'modelSelection', 'permissions', 'plan', 'title', 'todos', 'tokenUsage'].sort(),
+    // 'piTuiPerformance' joined in TPS plan PR-2: the bundled Host projection
+    // is the performance authority, and a pushed frame must refresh the R5/All
+    // figures with every other status key (never a static render).
+    ['agentPreset', 'contextBreakdown', 'contextPressure', 'goal', 'modelSelection', 'permissions', 'piTuiPerformance', 'plan', 'title', 'todos', 'tokenUsage'].sort(),
   )
   // Projections whose change the status does not consume stay OUT: their own
   // consumer establishes the subscription it needs.

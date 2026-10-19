@@ -57,7 +57,7 @@ const COMPOSITION_INVENTORY: ReadonlyArray<readonly [string, string]> = [
   ['presentation event routing attach', 'surface.attachEventRouting('],
   ['interaction provider attach', 'surface.attachInteraction('],
   ['command registration', 'command.register({ snapshot: initialSnapshot, skills: initialSkills })'],
-  ['surface teardown', 'const disposeSurface = (): void => {'],
+  ['surface teardown', 'const disposeSurface = (): Promise<void> | void => {'],
   ['startup lifecycle root', 'const startRunner = async (): Promise<void> => {'],
   ['terminal-total fatal catch', 'const handleStartupFailure = async (error: unknown): Promise<void> => {'],
 ]
@@ -505,7 +505,7 @@ test('A5: the composition surface keeps the documented surface release order', (
   // Plan §12.2/§38: the teardown order is behaviour. The composition root only
   // orchestrates; every release hook is surface-owned.
   const source = compositionSource()
-  const cleanupStart = source.indexOf('const disposeSurface = (): void => {')
+  const cleanupStart = source.indexOf('const disposeSurface = (): Promise<void> | void => {')
   assert.ok(cleanupStart >= 0, 'disposeSurface must exist')
   const cleanup = source.slice(cleanupStart, source.indexOf('diag.dispose()', cleanupStart) + 20)
   const order = [
@@ -540,6 +540,29 @@ test('A5: the composition surface keeps the startup order', () => {
     assert.ok(at > cursor, `${step} must come after the previous startup step`)
     cursor = at
   }
+})
+
+test('A5/rc.2: the turn flush is initialized before the routing source is attached', () => {
+  // The routing source registered with `attachEventRouting` can run DURING the
+  // startup sequence itself: the Remote event firehose delivers events while
+  // the first hydration is still open, and `turn/end` reaches
+  // `source.flushTurn()`. A `const` arrow declared later in the startup tail
+  // therefore raised a temporal-dead-zone error inside the firehose subscriber
+  // (CI: "[session-controller] event feed subscriber failed: ReferenceError:
+  // Cannot access 'flushTurn' before initialization") instead of the
+  // documented Remote no-op. Declaration order is the invariant, so this lock
+  // pins it: initialized BEFORE the attach, and still bound BY the attach.
+  const source = compositionSource()
+  const declaration = source.indexOf('const flushTurn = (): void => {')
+  const attach = source.indexOf('surface.attachEventRouting({')
+  const binding = source.indexOf('flushTurn: () => flushTurn(),')
+  assert.ok(declaration >= 0, 'the composition must declare the turn flush')
+  assert.ok(attach >= 0, 'the composition must attach the routing source')
+  assert.ok(binding >= 0, 'the routing source must bind the turn flush')
+  assert.ok(declaration < attach,
+    'the turn flush must be initialized before the routing source is attached')
+  assert.ok(attach < binding,
+    'the routing attach must be the place that binds the turn flush')
 })
 
 test('A5/TS2: the Host-subscription phases keep their frozen startup interleaving', () => {
@@ -704,9 +727,13 @@ test('A5/TS2: the composition zone is enumerated RECURSIVELY (nested helpers inc
       'src/app/bootstrap/lifecycle.ts',
       'src/app/bootstrap/presentation-bridge.ts',
       'src/app/bootstrap/profile.ts',
+      'src/app/bootstrap/remote-init-retry.ts',
+      'src/app/bootstrap/remote-refold-request.ts',
+      'src/app/bootstrap/renderer-selection.ts',
       'src/app/bootstrap/runtime-selection.ts',
       'src/app/bootstrap/session-startup.ts',
       'src/app/bootstrap/task-source.ts',
+      'src/app/bootstrap/terminal-output.ts',
     ],
   )
 })

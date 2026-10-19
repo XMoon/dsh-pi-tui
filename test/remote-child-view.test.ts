@@ -17,7 +17,7 @@ import {
   type RemoteChildBinding,
   type RemoteChildViewSessions,
 } from '../src/app/remote/child-view.ts'
-import type { RemoteLiveIngress, RemoteLiveIngressSinks } from '../src/app/remote/live-ingress.ts'
+import type { RemoteLiveIngress, RemoteLiveIngressHydrate, RemoteLiveIngressSinks } from '../src/app/remote/live-ingress.ts'
 import type { ViewerChildLiveSinks, ViewerChildOpenTarget } from '../src/app/surface/viewer-runtime.ts'
 import type { AssistantLiveInput } from '../src/runtime/assistant-stream-port.ts'
 import type { PresentationDurableEvent, PresentationReadSnapshot } from '../src/runtime/presentation-read-port.ts'
@@ -104,31 +104,47 @@ function childSessions(childId: string, binding: RemoteChildBinding): ChildSessi
   }
 }
 
-function childBinding(running: boolean): RemoteChildBinding {
+function childBinding(
+  running: boolean,
+  revision = 2,
+): RemoteChildBinding & { setRevision(next: number): void } {
+  let current = revision
   return {
     session: {
       getSnapshot: () => ({ running }),
       readAttachment: async () => ({ ok: true, value: { attachment: {}, data: new Uint8Array() } }),
     },
+    // S3-R0: the child re-fold fence reads this official window revision.
+    eventSource: { getSnapshot: () => ({ revision: current }) },
+    setRevision: next => { current = next },
   }
 }
 
 interface IngressCapture {
   readonly sessionId: string
   readonly sinks: RemoteLiveIngressSinks
-  readonly hydrateRevision: number | undefined
+  readonly hydrate: RemoteLiveIngressHydrate | undefined
   disposeCount: number
+  /** The proofs this handle was acknowledged with (S3-R0). */
+  readonly acknowledged: Array<{ generation: unknown; binding: unknown; revision: number }>
 }
 
-function fakeIngress(): { readonly ingress: RemoteLiveIngress; readonly captures: IngressCapture[] } {
+function fakeIngress(options: {
+  /** S3-R0: whether a read at this revision may replace the child fold. */
+  readonly eligible?: (revision: number) => boolean
+} = {}): { readonly ingress: RemoteLiveIngress; readonly captures: IngressCapture[] } {
   const captures: IngressCapture[] = []
   return {
     captures,
     ingress: {
-      subscribe(sessionId, sinks, hydrateRevision) {
-        const capture: IngressCapture = { sessionId, sinks, hydrateRevision, disposeCount: 0 }
+      subscribe(sessionId, sinks, hydrate) {
+        const capture: IngressCapture = { sessionId, sinks, hydrate, disposeCount: 0, acknowledged: [] }
         captures.push(capture)
-        return { dispose: () => { capture.disposeCount += 1 } }
+        return {
+          dispose: () => { capture.disposeCount += 1 },
+          acknowledgeWindowRefold: proof => { capture.acknowledged.push(proof); return true },
+          refoldEligible: revision => options.eligible?.(revision) ?? true,
+        }
       },
     },
   }
@@ -170,14 +186,36 @@ function buildSource(options: {
   read?: (sessionId: string, signal?: AbortSignal) => Promise<PresentationReadSnapshot | undefined>
   loadOlder?: (sessionId: string, signal?: AbortSignal) => Promise<PresentationReadSnapshot | undefined>
   childCwd?: (childSessionId: string) => string
+  generation?: { getSnapshot(): { id: number } | undefined; subscribe(listener: () => void): () => void }
 }) {
+  // The fixture models the PRODUCTION invariant the S3-R0 fence checks: the
+  // official binding's window revision IS the revision the reader returns. A
+  // test that wants a mismatch sets the binding revision explicitly afterwards.
+  const syncBindingRevision = (id: string, revision: number): void => {
+    const binding = options.sessions.binding(id) as unknown as { setRevision?(next: number): void } | undefined
+    binding?.setRevision?.(revision)
+  }
   return createRemoteChildViewSource<WireEvent>({
     sessions: options.sessions,
     reader: {
-      read: options.read ?? (async () => snapshotOf(0)),
-      loadOlder: options.loadOlder ?? (async () => undefined),
+      read: async (id, signal) => {
+        const snapshot = await (options.read ?? (async () => snapshotOf(0)))(id, signal)
+        if (snapshot !== undefined) syncBindingRevision(id, snapshot.revision)
+        return snapshot
+      },
+      loadOlder: async (id, signal) => {
+        const snapshot = await (options.loadOlder ?? (async () => undefined))(id, signal)
+        if (snapshot !== undefined) syncBindingRevision(id, snapshot.revision)
+        return snapshot
+      },
     },
     liveIngress: options.ingress,
+    // The official generation source answers a STABLE snapshot object (the
+    // S3-R0 fence compares identity, never a freshly-built value).
+    generation: options.generation ?? (() => {
+      const stable = { id: 1 }
+      return { getSnapshot: () => stable, subscribe: () => () => {} }
+    })(),
     childCwd: options.childCwd ?? (() => ''),
     asEvent,
   })
@@ -287,6 +325,7 @@ test('F6 regression: an errored window is never re-folded by rehydrate', async (
       }),
       readAttachment: async () => ({ ok: true, value: { attachment: {}, data: new Uint8Array() } }),
     },
+    eventSource: { getSnapshot: () => ({ revision: 1 }) },
   }
   const fixture = childSessions('child-1', mutable)
   const { ingress } = fakeIngress()
@@ -297,6 +336,82 @@ test('F6 regression: an errored window is never re-folded by rehydrate', async (
   openState = 'error'
   assert.equal(await view.rehydrate(), undefined,
     'an errored window must never be re-folded as a legitimate (empty) child')
+  view.release()
+})
+
+test('S3-R0: the child fold commits through a last-moment proof (write refused when the window moved)', async () => {
+  // The child re-fold must not be able to write a fold the ingress would then
+  // refuse to acknowledge: the identity/revision/eligibility checks and the
+  // WRITE are one synchronous step.
+  const generation = (() => {
+    let current: { id: number } | undefined = { id: 1 }
+    return {
+      source: { getSnapshot: () => current, subscribe: () => () => {} },
+      replace: (id: number) => { current = { id } },
+    }
+  })()
+  const fixture = childSessions('child-1', childBinding(true))
+  const { ingress, captures } = fakeIngress({ eligible: revision => revision >= 3 })
+  const source = buildSource({
+    sessions: fixture.sessions,
+    ingress,
+    generation: generation.source,
+    read: async () => snapshotOf(3),
+  })
+  const view = await source.open(openTarget())
+  assert.ok(view !== undefined)
+  const handle = view.subscribe({
+    onDurableEvent: () => {},
+    onLiveInput: () => {},
+    onWindowRefoldRequired: () => {},
+    onSessionSnapshotChanged: () => {},
+    onProjectionsChanged: () => {},
+  })
+  assert.ok(handle !== undefined)
+  const rehydrated = await view.rehydrate()
+  assert.ok(rehydrated?.commit !== undefined, 'the Remote snapshot carries the commit closure')
+  const writes: number[] = []
+  assert.equal(rehydrated!.commit!(() => { writes.push(3) }), true,
+    'a current read commits the fold')
+  assert.deepEqual(writes, [3])
+  assert.deepEqual(captures[0]?.acknowledged, [{ generation: generation.source.getSnapshot(), binding: fixture.sessions.binding('child-1'), revision: 3 }],
+    'the fold write and the acknowledgement are one step')
+
+  // The transport rolls over after the read: nothing may be written or acked.
+  const stale = await view.rehydrate()
+  assert.ok(stale?.commit !== undefined)
+  generation.replace(2)
+  const before = writes.length
+  assert.equal(stale!.commit!(() => { writes.push(4) }), false,
+    'a rollover between the read and the write refuses the commit')
+  assert.equal(writes.length, before, 'a refused commit writes NOTHING')
+  assert.equal(captures[0]?.acknowledged.length, 1, 'a refused commit acknowledges nothing')
+  view.release()
+})
+
+test('S3-R0: the child fold refuses a window the ingress marks ineligible (retained pre-rollover window)', async () => {
+  // Provenance is checked BEFORE the write: the retained window of the dead
+  // generation must never replace the child fold, even though it looks current.
+  const fixture = childSessions('child-1', childBinding(true))
+  const { ingress, captures } = fakeIngress({ eligible: () => false })
+  const source = buildSource({ sessions: fixture.sessions, ingress, read: async () => snapshotOf(5) })
+  const view = await source.open(openTarget())
+  assert.ok(view !== undefined)
+  const handle = view.subscribe({
+    onDurableEvent: () => {},
+    onLiveInput: () => {},
+    onWindowRefoldRequired: () => {},
+    onSessionSnapshotChanged: () => {},
+    onProjectionsChanged: () => {},
+  })
+  assert.ok(handle !== undefined)
+  const rehydrated = await view.rehydrate()
+  assert.ok(rehydrated?.commit !== undefined)
+  const writes: number[] = []
+  assert.equal(rehydrated!.commit!(() => { writes.push(5) }), false,
+    'an ineligible window cannot commit the child fold')
+  assert.deepEqual(writes, [], 'the write never ran')
+  assert.deepEqual(captures[0]?.acknowledged, [], 'nothing was acknowledged')
   view.release()
 })
 
@@ -361,8 +476,7 @@ test('subscribe forwards every ingress sink and passes the hydrated revision as 
   const sinks: ViewerChildLiveSinks<WireEvent> = {
     onDurableEvent: event => { durable.push(event) },
     onLiveInput: input => { live.push(input) },
-    onWindowReplaced: () => { calls.push('replaced') },
-    onWindowPrepended: () => { calls.push('prepended') },
+    onWindowRefoldRequired: () => { calls.push('refold') },
     onSessionSnapshotChanged: () => { calls.push('snapshot') },
     onProjectionsChanged: () => { calls.push('projections') },
   }
@@ -371,7 +485,7 @@ test('subscribe forwards every ingress sink and passes the hydrated revision as 
   assert.equal(captures.length, 1)
   const capture = captures[0]!
   assert.equal(capture.sessionId, 'child-1')
-  assert.equal(capture.hydrateRevision, 7, 'the hydrated reader revision fences the subscribe gap')
+  assert.equal(capture.hydrate?.revision, 7, 'the hydrated reader revision fences the subscribe gap')
 
   const raw = { type: 'turn/start', seq: 4, time: 40 }
   capture.sinks.onDurableEvent('child-1', raw)
@@ -382,11 +496,10 @@ test('subscribe forwards every ingress sink and passes the hydrated revision as 
   assert.equal(live.length, 1)
   assert.equal(live[0], input, 'the live input is forwarded by identity')
 
-  capture.sinks.onWindowReplaced('child-1')
-  capture.sinks.onWindowPrepended('child-1')
+  capture.sinks.onWindowRefoldRequired('child-1')
   capture.sinks.onSessionSnapshotChanged('child-1')
   capture.sinks.onProjectionsChanged('child-1')
-  assert.deepEqual(calls, ['replaced', 'prepended', 'snapshot', 'projections'])
+  assert.deepEqual(calls, ['refold', 'snapshot', 'projections'])
   view.release()
 })
 
@@ -399,8 +512,7 @@ test('release is idempotent, disposes the live subscription and releases the ref
   const handle = view.subscribe({
     onDurableEvent: () => {},
     onLiveInput: () => {},
-    onWindowReplaced: () => {},
-    onWindowPrepended: () => {},
+    onWindowRefoldRequired: () => {},
     onSessionSnapshotChanged: () => {},
     onProjectionsChanged: () => {},
   })
@@ -413,8 +525,7 @@ test('release is idempotent, disposes the live subscription and releases the ref
   assert.equal(view.subscribe({
     onDurableEvent: () => {},
     onLiveInput: () => {},
-    onWindowReplaced: () => {},
-    onWindowPrepended: () => {},
+    onWindowRefoldRequired: () => {},
     onSessionSnapshotChanged: () => {},
     onProjectionsChanged: () => {},
   }), undefined, 'a released view never installs a new subscription')

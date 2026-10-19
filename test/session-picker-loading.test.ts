@@ -15,6 +15,7 @@ import { parseCommand } from '@deepseek-ai/dsh-commands'
 import { afterEach, test } from 'node:test'
 import { Context } from '@deepseek-ai/cordis'
 import { CommandId } from '@deepseek-ai/dsh-commands'
+import { visibleWidth } from '@xmoon76/pi-tui'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { registerTuiCommands, type TuiCommandRunner } from '../src/commands.ts'
 import { createDiag } from '../src/runtime/process/diagnostics.ts'
@@ -64,9 +65,9 @@ interface Harness {
 }
 
 /** Mount the command surface with an injectable sessionReader. */
-function harness(sessionReader: SessionReader): Harness {
+function harness(sessionReader: SessionReader, size: { readonly columns: number; readonly rows: number } = { columns: 80, rows: 24 }): Harness {
   const ctx = new Context()
-  const vt = new VirtualTerminal(80, 24)
+  const vt = new VirtualTerminal(size.columns, size.rows)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
   startedApps.add(app)
@@ -156,7 +157,7 @@ function harness(sessionReader: SessionReader): Harness {
     setTerminalProgressMode: () => {}, setNotificationMethod: () => {},
     updateWelcomeCard: () => {},
     openJobView: () => {},
-    openTasksBrowser: () => {}, openPluginManager: () => {}, createPluginManagerSubmenu: () => ({ render: () => [], invalidate: () => {} }),
+    openTasksBrowser: () => {}, openPluginManager: () => {}, createPluginManagerPage: () => undefined,
     openRewindPicker: () => {},
     sessionTransitionPending: () => false,
     withSessionTransition: async <T>(task: () => T | Promise<T>) => task(),
@@ -348,6 +349,39 @@ test('a listing failure swaps the loading row for the refusal row', async (t) =>
   await waitUntil(() => h.view().includes('session persistence unavailable'))
   const view = h.view()
   assert.ok(!view.includes('Loading sessions…'), 'the refusal replaces the loading row')
+})
+
+test('an EMPTY readable roster states No readable sessions', async (t) => {
+  // The official listing publishes a Session from its header only, so a store
+  // whose logs the reader refuses is indistinguishable from an empty one at
+  // this layer: the empty roster must not claim there are no stored Sessions
+  // (the S2 limited contract). The default 80×24 grant and the 44×20 floor both
+  // keep the sentence readable (the plan's 44-column requirement), so the state
+  // is measured at both.
+  for (const [columns, rows] of [[80, 24], [44, 20]] as const) {
+    const h = harness({
+      list: async () => [],
+      search: async () => ({ items: [], hasMore: false }),
+      projectionBatch: async () => new Map(),
+      blank: () => undefined, measureContext: () => undefined,
+        turnOutline: () => undefined,
+        sessionStatus: () => undefined,
+    }, { columns, rows })
+    try {
+      await h.runSessions()
+      await waitUntil(() => h.view().includes('No readable sessions'))
+      const view = h.view()
+      assert.ok(!view.includes('Loading sessions…'), `the empty state replaces the loading row at ${columns}:\n${view}`)
+      assert.ok(!/no persisted sessions/iu.test(view), `the empty state never claims there are no stored Sessions:\n${view}`)
+      for (const line of h.vt.getViewport()) {
+        assert.ok(visibleWidth(line) <= columns, `no empty-state row overflows ${columns} cells: ${JSON.stringify(line)}`)
+      }
+      assert.ok(view.includes('No readable sessions'), `the whole sentence stays readable at ${columns} columns:\n${view}`)
+    } finally {
+      // ONE live TuiApp per process: release the slot before the next grant.
+      h.app.dispose()
+    }
+  }
 })
 
 test('progressive title enrichment preserves the live search query', async (t) => {

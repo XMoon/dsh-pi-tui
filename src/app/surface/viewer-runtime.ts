@@ -64,14 +64,25 @@ export interface ViewerChildSnapshot<Event> {
   readonly activity: 'running' | 'inactive'
   readonly cwd: string
   readonly revision: number | undefined
+  /**
+   * S3-R0 (Remote only): commit the fold THROUGH this closure so the identity
+   * proof, the write and the ingress acknowledgement are one synchronous step
+   * (plan §2.5: last-moment read→commit). Returns `false` when the transport or
+   * the window moved after the read — nothing was written and nothing was
+   * acknowledged. Absent for Direct/local reads (no ingress).
+   */
+  readonly commit?: (write: () => void) => boolean
 }
 
 /** The live sinks one child view publishes into the mounted viewer. */
 export interface ViewerChildLiveSinks<Event> {
   onDurableEvent(event: Event): void
   onLiveInput(input: AssistantLiveInput): void
-  onWindowReplaced(): void
-  onWindowPrepended(): void
+  /** S3-R0: the child's incremental sequence is no longer trustworthy
+   *  (generation rollover, revision discontinuity, replace/prepend, missing
+   *  change, hydrate gap). The viewer re-folds the child's CURRENT official
+   *  window and acknowledges the committed revision. */
+  onWindowRefoldRequired(): void
   onSessionSnapshotChanged(): void
   onProjectionsChanged(): void
 }
@@ -402,6 +413,14 @@ export function createViewerRuntime<Event extends SessionPresentationEvent>(
     depth = 1,
   ): Promise<void> => {
     if (deps.isCleanedUp()) return
+    // PR3-A capability gate at the REAL viewer admission point: a renderer
+    // that cannot present the viewer (the read-only TSP mount) declines the
+    // open with an OBSERVABLE notice instead of mounting into chrome that
+    // does not exist. No second admission path is created.
+    if (!deps.surface.display.supportsViewer) {
+      deps.surface.display.notify('the subagent viewer is not available in this renderer', 'error')
+      return
+    }
     // Surface authority (plan §6.10): mode is the durable semantic, the
     // access is what THIS surface may do — only a direct (depth 1)
     // continuable child is interactive from the root.
@@ -519,13 +538,9 @@ export function createViewerRuntime<Event extends SessionPresentationEvent>(
           applyAssistantLiveInput(target.folder, target.stats, target.previews, input, deps.summaryKeys)
           deps.surface.repaint()
         },
-        onWindowReplaced: () => {
+        onWindowRefoldRequired: () => {
           if (viewing === undefined || viewing.id !== childId) return
-          runDetachedViewerRehydrate()
-        },
-        onWindowPrepended: () => {
-          if (viewing === undefined || viewing.id !== childId) return
-          runDetachedViewerRehydrate()
+          requestViewerChildRefold()
         },
         onSessionSnapshotChanged: () => {
           const target = viewing
@@ -592,11 +607,43 @@ export function createViewerRuntime<Event extends SessionPresentationEvent>(
     ])
   }
 
+  /** S3-R0: the ONE child re-fold serialization. A recovery requirement marks
+   *  INTENT (the pump coalesces it); the history-paging path ENQUEUES its
+   *  re-fold on the same FIFO so two reads can never interleave their commits —
+   *  an older read must never overwrite the fold a newer one already committed. */
+  let viewerChildRefoldInFlight = false
+  let viewerChildRefoldPending = false
+  let viewerChildRefoldChain: Promise<void> = Promise.resolve()
+  const enqueueViewerChildRefold = (): Promise<void> => {
+    const run = viewerChildRefoldChain.then(() => rehydrateViewedChild())
+    viewerChildRefoldChain = run.catch(() => {})
+    return run
+  }
+  const pumpViewerChildRefold = (): void => {
+    if (viewerChildRefoldInFlight) return
+    viewerChildRefoldInFlight = true
+    deps.runDetached('viewer child refold', async () => {
+      try {
+        while (viewerChildRefoldPending) {
+          viewerChildRefoldPending = false
+          await enqueueViewerChildRefold()
+        }
+      } finally {
+        viewerChildRefoldInFlight = false
+        if (viewerChildRefoldPending) pumpViewerChildRefold()
+      }
+    })
+  }
+  const requestViewerChildRefold = (): void => {
+    viewerChildRefoldPending = true
+    pumpViewerChildRefold()
+  }
+
   /** Re-fold the viewed child from the current authoritative window. The
    * runner's detached ownership wrapper owns failure reporting; every commit
    * re-checks the exact viewer identity. */
   const runDetachedViewerRehydrate = (): void => {
-    deps.runDetached('viewer child re-hydration', () => rehydrateViewedChild())
+    requestViewerChildRefold()
   }
 
   const rehydrateViewedChild = async (): Promise<void> => {
@@ -613,14 +660,25 @@ export function createViewerRuntime<Event extends SessionPresentationEvent>(
     folder.hydrate(own)
     const stats = new StatsFolder()
     stats.hydrate(own)
-    target.folder = folder
-    target.window.setTurns(folder.groupedTurns())
-    target.stats = stats
-    for (const input of snapshot.liveInputs) {
-      applyAssistantLiveInput(target.folder, target.stats, target.previews, input, deps.summaryKeys)
+    const write = (): void => {
+      target.folder = folder
+      target.window.setTurns(folder.groupedTurns())
+      target.stats = stats
+      for (const input of snapshot.liveInputs) {
+        applyAssistantLiveInput(target.folder, target.stats, target.previews, input, deps.summaryKeys)
+      }
+      target.cwd = snapshot.cwd
+      target.activity = snapshot.activity
     }
-    target.cwd = snapshot.cwd
-    target.activity = snapshot.activity
+    // S3-R0: the fold write goes through the child's OWN last-moment fence when
+    // the source supplies one (Remote): identity + window revision are checked
+    // in the SAME synchronous step as the write, and the ingress acknowledgement
+    // happens only after it. `false` = the window moved after the read; the
+    // ingress re-arms, so the pump's next round re-reads (never a busy loop).
+    const committed = snapshot.commit === undefined
+      ? (write(), true)
+      : snapshot.commit(write)
+    if (!committed) return
     deps.refreshStatus()
     deps.surface.repaint()
   }
@@ -632,7 +690,9 @@ export function createViewerRuntime<Event extends SessionPresentationEvent>(
     if (target === undefined || handle === undefined || deps.isCleanedUp()) return
     await handle.loadOlder()
     if (deps.isCleanedUp() || viewing !== target) return
-    await rehydrateViewedChild()
+    // Serialized with every other child re-fold: an older in-flight re-fold must
+    // never commit after this one.
+    await enqueueViewerChildRefold()
   }
 
   /** Leave the subagent viewer (single Esc). Returns whether it exited.

@@ -1,8 +1,7 @@
 /**
  * Host transcript-search overlay mouse parity (the cap audit's last Host
  * private Input): the query row click-positions the private Input; the
- * title and hint rows are inert. Mirrors vendor X049 for the alt-screen
- * search component.
+ * title and hint rows are inert.
  * @module @xmoon76/dsh-pi-tui/transcript-search.test
  */
 

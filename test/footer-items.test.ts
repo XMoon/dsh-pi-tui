@@ -223,7 +223,7 @@ test('builtin styles render meaningful golden variants without changing defaults
     current.usage.context = { usedTokens: 25_000, windowTokens: 100_000, percent: 25 }
     current.usage.tokens = { input: 1_200, output: 3_400, cacheRead: 2_000, cacheWrite: 100 }
     current.usage.cacheHitPct = 91.9
-    current.usage.performance = { llmMs: 1_104_000, firstTokenMs: 1_800, tokensPerSec: 40 }
+    current.usage.performance = { llmMs: 1_104_000, firstTokenMs: 1_800, tokensPerSec: 40, sessionTokensPerSec: 12 }
     current.usage.turns = 3
     current.usage.steps = 7
     current.host.dshVersion = '1.2.3'
@@ -286,8 +286,10 @@ test('builtin styles render meaningful golden variants without changing defaults
     {
       id: 'performance',
       formats: [
-        ['full', 'TTFB 1.8s · 40 tok/s'],
-        ['speed', '40 tok/s'],
+        ['full', 'TTFB 1.8s · R5 40 tok/s'],
+        ['speed', 'R5 40 tok/s'],
+        ['speed-all', 'All 12 tok/s'],
+        ['speed-both', 'R5 40 · All 12 tok/s'],
         ['latency', 'TTFB 1.8s'],
       ],
     },
@@ -331,7 +333,7 @@ test('builtin styles render meaningful golden variants without changing defaults
   assert.equal(render('context', snap), '[███░░░░░░░░░] 25%')
   assert.equal(render('token-usage', snap), '1200/3400')
   assert.equal(render('cache-hit', snap), 'C 91.9%')
-  assert.equal(render('performance', snap), 'TTFB 1.8s · 40 tok/s')
+  assert.equal(render('performance', snap), 'TTFB 1.8s · R5 40 tok/s')
   assert.equal(render('turns-steps', snap), 't3/s7')
 })
 
@@ -359,7 +361,7 @@ test('new builtin styles fall back to the unchanged default formatter', () => {
   assert.equal(render('turns-steps', snap, { id: 'turns-steps', format: 'unknown' }), 't0/s0')
   assert.equal(render('cache-hit', snap, { id: 'cache-hit', format: 'unknown' }), 'C 50.0%')
   assert.equal(render('token-usage', snap, { id: 'token-usage', format: 'unknown' }), '1200/3400')
-  assert.equal(render('performance', snap, { id: 'performance', format: 'unknown' }), 'TTFB 0s · 40 tok/s')
+  assert.equal(render('performance', snap, { id: 'performance', format: 'unknown' }), 'TTFB 0s · R5 40 tok/s')
   assert.equal(render('version', snap, { id: 'version', format: 'unknown' }), 'v0.0.0')
   // `plain` (turns) and `compact` (performance) appeared in older custom
   // documents even though they were never declared meaningful styles. They
@@ -367,7 +369,7 @@ test('new builtin styles fall back to the unchanged default formatter', () => {
   // old layouts on load (performance's legacy 'compact' fallback is the
   // full style — now the recent TTFB + throughput pair).
   assert.equal(render('turns-steps', snap, { id: 'turns-steps', format: 'plain' }), 't0/s0')
-  assert.equal(render('performance', snap, { id: 'performance', format: 'compact' }), 'TTFB 0s · 40 tok/s')
+  assert.equal(render('performance', snap, { id: 'performance', format: 'compact' }), 'TTFB 0s · R5 40 tok/s')
 })
 
 test('unknown persisted formats survive parsing and fail soft in the real composer', () => {
@@ -398,7 +400,7 @@ test('unknown persisted formats survive parsing and fail soft in the real compos
     assert.ok(visibleWidth(row) <= 40, `composer output overflows: ${JSON.stringify(row)}`)
   }
   const text = plain(output)
-  assert.ok(text.includes('TTFB 0s · 40 tok/s'), `performance must use its default: ${text}`)
+  assert.ok(text.includes('TTFB 0s · R5 40 tok/s'), `performance must use its default: ${text}`)
   assert.ok(!text.includes('LLM'), `no lifetime LLM wall in the performance tail: ${text}`)
   assert.ok(text.includes('C 50.0%'), `cache hit must use its default: ${text}`)
   assert.ok(text.includes('1200/3400'), `token usage must use its default: ${text}`)
@@ -426,26 +428,33 @@ test('an unknown format string degrades to the item default, never throws', () =
   assert.equal(context, '[███░░░░░░░░░] 25%', 'the unknown context format must fall back to the default bar')
 })
 
-test('the split performance styles render distinct preferred/compact forms', () => {
+test('every performance format renders its own scope in preferred/compact forms', () => {
   const snap = snapshotWith(snap => {
-    snap.usage.performance = { llmMs: 138_800, firstTokenMs: 2_600, tokensPerSec: 659 }
+    snap.usage.performance = { llmMs: 138_800, firstTokenMs: 2_600, tokensPerSec: 659, sessionTokensPerSec: 44 }
   })
   const def = registry.get('performance')!
   const renderAt = (format: string, density: 'preferred' | 'compact'): string => {
     const segment = def.render(snap, { id: 'performance', format }, density, CONTEXT)
     return segment === null ? '' : plain(renderSpans(segment.spans))
   }
-  // preferred: latency carries the TTFB marker, speed the tok/s unit.
+  // preferred: latency carries the TTFB marker, `speed` the R5 rate,
+  // `speed-all` the whole-Session rate, `speed-both` the labelled pair (ONE
+  // unit), `full` TTFB beside R5.
   assert.equal(renderAt('latency', 'preferred'), 'TTFB 2.6s')
-  assert.equal(renderAt('speed', 'preferred'), '659 tok/s')
-  assert.equal(renderAt('full', 'preferred'), 'TTFB 2.6s · 659 tok/s')
-  // compact: shortened forms (the Row Editor's two placements still read
-  // distinctly through their style column).
+  assert.equal(renderAt('speed', 'preferred'), 'R5 659 tok/s')
+  assert.equal(renderAt('speed-all', 'preferred'), 'All 44 tok/s')
+  assert.equal(renderAt('speed-both', 'preferred'), 'R5 659 · All 44 tok/s')
+  assert.equal(renderAt('full', 'preferred'), 'TTFB 2.6s · R5 659 tok/s')
+  // compact: shortened forms. The pair collapses to its LEADING fact (the
+  // recent rate) so a narrow row never carries two rates; the other formats
+  // keep their own fact.
   assert.equal(renderAt('latency', 'compact'), '2.6s')
-  assert.equal(renderAt('speed', 'compact'), '659t/s')
-  assert.equal(renderAt('full', 'compact'), '2.6s 659t/s')
+  assert.equal(renderAt('speed', 'compact'), 'R5 659t/s')
+  assert.equal(renderAt('speed-all', 'compact'), 'All 44t/s')
+  assert.equal(renderAt('speed-both', 'compact'), 'R5 659t/s')
+  assert.equal(renderAt('full', 'compact'), '2.6s R5 659t/s')
   // The lifetime LLM wall is gone from every form.
-  for (const format of ['full', 'speed', 'latency']) {
+  for (const format of ['full', 'speed', 'speed-all', 'speed-both', 'latency']) {
     for (const density of ['preferred', 'compact'] as const) {
       assert.ok(!renderAt(format, density).includes('138.8'), `${format}/${density} must not show llmMs`)
     }
@@ -488,8 +497,6 @@ test('the footer stats line and the /status detail line are SEPARATE contracts',
     turns: 12,
     steps: 38,
     llmMs: 120_000,
-    firstTokenMsAvg: 2_000,
-    tokensPerSec: 40,
     cacheHitPct: 91.9,
     inputTokens: 2_579,
     outputTokens: 5_507,
@@ -497,12 +504,18 @@ test('the footer stats line and the /status detail line are SEPARATE contracts',
     cacheReadTokens: 20_000,
     cacheWriteTokens: 0,
   }
-  const footerLine = formatStatsLine(usageFromStats(stats as never))
-  const detailLine = formatStatsFacts(sessionStatsFactsOf(stats as never))
+  // PR-2: the measured performance values are the Host projection's, injected
+  // into the usage section (the fold no longer carries them).
+  const hostPerformance = { firstTokenMs: 2_000, tokensPerSec: 40, sessionTokensPerSec: 12 }
+  const baseUsage = usageFromStats(stats)
+  const usage = { ...baseUsage, performance: { ...baseUsage.performance, ...hostPerformance } }
+  const footerLine = formatStatsLine(usage)
+  const detailLine = formatStatsFacts(sessionStatsFactsOf(stats, hostPerformance))
   assert.ok(!footerLine.includes('LLM'), `the footer line carries no lifetime wall:\n${footerLine}`)
   assert.ok(footerLine.includes('TTFB 2s') && footerLine.includes('40 tok/s'), `recent metrics on the footer line:\n${footerLine}`)
   assert.ok(detailLine.includes('LLM 2m00s'), `the detail line keeps the lifetime wall:\n${detailLine}`)
-  assert.ok(detailLine.includes('TTFB 2s') && detailLine.includes('40 tok/s'), `recent metrics on the detail line:\n${detailLine}`)
+  assert.ok(detailLine.includes('TTFB 2s') && detailLine.includes('R5 40 tok/s') && detailLine.includes('All 12 tok/s'),
+    `the Host facts on the detail line:\n${detailLine}`)
   // The token/cache prefix stays IDENTICAL between the two surfaces.
   const tokenSegment = '↑2.6k ↓5.5k R20k CH91.9%'
   assert.equal(footerLine.split(' | ')[0], tokenSegment, `shared pi vocabulary:\n${footerLine}`)
@@ -516,8 +529,6 @@ test('an unavailable token projection renders the performance segment alone (no 
     turns: 12,
     steps: 38,
     llmMs: 120_000,
-    firstTokenMsAvg: 2_000,
-    tokensPerSec: 40,
     cacheHitPct: 91.9,
     inputTokens: 2_579,
     outputTokens: 5_507,
@@ -527,8 +538,9 @@ test('an unavailable token projection renders the performance segment alone (no 
   }
   // The Remote branch with an unavailable `tokenUsage`/context: the official
   // override is present but empty, so the token facts are UNKNOWN (omitted)
-  // while the recent-window performance metrics still come from the fold.
-  const usage = usageFromStats(stats as never, undefined, {})
+  // while the Host-projection performance metrics still render.
+  const base = usageFromStats(stats, undefined, {})
+  const usage = { ...base, performance: { ...base.performance, firstTokenMs: 2_000, tokensPerSec: 40 } }
   assert.equal(usage.tokens, undefined, 'no owned token facts')
   const line = formatStatsLine(usage)
   const compact = formatStatsLineCompact(usage)
@@ -545,28 +557,53 @@ test('PR5: unavailable recent metrics omit the performance segments (never a zer
   })
   // stats-line: the token segment survives; the recent tail is omitted.
   assert.equal(render('stats-line', unavailable), '↑1.2k ↓3.4k')
-  // split formats that need the missing fact render nothing.
-  assert.equal(render('performance', unavailable, { id: 'performance', format: 'latency' }), '')
-  assert.equal(render('performance', unavailable, { id: 'performance', format: 'speed' }), '')
-  assert.equal(render('performance', unavailable, { id: 'performance', format: 'full' }), '')
+  // EVERY format that needs a missing fact renders nothing.
+  for (const format of ['latency', 'speed', 'speed-all', 'speed-both', 'full']) {
+    assert.equal(render('performance', unavailable, { id: 'performance', format }), '', `${format} has no fact to show`)
+  }
   // A proven zero stays a legitimate measured value.
   const zero = snapshotWith(snap => {
     snap.usage.performance = { llmMs: 8100, firstTokenMs: 0, tokensPerSec: 0 }
   })
-  assert.equal(render('performance', zero, { id: 'performance', format: 'full' }), 'TTFB 0s · 0 tok/s')
+  assert.equal(render('performance', zero, { id: 'performance', format: 'full' }), 'TTFB 0s · R5 0 tok/s')
+  assert.equal(render('performance', zero, { id: 'performance', format: 'speed-both' }), 'R5 0 tok/s',
+    'the pair falls back to the one measured fact, never a fabricated All zero')
   assert.equal(render('stats-line', zero), '↑0 ↓0 | TTFB 0s · 0 tok/s')
 })
 
-test('PR5: a partially available recent window renders the available half only', () => {
+test('PR5: a partially available fact renders only the formats that own it', () => {
   const latencyOnly = snapshotWith(snap => {
     snap.usage.performance = { llmMs: 8100, firstTokenMs: 2_600 }
   })
   assert.equal(render('performance', latencyOnly, { id: 'performance', format: 'latency' }), 'TTFB 2.6s')
   assert.equal(render('performance', latencyOnly, { id: 'performance', format: 'speed' }), '')
+  assert.equal(render('performance', latencyOnly, { id: 'performance', format: 'speed-all' }), '')
+  assert.equal(render('performance', latencyOnly, { id: 'performance', format: 'speed-both' }), '')
   assert.equal(render('performance', latencyOnly, { id: 'performance', format: 'full' }), 'TTFB 2.6s')
   const speedOnly = snapshotWith(snap => {
     snap.usage.performance = { llmMs: 8100, tokensPerSec: 51 }
   })
-  assert.equal(render('performance', speedOnly, { id: 'performance', format: 'full' }), '51 tok/s')
+  assert.equal(render('performance', speedOnly, { id: 'performance', format: 'full' }), 'R5 51 tok/s')
+  assert.equal(render('performance', speedOnly, { id: 'performance', format: 'speed-both' }), 'R5 51 tok/s')
   assert.equal(render('performance', speedOnly, { id: 'performance', format: 'latency' }), '')
+  // TPS plan PR-3: an All-only Session answers the All formats and the pair,
+  // and nothing else — the R5 formats must never borrow the All figure.
+  const allOnly = snapshotWith(snap => {
+    snap.usage.performance = { llmMs: 8100, sessionTokensPerSec: 44 }
+  })
+  assert.equal(render('performance', allOnly, { id: 'performance', format: 'speed-all' }), 'All 44 tok/s')
+  assert.equal(render('performance', allOnly, { id: 'performance', format: 'speed-both' }), 'All 44 tok/s')
+  assert.equal(render('performance', allOnly, { id: 'performance', format: 'speed' }), '')
+  assert.equal(render('performance', allOnly, { id: 'performance', format: 'full' }), '')
+  // The ONE display precision policy reaches the RENDERED row: below 100 tok/s
+  // the figure keeps one decimal (`derivePerformance` → `displayRate`), so a
+  // status assertion must accept that form — the seeded model wall is real
+  // elapsed time and can legitimately push a scope below the integer threshold.
+  const decimal = snapshotWith(snap => {
+    snap.usage.performance = { llmMs: 8_100, firstTokenMs: 1_800, tokensPerSec: 87.5, sessionTokensPerSec: 44.3 }
+  })
+  assert.equal(render('performance', decimal, { id: 'performance', format: 'full' }),
+    'TTFB 1.8s · R5 87.5 tok/s')
+  assert.equal(render('performance', decimal, { id: 'performance', format: 'speed-both' }),
+    'R5 87.5 · All 44.3 tok/s')
 })

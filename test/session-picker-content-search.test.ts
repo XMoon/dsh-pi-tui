@@ -204,7 +204,7 @@ function harness(options: {
     setTerminalProgressMode: () => {}, setNotificationMethod: () => {},
     updateWelcomeCard: () => {},
     openJobView: () => {},
-    openTasksBrowser: () => {}, openPluginManager: () => {}, createPluginManagerSubmenu: () => ({ render: () => [], invalidate: () => {} }),
+    openTasksBrowser: () => {}, openPluginManager: () => {}, createPluginManagerPage: () => undefined,
     openRewindPicker: () => {},
     sessionTransitionPending: () => false,
     withSessionTransition: async <T>(task: () => T | Promise<T>) => task(),
@@ -758,6 +758,42 @@ test('a malicious cwd never reaches the terminal through the search description'
   assert.ok(!raw.includes('\x1b]0;PWNED'), 'the raw terminal stream must never carry the injected cwd sequence')
   const view = h.view()
   assert.ok(!view.includes('\x1b'), 'the raw ESC must never reach the terminal')
+})
+
+test('a malicious session title never reaches the terminal through the picker label', async (t) => {
+  const hostileTitle = 'evil\x1b]0;PWNED\x07\x1b[2J title'
+  const h = harness({
+    rows: [{ id: 'session-evil-title', updatedAt: 300, cwd: '/ws' }],
+    search: async () => ({ items: [], hasMore: false }),
+    // The Host title arrives through the projection replay, exactly like the
+    // production background title read.
+    projectionBatch: async () => new Map([['session-evil-title', { title: hostileTitle, preset: hostileTitle }]]),
+  })
+  t.after(() => h.app.stop())
+  await h.runSessions('')
+  await waitUntil(() => h.view().includes('evil'))
+  const raw = h.rawWrites.join('')
+  assert.ok(!raw.includes('\x1b]0;PWNED'), 'the raw terminal stream must never carry the injected title sequence')
+  assert.ok(!raw.includes('\x1b[2J'), 'the raw terminal stream must never carry the injected clear')
+  const view = h.view()
+  assert.ok(!view.includes('\x1b'), 'the raw ESC must never reach the terminal')
+  assert.ok(view.includes('evil title'), `the readable title text survives the projection:\n${view}`)
+  assert.ok(view.includes('preset:evil title'), `the readable preset meta survives too:\n${view}`)
+})
+
+test('a malicious session id never reaches the terminal through ID-derived meta', async (t) => {
+  const hostileId = 'session-ab\u001b]0;PWNED\u0007cd'
+  const h = harness({
+    rows: [{ id: hostileId, updatedAt: 300, cwd: '/ws' }],
+    search: async () => ({ items: [], hasMore: false }),
+  })
+  t.after(() => h.app.stop())
+  await h.runSessions('')
+  await waitUntil(() => h.view().includes('ab'))
+  const raw = h.rawWrites.join('')
+  assert.ok(!raw.includes('\u001b]0;PWNED'), 'the raw terminal stream must never carry the injected id sequence')
+  assert.ok(!h.view().includes('\u001b'), `the painted frame carries no raw ESC:\n${h.view()}`)
+  assert.ok(h.view().includes('ab'), 'the readable short-id prefix survives the projection')
 })
 
 test('content-only matches keep the Host page order (review P2)', async (t) => {
