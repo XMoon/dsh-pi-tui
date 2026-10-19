@@ -224,7 +224,7 @@ The subject owns its own artifacts (in the smoke, its event record).
 - [`tmux-testing.md`](./tmux-testing.md) — the terminal/TTY complement.
 - [`focus-replay-harness.md`](./tmux-testing.md) — the same shape for
   fullscreen frame replay: a probe script plus a pure oracle, documented here.
-- [`tern-tsp.md`](../tsp/overview.md) — the TSP integration and product boundary.
+- [`tsp/overview.md`](../tsp/overview.md) — the TSP integration and product boundary.
 
 
 ## Lane fidelity and evidence rules
