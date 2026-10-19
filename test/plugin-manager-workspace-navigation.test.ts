@@ -118,6 +118,35 @@ test('the removal confirmation defaults to Cancel and an explicit Remove is requ
   assert.deepEqual(harness.removeBundle, [vendor])
 })
 
+test('copying a failed install preserves duplicate output lines', async () => {
+  const harness = await open({
+    columns: 120,
+    rows: 40,
+    installImpl: async () => ({
+      changed: true,
+      application: 'failed',
+      stage: 'install',
+      target: 'pkg',
+      error: { code: 'operation-error' },
+      packageResult: { exitCode: 1, output: 'same line\nsame line\n', truncated: false },
+    }),
+  })
+  harness.vt.sendInput('i')
+  await harness.settle()
+  for (const character of 'pkg') harness.vt.sendInput(character)
+  await harness.settle()
+  harness.vt.sendInput('\r') // inspect
+  await harness.settle()
+  harness.vt.sendInput('\r') // install
+  await harness.settle()
+  assert.equal(harness.controller.installView()?.phase, 'failed')
+  harness.vt.sendInput('c')
+  await harness.settle()
+  assert.equal(harness.copied.length, 1)
+  assert.equal(harness.copied[0]!.split('\n').filter(line => line === 'same line').length, 2,
+    'the exact diagnostic output is copied without global line de-duplication')
+})
+
 test('Esc advertises the real destination per entry host', async () => {
   const direct = await open({ columns: 120, rows: 30 })
   assert.match(plain([direct.viewport().at(-1)!]), /Esc close/)

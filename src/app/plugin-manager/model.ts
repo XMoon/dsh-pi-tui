@@ -344,17 +344,33 @@ function cardWarningFacts(card: PluginCardView, exemptions: readonly PluginExemp
   const facts: PluginDetailFact[] = []
   if (card.error !== undefined) {
     facts.push({ label: 'Host error', value: errorText(card.error), tone: 'error' })
-    for (const entry of card.error.incompatible ?? []) {
-      const key = `${entry.name}@${entry.version}`
-      const exemption = exemptions.find(candidate => candidate.packageVersion === key)
+  }
+  // The Host accepts an exact-version exemption WITHOUT an incompatible error;
+  // an applied exemption must still be visible on the card (plan §4.5).
+  const exemptionKeys = new Set<string>()
+  if (card.version !== undefined) {
+    const key = `${card.name}@${card.version}`
+    const exemption = exemptions.find(candidate => candidate.packageVersion === key)
+    if (exemption !== undefined) {
+      exemptionKeys.add(key)
       facts.push({
         label: 'Exemption',
-        value: exemption === undefined
-          ? `${key}: no exact-version exemption applies`
-          : `${key}: exempted for DSH ${exemption.runtimeVersions.join(', ')}`,
-        tone: exemption === undefined ? 'warning' : 'success',
+        value: `${key}: exempted for DSH ${exemption.runtimeVersions.join(', ')}`,
+        tone: 'success',
       })
     }
+  }
+  for (const entry of card.error?.incompatible ?? []) {
+    const key = `${entry.name}@${entry.version}`
+    if (exemptionKeys.has(key)) continue
+    const exemption = exemptions.find(candidate => candidate.packageVersion === key)
+    facts.push({
+      label: 'Exemption',
+      value: exemption === undefined
+        ? `${key}: no exact-version exemption applies`
+        : `${key}: exempted for DSH ${exemption.runtimeVersions.join(', ')}`,
+      tone: exemption === undefined ? 'warning' : 'success',
+    })
   }
   if (card.isSelf) {
     facts.push({

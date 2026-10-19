@@ -10,6 +10,10 @@ import assert from 'node:assert/strict'
 import { afterEach, test } from 'node:test'
 import { visibleWidth } from '@xmoon76/pi-tui'
 import { darkColors, lightColors } from '../src/domain/display/theme.ts'
+import { PluginManagerController } from '../src/app/plugin-manager/controller.ts'
+import { PluginManagerWorkspacePanel } from '../src/tui/plugin-manager/workspace.ts'
+import { createDiag } from '../src/runtime/process/diagnostics.ts'
+import type { PluginChangeFact, PluginManagerPort, PluginManagerSnapshot } from '../src/runtime/plugin-manager-port.ts'
 import { SELF_BUNDLE } from '../src/app/plugin-manager/classify.ts'
 import type { TuiApp } from '../src/tui-app.ts'
 import { EXPERIMENTAL_NAMES, bundle, openWorkspace, plain, type WorkspaceHarness } from './support/plugin-workspace-harness.ts'
@@ -219,6 +223,72 @@ test('a resize between press and release refuses the stale gesture', async () =>
   release(harness, targetRow, 3)
   await harness.settle()
   assert.equal(harness.setBundle.length, 0, 'the stale click never activates a card/action')
+})
+
+test('a model refresh whose repaint has NOT run refuses a click on the old Enable action', async () => {
+  let enabled = false
+  const setBundle: Array<{ name: string; enabled: boolean }> = []
+  const snapshotOf = (): PluginManagerSnapshot => ({
+    bundles: [bundle({ name: '@vendor/foo', enabled, source: 'file:/tmp/foo' })],
+    plugins: [],
+    registries: { registry: null, fallbackRegistries: [], resolved: null },
+    exemptions: [],
+    exemptionWarnings: [],
+  })
+  const change = (): PluginChangeFact => ({ changed: true, application: 'applied', stage: 'enable', target: '@vendor/foo' })
+  const port: PluginManagerPort = {
+    snapshot: async () => snapshotOf(),
+    inspect: async () => ({ status: 'refused', problem: 'unknown', reason: 'not used' }),
+    setBundleEnabled: async (name, next) => { setBundle.push({ name, enabled: next }); enabled = next; return change() },
+    setPluginEnabled: async () => change(),
+    removeBundle: async () => ({ ...change(), stage: 'remove' }),
+    startInstall: async () => ({ ...change(), stage: 'install' }),
+    waitForInstall: async () => null,
+    cancelInstall: async () => ({ status: 'not-running' }),
+    subscribeInstall: () => () => {},
+    subscribeInvalidation: () => () => {},
+  }
+  const controller = new PluginManagerController(port, {
+    requestRender: () => {},
+    requestClose: () => {},
+    notify: () => {},
+    isOpen: () => true,
+    diag: createDiag({ filePath: undefined, stderrLevel: 'off' }),
+  })
+  const panel = new PluginManagerWorkspacePanel(controller, {
+    rows: () => 40,
+    columns: () => 120,
+    requestRender: () => {},
+    notice: () => undefined,
+    onCopy: () => {},
+  })
+  const paint = (): string[] => panel.render(120)
+  const settle = async (rounds = 8): Promise<void> => {
+    for (let index = 0; index < rounds; index += 1) await new Promise<void>(resolve => setTimeout(resolve, 0))
+  }
+
+  controller.open('direct-command')
+  await settle()
+  panel.handleInput('\r') // Details
+  const painted = paint().map(line => line.replace(/\x1b\[[0-9;]*m/g, ''))
+  const actionRow = painted.findIndex(line => line.includes('Enable…'))
+  assert.ok(actionRow >= 0, `the detail paints Enable…:\n${painted.join('\n')}`)
+
+  // The Host invalidation changes the authoritative model; the panel's queued
+  // repaint has NOT run yet, so the painted action still reads Enable….
+  enabled = true
+  controller.refresh()
+  for (let index = 0; index < 20 && controller.model().cards[0]?.enabled !== true; index += 1) {
+    await new Promise<void>(resolve => setTimeout(resolve, 0))
+  }
+  assert.equal(controller.model().cards[0]?.enabled, true, 'the authoritative model changed')
+
+  panel.onCellPress(50, actionRow)
+  panel.onCellClick(50, actionRow)
+  await settle()
+  assert.deepEqual(setBundle, [], 'the stale Enable… click must not become a Disable on the newer model')
+  controller.dispose()
+  panel.dispose()
 })
 
 test('a resize whose repaint has NOT run refuses press+release on the old hit map', async () => {
