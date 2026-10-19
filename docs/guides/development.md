@@ -358,7 +358,7 @@ exec "$DSH_NEXT_ROOT/node_modules/.bin/dsh" --profile pi-tui "$@"
 ## Full Source compatibility
 
 ```bash
-pnpm compat:dsh:source -- --dsh-dir "$HOME/project/deepseek-harness"
+pnpm compat:dsh:source -- --dsh-dir "/path/to/deepseek-harness"
 ```
 
 This is the CI-equivalent full Source compatibility proof: exact upstream source
