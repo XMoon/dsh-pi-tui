@@ -604,3 +604,79 @@ test('L5: the real forwarded install events reach the Remote adapter by exact re
   await settle(150)
   assert.equal(events.length, 2, 'a disposed install subscription delivers nothing later')
 })
+
+test('L6-F (S5 A12): a Remote mutation reply carried by a superseded Connection generation never repaints success or re-dispatches', async (t) => {
+  const life = testLifecycle(t)
+  const fixture = await mountPluginManagerRunner(life)
+  const profile = fixture.host.pluginManager!
+  const bundle = profile.bundleName
+
+  // Count the REAL Host write on the unwrapped service implementation.
+  const { symbols } = await import('@deepseek-ai/cordis')
+  const hostProxy = fixture.host.ctx.get('pluginManager') as unknown as Record<symbol, unknown> & {
+    setBundleEnabled(name: string, enabled: boolean): Promise<unknown>
+  }
+  const hostService = (hostProxy[symbols.original] ?? hostProxy) as typeof hostProxy
+  const originalHostWrite = hostService.setBundleEnabled
+  let hostWrites = 0
+  let releaseReply!: () => void
+  const replyGate = new Promise<void>(resolve => { releaseReply = resolve })
+  let replyHeld!: () => void
+  const replyReached = new Promise<void>(resolve => { replyHeld = resolve })
+  hostService.setBundleEnabled = async function patchedHostWrite(
+    this: unknown,
+    name: string,
+    enabled: boolean,
+  ): Promise<unknown> {
+    // The REAL Host write runs to completion first; then the Host-side answer
+    // is withheld, so the generated Remote call (and the adapter awaiting it)
+    // is still pending when the Connection generation switches.
+    const reply = await originalHostWrite.call(this, name, enabled)
+    hostWrites += 1
+    replyHeld()
+    await replyGate
+    return reply
+  }
+  t.after(() => { hostService.setBundleEnabled = originalHostWrite })
+
+  submit(fixture, '/plugins')
+  await waitFor('the fixture bundle is listed disabled', () =>
+    (bundleLine(fixture.vt.getViewport(), bundle) ?? '').includes('disabled'), 20_000)
+  await selectListRow(fixture.vt, bundle)
+  fixture.vt.sendInput('\r')
+  await waitFor('the fixture bundle detail owns the Details focus', () =>
+    /\[Details\]/.test(plain(fixture.vt.getViewport())), 20_000)
+  await waitFor('the fixture bundle detail offers the official Enable action', () =>
+    /\bEnable\b/.test(plain(fixture.vt.getViewport())), 20_000)
+  fixture.vt.sendInput('\r')
+  await replyReached
+  await waitFor('the real Host write is dispatched exactly once', () => hostWrites === 1, 20_000)
+  assert.match(plain(fixture.vt.getViewport()), /Enabled\s+No/, 'the pending operation has not repainted the Host truth')
+
+  // Switch the official Connection generation while the operation is pending.
+  const connection = fixture.aggregate.wire.client.connection as unknown as {
+    generation: { getSnapshot(): { readonly id: number } | undefined }
+    reconnect(): void
+  }
+  const before = connection.generation.getSnapshot()?.id
+  connection.reconnect()
+  await waitFor('a NEW DEFINED Connection generation is established', () => {
+    const current = connection.generation.getSnapshot()?.id
+    return current !== undefined && current !== before
+  }, 20_000)
+  // The new generation's authoritative inventory reread is the only painter:
+  // the real Host write really happened, so the truth is enabled.
+  await waitFor('the new generation reread paints the authoritative enabled truth', () =>
+    /Enabled\s+Yes/.test(plain(fixture.vt.getViewport())), 20_000)
+
+  // Now the old-generation reply lands on the new surface.
+  releaseReply()
+  await settle(500)
+  const view = plain(fixture.vt.getViewport())
+  assert.equal(hostWrites, 1, 'the stale reply never dispatches a second Host write')
+  assert.doesNotMatch(view, /enable restart-required|enable applied/,
+    'a stale generation reply never repaints an optimistic success summary')
+  assert.match(view, /generation changed|enable\/disable failed/,
+    'the superseded reply is reported as indeterminate; the authoritative reread decides the outcome')
+  assert.deepEqual([...profile.selectedBundles()], [bundle], 'the durable Host truth is exactly the one real write')
+})

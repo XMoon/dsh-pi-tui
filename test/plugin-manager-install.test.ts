@@ -7,9 +7,14 @@
  */
 
 import assert from 'node:assert/strict'
+import { existsSync, readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import test from 'node:test'
+import { symbols } from '@deepseek-ai/cordis'
+import { parse as parseYaml } from 'yaml'
 import { PluginManagerController } from '../src/app/plugin-manager/controller.ts'
 import { PluginManagerWorkspacePanel } from '../src/tui/plugin-manager/workspace.ts'
+import { DirectPluginManagerPort } from '../src/runtime/direct/plugin-manager-direct.ts'
 import { createDiag } from '../src/runtime/process/diagnostics.ts'
 import type {
   PluginChangeFact,
@@ -17,6 +22,9 @@ import type {
   PluginManagerPort,
   PluginManagerSnapshot,
 } from '../src/runtime/plugin-manager-port.ts'
+import { startLocalNpmRegistry, packFixturePackage } from './support/local-npm-registry.ts'
+import { createRemoteApplicationHostFixture } from './support/remote-application-fixture.ts'
+import { testLifecycle } from './support/temp-lifecycle.ts'
 
 function emptySnapshot(): PluginManagerSnapshot {
   return {
@@ -583,4 +591,283 @@ test('a zero-row body revokes build-script approval until an explicit re-selecti
   await tick()
   assert.equal(installCalls.length, 2, 'only the explicit re-selection approves')
   page.dispose()
+})
+
+// ── S5 / PR-E: real official Host install lifecycle (A09 / A10) ─────────────
+//
+// PRODUCTION PREREQUISITES REPRODUCED
+//   The real `@deepseek-ai/dsh-plugin-manager` Host service over the official
+//   base-owned `profileContext` + Loader, driven through the production
+//   `DirectPluginManagerPort`, `PluginManagerController` and workspace panel.
+//   The package source is a loopback npm registry; pnpm is the real binary and
+//   writes a real profile.
+// TEST STAND-INS
+//   The loopback registry and the tiny audit package/tarball created under the
+//   test lifecycle root.
+// DELIBERATELY ABSENT
+//   The public npm registry, the developer's real HOME/DSH_HOME/credential
+//   store, unknown third-party code, and any paid/native provider.
+
+function plainFrame(lines: readonly string[]): string {
+  return lines.map(line => line.replace(/\x1b\[[0-9;]*m/g, '')).join('\n')
+}
+
+async function waitForState(label: string, predicate: () => boolean | Promise<boolean>, timeoutMs = 60_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    if (await predicate()) return
+    await new Promise<void>(resolve => setTimeout(resolve, 25))
+  }
+  throw new Error(`timed out waiting for ${label}`)
+}
+
+/** Unwrap a Cordis traceable service proxy to the implementation that owns the
+ *  method (the proxy refuses property writes). */
+function serviceImplementation<T>(value: unknown): T {
+  const original = (value as Record<symbol, unknown>)[symbols.original]
+  return (original ?? value) as T
+}
+
+interface RealHostInstallFixture {
+  readonly host: Awaited<ReturnType<typeof createRemoteApplicationHostFixture>>
+  readonly controller: PluginManagerController
+  readonly profileDir: string
+  /** A new panel over the SAME controller (the surface is disposable; the
+   *  controller/install request outlives it). */
+  panelAt(rows: number, width?: number, t?: import('node:test').TestContext): PluginManagerWorkspacePanel
+}
+
+/** Boot the real Host + the production controller/panel over an isolated,
+ *  empty managed profile. */
+async function startRealInstallFixture(
+  t: import('node:test').TestContext,
+  presetId: string,
+): Promise<RealHostInstallFixture> {
+  const life = testLifecycle(t)
+  const host = await createRemoteApplicationHostFixture(life, presetId, {
+    pluginManagerProfile: { emptyProfile: true },
+    isolateHome: true,
+  })
+  assert.ok(host.pluginManager !== undefined)
+  const port = new DirectPluginManagerPort(host.ctx)
+  const controller = new PluginManagerController(port, {
+    requestRender: () => {},
+    requestClose: () => {},
+    notify: () => {},
+    isOpen: () => true,
+    diag: createDiag({ filePath: undefined, stderrLevel: 'off' }),
+  }, { observations: () => [] })
+  life.defer(() => controller.dispose())
+  controller.open('direct-command')
+  await waitForState('the real Host inventory', () => controller.status().state === 'ready')
+  return {
+    host,
+    controller,
+    profileDir: host.pluginManager.profileDir,
+    panelAt(rows: number, width = 80, testContext?: import('node:test').TestContext): PluginManagerWorkspacePanel {
+      const panel = new PluginManagerWorkspacePanel(controller, {
+        rows: () => rows,
+        columns: () => width,
+        requestRender: () => {},
+        notice: () => undefined,
+        onCopy: () => {},
+      })
+      if (testContext !== undefined) testContext.after(() => panel.dispose())
+      return panel
+    },
+  }
+}
+
+test('A09: the real Host cancel terminates the real pnpm install, restores the profile, and reopens one request', async (t) => {
+  const fixture = await startRealInstallFixture(t, 's5-pr-e-a09')
+  const { host, controller, profileDir } = fixture
+  const port = new DirectPluginManagerPort(host.ctx)
+
+  // Count real Host dispatches through the unwrapped service implementation:
+  // a cancel must never cause a second install.
+  const hostService = serviceImplementation<{
+    installBundle(spec: string, options?: unknown): Promise<unknown>
+  }>(host.ctx.get('pluginManager'))
+  const originalInstall = hostService.installBundle
+  let dispatches = 0
+  hostService.installBundle = function patchedInstall(this: unknown, spec: string, options?: unknown): Promise<unknown> {
+    dispatches += 1
+    return originalInstall.call(this, spec, options)
+  }
+  t.after(() => { hostService.installBundle = originalInstall })
+
+  const manifest = { name: '@s5-fixture/slow-cancel', version: '0.0.1', dsh: { bundle: { patch: [] } } }
+  const packed = packFixturePackage(join(host.workRoot, 'a09-package'), {
+    name: manifest.name,
+    version: manifest.version,
+    manifest,
+  })
+  const registry = await startLocalNpmRegistry(packed, { slowTarball: true, manifest })
+  t.after(() => registry.close())
+
+  const phases: Array<{ requestId: string; phase: string }> = []
+  const off = (host.ctx as unknown as {
+    on(name: string, listener: (payload: { requestId: string; phase: string }) => void): () => void
+  }).on('plugin-manager/install-state', payload => phases.push({ requestId: String(payload.requestId), phase: payload.phase }))
+  t.after(off)
+
+  controller.beginManualInstall()
+  // The panel opens on the SAME controller's install view (a real user opens
+  // the dialog after starting it).
+  const panel = fixture.panelAt(24, 80, t)
+  panel.render(80)
+  panel.handleInput('i') // the real list key opens the install dialog
+  controller.inspect(manifest.name, registry.url)
+  await waitForState('the accepted inspection', () => controller.installView()?.phase === 'confirm')
+  panel.render(80)
+  panel.handleInput('\r')
+  await waitForState('the real install to start', () => controller.installView()?.phase === 'installing')
+  const requestId = controller.installView()!.requestId!
+  assert.ok(requestId !== undefined && requestId !== '')
+
+  // The real pnpm child is now blocked in the slow tarball read.
+  await registry.waitForTarballRequest()
+  const running = plainFrame(panel.render(80))
+  assert.match(running, /Stop installation/, 'the running frame paints the official Stop action')
+
+  // Real user Stop key on the painted frame.
+  panel.handleInput('s')
+  await waitForState('the official cancellation to settle', () => controller.installView()?.phase === 'done')
+  assert.match(controller.installView()?.message ?? '', /cancelled/)
+  registry.releaseTarball()
+  await waitForState('the settled request to leave the Host installs map', async () => (await port.waitForInstall(requestId)) === null)
+
+  // Host final state: exactly one dispatch, no installed dependency, and the
+  // profile files are the restored originals.
+  assert.equal(dispatches, 1, 'one cancelled request never dispatches a second installBundle')
+  const profile = JSON.parse(readFileSync(join(profileDir, 'package.json'), 'utf8')) as {
+    dependencies?: Record<string, string>
+  }
+  assert.equal(profile.dependencies?.[manifest.name], undefined, 'the cancelled install never lands in the profile manifest')
+  assert.equal(existsSync(join(profileDir, 'node_modules', '@s5-fixture', 'slow-cancel')), false,
+    'the cancelled install never lands in the profile node_modules')
+
+  const requestPhases = phases.filter(event => event.requestId === requestId).map(event => event.phase)
+  assert.ok(requestPhases.includes('installing'), `the real Host announced installing: ${JSON.stringify(requestPhases)}`)
+  assert.ok(requestPhases.includes('cancelling'), `the real Host announced cancelling: ${JSON.stringify(requestPhases)}`)
+
+  // Re-entering the surface resumes the SAME request id; only an explicit
+  // New install may replace it.
+  const reopened = new PluginManagerWorkspacePanel(controller, {
+    rows: () => 24,
+    columns: () => 80,
+    requestRender: () => {},
+    notice: () => undefined,
+    onCopy: () => {},
+  })
+  t.after(() => reopened.dispose())
+  assert.equal(reopened.currentView(), 'install')
+  assert.equal(controller.installView()?.requestId, requestId)
+  assert.equal(controller.installView()?.phase, 'done')
+})
+
+test('A10: real pnpm blocked builds become pendingBuilds; only an explicit approval runs the harmless marker script', async (t) => {
+  const fixture = await startRealInstallFixture(t, 's5-pr-e-a10')
+  const { host, controller, profileDir } = fixture
+
+  const hostService = serviceImplementation<{
+    installBundle(spec: string, options?: unknown): Promise<unknown>
+  }>(host.ctx.get('pluginManager'))
+  const originalInstall = hostService.installBundle
+  let dispatches = 0
+  hostService.installBundle = function patchedInstall(this: unknown, spec: string, options?: unknown): Promise<unknown> {
+    dispatches += 1
+    return originalInstall.call(this, spec, options)
+  }
+  t.after(() => { hostService.installBundle = originalInstall })
+
+  const packageName = '@s5-fixture/build-consent'
+  const manifest = {
+    name: packageName,
+    version: '0.0.1',
+    dsh: { bundle: { patch: [] } },
+    scripts: {
+      postinstall: "node -e \"require('fs').writeFileSync('approved.marker','approved-by-explicit-user-action')\"",
+    },
+  }
+  const packed = packFixturePackage(join(host.workRoot, 'a10-package'), {
+    name: manifest.name,
+    version: manifest.version,
+    manifest,
+  })
+  const registry = await startLocalNpmRegistry(packed, { manifest })
+  t.after(() => registry.close())
+
+  controller.beginManualInstall()
+  controller.inspect(packageName, registry.url)
+  await waitForState('the accepted inspection', () => controller.installView()?.phase === 'confirm')
+  controller.confirmInstall()
+  await waitForState('the real blocked-build failure', () => controller.installView()?.phase === 'failed', 120_000)
+
+  const outcome = controller.installView()?.outcome
+  assert.equal(outcome?.application, 'failed')
+  assert.deepEqual([...outcome?.pendingBuilds ?? []], [`${packageName}@0.0.1`],
+    'the official Host reports the exact pending package from the real pnpm run')
+  assert.equal(dispatches, 1)
+  const marker = join(profileDir, 'node_modules', '@s5-fixture', 'build-consent', 'approved.marker')
+  assert.equal(existsSync(marker), false, 'a blocked build never runs its script')
+  const panel = fixture.panelAt(24, 80, t)
+
+  // The short/zero-body frames never admit the approval action: Enter on a
+  // frame that does not paint the full risk writes nothing to the Host.
+  const sizes = [
+    { rows: 10, width: 80, label: '80x10', approvalExpected: false },
+    { rows: 20, width: 44, label: '44x20', approvalExpected: true },
+    { rows: 2, width: 80, label: '80x2', approvalExpected: false },
+  ] as const
+  for (const size of sizes) {
+    // Re-create the panel at the requested live height for this frame.
+    const sized = new PluginManagerWorkspacePanel(controller, {
+      rows: () => size.rows,
+      columns: () => size.width,
+      requestRender: () => {},
+      notice: () => undefined,
+      onCopy: () => {},
+    })
+    const frame = plainFrame(sized.render(size.width))
+    const riskFullyVisible = /execute scripts with your[\s\S]*user privileges/.test(frame)
+    if (!size.approvalExpected) {
+      // The gate admits approval ONLY together with its fully painted risk.
+      assert.equal(riskFullyVisible, false, `${size.label}: the frame cannot show the full risk`)
+      assert.doesNotMatch(frame, /Approve and retry/, `${size.label}: no Approve without the full risk`)
+      sized.handleInput('\r')
+      await new Promise<void>(resolve => setTimeout(resolve, 60))
+      assert.equal(dispatches, 1, `${size.label}: Enter on an unsafe frame dispatches no install`)
+    } else {
+      // A taller narrow frame may legitimately admit approval — but only when
+      // both risk facts are painted in the same frame.
+      assert.match(frame, /Approve and retry/)
+      assert.equal(riskFullyVisible, true, `${size.label}: approval requires the fully painted risk`)
+    }
+    sized.dispose()
+  }
+
+  // The 80x24 frame shows BOTH risk facts and the explicit approval action.
+  const tall = plainFrame(panel.render(80))
+  assert.match(tall, /Approve and retry @s5-fixture\/build-consent@0\.0\.1/)
+  assert.match(tall, /execute scripts with your user privileges/)
+  assert.doesNotMatch(tall, /already-approved marker/)
+  panel.handleInput('\r')
+  await waitForState('the approved second install to settle', () => controller.installView()?.phase === 'done', 120_000)
+
+  assert.equal(dispatches, 2, 'the approval dispatches exactly one new Host attempt')
+  assert.equal(existsSync(marker), true, 'the approved build script wrote its harmless marker')
+  assert.equal(readFileSync(marker, 'utf8'), 'approved-by-explicit-user-action')
+
+  const profile = JSON.parse(readFileSync(join(profileDir, 'package.json'), 'utf8')) as {
+    dependencies?: Record<string, string>
+    dsh?: { profile?: { bundles?: string[] } }
+  }
+  assert.match(profile.dependencies?.[packageName] ?? '', /^\^?0\.0\.1$/, 'the approved install lands in the profile manifest')
+  assert.ok(profile.dsh?.profile?.bundles?.includes(packageName), 'the installed bundle is selected')
+  const workspace = parseYaml(readFileSync(join(profileDir, 'pnpm-workspace.yaml'), 'utf8')) as {
+    allowBuilds?: Record<string, unknown>
+  }
+  assert.deepEqual(workspace.allowBuilds, { [`${packageName}@0.0.1`]: true },
+    'the official approval persisted exactly the pending build permission')
 })

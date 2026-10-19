@@ -477,3 +477,32 @@ test('a failed invalidation subscription releases the already-installed listener
   generation.set(2)
   assert.equal(invalidations, 0, 'the rolled-back subscriptions must not deliver')
 })
+
+test('a Remote mutation result carried by a superseded Connection generation is refused, never presented as success', async () => {
+  const remote = remoteFixture()
+  const generation = generationFixture(1)
+  const original = remote.pluginManager.setBundleEnabled
+  let release!: () => void
+  const gate = new Promise<void>(resolve => { release = resolve })
+  let reached!: () => void
+  const started = new Promise<void>(resolve => { reached = resolve })
+  remote.pluginManager.setBundleEnabled = async (name, enabled) => {
+    reached()
+    await gate
+    return original(name, enabled)
+  }
+  const port = portOf(remote, generation)
+  const pending = port.setBundleEnabled('bundle-a', true)
+  await started
+  // A NEW Connection generation is established while the wire call is pending.
+  generation.set(2)
+  release()
+  await assert.rejects(pending, /Connection generation changed/)
+  assert.deepEqual(remote.calls, ['setBundleEnabled'], 'the real call really ran; only its stale result was refused')
+
+  // The SAME mutation on an unchanged generation still resolves normally.
+  remote.pluginManager.setBundleEnabled = original
+  const change = await port.setBundleEnabled('bundle-a', true)
+  assert.equal(change.stage, 'enable')
+  assert.equal(change.target, 'bundle-a:true')
+})
