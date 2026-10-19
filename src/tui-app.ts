@@ -264,7 +264,7 @@ import { projectFocus, type FocusProjectedBlock } from './tui/transcript/focus-p
 import { compactActionPresentation, compactActionSignature, compactActionStatsSignature, compactPreparingSummary, type CompactActionPresentation } from './tui/components/transcript/compact-process-preview.ts'
 import type { CompactActionSource, CompactActionStats } from './tui/transcript/process-summary.ts'
 import { projectCompact } from './tui/transcript/compact-projection.ts'
-import { clusterByMemberOf, isTranscriptWorkMember, projectTranscriptStructure, workByMemberOf, type TranscriptStructureBlock, type TranscriptWorkSpan } from './tui/transcript/structure.ts'
+import { clusterByMemberOf, isFoldableSnapshotContext, projectTranscriptStructure, workByMemberOf, type TranscriptStructureBlock, type TranscriptWorkSpan } from './tui/transcript/structure.ts'
 import { transcriptRevealAncestryFor, transcriptRevealPathFor, type TranscriptRevealAncestry } from './tui/transcript/reveal.ts'
 import { deepestCommonTranscriptContainer, sameTranscriptContainerPath, type TranscriptContainerOwner, type TranscriptContainerPath } from './tui/transcript/container-owner.ts'
 import { CompactWorkComponent } from './tui/components/transcript/compact-work.ts'
@@ -8839,8 +8839,9 @@ export class TuiApp {
   /** Whether one per-card override row is MATERIALIZED on the current
    * projection: a current-window top-level row, an OPEN Work member, or a row
    * the Focus projection actually emits (compaction always; a Focus secondary
-   * only inside an expanded root; surfaced context always — a mid-turn notice
-   * renders as a post-Thought row, never hidden). */
+   * only inside an expanded root; a foldable Snapshot only inside an expanded
+   * Thought root — a mid-turn notice renders as a post-Thought row, never
+   * hidden). */
   private messageRowMaterialized(message: TranscriptMessage, projectionExpanded: ReadonlySet<number>): boolean {
     // A local (non-session) card — e.g. a `!`/`!!` shell card — is always
     // appended to the rendered transcript and participates in NO canonical
@@ -8849,22 +8850,39 @@ export class TuiApp {
     if (this.localMessages.includes(message)) return true
     if (!this.messages.includes(message)) return false
     const index = this.canonicalStructureIndex()
+    const policy = displayPolicyFor(this.displayState.preset)
+    // Work is a real container only where the projection emits a Work header
+    // (Compact; nested Work in expanded Focus). Full keeps Work FLAT, so its
+    // members are always materialized at their raw chronology.
+    const workIsContainer = policy.focusBehavior
+      || (policy.turnLayer === 'open' && policy.processLayer === 'collapsed')
     const span = index.workByMember.get(message)
-    if (span !== undefined) {
-      return this.workOwnerMaterialized(span.owner, projectionExpanded) && this.workSpanExpanded(span)
+    if (workIsContainer && span !== undefined
+      && (!this.workOwnerMaterialized(span.owner, projectionExpanded) || !this.workSpanExpanded(span))) {
+      return false
     }
     // A cluster member's own per-card disclosure is materialized only while its
     // parent cluster is materialized AND effectively open: a parked override
     // behind a collapsed cluster must not consume the master's first press.
+    // A member of a snapshot-only cluster nested in a Work needs BOTH
+    // ancestors open.
     const cluster = index.clusterByMember.get(message)
-    if (cluster !== undefined) {
-      return this.clusterOwnerMaterialized(cluster.owner) && this.contextClusterExpanded(cluster)
+    if (cluster !== undefined
+      && (!this.clusterOwnerMaterialized(cluster.owner) || !this.contextClusterExpanded(cluster))) {
+      return false
     }
-    const policy = displayPolicyFor(this.displayState.preset)
+    if ((workIsContainer && span !== undefined) || cluster !== undefined) return true
     if (policy.focusBehavior && 'turn' in message) {
       // Compaction cards are emitted by BOTH Focus branches (collapsed and
       // expanded), so they are always materialized in the current window.
       if (message.kind === 'compaction') return true
+      // A foldable Snapshot with a real Thought owner lives INSIDE the
+      // collapsed Thought; its own card override only materializes once the
+      // root is expanded.
+      if (isFoldableSnapshotContext(message, index.clusterByMember)
+        && this.turnActivities.has(message.turn)) {
+        return projectionExpanded.has(message.turn)
+      }
       if (isFocusSecondaryDisclosure(message)) return projectionExpanded.has(message.turn)
     }
     return true
@@ -9626,8 +9644,16 @@ export class TuiApp {
       }
       if (!workHeader) {
         const focusPath: TranscriptContainerPath = [{ kind: 'focus-root', turn: block.focusOwnerTurn }]
-        for (const member of block.span.members) {
-          out.push({ kind: 'message', message: member, containerPath: focusPath })
+        for (const part of block.span.parts) {
+          if (part.kind === 'message') {
+            out.push({ kind: 'message', message: part.message, containerPath: focusPath })
+          } else {
+            // No operable cluster owner on this surface: the nested cluster
+            // fails open flat inside the Thought.
+            for (const member of part.cluster.members) {
+              out.push({ kind: 'message', message: member, containerPath: focusPath })
+            }
+          }
         }
         continue
       }
@@ -9637,8 +9663,12 @@ export class TuiApp {
       ]
       out.push({ kind: 'work', span: block.span, containerPath })
       if (!this.workSpanExpanded(block.span)) continue
-      for (const member of block.span.members) {
-        out.push({ kind: 'message', message: member, containerPath })
+      for (const part of block.span.parts) {
+        if (part.kind === 'message') {
+          out.push({ kind: 'message', message: part.message, containerPath })
+        } else {
+          out.push(...this.materializeContextCluster(part.cluster, containerPath))
+        }
       }
     }
     return out
@@ -9796,7 +9826,16 @@ export class TuiApp {
       if (block.kind === 'message') {
         out.push({ kind: 'message', message: block.message })
       } else if (block.kind === 'work') {
-        for (const member of block.span.members) out.push({ kind: 'message', message: member })
+        // Full keeps Work FLAT but preserves a carried snapshot-only Context
+        // cluster as the same shared cluster presentation every other preset
+        // uses. The rows are never reordered or deduplicated.
+        for (const part of block.span.parts) {
+          if (part.kind === 'message') {
+            out.push({ kind: 'message', message: part.message })
+          } else {
+            out.push(...this.materializeContextCluster(part.cluster))
+          }
+        }
       } else {
         out.push(...this.materializeContextCluster(block.cluster))
       }
@@ -9807,11 +9846,16 @@ export class TuiApp {
   /**
    * Present one canonical ambient cluster by surface capability: a FLAT
    * member sequence where the surface has no operable cluster owner, otherwise
-   * the header block plus its members when open. Both Full and Focus consume
-   * this, so cluster presentation is never re-derived per preset.
+   * the header block plus its members when open. Full, Focus and a nested
+   * Work cluster consume this, so cluster presentation is never re-derived per
+   * preset. `ancestorPath` carries the semantic ancestry of a NESTED cluster
+   * (for example `[focus-root, work]`); the top-level paths stay unchanged.
    */
-  private materializeContextCluster(cluster: ContextCluster): TranscriptRenderBlock[] {
-    const containerPath: TranscriptContainerPath = [{ kind: 'context-cluster', owner: cluster.owner }]
+  private materializeContextCluster(
+    cluster: ContextCluster,
+    ancestorPath: TranscriptContainerPath = [],
+  ): TranscriptRenderBlock[] {
+    const containerPath: TranscriptContainerPath = [...ancestorPath, { kind: 'context-cluster', owner: cluster.owner }]
     if (this.contextClusterDefaultExpanded()) {
       return cluster.members.map(member => ({ kind: 'message', message: member, containerPath }) as TranscriptRenderBlock)
     }
@@ -9950,14 +9994,17 @@ export class TuiApp {
 
   /** Whether one turn's contiguous Process run is still OPEN at the transcript
    * tail: the LAST turn-bearing message of the window belongs to that turn and
-   * is a Work MEMBER under the projection's own boundary authority
-   * ({@link isTranscriptWorkMember}). ONLY an open run may absorb a live
-   * Preparing call. A live Preparing call is a Process row that has not landed
-   * durably yet, so once an Assistant / Context / Attention boundary — OR a
-   * settled surfaced-interaction card — has been recorded, the call starts a
-   * NEW run: drawing it back into the previous Work span would cross a
-   * chronology boundary the canonical projection forbids. */
+   * is a Work MEMBER under the projection's own canonical structure
+   * ({@link projectTranscriptStructure} + {@link workByMemberOf}). A foldable
+   * Snapshot Context row carried by the span therefore keeps the run open
+   * instead of turning a live Preparing call into a new pending run. ONLY an
+   * open run may absorb a live Preparing call. A live Preparing call is a
+   * Process row that has not landed durably yet, so once an Assistant / Context
+   * boundary — OR a settled surfaced-interaction card — has been recorded, the
+   * call starts a NEW run: drawing it back into the previous Work span would
+   * cross a chronology boundary the canonical projection forbids. */
   private workRunOpenForTurn(turn: number): boolean {
+    const workByMember = this.canonicalStructureIndex().workByMember
     for (let index = this.messages.length - 1; index >= 0; index -= 1) {
       const message = this.messages[index]!
       if (!('turn' in message)) continue
@@ -9965,7 +10012,7 @@ export class TuiApp {
       // MEMBER under the SAME boundary authority the projection uses: a
       // settled surfaced-interaction card (question / Plan review) closes the
       // run even though its base semantic class stays `process`.
-      return message.turn === turn && isTranscriptWorkMember(message)
+      return message.turn === turn && workByMember.has(message)
     }
     return false
   }
@@ -10029,9 +10076,20 @@ export class TuiApp {
       }
       const workBlock = blocks[workIndex]
       if (this.workSpanExpanded(span)) {
-        // The open run renders the live call after its durable members.
+        // The open run renders the live call after its durable parts. A Work
+        // can carry a nested Context-cluster HEADER block, so counting flat
+        // members would overshoot; walk the blocks owned by this Work instead.
         const containerPath = workBlock?.kind === 'work' ? workBlock.containerPath : undefined
-        blocks.splice(workIndex + 1 + span.members.length, 0, {
+        let insertion = workIndex + 1
+        while (insertion < blocks.length) {
+          const candidate = blocks[insertion]!
+          const candidatePath = 'containerPath' in candidate ? candidate.containerPath : undefined
+          // Focus nests the Work under its Thought root, so match the Work
+          // owner ANYWHERE in the ancestry — never assume it is the first node.
+          if (candidatePath?.some(node => node.kind === 'work' && node.owner === span.owner) !== true) break
+          insertion += 1
+        }
+        blocks.splice(insertion, 0, {
           kind: 'streaming-tool-previews',
           turn,
           previews,

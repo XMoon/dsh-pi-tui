@@ -810,3 +810,29 @@ test('Activity header degrades duration→stats without tokens and never fabrica
     assert.ok(!header.includes('tok'), `no fabricated span tokens at width ${width}:\n${header}`)
   }
 })
+
+test('timing: a carried Snapshot Context row never widens the Activity wall span', () => {
+  const snapshot = (id: string, text: string, time: number, seq: number): SessionEvent => eventAt('user/message', {
+    id: MessageId(id), role: 'user',
+    content: [{ type: 'text', text }],
+    source: { kind: 'time-context', form: 'snapshot', sections: [{ name: 'time-context', body: text }] },
+  }, time, seq)
+  const folder = fold([
+    eventAt('turn/start', { turn: 1 }, T0, 0),
+    // Its point timing (T0+50) precedes the first Process evidence: it must not
+    // pull the Activity start earlier.
+    snapshot('snap-start', 'opening reading', T0 + 50, 1),
+    toolCall(1, 'c1', 'read', T0 + 100, 2),
+    toolResultEvent(1, 'c1', T0 + 200, 3),
+    // Its point timing (T0+1000) follows the last Process evidence: it must not
+    // stretch the Activity end.
+    snapshot('snap-end', 'closing reading', T0 + 1_000, 4),
+  ])
+  const span = spansOf(folder.messages())[0]!
+  assert.equal(span.members.length, 3, 'fixture: both snapshots are carried by the Work')
+  const summary = summarizeWorkSpan(span)
+  assert.deepEqual(statsOf(summary), { total: 1, types: { read: 1 } }, 'Context adds no Action')
+  assert.equal(summary.timing?.startedAt, T0 + 100, 'the span starts at the first REAL Process evidence')
+  assert.equal(summary.timing?.endedAt, T0 + 200, 'the span ends at the last REAL Process evidence')
+  assert.equal(summary.timing?.running, false)
+})

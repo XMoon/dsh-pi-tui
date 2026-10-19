@@ -12,7 +12,7 @@ import {
   sameTranscriptContainerPath,
   type TranscriptContainerOwner,
 } from '../src/tui/transcript/container-owner.ts'
-import { projectTranscriptStructure, workByMemberOf } from '../src/tui/transcript/structure.ts'
+import { clusterByMemberOf, projectTranscriptStructure, workByMemberOf } from '../src/tui/transcript/structure.ts'
 import type { TranscriptMessage } from '../src/transcript.ts'
 
 const thinking = (turn: number, text = 'reasoning'): TranscriptMessage => ({ kind: 'thinking', turn, text, running: true })
@@ -114,4 +114,25 @@ test('workByMemberOf never merges two same-turn spans across a boundary', () => 
   assert.equal(byMember.get(first)?.members.length, 1)
   assert.equal(byMember.get(second)?.members.length, 1)
   assert.notEqual(byMember.get(first)?.owner, byMember.get(second)?.owner)
+})
+
+// --- nested snapshot-only Context cluster (2026-10-19 Snapshot folding) ----
+
+const snapshot = (turn: number, label: string): TranscriptMessage => ({
+  kind: 'system', turn, text: `${label} body`, label, context: true,
+  contextPresentation: { form: 'snapshot', sourceKind: 'time-context', role: 'inject' },
+})
+
+test('a snapshot-only cluster nested in Work resolves BOTH its canonical ancestors', () => {
+  const first = snapshot(1, 'time A')
+  const second = snapshot(1, 'time B')
+  const process = tool(1)
+  const structure = projectTranscriptStructure([first, second, process])
+  const byWork = workByMemberOf(structure)
+  const byCluster = clusterByMemberOf(structure)
+  assert.deepEqual(structure.map(block => block.kind), ['work'])
+  assert.equal(byWork.get(second)?.owner, first, 'the Work owner is the first raw member')
+  assert.equal(byCluster.get(second)?.owner, first, 'the nested cluster owner is its first raw member')
+  assert.equal(byWork.get(second), byWork.get(process), 'both rows belong to the same Work span')
+  assert.equal(byCluster.get(process), undefined, 'a Process row is not a cluster member')
 })

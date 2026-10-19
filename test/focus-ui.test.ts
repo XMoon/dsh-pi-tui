@@ -3951,3 +3951,134 @@ test('a TOOL_NOT_STARTED diagnostic title never keeps a stale truncation after a
     `the wide EXPANDED terminal rebuilds the title (no stale truncation):\n${wideExpanded}`)
   app.stop()
 })
+
+// ── Snapshot Context follows the Thought (2026-10-19 Owner decision) ──────
+
+/** One durable `time-context` Snapshot injection in its official source shape. */
+function focusSnapshotEvent(id: string, text: string, time: number, seq: number): SessionEvent {
+  return eventAt('user/message', {
+    id: MessageId(id), role: 'user',
+    content: [{ type: 'text', text }],
+    source: { kind: 'time-context', form: 'snapshot', sections: [{ name: 'time-context', body: text }] },
+  }, time, seq)
+}
+
+test('collapsed Focus hides an opening time-context snapshot and restores it inside the expanded Thought', async () => {
+  const { vt, app } = startApp({ preset: 'focus' })
+  const folder = new TranscriptFolder()
+  applyMixed(folder, [
+    eventAt('turn/start', { turn: 1 }, T0, 0),
+    eventAt('user/message', {
+      id: MessageId('focus-snap-u1'), role: 'user',
+      content: [{ type: 'text', text: 'go' }],
+      source: { kind: 'user' },
+    }, T0 + 1, 1),
+    focusSnapshotEvent('focus-snap-ctx', 'FOCUS_SNAPSHOT time reading', T0 + 2, 2),
+    eventAt('assistant/chunk', { turn: 1, step: 0, chunk: { type: 'reasoning-delta', index: 0, text: 'reasoning' } }, T0 + 3, 3),
+    eventAt('tool/call', { turn: 1, step: 0, callId: ToolCallId('focus-snap-c1'), name: 'read', arguments: '{}' }, T0 + 4, 4),
+    eventAt('tool/result', {
+      turn: 1, step: 0,
+      message: {
+        id: MessageId('focus-snap-r1'), role: 'tool', toolCallId: ToolCallId('focus-snap-c1'),
+        content: [{ type: 'text', text: 'ok' }], source: { kind: 'tool', callId: ToolCallId('focus-snap-c1') },
+      },
+    }, T0 + 5, 5),
+    eventAt('assistant/message', {
+      turn: 1, step: 1,
+      message: { id: MessageId('focus-snap-final'), role: 'assistant', content: [{ type: 'text', text: 'done' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+    }, T0 + 6, 6),
+    eventAt('turn/end', { turn: 1, reason: { kind: 'completed' } }, T0 + 9000, 7),
+  ])
+  show(app, folder)
+  await vt.waitForRender()
+  const collapsed = vt.getViewport().join('\n')
+  assert.equal(countFocusHeaders(collapsed), 1, `one Thought for the turn:\n${collapsed}`)
+  assert.ok(!collapsed.includes('FOCUS_SNAPSHOT'),
+    `the opening Snapshot must not surface outside the collapsed Thought:\n${collapsed}`)
+  app.toggleFocusTurn(1)
+  await vt.waitForRender()
+  const lines = vt.getViewport()
+  const expanded = lines.join('\n')
+  assert.equal(expanded.split('FOCUS_SNAPSHOT').length - 1, 1, `the Snapshot is restored exactly once:\n${expanded}`)
+  const headerRow = findFocusHeaderRow(lines)
+  const snapshotRow = lines.findIndex(line => line.includes('FOCUS_SNAPSHOT'))
+  const toolRow = lines.findIndex(line => /Read\b/.test(line))
+  assert.ok(headerRow >= 0 && snapshotRow > headerRow, `the Snapshot lives inside the expanded Thought:\n${expanded}`)
+  assert.ok(toolRow < 0 || snapshotRow < toolRow, `the Snapshot keeps its raw order before the Process rows:\n${expanded}`)
+})
+
+test('collapsed Focus keeps a mixed instructions+snapshot cluster above the Thought', async () => {
+  const { vt, app } = startApp({ preset: 'focus' })
+  const folder = new TranscriptFolder()
+  applyMixed(folder, [
+    eventAt('turn/start', { turn: 1 }, T0, 0),
+    eventAt('user/message', {
+      id: MessageId('mixed-focus-u1'), role: 'user',
+      content: [{ type: 'text', text: 'go' }],
+      source: { kind: 'user' },
+    }, T0 + 1, 1),
+    eventAt('user/message', {
+      id: MessageId('mixed-focus-inst'), role: 'user',
+      content: [{ type: 'text', text: 'instructions body' }],
+      source: { kind: 'agent-instructions', form: 'instructions', changes: [{ path: 'AGENTS.md' }] },
+    }, T0 + 2, 2),
+    focusSnapshotEvent('mixed-focus-snap', 'MIXED_FOCUS_SNAPSHOT reading', T0 + 3, 3),
+    eventAt('assistant/chunk', { turn: 1, step: 0, chunk: { type: 'reasoning-delta', index: 0, text: 'reasoning' } }, T0 + 4, 4),
+    eventAt('tool/call', { turn: 1, step: 0, callId: ToolCallId('mixed-focus-c1'), name: 'read', arguments: '{}' }, T0 + 5, 5),
+    eventAt('assistant/message', {
+      turn: 1, step: 1,
+      message: { id: MessageId('mixed-focus-final'), role: 'assistant', content: [{ type: 'text', text: 'done' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+    }, T0 + 6, 6),
+    eventAt('turn/end', { turn: 1, reason: { kind: 'completed' } }, T0 + 9000, 7),
+  ])
+  show(app, folder)
+  await vt.waitForRender()
+  const lines = vt.getViewport()
+  const collapsed = lines.join('\n')
+  assert.match(collapsed, /Context · 2 injections/u, `the mixed cluster keeps one visible header:\n${collapsed}`)
+  assert.ok(!collapsed.includes('MIXED_FOCUS_SNAPSHOT'), 'the cluster members stay behind their disclosure')
+  const headerRow = findFocusHeaderRow(lines)
+  const clusterRow = lines.findIndex(line => line.includes('Context · 2 injections'))
+  assert.ok(headerRow >= 0 && clusterRow >= 0 && clusterRow < headerRow,
+    `the mixed cluster keeps its foundation position above the Thought:\n${collapsed}`)
+  // The cluster is the turn's opening foundation; it is not hoisted INTO the
+  // Thought nor torn apart by the fold.
+  app.setTranscriptDetailExpanded(true)
+  await vt.waitForRender()
+  const expanded = vt.getViewport().join('\n')
+  assert.match(expanded, /▾ .*Context · 2 injections/u, `the cluster remains operable:\n${expanded}`)
+  assert.ok(expanded.includes('MIXED_FOCUS_SNAPSHOT'), 'the Snapshot member is reachable through the cluster')
+})
+
+test('expanded Focus inserts the live Preparing call after every nested Work part', async () => {
+  const { vt, app } = startApp({ preset: 'focus' })
+  const folder = new TranscriptFolder()
+  applyMixed(folder, [
+    eventAt('turn/start', { turn: 1 }, T0, 0),
+    eventAt('user/message', {
+      id: MessageId('focus-prep-u1'), role: 'user',
+      content: [{ type: 'text', text: 'go' }],
+      source: { kind: 'user' },
+    }, T0 + 1, 1),
+    focusSnapshotEvent('focus-prep-snap-a', 'time A', T0 + 2, 2),
+    focusSnapshotEvent('focus-prep-snap-b', 'time B', T0 + 3, 3),
+    eventAt('assistant/chunk', { turn: 1, step: 0, chunk: { type: 'reasoning-delta', index: 0, text: 'reasoning' } }, T0 + 4, 4),
+    eventAt('tool/call', { turn: 1, step: 0, callId: ToolCallId('focus-prep-c1'), name: 'read', arguments: '{}' }, T0 + 5, 5),
+  ])
+  show(app, folder, [
+    { callId: 'focus-prep-live', argumentBytes: 3, turn: 1, step: 0, index: 0, name: 'bash', summary: 'pnpm test' },
+  ])
+  app.expandFocusTurn(1)
+  await vt.waitForRender()
+  const lines = vt.getViewport()
+  const joined = lines.join('\n')
+  assert.ok(hasFocusHeader(joined, true), `precondition: the Thought is open:\n${joined}`)
+  const clusterRow = lines.findIndex(line => line.includes('Context · 2 injections'))
+  const toolRow = lines.findIndex(line => /Read\b/.test(line))
+  const preparingRow = lines.findIndex(line => line.includes('Preparing Bash'))
+  assert.ok(clusterRow >= 0, `the nested snapshot cluster renders inside the Work:\n${joined}`)
+  assert.ok(toolRow >= 0, `the durable Tool renders:\n${joined}`)
+  assert.ok(preparingRow >= 0, `the live call renders:\n${joined}`)
+  assert.ok(preparingRow > clusterRow, `the live call follows the nested cluster header:\n${joined}`)
+  assert.ok(preparingRow > toolRow, `the live call follows every durable Work part:\n${joined}`)
+})

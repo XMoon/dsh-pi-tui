@@ -20,12 +20,13 @@ import {
 } from '../src/tui/transcript/context-structure.ts'
 import { contextPresentation, isTranscriptContextForm } from '../src/domain/transcript/context-semantics.ts'
 import { projectCompact } from '../src/tui/transcript/compact-projection.ts'
+import { clusterByMemberOf, projectTranscriptStructure } from '../src/tui/transcript/structure.ts'
 import { formatWorkHeaderLine, compactWorkBody, CompactWorkComponent } from '../src/tui/components/transcript/compact-work.ts'
 import { summarizeWorkSpan } from '../src/tui/transcript/work-summary.ts'
 import { compactActionPresentation } from '../src/tui/components/transcript/compact-process-preview.ts'
 import { contextClusterSummaryParts } from '../src/tui/transcript/context-summary.ts'
 import { formatContextClusterHeader, ContextClusterComponent } from '../src/tui/components/transcript/context-cluster.ts'
-import { TranscriptFolder, type TranscriptMessage } from '../src/transcript.ts'
+import { TranscriptFolder, isPostTurnReplayEvidence, type TranscriptMessage } from '../src/transcript.ts'
 
 function eventAt(type: string, data: Record<string, unknown>, time: number, seq: number): SessionEvent {
   return { type, seq, time, data } as SessionEvent
@@ -291,7 +292,7 @@ test('a temporary search reveal opens exactly the owning Work span', () => {
   assert.deepEqual(kindsOf(blocks), ['work', 'assistant', 'work', 'thinking', 'tool'])
 })
 
-test('surfaced Context is always a Work boundary; ambient runs cluster in Compact too', () => {
+test('non-Snapshot surfaced Context is always a Work boundary; ambient runs cluster in Compact too', () => {
   const messages: TranscriptMessage[] = [
     thinking(0), tool(0),
     contextRow(0, 'instructions', 'AGENTS.md'), contextRow(0, 'catalog', 'skills'),
@@ -302,6 +303,141 @@ test('surfaced Context is always a Work boundary; ambient runs cluster in Compac
   const blocks = projectCompact(messages, noOptions)
   assert.deepEqual(kindsOf(blocks),
     ['work', 'context-cluster', 'work', 'system', 'work', 'system', 'work', 'assistant'])
+})
+
+// --- Snapshot Context carried by Work (2026-10-19 Owner decision) ----------
+
+/** The one canonical Work span of a structure fixture. */
+function onlySpan(blocks: ReturnType<typeof projectTranscriptStructure>) {
+  const block = blocks[0]
+  assert.ok(block !== undefined && block.kind === 'work', 'fixture: one canonical Work span')
+  return block.span
+}
+
+test('a same-turn snapshot Context row never splits the surrounding Work span', () => {
+  const messages: TranscriptMessage[] = [
+    thinking(0, 'A'), tool(0, 'read'),
+    contextRow(0, 'snapshot', 'time-context'),
+    thinking(0, 'B'), tool(0, 'bash'),
+    contextRow(0, 'snapshot', 'time-context'),
+    tool(0, 'edit'),
+  ]
+  const structure = projectTranscriptStructure(messages)
+  assert.deepEqual(structure.map(block => block.kind), ['work'])
+  const span = onlySpan(structure)
+  assert.deepEqual(span.members, messages, 'Work members keep the complete raw order')
+  assert.equal(span.owner, messages[0], 'the owner is the first raw member')
+  assert.deepEqual(span.parts.map(part => part.kind), ['message', 'message', 'message', 'message', 'message', 'message', 'message'])
+  // Context is not Process: the carrier adds no action and no preview.
+  const summary = summarizeWorkSpan(span)
+  assert.equal(summary.actionStats.total, 3, 'read + bash + edit only')
+  assert.equal(summary.action?.message.kind === 'tool' ? summary.action.message.name : undefined, 'edit')
+  // Compact renders ONE Activity header for the whole turn.
+  const compact = projectCompact(messages, noOptions)
+  assert.deepEqual(kindsOf(compact), ['work'])
+})
+
+test('a snapshot before the first Process joins the Work that follows it', () => {
+  const snapshot = contextRow(0, 'snapshot', 'time-context')
+  const messages: TranscriptMessage[] = [snapshot, thinking(0, 'first'), tool(0, 'read')]
+  const structure = projectTranscriptStructure(messages)
+  assert.deepEqual(structure.map(block => block.kind), ['work'], 'no second zero-action Activity is invented')
+  const span = onlySpan(structure)
+  assert.equal(span.owner, snapshot, 'the presentation owner is the first raw member')
+  assert.deepEqual(span.members, messages, 'the snapshot precedes the Process rows in raw order')
+  assert.equal(summarizeWorkSpan(span).actionStats.total, 1)
+})
+
+test('snapshot-only rows never invent a Process-free Work span', () => {
+  const snapshot = contextRow(0, 'snapshot', 'time-context')
+  const messages: TranscriptMessage[] = [snapshot]
+  assert.deepEqual(projectTranscriptStructure(messages).map(block => block.kind), ['message'])
+  assert.deepEqual(kindsOf(projectCompact(messages, noOptions)), ['system'])
+
+  const a = contextRow(0, 'snapshot', 'time A')
+  const b = contextRow(0, 'snapshot', 'time B')
+  assert.deepEqual(projectTranscriptStructure([a, b]).map(block => block.kind), ['context-cluster'],
+    'a snapshot-only raw run keeps its Context cluster presentation')
+})
+
+test('raw-adjacent snapshots become ONE nested cluster part of the Work', () => {
+  const a = contextRow(0, 'snapshot', 'time A')
+  const b = contextRow(0, 'snapshot', 'time B')
+  const process = tool(0, 'read')
+  const span = onlySpan(projectTranscriptStructure([a, b, process]))
+  assert.deepEqual(span.members, [a, b, process])
+  assert.deepEqual(span.parts.map(part => part.kind), ['context-cluster', 'message'])
+  const nested = span.parts[0]
+  assert.ok(nested !== undefined && nested.kind === 'context-cluster')
+  assert.deepEqual(nested.cluster.members, [a, b], 'the nested cluster keeps its raw owner/members')
+  assert.equal(clusterByMemberOf(projectTranscriptStructure([a, b, process])).get(b)?.owner, a,
+    'clusterByMemberOf resolves a NESTED cluster member')
+})
+
+test('a mixed instructions/catalog/snapshot cluster stays one indivisible Work boundary', () => {
+  const instructions = contextRow(0, 'instructions', 'AGENTS.md')
+  const catalog = contextRow(0, 'catalog', 'skills')
+  const snapshot = contextRow(0, 'snapshot', 'time-context')
+  const messages: TranscriptMessage[] = [instructions, catalog, snapshot, thinking(0), tool(0)]
+  const structure = projectTranscriptStructure(messages)
+  assert.deepEqual(structure.map(block => block.kind), ['context-cluster', 'work'])
+  const cluster = structure[0]
+  assert.ok(cluster !== undefined && cluster.kind === 'context-cluster')
+  assert.deepEqual(cluster.cluster.members, [instructions, catalog, snapshot], 'the cluster is never torn apart')
+  const span = structure[1]
+  assert.ok(span !== undefined && span.kind === 'work')
+  assert.ok(!span.span.members.includes(snapshot), 'a mixed-cluster snapshot never joins the Work')
+  // The same raw sequence on the other side of a Process is still a boundary.
+  const trailing = projectTranscriptStructure([thinking(0), tool(0), snapshot, instructions])
+  assert.deepEqual(trailing.map(block => block.kind), ['work', 'context-cluster'])
+})
+
+test('notice/relay/recall/unknown Context still ends a snapshot-carrying Work', () => {
+  for (const form of ['notice', 'relay', 'recall', undefined] as const) {
+    const messages: TranscriptMessage[] = [
+      thinking(0), contextRow(0, 'snapshot', 'time-context'), contextRow(0, form, 'other'), tool(0),
+    ]
+    assert.deepEqual(kindsOf(projectCompact(messages, noOptions)), ['work', 'system', 'work'],
+      `${form ?? 'unknown'} must remain a Work boundary`)
+  }
+})
+
+test('expanding a Work materializes its nested snapshot cluster under the Work path', () => {
+  const a = contextRow(0, 'snapshot', 'time A')
+  const b = contextRow(0, 'snapshot', 'time B')
+  const process = tool(0, 'read')
+  const messages = [a, b, process]
+  const collapsed = projectCompact(messages, noOptions)
+  assert.deepEqual(kindsOf(collapsed), ['work'])
+  assert.deepEqual(collapsed[0]?.containerPath, [{ kind: 'work', owner: a }])
+  const expandedWork = projectCompact(messages, { ...noOptions, expandedWorkOwners: new Set([a]) })
+  assert.deepEqual(kindsOf(expandedWork), ['work', 'context-cluster', 'tool'], 'the nested cluster keeps its own disclosure')
+  const expandedBoth = projectCompact(messages, {
+    ...noOptions,
+    expandedWorkOwners: new Set([a]),
+    expandedClusters: new Set([a]),
+  })
+  assert.deepEqual(kindsOf(expandedBoth), ['work', 'context-cluster', 'system', 'system', 'tool'])
+  assert.deepEqual(expandedBoth[1]?.containerPath, [
+    { kind: 'work', owner: a },
+    { kind: 'context-cluster', owner: a },
+  ], 'the nested cluster carries the Work ancestor, then its cluster ancestor')
+  // A search-forced member opens BOTH ancestors.
+  const forced = projectCompact(messages, { ...noOptions, forcedExpanded: new Set([b]) })
+  assert.deepEqual(kindsOf(forced), ['work', 'context-cluster', 'system', 'system', 'tool'])
+})
+
+test('a flat fail-open Work emits nested snapshot rows without a dead header', () => {
+  const a = contextRow(0, 'snapshot', 'time A')
+  const b = contextRow(0, 'snapshot', 'time B')
+  const messages = [a, b, tool(0, 'read')]
+  const blocks = projectCompact(messages, {
+    ...noOptions,
+    workHeader: false,
+    clusterHeader: false,
+  })
+  assert.deepEqual(kindsOf(blocks), ['system', 'system', 'tool'])
+  for (const block of blocks) assert.equal(block.kind === 'work' || block.kind === 'context-cluster', false)
 })
 
 test('an expanded ambient cluster emits every member as an ordinary row', () => {
@@ -563,4 +699,47 @@ test('container chrome shares the transcript left edge; internal card structure 
   for (const row of new ContextClusterComponent({ cluster: clusters[0]!, expanded: false, iconStyle: 'symbols' }).render(80)) {
     assert.ok(!row.startsWith(' '), `cluster chrome row must not indent:\n${row}`)
   }
+})
+
+test('a late post-turn replay row stays a boundary next to a snapshot-carrying Work', () => {
+  const folder = new TranscriptFolder()
+  apply(folder, [
+    eventAt('turn/start', { turn: 0 }, 1000, 0),
+    eventAt('tool/call', { turn: 0, step: 0, callId: ToolCallId('snap-replay-c1'), name: 'read', arguments: '{}' }, 1002, 1),
+    eventAt('tool/result', {
+      turn: 0, step: 0,
+      message: {
+        id: MessageId('snap-replay-r1'), role: 'tool', toolCallId: ToolCallId('snap-replay-c1'),
+        content: [{ type: 'text', text: 'ok' }], source: { kind: 'tool', callId: ToolCallId('snap-replay-c1') },
+      },
+    }, 1003, 2),
+    eventAt('user/message', {
+      id: MessageId('snap-replay-ctx'), role: 'user',
+      content: [{ type: 'text', text: 'time reading' }],
+      source: { kind: 'time-context', form: 'snapshot' },
+    }, 1004, 3),
+    eventAt('assistant/message', {
+      turn: 0, step: 1,
+      message: { id: MessageId('snap-replay-final'), role: 'assistant', content: [{ type: 'text', text: 'final' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+    }, 1005, 4),
+    eventAt('turn/end', { turn: 0, reason: { kind: 'completed' } }, 1006, 5),
+    // A tool call that materializes AFTER its owning turn ended: transcript
+    // evidence, never Process/Action/Work evidence.
+    eventAt('tool/call', { turn: 0, step: 1, callId: ToolCallId('snap-replay-late'), name: 'bash', arguments: '{}' }, 6000, 6),
+  ])
+  const messages = folder.messages()
+  const structure = projectTranscriptStructure(messages)
+  assert.deepEqual(structure.map(block => block.kind), ['work', 'message', 'message'])
+  const span = onlySpan(structure)
+  assert.equal(span.members.length, 2, 'the snapshot rode the Work; the late replay row did not')
+  assert.ok(span.members.some(member => member.kind === 'system'), 'fixture: the snapshot is carried')
+  assert.deepEqual(summarizeWorkSpan(span).actionStats.total, 1, 'only the legal read counts')
+  const replay = structure[2]
+  assert.ok(replay !== undefined && replay.kind === 'message')
+  assert.equal(isPostTurnReplayEvidence(replay.message), true, 'the fixture row is replay evidence')
+  assert.deepEqual(projectCompact(messages, {
+    expandedWorkOwners: new Set(), expandedClusters: new Set(), forcedExpanded: new Set(),
+  }).map(block => block.kind === 'message' ? `message:${block.message.kind}` : block.kind),
+  ['work', 'message:assistant', 'message:tool'],
+  'the replay row stays standalone and the snapshot never bridges it into the Work')
 })

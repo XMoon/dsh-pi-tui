@@ -8,6 +8,10 @@
  * its original foundation position before the Thought. Collapsed turns HIDE
  * process rows (a committed pre-steer answer is the explicit exception) and
  * expanded turns restore raw chronology with the final assistant held back.
+ * A producer-declared Snapshot Context row follows the same rule unless it
+ * shares a raw-adjacent cluster with `instructions`/`catalog`: a foldable
+ * Snapshot joins the Thought instead of becoming turn foundation, while a
+ * mixed ambient cluster keeps its indivisible foundation position.
  *
  * This module owns the pure policy only. The PiTui disclosure card, its width
  * formatting, its theme/icon chrome and its live duration provider live in
@@ -24,8 +28,13 @@ import {
 } from '../../domain/transcript/folder.ts'
 import type { TranscriptMessage, TurnActivity } from '../../domain/transcript/types.ts'
 import { isSurfacedContext, isSurfacedInteractionTool } from '../../domain/transcript/semantics.ts'
-import { isNoticeContext } from './context-structure.ts'
-import { projectTranscriptStructure, type TranscriptStructureBlock, type TranscriptWorkSpan } from './structure.ts'
+import { clusterAdjacentAmbientContext, isNoticeContext, type ContextCluster } from './context-structure.ts'
+import {
+  isFoldableSnapshotContext,
+  projectTranscriptStructure,
+  type TranscriptStructureBlock,
+  type TranscriptWorkSpan,
+} from './structure.ts'
 import type { TranscriptContainerPath } from './container-owner.ts'
 import {
   addCompactActionStats,
@@ -315,6 +324,10 @@ export function projectFocus(
     // held-back final and every visible persistent boundary can never
     // duplicate themselves in the Action slot.
     const leadBoundary = focusThoughtLeadBoundary(group)
+    const foldableSnapshots: CollapsedFoldableSnapshotScope = {
+      clusterByMember: clusterAdjacentAmbientContext(group).byMember,
+      thoughtOwned: activity !== undefined,
+    }
     const firstCommittedIndex = group.findIndex(isCommittedAnswer)
     const hidden: TranscriptMessage[] = []
     // Collect first, emit once: the pre-thought rows, the post-thought rows
@@ -324,7 +337,7 @@ export function projectFocus(
     if (firstCommittedIndex < 0) {
       for (let index = 0; index < group.length; index += 1) {
         const member = group[index]!
-        const disposition = collapsedFocusRowDisposition(member, index, leadBoundary)
+        const disposition = collapsedFocusRowDisposition(member, index, leadBoundary, foldableSnapshots)
         if (disposition === 'pre-thought' || disposition === 'post-thought') {
           (disposition === 'pre-thought' ? preThought : postThought).push(member)
         } else if (member.kind !== 'compaction' && member !== final?.message) {
@@ -343,7 +356,7 @@ export function projectFocus(
       const beforeCommitted = group.slice(0, firstCommittedIndex)
       for (let index = 0; index < beforeCommitted.length; index += 1) {
         const member = beforeCommitted[index]!
-        const disposition = collapsedFocusRowDisposition(member, index, leadBoundary)
+        const disposition = collapsedFocusRowDisposition(member, index, leadBoundary, foldableSnapshots)
         if (disposition === 'pre-thought' || disposition === 'post-thought') {
           (disposition === 'pre-thought' ? preThought : postThought).push(member)
         } else if (member.kind !== 'compaction') {
@@ -355,12 +368,18 @@ export function projectFocus(
       // The committed-answer fence is preserved: from the first committed
       // answer onward every persistent row and the answer keep their raw
       // chronology (they are neither hoisted above the Thought nor moved
-      // across their semantic boundary).
+      // across their semantic boundary). A Snapshot that arrives after the
+      // committed answer therefore stays visible there instead of being
+      // pulled back into the earlier Thought disclosure.
+      const postCommittedFoldableSnapshots: CollapsedFoldableSnapshotScope = {
+        ...foldableSnapshots,
+        thoughtOwned: false,
+      }
       const postCommitted: TranscriptMessage[] = []
       for (let index = firstCommittedIndex; index < group.length; index += 1) {
         const member = group[index]!
         if (final !== undefined && member === final.message) continue
-        const disposition = collapsedFocusRowDisposition(member, index, leadBoundary)
+        const disposition = collapsedFocusRowDisposition(member, index, leadBoundary, postCommittedFoldableSnapshots)
         if (disposition !== 'hidden' || member.kind === 'compaction' || isCommittedAnswer(member)) {
           postCommitted.push(member)
         } else {
@@ -451,18 +470,32 @@ function isFocusPersistentInputRow(message: TranscriptMessage): boolean {
  * explains why the turn started and stays BEFORE the Thought. Every other
  * persistent input/context row keeps its existing pre-Thought behavior, and
  * ordinary Process stays hidden inside the collapsed Thought (restored in
- * raw chronology when the Thought opens). The decision reads the semantic
- * `form` and raw position, never a source kind or plugin name; `Compact` and
- * `Full` do not route through here.
+ * raw chronology when the Thought opens). A Snapshot Context row whose
+ * raw-adjacent ambient cluster is foldable joins that hidden set when a real
+ * Thought owner exists; without one every row must fail open. The decision
+ * reads the semantic `form`, the raw adjacency and raw position, never a
+ * source kind or plugin name; `Compact` and `Full` do not route through here.
  */
 type CollapsedFocusRowDisposition = 'pre-thought' | 'post-thought' | 'hidden'
+
+/** The Snapshot Context rows a collapsed Thought may carry instead of
+ * surfacing as turn foundation. `thoughtOwned` is false where no Thought
+ * block will be emitted (a truncated window without an activity) — the rows
+ * then fail open instead of disappearing. */
+interface CollapsedFoldableSnapshotScope {
+  readonly clusterByMember: ReadonlyMap<TranscriptMessage, ContextCluster>
+  readonly thoughtOwned: boolean
+}
 
 function collapsedFocusRowDisposition(
   message: TranscriptMessage,
   index: number,
   leadBoundary: number,
+  foldableSnapshots: CollapsedFoldableSnapshotScope,
 ): CollapsedFocusRowDisposition {
   if (!isFocusPersistentInputRow(message)) return 'hidden'
+  if (foldableSnapshots.thoughtOwned
+    && isFoldableSnapshotContext(message, foldableSnapshots.clusterByMember)) return 'hidden'
   if (index >= leadBoundary && isNoticeContext(message)) return 'post-thought'
   return 'pre-thought'
 }
@@ -514,13 +547,16 @@ function leadingInjectedContextPrefixEnd(group: readonly TranscriptMessage[]): n
  * immediately follow it. Rows before it (injected context) and the opening
  * foundation (initial user plus its adjacent injected context) stay above the
  * Thought; every later row (same-turn steers included) returns to its
- * chronological position. A turn whose user rows are all marked same-turn
- * steers has no opening human prompt: the boundary falls back to the end of
- * the LEADING injected-context prefix, so an inject-woken turn keeps its
- * foundation before the Thought (never a scan of mid-process system rows, and
- * never orchestration rows like llm/retry). Without steer metadata, the first
- * user remains the initial-prompt fallback; consecutive users are queue/steer
- * input, not a multi-row initial prompt. */
+ * chronological position. A FOLDABLE Snapshot Context row breaks the
+ * foundation: it follows the Thought (the ONE ambient form whose disclosure
+ * belongs to the turn's work), while a mixed `instructions`/`catalog` +
+ * Snapshot cluster keeps its indivisible foundation position. A turn whose
+ * user rows are all marked same-turn steers has no opening human prompt: the
+ * boundary falls back to the end of the LEADING injected-context prefix, so an
+ * inject-woken turn keeps its foundation before the Thought (never a scan of
+ * mid-process system rows, and never orchestration rows like llm/retry).
+ * Without steer metadata, the first user remains the initial-prompt fallback;
+ * consecutive users are queue/steer input, not a multi-row initial prompt. */
 export function focusThoughtLeadBoundary(group: readonly TranscriptMessage[]): number {
   const firstInitialUserIndex = group.findIndex(
     member => member.kind === 'user' && member.steer !== true,
@@ -528,13 +564,16 @@ export function focusThoughtLeadBoundary(group: readonly TranscriptMessage[]): n
   let end = firstInitialUserIndex >= 0
     ? firstInitialUserIndex + 1
     : leadingInjectedContextPrefixEnd(group)
+  if (firstInitialUserIndex < 0) return end
   // The opening foundation continues through immediately-following surfaced
-  // Context rows (the provider's opening snapshot/catalog burst), so it never
-  // lands below the Thought. A later Context row separated by Process rows is
-  // mid-turn and keeps its chronological position.
+  // Context rows (the provider's opening catalog/instructions burst), so it
+  // never lands below the Thought. A later Context row separated by Process
+  // rows is mid-turn and keeps its chronological position.
+  const clusterByMember = clusterAdjacentAmbientContext(group).byMember
   while (true) {
     const member = group[end]
     if (member === undefined || !isSurfacedContext(member)) break
+    if (isFoldableSnapshotContext(member, clusterByMember)) break
     end += 1
   }
   return end
