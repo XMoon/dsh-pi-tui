@@ -7441,9 +7441,9 @@ is promoted by this PR. PR merge is not stage closure; the four axes below are t
   `/model` picker are reused at the frozen sizes/themes; §7's risk/scroll/
   stale-hit rules keep their D1/D2 behavior. The tmux record and its
   NOT_VERIFIED items are in the validation report, including the review-delta
-  capture of the `[auto]` footer and the endpoint trust sentence on
-  `3251ca3d` (§8f.4); no Real Tern GUI is claimed and no TSP-native screen is
-  added.
+  capture of the `[auto]` footer and the endpoint trust sentence on the
+  reviewed code snapshot (§8f.4); no Real Tern GUI is claimed and no
+  TSP-native screen is added.
 
 ### D3 evidence index
 
