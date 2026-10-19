@@ -24,6 +24,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The Settings Plugins Rows pane now exposes `Open Plugin Manager`.** On the
+  multi-column projection the Rows column paints one real clickable navigation
+  row (`Rows (1)`); Enter, Right and a mouse click open the same Plugin Manager
+  page with no extra level or second focus. The narrow projection keeps the
+  existing one-step entry.
+- **Disabling or removing Auto Review now asks for the risk confirmation
+  first.** The shared confirmation states that disabling can move existing Auto
+  sessions to Full access and that Auto Review is not a sandbox, defaults to
+  Cancel, and performs no Host write before the explicit choice; cancel, stale
+  confirmations and invisible narrow-screen actions never change permissions.
+  Removing Auto Review shows the same warning.
+
 - **Snapshot injections such as `time-context` no longer split one turn's Activity/Thought
   into multiple blocks.** Compact folds them with the Activity; Focus hides them inside the
   Thought and restores each exactly once in raw order when expanded; Full keeps the original
