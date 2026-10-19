@@ -2090,8 +2090,9 @@ the official candidates. The default `Messages`/`HTTP` copy and the
 
 ### 8f.4 Review-delta re-verification — Auto footer and endpoint trust copy
 
-The review on `3251ca3d` required a fresh real-terminal capture for the two
-visible strings that changed after the first §8f record:
+The review-delta code snapshot (the commit immediately preceding this
+docs-only record) required a fresh real-terminal capture for the two visible
+strings that changed after the first §8f record:
 
 1. `/permission auto` now keeps the effective permission fact in the footer
    (the B03 `auto` preset was missing from the builtin label map).
@@ -2100,9 +2101,9 @@ visible strings that changed after the first §8f record:
 
 Method: the same isolated `DSH_HOME` (a copied dev profile linking this
 worktree) with the published `@deepseek-ai/dsh-experimental-auto-review` rc.2
-bundle added to that profile's bundle list; the worktree was rebuilt at
-`3251ca3d`; `TERM=screen-256color`, dark theme; `tmux` 120×40 for the Auto footer
-and 80×24 / 44×20 for the endpoint Detail; keys were sent with
+bundle added to that profile's bundle list; the worktree was rebuilt at the
+reviewed code snapshot; `TERM=screen-256color`, dark theme; `tmux` 120×40 for
+the Auto footer and 80×24 / 44×20 for the endpoint Detail; keys were sent with
 `tmux send-keys` and the pane read with `tmux capture-pane -p` (ANSI stripped
 for this record). The user's `pi-tui` profile was not touched.
 
