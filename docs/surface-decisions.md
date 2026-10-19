@@ -2001,6 +2001,18 @@ DIRECT page entry (not an empty Rows level), hosts the one Plugin Manager page
 inside this same screen, and returns to L0 with Plugins selected; see the S4-D1
 section below.
 
+**S4-D2 / D2-0 Owner amendment (2026-10-19).** The one-step direct entry is
+KEPT, and the multi-column `Rows` pane now displays ONE UI-only navigation
+affordance (`Open Plugin Manager`) for the Plugins category. It is not a
+Settings row: it has no `SettingsWorkspaceRowId`, value, freshness or editable
+field, it is not part of `SettingsWorkspaceSnapshot.rows`, and it is not counted
+in the Host settings row list. The pane header counts what is really painted
+(`Rows (1)`); a click on the affordance opens the SAME page as `Enter`/`Right`
+inside the same Alt-Screen lease and the same `openPluginsPage()` path. The
+narrow projection still has no Rows pane (it keeps the direct key entry), and a
+pane click in the Plugins Rows/Details area never fabricates an L1/L2 focus that
+the real navigation cannot produce.
+
 - **Post-B2-A navigation decision: three levels, not focus owners.** The
   workspace always has exactly three levels — L0 `categories`, L1 `rows`, L2
   `detail` — and the panel's `focus` is the only navigation state. `Right`
