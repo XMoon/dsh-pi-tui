@@ -12,10 +12,11 @@
  */
 
 import assert from 'node:assert/strict'
-import { existsSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import test from 'node:test'
 import { createUserMessage, LlmAdapter, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
+import { parse } from 'yaml'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { DirectPermissionConfig } from '../src/runtime/direct/config-direct.ts'
@@ -375,6 +376,9 @@ test('B03 /permission: without the bundle the Auto id is not offered and cannot 
 
 test('B03 real Host card → controller confirmation → real profile write', { skip }, async t => {
   const host = await startS4D2Host(t, { bundles: [B03] })
+  const beforePatch = existsSync(join(host.profileDir, 'cordis.patch.yml'))
+    ? readFileSync(join(host.profileDir, 'cordis.patch.yml'), 'utf8')
+    : ''
   const port = new DirectPluginManagerPort(host.ctx as never)
   const harness = await openWorkspace({ columns: 140, rows: 40, port })
   t.after(() => { try { harness.app.dispose() } catch {} })
@@ -420,6 +424,9 @@ test('B03 real Host card → controller confirmation → real profile write', { 
 
 test('B03 real Host row disable: shared confirmation → real setPluginEnabled', { skip }, async t => {
   const host = await startS4D2Host(t, { bundles: [B03] })
+  const beforePatch = existsSync(join(host.profileDir, 'cordis.patch.yml'))
+    ? readFileSync(join(host.profileDir, 'cordis.patch.yml'), 'utf8')
+    : ''
   const port = new DirectPluginManagerPort(host.ctx as never)
   const harness = await openWorkspace({ columns: 140, rows: 40, port })
   t.after(() => { try { harness.app.dispose() } catch {} })
@@ -449,6 +456,8 @@ test('B03 real Host row disable: shared confirmation → real setPluginEnabled',
   await harness.settle()
   let after = harness.controller.model().cards.find(candidate => candidate.name === AUTO_REVIEW_BUNDLE)
   assert.equal(after?.rows.find(candidate => candidate.entryId === row.entryId)?.enabled, true)
+  assert.equal(readFileSync(join(host.profileDir, 'cordis.patch.yml'), 'utf8'), beforePatch,
+    'default Cancel made no durable Host write')
 
   // Explicit disable: the real Direct port calls setPluginEnabled(entryId,false).
   // After Cancel the Details selection still points at the row action.
@@ -461,17 +470,19 @@ test('B03 real Host row disable: shared confirmation → real setPluginEnabled',
   await harness.settle()
   // The official Host row mutation is durable even when it reports
   // restart-required: the profile patch must disable the exact row id.
-  const { readFileSync } = await import('node:fs')
   const targetId = String(row.patchId ?? row.entryId)
-  await waitFor(() => {
+  const patchRows = (): { id?: string; disabled?: boolean }[] => {
     try {
-      return readFileSync(join(host.profileDir, 'cordis.patch.yml'), 'utf8').includes(targetId)
+      return parse(readFileSync(join(host.profileDir, 'cordis.patch.yml'), 'utf8')) as { id?: string; disabled?: boolean }[]
     } catch {
-      return false
+      return []
     }
-  }, 400)
-  const patch = readFileSync(join(host.profileDir, 'cordis.patch.yml'), 'utf8')
-  assert.match(patch, /disabled:\s*true/u, 'the real Host write durably disables the row')
-  assert.ok(patch.includes(targetId), 'the patch names the exact row id')
-  assert.match(harness.controller.notice() ?? '', /restart|applied|disabled|written/iu)
+  }
+  await waitFor(() => patchRows().some(candidate => candidate.id === targetId && candidate.disabled === true), 400)
+  const targetRow = patchRows().find(candidate => candidate.id === targetId)
+  assert.equal(targetRow?.disabled, true, 'the EXACT profile patch row is disabled')
+  assert.equal(patchRows().filter(candidate => candidate.disabled === true).length, 1,
+    'no sibling row was disabled instead of the target')
+  assert.match(harness.controller.notice() ?? '', /restart required/iu,
+    'the official result reports restart-required, not an applied live change')
 })
