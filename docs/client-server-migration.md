@@ -64,8 +64,12 @@ S4-D1 PR-D1 MERGED (#337) (official Plugin Manager catalog + fullscreen workspac
                     `CATALOG_MANAGEABLE` implementation/qualification for the real
                     rc.2 14/14 Host catalog; `HOST_CAPABLE` and
                     `TUI_FEATURE_SUPPORTED` remain S4-D2/D3 ledger items. The PR
-                    merge is done (#337); stage closure/review is still pending and
-                    D1-A09/A10/A12 remain PARTIAL)
+                    merge is done (#337); stage closure/review is still pending.
+                    D1-A09/A10/A12 are closed by S5 real-Host evidence: real
+                    install cancel/too-late (`test/plugin-manager-install.test.ts`
+                    A09/A09-too-late), blocked-build approval (A10), and the
+                    generated-Remote mutation/generation fence
+                    (`test/runner-remote-plugin-manager.test.ts` L6-F))
 S4-D2 PR-D2 IMPLEMENTED / STAGE OPEN (B01–B14 Host capability qualification over
                     the real rc.2 published Optional bundle packages: the shared
                     isolated fixture proves real Loader/patch/service/tool/Session/
@@ -83,9 +87,10 @@ S4-D3 PR-D3 DONE  (terminal capability truth: B05/B07/B08/B09/B10/B11 now have a
                     limits explicit; F10 upgrade guidance is DONE; the exact
                     rc.2 `deepseek-flash` route and the existing Web Search/Fetch
                     help are qualified. B04 stays HOST PENDING/WEB_ONLY under the
-                    Owner-accepted disposition; B13/B14 stay BLOCKED and
-                    D1-A09/A10/A12 stay PARTIAL — no D3 row is promoted by name.
-                    See the S4-D3 ledger section at the end)
+                    Owner-accepted disposition; B13/B14 stay BLOCKED;
+                    D1-A09/A10/A12 are closed by S5 real-Host evidence (see
+                    S4-D1) — no D3 row is promoted by name. See the S4-D3
+                    ledger section at the end)
 M4  NOT STARTED   (experimental local Host process / IPC split)
 M5  NOT STARTED   (external attach; localhost/SSH only)
 M6  NOT STARTED   (production dual stack: direct default, wire opt-in)
@@ -7392,10 +7397,17 @@ surface row.
 
 ### D1 legacy and remaining Owner decisions
 
-- **D1-A09 / D1-A10 / D1-A12 remain PARTIAL** (real Host install cancel/HMR,
-  pending-build approval and the full Direct/Remote mutation L6 matrix). S4-D2
-  does not re-claim them; the local profile installs used published packages and
-  deliberately did not close those D1 evidence gaps.
+- **D1-A09 / D1-A10 / D1-A12 are DONE** (closed by the S5 real-Host evidence):
+  A09 exercises a real official `cancelInstall` (both `cancelled` and
+  `too-late`/applying outcomes, exact profile restoration, same request id);
+  A10 exercises the real pnpm blocked-build -> `pendingBuilds` -> explicit
+  `approvedBuilds` -> marker cycle; A12 exercises the generated Client/Remote
+  mutation and refuses a reply carried by a superseded Connection generation.
+  Witnesses: `test/plugin-manager-install.test.ts` (A09/A09-too-late/A10) and
+  `test/runner-remote-plugin-manager.test.ts` (L6-F), with the L3 fence cases in
+  `test/remote-plugin-manager.test.ts`. This live ledger records the durable
+  closure fact; the release-admission report and its test matrix stay in the
+  PR body, not in this document.
 - **S4-D2 is NOT stage-DONE.** B04's web-only exclusion is now
   Owner-accepted (2026-10-19): its Host row remains `PENDING` on the missing
   Web `webServer`/`connection` transport, its TUI status remains `WEB_ONLY`,
@@ -7413,8 +7425,9 @@ truth, not a second Host implementation: it adds the bounded rc.2 Detail copy,
 v9 F10 upgrade guidance, the existing Web Search/Fetch help, the exact
 `deepseek-flash` route evidence and the six same-test Bundle→mounted-TuiApp
 L6s. B04's web-only disposition is Owner-accepted (Host PENDING/TUI WEB_ONLY/
-DEFERRED_WITH_OWNER); B13/B14 remain blocked, D1-A09/A10/A12 remain PARTIAL,
-and S4-D2 stays STAGE OPEN on those remaining Owner decisions — none of them
+DEFERRED_WITH_OWNER); B13/B14 remain blocked, D1-A09/A10/A12 are closed by
+S5 real-Host evidence, and S4-D2 stays STAGE OPEN on those remaining Owner
+decisions — none of them
 is promoted by this PR. PR merge is not stage closure; the four axes below are the claim.
 
 ### Four axes
@@ -7501,8 +7514,8 @@ the merge gate.
   `ROW_DISPOSITION` is DEFERRED_WITH_OWNER (never a Host/TUI PASS). B13/B14
   stay BLOCKED until a native credential/platform is admitted; this stage does
   not convert them to PASS.
-- D1-A09/A10/A12 stay PARTIAL; S4-D2 stays STAGE OPEN; final S5 npm/GUI and
-  cross-platform native validation remain out of scope.
+- D1-A09/A10/A12 are DONE (see the S4-D1 legacy note); S4-D2 stays STAGE OPEN;
+  final S5 npm/GUI and cross-platform native validation remain out of scope.
 - No real Tern GUI, physical mouse/trackpad matrix, native account or paid
   Search/Fetch/LLM call is claimed. The local tmux/VirtualTerminal evidence and
   its NOT_VERIFIED items are recorded in the validation report; CI on the PR
