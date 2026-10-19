@@ -25,6 +25,7 @@ import type {
   PluginInstallLogChunk,
   PluginInstallProgress,
 } from '@deepseek-ai/dsh-plugin-manager'
+import { PluginManagerStaleResultError } from '../src/runtime/plugin-manager-port.ts'
 import type { PluginInstallEvent } from '../src/runtime/plugin-manager-port.ts'
 
 const entryId = (value: string): PluginEntryId => value as PluginEntryId
@@ -497,7 +498,8 @@ test('a Remote mutation result carried by a superseded Connection generation is 
   // A NEW Connection generation is established while the wire call is pending.
   generation.set(2)
   release()
-  await assert.rejects(pending, /Connection generation changed/)
+  await assert.rejects(pending, error => error instanceof PluginManagerStaleResultError
+    && /Connection generation changed/.test(error.message))
   assert.deepEqual(remote.calls, ['setBundleEnabled'], 'the real call really ran; only its stale result was refused')
 
   // The SAME mutation on an unchanged generation still resolves normally.

@@ -21,6 +21,7 @@
  * @module @xmoon76/dsh-pi-tui/app/plugin-manager/controller
  */
 
+import { PluginManagerStaleResultError } from '../../runtime/plugin-manager-port.ts'
 import type {
   PluginChangeFact,
   PluginInstallEvent,
@@ -138,6 +139,20 @@ interface PluginConfirmation {
 }
 
 const EMPTY_SECTION_CARDS: readonly PluginCardView[] = Object.freeze([])
+
+/**
+ * One mutation-failure notice. A result carried by a superseded Connection
+ * generation is an INDETERMINATE outcome, never a definite failure: the Host
+ * may have applied the write, and the authoritative inventory reread (which
+ * always follows this notice) decides the visible truth.
+ */
+function mutationFailureText(operation: string, error: unknown): string {
+  if (error instanceof PluginManagerStaleResultError) {
+    return 'the plugin change result belongs to a superseded connection generation; '
+      + 'the authoritative inventory reread decides the outcome'
+  }
+  return `${operation} failed: ${errorMessage(error)}`
+}
 
 const EMPTY_MODEL: PluginManagerModel = Object.freeze({
   sections: Object.freeze([
@@ -778,7 +793,7 @@ export class PluginManagerController {
       this.message = changeSummary(change)
     } catch (error) {
       if (this.disposed || token !== this.mutationToken) return
-      this.message = `enable/disable failed: ${errorMessage(error)}`
+      this.message = mutationFailureText('enable/disable', error)
     }
     await this.finishMutation(token)
   }
@@ -828,7 +843,7 @@ export class PluginManagerController {
       this.message = changeSummary(change)
     } catch (error) {
       if (this.disposed || token !== this.mutationToken) return
-      this.message = `enable/disable failed: ${errorMessage(error)}`
+      this.message = mutationFailureText('enable/disable', error)
     }
     await this.finishMutation(token)
   }
@@ -973,7 +988,7 @@ export class PluginManagerController {
       this.message = changeSummary(change)
     } catch (error) {
       if (this.disposed || token !== this.mutationToken) return
-      this.message = `disable failed: ${errorMessage(error)}`
+      this.message = mutationFailureText('disable', error)
     }
     await this.finishMutation(token)
   }
@@ -1002,7 +1017,7 @@ export class PluginManagerController {
       this.message = changeSummary(change)
     } catch (error) {
       if (this.disposed || token !== this.mutationToken) return
-      this.message = `remove failed: ${errorMessage(error)}`
+      this.message = mutationFailureText('remove', error)
     }
     await this.finishMutation(token)
   }

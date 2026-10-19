@@ -229,6 +229,14 @@ const ISOLATED_HOME_KEYS = [
   'XDG_CONFIG_HOME', 'XDG_CACHE_HOME', 'XDG_DATA_HOME', 'XDG_STATE_HOME',
 ] as const
 
+/** Explicit package-manager config/auth environment a real `pnpm` child could
+ *  inherit from the runner. Home/XDG redirection alone does NOT neutralize
+ *  these: `npm_config_userconfig`/`NPM_CONFIG_USERCONFIG` (and their global/cache
+ *  twins) name paths outside the fixture root, so the real-pnpm evidence must
+ *  remove them and substitute test-owned paths. */
+const PACKAGE_MANAGER_ENV_PATTERN = /^(?:npm|pnpm)_config_/i
+const PACKAGE_MANAGER_AUTH_PATTERN = /^(?:NPM_TOKEN|NODE_AUTH_TOKEN|YARN_NPM_AUTH_TOKEN)$/i
+
 /** Point every credential/config/cache store at the fixture root. Returns the
  *  exact restore action; the caller owns it through the test lifecycle. */
 function isolateFixtureHome(root: string): () => void {
@@ -245,9 +253,40 @@ function isolateFixtureHome(root: string): () => void {
     XDG_STATE_HOME: join(home, '.local', 'state'),
   }
   const previous = new Map<string, string | undefined>()
+  const remember = (key: string): void => {
+    if (!previous.has(key)) previous.set(key, process.env[key])
+  }
   for (const key of ISOLATED_HOME_KEYS) {
-    previous.set(key, process.env[key])
+    remember(key)
     process.env[key] = values[key]
+  }
+  // Remove every ambient package-manager config/auth override, then point the
+  // explicit user/global config and cache at test-owned empty paths. Registry
+  // selection stays the caller's explicit install option.
+  for (const key of Object.keys(process.env)) {
+    if (!PACKAGE_MANAGER_ENV_PATTERN.test(key) && !PACKAGE_MANAGER_AUTH_PATTERN.test(key)) continue
+    remember(key)
+    delete process.env[key]
+  }
+  // npm refuses to load the SAME file as both user and global config, so the
+  // two test-owned files stay distinct (both empty).
+  const userNpmrc = join(home, '.npmrc')
+  const globalNpmrc = join(home, '.npmrc.global')
+  writeFileSync(userNpmrc, '')
+  writeFileSync(globalNpmrc, '')
+  const cache = join(home, '.npm-cache')
+  mkdirSync(cache, { recursive: true })
+  const overrides: Record<string, string> = {
+    npm_config_userconfig: userNpmrc,
+    NPM_CONFIG_USERCONFIG: userNpmrc,
+    npm_config_globalconfig: globalNpmrc,
+    NPM_CONFIG_GLOBALCONFIG: globalNpmrc,
+    npm_config_cache: cache,
+    NPM_CONFIG_CACHE: cache,
+  }
+  for (const [key, value] of Object.entries(overrides)) {
+    remember(key)
+    process.env[key] = value
   }
   return () => {
     for (const [key, value] of previous) {
