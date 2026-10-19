@@ -1529,6 +1529,17 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
   }
 
   private actionBarSegments(): ActionBarSegment[] {
+    const segments = this.frameActionBarSegments()
+    // A zero-row body paints no body-derived action/choice. Advertising Enter
+    // would promise an activation the CURRENT frame cannot perform (the D2
+    // revoke path already makes it a no-op); keep the real Esc destination and
+    // drop only the fake Enter invitation.
+    return (this.paintedChrome?.bodyRows ?? 0) <= 0
+      ? segments.filter(segment => !segment.text.startsWith('Enter'))
+      : segments
+  }
+
+  private frameActionBarSegments(): ActionBarSegment[] {
     const back = this.controller.host() === 'settings-entry' ? 'Esc back' : 'Esc close'
     if (this.searchEditing) {
       return [
