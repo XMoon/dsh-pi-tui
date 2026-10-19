@@ -70,8 +70,8 @@ async function viewport(vt: VirtualTerminal): Promise<string> {
   return vt.getViewport().join('\n')
 }
 /** A started app whose terminal writes are recorded (protocol queries included). */
-function startAppWithWrites(): { vt: VirtualTerminal; app: TuiApp; writes: string[] } {
-  const vt = new VirtualTerminal(100, 24)
+function startAppWithWrites(width = 100, height = 24): { vt: VirtualTerminal; app: TuiApp; writes: string[] } {
+  const vt = new VirtualTerminal(width, height)
   const writes: string[] = []
   const spy = new Proxy(vt, {
     get(target, prop) {
@@ -5193,8 +5193,8 @@ test('a folded bash preview keeps the app-owned log reset when the style crosses
   // The frame itself ends in an app-owned reset; the contract under test is the
   // reset that CLOSES the external style immediately after its last preview
   // character (a trailing frame reset would mask a leak).
-  assert.ok(painted.includes('third\u001b[0m'),
-    `the app-owned reset immediately follows the styled preview:\n${JSON.stringify(painted)}`)
+  assert.ok(painted.includes('third…\u001b[0m'),
+    `the app-owned reset immediately follows the styled preview (and its dropped-record marker):\n${JSON.stringify(painted)}`)
   assert.equal(tool.result, raw, 'the raw result is untouched')
   app.stop()
 })
@@ -5241,9 +5241,57 @@ test('a CR-progress folded preview measures the LOG-PROJECTED records, not raw z
   const rowStart = Math.max(0, stream.lastIndexOf('\n', marker) + 1)
   const rowEnd = stream.indexOf('\n', marker)
   const row = stripTerminalSequences(stream.slice(rowStart, rowEnd === -1 ? undefined : rowEnd)).trimEnd()
-  assert.ok(row.endsWith('— x x x'),
-    `the folded preview is exactly the first three SAFE records on ONE bounded row: ${JSON.stringify(row)}`)
+  assert.ok(row.endsWith('— x x x…'),
+    `the folded preview shows the first three SAFE records AND the dropped-record marker on ONE bounded row: ${JSON.stringify(row)}`)
   assert.ok(visibleWidth(row) <= 100, `the folded row stays inside the terminal width: ${JSON.stringify(row)}`)
+  assert.equal(tool.result, raw, 'the raw result is untouched')
+  app.stop()
+})
+
+test('a folded preview marks records dropped by COUNT, not only by width', async () => {
+  const { vt, app } = startAppWithWrites()
+  app.setTranscriptDetailExpanded(false)
+  const four: TranscriptMessage = {
+    kind: 'tool', turn: 0, name: 'generic_tool', args: '{"x":"y"}', result: 'one\ntwo\nthree\nfour', status: 'ok',
+  }
+  const exactly: TranscriptMessage = {
+    kind: 'tool', turn: 0, name: 'generic_tool', args: '{"x":"z"}', result: 'alpha\nbeta\ngamma', status: 'ok',
+  }
+  app.setTranscript([four, exactly])
+  const view = await viewport(vt)
+  const lines = view.split('\n').map(line => stripTerminalSequences(line).trimEnd())
+  assert.ok(lines.some(line => line.endsWith('— one two three…')),
+    `a dropped fourth record must be marked: \n${lines.join('\n')}`)
+  assert.ok(!lines.some(line => line.includes('four')), 'the dropped record must not leak into the row')
+  assert.ok(lines.some(line => line.endsWith('— alpha beta gamma')),
+    `exactly the preview's record budget needs no marker: \n${lines.join('\n')}`)
+  assert.ok(!lines.some(line => line.endsWith('— alpha beta gamma…')), 'exactly three records is not a truncation')
+  app.stop()
+})
+
+test('a width-clipped ANSI/CJK folded preview keeps exactly ONE hidden-content marker and its reset', async () => {
+  const { vt, app, writes } = startAppWithWrites(200, 24)
+  app.setTranscriptDetailExpanded(false)
+  const raw = `\u001b[1m${'界'.repeat(70)}\u001b[0m\nsecond\nthird\nfourth`
+  const tool: TranscriptMessage = {
+    kind: 'tool', turn: 0, name: 'bash', args: '{"command":"printf"}', result: raw, status: 'ok',
+  }
+  app.setTranscript([tool])
+  await viewport(vt)
+  const stream = writes.join('')
+  const marker = stream.indexOf('界')
+  assert.ok(marker >= 0, `the folded CJK preview was painted:\n${stream.slice(-2000)}`)
+  const rowStart = Math.max(0, stream.lastIndexOf('\n', marker) + 1)
+  const rowEnd = stream.indexOf('\n', marker)
+  const rawRow = stream.slice(rowStart, rowEnd === -1 ? undefined : rowEnd)
+  const plainRow = stripTerminalSequences(rawRow).trimEnd()
+  assert.ok(plainRow.endsWith('…'), `a width-clipped preview ends in the hidden-content marker:\n${JSON.stringify(plainRow)}`)
+  assert.equal((plainRow.match(/…/g) ?? []).length, 1,
+    `the count and width markers are never doubled:\n${JSON.stringify(plainRow)}`)
+  assert.ok(visibleWidth(plainRow) <= 200, `the row stays inside the terminal width:\n${JSON.stringify(plainRow)}`)
+  assert.ok(rawRow.includes('\u001b[1m'), 'the whitelisted style survives the clip')
+  assert.ok(rawRow.includes('\u001b[0m'), 'the app-owned reset closes the clipped style')
+  assert.ok(!plainRow.includes('second'), 'the records past the width cut are not painted')
   assert.equal(tool.result, raw, 'the raw result is untouched')
   app.stop()
 })

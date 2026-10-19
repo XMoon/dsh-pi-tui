@@ -104,6 +104,10 @@ preview is reduced to ONE row, the ORDER is load-bearing:
    the preview tail (the full-log reset was cut away), then fold any residual
    break. Skipping the first step can widen the row past its budget; skipping
    the third can bleed a styled prefix into the next physical row.
+A preview that dropped whole records must end in the hidden-content `…`
+marker even when the retained text fits the width (only the exact record
+budget is unmarked); a width cut already terminates in the same marker, so
+the two causes never double it.
 
 ## SGR whitelist (log policy only)
 
