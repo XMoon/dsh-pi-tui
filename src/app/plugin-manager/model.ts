@@ -375,6 +375,53 @@ function cardStatusFacts(card: PluginCardView): PluginDetailFact[] {
   return facts
 }
 
+/**
+ * The v9 F10 upgrade guidance of one bundle card (§4.1). It renders the
+ * CORRECT route only from Host facts (`availability`/`removable`/`version`/
+ * `installTarget`); it never invents an offered version and never turns a
+ * profile re-install into an in-place update. A standalone entry has no
+ * package route, so it carries no guidance fact.
+ */
+function upgradeGuidance(card: PluginCardView): PluginDetailFact | undefined {
+  if (card.target !== 'bundle') return undefined
+  if (card.isSelf) {
+    return {
+      label: 'Upgrade',
+      value: 'The Current TUI bundle is managed outside this screen.',
+      tone: 'dim',
+    }
+  }
+  if (card.availability === 'installation') {
+    return {
+      label: 'Upgrade',
+      value: 'Upgrade: Shipped with DSH. Upgrade the DSH installation to change this bundle version; Plugin Manager cannot update it in place.',
+      tone: 'normal',
+    }
+  }
+  if (card.availability === 'profile') {
+    const removal = card.canRemove
+      ? ''
+      : ' Removal is not permitted from this profile; do not reinstall over it here.'
+    return {
+      label: 'Upgrade',
+      value: `Upgrade: Profile-owned. Remove the current bundle first, then explicitly install the desired package version. No in-place update.${removal}`,
+      tone: 'normal',
+    }
+  }
+  if (card.installTarget === undefined) {
+    return {
+      label: 'Upgrade',
+      value: 'Install unavailable: No official install target was supplied.',
+      tone: 'warning',
+    }
+  }
+  return {
+    label: 'Upgrade',
+    value: `Install: Use the official offered target ${maskedSource(card.installTarget.spec)} (version ${card.installTarget.version}); this is not an in-place update.`,
+    tone: 'normal',
+  }
+}
+
 function cardSourceFacts(card: PluginCardView): PluginDetailFact[] {
   const facts: PluginDetailFact[] = [
     { label: 'Availability', value: availabilityLabel(card.availability), tone: 'dim' },
@@ -389,6 +436,10 @@ function cardSourceFacts(card: PluginCardView): PluginDetailFact[] {
   }
   if (card.version !== undefined) {
     facts.push({ label: 'Current version', value: card.version, tone: 'dim' })
+  } else if (card.installTarget !== undefined) {
+    // An unreadable current version is reported as unknown; the product's own
+    // release number is never substituted for a Host fact.
+    facts.push({ label: 'Current version', value: 'unavailable', tone: 'dim' })
   }
   if (
     card.installTarget !== undefined
@@ -396,11 +447,13 @@ function cardSourceFacts(card: PluginCardView): PluginDetailFact[] {
     && card.installTarget.version !== card.version
   ) {
     facts.push({
-      label: 'Update',
-      value: 'Update not applied automatically — remove then install is required',
-      tone: 'warning',
+      label: 'Version difference',
+      value: `Current ${card.version} · offered ${card.installTarget.version}.`,
+      tone: 'dim',
     })
   }
+  const guidance = upgradeGuidance(card)
+  if (guidance !== undefined) facts.push(guidance)
   return facts
 }
 

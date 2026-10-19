@@ -3071,9 +3071,9 @@ returns to the untouched conversation/transcript-fullscreen state.
   Host-capability consequence is also a bounded `Risk` fact on the exact B03
   card; it does not rewrite `official`/`availability`/`enabled`.
 
-## Plugin Detail states bounded rc.2 bundle support (2026-10-19, S4-D3 / PR-D3)
+## Plugin Detail states bounded rc.2 support and the standard upgrade route (2026-10-19, S4-D3 / PR-D3)
 
-The existing Plugin Manager Detail gains one read-only projection; no second
+The existing Plugin Manager Detail gains two read-only projections; no second
 page, tab, shortcut, button, scroll owner or port is introduced.
 
 - **Bounded rc.2 capability copy.** The 14 exact `B01–B14` package identities
@@ -3091,3 +3091,24 @@ page, tab, shortcut, button, scroll owner or port is introduced.
   names `WEB_ONLY` limits (Voice/Inspector/CoT/Market), `EXTERNAL_UNVERIFIED`
   for the two on-demand native subagents, and the foreground/no-guaranteed-Job
   fact for Ralph. Availability/Source/Version/Fiber remain separate Host facts.
+- **Standard upgrade guidance (v9 F10).** The Source group replaces the old
+  single `Update not applied automatically` line with a fact derived only from
+  `availability`, `canRemove`, `isSelf`, `version` and `installTarget`:
+  - shipment-owned → upgrade the DSH installation; no in-place update and no
+    Remove/Update action;
+  - profile-owned → Remove first, then explicitly install the desired version;
+    when the Host says removal is not permitted the copy says so instead of
+    suggesting a reinstall;
+  - missing with an official target → `Install: Use the official offered target
+    <masked spec> (version <version>)`; the existing `Install…` action remains
+    the only install path;
+  - missing without a target → `Install unavailable: No official install
+    target was supplied.`;
+  - Current TUI → managed outside this screen, with no remove/install advice.
+  When the current and offered versions are both known and differ, a separate
+  `Version difference: Current <version> · offered <version>.` fact is painted;
+  equal versions do not claim anything is the latest, and an unreadable current
+  version is `unavailable` rather than the running TUI release number. The
+  guidance never echoes a full userinfo/token and never dispatches a mutation:
+  profile Remove-then-Install stays two explicit user operations with the
+  existing D1 controller actions.

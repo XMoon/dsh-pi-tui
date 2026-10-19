@@ -1043,3 +1043,159 @@ test('dispose during a Host install neither cancels nor retries it and ignores a
   assert.equal(state.waitCalls.length, 0, 'dispose must never retry/recover an install')
   assert.equal(renders(), rendersAtDispose, 'a late settlement never repaints a disposed controller')
 })
+
+// ── D3-1 / v9 F10: upgrade guidance projection ─────────────────────────────
+
+function detailFact(detail: ReturnType<typeof buildPluginDetailView>, label: string) {
+  for (const group of detail.groups) {
+    for (const entry of group.facts) if (entry.label === label) return entry
+  }
+  return undefined
+}
+
+function upgradeText(detail: ReturnType<typeof buildPluginDetailView>): string | undefined {
+  return detailFact(detail, 'Upgrade')?.value
+}
+
+test('F10: shipped bundles guide a DSH upgrade and never expose an in-place update/Remove', async () => {
+  const { port } = fakePort({
+    snapshotImpl: async () => snapshot([
+      bundle({ name: '@deepseek-ai/dsh-base', availability: 'installation', installed: true, removable: false, source: undefined, version: '0.2.1-rc.2' }),
+    ]),
+  })
+  const { controller } = controllerOf(port)
+  controller.open('direct-command')
+  await tick()
+  const target = card(controller, bundleValue('@deepseek-ai/dsh-base'))!
+  const detail = buildPluginDetailView(target)
+  assert.match(upgradeText(detail) ?? '', /Upgrade: Shipped with DSH\. Upgrade the DSH installation/u)
+  assert.match(upgradeText(detail) ?? '', /cannot update it in place/u)
+  assert.ok(!detail.actions.some(action => action.value === PLUGIN_ACTION.remove), 'a shipped bundle never offers Remove through guidance')
+  assert.ok(!detail.actions.some(action => /update/i.test(action.value)), 'no Update business action exists')
+})
+
+test('F10: profile-owned bundles guide Remove-then-explicit-Install and never assume an offered version', async () => {
+  const { port } = fakePort({
+    snapshotImpl: async () => snapshot([
+      bundle({ name: 'profile-owned', availability: 'profile', installed: true, removable: true, source: 'file:/tmp/owned', version: '1.0.0' }),
+      bundle({
+        name: 'profile-read-only',
+        availability: 'profile',
+        installed: true,
+        removable: true,
+        readOnlyReason: 'management-required',
+        source: 'file:/tmp/read-only',
+        version: '1.0.0',
+      }),
+    ]),
+  })
+  const { controller } = controllerOf(port)
+  controller.open('direct-command')
+  await tick()
+  const removed = buildPluginDetailView(card(controller, bundleValue('profile-owned'))!)
+  assert.match(upgradeText(removed) ?? '', /Upgrade: Profile-owned\. Remove the current bundle first, then explicitly install the desired package version\. No in-place update\.$/u)
+  assert.doesNotMatch(upgradeText(removed) ?? '', /new version|latest|available version/u, 'no offered version is invented')
+  assert.ok(removed.actions.some(action => action.value === PLUGIN_ACTION.remove), 'the real Remove action remains the separate D1 path')
+
+  const readOnly = buildPluginDetailView(card(controller, bundleValue('profile-read-only'))!)
+  assert.match(upgradeText(readOnly) ?? '', /Removal is not permitted from this profile; do not reinstall over it here\./u)
+  const readOnlyRemove = readOnly.actions.find(action => action.value === PLUGIN_ACTION.remove)
+  assert.equal(readOnlyRemove?.enabled, false, 'Host read-only removal stays refused')
+  assert.match(readOnlyRemove?.reason ?? '', /Required by DSH management/u)
+})
+
+test('F10: missing catalog entries use the official offered target or state that none was supplied', async () => {
+  const { port } = fakePort({
+    snapshotImpl: async () => snapshot([
+      bundle({
+        name: 'offered',
+        official: true,
+        availability: 'missing',
+        installed: false,
+        removable: false,
+        source: undefined,
+        installTarget: { spec: 'offered@0.2.1-rc.2', version: '0.2.1-rc.2' },
+      }),
+      bundle({
+        name: 'no-target',
+        official: true,
+        availability: 'missing',
+        installed: false,
+        removable: false,
+        source: undefined,
+      }),
+    ]),
+  })
+  const { controller } = controllerOf(port)
+  controller.open('direct-command')
+  await tick()
+  const offered = buildPluginDetailView(card(controller, bundleValue('offered'))!)
+  assert.match(upgradeText(offered) ?? '', /^Install: Use the official offered target offered@0\.2\.1-rc\.2 \(version 0\.2\.1-rc\.2\); this is not an in-place update\.$/u)
+  assert.ok(offered.actions.some(action => action.value === PLUGIN_ACTION.officialInstall && action.enabled), 'the existing Install… path is unchanged')
+  assert.equal(detailFact(offered, 'Current version')?.value, 'unavailable', 'an unknown current version is stated, not fabricated')
+
+  const missing = buildPluginDetailView(card(controller, bundleValue('no-target'))!)
+  assert.equal(upgradeText(missing), 'Install unavailable: No official install target was supplied.')
+  assert.ok(missing.actions.some(action => action.value === PLUGIN_ACTION.officialInstall && action.enabled === false), 'the Install action stays disabled')
+})
+
+test('F10: the Current TUI bundle states external ownership and a standalone entry carries no package route', async () => {
+  const { port } = fakePort({
+    snapshotImpl: async () => ({
+      bundles: [bundle({ name: SELF_BUNDLE, availability: 'profile', installed: true, removable: true, source: 'file:/tmp/tui', version: '0.5.3' })],
+      plugins: [{ entryId: 'e-free', moduleName: 'free-entry', enabled: true, fiberPhase: 'active', patchId: 'free' }],
+      registries: { registry: null, fallbackRegistries: [], resolved: null },
+      exemptions: [],
+      exemptionWarnings: [],
+    }),
+  })
+  const { controller } = controllerOf(port)
+  controller.open('direct-command')
+  await tick()
+  const self = buildPluginDetailView(card(controller, bundleValue(SELF_BUNDLE))!)
+  assert.equal(upgradeText(self), 'The Current TUI bundle is managed outside this screen.')
+  assert.doesNotMatch(upgradeText(self) ?? '', /remove|install/iu, 'self-protection never suggests changing the running TUI')
+
+  const entry = buildPluginDetailView(card(controller, entryValue('e-free'))!)
+  assert.equal(upgradeText(entry), undefined, 'a standalone Loader entry has no package upgrade route')
+})
+
+test('F10: version difference, equal version and masked sources never leak credentials', async () => {
+  const { port } = fakePort({
+    snapshotImpl: async () => snapshot([
+      bundle({
+        name: 'different',
+        official: true,
+        availability: 'missing',
+        installed: false,
+        removable: false,
+        source: 'https://user:secret@example.com/pkg.git',
+        version: '0.2.0-rc.2',
+        installTarget: { spec: 'https://user:secret@example.com/pkg.git#0.2.1-rc.2', version: '0.2.1-rc.2' },
+      }),
+      bundle({
+        name: 'same',
+        official: true,
+        availability: 'missing',
+        installed: false,
+        removable: false,
+        source: undefined,
+        version: '0.2.1-rc.2',
+        installTarget: { spec: 'same@0.2.1-rc.2', version: '0.2.1-rc.2' },
+      }),
+    ]),
+  })
+  const { controller } = controllerOf(port)
+  controller.open('direct-command')
+  await tick()
+  const different = buildPluginDetailView(card(controller, bundleValue('different'))!)
+  assert.equal(detailFact(different, 'Version difference')?.value, 'Current 0.2.0-rc.2 · offered 0.2.1-rc.2.')
+  assert.match(upgradeText(different) ?? '', /https:\/\/\*\*\*@example\.com\/pkg\.git#0\.2\.1-rc\.2/u)
+  const painted = different.groups.flatMap(group => group.facts.map(entry => entry.value)).join('\n')
+  assert.doesNotMatch(painted, /user:secret|secret@/u, 'no credential crosses the Detail projection')
+
+  const same = buildPluginDetailView(card(controller, bundleValue('same'))!)
+  assert.equal(detailFact(same, 'Version difference'), undefined, 'equal versions are not a fabricated update')
+  assert.doesNotMatch(same.groups.flatMap(group => group.facts.map(entry => entry.value)).join('\n'), /latest|up to date/iu,
+    'equal versions do not claim the offered version is the latest')
+})

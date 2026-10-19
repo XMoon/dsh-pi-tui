@@ -215,16 +215,23 @@ test('the REAL rc.2 Host listBundles discovers 14/14 official optional/on-demand
     assert.equal(surface!.tone, 'normal')
     assert.ok(!facts.some(fact => fact.value.includes('Host capability not yet qualified for TUI')),
       `${card.name} never shows the stale generic capability warning`)
+    const upgrade = facts.find(fact => fact.label === 'Upgrade')
+    assert.ok(upgrade !== undefined, `${card.name} states the F10 route from real Host facts`)
     if (ON_DEMAND.includes(card.name)) {
       assert.equal(card.availability, 'missing')
       assert.equal(card.canInstall, true)
       assert.ok(detail.actions.some(action => action.value === 'action:official-install' && action.enabled))
       assert.equal(card.installTarget?.spec, `${card.name}@0.2.1-rc.2`)
+      assert.match(upgrade!.value, new RegExp(`^Install: Use the official offered target ${card.name.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')}@0\\.2\\.1-rc\\.2 \\(version 0\\.2\\.1-rc\\.2\\); this is not an in-place update\\.$`))
+      assert.match(upgrade!.value, /this is not an in-place update/)
+      assert.equal(facts.find(fact => fact.label === 'Current version')?.value, 'unavailable')
     } else {
       assert.equal(card.availability, 'installation')
       assert.equal(card.canInstall, false)
       assert.equal(card.canToggle, true, 'a shipped Optional bundle is switchable by the Host')
       assert.equal(card.canRemove, false, 'a shipped bundle is never removable')
+      assert.equal(upgrade!.value, 'Upgrade: Shipped with DSH. Upgrade the DSH installation to change this bundle version; Plugin Manager cannot update it in place.')
+      assert.ok(!detail.actions.some(action => action.value === 'action:remove'), 'F10 never adds a Remove action to a shipped bundle')
     }
   }
   // The two external on-demand rows carry their unverified limit through the
