@@ -181,6 +181,9 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
   private paintedDetailSelectionVisible = false
   /** The action values actually painted in the last install/confirm frame. */
   private paintedInstallActions: ReadonlySet<string> = new Set()
+  /** The install actions admitted by the CURRENT frame (approval is removed
+   * when its build-script risk cannot be fully shown). */
+  private currentInstallActions: readonly PluginDetailAction[] = []
   private paintedConfirmActions: ReadonlySet<string> = new Set()
   private pressedGesture: PressedGesture | undefined
   private lastRenderWidth = -1
@@ -994,7 +997,7 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
   }
 
   private activateInstallSelection(): void {
-    const actions = this.installActions()
+    const actions = this.currentInstallActions
     const action = actions[Math.min(this.installSelection, Math.max(0, actions.length - 1))]
     if (action === undefined) return
     if (!this.frameIsCurrent() || !this.paintedInstallActions.has(action.value)) return
@@ -1255,7 +1258,9 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
       if (this.controller.canReconcileInstall()) {
         actions.push({ value: INSTALL_ACTION.reconcile, label: 'Check installation status', enabled: true, tone: 'normal' })
       }
-      actions.push({ value: INSTALL_ACTION.new, label: 'New install', enabled: true, tone: 'normal' })
+      if (install.phase !== 'unknown') {
+        actions.push({ value: INSTALL_ACTION.new, label: 'New install', enabled: true, tone: 'normal' })
+      }
       actions.push({ value: INSTALL_ACTION.hide, label: 'Back', enabled: true, tone: 'normal' })
     }
     return actions
@@ -1501,7 +1506,7 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
       }
       return [
         { text: 'Enter action', priority: 80 },
-        { text: 'n new', priority: 55 },
+        ...(install.phase === 'unknown' ? [] : [{ text: 'n new', priority: 55 }]),
         { text: 'l logs', priority: 70 },
         { text: 'c copy', priority: 60 },
         { text: 'Esc back', priority: 100 },
@@ -1674,30 +1679,54 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
   private renderInstallBody(plan: ChromePlan, bodyTop: number, targets: HitTarget[]): string[] {
     const install = this.controller.installView()
     if (install === undefined) return padBody([color.textDim('No install is open')], plan.bodyRows, plan.width)
-    const actions = this.installActions()
+    const pending = this.controller.approvableBuilds() !== undefined
+    let actions = this.installActions()
+    let built = this.installLines(install, plan.width, actions)
+    const layout = (rendered: typeof built): {
+      actionsStart: number
+      actionBlock: string[]
+      contentViewport: number
+      content: string[]
+      visible: string[]
+      visibleActionBlock: number
+      riskVisible: boolean
+    } => {
+      const actionsStart = rendered.actionStart
+      const actionBlock = rendered.lines.slice(actionsStart)
+      const contentViewport = Math.max(1, plan.bodyRows - Math.min(actionBlock.length, plan.bodyRows))
+      const content = rendered.lines.slice(0, actionsStart)
+      this.installOffset = clampOffset(this.installOffset, content.length, contentViewport)
+      const visible = content.slice(this.installOffset, this.installOffset + contentViewport)
+      const visibleActionBlock = Math.min(actionBlock.length, Math.max(0, plan.bodyRows - contentViewport))
+      const riskVisible = rendered.riskStart >= 0
+        && rendered.riskStart >= this.installOffset
+        && rendered.riskEnd < this.installOffset + contentViewport
+      return { actionsStart, actionBlock, contentViewport, content, visible, visibleActionBlock, riskVisible }
+    }
+    let body = layout(built)
+    if (pending && actions.some(action => action.value === INSTALL_ACTION.approve) && !body.riskVisible) {
+      // The approval is inseparable from its risk disclosure: if the current
+      // frame cannot show the package names and the privilege warning, do not
+      // offer Approve. Re-layout without it so its action line/target vanishes.
+      actions = actions.filter(action => action.value !== INSTALL_ACTION.approve)
+      built = this.installLines(install, plan.width, actions)
+      body = layout(built)
+    }
+    this.currentInstallActions = actions
     if (actions.length > 0 && this.installSelection >= actions.length) {
       this.installSelection = actions.length - 1
       this.bumpRevision()
     }
-    const built = this.installLines(install, plan.width, actions)
-    // Pin the explicit action block (no extra title row) at the bottom so the
-    // primary action stays reachable at 80x10 while facts/logs scroll.
-    const actionsStart = built.actionStart
-    const actionBlock = built.lines.slice(actionsStart)
-    const contentViewport = Math.max(1, plan.bodyRows - Math.min(actionBlock.length, plan.bodyRows))
-    const content = built.lines.slice(0, actionsStart)
-    this.installOffset = clampOffset(this.installOffset, content.length, contentViewport)
-    const visible = content.slice(this.installOffset, this.installOffset + contentViewport)
-    const out = padBody(visible, contentViewport, plan.width)
-    for (const line of actionBlock) out.push(fit(line, plan.width))
-    const visibleActionBlock = Math.min(actionBlock.length, Math.max(0, plan.bodyRows - contentViewport))
-    this.paintedInstallActions = new Set()
+    const out = padBody(body.visible, body.contentViewport, plan.width)
+    for (const line of body.actionBlock) out.push(fit(line, plan.width))
+    const painted = new Set<string>()
     for (const action of built.actionLines) {
-      const y = contentViewport + (action.line - actionsStart)
-      if (y < contentViewport || y >= contentViewport + visibleActionBlock) continue
-      this.paintedInstallActions = new Set([...this.paintedInstallActions, action.value])
+      const y = body.contentViewport + (action.line - body.actionsStart)
+      if (y < body.contentViewport || y >= body.contentViewport + body.visibleActionBlock) continue
+      painted.add(action.value)
       targets.push({ kind: 'action', value: action.value, row: bodyTop + y, startCol: 0, endCol: plan.width })
     }
+    this.paintedInstallActions = painted
     return padBody(out, plan.bodyRows, plan.width)
   }
 
@@ -1706,8 +1735,10 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     install: PluginInstallView,
     width: number,
     actions: readonly PluginDetailAction[],
-  ): { lines: string[]; actionLines: PaintedActionLine[]; actionStart: number } {
+  ): { lines: string[]; actionLines: PaintedActionLine[]; actionStart: number; riskStart: number; riskEnd: number } {
     const lines: string[] = []
+    let riskStart = -1
+    let riskEnd = -1
     if (install.officialName !== undefined) {
       lines.push(color.textDim(`Official catalog · ${sanitizedPhysicalLine(install.officialName)}`))
     }
@@ -1789,6 +1820,7 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
       if (pending !== undefined) {
         // The approval risk is the FIRST fact: at 80x10 the pinned Approve
         // action must never appear above a hidden risk explanation.
+        riskStart = lines.length
         lines.push(color.warning(truncateToWidth(
           `Build scripts blocked for: ${pending.map(line => sanitizedPhysicalLine(line)).join(', ')}`,
           width,
@@ -1798,6 +1830,7 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
           'These packages execute scripts with your user privileges. Approve only when you trust them.',
           width,
         ).map(line => color.warning(line)))
+        riskEnd = lines.length - 1
       }
       const outcome = install.outcome
       const summary = outcome === undefined ? undefined : sanitizedPhysicalLine(changeSummary(outcome))
@@ -1856,6 +1889,8 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
       lines: actionLines.lines,
       actionLines: actionLines.actionLines,
       actionStart: actionLines.actionLines[0]?.line ?? actionLines.lines.length,
+      riskStart,
+      riskEnd,
     }
   }
 

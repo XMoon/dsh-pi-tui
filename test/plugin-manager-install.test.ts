@@ -378,6 +378,39 @@ test('a failed install reopens with the same request id and New install is expli
   assert.match(failedFrame, /Approve and retry evil-pkg/)
   assert.match(failedFrame, /New install/, 'the explicit new-install action is visible')
 
+  const short = new PluginManagerWorkspacePanel(controller, {
+    rows: () => 10,
+    columns: () => 80,
+    requestRender: () => {},
+    notice: () => undefined,
+    onCopy: () => {},
+  })
+  const shortFrame = short.render(80).join('\n')
+  assert.match(shortFrame, /Build scripts blocked/, 'the risk names remain visible at 80x10')
+  assert.doesNotMatch(shortFrame, /Approve/, 'approval is not offered when its risk cannot be fully shown')
+  short.handleInput('\r')
+  await tick()
+  assert.equal(installCalls.length, 1, 'Enter on the short frame cannot approve a hidden risk')
+  short.dispose()
+
+  const tall = new PluginManagerWorkspacePanel(controller, {
+    rows: () => 24,
+    columns: () => 80,
+    requestRender: () => {},
+    notice: () => undefined,
+    onCopy: () => {},
+  })
+  const tallFrame = tall.render(80).join('\n')
+  assert.match(tallFrame, /Approve and retry evil-pkg/)
+  assert.match(tallFrame, /execute scripts with your user privileges/, 'both risk facts and approval are visible at 80x24')
+  tall.dispose()
+
+  // Another official card's Install action must not bypass recovery and replace
+  // this terminal record; New install is the explicit replacement path.
+  assert.equal(controller.beginOfficialInstall('another-official-card'), false)
+  assert.equal(controller.installView()?.requestId, requestId)
+  assert.match(controller.notice() ?? '', /install result is still open/)
+
   page.handleInput('\x1b') // hide the install view
   await tick()
   assert.equal(page.currentView(), 'list')
@@ -445,12 +478,20 @@ test('an unknown install reopens with its request id and reconciliation action',
   assert.equal(rejected.installView()?.phase, 'unknown')
   const page = installPage(rejected)
   assert.equal(page.currentView(), 'install')
-  assert.match(page.render(120).join('\n'), /Check installation status/)
+  const unknownFrame = page.render(120).join('\n')
+  assert.match(unknownFrame, /Check installation status/)
+  assert.doesNotMatch(unknownFrame, /New install/, 'unknown must not offer a replacement request')
   page.handleInput('\x1b')
   page.handleInput('i')
   await tick()
   assert.equal(rejected.installView()?.requestId, unknownId)
   assert.equal(rejected.installView()?.phase, 'unknown')
+  page.handleInput('n')
+  await tick()
+  assert.equal(rejected.installView()?.requestId, unknownId, 'n cannot replace an unknown request')
+  assert.equal(rejected.beginManualInstall(), false)
+  assert.equal(rejected.beginOfficialInstall('another-official-card'), false)
+  assert.equal(rejected.installView()?.requestId, unknownId)
   page.dispose()
   rejected.dispose()
 })

@@ -128,7 +128,7 @@ test('copying a failed install preserves duplicate output lines', async () => {
       stage: 'install',
       target: 'pkg',
       error: { code: 'operation-error' },
-      packageResult: { exitCode: 1, output: 'same line\nsame\tline\n\u001b]52;c;YXR0YWNr\u0007\r\n', truncated: false },
+      packageResult: { exitCode: 1, output: 'same line\nsame line\nsame\tline\n\u001b]52;c;YXR0YWNr\u0007\r\n', truncated: false },
     }),
   })
   harness.vt.sendInput('i')
@@ -143,12 +143,49 @@ test('copying a failed install preserves duplicate output lines', async () => {
   harness.vt.sendInput('c')
   await harness.settle()
   assert.equal(harness.copied.length, 1)
-  assert.equal(harness.copied[0]!.split('\n').filter(line => line === 'same line').length, 1,
+  assert.equal(harness.copied[0]!.split('\n').filter(line => line === 'same line').length, 2,
     'the exact raw diagnostic output is copied without global line de-duplication')
   assert.ok(harness.copied[0]!.includes('same\tline'), 'TAB survives byte-exact copy')
   assert.ok(harness.copied[0]!.includes('\u001b]52;c;YXR0YWNr\u0007'), 'the raw OSC sequence survives byte-exact copy')
   assert.ok(harness.copied[0]!.includes('\r'), 'the raw CR survives byte-exact copy')
   assert.ok(!harness.view().includes('YXR0YWNr'), 'the display projection still strips the payload')
+})
+
+test('a running install copies its retained log byte-exact while the display stays projected', async () => {
+  const gate = deferred<PluginChangeFact>()
+  const harness = await open({ columns: 120, rows: 40, installImpl: () => gate.promise })
+  harness.vt.sendInput('i')
+  await harness.settle()
+  for (const character of 'pkg') harness.vt.sendInput(character)
+  await harness.settle()
+  harness.vt.sendInput('\r') // inspect
+  await harness.settle()
+  harness.vt.sendInput('\r') // install -> starting (held)
+  await harness.settle()
+  const requestId = harness.installCalls[0]!.requestId
+  harness.emit({ kind: 'phase', phase: { requestId, phase: 'installing' } })
+  harness.emit({
+    kind: 'log',
+    log: {
+      requestId,
+      jobId: 'j',
+      stream: 'stderr',
+      text: 'raw\tline\nline2\nline3\r\n\u001b]52;c;YXR0YWNr\u0007',
+    },
+  })
+  await harness.settle()
+  const retained = harness.controller.installView()!.log
+  assert.ok(retained.length > 0)
+  harness.vt.sendInput('c')
+  await harness.settle()
+  assert.equal(harness.copied.length, 1)
+  assert.ok(harness.copied[0]!.endsWith(retained.join('\n')),
+    'the clipboard payload ends with the exact retained log, without a display projection')
+  assert.ok(harness.copied[0]!.includes('! raw\tline'), 'stderr prefix and TAB are preserved byte-exact')
+  assert.ok(harness.copied[0]!.includes('\u001b]52;c;YXR0YWNr\u0007'), 'the raw OSC sequence is preserved')
+  assert.ok(!harness.view().includes('YXR0YWNr'), 'the display projection still strips the payload')
+  gate.resolve({ changed: true, application: 'applied', stage: 'install', target: 'pkg' })
+  await harness.settle()
 })
 
 test('Esc advertises the real destination per entry host', async () => {
