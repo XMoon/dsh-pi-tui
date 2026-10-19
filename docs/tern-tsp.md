@@ -207,9 +207,11 @@ TuiApp.setTranscript(...)        onTranscriptProjected (absent in production)
   local `del` of the old top-level card plus one `add` carrying the new Work
   subtree; the Work and unrelated user/assistant node ids stay stable. Covered
   by `test/tern-tsp-transcript-spike.test.ts` (`View.from` + `View.ops`) against
-  the pinned `@stencil-hq/tern@0.1.0`; no real Tern pane/GUI was run for this
-  exact nested combination, so its visual reading remains **GUI_NOT_VERIFIED**
-  (no new interaction target or surface is introduced). This is a note about the
+  the pinned `@stencil-hq/tern@0.1.0`. A real `tern serve` headless pane (Tern
+  0.9.4, b9ef74c) was also run for this exact nested scenario: 19/19 checks,
+  900×1100 and 480×700 panes, ancestor containment / visible-point and PNGs.
+  Physical GUI, window chrome, fonts and IME were not exercised and remain
+  **GUI_NOT_VERIFIED** (no new interaction target or surface is introduced). This is a note about the
   SHARED STRUCTURE mapping, not a claim that the experimental TSP transcript has
   PiTui's complete Compact/Focus/Full disclosure model; TSP transcript folding
   support remains partial and is out of scope for this change.
