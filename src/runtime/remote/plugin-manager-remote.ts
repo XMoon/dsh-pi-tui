@@ -130,16 +130,37 @@ export class RemotePluginManagerPort implements PluginManagerPort {
     return detachInspection(unwrapRemote(result, 'inspect'))
   }
 
+  /**
+   * Run one mutation on the generated Remote, fenced to the Connection
+   * generation captured BEFORE dispatch. A reply carried by a superseded
+   * generation is never presented as the new generation's success: the Host
+   * may already have applied the write, so the caller's authoritative
+   * inventory reread (which this adapter's invalidation hint requests) decides
+   * the visible outcome. A normal mutation observes the SAME generation
+   * before and after and is unaffected.
+   */
+  private async mutate<T>(operation: string, call: () => Promise<RemoteResultLike<T>>): Promise<T> {
+    const captured = this.generation.getSnapshot()
+    const value = unwrapRemote(await call(), operation)
+    if (!Object.is(captured, this.generation.getSnapshot())) {
+      throw new Error(
+        `pluginManager.${operation} returned after the Connection generation changed; `
+        + 'the authoritative inventory reread decides the outcome',
+      )
+    }
+    return value
+  }
+
   async setBundleEnabled(name: string, enabled: boolean): Promise<PluginChangeFact> {
-    return detachChange(unwrapRemote(await this.remote.pluginManager.setBundleEnabled(name, enabled), 'setBundleEnabled'))
+    return detachChange(await this.mutate('setBundleEnabled', () => this.remote.pluginManager.setBundleEnabled(name, enabled)))
   }
 
   async setPluginEnabled(id: string, enabled: boolean): Promise<PluginChangeFact> {
-    return detachChange(unwrapRemote(await this.remote.pluginManager.setPluginEnabled(id, enabled), 'setPluginEnabled'))
+    return detachChange(await this.mutate('setPluginEnabled', () => this.remote.pluginManager.setPluginEnabled(id, enabled)))
   }
 
   async removeBundle(name: string): Promise<PluginChangeFact> {
-    return detachChange(unwrapRemote(await this.remote.pluginManager.removeBundle(name), 'removeBundle'))
+    return detachChange(await this.mutate('removeBundle', () => this.remote.pluginManager.removeBundle(name)))
   }
 
   async startInstall(request: PluginInstallRequest): Promise<PluginChangeFact> {

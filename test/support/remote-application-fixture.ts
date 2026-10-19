@@ -134,7 +134,19 @@ export const PLUGIN_MANAGER_FIXTURE_BUNDLE = 'm3-5-pr4-fixture-bundle'
  * and a `@xmoon76/dsh-pi-tui`-named stand-in (the exact-name Current-TUI
  * negative-control target).
  */
-function mountPluginManagerProfile(workRoot: string): {
+function mountPluginManagerProfile(
+  workRoot: string,
+  options: {
+    /**
+     * Build a profile with NO installed fixture bundles: the base-owned
+     * `profileContext`/Loader/PluginManager graph stays the same, but a real
+     * `installBundle()` call is the only way a package can arrive. Used by the
+     * S5 A09/A10 real-Host install evidence; the default keeps the M3-5 PR4
+     * fixture bundle for the toggle tests.
+     */
+    readonly emptyProfile?: boolean
+  } = {},
+): {
   profileContext: Record<string, unknown>
   fixture: PluginManagerProfileFixture
 } {
@@ -142,37 +154,43 @@ function mountPluginManagerProfile(workRoot: string): {
   const installationDir = join(workRoot, 'installation')
   const installationAnchor = join(installationDir, 'package.json')
   const profilePatchPath = join(profileDir, 'cordis.patch.yml')
-  const fixtureBundleDir = join(profileDir, 'node_modules', PLUGIN_MANAGER_FIXTURE_BUNDLE)
-  const selfBundleDir = join(profileDir, 'node_modules', '@xmoon76', 'dsh-pi-tui')
-  mkdirSync(fixtureBundleDir, { recursive: true })
-  mkdirSync(selfBundleDir, { recursive: true })
   mkdirSync(installationDir, { recursive: true })
   writeFileSync(installationAnchor, JSON.stringify({
     name: 'm3-5-pr4-fixture-installation',
     private: true,
     dependencies: {},
   }, null, 2))
-  // A real bundle manifest (no patch rows): the official manager lists it,
-  // resolves it, and can select it through the profile manifest.
-  writeFileSync(join(fixtureBundleDir, 'package.json'), JSON.stringify({
-    name: PLUGIN_MANAGER_FIXTURE_BUNDLE,
-    version: '0.0.0',
-    private: true,
-    dsh: { bundle: { patch: [] } },
-  }, null, 2))
-  // The Current-TUI protection is the exact shipped name; only a resolvable
-  // manifest is needed for the card to exist (its patch declares no rows).
-  writeFileSync(join(selfBundleDir, 'package.json'), JSON.stringify({
-    name: '@xmoon76/dsh-pi-tui',
-    version: '0.0.0',
-    private: true,
-    dsh: { bundle: { patch: [] } },
-  }, null, 2))
+  if (options.emptyProfile !== true) {
+    const fixtureBundleDir = join(profileDir, 'node_modules', PLUGIN_MANAGER_FIXTURE_BUNDLE)
+    const selfBundleDir = join(profileDir, 'node_modules', '@xmoon76', 'dsh-pi-tui')
+    mkdirSync(fixtureBundleDir, { recursive: true })
+    mkdirSync(selfBundleDir, { recursive: true })
+    // A real bundle manifest (no patch rows): the official manager lists it,
+    // resolves it, and can select it through the profile manifest.
+    writeFileSync(join(fixtureBundleDir, 'package.json'), JSON.stringify({
+      name: PLUGIN_MANAGER_FIXTURE_BUNDLE,
+      version: '0.0.0',
+      private: true,
+      dsh: { bundle: { patch: [] } },
+    }, null, 2))
+    // The Current-TUI protection is the exact shipped name; only a resolvable
+    // manifest is needed for the card to exist (its patch declares no rows).
+    writeFileSync(join(selfBundleDir, 'package.json'), JSON.stringify({
+      name: '@xmoon76/dsh-pi-tui',
+      version: '0.0.0',
+      private: true,
+      dsh: { bundle: { patch: [] } },
+    }, null, 2))
+  }
+  const fixtureDependencies = options.emptyProfile === true
+    ? {}
+    : { [PLUGIN_MANAGER_FIXTURE_BUNDLE]: '0.0.0', '@xmoon76/dsh-pi-tui': '0.0.0' }
   const writeManifest = (bundles: readonly string[]): void => {
+    mkdirSync(profileDir, { recursive: true })
     writeFileSync(join(profileDir, 'package.json'), JSON.stringify({
       name: 'm3-5-pr4-fixture-profile',
       private: true,
-      dependencies: { [PLUGIN_MANAGER_FIXTURE_BUNDLE]: '0.0.0', '@xmoon76/dsh-pi-tui': '0.0.0' },
+      dependencies: fixtureDependencies,
       dsh: { profile: { bundles, patch: 'cordis.patch.yml' } },
     }, null, 2))
   }
@@ -203,6 +221,42 @@ function mountPluginManagerProfile(workRoot: string): {
   }
 }
 
+/** The location roots a real package install must never read from the
+ *  developer's machine. `TMPDIR`/`TMP`/`TEMP` stay ambient deliberately: the
+ *  test-lifecycle roots must not nest inside a previous host's disposable tree. */
+const ISOLATED_HOME_KEYS = [
+  'HOME', 'USERPROFILE', 'DSH_HOME', 'DSH_AGENTS_HOME',
+  'XDG_CONFIG_HOME', 'XDG_CACHE_HOME', 'XDG_DATA_HOME', 'XDG_STATE_HOME',
+] as const
+
+/** Point every credential/config/cache store at the fixture root. Returns the
+ *  exact restore action; the caller owns it through the test lifecycle. */
+function isolateFixtureHome(root: string): () => void {
+  const home = join(root, 'home')
+  mkdirSync(home, { recursive: true })
+  const values: Record<(typeof ISOLATED_HOME_KEYS)[number], string> = {
+    HOME: home,
+    USERPROFILE: home,
+    DSH_HOME: home,
+    DSH_AGENTS_HOME: join(home, '.agents'),
+    XDG_CONFIG_HOME: join(home, '.config'),
+    XDG_CACHE_HOME: join(home, '.cache'),
+    XDG_DATA_HOME: join(home, '.local', 'share'),
+    XDG_STATE_HOME: join(home, '.local', 'state'),
+  }
+  const previous = new Map<string, string | undefined>()
+  for (const key of ISOLATED_HOME_KEYS) {
+    previous.set(key, process.env[key])
+    process.env[key] = values[key]
+  }
+  return () => {
+    for (const [key, value] of previous) {
+      if (value === undefined) delete process.env[key]
+      else process.env[key] = value
+    }
+  }
+}
+
 /** The ordinary rc.2 Host fixture: real services, no M3 rows, no Remote composition. */
 export async function createRemoteApplicationHostFixture(
   life: TestLifecycle,
@@ -216,8 +270,22 @@ export async function createRemoteApplicationHostFixture(
      * a real `profileContext` over a real profile directory plus the real
      * `@deepseek-ai/dsh-plugin-manager` Host service. Off by default so every
      * other consumer keeps its exact previous composition.
+     *
+     * `{ emptyProfile: true }` keeps the SAME official graph but writes a
+     * profile with no installed fixture bundles, so a real `installBundle()`
+     * is the only way a package can arrive (S5 A09/A10 real-install
+     * evidence).
      */
-    readonly pluginManagerProfile?: boolean
+    readonly pluginManagerProfile?: boolean | {
+      readonly emptyProfile?: boolean
+    }
+    /**
+     * Point HOME/USERPROFILE/DSH_HOME/DSH_AGENTS_HOME and the four XDG roots at
+     * this fixture's disposable root before the composition boots. Required for
+     * a REAL pnpm install so the package store, user config and credentials
+     * never touch the developer's real home (S5 A09/A10).
+     */
+    readonly isolateHome?: boolean
     /**
      * TS8-HF1: the Host `@`-file reference provider the private
      * `piTuiFileReferences` bare route delegates. `'local'` mounts the REAL
@@ -244,6 +312,7 @@ export async function createRemoteApplicationHostFixture(
   dispose(): Promise<void>
 }> {
   const workRoot = life.tempDir('dsh-m3-4-pr1-')
+  if (options.isolateHome === true) life.defer(isolateFixtureHome(workRoot))
   const anchorDir = join(workRoot, 'anchor')
   mkdirSync(anchorDir, { recursive: true })
   const ctx = new Context()
@@ -283,8 +352,11 @@ export async function createRemoteApplicationHostFixture(
     }
     await ctx.plugin(UserQuestionService)
     await ctx.plugin(Loader)
-    if (options.pluginManagerProfile === true) {
-      pluginManager = mountPluginManagerProfile(workRoot)
+    if (options.pluginManagerProfile !== undefined && options.pluginManagerProfile !== false) {
+      pluginManager = mountPluginManagerProfile(
+        workRoot,
+        typeof options.pluginManagerProfile === 'object' ? options.pluginManagerProfile : {},
+      )
       ctx.provide('profileContext', pluginManager.profileContext as never)
       // The REAL base-owned Host service (`@deepseek-ai/dsh-base` mounts it
       // when a profile exists): the M3 additive Host runtime must REUSE it and
