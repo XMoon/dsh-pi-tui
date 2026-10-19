@@ -78,7 +78,7 @@ S4-D2 PR-D2 IMPLEMENTED / STAGE OPEN (B01–B14 Host capability qualification ov
                     launch-verified but EXTERNAL_UNVERIFIED without a native
                     credential/runtime. No D2 row is promoted by name alone — see
                     the S4-D2 ledger at the end)
-S4-D3 PR-D3 DONE  (terminal capability truth: B05/B07/B08/B09/B10/B11 now have a
+S4-D3 PR-D3 IMPLEMENTED / QUALIFICATION PENDING (terminal capability truth: B05/B07/B08/B09/B10/B11 now have a
                     SAME-test official Bundle→mounted-TuiApp L6 PASS with their
                     limits explicit; F10 upgrade guidance is DONE; the exact
                     rc.2 `deepseek-flash` route and the existing Web Search/Fetch
@@ -7408,7 +7408,7 @@ surface row.
 
 ## S4-D3 PR-D3 — terminal capability truth and TUI qualification
 
-**Stage status: DONE (local PR state; review accepted; stage-final lanes green on the frozen tree).** This stage is user-visible capability
+**Stage status: PARTIAL (review accepted; stage-final re-run pending on this tree).** This stage is user-visible capability
 truth, not a second Host implementation: it adds the bounded rc.2 Detail copy,
 v9 F10 upgrade guidance, the existing Web Search/Fetch help, the exact
 `deepseek-flash` route evidence and the six same-test Bundle→mounted-TuiApp
@@ -7447,13 +7447,14 @@ is promoted by this PR. PR merge is not stage closure; the four axes below are t
 
 ### D3 stage-final verification
 
-On the frozen delivery tree, `pnpm verify:prepush` and the CI-uncovered
+On the PRIOR frozen delivery tree, `pnpm verify:prepush` and the CI-uncovered
 delivery lanes (`compat:dsh:npm`, `compat:dsh:client-family`,
 `smoke:boundary`, `smoke:startup-strictness`, the applicable
 `smoke:remote-*` parity/closure lanes, `gate:dsh-preset-parity`,
-`smoke:s4-d2-bundles --gate` and `git diff --check`) passed. The
-published-artifact gates used the local pack output; CI on the PR HEAD remains
-the merge gate.
+`smoke:s4-d2-bundles --gate` and `git diff --check`) passed. A later
+keyboard-admission fix changed `src/**`/`test/**`, so that record is NOT
+evidence for the current tree; the re-run is pending. The published-artifact
+gates used the local pack output; CI on the PR HEAD remains the merge gate.
 
 ### D3 evidence index
 
