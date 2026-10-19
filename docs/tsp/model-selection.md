@@ -148,7 +148,7 @@ catalogue/writer.
 - Enlarged UI fonts at the wide layout, `PageUp`/`PageDown` through the client's
   control channel, physical wheel/trackpad, IME, OS focus, dark themes, terminal
   scaling, directories beyond the scripted sizes, full-profile/HMR and the Remote
-  TSP success path are `NOT_VERIFIED` unless a specific run proves them.
+  TSP success path are outside the headless contract; only a specific run may claim them.
 - **Owner-accepted limitation:** at a 400px-wide pane with an enlarged UI font
   (+25%/+50%) the client truncates the selected model/provider/effort
   information. The action remains visible and enabled; the Owner accepts the

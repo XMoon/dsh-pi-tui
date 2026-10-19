@@ -24,8 +24,8 @@ Untrusted node text (`ui.text`/`ui.md`/`ui.code`/`ui.card.head`/`ui.badge` and
 picker `label`/`detail`/`title`) uses the same display projection as PiTui
 (see [terminal-output.md](../architecture/terminal-output.md)). A structural
 node check proves the payload carries no raw control; it does not prove the
-closed-source client's own rendering, so physical GUI behavior stays
-`NOT_VERIFIED` until a pinned Tern pane is actually run.
+closed-source client's own rendering, so physical GUI behavior is not claimed
+until a pinned Tern pane is actually run.
 
 ## Product boundary
 
@@ -164,6 +164,7 @@ enough. `PROJECTION_ONLY` is not navigable state.
 - TSP transcript folding/disclosure is partial; it is not PiTui's complete
   Compact/Focus/Full model.
 - Physical GUI, IME, fonts, wheel/trackpad, theme modes and Remote TSP
-  qualification are `NOT_VERIFIED` unless a specific real-pane run proves them.
+  qualification are outside the automated contract; only a specific real-pane
+  run may claim them.
 - No Remote TSP renderer is claimed; a Remote TSP projection observer over the
   real wire remains a follow-up (see the repository handoff issue).
