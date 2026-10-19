@@ -42,6 +42,25 @@ export function compatFallbacks(dshPin) {
   return fallbacks
 }
 
+/** The single `@deepseek-ai/dsh@<target>` install target carried by a command,
+ * or null when the command names zero or multiple DSH targets. The installation
+ * gate uses this to cross-check `current.upgradeCommand` against
+ * `current.upgradeDsh`: the recommended command must install the exact version
+ * the matrix declares as the target. */
+export function dshInstallTarget(command) {
+  const targets = [...String(command).matchAll(/@deepseek-ai\/dsh@([^\s`'"]+)/gu)].map(match => match[1])
+  return targets.length === 1 ? targets[0] : null
+}
+
+/** The installation-gate cross-check: `current.upgradeCommand` must install
+ * exactly `current.upgradeDsh`. Returns an error string, or null when the pair is
+ * consistent. */
+export function matrixUpgradeCommandError(matrix = COMPAT_MATRIX) {
+  const target = dshInstallTarget(matrix.current.upgradeCommand)
+  if (target === matrix.current.upgradeDsh) return null
+  return `current.upgradeCommand must target @deepseek-ai/dsh@${matrix.current.upgradeDsh} (found ${target ?? 'no unique DSH target'})`
+}
+
 /** Every exact install guidance string the current release body must document:
  * the shipped DSH floor and TUI version, then each selected fallback row's
  * DSH/TUI pair. */

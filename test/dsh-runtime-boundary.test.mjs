@@ -4,7 +4,7 @@ import test from 'node:test'
 import { join } from 'node:path'
 import { testLifecycle } from './support/temp-lifecycle.ts'
 import { assertBoundary, resolveTarball } from '../scripts/dsh-runtime-boundary-smoke.mjs'
-import { COMPAT_MATRIX } from '../scripts/lib/dsh-compat.mjs'
+import { COMPAT_MATRIX, dshInstallTarget, matrixUpgradeCommandError } from '../scripts/lib/dsh-compat.mjs'
 
 /** The CURRENT bundle version, read the way the real smoke reads it from the
  * candidate tarball — a version bump cannot leave these fixtures stale. */
@@ -23,6 +23,27 @@ test('runtime boundary rejects explicit and discovered symlinked candidates', (t
   symlinkSync(target, candidate)
   assert.throws(() => resolveTarball(candidate), /regular file/u)
   assert.throws(() => resolveTarball(undefined, directory), /no candidate tarball/u)
+})
+
+test('the recommended upgrade command installs the exact matrix target', () => {
+  assert.equal(
+    dshInstallTarget(upgradeCommand),
+    COMPAT_MATRIX.current.upgradeDsh,
+    'current.upgradeCommand must install current.upgradeDsh',
+  )
+  assert.equal(matrixUpgradeCommandError(), null, 'the real matrix must satisfy the gate cross-check')
+
+  // Negative controls: the same check the installation gate applies must
+  // reject a different target or an ambiguous command.
+  const wrongTarget = {
+    current: { upgradeDsh: COMPAT_MATRIX.current.upgradeDsh, upgradeCommand: 'npm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty @deepseek-ai/dsh@0.2.0-rc.2' },
+  }
+  assert.match(matrixUpgradeCommandError(wrongTarget), /must target @deepseek-ai\/dsh@/u)
+
+  const ambiguous = {
+    current: { upgradeDsh: COMPAT_MATRIX.current.upgradeDsh, upgradeCommand: 'npm install -g @deepseek-ai/dsh@0.2.1-rc.2 @deepseek-ai/dsh@0.2.0-rc.2' },
+  }
+  assert.match(matrixUpgradeCommandError(ambiguous), /no unique DSH target/u)
 })
 
 test('runtime boundary accepts the recommended npm advisory notice', () => {

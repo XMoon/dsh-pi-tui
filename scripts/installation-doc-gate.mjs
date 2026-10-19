@@ -11,7 +11,7 @@
 import { readFileSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { COMPAT_MATRIX } from './lib/dsh-compat.mjs'
+import { COMPAT_MATRIX, matrixUpgradeCommandError } from './lib/dsh-compat.mjs'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 const README_FILES = [
@@ -66,6 +66,11 @@ function assertConvergedAllowLists(label, text) {
 assertConvergedAllowLists('src/dsh-compat-matrix.json current.upgradeCommand', COMPAT_MATRIX.current.upgradeCommand)
 if (allowScriptsLists(COMPAT_MATRIX.current.upgradeCommand).length !== 1) {
   console.error(`installation-doc-gate FAILED: the compat matrix upgrade command must contain exactly one --allow-scripts list`)
+  process.exit(1)
+}
+const matrixUpgradeError = matrixUpgradeCommandError()
+if (matrixUpgradeError !== null) {
+  console.error(`installation-doc-gate FAILED: ${matrixUpgradeError}`)
   process.exit(1)
 }
 const STABLE_DSH_CHANNEL = '@deepseek-ai/dsh@latest'
