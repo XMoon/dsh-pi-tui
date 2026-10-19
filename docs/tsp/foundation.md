@@ -286,23 +286,23 @@ universal/version-independent claim; a tier qualifies a claim, not a repository.
   watchdog/deferred-focus latch or automatic retries. Re-open on upstream/client
   changes or a material real symptom.
 
-## 8. Remaining unknowns and change gates
+## 8. Proof obligations and change gates
 
-The following classes remain unproven in general; a specific run may qualify a
-specific claim, never the class:
+The following classes are not established by this durable contract. Each
+requires the named evidence before a claim:
 
-| Topic | Durable state | Requirement before relying on it |
-|---|---|---|
-| Caret/editor focus on a region-root ID | UNKNOWN unless proven with valid node IDs and physical observation | Do not claim caret/editing focus from a protocol ACK or a rect |
-| Delayed `select`/`activate`/`action` after the drawing frame is replaced | UNKNOWN until a deterministic probe/negative test exists | Currentness design/negative integration test; targeted client proof if material |
-| Key change → client scroll/view-state reset | Client/shape-specific; measure before generalizing | Repeat a targeted probe for a new component shape/build |
-| Unsupported/unadvertised kind behavior | Only realizable when the source vocabulary exceeds advertised kinds | Revisit only on such a client; avoid phantom PASS |
-| Generic `reveal` / physical wheel / trackpad | NOT_VERIFIED unless the specific client/path was run | Qualify the exact consumer geometry/build independently |
-| Queued stale Focus after blocked frame coalescing | SDK-boundary class; upstream-owned | Wait for a consumable upstream fix or material regression, then requalify; no local queue replacement |
-| Client `error` diagnostics | Diagnostic surface only | Keep it a diagnostic, never a Focus retry or error-to-fatal policy |
-| Close keep semantics after an initial failure | RISK_UNPROVEN | Revisit on a real-client effect or an upstream lifecycle change |
-| Missing ACK forever | UNKNOWN; the frame pump stays blocked without ACK | No speculative ACK watchdog; re-open only with material symptom/evidence |
-| GUI/IME/fonts/wheel/Remote/full-profile | Outside headless verification | Feature-specific test or explicit Owner limitation, never retroactive PASS |
+| Class | Evidence required before claiming |
+|---|---|
+| Caret/editor focus on a region-root ID | Valid node IDs plus physical/caret observation; a protocol ACK or a node rect is not enough |
+| Delayed `select`/`activate`/`action` after the drawing frame is replaced | A deterministic currentness probe or negative integration test; targeted client proof if material |
+| Key change → client scroll/view-state reset | A targeted probe for the exact component shape/build; do not generalize from another shape |
+| Unsupported/unadvertised kind behavior | A client where the source vocabulary actually exceeds advertised kinds; avoid phantom PASS |
+| Generic `reveal`, physical wheel or trackpad | A run that exercises that exact consumer geometry/build |
+| Queued stale Focus after blocked frame coalescing | An upstream fix or a material regression reproduced through the real path; no local queue replacement |
+| Client `error` diagnostics | Keep them diagnostic; prove any retry/fatal policy separately before adding it |
+| Close keep semantics after an initial failure | A real-client effect or upstream lifecycle change; do not claim residue from protocol shape alone |
+| Missing ACK forever | Material symptom/evidence; no speculative ACK watchdog |
+| GUI/IME/fonts/wheel/Remote/full-profile | A feature-specific test or an explicit Owner limitation; never retroactive PASS |
 
 Required review trigger: SDK pin/main changes, Tern build changes, a new surface
 owner, key identity, async event admission, modal precedence, read/write

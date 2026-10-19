@@ -149,10 +149,10 @@ production default; TSP keeps the experimental opt-in described in
 
 The real-client runs are `REAL_TERN_HEADLESS`, not `REAL_TERN_GUI` and not a
 physical G8 acceptance. The unreadable disabled-Resume hover is an
-Owner-accepted client limitation; G8 visual acceptance remains `PARTIAL`.
-Physical GUI, IME, wheel, theme and physical PageUp/PageDown remain
-`NOT_VERIFIED`. Remote TSP Resume remains `UNKNOWN/NOT_VERIFIED`; no Remote
-L5/L6 success is claimed.
+Owner-accepted client limitation; G8 visual acceptance is not claimed as complete.
+Physical GUI, IME, wheel, theme and physical PageUp/PageDown are outside this
+contract and are not claimed. Remote TSP Resume is not claimed; no Remote L5/L6
+success is established.
 
 ## Regression lanes
 

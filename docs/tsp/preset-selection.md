@@ -175,7 +175,7 @@ calls the original `applyPresetSelection` / default writer.
 ## Limits and verification
 
 Physical GUI, IME, dark themes, enlarged fonts, physical wheel/trackpad, the
-Remote TSP preset path and any pane size not actually run are `NOT_VERIFIED`.
+Remote TSP preset path and any pane size not actually run are not claimed.
 A real-pane run is a headless client; it says nothing about OS input methods or
 desktop font resolution. Layout parameters measured on one client build are not
 universal no-clipping guarantees; reachability is the contract.
