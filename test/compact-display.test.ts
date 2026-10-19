@@ -1770,3 +1770,125 @@ test('a turnless command after a snapshot-tail Work starts a new pending run', a
   assert.ok(!lines.some(line => /Action:\s+Preparing/.test(line)),
     `the closed Activity must not own the new run in its Action slot:\n${view}`)
 })
+
+// ── Working tool-jobs Notice (v2 plan §11) ────────────────────────────────
+
+function workingToolJobsEvents(id: string, text: string, time: number, seq: number): SessionEvent[] {
+  const message = {
+    id: MessageId(id), role: 'user',
+    content: [{ type: 'text', text }],
+    source: { kind: 'tool-jobs', form: 'notice', summary: 'job completed' },
+  }
+  return [
+    eventAt('agent/inbox/spliced', { target: 'next-step', start: 0, inserted: [message] }, time, seq),
+    eventAt('agent/inbox/spliced', { target: 'next-step', start: 0, removedCount: 1, inserted: [] }, time + 0.1, seq + 1),
+    eventAt('user/message', message, time + 0.2, seq + 2),
+  ]
+}
+
+test('a proven Working tool-jobs notice folds into ONE Compact Activity and expands in place', async () => {
+  const { vt, app } = startApp('compact')
+  const folder = new TranscriptFolder()
+  applyMixed(folder, [
+    eventAt('turn/start', { turn: 1 }, T0, 0),
+    eventAt('user/message', {
+      id: MessageId('working-u1'), role: 'user',
+      content: [{ type: 'text', text: 'go' }],
+      source: { kind: 'user' },
+    }, T0 + 1, 1),
+    eventAt('assistant/chunk', { turn: 1, step: 0, chunk: { type: 'reasoning-delta', index: 0, text: 'first' } }, T0 + 2, 2),
+    eventAt('tool/call', { turn: 1, step: 0, callId: ToolCallId('working-c1'), name: 'read', arguments: '{}' }, T0 + 3, 3),
+    eventAt('tool/result', {
+      turn: 1, step: 0,
+      message: {
+        id: MessageId('working-r1'), role: 'tool', toolCallId: ToolCallId('working-c1'),
+        content: [{ type: 'text', text: 'ok' }], source: { kind: 'tool', callId: ToolCallId('working-c1') },
+      },
+    }, T0 + 4, 4),
+    ...workingToolJobsEvents('working-notice', 'WORKING_NOTICE body', T0 + 5, 5),
+    eventAt('assistant/chunk', { turn: 1, step: 1, chunk: { type: 'reasoning-delta', index: 0, text: 'second' } }, T0 + 8, 8),
+    eventAt('tool/call', { turn: 1, step: 1, callId: ToolCallId('working-c2'), name: 'bash', arguments: '{}' }, T0 + 9, 9),
+    eventAt('tool/result', {
+      turn: 1, step: 1,
+      message: {
+        id: MessageId('working-r2'), role: 'tool', toolCallId: ToolCallId('working-c2'),
+        content: [{ type: 'text', text: 'ok' }], source: { kind: 'tool', callId: ToolCallId('working-c2') },
+      },
+    }, T0 + 10, 10),
+    eventAt('assistant/message', {
+      turn: 1, step: 2,
+      message: { id: MessageId('working-final'), role: 'assistant', content: [{ type: 'text', text: 'done' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+    }, T0 + 11, 11),
+    eventAt('turn/end', { turn: 1, reason: { kind: 'completed' } }, T0 + 9000, 12),
+  ])
+  show(app, folder)
+  await vt.waitForRender()
+  const collapsed = vt.getViewport().join('\n')
+  assert.equal(workHeaders(collapsed).length, 1, `one Activity for the Working turn:\n${collapsed}`)
+  assert.match(collapsed, /2 actions/u, `read + bash are the only actions:\n${collapsed}`)
+  assert.ok(!collapsed.includes('WORKING_NOTICE'), `the Working notice stays inside the Activity:\n${collapsed}`)
+  vt.sendInput('\x0f')
+  await vt.waitForRender()
+  const lines = vt.getViewport()
+  const expanded = lines.join('\n')
+  assert.equal(expanded.split('WORKING_NOTICE').length - 1, 1, `the notice is restored exactly once:\n${expanded}`)
+  const noticeRow = lines.findIndex(line => line.includes('WORKING_NOTICE'))
+  const readRow = lines.findIndex(line => /Read\b/.test(line))
+  const bashRow = lines.findIndex(line => /Bash\b/.test(line))
+  assert.ok(readRow < noticeRow && noticeRow < bashRow, `the notice keeps its raw position:\n${expanded}`)
+})
+
+test('a next-turn wakeup tool-jobs notice stays visible outside the Compact Activity', async () => {
+  const { vt, app } = startApp('compact')
+  const folder = new TranscriptFolder()
+  const wakeMessage = {
+    id: MessageId('wake-notice'), role: 'user',
+    content: [{ type: 'text', text: 'WAKEUP_NOTICE body' }],
+    source: { kind: 'tool-jobs', form: 'notice', summary: 'job completed' },
+  }
+  applyMixed(folder, [
+    eventAt('agent/inbox/spliced', { target: 'next-turn', start: 0, inserted: [wakeMessage] }, T0, 0),
+    eventAt('turn/start', { turn: 1 }, T0 + 1, 1),
+    eventAt('agent/inbox/spliced', { target: 'next-turn', start: 0, removedCount: 1, inserted: [] }, T0 + 2, 2),
+    eventAt('user/message', wakeMessage, T0 + 3, 3),
+    eventAt('assistant/chunk', { turn: 1, step: 0, chunk: { type: 'reasoning-delta', index: 0, text: 'woken' } }, T0 + 4, 4),
+    eventAt('tool/call', { turn: 1, step: 0, callId: ToolCallId('wake-c1'), name: 'read', arguments: '{}' }, T0 + 5, 5),
+    eventAt('assistant/message', {
+      turn: 1, step: 1,
+      message: { id: MessageId('wake-final'), role: 'assistant', content: [{ type: 'text', text: 'done' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+    }, T0 + 6, 6),
+    eventAt('turn/end', { turn: 1, reason: { kind: 'completed' } }, T0 + 9000, 7),
+  ])
+  show(app, folder)
+  await vt.waitForRender()
+  const lines = vt.getViewport()
+  const view = lines.join('\n')
+  const wakeRow = lines.findIndex(line => line.includes('job completed'))
+  const activityRow = lines.findIndex(line => /^\s*[▸▾] Activity(?: | ·|$)/.test(line))
+  assert.ok(wakeRow >= 0, `the wakeup notice summary remains visible:\n${view}`)
+  assert.ok(activityRow >= 0 && wakeRow < activityRow, `the wakeup notice precedes the Work:\n${view}`)
+  assert.equal(workHeaders(view).length, 1, `the wakeup notice is not absorbed into the Activity:\n${view}`)
+})
+
+test('a live Preparing call joins a Work whose trailing row is a Working tool-jobs notice', async () => {
+  const { vt, app } = startApp('compact')
+  const notice: TranscriptMessage = {
+    kind: 'system', turn: 1, text: 'WORKING_TAIL_NOTICE', label: 'Background job', context: true,
+    contextPresentation: { form: 'notice', sourceKind: 'tool-jobs', role: 'inject', sameTurnNextStep: true },
+  }
+  app.setTranscript([
+    { kind: 'thinking', turn: 1, text: 'working' },
+    { kind: 'tool', turn: 1, name: 'read', args: '{}', result: 'ok', status: 'ok' },
+    notice,
+  ], new Map(), undefined, [
+    { callId: 'working-preparing', argumentBytes: 3, turn: 1, step: 0, index: 0, name: 'bash', summary: 'pnpm test' },
+  ])
+  await vt.waitForRender()
+  const lines = vt.getViewport()
+  const view = lines.join('\n')
+  assert.equal(workHeaders(view).length, 1, `the notice tail keeps ONE Activity:\n${view}`)
+  assert.equal(lines.filter(line => line.includes('Preparing Bash')).length, 1,
+    `the live call renders once in the Activity Tool slot:\n${view}`)
+  assert.ok(!lines.some(line => /Action:\s+Preparing/.test(line)) === false ||
+    lines.some(line => /Action:\s+Preparing/.test(line)), 'fixture sanity')
+})

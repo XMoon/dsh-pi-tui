@@ -522,9 +522,10 @@ container-owner vocabulary, the Context clustering/summary, the process/Work
 summary, the Compact/Focus projections and the reveal resolution, while
 `src/tui/components/transcript/**` owns the PiTui cards and rendered search
 mechanics. That structure also owns the presentation-only carriage of foldable
-Snapshot Context inside a Work span (`TranscriptWorkSpan.parts`); the rows stay
-Context, no Process/Persistence authority is added, and Compact/Full/Focus/TSP
-consume the same structure. The direction is one-way and mechanically enforced:
+Context inside a Work span (`TranscriptWorkSpan.parts`: Snapshot rows and
+proven Working `tool-jobs` Notices with durable same-turn next-step evidence);
+the rows stay Context, no Process/Persistence authority or Agent.status sampling
+is added, and Compact/Full/Focus/TSP consume the same structure. The direction is one-way and mechanically enforced:
 
 ```text
 PiTui transcript mechanics (tui/components/transcript/**)

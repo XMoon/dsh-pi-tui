@@ -8,10 +8,11 @@
  * its original foundation position before the Thought. Collapsed turns HIDE
  * process rows (a committed pre-steer answer is the explicit exception) and
  * expanded turns restore raw chronology with the final assistant held back.
- * A producer-declared Snapshot Context row follows the same rule unless it
- * shares a raw-adjacent cluster with `instructions`/`catalog`: a foldable
- * Snapshot joins the Thought instead of becoming turn foundation, while a
- * mixed ambient cluster keeps its indivisible foundation position.
+ * A foldable Context row (producer-declared Snapshot, or a `tool-jobs` Notice
+ * with durable same-turn next-step evidence) follows the same rule unless it
+ * shares a raw-adjacent cluster with `instructions`/`catalog`: it joins the
+ * Thought instead of becoming turn foundation, while a mixed ambient cluster
+ * keeps its indivisible foundation position.
  *
  * This module owns the pure policy only. The PiTui disclosure card, its width
  * formatting, its theme/icon chrome and its live duration provider live in
@@ -30,7 +31,7 @@ import type { TranscriptMessage, TurnActivity } from '../../domain/transcript/ty
 import { isSurfacedContext, isSurfacedInteractionTool } from '../../domain/transcript/semantics.ts'
 import { clusterAdjacentAmbientContext, isNoticeContext, type ContextCluster } from './context-structure.ts'
 import {
-  isFoldableSnapshotContext,
+  isFoldableWorkContext,
   projectTranscriptStructure,
   type TranscriptStructureBlock,
   type TranscriptWorkSpan,
@@ -471,16 +472,16 @@ function isFocusPersistentInputRow(message: TranscriptMessage): boolean {
  * explains why the turn started and stays BEFORE the Thought. Every other
  * persistent input/context row keeps its existing pre-Thought behavior, and
  * ordinary Process stays hidden inside the collapsed Thought (restored in
- * raw chronology when the Thought opens). A Snapshot Context row whose
- * raw-adjacent ambient cluster is foldable joins that hidden set when a real
- * Thought owner exists; without one every row must fail open. The decision
+ * raw chronology when the Thought opens). A foldable Context row (Snapshot or
+ * a proven Working tool-jobs Notice) joins that hidden set when a real Thought
+ * owner exists; without one every row must fail open. The decision
  * reads the semantic `form`, the raw adjacency and raw position, never a
  * source kind or plugin name; `Compact` and `Full` do not route through here.
  */
 type CollapsedFocusRowDisposition = 'pre-thought' | 'post-thought' | 'hidden'
 
-/** The Snapshot Context rows a collapsed Thought may carry instead of
- * surfacing as turn foundation. `thoughtOwned` is false where no Thought
+/** The foldable Context rows (Snapshot / proven Working tool-jobs Notice) a
+ * collapsed Thought may carry instead of surfacing as turn foundation. `thoughtOwned` is false where no Thought
  * block will be emitted (a truncated window without an activity) — the rows
  * then fail open instead of disappearing. `initialUserIndex` is the first
  * non-steer human row: a Snapshot positioned BEFORE it is causal foundation
@@ -503,7 +504,7 @@ function collapsedFocusRowDisposition(
   if (foldableSnapshots.thoughtOwned
     && foldableSnapshots.initialUserIndex >= 0
     && index > foldableSnapshots.initialUserIndex
-    && isFoldableSnapshotContext(message, foldableSnapshots.clusterByMember)) return 'hidden'
+    && isFoldableWorkContext(message, foldableSnapshots.clusterByMember)) return 'hidden'
   if (index >= leadBoundary && isNoticeContext(message)) return 'post-thought'
   return 'pre-thought'
 }
@@ -555,10 +556,11 @@ function leadingInjectedContextPrefixEnd(group: readonly TranscriptMessage[]): n
  * immediately follow it. Rows before it (injected context) and the opening
  * foundation (initial user plus its adjacent injected context) stay above the
  * Thought; every later row (same-turn steers included) returns to its
- * chronological position. A FOLDABLE Snapshot Context row breaks the
- * foundation: it follows the Thought (the ONE ambient form whose disclosure
- * belongs to the turn's work), while a mixed `instructions`/`catalog` +
- * Snapshot cluster keeps its indivisible foundation position. A turn whose
+ * chronological position. A FOLDABLE Context row (Snapshot or a proven
+ * Working tool-jobs Notice) breaks the foundation: it follows the Thought
+ * (these are the narrow forms whose disclosure belongs to the turn's work),
+ * while a mixed `instructions`/`catalog` + Snapshot cluster keeps its
+ * indivisible foundation position. A turn whose
  * user rows are all marked same-turn steers has no opening human prompt: the
  * boundary falls back to the end of the LEADING injected-context prefix, so an
  * inject-woken turn keeps its foundation before the Thought (never a scan of
@@ -581,7 +583,7 @@ export function focusThoughtLeadBoundary(group: readonly TranscriptMessage[]): n
   while (true) {
     const member = group[end]
     if (member === undefined || !isSurfacedContext(member)) break
-    if (isFoldableSnapshotContext(member, clusterByMember)) break
+    if (isFoldableWorkContext(member, clusterByMember)) break
     end += 1
   }
   return end

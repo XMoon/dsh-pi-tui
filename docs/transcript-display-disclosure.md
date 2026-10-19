@@ -86,10 +86,11 @@ projectTranscriptStructure()
 - `isTranscriptWorkMember()` is the single Process membership authority; the live
   Preparing ownership consumes the SAME predicate, so a settled surfaced
   interaction (question / Plan review) closes the trailing run everywhere.
-  A same-turn `form:'snapshot'` Context row may be CARRIED by a Work span, but
-  carriage is the separate display predicate `isFoldableSnapshotContext()`
-  (`isSurfacedContext` + `contextFormOf === 'snapshot'` + raw-adjacency
-  eligibility). It never becomes Process, never changes this predicate, and
+  A same-turn `form:'snapshot'` Context row or a proven Working `tool-jobs`
+  Notice may be CARRIED by a Work span, but carriage is the separate display
+  predicate `isFoldableWorkContext()` (`isFoldableSnapshotContext()` for
+  Snapshots; source-form + the durable same-turn next-step claim flag for
+  `tool-jobs`). It never becomes Process, never changes this predicate, and
   never enters Action/timing aggregates.
 - `clusterAdjacentAmbientContext()` remains the single cluster membership
   authority, computed from raw adjacency before any row is hidden. A
@@ -238,9 +239,10 @@ Compact:  User · Work(A)      · Assistant A · Work(B)      · Notice · Work(
   Attention rows always end the current span and stay visible at their
   chronological position.
 - Every surfaced Context presentation is a Work boundary **except a foldable
-  Snapshot** (2026-10-19 Owner decision): a `form:'snapshot'` singleton or a
-  snapshot-only raw-adjacent cluster is carried by the same-turn Work instead of
-  splitting it. A mixed `instructions`/`catalog` + `snapshot` cluster, a
+  Snapshot or a proven Working `tool-jobs` Notice** (2026-10-19 Owner decision):
+  a `form:'snapshot'` singleton, a snapshot-only raw-adjacent cluster, or a
+  `tool-jobs`/`notice` row with the durable same-turn `next-step` claim flag is
+  carried by the same-turn Work instead of splitting it. A mixed `instructions`/`catalog` + `snapshot` cluster, a
   `notice`/`relay`/`recall` row and every unknown form remain boundaries. The
   carried Snapshot keeps its Context row/cluster disclosure inside the expanded
   Work; a collapsed Work shows neither its header nor its body. Context never
@@ -324,7 +326,9 @@ Surfaced Context
 ```
 
 - `contextPresentation(source)` is the single parser of raw context sources
-  (`context.ts`); no other layer re-parses the source.
+  (`context.ts`); no other layer re-parses the source. The fold may add the
+  presentation-only `sameTurnNextStep` flag from its durable inbox claim chain;
+  that flag never rewrites the parsed source facts.
 - Unknown or absent forms are never coerced into the ambient role.
 - A notice shows its producer-authored `summary` below the header at normal
   brightness, wrapped naturally at render time. The TUI never invents a
@@ -431,6 +435,46 @@ the same-turn Work?":
   authority is introduced: this is a presentation-only refinement of the
   existing Owner-accepted three-preset contract.
 
+### Working `tool-jobs` Notice follows Work (v2, 2026-10-19)
+
+One non-Snapshot Context row has the same narrow carriage: a producer-declared
+`kind:'tool-jobs'` / `form:'notice'` completion Notice that the agent inbox
+delivered through **`next-step` during the same still-working turn**. This is
+a deliberately narrow exception, never a generic notice rule:
+
+- Qualification requires ALL of: surfaced Context + `sourceKind ===
+  'tool-jobs'` + `form === 'notice'` + the fold's presentation-only
+  `contextPresentation.sameTurnNextStep` flag. That flag is derived by the
+  `TranscriptFolder` from the durable `agent/inbox/spliced` insert/claim
+  identity chain (the same message id inserted into `next-step`, claimed, then
+  materialized as `user/message` in the SAME turn) — never from
+  `Agent.status`, the summary/header text, the TUI Working indicator or visual
+  adjacency.
+- A `next-turn` idle wakeup, a next-step message claimed in a DIFFERENT turn,
+  a foreign/legacy log, a missing claim, or any other producer (including
+  `subagent-settled`, relay/recall/unknown and future producers) keeps the
+  existing independent Context behavior: the notice explains why the agent was
+  woken and must stay visible.
+- The qualified Notice is carried by the same-turn Work exactly like a
+  Snapshot singleton (it can appear at the start, middle or end; it never joins
+  `ContextCluster`, which still accepts only raw-adjacent ambient rows). A Work
+  still requires at least one real Process row; a Process-free segment keeps
+  the original Notice card and never mints an Activity.
+- It stays Context: no Action, ActionStats or span timing contribution. Its
+  own Notice card header/summary/body disclosure and search reachability are
+  preserved.
+- Preset behavior matches the Snapshot carriage: Full keeps the raw chronology
+  and card; Compact folds it under the Activity and restores the card when the
+  Work opens; Focus collapsed hides a qualified mid-turn Notice inside the
+  real Thought (the opening user guard still applies: a Notice before the first
+  non-steer user, and every `next-turn` wakeup, stays foundation), and expanded
+  Focus restores it once in raw order. An unqualified Notice keeps the existing
+  pre/post-Thought rule.
+- The durable claim flag is presentation-only (`sameTurnNextStep` on
+  `TranscriptContextPresentation`); it is never written back to the Session
+  source, message, model input or Host/Remote wire. Search/click/Ctrl+O,
+  nested ancestry and capability fail-open are the same as Snapshot carriage.
+
 ### Surfaced interaction evidence (settled question / Plan review)
 
 A SETTLED surfaced-interaction tool card is not ordinary Process work: it is
@@ -505,7 +549,11 @@ class:
   the collapsed Thought and never a candidate for its Action slot); a notice
   inside the turn's opening foundation (the `thoughtLeadBoundary()` area) stays
   BEFORE the Thought because it explains why the turn started; a mid-turn relay
-  stays visible because it is external Agent-authored input. Expanded Focus
+  stays visible because it is external Agent-authored input. **v2 exception:** a
+  `tool-jobs` Notice with the durable same-turn `next-step` claim flag follows
+  the Thought instead (hidden while collapsed, restored once in raw order);
+  `next-turn` wakeups and every unqualified/foreign notice keep this existing
+  post-Thought or foundation rule. Expanded Focus
   restores every notice at its exact raw position. Compact keeps every notice
   standalone and Full keeps full chronology.
 - A search hit inside a mid-turn notice needs no Focus-root reveal and no

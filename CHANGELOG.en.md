@@ -12,9 +12,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Snapshot injections such as `time-context` no longer split one turn's Activity/Thought
   into multiple blocks.** Compact folds them with the Activity; Focus hides them inside the
   Thought and restores each exactly once in raw order when expanded; Full keeps the original
-  chronology and Context cards. A mixed `instructions`/`catalog` + Snapshot cluster and every
-  `notice`/`relay`/`recall` boundary keep their current behavior, and Snapshot rows still
-  contribute no tool count or elapsed time.
+  chronology and Context cards. A mixed `instructions`/`catalog` + Snapshot cluster keeps its
+  current behavior, and Snapshot rows still contribute no tool count or elapsed time. A
+  `tool-jobs` completion notice delivered through `next-step` during the same working turn
+  folds with the Activity/Thought too; idle `next-turn` wakeups, unproven/foreign notices and
+  `relay`/`recall` Context remain independent.
 
 ### Fixed
 

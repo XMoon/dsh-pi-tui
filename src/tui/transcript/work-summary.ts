@@ -76,8 +76,8 @@ export function summarizeWorkSpan(span: TranscriptWorkSpan): CompactWorkSummary 
     // Span-local wall timing from the member's OWN sidecar evidence
     // (post-F6 plan §12.2/§12.12): point rows simply have
     // start === end; members without evidence contribute nothing. A carried
-    // Snapshot Context row is NOT Process evidence: its point timing must
-    // never widen the Activity duration.
+    // Context row (Snapshot / Working tool-jobs Notice) is NOT Process
+    // evidence: its point timing must never widen the Activity duration.
     const memberTiming = isTranscriptWorkMember(member) ? transcriptTimingOf(member) : undefined
     if (memberTiming !== undefined) {
       startedAt = startedAt === undefined ? memberTiming.startedAt : Math.min(startedAt, memberTiming.startedAt)

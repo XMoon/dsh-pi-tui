@@ -11,8 +11,10 @@
 
 - **`time-context` 等 Snapshot 注入不再把同一回合的 Activity/Thought 切成多块**：Compact 中
   它们随 Activity 折叠，Focus 中随 Thought 隐藏并在展开后按原始顺序恢复一次；Full 保持原有
-  顺序与 Context 卡片。`instructions`/`catalog` 与 Snapshot 组成的混合 cluster、以及
-  `notice`/`relay`/`recall` 等边界保持原状，Snapshot 仍不计入工具数量或耗时。
+  顺序与 Context 卡片。`instructions`/`catalog` 与 Snapshot 组成的混合 cluster 保持原状，
+  Snapshot 仍不计入工具数量或耗时。同一回合工作中经 `next-step` 投递的后台任务完成通知
+  （`tool-jobs`）也随 Activity/Thought 折叠；空闲唤醒（`next-turn`）、无法证明投递路径的
+  通知，以及 `relay`/`recall` 等其他 Context 仍独立可见。
 
 ### 修复
 

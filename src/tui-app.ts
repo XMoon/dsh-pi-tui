@@ -264,7 +264,7 @@ import { projectFocus, type FocusProjectedBlock } from './tui/transcript/focus-p
 import { compactActionPresentation, compactActionSignature, compactActionStatsSignature, compactPreparingSummary, type CompactActionPresentation } from './tui/components/transcript/compact-process-preview.ts'
 import type { CompactActionSource, CompactActionStats } from './tui/transcript/process-summary.ts'
 import { projectCompact } from './tui/transcript/compact-projection.ts'
-import { clusterByMemberOf, isFoldableSnapshotContext, projectTranscriptStructure, workByMemberOf, type TranscriptStructureBlock, type TranscriptWorkSpan } from './tui/transcript/structure.ts'
+import { clusterByMemberOf, isFoldableWorkContext, projectTranscriptStructure, workByMemberOf, type TranscriptStructureBlock, type TranscriptWorkSpan } from './tui/transcript/structure.ts'
 import { transcriptRevealAncestryFor, transcriptRevealPathFor, type TranscriptRevealAncestry } from './tui/transcript/reveal.ts'
 import { deepestCommonTranscriptContainer, sameTranscriptContainerPath, type TranscriptContainerOwner, type TranscriptContainerPath } from './tui/transcript/container-owner.ts'
 import { CompactWorkComponent } from './tui/components/transcript/compact-work.ts'
@@ -8841,9 +8841,9 @@ export class TuiApp {
   /** Whether one per-card override row is MATERIALIZED on the current
    * projection: a current-window top-level row, an OPEN Work member, or a row
    * the Focus projection actually emits (compaction always; a Focus secondary
-   * only inside an expanded root; a foldable Snapshot only inside an expanded
-   * Thought root — a mid-turn notice renders as a post-Thought row, never
-   * hidden). */
+   * only inside an expanded root; a foldable Context row only inside an
+   * expanded Thought root — an unqualified mid-turn notice renders as a
+   * post-Thought row, never hidden). */
   private messageRowMaterialized(message: TranscriptMessage, projectionExpanded: ReadonlySet<number>): boolean {
     // A local (non-session) card — e.g. a `!`/`!!` shell card — is always
     // appended to the rendered transcript and participates in NO canonical
@@ -8878,10 +8878,10 @@ export class TuiApp {
       // Compaction cards are emitted by BOTH Focus branches (collapsed and
       // expanded), so they are always materialized in the current window.
       if (message.kind === 'compaction') return true
-      // A foldable Snapshot with a real Thought owner lives INSIDE the
-      // collapsed Thought; its own card override only materializes once the
-      // root is expanded.
-      if (isFoldableSnapshotContext(message, index.clusterByMember)
+      // A foldable Context row (Snapshot / proven Working tool-jobs Notice)
+      // with a real Thought owner lives INSIDE the collapsed Thought; its own
+      // card override only materializes once the root is expanded.
+      if (isFoldableWorkContext(message, index.clusterByMember)
         && this.turnActivities.has(message.turn)) {
         return projectionExpanded.has(message.turn)
       }
@@ -8916,6 +8916,13 @@ export class TuiApp {
     const target = this.searchRevealedMessage()
     if (target === undefined) return false
     const index = this.canonicalStructureIndex()
+    // A MATERIALIZED cluster is closed by this transaction (manual/bulk owners
+    // are cleared), and a manual Focus root full-reveals Work but NOT nested
+    // clusters. A target inside a nested cluster is therefore hidden even when
+    // its Work/root survives; revoke the reveal or it instantly reopens the
+    // cluster (a visually empty Ctrl+O press).
+    const cluster = index.clusterByMember.get(target)
+    if (cluster !== undefined && this.clusterOwnerMaterialized(cluster.owner)) return true
     const span = index.workByMember.get(target)
     if (span !== undefined) {
       // Only a MANUAL Focus root survives this collapse. A Ctrl+O-derived
@@ -8926,7 +8933,6 @@ export class TuiApp {
         && this.focusExpandedTurns.has(span.turn)
       return !rootKeepsOpen
     }
-    if (index.clusterByMember.has(target)) return true
     if (isDeliveredFilesDisclosureCandidate(target)) return this.deliveredFilesMasterCollapseHidesSearchTarget()
     // Thinking is Alt+T-owned: the master collapse does not change its state.
     if (target.kind === 'thinking') return false
@@ -10017,7 +10023,7 @@ export class TuiApp {
    * Any later standalone row is a hard boundary even when it carries no `turn`
    * (a turnless `kind:'command'`, a window summary, a Context row): the live
    * call then starts a NEW pending run rather than jumping back into the old
-   * Activity. A foldable Snapshot carried by the span keeps the run open
+   * Activity. A foldable Context row carried by the span keeps the run open
    * because it is inside the same trailing Work, not a following block. ONLY an
    * open run may absorb a live Preparing call. */
   private workRunOpenForTurn(turn: number): boolean {
