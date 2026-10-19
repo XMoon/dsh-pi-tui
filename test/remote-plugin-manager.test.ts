@@ -499,7 +499,7 @@ test('a Remote mutation result carried by a superseded Connection generation is 
   generation.set(2)
   release()
   await assert.rejects(pending, error => error instanceof PluginManagerStaleResultError
-    && /Connection generation changed/.test(error.message))
+    && /currentness context was superseded/.test(error.message))
   assert.deepEqual(remote.calls, ['setBundleEnabled'], 'the real call really ran; only its stale result was refused')
 
   // The SAME mutation on an unchanged generation still resolves normally.
