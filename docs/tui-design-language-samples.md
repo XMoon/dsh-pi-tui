@@ -2157,10 +2157,11 @@ the key actually applies.
 Method: the same isolated `DSH_HOME` (copied dev profile linking this worktree,
 with the published rc.2 B03 bundle selected for the confirmation frame); the
 worktree was rebuilt at the reviewed code snapshot; `TERM=screen-256color`,
-dark theme. A `tmux` 140×40 session opened `/plugins`, then the window was
-resized to 80×2 for the list frame; a second session opened the exact B03
-`Auto Review safety confirmation` and was resized to 80×2. ANSI is stripped
-for the record.
+dark theme. A `tmux` 140×40 session opened `/plugins`, then the window was resized to
+80×2 for the list frame; a second session opened the exact B03 `Auto Review
+safety confirmation` and was resized to 80×2; a third session opened
+`/plugins`, typed `/auto`, resized to 80×2 for the search-editing frame and
+then pressed Enter for the applied frame. ANSI is stripped for the record.
 
 ```text
 # 80×2 — Plugin Manager list: no Enter invite; Esc close stays real
@@ -2172,6 +2173,18 @@ Plugins · All                                                       5/23 enable
 # 80×2 — B03 safety confirmation: no Enter cancel; Esc cancel stays real
 Plugins · Auto Review                                               5/23 enabled
 Esc cancel
+```
+
+```text
+# 80×2 — search editing: the executable Enter apply and Esc clear are shown
+Plugins · All                                                       4/23 enabled
+Enter apply · Esc clear search
+```
+
+```text
+# 80×2 — after Enter: the search was applied and the list bar returned
+Plugins · All                                                       4/23 enabled
+/ search · i install · Tab filter · r refresh · Esc close
 ```
 
 The mounted VirtualTerminal suite covers the same rule for the list, Details

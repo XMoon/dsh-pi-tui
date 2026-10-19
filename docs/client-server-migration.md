@@ -7408,7 +7408,7 @@ surface row.
 
 ## S4-D3 PR-D3 — terminal capability truth and TUI qualification
 
-**Stage status: PARTIAL (review accepted; stage-final re-run pending on this tree).** This stage is user-visible capability
+**Stage status: PARTIAL (final review pending; stage-final re-run pending on this tree).** This stage is user-visible capability
 truth, not a second Host implementation: it adds the bounded rc.2 Detail copy,
 v9 F10 upgrade guidance, the existing Web Search/Fetch help, the exact
 `deepseek-flash` route evidence and the six same-test Bundle→mounted-TuiApp
