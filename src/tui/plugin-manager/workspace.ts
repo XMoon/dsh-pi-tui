@@ -191,6 +191,10 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
    * when its build-script risk cannot be fully shown). */
   private currentInstallActions: readonly PluginDetailAction[] = []
   private paintedConfirmActions: ReadonlySet<string> = new Set()
+  /** The action values actually painted in the LAST confirm frame, in order.
+   *  The keyboard selection indexes THIS list, so hiding the dangerous primary
+   *  (risk not fully visible) cannot leave Enter pointing at it. */
+  private paintedConfirmActionValues: readonly string[] = []
   private pressedGesture: PressedGesture | undefined
   private lastRenderWidth = -1
   private lastRenderRows = -1
@@ -578,13 +582,13 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
       return
     }
     if (matchesKey(data, 'up') || matchesKey(data, 'left')) {
-      this.confirmSelection = 0
+      this.confirmSelection = Math.max(0, this.confirmSelection - 1)
       this.bumpRevision()
       this.intents.requestRender()
       return
     }
     if (matchesKey(data, 'down') || matchesKey(data, 'right') || matchesKey(data, 'tab')) {
-      this.confirmSelection = 1
+      this.confirmSelection = Math.min(this.confirmSelection + 1, Math.max(0, this.paintedConfirmActionValues.length - 1))
       this.bumpRevision()
       this.intents.requestRender()
       return
@@ -1028,14 +1032,11 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
   }
 
   private activateConfirmSelection(): void {
-    const kind = this.controller.confirmationKind()
-    const primary = kind === undefined
-      ? undefined
-      : kind === 'remove' ? CONFIRM_ACTION.remove : CONFIRM_ACTION.autoDisable
-    const value = this.confirmSelection === 1 ? CONFIRM_ACTION.cancel : primary
+    const value = this.paintedConfirmActionValues[this.confirmSelection]
     if (value === undefined) return
     // Only the action this frame actually painted may be invoked from the
-    // keyboard; a stale/short frame does not grant a hidden Remove/Cancel.
+    // keyboard; a stale/short frame does not grant a hidden Remove/Cancel or a
+    // dangerous primary whose consequence is not fully visible.
     if (!this.frameIsCurrent() || !this.paintedConfirmActions.has(value)) return
     this.dispatchAction(value)
   }
@@ -1559,8 +1560,9 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
       ]
     }
     if (this.view === 'confirm') {
+      const hasPrimary = this.paintedConfirmActionValues.some(value => value !== CONFIRM_ACTION.cancel)
       return [
-        { text: 'Enter confirm', priority: 90 },
+        { text: hasPrimary ? 'Enter confirm' : 'Enter cancel', priority: 90 },
         ...(this.paintedConfirmScrollMax > 0 ? [{ text: 'PgUp/PgDn details', priority: 80 }] : []),
         { text: 'Esc cancel', priority: 100 },
       ]
@@ -1954,57 +1956,103 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
       : autoDisable
         ? 'Disable Auto Review?'
         : `Remove ${sanitizedPhysicalLine(name)}?`
-    const actions: PluginDetailAction[] = kind === 'remove'
-      ? [
-          { value: CONFIRM_ACTION.remove, label: 'Remove', enabled: card !== undefined, tone: 'warning' },
-          { value: CONFIRM_ACTION.cancel, label: 'Cancel', enabled: true, tone: 'normal' },
-        ]
-      : autoDisable
-        ? [
-            { value: CONFIRM_ACTION.autoDisable, label: 'Disable Auto Review', enabled: card !== undefined, tone: 'warning' },
-            { value: CONFIRM_ACTION.cancel, label: 'Cancel', enabled: true, tone: 'normal' },
-          ]
-        : [{ value: CONFIRM_ACTION.cancel, label: 'Cancel', enabled: true, tone: 'normal' }]
+    const primaryValue = kind === 'remove'
+      ? CONFIRM_ACTION.remove
+      : autoDisable ? CONFIRM_ACTION.autoDisable : undefined
+    const primary: PluginDetailAction | undefined = primaryValue === undefined
+      ? undefined
+      : {
+          value: primaryValue,
+          label: kind === 'remove' ? 'Remove' : 'Disable Auto Review',
+          // A stale card keeps the disabled primary for the controller's
+          // explicit "changed since the confirmation opened" refusal; the
+          // dangerous primary is WITHHELD only when its risk is not visible.
+          enabled: card !== undefined,
+          tone: 'warning',
+        }
     const content: string[] = []
     content.push(color.textStrong(truncateToWidth(title, plan.width, '…')))
     if (card === undefined) {
       content.push(color.error('This bundle changed since the confirmation opened. Re-open it from the list.'))
     }
-    // The Owner-frozen B03 consequence travels with BOTH destructive paths:
-    // disabling the bundle/row and removing the Auto Review profile bundle.
-    if (autoDisable || (kind === 'remove' && name === AUTO_REVIEW_BUNDLE)) {
+    // The required consequence block: every line inside it must be visible on
+    // the SAME frame that paints the dangerous primary. The Auto warning is the
+    // fixed Owner text; an ordinary remove requires its unload consequence.
+    let riskStart = -1
+    let riskEnd = -1
+    if (autoDisable) {
+      riskStart = content.length
       content.push(...wrapTextWithAnsi(AUTO_REVIEW_DISABLE_WARNING, plan.width).map(line => color.warning(line)))
-    }
-    if (kind === 'remove') {
-      content.push(...wrapTextWithAnsi(
-        'This unloads the bundle and removes the profile dependency. Installed files are removed and DSH does not reinstall it automatically.',
-        plan.width,
-      ).map(line => color.textDim(line)))
-    } else if (autoDisable) {
+      riskEnd = content.length - 1
+      // The Host teardown detail is supplemental, not part of the required
+      // consequence; it may scroll without withholding the primary.
       content.push(...wrapTextWithAnsi(
         'The official Host teardown moves existing Auto sessions to Full access; Auto Review is not a sandbox.',
         plan.width,
       ).map(line => color.textDim(line)))
+    } else if (kind === 'remove') {
+      if (name === AUTO_REVIEW_BUNDLE) {
+        riskStart = content.length
+        content.push(...wrapTextWithAnsi(AUTO_REVIEW_DISABLE_WARNING, plan.width).map(line => color.warning(line)))
+      } else {
+        riskStart = content.length
+      }
+      content.push(...wrapTextWithAnsi(
+        'This unloads the bundle and removes the profile dependency. Installed files are removed and DSH does not reinstall it automatically.',
+        plan.width,
+      ).map(line => color.textDim(line)))
+      riskEnd = content.length - 1
     }
-    // The choices stay PINNED; only the explanation scrolls when the terminal
-    // cannot show it whole (PgUp/PgDn or the wheel). A frame that cannot paint
-    // a choice publishes no target and admits no Enter for it.
-    const actionBlock = paintActions([], actions, this.confirmSelection, plan.width, false)
-    const actionRows = Math.min(actionBlock.lines.length, plan.bodyRows)
-    const contentViewport = Math.max(0, plan.bodyRows - actionRows)
-    this.paintedConfirmScrollMax = Math.max(0, content.length - contentViewport)
-    this.confirmOffset = Math.min(this.confirmOffset, this.paintedConfirmScrollMax)
-    const visibleContent = content.slice(this.confirmOffset, this.confirmOffset + contentViewport)
-    const out = padBody([...visibleContent], contentViewport, plan.width)
-    const visibleActions = actionBlock.lines.slice(0, actionRows)
+    /** Lay out the content+choices with the CURRENT offset. `riskVisible` is
+     *  evaluated only with the DANGEROUS actions still present, so hiding the
+     *  primary cannot make its own risk test pass (no oscillation). */
+    const layout = (actions: readonly PluginDetailAction[]): {
+      readonly actionBlock: ReturnType<typeof paintActions>
+      readonly actionRows: number
+      readonly contentViewport: number
+      readonly riskVisible: boolean
+    } => {
+      const actionBlock = paintActions([], actions, this.confirmSelection, plan.width, false)
+      const actionRows = Math.min(actionBlock.lines.length, plan.bodyRows)
+      const contentViewport = Math.max(0, plan.bodyRows - actionRows)
+      const riskVisible = riskStart < 0
+        || (contentViewport > 0
+          && riskStart >= this.confirmOffset
+          && riskEnd < this.confirmOffset + contentViewport)
+      return { actionBlock, actionRows, contentViewport, riskVisible }
+    }
+    const dangerous = primary === undefined ? [] : [primary]
+    let layoutResult = layout([...dangerous, { value: CONFIRM_ACTION.cancel, label: 'Cancel', enabled: true, tone: 'normal' }])
+    if (primary !== undefined && !layoutResult.riskVisible) {
+      // The dangerous action is inseparable from its consequence. Withhold it
+      // from BOTH the paint and the hit map; keep Cancel/Esc and scrolling.
+      const hint = wrapTextWithAnsi(
+        'Scroll with PgUp/PgDn to read the consequence. The dangerous action is withheld until it is fully visible.',
+        plan.width,
+      ).map(line => color.warning(line))
+      content.splice(1, 0, ...hint)
+      layoutResult = layout([{ value: CONFIRM_ACTION.cancel, label: 'Cancel', enabled: true, tone: 'normal' }])
+    }
+    this.paintedConfirmScrollMax = Math.max(0, content.length - layoutResult.contentViewport)
+    this.confirmOffset = clampOffset(this.confirmOffset, content.length, layoutResult.contentViewport)
+    const visibleContent = content.slice(this.confirmOffset, this.confirmOffset + layoutResult.contentViewport)
+    const out = padBody([...visibleContent], layoutResult.contentViewport, plan.width)
+    const visibleActions = layoutResult.actionBlock.lines.slice(0, layoutResult.actionRows)
     for (const line of visibleActions) out.push(fit(line, plan.width))
+    const previousValue = this.paintedConfirmActionValues[this.confirmSelection]
+    const values: string[] = []
     this.paintedConfirmActions = new Set()
-    for (const action of actionBlock.actionLines) {
-      const y = contentViewport + action.line
-      if (y < contentViewport || y >= contentViewport + visibleActions.length) continue
+    for (const action of layoutResult.actionBlock.actionLines) {
+      const y = layoutResult.contentViewport + action.line
+      if (y < layoutResult.contentViewport || y >= layoutResult.contentViewport + visibleActions.length) continue
+      values.push(action.value)
       this.paintedConfirmActions = new Set([...this.paintedConfirmActions, action.value])
       targets.push({ kind: 'action', value: action.value, row: bodyTop + y, startCol: 0, endCol: plan.width })
     }
+    this.paintedConfirmActionValues = values
+    const previousIndex = previousValue === undefined ? -1 : values.indexOf(previousValue)
+    const cancelIndex = values.indexOf(CONFIRM_ACTION.cancel)
+    this.confirmSelection = previousIndex >= 0 ? previousIndex : Math.max(0, cancelIndex)
     return padBody(out, plan.bodyRows, plan.width)
   }
 
