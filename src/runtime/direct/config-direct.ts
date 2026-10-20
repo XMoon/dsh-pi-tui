@@ -32,6 +32,7 @@ import {
 } from '@deepseek-ai/dsh-authorization'
 import {
   credentialOptionsFor,
+  getPath,
   providerOptionsFor,
   type ProviderCatalogEntry,
   type ProviderOption,
@@ -46,6 +47,12 @@ import {
 } from '../../domain/footer/command-trust.ts'
 import { parseFooterCustomItems, type FooterCustomItemsParseResult } from '../../domain/footer/custom-items.ts'
 import type {
+  AccountBalanceOutcome,
+  AccountClientMetadata,
+  AccountConfig,
+  AccountProfile,
+  AccountProfileOutcome,
+  AccountView,
   AuthorizationConfig,
   AuthorizationFlowEvent,
   AuthorizationFlowTarget,
@@ -58,7 +65,9 @@ import type {
   FooterCustomItemsRaw,
   PermissionConfig,
   PresetDefaultConfig,
+  ProviderConfigGuide,
   ProviderProfileConfig,
+  ProviderProfileFacts,
   SubagentAllowedModelRoute,
   SubagentModelSelectionConfig,
   TuiSettingsConfig,
@@ -135,6 +144,7 @@ export class DirectConfigPort implements ConfigPort {
   readonly providers: ProviderProfileConfig
   readonly credentials: CredentialConfig
   readonly authorization: AuthorizationConfig
+  readonly account: AccountConfig
   readonly permissions: PermissionConfig
   readonly presetDefault: PresetDefaultConfig
   readonly subagentModelSelection: SubagentModelSelectionConfig
@@ -151,6 +161,7 @@ export class DirectConfigPort implements ConfigPort {
     this.providers = new DirectProviderProfileConfig(ctx)
     this.credentials = new DirectCredentialConfig(ctx)
     this.authorization = new DirectAuthorizationConfig(ctx)
+    this.account = new DirectAccountConfig(ctx)
     this.permissions = new DirectPermissionConfig(ctx, agentFor)
     this.presetDefault = new DirectPresetDefaultConfig(ctx)
     this.subagentModelSelection = new DirectSubagentModelSelectionConfig(ctx)
@@ -327,6 +338,41 @@ export function credentialOptionOf(option: ProviderOption): CredentialProviderOp
   }
 }
 
+/** Project one settings profile value onto the detached Models facts. Only
+ * strings/booleans survive; the route's display label is the directory's own
+ * name, never a Client guess. */
+function providerFactsOf(route: string, fallbackLabel: string, profile: unknown): ProviderProfileFacts {
+  if (typeof profile !== 'object' || profile === null || Array.isArray(profile)) {
+    // A primitive/absent profile is still a real configuration fact; there are
+    // no structured fields to project.
+    return {
+      route,
+      configured: profile !== undefined,
+      displayName: fallbackLabel,
+      models: [],
+    }
+  }
+  const record = profile as Record<string, unknown>
+  const models = Array.isArray(record.models)
+    ? record.models.flatMap(entry => {
+        if (typeof entry === 'string') return [entry]
+        if (typeof entry === 'object' && entry !== null && typeof (entry as { id?: unknown }).id === 'string') {
+          return [(entry as { id: string }).id]
+        }
+        return []
+      })
+    : []
+  return {
+    route,
+    configured: true,
+    ...(typeof record.api === 'string' && record.api !== '' ? { api: record.api } : {}),
+    ...(typeof record.baseURL === 'string' && record.baseURL !== '' ? { baseURL: record.baseURL } : {}),
+    displayName: typeof record.displayName === 'string' && record.displayName !== '' ? record.displayName : fallbackLabel,
+    models,
+    ...(typeof record.apiKeyEnv === 'string' && record.apiKeyEnv !== '' ? { apiKeyEnv: record.apiKeyEnv } : {}),
+  }
+}
+
 export class DirectProviderProfileConfig implements ProviderProfileConfig {
   private readonly ctx: HostContextLike
 
@@ -417,6 +463,44 @@ export class DirectProviderProfileConfig implements ProviderProfileConfig {
         canProvisionProfile: isKeylessProfileSlot('llm-pi-ai', ['providers', route], route),
       }
     })
+  }
+
+  readProfile(route: string): ProviderProfileFacts {
+    // The deepseek official builtin is the adapter itself: there is no
+    // provider-profile slot, but the route is always addressable.
+    if (route === 'deepseek-official') {
+      return { route, configured: true, displayName: 'deepseek official', models: [] }
+    }
+    const llm = this.llm()
+    if (llm !== undefined) {
+      let entry: ProviderCatalogEntry | undefined
+      try {
+        entry = llm.listConfigurableProviders().find(candidate => candidate.provider === route)
+      } catch {
+        entry = undefined
+      }
+      if (entry !== undefined) {
+        const section = this.readSectionInternal(entry.settingsNs)
+        const profile = entry.settingsPath.length === 0 ? section : getPath(section, entry.settingsPath)
+        return providerFactsOf(route, entry.displayName, profile)
+      }
+    }
+    // The settings-only fallback (no llm directory): the conventional
+    // llm-pi-ai providers slot is the only profile location.
+    const section = this.readSectionInternal('llm-pi-ai') as
+      | { providers?: Record<string, unknown> }
+      | undefined
+    return providerFactsOf(route, route, section?.providers?.[route])
+  }
+
+  configGuide(): ProviderConfigGuide {
+    // The launcher's own profile context names the EXACT patch file it
+    // applies last; without one no path is guessed (custom/programmatic
+    // compositions have no durable profile file).
+    const profile = this.ctx.get('profileContext') as { patchPath?: unknown } | undefined
+    return typeof profile?.patchPath === 'string' && profile.patchPath !== ''
+      ? { profilePatchPath: profile.patchPath }
+      : {}
   }
 
   async writeProfile(route: string, profile: Record<string, unknown>): Promise<void> {
@@ -892,6 +976,210 @@ export class DirectAuthorizationConfig implements AuthorizationConfig {
       }
     }
   }
+}
+
+/** The structural DeepSeek Account host service (the official
+ * `DeepSeekAccount` abstract class's public surface). */
+export interface DeepSeekAccountServiceLike {
+  getState(): Promise<unknown>
+  getProfile(client: AccountClientMetadata): Promise<unknown>
+  getBalance(client: AccountClientMetadata): Promise<unknown>
+  watch(signal: AbortSignal, includeIdentityChanges?: boolean): AsyncIterable<unknown>
+  startSignIn(client: AccountClientMetadata, callbackOrigin: string, loginSource: 'web' | 'desktop'): Promise<unknown>
+  cancelSignIn(id: string): Promise<unknown>
+  signOut(client: AccountClientMetadata): Promise<unknown>
+}
+
+/** The structural Host webserver surface the account adapter needs. */
+export interface WebServerServiceLike {
+  getOrigin(): string
+}
+
+/** The Direct DeepSeek Account adapter (`ctx.deepseekAccount` + the official
+ * `ctx.webServer` callback listener). Every DTO is a detached copy: no token,
+ * grant payload, PKCE value, PlatformSession or service object crosses the
+ * port. The callback origin is ALWAYS the Host listener's own bound loopback
+ * root — a Client never supplies one. */
+export class DirectAccountConfig implements AccountConfig {
+  private readonly ctx: HostContextLike
+
+  constructor(ctx: HostContextLike) {
+    this.ctx = ctx
+  }
+
+  private account(): DeepSeekAccountServiceLike | undefined {
+    return this.ctx.get('deepseekAccount') as DeepSeekAccountServiceLike | undefined
+  }
+
+  available(): boolean {
+    return this.account() !== undefined
+  }
+
+  async getState(): Promise<AccountView> {
+    const account = this.account()
+    if (account === undefined) throw new Error('DeepSeek Account service unavailable')
+    return accountViewOf(await account.getState())
+  }
+
+  async getProfile(client: AccountClientMetadata): Promise<AccountProfileOutcome> {
+    const account = this.account()
+    if (account === undefined) throw new Error('DeepSeek Account service unavailable')
+    const outcome = await account.getProfile({ ...client })
+    if (outcome === null) return null
+    const value = outcome as { status?: unknown; value?: unknown }
+    if (value.status !== 'ready') return { status: 'failed' }
+    return { status: 'ready', value: accountProfileOf(value.value) }
+  }
+
+  async getBalance(client: AccountClientMetadata): Promise<AccountBalanceOutcome> {
+    const account = this.account()
+    if (account === undefined) throw new Error('DeepSeek Account service unavailable')
+    const outcome = await account.getBalance({ ...client })
+    if (outcome === null) return null
+    const value = outcome as { status?: unknown; value?: unknown; bonusWallets?: unknown }
+    if (value.status !== 'ready') return { status: 'failed' }
+    return {
+      status: 'ready',
+      value: walletListOf(value.value),
+      bonusWallets: walletListOf(value.bonusWallets),
+    }
+  }
+
+  watch(signal: AbortSignal): AsyncIterable<AccountView> {
+    const account = this.account()
+    if (account === undefined) {
+      // No service: an EMPTY subscription rather than a fabricated state.
+      return (async function* empty(): AsyncGenerator<AccountView> {})()
+    }
+    const source = account.watch(signal)
+    return (async function* projected(): AsyncGenerator<AccountView> {
+      const iterator = source[Symbol.asyncIterator]()
+      try {
+        for (;;) {
+          const next = await iterator.next()
+          if (next.done === true) return
+          yield accountViewOf(next.value)
+        }
+      } finally {
+        // Ending the signal is the only cancellation (never cancelSignIn):
+        // the official iterator owns its own listener release.
+        await iterator.return?.(undefined)
+      }
+    })()
+  }
+
+  getCallbackOrigin(): string | undefined {
+    const webServer = this.ctx.get('webServer') as WebServerServiceLike | undefined
+    if (webServer === undefined) return undefined
+    let origin: string
+    try {
+      origin = webServer.getOrigin()
+    } catch {
+      // Not bound (or not URL-expressible): the capability is unavailable.
+      return undefined
+    }
+    let url: URL
+    try {
+      url = new URL(origin)
+    } catch {
+      return undefined
+    }
+    // The account callback contract is a browser-accessible LOOPBACK HTTP
+    // origin without a path/query/fragment. Anything else is refused rather
+    // than forwarded to the Host.
+    if (url.protocol !== 'http:' || url.pathname !== '/' || url.search !== '' || url.hash !== '') return undefined
+    if (!isLoopbackUrlHost(url.hostname)) return undefined
+    return url.origin
+  }
+
+  async startSignIn(client: AccountClientMetadata): Promise<AccountView> {
+    const account = this.account()
+    if (account === undefined) throw new Error('DeepSeek Account service unavailable')
+    const callbackOrigin = this.getCallbackOrigin()
+    if (callbackOrigin === undefined) throw new Error('the Host browser callback listener is unavailable')
+    // `web` is the only login source a TUI may present (never Desktop).
+    return accountViewOf(await account.startSignIn({ ...client }, callbackOrigin, 'web'))
+  }
+
+  async cancelSignIn(id: string): Promise<AccountView> {
+    const account = this.account()
+    if (account === undefined) throw new Error('DeepSeek Account service unavailable')
+    return accountViewOf(await account.cancelSignIn(id))
+  }
+
+  async signOut(client: AccountClientMetadata): Promise<AccountView> {
+    const account = this.account()
+    if (account === undefined) throw new Error('DeepSeek Account service unavailable')
+    return accountViewOf(await account.signOut({ ...client }))
+  }
+
+  hasRunningAccountTasks(): boolean {
+    // Mirrors the official `isRunningAccountTask` predicate: a running Agent
+    // whose latest bound request used the account provider. The predicate is
+    // kept structural so this adapter never imports (or duplicates) a Host
+    // package; the Host's own signed-out listener owns the actual cancel.
+    const agents = this.ctx.get('agents') as { list?(): readonly unknown[] } | undefined
+    if (typeof agents?.list !== 'function') return false
+    return agents.list().some(candidate => {
+      const agent = candidate as {
+        readonly status?: unknown
+        readonly session?: { requestContext?(): unknown }
+      }
+      if (agent.status !== 'running') return false
+      const context = agent.session?.requestContext?.()
+      return typeof context === 'object' && context !== null
+        && (context as { provider?: unknown }).provider === 'deepseek-account'
+    })
+  }
+}
+
+/** Whether one URL hostname names the local loopback authority. */
+function isLoopbackUrlHost(hostname: string): boolean {
+  if (hostname === 'localhost') return true
+  if (hostname === '::1' || hostname === '[::1]') return true
+  const ipv4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(hostname)
+  if (ipv4 === null) return false
+  const parts = ipv4.slice(1).map(part => Number(part))
+  return parts.every(part => part <= 255) && parts[0] === 127
+}
+
+/** A detached account state copy (no Host record is aliased). */
+function accountViewOf(value: unknown): AccountView {
+  const view = value as AccountView
+  const attempt = view.attempt
+  return {
+    status: view.status,
+    links: { usageUrl: view.links.usageUrl, topUpUrl: view.links.topUpUrl },
+    attempt: attempt === null
+      ? null
+      : {
+          id: attempt.id,
+          phase: attempt.phase,
+          ...(attempt.authorizeUrl === undefined ? {} : { authorizeUrl: attempt.authorizeUrl }),
+          ...(attempt.expiresAt === undefined ? {} : { expiresAt: attempt.expiresAt }),
+          ...(attempt.errorCode === undefined ? {} : { errorCode: attempt.errorCode }),
+        },
+  }
+}
+
+/** A detached profile copy. */
+function accountProfileOf(value: unknown): AccountProfile {
+  const profile = value as AccountProfile
+  return {
+    id: profile.id,
+    name: profile.name,
+    contact: profile.contact,
+    ...(profile.avatarUrl === undefined ? {} : { avatarUrl: profile.avatarUrl }),
+  }
+}
+
+/** A detached wallet list with the decimal strings retained verbatim. */
+function walletListOf(value: unknown): readonly import('../config-port.ts').AccountWallet[] {
+  if (!Array.isArray(value)) return []
+  return value.map(entry => {
+    const wallet = entry as { currency: string; balance: string }
+    return { currency: wallet.currency, balance: wallet.balance }
+  })
 }
 
 /** The Direct permission config (`ctx.permissionPresets` +

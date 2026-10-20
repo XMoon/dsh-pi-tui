@@ -1,649 +1,152 @@
 /**
- * Headless tests for the /login and /logout credential surface: the pure
- * target resolution (deepseek official + llm-pi-ai provider routes keyed by
- * their apiKeyEnv refs) and the handler paths that set/unset through the
- * credentials service. The key-entry question dialog is stubbed (the
- * user-types-a-key flow itself lives in question.ts); the llm-pi-ai section
- * read is driven through a fake settings service.
+ * `/login` / `/logout` in Phase 3C / C2-MA.
+ *
+ * The commands are navigation only: they resolve the typed argument through
+ * the shared Auth target resolver and open the Settings workspace at the
+ * Models/Account destination. The credential writes are exercised in
+ * `models-workspace.test.ts` and the Direct integration suite.
+ *
  * @module @xmoon76/dsh-pi-tui/login-credentials.test
  */
 
 import assert from 'node:assert/strict'
-import { createClientCommandRegistry } from '../src/app/command/client-command-registry.ts'
-import { parseCommand } from '@deepseek-ai/dsh-commands'
-import { afterEach, test } from 'node:test'
-import { Context } from '@deepseek-ai/cordis'
-import type { Agent } from '@deepseek-ai/dsh-agent'
+import { test } from 'node:test'
 import type { CommandInvocation } from '@deepseek-ai/dsh-commands'
-import { CommandId } from '@deepseek-ai/dsh-commands'
+import { createAuthCommands } from '../src/tui/commands/auth.ts'
 import {
-  registerTuiCommands,
-  type TuiCommandRunner,
-} from '../src/commands.ts'
-import { credentialOptionsFor, resolveCredentialArg } from '../src/domain/catalog/provider.ts'
-import { createDiag } from '../src/runtime/process/diagnostics.ts'
-import { TuiApp } from '../src/tui-app.ts'
-import { DraftImageStore } from '../src/client/media/image/draft-store.ts'
-import { VirtualTerminal } from './virtual-terminal.ts'
-import { sessionScopeFacts } from './session-scope-facts.ts'
-import { DirectCatalogPort } from '../src/runtime/direct/catalog-direct.ts'
-import { DirectConfigPort } from '../src/runtime/direct/config-direct.ts'
-import { DirectHostFilePort } from '../src/runtime/direct/host-file-direct.ts'
-import { registerTuiCommandsWithDirectSeams } from './support/register-tui-commands.ts'
+  classifyCredentialArg,
+  credentialOptionsFor,
+  resolveCredentialArg,
+} from '../src/domain/catalog/provider.ts'
+import type { AuthDestination } from '../src/app/command/credential-workflow.ts'
+import type { AuthorizationFlowTarget, CredentialProviderOption } from '../src/runtime/config-port.ts'
+import type { RegisterOne } from '../src/commands.ts'
 
-
-/** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file
- * is disposed after each test — the process slot (the vendored fork
- * keybindings are process-global) is released only by the FINAL dispose,
- * never by stop() (see src/tui/process-slot.ts). */
-const startedApps = new Set<TuiApp>()
-afterEach(() => {
-  for (const app of [...startedApps]) {
-    startedApps.delete(app)
-    if (app.isDisposed()) continue
-    try { app.dispose() } catch {}
-  }
-})
-
-// themeOptOut() skips terminal queries under NO_COLOR / FORCE_COLOR=0 /
-// CI=true — clear all three so the render paths under test stay live.
-process.env.NO_COLOR = ''
-process.env.FORCE_COLOR = ''
-process.env.CI = ''
-
-/** The llm-pi-ai settings section the adapter would register. */
 const LLM_PI_AI_SECTION = {
   providers: {
     openai: { apiKeyEnv: 'OPENAI_API_KEY' },
     deepseek: { apiKeyEnv: 'DEEPSEEK_API_KEY' },
     acme: { apiKeyEnv: 'ACME_GATEWAY_API_KEY' },
-    // A route that never names a credential (provider-native discovery).
     anthropic: { apiKeyEnv: undefined },
   },
 }
 
-/** A fake credentials service recording every set/unset and serving the
- * rc.1 record enumeration /logout's picker reads. */
-function fakeCredentials(options: { failSet?: boolean; failListRecords?: boolean } = {}) {
-  const sets: string[] = []
-  const unsets: string[] = []
-  const deletes: string[] = []
-  const records: { key: string; kind?: string }[] = []
-  return {
-    sets,
-    unsets,
-    deletes,
-    records,
-    service: {
-      set: async (ref: string, key: string): Promise<void> => {
-        if (options.failSet === true) throw new Error('ref is shadowed read-only by the environment')
-        sets.push(`${ref}=${key}`)
-      },
-      unset: async (ref: string): Promise<void> => { unsets.push(ref) },
-      describe: async (ref: string): Promise<{ configured: boolean; source?: string }> => ({ configured: true }),
-      listRecords: async (): Promise<{ key: string; kind?: string }[]> => {
-        if (options.failListRecords === true) {
-          throw new Error('the Remote credentials backend cannot enumerate stored credential records')
-        }
-        return [...records]
-      },
-      deleteRecord: async (key: string): Promise<void> => { deletes.push(key) },
-    },
-  }
-}
+const OPTIONS: readonly CredentialProviderOption[] = [
+  { route: 'deepseek-official', label: 'deepseek official', ref: 'DEEPSEEK_API_KEY', configured: true, declared: false, namesCredential: true, group: 'configured', canProvisionProfile: false },
+  { route: 'openai', label: 'openai', ref: 'OPENAI_API_KEY', configured: true, declared: false, namesCredential: true, group: 'configured', canProvisionProfile: true },
+  { route: 'acme', label: 'acme', ref: 'ACME_GATEWAY_API_KEY', configured: true, declared: false, namesCredential: true, group: 'configured', canProvisionProfile: true },
+  { route: 'anthropic', label: 'anthropic', ref: 'ANTHROPIC_API_KEY', configured: true, declared: false, namesCredential: false, group: 'configured', canProvisionProfile: true },
+]
 
-/** A fake SettingsForms surface serving the llm-pi-ai form descriptor,
- * recording writes. */
-function fakeSettings() {
-  const mutations: { ns: string; ops: unknown[] }[] = []
-  return {
-    mutations,
-    service: {
-      describe: () => [{ ns: 'llm-pi-ai', value: LLM_PI_AI_SECTION, user: LLM_PI_AI_SECTION, revision: 2 }],
-      mutate: async (ns: string, ops: unknown[]): Promise<void> => { mutations.push({ ns, ops }) },
-    },
-  }
-}
+const TARGETS: readonly AuthorizationFlowTarget[] = [
+  { kind: 'authorization', key: 'llm-pi-ai/anthropic', route: 'anthropic', label: 'Anthropic', methods: [{ id: 'oauth', label: 'OAuth' }], inFlight: false },
+  { kind: 'authorization', key: 'deepseek-account-platform/default', label: 'DeepSeek', methods: [{ id: 'browser', label: 'DeepSeek' }], inFlight: false },
+]
 
-/** A stub runner with the same surface preset-command.test.ts uses. */
-function stubRunner(ctx: Context, app: TuiApp): TuiCommandRunner {
-  return {
-    ctx,
-    app,
-    diag: createDiag({ filePath: undefined, stderrLevel: 'off' }),
-    ...sessionScopeFacts(() => undefined, () => 0),
-    currentSessionId: undefined,
-    ensureSession: async () => {},
-    get selected() { return { current: undefined, assembled: undefined, saveSelection: async () => {} } },
-    defaultSelection: () => undefined,
-    defaultIntent: undefined,
-    setDefaultIntent: () => {},
-    defaultIntentRecord: undefined,
-    settleIntent: () => {},
-    tuiSettings: undefined,
-    applyFooterSettings: () => {},
-    agents: {} as never,
-    sessionReader: {
-      list: async () => [],
-      search: async () => ({ items: [], hasMore: false }),
-      projectionBatch: async () => new Map(), blank: () => undefined, measureContext: () => undefined,
-      turnOutline: () => undefined,
-      sessionStatus: () => undefined,
+function authCommands() {
+  const definitions = new Map<string, (invocation: CommandInvocation) => unknown>()
+  const opened: AuthDestination[] = []
+  const commands = createAuthCommands({
+    runner: {
+      config: {
+        providers: {
+          available: () => true,
+          listCredentialOptions: () => OPTIONS,
+          readProfile: (route: string) => ({ route, configured: true, models: [] }),
+          configGuide: () => ({}),
+          writeProfile: async () => {},
+          writeKeylessProfile: async () => ({ kind: 'written' }),
+        },
+        authorization: {
+          available: () => true,
+          listTargets: () => TARGETS,
+          begin: async () => ({ kind: 'unavailable' }),
+          onEvent: () => () => {},
+          respond: async () => {},
+          cancel: async () => {},
+        },
+        account: { available: () => true },
+      } as never,
     },
-    catalog: new DirectCatalogPort(ctx as never, () => undefined),
-    config: new DirectConfigPort(ctx as never, undefined, () => undefined),
-    commandRegistry: ctx.get('commands') as import('../src/commands.ts').CommandRegistryLike | undefined,
-    clientCommands: createClientCommandRegistry(parseCommand),
-    hostFile: new DirectHostFilePort(() => undefined),
-    hostShellCompletion: true,
-    transcriptExportAvailable: true,
-    interaction: {
-      questions: {
-        onRequest: () => true,
-        subscribe: () => undefined,
-        snapshot: () => undefined,
-        claimTimedWait: async () => undefined,
-        answerContinued: async () => 'not-continued' as const,
-      },
-      onApprovalRequest: () => {},
-      setApprovalPolicy: () => true,
+    registerOne: ((definition: { name: string; handler: (invocation: CommandInvocation) => unknown }) => {
+      definitions.set(definition.name, definition.handler)
+      return () => {}
+    }) as unknown as RegisterOne,
+    openAuthWorkspace: destination => {
+      if (destination.kind === 'error') return { kind: 'error', text: destination.message }
+      opened.push(destination)
+      return { kind: 'success' }
     },
-    sessionWriter: {
-      prompt: async () => ({ kind: 'committed' as const, value: undefined }),
-      updateQueue: async () => ({ kind: 'committed' as const, value: undefined }),
-      cancel: async () => ({ kind: 'committed' as const, value: undefined }),
-      rename: async (_sessionId: string, title: string) => ({ kind: 'committed' as const, value: { title } }),
-      refreshTitle: async () => ({ kind: 'ok' as const, title: undefined }),
-    },
-    cwd: '/ws',
-    sessionCwd: () => '/ws',
-    imageStore: new DraftImageStore(),
-    copyToClipboard: async () => true,
-    imageLimits: () => undefined,
-    insertIntoEditor: () => {},
-    prepareDraftMessage: async (text) => ({ role: 'user', id: `u:${text}`, content: [{ type: 'text', text }], source: { kind: 'user' } }) as never,
-    signal: new AbortController().signal,
-    switchSession: async () => undefined,
-    transitionTo: async <T>(steps: { target?: { id: string; header?: { cwd?: string } }; prepare?: () => Promise<void> | void; create: () => Promise<T> }) => {
-      await steps.prepare?.()
-      return { ok: true, next: await steps.create() }
-    },
-    currentPreset: () => undefined,
-    get pendingPreset() { return undefined },
-    set pendingPreset(_id: string | undefined) {},
-    get effectivePresetId() { return undefined },
-    awaitPendingDefaultWrite: async () => {},
-    trackDefaultWrite: () => {},
-    get defaultIntentOutcome() { return undefined },
-    setModelSelectionPending: () => {},
-    reconcileDefaultIntent: () => {},
-    sessionBlank: () => undefined,
-    refreshStatus: () => {},
-    progressUpdatesState: { mode: 'milestones' }, responseStyleState: { style: 'default' }, gitAttributionState: { mode: 'off' },
-    focusEnabled: () => false,
-    setFocusMode: () => {},
-    setNotificationMode: () => {},
-    setTerminalProgressMode: () => {}, setNotificationMethod: () => {},
-    updateWelcomeCard: () => {},
-    openJobView: () => {},
-    openTasksBrowser: () => {}, openPluginManager: () => {}, createPluginManagerPage: () => undefined,
-    openRewindPicker: () => {},
-    sessionTransitionPending: () => false,
-    withSessionTransition: async <T>(task: () => T | Promise<T>) => task(),
-    withWriter: async <T>(_scope: unknown, task: () => T | Promise<T>) => task(),
-    withPromptAdmission: async <T>(_agent: unknown, _line: string, task: () => T | Promise<T>) => task(),
-    enterView: async () => {},
-    requestExit: () => {},
-    extensions: undefined,
-    exit: () => {},
+  })
+  commands.registerLogin()
+  commands.registerLogout()
+  const invoke = async (name: string, rawInput: string): Promise<unknown> => {
+    const handler = definitions.get(name)
+    assert.ok(handler, `/${name} must be registered`)
+    return handler({ rawInput } as CommandInvocation)
   }
-}
-
-function invoke(rawInput: string): CommandInvocation {
-  return {
-    commandId: CommandId('cmd-test-1'),
-    agent: undefined as unknown as Agent,
-    rawInput,
-    attachments: [],
-    signal: new AbortController().signal,
-  }
-}
-
-/** Register the TUI commands and return the /login and /logout handlers.
- * `withLlmpiAi: false` omits the settings service, so /login sees only the
- * official deepseek target (the no-settings degradation path).
- * `questions` replaces the key-entry question stub with a full answer list
- * (used by the add-provider wizard tests).
- * `llm` provides a fake llm service with a configurable-provider directory. */
-function setup(options: {
-  key?: string
-  pick?: (items: readonly { value: string; label?: string }[]) => string
-  withLlmpiAi?: boolean
-  failSet?: boolean
-  /** A backend that cannot enumerate stored credential records (Remote rc.2). */
-  failListRecords?: boolean
-  questions?: () => { id: string; selected: string[]; custom?: string }[]
-  llm?: ReturnType<typeof fakeLlm>
-} = {}) {
-  const ctx = new Context()
-  const vt = new VirtualTerminal(100, 24)
-  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
-  app.start()
-  startedApps.add(app)
-  const commands = {
-    defs: [] as { name: string; handler?: unknown }[],
-    service: {
-      register: (def: { name: string; handler?: unknown }): (() => void) => { commands.defs.push(def); return () => {} },
-      list: () => [{ name: 'builtin', description: 'a builtin', input: { hint: '' } }],
-      find: () => undefined,
-      execute: async () => undefined,
-    },
-  }
-  ctx.provide('commands', commands.service as never)
-  const credentials = fakeCredentials({ failSet: options.failSet, failListRecords: options.failListRecords })
-  ctx.provide('credentials', credentials.service as never)
-  let settings: ReturnType<typeof fakeSettings> | undefined
-  if (options.withLlmpiAi !== false) {
-    settings = fakeSettings()
-    ctx.provide('settings', settings.service as never)
-  }
-  if (options.llm !== undefined) {
-    ctx.provide('llm', options.llm.service as never)
-  }
-  const runner = stubRunner(ctx, app)
-  registerTuiCommandsWithDirectSeams(runner)
-  // Stub the interactive surfaces: the key-entry question returns the fixed
-  // key; the credential picker resolves to the stub's choice.
-  app.askQuestions = async () => (options.questions?.() ?? [
-    { id: 'key', selected: [], custom: options.key ?? 'sk-test' },
-  ]) as never
-  const pickerRows: { value: string; label?: string; group?: string }[] = []
-  app.openPicker = ((items: readonly { value: string; label?: string; group?: string }[], onSelect: (value: string) => void) => {
-    pickerRows.push(...items.map(item => ({ ...item })))
-    onSelect((options.pick ?? ((rows) => rows[0]!.value))(items))
-    return { close: () => {}, setItems: () => {} }
-  }) as never
-  const login = commands.defs.find(entry => entry.name === 'login')
-  const logout = commands.defs.find(entry => entry.name === 'logout')
-  assert.ok(login?.handler !== undefined, 'login handler missing')
-  assert.ok(logout?.handler !== undefined, 'logout handler missing')
-  const run = async <T>(def: { handler?: unknown }, rawInput: string): Promise<T> =>
-    (def!.handler as (inv: CommandInvocation) => Promise<T>)(invoke(rawInput))
-  return { app, credentials, settings, llm: options.llm, signal: runner.signal, pickerRows, run, login, logout, runnerConfig: runner.config }
+  return { invoke, opened }
 }
 
 test('credentialOptionsFor lists deepseek official plus deduped llm-pi-ai routes', () => {
   const options = credentialOptionsFor(LLM_PI_AI_SECTION.providers)
-  assert.deepEqual(options, [
-    { label: 'deepseek official', ref: 'DEEPSEEK_API_KEY' },
-    { label: 'openai', ref: 'OPENAI_API_KEY' },
-    { label: 'acme', ref: 'ACME_GATEWAY_API_KEY' },
-  ])
-  // The deepseek route's ref is already the official ref: deduped away.
-  assert.equal(options.filter(option => option.ref === 'DEEPSEEK_API_KEY').length, 1)
-  // No llm-pi-ai section: only the official target.
-  assert.deepEqual(credentialOptionsFor(undefined), [
-    { label: 'deepseek official', ref: 'DEEPSEEK_API_KEY' },
+  assert.deepEqual(options.map(option => option.ref), [
+    'DEEPSEEK_API_KEY',
+    'OPENAI_API_KEY',
+    'ACME_GATEWAY_API_KEY',
   ])
 })
 
-test('resolveCredentialArg matches routes case-insensitively, then env-var names', () => {
-  const options = credentialOptionsFor(LLM_PI_AI_SECTION.providers)
-  assert.equal(resolveCredentialArg('acme', options), 'ACME_GATEWAY_API_KEY')
-  assert.equal(resolveCredentialArg('AcMe', options), 'ACME_GATEWAY_API_KEY')
-  assert.equal(resolveCredentialArg('deepseek', options), 'DEEPSEEK_API_KEY')
-  // An env-var-looking name not in the options is used verbatim, uppercased
-  // (the old escape hatch for arbitrary credential refs).
-  assert.equal(resolveCredentialArg('OPENAI_API_KEY', options), 'OPENAI_API_KEY')
-  assert.equal(resolveCredentialArg('MY_CUSTOM_KEY', options), 'MY_CUSTOM_KEY')
-  // Lowercase env-var-looking names are uppercased too (old behavior).
-  assert.equal(resolveCredentialArg('my_custom_key', options), 'MY_CUSTOM_KEY')
-  // Unknown words are rejected.
-  assert.equal(resolveCredentialArg('no-such-route', options), undefined)
-  assert.equal(resolveCredentialArg('', options), undefined)
+test('classifyCredentialArg distinguishes a route from a literal reference', () => {
+  assert.deepEqual(classifyCredentialArg('acme', OPTIONS), { kind: 'route', option: OPTIONS[2] })
+  assert.deepEqual(classifyCredentialArg('ACME_GATEWAY_API_KEY', OPTIONS), { kind: 'ref', ref: 'ACME_GATEWAY_API_KEY' })
+  assert.deepEqual(classifyCredentialArg('novel_key', OPTIONS), { kind: 'ref', ref: 'NOVEL_KEY' })
+  assert.equal(classifyCredentialArg('not valid!', OPTIONS), undefined)
+  assert.equal(resolveCredentialArg('acme', OPTIONS), 'ACME_GATEWAY_API_KEY')
+  assert.equal(resolveCredentialArg('my_key', OPTIONS), 'MY_KEY')
 })
 
-test('/login <route> sets that route\'s apiKeyEnv credential', async () => {
-  const t = setup()
-  const result = await t.run<{ kind: string; text?: string }>(t.login, 'acme')
-  assert.equal(result.kind, 'success')
-  assert.deepEqual(t.credentials.sets, ['ACME_GATEWAY_API_KEY=sk-test'])
-  t.app.stop()
+test('/login navigates: bare list, known route, explicit ref, new route, account', async () => {
+  const { invoke, opened } = authCommands()
+  await invoke('login', '')
+  await invoke('login', 'acme')
+  await invoke('login', 'ACME_GATEWAY_API_KEY')
+  await invoke('login', 'new-route')
+  await invoke('login', 'deepseek-account')
+  assert.deepEqual(opened, [
+    { kind: 'models', view: 'list' },
+    { kind: 'models', view: 'provider', route: 'acme' },
+    { kind: 'models', view: 'reference', ref: 'ACME_GATEWAY_API_KEY' },
+    { kind: 'models', view: 'add-provider', route: 'new-route' },
+    { kind: 'account', view: 'page' },
+  ])
 })
 
-test('/login <env-name> sets the named env credential directly', async () => {
-  const t = setup()
-  const result = await t.run<{ kind: string; text?: string }>(t.login, 'OPENAI_API_KEY')
-  assert.equal(result.kind, 'success')
-  assert.deepEqual(t.credentials.sets, ['OPENAI_API_KEY=sk-test'])
-  t.app.stop()
-})
-
-test('/login <novel-env-name> sets that name verbatim, never re-derived', async () => {
-  // The documented escape hatch: a name that matches NO catalog option ref
-  // must be stored under exactly that name — re-deriving it through
-  // deriveKeyRef would corrupt `MY_CUSTOM_KEY` into `MY_CUSTOM_KEY_API_KEY`.
-  const t = setup()
-  const result = await t.run<{ kind: string; text?: string }>(t.login, 'MY_CUSTOM_KEY')
-  assert.equal(result.kind, 'success')
-  assert.deepEqual(t.credentials.sets, ['MY_CUSTOM_KEY=sk-test'])
-  assert.match(result.text ?? '', /MY_CUSTOM_KEY set/)
-  t.app.stop()
-})
-
-test('/login with a malformed unknown target lists the valid options', async () => {
-  const t = setup()
-  // `No-Such-Route` is not a valid route pattern (uppercase) and not an
-  // env-var-looking name: the old "list the valid options" error path.
-  const result = await t.run<{ kind: string; text?: string }>(t.login, 'No-Such-Route')
+test('/login rejects an unknown target without opening a targetless page', async () => {
+  const { invoke, opened } = authCommands()
+  const result = await invoke('login', 'not valid!') as { kind: string; text: string }
   assert.equal(result.kind, 'error')
-  assert.match(result.text ?? '', /deepseek official \(DEEPSEEK_API_KEY\)/)
-  assert.match(result.text ?? '', /acme \(ACME_GATEWAY_API_KEY\)/)
-  assert.deepEqual(t.credentials.sets, [], 'nothing must be set')
-  t.app.stop()
+  assert.match(result.text, /unknown credential target/u)
+  assert.deepEqual(opened, [])
 })
 
-test('/login with no argument and multiple targets opens the picker', async () => {
-  // Picker rows now carry the ROUTE as value (openai), not the ref.
-  const t = setup({ pick: rows => rows.find(row => row.value === 'openai')!.value })
-  const result = await t.run<{ kind: string; text?: string }>(t.login, '')
-  assert.equal(result.kind, 'success')
-  assert.deepEqual(t.credentials.sets, ['OPENAI_API_KEY=sk-test'])
-  t.app.stop()
+test('/logout navigates: bare stored-credentials, exact ref, keyless record, account sign-out', async () => {
+  const { invoke, opened } = authCommands()
+  await invoke('logout', '')
+  await invoke('logout', 'ACME_GATEWAY_API_KEY')
+  await invoke('logout', 'anthropic')
+  await invoke('logout', 'deepseek-account')
+  assert.deepEqual(opened, [
+    { kind: 'models', view: 'logout-list' },
+    { kind: 'models', view: 'logout', target: { kind: 'reference', ref: 'ACME_GATEWAY_API_KEY', label: 'acme', route: 'acme' } },
+    { kind: 'models', view: 'logout', target: { kind: 'record', key: 'llm-pi-ai/anthropic', label: 'Anthropic', route: 'anthropic' } },
+    { kind: 'account', view: 'signout' },
+  ])
 })
 
-test('/login with no argument and only the official target skips the picker', async () => {
-  // No settings service → no llm-pi-ai section → exactly one target, so the
-  // picker must never open (sabotaged: it would throw).
-  const t = setup({ key: 'sk-official', withLlmpiAi: false })
-  t.app.openPicker = (() => { throw new Error('picker must not open') }) as never
-  const result = await t.run<{ kind: string; text?: string }>(t.login, '')
-  assert.equal(result.kind, 'success')
-  assert.deepEqual(t.credentials.sets, ['DEEPSEEK_API_KEY=sk-official'])
-  t.app.stop()
-})
-
-test('/login with an empty pasted key sets nothing', async () => {
-  const t = setup({ key: '' })
-  const result = await t.run<{ kind: string; text?: string }>(t.login, 'acme')
+test('/logout rejects an unknown target', async () => {
+  const { invoke, opened } = authCommands()
+  const result = await invoke('logout', 'not valid!') as { kind: string; text: string }
   assert.equal(result.kind, 'error')
-  assert.deepEqual(t.credentials.sets, [])
-  t.app.stop()
-})
-
-test('/logout resolves the same targets and unsets', async () => {
-  const t = setup()
-  const byRoute = await t.run<{ kind: string; text?: string }>(t.logout, 'acme')
-  assert.equal(byRoute.kind, 'success')
-  const byEnv = await t.run<{ kind: string; text?: string }>(t.logout, 'MY_CUSTOM_KEY')
-  assert.equal(byEnv.kind, 'success')
-  const defaultRun = await t.run<{ kind: string; text?: string }>(t.logout, '')
-  assert.equal(defaultRun.kind, 'success')
-  assert.deepEqual(t.credentials.unsets, ['ACME_GATEWAY_API_KEY', 'MY_CUSTOM_KEY', 'DEEPSEEK_API_KEY'])
-  const unknown = await t.run<{ kind: string; text?: string }>(t.logout, 'No-Such-Route')
-  assert.equal(unknown.kind, 'error')
-  t.app.stop()
-})
-
-/** A fake llm service with a configurable-provider directory. */
-function fakeLlm(directory: { provider: string; displayName: string; settingsNs: string; settingsPath: string[]; declared?: boolean }[]) {
-  const probes: { settingsNs: string; request: unknown }[] = []
-  return {
-    probes,
-    service: {
-      listConfigurableProviders: () => directory,
-      discoverModels: async (settingsNs: string, request: unknown) => {
-        probes.push({ settingsNs, request })
-        return [{ id: 'acme-large' }, { id: 'acme-think' }]
-      },
-    },
-  }
-}
-
-test('/login with the llm directory offers unconfigured catalog routes', async () => {
-  const t = setup({
-    llm: fakeLlm([
-      { provider: 'anthropic', displayName: 'anthropic', settingsNs: 'llm-pi-ai', settingsPath: ['providers', 'anthropic'] },
-    ]),
-    key: 'sk-ant',
-  })
-  // anthropic is in the directory (unconfigured) → /login anthropic sets the
-  // DERIVED ref (ANTHROPIC_API_KEY), not a settings-section listing.
-  const result = await t.run<{ kind: string; text?: string }>(t.login, 'anthropic')
-  assert.equal(result.kind, 'success')
-  assert.deepEqual(t.credentials.sets, ['ANTHROPIC_API_KEY=sk-ant'])
-  t.app.stop()
-})
-
-test('/login picker rows are grouped via the group field with the Add row last', async () => {
-  const t = setup({
-    llm: fakeLlm([
-      { provider: 'anthropic', displayName: 'anthropic', settingsNs: 'llm-pi-ai', settingsPath: ['providers', 'anthropic'] },
-      // A hand-declared route with no profile yet.
-      { provider: 'acme-gateway', displayName: 'Acme Gateway', settingsNs: 'llm-pi-ai', settingsPath: ['providers', 'acme-gateway'], declared: true },
-    ]),
-    pick: rows => rows[0]!.value,
-  })
-  const result = await t.run<{ kind: string; text?: string }>(t.login, '')
-  assert.equal(result.kind, 'success')
-  // Every provider row carries a group label; no synthetic header row value
-  // may be selectable; the Add New Platform row is last and ungrouped.
-  // anthropic has a stored profile in the section (apiKeyEnv undefined →
-  // derived ref) so it is configured; acme-gateway has no profile → custom.
-  // Reference rows all live under the `API key` category so the picker
-  // separates them from provider sign-in rows at a glance.
-  assert.equal(t.pickerRows[0]?.group, 'API key · configured') // deepseek official
-  assert.equal(t.pickerRows[1]?.group, 'API key · configured') // anthropic
-  assert.equal(t.pickerRows[2]?.group, 'API key · custom') // acme-gateway
-  const add = t.pickerRows.at(-1)
-  assert.equal(add?.label, '[ Add New Platform ]')
-  assert.equal(add?.group, undefined)
-  assert.equal(t.pickerRows.some(row => row.value.startsWith('\u0000group-')), false,
-    'no synthetic group-header row may be a selectable picker item')
-  t.app.stop()
-})
-
-test('/login <new-route> runs the add-provider wizard and persists the profile', async () => {
-  const t = setup({
-    llm: fakeLlm([]),
-    questions: () => [
-      // Wizard answers: (route pre-filled) api → baseURL → displayName →
-      // key, then the models question (multi-select, selected acme-large).
-      { id: 'api', selected: ['openai-completions'], custom: '' },
-      { id: 'baseURL', selected: [], custom: 'https://gateway.acme.example/v1' },
-      { id: 'displayName', selected: [], custom: 'Acme Gateway' },
-      { id: 'key', selected: [], custom: 'sk-acme' },
-      { id: 'models', selected: ['acme-large'], custom: '' },
-    ],
-  })
-  const result = await t.run<{ kind: string; text?: string }>(t.login, 'acme-gateway')
-  assert.equal(result.kind, 'success')
-  assert.match(result.text ?? '', /ACME_GATEWAY_API_KEY set · provider acme-gateway added/)
-  // The endpoint was probed with the draft fields (signal is the runner's).
-  assert.equal(t.llm!.probes.length, 1)
-  assert.deepEqual(t.llm!.probes[0]?.request, {
-    baseURL: 'https://gateway.acme.example/v1',
-    api: 'openai-completions',
-    apiKey: 'sk-acme',
-    signal: t.signal,
-  })
-  // The profile was persisted through settings.mutate + the key stored.
-  assert.equal(t.settings!.mutations.length, 1)
-  assert.equal(t.settings!.mutations[0]?.ns, 'llm-pi-ai')
-  assert.deepEqual(t.settings!.mutations[0]?.ops, [{
-    op: 'set',
-    path: ['providers', 'acme-gateway'],
-    value: {
-      displayName: 'Acme Gateway',
-      api: 'openai-completions',
-      baseURL: 'https://gateway.acme.example/v1',
-      models: [{ id: 'acme-large' }],
-      apiKeyEnv: 'ACME_GATEWAY_API_KEY',
-    },
-  }])
-  assert.deepEqual(t.credentials.sets, ['ACME_GATEWAY_API_KEY=sk-acme'])
-  t.app.stop()
-})
-
-test('/login wizard reports a profile that persisted but whose key write failed', async () => {
-  const t = setup({
-    llm: fakeLlm([]),
-    failSet: true,
-    questions: () => [
-      { id: 'api', selected: ['openai-completions'], custom: '' },
-      { id: 'baseURL', selected: [], custom: 'https://gateway.acme.example/v1' },
-      { id: 'displayName', selected: [], custom: '' },
-      { id: 'key', selected: [], custom: 'sk-acme' },
-      { id: 'models', selected: ['acme-large'], custom: '' },
-    ],
-  })
-  const result = await t.run<{ kind: string; text?: string }>(t.login, 'acme-gateway')
-  // The profile was persisted; only the key write failed, and the message
-  // must say so honestly instead of claiming the whole add failed.
-  assert.equal(result.kind, 'error')
-  assert.match(result.text ?? '', /provider acme-gateway added, but storing the key failed/)
-  assert.equal(t.settings!.mutations.length, 1)
-  t.app.stop()
-})
-
-test('/login add-provider rejects invalid base URLs before discovery or persistence', async () => {
-  let baseURL = ''
-  const t = setup({
-    llm: fakeLlm([]),
-    questions: () => [
-      { id: 'api', selected: ['openai-completions'], custom: '' },
-      { id: 'baseURL', selected: [], custom: baseURL },
-      { id: 'displayName', selected: [], custom: '' },
-      { id: 'key', selected: [], custom: 'sk-acme' },
-    ],
-  })
-  for (const candidate of ['gateway.example.com/v1', 'ftp://example.com', 'https://']) {
-    baseURL = candidate
-    const result = await t.run<{ kind: string; text?: string }>(t.login, 'acme-gateway')
-    assert.equal(result.kind, 'error')
-    assert.match(result.text ?? '', /invalid base URL/)
-    assert.equal(t.llm!.probes.length, 0, `${candidate} must fail before model discovery`)
-    assert.equal(t.settings!.mutations.length, 0, `${candidate} must fail before profile persistence`)
-    assert.deepEqual(t.credentials.sets, [], `${candidate} must fail before credential persistence`)
-  }
-  t.app.stop()
-})
-
-test('/login Add New Platform rejects a malformed route id', async () => {
-  // Picker selects the Add New Platform row; the wizard's route question is
-  // answered with a digit-leading id, which fails ROUTE_PATTERN.
-  const t = setup({
-    pick: rows => rows.find(row => row.label === '[ Add New Platform ]')!.value,
-    questions: () => [
-      { id: 'route', selected: [], custom: '1acme' },
-      { id: 'api', selected: ['openai-completions'], custom: '' },
-      { id: 'baseURL', selected: [], custom: 'https://x' },
-      { id: 'displayName', selected: [], custom: '' },
-      { id: 'key', selected: [], custom: '' },
-    ],
-  })
-  const result = await t.run<{ kind: string; text?: string }>(t.login, '')
-  assert.equal(result.kind, 'error')
-  assert.match(result.text ?? '', /invalid provider route/)
-  assert.deepEqual(t.credentials.sets, [])
-  t.app.stop()
-})
-
-test('/logout keeps the reference picker usable when the backend cannot enumerate records', async () => {
-  // Remote rc.2 publishes no record-read Remote: the adapter REJECTS
-  // listRecords() instead of pretending the list is empty. That must not make
-  // the whole /logout picker fail — the configured references are still
-  // clearable, and the result states the record limitation plainly (§9.4).
-  const t = setup()
-  // A Remote-shaped credential backend: the port reports the capability gap
-  // (rc.2 has no record-read Remote), so the picker must not depend on it.
-  ;(t.runnerConfig.credentials as unknown as { recordsSupported: () => boolean }).recordsSupported = () => false
-  const result = await t.run<{ kind: string; text?: string }>(t.logout, '')
-  assert.equal(result.kind, 'success')
-  assert.ok(t.pickerRows.length > 0, 'the picker still opens with the clearable references')
-  assert.ok(
-    t.pickerRows.every(row => !row.value.startsWith('\u0000record:')),
-    'no fabricated record row is offered',
-  )
-  assert.match(result.text ?? '', /cannot be enumerated or removed on this backend/u,
-    'the reference clear says what it did NOT clean up')
-  assert.deepEqual(t.credentials.unsets, ['DEEPSEEK_API_KEY'])
-  t.app.stop()
-})
-
-test('/logout reports nothing-to-sign-out with the record limitation instead of failing', async () => {
-  const t = setup()
-  ;(t.runnerConfig.credentials as unknown as { recordsSupported: () => boolean }).recordsSupported = () => false
-  // No reference is configured for this deployment: the picker would be empty.
-  t.credentials.service.describe = async () => ({ configured: false })
-  const result = await t.run<{ kind: string; text?: string }>(t.logout, '')
-  assert.equal(result.kind, 'error')
-  assert.match(result.text ?? '', /cannot be enumerated or removed on this backend/u)
-  t.app.stop()
-})
-
-test('/logout surfaces a real record-read failure on a backend that CAN enumerate', async () => {
-  // The port owns the capability distinction: a supported backend whose read
-  // fails must not be mislabelled as "records are unavailable here".
-  const t = setup({ failListRecords: true })
-  await assert.rejects(() => t.run(t.logout, ''), /cannot enumerate stored credential records/u)
-  t.app.stop()
-})
-
-test('/login never presents provider-native sign-in as silently available', async () => {
-  // §9.3: the backend's provider-auth sub-capability must never be SILENTLY
-  // unavailable. Remote rc.2 publishes no authorization surface and the wire
-  // cannot say whether a keyless route is OAuth-only or uses the conventional
-  // env-var reference, so the supported reference prompt carries an explicit
-  // note instead of a hard block (which would hide provider login entirely).
-  const t = setup()
-  ;(t.runnerConfig.providers as unknown as { listCredentialOptions: () => unknown[] }).listCredentialOptions = () => [{
-    route: 'anthropic',
-    label: 'Anthropic (native sign-in)',
-    ref: 'ANTHROPIC_API_KEY',
-    configured: true,
-    declared: false,
-    namesCredential: false,
-    group: 'available',
-    canProvisionProfile: true,
-  }]
-  ;(t.runnerConfig.authorization as unknown as { available: () => boolean }).available = () => false
-
-  const questions: string[] = []
-  t.app.askQuestions = (async (asked: readonly { question: string }[]) => {
-    questions.push(...asked.map(entry => entry.question))
-    return [{ id: 'key', selected: [], custom: 'sk-ant' }]
-  }) as never
-  const result = await t.run<{ kind: string; text?: string }>(t.login, 'anthropic')
-  assert.equal(result.kind, 'success')
-  assert.match(questions.join('\n'), /provider sign-in \(OAuth\/device\) is unavailable on this backend/u,
-    'the prompt states the unavailable sign-in capability instead of hiding it')
-  assert.deepEqual(t.credentials.sets, ['ANTHROPIC_API_KEY=sk-ant'])
-  t.app.stop()
-})
-
-test('/login names no sign-in limitation when the route uses an explicit reference', async () => {
-  const t = setup()
-  ;(t.runnerConfig.providers as unknown as { listCredentialOptions: () => unknown[] }).listCredentialOptions = () => [{
-    route: 'acme',
-    label: 'Acme',
-    ref: 'ACME_GATEWAY_API_KEY',
-    configured: true,
-    declared: false,
-    namesCredential: true,
-    group: 'configured',
-    canProvisionProfile: true,
-  }]
-  ;(t.runnerConfig.authorization as unknown as { available: () => boolean }).available = () => false
-
-  const questions: string[] = []
-  t.app.askQuestions = (async (asked: readonly { question: string }[]) => {
-    questions.push(...asked.map(entry => entry.question))
-    return [{ id: 'key', selected: [], custom: 'sk-test' }]
-  }) as never
-  const result = await t.run<{ kind: string; text?: string }>(t.login, 'acme')
-  assert.equal(result.kind, 'success')
-  assert.doesNotMatch(questions.join('\n'), /provider sign-in/u, 'a named-reference route carries no auth note')
-  assert.deepEqual(t.credentials.sets, ['ACME_GATEWAY_API_KEY=sk-test'])
-  t.app.stop()
+  assert.deepEqual(opened, [])
 })

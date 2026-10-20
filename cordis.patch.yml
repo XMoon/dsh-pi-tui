@@ -36,6 +36,22 @@
       name: '@xmoon76/dsh-pi-tui/performance-host'
       inject: [tuiStartup, sessionProjections]
 
+    # The OFFICIAL Host browser-callback listener for DeepSeek Account sign-in.
+    # The account provider registers `/oauth/callback` on this instance while an
+    # attempt is waiting for the browser; it is mounted here because the dsh-base
+    # layer ships the account provider but not the webserver. `host: 127.0.0.1`
+    # plus `port: 0` keeps the listener on a private loopback interface with an
+    # OS-assigned port (the stable `webserver` id lets a profile patch override
+    # the configuration without introducing a second service). `tuiStartup`
+    # gates the row on the same command-line admission as the TUI runner, so
+    # `dsh --profile pi-tui --help` never opens a socket.
+    - id: webserver
+      name: '@deepseek-ai/dsh-host-webserver'
+      inject: [tuiStartup]
+      config:
+        host: 127.0.0.1
+        port: 0
+
     - id: tui-app
       name: '@xmoon76/dsh-pi-tui'
       # `workspaceRegistry` is injected, not merely looked up: D2.4 Direct fork
@@ -52,7 +68,11 @@
       # surface must not mount without its performance authority, so a profile
       # that disables the `pi-tui-performance-host` row fails loudly here
       # instead of silently falling back to a Client-side estimate.
-      inject: [tuiStartup, piTuiExtensions, authorization, workspaceRegistry, pluginManager, jobController, piTuiPerformanceReady]
+      # `deepseekAccount` and `webServer` are the DeepSeek Account authority and
+      # its browser callback listener: the surface must not mount before both
+      # are published, otherwise the Account page could start a sign-in the
+      # Host cannot complete.
+      inject: [tuiStartup, piTuiExtensions, authorization, workspaceRegistry, pluginManager, jobController, piTuiPerformanceReady, deepseekAccount, webServer]
       config:
         sessionId: ''
 

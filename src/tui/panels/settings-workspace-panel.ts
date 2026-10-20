@@ -34,9 +34,13 @@ import {
 import { renderActionBarRow, type ActionBarSegment } from '../presentation/action-bar.ts'
 import { sanitizedPhysicalLine } from '../presentation/lines.ts'
 import { color } from '../theme/runtime.ts'
+import type { ModelsInitialView, ModelsPageExit, ModelsWorkspacePage } from './models-workspace-page.ts'
+import type { AccountInitialView, AccountWorkspacePage } from './account-workspace-page.ts'
 
-/** The four frozen Settings categories (S4-D1 adds the direct Plugins page). */
-export type SettingsWorkspaceCategoryId = 'appearance' | 'display' | 'plugins' | 'other'
+/** The frozen Settings categories, in the visible order: Models and Account
+ * are direct content pages (like Plugins); the four configuration categories
+ * keep their existing behavior. */
+export type SettingsWorkspaceCategoryId = 'models' | 'account' | 'appearance' | 'display' | 'plugins' | 'other'
 
 /** The navigation level: `categories` (L0) → `rows` (L1) → `detail` (L2).
  *  This is the SAME state in every width — the layout only decides which
@@ -186,6 +190,15 @@ export interface SettingsWorkspacePanelIntents {
    * teardown disposes the returned component instead and never calls `done`.
    */
   readonly onOpenPlugins?: (done: () => void) => Component | undefined
+  /** The lazily built Models direct page (the Settings category keeps the
+   * same screen lease). `openAccount` switches this workspace to the Account
+   * page when the Models list's account entry is activated. */
+  readonly createModelsPage?: (
+    initial: ModelsInitialView,
+    openAccount: () => void,
+  ) => SettingsAuthPage | undefined
+  /** The lazily built Account direct page. */
+  readonly createAccountPage?: (initial: AccountInitialView) => SettingsAuthPage | undefined
   /** The live terminal row budget (the panel never reads the terminal itself). */
   readonly rows: () => number
   /** The live terminal column budget (the projection's width). */
@@ -271,6 +284,19 @@ interface PaneBoxes {
   detail?: PaneBox
 }
 
+/** The common page surface the Models and Account direct pages expose to this
+ * workspace root. The root owns the screen/lease and the category rail; the
+ * page owns its body, its action bar and its last-painted hit map. */
+export interface SettingsAuthPage extends Component {
+  setBodyHeight(rows: number): void
+  handleInput(data: string): 'handled' | 'exit' | 'open-account'
+  handleMouse?(event: TuiMouseEvent): TuiMouseEventResult | undefined
+  onCellPress?(x: number, y: number): void
+  onCellClick?(x: number, y: number): void
+  invalidate(): void
+  dispose(): void
+}
+
 /** One pane the current frame actually paints: its level and absolute geometry.
  *  Hidden panes of the two-pane medium projection simply have no entry. */
 interface PaneLayout {
@@ -319,9 +345,11 @@ interface DetailProjection {
   readonly confirmCandidateVisible: boolean
 }
 
-const CATEGORY_ORDER: readonly SettingsWorkspaceCategoryId[] = ['appearance', 'display', 'plugins', 'other']
+const CATEGORY_ORDER: readonly SettingsWorkspaceCategoryId[] = ['models', 'account', 'appearance', 'display', 'plugins', 'other']
 
 const CATEGORY_LABELS: Record<SettingsWorkspaceCategoryId, string> = {
+  models: 'Models',
+  account: 'Account',
   appearance: 'Appearance',
   display: 'Display',
   plugins: 'Plugins',
@@ -542,13 +570,33 @@ export class SettingsWorkspacePanel implements Component {
   private lastChoiceWidth = -1
   private readonly source: SettingsWorkspaceSource
   private readonly intents: SettingsWorkspacePanelIntents
+  /** The active Models/Account direct page (at most one). */
+  private authPage: SettingsAuthPage | undefined
+  private authPageCategory: 'models' | 'account' | undefined
+  /** The last painted page area (panel coordinates) for mouse translation. */
+  private paintedAuthBox: { readonly x: number; readonly top: number; readonly width: number; readonly rows: number } | undefined
+  /** The root-level identity of one press inside the auth page: a resize or a
+   *  root state change between press and release refuses the gesture even when
+   *  the page has not repainted yet. */
+  private authPressed: {
+    readonly x: number
+    readonly y: number
+    readonly columns: number
+    readonly rows: number
+    readonly revision: number
+  } | undefined
 
   constructor(
     source: SettingsWorkspaceSource,
     intents: SettingsWorkspacePanelIntents,
     /** The re-entry selection (S2/PR-B §B3.4): the Web Settings launch restores
      *  this Workspace with its own row focused, never the default category. */
-    options?: { readonly initialRowId?: SettingsWorkspaceRowId },
+    options?: {
+      readonly initialRowId?: SettingsWorkspaceRowId
+      readonly initialCategory?: SettingsWorkspaceCategoryId
+      readonly initialModelsView?: ModelsInitialView
+      readonly initialAccountView?: AccountInitialView
+    },
   ) {
     this.source = source
     this.intents = intents
@@ -561,7 +609,55 @@ export class SettingsWorkspacePanel implements Component {
         this.rowId = target.id
         this.focus = 'rows'
       }
+    } else if (options?.initialCategory !== undefined) {
+      this.categoryId = options.initialCategory
+      this.focus = 'categories'
     }
+    if (options?.initialModelsView !== undefined) this.openModelsPage(options.initialModelsView)
+    else if (options?.initialAccountView !== undefined) this.openAccountPage(options.initialAccountView)
+  }
+
+  /** Open the Models direct page (the Settings category rail stays the root). */
+  private openModelsPage(initial: ModelsInitialView): void {
+    if (this.authPageCategory === 'models') {
+      this.intents.requestRender()
+      return
+    }
+    this.closeAuthPage()
+    const page = this.intents.createModelsPage?.(initial, () => this.openAccountPage({ view: 'page' }))
+    if (page === undefined) return
+    this.authPage = page
+    this.authPageCategory = 'models'
+    this.categoryId = 'models'
+    this.focus = 'categories'
+    this.bumpRevision()
+    this.intents.requestRender()
+  }
+
+  /** Open the Account direct page. */
+  private openAccountPage(initial: AccountInitialView): void {
+    if (this.authPageCategory === 'account') {
+      this.intents.requestRender()
+      return
+    }
+    this.closeAuthPage()
+    const page = this.intents.createAccountPage?.(initial)
+    if (page === undefined) return
+    this.authPage = page
+    this.authPageCategory = 'account'
+    this.categoryId = 'account'
+    this.focus = 'categories'
+    this.bumpRevision()
+    this.intents.requestRender()
+  }
+
+  private closeAuthPage(): void {
+    const page = this.authPage
+    this.authPage = undefined
+    this.authPageCategory = undefined
+    this.paintedAuthBox = undefined
+    this.authPressed = undefined
+    page?.dispose()
   }
 
   /** Repaint ONE row with facts an authority changed BETWEEN snapshot reads
@@ -602,6 +698,7 @@ export class SettingsWorkspacePanel implements Component {
     this.paintedChoiceCopy = false
     this.paintedChoiceNavigation = false
     this.paintedChoiceFactScroll = false
+    if (this.authPage !== undefined) return this.renderAuthPage(plan)
     const lines: string[] = []
     const targets: HitTarget[] = []
     const panes: PaneBoxes = {}
@@ -620,8 +717,61 @@ export class SettingsWorkspacePanel implements Component {
     return lines.slice(0, plan.rows)
   }
 
+  /** Render the active Models/Account page inside the workspace chrome: the
+   * category rail stays visible on wide/medium; the page owns the rest of the
+   * screen, INCLUDING its own last action-bar row. */
+  private renderAuthPage(plan: SettingsChromePlan): string[] {
+    const page = this.authPage
+    if (page === undefined) return []
+    const lines: string[] = []
+    const targets: HitTarget[] = []
+    if (plan.headerRows === 1) lines.push(...this.renderHeader(plan))
+    if (plan.metaRows === 1) lines.push(this.renderMetadata(plan))
+    if (plan.ruleRows >= 1) lines.push(color.border('─'.repeat(Math.max(1, plan.width))))
+    const bodyTop = plan.headerRows + plan.metaRows + (plan.ruleRows >= 1 ? 1 : 0)
+    const pageRows = Math.max(1, plan.bodyRows + plan.actionRows)
+    const narrow = plan.layout === 'narrow'
+    const categoryWidth = narrow ? 0 : plan.layout === 'wide' ? WIDE_CATEGORY_WIDTH : MEDIUM_CATEGORY_WIDTH
+    const pageX = narrow ? 0 : categoryWidth + COLUMN_GAP
+    const pageWidth = Math.max(1, plan.width - pageX)
+    page.setBodyHeight(pageRows)
+    const pageLines = page.render(pageWidth)
+    const categoryVisible = narrow
+      ? []
+      : CATEGORY_ORDER.slice(0, Math.min(CATEGORY_ORDER.length, pageRows)).map(id => this.categoryLine(id))
+    for (let index = 0; index < categoryVisible.length; index += 1) {
+      const line = fit(categoryVisible[index] ?? '', categoryWidth)
+      lines.push(narrow ? line : `${line}${' '.repeat(COLUMN_GAP)}${fit(pageLines[index] ?? '', pageWidth)}`)
+      targets.push({ kind: 'category', id: CATEGORY_ORDER[index]!, row: bodyTop + index, startCol: 0, endCol: categoryWidth })
+    }
+    if (narrow) {
+      for (const line of pageLines.slice(0, pageRows)) lines.push(fit(line, plan.width))
+    } else if (pageLines.length > categoryVisible.length) {
+      for (let index = categoryVisible.length; index < pageRows; index += 1) {
+        lines.push(`${fit('', categoryWidth)}${' '.repeat(COLUMN_GAP)}${fit(pageLines[index] ?? '', pageWidth)}`)
+      }
+    }
+    // Pad the category rail to the page height (the page already paints its
+    // own action bar, so the root paints no second bar).
+    const boxedRows = Math.min(pageRows, pageLines.length)
+    this.paintedAuthBox = { x: pageX, top: bodyTop, width: pageWidth, rows: boxedRows }
+    this.paintedPanes = {
+      categories: narrow ? undefined : {
+        x: 0,
+        width: categoryWidth,
+        contentTop: bodyTop,
+        contentRows: Math.min(CATEGORY_ORDER.length, pageRows),
+        maxOffset: Math.max(0, CATEGORY_ORDER.length - pageRows),
+      },
+    }
+    this.paintedTargets = targets
+    this.paintedRevision = this.revision
+    return lines.slice(0, plan.rows)
+  }
+
   invalidate(): void {
     this.pluginPage?.invalidate?.()
+    this.authPage?.invalidate()
   }
 
   /** The ONE level breadcrumb, identical in every layout: `Categories` →
@@ -630,11 +780,13 @@ export class SettingsWorkspacePanel implements Component {
    *  no longer a category focus owner or switch. */
   private renderHeader(plan: SettingsChromePlan): string[] {
     const row = this.selectedRow()
-    const breadcrumb = this.focus === 'categories'
-      ? 'Categories'
-      : this.focus === 'rows'
-        ? `${CATEGORY_LABELS[this.categoryId]} · Rows`
-        : `${CATEGORY_LABELS[this.categoryId]} · ${row?.label ?? '—'}`
+    const breadcrumb = this.authPageCategory !== undefined
+      ? CATEGORY_LABELS[this.authPageCategory]
+      : this.focus === 'categories'
+        ? 'Categories'
+        : this.focus === 'rows'
+          ? `${CATEGORY_LABELS[this.categoryId]} · Rows`
+          : `${CATEGORY_LABELS[this.categoryId]} · ${row?.label ?? '—'}`
     // Identity is BOLD textStrong and the trail is textDim (roles 1 + 2): the
     // brand word is not `primary`, because primary means active/actionable and
     // already paints the cursor, the focused label and every affordance.
@@ -655,8 +807,12 @@ export class SettingsWorkspacePanel implements Component {
    *  ink: the calm default is `textMuted`, a stale document is `warning` and an
    *  unavailable one is `error` (design language §3.2 corrections). */
   private renderMetadata(plan: SettingsChromePlan): string {
-    const row = this.selectedRow()
-    const scope = row?.scope ?? 'TUI preferences'
+    const row = this.authPage !== undefined ? undefined : this.selectedRow()
+    const scope = this.authPageCategory === 'models'
+      ? 'Host provider & credential configuration'
+      : this.authPageCategory === 'account'
+        ? 'DeepSeek Account · Host'
+        : row?.scope ?? 'TUI preferences'
     const captured = new Date(this.snapshot.capturedAt)
     const hh = String(captured.getHours()).padStart(2, '0')
     const mm = String(captured.getMinutes()).padStart(2, '0')
@@ -1627,6 +1783,18 @@ export class SettingsWorkspacePanel implements Component {
       this.pluginPage.handleInput?.(data)
       return
     }
+    if (this.authPage !== undefined) {
+      const result = this.authPage.handleInput(data)
+      if (result === 'exit') {
+        this.closeAuthPage()
+        this.focus = 'categories'
+        this.bumpRevision()
+        this.intents.requestRender()
+      } else if (result === 'open-account') {
+        this.openAccountPage({ view: 'page' })
+      }
+      return
+    }
     if (matchesKey(data, 'escape') || matchesKey(data, 'backspace')) return this.goBack()
     // Below the body floor every navigation/action target is invisible; only the
     // lifecycle/back key remains available. Read the live geometry because input
@@ -1749,6 +1917,7 @@ export class SettingsWorkspacePanel implements Component {
   }
 
   private selectCategory(category: SettingsWorkspaceCategoryId, focus?: SettingsWorkspacePage): void {
+    if (this.authPageCategory !== undefined && category !== this.authPageCategory) this.closeAuthPage()
     const changedCategory = category !== this.categoryId
     const targetFocus = focus ?? (this.choiceField() === undefined ? this.focus : 'categories')
     if (changedCategory || targetFocus !== this.focus || (this.choiceField() !== undefined && targetFocus !== 'detail')) {
@@ -1804,6 +1973,14 @@ export class SettingsWorkspacePanel implements Component {
     if (this.focus === 'categories') {
       if (this.categoryId === 'plugins') {
         this.openPluginsPage()
+        return
+      }
+      if (this.categoryId === 'models') {
+        this.openModelsPage({ view: 'list' })
+        return
+      }
+      if (this.categoryId === 'account') {
+        this.openAccountPage({ view: 'page' })
         return
       }
       this.leaveDetailTo('rows')
@@ -2013,6 +2190,7 @@ export class SettingsWorkspacePanel implements Component {
   handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
     if (this.disposed) return undefined
     if (this.pluginPage !== undefined) return this.pluginPage.handleMouse?.(event)
+    if (this.authPage !== undefined) return this.authPage.handleMouse?.(this.translateMouseEvent(event))
     if (event.type !== 'wheel') return undefined
     const delta = event.wheelDelta ?? 0
     if (delta === 0) return undefined
@@ -2037,6 +2215,21 @@ export class SettingsWorkspacePanel implements Component {
       this.pluginPage.onCellPress?.(x, y)
       return
     }
+    if (this.authPage !== undefined) {
+      const box = this.paintedAuthBox
+      if (box !== undefined && x >= box.x && x < box.x + box.width && y >= box.top && y < box.top + box.rows) {
+        this.authPressed = {
+          x,
+          y,
+          columns: this.intents.columns(),
+          rows: this.intents.rows(),
+          revision: this.revision,
+        }
+        this.authPage.onCellPress?.(x - box.x, y - box.top)
+        return
+      }
+      // A click on the category rail falls through to the root's own hit map.
+    }
     const target = this.targetAt(x, y)
     this.pressedGesture = target === undefined
       ? undefined
@@ -2055,6 +2248,21 @@ export class SettingsWorkspacePanel implements Component {
     if (this.pluginPage !== undefined) {
       this.pluginPage.onCellClick?.(x, y)
       return
+    }
+    if (this.authPage !== undefined) {
+      const box = this.paintedAuthBox
+      if (box !== undefined && x >= box.x && x < box.x + box.width && y >= box.top && y < box.top + box.rows) {
+        const pressed = this.authPressed
+        this.authPressed = undefined
+        if (pressed === undefined
+          || pressed.columns !== this.intents.columns()
+          || pressed.rows !== this.intents.rows()
+          || pressed.revision !== this.revision) return
+        this.authPage.onCellClick?.(x - box.x, y - box.top)
+        return
+      }
+      // A wheel/click on the category rail keeps the root's identity path; the
+      // pressed gesture below was recorded by the root's own onCellPress.
     }
     const pressed = this.pressedGesture
     this.pressedGesture = undefined
@@ -2087,6 +2295,14 @@ export class SettingsWorkspacePanel implements Component {
       case 'category':
         if (target.id === 'plugins' && this.categoryId === 'plugins') {
           this.openPluginsPage()
+          return
+        }
+        if (target.id === 'models') {
+          this.openModelsPage({ view: 'list' })
+          return
+        }
+        if (target.id === 'account') {
+          this.openAccountPage({ view: 'page' })
           return
         }
         this.selectCategory(target.id as SettingsWorkspaceCategoryId, 'categories')
@@ -2223,9 +2439,24 @@ export class SettingsWorkspacePanel implements Component {
     return this.paintedTargets.find(target => target.row === y && x >= target.startCol && x < target.endCol)
   }
 
+  /** Translate one panel-global mouse event into the page-local coordinates its
+   * last-painted hit map uses. */
+  private translateMouseEvent(event: TuiMouseEvent): TuiMouseEvent {
+    const box = this.paintedAuthBox
+    if (box === undefined) return event
+    return {
+      ...event,
+      x: event.x - box.x,
+      y: event.y - box.top,
+      screenX: event.screenX - box.x,
+      screenY: event.screenY - box.top,
+    }
+  }
+
   dispose(): void {
     if (this.disposed) return
     this.disposed = true
+    this.closeAuthPage()
     // An external Settings teardown releases the hosted Plugin page's owner
     // exactly once; its own normal close path never runs for this case.
     const page = this.pluginPage

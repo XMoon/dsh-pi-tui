@@ -7,6 +7,19 @@
 
 ## [Unreleased]
 
+### 新增
+
+- **Settings 新增 Models 与 Account 两个原位页面。** Models 列出 Host provider 目录、API key
+  存在性（不是连通性测试）与 DeepSeek Account 入口，支持 provider 详情、遮蔽输入的 API key
+  写入/清除、Add Provider 草稿向导、stored credential 清除确认和 provider-native 登录
+  （URL/提示/取消都在页面内）。Account 是独立页面：显示 Host 登录状态、浏览器授权 URL 与
+  SSH 隧道提示、各自独立的 Profile/充值钱包/赠送钱包，并可取消当前 attempt、刷新和二次确认
+  sign out。`/login` / `/logout` 改为打开对应页面的深链接，最终写入/清除都在页面内明确确认。
+- **DeepSeek Account 浏览器登录接入官方 Host callback。** TUI bundle 现在挂载官方
+  `host-webserver`（`127.0.0.1:0`），由官方 PlatformAccount 在授权期间注册
+  `/oauth/callback`；浏览器授权、PKCE/state 校验、grant 持久化与后台撤销都由 Host 完成，
+  TUI 不接收 token/grant，也不自建 HTTP 服务。`--help` 不会监听端口。
+
 ### 变更
 
 - **审批改为输入框位置的阻塞式操作面板。** 审批请求现在显示在编辑器席位：完整的

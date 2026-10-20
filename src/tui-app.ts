@@ -147,12 +147,16 @@ import { planTaskQuickLayout, TaskQuickAccessory } from './tui/panels/task-quick
 import { JobInspectorPanel, type JobCopyUnavailable } from './tui/panels/job-inspector-panel.ts'
 import {
   SettingsWorkspacePanel,
+  type SettingsAuthPage,
+  type SettingsWorkspaceCategoryId,
   type SettingsWorkspaceCommitOutcome,
   type SettingsWorkspaceCommitRequest,
   type SettingsWorkspaceRowFacts,
   type SettingsWorkspaceRowId,
   type SettingsWorkspaceSource,
 } from './tui/panels/settings-workspace-panel.ts'
+import type { ModelsInitialView } from './tui/panels/models-workspace-page.ts'
+import type { AccountInitialView } from './tui/panels/account-workspace-page.ts'
 import type { TaskPanelItem } from './app/surface/task-presentation.ts'
 import type { JobInspectorState, TaskBrowserViewState } from './app/surface/task-runtime.ts'
 import type { TaskBrowserSummary } from './app/surface/task-browser-runtime.ts'
@@ -1618,6 +1622,19 @@ export interface SettingsWorkspaceOpenOptions {
   /** The row this open selects first (the Web Settings return path,
    *  S2/PR-B §B3.4): a re-entry restores the SAME row instead of the default. */
   readonly initialRowId?: import('./tui/panels/settings-workspace-panel.ts').SettingsWorkspaceRowId
+  /** The category this open lands on (`/login` / `/logout` deeplinks). */
+  readonly initialCategory?: SettingsWorkspaceCategoryId
+  /** The Models page a deeplink opens (only with `initialCategory: 'models'`). */
+  readonly initialModelsView?: ModelsInitialView
+  /** The Account page a deeplink opens (only with `initialCategory: 'account'`). */
+  readonly initialAccountView?: AccountInitialView
+  /** The Models page factory (the screen lease stays with the workspace). */
+  readonly createModelsPage?: (
+    initial: ModelsInitialView,
+    openAccount: () => void,
+  ) => SettingsAuthPage | undefined
+  /** The Account page factory. */
+  readonly createAccountPage?: (initial: AccountInitialView) => SettingsAuthPage | undefined
 }
 
 /** The live row handle of an OPEN legacy settings list: a section whose facts
@@ -21721,6 +21738,8 @@ export class TuiApp {
       onClose: () => record.close(),
       onOpenLegacy: (targetId?: string) => openLegacy(targetId),
       ...(options.onOpenPlugins === undefined ? {} : { onOpenPlugins: options.onOpenPlugins }),
+      ...(options.createModelsPage === undefined ? {} : { createModelsPage: options.createModelsPage }),
+      ...(options.createAccountPage === undefined ? {} : { createAccountPage: options.createAccountPage }),
       // The clipboard capability stays the SAME Client-local `copySelection` the
       // rest of the surface already uses; the settlement re-proves THIS workspace
       // record before it may notify.
@@ -21772,6 +21791,9 @@ export class TuiApp {
       // from the legacy Web section never lands the user on the default theme
       // row.
       ...options.initialRowId === undefined ? {} : { initialRowId: options.initialRowId },
+      ...options.initialCategory === undefined ? {} : { initialCategory: options.initialCategory },
+      ...options.initialModelsView === undefined ? {} : { initialModelsView: options.initialModelsView },
+      ...options.initialAccountView === undefined ? {} : { initialAccountView: options.initialAccountView },
     })
     record = this.leaseWorkspaceScreen('settings', panel, options.onClose)
     const close = (): void => record.close()

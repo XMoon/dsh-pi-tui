@@ -2168,7 +2168,11 @@ export function registerTuiCommands(
 
   registerStatusCommand({ runner, registerOne })
 
-  const authCommands = createAuthCommands({ runner, app: app as TuiApp, registerOne, notifyOutcome })
+  const authCommands = createAuthCommands({
+    runner,
+    registerOne,
+    openAuthWorkspace: settingsCommands.openAuthWorkspace,
+  })
   authCommands.registerLogin()
 
   authCommands.registerLogout()

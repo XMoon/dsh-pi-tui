@@ -391,6 +391,23 @@ readiness. `R`
 re-reads and `C` copies the selected row's exact source value. Browsing, choosing
 and copying alone never write configuration.
 
+The Settings categories are now `Models / Account / Appearance / Display / Plugins /
+Other settings`; `/settings` still lands on Appearance. `Models` is an in-place page: it lists
+the Host provider directory, whether an API key is configured (presence only, never a
+connection test) and the DeepSeek Account entry; it exposes provider facts, a masked API-key
+editor, the Add Provider draft wizard, and provider-native sign-in with a persistent notice,
+prompts and cancel. `Account` is the independent DeepSeek Account page: it shows the Host state,
+the browser authorization URL and SSH tunnel guidance, and independent Profile / recharge-wallet
+/ bonus-wallet outcomes (a failure is never shown as a zero balance); it can cancel the exact
+attempt, refresh, and sign out after an explicit confirmation. Closing the page does not cancel
+an already-started browser sign-in. `/login` and `/logout` now only resolve a target and open the
+corresponding page (`/login` opens Models, a known route opens its detail, a known/novel reference
+opens the API Key Reference, a new route prefills Add Provider, and `deepseek-account` opens
+Account; `/logout` opens the stored-credentials list or one clear confirmation). The final write
+or clear always requires an explicit confirmation in the page. Account authorization stays
+separate from generic provider flows: it signs in only through the official PlatformAccount and
+the Host loopback `/oauth/callback`, and is never cleared as a generic credential record.
+
 The **`Configured theme` and `Transcript display` rows are directly editable**:
 from L1, `Right` or `Enter`, the painted `[Change…]` button, or ordinary visible
 Detail content opens the candidate choice in the SAME L2 pane. Current-value and
@@ -444,8 +461,8 @@ providers. `[current]` moves only after
 the official mutation and its authoritative read-back agree, and a refused write reads `Not saved`.
 The choice applies to the next search/fetch; a running operation is never changed retroactively. The
 DeepSeek API key row shows only whether the reference is configured and its source layer; configure
-or clear it through the existing masked `/login DEEPSEEK_API_KEY` / `/logout DEEPSEEK_API_KEY` paths,
-which run after the settings surface closes. Esc from the Web section restores the same
+or clear it through the masked API Key Reference in Models after the current Web editor closes
+(`/login DEEPSEEK_API_KEY` / `/logout DEEPSEEK_API_KEY` only navigate). Esc from the Web section restores the same
 `Web Search / Fetch` row; the original `Open existing settings…` entry still returns to the
 conversation. A Remote backend reports the section unavailable and names no Host namespace.
 

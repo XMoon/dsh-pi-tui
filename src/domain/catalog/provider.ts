@@ -213,12 +213,23 @@ export function credentialOptionsFor(
   return options
 }
 
-/** Resolve a /login or /logout argument to a credential ref. A
- * case-insensitive llm-pi-ai route name wins, then a literal env-var-looking
- * name (any casing, uppercased like the old behavior — `/login my_key` sets
- * `MY_KEY`); anything else is unknown and returns undefined so the caller
- * can list the valid options. */
-export function resolveCredentialArg(arg: string, options: readonly LoginCredentialOption[]): string | undefined {
+/** One resolved /login or /logout argument: a known provider ROUTE (its
+ *  profile/credential target) or a literal credential REFERENCE (existing or
+ *  novel). The two are distinct destinations for the Models page, so the
+ *  classifier exposes which one the text named instead of collapsing both into
+ *  a ref. */
+export type CredentialArgMatch =
+  | { readonly kind: 'route'; readonly option: LoginCredentialOption }
+  | { readonly kind: 'ref'; readonly ref: string }
+
+/** Resolve a /login or /logout argument with the SAME rules the command has
+ * always used: a route name (or a label's first word) wins, then a literal
+ * env-var-looking name (uppercased like the old behavior); anything else is
+ * unknown. */
+export function classifyCredentialArg(
+  arg: string,
+  options: readonly LoginCredentialOption[],
+): CredentialArgMatch | undefined {
   const trimmed = arg.trim()
   if (trimmed === '') return undefined
   // A route name matches its label; a label's FIRST WORD is an alias, so
@@ -228,9 +239,21 @@ export function resolveCredentialArg(arg: string, options: readonly LoginCredent
   const route = options.find(option =>
     option.label.toLowerCase() === needle
     || option.label.split(' ')[0]!.toLowerCase() === needle)
-  if (route !== undefined) return route.ref
-  // Env-var-looking names are used verbatim (uppercased for convenience,
-  // preserving the old `/login <anything>` behavior).
-  if (/^[a-zA-Z][a-zA-Z0-9_]*$/.test(trimmed)) return trimmed.toUpperCase()
+  if (route !== undefined) return { kind: 'route', option: route }
+  // An exact existing reference keeps its stored casing; a novel
+  // env-var-looking name is uppercased for convenience.
+  const exactRef = options.find(option => option.ref.toLowerCase() === needle)
+  if (exactRef !== undefined) return { kind: 'ref', ref: exactRef.ref }
+  if (/^[a-zA-Z][a-zA-Z0-9_]*$/.test(trimmed)) return { kind: 'ref', ref: trimmed.toUpperCase() }
   return undefined
+}
+
+/** Resolve a /login or /logout argument to a credential ref. A
+ * case-insensitive llm-pi-ai route name wins, then a literal env-var-looking
+ * name (any casing, uppercased like the old behavior — `/login my_key` sets
+ * `MY_KEY`); anything else is unknown and returns undefined so the caller
+ * can list the valid options. */
+export function resolveCredentialArg(arg: string, options: readonly LoginCredentialOption[]): string | undefined {
+  const match = classifyCredentialArg(arg, options)
+  return match === undefined ? undefined : match.kind === 'route' ? match.option.ref : match.ref
 }
