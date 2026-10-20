@@ -341,8 +341,17 @@ async function main() {
       ['vendored pi-tui tests', ['test:fork']],
       ['TUI build', ['build']],
       ['TUI bundle typecheck', ['typecheck:bundle']],
-      ['TUI unit tests', ['test:bundle']],
+      // The PRODUCT suite runs inside `prepack` (the packaging safety gate
+      // must stay self-contained), so running `test:bundle` here would run
+      // the whole product suite TWICE against the same workspace and the same
+      // dependency graph. The TOOLING suite is not part of `prepack`, so it
+      // still needs its own run here.
+      ['TUI tooling tests', ['test:tooling']],
       ['documentation tests', ['test:docs']],
+      // `gate:pi-surface-compat` is the re-vendor HARD GATE. It overlaps the
+      // product suite's own glob, but the independent entry is deliberately
+      // kept: a re-vendor contract must not depend on the product suite's
+      // discovery staying unchanged.
       ['Pi surface compatibility gate', ['gate:pi-surface-compat']],
       ['TUI candidate build and pack', ['pack:release']],
     ]) await run(PNPM_COMMAND, args, workspace, label, sourcePnpmEnv)
