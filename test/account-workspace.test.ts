@@ -419,3 +419,31 @@ test('a stale startSignIn snapshot cannot overwrite a newer watch state (P2)', a
   assert.doesNotMatch(painted, /waiting-browser/u)
   assert.equal(page.pendingMutation(), false)
 })
+
+test('refresh is refused while an Account operation is busy (RFL-012)', async () => {
+  const state: SourceState = { view: signedOut(), profileFails: false, balanceFails: false, runningTasks: false, calls: [] }
+  const source = makeSource(state)
+  let resolveStart: ((view: AccountView) => void) | undefined
+  let stateReads = 0
+  source.startSignIn = () => new Promise<AccountView>(resolve => {
+    state.calls.push('signIn')
+    resolveStart = resolve
+  })
+  source.getState = async () => {
+    stateReads += 1
+    throw new Error('refresh must not run while busy')
+  }
+  const page = new AccountWorkspacePage(source, () => {}, { view: 'page' })
+  page.setBodyHeight(30)
+  await flush()
+  text(page)
+  page.handleInput('\r') // start sign-in, held
+  await flush()
+  page.handleInput('r') // advertised refresh shortcut during busy
+  await flush()
+  assert.equal(stateReads, 0, 'refresh must not advance the generation or read state while busy')
+  resolveStart?.(waitingAttempt())
+  await flush()
+  assert.match(text(page), /waiting-browser/u)
+  assert.equal(page.pendingMutation(), false)
+})
