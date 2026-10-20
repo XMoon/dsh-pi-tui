@@ -140,6 +140,51 @@ export function productionReferences(source) {
     return undefined
   }
 
+  /**
+   * The LOCAL READ HELPERS: a function whose body joins a base with one of
+   * its OWN parameters.
+   *
+   *     const read = (rel: string) => readFileSync(join(ROOT, rel), 'utf8')
+   *     read('src/app/surface/runtime.ts')
+   *
+   * The join's argument is a PARAMETER, so the path is only known at the
+   * CALL SITE. The helper's name and its parameter positions are collected
+   * here, and the call sites are resolved below.
+   */
+  const readHelpers = new Map()
+  const collectHelpers = (node) => {
+    if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.initializer !== undefined) {
+      const initializer = node.initializer
+      if (ts.isArrowFunction(initializer) || ts.isFunctionExpression(initializer)) {
+        const parameters = initializer.parameters
+          .filter(parameter => ts.isIdentifier(parameter.name))
+          .map(parameter => parameter.name.text)
+        if (parameters.length > 0) {
+          const scan = (inner) => {
+            if (ts.isCallExpression(inner) && ts.isIdentifier(inner.expression) && inner.expression.text === 'join') {
+              for (const [index, argument] of inner.arguments.entries()) {
+                if (!ts.isIdentifier(argument)) continue
+                const position = parameters.indexOf(argument.text)
+                if (position === -1) continue
+                const base = inner.arguments.slice(0, index)
+                if (base.length === 0) continue
+                // The base may be a literal path or a named handle
+                // (`join(ROOT, rel)`): the base's own PRODUCTION AREA is
+                // what identifies the read, and the call site's argument
+                // supplies the path under it.
+                readHelpers.set(node.name.text, { parameters, position, base })
+              }
+            }
+            ts.forEachChild(inner, scan)
+          }
+          scan(initializer)
+        }
+      }
+    }
+    ts.forEachChild(node, collectHelpers)
+  }
+  collectHelpers(file)
+
   const visit = (node) => {
     // The import clause: `import { x } from '…'`, and the side-effect form.
     if (ts.isImportDeclaration(node) && node.moduleSpecifier !== undefined) {
@@ -167,6 +212,24 @@ export function productionReferences(source) {
     if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === 'require') {
       const [argument] = node.arguments
       if (argument !== undefined && ts.isStringLiteralLike(argument)) add(argument.text)
+    }
+    // A LOCAL READ HELPER's call site: `read('src/app/…')`. The path is
+    // known only here, at the call, so it is resolved from the argument
+    // that fills the helper's join parameter.
+    if (ts.isCallExpression(node) && ts.isIdentifier(node.expression)) {
+      const helper = readHelpers.get(node.expression.text)
+      if (helper !== undefined) {
+        const argument = node.arguments[helper.position]
+        if (argument !== undefined && ts.isStringLiteralLike(argument)) {
+          // The argument is the path under the base: it usually names the
+          // production area itself (`read('src/app/…')`).
+          const path = argument.text
+          const area = path.split('/').find(segment => segment === 'src' || segment === 'packages')
+          if (area !== undefined) {
+            add(`<root>${path.split('/').slice(path.split('/').indexOf(area)).join('/')}`)
+          }
+        }
+      }
     }
     // The PATH JOIN READ: `readFileSync(join(root, 'src', 'app', …))`.
     //
