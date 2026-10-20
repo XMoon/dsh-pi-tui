@@ -722,6 +722,11 @@ test('the Add Provider page drives discovery → multi-select → review → cre
   page.handleInput('\u001b[B') // models field
   page.handleInput('\r')
   await flush()
+  for (let index = 0; index < 50; index += 1) {
+    if (/Models advertised by the endpoint/u.test(viewText(page))) break
+    await new Promise<void>(resolve => setImmediate(resolve))
+    page.render(100)
+  }
   assert.match(viewText(page), /Models advertised by the endpoint/u)
   page.handleInput(' ')
   page.handleInput('\u001b[B')
@@ -1327,4 +1332,124 @@ test('a refresh while a reference clear is pending cannot reset it to ready (RFL
   releaseClear?.()
   await flush()
   assert.equal(page.pendingMutation(), false)
+})
+
+test('a failed stored-credentials read shows the failure, not a permanent Reading state (F1)', async () => {
+  let fail = true
+  const { source } = fakeSource()
+  source.storedCredentials = async () => {
+    if (fail) throw new Error('records backend unavailable')
+    return { rows: [{ kind: 'record' as const, key: 'llm-pi-ai/anthropic', label: 'Anthropic', route: 'anthropic', kindHint: 'grant' }], recordCleanupUnavailable: false, referenceReadFailures: [] }
+  }
+  const page = new ModelsWorkspacePage(source, () => {}, { view: 'records' }, () => {})
+  page.setBodyHeight(24)
+  await flush()
+  const failed = viewText(page)
+  assert.match(failed, /records backend unavailable/u)
+  assert.doesNotMatch(failed, /Reading the credential store/u)
+  fail = false
+  page.handleInput('r')
+  await flush()
+  assert.match(viewText(page), /Anthropic/u)
+  assert.doesNotMatch(viewText(page), /could not be read/u)
+})
+
+test('an old model discovery cannot apply to an edited endpoint (F2)', async () => {
+  let releaseDiscovery: (() => void) | undefined
+  const { source } = fakeSource()
+  source.discoverModels = async () => {
+    await new Promise<void>(resolve => { releaseDiscovery = resolve })
+    return [{ id: 'old-model' }]
+  }
+  const page = new ModelsWorkspacePage(source, () => {}, { view: 'add-provider', route: 'race-route' }, () => {})
+  page.setBodyHeight(30)
+  await flush()
+  viewText(page)
+  page.handleInput('\u001b[B')
+  page.handleInput('\u001b[B') // Base URL
+  page.handleInput('\r')
+  await flush()
+  page.render(100)
+  for (const character of 'https://a.example/v1') page.handleInput(character)
+  page.handleInput('\r')
+  page.handleInput('\r')
+  await flush()
+  page.render(100)
+  page.handleInput('\u001b[B')
+  page.handleInput('\u001b[B')
+  page.handleInput('\u001b[B') // Models
+   page.handleInput('\r')
+  await flush()
+  for (let index = 0; index < 50; index += 1) {
+    if (/Probing the endpoint/u.test(viewText(page))) break
+    await new Promise<void>(resolve => setImmediate(resolve))
+    page.render(100)
+  }
+  assert.match(viewText(page), /Probing the endpoint/u)
+  page.handleInput('\u001b[A')
+  page.handleInput('\u001b[A')
+  page.handleInput('\u001b[A') // back to Base URL
+  page.handleInput('\r')
+  await flush()
+  page.render(100)
+  for (const character of 'https://b.example/v1') page.handleInput(character)
+  page.handleInput('\r')
+  await flush()
+  releaseDiscovery?.()
+  await flush()
+  const painted = viewText(page)
+  assert.match(painted, /https:\/\/b\.example\/v1/u)
+  assert.doesNotMatch(painted, /Models advertised by the endpoint/u)
+  assert.doesNotMatch(painted, /old-model/u)
+})
+
+test('a profile-written/key-failed outcome refreshes the provider list (F3)', async () => {
+  const { source } = fakeSource()
+  const rows: ModelsProviderRow[] = []
+  source.rows = () => rows
+  source.createProvider = async draft => {
+    rows.push({
+      kind: 'reference', identity: `route:${draft.route}`, route: draft.route, label: draft.route,
+      ref: 'PARTIAL_API_KEY', configured: false, declared: false, namesCredential: true,
+      methods: [], inFlight: false, profile: { route: draft.route, configured: true, models: [...draft.models] },
+    })
+    return { kind: 'profile-written-key-failed', text: `provider ${draft.route} profile saved; key write failed`, reason: 'write refused' }
+  }
+  const page = new ModelsWorkspacePage(source, () => {}, { view: 'add-provider', route: 'partial-route' }, () => {})
+  page.setBodyHeight(30)
+  await flush()
+  ;(page as unknown as { add: Record<string, unknown>; view: { kind: string } }).add = {
+    step: 'review',
+    draft: { route: 'partial-route', api: 'openai-completions', baseURL: 'https://partial.example/v1', displayName: '', models: ['m1'], key: '' },
+    discovering: false,
+  }
+  ;(page as unknown as { view: { kind: string } }).view = { kind: 'review' }
+  page.render(100)
+  page.handleInput('\r') // Create
+  await flush()
+  assert.match(viewText(page), /key write failed/u)
+  page.render(100)
+  page.handleInput('\r') // Back to providers
+  await flush()
+  assert.match(viewText(page), /partial-route/u)
+})
+
+test('a short select picker keeps its action bar visible with a 3-line notice (F4)', async () => {
+  const { source } = fakeSource()
+  let picked: string | undefined
+  const page = new ModelsWorkspacePage(source, () => {}, { view: 'provider', route: 'anthropic' }, () => {})
+  page.setBodyHeight(4)
+  ;(page as unknown as { picker: unknown }).picker = {
+    token: {}, header: 'Sign in method', items: [{ value: 'a', label: 'Method A' }, { value: 'b', label: 'Method B' }],
+    index: 0,
+    onSelect: (value: string) => { picked = value },
+    onCancel: () => {},
+  }
+  ;(page as unknown as { authNotice: unknown }).authNotice = { message: 'Continue in your browser', url: 'https://example.test/authorize', code: 'ABCD' }
+  const lines = page.render(40).map(stripTerminalSequences)
+  assert.equal(lines.length, 4)
+  assert.match(lines.at(-1) ?? '', /Enter select/u)
+  assert.match(lines.at(-1) ?? '', /Esc cancel/u)
+  page.handleInput('\r')
+  assert.equal(picked, 'a')
 })
