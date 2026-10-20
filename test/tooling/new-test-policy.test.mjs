@@ -30,6 +30,7 @@ import { join } from 'node:path'
 import test from 'node:test'
 
 import { discoverTestFiles, resolveLane } from '../../scripts/test-discovery.mjs'
+import { fixedWaitHelpers, fixedWaitsOf } from '../../scripts/fixed-wait-helpers.mjs'
 import { LANES } from '../../scripts/test-lanes.mjs'
 
 const REPO_ROOT = join(import.meta.dirname, '..', '..')
@@ -93,66 +94,11 @@ test('a lane that matches nothing fails closed', () => {
  */
 const BASELINE = JSON.parse(readFileSync(join(TEST_ROOT, 'tooling', 'new-test-policy-baseline.json'), 'utf8'))
 
-/**
- * The shared FIXED-WAIT helpers.
- *
- * A blind sleep is not only a literal `setTimeout` in the test file: it can
- * also be a call to a SHARED helper that wraps one (`directSettle(ms)`).
- * The helper names are DERIVED from the support modules themselves — a
- * helper that wraps a `setTimeout` with a millisecond argument is a
- * fixed-wait helper by construction, so a new one is covered without a
- * hand-maintained list.
- */
-function fixedWaitHelpers() {
-  const helpers = new Set()
-  const supportRoot = join(TEST_ROOT, 'support')
-  for (const entry of readdirSync(supportRoot, { withFileTypes: true })) {
-    if (!entry.isFile() || !/\.(ts|mjs)$/u.test(entry.name)) continue
-    const source = readFileSync(join(supportRoot, entry.name), 'utf8')
-    for (const match of source.matchAll(
-      /export\s+(?:async\s+)?function\s+([a-zA-Z_$][A-Za-z0-9_$]*)\s*\([^)]*\b(?:millis|ms|delay|durationMs)\b[^)]*\)/gu,
-    )) {
-      helpers.add(match[1])
-    }
-  }
-  return helpers
-}
-
-/**
- * The fixed waits a test file contains.
- *
- * A BLIND sleep is a fixed wait whose only purpose is "give the system
- * time". The policy allows a bounded wait when the contract IS about a
- * time window, and requires the reason next to it.
- */
-function fixedWaitsOf(rel, helpers = fixedWaitHelpers()) {
-  const source = readFileSync(join(TEST_ROOT, rel), 'utf8')
-  const lines = source.split('\n')
-  const found = []
-  for (let index = 0; index < lines.length; index += 1) {
-    const line = lines[index]
-    // The literal form: `setTimeout(resolve, 4000)`.
-    const literal = /setTimeout\([^,]*,\s*\d[\d_]{2,}/u.test(line)
-    // The shared-helper form: `directSettle(4_000)`. A helper call with NO
-    // argument uses the helper's own default, so it counts too.
-    const helperCall = [...helpers].some(helper => {
-      const pattern = new RegExp(`\\b${helper}\\s*\\(\\s*(\\d[\\d_]{2,})?\\s*\\)`, 'u')
-      return pattern.test(line)
-    })
-    if (!literal && !helperCall) continue
-    // A blind wait needs a reason on the line itself or the line above.
-    const context = `${lines[index - 1] ?? ''}\n${line}`
-    if (/\/\/[^\n]*(?:reason|window|deadline|bounded|negative|observation)/iu.test(context)) continue
-    found.push(index + 1)
-  }
-  return found
-}
-
 test('a fixed wait in a NEW test carries a stated reason', () => {
   const baseline = BASELINE.fixedWaits
   const offenders = []
   for (const rel of discoverTestFiles(TEST_ROOT, ['.test.ts', '.test.mjs'])) {
-    const waits = fixedWaitsOf(rel)
+    const waits = fixedWaitsOf(rel, TEST_ROOT)
     const allowed = baseline[rel] ?? 0
     if (waits.length > allowed) {
       offenders.push(`${rel}: ${waits.length} unreasoned fixed wait(s) (the baseline allows ${allowed})`)
@@ -175,7 +121,7 @@ test('the pre-existing fixed-wait baseline still matches the tree', () => {
       stale.push(`${rel}: the file no longer exists`)
       continue
     }
-    const actual = fixedWaitsOf(rel).length
+    const actual = fixedWaitsOf(rel, TEST_ROOT).length
     if (actual > count) stale.push(`${rel}: ${actual} unreasoned fixed wait(s), the baseline allows ${count}`)
   }
   assert.deepEqual(stale, [],
@@ -277,7 +223,7 @@ test('a NEW long wait through a shared helper is caught', () => {
     const helpers = fixedWaitHelpers()
     assert.ok(helpers.has('directSettle'),
       'the shared fixed-wait helper must be discovered from the support modules')
-    const waits = fixedWaitsOf(probe, helpers)
+    const waits = fixedWaitsOf(probe, TEST_ROOT, helpers)
     assert.deepEqual(waits, [5],
       'a long wait through the shared helper must be reported as an unreasoned fixed wait')
   } finally {
@@ -300,9 +246,33 @@ test('a NEW long literal wait is caught', () => {
     '',
   ].join('\n'))
   try {
-    const waits = fixedWaitsOf(probe, fixedWaitHelpers())
+    const waits = fixedWaitsOf(probe, TEST_ROOT)
     assert.deepEqual(waits, [4],
       'a long literal wait must be reported as an unreasoned fixed wait')
+  } finally {
+    rmSync(path, { force: true })
+  }
+})
+
+test('a shared wait helper is discovered by its IMPLEMENTATION, not its name', () => {
+  // The review's finding: a helper named `sleep(timeoutMs)` was not
+  // discovered, because the discovery matched the PARAMETER NAME
+  // `millis|ms|delay|durationMs`. The derivation must be name-independent:
+  // a helper whose body waits a `setTimeout` whose delay comes from one of
+  // its OWN parameters is a fixed-wait helper by construction.
+  const probe = 'support/synthetic-sleep-helper.ts'
+  const path = join(TEST_ROOT, probe)
+  mkdirSync(join(path, '..'), { recursive: true })
+  writeFileSync(path, [
+    'export async function sleep(timeoutMs: number): Promise<void> {',
+    '  await new Promise(resolve => setTimeout(resolve, timeoutMs))',
+    '}',
+    '',
+  ].join('\n'))
+  try {
+    const helpers = fixedWaitHelpers()
+    assert.ok(helpers.has('sleep'),
+      'a helper that waits a parameter-driven setTimeout must be discovered, whatever its name')
   } finally {
     rmSync(path, { force: true })
   }

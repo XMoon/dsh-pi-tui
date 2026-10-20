@@ -96,7 +96,7 @@
     "runtime/remote/runner-remote-job-viewer.test.ts": 5,
     "runtime/remote/runner-remote-plugin-manager.test.ts": 3,
     "tooling/dsh-process.test.mjs": 5,
-    "tooling/new-test-policy.test.mjs": 4,
+    "tooling/new-test-policy.test.mjs": 2,
     "tooling/pi2dsh-compat-smoke.test.mjs": 1,
     "tui/activity-clock.test.ts": 2,
     "tui/focus-anchor.test.ts": 1,
