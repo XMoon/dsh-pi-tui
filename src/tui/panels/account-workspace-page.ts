@@ -685,8 +685,14 @@ export class AccountWorkspacePage implements Component {
       || target.row !== pressed.target.row) return
     if (!this.paintedActionIds.has(target.id)) return
     const rowIndex = this.paintedRowOrder.indexOf(target.id)
-    if (rowIndex >= 0) this.cursor = rowIndex
-    else this.cursor = this.paintedRowOrder.length + this.actionIndexOf(target.id)
+    if (rowIndex >= 0) {
+      this.cursor = rowIndex
+    } else {
+      const projection = this.project(this.lastWidth)
+      const action = projection.actions.find(candidate => candidate.id === target.id)
+      if (action === undefined || !action.enabled) return
+      this.cursor = this.paintedRowOrder.length + projection.actions.indexOf(action)
+    }
     this.activate(target.id)
   }
 

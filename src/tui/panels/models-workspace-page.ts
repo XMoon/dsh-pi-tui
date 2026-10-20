@@ -251,6 +251,7 @@ export class ModelsWorkspacePage implements Component {
   private cursor = 0
   private scroll = 0
   private picker: PickerState | undefined
+  private readonly pickerQueue: PickerState[] = []
   private modelPicker: { items: readonly { readonly id: string }[]; readonly selected: Set<string>; index: number } | undefined
   private question: EmbeddedQuestion | undefined
   private readonly questionQueue: EmbeddedQuestion[] = []
@@ -611,6 +612,7 @@ export class ModelsWorkspacePage implements Component {
           })
         } catch (error) {
           this.settle(() => {
+            if (!isCurrent() || readSerial !== this.clearReadSerial) return
             this.clear = { phase: 'failed', configured: true, reason: `the clear returned; the store could not be re-read: ${errorText(error)}` }
           })
         }
@@ -1032,13 +1034,8 @@ export class ModelsWorkspacePage implements Component {
       onSelect,
       onCancel,
     }
-    this.picker = picker
-    this.requestRender()
-    return { close: () => {
-      if (this.picker !== picker) return
-      this.picker = undefined
-      this.requestRender()
-    } }
+    this.setPicker(picker)
+    return { close: () => { this.removePicker(picker) } }
   }
 
   // ── embedded question ───────────────────────────────────────────────────
@@ -1520,10 +1517,11 @@ export class ModelsWorkspacePage implements Component {
     else if (clear.phase === 'done') content.push(color.success(sanitizedPhysicalLine(clear.result ?? 'cleared')))
     else if (!clear.configured) content.push(color.textMuted('Nothing stored for this target — nothing will be cleared.'))
     else content.push(color.warning('This removes the locally stored credential. The current model is not switched.'))
+    if (this.notice !== undefined) content.push('', color.warning(sanitizedPhysicalLine(this.notice)))
     this.copyValue = undefined
     const actions: ActionLine[] = []
     if (clear.phase === 'ready' && clear.configured) actions.push({ id: 'clear:confirm', label: 'Clear credential', enabled: true })
-    actions.push({ id: 'clear:back', label: '← Back', enabled: true })
+    if (clear.phase !== 'pending') actions.push({ id: 'clear:back', label: '← Back', enabled: true })
     return { content, actions }
   }
 
@@ -1698,13 +1696,32 @@ export class ModelsWorkspacePage implements Component {
     }
   }
 
+  private setPicker(picker: PickerState): void {
+    if (this.picker === undefined) this.picker = picker
+    else this.pickerQueue.push(picker)
+    this.revision += 1
+    this.requestRender()
+  }
+
+  /** Retire EXACTLY one select prompt. A withdrawn/answered older prompt can
+   *  never clear a newer one that now owns the single visible picker slot. */
+  private removePicker(picker: PickerState): void {
+    if (this.picker === picker) {
+      this.picker = this.pickerQueue.shift()
+    } else {
+      const index = this.pickerQueue.indexOf(picker)
+      if (index >= 0) this.pickerQueue.splice(index, 1)
+    }
+    this.revision += 1
+    this.requestRender()
+  }
+
   private handlePickerInput(data: string): void {
     const picker = this.picker
     if (picker === undefined) return
     if (matchesKey(data, 'escape') || matchesKey(data, 'backspace')) {
-      this.picker = undefined
+      this.removePicker(picker)
       picker.onCancel()
-      this.requestRender()
       return
     }
     if (matchesKey(data, 'up')) {
@@ -1730,9 +1747,8 @@ export class ModelsWorkspacePage implements Component {
     if (matchesKey(data, 'enter')) {
       const item = picker.items[picker.index]
       if (item === undefined) return
-      this.picker = undefined
+      this.removePicker(picker)
       picker.onSelect(item.value)
-      this.requestRender()
     }
   }
 
@@ -1915,8 +1931,16 @@ export class ModelsWorkspacePage implements Component {
         return 'handled'
       case 'records':
       case 'logout-list':
-      case 'logout':
       case 'guide':
+        this.clear = undefined
+        this.enter({ kind: 'list' })
+        return 'handled'
+      case 'logout':
+        if (this.clear?.phase === 'pending') {
+          this.notice = 'the credential clear is in flight — wait for the Host outcome'
+          this.requestRender()
+          return 'handled'
+        }
         this.clear = undefined
         this.enter({ kind: 'list' })
         return 'handled'
@@ -1981,16 +2005,18 @@ export class ModelsWorkspacePage implements Component {
     } else if (target.kind === 'action') {
       if (!this.paintedActionIds.has(target.id)) return
       const rowCount = this.rowOrder.length
-      this.cursor = rowCount + this.actionIndexOf(target.id)
-      this.activateAction(target.id)
+      const projection = this.project(this.lastWidth)
+      const action = projection.actions.find(candidate => candidate.id === target.id)
+      if (action === undefined || !action.enabled) return
+      this.cursor = rowCount + projection.actions.indexOf(action)
+      this.activateAction(action.id)
     } else if (target.kind === 'picker') {
       const index = Number(target.id)
       const picker = this.picker
       const item = picker?.items[index]
       if (picker !== undefined && item !== undefined) {
-        this.picker = undefined
+        this.removePicker(picker)
         picker.onSelect(item.value)
-        this.requestRender()
       }
     } else if (target.kind === 'model-picker') {
       const picker = this.modelPicker
@@ -2043,6 +2069,7 @@ export class ModelsWorkspacePage implements Component {
     this.pageController.abort()
     this.clearQuestions()
     this.picker = undefined
+    this.pickerQueue.length = 0
     this.modelPicker = undefined
     this.referencePhase = 'idle'
     this.referenceStatus = undefined
