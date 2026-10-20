@@ -404,7 +404,7 @@ test('a surface below 24 columns still paints all three decisions', async () => 
     arguments: LONG_ARGUMENTS,
   })
   const view = await viewport(vt)
-  assert.ok(view.includes('Approv'), `the compact title must stay identifiable:\n${view}`)
+  assert.ok(view.includes('bash'), `the compact tool identity must stay identifiable:\n${view}`)
   assert.ok(view.includes('[y] Allow once'), `allow decision missing:\n${view}`)
   assert.ok(view.includes('[n] Reject'), `reject decision missing:\n${view}`)
   assert.ok(view.includes('[Esc] Cancel'), `cancel decision missing:\n${view}`)

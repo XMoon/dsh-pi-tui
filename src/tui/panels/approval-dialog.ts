@@ -102,9 +102,9 @@ const PREFERRED_ACTION_ROWS = 2
  * a clipped box: the pinned header/footer must keep their own rows and there
  * is no honest way to show the title, a reading row AND all three decisions. */
 const MIN_SHEET_FRAME_ROWS = 5
-/** Below this CONTENT width the full decision labels cannot be packed at all;
- * the resize row is more truthful than truncated key badges. */
-const MIN_SHEET_CONTENT_WIDTH = 12
+/** Below this CONTENT width the sheet cannot show a meaningful title and a
+ * full decision bar; the resize row is more truthful than truncated badges. */
+const MIN_SHEET_CONTENT_WIDTH = 16
 
 /** A blank content row (kept as a plain space so the Frame border padding
  * never becomes a zero-width row). */
@@ -359,11 +359,21 @@ class ApprovalSheet implements Component {
       if (compactHeader) {
         // Ultra-short degradation keeps BOTH facts on one row instead of
         // spending the last reading row on a separate banner. The title is
-        // cropped FIRST so a long tool name can never push the danger fact out.
+        // cropped FIRST so a long tool name can never push the danger fact out;
+        // when even that row cannot fit the full banner, keep a compact tool
+        // identity plus the warning glyph.
         const suffix = ' · ⚠ Dangerous command'
-        titleShown = visibleWidth(suffix) < contentWidth
-          ? `${truncateToWidth(titleText, contentWidth - visibleWidth(suffix), '…')}${suffix}`
-          : truncateToWidth('⚠ Dangerous command', contentWidth, '…')
+        if (visibleWidth(suffix) < contentWidth) {
+          titleShown = `${truncateToWidth(titleText, contentWidth - visibleWidth(suffix), '…')}${suffix}`
+        } else {
+          const dangerTag = ' ⚠'
+          const toolLabel = sanitizedPhysicalLine(this.request.toolName)
+          titleShown = truncateToWidth(
+            `${truncateToWidth(toolLabel, Math.max(1, contentWidth - visibleWidth(dangerTag)), '…')}${dangerTag}`,
+            contentWidth,
+            '…',
+          )
+        }
       } else {
         dangerShown = truncateToWidth('⚠ Dangerous command — review carefully', contentWidth, '…')
       }
@@ -417,8 +427,16 @@ class ApprovalSheet implements Component {
       } else if (visibleWidth(`${titleShown}${shortSuffix}`) <= contentWidth) {
         titleShown = `${titleShown}${shortSuffix}`
       } else {
-        const titleBudget = Math.max(1, contentWidth - visibleWidth(shortSuffix))
-        titleShown = `${truncateToWidth(titleShown, titleBudget, '…')}${shortSuffix}`
+        // Drop the "Approve…" wrapper to a compact `<tool>?` before truncating
+        // the fact itself: the tool identity and resize cue both stay legible.
+        const toolLabel = sanitizedPhysicalLine(this.request.toolName)
+        const compactTitle = `${toolLabel}?`
+        if (visibleWidth(`${compactTitle}${shortSuffix}`) <= contentWidth) {
+          titleShown = `${compactTitle}${shortSuffix}`
+        } else {
+          const titleBudget = Math.max(1, contentWidth - visibleWidth(shortSuffix))
+          titleShown = `${truncateToWidth(titleShown, titleBudget, '…')}${shortSuffix}`
+        }
       }
     }
 
