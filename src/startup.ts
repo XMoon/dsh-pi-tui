@@ -321,12 +321,56 @@ export function apply(ctx: Context): void {
     // having mounted, print the actionable error and exit nonzero. `--help`
     // never reaches this action, and a fatal launcher boot never calls
     // `onReady`, so this cannot mask a real boot failure.
+    //
+    // The handshake judges ONE startup — the one this row registered it for.
+    // The launcher's readiness contract runs a listener registered AFTER
+    // readiness was committed SYNCHRONOUSLY, inside `onReady` itself, and a
+    // listener registered BEFORE the commit runs later, at commit time. That
+    // difference is the only signal this row has about whether it witnessed a
+    // startup at all.
+    //
+    // It matters at runtime: HMR's recomposition replaces this row when the
+    // linked bundle's files changed, and the replacement is applied long after
+    // the launcher committed readiness. The re-applied row therefore observed
+    // NO startup — it cannot judge the one that already happened — but the
+    // synchronous callback used to look exactly like a committed startup
+    // without a TUI, so it exited the running application. The re-applied row
+    // therefore delivers NO verdict: its readiness callback has already run
+    // by the time the row can act, and nothing re-arms it.
+    //
+    // The consequence is deliberate and bounded: a runtime replacement that
+    // never restores the TUI is NOT reported by this handshake. The launcher
+    // owns that outcome (DSH's HMR reports the failed replacement itself and
+    // the profile's own diagnostics carry it); this row only owns the verdict
+    // for a startup it witnessed, which is the cold start.
     let surfaceMounted = false
-    ctx.get('appReady')?.onReady(() => {
-      if (surfaceMounted) return
-      process.stderr.write(`\n${surfaceNotMountedMessage()}\n\n`)
-      ctx.get('appExit')?.(1)
-    })
+    const ready = ctx.get('appReady')
+    if (ready !== undefined) {
+      // The launcher's readiness contract, observed from inside this row:
+      // a listener registered BEFORE the commit runs LATER, so `onReady`
+      // returns before the callback fires; a listener registered AFTER the
+      // commit runs INSIDE `onReady`, so the callback has already fired by
+      // the time it returns. `registrationReturned` is therefore true exactly
+      // when the callback was DEFERRED — the only case in which this row
+      // witnessed a startup and may deliver a verdict about it.
+      let registrationReturned = false
+      const cancel = ready.onReady(() => {
+        // A callback that ran INSIDE `onReady` means the launcher committed
+        // readiness before this row existed. This row witnessed no startup
+        // and owns no startup verdict: the running application keeps running.
+        if (!registrationReturned) return
+        if (surfaceMounted) return
+        process.stderr.write(`\n${surfaceNotMountedMessage()}\n\n`)
+        ctx.get('appExit')?.(1)
+      })
+      registrationReturned = true
+      // The listener is owned by this row. The launcher clears its listener
+      // set when it commits readiness, so a listener that already ran cannot
+      // outlive the commit; this binding therefore covers the OTHER path —
+      // the row is unloaded BEFORE the commit, so the registration must be
+      // cancelled instead of judging a startup the row never witnessed.
+      ctx.effect(() => () => { cancel() }, 'tui-startup readiness handshake')
+    }
     const options = program.opts<{ session?: string; preset?: string }>()
     ctx.provide(TUI_STARTUP_SERVICE, {
       ...(options.session !== undefined ? { sessionId: options.session } : {}),

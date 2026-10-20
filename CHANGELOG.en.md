@@ -24,6 +24,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   grant persistence and background revocation stay on the Host; the TUI never receives a
   token/grant and never starts its own HTTP server. `--help` opens no listener.
 
+### Fixed
+
+- **Hot reloading no longer exits a running TUI.** After a linked package is
+  rebuilt, DSH re-mounts the TUI's rows; the re-mounted startup row used to read
+  "the launcher was ready long ago" as "the TUI never mounted" and ended the
+  running process with `required TUI surface did not mount`. Only a row that
+  actually witnessed that startup now delivers the verdict: a cold start whose
+  TUI is still missing still exits nonzero with the actionable notice.
+
 ### Changed
 
 - **Approvals now use a blocking editor-seat action sheet.** The complete reason
