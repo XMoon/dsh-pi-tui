@@ -29,6 +29,7 @@ import { waitFor } from './support/remote-application-fixture.ts'
 import { testLifecycle, type TestLifecycle } from './support/temp-lifecycle.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 import { LlmAdapter } from '@deepseek-ai/dsh-llm'
+import { symbols } from '@deepseek-ai/cordis'
 
 process.env.NO_COLOR = ''
 process.env.FORCE_COLOR = ''
@@ -880,4 +881,324 @@ test('L6 M3-6 PR2 (review O1): a dispatched credential write stays real across r
   // The replacement generation reports the durable result from Host authority.
   assert.equal((await credentials.describeReference('M3_6_PR2_KEY')).configured, true,
     'the replacement generation converges on the stored credential')
+})
+
+test('L6 PR-A: a same-session-id transport rollover suppresses the stale permission notice and never retries', async (t) => {
+  const life = testLifecycle(t)
+  const mainId = 'pr-a-perm-rollover'
+  const presetId = 'm3-4-pr4-preset'
+  const { createRemoteApplicationHostFixture } = await import('./support/remote-application-fixture.ts')
+  const host = await createRemoteApplicationHostFixture(life, presetId, {
+    llmAdapter: new StubStreamingLlmAdapter(),
+  })
+  host.ctx.provide('shell', { sandboxMode: 'workspace-write' } as never)
+  const { PermissionPresetService } = await import('@deepseek-ai/dsh-permission-presets')
+  await host.ctx.plugin(PermissionPresetService as never, undefined as never)
+  const approval = await import('@deepseek-ai/dsh-user-approval')
+  await host.ctx.plugin((approval as unknown as { default: new (ctx: never, config?: never) => unknown }).default as never, undefined as never)
+  const turnOutline = await import('@deepseek-ai/dsh-session-turn-outline')
+  await host.ctx.plugin(turnOutline)
+  await host.harness.create(SessionId(mainId), { provider: 'smoke', model: 'smoke' }, { cwd: host.anchorDir })
+
+  const aggregate = await createRemoteApplicationRuntime({
+    hostContext: host.ctx,
+    waitForHostPrerequisites: async () => {},
+    clientUiStartup: { sessionId: mainId },
+  })
+  life.defer(() => aggregate.selected.disposeTransport().catch(() => {}))
+
+  // Observe the COMPOSED permission port (the same instance the composition's
+  // status owner calls): a one-to-one wrapper that returns the original
+  // outcome unchanged. It lets the test wait for the apply's real settlement,
+  // not for a timer.
+  const remotePermissions = aggregate.selected.backend.config.permissions as unknown as {
+    applyPermissionPreset(sessionId: string, presetId: string, signal: AbortSignal): Promise<unknown>
+  }
+  const originalRemoteApply = remotePermissions.applyPermissionPreset
+  let remoteApplySettled: unknown
+  remotePermissions.applyPermissionPreset = async function (sessionId, presetId, signal) {
+    const outcome = await originalRemoteApply.call(this, sessionId, presetId, signal)
+    remoteApplySettled = outcome
+    return outcome
+  }
+
+  // Hold the OFFICIAL Client command RESULT after the Host command completed.
+  // This makes the settlement order deterministic: the write is durably
+  // committed, then the transport generation is replaced, then the old
+  // gesture observes the result. The transport fence must suppress its notice;
+  // the replacement connection's projection is the only repaint.
+  const clientCommandsProxy = aggregate.wire.client.remote.commands
+  const clientCommands = ((clientCommandsProxy as unknown as Record<symbol, unknown>)[symbols.original] ?? clientCommandsProxy) as unknown as {
+    execute(sessionId: string, line: string, attachments: readonly unknown[], signal: AbortSignal): Promise<unknown>
+  }
+  const originalClientExecute = clientCommands.execute
+  const executeDescriptor = Object.getOwnPropertyDescriptor(clientCommands, 'execute')
+  let resultHeld = false
+  let releaseResult: (() => void) | undefined
+  const resultGate = new Promise<void>(resolve => { releaseResult = resolve })
+  let signalResultHeld: (() => void) | undefined
+  const resultHeldSignal = new Promise<void>(resolve => { signalResultHeld = resolve })
+  Object.defineProperty(clientCommands, 'execute', {
+    configurable: true,
+    enumerable: true,
+    value: async function (sessionId: string, line: string, attachments: readonly unknown[], signal: AbortSignal) {
+      const result = await originalClientExecute.call(clientCommands, sessionId, line, attachments, signal)
+      if (line.startsWith('/permission') && !resultHeld) {
+        resultHeld = true
+        signalResultHeld?.()
+        await resultGate
+      }
+      return result
+    },
+  })
+  life.defer(() => releaseResult?.())
+  life.defer(() => {
+    if (executeDescriptor !== undefined) Object.defineProperty(clientCommands, 'execute', executeDescriptor)
+  })
+
+  const vt = new VirtualTerminal(110, 32)
+  const restoreTerminal = await import('./support/runner-harness.ts').then(m => m.installVirtualProcessTerminal(vt))
+  life.defer(restoreTerminal)
+
+  const runnerCtx = host.ctx
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = host.workRoot
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  runnerCtx.provide('appExit', (code: number) => { void code })
+  const { TUI_STARTUP_SERVICE } = await import('../src/startup.ts')
+  runnerCtx.provide(TUI_STARTUP_SERVICE, { sessionId: mainId, shippedPresetRoot: host.workRoot })
+  const override: RemoteApplicationOverride = {
+    selected: aggregate.selected,
+    presentation: aggregate.presentation,
+    extensionService: aggregate.clientUi.extensionService,
+  }
+  const apps: unknown[] = []
+  const originalStart = TuiApp.prototype.start
+  TuiApp.prototype.start = function patchedStart(this: unknown) {
+    apps.push(this)
+    return originalStart.call(this)
+  }
+  life.defer(() => { TuiApp.prototype.start = originalStart })
+  const runnerFiber = runnerCtx.plugin(pluginCtx => {
+    applyRunnerWithRuntime(pluginCtx, TuiConfigSchema({ fullscreen: 'off', sessionId: mainId } as never), override)
+  })
+  await runnerFiber
+  life.defer(() => runnerFiber.dispose())
+  await waitFor('remote runner mount', () => vt.getViewport().join('').length > 0, 20_000)
+
+  const app = await (async () => {
+    for (let i = 0; i < 600; i += 1) {
+      const candidate = apps.at(-1) as unknown as {
+        statusStore: { snapshot(): { access?: { permissionPreset?: { id?: string } } } }
+      } | undefined
+      if (candidate !== undefined && candidate.statusStore !== undefined) return candidate
+      await new Promise(resolve => setTimeout(resolve, 25))
+    }
+    throw new Error('the mounted app never exposed the status store')
+  })()
+  await waitFor('the baseline projection rendered', () =>
+    app.statusStore.snapshot().access?.permissionPreset?.id !== undefined, 20_000)
+  const before = app.statusStore.snapshot().access!.permissionPreset!.id!
+  const names = [...aggregate.selected.backend.config.permissions.presetNames()]
+  const next = names[(names.indexOf(before) + 1) % names.length]!
+  assert.notEqual(next, before, 'the cycle has a real catalog successor')
+
+  const notices: Array<{ text: string; kind: string }> = []
+  const originalNotify = (app as unknown as { notify(text: string, kind?: string): void }).notify.bind(app)
+  ;(app as unknown as { notify(text: string, kind?: string): void }).notify = (text, kind = 'info') => {
+    notices.push({ text, kind })
+    originalNotify(text, kind)
+  }
+
+  const cycle = (app as unknown as { events: { onCyclePermission?: () => void } }).events.onCyclePermission
+  assert.ok(cycle !== undefined)
+  cycle!()
+  await waitFor('the Host committed and the Client result is held', () => resultHeld, 20_000)
+  await waitFor('the held /permission committed on the Host', () => {
+    const events = (host.ctx.sessions.get(SessionId(mainId)) as unknown as {
+      snapshotEvents(): Array<{ type: string; data: unknown }>
+    }).snapshotEvents()
+    return events.some(event => event.type === 'permission/preset' && (event.data as { preset?: string }).preset === next)
+      && events.filter(event => event.type === 'command/run').length === 1
+      && events.filter(event => event.type === 'command/done').length === 1
+  }, 20_000)
+
+  // SAME session id, NEW transport generation. The old gesture cannot observe
+  // the committed result on its old connection.
+  const connection = aggregate.wire.client.connection as unknown as {
+    generation: { getSnapshot(): { readonly id: number } | undefined }
+    reconnect(): void
+  }
+  const generationBefore = connection.generation.getSnapshot()?.id
+  connection.reconnect()
+  await waitFor('connection generation replaced', () => {
+    const id = connection.generation.getSnapshot()?.id
+    return id !== undefined && id !== generationBefore
+  }, 20_000)
+
+  // Now release the ALREADY-COMMITTED result on the stale transport.
+  releaseResult?.()
+  await resultHeldSignal
+  await waitFor('the stale apply settles with the committed result', () => remoteApplySettled !== undefined, 20_000)
+  assert.deepEqual(remoteApplySettled, { kind: 'applied' },
+    'the composed Remote permission port really settled the committed write')
+  await waitFor('the replacement connection repaints the committed projection', () =>
+    app.statusStore.snapshot().access?.permissionPreset?.id === next, 20_000)
+  await new Promise(resolve => setTimeout(resolve, 500))
+  // The cycle's own success/notice text does NOT contain the word
+  // "permission" when the target is danger-full-access (it is the deliberate
+  // `⚠ … — no approvals` warning). The stale gesture must emit NO notice at
+  // all, so assert the whole recorder is empty.
+  assert.deepEqual(notices, [],
+    `the stale transport gesture must notify NOTHING on the replacement connection: ${JSON.stringify(notices)}`)
+  const events = (host.ctx.sessions.get(SessionId(mainId)) as unknown as {
+    snapshotEvents(): Array<{ type: string; data: unknown }>
+  }).snapshotEvents()
+  assert.equal(events.filter(event => event.type === 'command/run').length, 1,
+    'exactly ONE official /permission dispatch — a rollover never retries')
+  const presets = events.filter(event => event.type === 'permission/preset')
+    .map(event => (event.data as { preset?: string }).preset)
+  assert.deepEqual(presets, [before, next],
+    'the Host committed the switch; the replacement connection reads the official projection')
+})
+
+test('L6 PR-A: a post-dispatch Remote failure stays indeterminate, notifies once and never retries', async (t) => {
+  const life = testLifecycle(t)
+  const mainId = 'pr-a-perm-indeterminate'
+  const presetId = 'm3-4-pr4-preset'
+  const { createRemoteApplicationHostFixture } = await import('./support/remote-application-fixture.ts')
+  const host = await createRemoteApplicationHostFixture(life, presetId, {
+    llmAdapter: new StubStreamingLlmAdapter(),
+  })
+  host.ctx.provide('shell', { sandboxMode: 'workspace-write' } as never)
+  const { PermissionPresetService } = await import('@deepseek-ai/dsh-permission-presets')
+  await host.ctx.plugin(PermissionPresetService as never, undefined as never)
+  const approval = await import('@deepseek-ai/dsh-user-approval')
+  await host.ctx.plugin((approval as unknown as { default: new (ctx: never, config?: never) => unknown }).default as never, undefined as never)
+  const turnOutline = await import('@deepseek-ai/dsh-session-turn-outline')
+  await host.ctx.plugin(turnOutline)
+  await host.harness.create(SessionId(mainId), { provider: 'smoke', model: 'smoke' }, { cwd: host.anchorDir })
+
+  const aggregate = await createRemoteApplicationRuntime({
+    hostContext: host.ctx,
+    waitForHostPrerequisites: async () => {},
+    clientUiStartup: { sessionId: mainId },
+  })
+  life.defer(() => aggregate.selected.disposeTransport().catch(() => {}))
+  // The composed Remote permission adapter holds THIS official Client
+  // commands object. Let the real Host command run, then replace only its
+  // post-dispatch settlement with the gateway's indeterminate shape (the
+  // same production seam the Remote job-viewer L6 uses).
+  const clientCommandsProxy = aggregate.wire.client.remote.commands
+  // The official services are Cordis traceable proxies: patch the unwrapped
+  // implementation, which is the object the composed adapter actually calls.
+  const clientCommands = ((clientCommandsProxy as unknown as Record<symbol, unknown>)[symbols.original] ?? clientCommandsProxy) as unknown as {
+    execute(sessionId: string, line: string, attachments: readonly unknown[], signal: AbortSignal): Promise<unknown>
+  }
+  const originalClientExecute = clientCommands.execute
+  const executeDescriptor = Object.getOwnPropertyDescriptor(clientCommands, 'execute')
+  let permissionDispatches = 0
+  Object.defineProperty(clientCommands, 'execute', {
+    configurable: true,
+    enumerable: true,
+    value: async function (sessionId: string, line: string, attachments: readonly unknown[], signal: AbortSignal) {
+      const result = await originalClientExecute.call(clientCommands, sessionId, line, attachments, signal)
+      if (line.startsWith('/permission')) {
+        permissionDispatches += 1
+        if (permissionDispatches === 1) {
+          return { ok: false, error: { code: 'gateway/internal', message: 'injected post-dispatch indeterminate result' } }
+        }
+      }
+      return result
+    },
+  })
+  life.defer(() => {
+    if (executeDescriptor !== undefined) Object.defineProperty(clientCommands, 'execute', executeDescriptor)
+  })
+
+  const vt = new VirtualTerminal(110, 32)
+  const restoreTerminal = await import('./support/runner-harness.ts').then(m => m.installVirtualProcessTerminal(vt))
+  life.defer(restoreTerminal)
+
+  const runnerCtx = host.ctx
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = host.workRoot
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  runnerCtx.provide('appExit', (code: number) => { void code })
+  const { TUI_STARTUP_SERVICE } = await import('../src/startup.ts')
+  runnerCtx.provide(TUI_STARTUP_SERVICE, { sessionId: mainId, shippedPresetRoot: host.workRoot })
+  const override: RemoteApplicationOverride = {
+    selected: aggregate.selected,
+    presentation: aggregate.presentation,
+    extensionService: aggregate.clientUi.extensionService,
+  }
+  const apps: unknown[] = []
+  const originalStart = TuiApp.prototype.start
+  TuiApp.prototype.start = function patchedStart(this: unknown) {
+    apps.push(this)
+    return originalStart.call(this)
+  }
+  life.defer(() => { TuiApp.prototype.start = originalStart })
+  const runnerFiber = runnerCtx.plugin(pluginCtx => {
+    applyRunnerWithRuntime(pluginCtx, TuiConfigSchema({ fullscreen: 'off', sessionId: mainId } as never), override)
+  })
+  await runnerFiber
+  life.defer(() => runnerFiber.dispose())
+  await waitFor('remote runner mount', () => vt.getViewport().join('').length > 0, 20_000)
+
+  const app = await (async () => {
+    for (let i = 0; i < 600; i += 1) {
+      const candidate = apps.at(-1) as unknown as {
+        statusStore: { snapshot(): { access?: { permissionPreset?: { id?: string } } } }
+        notify(text: string, kind?: string): void
+      } | undefined
+      if (candidate !== undefined && candidate.statusStore !== undefined) return candidate
+      await new Promise(resolve => setTimeout(resolve, 25))
+    }
+    throw new Error('the mounted app never exposed the status store')
+  })()
+  await waitFor('the baseline projection rendered', () =>
+    app.statusStore.snapshot().access?.permissionPreset?.id !== undefined, 20_000)
+  const before = app.statusStore.snapshot().access!.permissionPreset!.id!
+  const names = [...aggregate.selected.backend.config.permissions.presetNames()]
+  const next = names[(names.indexOf(before) + 1) % names.length]!
+  assert.notEqual(next, before, 'the cycle has a real catalog successor')
+
+  const notices: Array<{ text: string; kind: string }> = []
+  const originalNotify = app.notify.bind(app)
+  app.notify = (text, kind = 'info') => {
+    notices.push({ text, kind })
+    originalNotify(text, kind)
+  }
+
+  const cycle = (app as unknown as { events: { onCyclePermission?: () => void } }).events.onCyclePermission
+  assert.ok(cycle !== undefined)
+  cycle!()
+
+  await waitFor('the official projection repainted the committed value', () =>
+    app.statusStore.snapshot().access?.permissionPreset?.id === next, 20_000)
+  await waitFor('the indeterminate notice reached the surface', () =>
+    notices.some(notice => notice.text.includes('dispatched') && notice.text.includes('unknown')), 20_000)
+  const indeterminateNotice = notices.find(notice => notice.text.includes('dispatched') && notice.text.includes('unknown'))
+  assert.equal(indeterminateNotice?.kind, 'error', 'the unknown settlement is an error-severity fact')
+  assert.ok(!notices.some(notice => notice.text.includes('unavailable')),
+    'a dispatched write is never downgraded to unavailable')
+  assert.equal(permissionDispatches, 1, 'exactly ONE permission apply — indeterminate never retries')
+  const events = (host.ctx.sessions.get(SessionId(mainId)) as unknown as {
+    snapshotEvents(): Array<{ type: string; data: unknown }>
+  }).snapshotEvents()
+  assert.equal(events.filter(event => event.type === 'command/run').length, 1,
+    'the Host executed exactly ONE official /permission command')
+  assert.equal(events.filter(event => event.type === 'command/done').length, 1,
+    'the official lifecycle is one run/done pair')
+  const presets = events.filter(event => event.type === 'permission/preset')
+    .map(event => (event.data as { preset?: string }).preset)
+  assert.deepEqual(presets, [before, next],
+    'the dispatched command really committed; the footer value is the official projection')
 })
