@@ -28,7 +28,7 @@ import { renderActionBarRow, type ActionBarSegment } from '../presentation/actio
 import { color } from '../theme/runtime.ts'
 import { sanitizedPhysicalLine } from '../presentation/lines.ts'
 import { QuestionFlow, type QuestionMouseGesture } from '../interaction/question.ts'
-import { createAuthorizationFlow } from '../../app/command/authorization.ts'
+import { authorizationFailureText, createAuthorizationFlow } from '../../app/command/authorization.ts'
 import type {
   AuthorizationConfig,
   AuthorizationFlowEvent,
@@ -274,6 +274,7 @@ export class ModelsWorkspacePage implements Component {
   private questionRows = 0
   private questionPress: { readonly gesture: QuestionMouseGesture; readonly revision: number; readonly width: number; readonly height: number; readonly row: number } | undefined
   private copyValue: string | undefined
+  private paintedCopy = false
   private referenceEditor: { ref: string; label: string }
   private referencePhase: 'idle' | 'editing' | 'pending' | 'verified' | 'not-saved' | 'unknown' = 'idle'
   private referenceStatus: string | undefined
@@ -457,6 +458,7 @@ export class ModelsWorkspacePage implements Component {
     if (view.kind === 'reference') {
       this.referencePhase = 'idle'
       this.referenceStatus = undefined
+      this.referenceConfigured = undefined
       this.readReferenceState()
     }
     this.requestRender()
@@ -795,14 +797,19 @@ export class ModelsWorkspacePage implements Component {
     this.add = { ...add, creating: true }
     this.requestRender()
     this.source.run('models add provider', async () => {
-      const outcome = await this.source.createProvider({
-        route: add.draft.route,
-        api: add.draft.api,
-        baseURL: add.draft.baseURL,
-        displayName: add.draft.displayName,
-        models: add.draft.models,
-        apiKey: add.draft.key,
-      })
+      let outcome: CreateProviderOutcome
+      try {
+        outcome = await this.source.createProvider({
+          route: add.draft.route,
+          api: add.draft.api,
+          baseURL: add.draft.baseURL,
+          displayName: add.draft.displayName,
+          models: add.draft.models,
+          apiKey: add.draft.key,
+        })
+      } catch (error) {
+        outcome = { kind: 'rejected', text: `could not add provider: ${errorText(error)}` }
+      }
       this.settle(() => {
         if (serial !== this.addSerial) return
         const current = this.add
@@ -859,13 +866,19 @@ export class ModelsWorkspacePage implements Component {
           started = await this.source.beginAuthorization(row.key!, method, this.pageController.signal)
         } catch (error) {
           this.settle(() => {
-            this.auth = { targetRoute: row.route, phase: 'failed', status: errorText(error) }
+            this.auth = {
+              targetRoute: row.route,
+              phase: 'failed',
+              status: authorizationFailureText(error, errorText(error)),
+            }
+            if (this.exitAfterAuth) this.leaveAfterAuth()
           })
           return
         }
         if (started.kind !== 'started') {
           this.settle(() => {
             this.auth = { targetRoute: row.route, phase: 'failed', status: 'authorization service unavailable' }
+            if (this.exitAfterAuth) this.leaveAfterAuth()
           })
           return
         }
@@ -893,7 +906,7 @@ export class ModelsWorkspacePage implements Component {
             targetRoute: row.route,
             phase: 'failed',
             attemptId: started.attemptId,
-            status: `sign-in failed${outcome.code === undefined ? '' : ` (${outcome.code})`}${outcome.message === undefined ? '' : `: ${outcome.message}`}`,
+            status: `sign-in failed${outcome.code === undefined ? '' : ` (${outcome.code})`}: ${authorizationFailureText({ code: outcome.code }, outcome.message ?? 'login failed')}`,
           }
           if (this.exitAfterAuth) this.leaveAfterAuth()
         })
@@ -1041,7 +1054,7 @@ export class ModelsWorkspacePage implements Component {
   }): EmbeddedQuestion {
     let settled = false
     const flow = new QuestionFlow(
-      [{ id: 'answer', question: options.question, masked: options.masked }],
+      [{ id: 'answer', question: options.question, header: options.header, masked: options.masked }],
       answers => {
         if (settled) return
         settled = true
@@ -1069,6 +1082,7 @@ export class ModelsWorkspacePage implements Component {
     if (this.question === undefined) this.question = question
     else this.questionQueue.push(question)
     this.question.flow.focused = true
+    this.revision += 1
   }
 
   /** Retire EXACTLY one prompt's UI. A withdrawn older prompt can never close a
@@ -1082,6 +1096,7 @@ export class ModelsWorkspacePage implements Component {
       const index = this.questionQueue.indexOf(question)
       if (index >= 0) this.questionQueue.splice(index, 1)
     }
+    this.revision += 1
     this.requestRender()
   }
 
@@ -1118,6 +1133,7 @@ export class ModelsWorkspacePage implements Component {
         { text: 'Enter continue', priority: 6 },
         { text: 'Esc back', priority: 8 },
       ], width)))
+      this.paintedCopy = false
       this.copyValue = undefined
       this.paintedTargets = []
       return this.pad(lines, height, width)
@@ -1133,6 +1149,7 @@ export class ModelsWorkspacePage implements Component {
         { text: 'm manual', priority: 4 },
         { text: 'Esc cancel', priority: 8 },
       ], width)))
+      this.paintedCopy = false
       this.paintedTargets = targets
       return this.pad(lines, height, width)
     }
@@ -1145,6 +1162,7 @@ export class ModelsWorkspacePage implements Component {
         { text: 'Enter select', priority: 6 },
         { text: 'Esc cancel', priority: 8 },
       ], width)))
+      this.paintedCopy = false
       this.paintedTargets = targets
       return this.pad(lines, height, width)
     }
@@ -1153,6 +1171,7 @@ export class ModelsWorkspacePage implements Component {
     if (projection.actions.length >= height) {
       this.paintedRowIds.clear()
       this.paintedActionIds.clear()
+      this.paintedCopy = false
       this.paintedTargets = []
       return this.pad([fit(color.warning('Resize the terminal to show the page actions.'), width)], height, width)
     }
@@ -1583,7 +1602,9 @@ export class ModelsWorkspacePage implements Component {
       segments.unshift({ text: 'r refresh', priority: 2 })
     }
     segments.push({ text: 'Esc back', priority: 8 })
-    return color.textMuted(renderActionBarRow(segments, width))
+    const rendered = renderActionBarRow(segments, width)
+    this.paintedCopy = rendered.includes('c copy')
+    return color.textMuted(rendered)
   }
 
   // ── input ────────────────────────────────────────────────────────────────
@@ -1615,7 +1636,7 @@ export class ModelsWorkspacePage implements Component {
       return 'handled'
     }
     if (matchesKey(data, 'c') || matchesKey(data, Key.shift('c'))) {
-      if (this.copyValue !== undefined) this.source.copy(this.copyValue)
+      if (this.paintedCopy && this.copyValue !== undefined) this.source.copy(this.copyValue)
       return 'handled'
     }
     if (data === 'o' || data === 'O') {
@@ -1877,8 +1898,17 @@ export class ModelsWorkspacePage implements Component {
         this.referenceStatus = undefined
         this.enter({ kind: 'list' })
         return 'handled'
-      case 'add-provider':
       case 'review':
+        if (this.add?.creating === true) {
+          this.notice = 'the provider write is in flight — wait for the Host outcome'
+          this.requestRender()
+          return 'handled'
+        }
+        this.addSerial += 1
+        this.add = undefined
+        this.enter({ kind: 'list' })
+        return 'handled'
+      case 'add-provider':
         this.addSerial += 1
         this.add = undefined
         this.enter({ kind: 'list' })

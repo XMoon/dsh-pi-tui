@@ -168,7 +168,9 @@ resulting destination; they never run a credential operation themselves.
 `/login`:
 
 - no argument → the Models list, no automatic login;
-- known route (label or first word) → that provider's detail page;
+- known route (canonical route, label or first word) → that provider's detail
+  page; the `deepseek-official` builtin goes to its dedicated API-key reference
+  page instead;
 - known reference or env-var-looking novel reference → the API-key reference
   page with the exact target ref; an empty answer never writes;
 - new valid route pattern → the Add Provider form prefilled with the route;

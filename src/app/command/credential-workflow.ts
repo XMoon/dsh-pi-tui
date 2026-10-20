@@ -486,7 +486,3 @@ export class CredentialWorkflow {
     return { kind: 'created', text: `API key ${ref} set · provider ${route} added` }
   }
 }
-
-/** The user-facing text for one authorization attempt failure (the existing
- * command taxonomy — kept in `authorization.ts` would add no value here). */
-export { authorizationFailureText } from './authorization.ts'

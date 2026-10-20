@@ -79,6 +79,11 @@ function walletText(wallet: AccountWallet): string {
   return `${wallet.balance} ${wallet.currency}`
 }
 
+/** The user-facing attempt phase: the official `succeeded` is Authorized. */
+function phaseLabel(phase: string): string {
+  return phase === 'succeeded' ? 'authorized' : phase
+}
+
 /** The page component. Constructed per workspace open. */
 export class AccountWorkspacePage implements Component {
   private readonly source: AccountWorkspaceSource
@@ -95,6 +100,7 @@ export class AccountWorkspacePage implements Component {
   private cursor = 0
   private scroll = 0
   private copyValue: string | undefined
+  private paintedCopy = false
   private readonly pageController = new AbortController()
   private disposed = false
   private revision = 0
@@ -150,6 +156,7 @@ export class AccountWorkspacePage implements Component {
   private refresh(): void {
     if (this.disposed) return
     const serial = ++this.stateSerial
+    this.revision += 1
     this.source.run('account state read', async () => {
       let view: AccountView
       try {
@@ -248,6 +255,7 @@ export class AccountWorkspacePage implements Component {
     }
     this.busy = 'signin'
     this.notice = undefined
+    this.revision += 1
     this.requestRender()
     this.source.run('account sign in', async () => {
       try {
@@ -267,6 +275,8 @@ export class AccountWorkspacePage implements Component {
     const attempt = this.activeAttempt()
     if (attempt === undefined || this.busy !== undefined) return
     this.busy = 'cancel'
+    this.revision += 1
+    this.requestRender()
     this.source.run('account cancel sign in', async () => {
       try {
         const view = await this.source.cancelSignIn(attempt.id)
@@ -286,6 +296,7 @@ export class AccountWorkspacePage implements Component {
     const view = this.view
     if (view === undefined || view.status !== 'credential-stored') return
     this.signOutConfirm = true
+    this.revision += 1
     this.signOutIdentity = this.profile.kind === 'ready'
       ? this.profile.value.name ?? this.profile.value.id ?? 'the stored DeepSeek Account'
       : 'the stored DeepSeek Account'
@@ -297,6 +308,8 @@ export class AccountWorkspacePage implements Component {
   private signOut(): void {
     if (this.busy !== undefined) return
     this.busy = 'signout'
+    this.revision += 1
+    this.requestRender()
     this.source.run('account sign out', async () => {
       try {
         const view = await this.source.signOut()
@@ -340,6 +353,7 @@ export class AccountWorkspacePage implements Component {
     const rowOrder = this.rowOrder.slice()
     if (projection.actions.length >= height) {
       this.paintedActionIds.clear()
+      this.paintedCopy = false
       this.paintedTargets = []
       this.paintedRowOrder = []
       const out = [fit(color.warning('Resize the terminal to show the page actions.'), width)]
@@ -385,7 +399,9 @@ export class AccountWorkspacePage implements Component {
     if (actions.length > 0) segments.push({ text: 'Up/Down select', priority: 5 }, { text: 'Enter select', priority: 6 })
     segments.push({ text: 'r refresh', priority: 2 })
     segments.push({ text: 'Esc back', priority: 8 })
-    return renderActionBarRow(segments, width)
+    const rendered = renderActionBarRow(segments, width)
+    this.paintedCopy = rendered.includes('c copy')
+    return rendered
   }
 
   private rowIds = new Map<number, string>()
@@ -428,11 +444,11 @@ export class AccountWorkspacePage implements Component {
     if (this.stateFailure !== undefined) content.push(...this.fact('Error', this.stateFailure, width))
     const attempt = this.activeAttempt()
     if (attempt !== undefined) {
-      content.push(...this.fact('Attempt', `${attempt.phase}${attempt.id === undefined ? '' : ` · ${attempt.id}`}`, width))
+      content.push(...this.fact('Attempt', `${phaseLabel(attempt.phase)}${attempt.id === undefined ? '' : ` · ${attempt.id}`}`, width))
       if (attempt.expiresAt !== undefined) content.push(...this.fact('Expires', new Date(attempt.expiresAt).toISOString(), width))
       if (attempt.errorCode !== undefined) content.push(...this.fact('Error code', attempt.errorCode, width))
     } else if (view?.attempt !== null && view?.attempt !== undefined) {
-      content.push(...this.fact('Last attempt', view.attempt.phase, width))
+      content.push(...this.fact('Last attempt', phaseLabel(view.attempt.phase), width))
       if (view.attempt.errorCode !== undefined) content.push(...this.fact('Error code', view.attempt.errorCode, width))
     }
     content.push(...this.fact('Profile', this.profileText(), width))
@@ -559,7 +575,7 @@ export class AccountWorkspacePage implements Component {
       return 'handled'
     }
     if (matchesKey(data, 'c') || matchesKey(data, Key.shift('c'))) {
-      if (this.copyValue !== undefined) this.copy(this.copyValue)
+      if (this.paintedCopy && this.copyValue !== undefined) this.copy(this.copyValue)
       return 'handled'
     }
     if (data === 'o' || data === 'O') {
@@ -610,7 +626,7 @@ export class AccountWorkspacePage implements Component {
       case 'account:cancel': this.cancelAttempt(); return 'handled'
       case 'account:signout': this.confirmSignOut(); return 'handled'
       case 'account:signout-confirm': this.signOut(); return 'handled'
-      case 'account:signout-cancel': this.signOutConfirm = false; this.cursor = 0; this.requestRender(); return 'handled'
+      case 'account:signout-cancel': this.signOutConfirm = false; this.cursor = 0; this.revision += 1; this.requestRender(); return 'handled'
       case 'account:open':
         if (attempt?.authorizeUrl !== undefined) this.openUrl(attempt.authorizeUrl)
         return 'handled'
