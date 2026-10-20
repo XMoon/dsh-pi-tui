@@ -310,3 +310,27 @@ test('disposing the Account page aborts its Host watch subscription (MA13 watche
   await flush()
   assert.equal(aborted, true, 'the page must end its own watch signal on teardown')
 })
+
+test('a pending sign-out owns the page: pendingMutation is true and Esc cannot exit (P1)', async () => {
+  const state: SourceState = { view: stored(), profileFails: false, balanceFails: false, runningTasks: false, calls: [] }
+  let release: (() => void) | undefined
+  const source = makeSource(state)
+  source.signOut = () => new Promise<AccountView>(resolve => {
+    state.calls.push('signOut')
+    release = () => { state.view = signedOut(); resolve(state.view) }
+  })
+  const page = new AccountWorkspacePage(source, () => {}, { view: 'signout' })
+  page.setBodyHeight(26)
+  await flush()
+  text(page)
+  page.handleInput('\r') // confirm sign out
+  await flush()
+  assert.equal(page.pendingMutation(), true)
+  assert.equal(page.handleInput('\u001b'), 'handled')
+  await flush()
+  assert.match(text(page), /Sign out/u)
+  assert.match(text(page), /in flight/u)
+  release?.()
+  await flush()
+  assert.equal(page.pendingMutation(), false)
+})
