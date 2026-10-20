@@ -145,6 +145,10 @@ test('login destination: bare, route, ref, novel ref, new route, account and inv
   assert.deepEqual(resolveLoginDestination('mykey', PROVIDERS, FLOWS), { kind: 'models', view: 'add-provider', route: 'mykey' })
   assert.deepEqual(resolveLoginDestination('my_key', PROVIDERS, FLOWS), { kind: 'models', view: 'reference', ref: 'MY_KEY' })
   assert.deepEqual(resolveLoginDestination('NOVEL_KEY', PROVIDERS, FLOWS), { kind: 'models', view: 'reference', ref: 'NOVEL_KEY' })
+  const flowOnly: readonly AuthorizationFlowTarget[] = [
+    { kind: 'authorization', route: 'mykey', key: 'plugin/mykey', label: 'My Key', methods: [{ id: 'oauth', label: 'OAuth' }], inFlight: false },
+  ]
+  assert.deepEqual(resolveLoginDestination('mykey', [], flowOnly), { kind: 'models', view: 'provider', route: 'mykey' })
   assert.deepEqual(resolveLoginDestination('deepseek-account', PROVIDERS, FLOWS), { kind: 'account', view: 'page' })
   const invalid = resolveLoginDestination('not valid!', PROVIDERS, FLOWS)
   assert.equal(invalid.kind, 'error')
