@@ -1663,6 +1663,25 @@ test('a failed coalesced catalog read still runs exactly one trailing refresh', 
   assert.equal(listings.length, 2, 'the trailing read must settle without starting another read')
 })
 
+/** The footer's parked-Question attention and its reachability hint are
+ * published asynchronously by the projection/render pipeline. Wait for BOTH
+ * instead of assuming the first render after mount already carries them: the
+ * old immediate assertion was a load-sensitive flake in CI's packed product
+ * lane. The wait is bounded and throws with the real frame on timeout. */
+async function waitForParkedQuestionFooter(vt: VirtualTerminal): Promise<string> {
+  const deadline = Date.now() + 15_000
+  for (;;) {
+    const view = vt.getViewport().join('\n')
+    if (view.includes('? 1 awaiting') && view.includes('↓ view')) return view
+    if (Date.now() >= deadline) {
+      throw new Error(`the parked-Question footer never advertised the reopen trigger:\n${view}`)
+    }
+    await settle()
+    await vt.waitForRender()
+    await new Promise(resolve => setTimeout(resolve, 20))
+  }
+}
+
 test('a parked continued Question is reachable and reopenable from the Task Center', async (t) => {
   // Addendum §16.4 (surface integration, not a source-string assertion): the
   // literal user path is park -> Task Center -> Enter -> the SAME Question
@@ -1757,8 +1776,8 @@ test('a parked continued Question is reachable and reopenable from the Task Cent
   // COLD discovery parks it: the Question must NOT have stolen the editor seat,
   // yet the footer's Task Center trigger is armed by the parked attention alone
   // (no Job/Subagent is running in this fixture).
+  const idle = await waitForParkedQuestionFooter(vt)
   assert.equal(app.overlayGraphState().handles, 0, 'cold discovery owns no overlay')
-  const idle = vt.getViewport().join('\n')
   assert.ok(!idle.includes('Type your answer…'), `no Question panel was mounted:\n${idle}`)
   // COLD DISCOVERY closes the whole chain, with zero work of any kind: the
   // controller found the continued call at attach (the fixture now models the
