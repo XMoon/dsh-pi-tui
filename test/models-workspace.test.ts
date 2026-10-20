@@ -1434,28 +1434,31 @@ test('a profile-written/key-failed outcome refreshes the provider list (F3)', as
   assert.match(viewText(page), /partial-route/u)
 })
 
-function shortPickerPage(): { page: ModelsWorkspacePage; picked: () => string | undefined } {
+function shortPickerPage(): { page: ModelsWorkspacePage; picked: () => string | undefined; cancelled: () => boolean } {
   const { source } = fakeSource()
   let picked: string | undefined
+  let cancelled = false
   const page = new ModelsWorkspacePage(source, () => {}, { view: 'provider', route: 'anthropic' }, () => {})
   ;(page as unknown as { picker: unknown }).picker = {
     token: {}, header: 'Sign in method', items: [{ value: 'a', label: 'Method A' }, { value: 'b', label: 'Method B' }],
     index: 0,
     onSelect: (value: string) => { picked = value },
-    onCancel: () => {},
+    onCancel: () => { cancelled = true },
   }
   ;(page as unknown as { authNotice: unknown }).authNotice = { message: 'Continue in your browser', url: 'https://example.test/authorize', code: 'ABCD' }
-  return { page, picked: () => picked }
+  return { page, picked: () => picked, cancelled: () => cancelled }
 }
 
 test('a 4-row picker with a 3-line notice refuses to hide auth details or submit (F4/F7)', async () => {
-  const { page, picked } = shortPickerPage()
+  const { page, picked, cancelled } = shortPickerPage()
   page.setBodyHeight(4)
   const lines = page.render(40).map(stripTerminalSequences)
   assert.match(lines.join('\n'), /Resize the terminal/u)
   assert.doesNotMatch(lines.join('\n'), /Method A/u)
   page.handleInput('\r')
   assert.equal(picked(), undefined)
+  page.handleInput('\u001b')
+  assert.equal(cancelled(), true, 'Esc must settle the prompt through onCancel, not orphan it')
 })
 
 test('a 5-row picker shows the full notice, action bar and correct mouse row (F4/F5)', async () => {
@@ -1472,4 +1475,14 @@ test('a 5-row picker shows the full notice, action bar and correct mouse row (F4
   page.onCellPress(2, 3)
   page.onCellClick(2, 3)
   assert.equal(picked(), 'a')
+})
+
+test('a resize before frame invalidates picker mouse targets too (F7)', async () => {
+  const { page, picked } = shortPickerPage()
+  page.setBodyHeight(5)
+  page.render(40) // painted while the picker fit
+  page.setBodyHeight(4) // resize arrived, frame not painted
+  page.onCellPress(2, 3)
+  page.onCellClick(2, 3)
+  assert.equal(picked(), undefined, 'the live fit check must block the stale painted target')
 })
