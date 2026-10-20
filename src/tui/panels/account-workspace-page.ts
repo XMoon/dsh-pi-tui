@@ -154,7 +154,7 @@ export class AccountWorkspacePage implements Component {
   }
 
   private refresh(): void {
-    if (this.disposed) return
+    if (this.disposed || this.busy !== undefined) return
     const serial = ++this.stateSerial
     this.revision += 1
     this.source.run('account state read', async () => {
