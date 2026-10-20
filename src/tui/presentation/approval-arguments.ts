@@ -33,6 +33,29 @@ export interface ApprovalArgumentSection {
 const ARGUMENTS = 'Arguments'
 const OTHER_ARGUMENTS = 'Other arguments'
 
+/** C0/C1/DEL and the Unicode line separators. */
+const KEY_CONTROL_PATTERN = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/gu
+/** The same set minus LF, which is the structured section's own line break. */
+const SECTION_CONTROL_PATTERN = /[\u0000-\u0009\u000b-\u001f\u007f-\u009f\u2028\u2029]/gu
+
+/** Encode one control character as a visible lower-case \uXXXX escape. */
+function controlEscape(char: string): string {
+  return `\\u${char.charCodeAt(0).toString(16).padStart(4, '0')}`
+}
+
+/** Escape a key BEFORE it is concatenated with the following fields. An
+ * unescaped ESC/C1 OSC would make the display sanitizer drop the remainder of
+ * the section, including later approval parameters. */
+function escapeKeyControls(key: string): string {
+  return key.replace(KEY_CONTROL_PATTERN, controlEscape)
+}
+
+/** Escape C1/line separators left literal by JSON.stringify in a structured
+ * section (LF is preserved as the section's own row break). */
+function escapeSectionControls(text: string): string {
+  return text.replace(SECTION_CONTROL_PATTERN, controlEscape)
+}
+
 /** The raw-text fallback: the exact received display text, never re-parsed. */
 function rawSections(raw: string): readonly ApprovalArgumentSection[] {
   return [{ heading: ARGUMENTS, text: raw }]
@@ -261,7 +284,7 @@ function otherSections(
     if (keyIndex < keys.length - 1) lines[lines.length - 1] += ','
   })
   lines.push('}')
-  return [{ heading: OTHER_ARGUMENTS, text: lines.join('\n') }]
+  return [{ heading: OTHER_ARGUMENTS, text: escapeSectionControls(lines.join('\n')) }]
 }
 
 /**
@@ -279,9 +302,11 @@ function genericSections(
   if (keys.length === 0) return [{ heading: ARGUMENTS, text: '(empty object)' }]
   const lines: string[] = []
   for (const key of keys) {
-    // A newline/CR in an external key could forge a second field row; quote
-    // just those keys. Ordinary keys stay readable and unquoted.
-    const displayKey = /[\r\n]/u.test(key) ? JSON.stringify(key) : key
+    // Encode every C0/C1 control (and CR/LF) in an external key before it is
+    // concatenated with the following fields: a raw ESC/C1 OSC would make the
+    // display sanitizer swallow the rest of the section, including later
+    // approval parameters. Ordinary keys stay readable and unquoted.
+    const displayKey = escapeKeyControls(key)
     const value = record[key]
     if (typeof value === 'string') {
       // Keep the JSON string form: quotes + escapes preserve the type and
@@ -293,7 +318,7 @@ function genericSections(
       lines.push(`${displayKey}: ${JSON.stringify(value)}`)
     }
   }
-  return [{ heading: ARGUMENTS, text: lines.join('\n') }]
+  return [{ heading: ARGUMENTS, text: escapeSectionControls(lines.join('\n')) }]
 }
 
 interface Draft {

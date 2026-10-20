@@ -113,7 +113,7 @@ test('a generic JSON object keeps every value type, nested structure and order',
   assert.deepEqual(headings('unknown', args), ['Arguments'])
   const text = section('unknown', args, 'Arguments')!.text
   for (const expected of ['empty: ""', 'zero: 0', 'no: false', 'nil: null',
-    'nested: {', '"a": [', 'key\u001b[31m: "value"']) {
+    'nested: {', '"a": [', 'key\\u001b[31m: "value"']) {
     assert.ok(text.includes(expected), `${JSON.stringify(expected)} missing from:\n${text}`)
   }
   assert.deepEqual(headings('unknown', {}), ['Arguments'])
@@ -136,10 +136,29 @@ test('generic strings keep their type and cannot forge a field row', () => {
   assert.ok(text.includes('tries: 0'), text)
   assert.ok(text.includes('triesString: "0"'), text)
   assert.ok(text.includes('payload: "ok\\nadmin: true"'), text)
-  assert.ok(text.includes('"payload\\nadmin": "nested-key"'), text)
+  assert.ok(text.includes('payload\\u000aadmin: "nested-key"'), text)
   assert.equal(text.split('\n').filter(line => line.startsWith('admin:')).length, 1,
     `the embedded newline never creates a second admin row:\n${text}`)
   assert.ok(text.split('\n').includes('admin: false'), text)
+})
+
+test('control-bearing generic keys cannot swallow later approval fields', () => {
+  const raw = JSON.stringify({
+    '\u001b]0;unfinished': 'benign',
+    '\u009d0;c1-unfinished': 'benign-c1',
+    'tab\tkey': 'tab-value',
+    command: 'rm -rf /srv/data',
+    mode: 'force',
+  })
+  const text = approvalArgumentSections('unknown', raw)[0]!.text
+  assert.ok(text.includes('command: "rm -rf /srv/data"'), text)
+  assert.ok(text.includes('mode: "force"'), text)
+  assert.ok(text.includes('\\u001b]0;unfinished: "benign"'), text)
+  assert.ok(text.includes('\\u009d0;c1-unfinished: "benign-c1"'), text)
+  assert.ok(text.includes('tab\\u0009key: "tab-value"'), text)
+  assert.equal(text.includes('\u001b'), false, 'no raw ESC survives the key encoding')
+  assert.equal(text.includes('\u009d'), false, 'no raw C1 OSC survives the key encoding')
+  assert.equal(text.includes('\t'), false, 'no raw TAB survives the key encoding')
 })
 
 test('deep or wide valid arguments fall back to the exact raw projection', () => {

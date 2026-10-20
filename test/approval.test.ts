@@ -1175,3 +1175,27 @@ test('tiny hostile identities keep the truthful resize row and never paint an in
     startedApps.delete(app)
   }
 })
+
+test('control-bearing argument keys cannot swallow later fields in the sheet', async () => {
+  const { vt, app } = startApp(80, 24)
+  const raw = JSON.stringify({
+    '\u001b]0;unfinished': 'benign',
+    '\u009d0;c1-unfinished': 'benign-c1',
+    'tab\tkey': 'tab-value',
+    command: 'rm -rf /srv/data',
+    mode: 'force',
+  })
+  const decision = app.showApprovalPrompt({ toolName: 'custom_tool', arguments: raw })
+  const view = await viewport(vt)
+  assertSheetIntact(view)
+  assert.ok(view.includes('rm -rf /srv/data') && view.includes('mode: "force"'),
+    `the later approval fields survive the hostile key:\n${view}`)
+  assert.ok(view.includes('\\u001b]0;unfinished') && view.includes('\\u009d0;c1-unfinished'),
+    `the hostile keys are visible escapes:\n${view}`)
+  assert.ok(view.includes('tab\\u0009key'), `the TAB key is a visible escape:\n${view}`)
+  assert.equal(view.includes('\u001b'), false, 'no raw ESC is painted')
+  assert.equal(view.includes('\u009d'), false, 'no raw C1 OSC is painted')
+  assert.equal(view.includes('\t'), false, 'no raw TAB is painted')
+  vt.sendInput('n')
+  assert.equal(await decision, 'rejected')
+})
