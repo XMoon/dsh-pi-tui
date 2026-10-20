@@ -184,6 +184,15 @@ export class AccountWorkspacePage implements Component {
     this.applyView(view)
   }
 
+  private invalidateSignOutConfirmation(reason: string): void {
+    if (!this.signOutConfirm) return
+    this.signOutConfirm = false
+    this.signOutIdentity = undefined
+    this.runningTasks = false
+    this.cursor = 0
+    this.notice = reason
+  }
+
   /** Apply one Host AccountView. A credential transition starts the independent
    * profile/balance reads; a signed-out state clears them. */
   private applyView(view: AccountView, readDetails = true): void {
@@ -194,11 +203,16 @@ export class AccountWorkspacePage implements Component {
       this.initializing = false
       if (view.status === 'credential-stored') {
         this.runningTasks = this.source.hasRunningAccountTasks()
-        if (readDetails && (previous !== 'credential-stored' || this.profile.kind === 'idle' || this.profile.kind === 'signed-out')) {
+        // AccountView.status does not carry the grant identity: a same-status
+        // watch update can mean account A was replaced by account B. Invalidate
+        // any open destructive confirmation and re-read the identity facts.
+        if (previous !== undefined) this.invalidateSignOutConfirmation('the Host account changed — confirm sign-out again')
+        if (readDetails) {
           this.readProfile()
           this.readBalance()
         }
       } else {
+        if (previous !== undefined) this.invalidateSignOutConfirmation('the Host account changed — sign-out confirmation cleared')
         this.profileSerial += 1
         this.balanceSerial += 1
         this.profile = { kind: 'signed-out' }
