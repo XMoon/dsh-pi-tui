@@ -10,6 +10,7 @@ import { afterEach, test } from 'node:test'
 import { TuiApp, type ApprovalOutcome } from '../src/tui-app.ts'
 import { parseUserKeybindings } from '../src/tui/keybindings/config.ts'
 import { color } from '../src/tui/theme/runtime.ts'
+import { visibleWidth } from '@xmoon76/pi-tui'
 import { VirtualTerminal } from './virtual-terminal.ts'
 
 /** Re-vendor lifecycle follow-up P3: every TuiApp started in this file is
@@ -115,7 +116,8 @@ test('approval sheet shows the tool, danger fact, complete reason/arguments and 
   assert.ok(view.includes('Approve bash?'), `title missing:\n${view}`)
   assert.ok(view.includes('Dangerous command'), `danger fact missing:\n${view}`)
   assert.ok(view.includes('update the deployment config'), `reason missing:\n${view}`)
-  assert.ok(view.includes('"deploy --prod"'), `arguments missing:\n${view}`)
+  assert.ok(view.includes('Run command') && view.includes('Command'), `semantic argument sections missing:\n${view}`)
+  assert.ok(view.includes('deploy --prod'), `arguments missing:\n${view}`)
   vt.sendInput('n')
   assert.equal(await decision, 'rejected')
 })
@@ -825,4 +827,217 @@ test('a settled approval leaves no frame behind and the surface stays usable', a
   await viewport(vt)
   vt.sendInput('y')
   assert.equal(await healthy, 'allowed-once')
+})
+
+/** The viewport with presentation ANSI stripped, for structural row checks. */
+function plainLines(vt: VirtualTerminal): string[] {
+  return vt.getViewport().map(line => line.replace(/\u001b\[[0-9;]*[A-Za-z]/gu, ''))
+}
+
+/** The painted frame's physical row count. */
+function frameHeight(view: string): number {
+  const bounds = frameBounds(view)
+  assert.ok(bounds !== undefined, `frame borders missing:\n${view}`)
+  return bounds.bottom - bounds.top + 1
+}
+
+test('a structured edit approval paints semantic sections, a readable floor and exact Copy', async () => {
+  const { vt, app, copied } = startApp(80, 24)
+  const raw = JSON.stringify({
+    file_path: 'src/config.ts',
+    old_string: 'const timeout = 30',
+    new_string: 'const timeout = 60',
+  })
+  const decision = app.showApprovalPrompt({
+    toolName: 'edit',
+    reason: 'Update the connection timeout',
+    arguments: raw,
+  })
+  const view = await viewport(vt)
+  assertSheetIntact(view)
+  assert.ok(frameHeight(view) >= 12, `80x24 keeps a readable minimum:\n${view}`)
+  const grant = (app as unknown as { approvalSeatRows(expanded: boolean): number }).approvalSeatRows(false)
+  assert.ok(frameHeight(view) <= grant,
+    `the readable minimum never exceeds the live seat grant (${frameHeight(view)} > ${grant}):\n${view}`)
+  assert.match(view, /Action[\s\S]*Replace text/u)
+  assert.match(view, /Target[\s\S]*src\/config\.ts/u)
+  assert.match(view, /Reason[\s\S]*Update the connection timeout/u)
+  assert.ok(!view.includes('{"file_path"'), `no raw JSON blob:\n${view}`)
+  vt.sendInput('\x1b[F') // End
+  const tail = await viewport(vt)
+  assert.match(tail, /Before[\s\S]*const timeout = 30/u)
+  assert.match(tail, /After[\s\S]*const timeout = 60/u)
+  assert.match(tail, /Intended input · not verified against disk/u)
+  vt.sendInput('c')
+  await vt.waitForRender()
+  await Promise.resolve()
+  await Promise.resolve()
+  assert.deepEqual(copied, [raw], 'Copy carries the exact received bytes')
+  vt.sendInput('n')
+  assert.equal(await decision, 'rejected')
+})
+
+test('a short write at 120x40 gets the 16-row reading floor with inert padding', async () => {
+  const { vt, app } = startApp(120, 40)
+  const decision = app.showApprovalPrompt({
+    toolName: 'write',
+    reason: 'Persist the new timeout',
+    arguments: JSON.stringify({ file_path: 'src/config.ts', content: 'export const timeout = 60' }),
+  })
+  const view = await viewport(vt)
+  assertSheetIntact(view)
+  assert.equal(frameHeight(view), 16, `120x40 short content keeps the 16-row floor:\n${view}`)
+  assert.ok(!view.includes('rows '), `a short body must not invent a scroll fact:\n${view}`)
+  assert.match(view, /Action[\s\S]*Write file/u)
+  assert.match(view, /Target[\s\S]*src\/config\.ts/u)
+  assert.match(view, /New content[\s\S]*export const timeout = 60/u)
+  const lines = plainLines(vt)
+  const valueRow = lines.findIndex(line => line.includes('export const timeout = 60'))
+  const actionRow = lines.findIndex(line => line.includes('[y] Allow once'))
+  assert.ok(valueRow >= 0 && actionRow > valueRow)
+  const blankRows = lines.slice(valueRow + 1, actionRow).filter(line => /^│\s+│$/u.test(line))
+  assert.ok(blankRows.length >= 2, `the frame is padded before the pinned action bar:\n${lines.join('\n')}`)
+  vt.sendInput('n')
+  assert.equal(await decision, 'rejected')
+})
+
+test('a long structured edit at 200x50 reaches the real tail with one body and a pinned bar', async () => {
+  const { vt, app } = startApp(200, 50)
+  const oldText = Array.from({ length: 80 }, (_, index) => `old-line-${String(index).padStart(3, '0')}`).join('\n')
+  const newText = Array.from({ length: 80 }, (_, index) => `new-line-${String(index).padStart(3, '0')}`).join('\n')
+  const decision = app.showApprovalPrompt({
+    toolName: 'edit',
+    reason: 'Rewrite the generated block',
+    arguments: JSON.stringify({ file_path: 'src/generated.ts', old_string: oldText, new_string: newText }),
+  })
+  let view = await viewport(vt)
+  assertSheetIntact(view)
+  assert.ok(view.includes('old-line-000'), `the head is painted:\n${view}`)
+  vt.sendInput('\x1b[F') // End
+  view = await viewport(vt)
+  assert.ok(view.includes('new-line-079'), `End reaches the real tail:\n${view}`)
+  assert.ok(view.includes('rows '), `a real scroll fact is shown:\n${view}`)
+  assert.ok(view.includes('[y] Allow once'), `the decision bar stays pinned:\n${view}`)
+  const frameLines = plainLines(vt)
+  assert.equal(frameLines.filter(line => line.includes('╭')).length, 1, 'one body, no second column')
+  assert.equal(frameLines.filter(line => line.includes('╰')).length, 1)
+  vt.sendInput('n')
+  assert.equal(await decision, 'rejected')
+})
+
+test('structured long paths and CJK wrap inside the grant and keep decisions reachable', async () => {
+  for (const [columns, rows] of [[72, 24], [44, 20]] as const) {
+    const { vt, app } = startApp(columns, rows)
+    const path = `src/${'very-long-directory-segment/'.repeat(6)}配置文件.ts`
+    const decision = app.showApprovalPrompt({
+      toolName: 'write',
+      reason: '记录超长的配置路径与中文内容，确认换行不会越过真实边框',
+      arguments: JSON.stringify({ file_path: path, content: '旧内容'.repeat(40) + '\n' + '新内容'.repeat(40) }),
+    })
+    let view = await viewport(vt)
+    assertSheetIntact(view)
+    for (const line of plainLines(vt)) {
+      assert.ok(visibleWidth(line) <= columns, `${columns}x${rows} overflows (${visibleWidth(line)}):\n${line}`)
+    }
+    assert.match(view, /Target/u)
+    vt.sendInput('\x1b[F')
+    view = await viewport(vt)
+    assert.ok(view.includes('新内容'), `${columns}x${rows} End reaches the CJK tail:\n${view}`)
+    vt.sendInput('n')
+    assert.equal(await decision, 'rejected')
+    app.dispose()
+    startedApps.delete(app)
+  }
+  // Below 24 terminal rows the sheet keeps its natural height instead of the floor.
+  const { vt, app } = startApp(44, 20)
+  const decision = app.showApprovalPrompt({ toolName: 'write', reason: 'short' })
+  const view = await viewport(vt)
+  assert.ok(frameHeight(view) < 12, `44x20 must not force the 12-row floor:\n${view}`)
+  vt.sendInput('n')
+  assert.equal(await decision, 'rejected')
+})
+
+test('short terminals keep the danger fact, a real reading row and honest structured degradation', async () => {
+  for (const [columns, rows] of [[80, 10], [44, 10]] as const) {
+    const { vt, app } = startApp(columns, rows)
+    const decision = app.showApprovalPrompt({
+      toolName: 'bash',
+      reason: 'clean the workspace',
+      arguments: JSON.stringify({ command: 'rm -rf /tmp/build-cache\nrm -rf ./dist\nnpm run build' }),
+      danger: true,
+    })
+    const view = await viewport(vt)
+    assertSheetIntact(view)
+    assert.ok(view.includes('Dangerous command'), `${columns}x${rows} danger missing:\n${view}`)
+    assert.ok(/Action: Run command|Command: /u.test(view), `${columns}x${rows} a real reading row is missing:\n${view}`)
+    assert.ok(view.includes('Resize') || view.includes('rows '), `${columns}x${rows} must state the reading limit:\n${view}`)
+    assert.ok(!view.includes('…'), `${columns}x${rows} must not crop an action label:\n${view}`)
+    vt.sendInput('n')
+    assert.equal(await decision, 'rejected')
+    app.dispose()
+    startedApps.delete(app)
+  }
+})
+
+test('hostile structured arguments never reach the terminal and Copy stays byte-exact', async () => {
+  const { vt, app, copied } = startApp(80, 24)
+  const raw = JSON.stringify({
+    file_path: 'src/config.ts',
+    old_string: 'safe',
+    new_string: 'evil\u001b[31mred\u001b]0;pwned\u0007text',
+  })
+  const decision = app.showApprovalPrompt({
+    toolName: 'edit',
+    reason: 'hostile body',
+    arguments: raw,
+    danger: true,
+  })
+  const view = await viewport(vt)
+  const stream = vt.writes.join('')
+  assert.ok(!stream.includes('pwned'), 'the OSC payload never reaches the terminal stream')
+  assert.ok(!stream.includes('\u009b'), 'no raw C1 byte reaches the terminal stream')
+  assert.ok(!view.includes('\u001b'), 'the painted view carries no raw ESC')
+  assert.match(view, /Target[\s\S]*src\/config\.ts/u)
+  vt.sendInput('c')
+  await vt.waitForRender()
+  await Promise.resolve()
+  await Promise.resolve()
+  assert.deepEqual(copied, [raw], 'Copy returns the exact received JSON bytes')
+  vt.sendInput('n')
+  assert.equal(await decision, 'rejected')
+})
+
+test('fullscreen padding rows are inert and a padding change fences the press', async () => {
+  const { vt, app } = startApp(120, 40)
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  const decision = app.showApprovalPrompt({
+    toolName: 'write',
+    reason: 'padded',
+    arguments: JSON.stringify({ file_path: 'src/config.ts', content: 'export const timeout = 60' }),
+  })
+  let view = await viewport(vt)
+  assert.equal(frameHeight(view), 16, `the 120x40 floor is painted:\n${view}`)
+  const allow = actionCell(view, '[y] Allow once')
+  // A blank padding row two rows above the pinned bar is inert.
+  press(vt, { x: 3, y: allow.y - 2 })
+  release(vt, { x: 3, y: allow.y - 2 })
+  await vt.waitForRender()
+  let settled = false
+  void decision.then(() => { settled = true })
+  await Promise.resolve()
+  assert.equal(settled, false, 'a padding row is not a decision target')
+  // A real press, then a resize that changes the padding/layout, then release.
+  press(vt, allow)
+  vt.resize(100, 32)
+  await vt.waitForRender()
+  view = await viewport(vt)
+  release(vt, actionCell(view, '[y] Allow once'))
+  await vt.waitForRender()
+  settled = false
+  void decision.then(() => { settled = true })
+  await Promise.resolve()
+  assert.equal(settled, false, 'a padding/layout change between press and release invalidates the click')
+  vt.sendInput('y')
+  assert.equal(await decision, 'allowed-once')
 })
