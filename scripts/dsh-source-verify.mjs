@@ -340,12 +340,15 @@ async function main() {
       ['vendored pi-tui typecheck', ['typecheck:fork']],
       ['vendored pi-tui tests', ['test:fork']],
       ['TUI build', ['build']],
-      ['TUI bundle typecheck', ['typecheck:bundle']],
       // The PRODUCT suite runs inside `prepack` (the packaging safety gate
       // must stay self-contained), so running `test:bundle` here would run
       // the whole product suite TWICE against the same workspace and the same
       // dependency graph. The TOOLING suite is not part of `prepack`, so it
       // still needs its own run here.
+      //
+      // `typecheck:bundle` is part of `prepack` too, so it runs there
+      // exactly once — an explicit run here would repeat it against the
+      // same workspace and the same dependency graph.
       ['TUI tooling tests', ['test:tooling']],
       ['tmux terminal tooling tests', ['test:tmux']],
       // `gate:pi-surface-compat` is the re-vendor HARD GATE. It overlaps the
