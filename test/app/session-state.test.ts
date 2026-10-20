@@ -6,6 +6,7 @@
  */
 
 import assert from 'node:assert/strict'
+import { createAppLifecycleGuard } from '../support/app-lifecycle-guard.ts'
 import { createClientCommandRegistry } from '../../src/app/command/client-command-registry.ts'
 import { parseCommand } from '@deepseek-ai/dsh-commands'
 import { afterEach, test } from 'node:test'
@@ -39,13 +40,9 @@ import { navigateToLegacySettings } from '../support/open-legacy-settings.ts'
  * is disposed after each test — the process slot (the vendored fork
  * keybindings are process-global) is released only by the FINAL dispose,
  * never by stop() (see src/tui/process-slot.ts). */
-const startedApps = new Set<TuiApp>()
+const { started: startedApps, disposeAll: disposeStartedApps } = createAppLifecycleGuard<TuiApp>()
 afterEach(() => {
-  for (const app of [...startedApps]) {
-    startedApps.delete(app)
-    if (app.isDisposed()) continue
-    try { app.dispose() } catch {}
-  }
+  disposeStartedApps()
 })
 
 // themeOptOut() skips terminal queries under NO_COLOR / FORCE_COLOR=0 /

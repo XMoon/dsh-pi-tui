@@ -8,6 +8,7 @@
  */
 
 import assert from 'node:assert/strict'
+import { createAppLifecycleGuard } from '../support/app-lifecycle-guard.ts'
 import { afterEach, test } from 'node:test'
 import { CommandId } from '@deepseek-ai/dsh-commands'
 import { MessageId, ToolCallId } from '@deepseek-ai/dsh-llm'
@@ -20,13 +21,9 @@ import { parseUserKeybindings } from '../../src/tui/keybindings/config.ts'
 import { enterChildDisplaySubject } from '../support/display-subject.ts'
 import { VirtualTerminal } from '../support/virtual-terminal.ts'
 
-const startedApps = new Set<TuiApp>()
+const { started: startedApps, disposeAll: disposeStartedApps } = createAppLifecycleGuard<TuiApp>()
 afterEach(() => {
-  for (const app of [...startedApps]) {
-    startedApps.delete(app)
-    if (app.isDisposed()) continue
-    try { app.dispose() } catch {}
-  }
+  disposeStartedApps()
 })
 
 function startApp(preset: DisplayState['preset'] = 'focus'): { vt: VirtualTerminal; app: TuiApp } {

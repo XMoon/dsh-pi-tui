@@ -14,6 +14,7 @@
  */
 
 import assert from 'node:assert/strict'
+import { createAppLifecycleGuard } from '../support/app-lifecycle-guard.ts'
 import { afterEach, test } from 'node:test'
 import { TuiApp } from '../../src/tui-app.ts'
 import { VirtualTerminal } from '../support/virtual-terminal.ts'
@@ -24,13 +25,9 @@ import type { RemoteConnectionGenerationSource } from '../../src/runtime/remote/
 import { createObservableGenerationHarness } from '../support/remote-generation.ts'
 import { buildPendingPresentation } from '../../src/app/surface/pending-presentation.ts'
 
-const startedApps = new Set<TuiApp>()
+const { started: startedApps, disposeAll: disposeStartedApps } = createAppLifecycleGuard<TuiApp>()
 afterEach(() => {
-  for (const app of [...startedApps]) {
-    startedApps.delete(app)
-    if (app.isDisposed()) continue
-    try { app.dispose() } catch {}
-  }
+  disposeStartedApps()
 })
 
 function startApp(): { vt: VirtualTerminal; app: TuiApp } {

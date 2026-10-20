@@ -11,6 +11,7 @@
  */
 
 import assert from 'node:assert/strict'
+import { createAppLifecycleGuard } from '../support/app-lifecycle-guard.ts'
 import { createClientCommandRegistry } from '../../src/app/command/client-command-registry.ts'
 import { parseCommand } from '@deepseek-ai/dsh-commands'
 import { afterEach, test } from 'node:test'
@@ -42,13 +43,9 @@ process.env.CI = ''
 
 /** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file
  * is disposed after each test. */
-const startedApps = new Set<TuiApp>()
+const { started: startedApps, disposeAll: disposeStartedApps } = createAppLifecycleGuard<TuiApp>()
 afterEach(() => {
-  for (const app of [...startedApps]) {
-    startedApps.delete(app)
-    if (app.isDisposed()) continue
-    try { app.dispose() } catch {}
-  }
+  disposeStartedApps()
 })
 
 /** A stub runner (the command-catalog pattern) for the grammar tests. */

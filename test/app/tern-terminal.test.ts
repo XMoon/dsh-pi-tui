@@ -8,6 +8,7 @@
  */
 
 import assert from 'node:assert/strict'
+import { createAppLifecycleGuard } from '../support/app-lifecycle-guard.ts'
 import { afterEach, test } from 'node:test'
 import { fileURLToPath } from 'node:url'
 import { TuiApp } from '../../src/tui-app.ts'
@@ -91,13 +92,9 @@ test('the Tern progress state needs BOTH a wait phase and a proven Agent-blockin
 
 /** The process TUI slot is global: every constructed TuiApp is disposed after
  *  each test (only dispose releases the slot, never stop()). */
-const startedApps = new Set<TuiApp>()
+const { started: startedApps, disposeAll: disposeStartedApps } = createAppLifecycleGuard<TuiApp>()
 afterEach(() => {
-  for (const app of [...startedApps]) {
-    startedApps.delete(app)
-    if (app.isDisposed()) continue
-    try { app.dispose() } catch {}
-  }
+  disposeStartedApps()
 })
 
 /** A started Tern app whose injected VirtualTerminal records every OSC 7. */

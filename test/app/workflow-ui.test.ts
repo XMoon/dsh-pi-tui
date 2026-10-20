@@ -9,6 +9,7 @@
  */
 
 import assert from 'node:assert/strict'
+import { createAppLifecycleGuard } from '../support/app-lifecycle-guard.ts'
 import { afterEach, test } from 'node:test'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { stripTerminalSequences } from '@xmoon76/pi-tui'
@@ -21,13 +22,9 @@ import { createDiag } from '../../src/runtime/process/diagnostics.ts'
 import { displaySeamStub } from '../support/display-seam-stub.ts'
 import { VirtualTerminal } from '../support/virtual-terminal.ts'
 
-const startedApps = new Set<TuiApp>()
+const { started: startedApps, disposeAll: disposeStartedApps } = createAppLifecycleGuard<TuiApp>()
 afterEach(() => {
-  for (const app of [...startedApps]) {
-    startedApps.delete(app)
-    if (app.isDisposed()) continue
-    try { app.dispose() } catch {}
-  }
+  disposeStartedApps()
 })
 
 process.env.NO_COLOR = ''

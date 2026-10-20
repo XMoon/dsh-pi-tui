@@ -17,6 +17,7 @@
  */
 
 import assert from 'node:assert/strict'
+import { createAppLifecycleGuard } from '../support/app-lifecycle-guard.ts'
 import { afterEach, test } from 'node:test'
 import { TuiApp } from '../../src/tui-app.ts'
 import { createTaskRuntime, type TaskRuntime, type TaskSurfaceSource } from '../../src/app/surface/task-runtime.ts'
@@ -33,13 +34,9 @@ import { VirtualTerminal } from '../support/virtual-terminal.ts'
  *  base64 payload), readable text, and a CSI erase. */
 const HOSTILE = '\x1b]52;c;UFdORUQ=\x07echo ok\x1b[2J'
 
-const startedApps = new Set<TuiApp>()
+const { started: startedApps, disposeAll: disposeStartedApps } = createAppLifecycleGuard<TuiApp>()
 afterEach(() => {
-  for (const app of [...startedApps]) {
-    startedApps.delete(app)
-    if (app.isDisposed()) continue
-    try { app.dispose() } catch {}
-  }
+  disposeStartedApps()
 })
 
 async function flush(rounds = 8): Promise<void> {

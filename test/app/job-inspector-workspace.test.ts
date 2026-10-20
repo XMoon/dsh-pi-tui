@@ -17,6 +17,7 @@
  */
 
 import assert from 'node:assert/strict'
+import { createAppLifecycleGuard } from '../support/app-lifecycle-guard.ts'
 import { afterEach, test } from 'node:test'
 import { stripTerminalSequences, TuiAltScreen, TuiMainScreen, visibleWidth } from '@xmoon76/pi-tui'
 import type { TaskBrowserHandle, TuiAppEvents } from '../../src/tui-app.ts'
@@ -35,13 +36,9 @@ import { VirtualTerminal } from '../support/virtual-terminal.ts'
 /** Every TuiApp started here is disposed after each test: the process's
  *  single-live-TUI slot (the vendored keybindings are process-global) is held
  *  only by LIVE surfaces. */
-const startedApps = new Set<TuiApp>()
+const { started: startedApps, disposeAll: disposeStartedApps } = createAppLifecycleGuard<TuiApp>()
 afterEach(() => {
-  for (const app of [...startedApps]) {
-    startedApps.delete(app)
-    if (app.isDisposed()) continue
-    try { app.dispose() } catch {}
-  }
+  disposeStartedApps()
 })
 
 /** Start the real surface with the caller's REAL event sinks (a fullscreen

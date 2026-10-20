@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { createAppLifecycleGuard } from '../support/app-lifecycle-guard.ts'
 import { afterEach, test } from 'node:test'
 import { parseUserKeybindings } from '../../src/tui/keybindings/config.ts'
 import { HostKeybindingManager } from '../../src/tui/keybindings/manager.ts'
@@ -15,13 +16,9 @@ import { CURSOR_MARKER, visibleWidth } from '@xmoon76/pi-tui'
  * is disposed after each test — the process slot (the vendored fork
  * keybindings are process-global) is released only by the FINAL dispose,
  * never by stop() (see src/tui/process-slot.ts). */
-const startedApps = new Set<TuiApp>()
+const { started: startedApps, disposeAll: disposeStartedApps } = createAppLifecycleGuard<TuiApp>()
 afterEach(() => {
-  for (const app of [...startedApps]) {
-    startedApps.delete(app)
-    if (app.isDisposed()) continue
-    try { app.dispose() } catch {}
-  }
+  disposeStartedApps()
 })
 
 function plain(text: string): string {

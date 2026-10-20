@@ -26,6 +26,7 @@
  */
 
 import assert from 'node:assert/strict'
+import { createAppLifecycleGuard } from '../support/app-lifecycle-guard.ts'
 import { readFileSync } from 'node:fs'
 import { afterEach, test } from 'node:test'
 import { EditorRegistry } from '../../src/extension/internal/editor-registry.ts'
@@ -56,13 +57,9 @@ import { VirtualTerminal } from '../support/virtual-terminal.ts'
 
 /** Every TuiApp built here is disposed after each test — the vendored fork
  * keybindings are a process-global slot (see `src/tui/process-slot.ts`). */
-const startedApps = new Set<TuiApp>()
+const { started: startedApps, disposeAll: disposeStartedApps } = createAppLifecycleGuard<TuiApp>()
 afterEach(() => {
-  for (const app of [...startedApps]) {
-    startedApps.delete(app)
-    if (app.isDisposed()) continue
-    try { app.dispose() } catch {}
-  }
+  disposeStartedApps()
 })
 
 const fakeDiag: Diag = {

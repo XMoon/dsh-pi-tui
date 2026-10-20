@@ -18,6 +18,7 @@
  */
 
 import assert from 'node:assert/strict'
+import { createAppLifecycleGuard } from '../support/app-lifecycle-guard.ts'
 import { afterEach, test } from 'node:test'
 import { Text } from '@xmoon76/pi-tui'
 import { TuiApp } from '../../src/tui-app.ts'
@@ -32,13 +33,9 @@ import { VirtualTerminal } from '../support/virtual-terminal.ts'
  * is disposed after each test — the process slot (the vendored fork
  * keybindings are process-global) is released only by the FINAL dispose,
  * never by stop() (see src/tui/process-slot.ts). */
-const startedApps = new Set<TuiApp>()
+const { started: startedApps, disposeAll: disposeStartedApps } = createAppLifecycleGuard<TuiApp>()
 afterEach(() => {
-  for (const app of [...startedApps]) {
-    startedApps.delete(app)
-    if (app.isDisposed()) continue
-    try { app.dispose() } catch {}
-  }
+  disposeStartedApps()
 })
 
 /** The snapshot surface slice (the focusedSeat field). */

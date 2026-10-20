@@ -7,6 +7,7 @@
  */
 
 import assert from 'node:assert/strict'
+import { createAppLifecycleGuard } from '../support/app-lifecycle-guard.ts'
 import { afterEach, test } from 'node:test'
 import { visibleWidth } from '@xmoon76/pi-tui'
 import { RendererRegistry } from '../../src/extension/internal/renderer-registry.ts'
@@ -18,13 +19,9 @@ import type { ExtensionView } from '../../src/extension/public-types.ts'
  * keybindings are process-global) is released only by the FINAL dispose,
  * never by stop() (see src/tui/process-slot.ts). */
 interface DisposableApp { isDisposed(): boolean; dispose(): void }
-const startedApps = new Set<DisposableApp>()
+const { started: startedApps, disposeAll: disposeStartedApps } = createAppLifecycleGuard<DisposableApp>()
 afterEach(() => {
-  for (const app of [...startedApps]) {
-    startedApps.delete(app)
-    if (app.isDisposed()) continue
-    try { app.dispose() } catch {}
-  }
+  disposeStartedApps()
 })
 
 function textView(text: string): ExtensionView {

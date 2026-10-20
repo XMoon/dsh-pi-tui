@@ -6,6 +6,7 @@
  */
 
 import assert from 'node:assert/strict'
+import { createAppLifecycleGuard } from '../support/app-lifecycle-guard.ts'
 import { createClientCommandRegistry } from '../../src/app/command/client-command-registry.ts'
 import { parseCommand } from '@deepseek-ai/dsh-commands'
 import { afterEach, test } from 'node:test'
@@ -16,13 +17,9 @@ import { TuiApp } from '../../src/tui-app.ts'
 import { VirtualTerminal } from '../support/virtual-terminal.ts'
 import { registerTuiCommandsWithDirectSeams } from '../support/register-tui-commands.ts'
 
-const startedApps = new Set<TuiApp>()
+const { started: startedApps, disposeAll: disposeStartedApps } = createAppLifecycleGuard<TuiApp>()
 afterEach(() => {
-  for (const app of [...startedApps]) {
-    startedApps.delete(app)
-    if (app.isDisposed()) continue
-    try { app.dispose() } catch {}
-  }
+  disposeStartedApps()
 })
 
 function fakeCommands(): { defs: { name: string; handler?: unknown }[]; commands: Record<string, unknown> } {
