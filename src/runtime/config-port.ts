@@ -411,11 +411,16 @@ export interface PermissionConfig {
   /** Apply one permission preset to a live session (/yolo applies
    * `danger-full-access` through the OFFICIAL command line so the switch
    * takes the exact host path — sandbox + approval writer + policy-change
-   * message + preset log). */
+   * message + preset log).
+   *
+   * `signal` is REQUIRED: the official `/permission` command reads
+   * `signal.aborted` before it dispatches, so every real UI/runner caller
+   * must supply its own live lifetime signal (never a fake or orphan
+   * controller). */
   applyPermissionPreset(
     sessionId: string,
     presetId: string,
-    signal?: AbortSignal,
+    signal: AbortSignal,
   ): Promise<PermissionPresetApplyOutcome>
 }
 

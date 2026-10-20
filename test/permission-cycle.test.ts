@@ -54,8 +54,13 @@ function harness(options: {
   /** The transport token flips stale during the apply await (scope stays
    *  current — a same-id binding rollover WITHOUT a TUI owner commit). */
   readonly transportStaleAfterApply?: boolean
+  /** The sync admission finds NO live scope (the sessionless surface). */
+  readonly noScope?: boolean
 }) {
   const applied: Array<{ sessionId: string; presetId: string }> = []
+  /** The EXACT signal argument each apply received (undefined when the
+   *  gesture owner supplies none). */
+  const applySignals: Array<AbortSignal | undefined> = []
   const notices: Array<{ message: string; kind: 'info' | 'error' }> = []
   let scopeCurrent = true
   let transportCurrent = true
@@ -89,14 +94,17 @@ function harness(options: {
     viewer: { read: () => undefined },
     clientCwd: '/ws',
     permissionCycle: {
-      captureLiveScope: () => ({ subject: {}, sessionId: 'session-a', generation: 1 }) as never,
+      captureLiveScope: () => options.noScope === true
+        ? undefined
+        : ({ subject: {}, sessionId: 'session-a', generation: 1 }) as never,
       isScopeCurrent: () => scopeCurrent,
       captureTransportToken: () => ({ token: 'transport-identity' }),
       isTransportTokenCurrent: () => transportCurrent,
       currentPermission: () => options.current,
       presetNames: () => options.names ?? ['read-only', 'workspace-write', 'danger-full-access'],
-      apply: async (sessionId: string, presetId: string) => {
+      apply: async (sessionId: string, presetId: string, signal?: AbortSignal) => {
         applied.push({ sessionId, presetId })
+        applySignals.push(signal)
         if (options.staleAfterApply) scopeCurrent = false
         if (options.transportStaleAfterApply) transportCurrent = false
         const outcome = options.outcome
@@ -110,11 +118,38 @@ function harness(options: {
   return {
     runtime,
     applied,
+    applySignals,
     notices,
     deps,
     ctx,
   }
 }
+
+test('§6.3 the gesture owner supplies NO signal of its own — the composition owns the lifetime fallback', async () => {
+  // The official `/permission` command requires a signal, so the cycle must
+  // never invent one here. This owner-level test only pins that fact; the
+  // production fallback (bootstrap's runner lifetime signal) is proven on the
+  // real runner path in `runner-direct-permission.test.ts`.
+  const h = harness({ current: 'read-only' })
+  h.runtime.cyclePermission()
+  await new Promise(resolve => setTimeout(resolve, 20))
+  assert.deepEqual(h.applySignals, [undefined],
+    'the status owner never fabricates an AbortSignal for the gesture write')
+})
+
+test('§6.3 no live scope / empty catalog / single current preset dispatch NOTHING', async () => {
+  const states = [
+    harness({ noScope: true }),
+    harness({ names: [] }),
+    harness({ current: 'workspace-write', names: ['workspace-write'] }),
+  ]
+  for (const h of states) h.runtime.cyclePermission()
+  await new Promise(resolve => setTimeout(resolve, 20))
+  for (const h of states) {
+    assert.deepEqual(h.applied, [], 'an unservable gesture never reaches the official /permission line')
+    assert.deepEqual(h.notices, [], 'and it reports no fabricated outcome')
+  }
+})
 
 test('§6.3 the cycle computes next from the projection current and dispatches EXACTLY ONE apply', async () => {
   const h = harness({ current: 'read-only' })

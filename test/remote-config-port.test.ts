@@ -57,7 +57,7 @@ interface FakeState {
   credentialGate: (() => void | Promise<void>) | undefined
   /** Makes the next credential RPC fail (a real failure result). */
   credentialFailure: { code: string; message: string } | undefined
-  readonly executeCalls: { sessionId: string; line: string; attachments: readonly unknown[]; signal?: AbortSignal }[]
+  readonly executeCalls: { sessionId: string; line: string; attachments: readonly unknown[]; signal: AbortSignal }[]
   executeResult: { ok: true; value: unknown } | { ok: false; error: unknown }
   readonly order: string[]
 }
@@ -249,7 +249,7 @@ function createBackend(seed?: (state: FakeState) => void) {
       },
     },
     commands: {
-      execute: async (sessionId: string, line: string, attachments: readonly unknown[], signal?: AbortSignal) => {
+      execute: async (sessionId: string, line: string, attachments: readonly unknown[], signal: AbortSignal) => {
         state.executeCalls.push({ sessionId, line, attachments, signal })
         return state.executeResult
       },
@@ -609,21 +609,24 @@ test('permission presets map the catalog, the settings default, and the official
   await port.describe()
   assert.equal(port.permissions.defaultPreset(), 'danger-full-access')
 
+  const applySignal = new AbortController().signal
   assert.deepEqual(
-    await port.permissions.applyPermissionPreset('session-a', 'danger-full-access'),
+    await port.permissions.applyPermissionPreset('session-a', 'danger-full-access', applySignal),
     { kind: 'applied' },
   )
   assert.equal(state.executeCalls.length, 1)
+  assert.equal(state.executeCalls[0]?.signal, applySignal,
+    'the Remote adapter forwards the caller signal by IDENTICAL reference (never a fake)')
   assert.deepEqual(state.executeCalls[0], {
     sessionId: 'session-a',
     line: '/permission danger-full-access',
     attachments: [],
-    signal: undefined,
+    signal: applySignal,
   })
 
   // An unknown preset never reaches the official command line.
   assert.deepEqual(
-    await port.permissions.applyPermissionPreset('session-a', 'bogus'),
+    await port.permissions.applyPermissionPreset('session-a', 'bogus', applySignal),
     { kind: 'unavailable', cause: 'permission' },
   )
   assert.equal(state.executeCalls.length, 1)

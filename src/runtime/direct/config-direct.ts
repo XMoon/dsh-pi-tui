@@ -112,7 +112,7 @@ export interface ApprovalServiceLike {
 
 /** The structural commands service surface (permission application only). */
 export interface CommandsServiceLike {
-  execute(agent: unknown, line: string, args: readonly unknown[], signal?: AbortSignal): Promise<unknown>
+  execute(agent: unknown, line: string, args: readonly unknown[], signal: AbortSignal): Promise<unknown>
 }
 
 /** The structural agent-presets service surface (the registry default). */
@@ -959,7 +959,7 @@ export class DirectPermissionConfig implements PermissionConfig {
   async applyPermissionPreset(
     sessionId: string,
     presetId: string,
-    signal?: AbortSignal,
+    signal: AbortSignal,
   ): Promise<{ kind: 'applied' } | { kind: 'unavailable'; cause: 'commands' | 'permission' }> {
     const commands = this.ctx.get('commands') as CommandsServiceLike | undefined
     if (commands === undefined) return { kind: 'unavailable', cause: 'commands' }

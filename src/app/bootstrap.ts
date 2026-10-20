@@ -1908,8 +1908,15 @@ export function applyRunnerWithRuntime(
           return backend.sessionReader.sessionStatus(sessionId)?.permission
         },
         presetNames: () => [...backend.config.permissions.presetNames()],
+        // The cycle gesture owns no cancellation controller of its own: its
+        // write rides THIS runner's existing lifetime signal. An explicit
+        // caller signal (when one exists) still wins.
         apply: (sessionId, presetId, signal) =>
-          backend.config.permissions.applyPermissionPreset(sessionId, presetId, signal),
+          backend.config.permissions.applyPermissionPreset(
+            sessionId,
+            presetId,
+            signal ?? lifecycleController.signal,
+          ),
       },
       generation: () => ownership.generation(),
       currentSessionId: () => ownership.currentSessionId(),

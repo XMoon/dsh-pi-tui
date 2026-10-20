@@ -294,13 +294,26 @@ export interface DirectTspFixtureOptions {
    * own switch, so a Session's EFFECTIVE directory is a real Host fact.
    */
   readonly workingDirectory?: boolean
+  /**
+   * The renderer the runner boots under. The default `'tsp'` installs the
+   * scripted Tern pane. `'pi-tui'` installs NO pane and leaves the process tty
+   * to the test, which must install its `VirtualTerminal` through
+   * `runner-harness.installVirtualProcessTerminal` BEFORE calling this factory
+   * (the same physical-terminal stand-in every PiTui runner suite uses).
+   */
+  readonly renderer?: 'tsp' | 'pi-tui'
 }
 
 export interface DirectTspExternalFixture extends Omit<DirectTspFixture, 'pane'> {}
 
+type DirectTspPiTuiOptions = DirectTspFixtureOptions & { readonly renderer: 'pi-tui' }
 type DirectTspExternalOptions = DirectTspFixtureOptions & { readonly externalTern: true }
-type DirectTspScriptedOptions = DirectTspFixtureOptions & { readonly externalTern?: false }
+type DirectTspScriptedOptions = DirectTspFixtureOptions & { readonly externalTern?: false; readonly renderer?: 'tsp' }
 
+export function createDirectTspFixture(
+  life: import('./temp-lifecycle.ts').TestLifecycle,
+  options: DirectTspPiTuiOptions,
+): Promise<DirectTspExternalFixture>
 export function createDirectTspFixture(
   life: import('./temp-lifecycle.ts').TestLifecycle,
   options: DirectTspExternalOptions,
@@ -316,7 +329,7 @@ export async function createDirectTspFixture(
   const workRoot = options.workRoot ?? life.tempDir('dsh-b2-direct-')
   const anchorDir = join(workRoot, 'anchor')
   mkdirSync(anchorDir, { recursive: true })
-  const pane = options.externalTern === true
+  const pane = options.externalTern === true || options.renderer === 'pi-tui'
     ? undefined
     : installTspPane({
         modelPicker: options.modelPicker,
@@ -324,9 +337,10 @@ export async function createDirectTspFixture(
         sessionBrowser: options.sessionBrowser,
       })
   // OWNERSHIP, not success-contingency: scripted mode replaces the PROCESS tty
-  // and clears five env vars; external-Tern mode must leave the Tern-owned tty
-  // and its injected environment untouched. In either mode, setup failures must
-  // restore the resources this fixture itself acquired.
+  // and clears five env vars; external-Tern and PiTui modes must leave the
+  // tty (Tern-owned / test VirtualTerminal) and its injected environment
+  // untouched. In every mode, setup failures must restore the resources this
+  // fixture itself acquired.
   const cleanup: Array<() => Promise<void> | void> = []
   /** Ownership cleanups run LAST, LIFO, EXACTLY ONCE (success or reject). */
   const runSetupCleanup = async (): Promise<void> => {
@@ -444,7 +458,7 @@ export async function createDirectTspFixture(
     new TypertGatewayService(gatewayCtx, { websocketHeartbeatIntervalMs: 50 })
   })
 
-  process.env.DSH_PI_TUI_RENDERER = 'tsp'
+  process.env.DSH_PI_TUI_RENDERER = options.renderer === 'pi-tui' ? 'pi-tui' : 'tsp'
   process.env.DSH_PI_TUI_LOG = join(workRoot, 'diag.log')
   // Isolate the DSH home for this fixture: the input-history and session
   // stores must land under the work root, never in the developer's real
