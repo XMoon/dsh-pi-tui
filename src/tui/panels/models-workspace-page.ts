@@ -386,16 +386,21 @@ export class ModelsWorkspacePage implements Component {
 
   private refreshRecords(): void {
     const serial = ++this.recordsSerial
+    // A read in flight has no current record presence: do not keep painting
+    // the previous snapshot as if it were the Host's current fact.
+    this.records = undefined
     this.source.run('models records read', async () => {
       try {
         const records = await this.source.storedCredentials()
         this.settle(() => {
           if (serial !== this.recordsSerial) return
           this.records = records
+          if (this.notice?.startsWith('the stored credentials could not be read') === true) this.notice = undefined
         })
       } catch (error) {
         this.settle(() => {
           if (serial !== this.recordsSerial) return
+          this.records = undefined
           this.notice = `the stored credentials could not be read: ${errorText(error)}`
         })
       }
