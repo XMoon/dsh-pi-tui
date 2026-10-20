@@ -362,8 +362,15 @@ export class ApprovalRuntime {
         () => { if (owned) this.showNext() },
         // Resume the suspended roots AFTER the successor decision: a mounted
         // successor owns the suspension and receives the handles without a
-        // transient reveal/focus; only a drained queue reveals once.
-        () => this.host.resumeApprovalSuspension(pending),
+        // transient reveal/focus; only a drained queue reveals once. Skip the
+        // host resume entirely for a prompt that never owned the seat (a
+        // pre-aborted/queued request has nothing to reveal and must not move
+        // focus away from a Job workspace / Task Quick).
+        () => {
+          if (owned || pending.suspendedOverlays.size > 0) {
+            this.host.resumeApprovalSuspension(pending)
+          }
+        },
         // The failed presentation left the stage, so the normal settle tail's
         // LAST-blocker obligation applies here too: a PARKED but still-current
         // optional tenant must come back once no approval is active and the queue
@@ -435,10 +442,11 @@ export class ApprovalRuntime {
   private settle(pending: PendingApproval, outcome: ApprovalOutcome): void {
     if (pending.settled === true) return
     pending.settled = true
+    const wasActive = this.active === pending
     // M3-6 PR3: the presentation cleanup is NON-TRUNCATING and the caller's
     // promise settlement is an OBLIGATION that no cleanup throw may skip. The
     // committed `settled` latch makes this the only settlement attempt.
-    const steps: Array<() => void> = this.active === pending
+    const steps: Array<() => void> = wasActive
       ? [
         () => this.host.cancelLeader(),
         () => this.host.clearFullscreenPointerGestures(),
@@ -473,8 +481,14 @@ export class ApprovalRuntime {
       () => { if (this.active === undefined) this.showNext() },
       // The successor decision is committed; now resume/transfer the roots this
       // prompt suspended. With B mounted the broker transfers them into B; with
-      // a drained queue this reveals/focuses them once.
-      () => this.host.resumeApprovalSuspension(pending),
+      // a drained queue this reveals/focuses them once. A prompt that never
+      // owned the seat (pre-aborted/queued) has no suspension and must not
+      // disturb the current Job workspace / Task Quick focus.
+      () => {
+        if (wasActive || pending.suspendedOverlays.size > 0) {
+          this.host.resumeApprovalSuspension(pending)
+        }
+      },
       // Phase 3A / PR-B: the notification runs AFTER the handover decision and
       // reads the LIVE state — a queued approval that just took over keeps the
       // optional tenant PARKED; only a fully drained queue may restore it.
