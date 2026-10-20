@@ -149,6 +149,13 @@ test('login destination: bare, route, ref, novel ref, new route, account and inv
     { kind: 'authorization', route: 'mykey', key: 'plugin/mykey', label: 'My Key', methods: [{ id: 'oauth', label: 'OAuth' }], inFlight: false },
   ]
   assert.deepEqual(resolveLoginDestination('mykey', [], flowOnly), { kind: 'models', view: 'provider', route: 'mykey' })
+  // A collision with an exact (case-insensitive) reference still resolves the
+  // KNOWN lowercase route first; the uppercase form stays the ref escape hatch.
+  const collisionOptions: readonly CredentialProviderOption[] = [
+    { route: 'other-provider', label: 'Other', ref: 'MYKEY', configured: true, declared: false, namesCredential: true, group: 'configured', canProvisionProfile: true },
+  ]
+  assert.deepEqual(resolveLoginDestination('mykey', collisionOptions, flowOnly), { kind: 'models', view: 'provider', route: 'mykey' })
+  assert.deepEqual(resolveLoginDestination('MYKEY', collisionOptions, flowOnly), { kind: 'models', view: 'reference', ref: 'MYKEY' })
   assert.deepEqual(resolveLoginDestination('deepseek-account', PROVIDERS, FLOWS), { kind: 'account', view: 'page' })
   const invalid = resolveLoginDestination('not valid!', PROVIDERS, FLOWS)
   assert.equal(invalid.kind, 'error')
