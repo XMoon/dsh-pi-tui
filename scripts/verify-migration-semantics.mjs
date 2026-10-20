@@ -243,7 +243,28 @@ export function productionReferences(source, fileDepth = 0) {
           const path = argument.text
           const area = path.split('/').find(segment => segment === 'src' || segment === 'packages')
           if (helper.baseIsRepositoryRoot !== true) {
-            unresolvedIdentifiers.add(node.expression.text)
+            // The base does NOT reach the repository root. If it
+            // statically names a NON-production directory (the generated
+            // preset patches, a fixture tree), the read is not a production
+            // read at all and is EXCLUDED. Only a base that could still
+            // name a production file is reported as unresolved.
+            // The base is statically known and names a NON-production
+            // directory — the GENERATED preset patches, a fixture tree:
+            // the read is not a production read and is EXCLUDED.
+            //
+            // The base is UNKNOWN, or it climbs only PART of the way to the
+            // repository root: the read COULD name a production file, so it
+            // is REPORTED. A base that stops at the TEST root, for
+            // instance, resolves the argument inside the test tree — and the
+            // argument naming `src/…` would then be a path that does not
+            // exist.
+            const baseNamesNonProductionDirectory = segments !== undefined
+              && segments.length > 0
+              && segments.some(segment => segment === 'generated' || segment === 'fixtures')
+            const baseIsUnknown = segments === undefined
+            if (!baseNamesNonProductionDirectory && (baseIsUnknown || helper.baseIsRepositoryRoot !== true)) {
+              unresolvedIdentifiers.add(node.expression.text)
+            }
           } else if (area === undefined) {
             // The argument does not name a production area: the base
             // decides whether the read reaches the repository's sources.
@@ -634,7 +655,9 @@ function isRepositoryRootBase(node, declarationOf, fileDepth, depth = 0) {
     .map(argument => argument.text)
   const up = segments.filter(segment => segment === '..').length
   const down = segments.filter(segment => segment !== '..')
-  if (ts.isCallExpression(first) && ts.isIdentifier(first.expression) && first.expression.text === 'dirname') {
+  const isFileDirectory = (ts.isCallExpression(first) && ts.isIdentifier(first.expression) && first.expression.text === 'dirname')
+    || (ts.isPropertyAccessExpression(first) && first.expression.kind === ts.SyntaxKind.MetaProperty)
+  if (isFileDirectory) {
     // The file's own directory, climbed `up` levels. The file is `depth`
     // levels below the test root, and the repository root is one level above
     // the test root.
@@ -671,16 +694,18 @@ function joinBaseSegments(node, declarationOf, depth = 0) {
   }
   const [first, ...rest] = node.arguments
   if (first === undefined) return undefined
-  const segments = rest
-    .filter(argument => ts.isStringLiteralLike(argument))
-    .map(argument => argument.text)
-  if (segments.length === 0) return undefined
   // The base is the file's own directory: `dirname(fileURLToPath(
-  // import.meta.url))`.
-  if (ts.isCallExpression(first) && ts.isIdentifier(first.expression) && first.expression.text === 'dirname') {
-    return segments
+  // import.meta.url))` or `import.meta.dirname`.
+  const isFileDirectory = (ts.isCallExpression(first) && ts.isIdentifier(first.expression) && first.expression.text === 'dirname')
+    || (ts.isPropertyAccessExpression(first) && first.expression.kind === ts.SyntaxKind.MetaProperty)
+  if (isFileDirectory) {
+    return rest
+      .filter(argument => ts.isStringLiteralLike(argument))
+      .map(argument => argument.text)
   }
-  // The base is a named handle: `ROOT`.
+  // The base is a named handle: `ROOT`. The handle's OWN resolution decides
+  // the base, so the recursion continues there — the literal segments of the
+  // CURRENT join are the handle's, not the base's.
   if (ts.isIdentifier(first)) {
     const declaration = declarationOf(first)
     if (declaration === undefined || !ts.isVariableDeclaration(declaration)) return undefined
