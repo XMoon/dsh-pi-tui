@@ -251,21 +251,20 @@ jobs:
       - name: Remote Session read fixture smoke
         run: pnpm smoke:remote-session-read
 
-      - name: Remote Session same-Host parity smoke
-        run: pnpm smoke:remote-session-read-parity
-
-      - name: Remote command/skill authority parity smoke
-        if: env.DSH_MODE == 'source'
-        run: pnpm smoke:remote-surface-authority-parity
-
-      - name: Remote task read parity smoke
-        if: env.DSH_MODE == 'source'
-        run: pnpm smoke:remote-task-read-parity
-
-      - name: Remote presentation/history parity smoke
-        if: env.DSH_MODE == 'source'
-        run: pnpm smoke:remote-presentation-parity
-
+      # The D1 closure gate OWNS the four same-Host parity proofs: it spawns
+      # each of them itself and aggregates their results into the explicit
+      # read-gap ledger (the known-skips set and the per-domain pass/comparable
+      # /mismatch summary). Running them as separate CI steps as well made the
+      # SAME proof execute TWICE per Source Mode run — once standalone and
+      # once inside the closure.
+      #
+      # Each proof script stays independently invocable (`pnpm
+      # smoke:remote-session-read-parity` and friends), so a developer can
+      # still run one proof on its own while debugging; only the CI GRAPH
+      # runs it once.
+      #
+      # A failing proof still fails the job: the closure rethrows the child's
+      # non-zero exit with the script name and the tail of its output.
       - name: D1 closure gate
         if: env.DSH_MODE == 'source'
         run: pnpm smoke:remote-d1-closure

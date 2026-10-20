@@ -17,13 +17,78 @@ import { testLifecycle } from './support/temp-lifecycle.ts'
 const CI_WORKFLOW = new URL('../.github/workflows/ci.yml', import.meta.url)
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 const GATE_SCRIPT = join(REPO_ROOT, 'scripts', 'check-no-session-events.mjs')
+const PACKAGE_JSON = join(REPO_ROOT, 'package.json')
 
-test('D1.2 authority smoke is restricted to the Source Mode lane', () => {
+/** The repository's package scripts, as raw source text (the exact spelling
+ *  of a script entry is what a CI step invokes). */
+function packageScripts() {
+  return readFileSync(PACKAGE_JSON, 'utf8')
+}
+
+test('the D1 closure gate is the ONE Source Mode entry for the four parity proofs', () => {
   const workflow = readFileSync(CI_WORKFLOW, 'utf8')
+  // The D1 closure OWNS the four same-Host parity proofs: it spawns each of
+  // them itself and aggregates their results into the explicit read-gap
+  // ledger. A CI step that ran a proof standalone as well made the SAME proof
+  // execute TWICE per Source Mode run.
+  //
+  // The contract this lock protects is the EXECUTION GRAPH, not the old step
+  // strings: each parity proof is invoked exactly once in the Source Mode CI
+  // run, and the closure is the only place that invokes it.
   assert.match(
     workflow,
-    /- name: Remote command\/skill authority parity smoke\n\s+if: env\.DSH_MODE == 'source'\n\s+run: pnpm smoke:remote-surface-authority-parity/u,
+    /- name: D1 closure gate\n\s+if: env\.DSH_MODE == 'source'\n\s+run: pnpm smoke:remote-d1-closure/u,
+    'the D1 closure gate must remain a Source Mode step',
   )
+  for (const command of [
+    'smoke:remote-surface-authority-parity',
+    'smoke:remote-task-read-parity',
+    'smoke:remote-presentation-parity',
+    'smoke:remote-session-read-parity',
+  ]) {
+    assert.doesNotMatch(
+      workflow,
+      new RegExp(`run: pnpm ${command}\\b`, 'u'),
+      `${command} must not be a standalone CI step: the D1 closure runs it`,
+    )
+  }
+  // The proof scripts themselves stay individually invocable (a developer can
+  // still run one proof on its own while debugging).
+  for (const command of [
+    'smoke:remote-surface-authority-parity',
+    'smoke:remote-task-read-parity',
+    'smoke:remote-presentation-parity',
+    'smoke:remote-session-read-parity',
+  ]) {
+    assert.ok(
+      packageScripts().includes(`"${command}":`),
+      `${command} must keep its own package script`,
+    )
+  }
+})
+
+test('the D1 closure still invokes all four parity proofs and keeps the known-skips contract', () => {
+  const closure = readFileSync(new URL('../scripts/dsh-remote-d1-closure-smoke.mjs', import.meta.url), 'utf8')
+  for (const script of [
+    'scripts/dsh-remote-session-read-parity-smoke.mjs',
+    'scripts/dsh-remote-surface-authority-parity-smoke.mjs',
+    'scripts/dsh-remote-task-read-parity-smoke.mjs',
+    'scripts/dsh-remote-presentation-parity-smoke.mjs',
+  ]) {
+    assert.ok(closure.includes(script), `the D1 closure must invoke ${script}`)
+  }
+  // The closure's own contract: the aggregated known-skips set is asserted
+  // EXACTLY, and every domain must be passed/comparable/mismatch-free. This
+  // is the evidence the four standalone CI steps never added.
+  assert.match(closure, /assert\.deepEqual\(skipped, KNOWN_SKIPS\)/u,
+    'the closure must keep asserting the exact known-skips set')
+  assert.match(closure, /mismatchCount === 0/u,
+    'the closure must keep asserting a mismatch-free aggregate')
+  assert.match(closure, /KNOWN_SKIPS = Object\.freeze\(\[\s*'session\.createdAt',\s*'session\.live',/u,
+    'the known-skips set must stay exactly the two recorded session gaps')
+  // A failing proof must not be swallowed by the aggregation layer.
+  assert.match(closure, /if \(result\.status !== 0\) \{[\s\S]*?throw new Error/u,
+    'a failing parity proof must fail the closure')
 })
 
 test('Source Mode parity smokes build the vendored pi-tui dist first', () => {
@@ -42,8 +107,6 @@ test('Source Mode parity smokes build the vendored pi-tui dist first', () => {
 test('D1-D2 task, presentation, and closure smokes are Source Mode gates', () => {
   const workflow = readFileSync(CI_WORKFLOW, 'utf8')
   for (const [name, command] of [
-    ['Remote task read parity smoke', 'smoke:remote-task-read-parity'],
-    ['Remote presentation/history parity smoke', 'smoke:remote-presentation-parity'],
     ['D1 closure gate', 'smoke:remote-d1-closure'],
     ['D2 closure smoke', 'smoke:remote-d2-closure'],
   ]) {
@@ -60,6 +123,10 @@ test('D1-D2 task, presentation, and closure smokes are Source Mode gates', () =>
   // d2.4 smoke.
   assert.doesNotMatch(workflow, /smoke:remote-d2-write/,
     'the retired D2.2 write harness must not remain a gate')
+  // D2 stays an INDEPENDENT qualification: it must not be folded into the D1
+  // closure, and the D2 closure keeps its own separate step.
+  assert.doesNotMatch(workflow, /d2-closure[\s\S]*?d1-closure/u,
+    'the D2 closure must stay a separate step from the D1 closure')
 })
 
 // ── deprecated synchronous Session history reader freeze (WP2) ─────────────
