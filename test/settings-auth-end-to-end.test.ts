@@ -220,6 +220,14 @@ test('/login acme deeplinks to the provider detail inside the Settings lease', a
   assert.match(add.view(), /Add Provider/u)
   assert.match(add.view(), /new-route/u)
   add.close()
+
+  const builtin = open()
+  await builtin.vt.waitForRender()
+  ;(builtin as unknown as { invoke(line: string): unknown }).invoke('/login deepseek-official')
+  await builtin.vt.waitForRender()
+  assert.match(builtin.view(), /API Key Reference · deepseek official/u)
+  assert.doesNotMatch(builtin.view(), /Provider · deepseek official/u)
+  builtin.close()
 })
 
 test('/login bare opens the Models list; /login deepseek-account opens Account', async () => {
@@ -299,5 +307,27 @@ test('Esc from an auth page returns to the category rail and the outer Esc close
   assert.match(h.rows()[0]!, /Settings · Categories/u)
   await key(h, '\u001b')
   assert.doesNotMatch(h.view(), /Settings · Categories/u)
+  h.close()
+})
+
+test('a cross-owner mouse drag never reuses the other owner press (RFL-004)', async () => {
+  const h = open()
+  await h.vt.waitForRender()
+  ;(h as unknown as { invoke(line: string): unknown }).invoke('/login acme')
+  await h.vt.waitForRender()
+  const providerRow = rowOf(h, 'Configure API Key')
+  const railModels = rowOf(h, 'Models')
+  press(h, providerRow, colOf(h, providerRow, 'Configure API Key'))
+  release(h, railModels, 1)
+  await h.vt.waitForRender()
+  assert.match(h.view(), /Provider · Acme Gateway/u, 'the auth-page press did not fire after a rail release')
+  assert.doesNotMatch(h.view(), /API Key Reference/u)
+
+  const railAppearance = rowOf(h, 'Appearance')
+  press(h, railAppearance, 1)
+  release(h, providerRow, colOf(h, providerRow, 'Configure API Key'))
+  await h.vt.waitForRender()
+  assert.match(h.rows()[0]!, /Settings · Models/u, 'the rail press did not fire after a page release')
+  assert.match(h.view(), /Provider · Acme Gateway/u)
   h.close()
 })

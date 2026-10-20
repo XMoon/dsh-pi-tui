@@ -1133,14 +1133,11 @@ export class DirectAccountConfig implements AccountConfig {
   }
 }
 
-/** Whether one URL hostname names the local loopback authority. */
+/** Whether one URL hostname is exactly the loopback authority the official
+ *  `loginOrigin` accepts (a broader 127/8 address would be rejected by the
+ *  provider, so the adapter must not advertise it). */
 function isLoopbackUrlHost(hostname: string): boolean {
-  if (hostname === 'localhost') return true
-  if (hostname === '::1' || hostname === '[::1]') return true
-  const ipv4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(hostname)
-  if (ipv4 === null) return false
-  const parts = ipv4.slice(1).map(part => Number(part))
-  return parts.every(part => part <= 255) && parts[0] === 127
+  return hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '[::1]'
 }
 
 /** A detached account state copy (no Host record is aliased). */

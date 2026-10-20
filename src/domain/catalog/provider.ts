@@ -19,10 +19,13 @@
  * @module @xmoon76/dsh-pi-tui/domain/catalog/provider
  */
 
-/** One /login credential target: a human label plus the env-var ref to set. */
+/** One /login credential target: a human label plus the env-var ref to set.
+ *  `route` is the canonical provider address when the source knows it; the
+ *  settings-only fallback may not, so it is optional. */
 export interface LoginCredentialOption {
   readonly label: string
   readonly ref: string
+  readonly route?: string
 }
 
 /**
@@ -236,9 +239,14 @@ export function classifyCredentialArg(
   // `/login deepseek` reaches the "deepseek official" entry (the official
   // adapter's route is deepseek).
   const needle = trimmed.toLowerCase()
-  const route = options.find(option =>
-    option.label.toLowerCase() === needle
-    || option.label.split(' ')[0]!.toLowerCase() === needle)
+  // The CANONICAL route identity wins over the display label: a route whose
+  // label differs (or a builtin such as `deepseek-official`) must still reach
+  // its provider detail/reference instead of falling through to the
+  // add-provider or unknown-target branch.
+  const route = options.find(option => option.route !== undefined && option.route.toLowerCase() === needle)
+    ?? options.find(option =>
+      option.label.toLowerCase() === needle
+      || option.label.split(' ')[0]!.toLowerCase() === needle)
   if (route !== undefined) return { kind: 'route', option: route }
   // An exact existing reference keeps its stored casing; a novel
   // env-var-looking name is uppercased for convenience.

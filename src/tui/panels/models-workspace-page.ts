@@ -26,7 +26,8 @@ import {
 } from '@xmoon76/pi-tui'
 import { renderActionBarRow, type ActionBarSegment } from '../presentation/action-bar.ts'
 import { color } from '../theme/runtime.ts'
-import { QuestionFlow } from '../interaction/question.ts'
+import { sanitizedPhysicalLine } from '../presentation/lines.ts'
+import { QuestionFlow, type QuestionMouseGesture } from '../interaction/question.ts'
 import { createAuthorizationFlow } from '../../app/command/authorization.ts'
 import type {
   AuthorizationConfig,
@@ -156,6 +157,7 @@ interface AddProviderState {
   readonly error?: string
   readonly discovering: boolean
   readonly discoveryNote?: string
+  readonly creating?: boolean
   readonly result?: CreateProviderOutcome
 }
 
@@ -181,6 +183,7 @@ interface AuthState {
 }
 
 interface EmbeddedQuestion {
+  readonly token: object
   readonly flow: QuestionFlow
 }
 
@@ -250,10 +253,14 @@ export class ModelsWorkspacePage implements Component {
   private picker: PickerState | undefined
   private modelPicker: { items: readonly { readonly id: string }[]; readonly selected: Set<string>; index: number } | undefined
   private question: EmbeddedQuestion | undefined
+  private readonly questionQueue: EmbeddedQuestion[] = []
   private notice: string | undefined
   private auth: AuthState | undefined
   private authNotice: NoticeState | undefined
   private authUnsubscribe: (() => void) | undefined
+  /** Esc on a provider detail with a live native attempt waits for the Host
+   *  settled event (and its prompt cleanup) before returning to the list. */
+  private exitAfterAuth = false
   private readonly pageController = new AbortController()
   private disposed = false
   private revision = 0
@@ -262,12 +269,25 @@ export class ModelsWorkspacePage implements Component {
   private lastWidth = 0
   private lastHeight = 0
   private bodyHeight = 1
+  /** The last painted QuestionFlow region (page-local rows) for mouse input. */
+  private questionTop = 0
+  private questionRows = 0
+  private questionPress: { readonly gesture: QuestionMouseGesture; readonly revision: number; readonly width: number; readonly height: number; readonly row: number } | undefined
   private copyValue: string | undefined
   private referenceEditor: { ref: string; label: string }
   private referencePhase: 'idle' | 'editing' | 'pending' | 'verified' | 'not-saved' | 'unknown' = 'idle'
   private referenceStatus: string | undefined
   private referenceConfigured: boolean | undefined
   private initializing = true
+  /** Per-wizard and per-confirmation identities: a late settlement of an
+   * abandoned draft/clear target can never mutate a newer one. */
+  private addSerial = 0
+  private referenceSerial = 0
+  private clearSerial = 0
+  private refreshSerial = 0
+  private recordsSerial = 0
+  private referenceReadSerial = 0
+  private clearReadSerial = 0
 
   constructor(
     source: ModelsWorkspaceSource,
@@ -313,6 +333,7 @@ export class ModelsWorkspacePage implements Component {
    * this page only; a late settlement after dispose is ignored by `settle`. */
   private refresh(): void {
     if (this.disposed) return
+    const serial = ++this.refreshSerial
     this.providerRows = this.source.rows()
     for (const row of this.providerRows) {
       if (row.kind !== 'reference' || row.ref === undefined) continue
@@ -325,6 +346,7 @@ export class ModelsWorkspacePage implements Component {
           state = { kind: 'unknown', reason: errorText(error) }
         }
         this.settle(() => {
+          if (serial !== this.refreshSerial) return
           this.credentialStates.set(ref, state)
         })
       })
@@ -337,6 +359,7 @@ export class ModelsWorkspacePage implements Component {
         summary = { available: true, failure: errorText(error) }
       }
       this.settle(() => {
+        if (serial !== this.refreshSerial) return
         this.account = summary
         this.initializing = false
       })
@@ -347,14 +370,17 @@ export class ModelsWorkspacePage implements Component {
   }
 
   private refreshRecords(): void {
+    const serial = ++this.recordsSerial
     this.source.run('models records read', async () => {
       try {
         const records = await this.source.storedCredentials()
         this.settle(() => {
+          if (serial !== this.recordsSerial) return
           this.records = records
         })
       } catch (error) {
         this.settle(() => {
+          if (serial !== this.recordsSerial) return
           this.notice = `the stored credentials could not be read: ${errorText(error)}`
         })
       }
@@ -362,14 +388,24 @@ export class ModelsWorkspacePage implements Component {
   }
 
   private readReferenceState(): void {
-    const ref = this.view.kind === 'reference' ? this.view.ref : this.view.kind === 'logout' && this.view.target.kind === 'reference' ? this.view.target.ref : undefined
+    const view = this.view
+    const ref = view.kind === 'reference' ? view.ref : view.kind === 'logout' && view.target.kind === 'reference' ? view.target.ref : undefined
     if (ref === undefined) return
+    const clearSerial = view.kind === 'logout' ? this.clearSerial : undefined
+    const readSerial = ++this.referenceReadSerial
     this.source.run('models reference read', async () => {
       try {
         const info = await this.source.describeReference(ref)
         this.settle(() => {
+          if (readSerial !== this.referenceReadSerial) return
+          const current = this.view
+          if (current.kind === 'reference') {
+            if (current.ref !== ref) return
+          } else if (current.kind === 'logout') {
+            if (current.target.kind !== 'reference' || current.target.ref !== ref) return
+          } else return
           this.referenceConfigured = info.configured
-          if (this.view.kind === 'logout' && this.clear !== undefined) {
+          if (current.kind === 'logout' && this.clear !== undefined && clearSerial === this.clearSerial) {
             this.clear = {
               phase: 'ready',
               configured: info.configured,
@@ -379,9 +415,16 @@ export class ModelsWorkspacePage implements Component {
         })
       } catch (error) {
         this.settle(() => {
-          if (this.view.kind === 'logout') {
+          if (readSerial !== this.referenceReadSerial) return
+          const current = this.view
+          if (current.kind === 'reference') {
+            if (current.ref !== ref) return
+          } else if (current.kind === 'logout') {
+            if (current.target.kind !== 'reference' || current.target.ref !== ref) return
+          } else return
+          if (current.kind === 'logout' && clearSerial === this.clearSerial) {
             this.clear = { phase: 'failed', configured: false, reason: errorText(error) }
-          } else {
+          } else if (current.kind === 'reference') {
             this.notice = `the credential store could not be read: ${errorText(error)}`
           }
         })
@@ -404,6 +447,7 @@ export class ModelsWorkspacePage implements Component {
   // ── navigation ──────────────────────────────────────────────────────────
 
   private enter(view: ModelsView): void {
+    if (view.kind === 'reference') this.referenceSerial += 1
     this.view = view
     this.cursor = 0
     this.scroll = 0
@@ -431,12 +475,14 @@ export class ModelsWorkspacePage implements Component {
     this.referencePhase = 'editing'
     const ref = this.view.ref
     const label = this.view.label
-    this.question = this.createQuestion({
+    const serial = this.referenceSerial
+    const isCurrent = (): boolean => serial === this.referenceSerial && this.view.kind === 'reference' && this.view.ref === ref
+    const question = this.createQuestion({
       header: `API key · ${label}`,
       question: `Enter the API key for ${label} (${ref}):`,
       masked: true,
       onAnswer: value => {
-        this.question = undefined
+        this.removeQuestion(question)
         const secret = value?.trim() ?? ''
         if (secret === '') {
           this.referencePhase = 'idle'
@@ -452,6 +498,7 @@ export class ModelsWorkspacePage implements Component {
             await this.source.setReference(ref, secret)
           } catch (error) {
             this.settle(() => {
+              if (!isCurrent()) return
               this.referencePhase = 'not-saved'
               this.referenceStatus = error instanceof Error && error.name === 'SupersededReadError'
                 ? 'Not sent — the key never left the client'
@@ -462,6 +509,7 @@ export class ModelsWorkspacePage implements Component {
           try {
             const info = await this.source.describeReference(ref)
             this.settle(() => {
+              if (!isCurrent()) return
               this.referencePhase = info.configured ? 'verified' : 'unknown'
               this.referenceStatus = info.configured
                 ? info.source === undefined ? 'Verified' : `Verified · source: ${info.source}`
@@ -470,6 +518,7 @@ export class ModelsWorkspacePage implements Component {
             })
           } catch (error) {
             this.settle(() => {
+              if (!isCurrent()) return
               this.referencePhase = 'unknown'
               this.referenceStatus = `the write returned; the store could not be re-read: ${errorText(error)}`
             })
@@ -477,12 +526,14 @@ export class ModelsWorkspacePage implements Component {
         })
       },
     })
+    this.setQuestion(question)
     this.requestRender()
   }
 
   // ── clear confirmation (logout) ──────────────────────────────────────────
 
   private openClear(target: CredentialClearTarget): void {
+    this.clearSerial += 1
     this.view = { kind: 'logout', target }
     this.cursor = 0
     this.scroll = 0
@@ -500,16 +551,20 @@ export class ModelsWorkspacePage implements Component {
   private readClearRecord(): void {
     if (this.view.kind !== 'logout' || this.view.target.kind !== 'record') return
     const key = this.view.target.key
+    const serial = this.clearSerial
+    const readSerial = ++this.clearReadSerial
     this.clear = { phase: 'reading', configured: false }
     this.source.run('models clear target read', async () => {
       try {
         const records = await this.source.storedCredentials()
         const present = records.rows.some(row => row.kind === 'record' && row.key === key)
         this.settle(() => {
+          if (readSerial !== this.clearReadSerial || serial !== this.clearSerial || this.view.kind !== 'logout' || this.view.target.kind !== 'record' || this.view.target.key !== key) return
           this.clear = { phase: 'ready', configured: present }
         })
       } catch (error) {
         this.settle(() => {
+          if (readSerial !== this.clearReadSerial || serial !== this.clearSerial || this.view.kind !== 'logout' || this.view.target.kind !== 'record' || this.view.target.key !== key) return
           this.clear = { phase: 'failed', configured: false, reason: errorText(error) }
         })
       }
@@ -521,6 +576,13 @@ export class ModelsWorkspacePage implements Component {
     const clear = this.clear
     if (view.kind !== 'logout' || clear === undefined || clear.phase !== 'ready' || !clear.configured) return
     const target = view.target
+    const serial = this.clearSerial
+    const isCurrent = (): boolean => serial === this.clearSerial
+      && this.view.kind === 'logout'
+      && this.view.target.kind === target.kind
+      && (target.kind === 'reference'
+        ? this.view.target.kind === 'reference' && this.view.target.ref === target.ref
+        : this.view.target.kind === 'record' && this.view.target.key === target.key)
     this.clear = { ...clear, phase: 'pending' }
     this.requestRender()
     this.source.run('models credential clear', async () => {
@@ -529,14 +591,17 @@ export class ModelsWorkspacePage implements Component {
         else await this.source.deleteRecord(target.key)
       } catch (error) {
         this.settle(() => {
+          if (!isCurrent()) return
           this.clear = { phase: 'failed', configured: true, reason: errorText(error) }
         })
         return
       }
       if (target.kind === 'reference') {
+        const readSerial = ++this.clearReadSerial
         try {
           const info = await this.source.describeReference(target.ref)
           this.settle(() => {
+            if (!isCurrent() || readSerial !== this.clearReadSerial) return
             this.clear = info.configured
               ? { phase: 'failed', configured: true, reason: 'the credential store still reports this reference as configured' }
               : { phase: 'done', configured: false, result: `API key ${target.ref} cleared` }
@@ -549,16 +614,19 @@ export class ModelsWorkspacePage implements Component {
         }
         return
       }
+      const readSerial = ++this.clearReadSerial
       try {
         const records = await this.source.storedCredentials()
         const present = records.rows.some(row => row.kind === 'record' && row.key === target.key)
         this.settle(() => {
+          if (!isCurrent() || readSerial !== this.clearReadSerial) return
           this.clear = present
             ? { phase: 'failed', configured: true, reason: 'the stored record is still present after the clear' }
             : { phase: 'done', configured: false, result: `${target.label} signed out locally — stored credential cleared` }
         })
       } catch (error) {
         this.settle(() => {
+          if (!isCurrent() || readSerial !== this.clearReadSerial) return
           this.clear = { phase: 'failed', configured: true, reason: `the clear returned; the record list could not be re-read: ${errorText(error)}` }
         })
       }
@@ -568,6 +636,7 @@ export class ModelsWorkspacePage implements Component {
   // ── add provider ────────────────────────────────────────────────────────
 
   private startAddProvider(route?: string): void {
+    this.addSerial += 1
     this.add = {
       step: 'form',
       draft: { route: route ?? '', api: PROTOCOL_CHOICES[0], baseURL: '', displayName: '', key: '', models: [] },
@@ -610,18 +679,19 @@ export class ModelsWorkspacePage implements Component {
       return
     }
     const current = add.draft[field.id]
-    this.question = this.createQuestion({
+    const question = this.createQuestion({
       header: `Add provider · ${field.label}`,
       question: field.question,
       masked: field.id === 'key',
       ...(field.id === 'key' ? { allowEmpty: true } : {}),
       initial: current,
       onAnswer: value => {
-        this.question = undefined
+        this.removeQuestion(question)
         if (value === undefined) return
         this.updateAddDraft({ [field.id]: value.trim() })
       },
     })
+    this.setQuestion(question)
     this.requestRender()
   }
 
@@ -634,6 +704,7 @@ export class ModelsWorkspacePage implements Component {
       return
     }
     this.add = { ...add, discovering: true, error: undefined }
+    const serial = this.addSerial
     this.requestRender()
     this.source.run('models model discovery', async () => {
       let discovery: readonly { id: string }[] = []
@@ -651,6 +722,7 @@ export class ModelsWorkspacePage implements Component {
         note = 'model probe failed — enter model ids by hand'
       }
       this.settle(() => {
+        if (serial !== this.addSerial) return
         const current = this.add
         if (current === undefined) return
         this.add = { ...current, discovering: false, discoveryNote: note }
@@ -670,16 +742,17 @@ export class ModelsWorkspacePage implements Component {
   private beginManualModels(): void {
     const add = this.add
     if (add === undefined) return
-    this.question = this.createQuestion({
+    const question = this.createQuestion({
       header: 'Add provider · model ids',
       question: 'Model ids this route serves (comma or space separated):',
       masked: false,
       initial: add.draft.models.join(', '),
       onAnswer: value => {
-        this.question = undefined
+        this.removeQuestion(question)
         if (value !== undefined) this.updateAddModels(parseModelIds(value))
       },
     })
+    this.setQuestion(question)
     this.requestRender()
   }
 
@@ -715,7 +788,10 @@ export class ModelsWorkspacePage implements Component {
 
   private createProvider(): void {
     const add = this.add
-    if (add === undefined || add.step !== 'review' || add.result !== undefined) return
+    if (add === undefined || add.step !== 'review' || add.result !== undefined || add.creating === true) return
+    const serial = this.addSerial
+    this.add = { ...add, creating: true }
+    this.requestRender()
     this.source.run('models add provider', async () => {
       const outcome = await this.source.createProvider({
         route: add.draft.route,
@@ -726,9 +802,12 @@ export class ModelsWorkspacePage implements Component {
         apiKey: add.draft.key,
       })
       this.settle(() => {
+        if (serial !== this.addSerial) return
         const current = this.add
         if (current === undefined) return
-        this.add = { ...current, result: outcome }
+        // The key draft dies with its single dispatch: a failed/partial write is
+        // never retried with a cached secret.
+        this.add = { ...current, creating: false, result: outcome, draft: { ...current.draft, key: '' } }
         if (outcome.kind === 'created') this.providerRows = this.source.rows()
       })
     })
@@ -738,6 +817,11 @@ export class ModelsWorkspacePage implements Component {
 
   private startAuthorization(row: ModelsProviderRow): void {
     if (row.kind !== 'authorization' || row.key === undefined || row.inFlight) return
+    if (this.auth?.phase === 'starting' || this.auth?.phase === 'running') {
+      this.notice = 'another provider sign-in is in progress — cancel it before starting a new one'
+      this.requestRender()
+      return
+    }
     if (row.methods.length > 1) {
       this.picker = {
         header: `Sign in method · ${row.label}`,
@@ -764,41 +848,42 @@ export class ModelsWorkspacePage implements Component {
       respond: (attemptId, promptId, answer) => this.source.respondAuthorization(attemptId, promptId, answer),
       cancel: attemptId => this.source.cancelAuthorization(attemptId),
     })
-    this.authUnsubscribe = this.source.authorizationEvents(flow.onEvent)
+    const off = this.source.authorizationEvents(flow.onEvent)
+    this.authUnsubscribe = off
     this.source.run('models provider sign-in', async () => {
-      let started: Awaited<ReturnType<ModelsWorkspaceSource['beginAuthorization']>>
       try {
-        started = await this.source.beginAuthorization(row.key!, method, this.pageController.signal)
-      } catch (error) {
-        this.settle(() => {
-          this.auth = { targetRoute: row.route, phase: 'failed', status: errorText(error) }
-          this.finishAuthorization()
-        })
-        return
-      }
-      if (started.kind !== 'started') {
-        this.settle(() => {
-          this.auth = { targetRoute: row.route, phase: 'failed', status: 'authorization service unavailable' }
-          this.finishAuthorization()
-        })
-        return
-      }
+        let started: Awaited<ReturnType<ModelsWorkspaceSource['beginAuthorization']>>
+        try {
+          started = await this.source.beginAuthorization(row.key!, method, this.pageController.signal)
+        } catch (error) {
+          this.settle(() => {
+            this.auth = { targetRoute: row.route, phase: 'failed', status: errorText(error) }
+          })
+          return
+        }
+        if (started.kind !== 'started') {
+          this.settle(() => {
+            this.auth = { targetRoute: row.route, phase: 'failed', status: 'authorization service unavailable' }
+          })
+          return
+        }
       flow.bind(started.attemptId)
       this.settle(() => {
         if (this.auth !== undefined) this.auth = { ...this.auth, phase: 'running', attemptId: started.attemptId }
       })
+      if (this.exitAfterAuth) this.cancelAuthorization()
       const outcome = await flow.outcome
       if (outcome.status === 'authorized') {
         const note = await this.source.provisionKeylessProfile(row.route)
         this.settle(() => {
           this.auth = { targetRoute: row.route, phase: 'authorized', attemptId: started.attemptId, status: `signed in to ${row.label}${note}` }
-          this.finishAuthorization()
           this.refresh()
+          if (this.exitAfterAuth) this.leaveAfterAuth()
         })
       } else if (outcome.status === 'cancelled') {
         this.settle(() => {
           this.auth = { targetRoute: row.route, phase: 'cancelled', attemptId: started.attemptId, status: 'sign-in cancelled' }
-          this.finishAuthorization()
+          if (this.exitAfterAuth) this.leaveAfterAuth()
         })
       } else {
         this.settle(() => {
@@ -808,10 +893,21 @@ export class ModelsWorkspacePage implements Component {
             attemptId: started.attemptId,
             status: `sign-in failed${outcome.code === undefined ? '' : ` (${outcome.code})`}${outcome.message === undefined ? '' : `: ${outcome.message}`}`,
           }
-          this.finishAuthorization()
+          if (this.exitAfterAuth) this.leaveAfterAuth()
         })
       }
+      } finally {
+        off()
+        if (this.authUnsubscribe === off) this.authUnsubscribe = undefined
+      }
     })
+  }
+
+  private leaveAfterAuth(): void {
+    this.exitAfterAuth = false
+    this.auth = undefined
+    this.authNotice = undefined
+    this.enter({ kind: 'list' })
   }
 
   private finishAuthorization(): void {
@@ -867,20 +963,22 @@ export class ModelsWorkspacePage implements Component {
     signal: AbortSignal | undefined,
   ): Promise<readonly { readonly id: string; readonly selected: string[]; readonly custom?: string }[]> {
     if (question === undefined) return Promise.resolve([])
+    if (this.disposed) return Promise.reject(new Error('the authorization page was closed'))
     return new Promise((resolve, reject) => {
       let settled = false
+      let embedded: EmbeddedQuestion | undefined
       const answer = (custom: string | undefined): void => {
         if (settled) return
         settled = true
         signal?.removeEventListener('abort', onAbort)
-        this.question = undefined
+        if (embedded !== undefined) this.removeQuestion(embedded)
         resolve([{ id: question.id, selected: [], ...(custom === undefined ? {} : { custom }) }])
         this.requestRender()
       }
       const onAbort = (): void => {
         if (settled) return
         settled = true
-        this.question = undefined
+        if (embedded !== undefined) this.removeQuestion(embedded)
         reject(new Error('authorization prompt withdrawn'))
         this.requestRender()
       }
@@ -889,13 +987,14 @@ export class ModelsWorkspacePage implements Component {
         return
       }
       signal?.addEventListener('abort', onAbort, { once: true })
-      this.question = this.createQuestion({
+      embedded = this.createQuestion({
         header: 'Sign in',
         question: question.question,
         masked: question.masked === true,
         ...(question.placeholder === undefined ? {} : { placeholder: question.placeholder }),
         onAnswer: answer,
       })
+      this.setQuestion(embedded)
       this.requestRender()
     })
   }
@@ -906,6 +1005,7 @@ export class ModelsWorkspacePage implements Component {
     onSelect: (value: string) => void,
     onCancel: () => void,
   ): { close?: () => void } {
+    if (this.disposed) return {}
     const picker: PickerState = {
       header,
       items: items.map(item => ({
@@ -960,7 +1060,33 @@ export class ModelsWorkspacePage implements Component {
     if (options.initial !== undefined && options.initial !== '' && options.masked !== true) {
       for (const character of options.initial) flow.handleInput(character)
     }
-    return { flow }
+    return { token: {}, flow }
+  }
+
+  private setQuestion(question: EmbeddedQuestion): void {
+    if (this.question === undefined) this.question = question
+    else this.questionQueue.push(question)
+    this.question.flow.focused = true
+  }
+
+  /** Retire EXACTLY one prompt's UI. A withdrawn older prompt can never close a
+   * newer prompt that now owns the single visible question slot. */
+  private removeQuestion(question: EmbeddedQuestion): void {
+    this.questionPress = undefined
+    if (this.question === question) {
+      this.question = this.questionQueue.shift()
+      if (this.question !== undefined) this.question.flow.focused = true
+    } else {
+      const index = this.questionQueue.indexOf(question)
+      if (index >= 0) this.questionQueue.splice(index, 1)
+    }
+    this.requestRender()
+  }
+
+  private clearQuestions(): void {
+    this.question = undefined
+    this.questionQueue.length = 0
+    this.questionPress = undefined
   }
 
   // ── rendering ────────────────────────────────────────────────────────────
@@ -982,6 +1108,8 @@ export class ModelsWorkspacePage implements Component {
       const questionRows = Math.max(1, height - 1 - notice.length)
       this.question.flow.setMaxRows(Math.max(8, questionRows))
       lines.push(...notice.map(line => fit(line, width)))
+      this.questionTop = lines.length
+      this.questionRows = questionRows
       lines.push(...this.question.flow.render(width).slice(0, questionRows).map(line => fit(line, width)))
       lines.push(color.textMuted(renderActionBarRow([
         { text: 'type to edit', priority: 5 },
@@ -1121,11 +1249,11 @@ export class ModelsWorkspacePage implements Component {
 
   private projectList(width: number): Projection {
     const content: string[] = [color.textStrong(TITLE), '']
-    const accountState = !this.account.available
+    const accountState = sanitizedPhysicalLine(!this.account.available
       ? 'Unavailable'
       : this.account.failure !== undefined
         ? `Unavailable · ${this.account.failure}`
-        : this.account.status === 'credential-stored' ? 'Signed in' : this.account.status === 'signed-out' ? 'Signed out' : 'Loading…'
+        : this.account.status === 'credential-stored' ? 'Signed in' : this.account.status === 'signed-out' ? 'Signed out' : 'Loading…')
     const accountTone = accountState === 'Signed in' ? 'success' : accountState === 'Signed out' ? 'muted' : 'warning'
     this.addRow(content, this.selectionLine(0, 'DeepSeek Account', accountState, accountTone, width), 'account', width)
     let interactive = 1
@@ -1150,8 +1278,8 @@ export class ModelsWorkspacePage implements Component {
   private selectionLine(index: number, label: string, value: string, tone: 'success' | 'warning' | 'muted', width: number): string {
     const selected = index === this.cursor
     const cursor = selected ? color.primary('> ') : '  '
-    const painted = `${label}`
-    const valueText = paintState(value, tone)
+    const painted = sanitizedPhysicalLine(label)
+    const valueText = paintState(sanitizedPhysicalLine(value), tone)
     const room = Math.max(1, width - 2 - visibleWidth(painted) - visibleWidth(value) - 1)
     return `${cursor}${selected ? color.textStrong(painted) : color.text(painted)}${' '.repeat(room)}${valueText}`
   }
@@ -1176,7 +1304,7 @@ export class ModelsWorkspacePage implements Component {
     if (row === undefined) {
       return { content: [color.error(`provider ${view.route} is no longer available`), '', color.textMuted('Esc goes back.')], actions: [] }
     }
-    const content: string[] = [color.textStrong(`Provider · ${row.label}`), '']
+    const content: string[] = [color.textStrong(`Provider · ${sanitizedPhysicalLine(row.label)}`), '']
     content.push(...this.fact('Route', row.route, width))
     content.push(...this.fact('Profile', row.profile.configured ? 'configured' : 'not configured', width))
     content.push(...this.fact('API protocol', row.profile.api ?? 'unknown', width))
@@ -1188,17 +1316,17 @@ export class ModelsWorkspacePage implements Component {
     content.push('', color.textDim('Credential presence only — not a connection test.'))
     if (this.auth !== undefined && this.auth.targetRoute === row.route) {
       content.push('', color.textStrong('Sign-in'))
-      content.push(color.text(this.auth.status ?? this.auth.phase))
+      content.push(color.text(sanitizedPhysicalLine(this.auth.status ?? this.auth.phase)))
       if (this.authNotice !== undefined) {
-        content.push(color.text(this.authNotice.message))
+        content.push(color.text(sanitizedPhysicalLine(this.authNotice.message)))
         if (this.authNotice.url !== undefined) {
-          content.push(color.text(this.authNotice.url))
+          content.push(color.text(sanitizedPhysicalLine(this.authNotice.url)))
           this.copyValue = this.authNotice.url
         } else this.copyValue = undefined
-        if (this.authNotice.code !== undefined) content.push(color.text(`Code: ${this.authNotice.code}`))
+        if (this.authNotice.code !== undefined) content.push(color.text(sanitizedPhysicalLine(`Code: ${this.authNotice.code}`)))
       } else this.copyValue = undefined
     } else this.copyValue = undefined
-    if (this.notice !== undefined) content.push('', color.warning(this.notice))
+    if (this.notice !== undefined) content.push('', color.warning(sanitizedPhysicalLine(this.notice)))
     const actions: ActionLine[] = []
     if (row.kind === 'authorization' && row.methods.length > 0) {
       actions.push({
@@ -1235,10 +1363,10 @@ export class ModelsWorkspacePage implements Component {
 
   private fact(label: string, value: string, width: number): string[] {
     const bodyWidth = Math.max(1, width - LABEL_WIDTH)
-    const wrapped = wrapTextWithAnsi(value, bodyWidth)
+    const wrapped = wrapTextWithAnsi(sanitizedPhysicalLine(value), bodyWidth)
     const parts = wrapped.length === 0 ? [''] : wrapped
     return [
-      `${fit(color.textDim(label), LABEL_WIDTH)}${color.text(parts[0]!)}`,
+      `${fit(color.textDim(sanitizedPhysicalLine(label)), LABEL_WIDTH)}${color.text(parts[0]!)}`,
       ...parts.slice(1).map(extra => `${' '.repeat(LABEL_WIDTH)}${color.text(extra)}`),
     ]
   }
@@ -1246,12 +1374,12 @@ export class ModelsWorkspacePage implements Component {
   private projectReference(width: number): Projection {
     const view = this.view
     if (view.kind !== 'reference') return { content: [], actions: [] }
-    const content: string[] = [color.textStrong(`API Key Reference · ${view.label}`), '']
+    const content: string[] = [color.textStrong(`API Key Reference · ${sanitizedPhysicalLine(view.label)}`), '']
     content.push(...this.fact('Reference', view.ref, width))
     content.push(...this.fact('Stored', this.referenceConfigured === undefined ? 'reading…' : this.referenceConfigured ? 'Configured' : 'Not set', width))
     if (this.referenceStatus !== undefined) content.push(...this.fact('Status', this.referenceStatus, width))
     content.push('', color.textDim('The value is written directly to the Host credential store; it is never shown, logged or written to the transcript. Verified requires the store to report the reference configured after the write.'))
-    if (this.notice !== undefined) content.push('', color.warning(this.notice))
+    if (this.notice !== undefined) content.push('', color.warning(sanitizedPhysicalLine(this.notice)))
     this.copyValue = view.ref
     const actions: ActionLine[] = []
     if (this.referencePhase !== 'pending' && this.referencePhase !== 'editing') {
@@ -1274,16 +1402,16 @@ export class ModelsWorkspacePage implements Component {
           : add.draft[field.id]
       this.addRow(
         content,
-        `${selected ? color.primary('> ') : '  '}${selected ? color.textStrong(field.label) : color.text(field.label)}: ${color.textDim(raw === '' ? '—' : raw)}`,
+        `${selected ? color.primary('> ') : '  '}${selected ? color.textStrong(field.label) : color.text(field.label)}: ${color.textDim(raw === '' ? '—' : sanitizedPhysicalLine(raw))}`,
         `add-field:${field.id}`,
         width,
       )
     }
     if (add.discovering) content.push('', color.textMuted('Probing the endpoint for models…'))
     if (add.discoveryNote !== undefined) content.push(color.textDim(add.discoveryNote))
-    if (add.error !== undefined) content.push('', color.error(add.error))
+    if (add.error !== undefined) content.push('', color.error(sanitizedPhysicalLine(add.error)))
     if (add.result !== undefined) {
-      content.push('', add.result.kind === 'created' ? color.success(add.result.text) : color.error(add.result.text))
+      content.push('', add.result.kind === 'created' ? color.success(sanitizedPhysicalLine(add.result.text)) : color.error(sanitizedPhysicalLine(add.result.text)))
     }
     this.copyValue = undefined
     const actions: ActionLine[] = add.result !== undefined
@@ -1306,11 +1434,15 @@ export class ModelsWorkspacePage implements Component {
     content.push(...this.fact('Models', add.draft.models.join(', '), width))
     content.push(...this.fact('API key', add.draft.key === '' ? 'not stored (provider-native authentication)' : 'will be stored in the credential store', width))
     content.push('', color.textDim('Create persists the provider profile; a stored key is a separate Host write whose failure is reported separately.'))
-    if (add.result !== undefined) content.push('', add.result.kind === 'created' ? color.success(add.result.text) : color.error(add.result.text))
+    if (add.result !== undefined) content.push('', add.result.kind === 'created' ? color.success(sanitizedPhysicalLine(add.result.text)) : color.error(sanitizedPhysicalLine(add.result.text)))
+    if (add.creating === true && add.result === undefined) {
+      content.push('', color.textMuted('Creating — one Host write at a time. Esc leaves this page; the dispatched write is not retried.'))
+    }
     this.copyValue = undefined
     if (add.result !== undefined) {
       return { content, actions: [{ id: 'review:done', label: '← Back to providers', enabled: true }] }
     }
+    if (add.creating === true) return { content, actions: [] }
     return {
       content,
       actions: [
@@ -1328,18 +1460,18 @@ export class ModelsWorkspacePage implements Component {
       return { content, actions: [{ id: 'records:back', label: '← Back', enabled: true }] }
     }
     if (records.recordCleanupUnavailable) content.push(color.warning('Stored credential records cannot be enumerated or removed on this backend.'))
-    for (const failure of records.referenceReadFailures) content.push(color.warning(`Reference read failed: ${failure}`))
+    for (const failure of records.referenceReadFailures) content.push(color.warning(`Reference read failed: ${sanitizedPhysicalLine(failure)}`))
     if (records.rows.length === 0) {
       content.push(color.textMuted('Nothing to sign out.'))
       return { content, actions: [{ id: 'records:back', label: '← Back', enabled: true }] }
     }
     for (const [index, row] of records.rows.entries()) {
       const kind = row.kind === 'reference' ? 'API key' : 'stored record'
-      const suffix = row.source === undefined ? '' : ` · source: ${row.source}`
-      const hint = row.kindHint === undefined ? '' : ` (${row.kindHint})`
+      const suffix = row.source === undefined ? '' : ` · source: ${sanitizedPhysicalLine(row.source)}`
+      const hint = row.kindHint === undefined ? '' : ` (${sanitizedPhysicalLine(row.kindHint)})`
       this.addRow(
         content,
-        `${index === this.cursor ? color.primary('> ') : '  '}${color.text(row.label)}${color.textMuted(` — ${kind}${hint} · ${row.key}${suffix}`)}`,
+        `${index === this.cursor ? color.primary('> ') : '  '}${color.text(sanitizedPhysicalLine(row.label))}${color.textMuted(` — ${kind}${hint} · ${sanitizedPhysicalLine(row.key)}${suffix}`)}`,
         `stored:${row.kind}:${row.key}`,
         width,
       )
@@ -1362,9 +1494,9 @@ export class ModelsWorkspacePage implements Component {
     }
     content.push('')
     if (clear.phase === 'reading') content.push(color.textMuted('Reading the credential store…'))
-    else if (clear.phase === 'failed') content.push(color.error(`Not cleared: ${clear.reason ?? 'the clear could not be verified'}`))
+    else if (clear.phase === 'failed') content.push(color.error(`Not cleared: ${sanitizedPhysicalLine(clear.reason ?? 'the clear could not be verified')}`))
     else if (clear.phase === 'pending') content.push(color.textMuted('Clearing — the Host has not confirmed yet.'))
-    else if (clear.phase === 'done') content.push(color.success(clear.result ?? 'cleared'))
+    else if (clear.phase === 'done') content.push(color.success(sanitizedPhysicalLine(clear.result ?? 'cleared')))
     else if (!clear.configured) content.push(color.textMuted('Nothing stored for this target — nothing will be cleared.'))
     else content.push(color.warning('This removes the locally stored credential. The current model is not switched.'))
     this.copyValue = undefined
@@ -1391,9 +1523,9 @@ export class ModelsWorkspacePage implements Component {
   private renderAuthNotice(width: number): string[] {
     const notice = this.authNotice
     if (notice === undefined) return []
-    const lines = [color.text(notice.message)]
-    if (notice.url !== undefined) lines.push(color.text(notice.url))
-    if (notice.code !== undefined) lines.push(color.text(`Code: ${notice.code}`))
+    const lines = [color.text(sanitizedPhysicalLine(notice.message))]
+    if (notice.url !== undefined) lines.push(color.text(sanitizedPhysicalLine(notice.url)))
+    if (notice.code !== undefined) lines.push(color.text(sanitizedPhysicalLine(`Code: ${notice.code}`)))
     return lines.slice(0, 4).map(line => fit(line, width))
   }
 
@@ -1407,7 +1539,7 @@ export class ModelsWorkspacePage implements Component {
     const offset = Math.min(Math.max(0, picker.index - viewport + 1), Math.max(0, picker.items.length + 1 - viewport))
     const lines: { text: string; id: string }[] = picker.items.map((model, index) => ({
       id: `model-picker:${index}`,
-      text: `${index === picker.index ? color.primary('> ') : '  '}${picker.selected.has(model.id) ? '[x]' : '[ ]'} ${index === picker.index ? color.textStrong(model.id) : color.text(model.id)}`,
+      text: `${index === picker.index ? color.primary('> ') : '  '}${picker.selected.has(model.id) ? '[x]' : '[ ]'} ${index === picker.index ? color.textStrong(sanitizedPhysicalLine(model.id)) : color.text(sanitizedPhysicalLine(model.id))}`,
     }))
     lines.push({
       id: 'model-picker:manual',
@@ -1424,12 +1556,12 @@ export class ModelsWorkspacePage implements Component {
   private renderPicker(width: number, rows: number, targets: HitTarget[]): string[] {
     const picker = this.picker
     if (picker === undefined) return []
-    const content: string[] = [color.textStrong(picker.header), '']
+    const content: string[] = [color.textStrong(sanitizedPhysicalLine(picker.header)), '']
     const offset = Math.min(Math.max(0, picker.index - rows + 1), Math.max(0, picker.items.length - rows))
     for (const [index, item] of picker.items.entries()) {
       if (index < offset || index >= offset + rows) continue
       const selected = index === picker.index
-      content.push(`${selected ? color.primary('> ') : '  '}${selected ? color.textStrong(item.label) : color.text(item.label)}${item.description === undefined ? '' : color.textDim(` — ${item.description}`)}`)
+      content.push(`${selected ? color.primary('> ') : '  '}${selected ? color.textStrong(sanitizedPhysicalLine(item.label)) : color.text(sanitizedPhysicalLine(item.label))}${item.description === undefined ? '' : color.textDim(` — ${sanitizedPhysicalLine(item.description)}`)}`)
       targets.push({ kind: 'picker', id: String(index), row: content.length - 1, startCol: 0, endCol: width })
     }
     return content
@@ -1702,15 +1834,15 @@ export class ModelsWorkspacePage implements Component {
       case 'reference:edit': this.beginReferenceEditor(); return 'handled'
       case 'reference:back': this.enter({ kind: 'list' }); return 'handled'
       case 'add:review': this.reviewAdd(); return 'handled'
-      case 'add:cancel': this.add = undefined; this.enter({ kind: 'list' }); return 'handled'
-      case 'add:done': this.add = undefined; this.enter({ kind: 'list' }); return 'handled'
+      case 'add:cancel': this.addSerial += 1; this.add = undefined; this.enter({ kind: 'list' }); return 'handled'
+      case 'add:done': this.addSerial += 1; this.add = undefined; this.enter({ kind: 'list' }); return 'handled'
       case 'review:create': this.createProvider(); return 'handled'
       case 'review:back': {
         const add = this.add
         if (add !== undefined) { this.add = { ...add, step: 'form', result: undefined }; this.enter({ kind: 'add-provider' }) }
         return 'handled'
       }
-      case 'review:done': this.add = undefined; this.enter({ kind: 'list' }); return 'handled'
+      case 'review:done': this.addSerial += 1; this.add = undefined; this.enter({ kind: 'list' }); return 'handled'
       case 'records:back': this.enter({ kind: 'list' }); return 'handled'
       case 'clear:confirm': this.confirmClear(); return 'handled'
       case 'clear:back': this.clear = undefined; this.enter({ kind: 'list' }); return 'handled'
@@ -1725,6 +1857,14 @@ export class ModelsWorkspacePage implements Component {
       case 'list':
         return 'exit'
       case 'provider':
+        if (this.auth?.phase === 'starting' || this.auth?.phase === 'running') {
+          // Esc is an explicit abandonment of the native attempt: cancel it and
+          // wait for the Host's settled event, which closes the page-local
+          // prompt before returning to the list.
+          this.exitAfterAuth = true
+          this.cancelAuthorization()
+          return 'handled'
+        }
         this.auth = undefined
         this.authNotice = undefined
         this.finishAuthorization()
@@ -1737,6 +1877,7 @@ export class ModelsWorkspacePage implements Component {
         return 'handled'
       case 'add-provider':
       case 'review':
+        this.addSerial += 1
         this.add = undefined
         this.enter({ kind: 'list' })
         return 'handled'
@@ -1764,12 +1905,33 @@ export class ModelsWorkspacePage implements Component {
 
   onCellPress(x: number, y: number): void {
     if (this.disposed) return
+    if (this.question !== undefined) {
+      const row = y - this.questionTop
+      const gesture = row >= 0 && row < this.questionRows ? this.question.flow.beginMousePress(row) : undefined
+      this.questionPress = gesture === undefined
+        ? undefined
+        : { gesture, revision: this.revision, width: this.lastWidth, height: this.lastHeight, row }
+      return
+    }
     const target = this.paintedTargets.find(candidate => candidate.row === y && x >= candidate.startCol && x < candidate.endCol)
     this.pressed = target === undefined ? undefined : { target, revision: this.revision, width: this.lastWidth, height: this.lastHeight }
   }
 
   onCellClick(x: number, y: number): void {
     if (this.disposed) return
+    if (this.question !== undefined) {
+      const pressed = this.questionPress
+      this.questionPress = undefined
+      const row = y - this.questionTop
+      if (pressed === undefined
+        || row !== pressed.row
+        || pressed.revision !== this.revision
+        || pressed.width !== this.lastWidth
+        || pressed.height !== this.lastHeight) return
+      this.question.flow.completeMouseClick(pressed.gesture, row, x)
+      this.requestRender()
+      return
+    }
     const pressed = this.pressed
     this.pressed = undefined
     const target = this.paintedTargets.find(candidate => candidate.row === y && x >= candidate.startCol && x < candidate.endCol)
@@ -1785,14 +1947,17 @@ export class ModelsWorkspacePage implements Component {
       this.cursor = this.rowIndexInProjection(target.id)
       this.activateRow(target.id)
     } else if (target.kind === 'action') {
+      if (!this.paintedActionIds.has(target.id)) return
       const rowCount = this.rowOrder.length
       this.cursor = rowCount + this.actionIndexOf(target.id)
       this.activateAction(target.id)
     } else if (target.kind === 'picker') {
       const index = Number(target.id)
       const picker = this.picker
-      if (picker !== undefined && Number.isInteger(index)) {
-        this.picker = { ...picker, index }
+      const item = picker?.items[index]
+      if (picker !== undefined && item !== undefined) {
+        this.picker = undefined
+        picker.onSelect(item.value)
         this.requestRender()
       }
     } else if (target.kind === 'model-picker') {
@@ -1804,8 +1969,12 @@ export class ModelsWorkspacePage implements Component {
         return
       }
       const index = Number(target.id.slice('model-picker:'.length))
-      if (!Number.isInteger(index)) return
-      this.modelPicker = { ...picker, index }
+      const model = picker.items[index]
+      if (model === undefined) return
+      const selected = new Set(picker.selected)
+      if (selected.has(model.id)) selected.delete(model.id)
+      else selected.add(model.id)
+      this.modelPicker = { ...picker, index, selected }
       this.requestRender()
     }
   }
@@ -1821,20 +1990,26 @@ export class ModelsWorkspacePage implements Component {
     return index < 0 ? 0 : index
   }
 
+  /** Revoke the press state when the Settings root hands the gesture to the
+   *  category rail or another owner. */
+  cancelPointer(): void {
+    this.pressed = undefined
+    this.questionPress = undefined
+  }
+
   dispose(): void {
     if (this.disposed) return
     this.disposed = true
-    this.authUnsubscribe?.()
-    this.authUnsubscribe = undefined
     const attemptId = this.auth?.attemptId
     if (attemptId !== undefined) {
       // A native attempt must not outlive the page with an open prompt. The
       // account browser attempt is deliberately NOT cancelled here (it is the
-      // Host's, not this page's).
+      // Host's, not this page's). Keep the subscription alive until the Host
+      // settles so its outcome cannot hang on a dropped settled event.
       void Promise.resolve(this.source.cancelAuthorization(attemptId)).catch(() => {})
     }
     this.pageController.abort()
-    this.question = undefined
+    this.clearQuestions()
     this.picker = undefined
     this.modelPicker = undefined
     this.referencePhase = 'idle'

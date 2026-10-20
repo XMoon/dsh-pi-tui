@@ -293,6 +293,8 @@ export interface SettingsAuthPage extends Component {
   handleMouse?(event: TuiMouseEvent): TuiMouseEventResult | undefined
   onCellPress?(x: number, y: number): void
   onCellClick?(x: number, y: number): void
+  /** Revoke one in-flight press when another owner claims the gesture. */
+  cancelPointer?(): void
   invalidate(): void
   dispose(): void
 }
@@ -728,7 +730,8 @@ export class SettingsWorkspacePanel implements Component {
     if (plan.headerRows === 1) lines.push(...this.renderHeader(plan))
     if (plan.metaRows === 1) lines.push(this.renderMetadata(plan))
     if (plan.ruleRows >= 1) lines.push(color.border('─'.repeat(Math.max(1, plan.width))))
-    const bodyTop = plan.headerRows + plan.metaRows + (plan.ruleRows >= 1 ? 1 : 0)
+    if (plan.noticeRows === 1) lines.push(this.renderNotice(plan))
+    const bodyTop = plan.headerRows + plan.metaRows + (plan.ruleRows >= 1 ? 1 : 0) + plan.noticeRows
     const pageRows = Math.max(1, plan.bodyRows + plan.actionRows)
     const narrow = plan.layout === 'narrow'
     const categoryWidth = narrow ? 0 : plan.layout === 'wide' ? WIDE_CATEGORY_WIDTH : MEDIUM_CATEGORY_WIDTH
@@ -1182,8 +1185,15 @@ export class SettingsWorkspacePanel implements Component {
     const buttons = row === undefined ? [] : this.detailButtons(row)
     const pinned = buttons.length > 0 && viewport >= 2 ? 1 : 0
     const scrollViewport = Math.max(0, viewport - pinned)
+    const directPage = this.categoryId === 'plugins'
+      ? 'Plugin Manager'
+      : this.categoryId === 'models'
+        ? 'Models'
+        : this.categoryId === 'account'
+          ? 'Account'
+          : 'this page'
     const content = row === undefined
-      ? [color.textDim('This category is a direct page entry. Press Enter or Right to open the Plugin Manager.')]
+      ? [color.textDim(`This category is a direct page entry. Press Enter or Right to open ${directPage}.`)]
       : this.detailContent(row, width, includeTitle)
     const offset = Math.min(Math.max(0, this.detailOffset), Math.max(0, content.length - scrollViewport))
     this.detailOffset = offset
@@ -1992,6 +2002,14 @@ export class SettingsWorkspacePanel implements Component {
   /** Enter the one Detail level. Writable rows start choosing in the same
    *  transition; focus is committed before the candidate source is re-read. */
   private enterDetail(): void {
+    if (this.categoryId === 'models') {
+      this.openModelsPage({ view: 'list' })
+      return
+    }
+    if (this.categoryId === 'account') {
+      this.openAccountPage({ view: 'page' })
+      return
+    }
     const row = this.selectedRow()
     if (row?.action === 'open-legacy') {
       this.intents.onOpenLegacy(row.legacyTargetId)
@@ -2190,7 +2208,13 @@ export class SettingsWorkspacePanel implements Component {
   handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
     if (this.disposed) return undefined
     if (this.pluginPage !== undefined) return this.pluginPage.handleMouse?.(event)
-    if (this.authPage !== undefined) return this.authPage.handleMouse?.(this.translateMouseEvent(event))
+    if (this.authPage !== undefined) {
+      const box = this.paintedAuthBox
+      if (box !== undefined && event.x >= box.x && event.x < box.x + box.width && event.y >= box.top && event.y < box.top + box.rows) {
+        return this.authPage.handleMouse?.(this.translateMouseEvent(event))
+      }
+      // A wheel over the category rail keeps scrolling the rail.
+    }
     if (event.type !== 'wheel') return undefined
     const delta = event.wheelDelta ?? 0
     if (delta === 0) return undefined
@@ -2211,11 +2235,15 @@ export class SettingsWorkspacePanel implements Component {
 
   onCellPress(x: number, y: number): void {
     if (this.disposed) return
+    // A new press always supersedes the other owner's press state.
+    this.pressedGesture = undefined
+    this.authPressed = undefined
     if (this.pluginPage !== undefined) {
       this.pluginPage.onCellPress?.(x, y)
       return
     }
     if (this.authPage !== undefined) {
+      this.authPressed = undefined
       const box = this.paintedAuthBox
       if (box !== undefined && x >= box.x && x < box.x + box.width && y >= box.top && y < box.top + box.rows) {
         this.authPressed = {
@@ -2228,7 +2256,9 @@ export class SettingsWorkspacePanel implements Component {
         this.authPage.onCellPress?.(x - box.x, y - box.top)
         return
       }
-      // A click on the category rail falls through to the root's own hit map.
+      // A click on the category rail falls through to the root's own hit map;
+      // the page's own press must not survive that ownership change.
+      this.authPage.cancelPointer?.()
     }
     const target = this.targetAt(x, y)
     this.pressedGesture = target === undefined
@@ -2246,12 +2276,17 @@ export class SettingsWorkspacePanel implements Component {
   onCellClick(x: number, y: number): void {
     if (this.disposed) return
     if (this.pluginPage !== undefined) {
+      this.pressedGesture = undefined
+      this.authPressed = undefined
       this.pluginPage.onCellClick?.(x, y)
       return
     }
     if (this.authPage !== undefined) {
       const box = this.paintedAuthBox
       if (box !== undefined && x >= box.x && x < box.x + box.width && y >= box.top && y < box.top + box.rows) {
+        // A release inside the page consumes the gesture: any root press from
+        // before it is stale and must never fire the category rail.
+        this.pressedGesture = undefined
         const pressed = this.authPressed
         this.authPressed = undefined
         if (pressed === undefined
@@ -2263,6 +2298,8 @@ export class SettingsWorkspacePanel implements Component {
       }
       // A wheel/click on the category rail keeps the root's identity path; the
       // pressed gesture below was recorded by the root's own onCellPress.
+      this.authPressed = undefined
+      this.authPage.cancelPointer?.()
     }
     const pressed = this.pressedGesture
     this.pressedGesture = undefined
