@@ -661,6 +661,18 @@ export class SettingsWorkspacePanel implements Component {
     this.intents.requestRender()
   }
 
+  private syncAuthPageBody(): void {
+    const page = this.authPage
+    if (page === undefined) return
+    const plan = planSettingsChrome(
+      this.intents.columns(),
+      this.intents.rows(),
+      this.intents.notice() !== undefined,
+      false,
+    )
+    page.setBodyHeight(Math.max(1, plan.bodyRows + plan.actionRows))
+  }
+
   private authPageHasPendingMutation(): boolean {
     return this.authPage?.pendingMutation?.() === true
   }
@@ -1814,6 +1826,10 @@ export class SettingsWorkspacePanel implements Component {
       return
     }
     if (this.authPage !== undefined) {
+      // Recompute the live page budget BEFORE forwarding input: a resize can
+      // arrive before its repaint frame, and Enter must not submit a form whose
+      // confirm rows are no longer visible.
+      this.syncAuthPageBody()
       const result = this.authPage.handleInput(data)
       if (result === 'exit') {
         if (!this.closeAuthPageForNavigation()) return
@@ -2266,6 +2282,7 @@ export class SettingsWorkspacePanel implements Component {
       return
     }
     if (this.authPage !== undefined) {
+      this.syncAuthPageBody()
       this.authPressed = undefined
       const box = this.paintedAuthBox
       if (box !== undefined && x >= box.x && x < box.x + box.width && y >= box.top && y < box.top + box.rows) {
@@ -2305,6 +2322,7 @@ export class SettingsWorkspacePanel implements Component {
       return
     }
     if (this.authPage !== undefined) {
+      this.syncAuthPageBody()
       const box = this.paintedAuthBox
       if (box !== undefined && x >= box.x && x < box.x + box.width && y >= box.top && y < box.top + box.rows) {
         // A release inside the page consumes the gesture: any root press from

@@ -430,7 +430,9 @@ test('a 30x8 Settings workspace disables Enter for a clipped masked form; 40x16 
   assert.match(h.view(), /Enter continue/u)
 
   h.vt.resize(30, 8)
+  h.vt.sendInput('\r') // Enter in the resize-before-frame gap
   await h.vt.waitForRender()
+  assert.equal(h.calls.some(call => call.startsWith('set:')), false, 'the input-path geometry guard blocks the race')
   assert.match(h.view(), /Resize the terminal/u)
   assert.match(h.view(), /Enter disabled/u)
   await key(h, 'a')

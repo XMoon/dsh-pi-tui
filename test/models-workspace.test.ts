@@ -560,6 +560,8 @@ test('Esc on a running native attempt cancels the exact attempt and returns to t
   await flush()
   assert.ok(calls.includes('cancel:auth-esc'), calls.join(','))
   assert.match(viewText(page), /Provider · Anthropic/u, 'the page waits on the Host settlement instead of leaving a prompt owner behind')
+  assert.match(viewText(page), /cancellation requested/u)
+  assert.match(viewText(page), /Cancellation requested/u)
   emit({ kind: 'settled', attemptId: 'auth-esc', status: 'cancelled' })
   await flush()
   assert.match(viewText(page), /Models & Credentials/u)
@@ -670,6 +672,7 @@ test('an empty masked key answer writes nothing (MA03)', async () => {
   viewText(page)
   page.handleInput('\r') // open the masked editor
   await flush()
+  viewText(page)
   page.handleInput('\r') // submit the empty draft to review
   page.handleInput('\r') // submit the review
   await flush()
@@ -707,6 +710,7 @@ test('the Add Provider page drives discovery → multi-select → review → cre
   page.handleInput('\u001b[B') // base URL field
   page.handleInput('\r')
   await flush()
+  viewText(page)
   for (const character of 'https://new.example/v1') page.handleInput(character)
   page.handleInput('\r')
   page.handleInput('\r')
@@ -959,6 +963,7 @@ test('a verified API-key write refreshes the list projection (P2)', async () => 
   viewText(page)
   page.handleInput('\r')
   await flush()
+  viewText(page)
   for (const character of 'sk-cache') page.handleInput(character)
   page.handleInput('\r')
   page.handleInput('\r')
@@ -1005,6 +1010,7 @@ test('a pending API-key write cannot be left by Esc and still verifies on settle
   viewText(page)
   page.handleInput('\r')
   await flush()
+  viewText(page)
   for (const character of 'sk-wait') page.handleInput(character)
   page.handleInput('\r')
   page.handleInput('\r')
@@ -1132,4 +1138,23 @@ test('a failed credential-record refresh invalidates the old presence instead of
   await flush()
   assert.match(row(), /Not set/u)
   assert.doesNotMatch(viewText(page), /could not be read/u)
+})
+
+test('Enter after a resize but before the resize frame cannot submit a clipped form (RFL-007)', async () => {
+  const { source, calls } = fakeSource()
+  source.setReference = async ref => { calls.push(`set:${ref}`) }
+  source.describeReference = async () => ({ configured: true })
+  const page = new ModelsWorkspacePage(source, () => {}, { view: 'reference', ref: 'ACME_API_KEY', label: 'Acme Gateway' }, () => {})
+  page.setBodyHeight(24)
+  await flush()
+  page.render(100)
+  page.handleInput('\r')
+  await flush()
+  page.render(100)
+  for (const character of 'sk-race') page.handleInput(character)
+  page.setBodyHeight(6) // resize arrived, resize frame has NOT rendered
+  page.handleInput('\r')
+  page.handleInput('\r')
+  await flush()
+  assert.equal(calls.some(call => call.startsWith('set:')), false)
 })
