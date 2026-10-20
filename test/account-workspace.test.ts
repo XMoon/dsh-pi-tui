@@ -12,7 +12,7 @@
 
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { stripTerminalSequences } from '@xmoon76/pi-tui'
+import { stripTerminalSequences, visibleWidth } from '@xmoon76/pi-tui'
 import { AccountWorkspacePage, type AccountInitialView } from '../src/tui/panels/account-workspace-page.ts'
 import type { AccountWorkspaceSource } from '../src/app/command/account-workflow.ts'
 import { accountClientMetadata } from '../src/app/command/account-workflow.ts'
@@ -254,4 +254,40 @@ test('an older Account getState cannot overwrite a newer watch snapshot (RFL-002
   held?.(signedOut())
   await flush()
   assert.match(text(page), /Signed in \(stored credential\)/u, 'the older read must be dropped')
+})
+
+test('closing the page ends only its watcher; a fresh page rebuilds the completed Host state (MA10)', async () => {
+  const state: SourceState = { view: waitingAttempt(), profileFails: false, balanceFails: false, runningTasks: false, calls: [] }
+  const source = makeSource(state)
+  const first = new AccountWorkspacePage(source, () => {}, { view: 'page' })
+  first.setBodyHeight(24)
+  await flush()
+  assert.match(text(first), /waiting-browser/u)
+  first.dispose()
+  // The Host attempt completes after the page is gone; the source (Host) now
+  // reports a stored credential. A new page must read that state, not a local
+  // cache and not a resurrected old page.
+  state.view = stored()
+  const second = new AccountWorkspacePage(source, () => {}, { view: 'page' })
+  second.setBodyHeight(24)
+  await flush()
+  assert.match(text(second), /Signed in \(stored credential\)/u)
+  assert.match(text(second), /Moon/u, 'the fresh page reads the independent profile too')
+  assert.equal(state.calls.some(call => call.startsWith('cancel:')), false, 'closing the page does not cancel the browser attempt')
+})
+
+test('Account page fits 105/80/60/40/30 columns in signed-out, attempt and stored states (MA12)', async () => {
+  for (const [width, height] of [[105, 40], [80, 24], [60, 22], [40, 16], [30, 8]] as const) {
+    for (const view of [signedOut(), waitingAttempt(), stored()]) {
+      const state: SourceState = { view, profileFails: false, balanceFails: false, runningTasks: false, calls: [] }
+      const page = new AccountWorkspacePage(makeSource(state), () => {}, { view: 'page' })
+      page.setBodyHeight(height)
+      await flush(3)
+      const lines = page.render(width)
+      assert.equal(lines.length, height)
+      for (const line of lines) {
+        assert.ok(visibleWidth(line) <= width, `${width}x${height} paints ${visibleWidth(line)} cells: ${JSON.stringify(stripTerminalSequences(line))}`)
+      }
+    }
+  }
 })

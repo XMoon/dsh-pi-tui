@@ -783,6 +783,8 @@ export class ModelsWorkspacePage implements Component {
       return
     }
     this.add = { ...add, step: 'review', error: undefined }
+    this.view = { kind: 'review' }
+    this.cursor = 0
     this.requestRender()
   }
 
