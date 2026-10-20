@@ -1773,12 +1773,19 @@ test('a parked continued Question is reachable and reopenable from the Task Cent
   await settle()
   await vt.waitForRender()
 
-  // COLD discovery parks it: the Question must NOT have stolen the editor seat,
-  // yet the footer's Task Center trigger is armed by the parked attention alone
-  // (no Job/Subagent is running in this fixture).
-  const idle = await waitForParkedQuestionFooter(vt)
+  // COLD first-frame witness: a parked Question must not steal the editor
+  // seat (or mount an overlay) even transiently at discovery. This is read
+  // BEFORE the async footer waiter, so a panel that briefly appeared and then
+  // disappeared can never be hidden by the final idle frame.
+  const cold = vt.getViewport().join('\n')
   assert.equal(app.overlayGraphState().handles, 0, 'cold discovery owns no overlay')
-  assert.ok(!idle.includes('Type your answer…'), `no Question panel was mounted:\n${idle}`)
+  assert.ok(!cold.includes('Type your answer…'), `no Question panel was mounted at cold discovery:\n${cold}`)
+
+  // The footer attention/reopen hint is published asynchronously by the
+  // projection/render pipeline; wait for BOTH before asserting the trigger,
+  // then keep the full park -> Task Center -> reopen journey. (The bounded
+  // wait fixes the packed-lane timing flake without moving the cold witness.)
+  const idle = await waitForParkedQuestionFooter(vt)
   // COLD DISCOVERY closes the whole chain, with zero work of any kind: the
   // controller found the continued call at attach (the fixture now models the
   // production `userQuestions` capability), parked it, published the count, and
