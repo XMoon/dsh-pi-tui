@@ -484,6 +484,27 @@ test('a narrow but tall grant keeps the compact readable sheet', async () => {
   assert.equal(await decision, 'rejected')
 })
 
+test('a tall ultra-narrow grant degrades instead of painting cropped action labels', async () => {
+  for (const [columns, rows] of [[10, 24], [12, 24]] as const) {
+    const { vt, app } = startApp(columns, rows)
+    const decision = app.showApprovalPrompt({
+      toolName: 'bash',
+      reason: 'readable reason',
+      arguments: 'first\nsecond',
+      danger: true,
+    })
+    const view = await viewport(vt)
+    assert.ok(view.includes('Resize'), `${columns}x${rows} must advertise resizing:\n${view}`)
+    assert.ok(!view.includes('[y]'), `${columns}x${rows} must not paint a partial allow label:\n${view}`)
+    assert.ok(!view.includes('[n]'), `${columns}x${rows} must not paint a partial reject label:\n${view}`)
+    assert.ok(!view.includes('[Esc]'), `${columns}x${rows} must not paint a partial cancel label:\n${view}`)
+    vt.sendInput('n')
+    assert.equal(await decision, 'rejected')
+    app.dispose()
+    startedApps.delete(app)
+  }
+})
+
 test('fullscreen 80x8 paints a real decision cell and keeps the resize fact', async () => {
   const { vt, app } = startApp(80, 8)
   app.setFullscreen(true)
