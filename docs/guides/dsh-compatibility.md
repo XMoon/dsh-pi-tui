@@ -118,6 +118,13 @@ validates a source pack. A source pack cannot validate the published ecosystem
 — the smoke refuses that combination and reports it as a SKIP, which is not a
 pass. The gate is blocking in both modes.
 
+A passing ecosystem check proves the candidate against the PUBLISHED DSH
+family only. In Source Mode it says nothing about the unpublished DSH source
+family, and the published pi2dsh release is pinned to a published DSH version,
+so a later source-baseline move must not read this gate as evidence that the
+new Host is compatible. The Source Mode lanes (official presets, the old-DSH
+boundary, the source distribution checks) own that qualification.
+
 For local validation use the isolated driver rather than workspace symlinks:
 
 ```sh
