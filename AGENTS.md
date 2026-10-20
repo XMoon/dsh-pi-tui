@@ -249,7 +249,7 @@ objective discovery guards.
 
 A stage-final validation must not run the same suite twice. `pnpm verify:prepush`
 is the repository's full pipeline: `typecheck:fork` + `typecheck:bench`,
-`test:fork`, `test:docs`, `test:tooling`, the architecture / boundary /
+`test:fork`, `test:tmux`, `test:tooling`, the architecture / boundary /
 keybinding / naming / session-event / installation-doc / pi-divergence /
 pi-vendor gates, `pnpm audit`, and finally `pnpm pack:release`. `pack:release`
 is NOT packaging-only: its `prepack` runs `clean` + `build` +
@@ -260,7 +260,7 @@ vim, examples, composeAgent). So in one pass never also run `typecheck:bundle`,
 `scripts/compose-agent-compat-smoke.mjs` by hand, and never invoke
 `pnpm pack`/`pack:release` while a build or an artifact-dependent gate is
 running. `pnpm test` already contains `test:fork` + `test:product` +
-`test:tooling` + `test:docs`; prefer it over the individual pieces. What a
+`test:tooling` + `test:tmux`; prefer it over the individual pieces. What a
 stage-final pass still needs ON TOP of `verify:prepush`: the migration contract
 smokes (`smoke:remote-*`), `smoke:boundary`, `smoke:startup-strictness`, the
 published-DSH compatibility checks (`compat:dsh:npm`, `compat:dsh:client-family`
@@ -274,7 +274,7 @@ and run only the remainder — re-running a green lane after an edit that does
 not touch its inputs buys no evidence and costs the whole suite. A delta
 invalidates a lane only when it touches that lane's inputs: `packages/pi-tui/**`
 for the fork lanes, `src/**` + `test/**` + `scripts/**` for the bundle suites,
-`docs/**` and the doc-gate inputs for `test:docs`/the documentation gates.
+`docs/**` and the doc-gate inputs for `test:tmux`/the documentation gates.
 A docs-only or comment-only delta does not invalidate a suite already green on
 the same code. State which lanes were already green (and against which state)
 and which were run for the delta, so the evidence stays auditable. CI runs the
@@ -292,7 +292,7 @@ twice.
 `ci.yml` coverage is what makes a green PR check evidence instead of work to
 reproduce: `Source checks` runs `build:fork`, `typecheck:fork`,
 `typecheck:bench`, `test:fork`, the `smoke:remote-*` parity/closure lanes (five
-of them only when the resolved DSH mode is `source`), `test:docs`,
+of them only when the resolved DSH mode is `source`), `test:tmux`,
 `gate:installation-doc`, `test:tooling`, `gate:pi-surface-compat`,
 `generate:pi-divergences` with a `git diff --exit-code` on `DIVERGENCES.md`,
 `gate:pi-divergence-ledger`, `gate:pi-vendor-diff --strict` and the naming gate;
