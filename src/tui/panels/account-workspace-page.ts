@@ -570,7 +570,8 @@ export class AccountWorkspacePage implements Component {
     const target = host.includes(':') && !host.startsWith('[') ? `[${host}]` : host
     // The browser follows the Host's redirect_uri on the SAME loopback address
     // family, so the local tunnel bind must use the callback host too.
-    return `ssh -N -L ${target}:${port}:${target}:${port} <SSH_TARGET>`
+    // Quote the forwarding argument: bracketed IPv6 addresses are globs in zsh.
+    return `ssh -N -L '${target}:${port}:${target}:${port}' <SSH_TARGET>`
   }
 
   // ── input ────────────────────────────────────────────────────────────────
