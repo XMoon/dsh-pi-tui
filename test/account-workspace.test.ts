@@ -351,3 +351,38 @@ test('an IPv6 loopback callback origin produces a matching SSH tunnel template (
   assert.match(painted, /\[::1\]:43121/u)
   assert.match(painted, /ssh -N -L '\[::1\]:43121:\[::1\]:43121'/u)
 })
+
+test('a same-status Host grant replacement invalidates the open sign-out confirmation (P1)', async () => {
+  const state: SourceState = { view: stored(), profileFails: false, balanceFails: false, runningTasks: false, calls: [] }
+  let identity = 'Account A'
+  const source = makeSource(state)
+  let pushWatch: ((view: AccountView) => void) | undefined
+  source.watch = async function* () {
+    yield state.view
+    while (true) {
+      const next = await new Promise<AccountView>(resolve => { pushWatch = resolve })
+      yield next
+    }
+  }
+  source.getProfile = async () => ({ status: 'ready', value: { id: identity, name: identity, contact: 'm***@example.com' } })
+  const page = new AccountWorkspacePage(source, () => {}, { view: 'page' })
+  page.setBodyHeight(30)
+  await flush()
+  text(page)
+  // Actions: Usage, Top up, Sign out, Refresh, ← Settings.
+  page.handleInput('\u001b[B')
+  page.handleInput('\u001b[B')
+  page.handleInput('\r')
+  await flush()
+  assert.match(text(page), /Sign out confirmation/u)
+  assert.match(text(page), /Account A/u)
+
+  identity = 'Account B'
+  state.view = stored() // same status, different grant
+  pushWatch?.(state.view)
+  await flush()
+  const after = text(page)
+  assert.doesNotMatch(after, /Sign out confirmation/u)
+  assert.match(after, /Account B/u)
+  assert.match(after, /confirm sign-out again/u)
+})
