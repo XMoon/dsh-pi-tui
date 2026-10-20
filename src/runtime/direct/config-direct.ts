@@ -883,33 +883,18 @@ export class DirectAuthorizationConfig implements AuthorizationConfig {
     return Promise.resolve()
   }
 
-  /** Withdraw one attempt. A pending prompt proves the provider has not
-   *  started committing yet: reject/withdraw it immediately and settle
-   *  locally so the prompt UI and the waiting page cannot hang on a provider
-   *  that ignores abort. With NO pending prompt the provider may already be in
-   *  the official service's `committing` window, so only abort the signal and
-   *  let the authoritative Host outcome decide (it can still be authorized). */
+  /** Withdraw one attempt. Close/withdraw every pending prompt bridge
+   *  IMMEDIATELY so no prompt UI can outlive the cancellation, then wait for
+   *  the official Host's authoritative outcome. A pending prompt is NOT proof
+   *  that the provider has avoided `commit()`: the session exposes prompt()
+   *  and commit() independently, and the service's `committing` guard can
+   *  still resolve `authorized`. Never forge a terminal `cancelled` here. */
   private cancelAttempt(attemptId: string): void {
     const attempt = this.attempts.get(attemptId)
     if (attempt === undefined || attempt.settled) return
     attempt.controller.abort()
-    if (this.hasPendingPrompts(attemptId)) this.settleCancelled(attemptId)
-  }
-
-  private hasPendingPrompts(attemptId: string): boolean {
-    for (const pending of this.pendingPrompts.values()) {
-      if (pending.attemptId === attemptId) return true
-    }
-    return false
-  }
-
-  /** Terminal cancellation after a pre-commit prompt withdrawal. */
-  private settleCancelled(attemptId: string): void {
-    const attempt = this.attempts.get(attemptId)
-    if (attempt === undefined || attempt.settled) return
-    attempt.settled = true
-    this.finalizeAttempt(attemptId)
-    this.emit({ kind: 'settled', attemptId, status: 'cancelled' })
+    this.rejectAttemptPrompts(attemptId)
+    attempt.disposeCallerAbortListener()
   }
 
   /** The ONE idempotent local-finalization path for an attempt: rejects
