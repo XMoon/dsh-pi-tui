@@ -392,7 +392,8 @@ test('short surfaces keep the title/danger, one reading row, actions and a resiz
     const view = await viewport(vt)
     assertSheetIntact(view)
     assert.ok(view.includes('Dangerous command'), `${columns}x${rows} danger fact missing:\n${view}`)
-    assert.ok(view.includes('Reason: line one'), `${columns}x${rows} one real reading row missing:\n${view}`)
+    assert.ok(view.includes('Arguments:') && view.includes('arg-'),
+      `${columns}x${rows} one real payload row missing:\n${view}`)
     assert.ok(view.includes('Resize to inspect more'), `${columns}x${rows} resize fact missing:\n${view}`)
     assert.ok(vt.writes.join('').includes(color.error('⚠ Dangerous command')),
       `${columns}x${rows} compact danger must use the error token`)
@@ -434,7 +435,8 @@ test('a long dangerous tool keeps the warning fact in a narrow title', async () 
     'the compact fallback warning glyph must use the error token')
   assert.ok(view.includes('very'), `the tool identity must stay partially identifiable:\n${view}`)
   assert.ok(view.includes('Resize'), `the resize cue must stay visible:\n${view}`)
-  assert.ok(view.includes('danger'), `the reading row must stay visible:\n${view}`)
+  assert.ok(view.includes('Arguments:') && view.includes('arg'),
+    `the actual payload row must stay visible:\n${view}`)
   assert.ok(view.includes('[y] Allow once') && view.includes('[n] Reject') && view.includes('[Esc] Cancel'),
     `all three decisions must stay painted:\n${view}`)
   vt.sendInput('n')
@@ -1057,6 +1059,35 @@ test('compact inline labels are dim and generated compact values use color.text'
     'the compact raw command keeps the default ink')
   vt.sendInput('n')
   assert.equal(await decision, 'rejected')
+})
+
+test('a compact generic or raw argument payload outranks the reason at 44x10', async () => {
+  const cases = [
+    {
+      name: 'generic object',
+      tool: 'custom_tool',
+      raw: JSON.stringify({ alpha: 'VALUE-A', beta: 'VALUE-B', gamma: 'VALUE-C' }),
+      marker: 'VALUE-A',
+    },
+    { name: 'raw fallback', tool: 'bash', raw: 'raw line one\nraw line two\nRAW-TAIL', marker: 'raw line one' },
+  ] as const
+  for (const entry of cases) {
+    const { vt, app } = startApp(44, 10)
+    const decision = app.showApprovalPrompt({
+      toolName: entry.tool,
+      reason: 'read carefully',
+      arguments: entry.raw,
+    })
+    const view = await viewport(vt)
+    assertSheetIntact(view)
+    assert.ok(view.includes('Arguments:') && view.includes(entry.marker),
+      `${entry.name}: the compact body must show the actual payload before the reason:\n${view}`)
+    assert.ok(view.includes('Resize'), `${entry.name}: the honest resize fact stays visible:\n${view}`)
+    vt.sendInput('n')
+    assert.equal(await decision, 'rejected')
+    app.dispose()
+    startedApps.delete(app)
+  }
 })
 
 test('hostile structured arguments never reach the terminal and Copy stays byte-exact', async () => {
