@@ -1,0 +1,90 @@
+name: Bug report
+description: Report a defect in dsh-pi-tui
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. Please fill in what you can — a partial report
+        with a reproducible observation is more useful than a complete one
+        without a reproduction.
+
+        If this concerns work that is already tracked in an issue, please add
+        your observation to that issue instead of opening a duplicate.
+
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      description: The dsh version and the dsh-pi-tui version you are running.
+      placeholder: "dsh 0.2.1-rc.2 + @xmoon76/dsh-pi-tui 0.5.3"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: backend
+    attributes:
+      label: Backend
+      description: >
+        Direct is the production backend. Remote is experimental and has no
+        public selector — choose Remote only if you reached it through an
+        explicit experimental setup.
+      options:
+        - Direct (default)
+        - Remote (experimental)
+        - Not sure
+    validations:
+      required: true
+
+  - type: input
+    id: preset
+    attributes:
+      label: Preset
+      description: >
+        The agent preset in use. `standard`, `ptc`, `minimal` and `cordis` are
+        the official generated presets.
+      placeholder: standard
+    validations:
+      required: false
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction
+      description: Steps to reproduce, starting from a fresh session.
+      placeholder: |
+        1. Start dsh with the pi-tui profile
+        2. Paste a long message and send it
+        3. Click "to expand" on the compacted user message
+        4. Click anywhere on the expanded bubble
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      description: What you expected to happen, and what happened instead.
+    validations:
+      required: true
+
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence
+      description: >
+        A pasted frame, a log excerpt, or a terminal recording. Control
+        characters are fine — wrap them in a fenced code block.
+      render: text
+    validations:
+      required: false
+
+  - type: textarea
+    id: notes
+    attributes:
+      label: Anything else
+      description: >
+        Related issues, a suspected cause, or a workaround that helps.
+    validations:
+      required: false
