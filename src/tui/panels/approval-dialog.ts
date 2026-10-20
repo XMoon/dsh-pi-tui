@@ -102,9 +102,6 @@ const PREFERRED_ACTION_ROWS = 2
  * a clipped box: the pinned header/footer must keep their own rows and there
  * is no honest way to show the title, a reading row AND all three decisions. */
 const MIN_SHEET_FRAME_ROWS = 5
-/** Below this CONTENT width the sheet cannot show a meaningful title and a
- * full decision bar; the resize row is more truthful than truncated badges. */
-const MIN_SHEET_CONTENT_WIDTH = 16
 
 /** A blank content row (kept as a plain space so the Frame border padding
  * never becomes a zero-width row). */
@@ -659,10 +656,9 @@ export class ApprovalSheetFrame extends Frame {
 
   render(width: number): string[] {
     const grant = Math.max(1, Math.floor(this.options.rowsOf(this.sheet.isExpanded())))
-    const contentWidth = Math.max(1, Math.floor(width) - 4)
     this.lastTermRows = this.options.terminalRows()
     this.lastTermColumns = width
-    if (grant < MIN_SHEET_FRAME_ROWS || contentWidth < MIN_SHEET_CONTENT_WIDTH) {
+    if (grant < MIN_SHEET_FRAME_ROWS) {
       // The seat grant cannot host an honest action sheet without taking the
       // header/footer rows or hiding a decision. Paint the explicit resize fact
       // and leave the keyboard decisions with the runtime.

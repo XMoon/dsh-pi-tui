@@ -465,6 +465,25 @@ test('a narrow short grant with no room for title and body degrades to the resiz
   }
 })
 
+test('a narrow but tall grant keeps the compact readable sheet', async () => {
+  const { vt, app } = startApp(16, 24)
+  const decision = app.showApprovalPrompt({
+    toolName: 'bash',
+    reason: 'readable reason',
+    arguments: 'first\nsecond',
+    danger: true,
+  })
+  const view = await viewport(vt)
+  assert.ok(view.includes('Approve'), `the title must stay readable in a tall narrow sheet:\n${view}`)
+  assert.ok(view.includes('Dangero') || view.includes('⚠'), `the danger fact must stay readable:\n${view}`)
+  assert.ok(view.includes('Reason') && view.includes('readable'), `the reading section must stay readable:\n${view}`)
+  assert.ok(view.includes('[y] Allow'), `allow decision missing:\n${view}`)
+  assert.ok(view.includes('[n] Reject'), `reject decision missing:\n${view}`)
+  assert.ok(view.includes('[Esc] Cancel'), `cancel decision missing:\n${view}`)
+  vt.sendInput('n')
+  assert.equal(await decision, 'rejected')
+})
+
 test('fullscreen 80x8 paints a real decision cell and keeps the resize fact', async () => {
   const { vt, app } = startApp(80, 8)
   app.setFullscreen(true)
