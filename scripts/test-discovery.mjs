@@ -82,16 +82,27 @@ export function discoverTestFiles(testRoot, suffixes = TEST_FILE_SUFFIXES) {
  * a pattern that matches nothing, or a lane that ends up with no files at
  * all, is an error — a lane that silently discovers nothing would report
  * green while proving nothing.
+ *
+ * `exclude` patterns remove files the lane must NOT own. They are applied
+ * AFTER the include patterns, so an exclusion can carve a subdirectory out
+ * of a broad pattern.
  */
 export function resolveLane(
   testRoot,
   patterns,
   suffixes = TEST_FILE_SUFFIXES,
+  exclude = [],
 ) {
   const all = discoverTestFiles(testRoot, suffixes)
+  const excluded = new Set()
+  for (const pattern of exclude) {
+    for (const rel of all) {
+      if (matchesPattern(rel, pattern)) excluded.add(rel)
+    }
+  }
   const selected = new Set()
   for (const pattern of patterns) {
-    const matches = all.filter(rel => matchesPattern(rel, pattern))
+    const matches = all.filter(rel => matchesPattern(rel, pattern) && !excluded.has(rel))
     if (matches.length === 0) {
       throw new Error(`the test lane pattern ${pattern} matched no test file under ${testRoot}`)
     }

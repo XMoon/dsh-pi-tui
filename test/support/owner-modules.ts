@@ -10,14 +10,14 @@ import ts from 'typescript'
  * The production support modules are TypeScript, so they cannot import the
  * unchecked `.mjs` gate script without an implicit-`any` error. The two copies
  * are kept in lockstep by a drift guard in
- * `test/application-architecture-gate.test.mjs` (it can import both).
+ * `test/architecture/application-architecture-gate.test.mjs` (it can import both).
  */
 export const PRODUCTION_SOURCE_EXTENSIONS: readonly string[] = ['.ts', '.tsx', '.mts', '.cts']
 
 /**
  * Mirror of the gate's `scriptKindOf`: `.tsx` must be parsed as TSX, or a legal
  * JSX tree hides the declarations an AST scan is looking for. Also drift-
- * guarded by `test/application-architecture-gate.test.mjs`.
+ * guarded by `test/architecture/application-architecture-gate.test.mjs`.
  */
 export function productionScriptKind(rel: string): ts.ScriptKind {
   return rel.endsWith('.tsx') ? ts.ScriptKind.TSX : ts.ScriptKind.TS
@@ -188,8 +188,8 @@ export function ownerFile(rel: string): string {
  * This mirrors the unwrap in `scripts/application-architecture-gate.mjs`
  * (`findDirectAdapterConstructions`). It lives here, next to the production
  * walkers it guards, because BOTH A5b AST guards
- * (`test/a5-composition-inventory.test.ts` and
- * `test/a5b-bootstrap-closure.test.ts`) share it: keeping one definition means
+ * (`test/architecture/a5-composition-inventory.test.ts` and
+ * `test/architecture/a5b-bootstrap-closure.test.ts`) share it: keeping one definition means
  * a wrapper the architecture gate unwraps can never silently bypass an A5b
  * scan.
  *

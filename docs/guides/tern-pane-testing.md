@@ -39,8 +39,8 @@ and it takes minutes. Run it deliberately, for acceptance evidence.
 | Piece | Owns |
 |---|---|
 | `scripts/tern-pane-drive.mjs` | The driver: `tern serve` lifecycle, the control channel, real input, the node tree, captures, the run directory and the result ledger |
-| `scripts/tern-pane-geometry.mjs` | The visibility oracle: boxes, clipping ancestors, the visible click point. Pure, covered by `test/tern-pane-geometry.test.mjs` |
-| `scripts/tern-pane-instrument.mjs` | The two remaining rules: which commands may be repeated, and how a path is quoted into the generated launcher. Pure, covered by `test/tern-pane-instrument.test.mjs` |
+| `scripts/tern-pane-geometry.mjs` | The visibility oracle: boxes, clipping ancestors, the visible click point. Pure, covered by `test/tooling/tern-pane-geometry.test.mjs` |
+| `scripts/tern-pane-instrument.mjs` | The two remaining rules: which commands may be repeated, and how a path is quoted into the generated launcher. Pure, covered by `test/tooling/tern-pane-instrument.test.mjs` |
 | `scripts/tern-pane-smoke.mjs` + `-smoke-subject.mts` | The committed smoke: the worked example, and the check that the driver still works end to end |
 | Your **flow** module | What to drive and what to assert. It receives the harness handle |
 | Your **subject** `.mts` | The UI under test, mounted in a real pane by `harness.launch` |

@@ -242,7 +242,7 @@ change (documentation and ledger together), never an ordinary refactor.
 
 The architecture gate also enforces the dependency direction and the zones that
 exist today. Its rule unit tests live in
-`test/application-architecture-gate.test.mjs`.
+`test/architecture/application-architecture-gate.test.mjs`.
 
 ```text
 pnpm gate:architecture

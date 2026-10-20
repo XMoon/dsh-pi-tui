@@ -35,7 +35,7 @@ const ACTIVE_FILES = [
   'src/startup.ts',
   'scripts/dsh-runtime-boundary-smoke.mjs',
   'test/startup.test.ts',
-  'test/dsh-runtime-boundary.test.mjs',
+  'test/tooling/dsh-runtime-boundary.test.mjs',
 ]
 const STABLE_COMMAND = 'dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@latest'
 const DSH_ALLOW_SCRIPTS_LIST = '@deepseek-ai/dsh-subprocess-local,koffi,node-pty'

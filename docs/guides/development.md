@@ -304,7 +304,7 @@ Benchmark entry points:
 
 - `pnpm bench` — full sweep;
 - `pnpm bench:fast` — short sweep;
-- `pnpm bench:smoke` — reduced sweep, exercised by `test/bench-smoke.test.mjs`.
+- `pnpm bench:smoke` — reduced sweep, exercised by `test/tooling/bench-smoke.test.mjs`.
 
 They are observational, manual and non-default. Compare on the same machine and
 Node version after `pnpm build`; `bench:smoke` asserts no timing threshold. Never
