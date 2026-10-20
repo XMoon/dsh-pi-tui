@@ -708,6 +708,13 @@ export function authorizationTargets(entries: readonly AuthorizationEntry[]): Au
   }))
 }
 
+/** Read an abort signal without TypeScript's control-flow narrowing: the
+ * caller can abort between the synchronous pre-dispatch check and the point
+ * where the attempt record is installed. */
+function callerAborted(signal: AbortSignal | undefined): boolean {
+  return signal?.aborted === true
+}
+
 /** The Direct authorization config (`ctx.authorization` behind the config
  * port's AuthorizationConfig). The upstream interaction model (notify/prompt
  * callbacks) is bridged into the port's EVENT model: the adapter owns the
@@ -733,6 +740,8 @@ export class DirectAuthorizationConfig implements AuthorizationConfig {
     key: CredentialKey
     settlement: Promise<void>
     disposeCallerAbortListener: () => void
+    /** The terminal event for this attempt has been emitted exactly once. */
+    settled: boolean
   }>()
 
   constructor(ctx: HostContextLike) {
@@ -796,7 +805,7 @@ export class DirectAuthorizationConfig implements AuthorizationConfig {
     // never settles cannot retain the attempt/controller/listener either
     // — repeated aborted logins leave nothing behind.
     const withdrawOnCallerAbort = (): void => {
-      this.finalizeAttempt(attemptId)
+      this.settleCancelled(attemptId)
     }
     const disposeCallerAbortListener = (): void => {
       request.signal?.removeEventListener('abort', withdrawOnCallerAbort)
@@ -832,23 +841,37 @@ export class DirectAuthorizationConfig implements AuthorizationConfig {
     // caller abort): a late upstream settlement after the finalization
     // only emits (the command already unsubscribed — a listener-less emit
     // is a no-op) and removes nothing twice.
+    const settleUpstream = (
+      outcome: { status: 'authorized' | 'cancelled' | 'failed'; code?: string; message?: string },
+    ): void => {
+      const attempt = this.attempts.get(attemptId)
+      if (attempt === undefined || attempt.settled) return
+      attempt.settled = true
+      this.finalizeAttempt(attemptId)
+      this.emit({
+        kind: 'settled',
+        attemptId,
+        status: outcome.status,
+        ...(outcome.code === undefined ? {} : { code: outcome.code }),
+        ...(outcome.message === undefined ? {} : { message: outcome.message }),
+      })
+    }
     const settlement = flow.then(
-      (outcome) => {
-        this.finalizeAttempt(attemptId)
-        this.emit({ kind: 'settled', attemptId, status: outcome.status })
-      },
+      outcome => settleUpstream(outcome),
       (error: unknown) => {
-        this.finalizeAttempt(attemptId)
-        this.emit({
-          kind: 'settled',
-          attemptId,
+        settleUpstream({
           status: 'failed',
           code: (error as { code?: unknown } | null)?.code as string | undefined,
           message: safeErrorMessage(error),
         })
       },
     )
-    this.attempts.set(attemptId, { controller, key, settlement, disposeCallerAbortListener })
+    this.attempts.set(attemptId, { controller, key, settlement, disposeCallerAbortListener, settled: false })
+    // The caller may have aborted between adding the listener and installing
+    // the attempt record: the listener's finalize found no record. Report the
+    // terminal cancelled event once here; a later upstream settlement is a
+    // no-op because `settled` is set and the record is removed.
+    if (callerAborted(request.signal)) this.settleCancelled(attemptId)
     return Promise.resolve({ kind: 'started', attemptId })
   }
 
@@ -868,8 +891,19 @@ export class DirectAuthorizationConfig implements AuthorizationConfig {
   }
 
   cancel(attemptId: string): Promise<void> {
-    this.finalizeAttempt(attemptId)
+    this.settleCancelled(attemptId)
     return Promise.resolve()
+  }
+
+  /** Emit the terminal cancelled settlement exactly once, withdraw every
+   *  pending prompt, and abandon local ownership even if the provider ignores
+   *  its abort signal and never settles on its own. */
+  private settleCancelled(attemptId: string): void {
+    const attempt = this.attempts.get(attemptId)
+    if (attempt === undefined || attempt.settled) return
+    attempt.settled = true
+    this.finalizeAttempt(attemptId)
+    this.emit({ kind: 'settled', attemptId, status: 'cancelled' })
   }
 
   /** The ONE idempotent local-finalization path for an attempt: rejects

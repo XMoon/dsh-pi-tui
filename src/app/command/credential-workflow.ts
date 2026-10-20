@@ -169,6 +169,19 @@ export function resolveLogoutDestination(
   if (isAccountArg(arg)) return { kind: 'account', view: 'signout' }
   const match = classifyCredentialArg(arg, options)
   if (match !== undefined) {
+    // A lowercase standalone flow route is a known record target, even when
+    // the shared classifier also sees the token as a case-insensitive ref.
+    // Uppercase MYKEY remains the explicit reference escape hatch.
+    if (match.kind === 'ref') {
+      const flowOnly = flowForRoute(generic, arg)
+      if (flowOnly !== undefined) {
+        return {
+          kind: 'models',
+          view: 'logout',
+          target: { kind: 'record', key: flowOnly.key, label: flowOnly.label, ...(flowOnly.route === undefined ? {} : { route: flowOnly.route }) },
+        }
+      }
+    }
     const option = match.kind === 'route'
       ? options.find(candidate => candidate.ref === match.option.ref)
       : options.find(candidate => candidate.ref === match.ref)
@@ -192,7 +205,7 @@ export function resolveLogoutDestination(
   }
   // A route that has a flow but no credential option (a foreign scope the
   // catalog does not expose) is cleared by its record.
-  const flow = flowForRoute(generic, arg.toLowerCase())
+  const flow = flowForRoute(generic, arg)
   if (flow !== undefined) {
     return {
       kind: 'models',

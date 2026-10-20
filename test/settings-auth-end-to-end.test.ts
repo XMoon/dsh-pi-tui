@@ -54,6 +54,7 @@ const SIGNED_OUT: AccountView = {
 interface Harness {
   readonly vt: VirtualTerminal
   readonly app: TuiApp
+  readonly calls: readonly string[]
   readonly view: () => string
   readonly rows: () => string[]
   readonly close: () => void
@@ -82,6 +83,10 @@ function open(): Harness {
   ctx.provide('commands', commands as never)
   ctx.provide('skills', { list: async () => [], get: async () => undefined, find: () => undefined, execute: async () => undefined } as never)
   const accountState = { view: SIGNED_OUT }
+  const calls: string[] = []
+  let recordRows: { key: string; label: string; kind: 'grant' }[] = [
+    { key: 'plugin/mykey', label: 'My Key', kind: 'grant' },
+  ]
   const base: Record<string, unknown> = {
     ctx,
     app,
@@ -135,11 +140,14 @@ function open(): Harness {
       credentials: {
         available: () => true,
         recordsSupported: () => true,
-        setReference: async () => {},
-        unsetReference: async () => {},
-        deleteRecord: async () => {},
+        setReference: async (ref: string) => { calls.push(`set:${ref}`) },
+        unsetReference: async (ref: string) => { calls.push(`unset:${ref}`) },
+        deleteRecord: async (key: string) => {
+          calls.push(`delete:${key}`)
+          recordRows = recordRows.filter(record => record.key !== key)
+        },
         describeReference: async () => ({ configured: true }),
-        listRecords: async () => [],
+        listRecords: async () => recordRows.map(record => ({ ...record })),
         onChanged: () => () => {},
       },
       authorization: {
@@ -179,6 +187,7 @@ function open(): Harness {
   return {
     vt,
     app,
+    calls,
     rows,
     view: () => rows().join('\n'),
     close: () => {
@@ -187,7 +196,7 @@ function open(): Harness {
     },
     // The invoke helper is exposed through the returned object below.
     ...( { invoke } as object),
-  } as Harness & { invoke: (line: string) => unknown }
+  } as unknown as Harness & { invoke: (line: string) => unknown }
 }
 
 const rowOf = (h: Harness, needle: string): number => {
@@ -371,5 +380,19 @@ test('MA13: a Host approval preempts Models input, abandons the workspace and ne
   await h.vt.waitForRender()
   assert.doesNotMatch(h.view(), /Settings · Models/u)
   assert.doesNotMatch(h.view(), /API Key Reference/u)
+  h.close()
+})
+
+test('/logout mykey deletes the flow RECORD, never the MYKEY reference (RFL-001 logout symmetry)', async () => {
+  const h = open()
+  await h.vt.waitForRender()
+  ;(h as unknown as { invoke(line: string): unknown }).invoke('/logout mykey')
+  await h.vt.waitForRender()
+  assert.match(h.view(), /plugin\/mykey/u)
+  assert.match(h.view(), /Clear stored credential/u)
+  await key(h, '\r')
+  await h.vt.waitForRender()
+  assert.ok(h.calls.includes('delete:plugin/mykey'), h.calls.join(','))
+  assert.equal(h.calls.some(call => call.startsWith('unset:')), false, h.calls.join(','))
   h.close()
 })

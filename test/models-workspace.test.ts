@@ -183,6 +183,40 @@ test('logout destination: known ref, keyless flow record and account', () => {
   })
   assert.deepEqual(resolveLogoutDestination('deepseek-account', PROVIDERS, FLOWS), { kind: 'account', view: 'signout' })
   assert.deepEqual(resolveLogoutDestination('', PROVIDERS, FLOWS), { kind: 'models', view: 'logout-list' })
+  const flowOnly: readonly AuthorizationFlowTarget[] = [
+    { kind: 'authorization', route: 'mykey', key: 'plugin/mykey', label: 'My Key', methods: [{ id: 'oauth', label: 'OAuth' }], inFlight: false },
+  ]
+  assert.deepEqual(resolveLogoutDestination('mykey', [], flowOnly), {
+    kind: 'models',
+    view: 'logout',
+    target: { kind: 'record', key: 'plugin/mykey', label: 'My Key', route: 'mykey' },
+  })
+  assert.deepEqual(resolveLogoutDestination('MYKEY', [], flowOnly), {
+    kind: 'models',
+    view: 'logout',
+    target: { kind: 'reference', ref: 'MYKEY', label: 'MYKEY' },
+  })
+  const collisionOptions: readonly CredentialProviderOption[] = [
+    { route: 'other-provider', label: 'Other', ref: 'MYKEY', configured: true, declared: false, namesCredential: true, group: 'configured', canProvisionProfile: true },
+  ]
+  assert.deepEqual(resolveLogoutDestination('mykey', collisionOptions, flowOnly), {
+    kind: 'models',
+    view: 'logout',
+    target: { kind: 'record', key: 'plugin/mykey', label: 'My Key', route: 'mykey' },
+  })
+  assert.deepEqual(resolveLogoutDestination('MYKEY', collisionOptions, flowOnly), {
+    kind: 'models',
+    view: 'logout',
+    target: { kind: 'reference', ref: 'MYKEY', label: 'Other', route: 'other-provider' },
+  })
+  const builtinFlow: readonly AuthorizationFlowTarget[] = [
+    { kind: 'authorization', route: 'deepseek-official', key: 'llm-pi-ai/deepseek-official', label: 'Official OAuth', methods: [{ id: 'oauth', label: 'OAuth' }], inFlight: false },
+  ]
+  assert.deepEqual(resolveLogoutDestination('deepseek-official', PROVIDERS, builtinFlow), {
+    kind: 'models',
+    view: 'logout',
+    target: { kind: 'reference', ref: 'DEEPSEEK_API_KEY', label: 'deepseek official', route: 'deepseek-official' },
+  })
 })
 
 test('the DeepSeek Account authorization flow is excluded from generic targets (MA14)', () => {
@@ -1066,4 +1100,36 @@ test('closing the Models page while a native attempt runs cancels it and the own
   // If the owned sign-in task is still pending this test times out; the
   // assertion above plus the await is the no-hang evidence.
   assert.ok(true)
+})
+
+test('a failed credential-record refresh invalidates the old presence instead of keeping it (P2)', async () => {
+  let mode: 'ok' | 'fail' | 'empty' = 'ok'
+  const { source } = fakeSource({
+    records: [{ key: 'llm-pi-ai/anthropic', kind: 'grant' }],
+  })
+  source.storedCredentials = async () => {
+    if (mode === 'fail') throw new Error('records read failed')
+    return {
+      rows: mode === 'ok' ? [{ kind: 'record' as const, key: 'llm-pi-ai/anthropic', label: 'Anthropic', route: 'anthropic', kindHint: 'grant' }] : [],
+      recordCleanupUnavailable: false,
+      referenceReadFailures: [],
+    }
+  }
+  const page = new ModelsWorkspacePage(source, () => {}, { view: 'list' }, () => {})
+  page.setBodyHeight(24)
+  await flush()
+  const row = (): string => page.render(100).map(stripTerminalSequences).find(line => line.includes('Anthropic')) ?? ''
+  assert.match(row(), /Configured/u)
+
+  mode = 'fail'
+  page.handleInput('r')
+  await flush()
+  assert.match(row(), /Unknown/u, 'a failed read must not keep painting the old Configured snapshot')
+  assert.match(viewText(page), /could not be read/u)
+
+  mode = 'empty'
+  page.handleInput('r')
+  await flush()
+  assert.match(row(), /Not set/u)
+  assert.doesNotMatch(viewText(page), /could not be read/u)
 })
