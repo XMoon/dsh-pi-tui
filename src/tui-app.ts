@@ -108,17 +108,17 @@ export {
   transcriptContentWidth,
 } from './tui/components/transcript-leaves.ts'
 import {
+  ApprovalSheetFrame,
+  type ApprovalMouseGesture,
   type ApprovalOutcome,
   type ApprovalPromptRequest,
 } from './tui/panels/approval-dialog.ts'
-// The approval presentation contract stays importable from this facade (TS4
-// plan §26); the approval LIFECYCLE is owned by
-// `tui/interaction/approval-runtime.ts` (TS5 §8.3).
+// The approval request/outcome contract stays importable from this facade
+// (TS4 plan §26); the approval LIFECYCLE is owned by
+// `tui/interaction/approval-runtime.ts` (TS5 §8.3) and the presentation by
+// `tui/panels/approval-dialog.ts` (Phase 3C / C1-B).
 export {
-  approvalOverlayGeometry,
-  capWrappedToHeight,
   type ApprovalOutcome,
-  type ApprovalOverlayGeometry,
   type ApprovalPromptRequest,
 } from './tui/panels/approval-dialog.ts'
 import {
@@ -222,7 +222,7 @@ import { longMessageDisclosureWindow } from './tui/transcript/long-message-discl
 import { HistoryPanel } from './tui/panels/history-panel.ts'
 import type { HistorySearchSource } from './client/history/search.ts'
 import { QuestionFlow, QuestionFrame, type QuestionFlowDraft } from './tui/interaction/question.ts'
-import { ApprovalRuntime } from './tui/interaction/approval-runtime.ts'
+import { ApprovalRuntime, type PendingApproval } from './tui/interaction/approval-runtime.ts'
 import { SaveLocationPrompt, SaveLocationFrame, type SaveLocationDeps, type SaveLocationRequest, type SaveLocationResult } from './tui/interaction/save-location.ts'
 // The interaction owners' app-facing structural types stay reachable through
 // this root facade: `app/**` owners consume the stable contract here rather
@@ -715,6 +715,38 @@ function preview(text: string, lines: number): string {
 
 /** SGR mouse reports (press/drag/release/wheel) — the alt screen owns them. */
 const MOUSE_SEQUENCE = /^\x1b\[<\d+;\d+;\d+[Mm]$/
+
+/**
+ * Decode one SGR/legacy mouse WHEEL report into a 0-based cell and the signed
+ * wheel step. `undefined` for every non-wheel mouse chunk, so press/release
+ * keep flowing to the alt screen's own click machinery.
+ */
+function parseApprovalWheel(data: string): { x: number; y: number; direction: -1 | 1 } | undefined {
+  const sgr = /^\x1b\[<(\d+);(\d+);(\d+)[Mm]$/.exec(data)
+  if (sgr !== null) {
+    const button = Number.parseInt(sgr[1]!, 10)
+    if ((button & 64) === 0) return undefined
+    const direction = button & 3
+    if (direction !== 0 && direction !== 1) return undefined
+    return {
+      x: Number.parseInt(sgr[2]!, 10) - 1,
+      y: Number.parseInt(sgr[3]!, 10) - 1,
+      direction: direction === 0 ? -1 : 1,
+    }
+  }
+  if (data.length === 6 && data.startsWith('\x1b[M')) {
+    const button = data.charCodeAt(3) - 32
+    if ((button & 64) === 0) return undefined
+    const direction = button & 3
+    if (direction !== 0 && direction !== 1) return undefined
+    return {
+      x: data.charCodeAt(4) - 33,
+      y: data.charCodeAt(5) - 33,
+      direction: direction === 0 ? -1 : 1,
+    }
+  }
+  return undefined
+}
 
 /**
  * Whether one raw chunk is terminal PROTOCOL rather than user text: an SGR or
@@ -2307,11 +2339,11 @@ function viewerBackOwnerId(back: { subjectId: string; generation: number }): str
   return `viewer-back:${back.subjectId}:${back.generation}`
 }
 
-/** One Question-owned inspection gesture. The Question object identity is
- * part of the fence so a press cannot survive a question settle or transfer
- * to the normal fullscreen click path. */
-type QuestionTranscriptGesture = TranscriptCellGesture & {
-  question: QuestionState
+/** One blocking-owner inspection gesture: the owner identity is part of the
+ * fence so a press cannot survive that owner's settle or transfer to the
+ * normal fullscreen click path. */
+type ModalTranscriptGesture<T extends object> = TranscriptCellGesture & {
+  owner: T
   target: 'transcript' | 'todo'
 }
 
@@ -2692,15 +2724,14 @@ export class TuiApp {
     clearFullscreenPointerGestures: () => this.clearFullscreenPointerGestures(),
     cancelLeader: () => this.keybindings.cancelLeader(),
     projectActivity: () => this.projectActivity(),
+    requestRender: () => this.requestRender(),
     terminalSize: () => ({ columns: this.terminal.columns, rows: this.terminal.rows }),
-    showApprovalOverlay: (frame, remount) => this.showOverlayOnHost(
-      frame,
-      { width: '100%', maxHeight: '100%' },
-      { remountable: true, remount },
-    ),
-    clearOverlayRemount: (handle) => { this.overlayRemounts.delete(handle) },
-    rebindApprovalOverlay: (handle, frame) => this.rebindOverlayRaw(handle, frame, { width: '100%', maxHeight: '100%' }),
-    focusEditorSeat: () => this.focusSeatOwner(),
+    mountApprovalFrame: (pending) => this.mountApprovalSeat(pending),
+    releaseApprovalFrame: (pending) => this.releaseApprovalSeat(pending),
+    rollbackApprovalFrame: (pending) => this.rollbackApprovalSeat(pending),
+    approvalSeatRows: (expanded) => this.approvalSeatRows(expanded),
+    approvalMouseEnabled: () => this.activeScreen.mode === 'fullscreen',
+    copyApprovalArguments: (text) => this.copyWorkspaceText(text),
     // Phase 3A / PR-B: the approval is a BLOCKING owner for the optional seat
     // tenant. `beforeApprovalMount` runs AFTER the pending prompt was
     // logically committed as active and BEFORE any focus/mount callback, so
@@ -2739,7 +2770,13 @@ export class TuiApp {
   /** The Question-owned inspection press gesture. Kept separate from the
    * normal fullscreen gesture so a Question cannot leak a background press
    * into the normal click ladder after it settles. */
-  private questionTranscriptGesture: QuestionTranscriptGesture | undefined
+  private questionTranscriptGesture: ModalTranscriptGesture<QuestionState> | undefined
+  /** The press-time approval action gesture: the release must name the SAME
+   * action cell of the SAME approval frame after the sheet's painted layout
+   * (scroll / expand / resize / A→B) is re-checked. */
+  private approvalPressGesture: { frame: ApprovalSheetFrame; gesture: ApprovalMouseGesture } | undefined
+  /** The Approval-owned modal-safe transcript inspection gesture. */
+  private approvalTranscriptGesture: ModalTranscriptGesture<ApprovalSheetFrame> | undefined
   /** The press-time semantic identity of a fullscreen transcript/todo
    * cell (mouse parity): the release click may only act on the EXACT
    * identity that was pressed — an async transcript projection change
@@ -2761,6 +2798,8 @@ export class TuiApp {
     this.fullscreenCellGesture = undefined
     this.questionPressGesture = undefined
     this.questionTranscriptGesture = undefined
+    this.approvalPressGesture = undefined
+    this.approvalTranscriptGesture = undefined
   }
 
   /** Flows waiting behind the active one (FIFO; shown on settle). */
@@ -3942,6 +3981,7 @@ export class TuiApp {
     this.overlayBroker = new OverlayBroker({
       question: () => this.activeQuestions,
       saveLocation: () => this.activeSaveLocation,
+      approval: () => this.approvals.activeSuspension(),
       setFocusSeat: (seat) => this.setFocusSeat(seat),
       // The close path re-derives the final seat from the LIVE surface: a
       // restored dependent capturing overlay keeps keyboard ownership; the
@@ -5402,6 +5442,13 @@ export class TuiApp {
   /** The host's own input precedence ladder (the raw stage has already
    * run — see {@link handleInput}). */
   private handleInputCore(data: string): TuiInputListenerResult {
+    // The approval action sheet is a blocking FULLSCREEN pointer owner: a
+    // wheel over its painted body scrolls the reading viewport and every other
+    // wheel is inert behind the modal (the transcript's background wheel stays
+    // under the existing modal-inspection policy). Regular never reaches this
+    // branch: the pointer surface only exists on the alt screen.
+    const approvalWheel = this.handleApprovalWheel(data)
+    if (approvalWheel !== undefined) return approvalWheel
     // MOUSE chunks bypass the host KEY ladder (X043): with the viewport
     // listener now registered AFTER this router, the ladder sees mouse
     // sequences first — and a question/approval handler consumes EVERY
@@ -7535,8 +7582,7 @@ export class TuiApp {
     this.overlayBroker.restoreFocusAfterSwap()
     // A question survives the switch through the SHARED seat (both screens'
     // layouts hold the same editorSeat): keep its frame focused on the new
-    // screen — the flow's input routing is screen-agnostic. The approval (if
-    // any) was rebind-restored above as the same logical node.
+    // screen — the flow's input routing is screen-agnostic.
     const question = this.activeQuestions
     if (question?.frame !== undefined) {
       this.activeScreen.setFocus(question.frame)
@@ -7548,6 +7594,13 @@ export class TuiApp {
     const saveLocation = this.activeSaveLocation
     if (saveLocation?.frame !== undefined) {
       this.activeScreen.setFocus(saveLocation.frame)
+    }
+    // The approval action sheet is the SAME seat frame across the swap (no
+    // rebind node): it keeps the keyboard only when the question/save owners
+    // above are not the live blocker.
+    const approvalFrame = this.approvals.activeFrame()
+    if (approvalFrame !== undefined && question === undefined && saveLocation === undefined) {
+      this.activeScreen.setFocus(approvalFrame)
     }
     // The surface slice tracks the mode switch (plan §7.1).
     this.extensionHost?.updateSurface({ fullscreen: enabled })
@@ -12166,12 +12219,45 @@ export class TuiApp {
   private questionFrameBounds(question: QuestionState): { top: number; bottom: number } | undefined {
     const frame = question.frame
     if (frame === undefined) return undefined
+    return this.seatFrameBounds(frame)
+  }
+
+  /** The screen bounds of one seat-owned frame (Question / Approval): the
+   * bottom edge is the last painted pinned chrome below the shared editor seat
+   * and the top edge is derived from the frame's own last render. */
+  private seatFrameBounds(frame: { readonly rows: number }): { top: number; bottom: number } {
     const width = Math.max(1, this.terminal.columns)
     const footerHeight = this.footer.render(width).length
     const belowWidgetHeight = this.widgetsBelow.render(width).length
     const taskQuickHeight = this.fullscreen?.getPaintedBox(this.taskQuick)?.height ?? 0
     const bottom = this.terminal.rows - footerHeight - belowWidgetHeight - taskQuickHeight
     return { top: bottom - frame.rows, bottom }
+  }
+
+  /**
+   * Fullscreen approval wheel: a wheel over the painted body viewport scrolls
+   * the sheet; any other wheel while the blocking sheet is active is inert (the
+   * modal's pointer plane owns it). Regular never calls this — it has no
+   * approval pointer surface at all.
+   */
+  private handleApprovalWheel(data: string): TuiInputListenerResult | undefined {
+    if (this.activeScreen.mode !== 'fullscreen' || !this.approvals.isActive()) return undefined
+    const wheel = parseApprovalWheel(data)
+    if (wheel === undefined) return undefined
+    this.clearExitConfirmation()
+    const frame = this.approvals.activeFrame()
+    if (frame === undefined) return { consume: true }
+    const width = Math.max(1, this.terminal.columns)
+    if (this.terminal.columns !== frame.termColumns || this.terminal.rows !== frame.termRows) {
+      return { consume: true }
+    }
+    const bounds = this.seatFrameBounds(frame)
+    if (wheel.y < bounds.top || wheel.y >= bounds.bottom
+      || wheel.x < 2 || wheel.x >= width - 2) return { consume: true }
+    if (frame.wheelBy(wheel.direction * this.wheelScrollLines, wheel.y - bounds.top - 1, wheel.x - 2)) {
+      this.requestRender()
+    }
+    return { consume: true }
   }
 
   /** A hit identity that is safe to inspect while a response modal owns
@@ -12292,18 +12378,17 @@ export class TuiApp {
     return undefined
   }
 
-  /** Record a Question-owned inspection press against the last painted
-   * snapshot. The Question identity is stored with the gesture so a
+  /** Record one blocking-owner inspection press against the last painted
+   * snapshot. The owner identity is stored with the gesture so a
    * settle/replacement cannot hand the release to another owner. */
-  private beginQuestionTranscriptInspection(question: QuestionState, y: number): void {
-    this.questionTranscriptGesture = undefined
+  private beginModalTranscriptInspection<T extends object>(owner: T, y: number): ModalTranscriptGesture<T> | undefined {
     const snapshot = this.fullscreenPaintSnapshot
-    if (snapshot === undefined) return
-    if (this.terminal.columns !== snapshot.columns || this.terminal.rows !== snapshot.termRows) return
+    if (snapshot === undefined) return undefined
+    if (this.terminal.columns !== snapshot.columns || this.terminal.rows !== snapshot.termRows) return undefined
     const todoHit = this.fullscreenTodoHit(snapshot, y)
     if (todoHit !== undefined) {
-      this.questionTranscriptGesture = {
-        question,
+      return {
+        owner,
         ownerId: todoHit,
         row: 0,
         hitId: 'todo',
@@ -12311,15 +12396,14 @@ export class TuiApp {
         termRows: snapshot.termRows,
         target: 'todo',
       }
-      return
     }
     const cell = this.resolveFullscreenTranscriptCell(y, snapshot)
-    if (cell === undefined) return
+    if (cell === undefined) return undefined
     const painted = snapshot.rows[cell.entryIndex]!
     const hitId = painted.hits[cell.inMessage] ?? 'inert'
-    if (!this.isModalInspectionSafeHit(hitId)) return
-    this.questionTranscriptGesture = {
-      question,
+    if (!this.isModalInspectionSafeHit(hitId)) return undefined
+    return {
+      owner,
       ownerId: painted.ownerId,
       row: cell.inMessage,
       hitId,
@@ -12329,14 +12413,11 @@ export class TuiApp {
     }
   }
 
-  /** Complete a Question-owned inspection click with the same live semantic
+  /** Complete one blocking-owner inspection click with the same live semantic
    * re-check as the normal fullscreen path. The snapshot supplies what the
    * user pressed; the refreshed live row map proves that target still means
    * the same disclosure before any action runs. */
-  private completeQuestionTranscriptInspection(question: QuestionState, y: number): void {
-    const pressed = this.questionTranscriptGesture
-    this.questionTranscriptGesture = undefined
-    if (pressed === undefined || pressed.question !== question) return
+  private completeModalTranscriptInspection<T extends object>(pressed: ModalTranscriptGesture<T>, y: number): void {
     const snapshot = this.fullscreenPaintSnapshot
     if (snapshot === undefined) return
     if (this.terminal.columns !== snapshot.columns || this.terminal.rows !== snapshot.termRows) return
@@ -12366,6 +12447,28 @@ export class TuiApp {
       || pressed.row !== cell.inMessage
       || pressed.hitId !== hitId) return
     this.applyModalInspectionHit(entry, cell.entryIndex, cell.inMessage)
+  }
+
+  private beginQuestionTranscriptInspection(question: QuestionState, y: number): void {
+    this.questionTranscriptGesture = this.beginModalTranscriptInspection(question, y)
+  }
+
+  private completeQuestionTranscriptInspection(question: QuestionState, y: number): void {
+    const pressed = this.questionTranscriptGesture
+    this.questionTranscriptGesture = undefined
+    if (pressed === undefined || pressed.owner !== question) return
+    this.completeModalTranscriptInspection(pressed, y)
+  }
+
+  private beginApprovalTranscriptInspection(frame: ApprovalSheetFrame, y: number): void {
+    this.approvalTranscriptGesture = this.beginModalTranscriptInspection(frame, y)
+  }
+
+  private completeApprovalTranscriptInspection(frame: ApprovalSheetFrame, y: number): void {
+    const pressed = this.approvalTranscriptGesture
+    this.approvalTranscriptGesture = undefined
+    if (pressed === undefined || pressed.owner !== frame) return
+    this.completeModalTranscriptInspection(pressed, y)
   }
 
   /**
@@ -12404,6 +12507,27 @@ export class TuiApp {
         return
       }
       this.beginQuestionTranscriptInspection(question, y)
+      return
+    }
+    // The approval action sheet owns the modal front in fullscreen: only its
+    // LAST-PAINTED action cells are decision targets, and an outside press may
+    // name only the modal-safe transcript inspection hit (never a workflow
+    // action or an ordinary background click).
+    if (this.approvals.isActive()) {
+      this.fullscreenCellGesture = undefined
+      const frame = this.approvals.activeFrame()
+      if (frame === undefined) return
+      if (this.terminal.rows !== frame.termRows || this.terminal.columns !== frame.termColumns) return
+      const bounds = this.seatFrameBounds(frame)
+      if (y >= bounds.top && y < bounds.bottom) {
+        const width = this.terminal.columns
+        if (x >= 2 && x <= width - 3) {
+          const gesture = frame.beginMousePress(y - bounds.top - 1, x - 2)
+          if (gesture !== undefined) this.approvalPressGesture = { frame, gesture }
+        }
+        return
+      }
+      this.beginApprovalTranscriptInspection(frame, y)
       return
     }
     // Any OTHER CAPTURING overlay owns the press: no transcript / dock /
@@ -12565,16 +12689,48 @@ export class TuiApp {
       this.completeQuestionTranscriptInspection(question, y)
       return
     }
+    // Approval owns the modal front: a release inside the action sheet may run
+    // only the action segment recorded at press time of THIS SAME frame; an
+    // outside release may complete only the modal-safe inspection gesture.
+    if (this.approvals.isActive()) {
+      this.fullscreenCellGesture = undefined
+      const frame = this.approvals.activeFrame()
+      const pressed = this.approvalPressGesture
+      this.approvalPressGesture = undefined
+      if (frame === undefined) {
+        this.approvalTranscriptGesture = undefined
+        return
+      }
+      if (this.terminal.rows !== frame.termRows || this.terminal.columns !== frame.termColumns) {
+        this.approvalTranscriptGesture = undefined
+        return
+      }
+      const bounds = this.seatFrameBounds(frame)
+      const width = this.terminal.columns
+      if (y >= bounds.top && y < bounds.bottom) {
+        const gesture = pressed?.frame === frame ? pressed.gesture : undefined
+        this.approvalTranscriptGesture = undefined
+        if (x >= 2 && x <= width - 3 && gesture !== undefined) {
+          frame.completeMouseClick(gesture, y - bounds.top - 1, x - 2)
+          this.requestRender()
+        }
+        return
+      }
+      this.completeApprovalTranscriptInspection(frame, y)
+      return
+    }
+    this.approvalPressGesture = undefined
+    this.approvalTranscriptGesture = undefined
     this.questionPressGesture = undefined
     this.questionTranscriptGesture = undefined
-    // Any OTHER managed overlay (search / settings / approvals / extension
-    // overlays) owns the click: with one up, NO transcript / dock / todo
-    // interaction below is reachable — concrete rows AND the blank-row
-    // fallback stay inert behind it (plan §17/§23.7). The question frame
-    // above is the only overlay that routes clicks itself. Any pre-overlay
-    // todo/transcript gesture is dead (a cross-mode close before the
-    // release must not resurrect it on the background surface). A
-    // nonCapturing notice is non-modal and does not own the release.
+    // Any OTHER managed overlay (search / settings / extension overlays) owns
+    // the click: with one up, NO transcript / dock / todo interaction below is
+    // reachable — concrete rows AND the blank-row fallback stay inert behind it
+    // (plan §17/§23.7). The question/approval frames above are the only seat
+    // owners that route clicks themselves. Any pre-overlay todo/transcript
+    // gesture is dead (a cross-mode close before the release must not resurrect
+    // it on the background surface). A nonCapturing notice is non-modal and
+    // does not own the release.
     if (this.overlayBlocksTranscriptPointer()) {
       this.fullscreenCellGesture = undefined
       return
@@ -14955,15 +15111,115 @@ export class TuiApp {
   }
 
   /**
+   * Project one approval action sheet as the blocking editor-seat occupant:
+   * suspend the visible managed roots, install the frame, hand it the keyboard
+   * and repaint. A Question/Save owner outranks the approval; its own settle
+   * projects this frame through the live seat derivation instead (the approval
+   * frame is already built and stays answerable).
+   */
+  private mountApprovalSeat(pending: PendingApproval): void {
+    const frame = pending.frame
+    if (frame === undefined) return
+    if (this.activeQuestions !== undefined || this.activeSaveLocation !== undefined) return
+    const focusRevision = this.overlayBroker.focusTransitionRevision()
+    this.overlayBroker.suspendVisibleRoots(pending)
+    // A synchronous focus/blur callback inside the suspension may settle or
+    // replace THIS prompt; only the still-current frame may be projected.
+    if (this.approvals.activeFrame() !== frame) return
+    this.mountSeatChild()
+    if (this.approvals.activeFrame() !== frame) return
+    // A callback inside the suspension may have handed the keyboard to a NEWER
+    // managed overlay (an explicit focus or a newer capturing mount). That newer
+    // intent wins over this mount's late focus; the approval stays projected and
+    // takes the keyboard back through the broker's live seat derivation once the
+    // newer owner leaves.
+    if (this.overlayBroker.focusTransitionRevision() !== focusRevision
+      && this.overlayBroker.hasFocusedOverlay()) {
+      this.publishFocusSeat()
+      this.requestRender()
+      return
+    }
+    this.activeScreen.setFocus(frame)
+    this.publishFocusSeat()
+    this.requestRender()
+  }
+
+  /**
+   * Release an approval seat projection: re-project the LIVE occupant, reveal
+   * the roots THIS prompt still owns (or hand them to a newer blocker), and
+   * repaint. The runtime has already cleared the active slot, so the released
+   * frame can never be painted again.
+   */
+  private releaseApprovalSeat(pending: PendingApproval): void {
+    this.unprojectApprovalSeat(pending, 'approval seat release')
+  }
+
+  /** Abandon a FAILED approval presentation with the same identity-fenced
+   * seat/suspension obligations (the runtime has cleared the active slot). */
+  private rollbackApprovalSeat(pending: PendingApproval): void {
+    this.unprojectApprovalSeat(pending, 'approval seat rollback')
+  }
+
+  private unprojectApprovalSeat(pending: PendingApproval, label: string): void {
+    runSyncDisposalSteps(label, [
+      () => this.mountSeatChild(),
+      // Never steal the keyboard from an overlay a synchronous callback of this
+      // batch just focused; `seatFallbackComponent` is undefined while a newer
+      // blocking owner has no frame yet.
+      () => this.focusSeatFallback(),
+      () => this.overlayBroker.resumeSuspendedRoots(pending),
+      () => this.publishFocusSeat(),
+      () => this.requestRender(),
+    ])
+  }
+
+  /**
+   * The frame-row grant for the approval action sheet: the C1-A reading target
+   * (~60%, expanded ~80%) capped by the REAL pinned chrome so the header,
+   * footer and pinned bands keep their rows. On a fullscreen surface the last
+   * painted chrome boxes are authoritative; a regular document can scroll and
+   * only needs the percentage.
+   */
+  private approvalSeatRows(expanded: boolean): number {
+    const rows = Math.max(1, this.terminal.rows)
+    const width = Math.max(1, this.terminal.columns)
+    const target = Math.floor(rows * (expanded ? 0.8 : 0.6))
+    const painted = (component: Component): number =>
+      this.fullscreen?.getPaintedBox(component)?.height ?? 0
+    // The bottom pinned chrome always belongs to its owner (footer, widget
+    // zone, Task Quick). One transcript row is reserved on a surface tall
+    // enough to have a real transcript region.
+    const bottomChrome = this.widgetsBelow.render(width).length
+      + this.footer.render(width).length
+      + (this.fullscreen === undefined ? 0 : painted(this.taskQuick))
+    // The header is pinned on BOTH roots; the regular document must not clip
+    // it just because the seat frame grew.
+    let chrome = this.header.render(width).length + bottomChrome
+    if (this.fullscreen !== undefined) {
+      chrome += painted(this.viewerSubjectBar)
+        + painted(this.widgetsAbove) + painted(this.working)
+        + painted(this.queuePane) + painted(this.goalLine)
+        + painted(this.todoPanel) + painted(this.dock)
+    }
+    const ceiling = rows - chrome - (rows >= 12 ? 1 : 0)
+    // A small terminal still gets enough rows for the title/danger facts, one
+    // reading row and the pinned actions; the sheet's own degradation decides
+    // what to drop when even that floor cannot fit.
+    const floor = Math.min(ceiling, 8)
+    return Math.max(3, Math.min(ceiling, Math.max(floor, target)))
+  }
+
+  /**
    * Focus the LIVE seat owner as the fallback TAIL of a settle. It never
    * overwrites a keyboard owner that a synchronous callback established inside
-   * the SAME batch: a capturing overlay that took focus (or another blocking
-   * owner that opened) is the NEWER fact, and the broker restores its own
-   * owner right after. This is what keeps a pre-settle snapshot from stealing
-   * the keyboard back (Phase 3A / PR-B §B3).
+   * the SAME batch: a capturing overlay that took focus is the NEWER fact, and
+   * the broker restores its own owner right after. This is what keeps a
+   * pre-settle snapshot from stealing the keyboard back (Phase 3A / PR-B §B3).
+   * A blocking owner whose frame is not built yet yields `undefined` from the
+   * seat derivation, so this never focuses a not-yet-painted frame.
    */
   private focusSeatFallback(): void {
-    if (this.optionalSeatBlocking() || this.overlayBroker.hasFocusedOverlay()) return
+    if (this.disposed || this.overlayBroker.hasFocusedOverlay()) return
     const owner = this.seatFallbackComponent()
     if (owner === undefined) return
     this.activeScreen.setFocus(owner)
@@ -15158,21 +15414,19 @@ export class TuiApp {
   /**
    * The ONE component the physical editor seat should currently project,
    * derived from the LIVE owner (Phase 3A / PR-B): a Question frame outranks a
-   * Save Location frame, an ACTIVE and still-current optional tenant outranks
-   * the seat editor, and the latest host/plugin editor is the final fallback.
+   * Save Location frame, a live Approval action sheet (the blocking seat owner)
+   * outranks an ACTIVE optional tenant, and the latest host/plugin editor is the
+   * final fallback. An approval whose frame is not built yet returns
+   * `undefined` (a callback's late tail must not project the editor over it).
    * A PARKED, finalized or stale tenant is never returned — the seat is not a
    * place where a parked panel waits for its next key.
-   *
-   * `undefined` means a blocking owner is live but its frame is not ready
-   * (the owner commits its intent before it builds/mounts the frame): the
-   * caller must leave the current occupant alone rather than project a newer
-   * winner's tail over it.
    */
   private seatFallbackComponent(): Component | undefined {
     const question = this.activeQuestions
     if (question !== undefined) return question.frame
     const saveLocation = this.activeSaveLocation
     if (saveLocation !== undefined) return saveLocation.frame
+    if (this.approvals.isActive()) return this.approvals.activeFrame()
     const optional = this.optionalSeat
     if (optional !== undefined && optional.phase === 'active'
       && !optional.finalized && optional.isCurrent()) {
@@ -15183,8 +15437,8 @@ export class TuiApp {
 
   /**
    * Whether the seat editor (host default or plugin winner) currently owns the
-   * PHYSICAL seat projection. A live Question/Save frame or an ACTIVE optional
-   * tenant owns it instead; an approval alone does not.
+   * PHYSICAL seat projection. A live Question/Save/Approval frame or an ACTIVE
+   * optional tenant owns it instead.
    */
   private seatEditorOwnsProjection(): boolean {
     return this.seatFallbackComponent() === this.seatEditor().component
@@ -18261,9 +18515,10 @@ export class TuiApp {
         // Phase 3B / B3-A: the History seat reads the LIVE terminal geometry and
         // chrome height on every render, so a resize only has to repaint it (the
         // ordinary render funnel below does that) and drop the pointer state
-        // that described the old frame.
+        // that described the old frame. The approval sheet derives its budget
+        // from the same live geometry on every render and the frame's painted
+        // terminal identity fences stale clicks; no overlay rebind is involved.
         this.historyPanel?.resetPointerGesture()
-        this.approvals.syncGeometry()
       }
       // PR #57 review (P1): the footer's physical-line budget derives from
       // the terminal GEOMETRY, the ACTIVE SURFACE and the MEASURED chrome
@@ -19398,15 +19653,15 @@ export class TuiApp {
   /**
    * Headless-test hook: current managed-overlay graph sizes. `handles` is the
    * live logical node count, `dependents` the number of suppression edges and
-   * `suspended` the directly suspended roots under the active question. The
-   * LOGICAL graph survives a fullscreen swap (only the physical projections
-   * are rebound), so it is not cleared by the screen teardown.
+   * `suspended` the directly suspended roots under the active blocking seat
+   * owner. The LOGICAL graph survives a fullscreen swap (only the physical
+   * projections are rebound), so it is not cleared by the screen teardown.
    */
   overlayGraphState(): { handles: number; dependents: number; suspended: number } {
     return {
       handles: this.overlayBroker.graphState().handles,
       dependents: this.overlayBroker.graphState().dependents,
-      suspended: this.activeQuestions?.suspendedOverlays.size ?? 0,
+      suspended: this.overlayBroker.graphState().suspended,
     }
   }
 
@@ -22269,10 +22524,11 @@ export class TuiApp {
     return this.approvals.showPrompt(request, agentInputWait)
   }
 
-  /** Headless-test hook: the number of live approval frames (a fullscreen
-   * swap must replace, not accumulate, them). */
-  ownedApprovalFramesForTest(): number {
-    return this.approvals.ownedFramesForTest()
+  /** Headless-test hook: the live approval action-sheet frame, or undefined
+   * when no prompt is presenting one (a fullscreen swap keeps the SAME frame;
+   * a settle/A→B replacement must never leak the previous one). */
+  approvalFrameForTest(): Component | undefined {
+    return this.approvals.activeFrame()
   }
 
   /**

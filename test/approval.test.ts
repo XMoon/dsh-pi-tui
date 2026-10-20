@@ -1,6 +1,7 @@
 /**
- * Headless tests for the approval dialog: overlay rendering, y/n/esc
- * decisions, FIFO queueing, and abort withdrawal.
+ * Headless tests for the approval action sheet: the editor-seat placement,
+ * the full scrollable request body, y/n/Esc/Ctrl+C decisions, FIFO queueing,
+ * abort withdrawal, copy/expand, and the fullscreen-only pointer path.
  * @module @xmoon76/dsh-pi-tui/approval.test
  */
 
@@ -24,13 +25,26 @@ afterEach(() => {
   }
 })
 
-
-function startApp(): { vt: VirtualTerminal; app: TuiApp } {
-  const vt = new VirtualTerminal(80, 24)
-  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+function startApp(columns = 80, rows = 24): { vt: VirtualTerminal; app: TuiApp; copied: string[] } {
+  const vt = new VirtualTerminal(columns, rows)
+  const copied: string[] = []
+  const app = new TuiApp(vt, {
+    onSubmit: () => {},
+    onExit: () => {},
+    runOwned: (label, task, options) => {
+      void Promise.resolve()
+        .then(() => task())
+        .then(result => options.onResult?.(result), error => options.onError?.(error))
+    },
+  }, {
+    copySelection: async (text: string) => {
+      copied.push(text)
+      return true
+    },
+  })
   app.start()
   startedApps.add(app)
-  return { vt, app }
+  return { vt, app, copied }
 }
 
 /** The visible viewport joined for substring assertions. */
@@ -39,124 +53,80 @@ async function viewport(vt: VirtualTerminal): Promise<string> {
   return vt.getViewport().join('\n')
 }
 
-test('approval prompt shows an overlay describing the tool', async () => {
-  const { vt, app } = startApp()
-  const decision = app.showApprovalPrompt({ toolName: 'bash', reason: 'run a command' })
-  const view = await viewport(vt)
-  assert.ok(view.includes('Approve bash?'), `dialog missing:\n${view}`)
-  assert.ok(view.includes('run a command'), `reason missing:\n${view}`)
-  assert.ok(view.includes('[y] allow once'), `key hints missing:\n${view}`)
-  assert.ok(decision instanceof Promise)
-})
-
-/** The dialog's user-visible invariant: both borders, the key hints, and a
- * height within the overlay's maxHeight must survive whatever content is
- * shown (the 80x24 test terminal yields maxHeight 16). */
-function assertDialogIntact(view: string): void {
-  assert.ok(view.includes('╭'), `top border missing:\n${view}`)
-  assert.ok(view.includes('╰'), `bottom border missing (dialog sliced past maxHeight):\n${view}`)
-  assert.ok(view.includes('[y] allow once'), `key hints missing:\n${view}`)
+/** The painted frame bounds (0-based viewport rows). */
+function frameBounds(view: string): { top: number; bottom: number } | undefined {
   const lines = view.split('\n')
   const top = lines.findIndex(line => line.includes('╭'))
   const bottom = lines.findIndex(line => line.includes('╰'))
-  assert.ok(top >= 0 && bottom >= top, `frame bounds not found:\n${view}`)
-  assert.ok(bottom - top + 1 <= 16, `frame taller than maxHeight:\n${view}`)
+  return top >= 0 && bottom >= top ? { top, bottom } : undefined
 }
 
-test('approval prompt with long args and reason keeps the frame and key hints intact', async () => {
-  const { vt, app } = startApp()
-  const decision = app.showApprovalPrompt({
-    toolName: 'edit_file',
-    arguments: '#!/usr/bin/env bash\n' + 'x'.repeat(240),
-    reason: 'the sandbox denied the previous write and the model retried '.repeat(8),
-  })
-  const view = await viewport(vt)
-  assertDialogIntact(view)
-  assert.ok(view.includes('more line'), `overflow marker missing:\n${view}`)
-  vt.sendInput('n')
-  assert.equal(await decision, 'rejected')
-})
+/** The user-visible sheet invariant: the three decision actions and both
+ * borders survive whatever content is shown. */
+function assertSheetIntact(view: string): void {
+  assert.ok(view.includes('Approve '), `title missing:\n${view}`)
+  assert.ok(view.includes('[y] Allow once'), `allow action missing:\n${view}`)
+  assert.ok(view.includes('[n] Reject'), `reject action missing:\n${view}`)
+  assert.ok(view.includes('[Esc] Cancel'), `cancel action missing:\n${view}`)
+  const bounds = frameBounds(view)
+  assert.ok(bounds !== undefined, `frame borders missing:\n${view}`)
+}
 
-test('approval dialog rebuilds original content across a wide-to-narrow-to-wide resize', async () => {
-  const { vt, app } = startApp()
-  vt.resize(120, 30)
-  await viewport(vt)
-  const marker = 'WIDE_APPROVAL_CONTENT_RESTORED'
-  const decision = app.showApprovalPrompt({
-    toolName: 'bash',
-    reason: 'wide reason '.repeat(8) + marker,
-    arguments: 'arg one\narg two\narg three',
-  })
-  let view = await viewport(vt)
-  assert.ok(view.includes(marker), `wide approval content missing before shrink:\n${view}`)
-  vt.resize(50, 10)
-  view = await viewport(vt)
-  assertDialogIntact(view)
-  vt.resize(120, 30)
-  view = await viewport(vt)
-  assert.ok(view.includes(marker), `wide approval content was not restored:\n${view}`)
-  vt.sendInput('n')
-  assert.equal(await decision, 'rejected')
-})
+/** One 1-based SGR cell of a painted action label. */
+function actionCell(view: string, label: string): { x: number; y: number } {
+  const lines = view.split('\n')
+  for (let index = 0; index < lines.length; index += 1) {
+    const column = lines[index]!.indexOf(label)
+    if (column !== -1) return { x: column + 1, y: index + 1 }
+  }
+  throw new Error(`action label not painted: ${label}\n${view}`)
+}
 
-test('approval dialog reflows a narrow-open prompt when the terminal grows', async () => {
-  const { vt, app } = startApp()
-  vt.resize(50, 10)
-  await viewport(vt)
-  const marker = 'NARROW_OPEN_APPROVAL_RESTORED'
-  const decision = app.showApprovalPrompt({
-    toolName: 'edit_file',
-    reason: 'narrow reason '.repeat(24) + marker,
-    arguments: 'first argument\nsecond argument',
-  })
-  let view = await viewport(vt)
-  assertDialogIntact(view)
-  vt.resize(120, 30)
-  view = await viewport(vt)
-  assert.ok(view.includes(marker), `grown approval content missing:\n${view}`)
-  vt.sendInput('n')
-  assert.equal(await decision, 'rejected')
-})
+function press(vt: VirtualTerminal, cell: { x: number; y: number }): void {
+  vt.sendInput(`\x1b[<0;${cell.x};${cell.y}M`)
+}
 
-test('dangerous approval with long content keeps hints and both borders', async () => {
+function release(vt: VirtualTerminal, cell: { x: number; y: number }): void {
+  vt.sendInput(`\x1b[<0;${cell.x};${cell.y}m`)
+}
+
+function click(vt: VirtualTerminal, cell: { x: number; y: number }): void {
+  press(vt, cell)
+  release(vt, cell)
+}
+
+function wheel(vt: VirtualTerminal, direction: 'up' | 'down', cell: { x: number; y: number }): void {
+  vt.sendInput(`\x1b[<${direction === 'up' ? 64 : 65};${cell.x};${cell.y}M`)
+}
+
+const LONG_ARGUMENTS = Array.from({ length: 120 }, (_, index) => `arg-${String(index).padStart(3, '0')}`).join('\n')
+
+test('approval sheet shows the tool, danger fact, complete reason/arguments and pinned actions', async () => {
   const { vt, app } = startApp()
   const decision = app.showApprovalPrompt({
     toolName: 'bash',
+    reason: 'update the deployment config',
+    arguments: '{"command":"deploy --prod"}',
     danger: true,
-    arguments: 'rm -rf /tmp/artifact'.repeat(30),
-    reason: 'cleanup after a failed build '.repeat(20),
   })
   const view = await viewport(vt)
-  assert.ok(view.includes('DANGEROUS COMMAND'), `danger notice missing:\n${view}`)
-  assertDialogIntact(view)
+  assertSheetIntact(view)
+  assert.ok(view.includes('Approve bash?'), `title missing:\n${view}`)
+  assert.ok(view.includes('Dangerous command'), `danger fact missing:\n${view}`)
+  assert.ok(view.includes('update the deployment config'), `reason missing:\n${view}`)
+  assert.ok(view.includes('"deploy --prod"'), `arguments missing:\n${view}`)
   vt.sendInput('n')
   assert.equal(await decision, 'rejected')
 })
 
-test('a long single-line argument preview is fully shown when it fits the budget', async () => {
-  // 300 chars wrap to 5 rows at the 72-col content width — inside the
-  // preview budget. The old 240-char '…' pre-cap used to cut it silently
-  // (an uncounted truncation); the marker helper owns truncation now.
-  const { vt, app } = startApp()
-  const decision = app.showApprovalPrompt({ toolName: 'bash', arguments: 'a'.repeat(300) })
-  const view = await viewport(vt)
-  assert.ok(!view.includes('…'), `preview must not show a bare ellipsis:\n${view}`)
-  const stripAnsi = (s: string): string => s.replace(/\x1b\[[0-9;]*m/g, '')
-  const body = view.split('\n').map(l => stripAnsi(l).replace(/[│╭╮╰╯─ ]/g, '')).join('')
-  assert.ok(body.includes('a'.repeat(300)), `preview must show all 300 chars:\n${view}`)
-  assertDialogIntact(view)
-  vt.sendInput('n')
-  assert.equal(await decision, 'rejected')
-})
-
-test('y allows once and closes the dialog', async () => {
+test('y allows once and closes the sheet', async () => {
   const { vt, app } = startApp()
   const decision = app.showApprovalPrompt({ toolName: 'bash' })
   await viewport(vt)
   vt.sendInput('y')
   assert.equal(await decision, 'allowed-once')
   const view = await viewport(vt)
-  assert.ok(!view.includes('Approve bash'), `dialog still visible:\n${view}`)
+  assert.ok(!view.includes('Approve bash'), `sheet still visible:\n${view}`)
 })
 
 test('n rejects and escape cancels', async () => {
@@ -210,7 +180,7 @@ test('ctrl+c cancels the prompt like escape', async () => {
   vt.sendInput('\x03') // ctrl+c
   assert.equal(await decision, 'cancelled')
   const view = await viewport(vt)
-  assert.ok(!view.includes('Approve bash'), `dialog still visible:\n${view}`)
+  assert.ok(!view.includes('Approve bash'), `sheet still visible:\n${view}`)
 })
 
 test('prompts queue FIFO and consume all keys while showing', async () => {
@@ -221,7 +191,7 @@ test('prompts queue FIFO and consume all keys while showing', async () => {
   vt.sendInput('y')
   assert.equal(await first, 'allowed-once')
   const secondView = await viewport(vt)
-  assert.ok(secondView.includes('Approve fs'), `second dialog missing:\n${secondView}`)
+  assert.ok(secondView.includes('Approve fs'), `second sheet missing:\n${secondView}`)
   vt.sendInput('n')
   assert.equal(await second, 'rejected')
 })
@@ -233,8 +203,7 @@ test('an aborted signal withdraws the prompt as cancelled', async () => {
   controller.abort()
   assert.equal(await decision, 'cancelled')
   const view = await viewport(vt)
-  assert.ok(!view.includes('Approve bash'), `dialog still visible:\n${view}`)
-  void vt
+  assert.ok(!view.includes('Approve bash'), `sheet still visible:\n${view}`)
 })
 
 test('an already-aborted signal settles immediately without hanging', async () => {
@@ -242,11 +211,9 @@ test('an already-aborted signal settles immediately without hanging', async () =
   const controller = new AbortController()
   controller.abort()
   const decision = app.showApprovalPrompt({ toolName: 'bash', signal: controller.signal })
-  // Must settle, never hang: a cancelled request needs no dialog at all.
   assert.equal(await decision, 'cancelled')
   const view = await viewport(vt)
-  assert.ok(!view.includes('Approve bash'), `dialog must not appear:\n${view}`)
-  void vt
+  assert.ok(!view.includes('Approve bash'), `sheet must not appear:\n${view}`)
 })
 
 test('a queued prompt aborted while waiting never reaches the screen', async () => {
@@ -255,14 +222,12 @@ test('a queued prompt aborted while waiting never reaches the screen', async () 
   const secondController = new AbortController()
   const second = app.showApprovalPrompt({ toolName: 'fs', signal: secondController.signal })
   await viewport(vt)
-  // The turn is cancelled while the fs prompt is still queued: its signal
-  // aborts, but no stale dialog may pop after the first prompt settles.
   secondController.abort()
   vt.sendInput('y')
   assert.equal(await first, 'allowed-once')
   assert.equal(await second, 'cancelled')
   const view = await viewport(vt)
-  assert.ok(!view.includes('Approve fs'), `stale queued dialog popped:\n${view}`)
+  assert.ok(!view.includes('Approve fs'), `stale queued sheet popped:\n${view}`)
 })
 
 test('editor input is blocked while a prompt is showing', async () => {
@@ -270,7 +235,6 @@ test('editor input is blocked while a prompt is showing', async () => {
   const submitted: string[] = []
   const app = new TuiApp(vt, { onSubmit: (text) => submitted.push(text), onExit: () => {} })
   app.start()
-
   startedApps.add(app)
   const decision = app.showApprovalPrompt({ toolName: 'bash' })
   await viewport(vt)
@@ -282,186 +246,393 @@ test('editor input is blocked while a prompt is showing', async () => {
   assert.equal(await decision, 'allowed-once')
 })
 
-test('todo summary reflects active and completed items in the dock', async () => {
+test('the whole argument body is reachable: End reaches the real tail (no six-line preview cap)', async () => {
   const { vt, app } = startApp()
-  app.setTodoSummary([{ content: 'fix the tests', status: 'in_progress' }, { content: 'ship it', status: 'pending' }])
+  const decision = app.showApprovalPrompt({ toolName: 'bash', arguments: LONG_ARGUMENTS })
   let view = await viewport(vt)
-  assert.ok(view.includes('2 active · fix the tests'), `dock missing:
-${view}`)
-  app.setTodoSummary([{ content: 'fix the tests', status: 'completed' }])
+  assert.ok(view.includes('arg-000'), `head missing:\n${view}`)
+  assert.ok(!view.includes('arg-119'), `the tail must not start in view:\n${view}`)
+  vt.sendInput('\x1b[F') // End
   view = await viewport(vt)
-  assert.ok(view.includes('1 todo done'), `dock missing:
-${view}`)
-  app.setTodoSummary([])
-  view = await viewport(vt)
-  assert.ok(view.includes('dsh-pi-tui'), `header missing:
-${view}`)
+  assert.ok(view.includes('arg-119'), `End must reach the real tail:\n${view}`)
+  assert.ok(view.includes('rows '), `a scroll fact must be shown:\n${view}`)
+  vt.sendInput('n')
+  assert.equal(await decision, 'rejected')
 })
 
-test('approval prompt previews arguments and flags dangerous commands', async () => {
+test('long CJK and unbroken words keep a reachable tail', async () => {
   const { vt, app } = startApp()
+  const cjk = app.showApprovalPrompt({
+    toolName: 'bash',
+    arguments: `${'超长中文参数'.repeat(120)}CJK_TAIL_MARKER`,
+  })
+  let view = await viewport(vt)
+  assert.ok(!view.includes('CJK_TAIL_MARKER'), `the CJK tail must not start in view:\n${view}`)
+  vt.sendInput('\x1b[F')
+  view = await viewport(vt)
+  assert.ok(view.includes('CJK_TAIL_MARKER'), `End must reach the CJK tail:\n${view}`)
+  vt.sendInput('n')
+  assert.equal(await cjk, 'rejected')
+
+  const word = app.showApprovalPrompt({
+    toolName: 'bash',
+    arguments: `${'W'.repeat(2000)}WORD_TAIL_MARKER`,
+  })
+  view = await viewport(vt)
+  assert.ok(!view.includes('WORD_TAIL_MARKER'), `the unbroken-word tail must not start in view:\n${view}`)
+  vt.sendInput('\x1b[F')
+  view = await viewport(vt)
+  assert.ok(view.includes('WORD_TAIL_MARKER'), `End must reach the unbroken-word tail:\n${view}`)
+  vt.sendInput('n')
+  assert.equal(await word, 'rejected')
+})
+
+test('PgDn/Home and the expanded reading size adjust the unified body viewport', async () => {
+  const { vt, app } = startApp()
+  const decision = app.showApprovalPrompt({ toolName: 'bash', arguments: LONG_ARGUMENTS })
+  let view = await viewport(vt)
+  const collapsed = frameBounds(view)
+  assert.ok(collapsed !== undefined)
+  vt.sendInput('\x1b[6~') // PageDown
+  view = await viewport(vt)
+  assert.ok(!view.includes('arg-000'), `PageDown must leave the head:\n${view}`)
+  vt.sendInput('\x1b[H') // Home
+  view = await viewport(vt)
+  assert.ok(view.includes('arg-000'), `Home must return to the head:\n${view}`)
+  vt.sendInput('e')
+  view = await viewport(vt)
+  const expanded = frameBounds(view)
+  assert.ok(expanded !== undefined)
+  assert.ok(expanded.bottom - expanded.top > collapsed.bottom - collapsed.top,
+    `'e' must grow the reading region:\n${view}`)
+  vt.sendInput('n')
+  assert.equal(await decision, 'rejected')
+})
+
+test('c copies the exact received argument bytes and empty arguments advertise no Copy', async () => {
+  const { vt, app, copied } = startApp()
+  const raw = '{"command":"rm -rf /tmp/x"}\nline\t<an\u001b[31mred\u001b]0;pwned\u0007>'
+  const decision = app.showApprovalPrompt({ toolName: 'bash', arguments: raw })
+  const view = await viewport(vt)
+  assert.ok(view.includes('[c] Copy args'), `copy action missing:\n${view}`)
+  vt.sendInput('c')
+  await vt.waitForRender()
+  await Promise.resolve()
+  await Promise.resolve()
+  assert.deepEqual(copied, [raw], 'Copy must carry the original bytes, not the display projection')
+  assert.ok(!view.includes('pwned'), `display leaked the OSC payload:\n${view}`)
+  vt.sendInput('n')
+  assert.equal(await decision, 'rejected')
+
+  const noArguments = app.showApprovalPrompt({ toolName: 'bash' })
+  const noArgumentsView = await viewport(vt)
+  assert.ok(!noArgumentsView.includes('[c] Copy'), `an empty request must not advertise Copy:\n${noArgumentsView}`)
+  vt.sendInput('c')
+  await vt.waitForRender()
+  await Promise.resolve()
+  assert.equal(copied.length, 1, 'no Copy delivery without arguments')
+  vt.sendInput('y')
+  assert.equal(await noArguments, 'allowed-once')
+})
+
+test('responsive layouts keep the title, reading row and pinned actions visible', async () => {
+  for (const [columns, rows] of [[44, 24], [80, 24], [120, 40], [200, 60]] as const) {
+    const { vt, app } = startApp(columns, rows)
+    const decision = app.showApprovalPrompt({
+      toolName: 'bash',
+      reason: 'review the request',
+      arguments: LONG_ARGUMENTS,
+      danger: true,
+    })
+    const view = await viewport(vt)
+    assertSheetIntact(view)
+    assert.ok(view.includes('review the request'), `${columns}x${rows} reason missing:\n${view}`)
+    assert.ok(view.includes('arg-'), `${columns}x${rows} argument reading row missing:\n${view}`)
+    vt.sendInput('n')
+    assert.equal(await decision, 'rejected')
+    app.dispose()
+    startedApps.delete(app)
+  }
+})
+
+test('a short surface degrades to the title/danger, one reading row, actions and a resize fact', async () => {
+  const { vt, app } = startApp(80, 8)
   const decision = app.showApprovalPrompt({
     toolName: 'bash',
-    arguments: 'rm -rf /home/user/backup',
+    reason: 'line one\nline two',
+    arguments: LONG_ARGUMENTS,
     danger: true,
   })
   const view = await viewport(vt)
-  assert.ok(view.includes('DANGEROUS'), `danger banner missing:\n${view}`)
-  assert.ok(view.includes('rm -rf /home/user/backup'), `argument preview missing:\n${view}`)
-  vt.sendInput('y')
-  assert.equal(await decision, 'allowed-once')
+  assertSheetIntact(view)
+  assert.ok(view.includes('Dangerous command'), `danger fact missing:\n${view}`)
+  assert.ok(view.includes('Reason: line one'), `one real reading row missing:\n${view}`)
+  assert.ok(view.includes('Resize to inspect more'), `resize fact missing:\n${view}`)
+  vt.sendInput('n')
+  assert.equal(await decision, 'rejected')
 })
 
-test('approval prompt truncates long argument previews to six lines', async () => {
-  const { vt, app } = startApp()
-  const lines = Array.from({ length: 12 }, (_, i) => `line-${i}`).join('\n')
-  app.showApprovalPrompt({ toolName: 'bash', arguments: lines })
-  const view = await viewport(vt)
-  assert.ok(view.includes('line-0'), `preview start missing:\n${view}`)
-  assert.ok(!view.includes('line-11'), `preview not truncated:\n${view}`)
-})
-
-test('approval dialog fits narrow terminals: hints and bottom border survive', async () => {
-  // The reported bug: on a ~62-col terminal the fixed 60-wide box left
-  // base-content slivers glued to the border AND the maxHeight slice cut
-  // the key hints and the bottom border. The dialog now spans the full
-  // width and budgets its height so the hints always render.
-  const vt = new VirtualTerminal(62, 17)
-  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
-  app.start()
-
-  startedApps.add(app)
-  const args = '{"content":"# dsh-pi-tui documentation\\n\\nThis directory is the home for everything that needs more than a paragraph:\\ndesign rationale, hard-won contracts, operational procedures, and measured\\ndata. The root `AGENTS.md` stays the *operati…'
-  const decision = app.showApprovalPrompt({
-    toolName: 'write',
-    arguments: args,
-    reason: 'escalate sandbox to workspace-write: 用户要求整理重构 docs/ 与 AGENTS.md\n需要写入新文档和改写现有文档',
-  })
-  const view = await viewport(vt)
-  const lines = view.split('\n')
-  const top = lines.findIndex(line => line.includes('╭'))
-  assert.ok(top >= 0, `dialog top border missing:\n${view}`)
-  assert.ok(lines[top]!.startsWith('╭'), `border must start at column 0 (no base-content sliver):\n${view}`)
-  assert.ok(view.includes('[y] allow once   [n] reject   [esc/ctrl+c] cancel'), `key hints sliced off:\n${view}`)
-  assert.ok(view.includes('╰'), `bottom border sliced off:\n${view}`)
-  assert.ok(view.includes('Approve write?'), `title missing:\n${view}`)
-  assert.ok(view.includes('escalate sandbox to workspace-write'), `reason missing:\n${view}`)
-  vt.sendInput('y')
-  assert.equal(await decision, 'allowed-once')
-})
-
-test('approval dialog degrades gracefully on very small terminals', async () => {
-  const vt = new VirtualTerminal(40, 12)
-  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
-  app.start()
-
-  startedApps.add(app)
+test('fullscreen 80x8 paints a real decision cell and keeps the resize fact', async () => {
+  const { vt, app } = startApp(80, 8)
+  app.setFullscreen(true)
+  await vt.waitForRender()
   const decision = app.showApprovalPrompt({
     toolName: 'bash',
-    arguments: 'rm -rf /tmp/whatever --force --recursive',
-    reason: 'a reason that should still fit',
+    reason: 'tiny pointer decision',
+    arguments: LONG_ARGUMENTS,
+    danger: true,
   })
   const view = await viewport(vt)
-  assert.ok(view.includes('[y] allow once'), `key hints sliced off:\n${view}`)
-  assert.ok(view.includes('╰'), `bottom border sliced off:\n${view}`)
-  assert.ok(view.includes('Approve bash?'), `title missing:\n${view}`)
-  assert.ok(view.includes('a reason that should still fit'), `reason missing:\n${view}`)
-  vt.sendInput('n')
-  assert.equal(await decision, 'rejected')
-})
-
-test('a long approval reason is capped so the key hints survive', async () => {
-  const vt = new VirtualTerminal(62, 17)
-  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
-  app.start()
-
-  startedApps.add(app)
-  const reason = Array.from({ length: 12 }, (_, i) => `reason line ${i}`).join('\n')
-  const decision = app.showApprovalPrompt({ toolName: 'bash', reason })
-  const view = await viewport(vt)
-  assert.ok(view.includes('[y] allow once'), `key hints sliced off:\n${view}`)
-  assert.ok(view.includes('╰'), `bottom border sliced off:\n${view}`)
-  assert.ok(view.includes('reason line 0'), `reason start missing:\n${view}`)
-  assert.ok(!view.includes('reason line 11'), `reason must be capped:\n${view}`)
-  vt.sendInput('\x1b') // escape
-  assert.equal(await decision, 'cancelled')
-})
-
-test('long single-line arguments cannot push the hints off a small terminal', async () => {
-  // The height budget must count WRAPPED rows: three 70-char argument
-  // lines at a 32-col content width wrap to ~9 display rows, so a raw-line
-  // budget would silently slice the hints and the bottom border.
-  const vt = new VirtualTerminal(40, 12)
-  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
-  app.start()
-
-  startedApps.add(app)
-  const lines = Array.from({ length: 3 }, () => 'x'.repeat(70)).join('\n')
-  const decision = app.showApprovalPrompt({ toolName: 'bash', arguments: lines })
-  const view = await viewport(vt)
-  assert.ok(view.includes('[y] allow once'), `key hints sliced off:\n${view}`)
-  assert.ok(view.includes('╰'), `bottom border sliced off:\n${view}`)
-  assert.ok(view.includes('Approve bash?'), `title missing:\n${view}`)
-  vt.sendInput('y')
+  assertSheetIntact(view)
+  assert.ok(view.includes('Dangerous command'), `danger fact missing:\n${view}`)
+  assert.ok(view.includes('Resize to inspect more'), `resize fact missing:\n${view}`)
+  click(vt, actionCell(view, '[y] Allow once'))
   assert.equal(await decision, 'allowed-once')
 })
 
-test('a long single-line reason is wrap-cropped so the hints survive', async () => {
-  // One 200-char reason line wraps to ~7 rows at a 32-col content width —
-  // the budget must crop it (with a `... N more` marker) instead of losing
-  // the hints.
-  const vt = new VirtualTerminal(40, 12)
-  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
-  app.start()
-
-  startedApps.add(app)
-  const reason = 'y'.repeat(200)
-  const decision = app.showApprovalPrompt({ toolName: 'bash', reason })
-  const view = await viewport(vt)
-  assert.ok(view.includes('[y] allow once'), `key hints sliced off:\n${view}`)
-  assert.ok(view.includes('╰'), `bottom border sliced off:\n${view}`)
-  assert.ok(view.includes('more line'), `truncation marker missing:\n${view}`)
-  vt.sendInput('n')
-  assert.equal(await decision, 'rejected')
-})
-
-test('danger on a tiny terminal drops the reason, never the hints', async () => {
-  // rows=10 -> maxHeight = max(8, min(16, 8)) = 8; the danger banner fills
-  // the fixed chrome (7 + 1), leaving ZERO rows for the reason — it must be
-  // skipped entirely (a stray '…' row would overflow and slice the border).
-  const vt = new VirtualTerminal(40, 10)
-  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
-  app.start()
-
-  startedApps.add(app)
-  const decision = app.showApprovalPrompt({ toolName: 'bash', reason: 'dangerous thing', danger: true })
-  const view = await viewport(vt)
-  assert.ok(view.includes('DANGEROUS'), `danger banner missing:\n${view}`)
-  assert.ok(view.includes('[y] allow once'), `key hints sliced off:\n${view}`)
-  assert.ok(view.includes('╰'), `bottom border sliced off:\n${view}`)
-  vt.sendInput('n')
-  assert.equal(await decision, 'rejected')
-})
-
-test('hostile approval content cannot inject a fake hint line or drop the chrome', async () => {
+test('hostile approval content cannot inject terminal control or fake an action row', async () => {
   const { vt, app } = startApp()
   const decision = app.showApprovalPrompt({
     toolName: 'ba\u001b[31msh\u001b]0;PWNED\u0007',
-    reason: 'oops\r[y] allow once\u009b2J',
+    reason: 'oops\r[y] Allow once\u009b2J',
     arguments: 'arg\u001b[2Jone\narg\u001b]52;c;YXR0YWNr\u0007two',
   })
   const view = await viewport(vt)
-  assertDialogIntact(view)
+  assertSheetIntact(view)
   const stream = vt.writes.join('')
   assert.ok(!stream.includes('PWNED'), 'the tool-name OSC payload never reaches the terminal stream')
   assert.ok(!stream.includes('YXR0YWNr'), 'the argument OSC payload never reaches the terminal stream')
   assert.ok(!stream.includes('\u009b'), 'no raw C1 byte reaches the terminal stream')
   assert.ok(!view.includes('\u001b'), 'the painted view carries no raw ESC')
-  // The CR could not start a new physical row: the injected text stays inline
-  // with the reason that carried it, so it can never impersonate the hint row.
   const reasonRow = view.split('\n').find(line => line.includes('oops'))
   assert.ok(reasonRow !== undefined, `the reason row is painted:\n${view}`)
-  assert.ok(reasonRow!.includes('[y] allow once'), `the CR folded into the SAME row:\n${view}`)
+  assert.ok(reasonRow!.includes('[y] Allow once'), 'the CR folded into the SAME row and could not impersonate an action')
   vt.sendInput('n')
   assert.equal(await decision, 'rejected')
+})
+
+test('fullscreen action buttons settle through the real press/release path', async () => {
+  const { vt, app } = startApp()
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  for (const [label, expected] of [
+    ['[y] Allow once', 'allowed-once'],
+    ['[n] Reject', 'rejected'],
+    ['[Esc] Cancel', 'cancelled'],
+  ] as const) {
+    const decision = app.showApprovalPrompt({ toolName: 'bash', reason: 'pointer decision' })
+    const view = await viewport(vt)
+    click(vt, actionCell(view, label))
+    assert.equal(await decision, expected)
+  }
+})
+
+test('fullscreen clicks are fenced: wrong release, blank press and A→B cannot settle', async () => {
+  const { vt, app } = startApp()
+  app.setFullscreen(true)
+  await vt.waitForRender()
+
+  // Press Allow, release Reject: no decision may run.
+  let decision = app.showApprovalPrompt({ toolName: 'bash', reason: 'press mismatch' })
+  let view = await viewport(vt)
+  const allow = actionCell(view, '[y] Allow once')
+  const reject = actionCell(view, '[n] Reject')
+  press(vt, allow)
+  release(vt, reject)
+  await vt.waitForRender()
+  let settled = false
+  void decision.then(() => { settled = true })
+  await Promise.resolve()
+  assert.equal(settled, false, 'a press on Allow + release on Reject must not settle')
+  vt.sendInput('y')
+  assert.equal(await decision, 'allowed-once')
+
+  // Press a blank title cell, release Allow: inert.
+  decision = app.showApprovalPrompt({ toolName: 'bash', reason: 'blank press' })
+  view = await viewport(vt)
+  const blank = { x: 5, y: (frameBounds(view)?.top ?? 0) + 2 }
+  const allow2 = actionCell(view, '[y] Allow once')
+  press(vt, blank)
+  release(vt, allow2)
+  await vt.waitForRender()
+  settled = false
+  void decision.then(() => { settled = true })
+  await Promise.resolve()
+  assert.equal(settled, false, 'a blank-cell press must not transfer to Allow')
+  vt.sendInput('n')
+  assert.equal(await decision, 'rejected')
+
+  // Press Allow on A, abort A, B takes the seat, release the A coordinates.
+  const controller = new AbortController()
+  const first = app.showApprovalPrompt({ toolName: 'bash', reason: 'A', signal: controller.signal })
+  const second = app.showApprovalPrompt({ toolName: 'fs', reason: 'B' })
+  view = await viewport(vt)
+  const allowA = actionCell(view, '[y] Allow once')
+  press(vt, allowA)
+  controller.abort()
+  assert.equal(await first, 'cancelled')
+  await vt.waitForRender()
+  release(vt, allowA)
+  await vt.waitForRender()
+  settled = false
+  void second.then(() => { settled = true })
+  await Promise.resolve()
+  assert.equal(settled, false, 'an A press released after B took the seat must not approve B')
+  const secondView = await viewport(vt)
+  click(vt, actionCell(secondView, '[n] Reject'))
+  assert.equal(await second, 'rejected')
+})
+
+test('a fullscreen press is invalidated by an expand or a resize before release', async () => {
+  const { vt, app } = startApp()
+  app.setFullscreen(true)
+  await vt.waitForRender()
+
+  // Expand between press and release.
+  let decision = app.showApprovalPrompt({ toolName: 'bash', arguments: LONG_ARGUMENTS })
+  let view = await viewport(vt)
+  let allow = actionCell(view, '[y] Allow once')
+  press(vt, allow)
+  vt.sendInput('e')
+  await vt.waitForRender()
+  view = await viewport(vt)
+  allow = actionCell(view, '[y] Allow once')
+  release(vt, allow)
+  await vt.waitForRender()
+  let settled = false
+  void decision.then(() => { settled = true })
+  await Promise.resolve()
+  assert.equal(settled, false, 'an expand between press and release must invalidate the click')
+  vt.sendInput('n')
+  assert.equal(await decision, 'rejected')
+
+  // Resize + repaint between press and release.
+  decision = app.showApprovalPrompt({ toolName: 'bash', arguments: LONG_ARGUMENTS })
+  view = await viewport(vt)
+  press(vt, actionCell(view, '[y] Allow once'))
+  vt.resize(100, 32)
+  await vt.waitForRender()
+  view = await vt.getViewport().join('\n')
+  release(vt, actionCell(view, '[y] Allow once'))
+  await vt.waitForRender()
+  settled = false
+  void decision.then(() => { settled = true })
+  await Promise.resolve()
+  assert.equal(settled, false, 'a resize between press and release must invalidate the click')
+  vt.sendInput('n')
+  assert.equal(await decision, 'rejected')
+})
+
+test('regular mode has no approval mouse action path; the terminal still keeps its own behavior', async () => {
+  const { vt, app } = startApp()
+  const decision = app.showApprovalPrompt({ toolName: 'bash', reason: 'regular is keyboard only' })
+  const view = await viewport(vt)
+  click(vt, actionCell(view, '[y] Allow once'))
+  await vt.waitForRender()
+  let settled = false
+  void decision.then(() => { settled = true })
+  await Promise.resolve()
+  assert.equal(settled, false, 'a regular-surface SGR click must not approve')
+  wheel(vt, 'down', { x: 5, y: (frameBounds(view)?.top ?? 0) + 3 })
+  await vt.waitForRender()
+  assert.equal(settled, false)
+  vt.sendInput('n')
+  assert.equal(await decision, 'rejected')
+})
+
+test('fullscreen wheel scrolls the painted body only', async () => {
+  const { vt, app } = startApp()
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  const decision = app.showApprovalPrompt({ toolName: 'bash', arguments: LONG_ARGUMENTS })
+  let view = await viewport(vt)
+  assert.ok(view.includes('arg-000'), `head missing:\n${view}`)
+  const bounds = frameBounds(view)
+  assert.ok(bounds !== undefined)
+  const bodyCell = { x: 5, y: bounds.top + 4 }
+  for (let index = 0; index < 3; index += 1) wheel(vt, 'down', bodyCell)
+  view = await viewport(vt)
+  assert.ok(!view.includes('arg-000'), `wheel over the body must scroll it:\n${view}`)
+  const afterScroll = frameBounds(view)
+  assert.ok(afterScroll !== undefined)
+  // A wheel over the action bar does not scroll the approval body.
+  const beforeActionWheel = view
+  wheel(vt, 'down', { x: 5, y: afterScroll.bottom })
+  view = await viewport(vt)
+  assert.equal(view, beforeActionWheel, 'a wheel outside the body must not scroll the sheet')
+  vt.sendInput('n')
+  assert.equal(await decision, 'rejected')
+})
+
+test('fullscreen Copy/Expand actions are clickable and use the painted target', async () => {
+  const { vt, app, copied } = startApp()
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  const raw = 'line one\nline two'
+  const decision = app.showApprovalPrompt({ toolName: 'bash', arguments: LONG_ARGUMENTS + '\n' + raw })
+  let view = await viewport(vt)
+  click(vt, actionCell(view, '[c] Copy args'))
+  await vt.waitForRender()
+  await Promise.resolve()
+  await Promise.resolve()
+  assert.equal(copied.length, 1, 'the painted Copy action delivers the raw arguments')
+  assert.ok(copied[0]!.endsWith(raw), 'Copy carries the exact received tail')
+  const before = frameBounds(view)
+  assert.ok(before !== undefined)
+  view = await viewport(vt)
+  click(vt, actionCell(view, '[e] Expand'))
+  view = await viewport(vt)
+  const after = frameBounds(view)
+  assert.ok(after !== undefined)
+  assert.ok(after.bottom - after.top > before.bottom - before.top,
+    `the painted Expand action must grow the reading region:\n${view}`)
+  vt.sendInput('n')
+  assert.equal(await decision, 'rejected')
+})
+
+test('settling an approval restores the editor draft and focus', async () => {
+  const { vt, app } = startApp()
+  app.setEditorText('keep this draft')
+  const decision = app.showApprovalPrompt({ toolName: 'bash', reason: 'draft safety' })
+  await viewport(vt)
+  vt.sendInput('y')
+  assert.equal(await decision, 'allowed-once')
+  await viewport(vt)
+  assert.equal(app.hostEditorTextForTest(), 'keep this draft')
+  assert.equal(app.focusedComponentForTest(), app.seatEditorForTest().component,
+    'with nothing restored, the editor owns the keyboard again')
+})
+
+test('queued A→B keeps the optional History tenant parked until the last approval settles', async () => {
+  // The optional-tenant owner's own suite covers the full History panel; this
+  // asserts the approval-specific queue-drain predicate through the public
+  // frame/lifecycle hooks.
+  const { vt, app } = startApp()
+  const first = app.showApprovalPrompt({ toolName: 'bash', reason: 'A' })
+  const second = app.showApprovalPrompt({ toolName: 'fs', reason: 'B' })
+  await viewport(vt)
+  assert.ok(app.approvalFrameForTest() !== undefined)
+  vt.sendInput('y')
+  assert.equal(await first, 'allowed-once')
+  const view = await viewport(vt)
+  assert.ok(view.includes('Approve fs?'), `B must take the seat:\n${view}`)
+  assert.ok(app.approvalFrameForTest() !== undefined)
+  vt.sendInput('n')
+  assert.equal(await second, 'rejected')
+  assert.equal(app.approvalFrameForTest(), undefined)
+})
+
+test('a settled approval leaves no frame behind and the surface stays usable', async () => {
+  const { vt, app } = startApp()
+  const decision = app.showApprovalPrompt({ toolName: 'bash', reason: 'frame lifecycle' })
+  const frame = app.approvalFrameForTest()
+  assert.notEqual(frame, undefined)
+  await viewport(vt)
+  vt.sendInput('\x1b')
+  assert.equal(await decision, 'cancelled')
+  assert.equal(app.approvalFrameForTest(), undefined, 'the settled approval releases its seat frame')
+  const healthy = app.showApprovalPrompt({ toolName: 'fs', reason: 'healthy after cancel' })
+  await viewport(vt)
+  vt.sendInput('y')
+  assert.equal(await healthy, 'allowed-once')
 })

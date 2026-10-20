@@ -633,14 +633,23 @@ anchor, without inventing a fourth meaning for `primary`.
   bindings — they stay live and are listed in the keybinding UI, so a row never
   spends its cells repeating the same action three ways. `PgUp/PgDn` (one action,
   two symmetric page keys) is the only sanctioned two-key token in a bar hint.
-  - **A modal's cancel/close device names both real keys.** The approval dialog
-    already paints `[esc/ctrl+c] cancel` and the transcript search overlay paints
-    `esc/ctrl+c` close — the latter because its shared Input swallows `Ctrl+C`, so
+  - **A modal's cancel/close device names its real keys.** The transcript search
+    overlay paints `esc/ctrl+c` close because its shared Input swallows `Ctrl+C`, so
     that key has to stay discoverable where the user is typing. Naming the two keys
     that leave a modal is NOT a bar enumerating an action's alternatives (which the
     rule above forbids): a modal hint's whole job is telling the user what leaves
-    it. `componentKeymap.keyHint` keeps the list form for these; a bar takes
+    it. `componentKeymap.keyHint` keeps the list form for these; a generic bar takes
     `keysFor(action)[0]` itself.
+    - **Scoped exception — Approval decision bar.** The approval action sheet's
+      pinned bar is a direct-action surface, not a generic hint row:
+      `[y] Allow once · [n] Reject · [Esc] Cancel`, with `[c] Copy args` /
+      `[e] Expand` as secondary segments when the width/grant allows. The bracketed
+      key token plus capitalized verb names BOTH the keyboard shortcut and the
+      fullscreen clickable action, so the label never lies about either channel.
+      `Ctrl+C` remains a live cancel key but is not repeated in that three-decision
+      bar; the bar must not be stretched to enumerate every alias. This exception is
+      scoped to the blocking Approval seat and does not loosen the grammar for other
+      surfaces.
 - **State fact** = `<Noun> <state>`: `Follow on`, `Follow paused`,
   `rows 7-40/40`, `Retained preview · not full history`. A fact never begins
   with a key name, so the two segment kinds stay distinguishable on one row.
@@ -902,7 +911,8 @@ A new surface picks one and must justify any deviation.
 | Archetype | Skeleton | Examples |
 |---|---|---|
 | **Workspace** (fullscreen) | §6.1, own row budget, pinned action bar | Settings, Job |
-| **Overlay** (modal, non-fullscreen) | `Frame` box, single body, bottom hint | pickers, approval dialog |
+| **Overlay** (modal, non-fullscreen) | `Frame` box, single body, bottom hint | pickers |
+| **Blocking editor-seat sheet** | `Frame` box in the editor seat (replaces the draft, never disposes it), pinned title/danger + one scrollable request body + pinned decision bar; Fullscreen paints real pointer cells, Regular is keyboard-only | Approval |
 | **Pane** (embedded in the transcript/log) | header line + folded body, no action bar | tool cards, subagent cards, Thinking |
 | **Status bar** | one row of items + separators, no interaction (a host-instruction line may be reserved above it — `footer/instruction.ts`) | footer |
 | **Accessory band** (pinned, on-demand) | zero rows hidden; when active: ONE top separator rule (the §6.2 exception) + identity row + ≤3 single-line navigation rows (tasks, then the optional Full action), painted UNDER the whole footer as the frame's last region | Task Quick |

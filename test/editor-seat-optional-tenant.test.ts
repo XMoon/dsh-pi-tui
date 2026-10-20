@@ -1108,7 +1108,7 @@ test('B-25: an approval mount whose focus callback settles it releases the losin
   await vt.waitForRender()
   assert.ok(viewport(vt).includes('fs'), `only the newer prompt may be mounted:\n${viewport(vt)}`)
   assert.ok(!viewport(vt).includes('bash'), 'the losing mount must be physically released')
-  assert.equal(app.ownedApprovalFramesForTest(), 1, 'the losing mount frame is disposed, never leaked')
+  assert.notEqual(app.approvalFrameForTest(), undefined, 'the losing mount frame is released, never leaked')
   assert.equal(app.assertOverlayForestForTest(), undefined)
 
   // A fullscreen swap replays the remount registrations: the stale prompt
@@ -2647,27 +2647,24 @@ test('B-47: a settled Approval never cancels the Save Location its own cleanup o
 test('B-48: a throwing physical mount releases the failed Approval and its queue', async () => {
   const { vt, app } = startApp()
   await vt.waitForRender()
-  // The physical overlay mount is the ONE funnel every overlay goes through. A
-  // throwing step there (the mount runs plugin focus/blur callbacks; the Advanced
-  // tier routes those to `notify`, a first-party/Cordis throw reaches the caller)
-  // is injected RECEIVER-PRESERVINGLY, once, so the assertion below is about the
-  // failure window, not about the injected identity.
+  // The blocking seat projection is the ONE funnel every approval goes
+  // through. A throwing step there is injected RECEIVER-PRESERVINGLY, once, so
+  // the assertion below is about the failure window, not about the injected
+  // identity.
   const proto = TuiApp.prototype as unknown as {
-    showOverlayOnHost(component: unknown, options: unknown, ownership?: unknown): unknown
+    mountApprovalSeat(pending: unknown): void
   }
-  const original = proto.showOverlayOnHost
+  const original = proto.mountApprovalSeat
   let armed = false
-  proto.showOverlayOnHost = function (
+  proto.mountApprovalSeat = function (
     this: unknown,
-    component: unknown,
-    options: unknown,
-    ownership?: unknown,
-  ): unknown {
+    pending: unknown,
+  ): void {
     if (armed) {
       armed = false
-      throw new Error('overlay mount boom')
+      throw new Error('seat mount boom')
     }
-    return original.call(this, component, options, ownership)
+    original.call(this, pending)
   }
   try {
     armed = true
@@ -2680,7 +2677,7 @@ test('B-48: a throwing physical mount releases the failed Approval and its queue
     }
     const primary = caught instanceof AggregateError ? caught.errors[0] : caught
     assert.ok(
-      primary instanceof Error && primary.message === 'overlay mount boom',
+      primary instanceof Error && primary.message === 'seat mount boom',
       `the mount failure must surface by identity as the primary failure: ${String(caught)}`,
     )
 
@@ -2698,7 +2695,7 @@ test('B-48: a throwing physical mount releases the failed Approval and its queue
     await vt.waitForRender()
     assert.equal(app.focusedComponentForTest(), next.component)
   } finally {
-    proto.showOverlayOnHost = original
+    proto.mountApprovalSeat = original
   }
 })
 
@@ -2772,34 +2769,32 @@ test('B-50: a failed Approval mount restores a parked-but-current optional tenan
   await vt.waitForRender()
   assert.equal(app.focusedComponentForTest(), tenant.component, 'the tenant owns the seat first')
 
-  // The physical mount throws while a HEALTHY (still-current) tenant is parked
-  // behind it: the park retires nobody, so the last-blocker restore obligation is
-  // the only thing that can bring this tenant back.
+  // The blocking seat projection throws while a HEALTHY (still-current) tenant
+  // is parked behind it: the park retires nobody, so the last-blocker restore
+  // obligation is the only thing that can bring this tenant back.
   const proto = TuiApp.prototype as unknown as {
-    showOverlayOnHost(component: unknown, options: unknown, ownership?: unknown): unknown
+    mountApprovalSeat(pending: unknown): void
   }
-  const original = proto.showOverlayOnHost
+  const original = proto.mountApprovalSeat
   let armed = true
-  proto.showOverlayOnHost = function (
+  proto.mountApprovalSeat = function (
     this: unknown,
-    component: unknown,
-    options: unknown,
-    ownership?: unknown,
-  ): unknown {
+    pending: unknown,
+  ): void {
     if (armed) {
       armed = false
-      throw new Error('overlay mount boom')
+      throw new Error('seat mount boom')
     }
-    return original.call(this, component, options, ownership)
+    original.call(this, pending)
   }
   try {
     const failed = app.showApprovalPrompt({ toolName: 'bash', reason: 'failed with a parked tenant' })
     await assert.rejects(settleOrTimeout(failed))
   } finally {
-    proto.showOverlayOnHost = original
+    proto.mountApprovalSeat = original
   }
   await vt.waitForRender()
-  assert.equal(app.ownedApprovalFramesForTest(), 0, 'the failed mount leaves no approval frame')
+  assert.equal(app.approvalFrameForTest(), undefined, 'the failed mount leaves no approval frame')
   assert.equal(
     app.focusedComponentForTest(),
     tenant.component,
@@ -2815,23 +2810,33 @@ test('B-50: a failed Approval mount restores a parked-but-current optional tenan
   assert.equal(tenant.closeCalls(), 0)
 })
 
-test('B-51: a physical overlay mount that fails before registration leaves no ghost modal', async () => {
+test('B-51: a throwing seat projection leaves no ghost approval frame', async () => {
   const { vt, app } = startApp()
   await vt.waitForRender()
-  // The fork pushes its overlay-stack entry and then performs terminal IO before
-  // returning the raw handle. Fail that IO seam ONCE: the broker never saw a node
-  // for this projection, so only a positional release can remove the ghost.
-  const originalHideCursor = vt.hideCursor.bind(vt)
-  let armed = true
-  vt.hideCursor = (): void => {
+  // Fail the SEAT projection (after the suspension committed) ONCE: the frame
+  // must be unwound and nothing may stay painted or answerable.
+  const seatProto = TuiApp.prototype as unknown as { mountApprovalSeat(pending: unknown): void }
+  const mountProto = TuiApp.prototype as unknown as { mountSeatChild(): void }
+  const originalSeat = seatProto.mountApprovalSeat
+  const originalMount = mountProto.mountSeatChild
+  let armed = false
+  seatProto.mountApprovalSeat = function (this: unknown, pending: unknown): void {
+    armed = true
+    try {
+      originalSeat.call(this, pending)
+    } finally {
+      armed = false
+    }
+  }
+  mountProto.mountSeatChild = function (this: unknown): void {
     if (armed) {
       armed = false
-      throw new Error('terminal io boom')
+      throw new Error('seat projection boom')
     }
-    originalHideCursor()
+    originalMount.call(this)
   }
   try {
-    const failed = app.showApprovalPrompt({ toolName: 'bash', reason: 'ghost mount' })
+    const failed = app.showApprovalPrompt({ toolName: 'bash', reason: 'ghost projection' })
     let caught: unknown
     try {
       await settleOrTimeout(failed)
@@ -2840,17 +2845,18 @@ test('B-51: a physical overlay mount that fails before registration leaves no gh
     }
     const primary = caught instanceof AggregateError ? caught.errors[0] : caught
     assert.ok(
-      primary instanceof Error && primary.message === 'terminal io boom',
-      `the IO failure must surface by identity: ${String(caught)}`,
+      primary instanceof Error && primary.message === 'seat projection boom',
+      `the projection failure must surface by identity: ${String(caught)}`,
     )
   } finally {
-    vt.hideCursor = originalHideCursor
+    seatProto.mountApprovalSeat = originalSeat
+    mountProto.mountSeatChild = originalMount
   }
   await vt.waitForRender()
-  assert.equal(app.ownedApprovalFramesForTest(), 0, 'the failed mount leaves no approval frame')
+  assert.equal(app.approvalFrameForTest(), undefined, 'the failed mount leaves no approval frame')
   assert.ok(
     !viewport(vt).includes('bash'),
-    `an unregistered raw projection must not survive as a ghost modal:\n${viewport(vt)}`,
+    `the failed seat projection must not survive as a ghost sheet:\n${viewport(vt)}`,
   )
   assert.equal(app.assertOverlayForestForTest(), undefined)
   // ... and the stage stays usable.
@@ -2872,21 +2878,19 @@ test('B-53: a QUEUED Approval whose mount fails rejects its own promise', async 
   // B is QUEUED: its Promise executor has already returned, so a mount failure for
   // B can no longer rely on the executor to reject it.
   const proto = TuiApp.prototype as unknown as {
-    showOverlayOnHost(component: unknown, options: unknown, ownership?: unknown): unknown
+    mountApprovalSeat(pending: unknown): void
   }
-  const original = proto.showOverlayOnHost
+  const original = proto.mountApprovalSeat
   let armed = false
-  proto.showOverlayOnHost = function (
+  proto.mountApprovalSeat = function (
     this: unknown,
-    component: unknown,
-    options: unknown,
-    ownership?: unknown,
-  ): unknown {
+    pending: unknown,
+  ): void {
     if (armed) {
       armed = false
       throw new Error('queued mount boom')
     }
-    return original.call(this, component, options, ownership)
+    original.call(this, pending)
   }
   let queued: Promise<unknown> | undefined
   try {
@@ -2901,7 +2905,7 @@ test('B-53: a QUEUED Approval whose mount fails rejects its own promise', async 
       // about the two promises.
     }
   } finally {
-    proto.showOverlayOnHost = original
+    proto.mountApprovalSeat = original
   }
   assert.equal(await settleOrTimeout(first), 'allowed-once', 'the first approval settles normally')
   let queuedFailure: unknown
@@ -2918,7 +2922,7 @@ test('B-53: a QUEUED Approval whose mount fails rejects its own promise', async 
   )
   await vt.waitForRender()
   assert.ok(!viewport(vt).includes('fs'), 'the failed queued approval must never be presented')
-  assert.equal(app.ownedApprovalFramesForTest(), 0)
+  assert.equal(app.approvalFrameForTest(), undefined)
   assert.equal(
     app.focusedComponentForTest(),
     tenant.component,
@@ -2976,7 +2980,7 @@ test('B-54: a real Advanced blur chain that throws through the host unwind leave
   const primary = caught instanceof AggregateError ? caught.errors[0] : caught
   assert.equal(primary, sentinel, `the mount failure must be the caller sentinel by identity: ${String(caught)}`)
   await vt.waitForRender()
-  assert.equal(app.ownedApprovalFramesForTest(), 0, 'the failed mount leaves no approval frame')
+  assert.equal(app.approvalFrameForTest(), undefined, 'the failed mount leaves no approval frame')
   assert.ok(
     !viewport(vt).includes('bash'),
     `the registered node and its raw projection must both be unwound:\n${viewport(vt)}`,
@@ -3046,7 +3050,7 @@ test('B-55: a failed Approval mount across a re-entrant fullscreen swap never po
   const primary = caught instanceof AggregateError ? caught.errors[0] : caught
   assert.equal(primary, sentinel, `the mount failure must be the caller sentinel by identity: ${String(caught)}`)
   await vt.waitForRender()
-  assert.equal(app.ownedApprovalFramesForTest(), 0, 'the failed mount leaves no approval frame')
+  assert.equal(app.approvalFrameForTest(), undefined, 'the failed mount leaves no approval frame')
   assert.ok(
     !viewport(vt).includes('bash'),
     `the failed Approval must be unwound on the swapped screen too:\n${viewport(vt)}`,
@@ -3103,7 +3107,7 @@ test('B-56: a fullscreen swap inside the Approval mount still leaves the dialog 
   )
   vt.sendInput('y')
   assert.equal(await settleOrTimeout(approval), 'allowed-once', 'the approval stays answerable after the swap')
-  assert.equal(app.ownedApprovalFramesForTest(), 0, 'the settled approval leaves no frame behind')
+  assert.equal(app.approvalFrameForTest(), undefined, 'the settled approval leaves no frame behind')
   await vt.waitForRender()
   assert.equal(app.assertOverlayForestForTest(), undefined)
   assert.ok(viewport(vt).includes('swap-root-ok'), `the surviving root must be restored:\n${viewport(vt)}`)
@@ -3161,25 +3165,24 @@ test('B-57: a callback NEWER focus inside the swap window beats the pre-swap own
   vt.sendInput('y')
   assert.equal(await settleOrTimeout(approval), 'allowed-once')
   await vt.waitForRender()
-  assert.equal(app.ownedApprovalFramesForTest(), 0)
+  assert.equal(app.approvalFrameForTest(), undefined)
   assert.equal(app.assertOverlayForestForTest(), undefined)
 })
 
-test('B-57b: a capturing overlay mounted in the swap window keeps its keyboard', async () => {
+test('B-57b: a capturing overlay mounted in the swap window stays under the blocking Approval and is revealed after it', async () => {
   const { vt, app } = startApp()
   await vt.waitForRender()
   let chainStarted = false
-  let cOwner: Component | null = null
-  let cLease: { blur(): void; close(): void } | undefined
+  let cLease: { close(): void } | undefined
   const c = advancedOverlayProbe('newer-capturing-c')
   const root = advancedOverlayProbe('newer-swap-root', undefined, () => {
     if (chainStarted) return
     chainStarted = true
     app.setFullscreen(true)
-    // A NEWER capturing mount (not just a focus()): its handoff must also survive
-    // the late pre-swap restore.
+    // A NEWER capturing mount (not just a focus()) inside the approval's mount
+    // window. The blocking Approval remains the frontmost owner: the newer
+    // plugin overlay is mounted into the approval's suspension and stays hidden.
     cLease = app.showAdvancedInteractiveOverlay(c.component)
-    cOwner = app.focusedComponentForTest()
   })
   const rootLease = app.showAdvancedInteractiveOverlay(root.component)
   await vt.waitForRender()
@@ -3187,32 +3190,26 @@ test('B-57b: a capturing overlay mounted in the swap window keeps its keyboard',
 
   const approval = app.showApprovalPrompt({ toolName: 'bash', reason: 'swap then newer mount' })
   await vt.waitForRender()
-  assert.equal(c.focusCount(), 1, 'the newer capturing overlay auto-focused on its mount')
-  assert.notEqual(cOwner, null)
-  assert.equal(app.focusedComponentForTest(), cOwner, 'the newer mount keeps the keyboard')
-  assert.equal(c.blurCount(), 0, 'the late restore must not blur the newer capturing owner')
-  // VISUAL ORDER: the physical paint priority must follow the broker's logical
-  // z-order — the later-mounted capturing overlay stays drawn on top of the
-  // Approval panel it covers, never the other way round.
-  assert.ok(
-    viewport(vt).includes('newer-capturing-c'),
-    `the newer capturing overlay must stay VISUALLY on top of the Approval:\n${viewport(vt)}`,
-  )
-  // (The Approval's own rows underneath the covering box are legitimately
-  // hidden by it — the discriminating fact is that C is drawn at all, and the
-  // Approval stays active and answerable below, asserted after C leaves.)
-  // The newer overlay leaves: the live Approval takes over and settles.
-  cLease!.close()
-  await vt.waitForRender()
-  assert.notEqual(
-    app.focusedComponentForTest(),
-    app.seatEditorForTest().component,
-    'the live Approval takes the keyboard once the newer overlay leaves',
-  )
+  assert.equal(c.focusCount(), 0, 'the newer capturing overlay is suspended under the blocking Approval')
+  assert.equal(c.blurCount(), 0)
+  assert.ok(!viewport(vt).includes('newer-capturing-c'),
+    `the blocking Approval must stay in front of the newer plugin overlay:\n${viewport(vt)}`)
+  assert.ok(viewport(vt).includes('bash'), `the Approval stays projected:\n${viewport(vt)}`)
+  assert.equal(app.focusedComponentForTest(), app.approvalFrameForTest(),
+    'the blocking Approval keeps the keyboard')
+
+  // The approval leaves: the newer mounted overlay is revealed by the modal's
+  // suspension release and becomes the live keyboard owner.
   vt.sendInput('y')
   assert.equal(await settleOrTimeout(approval), 'allowed-once')
   await vt.waitForRender()
-  assert.equal(app.ownedApprovalFramesForTest(), 0)
+  assert.ok(viewport(vt).includes('newer-capturing-c'),
+    `the newer overlay is revealed after the Approval leaves:\n${viewport(vt)}`)
+  assert.equal(c.focusCount(), 1, 'the revealed overlay takes the keyboard')
+  assert.equal(app.approvalFrameForTest(), undefined)
+  cLease!.close()
+  rootLease.close()
+  await vt.waitForRender()
   assert.equal(app.assertOverlayForestForTest(), undefined)
 })
 
@@ -3280,7 +3277,7 @@ test('B-60: a NEWER owner that leaves inside the swap window still hands the key
   vt.sendInput('y')
   assert.equal(await settleOrTimeout(approval), 'allowed-once')
   await vt.waitForRender()
-  assert.equal(app.ownedApprovalFramesForTest(), 0)
+  assert.equal(app.approvalFrameForTest(), undefined)
   assert.equal(app.assertOverlayForestForTest(), undefined)
   void rootLease
 })
