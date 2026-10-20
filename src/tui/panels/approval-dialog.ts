@@ -73,6 +73,13 @@ interface ActionLabel {
 interface BodyRow {
   readonly text: string
   readonly heading: boolean
+  /** A generated presentation value (Action/Replace all/empty object): use
+   * the body text token, never the terminal default foreground. */
+  readonly generated?: boolean
+  /** Compact inline label painted with the heading role before `text`. */
+  readonly label?: string
+  /** Structural two-space body indent (separate from the value's own tone). */
+  readonly indent?: boolean
 }
 
 /** One painted action segment in sheet-content coordinates. */
@@ -117,15 +124,20 @@ const INTENDED_INPUT_NOTE = 'Intended input · not verified against disk'
  * shared display sanitizer BEFORE wrapping, so no escape sequence or control
  * byte can reach the terminal; the raw bytes stay untouched for Copy.
  */
-function pushSectionRows(rows: BodyRow[], text: string, width: number): void {
+function pushSectionRows(
+  rows: BodyRow[],
+  text: string,
+  width: number,
+  generated = false,
+): void {
   const inner = Math.max(1, width - 2)
   for (const sourceLine of text.split('\n')) {
     const wrapped = wrapTextWithAnsi(sourceLine, inner)
     if (wrapped.length === 0) {
-      rows.push({ text: '  ', heading: false })
+      rows.push({ text: '', heading: false, generated, indent: true })
       continue
     }
-    for (const line of wrapped) rows.push({ text: `  ${line}`, heading: false })
+    for (const line of wrapped) rows.push({ text: line, heading: false, generated, indent: true })
   }
 }
 
@@ -146,27 +158,33 @@ function pushDimNote(rows: BodyRow[], text: string, width: number): void {
  * row (`Reason: …`) instead of spending a dedicated heading row, so a
  * three-row reading budget still shows real request text.
  */
-function pushInlineSection(rows: BodyRow[], label: string, text: string, width: number): void {
+function pushInlineSection(
+  rows: BodyRow[],
+  label: string,
+  text: string,
+  width: number,
+  generated = false,
+): void {
   const inner = Math.max(1, width - 2)
   const prefix = `${label}: `
   const firstWidth = Math.max(1, inner - visibleWidth(prefix))
   const sourceLines = text.split('\n')
   const firstWrapped = wrapTextWithAnsi(sourceLines[0] ?? '', firstWidth)
   if (firstWrapped.length === 0) {
-    rows.push({ text: prefix, heading: false })
+    rows.push({ text: '', label: prefix, heading: false, generated })
   } else {
-    rows.push({ text: `${prefix}${firstWrapped[0]}`, heading: false })
+    rows.push({ text: firstWrapped[0]!, label: prefix, heading: false, generated })
     for (let index = 1; index < firstWrapped.length; index += 1) {
-      rows.push({ text: `  ${firstWrapped[index]}`, heading: false })
+      rows.push({ text: `  ${firstWrapped[index]}`, heading: false, generated })
     }
   }
   for (let index = 1; index < sourceLines.length; index += 1) {
     const wrapped = wrapTextWithAnsi(sourceLines[index]!, inner)
     if (wrapped.length === 0) {
-      rows.push({ text: '  ', heading: false })
+      rows.push({ text: '  ', heading: false, generated })
       continue
     }
-    for (const line of wrapped) rows.push({ text: `  ${line}`, heading: false })
+    for (const line of wrapped) rows.push({ text: `  ${line}`, heading: false, generated })
   }
 }
 
@@ -279,16 +297,43 @@ class ApprovalSheet implements Component {
       const insertAt = targetIndex >= 0 ? targetIndex + 1 : actionIndex >= 0 ? actionIndex + 1 : 0
       sections.splice(insertAt, 0, { heading: 'Reason', text: reason })
     }
+    if (compact) {
+      // A very short viewport must show the actual payload, not only the
+      // Action/Target/Reason metadata: the content sections outrank the
+      // labels. The sort is stable, so equal ranks keep the section order.
+      const compactRank = (heading: string): number => {
+        switch (heading) {
+          case 'Command': return 0
+          case 'Before': return 1
+          case 'After': return 2
+          case 'New content': return 3
+          case 'Inserted text': return 4
+          case 'Target': return 5
+          case 'Reason': return 6
+          case 'Action': return 7
+          case 'Replace all': return 8
+          case 'Other arguments': return 9
+          default: return 10 // the raw/generic Arguments fallback
+        }
+      }
+      sections.sort((left, right) => compactRank(left.heading) - compactRank(right.heading))
+    }
     for (const section of sections) {
       const text = sanitizeDisplayText(section.text)
+      // Generated presentation values use the body text token; the raw
+      // recorded payload (Target/Reason/Before/After/Command/...) keeps the
+      // design-language raw-record default ink.
+      const generated = section.heading === 'Action'
+        || section.heading === 'Replace all'
+        || (section.heading === 'Arguments' && text === '(empty object)')
       if (compact) {
-        pushInlineSection(rows, section.heading, text, width)
+        pushInlineSection(rows, section.heading, text, width, generated)
         if (section.heading === 'Before') pushDimNote(rows, INTENDED_INPUT_NOTE, width)
         continue
       }
       rows.push({ text: section.heading, heading: true })
       if (section.heading === 'Before') pushDimNote(rows, INTENDED_INPUT_NOTE, width)
-      pushSectionRows(rows, text, width)
+      pushSectionRows(rows, text, width, generated)
     }
     this.bodyCache = { width, compact, rows }
     return rows
@@ -493,7 +538,17 @@ class ApprovalSheet implements Component {
     this.bodyTop = lines.length
     for (let index = 0; index < viewport; index += 1) {
       const row = body[this.scrollTop + index]
-      lines.push(row === undefined ? BLANK : row.heading ? color.textDim(row.text) : row.text)
+      if (row === undefined) {
+        lines.push(BLANK)
+        continue
+      }
+      const value = row.generated === true ? color.text(row.text) : row.text
+      if (row.label !== undefined) {
+        lines.push(`${color.textDim(row.label)}${value}`)
+        continue
+      }
+      const indent = row.indent === true ? '  ' : ''
+      lines.push(`${indent}${row.heading ? color.textDim(row.text) : value}`)
     }
     this.bodyBottom = this.bodyTop + viewport
     if (hint !== undefined && hint !== '') lines.push(hint)

@@ -156,3 +156,19 @@ test('the projection never invents an applied diff, danger decision or file IO f
   }
   assert.deepEqual(result.map(s => s.heading), ['Action', 'Target', 'Before', 'After'])
 })
+
+test('numeric-like top-level keys keep their source order and every value', () => {
+  const generic = approvalArgumentSections('unknown', '{"10":"ten","2":"two"}')
+  assert.deepEqual(generic.map(section => section.heading), ['Arguments'])
+  assert.equal(generic[0]!.text, '10: ten\n2: two')
+  const other = approvalArgumentSections('bash', '{"command":"ls","10":"ten","2":"two"}')
+  assert.equal(other.find(section => section.heading === 'Other arguments')?.text,
+    '{\n  "10": "ten",\n  "2": "two"\n}')
+})
+
+test('the source-order scan survives escaped keys and nested containers', () => {
+  const result = approvalArgumentSections('unknown', '{"a\\"b":1,"nested":{"x":[1,{"y":"}"}]},"z":2}')
+  const text = result[0]!.text
+  assert.ok(text.startsWith('a"b: 1\nnested: {'), text)
+  assert.ok(text.endsWith('z: 2'), text)
+})
