@@ -185,6 +185,8 @@ interface NoticeState {
 interface AuthState {
   readonly targetIdentity: string
   readonly phase: 'starting' | 'running' | 'authorized' | 'cancelled' | 'failed'
+  /** A cancellation was requested but the Host may still commit/finish. */
+  readonly cancelRequested?: boolean
   readonly attemptId?: string
   readonly status?: string
 }
@@ -272,6 +274,7 @@ export class ModelsWorkspacePage implements Component {
   /** Esc on a provider detail with a live native attempt waits for the Host
    *  settled event (and its prompt cleanup) before returning to the list. */
   private pendingAfterAuth: (() => void) | undefined
+  private cancelledAttempt: string | undefined
   private readonly pageController = new AbortController()
   private disposed = false
   private revision = 0
@@ -904,6 +907,7 @@ export class ModelsWorkspacePage implements Component {
 
   private beginAuthorization(row: ModelsProviderRow, method: string | undefined): void {
     if (row.key === undefined) return
+    this.cancelledAttempt = undefined
     this.auth = { targetIdentity: row.identity, phase: 'starting' }
     this.authNotice = undefined
     this.authUnsubscribe?.()
@@ -940,7 +944,7 @@ export class ModelsWorkspacePage implements Component {
       this.settle(() => {
         if (this.auth !== undefined) this.auth = { ...this.auth, phase: 'running', attemptId: started.attemptId }
       })
-      if (this.pendingAfterAuth !== undefined) this.cancelAuthorization()
+      if (this.pendingAfterAuth !== undefined || this.auth?.cancelRequested === true) this.cancelAuthorization()
       const outcome = await flow.outcome
       if (outcome.status === 'authorized') {
         const note = await this.source.provisionKeylessProfile(row.route)
@@ -1001,13 +1005,27 @@ export class ModelsWorkspacePage implements Component {
 
   private cancelAuthorization(): void {
     const auth = this.auth
-    if (auth?.attemptId === undefined) return
+    if (auth === undefined || (auth.phase !== 'starting' && auth.phase !== 'running')) return
+    if (auth.cancelRequested !== true) {
+      this.auth = {
+        ...auth,
+        cancelRequested: true,
+        status: 'cancellation requested — the Host may still complete the sign-in',
+      }
+      this.requestRender()
+    }
     const attemptId = auth.attemptId
+    if (attemptId === undefined || this.cancelledAttempt === attemptId) return
+    this.cancelledAttempt = attemptId
     this.source.run('models cancel sign-in', async () => {
       try {
         await this.source.cancelAuthorization(attemptId)
       } catch (error) {
-        this.settle(() => { this.notice = `cancel failed: ${errorText(error)}` })
+        this.settle(() => {
+          this.notice = `cancel failed: ${errorText(error)}`
+          if (this.auth !== undefined) this.auth = { ...this.auth, cancelRequested: false, status: 'cancel request failed — the sign-in may still be running' }
+          this.cancelledAttempt = undefined
+        })
       }
     })
   }
@@ -1150,8 +1168,10 @@ export class ModelsWorkspacePage implements Component {
   }
 
   private setQuestion(question: EmbeddedQuestion): void {
-    if (this.question === undefined) this.question = question
-    else this.questionQueue.push(question)
+    if (this.question === undefined) {
+      this.question = question
+      this.questionUsable = false
+    } else this.questionQueue.push(question)
     this.question.flow.focused = true
     this.revision += 1
   }
@@ -1162,7 +1182,10 @@ export class ModelsWorkspacePage implements Component {
     this.questionPress = undefined
     if (this.question === question) {
       this.question = this.questionQueue.shift()
-      if (this.question !== undefined) this.question.flow.focused = true
+      if (this.question !== undefined) {
+        this.question.flow.focused = true
+        this.questionUsable = false
+      }
     } else {
       const index = this.questionQueue.indexOf(question)
       if (index >= 0) this.questionQueue.splice(index, 1)
@@ -1181,7 +1204,11 @@ export class ModelsWorkspacePage implements Component {
 
   /** The Settings root sets the live body height before each render. */
   setBodyHeight(rows: number): void {
-    this.bodyHeight = Math.max(1, rows)
+    const next = Math.max(1, rows)
+    // A resize invalidates the last painted form budget BEFORE the resize
+    // frame: Enter arriving in that gap must not submit a clipped form.
+    if (next !== this.bodyHeight && this.question !== undefined) this.questionUsable = false
+    this.bodyHeight = next
   }
 
   render(width: number): string[] {
@@ -1451,7 +1478,11 @@ export class ModelsWorkspacePage implements Component {
     actions.push({ id: 'provider:clear', label: hasStored ? 'Clear stored credential…' : 'Nothing stored to clear', enabled: clearTarget !== undefined && hasStored })
     actions.push({ id: 'provider:guide', label: 'View model config guide', enabled: true })
     if (this.auth?.targetIdentity === row.identity && (this.auth.phase === 'running' || this.auth.phase === 'starting')) {
-      actions.push({ id: 'provider:cancel', label: 'Cancel current attempt', enabled: this.auth.attemptId !== undefined })
+      actions.push({
+        id: 'provider:cancel',
+        label: this.auth.cancelRequested === true ? 'Cancellation requested…' : 'Cancel current attempt',
+        enabled: this.auth.cancelRequested !== true,
+      })
     }
     actions.push({ id: 'provider:back', label: '← Providers', enabled: true })
     return { content, actions }

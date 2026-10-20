@@ -330,9 +330,65 @@ test('Direct cancel with an outstanding prompt still waits for an authorized Hos
     assert.equal(promptSeen, true)
     await port.cancel(started.attemptId)
     await new Promise<void>(resolve => setImmediate(resolve))
-    assert.equal(withdrawn, 1, 'the pending prompt UI closes immediately')
+    assert.equal(withdrawn, 0, 'the prompt stays answerable until the authoritative Host outcome')
     assert.equal(settled, 0, 'a pending prompt does NOT prove the Host has not entered commit')
     releaseUpstream?.({ status: 'authorized' })
+    const outcome = await flow.outcome
+    assert.equal(outcome.status, 'authorized')
+    assert.equal(settled, 1)
+  } finally {
+    off()
+    flow.close()
+  }
+})
+
+test('cancel keeps a pending prompt answerable so a flow that awaits it can settle authorized', async () => {
+  const key = credentialKey('llm-pi-ai', 'answer-after-cancel')
+  const entry = {
+    key,
+    label: 'Answer After Cancel',
+    methods: [{ id: 'oauth', label: 'Sign in' }],
+    inFlight: false,
+  }
+  const service = {
+    list: () => [entry],
+    describe: () => entry,
+    begin: async (request: {
+      interaction: { prompt: (prompt: { kind: 'text'; message: string }) => Promise<string> }
+    }) => {
+      await request.interaction.prompt({ kind: 'text', message: 'answer after cancel' })
+      return { status: 'authorized' as const }
+    },
+    cancel: () => {},
+  }
+  const port = new DirectAuthorizationConfig({ get: name => name === 'authorization' ? service : undefined })
+  const surface: AuthorizationSurface = {
+    openOutputViewer: () => () => {},
+    askQuestions: () => new Promise(() => {}),
+    openPicker: () => ({ close: () => {} }),
+  }
+  const flow = createAuthorizationFlow(surface, port)
+  let settled = 0
+  let withdrawn = 0
+  let promptId: string | undefined
+  const off = port.onEvent(event => {
+    if (event.kind === 'settled') settled += 1
+    if (event.kind === 'prompt-withdrawn') withdrawn += 1
+    if (event.kind === 'prompt') promptId = event.promptId
+    flow.onEvent(event)
+  })
+  try {
+    const started = await port.begin({ key })
+    assert.equal(started.kind, 'started')
+    if (started.kind !== 'started') return
+    flow.bind(started.attemptId)
+    await new Promise<void>(resolve => setImmediate(resolve))
+    assert.ok(promptId !== undefined)
+    await port.cancel(started.attemptId)
+    await new Promise<void>(resolve => setImmediate(resolve))
+    assert.equal(withdrawn, 0, 'the prompt stays answerable')
+    assert.equal(settled, 0, 'no terminal is forged while the flow may still finish')
+    await port.respond(started.attemptId, promptId, 'answer')
     const outcome = await flow.outcome
     assert.equal(outcome.status, 'authorized')
     assert.equal(settled, 1)

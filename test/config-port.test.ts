@@ -399,10 +399,9 @@ test('authorization bridges an ALREADY-ABORTED prompt signal as a non-decline wi
   assert.ok(events.some(event => event.kind === 'settled' && event.status === 'cancelled'), 'the withdrawal settles the attempt')
 })
 
-test('authorization cancel() closes the pending prompt UI immediately without rejecting its bridge', async () => {
-  // The prompt UI closes at once, but the bridge promise stays pending: the
-  // provider may legitimately still be committing and using that prompt, so
-  // injecting a rejection could corrupt the authoritative outcome.
+test('authorization cancel() leaves the prompt answerable and rejects no bridge before the Host settles', async () => {
+  // A provider may legitimately overlap prompt() and commit(); hiding the
+  // prompt or injecting a rejection could corrupt the authoritative outcome.
   const events: import('../src/runtime/config-port.ts').AuthorizationFlowEvent[] = []
   let promptSettled = false
   const authorization = port({
@@ -438,15 +437,14 @@ test('authorization cancel() closes the pending prompt UI immediately without re
   await settle()
   off()
   assert.equal(promptSettled, false, 'the bridge is NOT rejected before the Host outcome')
-  assert.ok(events.some(event => event.kind === 'prompt-withdrawn' && event.attemptId === promptEvent.attemptId),
-    'the prompt UI closes immediately')
+  assert.equal(events.some(event => event.kind === 'prompt-withdrawn'), false, 'the prompt stays answerable')
   assert.equal(events.some(event => event.kind === 'settled'), false, 'no terminal outcome is forged')
 })
 
-test('authorization cancel() emits prompt-withdrawn so the UI closes even if the flow never settles', async () => {
-  // A cancel must close the client's prompt UI EVEN IF the upstream flow
-  // ignores its abort signal and never settles. It must NOT reject the bridge
-  // or forge a terminal outcome: the Host still owns settlement.
+test('authorization cancel() does not forge a close or terminal for a wedged provider', async () => {
+  // The Host still owns settlement. A never-settling provider must not be
+  // papered over with a fake prompt-withdrawn or a fake cancelled outcome; the
+  // UI keeps the prompt answerable until the Host actually settles.
   const events: import('../src/runtime/config-port.ts').AuthorizationFlowEvent[] = []
   let promptSettled = false
   const authorization = port({
@@ -482,10 +480,8 @@ test('authorization cancel() emits prompt-withdrawn so the UI closes even if the
   await settle()
   off()
   assert.equal(promptSettled, false, 'cancel does not inject a rejection into the flow')
-  const withdrawn = events.find(event => event.kind === 'prompt-withdrawn'
-    && event.attemptId === promptEvent.attemptId && event.promptId === promptEvent.promptId)
-  assert.ok(withdrawn !== undefined,
-    `cancel must emit prompt-withdrawn for the open prompt (the UI closes without a settled event):\n${JSON.stringify(events)}`)
+  assert.equal(events.some(event => event.kind === 'prompt-withdrawn'), false, 'the prompt remains owned by the Host attempt')
+  assert.equal(events.some(event => event.kind === 'settled'), false, 'no terminal outcome is forged')
 })
 
 test('a caller-signal abort with a NEVER-SETTLING provider finalizes the attempt (no retention)', async () => {
@@ -543,12 +539,10 @@ test('a caller-signal abort with a NEVER-SETTLING provider finalizes the attempt
   await settle()
   off()
   assert.equal(promptSettled, false, 'the caller abort does not inject a rejection into the flow')
-  const withdrawn = events.find(event => event.kind === 'prompt-withdrawn'
-    && event.attemptId === promptEvent.attemptId && event.promptId === promptEvent.promptId)
-  assert.ok(withdrawn !== undefined,
-    `the caller abort must emit prompt-withdrawn (the UI closes):\n${JSON.stringify(events)}`)
+  assert.equal(events.some(event => event.kind === 'prompt-withdrawn'), false, 'the prompt is not torn down without a Host outcome')
+  assert.equal(events.some(event => event.kind === 'settled'), false, 'no terminal outcome is forged')
   assert.equal(adds, 1, 'one caller-abort listener registered')
-  assert.equal(removes, 1, 'the finalization disposed it — no leak on the long-lived signal')
+  assert.equal(removes, 1, 'the caller listener was disposed — no leak on the long-lived signal')
 })
 
 /** Flush the microtask queue (the event bridge is promise-based). */
