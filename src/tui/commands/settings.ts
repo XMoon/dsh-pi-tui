@@ -152,29 +152,41 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
   // the ConfigPort; the pages own view/draft state only. Both are constructed
   // ONCE per command coordinator (the ConfigPort is stable for the process
   // run) and every page instance receives the SAME semantics.
-  const credentialWorkflow = new CredentialWorkflow({
-    providers: runner.config.providers,
-    credentials: runner.config.credentials,
-    authorization: runner.config.authorization,
-    account: runner.config.account,
-    catalog: runner.catalog,
-    signal: runner.signal,
-    diag: runner.diag,
-  })
+  let credentialWorkflowInstance: CredentialWorkflow | undefined
+  /** Construct the workflows LAZILY: ordinary startup (and every non-Models
+   *  command) must not require a ConfigPort at all. */
+  const credentialWorkflowOf = (): CredentialWorkflow => {
+    credentialWorkflowInstance ??= new CredentialWorkflow({
+      providers: runner.config.providers,
+      credentials: runner.config.credentials,
+      authorization: runner.config.authorization,
+      account: runner.config.account,
+      catalog: runner.catalog,
+      signal: runner.signal,
+      diag: runner.diag,
+    })
+    return credentialWorkflowInstance
+  }
   const copyText = (text: string): void => {
     detach('settings copy', () => runner.copyToClipboard(text), { notify: true })
   }
-  const accountWorkflow = new AccountWorkflow({
-    account: runner.config.account,
-    version: packageVersion(),
-    openUrl: (url: string) => openExternalUrl(url),
-    copy: copyText,
-    run: (label: string, task: () => Promise<void>) => { detach(label, task, { notify: false }) },
-    diag: runner.diag,
-  })
-  const createModelsSource = (): ModelsWorkspaceSource => ({
+  let accountWorkflowInstance: AccountWorkflow | undefined
+  const accountWorkflowOf = (): AccountWorkflow => {
+    accountWorkflowInstance ??= new AccountWorkflow({
+      account: runner.config.account,
+      version: packageVersion(),
+      openUrl: (url: string) => openExternalUrl(url),
+      copy: copyText,
+      run: (label: string, task: () => Promise<void>) => { detach(label, task, { notify: false }) },
+      diag: runner.diag,
+    })
+    return accountWorkflowInstance
+  }
+  const createModelsSource = (): ModelsWorkspaceSource => {
+    const workflow = credentialWorkflowOf()
+    return {
     available: runner.config.credentials.available() && runner.config.providers.available(),
-    rows: () => credentialWorkflow.mergedTargets().map(target => target.kind === 'reference'
+    rows: () => workflow.mergedTargets().map(target => target.kind === 'reference'
       ? {
           kind: 'reference' as const,
           route: target.route,
@@ -185,7 +197,7 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
           namesCredential: target.namesCredential,
           methods: [],
           inFlight: false,
-          profile: credentialWorkflow.readProfile(target.route),
+          profile: workflow.readProfile(target.route),
         }
       : {
           kind: 'authorization' as const,
@@ -199,40 +211,41 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
           inFlight: target.inFlight,
           profile: target.route === undefined
             ? { route: '', configured: false, models: [] }
-            : credentialWorkflow.readProfile(target.route),
+            : workflow.readProfile(target.route),
         }),
-    accountSummary: () => credentialWorkflow.accountSummary(),
+    accountSummary: () => workflow.accountSummary(),
     credentialState: async (ref: string) => {
-      const info = await credentialWorkflow.describeReference(ref)
+      const info = await workflow.describeReference(ref)
       return {
         kind: 'known' as const,
         configured: info.configured,
         ...(info.source === undefined ? {} : { source: info.source }),
       }
     },
-    storedCredentials: () => credentialWorkflow.storedCredentials(),
-    describeReference: (ref: string) => credentialWorkflow.describeReference(ref),
-    setReference: (ref: string, secret: string) => credentialWorkflow.setReference(ref, secret),
-    clearReference: (ref: string) => credentialWorkflow.clearReference(ref),
-    deleteRecord: (key: string) => credentialWorkflow.deleteRecord(key),
+    storedCredentials: () => workflow.storedCredentials(),
+    describeReference: (ref: string) => workflow.describeReference(ref),
+    setReference: (ref: string, secret: string) => workflow.setReference(ref, secret),
+    clearReference: (ref: string) => workflow.clearReference(ref),
+    deleteRecord: (key: string) => workflow.deleteRecord(key),
     beginAuthorization: (key: string, method: string | undefined, signal: AbortSignal) =>
-      credentialWorkflow.beginAuthorization(key, method, signal),
-    authorizationEvents: listener => credentialWorkflow.authorizationEvents(listener),
+      workflow.beginAuthorization(key, method, signal),
+    authorizationEvents: listener => workflow.authorizationEvents(listener),
     respondAuthorization: (attemptId: string, promptId: string, answer: string | null) =>
-      credentialWorkflow.respondAuthorization(attemptId, promptId, answer),
-    cancelAuthorization: (attemptId: string) => credentialWorkflow.cancelAuthorization(attemptId),
-    provisionKeylessProfile: (route: string | undefined) => credentialWorkflow.provisionKeylessProfile(route),
-    discoverModels: request => credentialWorkflow.discoverModels(request),
-    createProvider: draft => credentialWorkflow.createProvider(draft),
-    configGuide: () => credentialWorkflow.configGuide(),
+      workflow.respondAuthorization(attemptId, promptId, answer),
+    cancelAuthorization: (attemptId: string) => workflow.cancelAuthorization(attemptId),
+    provisionKeylessProfile: (route: string | undefined) => workflow.provisionKeylessProfile(route),
+    discoverModels: request => workflow.discoverModels(request),
+    createProvider: draft => workflow.createProvider(draft),
+    configGuide: () => workflow.configGuide(),
     openUrl: (url: string) => openExternalUrl(url),
     copy: copyText,
     run: (label: string, task: () => Promise<void>) => { detach(label, task, { notify: false }) },
-  })
+    }
+  }
   const createModelsPage = (initial: ModelsInitialView, openAccount: () => void) =>
     new ModelsWorkspacePage(createModelsSource(), () => app.requestRender(), initial, openAccount)
   const createAccountPage = (initial: AccountInitialView) =>
-    new AccountWorkspacePage(accountWorkflow, () => app.requestRender(), initial)
+    new AccountWorkspacePage(accountWorkflowOf(), () => app.requestRender(), initial)
 
   // ── S2/PR-B §3.3 / §B3.4: the Web Search / Fetch settings section ──────
   //

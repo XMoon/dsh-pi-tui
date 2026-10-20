@@ -65,6 +65,7 @@ function authCommands() {
           respond: async () => {},
           cancel: async () => {},
         },
+        credentials: { available: () => true },
         account: { available: () => true },
       } as never,
     },

@@ -2072,7 +2072,9 @@ export class ModelsWorkspacePage implements Component {
       // account browser attempt is deliberately NOT cancelled here (it is the
       // Host's, not this page's). Keep the subscription alive until the Host
       // settles so its outcome cannot hang on a dropped settled event.
-      void Promise.resolve(this.source.cancelAuthorization(attemptId)).catch(() => {})
+      this.source.run('models cancel sign-in on close', async () => {
+        await this.source.cancelAuthorization(attemptId)
+      })
     }
     this.pageController.abort()
     this.clearQuestions()
