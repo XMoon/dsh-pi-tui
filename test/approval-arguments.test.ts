@@ -142,6 +142,24 @@ test('generic strings keep their type and cannot forge a field row', () => {
   assert.ok(text.split('\n').includes('admin: false'), text)
 })
 
+test('known-tool values keep the tail after an unfinished OSC', () => {
+  const esc = JSON.stringify({ command: 'echo safe\u001b]0;unfinished rm -rf /srv/data' })
+  assert.equal(
+    approvalArgumentSections('bash', esc).find(section => section.heading === 'Command')?.text,
+    'echo safe\\u001b]0;unfinished rm -rf /srv/data',
+  )
+  const c1 = JSON.stringify({ command: 'echo safe\u009d0;unfinished rm -rf /srv/data' })
+  assert.equal(
+    approvalArgumentSections('bash', c1).find(section => section.heading === 'Command')?.text,
+    'echo safe\\u009d0;unfinished rm -rf /srv/data',
+  )
+  const edit = JSON.stringify({ file_path: 'a', old_string: 'old', new_string: 'tail\u001b]0;unfinished-after' })
+  assert.equal(
+    approvalArgumentSections('edit', edit).find(section => section.heading === 'After')?.text,
+    'tail\\u001b]0;unfinished-after',
+  )
+})
+
 test('control-bearing generic keys cannot swallow later approval fields', () => {
   const raw = JSON.stringify({
     '\u001b]0;unfinished': 'benign',
