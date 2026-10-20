@@ -656,3 +656,68 @@ test('the Add Provider page drives discovery → multi-select → review → cre
   assert.ok(calls.some(call => call === 'create:new-route:openai-completions:https://new.example/v1:m1,m2:'), calls.join(','))
   assert.match(viewText(page), /provider new-route added/u)
 })
+
+test('a withdrawn older SELECT prompt can never overwrite the newer select prompt (RFL-003)', async () => {
+  const { source, calls } = fakeSource()
+  const listeners = new Set<(event: import('../src/runtime/config-port.ts').AuthorizationFlowEvent) => void>()
+  const emit = (event: import('../src/runtime/config-port.ts').AuthorizationFlowEvent): void => {
+    for (const listener of listeners) listener(event)
+  }
+  source.authorizationEvents = listener => {
+    listeners.add(listener)
+    return () => { listeners.delete(listener) }
+  }
+  source.beginAuthorization = async () => {
+    emit({ kind: 'prompt', attemptId: 'auth-3', promptId: 's1', prompt: { kind: 'select', message: 'FIRST SELECT', options: [{ id: 'a', label: 'A' }] } })
+    emit({ kind: 'prompt', attemptId: 'auth-3', promptId: 's2', prompt: { kind: 'select', message: 'SECOND SELECT', options: [{ id: 'b', label: 'B' }] } })
+    return { kind: 'started', attemptId: 'auth-3' }
+  }
+  source.respondAuthorization = async (attemptId, promptId, answer) => {
+    calls.push(`respond:${attemptId}:${promptId}:${answer}`)
+    emit({ kind: 'settled', attemptId, status: 'authorized' })
+  }
+  const page = new ModelsWorkspacePage(source, () => {}, { view: 'provider', route: 'anthropic' }, () => {})
+  page.setBodyHeight(26)
+  await flush()
+  viewText(page)
+  page.handleInput('\r')
+  await flush()
+  assert.match(viewText(page), /FIRST SELECT/u)
+  emit({ kind: 'prompt-withdrawn', attemptId: 'auth-3', promptId: 's1' })
+  await flush()
+  assert.match(viewText(page), /SECOND SELECT/u)
+  assert.doesNotMatch(viewText(page), /FIRST SELECT/u)
+  page.handleInput('\r')
+  await flush()
+  assert.ok(calls.includes('respond:auth-3:s2:b'), calls.join(','))
+  assert.equal(calls.some(call => call.startsWith('respond:auth-3:s1:')), false)
+})
+
+test('a pending clear cannot be left behind by Esc, and its rejected re-read stays on the same target (RFL-002)', async () => {
+  const { source, calls } = fakeSource()
+  let callsToDescribe = 0
+  let rejectReRead: ((error: Error) => void) | undefined
+  source.describeReference = async () => {
+    callsToDescribe += 1
+    if (callsToDescribe <= 2) return { configured: true }
+    return await new Promise((_resolve, reject) => { rejectReRead = reject })
+  }
+  source.clearReference = async ref => { calls.push(`unset:${ref}`) }
+  const page = new ModelsWorkspacePage(source, () => {}, {
+    view: 'logout',
+    target: { kind: 'reference', ref: 'ACME_API_KEY', label: 'Acme Gateway' },
+  }, () => {})
+  page.setBodyHeight(24)
+  await flush()
+  viewText(page)
+  page.handleInput('\r') // confirm the clear
+  await flush()
+  assert.ok(calls.includes('unset:ACME_API_KEY'), calls.join(','))
+  page.handleInput('\u001b')
+  await flush()
+  assert.match(viewText(page), /Clear stored credential/u, 'the pending clear keeps the page')
+  assert.match(viewText(page), /in flight/u)
+  rejectReRead?.(new Error('store read failed'))
+  await flush()
+  assert.match(viewText(page), /Not cleared: the clear returned; the store could not be re-read/u)
+})
