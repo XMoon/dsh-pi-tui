@@ -922,10 +922,17 @@ export class DirectAuthorizationConfig implements AuthorizationConfig {
     // Record the forced intent BEFORE dispatching abort: a provider abort
     // listener can synchronously call prompt(), and bridgePrompt() must
     // already see the dead surface. Abort still precedes bridge rejection.
-    if (forcePrompts) attempt.forced = true
+    if (forcePrompts) {
+      attempt.forced = true
+      attempt.controller.abort()
+      this.rejectAttemptPrompts(attemptId, 'authorization surface disposed')
+      attempt.disposeCallerAbortListener()
+      return
+    }
+    // Ordinary cancel only requests Host withdrawal. KEEP the caller-abort
+    // listener alive: a later forced page teardown must still be able to
+    // release a prompt the Host could not withdraw during its commit.
     attempt.controller.abort()
-    if (forcePrompts) this.rejectAttemptPrompts(attemptId, 'authorization surface disposed')
-    attempt.disposeCallerAbortListener()
   }
 
   /** The ONE idempotent local-finalization path for an attempt: rejects
