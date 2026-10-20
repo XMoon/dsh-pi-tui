@@ -115,7 +115,7 @@ test('pre-push-stages: current verify:prepush derives to the expected 15 stages'
     'pnpm typecheck:fork',
     'pnpm typecheck:bench',
     'pnpm test:fork',
-    'pnpm test:docs',
+    'pnpm test:tmux',
     'pnpm test:tooling',
     'pnpm gate:installation-doc',
     'pnpm gate:pi-divergence-ledger',
@@ -137,7 +137,7 @@ test('pre-push-stages: current verify:prepush:nofork derives to 13 stages', () =
   assert.equal(stages.length, 13)
   assert.deepEqual(stages, [
     'pnpm typecheck:bench',
-    'pnpm test:docs',
+    'pnpm test:tmux',
     'pnpm test:tooling',
     'pnpm gate:installation-doc',
     'pnpm gate:pi-divergence-ledger',

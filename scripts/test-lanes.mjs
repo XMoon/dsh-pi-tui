@@ -19,8 +19,9 @@
  *     (the scripts, the CI context, the static ownership gates). It is kept
  *     OUT of the packaging lifecycle so the artifact never depends on the
  *     developer git/CI environment.
- *   - `docs` — the tmux terminal-tooling tests (the historical `test:docs`
- *     name; the lane never tested `docs/**`).
+ *   - `tmux` — the tmux terminal-tooling tests (the historical `test:docs`
+ *     name: the lane never tested `docs/**`, it proves the tmux terminal
+ *     tooling).
  *
  * @module @xmoon76/dsh-pi-tui/scripts/test-lanes
  */
@@ -44,7 +45,7 @@ export const LANES = {
     patterns: ['tooling/**', 'architecture/**'],
     suffixes: ['.test.mjs', '.test.ts'],
   },
-  docs: {
+  tmux: {
     description: 'the tmux terminal-tooling suite',
     patterns: ['tmux/**'],
     suffixes: ['.test.mjs'],
