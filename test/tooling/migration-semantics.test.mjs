@@ -190,3 +190,33 @@ test('a whole-tree enumeration resolves to the directory it walks', () => {
   assert.deepEqual(productionReferences(source), ['../src/'],
     'the enumeration base is the reference')
 })
+
+test('a path-join READ of a production file is a reference', () => {
+  // The tree reads production files through a JOIN of the repository root
+  // and literal segments: `readFileSync(join(root, 'src', 'app', …))`.
+  const source = [
+    "const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..')",
+    "const surface = readFileSync(join(root, 'src', 'app', 'surface', 'runtime.ts'), 'utf8')",
+  ].join('\n')
+  assert.deepEqual(
+    productionReferences(source).filter(ref => ref.includes('/src/')),
+    ['../../src/app/surface/runtime.ts'],
+    'the join read must resolve to the production file',
+  )
+})
+
+test('a path join that WRITES a fixture is not a production reference', () => {
+  // `join(workspace, 'src', 'deep')` builds a TEMPORARY tree inside the
+  // test's own work root. Its paths are not the repository's production
+  // modules, so they must not be counted.
+  const source = [
+    "const workspace = join(dirname(fileURLToPath(import.meta.url)), '..', 'work')",
+    "mkdirSync(join(workspace, 'src', 'deep'), { recursive: true })",
+    "writeFileSync(join(workspace, 'src', 'deep', 'utility.ts'), 'x')",
+  ].join('\n')
+  assert.deepEqual(
+    productionReferences(source).filter(ref => ref.includes('/src/')),
+    [],
+    'a fixture write is not a production reference',
+  )
+})

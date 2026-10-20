@@ -11,9 +11,12 @@
  *   3. a file was REMOVED (its cases are gone);
  *   4. a file's case count CHANGED (a test was added, merged or retired).
  *
- * A MOVE is only claimed when the two trees' file sets prove it: the file
- * exists in the base tree under one path and in the current tree under
- * another, with the SAME content. Without that proof a differing path is
+ * A MOVE is claimed on a HEURISTIC: the file exists in the base tree under
+ * one path and in the current tree under another, with the same basename and
+ * the same case count, and the mapping is globally one-to-one. A report of
+ * paths and counts CANNOT prove file identity, and the tool does not claim
+ * to: the reconciliation's claim is "these cases moved from one path to
+ * another", which is what the per-file counts support. An ambiguous pair is
  * reported as an ADDITION and a REMOVAL — never as a move.
  *
  * The report is VALIDATED against its own totals: a report whose parsed
