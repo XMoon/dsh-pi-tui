@@ -484,7 +484,7 @@ test('authorization cancel() does not forge a close or terminal for a wedged pro
   assert.equal(events.some(event => event.kind === 'settled'), false, 'no terminal outcome is forged')
 })
 
-test('a caller-signal abort with a NEVER-SETTLING provider finalizes the attempt (no retention)', async () => {
+test('a forced caller abort releases prompt bridges but leaves the terminal to the Host', async () => {
   // The provider drives a prompt and then IGNORES its signal forever. The
   // caller-signal abort must route through the SAME idempotent
   // finalization as cancel(): reject the pending bridge, emit
@@ -538,8 +538,8 @@ test('a caller-signal abort with a NEVER-SETTLING provider finalizes the attempt
   controller.abort() // runner teardown: the provider never settles
   await settle()
   off()
-  assert.equal(promptSettled, false, 'the caller abort does not inject a rejection into the flow')
-  assert.equal(events.some(event => event.kind === 'prompt-withdrawn'), false, 'the prompt is not torn down without a Host outcome')
+  assert.equal(promptSettled, true, 'forced teardown releases a flow that may await the lost prompt')
+  assert.ok(events.some(event => event.kind === 'prompt-withdrawn'), 'the destroyed prompt UI is cleaned up')
   assert.equal(events.some(event => event.kind === 'settled'), false, 'no terminal outcome is forged')
   assert.equal(adds, 1, 'one caller-abort listener registered')
   assert.equal(removes, 1, 'the caller listener was disposed — no leak on the long-lived signal')

@@ -1737,10 +1737,19 @@ export class ModelsWorkspacePage implements Component {
 
   // ── input ────────────────────────────────────────────────────────────────
 
+  /** Re-evaluate the live form budget from the CURRENT notice and body height,
+   *  not the last painted frame: an authNotice can gain URL/code lines without
+   *  changing the terminal height. */
+  private questionFits(): boolean {
+    if (!this.questionUsable) return false
+    const noticeLines = this.renderAuthNotice(this.lastWidth).length
+    return Math.max(1, this.bodyHeight - 1 - noticeLines) >= 8
+  }
+
   handleInput(data: string): ModelsPageExit {
     if (this.disposed) return 'handled'
     if (this.question !== undefined) {
-      if (!this.questionUsable) {
+      if (!this.questionFits()) {
         if (matchesKey(data, 'escape')) this.question.flow.handleInput(data)
         else {
           this.notice = 'resize the terminal to show the full form before submitting'
@@ -2112,7 +2121,7 @@ export class ModelsWorkspacePage implements Component {
   onCellPress(x: number, y: number): void {
     if (this.disposed) return
     if (this.question !== undefined) {
-      if (!this.questionUsable) return
+      if (!this.questionFits()) return
       const row = y - this.questionTop
       const gesture = row >= 0 && row < this.questionRows ? this.question.flow.beginMousePress(row) : undefined
       this.questionPress = gesture === undefined
@@ -2127,7 +2136,7 @@ export class ModelsWorkspacePage implements Component {
   onCellClick(x: number, y: number): void {
     if (this.disposed) return
     if (this.question !== undefined) {
-      if (!this.questionUsable) return
+      if (!this.questionFits()) return
       const pressed = this.questionPress
       this.questionPress = undefined
       const row = y - this.questionTop
@@ -2217,6 +2226,11 @@ export class ModelsWorkspacePage implements Component {
   dispose(): void {
     if (this.disposed) return
     this.disposed = true
+    // Abort the page-owned signal FIRST: the Direct adapter uses this forced
+    // caller-abort path to release prompt bridges whose UI is about to be
+    // destroyed. Doing the ordinary cancel first could dispose that listener
+    // and strand a flow awaiting a lost prompt.
+    this.pageController.abort()
     const attemptId = this.auth?.attemptId
     if (attemptId !== undefined) {
       // A native attempt must not outlive the page with an open prompt. The
@@ -2227,7 +2241,6 @@ export class ModelsWorkspacePage implements Component {
         await this.source.cancelAuthorization(attemptId)
       })
     }
-    this.pageController.abort()
     this.clearQuestions()
     this.pendingAfterAuth = undefined
     this.picker = undefined
