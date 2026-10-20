@@ -184,6 +184,12 @@ export class AccountWorkspacePage implements Component {
     this.applyView(view)
   }
 
+  /** Adopt a mutation's returned snapshot only when no newer watch/refresh
+   *  snapshot has been committed since the operation started. */
+  private commitOperationView(view: AccountView, serial: number): void {
+    if (serial === this.stateSerial) this.commitView(view)
+  }
+
   private invalidateSignOutConfirmation(reason: string): void {
     if (!this.signOutConfirm) return
     this.signOutConfirm = false
@@ -262,6 +268,7 @@ export class AccountWorkspacePage implements Component {
 
   private signIn(): void {
     if (this.busy !== undefined) return
+    const serial = ++this.stateSerial
     if (this.source.callbackOrigin() === undefined) {
       this.notice = 'the Host browser callback listener is unavailable — browser sign-in cannot complete'
       this.requestRender()
@@ -274,8 +281,10 @@ export class AccountWorkspacePage implements Component {
     this.source.run('account sign in', async () => {
       try {
         const view = await this.source.startSignIn()
-        this.commitView(view)
-        this.settle(() => { this.busy = undefined })
+        this.settle(() => {
+          this.commitOperationView(view, serial)
+          this.busy = undefined
+        })
       } catch (error) {
         this.settle(() => {
           this.busy = undefined
@@ -288,14 +297,17 @@ export class AccountWorkspacePage implements Component {
   private cancelAttempt(): void {
     const attempt = this.activeAttempt()
     if (attempt === undefined || this.busy !== undefined) return
+    const serial = ++this.stateSerial
     this.busy = 'cancel'
     this.revision += 1
     this.requestRender()
     this.source.run('account cancel sign in', async () => {
       try {
         const view = await this.source.cancelSignIn(attempt.id)
-        this.commitView(view)
-        this.settle(() => { this.busy = undefined })
+        this.settle(() => {
+          this.commitOperationView(view, serial)
+          this.busy = undefined
+        })
       } catch (error) {
         this.settle(() => {
           this.busy = undefined
@@ -321,6 +333,7 @@ export class AccountWorkspacePage implements Component {
 
   private signOut(): void {
     if (this.busy !== undefined) return
+    const serial = ++this.stateSerial
     this.busy = 'signout'
     this.revision += 1
     this.requestRender()
@@ -331,7 +344,7 @@ export class AccountWorkspacePage implements Component {
           this.signOutConfirm = false
           this.signOutIdentity = undefined
           this.busy = undefined
-          this.commitView(view)
+          this.commitOperationView(view, serial)
         })
       } catch (error) {
         this.settle(() => {

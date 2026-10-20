@@ -386,3 +386,36 @@ test('a same-status Host grant replacement invalidates the open sign-out confirm
   assert.match(after, /Account B/u)
   assert.match(after, /confirm sign-out again/u)
 })
+
+test('a stale startSignIn snapshot cannot overwrite a newer watch state (P2)', async () => {
+  const state: SourceState = { view: signedOut(), profileFails: false, balanceFails: false, runningTasks: false, calls: [] }
+  const source = makeSource(state)
+  let resolveStart: ((view: AccountView) => void) | undefined
+  source.startSignIn = () => new Promise<AccountView>(resolve => {
+    state.calls.push('signIn')
+    resolveStart = resolve
+  })
+  let pushWatch: ((view: AccountView) => void) | undefined
+  source.watch = async function* () {
+    yield state.view
+    while (true) {
+      const next = await new Promise<AccountView>(resolve => { pushWatch = resolve })
+      yield next
+    }
+  }
+  const page = new AccountWorkspacePage(source, () => {}, { view: 'page' })
+  page.setBodyHeight(30)
+  await flush()
+  text(page)
+  page.handleInput('\r') // start sign-in; its snapshot is held
+  await flush()
+  state.view = stored()
+  pushWatch?.(state.view) // newer watch: authorization already completed
+  await flush()
+  resolveStart?.(waitingAttempt()) // old snapshot arrives late
+  await flush()
+  const painted = text(page)
+  assert.match(painted, /Signed in \(stored credential\)/u)
+  assert.doesNotMatch(painted, /waiting-browser/u)
+  assert.equal(page.pendingMutation(), false)
+})
