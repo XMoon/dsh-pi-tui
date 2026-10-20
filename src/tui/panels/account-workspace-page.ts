@@ -458,10 +458,12 @@ export class AccountWorkspacePage implements Component {
     if (url !== undefined) {
       content.push('', color.textStrong('Browser authorization'))
       content.push(...this.wrapText(url, width))
+      const host = this.callbackHost()
       const port = this.callbackPort()
-      if (port !== undefined) {
-        content.push('', color.textDim(`Remote/SSH: the callback listener is bound to 127.0.0.1:${port} on the Host.`))
-        content.push(...this.wrapText(`ssh -N -L 127.0.0.1:${port}:127.0.0.1:${port} <SSH_TARGET>`, width))
+      if (host !== undefined && port !== undefined) {
+        const target = host.includes(':') && !host.startsWith('[') ? `[${host}]` : host
+        content.push('', color.textDim(`Remote/SSH: the callback listener is bound to ${target}:${port} on the Host.`))
+        content.push(...this.wrapText(`ssh -N -L 127.0.0.1:${port}:${target}:${port} <SSH_TARGET>`, width))
         content.push(color.textDim('Create that tunnel from your local machine, then open the authorization URL locally. The port is random per process; re-read it after a restart.'))
       }
     } else {
@@ -540,6 +542,16 @@ export class AccountWorkspacePage implements Component {
     return `Recharge: ${recharge} · Bonus: ${bonus}`
   }
 
+  private callbackHost(): string | undefined {
+    const origin = this.source.callbackOrigin()
+    if (origin === undefined) return undefined
+    try {
+      return new URL(origin).hostname
+    } catch {
+      return undefined
+    }
+  }
+
   private callbackPort(): number | undefined {
     const origin = this.source.callbackOrigin()
     if (origin === undefined) return undefined
@@ -548,6 +560,14 @@ export class AccountWorkspacePage implements Component {
     } catch {
       return undefined
     }
+  }
+
+  private sshTemplate(): string | undefined {
+    const host = this.callbackHost()
+    const port = this.callbackPort()
+    if (host === undefined || port === undefined) return undefined
+    const target = host.includes(':') && !host.startsWith('[') ? `[${host}]` : host
+    return `ssh -N -L 127.0.0.1:${port}:${target}:${port} <SSH_TARGET>`
   }
 
   // ── input ────────────────────────────────────────────────────────────────
@@ -639,8 +659,8 @@ export class AccountWorkspacePage implements Component {
         if (attempt?.authorizeUrl !== undefined) this.copy(attempt.authorizeUrl)
         return 'handled'
       case 'account:copy-ssh': {
-        const port = this.callbackPort()
-        if (port !== undefined) this.copy(`ssh -N -L 127.0.0.1:${port}:127.0.0.1:${port} <SSH_TARGET>`)
+        const template = this.sshTemplate()
+        if (template !== undefined) this.copy(template)
         return 'handled'
       }
       case 'account:usage':
@@ -677,28 +697,28 @@ export class AccountWorkspacePage implements Component {
     this.pressed = target === undefined ? undefined : { target, revision: this.revision, width: this.lastWidth, height: this.lastHeight }
   }
 
-  onCellClick(x: number, y: number): void {
-    if (this.disposed) return
+  onCellClick(x: number, y: number): 'handled' | 'exit' {
+    if (this.disposed) return 'handled'
     const pressed = this.pressed
     this.pressed = undefined
     const target = this.paintedTargets.find(candidate => candidate.row === y && x >= candidate.startCol && x < candidate.endCol)
-    if (pressed === undefined || target === undefined) return
+    if (pressed === undefined || target === undefined) return 'handled'
     if (pressed.revision !== this.revision
       || pressed.width !== this.lastWidth
       || pressed.height !== this.lastHeight
       || target.id !== pressed.target.id
-      || target.row !== pressed.target.row) return
-    if (!this.paintedActionIds.has(target.id)) return
+      || target.row !== pressed.target.row) return 'handled'
+    if (!this.paintedActionIds.has(target.id)) return 'handled'
     const rowIndex = this.paintedRowOrder.indexOf(target.id)
     if (rowIndex >= 0) {
       this.cursor = rowIndex
     } else {
       const projection = this.project(this.lastWidth)
       const action = projection.actions.find(candidate => candidate.id === target.id)
-      if (action === undefined || !action.enabled) return
+      if (action === undefined || !action.enabled) return 'handled'
       this.cursor = this.paintedRowOrder.length + projection.actions.indexOf(action)
     }
-    this.activate(target.id)
+    return this.activate(target.id)
   }
 
   private actionIndexOf(id: string): number {

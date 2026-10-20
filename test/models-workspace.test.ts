@@ -1434,11 +1434,10 @@ test('a profile-written/key-failed outcome refreshes the provider list (F3)', as
   assert.match(viewText(page), /partial-route/u)
 })
 
-test('a short select picker keeps its action bar visible with a 3-line notice (F4)', async () => {
+function shortPickerPage(): { page: ModelsWorkspacePage; picked: () => string | undefined } {
   const { source } = fakeSource()
   let picked: string | undefined
   const page = new ModelsWorkspacePage(source, () => {}, { view: 'provider', route: 'anthropic' }, () => {})
-  page.setBodyHeight(4)
   ;(page as unknown as { picker: unknown }).picker = {
     token: {}, header: 'Sign in method', items: [{ value: 'a', label: 'Method A' }, { value: 'b', label: 'Method B' }],
     index: 0,
@@ -1446,15 +1445,31 @@ test('a short select picker keeps its action bar visible with a 3-line notice (F
     onCancel: () => {},
   }
   ;(page as unknown as { authNotice: unknown }).authNotice = { message: 'Continue in your browser', url: 'https://example.test/authorize', code: 'ABCD' }
+  return { page, picked: () => picked }
+}
+
+test('a 4-row picker with a 3-line notice refuses to hide auth details or submit (F4/F7)', async () => {
+  const { page, picked } = shortPickerPage()
+  page.setBodyHeight(4)
   const lines = page.render(40).map(stripTerminalSequences)
-  assert.equal(lines.length, 4)
+  assert.match(lines.join('\n'), /Resize the terminal/u)
+  assert.doesNotMatch(lines.join('\n'), /Method A/u)
+  page.handleInput('\r')
+  assert.equal(picked(), undefined)
+})
+
+test('a 5-row picker shows the full notice, action bar and correct mouse row (F4/F5)', async () => {
+  const { page, picked } = shortPickerPage()
+  page.setBodyHeight(5)
+  const lines = page.render(40).map(stripTerminalSequences)
+  assert.equal(lines.length, 5)
+  assert.match(lines.join('\n'), /ABCD/u)
   assert.match(lines.at(-1) ?? '', /Enter select/u)
-  assert.match(lines.at(-1) ?? '', /Esc cancel/u)
-  // The notice lines are not hit targets; the painted picker row is at y=2.
+  // Notice occupies y=0..2, the picker row is y=3, action y=4.
   page.onCellPress(2, 0)
   page.onCellClick(2, 0)
-  assert.equal(picked, undefined, 'a notice line must not select a hidden picker row')
-  page.onCellPress(2, 2)
-  page.onCellClick(2, 2)
-  assert.equal(picked, 'a')
+  assert.equal(picked(), undefined, 'a notice line must not select a picker row')
+  page.onCellPress(2, 3)
+  page.onCellClick(2, 3)
+  assert.equal(picked(), 'a')
 })

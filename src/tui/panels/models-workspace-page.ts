@@ -289,6 +289,7 @@ export class ModelsWorkspacePage implements Component {
   /** The embedded QuestionFlow requires an 8-row budget to keep its confirm
    *  hint visible; below it Enter must not submit a clipped form. */
   private questionUsable = true
+  private pickerUsable = true
   private questionPress: { readonly gesture: QuestionMouseGesture; readonly revision: number; readonly width: number; readonly height: number; readonly row: number } | undefined
   private copyValue: string | undefined
   private paintedCopy = false
@@ -1298,14 +1299,22 @@ export class ModelsWorkspacePage implements Component {
     }
     if (this.modelPicker !== undefined) {
       const notice = this.renderAuthNotice(width)
-      const visibleNotice = notice.slice(0, Math.max(0, height - 2))
-      lines.push(...visibleNotice.map(line => fit(line, width)))
-      const pickerRows = Math.max(1, height - 1 - visibleNotice.length)
+      const required = notice.length + 2
+      this.pickerUsable = required <= height
+      if (!this.pickerUsable) {
+        lines.push(color.warning(`Resize the terminal: the authorization notice, model choices and actions need ${required} rows.`))
+        lines.push(color.textMuted(renderActionBarRow([{ text: 'Esc cancel', priority: 8 }], width)))
+        this.paintedCopy = false
+        this.paintedTargets = []
+        return this.pad(lines, height, width)
+      }
+      lines.push(...notice.map(line => fit(line, width)))
+      const pickerRows = Math.max(1, height - 1 - notice.length)
       const targetStart = targets.length
       lines.push(...this.renderModelPicker(width, pickerRows, targets))
       for (let index = targetStart; index < targets.length; index += 1) {
         const target = targets[index]!
-        targets[index] = { ...target, row: target.row + visibleNotice.length }
+        targets[index] = { ...target, row: target.row + notice.length }
       }
       lines.push(color.textMuted(renderActionBarRow([
         { text: 'Space toggle', priority: 5 },
@@ -1319,15 +1328,21 @@ export class ModelsWorkspacePage implements Component {
     }
     if (this.picker !== undefined) {
       const notice = this.renderAuthNotice(width)
-      // Keep the action bar and at least one selectable row: a 3-line notice on
-      // a 4-row page must not push the only decision affordance off-screen.
-      const visibleNotice = notice.slice(0, Math.max(0, height - 2))
-      lines.push(...visibleNotice.map(line => fit(line, width)))
+      const required = notice.length + 2
+      this.pickerUsable = required <= height
+      if (!this.pickerUsable) {
+        lines.push(color.warning(`Resize the terminal: the authorization notice, sign-in choices and actions need ${required} rows.`))
+        lines.push(color.textMuted(renderActionBarRow([{ text: 'Esc cancel', priority: 8 }], width)))
+        this.paintedCopy = false
+        this.paintedTargets = []
+        return this.pad(lines, height, width)
+      }
+      lines.push(...notice.map(line => fit(line, width)))
       const targetStart = targets.length
-      lines.push(...this.renderPicker(width, Math.max(1, height - 1 - visibleNotice.length), targets))
+      lines.push(...this.renderPicker(width, Math.max(1, height - 1 - notice.length), targets))
       for (let index = targetStart; index < targets.length; index += 1) {
         const target = targets[index]!
-        targets[index] = { ...target, row: target.row + visibleNotice.length }
+        targets[index] = { ...target, row: target.row + notice.length }
       }
       lines.push(color.textMuted(renderActionBarRow([
         { text: 'Up/Down choose', priority: 5 },
@@ -1868,6 +1883,11 @@ export class ModelsWorkspacePage implements Component {
   private handleModelPickerInput(data: string): void {
     const picker = this.modelPicker
     if (picker === undefined) return
+    if (!this.pickerFits()) {
+      if (matchesKey(data, 'escape')) this.modelPicker = undefined
+      this.requestRender()
+      return
+    }
     if (matchesKey(data, 'escape') || matchesKey(data, 'backspace') || data === 'm' || data === 'M') {
       this.modelPicker = undefined
       if (data === 'm' || data === 'M') this.beginManualModels()
@@ -1937,9 +1957,19 @@ export class ModelsWorkspacePage implements Component {
     this.requestRender()
   }
 
+  private pickerFits(): boolean {
+    if (!this.pickerUsable) return false
+    return this.renderAuthNotice(this.lastWidth).length + 2 <= this.bodyHeight
+  }
+
   private handlePickerInput(data: string): void {
     const picker = this.picker
     if (picker === undefined) return
+    if (!this.pickerFits()) {
+      if (matchesKey(data, 'escape')) this.picker = undefined
+      this.requestRender()
+      return
+    }
     if (matchesKey(data, 'escape') || matchesKey(data, 'backspace')) {
       this.removePicker(picker)
       picker.onCancel()
@@ -2206,10 +2236,10 @@ export class ModelsWorkspacePage implements Component {
     this.pressed = target === undefined ? undefined : { target, revision: this.revision, width: this.lastWidth, height: this.lastHeight }
   }
 
-  onCellClick(x: number, y: number): void {
-    if (this.disposed) return
+  onCellClick(x: number, y: number): ModelsPageExit {
+    if (this.disposed) return 'handled'
     if (this.question !== undefined) {
-      if (!this.questionFits()) return
+      if (!this.questionFits()) return 'handled'
       const pressed = this.questionPress
       this.questionPress = undefined
       const row = y - this.questionTop
@@ -2217,33 +2247,33 @@ export class ModelsWorkspacePage implements Component {
         || row !== pressed.row
         || pressed.revision !== this.revision
         || pressed.width !== this.lastWidth
-        || pressed.height !== this.lastHeight) return
+        || pressed.height !== this.lastHeight) return 'handled'
       this.question.flow.completeMouseClick(pressed.gesture, row, x)
       this.requestRender()
-      return
+      return 'handled'
     }
     const pressed = this.pressed
     this.pressed = undefined
     const target = this.paintedTargets.find(candidate => candidate.row === y && x >= candidate.startCol && x < candidate.endCol)
-    if (pressed === undefined || target === undefined) return
+    if (pressed === undefined || target === undefined) return 'handled'
     if (pressed.revision !== this.revision
       || pressed.width !== this.lastWidth
       || pressed.height !== this.lastHeight
       || target.kind !== pressed.target.kind
       || target.id !== pressed.target.id
-      || target.row !== pressed.target.row) return
+      || target.row !== pressed.target.row) return 'handled'
     if (target.kind === 'row') {
       // The painted row IS the action, independent of the keyboard cursor.
       this.cursor = this.rowIndexInProjection(target.id)
-      this.activateRow(target.id)
+      return this.activateRow(target.id)
     } else if (target.kind === 'action') {
-      if (!this.paintedActionIds.has(target.id)) return
+      if (!this.paintedActionIds.has(target.id)) return 'handled'
       const rowCount = this.rowOrder.length
       const projection = this.project(this.lastWidth)
       const action = projection.actions.find(candidate => candidate.id === target.id)
-      if (action === undefined || !action.enabled) return
+      if (action === undefined || !action.enabled) return 'handled'
       this.cursor = rowCount + projection.actions.indexOf(action)
-      this.activateAction(action.id)
+      return this.activateAction(action.id)
     } else if (target.kind === 'picker') {
       const index = Number(target.id)
       const picker = this.picker
@@ -2252,23 +2282,26 @@ export class ModelsWorkspacePage implements Component {
         this.removePicker(picker)
         picker.onSelect(item.value)
       }
+      return 'handled'
     } else if (target.kind === 'model-picker') {
       const picker = this.modelPicker
-      if (picker === undefined) return
+      if (picker === undefined) return 'handled'
       if (target.id === 'model-picker:manual') {
         this.modelPicker = undefined
         this.beginManualModels()
-        return
+        return 'handled'
       }
       const index = Number(target.id.slice('model-picker:'.length))
       const model = picker.items[index]
-      if (model === undefined) return
+      if (model === undefined) return 'handled'
       const selected = new Set(picker.selected)
       if (selected.has(model.id)) selected.delete(model.id)
       else selected.add(model.id)
       this.modelPicker = { ...picker, index, selected }
       this.requestRender()
+      return 'handled'
     }
+    return 'handled'
   }
 
   private rowIndexInProjection(id: string): number {
