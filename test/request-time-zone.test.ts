@@ -38,7 +38,7 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { createDirectTspFixture, directSettle, waitFor } from './support/direct-tsp-fixture.ts'
+import { createDirectTspFixture, directSettle, waitFor, waitForInputDelivery } from './support/direct-tsp-fixture.ts'
 import { wireNodes, type WireNode } from './support/tsp-picker-wire.ts'
 
 interface RecordedPrompt {
@@ -122,7 +122,7 @@ test('a real Direct TUI submit writes the Client-sampled zone durably and the mo
     const prompts: RecordedPrompt[] = []
     const recorder = fixture.recordPrompts(call => prompts.push({ sessionId: call.sessionId, message: call.message }))
     try {
-      await directSettle(4_000)
+      await waitForInputDelivery(fixture.pane)
       fixture.pane.input.type('which day is it')
       await directSettle()
       fixture.pane.input.type('\r')
@@ -215,7 +215,7 @@ test('the rendered surface keeps the ordinary Queue/transcript/composer behaviou
     const prompts: unknown[] = []
     const recorder = fixture.recordPrompts(call => { prompts.push(call.message) })
     try {
-      await directSettle(4_000)
+      await waitForInputDelivery(fixture.pane)
       fixture.pane.input.type('parity question')
       await directSettle()
       fixture.pane.input.type('\r')
@@ -280,7 +280,7 @@ test('a non-ordinary (Skill) submission carries no fabricated zone and the Conte
     const timeContext = await import('@deepseek-ai/dsh-time-context')
     await fixture.ctx.plugin(timeContext as never, {} as never)
     try {
-      await directSettle(4_000)
+      await waitForInputDelivery(fixture.pane)
       fixture.pane.input.type('/zone-absent-skill')
       await directSettle()
       fixture.pane.input.type('\r')

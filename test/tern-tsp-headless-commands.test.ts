@@ -15,7 +15,7 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { createDirectTspFixture, directSettle, waitFor, type DirectTspFixture } from './support/direct-tsp-fixture.ts'
+import { createDirectTspFixture, directSettle, waitFor, waitForInputDelivery, type DirectTspFixture } from './support/direct-tsp-fixture.ts'
 import { wireNodes } from './support/tsp-picker-wire.ts'
 
 // ── wire helpers ────────────────────────────────────────────────────────────
@@ -145,7 +145,7 @@ test('A02: sessionless /fork refuses and creates no Session', async (t) => {
   const life = (await import('./support/temp-lifecycle.ts')).testLifecycle(t)
   const fixture = await createDirectTspFixture(life, { deltas: ['A02'] })
   try {
-    await directSettle(4_000)
+    await waitForInputDelivery(fixture.pane)
     await submitInput(fixture, '/fork')
     await waitFor('the sessionless fork refusal', () =>
       dockNotices(fixture).some(text => text.includes('no conversation to fork from')), 25_000)
@@ -163,7 +163,7 @@ test('A02: /fork forks the current conversation and publishes the child owner', 
   const life = (await import('./support/temp-lifecycle.ts')).testLifecycle(t)
   const fixture = await createDirectTspFixture(life, { deltas: ['FORK-SOURCE'] })
   try {
-    await directSettle(4_000)
+    await waitForInputDelivery(fixture.pane)
     const source = await seedTurn(fixture, 'seed the fork source')
     await submitInput(fixture, '/fork')
     await waitFor('the fork child owner', () => {
@@ -189,7 +189,7 @@ test('A03/A04: /title and /rename write the authoritative title and notify the d
     officialServices: { sessionTitle: true },
   })
   try {
-    await directSettle(4_000)
+    await waitForInputDelivery(fixture.pane)
     const sessionId = await seedTurn(fixture, 'a conversation for the title')
     await submitInput(fixture, '/title My first title')
     // The official Direct command-result card owns the text on this mount
@@ -218,7 +218,7 @@ test('RFL-001: a rejected /title publishes ONE refusal across Dock and transcrip
   // result card owns the message; the Dock must not repeat it.
   const fixture = await createDirectTspFixture(life, { deltas: ['TITLE-REJECT'] })
   try {
-    await directSettle(4_000)
+    await waitForInputDelivery(fixture.pane)
     await seedTurn(fixture, 'a conversation whose title cannot be written')
     await submitInput(fixture, '/title Rejected Title')
     await waitFor('the refusal to render', () =>
@@ -245,7 +245,7 @@ test('A05: bare /title regenerates the title from the conversation', async (t) =
     officialServices: { sessionTitle: true },
   })
   try {
-    await directSettle(4_000)
+    await waitForInputDelivery(fixture.pane)
     const sessionId = await seedTurn(fixture, 'regenerate from this sentence')
     await submitInput(fixture, '/title pinned by the user')
     await waitFor('the pinned title card', () =>
@@ -320,7 +320,7 @@ test('A06: /copy emits the OSC 52 sequence for the authoritative last assistant 
   const assistantText = 'COPY-ME-B2A-42'
   const fixture = await createDirectTspFixture(life, { deltas: [assistantText] })
   try {
-    await directSettle(4_000)
+    await waitForInputDelivery(fixture.pane)
     await seedTurn(fixture, 'produce a copyable answer')
     // The copy target is the AUTHORITATIVE last assistant text, not the
     // rendered window: assert the delivered text is what the policy received.
@@ -362,7 +362,7 @@ test('A06: /copy without an assistant message fails visibly and copies nothing',
   const life = (await import('./support/temp-lifecycle.ts')).testLifecycle(t)
   const fixture = await createDirectTspFixture(life, { deltas: ['UNUSED'] })
   try {
-    await directSettle(4_000)
+    await waitForInputDelivery(fixture.pane)
     await submitInput(fixture, '/new')
     await waitFor('the session owner', () => welcomeSessionIds(fixture).length === 1, 25_000)
     await submitInput(fixture, '/copy')
@@ -404,7 +404,7 @@ test('A06: /copy reports the shared policy failure when BOTH legs fail', async (
   const hadOwnWrite = Object.prototype.hasOwnProperty.call(stdoutPrototype, 'write')
   const originalWrite = stdoutPrototype.write as (this: unknown, data: unknown) => boolean
   try {
-    await directSettle(4_000)
+    await waitForInputDelivery(fixture.pane)
     await seedTurn(fixture, 'produce an uncopyable answer')
     // Clear the POSIX helper gates only for THIS gesture (restored below).
     for (const key of clipboardEnvKeys) delete process.env[key]
@@ -438,7 +438,7 @@ test('A07: sessionless /yolo reports the unavailable official permission writer'
   const life = (await import('./support/temp-lifecycle.ts')).testLifecycle(t)
   const fixture = await createDirectTspFixture(life, { deltas: ['A07'] })
   try {
-    await directSettle(4_000)
+    await waitForInputDelivery(fixture.pane)
     await submitInput(fixture, '/new')
     await waitFor('the session owner', () => welcomeSessionIds(fixture).length === 1, 25_000)
     await submitInput(fixture, '/yolo')
@@ -462,7 +462,7 @@ test('A07: /yolo applies danger-full-access through the official permission writ
     officialServices: { permissionPresets: true },
   })
   try {
-    await directSettle(4_000)
+    await waitForInputDelivery(fixture.pane)
     await submitInput(fixture, '/new')
     await waitFor('the session owner', () => welcomeSessionIds(fixture).length === 1, 25_000)
     const sessionId = welcomeSessionIds(fixture)[0]!
@@ -491,7 +491,7 @@ test('A08: /logout <reference> is refused on the TSP renderer and never mutates 
   const secret = 'sk-b2a-secret-value'
   const ref = 'DEEPSEEK_API_KEY'
   try {
-    await directSettle(4_000)
+    await waitForInputDelivery(fixture.pane)
     await submitInput(fixture, '/new')
     await waitFor('the session owner', () => welcomeSessionIds(fixture).length === 1, 25_000)
     const credentials = fixture.ctx.get('credentials') as unknown as {
@@ -522,7 +522,7 @@ test('A08: a composition without the credentials service reports the refusal and
   // the port's `available()` is false and the handler must refuse truthfully.
   const fixture = await createDirectTspFixture(life, { deltas: ['A08-PORT'], withoutCredentials: true })
   try {
-    await directSettle(4_000)
+    await waitForInputDelivery(fixture.pane)
     await submitInput(fixture, '/new')
     await waitFor('the session owner', () => welcomeSessionIds(fixture).length === 1, 25_000)
     await submitInput(fixture, '/logout deepseek')
@@ -555,7 +555,7 @@ test('A08: the TSP refusal never reaches a throwing credential port', async (t) 
   const hadOwnUnset = Object.prototype.hasOwnProperty.call(prototype, 'unset')
   const originalUnset = prototype.unset
   try {
-    await directSettle(4_000)
+    await waitForInputDelivery(fixture.pane)
     await submitInput(fixture, '/new')
     await waitFor('the session owner', () => welcomeSessionIds(fixture).length === 1, 25_000)
     await service.set(ref, secret)
@@ -579,7 +579,7 @@ test('A10: bare /logout is refused by the gate — no picker, no credential muta
   const fixture = await createDirectTspFixture(life, { deltas: ['A10'] })
   const ref = 'DEEPSEEK_API_KEY'
   try {
-    await directSettle(4_000)
+    await waitForInputDelivery(fixture.pane)
     await submitInput(fixture, '/new')
     await waitFor('the session owner', () => welcomeSessionIds(fixture).length === 1, 25_000)
     const credentials = fixture.ctx.get('credentials') as unknown as {
@@ -614,7 +614,7 @@ test('A11: /logout with an unresolvable target reports the real unknown-target e
   const life = (await import('./support/temp-lifecycle.ts')).testLifecycle(t)
   const fixture = await createDirectTspFixture(life, { deltas: ['A11'] })
   try {
-    await directSettle(4_000)
+    await waitForInputDelivery(fixture.pane)
     await submitInput(fixture, '/new')
     await waitFor('the session owner', () => welcomeSessionIds(fixture).length === 1, 25_000)
     // A hyphenated target can be neither a route nor an env-var-shaped
@@ -639,7 +639,7 @@ test('A13: every remaining PiTui-only builtin stays refused with the draft resto
     '/login', '/skill', '/display', '/focus', '/footer', '/statusline', '/keybindings',
   ]
   try {
-    await directSettle(4_000)
+    await waitForInputDelivery(fixture.pane)
     for (const line of refused) {
       const noticeBefore = lastNoticeSeq(fixture)
       await submitInput(fixture, line)
@@ -669,7 +669,7 @@ test('A09: /logout <flow-route> is refused truthfully while no flow provider is 
     officialServices: { authorization: true },
   })
   try {
-    await directSettle(4_000)
+    await waitForInputDelivery(fixture.pane)
     await submitInput(fixture, '/new')
     await waitFor('the session owner', () => welcomeSessionIds(fixture).length === 1, 25_000)
     const authorization = fixture.ctx.get('authorization') as unknown as { list(): readonly unknown[] }
@@ -708,7 +708,7 @@ test('A16: a no-panel TUI builtin executes locally while the turn runs (busyEnte
   })
   const writes = fixture.recordPrompts(() => {})
   try {
-    await directSettle(4_000)
+    await waitForInputDelivery(fixture.pane)
     const sessionId = await seedTurn(fixture, 'hold the turn open')
     await waitFor('the running turn', () => fixture.pane.output.text().includes('working'), 25_000)
     const writesBefore = writes.calls()
@@ -781,7 +781,7 @@ test('F5: a /copy success that outlives its Session is not announced on the repl
     persistedBlankSession: { id: 'f5-target-b' },
   })
   try {
-    await directSettle(4_000)
+    await waitForInputDelivery(fixture.pane)
     const source = await seedTurn(fixture, 'seed the F5 copy source')
     const sessionEvents = (sessionId: string): Array<{ type: string }> => {
       const sessions = fixture.ctx.get('sessions') as unknown as {
@@ -869,7 +869,7 @@ test('F4: a Host-route result keeps its own card when the Host claim is revoked 
     }],
   })
   try {
-    await directSettle(4_000)
+    await waitForInputDelivery(fixture.pane)
     const sessionId = await seedTurn(fixture, 'seed the F4 host route')
     const sessionEvents = (): Array<{ type: string }> => {
       const sessions = fixture.ctx.get('sessions') as unknown as {
@@ -916,7 +916,7 @@ test('A14: genuine Host /new, /copy, /logout, /title and /rename keep their Host
     })),
   })
   try {
-    await directSettle(4_000)
+    await waitForInputDelivery(fixture.pane)
     // An execute-kind Host descriptor claims its BARE token only (the official
     // `matchEnter` rule), so the genuine-winner control uses the bare lines.
     for (const name of names) {
@@ -964,7 +964,7 @@ test('A14: an argued line of a genuine Host execute-kind command stays an ordina
     }],
   })
   try {
-    await directSettle(4_000)
+    await waitForInputDelivery(fixture.pane)
     await submitInput(fixture, '/new argued-line')
     // The line reached the MODEL as a prompt (the ordinary-submission route).
     await waitFor('the ordinary prompt turn', () => fixture.modelCalls() === 1, 25_000)
@@ -975,6 +975,39 @@ test('A14: an argued line of a genuine Host execute-kind command stays an ordina
       'exactly the prompt Session exists; the TUI /new handler created no second one')
     assert.ok(!fixture.pane.output.text().includes('not available in TSP'),
       'an ordinary argued line is never refused as a TSP builtin')
+  } finally {
+    await fixture.settle()
+  }
+})
+
+// ── The post-boot delivery boundary ──────────────────────────────────────────
+
+test('the post-boot wait observes the tty input DELIVERY boundary, not a fixed slice', async (t) => {
+  // The post-boot wait used to be a fixed 4-second sleep. It is now the
+  // delivery boundary: the shipped Tern SDK attaches its stdin listener only
+  // after the hello handshake, and the scripted pane DROPS a `data` event that
+  // has no listener. So the listener registration IS the input-delivery
+  // fact, and a key typed before it is lost rather than merely unhandled.
+  //
+  // This lock proves the boundary is real in BOTH directions: a key typed
+  // BEFORE the boundary never arrives, and a key typed AFTER it does — so
+  // the wait cannot be replaced by an arbitrary delay.
+  const life = (await import('./support/temp-lifecycle.ts')).testLifecycle(t)
+  const fixture = await createDirectTspFixture(life, { deltas: ['DELIVERY'] })
+  try {
+    // BEFORE the boundary: the SDK has not attached its listener yet.
+    assert.equal(fixture.pane.input.listenerCount('data'), 0,
+      'the SDK attaches its stdin listener only after the hello handshake')
+    fixture.pane.input.type('lost')
+    await waitForInputDelivery(fixture.pane)
+    // The lost key never reached the composer.
+    assert.equal(composerText(fixture), undefined,
+      'a key typed before the SDK attached its listener is lost, never buffered')
+
+    // AFTER the boundary: the key is delivered (the renderer holds it until
+    // the one input bind and replays it).
+    fixture.pane.input.type('kept')
+    await waitFor('the delivered key to reach the composer', () => composerText(fixture) === 'kept', 25_000)
   } finally {
     await fixture.settle()
   }

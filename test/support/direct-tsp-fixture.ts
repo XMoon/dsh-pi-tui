@@ -191,6 +191,33 @@ export async function waitFor(label: string, predicate: () => boolean, timeoutMs
 }
 
 /**
+ * Wait until the TTY input is DELIVERABLE.
+ *
+ * The scripted pane is an `EventEmitter`: a `data` event with no listener is
+ * DROPPED. The shipped Tern SDK attaches its stdin listener only inside
+ * `session.handshake()` — i.e. AFTER the hello reply — so a key typed before
+ * that point is LOST, not merely unhandled.
+ *
+ * This is therefore the AUTHORITARY input-delivery boundary, and it is
+ * observable without mutating anything: the SDK's own listener registration is
+ * the fact.
+ *
+ * It is NOT a readiness proof for the whole application: the ONE input bind
+ * (`surface.bindRendererInput()`) runs later, and the renderer HOLDS the keys
+ * that arrive between the attach and the bind, replaying them in arrival
+ * order at the bind. So a key delivered after this wait is safe even if the
+ * bind has not committed yet.
+ */
+export async function waitForInputDelivery(pane: TspPane, timeoutMs = 20_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    if (pane.input.listenerCount('data') > 0) return
+    await new Promise(resolve => setTimeout(resolve, 1))
+  }
+  throw new Error('timed out waiting for the tty input to become deliverable')
+}
+
+/**
  * Mount the official Direct Host composition and TUI runner. The default uses
  * a scripted TSP pane; `externalTern: true` keeps the real Tern-owned stdio.
  */

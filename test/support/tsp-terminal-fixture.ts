@@ -49,7 +49,6 @@ class FakeInput extends EventEmitter implements TermInput {
     this.emit('data', ENCODER.encode(text))
   }
 }
-
 class FakeOutput extends EventEmitter implements TermOutput {
   readonly isTTY = true
   readonly columns = 100

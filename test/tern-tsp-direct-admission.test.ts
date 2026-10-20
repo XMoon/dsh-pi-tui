@@ -15,7 +15,7 @@ import assert from 'node:assert/strict'
 import { existsSync, readdirSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import test from 'node:test'
-import { createDirectTspFixture, directSettle, waitFor } from './support/direct-tsp-fixture.ts'
+import { createDirectTspFixture, directSettle, waitFor, waitForInputDelivery } from './support/direct-tsp-fixture.ts'
 import { pickerNode } from './support/tsp-picker-wire.ts'
 
 /** Every history file written under the fixture's isolated DSH home. */
@@ -63,7 +63,7 @@ test('B2/Direct: a GENUINE Host command with a TUI builtin name keeps its Host s
     }],
   })
   try {
-    await directSettle(4_000)
+    await waitForInputDelivery(fixture.pane)
     fixture.pane.input.type('/settings')
     await directSettle()
     fixture.pane.input.type('\r')
@@ -91,7 +91,7 @@ test('B1-B/Direct: installed Session Browser capability never captures Host-owne
     })),
   })
   try {
-    await directSettle(4_000)
+    await waitForInputDelivery(fixture.pane)
     for (const name of names) {
       fixture.pane.input.type(`/${name}`)
       await directSettle()
@@ -115,7 +115,7 @@ test('B1-B/Direct: /sessions without a negotiated Browser is refused and restore
   const sessions = fixture.ctx.get('sessions') as unknown as { list(): unknown[] }
   const sessionsBefore = sessions.list().length
   try {
-    await directSettle(4_000)
+    await waitForInputDelivery(fixture.pane)
     fixture.pane.input.type('/sessions')
     await directSettle()
     assert.equal(latestComposerText(fixture.pane.output.text()), '/sessions',
@@ -195,7 +195,7 @@ test('B2/Direct: a refused `!` line writes NO input-history row (accepted prompt
   const life = testLifecycle(t)
   const fixture = await createDirectTspFixture(life, { deltas: ['ok'] })
   try {
-    await directSettle(4_000)
+    await waitForInputDelivery(fixture.pane)
     // A refused user-shell line: the refusal sits BEFORE any history write.
     fixture.pane.input.type('!echo hi')
     await directSettle()
@@ -257,7 +257,7 @@ for (const busyEnter of ['queue', 'steer'] as const) {
       })
       const recorder = fixture.recordPrompts(call => { promptCalls.push(call) })
       try {
-        await directSettle(4_000)
+        await waitForInputDelivery(fixture.pane)
         // Start a real turn; its model stream is HELD so the turn stays running.
         fixture.pane.input.type('first prompt')
         await directSettle()
@@ -321,7 +321,7 @@ test('B2/Direct: Esc during a RUNNING turn cancels the turn through the existing
     appExit: () => { exited = true },
   })
   try {
-    await directSettle(4_000)
+    await waitForInputDelivery(fixture.pane)
     fixture.pane.input.type('cancel me')
     await directSettle()
     fixture.pane.input.type('\r')
@@ -367,7 +367,7 @@ test('B2/Direct: a REJECTED session cancel surfaces a renderer-neutral error not
     error: { code: 'session/agent-busy', message: rejectionMessage, details: {} },
   }))
   try {
-    await directSettle(4_000)
+    await waitForInputDelivery(fixture.pane)
     fixture.pane.input.type('cancel rejection case')
     await directSettle()
     fixture.pane.input.type('\r')
@@ -403,7 +403,7 @@ test('B2/Direct: a registered extension contribution runs (never refused by the 
     }],
   })
   try {
-    await directSettle(4_000)
+    await waitForInputDelivery(fixture.pane)
     fixture.pane.input.type('/extprobe')
     await directSettle()
     fixture.pane.input.type('\r')
@@ -437,7 +437,7 @@ test('B2/Direct: an advertised Skill that is gone at execution is consumed with 
     skills: [{ name: 'fixture-skill', description: 'A fixture skill', body: 'Do the fixture thing.', unresolved: true }],
   })
   try {
-    await directSettle(4_000)
+    await waitForInputDelivery(fixture.pane)
     fixture.pane.input.type('/fixture-skill')
     await directSettle()
     fixture.pane.input.type('\r')
@@ -465,7 +465,7 @@ test('B1-B/Direct: a resolvable Skill invocation keeps its agent-facing route wh
     skills: [{ name: 'fixture-skill', description: 'A fixture skill', body: 'Do the fixture thing.' }],
   })
   try {
-    await directSettle(4_000)
+    await waitForInputDelivery(fixture.pane)
     fixture.pane.input.type('/fixture-skill')
     await directSettle()
     fixture.pane.input.type('\r')
