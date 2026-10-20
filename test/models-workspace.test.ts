@@ -276,7 +276,7 @@ test('clear requires the painted confirmation action and re-reads the store', as
   configured.delete('ACME_API_KEY')
   await flush()
   assert.ok(calls.includes('unset:ACME_API_KEY'), calls.join(','))
-  assert.match(viewText(page), /cleared/u)
+  assert.match(viewText(page), /API key ACME_API_KEY cleared/u)
 })
 
 test('the Models account row opens the Account page instead of a provider flow', async () => {
@@ -991,7 +991,13 @@ test('a verified clear refreshes the list projection (P2)', async () => {
   viewText(page)
   page.handleInput('\r')
   await flush()
-  assert.match(viewText(page), /cleared/u)
+  assert.match(viewText(page), /API key ACME_API_KEY cleared/u)
+  // A later refresh read failure cannot regress the confirmed done state.
+  source.describeReference = async () => { throw new Error('late clear read failure') }
+  page.handleInput('r')
+  await flush()
+  assert.match(viewText(page), /API key ACME_API_KEY cleared/u)
+  assert.doesNotMatch(viewText(page), /Not cleared/u)
   page.handleInput('\u001b')
   await flush()
   const acmeRow = page.render(100).map(stripTerminalSequences).find(line => line.includes('Acme Gateway'))

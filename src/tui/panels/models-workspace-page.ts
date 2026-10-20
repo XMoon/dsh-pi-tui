@@ -682,7 +682,9 @@ export class ModelsWorkspacePage implements Component {
               configured: info.configured,
               ...(info.source === undefined ? {} : { source: info.source }),
             })
-            this.readReferenceState()
+            // The first authoritative describeReference() is the completion
+            // read. Do NOT start a second one: a later answer must not regress
+            // the confirmed done state.
           })
         } catch (error) {
           this.settle(() => {
