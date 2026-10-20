@@ -279,3 +279,65 @@ test('Direct cancel waits for the authoritative upstream outcome (commit window)
     flow.close()
   }
 })
+
+test('Direct cancel with an outstanding prompt still waits for an authorized Host commit', async () => {
+  const key = credentialKey('llm-pi-ai', 'prompt-commit-window')
+  let releaseUpstream: ((outcome: { status: 'authorized' | 'cancelled' }) => void) | undefined
+  let promptSeen = false
+  const entry = {
+    key,
+    label: 'Prompt Commit Window',
+    methods: [{ id: 'oauth', label: 'Sign in' }],
+    inFlight: false,
+  }
+  const service = {
+    list: () => [entry],
+    describe: () => entry,
+    begin: async (request: {
+      interaction: {
+        prompt: (prompt: { kind: 'text'; message: string }) => Promise<string>
+      }
+    }) => {
+      // Start a prompt but do not await its answer; the flow may still call
+      // commit while this bridge remains outstanding.
+      void request.interaction.prompt({ kind: 'text', message: 'held prompt' }).catch(() => {})
+      promptSeen = true
+      return await new Promise<{ status: 'authorized' | 'cancelled' }>(resolve => { releaseUpstream = resolve })
+    },
+    cancel: () => {},
+  }
+  const port = new DirectAuthorizationConfig({ get: name => name === 'authorization' ? service : undefined })
+  const surface: AuthorizationSurface = {
+    openOutputViewer: () => () => {},
+    // Keep the prompt OPEN so the cancellation actually has a pending bridge.
+    askQuestions: () => new Promise(() => {}),
+    openPicker: () => ({ close: () => {} }),
+  }
+  const flow = createAuthorizationFlow(surface, port)
+  let settled = 0
+  let withdrawn = 0
+  const off = port.onEvent(event => {
+    if (event.kind === 'settled') settled += 1
+    if (event.kind === 'prompt-withdrawn') withdrawn += 1
+    flow.onEvent(event)
+  })
+  try {
+    const started = await port.begin({ key })
+    assert.equal(started.kind, 'started')
+    if (started.kind !== 'started') return
+    flow.bind(started.attemptId)
+    await new Promise<void>(resolve => setImmediate(resolve))
+    assert.equal(promptSeen, true)
+    await port.cancel(started.attemptId)
+    await new Promise<void>(resolve => setImmediate(resolve))
+    assert.equal(withdrawn, 1, 'the pending prompt UI closes immediately')
+    assert.equal(settled, 0, 'a pending prompt does NOT prove the Host has not entered commit')
+    releaseUpstream?.({ status: 'authorized' })
+    const outcome = await flow.outcome
+    assert.equal(outcome.status, 'authorized')
+    assert.equal(settled, 1)
+  } finally {
+    off()
+    flow.close()
+  }
+})
