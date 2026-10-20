@@ -1450,6 +1450,11 @@ test('a short select picker keeps its action bar visible with a 3-line notice (F
   assert.equal(lines.length, 4)
   assert.match(lines.at(-1) ?? '', /Enter select/u)
   assert.match(lines.at(-1) ?? '', /Esc cancel/u)
-  page.handleInput('\r')
+  // The notice lines are not hit targets; the painted picker row is at y=2.
+  page.onCellPress(2, 0)
+  page.onCellClick(2, 0)
+  assert.equal(picked, undefined, 'a notice line must not select a hidden picker row')
+  page.onCellPress(2, 2)
+  page.onCellClick(2, 2)
   assert.equal(picked, 'a')
 })

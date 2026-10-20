@@ -1301,7 +1301,12 @@ export class ModelsWorkspacePage implements Component {
       const visibleNotice = notice.slice(0, Math.max(0, height - 2))
       lines.push(...visibleNotice.map(line => fit(line, width)))
       const pickerRows = Math.max(1, height - 1 - visibleNotice.length)
+      const targetStart = targets.length
       lines.push(...this.renderModelPicker(width, pickerRows, targets))
+      for (let index = targetStart; index < targets.length; index += 1) {
+        const target = targets[index]!
+        targets[index] = { ...target, row: target.row + visibleNotice.length }
+      }
       lines.push(color.textMuted(renderActionBarRow([
         { text: 'Space toggle', priority: 5 },
         { text: 'Enter apply', priority: 6 },
@@ -1318,7 +1323,12 @@ export class ModelsWorkspacePage implements Component {
       // a 4-row page must not push the only decision affordance off-screen.
       const visibleNotice = notice.slice(0, Math.max(0, height - 2))
       lines.push(...visibleNotice.map(line => fit(line, width)))
+      const targetStart = targets.length
       lines.push(...this.renderPicker(width, Math.max(1, height - 1 - visibleNotice.length), targets))
+      for (let index = targetStart; index < targets.length; index += 1) {
+        const target = targets[index]!
+        targets[index] = { ...target, row: target.row + visibleNotice.length }
+      }
       lines.push(color.textMuted(renderActionBarRow([
         { text: 'Up/Down choose', priority: 5 },
         { text: 'Enter select', priority: 6 },
