@@ -587,3 +587,62 @@ test('REAL Host prompt created AFTER forced teardown is rejected as surface disp
     }
   }
 })
+
+test('REAL Host synchronous prompt from an abort listener never reaches the dead surface', async t => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-c2-auth-reentrant-prompt-')
+  const ctx = new Context()
+  life.defer(() => ctx.fiber.dispose())
+  const key = credentialKey('llm-pi-ai', 'reentrant-prompt')
+  {
+    await ctx.plugin(LocalCredentialProvider, { path: join(home, '.credentials.yaml'), watch: false })
+    await ctx.plugin(AuthorizationService)
+    ctx.authorization.registerFlow({
+      key,
+      label: 'Reentrant Prompt',
+      methods: [{ id: 'oauth', label: 'Sign in' }],
+      run: async session => {
+        await new Promise<void>(resolve => {
+          session.signal.addEventListener('abort', () => {
+            // The Host forwards abort synchronously; a provider may prompt
+            // from inside that dispatch before Direct's force flag was set.
+            void session.prompt({ kind: 'text', message: 'abort-time prompt' }).catch(() => {})
+            resolve()
+          }, { once: true })
+        })
+      },
+    })
+    const port = new DirectAuthorizationConfig({ get: name => ctx.get(name) })
+    const surface: AuthorizationSurface = {
+      openOutputViewer: () => () => {},
+      askQuestions: () => new Promise(() => {}),
+      openPicker: () => ({ close: () => {} }),
+    }
+    const flow = createAuthorizationFlow(surface, port)
+    let prompts = 0
+    let settled = 0
+    const off = port.onEvent(event => {
+      if (event.kind === 'prompt') prompts += 1
+      if (event.kind === 'settled') settled += 1
+      flow.onEvent(event)
+    })
+    try {
+      const controller = new AbortController()
+      const started = await port.begin({ key, signal: controller.signal })
+      assert.equal(started.kind, 'started')
+      if (started.kind !== 'started') return
+      flow.bind(started.attemptId)
+      controller.abort()
+      const outcome = await Promise.race([
+        flow.outcome,
+        new Promise<{ status: string }>(resolve => setTimeout(() => resolve({ status: 'timeout' }), 1_000)),
+      ])
+      assert.notEqual(outcome.status, 'timeout')
+      assert.equal(prompts, 0, 'no prompt event may reach the dead surface')
+      assert.equal(settled, 1)
+    } finally {
+      off()
+      flow.close()
+    }
+  }
+})
