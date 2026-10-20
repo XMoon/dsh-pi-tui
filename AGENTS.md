@@ -433,6 +433,14 @@ policy above).
   stage closure, and a stage that is closed on one effort says nothing about
   another. Read the owning issue or PR for the actual status.
 
+## Pull requests
+
+* Pull requests use `.github/pull_request_template.md`. Keep the description
+  proportional to the change, report only verified evidence, and update an
+  owning Issue when one exists. The template summarizes applicable review
+  evidence; it does not replace `docs/guides/code-review.md`, authorize merge,
+  or imply stage closure.
+
 ## Documentation map
 
 - `docs/README.md` — the documentation policy and the complete index.
