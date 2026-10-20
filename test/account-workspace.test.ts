@@ -334,3 +334,20 @@ test('a pending sign-out owns the page: pendingMutation is true and Esc cannot e
   await flush()
   assert.equal(page.pendingMutation(), false)
 })
+
+test('an IPv6 loopback callback origin produces a matching SSH tunnel template (F8)', async () => {
+  const state: SourceState = { view: waitingAttempt(), profileFails: false, balanceFails: false, runningTasks: false, calls: [] }
+  const source = makeSource(state)
+  source.callbackOrigin = () => 'http://[::1]:43121'
+  source.startSignIn = async () => {
+    state.calls.push('signIn')
+    state.view = waitingAttempt()
+    return state.view
+  }
+  const page = new AccountWorkspacePage(source, () => {}, { view: 'page' })
+  page.setBodyHeight(30)
+  await flush()
+  const painted = text(page)
+  assert.match(painted, /\[::1\]:43121/u)
+  assert.match(painted, /ssh -N -L 127\.0\.0\.1:43121:\[::1\]:43121/u)
+})

@@ -61,7 +61,7 @@ interface Harness {
   readonly close: () => void
 }
 
-function open(width = 120, height = 40): Harness {
+function open(width = 120, height = 40, authorizationOverride?: unknown): Harness {
   const vt = new VirtualTerminal(width, height)
   const owned: OwnedRunner = (_label, task, options) => {
     void Promise.resolve().then(() => task()).then(
@@ -158,7 +158,7 @@ function open(width = 120, height = 40): Harness {
         listRecords: async () => recordRows.map(record => ({ ...record })),
         onChanged: () => () => {},
       },
-      authorization: {
+      authorization: authorizationOverride ?? {
         available: () => true,
         listTargets: () => FLOWS,
         begin: async () => ({ kind: 'unavailable' as const }),
@@ -462,5 +462,54 @@ test('the category rail cannot abandon a pending API-key write (pending mutation
 
   release()
   for (let index = 0; index < 20; index += 1) await new Promise<void>(resolve => setImmediate(resolve))
+  h.close()
+})
+
+test('the Account page mouse Back exits to the Settings category rail (F6)', async () => {
+  const h = open()
+  await h.vt.waitForRender()
+  ;(h as unknown as { invoke(line: string): unknown }).invoke('/login deepseek-account')
+  await h.vt.waitForRender()
+  assert.match(h.rows()[0]!, /Settings · Account/u)
+  const backRow = rowOf(h, '← Settings')
+  const backCol = colOf(h, backRow, '← Settings')
+  press(h, backRow, backCol)
+  release(h, backRow, backCol)
+  await h.vt.waitForRender()
+  assert.match(h.rows()[0]!, /Settings · Categories/u)
+  h.close()
+})
+
+test('real Settings 30x8 hides a clipped select prompt and refuses Enter (F7)', async () => {
+  const listeners = new Set<(event: unknown) => void>()
+  let respondCalls = 0
+  const auth = {
+    available: () => true,
+    listTargets: () => FLOWS,
+    begin: async () => {
+      queueMicrotask(() => {
+        for (const listener of listeners) {
+          listener({ kind: 'notice', attemptId: 'auth-short', notice: { message: 'Continue in your browser', url: 'https://example.test/authorize', code: 'ABCD' } })
+          listener({ kind: 'prompt', attemptId: 'auth-short', promptId: 'p1', prompt: { kind: 'select', message: 'Choose a method', options: [{ id: 'oauth', label: 'OAuth' }, { id: 'device', label: 'Device code' }] } })
+        }
+      })
+      return { kind: 'started' as const, attemptId: 'auth-short' }
+    },
+    onEvent: (listener: (event: unknown) => void) => { listeners.add(listener); return () => { listeners.delete(listener) } },
+    respond: async () => { respondCalls += 1 },
+    cancel: async () => {},
+  }
+  const h = open(120, 40, auth)
+  await h.vt.waitForRender()
+  ;(h as unknown as { invoke(line: string): unknown }).invoke('/login anthropic')
+  await h.vt.waitForRender()
+  await key(h, '\r') // start provider-native sign-in
+  await h.vt.waitForRender()
+  h.vt.resize(30, 8)
+  await h.vt.waitForRender()
+  assert.match(h.view(), /Resize the terminal/u)
+  assert.doesNotMatch(h.view(), /OAuth|Device code/u)
+  await key(h, '\r')
+  assert.equal(respondCalls, 0, 'Enter cannot answer an invisible select prompt')
   h.close()
 })

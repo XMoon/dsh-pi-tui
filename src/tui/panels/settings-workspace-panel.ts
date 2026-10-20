@@ -292,7 +292,7 @@ export interface SettingsAuthPage extends Component {
   handleInput(data: string): 'handled' | 'exit' | 'open-account'
   handleMouse?(event: TuiMouseEvent): TuiMouseEventResult | undefined
   onCellPress?(x: number, y: number): void
-  onCellClick?(x: number, y: number): void
+  onCellClick?(x: number, y: number): 'handled' | 'exit' | 'open-account' | void
   /** Revoke one in-flight press when another owner claims the gesture. */
   cancelPointer?(): void
   /** True while a Host mutation must settle on this page: the workspace root
@@ -2334,7 +2334,16 @@ export class SettingsWorkspacePanel implements Component {
           || pressed.columns !== this.intents.columns()
           || pressed.rows !== this.intents.rows()
           || pressed.revision !== this.revision) return
-        this.authPage.onCellClick?.(x - box.x, y - box.top)
+        const result = this.authPage.onCellClick?.(x - box.x, y - box.top)
+        if (result === 'exit') {
+          if (!this.closeAuthPageForNavigation()) return
+          this.focus = 'categories'
+          this.bumpRevision()
+          this.intents.requestRender()
+        } else if (result === 'open-account') {
+          if (this.authPageHasPendingMutation()) return
+          this.openAccountPage({ view: 'page' })
+        }
         return
       }
       // A wheel/click on the category rail keeps the root's identity path; the
