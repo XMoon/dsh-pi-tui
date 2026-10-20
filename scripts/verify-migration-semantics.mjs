@@ -39,7 +39,7 @@ const TEST_ROOT = resolve(ROOT, 'test')
  * specifier inside a template literal's `${…}` INTERPOLATION is, because
  * the parser sees it as executable code.
  */
-export function productionReferences(source) {
+export function productionReferences(source, fileDepth = 0) {
   const file = ts.createSourceFile('probe.ts', source, ts.ScriptTarget.ESNext, true, ts.ScriptKind.TS)
   const refs = []
   const add = (specifier) => {
@@ -169,10 +169,22 @@ export function productionReferences(source) {
                 const base = inner.arguments.slice(0, index)
                 if (base.length === 0) continue
                 // The base may be a literal path or a named handle
-                // (`join(ROOT, rel)`): the base's own PRODUCTION AREA is
-                // what identifies the read, and the call site's argument
-                // supplies the path under it.
-                readHelpers.set(node.name.text, { parameters, position, base })
+                // (`join(ROOT, rel)`). It is RESOLVED here — the helper's
+                // base is what makes the call site's path a REPOSITORY
+                // path, so an unverified base must not be treated as one.
+                readHelpers.set(node.name.text, {
+                  parameters,
+                  position,
+                  base,
+                  baseSegments: joinBaseSegments(inner, declarationOf),
+                  // The base reaches the REPOSITORY root only when its `..`
+                  // levels match the file's own depth below the test root.
+                  // A base with one level too few resolves into the test
+                  // tree, and every call site would then read a path that
+                  // does not exist — the exact silent failure the check
+                  // exists to catch.
+                  baseIsRepositoryRoot: isRepositoryRootBase(inner, declarationOf, fileDepth),
+                })
               }
             }
             ts.forEachChild(inner, scan)
@@ -221,11 +233,26 @@ export function productionReferences(source) {
       if (helper !== undefined) {
         const argument = node.arguments[helper.position]
         if (argument !== undefined && ts.isStringLiteralLike(argument)) {
-          // The argument is the path under the base: it usually names the
-          // production area itself (`read('src/app/…')`).
+          // The argument is the path under the base. The base MUST be
+          // verified as reaching the REPOSITORY root: only then does the
+          // argument name a production file. An unverified base is
+          // reported as unresolved — a wrong `..` level in the helper's
+          // base would otherwise make every call site resolve to the SAME
+          // (wrong) path, and the comparison would pass.
+          const segments = helper.baseSegments
           const path = argument.text
           const area = path.split('/').find(segment => segment === 'src' || segment === 'packages')
-          if (area !== undefined) {
+          if (helper.baseIsRepositoryRoot !== true) {
+            unresolvedIdentifiers.add(node.expression.text)
+          } else if (area === undefined) {
+            // The argument does not name a production area: the base
+            // decides whether the read reaches the repository's sources.
+            if (segments.includes('src') || segments.includes('packages')) {
+              add(`<root>${path}`)
+            } else {
+              unresolvedIdentifiers.add(node.expression.text)
+            }
+          } else {
             add(`<root>${path.split('/').slice(path.split('/').indexOf(area)).join('/')}`)
           }
         }
@@ -582,6 +609,91 @@ function isReadOf(node) {
 const READ_FUNCTIONS = /^(readFileSync|readFile|existsSync|statSync|lstatSync|realpathSync|access|openSync)$/u
 
 /**
+ * Whether a join's base reaches the REPOSITORY root.
+ *
+ * The base is the file's own directory plus some `..` levels. The file sits
+ * `depth` levels below the test root (the flat base tree: 0; the layered
+ * current tree: the number of directory segments). The repository root is
+ * `depth + 1` levels above the test root, so the base must climb exactly
+ * that many levels.
+ *
+ * A base with one level too few resolves into the TEST tree: the read
+ * would then name a path that does not exist, and every call site would
+ * resolve to the SAME (wrong) path — so the comparison between the two
+ * trees would pass while the reads are broken.
+ */
+function isRepositoryRootBase(node, declarationOf, fileDepth, depth = 0) {
+  if (depth > 8) return false
+  if (!ts.isCallExpression(node) || !ts.isIdentifier(node.expression) || node.expression.text !== 'join') {
+    return false
+  }
+  const [first, ...rest] = node.arguments
+  if (first === undefined) return false
+  const segments = rest
+    .filter(argument => ts.isStringLiteralLike(argument))
+    .map(argument => argument.text)
+  const up = segments.filter(segment => segment === '..').length
+  const down = segments.filter(segment => segment !== '..')
+  if (ts.isCallExpression(first) && ts.isIdentifier(first.expression) && first.expression.text === 'dirname') {
+    // The file's own directory, climbed `up` levels. The file is `depth`
+    // levels below the test root, and the repository root is one level above
+    // the test root.
+    return up === fileDepth + 1 && down.length === 0
+  }
+  if (ts.isIdentifier(first)) {
+    const declaration = declarationOf(first)
+    if (declaration === undefined || !ts.isVariableDeclaration(declaration)) return false
+    const initializer = declaration.initializer
+    if (initializer === undefined) return false
+    if (ts.isCallExpression(initializer) && ts.isIdentifier(initializer.expression) && initializer.expression.text === 'join') {
+      return isRepositoryRootBase(initializer, declarationOf, fileDepth, depth + 1)
+    }
+  }
+  return false
+}
+
+/**
+ * The segments a join's BASE resolves to, when it can be verified as the
+ * REPOSITORY root.
+ *
+ * A helper's base is the file's own directory plus some `..` levels: the
+ * repository root is the file's directory climbed past the test root. The
+ * resolution counts the levels and compares them with the file's DEPTH, so
+ * a base with one level too few is NOT the repository root — and a helper
+ * whose base is not the repository root cannot name a production file.
+ *
+ * Returns `undefined` when the base cannot be verified.
+ */
+function joinBaseSegments(node, declarationOf, depth = 0) {
+  if (depth > 8) return undefined
+  if (!ts.isCallExpression(node) || !ts.isIdentifier(node.expression) || node.expression.text !== 'join') {
+    return undefined
+  }
+  const [first, ...rest] = node.arguments
+  if (first === undefined) return undefined
+  const segments = rest
+    .filter(argument => ts.isStringLiteralLike(argument))
+    .map(argument => argument.text)
+  if (segments.length === 0) return undefined
+  // The base is the file's own directory: `dirname(fileURLToPath(
+  // import.meta.url))`.
+  if (ts.isCallExpression(first) && ts.isIdentifier(first.expression) && first.expression.text === 'dirname') {
+    return segments
+  }
+  // The base is a named handle: `ROOT`.
+  if (ts.isIdentifier(first)) {
+    const declaration = declarationOf(first)
+    if (declaration === undefined || !ts.isVariableDeclaration(declaration)) return undefined
+    const initializer = declaration.initializer
+    if (initializer === undefined) return undefined
+    if (ts.isCallExpression(initializer) && ts.isIdentifier(initializer.expression) && initializer.expression.text === 'join') {
+      return joinBaseSegments(initializer, declarationOf, depth + 1)
+    }
+  }
+  return undefined
+}
+
+/**
  * The BASE of a whole-tree enumeration that reads `new URL(<rel>, <root>)`
  * where `<root>` is a directory URL.
  */
@@ -673,8 +785,8 @@ export function productionReferenceCount(source) {
  * A difference that is NOT inside a string literal is a form the extractor
  * missed, and the caller reports it.
  */
-export function unexplainedTextReferences(source) {
-  const parsed = productionReferences(source)
+export function unexplainedTextReferences(source, fileDepth = 0) {
+  const parsed = productionReferences(source, fileDepth)
   const text = []
   for (const match of source.matchAll(/(?:new URL\(\s*|^\s*import\s+|\bfrom\s+|\bimport\s*\(\s*)['"`](\.\.\/[^'"`$]*)/gmu)) {
     if (isInsideStringLiteral(source, match.index)) continue
@@ -750,8 +862,11 @@ function main() {
     const source = readFileSync(resolve(TEST_ROOT, rel), 'utf8')
     const before = baseSource(rel)
     if (before === undefined) continue
-    const beforeRefs = productionReferences(before)
-    const afterRefs = productionReferences(source)
+    // The file's depth below the test root: the flat base tree has depth 0,
+    // the layered current tree the number of directory segments.
+    const depth = rel.split('/').length - 1
+    const beforeRefs = productionReferences(before, 0)
+    const afterRefs = productionReferences(source, depth)
     // The coverage check runs BEFORE the zero-reference skip: a file whose
     // ONLY reference uses an unrecognised form must still be reported.
     const unexplained = unexplainedTextReferences(source)
@@ -777,7 +892,7 @@ function main() {
     // directory. Each side is resolved against ITS OWN location — that is
     // exactly what the migration had to preserve.
     const baseRel = rel.split('/').pop()
-    const resolveAll = (text, fileRel) => productionReferences(text)
+    const resolveAll = (text, fileRel, fileDepth) => productionReferences(text, fileDepth)
       // A join-derived reference is already expressed relative to the TEST
       // ROOT (the resolver knows the base it resolved); a file-relative
       // specifier is resolved against the FILE's own directory. The base
@@ -791,8 +906,8 @@ function main() {
       })
       .filter(path => path.startsWith('src/') || path.startsWith('packages/') || path.startsWith('<'))
       .sort()
-    const beforeTargets = resolveAll(before, baseRel)
-    const afterTargets = resolveAll(source, rel)
+    const beforeTargets = resolveAll(before, baseRel, 0)
+    const afterTargets = resolveAll(source, rel, depth)
     if (JSON.stringify(beforeTargets) === JSON.stringify(afterTargets)) continue
     changed += 1
     const removed = beforeTargets.filter(target => !afterTargets.includes(target))
