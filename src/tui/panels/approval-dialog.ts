@@ -428,14 +428,20 @@ class ApprovalSheet implements Component {
         titleShown = `${titleShown}${shortSuffix}`
       } else {
         // Drop the "Approve…" wrapper to a compact `<tool>?` before truncating
-        // the fact itself: the tool identity and resize cue both stay legible.
+        // the fact itself: the tool identity, the danger glyph (when present)
+        // and the resize cue all stay legible.
         const toolLabel = sanitizedPhysicalLine(this.request.toolName)
-        const compactTitle = `${toolLabel}?`
-        if (visibleWidth(`${compactTitle}${shortSuffix}`) <= contentWidth) {
-          titleShown = `${compactTitle}${shortSuffix}`
+        const danger = this.request.danger === true
+        const warningPrefix = danger ? '⚠ ' : ''
+        const compactIdentity = `${toolLabel}${danger ? '' : '?'}`
+        if (visibleWidth(`${warningPrefix}${compactIdentity}${shortSuffix}`) <= contentWidth) {
+          titleShown = `${warningPrefix}${compactIdentity}${shortSuffix}`
         } else {
-          const titleBudget = Math.max(1, contentWidth - visibleWidth(shortSuffix))
-          titleShown = `${truncateToWidth(titleShown, titleBudget, '…')}${shortSuffix}`
+          const titleBudget = Math.max(
+            1,
+            contentWidth - visibleWidth(shortSuffix) - visibleWidth(warningPrefix),
+          )
+          titleShown = `${warningPrefix}${truncateToWidth(compactIdentity, titleBudget, '…')}${shortSuffix}`
         }
       }
     }
@@ -481,7 +487,11 @@ class ApprovalSheet implements Component {
     }
     this.actionHits = hits
     const paintedActions = new Set(actionRows.flat().map(label => label.action))
+    const dangerHonest = this.request.danger !== true
+      || dangerShown !== ''
+      || titleShown.includes('⚠')
     this.layoutHonest = titleShown !== ''
+      && dangerHonest
       && (body.length === 0 || viewport > 0)
       && paintedActions.has('allow-once')
       && paintedActions.has('reject')

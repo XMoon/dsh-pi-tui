@@ -413,6 +413,25 @@ test('a surface below 24 columns still paints all three decisions', async () => 
   assert.equal(await decision, 'rejected')
 })
 
+test('a long dangerous tool keeps the warning fact in a narrow title', async () => {
+  const { vt, app } = startApp(20, 10)
+  const decision = app.showApprovalPrompt({
+    toolName: 'very-long-tool-name-abcdefghijk',
+    reason: 'danger body',
+    arguments: LONG_ARGUMENTS,
+    danger: true,
+  })
+  const view = await viewport(vt)
+  assert.ok(view.includes('⚠'), `the danger glyph must survive the narrow title fallback:\n${view}`)
+  assert.ok(view.includes('very'), `the tool identity must stay partially identifiable:\n${view}`)
+  assert.ok(view.includes('Resize'), `the resize cue must stay visible:\n${view}`)
+  assert.ok(view.includes('danger'), `the reading row must stay visible:\n${view}`)
+  assert.ok(view.includes('[y] Allow once') && view.includes('[n] Reject') && view.includes('[Esc] Cancel'),
+    `all three decisions must stay painted:\n${view}`)
+  vt.sendInput('n')
+  assert.equal(await decision, 'rejected')
+})
+
 test('a grant below the minimum sheet paints one truthful resize row, never a clipped action', async () => {
   const { vt, app } = startApp(10, 4)
   const decision = app.showApprovalPrompt({ toolName: 'bash', reason: 'too small', danger: true })
