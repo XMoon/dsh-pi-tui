@@ -229,8 +229,22 @@ reinterpreted.
 
 ### Install state machine
 
-Phases: `editing → inspecting → confirm → starting → installing → applying →
-cancelling → done | failed | unknown`.
+Phases:
+
+```text
+editing → inspecting → confirm → starting → installing → applying
+                                      │            │
+                                      └────────────┴──→ cancelling
+                                                         ├─ cancelled       → done
+                                                         ├─ too-late        → applying
+                                                         ├─ already settled → unknown
+                                                         └─ cancel failed   → installing
+
+starting | installing | applying → done | failed | unknown
+```
+
+`cancelling` is reachable ONLY from `starting`/`installing`; it is never a
+normal successor of `applying`.
 
 - Exactly one `requestId` per attempt; inspect before any install; explicit
   confirmation. The same id is used by `waitForInstall`/`cancelInstall`; a new
