@@ -384,6 +384,49 @@ distribution compatibility.
 * Release commits/tags also require explicit user approval. Keep bilingual
   changelogs synchronized and user-facing.
 
+## Issue management
+
+GitHub Issues are the single entry point for open work, stage progress and
+verification evidence. `docs/` never carries that state (see the documentation
+policy above).
+
+* **Find before you create.** Search the open issues first. If an issue already
+  owns the work, update it; do not open a second one for the same obligation.
+* **One obligation per issue.** An issue owns one problem, one feature or one
+  qualification check, with its own acceptance criteria. Use an epic (label
+  `epic`) as the parent for a work stream, and sub-issues for the work items.
+* **Parent is not dependency.** A sub-issue expresses a work split; "Blocked by"
+  expresses the dependency. Record real dependencies as "Blocked by" /
+  "Blocking" — an item's startability usually depends on a *different* issue
+  than its parent.
+* **Do not manufacture TODOs.** `NOT_VERIFIED` boundaries, accepted exclusions
+  and deferred scopes are dispositions, not open defects. Keep them on the issue
+  that records them, with their re-entry trigger, instead of spawning a TODO
+  row for each.
+* **Deferred work carries a trigger.** A deferred issue states the condition
+  under which it re-enters work, and who owns it. A closed issue carries its
+  evidence: a PR, a CI run, or a test reference.
+* **PRs update their issue.** When a PR closes or advances an issue, say so in
+  that issue. Do not append to an epic as a substitute for the work item.
+* **Labels.** `epic` for a parent, `area:*` for the work stream, `kind:feature`
+  / `kind:qualification` / `kind:milestone` for the nature of the item,
+  `status:deferred` for an item with a stated re-entry trigger.
+* **Use the issue forms.** `.github/ISSUE_TEMPLATE/` holds the four forms:
+  `bug_report.yml`, `feature_request.yml`, `qualification_task.yml` (evidence
+  as the deliverable) and `work_item.yml` (the standard Context / Scope /
+  Acceptance / Dependencies / Evidence / Status structure). An issue that does
+  not match a form still follows the same structure.
+* **Name a code name before you rely on it.** A short code (`M4`, `S4-D2`,
+  `B13`, `J-02`, …) is a local label from some plan, ledger or gate. Whenever
+  you use one, say which effort it belongs to and what it designates —
+  the stage, the scope and the claim it covers — so the reader never has to
+  guess. A code name is not self-explanatory, it is not stable across efforts,
+  and it does not transfer between efforts that happen to reuse the letters.
+  Its meaning lives with the issue, PR or ledger that owns it, not here.
+* **Do not infer status from a code name or a merge.** A merged PR is not a
+  stage closure, and a stage that is closed on one effort says nothing about
+  another. Read the owning issue or PR for the actual status.
+
 ## Documentation map
 
 - `docs/README.md` — the documentation policy and the complete index.
