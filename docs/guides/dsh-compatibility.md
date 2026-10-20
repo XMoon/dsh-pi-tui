@@ -144,7 +144,7 @@ removed with the temporary validation workspace and must never be committed to
 - The official-preset gate installs only the exact target DSH and candidate
   artifact, then runs real `standard`/`ptc`/`minimal`/`cordis` Agent/Session
   creation, durable-header, degradation and `/goal` isolation checks.
-- `test/dsh-peer-window.test.mjs`, `test/release-notes.test.mjs` and
+- `test/tooling/dsh-peer-window.test.mjs`, `test/tooling/release-notes.test.mjs` and
   `scripts/installation-doc-gate.mjs` prove the manifest/matrix-derived install
   facts and the two root READMEs; a stale matrix fails the release-notes gate
   instead of publishing a mixed install.
