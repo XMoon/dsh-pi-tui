@@ -349,5 +349,5 @@ test('an IPv6 loopback callback origin produces a matching SSH tunnel template (
   await flush()
   const painted = text(page)
   assert.match(painted, /\[::1\]:43121/u)
-  assert.match(painted, /ssh -N -L 127\.0\.0\.1:43121:\[::1\]:43121/u)
+  assert.match(painted, /ssh -N -L \[::1\]:43121:\[::1\]:43121/u)
 })
