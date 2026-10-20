@@ -646,3 +646,78 @@ test('REAL Host synchronous prompt from an abort listener never reaches the dead
     }
   }
 })
+
+test('REAL Host ordinary cancel then forced teardown still releases a committing prompt', async t => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-c2-auth-cancel-then-teardown-')
+  const ctx = new Context()
+  life.defer(() => ctx.fiber.dispose())
+  const key = credentialKey('llm-pi-ai', 'cancel-then-teardown')
+  let releaseCommit: (() => void) | undefined
+  life.defer(() => releaseCommit?.())
+  const store = new Map<string, unknown>()
+  ctx.provide('credentials', {
+    modifyRecord: async (recordKey: string, update: () => Promise<unknown>) => {
+      await new Promise<void>(resolve => { releaseCommit = resolve })
+      const record = await update()
+      store.set(recordKey, record)
+      ctx.emit('credentials/record-updated', recordKey as never)
+      return record
+    },
+    describeRecord: async (recordKey: string) => ({ configured: store.has(recordKey) }),
+  } as never)
+  await ctx.plugin(AuthorizationService)
+  ctx.authorization.registerFlow({
+    key,
+    label: 'Cancel Then Teardown',
+    methods: [{ id: 'oauth', label: 'Sign in' }],
+    run: async session => {
+      const prompt = session.prompt({ kind: 'text', message: 'held prompt' })
+      prompt.catch(() => {})
+      await new Promise<void>(resolve => setImmediate(resolve))
+      await session.commit({ kind: 'grant', payload: { token: 'secret' } })
+      await prompt
+    },
+  })
+  const port = new DirectAuthorizationConfig({ get: name => ctx.get(name) })
+  const surface: AuthorizationSurface = {
+    openOutputViewer: () => () => {},
+    askQuestions: () => new Promise(() => {}),
+    openPicker: () => ({ close: () => {} }),
+  }
+  const flow = createAuthorizationFlow(surface, port)
+  let settled = 0
+  let withdrawn = 0
+  const off = port.onEvent(event => {
+    if (event.kind === 'settled') settled += 1
+    if (event.kind === 'prompt-withdrawn') withdrawn += 1
+    flow.onEvent(event)
+  })
+  try {
+    const controller = new AbortController()
+    const started = await port.begin({ key, signal: controller.signal })
+    assert.equal(started.kind, 'started')
+    if (started.kind !== 'started') return
+    flow.bind(started.attemptId)
+    await new Promise<void>(resolve => setImmediate(resolve))
+    // Ordinary cancel while the Host is already committing: it cannot withdraw.
+    await port.cancel(started.attemptId)
+    await new Promise<void>(resolve => setImmediate(resolve))
+    assert.equal(settled, 0, 'ordinary cancel does not forge a terminal')
+    // Forced page teardown must still be observed by the retained caller listener.
+    controller.abort()
+    await new Promise<void>(resolve => setImmediate(resolve))
+    assert.equal(withdrawn, 1, 'forced teardown releases the still-pending prompt')
+    releaseCommit?.()
+    const outcome = await Promise.race([
+      flow.outcome,
+      new Promise<{ status: string }>(resolve => setTimeout(() => resolve({ status: 'timeout' }), 1_000)),
+    ])
+    assert.notEqual(outcome.status, 'timeout', 'no deadlock after cancel -> forced teardown')
+    assert.equal(settled, 1)
+    assert.equal(store.has(key), true, 'the committed record remains the store authority')
+  } finally {
+    off()
+    flow.close()
+  }
+})
