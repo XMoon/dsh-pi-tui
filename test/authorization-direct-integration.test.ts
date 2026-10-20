@@ -234,3 +234,48 @@ test('REAL Direct attempt → Models page Esc: cancel settles and the page retur
     }
   }
 })
+
+test('Direct cancel waits for the authoritative upstream outcome (commit window)', async () => {
+  const key = credentialKey('llm-pi-ai', 'commit-window')
+  let releaseUpstream: ((outcome: { status: 'authorized' | 'cancelled' }) => void) | undefined
+  const entry = {
+    key,
+    label: 'Commit Window',
+    methods: [{ id: 'oauth', label: 'Sign in' }],
+    inFlight: false,
+  }
+  const service = {
+    list: () => [entry],
+    describe: () => entry,
+    begin: () => new Promise<{ status: 'authorized' | 'cancelled' }>(resolve => { releaseUpstream = resolve }),
+    cancel: () => {},
+  }
+  const port = new DirectAuthorizationConfig({ get: name => name === 'authorization' ? service : undefined })
+  const surface: AuthorizationSurface = {
+    openOutputViewer: () => () => {},
+    askQuestions: async () => [],
+    openPicker: () => ({ close: () => {} }),
+  }
+  const flow = createAuthorizationFlow(surface, port)
+  let settled = 0
+  const off = port.onEvent(event => {
+    if (event.kind === 'settled') settled += 1
+    flow.onEvent(event)
+  })
+  try {
+    const started = await port.begin({ key })
+    assert.equal(started.kind, 'started')
+    if (started.kind !== 'started') return
+    flow.bind(started.attemptId)
+    await port.cancel(started.attemptId)
+    await new Promise<void>(resolve => setImmediate(resolve))
+    assert.equal(settled, 0, 'cancel must not preempt a commit that may still resolve authorized')
+    releaseUpstream?.({ status: 'authorized' })
+    const outcome = await flow.outcome
+    assert.equal(outcome.status, 'authorized')
+    assert.equal(settled, 1)
+  } finally {
+    off()
+    flow.close()
+  }
+})
