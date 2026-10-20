@@ -295,6 +295,10 @@ export interface SettingsAuthPage extends Component {
   onCellClick?(x: number, y: number): void
   /** Revoke one in-flight press when another owner claims the gesture. */
   cancelPointer?(): void
+  /** True while a Host mutation must settle on this page: the workspace root
+   *  must not dispose it from USER navigation (category rail / Back / deep
+   *  link). Blocking-owner teardown still bypasses this guard. */
+  pendingMutation?(): boolean
   invalidate(): void
   dispose(): void
 }
@@ -625,7 +629,7 @@ export class SettingsWorkspacePanel implements Component {
       this.intents.requestRender()
       return
     }
-    this.closeAuthPage()
+    if (!this.closeAuthPageForNavigation()) return
     const page = this.intents.createModelsPage?.(initial, () => this.openAccountPage({ view: 'page' }))
     if (page === undefined) return
     this.authPage = page
@@ -644,7 +648,7 @@ export class SettingsWorkspacePanel implements Component {
       this.intents.requestRender()
       return
     }
-    this.closeAuthPage()
+    if (!this.closeAuthPageForNavigation()) return
     const page = this.intents.createAccountPage?.(initial)
     if (page === undefined) return
     this.authPage = page
@@ -655,6 +659,18 @@ export class SettingsWorkspacePanel implements Component {
     this.authPressed = undefined
     this.bumpRevision()
     this.intents.requestRender()
+  }
+
+  private authPageHasPendingMutation(): boolean {
+    return this.authPage?.pendingMutation?.() === true
+  }
+
+  /** Close the direct page for USER navigation only when no Host mutation is
+   *  still owned by it. */
+  private closeAuthPageForNavigation(): boolean {
+    if (this.authPageHasPendingMutation()) return false
+    this.closeAuthPage()
+    return true
   }
 
   private closeAuthPage(): void {
@@ -1800,11 +1816,12 @@ export class SettingsWorkspacePanel implements Component {
     if (this.authPage !== undefined) {
       const result = this.authPage.handleInput(data)
       if (result === 'exit') {
-        this.closeAuthPage()
+        if (!this.closeAuthPageForNavigation()) return
         this.focus = 'categories'
         this.bumpRevision()
         this.intents.requestRender()
       } else if (result === 'open-account') {
+        if (this.authPageHasPendingMutation()) return
         this.openAccountPage({ view: 'page' })
       }
       return
@@ -1931,7 +1948,9 @@ export class SettingsWorkspacePanel implements Component {
   }
 
   private selectCategory(category: SettingsWorkspaceCategoryId, focus?: SettingsWorkspacePage): void {
-    if (this.authPageCategory !== undefined && category !== this.authPageCategory) this.closeAuthPage()
+    if (this.authPageCategory !== undefined && category !== this.authPageCategory) {
+      if (!this.closeAuthPageForNavigation()) return
+    }
     const changedCategory = category !== this.categoryId
     const targetFocus = focus ?? (this.choiceField() === undefined ? this.focus : 'categories')
     if (changedCategory || targetFocus !== this.focus || (this.choiceField() !== undefined && targetFocus !== 'detail')) {

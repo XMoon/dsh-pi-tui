@@ -724,6 +724,8 @@ export class DirectAuthorizationConfig implements AuthorizationConfig {
     /** Remove the prompt's abort listener (every settlement path runs it
      * so a resolved prompt never leaks its listener). */
     cleanup: () => void
+    /** The UI has already been told this prompt was withdrawn. */
+    withdrawn: boolean
   }>()
   /** attemptId → the upstream attempt's withdraw controller + the observed
    * settlement promise (held so the flow is never a floating promise) +
@@ -883,18 +885,30 @@ export class DirectAuthorizationConfig implements AuthorizationConfig {
     return Promise.resolve()
   }
 
-  /** Withdraw one attempt. Close/withdraw every pending prompt bridge
-   *  IMMEDIATELY so no prompt UI can outlive the cancellation, then wait for
-   *  the official Host's authoritative outcome. A pending prompt is NOT proof
-   *  that the provider has avoided `commit()`: the session exposes prompt()
-   *  and commit() independently, and the service's `committing` guard can
-   *  still resolve `authorized`. Never forge a terminal `cancelled` here. */
+  /** Withdraw one attempt's PRESENTATION without injecting a rejection into
+   *  the provider's flow: close every open prompt UI immediately, then wait
+   *  for the official Host's authoritative outcome. A pending prompt is NOT
+   *  proof that the provider has avoided `commit()` (prompt() and commit() are
+   *  independent and may overlap); rejecting the bridge could turn a committed
+   *  attempt into `failed`. The bridge is rejected only after the terminal
+   *  outcome is known. */
   private cancelAttempt(attemptId: string): void {
     const attempt = this.attempts.get(attemptId)
     if (attempt === undefined || attempt.settled) return
     attempt.controller.abort()
-    this.rejectAttemptPrompts(attemptId)
+    this.withdrawPromptUi(attemptId)
     attempt.disposeCallerAbortListener()
+  }
+
+  /** Emit prompt-withdrawn for every UI still open on this attempt, WITHOUT
+   *  resolving/rejecting its bridge. The flow may legitimately still be
+   *  committing and use the pending prompt afterward. */
+  private withdrawPromptUi(attemptId: string): void {
+    for (const [promptId, pending] of this.pendingPrompts) {
+      if (pending.attemptId !== attemptId || pending.withdrawn) continue
+      pending.withdrawn = true
+      this.emit({ kind: 'prompt-withdrawn', attemptId, promptId })
+    }
   }
 
   /** The ONE idempotent local-finalization path for an attempt: rejects
@@ -927,6 +941,7 @@ export class DirectAuthorizationConfig implements AuthorizationConfig {
         attemptId,
         resolve,
         reject,
+        withdrawn: false,
         cleanup: (): void => { removeAbortListener?.() },
       }
       this.pendingPrompts.set(promptId, pending)
@@ -982,12 +997,10 @@ export class DirectAuthorizationConfig implements AuthorizationConfig {
       this.pendingPrompts.delete(promptId)
       pending.cleanup()
       pending.reject(cancellationError('authorization attempt settled'))
-      // The client UI must close EVEN IF the upstream flow never settles
-      // (a cancel aborts the controller, but a flow that ignores its
-      // signal would otherwise leave the prompt UI open forever): the
-      // withdrawal event closes exactly the prompt it names (review
-      // finding).
-      this.emit({ kind: 'prompt-withdrawn', attemptId, promptId })
+      // The UI may already have been closed by cancel(); emit the withdrawal
+      // exactly once, and still reject the bridge after the authoritative
+      // outcome so a late flow await cannot remain unsettled.
+      if (!pending.withdrawn) this.emit({ kind: 'prompt-withdrawn', attemptId, promptId })
     }
   }
 
