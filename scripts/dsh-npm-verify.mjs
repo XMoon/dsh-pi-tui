@@ -234,7 +234,7 @@ async function main() {
       // dependency graph. The TOOLING suite is not part of `prepack`, so it
       // still needs its own run here.
       ['TUI tooling tests', ['test:tooling']],
-      ['documentation tests', ['test:docs']],
+      ['tmux terminal tooling tests', ['test:tmux']],
       // `gate:pi-surface-compat` is the re-vendor HARD GATE. It overlaps the
       // product suite's own glob, but the independent entry is deliberately
       // kept: a re-vendor contract must not depend on the product suite's
