@@ -249,3 +249,25 @@ test('a join read of the FORK package is a reference', () => {
     'a join read of the fork package must resolve',
   )
 })
+
+test('a local read HELPER\'s call sites are the references', () => {
+  // The review's reproduction: the test defines a helper whose argument is
+  // a PARAMETER, so the path is only known at the call site.
+  //
+  //     const read = (rel: string) => readFileSync(join(ROOT, rel), 'utf8')
+  //     read('src/app/surface/runtime.ts')
+  //
+  // The join's argument is a parameter, so the path cannot be resolved at
+  // the definition; it is resolved from each call site's argument.
+  const source = [
+    "const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..')",
+    "const read = (rel: string): string => readFileSync(join(ROOT, rel), 'utf8')",
+    "const surface = read('src/app/surface/runtime.ts')",
+    "const journal = read('src/app/surface/opening-journal.ts')",
+  ].join('\n')
+  assert.deepEqual(
+    productionReferences(source).filter(ref => ref.includes('src/')).sort(),
+    ['<root>src/app/surface/opening-journal.ts', '<root>src/app/surface/runtime.ts'],
+    'each call site must contribute its own production path',
+  )
+})
