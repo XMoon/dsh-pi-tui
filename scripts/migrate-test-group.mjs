@@ -50,6 +50,19 @@ export function relativeImports(source) {
       specs.add(match[1])
     }
   }
+  // The DOUBLE-quoted clause: `from "…"` / `import("…")`.
+  for (const match of source.matchAll(/(?:\bfrom\s*|\bimport\s*\(\s*)"(\.[^"]*)"/gu)) {
+    if (!isInsideStringLiteral(source, match.index)) {
+      specs.add(match[1])
+    }
+  }
+  // The SIDE-EFFECT import: `import "…"`.
+  for (const match of source.matchAll(/^\s*import\s+'(\.[^']*)'/gmu)) {
+    specs.add(match[1])
+  }
+  for (const match of source.matchAll(/^\s*import\s+"(\.[^"]*)"/gmu)) {
+    specs.add(match[1])
+  }
   // The TEMPLATE import form: `import(\`../scripts/x.mjs?query=\`)`. The
   // literal prefix before the interpolation is the part that must be
   // rewritten; the interpolated part is appended to that prefix.
@@ -247,6 +260,7 @@ export function rewriteImports(source, fromRel, toRel) {
     // Replace the specifier only where it is a WHOLE quoted literal, so a
     // rewritten specifier can never be rewritten again by a later pass.
     out = out.split(`'${spec}'`).join(`'${normalized}'`)
+    out = out.split(`"${spec}"`).join(`"${normalized}"`)
     // The TEMPLATE import form carries the same prefix inside backticks.
     out = out.split(`\`${spec}\${`).join(`\`${normalized}\${`)
   }
@@ -262,12 +276,31 @@ function main() {
   const group = JSON.parse(readFileSync(groupPath, 'utf8'))
   const moves = group.moves ?? {}
 
+  // ── PREFLIGHT ────────────────────────────────────────────────────────────
+  // A destination that already exists would be OVERWRITTEN: the migration
+  // must never silently replace a file. Two sources may not claim the same
+  // destination either.
+  const destinations = new Set()
+  for (const [from, to] of Object.entries(moves)) {
+    if (destinations.has(to)) throw new Error(`two files claim the same destination: ${to}`)
+    destinations.add(to)
+    const fromPath = join(TEST_ROOT, from)
+    if (!existsSync(fromPath)) throw new Error(`the move source does not exist: test/${from}`)
+    const toPath = join(TEST_ROOT, to)
+    if (existsSync(toPath)) throw new Error(`the move destination already exists: test/${to}`)
+  }
+
   const before = discoverTestFiles(TEST_ROOT, ['.test.ts', '.test.mjs'])
-  const beforeSet = new Set(before)
+  // The AFTER set is compared through the MOVE MAPPING, not by path: a file
+  // that legitimately moved is not "lost". The comparison therefore proves
+  // that the migration is a pure RELOCATION — the same set of files, under
+  // their new names.
+  const expectedAfter = before
+    .map(rel => (moves[rel] === undefined ? rel : moves[rel]))
+    .sort()
 
   for (const [from, to] of Object.entries(moves)) {
     const fromPath = join(TEST_ROOT, from)
-    if (!existsSync(fromPath)) throw new Error(`the move source does not exist: test/${from}`)
     const source = readFileSync(fromPath, 'utf8')
     const toPath = join(TEST_ROOT, to)
     mkdirSync(dirname(toPath), { recursive: true })
@@ -276,31 +309,36 @@ function main() {
   }
 
   const after = discoverTestFiles(TEST_ROOT, ['.test.ts', '.test.mjs'])
-  const afterSet = new Set(after)
-  const lost = [...beforeSet].filter(rel => !afterSet.has(rel))
-  const gained = [...afterSet].filter(rel => !beforeSet.has(rel))
+  const lost = expectedAfter.filter(rel => !after.includes(rel))
+  const gained = after.filter(rel => !expectedAfter.includes(rel))
   console.log(`moved ${Object.keys(moves).length} file(s)`)
-  console.log(`discovered before: ${before.length}, after: ${after.length}`)
+  console.log(`discovered before: ${before.length}, after: ${after.length} (expected: ${expectedAfter.length})`)
   if (lost.length > 0) console.log(`LOST: ${lost.join(', ')}`)
   if (gained.length > 0) console.log(`GAINED: ${gained.join(', ')}`)
 
+  // ── EVERY relative path in the WHOLE tree must still resolve ────────────
+  // The moved files are the ones the rewrite touched, but an UNMOVED file
+  // can reference a MOVED file (a relative import, a source read, a
+  // path literal). The whole tree is therefore checked, not just the moved
+  // files.
   let broken = 0
-  for (const [from, to] of Object.entries(moves)) {
-    const source = readFileSync(join(TEST_ROOT, to), 'utf8')
+  for (const rel of after) {
+    const source = readFileSync(join(TEST_ROOT, rel), 'utf8')
     for (const spec of relativeImports(source)) {
-      if (!resolves(to, spec)) {
-        console.log(`BROKEN IMPORT: ${to} -> ${spec}`)
+      if (!resolves(rel, spec)) {
+        console.log(`BROKEN IMPORT: ${rel} -> ${spec}`)
         broken += 1
       }
     }
     for (const spec of relativeUrlPaths(source)) {
-      if (!resolves(to, spec)) {
-        console.log(`BROKEN SOURCE PATH: ${to} -> ${spec}`)
+      if (!resolves(rel, spec)) {
+        console.log(`BROKEN SOURCE PATH: ${rel} -> ${spec}`)
         broken += 1
       }
     }
-  }  console.log(`broken imports: ${broken}`)
-  if (lost.length > 0 || broken > 0) process.exitCode = 1
+  }
+  console.log(`broken paths across the whole tree: ${broken}`)
+  if (lost.length > 0 || gained.length > 0 || broken > 0) process.exitCode = 1
 }
 
 if (process.argv[1] !== undefined && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
