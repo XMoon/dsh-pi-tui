@@ -260,14 +260,55 @@ test('a local read HELPER\'s call sites are the references', () => {
   // The join's argument is a parameter, so the path cannot be resolved at
   // the definition; it is resolved from each call site's argument.
   const source = [
-    "const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..')",
+    "const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')",
     "const read = (rel: string): string => readFileSync(join(ROOT, rel), 'utf8')",
     "const surface = read('src/app/surface/runtime.ts')",
     "const journal = read('src/app/surface/opening-journal.ts')",
   ].join('\n')
+  // The file sits at the test ROOT (depth 0), so the repository root is ONE
+  // level up — which is what `ROOT` climbs.
   assert.deepEqual(
-    productionReferences(source).filter(ref => ref.includes('src/')).sort(),
+    productionReferences(source, 0).filter(ref => ref.includes('src/')).sort(),
     ['<root>src/app/surface/opening-journal.ts', '<root>src/app/surface/runtime.ts'],
     'each call site must contribute its own production path',
+  )
+})
+
+test('a read helper whose base is NOT the repository root is reported, not assumed', () => {
+  // The review's soundness finding: a helper's base decides whether its
+  // call sites name PRODUCTION files. A base with one `..` level too few
+  // resolves into the test tree, so every call site would read a path that
+  // does not exist — and the comparison between the two trees would pass
+  // while the reads are broken.
+  //
+  // The file sits ONE level below the test root, so the repository root is
+  // TWO levels up. A base that climbs only ONE level is NOT the repository
+  // root and must be reported.
+  const wrongBase = [
+    "const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')",
+    "const read = (rel: string): string => readFileSync(join(ROOT, rel), 'utf8')",
+    "const surface = read('src/app/surface/runtime.ts')",
+  ].join('\n')
+  const wrongRefs = productionReferences(wrongBase, 1)
+  assert.ok(
+    wrongRefs.some(ref => ref.startsWith('<unresolved:')),
+    'a base that does not reach the repository root must be reported as unresolved',
+  )
+  assert.ok(
+    !wrongRefs.includes('<root>src/app/surface/runtime.ts'),
+    'a base that does not reach the repository root must not be reported as a production read',
+  )
+
+  // The CORRECT base — TWO levels up from a file one level below the test
+  // root — resolves the production file.
+  const rightBase = [
+    "const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..')",
+    "const read = (rel: string): string => readFileSync(join(ROOT, rel), 'utf8')",
+    "const surface = read('src/app/surface/runtime.ts')",
+  ].join('\n')
+  assert.deepEqual(
+    productionReferences(rightBase, 1).filter(ref => ref.includes('src/')),
+    ['<root>src/app/surface/runtime.ts'],
+    'the verified repository root resolves the production file',
   )
 })
