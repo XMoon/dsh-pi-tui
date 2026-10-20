@@ -438,8 +438,11 @@ export class CredentialWorkflow {
       }
     }
     const route = draft.route.trim().toLowerCase()
-    if (route === 'deepseek-official') {
-      return { kind: 'rejected', text: 'the deepseek official route is a builtin and cannot be added' }
+    if (route === 'deepseek-official' || route === ACCOUNT_PROVIDER_ROUTE) {
+      return {
+        kind: 'rejected',
+        text: `the ${route} route is reserved by the official bundle and cannot be added`,
+      }
     }
     if (!ROUTE_PATTERN.test(route)) {
       return {

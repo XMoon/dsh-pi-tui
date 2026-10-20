@@ -829,3 +829,220 @@ test('two route-less authorization flows keep distinct identities and each opens
   await flush()
   assert.ok(calls.includes('begin:plugin-b/default'), calls.join(','))
 })
+
+function runningAuthSource() {
+  const { source, calls } = fakeSource()
+  const listeners = new Set<(event: import('../src/runtime/config-port.ts').AuthorizationFlowEvent) => void>()
+  const emit = (event: import('../src/runtime/config-port.ts').AuthorizationFlowEvent): void => {
+    for (const listener of listeners) listener(event)
+  }
+  source.authorizationEvents = listener => {
+    listeners.add(listener)
+    return () => { listeners.delete(listener) }
+  }
+  source.beginAuthorization = async () => ({ kind: 'started', attemptId: 'auth-nav' })
+  source.cancelAuthorization = async id => { calls.push(`cancel:${id}`) }
+  return { source, calls, emit }
+}
+
+test('Guide navigation during a native attempt cancels, waits for settlement and then opens the guide (P1)', async () => {
+  const { source, calls, emit } = runningAuthSource()
+  const page = new ModelsWorkspacePage(source, () => {}, { view: 'provider', route: 'anthropic' }, () => {})
+  page.setBodyHeight(26)
+  await flush()
+  viewText(page)
+  page.handleInput('\r') // sign in
+  await flush()
+  const lines = page.render(100).map(stripTerminalSequences)
+  const guideRow = lines.findIndex(line => line.includes('View model config guide'))
+  assert.ok(guideRow >= 0)
+  page.onCellPress(2, guideRow)
+  page.onCellClick(2, guideRow)
+  await flush()
+  assert.ok(calls.includes('cancel:auth-nav'), calls.join(','))
+  assert.match(viewText(page), /Provider · Anthropic/u, 'Guide waits for the Host settlement')
+  emit({ kind: 'settled', attemptId: 'auth-nav', status: 'cancelled' })
+  await flush()
+  assert.match(viewText(page), /Model configuration guide/u)
+})
+
+test('Clear navigation during a native attempt uses the same cancel-and-settle policy (P1)', async () => {
+  const { source, calls, emit } = runningAuthSource()
+  source.storedCredentials = async () => ({
+    rows: [{ kind: 'record', key: 'llm-pi-ai/anthropic', label: 'Anthropic', route: 'anthropic', kindHint: 'grant' }],
+    recordCleanupUnavailable: false,
+    referenceReadFailures: [],
+  })
+  const page = new ModelsWorkspacePage(source, () => {}, { view: 'provider', route: 'anthropic' }, () => {})
+  page.setBodyHeight(26)
+  await flush()
+  viewText(page)
+  page.handleInput('\r')
+  await flush()
+  const lines = page.render(100).map(stripTerminalSequences)
+  const clearRow = lines.findIndex(line => line.includes('Clear stored credential'))
+  assert.ok(clearRow >= 0)
+  page.onCellPress(2, clearRow)
+  page.onCellClick(2, clearRow)
+  await flush()
+  assert.ok(calls.includes('cancel:auth-nav'), calls.join(','))
+  assert.match(viewText(page), /Provider · Anthropic/u)
+  emit({ kind: 'settled', attemptId: 'auth-nav', status: 'cancelled' })
+  await flush()
+  assert.match(viewText(page), /Clear stored credential/u)
+})
+
+test('a verified API-key write refreshes the list projection (P2)', async () => {
+  let configured = false
+  const { source } = fakeSource()
+  source.credentialState = async () => ({ kind: 'known', configured })
+  source.describeReference = async () => ({ configured })
+  source.setReference = async () => { configured = true }
+  const page = new ModelsWorkspacePage(source, () => {}, { view: 'reference', ref: 'ACME_API_KEY', label: 'Acme Gateway' }, () => {})
+  page.setBodyHeight(24)
+  await flush()
+  viewText(page)
+  page.handleInput('\r')
+  await flush()
+  for (const character of 'sk-cache') page.handleInput(character)
+  page.handleInput('\r')
+  page.handleInput('\r')
+  await flush()
+  assert.match(viewText(page), /Verified/u)
+  page.handleInput('\u001b')
+  await flush()
+  const acmeRow = page.render(100).map(stripTerminalSequences).find(line => line.includes('Acme Gateway'))
+  assert.ok(acmeRow !== undefined)
+  assert.match(acmeRow, /Configured/u)
+})
+
+test('a verified clear refreshes the list projection (P2)', async () => {
+  let configured = true
+  const { source } = fakeSource()
+  source.credentialState = async () => ({ kind: 'known', configured })
+  source.describeReference = async () => ({ configured })
+  source.clearReference = async () => { configured = false }
+  const page = new ModelsWorkspacePage(source, () => {}, {
+    view: 'logout',
+    target: { kind: 'reference', ref: 'ACME_API_KEY', label: 'Acme Gateway' },
+  }, () => {})
+  page.setBodyHeight(24)
+  await flush()
+  viewText(page)
+  page.handleInput('\r')
+  await flush()
+  assert.match(viewText(page), /cleared/u)
+  page.handleInput('\u001b')
+  await flush()
+  const acmeRow = page.render(100).map(stripTerminalSequences).find(line => line.includes('Acme Gateway'))
+  assert.ok(acmeRow !== undefined)
+  assert.match(acmeRow, /Not set/u)
+})
+
+test('a pending API-key write cannot be left by Esc and still verifies on settlement (P2)', async () => {
+  let resolveWrite: (() => void) | undefined
+  const { source } = fakeSource()
+  source.setReference = () => new Promise<void>(resolve => { resolveWrite = resolve })
+  source.describeReference = async () => ({ configured: true })
+  const page = new ModelsWorkspacePage(source, () => {}, { view: 'reference', ref: 'ACME_API_KEY', label: 'Acme Gateway' }, () => {})
+  page.setBodyHeight(24)
+  await flush()
+  viewText(page)
+  page.handleInput('\r')
+  await flush()
+  for (const character of 'sk-wait') page.handleInput(character)
+  page.handleInput('\r')
+  page.handleInput('\r')
+  await flush()
+  page.handleInput('\u001b')
+  await flush()
+  assert.match(viewText(page), /API Key Reference/u)
+  assert.match(viewText(page), /in flight/u)
+  resolveWrite?.()
+  await flush()
+  assert.match(viewText(page), /Verified/u)
+})
+
+test('the list cursor follows into view so an off-screen provider is Enter-reachable (P2)', async () => {
+  const { source } = fakeSource()
+  const rows: ModelsProviderRow[] = Array.from({ length: 30 }, (_, index) => ({
+    kind: 'reference',
+    identity: `route:p${index}`,
+    route: `p${index}`,
+    label: `P${index}`,
+    ref: `P${index}_API_KEY`,
+    configured: true,
+    declared: true,
+    namesCredential: true,
+    methods: [],
+    inFlight: false,
+    profile: { route: `p${index}`, configured: true, models: [] },
+  }))
+  source.rows = () => rows
+  const page = new ModelsWorkspacePage(source, () => {}, { view: 'list' }, () => {})
+  page.setBodyHeight(10)
+  await flush()
+  page.render(100)
+  for (let index = 0; index < 20; index += 1) {
+    page.handleInput('\u001b[B')
+    page.render(100)
+  }
+  page.handleInput('\r')
+  assert.match(viewText(page), /Provider · P19/u)
+})
+
+test('the login-method picker reserves heading and action-bar rows on a short screen (P2)', async () => {
+  const { source } = fakeSource()
+  const methods = Array.from({ length: 10 }, (_, index) => ({ id: `m${index}`, label: `Method ${index}` }))
+  const rows: ModelsProviderRow[] = [{
+    kind: 'authorization', identity: 'auth:plugin/many', route: 'many', label: 'Many Methods',
+    key: 'plugin/many', configured: false, declared: false, namesCredential: false, methods, inFlight: false,
+    profile: { route: 'many', configured: false, models: [] },
+  }]
+  source.rows = () => rows
+  const page = new ModelsWorkspacePage(source, () => {}, { view: 'provider', route: 'many' }, () => {})
+  page.setBodyHeight(8)
+  await flush()
+  page.render(100)
+  page.handleInput('\r') // open the method picker
+  const lines = page.render(100).map(stripTerminalSequences)
+  assert.equal(lines.length, 8)
+  assert.match(lines.at(-1) ?? '', /Esc cancel/u)
+  assert.ok(lines.some(line => line.includes('Method 0')), lines.join('\n'))
+})
+
+test('closing the Models page while a native attempt runs cancels it and the owned task settles (MA13 no-hang)', async () => {
+  const { source, calls } = fakeSource()
+  const listeners = new Set<(event: import('../src/runtime/config-port.ts').AuthorizationFlowEvent) => void>()
+  const emit = (event: import('../src/runtime/config-port.ts').AuthorizationFlowEvent): void => {
+    for (const listener of listeners) listener(event)
+  }
+  source.authorizationEvents = listener => {
+    listeners.add(listener)
+    return () => { listeners.delete(listener) }
+  }
+  source.beginAuthorization = async () => ({ kind: 'started', attemptId: 'auth-close' })
+  source.cancelAuthorization = async id => {
+    calls.push(`cancel:${id}`)
+    emit({ kind: 'settled', attemptId: id, status: 'cancelled' })
+  }
+  let signInTask: Promise<void> | undefined
+  source.run = (label, task) => {
+    const running = task()
+    if (label === 'models provider sign-in') signInTask = running
+  }
+  const page = new ModelsWorkspacePage(source, () => {}, { view: 'provider', route: 'anthropic' }, () => {})
+  page.setBodyHeight(24)
+  await flush()
+  viewText(page)
+  page.handleInput('\r')
+  await flush()
+  page.dispose()
+  await flush()
+  assert.ok(calls.includes('cancel:auth-close'), calls.join(','))
+  assert.ok(signInTask !== undefined)
+  await signInTask
+  // If the owned sign-in task is still pending this test times out; the
+  // assertion above plus the await is the no-hang evidence.
+  assert.ok(true)
+})

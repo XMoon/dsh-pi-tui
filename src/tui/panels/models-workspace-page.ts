@@ -257,6 +257,9 @@ export class ModelsWorkspacePage implements Component {
   private add: AddProviderState | undefined
   private cursor = 0
   private scroll = 0
+  /** Set by keyboard navigation; the next render follows the selected content
+   *  row into view. Wheel scrolling clears it so it never fights the user. */
+  private followCursor = false
   private picker: PickerState | undefined
   private readonly pickerQueue: PickerState[] = []
   private modelPicker: { items: readonly { readonly id: string }[]; readonly selected: Set<string>; index: number } | undefined
@@ -268,7 +271,7 @@ export class ModelsWorkspacePage implements Component {
   private authUnsubscribe: (() => void) | undefined
   /** Esc on a provider detail with a live native attempt waits for the Host
    *  settled event (and its prompt cleanup) before returning to the list. */
-  private exitAfterAuth = false
+  private pendingAfterAuth: (() => void) | undefined
   private readonly pageController = new AbortController()
   private disposed = false
   private revision = 0
@@ -417,6 +420,11 @@ export class ModelsWorkspacePage implements Component {
             if (current.target.kind !== 'reference' || current.target.ref !== ref) return
           } else return
           this.referenceConfigured = info.configured
+          this.credentialStates.set(ref, {
+            kind: 'known',
+            configured: info.configured,
+            ...(info.source === undefined ? {} : { source: info.source }),
+          })
           if (current.kind === 'logout' && this.clear !== undefined && clearSerial === this.clearSerial) {
             this.clear = {
               phase: 'ready',
@@ -463,6 +471,7 @@ export class ModelsWorkspacePage implements Component {
     this.view = view
     this.cursor = 0
     this.scroll = 0
+    this.followCursor = false
     this.notice = undefined
     this.revision += 1
     if (view.kind === 'records' || view.kind === 'logout-list') this.refreshRecords()
@@ -520,6 +529,7 @@ export class ModelsWorkspacePage implements Component {
               this.referenceStatus = error instanceof Error && error.name === 'SupersededReadError'
                 ? 'Not sent — the key never left the client'
                 : errorText(error)
+              this.credentialStates.set(ref, { kind: 'unknown', reason: this.referenceStatus })
             })
             return
           }
@@ -532,12 +542,18 @@ export class ModelsWorkspacePage implements Component {
                 ? info.source === undefined ? 'Verified' : `Verified · source: ${info.source}`
                 : 'the write returned, but the credential store still reports it unset'
               this.referenceConfigured = info.configured
+              this.credentialStates.set(ref, {
+                kind: 'known',
+                configured: info.configured,
+                ...(info.source === undefined ? {} : { source: info.source }),
+              })
             })
           } catch (error) {
             this.settle(() => {
               if (!isCurrent()) return
               this.referencePhase = 'unknown'
               this.referenceStatus = `the write returned; the store could not be re-read: ${errorText(error)}`
+              this.credentialStates.set(ref, { kind: 'unknown', reason: this.referenceStatus })
             })
           }
         })
@@ -622,12 +638,18 @@ export class ModelsWorkspacePage implements Component {
             this.clear = info.configured
               ? { phase: 'failed', configured: true, reason: 'the credential store still reports this reference as configured' }
               : { phase: 'done', configured: false, result: `API key ${target.ref} cleared` }
+            this.credentialStates.set(target.ref, {
+              kind: 'known',
+              configured: info.configured,
+              ...(info.source === undefined ? {} : { source: info.source }),
+            })
             this.readReferenceState()
           })
         } catch (error) {
           this.settle(() => {
             if (!isCurrent() || readSerial !== this.clearReadSerial) return
             this.clear = { phase: 'failed', configured: true, reason: `the clear returned; the store could not be re-read: ${errorText(error)}` }
+            this.credentialStates.set(target.ref, { kind: 'unknown', reason: errorText(error) })
           })
         }
         return
@@ -638,6 +660,7 @@ export class ModelsWorkspacePage implements Component {
         const present = records.rows.some(row => row.kind === 'record' && row.key === target.key)
         this.settle(() => {
           if (!isCurrent() || readSerial !== this.clearReadSerial) return
+          this.records = records
           this.clear = present
             ? { phase: 'failed', configured: true, reason: 'the stored record is still present after the clear' }
             : { phase: 'done', configured: false, result: `${target.label} signed out locally — stored credential cleared` }
@@ -889,14 +912,14 @@ export class ModelsWorkspacePage implements Component {
               phase: 'failed',
               status: authorizationFailureText(error, errorText(error)),
             }
-            if (this.exitAfterAuth) this.leaveAfterAuth()
+            if (this.pendingAfterAuth !== undefined) this.runPendingAfterAuth()
           })
           return
         }
         if (started.kind !== 'started') {
           this.settle(() => {
             this.auth = { targetIdentity: row.identity, phase: 'failed', status: 'authorization service unavailable' }
-            if (this.exitAfterAuth) this.leaveAfterAuth()
+            if (this.pendingAfterAuth !== undefined) this.runPendingAfterAuth()
           })
           return
         }
@@ -904,19 +927,19 @@ export class ModelsWorkspacePage implements Component {
       this.settle(() => {
         if (this.auth !== undefined) this.auth = { ...this.auth, phase: 'running', attemptId: started.attemptId }
       })
-      if (this.exitAfterAuth) this.cancelAuthorization()
+      if (this.pendingAfterAuth !== undefined) this.cancelAuthorization()
       const outcome = await flow.outcome
       if (outcome.status === 'authorized') {
         const note = await this.source.provisionKeylessProfile(row.route)
         this.settle(() => {
           this.auth = { targetIdentity: row.identity, phase: 'authorized', attemptId: started.attemptId, status: `signed in to ${row.label}${note}` }
           this.refresh()
-          if (this.exitAfterAuth) this.leaveAfterAuth()
+          if (this.pendingAfterAuth !== undefined) this.runPendingAfterAuth()
         })
       } else if (outcome.status === 'cancelled') {
         this.settle(() => {
           this.auth = { targetIdentity: row.identity, phase: 'cancelled', attemptId: started.attemptId, status: 'sign-in cancelled' }
-          if (this.exitAfterAuth) this.leaveAfterAuth()
+          if (this.pendingAfterAuth !== undefined) this.runPendingAfterAuth()
         })
       } else {
         this.settle(() => {
@@ -926,7 +949,7 @@ export class ModelsWorkspacePage implements Component {
             attemptId: started.attemptId,
             status: `sign-in failed${outcome.code === undefined ? '' : ` (${outcome.code})`}: ${authorizationFailureText({ code: outcome.code }, outcome.message ?? 'login failed')}`,
           }
-          if (this.exitAfterAuth) this.leaveAfterAuth()
+          if (this.pendingAfterAuth !== undefined) this.runPendingAfterAuth()
         })
       }
       } finally {
@@ -936,11 +959,26 @@ export class ModelsWorkspacePage implements Component {
     })
   }
 
-  private leaveAfterAuth(): void {
-    this.exitAfterAuth = false
+  /** ONE policy for every in-page navigation that would leave the Provider
+   *  detail while a native attempt is starting/running: cancel the exact Host
+   *  attempt and run the intended navigation only after its settlement. */
+  private deferProviderNavigation(run: () => void): void {
+    if (this.disposed) return
+    if (this.auth?.phase !== 'starting' && this.auth?.phase !== 'running') {
+      run()
+      return
+    }
+    this.pendingAfterAuth = run
+    this.cancelAuthorization()
+  }
+
+  private runPendingAfterAuth(): void {
+    const run = this.pendingAfterAuth
+    this.pendingAfterAuth = undefined
+    if (this.disposed) return
     this.auth = undefined
     this.authNotice = undefined
-    this.enter({ kind: 'list' })
+    run?.()
   }
 
   private finishAuthorization(): void {
@@ -1199,6 +1237,16 @@ export class ModelsWorkspacePage implements Component {
     this.paintedActionIds.clear()
     const actionLines = projection.actions.map((action, index) => this.paintAction(action, rowCount + index))
     const contentRows = Math.max(0, height - 1 - actionLines.length)
+    if (this.followCursor && this.cursor < rowCount && contentRows > 0) {
+      const selectedId = this.rowOrder[this.cursor]
+      for (const [contentRow, id] of this.rowIds) {
+        if (id !== selectedId) continue
+        if (contentRow < this.scroll) this.scroll = contentRow
+        else if (contentRow >= this.scroll + contentRows) this.scroll = contentRow - contentRows + 1
+        break
+      }
+    }
+    this.followCursor = false
     this.scroll = Math.min(this.scroll, Math.max(0, projection.content.length - contentRows))
     for (let index = 0; index < contentRows; index += 1) {
       const lineIndex = this.scroll + index
@@ -1426,7 +1474,7 @@ export class ModelsWorkspacePage implements Component {
     if (this.referencePhase !== 'pending' && this.referencePhase !== 'editing') {
       actions.push({ id: 'reference:edit', label: 'Configure API Key…', enabled: true })
     }
-    actions.push({ id: 'reference:back', label: '← Back', enabled: true })
+    if (this.referencePhase !== 'pending') actions.push({ id: 'reference:back', label: '← Back', enabled: true })
     return { content, actions }
   }
 
@@ -1577,8 +1625,9 @@ export class ModelsWorkspacePage implements Component {
   private renderModelPicker(width: number, rows: number, targets: HitTarget[]): string[] {
     const picker = this.modelPicker
     if (picker === undefined) return []
-    const content: string[] = [color.textStrong('Models advertised by the endpoint'), '']
-    const viewport = Math.max(1, rows - content.length - 1)
+    const cappedRows = Math.max(1, rows)
+    const heading = cappedRows >= 4 ? [color.textStrong('Models advertised by the endpoint'), ''] : []
+    const viewport = Math.max(1, cappedRows - heading.length - 1)
     const offset = Math.min(Math.max(0, picker.index - viewport + 1), Math.max(0, picker.items.length + 1 - viewport))
     const lines: { text: string; id: string }[] = picker.items.map((model, index) => ({
       id: `model-picker:${index}`,
@@ -1588,26 +1637,33 @@ export class ModelsWorkspacePage implements Component {
       id: 'model-picker:manual',
       text: `${picker.index === picker.items.length ? color.primary('> ') : '  '}${color.text('Enter ids by hand…')}`,
     })
+    const content: string[] = [...heading]
     for (const [index, line] of lines.entries()) {
       if (index < offset || index >= offset + viewport) continue
       content.push(line.text)
       targets.push({ kind: 'model-picker', id: line.id, row: content.length - 1, startCol: 0, endCol: width })
     }
-    return content
+    return content.slice(0, cappedRows)
   }
 
   private renderPicker(width: number, rows: number, targets: HitTarget[]): string[] {
     const picker = this.picker
     if (picker === undefined) return []
-    const content: string[] = [color.textStrong(sanitizedPhysicalLine(picker.header)), '']
-    const offset = Math.min(Math.max(0, picker.index - rows + 1), Math.max(0, picker.items.length - rows))
+    const cappedRows = Math.max(1, rows)
+    // A 1-2 row budget keeps the SELECTED row visible instead of spending both
+    // rows on the header; the action bar outside this method still owns the
+    // final hint row.
+    const heading = cappedRows >= 3 ? [color.textStrong(sanitizedPhysicalLine(picker.header)), ''] : []
+    const viewport = Math.max(1, cappedRows - heading.length)
+    const offset = Math.min(Math.max(0, picker.index - viewport + 1), Math.max(0, picker.items.length - viewport))
+    const content: string[] = [...heading]
     for (const [index, item] of picker.items.entries()) {
-      if (index < offset || index >= offset + rows) continue
+      if (index < offset || index >= offset + viewport) continue
       const selected = index === picker.index
       content.push(`${selected ? color.primary('> ') : '  '}${selected ? color.textStrong(sanitizedPhysicalLine(item.label)) : color.text(sanitizedPhysicalLine(item.label))}${item.description === undefined ? '' : color.textDim(` — ${sanitizedPhysicalLine(item.description)}`)}`)
       targets.push({ kind: 'picker', id: String(index), row: content.length - 1, startCol: 0, endCol: width })
     }
-    return content
+    return content.slice(0, cappedRows)
   }
 
   private paintAction(action: ActionLine, index: number): string {
@@ -1785,6 +1841,7 @@ export class ModelsWorkspacePage implements Component {
   private move(delta: number): ModelsPageExit {
     const count = this.interactiveCount()
     this.cursor = Math.min(Math.max(0, this.cursor + delta), Math.max(0, count - 1))
+    this.followCursor = true
     this.revision += 1
     this.requestRender()
     return 'handled'
@@ -1800,6 +1857,7 @@ export class ModelsWorkspacePage implements Component {
 
   private jump(direction: 1 | -1): ModelsPageExit {
     this.cursor = direction < 0 ? 0 : Math.max(0, this.interactiveCount() - 1)
+    this.followCursor = true
     this.revision += 1
     this.requestRender()
     return 'handled'
@@ -1876,9 +1934,13 @@ export class ModelsWorkspacePage implements Component {
         if (view.kind === 'provider') {
           const row = this.providerRows.find(candidate => candidate.identity === view.identity)
           if (row?.ref !== undefined) {
-            this.referenceEditor.ref = row.ref
-            this.referenceEditor.label = row.label
-            this.enter({ kind: 'reference', ref: row.ref, label: row.label })
+            const ref = row.ref
+            const label = row.label
+            this.deferProviderNavigation(() => {
+              this.referenceEditor.ref = ref
+              this.referenceEditor.label = label
+              this.enter({ kind: 'reference', ref, label })
+            })
           }
         }
         return 'handled'
@@ -1888,11 +1950,11 @@ export class ModelsWorkspacePage implements Component {
         if (view.kind === 'provider') {
           const row = this.providerRows.find(candidate => candidate.identity === view.identity)
           const target = row === undefined ? undefined : this.clearTargetOf(row)
-          if (target !== undefined) this.openClear(target)
+          if (target !== undefined) this.deferProviderNavigation(() => this.openClear(target))
         }
         return 'handled'
       }
-      case 'provider:guide': this.enter({ kind: 'guide' }); return 'handled'
+      case 'provider:guide': this.deferProviderNavigation(() => this.enter({ kind: 'guide' })); return 'handled'
       case 'provider:cancel': this.cancelAuthorization(); return 'handled'
       case 'provider:back': return this.back()
       case 'reference:edit': this.beginReferenceEditor(); return 'handled'
@@ -1925,8 +1987,7 @@ export class ModelsWorkspacePage implements Component {
           // Esc is an explicit abandonment of the native attempt: cancel it and
           // wait for the Host's settled event, which closes the page-local
           // prompt before returning to the list.
-          this.exitAfterAuth = true
-          this.cancelAuthorization()
+          this.deferProviderNavigation(() => this.enter({ kind: 'list' }))
           return 'handled'
         }
         this.auth = undefined
@@ -1935,6 +1996,11 @@ export class ModelsWorkspacePage implements Component {
         this.enter({ kind: 'list' })
         return 'handled'
       case 'reference':
+        if (this.referencePhase === 'pending') {
+          this.notice = 'the API-key write is in flight — wait for the Host outcome'
+          this.requestRender()
+          return 'handled'
+        }
         this.referencePhase = 'idle'
         this.referenceStatus = undefined
         this.enter({ kind: 'list' })
@@ -1979,6 +2045,7 @@ export class ModelsWorkspacePage implements Component {
     const delta = event.wheelDelta ?? 0
     if (delta === 0) return undefined
     this.scroll = Math.max(0, this.scroll + delta)
+    this.followCursor = false
     this.revision += 1
     this.requestRender()
     return { handled: true }
