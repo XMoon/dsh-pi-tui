@@ -310,6 +310,8 @@ export class ModelsWorkspacePage implements Component {
    *  disturbing other providers' independent reads. */
   private readonly credentialReadSerials = new Map<string, number>()
   private clearReadSerial = 0
+  private recordsError: string | undefined
+  private addDiscoverySerial = 0
 
   constructor(
     source: ModelsWorkspaceSource,
@@ -401,18 +403,21 @@ export class ModelsWorkspacePage implements Component {
     // A read in flight has no current record presence: do not keep painting
     // the previous snapshot as if it were the Host's current fact.
     this.records = undefined
+    this.recordsError = undefined
     this.source.run('models records read', async () => {
       try {
         const records = await this.source.storedCredentials()
         this.settle(() => {
           if (serial !== this.recordsSerial) return
           this.records = records
+          this.recordsError = undefined
           if (this.notice?.startsWith('the stored credentials could not be read') === true) this.notice = undefined
         })
       } catch (error) {
         this.settle(() => {
           if (serial !== this.recordsSerial) return
           this.records = undefined
+          this.recordsError = errorText(error)
           this.notice = `the stored credentials could not be read: ${errorText(error)}`
         })
       }
@@ -729,6 +734,7 @@ export class ModelsWorkspacePage implements Component {
 
   private startAddProvider(route?: string): void {
     this.addSerial += 1
+    this.addDiscoverySerial += 1
     this.add = {
       step: 'form',
       draft: { route: route ?? '', api: PROTOCOL_CHOICES[0], baseURL: '', displayName: '', key: '', models: [] },
@@ -743,7 +749,14 @@ export class ModelsWorkspacePage implements Component {
   private updateAddDraft(patch: Partial<AddProviderState['draft']>): void {
     const add = this.add
     if (add === undefined) return
-    this.add = { ...add, draft: { ...add.draft, ...patch }, error: undefined }
+    const invalidatesDiscovery = 'baseURL' in patch || 'api' in patch || 'key' in patch
+    if (invalidatesDiscovery) this.addDiscoverySerial += 1
+    this.add = {
+      ...add,
+      draft: { ...add.draft, ...patch },
+      error: undefined,
+      ...(invalidatesDiscovery ? { discovering: false, discoveryNote: undefined } : {}),
+    }
     this.requestRender()
   }
 
@@ -797,7 +810,7 @@ export class ModelsWorkspacePage implements Component {
       return
     }
     this.add = { ...add, discovering: true, error: undefined }
-    const serial = this.addSerial
+    const serial = ++this.addDiscoverySerial
     this.requestRender()
     this.source.run('models model discovery', async () => {
       let discovery: readonly { id: string }[] = []
@@ -815,7 +828,7 @@ export class ModelsWorkspacePage implements Component {
         note = 'model probe failed — enter model ids by hand'
       }
       this.settle(() => {
-        if (serial !== this.addSerial) return
+        if (serial !== this.addDiscoverySerial) return
         const current = this.add
         if (current === undefined) return
         this.add = { ...current, discovering: false, discoveryNote: note }
@@ -908,10 +921,11 @@ export class ModelsWorkspacePage implements Component {
         // The key draft dies with its single dispatch: a failed/partial write is
         // never retried with a cached secret.
         this.add = { ...current, creating: false, result: outcome, draft: { ...current.draft, key: '' } }
-        if (outcome.kind === 'created') {
+        if (outcome.kind === 'created' || outcome.kind === 'profile-written-key-failed') {
           this.providerRows = this.source.rows()
-          // The new row's credential/record presence is authoritative state the
-          // list must not leave Unknown until a manual refresh.
+          // A persisted profile is a real new Provider row even when its key
+          // write failed; refresh its authority without changing the partial
+          // outcome copy.
           this.refresh()
         }
       })
@@ -1284,8 +1298,9 @@ export class ModelsWorkspacePage implements Component {
     }
     if (this.modelPicker !== undefined) {
       const notice = this.renderAuthNotice(width)
-      lines.push(...notice.map(line => fit(line, width)))
-      const pickerRows = Math.max(1, height - 1 - notice.length)
+      const visibleNotice = notice.slice(0, Math.max(0, height - 2))
+      lines.push(...visibleNotice.map(line => fit(line, width)))
+      const pickerRows = Math.max(1, height - 1 - visibleNotice.length)
       lines.push(...this.renderModelPicker(width, pickerRows, targets))
       lines.push(color.textMuted(renderActionBarRow([
         { text: 'Space toggle', priority: 5 },
@@ -1299,8 +1314,11 @@ export class ModelsWorkspacePage implements Component {
     }
     if (this.picker !== undefined) {
       const notice = this.renderAuthNotice(width)
-      lines.push(...notice.map(line => fit(line, width)))
-      lines.push(...this.renderPicker(width, Math.max(1, height - 1 - notice.length), targets))
+      // Keep the action bar and at least one selectable row: a 3-line notice on
+      // a 4-row page must not push the only decision affordance off-screen.
+      const visibleNotice = notice.slice(0, Math.max(0, height - 2))
+      lines.push(...visibleNotice.map(line => fit(line, width)))
+      lines.push(...this.renderPicker(width, Math.max(1, height - 1 - visibleNotice.length), targets))
       lines.push(color.textMuted(renderActionBarRow([
         { text: 'Up/Down choose', priority: 5 },
         { text: 'Enter select', priority: 6 },
@@ -1636,7 +1654,12 @@ export class ModelsWorkspacePage implements Component {
     const content: string[] = [color.textStrong('Stored credentials'), '']
     const records = this.records
     if (records === undefined) {
-      content.push(color.textMuted('Reading the credential store…'))
+      if (this.recordsError !== undefined) {
+        content.push(color.error(`the stored credentials could not be read: ${sanitizedPhysicalLine(this.recordsError)}`))
+        content.push(color.textMuted('Press r to retry.'))
+      } else {
+        content.push(color.textMuted('Reading the credential store…'))
+      }
       return { content, actions: [{ id: 'records:back', label: '← Back', enabled: true }] }
     }
     if (records.recordCleanupUnavailable) content.push(color.warning('Stored credential records cannot be enumerated or removed on this backend.'))
