@@ -46,6 +46,9 @@ export function createAuthCommands(deps: AuthCommandDeps): AuthCommandRegistrars
       description: 'Open Models to configure provider credentials or sign in to DeepSeek Account',
       input: { hint: '[<route|env-var|deepseek-account>]' },
       handler: (invocation) => {
+        if (!runner.config.credentials.available()) {
+          return { kind: 'error', text: 'credentials service unavailable' }
+        }
         const options = runner.config.providers.listCredentialOptions()
         const targets = runner.config.authorization.listTargets()
         return openAuthWorkspace(resolveLoginDestination(invocation.rawInput, options, targets))
@@ -59,6 +62,9 @@ export function createAuthCommands(deps: AuthCommandDeps): AuthCommandRegistrars
       description: 'Open Models to clear a stored provider credential or sign out of DeepSeek Account',
       input: { hint: '[<route|env-var|deepseek-account>]' },
       handler: (invocation) => {
+        if (!runner.config.credentials.available()) {
+          return { kind: 'error', text: 'credentials service unavailable' }
+        }
         const options = runner.config.providers.listCredentialOptions()
         const targets = runner.config.authorization.listTargets()
         return openAuthWorkspace(resolveLogoutDestination(invocation.rawInput, options, targets))
