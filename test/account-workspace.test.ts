@@ -133,7 +133,7 @@ test('Sign in starts the Host attempt and paints the authorize URL; Cancel uses 
   assert.ok(state.calls.includes('signIn'), state.calls.join(','))
   assert.match(painted, /waiting-browser/u)
   assert.match(painted, /https:\/\/platform\.example\/dsh\/authorize/u)
-  assert.match(painted, /ssh -N -L 127\.0\.0\.1:43121:127\.0\.0\.1:43121/u)
+  assert.match(painted, /ssh -N -L '127\.0\.0\.1:43121:127\.0\.0\.1:43121'/u)
   // Actions: Cancel current attempt, Open browser, Copy link,
   // Copy SSH template, Usage, Top up, Refresh, ← Settings.
   page.handleInput('\r')
@@ -349,5 +349,5 @@ test('an IPv6 loopback callback origin produces a matching SSH tunnel template (
   await flush()
   const painted = text(page)
   assert.match(painted, /\[::1\]:43121/u)
-  assert.match(painted, /ssh -N -L \[::1\]:43121:\[::1\]:43121/u)
+  assert.match(painted, /ssh -N -L '\[::1\]:43121:\[::1\]:43121'/u)
 })
