@@ -1183,3 +1183,73 @@ test('a growing auth notice without a repaint disables the previously painted fo
   await flush()
   assert.equal(calls.some(call => call.startsWith('set:')), false)
 })
+
+test('an OLD credentialState read cannot overwrite a newer API-key write read-back (P2)', async () => {
+  let releaseOld: (() => void) | undefined
+  const { source } = fakeSource()
+  source.credentialState = async () => {
+    await new Promise<void>(resolve => { releaseOld = resolve })
+    return { kind: 'known', configured: false }
+  }
+  source.setReference = async () => {}
+  source.describeReference = async () => ({ configured: true })
+  const page = new ModelsWorkspacePage(source, () => {}, { view: 'reference', ref: 'ACME_API_KEY', label: 'Acme Gateway' }, () => {})
+  page.setBodyHeight(24)
+  await flush()
+  page.render(100)
+  page.handleInput('\r')
+  await flush()
+  page.render(100)
+  for (const character of 'sk-newer') page.handleInput(character)
+  page.handleInput('\r')
+  page.handleInput('\r')
+  await flush()
+  assert.match(viewText(page), /Verified/u)
+  releaseOld?.()
+  await flush()
+  page.handleInput('\u001b')
+  await flush()
+  const acmeRow = page.render(100).map(stripTerminalSequences).find(line => line.includes('Acme Gateway'))
+  assert.ok(acmeRow !== undefined)
+  assert.match(acmeRow, /Configured/u, 'the older read must not regress the post-write projection')
+  assert.doesNotMatch(acmeRow, /Not set/u)
+})
+
+test('an OLD records read cannot resurrect a deleted record after the authoritative re-read (P2)', async () => {
+  let releaseOld: (() => void) | undefined
+  let deleted = false
+  let calls = 0
+  const { source } = fakeSource()
+  source.storedCredentials = async () => {
+    calls += 1
+    if (calls === 2) {
+      await new Promise<void>(resolve => { releaseOld = resolve })
+      return { rows: [{ kind: 'record' as const, key: 'llm-pi-ai/anthropic', label: 'Anthropic', route: 'anthropic', kindHint: 'grant' }], recordCleanupUnavailable: false, referenceReadFailures: [] }
+    }
+    return deleted
+      ? { rows: [], recordCleanupUnavailable: false, referenceReadFailures: [] }
+      : { rows: [{ kind: 'record' as const, key: 'llm-pi-ai/anthropic', label: 'Anthropic', route: 'anthropic', kindHint: 'grant' }], recordCleanupUnavailable: false, referenceReadFailures: [] }
+  }
+  source.deleteRecord = async () => { deleted = true }
+  const page = new ModelsWorkspacePage(source, () => {}, {
+    view: 'logout',
+    target: { kind: 'record', key: 'llm-pi-ai/anthropic', label: 'Anthropic', route: 'anthropic' },
+  }, () => {})
+  page.setBodyHeight(26)
+  await flush()
+  for (let index = 0; index < 100; index += 1) {
+    await new Promise<void>(resolve => setImmediate(resolve))
+    const frame = page.render(100).map(stripTerminalSequences).join('\n')
+    if (frame.includes('> Clear credential')) break
+  }
+  page.handleInput('\r')
+  await flush()
+  assert.match(viewText(page), /cleared/u)
+  releaseOld?.()
+  await flush()
+  page.handleInput('\u001b')
+  await flush()
+  const row = page.render(100).map(stripTerminalSequences).find(line => line.includes('Anthropic'))
+  assert.ok(row !== undefined)
+  assert.match(row, /Not set/u, 'the old record list must not resurrect the delete')
+})

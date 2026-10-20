@@ -305,6 +305,10 @@ export class ModelsWorkspacePage implements Component {
   private refreshSerial = 0
   private recordsSerial = 0
   private referenceReadSerial = 0
+  /** Per-reference read generation: a mutation's authoritative re-read must
+   *  invalidate an older credentialState answer for the SAME ref without
+   *  disturbing other providers' independent reads. */
+  private readonly credentialReadSerials = new Map<string, number>()
   private clearReadSerial = 0
 
   constructor(
@@ -357,6 +361,8 @@ export class ModelsWorkspacePage implements Component {
     for (const row of this.providerRows) {
       if (row.kind !== 'reference' || row.ref === undefined) continue
       const ref = row.ref
+      const refSerial = (this.credentialReadSerials.get(ref) ?? 0) + 1
+      this.credentialReadSerials.set(ref, refSerial)
       this.source.run('models credential read', async () => {
         let state: ModelsCredentialState
         try {
@@ -365,7 +371,7 @@ export class ModelsWorkspacePage implements Component {
           state = { kind: 'unknown', reason: errorText(error) }
         }
         this.settle(() => {
-          if (serial !== this.refreshSerial) return
+          if (this.credentialReadSerials.get(ref) !== refSerial) return
           this.credentialStates.set(ref, state)
         })
       })
@@ -411,6 +417,10 @@ export class ModelsWorkspacePage implements Component {
         })
       }
     })
+  }
+
+  private invalidateCredentialRead(ref: string): void {
+    this.credentialReadSerials.set(ref, (this.credentialReadSerials.get(ref) ?? 0) + 1)
   }
 
   private readReferenceState(): void {
@@ -529,6 +539,8 @@ export class ModelsWorkspacePage implements Component {
         }
         this.referencePhase = 'pending'
         this.referenceStatus = 'saving — the Host has not confirmed yet'
+        this.referenceReadSerial += 1
+        this.invalidateCredentialRead(ref)
         this.requestRender()
         this.source.run('models API key write', async () => {
           try {
@@ -540,6 +552,8 @@ export class ModelsWorkspacePage implements Component {
               this.referenceStatus = error instanceof Error && error.name === 'SupersededReadError'
                 ? 'Not sent — the key never left the client'
                 : errorText(error)
+              this.referenceReadSerial += 1
+              this.invalidateCredentialRead(ref)
               this.credentialStates.set(ref, { kind: 'unknown', reason: this.referenceStatus })
             })
             return
@@ -553,6 +567,8 @@ export class ModelsWorkspacePage implements Component {
                 ? info.source === undefined ? 'Verified' : `Verified · source: ${info.source}`
                 : 'the write returned, but the credential store still reports it unset'
               this.referenceConfigured = info.configured
+              this.referenceReadSerial += 1
+              this.invalidateCredentialRead(ref)
               this.credentialStates.set(ref, {
                 kind: 'known',
                 configured: info.configured,
@@ -564,6 +580,8 @@ export class ModelsWorkspacePage implements Component {
               if (!isCurrent()) return
               this.referencePhase = 'unknown'
               this.referenceStatus = `the write returned; the store could not be re-read: ${errorText(error)}`
+              this.referenceReadSerial += 1
+              this.invalidateCredentialRead(ref)
               this.credentialStates.set(ref, { kind: 'unknown', reason: this.referenceStatus })
             })
           }
@@ -649,6 +667,8 @@ export class ModelsWorkspacePage implements Component {
             this.clear = info.configured
               ? { phase: 'failed', configured: true, reason: 'the credential store still reports this reference as configured' }
               : { phase: 'done', configured: false, result: `API key ${target.ref} cleared` }
+            this.referenceReadSerial += 1
+            this.invalidateCredentialRead(target.ref)
             this.credentialStates.set(target.ref, {
               kind: 'known',
               configured: info.configured,
@@ -660,6 +680,8 @@ export class ModelsWorkspacePage implements Component {
           this.settle(() => {
             if (!isCurrent() || readSerial !== this.clearReadSerial) return
             this.clear = { phase: 'failed', configured: true, reason: `the clear returned; the store could not be re-read: ${errorText(error)}` }
+            this.referenceReadSerial += 1
+            this.invalidateCredentialRead(target.ref)
             this.credentialStates.set(target.ref, { kind: 'unknown', reason: errorText(error) })
           })
         }
@@ -671,6 +693,7 @@ export class ModelsWorkspacePage implements Component {
         const present = records.rows.some(row => row.kind === 'record' && row.key === target.key)
         this.settle(() => {
           if (!isCurrent() || readSerial !== this.clearReadSerial) return
+          this.recordsSerial += 1
           this.records = records
           this.clear = present
             ? { phase: 'failed', configured: true, reason: 'the stored record is still present after the clear' }
