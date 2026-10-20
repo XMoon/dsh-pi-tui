@@ -24,6 +24,7 @@ import { Frame } from '../components/frame.ts'
 import { color } from '../theme/runtime.ts'
 import { sanitizedPhysicalLine } from '../presentation/lines.ts'
 import { sanitizeDisplayText } from '../presentation/terminal-text.ts'
+import { approvalArgumentSections } from '../presentation/approval-arguments.ts'
 
 /** What an approval prompt shows; mirrors the approval/request payload. */
 export interface ApprovalPromptRequest {
@@ -106,6 +107,9 @@ const MIN_SHEET_FRAME_ROWS = 5
 /** A blank content row (kept as a plain space so the Frame border padding
  * never becomes a zero-width row). */
 const BLANK = ' '
+/** The edit/str_replace before/after pair is PROPOSED input, never a
+ * disk-verified diff. The sheet states that once beside the pair. */
+const INTENDED_INPUT_NOTE = 'Intended input · not verified against disk'
 
 /**
  * Split one untrusted multi-line section into width-aware rows with a fixed
@@ -123,6 +127,18 @@ function pushSectionRows(rows: BodyRow[], text: string, width: number): void {
     }
     for (const line of wrapped) rows.push({ text: `  ${line}`, heading: false })
   }
+}
+
+/** One low-key, wrapped note block: dim (heading-role) rows with the same
+ * two-space continuation indent as body text. */
+function pushDimNote(rows: BodyRow[], text: string, width: number): void {
+  const inner = Math.max(1, width - 2)
+  const wrapped = wrapTextWithAnsi(text, inner)
+  if (wrapped.length === 0) {
+    rows.push({ text: '  ', heading: true })
+    return
+  }
+  for (const line of wrapped) rows.push({ text: `  ${line}`, heading: true })
 }
 
 /**
@@ -191,6 +207,8 @@ class ApprovalSheet implements Component {
   private readonly options: ApprovalSheetOptions
   /** Content-row budget supplied by the seat frame before each render. */
   private maxRows = 12
+  /** Display-only content-row floor from the seat frame (0 = no floor). */
+  private minRows = 0
   /** Unified body scroll offset in wrapped display rows. */
   private scrollTop = 0
   /** The explicit expanded reading size ('e' / a painted Expand action). */
@@ -232,29 +250,45 @@ class ApprovalSheet implements Component {
     this.maxRows = Math.max(1, Math.floor(rows))
   }
 
+  /** Set the content-row display floor (the frame's readable minimum minus its
+   * borders). It pads short bodies before the pinned action bar; it never
+   * changes the body viewport, scroll facts or pointer targets. */
+  setMinRows(rows: number): void {
+    this.minRows = Math.max(0, Math.floor(rows))
+  }
+
   /** The full display-safe body rows; rebuilding happens only on width/compact
-   * change (scrolling reuses the wrapped projection). */
+   * change (scrolling reuses the wrapped projection). The argument sections
+   * are a pure display projection of the immutable request; Copy always uses
+   * the original bytes, never this projection. */
   private bodyRows(width: number): BodyRow[] {
     const compact = this.maxRows <= TINY_BODY_BUDGET
     if (this.bodyCache?.width === width && this.bodyCache.compact === compact) return this.bodyCache.rows
     const rows: BodyRow[] = []
     const reason = sanitizeDisplayText(this.request.reason ?? '')
+    const rawArguments = this.request.arguments
+    const sections = rawArguments === undefined || rawArguments === ''
+      ? []
+      : [...approvalArgumentSections(this.request.toolName, rawArguments)]
     if (reason !== '') {
-      if (compact) {
-        pushInlineSection(rows, 'Reason', reason, width)
-      } else {
-        rows.push({ text: 'Reason', heading: true })
-        pushSectionRows(rows, reason, width)
-      }
+      // Reason belongs to the request, not to the tool arguments: keep it
+      // between Target and the detail sections (after Action when the tool has
+      // no target, before the generic Arguments list).
+      const targetIndex = sections.findIndex(section => section.heading === 'Target')
+      const actionIndex = sections.findIndex(section => section.heading === 'Action')
+      const insertAt = targetIndex >= 0 ? targetIndex + 1 : actionIndex >= 0 ? actionIndex + 1 : 0
+      sections.splice(insertAt, 0, { heading: 'Reason', text: reason })
     }
-    const args = sanitizeDisplayText(this.request.arguments ?? '')
-    if (args !== '') {
+    for (const section of sections) {
+      const text = sanitizeDisplayText(section.text)
       if (compact) {
-        pushInlineSection(rows, 'Arguments', args, width)
-      } else {
-        rows.push({ text: 'Arguments', heading: true })
-        pushSectionRows(rows, args, width)
+        pushInlineSection(rows, section.heading, text, width)
+        if (section.heading === 'Before') pushDimNote(rows, INTENDED_INPUT_NOTE, width)
+        continue
       }
+      rows.push({ text: section.heading, heading: true })
+      if (section.heading === 'Before') pushDimNote(rows, INTENDED_INPUT_NOTE, width)
+      pushSectionRows(rows, text, width)
     }
     this.bodyCache = { width, compact, rows }
     return rows
@@ -464,6 +498,16 @@ class ApprovalSheet implements Component {
     this.bodyBottom = this.bodyTop + viewport
     if (hint !== undefined && hint !== '') lines.push(hint)
 
+    // The readable minimum is a display floor only: fill the content area
+    // between the real body (plus its scroll fact) and the pinned decisions.
+    // Padding is never counted in bodyTop/bodyBottom, never scrollable and
+    // never a pointer target.
+    const minimumRows = Math.min(this.minRows, maxRows)
+    const padding = body.length > 0
+      ? Math.max(0, minimumRows - (lines.length + actionRows.length))
+      : 0
+    for (let index = 0; index < padding; index += 1) lines.push(BLANK)
+
     // Paint the action bar and record the REAL cell ranges of this frame. The
     // hit map is empty on the regular surface: no approval button target is
     // ever registered there.
@@ -512,6 +556,7 @@ class ApprovalSheet implements Component {
       body.length,
       mouseEnabled ? 'm' : 'k',
       actionRows.map(row => row.map(label => label.action).join(',')).join('|'),
+      padding,
     ].join(':')
     return lines
   }
@@ -675,6 +720,12 @@ export class ApprovalSheetFrame extends Frame {
       return this.resizeRow(width)
     }
     this.sheet.setMaxRows(Math.max(1, grant - 2))
+    // The readable floor is derived from the live terminal height and clamped
+    // by the ONE seat grant; it never replaces the grant or the chrome budget.
+    const minimumFrameRows = this.lastTermRows >= 24
+      ? Math.min(grant, Math.min(16, Math.max(12, Math.floor(this.lastTermRows * 0.4))))
+      : 0
+    this.sheet.setMinRows(Math.max(0, minimumFrameRows - 2))
     const out = super.render(width)
     if (!this.sheet.isLayoutHonest()) {
       // The width/height combination cannot show the title, a reading row and

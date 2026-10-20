@@ -917,6 +917,19 @@ A new surface picks one and must justify any deviation.
 | **Status bar** | one row of items + separators, no interaction (a host-instruction line may be reserved above it — `footer/instruction.ts`) | footer |
 | **Accessory band** (pinned, on-demand) | zero rows hidden; when active: ONE top separator rule (the §6.2 exception) + identity row + ≤3 single-line navigation rows (tasks, then the optional Full action), painted UNDER the whole footer as the frame's last region | Task Quick |
 
+**Approval reading floor (PiTui).** The blocking editor-seat Approval sheet is a
+decision surface, not a tool card: on terminals with at least 24 rows it keeps a
+readable minimum frame — 12 physical rows at 24 terminal rows, rising to 16
+from 40 rows up — always clamped by the live seat grant. The extra height is
+inert display padding before the pinned decision bar, never scrollable request
+content or a pointer target; below 24 rows the existing truthful short-screen
+degradation applies. The body projects known tool arguments into `Action` /
+`Target` / `Before` / `After` / `Command` / `New content` sections and keeps
+every unknown field under `Other arguments`; an edit proposal is qualified as
+`Intended input · not verified against disk` (it is the request's intended
+input, not a disk-verified diff), and `Copy args` still returns the received
+raw bytes.
+
 Shared minimum spec for **PiTui-painted** Workspace and Overlay: identity, one body, one bottom
 bar, `Esc` last, whole-segment hint drops (never mid-word), role table respected. The
 accessory band is its own archetype (not a Workspace/Overlay): it owns no hint bar, no
