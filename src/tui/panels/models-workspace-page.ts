@@ -47,6 +47,10 @@ import { PROTOCOL_CHOICES, ROUTE_PATTERN } from '../../domain/catalog/provider.t
 /** One provider row of the Models list (a detached semantic DTO). */
 export interface ModelsProviderRow {
   readonly kind: 'reference' | 'authorization'
+  /** Stable list/detail identity: `route:<route>` for a reference or
+   *  `auth:<flow key>` for a provider-native flow. A route-less flow has no
+   *  route, so its key is the only unique identity. */
+  readonly identity: string
   readonly route: string
   readonly label: string
   /** The exact credential reference of a reference row. */
@@ -127,7 +131,7 @@ export type ModelsPageExit = 'handled' | 'exit' | 'open-account'
 
 type ModelsView =
   | { readonly kind: 'list' }
-  | { readonly kind: 'provider'; readonly route: string }
+  | { readonly kind: 'provider'; readonly identity: string }
   | { readonly kind: 'reference'; readonly ref: string; readonly label: string }
   | { readonly kind: 'add-provider' }
   | { readonly kind: 'review' }
@@ -179,7 +183,7 @@ interface NoticeState {
 }
 
 interface AuthState {
-  readonly targetRoute: string
+  readonly targetIdentity: string
   readonly phase: 'starting' | 'running' | 'authorized' | 'cancelled' | 'failed'
   readonly attemptId?: string
   readonly status?: string
@@ -303,6 +307,7 @@ export class ModelsWorkspacePage implements Component {
     this.source = source
     this.requestRender = requestRender
     this.onOpenAccount = onOpenAccount
+    this.providerRows = source.rows()
     this.referenceEditor = initial.view === 'reference'
       ? { ref: initial.ref, label: initial.label ?? initial.ref }
       : { ref: '', label: '' }
@@ -321,7 +326,7 @@ export class ModelsWorkspacePage implements Component {
         else this.view = { kind: initial.view }
         return
       case 'provider':
-        this.view = { kind: 'provider', route: initial.route }
+        this.view = { kind: 'provider', identity: this.identityOfRoute(initial.route) }
         return
       case 'reference':
         this.view = { kind: 'reference', ref: initial.ref, label: initial.label ?? initial.ref }
@@ -369,7 +374,9 @@ export class ModelsWorkspacePage implements Component {
         this.initializing = false
       })
     })
-    if (this.view.kind === 'records' || this.view.kind === 'logout-list') this.refreshRecords()
+    // Record presence is authoritative state for the authorization rows on the
+    // MODELS HOME too, not only for the Stored credentials view.
+    this.refreshRecords()
     if (this.view.kind === 'logout' || this.view.kind === 'reference') this.readReferenceState()
     this.requestRender()
   }
@@ -468,10 +475,14 @@ export class ModelsWorkspacePage implements Component {
     this.requestRender()
   }
 
-  private selectProvider(route: string): void {
+  private identityOfRoute(route: string): string {
+    return this.providerRows.find(candidate => candidate.route === route)?.identity ?? `route:${route}`
+  }
+
+  private selectProvider(identity: string): void {
     this.auth = undefined
     this.authNotice = undefined
-    this.enter({ kind: 'provider', route })
+    this.enter({ kind: 'provider', identity })
   }
 
   // ── API key reference ────────────────────────────────────────────────────
@@ -857,7 +868,7 @@ export class ModelsWorkspacePage implements Component {
 
   private beginAuthorization(row: ModelsProviderRow, method: string | undefined): void {
     if (row.key === undefined) return
-    this.auth = { targetRoute: row.route, phase: 'starting' }
+    this.auth = { targetIdentity: row.identity, phase: 'starting' }
     this.authNotice = undefined
     this.authUnsubscribe?.()
     const flow = createAuthorizationFlow(this.authorizationSurface(), {
@@ -874,7 +885,7 @@ export class ModelsWorkspacePage implements Component {
         } catch (error) {
           this.settle(() => {
             this.auth = {
-              targetRoute: row.route,
+              targetIdentity: row.identity,
               phase: 'failed',
               status: authorizationFailureText(error, errorText(error)),
             }
@@ -884,7 +895,7 @@ export class ModelsWorkspacePage implements Component {
         }
         if (started.kind !== 'started') {
           this.settle(() => {
-            this.auth = { targetRoute: row.route, phase: 'failed', status: 'authorization service unavailable' }
+            this.auth = { targetIdentity: row.identity, phase: 'failed', status: 'authorization service unavailable' }
             if (this.exitAfterAuth) this.leaveAfterAuth()
           })
           return
@@ -898,19 +909,19 @@ export class ModelsWorkspacePage implements Component {
       if (outcome.status === 'authorized') {
         const note = await this.source.provisionKeylessProfile(row.route)
         this.settle(() => {
-          this.auth = { targetRoute: row.route, phase: 'authorized', attemptId: started.attemptId, status: `signed in to ${row.label}${note}` }
+          this.auth = { targetIdentity: row.identity, phase: 'authorized', attemptId: started.attemptId, status: `signed in to ${row.label}${note}` }
           this.refresh()
           if (this.exitAfterAuth) this.leaveAfterAuth()
         })
       } else if (outcome.status === 'cancelled') {
         this.settle(() => {
-          this.auth = { targetRoute: row.route, phase: 'cancelled', attemptId: started.attemptId, status: 'sign-in cancelled' }
+          this.auth = { targetIdentity: row.identity, phase: 'cancelled', attemptId: started.attemptId, status: 'sign-in cancelled' }
           if (this.exitAfterAuth) this.leaveAfterAuth()
         })
       } else {
         this.settle(() => {
           this.auth = {
-            targetRoute: row.route,
+            targetIdentity: row.identity,
             phase: 'failed',
             attemptId: started.attemptId,
             status: `sign-in failed${outcome.code === undefined ? '' : ` (${outcome.code})`}: ${authorizationFailureText({ code: outcome.code }, outcome.message ?? 'login failed')}`,
@@ -956,6 +967,7 @@ export class ModelsWorkspacePage implements Component {
     return {
       openOutputViewer: options => this.showNotice({ message: options.refresh() }),
       showNotice: notice => this.showNotice(notice),
+      updateNotice: notice => this.updateNotice(notice),
       askQuestions: (questions, signal) => this.askPageQuestion(questions[0], signal),
       openPicker: (items, onSelect, onCancel, options) => this.openPagePicker(
         options?.header ?? 'Sign in',
@@ -979,6 +991,11 @@ export class ModelsWorkspacePage implements Component {
   }
 
   private noticeToken: object | undefined
+
+  private updateNotice(notice: NoticeState): void {
+    if (this.disposed) return
+    this.settle(() => { this.authNotice = notice })
+  }
 
   private askPageQuestion(
     question: { readonly id: string; readonly question: string; readonly placeholder?: string; readonly masked?: boolean } | undefined,
@@ -1285,7 +1302,7 @@ export class ModelsWorkspacePage implements Component {
       const state = this.credentialStateOf(row)
       const painted = credentialWord(state)
       const text = this.selectionLine(interactive, row.label, painted.word, painted.tone, width)
-      this.addRow(content, text, `provider:${row.route}`, width)
+      this.addRow(content, text, `provider:${row.identity}`, width)
       interactive += 1
     }
     const actions: ActionLine[] = [
@@ -1324,9 +1341,9 @@ export class ModelsWorkspacePage implements Component {
   private projectProvider(width: number): Projection {
     const view = this.view
     if (view.kind !== 'provider') return { content: [], actions: [] }
-    const row = this.providerRows.find(candidate => candidate.route === view.route)
+    const row = this.providerRows.find(candidate => candidate.identity === view.identity)
     if (row === undefined) {
-      return { content: [color.error(`provider ${view.route} is no longer available`), '', color.textMuted('Esc goes back.')], actions: [] }
+      return { content: [color.error(`provider entry ${view.identity} is no longer available`), '', color.textMuted('Esc goes back.')], actions: [] }
     }
     const content: string[] = [color.textStrong(`Provider · ${sanitizedPhysicalLine(row.label)}`), '']
     content.push(...this.fact('Route', row.route, width))
@@ -1338,7 +1355,7 @@ export class ModelsWorkspacePage implements Component {
     const state = this.credentialStateOf(row)
     content.push(...this.fact('Credential', credentialWord(state).word, width))
     content.push('', color.textDim('Credential presence only — not a connection test.'))
-    if (this.auth !== undefined && this.auth.targetRoute === row.route) {
+    if (this.auth !== undefined && this.auth.targetIdentity === row.identity) {
       content.push('', color.textStrong('Sign-in'))
       content.push(color.text(sanitizedPhysicalLine(this.auth.status ?? this.auth.phase)))
       if (this.authNotice !== undefined) {
@@ -1355,7 +1372,7 @@ export class ModelsWorkspacePage implements Component {
     if (row.kind === 'authorization' && row.methods.length > 0) {
       actions.push({
         id: 'provider:auth',
-        label: row.inFlight ? 'Sign-in in progress' : this.auth?.targetRoute === row.route && this.auth.phase === 'authorized' ? 'Sign in again (provider)' : 'Sign in (provider)',
+        label: row.inFlight ? 'Sign-in in progress' : this.auth?.targetIdentity === row.identity && this.auth.phase === 'authorized' ? 'Sign in again (provider)' : 'Sign in (provider)',
         enabled: !row.inFlight && (this.auth === undefined || this.auth.phase === 'authorized' || this.auth.phase === 'cancelled' || this.auth.phase === 'failed'),
       })
     }
@@ -1366,7 +1383,7 @@ export class ModelsWorkspacePage implements Component {
     const hasStored = state.kind === 'known' ? state.configured : true
     actions.push({ id: 'provider:clear', label: hasStored ? 'Clear stored credential…' : 'Nothing stored to clear', enabled: clearTarget !== undefined && hasStored })
     actions.push({ id: 'provider:guide', label: 'View model config guide', enabled: true })
-    if (this.auth?.targetRoute === row.route && (this.auth.phase === 'running' || this.auth.phase === 'starting')) {
+    if (this.auth?.targetIdentity === row.identity && (this.auth.phase === 'running' || this.auth.phase === 'starting')) {
       actions.push({ id: 'provider:cancel', label: 'Cancel current attempt', enabled: this.auth.attemptId !== undefined })
     }
     actions.push({ id: 'provider:back', label: '← Providers', enabled: true })
@@ -1849,7 +1866,7 @@ export class ModelsWorkspacePage implements Component {
       case 'provider:auth': {
         const view = this.view
         if (view.kind === 'provider') {
-          const row = this.providerRows.find(candidate => candidate.route === view.route)
+          const row = this.providerRows.find(candidate => candidate.identity === view.identity)
           if (row !== undefined) this.startAuthorization(row)
         }
         return 'handled'
@@ -1857,7 +1874,7 @@ export class ModelsWorkspacePage implements Component {
       case 'provider:reference': {
         const view = this.view
         if (view.kind === 'provider') {
-          const row = this.providerRows.find(candidate => candidate.route === view.route)
+          const row = this.providerRows.find(candidate => candidate.identity === view.identity)
           if (row?.ref !== undefined) {
             this.referenceEditor.ref = row.ref
             this.referenceEditor.label = row.label
@@ -1869,7 +1886,7 @@ export class ModelsWorkspacePage implements Component {
       case 'provider:clear': {
         const view = this.view
         if (view.kind === 'provider') {
-          const row = this.providerRows.find(candidate => candidate.route === view.route)
+          const row = this.providerRows.find(candidate => candidate.identity === view.identity)
           const target = row === undefined ? undefined : this.clearTargetOf(row)
           if (target !== undefined) this.openClear(target)
         }
@@ -1877,7 +1894,7 @@ export class ModelsWorkspacePage implements Component {
       }
       case 'provider:guide': this.enter({ kind: 'guide' }); return 'handled'
       case 'provider:cancel': this.cancelAuthorization(); return 'handled'
-      case 'provider:back': this.enter({ kind: 'list' }); return 'handled'
+      case 'provider:back': return this.back()
       case 'reference:edit': this.beginReferenceEditor(); return 'handled'
       case 'reference:back': this.enter({ kind: 'list' }); return 'handled'
       case 'add:review': this.reviewAdd(); return 'handled'

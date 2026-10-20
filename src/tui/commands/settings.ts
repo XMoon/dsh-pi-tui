@@ -189,6 +189,7 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
     rows: () => workflow.mergedTargets().map(target => target.kind === 'reference'
       ? {
           kind: 'reference' as const,
+          identity: `route:${target.route}`,
           route: target.route,
           label: target.label,
           ref: target.ref,
@@ -201,6 +202,7 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
         }
       : {
           kind: 'authorization' as const,
+          identity: `auth:${target.key}`,
           route: target.route ?? '',
           label: target.label,
           key: target.key,

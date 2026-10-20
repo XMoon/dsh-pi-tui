@@ -129,6 +129,10 @@ export interface AuthorizationSurface {
    *  message/URL/code inline). When present, this REPLACES the output viewer;
    *  the returned closer retires the notice, exactly like `openOutputViewer`. */
   showNotice?(notice: AuthorizationNoticeEvent): () => void
+  /** Replace the body of an ALREADY OPEN structured notice. The flow emits a
+   *  sequence of notices for one attempt (initializing → browser URL/code); a
+   *  one-shot `showNotice` would freeze the first body. */
+  updateNotice?(notice: AuthorizationNoticeEvent): void
   askQuestions(
     questions: readonly {
       id: string
@@ -214,7 +218,14 @@ export function createAuthorizationFlow(
   })
   const showNotice = (notice: AuthorizationNoticeEvent): void => {
     noticeBody = formatAuthorizationNotice(notice)
-    if (noticeHandle === undefined) {
+    if (noticeHandle !== undefined) {
+      // The notice is already on screen: update its body instead of dropping
+      // the later notice. A surface without an update seam keeps the legacy
+      // refresh-through-openOutputViewer behavior.
+      app.updateNotice?.(notice)
+      return
+    }
+    {
       // Attempt-scoped identity for THIS notice: the closer and the onClose
       // are bound to the same token, so only the notice that actually opened
       // may clear the slot.
