@@ -798,9 +798,7 @@ export class DirectAuthorizationConfig implements AuthorizationConfig {
     // never settles cannot retain the attempt/controller/listener either
     // — repeated aborted logins leave nothing behind.
     const withdrawOnCallerAbort = (): void => {
-      // Abort OUR signal; the authoritative Host outcome decides whether the
-      // attempt is cancelled or a commit that already started completes.
-      this.attempts.get(attemptId)?.controller.abort()
+      this.cancelAttempt(attemptId)
     }
     const disposeCallerAbortListener = (): void => {
       request.signal?.removeEventListener('abort', withdrawOnCallerAbort)
@@ -881,13 +879,37 @@ export class DirectAuthorizationConfig implements AuthorizationConfig {
   }
 
   cancel(attemptId: string): Promise<void> {
-    // Withdraw the adapter's signal. Do NOT emit a local `cancelled` here: the
-    // official AuthorizationService suppresses abort while a credential commit
-    // is in progress and may still resolve `authorized`. The settlement handler
-    // below emits the authoritative outcome exactly once; a provider that
-    // ignores abort is raced out by the service's own withdrawn settlement.
-    this.attempts.get(attemptId)?.controller.abort()
+    this.cancelAttempt(attemptId)
     return Promise.resolve()
+  }
+
+  /** Withdraw one attempt. A pending prompt proves the provider has not
+   *  started committing yet: reject/withdraw it immediately and settle
+   *  locally so the prompt UI and the waiting page cannot hang on a provider
+   *  that ignores abort. With NO pending prompt the provider may already be in
+   *  the official service's `committing` window, so only abort the signal and
+   *  let the authoritative Host outcome decide (it can still be authorized). */
+  private cancelAttempt(attemptId: string): void {
+    const attempt = this.attempts.get(attemptId)
+    if (attempt === undefined || attempt.settled) return
+    attempt.controller.abort()
+    if (this.hasPendingPrompts(attemptId)) this.settleCancelled(attemptId)
+  }
+
+  private hasPendingPrompts(attemptId: string): boolean {
+    for (const pending of this.pendingPrompts.values()) {
+      if (pending.attemptId === attemptId) return true
+    }
+    return false
+  }
+
+  /** Terminal cancellation after a pre-commit prompt withdrawal. */
+  private settleCancelled(attemptId: string): void {
+    const attempt = this.attempts.get(attemptId)
+    if (attempt === undefined || attempt.settled) return
+    attempt.settled = true
+    this.finalizeAttempt(attemptId)
+    this.emit({ kind: 'settled', attemptId, status: 'cancelled' })
   }
 
   /** The ONE idempotent local-finalization path for an attempt: rejects
