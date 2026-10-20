@@ -681,7 +681,7 @@ symlink 写入发布 package。
 
 ### CI 验证策略
 
-CI 对 push 到 `next` 以及目标为 `next` 的 PR 遵循跟踪的 `test/compat/dsh-mode.json` 策略；`main` 和所有 tag 使用 npm Mode。Source Mode 从 `test/compat/dsh-source.json` 读取 source target 并验证完整的官方 DSH tarball family、TUI 预设和旧 runtime 边界；npm Mode 则使用 checkout 的 `package.json`/冻结 lockfile 中声明的 DSH 版本运行 registry lane。对于尚未发布的 source family，已发布 `pi2dsh` 的生态检查会明确标记为 skipped。详细流程见 [`docs/guides/dsh-compatibility.md`](docs/guides/dsh-compatibility.md)。
+CI 对 push 到 `next` 以及目标为 `next` 的 PR 遵循跟踪的 `test/compat/dsh-mode.json` 策略；`main` 和所有 tag 使用 npm Mode。Source Mode 从 `test/compat/dsh-source.json` 读取 source target 并验证完整的官方 DSH tarball family、TUI 预设和旧 runtime 边界；npm Mode 则使用 checkout 的 `package.json`/冻结 lockfile 中声明的 DSH 版本运行 registry lane。已发布 `pi2dsh` 的生态检查在两种模式下都运行，并且始终针对已发布生态（从 registry 安装已发布的 DSH 与 pi2dsh），遇到 source pack 会明确跳过而不是伪装成通过。详细流程见 [`docs/guides/dsh-compatibility.md`](docs/guides/dsh-compatibility.md)。
 
 ## 项目结构
 

@@ -122,10 +122,10 @@ test('official preset assembly follows the selected Source/npm distribution lane
   assert.match(official, /else\n\s+node scripts\/official-presets-smoke\.mjs "\$\{TARBALLS\[0\]\}"/u)
 })
 
-test('Source Mode matrix uses a clean distribution-aware fresh install; the pi2dsh gate is DISABLED pending a compatible release', () => {
+test('Source Mode matrix uses a clean distribution-aware fresh install; the pi2dsh gate runs in both modes', () => {
   const workflow = readFileSync(new URL('../.github/workflows/ci.yml', import.meta.url), 'utf8')
   const compatStart = workflow.indexOf('  compat-smoke:')
-  const ecosystemStart = workflow.indexOf('  # DISABLED (2026-09-02):', compatStart)
+  const ecosystemStart = workflow.indexOf('  # Test the EXACT packed artifact against the published pi2dsh bridge', compatStart)
   assert.ok(compatStart >= 0 && ecosystemStart > compatStart, 'workflow job boundaries must exist')
   const compat = workflow.slice(compatStart, ecosystemStart)
   assert.match(compat, /Download DSH source pack/u)
@@ -135,23 +135,21 @@ test('Source Mode matrix uses a clean distribution-aware fresh install; the pi2d
 
   const officialStart = workflow.indexOf('  official-preset-assembly:')
   const ecosystem = workflow.slice(ecosystemStart, officialStart)
-  // The published pi2dsh@0.24.0 bridge is runtime-incompatible with the
-  // alpha.4 baseline (its `^0.1.2-alpha.1` peers satisfy alpha.4 semver-wise,
-  // so the metadata preflight passes, but the bridge predates the alpha.4
-  // Session/subagent APIs and fails the real runtime smoke). The gate is
-  // therefore DISABLED with a documented re-enable procedure; the
-  // official-preset-assembly job keeps the real preset coverage meanwhile.
-  assert.match(ecosystem, /DISABLED \(2026-09-02\)/u)
-  assert.match(ecosystem, /if: \$\{\{ false \}\}/u)
-  assert.match(ecosystem, /RE-ENABLE PROCEDURE/u)
+  // The published pi2dsh bridge declares the exact DSH target of this
+  // checkout, so the gate runs in BOTH modes: the smoke installs the
+  // published DSH and pi2dsh from the registry, and a failing peer
+  // declaration stays an ECOSYSTEM_CONTRACT_BLOCKER.
+  assert.match(ecosystem, /if: \$\{\{ always\(\) && needs\.dsh-context\.result == 'success' && needs\.build-and-pack\.result == 'success' \}\}/u)
+  assert.doesNotMatch(ecosystem, /if: \$\{\{ false \}\}/u)
+  assert.doesNotMatch(ecosystem, /DISABLED/u)
+  assert.doesNotMatch(ecosystem, /RE-ENABLE PROCEDURE/u)
   assert.doesNotMatch(ecosystem, /needs\.dsh-context\.outputs\.mode == 'npm'/u)
   assert.doesNotMatch(ecosystem, /Download DSH source pack/u)
   assert.doesNotMatch(ecosystem, /Source mode ecosystem status/u)
-  // The publish job must not gate on the disabled job (the re-enable
-  // comment may mention it — the CONDITION and the needs list may not).
+  // The publish job must wait for the ecosystem gate.
   const publish = workflow.slice(workflow.indexOf('  publish:'))
-  assert.doesNotMatch(publish, /if:.*ecosystem-compat\.result/u)
-  assert.doesNotMatch(publish, /^\s+- ecosystem-compat$/mu)
+  assert.match(publish, /if:.*ecosystem-compat\.result == 'success'/u)
+  assert.match(publish, /^\s+- ecosystem-compat$/mu)
 })
 
 test('npm verification rejects a symlinked candidate tarball', (t) => {

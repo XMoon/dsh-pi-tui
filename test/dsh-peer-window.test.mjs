@@ -105,3 +105,17 @@ test('the package version reserves one consistent release identity across manife
   assert.equal(currentRows.length, 1, 'exactly one matrix row must cover the current DSH target')
   assert.equal(currentRows[0].tui, version, 'the current compatibility row must carry the package version as its TUI identity')
 })
+
+test('the pi2dsh compatibility manifest targets the DSH version this checkout ships against', () => {
+  // The pi2dsh manifest is version-coupled with the DSH target: the ecosystem
+  // gate installs exactly `manifest.dshVersion` and proves the published
+  // pi2dsh bridge against it, so a stale pin silently validates the wrong
+  // pairing (or fails the peer preflight for the wrong reason). The DSH
+  // target moves with the development pin, so it moves here atomically.
+  const manifest = JSON.parse(readFileSync(join(process.cwd(), 'test', 'compat', 'pi2dsh.json'), 'utf8'))
+  assert.equal(manifest.dshVersion, expectedDevVersion,
+    'the pi2dsh manifest must target the exact DSH version this checkout develops against')
+  assert.equal(manifest.dshVersion, COMPAT_MATRIX.current.upgradeDsh,
+    'the pi2dsh manifest must target the recommended published DSH target')
+  assert.equal(manifest.consumer, 'pi2dsh', 'the pi2dsh manifest must name the pi2dsh consumer')
+})
