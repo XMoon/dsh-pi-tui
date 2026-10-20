@@ -132,6 +132,25 @@ function smokeEnvironment(fixture, registry = 'http://127.0.0.1:9/') {
     npm_config_registry: registry,
     NPM_CONFIG_USERCONFIG: npmrc,
     npm_config_userconfig: npmrc,
+    // This fixture's registry is DELIBERATELY unreachable (or a local
+    // request-log server), so npm's advisory `audit` POST can only fail
+    // — and npm's default `fetch-retries=2` x `fetch-retry-maxtimeout=60000`
+    // turns that known-unreachable endpoint into ~134s of pure retry wait
+    // for a 0.2s install.
+    //
+    // `audit=false` removes npm's ADDITIONAL vulnerability report, not the
+    // install itself: the fresh install still runs and the package still
+    // lands in `node_modules` (the smoke asserts the installed `dist` and
+    // imports every public entry from it).
+    //
+    // The scope is deliberately THIS synthetic fixture's subprocess
+    // environment only. The real publish/security path never runs through
+    // it: `pnpm smoke:pack` / `postpack` / the CI tarball smokes invoke
+    // `scripts/tarball-smoke.mjs` with the ambient environment against the
+    // real registry, and `pnpm audit --prod --audit-level high` is a
+    // separate command that keeps the full advisory gate.
+    NPM_CONFIG_AUDIT: 'false',
+    npm_config_audit: 'false',
     XDG_DATA_HOME: join(fixture.root, 'xdg-data'),
     XDG_CACHE_HOME: join(fixture.root, 'xdg-cache'),
   }
