@@ -115,6 +115,17 @@ test('REAL Direct adapters: provider facts, API-key set/re-read, and the Add Pro
     assert.match(store, /ACME_API_KEY: sk-test-1/u)
     assert.equal((await stat(join(home, '.credentials.yaml'))).mode & 0o077, 0, 'the credential store is not group/world readable')
 
+    const duplicate = await workflow.createProvider({
+      route: 'acme',
+      api: 'openai-completions',
+      baseURL: 'https://other.example/v1',
+      displayName: '',
+      models: ['m'],
+      apiKey: '',
+    })
+    assert.equal(duplicate.kind, 'rejected')
+    assert.match(duplicate.kind === 'rejected' ? duplicate.text : '', /already exists/u)
+
     const created = await workflow.createProvider({
       route: 'new-route',
       api: 'anthropic-messages',

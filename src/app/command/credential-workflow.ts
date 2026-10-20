@@ -41,6 +41,10 @@ import { SupersededReadError } from '../../runtime/read-error.ts'
 export const ACCOUNT_AUTHORIZATION_KEY = 'deepseek-account-platform/default'
 /** The user-facing account route name (`/login deepseek-account`). */
 export const ACCOUNT_ROUTE = 'deepseek-account'
+/** The official account model provider's route. Its own Account page owns the
+ *  entry; exposing it again as a generic provider row would duplicate the
+ *  account identity and invite an API key write where a grant is required. */
+export const ACCOUNT_PROVIDER_ROUTE = 'deepseek-account'
 
 /** One explicit clear target the Models/logout flow may present. */
 export type CredentialClearTarget =
@@ -117,8 +121,13 @@ export function resolveLoginDestination(
   if (match !== undefined) {
     if (match.kind === 'ref') return { kind: 'models', view: 'reference', ref: match.ref }
     const option = options.find(candidate => candidate.ref === match.option.ref)
-    if (option !== undefined) return { kind: 'models', view: 'provider', route: option.route }
-    return { kind: 'models', view: 'reference', ref: match.option.ref, label: match.option.label }
+    if (option === undefined) return { kind: 'models', view: 'reference', ref: match.option.ref, label: match.option.label }
+    // The deepseek official builtin has no provider-profile detail page: its
+    // dedicated API-key reference page is the one supported surface.
+    if (option.route === 'deepseek-official') {
+      return { kind: 'models', view: 'reference', ref: option.ref, label: option.label }
+    }
+    return { kind: 'models', view: 'provider', route: option.route }
   }
   if (ROUTE_PATTERN.test(arg)) {
     const flow = flowForRoute(generic, arg)
@@ -239,10 +248,17 @@ export class CredentialWorkflow {
     this.deps = deps
   }
 
-  /** The merged targets INCLUDING the account row (the Models list paints the
-   * account as its own entry; it is never a generic provider flow). */
+  /** The provider options that belong to the generic Models surface. The
+   *  official account model provider is excluded: its identity is the Account
+   *  page, and a generic API-key write is not its authorization plane. */
+  private genericProviderOptions(): readonly CredentialProviderOption[] {
+    return this.deps.providers.listCredentialOptions().filter(option => option.route !== ACCOUNT_PROVIDER_ROUTE)
+  }
+
+  /** The merged GENERIC provider targets. The Models list paints the Account
+   * entry as its own page row; it is never part of this provider set. */
   mergedTargets(): readonly LoginTarget[] {
-    return mergeLoginTargets(this.deps.providers.listCredentialOptions(), this.genericTargets())
+    return mergeLoginTargets(this.genericProviderOptions(), this.genericTargets())
   }
 
   genericTargets(): readonly AuthorizationFlowTarget[] {
@@ -250,11 +266,7 @@ export class CredentialWorkflow {
   }
 
   options(): readonly CredentialProviderOption[] {
-    return this.deps.providers.listCredentialOptions()
-  }
-
-  account(): AccountConfig {
-    return this.deps.account
+    return this.genericProviderOptions()
   }
 
   readProfile(route: string): ProviderProfileFacts {
@@ -412,11 +424,17 @@ export class CredentialWorkflow {
       }
     }
     const route = draft.route.trim().toLowerCase()
+    if (route === 'deepseek-official') {
+      return { kind: 'rejected', text: 'the deepseek official route is a builtin and cannot be added' }
+    }
     if (!ROUTE_PATTERN.test(route)) {
       return {
         kind: 'rejected',
         text: `invalid provider route "${route}" — lowercase letters, digits and dashes only, no leading digit`,
       }
+    }
+    if (this.options().some(option => option.route === route && option.configured)) {
+      return { kind: 'rejected', text: `provider route "${route}" already exists` }
     }
     if (!PROTOCOL_CHOICES.includes(draft.api as typeof PROTOCOL_CHOICES[number])) {
       return { kind: 'rejected', text: `invalid wire protocol "${draft.api}"` }

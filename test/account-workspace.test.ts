@@ -225,3 +225,33 @@ test('a failed sign-out keeps the Host-reported state and reports the failure', 
   assert.match(painted, /sign-out failed: local credential removal failed/u)
   assert.match(painted, /Signed in \(stored credential\)/u)
 })
+
+test('an older Account getState cannot overwrite a newer watch snapshot (RFL-002)', async () => {
+  const state: SourceState = { view: signedOut(), profileFails: false, balanceFails: false, runningTasks: false, calls: [] }
+  let pushWatch: ((view: AccountView) => void) | undefined
+  let held: ((view: AccountView) => void) | undefined
+  const source = makeSource(state)
+  source.watch = async function* () {
+    yield state.view
+    for (;;) {
+      const next = await new Promise<AccountView>(resolve => { pushWatch = resolve })
+      yield next
+    }
+  }
+  source.getState = () => new Promise<AccountView>(resolve => { held = resolve })
+  const page = new AccountWorkspacePage(source, () => {}, { view: 'page' })
+  page.setBodyHeight(26)
+  await flush()
+  page.render(100)
+  // The initial watch paint comes from the real getState? No: the held override
+  // starts on the manual refresh below; seed the initial state explicitly.
+  page.handleInput('r') // starts the old read
+  await flush()
+  state.view = stored()
+  pushWatch?.(state.view)
+  await flush()
+  assert.match(text(page), /Signed in \(stored credential\)/u)
+  held?.(signedOut())
+  await flush()
+  assert.match(text(page), /Signed in \(stored credential\)/u, 'the older read must be dropped')
+})

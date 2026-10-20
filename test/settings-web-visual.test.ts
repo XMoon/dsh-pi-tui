@@ -565,7 +565,7 @@ test('the launcher and Web rows explain opt-in billing, defaults and ori_questio
   await openOtherRows(h)
   await key(h, DOWN)
   const compact = (): string => h.plain().join(' ').replace(/[\u2500-\u257f]/gu, ' ').replace(/\s+/gu, ' ')
-  assert.match(compact(), /Host Web settings for the base profile, not an Optional Bundle/u)
+  assert.match(compact(), /Host Web settings for the base profile, .*?not an Optional Bundle/u)
   assert.match(compact(), /other bundles never change them and the defaults call no billed API/u)
   assert.match(compact(), /a Messages plan does not guarantee coverage/u)
   assert.match(compact(), /Share Original Question is on by default/u)

@@ -471,3 +471,131 @@ test('a stored credential RECORD is deleted through deleteRecord and never throu
   assert.equal(calls.some(call => call.startsWith('unset:')), false)
   assert.match(viewText(page), /signed out locally — stored credential cleared/u)
 })
+
+test('Esc on a running native attempt cancels the exact attempt and returns to the list only after settlement', async () => {
+  const { source, calls } = fakeSource()
+  const listeners = new Set<(event: import('../src/runtime/config-port.ts').AuthorizationFlowEvent) => void>()
+  const emit = (event: import('../src/runtime/config-port.ts').AuthorizationFlowEvent): void => {
+    for (const listener of listeners) listener(event)
+  }
+  source.authorizationEvents = listener => {
+    listeners.add(listener)
+    return () => { listeners.delete(listener) }
+  }
+  source.beginAuthorization = async () => {
+    calls.push('begin')
+    return { kind: 'started', attemptId: 'auth-esc' }
+  }
+  source.cancelAuthorization = async id => { calls.push(`cancel:${id}`) }
+  const page = new ModelsWorkspacePage(source, () => {}, { view: 'provider', route: 'anthropic' }, () => {})
+  page.setBodyHeight(26)
+  await flush()
+  viewText(page)
+  page.handleInput('\r')
+  await flush()
+  assert.match(viewText(page), /starting|running|Sign-in/u)
+  page.handleInput('\u001b')
+  await flush()
+  assert.ok(calls.includes('cancel:auth-esc'), calls.join(','))
+  assert.match(viewText(page), /Provider · Anthropic/u, 'the page waits on the Host settlement instead of leaving a prompt owner behind')
+  emit({ kind: 'settled', attemptId: 'auth-esc', status: 'cancelled' })
+  await flush()
+  assert.match(viewText(page), /Models & Credentials/u)
+})
+
+test('a painted but DISABLED action cannot be clicked into effect', async () => {
+  const { source, calls } = fakeSource({ configured: () => false })
+  const page = new ModelsWorkspacePage(source, () => {}, { view: 'provider', route: 'acme' }, () => {})
+  page.setBodyHeight(24)
+  await flush()
+  const lines = page.render(100).map(stripTerminalSequences)
+  const row = lines.findIndex(line => line.includes('Nothing stored to clear'))
+  assert.ok(row >= 0)
+  page.onCellPress(2, row)
+  page.onCellClick(2, row)
+  await flush()
+  assert.equal(calls.some(call => call.startsWith('unset:')), false)
+  assert.match(page.render(100).map(stripTerminalSequences).join('\n'), /Provider · Acme Gateway/u, 'the disabled action stays inert')
+})
+
+test('canonical route identities win over display labels, including the builtin and named-ref routes (RFL-001)', () => {
+  const options: readonly CredentialProviderOption[] = [
+    { route: 'deepseek-official', label: 'deepseek official', ref: 'DEEPSEEK_API_KEY', configured: true, declared: false, namesCredential: true, group: 'configured', canProvisionProfile: false },
+    { route: 'acme-canonical', label: 'Acme Gateway', ref: 'ACME_GATEWAY_API_KEY', configured: true, declared: false, namesCredential: true, group: 'configured', canProvisionProfile: true },
+  ]
+  const flows: readonly AuthorizationFlowTarget[] = [
+    { kind: 'authorization', route: 'acme-canonical', key: 'llm-pi-ai/acme-canonical', label: 'Acme OAuth', methods: [{ id: 'oauth', label: 'OAuth' }], inFlight: false },
+  ]
+  assert.deepEqual(resolveLoginDestination('deepseek-official', options, flows), { kind: 'models', view: 'reference', ref: 'DEEPSEEK_API_KEY', label: 'deepseek official' })
+  assert.deepEqual(resolveLoginDestination('acme-canonical', options, flows), { kind: 'models', view: 'provider', route: 'acme-canonical' })
+  assert.deepEqual(resolveLoginDestination('acme', options, flows), { kind: 'models', view: 'provider', route: 'acme-canonical' }, 'the label alias still works')
+  // A profile that explicitly names apiKeyEnv keeps the reference plane even
+  // when a flow exists for the same canonical route.
+  assert.deepEqual(resolveLogoutDestination('acme-canonical', options, flows), {
+    kind: 'models',
+    view: 'logout',
+    target: { kind: 'reference', ref: 'ACME_GATEWAY_API_KEY', label: 'Acme Gateway', route: 'acme-canonical' },
+  })
+})
+
+test('a withdrawn older prompt never closes the newer prompt UI (RFL-003)', async () => {
+  const { source, calls } = fakeSource()
+  const listeners = new Set<(event: import('../src/runtime/config-port.ts').AuthorizationFlowEvent) => void>()
+  const emit = (event: import('../src/runtime/config-port.ts').AuthorizationFlowEvent): void => {
+    for (const listener of listeners) listener(event)
+  }
+  source.authorizationEvents = listener => {
+    listeners.add(listener)
+    return () => { listeners.delete(listener) }
+  }
+  source.beginAuthorization = async () => {
+    emit({ kind: 'prompt', attemptId: 'auth-2', promptId: 'p1', prompt: { kind: 'text', message: 'FIRST PROMPT' } })
+    emit({ kind: 'prompt', attemptId: 'auth-2', promptId: 'p2', prompt: { kind: 'text', message: 'SECOND PROMPT' } })
+    return { kind: 'started', attemptId: 'auth-2' }
+  }
+  source.respondAuthorization = async (attemptId, promptId, answer) => {
+    calls.push(`respond:${attemptId}:${promptId}:${answer}`)
+    emit({ kind: 'settled', attemptId, status: 'authorized' })
+  }
+  source.provisionKeylessProfile = async () => ''
+  const page = new ModelsWorkspacePage(source, () => {}, { view: 'provider', route: 'anthropic' }, () => {})
+  page.setBodyHeight(26)
+  await flush()
+  viewText(page)
+  page.handleInput('\r')
+  await flush()
+  assert.match(viewText(page), /FIRST PROMPT/u)
+  emit({ kind: 'prompt-withdrawn', attemptId: 'auth-2', promptId: 'p1' })
+  await flush()
+  assert.match(viewText(page), /SECOND PROMPT/u)
+  assert.doesNotMatch(viewText(page), /FIRST PROMPT/u)
+  for (const character of 'second-answer') page.handleInput(character)
+  page.handleInput('\r')
+  page.handleInput('\r')
+  await flush()
+  assert.ok(calls.includes('respond:auth-2:p2:second-answer'), calls.join(','))
+  assert.equal(calls.some(call => call.startsWith('respond:auth-2:p1:')), false)
+})
+
+test('an older Models credential read cannot overwrite a newer refresh (RFL-002)', async () => {
+  const { source } = fakeSource()
+  let heldResolve: ((state: import('../src/tui/panels/models-workspace-page.ts').ModelsCredentialState) => void) | undefined
+  let releaseFirst = true
+  source.credentialState = async () => {
+    if (releaseFirst) {
+      releaseFirst = false
+      return await new Promise(resolve => { heldResolve = resolve })
+    }
+    return { kind: 'known', configured: true }
+  }
+  const page = new ModelsWorkspacePage(source, () => {}, { view: 'list' }, () => {})
+  page.setBodyHeight(24)
+  await flush()
+  page.handleInput('r')
+  await flush()
+  assert.match(viewText(page), /Configured/u)
+  heldResolve?.({ kind: 'known', configured: false })
+  await flush()
+  assert.match(viewText(page), /Configured/u, 'the stale read must not flip the row to Not set')
+  assert.doesNotMatch(viewText(page), /Not set/u)
+})

@@ -26,6 +26,7 @@ import {
 } from '@xmoon76/pi-tui'
 import { renderActionBarRow, type ActionBarSegment } from '../presentation/action-bar.ts'
 import { color } from '../theme/runtime.ts'
+import { sanitizedPhysicalLine } from '../presentation/lines.ts'
 import type { AccountView, AccountWallet } from '../../runtime/config-port.ts'
 import type { AccountQueryOutcome, AccountWorkspaceSource } from '../../app/command/account-workflow.ts'
 
@@ -104,6 +105,13 @@ export class AccountWorkspacePage implements Component {
   private bodyHeight = 1
   private initializing = true
   private watcherStarted = false
+  /** Latest-read serials: an older profile/balance read can never overwrite a
+   *  newer one (and a signed-out view invalidates both). */
+  private profileSerial = 0
+  private balanceSerial = 0
+  /** Latest AccountView read/operation identity: an older getState must never
+   *  overwrite a newer watch snapshot. */
+  private stateSerial = 0
 
   constructor(
     source: AccountWorkspaceSource,
@@ -130,7 +138,7 @@ export class AccountWorkspacePage implements Component {
     this.source.run('account watch', async () => {
       try {
         for await (const view of this.source.watch(this.pageController.signal)) {
-          this.applyView(view)
+          this.commitView(view)
         }
       } catch (error) {
         if (this.disposed || this.pageController.signal.aborted) return
@@ -141,21 +149,32 @@ export class AccountWorkspacePage implements Component {
 
   private refresh(): void {
     if (this.disposed) return
+    const serial = ++this.stateSerial
     this.source.run('account state read', async () => {
+      let view: AccountView
       try {
-        const view = await this.source.getState()
-        this.applyView(view, false)
-        if (view.status === 'credential-stored') {
-          this.readProfile()
-          this.readBalance()
-        }
+        view = await this.source.getState()
       } catch (error) {
         this.settle(() => {
+          if (serial !== this.stateSerial) return
           this.stateFailure = errorText(error)
           this.initializing = false
         })
+        return
+      }
+      if (this.disposed || serial !== this.stateSerial) return
+      this.applyView(view, false)
+      if (view.status === 'credential-stored') {
+        this.readProfile()
+        this.readBalance()
       }
     })
+  }
+
+  /** Commit one Host-observed view and invalidate older in-flight reads. */
+  private commitView(view: AccountView): void {
+    this.stateSerial += 1
+    this.applyView(view)
   }
 
   /** Apply one Host AccountView. A credential transition starts the independent
@@ -173,6 +192,8 @@ export class AccountWorkspacePage implements Component {
           this.readBalance()
         }
       } else {
+        this.profileSerial += 1
+        this.balanceSerial += 1
         this.profile = { kind: 'signed-out' }
         this.balance = { kind: 'signed-out' }
         this.runningTasks = false
@@ -182,19 +203,27 @@ export class AccountWorkspacePage implements Component {
 
   private readProfile(): void {
     if (this.disposed) return
+    const serial = ++this.profileSerial
     this.profile = { kind: 'pending' }
     this.source.run('account profile read', async () => {
       const outcome = await this.source.getProfile()
-      this.settle(() => { this.profile = queryStateOf(outcome) })
+      this.settle(() => {
+        if (serial !== this.profileSerial) return
+        this.profile = queryStateOf(outcome)
+      })
     })
   }
 
   private readBalance(): void {
     if (this.disposed) return
+    const serial = ++this.balanceSerial
     this.balance = { kind: 'pending' }
     this.source.run('account balance read', async () => {
       const outcome = await this.source.getBalance()
-      this.settle(() => { this.balance = queryStateOf(outcome) })
+      this.settle(() => {
+        if (serial !== this.balanceSerial) return
+        this.balance = queryStateOf(outcome)
+      })
     })
   }
 
@@ -223,7 +252,7 @@ export class AccountWorkspacePage implements Component {
     this.source.run('account sign in', async () => {
       try {
         const view = await this.source.startSignIn()
-        this.applyView(view)
+        this.commitView(view)
         this.settle(() => { this.busy = undefined })
       } catch (error) {
         this.settle(() => {
@@ -241,7 +270,7 @@ export class AccountWorkspacePage implements Component {
     this.source.run('account cancel sign in', async () => {
       try {
         const view = await this.source.cancelSignIn(attempt.id)
-        this.applyView(view)
+        this.commitView(view)
         this.settle(() => { this.busy = undefined })
       } catch (error) {
         this.settle(() => {
@@ -275,7 +304,7 @@ export class AccountWorkspacePage implements Component {
           this.signOutConfirm = false
           this.signOutIdentity = undefined
           this.busy = undefined
-          this.applyView(view)
+          this.commitView(view)
         })
       } catch (error) {
         this.settle(() => {
@@ -384,7 +413,10 @@ export class AccountWorkspacePage implements Component {
           '',
           color.textDim('The Host account service and its browser callback listener are required for sign-in.'),
         ],
-        actions: [{ id: 'account:back', label: '← Settings', enabled: true }],
+        actions: [
+          { id: 'account:refresh', label: 'Refresh', enabled: this.source.available() },
+          { id: 'account:back', label: '← Settings', enabled: true },
+        ],
       }
     }
     const view = this.view
@@ -421,14 +453,14 @@ export class AccountWorkspacePage implements Component {
     }
     if (this.signOutConfirm) {
       content.push('', color.textStrong('Sign out confirmation'))
-      content.push(color.warning(`This removes the locally stored DeepSeek Account credential for ${this.signOutIdentity ?? 'the current account'}. API keys stay stored; the current model is not switched.`))
+      content.push(color.warning(sanitizedPhysicalLine(`This removes the locally stored DeepSeek Account credential for ${this.signOutIdentity ?? 'the current account'}. API keys stay stored; the current model is not switched.`)))
       if (this.runningTasks) {
         content.push(color.error('A running agent is using a deepseek-account model. Signing out lets the Host cancel that matching account task.'))
       }
       content.push(color.textDim('The provider revokes the grant in the background; a remote failure never restores the local credential.'))
     }
     content.push(color.textDim('The Account token is never shown. Profile and balance are independent Host queries; a failure is stated on its own line.'))
-    if (this.notice !== undefined) content.push('', color.warning(this.notice))
+    if (this.notice !== undefined) content.push('', color.warning(sanitizedPhysicalLine(this.notice)))
     if (this.busy !== undefined) content.push('', color.textMuted(`${this.busy} — the Host has not confirmed yet`))
     const actions: ActionLine[] = []
     if (this.signOutConfirm) {
@@ -459,16 +491,16 @@ export class AccountWorkspacePage implements Component {
 
   private fact(label: string, value: string, width: number): string[] {
     const bodyWidth = Math.max(1, width - LABEL_WIDTH)
-    const wrapped = wrapTextWithAnsi(value, bodyWidth)
+    const wrapped = wrapTextWithAnsi(sanitizedPhysicalLine(value), bodyWidth)
     const parts = wrapped.length === 0 ? [''] : wrapped
     return [
-      `${fit(color.textDim(label), LABEL_WIDTH)}${color.text(parts[0]!)}`,
+      `${fit(color.textDim(sanitizedPhysicalLine(label)), LABEL_WIDTH)}${color.text(parts[0]!)}`,
       ...parts.slice(1).map(extra => `${' '.repeat(LABEL_WIDTH)}${color.text(extra)}`),
     ]
   }
 
   private wrapText(value: string, width: number): string[] {
-    return wrapTextWithAnsi(value, Math.max(1, width)).map(line => color.text(line))
+    return wrapTextWithAnsi(sanitizedPhysicalLine(value), Math.max(1, width)).map(line => color.text(line))
   }
 
   private profileText(): string {
@@ -598,10 +630,6 @@ export class AccountWorkspacePage implements Component {
         return 'handled'
       case 'account:refresh':
         this.refresh()
-        if (view?.status === 'credential-stored') {
-          this.readProfile()
-          this.readBalance()
-        }
         return 'handled'
       case 'account:back':
         return 'exit'
@@ -639,6 +667,7 @@ export class AccountWorkspacePage implements Component {
       || pressed.height !== this.lastHeight
       || target.id !== pressed.target.id
       || target.row !== pressed.target.row) return
+    if (!this.paintedActionIds.has(target.id)) return
     const rowIndex = this.paintedRowOrder.indexOf(target.id)
     if (rowIndex >= 0) this.cursor = rowIndex
     else this.cursor = this.paintedRowOrder.length + this.actionIndexOf(target.id)
@@ -654,6 +683,11 @@ export class AccountWorkspacePage implements Component {
   invalidate(): void {
     // No child editor state to invalidate: the page re-renders from its view
     // state on every frame.
+  }
+
+  /** Revoke the press state when another owner claims the gesture. */
+  cancelPointer(): void {
+    this.pressed = undefined
   }
 
   dispose(): void {
