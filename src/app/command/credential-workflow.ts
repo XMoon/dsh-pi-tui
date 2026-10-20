@@ -119,7 +119,14 @@ export function resolveLoginDestination(
   if (isAccountArg(arg)) return { kind: 'account', view: 'page' }
   const match = classifyCredentialArg(arg, options)
   if (match !== undefined) {
-    if (match.kind === 'ref') return { kind: 'models', view: 'reference', ref: match.ref }
+    if (match.kind === 'ref') {
+      // A NOVEL lowercase identifier is a new Provider route, not an env-var
+      // reference: `/login newroute` opens the prefilled Add Provider wizard,
+      // while `/login my_key` / `/login NOVEL_KEY` remain explicit references.
+      const knownRef = options.some(option => option.ref === match.ref)
+      if (!knownRef && ROUTE_PATTERN.test(arg)) return { kind: 'models', view: 'add-provider', route: arg }
+      return { kind: 'models', view: 'reference', ref: match.ref }
+    }
     const option = options.find(candidate => candidate.ref === match.option.ref)
     if (option === undefined) return { kind: 'models', view: 'reference', ref: match.option.ref, label: match.option.label }
     // The deepseek official builtin has no provider-profile detail page: its

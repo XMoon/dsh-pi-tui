@@ -46,6 +46,7 @@ function makeRows(): readonly ModelsProviderRow[] {
   return [
     {
       kind: 'reference',
+      identity: 'route:deepseek-official',
       route: 'deepseek-official',
       label: 'deepseek official',
       ref: 'DEEPSEEK_API_KEY',
@@ -58,6 +59,7 @@ function makeRows(): readonly ModelsProviderRow[] {
     },
     {
       kind: 'reference',
+      identity: 'route:acme',
       route: 'acme',
       label: 'Acme Gateway',
       ref: 'ACME_API_KEY',
@@ -70,6 +72,7 @@ function makeRows(): readonly ModelsProviderRow[] {
     },
     {
       kind: 'authorization',
+      identity: 'auth:llm-pi-ai/anthropic',
       route: 'anthropic',
       label: 'Anthropic',
       key: 'llm-pi-ai/anthropic',
@@ -138,6 +141,10 @@ test('login destination: bare, route, ref, novel ref, new route, account and inv
   assert.deepEqual(resolveLoginDestination('ACME_API_KEY', PROVIDERS, FLOWS), { kind: 'models', view: 'reference', ref: 'ACME_API_KEY' })
   assert.deepEqual(resolveLoginDestination('novel_key', PROVIDERS, FLOWS), { kind: 'models', view: 'reference', ref: 'NOVEL_KEY' })
   assert.deepEqual(resolveLoginDestination('new-route', PROVIDERS, FLOWS), { kind: 'models', view: 'add-provider', route: 'new-route' })
+  assert.deepEqual(resolveLoginDestination('newroute', PROVIDERS, FLOWS), { kind: 'models', view: 'add-provider', route: 'newroute' })
+  assert.deepEqual(resolveLoginDestination('mykey', PROVIDERS, FLOWS), { kind: 'models', view: 'add-provider', route: 'mykey' })
+  assert.deepEqual(resolveLoginDestination('my_key', PROVIDERS, FLOWS), { kind: 'models', view: 'reference', ref: 'MY_KEY' })
+  assert.deepEqual(resolveLoginDestination('NOVEL_KEY', PROVIDERS, FLOWS), { kind: 'models', view: 'reference', ref: 'NOVEL_KEY' })
   assert.deepEqual(resolveLoginDestination('deepseek-account', PROVIDERS, FLOWS), { kind: 'account', view: 'page' })
   const invalid = resolveLoginDestination('not valid!', PROVIDERS, FLOWS)
   assert.equal(invalid.kind, 'error')
@@ -292,6 +299,7 @@ test('provider-native sign-in presents the Host notice and a masked prompt, then
   }
   source.beginAuthorization = async key => {
     calls.push(`begin:${key}`)
+    emit({ kind: 'notice', attemptId: 'auth-1', notice: { message: 'Preparing sign-in' } })
     emit({ kind: 'notice', attemptId: 'auth-1', notice: { message: 'Authorize in the browser', url: 'https://provider.example/authorize' } })
     emit({
       kind: 'prompt',
@@ -596,8 +604,10 @@ test('an older Models credential read cannot overwrite a newer refresh (RFL-002)
   assert.match(viewText(page), /Configured/u)
   heldResolve?.({ kind: 'known', configured: false })
   await flush()
-  assert.match(viewText(page), /Configured/u, 'the stale read must not flip the row to Not set')
-  assert.doesNotMatch(viewText(page), /Not set/u)
+  const acmeRow = page.render(100).map(stripTerminalSequences).find(line => line.includes('Acme Gateway'))
+  assert.ok(acmeRow !== undefined)
+  assert.match(acmeRow, /Configured/u, 'the stale read must not flip the row to Not set')
+  assert.doesNotMatch(acmeRow, /Not set/u)
 })
 
 test('an empty masked key answer writes nothing (MA03)', async () => {
@@ -721,4 +731,81 @@ test('a pending clear cannot be left behind by Esc, and its rejected re-read sta
   rejectReRead?.(new Error('store read failed'))
   await flush()
   assert.match(viewText(page), /Not cleared: the clear returned; the store could not be re-read/u)
+})
+
+test('the painted ← Providers action uses the SAME cancel-and-settle path as Esc (P1)', async () => {
+  const { source, calls } = fakeSource()
+  const listeners = new Set<(event: import('../src/runtime/config-port.ts').AuthorizationFlowEvent) => void>()
+  const emit = (event: import('../src/runtime/config-port.ts').AuthorizationFlowEvent): void => {
+    for (const listener of listeners) listener(event)
+  }
+  source.authorizationEvents = listener => {
+    listeners.add(listener)
+    return () => { listeners.delete(listener) }
+  }
+  source.beginAuthorization = async () => ({ kind: 'started', attemptId: 'auth-back' })
+  source.cancelAuthorization = async id => { calls.push(`cancel:${id}`) }
+  const page = new ModelsWorkspacePage(source, () => {}, { view: 'provider', route: 'anthropic' }, () => {})
+  page.setBodyHeight(26)
+  await flush()
+  viewText(page)
+  page.handleInput('\r') // Sign in
+  await flush()
+  const lines = page.render(100).map(stripTerminalSequences)
+  const backRow = lines.findIndex(line => line.includes('← Providers'))
+  assert.ok(backRow >= 0, lines.join('\n'))
+  page.onCellPress(2, backRow)
+  page.onCellClick(2, backRow)
+  await flush()
+  assert.ok(calls.includes('cancel:auth-back'), calls.join(','))
+  assert.match(viewText(page), /Provider · Anthropic/u, 'the page waits for the Host settlement, exactly like Esc')
+  emit({ kind: 'settled', attemptId: 'auth-back', status: 'cancelled' })
+  await flush()
+  assert.match(viewText(page), /Models & Credentials/u)
+})
+
+test('the Models HOME reads credential-record presence for native authorization rows (P2)', async () => {
+  const { source } = fakeSource({ records: [{ key: 'llm-pi-ai/anthropic', kind: 'grant' }] })
+  const page = new ModelsWorkspacePage(source, () => {}, { view: 'list' }, () => {})
+  page.setBodyHeight(24)
+  await flush()
+  const anthropicRow = page.render(100).map(stripTerminalSequences).find(line => line.includes('Anthropic'))
+  assert.ok(anthropicRow !== undefined)
+  assert.match(anthropicRow, /Configured/u, 'the home list must not show Unknown after an authoritative records read')
+  assert.doesNotMatch(anthropicRow, /Unknown/u)
+})
+
+test('two route-less authorization flows keep distinct identities and each opens its own detail (P2)', async () => {
+  const { source, calls } = fakeSource()
+  const rows: ModelsProviderRow[] = [
+    {
+      kind: 'authorization', identity: 'auth:plugin-a/default', route: '', label: 'Plugin A', key: 'plugin-a/default',
+      configured: false, declared: false, namesCredential: false, methods: [{ id: 'oauth', label: 'OAuth' }], inFlight: false,
+      profile: { route: '', configured: false, models: [] },
+    },
+    {
+      kind: 'authorization', identity: 'auth:plugin-b/default', route: '', label: 'Plugin B', key: 'plugin-b/default',
+      configured: false, declared: false, namesCredential: false, methods: [{ id: 'oauth', label: 'OAuth' }], inFlight: false,
+      profile: { route: '', configured: false, models: [] },
+    },
+  ]
+  source.rows = () => rows
+  source.beginAuthorization = async key => { calls.push(`begin:${key}`); return { kind: 'started', attemptId: key } }
+  const page = new ModelsWorkspacePage(source, () => {}, { view: 'list' }, () => {})
+  page.setBodyHeight(24)
+  await flush()
+  viewText(page)
+  page.handleInput('\u001b[B') // first flow
+  page.handleInput('\r')
+  assert.match(viewText(page), /Provider · Plugin A/u)
+  page.handleInput('\u001b')
+  await flush()
+  viewText(page)
+  page.handleInput('\u001b[B')
+  page.handleInput('\u001b[B') // second flow
+  page.handleInput('\r')
+  assert.match(viewText(page), /Provider · Plugin B/u)
+  page.handleInput('\r') // sign in
+  await flush()
+  assert.ok(calls.includes('begin:plugin-b/default'), calls.join(','))
 })

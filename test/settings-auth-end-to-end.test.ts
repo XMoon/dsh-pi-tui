@@ -51,6 +51,7 @@ const SIGNED_OUT: AccountView = {
 
 interface Harness {
   readonly vt: VirtualTerminal
+  readonly app: TuiApp
   readonly view: () => string
   readonly rows: () => string[]
   readonly close: () => void
@@ -175,6 +176,7 @@ function open(): Harness {
   const rows = (): string[] => vt.getViewport().map(stripTerminalSequences)
   return {
     vt,
+    app,
     rows,
     view: () => rows().join('\n'),
     close: () => {
@@ -220,6 +222,14 @@ test('/login acme deeplinks to the provider detail inside the Settings lease', a
   assert.match(add.view(), /Add Provider/u)
   assert.match(add.view(), /new-route/u)
   add.close()
+
+  const noHyphen = open()
+  await noHyphen.vt.waitForRender()
+  ;(noHyphen as unknown as { invoke(line: string): unknown }).invoke('/login newroute')
+  await noHyphen.vt.waitForRender()
+  assert.match(noHyphen.view(), /Add Provider/u)
+  assert.match(noHyphen.view(), /newroute/u)
+  noHyphen.close()
 
   const builtin = open()
   await builtin.vt.waitForRender()
@@ -329,5 +339,27 @@ test('a cross-owner mouse drag never reuses the other owner press (RFL-004)', as
   await h.vt.waitForRender()
   assert.match(h.rows()[0]!, /Settings · Models/u, 'the rail press did not fire after a page release')
   assert.match(h.view(), /Provider · Acme Gateway/u)
+  h.close()
+})
+
+test('MA13: a Host approval preempts Models input, abandons the workspace and never revives the old prompt', async () => {
+  const h = open()
+  await h.vt.waitForRender()
+  ;(h as unknown as { invoke(line: string): unknown }).invoke('/login deepseek-official')
+  await h.vt.waitForRender()
+  // Enter the page-local masked API-key editor, then hand the seat to a Host
+  // approval. The workspace must be abandoned at its own lease boundary.
+  await key(h, '\r')
+  await key(h, '\r')
+  assert.match(h.view(), /Enter the API key/u)
+  const decision = h.app.showApprovalPrompt({ toolName: 'bash', reason: 'MA13 blocking-owner probe' })
+  await h.vt.waitForRender()
+  assert.match(h.view(), /Allow once/u)
+  assert.doesNotMatch(h.view(), /Settings · Models/u)
+  await key(h, 'y')
+  assert.equal(await decision, 'allowed-once')
+  await h.vt.waitForRender()
+  assert.doesNotMatch(h.view(), /Settings · Models/u)
+  assert.doesNotMatch(h.view(), /API Key Reference/u)
   h.close()
 })
