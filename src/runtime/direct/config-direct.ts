@@ -919,17 +919,12 @@ export class DirectAuthorizationConfig implements AuthorizationConfig {
   private cancelAttempt(attemptId: string, forcePrompts = false): void {
     const attempt = this.attempts.get(attemptId)
     if (attempt === undefined || attempt.settled) return
+    // Record the forced intent BEFORE dispatching abort: a provider abort
+    // listener can synchronously call prompt(), and bridgePrompt() must
+    // already see the dead surface. Abort still precedes bridge rejection.
+    if (forcePrompts) attempt.forced = true
     attempt.controller.abort()
-    // Ordinary cancel keeps prompts answerable until the Host settles. Forced
-    // caller teardown has destroyed their UI, so rejection is the only way to
-    // release a flow that may be awaiting one; the page is gone and the Host
-    // outcome remains authoritative. Record the forced state so a prompt the
-    // flow creates LATER is rejected as surface-disposed, never surfaced to a
-    // dead page and never turned into a user DECLINED.
-    if (forcePrompts) {
-      attempt.forced = true
-      this.rejectAttemptPrompts(attemptId, 'authorization surface disposed')
-    }
+    if (forcePrompts) this.rejectAttemptPrompts(attemptId, 'authorization surface disposed')
     attempt.disposeCallerAbortListener()
   }
 
