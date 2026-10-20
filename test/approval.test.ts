@@ -437,6 +437,7 @@ test('a grant below the minimum sheet paints one truthful resize row, never a cl
   const decision = app.showApprovalPrompt({ toolName: 'bash', reason: 'too small', danger: true })
   const view = await viewport(vt)
   assert.ok(view.includes('Resize'), `the resize fact must survive an impossible grant:\n${view}`)
+  assert.ok(view.includes('⚠'), `the danger fact must survive an impossible grant:\n${view}`)
   assert.ok(!view.includes('[y] Allow once'), `no action cell may survive an impossible grant:\n${view}`)
   assert.ok(!view.includes('╭'), `the tiny grant must not paint a clipped box:\n${view}`)
   vt.sendInput('n')
@@ -454,6 +455,7 @@ test('a narrow short grant with no room for title and body degrades to the resiz
     })
     const view = await viewport(vt)
     assert.ok(view.includes('Resize'), `${columns}x${rows} must advertise resizing:\n${view}`)
+    assert.ok(view.includes('⚠'), `${columns}x${rows} must keep the danger fact:\n${view}`)
     assert.ok(!view.includes('[y] Allow once'),
       `${columns}x${rows} must not paint a decision without the title/reading row:\n${view}`)
     vt.sendInput('n')
