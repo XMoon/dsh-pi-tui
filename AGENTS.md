@@ -392,6 +392,12 @@ policy above).
 
 * **Find before you create.** Search the open issues first. If an issue already
   owns the work, update it; do not open a second one for the same obligation.
+* **Not every change needs an issue.** An issue is required for a known
+  leftover, a deferred or bounded item, work that spans several PRs, and
+  anything that carries an owner and a re-entry trigger. A small fix that one
+  PR completes end to end may be managed by the PR alone — creating an issue
+  for it is overhead, not governance. When an issue does exist for the work,
+  the PR updates it.
 * **One obligation per issue.** An issue owns one problem, one feature or one
   qualification check, with its own acceptance criteria. Use an epic (label
   `epic`) as the parent for a work stream, and sub-issues for the work items.
