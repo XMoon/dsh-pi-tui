@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Settings now has in-place Models and Account pages.** Models lists the Host provider
+  directory, API-key presence (not a connection test) and the DeepSeek Account entry, and
+  exposes provider details, a masked API-key editor, the Add Provider draft wizard, stored
+  credential clear confirmations and provider-native sign-in (URL, prompts and cancel stay in
+  the page). Account is an independent page showing the Host state, the browser authorization
+  URL with SSH tunnel guidance, independent Profile / recharge-wallet / bonus-wallet outcomes,
+  exact-attempt cancellation, refresh and a confirmed sign-out. `/login` and `/logout` are now
+  deep links into those pages; every final write or clear requires an explicit in-page
+  confirmation.
+- **DeepSeek Account browser sign-in uses the official Host callback.** The TUI bundle now
+  mounts the official `host-webserver` (`127.0.0.1:0`); the official PlatformAccount registers
+  `/oauth/callback` while an attempt waits. Browser authorization, PKCE/state validation,
+  grant persistence and background revocation stay on the Host; the TUI never receives a
+  token/grant and never starts its own HTTP server. `--help` opens no listener.
+
 ### Changed
 
 - **Approvals now use a blocking editor-seat action sheet.** The complete reason

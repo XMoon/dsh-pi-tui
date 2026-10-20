@@ -239,6 +239,27 @@ export interface CredentialProviderOption {
   readonly canProvisionProfile: boolean
 }
 
+/** One provider profile's detached Host facts (the Models detail pane). All
+ * fields are semantic presentation facts; no settings namespace or path
+ * crosses the port. A route without a profile answers `configured: false`. */
+export interface ProviderProfileFacts {
+  readonly route: string
+  readonly configured: boolean
+  readonly api?: string
+  readonly baseURL?: string
+  readonly displayName?: string
+  readonly models: readonly string[]
+  /** The explicit `apiKeyEnv` reference, when the profile names one. */
+  readonly apiKeyEnv?: string
+}
+
+/** The safe manual-edit guidance for a complex profile: the confirmed USER
+ * profile patch path (never guessed), when the Host profile context exposes
+ * one. */
+export interface ProviderConfigGuide {
+  readonly profilePatchPath?: string
+}
+
 /** The provider-profile sub-domain: the add-provider wizard and the
  * /login merge. The adapter owns the Host schema knowledge — a consumer
  * names a ROUTE, never a settings namespace or path: the merged
@@ -254,6 +275,10 @@ export interface ProviderProfileConfig {
    * domain/catalog/provider.ts merge, wired by the adapter). Detached DTOs with
    * semantic flags only — no settings namespace or path ever crosses. */
   listCredentialOptions(): readonly CredentialProviderOption[]
+  /** The detached profile facts of one route (the Models detail pane). */
+  readProfile(route: string): ProviderProfileFacts
+  /** The confirmed manual-edit guidance for complex profile fields. */
+  configGuide(): ProviderConfigGuide
   /** Persist one provider profile (the add-provider wizard; the adapter
    * owns the llm-pi-ai schema). */
   writeProfile(route: string, profile: Record<string, unknown>): Promise<void>
@@ -556,6 +581,106 @@ export interface WebProviderConfig {
  */
 export type ConfigReadiness = 'ready' | 'stale' | 'unavailable'
 
+/** Identity of the requesting UI for one DeepSeek Account operation. The Host
+ * derives the Platform request headers from it, so the Client samples it per
+ * request (never caches an old timezone offset across a DST change). */
+export interface AccountClientMetadata {
+  readonly version: string
+  /** Active UI language; the Host reduces it to the Platform wire locale. */
+  readonly locale: string
+  /** Offset from UTC in seconds, positive east of Greenwich. */
+  readonly timezoneOffsetSeconds: number
+}
+
+/** One browser sign-in attempt as the account surface sees it. The attempt id
+ * is the only cancellation identity; it is passed straight back to
+ * {@link AccountConfig.cancelSignIn} and never derived from a URL or label. */
+export interface AccountSignInAttempt {
+  readonly id: string
+  readonly phase:
+    | 'initializing'
+    | 'waiting-browser'
+    | 'exchanging'
+    | 'committing'
+    | 'succeeded'
+    | 'cancelled'
+    | 'expired'
+    | 'failed'
+  readonly authorizeUrl?: string
+  readonly expiresAt?: number
+  readonly errorCode?: 'no-response' | 'network' | 'protocol' | 'expired' | 'storage'
+}
+
+/** Stored-account presence plus the latest attempt. `credential-stored` is a
+ * STORAGE fact, never a claim that the Platform validated the grant. */
+export interface AccountView {
+  readonly status: 'signed-out' | 'credential-stored'
+  readonly links: { readonly usageUrl: string; readonly topUpUrl: string }
+  readonly attempt: AccountSignInAttempt | null
+}
+
+/** The Platform profile projection (contacts already masked by Platform). */
+export interface AccountProfile {
+  readonly id: string | null
+  readonly name: string | null
+  readonly contact: string | null
+  readonly avatarUrl?: string | null
+}
+
+/** One recharge or bonus wallet; the decimal string is retained verbatim. */
+export interface AccountWallet {
+  readonly currency: string
+  readonly balance: string
+}
+
+/** Profile and balance settle INDEPENDENTLY: each may be ready or failed, and
+ * `null` means signed out / the grant changed under the query. */
+export type AccountProfileOutcome =
+  | { readonly status: 'ready'; readonly value: AccountProfile }
+  | { readonly status: 'failed' }
+  | null
+
+export type AccountBalanceOutcome =
+  | {
+      readonly status: 'ready'
+      readonly value: readonly AccountWallet[]
+      readonly bonusWallets: readonly AccountWallet[]
+    }
+  | { readonly status: 'failed' }
+  | null
+
+/**
+ * The DeepSeek Account sub-domain — the ONLY Host authority for browser
+ * account sign-in, profile/balance reads, cancellation and sign-out. It never
+ * exposes a token, grant payload, PKCE value, Platform session or generic
+ * account service object; every DTO is detached, and the callback origin is
+ * the Host webserver's own bound loopback root (never a Client-supplied URL).
+ *
+ * `available()` is the account SERVICE fact. `getCallbackOrigin()` is the
+ * separate browser-callback capability: `undefined` means the Host listener is
+ * missing or not bound, and the UI must state that instead of starting a flow
+ * that cannot complete.
+ */
+export interface AccountConfig {
+  available(): boolean
+  getState(): Promise<AccountView>
+  getProfile(client: AccountClientMetadata): Promise<AccountProfileOutcome>
+  getBalance(client: AccountClientMetadata): Promise<AccountBalanceOutcome>
+  /** Subscribe with a COMPLETE initial state; ending the signal never cancels
+   * an in-flight browser attempt. */
+  watch(signal: AbortSignal): AsyncIterable<AccountView>
+  getCallbackOrigin(): string | undefined
+  /** Start (or join) a browser attempt against the Host's own callback origin
+   * and the fixed `web` login source. */
+  startSignIn(client: AccountClientMetadata): Promise<AccountView>
+  cancelSignIn(id: string): Promise<AccountView>
+  signOut(client: AccountClientMetadata): Promise<AccountView>
+  /** Whether a running Agent's latest bound request used the account provider
+   * (the official sign-out risk fact). Read-only: the Host's signed-out
+   * listener owns the actual cancellation. */
+  hasRunningAccountTasks(): boolean
+}
+
 /** The config assembly — one narrow sub-interface per config domain.
  * Consumers depend on the sub-interface they use, never on the whole
  * assembly (no generic settings god API). */
@@ -578,6 +703,8 @@ export interface ConfigPort {
   readonly credentials: CredentialConfig
   /** Provider authorization flows. */
   readonly authorization: AuthorizationConfig
+  /** DeepSeek Account (browser sign-in, profile/balance, sign-out). */
+  readonly account: AccountConfig
   /** Permission presets (names/default/apply). */
   readonly permissions: PermissionConfig
   /** The saved default agent preset. */

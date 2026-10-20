@@ -42,7 +42,7 @@
  * @module @xmoon76/dsh-pi-tui/runtime/remote/config-remote
  */
 
-import { credentialOptionsFor, providerOptionsFor, type ProviderCatalogEntry, type ProviderOption } from '../../domain/catalog/provider.ts'
+import { credentialOptionsFor, getPath, providerOptionsFor, type ProviderCatalogEntry, type ProviderOption } from '../../domain/catalog/provider.ts'
 import {
   resolveTrustedFooterCommand,
   resolveUserCommandItemActivationIds,
@@ -51,6 +51,11 @@ import {
 } from '../../domain/footer/command-trust.ts'
 import { parseFooterCustomItems, type FooterCustomItemsParseResult } from '../../domain/footer/custom-items.ts'
 import type {
+  AccountBalanceOutcome,
+  AccountClientMetadata,
+  AccountConfig,
+  AccountProfileOutcome,
+  AccountView,
   AuthorizationConfig,
   AuthorizationFlowEvent,
   AuthorizationFlowTarget,
@@ -62,7 +67,9 @@ import type {
   FooterCustomItemsRaw,
   PermissionConfig,
   PresetDefaultConfig,
+  ProviderConfigGuide,
   ProviderProfileConfig,
+  ProviderProfileFacts,
   SubagentAllowedModelRoute,
   SubagentModelSelectionConfig,
   WebProviderConfig,
@@ -1038,6 +1045,28 @@ class RemoteProviderProfileConfig implements ProviderProfileConfig {
     })
   }
 
+  readProfile(route: string): ProviderProfileFacts {
+    const directory = this.mirror.providers()
+    if (directory !== undefined) {
+      const entry = directory.find(candidate => candidate.provider === route)
+      if (entry !== undefined) {
+        const section = this.mirror.namespace(entry.settingsNs)?.value
+        const profile = entry.settingsPath.length === 0 ? section : getPath(section, entry.settingsPath)
+        return remoteProviderFactsOf(route, entry.displayName, profile)
+      }
+    }
+    const section = this.mirror.namespace(PROVIDER_SETTINGS_NS)?.value as
+      | { providers?: Record<string, unknown> }
+      | undefined
+    return remoteProviderFactsOf(route, route, section?.providers?.[route])
+  }
+
+  configGuide(): ProviderConfigGuide {
+    // The wire carries no profile-file path; the UI states that manual-edit
+    // guidance is unavailable on this backend instead of guessing one.
+    return {}
+  }
+
   async writeProfile(route: string, profile: Record<string, unknown>): Promise<void> {
     // The ONE profile-slot rule gates the write: the conventional
     // llm-pi-ai `providers.<route>` slot, for a valid non-builtin route.
@@ -1451,6 +1480,7 @@ export class RemoteConfigPort implements ConfigPort {
   readonly providers: ProviderProfileConfig
   readonly credentials: CredentialConfig
   readonly authorization: AuthorizationConfig
+  readonly account: AccountConfig
   readonly permissions: PermissionConfig
   readonly presetDefault: PresetDefaultConfig
   readonly subagentModelSelection: SubagentModelSelectionConfig
@@ -1488,6 +1518,7 @@ export class RemoteConfigPort implements ConfigPort {
     )
     this.credentials = this.credentialConfig
     this.authorization = new RemoteAuthorizationConfig()
+    this.account = new RemoteUnsupportedAccountConfig()
     this.permissions = new RemotePermissionConfig(this.mirror, source.remote.commands)
     this.presetDefault = new RemotePresetDefaultConfig(this.mirror)
     this.subagentModelSelection = new RemoteSubagentModelSelectionConfig(this.mirror)
@@ -1582,5 +1613,86 @@ class RemoteUnsupportedWebProviderConfig implements WebProviderConfig {
 
   async setSearchApiBaseURL(): Promise<void> {
     this.refuse()
+  }
+}
+
+/** Detached provider facts for the Remote Models detail (the same semantic
+ * projection as Direct's adapter). */
+function remoteProviderFactsOf(route: string, fallbackLabel: string, profile: unknown): ProviderProfileFacts {
+  if (typeof profile !== 'object' || profile === null || Array.isArray(profile)) {
+    return { route, configured: profile !== undefined, displayName: fallbackLabel, models: [] }
+  }
+  const record = profile as Record<string, unknown>
+  const models = Array.isArray(record.models)
+    ? record.models.flatMap(entry => {
+        if (typeof entry === 'string') return [entry]
+        if (typeof entry === 'object' && entry !== null && typeof (entry as { id?: unknown }).id === 'string') {
+          return [(entry as { id: string }).id]
+        }
+        return []
+      })
+    : []
+  return {
+    route,
+    configured: true,
+    ...(typeof record.api === 'string' && record.api !== '' ? { api: record.api } : {}),
+    ...(typeof record.baseURL === 'string' && record.baseURL !== '' ? { baseURL: record.baseURL } : {}),
+    displayName: typeof record.displayName === 'string' && record.displayName !== '' ? record.displayName : fallbackLabel,
+    models,
+    ...(typeof record.apiKeyEnv === 'string' && record.apiKeyEnv !== '' ? { apiKeyEnv: record.apiKeyEnv } : {}),
+  }
+}
+
+/**
+ * The Remote backend's DeepSeek Account sub-domain: INTENTIONALLY unsupported
+ * for this stage. The rc.2 wire publishes no account state/attempt/profile/
+ * balance/sign-out RPC, and the browser callback origin is a Host listener
+ * fact that must never be synthesized by a Client. Every operation fails
+ * closed; the Account page states the backend limitation instead of faking a
+ * sign-in or a signed-out state.
+ */
+class RemoteUnsupportedAccountConfig implements AccountConfig {
+  available(): boolean {
+    return false
+  }
+
+  private refuse(): never {
+    throw new Error('DeepSeek Account is not supported on this backend')
+  }
+
+  async getState(): Promise<AccountView> {
+    this.refuse()
+  }
+
+  async getProfile(_client: AccountClientMetadata): Promise<AccountProfileOutcome> {
+    this.refuse()
+  }
+
+  async getBalance(_client: AccountClientMetadata): Promise<AccountBalanceOutcome> {
+    this.refuse()
+  }
+
+  watch(_signal: AbortSignal): AsyncIterable<AccountView> {
+    return (async function* empty(): AsyncGenerator<AccountView> {})()
+  }
+
+  getCallbackOrigin(): string | undefined {
+    return undefined
+  }
+
+  async startSignIn(_client: AccountClientMetadata): Promise<AccountView> {
+    this.refuse()
+  }
+
+  async cancelSignIn(_id: string): Promise<AccountView> {
+    this.refuse()
+  }
+
+  async signOut(_client: AccountClientMetadata): Promise<AccountView> {
+    this.refuse()
+  }
+
+  hasRunningAccountTasks(): boolean {
+    return false
   }
 }

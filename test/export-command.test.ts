@@ -137,8 +137,22 @@ function stubRunner(ctx: Context, app: TuiApp): TuiCommandRunner {
       providers: {
         available: () => true,
         listCredentialOptions: () => [],
+        readProfile: (route: string) => ({ route, configured: false, models: [] }),
+        configGuide: () => ({}),
         writeProfile: async () => {},
         writeKeylessProfile: async () => ({ kind: 'written' as const }),
+      },
+      account: {
+        available: () => false,
+        getState: async () => { throw new Error('account unavailable') },
+        getProfile: async () => null,
+        getBalance: async () => null,
+        watch: async function* () {},
+        getCallbackOrigin: () => undefined,
+        startSignIn: async () => { throw new Error('account unavailable') },
+        cancelSignIn: async () => { throw new Error('account unavailable') },
+        signOut: async () => { throw new Error('account unavailable') },
+        hasRunningAccountTasks: () => false,
       },
       credentials: {
         recordsSupported: () => true,

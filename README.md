@@ -324,6 +324,18 @@ Icon style、Transcript display 的运行时当前值与持久偏好、Thinking 
 态，以及每个条目的配置来源 Scope 与 backend 就绪状态；`R` 重新读取、`C` 复制所选行的
 原始值；浏览、选择与复制本身都不写入配置。
 
+Settings 的一级分类现在是 `Models / Account / Appearance / Display / Plugins / Other settings`；`/settings`
+仍默认落在 Appearance。`Models` 是原位页：列出 Host 的 provider 目录、API key 是否已配置（只是存在性，
+不是连通性测试）与 DeepSeek Account 入口；可查看 provider 事实、在遮蔽输入中写入/清除 API key、
+完成 Add Provider 草稿向导，以及发起 provider-native 登录（页面内持续显示 URL、提示与取消）。
+`Account` 是独立的 DeepSeek Account 页：显示 Host 的登录状态、浏览器授权 URL 与 SSH 隧道提示、
+以及各自独立的 Profile / 充值钱包 / 赠送钱包状态（失败不伪造为 0），可显式取消当前 attempt、刷新，
+并在二次确认后 sign out；关闭页面不会取消已经开始的浏览器登录。`/login` 与 `/logout` 现在只解析目标并
+打开对应页面（`/login` 打开 Models、已知 route 进详情、已知/新 ref 进 API Key Reference、新 route
+预填 Add Provider、`deepseek-account` 进 Account；`/logout` 打开已存凭据列表或单一清除确认），最终
+写入/清除必须在页面里明确确认。Account 授权与普通 provider flow 分开：Account 只通过官方
+PlatformAccount 与 Host 的 loopback `/oauth/callback` 登录，不会被当作普通 credential record 清除。
+
 其中**「Configured theme」和「Transcript display」两行可以直接修改**：在 L1 设置行按
 `Right` 或 `Enter`，或点击 `[Change…]` / 可见的 Detail 内容，即可在同一 L2 详情中打开
 候选选择；当前值与 Runtime / Persisted 事实留在同一详情事实区，并与候选列表独立滚动。`Up`/`Down`/`Home`/`End`
@@ -354,8 +366,8 @@ provider：登录或普通 Messages 套餐不保证覆盖其费用，默认的 `
 API。Web 配置是 base profile 所有的设置，不是 Bxx Optional Bundle；安装或启用任何其他 Bundle
 都不会改变这两个 provider。
 `[current]` 只在官方写入与权威回读一致后移动，失败显示 `Not saved`；选择对下一次搜索/获取生效，
-运行中的操作不会被追溯切换。DeepSeek API key 只显示是否配置与来源层，配置/清除复用现有遮蔽
-`/login DEEPSEEK_API_KEY` / `/logout DEEPSEEK_API_KEY`（先关闭设置界面再执行）。Esc 从 Web 段返回
+运行中的操作不会被追溯切换。DeepSeek API key 只显示是否配置与来源层；配置/清除会关闭当前 Web 编辑器，并在 Models 的遮蔽
+`API Key Reference` 页完成（`/login DEEPSEEK_API_KEY` / `/logout DEEPSEEK_API_KEY` 只负责导航）。Esc 从 Web 段返回
 同一 `Web Search / Fetch` 行；从 `Open existing settings…` 进入的旧路径仍返回会话。Remote 后端显示
 不可用，不发任何 Host 命名空间。
 

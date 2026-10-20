@@ -69,6 +69,7 @@
   ],
   "runtime/direct/config-direct.ts": [
     "agentPresets",
+    "agents",
     "approval",
     "authorization",
     "commands",

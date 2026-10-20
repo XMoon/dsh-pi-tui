@@ -1,0 +1,1857 @@
+/**
+ * The Settings → Models page (Phase 3C / C2-MA): the ONE in-place surface for
+ * provider profiles, API-key references, stored credential records and
+ * provider-native authorization attempts. It lives INSIDE the existing
+ * Settings workspace lease (the same screen, input route and mouse hit-map
+ * discipline as the rest of the workspace) and owns only view/draft state.
+ *
+ * The page never touches a Host service: every read is a detached DTO and
+ * every write is an intent on {@link ModelsWorkspaceSource} (implemented by
+ * the app/command layer over the ConfigPort). Secret drafts stay page-local
+ * and are dropped on save/cancel/dispose; the masked editor reuses the
+ * existing QuestionFlow component.
+ *
+ * @module @xmoon76/dsh-pi-tui/tui/panels/models-workspace-page
+ */
+
+import {
+  Key,
+  matchesKey,
+  truncateToWidth,
+  visibleWidth,
+  wrapTextWithAnsi,
+  type Component,
+  type TuiMouseEvent,
+  type TuiMouseEventResult,
+} from '@xmoon76/pi-tui'
+import { renderActionBarRow, type ActionBarSegment } from '../presentation/action-bar.ts'
+import { color } from '../theme/runtime.ts'
+import { QuestionFlow } from '../interaction/question.ts'
+import { createAuthorizationFlow } from '../../app/command/authorization.ts'
+import type {
+  AuthorizationConfig,
+  AuthorizationFlowEvent,
+  AuthorizationNoticeEvent,
+  ProviderConfigGuide,
+  ProviderProfileFacts,
+} from '../../runtime/config-port.ts'
+import type {
+  CreateProviderDraft,
+  CreateProviderOutcome,
+  CredentialClearTarget,
+  StoredCredentialRow,
+} from '../../app/command/credential-workflow.ts'
+import { PROTOCOL_CHOICES, ROUTE_PATTERN } from '../../domain/catalog/provider.ts'
+
+/** One provider row of the Models list (a detached semantic DTO). */
+export interface ModelsProviderRow {
+  readonly kind: 'reference' | 'authorization'
+  readonly route: string
+  readonly label: string
+  /** The exact credential reference of a reference row. */
+  readonly ref?: string
+  /** The exact authorization flow key of an authorization row. */
+  readonly key?: string
+  readonly configured: boolean
+  readonly declared: boolean
+  readonly namesCredential: boolean
+  readonly methods: readonly { readonly id: string; readonly label: string }[]
+  readonly inFlight: boolean
+  readonly profile: ProviderProfileFacts
+}
+
+/** The Account row's current summary. */
+export interface ModelsAccountSummary {
+  readonly available: boolean
+  readonly status?: 'signed-out' | 'credential-stored'
+  readonly failure?: string
+}
+
+/** One credential presence answer for the list (async, never inferred from a
+ * route or a profile). */
+export type ModelsCredentialState =
+  | { readonly kind: 'known'; readonly configured: boolean; readonly source?: string }
+  | { readonly kind: 'unknown'; readonly reason: string }
+  | { readonly kind: 'pending' }
+
+/** The stored-credential snapshot (references + records). */
+export interface ModelsStoredCredentials {
+  readonly rows: readonly StoredCredentialRow[]
+  readonly recordCleanupUnavailable: boolean
+  readonly referenceReadFailures: readonly string[]
+}
+
+/** The page's intent surface (the app/command owner implements it). */
+export interface ModelsWorkspaceSource {
+  readonly available: boolean
+  rows(): readonly ModelsProviderRow[]
+  accountSummary(): Promise<ModelsAccountSummary>
+  credentialState(ref: string): Promise<ModelsCredentialState>
+  storedCredentials(): Promise<ModelsStoredCredentials>
+  describeReference(ref: string): Promise<{ readonly configured: boolean; readonly source?: string }>
+  setReference(ref: string, secret: string): Promise<void>
+  clearReference(ref: string): Promise<void>
+  deleteRecord(key: string): Promise<void>
+  beginAuthorization(
+    targetKey: string,
+    method: string | undefined,
+    signal: AbortSignal,
+  ): Promise<{ readonly kind: 'started'; readonly attemptId: string } | { readonly kind: 'unavailable' }>
+  authorizationEvents(listener: (event: AuthorizationFlowEvent) => void): () => void
+  respondAuthorization(attemptId: string, promptId: string, answer: string | null): Promise<void>
+  cancelAuthorization(attemptId: string): Promise<void>
+  provisionKeylessProfile(route: string | undefined): Promise<string>
+  discoverModels(request: { readonly baseURL: string; readonly api: string; readonly apiKey?: string }): Promise<readonly { readonly id: string }[]>
+  createProvider(draft: CreateProviderDraft): Promise<CreateProviderOutcome>
+  configGuide(): ProviderConfigGuide
+  openUrl(url: string): void
+  copy(text: string): void
+  /** Run one page-owned async operation through the app's ownership entry. */
+  run(label: string, task: () => Promise<void>): void
+}
+
+/** The initial page a `/login` / `/logout` deep link opens. */
+export type ModelsInitialView =
+  | { readonly view: 'list' }
+  | { readonly view: 'provider'; readonly route: string }
+  | { readonly view: 'reference'; readonly ref: string; readonly label?: string }
+  | { readonly view: 'add-provider'; readonly route?: string }
+  | { readonly view: 'logout-list' }
+  | { readonly view: 'logout'; readonly target: CredentialClearTarget }
+  | { readonly view: 'records' }
+  | { readonly view: 'guide' }
+
+/** The page's own close/navigation result (the workspace root owns the seat). */
+export type ModelsPageExit = 'handled' | 'exit' | 'open-account'
+
+type ModelsView =
+  | { readonly kind: 'list' }
+  | { readonly kind: 'provider'; readonly route: string }
+  | { readonly kind: 'reference'; readonly ref: string; readonly label: string }
+  | { readonly kind: 'add-provider' }
+  | { readonly kind: 'review' }
+  | { readonly kind: 'records' }
+  | { readonly kind: 'logout-list' }
+  | { readonly kind: 'logout'; readonly target: CredentialClearTarget }
+  | { readonly kind: 'guide' }
+
+interface ClearState {
+  readonly phase: 'reading' | 'ready' | 'pending' | 'done' | 'failed'
+  readonly configured: boolean
+  readonly source?: string
+  readonly reason?: string
+  readonly result?: string
+}
+
+interface AddProviderState {
+  readonly step: 'form' | 'review'
+  readonly draft: {
+    readonly route: string
+    readonly api: string
+    readonly baseURL: string
+    readonly displayName: string
+    readonly key: string
+    readonly models: readonly string[]
+  }
+  readonly error?: string
+  readonly discovering: boolean
+  readonly discoveryNote?: string
+  readonly result?: CreateProviderOutcome
+}
+
+interface PickerState {
+  readonly header: string
+  readonly items: readonly { readonly value: string; readonly label: string; readonly description?: string }[]
+  readonly index: number
+  readonly onSelect: (value: string) => void
+  readonly onCancel: () => void
+}
+
+interface NoticeState {
+  readonly message: string
+  readonly url?: string
+  readonly code?: string
+}
+
+interface AuthState {
+  readonly targetRoute: string
+  readonly phase: 'starting' | 'running' | 'authorized' | 'cancelled' | 'failed'
+  readonly attemptId?: string
+  readonly status?: string
+}
+
+interface EmbeddedQuestion {
+  readonly flow: QuestionFlow
+}
+
+interface HitTarget {
+  readonly kind: 'row' | 'action' | 'picker' | 'model-picker'
+  readonly id: string
+  readonly row: number
+  readonly startCol: number
+  readonly endCol: number
+}
+
+interface ActionLine {
+  readonly id: string
+  readonly label: string
+  readonly enabled: boolean
+}
+
+interface Projection {
+  readonly content: string[]
+  readonly actions: readonly ActionLine[]
+}
+
+const TITLE = 'Models & Credentials'
+const LABEL_WIDTH = 16
+
+function fit(text: string, width: number): string {
+  if (width <= 0) return ''
+  const clamped = truncateToWidth(text, width, '…', false)
+  const padding = width - visibleWidth(clamped)
+  return padding > 0 ? clamped + ' '.repeat(padding) : clamped
+}
+
+function credentialWord(state: ModelsCredentialState): { readonly word: string; readonly tone: 'success' | 'warning' | 'muted' } {
+  if (state.kind === 'pending') return { word: 'Unknown', tone: 'muted' }
+  if (state.kind === 'unknown') return { word: 'Unknown', tone: 'warning' }
+  return state.configured
+    ? { word: state.source === undefined ? 'Configured' : `Configured · ${state.source}`, tone: 'success' }
+    : { word: 'Not set', tone: 'muted' }
+}
+
+function paintState(text: string, tone: 'success' | 'warning' | 'muted'): string {
+  return tone === 'success' ? color.success(text) : tone === 'warning' ? color.warning(text) : color.textMuted(text)
+}
+
+function parseModelIds(text: string): string[] {
+  return [...new Set(text.split(/[,\s]+/).map(part => part.trim()).filter(part => part !== ''))]
+}
+
+function errorText(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
+}
+
+/** The Models page component. Constructed per workspace open. */
+export class ModelsWorkspacePage implements Component {
+  private readonly source: ModelsWorkspaceSource
+  private requestRender: () => void
+  private readonly onOpenAccount: () => void
+  private view: ModelsView = { kind: 'list' }
+  private providerRows: readonly ModelsProviderRow[] = []
+  private account: ModelsAccountSummary = { available: false }
+  private readonly credentialStates = new Map<string, ModelsCredentialState>()
+  private records: ModelsStoredCredentials | undefined
+  private clear: ClearState | undefined
+  private add: AddProviderState | undefined
+  private cursor = 0
+  private scroll = 0
+  private picker: PickerState | undefined
+  private modelPicker: { items: readonly { readonly id: string }[]; readonly selected: Set<string>; index: number } | undefined
+  private question: EmbeddedQuestion | undefined
+  private notice: string | undefined
+  private auth: AuthState | undefined
+  private authNotice: NoticeState | undefined
+  private authUnsubscribe: (() => void) | undefined
+  private readonly pageController = new AbortController()
+  private disposed = false
+  private revision = 0
+  private paintedTargets: readonly HitTarget[] = []
+  private pressed: { readonly target: HitTarget; readonly revision: number; readonly width: number; readonly height: number } | undefined
+  private lastWidth = 0
+  private lastHeight = 0
+  private bodyHeight = 1
+  private copyValue: string | undefined
+  private referenceEditor: { ref: string; label: string }
+  private referencePhase: 'idle' | 'editing' | 'pending' | 'verified' | 'not-saved' | 'unknown' = 'idle'
+  private referenceStatus: string | undefined
+  private referenceConfigured: boolean | undefined
+  private initializing = true
+
+  constructor(
+    source: ModelsWorkspaceSource,
+    requestRender: () => void,
+    initial: ModelsInitialView,
+    onOpenAccount: () => void,
+  ) {
+    this.source = source
+    this.requestRender = requestRender
+    this.onOpenAccount = onOpenAccount
+    this.referenceEditor = initial.view === 'reference'
+      ? { ref: initial.ref, label: initial.label ?? initial.ref }
+      : { ref: '', label: '' }
+    this.applyInitial(initial)
+    this.refresh()
+  }
+
+  private applyInitial(initial: ModelsInitialView): void {
+    switch (initial.view) {
+      case 'list':
+      case 'records':
+      case 'logout-list':
+      case 'guide':
+      case 'add-provider':
+        if (initial.view === 'add-provider') this.startAddProvider(initial.route)
+        else this.view = { kind: initial.view }
+        return
+      case 'provider':
+        this.view = { kind: 'provider', route: initial.route }
+        return
+      case 'reference':
+        this.view = { kind: 'reference', ref: initial.ref, label: initial.label ?? initial.ref }
+        return
+      case 'logout':
+        this.openClear(initial.target)
+        return
+    }
+  }
+
+  // ── data refresh ─────────────────────────────────────────────────────────
+
+  /** Re-read every page-owned authority. All reads are intents that settle on
+   * this page only; a late settlement after dispose is ignored by `settle`. */
+  private refresh(): void {
+    if (this.disposed) return
+    this.providerRows = this.source.rows()
+    for (const row of this.providerRows) {
+      if (row.kind !== 'reference' || row.ref === undefined) continue
+      const ref = row.ref
+      this.source.run('models credential read', async () => {
+        let state: ModelsCredentialState
+        try {
+          state = await this.source.credentialState(ref)
+        } catch (error) {
+          state = { kind: 'unknown', reason: errorText(error) }
+        }
+        this.settle(() => {
+          this.credentialStates.set(ref, state)
+        })
+      })
+    }
+    this.source.run('models account read', async () => {
+      let summary: ModelsAccountSummary
+      try {
+        summary = await this.source.accountSummary()
+      } catch (error) {
+        summary = { available: true, failure: errorText(error) }
+      }
+      this.settle(() => {
+        this.account = summary
+        this.initializing = false
+      })
+    })
+    if (this.view.kind === 'records' || this.view.kind === 'logout-list') this.refreshRecords()
+    if (this.view.kind === 'logout' || this.view.kind === 'reference') this.readReferenceState()
+    this.requestRender()
+  }
+
+  private refreshRecords(): void {
+    this.source.run('models records read', async () => {
+      try {
+        const records = await this.source.storedCredentials()
+        this.settle(() => {
+          this.records = records
+        })
+      } catch (error) {
+        this.settle(() => {
+          this.notice = `the stored credentials could not be read: ${errorText(error)}`
+        })
+      }
+    })
+  }
+
+  private readReferenceState(): void {
+    const ref = this.view.kind === 'reference' ? this.view.ref : this.view.kind === 'logout' && this.view.target.kind === 'reference' ? this.view.target.ref : undefined
+    if (ref === undefined) return
+    this.source.run('models reference read', async () => {
+      try {
+        const info = await this.source.describeReference(ref)
+        this.settle(() => {
+          this.referenceConfigured = info.configured
+          if (this.view.kind === 'logout' && this.clear !== undefined) {
+            this.clear = {
+              phase: 'ready',
+              configured: info.configured,
+              ...(info.source === undefined ? {} : { source: info.source }),
+            }
+          }
+        })
+      } catch (error) {
+        this.settle(() => {
+          if (this.view.kind === 'logout') {
+            this.clear = { phase: 'failed', configured: false, reason: errorText(error) }
+          } else {
+            this.notice = `the credential store could not be read: ${errorText(error)}`
+          }
+        })
+      }
+    })
+  }
+
+  /** Apply one async settlement only while this page instance is alive. */
+  private settle(apply: () => void): void {
+    if (this.disposed) return
+    apply()
+    this.revision += 1
+    this.requestRender()
+  }
+
+  invalidate(): void {
+    this.question?.flow.invalidate()
+  }
+
+  // ── navigation ──────────────────────────────────────────────────────────
+
+  private enter(view: ModelsView): void {
+    this.view = view
+    this.cursor = 0
+    this.scroll = 0
+    this.notice = undefined
+    this.revision += 1
+    if (view.kind === 'records' || view.kind === 'logout-list') this.refreshRecords()
+    if (view.kind === 'reference') {
+      this.referencePhase = 'idle'
+      this.referenceStatus = undefined
+      this.readReferenceState()
+    }
+    this.requestRender()
+  }
+
+  private selectProvider(route: string): void {
+    this.auth = undefined
+    this.authNotice = undefined
+    this.enter({ kind: 'provider', route })
+  }
+
+  // ── API key reference ────────────────────────────────────────────────────
+
+  private beginReferenceEditor(): void {
+    if (this.view.kind !== 'reference' || this.referencePhase === 'pending') return
+    this.referencePhase = 'editing'
+    const ref = this.view.ref
+    const label = this.view.label
+    this.question = this.createQuestion({
+      header: `API key · ${label}`,
+      question: `Enter the API key for ${label} (${ref}):`,
+      masked: true,
+      onAnswer: value => {
+        this.question = undefined
+        const secret = value?.trim() ?? ''
+        if (secret === '') {
+          this.referencePhase = 'idle'
+          this.referenceStatus = 'empty key; nothing set'
+          this.requestRender()
+          return
+        }
+        this.referencePhase = 'pending'
+        this.referenceStatus = 'saving — the Host has not confirmed yet'
+        this.requestRender()
+        this.source.run('models API key write', async () => {
+          try {
+            await this.source.setReference(ref, secret)
+          } catch (error) {
+            this.settle(() => {
+              this.referencePhase = 'not-saved'
+              this.referenceStatus = error instanceof Error && error.name === 'SupersededReadError'
+                ? 'Not sent — the key never left the client'
+                : errorText(error)
+            })
+            return
+          }
+          try {
+            const info = await this.source.describeReference(ref)
+            this.settle(() => {
+              this.referencePhase = info.configured ? 'verified' : 'unknown'
+              this.referenceStatus = info.configured
+                ? info.source === undefined ? 'Verified' : `Verified · source: ${info.source}`
+                : 'the write returned, but the credential store still reports it unset'
+              this.referenceConfigured = info.configured
+            })
+          } catch (error) {
+            this.settle(() => {
+              this.referencePhase = 'unknown'
+              this.referenceStatus = `the write returned; the store could not be re-read: ${errorText(error)}`
+            })
+          }
+        })
+      },
+    })
+    this.requestRender()
+  }
+
+  // ── clear confirmation (logout) ──────────────────────────────────────────
+
+  private openClear(target: CredentialClearTarget): void {
+    this.view = { kind: 'logout', target }
+    this.cursor = 0
+    this.scroll = 0
+    if (target.kind === 'record') {
+      this.clear = { phase: 'ready', configured: true }
+      this.readClearRecord()
+    } else {
+      this.clear = { phase: 'reading', configured: false }
+      this.readReferenceState()
+    }
+    this.revision += 1
+    this.requestRender()
+  }
+
+  private readClearRecord(): void {
+    if (this.view.kind !== 'logout' || this.view.target.kind !== 'record') return
+    const key = this.view.target.key
+    this.clear = { phase: 'reading', configured: false }
+    this.source.run('models clear target read', async () => {
+      try {
+        const records = await this.source.storedCredentials()
+        const present = records.rows.some(row => row.kind === 'record' && row.key === key)
+        this.settle(() => {
+          this.clear = { phase: 'ready', configured: present }
+        })
+      } catch (error) {
+        this.settle(() => {
+          this.clear = { phase: 'failed', configured: false, reason: errorText(error) }
+        })
+      }
+    })
+  }
+
+  private confirmClear(): void {
+    const view = this.view
+    const clear = this.clear
+    if (view.kind !== 'logout' || clear === undefined || clear.phase !== 'ready' || !clear.configured) return
+    const target = view.target
+    this.clear = { ...clear, phase: 'pending' }
+    this.requestRender()
+    this.source.run('models credential clear', async () => {
+      try {
+        if (target.kind === 'reference') await this.source.clearReference(target.ref)
+        else await this.source.deleteRecord(target.key)
+      } catch (error) {
+        this.settle(() => {
+          this.clear = { phase: 'failed', configured: true, reason: errorText(error) }
+        })
+        return
+      }
+      if (target.kind === 'reference') {
+        try {
+          const info = await this.source.describeReference(target.ref)
+          this.settle(() => {
+            this.clear = info.configured
+              ? { phase: 'failed', configured: true, reason: 'the credential store still reports this reference as configured' }
+              : { phase: 'done', configured: false, result: `API key ${target.ref} cleared` }
+            this.readReferenceState()
+          })
+        } catch (error) {
+          this.settle(() => {
+            this.clear = { phase: 'failed', configured: true, reason: `the clear returned; the store could not be re-read: ${errorText(error)}` }
+          })
+        }
+        return
+      }
+      try {
+        const records = await this.source.storedCredentials()
+        const present = records.rows.some(row => row.kind === 'record' && row.key === target.key)
+        this.settle(() => {
+          this.clear = present
+            ? { phase: 'failed', configured: true, reason: 'the stored record is still present after the clear' }
+            : { phase: 'done', configured: false, result: `${target.label} signed out locally — stored credential cleared` }
+        })
+      } catch (error) {
+        this.settle(() => {
+          this.clear = { phase: 'failed', configured: true, reason: `the clear returned; the record list could not be re-read: ${errorText(error)}` }
+        })
+      }
+    })
+  }
+
+  // ── add provider ────────────────────────────────────────────────────────
+
+  private startAddProvider(route?: string): void {
+    this.add = {
+      step: 'form',
+      draft: { route: route ?? '', api: PROTOCOL_CHOICES[0], baseURL: '', displayName: '', key: '', models: [] },
+      discovering: false,
+    }
+    this.view = { kind: 'add-provider' }
+    this.cursor = 0
+    this.scroll = 0
+    this.requestRender()
+  }
+
+  private updateAddDraft(patch: Partial<AddProviderState['draft']>): void {
+    const add = this.add
+    if (add === undefined) return
+    this.add = { ...add, draft: { ...add.draft, ...patch }, error: undefined }
+    this.requestRender()
+  }
+
+  private editAddField(index: number): void {
+    const add = this.add
+    if (add === undefined) return
+    const field = ADD_FIELDS[index]
+    if (field === undefined) return
+    if (field.id === 'api') {
+      this.picker = {
+        header: 'Wire protocol',
+        items: PROTOCOL_CHOICES.map(choice => ({ value: choice, label: choice })),
+        index: Math.max(0, PROTOCOL_CHOICES.indexOf(add.draft.api as typeof PROTOCOL_CHOICES[number])),
+        onSelect: value => {
+          this.picker = undefined
+          this.updateAddDraft({ api: value })
+        },
+        onCancel: () => { this.picker = undefined; this.requestRender() },
+      }
+      this.requestRender()
+      return
+    }
+    if (field.id === 'models') {
+      this.beginModelDiscovery()
+      return
+    }
+    const current = add.draft[field.id]
+    this.question = this.createQuestion({
+      header: `Add provider · ${field.label}`,
+      question: field.question,
+      masked: field.id === 'key',
+      ...(field.id === 'key' ? { allowEmpty: true } : {}),
+      initial: current,
+      onAnswer: value => {
+        this.question = undefined
+        if (value === undefined) return
+        this.updateAddDraft({ [field.id]: value.trim() })
+      },
+    })
+    this.requestRender()
+  }
+
+  private beginModelDiscovery(): void {
+    const add = this.add
+    if (add === undefined || add.discovering) return
+    if (add.draft.baseURL.trim() === '') {
+      this.add = { ...add, error: 'enter the base URL first' }
+      this.requestRender()
+      return
+    }
+    this.add = { ...add, discovering: true, error: undefined }
+    this.requestRender()
+    this.source.run('models model discovery', async () => {
+      let discovery: readonly { id: string }[] = []
+      let note: string
+      try {
+        discovery = await this.source.discoverModels({
+          baseURL: add.draft.baseURL.trim(),
+          api: add.draft.api,
+          ...(add.draft.key.trim() === '' ? {} : { apiKey: add.draft.key.trim() }),
+        })
+        note = discovery.length > 0
+          ? `probed ${discovery.length} model${discovery.length > 1 ? 's' : ''}`
+          : 'the probe advertised no models — enter ids by hand'
+      } catch {
+        note = 'model probe failed — enter model ids by hand'
+      }
+      this.settle(() => {
+        const current = this.add
+        if (current === undefined) return
+        this.add = { ...current, discovering: false, discoveryNote: note }
+        if (discovery.length === 0) {
+          this.beginManualModels()
+          return
+        }
+        this.modelPicker = {
+          items: discovery,
+          selected: new Set(current.draft.models.filter(id => discovery.some(model => model.id === id))),
+          index: 0,
+        }
+      })
+    })
+  }
+
+  private beginManualModels(): void {
+    const add = this.add
+    if (add === undefined) return
+    this.question = this.createQuestion({
+      header: 'Add provider · model ids',
+      question: 'Model ids this route serves (comma or space separated):',
+      masked: false,
+      initial: add.draft.models.join(', '),
+      onAnswer: value => {
+        this.question = undefined
+        if (value !== undefined) this.updateAddModels(parseModelIds(value))
+      },
+    })
+    this.requestRender()
+  }
+
+  private updateAddModels(models: readonly string[]): void {
+    const add = this.add
+    if (add === undefined) return
+    this.add = { ...add, draft: { ...add.draft, models }, error: undefined }
+    this.requestRender()
+  }
+
+  private reviewAdd(): void {
+    const add = this.add
+    if (add === undefined) return
+    const route = add.draft.route.trim().toLowerCase()
+    if (!ROUTE_PATTERN.test(route)) {
+      this.add = { ...add, error: 'invalid route — lowercase letters, digits and dashes only, no leading digit' }
+      this.requestRender()
+      return
+    }
+    if (add.draft.baseURL.trim() === '') {
+      this.add = { ...add, error: 'base URL is required for a hand-declared provider route' }
+      this.requestRender()
+      return
+    }
+    if (add.draft.models.length === 0) {
+      this.add = { ...add, error: 'at least one model id is required' }
+      this.requestRender()
+      return
+    }
+    this.add = { ...add, step: 'review', error: undefined }
+    this.requestRender()
+  }
+
+  private createProvider(): void {
+    const add = this.add
+    if (add === undefined || add.step !== 'review' || add.result !== undefined) return
+    this.source.run('models add provider', async () => {
+      const outcome = await this.source.createProvider({
+        route: add.draft.route,
+        api: add.draft.api,
+        baseURL: add.draft.baseURL,
+        displayName: add.draft.displayName,
+        models: add.draft.models,
+        apiKey: add.draft.key,
+      })
+      this.settle(() => {
+        const current = this.add
+        if (current === undefined) return
+        this.add = { ...current, result: outcome }
+        if (outcome.kind === 'created') this.providerRows = this.source.rows()
+      })
+    })
+  }
+
+  // ── provider authorization ──────────────────────────────────────────────
+
+  private startAuthorization(row: ModelsProviderRow): void {
+    if (row.kind !== 'authorization' || row.key === undefined || row.inFlight) return
+    if (row.methods.length > 1) {
+      this.picker = {
+        header: `Sign in method · ${row.label}`,
+        items: row.methods.map(method => ({ value: method.id, label: method.label })),
+        index: 0,
+        onSelect: method => {
+          this.picker = undefined
+          this.beginAuthorization(row, method)
+        },
+        onCancel: () => { this.picker = undefined; this.requestRender() },
+      }
+      this.requestRender()
+      return
+    }
+    this.beginAuthorization(row, row.methods[0]?.id)
+  }
+
+  private beginAuthorization(row: ModelsProviderRow, method: string | undefined): void {
+    if (row.key === undefined) return
+    this.auth = { targetRoute: row.route, phase: 'starting' }
+    this.authNotice = undefined
+    this.authUnsubscribe?.()
+    const flow = createAuthorizationFlow(this.authorizationSurface(), {
+      respond: (attemptId, promptId, answer) => this.source.respondAuthorization(attemptId, promptId, answer),
+      cancel: attemptId => this.source.cancelAuthorization(attemptId),
+    })
+    this.authUnsubscribe = this.source.authorizationEvents(flow.onEvent)
+    this.source.run('models provider sign-in', async () => {
+      let started: Awaited<ReturnType<ModelsWorkspaceSource['beginAuthorization']>>
+      try {
+        started = await this.source.beginAuthorization(row.key!, method, this.pageController.signal)
+      } catch (error) {
+        this.settle(() => {
+          this.auth = { targetRoute: row.route, phase: 'failed', status: errorText(error) }
+          this.finishAuthorization()
+        })
+        return
+      }
+      if (started.kind !== 'started') {
+        this.settle(() => {
+          this.auth = { targetRoute: row.route, phase: 'failed', status: 'authorization service unavailable' }
+          this.finishAuthorization()
+        })
+        return
+      }
+      flow.bind(started.attemptId)
+      this.settle(() => {
+        if (this.auth !== undefined) this.auth = { ...this.auth, phase: 'running', attemptId: started.attemptId }
+      })
+      const outcome = await flow.outcome
+      if (outcome.status === 'authorized') {
+        const note = await this.source.provisionKeylessProfile(row.route)
+        this.settle(() => {
+          this.auth = { targetRoute: row.route, phase: 'authorized', attemptId: started.attemptId, status: `signed in to ${row.label}${note}` }
+          this.finishAuthorization()
+          this.refresh()
+        })
+      } else if (outcome.status === 'cancelled') {
+        this.settle(() => {
+          this.auth = { targetRoute: row.route, phase: 'cancelled', attemptId: started.attemptId, status: 'sign-in cancelled' }
+          this.finishAuthorization()
+        })
+      } else {
+        this.settle(() => {
+          this.auth = {
+            targetRoute: row.route,
+            phase: 'failed',
+            attemptId: started.attemptId,
+            status: `sign-in failed${outcome.code === undefined ? '' : ` (${outcome.code})`}${outcome.message === undefined ? '' : `: ${outcome.message}`}`,
+          }
+          this.finishAuthorization()
+        })
+      }
+    })
+  }
+
+  private finishAuthorization(): void {
+    this.authUnsubscribe?.()
+    this.authUnsubscribe = undefined
+  }
+
+  private cancelAuthorization(): void {
+    const auth = this.auth
+    if (auth?.attemptId === undefined) return
+    const attemptId = auth.attemptId
+    this.source.run('models cancel sign-in', async () => {
+      try {
+        await this.source.cancelAuthorization(attemptId)
+      } catch (error) {
+        this.settle(() => { this.notice = `cancel failed: ${errorText(error)}` })
+      }
+    })
+  }
+
+  /** The page-local authorization surface. `createAuthorizationFlow` owns the
+   * attempt state machine; this adapter only presents its notice and prompts. */
+  private authorizationSurface(): Parameters<typeof createAuthorizationFlow>[0] {
+    return {
+      openOutputViewer: options => this.showNotice({ message: options.refresh() }),
+      showNotice: notice => this.showNotice(notice),
+      askQuestions: (questions, signal) => this.askPageQuestion(questions[0], signal),
+      openPicker: (items, onSelect, onCancel, options) => this.openPagePicker(
+        options?.header ?? 'Sign in',
+        items,
+        onSelect,
+        onCancel,
+      ),
+    }
+  }
+
+  private showNotice(notice: NoticeState): () => void {
+    if (this.disposed) return () => {}
+    const token = {}
+    this.noticeToken = token
+    this.settle(() => { this.authNotice = notice })
+    return () => {
+      if (this.noticeToken !== token) return
+      this.noticeToken = undefined
+      this.settle(() => { this.authNotice = undefined })
+    }
+  }
+
+  private noticeToken: object | undefined
+
+  private askPageQuestion(
+    question: { readonly id: string; readonly question: string; readonly placeholder?: string; readonly masked?: boolean } | undefined,
+    signal: AbortSignal | undefined,
+  ): Promise<readonly { readonly id: string; readonly selected: string[]; readonly custom?: string }[]> {
+    if (question === undefined) return Promise.resolve([])
+    return new Promise((resolve, reject) => {
+      let settled = false
+      const answer = (custom: string | undefined): void => {
+        if (settled) return
+        settled = true
+        signal?.removeEventListener('abort', onAbort)
+        this.question = undefined
+        resolve([{ id: question.id, selected: [], ...(custom === undefined ? {} : { custom }) }])
+        this.requestRender()
+      }
+      const onAbort = (): void => {
+        if (settled) return
+        settled = true
+        this.question = undefined
+        reject(new Error('authorization prompt withdrawn'))
+        this.requestRender()
+      }
+      if (signal?.aborted === true) {
+        onAbort()
+        return
+      }
+      signal?.addEventListener('abort', onAbort, { once: true })
+      this.question = this.createQuestion({
+        header: 'Sign in',
+        question: question.question,
+        masked: question.masked === true,
+        ...(question.placeholder === undefined ? {} : { placeholder: question.placeholder }),
+        onAnswer: answer,
+      })
+      this.requestRender()
+    })
+  }
+
+  private openPagePicker(
+    header: string,
+    items: readonly { readonly value: string; readonly label?: string; readonly description?: string }[],
+    onSelect: (value: string) => void,
+    onCancel: () => void,
+  ): { close?: () => void } {
+    const picker: PickerState = {
+      header,
+      items: items.map(item => ({
+        value: item.value,
+        label: item.label ?? item.value,
+        ...(item.description === undefined ? {} : { description: item.description }),
+      })),
+      index: 0,
+      onSelect,
+      onCancel,
+    }
+    this.picker = picker
+    this.requestRender()
+    return { close: () => {
+      if (this.picker !== picker) return
+      this.picker = undefined
+      this.requestRender()
+    } }
+  }
+
+  // ── embedded question ───────────────────────────────────────────────────
+
+  private createQuestion(options: {
+    readonly header: string
+    readonly question: string
+    readonly masked: boolean
+    readonly initial?: string
+    readonly placeholder?: string
+    readonly allowEmpty?: boolean
+    readonly onAnswer: (value: string | undefined) => void
+  }): EmbeddedQuestion {
+    let settled = false
+    const flow = new QuestionFlow(
+      [{ id: 'answer', question: options.question, masked: options.masked }],
+      answers => {
+        if (settled) return
+        settled = true
+        const value = answers[0]?.custom ?? ''
+        if (value.trim() === '' && options.allowEmpty !== true) {
+          options.onAnswer(undefined)
+          return
+        }
+        options.onAnswer(value)
+      },
+      () => {
+        if (settled) return
+        settled = true
+        options.onAnswer(undefined)
+      },
+    )
+    flow.focused = true
+    if (options.initial !== undefined && options.initial !== '' && options.masked !== true) {
+      for (const character of options.initial) flow.handleInput(character)
+    }
+    return { flow }
+  }
+
+  // ── rendering ────────────────────────────────────────────────────────────
+
+  /** The Settings root sets the live body height before each render. */
+  setBodyHeight(rows: number): void {
+    this.bodyHeight = Math.max(1, rows)
+  }
+
+  render(width: number): string[] {
+    if (this.disposed) return []
+    this.lastWidth = width
+    this.lastHeight = this.bodyHeight
+    const height = Math.max(1, this.bodyHeight)
+    const lines: string[] = []
+    const targets: HitTarget[] = []
+    if (this.question !== undefined) {
+      const notice = this.renderAuthNotice(width)
+      const questionRows = Math.max(1, height - 1 - notice.length)
+      this.question.flow.setMaxRows(Math.max(8, questionRows))
+      lines.push(...notice.map(line => fit(line, width)))
+      lines.push(...this.question.flow.render(width).slice(0, questionRows).map(line => fit(line, width)))
+      lines.push(color.textMuted(renderActionBarRow([
+        { text: 'type to edit', priority: 5 },
+        { text: 'Enter continue', priority: 6 },
+        { text: 'Esc back', priority: 8 },
+      ], width)))
+      this.copyValue = undefined
+      this.paintedTargets = []
+      return this.pad(lines, height, width)
+    }
+    if (this.modelPicker !== undefined) {
+      const notice = this.renderAuthNotice(width)
+      lines.push(...notice.map(line => fit(line, width)))
+      const pickerRows = Math.max(1, height - 1 - notice.length)
+      lines.push(...this.renderModelPicker(width, pickerRows, targets))
+      lines.push(color.textMuted(renderActionBarRow([
+        { text: 'Space toggle', priority: 5 },
+        { text: 'Enter apply', priority: 6 },
+        { text: 'm manual', priority: 4 },
+        { text: 'Esc cancel', priority: 8 },
+      ], width)))
+      this.paintedTargets = targets
+      return this.pad(lines, height, width)
+    }
+    if (this.picker !== undefined) {
+      const notice = this.renderAuthNotice(width)
+      lines.push(...notice.map(line => fit(line, width)))
+      lines.push(...this.renderPicker(width, Math.max(1, height - 1 - notice.length), targets))
+      lines.push(color.textMuted(renderActionBarRow([
+        { text: 'Up/Down choose', priority: 5 },
+        { text: 'Enter select', priority: 6 },
+        { text: 'Esc cancel', priority: 8 },
+      ], width)))
+      this.paintedTargets = targets
+      return this.pad(lines, height, width)
+    }
+    const projection = this.project(width)
+    const rowCount = this.rowOrder.length
+    if (projection.actions.length >= height) {
+      this.paintedRowIds.clear()
+      this.paintedActionIds.clear()
+      this.paintedTargets = []
+      return this.pad([fit(color.warning('Resize the terminal to show the page actions.'), width)], height, width)
+    }
+    this.paintedRowIds.clear()
+    this.paintedActionIds.clear()
+    const actionLines = projection.actions.map((action, index) => this.paintAction(action, rowCount + index))
+    const contentRows = Math.max(0, height - 1 - actionLines.length)
+    this.scroll = Math.min(this.scroll, Math.max(0, projection.content.length - contentRows))
+    for (let index = 0; index < contentRows; index += 1) {
+      const lineIndex = this.scroll + index
+      const content = projection.content[lineIndex]
+      if (content === undefined) break
+      lines.push(fit(content, width))
+      const target = this.rowTargetOf(content, lineIndex)
+      if (target !== undefined) {
+        targets.push({ ...target, row: lines.length - 1 })
+        this.paintedRowIds.add(target.id)
+      }
+    }
+    while (lines.length < height - 1 - actionLines.length) lines.push(fit('', width))
+    lines.push(...actionLines.map(line => fit(line, width)))
+    for (const [index, action] of projection.actions.entries()) {
+      targets.push({
+        kind: 'action',
+        id: action.id,
+        row: height - 1 - actionLines.length + index,
+        startCol: 0,
+        endCol: width,
+      })
+      if (action.enabled) this.paintedActionIds.add(action.id)
+    }
+    lines.push(this.actionBar(width, projection.actions))
+    this.paintedTargets = targets
+    return this.pad(lines, height, width)
+  }
+
+  private pad(lines: string[], height: number, width: number): string[] {
+    const out = lines.slice(0, height)
+    while (out.length < height) out.push(fit('', width))
+    return out
+  }
+
+  /** The row projection of the active view. Content rows carry an optional
+   * target id in `rowTargets`; actions are always painted last. */
+  private rowIds = new Map<number, string>()
+  private rowTargets = new Map<number, HitTarget>()
+  private readonly rowOrder: string[] = []
+  private readonly paintedRowIds = new Set<string>()
+  private readonly paintedActionIds = new Set<string>()
+
+  private rowTargetOf(_content: string, index: number): HitTarget | undefined {
+    const id = this.rowIds.get(index)
+    const target = this.rowTargets.get(index)
+    return id === undefined || target === undefined ? undefined : target
+  }
+
+  private project(width: number): Projection {
+    this.rowIds.clear()
+    this.rowTargets.clear()
+    this.rowOrder.length = 0
+    this.copyValue = undefined
+    if (!this.source.available) {
+      return {
+        content: [
+          color.textStrong(TITLE),
+          '',
+          color.error('The Host settings/credential authority is unavailable on this backend.'),
+          '',
+          color.textDim('No provider or credential can be read or changed here.'),
+        ],
+        actions: [
+          { id: 'page:back', label: '← Back', enabled: true },
+        ],
+      }
+    }
+    switch (this.view.kind) {
+      case 'list': return this.projectList(width)
+      case 'provider': return this.projectProvider(width)
+      case 'reference': return this.projectReference(width)
+      case 'add-provider': return this.projectAddProvider(width)
+      case 'review': return this.projectReview(width)
+      case 'records': return this.projectRecords(width)
+      case 'logout-list': return this.projectRecords(width)
+      case 'logout': return this.projectClear(width)
+      case 'guide': return this.projectGuide(width)
+    }
+  }
+
+  private addRow(content: string[], text: string, id: string, width: number, kind: 'row' | 'action' = 'row'): void {
+    const row = content.length
+    content.push(text)
+    this.rowIds.set(row, id)
+    this.rowOrder.push(id)
+    this.rowTargets.set(row, { kind, id, row, startCol: 0, endCol: width })
+  }
+
+  private projectList(width: number): Projection {
+    const content: string[] = [color.textStrong(TITLE), '']
+    const accountState = !this.account.available
+      ? 'Unavailable'
+      : this.account.failure !== undefined
+        ? `Unavailable · ${this.account.failure}`
+        : this.account.status === 'credential-stored' ? 'Signed in' : this.account.status === 'signed-out' ? 'Signed out' : 'Loading…'
+    const accountTone = accountState === 'Signed in' ? 'success' : accountState === 'Signed out' ? 'muted' : 'warning'
+    this.addRow(content, this.selectionLine(0, 'DeepSeek Account', accountState, accountTone, width), 'account', width)
+    let interactive = 1
+    for (const row of this.providerRows) {
+      const state = this.credentialStateOf(row)
+      const painted = credentialWord(state)
+      const text = this.selectionLine(interactive, row.label, painted.word, painted.tone, width)
+      this.addRow(content, text, `provider:${row.route}`, width)
+      interactive += 1
+    }
+    const actions: ActionLine[] = [
+      { id: 'list:add', label: 'Add Provider…', enabled: true },
+      { id: 'list:records', label: 'Credential records', enabled: true },
+      { id: 'list:guide', label: 'Guide: edit complex model config manually', enabled: true },
+    ]
+    if (this.initializing) content.push(color.textMuted('Reading Host credentials…'))
+    if (this.notice !== undefined) content.push(color.warning(this.notice))
+    this.copyValue = undefined
+    return { content, actions }
+  }
+
+  private selectionLine(index: number, label: string, value: string, tone: 'success' | 'warning' | 'muted', width: number): string {
+    const selected = index === this.cursor
+    const cursor = selected ? color.primary('> ') : '  '
+    const painted = `${label}`
+    const valueText = paintState(value, tone)
+    const room = Math.max(1, width - 2 - visibleWidth(painted) - visibleWidth(value) - 1)
+    return `${cursor}${selected ? color.textStrong(painted) : color.text(painted)}${' '.repeat(room)}${valueText}`
+  }
+
+  private credentialStateOf(row: ModelsProviderRow): ModelsCredentialState {
+    if (row.kind === 'reference' && row.ref !== undefined) {
+      return this.credentialStates.get(row.ref) ?? { kind: 'pending' }
+    }
+    if (row.kind === 'authorization') {
+      const records = this.records
+      if (records === undefined) return { kind: 'pending' }
+      if (records.recordCleanupUnavailable) return { kind: 'unknown', reason: 'this backend cannot enumerate stored records' }
+      return { kind: 'known', configured: records.rows.some(entry => entry.kind === 'record' && entry.key === row.key) }
+    }
+    return { kind: 'known', configured: row.configured }
+  }
+
+  private projectProvider(width: number): Projection {
+    const view = this.view
+    if (view.kind !== 'provider') return { content: [], actions: [] }
+    const row = this.providerRows.find(candidate => candidate.route === view.route)
+    if (row === undefined) {
+      return { content: [color.error(`provider ${view.route} is no longer available`), '', color.textMuted('Esc goes back.')], actions: [] }
+    }
+    const content: string[] = [color.textStrong(`Provider · ${row.label}`), '']
+    content.push(...this.fact('Route', row.route, width))
+    content.push(...this.fact('Profile', row.profile.configured ? 'configured' : 'not configured', width))
+    content.push(...this.fact('API protocol', row.profile.api ?? 'unknown', width))
+    content.push(...this.fact('Endpoint', row.profile.baseURL ?? 'unknown', width))
+    content.push(...this.fact('Models', row.profile.models.length === 0 ? 'none listed' : row.profile.models.join(', '), width))
+    content.push(...this.fact('Auth kind', row.kind === 'authorization' ? 'provider-native authorization' : 'API key reference', width))
+    const state = this.credentialStateOf(row)
+    content.push(...this.fact('Credential', credentialWord(state).word, width))
+    content.push('', color.textDim('Credential presence only — not a connection test.'))
+    if (this.auth !== undefined && this.auth.targetRoute === row.route) {
+      content.push('', color.textStrong('Sign-in'))
+      content.push(color.text(this.auth.status ?? this.auth.phase))
+      if (this.authNotice !== undefined) {
+        content.push(color.text(this.authNotice.message))
+        if (this.authNotice.url !== undefined) {
+          content.push(color.text(this.authNotice.url))
+          this.copyValue = this.authNotice.url
+        } else this.copyValue = undefined
+        if (this.authNotice.code !== undefined) content.push(color.text(`Code: ${this.authNotice.code}`))
+      } else this.copyValue = undefined
+    } else this.copyValue = undefined
+    if (this.notice !== undefined) content.push('', color.warning(this.notice))
+    const actions: ActionLine[] = []
+    if (row.kind === 'authorization' && row.methods.length > 0) {
+      actions.push({
+        id: 'provider:auth',
+        label: row.inFlight ? 'Sign-in in progress' : this.auth?.targetRoute === row.route && this.auth.phase === 'authorized' ? 'Sign in again (provider)' : 'Sign in (provider)',
+        enabled: !row.inFlight && (this.auth === undefined || this.auth.phase === 'authorized' || this.auth.phase === 'cancelled' || this.auth.phase === 'failed'),
+      })
+    }
+    if (row.kind === 'reference' || (row.ref !== undefined && row.namesCredential)) {
+      actions.push({ id: 'provider:reference', label: 'Configure API Key…', enabled: true })
+    }
+    const clearTarget = this.clearTargetOf(row)
+    const hasStored = state.kind === 'known' ? state.configured : true
+    actions.push({ id: 'provider:clear', label: hasStored ? 'Clear stored credential…' : 'Nothing stored to clear', enabled: clearTarget !== undefined && hasStored })
+    actions.push({ id: 'provider:guide', label: 'View model config guide', enabled: true })
+    if (this.auth?.targetRoute === row.route && (this.auth.phase === 'running' || this.auth.phase === 'starting')) {
+      actions.push({ id: 'provider:cancel', label: 'Cancel current attempt', enabled: this.auth.attemptId !== undefined })
+    }
+    actions.push({ id: 'provider:back', label: '← Providers', enabled: true })
+    return { content, actions }
+  }
+
+  private clearTargetOf(row: ModelsProviderRow): CredentialClearTarget | undefined {
+    if (row.kind === 'authorization') {
+      return row.key === undefined ? undefined : { kind: 'record', key: row.key, label: row.label, ...(row.route === '' ? {} : { route: row.route }) }
+    }
+    if (row.ref === undefined) return undefined
+    if (row.namesCredential === false && row.configured) {
+      const flowKey = row.key ?? this.records?.rows.find(entry => entry.kind === 'record' && entry.route === row.route)?.key
+      if (flowKey !== undefined) return { kind: 'record', key: flowKey, label: row.label, ...(row.route === '' ? {} : { route: row.route }) }
+    }
+    return { kind: 'reference', ref: row.ref, label: row.label, ...(row.route === '' ? {} : { route: row.route }) }
+  }
+
+  private fact(label: string, value: string, width: number): string[] {
+    const bodyWidth = Math.max(1, width - LABEL_WIDTH)
+    const wrapped = wrapTextWithAnsi(value, bodyWidth)
+    const parts = wrapped.length === 0 ? [''] : wrapped
+    return [
+      `${fit(color.textDim(label), LABEL_WIDTH)}${color.text(parts[0]!)}`,
+      ...parts.slice(1).map(extra => `${' '.repeat(LABEL_WIDTH)}${color.text(extra)}`),
+    ]
+  }
+
+  private projectReference(width: number): Projection {
+    const view = this.view
+    if (view.kind !== 'reference') return { content: [], actions: [] }
+    const content: string[] = [color.textStrong(`API Key Reference · ${view.label}`), '']
+    content.push(...this.fact('Reference', view.ref, width))
+    content.push(...this.fact('Stored', this.referenceConfigured === undefined ? 'reading…' : this.referenceConfigured ? 'Configured' : 'Not set', width))
+    if (this.referenceStatus !== undefined) content.push(...this.fact('Status', this.referenceStatus, width))
+    content.push('', color.textDim('The value is written directly to the Host credential store; it is never shown, logged or written to the transcript. Verified requires the store to report the reference configured after the write.'))
+    if (this.notice !== undefined) content.push('', color.warning(this.notice))
+    this.copyValue = view.ref
+    const actions: ActionLine[] = []
+    if (this.referencePhase !== 'pending' && this.referencePhase !== 'editing') {
+      actions.push({ id: 'reference:edit', label: 'Configure API Key…', enabled: true })
+    }
+    actions.push({ id: 'reference:back', label: '← Back', enabled: true })
+    return { content, actions }
+  }
+
+  private projectAddProvider(width: number): Projection {
+    const add = this.add
+    if (add === undefined) return { content: [], actions: [] }
+    const content: string[] = [color.textStrong('Add Provider'), '', color.textDim('Draft only — nothing is persisted until Review → Create.')]
+    for (const [index, field] of ADD_FIELDS.entries()) {
+      const selected = index === this.cursor
+      const raw = field.id === 'models'
+        ? add.draft.models.length === 0 ? '—' : add.draft.models.join(', ')
+        : field.id === 'key'
+          ? add.draft.key === '' ? '— (provider-native auth)' : '••••••'
+          : add.draft[field.id]
+      this.addRow(
+        content,
+        `${selected ? color.primary('> ') : '  '}${selected ? color.textStrong(field.label) : color.text(field.label)}: ${color.textDim(raw === '' ? '—' : raw)}`,
+        `add-field:${field.id}`,
+        width,
+      )
+    }
+    if (add.discovering) content.push('', color.textMuted('Probing the endpoint for models…'))
+    if (add.discoveryNote !== undefined) content.push(color.textDim(add.discoveryNote))
+    if (add.error !== undefined) content.push('', color.error(add.error))
+    if (add.result !== undefined) {
+      content.push('', add.result.kind === 'created' ? color.success(add.result.text) : color.error(add.result.text))
+    }
+    this.copyValue = undefined
+    const actions: ActionLine[] = add.result !== undefined
+      ? [{ id: 'add:done', label: '← Back to providers', enabled: true }]
+      : [
+          { id: 'add:review', label: 'Review & create', enabled: !add.discovering },
+          { id: 'add:cancel', label: 'Cancel', enabled: true },
+        ]
+    return { content, actions }
+  }
+
+  private projectReview(width: number): Projection {
+    const add = this.add
+    if (add === undefined) return { content: [], actions: [] }
+    const content: string[] = [color.textStrong('Review provider'), '']
+    content.push(...this.fact('Route', add.draft.route, width))
+    content.push(...this.fact('Protocol', add.draft.api, width))
+    content.push(...this.fact('Base URL', add.draft.baseURL, width))
+    content.push(...this.fact('Display name', add.draft.displayName === '' ? add.draft.route : add.draft.displayName, width))
+    content.push(...this.fact('Models', add.draft.models.join(', '), width))
+    content.push(...this.fact('API key', add.draft.key === '' ? 'not stored (provider-native authentication)' : 'will be stored in the credential store', width))
+    content.push('', color.textDim('Create persists the provider profile; a stored key is a separate Host write whose failure is reported separately.'))
+    if (add.result !== undefined) content.push('', add.result.kind === 'created' ? color.success(add.result.text) : color.error(add.result.text))
+    this.copyValue = undefined
+    if (add.result !== undefined) {
+      return { content, actions: [{ id: 'review:done', label: '← Back to providers', enabled: true }] }
+    }
+    return {
+      content,
+      actions: [
+        { id: 'review:create', label: 'Create', enabled: true },
+        { id: 'review:back', label: 'Back to edit', enabled: true },
+      ],
+    }
+  }
+
+  private projectRecords(width: number): Projection {
+    const content: string[] = [color.textStrong('Stored credentials'), '']
+    const records = this.records
+    if (records === undefined) {
+      content.push(color.textMuted('Reading the credential store…'))
+      return { content, actions: [{ id: 'records:back', label: '← Back', enabled: true }] }
+    }
+    if (records.recordCleanupUnavailable) content.push(color.warning('Stored credential records cannot be enumerated or removed on this backend.'))
+    for (const failure of records.referenceReadFailures) content.push(color.warning(`Reference read failed: ${failure}`))
+    if (records.rows.length === 0) {
+      content.push(color.textMuted('Nothing to sign out.'))
+      return { content, actions: [{ id: 'records:back', label: '← Back', enabled: true }] }
+    }
+    for (const [index, row] of records.rows.entries()) {
+      const kind = row.kind === 'reference' ? 'API key' : 'stored record'
+      const suffix = row.source === undefined ? '' : ` · source: ${row.source}`
+      const hint = row.kindHint === undefined ? '' : ` (${row.kindHint})`
+      this.addRow(
+        content,
+        `${index === this.cursor ? color.primary('> ') : '  '}${color.text(row.label)}${color.textMuted(` — ${kind}${hint} · ${row.key}${suffix}`)}`,
+        `stored:${row.kind}:${row.key}`,
+        width,
+      )
+    }
+    this.copyValue = undefined
+    return { content, actions: [{ id: 'records:back', label: '← Back', enabled: true }] }
+  }
+
+  private projectClear(width: number): Projection {
+    const view = this.view
+    const clear = this.clear
+    if (view.kind !== 'logout' || clear === undefined) return { content: [], actions: [] }
+    const content: string[] = [color.textStrong('Clear stored credential'), '']
+    if (view.target.kind === 'reference') {
+      content.push(...this.fact('API key reference', view.target.ref, width))
+      content.push(...this.fact('Provider', view.target.route ?? view.target.label, width))
+    } else {
+      content.push(...this.fact('Stored record', view.target.key, width))
+      content.push(...this.fact('Provider', view.target.route ?? view.target.label, width))
+    }
+    content.push('')
+    if (clear.phase === 'reading') content.push(color.textMuted('Reading the credential store…'))
+    else if (clear.phase === 'failed') content.push(color.error(`Not cleared: ${clear.reason ?? 'the clear could not be verified'}`))
+    else if (clear.phase === 'pending') content.push(color.textMuted('Clearing — the Host has not confirmed yet.'))
+    else if (clear.phase === 'done') content.push(color.success(clear.result ?? 'cleared'))
+    else if (!clear.configured) content.push(color.textMuted('Nothing stored for this target — nothing will be cleared.'))
+    else content.push(color.warning('This removes the locally stored credential. The current model is not switched.'))
+    this.copyValue = undefined
+    const actions: ActionLine[] = []
+    if (clear.phase === 'ready' && clear.configured) actions.push({ id: 'clear:confirm', label: 'Clear credential', enabled: true })
+    actions.push({ id: 'clear:back', label: '← Back', enabled: true })
+    return { content, actions }
+  }
+
+  private projectGuide(width: number): Projection {
+    const guide = this.source.configGuide()
+    const content: string[] = [color.textStrong('Model configuration guide'), '']
+    content.push(color.text('Complex model options are edited manually in the profile patch file; this UI does not rewrite them.'))
+    content.push('')
+    content.push(...this.fact('Profile patch', guide.profilePatchPath ?? 'unavailable — this composition has no profile patch file', width))
+    content.push('')
+    content.push(color.textDim('Fields inside llm-pi-ai.providers.<route>: api, baseURL, displayName, models, apiKeyEnv. Keep the YAML valid; changes apply on the next launch. The credential store remains the only owner of key values.'))
+    this.copyValue = guide.profilePatchPath
+    return { content, actions: [{ id: 'guide:back', label: '← Back', enabled: true }] }
+  }
+
+  /** The persistent authorization notice above an in-page prompt/picker: the
+   * message and the browser URL/code must stay visible while the human acts. */
+  private renderAuthNotice(width: number): string[] {
+    const notice = this.authNotice
+    if (notice === undefined) return []
+    const lines = [color.text(notice.message)]
+    if (notice.url !== undefined) lines.push(color.text(notice.url))
+    if (notice.code !== undefined) lines.push(color.text(`Code: ${notice.code}`))
+    return lines.slice(0, 4).map(line => fit(line, width))
+  }
+
+  /** The endpoint-discovered model list: a true multi-select page-local list.
+   * Manual ids remain one keystroke away. */
+  private renderModelPicker(width: number, rows: number, targets: HitTarget[]): string[] {
+    const picker = this.modelPicker
+    if (picker === undefined) return []
+    const content: string[] = [color.textStrong('Models advertised by the endpoint'), '']
+    const viewport = Math.max(1, rows - content.length - 1)
+    const offset = Math.min(Math.max(0, picker.index - viewport + 1), Math.max(0, picker.items.length + 1 - viewport))
+    const lines: { text: string; id: string }[] = picker.items.map((model, index) => ({
+      id: `model-picker:${index}`,
+      text: `${index === picker.index ? color.primary('> ') : '  '}${picker.selected.has(model.id) ? '[x]' : '[ ]'} ${index === picker.index ? color.textStrong(model.id) : color.text(model.id)}`,
+    }))
+    lines.push({
+      id: 'model-picker:manual',
+      text: `${picker.index === picker.items.length ? color.primary('> ') : '  '}${color.text('Enter ids by hand…')}`,
+    })
+    for (const [index, line] of lines.entries()) {
+      if (index < offset || index >= offset + viewport) continue
+      content.push(line.text)
+      targets.push({ kind: 'model-picker', id: line.id, row: content.length - 1, startCol: 0, endCol: width })
+    }
+    return content
+  }
+
+  private renderPicker(width: number, rows: number, targets: HitTarget[]): string[] {
+    const picker = this.picker
+    if (picker === undefined) return []
+    const content: string[] = [color.textStrong(picker.header), '']
+    const offset = Math.min(Math.max(0, picker.index - rows + 1), Math.max(0, picker.items.length - rows))
+    for (const [index, item] of picker.items.entries()) {
+      if (index < offset || index >= offset + rows) continue
+      const selected = index === picker.index
+      content.push(`${selected ? color.primary('> ') : '  '}${selected ? color.textStrong(item.label) : color.text(item.label)}${item.description === undefined ? '' : color.textDim(` — ${item.description}`)}`)
+      targets.push({ kind: 'picker', id: String(index), row: content.length - 1, startCol: 0, endCol: width })
+    }
+    return content
+  }
+
+  private paintAction(action: ActionLine, index: number): string {
+    const selected = index === this.cursor
+    if (!action.enabled) return `  ${color.textMuted(action.label)}`
+    return `${selected ? color.primary('> ') : '  '}${selected ? color.textStrong(action.label) : color.text(action.label)}`
+  }
+
+  private actionBar(width: number, actions: readonly ActionLine[]): string {
+    const segments: ActionBarSegment[] = []
+    if (this.copyValue !== undefined) segments.push({ text: 'c copy', priority: 3 })
+    if (actions.length > 0) segments.push({ text: 'Up/Down select', priority: 5 }, { text: 'Enter select', priority: 6 })
+    if (this.view.kind === 'list' || this.view.kind === 'records' || this.view.kind === 'logout-list') {
+      segments.unshift({ text: 'r refresh', priority: 2 })
+    }
+    segments.push({ text: 'Esc back', priority: 8 })
+    return color.textMuted(renderActionBarRow(segments, width))
+  }
+
+  // ── input ────────────────────────────────────────────────────────────────
+
+  handleInput(data: string): ModelsPageExit {
+    if (this.disposed) return 'handled'
+    if (this.question !== undefined) {
+      this.question.flow.handleInput(data)
+      return 'handled'
+    }
+    if (this.modelPicker !== undefined) {
+      this.handleModelPickerInput(data)
+      return 'handled'
+    }
+    if (this.picker !== undefined) {
+      this.handlePickerInput(data)
+      return 'handled'
+    }
+    if (matchesKey(data, 'escape') || matchesKey(data, 'backspace')) return this.back()
+    if (matchesKey(data, 'up')) return this.move(-1)
+    if (matchesKey(data, 'down')) return this.move(1)
+    if (matchesKey(data, 'pageUp')) return this.page(-1)
+    if (matchesKey(data, 'pageDown')) return this.page(1)
+    if (matchesKey(data, 'home')) return this.jump(-1)
+    if (matchesKey(data, 'end')) return this.jump(1)
+    if (matchesKey(data, 'enter')) return this.confirm()
+    if (data === 'r' || data === 'R') {
+      this.refresh()
+      return 'handled'
+    }
+    if (matchesKey(data, 'c') || matchesKey(data, Key.shift('c'))) {
+      if (this.copyValue !== undefined) this.source.copy(this.copyValue)
+      return 'handled'
+    }
+    if (data === 'o' || data === 'O') {
+      const url = this.authNotice?.url
+      if (url !== undefined) this.source.openUrl(url)
+      return 'handled'
+    }
+    return 'handled'
+  }
+
+  private handleModelPickerInput(data: string): void {
+    const picker = this.modelPicker
+    if (picker === undefined) return
+    if (matchesKey(data, 'escape') || matchesKey(data, 'backspace') || data === 'm' || data === 'M') {
+      this.modelPicker = undefined
+      if (data === 'm' || data === 'M') this.beginManualModels()
+      else this.requestRender()
+      return
+    }
+    if (matchesKey(data, 'up')) {
+      this.modelPicker = { ...picker, index: Math.max(0, picker.index - 1) }
+      this.requestRender()
+      return
+    }
+    if (matchesKey(data, 'down')) {
+      this.modelPicker = { ...picker, index: Math.min(picker.items.length, picker.index + 1) }
+      this.requestRender()
+      return
+    }
+    if (matchesKey(data, 'home') || matchesKey(data, 'end')) {
+      this.modelPicker = { ...picker, index: matchesKey(data, 'home') ? 0 : picker.items.length }
+      this.requestRender()
+      return
+    }
+    if (data === ' ') {
+      const model = picker.items[picker.index]
+      if (model === undefined) return
+      const selected = new Set(picker.selected)
+      if (selected.has(model.id)) selected.delete(model.id)
+      else selected.add(model.id)
+      this.modelPicker = { ...picker, selected }
+      this.requestRender()
+      return
+    }
+    if (matchesKey(data, 'enter')) {
+      if (picker.index >= picker.items.length) {
+        this.modelPicker = undefined
+        this.beginManualModels()
+        return
+      }
+      if (picker.selected.size === 0) {
+        this.notice = 'select at least one model, or press m to enter ids by hand'
+        this.requestRender()
+        return
+      }
+      this.modelPicker = undefined
+      this.updateAddModels([...picker.selected])
+      return
+    }
+  }
+
+  private handlePickerInput(data: string): void {
+    const picker = this.picker
+    if (picker === undefined) return
+    if (matchesKey(data, 'escape') || matchesKey(data, 'backspace')) {
+      this.picker = undefined
+      picker.onCancel()
+      this.requestRender()
+      return
+    }
+    if (matchesKey(data, 'up')) {
+      this.picker = { ...picker, index: Math.max(0, picker.index - 1) }
+      this.requestRender()
+      return
+    }
+    if (matchesKey(data, 'down')) {
+      this.picker = { ...picker, index: Math.min(picker.items.length - 1, picker.index + 1) }
+      this.requestRender()
+      return
+    }
+    if (matchesKey(data, 'home')) {
+      this.picker = { ...picker, index: 0 }
+      this.requestRender()
+      return
+    }
+    if (matchesKey(data, 'end')) {
+      this.picker = { ...picker, index: picker.items.length - 1 }
+      this.requestRender()
+      return
+    }
+    if (matchesKey(data, 'enter')) {
+      const item = picker.items[picker.index]
+      if (item === undefined) return
+      this.picker = undefined
+      picker.onSelect(item.value)
+      this.requestRender()
+    }
+  }
+
+  private interactiveCount(): number {
+    const projection = this.project(this.lastWidth)
+    return this.rowOrder.length + projection.actions.length
+  }
+
+  private move(delta: number): ModelsPageExit {
+    const count = this.interactiveCount()
+    this.cursor = Math.min(Math.max(0, this.cursor + delta), Math.max(0, count - 1))
+    this.revision += 1
+    this.requestRender()
+    return 'handled'
+  }
+
+  private page(direction: -1 | 1): ModelsPageExit {
+    const step = Math.max(1, this.lastHeight - 3)
+    this.scroll = Math.max(0, this.scroll + direction * step)
+    this.revision += 1
+    this.requestRender()
+    return 'handled'
+  }
+
+  private jump(direction: 1 | -1): ModelsPageExit {
+    this.cursor = direction < 0 ? 0 : Math.max(0, this.interactiveCount() - 1)
+    this.revision += 1
+    this.requestRender()
+    return 'handled'
+  }
+
+  private confirm(): ModelsPageExit {
+    const projection = this.project(this.lastWidth)
+    const rowCount = this.rowOrder.length
+    if (this.cursor < rowCount) {
+      const id = this.rowOrder[this.cursor]
+      if (id === undefined || !this.paintedRowIds.has(id)) return 'handled'
+      return this.activateRow(id)
+    }
+    const action = projection.actions[this.cursor - rowCount]
+    if (action === undefined || !action.enabled || !this.paintedActionIds.has(action.id)) return 'handled'
+    return this.activateAction(action.id)
+  }
+
+  private activateRow(id: string): ModelsPageExit {
+    if (id === 'account') {
+      this.onOpenAccount()
+      return 'open-account'
+    }
+    if (id.startsWith('provider:')) {
+      this.selectProvider(id.slice('provider:'.length))
+      return 'handled'
+    }
+    if (id.startsWith('stored:')) {
+      const [, kind, ...rest] = id.split(':')
+      const key = rest.join(':')
+      const row = this.records?.rows.find(candidate => candidate.key === key && candidate.kind === kind)
+      if (row !== undefined) {
+        this.openClear(row.kind === 'reference'
+          ? { kind: 'reference', ref: row.key, label: row.label, ...(row.route === undefined ? {} : { route: row.route }) }
+          : { kind: 'record', key: row.key, label: row.label, ...(row.route === undefined ? {} : { route: row.route }) })
+      }
+      return 'handled'
+    }
+    if (id.startsWith('add-field:')) {
+      const index = ADD_FIELDS.findIndex(field => field.id === id.slice('add-field:'.length))
+      if (index >= 0) this.editAddField(index)
+      return 'handled'
+    }
+    if (id === 'list:add') {
+      this.startAddProvider()
+      return 'handled'
+    }
+    if (id === 'list:records') {
+      this.enter({ kind: 'records' })
+      return 'handled'
+    }
+    if (id === 'list:guide') {
+      this.enter({ kind: 'guide' })
+      return 'handled'
+    }
+    return 'handled'
+  }
+
+  private activateAction(id: string): ModelsPageExit {
+    switch (id) {
+      case 'list:add': this.startAddProvider(); return 'handled'
+      case 'list:records': this.enter({ kind: 'records' }); return 'handled'
+      case 'list:guide': this.enter({ kind: 'guide' }); return 'handled'
+      case 'provider:auth': {
+        const view = this.view
+        if (view.kind === 'provider') {
+          const row = this.providerRows.find(candidate => candidate.route === view.route)
+          if (row !== undefined) this.startAuthorization(row)
+        }
+        return 'handled'
+      }
+      case 'provider:reference': {
+        const view = this.view
+        if (view.kind === 'provider') {
+          const row = this.providerRows.find(candidate => candidate.route === view.route)
+          if (row?.ref !== undefined) {
+            this.referenceEditor.ref = row.ref
+            this.referenceEditor.label = row.label
+            this.enter({ kind: 'reference', ref: row.ref, label: row.label })
+          }
+        }
+        return 'handled'
+      }
+      case 'provider:clear': {
+        const view = this.view
+        if (view.kind === 'provider') {
+          const row = this.providerRows.find(candidate => candidate.route === view.route)
+          const target = row === undefined ? undefined : this.clearTargetOf(row)
+          if (target !== undefined) this.openClear(target)
+        }
+        return 'handled'
+      }
+      case 'provider:guide': this.enter({ kind: 'guide' }); return 'handled'
+      case 'provider:cancel': this.cancelAuthorization(); return 'handled'
+      case 'provider:back': this.enter({ kind: 'list' }); return 'handled'
+      case 'reference:edit': this.beginReferenceEditor(); return 'handled'
+      case 'reference:back': this.enter({ kind: 'list' }); return 'handled'
+      case 'add:review': this.reviewAdd(); return 'handled'
+      case 'add:cancel': this.add = undefined; this.enter({ kind: 'list' }); return 'handled'
+      case 'add:done': this.add = undefined; this.enter({ kind: 'list' }); return 'handled'
+      case 'review:create': this.createProvider(); return 'handled'
+      case 'review:back': {
+        const add = this.add
+        if (add !== undefined) { this.add = { ...add, step: 'form', result: undefined }; this.enter({ kind: 'add-provider' }) }
+        return 'handled'
+      }
+      case 'review:done': this.add = undefined; this.enter({ kind: 'list' }); return 'handled'
+      case 'records:back': this.enter({ kind: 'list' }); return 'handled'
+      case 'clear:confirm': this.confirmClear(); return 'handled'
+      case 'clear:back': this.clear = undefined; this.enter({ kind: 'list' }); return 'handled'
+      case 'guide:back': this.enter({ kind: 'list' }); return 'handled'
+      case 'page:back': return 'exit'
+      default: return 'handled'
+    }
+  }
+
+  private back(): ModelsPageExit {
+    switch (this.view.kind) {
+      case 'list':
+        return 'exit'
+      case 'provider':
+        this.auth = undefined
+        this.authNotice = undefined
+        this.finishAuthorization()
+        this.enter({ kind: 'list' })
+        return 'handled'
+      case 'reference':
+        this.referencePhase = 'idle'
+        this.referenceStatus = undefined
+        this.enter({ kind: 'list' })
+        return 'handled'
+      case 'add-provider':
+      case 'review':
+        this.add = undefined
+        this.enter({ kind: 'list' })
+        return 'handled'
+      case 'records':
+      case 'logout-list':
+      case 'logout':
+      case 'guide':
+        this.clear = undefined
+        this.enter({ kind: 'list' })
+        return 'handled'
+    }
+  }
+
+  // ── mouse ────────────────────────────────────────────────────────────────
+
+  handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
+    if (this.disposed || event.type !== 'wheel') return undefined
+    const delta = event.wheelDelta ?? 0
+    if (delta === 0) return undefined
+    this.scroll = Math.max(0, this.scroll + delta)
+    this.revision += 1
+    this.requestRender()
+    return { handled: true }
+  }
+
+  onCellPress(x: number, y: number): void {
+    if (this.disposed) return
+    const target = this.paintedTargets.find(candidate => candidate.row === y && x >= candidate.startCol && x < candidate.endCol)
+    this.pressed = target === undefined ? undefined : { target, revision: this.revision, width: this.lastWidth, height: this.lastHeight }
+  }
+
+  onCellClick(x: number, y: number): void {
+    if (this.disposed) return
+    const pressed = this.pressed
+    this.pressed = undefined
+    const target = this.paintedTargets.find(candidate => candidate.row === y && x >= candidate.startCol && x < candidate.endCol)
+    if (pressed === undefined || target === undefined) return
+    if (pressed.revision !== this.revision
+      || pressed.width !== this.lastWidth
+      || pressed.height !== this.lastHeight
+      || target.kind !== pressed.target.kind
+      || target.id !== pressed.target.id
+      || target.row !== pressed.target.row) return
+    if (target.kind === 'row') {
+      // The painted row IS the action, independent of the keyboard cursor.
+      this.cursor = this.rowIndexInProjection(target.id)
+      this.activateRow(target.id)
+    } else if (target.kind === 'action') {
+      const rowCount = this.rowOrder.length
+      this.cursor = rowCount + this.actionIndexOf(target.id)
+      this.activateAction(target.id)
+    } else if (target.kind === 'picker') {
+      const index = Number(target.id)
+      const picker = this.picker
+      if (picker !== undefined && Number.isInteger(index)) {
+        this.picker = { ...picker, index }
+        this.requestRender()
+      }
+    } else if (target.kind === 'model-picker') {
+      const picker = this.modelPicker
+      if (picker === undefined) return
+      if (target.id === 'model-picker:manual') {
+        this.modelPicker = undefined
+        this.beginManualModels()
+        return
+      }
+      const index = Number(target.id.slice('model-picker:'.length))
+      if (!Number.isInteger(index)) return
+      this.modelPicker = { ...picker, index }
+      this.requestRender()
+    }
+  }
+
+  private rowIndexInProjection(id: string): number {
+    const index = this.rowOrder.indexOf(id)
+    return index < 0 ? 0 : index
+  }
+
+  private actionIndexOf(id: string): number {
+    const projection = this.project(this.lastWidth)
+    const index = projection.actions.findIndex(action => action.id === id)
+    return index < 0 ? 0 : index
+  }
+
+  dispose(): void {
+    if (this.disposed) return
+    this.disposed = true
+    this.authUnsubscribe?.()
+    this.authUnsubscribe = undefined
+    const attemptId = this.auth?.attemptId
+    if (attemptId !== undefined) {
+      // A native attempt must not outlive the page with an open prompt. The
+      // account browser attempt is deliberately NOT cancelled here (it is the
+      // Host's, not this page's).
+      void Promise.resolve(this.source.cancelAuthorization(attemptId)).catch(() => {})
+    }
+    this.pageController.abort()
+    this.question = undefined
+    this.picker = undefined
+    this.modelPicker = undefined
+    this.referencePhase = 'idle'
+    this.referenceStatus = undefined
+    this.add = undefined
+    this.clear = undefined
+    this.paintedTargets = []
+    this.pressed = undefined
+    this.requestRender = () => {}
+  }
+}
+
+const ADD_FIELDS = [
+  { id: 'route', label: 'Route', question: 'Provider route (lowercase letters, digits and dashes)', masked: false },
+  { id: 'api', label: 'Wire protocol', question: 'Wire protocol', masked: false },
+  { id: 'baseURL', label: 'Base URL', question: 'Base URL (absolute http(s) URL)', masked: false },
+  { id: 'displayName', label: 'Display name', question: 'Display name (optional; defaults to the route)', masked: false },
+  { id: 'key', label: 'API key', question: 'API key (leave empty for provider-native authentication)', masked: true },
+  { id: 'models', label: 'Models', question: 'Model ids', masked: false },
+] as const

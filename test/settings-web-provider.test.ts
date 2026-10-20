@@ -332,7 +332,7 @@ test('the workspace row reports the configured providers and opens the Web secti
   const compactRow = (): string => rowView.replace(/[\u2500-\u257f│]/gu, ' ').replace(/\s+/gu, ' ')
   assert.match(rowView, /Search: Messages · Fetch: HTTP/u, 'the launcher shows the authoritative provider summary')
   assert.match(compactRow(), /billed separately/u)
-  assert.match(compactRow(), /not an Optional Bundle/u)
+  assert.match(compactRow(), /not an Optional.*?Bundle/u)
   assert.match(compactRow(), /Share Original Question is on by default/u)
   assert.match(compactRow(), /up to 128 characters/u)
   assert.match(compactRow(), /authoritative read-back agree/u)

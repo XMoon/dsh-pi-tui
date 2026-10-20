@@ -148,6 +148,62 @@ stopped-surface behavior are owned by
 this section keeps only the transport-neutral ownership taxonomy and the
 pre-dispatch generation rule.
 
+## Provider credentials and DeepSeek Account
+
+The `ConfigPort` keeps the three credential planes distinct:
+
+- `providers` — detached provider-profile facts and the keyless-profile write;
+- `credentials` — API-key references (`setReference`/`unsetReference`) and
+  stored credential RECORDS (`listRecords`/`deleteRecord`), presence only;
+- `authorization` — provider-native attempts as detached
+  notice/prompt/settled events answered through `respond`/`cancel`;
+- `account` — the DeepSeek Account state/attempt, profile, wallet balances,
+  watch, start/cancel sign-in, sign-out and the running-account-task risk read.
+
+The account DTOs are detached (`AccountView`, `AccountProfile`, wallet decimal
+strings, safe attempt ids/phases/error codes). A token, grant payload, PKCE
+value, `PlatformSession` or generic Host service object never crosses the port.
+`AccountClientMetadata` (`version`, `locale`, `timezoneOffsetSeconds`) is
+sampled per Platform request; the offset is never cached across a DST change.
+
+The bundle patch mounts the official `@deepseek-ai/dsh-host-webserver` row with
+the stable id `webserver`, `host: 127.0.0.1`, `port: 0` and the `tuiStartup`
+gate, and the TUI runner injects both `deepseekAccount` and `webServer`. The
+official PlatformAccount registers `/oauth/callback` on that Host listener
+while an attempt waits for the browser; the Direct adapter obtains the callback
+origin from `webServer.getOrigin()` (loopback HTTP only) and calls
+`startSignIn(client, origin, 'web')`. The Client never supplies a callback URL,
+opens a second HTTP server, or parses the browser callback. `--help` mounts no
+listener. A bind failure fails the Host row instead of falling back to a public
+interface.
+
+`watch(signal)` yields the complete initial state and later snapshots; ending
+the signal only stops observation and never cancels the attempt. Cancellation
+addresses the exact `SignInAttemptId`. `signOut` removes the local grant and
+leaves remote revocation in the background; a remote failure never restores the
+local grant, and independent API keys stay stored. The running-account-task read
+is a risk hint only: the Direct adapter reads `ctx.agents` (the declared
+`runtime/direct/config-direct.ts` baseline entry) to project that hint, while
+the official `deepseek-account/signed-out` listener owns the actual cancellation
+of matching account tasks.
+
+Remote has no qualified account wire for this stage: its `account` sub-domain is
+an explicit `available: false` that rejects operations and yields no state. The
+local grant is never read from the credential document by the TUI.
+
+Authority: `src/runtime/config-port.ts` (`ProviderProfileConfig`,
+`CredentialConfig`, `AuthorizationConfig`, `AccountConfig`),
+`src/runtime/direct/config-direct.ts` (`DirectAccountConfig` and the provider/
+credential/authorization adapters), `src/app/command/credential-workflow.ts`,
+`src/app/command/account-workflow.ts`, root `cordis.patch.yml`. Surface behavior
+is owned by [surface-behavior.md](./surface-behavior.md#models-page) and the
+command destinations by [surface-catalog.md](./surface-catalog.md).
+
+Must-not: expose a token/grant/PKCE value, start Account sign-in outside
+`deepseekAccount`, clear the Account grant through `deleteRecord`, infer a
+credential from a route/profile, mount a second webserver identity, or widen the
+callback listener beyond loopback in the shipped profile.
+
 ## Plugin Manager
 
 `@deepseek-ai/dsh-plugin-manager` is the sole authority for package/profile

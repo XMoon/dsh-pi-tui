@@ -1,0 +1,473 @@
+/**
+ * Phase 3C / C2-MA — the Models page and the shared credential workflow.
+ *
+ * The page is driven directly (its public `render`/`handleInput` seam) with a
+ * detached fake source; the workflow is driven over fake ConfigPort seams. The
+ * real Host path is covered by the Direct integration suite.
+ *
+ * @module @xmoon76/dsh-pi-tui/models-workspace.test
+ */
+
+import assert from 'node:assert/strict'
+import { test } from 'node:test'
+import { stripTerminalSequences, visibleWidth } from '@xmoon76/pi-tui'
+import { ModelsWorkspacePage, type ModelsInitialView, type ModelsProviderRow, type ModelsWorkspaceSource } from '../src/tui/panels/models-workspace-page.ts'
+import { CredentialWorkflow } from '../src/app/command/credential-workflow.ts'
+import {
+  resolveLoginDestination,
+  resolveLogoutDestination,
+  genericAuthorizationTargets,
+  ACCOUNT_AUTHORIZATION_KEY,
+} from '../src/app/command/credential-workflow.ts'
+import type { CredentialProviderOption, AuthorizationFlowTarget } from '../src/runtime/config-port.ts'
+
+const PROVIDERS: readonly CredentialProviderOption[] = [
+  { route: 'deepseek-official', label: 'deepseek official', ref: 'DEEPSEEK_API_KEY', configured: true, declared: false, namesCredential: true, group: 'configured', canProvisionProfile: false },
+  { route: 'acme', label: 'Acme Gateway', ref: 'ACME_API_KEY', configured: true, declared: false, namesCredential: true, group: 'configured', canProvisionProfile: true },
+  { route: 'anthropic', label: 'Anthropic', ref: 'ANTHROPIC_API_KEY', configured: true, declared: false, namesCredential: false, group: 'configured', canProvisionProfile: true },
+]
+
+const FLOWS: readonly AuthorizationFlowTarget[] = [
+  { kind: 'authorization', key: ACCOUNT_AUTHORIZATION_KEY, label: 'DeepSeek', methods: [{ id: 'browser', label: 'DeepSeek' }], inFlight: false },
+  { kind: 'authorization', route: 'anthropic', key: 'llm-pi-ai/anthropic', label: 'Anthropic', methods: [{ id: 'oauth', label: 'OAuth' }], inFlight: false },
+]
+
+function flush(times = 8): Promise<void> {
+  return (async () => {
+    for (let index = 0; index < times; index += 1) await new Promise<void>(resolve => setTimeout(resolve, 0))
+  })()
+}
+
+function viewText(page: ModelsWorkspacePage, width = 100): string {
+  return page.render(width).map(stripTerminalSequences).join('\n')
+}
+
+function makeRows(): readonly ModelsProviderRow[] {
+  return [
+    {
+      kind: 'reference',
+      route: 'deepseek-official',
+      label: 'deepseek official',
+      ref: 'DEEPSEEK_API_KEY',
+      configured: true,
+      declared: false,
+      namesCredential: true,
+      methods: [],
+      inFlight: false,
+      profile: { route: 'deepseek-official', configured: true, displayName: 'deepseek official', models: [] },
+    },
+    {
+      kind: 'reference',
+      route: 'acme',
+      label: 'Acme Gateway',
+      ref: 'ACME_API_KEY',
+      configured: true,
+      declared: false,
+      namesCredential: true,
+      methods: [],
+      inFlight: false,
+      profile: { route: 'acme', configured: true, displayName: 'Acme Gateway', api: 'openai-completions', baseURL: 'https://acme.example/v1', models: ['acme-1'] },
+    },
+    {
+      kind: 'authorization',
+      route: 'anthropic',
+      label: 'Anthropic',
+      key: 'llm-pi-ai/anthropic',
+      configured: true,
+      declared: false,
+      namesCredential: false,
+      methods: [{ id: 'oauth', label: 'OAuth' }],
+      inFlight: false,
+      profile: { route: 'anthropic', configured: true, displayName: 'Anthropic', models: [] },
+    },
+  ]
+}
+
+interface FakeSourceOptions {
+  readonly configured?: (ref: string) => boolean
+  readonly records?: readonly { key: string; kind?: string }[]
+  readonly accountStatus?: 'signed-out' | 'credential-stored'
+}
+
+function fakeSource(options: FakeSourceOptions = {}) {
+  const calls: string[] = []
+  const configured = options.configured ?? (() => true)
+  const source: ModelsWorkspaceSource = {
+    available: true,
+    rows: () => makeRows(),
+    accountSummary: async () => ({ available: true, status: options.accountStatus ?? 'signed-out' }),
+    credentialState: async ref => ({ kind: 'known', configured: configured(ref) }),
+    storedCredentials: async () => ({
+      rows: (options.records ?? []).map(record => ({ kind: 'record' as const, key: record.key, label: record.key, ...(record.kind === undefined ? {} : { kindHint: record.kind }) })),
+      recordCleanupUnavailable: false,
+      referenceReadFailures: [],
+    }),
+    describeReference: async ref => ({ configured: configured(ref) }),
+    setReference: async (ref, secret) => { calls.push(`set:${ref}:${secret}`) },
+    clearReference: async ref => { calls.push(`unset:${ref}`) },
+    deleteRecord: async key => { calls.push(`delete:${key}`) },
+    beginAuthorization: async () => ({ kind: 'started', attemptId: 'attempt-1' }),
+    authorizationEvents: () => () => {},
+    respondAuthorization: async () => {},
+    cancelAuthorization: async attemptId => { calls.push(`cancel:${attemptId}`) },
+    provisionKeylessProfile: async () => '',
+    discoverModels: async () => [{ id: 'm1' }],
+    createProvider: async draft => ({ kind: 'created', text: `created ${draft.route}` }),
+    configGuide: () => ({ profilePatchPath: '/home/u/.dsh/profiles/pi-tui/cordis.patch.yml' }),
+    openUrl: url => { calls.push(`open:${url}`) },
+    copy: text => { calls.push(`copy:${text}`) },
+    run: (_label, task) => { void task() },
+  }
+  return { source, calls }
+}
+
+function open(initial: ModelsInitialView = { view: 'list' }): { page: ModelsWorkspacePage; calls: string[]; accountOpened: () => boolean } {
+  const { source, calls } = fakeSource()
+  const page = new ModelsWorkspacePage(source, () => {}, initial, () => { calls.push('open-account') })
+  page.setBodyHeight(24)
+  return { page, calls, accountOpened: () => calls.includes('open-account') }
+}
+
+function send(page: ModelsWorkspacePage, ...keys: string[]): void {
+  for (const key of keys) page.handleInput(key)
+}
+
+test('login destination: bare, route, ref, novel ref, new route, account and invalid', () => {
+  assert.deepEqual(resolveLoginDestination('', PROVIDERS, FLOWS), { kind: 'models', view: 'list' })
+  assert.deepEqual(resolveLoginDestination('acme', PROVIDERS, FLOWS), { kind: 'models', view: 'provider', route: 'acme' })
+  assert.deepEqual(resolveLoginDestination('ACME_API_KEY', PROVIDERS, FLOWS), { kind: 'models', view: 'reference', ref: 'ACME_API_KEY' })
+  assert.deepEqual(resolveLoginDestination('novel_key', PROVIDERS, FLOWS), { kind: 'models', view: 'reference', ref: 'NOVEL_KEY' })
+  assert.deepEqual(resolveLoginDestination('new-route', PROVIDERS, FLOWS), { kind: 'models', view: 'add-provider', route: 'new-route' })
+  assert.deepEqual(resolveLoginDestination('deepseek-account', PROVIDERS, FLOWS), { kind: 'account', view: 'page' })
+  const invalid = resolveLoginDestination('not valid!', PROVIDERS, FLOWS)
+  assert.equal(invalid.kind, 'error')
+})
+
+test('logout destination: known ref, keyless flow record and account', () => {
+  assert.deepEqual(resolveLogoutDestination('ACME_API_KEY', PROVIDERS, FLOWS), {
+    kind: 'models',
+    view: 'logout',
+    target: { kind: 'reference', ref: 'ACME_API_KEY', label: 'Acme Gateway', route: 'acme' },
+  })
+  assert.deepEqual(resolveLogoutDestination('anthropic', PROVIDERS, FLOWS), {
+    kind: 'models',
+    view: 'logout',
+    target: { kind: 'record', key: 'llm-pi-ai/anthropic', label: 'Anthropic', route: 'anthropic' },
+  })
+  assert.deepEqual(resolveLogoutDestination('deepseek-account', PROVIDERS, FLOWS), { kind: 'account', view: 'signout' })
+  assert.deepEqual(resolveLogoutDestination('', PROVIDERS, FLOWS), { kind: 'models', view: 'logout-list' })
+})
+
+test('the DeepSeek Account authorization flow is excluded from generic targets (MA14)', () => {
+  assert.equal(genericAuthorizationTargets(FLOWS).some(target => target.key === ACCOUNT_AUTHORIZATION_KEY), false)
+  assert.equal(genericAuthorizationTargets(FLOWS).length, 1)
+})
+
+test('Models list paints the account, provider states and actions', async () => {
+  const { page } = open()
+  await flush()
+  const text = viewText(page)
+  assert.match(text, /Models & Credentials/u)
+  assert.match(text, /DeepSeek Account/u)
+  assert.match(text, /Acme Gateway/u)
+  assert.match(text, /Add Provider/u)
+  assert.match(text, /Credential records/u)
+})
+
+test('provider detail shows Host facts and opens the masked key editor; a write is Verified only after re-read', async () => {
+  const { page, calls } = open()
+  await flush()
+  viewText(page)
+  send(page, '\u001b[B') // account -> deepseek official
+  send(page, '\u001b[B') // -> acme
+  send(page, '\r')
+  const detail = viewText(page)
+  assert.match(detail, /Provider · Acme Gateway/u)
+  assert.match(detail, /openai-completions/u)
+  assert.match(detail, /https:\/\/acme\.example\/v1/u)
+  // Configure API Key is the first action for a reference row.
+  send(page, '\r')
+  assert.match(viewText(page), /API Key Reference · Acme Gateway/u)
+  send(page, '\r')
+  assert.match(viewText(page), /Enter the API key/u)
+  // Type the secret; Enter commits to the review page, Enter submits.
+  for (const character of 'sk-test') send(page, character)
+  send(page, '\r', '\r')
+  await flush()
+  assert.ok(calls.includes('set:ACME_API_KEY:sk-test'), calls.join(','))
+  assert.match(viewText(page), /Verified/u)
+})
+
+test('clear requires the painted confirmation action and re-reads the store', async () => {
+  const configured = new Set(['ACME_API_KEY'])
+  const { source, calls } = fakeSource({ configured: ref => configured.has(ref) })
+  const page = new ModelsWorkspacePage(source, () => {}, { view: 'provider', route: 'acme' }, () => {})
+  page.setBodyHeight(24)
+  await flush()
+  viewText(page)
+  // Provider actions: Configure API Key, Clear stored credential, Guide, Back.
+  send(page, '\u001b[B')
+  send(page, '\r')
+  await flush()
+  assert.match(viewText(page), /Clear stored credential/u)
+  assert.match(viewText(page), /This removes the locally stored credential/u)
+  send(page, '\r')
+  configured.delete('ACME_API_KEY')
+  await flush()
+  assert.ok(calls.includes('unset:ACME_API_KEY'), calls.join(','))
+  assert.match(viewText(page), /cleared/u)
+})
+
+test('the Models account row opens the Account page instead of a provider flow', async () => {
+  const { page, accountOpened } = open()
+  await flush()
+  viewText(page)
+  send(page, '\r')
+  assert.equal(accountOpened(), true)
+})
+
+test('the config guide shows the confirmed profile patch path and never guesses one', async () => {
+  const { page } = open({ view: 'guide' })
+  assert.match(viewText(page), /\/home\/u\/\.dsh\/profiles\/pi-tui\/cordis\.patch\.yml/u)
+  const { source } = fakeSource()
+  const noPath: ModelsWorkspaceSource = { ...source, configGuide: () => ({}) }
+  const other = new ModelsWorkspacePage(noPath, () => {}, { view: 'guide' }, () => {})
+  other.setBodyHeight(20)
+  assert.match(viewText(other), /unavailable/u)
+})
+
+test('CredentialWorkflow.createProvider reports a profile write and a separate key failure', async () => {
+  const mutations: { ns: string; ops: unknown[] }[] = []
+  let settings: Record<string, unknown> | undefined = {}
+  const workflow = new CredentialWorkflow({
+    providers: {
+      available: () => true,
+      listCredentialOptions: () => [],
+      readProfile: route => ({ route, configured: false, models: [] }),
+      configGuide: () => ({}),
+      writeProfile: async (route, profile) => {
+        mutations.push({ ns: route, ops: [profile] })
+        settings = { providers: { [route]: profile } }
+      },
+      writeKeylessProfile: async () => ({ kind: 'written' }),
+    },
+    credentials: {
+      available: () => true,
+      setReference: async () => { throw new Error('shadowed read-only') },
+      unsetReference: async () => {},
+      recordsSupported: () => true,
+      deleteRecord: async () => {},
+      describeReference: async () => ({ configured: false }),
+      listRecords: async () => [],
+      onChanged: () => () => {},
+    },
+    authorization: { available: () => false, listTargets: () => [], begin: async () => ({ kind: 'unavailable' }), onEvent: () => () => {}, respond: async () => {}, cancel: async () => {} },
+    account: { available: () => false, getState: async () => { throw new Error('x') }, getProfile: async () => null, getBalance: async () => null, watch: async function* () {}, getCallbackOrigin: () => undefined, startSignIn: async () => { throw new Error('x') }, cancelSignIn: async () => { throw new Error('x') }, signOut: async () => { throw new Error('x') }, hasRunningAccountTasks: () => false },
+    catalog: { models: { available: () => true, discoverModels: async () => [] } },
+    signal: new AbortController().signal,
+    diag: { error: () => {}, warn: () => {} },
+  })
+  const outcome = await workflow.createProvider({
+    route: 'acme',
+    api: 'openai-completions',
+    baseURL: 'https://acme.example/v1',
+    displayName: '',
+    models: ['m1'],
+    apiKey: 'sk',
+  })
+  assert.equal(outcome.kind, 'profile-written-key-failed')
+  assert.equal(mutations.length, 1)
+  assert.equal(settings === undefined, false)
+})
+
+test('provider-native sign-in presents the Host notice and a masked prompt, then settles authorized', async () => {
+  const { source, calls } = fakeSource()
+  const listeners = new Set<(event: import('../src/runtime/config-port.ts').AuthorizationFlowEvent) => void>()
+  const emit = (event: import('../src/runtime/config-port.ts').AuthorizationFlowEvent): void => {
+    for (const listener of listeners) listener(event)
+  }
+  source.authorizationEvents = listener => {
+    listeners.add(listener)
+    return () => { listeners.delete(listener) }
+  }
+  source.beginAuthorization = async key => {
+    calls.push(`begin:${key}`)
+    emit({ kind: 'notice', attemptId: 'auth-1', notice: { message: 'Authorize in the browser', url: 'https://provider.example/authorize' } })
+    emit({
+      kind: 'prompt',
+      attemptId: 'auth-1',
+      promptId: 'prompt-1',
+      prompt: { kind: 'secret', message: 'One-time code' },
+    })
+    return { kind: 'started', attemptId: 'auth-1' }
+  }
+  source.respondAuthorization = async (attemptId, promptId, answer) => {
+    calls.push(`respond:${attemptId}:${promptId}:${answer}`)
+    emit({ kind: 'settled', attemptId, status: 'authorized' })
+  }
+  source.provisionKeylessProfile = async route => route === 'anthropic' ? ' — provider profile recorded' : ''
+  const page = new ModelsWorkspacePage(source, () => {}, { view: 'provider', route: 'anthropic' }, () => {})
+  page.setBodyHeight(26)
+  await flush()
+  viewText(page)
+  page.handleInput('\r') // Sign in (provider)
+  await flush()
+  const auth = viewText(page)
+  assert.match(auth, /Authorize in the browser/u)
+  assert.match(auth, /https:\/\/provider\.example\/authorize/u)
+  assert.match(auth, /One-time code/u)
+  for (const character of 'otp-123') page.handleInput(character)
+  page.handleInput('\r')
+  page.handleInput('\r')
+  await flush()
+  assert.ok(calls.includes('begin:llm-pi-ai/anthropic'), calls.join(','))
+  assert.ok(calls.includes('respond:auth-1:prompt-1:otp-123'), calls.join(','))
+  assert.match(viewText(page), /signed in to Anthropic — provider profile recorded/u)
+})
+
+test('cancelling the Models page during a native attempt calls the Host cancel for that attempt', async () => {
+  const { source, calls } = fakeSource()
+  source.beginAuthorization = async () => ({ kind: 'started', attemptId: 'auth-9' })
+  const page = new ModelsWorkspacePage(source, () => {}, { view: 'provider', route: 'anthropic' }, () => {})
+  page.setBodyHeight(24)
+  await flush()
+  viewText(page)
+  page.handleInput('\r')
+  await flush()
+  page.dispose()
+  await flush()
+  assert.ok(calls.includes('cancel:auth-9'), calls.join(','))
+})
+
+test('the stored-credential list excludes the DeepSeek Account grant (MA14)', async () => {
+  const workflow = new CredentialWorkflow({
+    providers: {
+      available: () => true,
+      listCredentialOptions: () => [],
+      readProfile: (route: string) => ({ route, configured: false, models: [] }),
+      configGuide: () => ({}),
+      writeProfile: async () => {},
+      writeKeylessProfile: async () => ({ kind: 'written' }),
+    },
+    credentials: {
+      available: () => true,
+      setReference: async () => {},
+      unsetReference: async () => {},
+      recordsSupported: () => true,
+      deleteRecord: async () => {},
+      describeReference: async () => ({ configured: false }),
+      listRecords: async () => [
+        { key: 'deepseek-account-platform/default', kind: 'grant' },
+        { key: 'llm-pi-ai/anthropic', kind: 'oauth' },
+      ],
+      onChanged: () => () => {},
+    },
+    authorization: { available: () => true, listTargets: () => FLOWS, begin: async () => ({ kind: 'unavailable' }), onEvent: () => () => {}, respond: async () => {}, cancel: async () => {} },
+    account: { available: () => true, getState: async () => ({ status: 'credential-stored', links: { usageUrl: '', topUpUrl: '' }, attempt: null }), getProfile: async () => null, getBalance: async () => null, watch: async function* () {}, getCallbackOrigin: () => undefined, startSignIn: async () => { throw new Error('x') }, cancelSignIn: async () => { throw new Error('x') }, signOut: async () => { throw new Error('x') }, hasRunningAccountTasks: () => false },
+    catalog: { models: { available: () => false, discoverModels: async () => [] } },
+    signal: new AbortController().signal,
+    diag: { error: () => {}, warn: () => {} },
+  })
+  const stored = await workflow.storedCredentials()
+  assert.equal(stored.rows.some(row => row.key === 'deepseek-account-platform/default'), false)
+  assert.equal(stored.rows.some(row => row.key === 'llm-pi-ai/anthropic'), true)
+})
+
+test('Models page fits 105/80/60/40/30 columns without painting past the edge', async () => {
+  const { source } = fakeSource()
+
+  for (const [width, height] of [[105, 40], [80, 24], [60, 22], [40, 16], [30, 8]] as const) {
+    for (const initial of [
+      { view: 'list' },
+      { view: 'provider', route: 'acme' },
+      { view: 'add-provider' },
+    ] as const) {
+      const page = new ModelsWorkspacePage(source, () => {}, initial, () => {})
+      page.setBodyHeight(height)
+      const lines = page.render(width)
+      assert.equal(lines.length, height)
+      for (const line of lines) {
+        assert.ok(visibleWidth(line) <= width, `${width}x${height} ${initial.view} paints ${visibleWidth(line)} cells: ${JSON.stringify(stripTerminalSequences(line))}`)
+      }
+    }
+  }
+
+  // Below the action budget the page refuses every invisible submit and asks
+  // for a resize instead of leaving a hidden confirm target.
+  const tiny = new ModelsWorkspacePage(source, () => {}, { view: 'provider', route: 'acme' }, () => {})
+  tiny.setBodyHeight(3)
+  const tinyFrame = tiny.render(30).map(stripTerminalSequences).join('\n')
+  assert.match(tinyFrame, /Resize the terminal/u)
+})
+
+test('Models mouse press/release follows the painted hit map and a resize revokes it', async () => {
+  const { source, calls } = fakeSource()
+  const page = new ModelsWorkspacePage(source, () => {}, { view: 'provider', route: 'acme' }, () => {})
+  page.setBodyHeight(24)
+  await flush()
+  const line = (needle: string): { row: number; col: number } => {
+    const lines = page.render(100).map(stripTerminalSequences)
+    const row = lines.findIndex(candidate => candidate.includes(needle))
+    assert.ok(row >= 0, `missing ${needle}:\n${lines.join('\n')}`)
+    return { row, col: lines[row]!.indexOf(needle) }
+  }
+  const configure = line('Configure API Key')
+  page.onCellPress(configure.col, configure.row)
+  page.onCellClick(configure.col, configure.row)
+  assert.match(page.render(100).map(stripTerminalSequences).join('\n'), /API Key Reference/u)
+
+  // Press, repaint at a different height, then release the old cell: refused.
+  const edit = line('Configure API Key')
+  page.onCellPress(edit.col, edit.row)
+  page.setBodyHeight(20)
+  page.render(100)
+  page.onCellClick(edit.col, edit.row)
+  assert.match(page.render(100).map(stripTerminalSequences).join('\n'), /API Key Reference/u, 'the resize-revoked click must not open the editor')
+
+  // The dangerous clear action is a painted control too.
+  const configured = new Set(['ACME_API_KEY'])
+  const second = fakeSource({ configured: ref => configured.has(ref) })
+  const clearPage = new ModelsWorkspacePage(second.source, () => {}, { view: 'provider', route: 'acme' }, () => {})
+  clearPage.setBodyHeight(24)
+  await flush()
+  clearPage.render(100)
+  clearPage.handleInput('\u001b[B')
+  clearPage.handleInput('\r')
+  await flush()
+  const clearLines = clearPage.render(100).map(stripTerminalSequences)
+  const confirmRow = clearLines.findIndex(candidate => candidate.includes('Clear credential'))
+  assert.ok(confirmRow >= 0)
+  clearPage.onCellPress(2, confirmRow)
+  configured.delete('ACME_API_KEY')
+  clearPage.onCellClick(2, confirmRow)
+  await flush()
+  assert.ok(second.calls.includes('unset:ACME_API_KEY'), second.calls.join(','))
+})
+
+test('a stored credential RECORD is deleted through deleteRecord and never through unsetReference', async () => {
+  const { source, calls } = fakeSource()
+  let records: readonly { key: string; kind?: string }[] = [{ key: 'llm-pi-ai/anthropic', kind: 'oauth' }]
+  source.storedCredentials = async () => ({
+    rows: records.map(record => ({ kind: 'record' as const, key: record.key, label: 'Anthropic', route: 'anthropic', ...(record.kind === undefined ? {} : { kindHint: record.kind }) })),
+    recordCleanupUnavailable: false,
+    referenceReadFailures: [],
+  })
+  source.deleteRecord = async key => {
+    calls.push(`delete:${key}`)
+    records = records.filter(record => record.key !== key)
+  }
+  const page = new ModelsWorkspacePage(source, () => {}, {
+    view: 'logout',
+    target: { kind: 'record', key: 'llm-pi-ai/anthropic', label: 'Anthropic', route: 'anthropic' },
+  }, () => {})
+  page.setBodyHeight(24)
+  await flush()
+  const painted = viewText(page)
+  assert.match(painted, /Clear stored credential/u)
+  assert.match(painted, /Clear credential/u)
+  page.handleInput('\r')
+  await flush()
+  assert.ok(calls.includes('delete:llm-pi-ai/anthropic'), calls.join(','))
+  assert.equal(calls.some(call => call.startsWith('unset:')), false)
+  assert.match(viewText(page), /signed out locally — stored credential cleared/u)
+})

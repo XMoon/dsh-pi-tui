@@ -160,30 +160,50 @@ re-derive the declaration from the advertised union.
 
 ## Credential targets (`/login` / `/logout`)
 
-Resolve the argument against the MERGED credential catalog (the LLM configurable-
-provider directory overlaid on the `llm-pi-ai` settings section, deduped by ref,
-official DeepSeek first):
+`/login` and `/logout` are **navigation** into the Settings `Models` page (or
+the `Account` page for `deepseek-account`). They resolve the typed argument
+through the ONE shared Auth target resolver and open the workspace at the
+resulting destination; they never run a credential operation themselves.
 
-- name/first word → its `apiKeyEnv`;
-- an env-var-looking argument → used verbatim, never re-derived;
-- unknown valid route pattern → add-provider wizard (protocol/base URL/name/key,
-  model discovery with hand-entry fallback, persist profile + key separately);
-- otherwise → an error list;
-- no argument → grouped searchable picker plus an Add New Platform row;
-- no LLM service → the official target only.
+`/login`:
 
-`/logout` cannot enumerate Remote records: reject rather than report empty,
-offer clearable refs, and state the limitation. Credential operations re-check
-the Connection generation (a `setReference` on a replaced Host is unconfirmed;
-a superseded `describe` is not configured).
+- no argument → the Models list, no automatic login;
+- known route (label or first word) → that provider's detail page;
+- known reference or env-var-looking novel reference → the API-key reference
+  page with the exact target ref; an empty answer never writes;
+- new valid route pattern → the Add Provider form prefilled with the route;
+- `deepseek-account` → the Account page;
+- anything else → the unknown-target error listing the valid targets, with no
+  workspace opened.
+
+`/logout`:
+
+- no argument → the Models Stored credentials list;
+- known reference/route/flow → one explicit clear confirmation for the exact
+  reference or stored record (a keyless route with a flow clears its RECORD,
+  never the derived reference);
+- `deepseek-account` → the Account Sign out confirmation;
+- anything else → the unknown-target error.
+
+The final write/clear happens only inside the workspace after an explicit
+confirm. The DeepSeek Account authorization flow (`deepseek-account-platform/
+default`) is excluded from the generic provider flows and is never cleared
+through `credentials.deleteRecord`; the Account page owns its sign-in and
+sign-out. Remote cannot enumerate records: state the limitation instead of
+reporting an empty store.
 
 Authority: `src/domain/catalog/provider.ts` (`providerOptionsFor`,
-`credentialOptionsFor`, `resolveCredentialArg`, `deriveKeyRef`, `ROUTE_PATTERN`)
-consumed by `src/tui/commands/auth.ts`; Host business authority remains in
+`credentialOptionsFor`, `classifyCredentialArg`, `deriveKeyRef`,
+`ROUTE_PATTERN`), `src/app/command/credential-workflow.ts`
+(`resolveLoginDestination`, `resolveLogoutDestination`,
+`genericAuthorizationTargets`), consumed by `src/tui/commands/auth.ts` and the
+Settings pages. Host business authority remains in
 [host-client.md](./host-client.md).
 
-Must-not: re-derive a typed env name, claim stored records were cleaned, or
-present a provider-native sign-in as available.
+Must-not: re-derive a typed env name, keep a command-level picker/question/
+output-viewer branch, claim stored records were cleaned, present a
+provider-native sign-in as available, or offer the Account flow as a generic
+provider credential.
 
 ## Invariants (never break)
 

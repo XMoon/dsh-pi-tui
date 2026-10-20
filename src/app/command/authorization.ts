@@ -125,6 +125,10 @@ export interface AuthorizationSurface {
     refresh: () => string
     onClose?: () => void
   }): () => void
+  /** Structured notice presentation (the Settings Models page renders the
+   *  message/URL/code inline). When present, this REPLACES the output viewer;
+   *  the returned closer retires the notice, exactly like `openOutputViewer`. */
+  showNotice?(notice: AuthorizationNoticeEvent): () => void
   askQuestions(
     questions: readonly {
       id: string
@@ -216,16 +220,19 @@ export function createAuthorizationFlow(
       // may clear the slot.
       const token = {}
       noticeToken = token
-      const closer = app.openOutputViewer({
-        title: 'Sign in',
-        initial: noticeBody,
-        refresh: () => noticeBody,
-        onClose: () => {
-          if (noticeToken !== token) return
-          noticeToken = undefined
-          noticeHandle = undefined
-        },
-      })
+      const rawCloser = app.showNotice !== undefined
+        ? app.showNotice(notice)
+        : app.openOutputViewer({
+            title: 'Sign in',
+            initial: noticeBody,
+            refresh: () => noticeBody,
+            onClose: () => {
+              if (noticeToken !== token) return
+              noticeToken = undefined
+              noticeHandle = undefined
+            },
+          })
+      const closer = (): void => rawCloser()
       if (noticeToken === token) noticeHandle = closer
       // A synchronously finalized attempt (the surface was already gone):
       // close ONLY that stale view, never the newer notice's.

@@ -49,6 +49,12 @@ import { resolveThemeSelection, themePickerRows } from '../../app/surface/theme-
 import { normalizePersistedTheme } from '../../domain/display/theme-selection.ts'
 import { serializeTuiSettingsMutation, type ConfigPort, type TuiSettingsDoc, type WebProviderSettings } from '../../runtime/config-port.ts'
 import { WebCredentialPanel, WebEndpointPanel, WebWriteVerdictError, type WebCredentialAction } from '../panels/web-provider-panels.ts'
+import { ModelsWorkspacePage, type ModelsInitialView, type ModelsWorkspaceSource } from '../panels/models-workspace-page.ts'
+import { AccountWorkspacePage, type AccountInitialView } from '../panels/account-workspace-page.ts'
+import { CredentialWorkflow, type AuthDestination } from '../../app/command/credential-workflow.ts'
+import { AccountWorkflow } from '../../app/command/account-workflow.ts'
+import { packageVersion } from '../../client/launcher/version.ts'
+import { openExternalUrl } from '../../client/url/open.ts'
 import type {
   SettingsWorkspaceCommitOutcome,
   SettingsWorkspaceCommitRequest,
@@ -95,6 +101,8 @@ type SettingsCommandRunner = Pick<
   | 'setNotificationMode'
   | 'setTerminalProgressMode'
   | 'setSessionApprovalPolicy'
+  | 'signal'
+  | 'copyToClipboard'
   | 'tuiSettings'
 >
 
@@ -115,6 +123,10 @@ export interface SettingsCommandRegistrars {
   registerDisplay(): void
   registerFocus(): void
   registerKeybindings(): void
+  /** The ONE `/login` / `/logout` navigation entry: resolve the semantic
+   *  destination and open the Settings workspace at it. It never executes a
+   *  credential operation itself. */
+  openAuthWorkspace(destination: AuthDestination): CommandResult
 }
 
 /**
@@ -133,6 +145,94 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
     clearExtensionError,
     captureExtensionHealthRef,
   } = deps
+
+  // ── Phase 3C / C2-MA: the ONE credential workflow and the two direct pages ──
+  //
+  // The workflow owns target resolution + provider/key/record operations over
+  // the ConfigPort; the pages own view/draft state only. Both are constructed
+  // ONCE per command coordinator (the ConfigPort is stable for the process
+  // run) and every page instance receives the SAME semantics.
+  const credentialWorkflow = new CredentialWorkflow({
+    providers: runner.config.providers,
+    credentials: runner.config.credentials,
+    authorization: runner.config.authorization,
+    account: runner.config.account,
+    catalog: runner.catalog,
+    signal: runner.signal,
+    diag: runner.diag,
+  })
+  const copyText = (text: string): void => {
+    detach('settings copy', () => runner.copyToClipboard(text), { notify: true })
+  }
+  const accountWorkflow = new AccountWorkflow({
+    account: runner.config.account,
+    version: packageVersion(),
+    openUrl: (url: string) => openExternalUrl(url),
+    copy: copyText,
+    run: (label: string, task: () => Promise<void>) => { detach(label, task, { notify: false }) },
+    diag: runner.diag,
+  })
+  const createModelsSource = (): ModelsWorkspaceSource => ({
+    available: runner.config.credentials.available() && runner.config.providers.available(),
+    rows: () => credentialWorkflow.mergedTargets().map(target => target.kind === 'reference'
+      ? {
+          kind: 'reference' as const,
+          route: target.route,
+          label: target.label,
+          ref: target.ref,
+          configured: target.configured,
+          declared: target.declared,
+          namesCredential: target.namesCredential,
+          methods: [],
+          inFlight: false,
+          profile: credentialWorkflow.readProfile(target.route),
+        }
+      : {
+          kind: 'authorization' as const,
+          route: target.route ?? '',
+          label: target.label,
+          key: target.key,
+          configured: false,
+          declared: false,
+          namesCredential: false,
+          methods: target.methods.map(method => ({ ...method })),
+          inFlight: target.inFlight,
+          profile: target.route === undefined
+            ? { route: '', configured: false, models: [] }
+            : credentialWorkflow.readProfile(target.route),
+        }),
+    accountSummary: () => credentialWorkflow.accountSummary(),
+    credentialState: async (ref: string) => {
+      const info = await credentialWorkflow.describeReference(ref)
+      return {
+        kind: 'known' as const,
+        configured: info.configured,
+        ...(info.source === undefined ? {} : { source: info.source }),
+      }
+    },
+    storedCredentials: () => credentialWorkflow.storedCredentials(),
+    describeReference: (ref: string) => credentialWorkflow.describeReference(ref),
+    setReference: (ref: string, secret: string) => credentialWorkflow.setReference(ref, secret),
+    clearReference: (ref: string) => credentialWorkflow.clearReference(ref),
+    deleteRecord: (key: string) => credentialWorkflow.deleteRecord(key),
+    beginAuthorization: (key: string, method: string | undefined, signal: AbortSignal) =>
+      credentialWorkflow.beginAuthorization(key, method, signal),
+    authorizationEvents: listener => credentialWorkflow.authorizationEvents(listener),
+    respondAuthorization: (attemptId: string, promptId: string, answer: string | null) =>
+      credentialWorkflow.respondAuthorization(attemptId, promptId, answer),
+    cancelAuthorization: (attemptId: string) => credentialWorkflow.cancelAuthorization(attemptId),
+    provisionKeylessProfile: (route: string | undefined) => credentialWorkflow.provisionKeylessProfile(route),
+    discoverModels: request => credentialWorkflow.discoverModels(request),
+    createProvider: draft => credentialWorkflow.createProvider(draft),
+    configGuide: () => credentialWorkflow.configGuide(),
+    openUrl: (url: string) => openExternalUrl(url),
+    copy: copyText,
+    run: (label: string, task: () => Promise<void>) => { detach(label, task, { notify: false }) },
+  })
+  const createModelsPage = (initial: ModelsInitialView, openAccount: () => void) =>
+    new ModelsWorkspacePage(createModelsSource(), () => app.requestRender(), initial, openAccount)
+  const createAccountPage = (initial: AccountInitialView) =>
+    new AccountWorkspacePage(accountWorkflow, () => app.requestRender(), initial)
 
   // ── S2/PR-B §3.3 / §B3.4: the Web Search / Fetch settings section ──────
   //
@@ -668,7 +768,14 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
    *  read a second time (one guarded document read per surface). */
   let activeSettingsWorkspace: { readonly token: object; readonly refreshWebRow: () => void } | undefined
 
-  const openSettingsWorkspaceAt = (initialRowId?: SettingsWorkspaceRowId): void => {
+  interface WorkspaceOpenSpec {
+    readonly initialRowId?: SettingsWorkspaceRowId
+    readonly initialCategory?: import('../panels/settings-workspace-panel.ts').SettingsWorkspaceCategoryId
+    readonly initialModelsView?: ModelsInitialView
+    readonly initialAccountView?: AccountInitialView
+  }
+
+  const openSettingsWorkspaceWith = (spec: WorkspaceOpenSpec): void => {
     const token = {}
     // The panel snapshots its source in its CONSTRUCTOR, so the pending state
     // must be in place before the lease is taken.
@@ -683,7 +790,9 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
         onOpenLegacy: (targetId) => { openLegacySettings(targetId) },
         onOpenPlugins: (done) => runner.createPluginManagerPage(done),
         onCommit: commitSettingsWorkspaceField,
-        ...(initialRowId === undefined ? {} : { initialRowId }),
+        createModelsPage,
+        createAccountPage,
+        ...spec,
         onClose: () => {
           if (activeSettingsWorkspace?.token === token) activeSettingsWorkspace = undefined
         },
@@ -691,6 +800,10 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
     )
     activeSettingsWorkspace = { token, refreshWebRow: () => handle?.refreshRow(WEB_LAUNCHER_ROW_ID, webWorkspaceRowFacts()) }
     startWebSettingsRead(token)
+  }
+
+  const openSettingsWorkspaceAt = (initialRowId?: SettingsWorkspaceRowId): void => {
+    openSettingsWorkspaceWith(initialRowId === undefined ? {} : { initialRowId })
   }
 
   /** Enter the PENDING state synchronously: the previous value AND the
@@ -2691,5 +2804,50 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
       },
     })
   }
-  return { registerSettings, registerFooter, registerDisplay, registerFocus, registerKeybindings }
+  /** The ONE `/login` / `/logout` navigation entry. It maps the shared
+   *  semantic destination onto the Settings workspace; no credential write is
+   *  performed here. */
+  const openAuthWorkspace = (destination: AuthDestination): CommandResult => {
+    if (destination.kind === 'error') return { kind: 'error', text: destination.message }
+    try {
+      if (destination.kind === 'account') {
+        openSettingsWorkspaceWith({
+          initialCategory: 'account',
+          initialAccountView: { view: destination.view },
+        })
+      } else {
+        openSettingsWorkspaceWith({
+          initialCategory: 'models',
+          initialModelsView: modelsInitialOf(destination),
+        })
+      }
+    } catch (error) {
+      return {
+        kind: 'error',
+        text: `could not open the settings workspace: ${safeErrorMessage(error)}`,
+      }
+    }
+    return { kind: 'success' }
+  }
+
+  return { registerSettings, registerFooter, registerDisplay, registerFocus, registerKeybindings, openAuthWorkspace }
+}
+
+/** Map one resolved Models destination onto the page's initial view. */
+function modelsInitialOf(destination: Exclude<AuthDestination, { kind: 'account' } | { kind: 'error' }>): ModelsInitialView {
+  switch (destination.view) {
+    case 'list': return { view: 'list' }
+    case 'provider': return { view: 'provider', route: destination.route }
+    case 'reference': return {
+      view: 'reference',
+      ref: destination.ref,
+      ...(destination.label === undefined ? {} : { label: destination.label }),
+    }
+    case 'add-provider': return {
+      view: 'add-provider',
+      ...(destination.route === undefined ? {} : { route: destination.route }),
+    }
+    case 'logout-list': return { view: 'logout-list' }
+    case 'logout': return { view: 'logout', target: destination.target }
+  }
 }

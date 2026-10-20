@@ -150,10 +150,11 @@ Command page.
 
 `/settings` opens one fullscreen lease with three levels (L0 categories, L1
 rows, L2 detail) and one focus state. Width only projects panes (≥108 three,
-76–107 two, <76 one).
+76–107 two, <76 one). The category order is `Models, Account, Appearance,
+Display, Plugins, Other settings`; `/settings` still lands on `Appearance`.
 
-- Exactly two rows are writable: the configured theme and the transcript display
-  setting. Browse/copy never write.
+- Exactly two configuration rows are writable: the configured theme and the
+  transcript display setting. Browse/copy never write.
 - An L2 choice is transient; only an explicit Confirm commits one field through
   the serialized whole-document `ConfigPort` path and re-reads the authority.
 - `Verified` requires a ready read-back with a matching value. Rejected/unknown
@@ -162,15 +163,75 @@ rows, L2 detail) and one focus state. Width only projects panes (≥108 three,
 - Theme auto is fenced on the runtime selection intent.
 - `Plugins` is a direct page entry inside the same lease (see Plugin Manager);
   the legacy complete editor stays reachable through `Other settings`.
+- `Models` and `Account` are DIRECT content pages in the SAME lease (not
+  fabricated Settings rows and not a second alt-screen owner). Wide/medium keep
+  the category rail; narrow paints one page with an explicit `Esc`/Back path.
+  The category rail preserves the current page identity on return.
 - The screen lease/currentness mechanics are owned by
   [overlay-focus.md](./overlay-focus.md).
 
+### Models page
+
+The provider list and detail are detached ConfigPort projections
+(`listCredentialOptions`, `readProfile`, `describeReference`, `listRecords`).
+The page never infers a stored key from a route/profile.
+
+- Provider detail shows route, profile presence, protocol, endpoint, models,
+  auth kind and credential presence (presence only, not a connection test).
+- `Configure API Key` opens a page-local masked editor (the existing
+  QuestionFlow component); an empty/cancelled answer writes nothing. A resolved
+  `setReference` is not a success: `describeReference` must report the reference
+  configured before the page paints `Verified`; otherwise it states the
+  failure/unknown outcome.
+- `Clear stored credential` is a single explicit confirmation for the exact
+  identity (reference vs stored record). After the clear the page re-reads the
+  store; it never claims success without the authoritative absence.
+- `Add Provider` is one page-local draft over route → protocol → base URL →
+  display name → optional key → discovered/manual model ids → review → create.
+  Nothing persists before Create. Profile and credential writes are separate
+  Host operations; a persisted profile with a failed key write is reported as a
+  partial outcome with the exact failed stage.
+- Provider-native sign-in uses the existing authorization attempt owner: early
+  events are buffered before attempt binding, notices/URLs stay visible above
+  in-page prompts, select/text/secret prompts answer through `respond`, a Host
+  withdrawal closes only that prompt without answering, and settlement returns
+  to the provider detail. A successful sign-in may write a minimal keyless
+  profile for an unconfigured catalog route. Closing/changing the page cancels
+  the native attempt through its exact Host attempt; browser Account attempts
+  are never cancelled this way.
+- Stored credential records exclude the DeepSeek Account grant.
+
+### Account page
+
+- Host `AccountView` phases drive the display (`succeeded` is presented as
+  Authorized). `credential-stored` is a storage fact, not a server-validated
+  identity; profile and balance are independent queries with independent
+  pending/failed/ready states, and an unavailable balance is never shown as 0.
+- Wallet decimal strings are forwarded verbatim. `Usage` and `Top up` use the
+  client-local HTTP(S) opener with the official `AccountView.links`; the page
+  never receives a token or grant payload.
+- Sign in starts the official browser attempt with the Host's own loopback
+  callback origin and login source `web`, and paints the authorization URL plus
+  the SSH tunnel template for the current callback port. Cancel addresses the
+  exact attempt id; a stale id cancels nothing.
+- Sign out is an explicit confirmation with the account identity and the
+  running-account-task risk. It calls the official `signOut`; the local grant is
+  removed and the remote revocation remains background. A failed revocation
+  never restores a local grant, and independent API keys stay stored.
+- Closing the page ends only the watch subscription; an in-flight browser
+  attempt keeps running on the Host, and reopening reads the Host state again.
+
 Authority: `src/tui/commands/settings.ts`
-(`readSettingsWorkspaceSnapshot`, `commitSettingsWorkspaceField`),
-`SettingsWorkspacePanel`, `TuiApp.openSettingsWorkspace`.
+(`readSettingsWorkspaceSnapshot`, `commitSettingsWorkspaceField`, the Models/
+Account page sources), `src/app/command/credential-workflow.ts`,
+`src/app/command/account-workflow.ts`, `SettingsWorkspacePanel`,
+`ModelsWorkspacePage`, `AccountWorkspacePage`, `TuiApp.openSettingsWorkspace`.
 
 Must-not: add a second store/subscription/write path, fabricate defaults, commit
-after close/replacement, or paint a non-ready save as verified.
+after close/replacement, paint a non-ready save as verified, show a secret or
+token, infer credential presence from a route, offer an invisible confirm
+target, clear the Account grant as a generic record, or let an older page
+settlement repaint the current page.
 
 ## Task Quick
 
