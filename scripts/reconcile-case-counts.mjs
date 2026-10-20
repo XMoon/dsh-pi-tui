@@ -180,6 +180,12 @@ function main() {
   // old path that could claim it. An ambiguous pair (two old paths
   // competing for one new path, or one old path with two candidates) is
   // NOT a move — it is reported as a removal plus an addition.
+  //
+  // The candidate is matched by basename AND case count; that is a HEURISTIC,
+  // and the report says so. A report that only knows paths and counts cannot
+  // prove file identity, and does not pretend to: the reconciliation's claim
+  // is "these cases moved from one path to another", which is what the
+  // per-file counts support.
   const candidatesFor = new Map()
   for (const [beforePath_, count] of before) {
     if (afterFiles.has(beforePath_)) continue
@@ -232,6 +238,9 @@ function main() {
   console.log(`delta:  ${afterDeclared - beforeDeclared} cases\n`)
 
   console.log(`=== moved (${movedOut.length}) ===`)
+  console.log('  (a move is a same-basename, same-case-count path match that is')
+  console.log('   globally one-to-one; a report of paths and counts cannot prove')
+  console.log('   file identity, and does not claim to)')
   for (const [from, to, count] of movedOut) console.log(`  ${String(count).padStart(4)}  ${from} -> ${to}`)
   console.log(`\n=== added (${added.length}) ===`)
   for (const [file, count] of added) console.log(`  +${String(count).padStart(4)}  ${file}`)

@@ -145,3 +145,48 @@ test('a named array of production paths is resolved too', () => {
   ].join('\n')
   assert.deepEqual(productionReferences(source).sort(), ['../src/a.ts', '../src/b.ts'])
 })
+
+test('an identifier reused in two scopes resolves to each scope\'s own array', () => {
+  // The review's reproduction: two loops reuse the name `file` for
+  // DIFFERENT arrays. A file-global map would resolve both to the last
+  // array — a false reference for one loop and a missing one for the other.
+  const source = [
+    "for (const file of ['../src/actually-read.ts']) {",
+    "  readFileSync(new URL(file, import.meta.url), 'utf8')",
+    "}",
+    "for (const file of ['../src/not-read.ts']) {",
+    "  readFileSync(new URL(file, import.meta.url), 'utf8')",
+    "}",
+  ].join('\n')
+  assert.deepEqual(
+    productionReferences(source).sort(),
+    ['../src/actually-read.ts', '../src/not-read.ts'],
+    'each use must resolve to its OWN scope\'s array',
+  )
+})
+
+test('a runtime-built array is REPORTED, never silently ignored', () => {
+  // The reference cannot be resolved statically, so the checker must say so
+  // instead of claiming the file is covered.
+  const source = [
+    'const files = getSourcePaths()',
+    "for (const file of files) { readFileSync(new URL(file, import.meta.url), 'utf8') }",
+  ].join('\n')
+  const refs = productionReferences(source)
+  assert.equal(refs.length, 1)
+  assert.match(refs[0], /^<unresolved:/u,
+    'an unresolvable binding must be reported as unresolved')
+})
+
+test('a whole-tree enumeration resolves to the directory it walks', () => {
+  // `srcTsFiles(root).filter(rel => readFileSync(new URL(rel, root), …))`
+  // has no per-file target, but the DIRECTORY it walks is the reference the
+  // migration had to keep pointing at.
+  const source = [
+    "const root = new URL('../src/', import.meta.url)",
+    'const offenders = srcTsFiles(root)',
+    "  .filter(rel => readFileSync(new URL(rel, root), 'utf8').includes('x'))",
+  ].join('\n')
+  assert.deepEqual(productionReferences(source), ['../src/'],
+    'the enumeration base is the reference')
+})

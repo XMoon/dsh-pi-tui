@@ -41,51 +41,6 @@ const TEST_ROOT = resolve(ROOT, 'test')
  */
 export function productionReferences(source) {
   const file = ts.createSourceFile('probe.ts', source, ts.ScriptTarget.ESNext, true, ts.ScriptKind.TS)
-  // A `new URL(<identifier>, import.meta.url)` resolves through the
-  // identifier's STATIC INITIALIZER: the tree reads production files from
-  // an ARRAY of paths, e.g.
-  //
-  //     for (const file of ['../src/a.ts', '../src/b.ts']) {
-  //       readFileSync(new URL(file, import.meta.url), 'utf8')
-  //     }
-  //
-  // The identifiers that hold such an array are collected here, so the URL
-  // read is resolved to every path it actually names.
-  const arrayValues = new Map()
-  const collectArrays = (node) => {
-    // A named array: `const files = ['../src/a.ts', …]`.
-    if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.initializer !== undefined) {
-      if (ts.isArrayLiteralExpression(node.initializer)) {
-        const values = node.initializer.elements
-          .filter(element => ts.isStringLiteralLike(element))
-          .map(element => element.text)
-        if (values.length > 0) arrayValues.set(node.name.text, values)
-      }
-    }
-    // An INLINE array in a `for…of`: `for (const file of ['../src/a.ts', …])`.
-    // The loop variable then names each element in turn.
-    if (ts.isForOfStatement(node) && ts.isVariableDeclarationList(node.initializer)) {
-      const names = node.initializer.declarations
-        .filter(declaration => ts.isIdentifier(declaration.name))
-        .map(declaration => declaration.name.text)
-      const expression = node.expression
-      if (ts.isArrayLiteralExpression(expression)) {
-        const values = expression.elements
-          .filter(element => ts.isStringLiteralLike(element))
-          .map(element => element.text)
-        for (const name of names) {
-          if (values.length > 0) arrayValues.set(name, values)
-        }
-      }
-      if (ts.isIdentifier(expression)) {
-        for (const name of names) arrayValues.set(name, arrayValues.get(expression.text) ?? [])
-      }
-    }
-    ts.forEachChild(node, collectArrays)
-  }
-  collectArrays(file)
-  // A `.mjs` file is plain JavaScript; the parser handles both the same way
-  // for the forms this extractor cares about.
   const refs = []
   const add = (specifier) => {
     if (typeof specifier !== 'string') return
@@ -95,6 +50,154 @@ export function productionReferences(source) {
     // comparison.
     refs.push(specifier.split('?')[0])
   }
+
+  // A `new URL(<identifier>, import.meta.url)` resolves through the
+  // identifier's binding AT THAT USE SITE — not through a file-global map.
+  // The tree reads production files from an array of paths:
+  //
+  //     for (const file of ['../src/a.ts', '../src/b.ts']) {
+  //       readFileSync(new URL(file, import.meta.url), 'utf8')
+  //     }
+  //
+  // The binding is SCOPED: two loops may reuse the same name for different
+  // arrays, and a file-global map would resolve both to the LAST one — a
+  // false reference for one loop and a missing one for the other. The
+  // resolution therefore walks the AST from the USE SITE outwards and
+  // takes the NEAREST enclosing binding of that name.
+  const resolveIdentifierAt = (useNode, name) => {
+    // The nearest enclosing `for…of` whose loop variable IS the name, and
+    // whose iterable is an array literal of strings.
+    for (let node = useNode; node !== undefined; node = node.parent) {
+      if (ts.isForOfStatement(node) && ts.isVariableDeclarationList(node.initializer)) {
+        const names = node.initializer.declarations
+          .filter(declaration => ts.isIdentifier(declaration.name))
+          .map(declaration => declaration.name.text)
+        if (!names.includes(name)) continue
+        // The iterable is an INLINE array literal.
+        if (ts.isArrayLiteralExpression(node.expression)) {
+          return node.expression.elements
+            .filter(element => ts.isStringLiteralLike(element))
+            .map(element => element.text)
+        }
+        // The iterable is a NAMED array declared in the enclosing scope:
+        // `const files = ['…']; for (const file of files) { … }`.
+        if (ts.isIdentifier(node.expression)) {
+          const initializer = resolveDeclarationInitializer(node, node.expression.text)
+          if (initializer !== undefined && ts.isArrayLiteralExpression(initializer)) {
+            return initializer.elements
+              .filter(element => ts.isStringLiteralLike(element))
+              .map(element => element.text)
+          }
+          // The iterable is not a static array: the reference cannot be
+          // resolved, and that is REPORTED.
+          return undefined
+        }
+        return undefined
+      }
+      // The nearest enclosing BLOCK that declares the name as an array.
+      if (ts.isBlock(node) || ts.isSourceFile(node) || ts.isFunctionDeclaration(node)) {
+        for (const statement of node.statements ?? []) {
+          if (!ts.isVariableStatement(statement)) continue
+          for (const declaration of statement.declarationList.declarations) {
+            if (!ts.isIdentifier(declaration.name) || declaration.name.text !== name) continue
+            if (declaration.initializer !== undefined && ts.isArrayLiteralExpression(declaration.initializer)) {
+              return declaration.initializer.elements
+                .filter(element => ts.isStringLiteralLike(element))
+                .map(element => element.text)
+            }
+            // The binding exists but is NOT a static array: the reference
+            // cannot be resolved. That is reported, never ignored.
+            return undefined
+          }
+        }
+      }
+    }
+    return undefined
+  }
+
+  /**
+   * The initializer of the declaration that binds `name` in the enclosing
+   * scope of `from`.
+   */
+  const resolveDeclarationInitializer = (from, name) => {
+    for (let node = from; node !== undefined; node = node.parent) {
+      if (!ts.isBlock(node) && !ts.isSourceFile(node)) continue
+      for (const statement of node.statements ?? []) {
+        if (!ts.isVariableStatement(statement)) continue
+        for (const declaration of statement.declarationList.declarations) {
+          if (!ts.isIdentifier(declaration.name) || declaration.name.text !== name) continue
+          return declaration.initializer
+        }
+      }
+    }
+    return undefined
+  }
+
+  /**
+   * The BASE of a whole-tree enumeration, when the identifier names a
+   * directory-URL that is walked.
+   *
+   * `const root = new URL('../../src/', import.meta.url)` followed by
+   * `srcTsFiles(root)` enumerates EVERY `.ts` file under that directory.
+   * The individual reads have no static target, but the directory does — and
+   * the directory is what the migration had to keep pointing at.
+   */
+  const resolveEnumerationBase = (useNode, name) => {
+    // The identifier may be the CALLBACK PARAMETER of a chain that walks an
+    // enumerated tree: `srcTsFiles(root).filter(rel => new URL(rel, root))`.
+    // The base is the `root` ARGUMENT of that call.
+    for (let node = useNode; node !== undefined; node = node.parent) {
+      if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression)) {
+        const [first] = node.arguments
+        if (first !== undefined && ts.isIdentifier(first)) {
+          const base = resolveUrlDeclaration(node, first.text)
+          if (base !== undefined) return base
+        }
+      }
+      if (!ts.isBlock(node) && !ts.isSourceFile(node)) continue
+      for (const statement of node.statements ?? []) {
+        if (!ts.isVariableStatement(statement)) continue
+        for (const declaration of statement.declarationList.declarations) {
+          if (!ts.isIdentifier(declaration.name) || declaration.name.text !== name) continue
+          return resolveUrlDeclaration(declaration, name)
+        }
+      }
+    }
+    return undefined
+  }
+
+  /** The URL a declaration holds, when it holds one. */
+  const resolveUrlDeclaration = (declaration, name) => {
+    const initializer = ts.isVariableDeclaration(declaration)
+      ? declaration.initializer
+      : resolveDeclarationInitializer(declaration, name)
+    if (initializer === undefined) return undefined
+    if (ts.isNewExpression(initializer) && ts.isIdentifier(initializer.expression) && initializer.expression.text === 'URL') {
+      const [first] = initializer.arguments
+      if (first !== undefined && ts.isStringLiteralLike(first)) return first.text
+      if (first !== undefined && ts.isTemplateExpression(first)) return first.head.text
+    }
+    // A declaration that is not a URL: look for one further up the scope.
+    for (let node = declaration.parent; node !== undefined; node = node.parent) {
+      if (!ts.isBlock(node) && !ts.isSourceFile(node)) continue
+      for (const statement of node.statements ?? []) {
+        if (!ts.isVariableStatement(statement)) continue
+        for (const candidate of statement.declarationList.declarations) {
+          if (!ts.isIdentifier(candidate.name) || candidate.name.text !== name) continue
+          const inner = candidate.initializer
+          if (inner === undefined) return undefined
+          if (ts.isNewExpression(inner) && ts.isIdentifier(inner.expression) && inner.expression.text === 'URL') {
+            const [first] = inner.arguments
+            if (first !== undefined && ts.isStringLiteralLike(first)) return first.text
+            if (first !== undefined && ts.isTemplateExpression(first)) return first.head.text
+          }
+          return undefined
+        }
+      }
+    }
+    return undefined
+  }
+
   const visit = (node) => {
     // The import clause: `import { x } from '…'`, and the side-effect form.
     if (ts.isImportDeclaration(node) && node.moduleSpecifier !== undefined) {
@@ -131,15 +234,70 @@ export function productionReferences(source) {
       // literal prefix before the interpolation is the part that resolves.
       if (first !== undefined && ts.isTemplateExpression(first)) add(first.head.text)
       // The IDENTIFIER-valued source read: `new URL(file, …)` where `file`
-      // names an array of paths. Every path the array holds is a reference.
+      // names an array of paths. The binding is resolved at THIS use site.
+      //
+      // A binding that is not a static array may still be a WHOLE-TREE
+      // enumeration (`srcTsFiles(root)` returns every `.ts` path under a
+      // directory). Such a read has no per-file target to compare, but its
+      // BASE is a real reference: the directory it enumerates. The base is
+      // resolved here, and the enumeration itself is reported so the caller
+      // can state that the per-file comparison does not cover it.
       if (first !== undefined && ts.isIdentifier(first)) {
-        for (const value of arrayValues.get(first.text) ?? []) add(value)
+        const values = resolveIdentifierAt(node, first.text)
+        if (values === undefined) {
+          // The identifier is not a static array. It may still be a
+          // WHOLE-TREE enumeration, whose BASE is the reference the
+          // migration had to keep pointing at.
+          const base = resolveEnumerationBase(node, first.text)
+          if (base !== undefined) {
+            add(base)
+            enumeratedTrees.add(first.text)
+          } else {
+            // The BASE argument of the same `new URL` may still name the
+            // directory the tree is walked from; it is resolved below. The
+            // identifier is only reported as unresolved when no base
+            // exists either.
+            const baseArgument = node.arguments.length > 1 ? node.arguments[1] : undefined
+            const baseName = baseArgument !== undefined && ts.isIdentifier(baseArgument)
+              ? baseArgument.text
+              : undefined
+            if (baseName === undefined) unresolvedIdentifiers.add(first.text)
+          }
+        } else {
+          for (const value of values) add(value)
+        }
+      }
+      // The WHOLE-TREE enumeration: `new URL(<rel>, <root>)` where `<rel>`
+      // is a per-file path RELATIVE to a directory URL. The BASE argument is
+      // the directory the tree is walked from, and it is the reference the
+      // migration had to keep pointing at.
+      if (node.arguments.length > 1) {
+        const [, second] = node.arguments
+        if (second !== undefined && ts.isIdentifier(second)) {
+          const base = resolveDeclarationInitializer(node, second.text)
+          if (base !== undefined && ts.isNewExpression(base) && ts.isIdentifier(base.expression) && base.expression.text === 'URL') {
+            const [baseFirst] = base.arguments
+            if (baseFirst !== undefined && ts.isStringLiteralLike(baseFirst)) {
+              add(baseFirst.text)
+              enumeratedTrees.add(second.text)
+            }
+          }
+        }
       }
     }
     ts.forEachChild(node, visit)
   }
+  // The identifiers whose value could not be resolved statically, and the
+  // ones that name a WHOLE-TREE enumeration (whose per-file reads are not
+  // comparable, but whose BASE is).
+  const unresolvedIdentifiers = new Set()
+  const enumeratedTrees = new Set()
   visit(file)
-  return refs
+  for (const name of unresolvedIdentifiers) refs.push(`<unresolved:${name}>`)
+  // The same target can be reached twice (a directory base that is also an
+  // enumeration base); the comparison is over SETS, so a duplicate carries
+  // no information.
+  return [...new Set(refs)]
 }
 
 /**
@@ -252,6 +410,13 @@ function main() {
     const unexplained = unexplainedTextReferences(source)
     if (unexplained.length > 0) {
       uncovered.push(`${rel}: ${unexplained.length} reference(s) the extractor did not recognise: ${unexplained.join(', ')}`)
+    }
+    // A reference whose BINDING could not be resolved statically (the path
+    // is built at runtime) cannot be compared. It is REPORTED, never
+    // silently ignored: the check must not claim to cover it.
+    const unresolved = afterRefs.filter(ref => ref.startsWith('<unresolved:'))
+    if (unresolved.length > 0) {
+      uncovered.push(`${rel}: ${unresolved.length} reference(s) could not be resolved statically: ${unresolved.join(', ')}`)
     }
     if (beforeRefs.length === 0) continue
     compared += 1
