@@ -1460,8 +1460,9 @@ export class ModelsWorkspacePage implements Component {
     content.push('', color.textDim('Create persists the provider profile; a stored key is a separate Host write whose failure is reported separately.'))
     if (add.result !== undefined) content.push('', add.result.kind === 'created' ? color.success(sanitizedPhysicalLine(add.result.text)) : color.error(sanitizedPhysicalLine(add.result.text)))
     if (add.creating === true && add.result === undefined) {
-      content.push('', color.textMuted('Creating — one Host write at a time. Esc leaves this page; the dispatched write is not retried.'))
+      content.push('', color.textMuted('Creating — one Host write at a time; Esc reports the in-flight write instead of leaving. The dispatched write is not retried.'))
     }
+    if (this.notice !== undefined) content.push('', color.warning(sanitizedPhysicalLine(this.notice)))
     this.copyValue = undefined
     if (add.result !== undefined) {
       return { content, actions: [{ id: 'review:done', label: '← Back to providers', enabled: true }] }
