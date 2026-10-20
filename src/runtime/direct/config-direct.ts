@@ -798,7 +798,10 @@ export class DirectAuthorizationConfig implements AuthorizationConfig {
     // never settles cannot retain the attempt/controller/listener either
     // — repeated aborted logins leave nothing behind.
     const withdrawOnCallerAbort = (): void => {
-      this.cancelAttempt(attemptId)
+      // Forced page/runner teardown: there is no prompt UI left to answer.
+      // Reject the bridges as lifecycle cleanup so the Host flow can settle;
+      // the page is already gone, so no false terminal is painted.
+      this.cancelAttempt(attemptId, true)
     }
     const disposeCallerAbortListener = (): void => {
       request.signal?.removeEventListener('abort', withdrawOnCallerAbort)
@@ -889,10 +892,15 @@ export class DirectAuthorizationConfig implements AuthorizationConfig {
    *  service suppresses abort while committing. Keep the prompt answerable and
    *  let `settleUpstream` withdraw/reject it and emit the one authoritative
    *  outcome. */
-  private cancelAttempt(attemptId: string): void {
+  private cancelAttempt(attemptId: string, forcePrompts = false): void {
     const attempt = this.attempts.get(attemptId)
     if (attempt === undefined || attempt.settled) return
     attempt.controller.abort()
+    // Ordinary cancel keeps prompts answerable until the Host settles. Forced
+    // caller teardown has destroyed their UI, so rejection is the only way to
+    // release a flow that may be awaiting one; the page is gone and the Host
+    // outcome remains authoritative.
+    if (forcePrompts) this.rejectAttemptPrompts(attemptId)
     attempt.disposeCallerAbortListener()
   }
 

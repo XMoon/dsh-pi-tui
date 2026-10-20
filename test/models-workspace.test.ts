@@ -1158,3 +1158,28 @@ test('Enter after a resize but before the resize frame cannot submit a clipped f
   await flush()
   assert.equal(calls.some(call => call.startsWith('set:')), false)
 })
+
+test('a growing auth notice without a repaint disables the previously painted form budget (RFL-007)', async () => {
+  const { source, calls } = fakeSource()
+  source.setReference = async ref => { calls.push(`set:${ref}`) }
+  source.describeReference = async () => ({ configured: true })
+  const page = new ModelsWorkspacePage(source, () => {}, { view: 'reference', ref: 'ACME_API_KEY', label: 'Acme Gateway' }, () => {})
+  page.setBodyHeight(11)
+  await flush()
+  page.render(100)
+  page.handleInput('\r')
+  await flush()
+  page.render(100)
+  for (const character of 'sk-notice') page.handleInput(character)
+  // The URL/code notice grows by two lines after the last paint; the body
+  // height did not change, but the form no longer fits its 8-row minimum.
+  ;(page as unknown as { authNotice: { message: string; url: string; code: string } }).authNotice = {
+    message: 'Continue in your browser',
+    url: 'https://provider.example/authorize',
+    code: 'ABCD',
+  }
+  page.handleInput('\r')
+  page.handleInput('\r')
+  await flush()
+  assert.equal(calls.some(call => call.startsWith('set:')), false)
+})

@@ -182,7 +182,10 @@ The page never infers a stored key from a route/profile.
   QuestionFlow component); an empty/cancelled answer writes nothing. A resolved
   `setReference` is not a success: `describeReference` must report the reference
   configured before the page paints `Verified`; otherwise it states the
-  failure/unknown outcome.
+  failure/unknown outcome. Below the QuestionFlow's 8-row supported budget the
+  page paints a resize state and refuses submit; eligibility is re-evaluated
+  against the live body height and the current auth-notice rows on every input,
+  not only when a frame is painted.
 - `Clear stored credential` is a single explicit confirmation for the exact
   identity (reference vs stored record). After the clear the page re-reads the
   store; it never claims success without the authoritative absence.
@@ -196,9 +199,16 @@ The page never infers a stored key from a route/profile.
   in-page prompts, select/text/secret prompts answer through `respond`, a Host
   withdrawal closes only that prompt without answering, and settlement returns
   to the provider detail. A successful sign-in may write a minimal keyless
-  profile for an unconfigured catalog route. Closing/changing the page cancels
-  the native attempt through its exact Host attempt; browser Account attempts
-  are never cancelled this way.
+  profile for an unconfigured catalog route. An ordinary cancel/back is a
+  REQUEST: it keeps any open prompt answerable and waits for the Host's
+  authoritative settlement; the page refuses user navigation while a key
+  write, Add Provider create, clear or native attempt still owns it. Browser
+  Account attempts are never cancelled this way. A forced page teardown
+  (blocking owner or workspace teardown) cannot keep a prompt answerable: the
+  adapter releases the destroyed prompt bridge as cleanup, and the Host may
+  report failed/cancelled even when a commit had started; the next Host read
+  remains authoritative. That forced-teardown boundary has no safe
+  adapter-only outcome.
 - Stored credential records exclude the DeepSeek Account grant.
 
 ### Account page
@@ -217,7 +227,8 @@ The page never infers a stored key from a route/profile.
 - Sign out is an explicit confirmation with the account identity and the
   running-account-task risk. It calls the official `signOut`; the local grant is
   removed and the remote revocation remains background. A failed revocation
-  never restores a local grant, and independent API keys stay stored.
+  never restores a local grant, and independent API keys stay stored. While the
+  sign-out is pending, user navigation and page exit are refused.
 - Closing the page ends only the watch subscription; an in-flight browser
   attempt keeps running on the Host, and reopening reads the Host state again.
 
