@@ -8,6 +8,7 @@
  */
 
 import assert from 'node:assert/strict'
+import { createAppLifecycleGuard } from '../support/app-lifecycle-guard.ts'
 import test, { afterEach } from 'node:test'
 import { mkdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
@@ -540,13 +541,9 @@ test('INTEGRATION: a STALE pick (the contribution unloads between open and confi
 /** Re-vendor lifecycle follow-up P3: every TuiApp started here is stopped
  * after each test (the process's single-live-TUI slot is held only by
  * live surfaces). */
-const startedApps = new Set<TuiApp>()
+const { started: startedApps, disposeAll: disposeStartedApps } = createAppLifecycleGuard<TuiApp>()
 afterEach(() => {
-  for (const app of [...startedApps]) {
-    startedApps.delete(app)
-    if (app.isDisposed()) continue
-    try { app.dispose() } catch {}
-  }
+  disposeStartedApps()
 })
 
 test('INTEGRATION: the Theme submenu inherits the live row budget and keeps the selected theme + hint after a shrink', async () => {

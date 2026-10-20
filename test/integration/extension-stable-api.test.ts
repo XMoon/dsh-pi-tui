@@ -7,6 +7,7 @@
  */
 
 import assert from 'node:assert/strict'
+import { createAppLifecycleGuard } from '../support/app-lifecycle-guard.ts'
 import { afterEach, test } from 'node:test'
 
 
@@ -15,13 +16,9 @@ import { afterEach, test } from 'node:test'
  * keybindings are process-global) is released only by the FINAL dispose,
  * never by stop() (see src/tui/process-slot.ts). */
 interface DisposableApp { isDisposed(): boolean; dispose(): void }
-const startedApps = new Set<DisposableApp>()
+const { started: startedApps, disposeAll: disposeStartedApps } = createAppLifecycleGuard<DisposableApp>()
 afterEach(() => {
-  for (const app of [...startedApps]) {
-    startedApps.delete(app)
-    if (app.isDisposed()) continue
-    try { app.dispose() } catch {}
-  }
+  disposeStartedApps()
 })
 
 test('the deprecation map is part of the api() contract and empty at the current API version', async () => {

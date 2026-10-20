@@ -12,6 +12,7 @@
  */
 
 import assert from 'node:assert/strict'
+import { createAppLifecycleGuard } from '../support/app-lifecycle-guard.ts'
 import { afterEach, test } from 'node:test'
 import { createBuiltinFooterRegistry } from '../../src/tui/footer/builtin-items.ts'
 import { renderSpans } from '../../src/tui/footer/composer.ts'
@@ -82,13 +83,9 @@ test('every externally sourced builtin footer span is one safe physical row', ()
 })
 
 /** Every TuiApp constructed here is disposed after each test. */
-const startedApps = new Set<TuiApp>()
+const { started: startedApps, disposeAll: disposeStartedApps } = createAppLifecycleGuard<TuiApp>()
 afterEach(() => {
-  for (const app of [...startedApps]) {
-    startedApps.delete(app)
-    if (app.isDisposed()) continue
-    try { app.dispose() } catch {}
-  }
+  disposeStartedApps()
 })
 
 test('the REAL default footer paints hostile model/cwd/branch on one physical row each', async () => {

@@ -14,6 +14,7 @@
  */
 
 import assert from 'node:assert/strict'
+import { createAppLifecycleGuard } from '../support/app-lifecycle-guard.ts'
 import { afterEach, test } from 'node:test'
 import { stripTerminalSequences, visibleWidth, type Component } from '@xmoon76/pi-tui'
 import type { TaskBrowserHandle, TuiAppEvents } from '../../src/tui-app.ts'
@@ -30,13 +31,9 @@ import { createDiag } from '../../src/runtime/process/diagnostics.ts'
 import { displaySeamStub } from '../support/display-seam-stub.ts'
 import { VirtualTerminal } from '../support/virtual-terminal.ts'
 
-const startedApps = new Set<TuiApp>()
+const { started: startedApps, disposeAll: disposeStartedApps } = createAppLifecycleGuard<TuiApp>()
 afterEach(() => {
-  for (const app of [...startedApps]) {
-    startedApps.delete(app)
-    if (app.isDisposed()) continue
-    try { app.dispose() } catch {}
-  }
+  disposeStartedApps()
 })
 
 function startApp(

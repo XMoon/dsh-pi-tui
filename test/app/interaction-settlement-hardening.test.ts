@@ -13,6 +13,7 @@
  */
 
 import assert from 'node:assert/strict'
+import { createAppLifecycleGuard } from '../support/app-lifecycle-guard.ts'
 import { afterEach, test, type TestContext } from 'node:test'
 import { TuiApp } from '../../src/tui-app.ts'
 import { createDiag } from '../../src/runtime/process/diagnostics.ts'
@@ -20,13 +21,9 @@ import { runOwned } from '../../src/runtime/process/tasks.ts'
 import { liveTuiCountForTest } from '../../src/tui/process-slot.ts'
 import { VirtualTerminal } from '../support/virtual-terminal.ts'
 
-const startedApps = new Set<TuiApp>()
+const { started: startedApps, disposeAll: disposeStartedApps } = createAppLifecycleGuard<TuiApp>()
 afterEach(() => {
-  for (const app of [...startedApps]) {
-    startedApps.delete(app)
-    if (app.isDisposed()) continue
-    try { app.dispose() } catch {}
-  }
+  disposeStartedApps()
 })
 
 function startApp(sink?: (label: string, error: unknown) => void): { app: TuiApp; vt: VirtualTerminal } {

@@ -36,6 +36,7 @@
  */
 
 import assert from 'node:assert/strict'
+import { createAppLifecycleGuard } from '../../support/app-lifecycle-guard.ts'
 import { readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { afterEach, test } from 'node:test'
@@ -55,13 +56,9 @@ import { VirtualTerminal } from '../../support/virtual-terminal.ts'
 process.env.NO_COLOR = ''
 process.env.FORCE_COLOR = ''
 
-const startedApps = new Set<TuiApp>()
+const { started: startedApps, disposeAll: disposeStartedApps } = createAppLifecycleGuard<TuiApp>()
 afterEach(() => {
-  for (const app of [...startedApps]) {
-    startedApps.delete(app)
-    if (app.isDisposed()) continue
-    try { app.dispose() } catch {}
-  }
+  disposeStartedApps()
 })
 
 function plain(lines: readonly string[]): string {
