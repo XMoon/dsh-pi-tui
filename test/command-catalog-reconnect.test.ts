@@ -34,6 +34,7 @@ import { createCommandSurface } from '../src/app/command/surface.ts'
 import type { RemoteCommandSourceFace } from '../src/app/application-runtime.ts'
 import { parseCommand } from '@deepseek-ai/dsh-commands'
 import type { TuiCommandRunner, TuiSettingsLike } from '../src/commands.ts'
+import type { PermissionPresetApplyOutcome } from '../src/runtime/config-port.ts'
 import { DirectCatalogPort } from '../src/runtime/direct/catalog-direct.ts'
 import { DirectConfigPort } from '../src/runtime/direct/config-direct.ts'
 import { DirectHostFilePort } from '../src/runtime/direct/host-file-direct.ts'
@@ -191,6 +192,15 @@ const silentDiag = createDiag({ filePath: undefined, stderrLevel: 'off' })
 function fakeRunnerDeps(options: {
   readonly remoteSource?: RemoteCommandSourceFace
   readonly currentSessionId: () => string | undefined
+  /** The CommandSurface lifetime signal (defaults to a fresh test signal). */
+  readonly signal?: AbortSignal
+  /** Observe/replace the composed permission write (the CommandSurface
+   *  signal-routing test); omitted = the real DirectConfigPort behavior. */
+  readonly applyPermissionPreset?: (
+    sessionId: string,
+    presetId: string,
+    signal: AbortSignal,
+  ) => Promise<PermissionPresetApplyOutcome>
 }) {
   const ctx = new Context()
   const vt = new VirtualTerminal(100, 24)
@@ -200,6 +210,12 @@ function fakeRunnerDeps(options: {
   const tuiSettings: TuiSettingsLike = {
     get: () => ({ theme: 'auto', footer: 'full', fullscreen: 'off', busyEnter: 'queue', localShellSandbox: 'bypass', history: {} }) as never,
     replace: () => undefined,
+  }
+  const config = new DirectConfigPort(ctx as never, undefined, () => undefined)
+  if (options.applyPermissionPreset !== undefined) {
+    ;(config.permissions as unknown as {
+      applyPermissionPreset: NonNullable<typeof options.applyPermissionPreset>
+    }).applyPermissionPreset = options.applyPermissionPreset
   }
   const runner: TuiCommandRunner = {
     ctx,
@@ -225,7 +241,7 @@ function fakeRunnerDeps(options: {
       turnOutline: () => undefined, sessionStatus: () => undefined,
     },
     catalog: new DirectCatalogPort(ctx as never, () => undefined),
-    config: new DirectConfigPort(ctx as never, undefined, () => undefined),
+    config,
     // The Remote branch shape: no Host registry mirror (Client-only view).
     commandRegistry: undefined,
     clientCommands: createClientCommandRegistry(parseCommand),
@@ -253,7 +269,7 @@ function fakeRunnerDeps(options: {
     imageLimits: () => undefined,
     insertIntoEditor: () => {},
     prepareDraftMessage: async (text) => ({ role: 'user', id: `u:${text}`, content: [{ type: 'text', text }], source: { kind: 'user' } }) as never,
-    signal: new AbortController().signal,
+    signal: options.signal ?? new AbortController().signal,
     switchSession: async () => undefined,
     transitionTo: async <T>(steps: { prepare?: () => Promise<void> | void; create: () => Promise<T> }) => {
       await steps.prepare?.()
@@ -292,7 +308,7 @@ function fakeRunnerDeps(options: {
     ctx,
     logError: () => {},
     diag: silentDiag,
-    signal: new AbortController().signal,
+    signal: options.signal ?? new AbortController().signal,
     app: () => app,
     notify: () => {},
     liveAgent: () => undefined,
@@ -416,13 +432,18 @@ function fakeRunnerDeps(options: {
     requestExit: () => {},
     exit: () => {},
   })
+  let facade: TuiCommandRunner | undefined
   return {
     surface,
     runner,
     app,
+    /** The facade `buildRunner` produced (the public TuiCommandRunner seam). */
+    builtRunner: () => facade,
+    /** The REAL current SessionScope the harness's scope authority captures. */
+    scope: () => scopeFacts.captureSessionScope(),
     /** Register the TUI commands (building the runner facade first). */
     register: () => {
-      surface.buildRunner(runner as never)
+      facade = surface.buildRunner(runner as never)
       surface.register()
     },
     dispose: () => {
@@ -717,6 +738,57 @@ test('CCR-9: a throwing official generation unsubscribe still disposes the coord
     assert.equal(source.unsubscribedCount(), 1)
   } finally {
     source.releaseRead(0, [])
+    harness.dispose()
+  }
+})
+
+/* ── PR-A: the CommandSurface signal-routing discriminator ─────────────── */
+
+test('CSR-1: the CommandSurface prefers the explicit operation signal and forwards abort state unchanged', async () => {
+  const lifetime = new AbortController().signal
+  const explicit = new AbortController().signal
+  const aborted = new AbortController()
+  aborted.abort()
+  const received: AbortSignal[] = []
+  const harness = fakeRunnerDeps({
+    currentSessionId: () => 'session-a',
+    signal: lifetime,
+    applyPermissionPreset: async (_sessionId, _presetId, signal) => {
+      received.push(signal)
+      return { kind: 'applied' }
+    },
+  })
+  try {
+    harness.register()
+    const facade = harness.builtRunner()
+    assert.ok(facade !== undefined, 'the CommandSurface built its TuiCommandRunner facade')
+    // The harness's captured scope is CURRENT by the same real scope authority
+    // production uses; its session id is irrelevant to this signal-routing
+    // proof (the real /yolo path carries the live id).
+    const scope = harness.scope() as never
+
+    assert.deepEqual(
+      await facade.applyPermissionPreset(scope, 'danger-full-access', explicit),
+      { ownership: 'current', outcome: { kind: 'applied' } },
+    )
+    assert.equal(received[0], explicit,
+      'an explicit per-operation signal wins over the surface lifetime by IDENTITY')
+
+    received.length = 0
+    assert.deepEqual(
+      await facade.applyPermissionPreset(scope, 'danger-full-access'),
+      { ownership: 'current', outcome: { kind: 'applied' } },
+    )
+    assert.equal(received[0], lifetime,
+      'without an explicit signal the surface lifetime signal is the fallback')
+
+    received.length = 0
+    await facade.applyPermissionPreset(scope, 'danger-full-access', aborted.signal)
+    assert.equal(received[0], aborted.signal,
+      'an already-aborted caller signal is forwarded unchanged, never replaced')
+    assert.equal(received[0]?.aborted, true,
+      'the official executor still observes the caller cancellation')
+  } finally {
     harness.dispose()
   }
 })
