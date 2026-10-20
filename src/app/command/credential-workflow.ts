@@ -124,7 +124,14 @@ export function resolveLoginDestination(
       // reference: `/login newroute` opens the prefilled Add Provider wizard,
       // while `/login my_key` / `/login NOVEL_KEY` remain explicit references.
       const knownRef = options.some(option => option.ref === match.ref)
-      if (!knownRef && ROUTE_PATTERN.test(arg)) return { kind: 'models', view: 'add-provider', route: arg }
+      if (!knownRef && ROUTE_PATTERN.test(arg)) {
+        // A flow-only route is a KNOWN route even without a provider option
+        // (mergeLoginTargets appends standalone flows): open its detail before
+        // treating the lowercase identifier as a new provider.
+        const flow = flowForRoute(generic, arg)
+        if (flow !== undefined) return { kind: 'models', view: 'provider', route: arg }
+        return { kind: 'models', view: 'add-provider', route: arg }
+      }
       return { kind: 'models', view: 'reference', ref: match.ref }
     }
     const option = options.find(candidate => candidate.ref === match.option.ref)
