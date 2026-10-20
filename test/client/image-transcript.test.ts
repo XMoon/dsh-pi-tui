@@ -1,0 +1,265 @@
+/**
+ * M7/M10/M11 integration tests: image-bearing messages fold into the
+ * transcript with ordered content blocks and render as thumbnails (plan
+ * §15, M10 resume, M11 tool-result).
+ * @module @xmoon76/dsh-pi-tui/image-transcript.test
+ */
+
+import assert from 'node:assert/strict'
+import { afterEach, test } from 'node:test'
+import { createToolResultMessage, ToolCallId, type ContentBlock } from '@deepseek-ai/dsh-llm'
+import { TranscriptFolder } from '../../src/transcript.ts'
+import { TuiApp } from '../../src/tui-app.ts'
+import { ImageLoader } from '../../src/client/media/image/loader.ts'
+import { VirtualTerminal } from '../support/virtual-terminal.ts'
+import type { ImageAttachmentRefLike } from '../../src/domain/media/types.ts'
+
+
+/** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file
+ * is disposed after each test — the process slot (the vendored fork
+ * keybindings are process-global) is released only by the FINAL dispose,
+ * never by stop() (see src/tui/process-slot.ts). */
+const startedApps = new Set<TuiApp>()
+afterEach(() => {
+  for (const app of [...startedApps]) {
+    startedApps.delete(app)
+    if (app.isDisposed()) continue
+    try { app.dispose() } catch {}
+  }
+})
+
+const IMAGE_REF: ImageAttachmentRefLike = {
+  attachmentId: 'att-img-1',
+  mediaType: 'image/png',
+  bytes: 4,
+  width: 800,
+  height: 600,
+  name: 'shot.png',
+}
+
+function userMessageEvent(content: unknown[], source: { kind: string } = { kind: 'user' }): never {
+  return { type: 'user/message', seq: 1, time: 1, data: { content, source } } as never
+}
+
+function assistantMessageEvent(content: unknown[]): never {
+  return { type: 'assistant/message', seq: 1, time: 1, data: { turn: 1, step: 0, message: { content } } } as never
+}
+
+function toolResultEvent(blocks: unknown[]): never {
+  return {
+    type: 'tool/result',
+    seq: 1,
+    time: 1,
+    data: {
+      turn: 0,
+      step: 0,
+      message: createToolResultMessage({
+        callId: ToolCallId('call-1'),
+        content: blocks as readonly ContentBlock[],
+        isError: false,
+      }),
+    },
+  } as never
+}
+
+test('a user message with images folds with ordered content blocks', () => {
+  const folder = new TranscriptFolder()
+  folder.apply([userMessageEvent([
+    { type: 'text', text: '分析 ' },
+    { type: 'image', attachment: IMAGE_REF },
+    { type: 'text', text: ' 的差异' },
+  ])])
+  const messages = folder.messages()
+  assert.equal(messages.length, 1)
+  const message = messages[0]!
+  assert.equal(message.kind, 'user')
+  if (message.kind !== 'user') return
+  // The FLAT text keeps an inline marker at the image's position (search
+  // and loader-less rendering consume `text`); the ordered `content` blocks
+  // stay the canonical form for thumbnail rendering.
+  assert.equal(message.text, '分析 🖼️ shot.png 的差异')
+  assert.deepEqual(message.content?.map(block => block.type), ['text', 'image', 'text'])
+  assert.equal(message.content?.[1]?.type === 'image' && message.content[1].attachment.attachmentId, 'att-img-1')
+})
+
+test('an image-only user message folds (never dropped as empty text)', () => {
+  const folder = new TranscriptFolder()
+  folder.apply([userMessageEvent([{ type: 'image', attachment: IMAGE_REF }])])
+  const messages = folder.messages()
+  assert.equal(messages.length, 1)
+  assert.equal(messages[0]!.kind, 'user')
+})
+
+test('a glued draft still gets a separating space around the inline marker', () => {
+  // The /image insertion leaves NO space before the placeholder
+  // (`这张图是啥[image…]`), so the flat projection must add one — the
+  // marker must never glue to the preceding text.
+  const folder = new TranscriptFolder()
+  folder.apply([userMessageEvent([
+    { type: 'text', text: '这张图是啥' },
+    { type: 'image', attachment: IMAGE_REF },
+    { type: 'text', text: '看看' },
+  ])])
+  const message = folder.messages()[0]!
+  assert.equal(message.kind, 'user')
+  if (message.kind !== 'user') return
+  assert.equal(message.text, '这张图是啥 🖼️ shot.png 看看')
+})
+
+test('an assistant image block folds without crashing and keeps its blocks', () => {
+  const folder = new TranscriptFolder()
+  folder.apply([assistantMessageEvent([
+    { type: 'text', text: 'result:' },
+    { type: 'image', attachment: IMAGE_REF },
+  ])])
+  const messages = folder.messages()
+  const assistant = messages.find(message => message.kind === 'assistant')
+  assert.ok(assistant !== undefined, 'assistant entry exists')
+  if (assistant === undefined || assistant.kind !== 'assistant') return
+  assert.equal(assistant.text, 'result:')
+  assert.equal(assistant.content?.length, 2)
+})
+
+test('a tool result with an image keeps resultBlocks and folds [text, image]', () => {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    { type: 'tool/call', seq: 1, time: 1, data: { turn: 0, step: 0, callId: 'call-1', name: 'read_image', arguments: '{}' } } as never,
+    toolResultEvent([
+      { type: 'text', text: 'caption' },
+      { type: 'image', attachment: IMAGE_REF },
+    ]),
+  ])
+  const messages = folder.messages()
+  const tool = messages.find(message => message.kind === 'tool')
+  assert.ok(tool !== undefined)
+  if (tool === undefined || tool.kind !== 'tool') return
+  assert.equal(tool.resultBlocks?.length, 2)
+  assert.equal(tool.resultBlocks?.[1]?.type === 'image' && tool.resultBlocks[1].attachment?.attachmentId, 'att-img-1')
+})
+
+function startAppWithLoader(): { vt: VirtualTerminal; app: TuiApp; loader: ImageLoader } {
+  const vt = new VirtualTerminal(100, 24)
+  const loader = new ImageLoader(async () => ({ ref: {}, data: new Uint8Array([0x89, 0x50, 0x4e, 0x47]) }))
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
+    imageLoader: loader,
+    imageTheme: { fallbackColor: (text) => text },
+  })
+  app.start()
+  startedApps.add(app)
+  return { vt, app, loader }
+}
+
+test('the TUI renders a user message with an image (fallback line, then inline-ready)', async () => {
+  const { vt, app, loader } = startAppWithLoader()
+  await vt.waitForRender()
+  // Feed one folded user message through the app's public surface: rebuild
+  // the transcript from the folder output (the same path the runner uses).
+  const folder = new TranscriptFolder()
+  folder.apply([userMessageEvent([
+    { type: 'text', text: 'check ' },
+    { type: 'image', attachment: IMAGE_REF },
+  ])])
+  app.setTranscript(folder.messages())
+  await vt.waitForRender()
+  let view = vt.getViewport().join('\n')
+  // The image renders as the fallback summary line (loader resolves async;
+  // the first frame shows the pending text).
+  assert.ok(view.includes('🖼️ '), `thumbnail fallback visible:\n${view}`)
+  assert.ok(view.includes('800×600'), `dimensions in fallback:\n${view}`)
+  // The user BUBBLE itself keeps an inline `🖼️ name` marker at the image's
+  // position — the message never reads as text-only with the picture
+  // silently moved to its own row.
+  assert.ok(view.includes('check 🖼️ shot.png'), `bubble marker missing:\n${view}`)
+  // After the loader settles, a notified repaint keeps the fallback for
+  // non-inline terminals (headless caps default to no images).
+  await new Promise(resolve => setTimeout(resolve, 30))
+  await vt.waitForRender()
+  view = vt.getViewport().join('\n')
+  assert.ok(view.includes('🖼️ '), 'settled state still shows the text fallback headless')
+  app.stop()
+})
+
+test('a tool-result image renders inside the tool card (generic tool)', async () => {
+  const { vt, app } = startAppWithLoader()
+  app.setTranscriptDetailExpanded(true)
+  const folder = new TranscriptFolder()
+  folder.apply([
+    { type: 'tool/call', seq: 1, time: 1, data: { turn: 0, step: 0, callId: 'call-1', name: 'screenshot_tool', arguments: [] } } as never,
+    toolResultEvent([
+      { type: 'text', text: 'caption' },
+      { type: 'image', attachment: IMAGE_REF },
+    ]),
+  ])
+  app.setTranscript(folder.messages())
+  await vt.waitForRender()
+  const view = vt.getViewport().join('\n')
+  assert.ok(view.includes('🖼️ '), `tool-card image fallback visible:\n${view}`)
+  assert.ok(view.includes('caption'), 'the text block still renders')
+  app.stop()
+})
+
+test('a read_image tool card renders its image blocks as thumbnails', async () => {
+  const { vt, app } = startAppWithLoader()
+  app.setTranscriptDetailExpanded(true)
+  const folder = new TranscriptFolder()
+  folder.apply([
+    { type: 'tool/call', seq: 1, time: 1, data: { turn: 0, step: 0, callId: 'call-1', name: 'read_image', arguments: [] } } as never,
+    toolResultEvent([
+      { type: 'image', attachment: IMAGE_REF },
+    ]),
+  ])
+  app.setTranscript(folder.messages())
+  await vt.waitForRender()
+  const view = vt.getViewport().join('\n')
+  assert.ok(view.includes('🖼️ '), `read_image card shows the thumbnail:\n${view}`)
+  app.stop()
+})
+
+test('a rebuild (resize) keeps the thumbnail loader subscription alive (non-owning projection)', async () => {
+  // PR review round 3 blocker: rebuildMessages clears messagesView, and
+  // the fork's Container.clear() DISPOSES every child. The gutter wrapper
+  // must be NON-OWNING (the messageComponents cache owns the cached
+  // component lifecycle), or any rebuild — the first frame and every
+  // resize now rebuild — disposes the CACHED ImageThumbnail while the
+  // cache reuses it: the loader subscription drops, and the settle-time
+  // repaint is lost (the loading row sticks until an unrelated repaint).
+  let resolveRead!: (value: { ref: unknown; data: Uint8Array }) => void
+  const loader = new ImageLoader(() => new Promise<{ ref: unknown; data: Uint8Array }>(resolve => {
+    resolveRead = resolve
+  }))
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
+    imageLoader: loader,
+    imageTheme: { fallbackColor: (text) => text },
+  })
+  app.start()
+  startedApps.add(app)
+  const folder = new TranscriptFolder()
+  folder.apply([userMessageEvent([
+    { type: 'text', text: 'check ' },
+    { type: 'image', attachment: IMAGE_REF },
+  ])])
+  app.setTranscript(folder.messages())
+  await vt.waitForRender()
+  // The first geometry pass already clears + re-adds the projection: the
+  // subscription count is the regression lock (pre-fix it dropped to 0
+  // on the very first frame).
+  assert.equal(loader.listenerCount(), 1, 'a rebuild must not dispose the cached thumbnail (non-owning projection)')
+  let view = vt.getViewport().join('\n')
+  assert.ok(view.includes('🖼️ shot.png · 800×600'), `the thumbnail row must render:\n${view}`)
+  // A resize rebuild must keep the same cached thumbnail alive — its
+  // loader subscription still reaches it.
+  vt.resize(100, 24)
+  await vt.waitForRender()
+  assert.equal(loader.listenerCount(), 1, 'a resize must NOT drop the loader subscription')
+  // The settle still reaches the live subscriber: it invalidates the
+  // component, so a repaint reads the resolved state.
+  resolveRead?.({ ref: {}, data: new Uint8Array([0x89, 0x50, 0x4e, 0x47]) })
+  await new Promise(resolve => setTimeout(resolve, 10))
+  assert.equal(loader.listenerCount(), 1, 'the subscriber must survive the settle')
+  app.requestRender(true)
+  await vt.waitForRender()
+  view = vt.getViewport().join('\n')
+  assert.ok(view.includes('🖼️ shot.png · 800×600'), 'the resolved thumbnail row must still render after the settle')
+  app.stop()
+})

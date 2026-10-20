@@ -117,7 +117,7 @@ explicitly (`renderFooter()`); Question/Approval ride the status-store notify.
 A user binding, or a leader completion, of `app.tasks.open` is another
 TRIGGER of the same action and obeys the same ownership boundary (the
 modal inspection plane refuses non-inspection completions), so it is never
-a way across a modal. `test/surface-modal-affordance.test.ts` locks the
+a way across a modal. `test/tui/surface-modal-affordance.test.ts` locks the
 modal source→route→footer behavior, and the keybinding integration suite
 locks the remap/leader boundary.
 

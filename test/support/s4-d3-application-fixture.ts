@@ -28,7 +28,7 @@ import type { TestContext } from 'node:test'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { Config as TuiConfig, apply as applyTui } from '../../src/index.ts'
 import { TUI_STARTUP_SERVICE } from '../../src/startup.ts'
-import { VirtualTerminal } from '../virtual-terminal.ts'
+import { VirtualTerminal } from './virtual-terminal.ts'
 import { installVirtualProcessTerminal } from './runner-harness.ts'
 import {
   startS4D2Host,

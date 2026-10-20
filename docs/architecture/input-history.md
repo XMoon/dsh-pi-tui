@@ -167,7 +167,7 @@ row written before creation would carry no sessionId and vanish from
 `/sessions`, `!!` shells) persist with `sessionId: undefined` and stay
 visible in `Current directory` / `All directories`. The ordering contract
 lives in `src/app/submission/history-persist.ts` (`persistAfterSession`), pinned by
-`test/history-persist.test.ts` (the merge gate).
+`test/app/history-persist.test.ts` (the merge gate).
 
 ### Bounded recent-first scanning (the perf contract)
 
@@ -210,8 +210,8 @@ The file is oldest-first; `TuiApp.resetInputHistory` takes **newest-first**
 (`seedInputHistory` iterates it reversed into the editor, whose recall list
 is newest-first). The runner therefore reverses the loaded entries before
 seeding. The first `↑` must recall the MOST RECENT submission — this is
-pinned by `test/input-experience.test.ts` ("seeded input history recalls
-entries with the up arrow") and `test/tui-app.test.ts`.
+pinned by `test/tui/input-experience.test.ts` ("seeded input history recalls
+entries with the up arrow") and `test/client/tui-app.test.ts`.
 
 ### Seeding at boot (trap: deferred start has no session)
 
@@ -366,24 +366,24 @@ unwritten entries.
   (`parseHistoryLines` / `parseHistoryRecords`), read-only load
   (`loadHistoryFile` / `loadHistoryRecords` / `loadRecallHistory`), append
   rules (`appendHistoryLine` v1 / `appendHistoryRecord` v2). Pinned by
-  `test/history.test.ts`.
+  `test/client/history.test.ts`.
 - `src/client/history/search.ts` — the Ctrl+R search source (`HistorySearchSource`
   seam + `FileHistorySearchSource`): scope, bounded recent-first reverse
   scanning, the global scan budget, the page/continuation contract, legacy
   cwd recovery, matching, ordering, dedupe, cancellation. Pinned by
-  `test/history-search.test.ts`.
+  `test/client/history-search.test.ts`.
 - `src/client/history/reverse-reader.ts` — the reverse JSONL batch reader
   (EOF-backwards chunks, cross-chunk/UTF-8-safe line assembly, revision-
   bound continuation cursors, abort). Pinned by
-  `test/history-reverse-reader.test.ts`.
+  `test/client/history-reverse-reader.test.ts`.
 - `src/tui/panels/history-panel.ts` — the Ctrl+R modal panel (query input, scope
   tabs, list, details, responsive layout). Pinned by
-  `test/history-panel.test.ts` and the `test/ctrl-r.test.ts` integration
+  `test/client/history-panel.test.ts` and the `test/client/ctrl-r.test.ts` integration
   suite.
 - `src/app/submission/history-persist.ts` — the session-scope persist gate: the pure
   persist decision (`persistHistoryRecord`) and the deferred-start
   ordering contract (`persistAfterSession`). Pinned by
-  `test/history-persist.test.ts`.
+  `test/app/history-persist.test.ts`.
 - Runner wiring in `src/index.ts`: boot seed, per-session seed in
   `initLiveSession`, append on submit in `dispatchUserInput` (v2 rows,
   after session creation for agent-facing submissions), migration, and the

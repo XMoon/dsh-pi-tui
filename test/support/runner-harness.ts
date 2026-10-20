@@ -5,7 +5,7 @@ import { SESSION_FORMAT_VERSION, SessionSeq, type SessionEvent } from '@deepseek
 import { ProcessTerminal } from '@xmoon76/pi-tui'
 import { apply as applyRunner, Config as TuiConfigSchema } from '../../src/index.ts'
 import { TUI_STARTUP_SERVICE } from '../../src/startup.ts'
-import type { VirtualTerminal } from '../virtual-terminal.ts'
+import type { VirtualTerminal } from './virtual-terminal.ts'
 
 /** Build a minimal event envelope for tests. The type parameter is widened
  * to any string so legacy v1 `assistant/chunk` events (absent from master's

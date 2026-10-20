@@ -199,21 +199,21 @@ session identity there is no Host workspace to impersonate.
 The seam is `updateTerminalTitle({ sessionTitle, cwd: sessionCwdFact() })`; the
 cwd source is never re-chosen in the terminal adapter. Authority:
 `src/app/surface/status-runtime.ts`, `src/tui/terminal/title.ts`. Proof:
-`test/tern-terminal.test.ts` (fact/observable matrix) and
-`test/terminal-title.test.ts` (connected OSC 0 proof).
+`test/app/tern-terminal.test.ts` (fact/observable matrix) and
+`test/tui/terminal-title.test.ts` (connected OSC 0 proof).
 
 ## Test matrix and repro
 
 | Contract | Test owner | What it proves |
 |---|---|---|
-| projection semantics (whitelist, CR/TAB, incomplete sequences, 1 MiB bound) | `test/terminal-display-sanitize.test.ts` | pure `string -> string` behaviour |
-| untrusted transcript bytes on the wire | `test/rendering.test.ts` | Full/Compact/Focus, every message class, raw source unchanged, one-row command/tool/Activity identities |
-| Job body / search / copy | `test/job-inspector-workspace.test.ts`, `test/job-output-interaction.test.ts`, `test/job-workspace-visual.test.ts` | hostile output, CR records, Find on the painted row, byte-exact copy |
-| local `!` shell log | `test/local-shell-card.test.ts` | whitelisted SGR only, CR frames readable |
-| sibling surfaces | `test/approval.test.ts`, `test/plugin-manager-panel.test.ts`, `test/plugin-manager-install.test.ts`, `test/model-picker.test.ts`, `test/job-output-viewer.test.ts`, `test/session-picker-content-search.test.ts` | no fake hint row via CR, no OSC in chrome, LF/CRLF/TAB/OSC folded onto ONE row per single-line field |
-| builtin footer + welcome chrome | `test/footer-display-safety.test.ts`, `test/rendering.test.ts` | hostile cwd/model/branch/project/preset/version rendered through the REAL default footer and welcome card: one physical row each, no OSC/C1 at the TTY, raw workspace authority untouched |
-| TSP interaction labels | `test/tern-tsp-interaction.test.ts` | approval tool identity / question header / option labels carry no LF or control in their SDK props; question body/detail and option descriptions stay multi-line |
-| negative controls | `test/footer-ansi-sanitize.test.ts`, `test/terminal-title.test.ts`, `test/history-panel.test.ts` | the specialized contracts above still work |
+| projection semantics (whitelist, CR/TAB, incomplete sequences, 1 MiB bound) | `test/tui/terminal-display-sanitize.test.ts` | pure `string -> string` behaviour |
+| untrusted transcript bytes on the wire | `test/domain/rendering.test.ts` | Full/Compact/Focus, every message class, raw source unchanged, one-row command/tool/Activity identities |
+| Job body / search / copy | `test/app/job-inspector-workspace.test.ts`, `test/app/job-output-interaction.test.ts`, `test/app/job-workspace-visual.test.ts` | hostile output, CR records, Find on the painted row, byte-exact copy |
+| local `!` shell log | `test/tui/local-shell-card.test.ts` | whitelisted SGR only, CR frames readable |
+| sibling surfaces | `test/domain/approval.test.ts`, `test/plugin-manager-panel.test.ts`, `test/app/plugin-manager-install.test.ts`, `test/tui/model-picker.test.ts`, `test/integration/job-output-viewer.test.ts`, `test/app/session-picker-content-search.test.ts` | no fake hint row via CR, no OSC in chrome, LF/CRLF/TAB/OSC folded onto ONE row per single-line field |
+| builtin footer + welcome chrome | `test/domain/footer-display-safety.test.ts`, `test/domain/rendering.test.ts` | hostile cwd/model/branch/project/preset/version rendered through the REAL default footer and welcome card: one physical row each, no OSC/C1 at the TTY, raw workspace authority untouched |
+| TSP interaction labels | `test/app/tern-tsp-interaction.test.ts` | approval tool identity / question header / option labels carry no LF or control in their SDK props; question body/detail and option descriptions stay multi-line |
+| negative controls | `test/tui/footer-ansi-sanitize.test.ts`, `test/tui/terminal-title.test.ts`, `test/client/history-panel.test.ts` | the specialized contracts above still work |
 
 Minimal reproduction:
 
@@ -247,8 +247,8 @@ Must-not: mutate the source `ContentBlock`s or an assistant/tool `textOf`; let
 search miss the image identity; let a loader-less host drop the image; treat the
 marker as a second persisted representation.
 
-Proof: `test/image-transcript.test.ts`, `test/folding.test.ts`,
-`test/queue-notices.test.ts`.
+Proof: `test/client/image-transcript.test.ts`, `test/client/folding.test.ts`,
+`test/app/queue-notices.test.ts`.
 
 ## Surface-specific projection
 
@@ -263,8 +263,8 @@ applications are load-bearing:
   `chromeText()` projection. The Search row is user/query text and is outside
   this boundary. Never sanitize after theme styling, never sanitize the copy
   payload/DTO, and do not add a second single-line helper.
-  Proof: `test/task-browser-text-safety.test.ts`,
-  `test/task-center-refactor.test.ts`.
+  Proof: `test/app/task-browser-text-safety.test.ts`,
+  `test/app/task-center-refactor.test.ts`.
 - **Job Command / Output copy.** Output Copy sends the captured
   `JobObservedSnapshot.text` verbatim; Command Copy All sends the original
   `label` byte-exact (whitespace/TAB/CRLF/trailing newline survive); drag sends
@@ -273,6 +273,6 @@ applications are load-bearing:
   rewritten, and no payload is inferred from painted/truncated text. `Copy sent`
   proves emission only, never an OS-clipboard receipt. Authority:
   `src/tui/components/source-text-layout.ts`, `JobCommandDocument`/`Reader`,
-  `ClientActions.copySelection`. Proof: `test/job-workspace-visual.test.ts`
+  `ClientActions.copySelection`. Proof: `test/app/job-workspace-visual.test.ts`
   ("the Command page owns the EXACT selection copy", "copies only the original
   label").

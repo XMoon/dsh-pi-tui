@@ -20,7 +20,7 @@ import type {
   PluginRowFact,
   PluginSpecInspectionFact,
 } from '../../src/runtime/plugin-manager-port.ts'
-import { VirtualTerminal } from '../virtual-terminal.ts'
+import { VirtualTerminal } from './virtual-terminal.ts'
 
 export function plain(lines: readonly string[]): string {
   return lines.map(line => line.replace(/\x1b\[[0-9;]*m/g, '')).join('\n')

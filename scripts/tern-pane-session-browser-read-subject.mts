@@ -230,7 +230,7 @@ const observedPresentation: SessionBrowserPresentation = {
 
 const diag = createDiag({ stderrLevel: 'off' })
 // This controlled read fixture never switches sessions; Direct L6 is covered by
-// test/tern-tsp-session-browser-commands.test.ts with the real runtime scope.
+// test/runtime/direct/tern-tsp-session-browser-commands.test.ts with the real runtime scope.
 const readOnlyScope = { sessionId: currentId } as unknown as SessionScope
 const owner = createSessionBrowserReadOwner({
   reader: read,

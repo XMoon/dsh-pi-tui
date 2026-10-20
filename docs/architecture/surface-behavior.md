@@ -458,8 +458,8 @@ fabricates matches).
 
 Authority: `src/runtime/direct/file-completion/host-discovery.ts`,
 `src/app/remote/pi-tui-file-reference-host.ts` and the private
-`piTuiFileReferences` contract. Proof: `test/host-file-port.test.ts`,
-`test/remote-host-file-port.test.ts`.
+`piTuiFileReferences` contract. Proof: `test/client/host-file-port.test.ts`,
+`test/runtime/remote/remote-host-file-port.test.ts`.
 
 ## `!` / `!!` shell input
 

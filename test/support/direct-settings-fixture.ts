@@ -8,7 +8,7 @@
  * `SettingsForms.mutate` → the Loader committing the volatile reference →
  * authoritative re-read" is the real chain. The `SettingsForms` stand-in owns
  * the official path-op shape (describe/mutate + revision fence), exactly like
- * `test/tui-settings-direct.test.ts`.
+ * `test/app/tui-settings-direct.test.ts`.
  * @module @xmoon76/dsh-pi-tui/support/direct-settings-fixture
  */
 

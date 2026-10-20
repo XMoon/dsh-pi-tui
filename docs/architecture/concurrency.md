@@ -610,7 +610,7 @@ seconds on a silent no-feedback UI, and its one-time force-through token
 invited exactly the double-write it existed to prevent. With the old guard
 gone, the single-writer boundary is the DSH `SessionWriteLease`, and the
 submit hot path performs ZERO persistence work (a runner-level test pins
-this: `test/submit-hot-path.test.ts`). The web surface and other
+this: `test/app/submit-hot-path.test.ts`). The web surface and other
 pre-baseline TUIs are out of scope by design — they are not part of this
 project's ownership model.
 
@@ -635,4 +635,4 @@ the claim; a constructed app never touches the global keybindings.
 
 Authority: `src/tui/process-slot.ts` (`claimProcessTuiSlot`,
 `releaseProcessTuiSlot`) + `TuiApp.start/stop/dispose`.
-Proof: `test/process-tui-slot.test.ts`.
+Proof: `test/tui/process-tui-slot.test.ts`.

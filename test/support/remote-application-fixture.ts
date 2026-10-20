@@ -2,8 +2,8 @@
  * Shared M3-4 PR1 remote-application test fixture: the ordinary rc.2 Host
  * Context (the same base shape as the M3-1 L5 suite), the unsupported
  * prompt-serializer stand-in, and the bounded wait helper. Consumers:
- * test/remote-application-runtime.test.ts (the aggregate) and
- * test/application-runtime-selection.test.ts (the real selection chain).
+ * test/app/remote-application-runtime.test.ts (the aggregate) and
+ * test/app/application-runtime-selection.test.ts (the real selection chain).
  *
  * FIXTURE MANIFEST (L5 evidence governance; see each consuming suite's own
  * header for the per-suite view):
