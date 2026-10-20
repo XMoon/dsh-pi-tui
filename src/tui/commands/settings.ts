@@ -2809,6 +2809,12 @@ export function createSettingsCommands(deps: SettingsCommandDeps): SettingsComma
    *  performed here. */
   const openAuthWorkspace = (destination: AuthDestination): CommandResult => {
     if (destination.kind === 'error') return { kind: 'error', text: destination.message }
+    if ((app as unknown as import('../../tui-app.ts').TuiApp | undefined) === undefined) {
+      return {
+        kind: 'error',
+        text: 'the Settings Models/Account workspace is not available in this renderer',
+      }
+    }
     try {
       if (destination.kind === 'account') {
         openSettingsWorkspaceWith({

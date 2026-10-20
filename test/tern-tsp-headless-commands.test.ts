@@ -485,7 +485,7 @@ test('A07: /yolo applies danger-full-access through the official permission writ
 
 // ── A08/A10/A11: /logout ────────────────────────────────────────────────────
 
-test('A08: /logout <reference> clears the credential and reports it visibly', async (t) => {
+test('A08: /logout <reference> is refused on the TSP renderer and never mutates the credential', async (t) => {
   const life = (await import('./support/temp-lifecycle.ts')).testLifecycle(t)
   const fixture = await createDirectTspFixture(life, { deltas: ['A08'] })
   const secret = 'sk-b2a-secret-value'
@@ -503,12 +503,14 @@ test('A08: /logout <reference> clears the credential and reports it visibly', as
     // The official route name resolves to its apiKeyEnv reference through the
     // handler's OWN resolver (never a name guess by the gate).
     await submitInput(fixture, '/logout deepseek')
-    await waitFor('the logout success notice', () =>
-      dockNotices(fixture).some(text => text.includes(`API key ${ref} cleared`)), 25_000)
-    assert.equal(await credentials.resolve(ref), undefined,
-      'the authoritative credential read confirms the reference is gone')
+    await waitFor('the TSP workspace refusal', () =>
+      fixture.pane.output.text().includes('Settings Models/Account workspace is not available in this renderer'), 25_000)
+    assert.notEqual(await credentials.resolve(ref), undefined,
+      'the TSP refusal never clears the stored reference')
     assert.ok(!fixture.pane.output.text().includes(secret),
       'no message on the wire ever carries the credential VALUE')
+    assert.ok(!fixture.pane.output.text().includes(`API key ${ref} cleared`),
+      'the TSP renderer never reports a credential as cleared')
   } finally {
     await fixture.settle()
   }
@@ -535,7 +537,7 @@ test('A08: a composition without the credentials service reports the refusal and
   }
 })
 
-test('A08: a THROWING credential port surfaces the failure and never reports a clear', async (t) => {
+test('A08: the TSP refusal never reaches a throwing credential port', async (t) => {
   const life = (await import('./support/temp-lifecycle.ts')).testLifecycle(t)
   const fixture = await createDirectTspFixture(life, { deltas: ['A08-THROW'] })
   const ref = 'DEEPSEEK_API_KEY'
@@ -559,12 +561,12 @@ test('A08: a THROWING credential port surfaces the failure and never reports a c
     await service.set(ref, secret)
     prototype.unset = () => { throw new Error('controlled credential unset failure') }
     await submitInput(fixture, '/logout deepseek')
-    await waitFor('the throwing-port error notice', () =>
-      fixture.pane.output.text().includes('controlled credential unset failure'), 25_000)
+    await waitFor('the TSP workspace refusal', () =>
+      fixture.pane.output.text().includes('Settings Models/Account workspace is not available in this renderer'), 25_000)
     assert.ok(!fixture.pane.output.text().includes('cleared'),
-      'a throwing port is never reported as a cleared credential')
+      'the TSP refusal is never reported as a cleared credential')
     assert.notEqual(await service.resolve(ref), undefined,
-      'the stored reference survives the failed logout')
+      'the stored reference survives the TSP refusal without calling unset')
   } finally {
     if (hadOwnUnset) prototype.unset = originalUnset
     else delete prototype.unset
