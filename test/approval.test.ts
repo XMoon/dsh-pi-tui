@@ -424,6 +424,26 @@ test('a grant below the minimum sheet paints one truthful resize row, never a cl
   assert.equal(await decision, 'rejected')
 })
 
+test('a narrow short grant with no room for title and body degrades to the resize row', async () => {
+  for (const [columns, rows] of [[16, 8], [30, 8]] as const) {
+    const { vt, app } = startApp(columns, rows)
+    const decision = app.showApprovalPrompt({
+      toolName: 'bash',
+      reason: 'narrow short body',
+      arguments: LONG_ARGUMENTS,
+      danger: true,
+    })
+    const view = await viewport(vt)
+    assert.ok(view.includes('Resize'), `${columns}x${rows} must advertise resizing:\n${view}`)
+    assert.ok(!view.includes('[y] Allow once'),
+      `${columns}x${rows} must not paint a decision without the title/reading row:\n${view}`)
+    vt.sendInput('n')
+    assert.equal(await decision, 'rejected')
+    app.dispose()
+    startedApps.delete(app)
+  }
+})
+
 test('fullscreen 80x8 paints a real decision cell and keeps the resize fact', async () => {
   const { vt, app } = startApp(80, 8)
   app.setFullscreen(true)

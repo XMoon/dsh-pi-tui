@@ -209,6 +209,10 @@ class ApprovalSheet implements Component {
   private lastContentWidth = 0
   /** The semantic layout identity a click gesture was pressed against. */
   private layoutKey = ''
+  /** Whether the LAST render showed the title, a reading row (when content
+   * exists) and all three decision actions. The seat frame replaces an
+   * dishonest layout with one explicit resize row. */
+  private layoutHonest = false
   /** The live press gesture (object identity is part of the release fence). */
   private mousePressGesture: ApprovalMouseGesture | undefined
 
@@ -458,6 +462,12 @@ class ApprovalSheet implements Component {
       if (plain !== '') lines.push(painted)
     }
     this.actionHits = hits
+    const paintedActions = new Set(actionRows.flat().map(label => label.action))
+    this.layoutHonest = titleShown !== ''
+      && (body.length === 0 || viewport > 0)
+      && paintedActions.has('allow-once')
+      && paintedActions.has('reject')
+      && paintedActions.has('cancel')
     this.layoutKey = [
       contentWidth,
       maxRows,
@@ -471,8 +481,11 @@ class ApprovalSheet implements Component {
     return lines
   }
 
-  /** Record a fullscreen action press. Only a painted action cell is a
-   * target; blank space, borders and the scroll hint return undefined. */
+  /** Whether the last sheet render was truthful (title, a reading row when
+   * content exists, and all three decisions). */
+  isLayoutHonest(): boolean {
+    return this.layoutHonest
+  }
   beginMousePress(row: number, x: number): ApprovalMouseGesture | undefined {
     this.mousePressGesture = undefined
     if (!this.options.mouseEnabled()) return undefined
@@ -619,6 +632,15 @@ export class ApprovalSheetFrame extends Frame {
     }
     this.sheet.setMaxRows(Math.max(1, grant - 2))
     const out = super.render(width)
+    if (!this.sheet.isLayoutHonest()) {
+      // The width/height combination cannot show the title, a reading row and
+      // all three decisions inside the real grant. Do not paint a partial
+      // action sheet; keep one truthful resize row and leave the keyboard
+      // decisions to the runtime.
+      this.sheet.clearProjection()
+      this.lastRows = 1
+      return [truncateToWidth('Resize to inspect more', Math.max(1, width), '…')]
+    }
     this.lastRows = out.length
     return out
   }
