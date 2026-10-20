@@ -337,6 +337,20 @@ class ApprovalSheet implements Component {
     return color.textDim(`rows ${start}–${end}/${total} · ${more}`)
   }
 
+  /** Paint a pinned title row, keeping a compact danger fact in the error token
+   * instead of borrowing the title's strong ink. */
+  private paintTitle(title: string): string {
+    if (this.request.danger !== true) return color.textStrong(title)
+    const dangerText = '⚠ Dangerous command'
+    const dangerStart = title.indexOf(dangerText)
+    if (dangerStart !== -1) {
+      return `${color.textStrong(title.slice(0, dangerStart))}${color.error(dangerText)}${color.textStrong(title.slice(dangerStart + dangerText.length))}`
+    }
+    const glyph = title.indexOf('⚠')
+    if (glyph === -1) return color.textStrong(title)
+    return `${color.textStrong(title.slice(0, glyph))}${color.error('⚠')}${color.textStrong(title.slice(glyph + 1))}`
+  }
+
   render(width: number): string[] {
     const contentWidth = Math.max(1, Math.floor(width))
     this.lastContentWidth = contentWidth
@@ -440,7 +454,7 @@ class ApprovalSheet implements Component {
     }
 
     const lines: string[] = []
-    if (titleShown !== '') lines.push(color.textStrong(titleShown))
+    if (titleShown !== '') lines.push(this.paintTitle(titleShown))
     if (dangerShown !== '') lines.push(color.error(dangerShown))
     this.bodyTop = lines.length
     for (let index = 0; index < viewport; index += 1) {
@@ -641,13 +655,11 @@ export class ApprovalSheetFrame extends Frame {
   }
 
   /** The truthful one-row degradation; a dangerous request keeps its warning
-   * glyph even when nothing else fits. */
+   * glyph in the error token even when nothing else fits. */
   private resizeRow(width: number): string[] {
-    return [truncateToWidth(
-      this.danger ? '⚠ Resize to inspect more' : 'Resize to inspect more',
-      Math.max(1, width),
-      '…',
-    )]
+    const plain = this.danger ? '⚠ Resize to inspect more' : 'Resize to inspect more'
+    const cropped = truncateToWidth(plain, Math.max(1, width), '…')
+    return [this.danger ? cropped.replace('⚠', color.error('⚠')) : cropped]
   }
 
   render(width: number): string[] {

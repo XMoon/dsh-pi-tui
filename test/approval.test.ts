@@ -9,6 +9,7 @@ import assert from 'node:assert/strict'
 import { afterEach, test } from 'node:test'
 import { TuiApp, type ApprovalOutcome } from '../src/tui-app.ts'
 import { parseUserKeybindings } from '../src/tui/keybindings/config.ts'
+import { color } from '../src/tui/theme/runtime.ts'
 import { VirtualTerminal } from './virtual-terminal.ts'
 
 /** Re-vendor lifecycle follow-up P3: every TuiApp started in this file is
@@ -389,6 +390,8 @@ test('short surfaces keep the title/danger, one reading row, actions and a resiz
     assert.ok(view.includes('Dangerous command'), `${columns}x${rows} danger fact missing:\n${view}`)
     assert.ok(view.includes('Reason: line one'), `${columns}x${rows} one real reading row missing:\n${view}`)
     assert.ok(view.includes('Resize to inspect more'), `${columns}x${rows} resize fact missing:\n${view}`)
+    assert.ok(vt.writes.join('').includes(color.error('⚠ Dangerous command')),
+      `${columns}x${rows} compact danger must use the error token`)
     vt.sendInput('n')
     assert.equal(await decision, 'rejected')
     app.dispose()
@@ -423,6 +426,8 @@ test('a long dangerous tool keeps the warning fact in a narrow title', async () 
   })
   const view = await viewport(vt)
   assert.ok(view.includes('⚠'), `the danger glyph must survive the narrow title fallback:\n${view}`)
+  assert.ok(vt.writes.join('').includes(color.error('⚠')),
+    'the compact fallback warning glyph must use the error token')
   assert.ok(view.includes('very'), `the tool identity must stay partially identifiable:\n${view}`)
   assert.ok(view.includes('Resize'), `the resize cue must stay visible:\n${view}`)
   assert.ok(view.includes('danger'), `the reading row must stay visible:\n${view}`)
@@ -438,6 +443,8 @@ test('a grant below the minimum sheet paints one truthful resize row, never a cl
   const view = await viewport(vt)
   assert.ok(view.includes('Resize'), `the resize fact must survive an impossible grant:\n${view}`)
   assert.ok(view.includes('⚠'), `the danger fact must survive an impossible grant:\n${view}`)
+  assert.ok(vt.writes.join('').includes(color.error('⚠')),
+    'the resize-only danger glyph must use the error token')
   assert.ok(!view.includes('[y] Allow once'), `no action cell may survive an impossible grant:\n${view}`)
   assert.ok(!view.includes('╭'), `the tiny grant must not paint a clipped box:\n${view}`)
   vt.sendInput('n')
