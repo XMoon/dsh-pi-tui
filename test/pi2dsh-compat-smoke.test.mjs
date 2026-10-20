@@ -4,6 +4,8 @@ import test from 'node:test'
 import { join } from 'node:path'
 
 import { testLifecycle } from './support/temp-lifecycle.ts'
+import { API_VERSION } from '../src/extension/public-types.ts'
+import { UNSTABLE_API_LEVEL } from '../src/extension/unstable-types.ts'
 import {
   assertNoCompatibilityFailures,
   assertOfficialPresetHeader,
@@ -33,6 +35,7 @@ import {
   CI_ECOSYSTEM_TIMEOUT_MS,
   CLEANUP_BUDGET_MS,
   GATE_BUDGET_MS,
+  REQUIRED_CONTRACTS,
   run,
 } from '../scripts/pi2dsh-compat-smoke.mjs'
 
@@ -80,6 +83,32 @@ test('pi2dsh smoke treats the compatibility manifest as its version source of tr
   assert.doesNotThrow(() => validateManifest(manifest))
   assert.throws(() => validateManifest({ ...manifest, pi2dshVersion: 'not-a-version' }), /exact pi2dsh version/u)
   assert.throws(() => validateManifest({ ...manifest, dshVersion: 'not-a-version' }), /exact target DSH version/u)
+})
+
+test('the required contracts are derived from the production extension surface, not hand-written', () => {
+  // The published pi2dsh bridge hosts Pi components ONLY when the host
+  // reports the CURRENT apiVersion and advertises the unstable raw-surface
+  // capability; on any other api version it logs a warning and mounts no
+  // component, so a contract list frozen at an older api version would
+  // certify a pairing the bridge cannot use. The required list therefore
+  // follows the production constants, and the manifest must carry exactly
+  // that list.
+  assert.ok(REQUIRED_CONTRACTS.includes(`apiVersion=${API_VERSION}`),
+    'the required contracts must name the production api version')
+  assert.ok(REQUIRED_CONTRACTS.includes(`extensions/unstable.UNSTABLE_API_LEVEL=${UNSTABLE_API_LEVEL}`),
+    'the required contracts must name the production unstable API level')
+  assert.equal(REQUIRED_CONTRACTS.includes('apiVersion=1'), API_VERSION === 1,
+    'the required contracts must not carry a stale api version')
+
+  const manifest = JSON.parse(readFileSync(join(process.cwd(), 'test', 'compat', 'pi2dsh.json'), 'utf8'))
+  for (const contract of REQUIRED_CONTRACTS) {
+    assert.ok(manifest.contracts.includes(contract), `the manifest must declare ${contract}`)
+  }
+  // The stale v1 contract is refused: a manifest still naming it would pass
+  // the real runtime smoke (the host does report v2) while recording a
+  // contract the bridge never negotiated.
+  const stale = { ...manifest, contracts: manifest.contracts.filter(contract => contract !== `apiVersion=${API_VERSION}`) }
+  assert.throws(() => validateManifest(stale), /missing a required contract/u)
 })
 
 test('official preset validation is independent of pi2dsh consumer metadata', () => {
