@@ -80,12 +80,6 @@ export function pickerProps(pane: TspPane, prefix = MODEL_LAYER_PREFIX): Record<
   return pickerNode(pane, prefix)?.p ?? {}
 }
 
-/** A picker the caller has ALREADY waited for (a hard assertion, not a poll). */
-export function requiredProps(pane: TspPane): Record<string, unknown> {
-  assert.ok(pickerNode(pane), 'the native model picker must be mounted')
-  return pickerProps(pane)
-}
-
 /** Every visible text of the committed layer, plain and span text alike. */
 export function sheetText(pane: TspPane, prefix = MODEL_LAYER_PREFIX): string {
   const out: string[] = []
@@ -104,12 +98,6 @@ export function sheetText(pane: TspPane, prefix = MODEL_LAYER_PREFIX): string {
     }
   }
   return out.join(' | ')
-}
-
-/** Whether the mounted layer renders the inline Reasoning Effort card (the card's
- *  head is a PROP, so it never appears in the visible text). */
-export function hasEffortCard(pane: TspPane): boolean {
-  return layerNodes(pane).some((node) => node.k === 'card' && node.p.head === 'Reasoning Effort')
 }
 
 /** One named action of the picker's action bar. */
@@ -143,22 +131,6 @@ export function clickLayerNode(pane: TspPane, fragment: string, prefix = MODEL_L
   const node = layerNodes(pane, prefix).find((entry) => entry.id.includes(fragment))
   assert.ok(node, `no node matching ${fragment} in ${layerNodes(pane, prefix).map((n) => n.id).join(', ')}`)
   clickNodeById(pane, node.id)
-}
-
-/** A Row the SDK dispatches `onClick` on (an effort radio row). */
-export function rowNode(pane: TspPane, fragment: string, prefix = MODEL_LAYER_PREFIX): WireNode {
-  const node = layerNodes(pane, prefix).find((entry) => entry.k === 'row' && entry.id.includes(fragment))
-  assert.ok(node, `no row matching ${fragment} in ${layerNodes(pane, prefix).map((n) => n.id).join(', ')}`)
-  return node
-}
-
-/** A Card the SDK dispatches its own `onClick` on (the wide details card). The
- *  card is found by a fragment of its key; its `head` is a PROP, so a test can
- *  assert the affordance text without reaching into renderer state. */
-export function cardNode(pane: TspPane, fragment: string, prefix = MODEL_LAYER_PREFIX): WireNode {
-  const node = layerNodes(pane, prefix).find((entry) => entry.k === 'card' && entry.id.includes(fragment))
-  assert.ok(node, `no card matching ${fragment} in ${layerNodes(pane, prefix).map((n) => n.id).join(', ')}`)
-  return node
 }
 
 /** Wait until the model picker is mounted and in one exact state. */
