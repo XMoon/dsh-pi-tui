@@ -668,7 +668,7 @@ test('a withdrawn older SELECT prompt can never overwrite the newer select promp
     return () => { listeners.delete(listener) }
   }
   source.beginAuthorization = async () => {
-    emit({ kind: 'prompt', attemptId: 'auth-3', promptId: 's1', prompt: { kind: 'select', message: 'FIRST SELECT', options: [{ id: 'a', label: 'A' }] } })
+    emit({ kind: 'prompt', attemptId: 'auth-3', promptId: 's1', prompt: { kind: 'select', message: 'FIRST SELECT', options: [{ id: 'a', label: 'A' }, { id: 'a2', label: 'A2' }] } })
     emit({ kind: 'prompt', attemptId: 'auth-3', promptId: 's2', prompt: { kind: 'select', message: 'SECOND SELECT', options: [{ id: 'b', label: 'B' }] } })
     return { kind: 'started', attemptId: 'auth-3' }
   }
@@ -683,6 +683,7 @@ test('a withdrawn older SELECT prompt can never overwrite the newer select promp
   page.handleInput('\r')
   await flush()
   assert.match(viewText(page), /FIRST SELECT/u)
+  page.handleInput('\u001b[B') // navigate the first picker before it is withdrawn
   emit({ kind: 'prompt-withdrawn', attemptId: 'auth-3', promptId: 's1' })
   await flush()
   assert.match(viewText(page), /SECOND SELECT/u)
