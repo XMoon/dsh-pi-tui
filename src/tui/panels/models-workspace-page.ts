@@ -440,6 +440,7 @@ export class ModelsWorkspacePage implements Component {
           } else if (current.kind === 'logout') {
             if (current.target.kind !== 'reference' || current.target.ref !== ref) return
           } else return
+          if (current.kind === 'logout' && this.clear !== undefined && this.clear.phase !== 'reading') return
           this.referenceConfigured = info.configured
           this.credentialStates.set(ref, {
             kind: 'known',
@@ -463,6 +464,7 @@ export class ModelsWorkspacePage implements Component {
           } else if (current.kind === 'logout') {
             if (current.target.kind !== 'reference' || current.target.ref !== ref) return
           } else return
+          if (current.kind === 'logout' && this.clear !== undefined && this.clear.phase !== 'reading') return
           if (current.kind === 'logout' && clearSerial === this.clearSerial) {
             this.clear = { phase: 'failed', configured: false, reason: errorText(error) }
           } else if (current.kind === 'reference') {
@@ -646,6 +648,12 @@ export class ModelsWorkspacePage implements Component {
         ? this.view.target.kind === 'reference' && this.view.target.ref === target.ref
         : this.view.target.kind === 'record' && this.view.target.key === target.key)
     this.clear = { ...clear, phase: 'pending' }
+    // A refresh/read started before this dispatch must never reset the clear
+    // to ready while the Host mutation is in flight.
+    this.clearReadSerial += 1
+    this.referenceReadSerial += 1
+    if (target.kind === 'reference') this.invalidateCredentialRead(target.ref)
+    else this.recordsSerial += 1
     this.requestRender()
     this.source.run('models credential clear', async () => {
       try {

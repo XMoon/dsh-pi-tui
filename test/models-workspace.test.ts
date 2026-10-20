@@ -1290,3 +1290,35 @@ test('a failed record re-read fences the old records snapshot and leaves Unknown
   assert.ok(row !== undefined)
   assert.match(row, /Unknown/u, 'the failed re-read must fence the pre-delete snapshot')
 })
+
+test('a refresh while a reference clear is pending cannot reset it to ready (RFL-009)', async () => {
+  let releaseClear: (() => void) | undefined
+  let configured = true
+  const { source } = fakeSource()
+  source.describeReference = async () => ({ configured })
+  source.clearReference = async () => {
+    await new Promise<void>(resolve => { releaseClear = resolve })
+    configured = false
+  }
+  const page = new ModelsWorkspacePage(source, () => {}, {
+    view: 'logout',
+    target: { kind: 'reference', ref: 'ACME_API_KEY', label: 'Acme Gateway', route: 'acme' },
+  }, () => {})
+  page.setBodyHeight(26)
+  await flush()
+  for (let index = 0; index < 100; index += 1) {
+    await new Promise<void>(resolve => setImmediate(resolve))
+    const frame = page.render(100).map(stripTerminalSequences).join('\n')
+    if (frame.includes('> Clear credential')) break
+  }
+  page.handleInput('\r') // dispatch the Host clear; it is held pending
+  await flush()
+  assert.equal(page.pendingMutation(), true)
+  page.handleInput('r') // refresh starts readReferenceState(configured=true)
+  await flush()
+  assert.equal(page.pendingMutation(), true, 'a refresh must not release the clear owner')
+  assert.equal(page.handleInput('\u001b'), 'handled', 'Esc cannot leave while the clear is in flight')
+  releaseClear?.()
+  await flush()
+  assert.equal(page.pendingMutation(), false)
+})
