@@ -708,6 +708,12 @@ export function authorizationTargets(entries: readonly AuthorizationEntry[]): Au
   }))
 }
 
+/** Read an abort signal without control-flow narrowing (the caller can abort
+ * between the synchronous pre-dispatch check and attempt installation). */
+function callerAborted(signal: AbortSignal | undefined): boolean {
+  return signal?.aborted === true
+}
+
 /** The Direct authorization config (`ctx.authorization` behind the config
  * port's AuthorizationConfig). The upstream interaction model (notify/prompt
  * callbacks) is bridged into the port's EVENT model: the adapter owns the
@@ -735,6 +741,8 @@ export class DirectAuthorizationConfig implements AuthorizationConfig {
     disposeCallerAbortListener: () => void
     /** The terminal event for this attempt has been emitted exactly once. */
     settled: boolean
+    /** A forced caller/page teardown owns prompt cleanup for this attempt. */
+    forced: boolean
   }>()
 
   constructor(ctx: HostContextLike) {
@@ -819,14 +827,29 @@ export class DirectAuthorizationConfig implements AuthorizationConfig {
     if (request.signal !== undefined) {
       request.signal.addEventListener('abort', withdrawOnCallerAbort, { once: true })
     }
+    // Install the attempt record BEFORE begin(): the provider can emit a
+    // prompt synchronously from begin(), and the bridge must be able to see
+    // the attempt and its forced-teardown state. The settlement promise is
+    // replaced immediately after begin() returns the flow promise.
+    this.attempts.set(attemptId, {
+      controller,
+      key,
+      settlement: Promise.resolve(),
+      disposeCallerAbortListener,
+      settled: false,
+      forced: false,
+    })
+    // A caller can abort between the listener installation and this record;
+    // the event found no attempt then. Mark the record forced now so any
+    // synchronous prompt is rejected as surface-disposed.
+    if (callerAborted(request.signal)) this.cancelAttempt(attemptId, true)
     let flow: ReturnType<AuthorizationServiceLike['begin']>
     try {
       flow = authorization.begin({ key, method: request.method, interaction, signal })
     } catch (error) {
       // A SYNCHRONOUS begin failure (a wire backend throwing before its
-      // first await): no attempt exists yet, but the caller-abort listener
-      // must still be disposed — a leaked listener on the long-lived
-      // runner signal would accumulate across logins (review finding).
+      // first await): remove the placeholder and the caller-abort listener.
+      this.attempts.delete(attemptId)
       disposeCallerAbortListener()
       return Promise.reject(error)
     }
@@ -862,7 +885,8 @@ export class DirectAuthorizationConfig implements AuthorizationConfig {
         })
       },
     )
-    this.attempts.set(attemptId, { controller, key, settlement, disposeCallerAbortListener, settled: false })
+    const record = this.attempts.get(attemptId)
+    if (record !== undefined) record.settlement = settlement
     return Promise.resolve({ kind: 'started', attemptId })
   }
 
@@ -899,8 +923,13 @@ export class DirectAuthorizationConfig implements AuthorizationConfig {
     // Ordinary cancel keeps prompts answerable until the Host settles. Forced
     // caller teardown has destroyed their UI, so rejection is the only way to
     // release a flow that may be awaiting one; the page is gone and the Host
-    // outcome remains authoritative.
-    if (forcePrompts) this.rejectAttemptPrompts(attemptId, 'authorization surface disposed')
+    // outcome remains authoritative. Record the forced state so a prompt the
+    // flow creates LATER is rejected as surface-disposed, never surfaced to a
+    // dead page and never turned into a user DECLINED.
+    if (forcePrompts) {
+      attempt.forced = true
+      this.rejectAttemptPrompts(attemptId, 'authorization surface disposed')
+    }
     attempt.disposeCallerAbortListener()
   }
 
@@ -923,6 +952,12 @@ export class DirectAuthorizationConfig implements AuthorizationConfig {
 
   /** Bridge one upstream prompt into an event + a pending answer promise. */
   private bridgePrompt(attemptId: string, prompt: AuthorizationPrompt): Promise<string> {
+    const attempt = this.attempts.get(attemptId)
+    if (attempt === undefined || attempt.forced) {
+      // The page is gone (or its teardown already won): no UI can answer this
+      // prompt. Reject as a withdrawal/surface disposal, never a human decline.
+      return Promise.reject(cancellationError('authorization surface disposed'))
+    }
     return new Promise<string>((resolve, reject) => {
       const promptId = randomUUID()
       // The pending entry carries the abort-listener REMOVAL so every
