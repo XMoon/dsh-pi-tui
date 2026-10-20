@@ -162,6 +162,9 @@ interface AddProviderState {
 }
 
 interface PickerState {
+  /** Stable prompt identity: cursor navigation replaces the state object, so
+   *  removal must match this token, never the object identity. */
+  readonly token: object
   readonly header: string
   readonly items: readonly { readonly value: string; readonly label: string; readonly description?: string }[]
   readonly index: number
@@ -666,6 +669,7 @@ export class ModelsWorkspacePage implements Component {
     if (field === undefined) return
     if (field.id === 'api') {
       this.picker = {
+        token: {},
         header: 'Wire protocol',
         items: PROTOCOL_CHOICES.map(choice => ({ value: choice, label: choice })),
         index: Math.max(0, PROTOCOL_CHOICES.indexOf(add.draft.api as typeof PROTOCOL_CHOICES[number])),
@@ -835,6 +839,7 @@ export class ModelsWorkspacePage implements Component {
     }
     if (row.methods.length > 1) {
       this.picker = {
+        token: {},
         header: `Sign in method · ${row.label}`,
         items: row.methods.map(method => ({ value: method.id, label: method.label })),
         index: 0,
@@ -1024,6 +1029,7 @@ export class ModelsWorkspacePage implements Component {
   ): { close?: () => void } {
     if (this.disposed) return {}
     const picker: PickerState = {
+      token: {},
       header,
       items: items.map(item => ({
         value: item.value,
@@ -1706,10 +1712,11 @@ export class ModelsWorkspacePage implements Component {
   /** Retire EXACTLY one select prompt. A withdrawn/answered older prompt can
    *  never clear a newer one that now owns the single visible picker slot. */
   private removePicker(picker: PickerState): void {
-    if (this.picker === picker) {
+    const token = picker.token
+    if (this.picker?.token === token) {
       this.picker = this.pickerQueue.shift()
     } else {
-      const index = this.pickerQueue.indexOf(picker)
+      const index = this.pickerQueue.findIndex(candidate => candidate.token === token)
       if (index >= 0) this.pickerQueue.splice(index, 1)
     }
     this.revision += 1
