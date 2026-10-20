@@ -15,6 +15,12 @@
  * numerically). The parsed object remains the value authority; nested values
  * keep the plan-prescribed indented `JSON.stringify` projection.
  *
+ * The indented expansion is bounded: a valid tree beyond the display
+ * depth/node ceiling falls back to the exact raw text instead of expanding
+ * (the indented form is quadratic in depth and can throw). Generic scalar
+ * values keep their JSON spelling, so a string `"false"`/`"0"` and an embedded
+ * newline cannot be mistaken for a different typed field.
+ *
  * @module @xmoon76/dsh-pi-tui/tui/presentation/approval-arguments
  */
 
@@ -34,6 +40,32 @@ function rawSections(raw: string): readonly ApprovalArgumentSection[] {
 
 function isJsonObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+/** Display-only ceilings: the indented projection is O(depth^2) and
+ * `JSON.stringify` recurses. These are not approval/business limits. */
+const MAX_DISPLAY_DEPTH = 64
+const MAX_DISPLAY_NODES = 10_000
+
+/**
+ * Whether the parsed tree is too deep/wide for the indented display
+ * projection. Iterative on purpose: the guard must not recurse on the very
+ * input it protects against.
+ */
+function exceedsDisplayBudget(value: unknown): boolean {
+  const stack: Array<{ readonly value: unknown; readonly depth: number }> = [{ value, depth: 0 }]
+  let nodes = 0
+  while (stack.length > 0) {
+    const current = stack.pop()!
+    nodes += 1
+    if (nodes > MAX_DISPLAY_NODES || current.depth > MAX_DISPLAY_DEPTH) return true
+    if (current.value !== null && typeof current.value === 'object') {
+      for (const child of Object.values(current.value)) {
+        stack.push({ value: child, depth: current.depth + 1 })
+      }
+    }
+  }
+  return false
 }
 
 /** Decode one already-validated JSON string slice (quotes included). */
@@ -226,10 +258,11 @@ function otherSections(
 }
 
 /**
- * The generic JSON-object view: one readable `key: value` line per field,
- * nested objects/arrays serialized with two-space indentation. Scalars keep
- * their JSON spelling (including `false`, `0`, `null` and the empty string);
- * an empty object is stated as such instead of painting an empty body.
+ * The generic JSON-object view: one readable `key: value` line per field with
+ * the value's JSON spelling, so false vs "false", 0 vs "0" and embedded
+ * newlines stay distinguishable and cannot forge a field row. Nested objects/
+ * arrays keep the two-space indented JSON form; an empty object is stated as
+ * such instead of painting an empty body.
  */
 function genericSections(
   record: Record<string, unknown>,
@@ -239,13 +272,18 @@ function genericSections(
   if (keys.length === 0) return [{ heading: ARGUMENTS, text: '(empty object)' }]
   const lines: string[] = []
   for (const key of keys) {
+    // A newline/CR in an external key could forge a second field row; quote
+    // just those keys. Ordinary keys stay readable and unquoted.
+    const displayKey = /[\r\n]/u.test(key) ? JSON.stringify(key) : key
     const value = record[key]
     if (typeof value === 'string') {
-      lines.push(`${key}: ${value}`)
+      // Keep the JSON string form: quotes + escapes preserve the type and
+      // keep embedded newlines inside one field row.
+      lines.push(`${displayKey}: ${JSON.stringify(value)}`)
     } else if (value !== null && typeof value === 'object') {
-      lines.push(`${key}: ${JSON.stringify(value, null, 2)}`)
+      lines.push(`${displayKey}: ${JSON.stringify(value, null, 2)}`)
     } else {
-      lines.push(`${key}: ${JSON.stringify(value)}`)
+      lines.push(`${displayKey}: ${JSON.stringify(value)}`)
     }
   }
   return [{ heading: ARGUMENTS, text: lines.join('\n') }]
@@ -375,6 +413,9 @@ export function approvalArgumentSections(
   }
   if (!isJsonObject(parsed)) return rawSections(rawArguments)
   const record = parsed
+  // A valid but adversarial tree must never reach the indented projection:
+  // the raw fallback keeps every byte (and Copy) linear and terminal-safe.
+  if (exceedsDisplayBudget(record)) return rawSections(rawArguments)
   const sourceOrder = topLevelKeyOrder(rawArguments)
   let draft: Draft | undefined
   switch (toolName) {
