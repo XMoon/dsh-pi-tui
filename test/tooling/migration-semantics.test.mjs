@@ -108,3 +108,40 @@ test('the import TYPE query and the CommonJS require are references', () => {
   assert.deepEqual(productionReferences(requireForm), ['../src/runtime/config-port.ts'],
     'a CommonJS require is a real reference')
 })
+
+test('an identifier-valued source read resolves through its static initializer', () => {
+  // The review's finding: the tree reads production files from an ARRAY of
+  // paths, e.g.
+  //
+  //     for (const file of ['../src/a.ts', '../src/b.ts']) {
+  //       readFileSync(new URL(file, import.meta.url), 'utf8')
+  //     }
+  //
+  // The URL's argument is an IDENTIFIER, so a literal-only extractor sees
+  // nothing — and the migration's rewrite of those array entries would go
+  // unchecked.
+  const source = [
+    "for (const file of [",
+    "  '../src/app/plugin-manager/controller.ts',",
+    "  '../src/runtime/plugin-manager-port.ts',",
+    "]) {",
+    "  const source = readFileSync(new URL(file, import.meta.url), 'utf8')",
+    "}",
+  ].join('\n')
+  assert.deepEqual(
+    productionReferences(source).sort(),
+    ['../src/app/plugin-manager/controller.ts', '../src/runtime/plugin-manager-port.ts'],
+    'every path the array names is a reference',
+  )
+  assert.deepEqual(unexplainedTextReferences(source), [])
+})
+
+test('a named array of production paths is resolved too', () => {
+  const source = [
+    "const files = ['../src/a.ts', '../src/b.ts']",
+    "for (const file of files) {",
+    "  readFileSync(new URL(file, import.meta.url), 'utf8')",
+    "}",
+  ].join('\n')
+  assert.deepEqual(productionReferences(source).sort(), ['../src/a.ts', '../src/b.ts'])
+})

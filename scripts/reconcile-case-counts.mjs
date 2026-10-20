@@ -175,17 +175,32 @@ function main() {
   }
   const beforeFiles = new Set(before.keys())
   const afterFiles = new Set(after.keys())
-  const moves = new Map()
+  // A MOVE is claimed only when the mapping is GLOBALLY ONE-TO-ONE: the
+  // old path has exactly ONE candidate, AND that candidate is the only
+  // old path that could claim it. An ambiguous pair (two old paths
+  // competing for one new path, or one old path with two candidates) is
+  // NOT a move — it is reported as a removal plus an addition.
+  const candidatesFor = new Map()
   for (const [beforePath_, count] of before) {
     if (afterFiles.has(beforePath_)) continue
-    // The file is gone from its old path. Is there a file in the AFTER tree
-    // with the same BASENAME and the same case count? That is a candidate
-    // move; a candidate that is AMBIGUOUS (more than one match) is NOT
-    // claimed as a move — it is reported as a removal plus an addition.
     const base = beforePath_.split('/').pop()
-    const candidates = [...afterFiles].filter(afterPath_ =>
-      afterPath_.split('/').pop() === base && after.get(afterPath_) === count)
-    if (candidates.length === 1) moves.set(beforePath_, candidates[0])
+    candidatesFor.set(beforePath_, [...afterFiles].filter(afterPath_ =>
+      afterPath_.split('/').pop() === base && after.get(afterPath_) === count))
+  }
+  const claimedBy = new Map()
+  for (const [beforePath_, candidates] of candidatesFor) {
+    if (candidates.length !== 1) continue
+    const [only] = candidates
+    const claimants = [...candidatesFor].filter(([, list]) => list.includes(only))
+    if (claimants.length !== 1) continue
+    claimedBy.set(only, beforePath_)
+  }
+  const moves = new Map()
+  for (const [beforePath_, candidates] of candidatesFor) {
+    if (candidates.length !== 1) continue
+    const [only] = candidates
+    if (claimedBy.get(only) !== beforePath_) continue
+    moves.set(beforePath_, only)
   }
 
   const movedOut = []

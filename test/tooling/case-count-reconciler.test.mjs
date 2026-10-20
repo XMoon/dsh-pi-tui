@@ -121,3 +121,17 @@ test('the reported totals are the DECLARED totals, not the attributed part', () 
   assert.match(result.output, /before: 1 files, 3 cases \(3 attributed, 0 unattributed\)/u)
   assert.match(result.output, /after:  2 files, 4 cases \(4 attributed, 0 unattributed\)/u)
 })
+
+test('an ambiguous move is reported as an addition and removals, never as two moves', () => {
+  // Two old paths compete for ONE new path. The mapping is not one-to-one,
+  // so neither old path is a MOVE: the report must show one addition and
+  // two removals.
+  const before = report(2, [['one/foo.test.ts', 1], ['two/foo.test.ts', 1]])
+  const after = report(1, [['new/foo.test.ts', 1]])
+  const result = reconcile(before, after)
+  assert.equal(result.status, 0, result.output)
+  assert.match(result.output, /=== moved \(0\) ===/u,
+    'an ambiguous pair must not be claimed as a move')
+  assert.match(result.output, /=== added \(1\) ===/u)
+  assert.match(result.output, /=== removed \(2\) ===/u)
+})
