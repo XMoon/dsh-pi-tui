@@ -44,14 +44,12 @@ export function fixedWaitHelpers(supportRoot = SUPPORT_ROOT) {
     const path = join(supportRoot, entry.name)
     const source = readFileSync(path, 'utf8')
     const file = ts.createSourceFile('helper.ts', source, ts.ScriptTarget.ESNext, true, ts.ScriptKind.TS)
-    const visit = (node) => {
-      if (!ts.isFunctionDeclaration(node) || node.name === undefined) {
-        ts.forEachChild(node, visit)
-        return
-      }
-      const parameters = new Set(
-        node.parameters.map(parameter => parameter.name.getText(file)),
-      )
+    // A helper may be a FUNCTION DECLARATION (`export async function
+    // sleep(...)`) or a VARIABLE holding an arrow/function expression
+    // (`export const sleep = (...) => …`). Both are fixed-wait helpers when
+    // their body waits a `setTimeout` whose delay comes from one of their
+    // OWN parameters, so both forms are examined.
+    const examine = (name, parameters, body) => {
       let wraps = false
       const scan = (inner) => {
         if (ts.isCallExpression(inner) && ts.isIdentifier(inner.expression) && inner.expression.text === 'setTimeout') {
@@ -62,8 +60,29 @@ export function fixedWaitHelpers(supportRoot = SUPPORT_ROOT) {
         }
         ts.forEachChild(inner, scan)
       }
-      scan(node)
-      if (wraps) helpers.add(node.name.text)
+      scan(body)
+      if (wraps) helpers.add(name)
+    }
+    const visit = (node) => {
+      if (ts.isFunctionDeclaration(node) && node.name !== undefined) {
+        examine(
+          node.name.text,
+          new Set(node.parameters.map(parameter => parameter.name.getText(file))),
+          node,
+        )
+        ts.forEachChild(node, visit)
+        return
+      }
+      if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.initializer !== undefined) {
+        const initializer = node.initializer
+        if (ts.isArrowFunction(initializer) || ts.isFunctionExpression(initializer)) {
+          examine(
+            node.name.text,
+            new Set(initializer.parameters.map(parameter => parameter.name.getText(file))),
+            initializer,
+          )
+        }
+      }
       ts.forEachChild(node, visit)
     }
     visit(file)

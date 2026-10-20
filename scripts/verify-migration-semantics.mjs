@@ -41,6 +41,49 @@ const TEST_ROOT = resolve(ROOT, 'test')
  */
 export function productionReferences(source) {
   const file = ts.createSourceFile('probe.ts', source, ts.ScriptTarget.ESNext, true, ts.ScriptKind.TS)
+  // A `new URL(<identifier>, import.meta.url)` resolves through the
+  // identifier's STATIC INITIALIZER: the tree reads production files from
+  // an ARRAY of paths, e.g.
+  //
+  //     for (const file of ['../src/a.ts', '../src/b.ts']) {
+  //       readFileSync(new URL(file, import.meta.url), 'utf8')
+  //     }
+  //
+  // The identifiers that hold such an array are collected here, so the URL
+  // read is resolved to every path it actually names.
+  const arrayValues = new Map()
+  const collectArrays = (node) => {
+    // A named array: `const files = ['../src/a.ts', …]`.
+    if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.initializer !== undefined) {
+      if (ts.isArrayLiteralExpression(node.initializer)) {
+        const values = node.initializer.elements
+          .filter(element => ts.isStringLiteralLike(element))
+          .map(element => element.text)
+        if (values.length > 0) arrayValues.set(node.name.text, values)
+      }
+    }
+    // An INLINE array in a `for…of`: `for (const file of ['../src/a.ts', …])`.
+    // The loop variable then names each element in turn.
+    if (ts.isForOfStatement(node) && ts.isVariableDeclarationList(node.initializer)) {
+      const names = node.initializer.declarations
+        .filter(declaration => ts.isIdentifier(declaration.name))
+        .map(declaration => declaration.name.text)
+      const expression = node.expression
+      if (ts.isArrayLiteralExpression(expression)) {
+        const values = expression.elements
+          .filter(element => ts.isStringLiteralLike(element))
+          .map(element => element.text)
+        for (const name of names) {
+          if (values.length > 0) arrayValues.set(name, values)
+        }
+      }
+      if (ts.isIdentifier(expression)) {
+        for (const name of names) arrayValues.set(name, arrayValues.get(expression.text) ?? [])
+      }
+    }
+    ts.forEachChild(node, collectArrays)
+  }
+  collectArrays(file)
   // A `.mjs` file is plain JavaScript; the parser handles both the same way
   // for the forms this extractor cares about.
   const refs = []
@@ -87,6 +130,11 @@ export function productionReferences(source) {
       // The TEMPLATE source read: `new URL(\`../src/${name}\`, …)`. The
       // literal prefix before the interpolation is the part that resolves.
       if (first !== undefined && ts.isTemplateExpression(first)) add(first.head.text)
+      // The IDENTIFIER-valued source read: `new URL(file, …)` where `file`
+      // names an array of paths. Every path the array holds is a reference.
+      if (first !== undefined && ts.isIdentifier(first)) {
+        for (const value of arrayValues.get(first.text) ?? []) add(value)
+      }
     }
     ts.forEachChild(node, visit)
   }
