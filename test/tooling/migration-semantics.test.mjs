@@ -199,8 +199,8 @@ test('a path-join READ of a production file is a reference', () => {
     "const surface = readFileSync(join(root, 'src', 'app', 'surface', 'runtime.ts'), 'utf8')",
   ].join('\n')
   assert.deepEqual(
-    productionReferences(source).filter(ref => ref.includes('/src/')),
-    ['../../src/app/surface/runtime.ts'],
+    productionReferences(source).filter(ref => ref.includes('src/')),
+    ['<root>src/app/surface/runtime.ts'],
     'the join read must resolve to the production file',
   )
 })
@@ -215,8 +215,37 @@ test('a path join that WRITES a fixture is not a production reference', () => {
     "writeFileSync(join(workspace, 'src', 'deep', 'utility.ts'), 'x')",
   ].join('\n')
   assert.deepEqual(
-    productionReferences(source).filter(ref => ref.includes('/src/')),
+    productionReferences(source).filter(ref => ref.includes('src/')),
     [],
     'a fixture write is not a production reference',
+  )
+})
+
+test('a join read under a NAMED path variable is a reference', () => {
+  // The review's reproduction: the tree computes a path ONCE
+  // (`const srcDir = join(…, 'src')`) and then reads through it
+  // (`join(srcDir, 'index.ts')`). The base is resolved RECURSIVELY.
+  const source = [
+    "const srcDir = join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'src')",
+    "readFileSync(join(srcDir, 'index.ts'), 'utf8')",
+  ].join('\n')
+  assert.deepEqual(
+    productionReferences(source).filter(ref => ref.includes('src/')),
+    ['<root>src/index.ts'],
+    'the named path variable must resolve through its own initializer',
+  )
+})
+
+test('a join read of the FORK package is a reference', () => {
+  // The review's reproduction: the tree reads the vendored fork's own
+  // sources and manifest through `join(ROOT, 'packages', 'pi-tui', …)`.
+  const source = [
+    "const localUtils = readFileSync(join(ROOT, 'packages', 'pi-tui', 'src', 'utils.ts'), 'utf8')",
+    "const manifest = JSON.parse(readFileSync(join(ROOT, 'packages', 'pi-tui', 'vendor-divergences.json'), 'utf8'))",
+  ].join('\n')
+  assert.deepEqual(
+    productionReferences(source).filter(ref => ref.includes('packages/')),
+    ['<root>packages/pi-tui/src/utils.ts', '<root>packages/pi-tui/vendor-divergences.json'],
+    'a join read of the fork package must resolve',
   )
 })
