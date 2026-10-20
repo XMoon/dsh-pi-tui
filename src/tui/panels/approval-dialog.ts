@@ -629,6 +629,7 @@ export interface ApprovalSheetFrameOptions {
 export class ApprovalSheetFrame extends Frame {
   private readonly sheet: ApprovalSheet
   private readonly options: ApprovalSheetFrameOptions
+  private readonly danger: boolean
   private lastRows = 0
   private lastTermRows = 0
   private lastTermColumns = 0
@@ -643,6 +644,17 @@ export class ApprovalSheetFrame extends Frame {
     super(sheet, true)
     this.sheet = sheet
     this.options = options
+    this.danger = request.danger === true
+  }
+
+  /** The truthful one-row degradation; a dangerous request keeps its warning
+   * glyph even when nothing else fits. */
+  private resizeRow(width: number): string[] {
+    return [truncateToWidth(
+      this.danger ? '⚠ Resize to inspect more' : 'Resize to inspect more',
+      Math.max(1, width),
+      '…',
+    )]
   }
 
   render(width: number): string[] {
@@ -656,7 +668,7 @@ export class ApprovalSheetFrame extends Frame {
       // and leave the keyboard decisions with the runtime.
       this.sheet.clearProjection()
       this.lastRows = 1
-      return [truncateToWidth('Resize to inspect more', Math.max(1, width), '…')]
+      return this.resizeRow(width)
     }
     this.sheet.setMaxRows(Math.max(1, grant - 2))
     const out = super.render(width)
@@ -667,7 +679,7 @@ export class ApprovalSheetFrame extends Frame {
       // decisions to the runtime.
       this.sheet.clearProjection()
       this.lastRows = 1
-      return [truncateToWidth('Resize to inspect more', Math.max(1, width), '…')]
+      return this.resizeRow(width)
     }
     this.lastRows = out.length
     return out
