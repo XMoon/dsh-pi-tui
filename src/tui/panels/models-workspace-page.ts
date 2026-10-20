@@ -1966,7 +1966,10 @@ export class ModelsWorkspacePage implements Component {
     const picker = this.picker
     if (picker === undefined) return
     if (!this.pickerFits()) {
-      if (matchesKey(data, 'escape')) this.picker = undefined
+      if (matchesKey(data, 'escape')) {
+        this.removePicker(picker)
+        picker.onCancel()
+      }
       this.requestRender()
       return
     }
@@ -2232,6 +2235,10 @@ export class ModelsWorkspacePage implements Component {
         : { gesture, revision: this.revision, width: this.lastWidth, height: this.lastHeight, row }
       return
     }
+    if ((this.picker !== undefined || this.modelPicker !== undefined) && !this.pickerFits()) {
+      this.pressed = undefined
+      return
+    }
     const target = this.paintedTargets.find(candidate => candidate.row === y && x >= candidate.startCol && x < candidate.endCol)
     this.pressed = target === undefined ? undefined : { target, revision: this.revision, width: this.lastWidth, height: this.lastHeight }
   }
@@ -2250,6 +2257,10 @@ export class ModelsWorkspacePage implements Component {
         || pressed.height !== this.lastHeight) return 'handled'
       this.question.flow.completeMouseClick(pressed.gesture, row, x)
       this.requestRender()
+      return 'handled'
+    }
+    if ((this.picker !== undefined || this.modelPicker !== undefined) && !this.pickerFits()) {
+      this.pressed = undefined
       return 'handled'
     }
     const pressed = this.pressed
