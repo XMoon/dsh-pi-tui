@@ -6,7 +6,7 @@
  */
 
 import { TuiApp } from '../../src/tui-app.ts'
-import { VirtualTerminal } from '../virtual-terminal.ts'
+import { VirtualTerminal } from './virtual-terminal.ts'
 import { DirectHostFilePort } from '../../src/runtime/direct/host-file-direct.ts'
 import { suggestPathArgument } from '../../src/tui/file-completion/path-argument.ts'
 

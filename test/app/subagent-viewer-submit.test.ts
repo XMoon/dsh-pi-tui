@@ -1,0 +1,440 @@
+/**
+ * Runner-level tests for the interactive subagent viewer's human prompt
+ * delivery seam (subagent-viewer-submit.ts, plan §17; DSH 0.1.5-rc.1):
+ * validation, the official `ctx.subagents.prompt(...)` call, requestId
+ * minting, and error classification — with pure dependency injection, no
+ * TUI surface.
+ * @module @xmoon76/dsh-pi-tui/subagent-viewer-submit.test
+ */
+
+import assert from 'node:assert/strict'
+import test from 'node:test'
+import {
+  classifySubagentPromptError,
+  classifySubagentPromptSettlement,
+} from '../../src/runtime/subagent-outcome.ts'
+import {
+  resolveSubagentSettleTarget,
+  subagentPromptDisposition,
+  viewerCanonicalizeScope,
+  type SubagentSettleViewerState,
+} from '../../src/app/surface/viewer-submission.ts'
+import {
+  submitSubagentPrompt,
+  type SubagentPromptService,
+  type SubagentViewerSubmitDeps,
+} from '../../src/runtime/direct/subagent-direct.ts'
+import type {
+  SubagentPromptContentPart,
+  SubagentViewerSubmitRequest,
+} from '../../src/runtime/subagent-port.ts'
+
+const request: SubagentViewerSubmitRequest = {
+  parentSessionId: 'session-parent',
+  childSessionId: 'session-child',
+  delivery: 'queue',
+  content: [{ type: 'text', text: 'focus on cancellation races' }],
+}
+
+function deps(overrides: Partial<SubagentViewerSubmitDeps> = {}): SubagentViewerSubmitDeps {
+  return {
+    subagents: () => undefined,
+    makeSignal: () => new AbortController().signal,
+    mintRequestId: () => `request-${Math.random()}`,
+    clientTimeZone: () => 'Asia/Shanghai',
+    ...overrides,
+  }
+}
+
+interface RecordedCall {
+  requestId: string
+  parentSessionId: string
+  childSessionId: string
+  mode: string
+  delivery: string
+  content: readonly SubagentPromptContentPart[]
+  clientTimeZone: string | undefined
+  signal: AbortSignal
+}
+
+function service(calls: RecordedCall[]): SubagentPromptService {
+  return {
+    prompt: async (payload, signal) => {
+      calls.push({
+        requestId: payload.requestId,
+        parentSessionId: payload.parentSessionId,
+        childSessionId: payload.childSessionId,
+        mode: payload.mode,
+         delivery: payload.delivery,
+        content: payload.content,
+        clientTimeZone: payload.clientTimeZone,
+        signal,
+      })
+      return { messageId: `inbox-${payload.childSessionId}-1` }
+    },
+  }
+}
+
+test('delivers through the official prompt call with the official request vocabulary', async () => {
+  const calls: RecordedCall[] = []
+  const signal = new AbortController().signal
+  const outcome = await submitSubagentPrompt(request, deps({
+    subagents: () => service(calls),
+    makeSignal: () => signal,
+    mintRequestId: () => 'minted-request-id',
+  }))
+  assert.equal(outcome.kind, 'ok')
+  if (outcome.kind === 'ok') assert.equal(outcome.messageId, 'inbox-session-child-1')
+  assert.equal(calls.length, 1, 'prompt called exactly once')
+  assert.equal(calls[0]!.requestId, 'minted-request-id', 'the caller-minted id is persisted on the call')
+  assert.equal(calls[0]!.parentSessionId, 'session-parent')
+  assert.equal(calls[0]!.childSessionId, 'session-child')
+  assert.equal(calls[0]!.mode, 'continuable', 'the browser control address keeps the continuable discriminator')
+   assert.equal(calls[0]!.delivery, 'queue', 'viewer prompts are distinct FIFO continuation turns')
+  assert.deepEqual(calls[0]!.content, request.content)
+  assert.equal(calls[0]!.signal, signal, 'the caller-owned signal is forwarded to the official call')
+})
+
+test('forwards a resolved steer delivery without changing human provenance', async () => {
+  const calls: RecordedCall[] = []
+  const outcome = await submitSubagentPrompt({ ...request, delivery: 'steer' }, deps({
+    subagents: () => service(calls),
+  }))
+  assert.equal(outcome.kind, 'ok')
+  assert.equal(calls[0]!.delivery, 'steer', 'the resolved delivery must reach the official prompt unchanged')
+})
+
+test('every submit mints a FRESH requestId (a retry is a new human prompt)', async () => {
+  const calls: RecordedCall[] = []
+  let minted = 0
+  const depsBase = deps({
+    subagents: () => service(calls),
+    mintRequestId: () => `request-${minted += 1}`,
+  })
+  await submitSubagentPrompt(request, depsBase)
+  await submitSubagentPrompt(request, depsBase)
+  assert.notEqual(calls[0]!.requestId, calls[1]!.requestId, 'two submits never share one identity')
+})
+
+test('the prompt text runs through the SAME send seam as the main session (official literal semantics)', async () => {
+  // The OFFICIAL mention semantics (M3-3A): the child model receives the
+  // mention LITERALLY — exactly the bytes a main-session submission
+  // sends — and the Host's FILE_REFERENCE_PROMPT resolves relative paths
+  // from the workspace root. The seam still routes (a future official
+  // carrier would land behind it), but no backend rewrites the text.
+  const calls: RecordedCall[] = []
+  let seamCalls = 0
+  const outcome = await submitSubagentPrompt(
+    {
+      parentSessionId: request.parentSessionId,
+      childSessionId: request.childSessionId,
+      delivery: 'queue',
+      content: [{ type: 'text', text: 'review @src/foo.ts' }],
+    },
+    deps({
+      subagents: () => service(calls),
+      canonicalizeText: (text) => {
+        seamCalls += 1
+        return text
+      },
+    }),
+  )
+  assert.equal(outcome.kind, 'ok')
+  assert.equal(seamCalls, 1, 'the send seam ran exactly once for the text part')
+  const first = calls[0]!.content[0]!
+  assert.equal(first.type, 'text')
+  if (first.type === 'text') {
+    assert.equal(first.text, 'review @src/foo.ts',
+      'the prompt content stays literal — the same bytes the main session sends')
+  }
+})
+
+test('a signal aborted while canonicalizing rejects BEFORE the write path (never a stale accept)', async () => {
+  const controller = new AbortController()
+  controller.abort()
+  let calls = 0
+  const outcome = await submitSubagentPrompt(request, deps({
+    makeSignal: () => controller.signal,
+    canonicalizeText: async (text) => text,
+    subagents: () => ({
+      prompt: async () => {
+        calls += 1
+        return { messageId: 'inbox-1' }
+      },
+    }),
+  }))
+  assert.deepEqual(outcome, { kind: 'rejected', reason: { kind: 'cancelled' } })
+  assert.equal(calls, 0, 'the write path must never be invoked with an already-aborted signal')
+})
+
+test('rejects when the continuation runtime is unavailable', async () => {
+  const outcome = await submitSubagentPrompt(request, deps({ subagents: () => undefined }))
+  assert.deepEqual(outcome, { kind: 'rejected', reason: { kind: 'unavailable' } })
+})
+
+test('classifies the official RemoteError vocabulary into the stable reason set', () => {
+  const cases: Array<[string, string]> = [
+    ['subagent/parent-unavailable', 'parent-unavailable'],
+    ['subagent/not-resumable', 'stale-child'],
+    ['subagent/not-found', 'stale-child'],
+    ['subagent/catalog-diagnostic', 'stale-child'],
+    ['subagent/unauthorized', 'unauthorized'],
+    ['subagent/delivery-unavailable', 'unavailable'],
+    ['subagent/projections-unavailable', 'unavailable'],
+    ['gateway/cancelled', 'cancelled'],
+    ['subagent/invalid-time-zone', 'error'],
+    ['subagent/attachment-invalid', 'error'],
+    ['gateway/bad-request', 'error'],
+    ['gateway/internal', 'error'],
+  ]
+  for (const [code, kind] of cases) {
+    const reason = classifySubagentPromptError(makeError(code))
+    assert.equal(reason.kind, kind, `code ${code}`)
+  }
+})
+
+test('classifies cancellation before inbox acceptance as cancelled (message never owned by the child)', () => {
+  const reason = classifySubagentPromptError(Object.assign(new Error('aborted'), { name: 'AbortError' }))
+  assert.deepEqual(reason, { kind: 'cancelled' })
+})
+
+test('the OLD SubagentError vocabulary is NOT interpreted anymore', () => {
+  // The current DSH contract replaced the internal NOT_RESUMABLE/DRAINING/…
+  // codes with the RemoteError vocabulary; reading the old codes again would silently
+  // misclassify a future Host failure — they must fall through to `error`.
+  for (const code of ['NOT_RESUMABLE', 'UNAUTHORIZED', 'PARENT_UNAVAILABLE', 'DRAINING', 'ACTIVATION_CLOSING']) {
+    const reason = classifySubagentPromptError(makeError(code))
+    assert.equal(reason.kind, 'error', `legacy code ${code} must not be classified`)
+  }
+})
+
+test('a prompt that REJECTS surfaces the classified reason (never a throw)', async () => {
+  const outcome = await submitSubagentPrompt(request, deps({
+    subagents: () => ({
+      prompt: async () => { throw Object.assign(new Error('subagent cannot be resumed'), { code: 'subagent/not-resumable' }) },
+    }),
+  }))
+  assert.deepEqual(outcome, { kind: 'rejected', reason: { kind: 'stale-child' } })
+})
+
+test('an unexpected throw after dispatch is indeterminate, never a false "not sent"', async () => {
+  const outcome = await submitSubagentPrompt(request, deps({
+    subagents: () => ({
+      prompt: async () => { throw new Error('boom') },
+    }),
+  }))
+  assert.deepEqual(outcome, { kind: 'indeterminate', message: 'boom' })
+})
+
+test('a gateway/internal carrier failure after dispatch is indeterminate, not rejected', async () => {
+  const outcome = await submitSubagentPrompt(request, deps({
+    subagents: () => ({
+      prompt: async () => { throw makeError('gateway/internal') },
+    }),
+  }))
+  assert.equal(outcome.kind, 'indeterminate')
+  assert.equal(outcome.kind === 'indeterminate' ? outcome.message : undefined, 'remote error: gateway/internal')
+})
+
+test('subagentPromptDisposition never restores an indeterminate delivery', () => {
+  assert.deepEqual(subagentPromptDisposition({ kind: 'ok', messageId: 'm' }), { kind: 'sent' })
+  assert.deepEqual(subagentPromptDisposition({ kind: 'indeterminate', message: 'carrier reset' }), { kind: 'uncertain' })
+  assert.deepEqual(subagentPromptDisposition({ kind: 'rejected', reason: { kind: 'cancelled' } }), { kind: 'cancelled' })
+  assert.deepEqual(
+    subagentPromptDisposition({ kind: 'rejected', reason: { kind: 'parent-unavailable' } }),
+    { kind: 'rejected', reason: { kind: 'parent-unavailable' } },
+  )
+})
+
+test('a structured admission refusal settles rejected, never indeterminate', () => {
+  const cases: Array<[string, string]> = [
+    ['subagent/not-found', 'stale-child'],
+    ['subagent/catalog-diagnostic', 'stale-child'],
+    ['subagent/projections-unavailable', 'unavailable'],
+    ['subagent/attachment-invalid', 'error'],
+    ['subagent/invalid-time-zone', 'error'],
+    ['gateway/bad-request', 'error'],
+  ]
+  for (const [code, kind] of cases) {
+    const settlement = classifySubagentPromptSettlement(makeError(code))
+    assert.equal(settlement.kind, 'rejected', `code ${code} must be a proven refusal`)
+    if (settlement.kind === 'rejected') assert.equal(settlement.reason.kind, kind, `code ${code}`)
+  }
+})
+
+test('gateway/internal, post-invocation/unknown gateway, or code-less failures settle indeterminate', () => {
+  assert.equal(classifySubagentPromptSettlement(makeError('gateway/internal')).kind, 'indeterminate')
+  assert.equal(classifySubagentPromptSettlement(new Error('boom')).kind, 'indeterminate')
+})
+
+test('gateway pre-invocation refusals are rejected, post-invocation stays indeterminate', () => {
+  // Pinned Gateway raises these strictly before the business method runs.
+  assert.equal(classifySubagentPromptSettlement(makeError('gateway/invocation-unavailable')).kind, 'rejected')
+  assert.equal(classifySubagentPromptSettlement(makeError('gateway/service-unavailable')).kind, 'rejected')
+  // `gateway/result-invalid` is raised after the method returned, and an
+  // unknown future gateway code is never assumed to be a refusal.
+  assert.equal(classifySubagentPromptSettlement(makeError('gateway/result-invalid')).kind, 'indeterminate')
+  assert.equal(classifySubagentPromptSettlement(makeError('gateway/unknown-future-code')).kind, 'indeterminate')
+})
+
+test('a pre-dispatch canonicalization failure is rejected, never indeterminate', async () => {
+  const outcome = await submitSubagentPrompt(request, deps({
+    subagents: () => service([]),
+    canonicalizeText: () => { throw new Error('mention expansion failed') },
+  }))
+  assert.deepEqual(outcome, { kind: 'rejected', reason: { kind: 'error', message: 'mention expansion failed' } })
+})
+
+test('a pre-dispatch request-identity mint failure is rejected, never indeterminate', async () => {
+  const outcome = await submitSubagentPrompt(request, deps({
+    subagents: () => service([]),
+    mintRequestId: () => { throw new Error('mint failed') },
+  }))
+  assert.deepEqual(outcome, { kind: 'rejected', reason: { kind: 'error', message: 'mint failed' } })
+})
+
+test('carries the Client-local request zone, sampled once after the cancellation check', async () => {
+  const calls: RecordedCall[] = []
+  let samples = 0
+  const outcome = await submitSubagentPrompt(request, deps({
+    subagents: () => service(calls),
+    clientTimeZone: () => { samples += 1; return 'Europe/Paris' },
+  }))
+  assert.equal(outcome.kind, 'ok')
+  assert.equal(samples, 1, 'exactly one sample per follow-up')
+  assert.equal(calls[0]!.clientTimeZone, 'Europe/Paris',
+    'the sampled zone rides the official ctx.subagents.prompt request')
+})
+
+test('a cancelled follow-up samples no zone', async () => {
+  const calls: RecordedCall[] = []
+  const controller = new AbortController()
+  controller.abort()
+  let samples = 0
+  const outcome = await submitSubagentPrompt(request, deps({
+    subagents: () => service(calls),
+    makeSignal: () => controller.signal,
+    clientTimeZone: () => { samples += 1; return 'Europe/Paris' },
+  }))
+  assert.deepEqual(outcome, { kind: 'rejected', reason: { kind: 'cancelled' } })
+  assert.equal(samples, 0, 'a stale send never samples the request zone')
+  assert.equal(calls.length, 0)
+})
+
+test('an unsamplable request zone is a pre-dispatch refusal, never indeterminate', async () => {
+  const calls: RecordedCall[] = []
+  const outcome = await submitSubagentPrompt(request, deps({
+    subagents: () => service(calls),
+    clientTimeZone: () => { throw new Error('the TUI process reports no time zone') },
+  }))
+  assert.deepEqual(outcome, {
+    kind: 'rejected',
+    reason: { kind: 'error', message: 'the TUI process reports no time zone' },
+  })
+  assert.equal(calls.length, 0, 'the child inbox never receives a zone-less human prompt')
+})
+
+function makeError(code: string): Error {
+  return Object.assign(new Error(`remote error: ${code}`), { code })
+}
+
+// ── settle target resolution (plan §12: the current/stale split) ──────────
+
+const settleView = (overrides: Partial<SubagentSettleViewerState> = {}): SubagentSettleViewerState => ({
+  viewingChildId: 'session-child',
+  viewingLabel: 'research',
+  viewingParentSessionId: 'session-parent',
+  viewerGenerationAtSend: 3,
+  viewerGenerationNow: 3,
+  liveParentSessionId: 'session-parent',
+  ...overrides,
+})
+
+test('a settle is CURRENT only while the SAME viewer session is unchanged', () => {
+  assert.deepEqual(resolveSubagentSettleTarget(request, settleView()),
+    { kind: 'current', label: 'research' })
+})
+
+test('a close → REOPEN of the SAME child is STALE (the generation moved)', () => {
+  // The exact round-2 scenario: the viewer was closed and reopened for the
+  // same child id while the send was in flight — the new viewer session
+  // must not be touched by the old send's settle.
+  assert.deepEqual(resolveSubagentSettleTarget(request, settleView({
+    viewerGenerationNow: 5,
+  })), { kind: 'stale' })
+})
+
+test('a child switch is STALE even when the new child is the same id via another parent', () => {
+  assert.deepEqual(resolveSubagentSettleTarget(request, settleView({
+    viewingChildId: 'session-other',
+  })), { kind: 'stale' })
+  assert.deepEqual(resolveSubagentSettleTarget(request, settleView({
+    viewingParentSessionId: 'session-other-parent',
+  })), { kind: 'stale' })
+})
+
+test('a parent session switch at settle time is STALE', () => {
+  assert.deepEqual(resolveSubagentSettleTarget(request, settleView({
+    liveParentSessionId: 'session-other',
+  })), { kind: 'stale' })
+  assert.deepEqual(resolveSubagentSettleTarget(request, settleView({
+    liveParentSessionId: undefined,
+  })), { kind: 'stale' })
+})
+
+test('a closed viewer (no viewing child) is STALE', () => {
+  assert.deepEqual(resolveSubagentSettleTarget(request, settleView({
+    viewingChildId: undefined,
+    viewingLabel: undefined,
+    viewingParentSessionId: undefined,
+  })), { kind: 'stale' })
+})
+
+test('review: the canonicalize scope is the VIEWED CHILD workspace, never the parent cwd', () => {
+  // The child may have been born in another directory: rewriting its
+  // `@src/foo.ts` against the PARENT cwd would resolve to the wrong tree.
+  // A known child cwd wins; an unknown cold-child cwd falls back to the
+  // live parent session.
+  assert.deepEqual(
+    viewerCanonicalizeScope('/repo-b', 'session-parent'),
+    { kind: 'workspace', cwd: '/repo-b' },
+    'a known child cwd is the scope (parent cwd is irrelevant)',
+  )
+  assert.deepEqual(
+    viewerCanonicalizeScope('', 'session-parent'),
+    { kind: 'session', sessionId: 'session-parent' },
+    'an unknown cold-child cwd falls back to the live parent',
+  )
+  assert.deepEqual(
+    viewerCanonicalizeScope(undefined, undefined),
+    { kind: 'session', sessionId: '' },
+    'a sessionless fallback stays fail-closed',
+  )
+})
+
+test('image parts are forwarded VERBATIM (the Host admits them; the TUI never rewrites them)', async () => {
+  // The DTO mirrors the official PromptContentPart vocabulary: an image
+  // part rides through untouched — no canonicalization, no rewriting —
+  // while a text part in the same prompt still canonicalizes.
+  const calls: RecordedCall[] = []
+  const outcome = await submitSubagentPrompt(
+    {
+      parentSessionId: request.parentSessionId,
+      childSessionId: request.childSessionId,
+      delivery: 'queue',
+      content: [
+        { type: 'text', text: 'review @src/foo.ts' },
+        { type: 'image', mediaType: 'image/png', data: 'aGVsbG8=', name: 'shot.png' },
+      ],
+    },
+    deps({
+      subagents: () => service(calls),
+      canonicalizeText: (text) => text.replace('@src/foo.ts', '@/home/xmoon/project/src/foo.ts'),
+    }),
+  )
+  assert.equal(outcome.kind, 'ok')
+  assert.deepEqual(calls[0]!.content, [
+    { type: 'text', text: 'review @/home/xmoon/project/src/foo.ts' },
+    { type: 'image', mediaType: 'image/png', data: 'aGVsbG8=', name: 'shot.png' },
+  ], 'text canonicalizes, the image part is forwarded verbatim')
+})

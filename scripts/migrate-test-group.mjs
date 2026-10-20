@@ -1,22 +1,37 @@
 #!/usr/bin/env node
 /**
- * The test-tree MIGRATION driver: move test files into their production
- * ownership directory, fix the relative imports, and PROVE that the
- * discovered test set is unchanged.
+ * The migration DRIVER: move test files into their production ownership
+ * directory, fix the paths, and PROVE that the migration is a pure
+ * RELOCATION.
  *
- * The migration is a pure relocation: no test LOGIC changes. The driver
- * therefore verifies, for every group:
+ * The driver verifies, for every group:
  *
- *   1. the discovered file set is IDENTICAL before and after the move — a
- *      moved file that silently stops being discovered is the failure this
- *      whole exercise exists to prevent;
- *   2. every moved file's relative imports still resolve to a real file;
- *   3. the total case count is unchanged.
+ *   1. the discovered file set is IDENTICAL before and after the move
+ *      (compared through the move mapping, so a file that legitimately
+ *      moved is not reported as "lost");
+ *   2. every relative path in the WHOLE tree still resolves — the moved
+ *      files AND the files that reference them;
+ *   3. no destination is overwritten and no two sources claim one.
+ *
+ * The path forms it rewrites:
+ *
+ *   - the `from '…'` / `from "…"` import clauses, the side-effect
+ *     `import '…'`, and the `import('…')` calls (single, double and
+ *     template);
+ *   - the `new URL('…', import.meta.url)` source reads (single and
+ *     template), keeping a trailing separator for a URL BASE;
+ *   - the `join(dirname(fileURLToPath(import.meta.url)), '…')`,
+ *     `join(import.meta.dirname, '…')` and
+ *     `resolve(dirname(fileURLToPath(import.meta.url)), '…')` handles.
+ *
+ * It ALSO rewrites the files that REFERENCE a moved file: a moved helper
+ * leaves its importers' relative specifiers pointing at a path that no
+ * longer exists.
  *
  * Usage: node scripts/migrate-test-group.mjs <group.json>
  *
- * The group file is JSON:
- *   { "moves": { "test/old/name.test.ts": "test/new/name.test.ts", ... } }
+ * The group file is JSON: { "moves": { "from": "to", … } } with both sides
+ * relative to the test root.
  *
  * @module @xmoon76/dsh-pi-tui/scripts/migrate-test-group
  */
@@ -33,106 +48,64 @@ const TEST_ROOT = join(ROOT, 'test')
 /**
  * Every relative import specifier a test file uses.
  *
- * Only the REAL import forms count: a `from '…'` clause and a dynamic
- * `import('…')` call. A relative path inside a plain string literal (many
- * source locks assert on the exact text of a production import) is NOT an
- * import of THIS file and must not be rewritten.
- *
- * The `from` clause is matched only at a STATEMENT position — the clause
- * starts a line, or follows an identifier (`}` / `{` / `,` / `type` / `as`).
- * A quoted `from '…'` inside a longer string literal is therefore not a
- * match.
+ * Only the REAL import forms count: a `from '…'` clause, a side-effect
+ * `import '…'`, and a dynamic `import('…')` call. A relative path inside
+ * a plain string literal (many source locks assert on the exact text of a
+ * production import) is NOT an import of THIS file and must not be
+ * rewritten.
  */
 export function relativeImports(source) {
   const specs = new Set()
   for (const match of source.matchAll(/(?:\bfrom\s*|\bimport\s*\(\s*)'(\.[^']*)'/gu)) {
-    if (!isInsideStringLiteral(source, match.index)) {
-      specs.add(match[1])
-    }
+    if (!isInsideStringLiteral(source, match.index)) specs.add(match[1])
   }
-  // The DOUBLE-quoted clause: `from "…"` / `import("…")`.
   for (const match of source.matchAll(/(?:\bfrom\s*|\bimport\s*\(\s*)"(\.[^"]*)"/gu)) {
-    if (!isInsideStringLiteral(source, match.index)) {
-      specs.add(match[1])
-    }
+    if (!isInsideStringLiteral(source, match.index)) specs.add(match[1])
   }
-  // The SIDE-EFFECT import: `import "…"`.
-  for (const match of source.matchAll(/^\s*import\s+'(\.[^']*)'/gmu)) {
-    specs.add(match[1])
-  }
-  for (const match of source.matchAll(/^\s*import\s+"(\.[^"]*)"/gmu)) {
-    specs.add(match[1])
-  }
-  // The TEMPLATE import form: `import(\`../scripts/x.mjs?query=\`)`. The
-  // literal prefix before the interpolation is the part that must be
-  // rewritten; the interpolated part is appended to that prefix.
-  for (const match of source.matchAll(/\bimport\(\s*`(\.[^`$]*)\$\{/gu)) {
-    specs.add(match[1])
-  }
+  for (const match of source.matchAll(/^\s*import\s+'(\.[^']*)'/gmu)) specs.add(match[1])
+  for (const match of source.matchAll(/^\s*import\s+"(\.[^"]*)"/gmu)) specs.add(match[1])
+  // The TEMPLATE import form: `import(\`../scripts/x.mjs?query=\`)`.
+  for (const match of source.matchAll(/\bimport\(\s*`(\.[^`$]*)\$\{/gu)) specs.add(match[1])
   return [...specs]
 }
 
 /**
  * Every relative path a test file resolves against its OWN location.
- *
- * Two forms exist:
- *   - `new URL('…', import.meta.url)` — a source read;
- *   - `join(dirname(fileURLToPath(import.meta.url)), '…')` — a path built
- *     from the file's own directory.
- *
- * Both are relative to the FILE, exactly like an import, so a move must
- * rewrite them too — otherwise the test reads a path that no longer exists.
  */
 export function relativeUrlPaths(source) {
   const specs = new Set()
   for (const match of source.matchAll(/\bnew URL\(\s*'(\.[^']*)'\s*,\s*import\.meta\.url\s*\)/gu)) {
     specs.add(match[1])
   }
-  // The TEMPLATE form: `new URL(\`../src/x/${name}\`, import.meta.url)`. The
-  // literal prefix before the interpolation is the part that must be
-  // rewritten; the interpolated part is already relative to that prefix.
   for (const match of source.matchAll(/\bnew URL\(\s*`(\.[^`$]*)\$\{/gu)) {
     specs.add(match[1])
   }
   return [...specs]
 }
+
 /**
- * The `join(dirname(fileURLToPath(import.meta.url)), '…')` form: the
- * relative segments that follow the file's own directory.
- *
- * The path is expressed as SEGMENTS, so the rewrite is a segment-level
- * operation: the segments after the file's directory are replaced with the
- * segments that reach the same target from the new location.
+ * The `join(dirname(fileURLToPath(import.meta.url)), '…')` and
+ * `join(import.meta.dirname, '…')` handles.
  */
 export function joinPathSegments(source) {
   const specs = new Set()
-  // The `join(dirname(fileURLToPath(import.meta.url)), '…')` form, possibly
-  // spread over several lines. The segment list is matched as the quoted
-  // literals that follow the closing parenthesis of the `dirname(...)` call,
-  // so a nested `)` inside `fileURLToPath(...)` cannot truncate it.
   for (const match of source.matchAll(
     /join\(\s*dirname\(\s*fileURLToPath\(import\.meta\.url\)\s*\)\s*,\s*((?:'[^'\n]*'\s*,?\s*)+)\)/gu,
   )) {
     const segments = [...match[1].matchAll(/'([^']*)'/gu)].map(part => part[1])
-    if (segments.length === 0) continue
-    // The segments are joined with a separator that cannot occur inside a
-    // path segment, so the list can be split back unambiguously.
-    specs.add(segments.join('\u0000'))
+    if (segments.length > 0) specs.add(segments.join('\u0000'))
   }
-  // The `join(import.meta.dirname, '…')` form: the same semantics, spelled
-  // with the modern `import.meta.dirname`.
   for (const match of source.matchAll(
     /join\(\s*import\.meta\.dirname\s*,\s*((?:'[^'\n]*'\s*,?\s*)+)\)/gu,
   )) {
     const segments = [...match[1].matchAll(/'([^']*)'/gu)].map(part => part[1])
-    if (segments.length === 0) continue
-    specs.add(segments.join('\u0000'))
+    if (segments.length > 0) specs.add(segments.join('\u0000'))
   }
   return [...specs]
 }
 
 /**
- * The `resolve(dirname(fileURLToPath(import.meta.url)), '…')` form: the
+ * The `resolve(dirname(fileURLToPath(import.meta.url)), '…')` handle: the
  * repository-root handle a test computes from its own location.
  */
 export function resolveRootPaths(source) {
@@ -141,21 +114,12 @@ export function resolveRootPaths(source) {
     /resolve\(\s*dirname\(\s*fileURLToPath\(import\.meta\.url\)\s*\)\s*,\s*((?:'[^'\n]*'\s*,?\s*)+)\)/gu,
   )) {
     const segments = [...match[1].matchAll(/'([^']*)'/gu)].map(part => part[1])
-    if (segments.length === 0) continue
-    specs.add(segments.join('\u0000'))
+    if (segments.length > 0) specs.add(segments.join('\u0000'))
   }
   return [...specs]
 }
 
-/**
- * Whether the offset falls inside a string literal.
- *
- * The scan is line-by-line and tracks the quote character that opened the
- * literal: a `from '…'` inside a double-quoted literal, a template literal,
- * or a single-quoted literal is a source-lock assertion or a test fixture —
- * NOT an import of this file. Such a literal always has an unescaped
- * opening quote before the offset on the same line.
- */
+/** Whether the offset falls inside a string literal. */
 function isInsideStringLiteral(source, offset) {
   const lineStart = source.lastIndexOf('\n', offset - 1) + 1
   const line = source.slice(lineStart, offset)
@@ -189,8 +153,8 @@ export function resolves(fromRel, spec) {
  *
  * The rewrite is purely positional: a specifier that pointed at
  * `<old-dir>/x` now points at `<new-dir>/x`. The TARGET is resolved against
- * the old directory and re-expressed relative to the new one, so a file that
- * imported `../../src/tui-app.ts` from `test/` imports
+ * the old directory and re-expressed relative to the new one, so a file
+ * that imported `../../src/tui-app.ts` from `test/` imports
  * `../../../src/tui-app.ts` from `test/tui/`.
  */
 export function rewriteImports(source, fromRel, toRel) {
@@ -199,8 +163,7 @@ export function rewriteImports(source, fromRel, toRel) {
   if (fromDir === toDir) return source
   // The file's ABSOLUTE directory, exactly as `dirname(fileURLToPath(
   // import.meta.url))` yields it in the code being rewritten. A `join` over
-  // that absolute directory reproduces the code's own path semantics
-  // (`join('/repo/test', '..', 'src')` = `/repo/src`).
+  // that absolute directory reproduces the code's own path semantics.
   const fromAbsolute = join(TEST_ROOT, fromDir)
   const toAbsolute = join(TEST_ROOT, toDir)
   let out = source
@@ -215,16 +178,13 @@ export function rewriteImports(source, fromRel, toRel) {
     const keepSlash = spec.endsWith('/')
     const normalized = (newSpec.startsWith('.') ? newSpec : `./${newSpec}`) + (keepSlash ? '/' : '')
     out = out.split(`'${spec}'`).join(`'${normalized}'`)
-    // The TEMPLATE form carries the same prefix inside backticks.
-    const templateNew = keepSlash ? `${normalized}` : normalized
-    out = out.split(`\`${spec}\${`).join(`\`${templateNew}\${`)
+    out = out.split(`"${spec}"`).join(`"${normalized}"`)
+    out = out.split(`\`${spec}\${`).join(`\`${normalized}\${`)
   }
-  // The `join(dirname(fileURLToPath(import.meta.url)), '…')` form: the
-  // segments after the file's own directory must reach the same target.
-  //
-  // The WHOLE call is replaced, not just its segment list: a segment-level
-  // replacement would rewrite a short list (`'..'`) inside a longer one
-  // (`'..', 'src', …`) and corrupt it.
+  // The `join(...)` / `resolve(...)` handles: the segments after the file's
+  // own directory must reach the same target. The WHOLE call is replaced,
+  // not just its segment list: a segment-level replacement would rewrite a
+  // short list (`'..'`) inside a longer one (`'..', 'src', …`).
   for (const segments of joinPathSegments(source)) {
     const parts = segments.split('\u0000')
     const target = join(fromAbsolute, ...parts)
@@ -238,9 +198,6 @@ export function rewriteImports(source, fromRel, toRel) {
       out = out.split(call).join(`${base}${replacement})`)
     }
   }
-  // The `resolve(dirname(fileURLToPath(import.meta.url)), '…')` form: the
-  // repository-root handle. `resolve` normalizes a leading `..` against the
-  // base, so the segment list is re-expressed the same way.
   for (const segments of resolveRootPaths(source)) {
     const parts = segments.split('\u0000')
     const target = resolve(fromAbsolute, ...parts)
@@ -267,6 +224,30 @@ export function rewriteImports(source, fromRel, toRel) {
   return out
 }
 
+/**
+ * Rewrite the specifiers of a file that IMPORTS a moved file.
+ *
+ * A moved file leaves its importers' relative specifiers pointing at a path
+ * that no longer exists. The importer is NOT moved, so only the specifier
+ * that named the moved file changes.
+ */
+export function rewriteImporter(source, importerRel, movedFrom, movedTo) {
+  const importerAbsolute = join(TEST_ROOT, dirname(importerRel))
+  const movedAbsolute = join(TEST_ROOT, movedFrom)
+  const movedTarget = join(TEST_ROOT, movedTo)
+  let out = source
+  for (const spec of relativeImports(source)) {
+    if (!spec.startsWith('.')) continue
+    const resolved = join(importerAbsolute, spec)
+    if (resolved !== movedAbsolute) continue
+    const newSpec = relative(importerAbsolute, movedTarget).split('\\').join('/')
+    const normalized = newSpec.startsWith('.') ? newSpec : `./${newSpec}`
+    out = out.split(`'${spec}'`).join(`'${normalized}'`)
+    out = out.split(`"${spec}"`).join(`"${normalized}"`)
+  }
+  return out
+}
+
 function main() {
   const groupPath = process.argv[2]
   if (groupPath === undefined) {
@@ -277,42 +258,55 @@ function main() {
   const moves = group.moves ?? {}
 
   // ── PREFLIGHT ────────────────────────────────────────────────────────────
-  // A destination that already exists would be OVERWRITTEN: the migration
-  // must never silently replace a file. Two sources may not claim the same
-  // destination either.
   const destinations = new Set()
   for (const [from, to] of Object.entries(moves)) {
     if (destinations.has(to)) throw new Error(`two files claim the same destination: ${to}`)
     destinations.add(to)
-    const fromPath = join(TEST_ROOT, from)
-    if (!existsSync(fromPath)) throw new Error(`the move source does not exist: test/${from}`)
-    const toPath = join(TEST_ROOT, to)
-    if (existsSync(toPath)) throw new Error(`the move destination already exists: test/${to}`)
+    if (group.retargetOnly === true) continue
+    if (!existsSync(join(TEST_ROOT, from))) throw new Error(`the move source does not exist: test/${from}`)
+    if (existsSync(join(TEST_ROOT, to))) throw new Error(`the move destination already exists: test/${to}`)
   }
 
   const before = discoverTestFiles(TEST_ROOT, ['.test.ts', '.test.mjs'])
-  // The AFTER set is compared through the MOVE MAPPING, not by path: a file
-  // that legitimately moved is not "lost". The comparison therefore proves
-  // that the migration is a pure RELOCATION — the same set of files, under
-  // their new names.
   const expectedAfter = before
     .map(rel => (moves[rel] === undefined ? rel : moves[rel]))
     .sort()
 
-  for (const [from, to] of Object.entries(moves)) {
-    const fromPath = join(TEST_ROOT, from)
-    const source = readFileSync(fromPath, 'utf8')
-    const toPath = join(TEST_ROOT, to)
-    mkdirSync(dirname(toPath), { recursive: true })
-    writeFileSync(toPath, rewriteImports(source, from, to))
-    rmSync(fromPath)
+  if (group.retargetOnly !== true) {
+    for (const [from, to] of Object.entries(moves)) {
+      const source = readFileSync(join(TEST_ROOT, from), 'utf8')
+      const toPath = join(TEST_ROOT, to)
+      mkdirSync(dirname(toPath), { recursive: true })
+      writeFileSync(toPath, rewriteImports(source, from, to))
+      rmSync(join(TEST_ROOT, from))
+    }
   }
 
+  // ── The IMPORTERS of a moved file ────────────────────────────────────────
+  // A moved file leaves its importers' relative specifiers pointing at a
+  // path that no longer exists. The importer is not moved, so only the
+  // specifier that named the moved file changes.
   const after = discoverTestFiles(TEST_ROOT, ['.test.ts', '.test.mjs'])
-  const lost = expectedAfter.filter(rel => !after.includes(rel))
-  const gained = after.filter(rel => !expectedAfter.includes(rel))
+  let retargeted = 0
+  for (const [from, to] of Object.entries(moves)) {
+    for (const rel of after) {
+      if (rel === to) continue
+      const path = join(TEST_ROOT, rel)
+      const source = readFileSync(path, 'utf8')
+      const rewritten = rewriteImporter(source, rel, from, to)
+      if (rewritten !== source) {
+        writeFileSync(path, rewritten)
+        retargeted += 1
+      }
+    }
+  }
+  if (retargeted > 0) console.log(`retargeted ${retargeted} importer(s) of a moved file`)
+
+  const finalSet = discoverTestFiles(TEST_ROOT, ['.test.ts', '.test.mjs'])
+  const lost = expectedAfter.filter(rel => !finalSet.includes(rel))
+  const gained = finalSet.filter(rel => !expectedAfter.includes(rel))
   console.log(`moved ${Object.keys(moves).length} file(s)`)
-  console.log(`discovered before: ${before.length}, after: ${after.length} (expected: ${expectedAfter.length})`)
+  console.log(`discovered before: ${before.length}, after: ${finalSet.length} (expected: ${expectedAfter.length})`)
   if (lost.length > 0) console.log(`LOST: ${lost.join(', ')}`)
   if (gained.length > 0) console.log(`GAINED: ${gained.join(', ')}`)
 
@@ -321,8 +315,14 @@ function main() {
   // can reference a MOVED file (a relative import, a source read, a
   // path literal). The whole tree is therefore checked, not just the moved
   // files.
+  //
+  // The migration driver's OWN suite is excluded: it deliberately contains
+  // synthetic, non-resolving paths (they are the fixtures the rewrite rules
+  // are proved against).
+  const SYNTHETIC_PATH_OWNER = 'tooling/migration-driver.test.mjs'
   let broken = 0
-  for (const rel of after) {
+  for (const rel of finalSet) {
+    if (rel === SYNTHETIC_PATH_OWNER) continue
     const source = readFileSync(join(TEST_ROOT, rel), 'utf8')
     for (const spec of relativeImports(source)) {
       if (!resolves(rel, spec)) {

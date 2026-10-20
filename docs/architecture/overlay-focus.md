@@ -234,8 +234,8 @@ frame, auto-reopen, report a Host-driven end as user cancel, or add an
 `ASK_ABORTED`, `QUESTION_REPLY_QUEUED`, `ContinuedQuestionEntry`),
 `QuestionFlow`, `src/runtime/interaction-port.ts`.
 
-Proof: `test/question-park-reopen.test.ts`,
-`test/question-remote-lifecycle.test.ts`.
+Proof: `test/app/question-park-reopen.test.ts`,
+`test/app/question-remote-lifecycle.test.ts`.
 
 ### 6.2 Esc and visible-seat priority
 
@@ -380,7 +380,7 @@ that grant instead of the whole terminal height.
   assembly — it renders its fixed view regardless of the panel grant, so on a
   grant shorter than that view the compositor clamp applies. This PR keeps
   that degradation (no second scrollport) and pins it in
-  `test/keybinding-editor.test.ts`; "every render branch fits the grant"
+  `test/tui/keybinding-editor.test.ts`; "every render branch fits the grant"
   holds for the panel's own assemblies, not for the recorder view.
 - Legacy limits are retained deliberately: `/settings` keeps
   `SettingsList(items, 6, …)` and `configuredMaxHeight = 28`, so the nested
@@ -389,12 +389,12 @@ that grant instead of the whole terminal height.
   Workspace (a separate Settings Workspace design): the fork's SettingsList still lacks
   filtered-state Home/End paging, and the main settings list still shows at
   most six visible rows.
-- Evidence: `test/surface-row-grant.test.ts` (real `/settings` command →
+- Evidence: `test/app/surface-row-grant.test.ts` (real `/settings` command →
   live geometry → submenu → painted frame, resize, question AND approval
   suspension, the real bare `/keybindings` budget with its teardown count, and
-  a 44-column CJK frame/painted hit map), `test/theme-picker.test.ts` (Theme
-  submenu grant), `test/rendering.test.ts` (standalone budget, navigation and
-  close) and `test/keybinding-editor.test.ts` (per-panel grants, degenerate
+  a 44-column CJK frame/painted hit map), `test/app/theme-picker.test.ts` (Theme
+  submenu grant), `test/domain/rendering.test.ts` (standalone budget, navigation and
+  close) and `test/tui/keybinding-editor.test.ts` (per-panel grants, degenerate
   grants, painted mouse hit maps including the scrolled choice ordinal, and
   the recorder degradation).
 
@@ -459,10 +459,10 @@ has exactly ONE per-open finalizer, and every close route funnels through it:
   destructive-intent fence. `jobs.read()` — the consuming cursor — is never part
   of closing.
 
-Evidence: `test/surface-lifecycle-closure.test.ts` (Esc, returned closer, screen
+Evidence: `test/app/surface-lifecycle-closure.test.ts` (Esc, returned closer, screen
 swap, parent-only close, Quick/Full restore, Job A → B, session reset, final
 dispose, throwing child dispose, Sign-in notice identity) and
-`test/job-inspector-workspace.test.ts` (the workspace screen lease itself).
+`test/app/job-inspector-workspace.test.ts` (the workspace screen lease itself).
 
 ## 10.1 Job workspace: a temporary physical-screen lease
 
@@ -983,7 +983,7 @@ becomes a second authority over them or over the editor seat.
   physical retirement are the contract in §11.1 below, which extends — never
   replaces — this seam.
 
-Evidence: `test/editor-seat-optional-tenant.test.ts` (B-01…B-60: activation and
+Evidence: `test/domain/editor-seat-optional-tenant.test.ts` (B-01…B-60: activation and
 real key delivery, the REFUSE gate, PARK/restore across Question, Save Location
 and Approval including both FIFOs with a REAL suspended overlay root, the
 host-classified protocol fence on both screens for CURRENT and STALE subjects, a
@@ -1058,13 +1058,13 @@ second authority:
   `setEditorText`; a newer owner that took the seat during the close keeps the
   keyboard and the current editor.
 
-Evidence: `test/history-seat-b3b-lifecycle.test.ts` (H3B-01…H3B-12: the real
+Evidence: `test/app/history-seat-b3b-lifecycle.test.ts` (H3B-01…H3B-12: the real
 `SessionScopeAuthority` + ownership core + `bindSessionRuntime` publication over
 a real `TuiApp`/`VirtualTerminal`, Question/Approval FIFO park/restore, A→B→A
 and same-id re-owner refusal, the failed/pre-commit switch, a deferred
 search/copy settling after a switch, and the reentrant accept), plus the
-existing `test/ctrl-r.test.ts`, `test/history-panel.test.ts`,
-`test/history-seat-mouse.test.ts` and `test/editor-seat-optional-tenant.test.ts`
+existing `test/client/ctrl-r.test.ts`, `test/client/history-panel.test.ts`,
+`test/client/history-seat-mouse.test.ts` and `test/domain/editor-seat-optional-tenant.test.ts`
 suites.
 
 ## 12. The on-demand Task Quick accessory
@@ -1096,6 +1096,6 @@ this section records only the seat/geometry mechanics:
   subscription; a session-generation reset clears it with the other Task Center
   mirrors.
 
-Evidence: `test/task-quick-b4b-interaction.test.ts`,
-`test/task-quick-accessory.test.ts`, `test/fullscreen-widget-parity.test.ts`,
-`test/surface-lifecycle-closure.test.ts`.
+Evidence: `test/app/task-quick-b4b-interaction.test.ts`,
+`test/app/task-quick-accessory.test.ts`, `test/app/fullscreen-widget-parity.test.ts`,
+`test/app/surface-lifecycle-closure.test.ts`.

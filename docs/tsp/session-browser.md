@@ -158,18 +158,18 @@ success is established.
 
 ```sh
 node --import tsx/esm --test --test-concurrency=1 \
-  test/tern-tsp-command-admission.test.ts \
-  test/tern-tsp-direct-admission.test.ts \
-  test/tern-tsp-session-browser-commands.test.ts \
-  test/tern-tsp-session-browser-read.test.ts \
-  test/tern-tsp-session-browser.test.ts \
-  test/tern-tsp-session-browser-direct.test.ts \
-  test/session-runtime-remote-owner-handoff.test.ts \
-  test/runner-remote-command-plane.test.ts \
-  test/session-picker-content-search.test.ts \
-  test/tern-tsp-runner-interactive.test.ts \
-  test/sessions.test.ts
-node --import tsx/esm --test --test-name-pattern='^A-07' test/tern-tsp-live-mount.test.ts
+  test/app/tern-tsp-command-admission.test.ts \
+  test/integration/tern-tsp-direct-admission.test.ts \
+  test/runtime/direct/tern-tsp-session-browser-commands.test.ts \
+  test/app/tern-tsp-session-browser-read.test.ts \
+  test/app/tern-tsp-session-browser.test.ts \
+  test/app/tern-tsp-session-browser-direct.test.ts \
+  test/app/session-runtime-remote-owner-handoff.test.ts \
+  test/extension/runner-remote-command-plane.test.ts \
+  test/app/session-picker-content-search.test.ts \
+  test/integration/tern-tsp-runner-interactive.test.ts \
+  test/tui/sessions.test.ts
+node --import tsx/esm --test --test-name-pattern='^A-07' test/app/tern-tsp-live-mount.test.ts
 node scripts/tern-pane-drive.mjs scripts/tern-pane-session-browser-read.mjs
 node scripts/tern-pane-drive.mjs scripts/tern-pane-session-browser-direct.mjs
 ```

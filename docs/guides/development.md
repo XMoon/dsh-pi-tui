@@ -314,9 +314,9 @@ machines or Node versions.
 Surviving regression gates are structural:
 
 - structural work counters and ordered production call traces (for example
-  `test/transcript-history-extension.test.ts` asserts
+  `test/app/transcript-history-extension.test.ts` asserts
   `moveOlder → capture → repaint → restore:top`, not a threshold;
-  `test/fullscreen-scroll-geometry-epoch.test.ts` pins the row-map contract);
+  `test/client/fullscreen-scroll-geometry-epoch.test.ts` pins the row-map contract);
 - `DSH_TUI_SCROLL_PROFILE=1` emits one stderr line per coalesced scroll frame
   (latency, write, snapshot stages, bytes, rowsRW);
 - `DSH_TUI_RENDER_PROFILE` covers transcript presentation commits.

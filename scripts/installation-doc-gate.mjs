@@ -34,7 +34,7 @@ const ACTIVE_FILES = [
   'docs/guides/dsh-compatibility.md',
   'src/startup.ts',
   'scripts/dsh-runtime-boundary-smoke.mjs',
-  'test/startup.test.ts',
+  'test/app/startup.test.ts',
   'test/tooling/dsh-runtime-boundary.test.mjs',
 ]
 const STABLE_COMMAND = 'dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@latest'

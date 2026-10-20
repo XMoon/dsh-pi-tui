@@ -346,7 +346,7 @@ chrome rules budget of §6.2.
 
 ### 4.3 Glyph safety (EAW) — hard rule
 
-`test/icons.test.ts` already rejects East-Asian-Width **ambiguous** glyphs, hard
+`test/domain/icons.test.ts` already rejects East-Asian-Width **ambiguous** glyphs, hard
 coded as `SAFE_EAW = {'neutral','narrow','halfwidth'}`, because VTE/WezTerm
 `cjk-ambiguous-width` paints ambiguous glyphs **two** cells while
 `visibleWidth()` measures them as one.
@@ -800,7 +800,7 @@ Use these; do not build a parallel owner.
 | Overlay shells | `src/tui/components/frame.ts` (`Frame`, `FocusForwardingFrame`, `ResponsiveOverlayFrame`) | overlays keep the rounded frame; fullscreen workspaces never use it |
 | Single physical row safety | `src/tui/presentation/lines.ts` (`sanitizedPhysicalLine`, `escapedPhysicalLine`) | every chrome string passes through it |
 | Per-frame row budget | `planSettingsChrome` / `planChrome` in the owning panel | keep; do not share |
-| Real-frame tests | `test/settings-workspace-visual.test.ts`, `test/job-workspace-visual.test.ts`, `test/virtual-terminal.ts` | extend; never add a second screenshot framework |
+| Real-frame tests | `test/app/settings-workspace-visual.test.ts`, `test/app/job-workspace-visual.test.ts`, `test/support/virtual-terminal.ts` | extend; never add a second screenshot framework |
 
 **Explicitly not to be built:** a CSS-in-TS layer, a token store, a
 `SurfaceManager`/`WorkspaceRenderer`/layout DSL, a second focus manager, a modal
@@ -863,7 +863,7 @@ visual item, and an unrun screenshot must never be reported as PASS.
 
 Enforce only what is cheap and low-false-positive; the rest is review.
 
-1. **Chrome glyph width gate** (`test/design-language.test.ts`): the canonical
+1. **Chrome glyph width gate** (`test/domain/design-language.test.ts`): the canonical
    chrome glyph inventory (§4.4) must be 1 cell under `visibleWidth()` *and* EAW
    neutral/narrow/halfwidth, one glyph must not carry two meanings, and the
    rejected per-status glyphs are pinned as data. This makes §4.3
@@ -884,12 +884,12 @@ Enforce only what is cheap and low-false-positive; the rest is review.
    dropped/kept set matches §8 (this is the test that catches "someone made the
    header taller").
 4. **Atomic state chip** (`packages/pi-tui/test/settings-list.test.ts` for the
-   renderer contract, `test/preset-command.test.ts` + `test/surface-row-grant.test.ts`
+   renderer contract, `test/app/preset-command.test.ts` + `test/app/surface-row-grant.test.ts`
    for the real frames): a chip is never painted partially (`[defaul`), a dropped
    chip never leaves its separator, an over-wide label is clipped with `…` instead
    of overflowing, and the chip survives every width from the 44-column floor up.
 
-Items 1–3 are enforced by `test/design-language.test.ts` (item 1), the four frame
+Items 1–3 are enforced by `test/domain/design-language.test.ts` (item 1), the four frame
 invariants in `test/support/design-language-frames.ts` — called from BOTH visual
 suites — and the per-surface ladder matrix each of those suites walks over the
 frozen sizes above (items 2–3). The `Verified`/`Not saved` ink check lives in the
@@ -1010,7 +1010,7 @@ line numbers.
 | ` · ` joins metadata/hint segments | oh-my-pi `theme/symbols.ts:456` `"sep.dot": " · "`; kimi DESIGN §4; pi `settings-list.ts` hint line | both workspace meta/fact rows, `task-panel.ts:1275-1287` |
 | **Key token Capitalized, verb lowercase** | pi `keyDisplayText`; oh-my-pi `key-hint-format.ts`; kimi DESIGN §4 | `Esc back`, `Enter details` (bare letters must change, §4.1) |
 | Hints and keys come from the **keymap**, never a raw literal | pi AGENTS.md; kimi `printable-key-guard.test.ts` (CI-enforced); oh-my-pi `formatKeyHint` | `componentKeymap.keyHint('tasks.stop')` in Job; Settings still compares `'r'`/`'c'` |
-| Every row is width-clamped through the shared helpers | pi/oh-my-pi/kimi docs | `fit()` / `truncateToWidth` / `visibleWidth`; `test/icons.test.ts` |
+| Every row is width-clamped through the shared helpers | pi/oh-my-pi/kimi docs | `fit()` / `truncateToWidth` / `visibleWidth`; `test/domain/icons.test.ts` |
 | A **small, counted** decoration budget | kimi DESIGN §3 "整个 dialog 全宽 `─` 仅 2 条（顶 + 底）", checklist-enforced; pi's de-facto 2 `DynamicBorder`s | `planSettingsChrome` grants 0 or 2 rules |
 | Text contrast floor ≥ 4.5:1 | pi `docs/themes.md`; kimi AGENTS.md (+3:1 chrome) | palette comments ("tuned for ≥ 4.5:1 contrast on black") |
 | `borderFocus` is approval-only | kimi `theme/colors.ts` "Focus / attention border — currently only the approval panel" | identical comment on our `ColorPalette.borderFocus` |
@@ -1070,8 +1070,8 @@ clicks must use different cells.
 
 Authority: `src/tui/components/transcript-leaves.ts`,
 `src/tui-app.ts` (`transcriptRenderWidth`, `MessageComponentEntry.builtWidth`,
-`syncSurfaceGeometry`). Proof: `test/rendering.test.ts`,
-`test/image-collapse.test.ts`.
+`syncSurfaceGeometry`). Proof: `test/domain/rendering.test.ts`,
+`test/client/image-collapse.test.ts`.
 
 ### 13.5 Selected-row marquee
 
@@ -1085,7 +1085,7 @@ marqueeable title via `truncatePrimary`.
 Authority: `src/tui/components/marquee.ts` (`SelectedMarquee`, `marqueeStateAt`,
 `MARQUEE_STEP_MS`). Must-not: scroll the whole row, run a timer while nothing
 overflows, or add a fork divergence for the picker seam. Proof:
-`test/marquee.test.ts`, `test/task-panel.test.ts`.
+`test/tui/marquee.test.ts`, `test/app/task-panel.test.ts`.
 
 ### 13.6 Visual assertion updates
 

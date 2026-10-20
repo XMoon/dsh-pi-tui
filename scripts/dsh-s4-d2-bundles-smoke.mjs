@@ -18,7 +18,7 @@
  * - `--native`: the explicit external Claude Code / Codex credential gate. It
  *   records the presence/absence of the official environment credentials and
  *   `EXTERNAL_UNVERIFIED`; the REAL native start lives behind the unit-test gate
- *   `DSH_PI_TUI_S4_D2_NATIVE=1` (`test/s4-d2-native-subagents.test.ts`) under an
+ *   `DSH_PI_TUI_S4_D2_NATIVE=1` (`test/integration/s4-d2-native-subagents.test.ts`) under an
  *   isolated HOME. This CLI never fabricates a native success.
  * - `--gate`: operator/CI gate mode. Exit nonzero whenever the provisioned
  *   fixture is BLOCKED instead of silently treating the offline inspection as a
@@ -337,7 +337,7 @@ function runNativeGate(bundle, evidence) {
     credentialPresence,
     execution: 'not-run',
     reason: '--native records credential presence only. The real native start is gated by '
-      + 'DSH_PI_TUI_S4_D2_NATIVE=1 in test/s4-d2-native-subagents.test.ts under an isolated HOME; '
+      + 'DSH_PI_TUI_S4_D2_NATIVE=1 in test/integration/s4-d2-native-subagents.test.ts under an isolated HOME; '
       + 'without a real result the row stays EXTERNAL_UNVERIFIED. No system claude/codex CLI is substituted.',
   }
 }

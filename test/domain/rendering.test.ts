@@ -1,0 +1,5312 @@
+/**
+ * Headless tests for the P5c rendering features: diff colorization, LaTeX
+ * in assistant markdown, the todo panel, the thinking hide toggle,
+ * user-questions dialogs, and fullscreen scrollback search.
+ * @module @xmoon76/dsh-pi-tui/rendering.test
+ */
+
+import assert from 'node:assert/strict'
+import { afterEach, test } from 'node:test'
+import { MessageId, ToolCallId } from '@deepseek-ai/dsh-llm'
+import { CommandId } from '@deepseek-ai/dsh-commands'
+import { SessionSeq } from '@deepseek-ai/dsh-session'
+import type { SessionEvent } from '@deepseek-ai/dsh-session'
+import type { AssistantLiveChunk } from '../../src/runtime/assistant-stream-port.ts'
+import { isDiffResult } from '../../src/tui/transcript/diff-projection.ts'
+import { renderDiffLine } from '../../src/tui/components/transcript/diff.ts'
+import {
+  foldedCallPreview, genericRawInputLines, parseReadEnvelopes, parseSkillEnvelope, resultTextLines, subagentModelDisplay, systemContextBody, toolPresenterFrom, webCardLines,
+} from '../../src/tui/transcript/tool-presentation.ts'
+import { parseUserKeybindings } from '../../src/tui/keybindings/config.ts'
+import { HostKeybindingManager } from '../../src/tui/keybindings/manager.ts'
+import { KeybindingEditorPanel } from '../../src/tui/keybindings/ui/list.ts'
+import { buildKeybindingEditorModel } from '../../src/tui/keybindings/ui/model.ts'
+import { RendererRegistry } from '../../src/extension/internal/renderer-registry.ts'
+import { darkColors, lightColors } from '../../src/domain/display/theme.ts'
+import { color, currentPalette, setTheme } from '../../src/tui/theme/runtime.ts'
+import { iconFor } from '../../src/tui/icons.ts'
+import { TuiApp, BulletedComponent, TRANSCRIPT_RIGHT_GUTTER, transcriptContentWidth, TranscriptGutterComponent, type TranscriptViewportAnchor } from '../../src/tui-app.ts'
+import { WorkingIndicator, workingFramesFor } from '../../src/tui/components/working-indicator.ts'
+import { TranscriptFolder, type TranscriptMessage, type TurnActivity, type WorkflowRunId } from '../../src/transcript.ts'
+import { TranscriptWindowController } from '../../src/domain/transcript/window.ts'
+import { Text, visibleWidth, wrapTextWithAnsi, stripTerminalSequences, type Terminal } from '@xmoon76/pi-tui'
+import { VirtualTerminal } from '../support/virtual-terminal.ts'
+import { hasFocusHeader } from '../support/focus-header.ts'
+
+/** Re-vendor lifecycle follow-up P3: every TuiApp started in this file is
+ * stopped after each test — the process's single-live-TUI slot (the
+ * vendored keybindings are process-global) is held only by LIVE surfaces,
+ * so a test that starts an app must not leak the slot into the next test
+ * (see src/tui/process-slot.ts). */
+const startedApps = new Set<TuiApp>()
+afterEach(() => {
+  for (const app of [...startedApps]) {
+    startedApps.delete(app)
+    if (app.isDisposed()) continue
+    try { app.dispose() } catch {}
+  }
+})
+
+
+// CI/tooling environments export NO_COLOR, FORCE_COLOR=0 and CI=true, which
+// themeOptOut() honours by skipping terminal queries entirely — that would
+// silently turn every autodetect test into a no-op assertion. Clear all
+// three for this suite (the tests inject terminal replies, so the opt-out
+// would only mask the code paths under test).
+process.env.NO_COLOR = ''
+process.env.FORCE_COLOR = ''
+process.env.CI = ''
+
+function startApp(width = 100, height = 24): { vt: VirtualTerminal; app: TuiApp } {
+  const vt = new VirtualTerminal(width, height)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  return { vt, app }
+}
+
+async function viewport(vt: VirtualTerminal): Promise<string> {
+  await vt.waitForRender()
+  return vt.getViewport().join('\n')
+}
+/** A started app whose terminal writes are recorded (protocol queries included). */
+function startAppWithWrites(width = 100, height = 24): { vt: VirtualTerminal; app: TuiApp; writes: string[] } {
+  const vt = new VirtualTerminal(width, height)
+  const writes: string[] = []
+  const spy = new Proxy(vt, {
+    get(target, prop) {
+      if (prop === 'write') {
+        return (data: string): void => { writes.push(data); target.write(data) }
+      }
+      const value = Reflect.get(target, prop)
+      return typeof value === 'function' ? value.bind(target) : value
+    },
+  }) as unknown as Terminal
+  const app = new TuiApp(spy, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  return { vt, app, writes }
+}
+/** A started app whose user-activity signal is observable (the input boundary). */
+function startAppWithEvents(): { vt: VirtualTerminal; app: TuiApp; userInputs: () => number } {
+  const vt = new VirtualTerminal(100, 24)
+  let userInputs = 0
+  const app = new TuiApp(vt, {
+    onSubmit: () => {},
+    onExit: () => {},
+    onUserInput: () => { userInputs += 1 },
+  })
+  app.start()
+  startedApps.add(app)
+  return { vt, app, userInputs: () => userInputs }
+}
+/** Mode 2031 writes, in order (the tracking lifecycle contract). */
+function mode2031Writes(writes: string[]): string[] {
+  return writes.filter(data => data === '\x1b[?2031h' || data === '\x1b[?2031l')
+}
+
+test('diff detection and line colorization', () => {
+  assert.equal(isDiffResult('edit', 'plain'), true)
+  assert.equal(isDiffResult('apply_patch', 'plain'), true)
+  assert.equal(isDiffResult('bash', 'diff --git a/x b/x\n@@ -1 +1 @@'), true)
+  assert.equal(isDiffResult('bash', 'just output'), false)
+  assert.equal(renderDiffLine('+added'), color.success('+added'))
+  assert.equal(renderDiffLine('-removed'), color.error('-removed'))
+  assert.equal(renderDiffLine('@@ -1,3 +1,3 @@'), color.textDim('@@ -1,3 +1,3 @@'))
+  assert.equal(renderDiffLine('+++ b/x'), color.textDim('+++ b/x'))
+  assert.equal(renderDiffLine(' context'), ' context')
+})
+
+test('latex stays RAW in assistant markdown (kimi-parity product decision)', async () => {
+  // renderLatex: false everywhere (HOST_MARKDOWN_OPTIONS): the Earendil
+  // 0.84.4 re-vendor introduced LaTeX-to-Unicode rendering defaulting to
+  // ON, which silently changed transcript rendering; the host keeps the
+  // pre-re-vendor behavior (raw $...$ text) until an explicit setting
+  // opts in.
+  const { vt, app } = startApp()
+  app.setTranscript([{ kind: 'assistant', turn: 0, text: 'Energy $E=mc^2$ rules' }])
+  const view = await viewport(vt)
+  assert.ok(view.includes('E=mc^2'), `latex source must render verbatim:\n${view}`)
+  assert.ok(!view.includes('²'), `latex must not render to unicode yet:\n${view}`)
+})
+
+test('ctrl+t toggles the todo panel with markers', async () => {
+  const { vt, app } = startApp()
+  app.setTodoSummary([
+    { content: 'fix tests', status: 'in_progress' },
+    { content: 'ship it', status: 'pending' },
+    { content: 'done thing', status: 'completed' },
+  ])
+  let view = await viewport(vt)
+  assert.ok(!view.includes('Todo'), `panel visible by default:\n${view}`)
+  vt.sendInput('\x14') // ctrl+t
+  view = await viewport(vt)
+  assert.ok(view.includes('Todo'), `panel title missing:\n${view}`)
+  // Only the first active item shows in the header; the rest prove the panel.
+  assert.ok(view.includes('ship it'), `pending row missing:\n${view}`)
+  assert.ok(view.includes('done thing'), `completed row missing:\n${view}`)
+  vt.sendInput('\x14')
+  view = await viewport(vt)
+  assert.ok(!view.includes('Todo'), `panel still visible:\n${view}`)
+})
+
+test('alt+t toggles thinking detail (compact preview ↔ full body; never hidden)', async () => {
+  const { vt, app } = startApp()
+  app.setTranscript([{ kind: 'thinking', turn: 0, text: 'first thought\nsecret reasoning' }])
+  let view = await viewport(vt)
+  assert.ok(view.includes('secret reasoning'), `compact preview missing:\n${view}`)
+  assert.ok(view.includes('(alt+t to expand)'), `compact hint missing:\n${view}`)
+  assert.ok(!view.includes('first thought'), `full body leaked while compact:\n${view}`)
+  vt.sendInput('\x1bt') // alt+t
+  view = await viewport(vt)
+  assert.ok(view.includes('first thought'), `thinking not expanded:\n${view}`)
+  assert.ok(!view.includes('(alt+t to expand)'), `expanded block must drop the compact hint:\n${view}`)
+  assert.equal(app.isThinkingExpanded(), true)
+  vt.sendInput('\x1bt')
+  view = await viewport(vt)
+  assert.ok(view.includes('secret reasoning'), `compact preview must return:\n${view}`)
+  assert.ok(view.includes('(alt+t to expand)'), `compact hint must return:\n${view}`)
+  assert.ok(!view.includes('first thought'), `compact must never show the full body:\n${view}`)
+})
+
+test('askQuestions collects a single selection', async () => {
+  const { vt, app } = startApp()
+  const promise = app.askQuestions([{
+    id: 'q1',
+    question: 'Continue?',
+    options: [{ label: 'Yes' }, { label: 'No' }],
+  }])
+  let view = await viewport(vt)
+  assert.ok(view.includes('Continue?'), `question missing:\n${view}`)
+  assert.ok(view.includes('[1] Yes'), `option missing:\n${view}`)
+  vt.sendInput('2')
+  await viewport(vt)
+  vt.sendInput('\r')
+  assert.deepEqual(await promise, [{ id: 'q1', selected: ['No'] }])
+})
+
+test('question dialog wraps long text, keeps descriptions on their own lines, and never ellipsizes', async () => {
+  const { vt, app } = startApp()
+  const longQuestion = 'AGENTS.md 硬规则「fire-and-forget 走 runDetached,禁止裸 void」与现状存在分歧,如何解决?这一句非常长,必须换行显示而不能被对话框截断。'
+  const promise = app.askQuestions([{
+    id: 'q1',
+    question: longQuestion,
+    options: [{ label: '方案 3:新增 runOwned', description: '新增 runOwned(label, task, { onResult, onCancel, onError }) 用于 result-consuming 主流程,这段描述同样很长需要换行' }],
+  }])
+  const view = await viewport(vt)
+  // The full question text must be visible (wrapped, never ellipsized).
+  assert.ok(view.includes('对话框截断'), `question text truncated:\n${view}`)
+  assert.ok(!view.includes('…'), `question dialog ellipsized content:\n${view}`)
+  // The description renders on its own wrapped line, not crammed after the label.
+  const lines = view.split('\n')
+  const labelIdx = lines.findIndex(line => line.includes('方案 3:新增 runOwned'))
+  assert.ok(labelIdx >= 0, `option label missing:\n${view}`)
+  assert.ok(lines[labelIdx + 1]?.includes('新增 runOwned(label'), `description not on its own line:\n${view}`)
+  assert.ok(!lines[labelIdx]!.includes('result-consuming 主流程'), `description crammed on the label row:\n${view}`)
+  await vt.sendInput('\x1b')
+  await assert.rejects(promise, /cancelled/)
+})
+
+test('question dialog tabs align with the box border and the hint fits the width', async () => {
+  const { vt, app } = startApp()
+  const promise = app.askQuestions([{ id: 'q1', question: 'Pick', options: [{ label: 'A' }] }])
+  const view = await viewport(vt)
+  const lines = view.split('\n')
+  // The tab strip is the first content row of the overlay: the border column
+  // must be followed by the mark directly (the previous build's stray leading
+  // space inside the box made the box look misaligned). The overlay is
+  // centered, so strip the outer margin first.
+  const tabIdx = lines.findIndex(line => line.includes('Q1'))
+  assert.ok(tabIdx >= 0, `tab strip missing:\n${view}`)
+  const trimmedTab = lines[tabIdx]!.trimStart()
+  assert.ok(trimmedTab.startsWith('│ '), `tab row lost its border:\n${view}`)
+  // The frame adds exactly ONE padding cell; a second space means the tab
+  // strip content itself starts with a stray space (the old misalignment).
+  assert.ok(!trimmedTab.startsWith('│  '), `tab strip has a stray leading space:\n${view}`)
+  // The hint must not be ellipsized.
+  const hintIdx = lines.findIndex(line => line.includes('esc cancel'))
+  assert.ok(hintIdx >= 0 && !lines[hintIdx]!.includes('…'), `hint truncated:\n${view}`)
+  await vt.sendInput('\x1b')
+  await assert.rejects(promise, /cancelled/)
+})
+
+test('question dialog docks in the editor seat at full width above the footer', async () => {
+  // Issue #3 follow-up: the dialog used to be a centered 85%-wide × 26-row
+  // modal that covered the whole transcript on common terminals. It now
+  // spans the full terminal width and sits in the EDITOR SEAT (kimi's
+  // mountEditorReplacement), with the footer (status line) still visible
+  // BELOW it.
+  const { vt, app } = startApp(160)
+  app.setStatus({ model: 'my-model', cwd: 'c' })
+  const promise = app.askQuestions([{ id: 'q1', question: 'Pick', options: [{ label: 'A' }] }])
+  const view = await viewport(vt)
+  const lines = view.split('\n')
+  const strip = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, '')
+  const qIdx = lines.findIndex(line => strip(line).includes('Pick'))
+  assert.ok(qIdx >= 0, `question missing:\n${view}`)
+  let topIdx = -1
+  let bottomIdx = -1
+  for (let i = qIdx; i >= 0; i--) {
+    const s = strip(lines[i] ?? '')
+    if (s.includes('╭') && s.includes('╮')) { topIdx = i; break }
+  }
+  for (let i = qIdx; i < lines.length; i++) {
+    const s = strip(lines[i] ?? '')
+    if (s.includes('╰') && s.includes('╯')) { bottomIdx = i; break }
+  }
+  assert.ok(topIdx >= 0 && bottomIdx >= 0, `question frame missing:\n${view}`)
+  // Full width: the border spans all 160 columns.
+  const top = strip(lines[topIdx]!)
+  assert.equal(top.lastIndexOf('╮') - top.indexOf('╭') + 1, 160, `frame must span the full 160 cols:\n${view}`)
+  // The dialog is docked at the bottom, not centered: its bottom border sits
+  // immediately above the footer's first row.
+  const footerIdx = lines.findIndex(line => strip(line).includes('my-model'))
+  assert.ok(footerIdx >= 0, `footer missing:\n${view}`)
+  assert.equal(bottomIdx + 1, footerIdx, `dialog bottom border must sit directly above the footer:\n${view}`)
+  assert.ok(topIdx > 0, `dialog must not start at row 0 (docked, not centered):\n${view}`)
+  await vt.sendInput('\x1b')
+  await assert.rejects(promise, /cancelled/)
+})
+
+/** Measure the question frame's span (bottom border row - top border row + 1).
+ * The question frame is the BOTTOM-MOST frame in the viewport (the editor
+ * seat sits above the footer); frames above it (welcome card, header) are
+ * ignored. Returns -1 when no frame is found. */
+function questionFrameSpan(view: string): number {
+  const lines = view.split('\n')
+  const strip = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, '')
+  let top = -1
+  let bottom = -1
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const s = strip(lines[i] ?? '')
+    if (bottom === -1 && s.includes('╰') && s.includes('╯')) bottom = i
+    if (top === -1 && s.includes('╭') && s.includes('╮')) top = i
+    if (top !== -1 && bottom !== -1) break
+  }
+  return top >= 0 && bottom >= 0 ? bottom - top + 1 : -1
+}
+
+test('the question dialog height cap tracks the terminal height', async () => {
+  // The cap is 60% of the terminal height (8..24 content rows + 2 borders).
+  // The fixture must FILL the budget (7 long-description options), and the
+  // assertion measures the question frame's ACTUAL span — a short question
+  // renders fewer rows and proves nothing about the cap.
+  const cases: Array<[number, number]> = [[16, 10], [24, 14], [40, 24], [60, 26]]
+  for (const [rows, maxSpan] of cases) {
+    const vt = new VirtualTerminal(100, rows)
+    const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+    app.start()
+
+    startedApps.add(app)
+    const promise = app.askQuestions([{
+      id: 'q1',
+      question: 'Pick one',
+      options: Array.from({ length: 7 }, (_, i) => ({
+        label: `Option ${i + 1}`,
+        description: 'd'.repeat(800),
+      })),
+    }])
+    const view = await viewport(vt)
+    const span = questionFrameSpan(view)
+    assert.ok(span > 4, `dialog missing at ${rows} rows:\n${view}`)
+    assert.ok(span <= maxSpan, `dialog span ${span} > ${maxSpan} at ${rows} rows:\n${view}`)
+    assert.ok(view.includes('→'), `pointer pushed out at ${rows} rows:\n${view}`)
+    assert.ok(view.includes('esc cancel'), `hint pushed out at ${rows} rows:\n${view}`)
+    assert.ok(view.includes('more lines'), `truncation marker missing at ${rows} rows:\n${view}`)
+    await vt.sendInput('\x1b')
+    await assert.rejects(promise, /cancelled/)
+    // Re-vendor lifecycle follow-up P3: the process slot is released only
+    // by the FINAL dispose — dispose this iteration's app before the next
+    // case starts (a stopped-but-alive app still owns the slot).
+    app.dispose()
+  }
+})
+
+test('the whole question dialog fits its height: long descriptions cannot push the hint out', async () => {
+  const { vt, app } = startApp()
+  // Review repro: 7 options, each with an ~800-char description, once
+  // wrapped to 112 rows; the overlay clips at maxHeight 26 and the user
+  // would be choosing blind. The shared budget must keep the current
+  // option and the hint visible.
+  const promise = app.askQuestions([{
+    id: 'q1',
+    question: 'Pick one',
+    options: Array.from({ length: 7 }, (_, i) => ({
+      label: `Option ${i + 1}`,
+      description: 'd'.repeat(800),
+    })),
+  }])
+  const view = await viewport(vt)
+  // Measure the question frame only (24-row terminal: cap = 14 rows) — the
+  // docked layout leaves other content visible, so whole-viewport row counts
+  // would prove nothing.
+  const span = questionFrameSpan(view)
+  assert.ok(span > 4, `dialog missing:\n${view}`)
+  assert.ok(span <= 14, `dialog overflowed the 60% height cap (span ${span}):\n${view}`)
+  assert.ok(view.includes('Option 1'), `the current option was pushed out:\n${view}`)
+  assert.ok(view.includes('esc cancel'), `the hint was pushed out:\n${view}`)
+  assert.ok(view.includes('more lines'), `truncation marker missing:\n${view}`)
+  await vt.sendInput('\x1b')
+  await assert.rejects(promise, /cancelled/)
+})
+
+test('long descriptions cannot hide the highlighted option while moving the cursor', async () => {
+  const { vt, app } = startApp()
+  // Review repro: 7 options, each with an ~800-char description. Rows above
+  // the cursor used to consume the whole option budget, so after a few Downs
+  // the page showed only the rows above the cursor and the `→` pointer
+  // vanished. The current option's label is anchored: every step must show
+  // the pointer.
+  const promise = app.askQuestions([{
+    id: 'q1',
+    question: 'Pick one',
+    options: Array.from({ length: 7 }, (_, i) => ({
+      label: `Option ${i + 1}`,
+      description: 'd'.repeat(800),
+    })),
+  }])
+  for (let step = 0; step < 6; step++) {
+    const view = await viewport(vt)
+    assert.ok(view.includes('→'), `highlighted option vanished at step ${step}:\n${view}`)
+    assert.ok(view.includes('esc cancel'), `hint vanished at step ${step}:\n${view}`)
+    vt.sendInput('\x1b[B') // Down
+  }
+  const view = await viewport(vt)
+  assert.ok(view.includes('→'), `highlighted option vanished after the final Down:\n${view}`)
+  await vt.sendInput('\x1b')
+  await assert.rejects(promise, /cancelled/)
+})
+
+test('the highlighted question option stays visible at narrow terminal widths', async () => {
+  for (const width of [50, 60, 70]) {
+    const { vt, app } = startApp(width)
+    const promise = app.askQuestions([{
+      id: 'q1',
+      question: 'Pick one',
+      options: Array.from({ length: 7 }, (_, i) => ({
+        label: `Option ${i + 1}`,
+        description: 'd'.repeat(800),
+      })),
+    }])
+    for (let step = 0; step < 7; step++) {
+      const view = await viewport(vt)
+      assert.ok(view.includes('→'), `highlighted option vanished at width ${width}, step ${step}:\n${view}`)
+      if (step < 6) vt.sendInput('\x1b[B')
+    }
+    vt.sendInput('\x1b')
+    await assert.rejects(promise, /cancelled/)
+    // Re-vendor lifecycle follow-up P3: the process slot is released only
+    // by the FINAL dispose — dispose this iteration's app before the next
+    // width starts (a stopped-but-alive app still owns the slot).
+    app.dispose()
+  }
+})
+
+test('review page stays inside the dialog: the hint survives long answers', async () => {
+  const { vt, app } = startApp()
+  // Review repro: 3 questions, each ~900 chars, answered — the old review
+  // page wrapped every question/answer unbudgeted (54+ rows) and the overlay
+  // clipped the action row at row 53. The budgeted review page must keep the
+  // hint visible no matter how long the answers are; the Submit/Cancel
+  // two-choice row is gone (plan item 4 — Enter submits, Esc cancels).
+  const longQuestion = 'q'.repeat(900)
+  const promise = app.askQuestions([
+    { id: 'q1', question: longQuestion, options: [{ label: 'A' }] },
+    { id: 'q2', question: longQuestion, options: [{ label: 'B' }] },
+    { id: 'q3', question: longQuestion, options: [{ label: 'C' }] },
+  ])
+  await viewport(vt)
+  vt.sendInput('1')
+  await viewport(vt)
+  vt.sendInput('\x1b[C') // → next question
+  await viewport(vt)
+  vt.sendInput('1')
+  await viewport(vt)
+  vt.sendInput('\x1b[C') // → next question
+  await viewport(vt)
+  vt.sendInput('1')
+  await viewport(vt)
+  vt.sendInput('\x1b[C') // → review page
+  const view = await viewport(vt)
+  assert.ok(view.includes('Submit'), `Submit tab missing:\n${view}`)
+  assert.ok(!view.includes('Cancel'), `the two-choice Cancel action is gone:\n${view}`)
+  assert.ok(view.includes('esc cancel'), `hint missing:\n${view}`)
+  await vt.sendInput('\x1b')
+  await assert.rejects(promise, /cancelled/)
+})
+
+test('a long unbroken question detail is row-budgeted so the hint stays visible and options stay reachable', async () => {
+  const { vt, app } = startApp()
+  // 3000 chars on ONE line: without a physical-row budget this wraps to
+  // dozens of rows and pushes the options + hint out of the dialog.
+  const longDetail = 'x'.repeat(3000)
+  const promise = app.askQuestions([{
+    id: 'q1',
+    question: 'Pick a side',
+    detail: longDetail,
+    options: [{ label: 'Alpha' }, { label: 'Beta' }],
+  }])
+  let view = await viewport(vt)
+  // The unified scrollport shows the TOP of the page: the wrapped detail
+  // fills the region and the options sit below the fold — but the hint stays
+  // pinned and the marker proves the content continues.
+  assert.ok(!view.includes('Alpha'), `options must sit below the fold while the detail fills the region:\n${view}`)
+  assert.ok(view.includes('esc cancel'), `hint pushed out of the dialog:\n${view}`)
+  assert.ok(view.includes('more lines') || view.includes('more content hidden'), `truncation marker missing:\n${view}`)
+  // PageDown reaches the options — nothing is unreachable on a small screen.
+  for (let page = 0; page < 6 && !view.includes('Alpha'); page++) {
+    vt.sendInput('\x1b[6~')
+    await vt.waitForRender()
+    view = await viewport(vt)
+  }
+  assert.ok(view.includes('Alpha'), `options unreachable by scrolling:\n${view}`)
+  await vt.sendInput('\x1b')
+  await assert.rejects(promise, /cancelled/)
+})
+
+test('an active question re-budgets when the terminal resizes', async () => {
+  const vt = new VirtualTerminal(100, 40)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+
+  startedApps.add(app)
+  const promise = app.askQuestions([{
+    id: 'q1',
+    question: 'Pick one',
+    options: Array.from({ length: 7 }, (_, i) => ({
+      label: `Option ${i + 1}`,
+      description: 'd'.repeat(800),
+    })),
+  }])
+  let view = await viewport(vt)
+  assert.ok(questionFrameSpan(view) <= 24, `dialog must fit 24 rows at 40 rows:\n${view}`)
+  vt.resize(100, 16)
+  view = await viewport(vt)
+  const span = questionFrameSpan(view)
+  assert.ok(span <= 10, `dialog must re-budget to 10 rows after resize (span ${span}):\n${view}`)
+  assert.ok(view.includes('→'), `pointer lost after resize:\n${view}`)
+  assert.ok(view.includes('esc cancel'), `hint lost after resize:\n${view}`)
+  await vt.sendInput('\x1b')
+  await assert.rejects(promise, /cancelled/)
+})
+
+test('a queued question budgets against the terminal height at presentation', async () => {
+  const vt = new VirtualTerminal(100, 40)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+
+  startedApps.add(app)
+  const first = app.askQuestions([{ id: 'q1', question: 'First?', options: [{ label: 'A' }] }])
+  const second = app.askQuestions([{ id: 'q2', question: 'Second?', options: [
+    ...Array.from({ length: 7 }, (_, i) => ({ label: `Option ${i + 1}`, description: 'd'.repeat(800) })),
+  ] }])
+  await viewport(vt)
+  // Resize while the FIRST flow is active: the queued flow must present at
+  // the CURRENT height, not the height captured at askQuestions time.
+  vt.resize(100, 16)
+  await viewport(vt)
+  vt.sendInput('1')
+  await viewport(vt)
+  vt.sendInput('\r')
+  await first
+  const view = await viewport(vt)
+  assert.ok(view.includes('Second?'), `queued question must take the seat:\n${view}`)
+  const span = questionFrameSpan(view)
+  assert.ok(span <= 10, `queued dialog must budget at the current height (span ${span}):\n${view}`)
+  assert.ok(view.includes('esc cancel'), `hint lost:\n${view}`)
+  await vt.sendInput('\x1b')
+  await assert.rejects(second, /cancelled/)
+})
+
+test('the previous assistant reply stays visible above the question dialog', async () => {
+  const { vt, app } = startApp()
+  app.setTranscript([{ kind: 'assistant', turn: 0, text: 'Here is the plan I propose: step one, step two, step three.' }])
+  const promise = app.askQuestions([{ id: 'q1', question: 'Proceed?', options: [{ label: 'Yes' }, { label: 'No' }] }])
+  const view = await viewport(vt)
+  assert.ok(view.includes('Here is the plan I propose'), `reply hidden behind the dialog:\n${view}`)
+  assert.ok(view.includes('Proceed?'), `question missing:\n${view}`)
+  await vt.sendInput('\x1b')
+  await assert.rejects(promise, /cancelled/)
+})
+
+test('question dialog invariants hold under saturated chrome', async () => {
+  // Busy indicator + queue + todo + dock content are pinned rows above the
+  // seat; the dialog must keep its own invariants (height cap, pointer,
+  // hint) even when the transcript is squeezed out entirely. Transcript
+  // visibility is best-effort — it is NOT asserted here.
+  const { vt, app } = startApp()
+  app.setTodoSummary([
+    { content: 'todo one', status: 'in_progress' },
+    { content: 'todo two', status: 'pending' },
+  ])
+  app.setTasks([{ id: 't1', label: 'sleep 10', status: 'running' }])
+  const promise = app.askQuestions([{
+    id: 'q1',
+    question: 'Pick one',
+    options: Array.from({ length: 7 }, (_, i) => ({
+      label: `Option ${i + 1}`,
+      description: 'd'.repeat(800),
+    })),
+  }])
+  const view = await viewport(vt)
+  const span = questionFrameSpan(view)
+  assert.ok(span <= 14, `dialog overflowed under chrome (span ${span}):\n${view}`)
+  assert.ok(view.includes('→'), `pointer pushed out under chrome:\n${view}`)
+  assert.ok(view.includes('esc cancel'), `hint pushed out under chrome:\n${view}`)
+  await vt.sendInput('\x1b')
+  await assert.rejects(promise, /cancelled/)
+})
+
+test('a question flow preserves the editor draft across cancel', async () => {
+  const { vt, app } = startApp()
+  app.setDraft('my precious draft')
+  const promise = app.askQuestions([{ id: 'q1', question: 'Proceed?', options: [{ label: 'Yes' }] }])
+  await viewport(vt)
+  vt.sendInput('\x1b')
+  await assert.rejects(promise, /cancelled/)
+  // The SAME editor instance swaps back into the seat — the draft survives.
+  assert.equal(app.getDraft(), 'my precious draft')
+})
+
+test('aborting a question restores the editor without any key input', async () => {
+  const { vt, app } = startApp()
+  const controller = new AbortController()
+  const promise = app.askQuestions([{ id: 'q1', question: 'Proceed?', options: [{ label: 'Yes' }] }], controller.signal)
+  let view = await viewport(vt)
+  assert.ok(view.includes('Proceed?'), `question missing:\n${view}`)
+  // The AbortSignal path never passes through handleQuestionKey's repaint:
+  // the settle must request the repaint itself.
+  controller.abort()
+  await assert.rejects(promise, /cancelled/)
+  view = await viewport(vt)
+  assert.ok(!view.includes('Proceed?'), `stale question frame after abort:\n${view}`)
+})
+
+test('a question flow suspends the settings panel and restores it on settle', async () => {
+  const { vt, app } = startApp()
+  app.openSettings(
+    [{ id: 'a', label: 'Settings row A', description: 'desc', currentValue: '' }],
+    () => {},
+    () => {},
+  )
+  await vt.waitForRender()
+  const strip = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, '')
+  let view = vt.getViewport().map(strip).join('\n')
+  assert.ok(view.includes('Settings row A'), `settings missing before question:\n${view}`)
+  const promise = app.askQuestions([{ id: 'q1', question: 'Proceed?', options: [{ label: 'Yes' }] }])
+  await vt.waitForRender()
+  view = vt.getViewport().map(strip).join('\n')
+  assert.ok(view.includes('Proceed?'), `question missing:\n${view}`)
+  assert.ok(!view.includes('Settings row A'), `settings must be suspended while the question is up:\n${view}`)
+  // The question is answerable while the settings panel is hidden.
+  vt.sendInput('1')
+  await vt.waitForRender()
+  vt.sendInput('\r')
+  assert.deepEqual(await promise, [{ id: 'q1', selected: ['Yes'] }])
+  await vt.waitForRender()
+  view = vt.getViewport().map(strip).join('\n')
+  assert.ok(view.includes('Settings row A'), `settings must return after the question:\n${view}`)
+})
+
+test('an approval arriving during a question is suspended and revealed in order', async () => {
+  const { vt, app } = startApp()
+  app.openSettings(
+    [{ id: 'a', label: 'Settings row A', description: 'desc', currentValue: '' }],
+    () => {},
+    () => {},
+  )
+  await vt.waitForRender()
+  const question = app.askQuestions([{ id: 'q1', question: 'Proceed?', options: [{ label: 'Yes' }] }])
+  await vt.waitForRender()
+  const approval = app.showApprovalPrompt({ toolName: 'bash', reason: 'run a command' })
+  await vt.waitForRender()
+  const strip = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, '')
+  let view = vt.getViewport().map(strip).join('\n')
+  assert.ok(!view.includes('Approve bash?'), `approval must stay hidden under the question:\n${view}`)
+  // Settle the question: the approval appears (it was created while the
+  // question owned the modal front), the settings stay hidden beneath it.
+  vt.sendInput('1')
+  await vt.waitForRender()
+  vt.sendInput('\r')
+  await question
+  await vt.waitForRender()
+  view = vt.getViewport().map(strip).join('\n')
+  assert.ok(view.includes('Approve bash?'), `approval must appear after the question:\n${view}`)
+  assert.ok(!view.includes('Settings row A'), `settings must stay hidden under the approval:\n${view}`)
+  // Rejecting the approval restores the settings beneath it.
+  vt.sendInput('n')
+  assert.equal(await approval, 'rejected')
+  await vt.waitForRender()
+  view = vt.getViewport().map(strip).join('\n')
+  assert.ok(view.includes('Settings row A'), `settings must return after the approval:\n${view}`)
+})
+
+test('closing a suspended overlay during a question must not revive it', async () => {
+  const { vt, app } = startApp()
+  const close = app.openSettings(
+    [{ id: 'a', label: 'Settings row A', description: 'desc', currentValue: '' }],
+    () => {},
+    () => {},
+  )
+  await vt.waitForRender()
+  const promise = app.askQuestions([{ id: 'q1', question: 'Proceed?', options: [{ label: 'Yes' }] }])
+  await vt.waitForRender()
+  // Close the suspended settings programmatically while the question is up.
+  close()
+  await vt.waitForRender()
+  const strip = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, '')
+  let view = vt.getViewport().map(strip).join('\n')
+  assert.ok(!view.includes('Settings row A'), `settings must stay hidden:\n${view}`)
+  // Settling the question must NOT revive the closed overlay.
+  vt.sendInput('1')
+  await vt.waitForRender()
+  vt.sendInput('\r')
+  await promise
+  await vt.waitForRender()
+  view = vt.getViewport().map(strip).join('\n')
+  assert.ok(!view.includes('Settings row A'), `a closed overlay must not revive after the question:\n${view}`)
+})
+
+test('queued question flows transfer the seat and suspension without restoring', async () => {
+  const { vt, app } = startApp()
+  app.openSettings(
+    [{ id: 'a', label: 'Settings row A', description: 'desc', currentValue: '' }],
+    () => {},
+    () => {},
+  )
+  await vt.waitForRender()
+  const first = app.askQuestions([{ id: 'q1', question: 'First?', options: [{ label: 'A' }] }])
+  const second = app.askQuestions([{ id: 'q2', question: 'Second?', options: [{ label: 'B' }] }])
+  await vt.waitForRender()
+  const strip = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, '')
+  let view = vt.getViewport().map(strip).join('\n')
+  assert.ok(view.includes('First?'), `first question missing:\n${view}`)
+  assert.ok(!view.includes('Settings row A'), `settings must be suspended:\n${view}`)
+  vt.sendInput('1')
+  await vt.waitForRender()
+  vt.sendInput('\r')
+  await first
+  await vt.waitForRender()
+  view = vt.getViewport().map(strip).join('\n')
+  assert.ok(view.includes('Second?'), `second question must take the seat:\n${view}`)
+  assert.ok(!view.includes('First?'), `first frame must be gone:\n${view}`)
+  assert.ok(!view.includes('Settings row A'), `settings must stay suspended between flows:\n${view}`)
+  vt.sendInput('1')
+  await vt.waitForRender()
+  vt.sendInput('\r')
+  await second
+  await vt.waitForRender()
+  view = vt.getViewport().map(strip).join('\n')
+  assert.ok(view.includes('Settings row A'), `settings must return after the LAST flow:\n${view}`)
+})
+
+test('standalone keybindings editor keeps the full terminal budget (PR-C standalone control)', async () => {
+  // The nested /settings submenu is capped by the parent overlay grant; the
+  // standalone /keybindings overlay is NOT (it never receives setMaxRows),
+  // so its own whole-terminal budget and navigation must be unchanged.
+  const { vt, app } = startApp(120, 40)
+  const manager = new HostKeybindingManager()
+  const parsed = parseUserKeybindings(undefined)
+  manager.setUserConfiguration(parsed)
+  const model = buildKeybindingEditorModel(manager, parsed)
+  const panel = new KeybindingEditorPanel({
+    model,
+    onClose: () => {},
+    runMutation: () => {},
+    maxRows: () => app.keybindingEditorMaxRows(),
+  })
+  const close = app.openKeybindingEditor(panel)
+  try {
+    await vt.waitForRender()
+    const strip = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, '')
+    let lines = vt.getViewport().map(strip)
+    const hintRow = lines.findIndex(line => line.includes('Enter: details'))
+    assert.ok(hintRow > 0, `the standalone operation hint must be painted:\n${lines.join('\n')}`)
+    assert.ok(lines[hintRow]!.includes('│'), 'the hint must be painted INSIDE the frame')
+    assert.ok((lines[hintRow + 1] ?? '').includes('╰'), 'the frame bottom border must follow the hint')
+    assert.equal(panel.render(84).length, 35, 'the standalone editor keeps its own whole-terminal budget')
+    // Search/navigation still works end to end.
+    for (const character of 'submit') {
+      vt.sendInput(character)
+      await vt.waitForRender()
+    }
+    lines = vt.getViewport().map(strip)
+    assert.ok(lines.some(line => line.includes('Search: submit')), `the query must render:\n${lines.join('\n')}`)
+    vt.sendInput('\r')
+    await vt.waitForRender()
+    lines = vt.getViewport().map(strip)
+    assert.ok(lines.some(line => line.includes('Keyboard shortcuts › ')), `the detail must open:\n${lines.join('\n')}`)
+    vt.sendInput('\x1b')
+    await vt.waitForRender()
+    lines = vt.getViewport().map(strip)
+    assert.ok(lines.some(line => line.includes('Search: submit')), `the query must survive the return:\n${lines.join('\n')}`)
+    // The real closer removes the editor (the returned handle owns the hide).
+    close()
+    await vt.waitForRender()
+    assert.ok(!vt.getViewport().map(strip).some(line => line.includes('Enter: details')), 'the closer must remove the editor')
+  } finally {
+    manager.dispose()
+  }
+})
+
+test('a question preempts a visible approval and restores it on settle', async () => {
+  const { vt, app } = startApp()
+  const approval = app.showApprovalPrompt({ toolName: 'bash', reason: 'run a command' })
+  await vt.waitForRender()
+  const question = app.askQuestions([{ id: 'q1', question: 'Proceed?', options: [{ label: 'Yes' }] }])
+  await vt.waitForRender()
+  const strip = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, '')
+  let view = vt.getViewport().map(strip).join('\n')
+  assert.ok(view.includes('Proceed?'), `question must take the front:\n${view}`)
+  assert.ok(!view.includes('Approve bash?'), `approval must be suspended:\n${view}`)
+  vt.sendInput('1')
+  await vt.waitForRender()
+  vt.sendInput('\r')
+  await question
+  await vt.waitForRender()
+  view = vt.getViewport().map(strip).join('\n')
+  assert.ok(view.includes('Approve bash?'), `approval must return after the question:\n${view}`)
+  vt.sendInput('y')
+  assert.equal(await approval, 'allowed-once')
+})
+
+test('a question renders and restores inside fullscreen', async () => {
+  const { vt, app } = startApp()
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  const promise = app.askQuestions([{ id: 'q1', question: 'Proceed?', options: [{ label: 'Yes' }] }])
+  const view = await viewport(vt)
+  assert.ok(view.includes('Proceed?'), `question missing in fullscreen:\n${view}`)
+  vt.sendInput('1')
+  await vt.waitForRender()
+  vt.sendInput('\r')
+  assert.deepEqual(await promise, [{ id: 'q1', selected: ['Yes'] }])
+  await vt.waitForRender()
+  const after = await viewport(vt)
+  assert.ok(!after.includes('Proceed?'), `stale question frame in fullscreen:\n${after}`)
+})
+
+test('setFullscreen during an active question keeps the question mounted', async () => {
+  const { vt, app } = startApp()
+  const promise = app.askQuestions([{ id: 'q1', question: 'Proceed?', options: [{ label: 'Yes' }] }])
+  await vt.waitForRender()
+  // Direct toggle (not reachable through Ctrl+F — question input wins — but
+  // the public method must not crash or lose the question).
+  app.setFullscreen(true)
+  let view = await viewport(vt)
+  assert.ok(view.includes('Proceed?'), `question must survive the toggle:\n${view}`)
+  vt.sendInput('1')
+  await vt.waitForRender()
+  vt.sendInput('\r')
+  assert.deepEqual(await promise, [{ id: 'q1', selected: ['Yes'] }])
+  await vt.waitForRender()
+  app.setFullscreen(false)
+  view = await viewport(vt)
+  assert.ok(!view.includes('Proceed?'), `stale question frame after leaving fullscreen:\n${view}`)
+})
+
+test('fullscreen toggle clears the overlay tracking graph (no stale handles)', async () => {
+  // The toggle destroys the OLD screen's overlays — including ones suspended
+  // under an active question. The tracking graph (overlayHandles,
+  // overlayDependents, the question's suspension set) must be cleared at the
+  // toggle. This is a GRAPH assertion: stale handles are behaviorally
+  // invisible (settleQuestions guards revival with overlayHandles.has()), so
+  // a screen-output test cannot distinguish the leak from the fix — only the
+  // graph sizes can.
+  const { vt, app } = startApp()
+  app.openSettings(
+    [{ id: 'a', label: 'Settings row A', description: 'desc', currentValue: '' }],
+    () => {},
+    () => {},
+  )
+  await vt.waitForRender()
+  const promise = app.askQuestions([{ id: 'q1', question: 'Proceed?', options: [{ label: 'Yes' }] }])
+  await vt.waitForRender()
+  // Before the toggle: the settings overlay is suspended under the question.
+  assert.deepEqual(app.overlayGraphState(), { handles: 1, dependents: 0, suspended: 1 })
+  app.setFullscreen(true)
+  let view = await viewport(vt)
+  assert.ok(view.includes('Proceed?'), `question must survive the toggle:\n${view}`)
+  // After the toggle: the destroyed overlays leave NO dead handles behind
+  // (this assertion fails on the pre-fix code, which kept stale
+  // overlayDependents / suspendedOverlays entries across the toggle).
+  assert.deepEqual(app.overlayGraphState(), { handles: 0, dependents: 0, suspended: 0 })
+  // Settle the question: the destroyed settings must not revive.
+  vt.sendInput('1')
+  await vt.waitForRender()
+  vt.sendInput('\r')
+  assert.deepEqual(await promise, [{ id: 'q1', selected: ['Yes'] }])
+  await vt.waitForRender()
+  assert.deepEqual(app.overlayGraphState(), { handles: 0, dependents: 0, suspended: 0 })
+  view = await viewport(vt)
+  assert.ok(!view.includes('Settings row A'), `destroyed settings must not revive:\n${view}`)
+})
+
+/** Long detail: distinct lines that fit one row at width 100 (the app-level
+ * fixtures run at 100 cols) — a deterministic scrollport fixture. */
+function longDetailLines(n: number): string {
+  return Array.from({ length: n }, (_, i) => `detail-${String(i).padStart(2, '0')} ` + 'y'.repeat(70)).join('\n')
+}
+
+test('the question body scrolls with PageUp/PageDown', async () => {
+  const { vt, app } = startApp()
+  const promise = app.askQuestions([{
+    id: 'q1',
+    question: 'Pick a side',
+    detail: longDetailLines(60),
+    options: [{ label: 'Alpha' }, { label: 'Beta' }],
+  }])
+  let view = await viewport(vt)
+  assert.ok(view.includes('detail-00'), `top content missing:\n${view}`)
+  assert.ok(view.includes('↓ '), `down marker missing:\n${view}`)
+  assert.ok(!view.includes('detail-09'), `deep content must be clipped compact:\n${view}`)
+  vt.sendInput('\x1b[6~') // PageDown
+  await vt.waitForRender()
+  view = await viewport(vt)
+  assert.ok(!view.includes('detail-00'), `top content must scroll away:\n${view}`)
+  assert.ok(view.includes('↑ '), `up marker missing after scrolling:\n${view}`)
+  vt.sendInput('\x1b[5~') // PageUp
+  await vt.waitForRender()
+  view = await viewport(vt)
+  assert.ok(view.includes('detail-00'), `PageUp must return to the top:\n${view}`)
+  await vt.sendInput('\x1b')
+  await assert.rejects(promise, /cancelled/)
+})
+
+test('e expands the question panel and collapses it back', async () => {
+  const { vt, app } = startApp()
+  const promise = app.askQuestions([{
+    id: 'q1',
+    question: 'Pick a side',
+    detail: longDetailLines(60),
+    options: [{ label: 'Alpha' }, { label: 'Beta' }],
+  }])
+  let view = await viewport(vt)
+  const compactSpan = questionFrameSpan(view)
+  assert.ok(compactSpan <= 14, `compact panel must respect the 60% cap (span ${compactSpan}):\n${view}`)
+  assert.ok(!view.includes('detail-09'), `deep content must be clipped compact:\n${view}`)
+  vt.sendInput('e')
+  await vt.waitForRender()
+  view = await viewport(vt)
+  const expandedSpan = questionFrameSpan(view)
+  assert.ok(expandedSpan > compactSpan, `expand must grow the panel (${compactSpan} -> ${expandedSpan}):\n${view}`)
+  assert.ok(expandedSpan <= 20, `expanded panel must respect the 80% cap (span ${expandedSpan}):\n${view}`)
+  assert.ok(view.includes('detail-09'), `expand must reveal deeper content:\n${view}`)
+  // The pointer follows the cursor: moving it scrolls the option (with its
+  // description) into the viewport — the pointer never gets stranded
+  // off-screen while paging the unified scrollport.
+  vt.sendInput('j')
+  await vt.waitForRender()
+  view = await viewport(vt)
+  assert.ok(view.includes('→'), `pointer must follow the cursor into view:\n${view}`)
+  vt.sendInput('e')
+  await vt.waitForRender()
+  view = await viewport(vt)
+  assert.equal(questionFrameSpan(view), compactSpan, `collapse must restore the panel size:\n${view}`)
+  await vt.sendInput('\x1b')
+  await assert.rejects(promise, /cancelled/)
+})
+
+test('e reveals cut option descriptions on a small screen', async () => {
+  // Regression: on a 24-row terminal with a SHORT body, option descriptions
+  // were cut by the window budget and 'e' no-oped (its guard only looked at
+  // the BODY overflow) — descriptions were unreachable. 'e' must now grow
+  // the panel and let the extra rows flow to the option window.
+  const { vt, app } = startApp()
+  const promise = app.askQuestions([{
+    id: 'q1',
+    question: 'Pick a side',
+    options: Array.from({ length: 4 }, (_, i) => ({
+      label: `Option ${i + 1}`,
+      description: 'x'.repeat(700) + `TAIL${i}`,
+    })),
+  }])
+  let view = await viewport(vt)
+  assert.ok(view.includes('more lines'), `descriptions must be cut compact:\n${view}`)
+  assert.ok(!view.includes('TAIL0'), `description tail must be hidden compact:\n${view}`)
+  const compactSpan = questionFrameSpan(view)
+  vt.sendInput('e')
+  await vt.waitForRender()
+  view = await viewport(vt)
+  const expandedSpan = questionFrameSpan(view)
+  assert.ok(expandedSpan > compactSpan, `e must grow the panel (${compactSpan} -> ${expandedSpan}):\n${view}`)
+  assert.ok(view.includes('TAIL0'), `e must reveal the cut description:\n${view}`)
+  assert.ok(view.includes('→'), `pointer must survive expand:\n${view}`)
+  vt.sendInput('e')
+  await vt.waitForRender()
+  view = await viewport(vt)
+  assert.equal(questionFrameSpan(view), compactSpan, `collapse must restore the panel size:\n${view}`)
+  await vt.sendInput('\x1b')
+  await assert.rejects(promise, /cancelled/)
+})
+
+/** Send an SGR primary-button press+release (1-based coords) at a screen row. */
+function clickCell(vt: { sendInput: (data: string) => void }, x: number, y: number): void {
+  vt.sendInput(`\x1b[<0;${x + 1};${y + 1}M`)
+  vt.sendInput(`\x1b[<0;${x + 1};${y + 1}m`)
+}
+
+test('a fullscreen click on an option row selects it', async () => {
+  const { vt, app } = startApp()
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  const promise = app.askQuestions([{ id: 'q1', question: 'Proceed?', options: [{ label: 'Yes' }, { label: 'No' }] }])
+  let view = await viewport(vt)
+  const strip = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, '')
+  const lines = view.split('\n')
+  const yesIdx = lines.findIndex(line => strip(line).includes('[1] Yes'))
+  assert.ok(yesIdx >= 0, `option row missing:\n${view}`)
+  // Click the "Yes" row (x inside the content columns; y from the viewport).
+  clickCell(vt, 10, yesIdx)
+  await vt.waitForRender()
+  view = await viewport(vt)
+  // Single-select on the last question advances to the review page.
+  assert.ok(view.includes('Submit'), `click must select the option:\n${view}`)
+  vt.sendInput('\r')
+  assert.deepEqual(await promise, [{ id: 'q1', selected: ['Yes'] }])
+})
+
+test('Todo presentation remains clickable outside the active Question frame', async () => {
+  const { vt, app } = startApp()
+  const todos = Array.from({ length: 3 }, (_, i) => ({
+    id: `t-${i}`, content: `todo item ${i}`,
+    status: 'pending' as const,
+  }))
+  app.setTodoSummary(todos)
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  const promise = app.askQuestions([{ id: 'q1', question: 'Proceed?', options: [{ label: 'Yes' }] }])
+  let view = await viewport(vt)
+  const strip = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, '')
+  const lines = view.split('\n')
+  const dockIdx = lines.findIndex(line => strip(line).includes('☑'))
+  assert.ok(dockIdx >= 0, `todo summary dock row missing:\n${view}`)
+  assert.ok(lines.some(line => strip(line).includes('Proceed?')), `question missing:\n${view}`)
+  // A click on the dock row (outside the question frame) is a read-only
+  // presentation action and may open the Todo panel without disturbing the
+  // response owner.
+  clickCell(vt, 10, dockIdx)
+  await vt.waitForRender()
+  view = await viewport(vt)
+  assert.ok(app.isTodoPanelVisible(), 'a Todo presentation click must open the panel')
+  assert.ok(view.includes('Proceed?'), `question must stay mounted:\n${view}`)
+  await vt.sendInput('\x1b')
+  await assert.rejects(promise, /cancelled/)
+})
+
+test('a question resize refreshes the click geometry in both dimensions', async () => {
+  const { vt, app } = startApp()
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  const promise = app.askQuestions([{ id: 'q1', question: 'Proceed?', options: [{ label: 'Yes' }] }])
+  let view = await viewport(vt)
+  const strip = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, '')
+  const yesRow = (): number => view.split('\n').findIndex(line => strip(line).includes('[1] Yes'))
+  assert.ok(yesRow() >= 0, `option row missing:\n${view}`)
+  // The frame records BOTH terminal dimensions for the stale-click guard
+  // (a width resize rewraps the body and shifts the hit map, exactly like
+  // a height change).
+  const frame = (app as unknown as { activeQuestions?: { frame?: { termRows: number; termColumns: number } } }).activeQuestions?.frame
+  assert.equal(frame?.termColumns, 100, 'the frame must record the rendered width')
+  assert.equal(frame?.termRows, 24, 'the frame must record the rendered height')
+  // Resize the width; after the repaint the geometry is fresh and a click
+  // on the (moved) option row selects it again.
+  vt.resize(120, 24)
+  await vt.waitForRender()
+  assert.equal(frame?.termColumns, 120, 'the repaint must refresh the recorded width')
+  view = await viewport(vt)
+  const movedIdx = view.split('\n').findIndex(line => strip(line).includes('[1] Yes'))
+  assert.ok(movedIdx >= 0, `option row missing after resize:\n${view}`)
+  clickCell(vt, 10, movedIdx)
+  await vt.waitForRender()
+  view = await viewport(vt)
+  assert.ok(view.includes('Submit'), `a post-resize click must select the option:\n${view}`)
+  await vt.sendInput('\x1b')
+  await assert.rejects(promise, /cancelled/)
+})
+
+test('a fullscreen click on the body scroll marker expands the panel', async () => {
+  const { vt, app } = startApp()
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  const promise = app.askQuestions([{
+    id: 'q1',
+    question: 'Pick a side',
+    detail: longDetailLines(60),
+    options: [{ label: 'Alpha' }],
+  }])
+  let view = await viewport(vt)
+  const strip = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, '')
+  const lines = view.split('\n')
+  const markerIdx = lines.findIndex(line => strip(line).includes('↓ '))
+  assert.ok(markerIdx >= 0, `scroll marker missing:\n${view}`)
+  const compactSpan = questionFrameSpan(view)
+  clickCell(vt, 10, markerIdx)
+  await vt.waitForRender()
+  view = await viewport(vt)
+  const expandedSpan = questionFrameSpan(view)
+  assert.ok(expandedSpan > compactSpan, `marker click must expand the panel (${compactSpan} -> ${expandedSpan}):\n${view}`)
+  await vt.sendInput('\x1b')
+  await assert.rejects(promise, /cancelled/)
+})
+
+test('a fullscreen click toggles a multi-select option', async () => {
+  const { vt, app } = startApp()
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  const promise = app.askQuestions([{
+    id: 'q1',
+    question: 'Pick some',
+    multiSelect: true,
+    options: [{ label: 'A' }, { label: 'B' }],
+  }])
+  let view = await viewport(vt)
+  const strip = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, '')
+  const aIdx = view.split('\n').findIndex(line => strip(line).includes('[ ] A'))
+  assert.ok(aIdx >= 0, `option A row missing:\n${view}`)
+  clickCell(vt, 10, aIdx)
+  await vt.waitForRender()
+  view = await viewport(vt)
+  assert.ok(view.includes('[✓] A'), `click must toggle A on:\n${view}`)
+  const bIdx = view.split('\n').findIndex(line => strip(line).includes('[ ] B'))
+  assert.ok(bIdx >= 0, `option B row missing:\n${view}`)
+  clickCell(vt, 10, bIdx)
+  await vt.waitForRender()
+  view = await viewport(vt)
+  assert.ok(view.includes('[✓] B'), `click must toggle B on:\n${view}`)
+  // Multi-select stays on the question; the second click on A toggles it off.
+  const aOn = view.split('\n').findIndex(line => strip(line).includes('[✓] A'))
+  clickCell(vt, 10, aOn)
+  await vt.waitForRender()
+  view = await viewport(vt)
+  assert.ok(view.includes('[ ] A'), `click must toggle A back off:\n${view}`)
+  await vt.sendInput('\x1b')
+  await assert.rejects(promise, /cancelled/)
+})
+
+test('a fullscreen click on the "Type something." row enters free-text mode', async () => {
+  const { vt, app } = startApp()
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  const promise = app.askQuestions([{ id: 'q1', question: 'Pick', options: [{ label: 'A' }] }])
+  let view = await viewport(vt)
+  const strip = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, '')
+  const otherIdx = view.split('\n').findIndex(line => strip(line).includes('Type something.'))
+  assert.ok(otherIdx >= 0, `free-text row missing:\n${view}`)
+  clickCell(vt, 10, otherIdx)
+  await vt.waitForRender()
+  // Free-text mode is active: typed text lands in the row's real Input.
+  vt.sendInput('custom answer')
+  await vt.waitForRender()
+  view = await viewport(vt)
+  assert.ok(view.includes('custom answer'), `typed text must land in the free-text row:\n${view}`)
+  // A second click on the SAME row must not reset the in-progress text.
+  const editIdx = view.split('\n').findIndex(line => strip(line).includes('custom answer'))
+  clickCell(vt, 10, editIdx)
+  await vt.waitForRender()
+  view = await viewport(vt)
+  assert.ok(view.includes('custom answer'), `re-click must not discard the typed text:\n${view}`)
+  // Esc leaves free-text mode (a second Esc cancels the flow).
+  await vt.sendInput('\x1b')
+  await vt.waitForRender()
+  await vt.sendInput('\x1b')
+  await assert.rejects(promise, /cancelled/)
+})
+
+test('a fullscreen click is inert on the review page', async () => {
+  const { vt, app } = startApp()
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  const promise = app.askQuestions([{ id: 'q1', question: 'Proceed?', options: [{ label: 'Yes' }] }])
+  await vt.waitForRender()
+  vt.sendInput('1') // single-select advances to the review page
+  let view = await viewport(vt)
+  const strip = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, '')
+  assert.ok(view.includes('Submit'), `review page missing:\n${view}`)
+  const submitIdx = view.split('\n').findIndex(line => strip(line).includes('Submit'))
+  assert.ok(submitIdx >= 0, `Submit row missing:\n${view}`)
+  clickCell(vt, 10, submitIdx)
+  await vt.waitForRender()
+  const after = await viewport(vt)
+  // The review page has no hit map and no scroll marker: the click is inert.
+  assert.equal(after, view, `click must be inert on the review page:\n${after}`)
+  await vt.sendInput('\x1b')
+  await assert.rejects(promise, /cancelled/)
+})
+
+test('askQuestions toggles multi-select options', async () => {
+  const { vt, app } = startApp()
+  const promise = app.askQuestions([{
+    id: 'q1',
+    question: 'Pick some',
+    multiSelect: true,
+    options: [{ label: 'A' }, { label: 'B' }, { label: 'C' }],
+  }])
+  await viewport(vt)
+  vt.sendInput('1')
+  await viewport(vt)
+  vt.sendInput('3')
+  await viewport(vt)
+  vt.sendInput('1') // toggle A off again
+  await viewport(vt)
+  vt.sendInput('2') // toggle B on
+  await viewport(vt)
+  // Multi-select digits toggle; → pages to the review page, Enter submits.
+  vt.sendInput('\x1b[C')
+  await viewport(vt)
+  vt.sendInput('\r')
+  assert.deepEqual(await promise, [{ id: 'q1', selected: ['C', 'B'] }])
+})
+
+test('askQuestions collects free text for option-less questions', async () => {
+  const { vt, app } = startApp()
+  const promise = app.askQuestions([{ id: 'q1', question: 'Your name?' }])
+  await viewport(vt)
+  vt.sendInput('alice')
+  vt.sendInput('\r') // commit the typed answer
+  await viewport(vt)
+  vt.sendInput('\r') // review page: submit the batch
+  assert.deepEqual(await promise, [{ id: 'q1', selected: [], custom: 'alice' }])
+})
+
+test('askQuestions walks through multiple questions', async () => {
+  const { vt, app } = startApp()
+  const promise = app.askQuestions([
+    { id: 'q1', question: 'First?', options: [{ label: 'A' }] },
+    { id: 'q2', question: 'Second?', options: [{ label: 'B' }, { label: 'C' }] },
+  ])
+  let view = await viewport(vt)
+  assert.ok(view.includes('First?'), `first question missing:\n${view}`)
+  // A single-select Enter advances immediately (Web parity).
+  vt.sendInput('1')
+  await viewport(vt)
+  view = await viewport(vt)
+  assert.ok(view.includes('Second?'), `second question missing:\n${view}`)
+  vt.sendInput('2')
+  await viewport(vt)
+  // The review page: Enter submits the whole batch.
+  vt.sendInput('\r')
+  assert.deepEqual(await promise, [
+    { id: 'q1', selected: ['A'] },
+    { id: 'q2', selected: ['C'] },
+  ])
+})
+
+test('esc cancels an askQuestions flow with a rejection', async () => {
+  const { vt, app } = startApp()
+  const promise = app.askQuestions([{ id: 'q1', question: 'Continue?', options: [{ label: 'Yes' }] }])
+  await viewport(vt)
+  vt.sendInput('\x1b')
+  await assert.rejects(promise, /cancelled/)
+})
+
+test('concurrent askQuestions flows queue FIFO and each settles exactly once', async () => {
+  const { vt, app } = startApp()
+  const first = app.askQuestions([{ id: 'q1', question: 'First?', options: [{ label: 'A' }] }])
+  const second = app.askQuestions([{ id: 'q2', question: 'Second?', options: [{ label: 'B' }] }])
+  await viewport(vt)
+  let view = vt.getViewport().join('\n')
+  assert.ok(view.includes('First?'), `the first flow is on screen:\n${view}`)
+  assert.ok(!view.includes('Second?'), 'the second flow must wait in the queue')
+  vt.sendInput('1') // choose A
+  await viewport(vt)
+  vt.sendInput('\r') // submit the first flow
+  await viewport(vt)
+  view = vt.getViewport().join('\n')
+  assert.ok(view.includes('Second?'), `the second flow must take the screen:\n${view}`)
+  vt.sendInput('1') // choose B
+  await viewport(vt)
+  vt.sendInput('\r') // submit the second flow
+  await viewport(vt)
+  assert.deepEqual(await first, [{ id: 'q1', selected: ['A'] }])
+  assert.deepEqual(await second, [{ id: 'q2', selected: ['B'] }])
+  view = vt.getViewport().join('\n')
+  assert.ok(!view.includes('First?') && !view.includes('Second?'), `ghost overlay after both settle:\n${view}`)
+})
+
+test('a queued askQuestions flow aborted while waiting rejects without ever showing', async () => {
+  const { vt, app } = startApp()
+  const first = app.askQuestions([{ id: 'q1', question: 'First?', options: [{ label: 'A' }] }])
+  const controller = new AbortController()
+  const second = app.askQuestions([{ id: 'q2', question: 'Second?', options: [{ label: 'B' }] }], controller.signal)
+  await viewport(vt)
+  controller.abort() // cancelled while queued: never presented, promise settles
+  await assert.rejects(second, /cancelled/)
+  await viewport(vt)
+  let view = vt.getViewport().join('\n')
+  assert.ok(!view.includes('Second?'), 'the aborted flow must never be presented')
+  vt.sendInput('1')
+  await viewport(vt)
+  vt.sendInput('\r')
+  assert.deepEqual(await first, [{ id: 'q1', selected: ['A'] }])
+  view = vt.getViewport().join('\n')
+  assert.ok(!view.includes('Second?'), 'no ghost overlay after the first settles')
+})
+
+test('aborting the ACTIVE flow rejects it and shows the next queued flow', async () => {
+  const { vt, app } = startApp()
+  const controller = new AbortController()
+  const first = app.askQuestions([{ id: 'q1', question: 'First?', options: [{ label: 'A' }] }], controller.signal)
+  const second = app.askQuestions([{ id: 'q2', question: 'Second?', options: [{ label: 'B' }] }])
+  await viewport(vt)
+  controller.abort()
+  await assert.rejects(first, /cancelled/)
+  await viewport(vt)
+  const view = vt.getViewport().join('\n')
+  assert.ok(view.includes('Second?'), `the queued flow must take the screen after the active one aborts:\n${view}`)
+  vt.sendInput('1')
+  await viewport(vt)
+  vt.sendInput('\r')
+  assert.deepEqual(await second, [{ id: 'q2', selected: ['B'] }])
+})
+
+test('stop() cancels every pending askQuestions flow with a rejection', async () => {
+  const { vt, app } = startApp()
+  const first = app.askQuestions([{ id: 'q1', question: 'First?', options: [{ label: 'A' }] }])
+  const second = app.askQuestions([{ id: 'q2', question: 'Second?', options: [{ label: 'B' }] }])
+  await viewport(vt)
+  app.stop()
+  await assert.rejects(first, /cancelled/)
+  await assert.rejects(second, /cancelled/)
+})
+
+test('the message component cache is pruned to the live transcript', () => {
+  const vt = new VirtualTerminal(100, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+
+  startedApps.add(app)
+  const cache = (app as unknown as { messageComponents: Map<object, unknown> }).messageComponents
+  const messages: { kind: 'user'; turn: number; text: string }[] = []
+  for (let i = 0; i < 50; i += 1) {
+    messages.push({ kind: 'user', turn: i, text: `message ${i}` })
+  }
+  app.setTranscript(messages)
+  assert.ok(cache.size >= 50, 'the live messages are cached')
+  // The window slides forward in a long session: the cache must shrink to
+  // the live set instead of growing to full-history size.
+  app.setTranscript(messages.slice(45))
+  assert.equal(cache.size, 5, 'the cache must shrink to the live set')
+  // A completely fresh window disposes the previous entries.
+  app.setTranscript([{ kind: 'user', turn: 100, text: 'fresh' }])
+  assert.equal(cache.size, 1, 'entries from the previous window must be disposed')
+  app.stop()
+})
+
+test('open opaque display changes invalidate the assistant cache and render in order', async () => {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    {
+      type: 'turn/start',
+      seq: 0,
+      time: 1_700_000_000_000,
+      data: { turn: 0 },
+    } as SessionEvent,
+    {
+      type: 'step/start',
+      seq: 1,
+      time: 1_700_000_000_001,
+      data: { turn: 0, step: 0 },
+    } as SessionEvent,
+  ])
+  const input = (chunk: AssistantLiveChunk, time: number) => folder.applyLiveInput({
+    kind: 'chunk', sessionId: 'test', attemptId: 'attempt', turn: 0, step: 0, time, chunk,
+  })
+  input({ type: 'text-delta', index: 0, text: 'before' }, 2)
+  const message = folder.messages()[0]
+  assert.ok(message !== undefined && message.kind === 'assistant')
+
+  const { vt, app } = startApp()
+  app.setTranscript([message])
+  await viewport(vt)
+  const cache = (app as unknown as { messageComponents: Map<object, { component: object }> }).messageComponents
+  const before = cache.get(message)?.component
+  assert.ok(before !== undefined)
+
+  input({ type: 'block-start', index: 1, blockType: 'future-test-block' }, 3)
+  const projected = folder.messages()[0]
+  assert.strictEqual(projected, message, 'live folding updates the cached message object in place')
+  assert.equal(message.text, 'before', 'semantic text must remain unchanged')
+  assert.equal(message.content, undefined, 'open opaque display must not become semantic content')
+  app.setTranscript([projected])
+  const after = cache.get(projected)?.component
+  assert.ok(after !== undefined)
+  assert.notStrictEqual(after, before, 'displayBlocks must be part of the component cache identity')
+
+  const pendingView = await viewport(vt)
+  const beforeIndex = pendingView.indexOf('before')
+  const pendingIndex = pendingView.indexOf('Unknown block: future-test-block')
+  assert.ok(beforeIndex >= 0 && pendingIndex > beforeIndex,
+    `ordered open projection missing:\n${pendingView}`)
+  assert.ok(pendingView.includes('\nnull'), `open opaque rows must use a null payload:\n${pendingView}`)
+
+  input({ type: 'block-start', index: 1, blockType: 'future-test-block' }, 4)
+  app.setTranscript([projected])
+  assert.strictEqual(cache.get(projected)?.component, after, 'duplicate block-start must not invalidate the unchanged display projection')
+
+  input({
+    type: 'block-end', index: 1,
+    block: { type: 'future-test-block', payload: { value: 'done' } },
+  } as never, 5)
+  app.setTranscript([projected])
+  const finalized = cache.get(projected)?.component
+  assert.ok(finalized !== undefined)
+  assert.notStrictEqual(finalized, after, 'authoritative block-end must replace the pending component')
+
+  input({
+    type: 'block-end', index: 1,
+    block: { type: 'future-test-block', payload: { value: 'duplicate' } },
+  } as never, 6)
+  input({ type: 'text-delta', index: 1, text: 'ignored after freeze' }, 7)
+  app.setTranscript([projected])
+  assert.strictEqual(cache.get(projected)?.component, finalized, 'frozen duplicates and deltas must not invalidate the unchanged projection')
+
+})
+
+test('empty same-lane deltas preserve component identity while first ownership remains effective', () => {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    {
+      type: 'turn/start', seq: 0, time: 1_700_000_000_000,
+      data: { turn: 0 },
+    } as SessionEvent,
+    {
+      type: 'step/start', seq: 1, time: 1_700_000_000_001,
+      data: { turn: 0, step: 0 },
+    } as SessionEvent,
+  ])
+  const input = (chunk: AssistantLiveChunk, time: number) => folder.applyLiveInput({
+    kind: 'chunk', sessionId: 'test', attemptId: 'attempt', turn: 0, step: 0, time, chunk,
+  })
+  input({ type: 'text-delta', index: 0, text: 'stable' }, 2)
+  const { app } = startApp()
+  app.setTranscript(folder.messages())
+  const cache = (app as unknown as { messageComponents: Map<object, { component: object }> }).messageComponents
+  const firstAssistant = folder.messages().find(message => message.kind === 'assistant')
+  assert.ok(firstAssistant !== undefined && firstAssistant.kind === 'assistant')
+  const textComponent = cache.get(firstAssistant)?.component
+  assert.ok(textComponent !== undefined)
+
+  input({ type: 'text-delta', index: 0, text: '' }, 3)
+  app.setTranscript(folder.messages())
+  assert.strictEqual(cache.get(firstAssistant)?.component, textComponent, 'empty text delta must not churn an existing text lane')
+
+  input({ type: 'reasoning-delta', index: 1, text: 'thinking' }, 4)
+  app.setTranscript(folder.messages())
+  const thinking = folder.messages().find(message => message.kind === 'thinking')
+  assert.ok(thinking !== undefined && thinking.kind === 'thinking')
+  const thinkingComponent = cache.get(thinking)?.component
+  assert.ok(thinkingComponent !== undefined)
+  input({ type: 'reasoning-delta', index: 1, text: '' }, 5)
+  app.setTranscript(folder.messages())
+  assert.strictEqual(cache.get(thinking)?.component, thinkingComponent, 'empty reasoning delta must not churn an existing reasoning lane')
+
+  input({ type: 'tool-call-delta', index: 2, id: ToolCallId('empty-delta-call'), name: 'bash', argumentsDelta: '{}' }, 6)
+  app.setTranscript(folder.messages())
+  const assistantAfterTool = folder.messages().find(message => message.kind === 'assistant')
+  assert.ok(assistantAfterTool !== undefined && assistantAfterTool.kind === 'assistant')
+  const toolComponent = cache.get(assistantAfterTool)?.component
+  assert.ok(toolComponent !== undefined)
+  input({ type: 'tool-call-delta', index: 2, id: ToolCallId('renamed-delta-call'), name: 'bash', argumentsDelta: '' }, 7)
+  app.setTranscript(folder.messages())
+  assert.strictEqual(cache.get(assistantAfterTool)?.component, toolComponent,
+    'a changed tool-call id must not override the first owner of the indexed block')
+  input({ type: 'tool-call-delta', index: 2, id: ToolCallId('empty-delta-call'), name: 'zsh', argumentsDelta: '' }, 8)
+  app.setTranscript(folder.messages())
+  const renamedNameComponent = cache.get(assistantAfterTool)?.component
+  assert.ok(renamedNameComponent !== undefined)
+  assert.notStrictEqual(renamedNameComponent, toolComponent, 'a changed tool-call name must invalidate the component')
+  input({ type: 'tool-call-delta', index: 2, id: ToolCallId('empty-delta-call'), name: 'zsh', argumentsDelta: '' }, 9)
+  app.setTranscript(folder.messages())
+  assert.strictEqual(cache.get(assistantAfterTool)?.component, renamedNameComponent, 'an empty unchanged tool-call delta must not churn the component')
+
+  input({ type: 'block-start', index: 4, blockType: 'future-empty-transition' }, 10)
+  app.setTranscript(folder.messages())
+  const opaqueComponent = cache.get(assistantAfterTool)?.component
+  assert.ok(opaqueComponent !== undefined)
+  input({ type: 'text-delta', index: 4, text: '' }, 11)
+  app.setTranscript(folder.messages())
+  const emptyTransitionComponent = cache.get(assistantAfterTool)?.component
+  assert.ok(emptyTransitionComponent !== undefined)
+  assert.notStrictEqual(emptyTransitionComponent, opaqueComponent, 'opaque to empty known state must invalidate the component')
+  assert.equal(assistantAfterTool.displayBlocks?.some(block => block.kind === 'open-opaque') ?? false, false,
+    'opaque to empty known state must remove the display-only row')
+
+  input({ type: 'text-delta', index: 3, text: '' }, 12)
+  input({ type: 'block-start', index: 3, blockType: 'future-claimed' }, 9)
+  const claimed = folder.messages().find(message => message.kind === 'assistant')
+  assert.ok(claimed !== undefined && claimed.kind === 'assistant')
+  assert.equal(claimed.displayBlocks?.some(block => block.kind === 'open-opaque' && block.blockType === 'future-claimed') ?? false, false,
+    'an empty first delta still owns its index against a later block-start')
+})
+
+test('mixed assistant text and open opaque rows render in display order', async () => {
+  const { vt, app } = startApp()
+  app.setTranscript([{
+    kind: 'assistant',
+    turn: 0,
+    text: 'beforeafter',
+    displayBlocks: [
+      { kind: 'content', block: { type: 'text', text: 'before' } },
+      { kind: 'open-opaque', blockType: 'future-test-block' },
+      { kind: 'content', block: { type: 'text', text: 'after' } },
+    ],
+  } as never])
+  const view = await viewport(vt)
+  const beforeIndex = view.indexOf('before')
+  const pendingIndex = view.indexOf('Unknown block: future-test-block')
+  const afterIndex = view.indexOf('after')
+  assert.ok(beforeIndex >= 0 && pendingIndex > beforeIndex && afterIndex > pendingIndex,
+    `mixed display order broken:\n${view}`)
+
+  app.setTranscript([{
+    kind: 'assistant',
+    turn: 0,
+    text: 'beforeafter',
+    displayBlocks: [
+      { kind: 'content', block: { type: 'text', text: 'before' } },
+      { kind: 'content', block: { type: 'future-test-block', payload: { value: 'done' } } },
+      { kind: 'content', block: { type: 'text', text: 'after' } },
+    ],
+  } as never])
+  const finalizedView = await viewport(vt)
+  const finalizedBeforeIndex = finalizedView.indexOf('before')
+  const finalizedBlockIndex = finalizedView.indexOf('Unknown block: future-test-block')
+  const finalizedAfterIndex = finalizedView.indexOf('after')
+  assert.ok(finalizedBeforeIndex >= 0 && finalizedBlockIndex > finalizedBeforeIndex && finalizedAfterIndex > finalizedBlockIndex,
+    `finalized display order broken:\n${finalizedView}`)
+  assert.ok(finalizedView.includes('"value": "done"'), `finalized payload missing:\n${finalizedView}`)
+  assert.ok(!finalizedView.includes('\nnull'), `pending null row survived finalization:\n${finalizedView}`)
+})
+
+test('open opaque rows remain width-safe on a narrow viewport', async () => {
+  const { vt, app } = startApp(24, 12)
+  app.setTranscript([{
+    kind: 'assistant',
+    turn: 0,
+    text: '',
+    displayBlocks: [{ kind: 'open-opaque', blockType: 'future-test-block' }],
+  } as never])
+  const view = await viewport(vt)
+  assert.ok(view.includes('Unknown block:'), `narrow pending row missing:\n${view}`)
+  assert.ok(view.includes('null'), `narrow pending null payload missing:\n${view}`)
+  for (const line of view.split('\n')) {
+    assert.ok(visibleWidth(stripTerminalSequences(line)) <= 24, `line exceeds narrow width: ${line}`)
+  }
+})
+
+test('open opaque assistant rows bypass semantic plugin renderers', async () => {
+  const registry = new RendererRegistry()
+  registry.registerMessageRenderer({
+    id: 'assistant-plugin',
+    render: () => ({ kind: 'text', spans: [{ text: 'PLUGIN' }] }),
+  }, 'test-owner')
+  const vt = new VirtualTerminal(100, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { renderers: registry })
+  app.start()
+  startedApps.add(app)
+  app.setTranscript([{
+    kind: 'assistant',
+    turn: 0,
+    text: '',
+    displayBlocks: [{ kind: 'open-opaque', blockType: 'future-test-block' }],
+  } as never])
+  const view = await viewport(vt)
+  assert.ok(view.includes('Unknown block: future-test-block'), `host pending row missing:\n${view}`)
+  assert.ok(view.includes('\nnull'), `host pending payload missing:\n${view}`)
+  assert.ok(!view.includes('PLUGIN'), `semantic plugin renderer swallowed the pending row:\n${view}`)
+
+  app.setTranscript([{ kind: 'assistant', turn: 0, text: 'settled' } as never])
+  const settledView = await viewport(vt)
+  assert.ok(settledView.includes('PLUGIN'), `semantic plugin renderer did not recover after finalization:\n${settledView}`)
+  assert.ok(!settledView.includes('Unknown block: future-test-block'),
+    `pending opaque fallback survived finalization:\n${settledView}`)
+  assert.ok(!settledView.includes('\nnull'), `pending null payload survived finalization:\n${settledView}`)
+})
+
+test('interrupted open opaque rows retain the stopped marker', async () => {
+  const { vt, app } = startApp()
+  app.setTranscript([{
+    kind: 'assistant',
+    turn: 0,
+    text: '',
+    displayBlocks: [{ kind: 'open-opaque', blockType: 'future-test-block' }],
+    interrupted: true,
+  } as never])
+  const view = await viewport(vt)
+  assert.ok(view.includes('Unknown block: future-test-block'), `interrupted pending row missing:\n${view}`)
+  assert.ok(view.includes('(interrupted)'), `interrupted marker missing:\n${view}`)
+})
+
+test('local card push/replace/clear prune the component cache too', () => {
+  const vt = new VirtualTerminal(100, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+
+  startedApps.add(app)
+  const cache = (app as unknown as { messageComponents: Map<object, unknown> }).messageComponents
+  const locals = (app as unknown as { localMessages: object[] }).localMessages
+  // 200 distinct cards, each running→settled: every replacement is a NEW
+  // object, so without pruning the cache would hold the replaced running
+  // card AND the settled one (400). The cache must track the LIVE locals.
+  for (let i = 0; i < 200; i += 1) {
+    const running = app.pushLocalMessage({
+      kind: 'tool', turn: Number.POSITIVE_INFINITY, name: 'bash',
+      args: `{"i":${i}}`, result: '', status: 'running',
+    })
+    app.updateLocalMessage(running, {
+      kind: 'tool', turn: Number.POSITIVE_INFINITY, name: 'bash',
+      args: `{"i":${i}}`, result: 'done', status: 'ok',
+    })
+  }
+  assert.equal(cache.size, 200, 'each settled card cached once; replaced running objects pruned')
+  assert.equal(cache.size, locals.length, 'the cache tracks the live local cards, never more')
+  // Clearing the locals empties their cache entries (a bare session
+  // transcript repaint is NOT required to trigger this).
+  app.clearLocalMessages()
+  assert.equal(cache.size, 0, 'clearLocalMessages must drop the local cache entries')
+  app.stop()
+})
+
+test('tool card headers show the design title and the args summary', async () => {
+  const { vt, app } = startApp()
+  app.setTranscript([{
+    kind: 'tool', turn: 0, name: 'bash',
+    args: '{"command":"ls -la","cwd":"/tmp"}',
+    result: 'done', status: 'ok',
+  }])
+  const view = await viewport(vt)
+  assert.ok(view.includes('Bash ls -la [ok]'), `design title missing:\n${view}`)
+  assert.ok(!view.includes('command=ls -la'), `raw key-arg format leaked:\n${view}`)
+})
+
+/** One run_code card with two nested sub-calls (a failed bash + an ok read). */
+function ptcCodeCard(): Extract<TranscriptMessage, { kind: 'tool' }> {
+  return {
+    kind: 'tool', turn: 0, name: 'run_code',
+    args: '{"code":"print(1)","description":"Inspect project and run tests"}',
+    result: 'program output', status: 'ok',
+    subCalls: [
+      {
+        kind: 'tool', turn: 0, name: 'bash', args: '{"command":"npm test","description":"Run focused test suite"}',
+        result: '1 failed\n2 failed\n3 failed\n4 failed\n[exit code: 2]', status: 'ok',
+        subCallId: 'code-1:code:1', parentCallId: 'code-1', rootCallId: 'code-1',
+      },
+      {
+        kind: 'tool', turn: 0, name: 'read', args: '{"file_path":"a.ts","offset":1,"limit":200}',
+        result: 'file content', status: 'ok',
+        subCallId: 'code-1:code:2', parentCallId: 'code-1', rootCallId: 'code-1',
+      },
+    ],
+  }
+}
+
+test('PTC sub-call rows stay visible under a collapsed Code card, header-only', async () => {
+  const { vt, app } = startApp()
+  app.setTranscript([ptcCodeCard()])
+  const view = await viewport(vt)
+  assert.ok(view.includes('Code'), `root Code card missing:\n${view}`)
+  assert.ok(view.includes('Bash'), `child header must stay visible under a collapsed Code card:\n${view}`)
+  assert.ok(view.includes('Read'), `child header must stay visible under a collapsed Code card:\n${view}`)
+  // Regular mode: collapsed children are header-only (no body rows at all)
+  // so long nested output never floods the transcript; Ctrl+O on the root
+  // reveals everything.
+  assert.ok(!view.includes('1 failed'), `no child body rows while the root stays collapsed:\n${view}`)
+  assert.ok(view.includes('▶'), `the child header carries a disclosure affordance:\n${view}`)
+})
+
+test('a click on a PTC sub-call header expands only that child body', async () => {
+  const { vt, app } = startApp()
+  app.setFullscreen(true)
+  app.setTranscript([ptcCodeCard()])
+  await vt.waitForRender()
+  let view = await viewport(vt)
+  const strip = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, '')
+  const lines = view.split('\n')
+  const bashIdx = lines.findIndex(line => strip(line).includes('Bash'))
+  assert.ok(bashIdx >= 0, `bash child row missing:\n${view}`)
+  clickCell(vt, 10, bashIdx)
+  await vt.waitForRender()
+  view = await viewport(vt)
+  assert.ok(view.includes('4 failed'), `clicked child body must expand fully:\n${view}`)
+  assert.ok(view.includes('[exit code: 2]'), `the exit marker stays in the expanded body:\n${view}`)
+  assert.ok(view.includes('▼'), `the expanded child shows the open affordance:\n${view}`)
+  assert.ok(!view.includes('file content'), `the other child stays collapsed:\n${view}`)
+})
+
+test('a manually-expanded PTC child can still be collapsed while a search target covers it', async () => {
+  const { vt, app } = startApp()
+  app.setFullscreen(true)
+  const card = ptcCodeCard()
+  app.setTranscript([card])
+  await vt.waitForRender()
+  const strip = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, '')
+  // Manually expand the first child BEFORE the search navigation exists.
+  let bashIdx = vt.getViewport().join('\n').split('\n').findIndex(line => strip(line).includes('Bash'))
+  clickCell(vt, 10, bashIdx)
+  await vt.waitForRender()
+  assert.ok(vt.getViewport().join('\n').includes('4 failed'), 'precondition: the child is manually expanded')
+
+  // A search target that covers the SAME child (already in the manual set).
+  app.setTranscriptSearchTarget({
+    query: 'failed',
+    match: {
+      id: 0, turn: 0, occurrence: 0,
+      source: { kind: 'subcall-field', subCallIds: ['code-1:code:1'], field: 'result' },
+      sourceOccurrence: 0,
+    },
+    message: card,
+  })
+  await vt.waitForRender()
+  assert.ok(vt.getViewport().join('\n').includes('4 failed'), 'the search target keeps the child open')
+
+  // One explicit click must COLLAPSE it (not be reopened by the search force).
+  bashIdx = vt.getViewport().join('\n').split('\n').findIndex(line => strip(line).includes('Bash'))
+  clickCell(vt, 10, bashIdx)
+  await vt.waitForRender()
+  assert.ok(!vt.getViewport().join('\n').includes('4 failed'), 'the explicit click must collapse the search-forced child')
+  app.setFullscreen(false)
+  app.stop()
+})
+
+test('a PTC sub-call press cannot transfer after a sibling settle reflow (mouse parity)', async () => {
+  const { vt, app } = startApp()
+  app.setFullscreen(true)
+  app.setTranscriptDetailExpanded(true)
+  const message: Extract<TranscriptMessage, { kind: 'tool' }> = {
+    kind: 'tool', turn: 0, name: 'run_code',
+    args: '{"code":"print(1)"}', result: 'program output', status: 'ok',
+    subCalls: [
+      {
+        kind: 'tool', turn: 0, name: 'bash', args: '{"command":"npm test"}',
+        result: 'running', status: 'running',
+        subCallId: 'code-1:code:1', parentCallId: 'code-1', rootCallId: 'code-1',
+      },
+      {
+        kind: 'tool', turn: 0, name: 'read', args: '{"file_path":"a.ts"}',
+        result: 'file content', status: 'ok',
+        subCallId: 'code-1:code:2', parentCallId: 'code-1', rootCallId: 'code-1',
+      },
+    ],
+  }
+  app.setTranscript([message])
+  await vt.waitForRender()
+  // Expand subcall A (the bash child) so its body rows show.
+  let view = await viewport(vt)
+  const strip = (line: string): string => line.replace(/\x1b\[[0-9;]*m/g, '')
+  const bashIdx = view.split('\n').findIndex(line => strip(line).includes('Bash'))
+  assert.ok(bashIdx >= 0, `bash child row missing:\n${view}`)
+  clickCell(vt, 10, bashIdx)
+  await vt.waitForRender()
+  view = await viewport(vt)
+  const readIdx = view.split('\n').findIndex(line => strip(line).includes('Read'))
+  assert.ok(readIdx >= 0, `read child row missing:\n${view}`)
+  // Press the Read (B) header (no release): the press identity is
+  // ptc:<token>:code-1:code:2.
+  vt.sendInput(`\x1b[<0;10;${readIdx + 1}M`)
+  await vt.waitForRender()
+  // Subcall A settles with a multiline result: the SAME root message
+  // object is unchanged, A's body grows, and B's header moves down.
+  message.subCalls![0]!.result = '1 failed\n2 failed\n3 failed\n4 failed\n[exit code: 2]'
+  app.setTranscript([message])
+  await vt.waitForRender()
+  view = await viewport(vt)
+  const readAfter = view.split('\n').findIndex(line => strip(line).includes('Read'))
+  assert.ok(readAfter > readIdx, `B's header must move down after A's growth:\n${view}`)
+  // Release on the old cell: the click must NOT toggle the root card
+  // (the press identity is B's sub-call; the cell is now A's body).
+  vt.sendInput(`\x1b[<0;10;${readIdx + 1}m`)
+  await vt.waitForRender()
+  const overrides = (app as unknown as { expandedOverride: Map<unknown, boolean> }).expandedOverride
+  assert.equal(overrides.size, 0, `the stale sub-call press must not toggle the root card:\n${vt.getViewport().join('\n')}`)
+  app.stop()
+})
+
+test('regular mode: the root disclosure reveals the full child bodies and the bash command', async () => {
+  const { vt, app } = startApp()
+  app.setTranscriptDetailExpanded(true)
+  app.setTranscript([ptcCodeCard()])
+  const view = await viewport(vt)
+  assert.ok(view.includes('program output'), `expanded root shows its own body:\n${view}`)
+  assert.ok(view.includes('Bash'), `child headers stay visible:\n${view}`)
+  // Regular mode has no per-child click: Ctrl+O on the root reveals the
+  // full child bodies (the keyboard-owned disclosure path).
+  assert.ok(view.includes('4 failed'), `the full child body is reachable via the root disclosure:\n${view}`)
+  assert.ok(view.includes('$ npm test'), `the executed bash command is never lost:\n${view}`)
+})
+
+test('footer preset hides the stats line in compact mode', async () => {
+  const { vt, app } = startApp()
+  app.setStatus({
+    model: 'm', cwd: 'c',
+    // M1: the stats line composes from the structured usage facts.
+    usage: {
+      tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      performance: { llmMs: 8100, firstTokenMs: 8_100, tokensPerSec: 0 },
+      turns: 0,
+      steps: 0,
+    },
+  })
+  let view = await viewport(vt)
+  assert.ok(view.includes('TTFB 8.1s'), `stats line missing in full mode:\n${view}`)
+  app.setFooterPreset('compact')
+  view = await viewport(vt)
+  assert.ok(!view.includes('TTFB 8.1s'), `stats line visible in compact mode:\n${view}`)
+  assert.ok(view.includes('[m]'), `line 1 missing:\n${view}`)
+  app.setFooterPreset('full')
+  view = await viewport(vt)
+  assert.ok(view.includes('TTFB 8.1s'), `stats line not restored:\n${view}`)
+})
+
+test('autoDetectTheme observes only the OSC 11 background', async () => {
+  const { vt, app, writes } = startAppWithWrites()
+  const before = writes.length
+  const pending = app.autoDetectTheme()
+  assert.deepEqual(writes.slice(before), ['\x1b]11;?\x07'], 'one narrow OSC 11 query')
+  const fullTransaction = writes.filter(data =>
+    data.includes('\x1b]10;?') || data.includes('\x1b]4;') || data.endsWith('\x1b[c') || data.includes('\x1b[6n'))
+  assert.deepEqual(fullTransaction, [], 'no OSC 10 / OSC 4 / DA1 / DSR traffic')
+  vt.sendInput('\x1b]11;#eeeeee\x07') // bright background -> light
+  await pending
+  assert.equal(currentPalette, lightColors, 'a bright background selects the light palette')
+})
+
+test('autoDetectTheme maps a dark background to the dark palette', async () => {
+  const { vt, app } = startApp()
+  const pending = app.autoDetectTheme()
+  vt.sendInput('\x1b]11;#111111\x07') // dark background -> dark
+  await pending
+  assert.equal(currentPalette, darkColors, 'a dark background selects the dark palette')
+})
+
+test('autoDetectTheme resolves without changing the theme when the terminal is silent', async () => {
+  const { vt, app } = startApp()
+  const before = currentPalette
+  await app.autoDetectTheme() // VirtualTerminal never answers OSC 11
+  assert.equal(currentPalette, before, 'silent terminal must not change the palette')
+})
+
+test('autoDetectTheme falls back to COLORFGBG when the terminal never answers', async () => {
+  const previous = process.env.COLORFGBG
+  process.env.COLORFGBG = '0;15' // black on white: a light background
+  try {
+    const { app } = startApp()
+    setTheme('dark')
+    await app.autoDetectTheme()
+    assert.equal(currentPalette, lightColors, 'COLORFGBG decides when the terminal is silent')
+  } finally {
+    if (previous === undefined) delete process.env.COLORFGBG
+    else process.env.COLORFGBG = previous
+  }
+})
+
+test('autoDetectTheme applies the detected theme through the ACTIVE screen in fullscreen mode', async () => {
+  const { vt, app } = startApp()
+  app.setFullscreen(true)
+  await viewport(vt)
+  // The alt screen owns the terminal input handler: the OSC 11 reply must
+  // resolve the observation registered on the ACTIVE screen. An observation
+  // on the stopped main screen would be released by its stop() and the
+  // detection would silently no-op in fullscreen mode.
+  const pending = app.autoDetectTheme()
+  vt.sendInput('\x1b]11;#eeeeee\x07') // bright background -> light palette
+  await pending
+  assert.equal(currentPalette, lightColors, 'fullscreen autodetect must apply the detected palette')
+})
+
+test('autoDetectTheme drops an observation that resolves before a screen switch', async () => {
+  const { vt, app } = startApp()
+  setTheme('dark')
+  const pending = app.autoDetectTheme()
+  // The observation RESOLVES with a value and the swap happens in the same tick,
+  // before the continuation runs: the result belongs to the screen the user left.
+  vt.sendInput('\x1b]11;#eeeeee\x07')
+  app.setFullscreen(true)
+  await pending
+  await viewport(vt)
+  assert.equal(currentPalette, darkColors, 'a swapped-away screen may not colour the new one')
+})
+
+test('a late background reply across a Main/Fullscreen switch is not user input', async () => {
+  const { vt, app, userInputs } = startAppWithEvents()
+  setTheme('dark')
+  const pending = app.autoDetectTheme() // the observation belongs to the main screen
+  app.setFullscreen(true) // the main screen stops; the alt screen owns the terminal
+  await viewport(vt)
+  vt.sendInput('\x1b]11;#eeeeee\x07') // the main screen's reply arrives at the alt screen
+  await pending
+  assert.equal(userInputs(), 0, 'a terminal protocol reply must never count as user activity')
+  vt.sendInput('x') // control: real typing still counts
+  assert.equal(userInputs(), 1, 'ordinary input must still reach the user-activity signal')
+})
+
+test('a late background reply across a Fullscreen/Main switch is not user input', async () => {
+  const { vt, app, userInputs } = startAppWithEvents()
+  setTheme('dark')
+  app.setFullscreen(true)
+  await viewport(vt)
+  const pending = app.autoDetectTheme() // the observation belongs to the alt screen
+  app.setFullscreen(false) // the alt screen stops; the main screen owns the terminal
+  await viewport(vt)
+  vt.sendInput('\x1b]11;#eeeeee\x07')
+  await pending
+  assert.equal(userInputs(), 0, 'a terminal protocol reply must never count as user activity')
+  assert.equal(currentPalette, darkColors, 'and it must not colour the screen the user returned to')
+})
+
+test('a full stop/start keeps receiving live scheme reports', async () => {
+  const { vt, app } = startApp()
+  const received: string[] = []
+  app.onTerminalThemeChange((theme) => { received.push(theme) })
+  vt.sendInput('\x1b[?997;2n')
+  assert.deepEqual(received, ['light'], 'a report reaches the listener while the app is running')
+  app.stop()
+  app.start()
+  vt.sendInput('\x1b[?997;1n')
+  assert.deepEqual(received, ['light', 'dark'], 'a restarted app must still receive scheme reports')
+})
+
+test('autoDetectTheme coalesces concurrent calls onto one shared observation', async () => {
+  const { vt, app, writes } = startAppWithWrites()
+  const before = writes.length
+  const first = app.autoDetectTheme()
+  const second = app.autoDetectTheme()
+  assert.equal(writes.slice(before).filter(data => data.includes('\x1b]11;?')).length, 1,
+    'concurrent autodetect calls must share one OSC 11 observation')
+  vt.sendInput('\x1b]11;#eeeeee\x07')
+  await Promise.all([first, second])
+  assert.equal(currentPalette, lightColors, 'the shared observation result must apply once')
+})
+
+test('autoDetectTheme drops the settled result when shouldApply returns false', async () => {
+  const { vt, app } = startApp()
+  const before = currentPalette
+  const pending = app.autoDetectTheme({ shouldApply: () => false })
+  vt.sendInput('\x1b]11;#eeeeee\x07')
+  await pending
+  assert.equal(currentPalette, before, 'a refused result must not change the palette')
+})
+
+test('a late colour reply never reaches the editor', async () => {
+  const { vt, app } = startApp()
+  setTheme('dark')
+  await app.autoDetectTheme() // silent: the observation times out
+  vt.sendInput('\x1b]11;#eeeeee\x07') // stray reply with nothing pending
+  vt.sendInput('\x1b[1;2R') // legacy Shift+F3 is a KEY, not a protocol reply
+  vt.sendInput('Z')
+  const view = await viewport(vt)
+  assert.ok(view.includes('Z'), `the editor must still receive typing:\n${view}`)
+  assert.ok(!view.includes(']11;'), 'the stray reply must never be typed into the editor')
+  assert.equal(currentPalette, darkColors, 'a stray reply must not change the theme')
+})
+
+test('autoDetectTheme honours the colour opt-out without querying', async () => {
+  const previous = process.env.NO_COLOR
+  process.env.NO_COLOR = '1'
+  try {
+    const { app, writes } = startAppWithWrites()
+    setTheme('dark')
+    const before = writes.length
+    await app.autoDetectTheme()
+    assert.equal(writes.slice(before).filter(data => data.includes('\x1b]11;?')).length, 0,
+      'an opted-out environment must not query the terminal')
+    assert.equal(currentPalette, darkColors, 'the opt-out keeps the safe dark palette')
+  } finally {
+    if (previous === undefined) delete process.env.NO_COLOR
+    else process.env.NO_COLOR = previous
+  }
+})
+
+test('autoDetectTheme still detects after returning from fullscreen', async () => {
+  const { vt, app } = startApp()
+  app.setFullscreen(true)
+  await viewport(vt)
+  app.setFullscreen(false)
+  await viewport(vt)
+  const pending = app.autoDetectTheme()
+  vt.sendInput('\x1b]11;#eeeeee\x07')
+  await pending
+  assert.equal(currentPalette, lightColors, 'the regular screen detects again after the switch')
+})
+
+test('trackTerminalTheme toggles Mode 2031 without sampling the terminal', async () => {
+  const { vt, app, writes } = startAppWithWrites()
+  const received: string[] = []
+  app.onTerminalThemeChange((theme) => { received.push(theme) })
+  app.trackTerminalTheme(true)
+  app.trackTerminalTheme(true) // idempotent
+  assert.deepEqual(mode2031Writes(writes), ['\x1b[?2031h'], 'enabling tracking writes ?2031h once')
+  assert.equal(writes.filter(data => data.includes('\x1b]11;?')).length, 0,
+    'tracking never samples the terminal: the boot observation is the only query')
+  app.trackTerminalTheme(false)
+  assert.deepEqual(mode2031Writes(writes), ['\x1b[?2031h', '\x1b[?2031l'], 'disabling writes ?2031l')
+  app.trackTerminalTheme(true)
+  assert.deepEqual(mode2031Writes(writes), ['\x1b[?2031h', '\x1b[?2031l', '\x1b[?2031h'], 're-enabling writes ?2031h again')
+  vt.sendInput('\x1b[?997;2n')
+  assert.deepEqual(received, ['light'], 'reports still fan out to the listeners')
+})
+
+test('Mode 2031 follows the tracking choice across a Main/Fullscreen switch', async () => {
+  const { vt, app, writes } = startAppWithWrites()
+  app.trackTerminalTheme(true)
+  assert.deepEqual(mode2031Writes(writes), ['\x1b[?2031h'])
+  app.setFullscreen(true)
+  await viewport(vt)
+  assert.deepEqual(mode2031Writes(writes), ['\x1b[?2031h', '\x1b[?2031l', '\x1b[?2031h'],
+    'entering fullscreen disables on the main screen and enables on the alt screen')
+  app.setFullscreen(false)
+  await viewport(vt)
+  assert.deepEqual(mode2031Writes(writes), ['\x1b[?2031h', '\x1b[?2031l', '\x1b[?2031h', '\x1b[?2031l', '\x1b[?2031h'],
+    'returning to regular disables on the alt screen and re-enables on the main screen')
+
+  // A screen that was stopped when tracking was switched off records the flag
+  // and must not restore the old mode when it starts again.
+  app.trackTerminalTheme(false)
+  assert.deepEqual(mode2031Writes(writes).slice(-1), ['\x1b[?2031l'])
+  app.setFullscreen(true)
+  await viewport(vt)
+  assert.deepEqual(mode2031Writes(writes).slice(-1), ['\x1b[?2031l'],
+    'a newly started screen must not re-enable a disabled mode')
+})
+
+test('scheme reports reach listeners while the alt screen owns input', async () => {
+  const { vt, app } = startApp()
+  const received: string[] = []
+  app.onTerminalThemeChange((theme) => { received.push(theme) })
+  app.setFullscreen(true)
+  await viewport(vt)
+  vt.sendInput('\x1b[?997;2n') // light — consumed by the alt screen
+  assert.deepEqual(received, ['light'], 'reports must fan out from the active screen')
+  app.stop()
+})
+
+test('fullscreen scrollback search opens with ctrl+shift+f', async () => {
+  const { vt, app } = startApp()
+  app.setTranscript([{ kind: 'user', turn: 0, text: 'needle' }])
+  await viewport(vt)
+  app.setFullscreen(true)
+  await viewport(vt)
+  vt.sendInput('\x1b[102;6u') // kitty ctrl+shift+f
+  const view = await viewport(vt)
+  assert.ok(view.includes('Find transcript'), `search bar missing:\n${view}`)
+})
+
+test('ctrl+f opens and closes the transcript search (no fullscreen toggle)', async () => {
+  const { vt, app } = startApp()
+  app.setTranscript([{ kind: 'user', turn: 0, text: 'needle' }])
+  await viewport(vt)
+  assert.equal(app.isFullscreen(), false)
+  vt.sendInput('\x06') // ctrl+f → search, NOT fullscreen
+  let view = await viewport(vt)
+  assert.ok(view.includes('Find transcript'), `search bar missing:\n${view}`)
+  assert.equal(app.isFullscreen(), false, 'ctrl+f must not toggle fullscreen')
+  vt.sendInput('\x06') // ctrl+f again closes the overlay
+  view = await viewport(vt)
+  assert.ok(!view.includes('Find transcript'), `search bar still open:\n${view}`)
+})
+
+test('transcript search: Ctrl+C closes the overlay and the hint advertises next/prev/close', async () => {
+  const { vt, app } = startApp()
+  app.setTranscript([{ kind: 'user', turn: 0, text: 'needle' }])
+  await viewport(vt)
+  vt.sendInput('\x06') // ctrl+f opens search
+  let view = await viewport(vt)
+  assert.ok(view.includes('Find transcript'), `search bar missing:\n${view}`)
+  // The next/prev/close hint rides under the input. Its labels are rendered
+  // from the (non-configurable) keymap definitions and compacted to this exact
+  // overlay line, so the assertion pins the WHOLE hint rather than recomputing
+  // it in the test.
+  assert.ok(view.includes('↵ next · ⇧↵ prev · esc/ctrl+c close'), `search hint must render the full next/prev/close line:\n${view}`)
+  // Ctrl+C closes search (the old behavior: the overlay's shared Input
+  // swallowed Ctrl+C as its generic cancel and search stayed open).
+  vt.sendInput('\x03') // ctrl+c
+  view = await viewport(vt)
+  assert.ok(!view.includes('Find transcript'), `Ctrl+C must close search:\n${view}`)
+  // Esc still closes, Enter/Shift+Enter still navigate (semantic close
+  // keeps both routes — no regression).
+  vt.sendInput('\x06')
+  await viewport(vt)
+  vt.sendInput('\x1b')
+  view = await viewport(vt)
+  assert.ok(!view.includes('Find transcript'), `Esc must still close search:\n${view}`)
+})
+
+test('transcript search hint stays on one line at min-width (no layout break)', async () => {
+  const { vt, app } = startApp(24, 24) // the overlay minWidth
+  app.setTranscript([{ kind: 'user', turn: 0, text: 'needle' }])
+  await viewport(vt)
+  vt.sendInput('\x06')
+  const view = await viewport(vt)
+  assert.ok(view.includes('Find transcript'), `search bar missing at min width:\n${view}`)
+  const hintRow = view.split('\n').find(line => line.includes('next'))
+  assert.ok(hintRow !== undefined, `hint must render at min width:\n${view}`)
+  assert.ok((hintRow ?? '').length <= 24, `hint must not overflow the overlay width:\n${view}`)
+})
+
+test('transcript search: Left/Right/Home/End edit the query inside the overlay', async () => {
+  const { TuiApp } = await import('../../src/tui-app.ts')
+  const { VirtualTerminal } = await import('../support/virtual-terminal.ts')
+  const vt = new VirtualTerminal(100, 24)
+  const queries: string[] = []
+  const app = new TuiApp(vt, {
+    onSubmit: () => {},
+    onExit: () => {},
+    onSearchQuery: (query) => queries.push(query),
+  })
+  app.start()
+  startedApps.add(app)
+  app.startTranscriptSearch()
+  await viewport(vt)
+  vt.sendInput('abc')
+  await viewport(vt)
+  vt.sendInput('\x1b[D') // Left
+  vt.sendInput('X')
+  await viewport(vt)
+  assert.ok(queries.includes('abXc'), `Left+X must insert mid-query: ${JSON.stringify(queries)}`)
+  vt.sendInput('\x1bOH') // Home
+  vt.sendInput('Z')
+  await viewport(vt)
+  assert.ok(queries.includes('ZabXc'), `Home+Z must prefix: ${JSON.stringify(queries)}`)
+  vt.sendInput('\x1bOF') // End
+  vt.sendInput('Y')
+  await viewport(vt)
+  assert.ok(queries.includes('ZabXcY'), `End+Y must append: ${JSON.stringify(queries)}`)
+  app.closeTranscriptSearch()
+})
+
+test('fullscreen Ctrl+F and Ctrl+Shift+F search the full folder and re-window to an old match', async () => {
+  const folder = new TranscriptFolder()
+  folder.apply(Array.from({ length: 100 }, (_, turn) => ({
+    type: 'assistant/message',
+    surfaceOp: 'append',
+    seq: SessionSeq(turn),
+    time: 1_700_000_000_000 + turn,
+    data: {
+      turn,
+      step: 0,
+    stream: [],
+      message: {
+        id: MessageId(`history-${turn}`),
+        role: 'assistant',
+        content: [{ type: 'text', text: turn === 5 ? 'history-only needle' : `visible turn ${turn}` }],
+        source: { kind: 'model', provider: 'test', model: 'test' },
+      },
+    },
+  } as SessionEvent)))
+  const controller = new TranscriptWindowController({
+    windowTurns: 20,
+    stepTurns: 10,
+    turns: folder.groupedTurns(),
+  })
+  const renderWindow = (): void => {
+    const projection = folder.window({
+      maxTurns: controller.windowTurns,
+      ...(controller.endTurn() === undefined ? {} : { endTurn: controller.endTurn() }),
+    })
+    app.setTranscript(projection.messages, folder.turnActivities(), {
+      ...controller.snapshot(),
+      firstTurn: projection.firstTurn,
+      lastTurn: projection.lastTurn,
+      hasNewer: projection.hasNewer,
+    })
+  }
+  const hostMatches: number[] = []
+  let app!: TuiApp
+  const vt = new VirtualTerminal(100, 24)
+  app = new TuiApp(vt, {
+    onSubmit: () => {},
+    onExit: () => {},
+    onSearchQuery: (query) => {
+      const matches = folder.search(query)
+      if (matches.length === 0) return
+      const match = matches[0]
+      if (match === undefined) return
+      controller.anchorAt(match.turn)
+      hostMatches.push(match.turn)
+      renderWindow()
+    },
+    onSearchClose: () => {
+      controller.latest()
+      renderWindow()
+    },
+  })
+  app.start()
+
+  startedApps.add(app)
+  try {
+    renderWindow()
+    app.setFullscreen(true)
+    await viewport(vt)
+    assert.ok(!vt.getViewport().some(line => line.includes('history-only needle')), 'the old match must start outside the visible window')
+    for (const key of ['\x06', '\x1b[102;6u']) {
+      vt.sendInput(key)
+      await viewport(vt)
+      vt.sendInput('history-only')
+      const view = await viewport(vt)
+      assert.equal(controller.endTurn(), 5, `host search ${JSON.stringify(key)} must anchor the matched turn`)
+      assert.ok(view.includes('history-only needle'), `host search ${JSON.stringify(key)} must reveal the old match`)
+      assert.equal(hostMatches.at(-1), 5, `host search ${JSON.stringify(key)} must use the full folder`)
+      vt.sendInput('\x1b')
+      await viewport(vt)
+      assert.equal(controller.isLatest(), true, 'closing search must restore the latest window')
+    }
+  } finally {
+    app.stop()
+  }
+})
+
+test('fullscreen suppresses the stale fork search key after host search is remapped', async () => {
+  const hostQueries: string[] = []
+  const vt = new VirtualTerminal(100, 24)
+  const app = new TuiApp(vt, {
+    onSubmit: () => {},
+    onExit: () => {},
+    onSearchQuery: (query) => hostQueries.push(query),
+  })
+  app.start()
+
+  startedApps.add(app)
+  try {
+    app.keybindingsManager().setUserConfiguration(parseUserKeybindings({ 'app.transcript.search': 'ctrl+x' }))
+    app.setTranscript([{ kind: 'user', turn: 0, text: 'visible window' }])
+    app.setFullscreen(true)
+    await viewport(vt)
+
+    vt.sendInput('\x1b[102;6u') // old fork Ctrl+Shift+F must not open rendered-line search
+    await viewport(vt)
+    assert.ok(!vt.getViewport().some(line => line.includes('Find transcript')),
+      'the fork search must stay disabled when the host search is remapped')
+    vt.sendInput('ignored')
+    await viewport(vt)
+    assert.deepEqual(hostQueries, [], 'the stale fork key must not reach host search after a remap')
+
+    vt.sendInput('\x18') // remapped host Ctrl+X
+    await viewport(vt)
+    assert.ok(vt.getViewport().some(line => line.includes('Find transcript')), 'the remapped host search must open')
+    vt.sendInput('query')
+    await viewport(vt)
+    assert.deepEqual(hostQueries.at(-1), 'query')
+  } finally {
+    app.stop()
+  }
+})
+
+test('history window shows the location gutter plus the effective jump-latest indicator', async () => {
+  const { vt, app } = startApp(100, 24)
+  app.setTranscript([{ kind: 'user', turn: 40, text: 'history row' }], undefined, {
+    mode: 'history',
+    endTurn: 40,
+    firstTurn: 31,
+    lastTurn: 40,
+  })
+  app.setFullscreen(true)
+  let view = await viewport(vt)
+  assert.ok(view.includes('History · turn 31–40'), `history location gutter missing:\n${view}`)
+  assert.ok(!view.includes('Ctrl+End latest'), `the gutter must not repeat the jump key:\n${view}`)
+  assert.ok(view.includes('↓ Latest · Ctrl+End'), `default jump indicator missing:\n${view}`)
+
+  app.keybindingsManager().setUserConfiguration(parseUserKeybindings({ 'app.transcript.jumpLatest': 'ctrl+l' }))
+  view = await viewport(vt)
+  assert.ok(view.includes('↓ Latest · Ctrl+L'), `remapped jump indicator missing:\n${view}`)
+  assert.ok(!view.includes('Ctrl+End'), `stale jump hint remains:\n${view}`)
+  app.stop()
+})
+
+test('viewport anchors distinguish duplicate messages and cloned Focus activities', async () => {
+  const { vt, app } = startApp(100, 30)
+  const duplicateMessages = [
+    { kind: 'assistant' as const, turn: 7, text: 'first duplicate' },
+    { kind: 'assistant' as const, turn: 7, text: 'second duplicate' },
+    ...Array.from({ length: 30 }, (_, index) => ({ kind: 'assistant' as const, turn: index + 8, text: `tail ${index}` })),
+  ]
+  app.setTranscript(duplicateMessages)
+  app.setFullscreen(true)
+  await viewport(vt)
+  const duplicateAnchor: TranscriptViewportAnchor = {
+    scrollTop: 0,
+    top: {
+      turn: 7,
+      rowKind: 'message',
+      occurrence: 1,
+      message: { kind: 'assistant', turn: 7, text: 'fresh duplicate' },
+      rowOffset: 0,
+      viewportOffset: 0,
+    },
+  }
+  assert.equal(app.restoreTranscriptViewportAnchor(duplicateAnchor, 'top'), true)
+  let scroll = app.fullscreenScrollForTest()
+  assert.ok(scroll !== undefined && scroll.scrollTop > 0, 'the duplicate anchor must land below the first same-turn message')
+  let view = await viewport(vt)
+  assert.ok(view.includes('second duplicate'), `the cloned duplicate anchor selected the wrong row:\n${view}`)
+  assert.ok(!view.includes('first duplicate'), `the cloned duplicate anchor left the first row at the viewport top:\n${view}`)
+
+  const activity: TurnActivity = {
+    turn: 7,
+    startedAt: 1_000,
+    endedAt: 2_000,
+    completed: true,
+    reason: { kind: 'completed' },
+    tools: new Map(),
+    toolCalls: 0,
+    assistantMessages: 1,
+    revision: 0,
+  }
+  const focusMessages = [
+    { kind: 'user' as const, turn: 7, text: 'focus user' },
+    { kind: 'assistant' as const, turn: 7, text: 'focus final' },
+    ...Array.from({ length: 30 }, (_, index) => ({ kind: 'assistant' as const, turn: index + 8, text: `focus tail ${index}` })),
+  ]
+  const focusActivities = new Map<number, TurnActivity>([
+    [7, activity],
+    ...Array.from({ length: 30 }, (_, index) => {
+      const turn = index + 8
+      return [turn, { ...activity, turn }] as const
+    }),
+  ])
+  app.setTranscript(focusMessages, focusActivities)
+  app.setFocusMode(true)
+  await viewport(vt)
+  const clonedActivity = { ...activity, tools: new Map(activity.tools) }
+  const activityAnchor: TranscriptViewportAnchor = {
+    scrollTop: 0,
+    top: {
+      turn: 7,
+      rowKind: 'activity',
+      occurrence: 0,
+      activity: clonedActivity,
+      rowOffset: 0,
+      viewportOffset: 0,
+    },
+  }
+  assert.equal(app.restoreTranscriptViewportAnchor(activityAnchor, 'top'), true)
+  scroll = app.fullscreenScrollForTest()
+  assert.ok(scroll !== undefined && scroll.scrollTop > 0, 'the cloned activity anchor must land below the same-turn user row')
+  view = await viewport(vt)
+  assert.ok(hasFocusHeader(view), `the cloned activity anchor selected the same-turn message row:\n${view}`)
+  assert.ok(!view.includes('focus user'), `the cloned activity anchor left the user row at the viewport top:\n${view}`)
+  app.stop()
+})
+
+/** One unique marker per whale variant; any of them proves the whale is
+ * rendered (the variant is picked randomly once per process). */
+const WHALE_MARKERS = [".--'---._", '.------._', '.-------.', ".---'--.", '/ /~~~~~~']
+const hasWhale = (view: string): boolean => WHALE_MARKERS.some(marker => view.includes(marker))
+
+test('F2: an ABSENT welcome-card model fact is OMITTED, never rendered as an authoritative "unconfigured"', async () => {
+  // The official `SessionReader.sessionStatus()` contract: an absent field means
+  // the projection/capability is UNAVAILABLE and must not be guessed or replaced
+  // with a definitive business value. The Remote welcome branch therefore passes
+  // the absent fact THROUGH (no `model` key) instead of inventing
+  // "unconfigured", and the card renders no model line at all.
+  const { vt, app } = startApp()
+  app.setWelcomeCard({ cwd: '/ws', sessionId: 'session-absent-fact', version: '0.1.0' })
+  const view = await viewport(vt)
+  const plainFacts = view.split('\n').map(line => line.replace(/\x1b\[[0-9;]*m/g, '')).join('\n')
+  assert.ok(view.includes('session-absent-fact'), `the card must still render its facts:\n${view}`)
+  assert.equal(view.includes('unconfigured'), false,
+    'an unavailable model projection must never become a definitive business value')
+  assert.equal(view.includes('no model'), false,
+    'nor the legacy no-model literal')
+  assert.equal(/model[ \t]*\S/.test(plainFacts), false,
+    `no model value may be rendered from an absent fact:\n${view}`)
+})
+
+test('welcome card shows the whale and full facts in the wide layout', async () => {
+  const { vt, app } = startApp()
+  // Values long enough to wrap inside the ~76-col side-by-side facts column.
+  const longCwd = `/very/long/working/directory/that/keeps/going/${'segment/'.repeat(12)}end`
+  const longSession = `session-${'x'.repeat(100)}`
+  app.setWelcomeCard({
+    cwd: longCwd,
+    sessionId: longSession,
+    model: 'opencode-go/deepseek-v4-flash',
+    version: '0.1.0-rc.6',
+    preset: 'standard',
+  })
+  const view = await viewport(vt)
+  // Facts render in full: the session id is never truncated, and long lines
+  // wrap instead of ending in an ellipsis. The side-by-side facts column is
+  // 72 cells at width 100 (inner 96 − widest whale 20 − gap 4); recompute
+  // the actual wrap segments (label + value) and check each survives in the
+  // stripped viewport.
+  const factsColumn = 100 - 4 - 24
+  const plain = view.split('\n').map(line => line.replace(/\x1b\[[0-9;]*m/g, '')).join('\n')
+  for (const segment of wrapTextWithAnsi(`session  ${longSession}`, factsColumn)) {
+    assert.ok(plain.includes(segment), `session id segment truncated:\n${view}`)
+  }
+  for (const segment of wrapTextWithAnsi(`cwd      ${longCwd}`, factsColumn)) {
+    assert.ok(plain.includes(segment), `cwd segment truncated:\n${view}`)
+  }
+  assert.ok(view.includes('deepseek-v4-flash'), `model missing:\n${view}`)
+  assert.ok(view.includes('standard'), `preset missing:\n${view}`)
+  assert.ok(view.includes('0.1.0-rc.6'), `version missing:\n${view}`)
+  assert.ok(!view.includes('…'), `facts ellipsized:\n${view}`)
+  // 100 >= 72: the whale mascot renders side-by-side with the facts.
+  assert.ok(hasWhale(view), `whale missing:\n${view}`)
+  // No physical row overflows the terminal width (ANSI-aware).
+  for (const line of view.split('\n')) {
+    assert.ok(visibleWidth(line) <= 100, `row overflows terminal width:\n${view}`)
+  }
+  // The full-width box frames the card.
+  assert.ok(view.includes('╭'), `box top missing:\n${view}`)
+  assert.ok(view.includes('╰'), `box bottom missing:\n${view}`)
+  assert.ok(view.includes('│'), `box sides missing:\n${view}`)
+})
+test('working indicator shows on the row directly above the editor while active', async () => {
+  const { vt, app } = startApp()
+  app.setWorking(true)
+  const view = await viewport(vt)
+  const lines = view.split('\n')
+  const workingIndex = lines.findIndex(line => line.includes('Working'))
+  assert.ok(workingIndex !== -1, `working row missing:\n${view}`)
+  const editorTop = lines.findIndex(line => line.includes('─'.repeat(10)))
+  assert.ok(editorTop !== -1, `editor border missing:\n${view}`)
+  assert.equal(workingIndex + 1, editorTop, `working row must sit directly above the editor border:\n${view}`)
+  app.setWorking(false)
+  const idle = await viewport(vt)
+  assert.ok(!idle.includes('Working'), `working row survived:\n${idle}`)
+})
+
+test('WorkingIndicator stays active across timer restarts; refresh repaints live palettes', () => {
+  const renders: string[] = []
+  const capture = (): void => { renders.push(indicator.render(80).join('')) }
+  const indicator = new WorkingIndicator(capture, { frames: ['🐋'], intervalMs: 1000 })
+  // start() → restartAnimation() must NOT clear the active flag (the old
+  // code called stop() from restartAnimation, so refresh() never repainted
+  // and a single-frame indicator kept the stale palette forever).
+  indicator.start()
+  const afterStart = renders.length
+  indicator.refresh()
+  assert.ok(renders.length > afterStart, 'refresh() must repaint an ACTIVE indicator immediately')
+  // An active indicator follows a live theme switch on the next refresh.
+  setTheme('dark')
+  indicator.refresh()
+  const dark = renders[renders.length - 1]!
+  setTheme('light')
+  indicator.refresh()
+  const light = renders[renders.length - 1]!
+  assert.notEqual(dark, light, 'the active indicator must repaint with the live palette')
+  // Repeated start is idempotent: no throw, single timer (dispose clean).
+  indicator.start()
+  indicator.start()
+  indicator.dispose()
+  // A stopped indicator never repaints.
+  indicator.start()
+  indicator.stop()
+  const afterStop = renders.length
+  indicator.refresh()
+  assert.equal(renders.length, afterStop, 'refresh() must not repaint a STOPPED indicator')
+  // Restore the global theme (setTheme is module state).
+  setTheme('dark')
+})
+
+test('working indicator alternates between the whale emojis', async () => {
+  const vt = new VirtualTerminal(100, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { workingIntervalMs: 20 })
+  app.start()
+
+  startedApps.add(app)
+  app.setWorking(true)
+  await vt.waitForRender()
+  const seen = new Set<string>()
+  for (let i = 0; i < 30 && seen.size < 2; i += 1) {
+    const view = vt.getViewport().join('\n')
+    const line = view.split('\n').find(candidate => candidate.includes('Working'))
+    if (line !== undefined) {
+      if (line.includes('🐋')) seen.add('🐋')
+      if (line.includes('🐳')) seen.add('🐳')
+    }
+    await new Promise(resolve => setTimeout(resolve, 20))
+  }
+  assert.ok(seen.has('🐋') && seen.has('🐳'), `both whale emojis must appear, saw: ${[...seen].join(', ')}`)
+  app.setWorking(false)
+  app.stop()
+})
+
+test('working indicator shows above the editor in fullscreen too', async () => {
+  const { vt, app } = startApp()
+  app.setFullscreen(true)
+  app.setWorking(true)
+  const view = await viewport(vt)
+  const lines = view.split('\n')
+  const workingIndex = lines.findIndex(line => line.includes('Working'))
+  assert.ok(workingIndex !== -1, `working row missing in fullscreen:\n${view}`)
+  const editorTop = lines.findIndex(line => line.includes('─'.repeat(10)))
+  assert.ok(editorTop !== -1, `editor border missing:\n${view}`)
+  assert.equal(workingIndex + 1, editorTop, `working row must sit above the editor border in fullscreen:\n${view}`)
+  app.setWorking(false)
+  app.setFullscreen(false)
+})
+test('live theme switch recolors every surface while the content stays identical', async () => {
+  const vt = new VirtualTerminal(100, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+
+  startedApps.add(app)
+  app.setStatus({ model: 'p/m', cwd: '/ws', branch: 'main', turns: 2, steps: 3 })
+  app.setPlanMode(true)
+  app.setTodoSummary([{ content: 'fix the theme', status: 'in_progress' }])
+  app.setTasks([{ id: 'bash-1', label: 'review', status: 'running', kind: 'bash' }])
+  app.setQueueItems([{ id: 'q1', text: 'hello', mode: 'followup' }])
+  app.setWorking(true)
+  await vt.waitForRender()
+  // Locate the header row (contains the plan badge).
+  const findRow = (needle: string): number => {
+    const lines = vt.getViewport()
+    const index = lines.findIndex(line => line.includes(needle))
+    assert.ok(index !== -1, `row with ${needle} missing`)
+    return index
+  }
+  const headerRow = findRow('[plan]')
+  const badgeCol = (): number => vt.getViewport()[headerRow]!.indexOf('[plan]')
+  // Dark palette: the plan badge renders with the dark warning token.
+  assert.equal(vt.getCellFgRgb(headerRow, badgeCol()), 0xe8a838, 'dark plan badge must be #E8A838')
+  app.applyTheme('light')
+  await vt.waitForRender()
+  assert.equal(vt.getCellFgRgb(headerRow, badgeCol()), 0x92660a, 'light plan badge must be #92660A')
+  // Content is unchanged by the switch.
+  const before = vt.getViewport().join('\n')
+  app.applyTheme('dark')
+  await vt.waitForRender()
+  assert.equal(vt.getViewport().join('\n'), before, 'theme switch must not change content')
+  // A custom palette applies too; unset tokens keep the base.
+  app.applyPalette({ ...darkColors, primary: '#123456' })
+  await vt.waitForRender()
+  assert.equal(vt.getCellFgRgb(headerRow, badgeCol()), 0xe8a838, 'unset tokens keep the base palette')
+  app.applyTheme('dark')
+  app.setWorking(false)
+  app.stop()
+})
+
+test('theme switch repaints the welcome card: whale gradient stays, facts follow the palette', async () => {
+  const vt = new VirtualTerminal(100, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+
+  startedApps.add(app)
+  app.setWelcomeCard({ cwd: '/ws', sessionId: 'session-x', model: 'p/m', version: '0.0.0' })
+  await vt.waitForRender()
+  const lines = vt.getViewport()
+  const whaleRow = lines.findIndex(line => WHALE_MARKERS.some(marker => line.includes(marker)))
+  assert.ok(whaleRow >= 0, `welcome card missing:\n${lines.join('\n')}`)
+  // The whale gradient is a fixed brand ramp: the first glyph of the
+  // marker row (skipping the box's `│ ` prefix) paints one of the six
+  // ramp colors (the variant is random).
+  const whaleCol = lines[whaleRow]!.slice(2).search(/\S/) + 2
+  const ramp = [0x63c7d1, 0x5dbbd4, 0x56afd7, 0x50a3d9, 0x4996da, 0x4389d8]
+  const darkWhale = vt.getCellFgRgb(whaleRow, whaleCol)
+  assert.ok(darkWhale !== undefined && ramp.includes(darkWhale), `whale must paint a brand ramp color, got ${darkWhale}:\n${lines.join('\n')}`)
+  // The facts title is the welcome card's own row (the header also reads
+  // "dsh-pi-tui", so exclude the 🐋 header row).
+  const titleRow = lines.findIndex(line => line.includes('dsh-pi-tui') && !line.includes('🐋'))
+  assert.ok(titleRow >= 0, `facts title missing:\n${lines.join('\n')}`)
+  const titleCol = lines[titleRow]!.indexOf('dsh-pi-tui')
+  assert.equal(vt.getCellFgRgb(titleRow, titleCol), 0xf5f5f5, 'dark title must be #F5F5F5 (textStrong)')
+  app.applyTheme('light')
+  await vt.waitForRender()
+  // Facts follow the live palette; the whale gradient stays fixed (the
+  // width cache must not freeze the old ANSI).
+  assert.equal(vt.getCellFgRgb(titleRow, titleCol), 0x1a1a1a, 'light title must be #1A1A1A (textStrong)')
+  assert.equal(vt.getCellFgRgb(whaleRow, whaleCol), darkWhale, 'whale gradient must survive the theme switch')
+  app.stop()
+})
+
+test('welcome card stacks the whale above the facts at medium width', async () => {
+  const { vt, app } = startApp(60, 24)
+  app.setWelcomeCard({
+    cwd: '/ws',
+    sessionId: 'session-1',
+    model: 'p/m',
+    version: '0.1.0',
+    preset: 'code',
+  })
+  const view = await viewport(vt)
+  const lines = view.split('\n')
+  // 24 <= 60 < 72: the full whale renders, centered, above the facts.
+  const whaleRow = lines.findIndex(line => WHALE_MARKERS.some(marker => line.includes(marker)))
+  assert.ok(whaleRow >= 0, `whale missing:\n${view}`)
+  // The whale rows are never wrapped: the widest row fits the terminal.
+  for (const line of lines.filter(candidate => WHALE_MARKERS.some(marker => candidate.includes(marker)))) {
+    assert.ok(visibleWidth(line) <= 60, `whale row wrapped:\n${view}`)
+  }
+  // Facts come after the whale block (one blank row between). The header
+  // also reads "dsh-pi-tui", so exclude the 🐋 header row.
+  const factsRow = lines.findIndex(line => line.includes('dsh-pi-tui') && !line.includes('🐋'))
+  assert.ok(factsRow > whaleRow, `facts must follow the whale:\n${view}`)
+  assert.ok(view.includes('session-1'), `session id missing:\n${view}`)
+  assert.ok(view.includes('code'), `preset missing:\n${view}`)
+  // The full-width box frames the card.
+  assert.ok(view.includes('╭'), `box top missing:\n${view}`)
+})
+
+test('welcome card compacts to text rows at narrow width', async () => {
+  const { vt, app } = startApp(23, 24)
+  app.setWelcomeCard({
+    cwd: '/ws',
+    sessionId: 'session-1',
+    model: 'p/m',
+    version: '0.1.0',
+    preset: 'code',
+  })
+  const view = await viewport(vt)
+  // Below 24 columns the full whale is not shown.
+  assert.ok(!hasWhale(view), `whale leaked into compact:\n${view}`)
+  assert.ok(view.includes('🐋 dsh-pi-tui'), `compact title missing:\n${view}`)
+  assert.ok(view.includes('session-1'), `session id missing:\n${view}`)
+  assert.ok(view.includes('p/m'), `model missing:\n${view}`)
+  assert.ok(view.includes('code'), `preset missing:\n${view}`)
+  assert.ok(view.includes('/ws'), `cwd missing:\n${view}`)
+  assert.ok(view.includes('0.1.0'), `version missing:\n${view}`)
+  // No ellipsis truncation in compact mode.
+  assert.ok(!view.includes('…'), `compact truncated:\n${view}`)
+})
+
+test('welcome card switches layouts across resize breakpoints and back', async () => {
+  const { vt, app } = startApp(100, 24)
+  app.setWelcomeCard({ cwd: '/ws', sessionId: 'session-1', model: 'p/m', version: '0.1.0' })
+  await viewport(vt)
+  const viewText = (): string => vt.getViewport().join('\n')
+  assert.ok(hasWhale(viewText()), 'wide layout must show the whale')
+  vt.resize(60, 24)
+  await viewport(vt)
+  assert.ok(hasWhale(viewText()), 'stacked layout must show the whale')
+  vt.resize(23, 24)
+  await viewport(vt)
+  assert.ok(!hasWhale(viewText()), 'compact layout must hide the whale')
+  assert.ok(viewText().includes('🐋 dsh-pi-tui'), 'compact layout must show the emoji title')
+  vt.resize(100, 24)
+  await viewport(vt)
+  assert.ok(hasWhale(viewText()), 'wide layout must restore the whale')
+  assert.ok(!viewText().includes('🐋 dsh-pi-tui'), 'compact emoji must not survive the resize back')
+})
+
+test('fullscreen anchor offsets follow the welcome card height across layout breakpoints', async () => {
+  const { vt, app } = startApp(100, 30)
+  const messages = [
+    { kind: 'user' as const, turn: 1, text: 'first user' },
+    { kind: 'assistant' as const, turn: 1, text: 'first answer' },
+    ...Array.from({ length: 20 }, (_, index) => ({ kind: 'assistant' as const, turn: index + 2, text: `tail ${index}` })),
+  ]
+  app.setWelcomeCard({ cwd: '/ws', sessionId: 'session-1', model: 'p/m', version: '0.1.0' })
+  app.setTranscript(messages)
+  app.setFullscreen(true)
+  await viewport(vt)
+  const anchor: TranscriptViewportAnchor = {
+    scrollTop: 0,
+    top: {
+      turn: 5,
+      rowKind: 'message',
+      occurrence: 0,
+      message: { kind: 'assistant', turn: 5, text: 'tail 3' },
+      rowOffset: 0,
+      viewportOffset: 0,
+    },
+  }
+  // The anchored message must sit at the viewport top in EVERY layout: a
+  // stale welcome height would shift the row mapping.
+  const assertAnchored = async (label: string): Promise<void> => {
+    assert.equal(app.restoreTranscriptViewportAnchor(anchor, 'top'), true)
+    const view = await viewport(vt)
+    assert.ok(view.includes('tail 3'), `${label} anchor message missing:\n${view}`)
+    assert.ok(!view.includes('tail 2'), `${label} anchor must not leave the previous message at the top:\n${view}`)
+  }
+  await assertAnchored('wide')
+  vt.resize(60, 30)
+  await assertAnchored('stacked')
+  vt.resize(23, 30)
+  await assertAnchored('compact')
+  app.stop()
+})
+
+test('working indicator keeps animating in fullscreen and after leaving it, with a single timer', async () => {
+  const vt = new VirtualTerminal(100, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { workingIntervalMs: 20 })
+  app.start()
+
+  startedApps.add(app)
+  app.setWorking(true)
+  await vt.waitForRender()
+  // Sample several ticks WHILE the alt screen renders: the repaint callback
+  // must route to the active screen or the animation would freeze on the
+  // first frame (the main screen is stopped in fullscreen).
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  const seenFullscreen = new Set<string>()
+  for (let i = 0; i < 30 && seenFullscreen.size < 2; i += 1) {
+    const line = vt.getViewport().join('\n').split('\n').find(candidate => candidate.includes('Working'))
+    if (line !== undefined) {
+      if (line.includes('🐋')) seenFullscreen.add('🐋')
+      if (line.includes('🐳')) seenFullscreen.add('🐳')
+    }
+    await new Promise(resolve => setTimeout(resolve, 20))
+  }
+  assert.ok(seenFullscreen.has('🐋') && seenFullscreen.has('🐳'),
+    `both whale emojis must appear in fullscreen, saw: ${[...seenFullscreen].join(', ')}`)
+  // Leaving fullscreen: the animation continues (no duplicated timer stall).
+  app.setFullscreen(false)
+  await vt.waitForRender()
+  const seenAfter = new Set<string>()
+  for (let i = 0; i < 30 && seenAfter.size < 2; i += 1) {
+    const line = vt.getViewport().join('\n').split('\n').find(candidate => candidate.includes('Working'))
+    if (line !== undefined) {
+      if (line.includes('🐋')) seenAfter.add('🐋')
+      if (line.includes('🐳')) seenAfter.add('🐳')
+    }
+    await new Promise(resolve => setTimeout(resolve, 20))
+  }
+  assert.ok(seenAfter.has('🐋') && seenAfter.has('🐳'),
+    `animation must resume after leaving fullscreen, saw: ${[...seenAfter].join(', ')}`)
+  app.setWorking(false)
+  app.stop()
+})
+
+
+test('search cards group matches by file and mark truncation', async () => {
+  const vt = new VirtualTerminal(100, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
+    workspaceRoot: '/ws',
+    present: {
+      call: () => undefined,
+      result: () => ({
+        card: 'search',
+        shape: 'matches',
+        files: [{ path: '/ws/src/foo.ts', matches: [{ lineNumber: 12, line: 'const a = 1' }] }],
+        truncated: true,
+        total: 42,
+      }),
+    },
+  })
+  app.start()
+
+  startedApps.add(app)
+  app.setTranscriptDetailExpanded(true)
+  app.setTranscript([{
+    kind: 'tool', turn: 0, name: 'grep',
+    args: '{"pattern":"const","path":"/ws/src"}',
+    result: '12: const a = 1', status: 'ok', resultBlocks: [],
+  }])
+  const view = await viewport(vt)
+  assert.ok(view.includes('Search const [ok]'), `search header missing:\n${view}`)
+  assert.ok(view.includes('src/foo.ts'), `relativized file group missing:\n${view}`)
+  assert.ok(view.includes('12 │ const a = 1'), `match line missing:\n${view}`)
+  assert.ok(view.includes('… truncated — 42 total matches'), `truncation marker missing:\n${view}`)
+  assert.ok(!view.includes('/ws/src/foo.ts'), `absolute path leaked:\n${view}`)
+  app.stop()
+})
+
+test('terminal cards show the output and the exit code', async () => {
+  const vt = new VirtualTerminal(100, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
+    present: {
+      call: () => undefined,
+      result: () => ({ card: 'terminal', output: 'hello\nworld', exitCode: 0 }),
+    },
+  })
+  app.start()
+
+  startedApps.add(app)
+  app.setTranscriptDetailExpanded(true)
+  app.setTranscript([{
+    kind: 'tool', turn: 0, name: 'bash',
+    args: '{"command":"echo hi"}',
+    result: 'hello\nworld', status: 'ok', resultBlocks: [],
+  }])
+  const view = await viewport(vt)
+  assert.ok(view.includes('Bash echo hi [ok]'), `terminal header missing:\n${view}`)
+  // The command row survives expansion (kimi ShellExecution parity): the
+  // expanded body leads with `$ cmd` ABOVE the output.
+  const commandAt = view.indexOf('$ echo hi')
+  assert.ok(commandAt >= 0, `command row missing in the expanded card:\n${view}`)
+  assert.ok(view.indexOf('hello') > commandAt, `command must render above the output:\n${view}`)
+  assert.ok(view.includes('hello'), `output line missing:\n${view}`)
+  assert.ok(view.includes('world'), `output line missing:\n${view}`)
+  assert.ok(view.includes('[exit 0]'), `exit pill missing:\n${view}`)
+  app.stop()
+})
+
+test('expanded bash cards keep the command row without a presenter', async () => {
+  const { vt, app } = startApp()
+  app.setTranscript([{
+    kind: 'tool', turn: 0, name: 'bash',
+    args: '{"command":"ls -la /tmp && echo done"}',
+    result: 'file1\nfile2\ndone', status: 'ok', resultBlocks: [],
+  }])
+  let view = await viewport(vt)
+  assert.ok(view.includes('$ ls -la /tmp && echo done'), `folded command preview missing:\n${view}`)
+  app.setTranscriptDetailExpanded(true)
+  app.setTranscript([{
+    kind: 'tool', turn: 0, name: 'bash',
+    args: '{"command":"ls -la /tmp && echo done"}',
+    result: 'file1\nfile2\ndone', status: 'ok', resultBlocks: [],
+  }])
+  view = await viewport(vt)
+  const commandAt = view.indexOf('$ ls -la /tmp && echo done')
+  assert.ok(commandAt >= 0, `expanded card lost the command:\n${view}`)
+  assert.ok(view.indexOf('file1') > commandAt, `command must render above the output:\n${view}`)
+  assert.ok(view.includes('file2') && view.includes('done'), `output missing:\n${view}`)
+})
+
+test('running bash cards surface the command row when expanded', async () => {
+  const { vt, app } = startApp()
+  app.setTranscriptDetailExpanded(true)
+  app.setTranscript([{
+    kind: 'tool', turn: 0, name: 'bash',
+    args: '{"command":"pnpm test"}',
+    result: '', status: 'running', resultBlocks: [],
+  }])
+  const view = await viewport(vt)
+  assert.ok(view.includes('$ pnpm test'), `running card lost the command:\n${view}`)
+})
+
+test('running bash cards use the presenter command and never double-render it', async () => {
+  // The presenter path (callView.card === 'terminal') takes the command
+  // from the tool's own presentCall title; the command row must render
+  // exactly ONCE (the branch returns before the args-derived fallback).
+  const vt = new VirtualTerminal(100, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
+    present: {
+      call: () => ({ card: 'terminal', title: 'echo hi' }),
+      result: () => undefined,
+    },
+  })
+  app.start()
+
+  startedApps.add(app)
+  app.setTranscriptDetailExpanded(true)
+  app.setTranscript([{
+    kind: 'tool', turn: 0, name: 'bash',
+    args: '{"command":"echo hi"}',
+    result: '', status: 'running', resultBlocks: [],
+  }])
+  const view = await viewport(vt)
+  const matches = view.match(/\$ echo hi/g) ?? []
+  assert.equal(matches.length, 1, `command row must render exactly once:\n${view}`)
+  app.stop()
+})
+
+test('pwsh cards render the command under a PS> prompt', async () => {
+  const { vt, app } = startApp()
+  app.setTranscriptDetailExpanded(true)
+  app.setTranscript([{
+    kind: 'tool', turn: 0, name: 'pwsh',
+    args: '{"command":"Get-ChildItem"}',
+    result: 'file1', status: 'ok', resultBlocks: [],
+  }])
+  const view = await viewport(vt)
+  assert.ok(view.includes('PS> Get-ChildItem'), `pwsh prompt missing:\n${view}`)
+  assert.ok(!view.includes('$ Get-ChildItem'), `bash prompt leaked into a pwsh card:\n${view}`)
+  assert.ok(view.includes('file1'), `output missing:\n${view}`)
+})
+
+test('generic presenter cards keep the command row above the raw input', async () => {
+  // A presenter returning 'generic' with rawInput for a bash call must
+  // still lead with the `$ command` row (a no-op for non-terminal tools).
+  const vt = new VirtualTerminal(100, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
+    present: {
+      call: () => ({ card: 'generic', title: 'Sleep 5 seconds', rawInput: { command: 'sleep 5' } }),
+      result: () => undefined,
+    },
+  })
+  app.start()
+
+  startedApps.add(app)
+  app.setTranscriptDetailExpanded(true)
+  app.setTranscript([{
+    kind: 'tool', turn: 0, name: 'bash',
+    args: '{"command":"sleep 5"}',
+    result: '', status: 'running', resultBlocks: [],
+  }])
+  const view = await viewport(vt)
+  const commandAt = view.indexOf('$ sleep 5')
+  assert.ok(commandAt >= 0, `command row missing:\n${view}`)
+  // The presenter rawInput renders pretty-printed (JSON.stringify(…, null, 2)).
+  const rawAt = view.indexOf('"command": "sleep 5"')
+  assert.ok(rawAt > commandAt, `command must render above the raw input:\n${view}`)
+  app.stop()
+})
+
+test('a SETTLED background bash keeps the $ command above the generic result', async () => {
+  // The 2026-08-22 plan item 1 repro: a background bash returns fast, the
+  // tool call settles, and the expanded body used to render ONLY the
+  // generic "started background job …" result — the call presentation
+  // ($ command) vanished. Call and result are two stages, never
+  // substitutes: the expanded card must lead with the command row and
+  // append the result below it.
+  const vt = new VirtualTerminal(100, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
+    present: {
+      call: () => undefined,
+      result: () => ({
+        card: 'generic',
+        content: [{ type: 'text', text: 'started background job abc123' }],
+      }),
+    },
+  })
+  app.start()
+
+  startedApps.add(app)
+  app.setTranscriptDetailExpanded(true)
+  app.setTranscript([{
+    kind: 'tool', turn: 0, name: 'bash',
+    args: '{"command":"npm run build"}',
+    result: 'started background job abc123', status: 'ok', resultBlocks: [],
+  }])
+  const view = await viewport(vt)
+  const commandAt = view.indexOf('$ npm run build')
+  assert.ok(commandAt >= 0, `settled background card lost the command:\n${view}`)
+  const resultAt = view.indexOf('started background job abc123')
+  assert.ok(resultAt > commandAt, `the job result must render BELOW the command:\n${view}`)
+  app.stop()
+})
+
+test('a settled generic result on a NON-terminal tool adds no command row', async () => {
+  // The generic command row is a no-op for tools that are not bash/pwsh:
+  // a plan-review card must not gain a stray `$ ` line.
+  const vt = new VirtualTerminal(100, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
+    present: {
+      call: () => undefined,
+      result: () => ({
+        card: 'generic',
+        content: [{ type: 'text', text: 'the plan body' }],
+      }),
+    },
+  })
+  app.start()
+
+  startedApps.add(app)
+  app.setTranscriptDetailExpanded(true)
+  app.setTranscript([{
+    kind: 'tool', turn: 0, name: 'exit_plan_mode',
+    args: '{"plan":"do things"}',
+    result: 'the plan body', status: 'ok', resultBlocks: [],
+  }])
+  const view = await viewport(vt)
+  assert.ok(view.includes('the plan body'), `generic content missing:\n${view}`)
+  assert.ok(!view.includes('$ '), `non-terminal generic card must not gain a command row:\n${view}`)
+  app.stop()
+})
+
+test('injected context renders a web-style labeled row and expands to its body', async () => {
+  const { vt, app } = startApp()
+  app.setTranscript([{
+    kind: 'system', turn: 0,
+    text: '# AGENTS.md\nDo the thing carefully.\nNever break the build.',
+    label: 'AGENTS.md',
+  }])
+  // Folded: the row names the producer, the body stays hidden.
+  const folded = await viewport(vt)
+  assert.ok(folded.includes('Context injection AGENTS.md'), `injected label missing:\n${folded}`)
+  assert.ok(!folded.includes('Do the thing'), `injected body leaked while folded:\n${folded}`)
+  // Expanded: the body appears under the labeled header.
+  app.setTranscriptDetailExpanded(true)
+  const expanded = await viewport(vt)
+  assert.ok(expanded.includes('Context injection AGENTS.md'), `labeled header missing when expanded:\n${expanded}`)
+  assert.ok(expanded.includes('Do the thing carefully.'), `injected body missing:\n${expanded}`)
+})
+
+test('a notice injection folds with its one-line summary', async () => {
+  const { vt, app } = startApp()
+  app.setTranscript([{
+    kind: 'system', turn: 0,
+    text: '3 files written',
+    label: 'todo',
+    summary: 'saved the todo list',
+  }])
+  const view = await viewport(vt)
+  assert.ok(view.includes('Context injection todo — saved the todo list'), `notice summary missing:\n${view}`)
+})
+
+test('unlabeled system entries keep the section marker', async () => {
+  const { vt, app } = startApp()
+  app.setTranscript([{ kind: 'system', turn: 0, text: 'llm retry 1/3 — BUSY: overloaded' }])
+  const view = await viewport(vt)
+  assert.ok(view.includes('§ llm retry'), `section marker missing:\n${view}`)
+})
+
+
+
+
+
+test('fullscreen mouse click toggles one card independently of the global fold', async () => {
+  const { vt, app } = startApp()
+  app.setFullscreen(true)
+  app.setTranscript([
+    { kind: 'user', turn: 0, text: 'hello' },
+    { kind: 'thinking', turn: 0, text: 'one\ntwo\nthree' },
+    { kind: 'tool', turn: 0, name: 'bash', args: '{"command":"ls"}', result: 'a\nb\nc', status: 'ok' },
+    { kind: 'tool', turn: 0, name: 'bash', args: '{"command":"pwd"}', result: '/ws', status: 'ok' },
+  ])
+  await viewport(vt)
+  // Rows (blank spacers between blocks): header(1) + user(2) + thinking(4)
+  // + tool1(6) + tool2(8) inside the scroll pane. Click the first tool card:
+  // it alone expands.
+  vt.sendInput('\x1b[<0;10;8M')
+  vt.sendInput('\x1b[<0;10;8m')
+  let view = await viewport(vt)
+  assert.ok(view.includes('\nb'), `clicked card body missing:\n${view}`)
+  assert.ok(view.includes('Bash ls [ok]'), `clicked card header missing:\n${view}`)
+  assert.ok(!view.includes('\n  one'), `thinking must stay folded after the click:\n${view}`)
+  assert.ok(!view.includes('\n/ws'), `second tool card must stay folded:\n${view}`)
+  // Clicking the same row again collapses just that card. The second click
+  // waits past the alt screen's double-click window (a fast repeat selects
+  // a word, like a native terminal).
+  await new Promise(resolve => setTimeout(resolve, 600))
+  vt.sendInput('\x1b[<0;10;8M')
+  vt.sendInput('\x1b[<0;10;8m')
+  view = await viewport(vt)
+  assert.ok(!view.includes('\nb'), `card must collapse again:\n${view}`)
+  // The keyboard Ctrl+O still expands every non-Thinking card, mouse state
+  // or not — Thinking stays Alt+T-owned.
+  vt.sendInput('\x0f')
+  view = await viewport(vt)
+  assert.ok(view.includes('\nc'), `global expand must show the tool body:\n${view}`)
+  assert.ok(view.includes('\n/ws'), `global expand must show the second card:\n${view}`)
+  assert.ok(!view.includes('\n  one'), `Ctrl+O must NOT expand Thinking (Alt+T owns it):\n${view}`)
+  // Alt+T expands Thinking (the full body appears).
+  vt.sendInput('\x1bt')
+  view = await viewport(vt)
+  assert.ok(view.includes('\n  one'), `Alt+T must expand the thinking block:\n${view}`)
+  app.setFullscreen(false)
+})
+
+test('fullscreen click on a thinking row expands it; wheel, right button, and drag stay inert', async () => {
+  const { vt, app } = startApp()
+  app.setFullscreen(true)
+  app.setTranscript([
+    { kind: 'thinking', turn: 0, text: 'line one\nline two\nline three' },
+    { kind: 'tool', turn: 0, name: 'bash', args: '{"command":"ls"}', result: 'a\nb\nc', status: 'ok' },
+  ])
+  await viewport(vt)
+  // Rows: header(1) + thinking(2) + tool(3). Click the thinking title row.
+  vt.sendInput('\x1b[<0;5;2M')
+  vt.sendInput('\x1b[<0;5;2m')
+  let view = await viewport(vt)
+  assert.ok(view.includes('\n  line two'), `thinking body missing after click:\n${view}`)
+  assert.ok(!view.includes('\nb'), `tool card must stay folded:\n${view}`)
+  // A drag (press + moved release) must not toggle either card.
+  vt.sendInput('\x1b[<0;5;2M')
+  vt.sendInput('\x1b[<0;20;2m')
+  await viewport(vt)
+  view = vt.getViewport().join('\n')
+  assert.ok(view.includes('\n  line two'), `a drag must not collapse the card:\n${view}`)
+  assert.ok(!view.includes('\nb'), `a drag must not expand the tool card:\n${view}`)
+  // A wheel scroll and a right-button press/release must not toggle anything.
+  vt.sendInput('\x1b[<64;5;2M')
+  vt.sendInput('\x1b[<2;5;2M')
+  vt.sendInput('\x1b[<2;5;2m')
+  await viewport(vt)
+  view = vt.getViewport().join('\n')
+  assert.ok(view.includes('\n  line two'), `wheel/right must not collapse the card:\n${view}`)
+  assert.ok(!view.includes('\nb'), `wheel/right must not expand the tool card:\n${view}`)
+  app.setFullscreen(false)
+})
+
+
+
+test('tool card headers carry a per-variant emoji', async () => {
+  const { vt, app } = startApp()
+  app.setTranscript([
+    { kind: 'tool', turn: 0, name: 'read', args: '{"file_path":"/ws/src/foo.ts"}', result: 'x', status: 'ok' },
+    { kind: 'tool', turn: 0, name: 'bash', args: '{"command":"ls"}', result: 'x', status: 'ok' },
+    { kind: 'tool', turn: 0, name: 'grep', args: '{"pattern":"foo"}', result: 'x', status: 'ok' },
+    { kind: 'tool', turn: 0, name: 'subagent', args: 'worker', result: '', status: 'ok' },
+  ])
+  const view = await viewport(vt)
+  assert.ok(view.includes('📖  Read /ws/src/foo.ts'), `read emoji missing:\n${view}`)
+  assert.ok(view.includes('🖥️  Bash ls'), `bash emoji missing:\n${view}`)
+  assert.ok(view.includes('🔍  Search foo'), `search emoji missing:\n${view}`)
+  assert.ok(view.includes('🤖  Subagent worker'), `subagent emoji missing:\n${view}`)
+})
+
+test('regular mode leaves the mouse entirely to the terminal (no click handling)', async () => {
+  // pi parity: regular mode never enables mouse reporting, so terminal-native
+  // selection and scrollback scrolling stay intact. A stray SGR sequence is
+  // still inert and never disturbs the editor.
+  const { vt, app } = startApp()
+  app.setTranscript([
+    { kind: 'tool', turn: 0, name: 'bash', args: '{"command":"ls"}', result: 'a\nb\nc', status: 'ok' },
+  ])
+  await viewport(vt)
+  vt.sendInput('\x1b[<0;10;2M')
+  vt.sendInput('\x1b[<0;10;2m')
+  await viewport(vt)
+  const view = vt.getViewport().join('\n')
+  assert.ok(!view.includes('\nb'), `regular mode must not react to clicks:\n${view}`)
+})
+
+test('tool cards degrade to generic rendering when the registry lookup is absent', async () => {
+  // Mirrors the production guard: the registry is read through ctx.get and
+  // may be absent (or hide behind cordis's inject guard), in which case the
+  // presenter yields no views and cards render generically instead of failing.
+  const vt = new VirtualTerminal(100, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
+    present: toolPresenterFrom(() => undefined),
+  })
+  app.start()
+
+  startedApps.add(app)
+  app.setTranscriptDetailExpanded(true)
+  app.setTranscript([{
+    kind: 'tool', turn: 0, name: 'grep',
+    args: '{"pattern":"foo"}',
+    result: 'line one', status: 'ok', resultBlocks: [],
+  }])
+  await vt.waitForRender()
+  const view = vt.getViewport().join('\n')
+  assert.ok(view.includes('Search foo [ok]'), `generic header missing:\n${view}`)
+  assert.ok(view.includes('line one'), `generic body missing:\n${view}`)
+  app.stop()
+})
+
+test('injected context rows show their emoji in the viewport', async () => {
+  const { vt, app } = startApp()
+  app.setTranscript([{
+    kind: 'system', turn: 0,
+    text: '# AGENTS.md\nRead me first.',
+    label: 'AGENTS.md',
+    icon: 'context-file',
+  }, {
+    kind: 'system', turn: 0,
+    text: 'catalog',
+    label: 'skill-catalog',
+    icon: 'context-skill',
+  }])
+  const view = await viewport(vt)
+  assert.ok(view.includes('📄  Context injection AGENTS.md'), `instruction emoji missing:\n${view}`)
+  assert.ok(view.includes('📚  Context injection skill-catalog'), `catalog emoji missing:\n${view}`)
+})
+
+test('slash command cards carry a control-panel emoji', async () => {
+  const { vt, app } = startApp()
+  app.setTranscript([
+    { kind: 'tool', turn: 0, name: '/compact', args: '', result: 'executed', status: 'ok' },
+  ])
+  const view = await viewport(vt)
+  assert.ok(view.includes('🎛️  compact [ok]'), `slash emoji missing:\n${view}`)
+})
+
+test('tool and context cards render the symbols palette', async (t) => {
+  const vt = new VirtualTerminal(100, 40)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { iconStyle: 'symbols' })
+  t.after(() => app.stop())
+  app.start()
+
+  startedApps.add(app)
+  app.setTranscript([
+    { kind: 'tool', turn: 0, name: 'read', args: JSON.stringify({ path: '/ws/src/foo.ts' }), result: '', status: 'ok' },
+    { kind: 'tool', turn: 0, name: 'bash', args: JSON.stringify({ command: 'ls' }), result: '', status: 'ok' },
+    { kind: 'tool', turn: 0, name: 'grep', args: '', result: '', status: 'ok' },
+    { kind: 'tool', turn: 0, name: 'edit', args: '', result: '', status: 'ok' },
+    { kind: 'tool', turn: 0, name: 'unknown-thing', args: '', result: '', status: 'ok' },
+    { kind: 'tool', turn: 0, name: 'subagent', args: '', result: '', status: 'ok' },
+    { kind: 'workflow', turn: 0, runId: 'run-1' as WorkflowRunId, name: 'audit', status: 'completed', members: [] },
+    // The ERROR semantic belongs to the synthetic error card (the
+    // `error`-named tool); an ordinary tool that FAILED keeps its own
+    // variant icon — the status pill carries the failure.
+    { kind: 'tool', turn: 0, name: 'some-tool', args: '', result: 'boom', status: 'error' },
+    { kind: 'tool', turn: 0, name: 'error', args: '', result: '', status: 'error' },
+    { kind: 'tool', turn: 0, name: 'ask_user_question', args: '', result: '', status: 'error' },
+    { kind: 'tool', turn: 0, name: '/compact', args: '', result: 'executed', status: 'ok' },
+    { kind: 'system', turn: 0, text: '# AGENTS.md', label: 'AGENTS.md', icon: 'context-file' },
+  ])
+  const view = await viewport(vt)
+  assert.ok(view.includes('≣  Read /ws/src/foo.ts'), `symbols read icon missing:\n${view}`)
+  assert.ok(view.includes('›  Bash'), `symbols bash icon missing:\n${view}`)
+  assert.ok(view.includes('⌕  Search'), `symbols search icon missing:\n${view}`)
+  assert.ok(view.includes('~  Edit'), `symbols edit icon missing:\n${view}`)
+  assert.ok(view.includes('∗  Tool call'), `symbols generic icon missing:\n${view}`)
+  assert.ok(view.includes('⋄  Subagent'), `symbols subagent icon missing:\n${view}`)
+  assert.ok(view.includes('⇄  Workflow'), `symbols workflow icon missing:\n${view}`)
+  assert.ok(view.includes('⨯  Error'), `symbols error icon missing:\n${view}`)
+  assert.ok(view.includes('?  Question'), `symbols question icon missing:\n${view}`)
+  assert.ok(view.includes('›  compact [ok]'), `symbols slash icon missing:\n${view}`)
+  assert.ok(view.includes('≣  Context injection AGENTS.md'), `symbols context icon missing:\n${view}`)
+})
+
+test('minimal hides decorative icons with no dangling whitespace', async (t) => {
+  const vt = new VirtualTerminal(100, 40)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { iconStyle: 'minimal' })
+  t.after(() => app.stop())
+  app.start()
+
+  startedApps.add(app)
+  app.setTranscript([
+    { kind: 'tool', turn: 0, name: 'read', args: JSON.stringify({ path: '/ws/src/foo.ts' }), result: '', status: 'ok' },
+    { kind: 'tool', turn: 0, name: 'subagent', args: '', result: '', status: 'ok' },
+    { kind: 'workflow', turn: 0, runId: 'run-1' as WorkflowRunId, name: 'audit', status: 'completed', members: [] },
+    { kind: 'tool', turn: 0, name: 'some-tool', args: '', result: 'boom', status: 'error' },
+    { kind: 'tool', turn: 0, name: 'error', args: '', result: '', status: 'error' },
+    { kind: 'tool', turn: 0, name: '/compact', args: '', result: 'executed', status: 'ok' },
+    { kind: 'system', turn: 0, text: '# AGENTS.md', label: 'AGENTS.md', icon: 'context-file' },
+  ])
+  const view = await viewport(vt)
+  const lines = view.split('\n').map(stripTerminalSequences)
+  // Decorative icons are gone AND no leading space remains where the icon
+  // used to sit — the header starts directly with the title.
+  const read = lines.find(line => line.startsWith('Read /ws/src/foo.ts'))
+  assert.ok(read !== undefined, `minimal read header missing or space-prefixed:\n${view}`)
+  const subagent = lines.find(line => line.startsWith('Subagent'))
+  assert.ok(subagent !== undefined, `minimal subagent header missing or space-prefixed:\n${view}`)
+  const workflow = lines.find(line => line.replace(/^[▶▼] /, '').startsWith('Workflow'))
+  assert.ok(workflow !== undefined, `minimal workflow header missing or space-prefixed:\n${view}`)
+  const slash = lines.find(line => line.startsWith('compact [ok]'))
+  assert.ok(slash !== undefined, `minimal slash header missing or space-prefixed:\n${view}`)
+  const context = lines.find(line => line.startsWith('Context injection AGENTS.md'))
+  assert.ok(context !== undefined, `minimal context row missing or space-prefixed:\n${view}`)
+  // No decorative glyphs survived anywhere.
+  assert.ok(!view.includes('📖') && !view.includes('≣') && !view.includes('🤖') && !view.includes('⋄')
+    && !view.includes('🎛️') && !view.includes('›  '), `decorative icons leaked into minimal:\n${view}`)
+  // The important state markers survive — the synthetic error card keeps
+  // its `×` while an ordinary failed tool stays icon-free (the [error]
+  // pill carries it).
+  assert.ok(lines.some(line => line.startsWith('⨯  Error')), `minimal error marker missing:\n${view}`)
+  assert.ok(lines.some(line => line.startsWith('Tool call [error]')), `a failed ordinary tool must not gain a marker:\n${view}`)
+})
+
+test('the same folded messages repaint across emoji → symbols → minimal → emoji', async (t) => {
+  const vt = new VirtualTerminal(100, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  t.after(() => app.stop())
+  app.start()
+
+  startedApps.add(app)
+  const messages = [
+    { kind: 'tool' as const, turn: 0, name: 'read', args: JSON.stringify({ path: '/ws/src/foo.ts' }), result: '', status: 'ok' as const },
+    { kind: 'system' as const, turn: 0, text: '# AGENTS.md', label: 'AGENTS.md', icon: 'context-file' as const },
+  ]
+  app.setTranscript(messages)
+  // Emoji (the default).
+  let view = await viewport(vt)
+  assert.ok(view.includes('📖  Read /ws/src/foo.ts'), `emoji read icon missing:\n${view}`)
+  assert.ok(view.includes('📄  Context injection AGENTS.md'), `emoji context icon missing:\n${view}`)
+  // Symbols: the SAME folded messages, no reload, no re-fold.
+  app.setIconStyle('symbols')
+  view = await viewport(vt)
+  assert.ok(view.includes('≣  Read /ws/src/foo.ts'), `symbols read icon missing after switch:\n${view}`)
+  assert.ok(view.includes('≣  Context injection AGENTS.md'), `symbols context icon missing after switch:\n${view}`)
+  // Minimal: icons disappear, no dangling whitespace.
+  app.setIconStyle('minimal')
+  view = await viewport(vt)
+  const lines = view.split('\n').map(stripTerminalSequences)
+  assert.ok(lines.some(line => line.startsWith('Read /ws/src/foo.ts')), `minimal read header missing:\n${view}`)
+  assert.ok(lines.some(line => line.startsWith('Context injection AGENTS.md')), `minimal context row missing:\n${view}`)
+  // Back to emoji: the fold state never baked a glyph, so the original
+  // palette returns exactly.
+  app.setIconStyle('emoji')
+  view = await viewport(vt)
+  assert.ok(view.includes('📖  Read /ws/src/foo.ts'), `emoji read icon missing after round-trip:\n${view}`)
+  assert.ok(view.includes('📄  Context injection AGENTS.md'), `emoji context icon missing after round-trip:\n${view}`)
+  app.stop()
+})
+
+test('working indicator frames follow the icon style; custom frames survive switches', async (t) => {
+  // The default frames DERIVE from the icon registry — a drift between
+  // workingFramesFor and the palette is impossible by construction (the
+  // registry's EAW-safe gate therefore also guards the running glyphs).
+  for (const style of ['emoji', 'symbols', 'minimal'] as const) {
+    assert.deepEqual(workingFramesFor(style), [
+      iconFor('working-a', style),
+      iconFor('working-b', style),
+    ], `frames for ${style}`)
+  }
+  const vt = new VirtualTerminal(100, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { workingIntervalMs: 20 })
+  t.after(() => app.stop())
+  app.start()
+
+  startedApps.add(app)
+  app.setWorking(true)
+  await vt.waitForRender()
+  const workingLine = (): string | undefined =>
+    vt.getViewport().join('\n').split('\n').find(line => line.includes('Working'))
+  // Default frames are the whale pair under emoji (either frame may be
+  // live at sample time — the 20ms interval cycles fast).
+  let line = workingLine()
+  assert.ok(line !== undefined && (line.includes('🐋') || line.includes('🐳')),
+    `emoji whale frame missing:\n${vt.getViewport().join('\n')}`)
+  // A runtime switch swaps the frames to the low-noise pair.
+  app.setIconStyle('symbols')
+  await vt.waitForRender()
+  line = workingLine()
+  assert.ok(line !== undefined && (line.includes('∙') || line.includes('◦')), `symbols frame missing:\n${vt.getViewport().join('\n')}`)
+  assert.ok(!line.includes('🐋') && !line.includes('🐳'), `whale frames survived the switch:\n${line}`)
+  // Minimal shares the same animation pair.
+  app.setIconStyle('minimal')
+  await vt.waitForRender()
+  line = workingLine()
+  assert.ok(line !== undefined && (line.includes('∙') || line.includes('◦')), `minimal frame missing:\n${line}`)
+  app.setWorking(false)
+  app.stop()
+})
+
+test('setIconStyleFrames never overwrites an explicit custom frame set', () => {
+  const renders: string[] = []
+  const capture = (): void => { renders.push(indicator.render(80).join('')) }
+  const indicator = new WorkingIndicator(capture, { frames: ['❄️'], intervalMs: 1000 })
+  indicator.setIconStyleFrames(['•', '◦'])
+  indicator.start()
+  assert.ok(renders[renders.length - 1]!.includes('❄️'), `custom frames must survive an icon-style switch:\n${renders.join('\n')}`)
+  indicator.dispose()
+})
+
+test('setFrames to an empty set clears the running interval (no stale tick, no modulo-zero)', (t) => {
+  // Deterministic clock: the node:test mock timers drive the indicator's
+  // setInterval — no fixed real-time sleeps (the repo's timing rule).
+  t.mock.timers.enable({ apis: ['setInterval'] })
+  const renders: string[] = []
+  const capture = (): void => { renders.push(indicator.render(80).join('')) }
+  const indicator = new WorkingIndicator(capture, { frames: ['🐋', '🐳'], intervalMs: 10 })
+  indicator.start()
+  const afterStart = renders.length
+  // Shrink the ACTIVE indicator to zero frames: it repaints once with the
+  // new (empty) set, and the interval MUST be cleared — tick() must not
+  // produce further renders (and never modulo-zeros the frame index).
+  indicator.setFrames([])
+  const afterSet = renders.length
+  assert.ok(afterSet > afterStart, 'an active indicator must repaint with the new frame set')
+  t.mock.timers.tick(100)
+  assert.equal(renders.length, afterSet, `the interval must be cleared for a zero-frame set:\n${renders.join('\n')}`)
+  // Growing back re-arms the animation deterministically.
+  indicator.setFrames(['😊', '🙂'])
+  const afterGrow = renders.length
+  t.mock.timers.tick(100)
+  assert.ok(renders.length > afterGrow, 'the interval must re-arm when frames grow back')
+  indicator.dispose()
+})
+
+test('fullscreen cards and the Focus disclosure repaint across an icon style switch', async (t) => {
+  const vt = new VirtualTerminal(100, 40)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  t.after(() => app.stop())
+  app.start()
+
+  startedApps.add(app)
+  const activity: TurnActivity = {
+    turn: 0,
+    startedAt: 1000,
+    endedAt: 6000,
+    completed: true,
+    reason: { kind: 'completed' },
+    tools: new Map(),
+    toolCalls: 0,
+    assistantMessages: 0,
+    revision: 0,
+  }
+  app.setTranscript(
+    [
+      { kind: 'user', turn: 0, text: 'hello' },
+      { kind: 'tool', turn: 0, name: 'read', args: JSON.stringify({ path: '/ws/src/foo.ts' }), result: '', status: 'ok' },
+      { kind: 'system', turn: 0, text: '# AGENTS.md', label: 'AGENTS.md', icon: 'context-file' },
+    ],
+    new Map([[0, activity]]),
+  )
+  app.setFocusMode(true)
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  let view = vt.getViewport().join('\n')
+  assert.ok(hasFocusHeader(view, false), `emoji collapsed disclosure missing in fullscreen:\n${view}`)
+  // Open the Thought: the fullscreen secondaries default compact, so the
+  // tool/context headers are visible in the same frame.
+  app.toggleFocusTurn(0)
+  await vt.waitForRender()
+  app.expandAllWorkSpansForTest()
+  await vt.waitForRender()
+  view = vt.getViewport().join('\n')
+  assert.ok(hasFocusHeader(view, true), `emoji expanded disclosure missing in fullscreen:\n${view}`)
+  assert.ok(view.includes('📖  Read /ws/src/foo.ts'), `emoji read icon missing in fullscreen:\n${view}`)
+  assert.ok(view.includes('📄  Context injection AGENTS.md'), `emoji context icon missing in fullscreen:\n${view}`)
+  // Symbols: the SAME fullscreen session repaints with the new palette —
+  // no stale frame, no reload.
+  app.setIconStyle('symbols')
+  await vt.waitForRender()
+  view = vt.getViewport().join('\n')
+  assert.ok(hasFocusHeader(view, true), `symbols disclosure missing after fullscreen switch:\n${view}`)
+  assert.ok(view.includes('≣  Read /ws/src/foo.ts'), `symbols read icon missing after fullscreen switch:\n${view}`)
+  assert.ok(view.includes('≣  Context injection AGENTS.md'), `symbols context icon missing after fullscreen switch:\n${view}`)
+  // Minimal: decorative icons vanish (no dangling space), the disclosure
+  // affordance survives.
+  app.setIconStyle('minimal')
+  await vt.waitForRender()
+  view = vt.getViewport().join('\n')
+  const lines = view.split('\n').map(stripTerminalSequences)
+  assert.ok(lines.some(line => line.startsWith('Read /ws/src/foo.ts')), `minimal read header missing in fullscreen:\n${view}`)
+  assert.ok(hasFocusHeader(view, true), `minimal disclosure must survive in fullscreen:\n${view}`)
+})
+
+
+
+
+
+
+test('read envelopes parse single, merged, and non-envelope results', () => {
+  const single = `<path>/ws/a.ts</path>
+<type>file</type>
+<content>
+1: line one
+2: line two
+
+(End of file - total 2 lines)
+</content>`
+  const envelopes = parseReadEnvelopes(single)
+  assert.equal(envelopes.length, 1)
+  assert.equal(envelopes[0]?.path, '/ws/a.ts')
+  assert.equal(envelopes[0]?.lines.length, 2)
+  assert.equal(envelopes[0]?.lines[1]?.text, 'line two')
+  assert.equal(envelopes[0]?.totalLines, 2)
+  // Merged group card: two consecutive envelopes parse into two entries.
+  const merged = `${single}\n\n${single.replace('/ws/a.ts', '/ws/b.ts')}`
+  const mergedEnvelopes = parseReadEnvelopes(merged)
+  assert.equal(mergedEnvelopes.length, 2)
+  assert.equal(mergedEnvelopes[1]?.path, '/ws/b.ts')
+  // Not an envelope: no entries, no throw.
+  assert.equal(parseReadEnvelopes('plain output').length, 0)
+  assert.equal(parseReadEnvelopes('').length, 0)
+})
+
+test('skill and read_image cards fold their envelope summaries, never the raw XML', async () => {
+  const { vt, app } = startApp()
+  const skillBody = 'Follow these instructions.\n\nStep one.\nStep two.'
+  app.setTranscript([{
+    kind: 'tool', turn: 0, name: 'skill',
+    args: '{"name":"review-fix-loop"}',
+    result: [
+      '<skill_content name="review-fix-loop">',
+      '<skill_resources>',
+      'Base directory for this skill: /home/x/.dsh/skills/review-fix-loop',
+      '</skill_resources>',
+      '',
+      '<skill_instructions>',
+      skillBody,
+      '</skill_instructions>',
+      '</skill_content>',
+    ].join('\n'),
+    status: 'ok',
+  }])
+  let view = await viewport(vt)
+  assert.ok(view.includes('Load skill review-fix-loop'), `skill header missing:\n${view}`)
+  assert.ok(view.includes('— 3 lines of instructions'), `skill instruction count missing:\n${view}`)
+  assert.ok(!view.includes('<skill_content'), `raw skill envelope leaked:\n${view}`)
+  assert.ok(!view.includes('<skill_instructions'), `raw skill envelope leaked:\n${view}`)
+  assert.ok(!view.includes('<skill_resources'), `raw skill envelope leaked:\n${view}`)
+
+  app.setTranscript([{
+    kind: 'tool', turn: 0, name: 'read_image',
+    args: '{"file_path":"/ws/img.png"}',
+    result: `<path>/ws/img.png</path>\n<type>image</type>\n<content>\nPNG image, 800x600 px, 2048 bytes\n</content>`,
+    status: 'ok',
+  }])
+  view = await viewport(vt)
+  assert.ok(view.includes('PNG image, 800x600 px'), `image summary missing:\n${view}`)
+  assert.ok(!view.includes('<type>image</type>'), `raw image envelope leaked:\n${view}`)
+  assert.ok(!view.includes('<path>'), `raw image envelope leaked:\n${view}`)
+  // Malformed envelopes: no preview, no XML, on both tools.
+  app.setTranscript([{
+    kind: 'tool', turn: 0, name: 'skill',
+    args: '{"name":"x"}',
+    result: '<skill_content name="">broken',
+    status: 'ok',
+  }])
+  view = await viewport(vt)
+  assert.ok(!view.includes('<skill'), `malformed skill result leaked:\n${view}`)
+  app.setTranscript([{
+    kind: 'tool', turn: 0, name: 'read_image',
+    args: '{"file_path":"/ws/b.png"}',
+    result: '<path>   </path>\n<type>image</type>\n<content>\nPNG image, 1x1 px, 1 bytes\n</content>',
+    status: 'ok',
+  }])
+  view = await viewport(vt)
+  assert.ok(!view.includes('<'), `malformed image result leaked:\n${view}`)
+})
+
+test('expanded skill and read_image cards render their content, never the envelope', async () => {
+  const { vt, app } = startApp()
+  app.setTranscriptDetailExpanded(true)
+  // The name attribute is producer-escaped (&quot;) and must decode back;
+  // the body is embedded verbatim — angle brackets stay as written.
+  const skillBody = 'Follow the loop.\n\nRound until accepted.\n\nKeep <tag> verbatim.'
+  app.setTranscript([{
+    kind: 'tool', turn: 0, name: 'skill',
+    args: '{"name":"review-fix-loop"}',
+    result: [
+      '<skill_content name="review&quot;fix-loop">',
+      '<skill_resources>',
+      'Base directory for this skill: /home/x/.dsh/skills/review-fix-loop',
+      '</skill_resources>',
+      '',
+      '<skill_instructions>',
+      skillBody,
+      '</skill_instructions>',
+      '</skill_content>',
+    ].join('\n'),
+    status: 'ok',
+  }])
+  let view = await viewport(vt)
+  assert.ok(view.includes('skill: review"fix-loop'), `escaped skill name must decode:\n${view}`)
+  assert.ok(view.includes('Follow the loop.'), `instructions body missing:\n${view}`)
+  assert.ok(view.includes('<tag>'), `verbatim body must keep its angle brackets:\n${view}`)
+  assert.ok(!view.includes('<skill_instructions'), `envelope tags leaked into the expanded card:\n${view}`)
+  assert.ok(!view.includes('<skill_resources'), `envelope tags leaked into the expanded card:\n${view}`)
+  assert.ok(!view.includes('&quot;'), `unescaped attribute leaked:\n${view}`)
+
+  app.setTranscript([{
+    kind: 'tool', turn: 0, name: 'read_image',
+    args: '{"file_path":"/ws/img.png"}',
+    result: `<path>/ws/img.png</path>\n<type>image</type>\n<content>\nPNG image, 800x600 px, 2048 bytes\n</content>`,
+    resultBlocks: [
+      { type: 'text', text: `<path>/ws/img.png</path>\n<type>image</type>\n<content>\nPNG image, 800x600 px, 2048 bytes\n</content>` },
+      { type: 'image', image: { data: 'AQIDBA==', mimeType: 'image/png' } },
+    ] as never,
+    status: 'ok',
+  }])
+  view = await viewport(vt)
+  assert.ok(view.includes('PNG image, 800x600 px'), `image summary missing:\n${view}`)
+  assert.ok(view.includes('path: /ws/img.png'), `image path row missing:\n${view}`)
+  assert.ok(!view.includes('AQIDBA=='), `image payload base64 dumped into the card:\n${view}`)
+  assert.ok(!view.includes('<path>'), `expanded image envelope leaked:\n${view}`)
+})
+
+test('systemContextBody parses context envelopes and leaves plain text alone', () => {
+  const envelope = [
+    '<skill_content name="review-fix-loop">',
+    '<skill_resources>',
+    'Base directory for this skill: /home/x/.dsh/skills/review-fix-loop',
+    '</skill_resources>',
+    '',
+    '<skill_instructions>',
+    'Follow these instructions.',
+    '',
+    'Step one. Step two.',
+    '</skill_instructions>',
+    '</skill_content>',
+  ].join('\n')
+  assert.deepEqual(systemContextBody(envelope), ['Follow these instructions.', '', 'Step one. Step two.'])
+  // A malformed skill envelope yields an empty body, never the raw tags.
+  assert.deepEqual(systemContextBody('<skill_content name="">broken'), [])
+  // The skill catalog: wrapper and available_skills markers stripped, prose kept.
+  const catalog = [
+    '<system-reminder>',
+    'A skill is a reusable set of task-specific instructions.',
+    '',
+    '<available_skills>',
+    '- `glab`: GitLab helper',
+    '- `find-skills`: Discover skills',
+    '</available_skills>',
+    '',
+    'If the user names a skill, call the `skill` tool.',
+    '</system-reminder>',
+  ].join('\n')
+  assert.deepEqual(systemContextBody(catalog), [
+    'A skill is a reusable set of task-specific instructions.',
+    '',
+    '- `glab`: GitLab helper',
+    '- `find-skills`: Discover skills',
+    '',
+    'If the user names a skill, call the `skill` tool.',
+  ])
+  // Workspace instructions: only the wrapper lines go.
+  const instructions = [
+    '<system-reminder>',
+    'The following workspace instructions may be relevant to your work.',
+    '',
+    '# AGENTS.md',
+    'Do the thing carefully.',
+    '</system-reminder>',
+  ].join('\n')
+  assert.deepEqual(systemContextBody(instructions), [
+    'The following workspace instructions may be relevant to your work.',
+    '',
+    '# AGENTS.md',
+    'Do the thing carefully.',
+  ])
+  // A lone marker inside real content survives (the pair decides).
+  const lone = ['<system-reminder>', 'uses <available_skills> inside', '</system-reminder>'].join('\n')
+  assert.deepEqual(systemContextBody(lone), ['uses <available_skills> inside'])
+  // Plain text: undefined — the caller keeps its raw-body behavior.
+  assert.equal(systemContextBody('plain context text'), undefined)
+  assert.equal(systemContextBody(''), undefined)
+})
+
+test('parseSkillEnvelope keeps a body with nested envelope-shaped XML verbatim', () => {
+  // A skill documenting its own envelope embeds a COMPLETE nested
+  // `<skill_content>` block inside the outer instructions. The outer-
+  // envelope-aware boundaries must return the whole outer body, never the
+  // first inner closer.
+  const envelope = [
+    '<skill_content name="outer">',
+    '<skill_resources>',
+    'Base directory for this skill: /home/x/.dsh/skills/outer',
+    '</skill_resources>',
+    '',
+    '<skill_instructions>',
+    'The skill documents its own envelope:',
+    '<skill_content name="inner">',
+    '<skill_instructions>',
+    'inner body',
+    '</skill_instructions>',
+    '</skill_content>',
+    'End of the outer body.',
+    '</skill_instructions>',
+    '</skill_content>',
+  ].join('\n')
+  const parsed = parseSkillEnvelope(envelope)
+  assert.ok(parsed !== undefined, 'the nested envelope must parse')
+  assert.equal(parsed.name, 'outer')
+  assert.equal(parsed.instructions, [
+    'The skill documents its own envelope:',
+    '<skill_content name="inner">',
+    '<skill_instructions>',
+    'inner body',
+    '</skill_instructions>',
+    '</skill_content>',
+    'End of the outer body.',
+  ].join('\n'))
+  // The system row body derives through the same parser.
+  const body = systemContextBody(envelope)
+  assert.ok(body !== undefined)
+  assert.ok(body.includes('End of the outer body.'), `outer body truncated:\n${body?.join('\n')}`)
+  assert.ok(body!.includes('<skill_content name="inner">'), `nested block dropped:\n${body?.join('\n')}`)
+  // An unclosed nested opener in the body must not eat the outer close either.
+  const unclosed = [
+    '<skill_content name="u">',
+    '<skill_instructions>',
+    'body with <skill_instructions> but no inner close',
+    '</skill_instructions>',
+    '</skill_content>',
+  ].join('\n')
+  const parsedUnclosed = parseSkillEnvelope(unclosed)
+  assert.ok(parsedUnclosed !== undefined)
+  assert.equal(parsedUnclosed.instructions, 'body with <skill_instructions> but no inner close')
+})
+
+test('parseSkillEnvelope rejects a malformed first envelope instead of borrowing a later one', () => {
+  // A first envelope with no instructions of its own, followed by a
+  // COMPLETE second envelope: the parser must reject the malformed first
+  // envelope, never cross-pair its name with the later envelope's body.
+  const text = [
+    '<skill_content name="bad">',
+    'no instructions of its own',
+    '<skill_content name="good">',
+    '<skill_resources>',
+    'Base directory for this skill: /home/x/.dsh/skills/good',
+    '</skill_resources>',
+    '',
+    '<skill_instructions>',
+    'the good body',
+    '</skill_instructions>',
+    '</skill_content>',
+  ].join('\n')
+  assert.equal(parseSkillEnvelope(text), undefined)
+  // The context row derives an EMPTY body for the malformed envelope (it
+  // starts with `<skill_content` but does not parse): header only, never
+  // the raw tags.
+  assert.deepEqual(systemContextBody(text), [])
+  // An UNCLOSED `<skill_content name="…">` mention inside the body is
+  // structurally indistinguishable from the malformed concatenation above,
+  // so it degrades the same way (header only, never raw tags) — documented
+  // in parseSkillEnvelope. A CLOSED mention stays balanced and parses.
+  const unclosedMention = [
+    '<skill_content name="outer">',
+    '<skill_instructions>',
+    'mentions <skill_content name="inner"> inside the body',
+    '</skill_instructions>',
+    '</skill_content>',
+  ].join('\n')
+  assert.equal(parseSkillEnvelope(unclosedMention), undefined)
+  const closedMention = [
+    '<skill_content name="outer">',
+    '<skill_instructions>',
+    'a complete example:',
+    '<skill_content name="inner">',
+    '<skill_instructions>',
+    'inner body',
+    '</skill_instructions>',
+    '</skill_content>',
+    'end of the outer body',
+    '</skill_instructions>',
+    '</skill_content>',
+  ].join('\n')
+  const parsed = parseSkillEnvelope(closedMention)
+  assert.ok(parsed !== undefined, 'a balanced nested example inside the body must still parse')
+  assert.equal(parsed.instructions, [
+    'a complete example:',
+    '<skill_content name="inner">',
+    '<skill_instructions>',
+    'inner body',
+    '</skill_instructions>',
+    '</skill_content>',
+    'end of the outer body',
+  ].join('\n'))
+})
+
+test('parseSkillEnvelope rejects a malformed first envelope with unclosed instructions', () => {
+  // The first envelope's `<skill_instructions>` opener is never closed; the
+  // selected instructions boundaries would cross into the later envelope.
+  // The body balance guard rejects it instead of pairing across envelopes.
+  const text = [
+    '<skill_content name="bad">',
+    '<skill_instructions>',
+    'unclosed instructions body',
+    '<skill_content name="good">',
+    '<skill_instructions>',
+    'the good body',
+    '</skill_instructions>',
+    '</skill_content>',
+  ].join('\n')
+  assert.equal(parseSkillEnvelope(text), undefined)
+  assert.deepEqual(systemContextBody(text), [])
+  // The complete-nested-example body stays balanced and keeps parsing:
+  // both the inner opener and its close live inside the outer body.
+  const nested = [
+    '<skill_content name="outer">',
+    '<skill_instructions>',
+    'a complete example:',
+    '<skill_content name="inner">',
+    '<skill_instructions>',
+    'inner body',
+    '</skill_instructions>',
+    '</skill_content>',
+    'end of the outer body',
+    '</skill_instructions>',
+    '</skill_content>',
+  ].join('\n')
+  const parsed = parseSkillEnvelope(nested)
+  assert.ok(parsed !== undefined)
+  assert.equal(parsed.instructions, [
+    'a complete example:',
+    '<skill_content name="inner">',
+    '<skill_instructions>',
+    'inner body',
+    '</skill_instructions>',
+    '</skill_content>',
+    'end of the outer body',
+  ].join('\n'))
+  // A stray UNMATCHED closing tag in the body is documentation, not a
+  // second envelope: it cannot cross-pair, so the body stays verbatim.
+  const strayCloser = [
+    '<skill_content name="outer">',
+    '<skill_instructions>',
+    'the envelope ends with </skill_content>',
+    '</skill_instructions>',
+    '</skill_content>',
+  ].join('\n')
+  const parsedStray = parseSkillEnvelope(strayCloser)
+  assert.ok(parsedStray !== undefined, 'a stray closing tag must not reject the envelope')
+  assert.equal(parsedStray.instructions, 'the envelope ends with </skill_content>')
+})
+
+test('injected skill rows fold with the instruction count and expand to the parsed body, never the envelope', async () => {
+  const { vt, app } = startApp()
+  const skillBody = 'Follow these instructions.\n\nStep one. Step two.'
+  const envelope = [
+    '<skill_content name="review-fix-loop">',
+    '<skill_resources>',
+    'Base directory for this skill: /home/x/.dsh/skills/review-fix-loop',
+    '</skill_resources>',
+    '',
+    '<skill_instructions>',
+    skillBody,
+    '</skill_instructions>',
+    '</skill_content>',
+  ].join('\n')
+  // Folded (old turn): the row names the skill and the instruction count,
+  // never a single envelope tag.
+  app.setTranscript([{ kind: 'system', turn: 99, text: envelope, label: 'review-fix-loop', icon: 'context-skill' }])
+  let view = await viewport(vt)
+  assert.ok(view.includes('Context injection review-fix-loop — 2 lines of instructions'), `skill count missing:\n${view}`)
+  assert.ok(!view.includes('<skill_content'), `raw skill envelope leaked into the folded row:\n${view}`)
+  assert.ok(!view.includes('Base directory'), `resource chrome leaked into the folded row:\n${view}`)
+  // Expanded (Ctrl+O, recent turn): the instructions body renders, the
+  // envelope stays out — the same no-XML rule as the skill tool card.
+  app.setTranscriptDetailExpanded(true)
+  app.setTranscript([{ kind: 'system', turn: 0, text: envelope, label: 'review-fix-loop', icon: 'context-skill' }])
+  view = await viewport(vt)
+  assert.ok(view.includes('Context injection review-fix-loop'), `labeled header missing:\n${view}`)
+  assert.ok(view.includes('Follow these instructions.'), `instructions body missing:\n${view}`)
+  assert.ok(view.includes('Step one. Step two.'), `instructions body missing:\n${view}`)
+  assert.ok(!view.includes('<skill_content'), `raw skill envelope leaked into the expanded row:\n${view}`)
+  assert.ok(!view.includes('<skill_instructions'), `raw skill envelope leaked into the expanded row:\n${view}`)
+  assert.ok(!view.includes('<skill_resources'), `raw skill envelope leaked into the expanded row:\n${view}`)
+  assert.ok(!view.includes('Base directory'), `resource chrome leaked into the expanded row:\n${view}`)
+  // A malformed skill envelope in a system row renders the header only.
+  app.setTranscript([{ kind: 'system', turn: 0, text: '<skill_content name="">broken', label: 'x', icon: 'context-skill' }])
+  view = await viewport(vt)
+  assert.ok(view.includes('Context injection x'), `malformed header missing:\n${view}`)
+  assert.ok(!view.includes('<skill'), `malformed skill envelope leaked:\n${view}`)
+})
+
+test('injected catalog and instruction rows strip their reminder framing when expanded', async () => {
+  const { vt, app } = startApp()
+  app.setTranscriptDetailExpanded(true)
+  const catalog = [
+    '<system-reminder>',
+    'A skill is a reusable set of task-specific instructions.',
+    '',
+    '<available_skills>',
+    '- `glab`: GitLab helper',
+    '- `find-skills`: Discover skills',
+    '</available_skills>',
+    '',
+    'If the user names a skill, call the `skill` tool.',
+    '</system-reminder>',
+  ].join('\n')
+  app.setTranscript([{ kind: 'system', turn: 0, text: catalog, label: 'skill-catalog', icon: 'context-skill' }])
+  let view = await viewport(vt)
+  assert.ok(view.includes('Context injection skill-catalog'), `catalog header missing:\n${view}`)
+  assert.ok(view.includes('- `glab`: GitLab helper'), `catalog entry missing:\n${view}`)
+  assert.ok(view.includes('If the user names a skill'), `catalog prose missing:\n${view}`)
+  assert.ok(!view.includes('<system-reminder'), `catalog wrapper leaked:\n${view}`)
+  assert.ok(!view.includes('<available_skills'), `catalog markers leaked:\n${view}`)
+
+  const instructions = [
+    '<system-reminder>',
+    'The following workspace instructions may be relevant to your work.',
+    '',
+    '# AGENTS.md',
+    'Do the thing carefully.',
+    '</system-reminder>',
+  ].join('\n')
+  app.setTranscript([{ kind: 'system', turn: 0, text: instructions, label: 'AGENTS.md', icon: 'context-file' }])
+  view = await viewport(vt)
+  assert.ok(view.includes('Context injection AGENTS.md'), `instruction header missing:\n${view}`)
+  assert.ok(view.includes('Do the thing carefully.'), `instruction body missing:\n${view}`)
+  assert.ok(!view.includes('<system-reminder'), `instruction wrapper leaked:\n${view}`)
+})
+
+test('malformed read/write results render nothing expanded, never the raw envelope', async () => {
+  const { vt, app } = startApp()
+  app.setTranscriptDetailExpanded(true)
+  app.setTranscript([{
+    kind: 'tool', turn: 0, name: 'read',
+    args: '{"file_path":"/ws/a.ts"}',
+    result: '<path>/ws/a.ts</path> but no closing content',
+    status: 'ok',
+  }])
+  let view = await viewport(vt)
+  assert.ok(!view.includes('<path>'), `malformed read envelope leaked:\n${view}`)
+  app.setTranscript([{
+    kind: 'tool', turn: 0, name: 'write',
+    args: '{"file_path":"/ws/a.ts","content":"x"}',
+    result: '<path>/ws/a.ts</path> truncated',
+    status: 'ok',
+  }])
+  view = await viewport(vt)
+  assert.ok(!view.includes('<path>'), `malformed write envelope leaked:\n${view}`)
+})
+
+test('write cards preview the envelope verb, never the raw XML', async () => {
+  const { vt, app } = startApp()
+  app.setTranscript([{
+    kind: 'tool', turn: 0, name: 'write',
+    args: '{"file_path":"/ws/a.ts","content":"line one"}',
+    result: `<path>/ws/a.ts</path>\n<type>file</type>\n<content>\nUpdated file\n</content>`,
+    status: 'ok',
+  }])
+  let view = await viewport(vt)
+  assert.ok(view.includes('Write /ws/a.ts'), `write header missing:\n${view}`)
+  assert.ok(view.includes('— Updated'), `envelope verb missing:\n${view}`)
+  assert.ok(!view.includes('<path>'), `raw envelope leaked into the folded row:\n${view}`)
+  assert.ok(!view.includes('<content>'), `raw envelope leaked into the folded row:\n${view}`)
+  // The Created verb renders too; a malformed envelope shows no preview at
+  // all (never the raw text).
+  app.setTranscript([{
+    kind: 'tool', turn: 0, name: 'write',
+    args: '{"file_path":"/ws/b.ts","content":"x"}',
+    result: `<path>/ws/b.ts</path>\n<type>file</type>\n<content>\nCreated file\n</content>`,
+    status: 'ok',
+  }])
+  view = await viewport(vt)
+  assert.ok(view.includes('— Created'), `created verb missing:\n${view}`)
+  assert.ok(!view.includes('<path>'), `created envelope leaked:\n${view}`)
+  app.setTranscript([{
+    kind: 'tool', turn: 0, name: 'write',
+    args: '{"file_path":"/ws/c.ts","content":"x"}',
+    result: 'some unrelated text',
+    status: 'ok',
+  }])
+  view = await viewport(vt)
+  assert.ok(!view.includes('<'), `non-envelope result must not render angle brackets:\n${view}`)
+  // A blank <path> envelope is malformed: no preview at all (a whitespace
+  // path would surface as an invalid card row).
+  app.setTranscript([{
+    kind: 'tool', turn: 0, name: 'write',
+    args: '{"file_path":"/ws/d.ts","content":"x"}',
+    result: `<path>   </path>\n<type>file</type>\n<content>\nUpdated file\n</content>`,
+    status: 'ok',
+  }])
+  view = await viewport(vt)
+  assert.ok(!view.includes('— Updated'), `blank-path envelope must yield no preview:\n${view}`)
+  assert.ok(!view.includes('<path>'), `blank-path envelope must not leak XML:\n${view}`)
+})
+
+test('read cards preview their envelope summary, never the raw XML', async () => {
+  const { vt, app } = startApp()
+  app.setTranscript([{
+    kind: 'tool', turn: 0, name: 'read',
+    args: '{"file_path":"/ws/a.ts"}',
+    result: `<path>/ws/a.ts</path>
+<type>file</type>
+<content>
+1: line one
+2: line two
+
+(End of file - total 2 lines)
+</content>`,
+    status: 'ok',
+  }])
+  const view = await viewport(vt)
+  assert.ok(view.includes('Read /ws/a.ts [ok] — 2 lines'), `summary preview missing:\n${view}`)
+  assert.ok(!view.includes('<path>'), `raw envelope leaked into the folded row:\n${view}`)
+  assert.ok(!view.includes('<content>'), `raw content leaked into the folded row:\n${view}`)
+})
+
+test('merged read groups expand into one tree row per file', async () => {
+  const vt = new VirtualTerminal(100, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
+    present: toolPresenterFrom(() => undefined),
+    workspaceRoot: '/ws',
+  })
+  app.start()
+
+  startedApps.add(app)
+  app.setTranscriptDetailExpanded(true)
+  // The merged card is what groupConsecutiveReads produces: args "N files"
+  // plus the consecutive envelopes joined in the result.
+  const envelopeA = `<path>/ws/a.ts</path>\n<type>file</type>\n<content>\n1: a\n\n(End of file - total 1 lines)\n</content>`
+  const envelopeB = envelopeA.replace('/ws/a.ts', '/ws/b.ts').replace('1: a', '1: b')
+  app.setTranscript([{
+    kind: 'tool', turn: 0, name: 'read',
+    args: '2 files',
+    result: `${envelopeA}\n\n${envelopeB}`,
+    status: 'ok',
+  }])
+  await vt.waitForRender()
+  const view = vt.getViewport().join('\n')
+  assert.ok(view.includes('├─ a.ts · 1 lines'), `first tree row missing:\n${view}`)
+  assert.ok(view.includes('└─ b.ts · 1 lines'), `last tree row missing:\n${view}`)
+  assert.ok(!view.includes('<path>'), `raw XML leaked:\n${view}`)
+  app.stop()
+})
+
+test('assistant and user messages align continuation lines under the bullet', async () => {
+  const { vt, app } = startApp()
+  app.setTranscript([
+    { kind: 'user', turn: 0, text: 'line one\nline two' },
+    { kind: 'assistant', turn: 0, text: 'para one\n\npara two' },
+  ])
+  const view = await viewport(vt)
+  const lines = view.split('\n')
+  const user = lines.findIndex(line => line.includes('❯ line one'))
+  assert.ok(user >= 0, `user first line missing:\n${view}`)
+  assert.ok(lines[user + 1]?.includes('line two'), `user continuation must follow on the next row:\n${view}`)
+  assert.ok(!lines[user + 1]!.includes('❯'), `user continuation must not repeat the bullet:\n${view}`)
+  // The assistant whale leads the first paragraph; the second paragraph's
+  // first line indents under the bullet (a markdown blank line sits between).
+  const assistant = lines.findIndex(line => line.includes('🐋') && line.includes('para one'))
+  assert.ok(assistant >= 0, `assistant first line missing:\n${view}`)
+  const paraTwo = lines.findIndex(line => line.includes('para two'))
+  assert.ok(paraTwo > assistant, `assistant continuation missing:\n${view}`)
+  assert.ok(!lines[paraTwo]!.includes('🐋'), `continuation must not repeat the bullet:\n${view}`)
+  assert.ok(lines[paraTwo]!.startsWith('    '), `continuation must indent under the bullet:\n${view}`)
+})
+
+test('user messages render as brand-blue bubbles (dsh-web parity)', async () => {
+  const { vt, app } = startApp()
+  // Explicit palettes: the headless terminal's OSC 11 autodetect reply can
+  // pick either family, so pin dark first, then verify light below.
+  app.applyTheme('dark')
+  app.setTranscript([
+    { kind: 'user', turn: 0, text: 'line one' },
+    { kind: 'assistant', turn: 0, text: 'reply' },
+  ])
+  let view = await viewport(vt)
+  const rowOf = (needle: string): number => {
+    const index = view.split('\n').findIndex(line => line.includes(needle))
+    assert.ok(index >= 0, `${needle} row missing:\n${view}`)
+    return index
+  }
+  // The user's own words are a floating BUBBLE: the ❯ marker is brand
+  // blue (#679EFE), the whole row carries the bubble background
+  // (#2C2C2F), and the body stays in the terminal default foreground —
+  // never kimi's amber, never the assistant's whale blue.
+  const user = rowOf('❯ line one')
+  const userRow = view.split('\n')[user]!
+  const bodyCol = userRow.indexOf('line one')
+  assert.equal(vt.getCellFgRgb(user, 0), 0x679efe, `user ❯ must be brand blue:\n${view}`)
+  assert.notEqual(vt.getCellFgRgb(user, bodyCol), 0x679efe, `user body must NOT be role-coloured:\n${view}`)
+  // The bubble background covers the marker, the body AND the row tail.
+  assert.equal(vt.getCellBgRgb(user, 0), 0x2c2c2f, `bubble must start at column 0:\n${view}`)
+  assert.equal(vt.getCellBgRgb(user, bodyCol), 0x2c2c2f, `bubble must cover the body:\n${view}`)
+  assert.equal(vt.getCellBgRgb(user, userRow.length - 1), 0x2c2c2f, `bubble must cover the row tail:\n${view}`)
+  const assistant = rowOf('reply')
+  const replyCol = view.split('\n')[assistant]!.indexOf('reply')
+  assert.equal(vt.getCellBgRgb(assistant, replyCol), undefined, `assistant rows must have no bubble:\n${view}`)
+  // Light palette: the role tokens follow the theme (themeRevision
+  // rebuilds the message component, so the baked ANSI is not frozen).
+  app.applyTheme('light')
+  view = await viewport(vt)
+  const lightUser = rowOf('❯ line one')
+  const lightCol = view.split('\n')[lightUser]!.indexOf('line one')
+  assert.equal(vt.getCellFgRgb(lightUser, 0), 0x4177e6, `light ❯ must be deep brand-blue:\n${view}`)
+  assert.equal(vt.getCellBgRgb(lightUser, lightCol), 0xe4edfd, `light bubble must be pale brand-blue:\n${view}`)
+  app.stop()
+})
+
+test('BulletedComponent keeps a live child with reference-stable output', () => {
+  const child = new Text('hello world', 0, 0)
+  const bullet = new BulletedComponent(child, '❯ ')
+  const first = bullet.render(40)
+  assert.equal(first[0]!.trimEnd(), '❯ hello world', `first line must lead with the bullet:\n${first}`)
+  // Same width: the SAME array reference comes back. This is a component-level
+  // render optimization; the fork's X035 main-screen line cache separately
+  // compares primitive rendered-line values, not array identity.
+  assert.equal(bullet.render(40), first, 'same-width renders must reuse the same array')
+  // A narrower width re-renders the live child: wrapped continuation lines
+  // indent under the bullet instead of repeating it.
+  const narrow = bullet.render(10)
+  assert.notEqual(narrow, first, 'a width change must rebuild the output')
+  assert.ok(narrow[0]!.startsWith('❯ '), `first line must keep the bullet:\n${narrow}`)
+  assert.ok(narrow.slice(1).every(line => line.startsWith('  ')), `continuation must indent:\n${narrow}`)
+})
+
+test('assistant markdown tables reflow on terminal resize', async () => {
+  const { vt, app } = startApp(80)
+  const table = [
+    '| name | description |',
+    '| --- | --- |',
+    '| alpha | a fairly long description that should wrap when the window is narrow |',
+    '| beta | another longish description with bold and **inline code** tokens |',
+    '| gamma | short |',
+  ].join('\n')
+  app.setTranscript([{ kind: 'assistant', turn: 0, text: table }])
+  let view = await viewport(vt)
+  let top = view.split('\n').find(line => line.includes('┌'))
+  assert.ok(top !== undefined, `table missing at 80:\n${view}`)
+  assert.ok(top.includes('┐'), `border split across rows at 80:\n${view}`)
+  const wide = top.length
+
+  vt.resize(120, 24)
+  view = await viewport(vt)
+  top = view.split('\n').find(line => line.includes('┌'))
+  assert.ok(top !== undefined && top.includes('┐'), `border broken after widening:\n${view}`)
+  assert.ok(top.length > wide, `table must reflow wider after resize (was ${wide}, now ${top.length}):\n${view}`)
+
+  vt.resize(60, 24)
+  view = await viewport(vt)
+  top = view.split('\n').find(line => line.includes('┌'))
+  assert.ok(top !== undefined && top.includes('┐'), `border must not split into plain text after narrowing:\n${view}`)
+  assert.ok(top.length < wide, `table must reflow narrower after resize:\n${view}`)
+  assert.ok(top.length <= 60, `table must fit the terminal (${top.length} > 60):\n${view}`)
+})
+
+test('workflow runs expand into a phase-grouped member tree', async () => {
+  const { vt, app } = startApp()
+  app.setTranscriptDetailExpanded(true)
+  app.setTranscript([{
+    kind: 'workflow',
+    turn: 0,
+    runId: 'run-1' as WorkflowRunId,
+    name: 'audit',
+    status: 'running',
+    members: [
+      { seq: 0, label: 'checker', phase: 'review', childId: 'session-x' as never, status: 'completed' },
+      { seq: 1, label: 'patcher', phase: 'review', childId: 'session-y' as never, status: 'failed' },
+      { seq: 2, label: 'reporter', phase: 'report', childId: 'session-z' as never, status: 'completed' },
+      { seq: 3, label: 'live-agent', phase: null, childId: 'session-w' as never, status: 'running' },
+    ],
+  }])
+  const view = await viewport(vt)
+  assert.ok(view.includes('Workflow audit [running]'), `run header missing:\n${view}`)
+  assert.ok(view.includes('▼ review 2 agents'), `phase header missing:\n${view}`)
+  assert.ok(view.includes('checker — completed'), `completed member missing:\n${view}`)
+  assert.ok(view.includes('patcher — failed'), `failed member missing:\n${view}`)
+  // A fully-completed phase auto-closes (PR2 plan §7.6): the header stays,
+  // the members fold.
+  assert.ok(view.includes('▶ report 1 agent'), `second phase missing:\n${view}`)
+  assert.ok(!view.includes('reporter — completed'), `closed phase must not leak members:\n${view}`)
+  assert.ok(view.includes('▼ Unassigned 1 agent'), `null phase readable label missing:\n${view}`)
+  assert.ok(view.includes('live-agent — running'), `running member missing:\n${view}`)
+})
+
+test('workflow runs stay a single folded row until expanded', async () => {
+  const { vt, app } = startApp()
+  app.setTranscript([{
+    kind: 'workflow',
+    turn: 0,
+    runId: 'run-1' as WorkflowRunId,
+    name: 'audit',
+    status: 'completed',
+    members: [{ seq: 0, label: 'checker', phase: 'review', childId: 'session-x' as never, status: 'completed' }],
+  }])
+  const view = await viewport(vt)
+  assert.ok(view.includes('Workflow audit [completed]'), `folded header missing:\n${view}`)
+  assert.ok(!view.includes('checker — completed'), `members leaked while folded:\n${view}`)
+})
+
+test('workflow live member/status updates invalidate the cached card (plan §8.11)', async () => {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    { type: 'turn/start', seq: 0, time: 1_700_000_000_000, data: { turn: 0 } } as SessionEvent,
+    { type: 'tool-workflow/run-start', seq: 1, time: 1_700_000_000_001, data: { runId: 'run-1', name: 'audit' } } as SessionEvent,
+  ])
+  const { vt, app } = startApp()
+  app.setTranscriptDetailExpanded(true)
+  app.setTranscript(folder.messages())
+  const cache = (app as unknown as { messageComponents: Map<object, { component: object }> }).messageComponents
+  const first = folder.messages()[0]
+  assert.ok(first !== undefined && first.kind === 'workflow')
+  const firstComponent = cache.get(first)?.component
+  assert.ok(firstComponent !== undefined)
+  let view = await viewport(vt)
+  assert.ok(!view.includes('checker'), `no member before agent-start:\n${view}`)
+  // agent-start: the members array reference changes → the card rebuilds.
+  folder.apply([
+    { type: 'tool-workflow/agent-start', seq: 2, time: 1_700_000_000_002, data: { runId: 'run-1', seq: 1, label: 'checker', childId: 'session-x' } } as SessionEvent,
+  ])
+  app.setTranscript(folder.messages())
+  const secondComponent = cache.get(first)?.component
+  assert.notStrictEqual(secondComponent, firstComponent, 'agent-start must invalidate the cached workflow card')
+  view = await viewport(vt)
+  assert.ok(view.includes('checker — running'), `live member row missing:\n${view}`)
+  // agent-end: the member status changes → rebuild. The phase is now fully
+  // completed, so the PR2 completion auto-close folds it (plan §7.6).
+  folder.apply([
+    { type: 'tool-workflow/agent-end', seq: 3, time: 1_700_000_000_003, data: { runId: 'run-1', seq: 1, outcome: 'completed' } } as SessionEvent,
+  ])
+  app.setTranscript(folder.messages())
+  const thirdComponent = cache.get(first)?.component
+  assert.notStrictEqual(thirdComponent, secondComponent, 'agent-end must invalidate the cached workflow card')
+  view = await viewport(vt)
+  assert.ok(view.includes('▶ Unassigned 1 agent'), `completed phase must auto-close:\n${view}`)
+  assert.ok(!view.includes('checker — completed'), `closed phase must not leak members:\n${view}`)
+  // An unchanged re-render keeps the component.
+  app.setTranscript(folder.messages())
+  assert.strictEqual(cache.get(first)?.component, thirdComponent, 'an unchanged workflow card must not churn the component')
+})
+
+test('askQuestions marks recommended options and renders detail blocks', async () => {
+  const { vt, app } = startApp()
+  const promise = app.askQuestions([{
+    id: 'q1',
+    question: 'Pick one?',
+    detail: 'Some context about the choice.',
+    options: [
+      { label: 'Plain' },
+      { label: 'Best (recommended)' },
+    ],
+  }])
+  let view = await viewport(vt)
+  assert.ok(view.includes('Some context about the choice.'), `detail missing:\n${view}`)
+  assert.ok(view.includes('[recommended]'), `recommended badge missing:\n${view}`)
+  assert.ok(!view.includes('(recommended)'), `suffix must be stripped from the display:\n${view}`)
+  vt.sendInput('\r') // the recommended row is the default highlight → review
+  await viewport(vt)
+  vt.sendInput('\r') // review: submit
+  assert.deepEqual(await promise, [{ id: 'q1', selected: ['Best (recommended)'] }])
+})
+
+test('askQuestions skip pages through and preserves drafts', async () => {
+  const { vt, app } = startApp()
+  const promise = app.askQuestions([
+    { id: 'q1', question: 'First?', options: [{ label: 'A' }] },
+    { id: 'q2', question: 'Second?' },
+  ])
+  await viewport(vt)
+  vt.sendInput('\x1b[C') // → skip Q1 (empty answer)
+  await viewport(vt)
+  let view = await viewport(vt)
+  assert.ok(view.includes('Second?'), `skipped past the first question:\n${view}`)
+  vt.sendInput('hello')
+  vt.sendInput('\r') // commit the typed answer → review page
+  await viewport(vt)
+  // ← returns from the review page; drafts survive the round trip.
+  vt.sendInput('\x1b[D')
+  await viewport(vt)
+  view = await viewport(vt)
+  assert.ok(view.includes('Second?'), `back to the second question:\n${view}`)
+  assert.ok(view.includes('hello'), `the committed draft survives the review round trip:\n${view}`)
+  // Q2 is an OPTIONLESS question: ←/→ are TEXT cursor keys in edit mode —
+  // they never page back to Q1, commit or advance (the WP1 ownership fix).
+  vt.sendInput('\x1b[D') // ← moves the text cursor (no page-back)
+  await viewport(vt)
+  view = await viewport(vt)
+  assert.ok(view.includes('Second?'), `← must stay on the optionless question:\n${view}`)
+  assert.ok(!view.includes('First?'), `← must not page back to Q1 in text mode:\n${view}`)
+  vt.sendInput('\x1b[C') // → moves the text cursor (no commit/advance)
+  await viewport(vt)
+  view = await viewport(vt)
+  assert.ok(view.includes('Second?'), `→ must stay on the optionless question:\n${view}`)
+  assert.ok(!view.includes('Review your answer'), `→ must not advance in text mode:\n${view}`)
+  vt.sendInput('\r') // Enter commits → review
+  await viewport(vt)
+  vt.sendInput('\r') // submit
+  assert.deepEqual(await promise, [
+    { id: 'q1', selected: [] },
+    { id: 'q2', selected: [], custom: 'hello' },
+  ])
+})
+
+test('askQuestions review page shows every answer before submitting', async () => {
+  const { vt, app } = startApp()
+  const promise = app.askQuestions([
+    { id: 'q1', question: 'One?', options: [{ label: 'X' }] },
+    { id: 'q2', question: 'Two?', options: [{ label: 'Y' }] },
+  ])
+  await viewport(vt)
+  vt.sendInput('1')
+  await viewport(vt)
+  vt.sendInput('1')
+  await viewport(vt)
+  const view = await viewport(vt)
+  assert.ok(view.includes('Review your answer before submit'), `review page missing:\n${view}`)
+  assert.ok(view.includes('One?'), `Q1 answer missing:\n${view}`)
+  assert.ok(view.includes('Two?'), `Q2 answer missing:\n${view}`)
+  assert.ok(view.includes('X'), `Q1 value missing:\n${view}`)
+  assert.ok(view.includes('Y'), `Q2 value missing:\n${view}`)
+  vt.sendInput('\r') // submit
+  assert.deepEqual(await promise, [
+    { id: 'q1', selected: ['X'] },
+    { id: 'q2', selected: ['Y'] },
+  ])
+})
+
+test('an aborted signal settles the question flow as cancelled', async () => {
+  const { vt, app } = startApp()
+  const controller = new AbortController()
+  const promise = app.askQuestions([{ id: 'q1', question: 'Any?', options: [{ label: 'Yes' }] }], controller.signal)
+  await viewport(vt)
+  controller.abort()
+  await assert.rejects(promise, /cancelled/)
+  const view = await viewport(vt)
+  assert.ok(!view.includes('Any?'), `dialog must close on abort:\n${view}`)
+  void vt
+})
+
+test('ask_user_question cards carry the Question identity and a friendly summary', async () => {
+  const { vt, app } = startApp()
+  app.setTranscript([
+    { kind: 'tool', turn: 0, name: 'ask_user_question', args: '{"questions":[{"id":"q","question":"Go?"}]}', result: '', status: 'running' },
+  ])
+  const view = await viewport(vt)
+  assert.ok(view.includes('❓  Question'), `question card missing:\n${view}`)
+  assert.ok(view.includes('Go?'), `question text summary missing:\n${view}`)
+  assert.ok(!view.includes('Tool call'), `generic card leaked:\n${view}`)
+  assert.ok(!view.includes('"questions"'), `raw args JSON leaked into the summary:\n${view}`)
+})
+
+test('settled ask_user_question cards show the answered count, never raw JSON', async () => {
+  const { vt, app } = startApp()
+  app.setTranscript([
+    {
+      kind: 'tool', turn: 0, name: 'ask_user_question',
+      args: '{"questions":[{"id":"q1","question":"A?"},{"id":"q2","question":"B?"},{"id":"q3","question":"C?"}]}',
+      result: JSON.stringify({ answers: [
+        { id: 'q1', selected: ['x'] },
+        { id: 'q2', selected: [], custom: 'freeform' },
+        { id: 'q3', selected: [], custom: '' },
+      ] }),
+      status: 'ok',
+    },
+  ])
+  app.setTranscriptDetailExpanded(true)
+  const view = await viewport(vt)
+  assert.ok(view.includes('2/3 answered'), `answered count missing:\n${view}`)
+  // The expanded card carries the actual answers, one line per question —
+  // the count alone cannot recall the choices once the flow closed.
+  assert.ok(view.includes('● q1 → x'), `selected answer line missing:\n${view}`)
+  assert.ok(view.includes('● q2 → freeform'), `custom answer line missing:\n${view}`)
+  assert.ok(view.includes('○ q3 — skipped'), `skipped answer line missing:\n${view}`)
+  assert.ok(!view.includes('"answers"'), `raw answers JSON leaked:\n${view}`)
+  assert.ok(!view.includes('"selected"'), `raw selected JSON leaked:\n${view}`)
+  app.stop()
+})
+
+test('folded ask_user_question cards preview the answered count, never raw JSON', async () => {
+  const { vt, app } = startApp()
+  app.setTranscript([
+    {
+      kind: 'tool', turn: 0, name: 'ask_user_question',
+      args: '{"questions":[{"id":"q1","question":"A?"},{"id":"q2","question":"B?"}]}',
+      result: JSON.stringify({ answers: [
+        { id: 'q1', selected: ['x'] },
+        { id: 'q2', selected: [], custom: '' },
+      ] }),
+      status: 'ok',
+    },
+  ])
+  const view = await viewport(vt)
+  assert.ok(view.includes('— 1/2 answered'), `folded answered summary missing:\n${view}`)
+  assert.ok(!view.includes('"answers"'), `raw answers JSON leaked into the fold:\n${view}`)
+  app.stop()
+})
+
+const GOAL_RESULT = JSON.stringify({
+  goal: {
+    id: 'goal-1234', revision: 3, objective: 'ship the polish release',
+    phase: 'active', roundsStarted: 2, maxGoalRounds: 6,
+  },
+  activation: 'armed',
+})
+
+test('settled goal cards show field lines, never the raw goal JSON', async () => {
+  const { vt, app } = startApp()
+  app.setTranscript([
+    { kind: 'tool', turn: 0, name: 'get_goal', args: '{}', result: GOAL_RESULT, status: 'ok' },
+  ])
+  app.setTranscriptDetailExpanded(true)
+  const view = await viewport(vt)
+  assert.ok(view.includes('● objective: ship the polish release'), `objective line missing:\n${view}`)
+  assert.ok(view.includes('● active · revision 3'), `identity line missing:\n${view}`)
+  assert.ok(view.includes('● rounds: 2/6'), `rounds line missing:\n${view}`)
+  assert.ok(view.includes('● activation: armed'), `activation line missing:\n${view}`)
+  assert.ok(!view.includes('"goal"'), `raw goal JSON leaked:\n${view}`)
+  assert.ok(!view.includes('goal-1234'), `raw goal id leaked:\n${view}`)
+  app.stop()
+})
+
+test('folded goal cards preview the summary, never the raw goal JSON', async () => {
+  const { vt, app } = startApp()
+  app.setTranscript([
+    { kind: 'tool', turn: 0, name: 'get_goal', args: '{}', result: GOAL_RESULT, status: 'ok' },
+  ])
+  const view = await viewport(vt)
+  assert.ok(view.includes('— phase active · revision 3 · 2/6 rounds'), `folded goal summary missing:\n${view}`)
+  assert.ok(!view.includes('"goal"'), `raw goal JSON leaked into the fold:\n${view}`)
+  app.stop()
+})
+
+test('goal cards without a goal say no goal set', async () => {
+  const { vt, app } = startApp()
+  app.setTranscript([
+    { kind: 'tool', turn: 0, name: 'get_goal', args: '{}', result: JSON.stringify({ goal: null }), status: 'ok' },
+  ])
+  app.setTranscriptDetailExpanded(true)
+  const view = await viewport(vt)
+  assert.ok(view.includes('no goal set'), `empty-goal verdict missing:\n${view}`)
+  assert.ok(!view.includes('"goal"'), `raw goal JSON leaked:\n${view}`)
+  app.stop()
+})
+
+test('goal card headers carry the goal identity, not the generic Tool call row', async () => {
+  const { vt, app } = startApp()
+  app.setTranscript([
+    { kind: 'tool', turn: 0, name: 'get_goal', args: '{}', result: GOAL_RESULT, status: 'ok' },
+    { kind: 'tool', turn: 0, name: 'update_goal', args: '{"goal_id":"goal-1234","revision":3,"action":"edit","objective":"new"}', result: GOAL_RESULT, status: 'ok' },
+    { kind: 'tool', turn: 0, name: 'create_goal', args: '{"objective":"ship it"}', result: GOAL_RESULT, status: 'ok' },
+  ])
+  const view = await viewport(vt)
+  assert.ok(view.includes('Read Goal'), `get_goal identity missing:\n${view}`)
+  assert.ok(view.includes('Update Goal edit'), `update_goal identity missing:\n${view}`)
+  assert.ok(view.includes('Create Goal ship it'), `create_goal identity missing:\n${view}`)
+  assert.ok(!view.includes('Tool call get_goal'), `generic row leaked:\n${view}`)
+  app.stop()
+})
+
+test('goalResultSummary and goalResultLines parse the shared goal shape', async () => {
+  const { goalResultSummary, goalResultLines } = await import('../../src/tui/transcript/tool-presentation.ts')
+  assert.equal(goalResultSummary(GOAL_RESULT), 'phase active · revision 3 · 2/6 rounds')
+  assert.equal(goalResultSummary(JSON.stringify({ goal: null })), 'no goal set')
+  assert.equal(goalResultSummary('oops'), undefined)
+  assert.equal(goalResultSummary('{"other":1}'), undefined)
+  assert.deepEqual(goalResultLines(GOAL_RESULT), [
+    '● objective: ship the polish release',
+    '● active · revision 3',
+    '● rounds: 2/6',
+    '● activation: armed',
+  ])
+  assert.deepEqual(goalResultLines(JSON.stringify({ goal: null })), ['no goal set'])
+  assert.equal(goalResultLines('oops'), undefined)
+  // A blocked goal carries the reason line.
+  const blocked = JSON.stringify({
+    goal: { id: 'g', revision: 1, phase: 'blocked', roundsStarted: 3, maxGoalRounds: 6, blockedReason: { code: 'GOAL_ROUND', message: 'no progress' } },
+    activation: 'disarmed',
+  })
+  assert.deepEqual(goalResultLines(blocked), [
+    '● blocked · revision 1',
+    '● rounds: 3/6',
+    '● blocked: GOAL_ROUND — no progress',
+    '● activation: disarmed',
+  ])
+})
+
+test('foldedResultSummaryFor derives a friendly phrase, never the JSON', async () => {
+  const { foldedResultSummaryFor } = await import('../../src/tui/transcript/tool-presentation.ts')
+  // ralph: the render text's friendly first line is the summary.
+  assert.equal(
+    foldedResultSummaryFor('ralph', 'Ralph worker reported completion after 2 rounds.\nFinal report:\n{"status":"complete"}'),
+    'Ralph worker reported completion after 2 rounds.',
+  )
+  // A bare-JSON ralph result (no render prefix) falls back to status/rounds.
+  assert.equal(foldedResultSummaryFor('ralph', '{"status":"blocked","roundsStarted":3,"report":{}}'), 'blocked · 3 rounds')
+  // schedule family.
+  assert.equal(foldedResultSummaryFor('schedule_list', '[{"kind":"after","id":"s1"}]'), '1 scheduled')
+  assert.equal(foldedResultSummaryFor('schedule_list', '[]'), 'no scheduled jobs')
+  assert.equal(foldedResultSummaryFor('schedule_create', '{"kind":"after","id":"s1","state":"pending"}'), 'after · pending')
+  assert.equal(foldedResultSummaryFor('schedule_delete', '{"id":"s1","deleted":true}'), 'deleted')
+  assert.equal(foldedResultSummaryFor('schedule_delete', '{"id":"s1","deleted":false}'), 'not found')
+  assert.equal(foldedResultSummaryFor('schedule_list', '{"code":"schedule_error","message":"boom"}'), 'schedule_error')
+  // cordis inspect family.
+  assert.equal(foldedResultSummaryFor('cordis_inspect_list', '{"providers":[{"platform":"p"},{"platform":"q"}]}'), '2 providers')
+  assert.equal(foldedResultSummaryFor('cordis_inspect_list', '{"providers":[]}'), 'no providers')
+  assert.equal(foldedResultSummaryFor('cordis_inspect_query', '{"platform":"p","provider":"x","method":"query"}'), 'p · x · query')
+  assert.equal(foldedResultSummaryFor('cordis_inspect_self', '{"mode":"plugins","plugins":[]}'), 'mode plugins')
+  // Undeducible results yield undefined (the caller shows NO preview).
+  assert.equal(foldedResultSummaryFor('schedule_create', 'not json at all'), undefined)
+  assert.equal(foldedResultSummaryFor('cordis_inspect_query', '{"data":42}'), undefined)
+})
+
+test('folded JSON-result cards show the summary, never the raw JSON', async () => {
+  const { vt, app } = startApp()
+  app.setTranscript([
+    {
+      kind: 'tool', turn: 0, name: 'schedule_list', args: '{}',
+      result: '[{"kind":"after","id":"s1","prompt":"ping","scheduledAt":"t","state":"pending","deliveryMode":"queue","afterSeconds":30}]',
+      status: 'ok',
+    },
+    {
+      kind: 'tool', turn: 0, name: 'cordis_inspect_list', args: '{}',
+      result: '{"providers":[{"platform":"p","id":"i","purpose":"x","methods":[]}]}',
+      status: 'ok',
+    },
+    {
+      kind: 'tool', turn: 0, name: 'ralph', args: '{}',
+      result: 'Ralph worker reported completion after 2 rounds.\nFinal report:\n{"status":"complete","report":{"summary":"done"}}',
+      status: 'ok',
+    },
+  ])
+  const view = await viewport(vt)
+  assert.ok(view.includes('— 1 scheduled'), `schedule summary missing:\n${view}`)
+  assert.ok(view.includes('— 1 providers'), `cordis summary missing:\n${view}`)
+  assert.ok(view.includes('— Ralph worker reported completion after 2 rounds.'), `ralph summary missing:\n${view}`)
+  assert.ok(!view.includes('"afterSeconds"'), `raw schedule JSON leaked into the fold:\n${view}`)
+  assert.ok(!view.includes('"providers"'), `raw cordis JSON leaked into the fold:\n${view}`)
+  assert.ok(!view.includes('"summary"'), `raw ralph report JSON leaked into the fold:\n${view}`)
+  app.stop()
+})
+
+test('cancelled ask_user_question cards show the structured error identity', async () => {
+  const { vt, app } = startApp()
+  app.setTranscript([
+    {
+      kind: 'tool', turn: 0, name: 'ask_user_question',
+      args: '{"questions":[{"id":"q","question":"Go?"}]}',
+      result: '',
+      status: 'error',
+      error: { name: 'UserQuestionError', code: 'ASK_CANCELLED' },
+    },
+  ])
+  app.setTranscriptDetailExpanded(true)
+  const view = await viewport(vt)
+  assert.ok(view.includes('UserQuestionError: ASK_CANCELLED'), `error identity missing:\n${view}`)
+  assert.ok(!view.includes('"answers"'), `raw answers JSON leaked:\n${view}`)
+  app.stop()
+})
+
+test('askAnswersSummary counts answered entries and skips skipped ones', async () => {
+  const { askAnswersSummary } = await import('../../src/tui/transcript/tool-presentation.ts')
+  assert.equal(askAnswersSummary(JSON.stringify({ answers: [
+    { id: 'a', selected: ['x'] },
+    { id: 'b', selected: [], custom: 'freeform' },
+    { id: 'c', selected: [], custom: '' },
+  ] })), '2/3 answered')
+  // All skipped.
+  assert.equal(askAnswersSummary(JSON.stringify({ answers: [
+    { id: 'a', selected: [] },
+    { id: 'b' },
+  ] })), '0/2 answered')
+  // Malformed / non-answer text: undefined.
+  assert.equal(askAnswersSummary('oops'), undefined)
+  assert.equal(askAnswersSummary('"str"'), undefined)
+  assert.equal(askAnswersSummary('null'), undefined)
+  assert.equal(askAnswersSummary('{"other":1}'), undefined)
+  // A malformed entry (non-object) invalidates the WHOLE set — the same
+  // every-isAnswer check the web's answeredSummary applies — so the count
+  // can never disagree with the rendered lines.
+  assert.equal(askAnswersSummary(JSON.stringify({ answers: [null] })), undefined)
+  assert.equal(askAnswersSummary(JSON.stringify({ answers: [{ id: 'a', selected: ['x'] }, 'oops'] })), undefined)
+})
+
+test('askAnswersLines renders one line per answer, skipped entries dimmed', async () => {
+  const { askAnswersLines } = await import('../../src/tui/transcript/tool-presentation.ts')
+  assert.deepEqual(askAnswersLines(JSON.stringify({ answers: [
+    { id: 'q1', selected: ['x', 'y'] },
+    { id: 'q2', selected: [], custom: 'freeform' },
+    { id: 'q3', selected: [], custom: '' },
+    // Non-string selected members are dropped.
+    { id: 'q5', selected: [1, 'ok'] },
+  ] })), [
+    { text: '● q1 → x, y', skipped: false },
+    { text: '● q2 → freeform', skipped: false },
+    { text: '○ q3 — skipped', skipped: true },
+    { text: '● q5 → ok', skipped: false },
+  ])
+  // Unparseable / non-answer text: undefined (caller falls back).
+  assert.equal(askAnswersLines('oops'), undefined)
+  assert.equal(askAnswersLines('"str"'), undefined)
+  assert.equal(askAnswersLines('null'), undefined)
+  assert.equal(askAnswersLines('{"other":1}'), undefined)
+  // A malformed entry invalidates the set, exactly like the summary — the
+  // count and the rendered rows can never disagree.
+  assert.equal(askAnswersLines(JSON.stringify({ answers: [null] })), undefined)
+  assert.equal(askAnswersLines(JSON.stringify({ answers: [{ id: 'a', selected: ['x'] }, null] })), undefined)
+  // Empty answers array parses to no lines (not an error).
+  assert.deepEqual(askAnswersLines(JSON.stringify({ answers: [] })), [])
+})
+
+test('web search result views render sources and the answer (WebBlock parity)', async () => {
+  const vt = new VirtualTerminal(100, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
+    present: {
+      call: () => undefined,
+      result: () => ({
+        card: 'web', kind: 'search', truncated: true,
+        answer: 'The harness renders cards.',
+        sources: [
+          { url: 'https://example.com/a', title: 'Card docs', snippet: 'How cards render.' },
+          { url: 'https://example.com/b' },
+        ],
+      }),
+    },
+  })
+  app.start()
+
+  startedApps.add(app)
+  app.setTranscript([{
+    kind: 'tool', turn: 0, name: 'web_search',
+    args: '{"query":"dsh cards"}',
+    result: 'raw model-facing text must not appear',
+    status: 'ok',
+    resultBlocks: [{ type: 'text', text: 'raw model-facing text must not appear' }],
+  }])
+  app.setTranscriptDetailExpanded(true)
+  const view = await viewport(vt)
+  assert.ok(view.includes('The harness renders cards.'), `answer missing:\n${view}`)
+  assert.ok(view.includes('• Card docs — https://example.com/a'), `source title-url missing:\n${view}`)
+  assert.ok(view.includes('  How cards render.'), `source snippet missing:\n${view}`)
+  assert.ok(view.includes('• https://example.com/b'), `untitled source missing:\n${view}`)
+  assert.ok(view.includes('… truncated — more sources omitted'), `truncation marker missing:\n${view}`)
+  assert.ok(!view.includes('raw model-facing text'), `raw result leaked:\n${view}`)
+  app.stop()
+})
+
+test('web fetch result views render the URL and HTTP status', async () => {
+  const vt = new VirtualTerminal(100, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
+    present: {
+      call: () => undefined,
+      result: () => ({ card: 'web', kind: 'fetch', url: 'https://example.com/page', statusCode: 200, truncated: false }),
+    },
+  })
+  app.start()
+
+  startedApps.add(app)
+  app.setTranscript([{
+    kind: 'tool', turn: 0, name: 'web_fetch',
+    args: '{"url":"https://example.com/page"}',
+    result: 'raw body', status: 'ok', resultBlocks: [{ type: 'text', text: 'raw body' }],
+  }])
+  app.setTranscriptDetailExpanded(true)
+  const view = await viewport(vt)
+  assert.ok(view.includes('https://example.com/page — HTTP 200'), `fetch summary missing:\n${view}`)
+  assert.ok(!view.includes('raw body'), `raw body leaked:\n${view}`)
+  app.stop()
+})
+
+test('todo_write rawInput renders as a checklist instead of pretty JSON', async () => {
+  const vt = new VirtualTerminal(100, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
+    present: {
+      call: () => ({ card: 'generic', title: 'Update todo list', kind: 'other', rawInput: {
+        todos: [
+          { content: 'fix tests', status: 'in_progress' },
+          { content: 'ship it', status: 'pending' },
+          { content: 'done thing', status: 'completed' },
+        ],
+      } }),
+      result: () => undefined,
+    },
+  })
+  app.start()
+
+  startedApps.add(app)
+  app.setTranscript([{
+    kind: 'tool', turn: 0, name: 'todo_write',
+    args: JSON.stringify({ todos: [
+      { content: 'fix tests', status: 'in_progress' },
+      { content: 'ship it', status: 'pending' },
+      { content: 'done thing', status: 'completed' },
+    ] }),
+    result: '', status: 'running',
+  }])
+  app.setTranscriptDetailExpanded(true)
+  const view = await viewport(vt)
+  assert.ok(view.includes('● fix tests'), `active item missing:\n${view}`)
+  assert.ok(view.includes('○ ship it'), `pending item missing:\n${view}`)
+  assert.ok(view.includes('✓ done thing'), `completed item missing:\n${view}`)
+  assert.ok(!view.includes('"todos"'), `raw JSON leaked:\n${view}`)
+  app.stop()
+})
+
+test('exit_plan_mode renders its content plan body while running', async () => {
+  const vt = new VirtualTerminal(100, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
+    present: {
+      call: () => ({
+        card: 'generic', title: 'The Plan', kind: 'other',
+        content: [{ type: 'text', text: '# The Plan\nStep one.\nStep two.' }],
+      }),
+      result: () => undefined,
+    },
+  })
+  app.start()
+
+  startedApps.add(app)
+  app.setTranscript([{
+    kind: 'tool', turn: 0, name: 'exit_plan_mode',
+    args: JSON.stringify({ plan: '# The Plan\nStep one.\nStep two.' }),
+    result: '', status: 'running',
+  }])
+  app.setTranscriptDetailExpanded(true)
+  const view = await viewport(vt)
+  assert.ok(view.includes('Step one.'), `plan body missing:\n${view}`)
+  assert.ok(view.includes('Step two.'), `plan body truncated:\n${view}`)
+  assert.ok(!view.includes('"plan"'), `raw JSON leaked:\n${view}`)
+  app.stop()
+})
+
+test('generic result content renders instead of the raw model-facing text', async () => {
+  const vt = new VirtualTerminal(100, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
+    present: {
+      call: () => undefined,
+      result: () => ({ card: 'generic', title: 'Plan review', content: [{ type: 'text', text: 'The plan was approved.' }] }),
+    },
+  })
+  app.start()
+
+  startedApps.add(app)
+  app.setTranscript([{
+    kind: 'tool', turn: 0, name: 'exit_plan_mode',
+    args: '{"plan":"x"}', result: 'raw plan review', status: 'ok',
+    resultBlocks: [{ type: 'text', text: 'raw plan review' }],
+  }])
+  app.setTranscriptDetailExpanded(true)
+  const view = await viewport(vt)
+  assert.ok(view.includes('The plan was approved.'), `generic result content missing:\n${view}`)
+  assert.ok(!view.includes('raw plan review'), `raw result text leaked:\n${view}`)
+  app.stop()
+})
+
+test('folded todo cards preview done/total counts', async () => {
+  const { vt, app } = startApp()
+  app.setTranscript([{
+    kind: 'tool', turn: 0, name: 'todo_write',
+    args: JSON.stringify({ todos: [
+      { content: 'one', status: 'completed' },
+      { content: 'two', status: 'completed' },
+      { content: 'three', status: 'pending' },
+    ] }),
+    result: '', status: 'ok',
+  }])
+  const view = await viewport(vt)
+  assert.ok(view.includes('2/3 done'), `folded todo count missing:\n${view}`)
+  assert.ok(view.includes('three'), `first active item missing:\n${view}`)
+})
+
+test('folded web cards preview the query/url without repeating the header', async () => {
+  const { vt, app } = startApp()
+  app.setTranscript([
+    { kind: 'tool', turn: 0, name: 'web_search', args: '{"query":"dsh cards"}', result: 'x', status: 'ok' },
+    { kind: 'tool', turn: 0, name: 'web_fetch', args: '{"url":"https://example.com/p"}', result: 'x', status: 'ok' },
+  ])
+  const view = await viewport(vt)
+  // The header summary already carries the query/url (SUMMARY_KEYS), so the
+  // folded row shows it once — never duplicated by a preview suffix.
+  assert.ok(view.includes('Search dsh cards'), `folded web_search query missing:\n${view}`)
+  assert.ok(view.includes('https://example.com/p'), `folded web_fetch url missing:\n${view}`)
+  const searchRow = view.split('\n').find(line => line.includes('dsh cards'))
+  assert.ok(searchRow !== undefined && !searchRow.includes('— dsh cards'), `query duplicated on the folded row:\n${view}`)
+})
+
+test('webCardLines pure helper renders both search and fetch shapes', () => {
+  assert.deepEqual(webCardLines({
+    card: 'web', kind: 'search', truncated: true, answer: 'A.',
+    sources: [{ url: 'https://e.com', title: 'T', snippet: 'S.' }],
+  }), ['A.', '• T — https://e.com', '  S.', '… truncated — more sources omitted'])
+  assert.deepEqual(webCardLines({
+    card: 'web', kind: 'fetch', url: 'https://e.com', statusCode: 404, truncated: false,
+  }), ['https://e.com — HTTP 404'])
+})
+
+test('subagentModelDisplay extracts model/provider from subagent-family calls only', () => {
+  // subagent_route top-level shape: both parts present.
+  assert.equal(
+    subagentModelDisplay('subagent_route', JSON.stringify({ description: 'x', prompt: 'y', provider: 'ollama', model: 'deepseek-v4' })),
+    'deepseek-v4 · ollama',
+  )
+  // Either part alone renders alone.
+  assert.equal(subagentModelDisplay('subagent_router', JSON.stringify({ model: 'm1' })), 'm1')
+  assert.equal(subagentModelDisplay('subagent_route', JSON.stringify({ provider: 'p1' })), 'p1')
+  // agentOptions shape (compat with other dispatchers).
+  assert.equal(subagentModelDisplay('subagent_fork', JSON.stringify({ agentOptions: { provider: 'p', model: 'm' } })), 'm · p')
+  // No override in the args → undefined (the official subagent tool's model
+  // lives in deployment config and never renders).
+  assert.equal(subagentModelDisplay('subagent', JSON.stringify({ description: 'a', prompt: 'b' })), undefined)
+  assert.equal(subagentModelDisplay('subagent_route', JSON.stringify({ description: 'a', prompt: 'b' })), undefined)
+  // Unknown names / malformed / non-object args → undefined (compat: zero
+  // rendering change for every other tool).
+  assert.equal(subagentModelDisplay('bash', JSON.stringify({ model: 'x' })), undefined)
+  assert.equal(subagentModelDisplay('workflow', JSON.stringify({ model: 'x' })), undefined)
+  assert.equal(subagentModelDisplay('subagent_route', 'not-json'), undefined)
+  assert.equal(subagentModelDisplay('subagent_route', ''), undefined)
+  assert.equal(subagentModelDisplay('subagent_route', '[]'), undefined)
+  assert.equal(subagentModelDisplay('subagent_route', 'null'), undefined)
+})
+
+test('genericRawInputLines structures todo/session/terminal payloads', () => {
+  assert.deepEqual(genericRawInputLines('todo_write', {
+    todos: [
+      { content: 'a', status: 'in_progress' },
+      { content: 'b', status: 'completed' },
+    ],
+  }), ['● a', '✓ b'])
+  // The real todo_write presenter ships the todos ARRAY itself
+  // (presentCall: rawInput: args.todos), not a wrapped object.
+  assert.deepEqual(genericRawInputLines('todo_write', [
+    { content: 'a', status: 'in_progress' },
+    { content: 'b', status: 'completed' },
+  ]), ['● a', '✓ b'])
+  assert.deepEqual(genericRawInputLines('session_event_read', { seq: 7, session_id: 's1' }), ['s1 · seq 7'])
+  assert.deepEqual(genericRawInputLines('terminal_send', { sessionId: 'main', text: 'go' }), ['session main: go'])
+  assert.deepEqual(genericRawInputLines('unknown_tool', { a: 1 }), ['{', '  "a": 1', '}'])
+  assert.deepEqual(genericRawInputLines('skill', 'my-skill'), ['my-skill'])
+})
+
+test('foldedCallPreview pure helper derives todo/web/skill previews', () => {
+  assert.equal(foldedCallPreview('todo_write', JSON.stringify({ todos: [
+    { content: 'one', status: 'completed' },
+    { content: 'two', status: 'pending' },
+  ] })), ' — 1/2 done · two')
+  assert.equal(foldedCallPreview('web_search', '{"query":"dsh"}'), ' — dsh')
+  assert.equal(foldedCallPreview('web_fetch', '{"url":"https://e.com"}'), ' — https://e.com')
+  assert.equal(foldedCallPreview('skill', '{"name":"reclaim"}'), ' — reclaim')
+  assert.equal(foldedCallPreview('bash', '{"command":"ls"}'), '')
+})
+
+test('resultTextLines flattens blocks with the Web resultText semantics', () => {
+  assert.deepEqual(resultTextLines([{ type: 'text', text: 'one\ntwo' }]), ['one', 'two'])
+  assert.deepEqual(resultTextLines([{ type: 'reasoning', text: 'think' }]), ['{\n  "type": "reasoning",\n  "text": "think"\n}'])
+  assert.deepEqual(resultTextLines([], { name: 'Error', code: 'E_BAD' }), ['Error: E_BAD'])
+  assert.deepEqual(resultTextLines([]), [])
+})
+
+// ── The transcript right gutter (transcript right-gutter width contract) ───────────────
+
+test('transcriptContentWidth reserves the right gutter and never goes negative', () => {
+  assert.equal(TRANSCRIPT_RIGHT_GUTTER, 2)
+  // The plan §7 table: a 1-3 cell terminal still yields 1 cell.
+  const cases: Array<[number, number]> = [
+    [1, 1], [2, 1], [3, 1], [4, 2], [8, 6], [80, 78], [120, 118],
+  ]
+  for (const [terminal, expected] of cases) {
+    assert.equal(transcriptContentWidth(terminal), expected, `width ${terminal} must yield ${expected}`)
+  }
+})
+
+test('TranscriptGutterComponent renders the child at the content width and is NON-OWNING', () => {
+  const observed: number[] = []
+  let invalidated = 0
+  let disposed = 0
+  const child = {
+    invalidate: () => { invalidated += 1 },
+    dispose: () => { disposed += 1 },
+    render: (width: number): string[] => {
+      observed.push(width)
+      return ['x']
+    },
+  }
+  const wrapped = new TranscriptGutterComponent(child)
+  assert.deepEqual(wrapped.render(80), ['x'])
+  assert.deepEqual(observed, [78], 'the wrapper must render the child at width minus the gutter')
+  assert.deepEqual(wrapped.render(3), ['x'])
+  assert.deepEqual(observed, [78, 1], 'a tiny terminal must still yield a 1-cell content width')
+  assert.equal(wrapped.wantsKeyRelease, undefined)
+  wrapped.invalidate()
+  assert.equal(invalidated, 1, 'invalidate() must forward to the child (non-destructive)')
+  // The ownership contract: the wrapper is a NON-OWNING projection — a
+  // messagesView.clear() (every rebuildMessages) calls dispose() on the
+  // wrapper, which must NOT dispose the CACHED child the cache reuses
+  // right after (an ImageThumbnail would drop its loader subscription).
+  wrapped.dispose()
+  assert.equal(disposed, 0, 'dispose() must NOT forward: the component caches own the child lifecycle')
+})
+
+test('assistant long text wraps inside the transcript gutter (40 cols → 38)', async () => {
+  const vt = new VirtualTerminal(40, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+
+  startedApps.add(app)
+  app.setTranscript([{ kind: 'assistant', turn: 0, text: 'x'.repeat(60) }])
+  await vt.waitForRender()
+  const lines = vt.getViewport()
+  const assistant = lines.findIndex(line => line.includes('x'))
+  assert.ok(assistant >= 0, `assistant rows missing:\n${lines.join('\n')}`)
+  // The whale bullet (4 cells) + the wrapped inner: the FIRST row fills
+  // exactly the transcript content width — wrapping happened at 38, not
+  // at the 40-col terminal edge.
+  assert.equal(visibleWidth(lines[assistant]!), transcriptContentWidth(40),
+    `the first row must fill exactly the 38-col content width:\n${lines[assistant]}`)
+  for (const line of lines.slice(assistant, assistant + 2)) {
+    assert.ok(visibleWidth(line) <= transcriptContentWidth(40),
+      `an assistant row exceeds the 38-col content width: ${JSON.stringify(line)}`)
+  }
+  // Continuation rows indent under the bullet (never repeat it).
+  assert.ok(!lines[assistant + 1]!.includes('🐋'), `continuation must not repeat the bullet:\n${lines[assistant + 1]}`)
+  app.stop()
+})
+
+test('the user bubble background ends at the transcript content width, not the terminal edge', async () => {
+  const vt = new VirtualTerminal(40, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.applyTheme('dark')
+  app.start()
+
+  startedApps.add(app)
+  app.setTranscript([{ kind: 'user', turn: 0, text: 'y'.repeat(60) }])
+  await vt.waitForRender()
+  const lines = vt.getViewport()
+  const user = lines.findIndex(line => line.includes('❯'))
+  assert.ok(user >= 0, `user row missing:\n${lines.join('\n')}`)
+  // The bubble covers the content width (38 at 40 cols): marker, body and
+  // the padded tail all carry roleUserBg; the LAST TWO cells stay the TUI
+  // background — the bubble ends at the gutter, like every other block.
+  assert.equal(vt.getCellBgRgb(user, 0), 0x2c2c2f, `bubble must start at column 0:\n${lines.join('\n')}`)
+  assert.equal(vt.getCellBgRgb(user, transcriptContentWidth(40) - 1), 0x2c2c2f,
+    `bubble must cover the last content cell (col ${transcriptContentWidth(40) - 1}):\n${lines.join('\n')}`)
+  assert.equal(vt.getCellBgRgb(user, transcriptContentWidth(40)), undefined,
+    `the gutter cell (col ${transcriptContentWidth(40)}) must NOT carry the bubble:\n${lines.join('\n')}`)
+  assert.equal(vt.getCellBgRgb(user, 39), undefined,
+    `the terminal-edge cell must NOT carry the bubble:\n${lines.join('\n')}`)
+  // The content still wraps INSIDE the content width (inner = 38 - marker).
+  for (const line of lines.slice(user, user + 2)) {
+    assert.ok(visibleWidth(line) <= transcriptContentWidth(40),
+      `a bubble row exceeds the 38-col content width: ${JSON.stringify(line)}`)
+  }
+  app.stop()
+})
+
+test('assistant markdown with CJK, emoji and inline code stays inside the gutter', async () => {
+  const vt = new VirtualTerminal(40, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+
+  startedApps.add(app)
+  app.setTranscript([{
+    kind: 'assistant', turn: 0,
+    text: '这是一段非常长的中文内容用来验证窄终端换行必须发生在内容宽度内部 🎉 同时还有一段 `inline code` 片段需要保持完整',
+  }])
+  await vt.waitForRender()
+  const lines = vt.getViewport()
+  const joined = lines.join('\n')
+  assert.ok(joined.includes('🎉'), `the emoji must survive intact:\n${joined}`)
+  assert.ok(joined.includes('inline code'), `the inline code must survive intact:\n${joined}`)
+  for (const line of lines) {
+    if (line.includes('中文') || line.includes('inline')) {
+      assert.ok(visibleWidth(line) <= transcriptContentWidth(40),
+        `a markdown row exceeds the 38-col content width: ${JSON.stringify(line)}`)
+    }
+  }
+  app.stop()
+})
+
+test('folded tool / system / compaction rows respect the transcript gutter', async () => {
+  const vt = new VirtualTerminal(40, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+
+  startedApps.add(app)
+  app.setTranscript([
+    { kind: 'tool', turn: 0, name: 'bash', args: JSON.stringify({ command: `echo ${'x'.repeat(80)}` }), result: 'y'.repeat(120), status: 'ok' },
+    { kind: 'tool', turn: Number.POSITIVE_INFINITY, name: 'shell', args: `echo ${'z'.repeat(80)}`, result: 'w'.repeat(200), status: 'ok' },
+    { kind: 'system', turn: 0, label: 'workspace-instructions', summary: 's'.repeat(60), text: 'body' },
+    { kind: 'compaction', turn: 0, items: 40, tokens: 12345, text: 'summary body' },
+  ])
+  await vt.waitForRender()
+  const lines = vt.getViewport()
+  // The editor border (a full-width rule) is chrome, not a transcript
+  // row: only check the rows above it.
+  const border = lines.findIndex(line => /^[─═]+$/.test(line.trim()))
+  const rows = lines.slice(0, border === -1 ? lines.length : border).filter(line => line.trim() !== '')
+  for (const line of rows) {
+    assert.ok(visibleWidth(line) <= transcriptContentWidth(40),
+      `a folded card row exceeds the 38-col content width: ${JSON.stringify(line)}`)
+  }
+  // The folded command row must still show its prompt + a truncated command.
+  assert.ok(rows.some(line => line.includes('$ ')), `command row missing:\n${lines.join('\n')}`)
+  app.stop()
+})
+
+test('a terminal resize re-bakes the folded rows at the new content width (never wrap)', async () => {
+  // The width cache identity (review round 1, P1): folded rows truncate at
+  // BUILD time to the transcript content width. A 100 → 20 resize must
+  // rebuild them at the new width — a stale 98-col bake would wrap at the
+  // 18-col paint width and turn one folded row into several.
+  const vt = new VirtualTerminal(100, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+
+  startedApps.add(app)
+  app.setTranscript([
+    { kind: 'system', turn: 0, label: 'workspace-instructions', summary: 's'.repeat(80), text: 'body' },
+    { kind: 'tool', turn: 0, name: 'bash', args: JSON.stringify({ command: `echo ${'x'.repeat(80)}` }), result: 'y'.repeat(80), status: 'ok' },
+  ])
+  await vt.waitForRender()
+  // Baseline at 100: the system fold is ONE row directly above the tool
+  // card (one blank spacer row between the blocks). Locate by the 📎
+  // marker — the label truncates at narrow widths ('Context injec…').
+  let lines = vt.getViewport()
+  let sysIdx = lines.findIndex(line => line.includes('📎'))
+  let toolIdx = lines.findIndex(line => line.includes('🖥️'))
+  assert.ok(sysIdx >= 0 && toolIdx > sysIdx, `folded rows missing at 100:\n${lines.join('\n')}`)
+  assert.equal(toolIdx - sysIdx, 2, `precondition: the system fold is ONE row at 100:\n${lines.join('\n')}`)
+  vt.resize(20, 24)
+  await vt.waitForRender()
+  lines = vt.getViewport()
+  sysIdx = lines.findIndex(line => line.includes('📎'))
+  toolIdx = lines.findIndex(line => line.includes('🖥️'))
+  assert.ok(sysIdx >= 0 && toolIdx > sysIdx, `folded rows missing after resize:\n${lines.join('\n')}`)
+  assert.equal(toolIdx - sysIdx, 2,
+    `the system fold must stay ONE row after the resize (a stale 100-col bake would wrap):\n${lines.join('\n')}`)
+  assert.ok(visibleWidth(lines[sysIdx]!) <= transcriptContentWidth(20),
+    `the re-baked fold must fit the 18-col content width: ${JSON.stringify(lines[sysIdx])}`)
+  app.stop()
+})
+
+test('assistant bullet, thinking and compaction follow the symbols palette', async (t) => {
+  const vt = new VirtualTerminal(100, 40)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { iconStyle: 'symbols' })
+  t.after(() => app.stop())
+  app.start()
+
+  startedApps.add(app)
+  app.setTranscript([
+    { kind: 'assistant', turn: 0, text: 'para one\n\npara two' },
+    { kind: 'thinking', turn: 0, text: 'reasoning preview line' },
+    { kind: 'compaction', turn: 0, text: 'summary', items: 3, tokens: 100 },
+  ])
+  const view = await viewport(vt)
+  assert.ok(view.includes('∙  para one'), `symbols bullet missing:\n${view}`)
+  assert.ok(view.includes('∿ Thinking'), `symbols thinking title missing:\n${view}`)
+  assert.ok(view.includes('↧ Context compacted'), `symbols compaction title missing:\n${view}`)
+  // The header brand whale stays by design; the content-area glyphs must all be symbols.
+  assert.ok(!view.includes('🌊') && !view.includes('🗜') && !view.includes('🐋  para'), `emoji glyphs leaked into symbols:\n${view}`)
+})
+
+test('minimal keeps the bullet and semantic queue marker; thinking/compaction titles go bare', async (t) => {
+  const vt = new VirtualTerminal(100, 40)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { iconStyle: 'minimal' })
+  t.after(() => app.stop())
+  app.start()
+
+  startedApps.add(app)
+  app.setTranscript([
+    { kind: 'assistant', turn: 0, text: 'para one' },
+    { kind: 'thinking', turn: 0, text: 'reasoning preview line' },
+    { kind: 'compaction', turn: 0, text: 'summary', items: 3, tokens: 2 },
+  ])
+  app.setQueueItems([{ id: 'j-1', text: 'job done: exit 0', mode: 'steer' }])
+  const view = await viewport(vt)
+  const lines = view.split('\n').map(stripTerminalSequences)
+  assert.ok(lines.some(line => line.startsWith('∙  para one')), `the bullet must survive minimal:\n${view}`)
+  assert.ok(lines.some(line => line.startsWith('Thinking')), `thinking title must go bare (no leading space):\n${view}`)
+  assert.ok(lines.some(line => line.startsWith('Context compacted')), `compaction title must go bare:\n${view}`)
+  assert.ok(view.includes('❯ job done: exit 0'), `the semantic queue marker must survive minimal:\n${view}`)
+})
+
+// ── untrusted terminal output hardening: the transcript wire contract ──────
+
+/** One hostile payload covering every control family the projection drops. */
+const HOSTILE_PAYLOAD =
+  'safe-start'
+  + '\u001b]52;c;YXR0YWNr\u0007' // OSC 52 clipboard
+  + '\u001b]0;hijacked-title\u001b\\' // OSC 0 title (ST-terminated)
+  + '\u001b[2J\u001b[H' // clear + home
+  + '\u001b[?1049h' // alternate screen
+  + '\u001b[?1000h' // mouse mode
+  + '\u001bPbad\u001b\\' // device control string
+  + '\u009b2J' // raw 8-bit C1 CSI
+  + '\u001b[38;2;999;1;1m' // malformed SGR (dropped whole)
+  + 'needle-text'
+  + '\rprogress'
+  + '\tend'
+
+const RAW_HAZARDS = ['YXR0YWNr', 'hijacked-title', '\u001bPbad', '\u001b[38;2;999;1;1m', '\u009b']
+
+test('untrusted transcript text never carries its own terminal controls to the wire', async () => {
+  for (const preset of ['full', 'compact', 'focus'] as const) {
+    const { vt, app, writes } = startAppWithWrites()
+    app.setDisplayPreset(preset)
+    const user: TranscriptMessage = { kind: 'user', turn: 0, text: HOSTILE_PAYLOAD }
+    const assistant: TranscriptMessage = { kind: 'assistant', turn: 0, text: HOSTILE_PAYLOAD }
+    const thinking: TranscriptMessage = { kind: 'thinking', turn: 0, text: HOSTILE_PAYLOAD }
+    const system: TranscriptMessage = {
+      kind: 'system', turn: 0, text: HOSTILE_PAYLOAD, label: HOSTILE_PAYLOAD, summary: HOSTILE_PAYLOAD, context: true,
+    }
+    const command: TranscriptMessage = {
+      kind: 'command',
+      commandId: CommandId('cmd-hostile'),
+      seq: SessionSeq(1),
+      time: 1,
+      name: HOSTILE_PAYLOAD,
+      args: HOSTILE_PAYLOAD,
+      outcome: { kind: 'success', text: HOSTILE_PAYLOAD },
+    }
+    const tool: TranscriptMessage = {
+      kind: 'tool', turn: 0, name: 'bash', args: '{"command":"echo hi"}', result: HOSTILE_PAYLOAD, status: 'ok',
+    }
+    app.setTranscript([user, assistant, thinking, system, command, tool])
+    const view = await viewport(vt)
+    const stream = writes.join('')
+    for (const hazard of RAW_HAZARDS) {
+      assert.ok(!stream.includes(hazard),
+        `${preset}: hostile bytes reached the terminal stream: ${JSON.stringify(hazard)}`)
+    }
+    assert.match(view, /safe-start/, `${preset}: the payload's readable text survives:\n${view}`)
+    // The source objects stay byte-exact (one display projection, no mutation).
+    assert.equal(user.text, HOSTILE_PAYLOAD, `${preset}: the user source text is untouched`)
+    assert.equal(command.outcome?.text, HOSTILE_PAYLOAD, `${preset}: the command outcome is untouched`)
+    assert.equal(tool.result, HOSTILE_PAYLOAD, `${preset}: the tool result is untouched`)
+    // stop() does not release the process's single-live-TUI slot; dispose does.
+    startedApps.delete(app)
+    app.dispose()
+  }
+})
+
+test('a bash tool result keeps whitelisted log SGR at the TTY', async () => {
+  const { vt, app, writes } = startAppWithWrites()
+  const tool: TranscriptMessage = {
+    kind: 'tool', turn: 0, name: 'bash', args: '{"command":"printf"}',
+    result: 'plain \u001b[38;5;196mred\u001b[0m tail', status: 'ok',
+  }
+  app.setTranscript([tool])
+  await viewport(vt)
+  const stream = writes.join('')
+  assert.ok(stream.includes('\u001b[38;5;196m'), 'the whitelisted 256-color SGR reaches the TTY')
+  assert.equal(tool.result, 'plain \u001b[38;5;196mred\u001b[0m tail', 'the raw result is preserved')
+  app.stop()
+})
+
+test('hostile attachment, deliverable and ambient-cluster text never reaches the wire raw', async () => {
+  const { vt, app, writes } = startAppWithWrites()
+  const hostile = 'evil\u001b]52;c;YXR0YWNr\u0007\u001b[2J\u009b2Jname'
+  const user = {
+    kind: 'user', turn: 0, text: 'prompt',
+    content: [{ type: 'file', attachment: { id: 'a1', name: hostile, bytes: 12 } }],
+  } as unknown as TranscriptMessage
+  const assistant = {
+    kind: 'assistant', turn: 0, text: 'done',
+    deliverables: [{ path: hostile, description: hostile }],
+  } as unknown as TranscriptMessage
+  const ambient = (text: string): TranscriptMessage => ({
+    kind: 'system', turn: 0, text, context: true,
+    label: hostile, summary: hostile,
+    source: { kind: 'context', form: 'instructions' },
+  }) as unknown as TranscriptMessage
+  app.setTranscript([user, assistant, ambient('first'), ambient('second')])
+  const view = await viewport(vt)
+  const stream = writes.join('')
+  assert.ok(!stream.includes('YXR0YWNr'), 'no OSC 52 payload from an attachment/deliverable/cluster reaches the stream')
+  assert.ok(!stream.includes('\u009b'), 'no raw C1 byte reaches the stream')
+  assert.ok(!view.includes('YXR0YWNr'), `the painted frame carries no payload:\n${view}`)
+  app.stop()
+})
+
+test('hostile todo content never reaches the dock summary raw', async () => {
+  const { vt, app, writes } = startAppWithWrites()
+  const hostile = 'evil\u001b]52;c;YXR0YWNr\u0007\u001b[2J\u009b2Jtask'
+  app.setTodoSummary([{ content: hostile, status: 'in_progress' }])
+  const view = await viewport(vt)
+  const stream = writes.join('')
+  assert.ok(!stream.includes('YXR0YWNr'), 'no OSC 52 payload from a todo row reaches the terminal stream')
+  assert.ok(!stream.includes('\u009b'), 'no raw C1 byte from a todo row reaches the terminal stream')
+  assert.match(view, /evil/, `the readable todo text survives:\n${view}`)
+  app.stop()
+})
+
+test('an unknown user content block fallback never reaches the wire raw', async () => {
+  const { vt, app, writes } = startAppWithWrites()
+  // JSON.stringify escapes ESC (< U+0020) but leaves C1 characters literal, so
+  // the unknown-block fallback is the path where a raw C1 byte can survive.
+  const hostile = 'evil\u009b2J\u009d0;PWNED\u0007name'
+  const user = {
+    kind: 'user', turn: 0, text: 'prompt',
+    content: [
+      { type: 'text', text: 'ok' },
+      { type: 'future-test-block', payload: { value: hostile } },
+    ],
+  } as unknown as TranscriptMessage
+  app.setTranscript([user])
+  const view = await viewport(vt)
+  const stream = writes.join('')
+  assert.ok(!stream.includes('\u009b'), 'no raw C1 CSI from an unknown block reaches the terminal stream')
+  assert.ok(!stream.includes('\u009d'), 'no raw C1 OSC from an unknown block reaches the terminal stream')
+  assert.match(view, /evil/, `the readable unknown-block text survives:\n${view}`)
+  app.stop()
+})
+
+test('a diff-shaped terminal result keeps its whitelisted log SGR', async () => {
+  const { vt, app, writes } = startAppWithWrites()
+  const tool: TranscriptMessage = {
+    kind: 'tool', turn: 0, name: 'bash', args: '{"command":"git diff"}',
+    result: 'head\n@@ -1 +1 @@\n\u001b[38;5;196mred line\u001b[0m', status: 'ok',
+  }
+  app.setTranscript([tool])
+  ;(app as unknown as { toggleMessageExpanded: (m: TranscriptMessage) => void }).toggleMessageExpanded(tool)
+  await viewport(vt)
+  assert.ok(writes.join('').includes('\u001b[38;5;196m'),
+    'the whitelisted SGR survives a diff-shaped terminal result instead of being re-projected as plain text')
+  app.stop()
+})
+
+test('a real Session fold carries hostile text to a safe transcript paint', async () => {
+  const hostile = 'evil\u001b]52;c;YXR0YWNr\u0007\u001b[2J\u009b2Jname'
+  const folder = new TranscriptFolder()
+  folder.apply([
+    { type: 'turn/start', seq: 0, time: 1, data: { turn: 0 } } as SessionEvent,
+    { type: 'step/start', seq: 1, time: 2, data: { turn: 0, step: 0 } } as SessionEvent,
+    {
+      type: 'user/message', seq: 2, time: 3,
+      data: { id: 'u-hostile', role: 'user', content: [{ type: 'text', text: hostile }], source: { kind: 'user' } },
+    } as unknown as SessionEvent,
+  ])
+  folder.applyLiveInput({
+    kind: 'chunk', sessionId: 'test', attemptId: 'attempt', turn: 0, step: 0, time: 4,
+    chunk: { type: 'text-delta', index: 0, text: hostile },
+  })
+  const messages = folder.messages()
+  assert.ok(messages.length > 0, 'the fold materialized the hostile rows')
+
+  const { vt, app, writes } = startAppWithWrites()
+  app.setTranscript(messages)
+  const view = await viewport(vt)
+  const stream = writes.join('')
+  assert.ok(!stream.includes('YXR0YWNr'), 'no OSC 52 payload reaches the TTY from a real fold')
+  assert.ok(!stream.includes('\u009b'), 'no raw C1 byte reaches the TTY from a real fold')
+  assert.match(view, /evil/, `the readable text survives:\n${view}`)
+  const user = messages.find(message => message.kind === 'user')
+  if (user !== undefined) assert.equal(user.text, hostile, 'the canonical transcript text is untouched')
+  app.stop()
+})
+
+test('hostile question text never reaches the TTY raw', async () => {
+  const { vt, app, writes } = startAppWithWrites()
+  const hostile = 'evil\u001b]52;c;YXR0YWNr\u0007\u001b[2J\u009b2Jname'
+  const pending = app.askQuestions([{
+    id: 'q1',
+    question: hostile,
+    header: hostile,
+    detail: hostile,
+    options: [{ label: hostile, description: hostile }],
+  }])
+  const view = await viewport(vt)
+  const stream = writes.join('')
+  assert.ok(!stream.includes('YXR0YWNr'), `no OSC 52 payload from question text reaches the TTY:\n${view}`)
+  assert.ok(!stream.includes('\u009b'), 'no raw C1 byte from question text reaches the TTY')
+  assert.match(view, /evil/, `the readable question text survives:\n${view}`)
+  vt.sendInput('\x1b')
+  await pending.catch(() => {})
+  app.stop()
+})
+
+test('a hostile command/tool identity is folded onto ONE header row in every preset', async () => {
+  // The command title/args, the tool card header and the Activity/Focus stat
+  // tails are SINGLE-row compositions (truncateToWidth + search-region
+  // columns + the width-degradation ladder). An embedded LF/TAB/CR must be
+  // folded before those rows are built, never left to the Text layout.
+  const hostileCommand = 'Evil\nCommand\tTabbed'
+  const hostileTool = 'Evil\r\nTool\tTabbed'
+  for (const preset of ['full', 'compact', 'focus'] as const) {
+    const { vt, app } = startAppWithWrites()
+    app.setDisplayPreset(preset)
+    const command: TranscriptMessage = {
+      kind: 'command',
+      commandId: CommandId('cmd-single-row'),
+      seq: SessionSeq(1),
+      time: 1,
+      name: hostileCommand,
+      args: '',
+      outcome: null,
+    }
+    const tool: TranscriptMessage = {
+      kind: 'tool', turn: 0, name: hostileTool, args: '{"x":"y"}', result: '', status: 'running',
+    }
+    app.setTranscript([command, tool])
+    const view = await viewport(vt)
+    const lines = view.split('\n').map(stripTerminalSequences)
+    assert.ok(lines.some(line => line.includes('/Evil Command   Tabbed')),
+      `${preset}: the command name/args share one head row:\n${view}`)
+    if (preset === 'full') {
+      assert.ok(lines.some(line => line.includes('Evil Tool   Tabbed · y')),
+        `${preset}: the tool name/summary share one head row:\n${view}`)
+    } else if (preset === 'compact') {
+      // Compact folds the tool row into the Activity header stat tail: the
+      // raw subtype name must not break that single header row. (Focus
+      // renders no Work span for this bare fixture; its header tail is the
+      // same projected parts list, covered by the Activity assertion.)
+      assert.ok(lines.some(line => line.includes('Evil Tool   Tabbed ×1')),
+        `${preset}: the action stat tail stays on its header row:\n${view}`)
+      assert.ok(!lines.some(line => line.trim().startsWith('Tool   Tabbed ×1')),
+        `${preset}: no orphan wrapped stat row leaked out of the header:\n${view}`)
+    }
+    assert.equal(command.name, hostileCommand, `${preset}: the command source name is untouched`)
+    assert.equal(tool.name, hostileTool, `${preset}: the tool source name is untouched`)
+    app.dispose()
+  }
+})
+
+test('a folded bash preview keeps the app-owned log reset when the style crosses the preview cut', async () => {
+  const { vt, app, writes } = startAppWithWrites()
+  // The whitelisted style starts on line 1; the ONLY reset sits at the end of
+  // line 4, i.e. past the folded preview's 3-line cut. Projecting the full log
+  // first would put the app-owned reset after the cut and let bold/background
+  // bleed into the next physical row.
+  const raw = '\u001b[1mfirst\nsecond\nthird\nfourth\u001b[0m'
+  // The real Ctrl+O master OFF state folds every process card (the production
+  // `renderToolCard` folded-preview path under test).
+  app.setTranscriptDetailExpanded(false)
+  const tool: TranscriptMessage = {
+    kind: 'tool', turn: 0, name: 'bash', args: '{"command":"printf"}', result: raw, status: 'ok',
+  }
+  app.setTranscript([tool])
+  await viewport(vt)
+  const stream = writes.join('')
+  const marker = stream.indexOf('first second third')
+  assert.ok(marker >= 0, `the folded preview was painted:\n${stream.slice(-3000)}`)
+  // Take the WHOLE physical row around the marker, including the style that
+  // opens before its first visible character.
+  const rowStart = Math.max(0, stream.lastIndexOf('\n', marker) + 1)
+  const rowEnd = stream.indexOf('\n', marker)
+  const painted = stream.slice(rowStart, rowEnd === -1 ? undefined : rowEnd)
+  assert.ok(painted.includes('\u001b[1m'), 'the whitelisted style survives the folded preview')
+  // The frame itself ends in an app-owned reset; the contract under test is the
+  // reset that CLOSES the external style immediately after its last preview
+  // character (a trailing frame reset would mask a leak).
+  assert.ok(painted.includes('third…\u001b[0m'),
+    `the app-owned reset immediately follows the styled preview (and its dropped-record marker):\n${JSON.stringify(painted)}`)
+  assert.equal(tool.result, raw, 'the raw result is untouched')
+  app.stop()
+})
+
+test('hostile welcome-card facts never reach the TTY raw and stay one physical line each', async () => {
+  const { vt, app, writes } = startAppWithWrites()
+  const hostile = 'Evil\nName\r\nTabbed\tX\u001b]52;c;YXR0YWNr\u0007tail'
+  const collapsed = 'Evil Name Tabbed   Xtail'
+  // The card's facts are Session/model/preset/package metadata. `setWelcomeCard`
+  // keeps the raw cwd as the workspace-root authority; only the DISPLAY values
+  // may be projected.
+  app.setWelcomeCard({
+    cwd: `/root/${hostile}`,
+    sessionId: hostile,
+    model: `p/${hostile}`,
+    version: hostile,
+    preset: hostile,
+  })
+  const view = await viewport(vt)
+  const stream = writes.join('')
+  assert.ok(!stream.includes('YXR0YWNr'), `no OSC payload from welcome facts reaches the TTY:\n${view}`)
+  assert.ok(!stream.includes('\u009b'), 'no raw C1 byte from welcome facts reaches the TTY')
+  assert.ok(!stream.includes('\u001b]52'), 'no raw OSC introducer from welcome facts reaches the TTY')
+  const plainView = view.replace(/\x1b\[[0-9;]*m/g, '')
+  assert.ok(plainView.includes(collapsed), `the collapsed facts survive on one row:\n${plainView}`)
+  app.stop()
+})
+
+test('a CR-progress folded preview measures the LOG-PROJECTED records, not raw zero-width CRs', async () => {
+  const { vt, app, writes } = startAppWithWrites()
+  app.setTranscriptDetailExpanded(false)
+  // 61 x-records separated by lone CRs: raw width counts each CR as 0 columns,
+  // so measuring BEFORE the log projection misses the 60 spaces the policy
+  // introduces and the folded row would widen past its budget.
+  const raw = `${'x\r'.repeat(60)}x`
+  const tool: TranscriptMessage = {
+    kind: 'tool', turn: 0, name: 'bash', args: '{"command":"printf"}', result: raw, status: 'ok',
+  }
+  app.setTranscript([tool])
+  const view = await viewport(vt)
+  const stream = writes.join('')
+  const marker = stream.indexOf('— x x x')
+  assert.ok(marker >= 0, `the folded preview was painted:\n${stream.slice(-2000)}`)
+  const rowStart = Math.max(0, stream.lastIndexOf('\n', marker) + 1)
+  const rowEnd = stream.indexOf('\n', marker)
+  const row = stripTerminalSequences(stream.slice(rowStart, rowEnd === -1 ? undefined : rowEnd)).trimEnd()
+  assert.ok(row.endsWith('— x x x…'),
+    `the folded preview shows the first three SAFE records AND the dropped-record marker on ONE bounded row: ${JSON.stringify(row)}`)
+  assert.ok(visibleWidth(row) <= 100, `the folded row stays inside the terminal width: ${JSON.stringify(row)}`)
+  assert.equal(tool.result, raw, 'the raw result is untouched')
+  app.stop()
+})
+
+test('a folded preview marks records dropped by COUNT, not only by width', async () => {
+  const { vt, app } = startAppWithWrites()
+  app.setTranscriptDetailExpanded(false)
+  const four: TranscriptMessage = {
+    kind: 'tool', turn: 0, name: 'generic_tool', args: '{"x":"y"}', result: 'one\ntwo\nthree\nfour', status: 'ok',
+  }
+  const exactly: TranscriptMessage = {
+    kind: 'tool', turn: 0, name: 'generic_tool', args: '{"x":"z"}', result: 'alpha\nbeta\ngamma', status: 'ok',
+  }
+  // The common shell shape: the third record is followed by a trailing LF. It
+  // TERMINATES the record; it is not a hidden fourth record.
+  const trailingLf: TranscriptMessage = {
+    kind: 'tool', turn: 0, name: 'generic_tool', args: '{"x":"lf"}', result: 'eins\nzwei\ndrei\n', status: 'ok',
+  }
+  // Symmetric style tail: the only content after the final LF is a reset.
+  const trailingReset: TranscriptMessage = {
+    kind: 'tool', turn: 0, name: 'generic_tool', args: '{"x":"sgr"}', result: 'red\nblue\ngreen\n\u001b[0m', status: 'ok',
+  }
+  app.setTranscript([four, exactly, trailingLf, trailingReset])
+  const view = await viewport(vt)
+  const lines = view.split('\n').map(line => stripTerminalSequences(line).trimEnd())
+  assert.ok(lines.some(line => line.endsWith('— one two three…')),
+    `a dropped fourth record must be marked: \n${lines.join('\n')}`)
+  assert.ok(!lines.some(line => line.includes('four')), 'the dropped record must not leak into the row')
+  assert.ok(lines.some(line => line.endsWith('— alpha beta gamma')),
+    `exactly the preview's record budget needs no marker: \n${lines.join('\n')}`)
+  assert.ok(!lines.some(line => line.endsWith('— alpha beta gamma…')), 'exactly three records is not a truncation')
+  assert.ok(lines.some(line => line.endsWith('— eins zwei drei')),
+    `a trailing LF terminates the third record; it is not a hidden fourth:\n${lines.join('\n')}`)
+  assert.ok(!lines.some(line => line.endsWith('— eins zwei drei…')), 'the trailing LF itself must not add a marker')
+  assert.ok(lines.some(line => line.endsWith('— red blue green')),
+    `an SGR-only tail after the final LF is not a hidden record:\n${lines.join('\n')}`)
+  assert.ok(!lines.some(line => line.endsWith('— red blue green…')), 'the style-only tail must not add a marker')
+  app.stop()
+})
+
+test('a width-clipped ANSI/CJK folded preview keeps exactly ONE hidden-content marker and its reset', async () => {
+  const { vt, app, writes } = startAppWithWrites(200, 24)
+  app.setTranscriptDetailExpanded(false)
+  const raw = `\u001b[1m${'界'.repeat(70)}\u001b[0m\nsecond\nthird\nfourth`
+  const tool: TranscriptMessage = {
+    kind: 'tool', turn: 0, name: 'bash', args: '{"command":"printf"}', result: raw, status: 'ok',
+  }
+  app.setTranscript([tool])
+  await viewport(vt)
+  const stream = writes.join('')
+  const marker = stream.indexOf('界')
+  assert.ok(marker >= 0, `the folded CJK preview was painted:\n${stream.slice(-2000)}`)
+  const rowStart = Math.max(0, stream.lastIndexOf('\n', marker) + 1)
+  const rowEnd = stream.indexOf('\n', marker)
+  const rawRow = stream.slice(rowStart, rowEnd === -1 ? undefined : rowEnd)
+  const plainRow = stripTerminalSequences(rawRow).trimEnd()
+  assert.ok(plainRow.endsWith('…'), `a width-clipped preview ends in the hidden-content marker:\n${JSON.stringify(plainRow)}`)
+  assert.equal((plainRow.match(/…/g) ?? []).length, 1,
+    `the count and width markers are never doubled:\n${JSON.stringify(plainRow)}`)
+  assert.ok(visibleWidth(plainRow) <= 200, `the row stays inside the terminal width:\n${JSON.stringify(plainRow)}`)
+  assert.ok(rawRow.includes('\u001b[1m'), 'the whitelisted style survives the clip')
+  assert.ok(rawRow.includes('\u001b[0m'), 'the app-owned reset closes the clipped style')
+  assert.ok(!plainRow.includes('second'), 'the records past the width cut are not painted')
+  assert.equal(tool.result, raw, 'the raw result is untouched')
+  app.stop()
+})

@@ -116,11 +116,11 @@ Callbacks/components/renderers/editors/keybindings remain on their owning side;
 Host-originated declarative UI crosses only as serializable facts/tree/action
 identity.
 
-Regression anchors: `test/application-runtime-selection.test.ts` (one loader
+Regression anchors: `test/app/application-runtime-selection.test.ts` (one loader
 call, no Direct factory, no user selector),
-`test/remote-plugin-manager.test.ts` (superseded mutation never paints success),
-`test/remote-session-writer.test.ts` (post-dispatch generation replacement is
-indeterminate, never replayed), `test/remote-client-runtime.test.ts` (one
+`test/runtime/remote/remote-plugin-manager.test.ts` (superseded mutation never paints success),
+`test/runtime/remote/remote-session-writer.test.ts` (post-dispatch generation replacement is
+indeterminate, never replayed), `test/runtime/remote/remote-client-runtime.test.ts` (one
 materialized generation and binding identity).
 
 ## Currentness, operation ownership and request ids
@@ -255,7 +255,7 @@ saved cadence untouched (restored on exit); response style stays active.
 Locality: the preference state and rendering are Client-local; the Host-side
 agent composition consumes the parsed values. Authority:
 `src/domain/communication/policy.ts`, `src/domain/communication/focus.ts`,
-`src/app/direct/system-prompt.ts`. Proof: `test/communication-policy.test.ts`
+`src/app/direct/system-prompt.ts`. Proof: `test/app/communication-policy.test.ts`
 (Focus suppression + pinned section registration).
 
 ## Workflow terminal-state authority

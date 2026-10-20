@@ -312,7 +312,7 @@ node scripts/focus-screen-holes.mjs <artifact.json> [--dump]
   rows in EVERY run, with artifacts `usable` and `metrics.paintDetail: true`
   (paint detail off records those metrics as `null`). `abaAlternations` is a
   diagnostic, not a gate. The deterministic in-tree guard is
-  `test/focus-mounted-batch-refresh.test.ts`.
+  `test/tui/focus-mounted-batch-refresh.test.ts`.
 - Never use `perevent` for conclusions or treat a non-qualified run as evidence;
   never read a masked glyph difference as a regression; never report multiplexer
   pane-buffer evidence as physical-compositor proof.

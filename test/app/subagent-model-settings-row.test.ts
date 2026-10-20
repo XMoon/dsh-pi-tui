@@ -1,0 +1,541 @@
+/**
+ * Regression for the /settings "Subagent model selection" toggle row
+ * (review round 2): rapid toggles must SERIALIZE their official-section
+ * writes (a slow earlier write can never land after a newer one), every
+ * settle re-syncs the row to the ACTUAL committed state, and a rejected
+ * write rolls the row back with a notice.
+ * @module @xmoon76/dsh-pi-tui/subagent-model-settings-row.test
+ */
+
+import assert from 'node:assert/strict'
+import { createClientCommandRegistry } from '../../src/app/command/client-command-registry.ts'
+import { parseCommand } from '@deepseek-ai/dsh-commands'
+import { afterEach, test } from 'node:test'
+import { Context } from '@deepseek-ai/cordis'
+import { TuiApp } from '../../src/tui-app.ts'
+import { registerTuiCommands, type TuiCommandRunner } from '../../src/commands.ts'
+import { DirectCatalogPort } from '../../src/runtime/direct/catalog-direct.ts'
+import { DirectConfigPort } from '../../src/runtime/direct/config-direct.ts'
+import { DirectHostFilePort } from '../../src/runtime/direct/host-file-direct.ts'
+import { VirtualTerminal } from '../support/virtual-terminal.ts'
+import { sessionScopeFacts } from '../support/session-scope-facts.ts'
+import { registerTuiCommandsWithDirectSeams } from '../support/register-tui-commands.ts'
+import { navigateToLegacySettings } from '../support/open-legacy-settings.ts'
+
+/** Re-vendor lifecycle follow-up P3: every TuiApp started in this file is
+ * stopped after each test — the process's single-live-TUI slot (the
+ * vendored keybindings are process-global) is held only by LIVE surfaces
+ * (see src/tui/process-slot.ts). */
+const startedApps = new Set<TuiApp>()
+afterEach(() => {
+  for (const app of [...startedApps]) {
+    startedApps.delete(app)
+    if (app.isDisposed()) continue
+    try { app.dispose() } catch {}
+  }
+})
+
+
+/** The minimal live-Agent surface the settings handler's scope reads need
+ *  (`sessionScopeFacts` validates currency, so the row requires a real one). */
+const LIVE_AGENT = {
+  session: { id: 'settings-scope-session', header: { cwd: '/ws' }, snapshotEvents: () => [] },
+  options: { provider: 'p', model: 'm' },
+  status: 'idle',
+}
+
+const ENTER = '\r'
+
+function fakeCommands(): { defs: Array<{ name: string; handler?: unknown }>; service: unknown } {
+  const defs: Array<{ name: string; handler?: unknown }> = []
+  return {
+    defs,
+    service: {
+      register: (def: { name: string; handler?: unknown }): (() => void) => {
+        defs.push(def)
+        return () => {}
+      },
+      list: () => [],
+      find: () => undefined,
+      execute: async () => undefined,
+    },
+  }
+}
+
+interface SettingsDoc {
+  enabled?: boolean
+  allowedModels?: Array<{ provider: string; model: string }>
+}
+
+/** A settings service whose writes can be DELAYED (the serialization
+ * repro: the first write must not land after the second). */
+function settingsService(initial: SettingsDoc): {
+  service: { describe(): Array<{ ns: string; value: unknown; user: unknown; revision: number }>; mutate(ns: string, ops: unknown): Promise<unknown> }
+  doc: SettingsDoc
+  writes: Array<{ enabled: boolean; allowedModels: unknown }>
+  setPromises: Promise<void>[]
+  gateNextWrite: () => { release: () => void }
+  failNextWrite: () => void
+} {
+  const doc: SettingsDoc = { ...initial }
+  const writes: Array<{ enabled: boolean; allowedModels: unknown }> = []
+  const setPromises: Promise<void>[] = []
+  let gate: { release: () => void } | undefined
+  let fail = false
+  return {
+    service: {
+      describe: () => [{ ns: 'subagent-model-selection-settings', value: doc, user: doc, revision: 2 }],
+      mutate: async (_ns: string, ops: unknown) => {
+        const attempt = (async () => {
+          if (fail) {
+            fail = false
+            throw new Error('official validation rejected the section')
+          }
+          const parsed = ops as Array<{ op: string; path: string[]; value: unknown }>
+          const enabled = parsed.find(op => op.path[0] === 'enabled')?.value as boolean
+          const allowedModels = parsed.find(op => op.path[0] === 'allowedModels')?.value as unknown
+          writes.push({ enabled, allowedModels })
+          if (gate !== undefined) {
+            const pending = gate
+            gate = undefined
+            await new Promise<void>(resolve => pending.release = resolve)
+          }
+          doc.enabled = enabled
+          doc.allowedModels = allowedModels as SettingsDoc['allowedModels']
+        })()
+        setPromises.push(attempt)
+        await attempt
+      },
+    },
+    doc,
+    writes,
+    setPromises,
+    gateNextWrite: () => {
+      const pending = { release: () => {} }
+      gate = pending
+      return pending
+    },
+    failNextWrite: () => { fail = true },
+  }
+}
+
+/** Flush the serialized write chain and await every section write started
+ * so far (deterministic — never a fixed timer). The chain's settle
+ * handlers (syncFromSection / revert / notify) run one microtask AFTER the
+ * write promise itself settles, so a final bounded flush covers them. */
+async function settle(harness: ReturnType<typeof makeHarness>, expectedWrites: number): Promise<void> {
+  for (let i = 0; i < 16 && harness.settings.setPromises.length < expectedWrites; i += 1) {
+    await Promise.resolve()
+  }
+  await Promise.allSettled(harness.settings.setPromises)
+  for (let i = 0; i < 4; i += 1) await Promise.resolve()
+}
+
+function makeHarness(initial: SettingsDoc, options: { realSettings?: boolean; liveAgent?: unknown } = {}): {
+  runner: TuiCommandRunner
+  app: TuiApp
+  vt: VirtualTerminal
+  settings: ReturnType<typeof settingsService>
+  defs: Array<{ name: string; handler?: unknown }>
+  settingsChange: Parameters<TuiApp['openSettings']>[1] | undefined
+  settingsItems: Parameters<TuiApp['openSettings']>[0] | undefined
+  onCancel: (() => void) | undefined
+  notices: Array<{ message: string; kind: 'info' | 'error' }>
+} {
+  const ctx = new Context()
+  const vt = new VirtualTerminal(100, 30)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  const { defs, service: commandsService } = fakeCommands()
+  ctx.provide('commands', commandsService as never)
+  const settings = settingsService(initial)
+  ctx.provide('settings', settings.service as never)
+  // The 0.1.7 read authority is the official service's current() snapshot;
+  // the fake serves the same document the settings write commits.
+  ctx.provide('subagentModelSelection', { current: () => ({ enabled: settings.doc.enabled, allowedModels: (settings.doc.allowedModels ?? []).map(route => ({ ...route })) }) } as never)
+  ctx.provide('llm', {
+    listProviders: () => [{ id: 'p', name: 'Provider P' }],
+    listModels: async () => [{ id: 'm1' }, { id: 'm2' }],
+    resolveModelInfo: async () => ({}),
+    discoverModels: async () => [],
+    listConfigurableProviders: () => [],
+  } as never)
+  ctx.provide('agentDefaultModel', { currentSelection: () => undefined, saveSelection: async () => {} } as never)
+  const notices: Array<{ message: string; kind: 'info' | 'error' }> = []
+  app.notify = ((message: string, kind: 'info' | 'error' = 'info') => {
+    notices.push({ message, kind })
+  }) as TuiApp['notify']
+  let settingsChange: Parameters<TuiApp['openSettings']>[1] | undefined
+  let settingsItems: Parameters<TuiApp['openSettings']>[0] | undefined
+  let onCancel: (() => void) | undefined
+  if (options.realSettings === true) {
+    // Keep the REAL SettingsList mount (the fork generation guard is part of
+    // the behavior under test) while still capturing the panel arguments.
+    const original = app.openSettings.bind(app)
+    app.openSettings = ((...args: Parameters<TuiApp['openSettings']>) => {
+      settingsItems = args[0]
+      settingsChange = args[1]
+      onCancel = args[2]
+      return original(...args)
+    }) as TuiApp['openSettings']
+  } else {
+    app.openSettings = ((...args: Parameters<TuiApp['openSettings']>) => {
+      settingsItems = args[0]
+      settingsChange = args[1]
+      onCancel = args[2]
+      return () => {}
+    }) as TuiApp['openSettings']
+  }
+  const runner: TuiCommandRunner = {
+    ctx,
+    app,
+    diag: { warn: () => {}, error: () => {}, info: () => {} } as never,
+    ...sessionScopeFacts(() => options.liveAgent as never, () => 0),
+    currentSessionId: undefined,
+    ensureSession: async () => {},
+    get selected() { return { current: undefined, assembled: undefined, saveSelection: async () => {} } },
+    defaultSelection: () => undefined,
+    defaultIntent: undefined,
+    setDefaultIntent: () => {},
+    defaultIntentRecord: undefined,
+    settleIntent: () => {},
+    tuiSettings: undefined,
+    agents: {} as never,
+    sessionReader: { list: async () => [], search: async () => ({ items: [], hasMore: false }), projectionBatch: async () => new Map(), blank: () => undefined, measureContext: () => undefined,
+      turnOutline: () => undefined,
+      sessionStatus: () => undefined },
+    sessionWriter: { prompt: async () => ({ kind: 'committed' as const, value: undefined }), updateQueue: async () => ({ kind: 'committed' as const, value: undefined }), cancel: async () => ({ kind: 'committed' as const, value: undefined }), rename: async (_sessionId: string, title: string) => ({ kind: 'committed' as const, value: { title } }), refreshTitle: async () => ({ kind: 'ok' as const, title: undefined }) },
+    interaction: { questions: { subscribe: () => undefined,  onRequest: () => true, snapshot: () => undefined, claimTimedWait: async () => undefined, answerContinued: async () => 'not-continued' as const }, onApprovalRequest: () => {}, setApprovalPolicy: () => true },
+    catalog: new DirectCatalogPort(ctx as never, () => undefined),
+    config: new DirectConfigPort(ctx as never, undefined, () => undefined),
+    hostFile: new DirectHostFilePort(() => undefined),
+    hostShellCompletion: true,
+    transcriptExportAvailable: true,
+    commandRegistry: ctx.get('commands') as never,
+    clientCommands: createClientCommandRegistry(parseCommand),
+    cwd: '/ws',
+    sessionCwd: () => '/ws',
+    imageStore: {} as never,
+    copyToClipboard: async () => true,
+    imageLimits: () => undefined,
+    insertIntoEditor: () => {},
+    prepareDraftMessage: async (text) => ({ role: 'user', id: `u:${text}`, content: [{ type: 'text', text }], source: { kind: 'user' } }) as never,
+    signal: new AbortController().signal,
+    switchSession: async () => undefined,
+    transitionTo: async <T>(steps: { prepare?: () => Promise<void> | void; create: () => Promise<T> }) => {
+      await steps.prepare?.()
+      return { ok: true, next: await steps.create() }
+    },
+    currentPreset: () => undefined,
+    get pendingPreset() { return undefined },
+    set pendingPreset(_id: string | undefined) {},
+    get effectivePresetId() { return undefined },
+    awaitPendingDefaultWrite: async () => {},
+    trackDefaultWrite: () => {},
+    get defaultIntentOutcome() { return undefined },
+    setModelSelectionPending: () => {},
+    reconcileDefaultIntent: () => {},
+    sessionBlank: () => undefined,
+    refreshStatus: () => {},
+    progressUpdatesState: { mode: 'milestones' }, responseStyleState: { style: 'default' }, gitAttributionState: { mode: 'off' },
+    focusEnabled: () => false,
+    setFocusMode: () => {},
+    setNotificationMode: () => {},
+    setTerminalProgressMode: () => {}, setNotificationMethod: () => {},
+    updateWelcomeCard: () => {},
+    openJobView: () => {},
+    openTasksBrowser: () => {}, openPluginManager: () => {}, createPluginManagerPage: () => undefined,
+    openRewindPicker: () => {},
+    sessionTransitionPending: () => false,
+    withSessionTransition: async <T>(task: () => T | Promise<T>) => task(),
+    withWriter: async <T>(_scope: unknown, task: () => T | Promise<T>) => task(),
+    withPromptAdmission: async <T>(_agent: unknown, _line: string, task: () => T | Promise<T>) => task(),
+    enterView: async () => {},
+    requestExit: () => {},
+    extensions: undefined,
+    exit: () => {},
+    applyFooterSettings: () => {},
+  }
+  registerTuiCommandsWithDirectSeams(runner)
+  // The captured panel args are read through GETTERS: the mock assigns the
+  // outer variables when the handler runs, so a value snapshot taken at
+  // harness construction would stay undefined.
+  return {
+    runner,
+    app,
+    vt,
+    settings,
+    defs,
+    get settingsChange() { return settingsChange },
+    get settingsItems() { return settingsItems },
+    get onCancel() { return onCancel },
+    notices,
+  }
+}
+
+/** Open the /settings panel through the registered command, crossing the B2-A
+ *  workspace's `Other settings → Open existing settings…` bridge. */
+async function openSettingsPanel(harness: ReturnType<typeof makeHarness>): Promise<void> {
+  const settings = harness.defs.find(entry => entry.name === 'settings')
+  assert.ok(settings?.handler !== undefined, 'the settings command must be registered')
+  await (settings.handler as (invocation: { rawInput: string }) => Promise<unknown>)({ rawInput: '' })
+  await harness.vt.waitForRender()
+  await navigateToLegacySettings(harness.vt)
+}
+
+test('the /settings panel exposes the official subagent model-selection rows', async () => {
+  const harness = makeHarness({ enabled: false, allowedModels: [] })
+  await openSettingsPanel(harness)
+  const items = harness.settingsItems
+  assert.ok(items !== undefined, 'the panel must open')
+  const toggle = items!.find(item => item.id === 'subagent-model-selection')
+  assert.ok(toggle !== undefined, 'the toggle row must exist when the official service is mounted')
+  assert.deepEqual(toggle!.values, ['off', 'on'])
+  assert.equal(toggle!.currentValue, 'off')
+  const allowlist = items!.find(item => item.id === 'subagent-model-allowlist')
+  assert.ok(allowlist !== undefined, 'the allowlist row must exist')
+  assert.equal(allowlist!.currentValue, '0 routes')
+  // The UI order expresses the setup dependency: configure the allowed
+  // routes BEFORE enabling selection (the allowlist row comes first).
+  assert.ok(
+    items!.indexOf(allowlist!) < items!.indexOf(toggle!),
+    'the allowlist row must precede the selection toggle',
+  )
+})
+
+test('rapid toggles SERIALIZE: a slow earlier write never lands after a newer one', async () => {
+  const harness = makeHarness({ enabled: false, allowedModels: [{ provider: 'p', model: 'm1' }] })
+  await openSettingsPanel(harness)
+  const change = harness.settingsChange!
+  // The first write is GATED (stays in flight); the second toggle happens
+  // while it is pending. Serialization must order them: the second write
+  // only starts after the first settles, so the LAST toggle wins.
+  const gate = harness.settings.gateNextWrite()
+  change('subagent-model-selection', 'on', () => {})
+  change('subagent-model-selection', 'off', () => {})
+  await Promise.resolve()
+  assert.equal(harness.settings.writes.length, 1, 'the second write must wait for the first')
+  gate.release()
+  for (let i = 0; i < 8; i += 1) await Promise.resolve()
+  assert.equal(harness.settings.writes.length, 2, 'both writes commit in order')
+  assert.deepEqual(harness.settings.writes.map(write => write.enabled), [true, false])
+  assert.equal(harness.settings.doc.enabled, false, 'the LAST toggle wins')
+})
+
+test('enabling with an EMPTY allowlist is a setup guide, not a write: no settings write, row stays off', async () => {
+  const harness = makeHarness({ enabled: false, allowedModels: [] })
+  await openSettingsPanel(harness)
+  const change = harness.settingsChange!
+  const reverted: string[] = []
+  const navigated: string[] = []
+  // Enabling with an EMPTY allowlist is a UI precondition: the toggle must
+  // NOT call the official section write at all (no Host settings mutation),
+  // keep the row off, and guide the user to the allowlist row.
+  change('subagent-model-selection', 'on', (previous) => { reverted.push(previous) }, (targetId) => { navigated.push(targetId) })
+  for (let i = 0; i < 8; i += 1) await Promise.resolve()
+  assert.equal(harness.settings.writes.length, 0, 'no official section write may be produced')
+  assert.equal(harness.settings.doc.enabled, false, 'the section stays off')
+  assert.deepEqual(reverted, ['off'], 'the row display rolls back to the previous value')
+  assert.deepEqual(navigated, ['subagent-model-allowlist'], 'the cursor moves to the allowlist row')
+  const notice = harness.notices.at(-1)
+  assert.equal(notice?.kind, 'info', 'the guidance is an info notice, not an error')
+  assert.match(notice?.message ?? '', /Select at least one Subagent allowed model/i)
+  assert.doesNotMatch(notice?.message ?? '', /write failed/i, 'a setup precondition must never surface as a write failure')
+})
+
+test('enabling with a NON-EMPTY allowlist writes the whole official section', async () => {
+  const harness = makeHarness({ enabled: false, allowedModels: [{ provider: 'p', model: 'm1' }] })
+  await openSettingsPanel(harness)
+  const change = harness.settingsChange!
+  const reverted: string[] = []
+  change('subagent-model-selection', 'on', (previous) => { reverted.push(previous) })
+  await settle(harness, 1)
+  assert.equal(harness.settings.writes.length, 1, 'the official section write must happen')
+  assert.deepEqual(harness.settings.writes[0], {
+    enabled: true,
+    allowedModels: [{ provider: 'p', model: 'm1' }],
+  }, 'the whole section rides along: enabled flips, the allowlist is preserved')
+  assert.equal(harness.settings.doc.enabled, true, 'the section commits enabled')
+  assert.deepEqual(reverted, ['on'], 'the row re-syncs to the committed state')
+  assert.equal(harness.notices.length, 0, 'a legal write produces no notice')
+})
+
+test('first-time setup happy path: add an allowed route, then enable selection', async () => {
+  // The complete first-configuration flow: 0 routes + off → open the
+  // allowlist submenu (flat, provider-grouped: NO provider navigation step)
+  // → Enter toggles the highlighted model → ONE Esc returns to the settings
+  // list → toggle selection ON. The whole section must commit with the route
+  // the user just granted.
+  const harness = makeHarness({ enabled: false, allowedModels: [] })
+  await openSettingsPanel(harness)
+  const allowlistRow = harness.settingsItems!.find(item => item.id === 'subagent-model-allowlist')
+  assert.ok(allowlistRow?.submenu !== undefined, 'the allowlist row must carry the submenu')
+  const dones: Array<string | undefined> = []
+  const menu = allowlistRow.submenu!('0 routes', (selected) => { dones.push(selected) }) as { handleInput(data: string): void }
+  for (let i = 0; i < 8; i += 1) await Promise.resolve() // let provider discovery settle
+  menu.handleInput(ENTER) // toggle the highlighted model ON directly — no provider step
+  await settle(harness, 1)
+  assert.deepEqual(harness.settings.doc.allowedModels, [{ provider: 'p', model: 'm1' }], 'the first route commits')
+  menu.handleInput('\x1b') // ONE Esc returns to /settings and reports the summary
+  assert.deepEqual(dones, ['1 route'], 'a single Esc closes and the outer row shows the fresh route count')
+  // Now the toggle may be enabled: the gate must NOT block a non-empty
+  // allowlist, and the write carries the committed routes.
+  const change = harness.settingsChange!
+  change('subagent-model-selection', 'on', () => {})
+  await settle(harness, 2)
+  assert.equal(harness.settings.writes.length, 2, 'the allowlist write plus the enable write')
+  assert.deepEqual(harness.settings.writes[1], {
+    enabled: true,
+    allowedModels: [{ provider: 'p', model: 'm1' }],
+  })
+  assert.equal(harness.settings.doc.enabled, true, 'selection commits enabled')
+  assert.equal(harness.notices.length, 0, 'the happy path produces no notice')
+})
+
+test('closing the WHOLE settings panel disposes the allowlist submenu (no late toast, row converges)', async () => {
+  // The outer-teardown scenario: the allowlist submenu is open with a write
+  // pending, and the user closes the ENTIRE /settings panel. The submenu must
+  // be disposed with the panel: the pending write settling afterwards neither
+  // toasts nor repaints, and the captured row's displayed summary converges to
+  // the COMMITTED state through `summarize` (the fork would reject a late
+  // `done`).
+  const harness = makeHarness({ enabled: false, allowedModels: [] })
+  await openSettingsPanel(harness)
+  const allowlistRow = harness.settingsItems!.find(item => item.id === 'subagent-model-allowlist')
+  assert.ok(allowlistRow?.submenu !== undefined, 'the allowlist row must carry the submenu')
+  const menu = allowlistRow.submenu!('0 routes', () => {}) as { handleInput(data: string): void }
+  for (let i = 0; i < 8; i += 1) await Promise.resolve() // let provider discovery settle
+  harness.settings.failNextWrite()
+  menu.handleInput(ENTER) // toggle the highlighted model ON — this write will FAIL
+  // Close the whole panel while the write is still pending.
+  const cancel = harness.onCancel
+  assert.ok(cancel !== undefined, 'the panel onCancel must be captured')
+  cancel()
+  // Count repaints scheduled by the LATE settle only (after the panel closed).
+  let renders = 0
+  const originalRender = harness.app.requestRender.bind(harness.app)
+  harness.app.requestRender = () => { renders += 1; originalRender() }
+  await settle(harness, 1)
+  assert.equal(harness.notices.length, 0, 'a failure settling after the panel closed stays silent')
+  assert.equal(renders, 0, 'a settle after the WHOLE panel closed must not schedule a repaint')
+  assert.equal(allowlistRow.currentValue, '0 routes',
+    'the outer row still converges to the COMMITTED summary through the summarize seam')
+})
+
+test('a real SettingsList converges the outer row after Esc + a late rejected write', async () => {
+  // The fork SettingsList invalidates a submenu callback once the submenu
+  // closed (its submenu generation guard), so the post-close convergence MUST
+  // go through `summarize`. This drives the REAL SettingsList mount end to
+  // end: open the allowlist submenu via the outer list, toggle with a
+  // deferred rejected write, Esc back to the list, then let the write settle.
+  const harness = makeHarness({ enabled: false, allowedModels: [] }, { realSettings: true })
+  await openSettingsPanel(harness)
+  await harness.vt.waitForRender()
+  // Filter the outer list to the allowlist row, then open its submenu.
+  harness.vt.sendInput('allowed models')
+  await harness.vt.waitForRender()
+  harness.vt.sendInput(ENTER)
+  await harness.vt.waitForRender()
+  for (let i = 0; i < 8; i += 1) await Promise.resolve() // provider discovery settles
+  const allowlistRow = harness.settingsItems!.find(item => item.id === 'subagent-model-allowlist')
+  assert.ok(allowlistRow !== undefined, 'the allowlist row must exist')
+  harness.settings.failNextWrite()
+  harness.vt.sendInput(ENTER) // toggle the highlighted model ON — this write FAILS
+  harness.vt.sendInput('\x1b') // Esc closes the SUBMENU through the real SettingsList
+  await harness.vt.waitForRender()
+  await settle(harness, 1)
+  assert.equal(harness.notices.length, 0, 'a failure settling after the submenu closed stays silent')
+  assert.equal(allowlistRow.currentValue, '0 routes',
+    'the real SettingsList row must converge to the COMMITTED summary after the late rejection')
+  await harness.vt.waitForRender()
+  assert.ok(harness.vt.getViewport().join('\n').includes('0 routes'),
+    `the OUTER rendered row must show the committed summary:\n${harness.vt.getViewport().join('\n')}`)
+})
+
+test('a fullscreen teardown suppresses the late allowlist settle repaint', async () => {
+  // A fullscreen screen swap removes the whole /settings overlay WITHOUT
+  // invoking its onCancel. The teardown-aware `onHidden` hook must flip the
+  // mounted state so a late allowlist write settle does not schedule a
+  // repaint of the removed surface.
+  const harness = makeHarness({ enabled: false, allowedModels: [] }, { realSettings: true })
+  await openSettingsPanel(harness)
+  await harness.vt.waitForRender()
+  harness.vt.sendInput('allowed models')
+  await harness.vt.waitForRender()
+  harness.vt.sendInput(ENTER) // open the submenu
+  await harness.vt.waitForRender()
+  for (let i = 0; i < 8; i += 1) await Promise.resolve() // provider discovery settles
+  const allowlistRow = harness.settingsItems!.find(item => item.id === 'subagent-model-allowlist')
+  assert.ok(allowlistRow !== undefined, 'the allowlist row must exist')
+  const gate = harness.settings.gateNextWrite() // hold the allowlist write pending
+  harness.vt.sendInput(ENTER) // toggle the highlighted model ON — the write is held
+  harness.app.setFullscreen(true) // tears the settings overlay down without onCancel
+  await harness.vt.waitForRender()
+  let renders = 0
+  const originalRender = harness.app.requestRender.bind(harness.app)
+  harness.app.requestRender = () => { renders += 1; originalRender() }
+  gate.release() // the held write settles only after the teardown
+  await settle(harness, 1)
+  assert.equal(harness.notices.length, 0, 'a settle after a fullscreen teardown stays silent')
+  assert.equal(renders, 0, 'a settle after a fullscreen teardown must not schedule a repaint')
+  assert.equal(allowlistRow.currentValue, '1 route', 'the detached row still converges for bookkeeping')
+  harness.app.setFullscreen(false)
+  await harness.vt.waitForRender()
+})
+
+test('/settings announces a non-current config backend instead of presenting last-known values as current', async () => {
+  // §9.1: a backend whose config reads are not current must SAY so. The rows
+  // still show the last-known values (that is the documented disposition), so
+  // the panel carries the explicit non-current notice. ONE harness per test:
+  // the process allows a single live TuiApp.
+  const harness = makeHarness({ enabled: false, allowedModels: [] })
+  ;(harness.runner.config as unknown as { configReadiness: () => string }).configReadiness = () => 'stale'
+  await openSettingsPanel(harness)
+  const notice = harness.notices.find(entry => /not current \(reconnecting\)/u.test(entry.message))
+  assert.ok(notice !== undefined, `the panel must announce the non-current backend:\n${harness.notices.map(n => n.message).join('\n')}`)
+  assert.equal(notice.kind, 'error')
+})
+
+test('/settings announces a disconnected config backend as unavailable', async () => {
+  const harness = makeHarness({ enabled: false, allowedModels: [] })
+  ;(harness.runner.config as unknown as { configReadiness: () => string }).configReadiness = () => 'unavailable'
+  await openSettingsPanel(harness)
+  assert.ok(
+    harness.notices.some(entry => /configuration backend is unavailable/u.test(entry.message)),
+    'a disconnected config backend is announced as unavailable',
+  )
+  // The harness has no settings document, so the rows show the panel's
+  // BUILT-IN defaults: the notice must not call those "last known" Host values.
+  assert.ok(
+    harness.notices.some(entry => /built-in defaults, not Host values/u.test(entry.message)),
+    'without a Host document the notice says so instead of claiming last-known values',
+  )
+})
+
+test('/settings stays silent when the config backend is current', async () => {
+  const harness = makeHarness({ enabled: false, allowedModels: [] })
+  await openSettingsPanel(harness)
+  assert.equal(harness.notices.filter(entry => /not current|unavailable/u.test(entry.message)).length, 0,
+    'a ready backend raises no false alarm (Direct is always ready)')
+})
+
+test('/settings omits the approval-policy row on a backend that cannot read or write it', async () => {
+  // §9.2/§10: the Remote backend cannot read or write the independent session
+  // approval override, so the row must be OMITTED. Rendering the consumer's own
+  // `ask` default would present an unavailable policy as a real one.
+  // A live session scope is required for the row to even be considered.
+  const harness = makeHarness({ enabled: false, allowedModels: [] }, { liveAgent: LIVE_AGENT })
+  ;(harness.runner.config.permissions as unknown as { approvalOverrideAvailable: () => boolean })
+    .approvalOverrideAvailable = () => false
+  await openSettingsPanel(harness)
+  const ids = (harness.settingsItems ?? []).map(item => item.id)
+  assert.ok(!ids.includes('approval'), `the approval row must be omitted:\n${ids.join(', ')}`)
+})
+
+test('/settings keeps the approval-policy row where the capability exists', async () => {
+  const harness = makeHarness({ enabled: false, allowedModels: [] }, { liveAgent: LIVE_AGENT })
+  await openSettingsPanel(harness)
+  const ids = (harness.settingsItems ?? []).map(item => item.id)
+  assert.ok(ids.includes('approval'), `the approval row must stay on a capable backend:\n${ids.join(', ')}`)
+})

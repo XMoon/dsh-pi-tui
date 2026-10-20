@@ -783,7 +783,7 @@ Must-not: render raw JSON or raw model-facing XML on a folded row; beautify an
 expanded generic JSON body; mutate `TranscriptMessage` or model bytes; let an
 unknown tool lose the generic path.
 
-Proof: `test/rendering.test.ts` ("web search result views render sources and the
+Proof: `test/domain/rendering.test.ts` ("web search result views render sources and the
 answer", "folded JSON-result cards show the summary, never the raw JSON",
 "settled ask_user_question cards show the answered count", "goal cards without
 a goal say no goal set").
@@ -806,7 +806,7 @@ Must-not: rewrite/search-index/export the persisted text, add a second
 user-specific state map, add a dedicated collapse row, or let a plugin-owned
 user renderer own Host disclosure state.
 
-Proof: `test/long-user-disclosure.test.ts` ("exactly the row threshold stays
+Proof: `test/extension/long-user-disclosure.test.ts` ("exactly the row threshold stays
 full; one more row compacts", "compaction never mutates the canonical message
 text").
 
@@ -824,7 +824,7 @@ Markdown export states the fact, never invents a tool heading.
 
 Authority: `src/domain/transcript/folder.ts`,
 `src/client/artifact/transcript-markdown.ts`.
-Proof: `test/session-v4-tool-result.test.ts`.
+Proof: `test/client/session-v4-tool-result.test.ts`.
 
 ## Fullscreen jump and scroll intent
 
@@ -839,7 +839,7 @@ their own policy.
 Authority: `TuiAltScreen` affordance + `TuiApp` disclosure/viewport transaction.
 Must-not: use the fork's local `scrollToBottom` as the claimed path, derive
 ownership from geometry, or add a second viewport map.
-Proof: `test/focus-ui.test.ts`, `test/rendering.test.ts`.
+Proof: `test/app/focus-ui.test.ts`, `test/domain/rendering.test.ts`.
 
 ## Single mounted transcript batch
 
@@ -853,7 +853,7 @@ Must-not: project a second, unmounted batch for row-map refresh, or
 dispose/replace the mounted component from the refresh
 ("row-map refresh must not dispose the mounted component").
 
-Proof: `test/focus-mounted-batch-refresh.test.ts`.
+Proof: `test/tui/focus-mounted-batch-refresh.test.ts`.
 
 ## Fullscreen geometry-epoch snapshot reuse
 
@@ -865,7 +865,7 @@ otherwise it paints with a stale row map and stale press/release fence
 identities. Pure scroll frames must reuse the committed row snapshot and must
 not remeasure.
 
-Proof: `test/fullscreen-scroll-geometry-epoch.test.ts`.
+Proof: `test/client/fullscreen-scroll-geometry-epoch.test.ts`.
 
 ## Display-order and read-grouping convergence
 
@@ -888,4 +888,4 @@ The convergence contract:
 - The same rules apply to Compact, Full and Focus; do not add a second
   display-order fold or re-sort by liveness.
 
-Proof: `test/transcript-display-order-convergence.test.ts`.
+Proof: `test/tui/transcript-display-order-convergence.test.ts`.
