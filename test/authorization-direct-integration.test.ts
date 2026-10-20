@@ -405,6 +405,7 @@ test('REAL Host caller teardown during a held commit with a pending prompt canno
   life.defer(() => ctx.fiber.dispose())
   const key = credentialKey('llm-pi-ai', 'forced-commit')
   let releaseCommit: (() => void) | undefined
+  life.defer(() => releaseCommit?.())
   const store = new Map<string, unknown>()
   ctx.provide('credentials', {
     modifyRecord: async (recordKey: string, update: () => Promise<unknown>) => {
@@ -527,5 +528,62 @@ test('REAL Host caller teardown while waiting on a prompt settles cancelled with
   } finally {
     off()
     flow.close()
+  }
+})
+
+test('REAL Host prompt created AFTER forced teardown is rejected as surface disposed, never surfaced/declined', async t => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-c2-auth-late-prompt-')
+  const ctx = new Context()
+  life.defer(() => ctx.fiber.dispose())
+  const key = credentialKey('llm-pi-ai', 'late-prompt')
+  let releaseFlow: (() => void) | undefined
+  life.defer(() => releaseFlow?.())
+  {
+    await ctx.plugin(LocalCredentialProvider, { path: join(home, '.credentials.yaml'), watch: false })
+    await ctx.plugin(AuthorizationService)
+    ctx.authorization.registerFlow({
+      key,
+      label: 'Late Prompt',
+      methods: [{ id: 'oauth', label: 'Sign in' }],
+      run: async session => {
+        await new Promise<void>(resolve => { releaseFlow = resolve })
+        await session.prompt({ kind: 'text', message: 'must never reach the dead page' })
+        await session.commit({ kind: 'grant', payload: { token: 'secret' } })
+      },
+    })
+    const port = new DirectAuthorizationConfig({ get: name => ctx.get(name) })
+    const surface: AuthorizationSurface = {
+      openOutputViewer: () => () => {},
+      askQuestions: () => new Promise(() => {}),
+      openPicker: () => ({ close: () => {} }),
+    }
+    const flow = createAuthorizationFlow(surface, port)
+    let prompts = 0
+    let settled = 0
+    const off = port.onEvent(event => {
+      if (event.kind === 'prompt') prompts += 1
+      if (event.kind === 'settled') settled += 1
+      flow.onEvent(event)
+    })
+    try {
+      const controller = new AbortController()
+      const started = await port.begin({ key, signal: controller.signal })
+      assert.equal(started.kind, 'started')
+      if (started.kind !== 'started') return
+      flow.bind(started.attemptId)
+      controller.abort() // page teardown happened before the provider asked
+      releaseFlow?.()
+      const outcome = await Promise.race([
+        flow.outcome,
+        new Promise<{ status: string }>(resolve => setTimeout(() => resolve({ status: 'timeout' }), 1_000)),
+      ])
+      assert.equal(outcome.status, 'cancelled')
+      assert.equal(prompts, 0, 'a dead page never receives a late prompt')
+      assert.equal(settled, 1)
+    } finally {
+      off()
+      flow.close()
+    }
   }
 })
