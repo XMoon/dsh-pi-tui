@@ -702,6 +702,11 @@ export class ModelsWorkspacePage implements Component {
       } catch (error) {
         this.settle(() => {
           if (!isCurrent() || readSerial !== this.clearReadSerial) return
+          // The authoritative re-read failed. Fence any older refreshRecords
+          // answer and drop the old snapshot: record presence is Unknown, never
+          // the pre-delete list.
+          this.recordsSerial += 1
+          this.records = undefined
           this.clear = { phase: 'failed', configured: true, reason: `the clear returned; the record list could not be re-read: ${errorText(error)}` }
         })
       }
