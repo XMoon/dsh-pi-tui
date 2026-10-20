@@ -49,8 +49,10 @@ const MAX_DISPLAY_NODES = 10_000
 
 /**
  * Whether the parsed tree is too deep/wide for the indented display
- * projection. Iterative on purpose: the guard must not recurse on the very
- * input it protects against.
+ * projection. Iterative and lazy: children are enumerated one at a time and
+ * the ceiling is checked BEFORE a child wrapper is enqueued, so a very wide
+ * object can never materialize an over-cap pending list. The guard never
+ * recurses on the very input it protects against.
  */
 function exceedsDisplayBudget(value: unknown): boolean {
   const stack: Array<{ readonly value: unknown; readonly depth: number }> = [{ value, depth: 0 }]
@@ -59,10 +61,15 @@ function exceedsDisplayBudget(value: unknown): boolean {
     const current = stack.pop()!
     nodes += 1
     if (nodes > MAX_DISPLAY_NODES || current.depth > MAX_DISPLAY_DEPTH) return true
-    if (current.value !== null && typeof current.value === 'object') {
-      for (const child of Object.values(current.value)) {
-        stack.push({ value: child, depth: current.depth + 1 })
-      }
+    if (current.value === null || typeof current.value !== 'object') continue
+    const record = current.value as Record<string, unknown>
+    // for...in is lazy; hasOwnProperty keeps a polluted prototype out of the
+    // measurement. The frontier check runs before the wrapper allocation.
+    for (const key in record) {
+      if (!Object.prototype.hasOwnProperty.call(record, key)) continue
+      if (nodes + stack.length + 1 > MAX_DISPLAY_NODES) return true
+      if (current.depth + 1 > MAX_DISPLAY_DEPTH) return true
+      stack.push({ value: record[key], depth: current.depth + 1 })
     }
   }
   return false

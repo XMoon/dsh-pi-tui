@@ -150,7 +150,9 @@ test('deep or wide valid arguments fall back to the exact raw projection', () =>
   const known = `{"command":"ls","deep":${nested}}`
   assert.deepEqual(approvalArgumentSections('bash', known),
     [{ heading: 'Arguments', text: known }])
-  const wide = `{${Array.from({ length: 10_001 }, (_, index) => `"k${index}":${index}`).join(',')}}`
+  // 100k keys is deliberately far beyond the node ceiling: the guard must
+  // reject from the lazy frontier without materializing all children.
+  const wide = `{${Array.from({ length: 100_000 }, (_, index) => `"k${index}":${index}`).join(',')}}`
   assert.deepEqual(approvalArgumentSections('unknown', wide),
     [{ heading: 'Arguments', text: wide }])
 })
@@ -206,4 +208,23 @@ test('the source-order scan survives escaped keys and nested containers', () => 
   const text = result[0]!.text
   assert.ok(text.startsWith('a"b: 1\nnested: {'), text)
   assert.ok(text.endsWith('z: 2'), text)
+})
+
+test('the display budget rejects a wide frontier without materializing its children', () => {
+  const wide = `{${Array.from({ length: 100_000 }, (_, index) => `"k${index}":${index}`).join(',')}}`
+  const originalValues = Object.values
+  let valuesCalls = 0
+  Object.values = ((value: Record<string, unknown> | ArrayLike<unknown>) => {
+    valuesCalls += 1
+    return originalValues(value)
+  }) as typeof Object.values
+  let result: ReturnType<typeof approvalArgumentSections>
+  try {
+    result = approvalArgumentSections('unknown', wide)
+  } finally {
+    Object.values = originalValues
+  }
+  assert.deepEqual(result!, [{ heading: 'Arguments', text: wide }])
+  assert.equal(valuesCalls, 0,
+    'the budget must enumerate the wide frontier lazily, never via a full Object.values list')
 })
