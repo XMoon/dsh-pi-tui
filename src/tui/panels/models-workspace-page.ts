@@ -440,7 +440,8 @@ export class ModelsWorkspacePage implements Component {
           } else if (current.kind === 'logout') {
             if (current.target.kind !== 'reference' || current.target.ref !== ref) return
           } else return
-          if (current.kind === 'logout' && this.clear !== undefined && this.clear.phase !== 'reading') return
+          if (current.kind === 'logout' && this.clear !== undefined
+            && this.clear.phase !== 'reading' && this.clear.phase !== 'ready') return
           this.referenceConfigured = info.configured
           this.credentialStates.set(ref, {
             kind: 'known',
@@ -464,7 +465,8 @@ export class ModelsWorkspacePage implements Component {
           } else if (current.kind === 'logout') {
             if (current.target.kind !== 'reference' || current.target.ref !== ref) return
           } else return
-          if (current.kind === 'logout' && this.clear !== undefined && this.clear.phase !== 'reading') return
+          if (current.kind === 'logout' && this.clear !== undefined
+            && this.clear.phase !== 'reading' && this.clear.phase !== 'ready') return
           if (current.kind === 'logout' && clearSerial === this.clearSerial) {
             this.clear = { phase: 'failed', configured: false, reason: errorText(error) }
           } else if (current.kind === 'reference') {
