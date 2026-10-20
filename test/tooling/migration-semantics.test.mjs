@@ -312,3 +312,36 @@ test('a read helper whose base is NOT the repository root is reported, not assum
     'the verified repository root resolves the production file',
   )
 })
+
+test('a read helper over a NON-production directory is excluded, not reported', () => {
+  // The review's finding: a helper that reads the GENERATED preset patches
+  // is not a production read at all. Reporting it as an unresolved
+  // PRODUCTION reference would make the migration checker fail on a
+  // correct tree.
+  const source = [
+    "const root = join(import.meta.dirname, '..', '..', 'generated', 'dsh-presets')",
+    "const count = (file: string): number =>",
+    "  (readFileSync(join(root, file), 'utf8').match(/x/gu) ?? []).length",
+    "const hits = count('standard.patch.yml')",
+  ].join('\n')
+  assert.deepEqual(
+    productionReferences(source, 1),
+    [],
+    'a read of the generated presets is not a production reference',
+  )
+})
+
+test('a read helper over an UNKNOWN base is still reported', () => {
+  // The counterpart: a base that could still name a production file must
+  // be reported, never silently excluded.
+  const source = [
+    "const root = someBase()",
+    "const count = (file: string): number =>",
+    "  (readFileSync(join(root, file), 'utf8').match(/x/gu) ?? []).length",
+    "const hits = count('src/app/runtime.ts')",
+  ].join('\n')
+  assert.ok(
+    productionReferences(source, 1).some(ref => ref.startsWith('<unresolved:')),
+    'an unknown base must be reported as unresolved',
+  )
+})
