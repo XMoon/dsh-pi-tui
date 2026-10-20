@@ -16,51 +16,16 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import { discoverTestFiles } from './test-discovery.mjs'
+import { fixedWaitHelpers, fixedWaitsOf } from './fixed-wait-helpers.mjs'
 
 const ROOT = join(fileURLToPath(new URL('.', import.meta.url)), '..')
 const TEST_ROOT = join(ROOT, 'test')
-
-/** The shared FIXED-WAIT helpers, derived from the support modules. */
-function fixedWaitHelpers() {
-  const helpers = new Set()
-  const supportRoot = join(TEST_ROOT, 'support')
-  for (const entry of readdirSync(supportRoot, { withFileTypes: true })) {
-    if (!entry.isFile() || !/\.(ts|mjs)$/u.test(entry.name)) continue
-    const source = readFileSync(join(supportRoot, entry.name), 'utf8')
-    for (const match of source.matchAll(
-      /export\s+(?:async\s+)?function\s+([a-zA-Z_$][A-Za-z0-9_$]*)\s*\([^)]*\b(?:millis|ms|delay|durationMs)\b[^)]*\)/gu,
-    )) {
-      helpers.add(match[1])
-    }
-  }
-  return helpers
-}
-
-/** The unreasoned fixed waits a test file contains. */
-function fixedWaitsOf(rel, helpers) {
-  const source = readFileSync(join(TEST_ROOT, rel), 'utf8')
-  const lines = source.split('\n')
-  const found = []
-  for (let index = 0; index < lines.length; index += 1) {
-    const line = lines[index]
-    const literal = /setTimeout\([^,]*,\s*\d[\d_]{2,}/u.test(line)
-    const helperCall = [...helpers].some(helper => {
-      const pattern = new RegExp(`\\b${helper}\\s*\\(\\s*(\\d[\\d_]{2,})?\\s*\\)`, 'u')
-      return pattern.test(line)
-    })
-    if (!literal && !helperCall) continue
-    const context = `${lines[index - 1] ?? ''}\n${line}`
-    if (/\/\/[^\n]*(?:reason|window|deadline|bounded|negative|observation)/iu.test(context)) continue
-    found.push(index + 1)
-  }
-  return found
-}
 
 function main() {
   const helpers = fixedWaitHelpers()
   const fixedWaits = {}
   for (const rel of discoverTestFiles(TEST_ROOT, ['.test.ts', '.test.mjs'])) {
-    const count = fixedWaitsOf(rel, helpers).length
+    const count = fixedWaitsOf(rel, TEST_ROOT, helpers).length
     if (count > 0) fixedWaits[rel] = count
   }
   const sorted = {}

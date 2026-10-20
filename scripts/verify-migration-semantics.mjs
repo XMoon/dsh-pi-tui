@@ -5,19 +5,24 @@
  *
  * A path rewrite that resolves to a DIFFERENT production file is a silent
  * semantic change: the test would keep passing while proving a different
- * contract. This check compares the RESOLVED target of every
- * file-relative production reference against the base tree, by NAME
- * (the base tree's file and the current tree's file must be the same
- * production module).
+ * contract.
+ *
+ * The reference extraction is SYNTAX-AWARE. A regex cannot tell an
+ * executable `import('../src/x.ts')` from the same text inside a template
+ * literal's TEXT — and a template literal's `${…}` INTERPOLATION is
+ * executable code, not text. The TypeScript parser can: it reports the
+ * actual module specifiers and ignores a string that merely CONTAINS an
+ * import.
  *
  * Usage: node scripts/verify-migration-semantics.mjs <base-sha>
  * @module @xmoon76/dsh-pi-tui/scripts/verify-migration-semantics
  */
 
 import { execFileSync } from 'node:child_process'
-import { existsSync, readFileSync } from 'node:fs'
+import { readFileSync } from 'node:fs'
 import { dirname, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import ts from 'typescript'
 
 import { discoverTestFiles } from './test-discovery.mjs'
 
@@ -27,54 +32,65 @@ const TEST_ROOT = resolve(ROOT, 'test')
 /**
  * The file-relative production references a test file makes.
  *
- * Every FORM the tree actually uses is covered:
- *
- *   - `new URL('…', import.meta.url)` — the single-quoted source read;
- *   - `new URL(\`…\`, import.meta.url)` — the TEMPLATE source read (the
- *     literal prefix before the interpolation is the part that resolves);
- *   - `from '…'` and `from "…"` — the import clause, both quote styles.
- *
- * A form this extractor does not recognise would make the check report a
- * FALSE assurance, so the extractor also COUNTS the production references
- * it saw in a DIFFERENT way and the caller compares the two counts: a
- * reference the extractor missed shows up as a count difference.
+ * The TypeScript parser reports the ACTUAL module specifiers — the import
+ * clauses, the dynamic imports and the `new URL(…, import.meta.url)` source
+ * reads — and ignores text that merely contains an import. A specifier
+ * inside a template literal's TEXT is therefore not a reference; a
+ * specifier inside a template literal's `${…}` INTERPOLATION is, because
+ * the parser sees it as executable code.
  */
 export function productionReferences(source) {
+  const file = ts.createSourceFile('probe.ts', source, ts.ScriptTarget.ESNext, true, ts.ScriptKind.TS)
+  // A `.mjs` file is plain JavaScript; the parser handles both the same way
+  // for the forms this extractor cares about.
   const refs = []
-  // A reference inside a plain string literal is a source-lock assertion
-  // or a test fixture (many architecture guards assert on the exact text of
-  // a production import), NOT a reference of this file.
-  const add = (spec, index) => {
-    if (isInsideStringLiteral(source, index)) return
-    refs.push(spec)
+  const add = (specifier) => {
+    if (typeof specifier !== 'string') return
+    if (!specifier.startsWith('../')) return
+    // A specifier may carry a QUERY string (`x.mjs?process-test=1`): the
+    // query is not part of the path, so it is stripped before the
+    // comparison.
+    refs.push(specifier.split('?')[0])
   }
-  for (const match of source.matchAll(/new URL\(\s*'(\.\.\/[^']*)'\s*,\s*import\.meta\.url\s*\)/gu)) {
-    add(match[1], match.index)
+  const visit = (node) => {
+    // The import clause: `import { x } from '…'`, and the side-effect form.
+    if (ts.isImportDeclaration(node) && node.moduleSpecifier !== undefined) {
+      add(node.moduleSpecifier.text)
+    }
+    if (ts.isExportDeclaration(node) && node.moduleSpecifier !== undefined) {
+      add(node.moduleSpecifier.text)
+    }
+    // The dynamic import: `import('…')` — including one inside a template
+    // literal's interpolation, which the parser sees as executable.
+    if (ts.isCallExpression(node) && node.expression.kind === ts.SyntaxKind.ImportKeyword) {
+      const argument = node.arguments[0]
+      if (argument !== undefined && ts.isStringLiteralLike(argument)) add(argument.text)
+      // The TEMPLATE dynamic import: `import(\`../src/app/${name}\`)`. The
+      // literal prefix before the interpolation is the part that resolves.
+      if (argument !== undefined && ts.isTemplateExpression(argument)) add(argument.head.text)
+    }
+    // The import TYPE query: `import('…').Type` — a distinct AST form
+    // from the dynamic import, and a real reference.
+    if (ts.isImportTypeNode(node) && ts.isLiteralTypeNode(node.argument)) {
+      const literal = node.argument.literal
+      if (ts.isStringLiteralLike(literal)) add(literal.text)
+    }
+    // The CommonJS require: `require('…')`.
+    if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === 'require') {
+      const [argument] = node.arguments
+      if (argument !== undefined && ts.isStringLiteralLike(argument)) add(argument.text)
+    }
+    // The source read: `new URL('…', import.meta.url)`.
+    if (ts.isNewExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === 'URL') {
+      const [first] = node.arguments
+      if (first !== undefined && ts.isStringLiteralLike(first)) add(first.text)
+      // The TEMPLATE source read: `new URL(\`../src/${name}\`, …)`. The
+      // literal prefix before the interpolation is the part that resolves.
+      if (first !== undefined && ts.isTemplateExpression(first)) add(first.head.text)
+    }
+    ts.forEachChild(node, visit)
   }
-  for (const match of source.matchAll(/new URL\(\s*`(\.\.\/[^`$]*)\$\{/gu)) {
-    add(match[1], match.index)
-  }
-  for (const match of source.matchAll(/new URL\(\s*"(\.\.\/[^"]*)"\s*,\s*import\.meta\.url\s*\)/gu)) {
-    add(match[1], match.index)
-  }
-  for (const match of source.matchAll(/\bfrom\s+'(\.\.\/[^']*)'/gu)) {
-    add(match[1], match.index)
-  }
-  for (const match of source.matchAll(/\bfrom\s+"(\.\.\/[^"]*)"/gu)) {
-    add(match[1], match.index)
-  }
-  for (const match of source.matchAll(/\bimport\s*\(\s*'(\.\.\/[^']*)'/gu)) {
-    add(match[1], match.index)
-  }
-  for (const match of source.matchAll(/\bimport\s*\(\s*`(\.\.\/[^`$]*)\$\{/gu)) {
-    add(match[1], match.index)
-  }
-  for (const match of source.matchAll(/^\s*import\s+'(\.\.\/[^']*)'/gmu)) {
-    add(match[1], match.index)
-  }
-  for (const match of source.matchAll(/^\s*import\s+"(\.\.\/[^"]*)"/gmu)) {
-    add(match[1], match.index)
-  }
+  visit(file)
   return refs
 }
 
@@ -82,22 +98,38 @@ export function productionReferences(source) {
  * How many production references the source mentions, counted WITHOUT
  * knowing the forms.
  *
- * The comparison with {@link productionReferences} is the coverage proof:
- * a form the extractor does not recognise makes the two counts differ, and
+ * The comparison with {@link productionReferences} is the coverage proof: a
+ * form the extractor does not recognise makes the two counts differ, and
  * the caller reports it instead of reporting a false assurance.
- *
- * A reference inside a plain string literal is NOT a reference of this
- * file: it is a source-lock assertion or a test fixture (many architecture
- * guards assert on the exact text of a production import). Those are
- * counted separately, so the comparison is exact rather than approximate.
  */
 export function productionReferenceCount(source) {
   let count = 0
   for (const match of source.matchAll(/(?:new URL\(\s*|^\s*import\s+|\bfrom\s+|\bimport\s*\(\s*)['"`](\.\.\/[^'"`$]*)/gmu)) {
-    if (isInsideStringLiteral(source, match.index)) continue
     count += 1
+    void match
   }
   return count
+}
+
+/**
+ * The references the TEXT scan finds that the parser does not.
+ *
+ * Every one of them must be a reference inside a plain string literal (a
+ * source-lock assertion or a test fixture) — the parser ignores those on
+ * purpose, and the text scan cannot tell them apart from a real reference.
+ * A difference that is NOT inside a string literal is a form the extractor
+ * missed, and the caller reports it.
+ */
+export function unexplainedTextReferences(source) {
+  const parsed = productionReferences(source)
+  const text = []
+  for (const match of source.matchAll(/(?:new URL\(\s*|^\s*import\s+|\bfrom\s+|\bimport\s*\(\s*)['"`](\.\.\/[^'"`$]*)/gmu)) {
+    if (isInsideStringLiteral(source, match.index)) continue
+    // The comparison strips the QUERY string, exactly as the extractor does.
+    const specifier = match[1].split('?')[0]
+    if (!parsed.includes(specifier)) text.push(specifier)
+  }
+  return text
 }
 
 /** Whether the offset falls inside a string literal. */
@@ -167,18 +199,14 @@ function main() {
     if (before === undefined) continue
     const beforeRefs = productionReferences(before)
     const afterRefs = productionReferences(source)
+    // The coverage check runs BEFORE the zero-reference skip: a file whose
+    // ONLY reference uses an unrecognised form must still be reported.
+    const unexplained = unexplainedTextReferences(source)
+    if (unexplained.length > 0) {
+      uncovered.push(`${rel}: ${unexplained.length} reference(s) the extractor did not recognise: ${unexplained.join(', ')}`)
+    }
     if (beforeRefs.length === 0) continue
     compared += 1
-
-    // The form-agnostic count must not exceed the extractor's count by
-    // more than the source-lock strings the extractor deliberately skips
-    // (a `from '…'` inside a plain string literal). A larger gap means
-    // the extractor missed a form.
-    const beforeRaw = productionReferenceCount(before)
-    const afterRaw = productionReferenceCount(source)
-    if (beforeRaw !== beforeRefs.length || afterRaw !== afterRefs.length) {
-      uncovered.push(`${rel}: the extractor saw ${afterRefs.length} reference(s) but the source mentions ${afterRaw}`)
-    }
 
     // The RESOLVED target of every reference, as a path relative to the
     // repository root. The base and the current tree must resolve to the

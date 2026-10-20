@@ -153,34 +153,39 @@ function main() {
   const afterXml = readFileSync(afterPath, 'utf8')
   const before = countsFromJunit(beforeXml, 'before')
   const after = countsFromJunit(afterXml, 'after')
-  // A report whose unattributed share is large cannot explain the lane
-  // per file: the reconciliation would be tidy but over the attributed part
-  // only. That is reported, not accepted.
-  for (const [label, xml] of [['before', beforeXml], ['after', afterXml]]) {
-    const share = unattributedShare(xml)
-    if (share > 0.05) {
-      throw new Error(
-        `the ${label} report attributes only ${Math.round((1 - share) * 100)}% of its cases to a file: the per-file reconciliation would not cover the lane`,
-      )
-    }
+  // The report's DECLARED totals are the authority for the lane's case
+  // count; the per-file counts explain only the attributed part. If the
+  // unattributed part CHANGES between the two reports, the per-file
+  // reconciliation cannot explain the lane's delta, and the difference must
+  // be shown as its own line — not absorbed into a file's count.
+  const beforeDeclared = declaredTotals(beforeXml).tests
+  const afterDeclared = declaredTotals(afterXml).tests
+  const beforeUnattributed = unattributedEntryCount(beforeXml)
+  const afterUnattributed = unattributedEntryCount(afterXml)
+  if (beforeDeclared === undefined || afterDeclared === undefined) {
+    throw new Error('a report without a declared total cannot be reconciled per file')
   }
   const beforeTotal = [...before.values()].reduce((a, b) => a + b, 0)
   const afterTotal = [...after.values()].reduce((a, b) => a + b, 0)
-
-  // A file is a MOVE only when it exists in BOTH trees under different
-  // paths. The move map is built from the tree's own file lists, so a
-  // genuinely NEW file is an addition, not a move.
+  const unattributedDelta = afterUnattributed - beforeUnattributed
+  if (unattributedDelta !== 0) {
+    throw new Error(
+      `the two reports attribute a DIFFERENT number of cases to a file (${beforeUnattributed} vs ${afterUnattributed}): the per-file reconciliation cannot explain the lane's delta`,
+    )
+  }
   const beforeFiles = new Set(before.keys())
   const afterFiles = new Set(after.keys())
   const moves = new Map()
   for (const [beforePath_, count] of before) {
     if (afterFiles.has(beforePath_)) continue
     // The file is gone from its old path. Is there a file in the AFTER tree
-    // with the same BASENAME and the same case count? That is a move.
+    // with the same BASENAME and the same case count? That is a candidate
+    // move; a candidate that is AMBIGUOUS (more than one match) is NOT
+    // claimed as a move — it is reported as a removal plus an addition.
     const base = beforePath_.split('/').pop()
-    const candidate = [...afterFiles].find(afterPath_ =>
+    const candidates = [...afterFiles].filter(afterPath_ =>
       afterPath_.split('/').pop() === base && after.get(afterPath_) === count)
-    if (candidate !== undefined) moves.set(beforePath_, candidate)
+    if (candidates.length === 1) moves.set(beforePath_, candidates[0])
   }
 
   const movedOut = []
@@ -204,9 +209,12 @@ function main() {
     if (after.get(file) !== count) changed.push([file, count, after.get(file)])
   }
 
-  console.log(`before: ${before.size} files, ${beforeTotal} cases`)
-  console.log(`after:  ${after.size} files, ${afterTotal} cases`)
-  console.log(`delta:  ${afterTotal - beforeTotal} cases\n`)
+  // The LANE's totals are the reports' DECLARED counts; the per-file counts
+  // explain the attributed part, and the unattributed remainder is shown
+  // as its own line.
+  console.log(`before: ${before.size} files, ${beforeDeclared} cases (${beforeTotal} attributed, ${beforeUnattributed} unattributed)`)
+  console.log(`after:  ${after.size} files, ${afterDeclared} cases (${afterTotal} attributed, ${afterUnattributed} unattributed)`)
+  console.log(`delta:  ${afterDeclared - beforeDeclared} cases\n`)
 
   console.log(`=== moved (${movedOut.length}) ===`)
   for (const [from, to, count] of movedOut) console.log(`  ${String(count).padStart(4)}  ${from} -> ${to}`)
@@ -223,8 +231,8 @@ function main() {
   const explained = added.reduce((a, [, count]) => a + count, 0)
     - removed.reduce((a, [, count]) => a + count, 0)
     + changed.reduce((a, [, from, to]) => a + (to - from), 0)
-  console.log(`\nexplained delta: ${explained} (measured ${afterTotal - beforeTotal})`)
-  if (explained !== afterTotal - beforeTotal) {
+  console.log(`\nexplained delta: ${explained} (measured ${afterDeclared - beforeDeclared})`)
+  if (explained !== afterDeclared - beforeDeclared) {
     console.error('the reconciliation does NOT add up')
     process.exitCode = 1
   }
