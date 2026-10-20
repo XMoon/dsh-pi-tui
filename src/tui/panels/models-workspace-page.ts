@@ -857,7 +857,12 @@ export class ModelsWorkspacePage implements Component {
         // The key draft dies with its single dispatch: a failed/partial write is
         // never retried with a cached secret.
         this.add = { ...current, creating: false, result: outcome, draft: { ...current.draft, key: '' } }
-        if (outcome.kind === 'created') this.providerRows = this.source.rows()
+        if (outcome.kind === 'created') {
+          this.providerRows = this.source.rows()
+          // The new row's credential/record presence is authoritative state the
+          // list must not leave Unknown until a manual refresh.
+          this.refresh()
+        }
       })
     })
   }
@@ -2162,6 +2167,7 @@ export class ModelsWorkspacePage implements Component {
     }
     this.pageController.abort()
     this.clearQuestions()
+    this.pendingAfterAuth = undefined
     this.picker = undefined
     this.pickerQueue.length = 0
     this.modelPicker = undefined

@@ -645,9 +645,24 @@ test('an empty masked key answer writes nothing (MA03)', async () => {
 
 test('the Add Provider page drives discovery → multi-select → review → create (MA04)', async () => {
   const { source, calls } = fakeSource()
+  const createdRows: ModelsProviderRow[] = []
+  source.rows = () => createdRows
   source.discoverModels = async () => [{ id: 'm1' }, { id: 'm2' }]
   source.createProvider = async draft => {
     calls.push(`create:${draft.route}:${draft.api}:${draft.baseURL}:${draft.models.join(',')}:${draft.apiKey}`)
+    createdRows.push({
+      kind: 'reference',
+      identity: `route:${draft.route}`,
+      route: draft.route,
+      label: draft.route,
+      ref: 'NEW_ROUTE_API_KEY',
+      configured: true,
+      declared: true,
+      namesCredential: true,
+      methods: [],
+      inFlight: false,
+      profile: { route: draft.route, configured: true, models: [...draft.models] },
+    })
     return { kind: 'created', text: `provider ${draft.route} added` }
   }
   const page = new ModelsWorkspacePage(source, () => {}, { view: 'add-provider', route: 'new-route' }, () => {})
@@ -685,6 +700,12 @@ test('the Add Provider page drives discovery → multi-select → review → cre
   await flush()
   assert.ok(calls.some(call => call === 'create:new-route:openai-completions:https://new.example/v1:m1,m2:'), calls.join(','))
   assert.match(viewText(page), /provider new-route added/u)
+  viewText(page)
+  page.handleInput('\r') // ← Back to providers
+  await flush()
+  const newRow = page.render(100).map(stripTerminalSequences).find(line => line.includes('new-route'))
+  assert.ok(newRow !== undefined)
+  assert.match(newRow, /Configured/u, 'the created provider key is reflected without a manual refresh')
 })
 
 test('a withdrawn older SELECT prompt can never overwrite the newer select prompt (RFL-003)', async () => {
