@@ -25,7 +25,7 @@
  */
 
 import assert from 'node:assert/strict'
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import test from 'node:test'
 
@@ -94,22 +94,55 @@ test('a lane that matches nothing fails closed', () => {
 const BASELINE = JSON.parse(readFileSync(join(TEST_ROOT, 'tooling', 'new-test-policy-baseline.json'), 'utf8'))
 
 /**
+ * The shared FIXED-WAIT helpers.
+ *
+ * A blind sleep is not only a literal `setTimeout` in the test file: it can
+ * also be a call to a SHARED helper that wraps one (`directSettle(ms)`).
+ * The helper names are DERIVED from the support modules themselves — a
+ * helper that wraps a `setTimeout` with a millisecond argument is a
+ * fixed-wait helper by construction, so a new one is covered without a
+ * hand-maintained list.
+ */
+function fixedWaitHelpers() {
+  const helpers = new Set()
+  const supportRoot = join(TEST_ROOT, 'support')
+  for (const entry of readdirSync(supportRoot, { withFileTypes: true })) {
+    if (!entry.isFile() || !/\.(ts|mjs)$/u.test(entry.name)) continue
+    const source = readFileSync(join(supportRoot, entry.name), 'utf8')
+    for (const match of source.matchAll(
+      /export\s+(?:async\s+)?function\s+([a-zA-Z_$][A-Za-z0-9_$]*)\s*\([^)]*\b(?:millis|ms|delay|durationMs)\b[^)]*\)/gu,
+    )) {
+      helpers.add(match[1])
+    }
+  }
+  return helpers
+}
+
+/**
  * The fixed waits a test file contains.
  *
  * A BLIND sleep is a fixed wait whose only purpose is "give the system
  * time". The policy allows a bounded wait when the contract IS about a
  * time window, and requires the reason next to it.
  */
-function fixedWaitsOf(rel) {
+function fixedWaitsOf(rel, helpers = fixedWaitHelpers()) {
   const source = readFileSync(join(TEST_ROOT, rel), 'utf8')
   const lines = source.split('\n')
   const found = []
   for (let index = 0; index < lines.length; index += 1) {
     const line = lines[index]
-    if (!/setTimeout\([^,]*,\s*\d{3,}/u.test(line)) continue
+    // The literal form: `setTimeout(resolve, 4000)`.
+    const literal = /setTimeout\([^,]*,\s*\d[\d_]{2,}/u.test(line)
+    // The shared-helper form: `directSettle(4_000)`. A helper call with NO
+    // argument uses the helper's own default, so it counts too.
+    const helperCall = [...helpers].some(helper => {
+      const pattern = new RegExp(`\\b${helper}\\s*\\(\\s*(\\d[\\d_]{2,})?\\s*\\)`, 'u')
+      return pattern.test(line)
+    })
+    if (!literal && !helperCall) continue
     // A blind wait needs a reason on the line itself or the line above.
     const context = `${lines[index - 1] ?? ''}\n${line}`
-    if (/\/\/|reason|window|deadline|bounded|negative|observation/iu.test(context)) continue
+    if (/\/\/[^\n]*(?:reason|window|deadline|bounded|negative|observation)/iu.test(context)) continue
     found.push(index + 1)
   }
   return found
@@ -220,5 +253,57 @@ test('a new Domain, Integration and Tooling test land in the right lane', async 
     const files = resolveLane(TEST_ROOT, lane.patterns, lane.suffixes, lane.exclude ?? [])
     assert.ok(files.includes(addition.rel),
       `${addition.lane} must include ${addition.rel} in its executable file list`)
+  }
+})
+
+test('a NEW long wait through a shared helper is caught', () => {
+  // The regression for the review finding: the guard must see a fixed wait
+  // that goes through a SHARED helper (`directSettle(ms)`), not only a
+  // literal `setTimeout` in the test file. A new test that waits 30 seconds
+  // through the helper must be caught exactly like a literal one.
+  const probe = 'integration/synthetic-long-wait-probe.test.ts'
+  const path = join(TEST_ROOT, probe)
+  mkdirSync(join(path, '..'), { recursive: true })
+  writeFileSync(path, [
+    "import test from 'node:test'",
+    "import { directSettle } from '../support/direct-tsp-fixture.ts'",
+    '',
+    "test('a synthetic long wait through the shared helper', async () => {",
+    '  await directSettle(30_000)',
+    '})',
+    '',
+  ].join('\n'))
+  try {
+    const helpers = fixedWaitHelpers()
+    assert.ok(helpers.has('directSettle'),
+      'the shared fixed-wait helper must be discovered from the support modules')
+    const waits = fixedWaitsOf(probe, helpers)
+    assert.deepEqual(waits, [5],
+      'a long wait through the shared helper must be reported as an unreasoned fixed wait')
+  } finally {
+    rmSync(path, { force: true })
+  }
+})
+
+test('a NEW long literal wait is caught', () => {
+  // The same regression for the literal form, so both shapes are covered by
+  // the same guard.
+  const probe = 'integration/synthetic-literal-wait-probe.test.ts'
+  const path = join(TEST_ROOT, probe)
+  mkdirSync(join(path, '..'), { recursive: true })
+  writeFileSync(path, [
+    "import test from 'node:test'",
+    '',
+    "test('a synthetic long literal wait', async () => {",
+    '  await new Promise(resolve => setTimeout(resolve, 30_000))',
+    '})',
+    '',
+  ].join('\n'))
+  try {
+    const waits = fixedWaitsOf(probe, fixedWaitHelpers())
+    assert.deepEqual(waits, [4],
+      'a long literal wait must be reported as an unreasoned fixed wait')
+  } finally {
+    rmSync(path, { force: true })
   }
 })
