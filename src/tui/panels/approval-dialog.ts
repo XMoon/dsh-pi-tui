@@ -317,16 +317,12 @@ class ApprovalSheet implements Component {
     }
     if (limited !== undefined) return limited
     if (smallest !== undefined) return smallest
-    // An extremely narrow surface: truncate each decision label to the width
-    // so the three mandatory actions stay painted and reachable by keyboard.
-    const crop = (text: string): string => truncateToWidth(text, width, '…')
-    return [[
-      { action: 'allow-once', text: crop('[y] Allow') },
-    ], [
-      { action: 'reject', text: crop('[n] Reject') },
-    ], [
-      { action: 'cancel', text: crop('[Esc] Cancel') },
-    ]]
+    // No complete decision label fits the content width at all: do NOT crop a
+    // label into a partial word (a half-painted "Allow"/"Cancel" is not a
+    // truthful or reachable action). An empty action layout makes the frame's
+    // honesty check fall back to the explicit resize row; the keyboard
+    // decisions remain available through the runtime.
+    return []
   }
 
   /** The scroll fact / resize hint row. */
