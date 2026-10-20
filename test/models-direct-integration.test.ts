@@ -115,6 +115,18 @@ test('REAL Direct adapters: provider facts, API-key set/re-read, and the Add Pro
     assert.match(store, /ACME_API_KEY: sk-test-1/u)
     assert.equal((await stat(join(home, '.credentials.yaml'))).mode & 0o077, 0, 'the credential store is not group/world readable')
 
+    const reserved = await workflow.createProvider({
+      route: 'deepseek-account',
+      api: 'openai-completions',
+      baseURL: 'https://account.example/v1',
+      displayName: '',
+      models: ['account-model'],
+      apiKey: '',
+    })
+    assert.equal(reserved.kind, 'rejected')
+    assert.match(reserved.kind === 'rejected' ? reserved.text : '', /reserved by the official bundle/u)
+    assert.equal(settingsState.section.providers['deepseek-account'], undefined)
+
     const duplicate = await workflow.createProvider({
       route: 'acme',
       api: 'openai-completions',

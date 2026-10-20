@@ -291,3 +291,22 @@ test('Account page fits 105/80/60/40/30 columns in signed-out, attempt and store
     }
   }
 })
+
+test('disposing the Account page aborts its Host watch subscription (MA13 watcher closure)', async () => {
+  const state: SourceState = { view: signedOut(), profileFails: false, balanceFails: false, runningTasks: false, calls: [] }
+  let aborted = false
+  const source = makeSource(state)
+  source.watch = async function* (signal) {
+    yield state.view
+    await new Promise<void>(resolve => {
+      signal.addEventListener('abort', () => { aborted = true; resolve() }, { once: true })
+    })
+  }
+  const page = new AccountWorkspacePage(source, () => {}, { view: 'page' })
+  page.setBodyHeight(24)
+  await flush()
+  assert.equal(aborted, false)
+  page.dispose()
+  await flush()
+  assert.equal(aborted, true, 'the page must end its own watch signal on teardown')
+})
