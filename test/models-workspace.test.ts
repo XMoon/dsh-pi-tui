@@ -599,3 +599,60 @@ test('an older Models credential read cannot overwrite a newer refresh (RFL-002)
   assert.match(viewText(page), /Configured/u, 'the stale read must not flip the row to Not set')
   assert.doesNotMatch(viewText(page), /Not set/u)
 })
+
+test('an empty masked key answer writes nothing (MA03)', async () => {
+  const { page, calls } = open({ view: 'reference', ref: 'ACME_API_KEY', label: 'Acme Gateway' })
+  await flush()
+  viewText(page)
+  page.handleInput('\r') // open the masked editor
+  await flush()
+  page.handleInput('\r') // submit the empty draft to review
+  page.handleInput('\r') // submit the review
+  await flush()
+  assert.equal(calls.some(call => call.startsWith('set:')), false)
+  assert.match(viewText(page), /empty key; nothing set/u)
+})
+
+test('the Add Provider page drives discovery → multi-select → review → create (MA04)', async () => {
+  const { source, calls } = fakeSource()
+  source.discoverModels = async () => [{ id: 'm1' }, { id: 'm2' }]
+  source.createProvider = async draft => {
+    calls.push(`create:${draft.route}:${draft.api}:${draft.baseURL}:${draft.models.join(',')}:${draft.apiKey}`)
+    return { kind: 'created', text: `provider ${draft.route} added` }
+  }
+  const page = new ModelsWorkspacePage(source, () => {}, { view: 'add-provider', route: 'new-route' }, () => {})
+  page.setBodyHeight(30)
+  await flush()
+  viewText(page)
+  page.handleInput('\u001b[B')
+  page.handleInput('\u001b[B') // base URL field
+  page.handleInput('\r')
+  await flush()
+  for (const character of 'https://new.example/v1') page.handleInput(character)
+  page.handleInput('\r')
+  page.handleInput('\r')
+  await flush()
+  assert.match(viewText(page), /https:\/\/new\.example\/v1/u)
+
+  page.handleInput('\u001b[B')
+  page.handleInput('\u001b[B')
+  page.handleInput('\u001b[B') // models field
+  page.handleInput('\r')
+  await flush()
+  assert.match(viewText(page), /Models advertised by the endpoint/u)
+  page.handleInput(' ')
+  page.handleInput('\u001b[B')
+  page.handleInput(' ')
+  page.handleInput('\r')
+  await flush()
+  assert.match(viewText(page), /m1, m2/u)
+
+  page.handleInput('\u001b[B') // Review & create
+  page.handleInput('\r')
+  await flush()
+  assert.match(viewText(page), /Review provider/u)
+  page.handleInput('\r')
+  await flush()
+  assert.ok(calls.some(call => call === 'create:new-route:openai-completions:https://new.example/v1:m1,m2:'), calls.join(','))
+  assert.match(viewText(page), /provider new-route added/u)
+})
