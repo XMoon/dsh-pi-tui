@@ -1,7 +1,6 @@
 name: Work item
 description: An implementation or ownership task in the standard work-item structure
 title: ""
-labels: ["kind:feature"]
 body:
   - type: markdown
     attributes:
