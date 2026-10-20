@@ -555,6 +555,11 @@ export class AccountWorkspacePage implements Component {
   handleInput(data: string): 'handled' | 'exit' {
     if (this.disposed) return 'handled'
     if (matchesKey(data, 'escape') || matchesKey(data, 'backspace')) {
+      if (this.busy !== undefined) {
+        this.notice = 'an account operation is still in flight — wait for the Host outcome'
+        this.requestRender()
+        return 'handled'
+      }
       if (this.signOutConfirm) {
         this.signOutConfirm = false
         this.cursor = 0
@@ -710,6 +715,10 @@ export class AccountWorkspacePage implements Component {
   /** Revoke the press state when another owner claims the gesture. */
   cancelPointer(): void {
     this.pressed = undefined
+  }
+
+  pendingMutation(): boolean {
+    return this.busy !== undefined
   }
 
   dispose(): void {

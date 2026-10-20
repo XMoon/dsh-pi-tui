@@ -55,13 +55,14 @@ interface Harness {
   readonly vt: VirtualTerminal
   readonly app: TuiApp
   readonly calls: readonly string[]
+  readonly holdNextSetReference: () => () => void
   readonly view: () => string
   readonly rows: () => string[]
   readonly close: () => void
 }
 
-function open(): Harness {
-  const vt = new VirtualTerminal(120, 40)
+function open(width = 120, height = 40): Harness {
+  const vt = new VirtualTerminal(width, height)
   const owned: OwnedRunner = (_label, task, options) => {
     void Promise.resolve().then(() => task()).then(
       result => options.onResult?.(result),
@@ -87,6 +88,8 @@ function open(): Harness {
   let recordRows: { key: string; label: string; kind: 'grant' }[] = [
     { key: 'plugin/mykey', label: 'My Key', kind: 'grant' },
   ]
+  let setReferenceGate: Promise<void> | undefined
+  let releaseSetReference: (() => void) | undefined
   const base: Record<string, unknown> = {
     ctx,
     app,
@@ -140,7 +143,12 @@ function open(): Harness {
       credentials: {
         available: () => true,
         recordsSupported: () => true,
-        setReference: async (ref: string) => { calls.push(`set:${ref}`) },
+        setReference: async (ref: string) => {
+          calls.push(`set:${ref}`)
+          const gate = setReferenceGate
+          setReferenceGate = undefined
+          await gate
+        },
         unsetReference: async (ref: string) => { calls.push(`unset:${ref}`) },
         deleteRecord: async (key: string) => {
           calls.push(`delete:${key}`)
@@ -188,6 +196,10 @@ function open(): Harness {
     vt,
     app,
     calls,
+    holdNextSetReference: () => {
+      setReferenceGate = new Promise<void>(resolve => { releaseSetReference = resolve })
+      return () => { releaseSetReference?.() }
+    },
     rows,
     view: () => rows().join('\n'),
     close: () => {
@@ -210,6 +222,12 @@ const colOf = (h: Harness, row: number, needle: string): number => {
 }
 const press = (h: Harness, row: number, col: number): void => { h.vt.sendInput(`\x1b[<0;${col + 1};${row + 1}M`) }
 const release = (h: Harness, row: number, col: number): void => { h.vt.sendInput(`\x1b[<0;${col + 1};${row + 1}m`) }
+const click = async (h: Harness, row: number, col: number): Promise<void> => {
+  h.vt.sendInput(`\x1b[<0;${col + 1};${row + 1}M`)
+  await h.vt.waitForRender()
+  h.vt.sendInput(`\x1b[<0;${col + 1};${row + 1}m`)
+  await h.vt.waitForRender()
+}
 const key = async (h: Harness, data: string): Promise<void> => {
   h.vt.sendInput(data)
   await h.vt.waitForRender()
@@ -394,5 +412,53 @@ test('/logout mykey deletes the flow RECORD, never the MYKEY reference (RFL-001 
   await h.vt.waitForRender()
   assert.ok(h.calls.includes('delete:plugin/mykey'), h.calls.join(','))
   assert.equal(h.calls.some(call => call.startsWith('unset:')), false, h.calls.join(','))
+  h.close()
+})
+
+test('a 30x8 Settings workspace disables Enter for a clipped masked form; 40x16 keeps it visible (MA12)', async () => {
+  const h = open()
+  await h.vt.waitForRender()
+  ;(h as unknown as { invoke(line: string): unknown }).invoke('/login deepseek-official')
+  await h.vt.waitForRender()
+  await key(h, '\r') // open the masked API-key form at full height
+  await h.vt.waitForRender()
+  assert.match(h.view(), /API Key Reference|Enter the API key/u)
+
+  h.vt.resize(40, 16)
+  await h.vt.waitForRender()
+  assert.doesNotMatch(h.view(), /Enter is disabled/u)
+  assert.match(h.view(), /Enter continue/u)
+
+  h.vt.resize(30, 8)
+  await h.vt.waitForRender()
+  assert.match(h.view(), /Resize the terminal/u)
+  assert.match(h.view(), /Enter disabled/u)
+  await key(h, 'a')
+  await key(h, '\r')
+  await h.vt.waitForRender()
+  assert.equal(h.calls.some(call => call.startsWith('set:')), false, 'a clipped form must never submit')
+  h.close()
+})
+
+test('the category rail cannot abandon a pending API-key write (pending mutation ownership)', async () => {
+  const h = open()
+  await h.vt.waitForRender()
+  const release = h.holdNextSetReference()
+  ;(h as unknown as { invoke(line: string): unknown }).invoke('/login deepseek-official')
+  await h.vt.waitForRender()
+  await key(h, '\r') // open masked form
+  await key(h, 'sk-held')
+  await key(h, '\r') // review
+  await key(h, '\r') // submit (setReference is held open)
+  await h.vt.waitForRender()
+  assert.match(h.view(), /Saving|write|Verified|API Key Reference/u)
+
+  const accountRow = rowOf(h, 'Account')
+  await click(h, accountRow, 1)
+  assert.match(h.rows()[0]!, /Settings · Models/u, 'pending mutation wins over category navigation')
+  assert.doesNotMatch(h.view(), /Settings · Account/u)
+
+  release()
+  for (let index = 0; index < 20; index += 1) await new Promise<void>(resolve => setImmediate(resolve))
   h.close()
 })

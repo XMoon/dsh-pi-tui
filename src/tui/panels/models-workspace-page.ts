@@ -283,6 +283,9 @@ export class ModelsWorkspacePage implements Component {
   /** The last painted QuestionFlow region (page-local rows) for mouse input. */
   private questionTop = 0
   private questionRows = 0
+  /** The embedded QuestionFlow requires an 8-row budget to keep its confirm
+   *  hint visible; below it Enter must not submit a clipped form. */
+  private questionUsable = true
   private questionPress: { readonly gesture: QuestionMouseGesture; readonly revision: number; readonly width: number; readonly height: number; readonly row: number } | undefined
   private copyValue: string | undefined
   private paintedCopy = false
@@ -1191,14 +1194,20 @@ export class ModelsWorkspacePage implements Component {
     if (this.question !== undefined) {
       const notice = this.renderAuthNotice(width)
       const questionRows = Math.max(1, height - 1 - notice.length)
+      const usable = questionRows >= 8
+      this.questionUsable = usable
       this.question.flow.setMaxRows(Math.max(8, questionRows))
       lines.push(...notice.map(line => fit(line, width)))
       this.questionTop = lines.length
-      this.questionRows = questionRows
-      lines.push(...this.question.flow.render(width).slice(0, questionRows).map(line => fit(line, width)))
+      this.questionRows = usable ? questionRows : 0
+      if (usable) {
+        lines.push(...this.question.flow.render(width).slice(0, questionRows).map(line => fit(line, width)))
+      } else {
+        lines.push(color.warning('Resize the terminal: the full form and its confirm hint need at least 8 rows. Enter is disabled.'))
+      }
       lines.push(color.textMuted(renderActionBarRow([
         { text: 'type to edit', priority: 5 },
-        { text: 'Enter continue', priority: 6 },
+        { text: usable ? 'Enter continue' : 'Enter disabled', priority: 6 },
         { text: 'Esc back', priority: 8 },
       ], width)))
       this.paintedCopy = false
@@ -1700,6 +1709,14 @@ export class ModelsWorkspacePage implements Component {
   handleInput(data: string): ModelsPageExit {
     if (this.disposed) return 'handled'
     if (this.question !== undefined) {
+      if (!this.questionUsable) {
+        if (matchesKey(data, 'escape')) this.question.flow.handleInput(data)
+        else {
+          this.notice = 'resize the terminal to show the full form before submitting'
+          this.requestRender()
+        }
+        return 'handled'
+      }
       this.question.flow.handleInput(data)
       return 'handled'
     }
@@ -2064,6 +2081,7 @@ export class ModelsWorkspacePage implements Component {
   onCellPress(x: number, y: number): void {
     if (this.disposed) return
     if (this.question !== undefined) {
+      if (!this.questionUsable) return
       const row = y - this.questionTop
       const gesture = row >= 0 && row < this.questionRows ? this.question.flow.beginMousePress(row) : undefined
       this.questionPress = gesture === undefined
@@ -2078,6 +2096,7 @@ export class ModelsWorkspacePage implements Component {
   onCellClick(x: number, y: number): void {
     if (this.disposed) return
     if (this.question !== undefined) {
+      if (!this.questionUsable) return
       const pressed = this.questionPress
       this.questionPress = undefined
       const row = y - this.questionTop
@@ -2155,6 +2174,13 @@ export class ModelsWorkspacePage implements Component {
   cancelPointer(): void {
     this.pressed = undefined
     this.questionPress = undefined
+  }
+
+  pendingMutation(): boolean {
+    if (this.referencePhase === 'pending') return true
+    if (this.add?.creating === true) return true
+    if (this.clear?.phase === 'pending') return true
+    return this.auth?.phase === 'starting' || this.auth?.phase === 'running'
   }
 
   dispose(): void {

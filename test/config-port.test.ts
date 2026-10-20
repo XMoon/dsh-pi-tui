@@ -399,9 +399,10 @@ test('authorization bridges an ALREADY-ABORTED prompt signal as a non-decline wi
   assert.ok(events.some(event => event.kind === 'settled' && event.status === 'cancelled'), 'the withdrawal settles the attempt')
 })
 
-test('authorization cancel() rejects pending prompt bridges IMMEDIATELY', async () => {
-  // A cancel must not leave the client's prompt UI hanging until the
-  // upstream settles: the pending bridge promise rejects right away.
+test('authorization cancel() closes the pending prompt UI immediately without rejecting its bridge', async () => {
+  // The prompt UI closes at once, but the bridge promise stays pending: the
+  // provider may legitimately still be committing and using that prompt, so
+  // injecting a rejection could corrupt the authoritative outcome.
   const events: import('../src/runtime/config-port.ts').AuthorizationFlowEvent[] = []
   let promptSettled = false
   const authorization = port({
@@ -436,13 +437,16 @@ test('authorization cancel() rejects pending prompt bridges IMMEDIATELY', async 
   await authorization.cancel(promptEvent.attemptId)
   await settle()
   off()
-  assert.equal(promptSettled, true, 'cancel rejects the pending bridge immediately (the upstream await releases)')
+  assert.equal(promptSettled, false, 'the bridge is NOT rejected before the Host outcome')
+  assert.ok(events.some(event => event.kind === 'prompt-withdrawn' && event.attemptId === promptEvent.attemptId),
+    'the prompt UI closes immediately')
+  assert.equal(events.some(event => event.kind === 'settled'), false, 'no terminal outcome is forged')
 })
 
 test('authorization cancel() emits prompt-withdrawn so the UI closes even if the flow never settles', async () => {
   // A cancel must close the client's prompt UI EVEN IF the upstream flow
-  // ignores its abort signal and never settles: the adapter emits the
-  // withdrawal event itself, never waiting on the upstream settlement.
+  // ignores its abort signal and never settles. It must NOT reject the bridge
+  // or forge a terminal outcome: the Host still owns settlement.
   const events: import('../src/runtime/config-port.ts').AuthorizationFlowEvent[] = []
   let promptSettled = false
   const authorization = port({
@@ -477,7 +481,7 @@ test('authorization cancel() emits prompt-withdrawn so the UI closes even if the
   await authorization.cancel(promptEvent.attemptId)
   await settle()
   off()
-  assert.equal(promptSettled, true, 'cancel rejects the pending bridge immediately')
+  assert.equal(promptSettled, false, 'cancel does not inject a rejection into the flow')
   const withdrawn = events.find(event => event.kind === 'prompt-withdrawn'
     && event.attemptId === promptEvent.attemptId && event.promptId === promptEvent.promptId)
   assert.ok(withdrawn !== undefined,
@@ -538,7 +542,7 @@ test('a caller-signal abort with a NEVER-SETTLING provider finalizes the attempt
   controller.abort() // runner teardown: the provider never settles
   await settle()
   off()
-  assert.equal(promptSettled, true, 'the pending bridge rejected on the caller abort')
+  assert.equal(promptSettled, false, 'the caller abort does not inject a rejection into the flow')
   const withdrawn = events.find(event => event.kind === 'prompt-withdrawn'
     && event.attemptId === promptEvent.attemptId && event.promptId === promptEvent.promptId)
   assert.ok(withdrawn !== undefined,
