@@ -24,16 +24,100 @@ import { discoverTestFiles } from './test-discovery.mjs'
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const TEST_ROOT = resolve(ROOT, 'test')
 
-/** The file-relative production references a test file makes. */
-function productionReferences(source) {
+/**
+ * The file-relative production references a test file makes.
+ *
+ * Every FORM the tree actually uses is covered:
+ *
+ *   - `new URL('…', import.meta.url)` — the single-quoted source read;
+ *   - `new URL(\`…\`, import.meta.url)` — the TEMPLATE source read (the
+ *     literal prefix before the interpolation is the part that resolves);
+ *   - `from '…'` and `from "…"` — the import clause, both quote styles.
+ *
+ * A form this extractor does not recognise would make the check report a
+ * FALSE assurance, so the extractor also COUNTS the production references
+ * it saw in a DIFFERENT way and the caller compares the two counts: a
+ * reference the extractor missed shows up as a count difference.
+ */
+export function productionReferences(source) {
   const refs = []
-  for (const match of source.matchAll(/new URL\(\s*'(\.\.\/[^']*)'\s*,\s*import\.meta\.url\s*\)/gu)) {
-    refs.push(match[1])
+  // A reference inside a plain string literal is a source-lock assertion
+  // or a test fixture (many architecture guards assert on the exact text of
+  // a production import), NOT a reference of this file.
+  const add = (spec, index) => {
+    if (isInsideStringLiteral(source, index)) return
+    refs.push(spec)
   }
-  for (const match of source.matchAll(/from\s+'(\.\.\/[^']*)'/gu)) {
-    refs.push(match[1])
+  for (const match of source.matchAll(/new URL\(\s*'(\.\.\/[^']*)'\s*,\s*import\.meta\.url\s*\)/gu)) {
+    add(match[1], match.index)
+  }
+  for (const match of source.matchAll(/new URL\(\s*`(\.\.\/[^`$]*)\$\{/gu)) {
+    add(match[1], match.index)
+  }
+  for (const match of source.matchAll(/new URL\(\s*"(\.\.\/[^"]*)"\s*,\s*import\.meta\.url\s*\)/gu)) {
+    add(match[1], match.index)
+  }
+  for (const match of source.matchAll(/\bfrom\s+'(\.\.\/[^']*)'/gu)) {
+    add(match[1], match.index)
+  }
+  for (const match of source.matchAll(/\bfrom\s+"(\.\.\/[^"]*)"/gu)) {
+    add(match[1], match.index)
+  }
+  for (const match of source.matchAll(/\bimport\s*\(\s*'(\.\.\/[^']*)'/gu)) {
+    add(match[1], match.index)
+  }
+  for (const match of source.matchAll(/\bimport\s*\(\s*`(\.\.\/[^`$]*)\$\{/gu)) {
+    add(match[1], match.index)
+  }
+  for (const match of source.matchAll(/^\s*import\s+'(\.\.\/[^']*)'/gmu)) {
+    add(match[1], match.index)
+  }
+  for (const match of source.matchAll(/^\s*import\s+"(\.\.\/[^"]*)"/gmu)) {
+    add(match[1], match.index)
   }
   return refs
+}
+
+/**
+ * How many production references the source mentions, counted WITHOUT
+ * knowing the forms.
+ *
+ * The comparison with {@link productionReferences} is the coverage proof:
+ * a form the extractor does not recognise makes the two counts differ, and
+ * the caller reports it instead of reporting a false assurance.
+ *
+ * A reference inside a plain string literal is NOT a reference of this
+ * file: it is a source-lock assertion or a test fixture (many architecture
+ * guards assert on the exact text of a production import). Those are
+ * counted separately, so the comparison is exact rather than approximate.
+ */
+export function productionReferenceCount(source) {
+  let count = 0
+  for (const match of source.matchAll(/(?:new URL\(\s*|^\s*import\s+|\bfrom\s+|\bimport\s*\(\s*)['"`](\.\.\/[^'"`$]*)/gmu)) {
+    if (isInsideStringLiteral(source, match.index)) continue
+    count += 1
+  }
+  return count
+}
+
+/** Whether the offset falls inside a string literal. */
+function isInsideStringLiteral(source, offset) {
+  const lineStart = source.lastIndexOf('\n', offset - 1) + 1
+  const line = source.slice(lineStart, offset)
+  let quote = undefined
+  for (let index = 0; index < line.length; index += 1) {
+    const char = line[index]
+    if (char === '\\') {
+      index += 1
+      continue
+    }
+    if (quote !== undefined) {
+      if (char === quote) quote = undefined
+      continue
+    }
+    if (char === '"' || char === "'" || char === '`') quote = char
+  }
+  return quote !== undefined
 }
 
 /**
@@ -71,6 +155,11 @@ function main() {
   let compared = 0
   let changed = 0
   const problems = []
+  // The COVERAGE proof: a reference form the extractor does not recognise
+  // would make the check report a false assurance. The extractor's count is
+  // compared against an independent, form-agnostic count; a difference is
+  // REPORTED, not silently accepted.
+  const uncovered = []
 
   for (const rel of files) {
     const source = readFileSync(resolve(TEST_ROOT, rel), 'utf8')
@@ -80,6 +169,16 @@ function main() {
     const afterRefs = productionReferences(source)
     if (beforeRefs.length === 0) continue
     compared += 1
+
+    // The form-agnostic count must not exceed the extractor's count by
+    // more than the source-lock strings the extractor deliberately skips
+    // (a `from '…'` inside a plain string literal). A larger gap means
+    // the extractor missed a form.
+    const beforeRaw = productionReferenceCount(before)
+    const afterRaw = productionReferenceCount(source)
+    if (beforeRaw !== beforeRefs.length || afterRaw !== afterRefs.length) {
+      uncovered.push(`${rel}: the extractor saw ${afterRefs.length} reference(s) but the source mentions ${afterRaw}`)
+    }
 
     // The RESOLVED target of every reference, as a path relative to the
     // repository root. The base and the current tree must resolve to the
@@ -106,17 +205,23 @@ function main() {
 
   console.log(`test files with production references compared: ${compared}`)
   console.log(`files whose resolved production targets CHANGED: ${changed}`)
+  console.log(`files with a reference form the extractor did NOT recognise: ${uncovered.length}`)
+  for (const entry of uncovered) console.log(`  ${entry}`)
   if (problems.length === 0) {
     console.log('\nno test now reads a DIFFERENT production file than before the move')
-    return
+  } else {
+    console.log('')
+    for (const problem of problems) {
+      console.log(`${problem.rel}`)
+      for (const target of problem.removed) console.log(`  - ${target}`)
+      for (const target of problem.added) console.log(`  + ${target}`)
+    }
   }
-  console.log('')
-  for (const problem of problems) {
-    console.log(`${problem.rel}`)
-    for (const target of problem.removed) console.log(`  - ${target}`)
-    for (const target of problem.added) console.log(`  + ${target}`)
-  }
-  process.exitCode = 1
+  if (problems.length > 0 || uncovered.length > 0) process.exitCode = 1
 }
 
-main()
+// The module is importable: the extractor is proved by
+// `test/tooling/migration-semantics.test.mjs`, which imports it directly.
+if (process.argv[1] !== undefined && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  main()
+}
