@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { DirectSessionReader } from '../src/runtime/direct/session-direct.ts'
 import type { SessionContentSearchPage, SessionSummary } from '../src/runtime/session-reader-port.ts'
-import { createDirectTspFixture, directSettle, waitFor } from './support/direct-tsp-fixture.ts'
+import { createDirectTspFixture, directSettle, waitFor, waitForInputDelivery } from './support/direct-tsp-fixture.ts'
 import { pickerActionByBase, pickerNode, pickerProps, sendActivate, sendPickerAction, sendSelect, wireNodes } from './support/tsp-picker-wire.ts'
 
 const BROWSER = 'session-browser-'
@@ -72,7 +72,7 @@ test('B1-B/Direct: sessionless resume, UI A→B, and typed resume follow the pro
   const seedA = await createDirectTspFixture(life, { workRoot })
   let sourceId: string | undefined
   try {
-    await directSettle(4_000)
+    await waitForInputDelivery(seedA.pane)
     await submitInput(seedA.pane, 'seed session A')
     await waitFor('the first real Agent completes its seed turn', () => seedA.modelCalls() === 1)
     await directSettle(500)
