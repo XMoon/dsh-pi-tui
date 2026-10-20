@@ -325,7 +325,8 @@ test('c copies the exact received argument bytes and empty arguments advertise n
   await Promise.resolve()
   await Promise.resolve()
   assert.deepEqual(copied, [raw], 'Copy must carry the original bytes, not the display projection')
-  assert.ok(!view.includes('pwned'), `display leaked the OSC payload:\n${view}`)
+  assert.ok(!view.includes('\u001b]0;pwned'), `the raw OSC sequence reached the display:\n${view}`)
+  assert.ok(!view.includes('\u001b'), 'the painted view carries no raw ESC')
   vt.sendInput('n')
   assert.equal(await decision, 'rejected')
 
@@ -547,7 +548,8 @@ test('hostile approval content cannot inject terminal control or fake an action 
   assertSheetIntact(view)
   const stream = vt.writes.join('')
   assert.ok(!stream.includes('PWNED'), 'the tool-name OSC payload never reaches the terminal stream')
-  assert.ok(!stream.includes('YXR0YWNr'), 'the argument OSC payload never reaches the terminal stream')
+  assert.ok(!stream.includes('\u001b]52;c;YXR0YWNr'), 'the raw argument OSC never reaches the terminal stream')
+  assert.ok(view.includes('YXR0YWNr'), 'the hostile argument bytes are painted as visible escapes')
   assert.ok(!stream.includes('\u009b'), 'no raw C1 byte reaches the terminal stream')
   assert.ok(!view.includes('\u001b'), 'the painted view carries no raw ESC')
   const reasonRow = view.split('\n').find(line => line.includes('oops'))
@@ -1105,7 +1107,7 @@ test('hostile structured arguments never reach the terminal and Copy stays byte-
   })
   const view = await viewport(vt)
   const stream = vt.writes.join('')
-  assert.ok(!stream.includes('pwned'), 'the OSC payload never reaches the terminal stream')
+  assert.ok(!stream.includes('\u001b]0;pwned'), 'the raw OSC sequence never reaches the terminal stream')
   assert.ok(!stream.includes('\u009b'), 'no raw C1 byte reaches the terminal stream')
   assert.ok(!view.includes('\u001b'), 'the painted view carries no raw ESC')
   assert.match(view, /Target[\s\S]*src\/config\.ts/u)
@@ -1198,4 +1200,29 @@ test('control-bearing argument keys cannot swallow later fields in the sheet', a
   assert.equal(view.includes('\t'), false, 'no raw TAB is painted')
   vt.sendInput('n')
   assert.equal(await decision, 'rejected')
+})
+
+
+test('a known command keeps its full tail after an unfinished OSC', async () => {
+  for (const [label, command] of [
+    ['ESC OSC', 'echo safe\u001b]0;unfinished rm -rf /srv/data'],
+    ['C1 OSC', 'echo safe\u009d0;unfinished rm -rf /srv/data'],
+  ] as const) {
+    const { vt, app } = startApp(80, 24)
+    const decision = app.showApprovalPrompt({
+      toolName: 'bash',
+      arguments: JSON.stringify({ command, mode: 'force' }),
+    })
+    const view = await viewport(vt)
+    assertSheetIntact(view)
+    assert.ok(view.includes(command.replace('\u001b', '\\u001b').replace('\u009d', '\\u009d')),
+      `${label}: the command tail stays visible:\n${view}`)
+    assert.ok(view.includes('"mode": "force"'), `${label}: the following Other field stays visible:\n${view}`)
+    assert.equal(view.includes('\u001b'), false, `${label}: no raw ESC is painted`)
+    assert.equal(view.includes('\u009d'), false, `${label}: no raw C1 OSC is painted`)
+    vt.sendInput('n')
+    assert.equal(await decision, 'rejected')
+    app.dispose()
+    startedApps.delete(app)
+  }
 })

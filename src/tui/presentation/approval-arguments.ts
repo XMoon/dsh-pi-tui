@@ -56,9 +56,22 @@ function escapeSectionControls(text: string): string {
   return text.replace(SECTION_CONTROL_PATTERN, controlEscape)
 }
 
-/** The raw-text fallback: the exact received display text, never re-parsed. */
+/** Project every section's text over the display-control encoder. The raw
+ * bytes remain untouched for Copy; only the painted projection changes. */
+function displaySections(
+  sections: readonly ApprovalArgumentSection[],
+): readonly ApprovalArgumentSection[] {
+  return sections.map(section => ({
+    heading: section.heading,
+    text: escapeSectionControls(section.text),
+  }))
+}
+
+/** The raw-text fallback: the exact received display text, never re-parsed.
+ * Control bytes are painted as visible escapes so an unterminated OSC cannot
+ * hide the rest of the received text. */
 function rawSections(raw: string): readonly ApprovalArgumentSection[] {
-  return [{ heading: ARGUMENTS, text: raw }]
+  return [{ heading: ARGUMENTS, text: escapeSectionControls(raw) }]
 }
 
 function isJsonObject(value: unknown): value is Record<string, unknown> {
@@ -284,7 +297,7 @@ function otherSections(
     if (keyIndex < keys.length - 1) lines[lines.length - 1] += ','
   })
   lines.push('}')
-  return [{ heading: OTHER_ARGUMENTS, text: escapeSectionControls(lines.join('\n')) }]
+  return [{ heading: OTHER_ARGUMENTS, text: lines.join('\n') }]
 }
 
 /**
@@ -318,7 +331,7 @@ function genericSections(
       lines.push(`${displayKey}: ${JSON.stringify(value)}`)
     }
   }
-  return [{ heading: ARGUMENTS, text: escapeSectionControls(lines.join('\n')) }]
+  return [{ heading: ARGUMENTS, text: lines.join('\n') }]
 }
 
 interface Draft {
@@ -458,6 +471,8 @@ export function approvalArgumentSections(
     case 'pwsh': draft = shellDraft(record); break
     default: break
   }
-  if (draft === undefined) return genericSections(record, sourceOrder)
-  return [...draft.sections, ...otherSections(record, draft.consumed, sourceOrder)]
+  const sections = draft === undefined
+    ? genericSections(record, sourceOrder)
+    : [...draft.sections, ...otherSections(record, draft.consumed, sourceOrder)]
+  return displaySections(sections)
 }
