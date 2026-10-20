@@ -1063,7 +1063,14 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
         // apply is transport-neutral (ConfigPort → the official
         // /permission path); a Remote session must reach it without any
         // in-process Agent resolution.
-        const outcome = await deps.backend.config.permissions.applyPermissionPreset(scope.sessionId, presetId, presetSignal)
+        // The official `/permission` command requires a live signal: an
+        // explicit per-operation one is preferred, otherwise this command
+        // surface's own lifetime signal applies (never an orphan controller).
+        const outcome = await deps.backend.config.permissions.applyPermissionPreset(
+          scope.sessionId,
+          presetId,
+          presetSignal ?? deps.signal,
+        )
         // The operation WAS dispatched. Losing the surface after the fact must NOT
         // erase what the port settled (`src/runtime/write-outcome.ts`: ownership and
         // settlement are independent axes) — the caller may not claim "not applied".

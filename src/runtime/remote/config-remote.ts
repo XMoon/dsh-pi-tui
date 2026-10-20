@@ -1313,7 +1313,7 @@ class RemotePermissionConfig implements PermissionConfig {
   async applyPermissionPreset(
     sessionId: string,
     presetId: string,
-    signal?: AbortSignal,
+    signal: AbortSignal,
   ): Promise<PermissionPresetApplyOutcome> {
     // The preset id is validated against the composed catalog BEFORE it
     // reaches the official command line: an unknown (or hostile) id can never

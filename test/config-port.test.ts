@@ -569,18 +569,26 @@ test('permissions read names and the effective default, and persist the default'
   assert.equal(port({}).permissions.defaultPreset(), undefined, 'no service -> no default')
 })
 
-test('applyPermissionPreset runs the OFFICIAL command line through the resolved agent', async () => {
-  const executed: Array<{ line: string }> = []
+test('applyPermissionPreset runs the OFFICIAL command line through the resolved agent with the caller signal', async () => {
+  const executed: Array<{ line: string; signal: AbortSignal }> = []
   const permissions = port({
     permissionPresets: { get names() { return ['workspace-write', 'danger-full-access'] } },
     commands: {
-      execute: async (_agent: unknown, line: string) => { executed.push({ line }); return { ok: true } },
+      execute: async (_agent: unknown, line: string, _args: readonly unknown[], signal: AbortSignal) => {
+        assert.ok(signal instanceof AbortSignal, 'the official command receives a REAL AbortSignal')
+        executed.push({ line, signal })
+        return { ok: true }
+      },
     },
   }).permissions
-  assert.deepEqual(await permissions.applyPermissionPreset('session-live', 'danger-full-access'), { kind: 'applied' })
-  assert.deepEqual(executed, [{ line: '/permission danger-full-access' }])
-  assert.deepEqual(await permissions.applyPermissionPreset('session-other', 'danger-full-access'), { kind: 'unavailable', cause: 'permission' })
-  assert.deepEqual(await port({}).permissions.applyPermissionPreset('session-live', 'danger-full-access'), { kind: 'unavailable', cause: 'commands' })
+  const signal = new AbortController().signal
+  assert.deepEqual(await permissions.applyPermissionPreset('session-live', 'danger-full-access', signal), { kind: 'applied' })
+  assert.deepEqual(executed.map(entry => entry.line), ['/permission danger-full-access'])
+  assert.equal(executed[0]?.signal, signal,
+    'the caller signal reaches the official command by IDENTICAL reference (never replaced by a fake)')
+  assert.deepEqual(await permissions.applyPermissionPreset('session-other', 'danger-full-access', signal), { kind: 'unavailable', cause: 'permission' })
+  assert.deepEqual(await port({}).permissions.applyPermissionPreset('session-live', 'danger-full-access', signal), { kind: 'unavailable', cause: 'commands' })
+  assert.equal(executed.length, 1, 'exactly ONE official execution — only the resolvable valid preset dispatches')
 })
 
 test('applyPermissionPreset refuses a preset id the composed table does not offer', async () => {
@@ -592,7 +600,7 @@ test('applyPermissionPreset refuses a preset id the composed table does not offe
     },
   }).permissions
   assert.deepEqual(
-    await permissions.applyPermissionPreset('session-live', 'danger-full-access; rm -rf /'),
+    await permissions.applyPermissionPreset('session-live', 'danger-full-access; rm -rf /', new AbortController().signal),
     { kind: 'unavailable', cause: 'permission' },
     'a hostile id never reaches the command line',
   )
