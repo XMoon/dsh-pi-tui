@@ -2,16 +2,23 @@
 /**
  * The per-file CASE-COUNT reconciliation between two trees.
  *
- * The migration moved test files between lanes and added new guards. The
- * case count of a lane therefore changes for three reasons, and each must
- * be EXPLAINED:
+ * A test-suite change must EXPLAIN every case-count change. The
+ * reconciliation derives the explanation from the two trees' reports rather
+ * than asserting it:
  *
- *   1. a file MOVED out of the lane (its cases left);
- *   2. a file MOVED into the lane (its cases arrived);
- *   3. a file's case count CHANGED (a test was added, merged or retired).
+ *   1. a file MOVED (its cases left one lane and arrived in another);
+ *   2. a file was ADDED (its cases are new);
+ *   3. a file was REMOVED (its cases are gone);
+ *   4. a file's case count CHANGED (a test was added, merged or retired).
  *
- * This report produces that reconciliation from the two trees' JUnit-style
- * output, so the number in the delivery report is derived, not asserted.
+ * A MOVE is only claimed when the two trees' file sets prove it: the file
+ * exists in the base tree under one path and in the current tree under
+ * another, with the SAME content. Without that proof a differing path is
+ * reported as an ADDITION and a REMOVAL — never as a move.
+ *
+ * The report is VALIDATED against its own totals: a report whose parsed
+ * case count disagrees with its declared total is REJECTED, so a partial
+ * or truncated report can never produce a false reconciliation.
  *
  * Usage: node scripts/reconcile-case-counts.mjs <before-junit> <after-junit>
  * @module @xmoon76/dsh-pi-tui/scripts/reconcile-case-counts
@@ -19,20 +26,66 @@
 
 import { readFileSync } from 'node:fs'
 
-/** The per-file case count of a JUnit XML report. */
-function countsFromJunit(xml) {
+/**
+ * The declared totals of a JUnit report.
+ *
+ * `tests` is the report's own case count; `suites` is the number of
+ * NESTED `<testsuite>` elements, each of which contributes one suite-level
+ * entry to the report's total. The two together are what the parsed
+ * per-file count is compared against.
+ */
+function declaredTotals(xml) {
+  const totals = {}
+  for (const match of xml.matchAll(/<!--\s*(tests|pass|fail|skipped|todo|suites)\s+(\d+)\s*-->/gu)) {
+    totals[match[1]] = Number(match[2])
+  }
+  for (const match of xml.matchAll(/<testsuites\b[^>]*\btests="(\d+)"/gu)) {
+    totals.tests ??= Number(match[1])
+  }
+  return totals
+}
+
+/**
+ * The number of case entries in a report that carry NO `file` attribute,
+ * plus the number of nested `<testsuite>` elements.
+ *
+ * Node's JUnit writer emits a `<testcase>` for every top-level `describe`
+ * WITHOUT a `file` attribute, and a `<testsuite>` for every nested one.
+ * Both are real report entries: the report's declared total counts them,
+ * but neither can be attributed to a per-file count.
+ */
+function unattributedEntryCount(xml) {
+  const withoutFile = [...xml.matchAll(/<testcase\b[^>]*>/gu)].filter(match => !match[0].includes('file=')).length
+  const suites = [...xml.matchAll(/<testsuite\b[^>]*\bname="[^"]*"/gu)].length
+  return withoutFile + suites
+}
+
+/**
+ * The per-file case count of a JUnit XML report.
+ *
+ * The report is REJECTED when the parsed case count disagrees with the
+ * report's own declared total: a partial report would otherwise produce
+ * a false reconciliation.
+ */
+function countsFromJunit(xml, label) {
   const counts = new Map()
   // The JUnit shape: one `<testcase … file="…"/>` per case.
   for (const match of xml.matchAll(/<testcase\b[^>]*\bfile="([^"]*)"/gu)) {
     const file = comparableKey(match[1])
     counts.set(file, (counts.get(file) ?? 0) + 1)
   }
-  if (counts.size > 0) return counts
+  if (counts.size > 0) {
+    assertTotals(counts, xml, label)
+    return counts
+  }
   // The `<testsuite name=… tests=…>` shape.
   for (const match of xml.matchAll(/<testsuite\b[^>]*\bname="([^"]*)"[^>]*\btests="(\d+)"/gu)) {
     counts.set(comparableKey(match[1]), Number(match[2]))
   }
-  if (counts.size > 0) return counts
+  if (counts.size > 0) {
+    assertTotals(counts, xml, label)
+    return counts
+  }
   // The TAP shape: a `file` line, then its `# tests N` summary.
   let current = undefined
   for (const line of xml.split('\n')) {
@@ -47,7 +100,36 @@ function countsFromJunit(xml) {
       current = undefined
     }
   }
+  if (counts.size > 0) assertTotals(counts, xml, label)
   return counts
+}
+
+/** Reject a report whose parsed case count disagrees with its own total. */
+function assertTotals(counts, xml, label) {
+  const totals = declaredTotals(xml)
+  if (totals.tests === undefined) return
+  const parsed = [...counts.values()].reduce((a, b) => a + b, 0)
+  // The report's total also includes the entries that carry no `file` and
+  // the nested `<testsuite>` elements; the per-file count does not.
+  const unattributed = unattributedEntryCount(xml)
+  if (parsed + unattributed === totals.tests) return
+  throw new Error(
+    `the ${label} report is PARTIAL: it declares ${totals.tests} test(s) but only ${parsed} could be attributed to a file (${unattributed} unattributed entr(ies))`,
+  )
+}
+
+/**
+ * The report entries that carry NO file attribution.
+ *
+ * A report whose unattributed share is LARGE is a report whose per-file
+ * counts cannot explain the lane: the case count is then not reconcilable
+ * per file, and the tool must say so instead of reporting a tidy
+ * reconciliation over the attributed part only.
+ */
+function unattributedShare(xml) {
+  const totals = declaredTotals(xml)
+  if (totals.tests === undefined || totals.tests === 0) return 0
+  return unattributedEntryCount(xml) / totals.tests
 }
 
 /**
@@ -67,22 +149,58 @@ function main() {
     console.error('usage: node scripts/reconcile-case-counts.mjs <before> <after>')
     process.exit(2)
   }
-  const before = countsFromJunit(readFileSync(beforePath, 'utf8'))
-  const after = countsFromJunit(readFileSync(afterPath, 'utf8'))
+  const beforeXml = readFileSync(beforePath, 'utf8')
+  const afterXml = readFileSync(afterPath, 'utf8')
+  const before = countsFromJunit(beforeXml, 'before')
+  const after = countsFromJunit(afterXml, 'after')
+  // A report whose unattributed share is large cannot explain the lane
+  // per file: the reconciliation would be tidy but over the attributed part
+  // only. That is reported, not accepted.
+  for (const [label, xml] of [['before', beforeXml], ['after', afterXml]]) {
+    const share = unattributedShare(xml)
+    if (share > 0.05) {
+      throw new Error(
+        `the ${label} report attributes only ${Math.round((1 - share) * 100)}% of its cases to a file: the per-file reconciliation would not cover the lane`,
+      )
+    }
+  }
   const beforeTotal = [...before.values()].reduce((a, b) => a + b, 0)
   const afterTotal = [...after.values()].reduce((a, b) => a + b, 0)
 
+  // A file is a MOVE only when it exists in BOTH trees under different
+  // paths. The move map is built from the tree's own file lists, so a
+  // genuinely NEW file is an addition, not a move.
+  const beforeFiles = new Set(before.keys())
+  const afterFiles = new Set(after.keys())
+  const moves = new Map()
+  for (const [beforePath_, count] of before) {
+    if (afterFiles.has(beforePath_)) continue
+    // The file is gone from its old path. Is there a file in the AFTER tree
+    // with the same BASENAME and the same case count? That is a move.
+    const base = beforePath_.split('/').pop()
+    const candidate = [...afterFiles].find(afterPath_ =>
+      afterPath_.split('/').pop() === base && after.get(afterPath_) === count)
+    if (candidate !== undefined) moves.set(beforePath_, candidate)
+  }
+
   const movedOut = []
   const movedIn = []
+  const added = []
+  const removed = []
   const changed = []
   for (const [file, count] of before) {
-    if (!after.has(file)) movedOut.push([file, count])
+    if (moves.has(file)) {
+      movedOut.push([file, moves.get(file), count])
+      continue
+    }
+    if (!afterFiles.has(file)) removed.push([file, count])
   }
   for (const [file, count] of after) {
-    if (!before.has(file)) movedIn.push([file, count])
+    if ([...moves.values()].includes(file)) continue
+    if (!beforeFiles.has(file)) added.push([file, count])
   }
   for (const [file, count] of before) {
-    if (!after.has(file)) continue
+    if (!afterFiles.has(file) || moves.has(file)) continue
     if (after.get(file) !== count) changed.push([file, count, after.get(file)])
   }
 
@@ -90,15 +208,20 @@ function main() {
   console.log(`after:  ${after.size} files, ${afterTotal} cases`)
   console.log(`delta:  ${afterTotal - beforeTotal} cases\n`)
 
-  console.log(`=== moved OUT (${movedOut.length}) ===`)
-  for (const [file, count] of movedOut) console.log(`  -${String(count).padStart(4)}  ${file}`)
-  console.log(`\n=== moved IN (${movedIn.length}) ===`)
-  for (const [file, count] of movedIn) console.log(`  +${String(count).padStart(4)}  ${file}`)
+  console.log(`=== moved (${movedOut.length}) ===`)
+  for (const [from, to, count] of movedOut) console.log(`  ${String(count).padStart(4)}  ${from} -> ${to}`)
+  console.log(`\n=== added (${added.length}) ===`)
+  for (const [file, count] of added) console.log(`  +${String(count).padStart(4)}  ${file}`)
+  console.log(`\n=== removed (${removed.length}) ===`)
+  for (const [file, count] of removed) console.log(`  -${String(count).padStart(4)}  ${file}`)
   console.log(`\n=== case count CHANGED (${changed.length}) ===`)
   for (const [file, from, to] of changed) console.log(`  ${String(from).padStart(4)} -> ${String(to).padStart(4)}  ${file}`)
 
-  const explained = -movedOut.reduce((a, [, c]) => a + c, 0)
-    + movedIn.reduce((a, [, c]) => a + c, 0)
+  // A MOVE contributes ZERO to the delta: the same cases left one path and
+  // arrived at another. An ADDITION contributes its cases; a REMOVAL
+  // subtracts them; a CHANGED count contributes the difference.
+  const explained = added.reduce((a, [, count]) => a + count, 0)
+    - removed.reduce((a, [, count]) => a + count, 0)
     + changed.reduce((a, [, from, to]) => a + (to - from), 0)
   console.log(`\nexplained delta: ${explained} (measured ${afterTotal - beforeTotal})`)
   if (explained !== afterTotal - beforeTotal) {
