@@ -9,6 +9,7 @@ import {
   aliasAwareConstructionSites,
   ownerFile,
   ownerOccurrences,
+  parseSources,
   productionFilesUnder,
   productionScriptKind,
   productionSource,
@@ -297,9 +298,15 @@ test('A5: every single-owner construction is alias-aware unique across productio
     if (!owners.includes(ownerRel)) owners.push(ownerRel)
     expected.set(name, owners)
   }
+  // ONE parsed snapshot for the whole query set: the parse depends only on the
+  // FILE, never on the queried symbol, so re-parsing the tree per symbol was
+  // pure repeated work. The alias resolution stays PER SYMBOL inside
+  // `aliasAwareConstructionSites`, so sharing the snapshot does not share the
+  // alias interpretation.
+  const snapshot = parseSources(productionSources())
   for (const [name, owners] of expected) {
     assert.deepEqual(
-      aliasAwareConstructionSites(name),
+      aliasAwareConstructionSites(name, snapshot),
       [...owners].sort(),
       `${name} must be called/constructed ONLY from ${owners.join(', ')} across production src/** (alias-aware AST sites, never spellings)`,
     )
@@ -651,7 +658,7 @@ test('A5/TS2: a .tsx production duplicate cannot escape the single-owner scans',
     'the production scan must include the .tsx module',
   )
   assert.deepEqual(
-    aliasAwareConstructionSites('createSessionOwnershipCore', sources),
+    aliasAwareConstructionSites('createSessionOwnershipCore', parseSources(sources)),
     [rel],
     'a duplicate composition construction in a .tsx production module must be attributed to its own file',
   )
@@ -659,9 +666,9 @@ test('A5/TS2: a .tsx production duplicate cannot escape the single-owner scans',
   // not a valid module, so the scan of the same bytes cannot be the reason this
   // passes. The same construction in a real `.ts` file is still found.
   const tsSpelling = [{ rel: 'src/app/surface/duplicate.ts', source: 'export const s = createSessionOwnershipCore({})\n' }]
-  assert.deepEqual(aliasAwareConstructionSites('createSessionOwnershipCore', tsSpelling), ['src/app/surface/duplicate.ts'])
+  assert.deepEqual(aliasAwareConstructionSites('createSessionOwnershipCore', parseSources(tsSpelling)), ['src/app/surface/duplicate.ts'])
   assert.deepEqual(
-    aliasAwareConstructionSites('createSessionOwnershipCore', [{ rel: 'src/app/surface/duplicate.ts', source: jsxSource }]),
+    aliasAwareConstructionSites('createSessionOwnershipCore', parseSources([{ rel: 'src/app/surface/duplicate.ts', source: jsxSource }])),
     [],
     'the JSX source parsed as plain TS must not silently look like a scanned module — the extension drives the parser kind',
   )
@@ -762,4 +769,45 @@ test('A5/TS2: the JSX hard cases are visible to the whole-tree AST walkers', () 
   // The default kind stays TS for the pre-existing `.ts` fixtures/helpers.
   assert.ok(calledCallees('(surface.start)({})').includes('surface.start'))
   assert.deepEqual(hostSubscriptions("ctx.on('agent/status', () => {})").events, ['agent/status'])
+})
+
+test('A5/TS2: a shared parsed snapshot does not share the alias interpretation between symbols', () => {
+  // The whole-tree duplicate detector parses the production tree ONCE and
+  // evaluates independent symbol queries against it. Sharing the parse must
+  // NOT share the alias RESOLUTION: each symbol must resolve exactly the alias
+  // set it would have resolved on its own.
+  //
+  // The fixture gives the two symbols DIFFERENT alias spellings, each used at
+  // exactly one call site. If the alias set were shared across the queries,
+  // the second query would inherit the first query's alias and would report
+  // the first symbol's call site as one of its own.
+  const sources = [
+    { rel: 'src/alpha.ts', source: 'export const alpha = 1\nconst AlphaAlias = alpha\nexport function useAlpha() { AlphaAlias() }\n' },
+    { rel: 'src/beta.ts', source: 'export const beta = 1\nconst BetaAlias = beta\nexport function useBeta() { BetaAlias() }\n' },
+  ]
+  const snapshot = parseSources(sources)
+  assert.deepEqual(aliasAwareConstructionSites('alpha', snapshot), ['src/alpha.ts'],
+    'alpha must resolve only its own alias, not another symbol\'s')
+  assert.deepEqual(aliasAwareConstructionSites('beta', snapshot), ['src/beta.ts'],
+    'beta must resolve only its own alias, not another symbol\'s')
+  // The order of the queries must not matter: a shared snapshot resolves each
+  // symbol independently, so querying in either order gives the same answers.
+  const reversed = parseSources(sources)
+  assert.deepEqual(aliasAwareConstructionSites('beta', reversed), ['src/beta.ts'])
+  assert.deepEqual(aliasAwareConstructionSites('alpha', reversed), ['src/alpha.ts'])
+  // A shared snapshot must give the SAME answer as a fresh per-symbol
+  // snapshot — sharing the parse may not change any result.
+  for (const name of ['alpha', 'beta']) {
+    assert.deepEqual(
+      aliasAwareConstructionSites(name, snapshot),
+      aliasAwareConstructionSites(name, parseSources(sources)),
+      `${name} must resolve identically against a shared and against a fresh snapshot`,
+    )
+  }
+  // A DIFFERENT snapshot is independent of the first (no shared state).
+  assert.deepEqual(aliasAwareConstructionSites('alpha', parseSources([{ rel: 'src/other.ts', source: 'export const alpha = 1\n' }])), [],
+    'a different snapshot must not inherit the first snapshot\'s findings')
+  // A symbol that exists nowhere yields zero sites (the negative control).
+  assert.deepEqual(aliasAwareConstructionSites('ThisNameDoesNotExistAnywhere', snapshot), [],
+    'a name that exists nowhere must have zero construction sites')
 })
