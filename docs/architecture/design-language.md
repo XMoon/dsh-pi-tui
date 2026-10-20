@@ -924,9 +924,9 @@ from 40 rows up — always clamped by the live seat grant. The extra height is
 inert display padding before the pinned decision bar, never scrollable request
 content or a pointer target; below 24 rows the existing truthful short-screen
 degradation applies. On the shortest viewports the compact body puts the actual
-payload (`Command`, `Before`/`After`, `New content`, `Inserted text`) ahead of
-the Action/Target/Reason labels, so even a one-content-row grant shows what will
-run or change. The body projects known tool arguments into `Action` /
+payload (`Command`, `Before`/`After`, `New content`, `Inserted text`, and the
+generic/raw `Arguments` fallback) ahead of the Action/Target/Reason labels, so
+even a one-content-row grant shows what will run or change. The body projects known tool arguments into `Action` /
 `Target` / `Before` / `After` / `Command` / `New content` sections and keeps
 every unknown field under `Other arguments`; an edit proposal is qualified as
 `Intended input · not verified against disk` (it is the request's intended

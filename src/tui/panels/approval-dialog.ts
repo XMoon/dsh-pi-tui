@@ -308,12 +308,16 @@ class ApprovalSheet implements Component {
           case 'After': return 2
           case 'New content': return 3
           case 'Inserted text': return 4
-          case 'Target': return 5
-          case 'Reason': return 6
-          case 'Action': return 7
-          case 'Replace all': return 8
-          case 'Other arguments': return 9
-          default: return 10 // the raw/generic Arguments fallback
+          // The generic/raw Arguments section IS the payload when no
+          // specialized payload section exists; it must not sit behind the
+          // Reason metadata on the shortest viewports.
+          case 'Arguments': return 5
+          case 'Target': return 6
+          case 'Reason': return 7
+          case 'Action': return 8
+          case 'Replace all': return 9
+          case 'Other arguments': return 10
+          default: return 11
         }
       }
       sections.sort((left, right) => compactRank(left.heading) - compactRank(right.heading))
