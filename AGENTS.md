@@ -243,6 +243,10 @@ pnpm test
 Use the smallest relevant validation for the current change. Prefer targeted
 tests first; do not run expensive compatibility suites mechanically.
 
+Adding or changing a test? Read `docs/guides/testing.md` first: it owns the
+test-tree ownership map, the new-test rules, the lane commands and the
+objective discovery guards.
+
 A stage-final validation must not run the same suite twice. `pnpm verify:prepush`
 is the repository's full pipeline: `typecheck:fork` + `typecheck:bench`,
 `test:fork`, `test:docs`, `test:tooling`, the architecture / boundary /

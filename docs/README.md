@@ -97,6 +97,7 @@ MANDATORY or BLOCKING.
 | `guides/tern-pane-testing.md` | TSP contributors | Real Tern-pane harness vs headless evidence, run conditions, assertion-vs-measurement and limits |
 | `guides/footer.md` | users | `/footer` builtin items, styles, custom text/commands, extension items and troubleshooting |
 | `guides/dsh-compatibility.md` | users/contributors | Semver/prerelease matching method, manifest/matrix/mode authority, Session V2/V3 data handling, Source Mode validation |
+| `guides/testing.md` | contributors | The test-tree ownership map, the new-test rules, the lane commands and the objective discovery guards |
 
 ## Source-of-truth boundaries
 
