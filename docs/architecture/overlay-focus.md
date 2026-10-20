@@ -1,14 +1,14 @@
 # Overlay & focus contract
 
-The managed-overlay system (Question / Save Location modals, the Approval
-editor-seat action sheet, the Task Center and Job viewer, pickers, `/model`,
-history search, and plugin overlays from the extension tiers) is a state machine
-whose hardest failures are **synchronous reentrancy** bugs: a focus callback runs
-in the middle of another operation and the outer operation then overwrites the
-newer fact. This document records the model and the rules that keep it closed.
-Use it as a **regression checklist** when you touch `/model`, add a modal, change
-a plugin UI tier, or work on the fullscreen lifecycle — it exists so the next
-change does not have to rediscover the same hard-won edge cases.
+The blocking/overlay surface system (Question / Save Location modals, the
+Approval editor-seat action sheet, the Task Center and Job viewer, pickers,
+`/model`, history search, and plugin overlays from the extension tiers) is a
+state machine whose hardest failures are **synchronous reentrancy** bugs: a focus
+callback runs in the middle of another operation and the outer operation then
+overwrites the newer fact. This document records the model and the rules that keep
+it closed. Use it as a **regression checklist** when you touch `/model`, add a
+modal, change a plugin UI tier, or work on the fullscreen lifecycle — it exists so
+the next change does not have to rediscover the same hard-won edge cases.
 
 Implementation: `src/tui/interaction/overlay-broker.ts` (logical authority),
 `src/tui/interaction/approval-runtime.ts` (the approval queue/one-shot
@@ -87,8 +87,8 @@ The callbacks to consider (not just `focus()`): Advanced `onFocus` /
 | close | `closed=true`, removed from `nodes`/`roots`, children re-homed | retarget `focusPhysical` / seat | `raw.hide()` (the node can no longer be resurrected) |
 | Question/Save/Approval suspend | suspension ownership + per-root intent | `focusSeatOwner()` | hide only the roots the suspension still owns |
 | Question/Save/Approval resume | `newerOwner`/successor suspension from the LIVE blocker | `reveal()` — one focus, or transfer to the successor without revealing | none |
-| Approval seat mount | the pending request is the ACTIVE owner; its sheet frame + suspension set exist | seat projection + one focus (unless a newer focus/mount won during the callbacks) | none |
-| Approval seat release | the active slot is cleared and the suspension set still names only this request | re-project the live seat owner, reveal/transfer the roots | dispose the released sheet after the seat no longer projects it |
+| Approval seat mount | the pending request is the ACTIVE owner; its sheet frame + suspension set exist | seat projection + one focus only while Approval is still the derived live occupant (a newer focus/mount or Question/Save wins) | none |
+| Approval seat release | the active slot is cleared and the suspension set still names only this request | unproject the sheet; `showNext` commits the successor; then transfer the suspension to an active successor (no reveal) or reveal/focus once when drained | dispose the released sheet before the suspension resume |
 | fullscreen detach | close non-remountables; snapshot the prior physical owner | seat release/handoff (bounded, so the fork's per-hide fallback cannot fire) | derive the owner from LOGICAL intent (`frontmostFocusable`, with the prior owner as a fallback only while it still requests focus and is not explicit-hidden), then detach the raws |
 | fullscreen rebind / restore | the logical graph survives; rebind with `initialFocus:false` | rebind / one restore focus | none |
 | session switch / final teardown | close the Job/Settings workspace before its parent browser; clear refs | — | none |
@@ -145,7 +145,8 @@ Keyboard routing follows this priority:
 
 1. an active nested inspection child, when the existing ownership stack can
    support it;
-2. fixed Question/Approval response keys owned by the component;
+2. fixed Question response keys (the component) and Approval fixed/reading keys
+   (the approval runtime/sheet);
 3. a direct trigger of the explicit inspection-safe semantic allowlist;
 4. a leader prefix or completion, when the completed semantic action is in the
    same inspection-safe allowlist;
@@ -913,20 +914,25 @@ becomes a second authority over them or over the editor seat.
   prompt), and after the host projected the sheet frame: a losing mount disposes
   only the frame it created and never publishes over the newer prompt.
   `TuiApp.mountApprovalSeat` suspends the visible managed roots, installs the
-  frame as the seat occupant and focuses it only while no NEWER focus/capturing
-  mount happened during those callbacks; the approval frame stays projected and
-  re-takes the keyboard through the live seat derivation when the newer owner
-  leaves. A FAILED presentation — a throwing park hook OR a throwing seat mount —
+  frame as the seat occupant and focuses it only while Approval is still the
+  derived live seat occupant: a Question/Save presented by a callback keeps the
+  seat/focus, and a NEWER focus/capturing mount wins over this mount's late
+  focus. The approval frame stays projected and re-takes the keyboard through
+  the live seat derivation when the newer owner leaves. On settle, the sheet is
+  unprojected and disposed BEFORE the suspended roots are resumed; the queue
+  successor decision (`showNext`) runs first, so a mounted A→B successor owns the
+  suspension and receives the handles WITHOUT a transient reveal/focus between
+  prompts. A FAILED presentation — a throwing park hook OR a throwing seat mount —
   takes one shared identity-fenced path: this prompt is latched settled, its abort
   binding is released, its active ownership is cleared only while it is still the
   active one, its OWN promise is rejected with exactly the value that path throws
   (a prompt mounted from another prompt's settle tail has already returned from
   its executor, so nothing else could ever settle its caller), the released frame
-  is disposed, the host re-projects the live seat owner / reveals only the roots
-  this prompt still owns, and the queue advance runs as an independent step; the
-  LAST-blocker notification runs once no approval is active and the queue drained
-  — a PARKED but still-current tenant comes back instead of staying parked behind
-  a presentation that never happened.
+  is disposed, the host re-projects the live seat owner and runs the same
+  successor-then-resume/transfer order, and the queue advance runs as an
+  independent step; the LAST-blocker notification runs once no approval is active
+  and the queue drained — a PARKED but still-current tenant comes back instead of
+  staying parked behind a presentation that never happened.
   Managed-overlay mounts themselves still use the ONE overlay mount funnel
   (`showOverlayOnHost`), which fails closed on BOTH mount stages, and decides
   which stage it reached from THIS call's own progress — never from `node.raw`,

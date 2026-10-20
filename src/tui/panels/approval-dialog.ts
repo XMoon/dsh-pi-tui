@@ -66,6 +66,14 @@ interface ActionLabel {
   readonly text: string
 }
 
+/** One cached body row. Headings are painted with the theme token at RENDER
+ * time (never baked into the cache), so a palette switch cannot leave stale
+ * ANSI in the scrollable projection. */
+interface BodyRow {
+  readonly text: string
+  readonly heading: boolean
+}
+
 /** One painted action segment in sheet-content coordinates. */
 interface ActionHit {
   readonly action: ApprovalAction
@@ -90,6 +98,13 @@ const TINY_BODY_BUDGET = 6
 /** The action-bar rows a normal layout may consume before secondary labels
  * are dropped (the body keeps priority on short screens). */
 const PREFERRED_ACTION_ROWS = 2
+/** Below this frame grant the sheet paints one truthful resize row instead of
+ * a clipped box: the pinned header/footer must keep their own rows and there
+ * is no honest way to show the title, a reading row AND all three decisions. */
+const MIN_SHEET_FRAME_ROWS = 5
+/** Below this CONTENT width the full decision labels cannot be packed at all;
+ * the resize row is more truthful than truncated key badges. */
+const MIN_SHEET_CONTENT_WIDTH = 12
 
 /** A blank content row (kept as a plain space so the Frame border padding
  * never becomes a zero-width row). */
@@ -101,15 +116,15 @@ const BLANK = ' '
  * shared display sanitizer BEFORE wrapping, so no escape sequence or control
  * byte can reach the terminal; the raw bytes stay untouched for Copy.
  */
-function pushSectionRows(rows: string[], text: string, width: number): void {
+function pushSectionRows(rows: BodyRow[], text: string, width: number): void {
   const inner = Math.max(1, width - 2)
   for (const sourceLine of text.split('\n')) {
     const wrapped = wrapTextWithAnsi(sourceLine, inner)
     if (wrapped.length === 0) {
-      rows.push('  ')
+      rows.push({ text: '  ', heading: false })
       continue
     }
-    for (const line of wrapped) rows.push(`  ${line}`)
+    for (const line of wrapped) rows.push({ text: `  ${line}`, heading: false })
   }
 }
 
@@ -118,25 +133,27 @@ function pushSectionRows(rows: string[], text: string, width: number): void {
  * row (`Reason: …`) instead of spending a dedicated heading row, so a
  * three-row reading budget still shows real request text.
  */
-function pushInlineSection(rows: string[], label: string, text: string, width: number): void {
+function pushInlineSection(rows: BodyRow[], label: string, text: string, width: number): void {
   const inner = Math.max(1, width - 2)
   const prefix = `${label}: `
   const firstWidth = Math.max(1, inner - visibleWidth(prefix))
   const sourceLines = text.split('\n')
   const firstWrapped = wrapTextWithAnsi(sourceLines[0] ?? '', firstWidth)
   if (firstWrapped.length === 0) {
-    rows.push(prefix)
+    rows.push({ text: prefix, heading: false })
   } else {
-    rows.push(`${prefix}${firstWrapped[0]}`)
-    for (let index = 1; index < firstWrapped.length; index += 1) rows.push(`  ${firstWrapped[index]}`)
+    rows.push({ text: `${prefix}${firstWrapped[0]}`, heading: false })
+    for (let index = 1; index < firstWrapped.length; index += 1) {
+      rows.push({ text: `  ${firstWrapped[index]}`, heading: false })
+    }
   }
   for (let index = 1; index < sourceLines.length; index += 1) {
     const wrapped = wrapTextWithAnsi(sourceLines[index]!, inner)
     if (wrapped.length === 0) {
-      rows.push('  ')
+      rows.push({ text: '  ', heading: false })
       continue
     }
-    for (const line of wrapped) rows.push(`  ${line}`)
+    for (const line of wrapped) rows.push({ text: `  ${line}`, heading: false })
   }
 }
 
@@ -183,7 +200,7 @@ class ApprovalSheet implements Component {
   private expanded = false
   /** Wrapped body rows, cached by content width and the current compact mode
    * (scrolling reuses the projection; expand/resize rebuilds it). */
-  private bodyCache: { width: number; compact: boolean; rows: string[] } | undefined
+  private bodyCache: { width: number; compact: boolean; rows: BodyRow[] } | undefined
   /** Last-painted action segments (sheet-content coordinates). */
   private actionHits: ActionHit[] = []
   /** Last-painted body viewport rows and content width (wheel hit test). */
@@ -216,16 +233,16 @@ class ApprovalSheet implements Component {
 
   /** The full display-safe body rows; rebuilding happens only on width/compact
    * change (scrolling reuses the wrapped projection). */
-  private bodyRows(width: number): string[] {
+  private bodyRows(width: number): BodyRow[] {
     const compact = this.maxRows <= TINY_BODY_BUDGET
     if (this.bodyCache?.width === width && this.bodyCache.compact === compact) return this.bodyCache.rows
-    const rows: string[] = []
+    const rows: BodyRow[] = []
     const reason = sanitizeDisplayText(this.request.reason ?? '')
     if (reason !== '') {
       if (compact) {
         pushInlineSection(rows, 'Reason', reason, width)
       } else {
-        rows.push(color.textStrong('Reason'))
+        rows.push({ text: 'Reason', heading: true })
         pushSectionRows(rows, reason, width)
       }
     }
@@ -234,12 +251,24 @@ class ApprovalSheet implements Component {
       if (compact) {
         pushInlineSection(rows, 'Arguments', args, width)
       } else {
-        rows.push(color.textStrong('Arguments'))
+        rows.push({ text: 'Arguments', heading: true })
         pushSectionRows(rows, args, width)
       }
     }
     this.bodyCache = { width, compact, rows }
     return rows
+  }
+
+  /** The frame's too-small degradation: no sheet is painted, only the
+   * truthful resize status in the seat row. The pointer hit map is cleared so
+   * no stale action cell can survive a shrink below the minimum grant. */
+  clearProjection(): void {
+    this.actionHits = []
+    this.bodyTop = 0
+    this.bodyBottom = 0
+    this.lastContentWidth = 0
+    this.layoutKey = ''
+    this.mousePressGesture = undefined
   }
 
   /** Candidate action-label sets, richest first. */
@@ -273,16 +302,20 @@ class ApprovalSheet implements Component {
   ): ActionLabel[][] {
     const variants = this.actionVariants(hasArguments)
     let limited: ActionLabel[][] | undefined
-    let fallback: ActionLabel[][] | undefined
+    let smallest: ActionLabel[][] | undefined
     for (const variant of variants) {
       const packed = packActionRows(variant, width)
       if (packed === undefined) continue
-      if (fallback === undefined) fallback = packed
+      // The variants are ordered richest → shortest. Remember the LAST one
+      // that fits the width: when no variant fits the row budget, the shortest
+      // form is the truthful degradation (it keeps all three decisions instead
+      // of slicing off Reject/Cancel from the rich layout).
+      smallest = packed
       if (packed.length <= Math.min(rowLimit, PREFERRED_ACTION_ROWS)) return packed
       if (packed.length <= rowLimit && limited === undefined) limited = packed
     }
     if (limited !== undefined) return limited
-    if (fallback !== undefined) return fallback
+    if (smallest !== undefined) return smallest
     // An extremely narrow surface: truncate each decision label to the width
     // so the three mandatory actions stay painted and reachable by keyboard.
     const crop = (text: string): string => truncateToWidth(text, width, '…')
@@ -370,8 +403,19 @@ class ApprovalSheet implements Component {
       : undefined
     // When the grant cannot afford a dedicated scroll/resize row, carry the
     // resize fact on the title row so the reading row is never spent on it.
+    // A narrow title uses the short verb form rather than an ellipsis that
+    // would silently drop the fact.
     if (body.length > viewport && hint === undefined && titleShown !== '') {
-      titleShown = truncateToWidth(`${titleShown} · Resize to inspect more`, contentWidth, '…')
+      const fullSuffix = ' · Resize to inspect more'
+      const shortSuffix = ' · Resize'
+      if (visibleWidth(`${titleShown}${fullSuffix}`) <= contentWidth) {
+        titleShown = `${titleShown}${fullSuffix}`
+      } else if (visibleWidth(`${titleShown}${shortSuffix}`) <= contentWidth) {
+        titleShown = `${titleShown}${shortSuffix}`
+      } else {
+        const titleBudget = Math.max(1, contentWidth - visibleWidth(shortSuffix))
+        titleShown = `${truncateToWidth(titleShown, titleBudget, '…')}${shortSuffix}`
+      }
     }
 
     const lines: string[] = []
@@ -379,7 +423,8 @@ class ApprovalSheet implements Component {
     if (dangerShown !== '') lines.push(color.error(dangerShown))
     this.bodyTop = lines.length
     for (let index = 0; index < viewport; index += 1) {
-      lines.push(body[this.scrollTop + index] ?? BLANK)
+      const row = body[this.scrollTop + index]
+      lines.push(row === undefined ? BLANK : row.heading ? color.textDim(row.text) : row.text)
     }
     this.bodyBottom = this.bodyTop + viewport
     if (hint !== undefined && hint !== '') lines.push(hint)
@@ -560,12 +605,21 @@ export class ApprovalSheetFrame extends Frame {
   }
 
   render(width: number): string[] {
-    const budget = Math.max(3, Math.floor(this.options.rowsOf(this.sheet.isExpanded())))
-    this.sheet.setMaxRows(Math.max(1, budget - 2))
-    const out = super.render(width)
-    this.lastRows = out.length
+    const grant = Math.max(1, Math.floor(this.options.rowsOf(this.sheet.isExpanded())))
+    const contentWidth = Math.max(1, Math.floor(width) - 4)
     this.lastTermRows = this.options.terminalRows()
     this.lastTermColumns = width
+    if (grant < MIN_SHEET_FRAME_ROWS || contentWidth < MIN_SHEET_CONTENT_WIDTH) {
+      // The seat grant cannot host an honest action sheet without taking the
+      // header/footer rows or hiding a decision. Paint the explicit resize fact
+      // and leave the keyboard decisions with the runtime.
+      this.sheet.clearProjection()
+      this.lastRows = 1
+      return [truncateToWidth('Resize to inspect more', Math.max(1, width), '…')]
+    }
+    this.sheet.setMaxRows(Math.max(1, grant - 2))
+    const out = super.render(width)
+    this.lastRows = out.length
     return out
   }
 

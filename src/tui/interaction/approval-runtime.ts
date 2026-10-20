@@ -51,12 +51,20 @@ export interface ApprovalRuntimeHost {
    */
   mountApprovalFrame(pending: PendingApproval): void
   /**
-   * Release the seat projection: reveal the suspended managed roots and
-   * re-project the LIVE seat owner (a newer blocker, the optional tenant or
-   * the editor). The caller has already cleared the active slot, so this can
-   * never paint the released frame again.
+   * Release the seat projection: re-project the LIVE seat owner (a newer
+   * blocker, the optional tenant or the editor). The caller has already cleared
+   * the active slot, so this can never paint the released frame again. The
+   * suspended roots are NOT resumed here: `resumeApprovalSuspension` runs after
+   * the queue's successor decision so an A→B handover transfers them without a
+   * transient reveal/focus.
    */
   releaseApprovalFrame(pending: PendingApproval): void
+  /**
+   * Resume (or transfer) the roots the released approval suspended. Runs after
+   * `showNext`: a mounted successor owns the suspension and receives the
+   * handles without revealing them; a drained queue reveals once.
+   */
+  resumeApprovalSuspension(pending: PendingApproval): void
   /**
    * Roll back a FAILED seat presentation: the prompt never mounted (or lost a
    * synchronous callback race). Re-project the live owner and reveal only the
@@ -352,6 +360,10 @@ export class ApprovalRuntime {
         () => this.host.rollbackApprovalFrame(pending),
         () => this.releaseFrame(pending),
         () => { if (owned) this.showNext() },
+        // Resume the suspended roots AFTER the successor decision: a mounted
+        // successor owns the suspension and receives the handles without a
+        // transient reveal/focus; only a drained queue reveals once.
+        () => this.host.resumeApprovalSuspension(pending),
         // The failed presentation left the stage, so the normal settle tail's
         // LAST-blocker obligation applies here too: a PARKED but still-current
         // optional tenant must come back once no approval is active and the queue
@@ -431,10 +443,11 @@ export class ApprovalRuntime {
         () => this.host.cancelLeader(),
         () => this.host.clearFullscreenPointerGestures(),
         () => { this.active = undefined },
-        // Re-project the LIVE seat owner and reveal the roots this prompt hid.
-        // `releaseApprovalFrame` runs BEFORE the frame is disposed so the seat
-        // never paints a detached component; a newer blocker opened by these
-        // callbacks keeps its own projection.
+        // Unproject the released sheet WITHOUT resuming its suspended roots:
+        // the queue successor decision runs first, so an A→B handover mounts B
+        // and transfers the roots instead of flashing them between prompts.
+        // `releaseApprovalFrame` runs before the frame is disposed so the seat
+        // never paints a detached component.
         () => this.host.releaseApprovalFrame(pending),
         () => this.releaseFrame(pending),
         () => this.host.projectActivity(),
@@ -458,6 +471,10 @@ export class ApprovalRuntime {
       ...steps,
       () => pending.resolve(outcome),
       () => { if (this.active === undefined) this.showNext() },
+      // The successor decision is committed; now resume/transfer the roots this
+      // prompt suspended. With B mounted the broker transfers them into B; with
+      // a drained queue this reveals/focuses them once.
+      () => this.host.resumeApprovalSuspension(pending),
       // Phase 3A / PR-B: the notification runs AFTER the handover decision and
       // reads the LIVE state — a queued approval that just took over keeps the
       // optional tenant PARKED; only a fully drained queue may restore it.

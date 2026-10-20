@@ -2728,6 +2728,7 @@ export class TuiApp {
     terminalSize: () => ({ columns: this.terminal.columns, rows: this.terminal.rows }),
     mountApprovalFrame: (pending) => this.mountApprovalSeat(pending),
     releaseApprovalFrame: (pending) => this.releaseApprovalSeat(pending),
+    resumeApprovalSuspension: (pending) => this.resumeApprovalSuspension(pending),
     rollbackApprovalFrame: (pending) => this.rollbackApprovalSeat(pending),
     approvalSeatRows: (expanded) => this.approvalSeatRows(expanded),
     approvalMouseEnabled: () => this.activeScreen.mode === 'fullscreen',
@@ -4566,7 +4567,7 @@ export class TuiApp {
    * is deliberately NOT reassigned: TuiBase keeps its focusedComponent
    * across stop/start on the same instance, so whatever owned focus before
    * the suspend (the seat editor, an active question's QuestionFrame, an
-   * approval overlay) still owns it — forcing the seat editor here would
+   * Approval action sheet) still owns it — forcing the seat editor here would
    * break a live question's modal focus and IME anchor.
    */
   private resumeFromExternalEditor(): void {
@@ -5118,11 +5119,11 @@ export class TuiApp {
       // render a dead footer (a long-lived external store also stops
       // retaining this instance here).
       () => statusStoreUnsubscribe?.(),
-      // Settle every pending approval BEFORE stop(): settling hides overlay
-      // handles (hideCursor), and stop() ends with showCursor — the reverse
-      // order would leave the user's cursor hidden after exit. Each entry is
-      // an INDEPENDENT step, so one rejected prompt cannot strand its
-      // siblings' promises.
+      // Settle every pending approval BEFORE stop(): settling releases the
+      // approval seat/sheet and any managed overlay it suspended (hideCursor),
+      // and stop() ends with showCursor — the reverse order would leave the
+      // user's cursor hidden after exit. Each entry is an INDEPENDENT step, so
+      // one rejected prompt cannot strand its siblings' promises.
       ...this.approvals.teardownSettlementSteps(),
       () => this.disposeTrackedKeybindingEditors(),
       // Every physical overlay unmount happens BEFORE stop(): removing the
@@ -7233,8 +7234,9 @@ export class TuiApp {
 
   /**
    * Toggle between regular (terminal scrollback) and fullscreen (alt screen).
-   * Overlays live on the active screen, so the switch hides every mounted
-   * overlay; a pending approval prompt is re-rendered on the new screen.
+   * Managed overlays live on the active screen, so the switch rebinds their
+   * physical projections; the shared Approval seat frame is re-projected on the
+   * new screen.
    */
   toggleFullscreen(): void {
     if (this.disposed) return
@@ -7596,10 +7598,12 @@ export class TuiApp {
       this.activeScreen.setFocus(saveLocation.frame)
     }
     // The approval action sheet is the SAME seat frame across the swap (no
-    // rebind node): it keeps the keyboard only when the question/save owners
-    // above are not the live blocker.
+    // rebind node): re-read the LIVE blockers/frame after the remount callbacks
+    // so a Question/Save opened inside them keeps the keyboard, and a settled
+    // approval can never be re-focused from the pre-swap snapshot.
     const approvalFrame = this.approvals.activeFrame()
-    if (approvalFrame !== undefined && question === undefined && saveLocation === undefined) {
+    if (approvalFrame !== undefined && this.approvals.activeFrame() === approvalFrame
+      && this.activeQuestions === undefined && this.activeSaveLocation === undefined) {
       this.activeScreen.setFocus(approvalFrame)
     }
     // The surface slice tracks the mode switch (plan §7.1).
@@ -12247,6 +12251,10 @@ export class TuiApp {
     this.clearExitConfirmation()
     const frame = this.approvals.activeFrame()
     if (frame === undefined) return { consume: true }
+    // Only the CURRENT seat occupant may scroll: a Question/Save/newer blocker
+    // can outrank an active-but-hidden Approval, and the wheel must stay on the
+    // visible owner's existing path instead of mutating the hidden sheet.
+    if (this.seatFallbackComponent() !== frame) return undefined
     const width = Math.max(1, this.terminal.columns)
     if (this.terminal.columns !== frame.termColumns || this.terminal.rows !== frame.termRows) {
       return { consume: true }
@@ -15119,15 +15127,23 @@ export class TuiApp {
    */
   private mountApprovalSeat(pending: PendingApproval): void {
     const frame = pending.frame
-    if (frame === undefined) return
-    if (this.activeQuestions !== undefined || this.activeSaveLocation !== undefined) return
+    if (frame === undefined || this.disposed) return
+    // A live Question/Save owner outranks the approval's seat projection. The
+    // frame stays built; that owner's settle projects it through the live seat
+    // derivation and transfers the suspension graph.
+    const blockerLive = (): boolean =>
+      this.activeQuestions !== undefined || this.activeSaveLocation !== undefined
+    if (blockerLive()) return
     const focusRevision = this.overlayBroker.focusTransitionRevision()
     this.overlayBroker.suspendVisibleRoots(pending)
-    // A synchronous focus/blur callback inside the suspension may settle or
-    // replace THIS prompt; only the still-current frame may be projected.
-    if (this.approvals.activeFrame() !== frame) return
+    // A synchronous focus/blur callback inside the suspension may settle/replace
+    // THIS prompt or present a higher-priority Question/Save. Only a still-live
+    // approval that is STILL the derived seat occupant may be projected/focused;
+    // otherwise the callback's newer owner keeps the physical seat and focus.
+    if (this.disposed || this.approvals.activeFrame() !== frame || blockerLive()) return
     this.mountSeatChild()
-    if (this.approvals.activeFrame() !== frame) return
+    if (this.disposed || this.approvals.activeFrame() !== frame || blockerLive()
+      || this.seatFallbackComponent() !== frame) return
     // A callback inside the suspension may have handed the keyboard to a NEWER
     // managed overlay (an explicit focus or a newer capturing mount). That newer
     // intent wins over this mount's late focus; the approval stays projected and
@@ -15145,29 +15161,43 @@ export class TuiApp {
   }
 
   /**
-   * Release an approval seat projection: re-project the LIVE occupant, reveal
-   * the roots THIS prompt still owns (or hand them to a newer blocker), and
-   * repaint. The runtime has already cleared the active slot, so the released
-   * frame can never be painted again.
+   * Unproject an approval seat frame and re-project the LIVE occupant. This
+   * deliberately does NOT reveal the roots the prompt suspended: a queued
+   * successor must mount first (`showNext`), so the successor's own suspension
+   * can inherit the hidden roots without a transient reveal/focus between
+   * prompts. `resumeApprovalSuspension` runs after that handover decision.
    */
   private releaseApprovalSeat(pending: PendingApproval): void {
     this.unprojectApprovalSeat(pending, 'approval seat release')
   }
 
   /** Abandon a FAILED approval presentation with the same identity-fenced
-   * seat/suspension obligations (the runtime has cleared the active slot). */
+   * seat obligation (the runtime has cleared the active slot). */
   private rollbackApprovalSeat(pending: PendingApproval): void {
     this.unprojectApprovalSeat(pending, 'approval seat rollback')
   }
 
-  private unprojectApprovalSeat(pending: PendingApproval, label: string): void {
+  /**
+   * Resume/transfer the roots the released approval suspended. Runs AFTER the
+   * runtime's successor decision: a mounted successor is the live suspension
+   * owner, so the broker transfers the handles without revealing/focusing them;
+   * only a truly drained queue reveals once and restores the live seat owner.
+   */
+  private resumeApprovalSuspension(pending: PendingApproval): void {
+    runSyncDisposalSteps('approval suspension resume', [
+      () => this.overlayBroker.resumeSuspendedRoots(pending),
+      // Never steal the keyboard from a root/overlay the resume or a callback
+      // just focused; with no focused overlay this restores the live seat owner
+      // (editor / optional tenant / newer blocker).
+      () => this.focusSeatFallback(),
+      () => this.publishFocusSeat(),
+      () => this.requestRender(),
+    ])
+  }
+
+  private unprojectApprovalSeat(_pending: PendingApproval, label: string): void {
     runSyncDisposalSteps(label, [
       () => this.mountSeatChild(),
-      // Never steal the keyboard from an overlay a synchronous callback of this
-      // batch just focused; `seatFallbackComponent` is undefined while a newer
-      // blocking owner has no frame yet.
-      () => this.focusSeatFallback(),
-      () => this.overlayBroker.resumeSuspendedRoots(pending),
       () => this.publishFocusSeat(),
       () => this.requestRender(),
     ])
@@ -15204,9 +15234,10 @@ export class TuiApp {
     const ceiling = rows - chrome - (rows >= 12 ? 1 : 0)
     // A small terminal still gets enough rows for the title/danger facts, one
     // reading row and the pinned actions; the sheet's own degradation decides
-    // what to drop when even that floor cannot fit.
+    // what to drop when even that floor cannot fit, and a grant below its
+    // minimum paints one truthful resize row instead of a clipped box.
     const floor = Math.min(ceiling, 8)
-    return Math.max(3, Math.min(ceiling, Math.max(floor, target)))
+    return Math.max(1, Math.min(ceiling, Math.max(floor, target)))
   }
 
   /**
