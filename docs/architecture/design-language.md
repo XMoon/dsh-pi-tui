@@ -923,12 +923,14 @@ readable minimum frame — 12 physical rows at 24 terminal rows, rising to 16
 from 40 rows up — always clamped by the live seat grant. The extra height is
 inert display padding before the pinned decision bar, never scrollable request
 content or a pointer target; below 24 rows the existing truthful short-screen
-degradation applies. The body projects known tool arguments into `Action` /
+degradation applies. On the shortest viewports the compact body puts the actual
+payload (`Command`, `Before`/`After`, `New content`, `Inserted text`) ahead of
+the Action/Target/Reason labels, so even a one-content-row grant shows what will
+run or change. The body projects known tool arguments into `Action` /
 `Target` / `Before` / `After` / `Command` / `New content` sections and keeps
 every unknown field under `Other arguments`; an edit proposal is qualified as
 `Intended input · not verified against disk` (it is the request's intended
-input, not a disk-verified diff), and `Copy args` still returns the received
-raw bytes.
+input, not a disk-verified diff).
 
 Shared minimum spec for **PiTui-painted** Workspace and Overlay: identity, one body, one bottom
 bar, `Esc` last, whole-segment hint drops (never mid-word), role table respected. The

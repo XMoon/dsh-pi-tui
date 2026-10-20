@@ -9,7 +9,8 @@ import assert from 'node:assert/strict'
 import { afterEach, test } from 'node:test'
 import { TuiApp, type ApprovalOutcome } from '../src/tui-app.ts'
 import { parseUserKeybindings } from '../src/tui/keybindings/config.ts'
-import { color } from '../src/tui/theme/runtime.ts'
+import { color, setTheme } from '../src/tui/theme/runtime.ts'
+import { darkColors } from '../src/domain/display/theme.ts'
 import { visibleWidth } from '@xmoon76/pi-tui'
 import { VirtualTerminal } from './virtual-terminal.ts'
 
@@ -20,6 +21,7 @@ import { VirtualTerminal } from './virtual-terminal.ts'
  * (see src/tui/process-slot.ts). */
 const startedApps = new Set<TuiApp>()
 afterEach(() => {
+  setTheme('dark')
   for (const app of [...startedApps]) {
     startedApps.delete(app)
     if (app.isDisposed()) continue
@@ -969,7 +971,8 @@ test('short terminals keep the danger fact, a real reading row and honest struct
     const view = await viewport(vt)
     assertSheetIntact(view)
     assert.ok(view.includes('Dangerous command'), `${columns}x${rows} danger missing:\n${view}`)
-    assert.ok(/Action: Run command|Command: /u.test(view), `${columns}x${rows} a real reading row is missing:\n${view}`)
+    assert.ok(view.includes('Command') && view.includes('rm -rf /tmp/build-cache'),
+      `${columns}x${rows} must show the real command text, not only its label:\n${view}`)
     assert.ok(view.includes('Resize') || view.includes('rows '), `${columns}x${rows} must state the reading limit:\n${view}`)
     assert.ok(!view.includes('…'), `${columns}x${rows} must not crop an action label:\n${view}`)
     vt.sendInput('n')
@@ -977,6 +980,83 @@ test('short terminals keep the danger fact, a real reading row and honest struct
     app.dispose()
     startedApps.delete(app)
   }
+})
+
+test('a short structured edit shows the proposed Before content before its metadata', async () => {
+  const { vt, app } = startApp(80, 10)
+  const decision = app.showApprovalPrompt({
+    toolName: 'edit',
+    reason: 'Update the timeout',
+    arguments: JSON.stringify({ file_path: 'src/config.ts', old_string: 'const timeout = 30', new_string: 'const timeout = 60' }),
+  })
+  const view = await viewport(vt)
+  assertSheetIntact(view)
+  assert.ok(view.includes('Before') && view.includes('const timeout = 30'),
+    `a short viewport must show the proposed content, not only its labels:\n${view}`)
+  assert.match(view, /Intended input · not verified against disk/u)
+  vt.sendInput('n')
+  assert.equal(await decision, 'rejected')
+})
+
+
+test('generated approval summary values use the body text token under dark/light/custom', async () => {
+  const cases = [
+    ['dark', undefined],
+    ['light', undefined],
+    ['custom', { ...darkColors, text: '#123456' }],
+  ] as const
+  for (const [theme, custom] of cases) {
+    setTheme(theme, custom)
+    const { vt, app } = startApp(80, 24)
+    const decision = app.showApprovalPrompt({
+      toolName: 'edit',
+      reason: 'token check',
+      arguments: JSON.stringify({
+        file_path: 'src/config.ts',
+        old_string: 'old-value',
+        new_string: 'new-value',
+        replace_all: true,
+      }),
+    })
+    await viewport(vt)
+    vt.sendInput('\x1b[F') // End: paint the After / Replace all tail
+    await vt.waitForRender()
+    const stream = vt.writes.join('')
+    assert.ok(stream.includes(color.text('Replace text')),
+      `${theme}: the generated Action summary must use color.text`)
+    assert.ok(stream.includes(color.text('Yes')),
+      `${theme}: the generated Replace all value must use color.text`)
+    assert.ok(!stream.includes(color.text('src/config.ts')),
+      `${theme}: the raw Target must keep the default ink`)
+    assert.ok(!stream.includes(color.text('old-value')) && !stream.includes(color.text('new-value')),
+      `${theme}: the raw Before/After must keep the default ink`)
+    vt.sendInput('n')
+    assert.equal(await decision, 'rejected')
+    app.dispose()
+    startedApps.delete(app)
+  }
+  setTheme('dark')
+})
+
+test('compact inline labels are dim and generated compact values use color.text', async () => {
+  setTheme('dark')
+  const { vt, app } = startApp(80, 10)
+  const decision = app.showApprovalPrompt({
+    toolName: 'bash',
+    arguments: JSON.stringify({ command: 'ls' }),
+  })
+  const view = await viewport(vt)
+  assert.ok(view.includes('Command: ls') && view.includes('Action: Run command'),
+    `compact sections missing:\n${view}`)
+  const stream = vt.writes.join('')
+  assert.ok(stream.includes(color.textDim('Command: ')),
+    'the compact raw-payload label is painted with the heading role')
+  assert.ok(stream.includes(color.text('Run command')),
+    'the compact generated Action value uses color.text')
+  assert.ok(!stream.includes(color.text('ls')),
+    'the compact raw command keeps the default ink')
+  vt.sendInput('n')
+  assert.equal(await decision, 'rejected')
 })
 
 test('hostile structured arguments never reach the terminal and Copy stays byte-exact', async () => {
@@ -1040,4 +1120,27 @@ test('fullscreen padding rows are inert and a padding change fences the press', 
   assert.equal(settled, false, 'a padding/layout change between press and release invalidates the click')
   vt.sendInput('y')
   assert.equal(await decision, 'allowed-once')
+})
+
+test('tiny hostile identities keep the truthful resize row and never paint an invisible action', async () => {
+  for (const [columns, rows] of [[16, 8], [10, 24]] as const) {
+    const { vt, app } = startApp(columns, rows)
+    const decision = app.showApprovalPrompt({
+      toolName: `ba\u001b[31msh\u001b]0;pwned\u0007${'x'.repeat(40)}`,
+      reason: 'hostile tiny',
+      arguments: JSON.stringify({ command: 'rm -rf /tmp/x' }),
+      danger: true,
+    })
+    const view = await viewport(vt)
+    assert.ok(view.includes('Resize'), `${columns}x${rows} must advertise the honest resize fact:\n${view}`)
+    assert.ok(view.includes('⚠'), `${columns}x${rows} must keep the danger fact:\n${view}`)
+    assert.ok(!view.includes('[y]'), `${columns}x${rows} must not paint a decision it cannot show:\n${view}`)
+    const stream = vt.writes.join('')
+    assert.ok(!stream.includes('pwned'), `${columns}x${rows} leaked the OSC payload:\n${stream}`)
+    assert.ok(!view.includes('\u001b'), `${columns}x${rows} painted a raw ESC:\n${view}`)
+    vt.sendInput('n')
+    assert.equal(await decision, 'rejected')
+    app.dispose()
+    startedApps.delete(app)
+  }
 })
