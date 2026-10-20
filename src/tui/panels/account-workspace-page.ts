@@ -463,7 +463,8 @@ export class AccountWorkspacePage implements Component {
       if (host !== undefined && port !== undefined) {
         const target = host.includes(':') && !host.startsWith('[') ? `[${host}]` : host
         content.push('', color.textDim(`Remote/SSH: the callback listener is bound to ${target}:${port} on the Host.`))
-        content.push(...this.wrapText(`ssh -N -L 127.0.0.1:${port}:${target}:${port} <SSH_TARGET>`, width))
+        const template = this.sshTemplate()
+        if (template !== undefined) content.push(...this.wrapText(template, width))
         content.push(color.textDim('Create that tunnel from your local machine, then open the authorization URL locally. The port is random per process; re-read it after a restart.'))
       }
     } else {
@@ -567,7 +568,9 @@ export class AccountWorkspacePage implements Component {
     const port = this.callbackPort()
     if (host === undefined || port === undefined) return undefined
     const target = host.includes(':') && !host.startsWith('[') ? `[${host}]` : host
-    return `ssh -N -L 127.0.0.1:${port}:${target}:${port} <SSH_TARGET>`
+    // The browser follows the Host's redirect_uri on the SAME loopback address
+    // family, so the local tunnel bind must use the callback host too.
+    return `ssh -N -L ${target}:${port}:${target}:${port} <SSH_TARGET>`
   }
 
   // ── input ────────────────────────────────────────────────────────────────
