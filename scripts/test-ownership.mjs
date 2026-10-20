@@ -1,15 +1,15 @@
 #!/usr/bin/env node
 /**
  * The test-tree OWNERSHIP MAP: which production owner each test file
- * belongs to, and therefore which `test/<owner>/` directory it moves into.
+ * belongs to, and therefore which `test/<owner>/` directory it lives in.
  *
  * The map is the PLAN's classification, applied to the REAL current tree.
  * Every entry names ONE production owner (the layer whose contract the test
  * primarily proves); a test that spans several layers is filed under the
  * layer that owns the COMPOSITION it exercises.
  *
- * The map is data, not code: the migration driver reads it, and the
- * discovery guard can assert that no test file sits outside its owner
+ * The map is DATA, not code: the migration driver reads it, and the
+ * discovery guard asserts that no test file sits outside its owner
  * directory.
  *
  * @module @xmoon76/dsh-pi-tui/scripts/test-ownership
@@ -33,19 +33,17 @@ export const OWNERSHIP_DIRECTORIES = {
 }
 
 /**
- * The test files that own their OWNER directly: the file's PRIMARY
- * production contract is the named area, and the file moves into that
- * area's directory.
+ * The test files that already live in their owner directory.
  *
- * A file that is NOT listed here stays where it is until its group is
- * migrated: the migration is done group by group, and each group is
- * independently reviewable and revertable.
+ * The map records the CURRENT location of every migrated file, so the
+ * migration driver can move the NEXT group without re-deriving the whole
+ * inventory, and the guard can assert that every file sits in the
+ * directory its owner names.
  */
 export const OWNERSHIP_GROUPS = {
-  // ── Group 1: the tooling and the static architecture guards ──────────────
-  // These prove the DEVELOPMENT TOOLING itself and the STATIC ownership
-  // rules over `src/**`. They are the tooling lane's own content, and they
-  // must be runnable without the product suite.
+  // ── The development and release tooling itself ──────────────────────────
+  // These prove the tooling: the scripts, the CI context, the packaging
+  // lifecycle. They must be runnable without the product suite.
   tooling: [
     'test/tooling/bench-smoke.test.mjs',
     'test/tooling/dev-environment.test.mjs',
@@ -75,6 +73,7 @@ export const OWNERSHIP_GROUPS = {
     'test/tooling/tern-pane-geometry.test.mjs',
     'test/tooling/tern-pane-instrument.test.mjs',
   ],
+  // ── The static ownership rules over `src/**` ───────────────────────────
   architecture: [
     'test/architecture/client-boundary-gate.test.mjs',
     'test/architecture/application-architecture-gate.test.mjs',
@@ -90,18 +89,38 @@ export const OWNERSHIP_GROUPS = {
     'test/architecture/a5-composition-inventory.test.ts',
     'test/architecture/a5b-bootstrap-closure.test.ts',
   ],
+  // ── The release-package qualification ───────────────────────────────────
+  integration: [
+    'test/integration/package/tarball-smoke.test.mjs',
+  ],
 }
 
 /**
- * The target path of every file in every group: the same basename under the
- * owner's directory.
+ * The owner of every file the map names: the directory the file lives in.
+ */
+export function ownershipOf(groups = OWNERSHIP_GROUPS) {
+  const owners = {}
+  for (const [owner, files] of Object.entries(groups)) {
+    for (const file of files) {
+      if (file in owners) throw new Error(`${file} is claimed by two owners`)
+      owners[file] = owner
+    }
+  }
+  return owners
+}
+
+/**
+ * The move list for the files the map names that are NOT yet in their
+ * owner directory: the source path (test-root relative) mapped to the
+ * target path (test-root relative).
  */
 export function ownershipMoves(groups = OWNERSHIP_GROUPS) {
   const moves = {}
   for (const [owner, files] of Object.entries(groups)) {
     for (const file of files) {
       if (file in moves) throw new Error(`${file} is claimed by two owners`)
-      moves[file] = `test/${owner}/${file.slice('test/'.length)}`
+      const target = `test/${owner}/${file.slice('test/'.length)}`
+      if (target !== file) moves[file.slice('test/'.length)] = target.slice('test/'.length)
     }
   }
   return moves
