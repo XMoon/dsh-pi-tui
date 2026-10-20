@@ -44,7 +44,11 @@ export function productionReferences(source) {
   const refs = []
   const add = (specifier) => {
     if (typeof specifier !== 'string') return
-    if (!specifier.startsWith('../')) return
+    // A `<root>`-marked specifier is ALREADY relative to the test root (the
+    // join resolver knows the base it resolved); every other specifier is
+    // relative to the file and is resolved later.
+    const isRootRelative = specifier.startsWith('<root>')
+    if (!isRootRelative && !specifier.startsWith('../')) return
     // A specifier may carry a QUERY string (`x.mjs?process-test=1`): the
     // query is not part of the path, so it is stripped before the
     // comparison.
@@ -165,26 +169,25 @@ export function productionReferences(source) {
       if (argument !== undefined && ts.isStringLiteralLike(argument)) add(argument.text)
     }
     // The PATH JOIN READ: `readFileSync(join(root, 'src', 'app', …))`.
-    // The segments are literal, so the path is known — but only a JOIN that
-    // READS a production file counts: a join that WRITES a fixture
-    // (`join(workspace, 'src', 'deep')`) creates a temporary tree, and its
-    // paths are not the repository's production modules.
+    //
+    // The path is resolved RECURSIVELY: the join's base may itself be a
+    // join, or a NAMED path variable
+    // (`const srcDir = join(…, 'src'); readFileSync(join(srcDir, 'index.ts'))`),
+    // and the segments may name a production area other than `src`
+    // (`join(ROOT, 'packages', 'pi-tui', 'src', 'utils.ts')`).
+    //
+    // Only a join that READS a production file counts: a join that WRITES
+    // a fixture (`join(workspace, 'src', 'deep')`) creates a temporary
+    // tree, and its paths are not the repository's production modules.
     if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === 'join') {
-      const segments = node.arguments
-        .filter(argument => ts.isStringLiteralLike(argument))
-        .map(argument => argument.text)
-      if (segments.length > 0 && segments[0] === 'src' && isReadOf(node)) {
-        // The path is relative to the join's BASE, which the test
-        // computes for itself: `join(dirname(fileURLToPath(import.meta.url)),
-        // '..', '..')` is the REPOSITORY root from a test in a
-        // subdirectory, and the test root from the flat root. The base is
-        // resolved so the two trees are compared on the TARGET, not on the
-        // spelling of the base.
-        const base = joinBaseOf(node, declarationOf)
-        const relative = base === undefined
-          ? `../${segments.join('/')}`
-          : `${base}/${segments.join('/')}`
-        add(relative)
+      const resolved = resolveJoinPath(node, declarationOf)
+      if (resolved !== undefined && isProductionArea(resolved.area) && isReadOf(node)) {
+        // The path is expressed relative to the PRODUCTION AREA, so the flat
+        // base tree and the layered current tree are compared on the
+        // production file rather than on the spelling of the base. The
+        // `<root>` marker says the specifier is already test-root
+        // relative and must not be resolved again.
+        add(`<root>${resolved.segments.join('/')}`)
       }
     }
     // The source read: `new URL('…', import.meta.url)`.
@@ -327,6 +330,148 @@ function joinBaseOf(node, declarationOf) {
 }
 
 /**
+ * The production AREA a resolved path names: `src` or `packages`.
+ */
+function isProductionArea(area) {
+  return area === 'src' || area === 'packages'
+}
+
+/**
+ * The path a `join(...)` call resolves to, RELATIVE TO THE TEST ROOT.
+ *
+ * The resolution is RECURSIVE: the join's base may be another join, or a
+ * named path variable whose own initializer is a join. The result is
+ * expressed relative to the test root, so the flat base tree and the
+ * layered current tree are compared on the TARGET rather than on the
+ * spelling of the base.
+ *
+ * The returned `area` is the first production segment (`src` or
+ * `packages`); the returned `path` is the whole relative path.
+ */
+function resolveJoinPath(node, declarationOf, depth = 0) {
+  if (depth > 8) return undefined
+  if (!ts.isCallExpression(node) || !ts.isIdentifier(node.expression) || node.expression.text !== 'join') {
+    return undefined
+  }
+  const [first, ...rest] = node.arguments
+  if (first === undefined) return undefined
+  // The base is the FILE'S OWN DIRECTORY: `join(dirname(fileURLToPath(
+  // import.meta.url)), '..', '..', 'src')`. The `..` levels climb out of
+  // the test root; the literal segments that follow name a directory under
+  // it.
+  if (ts.isCallExpression(first) && ts.isIdentifier(first.expression) && first.expression.text === 'dirname') {
+    const segments = rest
+      .filter(argument => ts.isStringLiteralLike(argument))
+      .map(argument => argument.text)
+    const up = segments.filter(segment => segment === '..')
+    const area = segments.find(segment => segment === 'src' || segment === 'packages')
+    if (area === undefined) return undefined
+    const index = segments.indexOf(area)
+    return {
+      area,
+      segments: segments.slice(index),
+      prefix: segments.slice(0, index),
+      known: true,
+    }
+  }
+
+  // The base: a nested join, or a named path variable.
+  let base
+  if (ts.isCallExpression(first)) {
+    base = resolveJoinPath(first, declarationOf, depth + 1)
+  } else if (ts.isIdentifier(first)) {
+    const declaration = declarationOf(first)
+    if (declaration !== undefined && ts.isVariableDeclaration(declaration) && declaration.initializer !== undefined) {
+      const initializer = declaration.initializer
+      if (ts.isCallExpression(initializer) && ts.isIdentifier(initializer.expression) && initializer.expression.text === 'join') {
+        base = resolveJoinPath(initializer, declarationOf, depth + 1)
+      }
+    }
+    // A base that is NOT statically resolvable (a module-level constant
+    // like `ROOT`) still leaves the SEGMENTS meaningful: the segments
+    // after it name the production area. The path is then resolved
+    // relative to that area, and the check compares the AREA-relative
+    // path, which is what identifies the production file.
+  }
+
+  const segments = rest
+    .filter(argument => ts.isStringLiteralLike(argument))
+    .map(argument => argument.text)
+  if (base === undefined && segments.length === 0) return undefined
+
+  // The base is the file's own directory: `join(dirname(fileURLToPath(
+  // import.meta.url)), …)`. Every `..` climbs one level out of the test
+  // root.
+  const fileBase = fileDirectoryBase(node, declarationOf)
+  const fileSegments = fileDirectorySegments(node, declarationOf)
+  const prefix = fileBase === undefined ? (base?.prefix ?? []) : fileBase
+  const own = base === undefined ? fileSegments : base.segments
+  // A base whose own declaration is a `join(dirname(fileURLToPath(…)), …)`
+  // contributes its literal segments through `fileDirectoryBase`, which
+  // walks the SCOPE for the name. The recursion above cannot see them (the
+  // initializer's first argument is a call), so they are collected here.
+  const all = [...prefix, ...own, ...segments]
+  const area = all.find(segment => segment === 'src' || segment === 'packages')
+  if (area === undefined) return undefined
+  const index = all.indexOf(area)
+  return { area, segments: all.slice(index), prefix: all.slice(0, index), known: base !== undefined }
+}
+
+/**
+ * The `..` levels a `join(dirname(fileURLToPath(import.meta.url)), …)` base
+ * climbs out of the test root.
+ */
+function fileDirectoryBase(node, declarationOf) {
+  for (let current = node; current !== undefined; current = current.parent) {
+    if (!ts.isCallExpression(current)) continue
+    if (!ts.isIdentifier(current.expression) || current.expression.text !== 'join') continue
+    const [first] = current.arguments
+    if (first === undefined || !ts.isIdentifier(first)) continue
+    const declaration = declarationOf(first)
+    if (declaration === undefined || !ts.isVariableDeclaration(declaration)) continue
+    const initializer = declaration.initializer
+    if (initializer === undefined || !ts.isCallExpression(initializer)) continue
+    if (!ts.isIdentifier(initializer.expression) || initializer.expression.text !== 'join') continue
+    const segments = initializer.arguments
+      .slice(1)
+      .filter(argument => ts.isStringLiteralLike(argument))
+      .map(argument => argument.text)
+    // The base is the file's own directory: `join(dirname(fileURLToPath(
+    // import.meta.url)), …)`. Every `..` climbs one level out of the test
+    // root; the remaining literal segments name a directory under it.
+    const up = segments.filter(segment => segment === '..')
+    if (up.length !== segments.length) continue
+    return segments.map(() => '..')
+  }
+  return undefined
+}
+
+/**
+ * The literal segments a `join(dirname(fileURLToPath(import.meta.url)), …)`
+ * base names, beyond the `..` levels.
+ */
+function fileDirectorySegments(node, declarationOf) {
+  for (let current = node; current !== undefined; current = current.parent) {
+    if (!ts.isCallExpression(current)) continue
+    if (!ts.isIdentifier(current.expression) || current.expression.text !== 'join') continue
+    const [first] = current.arguments
+    if (first === undefined || !ts.isIdentifier(first)) continue
+    const declaration = declarationOf(first)
+    if (declaration === undefined || !ts.isVariableDeclaration(declaration)) continue
+    const initializer = declaration.initializer
+    if (initializer === undefined || !ts.isCallExpression(initializer)) continue
+    if (!ts.isIdentifier(initializer.expression) || initializer.expression.text !== 'join') continue
+    const segments = initializer.arguments
+      .slice(1)
+      .filter(argument => ts.isStringLiteralLike(argument))
+      .map(argument => argument.text)
+    if (segments.every(segment => segment === '..')) continue
+    return segments.filter(segment => segment !== '..')
+  }
+  return []
+}
+
+/**
  * Whether a `join(...)` call is the argument of a READ.
  *
  * A `join` that writes (`writeFileSync(join(…), …)`) or that creates a
@@ -335,22 +480,43 @@ function joinBaseOf(node, declarationOf) {
  */
 function isReadOf(node) {
   for (let current = node.parent; current !== undefined; current = current.parent) {
-    if (ts.isCallExpression(current)) {
+    // The join is an ARGUMENT of a call: `readFileSync(join(…), …)`.
+    if (ts.isCallExpression(current) && current.arguments.includes(node)) {
       const callee = current.expression
       if (ts.isIdentifier(callee)) {
-        return /^(readFileSync|readFile|existsSync|statSync|lstatSync|realpathSync|access|openSync)$/u.test(callee.text)
+        return READ_FUNCTIONS.test(callee.text)
       }
     }
-    // A join that is the RECEIVER of a write call is a fixture path too.
+    // The join is the RECEIVER of a call: `join(…).toString()`.
     if (ts.isPropertyAccessExpression(current) && current.expression === node) {
       const owner = current.parent
       if (owner !== undefined && ts.isCallExpression(owner) && ts.isIdentifier(owner.expression)) {
-        return /^(readFileSync|readFile|existsSync|statSync|lstatSync|realpathSync|access|openSync)$/u.test(owner.expression.text)
+        return READ_FUNCTIONS.test(owner.expression.text)
+      }
+    }
+    // The join is an element of an ARRAY that is read:
+    // `readFileSync([join(a), join(b)].map(…))` — the array is the argument
+    // of the read.
+    if (ts.isArrayLiteralExpression(current) && current.elements.includes(node)) {
+      const owner = current.parent
+      if (owner !== undefined && ts.isCallExpression(owner) && owner.arguments.includes(current)) {
+        const callee = owner.expression
+        if (ts.isIdentifier(callee) && READ_FUNCTIONS.test(callee.text)) return true
+        // `readFileSync(join(…).map(…))` — the array is the RECEIVER.
+        if (ts.isPropertyAccessExpression(callee) && ts.isIdentifier(callee.expression)) {
+          const inner = owner.arguments[0]
+          if (inner !== undefined && ts.isCallExpression(inner) && ts.isIdentifier(inner.expression)) {
+            return READ_FUNCTIONS.test(inner.expression.text)
+          }
+        }
       }
     }
   }
   return false
 }
+
+/** The functions whose argument is a path the code READS. */
+const READ_FUNCTIONS = /^(readFileSync|readFile|existsSync|statSync|lstatSync|realpathSync|access|openSync)$/u
 
 /**
  * The BASE of a whole-tree enumeration that reads `new URL(<rel>, <root>)`
@@ -549,8 +715,18 @@ function main() {
     // exactly what the migration had to preserve.
     const baseRel = rel.split('/').pop()
     const resolveAll = (text, fileRel) => productionReferences(text)
-      .map(spec => relative(ROOT, resolve(dirname(resolve(TEST_ROOT, fileRel)), spec)))
-      .filter(path => path.startsWith('src/') || path.startsWith('packages/'))
+      // A join-derived reference is already expressed relative to the TEST
+      // ROOT (the resolver knows the base it resolved); a file-relative
+      // specifier is resolved against the FILE's own directory. The base
+      // tree's file lives at the flat root, the current tree's file in its
+      // owner directory — each side resolves against ITS OWN location, and
+      // the two must land on the SAME production file.
+      .map(spec => {
+        if (spec.startsWith('<root>')) return spec.slice('<root>'.length)
+        if (spec.startsWith('<')) return spec
+        return relative(ROOT, resolve(dirname(resolve(TEST_ROOT, fileRel)), spec))
+      })
+      .filter(path => path.startsWith('src/') || path.startsWith('packages/') || path.startsWith('<'))
       .sort()
     const beforeTargets = resolveAll(before, baseRel)
     const afterTargets = resolveAll(source, rel)
