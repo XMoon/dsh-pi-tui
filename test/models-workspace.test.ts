@@ -156,6 +156,15 @@ test('login destination: bare, route, ref, novel ref, new route, account and inv
   ]
   assert.deepEqual(resolveLoginDestination('mykey', collisionOptions, flowOnly), { kind: 'models', view: 'provider', route: 'mykey' })
   assert.deepEqual(resolveLoginDestination('MYKEY', collisionOptions, flowOnly), { kind: 'models', view: 'reference', ref: 'MYKEY' })
+  // A generic flow that shares the builtin route never overrides the builtin's
+  // dedicated reference page (mergeLoginTargets also suppresses that flow).
+  const builtinFlow: readonly AuthorizationFlowTarget[] = [
+    { kind: 'authorization', route: 'deepseek-official', key: 'llm-pi-ai/deepseek-official', label: 'Official OAuth', methods: [{ id: 'oauth', label: 'OAuth' }], inFlight: false },
+  ]
+  assert.deepEqual(
+    resolveLoginDestination('deepseek-official', PROVIDERS, builtinFlow),
+    { kind: 'models', view: 'reference', ref: 'DEEPSEEK_API_KEY', label: 'deepseek official' },
+  )
   assert.deepEqual(resolveLoginDestination('deepseek-account', PROVIDERS, FLOWS), { kind: 'account', view: 'page' })
   const invalid = resolveLoginDestination('not valid!', PROVIDERS, FLOWS)
   assert.equal(invalid.kind, 'error')
