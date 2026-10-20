@@ -859,7 +859,7 @@ function sourceBootstrapFixture(life) {
   writeFileSync(join(root, 'pnpm-lock.yaml'), 'lockfileVersion: 9.0\n')
   writeFileSync(join(root, 'pnpm-workspace.yaml'), 'packages:\n- packages/*\n')
   mkdirSync(join(root, 'test', 'compat'), { recursive: true })
-  writeFileSync(join(root, 'test', 'compat', 'pi2dsh.json'), `${JSON.stringify({ issue: 26, consumer: 'pi2dsh', pi2dshVersion: '0.24.0', dshVersion: VERSION, contracts: [] }, null, 2)}\n`)
+  writeFileSync(join(root, 'test', 'compat', 'pi2dsh.json'), `${JSON.stringify({ issue: 26, consumer: 'pi2dsh', pi2dshVersion: '0.27.0', dshVersion: VERSION, contracts: [] }, null, 2)}\n`)
   const scriptsDir = fileURLToPath(new URL('../scripts', import.meta.url))
   cpSync(scriptsDir, join(root, 'scripts'), { recursive: true })
 

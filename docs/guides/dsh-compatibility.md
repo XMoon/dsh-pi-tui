@@ -111,11 +111,12 @@ registry lockfile for unpublished DSH metadata.
 
 CI policy is explicit: pushes to `next` and pull requests whose base is `next`
 follow the tracked `test/compat/dsh-mode.json`; `main` and every release tag use
-registry-backed npm mode with a frozen lockfile. The Source Mode ecosystem check
-prints
-`SKIPPED: requires published compatible DSH/pi2dsh combination` because a
-published bridge cannot prove compatibility against an unpublished source
-family; that check remains blocking in npm mode.
+registry-backed npm mode with a frozen lockfile. The pi2dsh ecosystem check
+runs in BOTH modes and always against the PUBLISHED ecosystem: it installs the
+published DSH and the published pi2dsh release from the registry, so it never
+validates a source pack. A source pack cannot validate the published ecosystem
+— the smoke refuses that combination and reports it as a SKIP, which is not a
+pass. The gate is blocking in both modes.
 
 For local validation use the isolated driver rather than workspace symlinks:
 
