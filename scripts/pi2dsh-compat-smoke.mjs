@@ -43,6 +43,8 @@ import { basename, dirname, isAbsolute, join, relative, resolve, sep as pathSepa
 import { fileURLToPath } from 'node:url'
 import ts from 'typescript'
 import semver from 'semver'
+import { API_VERSION } from '../src/extension/public-types.ts'
+import { UNSTABLE_API_LEVEL } from '../src/extension/unstable-types.ts'
 import {
   assertInstalledDshFamily,
   assertSourceResolution,
@@ -65,10 +67,17 @@ const CONSUMER_PACKAGE_NAME = 'pi2dsh'
 const OFFICIAL_PRESET_IDS = ['standard', 'ptc', 'minimal', 'cordis']
 const MANIFEST_PATH = join(PACKAGE_ROOT, 'test', 'compat', 'pi2dsh.json')
 const FIXTURE_ROOT = join(PACKAGE_ROOT, 'test', 'fixtures', 'pi2dsh-compat')
+// The required contracts are DERIVED from the production extension surface,
+// never hand-written here: the published pi2dsh bridge hosts Pi components
+// only when the host reports the CURRENT apiVersion and advertises the
+// unstable raw-surface capability (it otherwise degrades to a warning and
+// mounts no component), so a contract list frozen at an older api version
+// would certify a pairing the bridge cannot actually use. Deriving it keeps
+// the gate honest when the extension surface moves.
 const REQUIRED_CONTRACTS = [
   'root.LOCAL_COMMANDS',
-  'extensions/unstable.UNSTABLE_API_LEVEL=1',
-  'apiVersion=1',
+  `extensions/unstable.UNSTABLE_API_LEVEL=${UNSTABLE_API_LEVEL}`,
+  `apiVersion=${API_VERSION}`,
   'capability:unstable.surface.handle',
   'chrome.footer.status',
   'surface.mountComponent',
@@ -1542,5 +1551,6 @@ export {
   CI_ECOSYSTEM_TIMEOUT_MS,
   CLEANUP_BUDGET_MS,
   GATE_BUDGET_MS,
+  REQUIRED_CONTRACTS,
   run,
 }
