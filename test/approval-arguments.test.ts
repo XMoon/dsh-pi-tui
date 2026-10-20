@@ -112,12 +112,47 @@ test('a generic JSON object keeps every value type, nested structure and order',
   }
   assert.deepEqual(headings('unknown', args), ['Arguments'])
   const text = section('unknown', args, 'Arguments')!.text
-  for (const expected of ['empty: ', 'zero: 0', 'no: false', 'nil: null',
-    'nested: {', '"a": [', 'key\u001b[31m: value']) {
+  for (const expected of ['empty: ""', 'zero: 0', 'no: false', 'nil: null',
+    'nested: {', '"a": [', 'key\u001b[31m: "value"']) {
     assert.ok(text.includes(expected), `${JSON.stringify(expected)} missing from:\n${text}`)
   }
   assert.deepEqual(headings('unknown', {}), ['Arguments'])
   assert.equal(section('unknown', {}, 'Arguments')?.text, '(empty object)')
+})
+
+test('generic strings keep their type and cannot forge a field row', () => {
+  const raw = JSON.stringify({
+    enabled: false,
+    disabled: 'false',
+    tries: 0,
+    triesString: '0',
+    payload: 'ok\nadmin: true',
+    admin: false,
+    'payload\nadmin': 'nested-key',
+  })
+  const text = approvalArgumentSections('unknown', raw)[0]!.text
+  assert.ok(text.includes('enabled: false'), text)
+  assert.ok(text.includes('disabled: "false"'), text)
+  assert.ok(text.includes('tries: 0'), text)
+  assert.ok(text.includes('triesString: "0"'), text)
+  assert.ok(text.includes('payload: "ok\\nadmin: true"'), text)
+  assert.ok(text.includes('"payload\\nadmin": "nested-key"'), text)
+  assert.equal(text.split('\n').filter(line => line.startsWith('admin:')).length, 1,
+    `the embedded newline never creates a second admin row:\n${text}`)
+  assert.ok(text.split('\n').includes('admin: false'), text)
+})
+
+test('deep or wide valid arguments fall back to the exact raw projection', () => {
+  const depth = 2000
+  const nested = '{"a":'.repeat(depth) + '1' + '}'.repeat(depth)
+  assert.deepEqual(approvalArgumentSections('unknown', nested),
+    [{ heading: 'Arguments', text: nested }])
+  const known = `{"command":"ls","deep":${nested}}`
+  assert.deepEqual(approvalArgumentSections('bash', known),
+    [{ heading: 'Arguments', text: known }])
+  const wide = `{${Array.from({ length: 10_001 }, (_, index) => `"k${index}":${index}`).join(',')}}`
+  assert.deepEqual(approvalArgumentSections('unknown', wide),
+    [{ heading: 'Arguments', text: wide }])
 })
 
 test('a consumed field never repeats under Other arguments, including __proto__', () => {
@@ -160,7 +195,7 @@ test('the projection never invents an applied diff, danger decision or file IO f
 test('numeric-like top-level keys keep their source order and every value', () => {
   const generic = approvalArgumentSections('unknown', '{"10":"ten","2":"two"}')
   assert.deepEqual(generic.map(section => section.heading), ['Arguments'])
-  assert.equal(generic[0]!.text, '10: ten\n2: two')
+  assert.equal(generic[0]!.text, '10: "ten"\n2: "two"')
   const other = approvalArgumentSections('bash', '{"command":"ls","10":"ten","2":"two"}')
   assert.equal(other.find(section => section.heading === 'Other arguments')?.text,
     '{\n  "10": "ten",\n  "2": "two"\n}')
