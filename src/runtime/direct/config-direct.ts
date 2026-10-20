@@ -900,7 +900,7 @@ export class DirectAuthorizationConfig implements AuthorizationConfig {
     // caller teardown has destroyed their UI, so rejection is the only way to
     // release a flow that may be awaiting one; the page is gone and the Host
     // outcome remains authoritative.
-    if (forcePrompts) this.rejectAttemptPrompts(attemptId)
+    if (forcePrompts) this.rejectAttemptPrompts(attemptId, 'authorization surface disposed')
     attempt.disposeCallerAbortListener()
   }
 
@@ -983,12 +983,12 @@ export class DirectAuthorizationConfig implements AuthorizationConfig {
     })
   }
 
-  private rejectAttemptPrompts(attemptId: string): void {
+  private rejectAttemptPrompts(attemptId: string, reason = 'authorization attempt settled'): void {
     for (const [promptId, pending] of this.pendingPrompts) {
       if (pending.attemptId !== attemptId) continue
       this.pendingPrompts.delete(promptId)
       pending.cleanup()
-      pending.reject(cancellationError('authorization attempt settled'))
+      pending.reject(cancellationError(reason))
       // The Host has settled; close the prompt and release any flow await.
       this.emit({ kind: 'prompt-withdrawn', attemptId, promptId })
     }

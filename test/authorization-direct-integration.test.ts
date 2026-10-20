@@ -397,3 +397,135 @@ test('cancel keeps a pending prompt answerable so a flow that awaits it can sett
     flow.close()
   }
 })
+
+test('REAL Host caller teardown during a held commit with a pending prompt cannot deadlock', async t => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-c2-auth-forced-commit-')
+  const ctx = new Context()
+  life.defer(() => ctx.fiber.dispose())
+  const key = credentialKey('llm-pi-ai', 'forced-commit')
+  let releaseCommit: (() => void) | undefined
+  const store = new Map<string, unknown>()
+  ctx.provide('credentials', {
+    modifyRecord: async (recordKey: string, update: () => Promise<unknown>) => {
+      await new Promise<void>(resolve => { releaseCommit = resolve })
+      const record = await update()
+      store.set(recordKey, record)
+      ctx.emit('credentials/record-updated', recordKey as never)
+      return record
+    },
+    describeRecord: async (recordKey: string) => ({ configured: store.has(recordKey) }),
+  } as never)
+  await ctx.plugin(AuthorizationService)
+  ctx.authorization.registerFlow({
+    key,
+    label: 'Forced Commit',
+    methods: [{ id: 'oauth', label: 'Sign in' }],
+    run: async session => {
+      const prompt = session.prompt({ kind: 'text', message: 'held prompt' })
+      prompt.catch(() => {})
+      await new Promise<void>(resolve => setImmediate(resolve))
+      await session.commit({ kind: 'grant', payload: { token: 'secret' } })
+      await prompt
+    },
+  })
+  const port = new DirectAuthorizationConfig({ get: name => ctx.get(name) })
+  const surface: AuthorizationSurface = {
+    openOutputViewer: () => () => {},
+    askQuestions: () => new Promise(() => {}),
+    openPicker: () => ({ close: () => {} }),
+  }
+  const flow = createAuthorizationFlow(surface, port)
+  let settled = 0
+  let withdrawn = 0
+  const off = port.onEvent(event => {
+    if (event.kind === 'settled') settled += 1
+    if (event.kind === 'prompt-withdrawn') withdrawn += 1
+    flow.onEvent(event)
+  })
+  try {
+    const controller = new AbortController()
+    const started = await port.begin({ key, signal: controller.signal })
+    assert.equal(started.kind, 'started')
+    if (started.kind !== 'started') return
+    flow.bind(started.attemptId)
+    await new Promise<void>(resolve => setImmediate(resolve))
+    controller.abort() // pageController teardown: forced caller abort
+    await new Promise<void>(resolve => setImmediate(resolve))
+    assert.equal(withdrawn, 1, 'the destroyed prompt bridge is withdrawn/rejected')
+    assert.equal(settled, 0, 'no local terminal is synthesized before the Host outcome')
+    releaseCommit?.()
+    const outcome = await Promise.race([
+      flow.outcome,
+      new Promise<{ status: string }>(resolve => setTimeout(() => resolve({ status: 'timeout' }), 1_000)),
+    ])
+    assert.notEqual(outcome.status, 'timeout', 'the authoritative Host outcome still settles')
+    assert.equal(settled, 1)
+    assert.equal(store.has(key), true, 'the held commit did persist despite the UI teardown')
+  } finally {
+    off()
+    flow.close()
+  }
+})
+
+test('REAL Host caller teardown while waiting on a prompt settles cancelled without a record', async t => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-c2-auth-forced-wait-')
+  const ctx = new Context()
+  life.defer(() => ctx.fiber.dispose())
+  const key = credentialKey('llm-pi-ai', 'forced-wait')
+  const store = new Map<string, unknown>()
+  ctx.provide('credentials', {
+    modifyRecord: async (recordKey: string, update: () => Promise<unknown>) => {
+      const record = await update()
+      store.set(recordKey, record)
+      ctx.emit('credentials/record-updated', recordKey as never)
+      return record
+    },
+    describeRecord: async (recordKey: string) => ({ configured: store.has(recordKey) }),
+  } as never)
+  await ctx.plugin(AuthorizationService)
+  ctx.authorization.registerFlow({
+    key,
+    label: 'Forced Wait',
+    methods: [{ id: 'oauth', label: 'Sign in' }],
+    run: async session => {
+      await session.prompt({ kind: 'text', message: 'waiting prompt' })
+      await session.commit({ kind: 'grant', payload: { token: 'secret' } })
+    },
+  })
+  const port = new DirectAuthorizationConfig({ get: name => ctx.get(name) })
+  const surface: AuthorizationSurface = {
+    openOutputViewer: () => () => {},
+    askQuestions: () => new Promise(() => {}),
+    openPicker: () => ({ close: () => {} }),
+  }
+  const flow = createAuthorizationFlow(surface, port)
+  let settled = 0
+  const events: import('../src/runtime/config-port.ts').AuthorizationFlowEvent[] = []
+  const off = port.onEvent(event => {
+    events.push(event)
+    if (event.kind === 'settled') settled += 1
+    flow.onEvent(event)
+  })
+  try {
+    const controller = new AbortController()
+    const started = await port.begin({ key, signal: controller.signal })
+    assert.equal(started.kind, 'started')
+    if (started.kind !== 'started') return
+    flow.bind(started.attemptId)
+    await new Promise<void>(resolve => setImmediate(resolve))
+    controller.abort()
+    const outcome = await Promise.race([
+      flow.outcome,
+      new Promise<{ status: string }>(resolve => setTimeout(() => resolve({ status: 'timeout' }), 1_000)),
+    ])
+    assert.equal(outcome.status, 'cancelled')
+    assert.equal(settled, 1)
+    assert.equal(store.size, 0)
+    assert.ok(events.some(event => event.kind === 'prompt-withdrawn'))
+  } finally {
+    off()
+    flow.close()
+  }
+})
