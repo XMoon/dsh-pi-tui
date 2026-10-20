@@ -503,7 +503,7 @@ test('B-04: a Save Location prompt owns the seat while the tenant waits', async 
   assert.equal(tenant.closeCalls(), 0)
 })
 
-test('B-05: an Approval overlay owns the keyboard while the tenant is PARKED', async () => {
+test('B-05: an Approval action sheet owns the keyboard while the tenant is PARKED', async () => {
   const { vt, app } = startApp()
   await vt.waitForRender()
   const tenant = makeTenant()
@@ -1933,12 +1933,13 @@ test('B-33: the Approval A→B handover window refuses a fresh optional opener',
   vt.sendInput('y')
   assert.equal(await settleOrTimeout(first), 'allowed-once')
   await vt.waitForRender()
-  assert.equal(attempts, 1, 'the restored root focus callback must have attempted the open')
+  assert.equal(attempts, 0, 'the A→B handover must not reveal/refocus the suspended root')
   assert.equal(factoryCalls, 0, 'the REFUSE gate must not run the factory during the A→B window')
   assert.equal(tenantLease, undefined, 'no tenant may be installed between two queued approvals')
   assert.notEqual(app.focusSeatForTest(), 'editor-panel', 'no intermediate tenant seat')
   assert.ok(viewport(vt).includes('fs'), `the second approval must own the screen:\n${viewport(vt)}`)
 
+  arm = false
   vt.sendInput('n')
   assert.equal(await settleOrTimeout(second), 'rejected')
   await vt.waitForRender()
@@ -1951,6 +1952,45 @@ test('B-33: the Approval A→B handover window refuses a fresh optional opener',
   assert.equal(factoryCalls, 1)
   assert.equal(late.closeCalls(), 0)
   lateLease?.close()
+})
+
+test('B-33b: a suspended root is not revealed/refocused between two queued Approvals', async () => {
+  const { vt, app } = startApp()
+  await vt.waitForRender()
+  const root = advancedOverlayProbe('a-b-focus-root')
+  const rootLease = app.showAdvancedInteractiveOverlay(root.component)
+  await vt.waitForRender()
+  assert.equal(root.focusCount(), 1, 'the root owns the keyboard first')
+
+  const first = app.showApprovalPrompt({ toolName: 'bash', reason: 'A' })
+  const second = app.showApprovalPrompt({ toolName: 'fs', reason: 'B' })
+  await vt.waitForRender()
+  assert.ok(viewport(vt).includes('Approve bash?'), `A owns the seat:\n${viewport(vt)}`)
+  assert.deepEqual(
+    { focus: root.focusCount(), blur: root.blurCount() },
+    { focus: 1, blur: 1 },
+    'the A mount suspends the root exactly once',
+  )
+
+  vt.sendInput('y')
+  assert.equal(await settleOrTimeout(first), 'allowed-once')
+  await vt.waitForRender()
+  assert.ok(viewport(vt).includes('Approve fs?'), `B takes the seat:\n${viewport(vt)}`)
+  assert.deepEqual(
+    { focus: root.focusCount(), blur: root.blurCount() },
+    { focus: 1, blur: 1 },
+    'the A→B handoff must transfer the suspension without revealing/refocusing the root',
+  )
+
+  vt.sendInput('n')
+  assert.equal(await settleOrTimeout(second), 'rejected')
+  await vt.waitForRender()
+  assert.deepEqual(
+    { focus: root.focusCount(), blur: root.blurCount() },
+    { focus: 2, blur: 1 },
+    'the root is restored exactly once after the LAST queued approval',
+  )
+  rootLease.close()
 })
 
 test('B-34: a root opened by a cleanup during an abandoned presentation is handed back', async () => {
@@ -2644,7 +2684,7 @@ test('B-47: a settled Approval never cancels the Save Location its own cleanup o
   )
 })
 
-test('B-48: a throwing physical mount releases the failed Approval and its queue', async () => {
+test('B-48: a throwing seat mount releases the failed Approval and its queue', async () => {
   const { vt, app } = startApp()
   await vt.waitForRender()
   // The blocking seat projection is the ONE funnel every approval goes
@@ -3115,6 +3155,46 @@ test('B-56: a fullscreen swap inside the Approval mount still leaves the dialog 
   await vt.waitForRender()
 })
 
+test('B-56b: a Question opened inside the Approval mount keeps the seat and its physical focus', async () => {
+  const { vt, app } = startApp()
+  await vt.waitForRender()
+  let triggered = false
+  let question: ReturnType<TuiApp['askQuestions']> | undefined
+  const root = advancedOverlayProbe('question-in-approval-window', undefined, () => {
+    if (triggered) return
+    triggered = true
+    // The suspension's focus transition runs this callback synchronously while
+    // the Approval mount is still in flight: the Question becomes the live seat
+    // owner before the Approval mount tail resumes.
+    question = app.askQuestions([
+      { id: 'q-window', question: 'question during the approval mount?', options: [{ label: 'Yes' }] },
+    ])
+  })
+  const rootLease = app.showAdvancedInteractiveOverlay(root.component)
+  await vt.waitForRender()
+  const approval = app.showApprovalPrompt({ toolName: 'bash', reason: 'approval behind question' })
+  await vt.waitForRender()
+  assert.ok(viewport(vt).includes('question during the approval mount?'), `the Question must own the screen:\n${viewport(vt)}`)
+  assert.ok(!viewport(vt).includes('Approve bash?'), 'the Approval must not paint over the Question')
+  assert.notEqual(app.inputOwnerForTest(), app.approvalFrameForTest(),
+    'the Approval must not steal physical focus from the live Question')
+
+  vt.sendInput('\r')
+  vt.sendInput('\r')
+  assert.deepEqual(
+    await settleOrTimeout(question!),
+    [{ id: 'q-window', selected: ['Yes'] }],
+  )
+  await vt.waitForRender()
+  assert.ok(viewport(vt).includes('Approve bash?'), `the Approval must be restored after the Question:\n${viewport(vt)}`)
+  assert.equal(app.inputOwnerForTest(), app.approvalFrameForTest(),
+    'the restored Approval takes the keyboard after the Question settles')
+  vt.sendInput('y')
+  assert.equal(await settleOrTimeout(approval), 'allowed-once')
+  rootLease.close()
+  await vt.waitForRender()
+})
+
 test('B-57: a callback NEWER focus inside the swap window beats the pre-swap owner', async () => {
   const { vt, app } = startApp()
   await vt.waitForRender()
@@ -3391,6 +3471,47 @@ test('B-61: the REAL History tenant: a plugin editor winner change + recompile w
   assert.equal(app.seatEditorForTest().id, 'second', 'the CURRENT winner — never the hidden host editor — takes the keyboard')
   assert.equal(app.seatTextForTest(), 'second recompiled', 'the recompiled winner keeps its live document')
   assert.equal(app.hostEditorTextForTest(), 'host draft', 'the hidden host editor is never written')
+})
+
+test('B-61b: a plugin editor winner change/recompile while Approval owns the seat survives the round trip', async () => {
+  const registry = new EditorRegistry()
+  const { vt, app } = startApp(registry)
+  await vt.waitForRender()
+  app.setDraft('host draft')
+  const first = { text: '' }
+  registerLiveView(registry, 'first', first)
+  app.reconcileEditorNow()
+  app.requestRender()
+  await vt.waitForRender()
+  app.setDraft('first plugin')
+  await vt.waitForRender()
+  assert.equal(app.seatEditorForTest().id, 'first', 'the first plugin owns the seat')
+
+  const approval = app.showApprovalPrompt({ toolName: 'bash', reason: 'plugin winner under approval' })
+  await vt.waitForRender()
+  assert.ok(viewport(vt).includes('Approve bash?'), `the Approval owns the seat:\n${viewport(vt)}`)
+  assert.ok(!viewport(vt).includes('first plugin'), 'the Approval covers the plugin editor')
+
+  // A LOWER priority live-view winner is registered and recompiled while the
+  // Approval is the blocking seat owner: only the hidden holder state changes.
+  const second = { text: 'second view' }
+  registerLiveView(registry, 'second', second, -1)
+  app.reconcileEditorNow()
+  app.requestRender()
+  app.setDraft('second recompiled')
+  await vt.waitForRender()
+  assert.ok(viewport(vt).includes('Approve bash?'),
+    'the winner change/recompile must not eject the blocking Approval')
+  assert.ok(!viewport(vt).includes('second recompiled'), 'the Approval still covers the editor')
+  assert.equal(app.seatEditorForTest().id, 'second', 'the newer winner is the seat editor while parked')
+
+  vt.sendInput('y')
+  assert.equal(await settleOrTimeout(approval), 'allowed-once')
+  await vt.waitForRender()
+  assert.equal(app.seatEditorForTest().id, 'second', 'the CURRENT winner takes the seat after the Approval')
+  assert.equal(app.seatTextForTest(), 'second recompiled', 'the recompiled winner keeps its live document')
+  assert.equal(app.hostEditorTextForTest(), 'host draft', 'the hidden host editor is never written')
+  assert.equal(app.focusSeatForTest(), 'editor', 'the editor seat owns the derived seat after the Approval')
 })
 
 test('B-62: the REAL History tenant survives a Question↔Save Location handoff and is restored exactly once at the END', async () => {

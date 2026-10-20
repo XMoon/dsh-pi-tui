@@ -330,6 +330,8 @@ interface SurfaceHarness extends SurfaceControls {
   readonly surfaceRuntime: SurfaceRuntime<RoutedSessionEvent>
   /** The LIVE mounted app: real Question / Approval flows drive it. */
   readonly app: TuiApp
+  /** The mounted VirtualTerminal (headless paint/input probes). */
+  readonly vt: VirtualTerminal
   /** The canonical activity phase the surface publishes (NOT the pane state). */
   readonly phase: () => RunPhase
   /**
@@ -638,6 +640,7 @@ function mountSurface(
     timeline,
     surfaceRuntime: surface,
     app: surface.app,
+    vt,
     phase: () => surface.status.snapshot().activity.phase,
     agentApproval: (request) => {
       if (approvalListener === undefined) throw new Error('the Agent approval listener was not registered')
@@ -864,6 +867,27 @@ test('a Tern AGENT approval pauses the pane and settling it returns to working',
     assert.deepEqual(h.progressStates, ['indeterminate', 'paused', 'indeterminate'],
       'the settled wait returns to working while the Agent keeps running')
     assert.deepEqual(h.progress, [], 'the Tern path never falls back to the boolean projection')
+  } finally {
+    h.dispose()
+  }
+})
+
+test('a real Agent approval request reaches the PiTui action sheet and settles allowed-once', async () => {
+  const h = mountSurface((controls) => {
+    controls.setOwner('main')
+    controls.routeStatus('main', 'running')
+  })
+  try {
+    await drain()
+    const decision = h.agentApproval({ toolName: 'bash', reason: 'official approval chain' })
+    await h.vt.waitForRender()
+    const view = h.vt.getViewport().join('\n')
+    assert.ok(view.includes('Approve bash?'), `the official request must reach the action sheet:\n${view}`)
+    assert.ok(view.includes('official approval chain'), `the request reason must be painted:\n${view}`)
+    h.vt.sendInput('y')
+    assert.equal(await decision, 'allowed-once',
+      'the official approval port -> presenter -> sheet -> runtime path must return the caller outcome')
+    await drain()
   } finally {
     h.dispose()
   }

@@ -105,15 +105,14 @@ actual painted Footer; hiding the hint does not re-run hidden-entry admission
 or close Quick.
 
 The gate must test the ACTIVE input OWNERS, not only physical overlay
-focus: a Question / Save Location frame owns the editor SEAT (it is not a
-managed broker overlay, so `OverlayBroker.hasFocusedOverlay()` stays false
-while `handleInputCore` consumes every key), and an Approval owns a
-managed overlay. A hint derived from overlay focus alone advertised a `↓`
-the ladder refused. `tasksActive`, `?N` (parked attention) and `!N`
-(failure attention) are independent projections: suppressing the hint
-never clears them. Save Location has no `ActivityStatus` section of its
-own, so its present/settle boundaries refresh the footer explicitly
-(`renderFooter()`); Question/Approval ride the status-store notify.
+focus: Question / Save Location / Approval frames own the editor SEAT (none is
+a managed broker overlay for keyboard ownership, so `OverlayBroker.hasFocusedOverlay()`
+stays false while `handleInputCore` consumes every key). A hint derived from
+overlay focus alone advertised a `↓` the ladder refused. `tasksActive`, `?N`
+(parked attention) and `!N` (failure attention) are independent projections:
+suppressing the hint never clears them. Save Location has no `ActivityStatus`
+section of its own, so its present/settle boundaries refresh the footer
+explicitly (`renderFooter()`); Question/Approval ride the status-store notify.
 
 A user binding, or a leader completion, of `app.tasks.open` is another
 TRIGGER of the same action and obeys the same ownership boundary (the

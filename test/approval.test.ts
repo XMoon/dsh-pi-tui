@@ -355,19 +355,71 @@ test('responsive layouts keep the title, reading row and pinned actions visible'
   }
 })
 
-test('a short surface degrades to the title/danger, one reading row, actions and a resize fact', async () => {
-  const { vt, app } = startApp(80, 8)
+test('a live width reflow keeps the same request and a reachable tail', async () => {
+  const { vt, app } = startApp(120, 40)
+  const decision = app.showApprovalPrompt({ toolName: 'bash', arguments: LONG_ARGUMENTS })
+  let view = await viewport(vt)
+  assert.ok(view.includes('arg-000'), `wide head missing:\n${view}`)
+  vt.resize(44, 24)
+  view = await viewport(vt)
+  assertSheetIntact(view)
+  assert.ok(view.includes('arg-0'), `narrow reflow must keep the body:\n${view}`)
+  vt.sendInput('\x1b[F') // End
+  view = await viewport(vt)
+  assert.ok(view.includes('arg-119'), `the narrowed sheet must still reach the tail:\n${view}`)
+  vt.resize(120, 40)
+  view = await viewport(vt)
+  assertSheetIntact(view)
+  assert.ok(view.includes('arg-119'), `the widened reflow must keep the scrolled tail:\n${view}`)
+  vt.sendInput('n')
+  assert.equal(await decision, 'rejected')
+})
+
+test('short surfaces keep the title/danger, one reading row, actions and a resize fact', async () => {
+  for (const [columns, rows] of [[80, 8], [44, 10]] as const) {
+    const { vt, app } = startApp(columns, rows)
+    const decision = app.showApprovalPrompt({
+      toolName: 'bash',
+      reason: 'line one\nline two',
+      arguments: LONG_ARGUMENTS,
+      danger: true,
+    })
+    const view = await viewport(vt)
+    assertSheetIntact(view)
+    assert.ok(view.includes('Dangerous command'), `${columns}x${rows} danger fact missing:\n${view}`)
+    assert.ok(view.includes('Reason: line one'), `${columns}x${rows} one real reading row missing:\n${view}`)
+    assert.ok(view.includes('Resize to inspect more'), `${columns}x${rows} resize fact missing:\n${view}`)
+    vt.sendInput('n')
+    assert.equal(await decision, 'rejected')
+    app.dispose()
+    startedApps.delete(app)
+  }
+})
+
+test('a surface below 24 columns still paints all three decisions', async () => {
+  const { vt, app } = startApp(20, 10)
   const decision = app.showApprovalPrompt({
     toolName: 'bash',
-    reason: 'line one\nline two',
+    reason: 'narrow decision',
     arguments: LONG_ARGUMENTS,
-    danger: true,
   })
   const view = await viewport(vt)
-  assertSheetIntact(view)
-  assert.ok(view.includes('Dangerous command'), `danger fact missing:\n${view}`)
-  assert.ok(view.includes('Reason: line one'), `one real reading row missing:\n${view}`)
-  assert.ok(view.includes('Resize to inspect more'), `resize fact missing:\n${view}`)
+  assert.ok(view.includes('Approv'), `the compact title must stay identifiable:\n${view}`)
+  assert.ok(view.includes('[y] Allow once'), `allow decision missing:\n${view}`)
+  assert.ok(view.includes('[n] Reject'), `reject decision missing:\n${view}`)
+  assert.ok(view.includes('[Esc] Cancel'), `cancel decision missing:\n${view}`)
+  assert.ok(view.includes('Resize'), `narrow surface must advertise the resize cue:\n${view}`)
+  vt.sendInput('n')
+  assert.equal(await decision, 'rejected')
+})
+
+test('a grant below the minimum sheet paints one truthful resize row, never a clipped action', async () => {
+  const { vt, app } = startApp(10, 4)
+  const decision = app.showApprovalPrompt({ toolName: 'bash', reason: 'too small', danger: true })
+  const view = await viewport(vt)
+  assert.ok(view.includes('Resize'), `the resize fact must survive an impossible grant:\n${view}`)
+  assert.ok(!view.includes('[y] Allow once'), `no action cell may survive an impossible grant:\n${view}`)
+  assert.ok(!view.includes('╭'), `the tiny grant must not paint a clipped box:\n${view}`)
   vt.sendInput('n')
   assert.equal(await decision, 'rejected')
 })
@@ -521,6 +573,35 @@ test('a fullscreen press is invalidated by an expand or a resize before release'
   assert.equal(settled, false, 'a resize between press and release must invalidate the click')
   vt.sendInput('n')
   assert.equal(await decision, 'rejected')
+
+  // A body scroll between press and release also changes the painted layout.
+  decision = app.showApprovalPrompt({ toolName: 'bash', arguments: LONG_ARGUMENTS })
+  view = await viewport(vt)
+  const allowCell = actionCell(view, '[y] Allow once')
+  const body = frameBounds(view)
+  assert.ok(body !== undefined)
+  press(vt, allowCell)
+  wheel(vt, 'down', { x: 5, y: body.top + 4 })
+  await vt.waitForRender()
+  release(vt, allowCell)
+  await vt.waitForRender()
+  settled = false
+  void decision.then(() => { settled = true })
+  await Promise.resolve()
+  assert.equal(settled, false, 'a scroll between press and release must invalidate the click')
+  vt.sendInput('n')
+  assert.equal(await decision, 'rejected')
+})
+
+test('narrow fullscreen action rows keep real painted decision cells', async () => {
+  const { vt, app } = startApp(44, 24)
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  const decision = app.showApprovalPrompt({ toolName: 'bash', arguments: LONG_ARGUMENTS })
+  const view = await viewport(vt)
+  assertSheetIntact(view)
+  click(vt, actionCell(view, '[n] Reject'))
+  assert.equal(await decision, 'rejected')
 })
 
 test('regular mode has no approval mouse action path; the terminal still keeps its own behavior', async () => {
@@ -564,6 +645,25 @@ test('fullscreen wheel scrolls the painted body only', async () => {
   assert.equal(await decision, 'rejected')
 })
 
+test('a hidden Approval behind a Question does not consume the wheel', async () => {
+  const { vt, app } = startApp()
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  const approval = app.showApprovalPrompt({ toolName: 'bash', arguments: LONG_ARGUMENTS })
+  await viewport(vt)
+  const question = app.askQuestions([{ id: 'q-hidden', question: 'hidden wheel?', options: [{ label: 'Yes' }] }])
+  await vt.waitForRender()
+  for (let index = 0; index < 3; index += 1) wheel(vt, 'down', { x: 5, y: 15 })
+  await vt.waitForRender()
+  vt.sendInput('\r')
+  vt.sendInput('\r')
+  await question
+  const view = await viewport(vt)
+  assert.ok(view.includes('arg-000'), `the hidden Approval must not scroll behind the Question:\n${view}`)
+  vt.sendInput('n')
+  assert.equal(await approval, 'rejected')
+})
+
 test('fullscreen Copy/Expand actions are clickable and use the painted target', async () => {
   const { vt, app, copied } = startApp()
   app.setFullscreen(true)
@@ -590,15 +690,17 @@ test('fullscreen Copy/Expand actions are clickable and use the painted target', 
   assert.equal(await decision, 'rejected')
 })
 
-test('settling an approval restores the editor draft and focus', async () => {
+test('settling an approval restores the editor draft, cursor and focus', async () => {
   const { vt, app } = startApp()
   app.setEditorText('keep this draft')
+  app.seatEditorForTest().setCursor?.(5)
   const decision = app.showApprovalPrompt({ toolName: 'bash', reason: 'draft safety' })
   await viewport(vt)
   vt.sendInput('y')
   assert.equal(await decision, 'allowed-once')
   await viewport(vt)
   assert.equal(app.hostEditorTextForTest(), 'keep this draft')
+  assert.equal(app.seatEditorForTest().getCursor?.(), 5, 'the editor cursor survives the seat projection')
   assert.equal(app.focusedComponentForTest(), app.seatEditorForTest().component,
     'with nothing restored, the editor owns the keyboard again')
 })

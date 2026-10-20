@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Approvals now use a blocking editor-seat action sheet.** The complete reason
+  and arguments are readable in one scrollable body (no six-line argument
+  preview), with `y` allow once, `n` reject, `Esc`/`Ctrl+C` cancel, `c` copying the
+  received raw arguments and `e` expanding the reading area. Fullscreen can click
+  the actually painted Allow once / Reject / Cancel actions and wheel-scroll the
+  body; regular mode remains keyboard-only.
+
 ## [0.5.3] - 2026-10-20
 
 ### Install and version pairing
