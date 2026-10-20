@@ -51,149 +51,87 @@ export function productionReferences(source) {
     refs.push(specifier.split('?')[0])
   }
 
+  // The BINDING-AWARE resolution.
+  //
   // A `new URL(<identifier>, import.meta.url)` resolves through the
-  // identifier's binding AT THAT USE SITE — not through a file-global map.
-  // The tree reads production files from an array of paths:
-  //
-  //     for (const file of ['../src/a.ts', '../src/b.ts']) {
-  //       readFileSync(new URL(file, import.meta.url), 'utf8')
-  //     }
-  //
-  // The binding is SCOPED: two loops may reuse the same name for different
-  // arrays, and a file-global map would resolve both to the LAST one — a
-  // false reference for one loop and a missing one for the other. The
-  // resolution therefore walks the AST from the USE SITE outwards and
-  // takes the NEAREST enclosing binding of that name.
-  const resolveIdentifierAt = (useNode, name) => {
-    // The nearest enclosing `for…of` whose loop variable IS the name, and
-    // whose iterable is an array literal of strings.
-    for (let node = useNode; node !== undefined; node = node.parent) {
-      if (ts.isForOfStatement(node) && ts.isVariableDeclarationList(node.initializer)) {
-        const names = node.initializer.declarations
-          .filter(declaration => ts.isIdentifier(declaration.name))
-          .map(declaration => declaration.name.text)
-        if (!names.includes(name)) continue
-        // The iterable is an INLINE array literal.
-        if (ts.isArrayLiteralExpression(node.expression)) {
-          return node.expression.elements
-            .filter(element => ts.isStringLiteralLike(element))
-            .map(element => element.text)
-        }
-        // The iterable is a NAMED array declared in the enclosing scope:
-        // `const files = ['…']; for (const file of files) { … }`.
-        if (ts.isIdentifier(node.expression)) {
-          const initializer = resolveDeclarationInitializer(node, node.expression.text)
-          if (initializer !== undefined && ts.isArrayLiteralExpression(initializer)) {
-            return initializer.elements
-              .filter(element => ts.isStringLiteralLike(element))
-              .map(element => element.text)
+  // identifier's DECLARATION — and the declaration that matters is the one
+  // the USE SITE is bound to, not the one with the same NAME somewhere
+  // else. The TypeScript checker resolves that exactly: it follows the
+  // scope chain, so a function PARAMETER that shadows an outer array is
+  // resolved to the parameter.
+  const checker = createTypeChecker(file)
+  const declarationOf = (identifier) => {
+    if (checker === undefined) return undefined
+    const symbol = checker.getSymbolAtLocation(identifier)
+    if (symbol === undefined) return undefined
+    const declaration = symbol.valueDeclaration ?? symbol.declarations?.[0]
+    return declaration
+  }
+
+  /**
+   * The directory URL a `new URL(<rel>, <root>)` call's second argument
+   * names — the shape of a whole-tree enumeration.
+   */
+  const enumerationBaseArgument = (node) => {
+    if (node.arguments.length < 2) return undefined
+    const [, second] = node.arguments
+    if (second === undefined || !ts.isIdentifier(second)) return undefined
+    return urlValueOf(declarationOf(second))
+  }
+
+  /** The static string values a declaration initializes, when it has them. */
+  const stringValuesOf = (declaration) => {
+    if (declaration === undefined) return undefined
+    if (!ts.isVariableDeclaration(declaration)) return undefined
+    // A `for…of` LOOP VARIABLE is bound to the ITERABLE, not to an
+    // initializer: `for (const file of ['../src/a.ts'])`. The declaration
+    // has no initializer, so the iterable is read from the enclosing
+    // `for…of` statement.
+    if (declaration.initializer === undefined) {
+      const owner = declaration.parent?.parent
+      if (owner !== undefined && ts.isForOfStatement(owner) && owner.initializer === declaration.parent) {
+        const expression = owner.expression
+        if (ts.isArrayLiteralExpression(expression)) {
+          const values = []
+          let partial = false
+          for (const element of expression.elements) {
+            if (ts.isStringLiteralLike(element)) {
+              values.push(element.text)
+              continue
+            }
+            partial = true
           }
-          // The iterable is not a static array: the reference cannot be
-          // resolved, and that is REPORTED.
-          return undefined
+          return { values, partial }
+        }
+        if (ts.isIdentifier(expression)) {
+          // The iterable is a NAMED array declared in the enclosing scope.
+          const named = declarationOf(expression)
+          const resolved = named === undefined ? undefined : stringValuesOf(named)
+          if (resolved !== undefined) return resolved
         }
         return undefined
       }
-      // The nearest enclosing BLOCK that declares the name as an array.
-      if (ts.isBlock(node) || ts.isSourceFile(node) || ts.isFunctionDeclaration(node)) {
-        for (const statement of node.statements ?? []) {
-          if (!ts.isVariableStatement(statement)) continue
-          for (const declaration of statement.declarationList.declarations) {
-            if (!ts.isIdentifier(declaration.name) || declaration.name.text !== name) continue
-            if (declaration.initializer !== undefined && ts.isArrayLiteralExpression(declaration.initializer)) {
-              return declaration.initializer.elements
-                .filter(element => ts.isStringLiteralLike(element))
-                .map(element => element.text)
-            }
-            // The binding exists but is NOT a static array: the reference
-            // cannot be resolved. That is reported, never ignored.
-            return undefined
-          }
-        }
-      }
+      return undefined
     }
-    return undefined
-  }
-
-  /**
-   * The initializer of the declaration that binds `name` in the enclosing
-   * scope of `from`.
-   */
-  const resolveDeclarationInitializer = (from, name) => {
-    for (let node = from; node !== undefined; node = node.parent) {
-      if (!ts.isBlock(node) && !ts.isSourceFile(node)) continue
-      for (const statement of node.statements ?? []) {
-        if (!ts.isVariableStatement(statement)) continue
-        for (const declaration of statement.declarationList.declarations) {
-          if (!ts.isIdentifier(declaration.name) || declaration.name.text !== name) continue
-          return declaration.initializer
+    const initializer = declaration.initializer
+    if (ts.isArrayLiteralExpression(initializer)) {
+      // A SPREAD or a computed element makes the array's value only
+      // PARTIALLY known: the static subset is reported AND the array is
+      // marked unresolved, so the caller never claims full coverage.
+      const values = []
+      let partial = false
+      for (const element of initializer.elements) {
+        if (ts.isStringLiteralLike(element)) {
+          values.push(element.text)
+          continue
         }
-      }
-    }
-    return undefined
-  }
-
-  /**
-   * The BASE of a whole-tree enumeration, when the identifier names a
-   * directory-URL that is walked.
-   *
-   * `const root = new URL('../../src/', import.meta.url)` followed by
-   * `srcTsFiles(root)` enumerates EVERY `.ts` file under that directory.
-   * The individual reads have no static target, but the directory does — and
-   * the directory is what the migration had to keep pointing at.
-   */
-  const resolveEnumerationBase = (useNode, name) => {
-    // The identifier may be the CALLBACK PARAMETER of a chain that walks an
-    // enumerated tree: `srcTsFiles(root).filter(rel => new URL(rel, root))`.
-    // The base is the `root` ARGUMENT of that call.
-    for (let node = useNode; node !== undefined; node = node.parent) {
-      if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression)) {
-        const [first] = node.arguments
-        if (first !== undefined && ts.isIdentifier(first)) {
-          const base = resolveUrlDeclaration(node, first.text)
-          if (base !== undefined) return base
+        if (ts.isSpreadElement(element)) {
+          partial = true
+          continue
         }
+        partial = true
       }
-      if (!ts.isBlock(node) && !ts.isSourceFile(node)) continue
-      for (const statement of node.statements ?? []) {
-        if (!ts.isVariableStatement(statement)) continue
-        for (const declaration of statement.declarationList.declarations) {
-          if (!ts.isIdentifier(declaration.name) || declaration.name.text !== name) continue
-          return resolveUrlDeclaration(declaration, name)
-        }
-      }
-    }
-    return undefined
-  }
-
-  /** The URL a declaration holds, when it holds one. */
-  const resolveUrlDeclaration = (declaration, name) => {
-    const initializer = ts.isVariableDeclaration(declaration)
-      ? declaration.initializer
-      : resolveDeclarationInitializer(declaration, name)
-    if (initializer === undefined) return undefined
-    if (ts.isNewExpression(initializer) && ts.isIdentifier(initializer.expression) && initializer.expression.text === 'URL') {
-      const [first] = initializer.arguments
-      if (first !== undefined && ts.isStringLiteralLike(first)) return first.text
-      if (first !== undefined && ts.isTemplateExpression(first)) return first.head.text
-    }
-    // A declaration that is not a URL: look for one further up the scope.
-    for (let node = declaration.parent; node !== undefined; node = node.parent) {
-      if (!ts.isBlock(node) && !ts.isSourceFile(node)) continue
-      for (const statement of node.statements ?? []) {
-        if (!ts.isVariableStatement(statement)) continue
-        for (const candidate of statement.declarationList.declarations) {
-          if (!ts.isIdentifier(candidate.name) || candidate.name.text !== name) continue
-          const inner = candidate.initializer
-          if (inner === undefined) return undefined
-          if (ts.isNewExpression(inner) && ts.isIdentifier(inner.expression) && inner.expression.text === 'URL') {
-            const [first] = inner.arguments
-            if (first !== undefined && ts.isStringLiteralLike(first)) return first.text
-            if (first !== undefined && ts.isTemplateExpression(first)) return first.head.text
-          }
-          return undefined
-        }
-      }
+      return partial ? { values, partial } : { values, partial: false }
     }
     return undefined
   }
@@ -226,6 +164,29 @@ export function productionReferences(source) {
       const [argument] = node.arguments
       if (argument !== undefined && ts.isStringLiteralLike(argument)) add(argument.text)
     }
+    // The PATH JOIN READ: `readFileSync(join(root, 'src', 'app', …))`.
+    // The segments are literal, so the path is known — but only a JOIN that
+    // READS a production file counts: a join that WRITES a fixture
+    // (`join(workspace, 'src', 'deep')`) creates a temporary tree, and its
+    // paths are not the repository's production modules.
+    if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === 'join') {
+      const segments = node.arguments
+        .filter(argument => ts.isStringLiteralLike(argument))
+        .map(argument => argument.text)
+      if (segments.length > 0 && segments[0] === 'src' && isReadOf(node)) {
+        // The path is relative to the join's BASE, which the test
+        // computes for itself: `join(dirname(fileURLToPath(import.meta.url)),
+        // '..', '..')` is the REPOSITORY root from a test in a
+        // subdirectory, and the test root from the flat root. The base is
+        // resolved so the two trees are compared on the TARGET, not on the
+        // spelling of the base.
+        const base = joinBaseOf(node, declarationOf)
+        const relative = base === undefined
+          ? `../${segments.join('/')}`
+          : `${base}/${segments.join('/')}`
+        add(relative)
+      }
+    }
     // The source read: `new URL('…', import.meta.url)`.
     if (ts.isNewExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === 'URL') {
       const [first] = node.arguments
@@ -234,70 +195,227 @@ export function productionReferences(source) {
       // literal prefix before the interpolation is the part that resolves.
       if (first !== undefined && ts.isTemplateExpression(first)) add(first.head.text)
       // The IDENTIFIER-valued source read: `new URL(file, …)` where `file`
-      // names an array of paths. The binding is resolved at THIS use site.
-      //
-      // A binding that is not a static array may still be a WHOLE-TREE
-      // enumeration (`srcTsFiles(root)` returns every `.ts` path under a
-      // directory). Such a read has no per-file target to compare, but its
-      // BASE is a real reference: the directory it enumerates. The base is
-      // resolved here, and the enumeration itself is reported so the caller
-      // can state that the per-file comparison does not cover it.
+      // names an array of paths. The binding is the one the USE SITE is
+      // bound to.
       if (first !== undefined && ts.isIdentifier(first)) {
-        const values = resolveIdentifierAt(node, first.text)
-        if (values === undefined) {
-          // The identifier is not a static array. It may still be a
-          // WHOLE-TREE enumeration, whose BASE is the reference the
-          // migration had to keep pointing at.
-          const base = resolveEnumerationBase(node, first.text)
-          if (base !== undefined) {
+        const resolved = stringValuesOf(declarationOf(first))
+        if (resolved !== undefined) {
+          for (const value of resolved.values) add(value)
+          // A PARTIAL resolution (a spread or a computed element) means
+          // the array's full value is unknown: the static subset is
+          // reported AND the reference is marked unresolved, so the caller
+          // never claims full coverage.
+          if (resolved.partial) unresolvedIdentifiers.add(first.text)
+        } else {
+          // The binding is not a static array. It may still be a WHOLE-TREE
+          // enumeration, whose BASE argument is the reference the migration
+          // had to keep pointing at. The base is resolved FIRST: when it
+          // exists, the per-file reads are covered by the directory they
+          // are walked from, and the identifier is not unresolved.
+          // The read has a directory BASE: it is either part of a
+          // whole-tree enumeration (the directory is walked) or a runtime
+          // per-file read under that directory. In BOTH cases the
+          // directory is the reference the migration had to keep pointing
+          // at.
+          const enumerationBaseValue = enumerationBase(node, declarationOf)
+          const base = enumerationBaseValue ?? enumerationBaseArgument(node)
+          if (enumerationBaseValue !== undefined) {
+            // The read is PART of a whole-tree enumeration: the directory
+            // it walks is the reference, and the per-file reads are covered
+            // by it.
             add(base)
             enumeratedTrees.add(first.text)
+          } else if (base !== undefined) {
+            // The read has a directory BASE but is not part of an
+            // enumeration: the base is the reference, and the per-file
+            // value is runtime — REPORTED, never silently ignored.
+            add(base)
+            unresolvedIdentifiers.add(first.text)
+          } else if (enumerationBaseArgument(node) !== undefined) {
+            // The read has a directory BASE but is not part of an
+            // enumeration: the base is the reference, and the per-file
+            // value is runtime — REPORTED, never silently ignored.
+            const baseValue = enumerationBaseArgument(node)
+            if (baseValue !== undefined) add(baseValue)
+            unresolvedIdentifiers.add(first.text)
           } else {
-            // The BASE argument of the same `new URL` may still name the
-            // directory the tree is walked from; it is resolved below. The
-            // identifier is only reported as unresolved when no base
-            // exists either.
-            const baseArgument = node.arguments.length > 1 ? node.arguments[1] : undefined
-            const baseName = baseArgument !== undefined && ts.isIdentifier(baseArgument)
-              ? baseArgument.text
-              : undefined
-            if (baseName === undefined) unresolvedIdentifiers.add(first.text)
+            unresolvedIdentifiers.add(first.text)
           }
-        } else {
-          for (const value of values) add(value)
         }
       }
-      // The WHOLE-TREE enumeration: `new URL(<rel>, <root>)` where `<rel>`
-      // is a per-file path RELATIVE to a directory URL. The BASE argument is
-      // the directory the tree is walked from, and it is the reference the
-      // migration had to keep pointing at.
+      // The WHOLE-TREE enumeration's BASE: `new URL(<rel>, <root>)` where
+      // `<root>` is a directory URL. The individual reads have no static
+      // target, but the directory does.
       if (node.arguments.length > 1) {
         const [, second] = node.arguments
         if (second !== undefined && ts.isIdentifier(second)) {
-          const base = resolveDeclarationInitializer(node, second.text)
-          if (base !== undefined && ts.isNewExpression(base) && ts.isIdentifier(base.expression) && base.expression.text === 'URL') {
-            const [baseFirst] = base.arguments
-            if (baseFirst !== undefined && ts.isStringLiteralLike(baseFirst)) {
-              add(baseFirst.text)
-              enumeratedTrees.add(second.text)
-            }
+          const base = urlValueOf(declarationOf(second))
+          if (base !== undefined) {
+            add(base)
+            enumeratedTrees.add(second.text)
           }
         }
       }
     }
     ts.forEachChild(node, visit)
   }
-  // The identifiers whose value could not be resolved statically, and the
-  // ones that name a WHOLE-TREE enumeration (whose per-file reads are not
-  // comparable, but whose BASE is).
+
+  // The identifiers whose value could not be resolved statically, the ones
+  // whose value is only PARTIALLY known, and the ones that name a WHOLE-TREE
+  // enumeration (whose per-file reads are not comparable, but whose BASE
+  // is).
   const unresolvedIdentifiers = new Set()
+  const resolvedIdentifiers = new Set()
   const enumeratedTrees = new Set()
   visit(file)
   for (const name of unresolvedIdentifiers) refs.push(`<unresolved:${name}>`)
+  for (const name of resolvedIdentifiers) refs.push(`<partial:${name}>`)
   // The same target can be reached twice (a directory base that is also an
   // enumeration base); the comparison is over SETS, so a duplicate carries
   // no information.
   return [...new Set(refs)]
+}
+
+/** The URL a declaration holds, when it holds one. */
+function urlValueOf(declaration) {
+  if (declaration === undefined) return undefined
+  const initializer = ts.isVariableDeclaration(declaration) ? declaration.initializer : undefined
+  if (initializer === undefined) return undefined
+  if (!ts.isNewExpression(initializer) || !ts.isIdentifier(initializer.expression) || initializer.expression.text !== 'URL') {
+    return undefined
+  }
+  const [first] = initializer.arguments
+  if (first !== undefined && ts.isStringLiteralLike(first)) return first.text
+  if (first !== undefined && ts.isTemplateExpression(first)) return first.head.text
+  return undefined
+}
+
+/**
+ * The path a `join(base, …)` resolves to, RELATIVE to the test root.
+ *
+ * The base is a `join(dirname(fileURLToPath(import.meta.url)), '..', '..')`
+ * — a path relative to the FILE. The result is expressed relative to the
+ * test root, so the flat base tree and the layered current tree resolve the
+ * SAME production file and the comparison is about the target.
+ */
+function joinBaseOf(node, declarationOf) {
+  for (let current = node; current !== undefined; current = current.parent) {
+    if (!ts.isCallExpression(current)) continue
+    if (!ts.isIdentifier(current.expression) || current.expression.text !== 'join') continue
+    const [first] = current.arguments
+    if (first === undefined || !ts.isIdentifier(first)) continue
+    // The base argument must be a `dirname(fileURLToPath(import.meta.url))`
+    // handle — the file's own directory.
+    const declaration = declarationOf(first)
+    if (declaration === undefined || !ts.isVariableDeclaration(declaration)) continue
+    const initializer = declaration.initializer
+    if (initializer === undefined) continue
+    if (!ts.isCallExpression(initializer) || !ts.isIdentifier(initializer.expression) || initializer.expression.text !== 'join') {
+      continue
+    }
+    const [directory] = initializer.arguments
+    if (directory === undefined) continue
+    const up = initializer.arguments
+      .slice(1)
+      .filter(argument => ts.isStringLiteralLike(argument))
+      .map(argument => argument.text)
+    if (!up.every(segment => segment === '..')) continue
+    // `up` levels above the file's own directory.
+    return up.map(() => '..').join('/')
+  }
+  return undefined
+}
+
+/**
+ * Whether a `join(...)` call is the argument of a READ.
+ *
+ * A `join` that writes (`writeFileSync(join(…), …)`) or that creates a
+ * directory (`mkdirSync(join(…), …)`) builds a FIXTURE, not a production
+ * reference. Only a join that is READ names a production module.
+ */
+function isReadOf(node) {
+  for (let current = node.parent; current !== undefined; current = current.parent) {
+    if (ts.isCallExpression(current)) {
+      const callee = current.expression
+      if (ts.isIdentifier(callee)) {
+        return /^(readFileSync|readFile|existsSync|statSync|lstatSync|realpathSync|access|openSync)$/u.test(callee.text)
+      }
+    }
+    // A join that is the RECEIVER of a write call is a fixture path too.
+    if (ts.isPropertyAccessExpression(current) && current.expression === node) {
+      const owner = current.parent
+      if (owner !== undefined && ts.isCallExpression(owner) && ts.isIdentifier(owner.expression)) {
+        return /^(readFileSync|readFile|existsSync|statSync|lstatSync|realpathSync|access|openSync)$/u.test(owner.expression.text)
+      }
+    }
+  }
+  return false
+}
+
+/**
+ * The BASE of a whole-tree enumeration that reads `new URL(<rel>, <root>)`
+ * where `<root>` is a directory URL.
+ */
+function enumerationBase(node, declarationOf) {
+  for (let current = node; current !== undefined; current = current.parent) {
+    if (!ts.isCallExpression(current)) continue
+    // The enumeration's own call: `srcTsFiles(root)`. In a CHAIN
+    // (`srcTsFiles(root).filter(…)`) it is the RECEIVER of the property
+    // access, not an argument of the outer call.
+    const callee = current.expression
+    const receiver = ts.isPropertyAccessExpression(callee) ? callee.expression : undefined
+    const candidates = receiver === undefined
+      ? current.arguments
+      : (ts.isCallExpression(receiver) ? receiver.arguments : [])
+    for (const candidate of candidates) {
+      if (!ts.isIdentifier(candidate)) continue
+      const base = urlValueOf(declarationOf(candidate))
+      if (base !== undefined) return base
+    }
+    // The enumeration call may be the RECEIVER of a CALL chain:
+    // `srcTsFiles(root).filter(…).filter(…)`. The receiver of the OUTER
+    // call is then another call, whose arguments carry the base.
+    if (receiver !== undefined && ts.isCallExpression(receiver)) {
+      const inner = receiver.expression
+      const innerReceiver = ts.isPropertyAccessExpression(inner) ? inner.expression : undefined
+      const innerCandidates = innerReceiver === undefined
+        ? receiver.arguments
+        : (ts.isCallExpression(innerReceiver) ? innerReceiver.arguments : [])
+      for (const candidate of innerCandidates) {
+        if (!ts.isIdentifier(candidate)) continue
+        const base = urlValueOf(declarationOf(candidate))
+        if (base !== undefined) return base
+      }
+    }
+  }
+  return undefined
+}
+
+/**
+ * A type checker over one synthetic file.
+ *
+ * The checker is what makes the resolution BINDING-AWARE: it follows the
+ * scope chain, so a shadowing declaration is resolved to the right one.
+ */
+function createTypeChecker(file) {
+  try {
+    const host = {
+      getSourceFile: (name) => (name === file.fileName ? file : undefined),
+      writeFile: () => {},
+      getDefaultLibFileName: () => 'lib.d.ts',
+      useCaseSensitiveFileNames: () => true,
+      getCanonicalFileName: (name) => name,
+      getCurrentDirectory: () => '',
+      getNewLine: () => '\n',
+      fileExists: (name) => name === file.fileName,
+      readFile: (name) => (name === file.fileName ? file.text : undefined),
+      getDirectories: () => [],
+    }
+    const program = ts.createProgram([file.fileName], { noResolve: true, noLib: true }, host)
+    return program.getTypeChecker()
+  } catch {
+    return undefined
+  }
 }
 
 /**
