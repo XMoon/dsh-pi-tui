@@ -142,7 +142,7 @@ must never depend on the developer git/CI environment.
 A single file:
 
 ```sh
-node --test test/tui/some-case.test.ts
+node --test test/tui/marquee.test.ts
 ```
 
 The suite is TypeScript and runs under Node's type-stripping loader; a
