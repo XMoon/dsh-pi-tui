@@ -501,7 +501,7 @@ test('the shipped Direct row registers the Host exactly once and the runner wait
   // One Host Context registers the key once: no second Direct row.
   assert.equal((patch.match(/- id: pi-tui-performance-host\b/g) ?? []).length, 1)
   // The runner must not mount without its performance authority.
-  assert.match(patch, /inject: \[tuiStartup, piTuiExtensions, authorization, workspaceRegistry, pluginManager, jobController, piTuiPerformanceReady\]/)
+  assert.match(patch, /inject: \[tuiStartup, piTuiExtensions, authorization, workspaceRegistry, pluginManager, jobController, piTuiPerformanceReady, deepseekAccount, webServer\]/)
 })
 
 // ── the real Host plane: committed events drive the real seam ─────────────

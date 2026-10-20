@@ -1733,9 +1733,9 @@ test('capability-truthful discovery copy is registered for the conditional comma
   assert.equal(descriptionOf('transcript'),
     'Export a readable Markdown transcript of this session when supported')
   assert.equal(descriptionOf('login'),
-    'Configure provider credentials; provider-native sign-in is available when supported')
+    'Open Models to configure provider credentials or sign in to DeepSeek Account')
   assert.equal(descriptionOf('logout'),
-    'Clear provider credentials; stored-record cleanup is available when supported')
+    'Open Models to clear a stored provider credential or sign out of DeepSeek Account')
   // The ! / !! help row is presentation-only copy on the same discovery
   // surface: the gesture/card stays visible, execution is Host-owned.
   let captured: Parameters<TuiApp['openSettings']>[0] | undefined

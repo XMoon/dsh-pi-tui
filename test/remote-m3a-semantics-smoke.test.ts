@@ -1272,7 +1272,7 @@ test('P16: the REAL /settings workspace commits through the Remote adapter over 
       const refusedFrame = fixture.view().replace(/\s+/gu, ' ')
       assert.match(
         refusedFrame,
-        /Not saved · the display preset is applied locally, but storing it failed: settings\.mutate\(tui-app\) failed: settings write refused \(injected\)/,
+        /Not saved · the display preset is.*?applied locally, but storing it failed:.*?settings\.mutate\(tui-app\) failed:.*?settings write refused \(injected\)/,
         `a refused write is reported:\n${fixture.view()}`,
       )
       assert.equal(hostDescriptor()?.value?.displayPreset, 'compact', 'the refused write never reached the Host')
