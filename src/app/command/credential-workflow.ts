@@ -117,6 +117,12 @@ export function resolveLoginDestination(
   const arg = rawArg.trim()
   if (arg === '') return { kind: 'models', view: 'list' }
   if (isAccountArg(arg)) return { kind: 'account', view: 'page' }
+  // A lowercase standalone flow route is a KNOWN route even when the same
+  // token is also an exact (case-insensitive) credential reference: the
+  // documented precedence is known route before literal reference. Uppercase
+  // forms such as MYKEY remain the explicit reference escape hatch.
+  const flowRoute = flowForRoute(generic, arg)
+  if (flowRoute !== undefined) return { kind: 'models', view: 'provider', route: arg }
   const match = classifyCredentialArg(arg, options)
   if (match !== undefined) {
     if (match.kind === 'ref') {
