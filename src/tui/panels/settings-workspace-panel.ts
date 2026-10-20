@@ -632,6 +632,8 @@ export class SettingsWorkspacePanel implements Component {
     this.authPageCategory = 'models'
     this.categoryId = 'models'
     this.focus = 'categories'
+    this.pressedGesture = undefined
+    this.authPressed = undefined
     this.bumpRevision()
     this.intents.requestRender()
   }
@@ -649,6 +651,8 @@ export class SettingsWorkspacePanel implements Component {
     this.authPageCategory = 'account'
     this.categoryId = 'account'
     this.focus = 'categories'
+    this.pressedGesture = undefined
+    this.authPressed = undefined
     this.bumpRevision()
     this.intents.requestRender()
   }
