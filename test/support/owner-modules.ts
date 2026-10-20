@@ -242,6 +242,41 @@ export function productionSources(): Array<{ rel: string; source: string }> {
 }
 
 /**
+ * A parsed production source set: ONE AST per file, reusable across
+ * independent symbol queries.
+ *
+ * The alias-aware construction scan used to re-parse the whole `src/**` tree
+ * for EVERY queried symbol. The parse dominated its cost, and the parse
+ * depends only on the FILE — never on the symbol. This snapshot splits the
+ * two: parse once, then evaluate independent symbol queries against the same
+ * immutable trees.
+ *
+ * The snapshot is READ-ONLY: the queries below only visit nodes, and
+ * {@link unwrapExpression} only reads them. Sharing the trees between
+ * queries therefore cannot leak state from one query into another.
+ */
+export interface ParsedSourceSet {
+  readonly files: ReadonlyArray<{ readonly rel: string; readonly file: ts.SourceFile }>
+}
+
+/**
+ * Parse a source set into an AST snapshot.
+ *
+ * The parser kind follows the FILE (`.tsx` => TSX): a `.tsx` production
+ * module parsed as plain TS is not a valid module, so a legal JSX
+ * attribute/child holding a call would silently parse to nothing. See
+ * {@link productionScriptKind}.
+ */
+export function parseSources(sources: ReadonlyArray<{ readonly rel: string; readonly source: string }>): ParsedSourceSet {
+  return {
+    files: sources.map(({ rel, source }) => ({
+      rel,
+      file: ts.createSourceFile(rel, source, ts.ScriptTarget.ESNext, true, productionScriptKind(rel)),
+    })),
+  }
+}
+
+/**
  * Every production site that CALLS or CONSTRUCTS `name`, alias-aware.
  *
  * The unit is the AST callee identity (`CallExpression` / `NewExpression`
@@ -257,15 +292,18 @@ export function productionSources(): Array<{ rel: string; source: string }> {
  * (`obj[key](x)`, a re-export object, a `Proxy`, a re-assigned binding) is
  * outside the helper entirely. The architecture gate locks the dependency
  * direction only — it performs no type analysis.
+ *
+ * ALIAS STATE IS PER SYMBOL, NOT PER SNAPSHOT: the alias set below is
+ * computed inside this call, from the shared snapshot's trees, and is never
+ * stored on the snapshot. Two symbols queried against the SAME snapshot
+ * therefore resolve their aliases independently — sharing the parse must not
+ * share the alias INTERPRETATION.
  */
 export function aliasAwareConstructionSites(
   name: string,
-  sources: Array<{ rel: string; source: string }> = productionSources(),
+  snapshot: ParsedSourceSet = parseSources(productionSources()),
 ): string[] {
-  const files = sources.map(({ rel, source }) => ({
-    rel,
-    file: ts.createSourceFile(rel, source, ts.ScriptTarget.ESNext, true, productionScriptKind(rel)),
-  }))
+  const files = snapshot.files
   const aliases = new Set<string>()
   let changed = true
   while (changed) {

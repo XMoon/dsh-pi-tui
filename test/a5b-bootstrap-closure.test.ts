@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url'
 import ts from 'typescript'
 
 import { compositionFile, compositionSources, compositionSourcesUnder } from './support/composition-surface.ts'
-import { aliasAwareConstructionSites, ownerFile, ownerSource, productionScriptKind, productionSource, productionSources, unwrapExpression } from './support/owner-modules.ts'
+import { aliasAwareConstructionSites, ownerFile, ownerSource, parseSources, productionScriptKind, productionSource, productionSources, unwrapExpression, type ParsedSourceSet } from './support/owner-modules.ts'
 import { testLifecycle } from './support/temp-lifecycle.ts'
 
 /** This repository root. */
@@ -734,7 +734,7 @@ const OWNER_FACTORY_NAMES: readonly string[] = [
 
 /** Delegates to the shared alias-aware construction-site helper so the wrapper
  *  and alias scope has ONE definition (`test/support/owner-modules.ts`). */
-const factoryCallSites = (name: string): string[] => aliasAwareConstructionSites(name)
+const factoryCallSites = (name: string, snapshot: ParsedSourceSet): string[] => aliasAwareConstructionSites(name, snapshot)
 
 test('A5b: every extracted-owner factory is called exactly once, from the composition root', () => {
   // The per-module location lock above reads the hand-listed root only, so a
@@ -747,9 +747,14 @@ test('A5b: every extracted-owner factory is called exactly once, from the compos
     [...new Set(OWNER_CONSTRUCTIONS.map(([, factory]) => factory))].sort(),
     'OWNER_FACTORY_NAMES must cover exactly the extracted owners',
   )
+  // ONE parsed snapshot for the whole query set: the parse depends only on the
+  // FILE, never on the queried symbol. The alias resolution stays PER SYMBOL
+  // inside `aliasAwareConstructionSites`, so the shared snapshot does not share
+  // the alias interpretation between the factory names.
+  const snapshot = parseSources(productionSources())
   for (const name of OWNER_FACTORY_NAMES) {
     assert.deepEqual(
-      factoryCallSites(name),
+      factoryCallSites(name, snapshot),
       ['src/app/bootstrap.ts'],
       `${name} must be called exactly once, from src/app/bootstrap.ts, across production src/** (AST call sites, never spellings)`,
     )
