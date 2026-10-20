@@ -2289,10 +2289,12 @@ test('fullscreen Focus Approval keeps ownership while the effective fold key ins
   assert.ok(approvalY >= 0, 'the transcript remains painted behind Approval')
   click(vt, 3, approvalY + 1)
   await vt.waitForRender()
-  assert.equal(app.focusExpandedTurnsForTest().size, 0, 'Approval mouse stays inert without authoritative dialog bounds')
+  assert.deepEqual([...app.focusExpandedTurnsForTest()], [1],
+    'Approval fullscreen clicks may activate only the modal-safe transcript disclosure')
   vt.sendInput('\x18')
   await vt.waitForRender()
-  assert.deepEqual([...app.focusExpandedTurnsForTest()], [1], 'Approval must allow only the semantic transcript disclosure action')
+  assert.equal(app.focusExpandedTurnsForTest().size, 0,
+    'Approval must keep allowing the semantic transcript disclosure action')
   assert.ok(vt.getViewport().join('\n').includes('Approve bash?'), 'Approval must remain visible after disclosure')
   vt.sendInput('n')
   assert.equal(await approval, 'rejected')

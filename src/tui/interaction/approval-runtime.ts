@@ -1,23 +1,23 @@
 /**
- * The TUI-local approval interaction lifecycle (TS5 plan §8.3): the FIFO
- * prompt queue, the ONE prompt on screen, its abort binding, the responsive
- * overlay mount/rebind, the fixed y/n/Esc/Ctrl+C ownership, the exactly-once
- * settlement, the next-item scheduling and the teardown cancellation.
+ * The TUI-local approval interaction lifecycle (Surface Phase 3C / C1-B): the
+ * FIFO prompt queue, the ONE approval action sheet on screen, its abort
+ * binding, the blocking editor-seat projection, the fixed y/n/Esc/Ctrl+C
+ * ownership, the exactly-once settlement, the next-item scheduling and the
+ * teardown cancellation.
  *
  * It owns no Host business semantics: the approval request production, the
- * `InteractionPort` and the application currentness stay above it. The dialog
- * body itself is the TS4 `tui/panels/approval-dialog.ts` presentation, which
- * this runtime mounts and rebinds.
+ * `InteractionPort` and the application currentness stay above it. The sheet
+ * itself is `tui/panels/approval-dialog.ts`; this runtime creates exactly one
+ * frame per active prompt, projects it through the host's seat arbitration and
+ * releases it before the caller promise settles. Pointer decisions and the
+ * fixed keyboard decisions both enter the ONE `settle` path below.
  * @module @xmoon76/dsh-pi-tui/tui/interaction/approval-runtime
  */
 
 import { matchesKey, type OverlayHandle, type TuiInputListenerResult } from '@xmoon76/pi-tui'
 import { runSyncDisposalSteps, runSyncDisposalStepsWithPrimary } from '../../runtime/process/disposal.ts'
-import { ResponsiveOverlayFrame } from '../components/frame.ts'
 import {
-  ApprovalDialogSurface,
-  approvalOverlayGeometry,
-  buildApprovalDialog,
+  ApprovalSheetFrame,
   type ApprovalOutcome,
   type ApprovalPromptRequest,
 } from '../panels/approval-dialog.ts'
@@ -25,7 +25,7 @@ import {
 /**
  * The terminal/seat capabilities the approval runtime consumes. Every member
  * is an existing TuiApp coordination primitive — the runtime owns the approval
- * state machine, never a second copy of the overlay/editor/focus facts.
+ * state machine, never a second copy of the editor/focus/overlay facts.
  */
 export interface ApprovalRuntimeHost {
   /** The surface is finally disposed: a new prompt settles cancelled at once. */
@@ -39,22 +39,36 @@ export interface ApprovalRuntimeHost {
   cancelLeader(): void
   /** Re-derive the activity projection (the approval is a live modal). */
   projectActivity(): void
-  /** The live terminal dimensions the approval geometry derives from. */
+  /** Repaint the active surface after a sheet-local reading state change. */
+  requestRender(): void
+  /** The live terminal dimensions the sheet frame budget derives from. */
   terminalSize(): { readonly columns: number; readonly rows: number }
-  /** Mount the responsive frame as a remountable managed overlay. The `remount`
-   *  callback is built from the stable logical handle and registered BEFORE the
-   *  physical mount (see `TuiApp.showOverlayOnHost`), so a fullscreen swap started
-   *  by a callback inside that mount already re-creates this node's projection. */
-  showApprovalOverlay(
-    frame: ResponsiveOverlayFrame,
-    remount: (handle: OverlayHandle) => void,
-  ): OverlayHandle
-  /** Drop one logical node's rebind callback when it closes. */
-  clearOverlayRemount(handle: OverlayHandle): void
-  /** Project a fresh physical frame for an existing logical node. */
-  rebindApprovalOverlay(handle: OverlayHandle, frame: ResponsiveOverlayFrame): void
-  /** Restore the editor seat as the input fallback beneath the approval. */
-  focusEditorSeat(): void
+  /**
+   * Project the approval frame into the blocking editor seat: commit the
+   * overlay-root suspension, install the frame as the live seat occupant and
+   * hand it the keyboard. Does NOT touch the approval queue/promise: the
+   * runtime already committed the pending prompt as active before this call.
+   */
+  mountApprovalFrame(pending: PendingApproval): void
+  /**
+   * Release the seat projection: reveal the suspended managed roots and
+   * re-project the LIVE seat owner (a newer blocker, the optional tenant or
+   * the editor). The caller has already cleared the active slot, so this can
+   * never paint the released frame again.
+   */
+  releaseApprovalFrame(pending: PendingApproval): void
+  /**
+   * Roll back a FAILED seat presentation: the prompt never mounted (or lost a
+   * synchronous callback race). Re-project the live owner and reveal only the
+   * roots still owned by THIS prompt; never touch a newer owner.
+   */
+  rollbackApprovalFrame(pending: PendingApproval): void
+  /** Total frame-row grant (borders included) for the current reading size. */
+  approvalSeatRows(expanded: boolean): number
+  /** Whether the active surface supports approval pointer actions (fullscreen). */
+  approvalMouseEnabled(): boolean
+  /** Deliver the exact received argument bytes through the Client clipboard. */
+  copyApprovalArguments(text: string): void
   /**
    * Phase 3A / PR-B: the optional editor-seat tenant must be PARKED before the
    * mount can run a synchronous focus/blur callback. Called AFTER the pending
@@ -91,24 +105,22 @@ export interface PendingApproval {
   onAbort?: () => void
   /** Whether the main Agent is BLOCKED on this approval (never a local dialog). */
   agentInputWait: boolean
-  /** The live overlay handle behind the current approval dialog. */
-  handle?: OverlayHandle
-  /** The live geometry wrapper behind the current approval handle. */
-  responsiveFrame?: ResponsiveOverlayFrame
+  /** The live editor-seat action sheet behind this prompt. */
+  frame?: ApprovalSheetFrame
+  /** Managed overlay roots hidden by this blocking seat owner; revealed when
+   * this prompt releases the seat (or transferred to a newer blocker). */
+  suspendedOverlays: Set<OverlayHandle>
   /** Latched by settle: every prompt promise settles exactly once. */
   settled?: boolean
 }
 
 /**
- * The approval interaction owner. Requests queue FIFO; only one dialog is on
- * screen at a time; an aborted signal settles the prompt `cancelled`.
+ * The approval interaction owner. Requests queue FIFO; only one action sheet is
+ * on screen at a time; an aborted signal settles the prompt `cancelled`.
  */
 export class ApprovalRuntime {
   private readonly queue: PendingApproval[] = []
   private active: PendingApproval | undefined
-  /** Live approval frames: a fullscreen rebind REPLACES the frame for the SAME
-   * logical node (the overlay opts out of disposeOnHide). */
-  private readonly frames = new Set<ResponsiveOverlayFrame>()
 
   private readonly host: ApprovalRuntimeHost
 
@@ -116,9 +128,19 @@ export class ApprovalRuntime {
     this.host = host
   }
 
-  /** Whether an approval dialog currently owns the input stage. */
+  /** Whether an approval currently owns the input stage. */
   isActive(): boolean {
     return this.active !== undefined
+  }
+
+  /** The live action sheet of the active prompt, if it has been built. */
+  activeFrame(): ApprovalSheetFrame | undefined {
+    return this.active?.frame
+  }
+
+  /** The active prompt's overlay suspension view (the broker's modal seam). */
+  activeSuspension(): { readonly suspendedOverlays: Set<OverlayHandle> } | undefined {
+    return this.active
   }
 
   /** Whether an approval owns OR is WAITING FOR the input stage: an active
@@ -137,23 +159,19 @@ export class ApprovalRuntime {
     return this.active?.agentInputWait === true
   }
 
-  /** Sync the on-screen approval against a live terminal resize. */
-  syncGeometry(): void {
-    this.active?.responsiveFrame?.syncGeometry()
-  }
-
-  /** Headless-test hook: the number of live approval frames (a fullscreen
-   * swap must replace, not accumulate, them). */
-  ownedFramesForTest(): number {
-    return this.frames.size
-  }
-
-  /** Approval's fixed response keys must beat a conflicting inspection remap. */
+  /**
+   * Whether a key must be admitted to the sheet BEFORE the configurable modal
+   * inspection ladder: the four fixed response keys plus the sheet's own
+   * read-only keys. A remapped inspection action can never steal a decision or
+   * a reading key while the action sheet is the blocking owner.
+   */
   ownsFixedKey(data: string): boolean {
-    return matchesKey(data, 'y')
+    if (matchesKey(data, 'y')
       || matchesKey(data, 'n')
       || matchesKey(data, 'escape')
       || matchesKey(data, 'ctrl+c')
+    ) return true
+    return this.active?.frame?.ownsReadKey(data) === true
   }
 
   /** Route a key while a prompt is showing; every key except the explicit
@@ -165,6 +183,7 @@ export class ApprovalRuntime {
     else if (matchesKey(data, 'n')) this.settle(pending, 'rejected')
     else if (matchesKey(data, 'escape')) this.settle(pending, 'cancelled')
     else if (matchesKey(data, 'ctrl+c')) this.settle(pending, 'cancelled')
+    else if (pending.frame?.handleActionKey(data) === true) this.host.requestRender()
     return { consume: true }
   }
 
@@ -184,7 +203,13 @@ export class ApprovalRuntime {
     // approval handler may fire during exit teardown).
     if (this.host.isDisposed()) return Promise.resolve('cancelled')
     return new Promise<ApprovalOutcome>((resolve, reject) => {
-      const pending: PendingApproval = { request, resolve, reject, agentInputWait }
+      const pending: PendingApproval = {
+        request,
+        resolve,
+        reject,
+        agentInputWait,
+        suspendedOverlays: new Set(),
+      }
       if (request.signal !== undefined) {
         const onAbort = (): void => {
           try {
@@ -239,11 +264,11 @@ export class ApprovalRuntime {
     }
     // Phase 3A / PR-B: the LOGICAL input ownership is committed BEFORE any
     // call below that can synchronously run a plugin/focus callback (the
-    // optional-tenant park, the Save Location cancellation, the overlay
-    // mount). A callback fired by any of them must already observe THIS
-    // approval as the active owner, so the optional tenant can never be
-    // restored (or a Save Location settle can never take its
-    // "no approval active" restore path) behind an uncommitted approve.
+    // optional-tenant park, the Save Location cancellation, the seat mount).
+    // A callback fired by any of them must already observe THIS approval as
+    // the active owner, so the optional tenant can never be restored (or a
+    // Save Location settle can never take its "no approval active" restore
+    // path) behind an uncommitted approve.
     this.active = pending
     try {
       this.host.beforeApprovalMount()
@@ -268,18 +293,16 @@ export class ApprovalRuntime {
     this.host.clearFullscreenPointerGestures()
     // The prompt's disposal aborts its completion port, whose subscribers can
     // synchronously settle or replace THIS approval: a replaced prompt must not
-    // mount its frame over the newer owner (the post-mount fence below cannot
-    // undo an overlay that is already physically up).
+    // project its sheet over the newer owner (the post-mount fence below cannot
+    // undo a seat frame that is already physically installed).
     if (!this.ownsStage(pending)) return
     try {
       this.mount(pending)
     } catch (error) {
-      // Phase 3A / PR-B MOUNT FAILURE: the physical mount runs a synchronous
+      // Phase 3A / PR-B MOUNT FAILURE: the seat projection runs a synchronous
       // focus transition (a plugin onBlur/onFocus), which may throw. The prompt
       // is already committed as active, so this failure releases exactly its own
-      // bindings and resources (see `rollbackFailedPresentation`); `mount()` has
-      // already disposed the frame it created and the host has unwound the
-      // partially committed overlay node.
+      // bindings and resources (see `rollbackFailedPresentation`).
       this.rollbackFailedPresentation('approval mount rollback', pending, error)
     }
     // M6: a capturing surface owns the input now — any pending leader
@@ -292,7 +315,7 @@ export class ApprovalRuntime {
    * Whether THIS prompt still owns the input stage: it is the active one, not
    * settled, and the surface is alive. Re-read after EVERY mount-phase hook that
    * can synchronously run a plugin/focus callback (the park, the Save
-   * cancellation, the physical mount) — a settled or replaced prompt must not
+   * cancellation, the seat projection) — a settled or replaced prompt must not
    * keep acting on the stage its newer owner took.
    */
   private ownsStage(pending: PendingApproval): boolean {
@@ -301,17 +324,17 @@ export class ApprovalRuntime {
 
   /**
    * Phase 3A / PR-B: release THIS prompt after a failed presentation (a throwing
-   * park hook or a throwing physical mount). The rollback is IDENTITY FENCED and
+   * park hook or a throwing seat mount). The rollback is IDENTITY FENCED and
    * its obligations are INDEPENDENT: the prompt is latched settled and its abort
    * listener removed (it leaves every owner slot here, so nothing else would ever
    * unbind the caller's signal), the active slot is cleared only while THIS prompt
    * still owns it (a cleanup that synchronously settled this prompt and opened a
    * NEWER approval keeps its ownership, or 'y'/'n' could no longer settle the
-   * newer prompt), the host completes the abandoned presentation's
-   * seat/publish/render obligations, a legally queued successor is still presented
-   * through the existing queue authority, the LAST-blocker notification runs once
-   * no approval is active and the queue drained, and the ORIGINAL failure
-   * propagates (aggregated by identity with a rollback failure).
+   * newer prompt), the host completes the abandoned presentation's seat/publish
+   * obligations, a legally queued successor is still presented through the
+   * existing queue authority, the LAST-blocker notification runs once no approval
+   * is active and the queue drained, and the ORIGINAL failure propagates
+   * (aggregated by identity with a rollback failure).
    */
   private rollbackFailedPresentation(
     label: string,
@@ -326,7 +349,8 @@ export class ApprovalRuntime {
     if (owned) this.active = undefined
     try {
       runSyncDisposalStepsWithPrimary(label, primary, [
-        () => this.host.rollbackApprovalPark(),
+        () => this.host.rollbackApprovalFrame(pending),
+        () => this.releaseFrame(pending),
         () => { if (owned) this.showNext() },
         // The failed presentation left the stage, so the normal settle tail's
         // LAST-blocker obligation applies here too: a PARKED but still-current
@@ -349,92 +373,49 @@ export class ApprovalRuntime {
     }
   }
 
-  /** Build and mount the approval dialog for one prompt on the active screen. */
+  /** Build and project the action sheet for one prompt into the editor seat. */
   private mount(pending: PendingApproval): void {
-    const frame = this.createFrame(pending)
-    // The approval is REMOUNTABLE like every other managed overlay: a
-    // fullscreen swap rebinds the SAME logical node (with a fresh surface), so
-    // the overlays it suppresses stay suppressed and never get revealed/
-    // focused/re-hidden (no fabricated focus transition).
-    // The frame is published BEFORE the physical mount: the mount's focus
-    // transition can synchronously run a plugin callback that starts a fullscreen
-    // swap, and that swap calls the remount callback registered inside the mount
-    // funnel — which replaces `responsiveFrame` and disposes the frame it replaces.
-    pending.responsiveFrame = frame
-    let handle: OverlayHandle
-    try {
-      handle = this.host.showApprovalOverlay(frame, (logical) => {
-        if (this.active !== pending) return
-        const previous = pending.responsiveFrame
-        const next = this.createFrame(pending)
-        pending.responsiveFrame = next
-        this.host.rebindApprovalOverlay(logical, next)
-        previous?.dispose()
-      })
-    } catch (error) {
-      // The physical mount threw: the host has already unwound the overlay node it
-      // prepared and forgot this node's remount callback. Dispose the frame this
-      // mount currently owns — a swap inside the failing mount may already have
-      // replaced `frame` with its successor, which the callback published and which
-      // is the only frame left to release here — as an independent obligation, so a
-      // dispose failure cannot hide the original failure.
-      const current = pending.responsiveFrame
-      pending.responsiveFrame = undefined
-      runSyncDisposalStepsWithPrimary('approval overlay mount', error, [
-        () => current?.dispose(),
-      ])
-    }
-    // Phase 3A / PR-B MOUNT FENCE: the physical mount can synchronously run a
-    // plugin callback (onFocus/onBlur) that settles this prompt, replaces it
+    const frame = new ApprovalSheetFrame(pending.request, {
+      rowsOf: (expanded) => this.host.approvalSeatRows(expanded),
+      terminalRows: () => this.host.terminalSize().rows,
+      mouseEnabled: () => this.host.approvalMouseEnabled(),
+      onDecision: (outcome) => {
+        // A synchronous focus/blur/plugin callback may run inside the pointer
+        // dispatch; its settlement cleanup can throw. Contain it through the
+        // SAME owned sink the abort listener uses instead of letting it escape
+        // the terminal callback as an uncaught exception.
+        try {
+          this.settle(pending, outcome)
+        } catch (error) {
+          this.host.routeSettlementFailure('approval pointer settlement', error)
+        }
+      },
+      onCopy: (text) => this.host.copyApprovalArguments(text),
+    })
+    pending.frame = frame
+    // The seat projection is a synchronous focus transition: it may settle or
+    // replace THIS prompt (the mount fence below decides what is still owned).
+    this.host.mountApprovalFrame(pending)
+    // Phase 3A / PR-B MOUNT FENCE: the physical projection can synchronously run
+    // a plugin callback (onFocus/onBlur) that settles this prompt, replaces it
     // with a newer one, or disposes the surface. Only the STILL-current prompt may
-    // publish the handle; a losing mount releases exactly what THIS mount created
-    // and never overwrites the newer prompt.
-    if (!this.ownsStage(pending)) {
-      // A callback of this mount settled or replaced the prompt: release exactly
-      // what THIS mount created — its logical node (which also hides the physical
-      // projection it owns) and the CURRENT frame, which a swap inside the mount may
-      // already have replaced.
-      const current = pending.responsiveFrame
-      pending.responsiveFrame = undefined
-      runSyncDisposalSteps('approval mount fence', [
-        () => this.host.clearOverlayRemount(handle),
-        () => handle.hide(),
-        () => current?.dispose(),
-      ])
-      return
-    }
-    pending.handle = handle
+    // keep the frame; a losing mount releases exactly what THIS mount created and
+    // never touches the newer prompt.
+    if (!this.ownsStage(pending)) this.releaseFrame(pending)
   }
 
-  /** Build the responsive approval frame (surface + geometry) without mounting
-   * it, so a fullscreen rebind can re-create it for the same logical node. */
-  private createFrame(pending: PendingApproval): ResponsiveOverlayFrame {
-    const geometryOf = (): ReturnType<typeof approvalOverlayGeometry> => {
-      const { columns, rows } = this.host.terminalSize()
-      return approvalOverlayGeometry(columns, rows)
-    }
-    const surface = new ApprovalDialogSurface(
-      pending.request,
-      geometryOf,
-      (request, geometry) => buildApprovalDialog(request, geometry),
-    )
-    const frame: ResponsiveOverlayFrame = new ResponsiveOverlayFrame(surface, () => {
-      const geometry = geometryOf()
-      const { columns, rows } = this.host.terminalSize()
-      return {
-        width: geometry.width,
-        maxHeight: geometry.maxHeight,
-        // Raw terminal dims keep the key resize-sensitive once the approval
-        // geometry caps are reached (last-painted-geometry mouse fence).
-        key: `${columns}:${rows}:${geometry.width}:${geometry.maxHeight}:${geometry.contentWidth}`,
-      }
-    }, undefined, () => this.frames.delete(frame))
-    this.frames.add(frame)
-    return frame
+  /** Release this prompt's sheet object. The host has already re-projected the
+   * seat, so the frame is detached before it is disposed. Idempotent: a settle
+   * or a newer prompt may already have cleared it. */
+  private releaseFrame(pending: PendingApproval): void {
+    const frame = pending.frame
+    if (frame === undefined) return
+    pending.frame = undefined
+    frame.dispose?.()
   }
 
   /**
-   * Resolve one prompt and hide its dialog. The prompt may be on screen
+   * Resolve one prompt and release its sheet. The prompt may be on screen
    * (active), queued behind another, or never queued at all (its signal was
    * already aborted on arrival) — every state must settle the promise
    * exactly once and never leave a cancelled prompt in the queue.
@@ -450,20 +431,12 @@ export class ApprovalRuntime {
         () => this.host.cancelLeader(),
         () => this.host.clearFullscreenPointerGestures(),
         () => { this.active = undefined },
-        // Fallback: if nothing is restored beneath the approval, input returns
-        // to the editor.
-        () => this.host.focusEditorSeat(),
-        // Closing the approval restores every overlay it hid (Quick, Settings,
-        // any capturing overlay). pi-tui focuses a restored capturing overlay
-        // on setHidden(false), overriding the editor fallback above, and the
-        // broker's tracked close re-derives the final seat from that live
-        // surface (the shared close contract — no approval-specific publish).
-        () => { if (pending.handle !== undefined) this.host.clearOverlayRemount(pending.handle) },
-        () => pending.handle?.hide(),
-        // A remountable overlay opts out of disposeOnHide: the final close owns
-        // the frame/surface lifecycle explicitly.
-        () => pending.responsiveFrame?.dispose(),
-        () => { pending.responsiveFrame = undefined },
+        // Re-project the LIVE seat owner and reveal the roots this prompt hid.
+        // `releaseApprovalFrame` runs BEFORE the frame is disposed so the seat
+        // never paints a detached component; a newer blocker opened by these
+        // callbacks keeps its own projection.
+        () => this.host.releaseApprovalFrame(pending),
+        () => this.releaseFrame(pending),
         () => this.host.projectActivity(),
       ]
       : [

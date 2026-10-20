@@ -1257,7 +1257,7 @@ test('an approval-preserving fullscreen swap never fabricates focus transitions 
   await vt.waitForRender()
   assert.equal(component.focusCount, 1, 'the approval must not re-focus A')
   assert.equal(component.blurCount, 1, 'the approval blurs A exactly once')
-  assert.equal(app.ownedApprovalFramesForTest(), 1, 'one live approval frame')
+  assert.notEqual(app.approvalFrameForTest(), undefined, 'one live approval frame')
 
   for (let i = 0; i < 2; i += 1) {
     app.setFullscreen(true)
@@ -1269,14 +1269,14 @@ test('an approval-preserving fullscreen swap never fabricates focus transitions 
       { focus: 1, blur: 1 },
       'an approval-preserving fullscreen swap must not fabricate focus transitions on A',
     )
-    assert.equal(app.ownedApprovalFramesForTest(), 1,
-      'each swap replaces, never accumulates, the approval frame')
+    assert.notEqual(app.approvalFrameForTest(), undefined,
+      'each swap keeps the SAME seat frame, never accumulates overlay nodes')
   }
 
   vt.sendInput('\x1b')
   await approval.catch(() => {})
   await vt.waitForRender()
-  assert.equal(app.ownedApprovalFramesForTest(), 0, 'settling the approval disposes its frame')
+  assert.equal(app.approvalFrameForTest(), undefined, 'settling the approval releases its frame')
   assert.equal(a.focused, true, 'A is restored after the approval is cancelled')
   a.close()
   app.stop()

@@ -60,12 +60,20 @@ export interface SaveLocationSuspension {
   readonly suspendedOverlays: Set<OverlayHandle>
 }
 
+/** The broker's view of the active Approval editor-seat suspension (owned by
+ * the approval runtime). Same shape as the other blocking owners. */
+export interface ApprovalSuspension {
+  readonly suspendedOverlays: Set<OverlayHandle>
+}
+
 /** The broker's dependencies (the host's live state it reads). */
 export interface OverlayBrokerDeps {
   /** The currently active question flow, or undefined. */
   question?: () => QuestionSuspension | undefined
   /** The currently active Save Location prompt, or undefined. */
   saveLocation?: () => SaveLocationSuspension | undefined
+  /** The currently active Approval prompt, or undefined. */
+  approval?: () => ApprovalSuspension | undefined
   /** Report the focused seat (the host's setFocusSeat — broker reports
    * 'overlay' on capturing mounts). Coarse mount-time signal; the host
    * re-derives the final seat from physical focus. */
@@ -352,6 +360,7 @@ export class OverlayBroker {
     // The closing node leaves the modal suspensions it may belong to.
     this.deps.question?.()?.suspendedOverlays.delete(handle)
     this.deps.saveLocation?.()?.suspendedOverlays.delete(handle)
+    this.deps.approval?.()?.suspendedOverlays.delete(handle)
     // Re-home the children under the SINGLE remaining suppressor:
     // - an overlay parent (stay hidden, reparented);
     // - the active modal (join its direct suspension, stay hidden);
@@ -410,12 +419,12 @@ export class OverlayBroker {
 
   /**
    * Directly suspend every visible logical ROOT under the given modal (the
-   * Question / Save Location primitive). Child topology is never copied.
-   * TWO-PHASE: snapshot every root's focus intent BEFORE any mutation, then
-   * release the keyboard to the modal frame (the seat) before hiding, so the
-   * fork's hide fallback can never focus (and thereby re-intent) a sibling.
+   * Question / Save Location / Approval primitive). Child topology is never
+   * copied. TWO-PHASE: snapshot every root's focus intent BEFORE any mutation,
+   * then release the keyboard to the modal frame (the seat) before hiding, so
+   * the fork's hide fallback can never focus (and thereby re-intent) a sibling.
    */
-  suspendVisibleRoots(suspension: QuestionSuspension | SaveLocationSuspension): void {
+  suspendVisibleRoots(suspension: QuestionSuspension | SaveLocationSuspension | ApprovalSuspension): void {
     const targets = [...this.roots].filter(node =>
       !node.closed && this.isVisible(node) && !node.explicitHidden)
     // Phase 1: commit the logical suspension (intent + ownership) BEFORE any
@@ -436,10 +445,20 @@ export class OverlayBroker {
     this.deps.reconcileFocusSeat?.()
   }
 
-  /** Restore the modal's directly suspended roots (Question / Save Location
-   * settle). Each root keeps its own focus intent; the previously focused one
-   * (frontmost) reclaims the keyboard, otherwise the current seat owner does. */
-  resumeSuspendedRoots(suspension: QuestionSuspension | SaveLocationSuspension): void {
+  /** Restore the modal's directly suspended roots (Question / Save Location /
+   * Approval settle). Each root keeps its own focus intent; the previously
+   * focused one (frontmost) reclaims the keyboard, otherwise the current seat
+   * owner does. When ANOTHER blocking owner took the seat first (for example a
+   * Question that is releasing to an Approval it superseded), the remaining
+   * roots stay hidden and are handed to that owner instead of flashing above
+   * its action sheet. */
+  resumeSuspendedRoots(suspension: QuestionSuspension | SaveLocationSuspension | ApprovalSuspension): void {
+    const successor = this.activeSuspension()
+    if (successor !== undefined && successor !== suspension) {
+      for (const handle of suspension.suspendedOverlays) successor.suspendedOverlays.add(handle)
+      suspension.suspendedOverlays.clear()
+      return
+    }
     const restored: ManagedOverlayNode[] = []
     for (const handle of [...suspension.suspendedOverlays]) {
       const node = this.nodes.get(handle)
@@ -631,7 +650,10 @@ export class OverlayBroker {
     for (const node of this.nodes.values()) dependents += node.children.length
     const question = this.deps.question?.()
     const save = this.deps.saveLocation?.()
-    const suspended = (question?.suspendedOverlays.size ?? 0) + (save?.suspendedOverlays.size ?? 0)
+    const approval = this.deps.approval?.()
+    const suspended = (question?.suspendedOverlays.size ?? 0)
+      + (save?.suspendedOverlays.size ?? 0)
+      + (approval?.suspendedOverlays.size ?? 0)
     return { handles: this.nodes.size, dependents, suspended }
   }
 
@@ -697,8 +719,8 @@ export class OverlayBroker {
     }
   }
 
-  private activeSuspension(): QuestionSuspension | SaveLocationSuspension | undefined {
-    return this.deps.question?.() ?? this.deps.saveLocation?.()
+  private activeSuspension(): QuestionSuspension | SaveLocationSuspension | ApprovalSuspension | undefined {
+    return this.deps.question?.() ?? this.deps.saveLocation?.() ?? this.deps.approval?.()
   }
 
   private isSuppressed(node: ManagedOverlayNode): boolean {
@@ -706,7 +728,9 @@ export class OverlayBroker {
     const question = this.deps.question?.()
     if (question?.suspendedOverlays.has(node.wrapper) === true) return true
     const save = this.deps.saveLocation?.()
-    return save?.suspendedOverlays.has(node.wrapper) === true
+    if (save?.suspendedOverlays.has(node.wrapper) === true) return true
+    const approval = this.deps.approval?.()
+    return approval?.suspendedOverlays.has(node.wrapper) === true
   }
 
   private isVisible(node: ManagedOverlayNode): boolean {
@@ -827,6 +851,7 @@ export class OverlayBroker {
     }
     this.deps.question?.()?.suspendedOverlays.delete(node.wrapper)
     this.deps.saveLocation?.()?.suspendedOverlays.delete(node.wrapper)
+    this.deps.approval?.()?.suspendedOverlays.delete(node.wrapper)
   }
 
   /**
