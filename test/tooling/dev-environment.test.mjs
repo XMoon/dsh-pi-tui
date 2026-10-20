@@ -767,7 +767,7 @@ if (process.argv.includes('install')) {
 }
 `)
   chmodSync(pnpm, 0o755)
-  const worker = join(process.cwd(), 'test', 'dev-environment-prepare-worker.mjs')
+  const worker = join(process.cwd(), 'test', 'support', 'dev-environment-prepare-worker.mjs')
   const run = allowDirty => new Promise(resolve => {
     const child = spawn(process.execPath, [worker, root, config, distribution, pnpm, String(allowDirty)], {
       cwd: process.cwd(),
@@ -913,7 +913,7 @@ test('different SHA source locks remain independent across processes', async (t)
   const configB = join(root, 'source-b.json')
   writeFileSync(configA, JSON.stringify({ schemaVersion: 1, repository: DSH_REPOSITORY, ref: 'c'.repeat(40), expectedVersion: VERSION }))
   writeFileSync(configB, JSON.stringify({ schemaVersion: 1, repository: DSH_REPOSITORY, ref: 'd'.repeat(40), expectedVersion: VERSION }))
-  const worker = join(process.cwd(), 'test', 'dev-environment-lock-worker.mjs')
+  const worker = join(process.cwd(), 'test', 'support', 'dev-environment-lock-worker.mjs')
   const run = config => new Promise((resolve, reject) => {
     const child = spawn(process.execPath, [worker, root, config, cache, '120'], {
       cwd: process.cwd(),
@@ -966,7 +966,7 @@ test('different SHA workers create independent exact Git worktrees', async (t) =
   const configB = join(root, 'source-b.json')
   writeFileSync(configA, JSON.stringify({ schemaVersion: 1, repository: DSH_REPOSITORY, ref: refA, expectedVersion: VERSION }))
   writeFileSync(configB, JSON.stringify({ schemaVersion: 1, repository: DSH_REPOSITORY, ref: refB, expectedVersion: VERSION }))
-  const worker = join(process.cwd(), 'test', 'dev-environment-worktree-worker.mjs')
+  const worker = join(process.cwd(), 'test', 'support', 'dev-environment-worktree-worker.mjs')
   const run = config => new Promise((resolve, reject) => {
     const child = spawn(process.execPath, [worker, root, config, cache], {
       cwd: process.cwd(),
