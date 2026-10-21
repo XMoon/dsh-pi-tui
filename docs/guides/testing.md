@@ -177,6 +177,19 @@ Titles that already satisfy the three rules are left ALONE. Renaming a
 clear title creates churn and loses the history the name carries; the goal
 is readability, not uniformity.
 
+**Removing a code must not remove the MEANING around it.** A qualifier
+between the code and the sentence — the category the case belongs to, the
+scenario it names, the review that produced it — is part of what the title
+says, so it stays:
+
+| before | after |
+|---|---|
+| `B3 F4 control: with no settled entry …` | `control: with no settled entry …` |
+| `A0 fullscreen seat preflight: the alt screen …` | `fullscreen seat preflight: the alt screen …` |
+
+The CODE is what goes: `A5b`, `B4A-07`, `PR5`, `§1C-3`, `step 8`, `finding C`,
+`assertion 7`, `A:`. Everything the title says ABOUT the behaviour stays.
+
 **Evidence levels are not title prefixes.** `L1`–`L6` are the
 Host/Client qualification tiers defined in
 [host-client.md](../architecture/host-client.md#qualification-tiers); most
@@ -204,6 +217,9 @@ in kebab-case. The directory supplies the ownership; the basename names
 the behaviour without requiring any project history.
 
 #### Worked examples
+
+These show the SHAPE of the title to aim for. The tool removes the code
+label mechanically; the rest is the author's judgement.
 
 | Instead of | Write |
 |---|---|
