@@ -1,0 +1,27 @@
+# The skip REASONS this qualification accepts.
+#
+# One regular expression per line, matched against the reason a case states
+# for not running. A skip whose reason matches NONE of these FAILS the
+# aggregate, and so does a skip that states no reason at all.
+#
+# The rule this encodes: the skip count is a function of the ENVIRONMENT,
+# so a count is not evidence. What is evidence is that every skip is one of
+# a pre-agreed class of missing environment capability or unprovisioned
+# dependency — and that no case quietly stopped being proved.
+#
+# If any of these becomes required coverage, the fix is to PROVISION the
+# capability on the runner, not to keep accepting the skip.
+
+# The official DSH Optional-bundle installation is not provisioned in the
+# runner environment. The case says which package it was looking for.
+BLOCKED: no provisioned official DSH .* Optional-bundle installation
+
+# The real `fd`/`fdfind` integration cannot run without the binary. The
+# runner image does not ship it; a machine that has it runs the case.
+no fd/fdfind on PATH
+
+# POSIX-only facilities. The CI runner is Linux and does provide them, so a
+# skip here would be a SURPRISE and would fail this list — which is the
+# point: it is listed so that a platform change is reported, not absorbed.
+mkfifo is POSIX-only
+no /dev/full

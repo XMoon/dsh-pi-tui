@@ -150,6 +150,33 @@ function readEffectiveParams(shardDirectory) {
 }
 
 /**
+ * The skip REASONS this qualification accepts, as regular expressions.
+ *
+ * A skip is not a pass and it is not a failure: it is a case that did not
+ * run. Accepting it requires knowing WHY, so the accepted reasons are a
+ * committed policy rather than a tolerance for "some skips".
+ *
+ * @returns {RegExp[]|null} the accepted patterns, or null when the caller
+ *   does not classify skips.
+ */
+function acceptedSkipPatterns() {
+  const file = process.env.DSH_ACCEPTED_SKIPS_FILE
+  if (file === undefined || file === '') return null
+  if (!existsSync(file)) {
+    throw new Error(`the accepted-skip policy ${file} is missing: an absent policy must not disable the check`)
+  }
+  const patterns = readFileSync(file, 'utf8')
+    .split('\n')
+    .map(line => line.trim())
+    .filter(line => line !== '' && !line.startsWith('#'))
+    .map(line => new RegExp(line, 'u'))
+  if (patterns.length === 0) {
+    throw new Error(`the accepted-skip policy ${file} states no reason: that would accept no skip at all, which is not a policy`)
+  }
+  return patterns
+}
+
+/**
  * The shard argument a shard directory names.
  *
  * `product-diagnostics-shard-2-node24` is the artifact of `--shard=2/<total>`.
@@ -212,6 +239,7 @@ function readExpectations() {
     // resolved level (or omits it when the level is Node's default, which
     // the runner records as `null`).
     expectedConcurrency: expectedConcurrencyBaseline(),
+    acceptedSkips: acceptedSkipPatterns(),
   }
 }
 
@@ -288,9 +316,11 @@ export function verifyShards({
   expectedCases = null,
   expectedSkipped = null,
   expectedConcurrency = undefined,
+  acceptedSkips = undefined,
   expectedFiles: expectedFilesOverride,
 }) {
   const failures = []
+  const acceptedSkipPatternsOrNone = acceptedSkips === undefined ? null : acceptedSkips
 
   // The lane's own file list, resolved by the SAME discovery rule the
   // runner uses. This is the authority the shards are compared against.
@@ -402,6 +432,30 @@ export function verifyShards({
     }
     if (cancelled.length > 0) {
       failures.push(`the shard ${directory} reported ${cancelled.length} cancelled case(s)`)
+    }
+    // Every skip must state a reason, and the reason must be one this
+    // qualification accepts.
+    //
+    // A count cannot do this job: 37 skips is evidence only if the 37 are
+    // the SAME KIND of skip. A case that starts skipping itself for a new
+    // reason — a broken fixture, a missing tool the runner used to have —
+    // would keep the count identical and look like a healthy run.
+    if (acceptedSkipPatternsOrNone !== null && skipped > 0) {
+      const unclassified = []
+      for (const record of shardCases) {
+        if (record.result !== 'skip') continue
+        const reason = record.skipReason
+        if (reason === null || reason === undefined || reason === '') {
+          unclassified.push(`${record.name} (no reason stated)`)
+          continue
+        }
+        if (!acceptedSkipPatternsOrNone.some(pattern => pattern.test(reason))) {
+          unclassified.push(`${record.name} (${reason})`)
+        }
+      }
+      if (unclassified.length > 0) {
+        failures.push(`the shard ${directory} skipped ${unclassified.length} case(s) for a reason the policy does not accept: ${unclassified.slice(0, 3).join('; ')}`)
+      }
     }
     // The shard must record the run it belongs to. Without that identity
     // a shard from a DIFFERENT run could be counted towards this one, and
@@ -561,6 +615,12 @@ export function verifyShards({
     // What the measurement CLAIMED, in the same shape the shards recorded
     // what they APPLIED, so a reader can compare the two sides directly.
     expectedConcurrency: expectedConcurrency === undefined ? null : expectedConcurrency,
+    // Whether the skip REASONS were classified, and against how many
+    // accepted classes. A reader must be able to tell "no unaccepted skip"
+    // from "no policy was applied".
+    skipPolicy: acceptedSkipPatternsOrNone === null
+      ? null
+      : { acceptedClasses: acceptedSkipPatternsOrNone.length, enforced: true },
     shards,
     versions,
     failures,

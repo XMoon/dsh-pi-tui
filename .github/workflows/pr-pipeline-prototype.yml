@@ -352,6 +352,11 @@ jobs:
           DSH_EXPECTED_CONCURRENCY: default
           DSH_EXPECTED_CASES: ''
           DSH_EXPECTED_SKIPPED: ''
+          # A skip is accepted only when its REASON belongs to a pre-agreed
+          # class of missing capability or unprovisioned dependency. A count
+          # cannot carry that meaning: a case can start skipping itself for a
+          # new reason and leave the count identical.
+          DSH_ACCEPTED_SKIPS_FILE: scripts/measurement-accepted-skips.txt
         run: |
           set -euo pipefail
           DSH_EXPECTED_SHA="$(git rev-parse HEAD)"

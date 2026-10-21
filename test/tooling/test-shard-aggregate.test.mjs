@@ -48,7 +48,7 @@ const FILES = ['app/one.test.ts', 'app/two.test.ts', 'tui/three.test.ts']
  * @param {string} name - the shard's directory name.
  * @param {{files: string[], results?: Record<string, string>, spec?: object|null}} options
  */
-function writeShard(root, name, { files, results = {}, spec = { sha: 'sha-1', runId: 'run-1' }, applied = undefined }) {
+function writeShard(root, name, { files, results = {}, skipReasons = {}, spec = { sha: 'sha-1', runId: 'run-1' }, applied = undefined }) {
   const directory = join(root, name)
   mkdirSync(directory, { recursive: true })
   const records = []
@@ -59,7 +59,13 @@ function writeShard(root, name, { files, results = {}, spec = { sha: 'sha-1', ru
     // The result is taken AS GIVEN: a case with no result must stay
     // without one, so the aggregate's allow list can be exercised.
     const result = Object.hasOwn(results, file) ? results[file] : 'pass'
-    records.push({ file: repositoryPath, name: `the case in ${file}`, line: 2, column: 1, nesting: 0, duration_ms: 1, result })
+    const record = { file: repositoryPath, name: `the case in ${file}`, line: 2, column: 1, nesting: 0, duration_ms: 1, result }
+    // A skip states WHY. The aggregate classifies that reason, so a fixture
+    // that skips without one is a case the policy must reject.
+    if (result === 'skip') {
+      record.skipReason = Object.hasOwn(skipReasons, file) ? skipReasons[file] : null
+    }
+    records.push(record)
   }
   writeFileSync(join(directory, 'cases.jsonl'), records.map(record => JSON.stringify(record)).join('\n') + '\n')
   if (spec !== null) {
@@ -689,4 +695,91 @@ test('the aggregate records both the CLAIMED and the APPLIED level', (t) => {
     assert.equal(shard.applied.testConcurrency, 4, 'what each shard applied is part of the record')
     assert.equal(shard.applied.laneFileCount, shard.fileCount)
   }
+})
+
+// ---------------------------------------------------------------------------
+// The SKIP POLICY.
+//
+// A skip count is a function of the environment, so the count is not
+// evidence. What is evidence is that every skip states a reason and that
+// the reason is one of a pre-agreed class. Without this, a case can start
+// skipping itself for a NEW reason — a broken fixture, a tool the runner
+// used to have — and the count stays identical.
+// ---------------------------------------------------------------------------
+
+/** The accepted classes, as the aggregate reads them. */
+const ACCEPTED = [/BLOCKED: no provisioned official DSH .* Optional-bundle installation/u, /no fd\/fdfind on PATH/u]
+
+test('a skip with NO stated reason fails the policy', (t) => {
+  const life = testLifecycle(t)
+  const root = life.tempDir('dsh-skip-none-')
+  writeShard(root, 'shard-1', { files: ['app/one.test.ts'] })
+  writeShard(root, 'shard-2', {
+    files: ['tui/three.test.ts'],
+    results: { 'tui/three.test.ts': 'skip' },
+    skipReasons: { 'tui/three.test.ts': null },
+  })
+  const aggregate = verifyShards({
+    shardsRoot: root,
+    total: 2,
+    expectedFiles: EXPECTED,
+    acceptedSkips: ACCEPTED,
+  })
+  assert.ok(aggregate.failures.length > 0, 'a skip with no reason must fail')
+  assert.match(aggregate.failures.join('\n'), /no reason stated/u)
+})
+
+test('a skip whose reason is OUTSIDE the accepted classes fails', (t) => {
+  const life = testLifecycle(t)
+  const root = life.tempDir('dsh-skip-unknown-')
+  writeShard(root, 'shard-1', { files: ['app/one.test.ts'] })
+  writeShard(root, 'shard-2', {
+    files: ['tui/three.test.ts'],
+    results: { 'tui/three.test.ts': 'skip' },
+    skipReasons: { 'tui/three.test.ts': 'the fixture stopped working' },
+  })
+  const aggregate = verifyShards({
+    shardsRoot: root,
+    total: 2,
+    expectedFiles: EXPECTED,
+    acceptedSkips: ACCEPTED,
+  })
+  assert.ok(aggregate.failures.length > 0)
+  assert.match(aggregate.failures.join('\n'), /reason the policy does not accept/u)
+  assert.match(aggregate.failures.join('\n'), /the fixture stopped working/u,
+    'the failure must quote the reason, so a reader can classify it')
+})
+
+test('an ACCEPTED reason passes, and the policy is recorded in the report', (t) => {
+  const life = testLifecycle(t)
+  const root = life.tempDir('dsh-skip-ok-')
+  writeShard(root, 'shard-1', { files: ['app/one.test.ts', 'app/two.test.ts'] })
+  writeShard(root, 'shard-2', {
+    files: ['tui/three.test.ts'],
+    results: { 'tui/three.test.ts': 'skip' },
+    skipReasons: { 'tui/three.test.ts': 'BLOCKED: no provisioned official DSH 0.2.1-rc.2 Optional-bundle installation was found' },
+  })
+  const aggregate = verifyShards({
+    shardsRoot: root,
+    total: 2,
+    expectedFiles: EXPECTED,
+    acceptedSkips: ACCEPTED,
+  })
+  assert.deepEqual(aggregate.failures, [])
+  assert.deepEqual(aggregate.skipPolicy, { acceptedClasses: 2, enforced: true },
+    'a reader must be able to tell "no unaccepted skip" from "no policy applied"')
+})
+
+test('a run with NO policy applied says so, instead of looking enforced', (t) => {
+  const life = testLifecycle(t)
+  const root = life.tempDir('dsh-skip-nopolicy-')
+  writeShard(root, 'shard-1', { files: ['app/one.test.ts', 'app/two.test.ts'] })
+  writeShard(root, 'shard-2', {
+    files: ['tui/three.test.ts'],
+    results: { 'tui/three.test.ts': 'skip' },
+    skipReasons: { 'tui/three.test.ts': 'anything at all' },
+  })
+  const aggregate = verifyShards({ shardsRoot: root, total: 2, expectedFiles: EXPECTED })
+  assert.deepEqual(aggregate.failures, [], 'an unclassified skip is not a failure when no policy is asserted')
+  assert.equal(aggregate.skipPolicy, null, 'but the report must NOT claim a policy was enforced')
 })

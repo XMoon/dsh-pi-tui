@@ -348,6 +348,11 @@ jobs:
           # this claim FAILS — a run that silently applied a different
           # concurrency is not a measurement of this one.
           DSH_EXPECTED_CONCURRENCY: ${{ needs.prepare.outputs.test_concurrency }}
+          # The skip REASONS this run accepts. A skip whose reason is outside
+          # these classes — or that states none — FAILS, because a count alone
+          # cannot tell a healthy skip from a case that quietly stopped being
+          # proved.
+          DSH_ACCEPTED_SKIPS_FILE: scripts/measurement-accepted-skips.txt
           DSH_DAG_STARTED_EPOCH: ${{ needs.prepare.outputs.started_epoch }}
           DSH_BASELINE_SOURCE: ${{ inputs.baseline_source || 'the unsharded lane of the same commit' }}
         run: |

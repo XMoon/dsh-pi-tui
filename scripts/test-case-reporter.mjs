@@ -66,6 +66,23 @@ function resultOf(details) {
   return 'fail'
 }
 
+/**
+ * The reason a skip/todo marker carries.
+ *
+ * Node's marker is a STRING when the case stated why it did not run, and
+ * `true` when it did not. The distinction matters: the qualification
+ * classifies reasons, so "no reason given" must be representable and must
+ * not look like a reason.
+ *
+ * @param {unknown} marker - the marker value.
+ * @returns {string|null} the reason, or null when none was given.
+ */
+function describeMarker(marker) {
+  if (typeof marker === 'string') return marker
+  if (marker === true) return null
+  return null
+}
+
 export default async function reporter(source, options) {
   // The human report: Node's own `spec` reporter, fed the SAME events. The
   // output is therefore identical to a run without this reporter.
@@ -173,6 +190,17 @@ export default async function reporter(source, options) {
         : outcome.todo !== undefined || data.todo !== undefined
           ? 'todo'
           : resultOf(data.details),
+      // WHY a case did not run.
+      //
+      // The qualification does not accept "it skipped" — it accepts a skip
+      // whose REASON belongs to a pre-agreed class (a missing environment
+      // capability, an unprovisioned dependency). A skip with no stated
+      // reason, or one outside those classes, is a case that quietly stopped
+      // being proved, and the aggregate has to be able to see that.
+      //
+      // Node carries the reason as the VALUE of the marker, so a marker that
+      // is `true` means "skipped, reason not given" and is recorded as such.
+      skipReason: describeMarker(outcome.skip ?? outcome.todo ?? data.skip ?? data.todo),
     }
   }
 
