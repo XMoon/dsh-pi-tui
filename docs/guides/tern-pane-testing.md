@@ -222,6 +222,8 @@ The subject owns its own artifacts (in the smoke, its event record).
 ## Related
 
 - [`tmux-testing.md`](./tmux-testing.md) — the terminal/TTY complement.
+- [`tern-gui-testing.md`](./tern-gui-testing.md) — the real GUI-window lane:
+  hover, the client's own theme, the native window and the accessibility tree.
 - [`focus-replay-harness.md`](./tmux-testing.md) — the same shape for
   fullscreen frame replay: a probe script plus a pure oracle, documented here.
 - [`tsp/overview.md`](../tsp/overview.md) — the TSP integration and product boundary.

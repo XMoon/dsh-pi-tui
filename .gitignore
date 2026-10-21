@@ -25,3 +25,7 @@ temp/
 
 # Focus replay-harness run output (investigation tooling; see docs/guides/tmux-testing.md)
 artifacts/focus-replay/
+
+# The Tern client's own shot output (the GUI lane copies what it needs into
+# the run directory; see docs/guides/tern-gui-testing.md)
+target/
