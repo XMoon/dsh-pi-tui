@@ -291,6 +291,12 @@ jobs:
       - name: Pi component compatibility contract
         run: pnpm gate:pi-surface-compat
 
+      # Every production file a test reads by path must EXIST: a renamed or
+      # moved production module would otherwise leave a source lock
+      # silently pointing at a DIFFERENT file.
+      - name: Verify the production reads of the test tree
+        run: pnpm gate:production-reads
+
       # The JSON ledger is authoritative; this step proves the checked-in
       # human report is deterministic and has not been hand-edited.
       - name: Generate vendored divergence report

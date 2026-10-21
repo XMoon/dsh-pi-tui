@@ -110,7 +110,7 @@ test('pre-push-stages: current verify:prepush derives to the expected 15 stages'
   const r = spawnSync(process.execPath, [STAGES_SCRIPT, 'verify:prepush'], { cwd: ROOT, encoding: 'utf8' })
   assert.equal(r.status, 0)
   const stages = r.stdout.trim().split('\n')
-  assert.equal(stages.length, 15)
+  assert.equal(stages.length, 16)
   assert.deepEqual(stages, [
     'pnpm typecheck:fork',
     'pnpm typecheck:bench',
@@ -124,6 +124,7 @@ test('pre-push-stages: current verify:prepush derives to the expected 15 stages'
     'node scripts/check-no-session-events.mjs',
     'pnpm gate:boundary',
     'pnpm gate:architecture',
+    'pnpm gate:production-reads',
     'pnpm gate:keybindings',
     'pnpm audit --prod --audit-level high',
     'pnpm pack:release',
@@ -134,7 +135,7 @@ test('pre-push-stages: current verify:prepush:nofork derives to 13 stages', () =
   const r = spawnSync(process.execPath, [STAGES_SCRIPT, 'verify:prepush:nofork'], { cwd: ROOT, encoding: 'utf8' })
   assert.equal(r.status, 0)
   const stages = r.stdout.trim().split('\n')
-  assert.equal(stages.length, 13)
+  assert.equal(stages.length, 14)
   assert.deepEqual(stages, [
     'pnpm typecheck:bench',
     'pnpm test:tmux',
@@ -146,6 +147,7 @@ test('pre-push-stages: current verify:prepush:nofork derives to 13 stages', () =
     'node scripts/check-no-session-events.mjs',
     'pnpm gate:boundary',
     'pnpm gate:architecture',
+    'pnpm gate:production-reads',
     'pnpm gate:keybindings',
     'pnpm audit --prod --audit-level high',
     'pnpm pack:release',
