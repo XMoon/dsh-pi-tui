@@ -66,17 +66,27 @@ const workflow = (overrides: Partial<Extract<TranscriptMessage, { kind: 'workflo
  * Send an SGR primary-button press+release (1-based coords) at a screen
  * row.
  *
- * The fork's terminal decodes two rapid clicks on the SAME CELL as a
- * DOUBLE-CLICK (word selection), which would swallow the second toggle.
- * The fork's own double-click test requires the same row AND the same word
- * (`packages/pi-tui/src/tui-alt-screen.ts`: the click count advances only
- * when the previous click was in the same row and covered the same word),
- * and its window is 500 ms. So the delay is only needed before a click
- * that could follow the previous one into that window — a click on a
- * DIFFERENT CELL can never be a double-click, and paying 600 ms for it
- * bought nothing but wall clock.
+ * The fork's terminal decodes two rapid clicks as a DOUBLE-CLICK (word
+ * selection) when the click count advances, which would swallow the second
+ * toggle. The fork has TWO such tests, and they are not the same shape
+ * (`packages/pi-tui/src/tui-alt-screen.ts`):
+ *
+ *  - the component path needs the same component AND the same x and y;
+ *  - the text-selection path needs the same row AND the same word — the
+ *    same word can cover more than one column.
+ *
+ * Both windows are 500 ms. The delay is therefore paid before a click that
+ * could follow the previous one into either window, and this case's clicks
+ * all share ONE column, so the previous click's cell is the whole test: a
+ * click on a different ROW cannot be a double click (neither path needs
+ * only the row, and the column is fixed), while a click on the same cell
+ * can.
+ *
+ * A different column on the same row would need the word range as well —
+ * this case does not click there, and a general mouse simulator is not
+ * what this case needs.
  */
-const lastClickCell = new Map<object, string>()
+const lastClickCell = new WeakMap<object, string>()
 async function clickCell(vt: { sendInput: (data: string) => void }, x: number, y: number): Promise<void> {
   const cell = `${x}:${y}`
   if (lastClickCell.get(vt) === cell) {
