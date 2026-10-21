@@ -713,7 +713,7 @@ function b3bAskSave(app: import('../../src/tui-app.ts').TuiApp): Promise<SaveLoc
   )
 }
 
-test('(ctrl-r harness): a Question FIFO Q1→Q2 keeps the file-backed History seat parked and restores its query', async (t) => {
+test('a Question FIFO Q1→Q2 keeps the file-backed History seat parked and restores its query', async (t) => {
   const life = testLifecycle(t)
   const home = tempHome(life)
   const { vt, app } = await makeApp(life, home)
@@ -752,7 +752,7 @@ test('(ctrl-r harness): a Question FIFO Q1→Q2 keeps the file-backed History se
   assert.ok(!panelVisible(vt.getViewport()))
 })
 
-test('(ctrl-r harness): an Approval A→B FIFO keeps the file-backed History seat parked through the handover', async (t) => {
+test('an Approval A→B FIFO keeps the file-backed History seat parked through the handover', async (t) => {
   const life = testLifecycle(t)
   const home = tempHome(life)
   const { vt, app } = await makeApp(life, home)
@@ -799,7 +799,7 @@ test('(ctrl-r harness): an Approval A→B FIFO keeps the file-backed History sea
   assert.equal(app.focusSeatForTest(), 'editor-panel')
 })
 
-test('(ctrl-r harness): Save Location cancel and confirm each restore the SAME file-backed History seat', async (t) => {
+test('Save Location cancel and confirm each restore the SAME file-backed History seat', async (t) => {
   const life = testLifecycle(t)
   const home = tempHome(life)
   const { vt, app } = await makeApp(life, home)

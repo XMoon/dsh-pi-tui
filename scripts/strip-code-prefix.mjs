@@ -342,10 +342,16 @@ function main() {
  */
 export function rewriteSource(source) {
   // A `test(` / `it(` call, then the FIRST string literal after it.
+  //
+  // The call must be CODE, not a string that happens to contain
+  // `test('…')` — a test that builds a source fixture as an ARRAY OF
+  // STRINGS would otherwise have its fixture rewritten, and the fixture
+  // is what the case is about.
   const callPattern = /\b(?:test|it)\(\s*(['"`])/gu
   let result = ''
   let last = 0
   for (const match of source.matchAll(callPattern)) {
+    if (isInsideAString(source, match.index)) continue
     const quote = match[1]
     const start = match.index + match[0].length
     const end = findStringEnd(source, start, quote)
@@ -361,6 +367,34 @@ export function rewriteSource(source) {
   }
   result += source.slice(last)
   return result
+}
+
+/**
+ * Whether an index falls inside a string literal.
+ *
+ * A `test(` inside a string is TEXT, not a call: a fixture that contains
+ * a sample case title must not be rewritten, because the fixture is the
+ * subject of the case that holds it.
+ *
+ * @param {string} source - the file's content.
+ * @param {number} index - the index to test.
+ * @returns {boolean} true when the index is inside a string.
+ */
+function isInsideAString(source, index) {
+  let quote = null
+  for (let position = 0; position < index; position += 1) {
+    const char = source[position]
+    if (char === '\\') {
+      position += 1
+      continue
+    }
+    if (quote === null) {
+      if (char === "'" || char === '"' || char === '`') quote = char
+      continue
+    }
+    if (char === quote) quote = null
+  }
+  return quote !== null
 }
 
 /** The index just past the string literal that starts at `start`. */
