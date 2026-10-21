@@ -5819,7 +5819,7 @@ test('a replayed step fragment after turn/end cannot fabricate a Workflow termin
   assert.doesNotMatch(markdown, /Workflow: audit — interrupted/)
 })
 
-test('W7: the markdown export settles W1/W2/W3 from the same terminal facts as the fold', () => {
+test('the markdown export settles W1/W2/W3 from the same terminal facts as the fold', () => {
   // The SAME event prefix feeds the real TranscriptFolder and the real
   // Markdown formatter: the two derivations must agree on the exact status
   // words, so the export can never drift from the visual projection.

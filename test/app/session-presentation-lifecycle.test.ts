@@ -178,7 +178,7 @@ function harness(options: {
   }
 }
 
-test('S3-R0: the read→commit fence refuses a superseded revision (nothing is replaced)', async () => {
+test('the read→commit fence refuses a superseded revision (nothing is replaced)', async () => {
   // The S3-R0 window re-fold is only valid while the official window STILL is
   // the revision that was read; an async read overtaken by a newer revision (or
   // a replaced generation/binding) must commit nothing — otherwise it would
@@ -201,7 +201,7 @@ test('S3-R0: the read→commit fence refuses a superseded revision (nothing is r
     'the committed read replaced the fold')
 })
 
-test('S3-R0: a transport rollover during the cold read makes the hydrate uncommitted (undefined)', async () => {
+test('a transport rollover during the cold read makes the hydrate uncommitted (undefined)', async () => {
   // The bootstrap keys its retry on exactly this outcome: `initLiveRemoteSession`
   // returns undefined when the transport token captured BEFORE the read is no
   // longer current at commit time (the G1→undefined→G2 shape).
@@ -270,7 +270,7 @@ test('S3-R0/RFL-001: a window reconcile re-derives the compaction routing state 
     'a refused reconcile never touches the compaction routing state')
 })
 
-test('RFL-007: the reconcile publishes the proven working fold, the plan projection and the compaction-end measurement', async (t) => {
+test('the reconcile publishes the proven working fold, the plan projection and the compaction-end measurement', async (t) => {
   // The replace path used to run the full cold hydrate, which published the
   // working/busy fold, the projected plan mode and (via the event path) the
   // context measurement after a compaction end. The in-place reconcile must
@@ -589,7 +589,7 @@ test('compaction paging: widening the bounded window never re-measures the conte
     'the same boundary through a RECOVERY reconcile still measures once')
 })
 
-test('S3-R0: read A already in flight → window B commits → A settles last and writes nothing', async (t) => {
+test('read A already in flight → window B commits → A settles last and writes nothing', async (t) => {
   // RFL-003 owner-level barrier through the PRODUCTION rehydrate consumer:
   // A STARTS (captures revision 41), the official window advances to 42 and B
   // commits while A is still awaiting, then A settles last. A must not write and
@@ -630,7 +630,7 @@ test('S3-R0: read A already in flight → window B commits → A settles last an
   assert.ok(Object.is(h.presentation.mainFolder(), afterB), 'A wrote nothing; B remains visible')
 })
 
-test('PR3-B §7.3 (F1): the generation reset NEVER drops the active draft (the drop moved to the committed switch)', async () => {
+test('the generation reset NEVER drops the active draft (the drop moved to the committed switch)', async () => {
   // The round-6 review's F1 correction witness: the generation reset is an
   // INVALIDATION signal (the first-session creation bumps it; a
   // pre-publication failure bumps it while the old owner stands), so the

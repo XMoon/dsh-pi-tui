@@ -221,7 +221,7 @@ async function prepareTimeContextHost(
   return { host, sessions, clock, llm }
 }
 
-test('L5: the official time-context plugin injects one durable snapshot per eligible step over the real Host/Client wire', async (t) => {
+test('the official time-context plugin injects one durable snapshot per eligible step over the real Host/Client wire', async (t) => {
   const life = testLifecycle(t)
   const { host, sessions, clock, llm } = await prepareTimeContextHost(life, { plugin: true })
 
@@ -296,7 +296,7 @@ test('L5: the official time-context plugin injects one durable snapshot per elig
     'the durable log holds exactly the two injected readings')
 })
 
-test('L5 negative: with NO time-context plugin mounted, no reading is ever injected', async (t) => {
+test('negative: with NO time-context plugin mounted, no reading is ever injected', async (t) => {
   // This is the "no plugin row" control (the state the official `minimal`
   // composition produces, evidenced separately by the generated-preset
   // composition assertion below) — NOT a run of the official minimal preset.
@@ -311,7 +311,7 @@ test('L5 negative: with NO time-context plugin mounted, no reading is ever injec
     'a composition without the plugin never produces a time-context reading')
 })
 
-test('L5 negative: a message with no Client zone reports the browser zone unavailable, never the process zone', async (t) => {
+test('negative: a message with no Client zone reports the browser zone unavailable, never the process zone', async (t) => {
   const life = testLifecycle(t)
   // No `timeZone` config either: the plugin falls back to the PROCESS zone
   // (UTC in this suite) for the timestamp label, which must NOT be presented as
@@ -337,7 +337,7 @@ test('L5 negative: a message with no Client zone reports the browser zone unavai
   assert.ok(text.includes('[UTC]'), text)
 })
 
-test('L6: the real durable reading folds into ONE legal Context row and survives every display preset', async (t) => {
+test('the real durable reading folds into ONE legal Context row and survives every display preset', async (t) => {
   const life = testLifecycle(t)
   const { host, sessions } = await prepareTimeContextHost(life, { plugin: true })
   await promptViaClient(sessions, 'presentation question delta')

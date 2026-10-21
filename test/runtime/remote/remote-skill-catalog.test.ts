@@ -31,14 +31,14 @@ function harness(options: {
   return { generation, calls, catalog: new RemoteSkillCatalog(skills, generation.source) }
 }
 
-test('S1: listHumanSkills sends the EXACT session id and forwards the signal', async () => {
+test('listHumanSkills sends the EXACT session id and forwards the signal', async () => {
   const controller = new AbortController()
   const { catalog, calls } = harness()
   await catalog.listHumanSkills('session-42', controller.signal)
   assert.deepEqual(calls, [{ request: { sessionId: 'session-42' }, signal: controller.signal }])
 })
 
-test('S2: the returned catalog is detached from the wire value', async () => {
+test('the returned catalog is detached from the wire value', async () => {
   const { catalog } = harness({
     result: {
       ok: true,
@@ -56,7 +56,7 @@ test('S2: the returned catalog is detached from the wire value', async () => {
   assert.notEqual(first, second, 'each read is a fresh detached observation')
 })
 
-test('S2b: malformed wire rows are refused, never coerced', async () => {
+test('malformed wire rows are refused, never coerced', async () => {
   const { catalog } = harness({
     result: {
       ok: true,
@@ -73,12 +73,12 @@ test('S2b: malformed wire rows are refused, never coerced', async () => {
   assert.deepEqual(catalogValue?.skills.map(skill => skill.name), ['good'])
 })
 
-test('S3: a Host error is an ERROR, not an empty success', async () => {
+test('a Host error is an ERROR, not an empty success', async () => {
   const { catalog } = harness({ result: { ok: false, error: { code: 'session/not-found', message: 'no session' } } })
   await assert.rejects(catalog.listHumanSkills('s'), /no session/)
 })
 
-test('S4: an abort stays a cancellation', async () => {
+test('an abort stays a cancellation', async () => {
   const { catalog } = harness({ result: { ok: false, error: { code: 'gateway/cancelled', message: 'cancelled' } } })
   const controller = new AbortController()
   controller.abort()
@@ -90,7 +90,7 @@ test('S4: an abort stays a cancellation', async () => {
   })
 })
 
-test('S5: a result settling after a generation replacement is dropped as unavailable', async () => {
+test('a result settling after a generation replacement is dropped as unavailable', async () => {
   let release!: () => void
   const gate = new Promise<void>(resolve => { release = resolve })
   const { catalog, generation } = harness({ gate })
@@ -100,7 +100,7 @@ test('S5: a result settling after a generation replacement is dropped as unavail
   assert.equal(await pending, undefined)
 })
 
-test('S5b: a generation-replaced FAILURE is dropped too (not the new generation\'s error)', async () => {
+test('a generation-replaced FAILURE is dropped too (not the new generation\'s error)', async () => {
   let release!: () => void
   const gate = new Promise<void>(resolve => { release = resolve })
   const { catalog, generation } = harness({
@@ -120,17 +120,17 @@ test('no connection reads unavailable without any Host call', async () => {
   assert.deepEqual(calls, [])
 })
 
-test('S6: the sessionless standing catalog is explicitly unsupported (no Client scan)', async () => {
+test('the sessionless standing catalog is explicitly unsupported (no Client scan)', async () => {
   const { catalog } = harness()
   await assert.rejects(catalog.standing(undefined, '/host/cwd'), /no sessionless standing skill catalog/)
 })
 
-test('S7: the Client skill-body read stays unavailable', async () => {
+test('the Client skill-body read stays unavailable', async () => {
   const { catalog } = harness()
   assert.deepEqual(await catalog.resolveSkill('s', 'review-fix-loop'), { kind: 'unavailable' })
 })
 
-test('S8: hostLoadsSkillBody is a composition fact, not a wire probe', () => {
+test('hostLoadsSkillBody is a composition fact, not a wire probe', () => {
   const { catalog, calls } = harness()
   assert.equal(catalog.hostLoadsSkillBody('s'), true)
   assert.deepEqual(calls, [], 'the composition fact never dispatches a Host call')

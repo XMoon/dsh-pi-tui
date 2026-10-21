@@ -60,7 +60,7 @@ test('the TSP builtin capability unconditionally admits the exit pair and the B2
 
 // ── The ONE input-shaped member: /logout ────────────────────────────────────
 
-test('B2-A: /logout is admitted ONLY in its explicit-target form', () => {
+test('/logout is admitted ONLY in its explicit-target form', () => {
   const tui = classify({ tuiCommand: true })
   // Bare and whitespace-only forms need the credential picker: refused.
   assert.deepEqual(tspBuiltinAvailability(tui, 'logout', {}, ''), { kind: 'unsupported' })
@@ -74,7 +74,7 @@ test('B2-A: /logout is admitted ONLY in its explicit-target form', () => {
   }
 })
 
-test('B2-A: the argument-shaped admission never captures a non-TUI family', () => {
+test('the argument-shaped admission never captures a non-TUI family', () => {
   // A genuine Host /logout (with an argument) keeps its own routing.
   assert.deepEqual(tspBuiltinAvailability(
     classify({ hostClaim: { claimed: true, attachments: false }, tuiCommand: true }), 'logout', {}, 'some-target'),
@@ -88,7 +88,7 @@ test('B2-A: the argument-shaped admission never captures a non-TUI family', () =
 
 // ── The FAMILY is part of the result (the F1 fix) ───────────────────────────
 
-test('B1-B: native Session Browser commands require the mounted capability', () => {
+test('native Session Browser commands require the mounted capability', () => {
   const tui = classify({ tuiCommand: true })
   for (const name of ['sessions', 'resume', 'search']) {
     assert.deepEqual(bare(tui, name), { kind: 'unsupported' }, `/${name} is refused without the Browser`)
@@ -97,7 +97,7 @@ test('B1-B: native Session Browser commands require the mounted capability', () 
   }
 })
 
-test('B1-B: the Session Browser capability never captures a non-TUI family', () => {
+test('the Session Browser capability never captures a non-TUI family', () => {
   const browser = { sessionBrowser: true }
   const hostClaimed = classify({ hostClaim: { claimed: true, attachments: false }, tuiCommand: true })
   assert.deepEqual(bare(hostClaimed, 'sessions', browser), { kind: 'not-a-tui-builtin' })
@@ -115,7 +115,7 @@ test('B1-B: the Session Browser capability never captures a non-TUI family', () 
 
 // ── The FAMILY is part of the result (the F1 fix) ───────────────────────────
 
-test('B2: every non-TUI family reports not-a-tui-builtin, never unsupported', () => {
+test('every non-TUI family reports not-a-tui-builtin, never unsupported', () => {
   // A genuine Host command claiming the line — even with a TUI registration of
   // the same name present in the facts.
   const hostClaimed = classify({ hostClaim: { claimed: true, attachments: false }, tuiCommand: true })
@@ -140,14 +140,14 @@ test('B2: every non-TUI family reports not-a-tui-builtin, never unsupported', ()
   assert.deepEqual(bare(classify({}), 'not-registered'), { kind: 'not-a-tui-builtin' })
 })
 
-test('B2: the exit pair is available for the TUI family regardless of the name spelling', () => {
+test('the exit pair is available for the TUI family regardless of the name spelling', () => {
   const exit = classify({ tuiCommand: true })
   assert.equal(exit.kind, 'client-command')
   assert.deepEqual(bare(exit, 'quit'), { kind: 'available' },
     '/quit is /exit\'s canonical alias and stays available')
 })
 
-test('B2-A: the B2-A builtins stay available for the TUI family whatever the argument shape is', () => {
+test('the B2-A builtins stay available for the TUI family whatever the argument shape is', () => {
   // A genuine Host winner would have been classified `host-command` (tested
   // above); within the TUI family the LINE argument never changes the
   // unconditional members.
@@ -159,7 +159,7 @@ test('B2-A: the B2-A builtins stay available for the TUI family whatever the arg
 
 // ── RFL-001: the card-ownership policy the refusal sink consults ────────────
 
-test('B2-A: each mount has exactly ONE visible owner for a /title refusal', () => {
+test('each mount has exactly ONE visible owner for a /title refusal', () => {
   // PiTui over Direct keeps its long-standing in-handler notice beside the card.
   assert.equal(titleRefusalNoticeOwner({ pituiPresentation: true, backendKind: 'direct' }), 'handler')
   // TSP over Direct: the command-result card carries the same text.
@@ -169,7 +169,7 @@ test('B2-A: each mount has exactly ONE visible owner for a /title refusal', () =
   assert.equal(titleRefusalNoticeOwner({ pituiPresentation: true, backendKind: 'remote' }), 'submission-settlement')
 })
 
-test('B2-A: a confirmed title write publishes its own notice only on the card-less TSP path', () => {
+test('a confirmed title write publishes its own notice only on the card-less TSP path', () => {
   // The base handler never announced success; the only mount that needs the line
   // is TSP over the Client command registry (no card, no PiTui presentation).
   assert.equal(titleSuccessNoticeVisible({ pituiPresentation: false, backendKind: 'remote' }), true)
@@ -178,7 +178,7 @@ test('B2-A: a confirmed title write publishes its own notice only on the card-le
   assert.equal(titleSuccessNoticeVisible({ pituiPresentation: true, backendKind: 'direct' }), false)
 })
 
-test('B2-A: the card-less result-notice scope is the admitted set plus /logout', () => {
+test('the card-less result-notice scope is the admitted set plus /logout', () => {
   // The scope is derived from the ONE admission set (not a second routing list).
   assert.deepEqual([...TSP_B2A_RESULT_NOTICE_COMMANDS].sort(),
     [...TSP_SUPPORTED_TUI_BUILTINS, 'logout'].sort())

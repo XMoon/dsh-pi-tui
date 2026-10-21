@@ -353,7 +353,7 @@ test('a project-only command definition never spawns (the trust gate, plan §11.
   assert.equal(values.get('user:clock'), undefined, 'the item must stay unavailable')
 })
 
-test('P1 regression: a PROJECT merged layout can never activate a dormant USER command', async (t) => {
+test('regression: a PROJECT merged layout can never activate a dormant USER command', async (t) => {
   const life = testLifecycle(t)
   const dir = life.tempDir('pi-tui-activation-')
   const marker = join(dir, 'pwn')
@@ -390,7 +390,7 @@ test('P1 regression: a PROJECT merged layout can never activate a dormant USER c
   assert.equal(values.get('user:deploy'), undefined, 'the runner must not arm')
 })
 
-test('P1 regression: a STALE USER layout under footer: default authorizes nothing (mode gate)', async (t) => {
+test('regression: a STALE USER layout under footer: default authorizes nothing (mode gate)', async (t) => {
   const life = testLifecycle(t)
   const dir = life.tempDir('pi-tui-stale-')
   const marker = join(dir, 'pwn')
@@ -427,7 +427,7 @@ test('P1 regression: a STALE USER layout under footer: default authorizes nothin
   assert.equal(values.get('user:deploy'), undefined, 'the runner must not arm')
 })
 
-test('P1 regression: a command hidden by the rendered layout does not keep running in the background', async (t) => {
+test('regression: a command hidden by the rendered layout does not keep running in the background', async (t) => {
   const life = testLifecycle(t)
   const dir = life.tempDir('pi-tui-hidden-')
   const marker = join(dir, 'pwn')
@@ -462,7 +462,7 @@ test('P1 regression: a command hidden by the rendered layout does not keep runni
   assert.equal(values.get('user:deploy'), undefined)
 })
 
-test('P1 positive: a USER-declared custom layout DOES activate its command items', async (t) => {
+test('positive: a USER-declared custom layout DOES activate its command items', async (t) => {
   const life = testLifecycle(t)
   const dir = life.tempDir('pi-tui-activation-ok-')
   const marker = join(dir, 'pwn')
@@ -491,7 +491,7 @@ test('P1 positive: a USER-declared custom layout DOES activate its command items
   assert.equal(existsSync(marker), true, 'a USER-declared layout must activate its command items')
 })
 
-test('P1 regression: a PROJECT-forced command mode cannot turn stale fallback metadata into execution authorization', async (t) => {
+test('regression: a PROJECT-forced command mode cannot turn stale fallback metadata into execution authorization', async (t) => {
   const life = testLifecycle(t)
   const dir = life.tempDir('pi-tui-fallback-')
   const marker = join(dir, 'pwn')
@@ -534,7 +534,7 @@ test('P1 regression: a PROJECT-forced command mode cannot turn stale fallback me
   assert.equal(values.get('user:deploy'), undefined, 'the runner must not arm')
 })
 
-test('P1 positive: a command-mode USER with a custom fallback DOES run its fallback per-item commands', async (t) => {
+test('positive: a command-mode USER with a custom fallback DOES run its fallback per-item commands', async (t) => {
   const life = testLifecycle(t)
   const dir = life.tempDir('pi-tui-fallback-ok-')
   const marker = join(dir, 'pwn')

@@ -309,7 +309,7 @@ function countPluginMutations(service: unknown): { readonly counts: Record<'setB
   return { counts, restore() { for (const [name, original] of originals) proto[name] = original } }
 }
 
-test('B01: the mounted TUI keeps Team capability in the existing Tool/Activity views and invents no Team board', { skip: skippedInstallationReason([B01]) }, async t => {
+test('the mounted TUI keeps Team capability in the existing Tool/Activity views and invents no Team board', { skip: skippedInstallationReason([B01]) }, async t => {
   const adapter = new BoundaryAdapter()
   const app = await startS4D3Application(t, {
     bundles: [B01],
@@ -376,7 +376,7 @@ test('B01: the mounted TUI keeps Team capability in the existing Tool/Activity v
   assert.doesNotMatch(app.view(), /Team board|Team roster/u, 'no Team board page is invented')
 })
 
-test('B03: the real Auto preset and the shared Plugin Manager danger confirmation work in the mounted TUI', { skip: skippedInstallationReason([B03]) }, async t => {
+test('the real Auto preset and the shared Plugin Manager danger confirmation work in the mounted TUI', { skip: skippedInstallationReason([B03]) }, async t => {
   const adapter = new BoundaryAdapter()
   const app = await startS4D3Application(t, {
     bundles: [],

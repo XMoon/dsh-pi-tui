@@ -240,7 +240,7 @@ function startQuick(options: {
 
 // ── B4A-01: the passive projection reaches the frame with no browser open ──
 
-test('B4A-01 the Job roster paints below the editor with NO Task Browser open', async () => {
+test('the Job roster paints below the editor with NO Task Browser open', async () => {
   const h = startQuick({
     roster: [
       job('j1', 'build', 'running'),
@@ -285,7 +285,7 @@ test('B4A-01 the Job roster paints below the editor with NO Task Browser open', 
   h.app.stop()
 })
 
-test('B4A-01b the Jobs-only fallback (no subagent catalog) also paints below the editor', async () => {
+test('the Jobs-only fallback (no subagent catalog) also paints below the editor', async () => {
   const h = startQuick({
     taskRead: false,
     roster: [job('j1', 'build', 'running'), job('j2', 'deploy', 'failed')],
@@ -304,7 +304,7 @@ test('B4A-01b the Jobs-only fallback (no subagent catalog) also paints below the
   assert.match(strip(rawView(h.vt)[band.identity]!), /showing 1-1\/1$/)
 })
 
-test('B4A-01c a transient roster read failure keeps the RETAINED rows', async () => {
+test('a transient roster read failure keeps the RETAINED rows', async () => {
   const h = startQuick({ taskRead: false, roster: [job('j1', 'build', 'running')] })
   await flush()
   await h.vt.waitForRender()
@@ -321,7 +321,7 @@ test('B4A-01c a transient roster read failure keeps the RETAINED rows', async ()
   assert.match(strip(h.band().items[0]!), /bash · build\s+‣ Running$/)
 })
 
-test('B4A-01d the coordinator path (semantic Task read) feeds the SAME window', async () => {
+test('the coordinator path (semantic Task read) feeds the SAME window', async () => {
   const h = startQuick({
     roster: [job('j1', 'build', 'running')],
     descendants: [{
@@ -341,7 +341,7 @@ test('B4A-01d the coordinator path (semantic Task read) feeds the SAME window', 
   assert.ok(painted.some(line => /subagent · review/.test(line)), `the descendant row must paint:\n${view(h.vt)}`)
 })
 
-test('B4A-01e a Workflow-scoped Task Browser never narrows the resident window', async () => {
+test('a Workflow-scoped Task Browser never narrows the resident window', async () => {
   const h = startQuick({
     roster: [job('j1', 'build', 'running')],
     descendants: [
@@ -385,7 +385,7 @@ test('B4A-01e a Workflow-scoped Task Browser never narrows the resident window',
   assert.ok(resident.some(line => /unrelated agent/.test(line)), 'an unrelated active agent stays resident')
 })
 
-test('B4A-02 the window paints the PROJECTED activity in tree order, never a running lie', async () => {
+test('the window paints the PROJECTED activity in tree order, never a running lie', async () => {
   const h = startQuick({
     roster: [],
     descendants: [
@@ -413,7 +413,7 @@ test('B4A-02 the window paints the PROJECTED activity in tree order, never a run
   assert.match(items[1]!, /subagent · child · continuable\s+‣ Running$/)
 })
 
-test('B4A-02b a session reset clears the window with the rest of the Task Center state', async () => {
+test('a session reset clears the window with the rest of the Task Center state', async () => {
   const h = startQuick({ taskRead: false, roster: [job('j1', 'build', 'running')] })
   await flush()
   await h.vt.waitForRender()
@@ -432,7 +432,7 @@ test('B4A-02b a session reset clears the window with the rest of the Task Center
 
 // ── B4A-05: the frozen size matrix ─────────────────────────────────────────
 
-test('B4A-05 the 3/1/0 ladder on the frozen matrix, editor/footer/transcript preserved', async () => {
+test('the 3/1/0 ladder on the frozen matrix, editor/footer/transcript preserved', async () => {
   const sizes: ReadonlyArray<readonly [cols: number, rows: number, items: number]> = [
     [200, 60, 3],
     [120, 40, 3],
@@ -501,7 +501,7 @@ test('B4A-05 the 3/1/0 ladder on the frozen matrix, editor/footer/transcript pre
   }
 })
 
-test('B4A-05c the fullscreen root keeps a real transcript viewport beside the window', async () => {
+test('the fullscreen root keeps a real transcript viewport beside the window', async () => {
   const cells: ReadonlyArray<readonly [cols: number, rows: number, items: number]> = [
     [200, 60, 3],
     [120, 40, 3],
@@ -542,7 +542,7 @@ test('B4A-05c the fullscreen root keeps a real transcript viewport beside the wi
   }
 })
 
-test('B4A-05d an extreme frame degrades to ZERO rows instead of eating the transcript', async () => {
+test('an extreme frame degrades to ZERO rows instead of eating the transcript', async () => {
   const h = startQuick({ cols: 80, rows: 6, taskRead: false, roster: [
     job('j1', 'build', 'running'), job('j2', 'test', 'running'), job('j3', 'lint', 'running'),
   ] })
@@ -559,7 +559,7 @@ test('B4A-05d an extreme frame degrades to ZERO rows instead of eating the trans
   h.app.dispose()
 })
 
-test('B4A-05b a nonempty multi-line draft never invades the transcript floor', async () => {
+test('a nonempty multi-line draft never invades the transcript floor', async () => {
   const h = startQuick({ cols: 80, rows: 10, taskRead: false, roster: [
     job('j1', 'build', 'running'), job('j2', 'test', 'running'), job('j3', 'lint', 'running'),
   ] })
@@ -583,7 +583,7 @@ test('B4A-05b a nonempty multi-line draft never invades the transcript floor', a
   assert.ok(editor.top >= 1, `the transcript floor survives a taller draft:\n${view(h.vt)}`)
 })
 
-test('B4A-02c a superseded session late catalog result never paints into the new session', async () => {
+test('a superseded session late catalog result never paints into the new session', async () => {
   const h = startQuick({
     holdCatalog: true,
     roster: [job('j1', 'build', 'running')],
@@ -615,7 +615,7 @@ test('B4A-02c a superseded session late catalog result never paints into the new
 
 // ── B4A-03: Question attention, driven through the REAL controller ─────────
 
-test('B4A-03b the production Question controller subscription reaches the painted window', async () => {
+test('the production Question controller subscription reaches the painted window', async () => {
   const QUESTIONS: readonly AskUserQuestionItem[] = [{ id: 'q1', question: 'Use staging or production?' }]
   const SESSION = 'sess-main'
   const CALL = 'call-continued'
@@ -717,7 +717,7 @@ test('B4A-03b the production Question controller subscription reaches the painte
 
 // ── B4A-03: Question attention ─────────────────────────────────────────────
 
-test('B4A-03 a PARKED Question is its own typed row and a VISIBLE one never duplicates', async () => {
+test('a PARKED Question is its own typed row and a VISIBLE one never duplicates', async () => {
   const h = startQuick({ taskRead: false, roster: [], })
   h.attention.push({ sessionId: 'sess-main', callId: 'c1', questions: [{ id: 'q1', question: 'Continue with the deploy?' }], presentation: 'parked' })
   // The Question controller's own two publications for one attention change:
@@ -747,7 +747,7 @@ test('B4A-03 a PARKED Question is its own typed row and a VISIBLE one never dupl
 
 // ── B4A-04 / B4A-06: the pointer and the acknowledgement ledger ────────────
 
-test('B4A-06 the alt screen delivers a real SGR wheel to the painted window only', async () => {
+test('the alt screen delivers a real SGR wheel to the painted window only', async () => {
   const h = startQuick({ cols: 120, rows: 40, taskRead: false, roster: [
     job('j1', 'build', 'running'), job('j2', 'test', 'running'), job('j3', 'lint', 'running'),
     job('j4', 'deploy', 'running'), job('j5', 'audit', 'running'),
@@ -790,7 +790,7 @@ test('B4A-06 the alt screen delivers a real SGR wheel to the painted window only
   assert.equal(h.band().identity, -1, 'the accessory is hidden after its Esc')
 })
 
-test('B4A-06c a wheel on the window never scrolls the transcript behind it, boundary included', async () => {
+test('a wheel on the window never scrolls the transcript behind it, boundary included', async () => {
   const h = startQuick({ cols: 120, rows: 40, taskRead: false, roster: [
     job('j1', 'build', 'running'), job('j2', 'test', 'running'), job('j3', 'lint', 'running'),
     job('j4', 'deploy', 'running'), job('j5', 'audit', 'running'), job('j6', 'docs', 'running'),
@@ -822,7 +822,7 @@ test('B4A-06c a wheel on the window never scrolls the transcript behind it, boun
   assert.match(strip(rawView(h.vt)[h.band().identity]!), /showing 1-3\/6$/, 'the window stays at its top boundary')
 })
 
-test('B4A-06d a resize that has not been repainted refuses the wheel, then resolves against the new frame', async () => {
+test('a resize that has not been repainted refuses the wheel, then resolves against the new frame', async () => {
   const h = startQuick({ cols: 120, rows: 40, taskRead: false, roster: [
     job('j1', 'build', 'running'), job('j2', 'test', 'running'), job('j3', 'lint', 'running'),
     job('j4', 'deploy', 'running'),
@@ -860,7 +860,7 @@ test('B4A-06d a resize that has not been repainted refuses the wheel, then resol
   assert.match(itemRows(h.vt)[0]!, /bash · test\s+‣ Running\s+2-2\/4$/, `the new frame owns the wheel:\n${view(h.vt)}`)
 })
 
-test('B4A-06e a stale width resize still owns the in-band wheel: the transcript never scrolls', async () => {
+test('a stale width resize still owns the in-band wheel: the transcript never scrolls', async () => {
   const h = startQuick({ cols: 120, rows: 40, taskRead: false, roster: [
     job('j1', 'build', 'running'), job('j2', 'test', 'running'), job('j3', 'lint', 'running'),
     job('j4', 'deploy', 'running'), job('j5', 'audit', 'running'),
@@ -896,7 +896,7 @@ test('B4A-06e a stale width resize still owns the in-band wheel: the transcript 
   assert.equal(h.app.fullscreenScrollForTest()!.scrollTop, before.scrollTop, 'the transcript is still untouched')
 })
 
-test('B4A-06f an emptied roster owns its band until the blank frame is painted', async () => {
+test('an emptied roster owns its band until the blank frame is painted', async () => {
   const h = startQuick({ cols: 120, rows: 40, taskRead: false, roster: [
     job('j1', 'build', 'running'), job('j2', 'test', 'running'), job('j3', 'lint', 'running'),
     job('j4', 'deploy', 'running'),
@@ -937,7 +937,7 @@ test('B4A-06f an emptied roster owns its band until the blank frame is painted',
   assert.equal(after.scrollTop, after.maxScrollTop, 'the pane sits at the end of the grown viewport')
 })
 
-test('B4A-06b the ordinary main screen has NO application mouse: the wheel moves nothing', async () => {
+test('the ordinary main screen has NO application mouse: the wheel moves nothing', async () => {
   const h = startQuick({ cols: 120, rows: 40, taskRead: false, roster: [
     job('j1', 'build', 'running'), job('j2', 'test', 'running'), job('j3', 'lint', 'running'),
     job('j4', 'deploy', 'running'),
@@ -960,7 +960,7 @@ test('B4A-06b the ordinary main screen has NO application mouse: the wheel moves
   assert.equal(h.app.getDraft(), '')
 })
 
-test('B4A-04 painting, resizing and wheeling the passive window acknowledge NOTHING', async () => {
+test('painting, resizing and wheeling the passive window acknowledge NOTHING', async () => {
   const original = TaskBrowserRuntime.prototype.acknowledge
   let calls = 0
   TaskBrowserRuntime.prototype.acknowledge = function (this: TaskBrowserRuntime, values: readonly string[]): void {
@@ -1010,7 +1010,7 @@ test('B4A-04 painting, resizing and wheeling the passive window acknowledge NOTH
   }
 })
 
-test('B4A-08 the painted window uses the frozen role tokens, live across a theme switch', async () => {
+test('the painted window uses the frozen role tokens, live across a theme switch', async () => {
   const h = startQuick({ cols: 120, rows: 40, taskRead: false, roster: [
     job('j1', 'build', 'running'), job('j2', 'deploy', 'failed'),
   ] })
@@ -1062,7 +1062,7 @@ test('B4A-08 the painted window uses the frozen role tokens, live across a theme
   setTheme('dark')
 })
 
-test('B4A-05e the resident window coexists with a live PUBLIC below widget', async () => {
+test('the resident window coexists with a live PUBLIC below widget', async () => {
   const h = startQuick({ cols: 120, rows: 40, taskRead: false, widgetBelow: 'BELOW-WIDGET', roster: [
     job('j1', 'build', 'running'), job('j2', 'test', 'running'),
   ] })
@@ -1092,7 +1092,7 @@ test('B4A-05e the resident window coexists with a live PUBLIC below widget', asy
   }
 })
 
-test('B4A-05f the FULLSCREEN root paints the public below widget beside the window', async () => {
+test('the FULLSCREEN root paints the public below widget beside the window', async () => {
   const h = startQuick({ cols: 120, rows: 40, taskRead: false, widgetBelow: 'BELOW-WIDGET', roster: [
     job('j1', 'build', 'running'), job('j2', 'test', 'running'), job('j3', 'lint', 'running'),
   ] })
@@ -1130,7 +1130,7 @@ test('B4A-05f the FULLSCREEN root paints the public below widget beside the wind
   }
 })
 
-test('B4A-04b after the modal acknowledges, the window still paints the REAL failed state', async () => {
+test('after the modal acknowledges, the window still paints the REAL failed state', async () => {
   const h = startQuick({ cols: 120, rows: 40, roster: [job('j2', 'deploy', 'failed')] })
   await flush()
   await h.vt.waitForRender()
@@ -1157,7 +1157,7 @@ test('B4A-04b after the modal acknowledges, the window still paints the REAL fai
 
 // ── The band is a pinned row: every bottom-anchored hit test must follow it ─
 
-test('B4A-07b the fullscreen Todo/dock hit follows the band-pushed layout', async () => {
+test('the fullscreen Todo/dock hit follows the band-pushed layout', async () => {
   const h = startQuick({ cols: 80, rows: 24, taskRead: false, roster: [
     job('j1', 'build', 'running'), job('j2', 'test', 'running'), job('j3', 'lint', 'running'),
     job('j4', 'deploy', 'running'),
@@ -1203,7 +1203,7 @@ test('B4A-07b the fullscreen Todo/dock hit follows the band-pushed layout', asyn
   assert.ok(h.app.isTodoPanelExpanded(), `a panel-row click must expand the panel:\n${view(h.vt)}`)
 })
 
-test('B4B Todo/Dock hit follows the actual Quick heights 0, 1 and 5', async () => {
+test('Todo/Dock hit follows the actual Quick heights 0, 1 and 5', async () => {
   const cases = [
     { name: 'hidden', rows: 24, enterQuick: false, expectedHeight: 0 },
     { name: 'one-row grant', rows: 9, enterQuick: true, expectedHeight: 1 },
@@ -1256,7 +1256,7 @@ test('B4B Todo/Dock hit follows the actual Quick heights 0, 1 and 5', async () =
   }
 })
 
-test('B4B the Question option hit uses geometry after the blocking owner retires Quick', async () => {
+test('the Question option hit uses geometry after the blocking owner retires Quick', async () => {
   const h = startQuick({ cols: 80, rows: 24, taskRead: false, roster: [
     job('j1', 'build', 'running'), job('j2', 'test', 'running'), job('j3', 'lint', 'running'),
     job('j4', 'deploy', 'running'),
@@ -1298,7 +1298,7 @@ test('B4B the Question option hit uses geometry after the blocking owner retires
   assert.equal(answers[0]?.selected[0], 'OPTION-B', 'the click selects the option the user pointed at')
 })
 
-test('B4B Question option hits rebase after real Quick heights 0, 1 and 5 retire', async () => {
+test('Question option hits rebase after real Quick heights 0, 1 and 5 retire', async () => {
   const cases = [
     { name: 'zero-to-zero', rows: 24, enterQuick: false, expectedHeight: 0 },
     { name: 'one-to-zero', rows: 8, enterQuick: true, expectedHeight: 1 },
@@ -1374,7 +1374,7 @@ test('B4B Question option hits rebase after real Quick heights 0, 1 and 5 retire
 
 // ── B4A-07 / B4A-10 ────────────────────────────────────────────────────────
 
-test('B4A-07 a resize re-budgets the window and keeps the anchored row visible', async () => {
+test('a resize re-budgets the window and keeps the anchored row visible', async () => {
   const h = startQuick({ cols: 120, rows: 40, taskRead: false, roster: [
     job('j1', 'a', 'running'), job('j2', 'b', 'running'), job('j3', 'c', 'running'),
     job('j4', 'd', 'running'), job('j5', 'e', 'running'), job('j6', 'f', 'running'),
@@ -1395,7 +1395,7 @@ test('B4A-07 a resize re-budgets the window and keeps the anchored row visible',
   assert.equal(h.band().items.length, 3, 'growing back restores the window')
 })
 
-test('B4A-10 a display seam without Task Center support mounts no fake window', async () => {
+test('a display seam without Task Center support mounts no fake window', async () => {
   const h = startQuick({
     cols: 120, rows: 40, taskRead: false, supportsTaskCenter: false,
     roster: [job('j1', 'build', 'running')],

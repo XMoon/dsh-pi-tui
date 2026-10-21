@@ -97,7 +97,7 @@ async function waitFor(condition: () => boolean | Promise<boolean>, turns = 2000
   throw new Error('condition did not settle')
 }
 
-test('B09 Session Titles: real provider projection, manual precedence, late-title isolation and disable/restart', { skip: skip09 }, async t => {
+test('Session Titles: real provider projection, manual precedence, late-title isolation and disable/restart', { skip: skip09 }, async t => {
   const host = await startS4D2Host(t, { bundles: [B09] })
   const adapter = new ScriptedAdapter()
   host.ctx.llm.registerAdapter(['scripted'], adapter)
@@ -163,7 +163,7 @@ test('B09 Session Titles: real provider projection, manual precedence, late-titl
     'the restarted composition falls back to the base title provider')
 })
 
-test('B10 Badge Skill: real provider, skills-capable presets and no minimal skill tool', { skip: skip10 }, async t => {
+test('Badge Skill: real provider, skills-capable presets and no minimal skill tool', { skip: skip10 }, async t => {
   let host = await startS4D2Host(t, { bundles: [B10], presets: true })
   const work = join(host.root, 'work')
   const skills = host.ctx.get('skills') as {
@@ -208,7 +208,7 @@ test('B10 Badge Skill: real provider, skills-capable presets and no minimal skil
   assert.equal(after.some(skill => skill.name === 'dsh-badge'), false, 'the disabled bundle no longer contributes the skill')
 })
 
-test('B11 Ralph: one real bounded round, workflow activity and cancelled-run cleanup', { skip: skip11 }, async t => {
+test('Ralph: one real bounded round, workflow activity and cancelled-run cleanup', { skip: skip11 }, async t => {
   const host = await startS4D2Host(t, { bundles: [B11] })
   const work = join(host.root, 'work')
   const adapter = new RalphAdapter()

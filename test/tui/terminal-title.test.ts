@@ -154,7 +154,7 @@ test('an UNTERMINATED OSC tail is consumed, never left as visible payload (round
   assert.ok(title.includes('ok'), 'legit text before the sequence survives')
 })
 
-test('C0/C1 control characters in a title are stripped', () => {
+test('control characters in a title are stripped', () => {
   assert.equal(sanitizeTitleText('a\x1b[31mb\x07c'), 'abc')
   assert.equal(sanitizeTitleText('line1\r\nline2'), 'line1line2')
   assert.equal(sanitizeTitleText('\n\tplain'), 'plain')

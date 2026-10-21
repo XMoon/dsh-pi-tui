@@ -65,7 +65,7 @@ async function appendRealTurn(session: Session, turn: number, outputTokens: numb
   session.append('turn/end', { turn, reason: { kind: 'completed' } })
 }
 
-test('L5: real Host committed events reach the Client piTuiPerformance projection face', async (t) => {
+test('real Host committed events reach the Client piTuiPerformance projection face', async (t) => {
   const life = testLifecycle(t)
   const host = await createRemoteApplicationHostFixture(life, 'perf-host-wire')
   await host.harness.create(SessionId(SESSION_ID), undefined, { cwd: host.workRoot })

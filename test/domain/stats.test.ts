@@ -1040,7 +1040,7 @@ test('a burst route keeps token totals identical to the pre-recent accounting', 
   assert.deepEqual(folder.snapshot(), stats)
 })
 
-test('PR-2 formatStatsFacts renders each Host performance fact on its own availability', () => {
+test('formatStatsFacts renders each Host performance fact on its own availability', () => {
   const full: import('../../src/domain/status/stats.ts').SessionStatsFacts = {
     lifetime: { turns: 12, steps: 38, llmMs: 120000 },
     tokens: { input: 2579, output: 5507, cacheRead: 20000, cacheWrite: 0, cacheHitPct: 88.6 },
@@ -1078,7 +1078,7 @@ test('PR-2 formatStatsFacts renders each Host performance fact on its own availa
     'authoritative ZEROS render as visible zeros (not absence)')
 })
 
-test('PR-2 sessionStatsFactsOf takes the performance groups from the Host-derived facts', () => {
+test('sessionStatsFactsOf takes the performance groups from the Host-derived facts', () => {
   const stats = computeStats([])
   const bare = sessionStatsFactsOf(stats)
   assert.ok(bare.lifetime !== undefined && bare.tokens !== undefined, 'the fold owns lifetime and tokens')

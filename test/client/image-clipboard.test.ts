@@ -74,7 +74,7 @@ test('Wayland: text-only clipboard returns the plain text payload', async () => 
   assert.deepEqual(result, { kind: 'text', text: 'plain paste text' })
 })
 
-test('X11: an advertised image/png returns bytes; text-only returns text', async () => {
+test('an advertised image/png returns bytes; text-only returns text', async () => {
   const image = await readClipboardImage(x11Record(pngBytes()), envOf({ env: { DISPLAY: ':0' } }))
   assert.equal(image.kind, 'image')
   if (image.kind === 'image') assert.equal(image.mediaType, 'image/png')

@@ -536,7 +536,7 @@ test('a single Esc while IDLE only arms the double-Esc window', async () => {
 
 // ── conversation rewind (fork_rewind plan): idle empty double-Esc ─────────
 
-test('E03: an idle EMPTY single Esc never rewinds', async () => {
+test('an idle EMPTY single Esc never rewinds', async () => {
   const surface = startAppWithRewind()
   await surface.vt.waitForRender()
   surface.vt.sendInput('\x1b')
@@ -545,7 +545,7 @@ test('E03: an idle EMPTY single Esc never rewinds', async () => {
   assert.equal(surface.cancels, 0)
 })
 
-test('E04: an idle EMPTY double-Esc opens rewind, never cancel', async () => {
+test('an idle EMPTY double-Esc opens rewind, never cancel', async () => {
   const surface = startAppWithRewind()
   await surface.vt.waitForRender()
   surface.vt.sendInput('\x1b')
@@ -555,7 +555,7 @@ test('E04: an idle EMPTY double-Esc opens rewind, never cancel', async () => {
   assert.equal(surface.cancels, 0)
 })
 
-test('E05: an idle NON-EMPTY double-Esc keeps the cancel semantics', async () => {
+test('an idle NON-EMPTY double-Esc keeps the cancel semantics', async () => {
   const surface = startAppWithRewind()
   await surface.vt.waitForRender()
   surface.vt.sendInput('half-written draft')
@@ -567,7 +567,7 @@ test('E05: an idle NON-EMPTY double-Esc keeps the cancel semantics', async () =>
   assert.equal(surface.cancels, 1, 'the historical idle double-Esc cancel stays')
 })
 
-test('E06: a slow second Esc never rewinds', async () => {
+test('a slow second Esc never rewinds', async () => {
   const surface = startAppWithRewind()
   await surface.vt.waitForRender()
   surface.vt.sendInput('\x1b')
@@ -578,7 +578,7 @@ test('E06: a slow second Esc never rewinds', async () => {
   assert.equal(surface.cancels, 0)
 })
 
-test('E12: an intervening key press disarms the double-Esc window', async () => {
+test('an intervening key press disarms the double-Esc window', async () => {
   const surface = startAppWithRewind()
   await surface.vt.waitForRender()
   surface.vt.sendInput('\x1b') // arm
@@ -593,7 +593,7 @@ test('E12: an intervening key press disarms the double-Esc window', async () => 
   assert.equal(surface.rewinds, 1, 'a clean consecutive double-Esc still rewinds')
 })
 
-test('E01/E02: busy Esc stays a pure cancel — a quick second Esc never rewinds a half turn', async () => {
+test('busy Esc stays a pure cancel — a quick second Esc never rewinds a half turn', async () => {
   const surface = startAppWithRewind()
   await surface.vt.waitForRender()
   surface.app.setBusy(true)
@@ -604,7 +604,7 @@ test('E01/E02: busy Esc stays a pure cancel — a quick second Esc never rewinds
   assert.equal(surface.rewinds, 0, 'busy Esc must never open rewind')
 })
 
-test('E07: an open autocomplete owns Esc (closes it, never rewinds)', async () => {
+test('an open autocomplete owns Esc (closes it, never rewinds)', async () => {
   const surface = startAppWithRewind()
   await surface.vt.waitForRender()
   surface.app.setCommandCompletions(
@@ -620,7 +620,7 @@ test('E07: an open autocomplete owns Esc (closes it, never rewinds)', async () =
   assert.equal(surface.cancels, 0)
 })
 
-test('E10: the subagent viewer owns its Esc (exits, never rewinds)', async () => {
+test('the subagent viewer owns its Esc (exits, never rewinds)', async () => {
   const vt = new VirtualTerminal(100, 24)
   let cancels = 0
   let rewinds = 0
@@ -652,7 +652,7 @@ test('E10: the subagent viewer owns its Esc (exits, never rewinds)', async () =>
   assert.equal(cancels, 0)
 })
 
-test('E11: Kitty release/repeat escapes never count toward the double-Esc window', async () => {
+test('Kitty release/repeat escapes never count toward the double-Esc window', async () => {
   const surface = startAppWithRewind()
   await surface.vt.waitForRender()
   surface.vt.sendInput('\x1b[27;1:3u') // release

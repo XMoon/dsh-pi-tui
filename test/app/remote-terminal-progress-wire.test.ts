@@ -233,7 +233,7 @@ function factLabels(facts: readonly RemoteMainProgressFact[]): string[] {
 
 // ── PROOF 1 ────────────────────────────────────────────────────────────────
 
-test('L5: a real completed turn reaches the production source as snapshot -> working -> done', async (t) => {
+test('a real completed turn reaches the production source as snapshot -> working -> done', async (t) => {
   const life = testLifecycle(t)
   const wire = await mountProductionWire(life, 'r2-wire-completed', { llmAdapter: new CompletedAdapter() })
   const sessionId = 'r2-wire-completed-session'
@@ -263,7 +263,7 @@ test('L5: a real completed turn reaches the production source as snapshot -> wor
 
 // ── PROOF 2 ────────────────────────────────────────────────────────────────
 
-test('L5: a real error turn settles error and a real cancelled turn settles idle', async (t) => {
+test('a real error turn settles error and a real cancelled turn settles idle', async (t) => {
   const life = testLifecycle(t)
   const wire = await mountProductionWire(life, 'r2-wire-outcomes', { llmAdapter: new FailingAdapter() })
   const abortAdapter = new AbortableAdapter()
@@ -313,7 +313,7 @@ test('L5: a real error turn settles error and a real cancelled turn settles idle
 
 // ── PROOF 3 ────────────────────────────────────────────────────────────────
 
-test('L5: break cancellation reaches the production Host row and releases its subscriber', async (t) => {
+test('break cancellation reaches the production Host row and releases its subscriber', async (t) => {
   const life = testLifecycle(t)
   const wire = await mountProductionWire(life, 'r2-wire-cancel', { llmAdapter: new AbortableAdapter() })
   const sessionId = 'r2-wire-cancel-session'
@@ -359,7 +359,7 @@ test('L5: break cancellation reaches the production Host row and releases its su
 /** Installed only for the disposal proof: any real WebSocket construction is a failure. */
 let webSocketConstructions = 0
 
-test('L5: Host fiber disposal withdraws the descriptor and closes live watchers (in-process only)', async (t) => {
+test('Host fiber disposal withdraws the descriptor and closes live watchers (in-process only)', async (t) => {
   const life = testLifecycle(t)
   const wire = await mountProductionWire(life, 'r2-wire-dispose', { llmAdapter: new AbortableAdapter() })
   const disposedSession = 'r2-wire-dispose-live'
@@ -510,7 +510,7 @@ async function drain(source: RemoteTerminalProgressSource, sessionId: string): P
   return facts
 }
 
-test('L5: the consumption fails closed on a silent Host and stops quietly on abort or an owner move', async () => {
+test('the consumption fails closed on a silent Host and stops quietly on abort or an owner move', async () => {
   const sessionId = 'r2-source-session'
   // A Host row that retires every watch without ever delivering a frame: the
   // consumer must bound the re-establishments and report a failure, never spin.
@@ -537,7 +537,7 @@ test('L5: the consumption fails closed on a silent Host and stops quietly on abo
   })
 })
 
-test('L5: the Client source validates every frame and fences provenance/transport', async () => {
+test('the Client source validates every frame and fences provenance/transport', async () => {
   const sessionId = 'r2-source-session'
 
   // The framework does not apply the descriptor codec to downlink items: the

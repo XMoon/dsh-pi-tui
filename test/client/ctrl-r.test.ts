@@ -241,7 +241,7 @@ test('Ctrl+R resolves the Current Directory at OPEN time (a session switch moves
     'the current-directory scope must follow the LIVE cwd, not the construction snapshot')
 })
 
-test('UI4: Ctrl+R captures the session identity at OPEN time (a session switch moves the scope)', async (t) => {
+test('Ctrl+R captures the session identity at OPEN time (a session switch moves the scope)', async (t) => {
   const life = testLifecycle(t)
   const home = tempHome(life)
   const { VirtualTerminal } = await import('../support/virtual-terminal.ts')
@@ -284,7 +284,7 @@ test('UI4: Ctrl+R captures the session identity at OPEN time (a session switch m
     'the reopened seat must search the NEW session, not the construction snapshot')
 })
 
-test('H3A-14: a Question PARKS the History seat and the SAME tenant (query + selection) is restored', async (t) => {
+test('a Question PARKS the History seat and the SAME tenant (query + selection) is restored', async (t) => {
   const life = testLifecycle(t)
   const home = tempHome(life)
   const { vt, app } = await makeApp(life, home)
@@ -447,7 +447,7 @@ test('plugin keybindings can never claim Ctrl+R (host-reserved)', async (t) => {
   }, 'plugin'), /reserved/, 'a plugin cannot bind Ctrl+R')
 })
 
-test('H3A-01: a second Ctrl+R while the seat is open is a no-op (ONE History instance)', async (t) => {
+test('a second Ctrl+R while the seat is open is a no-op (ONE History instance)', async (t) => {
   const life = testLifecycle(t)
   const home = tempHome(life)
   const { vt, app } = await makeApp(life, home)
@@ -463,7 +463,7 @@ test('H3A-01: a second Ctrl+R while the seat is open is a no-op (ONE History ins
   assert.ok(strip(vt.getViewport()).includes('Search: > nginx'), 'the SAME seat keeps its query')
 })
 
-test('H3A-13: a pending Approval REFUSES Ctrl+R (silent no-op, approval untouched)', async (t) => {
+test('a pending Approval REFUSES Ctrl+R (silent no-op, approval untouched)', async (t) => {
   const life = testLifecycle(t)
   const home = tempHome(life)
   const { vt, app } = await makeApp(life, home)
@@ -480,7 +480,7 @@ test('H3A-13: a pending Approval REFUSES Ctrl+R (silent no-op, approval untouche
   assert.ok(!panelVisible(vt.getViewport()), 'the refused History never appears after the approval settles')
 })
 
-test('H3A-15: a clipboard failure reports Copy failed, and a settle after the seat closed stays silent', async (t) => {
+test('a clipboard failure reports Copy failed, and a settle after the seat closed stays silent', async (t) => {
   const life = testLifecycle(t)
   const home = tempHome(life)
   const notices: string[] = []
@@ -520,7 +520,7 @@ test('H3A-15: a clipboard failure reports Copy failed, and a settle after the se
     'a stale copy settle must not notify over a closed/replacement surface')
 })
 
-test('H3A-10: a REAL large-paste registry entry survives a History round trip (expanded payload identity)', async (t) => {
+test('a REAL large-paste registry entry survives a History round trip (expanded payload identity)', async (t) => {
   const life = testLifecycle(t)
   const home = tempHome(life)
   const { vt, app, submitted } = await makeApp(life, home)
@@ -713,7 +713,7 @@ function b3bAskSave(app: import('../../src/tui-app.ts').TuiApp): Promise<SaveLoc
   )
 }
 
-test('H3B-01 (ctrl-r harness): a Question FIFO Q1→Q2 keeps the file-backed History seat parked and restores its query', async (t) => {
+test('(ctrl-r harness): a Question FIFO Q1→Q2 keeps the file-backed History seat parked and restores its query', async (t) => {
   const life = testLifecycle(t)
   const home = tempHome(life)
   const { vt, app } = await makeApp(life, home)
@@ -752,7 +752,7 @@ test('H3B-01 (ctrl-r harness): a Question FIFO Q1→Q2 keeps the file-backed His
   assert.ok(!panelVisible(vt.getViewport()))
 })
 
-test('H3B-02 (ctrl-r harness): an Approval A→B FIFO keeps the file-backed History seat parked through the handover', async (t) => {
+test('(ctrl-r harness): an Approval A→B FIFO keeps the file-backed History seat parked through the handover', async (t) => {
   const life = testLifecycle(t)
   const home = tempHome(life)
   const { vt, app } = await makeApp(life, home)
@@ -799,7 +799,7 @@ test('H3B-02 (ctrl-r harness): an Approval A→B FIFO keeps the file-backed Hist
   assert.equal(app.focusSeatForTest(), 'editor-panel')
 })
 
-test('H3B-03 (ctrl-r harness): Save Location cancel and confirm each restore the SAME file-backed History seat', async (t) => {
+test('(ctrl-r harness): Save Location cancel and confirm each restore the SAME file-backed History seat', async (t) => {
   const life = testLifecycle(t)
   const home = tempHome(life)
   const { vt, app } = await makeApp(life, home)

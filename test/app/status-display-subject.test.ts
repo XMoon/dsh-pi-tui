@@ -120,7 +120,7 @@ function childRead(id: string, label = id): ViewerRead {
   return { id, label, mode: 'continuable', activity: 'running', cwd: '/child/header', stats: childStats() }
 }
 
-test('M3-5 PR1: the main subject keeps the main view with the live session sections', () => {
+test('the main subject keeps the main view with the live session sections', () => {
   const h = makeHarness()
   h.runtime.refresh()
   const commit = h.commits.at(-1)!
@@ -129,7 +129,7 @@ test('M3-5 PR1: the main subject keeps the main view with the live session secti
   assert.equal(commit.presentation, undefined, 'no display-subject projection on the main subject')
 })
 
-test('M3-5 PR1: every child Session-owned section comes from SessionStatus(childId)', () => {
+test('every child Session-owned section comes from SessionStatus(childId)', () => {
   const h = makeHarness()
   h.setStatus('main', {
     sessionId: 'main',
@@ -183,7 +183,7 @@ test('M3-5 PR1: every child Session-owned section comes from SessionStatus(child
     'the child goal badge is a display-subject presentation fact')
 })
 
-test('M3-5 PR1: an unavailable child SessionStatus leaves the Session-owned fields ABSENT (never the parent’s)', () => {
+test('an unavailable child SessionStatus leaves the Session-owned fields ABSENT (never the parent’s)', () => {
   const h = makeHarness()
   // The MAIN subject is committed first (the parent facts the child must not
   // inherit).
@@ -223,7 +223,7 @@ test('M3-5 PR1: an unavailable child SessionStatus leaves the Session-owned fiel
   })
 })
 
-test('M3-5 PR1: child A → child B keeps no A residue', () => {
+test('child A → child B keeps no A residue', () => {
   const h = makeHarness()
   h.setStatus('child-a', {
     sessionId: 'child-a',
@@ -252,7 +252,7 @@ test('M3-5 PR1: child A → child B keeps no A residue', () => {
   assert.equal(snap.usage.tokens, undefined)
 })
 
-test('M3-5 PR1: child → main re-derives the main subject from the main session', () => {
+test('child → main re-derives the main subject from the main session', () => {
   const h = makeHarness()
   h.setStatus('main', { sessionId: 'main', cwd: '/parent/ws', model: { provider: 'parent', model: 'm' } })
   h.setStatus('child-a', { sessionId: 'child-a', cwd: '/a', model: { provider: 'p', model: 'a' } })
@@ -267,7 +267,7 @@ test('M3-5 PR1: child → main re-derives the main subject from the main session
   assert.equal(commit.legacy.cwd, '/client')
 })
 
-test('M3-5 PR1: a REMOTE child’s Host cwd never implies a Client-local branch', (t) => {
+test('a REMOTE child’s Host cwd never implies a Client-local branch', (t) => {
   // A local checkout whose `.git/HEAD` the local derivation CAN read: the SAME
   // cwd proves a branch for a Direct (same-machine) child and must be omitted
   // for a Remote one.
@@ -289,7 +289,7 @@ test('M3-5 PR1: a REMOTE child’s Host cwd never implies a Client-local branch'
     'a Remote child cwd is not a Client path — its branch must be omitted, never inferred')
 })
 
-test('M3-5 PR1: the Remote main subject never retains a CHILD’s permission after the viewer closes', () => {
+test('the Remote main subject never retains a CHILD’s permission after the viewer closes', () => {
   const h = makeHarness({ remote: true })
   h.setStatus('main', { sessionId: 'main', cwd: '/parent/ws' })
   h.setStatus('child-a', { sessionId: 'child-a', cwd: '/a', permission: 'read-only' })
@@ -303,7 +303,7 @@ test('M3-5 PR1: the Remote main subject never retains a CHILD’s permission aft
     'the child’s permission must never become the main session’s retained value')
 })
 
-test('M3-5 PR1: the child context numerator/window are the SessionStatus facts, never the fold', () => {
+test('the child context numerator/window are the SessionStatus facts, never the fold', () => {
   const h = makeHarness()
   const stats = new StatsFolder()
   stats.hydrate([

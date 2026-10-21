@@ -108,7 +108,7 @@ const SINGLE_OWNER_SITES: ReadonlyArray<readonly [string, number, string]> = [
   ['new TranscriptWindowController(', 1, 'src/app/surface/viewer-runtime.ts'],
 ]
 
-test('A5: the composition surface is the entry plus the composition zone', () => {
+test('the composition surface is the entry plus the composition zone', () => {
   const sources = compositionSources()
   assert.equal(sources[0].rel, 'src/index.ts', 'the package entry is the first composition-surface file')
   assert.equal(sources[1].rel, 'src/app/bootstrap.ts', 'the composition facade is the second composition-surface file')
@@ -117,14 +117,14 @@ test('A5: the composition surface is the entry plus the composition zone', () =>
   }
 })
 
-test('A5: every composition responsibility still has a site', () => {
+test('every composition responsibility still has a site', () => {
   const source = compositionSource()
   for (const [name, site] of COMPOSITION_INVENTORY) {
     assert.ok(source.includes(site), `the composition surface must still own ${name} (${site})`)
   }
 })
 
-test('A5a: the composition ROOT owns every composition site (the entry owns none)', () => {
+test('the composition ROOT owns every composition site (the entry owns none)', () => {
   // Ownership LOCATION, not just "somewhere in the composition surface". The
   // aggregate counts below cannot catch a regression that moves a construction
   // back into the entry while deleting it from the composition root — the
@@ -185,7 +185,7 @@ test('A5a: the composition ROOT owns every composition site (the entry owns none
   }
 })
 
-test('A5: every single-owner construction has exactly its expected count across the owner surface', () => {
+test('every single-owner construction has exactly its expected count across the owner surface', () => {
   // The aggregate companion to the per-module location lock above: the TOTAL
   // count across the owner surface (which includes the composition root) must
   // still match, so a relocation that duplicates a construction in TWO owner
@@ -219,7 +219,7 @@ const WHOLE_TREE_NON_OWNER_SITES: Readonly<Record<string, readonly string[]>> = 
   'bindSessionRuntime(': ['src/app/session/runtime.ts'],
 }
 
-test('A5: no production file outside the pinned owners holds a single-owner construction', () => {
+test('no production file outside the pinned owners holds a single-owner construction', () => {
   // The per-module location lock above is the authority pin, but it reads only
   // the hand-listed `OWNER_MODULES`. A NEW file (or an unlisted module) that
   // constructs a second `new PendingSubmissions(` is invisible to it. This guard
@@ -290,7 +290,7 @@ function siteName(site: string): string {
  * alias-aware helper and asserts each name is reached ONLY from the file(s) the
  * table pins, so a second construction anywhere, in ANY spelling, fails.
  */
-test('A5: every single-owner construction is alias-aware unique across production src/**', () => {
+test('every single-owner construction is alias-aware unique across production src/**', () => {
   const expected = new Map<string, string[]>()
   for (const [site, , ownerRel] of SINGLE_OWNER_SITES) {
     const name = siteName(site)
@@ -333,7 +333,7 @@ function calledCallees(source: string, rel = 'module.ts'): string[] {
   return out
 }
 
-test('A5: calledCallees resolves the callee through every expression wrapper', () => {
+test('calledCallees resolves the callee through every expression wrapper', () => {
   // The composition-root guard is only as strong as its callee resolution: each
   // wrapper form below must still be attributed to the unwrapped call.
   const cases: ReadonlyArray<readonly [string, string]> = [
@@ -349,7 +349,7 @@ test('A5: calledCallees resolves the callee through every expression wrapper', (
   }
 })
 
-test('A5: the composition-root construction calls occur only in the composition root', () => {
+test('the composition-root construction calls occur only in the composition root', () => {
   // Plan §8.1/§8.4: a THIRD composition root would be a second
   // `createSessionOwnershipCore({` / `surface.start({` somewhere in production
   // src. The per-owner `SINGLE_OWNER_SITES` row pins the count in bootstrap but
@@ -464,7 +464,7 @@ function hostSubscriptions(source: string, rel = 'probe.ts'): { events: string[]
   return { events, dynamicCount }
 }
 
-test('A5: the Host subscription inventory is unique and AST-complete across production src/**', () => {
+test('the Host subscription inventory is unique and AST-complete across production src/**', () => {
   // Plan §14/§16 ("no subscription/disposer duplication") and §39. Read from the
   // AST so every legal spelling of a `ctx.on` subscription is counted, and assert
   // the COMPLETE inventory (not just the composition-root six): a second
@@ -508,7 +508,7 @@ test('A5: the Host subscription inventory is unique and AST-complete across prod
   )
 })
 
-test('A5: the composition surface keeps the documented surface release order', () => {
+test('the composition surface keeps the documented surface release order', () => {
   // Plan §12.2/§38: the teardown order is behaviour. The composition root only
   // orchestrates; every release hook is surface-owned.
   const source = compositionSource()
@@ -531,7 +531,7 @@ test('A5: the composition surface keeps the documented surface release order', (
   }
 })
 
-test('A5: the composition surface keeps the startup order', () => {
+test('the composition surface keeps the startup order', () => {
   // attachTasks → refreshPendingInput → initLiveSession → registerCommands.
   // Search FORWARD from each hit: the earlier input handlers also refresh the
   // pending presentation, so only the startup tail order is pinned here.
@@ -572,7 +572,7 @@ test('A5/rc.2: the turn flush is initialized before the routing source is attach
     'the routing attach must be the place that binds the turn flush')
 })
 
-test('A5/TS2: the Host-subscription phases keep their frozen startup interleaving', () => {
+test('the Host-subscription phases keep their frozen startup interleaving', () => {
   // §0/§12/§85/§91 Pass 3: the startup wiring order is BEHAVIOR. The baseline
   // interleaved the six application-level subscriptions with the Direct
   // live-assistant-stream acquire — `session/event` BEFORE it, the other five
@@ -628,7 +628,7 @@ test('A5/TS2: the Host-subscription phases keep their frozen startup interleavin
   assert.equal(phaseTwo.split('ctx.on(').length - 1, 5, 'phase 2 installs exactly the other five listeners')
 })
 
-test('A5/TS2: a .tsx production duplicate cannot escape the single-owner scans', (t) => {
+test('a .tsx production duplicate cannot escape the single-owner scans', (t) => {
   // TS1 closed the `.tsx` hole in the production architecture gate; this helper
   // (the whole-tree duplicate DETECTOR behind the A5b single-owner locks) must
   // scan the SAME extension set, and must parse a `.tsx` module as TSX. Without
@@ -674,7 +674,7 @@ test('A5/TS2: a .tsx production duplicate cannot escape the single-owner scans',
   )
 })
 
-test('A5/TS2: the composition zone is enumerated RECURSIVELY (nested helpers included)', (t) => {
+test('the composition zone is enumerated RECURSIVELY (nested helpers included)', (t) => {
   // The zone is the WHOLE `src/app/bootstrap/**` subtree (§7/§18/§20): a
   // one-level `readdir` lets a nested helper escape the composition/owner-surface
   // locks while the architecture gate (which treats the directory as the zone)
@@ -745,7 +745,7 @@ test('A5/TS2: the composition zone is enumerated RECURSIVELY (nested helpers inc
   )
 })
 
-test('A5/TS2: the JSX hard cases are visible to the whole-tree AST walkers', () => {
+test('the JSX hard cases are visible to the whole-tree AST walkers', () => {
   // A legal JSX ATTRIBUTE position hides the construct from a TS parse, so a
   // `.tsx` production module would otherwise escape the Host-subscription
   // inventory and the callee scan while `productionSources()` already scans it.
@@ -771,7 +771,7 @@ test('A5/TS2: the JSX hard cases are visible to the whole-tree AST walkers', () 
   assert.deepEqual(hostSubscriptions("ctx.on('agent/status', () => {})").events, ['agent/status'])
 })
 
-test('A5/TS2: a shared parsed snapshot does not share the alias interpretation between symbols', () => {
+test('a shared parsed snapshot does not share the alias interpretation between symbols', () => {
   // The whole-tree duplicate detector parses the production tree ONCE and
   // evaluates independent symbol queries against it. Sharing the parse must
   // NOT share the alias RESOLUTION: each symbol must resolve exactly the alias

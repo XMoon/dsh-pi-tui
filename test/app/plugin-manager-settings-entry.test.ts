@@ -166,7 +166,7 @@ test('Settings → Plugins opens the page in place; Esc returns to the same Sett
   assert.equal(counts.disposed, 1, 'the hosted page is disposed exactly once on normal close')
 })
 
-test('D2-0: wide 120×40 paints the Rows pane direct entry at its own column', async () => {
+test('wide 120×40 paints the Rows pane direct entry at its own column', async () => {
   for (const [columns, rows] of [[120, 40], [80, 24]] as const) {
     const { invoke, counts, vt } = setup({ columns, rows })
     await invoke('settings')
@@ -188,7 +188,7 @@ test('D2-0: wide 120×40 paints the Rows pane direct entry at its own column', a
   }
 })
 
-test('D2-0: Enter, Right and a real mouse click open the SAME single page', async () => {
+test('Enter, Right and a real mouse click open the SAME single page', async () => {
   const { invoke, counts, vt } = setup({ columns: 120, rows: 40 })
   await invoke('settings')
   await vt.waitForRender()
@@ -231,7 +231,7 @@ test('D2-0: Enter, Right and a real mouse click open the SAME single page', asyn
   assert.match(plain(vt.getViewport()), /> Plugins/)
 })
 
-test('D2-0: a stale release cannot open the page after a category switch, refresh, resize or close', async () => {
+test('a stale release cannot open the page after a category switch, refresh, resize or close', async () => {
   const scenarios = ['category', 'refresh', 'resize', 'close'] as const
   for (const scenario of scenarios) {
     const { invoke, counts, vt } = setup({ columns: 120, rows: 40 })
@@ -266,7 +266,7 @@ test('D2-0: a stale release cannot open the page after a category switch, refres
   }
 })
 
-test('D2-0: narrow 44×20 keeps the direct key entry and restores L0 with Plugins selected', async () => {
+test('narrow 44×20 keeps the direct key entry and restores L0 with Plugins selected', async () => {
   const { invoke, counts, vt } = setup({ columns: 44, rows: 20 })
   await invoke('settings')
   await vt.waitForRender()
@@ -284,7 +284,7 @@ test('D2-0: narrow 44×20 keeps the direct key entry and restores L0 with Plugin
   assert.match(plain(vt.getViewport()), /> Plugins/)
 })
 
-test('D2-0: every other category keeps its real Rows list and level navigation', async () => {
+test('every other category keeps its real Rows list and level navigation', async () => {
   const { invoke, counts, vt } = setup({ columns: 120, rows: 40 })
   await invoke('settings')
   await vt.waitForRender()

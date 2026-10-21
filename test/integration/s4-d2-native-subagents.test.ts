@@ -174,7 +174,7 @@ const NATIVE_TASKS = [
   { bundle: B14, packageName: B14, tool: 'subagent_codex', provider: 'codex' },
 ] as const
 
-test('B13/B14: official missing catalog, exact installTarget and local profile install', { skip }, async t => {
+test('official missing catalog, exact installTarget and local profile install', { skip }, async t => {
   // Catalog truth before any install: both on-demand packages are discoverable
   // as missing official entries with an exact rc.2 install target.
   const catalogHost = await startS4D2Host(t, { bundles: [] })

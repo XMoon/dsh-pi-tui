@@ -701,7 +701,7 @@ async function startRealInstallFixture(
   }
 }
 
-test('A09: the real Host cancel terminates the real pnpm install, restores the profile, and reopens one request', async (t) => {
+test('the real Host cancel terminates the real pnpm install, restores the profile, and reopens one request', async (t) => {
   // The fixture must neutralize an ambient package-manager user config, not
   // just HOME/XDG. Plant a sentinel that would break resolution if inherited.
   const sentinel = join(tmpdir(), `s5-npmrc-sentinel-${process.pid}-${Date.now()}`)
@@ -818,7 +818,7 @@ test('A09: the real Host cancel terminates the real pnpm install, restores the p
   assert.equal(controller.installView()?.phase, 'done')
 })
 
-test('A09 (too-late): the controller renders the real Host too-late response and the one install settles', async (t) => {
+test('(too-late): the controller renders the real Host too-late response and the one install settles', async (t) => {
   // Deterministic race window: the Host advances to `applying` and emits the
   // official phase event, but this test-local PORT WRAPPER withholds that ONE
   // presentation event until the user's Stop has already been dispatched. The
@@ -931,7 +931,7 @@ test('A09 (too-late): the controller renders the real Host too-late response and
   await waitForState('the settled request leaves the installs map', async () => (await inner!.waitForInstall(requestId)) === null)
 })
 
-test('A10: real pnpm blocked builds become pendingBuilds; only an explicit approval runs the harmless marker script', async (t) => {
+test('real pnpm blocked builds become pendingBuilds; only an explicit approval runs the harmless marker script', async (t) => {
   const fixture = await startRealInstallFixture(t, 's5-pr-e-a10')
   const { host, controller, profileDir } = fixture
 

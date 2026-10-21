@@ -121,7 +121,7 @@ test('a failing config first read is recorded and still yields a backend (never 
   runtime.dispose()
 })
 
-test('M3-4 PR1 §12: a post-adapter construction failure reverse-unwinds every constructed part (backend partial state does not survive)', async () => {
+test('a post-adapter construction failure reverse-unwinds every constructed part (backend partial state does not survive)', async () => {
   // The injection lands EXACTLY in the "adapters already constructed, factory
   // has not returned" window: `options.fetch` is read AFTER the semantics
   // bundle and the ConfigPort (with its mirror subscriptions) are

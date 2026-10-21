@@ -235,7 +235,7 @@ test('§7.5 unavailable Remote approval/sandbox facts are omitted, never guessed
 
 /* ───────── PR5: the required transcript-export capability declaration ──── */
 
-test('PR5 the transcript-export capability is REQUIRED and refused unless exactly true', () => {
+test('the transcript-export capability is REQUIRED and refused unless exactly true', () => {
   const commands = code('commands.ts')
   const declaration = commands.indexOf('readonly transcriptExportAvailable: boolean')
   assert.ok(declaration !== -1,
@@ -263,7 +263,7 @@ test('PR5 the transcript-export capability is REQUIRED and refused unless exactl
 
 /* ── PR5 v2 §1C: origin-aware command authority guards ─────────────────── */
 
-test('PR5 §1C the Direct compatibility mirror is NOT Host origin (registry membership ≠ ownership)', () => {
+test('§1C the Direct compatibility mirror is NOT Host origin (registry membership ≠ ownership)', () => {
   const commands = code('commands.ts')
   // §1C-2: the provenance set exists and marks ONLY successful mirrors.
   assert.ok(commands.includes('mirrorDefinitionIds'), 'the mirror-provenance set holds the EXACT stamped definitionIds (review R6-1)')
@@ -292,7 +292,7 @@ test('PR5 §1C the Direct compatibility mirror is NOT Host origin (registry memb
     'hostCatalogResolves is origin-aware (never raw registry membership)')
 })
 
-test('PR5 §1C one classifier drives the submission siblings', () => {
+test('§1C one classifier drives the submission siblings', () => {
   const controller = code('app/submission/controller.ts')
   assert.ok(controller.includes('classifyCommandLine('), 'the controller consumes the classifier')
   // The delivery/attachment/host-dispatch gates consume classification.kind.
@@ -314,7 +314,7 @@ test('PR5 §1C one classifier drives the submission siblings', () => {
 
 /* ── PR5 v2 §3C: rewind final-notification currentness guards ──────────── */
 
-test('PR5 §3C the rewind final settlement is gated by the operation-owned navigation identity', () => {
+test('§3C the rewind final settlement is gated by the operation-owned navigation identity', () => {
   const runtime = code('app/session/runtime.ts')
   // The adoption commit mints the post-adoption identity.
   assert.ok(runtime.includes('committedNavigation = claimedEpoch === undefined'),
@@ -355,7 +355,7 @@ test('PR5 §3C the rewind final settlement is gated by the operation-owned navig
 
 /* ── PR5 v2 §2.12: Ctrl+R main Session identity ─────────────────────────── */
 
-test('PR5 the Ctrl+R Current-session identity comes from the selected ownership authority', () => {
+test('the Ctrl+R Current-session identity comes from the selected ownership authority', () => {
   const bootstrap = code('app/bootstrap.ts')
   const seam = bootstrap.slice(
     bootstrap.indexOf('sessionId: () => ownership.currentSessionId()'),
@@ -370,7 +370,7 @@ test('PR5 the Ctrl+R Current-session identity comes from the selected ownership 
 
 /* ── PR5 v4 / R7: the final authority boundaries this round locked ─────── */
 
-test('PR5 §1C-4 (R7-1): every routing read of the Host claim consumes the GENUINE Host-origin authority', () => {
+test('§1C-4 (R7-1): every routing read of the Host claim consumes the GENUINE Host-origin authority', () => {
   const controller = code('app/submission/controller.ts')
   // The final command-plane ownership, the submit-time echo gate and the
   // attachment payload all read the origin claim — never the advertised union.
@@ -399,7 +399,7 @@ test('PR5 §1C-4 (R7-1): every routing read of the Host claim consumes the GENUI
     'the dead advertised-union view is gone')
 })
 
-test('PR5 §1C-4 (R7-3): hostOriginClaimOf has no skill-wrapper NAME shortcut', () => {
+test('§1C-4 (R7-3): hostOriginClaimOf has no skill-wrapper NAME shortcut', () => {
   const commands = code('commands.ts')
   const origin = commands.slice(
     commands.indexOf('const hostOriginClaimOf'),
@@ -411,7 +411,7 @@ test('PR5 §1C-4 (R7-3): hostOriginClaimOf has no skill-wrapper NAME shortcut', 
     false, 'a live wrapper NAME must not erase a later genuine Host winner')
 })
 
-test('PR5 §1C-4 (R7-2): the attachment gate consumes the shared classification alone', () => {
+test('§1C-4 (R7-2): the attachment gate consumes the shared classification alone', () => {
   const controller = code('app/submission/controller.ts')
   const gate = controller.slice(
     controller.indexOf('const attachmentRefusal = ('),
@@ -427,7 +427,7 @@ test('PR5 §1C-4 (R7-2): the attachment gate consumes the shared classification 
     'a genuine Host command follows its own attachment declaration')
 })
 
-test('PR5 §3C-4 (R7-4): the rewind settlement owner is phase-specific', () => {
+test('§3C-4 (R7-4): the rewind settlement owner is phase-specific', () => {
   const events = code('app/surface/application-events.ts')
   // The success settlement is fenced by the operation-owned adopted identity.
   assert.ok(events.includes('!deps.rewind.isNavigationCurrent(owned)) return'),
@@ -448,7 +448,7 @@ test('PR5 §3C-4 (R7-4): the rewind settlement owner is phase-specific', () => {
 
 /* ── PR5 F2: an unavailable Remote model fact is never a business value ── */
 
-test('PR5 F2: an absent `model` projection fact is passed THROUGH, never rendered as a business value', () => {
+test('an absent `model` projection fact is passed THROUGH, never rendered as a business value', () => {
   const status = code('app/surface/status-runtime.ts')
   const branch = status.slice(
     status.indexOf('const updateWelcomeCard = ('),
@@ -496,7 +496,7 @@ test('PR5 F2: an absent `model` projection fact is passed THROUGH, never rendere
 
 /* ── PR5 §1C-7 (whole-PR F4): the sessionless route consumes the classifier ── */
 
-test('PR5 §1C-7 (whole-PR F4): the sessionless route is the classifier TUI family, never a name set alone', () => {
+test('§1C-7 (whole-PR F4): the sessionless route is the classifier TUI family, never a name set alone', () => {
   const controller = code('app/submission/controller.ts')
   const at = controller.indexOf('const isSessionless = parsed !== undefined')
   assert.ok(at > 0, 'the sessionless predicate exists')
@@ -512,7 +512,7 @@ test('PR5 §1C-7 (whole-PR F4): the sessionless route is the classifier TUI fami
     'the sessionless name set remains an additional filter, never the decider')
 })
 
-test('PR5 §1C-6 (whole-PR F4): TUI ownership comes from the LIVE Client registry, never the static name list', () => {
+test('§1C-6 (whole-PR F4): TUI ownership comes from the LIVE Client registry, never the static name list', () => {
   const controller = code('app/submission/controller.ts')
   // The live exact-line claim is the TUI ownership source at every consumer.
   assert.ok(controller.includes('deps.command.clientClaimsLine(parsedAtSubmit)'),
@@ -552,7 +552,7 @@ test('PR5 §1C-6 (whole-PR F4): TUI ownership comes from the LIVE Client registr
 
 /* ── PR5 §1C-5 (whole-PR F2): the raw skill predicate never outranks the Host reservation ── */
 
-test('PR5 §1C-5 (whole-PR F2): every skill-route sibling consumes the Host reservation condition', () => {
+test('§1C-5 (whole-PR F2): every skill-route sibling consumes the Host reservation condition', () => {
   const controller = code('app/submission/controller.ts')
   // The early echo and the steer sibling both consumed the RAW
   // `isSkillInvocation` predicate, so a genuine Host name that does not claim

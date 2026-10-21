@@ -1115,7 +1115,7 @@ function upgradeText(detail: ReturnType<typeof buildPluginDetailView>): string |
   return detailFact(detail, 'Upgrade')?.value
 }
 
-test('F10: shipped bundles guide a DSH upgrade and never expose an in-place update/Remove', async () => {
+test('shipped bundles guide a DSH upgrade and never expose an in-place update/Remove', async () => {
   const { port } = fakePort({
     snapshotImpl: async () => snapshot([
       bundle({ name: '@deepseek-ai/dsh-base', availability: 'installation', installed: true, removable: false, source: undefined, version: '0.2.1-rc.2' }),
@@ -1132,7 +1132,7 @@ test('F10: shipped bundles guide a DSH upgrade and never expose an in-place upda
   assert.ok(!detail.actions.some(action => /update/i.test(action.value)), 'no Update business action exists')
 })
 
-test('F10: profile-owned bundles guide Remove-then-explicit-Install and never assume an offered version', async () => {
+test('profile-owned bundles guide Remove-then-explicit-Install and never assume an offered version', async () => {
   const { port } = fakePort({
     snapshotImpl: async () => snapshot([
       bundle({ name: 'profile-owned', availability: 'profile', installed: true, removable: true, source: 'file:/tmp/owned', version: '1.0.0' }),
@@ -1162,7 +1162,7 @@ test('F10: profile-owned bundles guide Remove-then-explicit-Install and never as
   assert.match(readOnlyRemove?.reason ?? '', /Required by DSH management/u)
 })
 
-test('F10: missing catalog entries use the official offered target or state that none was supplied', async () => {
+test('missing catalog entries use the official offered target or state that none was supplied', async () => {
   const { port } = fakePort({
     snapshotImpl: async () => snapshot([
       bundle({
@@ -1197,7 +1197,7 @@ test('F10: missing catalog entries use the official offered target or state that
   assert.ok(missing.actions.some(action => action.value === PLUGIN_ACTION.officialInstall && action.enabled === false), 'the Install action stays disabled')
 })
 
-test('F10: the Current TUI bundle states external ownership and a standalone entry carries no package route', async () => {
+test('the Current TUI bundle states external ownership and a standalone entry carries no package route', async () => {
   const { port } = fakePort({
     snapshotImpl: async () => ({
       bundles: [bundle({ name: SELF_BUNDLE, availability: 'profile', installed: true, removable: true, source: 'file:/tmp/tui', version: '0.5.3' })],
@@ -1218,7 +1218,7 @@ test('F10: the Current TUI bundle states external ownership and a standalone ent
   assert.equal(upgradeText(entry), undefined, 'a standalone Loader entry has no package upgrade route')
 })
 
-test('F10: version difference, equal version and masked sources never leak credentials', async () => {
+test('version difference, equal version and masked sources never leak credentials', async () => {
   const { port } = fakePort({
     snapshotImpl: async () => snapshot([
       bundle({

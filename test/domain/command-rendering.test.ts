@@ -65,7 +65,7 @@ function overrideOf(app: TuiApp, message: TranscriptMessage): boolean | undefine
   return (app as unknown as { expandedOverride: Map<TranscriptMessage, boolean> }).expandedOverride.get(message)
 }
 
-test('A18: the host command card keeps the slash-command icon row and status pill vocabulary', async () => {
+test('the host command card keeps the slash-command icon row and status pill vocabulary', async () => {
   const { vt, app } = startApp()
   const messages: TranscriptMessage[] = [
     command({ commandId: CommandId('cmd-run'), name: 'compact' }),
@@ -85,7 +85,7 @@ test('A18: the host command card keeps the slash-command icon row and status pil
   app.stop()
 })
 
-test('A18: verbatim rawInput args never double the separator whitespace', async () => {
+test('verbatim rawInput args never double the separator whitespace', async () => {
   const { vt, app } = startApp()
   // The official args are parseCommand's VERBATIM rawInput INCLUDING the
   // separator whitespace after the name — a leading space must not become
@@ -101,7 +101,7 @@ test('A18: verbatim rawInput args never double the separator whitespace', async 
   app.stop()
 })
 
-test('A19: the regular default is the one-line first-line preview; the master reveals the full body', async () => {
+test('the regular default is the one-line first-line preview; the master reveals the full body', async () => {
   const { vt, app } = startApp()
   const outcome = `first preview line of a long outcome\nsecond body line ${'x'.repeat(50)}\nthird body line`
   const target = command({ name: 'export', outcome: { kind: 'success', text: outcome } })
@@ -122,7 +122,7 @@ test('A19: the regular default is the one-line first-line preview; the master re
   app.stop()
 })
 
-test('A19: the per-card click flips a command against its effective state', async () => {
+test('the per-card click flips a command against its effective state', async () => {
   const { vt, app } = startApp()
   const target = command({ name: 'theme', outcome: { kind: 'success', text: 'theme set to dark' } })
   app.setTranscript([target], new Map())
@@ -141,7 +141,7 @@ test('A19: the per-card click flips a command against its effective state', asyn
   app.stop()
 })
 
-test('A19: in collapsed Focus the command stays standalone-visible, independent of the Thought root', async () => {
+test('in collapsed Focus the command stays standalone-visible, independent of the Thought root', async () => {
   const { vt, app } = startApp('focus')
   const target = command({ commandId: CommandId('cmd-f'), name: 'theme', outcome: { kind: 'success', text: 'focused outcome body' } })
   app.setTranscript([
@@ -154,7 +154,7 @@ test('A19: in collapsed Focus the command stays standalone-visible, independent 
   app.stop()
 })
 
-test('A19: in fullscreen Focus the command keeps its own click disclosure', async () => {
+test('in fullscreen Focus the command keeps its own click disclosure', async () => {
   const { vt, app } = startApp('focus')
   app.setFullscreen(true)
   await view(vt)
@@ -170,7 +170,7 @@ test('A19: in fullscreen Focus the command keeps its own click disclosure', asyn
   app.stop()
 })
 
-test('A20: an extension message renderer never receives a command snapshot', async () => {
+test('an extension message renderer never receives a command snapshot', async () => {
   const registry = new RendererRegistry()
   let messageCalls = 0
   registry.registerMessageRenderer({
@@ -189,7 +189,7 @@ test('A20: an extension message renderer never receives a command snapshot', asy
   app.stop()
 })
 
-test('A19/A15: a search hit in the outcome body reveals the command with the matched content', async () => {
+test('a search hit in the outcome body reveals the command with the matched content', async () => {
   const { vt, app } = startApp()
   const target = command({ name: 'export', args: 'unique-arg-token', outcome: { kind: 'success', text: 'needle-in-outcome body' } })
   app.setTranscript([target], new Map())
@@ -205,7 +205,7 @@ test('A19/A15: a search hit in the outcome body reveals the command with the mat
   app.stop()
 })
 
-test('A15/A18: the combined manual-compaction card renders the fused command facts', async () => {
+test('the combined manual-compaction card renders the fused command facts', async () => {
   const { vt, app } = startApp()
   const fused: TranscriptCommandMessage = command({
     commandId: CommandId('cmd-fused'), name: 'compact',
@@ -223,7 +223,7 @@ test('A15/A18: the combined manual-compaction card renders the fused command fac
   app.stop()
 })
 
-test('A19: a truncated folded outcome gains a light disclosure hint', async () => {
+test('a truncated folded outcome gains a light disclosure hint', async () => {
   const { vt, app } = startApp()
   const outcome = `first preview line\nsecond body line ${'x'.repeat(50)}\nthird body line`
   app.setTranscript([command({ name: 'export', outcome: { kind: 'success', text: outcome } })], new Map())
@@ -239,7 +239,7 @@ test('A19: a truncated folded outcome gains a light disclosure hint', async () =
   app.stop()
 })
 
-test('A18: a multiline fused outcome folds to ONE preview row in the combined card', async () => {
+test('a multiline fused outcome folds to ONE preview row in the combined card', async () => {
   const { vt, app } = startApp()
   const fused: TranscriptCommandMessage = command({
     commandId: CommandId('cmd-multi'), name: 'compact',
@@ -256,7 +256,7 @@ test('A18: a multiline fused outcome folds to ONE preview row in the combined ca
   app.stop()
 })
 
-test('A18: a no-text fused command error still titles the combined card as failed', async () => {
+test('a no-text fused command error still titles the combined card as failed', async () => {
   const { vt, app } = startApp()
   const fused: TranscriptCommandMessage = command({
     commandId: CommandId('cmd-quiet'), name: 'compact',
@@ -273,7 +273,7 @@ test('A18: a no-text fused command error still titles the combined card as faile
   app.stop()
 })
 
-test('A19: a width-truncated folded outcome keeps the disclosure hint visible', async () => {
+test('a width-truncated folded outcome keeps the disclosure hint visible', async () => {
   const vt = new VirtualTerminal(40, 20)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()

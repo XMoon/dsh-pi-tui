@@ -2203,7 +2203,7 @@ test('read-only Input operations never clear the skipped state', () => {
   assert.ok(view.includes('(skipped)'), `Ctrl+C without typing must keep the skipped mark:\n${view}`)
 })
 
-test('M3-3B draftSnapshot/initialDraft preserve progress across a park', () => {
+test('draftSnapshot/initialDraft preserve progress across a park', () => {
   // The park/reopen contract keeps the user's work: a controller snapshots the
   // flow at teardown and seeds the SAME call's new flow from it.
   const questions = [
@@ -2235,7 +2235,7 @@ test('M3-3B draftSnapshot/initialDraft preserve progress across a park', () => {
   assert.equal(freshDraft.tab, 0)
 })
 
-test('M3-3B onDraftChange reports every real mutation', () => {
+test('onDraftChange reports every real mutation', () => {
   const seen: number[] = []
   const flow = new QuestionFlow(
     [{ id: 'q1', question: 'Pick', options: [{ label: 'a' }, { label: 'b' }], multiSelect: true }],

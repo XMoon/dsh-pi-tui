@@ -71,7 +71,7 @@ const workHeaders = (view: string): string[] =>
 
 // --- S5: Preparing becomes durable ----------------------------------------
 
-test('S5: a durable Process row replaces the ephemeral preview without duplication', async () => {
+test('a durable Process row replaces the ephemeral preview without duplication', async () => {
   const { vt, app } = startApp()
   app.setTranscript([{ kind: 'thinking', turn: 1, text: 'reasoning 1' }], new Map(), undefined, [preview('p1')])
   await vt.waitForRender()
@@ -96,7 +96,7 @@ test('S5: a durable Process row replaces the ephemeral preview without duplicati
 
 // --- S6: Preparing disappears / cancels -----------------------------------
 
-test('S6: a cancelled preview leaves no ghost row and no fake pending Activity', async () => {
+test('a cancelled preview leaves no ghost row and no fake pending Activity', async () => {
   const { vt, app } = startApp()
   app.setTranscript([
     { kind: 'thinking', turn: 1, text: 'closed run' },
@@ -119,7 +119,7 @@ test('S6: a cancelled preview leaves no ghost row and no fake pending Activity',
 
 // --- S7: multiple Preparing calls -----------------------------------------
 
-test('S7: multiple ownerless previews fail open as one full Preparing row each', async () => {
+test('multiple ownerless previews fail open as one full Preparing row each', async () => {
   const { vt, app } = startApp()
   // Deliberately UNORDERED input: the rendered rows must follow the
   // streamingToolPreviewsForTurn() ordering (index, then step, then callId),
@@ -155,7 +155,7 @@ test('S7: multiple ownerless previews fail open as one full Preparing row each',
 
 // --- S8: turn boundary ----------------------------------------------------
 
-test('S8: no Preparing owner leaks from turn N to turn N+1', async () => {
+test('no Preparing owner leaks from turn N to turn N+1', async () => {
   const { vt, app } = startApp()
   app.setTranscript([
     { kind: 'thinking', turn: 1, text: 'turn one reasoning' },
@@ -174,7 +174,7 @@ test('S8: no Preparing owner leaks from turn N to turn N+1', async () => {
 
 // --- S9: session switch ---------------------------------------------------
 
-test('S9: a session switch drops the stale pending Preparing row and all owner state', async () => {
+test('a session switch drops the stale pending Preparing row and all owner state', async () => {
   const { vt, app } = startApp()
   app.setTranscript([
     { kind: 'thinking', turn: 1, text: 'session A run' },
@@ -197,7 +197,7 @@ test('S9: a session switch drops the stale pending Preparing row and all owner s
 
 // --- S10: preset / surface switch -----------------------------------------
 
-test('S10: preset and surface switches during Preparing keep one source of truth', async () => {
+test('preset and surface switches during Preparing keep one source of truth', async () => {
   const { vt, app } = startApp()
   const messages: TranscriptMessage[] = [
     { kind: 'thinking', turn: 1, text: 'run reasoning' },
@@ -229,7 +229,7 @@ test('S10: preset and surface switches during Preparing keep one source of truth
   assert.equal(workHeaders(view).length, 1, `regular Compact keeps one Work span:\n${view}`)
 })
 
-test('S10b: preset and surface switches during an OWNERLESS pending run keep one source of truth', async () => {
+test('preset and surface switches during an OWNERLESS pending run keep one source of truth', async () => {
   const { vt, app } = startApp()
   // A boundary closes the run, so the preview is an ownerless pending-run:
   // across every preset/surface switch there is exactly ONE live Preparing

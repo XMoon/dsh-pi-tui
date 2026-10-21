@@ -1188,7 +1188,7 @@ test('/fork avoids a duplicate selection when the inherited prefix already match
     'matching inherited state must not append a redundant child selection')
 })
 
-test('PR5 R7-4 positive control: a rewind LOAD failure whose picker identity is still current is shown', async (t) => {
+test('a rewind LOAD failure whose picker identity is still current is shown', async (t) => {
   // §3C-4: a throw from the PRE-ADMISSION region (here the `loadThrough` read)
   // belongs to the picker identity, and while that identity is current the
   // failure must be reported truthfully.
@@ -1246,7 +1246,7 @@ test('PR5 R7-4 positive control: a rewind LOAD failure whose picker identity is 
     `a current pre-admission load failure must be shown: ${probe.notices.join(', ')}`)
 })
 
-test('PR5 R6-5: a rewind settling after an EXTERNAL navigation never notifies the replacement surface (mounted stale negative)', async (t) => {
+test('a rewind settling after an EXTERNAL navigation never notifies the replacement surface (mounted stale negative)', async (t) => {
   const life = testLifecycle(t)
   const home = life.tempDir('dsh-pi-tui-rewind-stale-')
   const previousHome = process.env.DSH_HOME
@@ -1402,7 +1402,7 @@ test('PR5 R6-5: a rewind settling after an EXTERNAL navigation never notifies th
 })
 
 
-test('PR5 R6-5: a cancellation detected at N+2 is suppressed once navigation advances to N+3 (consumer-level fence)', async (t) => {
+test('a cancellation detected at N+2 is suppressed once navigation advances to N+3 (consumer-level fence)', async (t) => {
   // The structured-error contract: the error's OWN notificationNavigation
   // (the live identity at detection) decides publishability. This locks the
   // consumer gate directly — the mounted A→B→A positive (above) proves the
@@ -1731,7 +1731,7 @@ const B3_QUESTION: readonly B3Question[] = [
   { id: 'q-c', question: 'Which target?', options: [{ label: 'alpha' }, { label: 'beta' }] },
 ]
 
-test('B3 finding C (1): the real /new quiesce parks on a LIVE Question — A keeps the presentation until the user really answers', async (t) => {
+test('finding C (1): the real /new quiesce parks on a LIVE Question — A keeps the presentation until the user really answers', async (t) => {
   const life = testLifecycle(t)
   const home = life.tempDir('dsh-pi-tui-b3-c-new-')
   const sessionA = fakeSession({
@@ -1797,7 +1797,7 @@ test('B3 finding C (1): the real /new quiesce parks on a LIVE Question — A kee
   }
 })
 
-test('B3 finding C (2): the real /fork publication withdraws A\'s live modal while the Host cancellation is STILL in flight', async (t) => {
+test('finding C (2): the real /fork publication withdraws A\'s live modal while the Host cancellation is STILL in flight', async (t) => {
   const life = testLifecycle(t)
   const home = life.tempDir('dsh-pi-tui-b3-c-fork-')
   const sessionA = fakeSession({
@@ -1888,7 +1888,7 @@ test('B3 finding C (2): the real /fork publication withdraws A\'s live modal whi
   }
 })
 
-test('B3 finding C (3): a real publication withdraws a MOUNTED continued form and re-scopes its attention', async (t) => {
+test('finding C (3): a real publication withdraws a MOUNTED continued form and re-scopes its attention', async (t) => {
   const life = testLifecycle(t)
   const home = life.tempDir('dsh-pi-tui-b3-c-switch-')
   const sessionA = fakeSession({
@@ -1944,7 +1944,7 @@ test('B3 finding C (3): a real publication withdraws a MOUNTED continued form an
   }
 })
 
-test('B3 finding C (4): switching away and BACK restores the continued entry from the official projection', async (t) => {
+test('finding C (4): switching away and BACK restores the continued entry from the official projection', async (t) => {
   const life = testLifecycle(t)
   const home = life.tempDir('dsh-pi-tui-b3-c-return-')
   const previousHome = process.env.DSH_HOME
@@ -2007,7 +2007,7 @@ test('B3 finding C (4): switching away and BACK restores the continued entry fro
   assert.deepEqual(plane.answers, [], 'the restore dispatches no answer either')
 })
 
-test('B3 finding C/F6 (5): a real publication withdraws A\'s live APPROVAL prompt while its request is still in flight', async (t) => {
+test('finding C/F6 (5): a real publication withdraws A\'s live APPROVAL prompt while its request is still in flight', async (t) => {
   const life = testLifecycle(t)
   const home = life.tempDir('dsh-pi-tui-b3-c-approval-')
   const sessionA = fakeSession({
@@ -2090,7 +2090,7 @@ test('B3 finding C/F6 (5): a real publication withdraws A\'s live APPROVAL promp
   }
 })
 
-test('B3 finding F10 (6): a replaced subject\'s request that arrives AFTER the publication is never mounted (production path)', async (t) => {
+test('finding F10 (6): a replaced subject\'s request that arrives AFTER the publication is never mounted (production path)', async (t) => {
   const life = testLifecycle(t)
   const home = life.tempDir('dsh-pi-tui-b3-c-late-')
   const sessionA = fakeSession({
@@ -2195,7 +2195,7 @@ test('B3 finding F10 (6): a replaced subject\'s request that arrives AFTER the p
   }
 })
 
-test('B3 finding F13: the DEFAULT PiTui branch still forwards a foreign-session request to the app (the new policy is renderer-owned only)', async (t) => {
+test('finding F13: the DEFAULT PiTui branch still forwards a foreign-session request to the app (the new policy is renderer-owned only)', async (t) => {
   const life = testLifecycle(t)
   const home = life.tempDir('dsh-pi-tui-b3-c-pitui-')
   const previousHome = process.env.DSH_HOME
@@ -2241,7 +2241,7 @@ test('B3 finding F13: the DEFAULT PiTui branch still forwards a foreign-session 
     'the default branch delegated the foreign-session request to the app')
 })
 
-test('B3 finding F14 (7): a REAL opening rollback retires the opening target\'s presentation with NO extra trigger', async (t) => {
+test('finding F14 (7): a REAL opening rollback retires the opening target\'s presentation with NO extra trigger', async (t) => {
   const life = testLifecycle(t)
   const home = life.tempDir('dsh-pi-tui-b3-c-rollback-')
   const sessionA = fakeSession({
@@ -2335,7 +2335,7 @@ test('B3 finding F14 (7): a REAL opening rollback retires the opening target\'s 
   }
 })
 
-test('B3 P2-2 (8): signal-less live requests are settled by the REAL retirement, not by TUI exit', async (t) => {
+test('(8): signal-less live requests are settled by the REAL retirement, not by TUI exit', async (t) => {
   const life = testLifecycle(t)
   const home = life.tempDir('dsh-pi-tui-b3-nosig-')
   const sessionA = fakeSession({
@@ -2390,7 +2390,7 @@ test('B3 P2-2 (8): signal-less live requests are settled by the REAL retirement,
   }
 })
 
-test('B3 P3 (9): an open Alt+Q list does not survive a real Session replacement', async (t) => {
+test('(9): an open Alt+Q list does not survive a real Session replacement', async (t) => {
   const life = testLifecycle(t)
   const home = life.tempDir('dsh-pi-tui-b3-altq-switch-')
   const sessionA = fakeSession({
@@ -2559,12 +2559,12 @@ async function expectPublicationWindowCurrentness(
   }
 }
 
-test('B3 P2-B (10): the replaced modal leaves the seat AT the owner publication, before the new owner is initialized (fork and /new)', async (t) => {
+test('(10): the replaced modal leaves the seat AT the owner publication, before the new owner is initialized (fork and /new)', async (t) => {
   await expectPublicationWindowCurrentness(t, 'fork')
   await expectPublicationWindowCurrentness(t, 'new')
 })
 
-test('B3 P2-C (11): the commit-time withdrawal performs NO Host projection read (a throwing read cannot reach it)', async (t) => {
+test('(11): the commit-time withdrawal performs NO Host projection read (a throwing read cannot reach it)', async (t) => {
   const life = testLifecycle(t)
   const home = life.tempDir('dsh-pi-tui-b3-commitread-')
   const sessionA = fakeSession({

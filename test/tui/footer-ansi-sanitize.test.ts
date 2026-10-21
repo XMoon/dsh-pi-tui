@@ -39,7 +39,7 @@ test('a lone ESC is consumed without eating the next character', () => {
   assert.equal(out, 'ab')
 })
 
-test('C0 controls are stripped (tab/newline/CR survive as layout whitespace)', () => {
+test('controls are stripped (tab/newline/CR survive as layout whitespace)', () => {
   const out = sanitizeCommandOutput('a\x00b\x07c\td\ne\rf')
   assert.equal(out, 'abc\td\ne\rf')
 })

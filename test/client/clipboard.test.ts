@@ -89,7 +89,7 @@ test('Wayland without wl-copy falls through to X11 xclip when DISPLAY is set', a
   assert.deepEqual(calls, [{ command: 'xclip', args: ['-selection', 'clipboard'], input: 'hello' }])
 })
 
-test('X11: xclip first, xsel as the fallback', async () => {
+test('xclip first, xsel as the fallback', async () => {
   const { run, calls } = scriptedRun({ 'xclip -selection clipboard': 1, 'xsel --clipboard --input': 0 })
   const ok = await copyToClipboard('hello', run, envOf({ env: { DISPLAY: ':0' } }))
   assert.equal(ok, true)
@@ -99,7 +99,7 @@ test('X11: xclip first, xsel as the fallback', async () => {
   ])
 })
 
-test('X11: xsel alone works when xclip is missing', async () => {
+test('xsel alone works when xclip is missing', async () => {
   const { run, calls } = scriptedRun({ 'xsel --clipboard --input': 0 })
   const ok = await copyToClipboard('hello', run, envOf({
     env: { DISPLAY: ':0' },

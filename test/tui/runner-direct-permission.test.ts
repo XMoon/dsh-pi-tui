@@ -83,7 +83,7 @@ function sessionEvents(ctx: Context, sessionId: string): readonly CommandEvent[]
 
 const stripAnsi = (line: string): string => line.replace(/\u001b\[[0-9;]*[A-Za-z]/gu, '')
 
-test('L6 Direct: a real Shift+Tab executes exactly ONE official /permission and the pushed projection repaints', async (t) => {
+test('Direct: a real Shift+Tab executes exactly ONE official /permission and the pushed projection repaints', async (t) => {
   const life = testLifecycle(t)
   // The PiTui PHYSICAL terminal: the direct fixture leaves the tty to this
   // VirtualTerminal (the same stand-in every PiTui runner suite installs).

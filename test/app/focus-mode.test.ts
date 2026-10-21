@@ -2861,7 +2861,7 @@ test('a settled text-only answer crossed by a human steer stays persistent befor
     'Focus off leaves the raw transcript chronology unchanged')
 })
 
-test('Q11 a settled question after a committed pre-steer answer never crosses the ordering fence', () => {
+test('a settled question after a committed pre-steer answer never crosses the ordering fence', () => {
   const folder = new TranscriptFolder()
   const initial = steerMessage('q-fence-initial', 'initial prompt')
   const steer = steerMessage('q-fence-steer', 'human steer')
