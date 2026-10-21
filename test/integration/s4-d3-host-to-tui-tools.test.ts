@@ -99,7 +99,7 @@ function footerLine(view: string): string {
   return lines.find(line => line.includes('[scripted/review-model]')) ?? ''
 }
 
-test('B05: the real create_worktree result and effective cwd reach the mounted TUI', { skip: skippedInstallationReason([B05]) }, async t => {
+test('the real create_worktree result and effective cwd reach the mounted TUI', { skip: skippedInstallationReason([B05]) }, async t => {
   const app = await startS4D3Application(t, {
     bundles: [B05],
     patches: [{ id: 'agent-default-model', config: { provider: 'scripted', model: 'review-model' } }] as never,
@@ -204,7 +204,7 @@ function toolResultTexts(agent: Agent): string[] {
 
 const sleep = async (ms: number): Promise<void> => { await new Promise<void>(resolve => setTimeout(resolve, ms)) }
 
-test('B07: the real retained terminal result, Job and close state reach the mounted TUI', { skip: skippedInstallationReason([B07]) }, async t => {
+test('the real retained terminal result, Job and close state reach the mounted TUI', { skip: skippedInstallationReason([B07]) }, async t => {
   const app = await startS4D3Application(t, {
     bundles: [B07],
     patches: [{ id: 'agent-default-model', config: { provider: 'scripted', model: 'review-model' } }] as never,
@@ -307,7 +307,7 @@ test('B07: the real retained terminal result, Job and close state reach the moun
 
 // ── B08 session search ─────────────────────────────────────────────────────
 
-test('B08: the official scoped session_search results reach the PiTui Tool output, never the Session Browser', { skip: skippedInstallationReason([B08]) }, async t => {
+test('the official scoped session_search results reach the PiTui Tool output, never the Session Browser', { skip: skippedInstallationReason([B08]) }, async t => {
   const adapter = new ScriptedAdapter()
   const project = { path: '' }
   const app = await startS4D3Application(t, {

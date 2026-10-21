@@ -1350,7 +1350,7 @@ function settingsWorkspaceSource(): SettingsWorkspaceSource {
   }
 }
 
-test('B2A-13 a Question preempts the Settings workspace; a blocking owner refuses a new lease and the workspace never resurrects', async () => {
+test('a Question preempts the Settings workspace; a blocking owner refuses a new lease and the workspace never resurrects', async () => {
   const { vt, app } = startApp()
   app.openSettingsWorkspace(settingsWorkspaceSource(), { onOpenLegacy: () => {} })
   await vt.waitForRender()
@@ -1376,7 +1376,7 @@ test('B2A-13 a Question preempts the Settings workspace; a blocking owner refuse
   app.stop()
 })
 
-test('B2A-14 the Job and Settings workspace leases are mutually exclusive, and a stale closer cannot release twice', async () => {
+test('the Job and Settings workspace leases are mutually exclusive, and a stale closer cannot release twice', async () => {
   const { vt, app } = startApp()
   const harness = attachTasks(app, { jobIds: ['job-a'] })
   await flush()
@@ -1427,7 +1427,7 @@ test('B2A-14 the Job and Settings workspace leases are mutually exclusive, and a
   app.stop()
 })
 
-test('B2A-14b TuiApp.dispose releases a leased Settings workspace exactly once', async () => {
+test('TuiApp.dispose releases a leased Settings workspace exactly once', async () => {
   const { vt, app } = startApp()
   let closes = 0
   app.openSettingsWorkspace(settingsWorkspaceSource(), {
@@ -1443,7 +1443,7 @@ test('B2A-14b TuiApp.dispose releases a leased Settings workspace exactly once',
   assert.equal(closes, 1, 'a repeated dispose cannot double-notify')
 })
 
-test('B2A-15 a legacy handoff that loses the surface to a NEWER workspace never mounts the legacy editor', async () => {
+test('a legacy handoff that loses the surface to a NEWER workspace never mounts the legacy editor', async () => {
   const { vt, app } = startApp()
   let legacyOpens = 0
   let innerOpened = false
@@ -1475,7 +1475,7 @@ test('B2A-15 a legacy handoff that loses the surface to a NEWER workspace never 
   app.stop()
 })
 
-test('B2A-16 the session hydration boundary retires a leased Settings workspace exactly once', async () => {
+test('the session hydration boundary retires a leased Settings workspace exactly once', async () => {
   const { vt, app } = startApp()
   let closes = 0
   app.openSettingsWorkspace(settingsWorkspaceSource(), {
@@ -1493,7 +1493,7 @@ test('B2A-16 the session hydration boundary retires a leased Settings workspace 
   app.stop()
 })
 
-test('B2A-17 an Approval and a Save Location both pre-empt the Settings workspace, which then refuses a new lease', async () => {
+test('an Approval and a Save Location both pre-empt the Settings workspace, which then refuses a new lease', async () => {
   const { vt, app } = startApp()
   app.openSettingsWorkspace(settingsWorkspaceSource(), { onOpenLegacy: () => {} })
   await vt.waitForRender()
@@ -1526,7 +1526,7 @@ test('B2A-17 an Approval and a Save Location both pre-empt the Settings workspac
   app.stop()
 })
 
-test('B2A-18 stop() releases a leased Settings workspace once and restarts with no ghost screen', async () => {
+test('stop() releases a leased Settings workspace once and restarts with no ghost screen', async () => {
   const { vt, app } = startApp()
   let closes = 0
   app.openSettingsWorkspace(settingsWorkspaceSource(), {
@@ -1546,7 +1546,7 @@ test('B2A-18 stop() releases a leased Settings workspace once and restarts with 
   app.stop()
 })
 
-test('B2A-19 a Settings round trip preserves an open Task Browser overlay (same instance)', async () => {
+test('a Settings round trip preserves an open Task Browser overlay (same instance)', async () => {
   const { vt, app } = startApp()
   const harness = attachTasks(app, { jobIds: ['job-a'] })
   await flush()
@@ -1566,7 +1566,7 @@ test('B2A-19 a Settings round trip preserves an open Task Browser overlay (same 
   app.stop()
 })
 
-test('B2A-20 a legacy handoff never crosses a blocking owner started by its own close', async () => {
+test('a legacy handoff never crosses a blocking owner started by its own close', async () => {
   const { vt, app } = startApp()
   let legacyOpens = 0
   let question: Promise<unknown> | undefined
@@ -1599,7 +1599,7 @@ test('B2A-20 a legacy handoff never crosses a blocking owner started by its own 
   app.stop()
 })
 
-test('B2A-21 closing a workspace hands the terminal over without flushing its own document into the resumed surface', async () => {
+test('closing a workspace hands the terminal over without flushing its own document into the resumed surface', async () => {
   const { vt, app } = startApp()
   // The physical byte stream is the contract here: a workspace screen stopped
   // WITHOUT `preserveScreen` exits the alternate screen and then writes its own
@@ -1657,7 +1657,7 @@ test('B2A-21 closing a workspace hands the terminal over without flushing its ow
   app.stop()
 })
 
-test('B2A-22 a workspace open unwind never flushes the partially started screen document into the restored surface', async () => {
+test('a workspace open unwind never flushes the partially started screen document into the restored surface', async () => {
   const { vt, app } = startApp()
   const harness = attachTasks(app, { jobIds: ['job-a'] })
   await flush()

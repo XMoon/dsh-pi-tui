@@ -139,7 +139,7 @@ async function openFullscreenHistory(h: Harness): Promise<void> {
   await flush(2)
 }
 
-test('A0 fullscreen seat preflight: the alt screen delivers press/click to a History result row (select only)', async () => {
+test('fullscreen seat preflight: the alt screen delivers press/click to a History result row (select only)', async () => {
   const h = startApp([row('alpha prompt', 3, '/work/a', 'id-a'), row('beta prompt', 2, '/work/a', 'id-b')])
   await openFullscreenHistory(h)
   const betaRow = rowOf(h.vt, 'beta prompt')
@@ -157,7 +157,7 @@ test('A0 fullscreen seat preflight: the alt screen delivers press/click to a His
   assert.ok(rowOf(h.vt, 'Preview') >= 0, 'the Preview must be painted')
 })
 
-test('A0 fullscreen seat preflight: wheel scrolls the region under the pointer only', async () => {
+test('fullscreen seat preflight: wheel scrolls the region under the pointer only', async () => {
   const long = Array.from({ length: 200 }, (_, index) => `source line ${index}`).join('\n')
   const h = startApp([
     ...Array.from({ length: 20 }, (_, index) => row(`entry ${index}`, 30 - index, '/work/a', `id-${index}`)),
@@ -199,7 +199,7 @@ test('A0 fullscreen seat preflight: wheel scrolls the region under the pointer o
     previewAfterListWheel, 'a NEW selected result resets the Preview to its top')
 })
 
-test('A0 fullscreen seat preflight: the Preview drag copies the exact original substring', async () => {
+test('fullscreen seat preflight: the Preview drag copies the exact original substring', async () => {
   const prompt = 'first line\nsecond line with trailing  \nthird'
   const h = startApp([row(prompt, 1, '/work/a', 'p1')])
   await openFullscreenHistory(h)
@@ -223,7 +223,7 @@ test('A0 fullscreen seat preflight: the Preview drag copies the exact original s
     `the seat must keep the keyboard after a pointer gesture:\n${view(h.vt)}`)
 })
 
-test('A0 fullscreen seat preflight: a release after a resize never accepts (last-painted geometry fence)', async () => {
+test('fullscreen seat preflight: a release after a resize never accepts (last-painted geometry fence)', async () => {
   const h = startApp([row('result A', 1, '/work/a', 'id-a')])
   await openFullscreenHistory(h)
   const rowA = rowOf(h.vt, 'result A')
@@ -242,7 +242,7 @@ test('A0 fullscreen seat preflight: a release after a resize never accepts (last
   assert.ok(rowOf(h.vt, 'Input History') >= 0, 'the seat stays open (no action fired)')
 })
 
-test('A0 fullscreen seat preflight: a result press resolves by ID, and a page that moved under it never transfers the selection', async () => {
+test('fullscreen seat preflight: a result press resolves by ID, and a page that moved under it never transfers the selection', async () => {
   // press A → an async search replaces the page so the PRESSED CELL now holds B
   // (A moved to another row and stays selected by its stable id) → release+click
   // must not move the selection to B, and must not accept anything.
@@ -273,7 +273,7 @@ test('A0 fullscreen seat preflight: a result press resolves by ID, and a page th
   assert.equal(h.app.getDraft(), '', 'a result click never accepts')
 })
 
-test('A0 negative: the regular main screen writes no mouse mode and honors no pointer action (H3A-16)', async () => {
+test('negative: the regular main screen writes no mouse mode and honors no pointer action (H3A-16)', async () => {
   // TWO rows, so a pointer action that WERE interpreted would visibly move the
   // selection to the second one.
   const h = startApp([
@@ -321,7 +321,7 @@ test('A0 negative: the regular main screen writes no mouse mode and honors no po
   assert.ok(rowOf(h.vt, 'Input History') < 0, 'Esc must still close the regular-root History')
 })
 
-test('A0 fullscreen actions: Copy All [Alt+C] copies the EXACT entry bytes (newline/CJK/trailing spaces)', async () => {
+test('fullscreen actions: Copy All [Alt+C] copies the EXACT entry bytes (newline/CJK/trailing spaces)', async () => {
   const prompt = '  leading\n中文行 with trailing  \nlast'
   const h = startApp([row(prompt, 1, '/work/a', 'p1')])
   await openFullscreenHistory(h)
@@ -337,7 +337,7 @@ test('A0 fullscreen actions: Copy All [Alt+C] copies the EXACT entry bytes (newl
   assert.equal(h.app.getDraft(), '', 'a copy must never accept into the editor')
 })
 
-test('A0 fullscreen actions: Use Selected [Enter] accepts the pressed entry; a page that moved under it refuses', async () => {
+test('fullscreen actions: Use Selected [Enter] accepts the pressed entry; a page that moved under it refuses', async () => {
   const h = startApp([row('result A', 1, '/work/a', 'id-a')])
   await openFullscreenHistory(h)
   const headingRow = rowOf(h.vt, 'Use Selected [Enter]')
@@ -366,7 +366,7 @@ test('A0 fullscreen actions: Use Selected [Enter] accepts the pressed entry; a p
   assert.ok(rowOf(h.vt, 'Copy All [Alt+C]') < 0, 'accepting closes the History seat')
 })
 
-test('A0 fullscreen cancellation: Esc closes the seat without exiting or interrupting', async () => {
+test('fullscreen cancellation: Esc closes the seat without exiting or interrupting', async () => {
   let exits = 0
   const vt = new VirtualTerminal(100, 30)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => { exits += 1 } }, {
@@ -392,7 +392,7 @@ test('A0 fullscreen cancellation: Esc closes the seat without exiting or interru
   assert.equal(app.getDraft(), 'my draft', 'Esc must leave the draft untouched')
 })
 
-test('A0 fullscreen cancellation: a Question parks the seat and the SAME History returns with its query', async () => {
+test('fullscreen cancellation: a Question parks the seat and the SAME History returns with its query', async () => {
   const h = startApp([row('alpha prompt', 1, '/work/a', 'id-a')])
   await openFullscreenHistory(h)
   h.vt.sendInput('alp')
@@ -411,7 +411,7 @@ test('A0 fullscreen cancellation: a Question parks the seat and the SAME History
   assert.ok(view(h.vt).includes('Search: > alp'), 'the query survives the park/restore round trip')
 })
 
-test('A0 fullscreen cancellation: a fullscreen swap keeps the SAME panel and drops the stale gesture', async () => {
+test('fullscreen cancellation: a fullscreen swap keeps the SAME panel and drops the stale gesture', async () => {
   const h = startApp([row('alpha prompt', 1, '/work/a', 'id-a'), row('beta prompt', 2, '/work/a', 'id-b')])
   await openFullscreenHistory(h)
   h.vt.sendInput('\x1b[B') // select beta
@@ -434,7 +434,7 @@ test('A0 fullscreen cancellation: a fullscreen swap keeps the SAME panel and dro
   assert.equal(h.app.getDraft(), '', 'a gesture straddling a screen swap must never accept')
 })
 
-test('A0 fullscreen actions: an action pressed before a resize never fires at the stale geometry', async () => {
+test('fullscreen actions: an action pressed before a resize never fires at the stale geometry', async () => {
   const h = startApp([row('alpha prompt', 1, '/work/a', 'id-a')], 120, 40)
   await openFullscreenHistory(h)
   const headingRow = rowOf(h.vt, 'Use Selected [Enter]')
@@ -452,7 +452,7 @@ test('A0 fullscreen actions: an action pressed before a resize never fires at th
   assert.ok(rowOf(h.vt, 'Input History') >= 0, 'the seat stays open')
 })
 
-test('A0 cancellation: a pointer press does not survive a Question park/restore round trip', async () => {
+test('cancellation: a pointer press does not survive a Question park/restore round trip', async () => {
   const h = startApp([row('alpha prompt', 1, '/work/a', 'id-a')])
   await openFullscreenHistory(h)
   const headingRow = rowOf(h.vt, 'Use Selected [Enter]')
@@ -478,7 +478,7 @@ test('A0 cancellation: a pointer press does not survive a Question park/restore 
   assert.ok(rowOf(h.vt, 'Input History') >= 0, 'the restored seat stays open')
 })
 
-test('A0 fullscreen mouse: a right or middle SGR button can never select, drag or activate', async () => {
+test('fullscreen mouse: a right or middle SGR button can never select, drag or activate', async () => {
   const h = startApp([
     row('alpha prompt', 3, '/work/a', 'id-a'),
     row('beta prompt', 2, '/work/a', 'id-b'),
@@ -513,7 +513,7 @@ test('A0 fullscreen mouse: a right or middle SGR button can never select, drag o
   assert.ok(marker().includes('beta prompt'), 'the left button still selects')
 })
 
-test('A0 fullscreen mouse: the drag copies through the RELEASE cell, not the last motion cell', async () => {
+test('fullscreen mouse: the drag copies through the RELEASE cell, not the last motion cell', async () => {
   const h = startApp([row('abc\ndefghij', 1, '/work/a', 'p1')])
   await openFullscreenHistory(h)
   const headingRow = rowOf(h.vt, 'Preview ')
@@ -529,7 +529,7 @@ test('A0 fullscreen mouse: the drag copies through the RELEASE cell, not the las
     'the release position finalizes the copied range (through the released cell)')
 })
 
-test('A0 fullscreen actions: the LAST painted cell of each item is inside its hit range (no bracket device)', async () => {
+test('fullscreen actions: the LAST painted cell of each item is inside its hit range (no bracket device)', async () => {
   const h = startApp([row('alpha prompt', 3, '/work/a', 'id-a')])
   await openFullscreenHistory(h)
   const copyRow = rowOf(h.vt, 'Copy All [Alt+C]')

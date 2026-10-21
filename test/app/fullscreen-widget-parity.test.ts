@@ -277,7 +277,7 @@ function countWidgetRefresh(host: SurfaceHost): () => number {
   return () => calls
 }
 
-test('B4B addendum physical matrix preserves below widgets, two-row Footer, multiline Editor and transcript on both roots', async () => {
+test('physical matrix preserves below widgets, two-row Footer, multiline Editor and transcript on both roots', async () => {
   const taskItems: TaskPanelItem[] = [
     { value: 'job:matrix-a', label: 'Q-MATRIX-A', status: 'running', active: true, source: 'job', type: 'bash', canStop: true },
     { value: 'job:matrix-b', label: 'Q-MATRIX-B', status: 'running', active: true, source: 'job', type: 'bash', canStop: true },

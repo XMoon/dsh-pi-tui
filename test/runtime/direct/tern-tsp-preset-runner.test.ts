@@ -76,7 +76,7 @@ type Pane = { key(sequence: string): void; output: { text(): string } }
 
 /* ------------------------------------------------------- capability admission */
 
-test('PR4-A: a pane without the picker kind refuses /preset before the handler', async (t) => {
+test('a pane without the picker kind refuses /preset before the handler', async (t) => {
   const life = testLifecycle(t), home = life.tempDir('dsh-preset-gate-')
   const boot = await ownTspBoot({ life, home, logFile: home + '/diag.log' })
   try {
@@ -95,7 +95,7 @@ test('PR4-A: a pane without the picker kind refuses /preset before the handler',
 
 /* ------------------------------------------------------- real Direct Host runs */
 
-test('PR4-A: the real /preset handler opens the native picker over the REAL roster', async (t) => {
+test('the real /preset handler opens the native picker over the REAL roster', async (t) => {
   const life = testLifecycle(t)
   const fixture = await createDirectTspFixture(life, {
     presetPicker: true,
@@ -150,7 +150,7 @@ test('PR4-A: the real /preset handler opens the native picker over the REAL rost
   }
 })
 
-test('PR4-A: sessionless Use stages the run-local pending preset without a Session', async (t) => {
+test('sessionless Use stages the run-local pending preset without a Session', async (t) => {
   const life = testLifecycle(t)
   const fixture = await createDirectTspFixture(life, {
     presetPicker: true,
@@ -184,7 +184,7 @@ test('PR4-A: sessionless Use stages the run-local pending preset without a Sessi
   }
 })
 
-test('PR4-A: a STARTED Session is refused by the ORIGINAL message, never a picker', async (t) => {
+test('a STARTED Session is refused by the ORIGINAL message, never a picker', async (t) => {
   const life = testLifecycle(t)
   const fixture = await createDirectTspFixture(life, {
     presetPicker: true,
@@ -244,7 +244,7 @@ async function waitTo(predicate: () => boolean, timeoutMs = 2000): Promise<void>
   assert.fail('timed out waiting for a negative fact')
 }
 
-test('PR4-A: a REAL blank live Session switches preset through the Host and rereads it', async (t) => {
+test('a REAL blank live Session switches preset through the Host and rereads it', async (t) => {
   const life = testLifecycle(t)
   const fixture = await createDirectTspFixture(life, {
     presetPicker: true,
@@ -321,7 +321,7 @@ test('PR4-A: a REAL blank live Session switches preset through the Host and rere
   assert.deepEqual(liveAgents(), [], 'the runner teardown released the resumed Session')
 })
 
-test('PR4-A: a Host write that settles after its panel was replaced notifies nobody', async (t) => {
+test('a Host write that settles after its panel was replaced notifies nobody', async (t) => {
   const life = testLifecycle(t)
   const fixture = await createDirectTspFixture(life, {
     presetPicker: true,
@@ -386,7 +386,7 @@ test('PR4-A: a Host write that settles after its panel was replaced notifies nob
 
 /* ------------------------------------------------------------ typed verbs */
 
-test('PR4-A: the typed verbs keep their original Host routes and never open a picker', async (t) => {
+test('the typed verbs keep their original Host routes and never open a picker', async (t) => {
   const life = testLifecycle(t)
   const fixture = await createDirectTspFixture(life, {
     presetPicker: true,
@@ -439,7 +439,7 @@ test('PR4-A: the typed verbs keep their original Host routes and never open a pi
   }
 })
 
-test('PR4-A: a Host-owned /preset keeps its own route ahead of the TUI registration', async (t) => {
+test('a Host-owned /preset keeps its own route ahead of the TUI registration', async (t) => {
   const life = testLifecycle(t)
   const invoked: string[] = []
   const fixture = await createDirectTspFixture(life, {
@@ -471,7 +471,7 @@ function presetDefaultRow(patchPath: string): string | undefined {
   return rows.find((row) => row.id === 'agent-preset-registry')?.config?.selectedDefault
 }
 
-test('PR4-A: the picker default write persists through the official profile plane', async (t) => {
+test('the picker default write persists through the official profile plane', async (t) => {
   const life = testLifecycle(t)
   const fixture = await createDirectTspFixture(life, {
     presetPicker: true,
@@ -534,7 +534,7 @@ test('PR4-A: the picker default write persists through the official profile plan
     'and it composes the saved profile document')
 })
 
-test('PR4-A: without a Config owner the default write is honestly disabled', async (t) => {
+test('without a Config owner the default write is honestly disabled', async (t) => {
   const life = testLifecycle(t)
   const fixture = await createDirectTspFixture(life, {
     presetPicker: true,

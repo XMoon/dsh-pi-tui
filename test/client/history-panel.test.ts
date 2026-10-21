@@ -144,7 +144,7 @@ const internalDividerRow = (lines: readonly string[]): number =>
 
 // ── the pure seat row allocator ─────────────────────────────────────────────
 
-test('B3-A layout: the responsive sizes allocate header/query/footer, ≤8 result rows and the Preview remainder', () => {
+test('layout: the responsive sizes allocate header/query/footer, ≤8 result rows and the Preview remainder', () => {
   const cases = [
     // D15: at these comfortable grants BOTH boundary rules are drawn and consume
     // two content rows (the list region yields first), so each Preview is 2
@@ -173,7 +173,7 @@ test('B3-A layout: the responsive sizes allocate header/query/footer, ≤8 resul
   }
 })
 
-test('B3-A layout: the tiny sizes keep the mandatory chrome and never paint an unpainted acceptance', () => {
+test('layout: the tiny sizes keep the mandatory chrome and never paint an unpainted acceptance', () => {
   // 80x10 / 80x8 / 44x8 with a real two-row chrome: query + hint survive and the
   // Preview (metadata, heading, divider) yields BEFORE the mandatory rows.
   const tiny = planHistorySeatLayout(80, 8, 2, false, { previewable: true })
@@ -214,7 +214,7 @@ test('B3-A layout: the tiny sizes keep the mandatory chrome and never paint an u
   assert.equal(message.acceptEnabled, false)
 })
 
-test('B3-A layout: a non-positive/NaN geometry never produces a negative allocation', () => {
+test('layout: a non-positive/NaN geometry never produces a negative allocation', () => {
   for (const [cols, rows, chrome] of [[0, 0, 0], [-5, -5, -5], [Number.NaN, Number.NaN, Number.NaN]] as const) {
     const layout = planHistorySeatLayout(cols, rows, chrome, false, { previewable: true })
     assert.ok(layout.width >= 1)
@@ -631,7 +631,7 @@ test('history preview mapping: tabs, spaces, CJK, combining marks, emoji, hard b
   assert.equal(endOffset('a\u0000b', 80, 0, 0), 1, 'a NUL maps one source character')
 })
 
-test('H3A-05: a 200-row page scrolls to row 150 with the marker visible and the stable ID preserved across a resize', async () => {
+test('a 200-row page scrolls to row 150 with the marker visible and the stable ID preserved across a resize', async () => {
   const source = new FakeSource()
   source.rows = Array.from({ length: 200 }, (_, index) => row(`entry ${index}`, 200 - index, '/a', `id-${index}`))
   let columns = 100
@@ -656,7 +656,7 @@ test('H3A-05: a 200-row page scrolls to row 150 with the marker visible and the 
   assert.ok(resized.some(line => line.startsWith('> ') && line.includes('entry 150')), resized.join('\n'))
 })
 
-test('H3A-06: Copy All of a 2000-line prompt is the whole original source, and the Preview reaches its last row', async () => {
+test('Copy All of a 2000-line prompt is the whole original source, and the Preview reaches its last row', async () => {
   const source = new FakeSource()
   const huge = Array.from({ length: 2000 }, (_, index) => `line ${index}`).join('\n')
   source.rows = [row(huge, 1, '/a', 'huge')]
@@ -674,7 +674,7 @@ test('H3A-06: Copy All of a 2000-line prompt is the whole original source, and t
   assert.ok(!lines.some(line => line.includes('… more')), 'no truncation marker is ever painted')
 })
 
-test('H3A-04: a STALE rejection after a query change never paints the error state', async () => {
+test('a STALE rejection after a query change never paints the error state', async () => {
   const source = new FakeSource()
   source.manual = true
   const { panel } = makePanel(source)
@@ -693,7 +693,7 @@ test('H3A-04: a STALE rejection after a query change never paints the error stat
   assert.ok(!lines.some(line => line.includes('History unavailable')))
 })
 
-test('H3A-09: a Preview drag that releases outside the painted region cancels (nothing is copied)', async () => {
+test('a Preview drag that releases outside the painted region cancels (nothing is copied)', async () => {
   const source = new FakeSource()
   source.rows = [row('abc\ndef', 1, '/a', 'p')]
   const copied: string[] = []
@@ -779,7 +779,7 @@ test('currentness: the pointer and acceptance entries refuse a stale subject', a
   assert.equal(closed(), 0, 'refusing an action never closes the panel by itself')
 })
 
-test('H3A-09: a release outside the painted Preview cancels the drag (no copy, no surviving anchor)', async () => {
+test('a release outside the painted Preview cancels the drag (no copy, no surviving anchor)', async () => {
   const source = new FakeSource()
   source.rows = [row('abc\ndef', 1, '/a', 'p')]
   const copied: string[] = []
@@ -889,7 +889,7 @@ test('pointer: a repaint-free page replacement neither transfers the selection n
   assert.equal(panel.selected()?.id, 'id-b', 'the rejected press never re-selects from the stale hit map')
 })
 
-test('H3A-09: the RELEASE position is the drag endpoint (a terminal may fold the last motion into it)', async () => {
+test('the RELEASE position is the drag endpoint (a terminal may fold the last motion into it)', async () => {
   const source = new FakeSource()
   source.rows = [row('abc\ndefghij', 1, '/a', 'p')]
   const copied: string[] = []
@@ -967,7 +967,7 @@ test('pointer: a right or middle button can never start a History gesture', asyn
   assert.deepEqual(copied, ['abc'], 'the left button still drags and copies')
 })
 
-test('H3A-12: a resize keeps the Preview on the same SOURCE text (real re-wrap, ASCII and CJK)', async () => {
+test('a resize keeps the Preview on the same SOURCE text (real re-wrap, ASCII and CJK)', async () => {
   // Each source LINE is 80 cells: it paints ONE visual row at 100 columns and
   // TWO at 40, so a raw visual-row anchor would land on a different passage.
   const ascii = (index: number): string => `L${String(index).padStart(2, '0')}${'-'.repeat(77)}`
@@ -1029,7 +1029,7 @@ test('H3A-12: a resize keeps the Preview on the same SOURCE text (real re-wrap, 
 
 // ── B3-B: the frozen design-language roles on the History seat ───────────────
 
-test('B3-B visual: identity / active scope / selected row / counter / metadata carry the frozen role tokens', async () => {
+test('visual: identity / active scope / selected row / counter / metadata carry the frozen role tokens', async () => {
   const source = new FakeSource()
   source.rows = [row('alpha prompt', 3, '/work/a', 'a'), row('beta prompt', 2, '/work/b', 'b')]
   const { panel } = makePanel(source, { sessionId: 'ses_a' })
@@ -1059,7 +1059,7 @@ test('B3-B visual: identity / active scope / selected row / counter / metadata c
   assert.ok(raw.some(line => line.includes(color.textMuted('F2 expand'))), 'the F2 hint is textMuted')
 })
 
-test('B3-B action bar: fixed order with Esc last, whole-segment drops, never a partial word', async () => {
+test('action bar: fixed order with Esc last, whole-segment drops, never a partial word', async () => {
   const source = new FakeSource()
   source.rows = [row('alpha', 1, '/work/a', 'a')]
   const { panel } = makePanel(source)
@@ -1080,7 +1080,7 @@ test('B3-B action bar: fixed order with Esc last, whole-segment drops, never a p
   assert.ok(!narrow.includes('· ·') && !narrow.includes('·  ') && !narrow.trimEnd().endsWith('·'), 'no dangling separator')
 })
 
-test('B3-B narrow: the F2 hint is removed whole and the scope tabs use the short forms', async () => {
+test('narrow: the F2 hint is removed whole and the scope tabs use the short forms', async () => {
   const source = new FakeSource()
   source.rows = [row('alpha', 1, '/work/a', 'a')]
   const { panel } = makePanel(source, { sessionId: 'ses_a' })
@@ -1093,7 +1093,7 @@ test('B3-B narrow: the F2 hint is removed whole and the scope tabs use the short
   assert.ok(!header.includes('exp'), header)
 })
 
-test('B3-B placeholders: a no-match is textDim and a failed load paints its word error', async () => {
+test('placeholders: a no-match is textDim and a failed load paints its word error', async () => {
   const empty = new FakeSource()
   empty.rows = []
   const { panel } = makePanel(empty)
@@ -1129,7 +1129,7 @@ test('B3-B placeholders: a no-match is textDim and a failed load paints its word
     'a failure is never painted as a calm placeholder')
 })
 
-test('B3-B matrix: the seat never overflows 200x50 / 80x10 / 44x20 and keeps the action bar last', async () => {
+test('matrix: the seat never overflows 200x50 / 80x10 / 44x20 and keeps the action bar last', async () => {
   for (const [columns, rows] of [[200, 50], [80, 10], [44, 20]] as const) {
     const source = new FakeSource()
     source.rows = [row('alpha prompt with a much longer body than the row', 3, '/work/a', 'a')]
@@ -1157,7 +1157,7 @@ test('B3-B matrix: the seat never overflows 200x50 / 80x10 / 44x20 and keeps the
   }
 })
 
-test('B3-B degenerate width: a frame below the frozen matrix never overflows', async () => {
+test('degenerate width: a frame below the frozen matrix never overflows', async () => {
   const source = new FakeSource()
   source.rows = [row('alpha prompt', 1, '/work/a', 'a')]
   const { panel } = makePanel(source, {
@@ -1177,7 +1177,7 @@ test('B3-B degenerate width: a frame below the frozen matrix never overflows', a
 // B3-B theme: dark / light / custom (H3B-16)
 // ---------------------------------------------------------------------------
 
-test('B3-B theme: dark/light/custom resolve the frozen role tokens live and never overflow', async () => {
+test('theme: dark/light/custom resolve the frozen role tokens live and never overflow', async () => {
   const source = new FakeSource()
   source.rows = [row('alpha prompt', 3, '/work/a', 'a')]
   const { panel } = makePanel(source, { sessionId: 'ses_a' })
@@ -1228,7 +1228,7 @@ test('B3-B theme: dark/light/custom resolve the frozen role tokens live and neve
 })
 
 
-test('D15 boundary rules: the bottom rule yields first, leaving a witnessed TOP-only state', () => {
+test('boundary rules: the bottom rule yields first, leaving a witnessed TOP-only state', () => {
   // 80x12, no chrome: grant = floor(12×.63) = 7. Two rules need an 8-row grant,
   // so the bottom rule has yielded while the top rule and the full mandatory
   // chrome plus a result row stay painted.
@@ -1259,7 +1259,7 @@ test('D15 boundary rules: the bottom rule yields first, leaving a witnessed TOP-
 })
 
 
-test('D15 boundary rules: they may compress Results/Preview but never to zero rows', () => {
+test('boundary rules: they may compress Results/Preview but never to zero rows', () => {
   // The rules really take rows from the body (the allocation matrix above pins
   // the pre-D15 vs D15 numbers, e.g. 200x60 preview 23 -> 21), yet a real result
   // row and a real Preview content row always survive them.

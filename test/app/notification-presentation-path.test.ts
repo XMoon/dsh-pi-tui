@@ -26,7 +26,7 @@ function createPath(mode = 'always', method = 'bell') {
   return { writes, runtime }
 }
 
-test('TS5: agent/status running -> idle reaches the injected terminal presentation once', () => {
+test('agent/status running -> idle reaches the injected terminal presentation once', () => {
   const { writes, runtime } = createPath()
   runtime.setCompletionOwner('agent-1')
   runtime.onAgentStatus('agent-1', 'running')
@@ -37,7 +37,7 @@ test('TS5: agent/status running -> idle reaches the injected terminal presentati
   assert.deepEqual(writes, ['\x07'], 'a repeated idle never re-notifies')
 })
 
-test('TS5: the completion-owner fence is load-bearing', () => {
+test('the completion-owner fence is load-bearing', () => {
   // A RETIRED agent observed running -> idle must not notify. The observation
   // order is what makes this discriminating: without the identity fence the
   // retired agent's OWN running -> idle would settle. The live agent still
@@ -52,7 +52,7 @@ test('TS5: the completion-owner fence is load-bearing', () => {
   assert.deepEqual(writes, ['\x07'], 'the live agent still settles')
 })
 
-test('TS5: the mode/method policy flows through the presentation', () => {
+test('the mode/method policy flows through the presentation', () => {
   const { writes, runtime } = createPath('always', 'osc9')
   runtime.setCompletionOwner('a')
   runtime.onAgentStatus('a', 'running')
@@ -76,7 +76,7 @@ test('TS5: the mode/method policy flows through the presentation', () => {
   assert.equal(writes.length, 2, 'the unfocused report lets the next settle through')
 })
 
-test('TS5: focus reporting rides the same writer', () => {
+test('focus reporting rides the same writer', () => {
   const { writes, runtime } = createPath()
   runtime.enableFocusReporting()
   assert.deepEqual(writes, [ENABLE_FOCUS_REPORTING])
@@ -84,7 +84,7 @@ test('TS5: focus reporting rides the same writer', () => {
   assert.deepEqual(writes, [ENABLE_FOCUS_REPORTING, DISABLE_FOCUS_REPORTING])
 })
 
-test('TS5: a broken terminal writer can never crash the surface', () => {
+test('a broken terminal writer can never crash the surface', () => {
   const presentation = createTerminalNotificationPresentation({
     writer: { write: () => { throw new Error('EPIPE') } },
   })

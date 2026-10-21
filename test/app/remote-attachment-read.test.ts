@@ -191,7 +191,7 @@ test('a missing Connection generation rejects as a not-ready transport, not an e
   assert.deepEqual(harness.retains, [], 'and cold-retains nothing')
 })
 
-test('R7-1: a same-binding Connection generation rollover is ADOPTED (a fresh read still succeeds)', async () => {
+test('a same-binding Connection generation rollover is ADOPTED (a fresh read still succeeds)', async () => {
   // The official RemoteLiveIngress guarantees that a Connection generation
   // rollover does NOT retire the handle: the retained binding is unchanged and the
   // handle adopts the new generation. A presentation captured before the reconnect

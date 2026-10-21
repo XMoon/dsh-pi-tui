@@ -60,7 +60,7 @@ function createOwner(options: { readonly unsubscribeFailure?: Error }) {
   return { runtime, counters }
 }
 
-test('M3-6 PR3: a throwing footer unsubscribe cannot strand the runner or the dynamic runtime', (t) => {
+test('a throwing footer unsubscribe cannot strand the runner or the dynamic runtime', (t) => {
   const failure = new Error('footer unsubscribe failed')
   const { runtime, counters } = createOwner({ unsubscribeFailure: failure })
   const originalRunner = FooterCommandRunner.prototype.dispose
@@ -83,7 +83,7 @@ test('M3-6 PR3: a throwing footer unsubscribe cannot strand the runner or the dy
     'a second disposal is inert (no release re-runs)')
 })
 
-test('M3-6 PR3: a throwing runner disposal cannot strand the dynamic footer runtime', (t) => {
+test('a throwing runner disposal cannot strand the dynamic footer runtime', (t) => {
   const failure = new Error('runner dispose failed')
   const { runtime, counters } = createOwner({})
   const originalDynamic = FooterDynamicItemRuntime.prototype.dispose

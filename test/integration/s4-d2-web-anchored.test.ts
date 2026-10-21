@@ -55,7 +55,7 @@ async function localServer(handler: (request: IncomingMessage, response: ServerR
   }
 }
 
-test('B02 Voice: real speech registry/readiness, no model and no microphone claim', { skip }, async t => {
+test('Voice: real speech registry/readiness, no model and no microphone claim', { skip }, async t => {
   let host = await startS4D2Host(t, { bundles: [B02] })
   const speech = host.ctx.get('speechToText') as {
     snapshot(): {
@@ -87,7 +87,7 @@ test('B02 Voice: real speech registry/readiness, no model and no microphone clai
   assert.equal(host.ctx.get('speechToText'), undefined, 'the speech service is released with the bundle')
 })
 
-test('B04 Inspector: the web transport prerequisite is honestly pending, no capture in the TUI profile', { skip }, async t => {
+test('Inspector: the web transport prerequisite is honestly pending, no capture in the TUI profile', { skip }, async t => {
   const host = await startS4D2Host(t, { bundles: [B04] })
   assert.equal(host.ctx.get('inspector'), undefined, 'no inspector service is fabricated without webServer/connection')
   const entry = host.loaderEntries().find(candidate => candidate.id === 'experimental-inspector')
@@ -105,7 +105,7 @@ test('B04 Inspector: the web transport prerequisite is honestly pending, no capt
   assert.equal(host.ctx.get('inspector'), undefined)
 })
 
-test('B06 CoT translation: real translator route through a controlled endpoint, error/cancel', { skip }, async t => {
+test('CoT translation: real translator route through a controlled endpoint, error/cancel', { skip }, async t => {
   let mode: 'ok' | 'error' = 'ok'
   const server = await localServer((request, response, body) => {
     if (mode === 'error') {
@@ -166,7 +166,7 @@ test('B06 CoT translation: real translator route through a controlled endpoint, 
   assert.equal(host.ctx.get('translator') !== undefined, true)
 })
 
-test('B12 Plugin Market: real empty default, explicit offline index, unknown/invalid source negatives', { skip }, async t => {
+test('Plugin Market: real empty default, explicit offline index, unknown/invalid source negatives', { skip }, async t => {
   const index = {
     format: 1,
     title: { en: 'Local Test Index' },

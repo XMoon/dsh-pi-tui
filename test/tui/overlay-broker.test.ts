@@ -309,7 +309,7 @@ test('OverlayBroker: disposeAll physically unmounts every node without restoring
   assert.deepEqual(a.hiddenLog, ['hide-temp', 'hide'])
 })
 
-test('M3-6 PR3: a throwing physical hide cannot strand later hides and still clears the logical graph', () => {
+test('a throwing physical hide cannot strand later hides and still clears the logical graph', () => {
   const broker = new OverlayBroker()
   const a = fakeHandle('a')
   const b = fakeHandle('b')

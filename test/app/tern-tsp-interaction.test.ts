@@ -248,7 +248,7 @@ test('B-hardening: hostile question header/option labels fold to one prop row wh
 
 // ── The single modal layer, focus, and the return to the composer ───────────
 
-test('B3: an approval owns ONE layer overlay, unmounts it on settle, and returns the caret to an untouched composer', async () => {
+test('an approval owns ONE layer overlay, unmounts it on settle, and returns the caret to an untouched composer', async () => {
   const harness = await mountHarness()
   try {
     harness.renderer.composer.setDraft('draft kept')
@@ -274,7 +274,7 @@ test('B3: an approval owns ONE layer overlay, unmounts it on settle, and returns
   }
 })
 
-test('B3: approval keys are exactly y/n/Esc/Ctrl+C and every other key is consumed', async () => {
+test('approval keys are exactly y/n/Esc/Ctrl+C and every other key is consumed', async () => {
   const cases: { key: string; expected: ApprovalOutcome }[] = [
     { key: 'y', expected: 'allowed-once' },
     { key: 'n', expected: 'rejected' },
@@ -310,7 +310,7 @@ test('B3: approval keys are exactly y/n/Esc/Ctrl+C and every other key is consum
   }
 })
 
-test('B3: a queued approval takes the seat without a second focus, and a reentrant successor is not answered by the first key', async () => {
+test('a queued approval takes the seat without a second focus, and a reentrant successor is not answered by the first key', async () => {
   const harness = await mountHarness()
   try {
     // Two requests in flight: the second is QUEUED (not yet visible).
@@ -332,7 +332,7 @@ test('B3: a queued approval takes the seat without a second focus, and a reentra
   }
 })
 
-test('B3: abort settles the right approval (queued abort leaves the active one alone)', async () => {
+test('abort settles the right approval (queued abort leaves the active one alone)', async () => {
   const harness = await mountHarness()
   try {
     const alreadyAborted = new AbortController()
@@ -377,7 +377,7 @@ function snapshotOf(draft: { readonly tab: number; readonly answers: readonly { 
   return { tab: draft.tab, answers: draft.answers.map(answer => ({ selected: [...answer.selected], custom: answer.custom, skipped: answer.skipped })) }
 }
 
-test('B3: a single-select question highlights the intent.approve option and delivers the real option labels', async () => {
+test('a single-select question highlights the intent.approve option and delivers the real option labels', async () => {
   const harness = await mountHarness()
   const recorder = statusOf()
   try {
@@ -408,7 +408,7 @@ test('B3: a single-select question highlights the intent.approve option and deli
   }
 })
 
-test('B3: a multi-select question toggles with Space, keeps original option order and submits with Enter', async () => {
+test('a multi-select question toggles with Space, keeps original option order and submits with Enter', async () => {
   const harness = await mountHarness()
   const recorder = statusOf()
   try {
@@ -432,7 +432,7 @@ test('B3: a multi-select question toggles with Space, keeps original option orde
   }
 })
 
-test('B3: an unanswered question marked forward is skipped, and Review returns to the last question', async () => {
+test('an unanswered question marked forward is skipped, and Review returns to the last question', async () => {
   const harness = await mountHarness()
   const recorder = statusOf()
   try {
@@ -455,7 +455,7 @@ test('B3: an unanswered question marked forward is skipped, and Review returns t
   }
 })
 
-test('B3: a masked free-text answer never reaches the wire and is returned through the original promise', async () => {
+test('a masked free-text answer never reaches the wire and is returned through the original promise', async () => {
   const harness = await mountHarness()
   const recorder = statusOf()
   try {
@@ -481,7 +481,7 @@ test('B3: a masked free-text answer never reaches the wire and is returned throu
   }
 })
 
-test('B4: a masked answer stays masked on the Review page and the official answer keeps the real value', async () => {
+test('a masked answer stays masked on the Review page and the official answer keeps the real value', async () => {
   // §6.4-6's masked question type is unreachable through the agent tool (its schema
   // has no `masked` field) and the builtin masked prompt (`/auth`) is not a
   // TSP-reachable command, so the renderer's masked behaviour is covered here: the
@@ -510,7 +510,7 @@ test('B4: a masked answer stays masked on the Review page and the official answe
   }
 })
 
-test('B3: an optionless question edits free text, Esc→Enter round trip keeps it, and Enter confirms through Review', async () => {
+test('an optionless question edits free text, Esc→Enter round trip keeps it, and Enter confirms through Review', async () => {
   const harness = await mountHarness()
   const recorder = statusOf()
   try {
@@ -533,7 +533,7 @@ test('B3: an optionless question edits free text, Esc→Enter round trip keeps i
   }
 })
 
-test('B3: an initialDraft restores the parked progress (tab, selection, custom)', async () => {
+test('an initialDraft restores the parked progress (tab, selection, custom)', async () => {
   const harness = await mountHarness()
   const recorder = statusOf()
   try {
@@ -566,7 +566,7 @@ test('B3: an initialDraft restores the parked progress (tab, selection, custom)'
 
 // ── Alt+Q: the continued-question list ──────────────────────────────────────
 
-test('B3: Alt+Q reads the parked rows fresh, reopens through the controller, and closes the list first', async () => {
+test('Alt+Q reads the parked rows fresh, reopens through the controller, and closes the list first', async () => {
   const harness = await mountHarness()
   try {
     harness.pane.key('\x1bq')
@@ -596,7 +596,7 @@ test('B3: Alt+Q reads the parked rows fresh, reopens through the controller, and
   }
 })
 
-test('B3: a refused Alt+Q reopen only notifies, and a new official request preempts the list', async () => {
+test('a refused Alt+Q reopen only notifies, and a new official request preempts the list', async () => {
   const harness = await mountHarness()
   try {
     harness.continued.push({ sessionId: 'session-a', callId: 'call-stale', presentation: 'parked' })
@@ -623,7 +623,7 @@ test('B3: a refused Alt+Q reopen only notifies, and a new official request preem
 
 // ── Hydration, the shared fence and the SDK event gate ──────────────────────
 
-test('B3: the modal seat outranks the hydration fence, while Alt+Q stays fenced out', async () => {
+test('the modal seat outranks the hydration fence, while Alt+Q stays fenced out', async () => {
   const harness = await mountHarness()
   try {
     const pending = harness.renderer.interaction.showApprovalPrompt(APPROVAL, true)
@@ -644,7 +644,7 @@ test('B3: the modal seat outranks the hydration fence, while Alt+Q stays fenced 
   }
 })
 
-test('B3: a terminal focus event cannot move the caret away from an open form', async () => {
+test('a terminal focus event cannot move the caret away from an open form', async () => {
   const harness = await mountHarness()
   try {
     // Without a modal the event is not the seat's business: no new focus op.
@@ -666,7 +666,7 @@ test('B3: a terminal focus event cannot move the caret away from an open form', 
   }
 })
 
-test('B3: a question form focuses its real input node only while the free-text editor is open', async () => {
+test('a question form focuses its real input node only while the free-text editor is open', async () => {
   const harness = await mountHarness()
   try {
     const answers = harness.renderer.interaction.askQuestions([question({ id: 'q9', question: 'Anything?', options: [{ label: 'a' }] })], undefined, undefined, false)
@@ -684,7 +684,7 @@ test('B3: a question form focuses its real input node only while the free-text e
   }
 })
 
-test('B3: disposal settles an unanswered form so no caller hangs', async () => {
+test('disposal settles an unanswered form so no caller hangs', async () => {
   const harness = await mountHarness()
   try {
     const approval = harness.renderer.interaction.showApprovalPrompt(APPROVAL, true)
@@ -716,7 +716,7 @@ async function settledOrPending(pending: Promise<unknown>): Promise<string> {
 
 // ── Findings C/F6/F7/F8: a replaced Session's form leaves the seat ───────────
 
-test('B3 finding C: withdrawPresentation drops the form and releases the input (the promise stays with its own lifetime)', async () => {
+test('finding C: withdrawPresentation drops the form and releases the input (the promise stays with its own lifetime)', async () => {
   const { createTspInteractionSeat } = await import('../../src/tui/tsp/interaction.ts')
   const seat = createTspInteractionSeat({
     render: () => {},
@@ -758,7 +758,7 @@ test('B3 finding C: withdrawPresentation drops the form and releases the input (
   assert.match(await settledOrPending(secondAnswers), /question flow cancelled/)
 })
 
-test('B3 findings F6/F7: a lifetime retired BEFORE its slot exists never mounts, and its own lifetime still settles it', async () => {
+test('findings F6/F7: a lifetime retired BEFORE its slot exists never mounts, and its own lifetime still settles it', async () => {
   const { createTspInteractionSeat } = await import('../../src/tui/tsp/interaction.ts')
   const fatals: unknown[] = []
   const seat = createTspInteractionSeat({
@@ -795,7 +795,7 @@ test('B3 findings F6/F7: a lifetime retired BEFORE its slot exists never mounts,
   seat.dispose()
 })
 
-test('B3 finding F8: a withdrawal whose frame commit fails reaches the renderer fatal sink and settles nothing itself', async () => {
+test('finding F8: a withdrawal whose frame commit fails reaches the renderer fatal sink and settles nothing itself', async () => {
   const { createTspInteractionSeat } = await import('../../src/tui/tsp/interaction.ts')
   const fatals: unknown[] = []
   let failFrame = false
@@ -832,7 +832,7 @@ test('B3 finding F8: a withdrawal whose frame commit fails reaches the renderer 
 
 // ── Failure and mutation-hook contracts (review findings F1–F3) ─────────────
 
-test('B3 F1: a frame failure while PRESENTING a form is fatal, settles once and leaves no ghost seat', async () => {
+test('a frame failure while PRESENTING a form is fatal, settles once and leaves no ghost seat', async () => {
   const { createTspInteractionSeat } = await import('../../src/tui/tsp/interaction.ts')
   const fatals: unknown[] = []
   let fail = true
@@ -869,7 +869,7 @@ test('B3 F1: a frame failure while PRESENTING a form is fatal, settles once and 
   }
 })
 
-test('B3 F2: a real single-select choice invalidates the replaced Other text (it cannot resurrect)', async () => {
+test('a real single-select choice invalidates the replaced Other text (it cannot resurrect)', async () => {
   const harness = await mountHarness()
   try {
     const answers = harness.renderer.interaction.askQuestions(
@@ -894,7 +894,7 @@ test('B3 F2: a real single-select choice invalidates the replaced Other text (it
   }
 })
 
-test('B3 F3: re-confirming the same answer fires no real-answer mutation hook', async () => {
+test('re-confirming the same answer fires no real-answer mutation hook', async () => {
   const harness = await mountHarness()
   const recorder = statusOf()
   try {
@@ -993,7 +993,7 @@ test('B3 F6.3: a retired request detaches its real listener and cannot write int
   }
 })
 
-test('B3 P3: closeTransientList releases the seat and the input (a replacement never inherits the list)', async () => {
+test('closeTransientList releases the seat and the input (a replacement never inherits the list)', async () => {
   const { createTspInteractionSeat } = await import('../../src/tui/tsp/interaction.ts')
   const renders: number[] = []
   const seat = createTspInteractionSeat({
@@ -1017,7 +1017,7 @@ test('B3 P3: closeTransientList releases the seat and the input (a replacement n
   seat.dispose()
 })
 
-test('B3 P2-D: a batched withdrawal commits ONE frame and never promotes a member of the batch', async () => {
+test('a batched withdrawal commits ONE frame and never promotes a member of the batch', async () => {
   const { createTspInteractionSeat } = await import('../../src/tui/tsp/interaction.ts')
   const frames: string[] = []
   const seat = createTspInteractionSeat({

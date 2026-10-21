@@ -42,12 +42,16 @@ const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
  * optionally followed by a sub-number (`A5b-6`, `B4A-07`), and optionally
  * followed by a slash-qualified sub-code (`A5b/TS2`).
  *
+ * A few families start with a DIGIT instead of a letter (`3B`, `2B`), and a
+ * few carry a letter separator (`AC-1`, `PR-A`). They are part of the same
+ * family of local labels, so they are matched too.
+ *
  * The separator is what tells a CODE from an ordinary word: a code is
  * followed by a colon, a dash, a slash-code or a space and then a
  * lowercase word. `L6` alone as a whole title is NOT a code-led title —
  * there is no sentence to keep.
  */
-const CODE = String.raw`(?:[A-Z]{1,4}\d+[a-zA-Z]?(?:-[A-Z])?(?:-\d+[a-z]?)?(?:\/[A-Z]{1,4}\d+[a-z]?)*|RFL-\d+)`
+const CODE = String.raw`(?:[A-Z]{1,4}\d+[a-zA-Z]?(?:-[A-Z])?(?:-\d+[a-z]?)?(?:\/[A-Z]{1,4}\d+[a-z]?)*|[A-Z]{2,4}-(?:[A-Z]|\d+)[a-z]?|\d+[A-Z](?:\d+)?|RFL-\d+)`
 
 /**
  * The word-suffix code form (`B4B-delete-fallback`, `B4B-07-height`).
@@ -60,11 +64,11 @@ const WORD_SUFFIX_CODE = String.raw`[A-Z]{1,4}\d+[a-zA-Z]?(?:-\d+)?-(?:swap|resi
 /**
  * ONE leading code label, with the separator that ends it.
  *
- * A label may be followed by a section marker (`§7.3`), by a bracketed
- * second code (`(F2)`), and by a lowercase qualifier word that belongs to
- * the label (`negative control`, `static`, `lock`).
+ * A label may be followed by a section marker (`§7.4-10/11`), by a
+ * bracketed second code (`(F2)`), and by a lowercase qualifier word that
+ * belongs to the label (`negative control`, `static`, `lock`).
  */
-const ONE_LABEL = String.raw`(?:${CODE}|${WORD_SUFFIX_CODE})(?:\s*§\s*[\d.]+)?(?:\s*\([A-Z]{1,4}\d+[a-z]?\))?(?:\s+(?:negative\s+control|positive\s+control|static|lock|child|final|retired|addendum)\b)*`
+const ONE_LABEL = String.raw`(?:${CODE}|${WORD_SUFFIX_CODE})(?:\s*§\s*[\d.]+(?:-\d+)?(?:\/\d+)?)?(?:\s*\([A-Z]{1,4}\d+[a-z]?\))?(?:\s+(?:negative\s+control|positive\s+control|static|lock|child|final|retired|addendum)\b)*`
 
 /** Whether a title STARTS with a code (used to keep a bare code intact). */
 const CODE_AT_START = new RegExp(String.raw`^${CODE}\b`, 'u')

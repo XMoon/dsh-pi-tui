@@ -512,7 +512,7 @@ function recordingPluginEditor(state: { text: string; received: string[] }): Ext
 // H3B-01: Question FIFO Q1 → Q2
 // ---------------------------------------------------------------------------
 
-test('H3B-01: a Question FIFO parks History across Q1→Q2 and restores the SAME tenant query/selection/Preview anchor', async (t) => {
+test('a Question FIFO parks History across Q1→Q2 and restores the SAME tenant query/selection/Preview anchor', async (t) => {
   const life = testLifecycle(t)
   const dispose = probeHistoryPanelDispose(life)
   const h = buildModalFixture(life, {
@@ -567,7 +567,7 @@ test('H3B-01: a Question FIFO parks History across Q1→Q2 and restores the SAME
 // H3B-02: Approval A → B, including the hasPending() handover gap
 // ---------------------------------------------------------------------------
 
-test('H3B-02: an Approval A→B FIFO keeps History parked across the hasPending() handover gap', async (t) => {
+test('an Approval A→B FIFO keeps History parked across the hasPending() handover gap', async (t) => {
   const life = testLifecycle(t)
   const dispose = probeHistoryPanelDispose(life)
   const h = buildModalFixture(life, { source: filterSource([{ content: 'approval park row', ts: 3 }]) })
@@ -622,7 +622,7 @@ test('H3B-02: an Approval A→B FIFO keeps History parked across the hasPending(
 // H3B-03: Save Location cancel + confirm
 // ---------------------------------------------------------------------------
 
-test('H3B-03: a Save Location prompt parks History; cancel and confirm both restore it with draft/cursor/paste registry intact', async (t) => {
+test('a Save Location prompt parks History; cancel and confirm both restore it with draft/cursor/paste registry intact', async (t) => {
   const life = testLifecycle(t)
   const dispose = probeHistoryPanelDispose(life)
   const h = buildModalFixture(life, { source: filterSource([{ content: 'save prompt row', ts: 3 }]) })
@@ -672,7 +672,7 @@ test('H3B-03: a Save Location prompt parks History; cancel and confirm both rest
 // H3B-04: a throwing stale-History cleanup during a blocker park
 // ---------------------------------------------------------------------------
 
-test('H3B-04: a stale History whose cleanup throws while a Question preempts the seat surfaces the error identity and rolls the owner back once', async (t) => {
+test('a stale History whose cleanup throws while a Question preempts the seat surfaces the error identity and rolls the owner back once', async (t) => {
   const life = testLifecycle(t)
   const dispose = probeHistoryPanelDispose(life)
   const h = buildModalFixture(life, { source: filterSource([{ content: 'reentrant row', ts: 3 }]) })
@@ -711,7 +711,7 @@ test('H3B-04: a stale History whose cleanup throws while a Question preempts the
 // H3B-05: a real A → B publication
 // ---------------------------------------------------------------------------
 
-test('H3B-05: a real A→B publication retires the open History seat exactly once before the first new-session frame', async (t) => {
+test('a real A→B publication retires the open History seat exactly once before the first new-session frame', async (t) => {
   const life = testLifecycle(t)
   const dispose = probeHistoryPanelDispose(life)
   const h = buildSessionFixture(life, { source: filterSource([{ content: 'session a row', ts: 3 }]) })
@@ -759,7 +759,7 @@ test('H3B-05: a real A→B publication retires the open History seat exactly onc
 // H3B-06: A → B → A with the same id string
 // ---------------------------------------------------------------------------
 
-test('H3B-06: an A→B→A switch with the SAME id string leaves the captured OLD scope refusing Enter/Copy/async', async (t) => {
+test('an A→B→A switch with the SAME id string leaves the captured OLD scope refusing Enter/Copy/async', async (t) => {
   const life = testLifecycle(t)
   const dispose = probeHistoryPanelDispose(life)
   const h = buildSessionFixture(life, {
@@ -823,7 +823,7 @@ test('H3B-06: an A→B→A switch with the SAME id string leaves the captured OL
 // H3B-07: same-owner generation bump and sessionless → first Session
 // ---------------------------------------------------------------------------
 
-test('H3B-07: a same-owner generation bump expires the captured scope and retires the seat even though the id did not move', async (t) => {
+test('a same-owner generation bump expires the captured scope and retires the seat even though the id did not move', async (t) => {
   const life = testLifecycle(t)
   const dispose = probeHistoryPanelDispose(life)
   const h = buildSessionFixture(life, { source: filterSource([{ content: 'bump row', ts: 3 }]) })
@@ -852,7 +852,7 @@ test('H3B-07: a same-owner generation bump expires the captured scope and retire
   assert.equal(h.captures[1]!.sessionId, 'session-a')
 })
 
-test('H3B-07 (first-session): the first published Session kills a sessionless History seat at the publication seam', async (t) => {
+test('(first-session): the first published Session kills a sessionless History seat at the publication seam', async (t) => {
   const life = testLifecycle(t)
   const dispose = probeHistoryPanelDispose(life)
   const h = buildSessionFixture(life, { source: filterSource([{ content: 'sessionless row', ts: 3 }]) })
@@ -887,7 +887,7 @@ test('H3B-07 (first-session): the first published Session kills a sessionless Hi
 // H3B-08: failed / pre-commit switches
 // ---------------------------------------------------------------------------
 
-test('H3B-08: a pre-publication switch failure never retires a still-current History seat nor rewrites the owner', async (t) => {
+test('a pre-publication switch failure never retires a still-current History seat nor rewrites the owner', async (t) => {
   const life = testLifecycle(t)
   const dispose = probeHistoryPanelDispose(life)
   const h = buildSessionFixture(life, { source: filterSource([{ content: 'survivor row', ts: 3 }]) })
@@ -920,7 +920,7 @@ test('H3B-08: a pre-publication switch failure never retires a still-current His
   assert.ok(!panelVisible(h.vt))
 })
 
-test('H3B-08 (post-bump): a post-bump pre-publication failure keeps the owner and still retires through the generation contract', async (t) => {
+test('(post-bump): a post-bump pre-publication failure keeps the owner and still retires through the generation contract', async (t) => {
   const life = testLifecycle(t)
   const dispose = probeHistoryPanelDispose(life)
   const h = buildSessionFixture(life, { source: filterSource([{ content: 'post bump row', ts: 3 }]) })
@@ -958,7 +958,7 @@ test('H3B-08 (post-bump): a post-bump pre-publication failure keeps the owner an
 // H3B-09: an async History query across a real publication
 // ---------------------------------------------------------------------------
 
-test('H3B-09: a deferred History search resolving/rejecting after a switch paints nothing, writes nothing and cleans up once', async (t) => {
+test('a deferred History search resolving/rejecting after a switch paints nothing, writes nothing and cleans up once', async (t) => {
   const life = testLifecycle(t)
   const dispose = probeHistoryPanelDispose(life)
   const deferred = deferredSearchSource()
@@ -1019,7 +1019,7 @@ test('H3B-09: a deferred History search resolving/rejecting after a switch paint
 // H3B-10: Copy All settling across a real publication
 // ---------------------------------------------------------------------------
 
-test('H3B-10: a Copy All payload is captured synchronously and a late settlement neither notifies nor repaints the new session', async (t) => {
+test('a Copy All payload is captured synchronously and a late settlement neither notifies nor repaints the new session', async (t) => {
   const life = testLifecycle(t)
   const dispose = probeHistoryPanelDispose(life)
   const copied: string[] = []
@@ -1085,7 +1085,7 @@ test('H3B-10: a Copy All payload is captured synchronously and a late settlement
 // H3B-11: reentrancy inside the onAccept lease close
 // ---------------------------------------------------------------------------
 
-test('H3B-11: a synchronous reentry inside onAccept\'s lease.close() never overwrites the newer tenant, and the old lease retires only itself', async (t) => {
+test('a synchronous reentry inside onAccept\'s lease.close() never overwrites the newer tenant, and the old lease retires only itself', async (t) => {
   const life = testLifecycle(t)
   const dispose = probeHistoryPanelDispose(life)
   const h = buildModalFixture(life, { source: filterSource([{ content: 'accepted prompt', ts: 3 }]) })
@@ -1135,7 +1135,7 @@ test('H3B-11: a synchronous reentry inside onAccept\'s lease.close() never overw
 // H3B-12: a plugin editor winner change while History is PARKED
 // ---------------------------------------------------------------------------
 
-test('H3B-12: a plugin editor winner change during a PARK never ejects the blocker and History\'s Esc hands the keyboard to the CURRENT winner', async (t) => {
+test('a plugin editor winner change during a PARK never ejects the blocker and History\'s Esc hands the keyboard to the CURRENT winner', async (t) => {
   const life = testLifecycle(t)
   const dispose = probeHistoryPanelDispose(life)
   const registry = new EditorRegistry()
@@ -1204,7 +1204,7 @@ test('H3B-12: a plugin editor winner change during a PARK never ejects the block
 // B3-B composition lock: the bootstrap reset-callback wiring.
 // ---------------------------------------------------------------------------
 
-test('B3-B composition: bootstrap retires History in the ONE resetForGeneration callback', () => {
+test('composition: bootstrap retires History in the ONE resetForGeneration callback', () => {
   // Why a source lock: the L6 harness above mirrors bootstrap's reset wiring, so
   // removing THIS production line is otherwise invisible (the publishOwner seam
   // still retires after the ordinary switch's bump). A pure generation bump has
@@ -1233,7 +1233,7 @@ test('B3-B composition: bootstrap retires History in the ONE resetForGeneration 
 // H3B-05b: a throwing History cleanup AT PUBLICATION (plan §2.4 item 7)
 // ---------------------------------------------------------------------------
 
-test('H3B-05b: a throwing History cleanup at publication keeps the published owner, surfaces the error identity and closes once', async (t) => {
+test('a throwing History cleanup at publication keeps the published owner, surfaces the error identity and closes once', async (t) => {
   const life = testLifecycle(t)
   const dispose = probeHistoryPanelDispose(life)
   const ownedFailures: unknown[] = []

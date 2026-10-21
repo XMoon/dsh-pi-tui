@@ -147,7 +147,7 @@ function retainedHandle(h: ReturnType<typeof harness>, sessionId: string): {
   return { handle: h.handleOf(sessionId, wrapper), wrapper }
 }
 
-test('R1: a Remote handle maps to an owner named by its exact binding', () => {
+test('a Remote handle maps to an owner named by its exact binding', () => {
   const h = harness()
   const { handle } = retainedHandle(h, 'session-x')
   const owner = h.ownerOf(handle)
@@ -165,7 +165,7 @@ test('a Direct handle and a publication-only fork handle map to no Remote owner'
     'a publication-only Remote fork handle carries no Client owner')
 })
 
-test('R2: the same exact binding and wrapper resolve to the SAME owner with no release', () => {
+test('the same exact binding and wrapper resolve to the SAME owner with no release', () => {
   const h = harness()
   const { handle, wrapper } = retainedHandle(h, 'session-a')
   const first = h.services.owners.fromHandle(handle)
@@ -174,7 +174,7 @@ test('R2: the same exact binding and wrapper resolve to the SAME owner with no r
   assert.deepEqual(h.calls.releases, [], 're-wrapping the same wrapper must not release anything')
 })
 
-test('R3: a new wrapper on the same binding transfers authority and releases the old reference once', () => {
+test('a new wrapper on the same binding transfers authority and releases the old reference once', () => {
   const h = harness()
   const { wrapper: first } = retainedHandle(h, 'session-a')
   const owner = h.ownerOf(h.handleOf('session-a', first))
@@ -189,7 +189,7 @@ test('R3: a new wrapper on the same binding transfers authority and releases the
   assert.ok(!h.isLive('session-a'), 'both TUI references are gone')
 })
 
-test('R4: a released wrapper cannot resurrect ownership', async () => {
+test('a released wrapper cannot resurrect ownership', async () => {
   const h = harness()
   const { wrapper: first } = retainedHandle(h, 'session-a')
   const owner = h.ownerOf(h.handleOf('session-a', first))
@@ -231,7 +231,7 @@ test('a new TUI retain of a still-live binding re-activates the SAME owner', () 
   void external
 })
 
-test('R5: the same session id with a new binding is a different owner generation', () => {  const h = harness()
+test('the same session id with a new binding is a different owner generation', () => {  const h = harness()
   const first = retainedHandle(h, 'session-x')
   const ownerA = h.ownerOf(first.handle)
   void h.services.retirement.retire(ownerA, 'transition')
@@ -242,12 +242,12 @@ test('R5: the same session id with a new binding is a different owner generation
   assert.equal(h.services.owners.sessionId(ownerB), 'session-x')
 })
 
-test('R6: an unknown owner fails fast in sessionId', () => {
+test('an unknown owner fails fast in sessionId', () => {
   const h = harness()
   assert.throws(() => h.services.owners.sessionId({} as SessionOwnerRef), /not registered/)
 })
 
-test('R7: an idle generation resolves immediately with no listener', async () => {
+test('an idle generation resolves immediately with no listener', async () => {
   const h = harness()
   const { handle } = retainedHandle(h, 'session-a')
   const owner = h.ownerOf(handle)
@@ -257,7 +257,7 @@ test('R7: an idle generation resolves immediately with no listener', async () =>
   assert.equal(signal.listenerCount(), 0, 'no abort listener may remain')
 })
 
-test('R8: a running generation settles when running flips to false, unsubscribing once', async () => {
+test('a running generation settles when running flips to false, unsubscribing once', async () => {
   const h = harness()
   const { handle } = retainedHandle(h, 'session-a')
   const owner = h.ownerOf(handle)
@@ -336,7 +336,7 @@ test('a running→false flip before the subscription registers cannot be lost', 
     'the post-subscribe snapshot re-check must observe the already-idle state')
 })
 
-test('R9: abort stops the LOCAL wait only — no cancel, no release, listeners removed', async () => {
+test('abort stops the LOCAL wait only — no cancel, no release, listeners removed', async () => {
   const h = harness()
   const { handle, wrapper } = retainedHandle(h, 'session-a')
   const owner = h.ownerOf(handle)
@@ -369,7 +369,7 @@ test('an already-aborted signal never leaves a subscription behind', async () =>
   assert.equal(signal.listenerCount(), 0)
 })
 
-test('R10: retire releases the active Client reference exactly once across modes', async () => {
+test('retire releases the active Client reference exactly once across modes', async () => {
   const h = harness()
   const { handle } = retainedHandle(h, 'session-a')
   const owner = h.ownerOf(handle)
@@ -379,7 +379,7 @@ test('R10: retire releases the active Client reference exactly once across modes
   assert.ok(!h.isLive('session-a'), 'the generation is fully retired')
 })
 
-test('R11: flush and preCancel invent no Host action', async () => {
+test('flush and preCancel invent no Host action', async () => {
   const h = harness()
   const { handle } = retainedHandle(h, 'session-a')
   const owner = h.ownerOf(handle)
@@ -391,7 +391,7 @@ test('R11: flush and preCancel invent no Host action', async () => {
   assert.equal(h.bindingOf('session-a')!.subscribeCalls(), 0, 'neither call subscribes')
 })
 
-test('R12: a parked retained owner is drained exactly once', async () => {
+test('a parked retained owner is drained exactly once', async () => {
   const h = harness()
   const { handle } = retainedHandle(h, 'session-a')
   const owner = h.ownerOf(handle)

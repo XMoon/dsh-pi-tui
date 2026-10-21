@@ -259,7 +259,7 @@ function hostUserRows(fixture: Pr3Fixture, sessionId: string): string[] {
     })
 }
 
-test('L6 §37 prompt: an idle plain prompt reaches the Host durable log through the official wire (echo → prompt → durable, no duplicate)', async (t) => {
+test('prompt: an idle plain prompt reaches the Host durable log through the official wire (echo → prompt → durable, no duplicate)', async (t) => {
   const life = testLifecycle(t)
   const mainId = 'm3-4-pr3-plain'
   const presetId = 'm3-4-pr3-preset'
@@ -282,7 +282,7 @@ test('L6 §37 prompt: an idle plain prompt reaches the Host durable log through 
   await waitFor('assistant answer rendered', () => fixture.vt.getViewport().join('').includes('remote reply'), 20_000)
 })
 
-test('L6 §37 prompt negative: an empty or whitespace-only draft dispatches nothing', async (t) => {
+test('prompt negative: an empty or whitespace-only draft dispatches nothing', async (t) => {
   const life = testLifecycle(t)
   const mainId = 'm3-4-pr3-empty'
   const presetId = 'm3-4-pr3-preset'
@@ -307,7 +307,7 @@ test('L6 §37 prompt negative: an empty or whitespace-only draft dispatches noth
     hostUserRows(fixture, mainId).some(row => row.includes('after empty gamma')), 20_000)
 })
 
-test('L6 §37 prompt: a sessionless first prompt creates the Session, then reaches the Host durable log', async (t) => {
+test('prompt: a sessionless first prompt creates the Session, then reaches the Host durable log', async (t) => {
   const life = testLifecycle(t)
   const presetId = 'm3-4-pr3-preset'
   const fixture = await mountPr3Runner(life, { presetId })
@@ -326,7 +326,7 @@ test('L6 §37 prompt: a sessionless first prompt creates the Session, then reach
   }
 })
 
-test('L6 §37 shell (Remote, CARRIER_GAP): `!` and `!!` BOTH fail closed — zero Client spawn, zero Session write, visible unavailable', async (t) => {
+test('shell (Remote, CARRIER_GAP): `!` and `!!` BOTH fail closed — zero Client spawn, zero Session write, visible unavailable', async (t) => {
   const life = testLifecycle(t)
   const mainId = 'm3-4-pr3-shellgap'
   const presetId = 'm3-4-pr3-preset'
@@ -355,7 +355,7 @@ test('L6 §37 shell (Remote, CARRIER_GAP): `!` and `!!` BOTH fail closed — zer
     'no shell command or output reached the Session/model context')
 })
 
-test('L6 §37 image: known staged bytes → PromptContentPart → Host durable attachment → official readAttachment byte equality', async (t) => {
+test('image: known staged bytes → PromptContentPart → Host durable attachment → official readAttachment byte equality', async (t) => {
   const life = testLifecycle(t)
   const mainId = 'm3-4-pr3-image'
   const presetId = 'm3-4-pr3-preset'
@@ -438,7 +438,7 @@ test('L6 §37 image: known staged bytes → PromptContentPart → Host durable a
   }
 })
 
-test('L6 §37 queue/steer: a busy queue prompt lands as an official queued occurrence; a steer lands as steering', async (t) => {
+test('queue/steer: a busy queue prompt lands as an official queued occurrence; a steer lands as steering', async (t) => {
   const life = testLifecycle(t)
   const mainId = 'm3-4-pr3-busy'
   const presetId = 'm3-4-pr3-preset'
@@ -515,7 +515,7 @@ test('L6 §37 queue/steer: a busy queue prompt lands as an official queued occur
   }, 20_000)
 })
 
-test('L6: a submit inside a session transition is refused, keeps the draft and dispatches nothing', async (t) => {
+test('a submit inside a session transition is refused, keeps the draft and dispatches nothing', async (t) => {
   const life = testLifecycle(t)
   const presetId = 'm3-4-pr3-preset'
   const host = await mountHost(life, presetId)
@@ -571,7 +571,7 @@ test('L6: a submit inside a session transition is refused, keeps the draft and d
     'the retired session stays untouched after the settle')
 })
 
-test('L6: a Remote submit after /resume targets the replacement current Session, never the retired Session', async (t) => {
+test('a Remote submit after /resume targets the replacement current Session, never the retired Session', async (t) => {
   const life = testLifecycle(t)
   const presetId = 'm3-4-pr3-preset'
   const host = await mountHost(life, presetId)
@@ -607,7 +607,7 @@ test('L6: a Remote submit after /resume targets the replacement current Session,
 })
 
 
-test('L6 §37 busy steer: a steer gesture while running lands as next-step with its own rpcId (never next-turn, never queued)', async (t) => {
+test('busy steer: a steer gesture while running lands as next-step with its own rpcId (never next-turn, never queued)', async (t) => {
   const life = testLifecycle(t)
   const mainId = 'm3-4-pr3-steer'
   const presetId = 'm3-4-pr3-preset'
@@ -668,7 +668,7 @@ test('L6 §37 busy steer: a steer gesture while running lands as next-step with 
   }, 20_000)
 })
 
-test('L6 §27 remote cancel: a real cancel gesture stops the running official turn and PRESERVES the queued next-turn work', async (t) => {
+test('remote cancel: a real cancel gesture stops the running official turn and PRESERVES the queued next-turn work', async (t) => {
   const life = testLifecycle(t)
   const mainId = 'm3-4-pr3-cancel'
   const presetId = 'm3-4-pr3-preset'
@@ -747,7 +747,7 @@ test('L6 §27 remote cancel: a real cancel gesture stops the running official tu
   }, 20_000)
 })
 
-test('L6 PR5 image resend: a SECOND submission citing the recalled durable image re-delivers the authorized bytes (mounted durable-image resend)', async (t) => {
+test('image resend: a SECOND submission citing the recalled durable image re-delivers the authorized bytes (mounted durable-image resend)', async (t) => {
   const life = testLifecycle(t)
   const mainId = 'm3-4-pr5-image-resend'
   const presetId = 'm3-4-pr3-preset'
@@ -1000,7 +1000,7 @@ async function mountD12Fixture(life: TestLifecycle, options: { clipboard: boolea
   return { probe, store, pngBytes, pngPath, hugePath, clipLog, reads: () => hostLimitReads }
 }
 
-test('TS8-C D12 locality: Remote Client /image intake never reads the Direct Host image policy', async (t) => {
+test('locality: Remote Client /image intake never reads the Direct Host image policy', async (t) => {
   const life = testLifecycle(t)
   const d12 = await mountD12Fixture(life, { clipboard: false })
 
@@ -1023,7 +1023,7 @@ test('TS8-C D12 locality: Remote Client /image intake never reads the Direct Hos
   assert.equal(d12.reads(), 0, 'the refusal used the Client resident cap, not the Direct Host policy')
 })
 
-test('TS8-C D12 locality: Remote Ctrl+V clipboard image intake never reads the Direct Host image policy', async (t) => {
+test('locality: Remote Ctrl+V clipboard image intake never reads the Direct Host image policy', async (t) => {
   // The fake `wl-paste` witness is only sound where the REAL production probe
   // routes to Wayland: darwin/win32 select the native backend and WSL selects
   // PowerShell BEFORE the Wayland branch, and Termux is unsupported

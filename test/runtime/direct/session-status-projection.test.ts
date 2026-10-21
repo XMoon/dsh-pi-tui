@@ -69,14 +69,14 @@ function reader(
   return { direct, snapshotKeys: projections.snapshotKeys }
 }
 
-test('R1/R2 (Direct): measureContext reads projectedTokens first, then pressureTokens', () => {
+test('(Direct): measureContext reads projectedTokens first, then pressureTokens', () => {
   const { direct } = reader({ s: { contextPressure: { pressureTokens: 100, projectedTokens: 125 } } })
   assert.equal(direct.measureContext('s'), 125, 'projectedTokens wins')
   const { direct: fallback } = reader({ s: { contextPressure: { pressureTokens: 100 } } })
   assert.equal(fallback.measureContext('s'), 100, 'pressureTokens is the fallback')
 })
 
-test('R3 (Direct): an absent projection capability or value reads unmeasured', () => {
+test('(Direct): an absent projection capability or value reads unmeasured', () => {
   const { direct } = reader({ s: { contextPressure: {} } })
   assert.equal(direct.measureContext('s'), undefined, 'no fields yet — absent until a provider reports usage')
   const noService = new DirectSessionReader({ get: () => undefined }, {
@@ -88,13 +88,13 @@ test('R3 (Direct): an absent projection capability or value reads unmeasured', (
   assert.equal(noAgent.measureContext('unknown'), undefined, 'no live agent = unavailable')
 })
 
-test('R5 (Direct): the Direct mapping equals the one shared semantic numerator', () => {
+test('(Direct): the Direct mapping equals the one shared semantic numerator', () => {
   const pressure = { pressureTokens: 100, projectedTokens: 125, contextWindow: 1000 }
   const { direct } = reader({ s: { contextPressure: pressure } })
   assert.equal(direct.measureContext('s'), contextPressureOccupancy(pressure))
 })
 
-test('R6 (Direct): a throwing projection read is unmeasured, never a crash', () => {
+test('(Direct): a throwing projection read is unmeasured, never a crash', () => {
   const direct = new DirectSessionReader({
     get: () => ({
       snapshot: () => { throw new Error('teardown race') },
@@ -108,14 +108,14 @@ test('R6 (Direct): a throwing projection read is unmeasured, never a crash', () 
   assert.equal(direct.sessionStatus('s'), undefined)
 })
 
-test('W5 (Direct): turnOutline reads the official projection without paging', () => {
+test('(Direct): turnOutline reads the official projection without paging', () => {
   const outline = [{ turn: 1, seq: 10, prompt: 'p1', response: 'r1' }]
   const { direct, snapshotKeys } = reader({ s: { turnOutline: outline } })
   assert.deepEqual(direct.turnOutline('s'), outline)
   assert.deepEqual(snapshotKeys.at(-1), ['turnOutline'], 'the read names the official key')
 })
 
-test('W6 (Direct): sessionStatus maps every official projection fact with the session cwd', () => {
+test('(Direct): sessionStatus maps every official projection fact with the session cwd', () => {
   const { direct } = reader({
     s: {
       modelSelection: { lastUsed: { provider: 'p', model: 'm1' }, next: { provider: 'p', model: 'm2', reasoningEffort: 'high' } },
@@ -139,14 +139,14 @@ test('W6 (Direct): sessionStatus maps every official projection fact with the se
   })
 })
 
-test('W6 (Direct): model falls back to lastUsed when next is null', () => {
+test('(Direct): model falls back to lastUsed when next is null', () => {
   const { direct } = reader({
     s: { modelSelection: { lastUsed: { provider: 'p', model: 'used' }, next: null } },
   })
   assert.deepEqual(direct.sessionStatus('s')?.model, { provider: 'p', model: 'used' })
 })
 
-test('W6 child correctness: each session reads only ITS OWN facts', () => {
+test('correctness: each session reads only ITS OWN facts', () => {
   const { direct } = reader({
     main: { contextPressure: { projectedTokens: 500 }, todos: [{ content: 'main', status: 'pending' }] },
     'child-b': { contextPressure: { projectedTokens: 50 } },
@@ -166,7 +166,7 @@ test('W6 child correctness: each session reads only ITS OWN facts', () => {
   assert.equal(direct.sessionStatus('child-cold'), undefined)
 })
 
-test('W6: the official todos null (no write yet) stays null — distinct from capability-absent', () => {
+test('the official todos null (no write yet) stays null — distinct from capability-absent', () => {
   const { direct } = reader({ s: { todos: null } })
   assert.equal(direct.sessionStatus('s')?.todos, null,
     'null is the legal "projection present, no todo yet" business value')
@@ -175,7 +175,7 @@ test('W6: the official todos null (no write yet) stays null — distinct from ca
     'an absent projection value reads capability-unavailable')
 })
 
-test('W6 (Direct): malformed projection values stay absent — never coerced', () => {
+test('(Direct): malformed projection values stay absent — never coerced', () => {
   const { direct } = reader({
     s: {
       modelSelection: { lastUsed: null, next: { provider: '', model: 'x' } },
@@ -194,7 +194,7 @@ test('W6 (Direct): malformed projection values stay absent — never coerced', (
 // require a live Agent, must never start/materialize a Session, and must
 // never fall back to another subject.
 
-test('M3-5 §9.1: a RETAINED Session with no live Agent still answers its own status', () => {
+test('a RETAINED Session with no live Agent still answers its own status', () => {
   const { direct } = reader(
     {
       'retained-child': {
@@ -219,7 +219,7 @@ test('M3-5 §9.1: a RETAINED Session with no live Agent still answers its own st
   }, 'the retained Session own facts only — the live MAIN session must not fill any field')
 })
 
-test('M3-5 §9.1: retained child A / child B stay isolated and an absent Session stays unavailable', () => {
+test('retained child A / child B stay isolated and an absent Session stays unavailable', () => {
   const { direct } = reader(
     {
       'child-a': { contextPressure: { projectedTokens: 10 }, todos: [{ content: 'a', status: 'pending' }] },
@@ -244,7 +244,7 @@ test('M3-5 §9.1: retained child A / child B stay isolated and an absent Session
   assert.equal(direct.sessionStatus('not-attached'), undefined, 'an unattached Session reads unavailable')
 })
 
-test('M3-5 §9.1: a retained Session without the projection service reads unavailable', () => {
+test('a retained Session without the projection service reads unavailable', () => {
   const direct = new DirectSessionReader({ get: () => undefined }, {
     sessionOf: () => ({ header: { id: SessionId('s'), cwd: '/s' } }) as never,
     agentOf: () => undefined,

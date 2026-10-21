@@ -61,7 +61,7 @@ function harness(options: {
   return { runtime, calls, setScopeCurrent: (value: boolean) => { scopeCurrent = value } }
 }
 
-test('PR5 §3.7: currentSessionStats re-checks the ORIGINAL scope after the await', async () => {
+test('currentSessionStats re-checks the ORIGINAL scope after the await', async () => {
   const stale = harness({ staleDuringRead: true, statsResult: { turns: 99 } })
   await assert.rejects(
     stale.runtime.currentSessionStats(SCOPE),
@@ -74,7 +74,7 @@ test('PR5 §3.7: currentSessionStats re-checks the ORIGINAL scope after the awai
   assert.deepEqual(stats, { turns: 3 }, 'a current-scope read returns the figures unchanged')
 })
 
-test('PR5 §3.7: lastAssistantText re-checks the ORIGINAL scope after the await', async () => {
+test('lastAssistantText re-checks the ORIGINAL scope after the await', async () => {
   const stale = harness({ staleDuringRead: true, textResult: 'old-session text' })
   await assert.rejects(
     stale.runtime.lastAssistantText(SCOPE),
@@ -86,7 +86,7 @@ test('PR5 §3.7: lastAssistantText re-checks the ORIGINAL scope after the await'
   assert.equal(await live.runtime.lastAssistantText(SCOPE), 'current text')
 })
 
-test('PR5 §3.7: a scope that goes stale BEFORE dispatch never starts the read', async () => {
+test('a scope that goes stale BEFORE dispatch never starts the read', async () => {
   const h = harness({ textResult: 'never' })
   h.setScopeCurrent(false)
   await assert.rejects(

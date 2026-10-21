@@ -198,7 +198,7 @@ test('T-hardening: hostile transcript text never reaches a native View prop', ()
 
 // ── T3: real fold -> canonical projection -> native view ───────────────────
 
-test('T3: the replay fold projects the canonical Work/Context/standalone structure', () => {
+test('the replay fold projects the canonical Work/Context/standalone structure', () => {
   const folder = folderThrough(STEPS.length - 1)
   assert.deepEqual(structureKinds(projectTranscriptStructure(folder.messages())), [
     'message:user',
@@ -212,7 +212,7 @@ test('T3: the replay fold projects the canonical Work/Context/standalone structu
   ])
 })
 
-test('T3: the mapper renders the projected blocks as native TSP nodes with real content', () => {
+test('the mapper renders the projected blocks as native TSP nodes with real content', () => {
   const folder = folderThrough(STEPS.length - 1)
   const keys = new TranscriptNodeKeys()
   const view = viewOf(folder, keys)
@@ -250,7 +250,7 @@ test('T3: the mapper renders the projected blocks as native TSP nodes with real 
 
 // ── T5: incremental ops ────────────────────────────────────────────────────
 
-test('T5: a text/status update sends a small delta and preserves unaffected node ids', () => {
+test('a text/status update sends a small delta and preserves unaffected node ids', () => {
   const folder = new TranscriptFolder()
   const keys = new TranscriptNodeKeys()
   applyReplayStep(folder, STEPS[0]!)
@@ -295,7 +295,7 @@ test('T5: a text/status update sends a small delta and preserves unaffected node
   assert.deepEqual(toolSet[2], { status: 'done' })
 })
 
-test('T5: re-rendering the same fold emits no ops at all', () => {
+test('re-rendering the same fold emits no ops at all', () => {
   const folder = folderThrough(2)
   const keys = new TranscriptNodeKeys()
   assert.deepEqual(viewOf(folder, keys).ops(viewOf(folder, keys), 's1'), [])
@@ -303,7 +303,7 @@ test('T5: re-rendering the same fold emits no ops at all', () => {
 
 // ── T4 / T8: classification, boundaries and special families ───────────────
 
-test('T4: a non-ambient Work boundary flushes the ambient cluster instead of joining it', () => {
+test('a non-ambient Work boundary flushes the ambient cluster instead of joining it', () => {
   const folder = folderThrough(STEPS.length - 1)
   const blocks = projectTranscriptStructure(folder.messages())
   const cluster = blocks.find(block => block.kind === 'context-cluster')
@@ -318,7 +318,7 @@ test('T4: a non-ambient Work boundary flushes the ambient cluster instead of joi
   assert.equal(members.length, 2, 'the cluster contains exactly its two raw members')
 })
 
-test('T8: a settled interaction and a slash command stay outside every Work span', () => {
+test('a settled interaction and a slash command stay outside every Work span', () => {
   const folder = folderThrough(STEPS.length - 1)
   const keys = new TranscriptNodeKeys()
   const view = viewOf(folder, keys)
@@ -339,7 +339,7 @@ test('T8: a settled interaction and a slash command stay outside every Work span
   assert.equal(nodeOf(view, `${commandNode.id}.body`).props['text'], 'session healthy')
 })
 
-test('T8: a post-turn replay result is honest diagnostic evidence, never a fabricated success', () => {
+test('a post-turn replay result is honest diagnostic evidence, never a fabricated success', () => {
   const folder = folderThrough(STEPS.length - 1)
   const keys = new TranscriptNodeKeys()
   const view = viewOf(folder, keys)
@@ -357,7 +357,7 @@ test('T8: a post-turn replay result is honest diagnostic evidence, never a fabri
   assert.ok(block !== undefined, 'the orphan row is a standalone message block, not Work membership')
 })
 
-test('T8: a Context row renders the helper-stripped body and its source kind, never raw envelope XML', () => {
+test('a Context row renders the helper-stripped body and its source kind, never raw envelope XML', () => {
   const folder = new TranscriptFolder()
   const keys = new TranscriptNodeKeys()
   folder.apply([ev('turn/start', { turn: 1 }, 0)])
@@ -377,7 +377,7 @@ test('T8: a Context row renders the helper-stripped body and its source kind, ne
 
 // ── T6 / T7: identity limits and sibling uniqueness ────────────────────────
 
-test('T6: a merged read-group replacement changes that card\'s key while neighbours keep theirs', () => {
+test('a merged read-group replacement changes that card\'s key while neighbours keep theirs', () => {
   const folder = new TranscriptFolder()
   const keys = new TranscriptNodeKeys()
   folder.apply([ev('turn/start', { turn: 1 }, 0)])
@@ -407,7 +407,7 @@ test('T6: a merged read-group replacement changes that card\'s key while neighbo
   assert.ok(!deleted.has(userNodeId) && !added.has(userNodeId), 'the untouched user card keeps its identity')
 })
 
-test('T6: dynamic Context clustering also rebuilds a retained row\'s node id', () => {
+test('dynamic Context clustering also rebuilds a retained row\'s node id', () => {
   const folder = new TranscriptFolder()
   const keys = new TranscriptNodeKeys()
   folder.apply([ev('turn/start', { turn: 1 }, 0)])
@@ -444,7 +444,7 @@ test('T6: dynamic Context clustering also rebuilds a retained row\'s node id', (
   assert.equal(nodeOf(after, `main.ctx-${firstKey}.${firstKey}`).kind, 'card', 'and re-added under the cluster')
 })
 
-test('T7: sibling Work spans sharing a turn, and repeated text, never collide', () => {
+test('sibling Work spans sharing a turn, and repeated text, never collide', () => {
   const folder = new TranscriptFolder()
   const keys = new TranscriptNodeKeys()
   const notice = (seq: number, id: string, text: string): SessionEvent =>
@@ -560,7 +560,7 @@ class ScriptedTerminal {
   }
 }
 
-test('T1: the runner reports an unsupported environment and opens no surface', async () => {
+test('the runner reports an unsupported environment and opens no surface', async () => {
   const writes: string[] = []
   let connects = 0
   const result = await runTernTranscriptSpike({
@@ -576,7 +576,7 @@ test('T1: the runner reports an unsupported environment and opens no surface', a
   assert.doesNotMatch(writes.join(''), /closed/)
 })
 
-test('T1: the real SDK connect declines every non-Tern environment', async () => {
+test('the real SDK connect declines every non-Tern environment', async () => {
   const cases: Record<string, string>[] = [
     { TERN_TSP: '0' },
     { TMUX: '/tmp/tmux-1000/default,1,0' },
@@ -595,7 +595,7 @@ test('T1: the real SDK connect declines every non-Tern environment', async () =>
   assert.deepEqual(nonTty.raw, [])
 })
 
-test('T1/T9: a tty that never answers the handshake fails closed and restores raw mode', async () => {
+test('a tty that never answers the handshake fails closed and restores raw mode', async () => {
   const terminal = new ScriptedTerminal('silent')
   const session = await connect({
     env: {},
@@ -609,7 +609,7 @@ test('T1/T9: a tty that never answers the handshake fails closed and restores ra
   assert.equal(terminal.input.isRaw, false)
 })
 
-test('T9: the real SDK, a scripted Tern tty and the spike compose end to end', async () => {
+test('the real SDK, a scripted Tern tty and the spike compose end to end', async () => {
   const sigintBefore = process.listenerCount('SIGINT')
   const exitBefore = process.listenerCount('exit')
   const terminal = new ScriptedTerminal('tern')
@@ -672,7 +672,7 @@ function stubSession(inputs: readonly SessionInput[], failRender = false, failSu
   return { session, renders, keepOptions, closeCalls: () => closed }
 }
 
-test('T9: the runner releases the surface with keep:false and the session on quit', async () => {
+test('the runner releases the surface with keep:false and the session on quit', async () => {
   const handle = stubSession([keyInput('n'), keyInput('q')])
   const result = await runTernTranscriptSpike({ connect: async () => handle.session, io: { write: () => {} } })
   assert.deepEqual(result, { kind: 'closed', rendered: 2, steps: STEPS.length })
@@ -680,7 +680,7 @@ test('T9: the runner releases the surface with keep:false and the session on qui
   assert.equal(handle.closeCalls(), 1)
 })
 
-test('T9: the real SDK decodes a raw Ctrl+C byte into the key the runner quits on', () => {
+test('the real SDK decodes a raw Ctrl+C byte into the key the runner quits on', () => {
   // A real terminal sends 0x03 for Ctrl+C while the tty is in raw mode. This
   // pins that the SHIPPED SDK decode lands on exactly the key shape the runner
   // test above feeds in (`{name:'c', ctrl:true}`) — so the Ctrl+C key path is a
@@ -691,7 +691,7 @@ test('T9: the real SDK decodes a raw Ctrl+C byte into the key the runner quits o
   assert.deepEqual({ name: key.name, ctrl: key.ctrl }, { name: 'c', ctrl: true })
 })
 
-test('T9: Ctrl+C closes cleanly, and a session that ends by itself still closes the surface', async () => {
+test('Ctrl+C closes cleanly, and a session that ends by itself still closes the surface', async () => {
   const interrupted = stubSession([keyInput('c', true)])
   await runTernTranscriptSpike({ connect: async () => interrupted.session, io: { write: () => {} } })
   assert.deepEqual(interrupted.keepOptions, [false])
@@ -703,7 +703,7 @@ test('T9: Ctrl+C closes cleanly, and a session that ends by itself still closes 
   assert.equal(ended.closeCalls(), 1)
 })
 
-test('T9: a render failure is surfaced truthfully after cleanup, not converted to unsupported', async () => {
+test('a render failure is surfaced truthfully after cleanup, not converted to unsupported', async () => {
   const handle = stubSession([], true)
   await assert.rejects(
     () => runTernTranscriptSpike({ connect: async () => handle.session, io: { write: () => {} } }),
@@ -713,7 +713,7 @@ test('T9: a render failure is surfaced truthfully after cleanup, not converted t
   assert.equal(handle.closeCalls(), 1)
 })
 
-test('T9: a session-open failure still closes the session', async () => {
+test('a session-open failure still closes the session', async () => {
   let closed = 0
   const session: SpikeSession = {
     open() {
@@ -732,7 +732,7 @@ test('T9: a session-open failure still closes the session', async () => {
   assert.equal(closed, 1, 'the session (and its raw-mode ownership) is released')
 })
 
-test('T9: a surface-close failure still releases the session and stays visible', async () => {
+test('a surface-close failure still releases the session and stays visible', async () => {
   const handle = stubSession([keyInput('q')], false, true)
   await assert.rejects(
     () => runTernTranscriptSpike({ connect: async () => handle.session, io: { write: () => {} } }),
@@ -742,7 +742,7 @@ test('T9: a surface-close failure still releases the session and stays visible',
   assert.equal(handle.closeCalls(), 1, 'the session is still closed, so the tty is released')
 })
 
-test('T9: `n` beyond the last replay step is a no-op, never a crash', async () => {
+test('`n` beyond the last replay step is a no-op, never a crash', async () => {
   const presses = Array.from({ length: STEPS.length + 3 }, () => keyInput('n')).concat([keyInput('q')])
   const handle = stubSession(presses)
   const result = await runTernTranscriptSpike({ connect: async () => handle.session, io: { write: () => {} } })
@@ -751,7 +751,7 @@ test('T9: `n` beyond the last replay step is a no-op, never a crash', async () =
 
 // ── T10: isolation ─────────────────────────────────────────────────────────
 
-test('T10: the spike imports no PiTui owner and no application/client module', async () => {
+test('the spike imports no PiTui owner and no application/client module', async () => {
   const { readFileSync } = await import('node:fs')
   const allowed = [
     /^node:/,

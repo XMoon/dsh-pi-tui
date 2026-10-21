@@ -79,7 +79,7 @@ function descriptor(seq: number, mode: 'continuable' | 'one-shot' = 'continuable
 // A — command lifecycle
 // ---------------------------------------------------------------------------
 
-test('A01: command/run creates one real running Command with no semantic turn', () => {
+test('command/run creates one real running Command with no semantic turn', () => {
   const folder = new TranscriptFolder()
   folder.apply([
     event('command/run', { commandId: CommandId('cmd-1'), name: 'title', args: 'hello', source: { kind: 'user' } }, 0),
@@ -95,7 +95,7 @@ test('A01: command/run creates one real running Command with no semantic turn', 
   assert.ok(!('turn' in command), 'a command never carries a semantic turn')
 })
 
-test('A01: a duplicated/replayed command/run with the same id never mints a second row', () => {
+test('a duplicated/replayed command/run with the same id never mints a second row', () => {
   const folder = new TranscriptFolder()
   folder.apply([
     event('command/run', { commandId: CommandId('cmd-1'), name: 'title', source: { kind: 'user' } }, 0),
@@ -104,7 +104,7 @@ test('A01: a duplicated/replayed command/run with the same id never mints a seco
   assert.equal(commandRows(folder.messages()).length, 1)
 })
 
-test('A02: command/done settles the same row in place and dirties search', () => {
+test('command/done settles the same row in place and dirties search', () => {
   const folder = new TranscriptFolder()
   folder.apply([
     event('command/run', { commandId: CommandId('cmd-1'), name: 'title', args: 'x', source: { kind: 'user' } }, 0),
@@ -125,7 +125,7 @@ test('A02: command/done settles the same row in place and dirties search', () =>
   assert.ok(folder.searchRevision() > revisionBefore, 'settlement must dirty the search entry')
 })
 
-test('A03: an error command settles with an error outcome and no fabricated tool result', () => {
+test('an error command settles with an error outcome and no fabricated tool result', () => {
   const folder = new TranscriptFolder()
   folder.apply([
     event('command/run', { commandId: CommandId('cmd-1'), name: 'title', source: { kind: 'user' } }, 0),
@@ -139,7 +139,7 @@ test('A03: an error command settles with an error outcome and no fabricated tool
   assert.equal(command.outcome?.text, 'boom')
 })
 
-test('A04: a fragment-only command/done still produces one fail-soft command row', () => {
+test('a fragment-only command/done still produces one fail-soft command row', () => {
   const folder = new TranscriptFolder()
   folder.apply([
     event('command/done', { commandId: CommandId('cmd-lost'), kind: 'success', text: 'done anyway' }, 0),
@@ -154,7 +154,7 @@ test('A04: a fragment-only command/done still produces one fail-soft command row
   assert.equal(command.outcome?.text, 'done anyway')
 })
 
-test('A05: sourceEventSeq is retained only for a valid success relationship', () => {
+test('sourceEventSeq is retained only for a valid success relationship', () => {
   const valid = new TranscriptFolder()
   valid.apply([
     event('command/run', { commandId: CommandId('cmd-1'), name: 'compact', source: { kind: 'user' } }, 0),
@@ -187,7 +187,7 @@ test('A05: sourceEventSeq is retained only for a valid success relationship', ()
 // A — chronology / Focus / Compact
 // ---------------------------------------------------------------------------
 
-test('A06: an idle command after a completed turn renders after the final assistant', () => {
+test('an idle command after a completed turn renders after the final assistant', () => {
   const folder = new TranscriptFolder()
   folder.apply([
     event('turn/start', { turn: 0 }, 0),
@@ -200,7 +200,7 @@ test('A06: an idle command after a completed turn renders after the final assist
   assert.deepEqual(kinds(folder.messages()), ['user', 'assistant', 'command'])
 })
 
-test('A07: a mid-turn command splits the Focus Thought runs without touching Action stats', () => {
+test('a mid-turn command splits the Focus Thought runs without touching Action stats', () => {
   const folder = new TranscriptFolder()
   folder.apply([
     event('turn/start', { turn: 0 }, 0),
@@ -235,7 +235,7 @@ test('A07: a mid-turn command splits the Focus Thought runs without touching Act
   }
 })
 
-test('A07: a command is a control-class row and never Work/Activity/Action evidence', () => {
+test('a command is a control-class row and never Work/Activity/Action evidence', () => {
   const folder = new TranscriptFolder()
   folder.apply([
     event('turn/start', { turn: 0 }, 0),
@@ -248,7 +248,7 @@ test('A07: a command is a control-class row and never Work/Activity/Action evide
   assert.deepEqual(classifyTranscriptMessage(command), { class: 'control', origin: 'command' })
 })
 
-test('A08: a command-only session stays visible in full, bounded and search projections', () => {
+test('a command-only session stays visible in full, bounded and search projections', () => {
   const folder = new TranscriptFolder()
   folder.apply([
     event('command/run', { commandId: CommandId('cmd-1'), name: 'title', args: 'x', source: { kind: 'user' } }, 0),
@@ -264,7 +264,7 @@ test('A08: a command-only session stays visible in full, bounded and search proj
   assert.ok(resolved !== undefined && resolved.kind === 'command')
 })
 
-test('A09: a leading pre-turn command stays visible when the window contains the first turn', () => {
+test('a leading pre-turn command stays visible when the window contains the first turn', () => {
   const folder = new TranscriptFolder()
   folder.apply([
     event('command/run', { commandId: CommandId('cmd-1'), name: 'title', source: { kind: 'user' } }, 0),
@@ -282,7 +282,7 @@ test('A09: a leading pre-turn command stays visible when the window contains the
   assert.ok(kinds(full).indexOf('command') < kinds(full).indexOf('user'))
 })
 
-test('A09: an anchored search window can reveal a leading pre-turn command', () => {
+test('an anchored search window can reveal a leading pre-turn command', () => {
   const folder = new TranscriptFolder()
   folder.apply([
     event('command/run', { commandId: CommandId('cmd-1'), name: 'export', source: { kind: 'user' } }, 0),
@@ -298,7 +298,7 @@ test('A09: an anchored search window can reveal a leading pre-turn command', () 
   assert.ok(kinds(window.messages).includes('command'), 'the anchored window reveals the leading command')
 })
 
-test('A10: a tail command after the latest turn stays visible in the latest window', () => {
+test('a tail command after the latest turn stays visible in the latest window', () => {
   const folder = new TranscriptFolder()
   folder.apply([
     event('turn/start', { turn: 0 }, 0),
@@ -313,7 +313,7 @@ test('A10: a tail command after the latest turn stays visible in the latest wind
   assert.ok(windowKinds[windowKinds.length - 1] === 'command', 'the tail command stays in the latest window')
 })
 
-test('A11: commands never inflate old-window tool-call counts', () => {
+test('commands never inflate old-window tool-call counts', () => {
   const folder = new TranscriptFolder()
   folder.apply([
     event('turn/start', { turn: 0 }, 0),
@@ -380,7 +380,7 @@ function manualCompactEvents(options: {
   return events
 }
 
-test('A12: a compaction lifecycle referencing the command id fuses the command into the card', () => {
+test('a compaction lifecycle referencing the command id fuses the command into the card', () => {
   const folder = new TranscriptFolder()
   folder.apply(manualCompactEvents({ withSourceEventSeq: false }))
   const messages = folder.messages()
@@ -393,7 +393,7 @@ test('A12: a compaction lifecycle referencing the command id fuses the command i
   assert.equal(compaction.sourceCommand?.commandId, CommandId('cmd-1'))
 })
 
-test('A13: a sourceEventSeq pointing at the summary event resolves the exact compaction card', () => {
+test('a sourceEventSeq pointing at the summary event resolves the exact compaction card', () => {
   const folder = new TranscriptFolder()
   folder.apply(manualCompactEvents({ withSourceCommandId: false }))
   const messages = folder.messages()
@@ -404,7 +404,7 @@ test('A13: a sourceEventSeq pointing at the summary event resolves the exact com
   assert.equal(compaction.sourceCommand?.outcome?.sourceEventSeq, SessionSeq(2))
 })
 
-test('A14: after authoritative correlation there is exactly one visible manual-compaction presentation', () => {
+test('after authoritative correlation there is exactly one visible manual-compaction presentation', () => {
   const folder = new TranscriptFolder()
   folder.apply(manualCompactEvents())
   const messages = folder.messages()
@@ -413,7 +413,7 @@ test('A14: after authoritative correlation there is exactly one visible manual-c
   assert.deepEqual(kinds(window.messages).filter(kind => kind !== 'summary'), ['compaction'])
 })
 
-test('A15: search still finds the fused command through the compaction representative', () => {
+test('search still finds the fused command through the compaction representative', () => {
   const folder = new TranscriptFolder()
   folder.apply(manualCompactEvents({ args: 'unique-arg-token', outcomeText: 'distinctive-outcome-token' }))
   // Distinctive needles that appear ONLY in the command's own fields — the
@@ -434,7 +434,7 @@ test('A15: search still finds the fused command through the compaction represent
     'the hidden raw command never emits a second visible row')
 })
 
-test('A09/F1 regression: a settled inter-turn command in a later turn keeps its placement anchor', () => {
+test('regression: a settled inter-turn command in a later turn keeps its placement anchor', () => {
   // command/done necessarily marks the search entry dirty; the lazy
   // re-normalization must NOT reset the presentation anchor to 0 for a
   // turn-less row (the anchor sidecar written at append time is the
@@ -459,7 +459,7 @@ test('A09/F1 regression: a settled inter-turn command in a later turn keeps its 
     'the anchored window reveals the inter-turn command')
 })
 
-test('A12 reverse order: evidence arriving after a leg-2 fusion never re-decides it', () => {
+test('reverse order: evidence arriving after a leg-2 fusion never re-decides it', () => {
   // command/done settles FIRST (leg 2 alone fuses to cpt-a); a later
   // compaction lifecycle claiming the same command id (leg 1) must neither
   // move nor revoke the established fusion.
@@ -496,7 +496,7 @@ test('fold parity: a cold hydrate and a live apply produce the same command proj
   assert.equal(searchCold, searchLive, 'cold and live search agree through the fused card')
 })
 
-test('A16: a leg-1 declaration owns immediately; a contradictory late leg 2 never re-decides', () => {
+test('a leg-1 declaration owns immediately; a contradictory late leg 2 never re-decides', () => {
   const folder = new TranscriptFolder()
   // cpt-a's lifecycle DECLARES command cmd-1 (leg 1) — the ownership is
   // proven the moment the declaration lands, so the running command is
@@ -520,7 +520,7 @@ test('A16: a leg-1 declaration owns immediately; a contradictory late leg 2 neve
   assert.equal(commandRows(messages).length, 0, 'the command stays behind its established owner')
 })
 
-test('A14: the combined owner is established while the command is still RUNNING', () => {
+test('the combined owner is established while the command is still RUNNING', () => {
   // The official manual /compact order: run → compaction events (carrying
   // sourceCommandId) → done. The declaration alone proves the relationship,
   // so the running period must show ONE combined card, never
@@ -539,7 +539,7 @@ test('A14: the combined owner is established while the command is still RUNNING'
   assert.ok(compaction.sourceCommand !== undefined && compaction.sourceCommand.outcome === null)
 })
 
-test('A14: settlement refreshes the combined owner search corpus', () => {
+test('settlement refreshes the combined owner search corpus', () => {
   // leg 1 fuses BEFORE settlement (outcome null); command/done then settles
   // the SAME object — the fused card's corpus must pick the outcome text up,
   // proving settlement refreshes the owner entry rather than skipping it.
@@ -555,7 +555,7 @@ test('A14: settlement refreshes the combined owner search corpus', () => {
     'the settled outcome is searchable through the combined owner')
 })
 
-test('A16: a failed manual command keeps its error in the combined owner', () => {
+test('a failed manual command keeps its error in the combined owner', () => {
   const folder = new TranscriptFolder()
   folder.apply([
     event('command/run', { commandId: CommandId('cmd-1'), name: 'compact', source: { kind: 'user' } }, 0),
@@ -605,7 +605,7 @@ test('A06/Focus: an idle manual compaction keeps the real chronology outside the
     `the collapsed Focus keeps the real chronology: ${JSON.stringify(shapes)}`)
 })
 
-test('A08: the non-monotonic defensive window keeps commands bounded by their anchor', () => {
+test('the non-monotonic defensive window keeps commands bounded by their anchor', () => {
   // A corrupt/replayed log (non-monotonic turns) takes the defensive slow
   // window path; turn-less commands there follow the SHARED placement
   // authority, so a small window must not drag every historical command in.
@@ -637,7 +637,7 @@ test('A08: the non-monotonic defensive window keeps commands bounded by their an
   assert.ok(replayCommands[0]?.kind === 'command' && replayCommands[0].args === 'token-b')
 })
 
-test('A16: a leg-2 hit on a card declaring a DIFFERENT command never fuses', () => {
+test('a leg-2 hit on a card declaring a DIFFERENT command never fuses', () => {
   // Reverse-leg conflict: command A's sourceEventSeq points at compaction
   // B's summary, but B's own lifecycle metadata declares sourceCommandId =
   // cmd-OTHER. The card belongs to cmd-OTHER — fusing A into it would guess
@@ -660,7 +660,7 @@ test('A16: a leg-2 hit on a card declaring a DIFFERENT command never fuses', () 
   assert.equal(command?.outcome?.sourceEventSeq, SessionSeq(2))
 })
 
-test('A17: an unrelated sourceEventSeq keeps the command standalone while retaining the relationship', () => {
+test('an unrelated sourceEventSeq keeps the command standalone while retaining the relationship', () => {
   const folder = new TranscriptFolder()
   folder.apply([
     event('command/run', { commandId: CommandId('cmd-1'), name: 'export', source: { kind: 'user' } }, 0),
@@ -678,7 +678,7 @@ test('A17: an unrelated sourceEventSeq keeps the command standalone while retain
 // B — descriptor disappearance
 // ---------------------------------------------------------------------------
 
-test('B01/B02: a subagent/descriptor materializes no TranscriptMessage regardless of placement', () => {
+test('a subagent/descriptor materializes no TranscriptMessage regardless of placement', () => {
   const continuable = new TranscriptFolder()
   continuable.apply([
     descriptor(0, 'continuable'),
@@ -700,13 +700,13 @@ test('B01/B02: a subagent/descriptor materializes no TranscriptMessage regardles
   assert.deepEqual(kinds(oneShot.messages()), ['user', 'assistant'])
 })
 
-test('B03: a descriptor-only child log produces no transcript card', () => {
+test('a descriptor-only child log produces no transcript card', () => {
   const folder = new TranscriptFolder()
   folder.apply([descriptor(0)])
   assert.deepEqual(folder.messages(), [])
 })
 
-test('B05: the parent genuine subagent tool/call remains an ordinary Tool', () => {
+test('the parent genuine subagent tool/call remains an ordinary Tool', () => {
   const folder = new TranscriptFolder()
   folder.apply([
     event('turn/start', { turn: 0 }, 0),
@@ -725,7 +725,7 @@ test('B05: the parent genuine subagent tool/call remains an ordinary Tool', () =
   assert.equal(tool.origin, undefined, 'the genuine delegation stays a model tool, not a synthetic row')
 })
 
-test('B06: a descriptor never inflates old-window tool counts', () => {
+test('a descriptor never inflates old-window tool counts', () => {
   const folder = new TranscriptFolder()
   folder.apply([
     event('turn/start', { turn: 0 }, 0),
@@ -745,7 +745,7 @@ test('B06: a descriptor never inflates old-window tool counts', () => {
   assert.ok(!summary.text.includes('2 tool calls'), summary.text)
 })
 
-test('B07: descriptor fields are not searchable as human transcript rows', () => {
+test('descriptor fields are not searchable as human transcript rows', () => {
   const folder = new TranscriptFolder()
   folder.apply([
     event('turn/start', { turn: 0 }, 0),
@@ -760,7 +760,7 @@ test('B07: descriptor fields are not searchable as human transcript rows', () =>
   assert.equal(folder.search('real prompt').length, 1)
 })
 
-test('A09/A15: a fused pre-turn manual compaction inherits the command placement anchor', () => {
+test('a fused pre-turn manual compaction inherits the command placement anchor', () => {
   // The visible/searchable representative of a manual /compact is the
   // compaction card; when the whole lifecycle precedes the first model turn
   // the card must inherit the command's re-anchored placement (the legacy
@@ -785,7 +785,7 @@ test('A09/A15: a fused pre-turn manual compaction inherits the command placement
     'the anchored window reveals the pre-turn manual-compaction card')
 })
 
-test('A08/A15: a fused manual compaction in a replayed era follows the command anchor', () => {
+test('a fused manual compaction in a replayed era follows the command anchor', () => {
   // Non-monotonic replay: the compaction card's fold-time turn follows the
   // monotonic currentTurn fence (8), but the command physically settles in
   // the replayed turn-3 era (anchor 3). The combined owner must follow the
@@ -817,7 +817,7 @@ test('A08/A15: a fused manual compaction in a replayed era follows the command a
     'the turn-8 window does not drag the replayed-era manual compaction in')
 })
 
-test('A09: an ignored replayed turn/start never adopts the leading prefix', () => {
+test('an ignored replayed turn/start never adopts the leading prefix', () => {
   // Round-5 probe: a command prefix, a turn/end(3) with no accepted start,
   // a REPLAYED turn/start(3) (the activity is already completed → ignored),
   // and only then the real turn/start(8). The ignored replay must not
@@ -837,7 +837,7 @@ test('A09: an ignored replayed turn/start never adopts the leading prefix', () =
   assert.equal(matches[0]!.turn, 8, `the first ACCEPTED turn owns the prefix (got ${matches[0]!.turn})`)
 })
 
-test('A09: turn 0 is a legal anchor — an in-turn-0 command is never re-anchored by turn 1', () => {
+test('turn 0 is a legal anchor — an in-turn-0 command is never re-anchored by turn 1', () => {
   // The pending-prefix decision is keyed on "has an ACCEPTED turn/start been
   // seen", never on `anchor === 0`: a command issued inside REAL turn 0
   // keeps its legal 0 anchor, and the later turn 1 must not steal it.
@@ -862,7 +862,7 @@ test('A09: turn 0 is a legal anchor — an in-turn-0 command is never re-anchore
     'the turn-1 window does not contain the turn-0 command')
 })
 
-test('A09: a turn-0 fused manual compaction keeps its legal 0 anchor', () => {
+test('a turn-0 fused manual compaction keeps its legal 0 anchor', () => {
   const folder = new TranscriptFolder()
   folder.apply([
     event('turn/start', { turn: 0 }, 0),

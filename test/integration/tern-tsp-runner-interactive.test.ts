@@ -49,7 +49,7 @@ function latestComposerText(wire: string): string | undefined {
 
 // ── The TUI-builtin admission on the TSP renderer ────────────────────────────
 
-test('B2: a TUI builtin with PiTui UI is refused on TSP with the draft restored', async (t) => {
+test('a TUI builtin with PiTui UI is refused on TSP with the draft restored', async (t) => {
   const { testLifecycle } = await import('../support/temp-lifecycle.ts')
   const life = testLifecycle(t)
   const home = life.tempDir('pr3b-tsp-interactive-')
@@ -73,7 +73,7 @@ test('B2: a TUI builtin with PiTui UI is refused on TSP with the draft restored'
   }
 })
 
-test('B2: a NON-TUI slash line is never refused by the builtin gate (the F1 regression)', async (t) => {
+test('a NON-TUI slash line is never refused by the builtin gate (the F1 regression)', async (t) => {
   const { testLifecycle } = await import('../support/temp-lifecycle.ts')
   const life = testLifecycle(t)
   const home = life.tempDir('pr3b-tsp-interactive-')
@@ -95,7 +95,7 @@ test('B2: a NON-TUI slash line is never refused by the builtin gate (the F1 regr
   }
 })
 
-test('B2: `/exit` is allowed through (the exit pair is the only supported TUI builtin)', async (t) => {
+test('`/exit` is allowed through (the exit pair is the only supported TUI builtin)', async (t) => {
   const { testLifecycle } = await import('../support/temp-lifecycle.ts')
   const life = testLifecycle(t)
   const home = life.tempDir('pr3b-tsp-interactive-')
@@ -113,7 +113,7 @@ test('B2: `/exit` is allowed through (the exit pair is the only supported TUI bu
   }
 })
 
-test('B2: `/quit` exits through the registered alias (the true catalog claim)', async (t) => {
+test('`/quit` exits through the registered alias (the true catalog claim)', async (t) => {
   const { testLifecycle } = await import('../support/temp-lifecycle.ts')
   const life = testLifecycle(t)
   const home = life.tempDir('pr3b-tsp-interactive-')
@@ -136,7 +136,7 @@ test('B2: `/quit` exits through the registered alias (the true catalog claim)', 
 // ── The local user-shell refusal (no Host process, no session, no history) ──
 
 for (const line of ['!echo hi', '!!echo hi']) {
-  test(`B2: \`${line}\` is refused before any Host shell run or Session`, async (t) => {
+  test(`\`${line}\` is refused before any Host shell run or Session`, async (t) => {
     const { testLifecycle } = await import('../support/temp-lifecycle.ts')
     const life = testLifecycle(t)
     const home = life.tempDir('pr3b-tsp-interactive-')
@@ -169,7 +169,7 @@ for (const line of ['!echo hi', '!!echo hi']) {
 
 // ── A plain prompt rides the ONE existing submission path ───────────────────
 
-test('B2: a plain Enter takes the real application submit path', async (t) => {
+test('a plain Enter takes the real application submit path', async (t) => {
   const { testLifecycle } = await import('../support/temp-lifecycle.ts')
   const life = testLifecycle(t)
   const home = life.tempDir('pr3b-tsp-interactive-')
@@ -220,7 +220,7 @@ test('B2: a plain Enter takes the real application submit path', async (t) => {
 
 // ── The startup window: a held Enter must NOT bypass the refusals ───────────
 
-test('B2: a `!` HELD with the SDK handshake is refused too — no shell/session side effects at the bind', async (t) => {
+test('a `!` HELD with the SDK handshake is refused too — no shell/session side effects at the bind', async (t) => {
   const { testLifecycle } = await import('../support/temp-lifecycle.ts')
   const life = testLifecycle(t)
   const home = life.tempDir('pr3b-tsp-interactive-')

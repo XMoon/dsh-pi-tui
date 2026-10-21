@@ -441,7 +441,7 @@ test('a malformed item contribution degrades gracefully (never breaks the footer
   }
 })
 
-test('M4 footer items are MAIN-SUBJECT gated: they do not render while the subagent viewer is open', async () => {
+test('footer items are MAIN-SUBJECT gated: they do not render while the subagent viewer is open', async () => {
   const ctx = new Context()
   try {
     const { service } = await mountTree(ctx)

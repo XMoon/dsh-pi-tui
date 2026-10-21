@@ -361,7 +361,7 @@ function autoReviewCatalog(): NonNullable<Parameters<typeof open>[0]> {
 
 const compact = (view: string): string => view.replace(/\s+/gu, ' ')
 
-test('B03 disable opens the shared risk confirmation and writes only after the explicit choice', async () => {
+test('disable opens the shared risk confirmation and writes only after the explicit choice', async () => {
   const harness = await open(autoReviewCatalog())
   await selectCard(harness, `bundle:${AUTO_REVIEW}`)
   harness.vt.sendInput('\r')
@@ -390,7 +390,7 @@ test('B03 disable opens the shared risk confirmation and writes only after the e
   assert.deepEqual(harness.setBundle, [{ name: AUTO_REVIEW, enabled: false }])
 })
 
-test('B03 row disable cannot bypass the confirmation and writes the exact entry id', async () => {
+test('row disable cannot bypass the confirmation and writes the exact entry id', async () => {
   const harness = await open(autoReviewCatalog())
   await selectCard(harness, `bundle:${AUTO_REVIEW}`)
   harness.vt.sendInput('\r')
@@ -412,7 +412,7 @@ test('B03 row disable cannot bypass the confirmation and writes the exact entry 
   assert.deepEqual(harness.setPlugin, [{ entryId: 'e-auto', enabled: false }])
 })
 
-test('B03 stale confirmation never writes after the authoritative inventory changed', async () => {
+test('stale confirmation never writes after the authoritative inventory changed', async () => {
   const harness = await open(autoReviewCatalog())
   await selectCard(harness, `bundle:${AUTO_REVIEW}`)
   harness.vt.sendInput('\r')
@@ -431,7 +431,7 @@ test('B03 stale confirmation never writes after the authoritative inventory chan
   assert.match(harness.view(), /Auto Review changed since the confirmation opened/)
 })
 
-test('B03 remove uses the same confirmation view with the same risk warning', async () => {
+test('remove uses the same confirmation view with the same risk warning', async () => {
   const catalog = autoReviewCatalog()
   const harness = await open({
     ...catalog,
@@ -481,7 +481,7 @@ async function openAutoConfirm(harness: WorkspaceHarness): Promise<void> {
   assert.equal(harness.panel.currentView(), 'confirm')
 }
 
-test('B03 danger primary is withheld on 80×5 and 44×8 until its consequence is fully visible', async () => {
+test('danger primary is withheld on 80×5 and 44×8 until its consequence is fully visible', async () => {
   for (const [columns, rows] of [[80, 5], [44, 8]] as const) {
     const harness = await open(autoReviewCatalog())
     await openAutoConfirm(harness)
@@ -527,7 +527,7 @@ test('B03 danger primary is withheld on 80×5 and 44×8 until its consequence is
   }
 })
 
-test('B03 danger primary disappears when the warning scrolls out and returns with it', async () => {
+test('danger primary disappears when the warning scrolls out and returns with it', async () => {
   const harness = await open(autoReviewCatalog())
   await openAutoConfirm(harness)
   assert.match(harness.view(), /Disable Auto Review/)

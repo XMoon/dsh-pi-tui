@@ -458,7 +458,7 @@ function fakeRunnerDeps(options: {
 
 /* ── CCR-1 ────────────────────────────────────────────────────────────── */
 
-test('CCR-1: a synchronous subscription-time generation notification is NOT a duplicate startup refresh', () => {
+test('a synchronous subscription-time generation notification is NOT a duplicate startup refresh', () => {
   // The rc.2 observable may notify the CURRENT token synchronously at
   // subscription time. Capture-before-subscribe + Object.is(token) identity
   // makes that immediate callback a no-op: zero catalog reads (§6 Must 3).
@@ -481,7 +481,7 @@ test('CCR-1: a synchronous subscription-time generation notification is NOT a du
 
 /* ── CCR-2 ────────────────────────────────────────────────────────────── */
 
-test('CCR-2: disconnect (A -> undefined) reads nothing, clears nothing, and keeps the Host-origin claim reserved', async () => {
+test('disconnect (A -> undefined) reads nothing, clears nothing, and keeps the Host-origin claim reserved', async () => {
   const source = controlledRemoteSource({})
   const harness = fakeRunnerDeps({
     remoteSource: source,
@@ -517,7 +517,7 @@ test('CCR-2: disconnect (A -> undefined) reads nothing, clears nothing, and keep
 
 /* ── CCR-3 ────────────────────────────────────────────────────────────── */
 
-test('CCR-3: a new defined generation B refreshes automatically without /reload and replaces the Host truth', async () => {
+test('a new defined generation B refreshes automatically without /reload and replaces the Host truth', async () => {
   const source = controlledRemoteSource({})
   const harness = fakeRunnerDeps({
     remoteSource: source,
@@ -551,7 +551,7 @@ test('CCR-3: a new defined generation B refreshes automatically without /reload 
 
 /* ── CCR-4 ────────────────────────────────────────────────────────────── */
 
-test('CCR-4: a FAILED new-generation read keeps the last-good Host claims (no blank success, no Client takeover)', async () => {
+test('a FAILED new-generation read keeps the last-good Host claims (no blank success, no Client takeover)', async () => {
   const source = controlledRemoteSource({})
   const harness = fakeRunnerDeps({
     remoteSource: source,
@@ -579,7 +579,7 @@ test('CCR-4: a FAILED new-generation read keeps the last-good Host claims (no bl
 
 /* ── CCR-5 ────────────────────────────────────────────────────────────── */
 
-test('CCR-5: generation C supersedes an in-flight B refresh through the existing coordinator fences', async () => {
+test('generation C supersedes an in-flight B refresh through the existing coordinator fences', async () => {
   const source = controlledRemoteSource({})
   const harness = fakeRunnerDeps({
     remoteSource: source,
@@ -615,7 +615,7 @@ test('CCR-5: generation C supersedes an in-flight B refresh through the existing
 
 /* ── CCR-6 ────────────────────────────────────────────────────────────── */
 
-test('CCR-6: the reconnect callback reads the CURRENT session id at execution time, never a startup-captured id', async () => {
+test('the reconnect callback reads the CURRENT session id at execution time, never a startup-captured id', async () => {
   const source = controlledRemoteSource({})
   let currentSession: string | undefined = 'session-a'
   const harness = fakeRunnerDeps({
@@ -642,7 +642,7 @@ test('CCR-6: the reconnect callback reads the CURRENT session id at execution ti
 
 /* ── CCR-7 ────────────────────────────────────────────────────────────── */
 
-test('CCR-7: disposeCatalog unsubscribes the generation listener exactly once and no post-dispose refresh starts', async () => {
+test('disposeCatalog unsubscribes the generation listener exactly once and no post-dispose refresh starts', async () => {
   const source = controlledRemoteSource({})
   const harness = fakeRunnerDeps({
     remoteSource: source,
@@ -672,7 +672,7 @@ test('CCR-7: disposeCatalog unsubscribes the generation listener exactly once an
 
 /* ── CCR-8 ────────────────────────────────────────────────────────────── */
 
-test('CCR-8 (Direct negative control): no generation subscription exists on the Direct branch', () => {
+test('(Direct negative control): no generation subscription exists on the Direct branch', () => {
   const harness = fakeRunnerDeps({
     remoteSource: undefined,
     currentSessionId: () => 'session-a',
@@ -692,7 +692,7 @@ test('CCR-8 (Direct negative control): no generation subscription exists on the 
 
 /* ── CCR-9 (M3-6 PR3) ─────────────────────────────────────────────────── */
 
-test('CCR-9: a throwing official generation unsubscribe still disposes the coordinator and retires the refresh path', async () => {
+test('a throwing official generation unsubscribe still disposes the coordinator and retires the refresh path', async () => {
   const unsubscribeFailure = new Error('generation unsubscribe failed')
   const source = controlledRemoteSource({ unsubscribeFailure })
   const harness = fakeRunnerDeps({
@@ -744,7 +744,7 @@ test('CCR-9: a throwing official generation unsubscribe still disposes the coord
 
 /* ── PR-A: the CommandSurface signal-routing discriminator ─────────────── */
 
-test('CSR-1: the CommandSurface prefers the explicit operation signal and forwards abort state unchanged', async () => {
+test('the CommandSurface prefers the explicit operation signal and forwards abort state unchanged', async () => {
   const lifetime = new AbortController().signal
   const explicit = new AbortController().signal
   const aborted = new AbortController()

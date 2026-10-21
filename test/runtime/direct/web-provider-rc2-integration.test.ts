@@ -384,7 +384,7 @@ async function writeWebSettingsThroughTui(app: S4D3Application, config: DirectWe
   await app.waitFor(() => !app.view().includes('Settings ·'), 'the Settings workspace closes')
 }
 
-test('D3-2: a TUI Web settings write reaches the NEXT real tool call and the mounted transcript', { skip: skippedInstallationReason([]) }, async t => {
+test('a TUI Web settings write reaches the NEXT real tool call and the mounted transcript', { skip: skippedInstallationReason([]) }, async t => {
   const adapter = new WebL6Adapter()
   const app = await startS4D3Application(t, {
     bundles: [],
@@ -434,7 +434,7 @@ test('D3-2: a TUI Web settings write reaches the NEXT real tool call and the mou
   assert.match(app.view(), /https:\/\/example\.test\/api/u)
 })
 
-test('D3-2: the missing-credential error reaches the TUI and the selected provider is never bypassed', { skip: skippedInstallationReason([]) }, async t => {
+test('the missing-credential error reaches the TUI and the selected provider is never bypassed', { skip: skippedInstallationReason([]) }, async t => {
   const adapter = new WebL6Adapter()
   const app = await startS4D3Application(t, {
     bundles: [],

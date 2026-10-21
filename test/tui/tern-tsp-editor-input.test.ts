@@ -63,7 +63,7 @@ function composerWithSinks(): { composer: TspComposer; pending: Array<string | u
 
 // ── Layer 1: the reducer (pure composer semantics) ──────────────────────────
 
-test('B1: printable keys insert at the caret; CJK and emoji are single edits', () => {
+test('printable keys insert at the caret; CJK and emoji are single edits', () => {
   const { composer } = composerWithSinks()
   composer.applyKey(key('a', { text: 'a' }))
   composer.applyKey(key('b', { text: 'b' }))
@@ -74,7 +74,7 @@ test('B1: printable keys insert at the caret; CJK and emoji are single edits', (
     'CJK (1 UTF-16 unit) and emoji (surrogate pair) insert atomically')
 })
 
-test('B1: backspace/delete never split a surrogate pair or a ZWJ sequence', () => {
+test('backspace/delete never split a surrogate pair or a ZWJ sequence', () => {
   const { composer } = composerWithSinks()
   // Type the content so the caret sits at the END: 'a' + family emoji (8
   // UTF-16 units, ONE grapheme) + 'b'.
@@ -97,7 +97,7 @@ test('B1: backspace/delete never split a surrogate pair or a ZWJ sequence', () =
   assert.deepEqual(composer.state(), { text: '', cursor: 0, focused: false })
 })
 
-test('B1: left/right move by grapheme clusters, never by lone UTF-16 units', () => {
+test('left/right move by grapheme clusters, never by lone UTF-16 units', () => {
   const { composer } = composerWithSinks()
   for (const ch of ['a', '👍', 'b']) composer.applyKey(key(ch, { text: ch }))
   assert.equal(composer.state().cursor, 4)
@@ -111,7 +111,7 @@ test('B1: left/right move by grapheme clusters, never by lone UTF-16 units', () 
   assert.equal(composer.state().cursor, 4)
 })
 
-test('B1: home/end operate on the containing line of a multi-line draft', () => {
+test('home/end operate on the containing line of a multi-line draft', () => {
   const { composer } = composerWithSinks()
   // Type 'one', newline (Shift+Enter), 'tw' so the caret is inside line 2.
   for (const ch of ['o', 'n', 'e']) composer.applyKey(key(ch, { text: ch }))
@@ -128,7 +128,7 @@ test('B1: home/end operate on the containing line of a multi-line draft', () => 
   assert.equal(composer.state().cursor, 4, 'home at the line start is idempotent')
 })
 
-test('B1: Shift+Enter inserts a newline; Enter and Ctrl+Enter classify as gestures without mutating the draft', () => {
+test('Shift+Enter inserts a newline; Enter and Ctrl+Enter classify as gestures without mutating the draft', () => {
   const { composer } = composerWithSinks()
   composer.applyKey(key('enter', { shift: true }))
   assert.deepEqual(composer.state().text, '\n')
@@ -139,21 +139,21 @@ test('B1: Shift+Enter inserts a newline; Enter and Ctrl+Enter classify as gestur
   assert.equal(composer.state().text, '\n', 'submit gestures never clear the draft themselves')
 })
 
-test('B1: bracketed paste is ONE atomic edit; command-looking content never dispatches', () => {
+test('bracketed paste is ONE atomic edit; command-looking content never dispatches', () => {
   const { composer } = composerWithSinks()
   const edit = composer.applyKey(key('paste', { text: '/exit\n!echo hi\nq' }))
   assert.deepEqual(edit, { kind: 'edited' })
   assert.deepEqual(composer.state().text, '/exit\n!echo hi\nq')
 })
 
-test('B1: Ctrl+D exits only on an empty draft; with text it is a no-op', () => {
+test('Ctrl+D exits only on an empty draft; with text it is a no-op', () => {
   const { composer } = composerWithSinks()
   assert.deepEqual(composer.applyKey(key('d', { ctrl: true })), { kind: 'exit-empty' })
   composer.applyKey(key('x', { text: 'x' }))
   assert.deepEqual(composer.applyKey(key('d', { ctrl: true })), { kind: 'none' })
 })
 
-test('B1: unknown control keys are ignored, never literal escape text', () => {
+test('unknown control keys are ignored, never literal escape text', () => {
   const { composer } = composerWithSinks()
   composer.applyKey(key('f3'))
   composer.applyKey(key('escape'))
@@ -161,7 +161,7 @@ test('B1: unknown control keys are ignored, never literal escape text', () => {
   assert.deepEqual(composer.state(), { text: '', cursor: 0, focused: false })
 })
 
-test('B1: the port members — draft clamp, pending sink, settled no-op', () => {
+test('the port members — draft clamp, pending sink, settled no-op', () => {
   const { composer, pending, notices } = composerWithSinks()
   composer.setDraft('hello')
   assert.equal(composer.getDraft(), 'hello')
@@ -180,7 +180,7 @@ test('B1: the port members — draft clamp, pending sink, settled no-op', () => 
 
 // ── F1: the cursor-boundary invariant (real-SDK reachable shapes) ────────────
 
-test('B1/F1: paste a combining mark, Home, type a letter — the merged cluster never strands its mark', () => {
+test('paste a combining mark, Home, type a letter — the merged cluster never strands its mark', () => {
   // The reviewer's REAL-SDK probe shape: bracketed-paste U+0301 (combining
   // acute), Home, then 'a' merges into ONE grapheme 'á'. The caret must land
   // at the merged cluster's END and backspace consumes the WHOLE cluster.
@@ -196,7 +196,7 @@ test('B1/F1: paste a combining mark, Home, type a letter — the merged cluster 
   assert.deepEqual(composer.state(), { text: '', cursor: 0, focused: false })
 })
 
-test('B1/F1: setEditorText with a shorter surrogate text keeps the caret boundary-aligned', () => {
+test('setEditorText with a shorter surrogate text keeps the caret boundary-aligned', () => {
   // The reviewer's second REAL shape: type 'x' (caret 1), then
   // setEditorText('👍') — the numeric clamp would keep 1, INSIDE the pair.
   const { composer } = composerWithSinks()
@@ -208,7 +208,7 @@ test('B1/F1: setEditorText with a shorter surrogate text keeps the caret boundar
     'backspace consumed the whole surrogate pair — no lone \\udc4d remains')
 })
 
-test('B1/F1: insertIntoEditor merging with a following combining cluster keeps the caret aligned', () => {
+test('insertIntoEditor merging with a following combining cluster keeps the caret aligned', () => {
   // Insertion may MERGE with the following cluster (a ZWJ/combining suffix):
   // the caret must end at the merged cluster's end, never inside it.
   const { composer } = composerWithSinks()
@@ -221,7 +221,7 @@ test('B1/F1: insertIntoEditor merging with a following combining cluster keeps t
   assert.deepEqual(composer.state(), { text: '', cursor: 0, focused: false })
 })
 
-test('B1/F1: End never lands inside a pasted CRLF cluster; backspace keeps it whole', () => {
+test('End never lands inside a pasted CRLF cluster; backspace keeps it whole', () => {
   // The round-3 REAL-SDK probe shape: paste 'a\r\nb' (the bracketed paste
   // preserves the raw CRLF; Intl.Segmenter treats the pair as ONE grapheme).
   // End on line 1 must stop at the CR (cursor 1), never at the LF position
@@ -263,7 +263,7 @@ test('B1/F1: End never lands inside a pasted CRLF cluster; backspace keeps it wh
     'delete consumed the CRLF as one unit')
 })
 
-test('B1/F1: deleting a separator that FUSES two clusters keeps the caret boundary-aligned', () => {
+test('deleting a separator that FUSES two clusters keeps the caret boundary-aligned', () => {
   // The round-2 probe shape: '🇦x🇧' (two flag halves separated by 'x').
   // Deleting the separator merges the regional indicators into ONE flag
   // cluster; the caret must normalize onto the fused boundary so a
@@ -291,7 +291,7 @@ test('B1/F1: deleting a separator that FUSES two clusters keeps the caret bounda
 
 // ── F2: every port mutator commits an authoritative render ───────────────────
 
-test('B1/F2: setDraft/setEditorText/insertIntoEditor each notify exactly one render', () => {
+test('setDraft/setEditorText/insertIntoEditor each notify exactly one render', () => {
   const { composer, changes } = composerWithSinks()
   const before = changes()
   composer.setDraft('one')
@@ -474,7 +474,7 @@ function focusSeen(wireText: string): boolean {
   return /"focus","dock\.composer"/.test(wireText)
 }
 
-test('B1/L2: the dock renders the controlled editor and focuses it after the first frame', async () => {
+test('the dock renders the controlled editor and focuses it after the first frame', async () => {
   const harness = await mountPane()
   try {
     const wire = harness.tern.output.text()
@@ -489,7 +489,7 @@ test('B1/L2: the dock renders the controlled editor and focuses it after the fir
   }
 })
 
-test('B1/L2: typed bytes flow through the SDK decoder into the controlled editor', async () => {
+test('typed bytes flow through the SDK decoder into the controlled editor', async () => {
   const harness = await mountPane()
   try {
     harness.tern.input.type('hi')
@@ -506,7 +506,7 @@ test('B1/L2: typed bytes flow through the SDK decoder into the controlled editor
   }
 })
 
-test('B1/L2/P3: one accepted edit calls Surface.render exactly ONCE (no double render)', async () => {
+test('one accepted edit calls Surface.render exactly ONCE (no double render)', async () => {
   // The round-6 review's discriminating-power ruling: a WIRE-frame count
   // cannot detect a duplicate render (the SDK's diff suppresses empty
   // updates — verified by the reviewer's probe). Observe the REAL
@@ -544,7 +544,7 @@ test('B1/L2/P3: one accepted edit calls Surface.render exactly ONCE (no double r
   await session.close()
 })
 
-test('B1/L2/F2: the composer-port mutators reach the wire through the real SDK chain', async () => {
+test('the composer-port mutators reach the wire through the real SDK chain', async () => {
   const harness = await mountPane()
   try {
     harness.tern.input.type('old')
@@ -572,7 +572,7 @@ test('B1/L2/F2: the composer-port mutators reach the wire through the real SDK c
   }
 })
 
-test('B2/L2: a bound Enter submits the snapshot and clears the composer BEFORE the callback', async () => {
+test('a bound Enter submits the snapshot and clears the composer BEFORE the callback', async () => {
   // §3.4 submission gesture ordering: snapshot, clear, then callback — the
   // callback observes an EMPTY composer (a synchronous restore merges into
   // it rather than being erased by a post-callback clear).
@@ -612,7 +612,7 @@ test('B2/L2: a bound Enter submits the snapshot and clears the composer BEFORE t
   }
 })
 
-test('B2/L2: a PRE-BIND Enter is held and submits at the bind, never before it', async () => {
+test('a PRE-BIND Enter is held and submits at the bind, never before it', async () => {
   // Nothing may reach the application before the commit-point binding
   // exists: the pre-bind Enter waits in the held queue and is applied (as a
   // real submission) only when bindInput consumes the queue in order.
@@ -639,7 +639,7 @@ test('B2/L2: a PRE-BIND Enter is held and submits at the bind, never before it',
   }
 })
 
-test('B1/L2: a paste stays one edit and never dispatches commands', async () => {
+test('a paste stays one edit and never dispatches commands', async () => {
   const harness = await mountPane()
   try {
     // Bracketed paste bytes exactly as a terminal sends them.
@@ -658,7 +658,7 @@ test('B1/L2: a paste stays one edit and never dispatches commands', async () => 
   }
 })
 
-test('B1/L2: a bound Ctrl+C cancels (never exits); a typed q does not', async () => {
+test('a bound Ctrl+C cancels (never exits); a typed q does not', async () => {
   const harness = await mountPane()
   try {
     harness.tern.input.type('q')
@@ -682,7 +682,7 @@ test('B1/L2: a bound Ctrl+C cancels (never exits); a typed q does not', async ()
   }
 })
 
-test('B1/L2: input after dispose is inert', async () => {
+test('input after dispose is inert', async () => {
   const harness = await mountPane()
   await harness.dispose()
   await harness.session.close()
@@ -693,7 +693,7 @@ test('B1/L2: input after dispose is inert', async () => {
   assert.equal(harness.exitCount(), 0, 'a late key after dispose never exits')
 })
 
-test('B1/L2: a key batched with the SDK handshake is consumed through the composer', async () => {
+test('a key batched with the SDK handshake is consumed through the composer', async () => {
   // The handshake-batch race (§3.3): bytes arriving in the SAME input chunk
   // as the hello reply are decoded by the SDK and delivered to the mounted
   // input loop — they must land in the composer, never bypass it.
@@ -708,7 +708,7 @@ test('B1/L2: a key batched with the SDK handshake is consumed through the compos
   }
 })
 
-test('B1/L2: an early Ctrl+D in the handshake batch routes the legal exit', async () => {
+test('an early Ctrl+D in the handshake batch routes the legal exit', async () => {
   // A legal early quit during the PR3-A compatibility window still routes
   // through the same exit controller (empty draft — nothing was typed yet).
   const harness = await mountPane({ withHandshake: '\x04' })
@@ -723,7 +723,7 @@ test('B1/L2: an early Ctrl+D in the handshake batch routes the legal exit', asyn
 
 // ── F4: the editor-local/lifecycle binding and the held pre-bind window ─────
 
-test('B1/L2/F4: keys before the bind are HELD, then consumed exactly once at the bind', async () => {
+test('keys before the bind are HELD, then consumed exactly once at the bind', async () => {
   // No bind yet (bind: false mirrors a connect that outlived the startup
   // commit): the typed keys must NOT reach the editor — they wait.
   const harness = await mountPane({ bind: false })
@@ -745,7 +745,7 @@ test('B1/L2/F4: keys before the bind are HELD, then consumed exactly once at the
   }
 })
 
-test('B1/L2/F4: a dispose before the bind discards the held keys unconsumed', async () => {
+test('a dispose before the bind discards the held keys unconsumed', async () => {
   const harness = await mountPane({ bind: false })
   harness.tern.input.type('doomed')
   await harness.dispose()
@@ -758,7 +758,7 @@ test('B1/L2/F4: a dispose before the bind discards the held keys unconsumed', as
   assert.equal(harness.frames().length, framesBefore, 'nothing renders after dispose — the queue was discarded')
 })
 
-test('B1/L2/F4: the bound exit handler routes the composer exit gesture', async () => {
+test('the bound exit handler routes the composer exit gesture', async () => {
   const tern = new ScriptedTern()
   const session = await sdkConnect({ env: {}, input: tern.input, output: tern.output, exitHooks: false, timeout: 500 })
   assert.ok(session !== null)
@@ -802,7 +802,7 @@ test('B1/L2/F4: the bound exit handler routes the composer exit gesture', async 
   }
 })
 
-test('B1/L2/F4: real user input is observed only through the bound projection', async () => {
+test('real user input is observed only through the bound projection', async () => {
   const harness = await mountPane()
   try {
     harness.tern.input.type('a')
@@ -819,7 +819,7 @@ test('B1/L2/F4: real user input is observed only through the bound projection', 
   }
 })
 
-test('B1/L2/F4: a held key orders the pre-bind Ctrl+D — no exit before the bind replays it', async () => {
+test('a held key orders the pre-bind Ctrl+D — no exit before the bind replays it', async () => {
   // The round-2 ordered-semantics finding: a held 'a' (not yet applied) plus
   // Ctrl+D must NOT pre-bind-exit on the empty live draft — the gesture's
   // emptiness depends on the held edits and re-decides IN ARRIVAL ORDER at
@@ -844,7 +844,7 @@ test('B1/L2/F4: a held key orders the pre-bind Ctrl+D — no exit before the bin
   }
 })
 
-test('B1/L2: the empty-draft Ctrl+D exit shape (the real-pane v4 tail) through the bound loop', async () => {
+test('the empty-draft Ctrl+D exit shape (the real-pane v4 tail) through the bound loop', async () => {
   // The exact shape the real-pane smoke's tail exercised: type two chars,
   // clear them with backspaces, then \x04 — ONE exit, after the draft is
   // truly empty. (The real pane's Control+d chord delivers no byte — the
@@ -865,7 +865,7 @@ test('B1/L2: the empty-draft Ctrl+D exit shape (the real-pane v4 tail) through t
   }
 })
 
-test('B1/L2/F4: a pre-bind input flood fails loud ONCE and still replays the held prefix', async () => {
+test('a pre-bind input flood fails loud ONCE and still replays the held prefix', async () => {
   const harness = await mountPane({ bind: false })
   try {
     // Over 128 held keys: the 129th trips the ONE observable overflow notice.

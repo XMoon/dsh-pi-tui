@@ -351,7 +351,7 @@ const settleFrames = async (): Promise<void> => {
 }
 
 
-test('M3-6 PR2 (review F3): a proven settlement does not notify the REPLACEMENT subject\'s surface after a session switch', async () => {
+test('(review F3): a proven settlement does not notify the REPLACEMENT subject\'s surface after a session switch', async () => {
   // The adapter keeps the dispatched settlement real (no post-dispatch
   // generation re-check); the CONSUMER must therefore own the visibility
   // fence. When the answer was dispatched for session A's continued call and
@@ -412,7 +412,7 @@ test('M3-6 PR2 (review F3): a proven settlement does not notify the REPLACEMENT 
     'the replacement subject\'s surface never sees the old subject\'s settlement notice')
 })
 
-test('M3-6 PR2 (review F3b): a superseded settlement never retires a NEWER entry for the same call', async () => {
+test('(review F3b): a superseded settlement never retires a NEWER entry for the same call', async () => {
   // The reachable sequence the entry-mutation fence exists for: session A's
   // continued answer is dispatched and the Host accepts it (settlement held);
   // the queued reply reaches the projection; the user then DISCARDS that
@@ -477,7 +477,7 @@ test('M3-6 PR2 (review F3b): a superseded settlement never retires a NEWER entry
     'the superseded settlement is still not announced on the current surface')
 })
 
-test('M3-6 PR3: a throwing projection unsubscribe cannot strand the mounted form abort or the active cleanup', async () => {
+test('a throwing projection unsubscribe cannot strand the mounted form abort or the active cleanup', async () => {
   const failure = new Error('projection unsubscribe failed')
   let released = 0
   const claim: QuestionWaitClaim = { remainingMs: 60_000, ended: new Promise(() => {}), release: () => { released += 1 } }
@@ -510,7 +510,7 @@ test('M3-6 PR3: a throwing projection unsubscribe cannot strand the mounted form
 
 // ── PR3-B B3: the timed lifecycle driving the REAL TSP seat ──────────────────
 
-test('PR3-B B3: the timed claim, timeout and continued late answer drive the REAL TSP seat', async () => {
+test('the timed claim, timeout and continued late answer drive the REAL TSP seat', async () => {
   const { createTspInteractionSeat } = await import('../../src/tui/tsp/interaction.ts')
   const seat = createTspInteractionSeat({
     render: () => {},

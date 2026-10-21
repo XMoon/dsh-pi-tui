@@ -426,13 +426,13 @@ async function runClientCommandErrorAcrossOwnerChange(options: {
   return { notices }
 }
 
-test('F5: a stale Client-command error is NOT announced on the replacement owner', async () => {
+test('a stale Client-command error is NOT announced on the replacement owner', async () => {
   const result = await runClientCommandErrorAcrossOwnerChange({ staleAtSettlement: true })
   assert.deepEqual(result.notices, [],
     'the captured scope was replaced, so the old failure must not reach the new surface')
 })
 
-test('F5: the SAME-session Client-command error is announced exactly once', async () => {
+test('the SAME-session Client-command error is announced exactly once', async () => {
   const result = await runClientCommandErrorAcrossOwnerChange({ staleAtSettlement: false })
   assert.deepEqual(result.notices, ['stale copy failure'],
     'a current owner receives the card-less failure exactly once')

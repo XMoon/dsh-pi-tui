@@ -192,7 +192,7 @@ function readsAcrossConversationEvents(): SessionEvent[] {
 
 // ── T1: the core Work-partition parity ─────────────────────────────────────
 
-test('T1: Tool → Assistant text → Tool derives the SAME live and cold Work partition', () => {
+test('Tool → Assistant text → Tool derives the SAME live and cold Work partition', () => {
   const cold = foldEvents(interleavedEvents())
   const live = interleavedLive()
   // VISIBLE ROW ORDER (logical identity, never object references).
@@ -211,7 +211,7 @@ test('T1: Tool → Assistant text → Tool derives the SAME live and cold Work p
 
 // ── T2: reads separated by a Conversation must not merge ───────────────────
 
-test('T2: a Conversation visible between two reads keeps them as two reads in the cold fold too', () => {
+test('a Conversation visible between two reads keeps them as two reads in the cold fold too', () => {
   const cold = foldEvents(readsAcrossConversationEvents())
   const reads = cold.messages().filter(message => message.kind === 'tool')
   assert.equal(reads.length, 2, 'cold must not collapse the two reads into one card')
@@ -232,7 +232,7 @@ test('T2: a Conversation visible between two reads keeps them as two reads in th
 
 // ── T3: genuinely adjacent reads still merge (no over-splitting) ───────────
 
-test('T3: reads with no Conversation between them still merge', () => {
+test('reads with no Conversation between them still merge', () => {
   // The assistant text is first visible AFTER both reads, so no record proves it
   // belongs between them: the conservative (and correct) result is one group.
   const cold = foldEvents([
@@ -255,7 +255,7 @@ test('T3: reads with no Conversation between them still merge', () => {
 
 // ── T4: mixed Thinking / Assistant / Tool lanes ────────────────────────────
 
-test('T4a: Thinking → Assistant → tools keeps the reasoning lane before the Conversation and the tools after it', () => {
+test('Thinking → Assistant → tools keeps the reasoning lane before the Conversation and the tools after it', () => {
   const stream = [
     { type: 'chunk', time: T0 + 1_000, chunk: { type: 'block-start', index: 0, blockType: 'reasoning' } },
     { type: 'chunk', time: T0 + 1_000, chunk: { type: 'reasoning-delta', index: 0, text: 'brief thought' } },
@@ -275,7 +275,7 @@ test('T4a: Thinking → Assistant → tools keeps the reasoning lane before the 
   assert.deepEqual(structureKinds(cold), ['work', 'message', 'work'])
 })
 
-test('T4b: an assistant-first lane order keeps the Conversation before its reasoning row', () => {
+test('an assistant-first lane order keeps the Conversation before its reasoning row', () => {
   const stream = [
     textChunk(T0 + 1_000, 0, 'answer first'),
     { type: 'chunk', time: T0 + 1_500, chunk: { type: 'block-start', index: 1, blockType: 'reasoning' } },
@@ -292,7 +292,7 @@ test('T4b: an assistant-first lane order keeps the Conversation before its reaso
 
 // ── T5: negative cases — no guessing without evidence ─────────────────────
 
-test('T5a: tools of a DIFFERENT turn are never displaced by another turn’s Conversation', () => {
+test('tools of a DIFFERENT turn are never displaced by another turn’s Conversation', () => {
   const cold = foldEvents([
     eventAt('turn/start', { turn: 1 }, T0, 0),
     toolCall({ callId: 'c1', name: 'bash', turn: 1, step: 0, time: T0 + 1_000, seq: 1 }),
@@ -310,7 +310,7 @@ test('T5a: tools of a DIFFERENT turn are never displaced by another turn’s Con
     'a cross-turn Conversation never reaches back into the earlier turn')
 })
 
-test('T5b: a streamless settlement provides no order evidence, so no tool is displaced', () => {
+test('a streamless settlement provides no order evidence, so no tool is displaced', () => {
   const cold = foldEvents([
     eventAt('turn/start', { turn: 1 }, T0, 0),
     toolCall({ callId: 'c1', name: 'bash', turn: 1, step: 0, time: T0 + 1_000, seq: 1 }),
@@ -330,7 +330,7 @@ test('T5b: a streamless settlement provides no order evidence, so no tool is dis
     'without evidence the durable append order is preserved')
 })
 
-test('T5c: an equal-time Conversation provides no provable ORDER, so no tool is displaced', () => {
+test('an equal-time Conversation provides no provable ORDER, so no tool is displaced', () => {
   const cold = foldEvents([
     eventAt('turn/start', { turn: 1 }, T0, 0),
     toolCall({ callId: 'c1', name: 'bash', turn: 1, step: 1, time: T0 + 3_000, seq: 1 }),
@@ -346,7 +346,7 @@ test('T5c: an equal-time Conversation provides no provable ORDER, so no tool is 
     'equal times stay in the durable order instead of guessing')
 })
 
-test('T5d: a stream tool-call delta whose callId matches no recorded call displaces nothing', () => {
+test('a stream tool-call delta whose callId matches no recorded call displaces nothing', () => {
   const cold = foldEvents([
     eventAt('turn/start', { turn: 1 }, T0, 0),
     toolCall({ callId: 'c1', name: 'bash', turn: 1, step: 1, time: T0 + 3_000, seq: 1 }),
@@ -364,7 +364,7 @@ test('T5d: a stream tool-call delta whose callId matches no recorded call displa
     'only an identified, recorded call may be reordered')
 })
 
-test('T5e: duplicate tool names never cross-talk — displacement follows the callId', () => {
+test('duplicate tool names never cross-talk — displacement follows the callId', () => {
   const cold = foldEvents([
     eventAt('turn/start', { turn: 1 }, T0, 0),
     toolCall({ callId: 'bash-a', name: 'bash', turn: 1, step: 0, time: T0 + 1_000, seq: 1 }),
@@ -386,7 +386,7 @@ test('T5e: duplicate tool names never cross-talk — displacement follows the ca
 
 // ── T2b: the split reads keep their own corpus, representative and window slot ──
 
-test('T2b: each split read keeps its own search corpus, representative and window slot', () => {
+test('each split read keeps its own search corpus, representative and window slot', () => {
   const cold = foldEvents(readsAcrossConversationEvents())
   const readA = cold.search('a.ts')
   const readB = cold.search('b.ts')
@@ -410,7 +410,7 @@ test('T2b: each split read keeps its own search corpus, representative and windo
 
 // ── T4c: a second step's lane after a tool row ─────────────────────────────
 
-test('T4c: each step keeps its own lane order; only the provable part is reordered', () => {
+test('each step keeps its own lane order; only the provable part is reordered', () => {
   const events = [
     eventAt('turn/start', { turn: 1 }, T0, 0),
     toolCall({ callId: 'c9', name: 'bash', turn: 1, step: 0, time: T0 + 3_000, seq: 1 }),
@@ -449,7 +449,7 @@ test('T4c: each step keeps its own lane order; only the provable part is reorder
 
 // ── T6: Preparing start before the visible text, durable call after ────────
 
-test('T6: a Tool whose LIVE materialization preceded the visible text stays before the Conversation', () => {
+test('a Tool whose LIVE materialization preceded the visible text stays before the Conversation', () => {
   const events = (): SessionEvent[] => [
     eventAt('turn/start', { turn: 1 }, T0, 0),
     assistantSettlement({
@@ -486,7 +486,7 @@ test('T6: a Tool whose LIVE materialization preceded the visible text stays befo
 
 // ── T7: display-order invariants under displacement and re-application ─────
 
-test('T7: a displaced fold emits every visible row once with stable ids, and re-application is inert', () => {
+test('a displaced fold emits every visible row once with stable ids, and re-application is inert', () => {
   // Distinctive result text: a merged read card keeps its MEMBERS' evidence but
   // the representative's corpus is the group text, so a hit is looked up by the
   // content that survives the merge.
@@ -523,7 +523,7 @@ test('T7: a displaced fold emits every visible row once with stable ids, and re-
 
 // ── T8: the real consumer chain down to the Compact presentation ───────────
 
-test('T8: the converged Work partition reaches the Compact presentation as two Activities', () => {
+test('the converged Work partition reaches the Compact presentation as two Activities', () => {
   const cold = foldEvents(interleavedEvents())
   const spans: TranscriptWorkSpan[] = []
   for (const block of projectTranscriptStructure(cold.messages())) {
@@ -559,7 +559,7 @@ function toolRows(folder: TranscriptFolder): ToolRow[] {
 
 // ── F1: the first read of a NEW turn starts its own run ────────────────────
 
-test('F1: reads of a new turn start their own run after a turn transition', () => {
+test('reads of a new turn start their own run after a turn transition', () => {
   const cold = foldEvents([
     turnStart(1, T0, 0),
     readCall('a', 1, 0, T0 + 100, 1, 'a.ts'), toolResult('a', 1, 0, T0 + 150, 2, 'a'),
@@ -574,7 +574,7 @@ test('F1: reads of a new turn start their own run after a turn transition', () =
 
 // ── F2/T6b: the durable call arrived BEFORE the settlement ────────────────
 
-test('T6b: a durable call that arrived BEFORE the settlement honours its Preparing evidence', () => {
+test('a durable call that arrived BEFORE the settlement honours its Preparing evidence', () => {
   const cold = foldEvents([
     turnStart(1, T0, 0),
     toolCall({ callId: 'c1', name: 'bash', turn: 1, step: 0, time: T0 + 3_000, seq: 1 }),
@@ -591,7 +591,7 @@ test('T6b: a durable call that arrived BEFORE the settlement honours its Prepari
 
 // ── F3: identity is (turn, step, callId), never the bare call id ──────────
 
-test('F3: a call id reused by another step never moves the newer card', () => {
+test('a call id reused by another step never moves the newer card', () => {
   const cold = foldEvents([
     turnStart(1, T0, 0),
     toolCall({ callId: 'x', name: 'bash', turn: 1, step: 0, time: T0 + 1_000, seq: 1 }),
@@ -609,7 +609,7 @@ test('F3: a call id reused by another step never moves the newer card', () => {
 
 // ── F4: late rows of an earlier turn are not outside their own run ────────
 
-test('F4: late reads of an earlier turn still group with each other (live incremental regroup)', () => {
+test('late reads of an earlier turn still group with each other (live incremental regroup)', () => {
   // INCREMENTAL (never hydrated): the late turn-1 rows settle through the live
   // regroup path, which is where the positional turn range used to be wrong.
   const live = new TranscriptFolder()
@@ -655,7 +655,7 @@ test('F4: late reads of an earlier turn still group with each other (live increm
 
 // ── F5: visibility is display adjacency ───────────────────────────────────
 
-test('F5: hiding the lane row between two reads lets them merge', () => {
+test('hiding the lane row between two reads lets them merge', () => {
   const folder = new TranscriptFolder()
   folder.hydrate([
     turnStart(1, T0, 0),
@@ -683,7 +683,7 @@ test('F5: hiding the lane row between two reads lets them merge', () => {
 
 // ── T4d: an assistant-first lane with a later Tool ───────────────────────
 
-test('T4d: an assistant-first lane with a later Tool converges in both folds', () => {
+test('an assistant-first lane with a later Tool converges in both folds', () => {
   const events = (): SessionEvent[] => [
     turnStart(1, T0, 0),
     toolCall({ callId: 'c1', name: 'bash', turn: 1, step: 0, time: T0 + 2_000, seq: 1 }),
@@ -718,7 +718,7 @@ test('T4d: an assistant-first lane with a later Tool converges in both folds', (
 
 // ── T5f/T5g: one symmetric evidence rule ─────────────────────────────────
 
-test('T5f: a same-step call known only from the durable message block is still converged', () => {
+test('a same-step call known only from the durable message block is still converged', () => {
   // The settlement arrives FIRST (creating the Conversation row) and the durable
   // call lands LATER with an EARLIER time: the correct order (Tool before the
   // Conversation) therefore REQUIRES a displacement, and the call is named only
@@ -745,7 +745,7 @@ test('T5f: a same-step call known only from the durable message block is still c
   assert.deepEqual(logicalRows(cold), ['tool:a1', 'assistant:text at two'])
 })
 
-test('T5g: a streamless settlement provides no ORDER evidence — the durable order is kept', () => {
+test('a streamless settlement provides no ORDER evidence — the durable order is kept', () => {
   const cold = foldEvents([
     turnStart(1, T0, 0),
     eventAt('assistant/message', {
@@ -765,7 +765,7 @@ test('T5g: a streamless settlement provides no ORDER evidence — the durable or
 
 // ── strengthened negatives (the guard must actually be reached) ───────────
 
-test('T5c: an equal-time same-step Conversation never reorders the Tool', () => {
+test('an equal-time same-step Conversation never reorders the Tool', () => {
   const cold = foldEvents([
     turnStart(1, T0, 0),
     assistantSettlement({
@@ -779,7 +779,7 @@ test('T5c: an equal-time same-step Conversation never reorders the Tool', () => 
     'a same-step call named by the stream with an EQUAL instant proves no order')
 })
 
-test('T5h: a call id reused in another turn is never this step’s candidate', () => {
+test('a call id reused in another turn is never this step’s candidate', () => {
   // The foreign (turn 2) card exists BEFORE turn 1's settlement runs, so a
   // call-id-keyed lookup would find it and displace it around turn 1's
   // Conversation; the durable (turn, step, callId) identity cannot.
@@ -830,7 +830,7 @@ test('PERF: a long turn settles each read in bounded local work', () => {
 
 // ── the resolved Activity lifetime threads into the Compact presentation ────
 
-test('T8b: the resolved Activity lifetime renders the Compact duration (full consumer chain)', async () => {
+test('the resolved Activity lifetime renders the Compact duration (full consumer chain)', async () => {
   const cold = foldEvents(interleavedEvents())
   const structure = projectTranscriptStructure(cold.messages())
   const spans: TranscriptWorkSpan[] = []
@@ -856,7 +856,7 @@ test('T8b: the resolved Activity lifetime renders the Compact duration (full con
 
 // ── several Tool relations on ONE anchor, re-derived on replacement ─────────
 
-test('T9: one anchor owns several Tool relations and re-derives them on a replacement', () => {
+test('one anchor owns several Tool relations and re-derives them on a replacement', () => {
   const replacement = (visibleAt: number, seq: number): SessionEvent => eventAt('assistant/message', {
     turn: 1, step: 0,
     message: {
@@ -892,7 +892,7 @@ test('T9: one anchor owns several Tool relations and re-derives them on a replac
 
 // ── N1: a re-sorted side must re-order the derived read-group members ───────
 
-test('N1: re-sorting one side rebuilds the merged group member order, representative and result', () => {
+test('re-sorting one side rebuilds the merged group member order, representative and result', () => {
   const settlement = (bStart: number, seq: number): SessionEvent => eventAt('assistant/message', {
     turn: 1, step: 0,
     message: {
@@ -934,7 +934,7 @@ test('N1: re-sorting one side rebuilds the merged group member order, representa
 
 // ── N2: the regroup envelope closes over its own interior ───────────────────
 
-test('N2: a settlement whose envelope contains an earlier anchor never orphans that anchor’s group', () => {
+test('a settlement whose envelope contains an earlier anchor never orphans that anchor’s group', () => {
   // COVERAGE NOTE (internal round 6): the visible foreign rows in this fixture make
   // the conservative reachability guard DENY the displacements the original bug
   // needed, so this test pins the counters/identity-uniqueness/live-cold agreement
@@ -983,7 +983,7 @@ test('N2: a settlement whose envelope contains an earlier anchor never orphans t
 
 // ── N3: a replacement drops the call's eligibility for a LATER durable call ──
 
-test('N3: a replacement that stops naming a call removes its eligibility for a later durable call', () => {
+test('a replacement that stops naming a call removes its eligibility for a later durable call', () => {
   const settlement = (stream: readonly Record<string, unknown>[], seq: number): SessionEvent => eventAt('assistant/message', {
     turn: 1, step: 0,
     message: {
@@ -1008,7 +1008,7 @@ test('N3: a replacement that stops naming a call removes its eligibility for a l
     'the replacement removed the call from this step’s candidates')
 })
 
-test('N3b: two steps that request the same call id each keep their own eligibility', () => {
+test('two steps that request the same call id each keep their own eligibility', () => {
   const folder = new TranscriptFolder()
   const blockSettlement = (step: number, visibleAt: number, seq: number, args: string): SessionEvent => eventAt('assistant/message', {
     turn: 1, step,
@@ -1040,7 +1040,7 @@ test('N3b: two steps that request the same call id each keep their own eligibili
   assert.equal(toolRows(folder).length, 2)
   assert.equal(folder.search('{"step":0}').length, 1)
 })
-test('N3c: a replacement drops a durable BLOCK request too, not just a streamed delta', () => {
+test('a replacement drops a durable BLOCK request too, not just a streamed delta', () => {
   const settled = (withBlock: boolean, seq: number): SessionEvent => eventAt('assistant/message', {
     turn: 1, step: 0,
     message: {
@@ -1065,7 +1065,7 @@ test('N3c: a replacement drops a durable BLOCK request too, not just a streamed 
     'the superseded durable block no longer qualifies the later call')
 })
 
-test('N3d: dropping a displaced relation reunites the rows it separated (live/cold parity)', () => {
+test('dropping a displaced relation reunites the rows it separated (live/cold parity)', () => {
   // COVERAGE NOTE (internal round 6): the visible foreign rows in this fixture make
   // the conservative reachability guard DENY the displacements the original bug
   // needed, so this test pins the counters/identity-uniqueness/live-cold agreement
@@ -1102,7 +1102,7 @@ test('N3d: dropping a displaced relation reunites the rows it separated (live/co
 
 // ── R4-1: an out-of-order result re-groups from the emitted positions ───────
 
-test('R4-1: a late read settling behind another step’s visible row keeps that row separating', () => {
+test('a late read settling behind another step’s visible row keeps that row separating', () => {
   // RULING (external round 2, option 1): the earlier expectation that A and B
   // must MERGE was wrong — the bash row X sits between them in time AND in the
   // display, so merging would let a read cross an external visible boundary. The
@@ -1137,7 +1137,7 @@ test('R4-1: a late read settling behind another step’s visible row keeps that 
   assert.deepEqual(structureKinds(live), structureKinds(cold))
 })
 
-test('R4-1b: a late read with NO visible boundary between them still merges', () => {
+test('a late read with NO visible boundary between them still merges', () => {
   const events = (): SessionEvent[] => [
     turnStart(1, T0, 0),
     readCall('a', 1, 0, T0 + 3_000, 1, 'a.ts'),
@@ -1156,7 +1156,7 @@ test('R4-1b: a late read with NO visible boundary between them still merges', ()
   assert.equal(merged[0]!.callCount, 2)
   assert.deepEqual(logicalRows(live), logicalRows(cold))
 })
-test('R4-2: a departure whose union envelope contains another anchor never orphans that anchor’s group', () => {
+test('a departure whose union envelope contains another anchor never orphans that anchor’s group', () => {
   // COVERAGE NOTE (internal round 6): the visible foreign rows in this fixture make
   // the conservative reachability guard DENY the displacements the original bug
   // needed, so this test pins the counters/identity-uniqueness/live-cold agreement
@@ -1225,7 +1225,7 @@ test('R4-2: a departure whose union envelope contains another anchor never orpha
 
 // ── R4-3: the late-result regroup is linear in the affected run ─────────────
 
-test('R4-3: a late result over a large merged run stays linear (deterministic work guard)', () => {
+test('a late result over a large merged run stays linear (deterministic work guard)', () => {
   const count = 200
   const events: SessionEvent[] = [turnStart(1, T0, 0), readCall('running', 1, 0, T0 + 1_000, 1, 'r.ts')]
   let seq = 2
@@ -1246,7 +1246,7 @@ test('R4-3: a late result over a large merged run stays linear (deterministic wo
 
 // ── R4-4: multi-sibling relations survive a Thinking tombstone ─────────────
 
-test('R4-4: a Thinking tombstone keeps every sibling Tool relation, in order', () => {
+test('a Thinking tombstone keeps every sibling Tool relation, in order', () => {
   const folder = new TranscriptFolder()
   folder.apply([
     turnStart(1, T0, 0),
@@ -1289,7 +1289,7 @@ test('R4-4: a Thinking tombstone keeps every sibling Tool relation, in order', (
 
 // ── external review: a hidden anchor may not order Tool rows ────────────────
 
-test('EXT1: an invisible authoritative Conversation never displaces a Tool row', () => {
+test('an invisible authoritative Conversation never displaces a Tool row', () => {
   const settlement = (empty: boolean, seq: number): SessionEvent => eventAt('assistant/message', {
     turn: 1, step: 0,
     message: {
@@ -1317,7 +1317,7 @@ test('EXT1: an invisible authoritative Conversation never displaces a Tool row',
 
 // ── external review: same-side order is evidence order in BOTH folds ────────
 
-test('EXT2: cold orders the displaced side by evidence; live keeps the conformant arrival order', () => {
+test('cold orders the displaced side by evidence; live keeps the conformant arrival order', () => {
   const settlement = (): SessionEvent => eventAt('assistant/message', {
     turn: 1, step: 0,
     message: {
@@ -1348,7 +1348,7 @@ test('EXT2: cold orders the displaced side by evidence; live keeps the conforman
   assert.equal(toolRows(cold)[0]!.result, 'earlier result\n\nlater result')
   assert.deepEqual(logicalRows(live), logicalRows(cold))
 })
-test('EXT3: one settlement with many same-step Tools regroups exactly once', () => {
+test('one settlement with many same-step Tools regroups exactly once', () => {
   const count = 200
   const events: SessionEvent[] = [turnStart(1, T0, 0)]
   let seq = 1
@@ -1395,7 +1395,7 @@ test('EXT3: one settlement with many same-step Tools regroups exactly once', () 
 
 // ── external round 2: the side order must not cross an intervening row ──────
 
-test('EXT4: an intervening Thinking row is never swallowed by the same-step read run', () => {
+test('an intervening Thinking row is never swallowed by the same-step read run', () => {
   const folder = new TranscriptFolder()
   const settlement = (seq: number): SessionEvent => eventAt('assistant/message', {
     turn: 1, step: 0,
@@ -1425,7 +1425,7 @@ test('EXT4: an intervening Thinking row is never swallowed by the same-step read
     `the visible order must keep the Thinking row before the reads:\n${JSON.stringify(rows)}`)
 })
 
-test('EXT5: another step’s visible row is never crossed by the same-step read run', () => {
+test('another step’s visible row is never crossed by the same-step read run', () => {
   const folder = new TranscriptFolder()
   folder.apply([
     turnStart(1, T0, 0),
@@ -1450,7 +1450,7 @@ test('EXT5: another step’s visible row is never crossed by the same-step read 
     'the intervening row keeps its position between the two reads')
 })
 
-test('EXT6: a settlement that revokes many relations regroups once', () => {
+test('a settlement that revokes many relations regroups once', () => {
   const count = 200
   const events: SessionEvent[] = [turnStart(1, T0, 0)]
   let seq = 1
@@ -1485,7 +1485,7 @@ test('EXT6: a settlement that revokes many relations regroups once', () => {
 
 // ── external round 3, P2-A: a later visibility change re-validates relations ──
 
-test('EXT7: a row that becomes visible revokes the displacement it was invisible under', () => {
+test('a row that becomes visible revokes the displacement it was invisible under', () => {
   const xSettlement = (visible: boolean, seq: number, time: number): SessionEvent => eventAt('assistant/message', {
     turn: 1, step: 1,
     message: {
@@ -1544,7 +1544,7 @@ test('EXT7: a row that becomes visible revokes the displacement it was invisible
 
 // ── external round 4, P2-B: O(1) sorts per settlement ───────────────────────
 
-test('EXT8: establishing many relations in ONE settlement sorts a constant number of times', () => {
+test('establishing many relations in ONE settlement sorts a constant number of times', () => {
   const count = 200
   const events: SessionEvent[] = [turnStart(1, T0, 0)]
   let seq = 1
@@ -1588,7 +1588,7 @@ test('EXT8: establishing many relations in ONE settlement sorts a constant numbe
 
 // ── external round 6: the Tool guard never rules on a Lane relation ──────────
 
-test('EXT9: a Lane displacement survives the re-validation of a visible Assistant', () => {
+test('a Lane displacement survives the re-validation of a visible Assistant', () => {
   const xSettlement = (visible: boolean, seq: number, time: number): SessionEvent => eventAt('assistant/message', {
     turn: 1, step: 1,
     message: {
@@ -1638,7 +1638,7 @@ test('EXT9: a Lane displacement survives the re-validation of a visible Assistan
 
 // ── internal round 5: a LANE relocation re-validates Tool displacements ──────
 
-test('EXT10: a recreated Lane row revokes the Tool displacement it now blocks', () => {
+test('a recreated Lane row revokes the Tool displacement it now blocks', () => {
   const xSettlement = (stream: readonly Record<string, unknown>[], seq: number, time: number): SessionEvent =>
     eventAt('assistant/message', {
       turn: 1, step: 1,
@@ -1681,7 +1681,7 @@ test('EXT10: a recreated Lane row revokes the Tool displacement it now blocks', 
 
 // ── internal round 6: the four confirmed P2s ────────────────────────────────
 
-test('INT1: a replacement proving an EARLIER Preparing time updates the cache for a late card', () => {
+test('a replacement proving an EARLIER Preparing time updates the cache for a late card', () => {
   const prepMessage = (prep: number, seq: number): SessionEvent => eventAt('assistant/message', {
     turn: 1, step: 0,
     message: { id: `m-int1-${seq}`, role: 'assistant', content: [{ type: 'text', text: 'reply' }], source: { kind: 'assistant' } },
@@ -1700,7 +1700,7 @@ test('INT1: a replacement proving an EARLIER Preparing time updates the cache fo
   assert.deepEqual(logicalRows(control), logicalRows(late))
 })
 
-test('INT2: refreshing many Preparing times sorts and regroups a constant number of times', () => {
+test('refreshing many Preparing times sorts and regroups a constant number of times', () => {
   for (const count of [20, 50, 100]) {
     const events: SessionEvent[] = [turnStart(1, T0, 0)]
     let seq = 1
@@ -1738,7 +1738,7 @@ test('INT2: refreshing many Preparing times sorts and regroups a constant number
   }
 })
 
-test('INT3: a displaced-run late result does linear closure work', () => {
+test('a displaced-run late result does linear closure work', () => {
   for (const count of [100, 200]) {
     const events: SessionEvent[] = [turnStart(1, T0, 0), readCall('a', 1, 0, T0 + 3_000, 1, 'a.ts')]
     let seq = 2
@@ -1769,7 +1769,7 @@ test('INT3: a displaced-run late result does linear closure work', () => {
   }
 })
 
-test('INT4: normal serial tail settlements never walk the displacement map', () => {
+test('normal serial tail settlements never walk the displacement map', () => {
   const folder = new TranscriptFolder()
   folder.apply([turnStart(1, T0, 0)])
   const before = folder.searchDiagnosticsForTest().displacementScans
@@ -1789,7 +1789,7 @@ test('INT4: normal serial tail settlements never walk the displacement map', () 
 
 // ── internal round 7: the five confirmed P2s ────────────────────────────────
 
-test('INT5: an OPPOSITE-side own Tool is a boundary, never a crossing licence', () => {
+test('an OPPOSITE-side own Tool is a boundary, never a crossing licence', () => {
   const folder = new TranscriptFolder()
   folder.apply([
     turnStart(1, T0, 0),
@@ -1808,7 +1808,7 @@ test('INT5: an OPPOSITE-side own Tool is a boundary, never a crossing licence', 
   assert.equal(toolRows(folder)[0]!.callCount, 2)
 })
 
-test('INT6: a restored Thinking slot re-validates the Tool displacement it now blocks', () => {
+test('a restored Thinking slot re-validates the Tool displacement it now blocks', () => {
   const folder = new TranscriptFolder()
   const thought = [
     { type: 'chunk', time: T0 + 6_000, chunk: { type: 'reasoning-delta', index: 2, text: 'thought x' } },
@@ -1836,7 +1836,7 @@ test('INT6: a restored Thinking slot re-validates the Tool displacement it now b
     'B returns to its physical slot while the Thinking lane keeps its own place')
 })
 
-test('INT7: a displaced-run late result performs no per-row position search', () => {
+test('a displaced-run late result performs no per-row position search', () => {
   const count = 200
   const events: SessionEvent[] = [turnStart(1, T0, 0), readCall('a', 1, 0, T0 + 3_000, 1, 'a.ts')]
   let seq = 2
@@ -1858,7 +1858,7 @@ test('INT7: a displaced-run late result performs no per-row position search', ()
     `closure work must stay linear (visited ${after.emittedRowVisits - before.emittedRowVisits})`)
 })
 
-test('INT8: the Preparing refresh batch reuses ONE side-specific reach', () => {
+test('the Preparing refresh batch reuses ONE side-specific reach', () => {
   for (const count of [20, 50, 100]) {
     const events: SessionEvent[] = [turnStart(1, T0, 0)]
     let seq = 1
@@ -1885,7 +1885,7 @@ test('INT8: the Preparing refresh batch reuses ONE side-specific reach', () => {
   }
 })
 
-test('INT9: expiring many relations rebuilds the interval maximum once', () => {
+test('expiring many relations rebuilds the interval maximum once', () => {
   const count = 200
   const events: SessionEvent[] = [turnStart(1, T0, 0), readCall('a', 1, 0, T0 + 3_000, 1, 'a.ts')]
   let seq = 2
@@ -1909,7 +1909,7 @@ test('INT9: expiring many relations rebuilds the interval maximum once', () => {
 
 // ── internal round 8: the two confirmed P2s ─────────────────────────────────
 
-test('INT10: replacing the authority is idempotent and never crosses a restored opposite-side sibling', () => {
+test('replacing the authority is idempotent and never crosses a restored opposite-side sibling', () => {
   const frameChunk = (frame: { at: number; kind: string }, index: number): Record<string, unknown> => ({
     type: 'chunk',
     time: T0 + frame.at,
@@ -1958,7 +1958,7 @@ test('INT10: replacing the authority is idempotent and never crosses a restored 
   }
 })
 
-test('INT11: an ordinary thinking-first cold history never walks the relation map', () => {
+test('an ordinary thinking-first cold history never walks the relation map', () => {
   for (const turns of [50, 100]) {
     const events: SessionEvent[] = []
     let seq = 1
@@ -1986,7 +1986,7 @@ test('INT11: an ordinary thinking-first cold history never walks the relation ma
 })
 
 
-test('INT12: an expiring Tool relation never turns a fresh tail into a history rebuild', () => {
+test('an expiring Tool relation never turns a fresh tail into a history rebuild', () => {
   for (const turns of [50, 100]) {
     const events: SessionEvent[] = []
     let seq = 1
@@ -2020,7 +2020,7 @@ test('INT12: an expiring Tool relation never turns a fresh tail into a history r
   }
 })
 
-test('INT13: a late assistant/attempt never leaves a Tool relation crossing a restored sibling', () => {
+test('a late assistant/attempt never leaves a Tool relation crossing a restored sibling', () => {
   const laneStream = (visibleAt: number, bAt = 3_000, aAt = 5_000): Record<string, unknown>[] =>
     [{ at: visibleAt, kind: 'text' }, { at: bAt, kind: 'b' }, { at: aAt, kind: 'a' }]
       .sort((left, right) => left.at - right.at)
@@ -2051,7 +2051,7 @@ test('INT13: a late assistant/attempt never leaves a Tool relation crossing a re
   assert.equal(toolRows(folder)[0]!.callCount, 2)
 })
 
-test('INT14: a sibling whose own timing did NOT change is still re-derived by a late attempt', () => {
+test('a sibling whose own timing did NOT change is still re-derived by a late attempt', () => {
   const laneStream = (visibleAt: number, bAt: number, aAt: number): Record<string, unknown>[] =>
     [{ at: visibleAt, kind: 'text' }, { at: bAt, kind: 'b' }, { at: aAt, kind: 'a' }]
       .sort((left, right) => left.at - right.at)
@@ -2080,7 +2080,7 @@ test('INT14: a sibling whose own timing did NOT change is still re-derived by a 
   }
 })
 
-test('INT15: a late attempt cannot resurrect an id the current message expired', () => {
+test('a late attempt cannot resurrect an id the current message expired', () => {
   const folder = new TranscriptFolder()
   folder.apply([
     turnStart(1, T0, 0),
@@ -2104,7 +2104,7 @@ test('INT15: a late attempt cannot resurrect an id the current message expired',
     'the expired id stays expired and nothing moves')
 })
 
-test('INT16: an expired id stays unowned for a LATER first tool/call after a late attempt', () => {
+test('an expired id stays unowned for a LATER first tool/call after a late attempt', () => {
   const named = [
     toolCallDeltaChunk(T0 + 1_000, 0, 'c', 'read'),
     textChunk(T0 + 2_000, 1, 'reply'),
@@ -2131,7 +2131,7 @@ test('INT16: an expired id stays unowned for a LATER first tool/call after a lat
   }
 })
 
-test('INT17: a still-declared Tool converges the same from LIVE and COLD raw placements', () => {
+test('a still-declared Tool converges the same from LIVE and COLD raw placements', () => {
   const settlementStream = (): Record<string, unknown>[] => [
     textChunk(T0 + 2_000, 0, 'reply'),
     toolCallDeltaChunk(T0 + 3_000, 1, 'c', 'read'),

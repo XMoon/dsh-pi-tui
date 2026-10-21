@@ -213,7 +213,7 @@ test('entering the viewer clears the main session local cards', async () => {
   app.stop()
 })
 
-test('B04: a child log with a descriptor keeps its viewer identity without a fake Subagent card', async () => {
+test('a child log with a descriptor keeps its viewer identity without a fake Subagent card', async () => {
   // Post-PR166 convergence: `subagent/descriptor` is child identity METADATA
   // and materializes no TranscriptMessage. The viewer's authoritative
   // chrome/footer state (label, mode) still identifies the child, proving we

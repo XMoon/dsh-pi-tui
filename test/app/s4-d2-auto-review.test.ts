@@ -132,7 +132,7 @@ function resultText(result: { content?: readonly { type?: string; text?: string 
   return (result.content ?? []).map(block => block.type === 'text' ? block.text ?? '' : '').join('')
 }
 
-test('B03 Auto Review: native allow/deny/ask/error and durable body evidence', { skip }, async t => {
+test('Auto Review: native allow/deny/ask/error and durable body evidence', { skip }, async t => {
   const host = await startS4D2Host(t, { bundles: [B03], presets: false })
   const adapter = new ScriptedAdapter()
   host.ctx.llm.registerAdapter(['scripted'], adapter)
@@ -229,7 +229,7 @@ test('B03 Auto Review: native allow/deny/ask/error and durable body evidence', {
   // The exact 14 identities remain the frozen set.
 })
 
-test('B03 Auto Review: started PTC inner tools are reviewed; the outer run_code is not', { skip }, async t => {
+test('Auto Review: started PTC inner tools are reviewed; the outer run_code is not', { skip }, async t => {
   const host = await startS4D2Host(t, { bundles: [B03], presets: true })
   const adapter = new ScriptedAdapter()
   host.ctx.llm.registerAdapter(['scripted'], adapter)
@@ -288,7 +288,7 @@ test('B03 Auto Review: started PTC inner tools are reviewed; the outer run_code 
   assert.equal(adapter.reviewRequests.length, 0, 'the outer run_code and non-tool JS effects are not reviewed')
 })
 
-test('B03 Auto Review: teardown migrates live Auto sessions to Full access and drains in-flight reviews', { skip }, async t => {
+test('Auto Review: teardown migrates live Auto sessions to Full access and drains in-flight reviews', { skip }, async t => {
   let host = await startS4D2Host(t, { bundles: [B03], presets: false })
   const adapter = new ScriptedAdapter()
   host.ctx.llm.registerAdapter(['scripted'], adapter)
@@ -351,7 +351,7 @@ async function waitFor(condition: () => boolean, turns = 200): Promise<void> {
   throw new Error('condition did not settle')
 }
 
-test('B03 /permission: the real Auto preset is visible and applies through the Direct port', { skip }, async t => {
+test('/permission: the real Auto preset is visible and applies through the Direct port', { skip }, async t => {
   const host = await startS4D2Host(t, { bundles: [B03], presets: false })
   const sessionId = 's4-d2-b03-permission'
   const agent = await host.createAgent(SessionId(sessionId), { provider: 'scripted', model: 'review-model', cwd: join(host.root, 'work') })
@@ -363,7 +363,7 @@ test('B03 /permission: the real Auto preset is visible and applies through the D
   assert.equal(config.approvalOverrideOf(sessionId), 'ask', 'the official Auto spec pinned the ask policy')
 })
 
-test('B03 /permission: without the bundle the Auto id is not offered and cannot be applied', { skip }, async t => {
+test('/permission: without the bundle the Auto id is not offered and cannot be applied', { skip }, async t => {
   const host = await startS4D2Host(t, { bundles: [] })
   const sessionId = 's4-d2-b03-permission-off'
   const agent = await host.createAgent(SessionId(sessionId), { provider: 'scripted', model: 'review-model', cwd: join(host.root, 'work') })
@@ -374,7 +374,7 @@ test('B03 /permission: without the bundle the Auto id is not offered and cannot 
   assert.equal(permissions.current(agent.session), 'workspace-write', 'a refused apply never changes the session')
 })
 
-test('B03 real Host card → controller confirmation → real profile write', { skip }, async t => {
+test('real Host card → controller confirmation → real profile write', { skip }, async t => {
   const host = await startS4D2Host(t, { bundles: [B03] })
   const beforePatch = existsSync(join(host.profileDir, 'cordis.patch.yml'))
     ? readFileSync(join(host.profileDir, 'cordis.patch.yml'), 'utf8')
@@ -422,7 +422,7 @@ test('B03 real Host card → controller confirmation → real profile write', { 
   assert.equal(profileSelectsBundle(host.profileDir, B03), false, 'the real Host write deselected the bundle')
 })
 
-test('B03 real Host row disable: shared confirmation → real setPluginEnabled', { skip }, async t => {
+test('real Host row disable: shared confirmation → real setPluginEnabled', { skip }, async t => {
   const host = await startS4D2Host(t, { bundles: [B03] })
   const beforePatch = existsSync(join(host.profileDir, 'cordis.patch.yml'))
     ? readFileSync(join(host.profileDir, 'cordis.patch.yml'), 'utf8')

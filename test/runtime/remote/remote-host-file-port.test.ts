@@ -35,7 +35,7 @@ function harness(options: {
   return { generation, calls, port: new RemoteHostFilePort(fileReferences, generation.source) }
 }
 
-test('F1: the session scope sends the EXACT session id and the OFFICIAL query form', async () => {
+test('the session scope sends the EXACT session id and the OFFICIAL query form', async () => {
   const { port, calls } = harness({
     result: { ok: true, value: { kind: 'ok', items: [{ path: 'src/a.ts', kind: 'file' }] } },
   })
@@ -47,13 +47,13 @@ test('F1: the session scope sends the EXACT session id and the OFFICIAL query fo
   assert.deepEqual(calls, [{ sessionId: 'child-7', query: 'src/a', signal: undefined }])
 })
 
-test('F1b: an authoritative Host empty answer stays ok([]) — not unavailable', async () => {
+test('an authoritative Host empty answer stays ok([]) — not unavailable', async () => {
   const { port } = harness({ result: { ok: true, value: { kind: 'ok', items: [] } } })
   assert.deepEqual(await port.listReferences({ kind: 'session', sessionId: 's' }, 'none'),
     { kind: 'ok', items: [] })
 })
 
-test('F1c: a Host-business unavailable VALUE crosses as the port unavailable', async () => {
+test('a Host-business unavailable VALUE crosses as the port unavailable', async () => {
   const { port } = harness({
     result: { ok: true, value: { kind: 'unavailable', reason: 'the requested Session has no live Host Agent' } },
   })
@@ -61,14 +61,14 @@ test('F1c: a Host-business unavailable VALUE crosses as the port unavailable', a
   assert.deepEqual(result, { kind: 'unavailable', reason: 'the requested Session has no live Host Agent' })
 })
 
-test('F2: the AbortSignal is forwarded to the private call', async () => {
+test('the AbortSignal is forwarded to the private call', async () => {
   const controller = new AbortController()
   const { port, calls } = harness()
   await port.listReferences({ kind: 'session', sessionId: 's' }, 'x', { signal: controller.signal })
   assert.equal(calls[0]!.signal, controller.signal)
 })
 
-test('F2b: an already-aborted request never dispatches', async () => {
+test('an already-aborted request never dispatches', async () => {
   const controller = new AbortController()
   controller.abort()
   const { port, calls } = harness()
@@ -76,7 +76,7 @@ test('F2b: an already-aborted request never dispatches', async () => {
   assert.deepEqual(calls, [])
 })
 
-test('F3: the returned candidates are detached from the wire value', async () => {
+test('the returned candidates are detached from the wire value', async () => {
   const wire: { path: string; kind: 'file' | 'directory' }[] = [{ path: 'a.ts', kind: 'file' }]
   const { port } = harness({ result: { ok: true, value: { kind: 'ok', items: wire } } })
   const result = await port.listReferences({ kind: 'session', sessionId: 's' }, 'a')
@@ -88,7 +88,7 @@ test('F3: the returned candidates are detached from the wire value', async () =>
   }
 })
 
-test('F4: a replaced connection turns the settle unavailable', async () => {
+test('a replaced connection turns the settle unavailable', async () => {
   let release!: () => void
   const gate = new Promise<void>(resolve => { release = resolve })
   const { port, generation } = harness({
@@ -111,7 +111,7 @@ test('F4: a replaced connection turns the settle unavailable', async () => {
     'a generation-replaced throw is unavailable, never the new generation\'s failure')
 })
 
-test('F4b: a Host domain error surfaces as an error, never an empty ok', async () => {
+test('a Host domain error surfaces as an error, never an empty ok', async () => {
   const { port } = harness({ result: { ok: false, error: { code: 'piTuiFileReferences/failed', message: 'no such session' } } })
   await assert.rejects(port.listReferences({ kind: 'session', sessionId: 's' }, 'a'), /no such session/)
 })
@@ -145,7 +145,7 @@ test('a pre-aborted resolveReference rejects instead of answering unavailable', 
     'cancellation outranks the no-carrier unavailable on the synchronous resolve path')
 })
 
-test('F5: the workspace scope is unavailable with ZERO Remote calls', async () => {
+test('the workspace scope is unavailable with ZERO Remote calls', async () => {
   const { port, calls } = harness()
   const result = await port.listReferences({ kind: 'workspace', cwd: '/any/cwd' }, 'a')
   assert.equal(result.kind, 'unavailable')
@@ -153,20 +153,20 @@ test('F5: the workspace scope is unavailable with ZERO Remote calls', async () =
   assert.deepEqual(calls, [], 'the workspace scope never dispatches')
 })
 
-test('F6: no existence carrier — unavailable, never missing', async () => {
+test('no existence carrier — unavailable, never missing', async () => {
   const { port, calls } = harness()
   const result = await port.resolveReference({ kind: 'session', sessionId: 's' }, 'a.ts')
   assert.equal(result.kind, 'unavailable')
   assert.deepEqual(calls, [], 'existence never dispatches a discovery call')
 })
 
-test('F7: canonicalization keeps every relative mention literal', async () => {
+test('canonicalization keeps every relative mention literal', async () => {
   const { port } = harness()
   assert.equal(await port.canonicalizeMentions({ kind: 'session', sessionId: 's' }, 'see @src/a.ts and @b.md'),
     'see @src/a.ts and @b.md')
 })
 
-test('F8: the adapter module never touches the Client filesystem', async () => {
+test('the adapter module never touches the Client filesystem', async () => {
   const { readFileSync } = await import('node:fs')
   const adapterSource = readFileSync('src/runtime/remote/host-file-remote.ts', 'utf8')
   assert.ok(!/\bprocess\.cwd\(\)/.test(adapterSource), 'no process.cwd()')
@@ -183,7 +183,7 @@ test('F8: the adapter module never touches the Client filesystem', async () => {
     'no Direct Host discovery capability')
 })
 
-test('F9: the child scope carries the CHILD session id — never a parent cwd', async () => {
+test('the child scope carries the CHILD session id — never a parent cwd', async () => {
   const { port, calls } = harness({ result: { ok: true, value: { kind: 'ok', items: [] } } })
   await port.listReferences({ kind: 'session', sessionId: 'child-9' }, 'x')
   assert.equal(calls[0]!.sessionId, 'child-9')

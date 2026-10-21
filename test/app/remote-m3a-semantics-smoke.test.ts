@@ -567,7 +567,7 @@ async function compose(host: HostFixture): Promise<Composed> {
   return { runtime, semantics: createRemoteM3ASemantics(runtime.client, { promptSerializer: stubSerializer() }) }
 }
 
-test('P1-P10: the M3-3A semantic bundle serves over one real Host wire', async (t) => {
+test('the M3-3A semantic bundle serves over one real Host wire', async (t) => {
   const life = testLifecycle(t)
   const host = await createHostFixture(life)
   const { runtime, semantics } = await compose(host)
@@ -754,7 +754,7 @@ async function waitFor(label: string, predicate: () => boolean, timeoutMs = 15_0
   }
 }
 
-test('P11: the rc.2 Question wire surfaces (live request → claim → timeout → late-answer mapping)', async (t) => {
+test('the rc.2 Question wire surfaces (live request → claim → timeout → late-answer mapping)', async (t) => {
   const life = testLifecycle(t)
   const host = await createHostFixture(life)
   const { runtime, semantics } = await compose(host)
@@ -841,7 +841,7 @@ test('P11: the rc.2 Question wire surfaces (live request → claim → timeout �
   }
 })
 
-test('P15: a REAL timed tool call produces a durable continued question, accepts the late answer once, and never duplicates it', async (t) => {
+test('a REAL timed tool call produces a durable continued question, accepts the late answer once, and never duplicates it', async (t) => {
   const life = testLifecycle(t)
   const host = await createHostFixture(life, { llmAdapter: new TimedQuestionLlmAdapter() })
   // The REAL model-facing tool, registered on the Host tool runtime exactly as
@@ -954,7 +954,7 @@ test('P15: a REAL timed tool call produces a durable continued question, accepts
   }
 })
 
-test('P12: the M3 composition REUSES the existing userQuestions service (never a second mount)', async (t) => {
+test('the M3 composition REUSES the existing userQuestions service (never a second mount)', async (t) => {
   // `@deepseek-ai/dsh-base` already mounts `id: user-questions ->
   // @deepseek-ai/dsh-user-questions`, and this bundle layers on top of that
   // base without disabling it. The M3 additive closure therefore must not
@@ -980,7 +980,7 @@ test('P12: the M3 composition REUSES the existing userQuestions service (never a
   assert.equal(afterDispose, before, 'disposal leaves the Host service untouched')
 })
 
-test('P13: the Remote question subscription follows a REAL reconnect', async (t) => {
+test('the Remote question subscription follows a REAL reconnect', async (t) => {
   // The contract the adapter claims must hold against the real Client, not only
   // a fake: a generation change notifies the consumer (which re-reads the
   // fenced snapshot), and authority is restored on the new generation.
@@ -1015,7 +1015,7 @@ test('P13: the Remote question subscription follows a REAL reconnect', async (t)
   }
 })
 
-test('P14: the assembled M3-3B Remote backend serves config + archive over the real Host/Client graph', async (t) => {
+test('the assembled M3-3B Remote backend serves config + archive over the real Host/Client graph', async (t) => {
   // The M3-3B integrated same-Host qualification: ONE real rc.2 Host Context ->
   // the real experimental Client runtime -> `createRemoteBackendRuntime(...)`
   // with the composition-owned carrier fetch. The earlier suites prove the
@@ -1154,7 +1154,7 @@ test('P14: the assembled M3-3B Remote backend serves config + archive over the r
   }
 })
 
-test('P16: the REAL /settings workspace commits through the Remote adapter over the wire and verifies by the authoritative re-read', async (t) => {
+test('the REAL /settings workspace commits through the Remote adapter over the wire and verifies by the authoritative re-read', async (t) => {
   // The Remote ASSEMBLED UI path the acceptance requires: the command's
   // `ConfigPort.tuiSettings` IS the Remote adapter over the real generated
   // transport, the UI is the real `TuiApp` on a virtual terminal, and the
@@ -1336,7 +1336,7 @@ test('P16: the REAL /settings workspace commits through the Remote adapter over 
   }
 })
 
-test('P17: the REAL Host-owned Direct settings authority drives the /settings workspace (Theme → Host commit → authoritative re-read → Verified)', async (t) => {
+test('the REAL Host-owned Direct settings authority drives the /settings workspace (Theme → Host commit → authoritative re-read → Verified)', async (t) => {
   // The Direct counterpart of P16, over the SAME real Host config plane: the settings
   // port is the production `DirectConfigPort` whose `tuiSettings` is the production
   // `DirectTuiSettings` — built EXACTLY as `src/app/bootstrap.ts` builds it, from the
@@ -1399,7 +1399,7 @@ test('P17: the REAL Host-owned Direct settings authority drives the /settings wo
   }
 })
 
-test('P15: without a settings service the Remote config fails closed', async (t) => {
+test('without a settings service the Remote config fails closed', async (t) => {
   // The complementary contract, deliberately kept testable now that the config
   // plane is opt-in: on a deployment whose profile composition carries no
   // settings service the Remote configuration must never fabricate values and

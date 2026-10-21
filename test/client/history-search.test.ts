@@ -264,7 +264,7 @@ test('limit caps the returned rows', async (t) => {
 // mtime priority, page/continuation semantics, early exit, stats.
 // ---------------------------------------------------------------------------
 
-test('S1: current scope never parses the whole file — the global budget bounds the scan', async (t) => {
+test('current scope never parses the whole file — the global budget bounds the scan', async (t) => {
   const life = testLifecycle(t)
   const home = tempHome(life)
   writeV2(home, '/a', Array.from({ length: 10000 }, (_, i) => ({ content: `prompt-${i}`, ts: i })))
@@ -279,7 +279,7 @@ test('S1: current scope never parses the whole file — the global budget bounds
   assert.ok(page.continuation !== undefined, 'older history remains reachable')
 })
 
-test('S2: the all-scope budget is GLOBAL — three files share one cap, never per-file', async (t) => {
+test('the all-scope budget is GLOBAL — three files share one cap, never per-file', async (t) => {
   const life = testLifecycle(t)
   const home = tempHome(life)
   for (const dir of ['/a', '/b', '/c']) {
@@ -293,7 +293,7 @@ test('S2: the all-scope budget is GLOBAL — three files share one cap, never pe
   assert.equal(page.exhausted, false)
 })
 
-test('S3: the all-scope scan visits the most recently modified file first', async (t) => {
+test('the all-scope scan visits the most recently modified file first', async (t) => {
   const life = testLifecycle(t)
   const home = tempHome(life)
   writeV2(home, '/a', Array.from({ length: 100 }, (_, i) => ({ content: `a-${i}`, ts: i })))
@@ -313,7 +313,7 @@ test('S3: the all-scope scan visits the most recently modified file first', asyn
   assert.equal(fromB, 50, 'the older file is cut by the remaining budget')
 })
 
-test('S4: the final order is row.ts — file mtime never overrides it', async (t) => {
+test('the final order is row.ts — file mtime never overrides it', async (t) => {
   const life = testLifecycle(t)
   const home = tempHome(life)
   writeV2(home, '/a', Array.from({ length: 100 }, (_, i) => ({ content: `a-${i}`, ts: i })))
@@ -330,7 +330,7 @@ test('S4: the final order is row.ts — file mtime never overrides it', async (t
   assert.equal(page.results[page.results.length - 1]?.sourceFile, aFile)
 })
 
-test('S5: resultLimit and scanLimit are separate — a query never stops at 20 matches', async (t) => {
+test('resultLimit and scanLimit are separate — a query never stops at 20 matches', async (t) => {
   const life = testLifecycle(t)
   const home = tempHome(life)
   writeV2(home, '/a', Array.from({ length: 500 }, (_, i) => ({ content: `prompt-${i}`, ts: i })))
@@ -343,7 +343,7 @@ test('S5: resultLimit and scanLimit are separate — a query never stops at 20 m
   assert.ok(page.continuation !== undefined)
 })
 
-test('S6: a sparse query scans to the budget/EOF, not to the first matches', async (t) => {
+test('a sparse query scans to the budget/EOF, not to the first matches', async (t) => {
   const life = testLifecycle(t)
   const home = tempHome(life)
   const rows = Array.from({ length: 6000 }, (_, i) => ({
@@ -361,7 +361,7 @@ test('S6: a sparse query scans to the budget/EOF, not to the first matches', asy
   assert.ok(page.continuation !== undefined)
 })
 
-test('S7: an empty query stops early once this call has enough unique results', async (t) => {
+test('an empty query stops early once this call has enough unique results', async (t) => {
   const life = testLifecycle(t)
   const home = tempHome(life)
   writeV2(home, '/a', Array.from({ length: 10000 }, (_, i) => ({ content: `prompt-${i}`, ts: i })))
@@ -374,7 +374,7 @@ test('S7: an empty query stops early once this call has enough unique results', 
   assert.ok(page.continuation !== undefined, 'older history remains reachable')
 })
 
-test('S11: continuation pages resume without rescanning — no gaps, no duplicates', async (t) => {
+test('continuation pages resume without rescanning — no gaps, no duplicates', async (t) => {
   const life = testLifecycle(t)
   const home = tempHome(life)
   const rows = Array.from({ length: 12000 }, (_, i) => ({
@@ -414,7 +414,7 @@ test('S11: continuation pages resume without rescanning — no gaps, no duplicat
   )
 })
 
-test('S12: reaching the scan budget is not exhausted', async (t) => {
+test('reaching the scan budget is not exhausted', async (t) => {
   const life = testLifecycle(t)
   const home = tempHome(life)
   writeV2(home, '/a', Array.from({ length: 1000 }, (_, i) => ({ content: `p-${i}`, ts: i })))
@@ -424,7 +424,7 @@ test('S12: reaching the scan budget is not exhausted', async (t) => {
   assert.ok(page.continuation !== undefined)
 })
 
-test('S13: a continuation with a mismatched request context is a typed error', async (t) => {
+test('a continuation with a mismatched request context is a typed error', async (t) => {
   const life = testLifecycle(t)
   const home = tempHome(life)
   writeV2(home, '/a', Array.from({ length: 1000 }, (_, i) => ({ content: `p-${i}`, ts: i })))
@@ -442,7 +442,7 @@ test('S13: a continuation with a mismatched request context is a typed error', a
   )
 })
 
-test('S14: page overflow is carried — no match is ever lost across pages', async (t) => {
+test('page overflow is carried — no match is ever lost across pages', async (t) => {
   const life = testLifecycle(t)
   const home = tempHome(life)
   // 100 rows, limit 10: a single batch collects far more than the page
@@ -463,7 +463,7 @@ test('S14: page overflow is carried — no match is ever lost across pages', asy
   assert.equal(new Set(merged.map(row => row.content)).size, 100, 'no duplicates across pages')
 })
 
-test('S15: a file fully scanned at the exact budget boundary is not re-scanned by the next page', async (t) => {
+test('a file fully scanned at the exact budget boundary is not re-scanned by the next page', async (t) => {
   const life = testLifecycle(t)
   const home = tempHome(life)
   writeV2(home, '/a', Array.from({ length: 100 }, (_, i) => ({ content: `a-${i}`, ts: i })))
@@ -479,7 +479,7 @@ test('S15: a file fully scanned at the exact budget boundary is not re-scanned b
   assert.equal(page2.exhausted, true)
 })
 
-test('S16: all-scope pending rows survive across pages — a proof found on a later page recovers them', async (t) => {
+test('all-scope pending rows survive across pages — a proof found on a later page recovers them', async (t) => {
   const life = testLifecycle(t)
   const home = tempHome(life)
   // One validating v2 row (OLDEST) + 100 legacy v1 rows (newer): page 1
@@ -505,7 +505,7 @@ test('S16: all-scope pending rows survive across pages — a proof found on a la
   assert.equal(page2.exhausted, true)
 })
 
-test('S17: a knownCwds resolver update between pages recovers pending rows', async (t) => {
+test('a knownCwds resolver update between pages recovers pending rows', async (t) => {
   const life = testLifecycle(t)
   const home = tempHome(life)
   // 100 legacy v1 rows, no v2 proof anywhere: page 1 leaves them pending
@@ -529,7 +529,7 @@ test('S17: a knownCwds resolver update between pages recovers pending rows', asy
   assert.equal(page2.exhausted, true)
 })
 
-test('S18: a newer occurrence found on a later page is re-reported (cross-page replacement)', async (t) => {
+test('a newer occurrence found on a later page is re-reported (cross-page replacement)', async (t) => {
   const life = testLifecycle(t)
   const home = tempHome(life)
   // File A (newest mtime) holds 'shared' at ts=1; file B (older mtime)
@@ -557,7 +557,7 @@ test('S18: a newer occurrence found on a later page is re-reported (cross-page r
   assert.equal(page2.exhausted, true)
 })
 
-test('S19: a fresh continuation file (exact budget boundary) still gets its knownCwds proof', async (t) => {
+test('a fresh continuation file (exact budget boundary) still gets its knownCwds proof', async (t) => {
   const life = testLifecycle(t)
   const home = tempHome(life)
   // File A (100 v2 rows) is fully scanned exactly at the budget; the
@@ -589,7 +589,7 @@ test('S19: a fresh continuation file (exact budget boundary) still gets its know
   assert.equal(page2.exhausted, true)
 })
 
-test('S20: a concurrent append between pages does not invalidate the continuation (snapshot semantics)', async (t) => {
+test('a concurrent append between pages does not invalidate the continuation (snapshot semantics)', async (t) => {
   const life = testLifecycle(t)
   const home = tempHome(life)
   // 300 rows, a needle every 100th: page 1 scans the newest 100 (one
@@ -628,7 +628,7 @@ test('S20: a concurrent append between pages does not invalidate the continuatio
   assert.equal(continuation, undefined, 'exhausted only after the old snapshot is fully scanned')
 })
 
-test('S21: a file shrunk under a continuation cursor is a stale-continuation error, not a silent skip', async (t) => {
+test('a file shrunk under a continuation cursor is a stale-continuation error, not a silent skip', async (t) => {
   const life = testLifecycle(t)
   const home = tempHome(life)
   writeV2(home, '/a', Array.from({ length: 300 }, (_, i) => ({ content: `p-${i}`, ts: i })))
@@ -653,7 +653,7 @@ test('S21: a file shrunk under a continuation cursor is a stale-continuation err
 // order, dedupe, continuation and cwd isolation.
 // ---------------------------------------------------------------------------
 
-test('S22: session scope returns only the requested session\'s rows (mixed file)', async (t) => {
+test('session scope returns only the requested session\'s rows (mixed file)', async (t) => {
   const life = testLifecycle(t)
   const home = tempHome(life)
   writeV2(home, '/a', [
@@ -667,7 +667,7 @@ test('S22: session scope returns only the requested session\'s rows (mixed file)
   assert.ok(results.every(row => row.cwd === '/a'), 'matching rows inherit the effective cwd')
 })
 
-test('S23: session scope excludes v1 rows and v2 rows without a sessionId', async (t) => {
+test('session scope excludes v1 rows and v2 rows without a sessionId', async (t) => {
   const life = testLifecycle(t)
   const home = tempHome(life)
   const file = historyFilePath(home, '/a')
@@ -682,7 +682,7 @@ test('S23: session scope excludes v1 rows and v2 rows without a sessionId', asyn
     'legacy rows and sessionless v2 rows are never guessed into a session')
 })
 
-test('S24: the session filter runs BEFORE the query filter', async (t) => {
+test('the session filter runs BEFORE the query filter', async (t) => {
   const life = testLifecycle(t)
   const home = tempHome(life)
   writeV2(home, '/a', [
@@ -695,7 +695,7 @@ test('S24: the session filter runs BEFORE the query filter', async (t) => {
     'a query match in another session must never leak through')
 })
 
-test('S25: session scope dedupes by content — the newest occurrence in the session wins', async (t) => {
+test('session scope dedupes by content — the newest occurrence in the session wins', async (t) => {
   const life = testLifecycle(t)
   const home = tempHome(life)
   writeV2(home, '/a', [
@@ -709,7 +709,7 @@ test('S25: session scope dedupes by content — the newest occurrence in the ses
   assert.equal(same[0]?.ts, 3, 'the NEWEST occurrence in the session wins')
 })
 
-test('S26: session continuation pages return only the current session', async (t) => {
+test('session continuation pages return only the current session', async (t) => {
   const life = testLifecycle(t)
   const home = tempHome(life)
   // 300 rows: session A rows every 100th, session B fillers — the
@@ -741,7 +741,7 @@ test('S26: session continuation pages return only the current session', async (t
   assert.equal(continuation, undefined, 'exhausted only after the old snapshot is fully scanned')
 })
 
-test('S27: a continuation with a mismatched sessionId is a typed error', async (t) => {
+test('a continuation with a mismatched sessionId is a typed error', async (t) => {
   const life = testLifecycle(t)
   const home = tempHome(life)
   writeV2(home, '/a', Array.from({ length: 1000 }, (_, i) => ({ content: `p-${i}`, ts: i, sessionId: 'ses_a' })))
@@ -755,7 +755,7 @@ test('S27: a continuation with a mismatched sessionId is a typed error', async (
   )
 })
 
-test('S28: session scope never scans other cwds', async (t) => {
+test('session scope never scans other cwds', async (t) => {
   const life = testLifecycle(t)
   const home = tempHome(life)
   writeV2(home, '/a', [{ content: 'mine in a', ts: 1, sessionId: 'ses_a' }])

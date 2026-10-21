@@ -156,7 +156,7 @@ test('an unsupported attachment payload is rejected before a text-only execution
   assert.deepEqual(h.calls[0]?.attachments, attachments)
 })
 
-test('PR5: an exact commands.execute session/writer-held refusal is rejected with code, details and guidance', async () => {
+test('an exact commands.execute session/writer-held refusal is rejected with code, details and guidance', async () => {
   // L3 contract proof for AC6: the adapter classifies an EXPLICIT
   // `session/writer-held` command result correctly. PR5 does NOT claim this is
   // normally UI-reachable on a cold held Session (`commands.list(agent)` needs

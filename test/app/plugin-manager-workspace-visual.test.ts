@@ -360,7 +360,7 @@ async function selectCard(harness: WorkspaceHarness, value: string): Promise<voi
   assert.fail(`card ${value} was not selectable`)
 }
 
-test('B03 risk confirmation keeps the frozen warning readable with Cancel default at 80×10 and 44×20', async () => {
+test('risk confirmation keeps the frozen warning readable with Cancel default at 80×10 and 44×20', async () => {
   const warning = 'Disabling Auto Review can change existing Auto sessions to Full access. Auto Review is not a sandbox. Continue?'
   for (const [columns, rows] of [[80, 10], [44, 20]] as const) {
     const harness = await open({
@@ -501,7 +501,7 @@ test('the B11 surface/risk copy is fully readable (scrolled) at 80×24, 72×24 a
   }
 })
 
-test('B04 keeps its unverified host limit visible in the real Detail', async () => {
+test('keeps its unverified host limit visible in the real Detail', async () => {
   const harness = await open({
     columns: 80,
     rows: 24,

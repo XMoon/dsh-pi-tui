@@ -60,7 +60,7 @@ async function settleOutcome<T>(
   ])
 }
 
-test('M3-6 PR3: a throwing workspace panel dispose still fires the one-shot close notification', () => {
+test('a throwing workspace panel dispose still fires the one-shot close notification', () => {
   const app = startApp()
   const failure = new Error('panel dispose failed')
   let closed = 0
@@ -86,7 +86,7 @@ test('M3-6 PR3: a throwing workspace panel dispose still fires the one-shot clos
   assert.equal(closed, 1, 'a repeated close does not re-notify')
 })
 
-test('M3-6 PR3: a throwing question presentation cleanup still rejects the question promise', async (t) => {
+test('a throwing question presentation cleanup still rejects the question promise', async (t) => {
   const app = startApp()
   const failure = new Error('question cleanup failed')
   const pending = app.askQuestions([{ id: 'q1', question: 'proceed?', options: [{ label: 'yes' }] }])
@@ -102,7 +102,7 @@ test('M3-6 PR3: a throwing question presentation cleanup still rejects the quest
   t.mock.restoreAll()
 })
 
-test('M3-6 PR3: a throwing SaveLocationPrompt.dispose() still settles the save-location promise', async (t) => {
+test('a throwing SaveLocationPrompt.dispose() still settles the save-location promise', async (t) => {
   const app = startApp()
   const failure = new Error('save location prompt dispose failed')
   // The REAL prompt disposer in the save-location settlement batch.
@@ -122,7 +122,7 @@ test('M3-6 PR3: a throwing SaveLocationPrompt.dispose() still settles the save-l
 })
 
 /* TERMINAL fail-closed case — keep LAST in this file. */
-test('M3-6 PR3: a throwing approval presentation cleanup still settles the approval promise (fail-closed slot)', async (t) => {
+test('a throwing approval presentation cleanup still settles the approval promise (fail-closed slot)', async (t) => {
   const app = startApp()
   const failure = new Error('approval cleanup failed')
   let armed = false

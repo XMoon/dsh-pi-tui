@@ -1932,7 +1932,7 @@ test('a parked continued Question is reachable and reopenable from the Task Cent
 
 })
 
-test('M3-5 PR1 L6: the Direct child viewer derives its display subject from SessionStatus(childId) and never leaks the parent', async (t) => {
+test('the Direct child viewer derives its display subject from SessionStatus(childId) and never leaks the parent', async (t) => {
   // The decisive Direct application proof: the REAL Task Center/viewer entry
   // mounts the child, and the status/footer sink shows the child's OWN
   // SessionStatus facts (model/preset/permission/cwd/context/usage/todos)
@@ -2576,7 +2576,7 @@ test('M3-5 PR1 L6: the Direct child viewer derives its display subject from Sess
   app.setDisplayPreset('full')
 })
 
-test('F4-R1: a viewer follow-up refusal settles through the production viewer into the right draft sink (current merge vs stale map-only) and an accepted send restores nothing', async (t) => {
+test('a viewer follow-up refusal settles through the production viewer into the right draft sink (current merge vs stale map-only) and an accepted send restores nothing', async (t) => {
   // The connected production chain under test:
   //   TuiApp viewer follow-up (Enter in an interactive continuable viewer)
   //     -> TuiAppEvents.onSubagentSubmit (application-events.ts)
@@ -2782,7 +2782,7 @@ test('F4-R1: a viewer follow-up refusal settles through the production viewer in
     'the stale refusal must restore into the ADDRESSED child slot (surfaced when that child is viewed again)')
 })
 
-test('T6/T7: Direct viewer shows the child’s used model and follows later request headers without a registered projection', async (t) => {
+test('Direct viewer shows the child’s used model and follows later request headers without a registered projection', async (t) => {
   // The shipped `dsh-base` + TUI composition mounts `ctx.sessionProjections`
   // but registers no `modelSelection` unit (its only registrant is the API
   // SessionController row of the web bundle). Before this fix the child subject
@@ -2976,7 +2976,7 @@ test('T6/T7: Direct viewer shows the child’s used model and follows later requ
   assert.ok(!restored.includes('child-b-used-model'), `the child model must not linger on the main subject:\n${restored}`)
 })
 
-test('T6b (owner item 1): a child that USED the same route as the process default reads it through the absence branch, never as a default fill', async (t) => {
+test('(owner item 1): a child that USED the same route as the process default reads it through the absence branch, never as a default fill', async (t) => {
   // The inherited-route case: the child's own `request/header` carries exactly
   // the process default's provider/model, so a default-fill bug would render the
   // SAME string and a broken compat read would render `model ?`. The test

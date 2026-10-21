@@ -42,7 +42,7 @@ class StubStreamingLlmAdapter extends LlmAdapter {
   override async *stream(): AsyncGenerator<never> {}
 }
 
-test('L6 §7.4-12: Remote permission cycle — projection current, one semantic apply, pushed projection repaints', async (t) => {
+test('Remote permission cycle — projection current, one semantic apply, pushed projection repaints', async (t) => {
   const life = testLifecycle(t)
   const mainId = 'm3-4-pr4-perm'
   const presetId = 'm3-4-pr4-preset'
@@ -175,7 +175,7 @@ test('L6 §7.4-12: Remote permission cycle — projection current, one semantic 
     'the cycle dispatched EXACTLY ONE official /permission command (no retry, no duplicate)')
 })
 
-test('L6 §7.4-13 stale permission: apply A → switch B before settle → NO B contamination', async (t) => {
+test('stale permission: apply A → switch B before settle → NO B contamination', async (t) => {
   // The race the fences exist for: the /permission apply for A is still
   // executing when the surface switches to B. The stale gesture's notice
   // must NEVER surface on B's surface, and B's pushed projection value
@@ -346,7 +346,7 @@ test('L6 §7.4-13 stale permission: apply A → switch B before settle → NO B 
   assert.notEqual(aPreset, undefined)
 })
 
-test('L6 PR5 §1D: /yolo on a Remote live session reaches the semantic permission apply with NO Direct-Agent prerequisite', async (t) => {
+test('§1D: /yolo on a Remote live session reaches the semantic permission apply with NO Direct-Agent prerequisite', async (t) => {
   const life = testLifecycle(t)
   const mainId = 'm3-4-pr5-yolo'
   const presetId = 'm3-4-pr4-preset'
@@ -446,7 +446,7 @@ test('L6 PR5 §1D: /yolo on a Remote live session reaches the semantic permissio
     'exactly ONE official /permission command ran (never retried, never duplicated)')
 })
 
-test('L6 M3-6 PR2 §14.9: a real pending Remote Question survives reconnect — the same flow answers exactly once, no duplicate overlay, no answer replay', async (t) => {
+test('a real pending Remote Question survives reconnect — the same flow answers exactly once, no duplicate overlay, no answer replay', async (t) => {
   const life = testLifecycle(t)
   const mainId = 'm3-6-pr2-q'
   const presetId = 'm3-4-pr4-preset'
@@ -569,7 +569,7 @@ test('L6 M3-6 PR2 §14.9: a real pending Remote Question survives reconnect — 
     'the question surface fully retired after the single answer')
 })
 
-test('L6 M3-6 PR2 (review follow-up): a dispatched continued-answer settlement stays real across reconnect — classified from the Host result, never replayed', async (t) => {
+test('(review follow-up): a dispatched continued-answer settlement stays real across reconnect — classified from the Host result, never replayed', async (t) => {
   // The §16.3 write-settlement window the live-waterfall case cannot reach:
   // the answer is dispatched through `answerContinued()` on generation A,
   // the Connection reconnects while the settlement is in flight, and the
@@ -814,7 +814,7 @@ test('L6 M3-6 PR2 (review follow-up): a dispatched continued-answer settlement s
     `the controller observed exactly one truthful adapter settlement (no reclassification): ${JSON.stringify(settledOutcomes)}`)
 })
 
-test('L6 M3-6 PR2 (review O1): a dispatched credential write stays real across reconnect — no reclassification, exactly one dispatch, no replay', async (t) => {
+test('(review O1): a dispatched credential write stays real across reconnect — no reclassification, exactly one dispatch, no replay', async (t) => {
   // The /login handler writes through exactly this port
   // (`runner.config.credentials.setReference`). The shared fixture now mounts
   // the SAME writable provider the production base composition mounts
@@ -883,7 +883,7 @@ test('L6 M3-6 PR2 (review O1): a dispatched credential write stays real across r
     'the replacement generation converges on the stored credential')
 })
 
-test('L6 PR-A: a same-session-id transport rollover suppresses the stale permission notice and never retries', async (t) => {
+test('a same-session-id transport rollover suppresses the stale permission notice and never retries', async (t) => {
   const life = testLifecycle(t)
   const mainId = 'pr-a-perm-rollover'
   const presetId = 'm3-4-pr4-preset'
@@ -1065,7 +1065,7 @@ test('L6 PR-A: a same-session-id transport rollover suppresses the stale permiss
     'the Host committed the switch; the replacement connection reads the official projection')
 })
 
-test('L6 PR-A: a post-dispatch Remote failure stays indeterminate, notifies once and never retries', async (t) => {
+test('a post-dispatch Remote failure stays indeterminate, notifies once and never retries', async (t) => {
   const life = testLifecycle(t)
   const mainId = 'pr-a-perm-indeterminate'
   const presetId = 'm3-4-pr4-preset'

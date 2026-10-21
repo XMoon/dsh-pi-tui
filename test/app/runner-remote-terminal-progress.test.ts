@@ -171,7 +171,7 @@ async function mountRemoteRunner(
   }
 }
 
-test('L6 production runner: a real Remote turn drives OSC 7501, and a reconnect never resurrects it', async (t) => {
+test('production runner: a real Remote turn drives OSC 7501, and a reconnect never resurrects it', async (t) => {
   const life = testLifecycle(t)
   const presetId = 'rtp-runner-preset'
   const mainId = 'rtp-runner-main'

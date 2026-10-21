@@ -251,7 +251,7 @@ test('clear() invalidates even attachments that were locally invalidated before 
   assert.equal(loader.get(ref).state, 'ready')
 })
 
-test('P1: the read authority is the component-passed scope, never a re-resolved environment', async () => {
+test('the read authority is the component-passed scope, never a re-resolved environment', async () => {
   const contexts: unknown[] = []
   const loader = new ImageLoader(async (_ref, context) => {
     contexts.push(context)
@@ -273,7 +273,7 @@ test('P1: the read authority is the component-passed scope, never a re-resolved 
   assert.equal(loader.get(childRef, childScope).state, 'ready')
 })
 
-test('F7-A regression: a FAILURE belongs to the asking scope and is never served to another', async () => {
+test('regression: a FAILURE belongs to the asking scope and is never served to another', async () => {
   const reads: unknown[] = []
   const loader = new ImageLoader(async (_ref, context) => {
     reads.push((context as { key: string }).key)
@@ -298,7 +298,7 @@ test('F7-A regression: a FAILURE belongs to the asking scope and is never served
   assert.equal(loader.get(ref, parentScope).state, 'ready')
 })
 
-test('P1 regression: a cached MAIN image is NEVER reused for the child component that references the same id', async () => {
+test('regression: a cached MAIN image is NEVER reused for the child component that references the same id', async () => {
   const reads: unknown[] = []
   const loader = new ImageLoader(async (_ref, context) => {
     reads.push((context as { sessionId: string }).sessionId)
@@ -326,7 +326,7 @@ test('P1 regression: a cached MAIN image is NEVER reused for the child component
   assert.equal(loader.get(shared, mainScope).state, 'ready')
 })
 
-test('P1 regression: a same-id binding rollover (new scope, same session id) must not reuse the retired entry', async () => {
+test('regression: a same-id binding rollover (new scope, same session id) must not reuse the retired entry', async () => {
   let reads = 0
   const loader = new ImageLoader(async () => { reads += 1; return { ref: {}, data: new Uint8Array([3]) } })
   const ref = refOf('sha256:rollover')
@@ -346,7 +346,7 @@ test('P1 regression: a same-id binding rollover (new scope, same session id) mus
   assert.equal(loader.get(ref, first).state, 'ready', 'the retired scope keeps its own entry')
 })
 
-test('F7-A regression: bytes stay shared WITHIN one scope, with same-scope dedupe', async () => {
+test('regression: bytes stay shared WITHIN one scope, with same-scope dedupe', async () => {
   let reads = 0
   const loader = new ImageLoader(async () => { reads += 1; return { ref: {}, data: new Uint8Array([9]) } })
   const scope = { sessionId: 'child-session', key: 'child:1:child-session' }
@@ -363,7 +363,7 @@ test('F7-A regression: bytes stay shared WITHIN one scope, with same-scope dedup
   assert.equal(reads, 1, 'the same presentation reuses its own authorized bytes')
 })
 
-test('P1 regression: a settle is delivered only to its OWN scope\'s subscribers, and a sibling scope sees only its own state', async () => {
+test('regression: a settle is delivered only to its OWN scope\'s subscribers, and a sibling scope sees only its own state', async () => {
   let releaseRead!: () => void
   const gate = new Promise<void>(resolve => { releaseRead = resolve })
   let reads = 0
@@ -402,7 +402,7 @@ test('P1 regression: a settle is delivered only to its OWN scope\'s subscribers,
   offParent()
 })
 
-test('P2 object-scope: invalidate(id) reaches an OBJECT scope (ready -> idle + fresh read) and leaves its subscriber alone', async () => {
+test('object-scope: invalidate(id) reaches an OBJECT scope (ready -> idle + fresh read) and leaves its subscriber alone', async () => {
   const reads: string[] = []
   const loader = new ImageLoader(async ref => {
     reads.push(String(ref.attachmentId))
@@ -433,7 +433,7 @@ test('P2 object-scope: invalidate(id) reaches an OBJECT scope (ready -> idle + f
   off()
 })
 
-test('P2 object-scope: clear() drops OBJECT-scope state, broadcasts to its subscriber, and listenerCount() counts it', async () => {
+test('object-scope: clear() drops OBJECT-scope state, broadcasts to its subscriber, and listenerCount() counts it', async () => {
   const loader = new ImageLoader(async ref => {
     if (ref.attachmentId === 'obj-clear-error') throw new Error('child scope failure')
     return { ref: {}, data: new Uint8Array([2]) }
@@ -465,7 +465,7 @@ test('P2 object-scope: clear() drops OBJECT-scope state, broadcasts to its subsc
   assert.equal(loader.listenerCount(), 0, 'unsubscribing removes the object scope listener')
 })
 
-test('P2 object-scope: clear() discards an in-flight settle in one scope without disturbing another scope', async () => {
+test('object-scope: clear() discards an in-flight settle in one scope without disturbing another scope', async () => {
   const gates: Array<() => void> = []
   const loader = new ImageLoader(async () => {
     await new Promise<void>(resolve => { gates.push(resolve) })
@@ -494,7 +494,7 @@ test('P2 object-scope: clear() discards an in-flight settle in one scope without
   assert.equal(loader.get(ref, s1).state, 'idle', 'the other scope never borrows s2 bytes')
 })
 
-test('P2 object-scope: two scopes never share bytes, failures or subscribers (both directions)', async () => {
+test('object-scope: two scopes never share bytes, failures or subscribers (both directions)', async () => {
   const loader = new ImageLoader(async (_ref, scope) => {
     if ((scope as { key: string }).key === 'child:1:A') throw new Error('A failed')
     return { ref: {}, data: new Uint8Array([9]) }

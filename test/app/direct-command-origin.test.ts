@@ -171,7 +171,7 @@ async function settle(rounds = 40): Promise<void> {
   for (let index = 0; index < rounds; index += 1) await Promise.resolve()
 }
 
-test('PR5 AC-1 Direct: a successful Host-registry compatibility mirror stays CLIENT_COMMAND — /status reaches its handler under running+steer', async (t) => {
+test('Direct: a successful Host-registry compatibility mirror stays CLIENT_COMMAND — /status reaches its handler under running+steer', async (t) => {
   const home = testLifecycle(t).tempDir('pr5-direct-origin-')
   const harness = makeHarness(home)
   const ctx = new Context()
@@ -262,7 +262,7 @@ test('PR5 AC-1 Direct: a successful Host-registry compatibility mirror stays CLI
   }
 })
 
-test('PR5 R6-1: a genuine Agent-SCOPED Host shadow over our global mirror stays HOST authority (winner provenance, not name)', async (t) => {
+test('a genuine Agent-SCOPED Host shadow over our global mirror stays HOST authority (winner provenance, not name)', async (t) => {
   const home = testLifecycle(t).tempDir('pr5-direct-shadow-')
   const harness = makeHarness(home)
   const ctx = new Context()

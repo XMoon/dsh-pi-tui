@@ -716,7 +716,7 @@ test('runner permission projection clears on service/agent absence (runner-level
     'a missing live agent must yield undefined (clear)')
 })
 
-test('M3-5 PR1: the extension snapshot keeps v2 live-session semantics and publishes the display subject additively', async () => {
+test('the extension snapshot keeps v2 live-session semantics and publishes the display subject additively', async () => {
   // Contract decision (M3-5 PR1): `SessionSnapshot` (v2, released) describes the
   // LIVE session owner everywhere — a viewer transition must NOT re-point it.
   // The session the user is looking at is published additively as

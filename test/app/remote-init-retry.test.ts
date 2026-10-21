@@ -63,7 +63,7 @@ function harness(initial: {
   }
 }
 
-test('RFL-002: an armed retry waits for the OFFICIAL generation, then re-inits exactly once', async () => {
+test('an armed retry waits for the OFFICIAL generation, then re-inits exactly once', async () => {
   const h = harness({ sessionId: 's1', ownerGeneration: 1, connectionGeneration: undefined })
   const armed = armRemoteInitRetry(h.deps, 's1', 1)
   assert.ok(armed !== undefined)
@@ -79,7 +79,7 @@ test('RFL-002: an armed retry waits for the OFFICIAL generation, then re-inits e
   assert.deepEqual(h.runs, [1], 'the retry disarms itself after the usable signal')
 })
 
-test('RFL-002: a same-id owner commit (owner generation bumped) cancels the armed retry', async () => {
+test('a same-id owner commit (owner generation bumped) cancels the armed retry', async () => {
   // The reviewer's race: a same-id owner commit keeps the session id but bumps
   // the owner generation. The old retry must not run the init — its entry
   // disposes the live surface — against the new owner.
@@ -92,7 +92,7 @@ test('RFL-002: a same-id owner commit (owner generation bumped) cancels the arme
   assert.deepEqual(h.runs, [], 'the stale attempt never re-inits over the NEW owner')
 })
 
-test('RFL-002: the owner moving between the signal and the detached task wins', async () => {
+test('the owner moving between the signal and the detached task wins', async () => {
   const h = harness({ sessionId: 's1', ownerGeneration: 1, connectionGeneration: undefined })
   armRemoteInitRetry(h.deps, 's1', 1)
   h.setConnectionGeneration({ id: 2 })
@@ -104,7 +104,7 @@ test('RFL-002: the owner moving between the signal and the detached task wins', 
   assert.deepEqual(h.runs, [], 'the same-tick re-check refuses the superseded attempt')
 })
 
-test('RFL-002: a different session, cleanup, or a repeated undefined generation never re-inits', async () => {
+test('a different session, cleanup, or a repeated undefined generation never re-inits', async () => {
   const h = harness({ sessionId: 's1', ownerGeneration: 1, connectionGeneration: undefined })
   armRemoteInitRetry(h.deps, 's1', 1)
   h.setCurrentSession('s2')
@@ -129,7 +129,7 @@ test('RFL-002: a different session, cleanup, or a repeated undefined generation 
   assert.deepEqual(flapping.runs, [], 'a still-undefined generation never re-inits')
 })
 
-test('RFL-002: a cleaned-up app does not arm at all', () => {
+test('a cleaned-up app does not arm at all', () => {
   const h = harness({ sessionId: 's1', ownerGeneration: 1, connectionGeneration: undefined })
   h.setCleanedUp(true)
   assert.equal(armRemoteInitRetry(h.deps, 's1', 1), undefined)

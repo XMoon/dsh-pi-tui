@@ -40,7 +40,7 @@ function welcomeSessionIds(pane: Parameters<typeof wireNodes>[0]): string[] {
     .map((node) => node.id.slice(prefix.length))
 }
 
-test('B1-B/Direct: sessionless resume, UI A→B, and typed resume follow the production lifecycle', async (t) => {
+test('B/Direct: sessionless resume, UI A→B, and typed resume follow the production lifecycle', async (t) => {
   const { testLifecycle } = await import('../../support/temp-lifecycle.ts')
   const life = testLifecycle(t)
   const workRoot = life.tempDir('dsh-b1b-session-store-')

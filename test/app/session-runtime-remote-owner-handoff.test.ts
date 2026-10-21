@@ -330,7 +330,7 @@ function harness() {
   }
 }
 
-test('H1: ordinary switch = retain NEW → commit NEW → release OLD → post-handoff init', async () => {
+test('ordinary switch = retain NEW → commit NEW → release OLD → post-handoff init', async () => {
   const h = harness()
   h.publishRetained('session-a')
   const beforeMap = h.calls.fromHandle
@@ -353,7 +353,7 @@ test('H1: ordinary switch = retain NEW → commit NEW → release OLD → post-h
   assert.ok(h.isLive('session-b'), 'the NEW generation stays retained')
 })
 
-test('B1-B: a committed switch survives a post-commit catalog failure and reports it', async () => {
+test('a committed switch survives a post-commit catalog failure and reports it', async () => {
   const h = harness()
   h.publishRetained('session-a')
   h.failNextCatalogRefresh()
@@ -372,7 +372,7 @@ test('B1-B: a committed switch survives a post-commit catalog failure and report
     'the post-commit failure is recorded with its truthful catalog phase')
 })
 
-test('PR3-B §7.3 (F1 timing): the drop rides the publication commit — BEFORE the new session\'s init/catalog', async () => {
+test('(F1 timing): the drop rides the publication commit — BEFORE the new session\'s init/catalog', async () => {
   // The external review's probe-886 shape: the OLD draft must be gone
   // BEFORE the new session becomes editable (its hydration lifts the input
   // fence) — i.e. before ANY post-commit await (init/catalog), never after
@@ -400,7 +400,7 @@ test('PR3-B §7.3 (F1 timing): the drop rides the publication commit — BEFORE 
     `the editor-recall scope opens before the new session's hydration (scope@${scopeIndex}, init@${initIndex})`)
 })
 
-test('PR3-B §7.3 (F1 atomicity): a THROWING drop seam is a pre-publication failure — OLD owner/draft stand, NEW is released', async () => {
+test('(F1 atomicity): a THROWING drop seam is a pre-publication failure — OLD owner/draft stand, NEW is released', async () => {
   // The external review's publication-atomicity probe: the drop used to
   // carry renderer render IO, so a synchronous throw left the OLD draft
   // already cleared while the publication was rolled back to a
@@ -437,7 +437,7 @@ test('PR3-B §7.3 (F1 atomicity): a THROWING drop seam is a pre-publication fail
     'the successful retry dropped exactly once')
 })
 
-test('PR3-B §7.3 (F1 wiring): the active-draft drop fires ONLY at the committed cross-owner switch', async () => {
+test('(F1 wiring): the active-draft drop fires ONLY at the committed cross-owner switch', async () => {
   // The production call positions: a successful ordinary switch drops the
   // outgoing draft exactly once (AFTER the publication, with the new owner
   // current); a superseded/pre-publication failed switch NEVER drops; and
@@ -464,7 +464,7 @@ test('PR3-B §7.3 (F1 wiring): the active-draft drop fires ONLY at the committed
     'a same-id no-op switch never drops again')
 })
 
-test('H2: a NEW superseded before commit is released; OLD stays current; no init', async () => {
+test('a NEW superseded before commit is released; OLD stays current; no init', async () => {
   const h = harness()
   h.publishRetained('session-a')
   // The adapter-level supersession contract: the connection generation moved
@@ -478,7 +478,7 @@ test('H2: a NEW superseded before commit is released; OLD stays current; no init
   assert.ok(!h.events.some(entry => entry.startsWith('switch:')), 'no switch may be reported')
 })
 
-test('B1-B: a guarded switch rechecks scope inside the gate before navigation side effects', async () => {
+test('a guarded switch rechecks scope inside the gate before navigation side effects', async () => {
   const h = harness()
   h.publishRetained('session-a')
   const expectedScope = { sessionId: 'session-a' } as SessionScope
@@ -512,7 +512,7 @@ test('B1-B: a guarded switch rechecks scope inside the gate before navigation si
   }
 })
 
-test('B1-B: a queued captured scope stays stale through A→C→A even when the Session ID returns', async () => {
+test('a queued captured scope stays stale through A→C→A even when the Session ID returns', async () => {
   const h = harness()
   h.publishRetained('session-a')
   const scopeAuthority = createSessionScopeAuthority({
@@ -569,7 +569,7 @@ test('B1-B: a queued captured scope stays stale through A→C→A even when the 
   }
 })
 
-test('H3: a same-id reopen is a NEW owner generation; the stale owner never becomes current', async () => {
+test('a same-id reopen is a NEW owner generation; the stale owner never becomes current', async () => {
   const h = harness()
   const ownerA = h.publishRetained('session-x').owner
   // Capture the stale owner's completion subject BEFORE the rollover: a late
@@ -591,7 +591,7 @@ test('H3: a same-id reopen is a NEW owner generation; the stale owner never beco
   assert.equal(h.countRefs('session-x'), 1, 'exactly the new generation\'s reference remains')
 })
 
-test('H4: rapid A → B(superseded) → C commits only C and releases each reference once', async () => {
+test('rapid A → B(superseded) → C commits only C and releases each reference once', async () => {
   const h = harness()
   h.publishRetained('session-a')
   let supersedeB!: () => void
@@ -613,7 +613,7 @@ test('H4: rapid A → B(superseded) → C commits only C and releases each refer
   assert.equal(h.countRefs('session-a'), 0, 'A is released once, by C\'s commit')
 })
 
-test('H5: a Remote fork adopts the published child through exactly one open and releases the source once', async () => {
+test('a Remote fork adopts the published child through exactly one open and releases the source once', async () => {
   const h = harness()
   h.publishRetained('session-a')
   const outcome = await h.runtime.forkSession('session-a')
@@ -630,7 +630,7 @@ test('H5: a Remote fork adopts the published child through exactly one open and 
   assert.ok(h.events.includes(`init:${h.core.currentSessionId()!}`), 'the child surface init ran')
 })
 
-test('PR3-B §7.3 (F1 atomicity, fork): a THROWING drop seam fails the adoption pre-publication — source/draft stand', async () => {
+test('(F1 atomicity, fork): a THROWING drop seam fails the adoption pre-publication — source/draft stand', async () => {
   // The fork-adoption sibling of the ordinary-switch atomicity probe: the
   // drop rides the adoption's publication seam too, so a synchronous throw
   // there must classify as a PRE-publication failure — the source owner
@@ -651,7 +651,7 @@ test('PR3-B §7.3 (F1 atomicity, fork): a THROWING drop seam fails the adoption 
   assert.equal(h.core.currentSessionId(), 'session-a', 'no child became current')
 })
 
-test('H6: a fork stale before adoption never opens the child', async () => {
+test('a fork stale before adoption never opens the child', async () => {
   const h = harness()
   h.publishRetained('session-a')
   // Bump the navigation epoch while the Host fork dispatch is in flight: the
@@ -668,7 +668,7 @@ test('H6: a fork stale before adoption never opens the child', async () => {
     'this stale path never entered the transition gate, so no recall was deferred and none may settle')
 })
 
-test('H7: a fork stale AFTER the adoption open releases the NEW owner exactly once', async () => {
+test('a fork stale AFTER the adoption open releases the NEW owner exactly once', async () => {
   const h = harness()
   h.publishRetained('session-a')
   // The epoch moves during the adoption open (after the retain): the child id
@@ -685,7 +685,7 @@ test('H7: a fork stale AFTER the adoption open releases the NEW owner exactly on
     'the unified fork transaction-finally restores the deferred recall exactly once')
 })
 
-test('H8: a failed adoption open never redispatches the fork and keeps the current owner', async () => {  const h = harness()
+test('a failed adoption open never redispatches the fork and keeps the current owner', async () => {  const h = harness()
   h.publishRetained('session-a')
   h.arms.set('child-1', { fail: true })
   const outcome = await h.runtime.forkSession('session-a')
@@ -706,7 +706,7 @@ test('H8: a failed adoption open never redispatches the fork and keeps the curre
   }
 })
 
-test('H9: a reconnect that preserves the exact binding preserves the owner identity', async () => {
+test('a reconnect that preserves the exact binding preserves the owner identity', async () => {
   const h = harness()
   const { owner, wrapper } = h.publishRetained('session-a')
   // Model a normal reconnect: the connection generation changes but the exact
@@ -719,7 +719,7 @@ test('H9: a reconnect that preserves the exact binding preserves the owner ident
   assert.equal(h.core.owner(), owner)
 })
 
-test('H10: a full scope retire and re-materialize changes the owner identity', async () => {
+test('a full scope retire and re-materialize changes the owner identity', async () => {
   const h = harness()
   const ownerA = h.publishRetained('session-x').owner
   await h.runtime.retireOwnedSession()
@@ -728,7 +728,7 @@ test('H10: a full scope retire and re-materialize changes the owner identity', a
   assert.notEqual(ownerB, ownerA, 'a re-materialized scope is a NEW owner generation')
 })
 
-test('H11: an exit after the fork retain but before commit releases NEW once; OLD retirement is preserved', async () => {
+test('an exit after the fork retain but before commit releases NEW once; OLD retirement is preserved', async () => {
   const h = harness()
   h.publishRetained('session-a')
   // The surface is disposed while the adoption open runs: the NEW owner was
@@ -744,7 +744,7 @@ test('H11: an exit after the fork retain but before commit releases NEW once; OL
   assert.equal(h.countRefs('session-a'), 0, 'the old owner is retired exactly once')
 })
 
-test('H12: a fatal after commit never rolls back to OLD; the retirement releases NEW once', async () => {
+test('a fatal after commit never rolls back to OLD; the retirement releases NEW once', async () => {
   const h = harness()
   h.publishRetained('session-a')
   const outcome = await h.runtime.forkSession('session-a')

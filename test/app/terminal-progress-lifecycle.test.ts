@@ -1671,7 +1671,7 @@ test('the Remote feed commits the Host fact, and a lineage restart re-baselines 
   }
 })
 
-test('L4: the Direct adapter publishes exactly the shared fold commits for the same evidence', async () => {
+test('the Direct adapter publishes exactly the shared fold commits for the same evidence', async () => {
   // R1 §5.4: the SAME explainable evidence sequence drives (a) the mounted
   // surface's real Direct adapter and (b) a bare shared-fold instance. The two
   // must agree commit for commit — this is the shared-semantics proof, not a
