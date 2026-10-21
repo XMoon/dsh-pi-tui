@@ -403,7 +403,7 @@ test('Quick: returns the scrolled editor viewport, cursor and mode unchanged', a
 })
 
 /** S4 — ↑↓/Pg navigation; Up at the global first row exits. */
-test('Up/Down: Up/Down: Up/Down: and PgUp/PgDn move by painted task rows; Up at the global first row exits', async () => {
+test('Up/Down: and PgUp/PgDn move by painted task rows; Up at the global first row exits', async () => {
   const h = await startQuick({
     roster: [
       job('j1', 'alpha', 'running'), job('j2', 'bravo', 'running'), job('j3', 'charlie', 'running'),

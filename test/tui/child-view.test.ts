@@ -58,7 +58,7 @@ test('childOwnEvents keeps child history across every untagged resume marker', (
     event(3, 'assistant/message', { turn: 1, step: 1, message: { role: 'assistant', content: [{ type: 'text', text: 'first closing' }] } }),
     event(4, 'session/end-seed', {}),
     event(5, 'user/message', { content: [{ type: 'text', text: 'resumed turn' }], source: { kind: 'user' } }),
-    event(6, 'assistant/message', { turn: 2, step: 1, message: { role: 'assistant', content: [{ type: 'text', text: 'resumed reply' }] } }),
+    event(6, 'assistant/message', { turn: 2, step: 1, message: { role: 'assistant', content: [{ type: 'text', text: 'resumed closing' }] } }),
     event(7, 'session/end-seed', {}),
     event(8, 'user/message', { content: [{ type: 'text', text: 'third turn' }], source: { kind: 'user' } }),
   ]
@@ -66,7 +66,7 @@ test('childOwnEvents keeps child history across every untagged resume marker', (
   assert.deepEqual(own.map(candidate => candidate.seq), [2, 3, 4, 5, 6, 7, 8])
   const text = own.map(candidate => JSON.stringify(candidate.data)).join('\n')
   assert.ok(text.includes('third turn'))
-  assert.ok(text.includes('first reply'))
+  assert.ok(text.includes('first closing'))
   assert.ok(text.includes('resumed turn'))
   assert.ok(text.includes('resumed reply'))
   assert.ok(text.includes('third turn'))

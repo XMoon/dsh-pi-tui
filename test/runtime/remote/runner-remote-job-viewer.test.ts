@@ -369,7 +369,7 @@ async function openJobRow(fx: JobViewerFixture, label: string): Promise<void> {
   fx.fixture.vt.sendInput('\r')
 }
 
-test('steps 1-8 + negatives (c)/no-retry/no-ctx.jobs.read: the REAL Job viewer observes the Remote stream, updates live without consuming `job_output`, and its Stop converges through the official roster', async (t) => {
+test('steps 1-8 + negatives (c) /no-retry/no-ctx.jobs.read: the REAL Job viewer observes the Remote stream, updates live without consuming `job_output`, and its Stop converges through the official roster', async (t) => {
   const life = testLifecycle(t)
   const fx = await mountJobViewerFixture(life)
   const { app, view } = fx

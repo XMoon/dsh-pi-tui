@@ -179,13 +179,18 @@ is readability, not uniformity.
 
 **Removing a code must not remove the MEANING around it.** A qualifier
 between the code and the sentence — the category the case belongs to, the
-scenario it names, the review that produced it — is part of what the title
-says, so it stays:
+scenario it names — is part of what the title says, so it stays:
 
 | before | after |
 |---|---|
 | `B3 F4 control: with no settled entry …` | `control: with no settled entry …` |
 | `A0 fullscreen seat preflight: the alt screen …` | `fullscreen seat preflight: the alt screen …` |
+| `L6 §37 shell (Remote, CARRIER_GAP): the shell routes …` | `shell (Remote, CARRIER_GAP): the shell routes …` |
+
+A BRACKETED qualifier that directly follows the code is part of the code
+label and goes with it — it names the review or the variant, and a reader
+of the log has neither: `PR4 F2b.2 (review round 4): …` becomes
+`…: …`.
 
 The CODE is what goes: `A5b`, `B4A-07`, `PR5`, `§1C-3`, `step 8`, `finding C`,
 `assertion 7`, `A:`. Everything the title says ABOUT the behaviour stays.

@@ -505,7 +505,7 @@ test('a command definition render reads the cache ONLY (no cache → null, place
 
   // A 30 source commits the cached first line (the definition is
   // recompiled against the source).
-  catalog.setCommandValueSource({ value: () => ({ kind: 'value', text: '30' }) })
+  catalog.setCommandValueSource({ 30: () => ({ kind: '30', text: '30' }) })
   assert.deepEqual(render()?.spans[0], { text: '30', tone: 'accent' })
   // An empty cached value is unavailable too.
   catalog.setCommandValueSource({ value: () => ({ kind: 'value', text: '' }) })
