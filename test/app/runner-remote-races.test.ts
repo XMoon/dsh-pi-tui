@@ -223,12 +223,12 @@ async function mountRaceRunner(
   })
   // The transport is disposed by the RUNNER FIBER's teardown effect
   // (`registerRunnerDisposal` → `disposeSelectedTransport`), so the fiber
-  // disposal registered below owns it. A second, unconditional
-  // `selected.disposeTransport()` registration would reach the SAME
-  // idempotent disposer a second time — and the "the transport disposes
-  // exactly once" assertions count the CALLS, so the extra registration
-  // could land before the assertion and make the count 2 (the
-  // load-sensitive flake this fixture's ownership must not have).
+  // disposal owns it. A second, unconditional `selected.disposeTransport()`
+  // registration would reach the SAME idempotent disposer a second time —
+  // and the "the transport disposes exactly once" assertions count the
+  // CALLS, so the extra registration could land before the assertion and
+  // make the count 2 (the load-sensitive flake this fixture's ownership must
+  // not have).
   //
   // The fallback below is the SAFETY net for the one case the fiber effect
   // cannot cover: the runner never mounted (the mount threw), so no teardown
@@ -243,6 +243,28 @@ async function mountRaceRunner(
     runnerReleasedTransport = true
     await originalDisposeTransport()
   }
+  // ONE awaited cleanup that owns the transport, in the production order: the
+  // runner fiber's teardown effect, then the fallback for a runner that never
+  // mounted. It is AWAITED on purpose: a fire-and-forget teardown would let
+  // the lifecycle remove the temp directories while the transport was still
+  // being disposed, and would let the fallback start the transport teardown
+  // before the runner's own retirement had settled.
+  //
+  // It is registered HERE — right after the aggregate exists and BEFORE any
+  // setup step that can reject — so the fallback really covers a mount that
+  // never completed. A cleanup registered after the mount would not exist on
+  // that path at all, and the aggregate would be left undisposed.
+  let runnerFiber: { dispose(): Promise<void> } | undefined
+  life.defer(async (): Promise<void> => {
+    await runnerFiber?.dispose()
+    // The fallback for the one case the fiber's teardown effect cannot cover:
+    // the runner never mounted (the mount threw), so no teardown effect exists
+    // and nothing else would release the transport. It runs only when the
+    // runner never reached it, so it can never add a second call to a
+    // transport the runner already disposed.
+    if (runnerReleasedTransport) return
+    await aggregate.selected.disposeTransport().catch(() => {})
+  })
   const vt = new VirtualTerminal(110, 32)
   const restoreTerminal = await import('../support/runner-harness.ts').then(m => m.installVirtualProcessTerminal(vt))
   life.defer(restoreTerminal)
@@ -274,24 +296,9 @@ async function mountRaceRunner(
   const fiber = runnerCtx.plugin(pluginCtx => {
     applyRunnerWithRuntime(pluginCtx, TuiConfigSchema({ fullscreen: 'off', sessionId: options.resumeSessionId } as never), override)
   })
+  runnerFiber = fiber
   await fiber
   await waitFor('race runner mount', () => vt.getViewport().join('').length > 0, 20_000)
-  // ONE awaited cleanup that owns the transport, in the production order: the
-  // runner fiber's teardown effect, then the fallback for a runner that never
-  // mounted. It is AWAITED on purpose: a fire-and-forget teardown would let
-  // the lifecycle remove the temp directories while the transport was still
-  // being disposed, and would let the fallback start the transport teardown
-  // before the runner's own retirement had settled.
-  life.defer(async (): Promise<void> => {
-    await fiber.dispose()
-    // The fallback for the one case the fiber's teardown effect cannot cover:
-    // the runner never mounted (the mount threw), so no teardown effect exists
-    // and nothing else would release the transport. It runs only when the
-    // runner never reached it, so it can never add a second call to a
-    // transport the runner already disposed.
-    if (runnerReleasedTransport) return
-    await aggregate.selected.disposeTransport().catch(() => {})
-  })
   return {
     host,
     vt,
