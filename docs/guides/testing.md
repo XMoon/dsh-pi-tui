@@ -218,11 +218,21 @@ the context. Dropping the code is a rename with no loss.
 
 #### Checking the result
 
-`pnpm report:case-inventory` collects the real case list of a lane by
-running that lane through the same reporter the CI uses, and prints the
-titles that still lead with a code or that carry no result. It is a
-REPORT, not a gate: the judgement "is this title clear" stays with the
-reviewer, exactly like rule 4 above.
+Two reports, in this order:
+
+| Command | What it reports |
+|---|---|
+| `pnpm report:case-inventory` | the real case list of the product lane, collected by running that lane through the same reporter the CI uses |
+| `pnpm report:case-titles` | the titles of that list that still lead with a code, or that name a subject without naming a result |
+
+The inventory is collected from a RUN, not from a text scan: a table-driven
+case builds its title at run time, and a `describe()` chain contributes to
+the title the reader sees, so a regex cannot produce the list.
+
+Both are REPORTS, not gates: the judgement "is this title clear" stays with
+the reviewer, exactly like rule 4 above. The audit's two verdicts are
+HINTS — a title it flags may be perfectly clear, and a title it does not
+flag may still be vague.
 
 ## 2. Running the tests
 
