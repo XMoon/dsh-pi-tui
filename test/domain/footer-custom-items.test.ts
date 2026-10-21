@@ -390,7 +390,7 @@ test('custom definitions do not change the existing FooterLayoutV1 shape or buil
 
 // ── PR D: custom command item schema / parser / catalog ──────────────────
 
-test('PR D: a valid command definition parses with the user:* id contract', () => {
+test('a valid command definition parses with the user:* id contract', () => {
   const parsed = parseFooterCustomItem(VALID_CLOCK)
   assert.deepEqual(parsed, VALID_CLOCK)
   assert.equal(parsed?.kind, 'command')
@@ -405,7 +405,7 @@ test('PR D: a valid command definition parses with the user:* id contract', () =
   assert.deepEqual(explicit, { ...VALID_CLOCK, refreshIntervalMs: 10000, timeoutMs: 500 })
 })
 
-test('PR D: command validation rejects empty/control-char commands and bad ids/tones', () => {
+test('command validation rejects empty/control-char commands and bad ids/tones', () => {
   assert.equal(parseFooterCustomItem({ ...VALID_CLOCK, command: '' }), undefined)
   assert.equal(parseFooterCustomItem({ ...VALID_CLOCK, command: '   ' }), undefined)
   assert.equal(parseFooterCustomItem({ ...VALID_CLOCK, command: 'date\u0000' }), undefined)
@@ -417,7 +417,7 @@ test('PR D: command validation rejects empty/control-char commands and bad ids/t
   assert.equal(parseFooterCustomItem({ ...VALID_CLOCK, kind: 'script' }), undefined)
 })
 
-test('PR D: refresh/timeout bounds follow the whole-footer rule set (clamp, never reject finite junk)', () => {
+test('refresh/timeout bounds follow the whole-footer rule set (clamp, never reject finite junk)', () => {
   // A hand-edited refresh below the 1s floor is accepted and clamped by the
   // runtime — the SAME contract as parseFooterCommandConfig (one rule set,
   // never two drifting copies).
@@ -436,7 +436,7 @@ test('PR D: refresh/timeout bounds follow the whole-footer rule set (clamp, neve
   assert.equal(big!.kind === 'command' ? big!.timeoutMs : undefined, 5000)
 })
 
-test('PR D: mixed text + command collections parse with first-wins duplicates', () => {
+test('mixed text + command collections parse with first-wins duplicates', () => {
   const result = parseFooterCustomItems([
     VALID_ENVIRONMENT,
     VALID_CLOCK,
@@ -448,7 +448,7 @@ test('PR D: mixed text + command collections parse with first-wins duplicates', 
   assert.equal(result.invalidCount, 3)
 })
 
-test('PR D: the catalog creates/edits/renames/removes command definitions', () => {
+test('the catalog creates/edits/renames/removes command definitions', () => {
   const catalog = new FooterCustomItemCatalog()
   const created = catalog.createCommand('Clock', 'date +%H:%M', 5000, 300, 'auto')
   assert.ok(created.item)
@@ -478,7 +478,7 @@ test('PR D: the catalog creates/edits/renames/removes command definitions', () =
   assert.equal(catalog.get('user:Time'), undefined)
 })
 
-test('PR D: known-kind objects with unknown/future fields are forward-compatible raw data (never normalized)', () => {
+test('known-kind objects with unknown/future fields are forward-compatible raw data (never normalized)', () => {
   // A future client's field on a KNOWN kind must never be silently
   // normalized away: the object classifies as unknown (preserved raw by
   // the /footer merge, excluded from the runtime projection).
@@ -490,7 +490,7 @@ test('PR D: known-kind objects with unknown/future fields are forward-compatible
   assert.ok(parseFooterCustomItem({ ...VALID_CLOCK, refreshIntervalMs: 5000, timeoutMs: 300, tone: 'auto' }))
 })
 
-test('PR D: a command definition render reads the cache ONLY (no cache → null, placeholder → dim marker)', () => {
+test('a command definition render reads the cache ONLY (no cache → null, placeholder → dim marker)', () => {
   const catalog = new FooterCustomItemCatalog([VALID_CLOCK])
   const registry = new FooterItemRegistry()
   registry.setCustomSource(catalog)
@@ -527,7 +527,7 @@ test('PR D: a command definition render reads the cache ONLY (no cache → null,
   assert.ok(!plain(composed).includes('[command]'))
 })
 
-test('PR D: a command definition with no cache renders unavailable in the live footer (never a placeholder)', () => {
+test('a command definition with no cache renders unavailable in the live footer (never a placeholder)', () => {
   const catalog = new FooterCustomItemCatalog([VALID_CLOCK])
   const registry = new FooterItemRegistry()
   registry.setCustomSource(catalog)
@@ -541,7 +541,7 @@ test('PR D: a command definition with no cache renders unavailable in the live f
   assert.ok(!plain(composed).includes('date'), 'the live footer must not show the command string')
 })
 
-test('PR D: command items participate in the ordinary composer layout (rows, budget, host instruction)', () => {
+test('command items participate in the ordinary composer layout (rows, budget, host instruction)', () => {
   const catalog = new FooterCustomItemCatalog([
     VALID_CLOCK,
     { schemaVersion: 1, id: 'user:environment', kind: 'text', text: 'PROD' },

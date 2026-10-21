@@ -1691,7 +1691,7 @@ test('the child viewer never falls back to the parent facts for a fact its own S
     'the parent todo fact survives the child viewer round trip')
 })
 
-test('child A → child B leaves no cross-child residue (transcript, workspace, subject, retained generation)', async (t) => {
+test('leaves no cross-child residue (transcript, workspace, subject, retained generation)', async (t) => {
   const life = testLifecycle(t)
   const { fixture, app, viewport } = await mountTaskCenterFixture(life)
   const clientSessions = fixture.aggregate.wire.client.sessions

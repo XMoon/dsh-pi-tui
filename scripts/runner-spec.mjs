@@ -86,6 +86,20 @@ function command(command, args) {
   }
 }
 
+/**
+ * The commit this working tree actually has.
+ *
+ * It is read from the repository itself rather than from the workflow's
+ * environment, because the environment names the ref the run was
+ * DISPATCHED for — which is not necessarily the commit that was checked
+ * out. A measurement dispatched for one commit and run against another
+ * must be identifiable as such.
+ */
+function checkedOutSha() {
+  const result = command('git', ['rev-parse', 'HEAD'])
+  return result.present ? result.value : null
+}
+
 export function collectRunnerSpec() {
   const pnpm = command('pnpm', ['--version'])
   return {
@@ -93,7 +107,12 @@ export function collectRunnerSpec() {
     // compares. A shard that does not agree with the aggregating run on
     // these is a shard of a DIFFERENT run, and counting it would claim a
     // coverage nobody measured.
-    sha: process.env.GITHUB_SHA ?? null,
+    //
+    // `sha` is the commit that is actually CHECKED OUT, not the ref the
+    // workflow was dispatched for: a measurement may be dispatched for one
+    // commit and check out another, and the identity has to be the one the
+    // tests actually ran against.
+    sha: checkedOutSha() ?? process.env.GITHUB_SHA ?? null,
     runId: process.env.GITHUB_RUN_ID ?? null,
     runAttempt: process.env.GITHUB_RUN_ATTEMPT ?? null,
     node: {

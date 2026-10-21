@@ -703,7 +703,7 @@ test('control: with no settled entry an empty recorded result still renders no r
 
 // ── F6.2: the official approval sink covers rejection and every abort shape ──
 
-test('B3 F6.2: rejection and each abort shape settle through the official approval sink', async () => {
+test('rejection and each abort shape settle through the official approval sink', async () => {
   const harness = await mountRunnerHarness()
   try {
     const rejected = harness.approvalRequest({ toolName: 'bash', reason: 'no thanks', signal: new AbortController().signal })
@@ -737,7 +737,7 @@ test('B3 F6.2: rejection and each abort shape settle through the official approv
 
 // ── F6.4: reentrant successors and mixed Question/Approval handoff ──────────
 
-test('B3 F6.4: a successor created from the answered request is not answered by the same key', async () => {
+test('a successor created from the answered request is not answered by the same key', async () => {
   const harness = await mountRunnerHarness()
   try {
     // The production reentry shape: the official consumer of the FIRST answer
@@ -757,7 +757,7 @@ test('B3 F6.4: a successor created from the answered request is not answered by 
   }
 })
 
-test('B3 F6.4: a question created while an approval owns the seat waits its turn (mixed handoff)', async () => {
+test('a question created while an approval owns the seat waits its turn (mixed handoff)', async () => {
   const harness = await mountRunnerHarness()
   try {
     const approval = harness.approvalRequest({ toolName: 'bash', reason: 'owns the seat', signal: new AbortController().signal })
@@ -783,7 +783,7 @@ test('B3 F6.4: a question created while an approval owns the seat waits its turn
   }
 })
 
-test('B3 F6.4: an approval created while a question owns the seat waits its turn', async () => {
+test('an approval created while a question owns the seat waits its turn', async () => {
   const harness = await mountRunnerHarness()
   try {
     const question = harness.questionRequest({
@@ -808,7 +808,7 @@ test('B3 F6.4: an approval created while a question owns the seat waits its turn
   }
 })
 
-test('B3 F6.4: a reentrant official request created inside a controller projection READ does not preempt the form', async () => {
+test('a reentrant official request created inside a controller projection READ does not preempt the form', async () => {
   const harness = await mountRunnerHarness()
   try {
     let reentered: Promise<unknown> | undefined
@@ -842,7 +842,7 @@ test('B3 F6.4: a reentrant official request created inside a controller projecti
 
 // ── F6.1: the genuine timed claim → timeout → continued → late answer ───────
 
-test('B3 F6.1: a real timed claim times out into the continued form (the official sink sees ASK_TIMED_OUT)', async () => {
+test('a real timed claim times out into the continued form (the official sink sees ASK_TIMED_OUT)', async () => {
   const harness = await mountRunnerHarness({ remainingMs: 150 })
   try {
     const delivered = harness.questionRequest({
@@ -940,7 +940,7 @@ test('B3 F6.1: a real timed claim times out into the continued form (the officia
   }
 })
 
-test('B3 F6.1: a real answer mutation before the deadline freezes the countdown', async () => {
+test('a real answer mutation before the deadline freezes the countdown', async () => {
   const harness = await mountRunnerHarness({ remainingMs: 300 })
   try {
     const delivered = harness.questionRequest({
@@ -963,7 +963,7 @@ test('B3 F6.1: a real answer mutation before the deadline freezes the countdown'
   }
 })
 
-test('B3 F6.1: the Host closing the timed wait rejects ASK_ABORTED, never a user cancel', async () => {
+test('the Host closing the timed wait rejects ASK_ABORTED, never a user cancel', async () => {
   const harness = await mountRunnerHarness({ remainingMs: 5_000 })
   try {
     const delivered = harness.questionRequest({
@@ -983,7 +983,7 @@ test('B3 F6.1: the Host closing the timed wait rejects ASK_ABORTED, never a user
 
 // ── F6.3: currentness — retirement never writes into the new session ────────
 
-test('B3 F6.3: a retired request cannot touch the new session, and B gets a FRESH seat identity', async () => {
+test('a retired request cannot touch the new session, and B gets a FRESH seat identity', async () => {
   const harness = await mountRunnerHarness({
     projection: {
       active: [],
@@ -1049,7 +1049,7 @@ test('B3 F6.3: a retired request cannot touch the new session, and B gets a FRES
 
 // ── F6.1: the claim lifetime is released when the surface retires ────────────
 
-test('B3 F6.1: disposing the surface releases the live Host claim (the caller lifetime)', async () => {
+test('disposing the surface releases the live Host claim (the caller lifetime)', async () => {
   const harness = await mountRunnerHarness({ remainingMs: 30_000 })
   try {
     const delivered = harness.questionRequest({
