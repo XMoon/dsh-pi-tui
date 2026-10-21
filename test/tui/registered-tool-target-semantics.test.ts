@@ -336,15 +336,18 @@ test('both branches prove the path of ONE settled read from its tool-authored me
   )
 })
 
-test('an edit with NO result metadata is proven by Direct and refused by the Client', () => {
-  // This case measures ONE running-shaped edit: call args only, no result
-  // metadata. There the Direct branch has the registered tool's own
-  // `presentCall`, while the Client's call view is derived from the tool NAME
-  // (a guess, so it is not proof). A plugin may register its own tool under a
-  // built-in name, which is why that guess cannot be trusted.
+test('an edit whose result carries NO metadata is proven by Direct and refused by the Client', () => {
+  // This case measures ONE edit row that SETTLED SUCCESSFULLY but whose result
+  // carries no metadata (the fixture appends a successful `toolResult` with no
+  // `meta`). It is NOT a running row. With no result view, only the call view
+  // is left: the Direct branch has the registered tool's own `presentCall`,
+  // while the Client's call view is derived from the tool NAME — a guess, so it
+  // is not proof. A plugin may register its own tool under a built-in name,
+  // which is why that guess cannot be trusted.
   //
-  // It does NOT measure a settled edit: with result metadata present the two
-  // branches agree, and the real-execution case below covers that.
+  // It does NOT measure an edit whose result DOES carry metadata: no case in
+  // this file exercises that shape, here or below. The real-execution cases at
+  // the end of this file are READS, not edits.
   const remote = createClientToolPresenter()
   const kindWith = (
     presenter: ToolPresenter,
@@ -505,4 +508,37 @@ test('a REAL settled read asked for by a RELATIVE path still claims the path kin
     'path',
     'one file is one path, however each stage spells it',
   )
+})
+
+test('a REAL overwrite that changes nothing still yields a diff on BOTH branches', async (t) => {
+  // `dsh-tool-fs` records `diffs: []` for an overwrite that wrote the identical
+  // content — the patch simply has no hunks — exactly as it does for a create.
+  // Its own write presenter rebuilds the diff from the call arguments in both
+  // cases. Treating the empty list as "create only" left this legitimate write
+  // with no view on the Client branch, which also cost it a provable path.
+  const life = testLifecycle(t)
+  const dir = life.tempDir('pr-b1-unchanged-')
+  const filePath = join(dir, 'same.txt')
+  await writeFile(filePath, 'hello\n')
+  const args = { file_path: filePath, content: 'hello\n' }
+
+  const outcome = await ctx.tools.execute({
+    signal: new AbortController().signal,
+    callId: ToolCallId('call-b1-unchanged'),
+    name: 'write',
+    arguments: args,
+    agent: owner,
+  })
+  assert.equal(outcome.isError, false, 'the real overwrite succeeded')
+  const meta = outcome.meta as { operation?: unknown; path?: unknown; diffs?: unknown }
+  assert.equal(meta.operation, 'update', 'the tool reports an update')
+  assert.deepEqual(meta.diffs, [], 'an unchanged overwrite has no hunks')
+
+  const argsRaw = JSON.stringify(args)
+  const input = { content: outcome.content, isError: outcome.isError, ...outcome.meta === undefined ? {} : { meta: outcome.meta } }
+  const directView = toolPresenterFrom(registry).result('write', argsRaw, input)
+  const clientView = createClientToolPresenter().result('write', argsRaw, input)
+  assert.ok(directView !== undefined && directView.card === 'diff', 'the Direct branch rebuilt a diff')
+  assert.ok(clientView !== undefined && clientView.card === 'diff', 'the Client branch rebuilt a diff')
+  assert.deepEqual(clientView.diffs, directView.diffs, 'both branches agree on the diff')
 })

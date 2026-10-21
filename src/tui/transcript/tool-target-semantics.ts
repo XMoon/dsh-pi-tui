@@ -110,9 +110,10 @@ function pathsOfView(view: ToolCallView | ToolResultView | undefined): string[] 
  * lose its `path` kind exactly when the call finishes.
  *
  * So the settled RESULT is the authority for what happened, and the call view
- * is consulted only while no result view exists (a running call). Whichever
- * stage answers, the "exactly one path" rule is applied WITHIN that stage, so
- * a genuinely multi-file call still refuses.
+ * answers only when the result does NOT prove a path — either because there is
+ * no result view yet (a running call) or because that view carries no path at
+ * all. Whichever stage answers, the "exactly one path" rule is applied WITHIN
+ * that stage, so a genuinely multi-file call still refuses.
  */
 function provenPaths(facts: ToolTargetFacts): string[] {
   const settled = pathsOfView(facts.resultView)
