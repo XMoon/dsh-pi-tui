@@ -38,7 +38,6 @@ async function awaitComposer(fixture: DirectTspFixture, text: string): Promise<v
     latestComposerText(fixture.pane.output.text()) === text, 25_000)
 }
 
-/** The latest controlled editor text on the wire for `dock.composer`. */
 /**
  * Every text the CURRENT wire carries.
  *
@@ -54,6 +53,7 @@ function renderedLines(fixture: DirectTspFixture): string[] {
     .filter((text): text is string => typeof text === 'string' && text !== '')
 }
 
+/** The latest controlled editor text on the wire for `dock.composer`. */
 function latestComposerText(wire: string): string | undefined {
   let text: string | undefined
   let seen = false
