@@ -371,7 +371,7 @@ test('effective ↓ enters from the middle of the last visual line and preserves
   assert.ok(view(h.vt).includes('first line of the draft'), 'the editor is visible again')
 })
 
-test('Quick: returns the scrolled editor viewport, cursor and mode unchanged', async () => {
+test('Quick returns the scrolled editor viewport, cursor and mode unchanged', async () => {
   const h = await startQuick({ roster: [job('j1', 'build', 'running')] })
   for (let i = 0; i < 8; i++) await new Promise(r => setTimeout(r, 0))
   await h.vt.waitForRender()
@@ -403,7 +403,7 @@ test('Quick: returns the scrolled editor viewport, cursor and mode unchanged', a
 })
 
 /** S4 — ↑↓/Pg navigation; Up at the global first row exits. */
-test('Up/Down: and PgUp/PgDn move by painted task rows; Up at the global first row exits', async () => {
+test('Up/Down and PgUp/PgDn move by painted task rows; Up at the global first row exits', async () => {
   const h = await startQuick({
     roster: [
       job('j1', 'alpha', 'running'), job('j2', 'bravo', 'running'), job('j3', 'charlie', 'running'),
@@ -465,7 +465,7 @@ test('Up/Down: and PgUp/PgDn move by painted task rows; Up at the global first r
 
 /** S6 — Enter routes the typed selection into a REAL Job workspace (the
  *  literal Enter → accessory → app callback → runtime → Job Inspector sink). */
-test('Enter: opens the real Job workspace; a refused value never disturbs it', async () => {
+test('Enter opens the real Job workspace; a refused value never disturbs it', async () => {
   const h = await startQuick({
     roster: [job('j1', 'build', 'running'), job('j2', 'test', 'running')],
   })
@@ -713,7 +713,7 @@ test('a deleted Quick selection cannot open its fallback before paint', async ()
   assert.ok(view(h.vt).includes('j3'), `the opened workspace is the painted successor:\n${view(h.vt)}`)
 })
 
-test('Enter: routes a Quick Subagent through the real typed enterView authority', async () => {
+test('Enter routes a Quick Subagent through the real typed enterView authority', async () => {
   const h = await startQuick({
     roster: [],
     descendants: [{
@@ -1035,7 +1035,7 @@ test('owner displacement retires Quick before History, Settings, managed overlay
   assert.equal(h.band().identity, -1, 'Quick paints no rows after the plugin editor takes the seat')
 })
 
-test('Job: and Settings workspace leases retire active Quick and never restore it', async () => {
+test('Job and Settings workspace leases retire active Quick and never restore it', async () => {
   const h = await startQuick({ roster: [job('j1', 'build', 'running')] })
   for (let i = 0; i < 8; i++) await new Promise(r => setTimeout(r, 0))
   await h.vt.waitForRender()

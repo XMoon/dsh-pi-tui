@@ -817,7 +817,7 @@ test('a sessionless TUI built-in works before the first Session and creates none
     'a sessionless command never creates a Session')
 })
 
-test('/copy: reaches the newest assistant message OUTSIDE the initial window by paging', async (t) => {
+test('/copy reaches the newest assistant message OUTSIDE the initial window by paging', async (t) => {
   const life = testLifecycle(t)
   const mainId = 'm3-4-pr4-cmd-copy'
   const fixture = await mountRunner(life, {

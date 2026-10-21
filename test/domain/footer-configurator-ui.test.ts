@@ -636,7 +636,7 @@ test('programmatic configurator close disposes a pending paste-prefix timer', as
   app.stop()
 })
 
-test('app disposal cancels a configurator paste-prefix timer', async (t) => {
+test('final app disposal cancels a configurator paste-prefix timer', async (t) => {
   const { vt, app } = startApp()
   const model = openDefault(app)
   await vt.waitForRender()

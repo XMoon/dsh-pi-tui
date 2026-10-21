@@ -78,9 +78,7 @@ test('scanTree walks the tree and allows only the whitelisted files', async (t) 
   assert.equal(violations[0].file, join(root, 'stray.test.ts'))
   assert.equal(violations[0].line, 1)
   assert.ok(ALLOWED_DIRECT_USAGE.every((entry) => entry.reason.length > 0), 'every whitelist entry must carry a reason')
-  // The allowlist matches by BASENAME, so a move of the helper does not
-  // silently un-whitelist it.
-  assert.ok(ALLOWED_DIRECT_USAGE.some((entry) => entry.file === 'temp-lifecycle.ts'), 'the helper must be whitelisted')
+  assert.ok(ALLOWED_DIRECT_USAGE.some((entry) => entry.file === 'support/temp-lifecycle.ts'), 'the helper must be whitelisted')
 })
 
 test('collectTestFiles only picks up source files', async (t) => {

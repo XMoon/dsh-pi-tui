@@ -231,7 +231,7 @@ test('recursively reads the full descendant tree in stable pre-order with exact 
   assert.equal(client.refreshCalls, 0)
 })
 
-test('activity comes from the official Session running bit, never catalog presence', async () => {
+test('child activity comes from the official Session running bit, never catalog presence', async () => {
   const generations = createSnapshotGenerationHarness()
   const client = twoLevelFixture()
   const reader = new RemoteTaskReader(client, jobsFixture({}), generations.source)
