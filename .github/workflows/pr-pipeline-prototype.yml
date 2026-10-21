@@ -973,6 +973,100 @@ jobs:
           node scripts/tarball-smoke.mjs "${TARBALLS[0]}"
 
   # ---------------------------------------------------------------------------
+  # THE PACK EQUIVALENCE PROOF, and WHEN it has to run again.
+  #
+  # A lifecycle-free `pnpm pack` is only acceptable because its content
+  # equals an ordinary `pnpm pack`'s. That equality depends on the PACKAGING
+  # INPUTS — the manifest, the build configuration, the preset generator, the
+  # pinned pnpm — not on the source code, and not on the tests.
+  #
+  # So the proof is a GATED PROPERTY with a trigger, not a per-run cost: it
+  # runs when the inputs differ from the recorded proof, or when no proof is
+  # recorded at all. "No proof recorded" is deliberately a trigger, not a
+  # pass: an unproven equality is not an unchanged one.
+  # ---------------------------------------------------------------------------
+  equivalence:
+    name: Pack equivalence (triggered)
+    needs:
+      - context
+    if: ${{ !cancelled() && needs['context'].result == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Setup pnpm and Node.js
+        uses: pnpm/setup@v2
+        with:
+          runtime: node@24
+          cache: true
+          install: false
+
+      - name: Do the packaging inputs still match the recorded proof?
+        id: trigger
+        run: |
+          set -euo pipefail
+          if node scripts/pack-equivalence-input.mjs --check scripts/pack-equivalence-baseline.json; then
+            echo 'needed=false' >> "$GITHUB_OUTPUT"
+          else
+            echo 'needed=true' >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Report this run's packaging input digest
+        run: node scripts/pack-equivalence-input.mjs --write packaging-inputs.json
+
+      - name: Prepare the dependencies for this mode
+        if: ${{ steps.trigger.outputs.needed == 'true' }}
+        env:
+          DSH_MODE_RESOLVED: ${{ needs.context.outputs.mode }}
+        run: |
+          set -euo pipefail
+          node scripts/prototype-deps.mjs \
+            --mode "$DSH_MODE_RESOLVED" \
+            --distribution "$RUNNER_TEMP/dsh-source-pack" \
+            --workspace "$GITHUB_WORKSPACE"
+
+      # The ordinary pack runs the FULL lifecycle, so it is only paid for
+      # when the trigger fires.
+      - name: Build the ordinary package
+        if: ${{ steps.trigger.outputs.needed == 'true' }}
+        run: |
+          set -euo pipefail
+          mkdir -p packs
+          pnpm pack --pack-destination "$GITHUB_WORKSPACE"
+          mv "$GITHUB_WORKSPACE"/xmoon76-dsh-pi-tui-*.tgz "$GITHUB_WORKSPACE/packs/"
+
+      - name: Build the CI-only package
+        if: ${{ steps.trigger.outputs.needed == 'true' }}
+        run: |
+          set -euo pipefail
+          mkdir -p packs-ci-only
+          pnpm pack --pack-destination "$GITHUB_WORKSPACE" --config.ignore-scripts=true
+          mv "$GITHUB_WORKSPACE"/xmoon76-dsh-pi-tui-*.tgz "$GITHUB_WORKSPACE/packs-ci-only/"
+
+      - name: Compare the two packages by CONTENT
+        if: ${{ steps.trigger.outputs.needed == 'true' }}
+        run: |
+          set -euo pipefail
+          ordinary="$(ls packs/*.tgz | head -1)"
+          ci_only="$(ls packs-ci-only/*.tgz | head -1)"
+          node scripts/compare-tarballs.mjs --a "$ordinary" --b "$ci_only" --out packs/pack-equivalence.json
+
+      - name: Upload the proof (and the digest this run took)
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: prototype-pack-equivalence
+          path: |
+            packaging-inputs.json
+            packs/pack-equivalence.json
+          if-no-files-found: warn
+          retention-days: 7
+
+  # ---------------------------------------------------------------------------
   # THE QUALIFIED ARTIFACT.
   #
   # It is produced HERE, and only here: after the shard aggregate proved the
@@ -994,13 +1088,17 @@ jobs:
       - candidate
       - qualify
       - downstream
+      # A triggered equivalence proof that FAILED must stop the qualified
+      # artifact. The job is skipped when the proof is still valid, so the
+      # condition below tolerates `skipped` for this need only.
+      - equivalence
     # This job depends on `source-pack` TRANSITIVELY, through `build`, and a
     # skipped job in the dependency graph skips its dependents unless they
     # say otherwise. Without this condition an npm run published nothing
     # while every one of its direct dependencies had succeeded — and the
     # summary then failed on `qualified artifact is 'skipped'`, which points
     # at the wrong job.
-    if: ${{ !cancelled() && needs['context'].result == 'success' && needs['build'].result == 'success' && needs['typecheck'].result == 'success' && needs['aggregate'].result == 'success' && needs['candidate'].result == 'success' && needs['qualify'].result == 'success' && needs['downstream'].result == 'success' }}
+    if: ${{ !cancelled() && needs['context'].result == 'success' && needs['build'].result == 'success' && needs['typecheck'].result == 'success' && needs['aggregate'].result == 'success' && needs['candidate'].result == 'success' && needs['qualify'].result == 'success' && needs['downstream'].result == 'success' && needs['equivalence'].result != 'failure' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -1072,6 +1170,7 @@ jobs:
       - qualify
       - downstream
       - qualified
+      - equivalence
     if: ${{ always() }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -1117,6 +1216,7 @@ jobs:
           QUALIFY: ${{ needs.qualify.result }}
           DOWNSTREAM: ${{ needs.downstream.result }}
           QUALIFIED: ${{ needs.qualified.result }}
+          EQUIVALENCE: ${{ needs.equivalence.result }}
         run: |
           set -euo pipefail
           node scripts/pipeline-guard.mjs summary \
@@ -1130,6 +1230,7 @@ jobs:
             --phase "qualification=$QUALIFY" \
             --phase "downstream matrix=$DOWNSTREAM" \
             --phase "qualified artifact=$QUALIFIED" \
+            --phase "equivalence proof=$EQUIVALENCE" \
             | tee pipeline-summary.txt
 
       - name: Upload the pipeline summary

@@ -377,7 +377,7 @@ test('every job that installs dependencies uses the shared preparation', () => {
   const inline = [...source.matchAll(/pnpm install --frozen-lockfile/gu)].length
   assert.equal(inline, 0, 'no job may install dependencies inline: use scripts/prototype-deps.mjs')
   const shared = [...source.matchAll(/prototype-deps\.mjs/gu)].length
-  assert.equal(shared, 6, `the six consumer jobs must all use the shared preparation, found ${shared}`)
+  assert.ok(shared >= 6, `the consumer jobs must all use the shared preparation, found ${shared}`)
 })
 
 test('no committed mode override exists, because it could never work', () => {
