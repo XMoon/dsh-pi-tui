@@ -37,6 +37,14 @@ on:
           - '2'
           - '3'
           - '4'
+      expected_cases:
+        description: 'The case count the unsharded lane reports (the baseline the shards must match)'
+        required: false
+        type: string
+      expected_skipped:
+        description: 'The skipped-case count the unsharded lane reports'
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -216,6 +224,12 @@ jobs:
           # commit that was REQUESTED, which is not necessarily the one
           # that was measured.
           DSH_EXPECTED_RUN_ID: ${{ github.run_id }}
+          DSH_EXPECTED_RUN_ATTEMPT: ${{ github.run_attempt }}
+          # The baseline the shards' case counts are compared against. It
+          # is the UNSHARDED lane's own totals, so a recorder that dropped
+          # a case or reported an extra skip cannot pass.
+          DSH_EXPECTED_CASES: ${{ inputs.expected_cases }}
+          DSH_EXPECTED_SKIPPED: ${{ inputs.expected_skipped }}
         run: |
           set -euo pipefail
           DSH_EXPECTED_SHA="$(git rev-parse HEAD)"
