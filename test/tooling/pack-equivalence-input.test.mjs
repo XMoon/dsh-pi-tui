@@ -20,8 +20,9 @@ import { join } from 'node:path'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import test from 'node:test'
+import { parse as parseYaml } from 'yaml'
 
-import { packagingInputDigest } from '../../scripts/pack-equivalence-input.mjs'
+import { normalizePackInvocation, packagingInputDigest } from '../../scripts/pack-equivalence-input.mjs'
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..')
 const SCRIPT = join(ROOT, 'scripts', 'pack-equivalence-input.mjs')
@@ -81,7 +82,7 @@ test('a recorded proof covers the inputs it was taken at, in ITS scope', (t) => 
   const file = join(scratch(t), 'baseline.json')
   cli(['--write', file])
   const recorded = JSON.parse(readFileSync(file, 'utf8'))
-  recorded.proof = { equivalent: true, mode: 'npm', node: process.versions.node.split('.')[0] }
+  recorded.proof = { equivalent: true, mode: 'npm', node: process.versions.node.split('.')[0], platform: process.platform }
   writeFileSync(file, `${JSON.stringify(recorded, null, 2)}\n`)
   const check = cli(['--check', file])
   assert.equal(check.status, 0, check.stdout + check.stderr)
@@ -94,7 +95,7 @@ test('a proof from ANOTHER mode does not cover this run', (t) => {
   const file = join(scratch(t), 'baseline.json')
   cli(['--write', file])
   const recorded = JSON.parse(readFileSync(file, 'utf8'))
-  recorded.proof = { equivalent: true, mode: 'npm', node: process.versions.node.split('.')[0] }
+  recorded.proof = { equivalent: true, mode: 'npm', node: process.versions.node.split('.')[0], platform: process.platform }
   writeFileSync(file, `${JSON.stringify(recorded, null, 2)}\n`)
   const check = cli(['--check', file, '--mode', 'source'])
   assert.equal(check.status, 1)
@@ -105,7 +106,7 @@ test('a proof from ANOTHER Node major does not cover this run', (t) => {
   const file = join(scratch(t), 'baseline.json')
   cli(['--write', file])
   const recorded = JSON.parse(readFileSync(file, 'utf8'))
-  recorded.proof = { equivalent: true, mode: 'npm', node: '24' }
+  recorded.proof = { equivalent: true, mode: 'npm', node: '24', platform: process.platform }
   writeFileSync(file, `${JSON.stringify(recorded, null, 2)}\n`)
   const check = cli(['--check', file, '--node', '26'])
   assert.equal(check.status, 1)
@@ -135,7 +136,7 @@ test('a record for OTHER inputs TRIGGERS the proof and names what differs', (t) 
   const recorded = JSON.parse(readFileSync((cli(['--write', file]), file), 'utf8'))
   // A valid proof, so the check proceeds to the digest comparison this case
   // is about.
-  recorded.proof = { equivalent: true, mode: 'npm', node: process.versions.node.split('.')[0] }
+  recorded.proof = { equivalent: true, mode: 'npm', node: process.versions.node.split('.')[0], platform: process.platform }
   // Pretend the manifest changed since the proof was taken.
   recorded.digest = '0'.repeat(64)
   recorded.inputs = recorded.inputs.map(input =>
@@ -145,4 +146,77 @@ test('a record for OTHER inputs TRIGGERS the proof and names what differs', (t) 
   assert.equal(check.status, 1)
   assert.match(check.stdout, /differ/u)
   assert.match(check.stdout, /package\.json/u, 'the trigger must name the input that changed')
+})
+
+// ---------------------------------------------------------------------------
+// RFL-007: the protocol must be BOUND to what the workflow runs.
+//
+// `scripts/pack-equivalence-protocol.json` is a static string. If the workflow
+// changes its pack command and the JSON is not updated, the digest does not
+// change, `--check` keeps saying "unchanged", the real comparison is skipped —
+// and the recorded proof now describes a comparison the pipeline no longer
+// performs.
+//
+// So the workflow's own commands are read and compared with the protocol.
+// ---------------------------------------------------------------------------
+
+test('the workflow runs EXACTLY the two commands the protocol declares', () => {
+  const workflow = parseYaml(readFileSync(join(ROOT, '.github', 'workflows', 'pr-pipeline-prototype.yml'), 'utf8'))
+  const protocol = JSON.parse(readFileSync(join(ROOT, 'scripts', 'pack-equivalence-protocol.json'), 'utf8'))
+
+  // Every `pnpm pack` invocation in the equivalence job, as the shell will run
+  // it.
+  const commands = []
+  for (const step of workflow.jobs.equivalence.steps) {
+    if (typeof step.run !== 'string') continue
+    for (const line of step.run.split('\n')) {
+      if (/^\s*pnpm pack\b/u.test(line)) commands.push(line.trim())
+    }
+  }
+  assert.equal(commands.length, 2, `the equivalence job must run exactly two packs, found: ${commands.join(' | ')}`)
+
+  const actual = commands.map(normalizePackInvocation).map(tokens => tokens.join(' ')).sort()
+  const declared = [protocol.ordinaryPack, protocol.ciOnlyPack]
+    .map(normalizePackInvocation)
+    .map(tokens => tokens.join(' '))
+    .sort()
+  assert.deepEqual(actual, declared,
+    'a workflow pack command that differs from the protocol must be a protocol change, not an invisible drift')
+})
+
+test('the protocol declares the comparator, and the workflow uses that file', () => {
+  const workflow = parseYaml(readFileSync(join(ROOT, '.github', 'workflows', 'pr-pipeline-prototype.yml'), 'utf8'))
+  const protocol = JSON.parse(readFileSync(join(ROOT, 'scripts', 'pack-equivalence-protocol.json'), 'utf8'))
+  assert.equal(typeof protocol.comparator, 'string')
+  const compareStep = workflow.jobs.equivalence.steps.find(step => typeof step.run === 'string' && step.run.includes('compare-tarballs'))
+  assert.ok(compareStep, 'the equivalence job must compare with the declared comparator')
+  assert.ok(compareStep.run.includes(protocol.comparator),
+    `the job must invoke ${protocol.comparator}`)
+})
+
+test('a proof from ANOTHER platform does not cover this run', (t) => {
+  // `pnpm pack` and the tar layout are platform-dependent.
+  const file = join(scratch(t), 'baseline.json')
+  cli(['--write', file])
+  const recorded = JSON.parse(readFileSync(file, 'utf8'))
+  recorded.proof = { equivalent: true, mode: 'npm', node: '24', platform: 'linux' }
+  writeFileSync(file, `${JSON.stringify(recorded, null, 2)}\n`)
+  const check = cli(['--check', file, '--platform', 'win32'])
+  assert.equal(check.status, 1)
+  assert.match(check.stdout, /platform 'linux', not 'win32'/u)
+})
+
+test('a workflow command that drifts from the protocol is caught', () => {
+  // The discrimination check for the binding above: if the workflow dropped
+  // `--config.ignore-scripts=true`, the CI-only pack would run the FULL
+  // lifecycle — a different comparison — while the protocol file and the
+  // digest stayed the same.
+  const protocol = JSON.parse(readFileSync(join(ROOT, 'scripts', 'pack-equivalence-protocol.json'), 'utf8'))
+  const mutated = 'pnpm pack --pack-destination "$GITHUB_WORKSPACE"'
+  const declared = normalizePackInvocation(protocol.ciOnlyPack).join(' ')
+  assert.notEqual(
+    normalizePackInvocation(mutated).join(' '),
+    declared,
+    'the ordinary and the lifecycle-free command must not compare equal',
+  )
 })

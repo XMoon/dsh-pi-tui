@@ -19,8 +19,11 @@
  *     output does not change the RELATION between the two pack paths: both
  *     consume whatever `dist` the build produced. The relation depends on how
  *     the package is assembled, not on what happens to be inside it.
- *   - the lockfile. It changes which dependency versions a consumer gets, not
- *     which files the tarball contains.
+ *   - the lockfile is INCLUDED. It was excluded at first on the argument that
+ *     it only changes a consumer's dependency versions — but the ordinary
+ *     pack runs `prepack`, whose build toolchain comes from the lockfile, so
+ *     a lockfile change can change the payload while the proof still claimed
+ *     to cover it.
  *
  * Usage:
  *   node scripts/pack-equivalence-input.mjs --write <file>
@@ -90,6 +93,30 @@ export function packagingInputDigest() {
     inputs.push({ path: input.path, present, sha256 })
   }
   return { digest: hash.digest('hex'), inputs }
+}
+
+
+/**
+ * A pack invocation reduced to a comparable form.
+ *
+ * The workflow writes `--pack-destination "$GITHUB_WORKSPACE"` where the
+ * protocol names `<workspace>`, and flag ORDER is not meaningful. Normalising
+ * both sides to a sorted token list is what lets a test compare the PROTOCOL
+ * with the command the workflow actually runs — without that comparison the
+ * protocol is a comment: changing the command would leave the digest
+ * untouched and the proof would keep being skipped.
+ *
+ * @param {string} text - a command line, or the protocol's own string.
+ * @returns {string[]} the comparable tokens.
+ */
+export function normalizePackInvocation(text) {
+  return text
+    .replace(/"\$GITHUB_WORKSPACE"/gu, '<workspace>')
+    .replace(/\$GITHUB_WORKSPACE/gu, '<workspace>')
+    .replace(/\s+/gu, ' ')
+    .trim()
+    .split(' ')
+    .sort()
 }
 
 /**
@@ -164,6 +191,13 @@ function main() {
   }
   if (proof.node !== node) {
     console.log(`changed: the recorded proof is for Node ${proof.node}, not ${node}`)
+    process.exit(1)
+  }
+  // The PLATFORM is part of the scope: `pnpm pack` and the tar layout are
+  // platform-dependent, so a Linux proof says nothing about a Windows run.
+  const platform = valueOf(args, '--platform') ?? process.platform
+  if (proof.platform !== platform) {
+    console.log(`changed: the recorded proof is for platform '${proof.platform}', not '${platform}'`)
     process.exit(1)
   }
   if (recorded.digest !== current.digest) {

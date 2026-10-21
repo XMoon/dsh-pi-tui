@@ -1010,7 +1010,7 @@ jobs:
         run: |
           set -euo pipefail
           if node scripts/pack-equivalence-input.mjs --check scripts/pack-equivalence-baseline.json \
-               --mode "${{ needs.context.outputs.mode }}" --node 24; then
+               --mode "${{ needs.context.outputs.mode }}" --node 24 --platform "${{ runner.os }}"; then
             echo 'needed=false' >> "$GITHUB_OUTPUT"
           else
             echo 'needed=true' >> "$GITHUB_OUTPUT"
