@@ -23,21 +23,27 @@ import { spawnSync } from 'node:child_process'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
+import { hasLeadingCodePrefix } from './strip-code-prefix.mjs'
+
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 
 /**
- * A title that LED BY a code.
+ * Whether a title LED BY a code.
  *
- * The code families come from this repository's own effort labels:
- * `A5b`, `B4A-07`, `PR5`, `M3-4`, `RFL-002`, `TS2`, `F1`, `S4-D2`, `RC2` …
- * and the plan-section markers (`§18.1`, `§1C-3`).
+ * The check calls the TRANSFORM's own predicate, so the audit and the
+ * transform can never disagree about what a code is. An audit with its
+ * own pattern can silently stop reporting the very titles the transform
+ * would change, and a "no code-led titles" report based on a narrower
+ * pattern is a false assurance.
  *
- * The check reuses the TRANSFORM's own token model, so the audit and the
- * transform can never disagree about what a code is. A title that merely
- * mentions a code in passing is not led by it, so the check anchors at the
- * start of the title.
+ * The code families are the ones this repository uses: `A5b`, `B4A-07`,
+ * `PR5`, `M3-4`, `RFL-002`, `TS2`, `F1`, `S4-D2`, `RC2` …, the
+ * plan-section markers (`§18.1`, `§1C-3`), and the compound forms
+ * (`A06/Focus`, `B3 F6.1`, `PR D`, `E2–E5`).
  */
-const CODE_PREFIX = /^(?:[A-Z]{1,4}\d+[a-zA-Z]?(?:\.\d+[a-z]?)?(?:-[A-Z]\d*)?(?:-\d+[a-z]?)?(?:-[A-Za-z]+)?|RFL-\d+|§\s*\d|§\s*[A-Z]\d)(?=[\s:—–-]|$)/u
+function ledByCode(title) {
+  return hasLeadingCodePrefix(title)
+}
 
 /**
  * A title that names a SUBJECT without naming a RESULT.
@@ -58,7 +64,7 @@ const TOPIC_ONLY = [
 
 /** The audit's verdict for one case. */
 function classify(name) {
-  if (CODE_PREFIX.test(name)) return 'CODE_PREFIX'
+  if (ledByCode(name)) return 'CODE_PREFIX'
   if (TOPIC_ONLY.some(pattern => pattern.test(name))) return 'TOPIC_ONLY'
   return 'OK'
 }

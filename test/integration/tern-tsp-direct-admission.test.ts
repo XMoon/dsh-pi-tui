@@ -76,7 +76,7 @@ test('a GENUINE Host command with a TUI builtin name keeps its Host sink', async
   }
 })
 
-test('B/Direct: installed Session Browser capability never captures Host-owned command names', async (t) => {
+test('installed Session Browser capability never captures Host-owned command names', async (t) => {
   const { testLifecycle } = await import('../support/temp-lifecycle.ts')
   const life = testLifecycle(t)
   const names = ['sessions', 'resume', 'search']
@@ -108,7 +108,7 @@ test('B/Direct: installed Session Browser capability never captures Host-owned c
   }
 })
 
-test('B/Direct: /sessions without a negotiated Browser is refused and restores the draft', async (t) => {
+test('/sessions without a negotiated Browser is refused and restores the draft', async (t) => {
   const { testLifecycle } = await import('../support/temp-lifecycle.ts')
   const life = testLifecycle(t)
   const fixture = await createDirectTspFixture(life, { sessionBrowser: false })
@@ -242,7 +242,7 @@ const CTRL_ENTER = '\u001b[13;5u'
 
 for (const busyEnter of ['queue', 'steer'] as const) {
   for (const gesture of ['enter', 'accelerated'] as const) {
-    test(`B2/Direct: a ${gesture === 'enter' ? 'plain Enter' : 'Ctrl+Enter'} into a RUNNING turn takes the ${gesture === 'enter' ? 'configured' : 'OPPOSITE'} busyEnter=${busyEnter}`, async (t) => {
+    test(`a ${gesture === 'enter' ? 'plain Enter' : 'Ctrl+Enter'} into a RUNNING turn takes the ${gesture === 'enter' ? 'configured' : 'OPPOSITE'} busyEnter=${busyEnter}`, async (t) => {
       const { testLifecycle } = await import('../support/temp-lifecycle.ts')
       const life = testLifecycle(t)
       let releaseStream!: () => void
@@ -454,7 +454,7 @@ test('an advertised Skill that is gone at execution is consumed with an explicit
   }
 })
 
-test('B/Direct: a resolvable Skill invocation keeps its agent-facing route while Browser capability is mounted', async (t) => {
+test('a resolvable Skill invocation keeps its agent-facing route while Browser capability is mounted', async (t) => {
   const { testLifecycle } = await import('../support/temp-lifecycle.ts')
   const life = testLifecycle(t)
   // A real non-colliding Skill invocation exercises the production classifier
