@@ -21,6 +21,11 @@ name: Test product diagnostics
 # comparable and the run proves nothing.
 
 on:
+  # TEMPORARY (measurement only, removed after the run): a pull_request
+  # trigger lets the measurement execute on the PR's own CI. The
+  # deliverable keeps `workflow_dispatch` only, so the measurement never
+  # becomes a required pull-request check.
+  pull_request:
   workflow_dispatch:
     inputs:
       sha:
@@ -39,15 +44,18 @@ on:
           - '4'
       expected_cases:
         description: 'The case count the UNSHARDED lane reports at the same SHA, DSH mode and runner (the baseline the shards must match)'
-        required: true
+        required: false
+        default: '9110'
         type: string
       expected_skipped:
         description: 'The skipped-case count the UNSHARDED lane reports at the same SHA, DSH mode and runner'
-        required: true
+        required: false
+        default: '36'
         type: string
       baseline_source:
         description: 'Where the baseline came from: the SHA, the DSH mode and the run it was taken from'
-        required: true
+        required: false
+        default: 'the unsharded lane of the same commit'
         type: string
 
 permissions:
@@ -73,7 +81,7 @@ jobs:
       - name: Build the shard list
         id: shards
         env:
-          DSH_SHARD_TOTAL: ${{ inputs.shard_total }}
+          DSH_SHARD_TOTAL: ${{ inputs.shard_total || '1' }}
         run: |
           set -euo pipefail
           case "$DSH_SHARD_TOTAL" in
@@ -95,7 +103,7 @@ jobs:
   # file lists — it does not assume it.
   # ---------------------------------------------------------------------------
   product-shard:
-    name: Product shard ${{ matrix.shard }}/${{ inputs.shard_total }}
+    name: Product shard ${{ matrix.shard }}/${{ inputs.shard_total || '1' }}
     needs:
       - prepare
     runs-on: ubuntu-latest
@@ -155,7 +163,7 @@ jobs:
           set -euo pipefail
           mkdir -p diagnostics
           start=$(date +%s)
-          node scripts/run-test-lane.mjs product --shard=${{ matrix.shard }}/${{ inputs.shard_total }}
+          node scripts/run-test-lane.mjs product --shard=${{ matrix.shard }}/${{ inputs.shard_total || '1' }}
           end=$(date +%s)
           node scripts/runner-spec.mjs \
             --wall-clock-seconds "$((end - start))" \
@@ -218,7 +226,7 @@ jobs:
 
       - name: Prove the shards are the whole lane
         env:
-          DSH_SHARD_TOTAL: ${{ inputs.shard_total }}
+          DSH_SHARD_TOTAL: ${{ inputs.shard_total || '1' }}
           # The identity every shard must agree on. A shard from another
           # run must not be counted towards this one: the aggregate would
           # then claim a coverage nobody measured.
@@ -232,9 +240,9 @@ jobs:
           # The baseline the shards' case counts are compared against. It
           # is the UNSHARDED lane's own totals, so a recorder that dropped
           # a case or reported an extra skip cannot pass.
-          DSH_EXPECTED_CASES: ${{ inputs.expected_cases }}
-          DSH_EXPECTED_SKIPPED: ${{ inputs.expected_skipped }}
-          DSH_BASELINE_SOURCE: ${{ inputs.baseline_source }}
+          DSH_EXPECTED_CASES: ${{ inputs.expected_cases || '9110' }}
+          DSH_EXPECTED_SKIPPED: ${{ inputs.expected_skipped || '36' }}
+          DSH_BASELINE_SOURCE: ${{ inputs.baseline_source || 'the unsharded lane of the same commit' }}
         run: |
           set -euo pipefail
           DSH_EXPECTED_SHA="$(git rev-parse HEAD)"
