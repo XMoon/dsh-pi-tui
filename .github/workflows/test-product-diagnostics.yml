@@ -86,6 +86,7 @@ jobs:
       shards: ${{ steps.shards.outputs.shards }}
       shard_total: ${{ steps.shards.outputs.shard_total }}
       test_concurrency: ${{ steps.shards.outputs.test_concurrency }}
+      nodes: ${{ steps.shards.outputs.nodes }}
     steps:
       - name: Checkout the measured commit
         uses: actions/checkout@v7
@@ -126,6 +127,7 @@ jobs:
           echo "shards=$shards" >> "$GITHUB_OUTPUT"
           echo "shard_total=$DSH_SHARD_TOTAL" >> "$GITHUB_OUTPUT"
           echo "test_concurrency=$DSH_TEST_CONCURRENCY" >> "$GITHUB_OUTPUT"
+          echo "nodes=$DSH_NODE_VERSIONS" >> "$GITHUB_OUTPUT"
           echo "the measurement will run these shards: $shards"
           echo "with this test concurrency: ${DSH_TEST_CONCURRENCY:-the Node default}"
 
@@ -147,6 +149,10 @@ jobs:
       fail-fast: false
       matrix:
         shard: ${{ fromJSON(needs.prepare.outputs.shards) }}
+        # The Node versions the shard argument has to qualify on. The
+        # repository's own tarball smoke runs 22.19, 24 and 26, so the
+        # shard argument is qualified on the same three.
+        node: ${{ fromJSON(needs.prepare.outputs.nodes) }}
     env:
       DSH_TEST_JSONL: ${{ github.workspace }}/diagnostics/cases.jsonl
 
@@ -160,7 +166,7 @@ jobs:
       - name: Setup pnpm and Node.js
         uses: pnpm/setup@v2
         with:
-          runtime: node@24
+          runtime: node@${{ matrix.node }}
           cache: true
           install: false
 
