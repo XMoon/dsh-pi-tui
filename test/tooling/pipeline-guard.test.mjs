@@ -25,7 +25,7 @@ import { dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import test from 'node:test'
 
-import { REQUIRED_PHASES, checkMode, summarize } from '../../scripts/pipeline-guard.mjs'
+import { FAULT_TOKENS, REQUIRED_PHASES, checkFault, checkMode, summarize } from '../../scripts/pipeline-guard.mjs'
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..')
 const SCRIPT = join(ROOT, 'scripts', 'pipeline-guard.mjs')
@@ -181,4 +181,61 @@ test('the CLI exits zero for a fully successful run and prints the summary', () 
   for (const name of REQUIRED_PHASES) {
     assert.match(result.stdout, new RegExp(`${name.padEnd(16)} success`, 'u'), `the summary must show ${name}`)
   }
+})
+
+// ---------------------------------------------------------------------------
+// The FAULT token.
+//
+// The injections exist to prove the pipeline REJECTS a qualification instead
+// of arguing that it would. That only works if the token is read, valid and
+// CLOSED: an unknown token must be a configuration error, because a typo
+// that silently disabled the injection would produce a green run that proves
+// nothing.
+// ---------------------------------------------------------------------------
+
+test('every implemented injection is accepted', () => {
+  for (const fault of FAULT_TOKENS) {
+    assert.deepEqual(checkFault(`${fault}\n`), { ok: true, fault }, `'${fault}' must be a valid token`)
+  }
+})
+
+test('an UNKNOWN fault token is a configuration error, not a silent no-op', () => {
+  const verdict = checkFault('shard-fial')
+  assert.equal(verdict.ok, false)
+  assert.match(verdict.reason, /not one this pipeline implements/u)
+  assert.match(verdict.reason, /closed list/u)
+})
+
+test('an EMPTY fault token is refused: a run must state whether it is an injection', () => {
+  for (const raw of ['', '\n', '   ']) {
+    const verdict = checkFault(raw)
+    assert.equal(verdict.ok, false)
+    assert.match(verdict.reason, /must state whether it is an injection/u)
+  }
+})
+
+test('the CLI accepts the committed fault file', () => {
+  const file = join(ROOT, 'scripts', 'prototype-fault.txt')
+  const result = cli(['fault', file])
+  assert.equal(result.status, 0, result.stderr)
+  assert.match(result.stdout, /fault token 'none'/u, 'the committed default must be a normal run')
+})
+
+test('the six required failure classes each have a token', () => {
+  // The Owner's list, one token per class. Keeping it explicit means a class
+  // cannot quietly disappear from the list.
+  const required = ['shard-fail', 'shard-missing', 'digest-mismatch', 'build-missing', 'smoke-fail', 'downstream-fail']
+  for (const fault of required) {
+    assert.ok(FAULT_TOKENS.includes(fault), `the class '${fault}' must have a token`)
+  }
+  assert.equal(required.length, 6)
+})
+
+test('the required phases include the two the qualified-artifact split added', () => {
+  // The split is the whole point of the sixth failure class: a provisional
+  // candidate is consumed downstream, and only a fully gated run produces a
+  // QUALIFIED artifact. A summary that did not require those phases would
+  // report green while neither happened.
+  assert.ok(REQUIRED_PHASES.includes('downstream matrix'))
+  assert.ok(REQUIRED_PHASES.includes('qualified artifact'))
 })

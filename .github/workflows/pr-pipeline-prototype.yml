@@ -71,6 +71,7 @@ jobs:
     timeout-minutes: 5
     outputs:
       mode: ${{ steps.context.outputs.mode }}
+      fault: ${{ steps.fault.outputs.fault }}
       shard_total: ${{ steps.shards.outputs.shard_total }}
       shards: ${{ steps.shards.outputs.shards }}
       started_epoch: ${{ steps.shards.outputs.started_epoch }}
@@ -106,6 +107,19 @@ jobs:
         env:
           DSH_MODE: ${{ steps.context.outputs.mode }}
         run: node scripts/pipeline-guard.mjs mode "$DSH_MODE"
+
+      # The FAULT this run is asked to perform on itself.
+      #
+      # The token is a COMMITTED fact, so a run cannot quietly differ from
+      # the one its commit describes, and the list is closed: a typo is a
+      # configuration error rather than a silent no-op that would produce a
+      # green run proving nothing.
+      - name: Resolve the fault injection
+        id: fault
+        run: |
+          set -euo pipefail
+          node scripts/pipeline-guard.mjs fault scripts/prototype-fault.txt
+          echo "fault=$(tr -d '[:space:]' < scripts/prototype-fault.txt)" >> "$GITHUB_OUTPUT"
 
       - name: Resolve the shard list
         id: shards
@@ -173,6 +187,9 @@ jobs:
         run: node scripts/build-digest.mjs --write build-digest.json
 
       - name: Upload the shared build
+        # INJECTION 'build-missing': the consumers then have nothing to
+        # download and must fail rather than build their own.
+        if: ${{ needs.context.outputs.fault != 'build-missing' }}
         uses: actions/upload-artifact@v7
         with:
           name: prototype-build
@@ -284,8 +301,27 @@ jobs:
           name: prototype-build
           path: ${{ github.workspace }}
 
+      # INJECTION 'digest-mismatch': one byte of a build output changes, so
+      # this shard's build is no longer the one the build job identified.
+      # The verification below must reject it BEFORE the lane runs.
+      - name: "INJECTED FAULT: corrupt the downloaded build"
+        if: ${{ needs.context.outputs.fault == 'digest-mismatch' && matrix.shard == 2 }}
+        run: |
+          set -euo pipefail
+          printf '\n/* injected */\n' >> dist/index.mjs
+          echo "corrupted dist/index.mjs on shard ${{ matrix.shard }}"
+
       - name: Verify this shard holds the build the build job produced
         run: node scripts/build-digest.mjs --verify build-digest.json
+
+      # INJECTION 'shard-fail': this shard's run fails. What is under test is
+      # the pipeline's HANDLING of a failed shard — the matrix must report
+      # failure and the aggregate must refuse the set.
+      - name: "INJECTED FAULT: fail this shard"
+        if: ${{ needs.context.outputs.fault == 'shard-fail' && matrix.shard == 3 }}
+        run: |
+          echo "the shard test run failed (INJECTED FAULT 'shard-fail')" >&2
+          exit 1
 
       - name: Run this shard
         run: |
@@ -299,7 +335,9 @@ jobs:
             --out diagnostics/runner-spec.json
 
       - name: Upload this shard's records
-        if: always()
+        # INJECTION 'shard-missing': these records never arrive, so the
+        # aggregate sees three shards where four are required.
+        if: ${{ always() && !(needs.context.outputs.fault == 'shard-missing' && matrix.shard == 4) }}
         uses: actions/upload-artifact@v7
         with:
           name: prototype-shard-${{ matrix.shard }}-node24
@@ -564,6 +602,18 @@ jobs:
           echo "CANDIDATE=${TARBALLS[0]}" >> "$GITHUB_ENV"
           echo "the candidate is the produced tarball ($ACTUAL)"
 
+      # INJECTION 'smoke-fail': the candidate is truncated AFTER the digest
+      # check above, so the FIRST smoke (which extracts the tarball) meets a
+      # real broken archive. The failure is the smoke's, not a synthetic
+      # exit code.
+      - name: "INJECTED FAULT: truncate the candidate before the smokes"
+        if: ${{ needs.context.outputs.fault == 'smoke-fail' }}
+        run: |
+          set -euo pipefail
+          size=$(stat -c%s "$CANDIDATE")
+          truncate -s $((size / 2)) "$CANDIDATE"
+          echo "truncated $CANDIDATE to $((size / 2)) bytes"
+
       # The eight postpack smokes, one step each, in the SAME order the
       # package lifecycle runs them, each given the explicit path of the one
       # candidate. A failing smoke stops the job, exactly like `&&` in the
@@ -606,13 +656,159 @@ jobs:
             exit 1
           fi
 
-      # The upload is the LAST step, downstream of every gate. It is named so
-      # that no publishing event can mistake it for a release candidate.
-      - name: Upload the QUALIFIED candidate
+      # This upload is a PROVISIONAL candidate, not a qualified one.
+      #
+      # The downstream compatibility legs have not run yet, and the real CI
+      # still has to test the package on the supported Node versions. An
+      # artifact that downstream jobs may CONSUME is not the same thing as
+      # an artifact that has PASSED those jobs: the qualified artifact is
+      # produced by the `qualified` job below, and only after every
+      # downstream leg succeeded.
+      - name: Upload the PROVISIONAL candidate for downstream consumption
+        uses: actions/upload-artifact@v7
+        with:
+          name: prototype-provisional-candidate
+          path: ${{ env.CANDIDATE }}
+          if-no-files-found: error
+          retention-days: 3
+
+  # ---------------------------------------------------------------------------
+  # THE DOWNSTREAM COMPATIBILITY MATRIX.
+  #
+  # This is a REAL consumer gate, not a placeholder: each leg installs the
+  # workspace, downloads the provisional candidate and runs the tarball
+  # smoke against it on one of the supported Node versions. A packaging
+  # change that breaks a supported runtime fails here.
+  #
+  # It exists so the sixth failure class can be proved: a downstream leg
+  # that fails must prevent the QUALIFIED artifact from existing.
+  # ---------------------------------------------------------------------------
+  downstream:
+    name: Downstream compat / Node ${{ matrix.node }}
+    needs:
+      - context
+      - qualify
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        # The same boundaries the release matrix covers: the minimum Node 22,
+        # the minimum Node 24, and the current major.
+        node:
+          - '22.19.0'
+          - '24.0.0'
+          - '26'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Setup pnpm and Node.js
+        uses: pnpm/setup@v2
+        with:
+          runtime: node@${{ matrix.node }}
+          cache: true
+          install: false
+
+      - name: Install the workspace dependencies
+        run: |
+          set -euo pipefail
+          PNPM_CONFIG_VERIFY_DEPS_BEFORE_RUN=false \
+            PNPM_CONFIG_MANAGE_PACKAGE_MANAGER_VERSIONS=false \
+            pnpm install --frozen-lockfile
+
+      - name: Download the provisional candidate
+        uses: actions/download-artifact@v8
+        with:
+          name: prototype-provisional-candidate
+          path: provisional
+
+      # INJECTION 'downstream-fail': ONE leg of the real matrix fails. What
+      # is under test is that the qualified artifact never comes into
+      # existence afterwards.
+      - name: "INJECTED FAULT: fail this downstream leg"
+        if: ${{ needs.context.outputs.fault == 'downstream-fail' && matrix.node == '26' }}
+        run: |
+          echo "the downstream compatibility leg failed (INJECTED FAULT 'downstream-fail')" >&2
+          exit 1
+
+      - name: Run the tarball smoke on this Node version
+        run: |
+          set -euo pipefail
+          mapfile -t TARBALLS < <(find provisional -maxdepth 1 -type f -name 'xmoon76-dsh-pi-tui-*.tgz' -print | sort)
+          if [ "${#TARBALLS[@]}" -ne 1 ]; then
+            echo "Expected exactly one provisional tarball, found ${#TARBALLS[@]}" >&2
+            exit 1
+          fi
+          node scripts/tarball-smoke.mjs "${TARBALLS[0]}"
+
+  # ---------------------------------------------------------------------------
+  # THE QUALIFIED ARTIFACT.
+  #
+  # It is produced HERE, and only here: after the shard aggregate proved the
+  # coverage, the typecheck passed, the candidate was packed from the
+  # verified build, the eight smokes and the leak gate passed against that
+  # exact tarball, AND every downstream compatibility leg succeeded.
+  #
+  # The bytes are re-proved one last time against the pack job's digest, so
+  # the artifact that earns the name is the one that was tested — not a copy
+  # that happened to land in the same directory.
+  # ---------------------------------------------------------------------------
+  qualified:
+    name: Publish the qualified artifact
+    needs:
+      - context
+      - build
+      - typecheck
+      - aggregate
+      - candidate
+      - qualify
+      - downstream
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          package-manager-cache: false
+
+      - name: Download the provisional candidate
+        uses: actions/download-artifact@v8
+        with:
+          name: prototype-provisional-candidate
+          path: provisional
+
+      - name: Re-prove the artifact is the one every gate tested
+        env:
+          EXPECTED_SHA256: ${{ needs.candidate.outputs.sha256 }}
+        run: |
+          set -euo pipefail
+          mapfile -t TARBALLS < <(find provisional -maxdepth 1 -type f -name 'xmoon76-dsh-pi-tui-*.tgz' -print | sort)
+          if [ "${#TARBALLS[@]}" -ne 1 ]; then
+            echo "Expected exactly one tarball to qualify, found ${#TARBALLS[@]}" >&2
+            exit 1
+          fi
+          ACTUAL="$(sha256sum "${TARBALLS[0]}" | cut -d' ' -f1)"
+          if [ "$ACTUAL" != "$EXPECTED_SHA256" ]; then
+            echo "the artifact is $ACTUAL, not the qualified $EXPECTED_SHA256" >&2
+            exit 1
+          fi
+          cp "${TARBALLS[0]}" qualified.tgz
+          echo "qualified $ACTUAL"
+
+      - name: Upload the QUALIFIED artifact
         uses: actions/upload-artifact@v7
         with:
           name: prototype-qualified-candidate
-          path: ${{ env.CANDIDATE }}
+          path: qualified.tgz
           if-no-files-found: error
           retention-days: 3
 
@@ -634,6 +830,8 @@ jobs:
       - aggregate
       - candidate
       - qualify
+      - downstream
+      - qualified
     if: ${{ always() }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -677,6 +875,8 @@ jobs:
           AGGREGATE: ${{ needs.aggregate.result }}
           CANDIDATE: ${{ needs.candidate.result }}
           QUALIFY: ${{ needs.qualify.result }}
+          DOWNSTREAM: ${{ needs.downstream.result }}
+          QUALIFIED: ${{ needs.qualified.result }}
         run: |
           set -euo pipefail
           node scripts/pipeline-guard.mjs summary \
@@ -688,6 +888,8 @@ jobs:
             --phase "aggregate=$AGGREGATE" \
             --phase "candidate pack=$CANDIDATE" \
             --phase "qualification=$QUALIFY" \
+            --phase "downstream matrix=$DOWNSTREAM" \
+            --phase "qualified artifact=$QUALIFIED" \
             | tee pipeline-summary.txt
 
       - name: Upload the pipeline summary

@@ -27,6 +27,7 @@
  * @module @xmoon76/dsh-pi-tui/scripts/pipeline-guard
  */
 
+import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -38,7 +39,52 @@ import { fileURLToPath } from 'node:url'
  * is LISTED and did not run is a failure, not a pass. That distinction is
  * the whole point: "it did not run" and "it passed" are different facts.
  */
-export const REQUIRED_PHASES = ['context', 'build', 'typecheck', 'product shards', 'aggregate', 'candidate pack', 'qualification']
+export const REQUIRED_PHASES = ['context', 'build', 'typecheck', 'product shards', 'aggregate', 'candidate pack', 'qualification', 'downstream matrix', 'qualified artifact']
+
+/**
+ * The fault injections this pipeline can perform on itself.
+ *
+ * `none` is a normal run. Every other token makes the pipeline fail at a
+ * specific place, so the fail-closed behaviour can be demonstrated instead
+ * of argued: the point of each injection is that the qualification is
+ * REJECTED and no qualified artifact is produced.
+ *
+ * The list is CLOSED. An unknown token is a configuration error, not a
+ * silent no-op: a typo that quietly disabled the injection would produce a
+ * green run that proves nothing.
+ */
+export const FAULT_TOKENS = [
+  'none',
+  // a shard's test run fails
+  'shard-fail',
+  // a shard's records never arrive
+  'shard-missing',
+  // a shard receives a build that is not the one the build job produced
+  'digest-mismatch',
+  // the shared build artifact is never uploaded
+  'build-missing',
+  // one of the eight postpack smokes fails on the candidate
+  'smoke-fail',
+  // a downstream compatibility leg fails after the candidate was built
+  'downstream-fail',
+]
+
+/**
+ * Validate the committed fault token.
+ *
+ * @param {string} raw - the file's contents.
+ * @returns {{ok: boolean, fault?: string, reason?: string}} the verdict.
+ */
+export function checkFault(raw) {
+  const fault = (raw ?? '').trim()
+  if (fault === '') {
+    return { ok: false, reason: 'the fault token is empty: a run must state whether it is an injection' }
+  }
+  if (!FAULT_TOKENS.includes(fault)) {
+    return { ok: false, reason: `the fault token '${fault}' is not one this pipeline implements (closed list: ${FAULT_TOKENS.join(', ')})` }
+  }
+  return { ok: true, fault }
+}
 
 /**
  * The dependency modes this prototype can qualify.
@@ -129,6 +175,15 @@ export function summarize({ started, phases }) {
 function main() {
   const args = process.argv.slice(2)
   const command = args[0]
+  if (command === 'fault') {
+    const verdict = checkFault(readFileSync(args[1], 'utf8'))
+    if (!verdict.ok) {
+      console.error(verdict.reason)
+      process.exit(1)
+    }
+    console.log(`fault token '${verdict.fault}'`)
+    return
+  }
   if (command === 'mode') {
     const verdict = checkMode(args[1])
     if (!verdict.ok) {
@@ -162,6 +217,7 @@ function main() {
     return
   }
   console.error('usage: node scripts/pipeline-guard.mjs mode <mode>')
+  console.error('       node scripts/pipeline-guard.mjs fault <file>')
   console.error('       node scripts/pipeline-guard.mjs summary --started <epoch> --phase <name>=<result> ...')
   process.exit(2)
 }
