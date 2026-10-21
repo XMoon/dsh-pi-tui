@@ -862,7 +862,7 @@ test('/copy: reaches the newest assistant message OUTSIDE the initial window by 
     'the copied text is the last assistant message reached by paging')
 })
 
-test('a REAL Host `/export` claim wins over the same-named TUI built-in', async (t) => {
+test('L6 §D3 (review F2-external): a REAL Host `/export` claim wins over the same-named TUI built-in', async (t) => {
   // The frozen rc.2 `dsh-session-log-export` Host plugin registers `/export`
   // (a Web-only ZIP download) — the REAL production collision. The TUI also
   // owns a Client `/export` built-in. The §D3 precedence contract: the
@@ -1015,7 +1015,7 @@ test('stale catalog (M3-6 PR2): refresh A → Connection replacement → the old
       id: 'pr2-stale-twin',
       name: 'stale-cmd',
       sessionless: true,
-      handler: () => { staleClientRuns += 1; return { kind: 'success', text: 'name fell to the client twin' } },
+      handler: () => { staleClientRuns += 1; return { kind: 'success', text: 'retired name fell to the client twin' } },
     }],
   })
 

@@ -184,7 +184,7 @@ function startQuick(options: {
     },
     ...(options.taskRead === false ? {} : {
       taskRead: {
-        currentKey: () => 'sess-main',
+        currentKey: () => 'g1:sess-main',
         currentSessionId: () => 'sess-main',
         readTask: async () => {
           if (options.holdCatalog === true) {

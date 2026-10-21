@@ -2,7 +2,7 @@
  * PR-A L5/L6 — the REAL Direct permission-cycle path (the Shift+Tab
  * `AbortSignal` contract).
  *
- * SOURCE → DECISION → SINK: a real `ESC [ Z`terminal input enters
+ * SOURCE → DECISION → SINK: a real `ESC [ Z` (Shift+Tab) terminal input enters
  * the mounted PiTui surface → `StatusRuntime.cyclePermission` → the
  * composition's `permissionCycle.apply` → `ConfigPort.permissions.
  * applyPermissionPreset` → the OFFICIAL rc.2 `/permission` command executor

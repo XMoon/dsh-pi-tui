@@ -79,7 +79,7 @@ function makeHarness(): {
   /** Reject the Task read of the i-th refreshCatalog call (0-based). */
   rejectListing(index: number, error: Error): void
 } {
-  let key: string | undefined = 'sess-main'
+  let key: string | undefined = 'g1:sess-main'
   const statuses = new Map<string, string>()
   let jobs: TaskBrowserJobInput[] = [job()]
   let listingCount = 0
@@ -213,7 +213,7 @@ test('Case D2: a session switch mid-listing never commits the old catalog', asyn
   h.setStatus('child-a', 'running')
   const listing = h.runtime.refreshCatalog()
   // The user switches sessions while the listing is in flight.
-  h.setKey('sess-other')
+  h.setKey('g2:sess-other')
   h.settleListing(0, [child({ activity: 'running' })])
   await listing
   assert.equal(h.commits().length, 0, 'the fenced listing must not commit')
@@ -638,7 +638,7 @@ test('Case E: an old session listing rejecting never marks the NEW session brows
   assert.ok(h.refreshStates().some(state => state.state === 'loading'),
     'the request itself surfaces loading under session A')
   // The session switches to B before A's listing settles.
-  h.setKey('sess-b')
+  h.setKey('g2:sess-b')
   h.setStatus('child-a', 'running')
   h.runtime.refreshRuntime() // B's browser seeds its first frame
   // A's listing rejects AFTER B owns the surface.
@@ -691,7 +691,7 @@ test('Case F: a cross-session overlap cannot strand the NEW session in loading (
   // Session A starts a catalog refresh; it stays pending.
   const aListing = h.runtime.refreshCatalog()
   // Session B takes over and its OWN refresh succeeds fully.
-  h.setKey('sess-b')
+  h.setKey('g2:sess-b')
   h.setStatus('child-b', 'running')
   const bListing = h.runtime.refreshCatalog()
   h.settleListing(1, [child({ id: 'child-b' as SessionId, activity: 'running', depth: 1 })])
@@ -819,7 +819,7 @@ test('scope: reset() (session switch) clears the scope with the catalog', async 
   await listing
   h.runtime.setScope({ kind: 'subagents', childIds: ['child-1'] })
   h.runtime.reset()
-  h.setKey('sess-b')
+  h.setKey('g2:sess-b')
   const secondListing = h.runtime.refreshCatalog()
   h.settleListing(1, [
     child({ id: 'child-1' as SessionId, label: 'a', mode: 'one-shot', depth: 1 }),

@@ -186,7 +186,7 @@ async function createHostFixture(
     await ctx.plugin(UserQuestionService)
     await ctx.plugin(Loader)
     await ctx.plugin(AgentPresetRegistry, { default: PRESET })
-    await ctx.get('agentPresets')!.register({ id: PRESET, name: 'preset', plugins: [] })
+    await ctx.get('agentPresets')!.register({ id: PRESET, name: 'M3 L5 preset', plugins: [] })
     await ctx.inject(SqliteSessionQueryEngine.inject, queryCtx => {
       new SqliteSessionQueryEngine(queryCtx, { path: ':memory:', openAt: 'first-search' })
     })
@@ -597,7 +597,7 @@ test('D-K. the composed runtime behavior axis over one shared Host + Client comp
           }
         },
       })
-      handle!.append('live output\n\n')
+      handle!.append('l5 retained output\n')
       await waitFor('the known job to appear in the Client roster', () => {
         const rows = client.jobs.state.getSnapshot().rows[ownerId] ?? []
         return rows.some(row => String(row.id) === String(jobId))
@@ -608,10 +608,10 @@ test('D-K. the composed runtime behavior axis over one shared Host + Client comp
       const snapshots: JobObservedSnapshot[] = []
       closeObserver = port.open(String(ownerId), String(jobId), snapshot => snapshots.push(snapshot))
       await waitFor('the retained output to reach the Remote observer', () =>
-        snapshots.some(snapshot => snapshot.text.includes('retained output')))
-      handle!.append('live output\n')
+        snapshots.some(snapshot => snapshot.text.includes('l5 retained output')))
+      handle!.append('l5 live output\n')
       await waitFor('the live output to reach the Remote observer', () =>
-        snapshots.at(-1)?.text.includes('live output') === true)
+        snapshots.at(-1)?.text.includes('l5 live output') === true)
 
       // Real adapter `stop` -> generated `job.kill` -> Host JobRegistry
       // admission, then BOTH official streams converge on their own: the roster
@@ -799,7 +799,7 @@ test('a Client-side readiness failure unwinds the partial Client cleanly', async
     let openedStreams = 0
     let activeStreams = 0
     const inducedReason = new Error('induced client readiness failure')
-    const closeSentinel = new Error('sentinel: jobs fiber disposal failure')
+    const closeSentinel = new Error('L2 sentinel: jobs fiber disposal failure')
     const controller = new AbortController()
     const countingCarrier = {
       ownsHost: true as const,
@@ -966,7 +966,7 @@ test('an aborted lifecycle signal outranks the already-ready readiness fast path
             && sessions.list.getSnapshot().phase === 'ready'
           const deadline = Date.now() + 15_000
           while (!ready()) {
-            if (Date.now() > deadline) throw new Error('readiness never landed')
+            if (Date.now() > deadline) throw new Error('L4: readiness never landed')
             await new Promise(resolve => setTimeout(resolve, 5))
           }
           controller.abort(induced)

@@ -217,10 +217,10 @@ test('recursively reads the full descendant tree in stable pre-order with exact 
     parentAvailable: true,
     descendants: [
       // child-a's whole subtree precedes the later sibling child-b.
-      child('child-a', 'parent', 1, { label: 'child-a', activity: 'running', hasChildren: true }),
-      child('grandchild-a1', 'child-a', 2, { label: 'grandchild-a1', mode: 'one-shot' }),
-      child('grandchild-a2', 'child-a', 2, { label: 'grandchild-a2' }),
-      child('child-b', 'parent', 1, { label: 'child-b', mode: 'one-shot' }),
+      child('child-a', 'parent', 1, { label: 'child child-a', activity: 'running', hasChildren: true }),
+      child('grandchild-a1', 'child-a', 2, { label: 'child grandchild-a1', mode: 'one-shot' }),
+      child('grandchild-a2', 'child-a', 2, { label: 'child grandchild-a2' }),
+      child('child-b', 'parent', 1, { label: 'child child-b', mode: 'one-shot' }),
     ],
     jobs: [job('j1', 'completed'), job('j2')],
   })
@@ -269,9 +269,9 @@ test('unknown mode becomes an unsupported diagnostic and its children are still 
   assert.deepEqual(snapshot?.descendants, [
     { kind: 'diagnostic', id: 'child-unknown', reason: 'unsupported', parentId: 'parent', depth: 1 },
     // The unknown child's readable catalog is still traversed.
-    child('grandchild', 'child-unknown', 2, { label: 'grandchild' }),
+    child('grandchild', 'child-unknown', 2, { label: 'child grandchild' }),
     // A different sibling survives.
-    child('child-sibling', 'parent', 1, { label: 'child-sibling' }),
+    child('child-sibling', 'parent', 1, { label: 'child child-sibling' }),
   ])
 })
 
@@ -305,7 +305,7 @@ test('ADAPTER-SHAPE: a branch read failure with a SURVIVING structured reason ma
     { kind: 'diagnostic', id: 'child-corrupt', reason: 'corrupt', parentId: 'parent', depth: 1 },
     { kind: 'diagnostic', id: 'child-conflict', reason: 'corrupt', parentId: 'parent', depth: 1 },
     { kind: 'diagnostic', id: 'child-plain', reason: 'unavailable', parentId: 'parent', depth: 1 },
-    child('child-ok', 'parent', 1, { label: 'child-ok' }),
+    child('child-ok', 'parent', 1, { label: 'child child-ok' }),
   ])
 })
 
@@ -351,7 +351,7 @@ test('regression: ready without the catalog on a BRANCH becomes an unavailable d
   const client = sessionsFixture({
     byId: { parent: { running: false }, child: { running: false } },
     projections: {
-      parent: { entries: [catalogEntry('child', 'continuable', 'child')], state: 'ready' },
+      parent: { entries: [catalogEntry('child', 'continuable', 'child child')], state: 'ready' },
       child: { entries: undefined, state: 'ready' },
     },
   })
@@ -391,11 +391,11 @@ test('a BRANCH whose projections are unavailable degrades BRANCH-LOCALLY (siblin
   const snapshot = await reader.readDescendants('parent')
   assert.deepEqual(snapshot?.descendants, [
     { kind: 'diagnostic', id: 'child-x', reason: 'unavailable', parentId: 'parent', depth: 1 },
-    child('child-ok', 'parent', 1, { label: 'child-ok' }),
+    child('child-ok', 'parent', 1, { label: 'child child-ok' }),
   ], 'the unreadable branch degrades locally and its sibling stays visible')
 })
 
-test('a `ready` baseline without the catalog stays branch-scoped for BOTH provenances (carrier cannot distinguish them)', async () => {
+test('F4d: a `ready` baseline without the catalog stays branch-scoped for BOTH provenances (carrier cannot distinguish them)', async () => {
   const generations = createSnapshotGenerationHarness()
   // The official handler returns NULL for a missing Session and a non-null
   // `{asOfSeq, values}` for a readable Session whose baseline omits the catalog;
@@ -416,7 +416,7 @@ test('a `ready` baseline without the catalog stays branch-scoped for BOTH proven
   const snapshot = await reader.readDescendants('parent')
   assert.deepEqual(snapshot?.descendants, [
     { kind: 'diagnostic', id: 'ghost', reason: 'unavailable', parentId: 'parent', depth: 1 },
-    child('child-ok', 'parent', 1, { label: 'child-ok' }),
+    child('child-ok', 'parent', 1, { label: 'child child-ok' }),
   ], 'a missing/absent child baseline loses only its own branch and the sibling survives')
 })
 
@@ -435,7 +435,7 @@ test('rc.2 CARRIER shape: a REAL wire branch failure (RemoteError code=gateway/i
   const client = sessionsFixture({
     byId: { parent: { running: false } },
     projections: {
-      parent: { entries: [catalogEntry('child', 'continuable', 'child')], state: 'ready' },
+      parent: { entries: [catalogEntry('child', 'continuable', 'child child')], state: 'ready' },
       child: { entries: [], state: 'error', error: wireFailure },
     },
   })

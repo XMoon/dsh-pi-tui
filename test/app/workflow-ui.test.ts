@@ -117,7 +117,7 @@ test('5-member phase stays inline; the 6th member flips it to summary', async ()
     member(4, 'm4', 'P', 'running'),
   ] })])
   let view = await viewport(vt)
-  assert.ok(view.includes('running'), `members must all be inline: \n${view}`)
+  assert.ok(view.includes('m4 — running'), `5 members must all be inline:\n${view}`)
   assert.ok(!view.includes('View 5 agents'), `5-member phase must not summarize:\n${view}`)
   app.setTranscript([workflow({ members: [
     ...Array.from({ length: 5 }, (_, i) => member(i, `m${i}`, 'P', 'completed')),
@@ -126,7 +126,7 @@ test('5-member phase stays inline; the 6th member flips it to summary', async ()
   view = await viewport(vt)
   assert.ok(view.includes('▼ P 6 agents'), `phase header missing:\n${view}`)
   assert.ok(view.includes('View 6 agents'), `6-member phase must show the scoped entry:\n${view}`)
-  assert.ok(!view.includes('completed'), `summary mode must not inline ordinary members:\n${view}`)
+  assert.ok(!view.includes('m4 — completed'), `summary mode must not inline ordinary members:\n${view}`)
 })
 
 test('100-agent phase stays bounded: aggregate + capped abnormal preview only', async () => {
@@ -526,7 +526,7 @@ test('Fold -> TUI click -> TaskRuntime live driver gate -> enterView (open and r
       stop: async () => ({ kind: 'requested' }),
     },
     taskRead: {
-      currentKey: () => 'sess-main',
+      currentKey: () => 'g1:sess-main',
       currentSessionId: () => 'sess-main',
       readTask: async () => ({
         parentSessionId: 'sess-main', parentAvailable: true, descendants: [...descendants], jobs: [],
@@ -689,7 +689,7 @@ test('a closed completed run still shows the aggregate summary (review P1, plan 
   const view = await viewport(vt)
   assert.equal(runChevron(view), '▶', `completed run must close:\n${view}`)
   assert.ok(view.includes('100 agents · 100 completed'), `closed run must keep the aggregate summary:\n${view}`)
-  assert.ok(!view.includes('completed'), `closed run must not leak members:\n${view}`)
+  assert.ok(!view.includes('m0 — completed'), `closed run must not leak members:\n${view}`)
 })
 
 test('workflowMemberViewerTarget rejects a mismatched row and a continuable row (review P2)', () => {
@@ -1067,7 +1067,7 @@ test('a workflow member press cannot transfer to the aggregate View row after a 
   ] })
   app.setTranscript([message])
   let view = await viewport(vt)
-  const memberRow = rowOf(view, 'running')
+  const memberRow = rowOf(view, 'a1 — running')
   // Press the second member (no release): the press identity is
   // workflow:member:run-1:1:child-1 — the cell the aggregate View row
   // takes over after the 5→6 switch.
@@ -1214,7 +1214,7 @@ function cellOf(vt: VirtualTerminal, needle: string, innerOffset = 0): { row: nu
 test('workflow search: the status field is disambiguated from the label on one row', async () => {
   const { vt, app } = startApp()
   // One failed member keeps the (inline) phase open. Query 'a' matches BOTH
-  // fields: 'alpha'and 'failed' (once).
+  // fields: 'alpha' (twice) and 'failed' (once).
   const card = workflow({ status: 'running', members: [member(0, 'alpha', 'Research', 'failed')] })
   app.setTranscript([card])
   await viewport(vt)

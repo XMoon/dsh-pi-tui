@@ -190,7 +190,7 @@ test('a FAILING Host command rolls the draft back into the composer', async (t) 
   }
 })
 
-test('a refused `!` line writes NO input-history row (accepted prompt does)', async (t) => {
+test('B2/Direct: a refused `!` line writes NO input-history row (accepted prompt does)', async (t) => {
   const { testLifecycle } = await import('../support/temp-lifecycle.ts')
   const life = testLifecycle(t)
   const fixture = await createDirectTspFixture(life, { deltas: ['ok'] })
@@ -242,7 +242,7 @@ const CTRL_ENTER = '\u001b[13;5u'
 
 for (const busyEnter of ['queue', 'steer'] as const) {
   for (const gesture of ['enter', 'accelerated'] as const) {
-    test(`a ${gesture === 'enter' ? 'plain Enter' : 'Ctrl+Enter'} into a RUNNING turn takes the ${gesture === 'enter' ? 'configured' : 'OPPOSITE'} busyEnter=${busyEnter}`, async (t) => {
+    test(`B2/Direct: a ${gesture === 'enter' ? 'plain Enter' : 'Ctrl+Enter'} into a RUNNING turn takes the ${gesture === 'enter' ? 'configured' : 'OPPOSITE'} busyEnter=${busyEnter}`, async (t) => {
       const { testLifecycle } = await import('../support/temp-lifecycle.ts')
       const life = testLifecycle(t)
       let releaseStream!: () => void

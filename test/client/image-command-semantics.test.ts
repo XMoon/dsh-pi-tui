@@ -143,7 +143,7 @@ test('a HOST claim outranks a same-named client contribution in the attachment g
     'a host-claimed line is never a local command (the host route owns it)')
   const core = commandIsLocalForAttachments({ name: 'help', rawInput: '' }, undefined, undefined, true)
   assert.equal(core, false,
-    'line authority (review round 2): a host-RESOLVED name is never TUI-local — even a LOCAL_COMMANDS member defers to the host route when the catalog claims its line')
+    '§D3 line authority (review round 2): a host-RESOLVED name is never TUI-local — even a LOCAL_COMMANDS member defers to the host route when the catalog claims its line')
   assert.equal(commandRejectsImages({ name: 'help' }, `/help ${image.placeholder}`, store, core), false,
     'the host descriptor owns the attachment policy of its own claimed line')
 })

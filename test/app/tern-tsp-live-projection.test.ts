@@ -7,7 +7,7 @@
  *       -> the REAL `routeSessionEvent` / `applyAssistantInput` routing bodies
  *       -> ONE real `TranscriptFolder` + `TranscriptWindowController`
  *       -> the REAL `SurfaceRuntime.repaintTarget()` projection glue
- *       -> the real mounted `TuiApp`committed the SAME array
+ *       -> the real mounted `TuiApp` (VirtualTerminal) committed the SAME array
  *       -> the optional read-only observer (`onTranscriptProjected`)
  *       -> PR1's pure mapper -> the real `@stencil-hq/tern` SDK surface
  *
@@ -637,7 +637,7 @@ test('the viewed child and the main session each publish their own scope', () =>
 
     const child = harness.viewChild()
     harness.surface.routeSessionEvent(CHILD_SESSION, ev('turn/start', { turn: 1 }, 0))
-    harness.surface.routeSessionEvent(CHILD_SESSION, userMessage(1, 'child-1', 'prompt'))
+    harness.surface.routeSessionEvent(CHILD_SESSION, userMessage(1, 'child-1', 'child prompt'))
     harness.surface.routeSessionEvent(CHILD_SESSION, ev('turn/end', { turn: 1, reason: { kind: 'completed' } }, 2))
 
     const childFrames = seen.slice(1)
@@ -649,7 +649,7 @@ test('the viewed child and the main session each publish their own scope', () =>
       assert.notEqual(frame.sourceIdentity, mainIdentity, 'the child scope is not the main scope')
       assert.notEqual(frame.sourceIdentity, child, 'the child fold itself is never handed out')
     }
-    assert.ok(childFrames.some(frame => hasUserText(frame.messages, 'prompt')))
+    assert.ok(childFrames.some(frame => hasUserText(frame.messages, 'child prompt')))
 
     // A main-session event still folds into the MAIN transcript while the child
     // is displayed; the ACTIVE projection stays the child's (the displayed
@@ -693,7 +693,7 @@ test('a subject switch performed synchronously inside setTranscript drops the st
 
     // The next commit projects the CHILD (the viewer is mounted now).
     harness.surface.routeSessionEvent(CHILD_SESSION, ev('turn/start', { turn: 1 }, 0))
-    harness.surface.routeSessionEvent(CHILD_SESSION, userMessage(1, 'child-1', 'prompt'))
+    harness.surface.routeSessionEvent(CHILD_SESSION, userMessage(1, 'child-1', 'child prompt'))
     harness.surface.routeSessionEvent(CHILD_SESSION, ev('turn/end', { turn: 1, reason: { kind: 'completed' } }, 2))
     assert.ok(seen.length > 0, 'the child projection is published')
     assert.equal(seen[seen.length - 1]!.subjectKind, 'viewed-child')
@@ -1358,11 +1358,11 @@ test('surface.commitStatus publishes ONE atomic store transaction on PiTui', asy
         {},
         {
           sessionId: CHILD_ID,
-          title: 'title',
+          title: 'child title',
           workspaceRoot: '/w',
           todos: [
-            { content: 'todo two', status: 'pending' },
-            { content: 'todo two', status: 'pending' },
+            { content: 'child todo one', status: 'pending' },
+            { content: 'child todo two', status: 'pending' },
           ],
         } as never,
       )

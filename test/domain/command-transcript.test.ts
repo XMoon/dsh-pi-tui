@@ -581,7 +581,7 @@ test('an idle manual compaction keeps the real chronology outside the Thought', 
   folder.apply([
     event('turn/start', { turn: 7 }, 0),
     userMessage('go', 1, 7),
-    assistantMessage('answer', 2, 7),
+    assistantMessage('final answer', 2, 7),
     event('turn/end', { turn: 7, reason: { kind: 'completed' } }, 3),
     event('command/run', { commandId: CommandId('cmd-1'), name: 'compact', source: { kind: 'user' } }, 4),
     rawEvent('compaction/start', { compactionId: 'cpt-1', sourceCommandId: CommandId('cmd-1'), turn: null }, 5),
@@ -683,8 +683,8 @@ test('a subagent/descriptor materializes no TranscriptMessage regardless of plac
   continuable.apply([
     descriptor(0, 'continuable'),
     event('turn/start', { turn: 0 }, 1),
-    userMessage('answer', 2),
-    assistantMessage('answer', 3),
+    userMessage('child work', 2),
+    assistantMessage('child answer', 3),
     event('turn/end', { turn: 0, reason: { kind: 'completed' } }, 4),
   ])
   assert.deepEqual(kinds(continuable.messages()), ['user', 'assistant'])
@@ -693,8 +693,8 @@ test('a subagent/descriptor materializes no TranscriptMessage regardless of plac
   oneShot.apply([
     event('turn/start', { turn: 0 }, 0),
     descriptor(1, 'one-shot'),
-    userMessage('answer', 2),
-    assistantMessage('answer', 3),
+    userMessage('child work', 2),
+    assistantMessage('child answer', 3),
     event('turn/end', { turn: 0, reason: { kind: 'completed' } }, 4),
   ])
   assert.deepEqual(kinds(oneShot.messages()), ['user', 'assistant'])
@@ -712,7 +712,7 @@ test('the parent genuine subagent tool/call remains an ordinary Tool', () => {
     event('turn/start', { turn: 0 }, 0),
     userMessage('delegate', 1),
     toolCall('subagent', 'call-sub', 2, 0, 0, JSON.stringify({ prompt: 'do work' })),
-    toolResult('call-sub', 'finished', 3),
+    toolResult('call-sub', 'child finished', 3),
     assistantMessage('done', 4),
     event('turn/end', { turn: 0, reason: { kind: 'completed' } }, 5),
   ])

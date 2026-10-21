@@ -51,10 +51,12 @@ async function spin(ms: number): Promise<void> {
 }
 
 /** A REAL FooterDynamicItemRuntime for the no-exec save-boundary tests.
- * The stub applyFooterSettings mirrors the real applyFooterSettings'* sync (trusted definitions + active layout ids), so the tests prove the * SAVE BOUNDARY end to end: the runtime can only ever see definitions a
+ * The stub applyFooterSettings mirrors the real applyFooterSettings' PR D
+ * sync (trusted definitions + active layout ids), so the tests prove the
+ * SAVE BOUNDARY end to end: the runtime can only ever see definitions a
  * successful save committed — never a draft, never a failed save. */
 function wireRuntimeApply(app: TuiApp): FooterDynamicItemRuntime {
-  return nItemRuntime({
+  return new FooterDynamicItemRuntime({
     snapshot: () => emptyStatusSnapshot(),
     width: () => 100,
     height: () => 30,

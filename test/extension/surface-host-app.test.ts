@@ -443,7 +443,7 @@ test('a plugin invalidate after attach reaches the screen WITHOUT a manual refre
   const mutable = ledger.register('chrome.header.badge', { id: 'mut' }, { text: 'm1' } as HeaderBadge, 'plugin-a')
   await settle()
   await vt.waitForRender()
-  assert.ok(host.headerBadgeText().includes('[m1]'), `missing after register: ${host.headerBadgeText()}`)
+  assert.ok(host.headerBadgeText().includes('[m1]'), `m1 missing after register: ${host.headerBadgeText()}`)
   const record = ledger.snapshot<HeaderBadge>('chrome.header.badge').records.find(r => r.id === 'mut')
   ;(record!.value as { text: string }).text = 'm2'
   mutable.invalidate()

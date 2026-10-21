@@ -37,8 +37,8 @@ test('the D1 closure gate is the ONE Source Mode entry for the four parity proof
   // run, and the closure is the only place that invokes it.
   assert.match(
     workflow,
-    /- name: D1 closure smoke\n\s+if: env\.DSH_MODE == 'source'\n\s+run: pnpm smoke:remote-d1-closure/u,
-    'the D1 closure smoke must remain a Source Mode step',
+    /- name: D1 closure gate\n\s+if: env\.DSH_MODE == 'source'\n\s+run: pnpm smoke:remote-d1-closure/u,
+    'the D1 closure gate must remain a Source Mode step',
   )
   for (const command of [
     'smoke:remote-surface-authority-parity',
@@ -107,8 +107,8 @@ test('Source Mode parity smokes build the vendored pi-tui dist first', () => {
 test('task, presentation, and closure smokes are Source Mode gates', () => {
   const workflow = readFileSync(CI_WORKFLOW, 'utf8')
   for (const [name, command] of [
-    ['closure smoke', 'smoke:remote-d1-closure'],
-    ['closure smoke', 'smoke:remote-d2-closure'],
+    ['D1 closure gate', 'smoke:remote-d1-closure'],
+    ['D2 closure smoke', 'smoke:remote-d2-closure'],
   ]) {
     assert.match(
       workflow,

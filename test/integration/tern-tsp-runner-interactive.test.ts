@@ -95,7 +95,7 @@ test('a NON-TUI slash line is never refused by the builtin gate (the F1 regressi
   }
 })
 
-test('`/exit` is allowed through (the exit pair is the only supported TUI builtin)', async (t) => {
+test('B2: `/exit` is allowed through (the exit pair is the only supported TUI builtin)', async (t) => {
   const { testLifecycle } = await import('../support/temp-lifecycle.ts')
   const life = testLifecycle(t)
   const home = life.tempDir('pr3b-tsp-interactive-')
@@ -113,7 +113,7 @@ test('`/exit` is allowed through (the exit pair is the only supported TUI builti
   }
 })
 
-test('`/quit` exits through the registered alias (the true catalog claim)', async (t) => {
+test('B2: `/quit` exits through the registered alias (the true catalog claim)', async (t) => {
   const { testLifecycle } = await import('../support/temp-lifecycle.ts')
   const life = testLifecycle(t)
   const home = life.tempDir('pr3b-tsp-interactive-')
@@ -220,7 +220,7 @@ test('a plain Enter takes the real application submit path', async (t) => {
 
 // ── The startup window: a held Enter must NOT bypass the refusals ───────────
 
-test('a `!` HELD with the SDK handshake is refused too — no shell/session side effects at the bind', async (t) => {
+test('B2: a `!` HELD with the SDK handshake is refused too — no shell/session side effects at the bind', async (t) => {
   const { testLifecycle } = await import('../support/temp-lifecycle.ts')
   const life = testLifecycle(t)
   const home = life.tempDir('pr3b-tsp-interactive-')

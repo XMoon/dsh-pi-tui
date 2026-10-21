@@ -389,7 +389,7 @@ test('a Host approval preempts Models input, abandons the workspace and never re
   await key(h, '\r')
   await key(h, '\r')
   assert.match(h.view(), /Enter the API key/u)
-  const decision = h.app.showApprovalPrompt({ toolName: 'bash', reason: 'blocking-owner probe' })
+  const decision = h.app.showApprovalPrompt({ toolName: 'bash', reason: 'MA13 blocking-owner probe' })
   await h.vt.waitForRender()
   assert.match(h.view(), /Allow once/u)
   assert.doesNotMatch(h.view(), /Settings · Models/u)

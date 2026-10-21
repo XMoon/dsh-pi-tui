@@ -1871,7 +1871,7 @@ test('child, foreign-session and opening-journal events never feed the main turn
     h.routeStatus('main', 'idle')
     await drain()
     assert.deepEqual(h.programWrites, [IDLE, WORKING, IDLE],
-      '/: foreign / journal events must not create a done outcome')
+      'child / foreign / journal events must not create a done outcome')
   } finally {
     h.dispose()
   }

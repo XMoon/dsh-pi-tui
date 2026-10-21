@@ -63,7 +63,7 @@ test('current scope reads only the cwd file; v1 rows inherit the cwd', async (t)
   writeV1(home, '/work/b', ['gamma'])
   const results = await search(home, 'current', '/work/a', '')
   assert.equal(results.length, 2)
-  assert.ok(results.every(row => row.cwd === '/work/a'), 'rows inherit the effective cwd')
+  assert.ok(results.every(row => row.cwd === '/work/a'), 'v1 rows inherit the effective cwd')
   // Legacy rows have no ts: within one file, newest row first (sourceIndex DESC).
   assert.equal(results[0]?.content, 'beta')
   assert.equal(results[1]?.content, 'alpha')

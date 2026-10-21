@@ -151,10 +151,10 @@ function harness(options: {
 const QUESTIONS = [{ id: 'q1', question: 'Pick one', options: [{ label: 'a' }] }]
 
 test('remainingTimeText renders a mm:ss countdown', () => {
-  assert.equal(remainingTimeText(0), '00')
-  assert.equal(remainingTimeText(1), '01')
-  assert.equal(remainingTimeText(61_000), '01')
-  assert.equal(remainingTimeText(-5), '00')
+  assert.equal(remainingTimeText(0), '0:00')
+  assert.equal(remainingTimeText(1), '0:01')
+  assert.equal(remainingTimeText(61_000), '1:01')
+  assert.equal(remainingTimeText(-5), '0:00')
 })
 
 test('a timed request claims the Host wait BEFORE the countdown starts', async () => {

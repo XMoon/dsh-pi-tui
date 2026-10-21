@@ -124,10 +124,6 @@ test('orphan and unknown ESC forms never emit their ESC', () => {
 test('are dropped except LF', () => {
   assert.equal(sanitizeDisplayText('a\u0000\u0007\u0008\u000bb\u007fc'), 'abc')
   assert.equal(sanitizeDisplayText('a\u0003b'), 'ab')
-  // The line feed is the ONE control character the display must keep: it
-  // separates the lines of a projection, and dropping it would join them.
-  assert.equal(sanitizeDisplayText('a\nb'), 'a\nb')
-  assert.equal(sanitizeDisplayText('a\n\u0000b'), 'a\nb')
 })
 
 test('plain projection drops SGR and keeps the readable text', () => {

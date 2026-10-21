@@ -27,13 +27,13 @@ test('childOwnEvents cuts seeded parent history after the inherited ownership ma
   const log = [
     event(0, 'user/message', { content: [{ type: 'text', text: 'parent prompt' }], source: { kind: 'user' } }),
     event(1, 'turn/start', { turn: 1 }),
-    event(2, 'assistant/message', { turn: 1, step: 1, message: { role: 'assistant', content: [{ type: 'text', text: 'parent closing' }] } }),
+    event(2, 'assistant/message', { turn: 1, step: 1, message: { role: 'assistant', content: [{ type: 'text', text: 'parent reply' }] } }),
     parentNotice,
     event(6, 'turn/end', { turn: 1, reason: { kind: 'completed' } }),
     event(7, 'session/end-seed', { inherited: true }),
-    event(8, 'user/message', { content: [{ type: 'text', text: 'prompt' }], source: { kind: 'user' } }),
+    event(8, 'user/message', { content: [{ type: 'text', text: 'child prompt' }], source: { kind: 'user' } }),
     event(9, 'turn/start', { turn: 1 }),
-    event(10, 'assistant/message', { turn: 1, step: 1, message: { role: 'assistant', content: [{ type: 'text', text: 'closing' }] } }),
+    event(10, 'assistant/message', { turn: 1, step: 1, message: { role: 'assistant', content: [{ type: 'text', text: 'child reply' }] } }),
   ]
   const own = childOwnEvents(log)
   assert.deepEqual(own.map(candidate => candidate.seq), [8, 9, 10], 'only events after the ownership marker survive')
@@ -42,9 +42,9 @@ test('childOwnEvents cuts seeded parent history after the inherited ownership ma
 
 test('childOwnEvents keeps everything for an unseeded (spawned) child', () => {
   const log = [
-    event(0, 'user/message', { content: [{ type: 'text', text: 'prompt' }], source: { kind: 'user' } }),
+    event(0, 'user/message', { content: [{ type: 'text', text: 'child prompt' }], source: { kind: 'user' } }),
     event(1, 'turn/start', { turn: 1 }),
-    event(2, 'assistant/message', { turn: 1, step: 1, message: { role: 'assistant', content: [{ type: 'text', text: 'closing' }] } }),
+    event(2, 'assistant/message', { turn: 1, step: 1, message: { role: 'assistant', content: [{ type: 'text', text: 'child reply' }] } }),
     event(3, 'session/end-seed', {}),
   ]
   assert.equal(childOwnEvents(log), log, 'without an inherited marker every event is the child\'s own')
@@ -54,22 +54,22 @@ test('childOwnEvents keeps child history across every untagged resume marker', (
   const log = [
     event(0, 'user/message', { content: [{ type: 'text', text: 'parent prompt' }], source: { kind: 'user' } }),
     event(1, 'session/end-seed', { inherited: true }),
-    event(2, 'user/message', { content: [{ type: 'text', text: 'third turn' }], source: { kind: 'user' } }),
-    event(3, 'assistant/message', { turn: 1, step: 1, message: { role: 'assistant', content: [{ type: 'text', text: 'first closing' }] } }),
+    event(2, 'user/message', { content: [{ type: 'text', text: 'child first turn' }], source: { kind: 'user' } }),
+    event(3, 'assistant/message', { turn: 1, step: 1, message: { role: 'assistant', content: [{ type: 'text', text: 'child first reply' }] } }),
     event(4, 'session/end-seed', {}),
-    event(5, 'user/message', { content: [{ type: 'text', text: 'resumed turn' }], source: { kind: 'user' } }),
-    event(6, 'assistant/message', { turn: 2, step: 1, message: { role: 'assistant', content: [{ type: 'text', text: 'resumed closing' }] } }),
+    event(5, 'user/message', { content: [{ type: 'text', text: 'child resumed turn' }], source: { kind: 'user' } }),
+    event(6, 'assistant/message', { turn: 2, step: 1, message: { role: 'assistant', content: [{ type: 'text', text: 'child resumed reply' }] } }),
     event(7, 'session/end-seed', {}),
-    event(8, 'user/message', { content: [{ type: 'text', text: 'third turn' }], source: { kind: 'user' } }),
+    event(8, 'user/message', { content: [{ type: 'text', text: 'child third turn' }], source: { kind: 'user' } }),
   ]
   const own = childOwnEvents(log)
   assert.deepEqual(own.map(candidate => candidate.seq), [2, 3, 4, 5, 6, 7, 8])
   const text = own.map(candidate => JSON.stringify(candidate.data)).join('\n')
-  assert.ok(text.includes('third turn'))
-  assert.ok(text.includes('first closing'))
-  assert.ok(text.includes('resumed turn'))
-  assert.ok(text.includes('resumed reply'))
-  assert.ok(text.includes('third turn'))
+  assert.ok(text.includes('child first turn'))
+  assert.ok(text.includes('child first reply'))
+  assert.ok(text.includes('child resumed turn'))
+  assert.ok(text.includes('child resumed reply'))
+  assert.ok(text.includes('child third turn'))
   assert.ok(!text.includes('parent prompt'))
 })
 
@@ -95,15 +95,15 @@ test('the viewer transcript never shows a seeded parent completion notice', () =
     parentNotice,
     event(6, 'turn/end', { turn: 1, reason: { kind: 'completed' } }),
     event(7, 'session/end-seed', { inherited: true }),
-    event(8, 'user/message', { content: [{ type: 'text', text: 'prompt' }], source: { kind: 'user' } }),
+    event(8, 'user/message', { content: [{ type: 'text', text: 'child prompt' }], source: { kind: 'user' } }),
     event(9, 'turn/start', { turn: 1 }),
-    event(10, 'assistant/message', { turn: 1, step: 1, message: { role: 'assistant', content: [{ type: 'text', text: 'reply' }] } }),
+    event(10, 'assistant/message', { turn: 1, step: 1, message: { role: 'assistant', content: [{ type: 'text', text: 'child reply' }] } }),
   ]
   const folder = new TranscriptFolder()
   folder.apply(childOwnEvents(log))
   const messages = folder.messages()
   const text = messages.map(m => 'text' in m ? m.text : '').join('\n')
-  assert.ok(text.includes('prompt'), `the child's own message must show:\n${text}`)
+  assert.ok(text.includes('child prompt'), `the child's own message must show:\n${text}`)
   assert.ok(!text.includes('subagent-settled'), `the parent's completion notice must NOT render in the viewer:\n${text}`)
   assert.ok(!text.includes('Background subagent parent-child'), `the notice body must not leak:\n${text}`)
 })
@@ -114,9 +114,9 @@ test('the child viewer keeps the child full assistant surface (never text-only)'
   // CHILD viewer's own transcript. The child's tool cards survive alongside
   // the text, so the viewer is not a text-only projection.
   const log = [
-    event(0, 'user/message', { content: [{ type: 'text', text: 'prompt' }], source: { kind: 'user' } }),
+    event(0, 'user/message', { content: [{ type: 'text', text: 'child prompt' }], source: { kind: 'user' } }),
     event(1, 'turn/start', { turn: 1 }),
-    event(2, 'assistant/message', { turn: 1, step: 1, message: { role: 'assistant', content: [{ type: 'text', text: 'reply' }] } }),
+    event(2, 'assistant/message', { turn: 1, step: 1, message: { role: 'assistant', content: [{ type: 'text', text: 'child reply' }] } }),
     event(3, 'tool/call', { turn: 1, step: 1, callId: 'call-1', name: 'bash', arguments: '{"command":"ls"}' }),
     event(4, 'tool/result', {
       turn: 1,
@@ -129,7 +129,7 @@ test('the child viewer keeps the child full assistant surface (never text-only)'
         source: { kind: 'tool', callId: 'call-1' },
       },
     }),
-    event(5, 'assistant/message', { turn: 1, step: 2, message: { role: 'assistant', content: [{ type: 'text', text: 'closing' }] } }),
+    event(5, 'assistant/message', { turn: 1, step: 2, message: { role: 'assistant', content: [{ type: 'text', text: 'child closing' }] } }),
   ]
   const folder = new TranscriptFolder()
   folder.apply(log)
@@ -138,8 +138,8 @@ test('the child viewer keeps the child full assistant surface (never text-only)'
   assert.ok(kinds.includes('assistant'), `the child's assistant text must survive:\n${JSON.stringify(kinds)}`)
   assert.ok(kinds.includes('tool'), `the child's tool card must survive (never trimmed to text-only):\n${JSON.stringify(kinds)}`)
   const text = messages.map(message => 'text' in message ? message.text : '').join('\n')
-  assert.ok(text.includes('reply'), `first reply missing:\n${text}`)
-  assert.ok(text.includes('closing'), `closing reply missing:\n${text}`)
+  assert.ok(text.includes('child reply'), `first reply missing:\n${text}`)
+  assert.ok(text.includes('child closing'), `closing reply missing:\n${text}`)
 })
 
 test('a parent settlement notice never alters the child viewer surface', () => {
@@ -147,9 +147,9 @@ test('a parent settlement notice never alters the child viewer surface', () => {
   // marker; the child's OWN folded surface must be byte-identical with and
   // without it (the parent projection must not shrink the child's output).
   const childLog = [
-    event(8, 'user/message', { content: [{ type: 'text', text: 'prompt' }], source: { kind: 'user' } }),
+    event(8, 'user/message', { content: [{ type: 'text', text: 'child prompt' }], source: { kind: 'user' } }),
     event(9, 'turn/start', { turn: 1 }),
-    event(10, 'assistant/message', { turn: 1, step: 1, message: { role: 'assistant', content: [{ type: 'text', text: 'reply' }] } }),
+    event(10, 'assistant/message', { turn: 1, step: 1, message: { role: 'assistant', content: [{ type: 'text', text: 'child reply' }] } }),
     event(11, 'tool/call', { turn: 1, step: 1, callId: 'call-1', name: 'bash', arguments: '{"command":"ls"}' }),
     event(12, 'tool/result', {
       turn: 1,
@@ -221,8 +221,8 @@ test('a child log with a descriptor keeps its viewer identity without a fake Sub
   const log = [
     event(0, 'subagent/descriptor', { version: 2, mode: 'continuable', provider: 'in-process', label: 'scout-child', agentModel: 'deepseek-chat' }),
     event(1, 'turn/start', { turn: 1 }),
-    event(2, 'user/message', { content: [{ type: 'text', text: 'prompt' }], source: { kind: 'user' }, turn: 1 }),
-    event(3, 'assistant/message', { turn: 1, step: 1, message: { role: 'assistant', content: [{ type: 'text', text: 'reply' }], source: { kind: 'model', provider: 'p', model: 'm' } }, stream: [] }),
+    event(2, 'user/message', { content: [{ type: 'text', text: 'child prompt' }], source: { kind: 'user' }, turn: 1 }),
+    event(3, 'assistant/message', { turn: 1, step: 1, message: { role: 'assistant', content: [{ type: 'text', text: 'child reply' }], source: { kind: 'model', provider: 'p', model: 'm' } }, stream: [] }),
     event(4, 'turn/end', { turn: 1, reason: { kind: 'completed' } }),
   ]
   const folder = new TranscriptFolder()
@@ -246,7 +246,7 @@ test('a child log with a descriptor keeps its viewer identity without a fake Sub
   app.setTranscript(messages, folder.turnActivities())
   await vt.waitForRender()
   const view = vt.getViewport().join('\n')
-  assert.ok(view.includes('prompt'), `the child transcript body renders:\n${view}`)
+  assert.ok(view.includes('child prompt'), `the child transcript body renders:\n${view}`)
   assert.ok(view.includes('scout-child'), `the viewer chrome keeps the authoritative child label:\n${view}`)
   assert.ok(view.includes('‹ back'), `the mode identity lives in the viewer subject bar:\n${view}`)
   assert.ok(view.includes('● running'), `the child activity stays in the viewer subject bar:\n${view}`)
