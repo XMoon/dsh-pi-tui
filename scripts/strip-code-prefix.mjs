@@ -61,7 +61,7 @@ const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
  * A few families start with a DIGIT instead of a letter (`3B`, `2B`), and
  * a few carry a letter separator (`AC-1`, `PR-A`).
  */
-const CODE_TOKEN = /^(?:[A-Z]{1,4}\d+[a-zA-Z]?(?:(?:\.\d+|\u2013[A-Z]?\d+|-\d+)[a-z]?)?(?:-[A-Z]\d*)?(?:-[A-Za-z]+)?(?:\+[A-Za-z]+)?\.?(?:\/(?:[A-Z]{1,4}\d+[a-zA-Z]?(?:\.\d+[a-z]?)?(?:-[A-Z]\d*)?(?:-[A-Z]{1,4}\d*)?|RFL-\d+|Direct(?:-L\d)?|Focus|DEL|BEL|BS|OWNER-RULED))*|RFL-\d+|[A-Z]{2,4}-(?:[A-Z]|\d+)[a-z]?|\d+[A-Z]\d*|[A-Z]{1,4}\d+[a-zA-Z]?(?:-\d+)?-(?:swap|resize-zero|resize|height|delete-fallback))$/u
+const CODE_TOKEN = /^(?:\d+\.\d+[a-z]?|[A-Z]{1,4}\d+[a-zA-Z]?(?:(?:\.\d+|\u2013[A-Z]?\d+|-\d+)[a-z]?)?(?:-[A-Z]\d*)?(?:-[A-Za-z]+)?(?:\+[A-Za-z]+)?\.?(?:\/(?:[A-Z]{1,4}\d+[a-zA-Z]?(?:\.\d+[a-z]?)?(?:-[A-Z]\d*)?(?:-[A-Z]{1,4}\d*)?|RFL-\d+|\d{1,2}\/\d{1,2}|Direct(?:-L\d)?|Focus|DEL|BEL|BS|OWNER-RULED))*|RFL-\d+|[A-Z]{2,4}-(?:[A-Z]|\d+)[a-z]?|\d+[A-Z]\d*|\d{1,2}\/\d{1,2}|[A-Z]{1,4}\d+[a-zA-Z]?(?:-\d+)?-(?:swap|resize-zero|resize|height|delete-fallback))$/u
 
 /**
  * A SECTION marker: a pointer into the plan that wrote the test.
@@ -69,12 +69,15 @@ const CODE_TOKEN = /^(?:[A-Z]{1,4}\d+[a-zA-Z]?(?:(?:\.\d+|\u2013[A-Z]?\d+|-\d+)[
  * `§18.1`, `§1C-3`, `§D2`, `§6.4 (3)`. It is the same kind of local
  * label as a code: the reader of a CI log does not have the plan either.
  */
-const SECTION_TOKEN = /^§\s*(?:\d+[A-Z](?:-\d+)?|\d+[A-Z]?(?:\.\d+)*(?:-\d+)?|[A-Z]\d+(?:-\d+)?)(?:\/§?\s*(?:\d+[A-Z]?(?:\.\d+)*(?:-\d+)?|[A-Z]\d+(?:-\d+)?))*?(?:\s*\(\d+\))?$/u
+const SECTION_TOKEN = /^§\s*(?:\d+[A-Z](?:-\d+)?|\d+[A-Z]?(?:\.\d+)*(?:-\d+)?[a-z]?|[A-Z]\d+(?:-\d+)?)(?:\/§?\s*(?:\d+[A-Z]?(?:\.\d+)*(?:-\d+)?[a-z]?|[A-Z]\d+(?:-\d+)?))*?(?:\s*\(\d+\))?$/u
 
 /**
- * A bracketed code: `(R6-1)`, `(F2)`, `(3)`.
+ * A bracketed code: `(R6-1)`, `(F2)`, `(3)`, `(10)`.
+ *
+ * A bare NUMBER in brackets is a case label too — the plan numbers its
+ * cases — so `(10):` is a label and not a sentence.
  */
-const BRACKET_CODE_TOKEN = /^\([A-Z]{1,4}\d+[a-z]?(?:\/[A-Z0-9]+)*\)$/u
+const BRACKET_CODE_TOKEN = /^\((?:[A-Z]{1,4}\d+[a-z]?(?:-\d+)?(?:\/[A-Z0-9-]+)*|\d+)\)$/u
 
 /**
  * A bracketed REVIEW qualifier: `(review round 4)`, `(ruling)`.
@@ -83,6 +86,14 @@ const BRACKET_CODE_TOKEN = /^\([A-Z]{1,4}\d+[a-z]?(?:\/[A-Z0-9]+)*\)$/u
  * goes with the label.
  */
 const BRACKET_REVIEW_TOKEN = /^\((?:review\s+round\s+\d+\s+)?(?:ruling|review|external)\)$/u
+
+/**
+ * A bracketed HARNESS label: `(ctrl-r harness)`, `(Parity harness)`.
+ *
+ * It names the harness the case drives, not the behaviour, so it goes
+ * with the label.
+ */
+const BRACKET_HARNESS_TOKEN = /^\([A-Za-z0-9 -]+ harness\)$/u
 
 /**
  * The word-suffix code form: `B4B-delete-fallback`, `B4B-07-height`.
@@ -154,6 +165,7 @@ function isLabelToken(token, first) {
     || SECTION_TOKEN.test(token)
     || BRACKET_CODE_TOKEN.test(token)
     || BRACKET_REVIEW_TOKEN.test(token)
+    || BRACKET_HARNESS_TOKEN.test(token)
     || LABEL_WORD.test(token)
 }
 
@@ -168,6 +180,29 @@ function isLabelToken(token, first) {
  * @returns {{head: string, rest: string}|null} the split, or null.
  */
 function splitLabel(title) {
+  // A DOT separator comes FIRST, because a dot-separated code is the
+  // shortest possible label: `F1. a synchronous mount throw leaves the
+  // stage fiber unassigned: …` — the colon is inside the SENTENCE, and
+  // splitting there would cut the sentence in half.
+  //
+  // The dot is only a separator when the text in front of it is a CODE.
+  // Otherwise it is the end of the title's first sentence.
+  const dot = /\. /u.exec(title)
+  if (dot !== null) {
+    const head = title.slice(0, dot.index)
+    if (isLabelToken(head, true)) {
+      return { head, rest: title.slice(dot.index + 2) }
+    }
+  }
+  // A bracketed label: `(ctrl-r harness): the case …`. The bracket ends
+  // the label, and the colon after it separates the sentence.
+  const bracketed = /^\([^)]*\)\s*:\s*/u.exec(title)
+  if (bracketed !== null) {
+    const head = title.slice(0, bracketed[0].index + bracketed[0].indexOf(')') + 1)
+    if (isLabelToken(head, true)) {
+      return { head, rest: title.slice(bracketed[0].index + bracketed[0].length) }
+    }
+  }
   const colon = title.indexOf(':')
   if (colon !== -1) return { head: title.slice(0, colon), rest: title.slice(colon + 1) }
   // A dash separator: `- ` (a dash followed by a space), so an ordinary
@@ -175,10 +210,6 @@ function splitLabel(title) {
   // the same separator.
   const dash = / [—–-] /u.exec(title)
   if (dash !== null) return { head: title.slice(0, dash.index), rest: title.slice(dash.index + 3) }
-  // A DOT separator: `F1. a synchronous mount throw`. The dot follows a
-  // code, so it is the code's own separator and not part of it.
-  const dot = /\. /u.exec(title)
-  if (dot !== null) return { head: title.slice(0, dot.index), rest: title.slice(dot.index + 2) }
   // A space before a lowercase word.
   const space = / (?=[a-z])/u.exec(title)
   if (space !== null) return { head: title.slice(0, space.index), rest: title.slice(space.index + 1) }
@@ -199,7 +230,12 @@ function splitLabel(title) {
 export function splitLeadingLabel(title) {
   const split = splitLabel(title)
   if (split === null) return null
-  const rawTokens = split.head.split(/\s+/u).filter(token => token !== '')
+  // A BRACKETED head is ONE token: `(ctrl-r harness)` is a single label,
+  // and splitting it on the space inside the bracket would make the
+  // bracket a token of its own.
+  const rawTokens = /^\(.+\)$/u.test(split.head)
+    ? [split.head]
+    : split.head.split(/\s+/u).filter(token => token !== '')
   if (rawTokens.length === 0) return null
   const tokens = []
   for (const token of rawTokens) {
