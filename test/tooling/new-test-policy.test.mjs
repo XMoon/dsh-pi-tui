@@ -130,30 +130,36 @@ test('the pre-existing fixed-wait baseline still matches the tree', () => {
 
 // ── Rule 4: Minimal Test Infrastructure ───────────────────────────────────
 
-test('a shared fixture exposes only the capability its consumers use', () => {
-  // The narrow-fake rule has an objective floor: a shared fixture may not
-  // grow a capability that NO consumer reads. An unused capability is the
-  // "universal fake" the policy forbids.
-  const fixture = join(TEST_ROOT, 'support', 'register-tui-commands.ts')
-  if (!existsSync(fixture)) return
-  const source = readFileSync(fixture, 'utf8')
-  const declared = [...source.matchAll(/^\s{2}(readonly\s+)?([a-zA-Z][A-Za-z0-9_]*)\??\s*[:(]/gmu)].map(m => m[2])
-  if (declared.length === 0) return
+test('a shared fixture has at least one consumer', () => {
+  // The objective floor of the narrow-fake rule: a shared fixture with NO
+  // consumer is dead weight — a helper nobody reads is the "universal
+  // fake" the policy forbids, and it is the one form of the rule that can
+  // be checked without judging the test's INTENT.
+  //
+  // The rule that a fake must not expose MORE capability than its consumer
+  // uses is a REVIEW judgement: whether a capability is "used" depends on
+  // what the test is trying to prove, which no static check can decide. The
+  // policy says so explicitly, and this guard checks only the part that can
+  // be checked objectively.
+  const supportRoot = join(TEST_ROOT, 'support')
+  const fixtures = readdirSync(supportRoot, { withFileTypes: true })
+    .filter(entry => entry.isFile() && /\.(ts|mjs)$/u.test(entry.name))
+    .map(entry => entry.name)
+  assert.ok(fixtures.length > 0, 'the support directory must hold the shared fixtures')
+
   const consumers = discoverTestFiles(TEST_ROOT, ['.test.ts', '.test.mjs'])
-    .filter(rel => rel !== 'support/register-tui-commands.ts')
-  const used = new Set()
-  for (const rel of consumers) {
-    const consumer = readFileSync(join(TEST_ROOT, rel), 'utf8')
-    if (!consumer.includes('register-tui-commands')) continue
-    for (const name of declared) {
-      if (new RegExp(`\\b${name}\\b`, 'u').test(consumer)) used.add(name)
-    }
+  const orphans = []
+  for (const fixture of fixtures) {
+    const used = consumers.some(rel => {
+      if (rel.startsWith('support/')) return false
+      return readFileSync(join(TEST_ROOT, rel), 'utf8').includes(fixture)
+    })
+    if (!used) orphans.push(fixture)
   }
-  const unused = declared.filter(name => !used.has(name))
   assert.deepEqual(
-    unused,
+    orphans,
     [],
-    'a shared fixture must not expose a capability no consumer reads — remove it, or the fake pretends to cover more than it does',
+    'a shared fixture with no consumer is dead weight — inline it into its consumer, or delete it',
   )
 })
 

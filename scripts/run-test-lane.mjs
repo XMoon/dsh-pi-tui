@@ -49,11 +49,21 @@ function main() {
   }
   // The lane's patterns are relative to the test root.
   const files = resolveLane(TEST_ROOT, lane.patterns, lane.suffixes, lane.exclude ?? [])
-  const absolute = files.map(rel => join(TEST_ROOT, rel))
+  // The file list is passed RELATIVE to the repository root, and the child
+  // runs with that root as its working directory.
+  //
+  // The absolute form would exceed the Windows command-line limit: the
+  // product lane is 491 files, and absolute paths in a typical Windows
+  // checkout total ~60,000 characters against `CreateProcessW`'s 32,767.
+  // The relative form is ~9,000 characters on every platform, and the
+  // child's `cwd` keeps the repository root as the working directory —
+  // which the tests rely on (22 of them read `process.cwd()`).
+  const relativeFiles = files.map(rel => join('test', rel))
 
   const root = mkdtempSync(join(tmpdir(), 'dsh-pi-tui-test-run-'))
   const keep = process.env.DSH_TEST_KEEP_TMP === '1'
-  const child = spawn(process.execPath, ['--test', ...absolute], {
+  const child = spawn(process.execPath, ['--test', ...relativeFiles], {
+    cwd: ROOT,
     stdio: 'inherit',
     shell: false,
     env: { ...process.env, TMPDIR: root, TMP: root, TEMP: root },

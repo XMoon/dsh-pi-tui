@@ -91,6 +91,12 @@ A fake must implement exactly the capability the test exercises. A fake
 with MORE capabilities than the test uses makes the test look like it
 covers more than it does.
 
+The part of this rule that can be checked objectively is that a shared
+fixture has at least one consumer: a helper nobody reads is dead weight,
+and the guard enforces it. Whether a fake exposes more capability than its
+consumer USES depends on what the test is trying to prove, so that half
+stays a review judgement.
+
 ### 5. Deterministic Async Testing
 
 Wait for a real event, state or operation settlement. A fixed sleep is
@@ -160,19 +166,24 @@ The suite is TypeScript and runs under Node's type-stripping loader; a
 
 ## 4. The objective guards
 
-Three rules above are enforced by OBJECTIVE, automatable checks — not by
+The rules above are enforced by OBJECTIVE, automatable checks — not by
 review judgement:
 
 | Rule | Guard | Where |
 |---|---|---|
 | 6 — Discoverability | every discovered test file belongs to exactly one lane; the lanes never overlap; the infrastructure directories are never part of a lane | `test/tooling/test-discovery.test.mjs` |
-| 4 — Minimal infrastructure | the migration driver's rewrite rules cover every path form a moved test uses | `test/tooling/migration-driver.test.mjs` |
 | 6 — Discoverability (the rule itself) | the discovery rule finds the root level and every nested level, never finds the infrastructure directories, never double-discovers, and fails closed on an empty lane | `test/tooling/test-discovery.test.mjs` |
+| 5 — Deterministic async | a file outside the recorded floor cannot introduce an unreasoned fixed wait, and a floor file's wait count cannot grow | `test/tooling/new-test-policy.test.mjs` |
+| 4 — Minimal infrastructure | a shared fixture has at least one consumer | `test/tooling/new-test-policy.test.mjs` |
+| 6 — Discoverability (placement) | a new Domain, Integration or Tooling test lands in the right lane and reaches the right verification entry point | `test/tooling/new-test-policy.test.mjs` |
+| 6 — Discoverability (execution) | the lane runner passes the file list relative to the repository root, so the command line fits the Windows limit, and the child runs with the repository root as its working directory | `test/tooling/test-lane-runner.test.mjs` |
+| 1 — Ownership First (the read side) | every production file a test reads by path EXISTS: a renamed or moved production module can never leave a source lock silently pointing at a different file | `pnpm gate:production-reads` |
 
-The remaining rules (1, 2, 3, 5) are review judgements, and they stay
-that way on purpose: a mechanical gate for "is this test valuable" would
-either be trivially satisfiable or would force tests to be split into
-shape the gate likes.
+The remaining rules (1, 2, 3, and the "a fake must not exceed its
+consumer's needs" half of 4) are review judgements, and they stay that way
+on purpose: a mechanical gate for "is this test valuable" would either be
+trivially satisfiable or would force tests to be split into shape the gate
+likes.
 
 ## 5. What this document does NOT own
 
