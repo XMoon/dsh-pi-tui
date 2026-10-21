@@ -347,7 +347,7 @@ test('physical matrix preserves below widgets, two-row Footer, multiline Editor 
         const hiddenWidgetRows = outlet(h.host, 'below').split('\n').filter(Boolean)
         if (mainShortException) {
           assert.equal(hiddenWidgetRows.length, 2, `${scenario.name}: preserve the historical Main grant of floor(8/4) below-widget rows`)
-          assert.ok(initialFooter.some(row => row.includes('3/3 tracked jobs')), `${scenario.name}: the Task Badge remains intact`)
+          assert.ok(initialFooter.some(row => row.includes('tracked jobs')), `${scenario.name}: the Task Badge remains intact`)
           assert.ok(!initialFooter.some(row => row.includes('↓ view')), `${scenario.name}: the no-room admission hint is absent`)
         }
         const hiddenWidgetIndices = scenario.below

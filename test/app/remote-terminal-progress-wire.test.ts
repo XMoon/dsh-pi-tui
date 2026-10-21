@@ -98,7 +98,7 @@ class FailingAdapter extends LlmAdapter {
     return Promise.resolve({ provider, id: model, name: model })
   }
   async * stream(): AsyncIterable<StreamChunk> {
-    throw new LlmError('r2 probe failure', 'UNKNOWN')
+    throw new LlmError('probe failure', 'UNKNOWN')
   }
 }
 

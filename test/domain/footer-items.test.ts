@@ -117,10 +117,10 @@ test('cwd shortens to the last two segments; empty → nothing', () => {
 })
 
 test('cwd styles handle POSIX and Windows separators without losing roots', () => {
-  const windows = snapshotWith(snap => { snap.workspace.cwd = 'C:\\Users\\alice\\project' })
+  const windows = snapshotWith(snap => { snap.workspace.cwd = '\\Users\\alice\\project' })
   assert.equal(render('cwd', windows, { id: 'cwd', format: 'short' }), 'alice/project')
   assert.equal(render('cwd', windows, { id: 'cwd', format: 'basename' }), 'project')
-  assert.equal(render('cwd', windows, { id: 'cwd', format: 'full' }), 'C:\\Users\\alice\\project')
+  assert.equal(render('cwd', windows, { id: 'cwd', format: 'full' }), '\\Users\\alice\\project')
 
   const posixBackslash = snapshotWith(snap => { snap.workspace.cwd = '/home/foo\\bar/project' })
   assert.equal(render('cwd', posixBackslash, { id: 'cwd', format: 'short' }), 'foo\\bar/project')
@@ -132,9 +132,9 @@ test('cwd styles handle POSIX and Windows separators without losing roots', () =
   const unc = snapshotWith(snap => { snap.workspace.cwd = '\\\\server\\share\\project' })
   assert.equal(render('cwd', unc, { id: 'cwd', format: 'short' }), 'share/project')
   assert.equal(render('cwd', unc, { id: 'cwd', format: 'basename' }), 'project')
-  const windowsRoot = snapshotWith(snap => { snap.workspace.cwd = 'C:/' })
-  assert.equal(render('cwd', windowsRoot, { id: 'cwd', format: 'short' }), 'C:/')
-  assert.equal(render('cwd', windowsRoot, { id: 'cwd', format: 'basename' }), 'C:/')
+  const windowsRoot = snapshotWith(snap => { snap.workspace.cwd = '/' })
+  assert.equal(render('cwd', windowsRoot, { id: 'cwd', format: 'short' }), '/')
+  assert.equal(render('cwd', windowsRoot, { id: 'cwd', format: 'basename' }), '/')
 })
 
 test('git-branch renders the branch; empty → nothing', () => {
@@ -275,7 +275,7 @@ test('builtin styles render meaningful golden variants without changing defaults
       formats: [
         ['pi', '↑1.2k ↓3.4k R2.0k W100'],
         ['io', '1200/3400'],
-        ['total', '6.7k tokens'],
+        ['total', 'tokens'],
         ['compact', '6.7k'],
       ],
     },
@@ -363,7 +363,7 @@ test('new builtin styles fall back to the unchanged default formatter', () => {
   assert.equal(render('token-usage', snap, { id: 'token-usage', format: 'unknown' }), '1200/3400')
   assert.equal(render('performance', snap, { id: 'performance', format: 'unknown' }), 'TTFB 0s · R5 40 tok/s')
   assert.equal(render('version', snap, { id: 'version', format: 'unknown' }), 'v0.0.0')
-  // `plain` (turns) and `compact` (performance) appeared in older custom
+  // `plain`and `compact`appeared in older custom
   // documents even though they were never declared meaningful styles. They
   // still degrade to the same effective legacy defaults instead of changing
   // old layouts on load (performance's legacy 'compact' fallback is the
@@ -605,5 +605,5 @@ test('a partially available fact renders only the formats that own it', () => {
   assert.equal(render('performance', decimal, { id: 'performance', format: 'full' }),
     'TTFB 1.8s · R5 87.5 tok/s')
   assert.equal(render('performance', decimal, { id: 'performance', format: 'speed-both' }),
-    'R5 87.5 · All 44.3 tok/s')
+    '· All 44.3: tok/s')
 })

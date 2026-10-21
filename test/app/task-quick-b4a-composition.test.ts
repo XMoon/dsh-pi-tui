@@ -184,7 +184,7 @@ function startQuick(options: {
     },
     ...(options.taskRead === false ? {} : {
       taskRead: {
-        currentKey: () => 'g1:sess-main',
+        currentKey: () => 'sess-main',
         currentSessionId: () => 'sess-main',
         readTask: async () => {
           if (options.holdCatalog === true) {
@@ -1203,7 +1203,7 @@ test('the fullscreen Todo/dock hit follows the band-pushed layout', async () => 
   assert.ok(h.app.isTodoPanelExpanded(), `a panel-row click must expand the panel:\n${view(h.vt)}`)
 })
 
-test('Todo/Dock hit follows the actual Quick heights 0, 1 and 5', async () => {
+test('Todo/Dock: hit follows the actual Quick heights 0, 1 and 5', async () => {
   const cases = [
     { name: 'hidden', rows: 24, enterQuick: false, expectedHeight: 0 },
     { name: 'one-row grant', rows: 9, enterQuick: true, expectedHeight: 1 },
@@ -1298,7 +1298,7 @@ test('the Question option hit uses geometry after the blocking owner retires Qui
   assert.equal(answers[0]?.selected[0], 'OPTION-B', 'the click selects the option the user pointed at')
 })
 
-test('Question option hits rebase after real Quick heights 0, 1 and 5 retire', async () => {
+test('Question: option hits rebase after real Quick heights 0, 1 and 5 retire', async () => {
   const cases = [
     { name: 'zero-to-zero', rows: 24, enterQuick: false, expectedHeight: 0 },
     { name: 'one-to-zero', rows: 8, enterQuick: true, expectedHeight: 1 },

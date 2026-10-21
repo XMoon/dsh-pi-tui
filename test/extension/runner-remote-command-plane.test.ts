@@ -476,7 +476,7 @@ function retainFacts(sessions: ClientSessionsFace, id: string): { referenceCount
   return { referenceCount: snapshot.referenceCount, retainedBy: { ...snapshot.retainedBy } }
 }
 
-test('Remote: a card-less /copy failure is published once and produces no Host command row', async (t) => {
+test('a card-less /copy failure is published once and produces no Host command row', async (t) => {
   const life = testLifecycle(t)
   const mainId = 'b2a-f1-copy'
   const fixture = await mountRunner(life, { resumeSessionId: mainId, seed: seedWithoutAnswer })
@@ -493,7 +493,7 @@ test('Remote: a card-less /copy failure is published once and produces no Host c
     'the Client registry route produced no Host command/run row (so no result card exists)')
 })
 
-test('Remote: a card-less /yolo unavailability is published, never reported as applied', async (t) => {
+test('a card-less /yolo unavailability is published, never reported as applied', async (t) => {
   const life = testLifecycle(t)
   const mainId = 'b2a-f1-yolo'
   const fixture = await mountRunner(life, { resumeSessionId: mainId, seed: seedWithoutAnswer })
@@ -509,7 +509,7 @@ test('Remote: a card-less /yolo unavailability is published, never reported as a
     'the Client registry route produced no Host command/run row')
 })
 
-test('Remote: a sessionless /logout target error is settled ONCE by the local command path', async (t) => {
+test('a sessionless /logout target error is settled ONCE by the local command path', async (t) => {
   const life = testLifecycle(t)
   // No resumed Session: a sessionless command runs through the controller's
   // local-command path, which already notifies its errors — the new card-less
@@ -537,7 +537,7 @@ test('Remote: a sessionless /logout target error is settled ONCE by the local co
  * hide a Client-route error or duplicate a Host-route one when the catalog
  * changes mid-flight. Both directions are driven deterministically below.
  */
-test('Remote: a Client-route error is still published once when the Host catalog claims the name mid-flight', async (t) => {
+test('a Client-route error is still published once when the Host catalog claims the name mid-flight', async (t) => {
   // The POSIX helper gates are cleared (and macOS/Windows skipped) so the copy
   // policy's failure is deterministic; the OSC 52 write is the mid-flight hook.
   if (process.platform === 'darwin' || process.platform === 'win32') {
@@ -604,7 +604,7 @@ test('Remote: a Client-route error is still published once when the Host catalog
     'the invocation stayed on the Client registry route (no Host command/run row)')
 })
 
-test('Remote TSP: a card-less command failure reaches the TSP Dock', async (t) => {
+test('TSP: a card-less command failure reaches the TSP Dock', async (t) => {
   const life = testLifecycle(t)
   const mainId = 'b2a-f1-tsp'
   const { createRemoteApplicationHostFixture } = await import('../support/remote-application-fixture.ts')
@@ -817,7 +817,7 @@ test('a sessionless TUI built-in works before the first Session and creates none
     'a sessionless command never creates a Session')
 })
 
-test('/copy reaches the newest assistant message OUTSIDE the initial window by paging', async (t) => {
+test('/copy: reaches the newest assistant message OUTSIDE the initial window by paging', async (t) => {
   const life = testLifecycle(t)
   const mainId = 'm3-4-pr4-cmd-copy'
   const fixture = await mountRunner(life, {
@@ -1015,7 +1015,7 @@ test('stale catalog (M3-6 PR2): refresh A → Connection replacement → the old
       id: 'pr2-stale-twin',
       name: 'stale-cmd',
       sessionless: true,
-      handler: () => { staleClientRuns += 1; return { kind: 'success', text: 'retired name fell to the client twin' } },
+      handler: () => { staleClientRuns += 1; return { kind: 'success', text: 'name fell to the client twin' } },
     }],
   })
 

@@ -117,7 +117,7 @@ test('CoT translation: real translator route through a controlled endpoint, erro
     if (request.url?.startsWith('/google')) {
       // google-form-v1: urlencoded q -> [[[translatedText, ...]]]
       const query = new URLSearchParams(body)
-      response.end(JSON.stringify([[[`G:${query.get('q') ?? ''}`, 'source', null, null, 10]]]))
+      response.end(JSON.stringify([[[`${query.get('q') ?? ''}`, 'source', null, null, 10]]]))
       return
     }
     // bing-edge-v1: JSON string array -> [{translations:[{text}]}]
@@ -150,7 +150,7 @@ test('CoT translation: real translator route through a controlled endpoint, erro
     'the real translator route sent the reasoning text to the controlled endpoint and parsed its response')
 
   const googleSpec = translator.resolve({ text: 'google reasoning text', targetLanguage: 'zh', provider: 'google' })
-  assert.equal(await translator.translate(googleSpec), 'G:google reasoning text',
+  assert.equal(await translator.translate(googleSpec), 'google reasoning text',
     'the second anonymous provider route is exercised through the same real translator service')
 
   mode = 'error'

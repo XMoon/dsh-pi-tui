@@ -585,10 +585,10 @@ test('the M3-3A semantic bundle serves over one real Host wire', async (t) => {
     seedTurn(host, MAIN, { turn: 1, prompt: 'plan the launch', response: 'launch plan ready', usage: { inputTokens: 1000, outputTokens: 42 } })
     seedTurn(host, CHILD, {
       turn: 1,
-      prompt: 'child task',
-      response: 'child done',
+      prompt: 'task',
+      response: 'done',
       usage: { inputTokens: 200, outputTokens: 7 },
-      todos: [{ content: 'child todo', status: 'in_progress' }],
+      todos: [{ content: 'todo', status: 'in_progress' }],
     })
 
     // P1 — Session list/read through the official Client list face.

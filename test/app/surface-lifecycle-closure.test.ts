@@ -168,7 +168,7 @@ function attachTasks(app: TuiApp, options: { jobIds?: readonly string[]; childId
       subscribe: () => () => {},
     },
     taskRead: {
-      currentKey: () => 'g1:sess-main',
+      currentKey: () => 'sess-main',
       currentSessionId: () => 'sess-main',
       readTask: async () => ({
         parentSessionId: 'sess-main',
@@ -679,17 +679,17 @@ test('A-08 a browser retired inside its own retire callback cannot touch the rep
   await vt.waitForRender()
   a.close()
   await vt.waitForRender()
-  assert.deepEqual(reasons, ['A:external'], 'A must retire exactly once')
+  assert.deepEqual(reasons, ['external'], 'A must retire exactly once')
   assert.equal(app.overlayGraphState().handles, 1, 'only the replacement browser may remain')
   assert.ok(view(vt).includes('B'), `the replacement browser must be alive and visible:\n${view(vt)}`)
 
   // The replacement is fully functional: its own Esc retires IT, not A again.
   vt.sendInput('\x1b')
   await vt.waitForRender()
-  assert.deepEqual(reasons, ['A:external', 'B:cancel'])
+  assert.deepEqual(reasons, ['external', 'cancel'])
   assert.equal(app.overlayGraphState().handles, 0)
   replacement!.close()
-  assert.deepEqual(reasons, ['A:external', 'B:cancel'], 'a late close of the retired replacement must be a no-op')
+  assert.deepEqual(reasons, ['external', 'cancel'], 'a late close of the retired replacement must be a no-op')
   app.stop()
 })
 
@@ -1427,7 +1427,7 @@ test('the Job and Settings workspace leases are mutually exclusive, and a stale 
   app.stop()
 })
 
-test('TuiApp.dispose releases a leased Settings workspace exactly once', async () => {
+test('TuiApp.dispose: releases a leased Settings workspace exactly once', async () => {
   const { vt, app } = startApp()
   let closes = 0
   app.openSettingsWorkspace(settingsWorkspaceSource(), {
@@ -1637,7 +1637,7 @@ test('closing a workspace hands the terminal over without flushing its own docum
   // The marker must be CONTIGUOUS in the write stream (the terminal receives
   // per-span diffs, so text split across two chalk spans is not a substring) and
   // UNIQUE to the departing Job document. The workspace's own action-bar verb
-  // `Esc back` (D13) qualifies on both counts: it is a single span, it is painted
+  // `Esc back`qualifies on both counts: it is a single span, it is painted
   // at EVERY width (Esc is never dropped), and no other surface in this
   // transition paints it — the restored Task Browser paints `Esc close`.
   //

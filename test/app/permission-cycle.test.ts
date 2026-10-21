@@ -125,7 +125,7 @@ function harness(options: {
   }
 }
 
-test('the gesture owner supplies NO signal of its own — the composition owns the lifetime fallback', async () => {
+test('the gesture owner supplies NO signal of its own: the composition owns the lifetime fallback', async () => {
   // The official `/permission` command requires a signal, so the cycle must
   // never invent one here. This owner-level test only pins that fact; the
   // production fallback (bootstrap's runner lifetime signal) is proven on the
@@ -161,7 +161,7 @@ test('the cycle computes next from the projection current and dispatches EXACTLY
     'the notice is the gesture feedback')
 })
 
-test('applied does NOT install the value locally — no status repaint claims the commit', async () => {
+test('applied does NOT install the value locally: no status repaint claims the commit', async () => {
   const h = harness({ current: 'read-only' })
   const commits: unknown[] = []
   ;(h.deps.surface as unknown as { commitStatus: (patch: unknown) => void }).commitStatus = (patch: unknown) => {

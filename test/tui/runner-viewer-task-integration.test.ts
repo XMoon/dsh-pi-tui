@@ -184,7 +184,7 @@ test('an inactive child completion during observeSession is replayed by the view
       event('user/message', {
         id: MessageId('viewer-opening-first-prompt'),
         role: 'user',
-        content: [{ type: 'text', text: 'child first prompt' }],
+        content: [{ type: 'text', text: 'first prompt' }],
         source: { kind: 'user' },
       }, 10, 'append'),
       event('assistant/message', {
@@ -193,7 +193,7 @@ test('an inactive child completion during observeSession is replayed by the view
         message: {
           id: MessageId('viewer-opening-first-reply'),
           role: 'assistant',
-          content: [{ type: 'text', text: 'child first reply' }],
+          content: [{ type: 'text', text: 'first reply' }],
           source: { kind: 'model', provider: 'p', model: 'm' },
         },
         usage: { inputTokens: 9, outputTokens: 3 },
@@ -261,7 +261,7 @@ test('an inactive child completion during observeSession is replayed by the view
   emitDurable('user/message', {
     id: MessageId('viewer-opening-resumed-prompt'),
     role: 'user',
-    content: [{ type: 'text', text: 'child resumed prompt' }],
+    content: [{ type: 'text', text: 'resumed prompt' }],
     source: { kind: 'user' },
   }, 'append')
   emitDurable('assistant/message', {
@@ -270,7 +270,7 @@ test('an inactive child completion during observeSession is replayed by the view
     message: {
       id: MessageId('viewer-opening-completed'),
       role: 'assistant',
-      content: [{ type: 'text', text: 'child resumed reply' }],
+      content: [{ type: 'text', text: 'resumed reply' }],
       source: { kind: 'model', provider: 'p', model: 'm' },
     },
     usage: { inputTokens: 9, outputTokens: 3 },
@@ -287,16 +287,16 @@ test('an inactive child completion during observeSession is replayed by the view
   assert.notEqual(app.getViewerGeneration(), 0, 'the child viewer must mount after the cold observation returns')
   const messages = probe.capturedMessages ?? []
   const texts = messages.map(message => message.text ?? '')
-  assert.equal(texts.filter(text => text === 'child resumed reply').length, 1,
+  assert.equal(texts.filter(text => text === 'resumed reply').length, 1,
     'buffered child durable events must be hydrated exactly once after the stale observation cut')
-  for (const visible of ['child first prompt', 'child first reply', 'child resumed prompt', 'child resumed reply']) {
-    assert.ok(texts.includes(visible), `child history must include ${visible}: ${texts.join(' | ')}`)
+  for (const visible of ['first prompt', 'first reply', 'resumed prompt', 'resumed reply']) {
+    assert.ok(texts.includes(visible), `history must include ${visible}: ${texts.join(' | ')}`)
   }
   for (const hidden of ['parent prompt hidden from child viewer', 'parent reply hidden from child viewer', 'parent settlement notice hidden from child viewer']) {
     assert.ok(!texts.includes(hidden), `parent history must stay hidden: ${hidden}`)
   }
-  assert.ok(texts.indexOf('child first prompt') < texts.indexOf('child resumed prompt'),
-    `child turns must remain in order: ${texts.join(' | ')}`)
+  assert.ok(texts.indexOf('first prompt') < texts.indexOf('resumed prompt'),
+    `turns must remain in order: ${texts.join(' | ')}`)
 })
 
 test('an inactive child cold-resume replays its opening prefix and running activity', async (t) => {
@@ -325,7 +325,7 @@ test('an inactive child cold-resume replays its opening prefix and running activ
   const child: FakeSession = fakeSession({
     id: 'viewer-opening-live-child',
     header: { id: 'viewer-opening-live-child', cwd: home, createdAt: 1_700_000_000_001, version: SESSION_FORMAT_VERSION },
-    events: sessionEvents('child history'),
+    events: sessionEvents('history'),
   })
   const subagents = {
     listDescendants: async () => [{
@@ -384,7 +384,7 @@ test('an inactive child cold-resume replays its opening prefix and running activ
   emitLiveStream(context, childAgent, { type: 'start', attemptId: 'viewer-opening-live', revision: 1, turn: 1, step: 0 })
   emitLiveStream(context, childAgent, {
     type: 'chunk', attemptId: 'viewer-opening-live', revision: 2, index: 0,
-    time: 1_700_000_000_200, chunk: { type: 'text-delta', index: 0, text: 'child opening prefix' },
+    time: 1_700_000_000_200, chunk: { type: 'text-delta', index: 0, text: 'opening prefix' },
   })
   releaseObservation()
   await settle()
@@ -392,7 +392,7 @@ test('an inactive child cold-resume replays its opening prefix and running activ
   assert.notEqual(app.getViewerGeneration(), 0, 'the child viewer must mount after observation')
   assert.equal((probe.capturedViewerMode as { activity?: string } | undefined)?.activity, 'running',
     'the attached Agent runtime status must override stale catalog and durable history activity during viewer opening')
-  assert.ok((probe.capturedMessages ?? []).some(message => message.text === 'child opening prefix'),
+  assert.ok((probe.capturedMessages ?? []).some(message => message.text === 'opening prefix'),
     'the exact child Agent baseline must replay after durable opening hydration')
 })
 
@@ -423,13 +423,13 @@ test('the parent Preparing projection and child viewer lifecycle rollover stay l
   const child: FakeSession = fakeSession({
     id: 'child-preparing-viewer-session',
     header: { id: 'child-preparing-viewer-session', cwd: home, createdAt: 1_700_000_000_001, version: SESSION_FORMAT_VERSION },
-    events: sessionEvents('child answer'),
+    events: sessionEvents('answer'),
   })
   const subagents = {
     listDescendants: async () => [{
       kind: 'child',
       id: child.id,
-      label: 'child viewer',
+      label: 'viewer',
       mode: 'continuable',
       activity: 'running',
       hasChildren: false,
@@ -667,13 +667,13 @@ test('the interactive child viewer projects its own authoritative steering and n
       version: SESSION_FORMAT_VERSION,
       parentSession: 'parent-child-steering',
     },
-    events: sessionEvents('child answer'),
+    events: sessionEvents('answer'),
   })
   const subagents = {
     listDescendants: async () => [{
       kind: 'child',
       id: child.id,
-      label: 'child steer',
+      label: 'steer',
       mode: 'continuable',
       activity: 'running',
       hasChildren: false,
@@ -1514,7 +1514,7 @@ test('session switch does not let an old coalesced refresh block the new session
       version: SESSION_FORMAT_VERSION,
       parentSession: 'coalesce-switch-b',
     },
-    events: sessionEvents('child b answer'),
+    events: sessionEvents('b answer'),
   })
   const listings: { sessionId: string; resolve: (entries: readonly SubagentDescendantListEntry[]) => void }[] = []
   const subagents = {
@@ -1563,7 +1563,7 @@ test('session switch does not let an old coalesced refresh block the new session
   // The OLD session settles while B's FIRST read is still in flight. The
   // generation fence must make it a total no-op: no A trailing read, and — the
   // point of this ordering — it must NOT clear B's in-flight mark.
-  listings[0]!.resolve([descendantEntry('coalesce-switch-child-a', 'child a', sessionA.id)])
+  listings[0]!.resolve([descendantEntry('coalesce-switch-child-a', 'a', sessionA.id)])
   await settle()
   assert.equal(listings.length, 2,
     'a superseded generation must not schedule a trailing read while the new session is in flight')
@@ -1588,11 +1588,11 @@ test('session switch does not let an old coalesced refresh block the new session
 
   // B's first read settles: the coalesced B invalidation produces exactly ONE
   // trailing B read, then B is idle again.
-  listings[1]!.resolve([descendantEntry(childB.id, 'child b', sessionB.id)])
+  listings[1]!.resolve([descendantEntry(childB.id, 'b', sessionB.id)])
   await settle()
   assert.equal(listings.length, 3, 'session B must produce its own trailing read')
   assert.equal(listings[2]!.sessionId, sessionB.id)
-  listings[2]!.resolve([descendantEntry(childB.id, 'child b', sessionB.id)])
+  listings[2]!.resolve([descendantEntry(childB.id, 'b', sessionB.id)])
   await settle()
   assert.deepEqual(badges.at(-1)?.map(entry => entry.id), [childB.id],
     'session B must project its running child into the badge')
@@ -1969,17 +1969,17 @@ test('the Direct child viewer derives its display subject from SessionStatus(chi
   const childA = fakeSession({
     id: 'display-subject-child-a',
     header: { id: 'display-subject-child-a', cwd: childACwd, createdAt: 1_700_000_000_001, version: SESSION_FORMAT_VERSION },
-    events: sessionEvents('child a answer'),
+    events: sessionEvents('a answer'),
   })
   const childB = fakeSession({
     id: 'display-subject-child-b',
     header: { id: 'display-subject-child-b', cwd: childBCwd, createdAt: 1_700_000_000_002, version: SESSION_FORMAT_VERSION },
-    events: sessionEvents('child b answer'),
+    events: sessionEvents('b answer'),
   })
   const subagents = {
     listDescendants: async () => [
-      { kind: 'child', id: childA.id, label: 'child display subject A', mode: 'continuable', activity: 'running', hasChildren: false, parentId: parent.id, depth: 1 },
-      { kind: 'child', id: childB.id, label: 'child display subject B', mode: 'continuable', activity: 'running', hasChildren: false, parentId: parent.id, depth: 1 },
+      { kind: 'child', id: childA.id, label: 'display subject A', mode: 'continuable', activity: 'running', hasChildren: false, parentId: parent.id, depth: 1 },
+      { kind: 'child', id: childB.id, label: 'display subject B', mode: 'continuable', activity: 'running', hasChildren: false, parentId: parent.id, depth: 1 },
     ],
   }
   const harness = makeHarness(home, [parent, childA, childB], { provider: 'p', model: 'parent-model' }, undefined, undefined, subagents)
@@ -1996,7 +1996,7 @@ test('the Direct child viewer derives its display subject from SessionStatus(chi
   // the official projection and commit the corresponding durable event (the
   // real Host order), then require the display subject to follow WITHOUT a
   // turn/step boundary.
-  let childATitle = 'child a title'
+  let childATitle = 'a title'
   let childATodos: readonly { readonly content: string; readonly status: 'pending' | 'in_progress' | 'completed' }[] = [
     { content: 'CHILD-A-TODO', status: 'in_progress' },
     { content: 'CHILD-A-TODO-2', status: 'pending' },
@@ -2010,7 +2010,7 @@ test('the Direct child viewer derives its display subject from SessionStatus(chi
         get agentPreset() { return childAPreset },
         permissions: { currentValue: 'read-only' },
         get title() { return childATitle },
-        goal: { goal: { objective: 'child a objective', phase: 'active' } },
+        goal: { goal: { objective: 'a objective', phase: 'active' } },
         contextPressure: { projectedTokens: 100, contextWindow: 2000 },
         tokenUsage: { uncachedInputTokens: 11, outputTokens: 5, cacheReadTokens: 0, cacheWriteTokens: 0 },
         get todos() { return childATodos },
@@ -2019,7 +2019,7 @@ test('the Direct child viewer derives its display subject from SessionStatus(chi
     [childB.id]: {
       modelSelection: { lastUsed: { provider: 'deepseek', model: 'child-b-model' } },
       permissions: { currentValue: 'workspace-write' },
-      title: 'child b title',
+      title: 'b title',
       contextPressure: { pressureTokens: 300, contextWindow: 4000 },
       tokenUsage: { uncachedInputTokens: 21, outputTokens: 9, cacheReadTokens: 0, cacheWriteTokens: 0 },
       todos: [{ content: 'CHILD-B-TODO', status: 'pending' }],
@@ -2079,7 +2079,7 @@ test('the Direct child viewer derives its display subject from SessionStatus(chi
   assert.deepEqual(aStatus.view.subject, {
     kind: 'subagent',
     id: childA.id,
-    label: 'child display subject A',
+    label: 'display subject A',
     mode: 'continuable',
     activity: 'running',
   })
@@ -2099,7 +2099,7 @@ test('the Direct child viewer derives its display subject from SessionStatus(chi
   assert.ok(aPresentation, 'the child display-subject presentation must travel in the same commit')
   assert.equal(aPresentation.sessionId, childA.id)
   assert.equal(aPresentation.workspaceRoot, childACwd)
-  assert.equal(aPresentation.title, 'child a title')
+  assert.equal(aPresentation.title, 'a title')
   assert.deepEqual(aPresentation.todos, [
     { content: 'CHILD-A-TODO', status: 'in_progress' },
     { content: 'CHILD-A-TODO-2', status: 'pending' },
@@ -2121,7 +2121,7 @@ test('the Direct child viewer derives its display subject from SessionStatus(chi
   // count and the child workspace.
   const viewA = vt.getViewport().join('\n')
   assert.ok(viewA.includes('‹ back'), `the viewer subject bar must render:\n${viewA}`)
-  assert.ok(viewA.includes('child display subject A'), `the child label must render:\n${viewA}`)
+  assert.ok(viewA.includes('display subject A'), `the child label must render:\n${viewA}`)
   assert.ok(viewA.includes('child-a-ws'), `the child workspace must render:\n${viewA}`)
   assert.ok(viewA.includes('deepseek/child-a-model'), `the child model must render:\n${viewA}`)
   assert.ok(!viewA.includes('[subagent · continuable]'), `the retired viewer badge must not render:\n${viewA}`)
@@ -2162,23 +2162,23 @@ test('the Direct child viewer derives its display subject from SessionStatus(chi
   // INVALIDATION (M3-5 PR1 review R4): a child `session/title` alone — with NO
   // step/end / turn/end boundary around it — must re-derive the display subject
   // immediately. The Host commits the event AND its projection moves.
-  childATitle = 'child a retitled'
+  childATitle = 'a retitled'
   // The Host commits the durable event through its own Session append (the
   // production shape: the fake session's `append` is the same primitive the
   // other runner suites use).
-  context.emit('session/event', childA as never, childA.append!('session/title', { title: 'child a retitled' }) as SessionEvent)
+  context.emit('session/event', childA as never, childA.append!('session/title', { title: 'a retitled' }) as SessionEvent)
   await settle()
   await vt.waitForRender()
-  assert.equal(probe.capturedDisplaySubject?.presentation?.title, 'child a retitled',
+  assert.equal(probe.capturedDisplaySubject?.presentation?.title, 'a retitled',
     'a lone child session/title must reach the display-subject presentation without a boundary')
   const subjectAfterTitle = probe.displaySubject() as { readonly title?: string; readonly sessionId?: string } | undefined
   assert.equal(subjectAfterTitle?.sessionId, childA.id)
-  assert.equal(subjectAfterTitle?.title, 'child a retitled',
+  assert.equal(subjectAfterTitle?.title, 'a retitled',
     'the EXTENSION-visible display-subject title must follow a lone child session/title immediately')
   // The BAR follows the same title-only change even though no StatusStore
   // SECTION changed (the store therefore does not notify); the presentation
   // projection is re-read at the atomic commit point.
-  assert.ok(app.viewerSubjectBarRenderRowsForTest().join('\n').includes('child a retitled'),
+  assert.ok(app.viewerSubjectBarRenderRowsForTest().join('\n').includes('a retitled'),
     'a lone child session/title must refresh the subject bar without any store section change')
 
   // The same for a child `todo/write`: the display-subject todo list (and the
@@ -2197,7 +2197,7 @@ test('the Direct child viewer derives its display subject from SessionStatus(chi
   const viewTodoWrite = vt.getViewport().join('\n')
   assert.ok(viewTodoWrite.includes('3 active · CHILD-A-TODO-3'),
     `the rendered child todo summary must follow the lone todo/write:\n${viewTodoWrite}`)
-  assert.ok(viewTodoWrite.includes('child a retitled'),
+  assert.ok(viewTodoWrite.includes('a retitled'),
     `the committed child title must render in the subject bar:\n${viewTodoWrite}`)
 
   // INVALIDATION (M3-5 PR1 review R4): a lone child `model/selection` — the
@@ -2332,10 +2332,10 @@ test('the Direct child viewer derives its display subject from SessionStatus(chi
     turn: 3, step: 0,
     message: {
       id: MessageId('ux2-child-answer'), role: 'assistant',
-      content: [{ type: 'text', text: 'child answer ux2' }], source: { kind: 'assistant' },
+      content: [{ type: 'text', text: 'answer ux2' }], source: { kind: 'assistant' },
     },
   }) as SessionEvent)
-  await waitForView('child answer ux2')
+  await waitForView('answer ux2')
   const childFrozenView = plain(vt.getViewport().join('\n'))
   const childFrozen = activitySeconds(vt.getViewport().join('\n'))
   assert.ok(childFrozen !== undefined && childFrozen >= childSilent && childFrozen <= childSilent + 2,
@@ -2378,16 +2378,16 @@ test('the Direct child viewer derives its display subject from SessionStatus(chi
     turn: 4, step: 0,
     message: {
       id: MessageId('ux2-e5-reasoning'), role: 'assistant',
-      content: [{ type: 'reasoning', text: 'e5 thought' }, { type: 'text', text: 'e5 answer' }],
+      content: [{ type: 'reasoning', text: 'thought' }, { type: 'text', text: 'answer' }],
       source: { kind: 'model', provider: 'p', model: 'm' },
     },
     stream: [
       { type: 'chunk', time: 1_700_000_000_000 + 322_000, chunk: { type: 'block-start', index: 0, blockType: 'reasoning' } },
-      { type: 'chunk', time: 1_700_000_000_000 + 322_000, chunk: { type: 'reasoning-delta', index: 0, text: 'e5 thought' } },
-      { type: 'chunk', time: 1_700_000_000_000 + 323_000, chunk: { type: 'block-end', index: 0, block: { type: 'reasoning', text: 'e5 thought' } } },
+      { type: 'chunk', time: 1_700_000_000_000 + 322_000, chunk: { type: 'reasoning-delta', index: 0, text: 'thought' } },
+      { type: 'chunk', time: 1_700_000_000_000 + 323_000, chunk: { type: 'block-end', index: 0, block: { type: 'reasoning', text: 'thought' } } },
       { type: 'chunk', time: 1_700_000_000_000 + 324_000, chunk: { type: 'block-start', index: 1, blockType: 'text' } },
-      { type: 'chunk', time: 1_700_000_000_000 + 324_000, chunk: { type: 'text-delta', index: 1, text: 'e5 answer' } },
-      { type: 'chunk', time: 1_700_000_000_000 + 325_000, chunk: { type: 'block-end', index: 1, block: { type: 'text', text: 'e5 answer' } } },
+      { type: 'chunk', time: 1_700_000_000_000 + 324_000, chunk: { type: 'text-delta', index: 1, text: 'answer' } },
+      { type: 'chunk', time: 1_700_000_000_000 + 325_000, chunk: { type: 'block-end', index: 1, block: { type: 'text', text: 'answer' } } },
     ],
   }, 321))
   // A THIRD Work that is still OPEN when turn/end arrives: this is the decisive
@@ -2444,15 +2444,15 @@ test('the Direct child viewer derives its display subject from SessionStatus(chi
     'pressureTokens is B’s numerator when projectedTokens is absent')
   assert.equal(bStatus.composition.agentPreset, undefined, 'B records no preset — A’s must not survive')
   assert.deepEqual(probe.capturedDisplaySubject?.presentation?.todos, [{ content: 'CHILD-B-TODO', status: 'pending' }])
-  assert.equal(probe.capturedDisplaySubject?.presentation?.title, 'child b title')
+  assert.equal(probe.capturedDisplaySubject?.presentation?.title, 'b title')
   assert.equal(probe.capturedDisplaySubject?.presentation?.goal, undefined, 'A’s goal must not survive into B')
   assert.equal(probe.capturedDisplaySubject?.legacy?.cwd, home, 'B’s commit keeps the LIVE legacy facts')
   const viewB = vt.getViewport().join('\n')
-  assert.ok(viewB.includes('child display subject B'), `the rendered subject bar must show B’s identity:\n${viewB}`)
+  assert.ok(viewB.includes('display subject B'), `the rendered subject bar must show B’s identity:\n${viewB}`)
   assert.ok(viewB.includes('child-b-ws'), `the rendered footer must show B’s workspace:\n${viewB}`)
   assert.ok(!viewB.includes('child-a-ws'), `A’s workspace must not survive into B:\n${viewB}`)
   assert.ok(!viewB.includes('child-a-model'), `A’s model must not survive into the subject bar:\n${viewB}`)
-  assert.ok(!viewB.includes('child a retitled'), `A’s title must not survive into B’s subject bar:\n${viewB}`)
+  assert.ok(!viewB.includes('a retitled'), `A’s title must not survive into B’s subject bar:\n${viewB}`)
 
   // Child → main restores the parent subject.
   input('\x1b')
@@ -2495,7 +2495,7 @@ test('the Direct child viewer derives its display subject from SessionStatus(chi
   assert.ok(!viewNoOfficial.includes('↑11'), `the removed official value must not linger:\n${viewNoOfficial}`)
   assert.ok(!viewNoOfficial.includes('↓'), `no token figures may render when the official usage is unavailable:\n${viewNoOfficial}`)
   assert.ok(!viewNoOfficial.includes('100/2.0k'), `no context window may render when the official child context is unavailable:\n${viewNoOfficial}`)
-  assert.ok(viewNoOfficial.includes('child display subject A'), `the child identity must still render:\n${viewNoOfficial}`)
+  assert.ok(viewNoOfficial.includes('display subject A'), `the child identity must still render:\n${viewNoOfficial}`)
   assert.ok(viewNoOfficial.includes('model ?'),
     `an absent official child model must render the unknown token, never a parent value:\n${viewNoOfficial}`)
   assert.ok(!viewNoOfficial.includes('child-a-model'),
@@ -2633,7 +2633,7 @@ test('a viewer follow-up refusal settles through the production viewer into the 
       event('user/message', {
         id: MessageId('viewer-settle-first-prompt'),
         role: 'user',
-        content: [{ type: 'text', text: 'child first prompt' }],
+        content: [{ type: 'text', text: 'first prompt' }],
         source: { kind: 'user' },
       }, 2, 'append'),
       event('assistant/message', {
@@ -2642,7 +2642,7 @@ test('a viewer follow-up refusal settles through the production viewer into the 
         message: {
           id: MessageId('viewer-settle-first-reply'),
           role: 'assistant',
-          content: [{ type: 'text', text: 'child first reply' }],
+          content: [{ type: 'text', text: 'first reply' }],
           source: { kind: 'model', provider: 'p', model: 'm' },
         },
         usage: { inputTokens: 3, outputTokens: 2 },
@@ -2818,7 +2818,7 @@ test('Direct viewer shows the child’s used model and follows later request hea
     id: 'direct-model-child-a',
     header: { id: 'direct-model-child-a', cwd: childACwd, createdAt: 1_700_000_000_101, version: SESSION_FORMAT_VERSION },
     events: [
-      ...sessionEvents('child a answer'),
+      ...sessionEvents('a answer'),
       modelEvent('request/header', { header: { config: { provider: 'deepseek', model: 'child-a-used-model', reasoningEffort: 'high' } }, reason: 'initial' }, 6),
     ],
   })
@@ -2826,7 +2826,7 @@ test('Direct viewer shows the child’s used model and follows later request hea
     id: 'direct-model-child-b',
     header: { id: 'direct-model-child-b', cwd: childBCwd, createdAt: 1_700_000_000_102, version: SESSION_FORMAT_VERSION },
     events: [
-      ...sessionEvents('child b answer'),
+      ...sessionEvents('b answer'),
       modelEvent('request/header', { header: { config: { provider: 'deepseek', model: 'child-b-used-model' } }, reason: 'initial' }, 6),
     ],
   })
@@ -3224,7 +3224,7 @@ test('PERF (plan §5): the Direct compat read adds no perceptible refresh cost o
   assert.equal(compat.logScans, official.logScans,
     `the compat read must add no Session-log scan (compat ${compat.logScans}, official ${official.logScans})`)
   console.log(`[perf] compat overhead over the official path: mean ${(compat.mean - official.mean).toFixed(3)}`
-    + ` p95 ${(compat.p95 - official.p95).toFixed(3)} max ${(compat.max - official.max).toFixed(3)} ms/event`)
+    + `${(compat.p95: official.p95).toFixed(3)} max ${(compat.max - official.max).toFixed(3)} ms/event`)
   assert.ok(compat.p95 < 50,
     `no refresh lane may stall pathologically; measured p95 ${compat.p95.toFixed(3)} ms/event`)
 })
@@ -3264,7 +3264,7 @@ test('the real /tasks Subagent interrupt admits through the session writer and a
   const child: FakeSession = fakeSession({
     id: 'task-interrupt-safety-child',
     header: { id: 'task-interrupt-safety-child', cwd: home, createdAt: 1_700_000_000_001, version: SESSION_FORMAT_VERSION },
-    events: sessionEvents('child answer'),
+    events: sessionEvents('answer'),
   })
   // The task's verified hostile fixture: OSC 52 clipboard write + readable
   // text + CSI erase, carried by the OFFICIAL subagent label.

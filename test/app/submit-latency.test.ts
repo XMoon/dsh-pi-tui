@@ -161,7 +161,7 @@ test('dispatch is stamped BEFORE the delivery: synchronously-emitted events log 
   assert.deepEqual(sink.lines.map(line => line.message), [
     'submit.accept', 'submit.dispatch', 'submit.inbox.inserted',
     'submit.turn.start', 'submit.user.message', 'submit.assistant.first',
-  ], 'T1 must never trail T2-T5')
+  ], 'must never trail T2-T5')
 })
 
 test('COALESCING (documented): a late dispatch from an older in-flight submission coalesces into the newest baseline', () => {
@@ -215,7 +215,7 @@ test('the timeline SURVIVES a previous turn ending (queued submissions keep T1-T
   tracker.mark('s', 'assistant.first')
   const offsets = sink.lines.filter(line => line.message !== 'submit.accept').map(line => line.fields?.offset)
   assert.deepEqual(offsets, ['0ms', '0ms', '2000ms', '2000ms', '5000ms'],
-    'T1-T5 must survive the previous turn ending (2000ms = the previous turn\'s tail)')
+    'must survive the previous turn ending (2000ms = the previous turn\'s tail)')
 })
 
 test('assistant.first AUTO-COMPLETES the timeline (a new accept starts the next)', () => {
@@ -256,7 +256,7 @@ test('PREREQUISITE: a chunk from a STILL-STREAMING previous turn cannot steal as
   time.advance(100)
   // Turn 12 is still streaming: a chunk lands with no user.message yet.
   assert.equal(tracker.mark('s', 'assistant.first'), false,
-    'T5 before T4 must be refused (the chunk belongs to the previous turn)')
+    'before T4 must be refused (the chunk belongs to the previous turn)')
   assert.equal(sink.lines.filter(line => line.message === 'submit.assistant.first').length, 0,
     'no T5 line, and the timeline is NOT auto-completed by a foreign chunk')
   // Turn 12 ends; turn 13 processes B: the real journey completes.
@@ -268,7 +268,7 @@ test('PREREQUISITE: a chunk from a STILL-STREAMING previous turn cannot steal as
     'the REAL first chunk (after user.message) logs T5')
   const t5 = sink.lines.filter(line => line.message === 'submit.assistant.first')
   assert.equal(t5.length, 1)
-  assert.equal(t5[0]!.fields?.offset, '2650ms', 'T5 measures the true first-token latency')
+  assert.equal(t5[0]!.fields?.offset, '2650ms', 'measures the true first-token latency')
   // The timeline auto-completed after the real T5.
   assert.equal(tracker.mark('s', 'user.message'), false, 'post-completion marks are no-ops')
 })

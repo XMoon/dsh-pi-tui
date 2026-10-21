@@ -139,7 +139,7 @@ test('an UNQUALIFIED busy-turn tool-jobs notice stays visible after the Thought 
 
 test('unqualified busy-turn notices render by form, not source kind', () => {
   for (const sourceKind of ['tool-jobs', 'subagent-settled', 'future-producer']) {
-    const noticeRow = notice('Agent notice', 'child settled', sourceKind)
+    const noticeRow = notice('Agent notice', 'settled', sourceKind)
     const messages = [user('go'), thinking('first'), tool(), noticeRow, assistant('final')]
     assert.ok(collapsed(messages).includes(noticeRow), `source ${sourceKind}: visible while collapsed`)
     assert.equal(expanded(messages).indexOf(noticeRow), 3, `source ${sourceKind}: restored when expanded`)

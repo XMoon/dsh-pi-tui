@@ -199,7 +199,7 @@ test('lastAssistantText: a superseded paging result is dropped (undefined)', asy
 
 /* ── PR5 v2 §1B-2: unknown stays unknown (never `?? 0`) ─────────────────── */
 
-test('absent projections stay absent groups — never fabricated zeros', async () => {
+test('absent projections stay absent groups: never fabricated zeros', async () => {
   const window: PresentationReadSnapshot = {
     sessionId: 's', durableEvents: [] as never, liveInputs: [], revision: 1,
     coverage: 'full', hasMore: false, loadingOlder: false, openState: 'open',

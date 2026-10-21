@@ -125,7 +125,7 @@ function completedTurn(turn: number, baseSeq: number, startTime: number): Sessio
       message: {
         id: MessageId(`msg-a-${turn}`),
         role: 'assistant',
-        content: [{ type: 'text', text: `final answer ${turn}` }],
+        content: [{ type: 'text', text: `answer ${turn}` }],
         source: { kind: 'model', provider: 'p', model: 'm' },
       },
     }, startTime + 5, baseSeq + 5),
@@ -416,7 +416,7 @@ test('parallel tool results never yank the Tool slot back to an older call (plan
 test('an empty assistant/message without a prior chunk still owns the final slot (no earlier fallback)', () => {
   const folder = new TranscriptFolder()
   applyMixed(folder, [
-    ...completedTurn(0, 0, 1000).slice(0, -1), // step 1: 'final answer text'
+    ...completedTurn(0, 0, 1000).slice(0, -1), // step 1: 'answer text'
     // The exact last assistant/message is EMPTY and has no preceding chunk.
     eventAt('assistant/message', {
       turn: 0, step: 2,
@@ -425,7 +425,7 @@ test('an empty assistant/message without a prior chunk still owns the final slot
     eventAt('turn/end', { turn: 0, reason: { kind: 'completed' } }, 1000 + 12, 22),
   ])
   const messages = folder.messages()
-  assert.equal(messages.findLast(m => m.kind === 'assistant')?.text, 'final answer 0',
+  assert.equal(messages.findLast(m => m.kind === 'assistant')?.text, 'answer 0',
     'the earlier text row remains visible while the empty authority stays hidden')
   assert.equal(folder.turnActivity(0)?.lastAssistantVisible, false,
     'the hidden exact-last marker prevents earlier final fallback')
@@ -1727,7 +1727,7 @@ test('PTC child error never marks the root; the outer result decides', () => {
   ])
   const body = focusCollapsedBody(failedChild.turnActivity(0)!, 80, focusActionPresentationOf(failedChild))
   const actionLine = body.find(line => line.startsWith('Action:'))
-  assert.ok(actionLine !== undefined && !actionLine.includes('✗'), `child failure must not mark the root:\n${actionLine}`)
+  assert.ok(actionLine !== undefined && !actionLine.includes('✗'), `failure must not mark the root: \n${actionLine}`)
   // Root success after a failed child: ✓ Code.
   const folder = new TranscriptFolder()
   applyMixed(folder, [
@@ -2247,7 +2247,7 @@ test('Focus ON collapsed: user → FocusActivity → final, process hidden', () 
   const final = blocks[2]
   assert.ok(final !== undefined && final.kind === 'message')
   if (final.kind === 'message' && final.message.kind === 'assistant') {
-    assert.equal(final.message.text, 'final answer 0')
+    assert.equal(final.message.text, 'answer 0')
   } else {
     assert.fail('the final block must be the assistant message')
   }
@@ -2266,7 +2266,7 @@ test('a reasoning-first durable step renders Activity before the final Assistant
         role: 'assistant',
         content: [
           { type: 'reasoning', text: 'checking the plan first' },
-          { type: 'text', text: 'final answer' },
+          { type: 'text', text: 'answer' },
         ],
         source: { kind: 'model', provider: 'p', model: 'm' },
       },
@@ -2275,8 +2275,8 @@ test('a reasoning-first durable step renders Activity before the final Assistant
         { type: 'chunk', time: 1003, chunk: { type: 'reasoning-delta', index: 0, text: 'checking the plan first' } },
         { type: 'chunk', time: 1004, chunk: { type: 'block-end', index: 0, block: { type: 'reasoning', text: 'checking the plan first' } } },
         { type: 'chunk', time: 1005, chunk: { type: 'block-start', index: 1, blockType: 'text' } },
-        { type: 'chunk', time: 1006, chunk: { type: 'text-delta', index: 1, text: 'final answer' } },
-        { type: 'chunk', time: 1007, chunk: { type: 'block-end', index: 1, block: { type: 'text', text: 'final answer' } } },
+        { type: 'chunk', time: 1006, chunk: { type: 'text-delta', index: 1, text: 'answer' } },
+        { type: 'chunk', time: 1007, chunk: { type: 'block-end', index: 1, block: { type: 'text', text: 'answer' } } },
       ],
     }, 1008, 2),
     eventAt('turn/end', { turn: 0, reason: { kind: 'completed' } }, 1009, 3),
@@ -2316,7 +2316,7 @@ test('a reasoning-first durable step keeps its Activity before the final Assista
         role: 'assistant',
         content: [
           { type: 'reasoning', text: 'checking the plan first' },
-          { type: 'text', text: 'final answer' },
+          { type: 'text', text: 'answer' },
         ],
         source: { kind: 'model', provider: 'p', model: 'm' },
       },
@@ -2325,8 +2325,8 @@ test('a reasoning-first durable step keeps its Activity before the final Assista
         { type: 'chunk', time: 1003, chunk: { type: 'reasoning-delta', index: 0, text: 'checking the plan first' } },
         { type: 'chunk', time: 1004, chunk: { type: 'block-end', index: 0, block: { type: 'reasoning', text: 'checking the plan first' } } },
         { type: 'chunk', time: 1005, chunk: { type: 'block-start', index: 1, blockType: 'text' } },
-        { type: 'chunk', time: 1006, chunk: { type: 'text-delta', index: 1, text: 'final answer' } },
-        { type: 'chunk', time: 1007, chunk: { type: 'block-end', index: 1, block: { type: 'text', text: 'final answer' } } },
+        { type: 'chunk', time: 1006, chunk: { type: 'text-delta', index: 1, text: 'answer' } },
+        { type: 'chunk', time: 1007, chunk: { type: 'block-end', index: 1, block: { type: 'text', text: 'answer' } } },
       ],
     }, 1008, 2),
     eventAt('turn/end', { turn: 0, reason: { kind: 'completed' } }, 1009, 3),
@@ -2466,7 +2466,7 @@ test('turnActivities returns the SAME objects by reference (no per-repaint copy)
 test('the final is the EXACT last assistant: an empty last step yields NO final (no earlier fallback)', () => {
   const folder = new TranscriptFolder()
   applyMixed(folder, [
-    ...completedTurn(0, 0, 1000).slice(0, -1), // step 1 settles 'final answer text'
+    ...completedTurn(0, 0, 1000).slice(0, -1), // step 1 settles 'answer text'
     // step 2 streams then settles to EMPTY text (the folder keeps the
     // entry, text becomes '').
     eventAt('assistant/chunk', { turn: 0, step: 2, chunk: { type: 'text-delta', index: 0, text: 'partial' } }, 1000 + 10, 20),
@@ -2477,7 +2477,7 @@ test('the final is the EXACT last assistant: an empty last step yields NO final 
     eventAt('turn/end', { turn: 0, reason: { kind: 'completed' } }, 1000 + 12, 22),
   ])
   const messages = folder.messages()
-  assert.equal(messages.findLast(m => m.kind === 'assistant')?.text, 'final answer 0',
+  assert.equal(messages.findLast(m => m.kind === 'assistant')?.text, 'answer 0',
     'the earlier text row remains visible while the empty exact-last row stays hidden')
   assert.equal(folder.turnActivity(0)?.lastAssistantVisible, false)
   const blocks = projectFocusFlat(messages, folder.turnActivities(), new Set(), true)
@@ -2488,7 +2488,7 @@ test('the final is the EXACT last assistant: an empty last step yields NO final 
 test('an image-only final assistant is the EXACT final (never falls back to the earlier text step)', () => {
   const folder = new TranscriptFolder()
   applyMixed(folder, [
-    ...completedTurn(0, 0, 1000).slice(0, -1), // step 1: 'final answer text'
+    ...completedTurn(0, 0, 1000).slice(0, -1), // step 1: 'answer text'
     eventAt('assistant/message', {
       turn: 0, step: 2,
       message: {
@@ -2532,7 +2532,7 @@ test('a reasoning-only exact last assistant is NOT renderable — no final', () 
     eventAt('turn/end', { turn: 0, reason: { kind: 'completed' } }, 1000 + 12, 22),
   ])
   const messages = folder.messages()
-  assert.equal(messages.findLast(m => m.kind === 'assistant')?.text, 'final answer 0',
+  assert.equal(messages.findLast(m => m.kind === 'assistant')?.text, 'answer 0',
     'the earlier text row remains visible while the reasoning-only exact-last row stays hidden')
   assert.equal(folder.turnActivity(0)?.lastAssistantVisible, false)
   const blocks = projectFocusFlat(messages, folder.turnActivities(), new Set(), true)
@@ -2781,7 +2781,7 @@ function steeredTurn(turn: number, baseSeq: number, startTime: number): SessionE
       turn, step: 1,
       message: {
         id: MessageId(`msg-a-${turn}`), role: 'assistant',
-        content: [{ type: 'text', text: `final answer ${turn}` }],
+        content: [{ type: 'text', text: `answer ${turn}` }],
         source: { kind: 'model', provider: 'p', model: 'm' },
       },
     }, startTime + 8, baseSeq + 8),
@@ -3443,7 +3443,7 @@ test('expanded: injected/system context before the initial user stays above the 
     }, 1005, 5),
     eventAt('assistant/message', {
       turn: 0, step: 1,
-      message: { id: MessageId('a-0'), role: 'assistant', content: [{ type: 'text', text: 'final answer 0' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+      message: { id: MessageId('a-0'), role: 'assistant', content: [{ type: 'text', text: 'answer 0' }], source: { kind: 'model', provider: 'p', model: 'm' } },
     }, 1006, 6),
     eventAt('turn/end', { turn: 0, reason: { kind: 'completed' } }, 7000, 7),
   ])
@@ -3517,7 +3517,7 @@ test('expanded: multiple steers keep their relative chronology', () => {
     }, 2000, 50),
     eventAt('assistant/message', {
       turn: 0, step: 2,
-      message: { id: MessageId('a2'), role: 'assistant', content: [{ type: 'text', text: 'final after second steer' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+      message: { id: MessageId('a2'), role: 'assistant', content: [{ type: 'text', text: 'after second steer' }], source: { kind: 'model', provider: 'p', model: 'm' } },
     }, 2001, 51),
     eventAt('turn/end', { turn: 0, reason: { kind: 'completed' } }, 2002, 52),
   ])

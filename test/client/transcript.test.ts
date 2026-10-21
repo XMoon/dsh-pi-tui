@@ -2799,14 +2799,14 @@ test('a subagent settlement notice folds as the Host-constructed text-only notic
     event('user/message', {
       id: MessageId('msg-settled'),
       role: 'user',
-      content: [{ type: 'text', text: 'child finished: 2 files written' }],
+      content: [{ type: 'text', text: 'finished: 2 files written' }],
       source: { kind: 'subagent-settled' } as never,
     }, 0),
   ])
   const notice = messages[0]
   assert.ok(notice !== undefined && notice.kind === 'system')
   assert.equal(notice.icon, 'context-notice')
-  assert.equal(notice.text, 'child finished: 2 files written')
+  assert.equal(notice.text, 'finished: 2 files written')
 })
 
 test('multiple subagent settlement notices keep their Host order', () => {
@@ -4136,7 +4136,7 @@ function messageSettlement(seq: number, step: { stream: AssistantStreamRecord[];
 /** One durable text-only `assistant/message` settlement (empty stream — no
  * STREAM lane evidence; the text-only content itself proves an
  * assistant-first step). */
-function textOnlySettlement(seq: number, text = 'final answer'): SessionEvent {
+function textOnlySettlement(seq: number, text = 'answer'): SessionEvent {
   return event('assistant/message', {
     turn: 0,
     step: 0,
@@ -4475,12 +4475,12 @@ test('lane displacement keeps TranscriptItemId and search/window/group contracts
     event('step/start', { turn: 0, step: 0 }, 1),
     textOnlySettlement(2),
     event('tool/call', { turn: 0, step: 0, callId: ToolCallId('r1'), name: 'read', arguments: '{"file_path":"r1.ts"}' }, 3),
-    toolResult(4, 'r1', 'r1 ok', 'read'),
+    toolResult(4, 'r1', 'ok', 'read'),
   ])
   folder.applyLiveInput(liveChunk(0, 0, { type: 'reasoning-delta', index: 9, text: 'late diagnostic thought' }, 5))
   folder.apply([
     event('tool/call', { turn: 0, step: 0, callId: ToolCallId('r2'), name: 'read', arguments: '{"file_path":"r2.ts"}' }, 6),
-    toolResult(7, 'r2', 'r2 ok', 'read'),
+    toolResult(7, 'r2', 'ok', 'read'),
   ])
   // [Assistant, read r1, Thinking, read r2] — the visible Thinking row sits
   // between the two reads, so they stay individual cards.
@@ -4491,7 +4491,7 @@ test('lane displacement keeps TranscriptItemId and search/window/group contracts
   // the replacement ('ordered thought' — the authoritative replacement
   // replaces the row TEXT in place, same id).
   const thinkingBefore = folder.search('thought')
-  const readBefore = folder.search('r1 ok')
+  const readBefore = folder.search('ok')
   assert.equal(thinkingBefore.length, 1)
   assert.equal(readBefore.length, 1)
   folder.apply([messageSettlement(8, laneOrderedStep('thinking'))])
@@ -4507,7 +4507,7 @@ test('lane displacement keeps TranscriptItemId and search/window/group contracts
   assert.match(mergedRead.args, /2 files/u)
   assert.equal(folder.search('late diagnostic').length, 0, 'the authoritative replacement replaced the diagnostic text in place')
   const thinkingAfter = folder.search('thought')
-  const readAfter = folder.search('r1 ok')
+  const readAfter = folder.search('ok')
   assert.equal(thinkingAfter.length, 1)
   assert.equal(readAfter.length, 1)
   assert.equal(thinkingAfter[0]?.id, thinkingBefore[0]?.id, 'the Thinking hit keeps its TranscriptItemId across the displacement')
@@ -4556,7 +4556,7 @@ test('a displaced lane pair stays unique and ordered inside a bounded window', (
   assert.equal(windowed.messages.filter(message => message.kind === 'assistant').length, 1, 'the anchor Assistant row appears exactly once')
   const merged = windowed.messages.find(message => message.kind === 'tool')
   assert.ok(merged !== undefined && merged.kind === 'tool')
-  assert.ok(merged.result.includes('r1 ok') && merged.result.includes('r2 ok') && merged.result.includes('r3 ok'))
+  assert.ok(merged.result.includes('ok') && merged.result.includes('ok') && merged.result.includes('ok'))
   const anchored = folder.window({ maxTurns: 1, endTurn: 0 })
   assert.deepEqual(anchored.messages.map(message => message.kind), ['thinking', 'assistant', 'tool'])
   assert.deepEqual([...folder.groupedTurns()], [0])
@@ -5434,10 +5434,10 @@ test('authoritative assistant messages clear open opaque display state', () => {
     event('step/start', { turn: 0, step: 0 }, 1),
   ])
   folder.applyLiveInput(liveChunk(0, 0, { type: 'block-start', index: 0, blockType: 'file' }, 2))
-  folder.apply([assistantMessage(3, 'final text')])
+  folder.apply([assistantMessage(3, 'text')])
   const assistant = folder.messages().find(message => message.kind === 'assistant')
   assert.ok(assistant !== undefined && assistant.kind === 'assistant')
-  assert.equal(assistant.text, 'final text')
+  assert.equal(assistant.text, 'text')
   assert.equal(assistant.displayBlocks, undefined)
   assert.equal(assistant.content, undefined)
 })
@@ -5622,30 +5622,30 @@ test('a retry never concatenates: the durable message carries only the retry tex
     policyKey: 'test', retry: 1, maxRetries: 2, delayMs: 0,
     failure: { message: 'failed', code: 'TEST' },
   }, 4)])
-  folder.applyLiveInput(liveChunk(0, 0, { type: 'text-delta', index: 0, text: 'final answer' }, 4)) // attempt B
+  folder.applyLiveInput(liveChunk(0, 0, { type: 'text-delta', index: 0, text: 'answer' }, 4)) // attempt B
   const streaming = folder.messages().filter(message => message.kind === 'assistant')
   assert.equal(streaming.length, 1)
   assert.ok(streaming[0] !== undefined && streaming[0].kind === 'assistant')
-  assert.equal(streaming[0].text, 'final answer', 'B starts from an empty entry — never "hello worfinal answer"')
-  folder.apply([assistantMessage(5, 'final answer'), event('step/end', { turn: 0, step: 0 }, 6), event('turn/end', { turn: 0, reason: { kind: 'completed' } }, 7)])
+  assert.equal(streaming[0].text, 'answer', 'B starts from an empty entry — never "hello worfinal answer"')
+  folder.apply([assistantMessage(5, 'answer'), event('step/end', { turn: 0, step: 0 }, 6), event('turn/end', { turn: 0, reason: { kind: 'completed' } }, 7)])
   const settled = folder.messages().filter(message => message.kind === 'assistant')
   assert.equal(settled.length, 1)
   assert.ok(settled[0] !== undefined && settled[0].kind === 'assistant')
-  assert.equal(settled[0].text, 'final answer')
+  assert.equal(settled[0].text, 'answer')
   // Reopen parity: the same durable log replays to the same single message.
   const reopened = new TranscriptFolder()
   reopened.hydrate([
     event('turn/start', { turn: 0 }, 0),
     event('step/start', { turn: 0, step: 0 }, 1),
     event('assistant/attempt', { turn: 0, step: 0, stream: [] }, 3),
-    assistantMessage(5, 'final answer'),
+    assistantMessage(5, 'answer'),
     event('step/end', { turn: 0, step: 0 }, 6),
     event('turn/end', { turn: 0, reason: { kind: 'completed' } }, 7),
   ])
   const replayed = reopened.messages()
   assert.equal(replayed.length, 1)
   assert.ok(replayed[0] !== undefined && replayed[0].kind === 'assistant')
-  assert.equal(replayed[0].text, 'final answer', 'reopen shows exactly the retry, never the failed prefix')
+  assert.equal(replayed[0].text, 'answer', 'reopen shows exactly the retry, never the failed prefix')
 })
 
 test('a retry-started durable message replaces prior reasoning, including no reasoning', () => {

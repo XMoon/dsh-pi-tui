@@ -505,8 +505,8 @@ test('a command definition render reads the cache ONLY (no cache → null, place
 
   // A value source commits the cached first line (the definition is
   // recompiled against the source).
-  catalog.setCommandValueSource({ value: () => ({ kind: 'value', text: '14:30' }) })
-  assert.deepEqual(render()?.spans[0], { text: '14:30', tone: 'accent' })
+  catalog.setCommandValueSource({ value: () => ({ kind: 'value', text: '30' }) })
+  assert.deepEqual(render()?.spans[0], { text: '30', tone: 'accent' })
   // An empty cached value is unavailable too.
   catalog.setCommandValueSource({ value: () => ({ kind: 'value', text: '' }) })
   assert.equal(render(), null)
@@ -516,14 +516,14 @@ test('a command definition render reads the cache ONLY (no cache → null, place
 
   // The composer renders the cached value as an ordinary item (no
   // command special-case in the composer).
-  catalog.setCommandValueSource({ value: () => ({ kind: 'value', text: '14:30' }) })
+  catalog.setCommandValueSource({ value: () => ({ kind: 'value', text: '30' }) })
   const composed = new FooterComposer(registry).render({
     snapshot: emptyStatusSnapshot(),
     layout: { schemaVersion: 1, rows: [{ left: [{ id: 'user:clock' }], right: [] }] },
     width: 80,
     context: { taskBrowserAvailable: false, extensionFooterText: '' },
   })
-  assert.ok(plain(composed).includes('14:30'))
+  assert.ok(plain(composed).includes('30'))
   assert.ok(!plain(composed).includes('[command]'))
 })
 
@@ -546,7 +546,7 @@ test('command items participate in the ordinary composer layout (rows, budget, h
     VALID_CLOCK,
     { schemaVersion: 1, id: 'user:environment', kind: 'text', text: 'PROD' },
   ])
-  catalog.setCommandValueSource({ value: () => ({ kind: 'value', text: '14:30' }) })
+  catalog.setCommandValueSource({ value: () => ({ kind: 'value', text: '30' }) })
   const registry = new FooterItemRegistry(createBuiltinFooterRegistry())
   registry.setCustomSource(catalog)
   const composer = new FooterComposer(registry)
@@ -565,7 +565,7 @@ test('command items participate in the ordinary composer layout (rows, budget, h
     instruction: { id: 'exit', text: [{ text: 'Ctrl+C exit' }], priority: 100 },
   })
   const lines = rendered.split('\n').filter(line => line !== '')
-  assert.ok(plain(rendered).includes('14:30'), 'the command value must render like any item')
+  assert.ok(plain(rendered).includes('30'), 'the command value must render like any item')
   assert.ok(plain(rendered).includes('PROD'), 'the custom text item must render alongside')
   assert.ok(lines.length <= 4, `the whole footer must stay within the 4-line budget (got ${lines.length})`)
   assert.ok(lines.every(line => visibleWidth(line) <= 80), 'no line may overflow the width')

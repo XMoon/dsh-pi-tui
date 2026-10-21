@@ -88,8 +88,8 @@ test('shortPathCwd keeps the last two segments and never invents a root', () => 
   assert.equal(shortPathCwd('/'), '/')
   // Windows drive paths split on BOTH separators and join POSIX-style
   // (the footer formatter's rule — title and footer stay consistent).
-  assert.equal(shortPathCwd('C:\\repo'), 'C:/repo')
-  assert.equal(shortPathCwd('C:\\repo\\work\\deep'), 'work/deep')
+  assert.equal(shortPathCwd('\\repo'), '/repo')
+  assert.equal(shortPathCwd('\\repo\\work\\deep'), 'work/deep')
   assert.equal(shortPathCwd('\\\\server\\share\\deep'), 'share/deep')
 })
 
@@ -165,7 +165,7 @@ test('control characters in a title are stripped', () => {
 test('shortPathCwd delegates to the footer formatter (single implementation, no drift)', async () => {
   // The footer's shortCwd is the ONE implementation; the title must use it.
   const { shortCwd } = await import('../../src/tui/footer/formatters.ts')
-  for (const cwd of ['/foo/bar', '/foo/bar/baz', '/', 'C:\\repo', 'C:\\repo\\work\\deep', '\\\\server\\share\\deep']) {
+  for (const cwd of ['/foo/bar', '/foo/bar/baz', '/', '\\repo', '\\repo\\work\\deep', '\\\\server\\share\\deep']) {
     assert.equal(shortPathCwd(cwd), shortCwd(cwd), `shortPathCwd must equal footer shortCwd for ${cwd}`)
   }
 })

@@ -113,7 +113,7 @@ test('the real create_worktree result and effective cwd reach the mounted TUI', 
   git(project, 'init', '-q', '-b', 'main')
   git(project, 'config', 'user.email', 's4-d3@example.invalid')
   git(project, 'config', 'user.name', 'S4 D3')
-  writeFileSync(join(project, 'README.md'), 'S4-D3 B05 fixture\n')
+  writeFileSync(join(project, 'README.md'), 'fixture\n')
   git(project, 'add', 'README.md')
   git(project, 'commit', '-q', '-m', 'fixture base')
   const baseCommit = git(project, 'rev-parse', 'HEAD')

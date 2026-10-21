@@ -1188,7 +1188,7 @@ test('/fork avoids a duplicate selection when the inherited prefix already match
     'matching inherited state must not append a redundant child selection')
 })
 
-test('a rewind LOAD failure whose picker identity is still current is shown', async (t) => {
+test('positive control: a rewind LOAD failure whose picker identity is still current is shown', async (t) => {
   // §3C-4: a throw from the PRE-ADMISSION region (here the `loadThrough` read)
   // belongs to the picker identity, and while that identity is current the
   // failure must be reported truthfully.

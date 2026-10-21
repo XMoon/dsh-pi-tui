@@ -114,7 +114,7 @@ test('the real /preset handler opens the native picker over the REAL roster', as
     await waitFor('native preset picker', () => props(fixture.pane).state === 'ready')
     assert.deepEqual(items(fixture.pane).map((entry) => entry.id), ['preset:b2-direct-preset', 'preset:minimal-preset'])
     const cards = items(fixture.pane)
-    assert.equal(cards[0]?.label, 'B2 direct preset')
+    assert.equal(cards[0]?.label, 'direct preset')
     assert.deepEqual(cards[0]?.badges, [{ text: 'Default' }])
     assert.match(String(cards[1]?.detail), /^Custom · A second real target\.$/)
     // The two session facts are independent display facts of this subject (Owner

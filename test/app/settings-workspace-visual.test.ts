@@ -411,9 +411,9 @@ test('A-03 100x40 and 76x24 project the medium composition per level and switch 
   const h = setup({ columns, rows, doc: { theme: 'plugin:acme/solarized' }, themes: pluginThemes() })
   await h.open()
   // L0 paints categories + rows only; the retired header arrows never paint.
-  assert.match(h.rowsPlain()[rowOf(h, 'Categories (6)')]!, /\[Categories \(6\)\]/, 'L0 owns the categories level')
+  assert.match(h.rowsPlain()[rowOf(h, 'Categories (6)')]!, /\[Categories \(6\)\]/, 'owns the categories level')
   assert.ok(h.rowsPlain().some(line => line.includes('Rows (2)')), `the rows column exists:\n${h.view()}`)
-  assert.ok(!h.view().includes('Details'), 'L0 does not paint the Detail column')
+  assert.ok(!h.view().includes('Details'), 'does not paint the Detail column')
   assert.ok(!h.view().includes('←'), 'no medium header category arrows')
   // The categories level moves with ↑↓.
   await key(h, '\x1b[B')
@@ -422,8 +422,8 @@ test('A-03 100x40 and 76x24 project the medium composition per level and switch 
   assert.ok(h.rowsPlain().some(line => line.startsWith('> Appearance')))
   // Enter advances to L1: rows + detail, no categories column.
   await key(h, '\r')
-  assert.match(h.rowsPlain()[rowOf(h, 'Details')]!, /Details/, 'L1 paints the Detail column')
-  assert.ok(!h.view().includes('Categories (6)'), 'L1 hides the categories column')
+  assert.match(h.rowsPlain()[rowOf(h, 'Details')]!, /Details/, 'paints the Detail column')
+  assert.ok(!h.view().includes('Categories (6)'), 'hides the categories column')
   // Right enters L2's inline choice directly from L1 on the same projection.
   await key(h, '\x1b[C')
   assert.match(h.view(), /Choose value/, 'the one-step detail entry opens the inline choice')
@@ -718,7 +718,7 @@ test('A-09b the wheel scrolls only the visible pane under the pointer, and blank
   const themeRow = rowOf(h, 'Configured theme')
   wheel(h, themeRow, 96, true)
   await h.vt.waitForRender()
-  assert.equal(h.view(), l0, 'L0 has no Detail pane to scroll')
+  assert.equal(h.view(), l0, 'has no Detail pane to scroll')
   await key(h, '\r') // L0 -> L1: rows + detail
   const before = h.view()
   // Wheel over the row pane must not scroll the detail pane.
@@ -1014,7 +1014,7 @@ test('a click anywhere in a visible column takes that column focus', async () =>
 
 // ── F2: the row grant and the actual paint/admission agree ────────────────
 
-test('100x3 paints real content in its only body row, not pane headers', async () => {
+test('100x3: paints real content in its only body row, not pane headers', async () => {
   const h = setup({ columns: 100, rows: 3, doc: { theme: 'dark' } })
   await h.open()
   const painted = h.rowsPlain()
@@ -1038,7 +1038,7 @@ test('below the body floor Enter/Tab/arrows/C/R are inert; only Esc escapes', as
   h.dispose()
 })
 
-test('72x3 paints no hidden Copy or Confirm action', async () => {
+test('72x3: paints no hidden Copy or Confirm action', async () => {
   const h = setup({ columns: 72, rows: 3, doc: { theme: 'dark' } })
   await h.open()
   await key(h, '\r') // categories -> rows
@@ -1332,7 +1332,7 @@ test('a viewport shrink reveals the selected row instead of hiding it', async ()
 
 // ── F1 sibling: the retired Tab cycle and header arrows ───────────────────
 
-test('Left/Right navigate the single focus hierarchy; Tab remains inert at every projection', async () => {
+test('Left/Right: navigate the single focus hierarchy; Tab remains inert at every projection', async () => {
   for (const columns of [200, 100, 72] as const) {
     const h = setup({ columns, rows: 24, doc: { theme: 'dark' } })
     await h.open()
@@ -1538,7 +1538,7 @@ test('every width opens at L0, ↑↓ changes the category and Enter enters the 
   for (const [columns, rows] of [[200, 40], [100, 40], [72, 24], [44, 8]] as const) {
     const h = setup({ columns, rows, doc: { theme: 'dark' } })
     await h.open()
-    assert.match(h.rowsPlain()[0]!, /Settings · Categories/, `L0 at ${columns} columns`)
+    assert.match(h.rowsPlain()[0]!, /Settings · Categories/, `at ${columns} columns`)
     assert.ok(!h.view().includes('· Rows'), `no level is pre-entered at ${columns}`)
     await key(h, '\x1b[B')
     assert.ok(h.rowsPlain().some(line => line.startsWith('> Display')), `↓ selects Display at ${columns}:\n${h.view()}`)
@@ -1548,7 +1548,7 @@ test('every width opens at L0, ↑↓ changes the category and Enter enters the 
   }
 })
 
-test('Esc walks one level back at every width; only L0 closes', async () => {
+test('Esc: walks one level back at every width; only L0 closes', async () => {
   for (const [columns, rows] of [[200, 40], [100, 40], [72, 24]] as const) {
     const h = setup({ columns, rows, doc: { theme: 'dark' } })
     await h.open()
@@ -1573,16 +1573,16 @@ test('the medium projection is a pure function of focus: L0 categories+rows, L1/
   for (const columns of [76, 107]) {
     const h = setup({ columns, rows: 40, doc: { theme: 'plugin:acme/solarized' }, themes: pluginThemes() })
     await h.open()
-    assert.ok(h.rowsPlain().some(line => line.includes('Categories (6)')), `L0 categories at ${columns}:\n${h.view()}`)
-    assert.ok(!h.view().includes('Details'), 'L0 paints no Detail pane')
-    assert.ok(!h.view().includes('Copy value [C]'), 'L0 publishes no Detail button')
+    assert.ok(h.rowsPlain().some(line => line.includes('Categories (6)')), `categories at ${columns}: \n${h.view()}`)
+    assert.ok(!h.view().includes('Details'), 'paints no Detail pane')
+    assert.ok(!h.view().includes('Copy value [C]'), 'publishes no Detail button')
     await key(h, '\r')
-    assert.ok(h.rowsPlain().some(line => line.includes('Details')), 'L1 paints rows+detail')
-    assert.ok(!h.view().includes('Categories (6)'), 'L1 drops the categories column')
+    assert.ok(h.rowsPlain().some(line => line.includes('Details')), 'paints rows+detail')
+    assert.ok(!h.view().includes('Categories (6)'), 'drops the categories column')
     await key(h, '\r')
-    assert.ok(h.view().includes('Choose value'), 'L2 enters an inline choice without a second browse Enter')
+    assert.ok(h.view().includes('Choose value'), 'enters an inline choice without a second browse Enter')
     assert.ok(h.view().includes('Solarized'), 'the selected source identity remains visible')
-    assert.ok(!h.view().includes('Categories (6)'), 'L2 keeps the rows+detail projection')
+    assert.ok(!h.view().includes('Categories (6)'), 'keeps the rows+detail projection')
     await key(h, '\x1b')
     assert.match(h.rowsPlain()[0]!, /· Rows/, 'Esc cancels L2 directly back to L1')
     await key(h, '\x1b')
@@ -1597,10 +1597,10 @@ test('the narrow projection keeps the inline choice across resize and preserves 
   await h.open()
   assert.match(h.rowsPlain()[0]!, /Settings · Categories/)
   assert.ok(h.rowsPlain().some(line => line.startsWith('> Appearance')))
-  assert.ok(!h.view().includes('Configured theme'), 'L0 shows only the categories')
+  assert.ok(!h.view().includes('Configured theme'), 'shows only the categories')
   await key(h, '\r')
   assert.match(h.rowsPlain()[0]!, /· Rows/)
-  assert.ok(!h.view().includes('Display'), 'L1 shows only the current category rows')
+  assert.ok(!h.view().includes('Display'), 'shows only the current category rows')
   await key(h, '\r')
   assert.match(h.rowsPlain()[0]!, /Configured theme/)
   assert.ok(h.view().includes('Choose value'), 'a writable L1 row enters the inline choice')
@@ -1783,7 +1783,7 @@ test('the arrow hierarchy never leaks keys into the hidden editor', async () => 
 test('only visible panes publish hits: the hidden Detail band neither copies nor focuses', async () => {
   const h = setup({ columns: 100, rows: 40, doc: { theme: 'plugin:acme/solarized' }, themes: pluginThemes() })
   await h.open()
-  assert.ok(!h.view().includes('Copy value [C]'), 'L0 paints no Detail button')
+  assert.ok(!h.view().includes('Copy value [C]'), 'paints no Detail button')
   const row = rowOf(h, 'Configured theme')
   press(h, row, 96)
   release(h, row, 96)
@@ -3341,7 +3341,7 @@ const toPlugins = async (h: Harness): Promise<void> => {
   await key(h, '\x1b[B')
 }
 
-test('120×40 and 80×24 paint the UI-only Plugins entry in the real Rows column', async () => {
+test('120×40: and 80×24 paint the UI-only Plugins entry in the real Rows column', async () => {
   for (const [columns, rows] of [[120, 40], [80, 24]] as const) {
     const h = setup({ columns, rows, pluginPage: true })
     await h.open()
@@ -3366,14 +3366,14 @@ test('120×40 and 80×24 paint the UI-only Plugins entry in the real Rows column
       'the Enter / Right hint uses textMuted')
     assert.notEqual(h.vt.getCellFgRgb(entryRow, 26), hexToRgb(currentPalette.primary),
       'the entry is not the primary cursor')
-    assert.ok(h.view().includes('[Categories (6)]'), 'L0 keeps its ONE active pane device')
+    assert.ok(h.view().includes('[Categories (6)]'), 'keeps its ONE active pane device')
     assert.ok(!h.view().includes('[Rows'), 'the rows column is not a second focus owner')
     assertBarIsLastRow(h.rowsPlain(), (row, col) => h.vt.getCellFgRgb(row, col), 'Esc close')
     h.dispose()
   }
 })
 
-test('80×10 keeps the visible direct entry above the pinned bar', async () => {
+test('80×10: keeps the visible direct entry above the pinned bar', async () => {
   const h = setup({ columns: 80, rows: 10, pluginPage: true })
   await h.open()
   await toPlugins(h)
@@ -3385,7 +3385,7 @@ test('80×10 keeps the visible direct entry above the pinned bar', async () => {
   h.dispose()
 })
 
-test('44×20 narrow paints no second-column affordance and keeps the direct key entry', async () => {
+test('44×20: narrow paints no second-column affordance and keeps the direct key entry', async () => {
   const h = setup({ columns: 44, rows: 20, pluginPage: true })
   await h.open()
   await toPlugins(h)

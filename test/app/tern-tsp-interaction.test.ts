@@ -1036,7 +1036,7 @@ test('a batched withdrawal commits ONE frame and never promotes a member of the 
   assert.doesNotMatch(frames.at(-1) ?? '', /A second/, 'the second request is queued, not painted')
   // A request for the SUCCESSOR subject is already queued behind them.
   void seat.presenter.showApprovalPrompt({ toolName: 'bash', reason: 'B request', signal: successor.signal }, true)
-    .then(value => { settled.push(`B:${String(value)}`) }, error => { settled.push(`B:${String(error)}`) })
+    .then(value => { settled.push(`${String(value)}`) }, error => { settled.push(`${String(error)}`) })
   const framesBefore = frames.length
 
   // The replacement withdraws BOTH replaced requests in ONE batch.
@@ -1053,6 +1053,6 @@ test('a batched withdrawal commits ONE frame and never promotes a member of the 
   successor.abort()
   await Promise.resolve()
   await Promise.resolve()
-  assert.deepEqual(settled, ['B:cancelled'], 'the successor settles for its own lifetime')
+  assert.deepEqual(settled, ['cancelled'], 'the successor settles for its own lifetime')
   seat.dispose()
 })

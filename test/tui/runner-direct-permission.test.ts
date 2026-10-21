@@ -2,7 +2,7 @@
  * PR-A L5/L6 — the REAL Direct permission-cycle path (the Shift+Tab
  * `AbortSignal` contract).
  *
- * SOURCE → DECISION → SINK: a real `ESC [ Z` (Shift+Tab) terminal input enters
+ * SOURCE → DECISION → SINK: a real `ESC [ Z`terminal input enters
  * the mounted PiTui surface → `StatusRuntime.cyclePermission` → the
  * composition's `permissionCycle.apply` → `ConfigPort.permissions.
  * applyPermissionPreset` → the OFFICIAL rc.2 `/permission` command executor
@@ -83,7 +83,7 @@ function sessionEvents(ctx: Context, sessionId: string): readonly CommandEvent[]
 
 const stripAnsi = (line: string): string => line.replace(/\u001b\[[0-9;]*[A-Za-z]/gu, '')
 
-test('Direct: a real Shift+Tab executes exactly ONE official /permission and the pushed projection repaints', async (t) => {
+test('a real Shift+Tab executes exactly ONE official /permission and the pushed projection repaints', async (t) => {
   const life = testLifecycle(t)
   // The PiTui PHYSICAL terminal: the direct fixture leaves the tty to this
   // VirtualTerminal (the same stand-in every PiTui runner suite installs).

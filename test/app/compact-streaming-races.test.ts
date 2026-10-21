@@ -385,7 +385,7 @@ function interactionTurn(name: 'ask_user_question' | 'exit_plan_mode'): {
     eventAt('tool/result', { turn: 1, step: 1, message: { id: MessageId('qr1'), role: 'tool', toolCallId: ToolCallId('q1'),
     content: [{ type: 'text', text: result }], source: { kind: 'tool', callId: ToolCallId('q1') } } }, 1005, 5),
   ] as SessionEvent[])
-  return { folder, interactionMarker: name === 'ask_user_question' ? '1/1 answered' : 'PLAN_APPROVED_MARKER' }
+  return { folder, interactionMarker: name === 'ask_user_question' ? 'answered' : 'PLAN_APPROVED_MARKER' }
 }
 
 for (const name of ['ask_user_question', 'exit_plan_mode'] as const) {

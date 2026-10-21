@@ -354,7 +354,7 @@ test('the minimal preset never gains a model skill tool (the human /skill surfac
   const agent = await app.submitFirstPrompt('Start the minimal session')
   await agent.whenIdle()
   assert.equal(app.host.hasTool('skill', agent), false, 'minimal declares no model skill tool')
-  assert.equal(app.host.hasTool('skill', undefined), false, 'B10 is a provider, not a global model tool')
+  assert.equal(app.host.hasTool('skill', undefined), false, 'is a provider, not a global model tool')
   assert.equal(app.host.ctx.tools.schemas(agent).some(schema => schema.name === 'skill'), false)
   // `/skill` is the HUMAN-invocable surface: the provider can list the skill
   // there without granting the minimal model any skill tool.

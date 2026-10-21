@@ -266,7 +266,7 @@ test('StatsFolder matches computeStats and folds incrementally', () => {
     assert.deepEqual(snapshot, partial, `mismatch after event ${index}`)
   }
   const final = folder.snapshot()
-  assert.deepEqual(final, oneShot, 'final snapshot must match computeStats')
+  assert.deepEqual(final, oneShot, 'snapshot must match computeStats')
 })
 
 test('StatsFolder bounds completed-turn lifecycle state with a monotonic fence', () => {
@@ -1059,7 +1059,7 @@ test('formatStatsFacts renders each Host performance fact on its own availabilit
   const facts: import('../../src/domain/status/stats.ts').SessionStatsFacts = { recent: {}, sessionPerformance: undefined }
   assert.equal(formatStatsFacts(facts), 'unmeasured', 'no answered performance fact reads unmeasured')
   assert.equal(formatStatsFacts({ recent: { firstTokenMsAvg: 1500 } }), 'TTFB 1.5s', 'TTFB alone')
-  assert.equal(formatStatsFacts({ recent: { tokensPerSec: 40 } }), 'R5 40 tok/s', 'R5 alone')
+  assert.equal(formatStatsFacts({ recent: { tokensPerSec: 40 } }), 'R5 40 tok/s', 'alone')
   assert.equal(formatStatsFacts({ sessionPerformance: { tokensPerSec: 12 } }), 'All 12 tok/s', 'All alone')
 
   const lifetimeOnly: import('../../src/domain/status/stats.ts').SessionStatsFacts = { lifetime: { llmMs: 120000 } }

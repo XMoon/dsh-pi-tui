@@ -37,7 +37,7 @@ function seedRepository(root: string): { project: string; baseCommit: string } {
   git(project, 'init', '-q', '-b', 'main')
   git(project, 'config', 'user.email', 's4-d2@example.invalid')
   git(project, 'config', 'user.name', 'S4 D2')
-  writeFileSync(join(project, 'README.md'), 'S4-D2 worktree fixture\n')
+  writeFileSync(join(project, 'README.md'), 'worktree fixture\n')
   git(project, 'add', 'README.md')
   git(project, 'commit', '-q', '-m', 'fixture base')
   return { project, baseCommit: git(project, 'rev-parse', 'HEAD') }
@@ -57,7 +57,7 @@ test('an official Optional bundle goes off→enable→restart-required→restart
   const sourceReadme = readFileSync(join(project, 'README.md'), 'utf8')
   try {
     // OFF: the real Host tool registry does not carry the bundle's tool.
-    assert.equal(host.hasTool('create_worktree'), false, 'B05 is not active before it is enabled')
+    assert.equal(host.hasTool('create_worktree'), false, 'is not active before it is enabled')
     assert.equal(profileSelectsBundle(host.profileDir, B05), false)
 
     // ON through the OFFICIAL Host plugin manager: a startup-only profile

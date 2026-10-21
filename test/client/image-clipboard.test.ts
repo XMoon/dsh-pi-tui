@@ -55,7 +55,7 @@ function x11Record(png: Buffer | undefined): RunCommand {
     if (args.includes('image/png')) {
       return png === undefined ? { stdout: Buffer.alloc(0), stderr: Buffer.alloc(0), code: 0 } : { stdout: png, stderr: Buffer.alloc(0), code: 0 }
     }
-    return { stdout: Buffer.from('x11 paste text'), stderr: Buffer.alloc(0), code: 0 }
+    return { stdout: Buffer.from('paste text'), stderr: Buffer.alloc(0), code: 0 }
   }) as unknown as RunCommand
 }
 
@@ -79,7 +79,7 @@ test('an advertised image/png returns bytes; text-only returns text', async () =
   assert.equal(image.kind, 'image')
   if (image.kind === 'image') assert.equal(image.mediaType, 'image/png')
   const text = await readClipboardImage(x11Record(undefined), envOf({ env: { DISPLAY: ':0' } }))
-  assert.deepEqual(text, { kind: 'text', text: 'x11 paste text' })
+  assert.deepEqual(text, { kind: 'text', text: 'paste text' })
 })
 
 test('no display and no wayland resolves to unsupported without probing', async () => {
@@ -168,7 +168,7 @@ test('commandOnPath walks $PATH, never just the CWD (review finding)', () => {
   // An explicit directory list resolves only entries present in it.
   assert.equal(commandOnPath('node', '', 'linux'), false, 'no PATH, no CWD hit for a non-CWD binary')
   // Windows-style separators are honored only for ';'-separated PATHs.
-  const windowsPath = 'C:\\NoSuchDir;' + process.env.PATH!.split(':').filter(Boolean).join(';')
+  const windowsPath = '\\NoSuchDir;' + process.env.PATH!.split(':').filter(Boolean).join(';')
   assert.equal(commandOnPath('node', windowsPath, 'win32'), true)
 })
 
@@ -177,7 +177,7 @@ test('commandOnPath keeps win32 drive-letter colons and honors separators', () =
   // as part of an entry (unreachable directories are simply missed).
   const windowsStyle = process.env.PATH!.split(':').filter(Boolean).join(';')
   assert.equal(commandOnPath('node', windowsStyle, 'win32'), true)
-  assert.equal(commandOnPath('node', 'C:\\NoSuchDir;C:\\AlsoMissing', 'win32'), false)
+  assert.equal(commandOnPath('node', '\\NoSuchDir;C:\\AlsoMissing', 'win32'), false)
   // POSIX keeps ':' splitting.
   assert.equal(commandOnPath('node', process.env.PATH, 'linux'), true)
 })
@@ -192,14 +192,14 @@ test('Wayland without wl-paste falls through to X11 xclip (review finding 4)', a
   const run = (async (command: string, args: readonly string[]) => {
     calls.push(command)
     if (args.includes('TARGETS')) return { stdout: Buffer.from('UTF8_STRING'), stderr: Buffer.alloc(0), code: 0 }
-    return { stdout: Buffer.from('x11 text'), stderr: Buffer.alloc(0), code: 0 }
+    return { stdout: Buffer.from('text'), stderr: Buffer.alloc(0), code: 0 }
   }) as unknown as RunCommand
   const env = envOf({
     env: { WAYLAND_DISPLAY: 'wayland-0', DISPLAY: ':0' },
     exists: (command) => command === 'xclip',
   })
   const result = await readClipboardImage(run, env)
-  assert.deepEqual(result, { kind: 'text', text: 'x11 text' })
+  assert.deepEqual(result, { kind: 'text', text: 'text' })
   assert.ok(calls.length >= 1 && calls.every(command => command === 'xclip'), 'only xclip ran after wl-paste was missing')
 })
 
