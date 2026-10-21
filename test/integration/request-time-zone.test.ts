@@ -174,7 +174,10 @@ test('an unsamplable process zone refuses the Direct send before dispatch and re
     const fixture = await createDirectTspFixture(life, { deltas: ['zone turn ran'] })
     const recorder = fixture.recordPrompts(() => {})
     try {
-      await directSettle(4_000)
+      // The tty becoming DELIVERABLE is the runner's readiness signal: an
+      // input event delivered before the SDK attaches its listener is DROPPED,
+      // so a fixed startup sleep only raced the handshake.
+      await waitForInputDelivery(fixture.pane)
       fixture.pane.input.type('zone-less send')
       await awaitComposer(fixture, 'zone-less send')
       assert.equal(latestComposerText(fixture.pane.output.text()), 'zone-less send',
@@ -190,6 +193,9 @@ test('an unsamplable process zone refuses the Direct send before dispatch and re
       // The refused request is never replayed: only the corrected retry below
       // reaches the official write, and it carries the zone that is now real.
       process.env.TZ = 'Asia/Shanghai'
+      // A NEGATIVE observation: the refusal must NOT schedule a replay, and
+      // "not yet" is not "never" — so this needs a bounded window, not a
+      // completion signal.
       await directSettle()
       assert.equal(recorder.calls(), 0, 'the refusal schedules no automatic replay')
       fixture.pane.input.type('\r')
@@ -240,7 +246,10 @@ test('the rendered surface keeps the ordinary Queue/transcript/composer behaviou
       await awaitComposer(fixture, 'parity busy follow-up')
       fixture.pane.input.type('\r')
       await waitFor('the busy delivery to settle', () => recorder.calls() === 2, 25_000)
-      await directSettle(1_500)
+      // The busy submission must RENDER as the ordinary queue row: the
+      // rendered line is the completion signal the assertions read.
+      await waitFor('the busy submission to render as the queue row', () =>
+        renderedLines(fixture).some(line => line.includes('queued (followup): parity busy follow-up')), 25_000)
       assert.deepEqual(prompts.map(message =>
         (message as { source: { clientTimeZone?: string } }).source.clientTimeZone),
       ['Asia/Shanghai', 'Asia/Shanghai'],
@@ -257,7 +266,13 @@ test('the rendered surface keeps the ordinary Queue/transcript/composer behaviou
 
       releaseStream()
       await waitFor('the scripted reply', () => fixture.pane.output.text().includes('zone parity reply'), 25_000)
-      await directSettle(2_000)
+      // The transcript rows are the completion signal: the first user row and
+      // the queued row must both have landed.
+      await waitFor('the transcript rows to render', () => {
+        const lines = renderedLines(fixture)
+        return lines.some(line => line === 'parity question')
+          && lines.some(line => line === 'parity busy follow-up')
+      }, 25_000)
       const rendered = renderedLines(fixture)
       assert.ok(rendered.some(line => line === 'parity question'), 'the first user row stays in the transcript')
       assert.ok(rendered.some(line => line === 'parity busy follow-up'), 'the queued row becomes a transcript row')
@@ -295,7 +310,7 @@ test('a non-ordinary (Skill) submission carries no fabricated zone and the Conte
     try {
       await waitForInputDelivery(fixture.pane)
       fixture.pane.input.type('/zone-absent-skill')
-      await directSettle()
+      await awaitComposer(fixture, '/zone-absent-skill')
       fixture.pane.input.type('\r')
       await waitFor('the skill turn to reach the model', () =>
         fixture.pane.output.text().includes('skill zone turn ran'), 25_000)

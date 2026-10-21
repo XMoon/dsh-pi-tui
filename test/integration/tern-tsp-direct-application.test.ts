@@ -57,7 +57,12 @@ test('a TSP Enter drives a REAL Agent turn and the streamed reply reaches the pa
     // startup sleeps only guessed how long that took.
     await waitForInputDelivery(fixture.pane)
     fixture.pane.input.type('hello official direct')
-    await directSettle()
+    // The composer HOLDING the text is the completion signal: the renderer
+    // holds the key until its bind and replays it, so the draft appears when
+    // the input was actually applied — a fixed settle only guessed how long
+    // that takes, and a slow bind would make the case read the old frame.
+    await waitFor('the composer to hold the typed draft', () =>
+      latestComposerText(fixture.pane.output.text()) === 'hello official direct', 25_000)
     assert.equal(latestComposerText(fixture.pane.output.text()), 'hello official direct',
       'the draft is on the wire before the gesture')
     // NEGATIVE CONTROL: the scripted model's text is NOT on the wire before the
