@@ -62,12 +62,27 @@ const workflow = (overrides: Partial<Extract<TranscriptMessage, { kind: 'workflo
   ...overrides,
 })
 
-/** Send an SGR primary-button press+release (1-based coords) at a screen
- * row. A short delay precedes every click: the fork's terminal decodes two
- * rapid same-position clicks as a DOUBLE-CLICK (word selection), which
- * would swallow the second toggle. */
+/**
+ * Send an SGR primary-button press+release (1-based coords) at a screen
+ * row.
+ *
+ * The fork's terminal decodes two rapid clicks on the SAME CELL as a
+ * DOUBLE-CLICK (word selection), which would swallow the second toggle.
+ * The fork's own double-click test requires the same row AND the same word
+ * (`packages/pi-tui/src/tui-alt-screen.ts`: the click count advances only
+ * when the previous click was in the same row and covered the same word),
+ * and its window is 500 ms. So the delay is only needed before a click
+ * that could follow the previous one into that window — a click on a
+ * DIFFERENT CELL can never be a double-click, and paying 600 ms for it
+ * bought nothing but wall clock.
+ */
+const lastClickCell = new Map<object, string>()
 async function clickCell(vt: { sendInput: (data: string) => void }, x: number, y: number): Promise<void> {
-  await new Promise(resolve => setTimeout(resolve, 600))
+  const cell = `${x}:${y}`
+  if (lastClickCell.get(vt) === cell) {
+    await new Promise(resolve => setTimeout(resolve, 600))
+  }
+  lastClickCell.set(vt, cell)
   vt.sendInput(`\x1b[<0;${x + 1};${y + 1}M`)
   vt.sendInput(`\x1b[<0;${x + 1};${y + 1}m`)
 }

@@ -136,8 +136,45 @@ async function mountPane(
   }
 }
 
+/**
+ * The FIXED wait, for the observations that are about what did NOT happen.
+ *
+ * A negative fact ("the held key never reached the composer") needs an
+ * observation WINDOW, and the window is the assertion's own bound.
+ */
 async function settle(millis = 300): Promise<void> {
   await new Promise(resolve => setTimeout(resolve, millis))
+}
+
+/** Wait for a real fact, with the deadline the observation is worth. */
+async function awaitFact(
+  predicate: () => boolean,
+  label: string,
+  timeoutMs = 10_000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  while (!predicate()) {
+    if (Date.now() >= deadline) {
+      assert.fail(`timed out waiting for ${label}`)
+    }
+    await new Promise(resolve => setTimeout(resolve, 1))
+  }
+}
+
+/**
+ * Wait until the composer HAS the typed text.
+ *
+ * The typed text reaches the composer through the real input path, and the
+ * composer is the authority for it (the controlled editor state the renderer
+ * owns, and the same text the wire carries). Waiting for that fact replaces
+ * a fixed sleep that only GUESSED how long the delivery takes.
+ */
+async function awaitTyped(harness: Harness, text: string): Promise<void> {
+  await awaitFact(
+    () => harness.renderer.composer.getDraft() === text
+      || lastComposerText(harness.output.text()) === text,
+    `the composer to hold ${JSON.stringify(text)}`,
+  )
 }
 
 test('the submit callback observes an EMPTY composer (clear-before-callback ordering)', async () => {
@@ -147,9 +184,9 @@ test('the submit callback observes an EMPTY composer (clear-before-callback orde
   })
   try {
     harness.input.type('ordered text')
-    await settle()
+    await awaitTyped(harness, 'ordered text')
     harness.input.type('\r')
-    await settle()
+    await awaitFact(() => seen.length === 1, 'the submit callback to run')
     assert.deepEqual(seen, [{ text: 'ordered text', draftAtCallback: '' }],
       'one submit; the composer was already cleared when the callback ran')
     assert.equal(harness.renderer.composer.getDraft(), '')
@@ -176,16 +213,16 @@ test('a refusal that merges the draft back becomes live content and is re-submit
   })
   try {
     harness.input.type('!echo hi')
-    await settle()
+    await awaitTyped(harness, '!echo hi')
     harness.input.type('\r')
-    await settle()
+    await awaitFact(() => submissions.length === 1, 'the refused line to reach the submit path')
     assert.deepEqual(submissions, ['!echo hi'], 'the refused line reached the submit path once')
     assert.equal(harness.renderer.composer.getDraft(), '!echo hi',
       'the refusal merged the line back into the live composer')
     assert.equal(lastComposerText(harness.output.text()), '!echo hi',
       'the merged draft is on the wire again (the renderer never re-applied a stale snapshot)')
     harness.input.type('\r')
-    await settle()
+    await awaitFact(() => submissions.length === 2, 'the second submission')
     assert.deepEqual(submissions, ['!echo hi', '!echo hi'],
       'the next Enter re-sends the restored text (a real second submission, not a replay of the first)')
   } finally {
@@ -202,9 +239,9 @@ test('an accepted submit leaves an empty composer, so a second Enter cannot doub
   const harness = await mountPane((text) => { if (text.trim() !== '') delivered.push(text) })
   try {
     harness.input.type('once')
-    await settle()
+    await awaitTyped(harness, 'once')
     harness.input.type('\r')
-    await settle()
+    await awaitFact(() => delivered.length === 1, 'the first delivery')
     assert.deepEqual(delivered, ['once'], 'the first Enter delivered the draft exactly once')
     assert.equal(harness.renderer.composer.getDraft(), '')
     harness.input.type('\r')
@@ -223,7 +260,7 @@ test('the hydration window accepts NO composer key and never submits', async () 
   const harness = await mountPane((text) => { submissions.push(text) })
   try {
     harness.input.type('draft before the switch')
-    await settle()
+    await awaitTyped(harness, 'draft before the switch')
     assert.equal(harness.renderer.composer.getDraft(), 'draft before the switch')
     // A generation bump: the surface reports the hydration window (the new
     // subject's frame has not committed yet).
@@ -254,11 +291,11 @@ test('the fence lifts when the new subject commits, and the composer works again
     harness.renderer.display.setTranscript([], undefined, undefined, undefined, undefined, { subject: 'new' })
     await settle()
     harness.input.type('after the switch')
-    await settle()
+    await awaitTyped(harness, 'after the switch')
     assert.equal(harness.renderer.composer.getDraft(), 'after the switch',
       'input is accepted again once the new subject committed')
     harness.input.type('\r')
-    await settle()
+    await awaitFact(() => submissions.length === 1, 'the submit after the fence lift')
     assert.deepEqual(submissions, ['after the switch'],
       'a submit after the fence lift reaches the application normally')
   } finally {
@@ -310,7 +347,7 @@ test('a hydration that NEVER commits stays fail-closed (Loading retained, no sub
   })
   try {
     harness.input.type('draft of the outgoing subject')
-    await settle()
+    await awaitTyped(harness, 'draft of the outgoing subject')
     assert.equal(harness.renderer.composer.getDraft(), 'draft of the outgoing subject')
     // The owner's hydrate began and NEVER commits a new subject.
     harness.renderer.display.beginSessionHydration()
@@ -350,7 +387,7 @@ test('a GENUINE session switch clears the old draft — Enter into B never sends
   const harness = await mountPane((text) => { submissions.push(text) })
   try {
     harness.input.type('draft from A')
-    await settle()
+    await awaitTyped(harness, 'draft from A')
     assert.equal(harness.renderer.composer.getDraft(), 'draft from A')
     // The committed-switch seam pair (the runtime calls these back-to-back
     // at the post-publication site).
@@ -366,14 +403,14 @@ test('a GENUINE session switch clears the old draft — Enter into B never sends
     // form to the application (its empty-submission no-op); what must NEVER
     // appear is A's text.
     harness.input.type('\r')
-    await settle()
+    await awaitFact(() => submissions.length === 1, 'the empty handover')
     assert.deepEqual(submissions, [''],
       'the stray Enter handed over the EMPTY draft (the application no-ops it) — never A\'s text')
     // B's own typing works normally.
     harness.input.type('typed in B')
-    await settle()
+    await awaitTyped(harness, 'typed in B')
     harness.input.type('\r')
-    await settle()
+    await awaitFact(() => submissions.length === 2, "B's own submission")
     assert.deepEqual(submissions, ['', 'typed in B'],
       'after the empty handover, B\'s own draft submits normally (A\'s text never appears)')
   } finally {
@@ -397,7 +434,7 @@ test('the FIRST-session creation and a generation bump WITHOUT a committed switc
     // in flight; the creation's generation bump + hydration window raise —
     // but there is no OUTGOING session, so no drop may happen.
     harness.input.type('typed while the first session creates')
-    await settle()
+    await awaitTyped(harness, 'typed while the first session creates')
     harness.renderer.display.beginSessionHydration()
     await settle()
     harness.renderer.display.setTranscript([], undefined, undefined, undefined, undefined, { subject: 'first' })
@@ -409,7 +446,7 @@ test('the FIRST-session creation and a generation bump WITHOUT a committed switc
     // its own fold re-commits. The hydration window lifts on the new source
     // token; the draft was never dropped.
     harness.input.type(' + kept')
-    await settle()
+    await awaitTyped(harness, 'typed while the first session creates + kept')
     harness.renderer.display.beginSessionHydration()
     await settle()
     harness.renderer.display.setTranscript([], undefined, undefined, undefined, undefined, { subject: 'still-A' })
@@ -431,7 +468,7 @@ test('a SAME-SESSION rehydrate preserves the unsubmitted draft', async () => {
   const harness = await mountPane((text) => { submissions.push(text) })
   try {
     harness.input.type('kept through rehydrate')
-    await settle()
+    await awaitTyped(harness, 'kept through rehydrate')
     harness.renderer.display.beginSessionHydration()
     await settle()
     // The SAME session's replacement fold commits (a new source token, no
@@ -441,11 +478,11 @@ test('a SAME-SESSION rehydrate preserves the unsubmitted draft', async () => {
     assert.equal(harness.renderer.composer.getDraft(), 'kept through rehydrate',
       'the same-session rehydrate preserved the unsubmitted draft')
     harness.input.type(' + more')
-    await settle()
+    await awaitTyped(harness, 'kept through rehydrate + more')
     assert.equal(harness.renderer.composer.getDraft(), 'kept through rehydrate + more',
       'editing continues on the preserved draft')
     harness.input.type('\r')
-    await settle()
+    await awaitFact(() => submissions.length === 1, 'the preserved draft submission')
     assert.deepEqual(submissions, ['kept through rehydrate + more'],
       'the preserved draft submits into the SAME session normally')
   } finally {
@@ -463,7 +500,7 @@ test('a FAILED switch (hydration raised, never cleared, no new subject) preserve
   const harness = await mountPane((text) => { submissions.push(text) })
   try {
     harness.input.type('draft during failed switch')
-    await settle()
+    await awaitTyped(harness, 'draft during failed switch')
     harness.renderer.display.beginSessionHydration()
     await settle()
     // The switch FAILED: the same subject's own fold re-commits (the fence
@@ -473,7 +510,7 @@ test('a FAILED switch (hydration raised, never cleared, no new subject) preserve
     assert.equal(harness.renderer.composer.getDraft(), 'draft during failed switch',
       'a failed switch preserved the draft (no draft drop without the generation boundary)')
     harness.input.type('\r')
-    await settle()
+    await awaitFact(() => submissions.length === 1, 'the recovered session submission')
     assert.deepEqual(submissions, ['draft during failed switch'],
       'the preserved draft submits into the recovered session normally')
   } finally {
@@ -520,7 +557,7 @@ test('clearActiveDraft is PURE STATE — no render IO, no throw surface', async 
   const harness = await mountPane(() => {})
   try {
     harness.input.type('draft to drop')
-    await settle()
+    await awaitTyped(harness, 'draft to drop')
     assert.equal(harness.renderer.composer.getDraft(), 'draft to drop')
     const framesBefore = harness.output.chunks.length
     harness.renderer.display.clearActiveDraft()
