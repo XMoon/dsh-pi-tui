@@ -1,5 +1,5 @@
 {
-  "digest": "84ad20c17b7ed1969685cb6851b6b91f9b026c3f8659f5e6d8acd21a20042fce",
+  "digest": "ff60c0ec7b1656d075b58b0fba4dd7b19007c8cbacce6089f3f6000ddde87d23",
   "inputs": [
     {
       "path": "package.json",
@@ -46,7 +46,7 @@
     {
       "path": "scripts/pack-equivalence-protocol.json",
       "present": true,
-      "sha256": "e967dc7a3db071eadedc8b80b7770f55950107c2e5eae38f01c39870778d231a",
+      "sha256": "70398d5ed490d49e7b8edc4b98dd93a664480a3981b430dddbf1360f49316345",
       "why": "the protocol is the pair of commands being compared"
     }
   ],
@@ -58,8 +58,8 @@
     "entryCount": 37,
     "differingFiles": [],
     "manifestDifferences": [],
-    "run": "https://github.com/XMoon/dsh-pi-tui/actions/runs/39660914932",
-    "commit": "e9f4f25d75fea1b210723f323e51bcf3bfc9bd3f",
-    "note": "Reopened by any change to a digested input, to the proof MODE/NODE/PLATFORM, to the protocol, or by a missing/false proof."
+    "run": "https://github.com/XMoon/dsh-pi-tui/actions/runs/39663543556",
+    "commit": "f493342c3d68c8b716fc5f827296c7663dfece8b",
+    "note": "Reopened by any change to a digested input (including the protocol and its operands), to the proof MODE/NODE/PLATFORM, or by a missing/false proof."
   }
 }
