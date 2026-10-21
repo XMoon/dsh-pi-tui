@@ -128,14 +128,10 @@ jobs:
       # The machine the measurement runs on. Every value is measured or
       # reported as unavailable; a missing cgroup file is never replaced by
       # the runner family's public label.
-      - name: Record the runner specification
-        run: |
-          set -euo pipefail
-          mkdir -p diagnostics
-          node scripts/runner-spec.mjs --out diagnostics/runner-spec.json
-
-      # The build is a build INPUT to the bundle and to the tests, so it
-      # runs BEFORE the tests and never at the same time as them.
+      #
+      # The specification is written AFTER the measurement, so the measured
+      # wall clock is a field of the same document as the machine it was
+      # measured on — a reader never has to correlate two files.
       - name: Build the vendored fork and the bundle
         run: pnpm build
 
@@ -149,7 +145,9 @@ jobs:
           start=$(date +%s)
           node scripts/run-test-lane.mjs product --shard=${{ matrix.shard }}/${{ inputs.shard_total }}
           end=$(date +%s)
-          echo "wall_clock_seconds=$((end - start))" >> diagnostics/runner-spec.json
+          node scripts/runner-spec.mjs \
+            --wall-clock-seconds "$((end - start))" \
+            --out diagnostics/runner-spec.json
 
       - name: Summarize the case distribution
         run: |

@@ -133,13 +133,20 @@ export function collectRunnerSpec() {
 function main() {
   const args = process.argv.slice(2)
   const outIndex = args.indexOf('--out')
+  const wallIndex = args.indexOf('--wall-clock-seconds')
   const spec = collectRunnerSpec()
+  if (wallIndex !== -1) {
+    // The measured wall clock is a FIELD of the specification, not a line
+    // appended to the file: appending `wall_clock_seconds=123` to a JSON
+    // document makes it invalid JSON, and every reader of it would then
+    // fail to parse the very file that holds the measurement.
+    spec.wallClockSeconds = Number(args[wallIndex + 1])
+  }
   if (outIndex !== -1) {
     writeFileSync(args[outIndex + 1], `${JSON.stringify(spec, null, 2)}\n`)
   }
   console.log(JSON.stringify(spec, null, 2))
 }
-
 if (process.argv[1] !== undefined && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   main()
 }

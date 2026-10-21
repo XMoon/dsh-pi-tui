@@ -235,3 +235,24 @@ test('the runner specification reports the real machine, and marks what it canno
     assert.equal(typeof spec.cgroup.cpu.cgroupVersion, 'string')
   }
 })
+
+test('the runner specification with a wall clock is still valid JSON', () => {
+  // The measured wall clock used to be APPENDED to the specification file
+  // as `wall_clock_seconds=42`, which made the JSON invalid — so the
+  // aggregate could not read the very file that held the measurement. The
+  // wall clock is now a FIELD of the document.
+  const dir = mkdtempSync(join(tmpdir(), 'dsh-runner-spec-'))
+  try {
+    const path = join(dir, 'runner-spec.json')
+    const result = spawnSync(
+      process.execPath,
+      [join(ROOT, 'scripts', 'runner-spec.mjs'), '--wall-clock-seconds', '42', '--out', path],
+      { cwd: ROOT, encoding: 'utf8' },
+    )
+    assert.equal(result.status, 0, result.stderr)
+    const spec = JSON.parse(readFileSync(path, 'utf8'))
+    assert.equal(spec.wallClockSeconds, 42)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
