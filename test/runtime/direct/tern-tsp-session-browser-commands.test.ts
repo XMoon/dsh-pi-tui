@@ -40,6 +40,48 @@ function welcomeSessionIds(pane: Parameters<typeof wireNodes>[0]): string[] {
     .map((node) => node.id.slice(prefix.length))
 }
 
+/**
+ * The projection scope identity the renderer is currently showing (`s3`), or
+ * `undefined` while it sits BETWEEN scopes — the Loading state, in which the
+ * transcript carries no scoped row at all.
+ */
+function projectionScopeId(pane: Parameters<typeof wireNodes>[0]): string | undefined {
+  for (const node of wireNodes(pane)) {
+    const match = /main\.(s\d+)-/u.exec(node.id)
+    if (match !== null) return match[1]
+  }
+  return undefined
+}
+
+/**
+ * Wait until a NEW projection scope has committed.
+ *
+ * The renderer fences the composer input between a session switch's
+ * `beginSessionHydration()` and the new subject's first committed frame: a
+ * key typed in that window is DROPPED, not held, so no later wait can
+ * recover it. The fence lifts exactly when the new scope commits
+ * (`src/tui/tsp/session.ts`: `hydrating = false` and `scopeEpoch += 1` are
+ * the same commit), so "a new scope is on the wire" IS "the composer
+ * accepts input again".
+ *
+ * The Browser's DISAPPEARANCE is not that signal: the switch retires the
+ * Browser first and only then starts the hydration, so a test that types as
+ * soon as the Browser is gone can land inside the fence and lose the input.
+ */
+async function waitForNewProjectionScope(
+  pane: Parameters<typeof wireNodes>[0],
+  previous: string | undefined,
+): Promise<string> {
+  let committed: string | undefined
+  await waitFor('the new projection scope commits', () => {
+    const current = projectionScopeId(pane)
+    if (current === undefined || current === previous) return false
+    committed = current
+    return true
+  })
+  return committed!
+}
+
 test('sessionless resume, UI A→B, and typed resume follow the production lifecycle', async (t) => {
   const { testLifecycle } = await import('../../support/temp-lifecycle.ts')
   const life = testLifecycle(t)
@@ -173,8 +215,12 @@ test('sessionless resume, UI A→B, and typed resume follow the production lifec
     sendSelect(fixture.pane, `session:${targetId}`, firstPicker)
     await waitFor('the sessionless target is selected', () => pickerProps(fixture.pane, BROWSER).selected === `session:${targetId}`)
     const sessionlessTraceStart = lifecycleTrace.length
+    const scopeBeforeSessionlessResume = projectionScopeId(fixture.pane)
     fixture.pane.key('\r')
     await waitFor('the captured Browser retires after sessionless resume', () => pickerNode(fixture.pane, BROWSER) === undefined)
+    // The Browser's retirement is NOT the end of the switch: the composer input
+    // stays fenced until B's own projection scope commits.
+    await waitForNewProjectionScope(fixture.pane, scopeBeforeSessionlessResume)
     assert.equal(lifecycleTrace.slice(sessionlessTraceStart).filter((event) => event.kind === 'open'
       && event.sessionId === targetId && event.outcome === 'starting').length, 1,
     'one Enter emits one Direct open from a sessionless Browser')
@@ -302,9 +348,13 @@ test('sessionless resume, UI A→B, and typed resume follow the production lifec
       'the failed transition releases pending so the user can retry')
 
     const retryTraceStart = lifecycleTrace.length
+    const scopeBeforeRetryResume = projectionScopeId(fixture.pane)
     sendPickerAction(fixture.pane, 'resume', BROWSER)
     await waitFor('retrying Footer Resume switches to A', () => pickerNode(fixture.pane, BROWSER) === undefined
       && welcomeSessionIds(fixture.pane).includes(sourceId))
+    // The Browser's retirement is NOT the end of the switch: the composer input
+    // stays fenced until A's own projection scope commits.
+    await waitForNewProjectionScope(fixture.pane, scopeBeforeRetryResume)
     assertOldFlushBeforeOpen(retryTraceStart, targetId, sourceId)
     assert.equal(lifecycleTrace.slice(retryTraceStart).filter((event) => event.kind === 'open'
       && event.sessionId === sourceId && event.outcome === 'starting').length, 1,
@@ -321,8 +371,14 @@ test('sessionless resume, UI A→B, and typed resume follow the production lifec
     sendSelect(fixture.pane, `session:${targetId}`, sourcePicker)
     await waitFor('the target B row is selected from A', () => pickerProps(fixture.pane, BROWSER).selected === `session:${targetId}`)
     const uiTraceStart = lifecycleTrace.length
+    const scopeBeforeAtoB = projectionScopeId(fixture.pane)
     fixture.pane.key('\r')
     await waitFor('the A→B Enter transition retires the captured Browser', () => pickerNode(fixture.pane, BROWSER) === undefined)
+    // The Browser's retirement is NOT the end of the switch: the composer input
+    // stays fenced until B's own projection scope commits. A key typed before
+    // that is DROPPED (not held), so the wait below is the only thing that
+    // keeps the next command from being lost.
+    await waitForNewProjectionScope(fixture.pane, scopeBeforeAtoB)
 
     const finalRereadStart = listCalls.length
     await submitInput(fixture.pane, '/sessions')
@@ -343,9 +399,13 @@ test('sessionless resume, UI A→B, and typed resume follow the production lifec
 
     const directTraceStart = lifecycleTrace.length
     const directResumeStart = listCalls.length
+    const scopeBeforeTypedResume = projectionScopeId(fixture.pane)
     await submitInput(fixture.pane, `/resume ${sourceId}`)
     await waitFor('typed /resume directly switches from B to A', () => listCalls.length > directResumeStart
       && pickerNode(fixture.pane, BROWSER) === undefined)
+    // The Browser's retirement is NOT the end of the switch: the composer input
+    // stays fenced until A's own projection scope commits.
+    await waitForNewProjectionScope(fixture.pane, scopeBeforeTypedResume)
     assert.equal(listCalls.length, directResumeStart + 1, 'typed direct resume performs one shared listing')
     assert.equal(listCalls[directResumeStart]?.currentSessionId, targetId)
     assert.ok(listCalls[directResumeStart]?.rows?.some((row) => row.id === sourceId))
@@ -377,9 +437,13 @@ test('sessionless resume, UI A→B, and typed resume follow the production lifec
     sendSelect(fixture.pane, `session:${targetId}`, activatePicker)
     await waitFor('B is selected before native row activation', () => pickerProps(fixture.pane, BROWSER).selected === `session:${targetId}`)
     const activateTraceStart = lifecycleTrace.length
+    const scopeBeforeNativeActivate = projectionScopeId(fixture.pane)
     sendActivate(fixture.pane, `session:${targetId}`, activatePicker)
     await waitFor('native row activate switches A→B', () => pickerNode(fixture.pane, BROWSER) === undefined
       && welcomeSessionIds(fixture.pane).includes(targetId))
+    // The Browser's retirement is NOT the end of the switch: the composer input
+    // stays fenced until B's own projection scope commits.
+    await waitForNewProjectionScope(fixture.pane, scopeBeforeNativeActivate)
     assertOldFlushBeforeOpen(activateTraceStart, sourceId, targetId)
     assert.equal(lifecycleTrace.slice(activateTraceStart).filter((event) => event.kind === 'open'
       && event.sessionId === targetId && event.outcome === 'starting').length, 1,
