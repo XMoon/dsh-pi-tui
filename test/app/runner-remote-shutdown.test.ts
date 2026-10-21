@@ -678,16 +678,17 @@ test('the transport fallback does NOT swallow a failed teardown', async () => {
     },
   }
   const ownership = ownTransportTeardown(failing)
-  assert.equal(ownership.releasedByRunner(), false,
-    'the runner never released the transport, so the fallback owns it')
+  assert.equal(ownership.disposeTransportReached(), false,
+    'the transport disposer was never reached, so the fallback owns the teardown')
   await assert.rejects(
     async () => { await ownership.runFallback() },
     /the fallback teardown failed \(injected\)/,
     'a failed fallback teardown is REPORTED, never swallowed',
   )
 
-  // The runner's own teardown releases the transport: the fallback then adds
-  // no second call, and a failure of that first teardown is still reported.
+  // The runner's own teardown REACHED the disposer: the fallback then adds
+  // no second call (the production disposer is idempotent), and a failure of
+  // that first teardown is still reported to its own caller.
   const released = {
     disposeTransport: async (): Promise<void> => {
       throw new Error('the runner teardown failed (injected)')
@@ -699,7 +700,7 @@ test('the transport fallback does NOT swallow a failed teardown', async () => {
     /the runner teardown failed \(injected\)/,
     'the runner teardown failure is reported to its own caller',
   )
-  assert.equal(second.releasedByRunner(), true,
-    'the runner reached the transport, so the fallback is inert')
+  assert.equal(second.disposeTransportReached(), true,
+    'the transport disposer was reached (the production one is idempotent, so the fallback adds no second call)')
   await second.runFallback()
 })
