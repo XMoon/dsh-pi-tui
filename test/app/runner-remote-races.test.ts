@@ -136,6 +136,61 @@ interface RaceFixture {
   runnerFiberDispose(): Promise<void>
 }
 
+/**
+ * The REAL transport-disposal observer.
+ *
+ * The production disposer is idempotent (`if (transportDisposed) return`
+ * BEFORE it reaches `clientUi.dispose()`), so the Client-UI subtree's dispose
+ * does the work EXACTLY ONCE per transport — no matter how many times the
+ * disposer is called. Counting THAT is counting the REAL disposal; counting
+ * the disposer calls counts the calls, and a second caller (the fixture's own
+ * cleanup, a retry) would make the call count 2 while nothing was disposed
+ * twice.
+ *
+ * The observer therefore wraps `clientUi.dispose` — the first thing the real
+ * disposal does — and counts the disposals that DID the work. The wrapper
+ * keeps the production idempotence itself: a later call is a no-op, exactly
+ * like the production subtree disposer, and it is NOT counted. So the count
+ * means "the transport graph was really torn down", and a genuine second
+ * teardown of the graph would count 2 and fail the assertion.
+ *
+ * The disposer CALL is still observed for the ORDER assertions.
+ */
+interface TransportDisposalObserver {
+  /** The REAL disposals: the ones that did the work. */
+  readonly realDisposals: () => number
+  /** The disposer CALLS, real or idempotent no-op. */
+  readonly calls: () => number
+}
+
+function observeTransportDisposal(
+  aggregate: Awaited<ReturnType<typeof createRemoteApplicationRuntime>>,
+  observed: string[],
+): TransportDisposalObserver {
+  const clientUi = aggregate.clientUi
+  const originalClientUiDispose = clientUi.dispose.bind(clientUi)
+  let realDisposals = 0
+  let clientUiDisposed = false
+  // The wrapper carries the production subtree disposer's idempotence, so it
+  // knows whether a call did the work or was a no-op: only the FIRST call
+  // forwards to the production disposer and counts.
+  clientUi.dispose = async (): Promise<void> => {
+    if (clientUiDisposed) return
+    clientUiDisposed = true
+    realDisposals += 1
+    await originalClientUiDispose()
+  }
+  const selected = aggregate.selected as { disposeTransport(): Promise<void> }
+  const originalDispose = selected.disposeTransport.bind(selected)
+  let calls = 0
+  selected.disposeTransport = async (): Promise<void> => {
+    calls += 1
+    observed.push('transport-dispose')
+    await originalDispose()
+  }
+  return { realDisposals: () => realDisposals, calls: () => calls }
+}
+
 async function mountRaceRunner(
   life: TestLifecycle,
   options: {
@@ -156,7 +211,15 @@ async function mountRaceRunner(
       ...(options.resumeSessionId === undefined ? {} : { sessionId: options.resumeSessionId }),
     },
   })
-  life.defer(() => aggregate.selected.disposeTransport().catch(() => {}))
+  // The transport is disposed by the RUNNER FIBER's teardown effect
+  // (`registerRunnerDisposal` → `disposeSelectedTransport`), so the fiber
+  // disposal registered below owns it. A second, direct
+  // `selected.disposeTransport()` registration would reach the SAME
+  // idempotent disposer a second time — and the "the transport disposes
+  // exactly once" assertions count the CALLS, so the extra registration
+  // could land before the assertion and make the count 2 (the load-sensitive
+  // flake this fixture's ownership must not have). The fiber disposal is the
+  // ONE owner; nothing else disposes the transport.
   const vt = new VirtualTerminal(110, 32)
   const restoreTerminal = await import('../support/runner-harness.ts').then(m => m.installVirtualProcessTerminal(vt))
   life.defer(restoreTerminal)
@@ -341,15 +404,9 @@ test('teardown with a pending main-path READ — release after the OBSERVED surf
     originalStop()
     writesAtSurfaceStop.count = surfaceWrites.count
   }
-  // TRANSPORT-DISPOSAL OBSERVER.
-  const selected = fixture.aggregate.selected as { disposeTransport(): Promise<void> }
-  let transportDisposals = 0
-  const originalDispose = selected.disposeTransport.bind(selected)
-  selected.disposeTransport = async (): Promise<void> => {
-    transportDisposals += 1
-    observed.push('transport-dispose')
-    await originalDispose()
-  }
+  // TRANSPORT-DISPOSAL OBSERVER: the REAL disposals are the ones that did the
+  // work, not the calls.
+  const transport = observeTransportDisposal(fixture.aggregate, observed)
   // START the teardown (unawaited): the registered effect runs
   // disposeSurface SYNCHRONOUSLY (surface-stop) and then begins the
   // retirement drain, which waits for the pending settlement work.
@@ -359,7 +416,7 @@ test('teardown with a pending main-path READ — release after the OBSERVED surf
   // has NOT disposed yet (the drain runs first) and the read is still
   // pending.
   await waitFor('the surface stopped (observed)', () => observed.includes('surface-stop'), 10_000)
-  assert.equal(transportDisposals, 0,
+  assert.equal(transport.realDisposals(), 0,
     'the transport has NOT disposed while the surface is stopped and the drain is pending')
   assert.equal(readParked && releaseRead !== undefined, true, 'the pending read is still unsettled inside the drain window')
   // Release the pending read INSIDE the drain window (surface fenced, drain
@@ -369,7 +426,7 @@ test('teardown with a pending main-path READ — release after the OBSERVED surf
   await teardownPromise
   // Observed order: surface-stop BEFORE transport-dispose (the drain
   // settles the released read between them), transport EXACTLY once.
-  assert.equal(transportDisposals, 1,
+  assert.equal(transport.realDisposals(), 1,
     'the selected transport disposes exactly once through the runner teardown')
   assert.ok(observed.indexOf('surface-stop') < observed.indexOf('transport-dispose'),
     'observed order: surface stop precedes the transport disposal (the drain ran between)')
@@ -423,22 +480,15 @@ test('teardown with a pending WRITE — observed surface-stop boundary, drain-se
     originalStop()
     writesAtSurfaceStop.count = surfaceWrites.count
   }
-  const selected = fixture.aggregate.selected as { disposeTransport(): Promise<void> }
-  let transportDisposals = 0
-  const originalDispose = selected.disposeTransport.bind(selected)
-  selected.disposeTransport = async (): Promise<void> => {
-    transportDisposals += 1
-    observed.push('transport-dispose')
-    await originalDispose()
-  }
+  const transport = observeTransportDisposal(fixture.aggregate, observed)
   // START the teardown; observe the surface stop BEFORE releasing the write.
   const teardownPromise = fixture.runnerFiberDispose()
   await waitFor('the surface stopped (observed)', () => observed.includes('surface-stop'), 10_000)
-  assert.equal(transportDisposals, 0,
+  assert.equal(transport.realDisposals(), 0,
     'the transport has NOT disposed while the drain is pending the parked write')
   parked.release()
   await teardownPromise
-  assert.equal(transportDisposals, 1,
+  assert.equal(transport.realDisposals(), 1,
     'the selected transport disposes exactly once through the runner teardown')
   assert.ok(observed.indexOf('surface-stop') < observed.indexOf('transport-dispose'),
     'observed order: surface stop precedes the transport disposal (the drain settled the write between)')
@@ -504,17 +554,10 @@ test('a prompt ACCEPTED before teardown keeps its receipt, becomes durable and i
     originalStop()
     writesAtSurfaceStop.count = surfaceWrites.count
   }
-  const selected = fixture.aggregate.selected as { disposeTransport(): Promise<void> }
-  let transportDisposals = 0
-  const originalDispose = selected.disposeTransport.bind(selected)
-  selected.disposeTransport = async (): Promise<void> => {
-    transportDisposals += 1
-    observed.push('transport-dispose')
-    await originalDispose()
-  }
+  const transport = observeTransportDisposal(fixture.aggregate, observed)
 
   await fixture.runnerFiberDispose()
-  assert.equal(transportDisposals, 1, 'the selected transport disposes exactly once')
+  assert.equal(transport.realDisposals(), 1, 'the selected transport disposes exactly once')
   assert.ok(observed.indexOf('surface-stop') < observed.indexOf('transport-dispose'),
     'the observed order stays surface stop -> drain -> transport disposal')
   await new Promise(resolve => setTimeout(resolve, 200))

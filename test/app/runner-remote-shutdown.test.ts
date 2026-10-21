@@ -97,6 +97,14 @@ function instrumentTuiApps(life: TestLifecycle): { readonly apps: unknown[] } {
 /**
  * Wrap the aggregate's OWN retirement + transport disposal BEFORE the runner
  * adopts it, so the observed order is the production path's, not a timing guess.
+ *
+ * `transport.disposals` counts the REAL disposals — the ones that did the
+ * work. The production disposer is idempotent (`if (transportDisposed)
+ * return`) and returns BEFORE it reaches `clientUi.dispose()`, so the Client-UI
+ * subtree's dispose runs exactly once per transport no matter how many times
+ * the disposer is called. Counting THAT counts the real disposal; counting the
+ * disposer calls counts the calls, and a second caller would make the call
+ * count 2 while nothing was disposed twice.
  */
 function instrumentAggregate(aggregate: RemoteAggregate, observed: string[]): { readonly transport: { disposals: number } } {
   const retirement: SessionOwnerRetirement = aggregate.selected.retirement
@@ -113,9 +121,19 @@ function instrumentAggregate(aggregate: RemoteAggregate, observed: string[]): { 
     return report
   }
   const transport = { disposals: 0 }
+  const originalClientUiDispose = aggregate.clientUi.dispose.bind(aggregate.clientUi)
+  let clientUiDisposed = false
+  aggregate.clientUi.dispose = async (): Promise<void> => {
+    // The production subtree disposer is idempotent: the FIRST call does the
+    // work, a later call is a no-op. Counting only the work keeps the count
+    // equal to the number of REAL teardowns of the transport graph.
+    if (clientUiDisposed) return
+    clientUiDisposed = true
+    transport.disposals += 1
+    await originalClientUiDispose()
+  }
   const originalDispose = aggregate.selected.disposeTransport.bind(aggregate.selected)
   aggregate.selected.disposeTransport = async (): Promise<void> => {
-    transport.disposals += 1
     observed.push('transport-dispose')
     await originalDispose()
   }
@@ -137,6 +155,11 @@ interface TeardownCounts {
  * runtime) with call-through observers, so the L6 teardown proves each
  * production owner was actually released — not merely that the transport entry
  * was called.
+ *
+ * The Client-UI subtree's dispose is counted the way the production subtree
+ * disposer behaves: the FIRST call does the work, a later call is a no-op and
+ * is not counted. So the count is "the owner was really released" — the same
+ * quantity `instrumentAggregate` reports for the transport.
  */
 function instrumentTeardownOwners(aggregate: RemoteAggregate): TeardownCounts {
   const counts: TeardownCounts = { clientUi: 0, taskWatch: 0, adapters: 0, client: 0, host: 0 }
@@ -148,7 +171,12 @@ function instrumentTeardownOwners(aggregate: RemoteAggregate): TeardownCounts {
       return original.apply(owner, args)
     }
   }
-  wrap(aggregate.clientUi, 'dispose', () => { counts.clientUi += 1 })
+  let clientUiDisposed = false
+  wrap(aggregate.clientUi, 'dispose', () => {
+    if (clientUiDisposed) return
+    clientUiDisposed = true
+    counts.clientUi += 1
+  })
   wrap(aggregate.presentation.task, 'dispose', () => { counts.taskWatch += 1 })
   wrap(aggregate.backendRuntime, 'dispose', () => { counts.adapters += 1 })
   wrap(aggregate.wire.client, 'dispose', () => { counts.client += 1 })
@@ -187,7 +215,14 @@ async function mountShutdownRunner(
     waitForHostPrerequisites: async () => {},
     clientUiStartup: { sessionId: options.resumeSessionId },
   })
-  life.defer(() => aggregate.selected.disposeTransport().catch(() => {}))
+  // The transport is disposed by the RUNNER FIBER's teardown effect
+  // (`registerRunnerDisposal` → `disposeSelectedTransport`), so the fiber
+  // disposal registered below owns it. A second, direct
+  // `selected.disposeTransport()` registration would reach the SAME
+  // idempotent disposer a second time — and the "disposes exactly once"
+  // assertions count the CALLS, so the extra registration could land
+  // before the assertion and make the count 2. The fiber disposal is the ONE
+  // owner; nothing else disposes the transport.
   options.beforeMount?.(aggregate)
   const previousHome = process.env.DSH_HOME
   process.env.DSH_HOME = host.workRoot
