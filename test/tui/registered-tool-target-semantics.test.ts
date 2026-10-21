@@ -30,6 +30,9 @@ import SkillRegistry from '@deepseek-ai/dsh-skill'
 import { ShellExecutor } from '@deepseek-ai/dsh-shell'
 import type { ShellExecRequest, ShellExecSpec, ShellExecution } from '@deepseek-ai/dsh-shell'
 import * as ShellEnvPlugin from '@deepseek-ai/dsh-shell-env'
+import { mkdir, writeFile } from 'node:fs/promises'
+import { join } from 'node:path'
+import { testLifecycle } from '../support/temp-lifecycle.ts'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
 import * as ToolBash from '@deepseek-ai/dsh-tool-bash'
@@ -284,23 +287,28 @@ test('the registered tools the head displays a COUNT for keep the plain text kin
 
 // ── Direct / Remote parity, measured on the REAL registry ─────────────────
 
-test('the Direct and Remote branches agree on every registered tool except the search family', () => {
-  // The parity question: the Client branch must not guess by tool name (a
-  // plugin may shadow a built-in name), so it reads the TOOL-AUTHORED result
-  // metadata instead. This case measures the AGREEMENT SET against the real
-  // registry, and pins the one family that still diverges.
+test('the two branches agree on the read family, which the tool-authored metadata proves', () => {
+  // The parity question, scoped to what this file MEASURES: for the read
+  // family the two branches reach the same kind, because both read the
+  // tool's OWN result metadata — a real source, not a name-keyed guess.
+  //
+  // This is NOT a claim about every registered tool: the matrix below is the
+  // exact set this case measures (read, and the two refusals). The search
+  // family's divergence is pinned by the NEXT case, and the edit/write
+  // divergence by the one after it.
   const remote = createClientToolPresenter()
   const kindWith = (
     presenter: ToolPresenter,
     name: string,
     args: Record<string, unknown>,
     meta: unknown,
+    text = 'ok',
   ): unknown => {
     const folder = new TranscriptFolder()
     folder.apply([
       ev('turn/start', { turn: 1 }, 0),
       toolCall(1, 'c1', name, args),
-      toolResult(2, 'c1', 'ok', meta),
+      toolResult(2, 'c1', text, meta),
     ])
     const keys = new TranscriptNodeKeys()
     const view = View.from({
@@ -314,31 +322,127 @@ test('the Direct and Remote branches agree on every registered tool except the s
 
   const direct = toolPresenterFrom(registry)
   const readMeta = { path: 'src/a.ts', offset: 1, lines: [{ number: 1, text: 'a' }], totalLines: 1 }
-  const cases: readonly { name: string; args: Record<string, unknown>; meta: unknown }[] = [
-    { name: 'read', args: { file_path: 'src/a.ts' }, meta: readMeta },
-    { name: 'edit', args: { file_path: 'src/a.ts', old_string: 'a', new_string: 'b' }, meta: undefined },
-    { name: 'write', args: { file_path: 'src/b.ts', content: 'x' }, meta: undefined },
-    { name: 'bash', args: { command: 'pnpm test', description: 'Run the tests' }, meta: undefined },
-  ]
-  for (const testCase of cases) {
-    assert.equal(
-      kindWith(remote, testCase.name, testCase.args, testCase.meta),
-      kindWith(direct, testCase.name, testCase.args, testCase.meta),
-      `${testCase.name}: the two branches agree`,
-    )
+  const readEnvelope = '<path>src/a.ts</path>\n<type>file</type>\n<content>\n1: a\n</content>'
+
+  assert.equal(
+    kindWith(direct, 'read', { file_path: 'src/a.ts' }, readMeta, readEnvelope),
+    'path',
+    'the Direct branch proves the path from the registered tool',
+  )
+  assert.equal(
+    kindWith(remote, 'read', { file_path: 'src/a.ts' }, readMeta, readEnvelope),
+    'path',
+    'the Remote branch proves the same path from the tool-authored metadata',
+  )
+})
+
+test('the two branches differ on the edit family, whose Remote call view is a name-keyed guess', () => {
+  // The Remote bridge derives its edit/write call view from the tool NAME and
+  // the raw arguments. A plugin may register its own tool under a built-in
+  // name, so that view is a guess and cannot PROVE that the displayed string
+  // is a path. The Direct branch resolves the actual scoped definition, so it
+  // can. The difference is the price of never guessing by name.
+  const remote = createClientToolPresenter()
+  const kindWith = (
+    presenter: ToolPresenter,
+    name: string,
+    args: Record<string, unknown>,
+  ): unknown => {
+    const folder = new TranscriptFolder()
+    folder.apply([
+      ev('turn/start', { turn: 1 }, 0),
+      toolCall(1, 'c1', name, args),
+      toolResult(2, 'c1', 'ok'),
+    ])
+    const keys = new TranscriptNodeKeys()
+    const view = View.from({
+      main: transcriptView(projectTranscriptStructure(folder.messages()), keys, {
+        cwd: CWD,
+        toolPresenter: presenter,
+      }),
+    })
+    return flatten(view).find(node => node.kind === 'tool')?.props['targetKind']
   }
 
-  // The search family still diverges: a PATTERN is provable only from the
-  // registered call view, because the search tools' result metadata carries
-  // the RESULTS, not the pattern. The Remote branch stays plain there.
-  assert.equal(
-    kindWith(direct, 'glob', { pattern: 'src/**/*.ts' }, undefined),
-    'pattern',
-    'the Direct branch proves the pattern from the registered call view',
-  )
-  assert.equal(
-    kindWith(remote, 'glob', { pattern: 'src/**/*.ts' }, undefined),
-    'text',
-    'the Remote branch cannot prove a pattern, and stays conservative',
-  )
+  const direct = toolPresenterFrom(registry)
+  const editArgs = { file_path: 'src/a.ts', old_string: 'a', new_string: 'b' }
+  assert.equal(kindWith(direct, 'edit', editArgs), 'path',
+    'the Direct branch proves the path from the registered tool')
+  assert.equal(kindWith(remote, 'edit', editArgs), 'text',
+    'the Remote branch refuses: its call view is derived from the tool name')
+})
+
+test('the two branches differ on the search family, whose pattern only the registered call view proves', () => {
+  // A PATTERN is provable only from the registered call view, because the
+  // search tools' result metadata carries the RESULTS, not the pattern. The
+  // Remote branch stays plain there. This is a measured fact about the two
+  // branches' authorities — not a product contract.
+  const remote = createClientToolPresenter()
+  const kindWith = (presenter: ToolPresenter): unknown => {
+    const folder = new TranscriptFolder()
+    folder.apply([
+      ev('turn/start', { turn: 1 }, 0),
+      toolCall(1, 'c1', 'glob', { pattern: 'src/**/*.ts' }),
+      toolResult(2, 'c1', 'ok'),
+    ])
+    const keys = new TranscriptNodeKeys()
+    const view = View.from({
+      main: transcriptView(projectTranscriptStructure(folder.messages()), keys, {
+        cwd: CWD,
+        toolPresenter: presenter,
+      }),
+    })
+    return flatten(view).find(node => node.kind === 'tool')?.props['targetKind']
+  }
+
+  assert.equal(kindWith(toolPresenterFrom(registry)), 'pattern',
+    'the Direct branch proves the pattern from the registered call view')
+  assert.equal(kindWith(remote), 'text',
+    'the Remote branch cannot prove a pattern, and stays conservative')
+})
+
+// ── A REAL read execution, through both branches ──────────────────────────
+
+test('a REAL read execution yields the SAME view on both branches', async (t) => {
+  // The Client derivation requires the result content to be exactly the ONE
+  // read envelope the metadata describes, and requires the envelope's path and
+  // the metadata's path to be the SAME string. Both are assumptions about the
+  // REAL tool's output, so assert them against an actual execution: if the
+  // envelope shape or the path ever diverge, this case fails instead of the
+  // feature silently degrading to `text` forever.
+  const life = testLifecycle(t)
+  const dir = life.tempDir('pr-b1-real-read-')
+  await mkdir(join(dir, 'src'), { recursive: true })
+  const filePath = join(dir, 'src', 'real.ts')
+  await writeFile(filePath, 'const answer = 42\n')
+
+  const outcome = await ctx.tools.execute({
+    signal: new AbortController().signal,
+    callId: ToolCallId('call-b1-real-read'),
+    name: 'read',
+    arguments: { file_path: filePath },
+    agent: owner,
+  })
+  assert.equal(outcome.isError, false, 'the real read succeeded')
+
+  const only = outcome.content.length === 1 ? outcome.content[0] : undefined
+  assert.ok(only !== undefined && only.type === 'text', 'the real result is ONE text block')
+  const envelopePath = /^<path>([^\n]*)<\/path>/.exec(only.text)?.[1]
+  const metaPath = (outcome.meta as { path?: string } | undefined)?.path
+  assert.equal(envelopePath, metaPath, 'the envelope path and the metadata path agree')
+
+  const argsRaw = JSON.stringify({ file_path: filePath })
+  const input = {
+    content: outcome.content,
+    isError: outcome.isError,
+    ...outcome.meta === undefined ? {} : { meta: outcome.meta },
+  }
+  const directView = toolPresenterFrom(registry).result('read', argsRaw, input)
+  const clientView = createClientToolPresenter().result('read', argsRaw, input)
+  assert.ok(directView !== undefined && directView.card === 'read', 'the Direct branch produced a read view')
+  assert.ok(clientView !== undefined && clientView.card === 'read', 'the Client branch produced a read view')
+  for (const field of ['path', 'offset', 'totalLines'] as const) {
+    assert.equal(clientView[field], directView[field], `the two branches agree on ${field}`)
+  }
+  assert.deepEqual(clientView.lines, directView.lines, 'the two branches agree on the lines')
 })

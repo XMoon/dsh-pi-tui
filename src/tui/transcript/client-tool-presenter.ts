@@ -29,6 +29,7 @@ import type {
   ToolCallView,
   ToolResultView,
 } from '@deepseek-ai/dsh-tools'
+import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 import type { ToolPresenter } from './tool-presentation.ts'
 
 /** Parse one tool-call args JSON payload (undefined when malformed). */
@@ -107,35 +108,78 @@ function terminalView(args: Record<string, unknown>): TerminalCallView | undefin
  * registry lets a scoped registration SHADOW a global one — so a name-keyed
  * guess would read a plugin's `url` parameter as a path.
  *
- * The metadata is narrowed defensively: an absent, malformed or foreign
- * payload yields no view, and the row keeps the plain generic card.
+ * The Client derivation must stay in STEP with the tool's own Host
+ * `presentResult`, which is the authority for the same view. That presenter
+ * guards TWO things beyond the metadata itself:
+ *
+ * - the RESULT CONTENT must be the single block the view describes (a merged
+ *   read group carries TWO envelopes and INHERITS the first read's metadata,
+ *   so a metadata-only derivation would describe one file while the card shows
+ *   two); and
+ * - every field the view exposes must be narrowed, never cast (a malformed
+ *   `diffs` entry would otherwise reach the diff renderer unvalidated).
+ *
+ * A view the Host presenter would NOT produce must not be produced here
+ * either: the two branches have to agree, and the settled card is rendered
+ * from whichever view comes first.
  */
-function metaPathView(meta: unknown): ToolResultView | undefined {
+function metaPathView(meta: unknown, content: readonly ContentBlock[], isError: boolean): ToolResultView | undefined {
+  // The tool's own Host `presentResult` returns no view for a FAILED call; the
+  // Client derivation must agree, or the two branches would render a failed
+  // call differently.
+  if (isError) return undefined
   if (typeof meta !== 'object' || meta === null || Array.isArray(meta)) return undefined
   const record = meta as Record<string, unknown>
   const path = record['path']
   if (typeof path !== 'string' || path === '') return undefined
+
+  // The result content must be the ONE text block the view describes.
+  const only = content.length === 1 ? content[0] : undefined
+  if (only === undefined || only.type !== 'text') return undefined
+  const text = only.text
+
   const diffs = record['diffs']
   if (Array.isArray(diffs)) {
-    const paths = diffs
-      .filter((diff): diff is { path: string } =>
-        typeof diff === 'object' && diff !== null
-        && typeof (diff as { path?: unknown }).path === 'string')
-      .map(diff => diff.path)
-    if (paths.length === 0) return undefined
-    return { card: 'diff', diffs: diffs as FileDiff[] }
+    // Narrow EVERY entry the way the tool's own `diffsFromMeta` does: a path
+    // alone is not a `FileDiff` (it also carries `oldText` and `newText`),
+    // and an unvalidated entry would crash the diff renderer.
+    if (diffs.length === 0) return undefined
+    const narrowed: FileDiff[] = []
+    for (const diff of diffs) {
+      if (typeof diff !== 'object' || diff === null || Array.isArray(diff)) return undefined
+      const entry = diff as { path?: unknown; oldText?: unknown; newText?: unknown }
+      if (typeof entry.path !== 'string') return undefined
+      if (entry.oldText !== null && typeof entry.oldText !== 'string') return undefined
+      if (typeof entry.newText !== 'string') return undefined
+      narrowed.push({ path: entry.path, oldText: entry.oldText, newText: entry.newText })
+    }
+    // The diff view describes the files the call CHANGED; the result content
+    // must be the one block those changes are reported in.
+    if (text.trim() === '') return undefined
+    return { card: 'diff', diffs: narrowed }
   }
+
   // The read shape: the tool states the path it read and the window it took.
+  // The result content must be EXACTLY ONE read envelope for that path, in the
+  // SAME shape the tool's own Host `presentResult` accepts. A merged group
+  // (two envelopes, inherited metadata) does not qualify, and the card falls
+  // back to the existing envelope rendering.
+  const envelope = /^<path>([^\n]*)<\/path>\n<type>[^<]*<\/type>\n<content>([\s\S]*)\n<\/content>$/u.exec(text)
+  if (envelope === null) return undefined
+  if (envelope[1] !== path) return undefined
+
   const offset = record['offset']
   const totalLines = record['totalLines']
   if (typeof offset !== 'number' || typeof totalLines !== 'number') return undefined
   const lines = record['lines']
-  const readLines = Array.isArray(lines)
-    ? lines.filter((line): line is ReadFileLine =>
-      typeof line === 'object' && line !== null
-      && typeof (line as { number?: unknown }).number === 'number'
-      && typeof (line as { text?: unknown }).text === 'string')
-    : []
+  if (!Array.isArray(lines)) return undefined
+  const readLines: ReadFileLine[] = []
+  for (const line of lines) {
+    if (typeof line !== 'object' || line === null) return undefined
+    const entry = line as { number?: unknown; text?: unknown }
+    if (typeof entry.number !== 'number' || typeof entry.text !== 'string') return undefined
+    readLines.push({ number: entry.number, text: entry.text })
+  }
   const lang = record['lang']
   return {
     card: 'read',
@@ -154,11 +198,18 @@ function metaPathView(meta: unknown): ToolResultView | undefined {
  * inferring by tool name. Every other settled-result rendering the TUI needs
  * already has a Client-side derivation (read envelopes, result text lines,
  * the compact summaries), so a Host result view is never required — an
- * absent or foreign metadata yields `undefined` and keeps those paths
- * authoritative.
+ * absent, foreign or inconsistent metadata yields `undefined` and keeps
+ * those paths authoritative.
  */
 export function createClientToolPresenter(): ToolPresenter {
   return {
+    // This bridge NEVER consults a registry: its call views are DERIVED from
+    // the tool name and the raw arguments, so they repeat a name-keyed guess
+    // and prove nothing about what the string IS. A plugin may also register
+    // its own tool under a built-in name, so the name cannot even identify
+    // the built-in. A consumer that needs a PROVEN kind must not read these
+    // views as proof.
+    callViewIsToolAuthored: false,
     call(name: string, argsRaw: string): ToolCallView | undefined {
       const args = parseArgs(argsRaw)
       if (args === undefined) return undefined
@@ -167,8 +218,14 @@ export function createClientToolPresenter(): ToolPresenter {
       if (name === 'bash' || name === 'pwsh') return terminalView(args)
       return undefined
     },
-    result(_name: string, _argsRaw: string, result: { readonly meta?: unknown }): ToolResultView | undefined {
-      return metaPathView(result.meta)
+    result(_name: string, argsRaw: string, result: { readonly content: readonly ContentBlock[]; readonly isError: boolean; readonly meta?: unknown }): ToolResultView | undefined {
+      // The Direct bridge parses the args JSON BEFORE consulting the tool, so
+      // a row whose args are not a JSON object (a merged read group's literal
+      // `'2 files'`) never reaches a Host `presentResult` at all. The Client
+      // derivation must apply the SAME gate, or the two branches would produce
+      // different views for the same row.
+      if (parseArgs(argsRaw) === undefined) return undefined
+      return metaPathView(result.meta, result.content, result.isError)
     },
   }
 }

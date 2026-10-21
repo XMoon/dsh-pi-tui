@@ -1177,6 +1177,21 @@ export interface ToolPresenter {
   call(name: string, argsRaw: string): ToolCallView | undefined
   /** The completed-call view for one tool result, or undefined. */
   result(name: string, argsRaw: string, result: ToolResultInput): ToolResultView | undefined
+  /**
+   * Whether `call()` returns a view the REGISTERED tool author declared
+   * (`presentCall`), or one the bridge DERIVED from the tool name and the raw
+   * arguments.
+   *
+   * The distinction is a PROVENANCE fact, not a quality judgement: a derived
+   * view repeats the name-keyed guess the bridge already makes for its own
+   * rendering, so it proves nothing about what the string IS. The Host
+   * bridge answers `true` (its views come from the scoped registry); the
+   * Client-derived bridge answers `false` (it never consults a registry, and a
+   * plugin may shadow a built-in name).
+   *
+   * Absent means `false`: an unstated provenance is not a provenance.
+   */
+  readonly callViewIsToolAuthored?: boolean
 }
 
 /**
@@ -1645,6 +1660,9 @@ export interface ToolDefinitionLike {
  */
 export function toolPresenterFrom(get: (name: string) => ToolDefinitionLike | undefined): ToolPresenter {
   return {
+    // Every view this bridge returns comes from the REGISTERED definition the
+    // scoped lookup resolved, so it is tool-authored by construction.
+    callViewIsToolAuthored: true,
     call(name, argsRaw) {
       const definition = get(name)
       if (definition?.presentCall === undefined) return undefined

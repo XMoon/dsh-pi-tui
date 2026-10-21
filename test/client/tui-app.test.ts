@@ -17,8 +17,10 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { testLifecycle } from '../support/temp-lifecycle.ts'
 import { toolPresenterFrom } from '../../src/tui/transcript/tool-presentation.ts'
+import { createClientToolPresenter } from '../../src/tui/transcript/client-tool-presenter.ts'
 import { TranscriptFolder } from '../../src/transcript.ts'
 import type { TranscriptMessage, TurnActivity } from '../../src/transcript.ts'
+import type { JsonValue } from '../../src/domain/transcript/types.ts'
 import type { AssistantLiveChunk, AssistantLiveInput } from '../../src/runtime/assistant-stream-port.ts'
 import { TuiApp, ThinkingCompactComponent, TODO_COMPACT_LIMIT, TODO_SHORT_COMPACT_LIMIT, TODO_SHORT_SCREEN_MAX_ROWS, todoCompactLimit } from '../../src/tui-app.ts'
 import { Text, stripTerminalSequences, visibleWidth } from '@xmoon76/pi-tui'
@@ -383,6 +385,79 @@ test('tool cards present through the real registry: read shows the relativized p
   } finally {
     unregister()
   }
+})
+
+test('a merged read group renders one tree row per file on the Client presenter too', async (t) => {
+  // The merged group card INHERITS the first read's metadata and result
+  // blocks while its args are the literal `2 files`. The Direct bridge parses
+  // the args JSON before consulting a tool, so that row never reaches a Host
+  // `presentResult`; the Client derivation must apply the SAME gate. Without
+  // it the group would render as ONE file instead of the two-file tree.
+  const life = testLifecycle(t)
+  const dir = life.tempDir('dsh-pi-tui-merged-read-')
+  await mkdir(join(dir, 'src'), { recursive: true })
+  await writeFile(join(dir, 'src', 'one.ts'), 'first')
+  await writeFile(join(dir, 'src', 'two.ts'), 'second')
+
+  const vt = new VirtualTerminal(100, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
+    workspaceRoot: dir,
+    present: createClientToolPresenter(),
+  })
+  app.start()
+  startedApps.add(app)
+  life.defer(() => app.stop())
+  app.setTranscriptDetailExpanded(true)
+
+  const envelope = (path: string, text: string): string =>
+    `<path>${path}</path>\n<type>file</type>\n<content>\n1: ${text}\n</content>`
+  const meta = (path: string, text: string): JsonValue => ({
+    path,
+    offset: 1,
+    lines: [{ number: 1, text }],
+    totalLines: 1,
+  })
+  const call = (seq: number, id: string, path: string): SessionEvent => ({
+    type: 'tool/call',
+    seq: SessionSeq(seq),
+    time: 1_700_000_000_000 + seq,
+    data: { turn: 0, step: 0, callId: ToolCallId(id), name: 'read', arguments: JSON.stringify({ file_path: path }) },
+  })
+  const result = (seq: number, id: string, path: string, text: string): SessionEvent => ({
+    type: 'tool/result',
+    surfaceOp: 'append',
+    seq: SessionSeq(seq),
+    time: 1_700_000_000_001 + seq,
+    data: {
+      turn: 0,
+      step: 0,
+      message: createToolResultMessage({
+        callId: ToolCallId(id),
+        content: [{ type: 'text', text: envelope(path, text) }],
+        isError: false,
+      }),
+      meta: meta(path, text),
+    },
+  })
+
+  const folder = new TranscriptFolder()
+  folder.apply([
+    call(0, 'call-1', join(dir, 'src', 'one.ts')),
+    result(1, 'call-1', join(dir, 'src', 'one.ts'), 'first'),
+    call(2, 'call-2', join(dir, 'src', 'two.ts')),
+    result(3, 'call-2', join(dir, 'src', 'two.ts'), 'second'),
+  ])
+  const merged = folder.messages().find((m): m is Extract<typeof m, { kind: 'tool' }> =>
+    m.kind === 'tool' && m.callCount === 2)
+  assert.ok(merged !== undefined, 'the two reads merged into one card')
+
+  app.setTranscript(folder.messages())
+  await vt.waitForRender()
+  const view = vt.getViewport().join('\n')
+  assert.ok(view.includes('one.ts'), `the first file is missing:\n${view}`)
+  assert.ok(view.includes('two.ts'), `the second file is missing:\n${view}`)
+  // The group shows a tree row per file, NOT one file's lines and a count.
+  assert.ok(!view.includes('total lines: 1'), `the merged group rendered as ONE file:\n${view}`)
 })
 
 
