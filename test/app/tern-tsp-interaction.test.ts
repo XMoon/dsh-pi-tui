@@ -758,7 +758,7 @@ test('withdrawPresentation drops the form and releases the input (the promise st
   assert.match(await settledOrPending(secondAnswers), /question flow cancelled/)
 })
 
-test('findings F6/F7: a lifetime retired BEFORE its slot exists never mounts, and its own lifetime still settles it', async () => {
+test('a lifetime retired BEFORE its slot exists never mounts, and its own lifetime still settles it', async () => {
   const { createTspInteractionSeat } = await import('../../src/tui/tsp/interaction.ts')
   const fatals: unknown[] = []
   const seat = createTspInteractionSeat({
