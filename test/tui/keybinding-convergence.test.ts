@@ -266,7 +266,7 @@ test('conflict: no fabricated Ctrl+R / Ctrl+T fallback', () => {
 
 // ── 4.6 leader dead bindings ──────────────────────────────────────────────
 
-test('<leader>escape: is rejected by the parser', () => {
+test('<leader>escape is rejected by the parser', () => {
   const parsed = parseUserKeybindings({
     leader: 'ctrl+x',
     bindings: { 'app.history.search': '<leader>escape' },
@@ -557,7 +557,7 @@ test('a remapped interrupt keeps its consecutive-press idle semantics', async ()
   app.stop()
 })
 
-test('Shift+Enter: cannot be bound to submit (the editor newline key)', () => {
+test('Shift+Enter cannot be bound to submit (the editor newline key)', () => {
   const parsed = parseUserKeybindings({ 'app.input.submit': 'shift+enter' })
   assert.deepEqual(parsed.bindings, {}, 'shift+enter submit must be rejected')
   assert.ok(parsed.diagnostics.some(message => message.includes('newline')),
@@ -654,7 +654,7 @@ test('a conditional high-priority rule does not shadow a lower rule when its pre
 
 // ── remapped interrupt double-window (P2 finding) ─────────────────────────
 
-test('Ctrl+X → Esc → Ctrl+X: does NOT fire the idle double action', async () => {
+test('Ctrl+X → Esc → Ctrl+X does NOT fire the idle double action', async () => {
   const vt = new VirtualTerminal(80, 24)
   let rewinds = 0
   const app = new TuiApp(vt, {

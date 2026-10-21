@@ -85,6 +85,8 @@ function isCodeToken(token) {
     if (CODE_ATOM.test(segment)) return true
     // A bare numeric segment continues a numeric code: `B4B-04/05`.
     if (index > 0 && /^\d{1,4}$/u.test(segment)) return true
+    // A CONTROL-CODE list is a subject, not a code: `C0/DEL/BEL/BS`.
+    if (/^(?:C0|DEL|BEL|BS|VT)$/u.test(segment)) return false
     // A qualifier names the variant: `A06/Focus`, `B2/Direct`. It may
     // carry a level suffix: `B2/Direct-L6`.
     if (index > 0 && QUALIFIER_TOKEN.test(segment)) return true
@@ -178,6 +180,23 @@ const QUALIFIER_TOKEN = /^(?:Direct|Remote|Focus|DEL|BEL|BS|OWNER-RULED)$/u
 const LABEL_WORD = /^(?:negative\s+control|positive\s+control|static|lock|child|final|retired|addendum|absolute|headless)$/u
 
 /**
+ * Whether a LABEL WORD is part of a label.
+ *
+ * These words are ordinary English: `final app disposal cancels …` and
+ * `child activity comes from the official Session running bit …` are
+ * sentences that START with one of them. So the word is a label only
+ * when a CODE precedes it — `B4B addendum physical matrix …`, `P1.5
+ * headless D: …`.
+ *
+ * On its own it is the subject of the sentence, and the subject is what
+ * the reader needs.
+ */
+function isLabelWord(token, first) {
+  if (!LABEL_WORD.test(token)) return false
+  return !first
+}
+
+/**
  * A single-letter code with a slash-qualified qualifier: `B/Direct`.
  *
  * A lone capital letter on its own is a KEY name (`S on a clean draft`),
@@ -243,6 +262,12 @@ function isLabelToken(token, first, colonForm = false) {
     // code follows it (`B/Direct`); on its own it is a key name.
     return false
   }
+  // A CONTROL-CODE list is the SUBJECT of its sentence, not a label:
+  // `C0/DEL/BEL/BS are dropped except LF` says WHICH codes are dropped,
+  // and the reader needs that list.
+  if (/^(?:C0|DEL|BEL|BS|VT)(?:\/(?:C0|DEL|BEL|BS|VT))+$/u.test(token)) {
+    return false
+  }
   // A QUALIFIER (`Focus`, `Direct`) names the variant a case covers, so it
   // is part of the label — but only when a CODE precedes it. On its own,
   // `Focus Error sanitizes AUTH failure messages` is a sentence ABOUT the
@@ -264,7 +289,7 @@ function isLabelToken(token, first, colonForm = false) {
     || BRACKET_REVIEW_TOKEN.test(token)
     || BRACKET_HARNESS_TOKEN.test(token)
     || BRACKET_QUALIFIER_TOKEN.test(token)
-    || LABEL_WORD.test(token)
+    || isLabelWord(token, first)
 }
 
 /**
@@ -437,7 +462,14 @@ export function splitLeadingLabel(title) {
   // The bracket is part of the LABEL, so the rewrite removes it. What
   // remains is the words between the label and the colon, then the
   // sentence.
-  const sentence = kept === '' ? afterBracket : `${kept}: ${afterBracket}`
+  // The words between the label and the sentence are KEPT. In the colon
+  // form they were separated by the colon, so the colon goes with them;
+  // in the space form there was no colon, so none is introduced.
+  const sentence = kept === ''
+    ? afterBracket
+    : colonForm
+      ? `${kept}: ${afterBracket}`
+      : `${kept} ${afterBracket}`
   // A label that is ONE bare token with no sentence after it is the whole
   // title (`B3`, `L6`), not a label.
   if (consumed === tokens.length && tokens.length === 1 && sentence === '') return null

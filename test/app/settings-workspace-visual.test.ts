@@ -1014,7 +1014,7 @@ test('a click anywhere in a visible column takes that column focus', async () =>
 
 // ── F2: the row grant and the actual paint/admission agree ────────────────
 
-test('100x3: paints real content in its only body row, not pane headers', async () => {
+test('100x3 paints real content in its only body row, not pane headers', async () => {
   const h = setup({ columns: 100, rows: 3, doc: { theme: 'dark' } })
   await h.open()
   const painted = h.rowsPlain()
@@ -1038,7 +1038,7 @@ test('below the body floor Enter/Tab/arrows/C/R are inert; only Esc escapes', as
   h.dispose()
 })
 
-test('72x3: paints no hidden Copy or Confirm action', async () => {
+test('72x3 paints no hidden Copy or Confirm action', async () => {
   const h = setup({ columns: 72, rows: 3, doc: { theme: 'dark' } })
   await h.open()
   await key(h, '\r') // categories -> rows
@@ -1332,7 +1332,7 @@ test('a viewport shrink reveals the selected row instead of hiding it', async ()
 
 // ── F1 sibling: the retired Tab cycle and header arrows ───────────────────
 
-test('Left/Right: navigate the single focus hierarchy; Tab remains inert at every projection', async () => {
+test('Left/Right navigate the single focus hierarchy; Tab remains inert at every projection', async () => {
   for (const columns of [200, 100, 72] as const) {
     const h = setup({ columns, rows: 24, doc: { theme: 'dark' } })
     await h.open()
@@ -1548,7 +1548,7 @@ test('every width opens at L0, ↑↓ changes the category and Enter enters the 
   }
 })
 
-test('Esc: walks one level back at every width; only L0 closes', async () => {
+test('Esc walks one level back at every width; only L0 closes', async () => {
   for (const [columns, rows] of [[200, 40], [100, 40], [72, 24]] as const) {
     const h = setup({ columns, rows, doc: { theme: 'dark' } })
     await h.open()
@@ -1793,7 +1793,7 @@ test('only visible panes publish hits: the hidden Detail band neither copies nor
   h.dispose()
 })
 
-test('C: copies only in a read-only Detail; R refreshes in place; browsing never writes', async () => {
+test('C copies only in a read-only Detail; R refreshes in place; browsing never writes', async () => {
   const h = setup({ columns: 100, rows: 40, doc: { theme: 'plugin:acme/solarized', iconStyle: 'symbols' }, themes: pluginThemes() })
   await h.open()
   await key(h, 'c')
@@ -3341,7 +3341,7 @@ const toPlugins = async (h: Harness): Promise<void> => {
   await key(h, '\x1b[B')
 }
 
-test('120×40: and 80×24 paint the UI-only Plugins entry in the real Rows column', async () => {
+test('120×40 and 80×24 paint the UI-only Plugins entry in the real Rows column', async () => {
   for (const [columns, rows] of [[120, 40], [80, 24]] as const) {
     const h = setup({ columns, rows, pluginPage: true })
     await h.open()
@@ -3373,7 +3373,7 @@ test('120×40: and 80×24 paint the UI-only Plugins entry in the real Rows colum
   }
 })
 
-test('80×10: keeps the visible direct entry above the pinned bar', async () => {
+test('80×10 keeps the visible direct entry above the pinned bar', async () => {
   const h = setup({ columns: 80, rows: 10, pluginPage: true })
   await h.open()
   await toPlugins(h)
@@ -3385,7 +3385,7 @@ test('80×10: keeps the visible direct entry above the pinned bar', async () => 
   h.dispose()
 })
 
-test('44×20: narrow paints no second-column affordance and keeps the direct key entry', async () => {
+test('44×20 narrow paints no second-column affordance and keeps the direct key entry', async () => {
   const h = setup({ columns: 44, rows: 20, pluginPage: true })
   await h.open()
   await toPlugins(h)

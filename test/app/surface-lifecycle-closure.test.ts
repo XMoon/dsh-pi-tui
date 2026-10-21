@@ -1427,7 +1427,7 @@ test('the Job and Settings workspace leases are mutually exclusive, and a stale 
   app.stop()
 })
 
-test('TuiApp.dispose: releases a leased Settings workspace exactly once', async () => {
+test('TuiApp.dispose releases a leased Settings workspace exactly once', async () => {
   const { vt, app } = startApp()
   let closes = 0
   app.openSettingsWorkspace(settingsWorkspaceSource(), {
