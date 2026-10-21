@@ -47,7 +47,7 @@ on:
       test_concurrency:
         description: "How many test FILES Node runs at once (the C1 concurrency experiment: ONE lane, no shard, and the concurrency is the only variable)"
         required: false
-        default: ''
+        default: '1'
         type: string
       expected_cases:
         description: 'The case count the UNSHARDED lane reports at the same SHA, DSH mode and runner (the baseline the shards must match)'
