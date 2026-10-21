@@ -68,11 +68,41 @@ export function parseShard(args) {
   return `${index}/${total}`
 }
 
+/**
+ * Parse the optional `--test-concurrency=<n>` argument.
+ *
+ * The concurrency is Node's OWN `--test-concurrency`: it caps how many test
+ * FILES the runner keeps in flight at once. It is passed straight through,
+ * so the level that is measured is the level that runs.
+ *
+ * The DEFAULT level is expressed by NOT passing the flag at all: Node then
+ * uses `os.availableParallelism()`, which is what the repository actually
+ * runs. A level of `default` therefore means "no flag", not "the number of
+ * CPUs".
+ *
+ * @param {string[]} args - the command line arguments.
+ * @returns {string|undefined} the Node concurrency argument, or undefined.
+ */
+export function parseConcurrency(args) {
+  const argument = args.find(entry => entry.startsWith('--test-concurrency='))
+  if (argument === undefined) return undefined
+  const value = argument.slice('--test-concurrency='.length)
+  if (value === 'default') return undefined
+  if (!/^\d+$/u.test(value)) {
+    throw new Error(`the test concurrency must be a whole number or "default", got: ${value}`)
+  }
+  const concurrency = Number(value)
+  if (concurrency < 1) {
+    throw new Error(`the test concurrency must be at least 1, got: ${concurrency}`)
+  }
+  return `--test-concurrency=${concurrency}`
+}
+
 function main() {
   const laneName = process.argv[2]
   const args = process.argv.slice(3)
   if (laneName === undefined) {
-    console.error(`usage: node scripts/run-test-lane.mjs <lane> [--shard=<index>/<total>]\nlanes: ${Object.keys(LANES).join(', ')}`)
+    console.error(`usage: node scripts/run-test-lane.mjs <lane> [--shard=<index>/<total>] [--test-concurrency=<n>]\nlanes: ${Object.keys(LANES).join(', ')}`)
     process.exit(2)
   }
   const lane = LANES[laneName]
@@ -97,6 +127,10 @@ function main() {
   // is the WHOLE lane.
   const shard = parseShard(args)
 
+  // The optional concurrency. It is a runner ARGUMENT, not a mode: the
+  // default is Node's own.
+  const concurrency = parseConcurrency(args)
+
   // The MACHINE-READABLE reporter.
   //
   // It is opt-in: the destination variable is what turns it on. Without
@@ -119,6 +153,7 @@ function main() {
     '--test',
     ...reporterArgs,
     ...(shard === undefined ? [] : [`--test-shard=${shard}`]),
+    ...(concurrency === undefined ? [] : [concurrency]),
     ...relativeFiles,
   ], {
     cwd: ROOT,
@@ -163,4 +198,9 @@ function main() {
   })
 }
 
-main()
+// The runner runs only when it is EXECUTED. A test that imports the
+// argument parsers must be able to reach them without the module running a
+// lane.
+if (process.argv[1] !== undefined && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  main()
+}
