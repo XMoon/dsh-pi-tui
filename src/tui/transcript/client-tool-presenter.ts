@@ -140,6 +140,34 @@ function diffsOf(record: Record<string, unknown>): FileDiff[] | undefined {
 }
 
 /**
+ * The create-time diff a WRITE-shaped metadata record implies, or undefined.
+ *
+ * Unlike the other branches, this one does not REPORT what the metadata says —
+ * it FABRICATES a `newText` from the call arguments. So it must demand the
+ * tool's own write contract rather than a mere field collision: the projected
+ * `operation` must be one of the two values `dsh-tool-fs` defines, its `diffs`
+ * must be the EMPTY list that projection emits exactly when `before === null`
+ * (a create), and the call must carry the string `content` the diff is built
+ * from. A third-party tool that happens to send `operation` + `path` +
+ * `content` matches none of that and gets no view.
+ */
+function writeCreateDiffs(
+  record: Record<string, unknown>,
+  args: Record<string, unknown> | undefined,
+): FileDiff[] | undefined {
+  // `create` is one of the two values the write projection defines, and the
+  // ONLY one that emits an empty list (it means `before === null`). Requiring
+  // it names the legal value directly, so an `update`, a `delete` or any other
+  // tool's marker is refused here rather than interpreted.
+  if (record['operation'] !== 'create') return undefined
+  const diffs = record['diffs']
+  if (!Array.isArray(diffs) || diffs.length !== 0) return undefined
+  const content = args?.['content']
+  if (typeof content !== 'string') return undefined
+  return [{ path: record['path'] as string, oldText: null, newText: content }]
+}
+
+/**
  * The settled-result view derived from the TOOL-AUTHORED result metadata,
  * mirroring the two Host `presentResult` implementations the Client cannot
  * call:
@@ -186,11 +214,9 @@ function metaPathView(
     return { card: 'diff', diffs }
   }
   // A write that CREATED the file records `diffs: []`. The tool's own write
-  // presenter rebuilds the diff from its arguments; `operation` is the
-  // tool-authored marker that this metadata came from a write-shaped call.
-  if (record['operation'] !== undefined && typeof args?.['content'] === 'string') {
-    return { card: 'diff', diffs: [{ path, oldText: null, newText: args['content'] }] }
-  }
+  // presenter rebuilds the diff from its arguments.
+  const created = writeCreateDiffs(record, args)
+  if (created !== undefined) return { card: 'diff', diffs: created }
 
   const readMeta = readMetaOf(record)
   if (readMeta === undefined) return undefined
