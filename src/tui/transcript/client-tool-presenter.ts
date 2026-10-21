@@ -145,21 +145,23 @@ function diffsOf(record: Record<string, unknown>): FileDiff[] | undefined {
  * Unlike the other branches, this one does not REPORT what the metadata says —
  * it FABRICATES a `newText` from the call arguments. So it must demand the
  * tool's own write contract rather than a mere field collision: the projected
- * `operation` must be one of the two values `dsh-tool-fs` defines, its `diffs`
- * must be the EMPTY list that projection emits exactly when `before === null`
- * (a create), and the call must carry the string `content` the diff is built
- * from. A third-party tool that happens to send `operation` + `path` +
- * `content` matches none of that and gets no view.
+ * `operation` must be one of the two values `dsh-tool-fs` defines — NOT a
+ * narrower `create`, because an empty list has TWO origins: a create (no
+ * before-image) and an overwrite that wrote the identical content. Its `diffs`
+ * must be the empty list, and the call must carry the string `content` the
+ * diff is built from. A third-party tool that happens to send `operation` +
+ * `path` + `content` matches none of that and gets no view.
  */
 function writeCreateDiffs(
   record: Record<string, unknown>,
   args: Record<string, unknown> | undefined,
 ): FileDiff[] | undefined {
-  // `create` is one of the two values the write projection defines, and the
-  // ONLY one that emits an empty list (it means `before === null`). Requiring
-  // it names the legal value directly, so an `update`, a `delete` or any other
-  // tool's marker is refused here rather than interpreted.
-  if (record['operation'] !== 'create') return undefined
+  // The write projection defines exactly these two values. An empty list can
+  // come from EITHER: a create has no before-image, and an overwrite that
+  // wrote the identical content produces no hunks. Anything else (another
+  // tool's marker, a `delete`) is refused here rather than interpreted.
+  const operation = record['operation']
+  if (operation !== 'create' && operation !== 'update') return undefined
   const diffs = record['diffs']
   if (!Array.isArray(diffs) || diffs.length !== 0) return undefined
   const content = args?.['content']

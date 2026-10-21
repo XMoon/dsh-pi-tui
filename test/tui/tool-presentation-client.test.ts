@@ -170,32 +170,34 @@ test('result: the read metadata must survive the same window validation the tool
   assert.equal(read({ ...base, lang: 7 }), undefined, 'non-string lang')
 })
 
-test('result: a write that CREATED the file rebuilds its diff, and nothing else does', () => {
-  // `dsh-tool-fs` records `diffs: []` when a write creates a file (there is no
-  // before-image), and its own write presenter then rebuilds the diff from the
-  // call arguments. This branch FABRICATES data, so it demands the tool's own
-  // write contract — the projected `operation` value, the empty list that
-  // create emits, and a string `content` argument — never a name.
+test('result: an EMPTY diff list is rebuilt from the arguments for a create OR an unchanged overwrite', () => {
+  // `dsh-tool-fs` records `diffs: []` in TWO legitimate cases: a create (there
+  // is no before-image) and an overwrite that wrote the IDENTICAL content (the
+  // patch has no hunks). Its own write presenter rebuilds the diff from the
+  // call arguments in both. This branch FABRICATES data, so it demands the
+  // tool's write contract — a `create` or `update` marker, the empty list, and
+  // a string `content` argument — and never a tool name.
   const args = JSON.stringify({ file_path: 'src/new.ts', content: 'fresh\n' })
-  const created = presenter.result('write', args, {
+  const view = (operation: string): ReturnType<typeof presenter.result> => presenter.result('write', args, {
     content: [{ type: 'text', text: 'written' }],
     isError: false,
-    meta: { operation: 'create', path: 'src/new.ts', diffs: [] },
+    meta: { operation, path: 'src/new.ts', diffs: [] },
   })
-  assert.ok(created !== undefined && created.card === 'diff')
-  assert.deepEqual(created.diffs, [{ path: 'src/new.ts', oldText: null, newText: 'fresh\n' }])
+  for (const operation of ['create', 'update'] as const) {
+    const built = view(operation)
+    assert.equal(built?.card, 'diff', `${operation}: rebuilt as a diff`)
+    assert.deepEqual(built?.card === 'diff' ? built.diffs : undefined, [{ path: 'src/new.ts', oldText: null, newText: 'fresh\n' }])
+  }
 
   const read = (meta: Record<string, unknown>, callArgs = args): unknown => presenter.result('write', callArgs, {
     content: [{ type: 'text', text: 'written' }], isError: false, meta: meta as never,
   })
   // A third-party tool that happens to send `operation` + `path` + `content`
-  // must not be read as a create: the operation value is not one the write
-  // contract defines.
+  // must not be read as a write: the marker is not a value the contract defines.
   assert.equal(read({ operation: 'delete', path: 'src/a.ts', diffs: [] }), undefined, 'unknown operation value')
-  // `[]` is the create signature; an absent list is not this shape.
+  assert.equal(read({ operation: 'fetch', path: 'https://example.test/x', diffs: [] }), undefined, 'a foreign marker')
+  // The empty list is the signature; an absent list is not this shape.
   assert.equal(read({ operation: 'create', path: 'src/a.ts' }), undefined, 'no diffs field')
-  // `[]` contradicts `update`, which would have carried hunks.
-  assert.equal(read({ operation: 'update', path: 'src/a.ts', diffs: [] }), undefined, 'update with an empty list')
   // The diff is built from the argument, so the argument must be there.
   assert.equal(read({ operation: 'create', path: 'src/a.ts', diffs: [] }, JSON.stringify({ file_path: 'src/a.ts' })), undefined, 'no content argument')
   // An edit with an empty list declines, exactly like the Host edit presenter.
