@@ -247,7 +247,7 @@ test('every terminalProgress mode round-trips through the live Config authority'
   ], 'each mode change crosses as exactly ONE path-scoped op and nothing else')
 })
 
-test('§18.2 no effective→user promotion: a base-supplied theme stays out of the USER override', async () => {
+test('no effective→user promotion: a base-supplied theme stays out of the USER override', async () => {
   // The base/project layer supplies theme: dark; the user changes ONLY
   // displayPreset. The descriptor snapshot carries the inherited effective
   // view with no USER overrides.
@@ -268,7 +268,7 @@ test('§18.2 no effective→user promotion: a base-supplied theme stays out of t
   ], 'inherited footerLayout/keybindings values are not promoted')
 })
 
-test('§18.2 an unrelated write never drops a USER-owned object field whose effective value is a merged superset', async () => {
+test('an unrelated write never drops a USER-owned object field whose effective value is a merged superset', async () => {
   // Upstream mergeLayers merges nested plain objects recursively: with a
   // project/home layer contributing extra keys, the EFFECTIVE value is a
   // SUPERSET of the raw USER override. Production writers spread get() (the
@@ -302,7 +302,7 @@ test('§18.2 an unrelated write never drops a USER-owned object field whose effe
   ])
 })
 
-test('§18.2 writing the inherited value over a USER override resets it (unset, not pin)', async () => {
+test('writing the inherited value over a USER override resets it (unset, not pin)', async () => {
   // The USER layer owns theme: dark while the effective reference serves the
   // inherited light: the caller writes light back — the override must be
   // REMOVED (unset), never kept as a pinned value and never dropped silently.
@@ -355,7 +355,7 @@ test('an unchanged document emits no mutation at all', async () => {
   assert.equal(forms.calls.length, 0)
 })
 
-test('§18.3 the write carries the descriptor revision and surfaces conflicts', async () => {
+test('the write carries the descriptor revision and surfaces conflicts', async () => {
   const refs = refsOf()
   const forms = formsOf({}, 11, refs.snapshot())
   const settings = new DirectTuiSettings(refs, forms.forms)
@@ -397,7 +397,7 @@ test('the production schema defaults mount fullscreen ON (§5.5)', () => {
   assert.equal(resolved.legacySettingsMigrationVersion.get(), 0)
 })
 
-test('§18.3 ops derivation and the revision fence come from ONE descriptor snapshot', async () => {
+test('ops derivation and the revision fence come from ONE descriptor snapshot', async () => {
   // The race the atomic snapshot closes: describe #1 (user={}, revision=4)
   // decides the ops; a concurrent USER edit lands (user={theme:'light'},
   // revision=5) BEFORE the mutate. The write must still carry revision 4 —

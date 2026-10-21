@@ -35,6 +35,17 @@ import { fileURLToPath } from 'node:url'
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 
 /**
+ * A leading SECTION marker (`§18.1`, `§1C-4`, `§D2`).
+ *
+ * The section number points into the plan that wrote the test, so it is
+ * the same kind of local label as a code — the reader of a CI log does not
+ * have the plan either.
+ *
+ * A section marker may carry a letter family (`§1C-4`) or a bracketed
+ * index (`§6.4 (3)`), both of which are part of the marker.
+ */
+const SECTION = String.raw`§\s*(?:\d+[A-Z]?(?:\.\d+)*(?:-\d+)?|[A-Z]\d+(?:-\d+)?)(?:\s*\(\d+\))?`
+/**
  * A leading code, and the separator that ends it.
  *
  * The code families are the ones this repository actually uses: a short
@@ -68,7 +79,7 @@ const WORD_SUFFIX_CODE = String.raw`[A-Z]{1,4}\d+[a-zA-Z]?(?:-\d+)?-(?:swap|resi
  * bracketed second code (`(F2)`), and by a lowercase qualifier word that
  * belongs to the label (`negative control`, `static`, `lock`).
  */
-const ONE_LABEL = String.raw`(?:${CODE}|${WORD_SUFFIX_CODE})(?:\s*§\s*[\d.]+(?:-\d+)?(?:\/\d+)?)?(?:\s*\([A-Z]{1,4}\d+[a-z]?\))?(?:\s+(?:negative\s+control|positive\s+control|static|lock|child|final|retired|addendum)\b)*`
+const ONE_LABEL = String.raw`(?:${CODE}|${WORD_SUFFIX_CODE}|${SECTION})(?:\s*§\s*[\d.]+(?:-\d+)?(?:\/\d+)?)?(?:\s*\([A-Z]{1,4}\d+[a-z]?\))?(?:\s+\((?:review\s+round\s+\d+\s+)?(?:ruling|review|external)\))?(?:\s+(?:negative\s+control|positive\s+control|static|lock|child|final|retired|addendum)\b)*`
 
 /** Whether a title STARTS with a code (used to keep a bare code intact). */
 const CODE_AT_START = new RegExp(String.raw`^${CODE}\b`, 'u')

@@ -189,9 +189,19 @@ case, and do not add a comment to a case whose title already says it.
 
 **Files are named by owner, not by the case.** A test file's name states
 the production owner it covers. A file whose name is only a code or a
-milestone (`a5b-bootstrap-closure.test.ts`) hides that owner and should be
-renamed to the owner it actually covers. The file's cases then read as
+milestone (`m3-4-pr4-guards.test.ts`) hides that owner and should be
+renamed to the contract it actually guards. The file's cases then read as
 ordinary English without any prefix.
+
+A file name that already carries a MEANINGFUL subject keeps it, even when
+its prefix is a milestone: `s4-d2-auto-review.test.ts` names the Auto
+Review capability it covers, and renaming it would lose that. The test is
+whether the name lets a reader find the behaviour, not whether the prefix
+happened to be a project code.
+
+The full name is `test/<production-owner>/<contract-or-behaviour>.test.<ext>`
+in kebab-case. The directory supplies the ownership; the basename names
+the behaviour without requiring any project history.
 
 #### Worked examples
 
