@@ -401,7 +401,7 @@ test('every routing read of the Host claim consumes the GENUINE Host-origin auth
     'the dead advertised-union view is gone')
 })
 
-test('(R7-3): hostOriginClaimOf has no skill-wrapper NAME shortcut', () => {
+test('hostOriginClaimOf has no skill-wrapper NAME shortcut', () => {
   const commands = code('commands.ts')
   const origin = commands.slice(
     commands.indexOf('const hostOriginClaimOf'),
@@ -413,7 +413,7 @@ test('(R7-3): hostOriginClaimOf has no skill-wrapper NAME shortcut', () => {
     false, 'a live wrapper NAME must not erase a later genuine Host winner')
 })
 
-test('(R7-2): the attachment gate consumes the shared classification alone', () => {
+test('the attachment gate consumes the shared classification alone', () => {
   const controller = code('app/submission/controller.ts')
   const gate = controller.slice(
     controller.indexOf('const attachmentRefusal = ('),
@@ -429,7 +429,7 @@ test('(R7-2): the attachment gate consumes the shared classification alone', () 
     'a genuine Host command follows its own attachment declaration')
 })
 
-test('(R7-4): the rewind settlement owner is phase-specific', () => {
+test('the rewind settlement owner is phase-specific', () => {
   const events = code('app/surface/application-events.ts')
   // The success settlement is fenced by the operation-owned adopted identity.
   assert.ok(events.includes('!deps.rewind.isNavigationCurrent(owned)) return'),

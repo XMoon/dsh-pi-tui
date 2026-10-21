@@ -320,7 +320,7 @@ test('only the winner stamped with THIS surface\'s mirror id is subtracted', () 
   }
 })
 
-test('(R6-2/R6-3): the sessionless origin derives from the PURE Host view; the advertised union may differ', () => {
+test('the sessionless origin derives from the PURE Host view; the advertised union may differ', () => {
   const t = setup()
   try {
     // A genuine Host /export declares attachments; the TUI's own Client

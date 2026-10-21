@@ -269,7 +269,7 @@ test('pre-dispatch stale capture: a submission parked mid-serialize survives a C
 
 /* ── PR5 (plan §3.9): selected-runtime teardown with pending main-path work ── */
 
-test('§3.9a: teardown with a pending main-path READ — release after the OBSERVED surface stop, inside the drain, before the exactly-once transport disposal', async (t) => {
+test('teardown with a pending main-path READ — release after the OBSERVED surface stop, inside the drain, before the exactly-once transport disposal', async (t) => {
   const life = testLifecycle(t)
   const presetId = 'm3-4-pr3-race-preset'
   const host = await mountHost(life, presetId)
@@ -381,7 +381,7 @@ test('§3.9a: teardown with a pending main-path READ — release after the OBSER
     'no durable row landed after the transport disposal (no post-disposal visible commit)')
 })
 
-test('§3.9b: teardown with a pending WRITE — observed surface-stop boundary, drain-settled release, exactly-once transport disposal, nothing visible after', async (t) => {
+test('teardown with a pending WRITE — observed surface-stop boundary, drain-settled release, exactly-once transport disposal, nothing visible after', async (t) => {
   const life = testLifecycle(t)
   const presetId = 'm3-4-pr3-race-preset'
   const host = await mountHost(life, presetId)
@@ -470,7 +470,7 @@ test('§3.9b: teardown with a pending WRITE — observed surface-stop boundary, 
     'the stopped surface receives no post-shutdown draft write-back')
 })
 
-test('§3.9c: a prompt ACCEPTED before teardown keeps its receipt, becomes durable and is never resent', async (t) => {
+test('a prompt ACCEPTED before teardown keeps its receipt, becomes durable and is never resent', async (t) => {
   const life = testLifecycle(t)
   const presetId = 'm3-4-pr3-race-preset'
   const host = await mountHost(life, presetId)
